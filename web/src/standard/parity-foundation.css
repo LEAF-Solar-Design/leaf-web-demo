@@ -1,0 +1,11 @@
+/* leaf-dp-v1 */
+.btn.ghost{background:transparent;color:var(--leaf-ink);border:1px solid transparent}
+@media (hover:hover) and (pointer:fine){.btn.ghost:hover{background:var(--leaf-hover-tint);color:var(--leaf-ink)}}
+.btn.ghost:disabled{color:var(--leaf-ink-disabled);background:transparent}
+.btn:focus-visible,.chip-act:focus-visible,.chip-neutral:focus-visible,.chip-danger:focus-visible,.dp-focus:focus-visible{outline:var(--leaf-metric-focus-width) solid var(--leaf-focus);outline-offset:var(--leaf-metric-focus-offset)}
+@media (forced-colors:active){.btn:focus-visible,.chip-act:focus-visible,.chip-neutral:focus-visible,.chip-danger:focus-visible,.dp-focus:focus-visible{outline-color:Highlight}}
+.dp-number{font-variant-numeric:tabular-nums;text-align:right}
+.dp-status{display:inline-flex;align-items:center;gap:var(--leaf-space-2);font-size:var(--leaf-size-caption);line-height:var(--leaf-leading-caption)}
+.dp-status::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.dp-status[data-state="degraded"]::before{border-radius:1.5px}
+.dp-status[data-state="inactive"]::before{background:transparent;border:1.5px solid currentColor}

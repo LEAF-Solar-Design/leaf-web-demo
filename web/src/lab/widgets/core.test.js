@@ -8,6 +8,7 @@ import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { FORMATS, PRESETS, PRIMITIVES } from './widgetCatalog.js'
 import { migrate, validateWidgetDoc } from './widgetDoc.js'
+import { LA_USABLE_HEIGHT, laFitProblem } from './laFit.js'
 import { renderWidget } from './widgetRender.js'
 import { formatMoney, formatPercent, resolveBinding } from './widgetResolve.js'
 import WidgetCard from './WidgetCard.jsx'
@@ -36,15 +37,25 @@ describe('frozen designer migration', () => {
     const html = read('contract/fixtures/widget/sources/kashbot-widget-designer-v2.html')
     const context = vm.createContext({})
     vm.runInContext(html.slice(html.indexOf('const FORMATS ='), html.indexOf('// Sample data,')) + ';result = defaultDoc()', context)
-    expect(JSON.parse(JSON.stringify(context.result))).toEqual(designer)
+    const upstream = JSON.parse(JSON.stringify(context.result))
+    // SEL-403c2 explicitly overrides the frozen upstream la canvas and footer.
+    upstream.formats.la.h = 128
+    upstream.formats.la.els = upstream.formats.la.els.filter((e) => !['divider', 'history'].includes(e.id))
+    expect(upstream).toEqual(designer)
     expect(Object.keys(designer.formats)).toHaveLength(13)
-    expect(Object.values(designer.formats).flatMap((f) => f.els)).toHaveLength(55)
+    // SEL-403c2 removes the two la footer elements.
+    expect(Object.values(designer.formats).flatMap((f) => f.els)).toHaveLength(53)
     expect(Object.keys(PRESETS)).toHaveLength(30)
     expect(kashbotWidgetPack.presets).toHaveLength(30)
   })
   it('preserves every frozen element coordinate within the point tolerance', () => {
-    const doc = migrate(designer)
+    const doc = migrate(parity.doc)
     expect(doc).toEqual(parity.doc)
+    const studio = clone(doc)
+    // SEL-403c2 changes only the default la height and removes its footer.
+    studio.formats.la.h = 128
+    studio.formats.la.els = studio.formats.la.els.filter((e) => !['divider', 'history'].includes(e.id))
+    expect(migrate(designer)).toEqual(studio)
     expect(migrate(doc)).toEqual(doc)
     for (const [id, f] of Object.entries(golden.formats)) {
       expect(FORMATS[id].w).toBe(f.width)
@@ -84,6 +95,64 @@ describe('frozen designer migration', () => {
 })
 
 describe('closed bounded document', () => {
+  it('ignores drafts without a usable la format', () => {
+    for (const doc of [
+      undefined, null, false, 42, 'draft', [], {},
+      ...[null, false, 42, 'draft', []].map((formats) => ({ formats })),
+      ...[undefined, null, false, 42, 'draft', []].map((la) => ({ formats: { la } })),
+    ]) {
+      expect(() => laFitProblem(doc)).not.toThrow()
+      expect(laFitProblem(doc)).toBeNull()
+    }
+  })
+  it('judges partial la drafts using only finite geometry', () => {
+    const message = 'The lock screen layout must fit in 128 pt. Lower its height or move elements up.'
+    for (const els of [undefined, null, false, 42, 'draft', {}, { every: true }]) {
+      for (const h of [undefined, null, '160', NaN, Infinity, -Infinity, 128, 160]) {
+        const doc = { formats: { la: { h, els } } }
+        expect(() => laFitProblem(doc)).not.toThrow()
+        expect(laFitProblem(doc)).toBe(h === 160 ? message : null)
+      }
+    }
+    const unmeasurable = [
+      null, undefined, false, 42, 'draft', {}, { y: 129 }, { h: 129 },
+      { y: '129', h: 1 }, { y: 129, h: '1' }, { y: null, h: 129 },
+      { y: NaN, h: 129 }, { y: Infinity, h: 1 }, { y: 129, h: -Infinity },
+    ]
+    for (const h of [undefined, null, '160', {}, NaN, Infinity, -Infinity, 100, 128, 160]) {
+      const height = Number.isFinite(h) ? h : LA_USABLE_HEIGHT
+      const la = { h, els: [...unmeasurable, { y: height - 1, h: 1 }] }
+      const doc = { formats: { la } }
+      expect(() => laFitProblem(doc)).not.toThrow()
+      expect(laFitProblem(doc)).toBe(h === 160 ? message : null)
+      la.els.push({ y: height, h: 1 })
+      expect(() => laFitProblem(doc)).not.toThrow()
+      expect(laFitProblem(doc)).toBe(message)
+    }
+  })
+  it('caps Studio la publication without changing the renderer frame or validation', () => {
+    expect(FORMATS.la).toMatchObject({ w: 361, h: 160 })
+    expect(LA_USABLE_HEIGHT).toBe(128)
+    const doc = migrate(designer)
+    expect(doc.formats.la.els.map((e) => e.id)).toEqual(['brand', 'total', 'symbols', 'pnl'])
+    expect(doc.formats.la.els.every((e) => e.y + e.h <= doc.formats.la.h)).toBe(true)
+    expect(validateWidgetDoc(doc)).toEqual(doc)
+    expect(laFitProblem(doc)).toBeNull()
+    expect(laFitProblem({ ...doc, active: 'diExp', formats: { diExp: doc.formats.diExp } })).toBeNull()
+    const fitting = clone(doc)
+    fitting.formats.la.els[0].y = 128 - fitting.formats.la.els[0].h
+    expect(laFitProblem(fitting)).toBeNull()
+    const tall = clone(doc)
+    tall.formats.la.h = 160
+    expect(validateWidgetDoc(tall)).toEqual(tall)
+    expect(laFitProblem(tall)).toContain('128 pt')
+    const overflow = clone(doc)
+    overflow.formats.la.els[0].y = 129 - overflow.formats.la.els[0].h
+    expect(laFitProblem(overflow)).toContain('128 pt')
+    overflow.formats.la.els[0].y -= 1
+    expect(validateWidgetDoc(overflow)).toEqual(overflow)
+    expect(laFitProblem(overflow)).toBeNull()
+  })
   it.each(parity.verdicts)('$name: accepted=$accepted', ({ path, value, accepted }) => {
     const doc = clone(parity.doc)
     if (path.length) {

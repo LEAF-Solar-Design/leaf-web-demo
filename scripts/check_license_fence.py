@@ -65,6 +65,19 @@ SCAN_ROOTS: tuple[str, ...] = ("web", "vendor")
 # every directory that is not in this set.
 PRUNE_DIRNAMES = frozenset({".git", "node_modules", "__pycache__"})
 
+# Next's compiler cache and trace are build metadata, not shipped code.
+# Keep .next/static, out and dist scanned, including worker chunks.
+BUILD_METADATA_PATHS = frozenset({"web/.next/cache", "web/.next/trace"})
+
+# Exact non-runtime references in Node build verification tools. These do not
+# exempt imports, other references, or any of the license/header rules.
+TOOL_REFERENCE_LITERALS = {
+    "web/scripts/next-fence-fixtures.mjs": (b"'vendor/acadrust-worker'",),
+    "web/scripts/check_web_container_config.mjs": (
+        rb"/COPY --from=engine \/engine-src\/pkg-web \/vendor\/acadrust-worker\/pkg-web/",
+    ),
+}
+
 # The fence's own 3 files. Exactly these — see module docstring.
 SELF_EXCLUDED_PATHS = frozenset({
     "scripts/check_license_fence.py",
@@ -175,11 +188,13 @@ def _iter_scan_files(root: Path, scan_roots=SCAN_ROOTS):
             continue
         for dirpath, dirnames, filenames in os.walk(base):
             dirnames[:] = [d for d in dirnames if d not in PRUNE_DIRNAMES]
+            dirnames[:] = [d for d in dirnames
+                          if (Path(dirpath) / d).relative_to(root).as_posix() not in BUILD_METADATA_PATHS]
             for name in filenames:
                 full = Path(dirpath) / name
                 rel = PurePosixPath(full.relative_to(root).as_posix())
                 relpath = str(rel)
-                if _is_self_excluded(relpath):
+                if _is_self_excluded(relpath) or relpath in BUILD_METADATA_PATHS:
                     continue
                 yield full, relpath
 
@@ -221,6 +236,8 @@ def _scan_file(full: Path, relpath: str) -> list[Violation]:
     acadrust_matches = list(ACADRUST_RE.finditer(data))
     if acadrust_matches and not _is_under_prefix(relpath, ALLOWED_ACADRUST_PREFIX):
         legal_spans = [m.span(2) for m in WORKER_SPAWN_RE.finditer(data)]
+        for literal in TOOL_REFERENCE_LITERALS.get(relpath, ()):
+            legal_spans.extend(m.span() for m in re.finditer(re.escape(literal), data))
         for m in acadrust_matches:
             start, end = m.span()
             legal = any(lo <= start and end <= hi for lo, hi in legal_spans)
@@ -278,6 +295,28 @@ def _write(root: Path, relpath: str, content: bytes) -> None:
 
 
 class LicenseFenceSelfTest(unittest.TestCase):
+    def test_next_metadata_is_not_shipped_but_outputs_are_scanned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("web/.next/cache/webpack/0.pack", "web/.next/trace",
+                         "web/.next/static/chunks/app.js", "web/out/app.js", "web/dist/app.js"):
+                _write(root, name, b"import x from 'acadrust'\n")
+            self.assertEqual({v.path for v in scan_tree(root)}, {
+                "web/.next/static/chunks/app.js", "web/out/app.js", "web/dist/app.js",
+            })
+
+    def test_build_tool_path_data_does_not_exempt_imports_or_headers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, literals in TOOL_REFERENCE_LITERALS.items():
+                _write(root, name, b"\n".join(literals))
+            self.assertEqual(scan_tree(root), [])
+            for name, literals in TOOL_REFERENCE_LITERALS.items():
+                _write(root, name, b"\n".join(literals) + b"\nimport x from 'acadrust';\n// SPDX-License-Identifier: GPL-3.0-only")
+            violations = scan_tree(root)
+            self.assertEqual(len([v for v in violations if v.kind == "acadrust_outside_prefix"]), 2)
+            self.assertEqual(len([v for v in violations if v.kind == "gpl3_license_header"]), 2)
+
     def test_self_exclusion_is_exactly_the_three_fence_files(self):
         # Locks the exclusion set narrow: widening it to a real source
         # directory is the evasion hole trap this fence exists to avoid.

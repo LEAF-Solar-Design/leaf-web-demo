@@ -141,6 +141,33 @@ describe('DemoTour at 390x844: the coach', () => {
     expect(px(top)).toBeGreaterThanOrEqual(0)
   })
 
+  it('keeps the coach usable beside the docked workspace activity rail', () => {
+    const tops = mountPhoneChrome(390, 844)
+    const app = document.querySelector('.app')
+    app.dataset.environmentPanel = 'studio'
+    const rail = app.querySelector('.rail-stack')
+    rail.id = 'project-workspace-activity'
+    rail.append(app.querySelector('aside.nav'))
+    fakeRect(rail, { top: 189, left: 90, width: 300, height: 499 })
+    fakeRect(rail.querySelector('aside.nav'), { top: 240, left: 90, width: 300, height: 300 })
+    const header = document.createElement('header')
+    header.className = 'top'
+    app.prepend(header)
+    fakeRect(header, { top: 0, left: 0, width: 390, height: 140 })
+    const ribbon = document.createElement('div')
+    ribbon.id = 'drafting-ribbon'
+    app.append(ribbon)
+    fakeRect(ribbon, { top: 189, left: 0, width: 390, height: 48 })
+
+    render(<DemoTour steps={STEPS} onExit={() => {}} />)
+    const { top, maxHeight } = document.querySelector('.tour-card').style
+    expect(px(maxHeight)).toBeGreaterThan(100)
+    expect(px(top)).toBeGreaterThanOrEqual(245)
+    expect(px(top) + px(maxHeight)).toBeLessThanOrEqual(tops.commandBar)
+    expect(screen.getByRole('button', { name: 'More' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Skip' })).toBeTruthy()
+  })
+
   it('starts collapsed, expands on More, and carries no banner strip', () => {
     render(<DemoTour steps={STEPS} onExit={() => {}} />)
     expect(document.querySelector('.tour-banner')).toBeNull()

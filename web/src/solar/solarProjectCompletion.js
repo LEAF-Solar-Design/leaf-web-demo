@@ -30,6 +30,78 @@ const present = (value, key) => !!Object.getOwnPropertyDescriptor(value, key)
 const completion = (state, jobId, outputVersionId = null, reasonCode = null, message = null) =>
   Object.freeze({ state, jobId, outputVersionId, reasonCode, message })
 
+const WORKER_REASON = 'sip_r4_worker_unavailable'
+const WORKER_LABELS = Object.freeze({
+  'solar-panels-from-drawing': 'Import panels from drawing',
+  'solar-panel-groups': 'Panel groups',
+  'solar-homeruns': 'Homeruns',
+  'solar-feeders': 'Feeders',
+  'solar-schedule': 'Schedule',
+  'solar-settings': 'Solar settings',
+  'solar-size-strings': 'String sizing',
+  'solar-combiners': 'Combiners',
+  'solar-string-add': 'Add string',
+  'solar-assign-equipment': 'Assign equipment',
+  'solar-string-multi-add': 'Add multiple strings',
+  'solar-string-conductors': 'String conductors',
+  'solar-correct-string': 'Correct string',
+  'solar-solve-proposal': 'Solve proposal',
+  'solar-commit-solve': 'Apply solve proposal',
+})
+const WORKER_GRAPH_TOOLS = new Set(['solar-panels-from-drawing', 'solar-panel-groups',
+  'solar-homeruns', 'solar-feeders', 'solar-schedule'])
+
+// Only a received initial admission refusal can establish that no job was started.
+// Inspect own data descriptors only; wire prose and arbitrary payload fields stay private.
+export function readProjectSolarWorkerRefusal(submission) {
+  try {
+    assert(field(submission, 'ok') === false && field(submission, 'status') === 503)
+    const reasons = []
+    const inspect = (value, envelope = false) => {
+      record(value)
+      const ok = field(value, 'ok', false)
+      assert(ok === undefined || ok === false)
+      for (const key of ['job_id', 'jobId', 'output_version_id', 'outputVersionId', 'data', 'result', 'job', 'state']) {
+        assert(field(value, key, false) == null)
+      }
+      const statusCode = field(value, 'status_code', false)
+      assert(statusCode == null || statusCode === 503)
+      if (envelope) assert(field(value, 'status', false) == null)
+      for (const key of ['reason', 'reason_code', 'reasonCode']) {
+        if (present(value, key)) {
+          const code = field(value, key)
+          assert(typeof code === 'string' && CODE.test(code) && code.toLowerCase() === WORKER_REASON)
+          reasons.push(code)
+        }
+      }
+      const error = field(value, 'error', false)
+      if (error != null) {
+        record(error)
+        for (const key of ['reason', 'reason_code', 'reasonCode']) {
+          if (present(error, key)) {
+            const code = field(error, key)
+            assert(typeof code === 'string' && CODE.test(code) && code.toLowerCase() === WORKER_REASON)
+            reasons.push(code)
+          }
+        }
+      }
+    }
+    inspect(submission)
+    const envelope = field(submission, 'envelope', false)
+    if (envelope != null) inspect(envelope, true)
+    assert(reasons.length > 0)
+    return WORKER_REASON
+  } catch { return null }
+}
+
+export function projectSolarWorkerRefusal(tool) {
+  if (typeof tool !== 'string' || !Object.hasOwn(WORKER_LABELS, tool)) return projectSolarRunFailure(null)
+  const next = WORKER_GRAPH_TOOLS.has(tool) ? ' Try again later: Refresh preview, then Review & run.'
+    : ' Try again later.'
+  return Object.freeze({ reasonCode: WORKER_REASON,
+    message: `No worker was available to start ${WORKER_LABELS[tool]}.${next}` })
+}
+
 // Project proposals are nonpublishing results. Keep only the review projection, never the solver payload.
 export function readSolarSolveProposal(result, jobId) {
   assert(uuid(jobId) && field(result, 'schema') === 'leaf.solar-solve-proposal.v1')

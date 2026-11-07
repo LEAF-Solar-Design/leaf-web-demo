@@ -1,46 +1,16 @@
-/**
- * Bundle-shape receipt for the ONE studio shell (ACCEPTANCE.md, W7 and its
- * Version 3 section).
- *
- * W7 deleted the old console shell and the runtime rail that selected it, so
- * the app always renders the studio shell. One real vite build, then prove on
- * the emitted artifact that (a) the studio shell actually ships and (b) no
- * read of the legacy `__LEAF_FLAGS` global survives anywhere in the bundle:
- * nothing shipped can select a different shell.
- *
- * Panel-hardened: the "no VITE-shaped flag" guard is a SOURCE scan, because
- * Vite define-replaces `import.meta.env.VITE_ONE_SHELL` at build time and
- * the literal never reaches dist JS exactly when the fence regression is
- * real; and the studio-ground marker excludes App's `studio-ground-viewer`
- * substring.
- *
- * Slow by nature (one full vite build) — same justification as the two
- * bundleFence suites this copies its harness from.
- */
-import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { bundleGraph } from '../../scripts/bundle-assets.mjs'
+import { nextFenceDirectory, NEXT_FENCE_TIMEOUT } from '../../scripts/next-fence-fixtures.mjs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { beforeAll, describe, expect, it } from 'vitest'
 
 const WEB_ROOT = process.cwd()
-const OUT_ROOT = join(WEB_ROOT, 'node_modules', '.cache', 'one-shell-shape')
 
-function build() {
-  rmSync(OUT_ROOT, { recursive: true, force: true })
-  mkdirSync(OUT_ROOT, { recursive: true })
-  execFileSync(
-    process.execPath,
-    [join(WEB_ROOT, 'node_modules', 'vite', 'bin', 'vite.js'), 'build', '--outDir', OUT_ROOT, '--emptyOutDir'],
-    { cwd: WEB_ROOT, env: { ...process.env }, stdio: 'pipe', timeout: 240_000 },
-  )
-}
-
-function emittedJavaScript() {
-  const assets = join(OUT_ROOT, 'assets')
-  expect(existsSync(assets)).toBe(true)
-  const files = readdirSync(assets).filter((f) => f.endsWith('.js'))
-  expect(files.length).toBeGreaterThan(0)
-  return files.map((f) => readFileSync(join(assets, f), 'utf8')).join('\n')
+function emittedJavaScript(directory) {
+  const graph = bundleGraph(directory)
+  const initial = [...graph.startup].map(file => graph.assets.get(file)).join('\n')
+  expect(initial).not.toMatch(/__THREE__|three\.(?:module|core)|node_modules[/\\\\]three[/\\\\]/)
+  return [...graph.assets].filter(([file]) => file.endsWith('.js')).map(([, code]) => code).join('\n')
 }
 
 // Every source file the bundle is built from, plus the container and CI
@@ -56,7 +26,7 @@ function sourceFiles() {
     }
   }
   walk(join(WEB_ROOT, 'src'))
-  out.push(join(WEB_ROOT, 'index.html'))
+  if (existsSync(join(WEB_ROOT, 'index.html'))) out.push(join(WEB_ROOT, 'index.html'))
   const repo = join(WEB_ROOT, '..')
   for (const rel of ['deploy/Dockerfile.web', '.github/workflows/build-platform-images.yml']) {
     const p = join(repo, rel)
@@ -67,10 +37,9 @@ function sourceFiles() {
 
 describe('one studio shell bundle shape', () => {
   let js = ''
-  beforeAll(() => {
-    build()
-    js = emittedJavaScript()
-  }, 300_000)
+  beforeAll(async () => {
+    js = emittedJavaScript(await nextFenceDirectory('enabled'))
+  }, NEXT_FENCE_TIMEOUT)
 
   it('ships the studio shell — the host AND SiteRoot\'s ground node, not just App\'s portal wrapper', () => {
     expect(js).toContain('studio-shell')

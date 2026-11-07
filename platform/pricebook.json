@@ -18,6 +18,7 @@
     "tool_ci": {"billable": true},
     "gpu_inference": {"billable": true},
     "ios_build": {"billable": true},
-    "app_auth": {"billable": true}
+    "app_auth": {"billable": true},
+    "kashbot_runner": {"billable": false}
   }
 }

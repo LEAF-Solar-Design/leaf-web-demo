@@ -43,6 +43,22 @@ export default function OpsDrawer({ onDismiss, exiting }) {
   const [accountErr, setAccountErr] = useState(null)
   const [accountConfirming, setAccountConfirming] = useState(false)
   const [accountActing, setAccountActing] = useState(false)
+  const previousFocusState = useRef({ confirming: null, accountConfirming: false, acting: null, accountActing: false })
+
+  useEffect(() => {
+    const previous = previousFocusState.current
+    let target
+    if (confirming) target = drawerRef.current?.querySelector('[data-tenant-confirm]')
+    else if (previous.confirming || previous.acting) {
+      const id = previous.confirming || previous.acting
+      target = [...(drawerRef.current?.querySelectorAll('[data-tenant-action]') || [])]
+        .find(element => element.dataset.tenantAction === id && !element.disabled) || closeRef.current || drawerRef.current
+    }
+    if (accountConfirming && !accountActing) target = drawerRef.current?.querySelector('[data-account-confirm]')
+    else if (previous.accountConfirming || previous.accountActing) target = drawerRef.current?.querySelector('[data-account-action]:not(:disabled)') || closeRef.current || drawerRef.current
+    target?.focus()
+    previousFocusState.current = { confirming, accountConfirming, acting, accountActing }
+  }, [confirming, accountConfirming, acting, accountActing])
 
   const load = useCallback(async () => {
     setLoading(true); setErr(null); setActionErr(null); setForbidden(false)
@@ -105,7 +121,11 @@ export default function OpsDrawer({ onDismiss, exiting }) {
     if (!focusable.length) return
     const first = focusable[0]
     const last = focusable[focusable.length - 1]
-    if (focusable.length === 1 || (!event.shiftKey && document.activeElement === last)) {
+    if (document.activeElement === drawerRef.current || !drawerRef.current?.contains(document.activeElement)) {
+      event.preventDefault()
+      const target = event.shiftKey ? last : first
+      target.focus()
+    } else if (focusable.length === 1 || (!event.shiftKey && document.activeElement === last)) {
       event.preventDefault()
       first.focus()
     } else if (event.shiftKey && document.activeElement === first) {
@@ -160,7 +180,7 @@ export default function OpsDrawer({ onDismiss, exiting }) {
     : `${profiles} profile${profiles === 1 ? '' : 's'}`
 
   return (
-    <aside ref={drawerRef} className={`drawer${exiting ? ' exit' : ''}`} role="dialog" aria-modal="true" aria-label="Internal ops" onKeyDown={ownKeyboard}>
+    <aside ref={drawerRef} tabIndex={-1} className={`drawer${exiting ? ' exit' : ''}`} role="dialog" aria-modal="true" aria-label="Internal ops" onKeyDown={ownKeyboard}>
       <div className="drawer-head">
         <span className="ops-badge">Internal</span>
         <span className="drawer-title">Ops · tenants</span>
@@ -211,12 +231,13 @@ export default function OpsDrawer({ onDismiss, exiting }) {
                   <button className="chip-act" onClick={actOnAccountControl} disabled={accountActing}>
                     {accountActing ? 'Saving…' : 'Confirm'}
                   </button>
-                  <button className="chip-neutral" onClick={() => setAccountConfirming(false)} disabled={accountActing}>
+                  <button data-account-confirm className="chip-neutral" onClick={() => setAccountConfirming(false)} disabled={accountActing}>
                     Keep current
                   </button>
                 </div>
               ) : (
                 <button
+                  data-account-action
                   className={accountControls.tool_publication_approval_required ? 'chip-act' : 'chip-neutral'}
                   onClick={() => setAccountConfirming(true)}
                   disabled={accountActing}
@@ -309,8 +330,8 @@ export default function OpsDrawer({ onDismiss, exiting }) {
                         {t.tenant_id}
                       </button>
                     </td>
-                    <td className="num">{Number(t.runs || 0).toLocaleString()}</td>
-                    <td className="num">${Number(t.usd_est || 0).toFixed(3)}</td>
+                    <td className="num">{t.runs == null ? 'Unavailable' : Number(t.runs).toLocaleString()}</td>
+                    <td className="num">{t.usd_est == null ? 'Unavailable' : formatUsageUsd(t.usd_est)}</td>
                     <td>
                       {/* Kill-switch = deliberate hold: amber square dot, not red/fail. */}
                       <span className={`state ${disabled ? 'quota' : 'done'}`}>
@@ -330,17 +351,18 @@ export default function OpsDrawer({ onDismiss, exiting }) {
                           >
                             {isActing ? 'Working…' : (disabled ? 'Enable' : 'Disable')}
                           </button>
-                          <button className="chip-neutral" onClick={() => setConfirming(null)} disabled={isActing}>
+                          <button data-tenant-confirm className="chip-neutral" onClick={() => setConfirming(null)} disabled={isActing}>
                             Keep
                           </button>
                         </span>
                       ) : (
                         <button
+                          data-tenant-action={t.tenant_id}
                           className={disabled ? 'chip-act' : 'chip-danger'}
                           onClick={() => setConfirming(t.tenant_id)}
                           disabled={isActing}
                         >
-                          {disabled ? 'Enable' : 'Disable'}
+                          {isActing ? 'Working…' : disabled ? 'Enable' : 'Disable'}
                         </button>
                       )}
                     </td>

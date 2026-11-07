@@ -79,7 +79,7 @@ export function projectSolarWorkspaceReason(code) {
   }
 }
 
-const READ_TOOLS = ['solar-string-data', 'solar-electrical-schedules', 'solar-cable-export']
+const READ_TOOLS = ['solar-string-data', 'solar-electrical-schedules', 'solar-cable-export', 'solar-solaredge-tracking-read']
 const DIGEST = new RegExp('^sha256:[0-9a-f]{64}$')
 const REASON_CODE = new RegExp('^[A-Za-z][A-Za-z0-9_]{0,127}$')
 const plain = (value) => value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype
@@ -276,7 +276,7 @@ export default function ProjectSolarReadPanel({ tool, solarBinding, authorityKey
       if (!check()) return
       setState({ phase: 'reading', generation: token })
       const outcome = await admitted.projectClient.readSolar({ tool: admitted.name, params,
-        catalogDigest: admitted.digest, current: true, signal: controller.signal })
+        catalogDigest: admitted.digest, current: admitted.name !== 'solar-solaredge-tracking-read', signal: controller.signal })
       if (!check()) return
       const ok = outcome?.ok === true
       const data = ok ? outcome.data?.result : null
@@ -316,6 +316,6 @@ export default function ProjectSolarReadPanel({ tool, solarBinding, authorityKey
     </form>
     {!owner.reason && visible.phase === 'presented' && <SolarReadResult data={visible.data}
       solarBinding={solarBinding} authorityKey={authorityKey} projectClient={projectClient}
-      catalogDigest={owner.digest} projectCurrent={true} save={save} />}
+      catalogDigest={owner.digest} projectCurrent={owner.name !== 'solar-solaredge-tracking-read'} save={save} />}
   </section>
 }

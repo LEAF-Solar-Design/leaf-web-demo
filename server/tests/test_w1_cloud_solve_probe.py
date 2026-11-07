@@ -11,12 +11,14 @@ Missing live input is a failure when requested, never a skip.
 from __future__ import annotations
 
 import copy
+import base64
 import hashlib
 import json
 import os
 import re
 import sys
 import time
+from uuid import uuid4
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -28,6 +30,165 @@ sys.path.insert(0, str(SERVER))
 
 import leaf_cloud_client as cloud
 import leaf_cloud_grants as grants
+
+
+class AsyncReply:
+    def __init__(self, status, body, headers=None):
+        self.status_code, self.body, self.headers = status, body, headers or {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def iter_content(self, size):
+        yield self.body
+
+
+def test_async_submit_headers_and_acceptance(params, monkeypatch):
+    grid_id, key = uuid4(), str(uuid4())
+    grant = grants.CloudGrant("w1-tenant", "private")
+    def post(url, **kwargs):
+        assert url == cloud.SOLVER_URL
+        assert kwargs["headers"] == {"Authorization": "Bearer private",
+            "Content-Type": "application/json", "Idempotency-Key": key, "Prefer": "respond-async"}
+        assert kwargs["allow_redirects"] is False and kwargs["stream"] is True
+        assert sum(kwargs["timeout"]) <= 2
+        assert json.loads(kwargs["data"]) == params["request"]
+        return AsyncReply(202, cloud.canonical_bytes({"status": "accepted", "grid_id": str(grid_id)}))
+    monkeypatch.setattr(cloud.requests, "post", post)
+    assert cloud.submit_stringer_async(cloud.validate_params(params).request, grant, key,
+        remaining_seconds=2) == ("accepted", grid_id)
+
+
+def test_async_submit_legacy_completed_body(params, recorded, monkeypatch):
+    raw = cloud.canonical_bytes(recorded["response"])
+    monkeypatch.setattr(cloud.requests, "post", lambda *args, **kwargs: AsyncReply(200, raw))
+    assert cloud.submit_stringer_async(cloud.validate_params(params).request,
+        grants.CloudGrant("w1-tenant", ""), str(uuid4())) == ("completed", raw)
+
+
+@pytest.mark.parametrize("status,classification", [
+    (409, "cloud_request_invalid"), (401, "cloud_auth_missing"),
+    (403, "cloud_tenant_unauthorized"), (302, "cloud_upstream_failure"),
+])
+def test_async_submit_refusals(params, monkeypatch, status, classification):
+    monkeypatch.setattr(cloud.requests, "post", lambda *args, **kwargs: AsyncReply(status, b""))
+    with pytest.raises(grants.CloudError, match="^" + classification + "$"):
+        cloud.submit_stringer_async(cloud.validate_params(params).request,
+            grants.CloudGrant("w1-tenant", ""), str(uuid4()))
+
+
+@pytest.mark.parametrize("retry_after,expected", [("12", 12), ("99999", 60), ("bad", 5), ("-2", 5)])
+def test_async_busy_retry_after_bounded(params, monkeypatch, retry_after, expected):
+    monkeypatch.setattr(cloud.requests, "post", lambda *args, **kwargs:
+        AsyncReply(503, b"", {"Retry-After": retry_after}))
+    assert cloud.submit_stringer_async(cloud.validate_params(params).request,
+        grants.CloudGrant("w1-tenant", ""), str(uuid4())) == ("busy", expected)
+
+
+@pytest.mark.parametrize("failure", [cloud.requests.ReadTimeout(), cloud.requests.ConnectionError()])
+def test_async_postwrite_errors_are_retryable(params, monkeypatch, failure):
+    def fail(*args, **kwargs):
+        raise failure
+    monkeypatch.setattr(cloud.requests, "post", fail)
+    assert cloud.submit_stringer_async(cloud.validate_params(params).request,
+        grants.CloudGrant("w1-tenant", ""), str(uuid4())) == ("retryable", 5)
+
+
+def test_async_busy_http_date_respects_remaining_budget(params, monkeypatch):
+    monkeypatch.setattr(cloud.time, "time", lambda: 0)
+    monkeypatch.setattr(cloud.requests, "post", lambda *args, **kwargs:
+        AsyncReply(503, b"", {"Retry-After": "Thu, 01 Jan 1970 00:00:30 GMT"}))
+    assert cloud.submit_stringer_async(cloud.validate_params(params).request,
+        grants.CloudGrant("tenant", ""), str(uuid4()), remaining_seconds=2) == ("busy", 2)
+
+
+def test_async_exhausted_budget_does_not_send(params, monkeypatch):
+    monkeypatch.setattr(cloud.requests, "post", lambda *args, **kwargs:
+        pytest.fail("exhausted attempt must not submit"))
+    assert cloud.submit_stringer_async(cloud.validate_params(params).request,
+        grants.CloudGrant("tenant", ""), str(uuid4()), remaining_seconds=0) == ("retryable", 0)
+
+
+@pytest.mark.parametrize("remaining,elapsed", [(600, 51), (2, 3)])
+def test_async_slow_stream_retries_at_call_or_attempt_deadline(monkeypatch, remaining, elapsed):
+    observed = [0.0]
+    monkeypatch.setattr(cloud.time, "monotonic", lambda: observed[0])
+    class SlowReply(AsyncReply):
+        def iter_content(self, size):
+            observed[0] = elapsed
+            yield b'{"status":"running"}'
+    monkeypatch.setattr(cloud.requests, "get", lambda *args, **kwargs: SlowReply(202, b""))
+    assert cloud.get_stringer_result(uuid4(), grants.CloudGrant("tenant", ""),
+        remaining_seconds=remaining) == ("retryable", 0)
+
+
+def test_async_read_timeout_during_result_stream_is_retryable(monkeypatch):
+    class InterruptedReply(AsyncReply):
+        def iter_content(self, size):
+            yield b'{"status":'
+            raise cloud.requests.ReadTimeout("stream interrupted")
+    monkeypatch.setattr(cloud.requests, "get", lambda *args, **kwargs: InterruptedReply(200, b""))
+    assert cloud.get_stringer_result(uuid4(), grants.CloudGrant("tenant", "")) == ("retryable", 5)
+
+
+@pytest.mark.parametrize("status,body,expected", [
+    (202, {"status": "running"}, "pending"), (200, {"status": "expired"}, "expired"),
+    (404, {}, "missing"), (500, {}, "retryable"), (429, {}, "retryable"),
+])
+def test_async_result_get_mapping(monkeypatch, status, body, expected):
+    grid_id = uuid4()
+    def get(url, **kwargs):
+        assert url == cloud.SOLVER_URL + "jobs/" + str(grid_id) + "/result"
+        assert kwargs["headers"] == {"Authorization": "Bearer private"}
+        assert kwargs["allow_redirects"] is False and kwargs["stream"] is True
+        assert sum(kwargs["timeout"]) <= 3
+        return AsyncReply(status, cloud.canonical_bytes(body))
+    monkeypatch.setattr(cloud.requests, "get", get)
+    result = cloud.get_stringer_result(grid_id, grants.CloudGrant("tenant", "private"), remaining_seconds=3)
+    assert result[0] == expected
+
+
+def test_async_result_completed_identity_and_mismatch(recorded, monkeypatch):
+    body = recorded["response"]
+    raw = cloud.canonical_bytes(body)
+    monkeypatch.setattr(cloud.requests, "get", lambda *args, **kwargs: AsyncReply(200, raw))
+    assert cloud.get_stringer_result(body["job_id"], grants.CloudGrant("tenant", "")) == ("completed", raw)
+    with pytest.raises(grants.CloudError, match="^cloud_response_invalid$"):
+        cloud.get_stringer_result(uuid4(), grants.CloudGrant("tenant", ""))
+
+
+@pytest.mark.parametrize("body", [{"status": "accepted", "grid_id": "bad"},
+                                  {"status": "accepted"}, {"status": "running"}])
+def test_async_submit_rejects_malformed_handle(params, monkeypatch, body):
+    monkeypatch.setattr(cloud.requests, "post", lambda *args, **kwargs:
+        AsyncReply(202, cloud.canonical_bytes(body)))
+    with pytest.raises(grants.CloudError, match="^cloud_response_invalid$"):
+        cloud.submit_stringer_async(cloud.validate_params(params).request,
+            grants.CloudGrant("tenant", ""), str(uuid4()))
+
+
+def test_async_result_response_cap_and_connection_error(monkeypatch):
+    monkeypatch.setattr(cloud.requests, "get", lambda *args, **kwargs:
+        AsyncReply(200, b"x" * (cloud.MAX_RESPONSE_BYTES + 1)))
+    with pytest.raises(grants.CloudError, match="^cloud_response_invalid$"):
+        cloud.get_stringer_result(uuid4(), grants.CloudGrant("tenant", ""))
+    def fail(*args, **kwargs):
+        raise cloud.requests.ConnectionError("private detail")
+    monkeypatch.setattr(cloud.requests, "get", fail)
+    assert cloud.get_stringer_result(uuid4(), grants.CloudGrant("tenant", ""))[0] == "retryable"
+
+
+def test_async_principal_hash_reads_token_claims_only():
+    token = "e30." + base64.urlsafe_b64encode(b'{"iss":"issuer","sub":"solver"}').decode().rstrip("=") + ".sig"
+    expected = hashlib.sha256(b"issuer|solver").hexdigest()
+    assert cloud.grant_principal_sha256(grants.CloudGrant("tenant", token)) == expected
+    assert cloud.grant_principal_sha256(grants.CloudGrant("another-tenant", token)) == expected
+    for invalid in ("not-a-jwt", "e30.e30.sig", "e30.@@@.sig"):
+        with pytest.raises(grants.CloudError, match="^cloud_auth_missing$"):
+            cloud.grant_principal_sha256(grants.CloudGrant("tenant", invalid))
 
 
 @pytest.fixture

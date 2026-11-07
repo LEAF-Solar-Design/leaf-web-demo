@@ -17,7 +17,7 @@
 }
 
 .solar-preset-form .solar-preset-note {
-  font-size: 0.85em;
+  font-size: var(--leaf-size-caption);
   color: var(--muted);
 }
 

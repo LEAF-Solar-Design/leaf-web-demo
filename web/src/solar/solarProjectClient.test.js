@@ -35,6 +35,19 @@ afterEach(() => { for (const client of clients.splice(0)) client.dispose(); vi.u
 const init = (fetchImpl) => fetchImpl.mock.calls.at(-1)[1]
 const url = (fetchImpl) => fetchImpl.mock.calls.at(-1)[0]
 const refusal = (reason) => ({ error: { reason_code: reason, error_code: 'BAD_PARAMS', retryable: false }, detail: { preserved: true } })
+const custody = () => ({ delegated: true, delegation_id: J, fence: lease.fence, expires_at: lease.expires })
+const approveRequest = { confirmationId: 'confirmation-1', sessionId: 'assistant-1', inputVersionId: V }
+const edgeCounts = { pdf_matrices: 1, pdf_panels: 2, matchable_grids: 1, bridge_grids: 0, frames: 1,
+  matched_frames: 1, group_strings: 1, bridge_strings: 0, strings: 1, assigned_panels: 2,
+  unassigned_panels: 0, partial_strings: 0 }
+function edgeData(report = false, changes = {}) {
+  return { schema: report ? 'leaf.solar-project-solaredge-report-result.v1' : 'leaf.solar-project-import-source.v1',
+    kind: report ? 'solaredge-report' : 'solaredge-pdf', ...identity, input_version_id: V,
+    source_intake_sha256: 'd'.repeat(64), graph_sha256: 'e'.repeat(64), graph_project_id: 'design-1',
+    ...(report ? { source_artifact_id: 'a'.repeat(64), counts: edgeCounts } : { page_count: 1 }),
+    [report ? 'report' : 'source']: artifact({ media_type: report ? 'application/json' : 'application/pdf',
+      filename: report ? 'solaredge-report.json' : 'solaredge-source.pdf' }), ...changes }
+}
 function artifact(changes = {}) {
   const artifactId = 'c'.repeat(64)
   return { ...identity, source_version_id: V, source_intake_sha256: 'd'.repeat(64), graph_sha256: 'e'.repeat(64),
@@ -44,6 +57,182 @@ function artifact(changes = {}) {
 }
 
 describe('project Solar transport and lifecycle', () => {
+  it('delegates only private possession to one approved run without acquiring or renewing', async () => {
+    const { client, fetchImpl } = setup(acquired())
+    await client.acquireCheckout()
+    fetchImpl.mockResolvedValueOnce(response(custody()))
+    const before = client.getSnapshot()
+    expect(await client.delegateApprovedRun(approveRequest)).toMatchObject({ ok: true, data: custody() })
+    expect(url(fetchImpl)).toBe('https://api.test/api/agent/approvals/confirmation-1/checkout-custody')
+    expect(init(fetchImpl)).toMatchObject({ method: 'POST', headers: { 'X-Checkout-Capability': token(), Authorization: 'Bearer synthetic' } })
+    expect(JSON.parse(init(fetchImpl).body)).toEqual({ session_id: 'assistant-1', input_version_id: V })
+    expect(client.getSnapshot()).toBe(before)
+    expect(JSON.stringify(client.getSnapshot())).not.toContain(token())
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+  })
+
+  it('refuses missing checkout possession and wrong immutable versions before transport', async () => {
+    const { client, fetchImpl } = setup()
+    expect((await client.delegateApprovedRun(approveRequest)).reason).toBe('SIP_R7_CHECKOUT_REQUIRED')
+    expect((await client.delegateApprovedRun({ ...approveRequest, inputVersionId: J })).reason).toBe('SIP_R7_REQUEST_INVALID')
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it.each(['scope', 'auth', 'release', 'fence', 'expiry', 'dispose'])('revokes exactly the issued grant on %s', async (change) => {
+    vi.useFakeTimers()
+    const { client, fetchImpl } = setup(acquired())
+    await client.acquireCheckout()
+    fetchImpl.mockResolvedValueOnce(response(custody()))
+    await client.delegateApprovedRun(approveRequest)
+    fetchImpl.mockResolvedValue(response({ revoked: true }))
+    if (change === 'scope') client.setScope({ ...binding, input_version_id: J }, 'session-1')
+    if (change === 'auth') client.setScope(binding, 'session-2')
+    if (change === 'release') {
+      fetchImpl.mockImplementation(async (path, options) => response(options.body ? { revoked: true } : { ...identity, released: true, checkout: null }))
+      await client.releaseCheckout()
+    }
+    if (change === 'fence') {
+      fetchImpl.mockImplementation(async (path, options) => response(options.method === 'GET' ? { ...identity, checkout: { ...lease, fence: '2' } } : { revoked: true }))
+      await client.readCheckout()
+    }
+    if (change === 'expiry') await vi.advanceTimersByTimeAsync(Date.parse(lease.expires) - Date.now())
+    if (change === 'dispose') client.dispose()
+    const cleanup = fetchImpl.mock.calls.filter(([path, options]) => path.endsWith('/checkout-custody') && options.method === 'DELETE')
+    expect(cleanup).toHaveLength(1)
+    expect(JSON.parse(cleanup[0][1].body)).toEqual({ session_id: 'assistant-1', delegation_id: J })
+    expect(cleanup[0][1].headers).not.toHaveProperty('X-Checkout-Capability')
+    expect(cleanup[0][1].headers.Authorization).toBe('Bearer synthetic')
+  })
+
+  it('cleans up late issuance with original subject headers after stale response discard', async () => {
+    let subject = 'original'
+    const { client, fetchImpl } = setup(acquired(), 200, { authHeaders: () => ({ Authorization: `Bearer ${subject}` }) })
+    await client.acquireCheckout()
+    const late = deferred()
+    fetchImpl.mockReturnValueOnce(late.promise)
+    const pending = client.delegateApprovedRun(approveRequest)
+    subject = 'replacement'
+    client.setScope(binding, 'session-2')
+    expect((await pending).reason).toBe('SIP_R7_SCOPE_STALE')
+    fetchImpl.mockResolvedValue(response({ revoked: true }))
+    late.resolve(response(custody()))
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(3))
+    expect(init(fetchImpl).headers.Authorization).toBe('Bearer original')
+    expect(init(fetchImpl).headers).not.toHaveProperty('X-Checkout-Capability')
+    expect(JSON.parse(init(fetchImpl).body)).toEqual({ session_id: 'assistant-1', delegation_id: J })
+  })
+
+  it('never cleans a foreign grant through the public cleanup method', async () => {
+    const { client, fetchImpl } = setup(acquired())
+    await client.acquireCheckout()
+    fetchImpl.mockResolvedValueOnce(response(custody()))
+    await client.delegateApprovedRun(approveRequest)
+    await client.revokeApprovedRun({ ...approveRequest, sessionId: 'foreign', delegationId: J })
+    await client.revokeApprovedRun({ ...approveRequest, delegationId: V })
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    fetchImpl.mockResolvedValue(response({ revoked: true }))
+    await client.revokeApprovedRun({ ...approveRequest, delegationId: J })
+    expect(fetchImpl).toHaveBeenCalledTimes(3)
+  })
+
+  it('revokes custody at its own expiry even when the checkout remains owned', async () => {
+    vi.useFakeTimers()
+    const { client, fetchImpl } = setup(acquired())
+    await client.acquireCheckout()
+    fetchImpl.mockResolvedValueOnce(response({ ...custody(), expires_at: new Date(Date.now() + 1000).toISOString() }))
+    await client.delegateApprovedRun(approveRequest)
+    fetchImpl.mockResolvedValue(response({ revoked: true }))
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(init(fetchImpl).method).toBe('DELETE')
+    expect(client.getSnapshot().ownsCheckout).toBe(true)
+  })
+
+  it('never returns usable custody after a release starts while issuance is pending', async () => {
+    const { client, fetchImpl } = setup(acquired())
+    await client.acquireCheckout()
+    const issue = deferred(), release = deferred()
+    fetchImpl.mockReturnValueOnce(issue.promise).mockReturnValueOnce(release.promise)
+    const pending = client.delegateApprovedRun(approveRequest)
+    const releasing = client.releaseCheckout()
+    fetchImpl.mockResolvedValue(response({ revoked: true }))
+    issue.resolve(response(custody()))
+    expect((await pending).reason).toBe('SIP_R7_SCOPE_STALE')
+    expect(JSON.parse(init(fetchImpl).body).delegation_id).toBe(J)
+    release.resolve(response({ ...identity, released: true, checkout: null }))
+    await releasing
+  })
+  it('uploads immutable PDF bytes to the captured canonical version without creating a run', async () => {
+    const data = edgeData(), { client, fetchImpl } = setup(data)
+    const file = new File(['%PDF-1.7'], 'layout.pdf', { type: 'application/pdf' })
+    expect(await client.uploadSolarEdgePdf({ file })).toMatchObject({ ok: true, data })
+    expect(url(fetchImpl)).toBe(`https://api.test/api/projects/${P}/drawings/${D}/versions/${V}/imports/solaredge-pdf`)
+    expect(init(fetchImpl)).toMatchObject({ method: 'POST', body: file,
+      headers: { Authorization: 'Bearer synthetic', 'Content-Type': 'application/pdf', 'X-Org-Id': O, 'X-Project-Id': P } })
+    expect(init(fetchImpl).headers).not.toHaveProperty('X-Checkout-Capability')
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports on a canonical immutable artifact without legacy version coercion or catalog fields', async () => {
+    const data = edgeData(true), { client, fetchImpl } = setup(data)
+    expect((await client.reportSolarEdgePdf({ sourceArtifactId: 'a'.repeat(64), alignmentTolerance: 0.5, selectionOrder: 'recorded' })).ok).toBe(true)
+    expect(url(fetchImpl)).toBe(`https://api.test/api/projects/${P}/drawings/${D}/versions/${V}/imports/solaredge-pdf/report`)
+    expect(JSON.parse(init(fetchImpl).body)).toEqual({ source_artifact_id: 'a'.repeat(64), alignment_tolerance: 0.5, selection_order: 'recorded' })
+  })
+
+  it('refuses malformed or foreign canonical SolarEdge producers', async () => {
+    const { client, fetchImpl } = setup()
+    for (const data of [edgeData(false, { schema: 'leaf.solar-import-source.v1', source_version: 3 }),
+      edgeData(false, { input_version_id: J }), edgeData(false, { project_id: J }), edgeData(false, { page_count: 51 }),
+      edgeData(false, { source: { ...edgeData().source, source_version_id: J } }),
+      edgeData(false, { source: { ...edgeData().source, graph_sha256: 'a'.repeat(64) } })]) {
+      fetchImpl.mockResolvedValueOnce(response(data))
+      expect((await client.uploadSolarEdgePdf({ file: new File(['%PDF'], 'layout.pdf') })).reason).toBe('SIP_R7_RESPONSE_INVALID')
+    }
+    for (const data of [edgeData(true, { source_artifact_id: 'b'.repeat(64) }),
+      edgeData(true, { counts: { ...edgeCounts, assigned_panels: 1.5 } }),
+      edgeData(true, { report: { ...edgeData(true).report, filename: 'other.json' } })]) {
+      fetchImpl.mockResolvedValueOnce(response(data))
+      expect((await client.reportSolarEdgePdf({ sourceArtifactId: 'a'.repeat(64), alignmentTolerance: 1 })).reason).toBe('SIP_R7_RESPONSE_INVALID')
+    }
+  })
+
+  it('validates SolarEdge PDF and report limits before transport', async () => {
+    const { client, fetchImpl } = setup()
+    for (const file of [null, { size: 4 }, new File([], 'empty.pdf'), new Blob([new Uint8Array(16777217)])]) {
+      expect((await client.uploadSolarEdgePdf({ file })).reason).toBe('SIP_R7_REQUEST_INVALID')
+    }
+    for (const change of [{ sourceArtifactId: 'wrong' }, { alignmentTolerance: 0 }, { alignmentTolerance: Infinity }, { selectionOrder: 'other' }]) {
+      expect((await client.reportSolarEdgePdf({ sourceArtifactId: 'a'.repeat(64), alignmentTolerance: 1, ...change })).reason).toBe('SIP_R7_REQUEST_INVALID')
+    }
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it('discards late PDF and report results when the selected version or authority changes', async () => {
+    const { client, fetchImpl } = setup()
+    const upload = deferred()
+    fetchImpl.mockReturnValueOnce(upload.promise)
+    const pending = client.uploadSolarEdgePdf({ file: new File(['%PDF'], 'layout.pdf') })
+    client.setScope({ ...binding, input_version_id: J }, 'session-1')
+    expect(init(fetchImpl).signal.aborted).toBe(true)
+    upload.resolve(response(edgeData()))
+    expect((await pending).reason).toBe('SIP_R7_SCOPE_STALE')
+    client.setScope(binding, 'session-1')
+    fetchImpl.mockImplementationOnce(() => new Promise(() => {}))
+    const report = client.reportSolarEdgePdf({ sourceArtifactId: 'a'.repeat(64), alignmentTolerance: 1 })
+    client.setScope(binding, 'session-2')
+    expect((await report).reason).toBe('SIP_R7_SCOPE_STALE')
+  })
+  it('S1-121 clears a release error after a successful checkout reread', async () => {
+    const { client, fetchImpl } = setup(acquired())
+    await client.acquireCheckout()
+    fetchImpl.mockResolvedValueOnce(response(refusal('CHECKOUT_STALE'), 409))
+    expect((await client.releaseCheckout()).ok).toBe(false)
+    expect(client.getSnapshot().error).toBe('CHECKOUT_STALE')
+    fetchImpl.mockResolvedValueOnce(response({ ...identity, checkout: null }))
+    expect((await client.readCheckout()).ok).toBe(true)
+    expect(client.getSnapshot()).toMatchObject({ error: null, checkout: null, ownsCheckout: false })
+  })
+
   const sizingModules = () => ({ schema_version: 1,
     catalog: { source: 'pvlib.CeCMod', pvlib_version: '0.13', count: 1, sha256: 'a'.repeat(64) },
     modules: [{ key: 'Canadian_Solar_CS6U', stc_w: 330, n_s: 72, v_oc_ref: null, length_m: 1.9, width_m: null }],

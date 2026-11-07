@@ -21,6 +21,24 @@ function setup() {
 async function load() { click('Load drafts'); await screen.findByRole('button', { name: `Select draft ${reference.id}, version ${reference.version}` }) }
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.useRealTimers() })
 
+it('does not assert that a draft is selected on mount or after listing', async () => {
+  const { props } = setup()
+  render(<WorkflowScheduleDraftBrowser {...props} />)
+  expect(screen.queryByText('This is a saved draft. Nothing is scheduled or authorized to run.')).toBeNull()
+  await load()
+  expect(screen.queryByText('This is a saved draft. Nothing is scheduled or authorized to run.')).toBeNull()
+})
+
+it('removes the selected-draft assertion while reading another draft', async () => {
+  const { props, client } = setup()
+  render(<WorkflowScheduleDraftBrowser {...props} />)
+  await load(); select()
+  await screen.findByRole('heading', { name: draft.title })
+  client.getWorkflowScheduleDraft.mockImplementationOnce(() => new Promise(() => {}))
+  select(other)
+  expect(screen.queryByText('This is a saved draft. Nothing is scheduled or authorized to run.')).toBeNull()
+})
+
 it('is inert on mount, time and callback-only rerenders; guards explicit list and exact detail reads', async () => {
   const { props, client } = setup()
   const { rerender } = render(<WorkflowScheduleDraftBrowser {...props} mode="dark" />)

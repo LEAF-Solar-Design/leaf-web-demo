@@ -52,3 +52,12 @@ button.chip-act, button.chip-neutral { border: 0; font-family: inherit; }
 
 /* entitlements "Checking plan" — pulse dot + verb needs an inline-flex line */
 .ent-head .ent-src.ent-checking { display: inline-flex; align-items: center; gap: 6px; }
+
+.tool-explain { margin-block: var(--leaf-space-2); font-size: var(--leaf-size-caption); color: var(--muted); overflow-wrap: anywhere; }
+.tool-explain > summary { cursor: pointer; color: var(--primary); }
+.tool-explain p, .tool-explain dl, .tool-explain ul { margin-block: var(--leaf-space-2); }
+.tool-explain h4 { margin-block: var(--leaf-space-2) var(--leaf-space-1); font-size: var(--leaf-size-caption); }
+.tool-explain ul { padding-inline-start: var(--leaf-space-4); }
+.tool-explain dd { margin-inline-start: var(--leaf-space-3); }
+.tool-explain-effect.write { color: var(--status-warning); }
+.tool-explain-effect.read { color: var(--primary); }

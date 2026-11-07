@@ -76,7 +76,7 @@ def _scope(cur, org_id, project_id, drawing_id, *, actor_binding_id=None):
     args = {"org_id": org_id, "project_id": project_id, "drawing_id": drawing_id}
     cur.execute(
         "SELECT project_id FROM live_projects WHERE org_id = %(org_id)s "
-        "AND project_id = %(project_id)s FOR SHARE", args,
+        "AND project_id = %(project_id)s " + ("FOR UPDATE" if drawing_id is None else "FOR SHARE"), args,
     )
     if cur.fetchone() is None:
         refuse("CONTEXT_NOT_FOUND")
@@ -99,13 +99,14 @@ def _scope(cur, org_id, project_id, drawing_id, *, actor_binding_id=None):
         authority = cur.fetchone()
     if authority is None or authority["authority_mode"] != "postgres_canonical":
         refuse("CANONICAL_AUTHORITY_REQUIRED")
-    cur.execute(
-        "SELECT drawing_id FROM drawing_artifacts WHERE org_id = %(org_id)s "
-        "AND project_id = %(project_id)s AND drawing_id = %(drawing_id)s "
-        "AND status = 'active' FOR UPDATE", args,
-    )
-    if cur.fetchone() is None:
-        refuse("CONTEXT_NOT_FOUND")
+    if drawing_id is not None:
+        cur.execute(
+            "SELECT drawing_id FROM drawing_artifacts WHERE org_id = %(org_id)s "
+            "AND project_id = %(project_id)s AND drawing_id = %(drawing_id)s "
+            "AND status = 'active' FOR UPDATE", args,
+        )
+        if cur.fetchone() is None:
+            refuse("CONTEXT_NOT_FOUND")
     if actor_binding_id is not None:
         args["actor"] = actor_binding_id
         cur.execute(
@@ -284,6 +285,61 @@ def verify_checkout(org_id, project_id, drawing_id, *, actor_binding_id, expecte
 
 
 PUBLICATION_SCHEMA = "leaf.project-drawing-publication.v1"
+INITIAL_PUBLICATION_SCHEMA = "leaf.project-drawing-initial-publication.v1"
+
+
+def initial_publication_scope(org_id, project_id, actor_binding_id, *, conn):
+    """Serialize first drawing creation on the real project, with normal authority."""
+    _ids(org_id, project_id, actor_binding_id)
+    with conn.cursor() as cur:
+        _scope(cur, org_id, project_id, None, actor_binding_id=actor_binding_id)
+        cur.execute("SELECT drawing_id FROM drawing_artifacts WHERE org_id=%s "
+                    "AND project_id=%s AND status='active' LIMIT 1", (org_id, project_id))
+        if cur.fetchone() is not None:
+            raise ProjectContextError("PROJECT_LAYOUT_INITIAL_REQUIRES_EMPTY_PROJECT")
+
+
+def publish_initial_version(org_id, project_id, drawing_id, *, actor_binding_id,
+                            request_id, intake_sha256, source_sha256, parameters_sha256,
+                            conn, before_new):
+    """Create the first actual artifact/version only after durable native output exists."""
+    _ids(org_id, project_id, drawing_id, actor_binding_id, request_id)
+    if any(not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None
+           for value in (intake_sha256, source_sha256, parameters_sha256)):
+        raise ProjectContextError("SIP_R2_PUBLICATION_PARAMS_INVALID")
+    source = publication_source_key(org_id, project_id, drawing_id, source_sha256)
+    intake = publication_intake_key(org_id, project_id, drawing_id, intake_sha256)
+    proof = {"schema": INITIAL_PUBLICATION_SCHEMA, "organization_id": str(org_id),
+             "project_id": str(project_id), "drawing_id": str(drawing_id),
+             "parent_version_id": None, "request_id": str(request_id),
+             "actor_binding_id": str(actor_binding_id), "parameters_sha256": parameters_sha256,
+             "source": {"ref": source, "sha256": source_sha256},
+             "intake": {"ref": intake, "sha256": intake_sha256}, "base_object_ref": source}
+    args = {"org": org_id, "project": project_id, "drawing": drawing_id,
+            "key": "sip-r2:" + str(request_id)}
+    with conn.cursor() as cur:
+        _scope(cur, org_id, project_id, None, actor_binding_id=actor_binding_id)
+        cur.execute("SELECT * FROM drawing_versions WHERE org_id=%(org)s "
+                    "AND project_id=%(project)s AND idempotency_key=%(key)s", args)
+        row = cur.fetchone()
+        if row is not None:
+            if (row["deleted_at"] is not None or row["provenance"] != proof
+                    or row["drawing_id"] != drawing_id or row["oss_object"] != source
+                    or row["intake_ref"] != intake or row["seq"] != 1
+                    or row["import_fingerprint"] != _publication_fingerprint(proof)):
+                raise ProjectContextError("SIP_R2_IDEMPOTENCY_CONFLICT")
+            return DrawingVersion.from_row(row)
+        initial_publication_scope(org_id, project_id, actor_binding_id, conn=conn)
+        before_new()
+        cur.execute("INSERT INTO drawing_artifacts (drawing_id,project_id,org_id,name) "
+                    "VALUES (%(drawing)s,%(project)s,%(org)s,'Primary drawing')", args)
+        args.update(version=uuid4(), source=source, intake=intake, actor=str(actor_binding_id),
+                    proof=Jsonb(proof), fingerprint=_publication_fingerprint(proof))
+        cur.execute("INSERT INTO drawing_versions (version_id,drawing_id,project_id,org_id,seq,"
+                    "oss_object,intake_ref,created_by,provenance,idempotency_key,import_fingerprint) "
+                    "VALUES (%(version)s,%(drawing)s,%(project)s,%(org)s,1,%(source)s,%(intake)s,"
+                    "%(actor)s,%(proof)s,%(key)s,%(fingerprint)s) RETURNING *", args)
+        return DrawingVersion.from_row(cur.fetchone())
 
 
 def validate_publication_params(org_id, project_id, drawing_id, parent_id,
@@ -300,14 +356,22 @@ def publication_intake_key(org_id, project_id, drawing_id, digest):
             f"intakes/{digest}.json")
 
 
+def publication_source_key(org_id, project_id, drawing_id, digest):
+    return (f"tenants/{org_id}/projects/{project_id}/drawings/{drawing_id}/"
+            f"sources/{digest}.dxf")
+
+
 def _publication_proof(org_id, project_id, drawing_id, parent_id, actor, fence,
-                       request_id, digest, base_object_ref):
-    return {"schema": PUBLICATION_SCHEMA, "organization_id": str(org_id),
+                       request_id, digest, base_object_ref, source_sha256=None):
+    proof = {"schema": PUBLICATION_SCHEMA, "organization_id": str(org_id),
             "project_id": str(project_id), "drawing_id": str(drawing_id),
             "parent_version_id": str(parent_id), "request_id": str(request_id),
             "actor_binding_id": str(actor), "checkout_fence": str(fence),
             "intake": {"ref": publication_intake_key(org_id, project_id, drawing_id, digest),
                        "sha256": digest}, "base_object_ref": base_object_ref}
+    if source_sha256 is not None:
+        proof["source"] = {"ref": base_object_ref, "sha256": source_sha256}
+    return proof
 
 
 def _publication_fingerprint(proof):
@@ -318,10 +382,18 @@ def _publication_fingerprint(proof):
 def publish_version(org_id: UUID, project_id: UUID, drawing_id: UUID, *,
                     expected_parent_version_id: UUID, actor_binding_id: UUID,
                     expected_fence: int, request_id: UUID, intake_sha256: str,
-                    conn, before_new=None) -> DrawingVersion:
+                    conn, before_new=None, source_object_ref=None,
+                    source_sha256=None) -> DrawingVersion:
     """Publish under the artifact fence; the caller owns commit and rollback."""
     validate_publication_params(org_id, project_id, drawing_id, expected_parent_version_id,
                                 actor_binding_id, expected_fence, request_id, intake_sha256)
+    if source_object_ref is not None or source_sha256 is not None:
+        if (not isinstance(source_sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", source_sha256) is None
+                or not isinstance(source_object_ref, str)
+                or source_object_ref != publication_source_key(
+                    org_id, project_id, drawing_id, source_sha256)):
+            raise ProjectContextError("SIP_R2_PUBLICATION_PARAMS_INVALID")
     args = {"org_id": org_id, "project_id": project_id, "drawing_id": drawing_id,
             "parent_id": expected_parent_version_id, "actor_binding_id": actor_binding_id,
             "expected_fence": expected_fence, "key": "sip-r2:" + str(request_id)}
@@ -340,8 +412,10 @@ def publish_version(org_id: UUID, project_id: UUID, drawing_id: UUID, *,
                 refuse("CONTEXT_NOT_FOUND")
             proof = _publication_proof(org_id, project_id, drawing_id,
                 expected_parent_version_id, actor_binding_id, expected_fence,
-                request_id, intake_sha256, row["oss_object"])
+                request_id, intake_sha256, source_object_ref if source_object_ref is not None
+                else row["oss_object"], source_sha256)
             if (row["drawing_id"] != drawing_id or row["provenance"] != proof
+                    or row["oss_object"] != proof["base_object_ref"]
                     or row["intake_ref"] != proof["intake"]["ref"]
                     or row["import_fingerprint"] != _publication_fingerprint(proof)):
                 raise ProjectContextError("SIP_R2_IDEMPOTENCY_CONFLICT")
@@ -375,9 +449,10 @@ def publish_version(org_id: UUID, project_id: UUID, drawing_id: UUID, *,
             "WHERE org_id = %(org_id)s AND project_id = %(project_id)s "
             "AND drawing_id = %(drawing_id)s", args)
         seq = cur.fetchone()["next_seq"]
+        object_ref = source_object_ref if source_object_ref is not None else parent["oss_object"]
         proof = _publication_proof(org_id, project_id, drawing_id, expected_parent_version_id,
-            actor_binding_id, expected_fence, request_id, intake_sha256, parent["oss_object"])
-        args.update(version_id=uuid4(), seq=seq, oss_object=parent["oss_object"],
+            actor_binding_id, expected_fence, request_id, intake_sha256, object_ref, source_sha256)
+        args.update(version_id=uuid4(), seq=seq, oss_object=object_ref,
                     intake_ref=proof["intake"]["ref"], created_by=str(actor_binding_id),
                     provenance=Jsonb(proof), fingerprint=_publication_fingerprint(proof))
         cur.execute(

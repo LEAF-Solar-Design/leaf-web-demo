@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import SolarStringComposer from './SolarStringComposer.jsx'
 import SolarStepEditor from './SolarStepEditor.jsx'
 import { createSolarProjectClient } from './solarProjectClient.js'
+import workerUnavailable from './__fixtures__/workerUnavailable.json'
+import { projectSolarWorkerRefusal } from './solarProjectCompletion.js'
 import ground from './__fixtures__/stringComposerGround.json'
 import rooftop from './__fixtures__/stringComposerRooftop.json'
 import { decodeGroundFrameSlots, GROUND_SLOT_CODEC } from './solarGroundSlots.js'
@@ -630,6 +632,26 @@ const readyProject = async () => { await waitFor(() => expect(button('Review & r
 const prepareSingle = async () => { addRange(); await readyProject() }
 
 describe('canonical SolarStringComposer', () => {
+  it.each([STRING_ADD_TOOL, STRING_MULTI_ADD_TOOL])('G20b %s releases a worker refusal without retaining the request', async (tool) => {
+    const result = { ok: false, status: 503, reason: 'SIP_R4_WORKER_UNAVAILABLE', envelope: workerUnavailable }
+    const onProjectSubmit = vi.fn().mockResolvedValueOnce(result).mockResolvedValueOnce(submittedOutcome())
+    const { props } = await mountProject({ row: { name: tool }, onProjectSubmit })
+    if (tool === STRING_MULTI_ADD_TOOL) change('String length', '3')
+    await prepareSingle()
+    click('Review & run'); await flushProject()
+    const refusal = projectSolarWorkerRefusal(tool)
+    expect(screen.getByRole('alert').textContent).toBe(`${refusal.message} (${refusal.reasonCode})`)
+    expect(screen.queryByText(PROJECT_STRING_COMPOSER_REASONS.submission_uncertain)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+    expect(screen.getByLabelText('Last slot').disabled).toBe(false)
+    const intent = onProjectSubmit.mock.calls[0][0]
+    click('Refresh preview'); await readyProject()
+    expect(props.newProjectIntentKey).toHaveBeenCalledTimes(2)
+    click('Review & run'); await flushProject()
+    expect(onProjectSubmit).toHaveBeenCalledTimes(2)
+    expect(onProjectSubmit.mock.calls[1][0]).not.toBe(intent)
+  })
+
   it('R10-11 Multi exact preview and unchanged reread hand off the identical intent once', async () => {
     const { props, harness } = await mountProject({ row: { name: STRING_MULTI_ADD_TOOL } })
     addRange(); addRange(1, '1', '2'); change('String length', '3')

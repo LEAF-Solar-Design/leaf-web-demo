@@ -7,7 +7,7 @@
  * stream is driven event by event through the panel's own onEvent handler.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
 vi.mock('../telemetry.js', () => ({ track: vi.fn() }))
 vi.mock('../converse.js', () => ({
@@ -57,6 +57,102 @@ const scrollTo = (el, scrollTop) => {
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
+})
+
+describe('durable user text replay', () => {
+  const recovered = [
+    event('turn_started', 'stored-turn', { text: 'Count the panels in this project.' }),
+    event('text_delta', 'stored-turn', { text: 'There are 64 panels.' }),
+    event('job_linked', 'stored-turn', { job_id: 'existing-job', tool: 'count_panels' }),
+    event('proposed_run', 'stored-turn', {
+      confirmation_id: 'existing-approval', tool: 'move_panel',
+      capability: 'drawing.write', params: { handle: 'A100' },
+    }),
+    event('turn_complete', 'stored-turn', { stop_reason: 'end_turn' }),
+  ]
+  const userBubbles = () => [...document.querySelectorAll('.converse-msg.user')]
+  const noReplayExecution = () => {
+    expect(converse.postMessage).not.toHaveBeenCalled()
+    expect(converse.resolveApproval).not.toHaveBeenCalled()
+    expect(converse.cancelTurn).not.toHaveBeenCalled()
+  }
+
+  it('remounts an existing session with its user, assistant, job and approval', async () => {
+    const first = await setup(recovered)
+    expect(userBubbles()).toHaveLength(1)
+    first.unmount()
+    await setup(recovered)
+    expect(converse.openStream).toHaveBeenCalledTimes(2)
+    expect(converse.openStream.mock.calls.map(([sessionId]) => sessionId)).toEqual(['session-1', 'session-1'])
+    expect(userBubbles()).toHaveLength(1)
+    expect(userBubbles()[0]).toHaveTextContent('Count the panels in this project.')
+    expect(screen.getByText('There are 64 panels.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Attach' })).toBeInTheDocument()
+    expect(screen.getByText('move_panel')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument()
+    noReplayExecution()
+  })
+
+  it('uses one bubble per turn and renders repeated durable text literally', async () => {
+    const text = '<img src=x onerror="alert(1)">'
+    await setup([
+      event('turn_started', 'same-turn', { text }),
+      event('turn_started', 'same-turn', { text }),
+      event('turn_complete', 'same-turn', { stop_reason: 'end_turn' }),
+    ])
+    expect(userBubbles()).toHaveLength(1)
+    expect(userBubbles()[0].textContent).toBe(text)
+    expect(userBubbles()[0].querySelector('img')).toBeNull()
+    noReplayExecution()
+  })
+
+  it('retains App-dispatched local text precedence over its durable fallback', async () => {
+    render(<ConversePanel sessionId="session-1" userTurns={[{ turnId: 'same-turn', text: 'Current local text' }]} />)
+    await push(
+      event('turn_started', 'same-turn', { text: 'Durable fallback text' }),
+      event('turn_complete', 'same-turn', { stop_reason: 'end_turn' }),
+    )
+    expect(userBubbles()).toHaveLength(1)
+    expect(userBubbles()[0].textContent).toBe('Current local text')
+    expect(screen.queryByText('Durable fallback text')).toBeNull()
+    noReplayExecution()
+  })
+
+  it('retains a panel-sent reply without posting it again during replay', async () => {
+    converse.postMessage.mockResolvedValueOnce({ turn_id: 'reply-turn', status: 'started' })
+    await setup()
+    const composer = screen.getByRole('textbox', { name: 'Reply to the assistant' })
+    fireEvent.change(composer, { target: { value: 'My local reply' } })
+    fireEvent.keyDown(composer, { key: 'Enter' })
+    await waitFor(() => expect(converse.postMessage).toHaveBeenCalledTimes(1))
+    await push(
+      event('turn_started', 'reply-turn', { text: 'Stored fallback reply' }),
+      event('turn_complete', 'reply-turn', { stop_reason: 'end_turn' }),
+    )
+    expect(userBubbles()).toHaveLength(1)
+    expect(userBubbles()[0].textContent).toBe('My local reply')
+    expect(converse.postMessage).toHaveBeenCalledTimes(1)
+    expect(converse.resolveApproval).not.toHaveBeenCalled()
+    expect(converse.cancelTurn).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['missing', {}],
+    ['empty', { text: '' }],
+    ['blank', { text: ' \n ' }],
+    ['null', { text: null }],
+    ['number', { text: 64 }],
+    ['object', { text: { user: 'not a string' } }],
+    ['image-only', { images: [{ media_type: 'image/png' }] }],
+    ['confirmation', { confirm: { confirmationId: 'existing-approval', approved: true } }],
+  ])('does not invent user text for a %s turn', async (kind, data) => {
+    await setup([
+      event('turn_started', 'no-user-text', data),
+      event('turn_complete', 'no-user-text', { stop_reason: 'end_turn' }),
+    ])
+    expect(userBubbles()).toHaveLength(0)
+    noReplayExecution()
+  })
 })
 
 describe('tool steps render as ledger rows with a state word', () => {

@@ -105,18 +105,19 @@ export function decideStagingDelivery(app, web) {
   return 'unverified'
 }
 
-export async function stagingDelivery(baseURL, { env = process.env, fetchImpl, ancestry, now = () => new Date(), timeoutMs } = {}) {
+export async function stagingDelivery(baseURL, { env = process.env, fetchImpl, ancestry, now = () => new Date(), timeoutMs, collectProvenance = false } = {}) {
   const expected = resolveExpectedSha(env)
   const evidence = { schema: 'leaf.staging-delivery.v1', checkedAt: now().toISOString(), expected_sha: expected,
     app: { source_sha: null, release_source_sha: null, source_identity: 'unknown', observation: 'not_configured', http_status: null, relation: 'unknown' },
     web: { source_sha: null, observation: 'not_configured', http_status: null, relation: 'unknown' }, decision: 'not_configured' }
-  if (!expected) return evidence
+  if (!expected && !collectProvenance) return evidence
   const origin = assertAllowedStagingHost(baseURL, env).origin
   // URL credentials are never forwarded, even on an otherwise allowed origin.
   const target = new URL(baseURL)
   if (target.username || target.password) throw new StagingHostError('delivery target credentials forbidden')
   Object.assign(evidence.app, await observeDeliveryHealth(origin, '/api/health', { fetchImpl, timeoutMs, env }))
   Object.assign(evidence.web, await observeDeliveryHealth(origin, '/health.json', { fetchImpl, timeoutMs, env }))
+  if (!expected) return evidence
   const compare = ancestry ?? createLocalAncestry()
   for (const component of [evidence.app, evidence.web]) {
     if (component.observation !== 'ok') continue

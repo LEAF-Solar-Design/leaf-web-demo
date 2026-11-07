@@ -236,7 +236,7 @@ def test_sip_r5_seed_submission(lane, monkeypatch):
     assert (lane.s.blobs, lane.s.versions, lane.s.fingerprints, lane.s.writes) == before
 
 
-# W1C-3 adds commit; fifteen supported tools, four creation tools.
+# SolarEdge acceptance joins the sixteen supported tools; four create entities.
 def test_sip_r5_supported_tools(lane, monkeypatch):
     monkeypatch.setenv("LEAF_SOLAR_PROJECT_RUN_ENABLED", "1")
     calls = []
@@ -251,7 +251,7 @@ def test_sip_r5_supported_tools(lane, monkeypatch):
         refusal(run(lane, {}, name), "SIP_R3_TOOL_UNSUPPORTED")
     lane.tools["solar-settings"]["description"] = "Changed record"
     refusal(run(lane, {}), "SIP_R3_TOOL_MANIFEST_MISMATCH")
-    assert len(calls) == 15
+    assert len(calls) == 16
 
 
 def test_sip_r5_binding_and_legacy_pins(lane, monkeypatch):
@@ -433,7 +433,7 @@ def test_sip_r5_catalog_preview(lane, monkeypatch):
                       "idempotency_key": "key"} for name in policy_cases.ELEVEN}
     response = preview(lane, project_runs=json.dumps(entries))
     assert all(states(response)[name]["runnable"] for name in policy_cases.ELEVEN)
-    assert len(calls) == 15 and len({name for name, _ in calls}) == 15
+    assert len(calls) == 16 and {name for name, _ in calls} == set(policy_cases.ELEVEN)
     missing = states(preview(lane, input_version_id=""))["solar-settings"]
     assert missing["admission"]["status_code"] == 400
     assert missing["admission"]["error"]["message"] == "a canonical drawing version UUID is required"
@@ -795,8 +795,10 @@ def test_sip_r5_solver_and_generic_read_isolation(lane, monkeypatch):
     ordinary = {"name": "ordinary-read", "capabilities": ["drawing.read"], "default_params": {}}
     lane.tools[ordinary["name"]] = ordinary
     reads = []
-    monkeypatch.setattr(route, "_run_project_read", lambda *args:
-        reads.append(args) or route.JSONResponse(status_code=200, content={"ok": True}))
+    def project_read(*args, persist=False, idempotency_key=None, selected_binding=None):
+        reads.append((args, persist, idempotency_key, selected_binding))
+        return route.JSONResponse(status_code=200, content={"ok": True})
+    monkeypatch.setattr(route, "_run_project_read", project_read)
     for enabled in (False, True):
         if enabled:
             monkeypatch.setenv("LEAF_SOLAR_PROJECT_RUN_ENABLED", "1")
@@ -813,6 +815,8 @@ def test_sip_r5_solver_and_generic_read_isolation(lane, monkeypatch):
             assert route._access_error(rec, lane.tenant, rec["job_id"]) is None
             assert len(lane.calls) == before
     assert len(calls) == len(reads) == 2
+    assert all((persist, key, binding) == (False, "key", None)
+               for _args, persist, key, binding in reads)
     ctx = campaign_cases.completion_context()
     ctx["tenant_id"] = ctx["org_id"]
     caller = deps.TenantContext(ctx["org_id"], tier="hosted_pro", subject="campaign-reader")

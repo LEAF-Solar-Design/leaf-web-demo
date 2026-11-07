@@ -12,7 +12,7 @@
 #
 # Buckets:
 #   demo-gate — the presenter-kit whole-mission gate (mirrors the mission YAML
-#               success_oracle): the seven node oracles, the vite build with a
+#               success_oracle): the seven node oracles, the Next build with a
 #               >=2-JS-chunk assertion, the offline pre-flight (every golden
 #               number RECOMPUTED from the real intake), and the authored-tool
 #               registry probe. Hermetic: npm ci is impossible offline, so deps
@@ -39,7 +39,7 @@ done
 emit() { printf '[run-local-ci] %s: %s\n' "$1" "$2"; }
 
 ensure_deps() {
-  if [ -x web/node_modules/.bin/vite ]; then
+  if [ -x web/node_modules/.bin/next ]; then
     echo "deps: using existing web/node_modules"
     return 0
   fi
@@ -77,9 +77,20 @@ demo_gate() {
     && node test/check_integration.mjs
   ) || { echo "--- FAILED: node oracles"; return 1; }
 
-  echo "--- vite build (must produce >=2 JS chunks)"
-  ( cd web && rm -rf dist && npm run build \
-    && [ "$(ls dist/assets/*.js | wc -l)" -ge 2 ]
+  echo "--- Next build (must produce >=2 JS chunks and a matching export manifest)"
+  # next-build.mjs exports out/ and publishes it as dist/. Inspect those
+  # deployed bytes, not the .next compiler cache or Vite's old assets layout.
+  ( cd web && npm run build && node --input-type=module <<'NODE'
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { emittedJavaScript } from './scripts/bundle-assets.mjs'
+const scripts = emittedJavaScript('dist')
+assert.ok(scripts.size >= 2, 'Next export must contain at least two JavaScript chunks')
+const manifest = JSON.parse(readFileSync('dist/web-build-manifest.json', 'utf8'))
+assert.equal(manifest.schema, 'leaf.web-bundle.v1')
+assert.equal(manifest.framework, 'next')
+assert.deepEqual(manifest.scripts, [...scripts.keys()].sort())
+NODE
   ) || { echo "--- FAILED: build / chunk count"; return 1; }
 
   echo "--- offline pre-flight"

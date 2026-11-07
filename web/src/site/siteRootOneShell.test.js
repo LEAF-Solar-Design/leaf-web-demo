@@ -122,7 +122,9 @@ describe('App portal wiring', () => {
     // surface attribute's gate is what this pin guards.)
     expect(src).toContain("const studioShell = !!studioGround && surfaceSlots.chrome.shell === 'cockpit'")
     expect(src).toMatch(/data-studio-shell=\{studioShell \? 'cockpit' : undefined\} data-surface=/)
-    expect(src).toMatch(/<div className="app"[^>]*\bdata-surface=\{studioGround \? activeSurface : undefined\} data-start-open=\{studioGround && startOpen \? 'true' : undefined\} data-tour="shell"\s+onClickCapture=/)
+    expect(src).toMatch(/<div className="app"[^>]*\bdata-surface=\{studioGround \? activeSurface : undefined\} data-start-open=\{studioGround && startOpen \? 'true' : undefined\} data-tour="shell"/)
+    expect(src).toContain("data-environment-panel={studioShell ? browserPanel : undefined}")
+    expect(src).toContain("inert={studioShell && browserPanel !== 'studio' ? INERT_VALUE : undefined}")
   })
 
   it('never seeds intake synchronously — the single-mount invariant of the portal', () => {
@@ -141,7 +143,7 @@ describe('App portal wiring', () => {
     expect(Object.isFrozen(STUDIO_DRAWERS)).toBe(true)
     expect(src).toContain("const [studioDrawer, setStudioDrawer] = useState('none')")
     expect(src).toContain("STUDIO_DRAWERS.includes(name) ? name : 'none'")
-    expect(src).toContain('data-drawer={studioShell ? studioDrawer : undefined}')
+    expect(src).toContain('data-drawer={studioShell && !browserAssetActive ? studioDrawer : undefined}')
     expect(src).toMatch(/\{studioShell && \(\s*<div className="studio-drawer-tabs"/)
   })
 })
@@ -170,7 +172,7 @@ describe('rollback contract', () => {
       previousEnd = media.lastIndex = end
     }
     outsideDesktop.push(css.slice(previousEnd))
-    const rules = desktopBodies.flatMap(body => [...body.matchAll(/([^{}]+)\{([^{}]*)\}/g)])
+    const rules = desktopBodies.flatMap(body => [...body.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^{}]*)\}/g)])
     const bodies = selector => rules.filter(rule => rule[1].trim() === selector).map(rule => rule[2]).join('\n')
     expect(bodies(`${shell} header.top`)).toMatch(/height:\s*auto;/)
     expect(bodies(`${shell} header.top`)).toMatch(/min-height:\s*28px;/)
@@ -220,10 +222,23 @@ describe('rollback contract', () => {
     expect(bodies(shell)).not.toMatch(/--ck-canvas-top:\s*(?:183|185|241)px;/)
     const u3Rules = rules.filter(rule => /--ck-rail-width|--ck-overview-reserve|--drawer-top|right:\s*calc\(var\(--ck-rail-width\)/.test(rule[2])
       || /header\.top/.test(rule[1]) && /flex-wrap:\s*wrap;|flex-shrink:\s*0;/.test(rule[2]))
+    const environmentShell = '.studio-shell .app[data-studio-shell="cockpit"]'
+    const environment = `${environmentShell}:is([data-surface="cad"], [data-surface="solar"])`
+    const environmentRules = new Set([
+      `${environment}[data-environment-panel]`,
+      `${environment}[data-environment-panel="studio"]`,
+      `${environmentShell}[data-surface="solar"][data-environment-panel]`,
+    ])
+    expect(bodies(`${environment}[data-environment-panel]`)).toMatch(/--ck-rail-width:\s*0px;/)
+    expect(bodies(`${environment}[data-environment-panel="studio"]`)).toMatch(/--ck-rail-width:\s*300px;/)
+    expect(bodies(`${environmentShell}[data-surface="solar"][data-environment-panel]`))
+      .toMatch(/grid-template-columns:\s*var\(--ck-nav-width\) minmax\(0,\s*1fr\) var\(--ck-rail-width\);/)
     expect(u3Rules.length).toBeGreaterThan(0)
     for (const rule of u3Rules) {
-      expect(rule[1].split(',\n').every(selector => selector.trim().startsWith(shell))).toBe(true)
+      expect(rule[1].split(',\n').every(selector => selector.trim().startsWith(shell)
+        || environmentRules.has(selector.trim()))).toBe(true)
     }
+    for (const selector of environmentRules) expect(outsideDesktop.join('\n')).not.toContain(selector)
     expect(bodies(`${sharedShell} .tc-product-nav`)).toMatch(/position:\s*fixed;/)
     expect(bodies(`${sharedShell}:has(aside.rail[data-spine])`)).toMatch(/grid-template-columns:\s*0 1fr 0;/)
     expect(bodies(`${sharedShell} aside.rail:not([data-spine])`)).toMatch(/position:\s*fixed;/)

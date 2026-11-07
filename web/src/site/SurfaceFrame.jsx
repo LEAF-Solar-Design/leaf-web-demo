@@ -32,7 +32,8 @@
 // nothing here compares a surface id to a string literal. Every gate reads a
 // declared slot off surfaceContract(activeSurface).
 // ---------------------------------------------------------------------------
-import { createContext, lazy, Suspense, useContext } from 'react'
+import { createContext, lazy, Suspense, useContext, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 
 import ConnectionBanner from '../components/ConnectionBanner.jsx'
 import ConversationListComponent from '../components/ConversationList.jsx'
@@ -40,6 +41,7 @@ import EntitlementGate from '../components/EntitlementGate.jsx'
 import JobInboxComponent from '../components/JobInbox.jsx'
 import JobRailComponent from '../components/JobRail.jsx'
 import LinkServiceDrawer from '../components/LinkServiceDrawer.jsx'
+import LinkDeviceDrawer from '../components/LinkDeviceDrawer.jsx'
 import ProductSurfaceTabs, { ProductSurfaceFrame } from '../components/ProductSurfaceTabs.jsx'
 import ToastComponent from '../components/Toast.jsx'
 
@@ -209,6 +211,7 @@ export default function SurfaceFrame({
   toast = null,
   conversations = null,
   integrations = null,
+  devices = null,
   signedIn = false,
   onSignOut = null,
   // Slice 9b. Whatever ladder fields the scene can supply for a registry
@@ -254,6 +257,7 @@ export default function SurfaceFrame({
     toast,
     conversations,
     integrations,
+    devices,
     signedIn,
     onSignOut,
     contextMenuCtx,
@@ -560,13 +564,29 @@ function Conversations() {
  * link a service FROM) renders nothing even if a scene mistakenly passed
  * wiring for it.
  */
+// The console's activity rail is hidden and inert while Studio is closed.
+// Ops needs these controls independently of that panel. Keep their state in
+// the shared slot, but seat both triggers in this app's visible header.
+function OpsIntegrationsSeat({ children }) {
+  const anchor = useRef(null)
+  const [host, setHost] = useState(null)
+  useLayoutEffect(() => {
+    setHost(anchor.current?.closest('.app')?.querySelector('header.top .who') || null)
+  }, [])
+  return <>
+    <span hidden ref={anchor} />
+    {host && createPortal(<span className="ops-integrations">{children}</span>, host)}
+  </>
+}
+
 function Integrations() {
   const frame = useSlot()
   const wiring = frame?.integrations
-  if (!wiring) return null
+  if (!wiring && !frame?.devices) return null
   if (frame.contract.integrations?.link !== 'standard-flow') return null
-  return (
-    <LinkServiceDrawer
+  const controls = (
+    <>
+    {wiring && <LinkServiceDrawer
       mock={wiring.mock}
       servers={wiring.servers}
       loading={wiring.loading}
@@ -576,10 +596,36 @@ function Integrations() {
       onToggle={wiring.onToggle}
       onRegister={wiring.onRegister}
       onConnect={wiring.onConnect}
+      onRefresh={wiring.onRefresh}
       onHealth={wiring.onHealth}
       onUnlink={wiring.onUnlink}
-    />
+    />}
+    {frame.devices && <LinkDeviceDrawer
+      key={frame.devices.projectId || 'no-project'}
+      mock={frame.devices.mock}
+      devices={frame.devices.devices}
+      loading={frame.devices.loading}
+      busy={frame.devices.busy}
+      error={frame.devices.error}
+      open={frame.devices.open}
+      onToggle={frame.devices.onToggle}
+      onEnroll={frame.devices.onEnroll}
+      onRefresh={frame.devices.onRefresh}
+      onCommand={frame.devices.onCommand}
+      onGetCommand={frame.devices.onGetCommand}
+      onAudit={frame.devices.onAudit}
+      onRevoke={frame.devices.onRevoke}
+      onRelayToken={frame.devices.onRelayToken}
+      catalog={frame.devices.catalog}
+      catalogLoading={frame.devices.catalogLoading}
+      catalogError={frame.devices.catalogError}
+      onLoadCatalog={frame.devices.onLoadCatalog}
+    />}
+    </>
   )
+  return isConsole(frame) && frame.studioShell && frame.contract.ground === 'integrations'
+    ? <OpsIntegrationsSeat>{controls}</OpsIntegrationsSeat>
+    : controls
 }
 
 /**

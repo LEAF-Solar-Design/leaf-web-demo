@@ -2,6 +2,8 @@
 
 SUPPORTED_TOOLS = frozenset((
     "solar-settings",
+    "solar-design-presets",
+    "solar-trackers-to-panel-groups",
     "solar-panels-from-drawing",
     "solar-size-strings",
     "solar-combiners",
@@ -16,4 +18,5 @@ SUPPORTED_TOOLS = frozenset((
     "solar-correct-string",
     "solar-solve-proposal",
     "solar-commit-solve",
+    "solar-solaredge-accept",
 ))

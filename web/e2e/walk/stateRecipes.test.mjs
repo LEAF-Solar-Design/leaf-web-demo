@@ -2,16 +2,942 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, readdirSync } from 'node:fs'
 import { EventEmitter } from 'node:events'
+import { runInNewContext } from 'node:vm'
 import { ACTIONS, accessibleName } from '../../src/lib/actionRegistry.js'
 import { holdJobRoutes, openHistory, previewVersion, startPendingRun, runProbe, assertEffect, setupStep, requireNoDrawing, VERSIONLESS_DRAWING_REASON, solarCalibrationFailure,
   assertEngineMode, setJobRail, solarBrowserCatalogRequired, barNoRung, captureBarNoRung, assertBarNoRung, installGeometryObserver,
-  captureEngineRefusal, assertEngineRefusal, assertCopiedGeometry, expectedVersionHead, assertVersionTransition, establishZoomBaseline } from './fixtures.mjs'
+  captureEngineRefusal, assertEngineRefusal, runProbeOracle, assertCopiedGeometry, expectedVersionHead, assertVersionTransition, establishZoomBaseline } from './fixtures.mjs'
 import { solarDocumentProbe, authorAvailability, disclosureEvidence, phoneRailAvailability, completeSolarReadiness, UnsupportedLocalError, recoverFailedCatalog } from './fixtures.mjs'
 import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { resolveProbe } from './probes.mjs'
+import { prepareBrowserToolsProject, prepareProjectSharedShell, closeBaselinePanel } from './fixtures.mjs'
 import { captureMultipleSelection, assertMultipleSelectionDelete } from './fixtures.mjs'
 import { seedSolarChain } from './fixtures.mjs'
+import { assertSolarStepEditor, observeSolarEditorRequests, SOLAR_REQUIRED_FORM_INPUTS } from './fixtures.mjs'
 import { solarChainSteps } from './probes.mjs'
+import { activateWithMobileTouchMeasurements } from './mobileTouchMeasurements.mjs'
+import { jobMonitorLauncherRecipe } from './probes.mjs'
+import { prepareStudioJobMonitor, assertStudioJobMonitor } from './fixtures.mjs'
+import { collectPromptRunDiagnostic } from './fixtures.mjs'
+import { withCensusStudioRail, mergeCensusCaptures, captureClosedAndStudioCensus, assertFirstRunCadProfile } from './fixtures.mjs'
+
+test('WL57 U1 merge preserves closed rows, adds unique Studio features and recomputes census totals', () => {
+  const capture = resolved => ({ ok: false, total: 999, resolved,
+    baselined: [{ name: 'baseline' }], unmapped: [], stale: [], controls: [...resolved] })
+  const cad = { feature_id: 'tab:drafting:draw', name: 'closed Draw' }
+  const linked = { feature_id: 'control:linked-services', name: 'Linked services' }
+  const closed = capture([cad]), studio = capture([{ ...cad, name: 'Studio Draw' }, linked, linked])
+  const before = JSON.stringify([closed, studio])
+  const merged = mergeCensusCaptures(closed, studio)
+  assert.deepEqual(merged.resolved, [cad, linked])
+  assert.equal(merged.resolved[0], cad)
+  assert.equal(merged.total, 3)
+  assert.equal(merged.ok, true)
+  assert.deepEqual(merged.controls, [cad, linked])
+  assert.equal(JSON.stringify([closed, studio]), before)
+  assert.deepEqual(mergeCensusCaptures(closed, studio), merged)
+  for (const field of ['unmapped', 'stale']) {
+    const failed = mergeCensusCaptures({ ...closed, [field]: [{ name: 'problem' }] }, studio)
+    assert.equal(failed.ok, false)
+    assert.equal(failed.total, field === 'unmapped' ? 4 : 3)
+  }
+  assert.throws(() => mergeCensusCaptures(null, studio), TypeError)
+  assert.throws(() => mergeCensusCaptures(closed, capture([{ feature_id: 42 }])), TypeError)
+})
+
+test('WL57 census captures closed then Studio and restores the initial state even on failure', async () => {
+  for (const expanded of ['false', 'true']) for (const failAt of [0, 1, 2]) {
+    const fake = studioRailFake({ expanded })
+    const getByRole = fake.page.getByRole
+    fake.page.getByRole = (role, options) => role === 'button'
+      ? { getAttribute: async () => {
+        assert.equal(fake.expanded(), 'true')
+        return 'false'
+      } } : getByRole(role, options)
+    let calls = 0
+    const operation = () => captureClosedAndStudioCensus(fake.page, async () => {
+      assert.equal(fake.expanded(), calls++ === 0 ? 'false' : 'true')
+      if (calls === failAt) throw new Error('capture failed')
+      return { resolved: [], baselined: [], unmapped: [], stale: [], controls: [], total: 0, ok: true }
+    }, wl53Assertions)
+    if (failAt) await assert.rejects(operation(), /capture failed/)
+    else await operation()
+    assert.equal(fake.expanded(), expanded)
+    assert.equal(calls, failAt === 1 ? 1 : 2)
+  }
+})
+
+test('WL57 U3 first-run requires the CAD combobox value and falls back only when absent', async () => {
+  for (const present of [true, false]) for (const value of ['cad', 'solar']) {
+    const events = []
+    const profile = { count: async () => Number(present), inputValue: async () => value }
+    const page = { getByRole: (role, options) => {
+      if (role === 'navigation') {
+        assert.equal(options.name, 'Workspace controls')
+        return { getByRole: (role, options) => {
+          assert.equal(role, 'combobox'); assert.equal(options.name, 'Workspace profile')
+          return profile
+        } }
+      }
+      assert.equal(role, 'tab'); assert.equal(options.name, 'CAD')
+      events.push('legacy tab')
+      return { getAttribute: async () => 'true' }
+    } }
+    const assertions = locator => ({
+      toHaveValue: async expected => { events.push('profile value'); assert.equal(await locator.inputValue(), expected) },
+      toHaveAttribute: async (name, expected) => {
+        assert.equal(name, 'aria-selected'); assert.equal(await locator.getAttribute(name), expected)
+      },
+    })
+    if (present && value !== 'cad') await assert.rejects(assertFirstRunCadProfile(page, assertions))
+    else await assertFirstRunCadProfile(page, assertions)
+    assert.deepEqual(events, [present ? 'profile value' : 'legacy tab'])
+  }
+})
+
+const wl53Assertions = value => ({
+  toBe: expected => assert.equal(value, expected),
+  toBeGreaterThanOrEqual: expected => assert.ok(value >= expected),
+  toBeLessThanOrEqual: expected => assert.ok(value <= expected),
+  toBeVisible: async () => assert.equal(await value.isVisible(), true),
+  toHaveAttribute: async (name, expected) => assert.equal(await value.getAttribute(name), expected),
+})
+wl53Assertions.poll = read => ({ toBe: async expected => assert.equal(await read(), expected) })
+
+test('WL53 U1 census reveals closed Studio once, preserves open or absent Studio, and restores on failure', async () => {
+  for (const visible of [true, false]) for (const expanded of ['false', 'true']) for (const fail of [false, true]) {
+    const fake = studioRailFake({ visible, expanded })
+    const linked = { getAttribute: async name => {
+      assert.equal(name, 'aria-expanded')
+      assert.equal(fake.expanded(), visible ? 'true' : expanded)
+      fake.events.push('Linked services assertion')
+      return 'false'
+    } }
+    const operation = () => withCensusStudioRail(fake.page, async () => {
+      await wl53Assertions(linked).toHaveAttribute('aria-expanded', 'false')
+      fake.events.push('census')
+      if (fail) throw new Error('census failed')
+      return 'inventory'
+    }, wl53Assertions)
+    if (fail) await assert.rejects(operation(), /census failed/)
+    else assert.equal(await operation(), 'inventory')
+    assert.equal(fake.expanded(), expanded)
+    assert.deepEqual(fake.events, visible && expanded === 'false'
+      ? ['Studio click', 'Linked services assertion', 'census', 'Studio click']
+      : ['Linked services assertion', 'census'])
+  }
+})
+
+test('WL53 U2 browser checks the asset before opening Project and closes it after the board check', async () => {
+  for (const fault of [null, 'asset', 'content', 'board']) for (const rendered of [false, true]) {
+    const fake = workspaceEnvironmentFake({ status: 'available', statusLabel: 'Ready' })
+    const events = [], visible = read => ({ isVisible: async () => read() })
+    let projectOpen = false
+    const project = { ...visible(() => true), click: async () => {
+      events.push('open Project'); projectOpen = true
+    } }
+    const close = { ...visible(() => projectOpen), click: async () => {
+      events.push('close Project'); projectOpen = false
+    } }
+    const asset = { ...visible(() => fault !== 'asset'),
+      getByRole: (role, options) => {
+        assert.equal(role, 'heading'); assert.equal(options.name, 'No app to show yet')
+        const empty = visible(() => !rendered && fault !== 'content')
+        empty.or = other => ({ first: () => visible(async () => await empty.isVisible() || await other.isVisible()) })
+        return empty
+      },
+      locator: selector => {
+        assert.equal(selector, 'iframe, .project-page, .portfolio')
+        return visible(() => rendered && fault !== 'content')
+      },
+    }
+    const getByRole = fake.page.getByRole
+    fake.page.getByRole = (role, options) => {
+      if (role === 'region' && options.name === 'Browser asset') return asset
+      if (role === 'region' && options.name === 'Project workspace') return visible(() => {
+        events.push('board check'); return projectOpen && fault !== 'board'
+      })
+      if (role === 'button' && options.name === 'Close Project') return close
+      const result = getByRole(role, options)
+      if (role !== 'navigation') return result
+      return { ...result, getByRole: (childRole, childOptions) => childOptions.name === 'Project'
+        ? project : result.getByRole(childRole, childOptions) }
+    }
+    const probe = { kind: 'surface', sourceId: 'browser', state: 'ready', locator: { role: 'tab', name: 'browser' }, assertion: {
+      target: 'surface:browser', state: 'available', label: 'Ready', ground: 'board',
+    } }
+    const resolved = await resolveSurfaceControl(fake.page, probe)
+    await resolved.activate()
+    const assertions = value => ({ ...workspaceOracleAssertions(value), toBeVisible: async () => {
+      if (value === asset) {
+        assert.ok(fake.events.includes('Select profile:browser'))
+        events.push('asset check')
+      }
+      assert.equal(await value.isVisible(), true)
+    } })
+    const check = () => assertEffect(probe, { page: fake.page }, resolved.locator, {}, assertions)
+    if (fault) await assert.rejects(check(), assert.AssertionError)
+    else await check()
+    assert.equal(projectOpen, false)
+    assert.deepEqual(events, fault === 'asset' || fault === 'content' ? ['asset check']
+      : ['asset check', 'open Project', 'board check', 'close Project'])
+  }
+})
+
+test('WL53 U3 missing Lab option records an unmet precondition and present Lab selects normally', async () => {
+  for (const enabled of [false, true]) {
+    const fake = workspaceEnvironmentFake(), evidence = {}
+    const offered = enabled ? ['browser', 'lab'] : ['browser', 'cad']
+    fake.profileControl.locator = selector => {
+      assert.equal(selector, 'option')
+      return { evaluateAll: async read => read(offered.map(value => ({ value }))) }
+    }
+    const resolved = await resolveSurfaceControl(fake.page, {
+      kind: 'surface', sourceId: 'lab', locator: { role: 'tab', name: 'lab' },
+    }, evidence)
+    if (enabled) {
+      await resolved.activate()
+      assert.deepEqual(fake.events, ['Select profile:lab'])
+      assert.deepEqual(evidence, {})
+    } else {
+      await assert.rejects(resolved.activate(), error => {
+        assert.equal(error.constructor, Error)
+        assert.equal(error.message, 'surface precondition: lab is not an enabled workspace profile on this target')
+        return true
+      })
+      assert.deepEqual(evidence, { surfacePrecondition: { surface: 'lab', reason: 'profile not enabled on this target',
+        offered, source: 'web/src/site/productSurfaces.js:716' } })
+      assert.deepEqual(fake.events, [])
+    }
+  }
+})
+
+test('WL53 U4 overview accepts changed clipped marker size but rejects zoom, no pan and escaped bounds', async () => {
+  const before = { viewport: { x: 10, y: 10, width: 20, height: 20 } }
+  const overviewPan = { map: { x: 0, y: 0, width: 100, height: 80 }, scale: '1:500' }
+  for (const fault of [null, 'scale', 'movement', 'left', 'top', 'right', 'bottom']) {
+    const after = { x: 30, y: 25, width: 21.9, height: 22 }
+    if (fault === 'movement') Object.assign(after, { x: 10, y: 10 })
+    if (fault === 'left') after.x = -1
+    if (fault === 'top') after.y = -1
+    if (fault === 'right') after.x = 90
+    if (fault === 'bottom') after.y = 70
+    const visible = { _apiName: 'Locator', isVisible: async () => true,
+      _expect: async expression => {
+        assert.equal(expression, 'to.be.visible')
+        return { matches: true, log: [] }
+      } }
+    const marker = { ...visible, evaluate: async read => read({
+      getAttribute: key => String(after[key]), hasAttribute: key => key in after,
+    }) }
+    const locator = { locator: selector => {
+      assert.equal(selector, '[data-overview-viewport]'); return marker
+    } }
+    const page = {
+      locator: selector => {
+        if (selector === 'section.workspace-environment') return {
+          count: async () => 1, getAttribute: async name => {
+            assert.equal(name, 'data-entered'); return 'true'
+          },
+        }
+        assert.equal(selector, '.cockpit-scale b')
+        return { innerText: async () => fault === 'scale' ? '1:250' : '1:500' }
+      },
+      getByRole: (role, options) => {
+        if (role === 'button' && options.name === 'Expand drawing overview') return { isVisible: async () => false }
+        if (role === 'button' && options.name === 'Drawing overview') return locator
+        if (role === 'combobox') { assert.equal(options.name, 'Command bar'); return visible }
+        assert.equal(role, 'region'); assert.equal(options.name, 'Drawing')
+        return { locator: selector => { assert.equal(selector, 'canvas:visible'); return visible } }
+      },
+    }
+    const runtime = { page, overviewPan, evidence: { overviewPan: {} } }
+    const check = () => assertEffect({ assertion: { target: 'viewer-overview-pan' } }, runtime, locator, before, wl53Assertions)
+    if (fault) await assert.rejects(check(), assert.AssertionError)
+    else {
+      await check()
+      assert.deepEqual(runtime.evidence.overviewPan.after, after)
+    }
+  }
+})
+
+function promptRunDiagnosticFake({ resolverVisible = false } = {}) {
+  const state = { barValue: '/w1k-no-such-tool', runDisabled: false, resolverVisible,
+    toolCommandsVisible: true, statusText: `  ${'status '.repeat(40)}  `,
+    alerts: ['  First alert  ', `  ${'a'.repeat(140)}  `, ' Third alert ', 'Fourth alert'] }
+  const resolver = {
+    isVisible: async () => state.resolverVisible,
+    getByText: (text, options) => {
+      assert.ok(text.includes('/w1k-no-such-tool'))
+      assert.equal(options.exact, true)
+      return { resolverCopy: true }
+    },
+  }
+  const page = {
+    getByRole: (role, options) => {
+      assert.equal(options.exact, true)
+      if (role === 'combobox') {
+        assert.equal(options.name, 'Command bar')
+        return { inputValue: async () => state.barValue }
+      }
+      if (role === 'button') {
+        assert.equal(options.name, 'Run')
+        return { isDisabled: async () => state.runDisabled }
+      }
+      assert.equal(role, 'listbox')
+      if (options.name === 'Route resolver') return resolver
+      assert.equal(options.name, 'Tool commands')
+      return { isVisible: async () => state.toolCommandsVisible }
+    },
+    locator: selector => {
+      if (selector === '.bar-dock .cockpit-engine-status:visible') return {
+        first: () => ({ textContent: async () => state.statusText }),
+      }
+      assert.equal(selector, '[role="alert"]:visible')
+      return { evaluateAll: async read => read(state.alerts.map(textContent => ({ textContent }))) }
+    },
+  }
+  return { page, state, resolver }
+}
+
+test('WL50 U1 prompt-run diagnostic collects bounded text and copies at most ten request paths', async () => {
+  const fake = promptRunDiagnosticFake()
+  const requests = Array.from({ length: 12 }, (_, index) => `https://leaf.test/api/decision/${index}?secret=value#fragment`)
+  const diagnostic = await collectPromptRunDiagnostic(fake.page, { localDecisionRequests: requests })
+  assert.deepEqual(diagnostic, {
+    barValue: '/w1k-no-such-tool', runDisabled: false, resolverVisible: false, toolCommandsVisible: true,
+    localDecisionRequests: Array.from({ length: 10 }, (_, index) => `/api/decision/${index}`),
+    statusText: fake.state.statusText.trim().slice(0, 160),
+    alerts: ['First alert', 'a'.repeat(120), 'Third alert'],
+  })
+  assert.notEqual(diagnostic.localDecisionRequests, requests)
+  assert.equal(requests.length, 12)
+  assert.ok(requests[0].includes('?secret='))
+  fake.state.statusText = null
+  assert.equal((await collectPromptRunDiagnostic(fake.page, {})).statusText, null)
+})
+
+test('WL50 U2 prompt-run diagnostic tolerates throwing and indefinitely hanging reads', async () => {
+  const empty = { barValue: null, runDisabled: null, resolverVisible: null, toolCommandsVisible: null,
+    localDecisionRequests: [], statusText: null, alerts: [] }
+  for (const hang of [false, true]) {
+    const read = () => {
+      if (hang) return new Promise(() => {})
+      throw new Error('diagnostic read failed')
+    }
+    const node = { inputValue: read, isDisabled: read, isVisible: read, textContent: read, evaluateAll: read }
+    node.first = () => node
+    const page = { getByRole: () => node, locator: () => node }
+    const runtime = { get localDecisionRequests() { throw new Error('request read failed') } }
+    const started = Date.now()
+    assert.deepEqual(await collectPromptRunDiagnostic(page, runtime), empty)
+    assert.ok(Date.now() - started < 3000, 'reads must share the two-second bound')
+  }
+  assert.deepEqual(await collectPromptRunDiagnostic(null, null), empty)
+})
+
+test('WL50 U3 unknown-tool oracle retains snapshots and the original visibility error', async () => {
+  for (const visible of [false, true]) {
+    const fake = promptRunDiagnosticFake({ resolverVisible: visible })
+    const runtime = { page: fake.page, evidence: {}, localDecisionRequests: [] }
+    const originalError = new Error('Route resolver never appeared')
+    const events = []
+    const assertions = value => ({
+      toBeVisible: async () => {
+        if (value === fake.resolver) {
+          events.push('resolver visible')
+          assert.ok(runtime.evidence.promptRunDiagnostic.atOracleEntry)
+          if (!visible) {
+            fake.state.barValue = 'value at failure'
+            throw originalError
+          }
+        } else {
+          assert.equal(value.resolverCopy, true)
+          events.push('resolver copy visible')
+        }
+      },
+      toEqual: expected => {
+        assert.equal(value, runtime.localDecisionRequests)
+        assert.deepEqual(value, expected)
+        events.push('no decision requests')
+      },
+    })
+    const probe = { kind: 'control', featureId: 'control:prompt-run', state: 'ready',
+      assertion: { target: 'unknown-tool-resolver' } }
+    const check = () => assertEffect(probe, runtime, null, {}, assertions)
+    if (visible) await check()
+    else await assert.rejects(check, error => error === originalError)
+    const diagnostic = runtime.evidence.promptRunDiagnostic
+    assert.equal(diagnostic.atOracleEntry.barValue, '/w1k-no-such-tool')
+    assert.equal(diagnostic.atOracleEntry.resolverVisible, visible)
+    if (visible) {
+      assert.deepEqual(Object.keys(diagnostic), ['atOracleEntry'])
+      assert.deepEqual(events, ['resolver visible', 'resolver copy visible', 'no decision requests'])
+    } else {
+      assert.equal(diagnostic.atFailure.barValue, 'value at failure')
+      assert.equal(diagnostic.atFailure.resolverVisible, false)
+      assert.deepEqual(events, ['resolver visible'])
+    }
+  }
+})
+
+function monitorStudioFake({ present = true, open = false, content = true, heading = true, collapse = '', spine = false } = {}) {
+  const clicks = []
+  const node = (visible, count = () => Number(visible())) => ({
+    isVisible: async () => visible(), count: async () => count(),
+  })
+  const studio = { ...node(() => present), getAttribute: async () => String(open),
+    click: async () => { clicks.push('Studio'); open = !open } }
+  const close = { ...node(() => open), click: async () => { clicks.push('Close Studio'); open = false } }
+  const sidebar = { ...node(() => open), getByRole: (role, options) => {
+    if (role === 'heading') {
+      assert.ok(options.name.test('Job monitor (2 live)'))
+      return node(() => open && heading)
+    }
+    assert.equal(role, 'button')
+    assert.equal(options.exact, true)
+    assert.equal(options.includeHidden, true)
+    return node(() => open && collapse === options.name, () => Number(collapse === options.name))
+  } }
+  const page = { getByRole: (role, options) => {
+    if (role === 'navigation') {
+      assert.equal(options.name, 'Workspace controls')
+      return { getByRole: (role, options) => {
+        assert.equal(role, 'button'); assert.equal(options.name, 'Studio')
+        return studio
+      } }
+    }
+    if (role === 'button') { assert.equal(options.name, 'Close Studio'); return close }
+    if (role === 'region') { assert.equal(options.name, 'Studio sidebar'); return sidebar }
+    if (role === 'heading') return node(() => open && heading)
+    assert.equal(role, 'toolbar'); assert.equal(options.name, 'Job monitor')
+    return node(() => spine, () => Number(spine))
+  }, locator: selector => {
+    assert.equal(selector, 'aside.rail')
+    return { filter: () => ({ locator: selector => {
+      assert.equal(selector, '.rail-ske, .rail-empty, .rail-ledger > *')
+      return { first: () => node(() => open && content) }
+    } }) }
+  } }
+  const assertions = value => ({
+    toBeVisible: async () => assert.equal(await value.isVisible(), true),
+    toBeHidden: async () => assert.equal(await value.isVisible(), false),
+    toHaveAttribute: async (name, expected) => assert.equal(await value.getAttribute(name), expected),
+    toHaveCount: async expected => assert.equal(await value.count(), expected),
+  })
+  return { page, clicks, assertions }
+}
+
+test('WL47 Studio monitor setup closes only an open sidebar and activation clicks Studio once', async () => {
+  const map = buildFeatureMap()
+  for (const state of ['ready', 'failed-load']) for (const open of [true, false]) {
+    const fake = monitorStudioFake({ open })
+    assert.equal(await prepareStudioJobMonitor(fake.page, fake.assertions), true)
+    assert.deepEqual(fake.clicks, open ? ['Close Studio'] : [])
+    const probe = resolveProbe(map.entries.find(row => row.id === 'control:job-monitor-expand'), state)
+    const recipe = jobMonitorLauncherRecipe(probe, true)
+    await fake.page.getByRole(recipe.scope.role, recipe.scope).getByRole(recipe.role, recipe).click()
+    assert.equal(fake.clicks.filter(name => name === 'Studio').length, 1)
+    assert.equal(await assertStudioJobMonitor(fake.page, fake.assertions), true)
+  }
+})
+
+test('WL47 Studio monitor oracle rejects missing content, heading, either Collapse and the spine', async () => {
+  for (const options of [{ content: false }, { heading: false }, { collapse: 'Collapse the job monitor' },
+    { collapse: 'Collapse the job monitor to a spine' }, { spine: true }, { open: false }]) {
+    const fake = monitorStudioFake({ open: true, ...options })
+    await assert.rejects(assertStudioJobMonitor(fake.page, fake.assertions))
+  }
+})
+
+test('WL47 absent Studio leaves setup and the oracle to the existing spine branches', async () => {
+  const fake = monitorStudioFake({ present: false })
+  assert.equal(await prepareStudioJobMonitor(fake.page, fake.assertions), false)
+  assert.equal(await assertStudioJobMonitor(fake.page, fake.assertions), false)
+  assert.deepEqual(fake.clicks, [])
+})
+
+function projectSidebarFake({ initial = 'none', pane = false, surface = 'browser', studioPresent = true, toolsHidden = false } = {}) {
+  let open = initial
+  let contentVisible = true
+  const events = []
+  const visible = read => ({ isVisible: async () => read() })
+  const button = name => ({ ...visible(() => name !== 'Studio' || studioPresent), click: async () => {
+    events.push(name)
+    open = open === name ? 'none' : name
+  } })
+  const region = name => ({ ...visible(() => open === name), getByRole: (role, options) => {
+    assert.equal(role, 'button')
+    assert.equal(options.exact, true)
+    return { ...visible(() => open === name && !pane && contentVisible && options.name === 'Open tools'), click: async () => {
+      assert.equal(open, name, 'only visible close/content controls may be clicked')
+      events.push(options.name)
+      if (options.name === `Close ${name}`) open = 'none'
+      else if (options.name === 'Open versions') pane = true
+      else if (options.name === 'Open tools') pane = 'tools'
+      else if (options.name === 'Back to board') pane = false
+      else assert.fail(`Unexpected sidebar control: ${options.name}`)
+    } }
+  } })
+  const page = {
+    locator: selector => {
+      if (selector === '.app') return { first: () => ({ getAttribute: async name => {
+        assert.equal(name, 'data-surface')
+        return surface
+      } }) }
+      if (selector === '#project-workspace-activity') return visible(() => open === 'Studio')
+      if (selector === '#environment-project-panel .ground-pane') return { count: async () => pane ? 1 : 0 }
+      if (selector === '#environment-project-panel .ground-tile') {
+        return { first: () => visible(() => open === 'Project' && !pane && contentVisible) }
+      }
+      if (selector === '#environment-project-panel .ground-pane[data-pane="tools"] > p:visible, #environment-project-panel .ground-pane[data-pane="tools"] > ul > li:visible') {
+        return { first: () => visible(() => open === 'Project' && pane === 'tools' && !toolsHidden && contentVisible) }
+      }
+      assert.equal(selector, '#environment-project-panel :is(.ground-pane, .ground-tile, .project-material-intake):visible')
+      // Only the current state's content exists, even though all three are valid oracle targets.
+      const content = pane === 'material' ? '.project-material-intake' : pane ? '.ground-pane' : '.ground-tile'
+      assert.ok(selector.includes(content))
+      return { first: () => visible(() => open === 'Project' && contentVisible) }
+    },
+    getByRole: (role, options) => {
+      assert.equal(options.exact, true)
+      if (role === 'navigation') {
+        assert.equal(options.name, 'Workspace controls')
+        return { getByRole: (role, options) => {
+          assert.equal(role, 'button')
+          assert.equal(options.exact, true)
+          assert.ok(['Studio', 'Project'].includes(options.name))
+          return button(options.name)
+        } }
+      }
+      assert.equal(role, 'region')
+      if (options.name === 'Tools') return {
+        ...visible(() => open === 'Project' && pane === 'tools' && !toolsHidden),
+        getAttribute: async name => {
+          assert.equal(name, 'data-pane')
+          return pane
+        },
+      }
+      assert.ok(['Studio sidebar', 'Project sidebar'].includes(options.name))
+      return region(options.name.replace(' sidebar', ''))
+    },
+  }
+  const assertions = locator => ({
+    toBeVisible: async () => assert.equal(await locator.isVisible(), true, 'content must be visible'),
+    toBeHidden: async () => assert.equal(await locator.isVisible(), false, 'sidebar must start closed'),
+    toHaveAttribute: async (name, value) => assert.equal(await locator.getAttribute(name), value),
+  })
+  return { page, assertions, events, open: () => open, pane: () => pane,
+    clearContent: () => { contentVisible = false }, restoreContent: () => { contentVisible = true } }
+}
+
+function browserToolsJourneyFake({ initial = 'unbound', names = [], boardAppears = true, loaded = true,
+  scopeReset = false, chooserVisible = true } = {}) {
+  let state = initial
+  let sidebarVisible = true
+  let projectName = ''
+  const events = []
+  const visible = (read, extra = {}) => ({
+    isVisible: async () => read(),
+    or(other) { return visible(async () => await this.isVisible() || await other.isVisible()) },
+    ...extra,
+  })
+  const button = (name, read, action) => visible(read, {
+    click: async () => {
+      assert.equal(await read(), true, `${name} must be visible before clicking`)
+      events.push(name)
+      action()
+    },
+  })
+  const selectProject = () => {
+    state = boardAppears ? 'board' : 'stalled'
+    if (scopeReset) sidebarVisible = false
+  }
+  const projectList = options => {
+    const matching = options?.name === undefined ? names : names.filter(name => name === options.name)
+    const first = () => ({
+      ...button(matching[0], () => state === 'bound' && loaded && matching.length > 0,
+        selectProject),
+      innerText: async () => matching[0],
+    })
+    return { first, count: async () => state === 'bound' && loaded ? matching.length : 0 }
+  }
+  const regions = kind => visible(() => state === kind, {
+    getByRole: (role, options = {}) => {
+      assert.equal(options.exact, true)
+      if (role === 'list') {
+        assert.equal(kind, 'bound')
+        assert.equal(options.name, 'Projects')
+        return { getByRole: (role, options) => {
+          assert.equal(role, 'button')
+          return projectList(options)
+        } }
+      }
+      if (role === 'textbox') {
+        assert.equal(kind, 'bound')
+        assert.equal(options.name, 'Project name')
+        return { fill: async value => {
+          assert.equal(state, 'bound')
+          projectName = value
+          events.push(`fill:${value}`)
+        } }
+      }
+      assert.equal(role, 'button')
+      assert.equal(options.name, kind === 'unbound' ? 'Create workspace' : 'Create project')
+      return button(options.name, () => state === kind, () => {
+        if (kind === 'bound') assert.equal(projectName, 'WL46 walk project')
+        if (kind === 'unbound') state = 'bound'
+        else selectProject()
+      })
+    },
+    getByText: (text, options) => {
+      assert.equal(text, 'No projects yet.')
+      assert.deepEqual(options, { exact: true })
+      return visible(() => state === 'bound' && loaded && names.length === 0)
+    },
+  })
+  const page = { getByRole: (role, options) => {
+    assert.equal(options.exact, true)
+    if (role === 'button') {
+      assert.equal(options.name, 'Open project or material')
+      return button(options.name, () => !sidebarVisible && chooserVisible, () => { sidebarVisible = true })
+    }
+    assert.equal(role, 'navigation')
+    assert.equal(options.name, 'Workspace controls')
+    return { getByRole: (role, options) => {
+      assert.equal(role, 'button')
+      assert.deepEqual(options, { name: 'Project', exact: true })
+      return button(options.name, () => !sidebarVisible, () => { sidebarVisible = true })
+    } }
+  } }
+  const sidebar = { isVisible: async () => sidebarVisible, page: () => page, getByRole: (role, options) => {
+    assert.equal(options.exact, true)
+    if (role === 'button') {
+      assert.equal(options.name, 'Open tools')
+      return button(options.name, () => sidebarVisible && state === 'board', () => assert.fail('setup must not activate Open tools'))
+    }
+    assert.equal(role, 'region')
+    assert.ok(['Create your workspace', 'Workspace projects'].includes(options.name))
+    return regions(options.name === 'Create your workspace' ? 'unbound' : 'bound')
+  } }
+  const assertions = locator => ({ toBeVisible: async () => {
+    assert.equal(await locator.isVisible(), true, 'expected browser journey control to be visible')
+  } })
+  assertions.poll = (read, options) => ({ toBe: async expected => {
+    assert.deepEqual(options, { timeout: 15_000 })
+    assert.equal(await read(), expected)
+  } })
+  return { sidebar, assertions, events }
+}
+
+test('WL46 unbound browser journey creates workspace then project once and reaches the board', async () => {
+  const fake = browserToolsJourneyFake()
+  await prepareBrowserToolsProject(fake.sidebar, fake.assertions)
+  assert.deepEqual(fake.events, ['Create workspace', 'fill:WL46 walk project', 'Create project'])
+  assert.equal(await fake.sidebar.getByRole('button', { name: 'Open tools', exact: true }).isVisible(), true)
+})
+
+test('WL48 unbound journey reopens Project once through the chooser after the scope reset', async () => {
+  const fake = browserToolsJourneyFake({ scopeReset: true })
+  await prepareBrowserToolsProject(fake.sidebar, fake.assertions)
+  assert.deepEqual(fake.events, ['Create workspace', 'fill:WL46 walk project', 'Create project', 'Open project or material'])
+  assert.equal(await fake.sidebar.getByRole('button', { name: 'Open tools', exact: true }).isVisible(), true)
+})
+
+test('WL48 listed project reopens through Workspace controls only when the sidebar closes', async () => {
+  for (const scopeReset of [true, false]) {
+    const fake = browserToolsJourneyFake({ initial: 'bound', names: ['Existing walk project'],
+      scopeReset, chooserVisible: false })
+    await prepareBrowserToolsProject(fake.sidebar, fake.assertions)
+    assert.deepEqual(fake.events, scopeReset ? ['Existing walk project', 'Project'] : ['Existing walk project'])
+    assert.equal(await fake.sidebar.getByRole('button', { name: 'Open tools', exact: true }).isVisible(), true)
+  }
+})
+
+test('WL48 missing Open tools after reopening fails without any further clicks', async () => {
+  for (const chooserVisible of [true, false]) {
+    const fake = browserToolsJourneyFake({ initial: 'bound', names: ['Existing walk project'],
+      scopeReset: true, chooserVisible, boardAppears: false })
+    await assert.rejects(prepareBrowserToolsProject(fake.sidebar, fake.assertions),
+      /Open tools setup: browser workspace journey did not reach the Open tools board/)
+    assert.deepEqual(fake.events, ['Existing walk project', chooserVisible ? 'Open project or material' : 'Project'])
+  }
+})
+
+test('WL46 bound browser journey opens the first listed project or creates only when empty', async () => {
+  for (const names of [[], ['Existing walk project', 'Second project']]) {
+    const fake = browserToolsJourneyFake({ initial: 'bound', names })
+    await prepareBrowserToolsProject(fake.sidebar, fake.assertions)
+    assert.deepEqual(fake.events, names.length ? [names[0]] : ['fill:WL46 walk project', 'Create project'])
+    assert.equal(await fake.sidebar.getByRole('button', { name: 'Open tools', exact: true }).isVisible(), true)
+  }
+  const board = browserToolsJourneyFake({ initial: 'board' })
+  await prepareBrowserToolsProject(board.sidebar, board.assertions)
+  assert.deepEqual(board.events, [])
+})
+
+test('WL46 missing Open tools fails setup clearly without retry or activation clicks', async () => {
+  for (const names of [[], ['Existing walk project']]) {
+    const fake = browserToolsJourneyFake({ initial: 'bound', names, boardAppears: false })
+    await assert.rejects(prepareBrowserToolsProject(fake.sidebar, fake.assertions),
+      /Open tools setup: browser workspace journey did not reach the Open tools board/)
+    assert.deepEqual(fake.events, names.length ? [names[0]] : ['fill:WL46 walk project', 'Create project'])
+  }
+  for (const options of [{ initial: 'unavailable' }, { initial: 'bound', loaded: false }]) {
+    const fake = browserToolsJourneyFake(options)
+    await assert.rejects(prepareBrowserToolsProject(fake.sidebar, fake.assertions), /Open tools setup:/)
+    assert.deepEqual(fake.events, [])
+  }
+})
+
+test('WL46 leaves Tools project provisioning to the browser journey after sidebar preparation', async () => {
+  const source = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
+  const runner = source.slice(source.indexOf('export async function runProbe(probe, runtime) {'), source.indexOf('\n// This reporter'))
+  const setup = runner.indexOf('for (const recipe of probe.setup.steps)')
+  const sidebar = runner.indexOf('probe = await prepareProjectSharedShell(probe, runtime)')
+  assert.ok(setup >= 0 && sidebar > setup)
+  const preparation = source.slice(source.indexOf('export async function prepareProjectSharedShell'),
+    source.indexOf('export function redactSolarDiagnostic'))
+  assert.ok(preparation.indexOf('await prepareBrowserToolsProject(project.region, assertions)')
+    > preparation.indexOf('await assertions(project.region).toBeVisible()'))
+  assert.doesNotMatch(source, /prepareProjectSharedShellSetup/)
+  for (const tab of ['tools', 'activity', 'project']) {
+    for (const surface of ['browser', 'cad']) {
+      for (const studioPresent of [true, false]) {
+        const probe = resolveProbe(buildFeatureMap().entries.find(row => row.id === `tab:project:${tab}`), 'ready')
+        const originalSetup = structuredClone(probe.setup)
+        const fake = projectSidebarFake({ surface, studioPresent })
+        const runtime = { page: fake.page, cleanup: [], evidence: { steps: [] } }
+        for (const recipe of probe.setup.steps.filter(row => row.kind === 'open-real-project')) {
+          fake.events.push(recipe.kind)
+          runtime.evidence.steps.push({ phase: 'setup', ...recipe })
+        }
+        const resolved = await prepareProjectSharedShell(probe, runtime, fake.assertions)
+        const sharedTools = tab === 'tools' && surface === 'browser' && studioPresent
+        assert.deepEqual(fake.events, [
+          ...(sharedTools ? ['Project'] : []),
+        ])
+        assert.deepEqual(runtime.evidence.steps, [])
+        assert.deepEqual(probe.setup, originalSetup)
+        assert.deepEqual(resolved.setup.steps, originalSetup.steps)
+      }
+    }
+  }
+})
+
+function baselinePanelFake({ exiting = false, staysVisible = false, waitError, clickError } = {}) {
+  let visible = true, clicks = 0, hiddenChecks = 0
+  const close = {
+    waitFor: async options => {
+      assert.deepEqual(options, { state: 'attached', timeout: 2000 })
+      if (waitError) throw waitError
+      if (exiting) {
+        visible = staysVisible
+        const error = new Error('close button did not resolve')
+        error.name = 'TimeoutError'
+        throw error
+      }
+    },
+    click: async () => {
+      clicks++
+      if (clickError) throw clickError
+      visible = staysVisible
+    },
+  }
+  class Locator {
+    constructor() { this._apiName = 'Locator' }
+    async isVisible() { return visible }
+    getByRole(role, options) {
+      assert.equal(role, 'button')
+      assert.deepEqual(options, { name: 'Close version history', exact: true })
+      return close
+    }
+    async _expect(expression) {
+      assert.equal(expression, 'to.be.hidden')
+      hiddenChecks++
+      assert.equal(visible, false, 'panel must be hidden')
+      return { matches: true, log: [] }
+    }
+  }
+  const panel = new Locator()
+  const spec = { role: 'dialog', name: 'Version history', close: 'Close version history' }
+  const page = { getByRole: (role, options) => {
+    assert.equal(role, spec.role)
+    assert.deepEqual(options, { name: spec.name, exact: true })
+    return panel
+  } }
+  return { page, spec, clicks: () => clicks, hiddenChecks: () => hiddenChecks }
+}
+
+test('WL43 exiting baseline panels skip only the unresolved close and still require hidden', async () => {
+  for (const staysVisible of [false, true]) {
+    const fake = baselinePanelFake({ exiting: true, staysVisible })
+    const evidence = {}
+    const closing = closeBaselinePanel(fake.page, fake.spec, evidence)
+    if (staysVisible) await assert.rejects(closing, /panel must be hidden/)
+    else await closing
+    assert.equal(fake.clicks(), 0)
+    assert.equal(fake.hiddenChecks(), 1)
+    assert.deepEqual(evidence, { baselineCloseSkipped: 'panel-exiting' })
+  }
+})
+
+test('WL43 normal baseline close clicks once and propagates non-resolution failures', async () => {
+  const fake = baselinePanelFake()
+  const evidence = {}
+  await closeBaselinePanel(fake.page, fake.spec, evidence)
+  assert.equal(fake.clicks(), 1)
+  assert.equal(fake.hiddenChecks(), 1)
+  assert.deepEqual(evidence, {})
+  for (const source of ['waitError', 'clickError']) {
+    const error = new Error(`${source} failure`)
+    if (source === 'clickError') error.name = 'TimeoutError'
+    const failed = baselinePanelFake({ [source]: error })
+    await assert.rejects(closeBaselinePanel(failed.page, failed.spec, evidence), actual => actual === error)
+    assert.equal(failed.clicks(), source === 'clickError' ? 1 : 0)
+    assert.equal(failed.hiddenChecks(), 0)
+    assert.deepEqual(evidence, {})
+  }
+})
+
+test('WL40 Tools starts from the board, opens once, observes content and restores sidebars', async () => {
+  const probe = resolveProbe(buildFeatureMap().entries.find(row => row.id === 'tab:project:tools'), 'ready')
+  for (const initial of ['none', 'Studio', 'Project']) {
+    const fake = projectSidebarFake({ initial })
+    const runtime = { page: fake.page, cleanup: [] }
+    const resolved = await prepareProjectSharedShell(probe, runtime, fake.assertions)
+    assert.equal(fake.open(), 'Project')
+    assert.equal(fake.pane(), false)
+    assert.deepEqual(fake.events, initial === 'Project' ? [] : ['Project'])
+    await assert.rejects(assertEffect(resolved, runtime, null, {}, fake.assertions), /content must be visible/)
+    const control = fake.page.getByRole(resolved.locator.scope.role, resolved.locator.scope)
+      .getByRole(resolved.locator.role, { name: resolved.locator.name, exact: true })
+    await control.click()
+    await assertEffect(resolved, runtime, control, {}, fake.assertions)
+    assert.equal(fake.events.filter(name => name === 'Open tools').length, 1)
+    for (const cleanup of runtime.cleanup.reverse()) await cleanup()
+    assert.equal(fake.open(), initial)
+    assert.equal(fake.pane(), false)
+    assert.deepEqual(fake.events, [
+      ...(initial === 'Project' ? [] : ['Project']), 'Open tools', 'Back to board', 'Close Project',
+      ...(initial === 'none' ? [] : [initial]),
+    ])
+  }
+})
+
+test('WL40 Tools rejects any existing pane before clicking or registering cleanup', async () => {
+  const probe = resolveProbe(buildFeatureMap().entries.find(row => row.id === 'tab:project:tools'), 'ready')
+  for (const initial of ['none', 'Studio', 'Project']) {
+    for (const pane of [true, 'material', 'tools']) {
+      const fake = projectSidebarFake({ initial, pane })
+      const runtime = { page: fake.page, cleanup: [] }
+      await assert.rejects(prepareProjectSharedShell(probe, runtime, fake.assertions),
+        /Open tools precondition: Project must start on the board with no pane open/)
+      assert.deepEqual(fake.events, [])
+      assert.deepEqual(runtime.cleanup, [])
+      assert.equal(fake.pane(), pane)
+    }
+  }
+})
+
+test('WL40 Tools rejects hidden pane or missing content after clicking and cleans up', async () => {
+  const probe = resolveProbe(buildFeatureMap().entries.find(row => row.id === 'tab:project:tools'), 'ready')
+  for (const initial of ['none', 'Studio', 'Project']) {
+    for (const toolsHidden of [true, false]) {
+      const fake = projectSidebarFake({ initial, toolsHidden })
+      const runtime = { page: fake.page, cleanup: [] }
+      const resolved = await prepareProjectSharedShell(probe, runtime, fake.assertions)
+      await fake.page.getByRole('region', resolved.locator.scope)
+        .getByRole('button', { name: 'Open tools', exact: true }).click()
+      if (!toolsHidden) fake.clearContent()
+      await assert.rejects(assertEffect(resolved, runtime, null, {}, fake.assertions), /content must be visible/)
+      // Restore board visibility independently of the failed Tools content oracle.
+      fake.restoreContent()
+      for (const cleanup of runtime.cleanup.reverse()) await cleanup()
+      assert.equal(fake.open(), initial)
+      assert.equal(fake.pane(), false)
+      assert.equal(fake.events.filter(name => name === 'Open tools').length, 1)
+      assert.equal(fake.events.filter(name => name === 'Back to board').length, 1)
+    }
+  }
+})
+
+test('WL36c shared sidebars observe each current pane state and restore only sidebar visibility', async () => {
+  const map = buildFeatureMap()
+  for (const tab of ['activity', 'project']) {
+    for (const initial of ['none', 'Studio', 'Project']) {
+      for (const pane of [false, true, 'material']) {
+        const fake = projectSidebarFake({ initial, pane })
+        const runtime = { page: fake.page, cleanup: [] }
+        const probe = resolveProbe(map.entries.find(row => row.id === `tab:project:${tab}`), 'ready')
+        const resolved = await prepareProjectSharedShell(probe, runtime, fake.assertions)
+        assert.equal(fake.open(), 'none')
+        assert.equal(fake.pane(), pane)
+        assert.deepEqual(fake.events, initial === 'none' ? [] : [`Close ${initial}`])
+        if (initial !== 'none') assert.equal(fake.events[0], `Close ${initial}`)
+        const control = fake.page.getByRole('navigation', resolved.locator.scope)
+          .getByRole(resolved.locator.role, { name: resolved.locator.name, exact: true })
+        const activations = fake.events.length
+        await control.click()
+        assert.deepEqual(fake.events.slice(activations), [tab === 'activity' ? 'Studio' : 'Project'])
+        await assertEffect(resolved, runtime, control, {}, fake.assertions)
+        for (const cleanup of runtime.cleanup.reverse()) await cleanup()
+        assert.equal(fake.open(), initial)
+        assert.equal(fake.pane(), pane)
+        assert.deepEqual(fake.events, [
+          ...(initial === 'none' ? [] : [`Close ${initial}`]),
+          tab === 'activity' ? 'Studio' : 'Project',
+          `Close ${tab === 'activity' ? 'Studio' : 'Project'}`,
+          ...(initial === 'none' ? [] : [initial]),
+        ])
+      }
+    }
+  }
+})
+
+test('WL36c shared sidebar oracle rejects a hidden region and a visible Project sidebar without content', async () => {
+  for (const tab of ['activity', 'project']) {
+    const fake = projectSidebarFake()
+    const runtime = { page: fake.page, cleanup: [] }
+    const probe = resolveProbe(buildFeatureMap().entries.find(row => row.id === `tab:project:${tab}`), 'ready')
+    const resolved = await prepareProjectSharedShell(probe, runtime, fake.assertions)
+    await assert.rejects(assertEffect(resolved, runtime, null, {}, fake.assertions), /content must be visible/)
+    await fake.page.getByRole('navigation', resolved.locator.scope)
+      .getByRole('button', { name: resolved.locator.name, exact: true }).click()
+    if (tab === 'project') {
+      fake.clearContent()
+      await assert.rejects(assertEffect(resolved, runtime, null, {}, fake.assertions), /content must be visible/)
+    }
+  }
+})
+
+test('WL36b runtime resolver leaves legacy Ribbon recipes untouched without Studio or browser surface', async () => {
+  const map = buildFeatureMap()
+  for (const options of [{ studioPresent: false }, { surface: 'cad' }]) {
+    for (const tab of ['activity', 'project', 'tools']) {
+      const fake = projectSidebarFake(options)
+      const runtime = { page: fake.page, cleanup: [] }
+      const probe = resolveProbe(map.entries.find(row => row.id === `tab:project:${tab}`), 'ready')
+      assert.equal(await prepareProjectSharedShell(probe, runtime, fake.assertions), probe)
+      assert.deepEqual(fake.events, [])
+      assert.deepEqual(runtime.cleanup, [])
+    }
+  }
+})
+
+test('WL36c cleanup restores original sidebars after an oracle failure without losing Material', async () => {
+  for (const tab of ['activity', 'project']) {
+    const fake = projectSidebarFake({ initial: tab === 'activity' ? 'Project' : 'Studio', pane: 'material' })
+    const runtime = { page: fake.page, cleanup: [] }
+    const probe = resolveProbe(buildFeatureMap().entries.find(row => row.id === `tab:project:${tab}`), 'ready')
+    const resolved = await prepareProjectSharedShell(probe, runtime, fake.assertions)
+    await assert.rejects(assertEffect(resolved, runtime, null, {}, fake.assertions))
+    for (const cleanup of runtime.cleanup.reverse()) await cleanup()
+    assert.equal(fake.open(), tab === 'activity' ? 'Project' : 'Studio')
+    assert.equal(fake.pane(), 'material')
+    assert.ok(fake.events.every(name => ['Studio', 'Project', 'Close Studio', 'Close Project'].includes(name)))
+  }
+})
 import { projectSolarResponse, projectSolarStep, switchProjectSolarForms, assertProjectSolarDrawing, observeProjectSolarResponses, setupRequestHeaders, observeProbeRequests } from './fixtures.mjs'
 import { inspectJob, inspectContext } from '../local/solarProjectWalk.mjs'
 import { expect as walkExpect, selectProjectSolarVersion, openProjectSolarTool,
@@ -21,8 +947,1020 @@ import { canonicalProjectVersion, proposalCatalogState, proposalFormValues, refu
 import { monitorStagingSolar, withStagingProject, stagingNetworkPath, stagingErrorCode,
   observeStagingNetwork, stagingNetworkFailure, stagingEvidenceStep,
   appendStagingRequest, appendStagingConsole } from '../walk-staging/projectSolarSteps.mjs'
-import { redactSolarDiagnostic, projectSolarRunDiagnostic, walkClick, walkFill, walkSelect, walkEnabled } from './fixtures.mjs'
+import { redactSolarDiagnostic, projectSolarRunDiagnostic, walkClick, walkFill, walkSelect, walkEnabled,
+  enterWorkspaceIfChooser, enterWorkspaceEnvironment, reloadAndReenter, openSolarCadProfile, STUDIO_RAIL_FEATURES, revealStudioRail, prepareStudioRail } from './fixtures.mjs'
 import { stagingDelivery, observeDeliveryHealth, createLocalAncestry, deliveryRepo, decideStagingDelivery } from './stagingDelivery.mjs'
+import { absenceNamePattern, resolveSurfaceControl, assertSurfaceState, setPhonePanel, readPhonePanel, assertPhonePanel } from './fixtures.mjs'
+import { setStudioDrawer, studioDrawerLocator, assertStudioDrawer, studioDrawerProbeLocator,
+  setToolRail, railExpandLauncher, assertRailExpandFamily } from './fixtures.mjs'
+import { ACCESSIBILITY_DIALOG_SCOPE, accessibilityDialogTargets, mergeAccessibilityMeasurements, addPersonaFragment,
+  prepareAccessibilityCapture, followAccessibilityCapture } from './fixtures.mjs'
+import { accessibility, mobileTouch, endUser, support, opsSre, redHat, performance as performanceLens } from './lenses/index.mjs'
+import { createWalkPersonaObservers, protectedStateDigest, prepareQcDevHistory } from './fixtures.mjs'
+import { qcDev, uiUxDev } from './lenses/index.mjs'
+import { PANEL_PERFORMANCE_BUDGETS, PANEL_PERFORMANCE_BUDGET_SOURCE, PANEL_PERFORMANCE_VIEWPORTS,
+  preparePanelPerformanceCapture } from './fixtures.mjs'
+import { createPerformanceMeasurementCapture } from './performanceMeasurements.mjs'
+import { unfamiliar } from './lenses/index.mjs'
+
+function chooserOpenFixture({ chooser = false, label = true, opens = true, focus = true, expanded = true,
+  observerFails = false } = {}) {
+  const clicks = [], focusChecks = [], navigations = []
+  let sidebar = false, focused = false
+  const forbidden = () => assert.fail('chooser discovery must not create, import, save, request a model or build')
+  const handle = { isConnected: true, isVisible: async () => true, dispose: async () => {},
+    getBoundingClientRect: () => ({ x: 10, y: 10, width: 100, height: 40 }), contains: () => false }
+  const navigationHandle = { ...handle }
+  const primary = {
+    isVisible: async () => chooser && label, count: async () => label ? 1 : 0,
+    elementHandle: async () => handle,
+    ariaSnapshot: async () => '- button "Open project or material"',
+    click: async () => {
+      assert.ok(chooser && label)
+      clicks.push('Open project or material'); chooser = false; sidebar = opens; focused = opens && focus
+    },
+  }
+  const choose = { click: async () => { clicks.push('Choose'); chooser = true; sidebar = false; focused = false } }
+  const project = { getAttribute: async (name) => {
+    assert.equal(name, 'aria-expanded'); return String(sidebar && expanded)
+  } }
+  const navigation = {
+    count: async () => 1, elementHandle: async () => navigationHandle,
+    ariaSnapshot: async () => '- navigation "Workspace controls"',
+    getByRole(role, { name, exact }) {
+      assert.equal(role, 'button'); assert.equal(exact, true)
+      if (name === 'Choose') return choose
+      if (name === 'Project') return project
+      return forbidden()
+    },
+  }
+  const page = {
+    request: { post: forbidden, put: forbidden, patch: forbidden, delete: forbidden, get: forbidden },
+    create: forbidden, import: forbidden, save: forbidden, submit: forbidden, build: forbidden,
+    keyboard: { press: forbidden },
+    goto: async (url) => { assert.equal(url, '/app?surface=cad&drawing=rooftop_demo'); navigations.push(url) },
+    evaluate: async (callback, argument) => {
+      if (observerFails) throw new Error('observer unavailable')
+      return runInNewContext(`(${callback.toString()})(argument)`, { argument,
+        window: { innerWidth: 1440, innerHeight: 1000,
+          getComputedStyle: () => ({ display: 'block', visibility: 'visible' }) },
+        document: { elementFromPoint: () => handle } })
+    },
+    getByRole(role, { name, exact }) {
+      assert.equal(exact, true)
+      if (role === 'button' && name === 'Open project or material') return primary
+      if (role === 'navigation' && name === 'Workspace controls') return navigation
+      if (role === 'heading' && name === 'What would you like to work on?') return { isVisible: async () => chooser }
+      if (role === 'region' && name === 'Project sidebar') return { isVisible: async () => sidebar }
+      if (role === 'button' && name === 'Close Project') return { focused: () => {
+        focusChecks.push('Close Project'); return focused
+      } }
+      return forbidden()
+    },
+  }
+  const assertions = (locator) => ({
+    toBeVisible: async () => assert.equal(await locator.isVisible(), true),
+    toBeHidden: async () => assert.equal(await locator.isVisible(), false),
+    toHaveCount: async (count) => assert.equal(await locator.count(), count),
+    toBeFocused: async () => assert.equal(locator.focused(), true),
+    toHaveAttribute: async (name, value) => assert.equal(await locator.getAttribute(name), value),
+  })
+  const evidence = { schema: 'leaf.walk-evidence.v1', viewport: 'desktop', steps: [] }
+  const probe = resolveProbe(buildFeatureMap().entries.find(row => row.id === 'control:chooser-open'), 'ready')
+  const runtime = { page, evidence, recipeAssertions: assertions, testInfo: { project: { name: 'desktop' }, annotations: [] },
+    runStep: async (_name, callback) => callback() }
+  return { probe, runtime, clicks, focusChecks, navigations }
+}
+
+test('WL32 chooser discovery uses labeled clicks, verifies focus and passes the real unfamiliar lens', async () => {
+  for (const chooser of [false, true]) {
+    const fake = chooserOpenFixture({ chooser })
+    await runProbe(fake.probe, fake.runtime)
+    assert.deepEqual(fake.clicks, [...(chooser ? [] : ['Choose']), 'Open project or material', 'Choose'])
+    assert.deepEqual(fake.focusChecks, ['Close Project'])
+    assert.deepEqual(fake.navigations, ['/app?surface=cad&drawing=rooftop_demo'])
+    assert.equal(fake.runtime.evidence.chooserTask.targetLabel, 'Open project or material')
+    assert.equal(fake.runtime.evidence.result.result, 'passed')
+    assert.equal(unfamiliar.evaluate(fake.runtime.evidence).status, 'pass')
+  }
+})
+
+test('WL32 missing chooser label preserves functional failure and unfamiliar UNKNOWN without guessed navigation', async () => {
+  const fake = chooserOpenFixture({ label: false })
+  await assert.rejects(runProbe(fake.probe, fake.runtime))
+  assert.deepEqual(fake.clicks, ['Choose', 'Choose'])
+  assert.deepEqual(fake.navigations, ['/app?surface=cad&drawing=rooftop_demo'])
+  assert.equal(fake.runtime.evidence.measurements.navigation.nextStepFound, false)
+  assert.equal(unfamiliar.evaluate(fake.runtime.evidence).status, 'unknown')
+  assert.ok(fake.runtime.evidence.failure)
+  assert.equal(fake.runtime.evidence.result, undefined)
+})
+
+test('WL32 hidden sidebar, lost focus or unexpanded Project preserves failure and unfamiliar FINDING', async () => {
+  for (const options of [{ opens: false }, { focus: false }, { expanded: false }]) {
+    const fake = chooserOpenFixture(options)
+    await assert.rejects(runProbe(fake.probe, fake.runtime))
+    assert.deepEqual(fake.clicks, ['Choose', 'Open project or material', 'Choose'])
+    assert.equal(fake.runtime.evidence.measurements.navigation.nextStepFound, false)
+    assert.equal(unfamiliar.evaluate(fake.runtime.evidence).status, 'finding')
+    assert.ok(fake.runtime.evidence.failure)
+  }
+})
+
+test('WL32 optional observer failures leave the chooser functional verdict intact', async () => {
+  const fake = chooserOpenFixture({ observerFails: true })
+  await runProbe(fake.probe, fake.runtime)
+  assert.equal(fake.runtime.evidence.result.result, 'passed')
+  assert.equal(unfamiliar.evaluate(fake.runtime.evidence).status, 'unknown')
+})
+
+function panelPerformanceFixture({ featureId = 'control:linked-services', state = 'ready', viewport = 'desktop',
+  url = 'https://walk.test/app', overlay = false, ready = true, visible = true, enabled = true,
+  closeVisible = true, closeEnabled = true, focusReached = true, createCapture } = {}) {
+  let time = 0, opened = false, actions = 0, captures = 0
+  const evidence = { schema: 'leaf.walk-evidence.v1', featureId, state, viewport,
+    result: { result: 'passed', featureId, state } }
+  const probe = { featureId, state }
+  const focus = { focused: () => focusReached }
+  const close = { visible: closeVisible, enabled: closeEnabled, focused: () => focusReached }
+  const spec = ACCESSIBILITY_DIALOG_SCOPE[featureId]
+  const panel = { get visible() { return opened }, getByRole(role, options) {
+    if (role === 'switch') {
+      assert.deepEqual(options, { name: 'Single-key shortcuts', exact: true })
+      return focus
+    }
+    assert.deepEqual([role, options], ['button', { name: featureId === 'action:bar-shortcuts' ? 'Close'
+      : featureId === 'control:version-history' ? 'Close version history' : spec.initialFocus.name, exact: true }])
+    return close
+  } }
+  const page = { url: () => url, evaluate: async () => ready, getByRole(role, options) {
+    if (options?.name === spec?.name && role === 'dialog') return panel
+    if (role === 'navigation') return { getByRole: () => ({
+      isVisible: async () => visible, isEnabled: async () => enabled,
+    }) }
+    return { count: async () => overlay ? 1 : 0, nth: () => ({ isVisible: async () => overlay }) }
+  } }
+  const assertions = target => ({
+    toBeVisible: async () => assert.equal(target.visible, true),
+    toBeEnabled: async () => assert.equal(target.enabled, true),
+    toBeFocused: async () => assert.equal(target.focused(), true),
+  })
+  return { evidence, probe, page, assertions,
+    locator: { isVisible: async () => visible, isEnabled: async () => enabled, focused: () => focusReached },
+    async prepare() {
+      return preparePanelPerformanceCapture({ page, probe, viewport, evidence, assertions,
+        locator: this.locator, createCapture: options => {
+          captures++
+          return createCapture ? createCapture(options) : createPerformanceMeasurementCapture({ ...options, now: () => time })
+        } })
+    },
+    async action() { actions++; opened = true },
+    at(value) { time = value },
+    counts: () => ({ actions, captures }),
+  }
+}
+
+test('WL28 frozen product budgets retain both viewport targets and only actual probe viewports', () => {
+  assert.equal(PANEL_PERFORMANCE_BUDGET_SOURCE, 'WL28-PANEL-PERFORMANCE-BUDGETS.md')
+  assert.deepEqual(PANEL_PERFORMANCE_VIEWPORTS, { desktop: { width: 1440, height: 1000 }, phone: { width: 390, height: 844 } })
+  assert.ok(Object.isFrozen(PANEL_PERFORMANCE_BUDGETS))
+  for (const budget of Object.values(PANEL_PERFORMANCE_BUDGETS)) {
+    assert.ok(Object.isFrozen(budget) && Object.isFrozen(budget.maxDurationMs) && Object.isFrozen(budget.viewports))
+    assert.deepEqual(budget, { source: PANEL_PERFORMANCE_BUDGET_SOURCE, state: 'ready', viewports: ['desktop'],
+      maxDurationMs: { desktop: 2000, phone: 3000 }, maxRequiredSteps: 1 })
+  }
+})
+
+test('WL28 each confirmed panel opening with one dispatched action feeds a passing real performance lens', async () => {
+  for (const featureId of Object.keys(PANEL_PERFORMANCE_BUDGETS)) {
+    const fake = panelPerformanceFixture({ featureId }), verdict = structuredClone(fake.evidence.result)
+    const capture = await fake.prepare()
+    fake.at(9000) // Preparation is outside the activation clock.
+    await capture.dispatch(() => fake.action())
+    fake.at(11000)
+    await capture.finish()
+    assert.equal(performanceLens.evaluate(fake.evidence).status, 'pass')
+    assert.deepEqual(fake.evidence.measurements.task, { durationMs: 2000, requiredSteps: 1 })
+    assert.deepEqual(fake.evidence.measurements.wait, { observed: false, progress: '', reason: '' })
+    assert.equal(fake.evidence.measurements.baseline.reference, `${PANEL_PERFORMANCE_BUDGET_SOURCE}:${featureId}@desktop`)
+    assert.equal(fake.evidence.measurements.reference, `walk:${featureId}[ready]@desktop`)
+    assert.deepEqual(fake.counts(), { actions: 1, captures: 1 })
+    assert.deepEqual(fake.evidence.result, verdict)
+  }
+})
+
+test('WL28 excess duration or a second actual dispatch yields a performance finding', async () => {
+  for (const [duration, steps] of [[2001, 1], [100, 2]]) {
+    const fake = panelPerformanceFixture(), capture = await fake.prepare()
+    for (let i = 0; i < steps; i++) await capture.dispatch(() => fake.action())
+    fake.at(duration)
+    await capture.finish()
+    assert.equal(performanceLens.evaluate(fake.evidence).status, 'finding')
+    assert.equal(fake.counts().actions, steps)
+    assert.equal(fake.evidence.measurements.task.requiredSteps, steps)
+    assert.equal(fake.evidence.result.result, 'passed')
+  }
+})
+
+test('WL28 unconfirmed Close or initial focus leaves performance UNKNOWN and preserves the functional verdict', async () => {
+  for (const options of [{ closeVisible: false }, { closeEnabled: false }, { focusReached: false }]) {
+    const fake = panelPerformanceFixture(options), verdict = structuredClone(fake.evidence.result)
+    const capture = await fake.prepare()
+    await capture.dispatch(() => fake.action())
+    await capture.finish()
+    assert.equal(fake.evidence.personaFragments, undefined)
+    assert.equal(performanceLens.evaluate(fake.evidence).status, 'unknown')
+    assert.deepEqual(fake.evidence.result, verdict)
+  }
+})
+
+test('WL28 failed-load, try, other probes, unused viewports and unmet preconditions create no capture', async () => {
+  for (const options of [{ state: 'failed-load' }, { url: 'https://walk.test/try' },
+    { featureId: 'control:session-details' }, { viewport: 'phone' }, { viewport: 'tablet' },
+    { overlay: true }, { visible: false }, { enabled: false }, { ready: false }]) {
+    const fake = panelPerformanceFixture(options)
+    assert.equal(await fake.prepare(), null)
+    assert.equal(fake.counts().captures, 0)
+    assert.equal(fake.evidence.personaFragments, undefined)
+  }
+})
+
+test('WL28 observer exceptions are value-free and never swallow activation failures', async () => {
+  for (const phase of ['create', 'start', 'requiredStep', 'finish']) {
+    const fake = panelPerformanceFixture({ createCapture(options) {
+      const fail = () => { throw new Error('private-performance-value') }
+      if (phase === 'create') return fail()
+      return { ...createPerformanceMeasurementCapture({ ...options, now: () => 0 }), [phase]: fail }
+    } })
+    const verdict = structuredClone(fake.evidence.result), capture = await fake.prepare()
+    if (capture) {
+      await capture.dispatch(() => fake.action())
+      await capture.finish()
+      assert.equal(fake.counts().actions, 1)
+    }
+    assert.equal(performanceLens.evaluate(fake.evidence).status, 'unknown')
+    assert.deepEqual(fake.evidence.result, verdict)
+    assert.deepEqual(fake.evidence.measurementDiagnostics,
+      [{ persona: 'performance', message: 'Optional persona observation failed' }])
+    assert.equal(JSON.stringify(fake.evidence).includes('private-performance-value'), false)
+  }
+  const fake = panelPerformanceFixture(), capture = await fake.prepare()
+  const failure = new Error('real activation failure')
+  await assert.rejects(capture.dispatch(() => { throw failure }), error => error === failure)
+  assert.equal(fake.evidence.personaFragments, undefined)
+})
+
+function observerWalkFixture(persona, overrides = {}) {
+  const probe = persona === 'end-user' ? { featureId: 'control:version-history', state: 'ready' }
+    : persona === 'red-hat' ? { featureId: 'action:engine-delete', state: 'ready', assertion: { target: 'engine-refusal' } }
+      : { featureId: 'action:bar-retry', state: 'retry-history' }
+  const evidence = { schema: 'leaf.walk-evidence.v1', featureId: probe.featureId, state: probe.state, viewport: 'desktop',
+    result: { result: 'passed', featureId: probe.featureId, state: probe.state } }
+  const observers = createWalkPersonaObservers({ probe, viewport: 'desktop', evidence, ...overrides })
+  return { probe, evidence, observers }
+}
+
+test('WL31 History uses the declared QC order and never supplies a missing result event', async () => {
+  for (const resultEvent of [true, false]) {
+    const fake = observerWalkFixture('end-user')
+    const verdict = structuredClone(fake.evidence.result)
+    await fake.observers.observe('qc-dev', 'start')
+    await fake.observers.observe('qc-dev', 'observeEvent', 'control:version-history')
+    if (resultEvent) await fake.observers.observe('qc-dev', 'observeEvent', 'version-history-open')
+    await fake.observers.observe('qc-dev', 'observeResult', 'version-history-open')
+    await fake.observers.finish()
+    const fragment = fake.evidence.personaFragments.find(({ persona }) => persona === 'qc-dev')
+    assert.deepEqual(fragment.measurements, {
+      reference: 'qc-dev:control:version-history[ready]@desktop', sequence: {
+        action: 'control:version-history', expectedResult: 'version-history-open',
+        expectedOrder: ['control:version-history', 'version-history-open'],
+        observedOrder: resultEvent ? ['control:version-history', 'version-history-open'] : ['control:version-history'],
+        observedResult: 'version-history-open',
+      },
+    })
+    assert.equal(qcDev.evaluate(fake.evidence).status, resultEvent ? 'pass' : 'finding')
+    assert.deepEqual(fake.evidence.result, verdict)
+  }
+})
+
+test('WL31 History failed private-drawing preconditions and failed opening cannot produce QC PASS', async () => {
+  for (const ready of [true, false]) {
+    const fake = observerWalkFixture('end-user')
+    const runtime = { evidence: { ...fake.evidence, drawingId: 'private' }, drawingId: 'private',
+      testInfo: { project: { name: 'desktop' } }, walkPersonaObservers: fake.observers,
+      page: { getByRole: role => role === 'region' ? { locator: () => ({ visible: ready }) }
+        : { visible: false } } }
+    const assertions = target => ({
+      toBeVisible: async () => assert.equal(target.visible, true),
+      toBeHidden: async () => assert.equal(target.visible, false),
+      toHaveAttribute: async (_key, value) => assert.equal(target.expanded, value),
+    })
+    await prepareQcDevHistory(fake.probe, runtime, { expanded: 'false' }, { visible: false }, assertions)
+    await fake.observers.observe('qc-dev', 'observeEvent', 'control:version-history')
+    // A failed functional opening never reaches the result assertion hook.
+    await fake.observers.finish()
+    assert.notEqual(qcDev.evaluate(fake.evidence).status, 'pass')
+    if (!ready) assert.equal(fake.evidence.personaFragments, undefined)
+  }
+})
+
+test('WL31 Retry records each actual recovery GET and retains duplicate order for the real lens', async () => {
+  for (const count of [1, 2]) {
+    const fake = observerWalkFixture('ops-sre')
+    const verdict = structuredClone(fake.evidence.result)
+    let handler, listener, released = false
+    const alert = { visible: true, countValue: 0 }, row = { visible: true, first() { return this } }
+    const runtime = { evidence: fake.evidence, drawingId: 'private', cleanup: [], walkPersonaObservers: fake.observers,
+      page: { route: async (_pattern, callback) => { handler = callback },
+        unroute: async () => { released = true },
+        getByRole: () => ({ getByRole: role => role === 'alert' ? alert : row }),
+        on: (_event, callback) => { assert.equal(released, true); listener = callback }, off: () => {} } }
+    await setupHistoryFault(fake.probe, runtime, faultAssertions, async () => handler({
+      request: () => ({ url: () => 'http://walk/api/drawings/private/versions?include_deltas=1' }),
+      abort: async () => {},
+    }))
+    await fake.observers.observe('qc-dev', 'observeEvent', 'action:bar-retry')
+    for (let index = 0; index < count; index++) listener({ method: () => 'GET',
+      url: () => 'http://walk/api/drawings/private/versions?include_deltas=1' })
+    listener({ method: () => 'POST', url: () => 'http://walk/api/drawings/private/versions' })
+    listener({ method: () => 'GET', url: () => 'http://walk/api/drawings/other/versions' })
+    const probe = { ...fake.probe, assertion: { target: 'retry:history' } }
+    if (count === 1) await assertEffect(probe, runtime, {}, {}, faultAssertions)
+    else await assert.rejects(assertEffect(probe, runtime, {}, {}, faultAssertions), assert.AssertionError)
+    await fake.observers.finish()
+    const fragment = fake.evidence.personaFragments.find(({ persona }) => persona === 'qc-dev')
+    assert.equal(fragment.measurements.reference, 'qc-dev:action:bar-retry[retry-history]@desktop')
+    assert.deepEqual(fragment.measurements.sequence.expectedOrder,
+      ['action:bar-retry', 'history-recovery-request', 'Versions restored'])
+    assert.deepEqual(fragment.measurements.sequence.observedOrder,
+      ['action:bar-retry', ...Array(count).fill('history-recovery-request'), ...(count === 1 ? ['Versions restored'] : [])])
+    assert.equal(qcDev.evaluate(fake.evidence).status, count === 1 ? 'pass' : 'unknown')
+    assert.deepEqual(fake.evidence.result, verdict)
+    for (const cleanup of runtime.cleanup.reverse()) await cleanup()
+  }
+})
+
+test('WL31 the QC lens evaluates a supplied duplicate trace without normalizing it', async () => {
+  const fake = observerWalkFixture('ops-sre')
+  const received = ['action:bar-retry', 'history-recovery-request', 'history-recovery-request', 'Versions restored']
+  await fake.observers.observe('qc-dev', 'start')
+  for (const event of received) await fake.observers.observe('qc-dev', 'observeEvent', event)
+  await fake.observers.observe('qc-dev', 'observeResult', 'Versions restored')
+  await fake.observers.finish()
+  assert.deepEqual(fake.evidence.measurements.sequence.observedOrder, received)
+  const evaluated = qcDev.evaluate(fake.evidence)
+  assert.equal(evaluated.status, 'finding')
+  assert.deepEqual(evaluated.results[0].finding.evidence.evidence['sequence.observedOrder'], received)
+})
+
+test('WL31 History emits a labelled automated UI/UX proxy without participant feedback', async () => {
+  const fake = observerWalkFixture('end-user')
+  const node = x => ({ isConnected: true, innerText: 'Version history', isVisible: async () => true,
+    dispose: async () => {}, getBoundingClientRect: () => ({ x, y: 0, width: 80, height: 40 }) })
+  const triggerNode = node(0), closeNode = node(100), panelNode = node(200)
+  const locator = handle => ({ count: async () => 1, elementHandle: async () => handle, visible: true })
+  const close = locator(closeNode), panel = { ...locator(panelNode), getByRole: () => close }
+  const trigger = { ...locator(triggerNode), getAttribute: async () => 'true' }
+  let samples = 0
+  const runtime = { walkPersonaObservers: fake.observers, testInfo: { project: { name: 'desktop' } },
+    page: { getByRole: () => panel, evaluate: async (callback, argument) => {
+      samples++
+      assert.deepEqual(argument.targets, [triggerNode, closeNode])
+      assert.equal(argument.completion, panelNode)
+      const descriptors = Object.getOwnPropertyDescriptors(globalThis)
+      Object.defineProperty(globalThis, 'window', { configurable: true, value: { innerWidth: 1440, innerHeight: 1000,
+        getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }) } })
+      Object.defineProperty(globalThis, 'document', { configurable: true,
+        value: { elementFromPoint: () => panelNode } })
+      try { return callback(argument) } finally {
+        for (const key of ['window', 'document']) {
+          if (descriptors[key]) Object.defineProperty(globalThis, key, descriptors[key])
+          else delete globalThis[key]
+        }
+      }
+    } } }
+  await assertEffect({ ...fake.probe, kind: 'control', assertion: { target: 'version-history' } },
+    runtime, trigger, { visible: false }, censusAssertions)
+  await fake.observers.finish()
+  assert.equal(samples, 1)
+  const fragment = fake.evidence.personaFragments.find(({ persona }) => persona === 'ui-ux-dev')
+  assert.equal(fragment.measurements.reference, 'ui-ux-dev:control:version-history[ready]@desktop')
+  assert.deepEqual(fragment.measurements.coverage,
+    { kind: 'automated-proxy', predicates: ['ui-ux-dev.completion-proxy'] })
+  assert.equal(Object.hasOwn(fragment.measurements, 'humanFeedback'), false)
+  assert.equal(Object.hasOwn(fake.evidence.measurements, 'humanFeedback'), false)
+  const result = uiUxDev.evaluate(fake.evidence)
+  assert.equal(result.status, 'unknown')
+  assert.equal(result.results.find(entry => entry.assertion_id === 'ui-ux-dev.completion-proxy').status, 'pass')
+})
+
+test('WL31 optional QC and UI/UX errors leave personas absent and preserve the functional verdict', async () => {
+  for (const persona of ['qc-dev', 'ui-ux-dev']) {
+    for (const late of [false, true]) {
+      const throwing = () => { throw new Error('private-observer-value') }
+      const fake = observerWalkFixture('end-user', persona === 'ui-ux-dev' ? { uiUx: throwing }
+        : { qcDev: late ? () => ({ start() {}, observeEvent: throwing }) : throwing })
+      const verdict = structuredClone(fake.evidence.result)
+      await fake.observers.observe('qc-dev', 'start')
+      await fake.observers.observe('qc-dev', 'observeEvent', 'control:version-history')
+      await fake.observers.observe('ui-ux-dev', 'completion', {})
+      await fake.observers.finish()
+      assert.equal(fake.evidence.personaFragments?.some(fragment => fragment.persona === persona) ?? false, false)
+      assert.deepEqual(fake.evidence.result, verdict)
+      assert.equal(JSON.stringify(fake.evidence).includes('private-observer-value'), false)
+    }
+  }
+})
+
+test('WL31 undeclared features, states and viewports create no QC or UI/UX capture', async () => {
+  const unexpected = () => assert.fail('out-of-scope observer created')
+  for (const [featureId, state, viewport] of [
+    ['control:version-history', 'ready', 'phone'], ['control:version-history', 'closed', 'desktop'],
+    ['action:bar-retry', 'retry-history', 'phone'], ['action:bar-retry', 'ready', 'desktop'],
+    ['control:linked-services', 'ready', 'desktop'],
+  ]) {
+    const evidence = {}, observers = createWalkPersonaObservers({ probe: { featureId, state }, viewport,
+      evidence, qcDev: unexpected, uiUx: unexpected })
+    await observers.observe('qc-dev', 'start')
+    await observers.observe('ui-ux-dev', 'completion', {})
+    await observers.finish()
+    assert.equal(evidence.personaFragments, undefined)
+    assert.equal(evidence.measurementDiagnostics, undefined)
+  }
+})
+
+function supportAlertFixture(reachable = true) {
+  const title = { innerText: 'Couldn’t load versions' }, reason = { innerText: 'History request failed' }
+  const retry = { innerText: 'Retry', contains: node => node === retry,
+    getBoundingClientRect: () => ({ x: 0, y: 0, width: 60, height: 44 }) }
+  for (const node of [title, reason, retry]) Object.assign(node, {
+    isConnected: true, isVisible: async () => true, dispose: async () => {},
+  })
+  const locator = node => ({ count: async () => 1, isVisible: async () => true,
+    elementHandle: async () => node, ariaSnapshot: async () => '- button "Retry"' })
+  const alert = { locator: selector => {
+    assert.ok(['.pane-fail-title', '.pane-fail-reason'].includes(selector))
+    return locator(selector === '.pane-fail-title' ? title : reason)
+  }, getByRole: (role, options) => {
+    assert.deepEqual([role, options], ['button', { name: 'Retry', exact: true }])
+    return locator(retry)
+  } }
+  const page = { evaluate: async (callback, argument) => {
+    const descriptors = Object.getOwnPropertyDescriptors(globalThis)
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: { innerWidth: 1024, innerHeight: 768 } })
+    Object.defineProperty(globalThis, 'document', { configurable: true,
+      value: { elementFromPoint: () => reachable ? retry : null } })
+    try { return callback(argument) } finally {
+      for (const key of ['window', 'document']) {
+        if (descriptors[key]) Object.defineProperty(globalThis, key, descriptors[key])
+        else delete globalThis[key]
+      }
+    }
+  } }
+  return { page, alert, errorObserved: true }
+}
+
+const protectedSnapshot = () => ({ geometry: { entities: [{ id: 1, x: 4 }] }, selection: 'none',
+  history: [{ disabled: true }], clipboard: { disabled: true }, versions: [{ v: 1 }], dispatches: [] })
+
+async function observedPersonaTrace(fake, persona, violating = false) {
+  const { observers } = fake
+  if (persona === 'end-user') {
+    if (violating) await observers.observe(persona, 'manualApply')
+    await observers.observe(persona, 'observeEffect', 'version-history-open')
+  } else if (persona === 'support') {
+    await observers.observe(persona, 'alert', supportAlertFixture(!violating))
+  } else if (persona === 'ops-sre') {
+    await observers.observe(persona, 'observeFailure', true)
+    await observers.observe(persona, 'observeWait', { observed: false, progress: '', reason: '' })
+    await observers.observe(persona, 'observeRecovery', {
+      action: 'Retry', outcome: 'Versions restored', outcomeVisible: !violating,
+    })
+  } else {
+    await observers.observe(persona, 'before', protectedSnapshot())
+    await observers.observe(persona, 'observeRefusal', { observed: true, visibleText: 'Nothing selected' })
+    const after = protectedSnapshot()
+    if (violating) after.dispatches.push({ type: 'edit' })
+    await observers.observe(persona, 'after', after)
+  }
+  await observers.finish()
+}
+
+for (const lens of [endUser, support, opsSre, redHat]) {
+  test(`${lens.name} walk facts compose a real passing or finding lens fragment`, async () => {
+    for (const violating of [false, true]) {
+      const fake = observerWalkFixture(lens.name)
+      const result = structuredClone(fake.evidence.result)
+      await observedPersonaTrace(fake, lens.name, violating)
+      assert.equal(lens.evaluate(fake.evidence).status, violating ? 'finding' : 'pass')
+      assert.deepEqual(fake.evidence.result, result)
+      assert.deepEqual(fake.evidence.measurementSources, [{ persona: lens.name,
+        reference: `${lens.name}:${fake.probe.featureId}[${fake.probe.state}]@desktop`, missing: false }])
+      assert.equal(fake.evidence.measurements.reference, `walk:${fake.probe.featureId}[${fake.probe.state}]@desktop`)
+    }
+  })
+
+  test(`${lens.name} absent observed fact stays UNKNOWN and keeps the functional result`, async () => {
+    const fake = observerWalkFixture(lens.name)
+    const result = structuredClone(fake.evidence.result)
+    if (lens === support) await fake.observers.observe(lens.name, 'alert', { errorObserved: false })
+    if (lens === opsSre) {
+      await fake.observers.observe(lens.name, 'observeFailure', false)
+      await fake.observers.observe(lens.name, 'observeWait', { observed: false, progress: '', reason: '' })
+    }
+    if (lens === redHat) {
+      await fake.observers.observe(lens.name, 'before', protectedSnapshot())
+      await fake.observers.observe(lens.name, 'observeRefusal', { observed: false, visibleText: '' })
+      await fake.observers.observe(lens.name, 'after', protectedSnapshot())
+    }
+    await fake.observers.finish()
+    assert.equal(lens.evaluate(fake.evidence).status, 'unknown')
+    assert.equal(fake.evidence.personaFragments, undefined)
+    assert.deepEqual(fake.evidence.result, result)
+  })
+
+  test(`${lens.name} observer exception is value-free and preserves other fragments and result`, async () => {
+    const throwing = () => { throw new Error('private-observer-value') }
+    const factories = { endUser: throwing, support: throwing, opsSre: throwing, redHat: throwing }
+    const key = { 'end-user': 'endUser', support: 'support', 'ops-sre': 'opsSre', 'red-hat': 'redHat' }[lens.name]
+    const fake = observerWalkFixture(lens.name, { [key]: factories[key] })
+    const bundleReference = `walk:${fake.probe.featureId}[${fake.probe.state}]@desktop`
+    addPersonaFragment(fake.evidence, { persona: 'accessibility', bundleReference,
+      measurements: { reference: 'accessibility:other[ready]@desktop', overlay: { modal: true } } })
+    const result = structuredClone(fake.evidence.result), fragments = structuredClone(fake.evidence.personaFragments)
+    await observedPersonaTrace(fake, lens.name)
+    assert.equal(lens.evaluate(fake.evidence).status, 'unknown')
+    assert.deepEqual(fake.evidence.result, result)
+    assert.deepEqual(fake.evidence.personaFragments, fragments)
+    assert.deepEqual(fake.evidence.measurementDiagnostics, [{ persona: lens.name, message: 'Optional persona observation failed' }])
+    assert.equal(JSON.stringify(fake.evidence).includes('private-observer-value'), false)
+  })
+}
+
+test('observer scopes exclude unrelated features, states, viewports and assertion targets', async () => {
+  const unexpected = () => assert.fail('out-of-scope observer created')
+  for (const [probe, viewport] of [
+    [{ featureId: 'control:other', state: 'ready' }, 'desktop'],
+    [{ featureId: 'control:version-history', state: 'failed-load' }, 'desktop'],
+    [{ featureId: 'control:version-history', state: 'ready' }, 'phone'],
+    [{ featureId: 'action:bar-retry', state: 'ready' }, 'desktop'],
+    [{ featureId: 'action:other', state: 'retry-history' }, 'phone'],
+    [{ featureId: 'action:engine-delete', state: 'ready', assertion: { target: 'engine:delete' } }, 'desktop'],
+    [{ featureId: 'action:engine-delete', state: 'ready', assertion: { target: 'engine-refusal' } }, 'tablet'],
+  ]) {
+    const evidence = {}, observers = createWalkPersonaObservers({ probe, viewport, evidence,
+      endUser: unexpected, support: unexpected, opsSre: unexpected, redHat: unexpected })
+    for (const persona of ['end-user', 'support', 'ops-sre', 'red-hat']) {
+      await observers.observe(persona, 'alert', { errorObserved: true })
+    }
+    await observers.finish()
+    assert.deepEqual(evidence, {})
+  }
+})
+
+test('protected-state digests cover every captured boundary without retaining snapshot values', () => {
+  const before = protectedSnapshot(), digest = protectedStateDigest(before)
+  assert.match(digest, /^[a-f0-9]{64}$/)
+  assert.equal(protectedStateDigest(structuredClone(before)), digest)
+  for (const key of ['geometry', 'selection', 'history', 'clipboard', 'versions', 'dispatches']) {
+    assert.notEqual(protectedStateDigest({ ...before, [key]: 'changed' }), digest)
+  }
+})
+
+test('version-history oracle supplies only the panel opening it actually confirmed', async () => {
+  for (const visible of [true, false]) {
+    const fake = observerWalkFixture('end-user')
+    const probe = { ...fake.probe, kind: 'control', assertion: { target: 'version-history' } }
+    const runtime = { page: { getByRole: () => ({ visible, getByRole: () => ({ visible: true }) }) },
+      testInfo: { project: { name: 'desktop' } }, walkPersonaObservers: fake.observers }
+    const locator = { getAttribute: async () => 'true' }
+    if (visible) await assertEffect(probe, runtime, locator, { visible: false }, censusAssertions)
+    else await assert.rejects(assertEffect(probe, runtime, locator, { visible: false }, censusAssertions))
+    await fake.observers.finish()
+    assert.equal(endUser.evaluate(fake.evidence).status, visible ? 'pass' : 'unknown')
+  }
+})
+
+test('history setup collects support before releasing the fault and oracle supplies the visible recovery', async () => {
+  const fake = observerWalkFixture('support'), alertFacts = supportAlertFixture()
+  const probe = { ...fake.probe, assertion: { target: 'retry:history' } }
+  let handler, requestObserver, released = false
+  const alert = { ...alertFacts.alert, visible: true, countValue: 0 }
+  const row = { visible: true, first() { return this } }
+  const runtime = { page: { ...alertFacts.page,
+    route: async (_pattern, callback) => { handler = callback },
+    unroute: async () => {
+      assert.equal(released, false)
+      released = true
+      // Both title and recovery were read while the alert was still present.
+      assert.equal(alert.visible, true)
+      alert.visible = false
+    },
+    getByRole: () => ({ getByRole: role => role === 'alert' ? alert : row }),
+    on: (_event, callback) => { requestObserver = callback }, off: async () => {},
+  }, drawingId: 'private', evidence: fake.evidence, cleanup: [], walkPersonaObservers: fake.observers }
+  const history = async () => handler({ request: () => ({ url: () => 'http://walk/api/drawings/private/versions?include_deltas=1' }),
+    abort: async () => {} })
+  await setupHistoryFault(probe, runtime, faultAssertions, history)
+  assert.equal(released, true)
+  requestObserver({ method: () => 'GET', url: () => 'http://walk/api/drawings/private/versions' })
+  await assertEffect(probe, runtime, {}, {}, faultAssertions)
+  await fake.observers.finish()
+  assert.equal(support.evaluate(fake.evidence).status, 'pass')
+  assert.equal(opsSre.evaluate(fake.evidence).status, 'pass')
+  assert.deepEqual(fake.evidence.measurements.wait, { observed: false, progress: '', reason: '' })
+  for (const cleanup of runtime.cleanup.reverse()) await cleanup()
+})
+
+test('refusal oracle supplies its visible text and complete after snapshot to the observer', async () => {
+  const fake = observerWalkFixture('red-hat'), { runtime } = refusalRuntime()
+  const probe = { ...fake.probe, assertion: { target: 'engine-refusal', refusal: 'expected refusal' } }
+  runtime.evidence = fake.evidence
+  runtime.walkPersonaObservers = fake.observers
+  const before = await captureEngineRefusal(runtime)
+  await fake.observers.observe('red-hat', 'before', before)
+  await assertEngineRefusal(probe, runtime, before, oracleAssertions)
+  await fake.observers.finish()
+  assert.equal(redHat.evaluate(fake.evidence).status, 'pass')
+  assert.equal(fake.evidence.measurements.refusal.protectedBefore, protectedStateDigest(before))
+  assert.equal(fake.evidence.measurements.refusal.protectedAfter, protectedStateDigest(fake.evidence.engineRefusal.after))
+  assert.equal(fake.evidence.measurements.failure.visibleText, 'expected refusal')
+})
+
+test('late observer exceptions drop only that persona after other facts were collected', async () => {
+  for (const phase of ['observeRecovery', 'finish']) {
+    const capture = { observeFailure() {}, observeWait() {},
+      observeRecovery() { if (phase === 'observeRecovery') throw new Error('private-late-value') },
+      finish() { throw new Error('private-late-value') } }
+    const fake = observerWalkFixture('support', { opsSre: () => capture })
+    await fake.observers.observe('ops-sre', 'observeFailure', true)
+    await fake.observers.observe('ops-sre', 'observeRecovery', { action: 'Retry', outcome: 'Versions restored', outcomeVisible: true })
+    await observedPersonaTrace(fake, 'support')
+    assert.equal(support.evaluate(fake.evidence).status, 'pass')
+    assert.equal(opsSre.evaluate(fake.evidence).status, 'unknown')
+    assert.equal(fake.evidence.result.result, 'passed')
+    assert.deepEqual(fake.evidence.measurementDiagnostics, [{ persona: 'ops-sre', message: 'Optional persona observation failed' }])
+    assert.equal(JSON.stringify(fake.evidence).includes('private-late-value'), false)
+  }
+})
+
+function accessibilityWalkFixture({ tabOutside = false, tabThrows = false, modal = false,
+  featureId = 'control:linked-services', state = 'ready', escapeClosed = true } = {}) {
+  const sessionDetails = featureId === 'control:session-details'
+  const shortcuts = featureId === 'action:bar-shortcuts'
+  const name = shortcuts ? 'Keyboard shortcuts' : sessionDetails ? 'Session details' : 'Linked services'
+  const calls = [], cleanup = [], child = {}, outside = {}
+  const opener = { isConnected: true, disposed: 0, async dispose() { this.disposed++ } }
+  const initial = { isConnected: true, disposed: 0, async dispose() { this.disposed++ } }
+  const root = { isConnected: true, visible: true, disposed: 0,
+    contains: node => node === child,
+    closest: () => null,
+    getAttribute: name => { assert.equal(name, 'aria-modal'); return String(modal) },
+    async isVisible() { return this.visible },
+    async dispose() { this.disposed++ } }
+  const document = { activeElement: initial }
+  const locatorFor = handle => ({ count: async () => 1, isVisible: async () => handle.visible !== false,
+    elementHandle: async () => handle,
+    ariaSnapshot: async () => `- dialog "${name}":\n  - button "Close"` })
+  const locator = locatorFor(opener), dialog = locatorFor(root)
+  const page = {
+    getByRole(role, options) {
+      if (shortcuts && role === 'navigation') {
+        assert.deepEqual(options, { name: 'Workspace controls', exact: true })
+        return { getByRole: () => locator }
+      }
+      if (shortcuts && role === 'switch') {
+        assert.deepEqual(options, { name: 'Single-key shortcuts', exact: true })
+        return locatorFor(initial)
+      }
+      if (role === 'button') {
+        assert.deepEqual(options, { name: sessionDetails ? 'Close details' : 'Close linked services panel', exact: true })
+        return locatorFor(initial)
+      }
+      assert.equal(role, 'dialog')
+      assert.deepEqual(options, { name, exact: true })
+      return dialog
+    },
+    evaluate: async (callback, argument) => {
+      const previous = Object.getOwnPropertyDescriptor(globalThis, 'document')
+      Object.defineProperty(globalThis, 'document', { value: document, configurable: true })
+      try { return callback(argument) } finally {
+        if (previous) Object.defineProperty(globalThis, 'document', previous)
+        else delete globalThis.document
+      }
+    },
+    keyboard: { press: async key => {
+      calls.push(key)
+      if (key === 'Tab') {
+        if (tabThrows) throw new Error('keyboard unavailable')
+        document.activeElement = tabOutside ? outside : child
+      } else {
+        assert.equal(key, 'Escape')
+        root.visible = !escapeClosed
+        document.activeElement = opener
+      }
+    } },
+  }
+  const probe = { featureId, state }
+  const mobile = { reference: 'mobile-touch:control:linked-services[ready]@phone',
+    input: { touch: true, coarsePointer: true }, viewport: { width: 390, height: 844 },
+    control: { reachable: true, clipped: false, rect: { x: 10, y: 20, width: 44, height: 44 } } }
+  const evidence = { schema: 'leaf.walk-evidence.v1', featureId: probe.featureId,
+    state: probe.state, viewport: 'desktop',
+    result: { result: 'passed', featureId: probe.featureId, state: probe.state } }
+  addPersonaFragment(evidence, { persona: 'mobile-touch', measurements: structuredClone(mobile),
+    bundleReference: `walk:${probe.featureId}[${probe.state}]@desktop` })
+  return { page, probe, locator, evidence, cleanup, calls, mobile, root, opener }
+}
+
+test('dialog follow-on feeds the real accessibility lens and preserves mobile measurements', async () => {
+  const fake = accessibilityWalkFixture()
+  const capture = await prepareAccessibilityCapture({ ...fake, viewport: 'desktop' })
+  await followAccessibilityCapture({ ...fake, capture })
+  assert.equal(accessibility.evaluate(fake.evidence).status, 'pass')
+  assert.equal(fake.evidence.measurements.reference, 'walk:control:linked-services[ready]@desktop')
+  for (const [key, value] of Object.entries(fake.mobile)) {
+    if (key !== 'reference') assert.deepEqual(fake.evidence.measurements[key], value)
+  }
+  assert.deepEqual(fake.evidence.measurementSources, [
+    { persona: 'mobile-touch', reference: fake.mobile.reference, missing: false },
+    { persona: 'accessibility', reference: 'accessibility:control:linked-services[ready]@desktop', missing: false },
+  ])
+  assert.deepEqual(fake.calls, ['Tab', 'Escape'])
+  for (const dispose of fake.cleanup) await dispose()
+  assert.ok(fake.root.disposed > 0)
+  assert.ok(fake.opener.disposed > 0)
+  assert.deepEqual(mergeAccessibilityMeasurements({ focus: { prior: 'retained' }, other: 7 },
+    { focus: { observed: false, absent: undefined }, overlay: { modal: false } }),
+  { focus: { prior: 'retained', observed: false }, other: 7, overlay: { modal: false } })
+})
+
+test('mobile-touch and accessibility fragments preserve both passing persona verdicts', async () => {
+  const fake = accessibilityWalkFixture()
+  fake.evidence.viewport = 'phone'
+  const capture = await prepareAccessibilityCapture({ ...fake, viewport: 'desktop' })
+  await followAccessibilityCapture({ ...fake, capture })
+  assert.equal(fake.evidence.measurements.reference, 'walk:control:linked-services[ready]@phone')
+  assert.equal(mobileTouch.evaluate(fake.evidence).status, 'pass')
+  assert.equal(accessibility.evaluate(fake.evidence).status, 'pass')
+  assert.deepEqual(fake.evidence.measurementConflicts, [])
+  for (const dispose of fake.cleanup) await dispose()
+})
+
+test('persona fragments remove disagreeing fields and replace earlier observations for one persona', () => {
+  const evidence = {}, bundleReference = 'walk:control:linked-services[ready]@phone'
+  const add = (persona, measurements) => addPersonaFragment(evidence, { persona, measurements, bundleReference })
+  add('mobile-touch', { reference: 'mobile-touch:probe[ready]@phone', control: { reachable: true, clipped: false } })
+  add('accessibility', { reference: 'accessibility:probe[ready]@phone', control: { reachable: false } })
+  assert.equal(Object.hasOwn(evidence.measurements.control, 'reachable'), false)
+  assert.equal(evidence.measurements.control.clipped, false)
+  assert.deepEqual(evidence.measurementConflicts, ['control.reachable'])
+  add('accessibility', { reference: 'accessibility:probe[ready]@phone', control: { reachable: true } })
+  assert.equal(evidence.personaFragments.length, 2)
+  assert.equal(evidence.measurements.control.reachable, true)
+  assert.deepEqual(evidence.measurementConflicts, [])
+})
+
+test('a credential-shaped fragment is dropped without losing the other persona or exposing values', () => {
+  const evidence = {}, bundleReference = 'walk:control:linked-services[ready]@phone'
+  const measurements = { reference: 'mobile-touch:probe[ready]@phone', control: { reachable: true } }
+  addPersonaFragment(evidence, { persona: 'mobile-touch', measurements, bundleReference })
+  const before = structuredClone(evidence.measurements)
+  assert.doesNotThrow(() => addPersonaFragment(evidence, { persona: 'accessibility', bundleReference,
+    measurements: { reference: 'accessibility:probe[ready]@phone', overlay: { name: ['Bea', 'rer synthetic-private-value'].join('') } } }))
+  assert.deepEqual(evidence.measurements, before)
+  assert.deepEqual(evidence.personaFragments, [{ persona: 'mobile-touch', measurements }])
+  assert.deepEqual(evidence.measurementSources,
+    [{ persona: 'mobile-touch', reference: measurements.reference, missing: false }])
+  assert.deepEqual(evidence.measurementDiagnostics, [{ message: 'Optional persona measurement fragment rejected' }])
+  assert.equal(JSON.stringify(evidence).includes('synthetic-private-value'), false)
+})
+
+test('a credential-shaped replacement preserves the previous fragment and its source', () => {
+  const evidence = {}, bundleReference = 'walk:control:linked-services[ready]@phone'
+  const measurements = { reference: 'mobile-touch:probe[ready]@phone', control: { reachable: true, clipped: false } }
+  addPersonaFragment(evidence, { persona: 'mobile-touch', measurements, bundleReference })
+  const fragments = evidence.personaFragments
+  const before = structuredClone(evidence)
+  assert.doesNotThrow(() => addPersonaFragment(evidence, { persona: 'mobile-touch', bundleReference,
+    measurements: { reference: 'mobile-touch:replacement[ready]@phone', control: { name: ['Bea', 'rer synthetic-private-value'].join('') } } }))
+  assert.equal(evidence.personaFragments, fragments)
+  assert.deepEqual(evidence.personaFragments, before.personaFragments)
+  assert.deepEqual(evidence.measurements, before.measurements)
+  assert.deepEqual(evidence.measurementSources, before.measurementSources)
+  assert.deepEqual(evidence.measurementConflicts, before.measurementConflicts)
+  assert.deepEqual(evidence.measurementDiagnostics, [{ message: 'Optional persona measurement fragment rejected' }])
+  assert.equal(JSON.stringify(evidence).includes('synthetic-private-value'), false)
+})
+
+test('a valid mobile-touch replacement updates the fragment, measurements, and source', () => {
+  const evidence = {}, bundleReference = 'walk:control:linked-services[ready]@phone'
+  addPersonaFragment(evidence, { persona: 'mobile-touch', bundleReference,
+    measurements: { reference: 'mobile-touch:probe[ready]@phone', control: { reachable: true, clipped: false } } })
+  const measurements = { reference: 'mobile-touch:replacement[ready]@phone', control: { reachable: false } }
+  assert.doesNotThrow(() => addPersonaFragment(evidence, { persona: 'mobile-touch', measurements, bundleReference }))
+  assert.deepEqual(evidence.personaFragments, [{ persona: 'mobile-touch', measurements }])
+  assert.deepEqual(evidence.measurements, { reference: bundleReference, control: { reachable: false } })
+  assert.deepEqual(evidence.measurementSources,
+    [{ persona: 'mobile-touch', reference: measurements.reference, missing: false }])
+  assert.deepEqual(evidence.measurementConflicts, [])
+  assert.equal(evidence.measurementDiagnostics, undefined)
+})
+
+test('a measured Tab leaving the dialog yields a real accessibility finding', async () => {
+  const fake = accessibilityWalkFixture({ tabOutside: true })
+  const capture = await prepareAccessibilityCapture({ ...fake, viewport: 'desktop' })
+  await followAccessibilityCapture({ ...fake, capture })
+  assert.equal(fake.evidence.measurements.focus.tabRemainsInside, false)
+  assert.equal(accessibility.evaluate(fake.evidence).status, 'finding')
+  for (const dispose of fake.cleanup) await dispose()
+})
+
+test('a failed follow-on retains only observed fields, disposes, and preserves the functional verdict', async () => {
+  const fake = accessibilityWalkFixture({ tabThrows: true })
+  const verdict = structuredClone(fake.evidence.result)
+  const capture = await prepareAccessibilityCapture({ ...fake, viewport: 'desktop' })
+  await followAccessibilityCapture({ ...fake, capture })
+  assert.equal(fake.evidence.measurements.overlay.role, 'dialog')
+  for (const key of ['tabRemainsInside', 'escapeClosed', 'returnTarget', 'actualReturnTarget']) {
+    assert.equal(Object.hasOwn(fake.evidence.measurements.focus, key), false)
+  }
+  assert.equal(accessibility.evaluate(fake.evidence).status, 'unknown')
+  assert.deepEqual(fake.evidence.result, verdict)
+  assert.ok(fake.evidence.accessibilityDiagnostics.some(item => item.phase === 'tab'))
+  assert.deepEqual(fake.calls, ['Tab'])
+  for (const dispose of fake.cleanup) await dispose()
+  assert.ok(fake.root.disposed > 0)
+  assert.ok(fake.opener.disposed > 0)
+})
+
+test('only the declared desktop dialog states can create an accessibility capture', async () => {
+  assert.deepEqual(Object.keys(ACCESSIBILITY_DIALOG_SCOPE), ['control:linked-services', 'control:claude-accounts',
+    'control:session-details', 'control:version-history', 'action:bar-shortcuts'])
+  for (const [featureId, name, states] of [
+    ['control:linked-services', 'Linked services', ['ready', 'failed-load']],
+    ['control:claude-accounts', 'Claude accounts', ['ready', 'failed-load']],
+    ['control:session-details', 'Session details', ['ready', 'failed-load']],
+    ['control:version-history', 'Version history', ['ready']],
+  ]) {
+    assert.deepEqual(ACCESSIBILITY_DIALOG_SCOPE[featureId].states, states)
+    for (const state of states) {
+      const locator = {}, dialog = {}, initial = {}
+      const focus = ACCESSIBILITY_DIALOG_SCOPE[featureId].initialFocus
+      const targets = await accessibilityDialogTargets({ viewport: 'desktop', probe: { featureId, state }, locator,
+        page: { getByRole: (role, options) => {
+          if (focus?.role && role === focus.role) {
+            assert.deepEqual(options, { name: focus.name, exact: true })
+            return initial
+          }
+          assert.deepEqual([role, options], ['dialog', { name, exact: true }])
+          return dialog
+        } } })
+      assert.deepEqual(targets, { openTarget: focus?.role ? { key: focus.key, locator: initial } : { key: featureId, locator },
+        returnTarget: { key: featureId, locator }, dialog })
+    }
+  }
+  for (const [viewport, featureId, state] of [
+    ['desktop', 'control:cost-panel', 'ready'], ['desktop', 'control:version-history', 'failed-load'],
+    ['desktop', 'action:bar-shortcuts', 'failed-load'],
+    ...Object.keys(ACCESSIBILITY_DIALOG_SCOPE).flatMap(id => ['ready', 'failed-load'].map(state => ['phone', id, state])),
+  ]) {
+    const fake = accessibilityWalkFixture()
+    const probe = { featureId, state }
+    assert.equal(await accessibilityDialogTargets({ ...fake, viewport, probe }), null)
+    assert.equal(await prepareAccessibilityCapture({ ...fake, viewport, probe,
+      createCapture: () => assert.fail('out-of-scope probe created capture') }), null)
+    assert.deepEqual(fake.cleanup, [])
+    assert.equal(Object.hasOwn(fake.evidence.measurements, 'overlay'), false)
+  }
+})
+
+test('each declared dialog capture receives its initial focus target and emits its modality expectation', async () => {
+  for (const [featureId, name, role, focusName, key, expectedModal = false] of [
+    ['control:linked-services', 'Linked services', 'button', 'Close linked services panel', 'close-linked-services'],
+    ['control:claude-accounts', 'Claude accounts', 'button', 'Close Claude account panel', 'close-claude-accounts'],
+    ['control:session-details', 'Session details', 'button', 'Close details', 'close-session-details'],
+    ['control:version-history', 'Version history', null, null, 'control:version-history'],
+    ['action:bar-shortcuts', 'Keyboard shortcuts', 'switch', 'Single-key shortcuts', 'single-key-shortcuts', true],
+  ]) for (const state of ACCESSIBILITY_DIALOG_SCOPE[featureId].states) {
+    const opener = { isVisible: async () => true }, initial = {}, dialog = {}, cleanup = []
+    const page = { getByRole(actualRole, options) {
+      if (actualRole === 'navigation') {
+        assert.deepEqual(options, { name: 'Workspace controls', exact: true })
+        return { getByRole: () => opener }
+      }
+      if (actualRole === 'dialog') {
+        assert.deepEqual(options, { name, exact: true })
+        return dialog
+      }
+      assert.deepEqual([actualRole, options], [role, { name: focusName, exact: true }])
+      return initial
+    }, keyboard: { press: async () => {} } }
+    const probe = { featureId, state }
+    const evidence = { schema: 'leaf.walk-evidence.v1', featureId, state, viewport: 'desktop' }
+    const capture = await prepareAccessibilityCapture({ page, probe, viewport: 'desktop', locator: opener,
+      evidence, cleanup, createCapture(options) {
+        assert.deepEqual(options.openTarget, { key, locator: role ? initial : opener })
+        assert.deepEqual(options.returnTarget, {
+          key: featureId === 'action:bar-shortcuts' ? 'workspace-project' : featureId, locator: opener })
+        assert.equal(options.dialog, dialog)
+        return { opened: async () => {}, afterTab: async () => {}, afterEscape: async () => {},
+          dispose: async () => {}, result: () => ({ reference: options.reference,
+            overlay: { role: 'dialog', name, modal: false } }) }
+      } })
+    assert.equal(ACCESSIBILITY_DIALOG_SCOPE[featureId].expectedModal, expectedModal)
+    assert.equal(ACCESSIBILITY_DIALOG_SCOPE[featureId].expectedEscapeClosed, true)
+    await followAccessibilityCapture({ capture, page, evidence })
+    assert.equal(evidence.personaFragments[0].measurements.overlay.expectedModal, expectedModal)
+    assert.equal(evidence.measurements.overlay.expectedModal, expectedModal)
+    assert.equal(evidence.measurements.overlay.modal, false)
+    assert.equal(accessibility.evaluate(evidence).status, 'unknown')
+    for (const dispose of cleanup) await dispose()
+  }
+})
+
+test('session-details desktop traces pass the real lens only when Escape closes the dialog', async () => {
+  for (const state of ['ready', 'failed-load']) for (const escapeClosed of [true, false]) {
+    const fake = accessibilityWalkFixture({ featureId: 'control:session-details', state, modal: false, escapeClosed })
+    const capture = await prepareAccessibilityCapture({ ...fake, viewport: 'desktop' })
+    await followAccessibilityCapture({ ...fake, capture })
+    const { overlay, focus } = fake.evidence.measurements
+    assert.deepEqual(overlay, { role: 'dialog', name: 'Session details', modal: false, expectedModal: false })
+    assert.equal(focus.openTarget, 'close-session-details')
+    assert.equal(focus.actualOpenTarget, 'close-session-details')
+    assert.equal(focus.tabRemainsInside, true)
+    assert.equal(focus.escapeClosed, escapeClosed)
+    assert.equal(focus.returnTarget, 'control:session-details')
+    assert.equal(focus.actualReturnTarget, 'control:session-details')
+    assert.equal(accessibility.evaluate(fake.evidence).status, escapeClosed ? 'pass' : 'finding')
+    assert.equal(fake.evidence.result.result, 'passed')
+    for (const dispose of fake.cleanup) await dispose()
+  }
+})
+
+test('session-details desktop reports a finding when the Details dialog is modal', async () => {
+  for (const state of ['ready', 'failed-load']) {
+    const fake = accessibilityWalkFixture({ featureId: 'control:session-details', state, modal: true, escapeClosed: true })
+    const capture = await prepareAccessibilityCapture({ ...fake, viewport: 'desktop' })
+    await followAccessibilityCapture({ ...fake, capture })
+    assert.equal(fake.evidence.measurements.overlay.modal, true)
+    assert.equal(fake.evidence.measurements.overlay.expectedModal, false)
+    assert.equal(accessibility.evaluate(fake.evidence).status, 'finding')
+    for (const dispose of fake.cleanup) await dispose()
+  }
+})
+
+test('WL60 U3 shortcut modal measurements agree with the scope and pass the real lens', async () => {
+  assert.equal(ACCESSIBILITY_DIALOG_SCOPE['action:bar-shortcuts'].expectedModal, true)
+  for (const modal of [true, false]) {
+    const fake = accessibilityWalkFixture({ featureId: 'action:bar-shortcuts', modal })
+    const capture = await prepareAccessibilityCapture({ ...fake, viewport: 'desktop' })
+    await followAccessibilityCapture({ ...fake, capture })
+    assert.deepEqual(fake.evidence.measurements.overlay, {
+      role: 'dialog', name: 'Keyboard shortcuts', modal, expectedModal: true,
+    })
+    assert.equal(accessibility.evaluate(fake.evidence).status, modal ? 'pass' : 'finding')
+    for (const dispose of fake.cleanup) await dispose()
+  }
+})
+
+test('shortcuts declares the switch for initial focus and the persistent opener for return focus', async () => {
+  for (const visible of [true, false]) {
+    const project = { isVisible: async () => visible }, tab = {}, toggle = {}
+    const page = { getByRole: (role, options) => {
+      if (role === 'switch') {
+        assert.deepEqual(options, { name: 'Single-key shortcuts', exact: true })
+        return toggle
+      }
+      if (role === 'navigation') {
+        assert.equal(options.name, 'Workspace controls')
+        return { getByRole: () => project }
+      }
+      if (role === 'tablist') return { getByRole: () => ({ first: () => tab }) }
+      assert.deepEqual([role, options], ['dialog', { name: 'Keyboard shortcuts', exact: true }])
+      return { dialog: true }
+    } }
+    const targets = await accessibilityDialogTargets({ page, viewport: 'desktop',
+      probe: { featureId: 'action:bar-shortcuts', state: 'ready' }, locator: {} })
+    assert.deepEqual(targets.openTarget, { key: 'single-key-shortcuts', locator: toggle })
+    assert.deepEqual(targets.returnTarget, { key: visible ? 'workspace-project' : 'workspace-profile-tab',
+      locator: visible ? project : tab })
+  }
+  const fake = accessibilityWalkFixture({ modal: false })
+  const capture = await prepareAccessibilityCapture({ ...fake, viewport: 'desktop' })
+  await followAccessibilityCapture({ ...fake, capture })
+  assert.equal(fake.evidence.measurements.overlay.modal, false)
+  assert.equal(fake.evidence.measurements.overlay.expectedModal, false)
+  assert.equal(accessibility.evaluate(fake.evidence).status, 'pass')
+  for (const dispose of fake.cleanup) await dispose()
+  const mismatch = accessibilityWalkFixture({ modal: true })
+  const mismatchedCapture = await prepareAccessibilityCapture({ ...mismatch, viewport: 'desktop' })
+  await followAccessibilityCapture({ ...mismatch, capture: mismatchedCapture })
+  assert.equal(mismatch.evidence.measurements.overlay.modal, true)
+  assert.equal(mismatch.evidence.measurements.overlay.expectedModal, false)
+  assert.equal(accessibility.evaluate(mismatch.evidence).status, 'finding')
+  for (const dispose of mismatch.cleanup) await dispose()
+})
 
 const stagingBase = 'https://platform-staging.leafdesign.ai'
 const stagingIds = [1, 2, 3, 4, 5, 6].map(id => `00000000-0000-4000-8000-${String(id).padStart(12, '0')}`)
@@ -326,7 +2264,7 @@ test('proposal review uses named bounded helpers for every fill, select and enab
   const body = reviewStagingProposal.toString()
   assert.doesNotMatch(body, /\.(?:fill|selectOption|isEnabled)\s*\(/)
   for (const call of ["walkEnabled(frame, 'Frame')", "walkEnabled(start, 'Run solve')",
-    "walkFill(form.getByLabel('Grant ref', { exact: true }), 'w1-staging', 'Grant ref')",
+    "walkFill(form.getByLabel('Grant ref', { exact: true }), process.env.LEAF_WALK_STAGING_GRANT_REF || 'staging-solver', 'Grant ref')",
     "walkFill(form.getByLabel('Request', { exact: true }), JSON.stringify(values.request), 'Request')",
     "walkFill(frame, values.frame, 'Frame')",
     "walkSelect(form.getByRole('combobox', { name: 'Phase', exact: true }), '0', 'Phase')"]) {
@@ -917,6 +2855,1312 @@ const stagingAssertions = value => ({
 })
 stagingAssertions.poll = callback => ({ toBe: async expected => assert.equal(await callback(), expected) })
 
+function workspaceEnvironmentFake({ present = true, entered = 'false', resume = true, controlsPresent = true,
+  offered = true, settles = true, profileVisible = true, profileSettles = true, chooserVisible = true,
+  legacyVisible = true, boardVisible = legacyVisible, returnVisible = legacyVisible,
+  legacySelected = 'false', status = 'available', statusAttached = true, statusLabel = 'Ready' } = {}) {
+  const events = []
+  let expanded = 'false', profile = 'cad', entryClicked = false
+  // Project's locator assertion delegates to _expect; environment polls read
+  // attributes directly and record the state observed after the action.
+  class Locator {
+    constructor(attributes) { this.attributes = attributes; this._apiName = 'Locator' }
+    async _expect(expression, options) {
+      assert.ok(['to.have.attribute', 'to.have.attribute.value'].includes(expression))
+      assert.equal(options.timeout, 15_000)
+      const name = options.expressionArg, expected = options.expectedText[0].string
+      const received = await this.getAttribute(name)
+      assert.equal(received, expected)
+      events.push(`assert:${name}=${expected}`)
+      return { matches: true, received, log: [] }
+    }
+    async getAttribute(name) {
+      const value = this.attributes()[name] ?? null
+      if ((name === 'data-entered' && entryClicked) || (name === 'data-profile' && profile === 'solar')) {
+        events.push(`assert:${name}=${value}`)
+        if (name === 'data-entered') entryClicked = false
+      }
+      return value
+    }
+  }
+  const project = Object.assign(new Locator(() => ({ 'aria-expanded': expanded })), {
+    count: async () => 1,
+    click: async options => {
+      assert.deepEqual(options, { timeout: 15_000 })
+      events.push('Close Project panel'); expanded = 'false'
+    },
+  })
+  const environment = Object.assign(new Locator(() => ({ 'data-entered': entered, 'data-profile': profile })), {
+    count: async () => present ? 1 : 0,
+    getByRole: (role, { name, exact }) => {
+      assert.equal(role, 'button')
+      assert.equal(exact, true)
+      assert.ok(['Continue workspace', 'Open project or material'].includes(name))
+      return { isVisible: async () => offered && name === (resume ? 'Continue workspace' : 'Open project or material'), click: async options => {
+        assert.deepEqual(options, { timeout: 15_000 })
+        assert.equal(name, resume ? 'Continue workspace' : 'Open project or material')
+        events.push(name); entered = settles ? 'true' : 'false'; entryClicked = true
+        if (!resume) expanded = 'true'
+      } }
+    },
+  })
+  const profileControl = {
+    count: async () => 1, isVisible: async () => controlsPresent && profileVisible,
+    inputValue: async () => profile,
+    locator: selector => {
+      assert.equal(selector, 'option')
+      return { evaluateAll: async read => read(['browser', 'lab', 'ops', 'cad', 'solar'].map(value => ({ value }))) }
+    },
+    selectOption: async option => {
+      if (typeof option === 'string') {
+        events.push(`Select profile:${option}`)
+        if (profileSettles) profile = option
+      } else {
+        assert.deepEqual(option, { label: 'Solar CAD' }); profile = 'solar'; events.push('Select Solar CAD')
+      }
+    },
+  }
+  const legacy = {
+    text: statusLabel,
+    isVisible: async () => legacyVisible,
+    click: async () => { events.push('Select legacy tab'); legacySelected = 'true' },
+    getAttribute: async name => { assert.equal(name, 'aria-selected'); return legacySelected },
+    locator: selector => {
+      assert.equal(selector, '[data-state]')
+      return { isVisible: async () => false, getAttribute: async name => {
+        assert.equal(name, 'data-state'); return statusAttached ? status : null
+      } }
+    },
+  }
+  const controls = { count: async () => controlsPresent ? 1 : 0, getByRole: (role, { name, exact }) => {
+    assert.equal(exact, true)
+    if (role === 'button' && name === 'Project') return project
+    assert.equal(role, 'combobox')
+    assert.equal(name, 'Workspace profile')
+    return profileControl
+  } }
+  const page = {
+    locator: selector => { assert.equal(selector, 'section.workspace-environment'); return environment },
+    getByRole: (role, options) => {
+      if (role === 'navigation') {
+        assert.deepEqual(options, { name: 'Workspace controls', exact: true }); return controls
+      }
+      if (role === 'tablist') {
+        assert.equal(options.name, 'Workspace profile')
+        if (controlsPresent && profileVisible) assert.equal(options.includeHidden, true)
+        return { getByRole: (role, options) => {
+          assert.equal(role, 'tab')
+          if (controlsPresent && profileVisible) assert.equal(options.includeHidden, true)
+          return legacy
+        } }
+      }
+      if (role === 'heading') return { isVisible: async () => {
+        if (options.name === 'What would you like to work on?') return chooserVisible
+        assert.equal(options.name, 'Project board'); return boardVisible
+      } }
+      if (role === 'button') {
+        assert.equal(options.name, 'Return to drawing')
+        return { isVisible: async () => returnVisible }
+      }
+      assert.equal(role, 'tab')
+      assert.deepEqual(options, { name: 'Solar CAD', exact: true })
+      return { click: async options => {
+        assert.deepEqual(options, { timeout: 15_000 }); events.push('Solar CAD')
+      } }
+    },
+  }
+  return { page, events, profileControl, legacy, environment,
+    setPresent: value => { present = value }, setEntered: value => { entered = value } }
+}
+
+const workspaceOracleAssertions = locator => ({
+  toBeVisible: async () => assert.equal(await locator.isVisible(), true),
+  toContainText: async expected => assert.ok(locator.text.includes(expected)),
+  toHaveValue: async expected => assert.equal(await locator.inputValue(), expected),
+  toHaveAttribute: async (name, expected) => assert.equal(await locator.getAttribute(name), expected),
+})
+
+test('WL23 runProbe helpers are exported functions for the production guarded paths', () => {
+  assert.equal(typeof absenceNamePattern, 'function')
+  assert.equal(typeof resolveSurfaceControl, 'function')
+})
+
+test('WL23 absence identity ignores unrelated buttons and catches moved or hidden actions', () => {
+  const buttons = Array.from({ length: 122 }, (_, index) => ({ name: `Other ${index}` }))
+  for (const name of ['New drawing', 'Print', 'Save version', 'Save [version].+']) {
+    const pattern = absenceNamePattern({ name })
+    const absent = rows => assert.equal(rows.filter(button => pattern.test(button.name)).length, 0)
+    absent(buttons)
+    absent([...buttons, { name: `Other ${name}` }, { name: `${name} other` }])
+    for (const hidden of [false, true]) for (const suffix of ['', ' (unavailable: No drawing)']) {
+      assert.throws(() => absent([...buttons, { name: name + suffix, hidden, scope: 'elsewhere' }]), assert.AssertionError)
+    }
+  }
+  const explicit = /^Only this refusal$/
+  assert.equal(absenceNamePattern({ name: 'Print', unavailableName: explicit }), explicit)
+  assert.equal(absenceNamePattern({ name: 'Print', unavailableName: 'Exact refusal' }), 'Exact refusal')
+  assert.equal(absenceNamePattern({ name: 'Print (unavailable: Old reason)' }).test('Print'), true)
+  assert.equal(absenceNamePattern({ name: /^refusal$/, availableName: 'Print' }).test('Print'), true)
+  for (const locator of [undefined, {}, { name: '' }, { name: '  ' }, { name: /Print/ },
+    { unavailableName: '' }, { unavailableName: null }]) {
+    assert.throws(() => absenceNamePattern(locator), /stable action name/)
+  }
+})
+
+const surfaceProbe = id => ({ kind: 'surface', sourceId: id, state: 'ready',
+  locator: { role: 'tab', name: id, exact: true,
+    scope: { role: 'tablist', name: 'Workspace profile', exact: true } } })
+
+test('WL23 modern surface control selects the requested profile id despite hidden legacy tabs', async () => {
+  for (const id of ['browser', 'lab', 'ops', 'cad', 'solar']) {
+    const fake = workspaceEnvironmentFake({ legacyVisible: false })
+    const resolved = await resolveSurfaceControl(fake.page, surfaceProbe(id))
+    assert.equal(resolved.locator, fake.profileControl)
+    await resolved.activate()
+    await resolved.assertSelected(workspaceOracleAssertions)
+    assert.equal(fake.events.includes(`Select profile:${id}`), true)
+    assert.equal(fake.events.includes('Select legacy tab'), false)
+    fake.profileControl.inputValue = async () => 'wrong'
+    await assert.rejects(resolved.assertSelected(workspaceOracleAssertions), assert.AssertionError)
+    fake.profileControl.inputValue = async () => id
+    fake.environment.getAttribute = async () => 'wrong'
+    await assert.rejects(resolved.assertSelected(workspaceOracleAssertions), assert.AssertionError)
+  }
+})
+
+test('WL23 absent or hidden modern strip preserves legacy tab activation and selection checks', async () => {
+  for (const options of [{ controlsPresent: false }, { profileVisible: false }]) {
+    const fake = workspaceEnvironmentFake(options)
+    const resolved = await resolveSurfaceControl(fake.page, surfaceProbe('solar'))
+    assert.equal(resolved.locator, fake.legacy)
+    await assert.rejects(resolved.assertSelected(workspaceOracleAssertions), assert.AssertionError)
+    await resolved.activate()
+    await resolved.assertSelected(workspaceOracleAssertions)
+    assert.deepEqual(fake.events, ['Select legacy tab'])
+  }
+})
+
+test('WL23 readiness requires the expected data-state on an attached hidden legacy badge', async () => {
+  for (const state of ['available', 'beta', 'paused']) {
+    for (const options of [{ status: state }, { status: 'wrong' }, { status: state, statusAttached: false }]) {
+      const fake = workspaceEnvironmentFake({ legacyVisible: false, ...options })
+      const resolved = await resolveSurfaceControl(fake.page, surfaceProbe('solar'))
+      const check = () => assertSurfaceState(resolved.legacy, state, workspaceOracleAssertions)
+      if (options.status === state && options.statusAttached !== false) await check()
+      else await assert.rejects(check(), assert.AssertionError)
+    }
+  }
+})
+
+test('WL23 surface effect checks the modern profile and hidden legacy readiness together', async () => {
+  for (const [id, state, label] of [['browser', 'available', 'Ready'], ['lab', 'available', 'Ready'],
+    ['ops', 'available', 'Ready'], ['cad', 'paused', 'Execution paused'], ['solar', 'beta', 'Beta']]) {
+    for (const statusAttached of [true, false]) {
+      const fake = workspaceEnvironmentFake({ legacyVisible: false, status: state, statusLabel: label, statusAttached })
+      const probe = { ...surfaceProbe(id), assertion: { target: `surface:${id}`, state, label } }
+      const resolved = await resolveSurfaceControl(fake.page, probe)
+      await resolved.activate()
+      const check = () => assertEffect(probe, { page: fake.page }, resolved.locator, {}, workspaceOracleAssertions)
+      if (statusAttached) await check()
+      else await assert.rejects(check(), assert.AssertionError)
+    }
+  }
+})
+
+test('WL23 Start requires the visible chooser and exited environment, or the legacy board and Return', async () => {
+  const probe = { assertion: { target: 'project-board' } }
+  for (const options of [{ entered: 'false' }, { entered: 'true' }, { chooserVisible: false },
+    { present: false }, { present: false, boardVisible: false }, { present: false, returnVisible: false }]) {
+    const fake = workspaceEnvironmentFake(options)
+    const check = () => assertEffect(probe, { page: fake.page }, null, {}, workspaceOracleAssertions)
+    if (options.entered === 'true' || options.chooserVisible === false || options.boardVisible === false || options.returnVisible === false) {
+      await assert.rejects(check(), assert.AssertionError)
+    } else await check()
+  }
+})
+
+test('WL23 project-board routes every environment and legacy check through injected assertions', async () => {
+  const probe = { assertion: { target: 'project-board' } }
+  for (const present of [true, false]) {
+    const calls = []
+    const environment = { count: async () => present ? 1 : 0 }
+    const page = {
+      locator: selector => {
+        assert.equal(selector, 'section.workspace-environment')
+        return environment
+      },
+      getByRole: (role, options) => ({ role, ...options }),
+    }
+    const assertions = locator => {
+      const call = { locator }
+      calls.push(call)
+      return {
+        toBeVisible: async () => { call.matcher = 'toBeVisible' },
+        toHaveAttribute: async (...args) => { call.matcher = 'toHaveAttribute'; call.args = args },
+      }
+    }
+    await assertEffect(probe, { page }, null, {}, assertions)
+    assert.deepEqual(calls, present ? [
+      { locator: { role: 'heading', name: 'What would you like to work on?', exact: true }, matcher: 'toBeVisible' },
+      { locator: environment, matcher: 'toHaveAttribute', args: ['data-entered', 'false'] },
+    ] : [
+      { locator: { role: 'heading', name: 'Project board', exact: true }, matcher: 'toBeVisible' },
+      { locator: { role: 'button', name: 'Return to drawing', exact: true }, matcher: 'toBeVisible' },
+    ])
+  }
+})
+
+function boundedWorkspacePoll({ passes = 4, beforePass = () => {} } = {}) {
+  const polls = []
+  const assertions = (value, message) => walkExpect(value, message)
+  assertions.poll = (read, options) => ({ toBe: async expected => {
+    const poll = { timeout: options.timeout, passes: 0 }
+    polls.push(poll)
+    for (let pass = 1; pass <= passes; pass++) {
+      poll.passes = pass
+      beforePass(pass, poll)
+      if (await read() === expected) return
+    }
+    throw new Error('fake poll reached its timeout')
+  } })
+  return { polls, assertions }
+}
+
+function studioRailFake({ visible = true, expanded = 'false' } = {}) {
+  const workspace = workspaceEnvironmentFake()
+  const events = workspace.events
+  class Locator {
+    constructor(kind) { this.kind = kind; this._apiName = 'Locator' }
+    async isVisible() { return visible }
+    async getAttribute(name) {
+      assert.equal(name, 'aria-expanded')
+      assert.equal(visible, true, 'absent Studio must not be read')
+      return expanded
+    }
+    async click() {
+      events.push('Studio click')
+      expanded = expanded === 'true' ? 'false' : 'true'
+    }
+    async _expect(expression, options) {
+      if (this.kind === 'button') {
+        assert.ok(['to.have.attribute', 'to.have.attribute.value'].includes(expression))
+        assert.equal(options.expressionArg, 'aria-expanded')
+        assert.equal(options.expectedText[0].string, 'true')
+        assert.equal(expanded, 'true')
+        events.push('Studio expanded wait')
+      } else {
+        assert.equal(expression, 'to.be.visible')
+        assert.equal(expanded, 'true')
+        events.push('Studio rail visible wait')
+      }
+      return { matches: true, received: expanded, log: [] }
+    }
+  }
+  const button = new Locator('button')
+  const page = {
+    getByRole: (role, options) => {
+      assert.equal(role, 'navigation')
+      assert.deepEqual(options, { name: 'Workspace controls', exact: true })
+      return { getByRole: (role, options) => {
+        assert.equal(role, 'button')
+        assert.deepEqual(options, { name: 'Studio', exact: true })
+        return button
+      } }
+    },
+    locator: selector => {
+      assert.equal(selector, '#project-workspace-activity')
+      return new Locator('rail')
+    },
+  }
+  return { page, events, workspace, expanded: () => expanded }
+}
+
+test('Studio rail reveal opens once and waits for the expanded button and visible rail', async () => {
+  const fake = studioRailFake()
+  assert.equal(await revealStudioRail(fake.page), true)
+  assert.deepEqual(fake.events, ['Studio click', 'Studio expanded wait', 'Studio rail visible wait'])
+})
+
+test('Studio rail reveal leaves an already open panel alone', async () => {
+  const fake = studioRailFake({ expanded: 'true' })
+  assert.equal(await revealStudioRail(fake.page), false)
+  assert.deepEqual(fake.events, [])
+})
+
+test('Studio rail reveal tolerates builds without Workspace controls', async () => {
+  const fake = studioRailFake({ visible: false })
+  assert.equal(await revealStudioRail(fake.page), false)
+  assert.deepEqual(fake.events, [])
+})
+
+function phonePanelFake({ modern = true, studio = false, content = true, drawer = 'none', ledger = true,
+  empty = false, skeleton = false, navStaysVisible = false, sidebarStaysVisible = false, result = true,
+  resultCount = result ? 1 : 0, resultInSidebar = true, resultVisible = true } = {}) {
+  const events = [], legacy = { Catalog: false, Jobs: false, Result: false, Plan: false }
+  let view = false, more = false
+  class Locator {
+    constructor(kind) { this.kind = kind; this._apiName = 'Locator' }
+    async isVisible() {
+      if (this.kind === 'Studio') return modern
+      if (this.kind === 'sidebar') return studio || sidebarStaysVisible
+      if (this.kind === 'ledger') return studio && content && ledger
+      if (this.kind === 'job content') return studio && content && (skeleton || empty || ledger)
+      if (this.kind === 'heading') return studio && content
+      if (this.kind === 'nav') return studio || navStaysVisible
+      if (this.kind === 'result') return studio && result && resultVisible
+      if (this.kind === 'Close Studio') return studio
+      if (this.kind === 'Entitlements') return drawer === 'plan' && content
+      if (this.kind === 'View panel') return view && more
+      if (this.kind === 'More panels') return view
+      return true
+    }
+    async count() { return this.kind === 'sidebar result' ? (resultInSidebar ? resultCount : 0) : 1 }
+    filter({ has }) {
+      assert.equal(this.kind, 'job rail')
+      assert.equal(has.kind, 'heading')
+      return this
+    }
+    locator(selector) {
+      if (this.kind === 'sidebar') {
+        assert.equal(selector, '.result-block')
+        return locator('sidebar result')
+      }
+      assert.equal(this.kind, 'job rail')
+      assert.equal(selector, '.rail-ske, .rail-empty, .rail-ledger > *')
+      return locator('job content')
+    }
+    first() { assert.equal(this.kind, 'job content'); return this }
+    async inputValue() { assert.equal(this.kind, 'Command bar'); return 'keep this command' }
+    async getAttribute(name) {
+      if (name === 'data-drawer') return drawer
+      if (this.kind === 'Studio') return String(studio)
+      if (this.kind === 'View tab') return String(view)
+      if (this.kind === 'More panels') return String(more)
+      return String(legacy[this.kind])
+    }
+    async click() {
+      events.push(this.kind)
+      if (this.kind === 'Studio') studio = !studio
+      else if (this.kind === 'Close Studio') studio = false
+      else if (this.kind === 'View tab') view = true
+      else if (this.kind === 'More panels') more = !more
+      else if (this.kind === 'properties') {
+        assert.ok(view && more, 'properties must be disclosed before activation')
+        drawer = drawer === 'plan' ? 'none' : 'plan'
+      } else legacy[this.kind] = !legacy[this.kind]
+    }
+    async _expect(expression, options) {
+      if (expression === 'to.be.visible') assert.equal(await this.isVisible(), true)
+      else {
+        assert.ok(['to.have.attribute', 'to.have.attribute.value'].includes(expression))
+        assert.equal(await this.getAttribute(options.expressionArg), options.expectedText[0].string)
+      }
+      return { matches: true, log: [] }
+    }
+  }
+  const locator = kind => new Locator(kind)
+  const toolbar = { getByRole: (role, options) => {
+    if (role === 'group') { assert.equal(options.name, 'View'); return locator('View panel') }
+    assert.ok(['More panels', 'properties'].includes(options.name))
+    return locator(options.name)
+  } }
+  const page = {
+    getByRole: (role, options) => {
+      if (role === 'navigation') {
+        assert.equal(options.name, 'Workspace controls')
+        return { getByRole: (role, options) => { assert.equal(options.name, 'Studio'); return locator('Studio') } }
+      }
+      if (role === 'toolbar') { assert.equal(options.name, 'Drafting tools'); return toolbar }
+      if (role === 'combobox') { assert.equal(options.name, 'Command bar'); return locator('Command bar') }
+      if (role === 'tablist') {
+        assert.equal(options.name, 'Ribbon')
+        return { getByRole: (role, options) => { assert.equal(options.name, 'View'); return locator('View tab') } }
+      }
+      if (role === 'group') {
+        assert.equal(options.name, 'Workspace panels')
+        assert.equal(modern, false, 'modern panels must never use legacy tabs')
+        return { getByRole: (role, options) => locator(options.name) }
+      }
+      if (role === 'region') {
+        assert.ok(['Studio sidebar', 'Entitlements'].includes(options.name))
+        return locator(options.name === 'Studio sidebar' ? 'sidebar' : 'Entitlements')
+      }
+      if (role === 'button') { assert.equal(options.name, 'Close Studio'); return locator('Close Studio') }
+      assert.equal(role, 'heading'); assert.match('Job monitor', options.name)
+      return locator('heading')
+    },
+    locator: selector => {
+      assert.ok(['.app', '#project-workspace-activity', 'aside.rail .rail-ledger', 'aside.nav', 'aside.rail', '.result-block'].includes(selector))
+      if (selector === '.result-block') return locator('result')
+      return locator(selector === '.app' ? 'app' : selector === '#project-workspace-activity' ? 'sidebar'
+        : selector === 'aside.nav' ? 'nav' : selector === 'aside.rail' ? 'job rail' : 'ledger')
+    },
+  }
+  const assertions = value => ({
+    toHaveAttribute: async (name, expected) => assert.equal(await value.getAttribute(name), expected),
+    toBeVisible: async () => assert.equal(await value.isVisible(), true),
+    toBeHidden: async () => assert.equal(await value.isVisible(), false),
+    toHaveValue: async expected => assert.equal(await value.inputValue(), expected),
+    toHaveCount: async expected => assert.equal(await value.count(), expected),
+  })
+  return { page, events, assertions }
+}
+
+test('phone Jobs transitions are idempotent and require visible Studio content', async () => {
+  const fake = phonePanelFake()
+  for (const open of [true, true, false, false]) {
+    await setPhonePanel(fake.page, 'Jobs', open, fake.assertions)
+    assert.equal(await readPhonePanel(fake.page, 'Jobs'), open)
+  }
+  assert.deepEqual(fake.events, ['Studio', 'Close Studio'])
+})
+
+test('expanded Studio with hidden content cannot prove Jobs open', async () => {
+  const fake = phonePanelFake({ studio: true, content: false })
+  assert.equal(await readPhonePanel(fake.page, 'Jobs'), false)
+  await assert.rejects(assertPhonePanel(fake.page, 'Jobs', true, fake.assertions), assert.AssertionError)
+  await assert.rejects(setPhonePanel(fake.page, 'Jobs', true, fake.assertions), assert.AssertionError)
+  assert.deepEqual(fake.events, [])
+})
+
+test('desktop Studio Jobs opens once, requires its ledger, and closes through Close Studio', async () => {
+  const fake = phonePanelFake()
+  for (const open of [true, true, false, false]) await setStudioDrawer(fake.page, 'jobs', open, fake.assertions)
+  await assertStudioDrawer(fake.page, 'jobs', false, fake.assertions)
+  assert.deepEqual(fake.events, ['Studio', 'Close Studio'])
+  const missing = phonePanelFake({ ledger: false })
+  await assert.rejects(setStudioDrawer(missing.page, 'jobs', true, missing.assertions), assert.AssertionError)
+  assert.deepEqual(missing.events, ['Studio'])
+  const stuck = phonePanelFake({ studio: true, sidebarStaysVisible: true })
+  await assert.rejects(setStudioDrawer(stuck.page, 'jobs', false, stuck.assertions), assert.AssertionError)
+  assert.deepEqual(stuck.events, ['Close Studio'])
+})
+
+test('phone Studio Result opens once, requires the result block, and proves the sidebar closed', async () => {
+  const fake = phonePanelFake()
+  for (const open of [true, true, false, false]) await setStudioDrawer(fake.page, 'result', open, fake.assertions)
+  assert.deepEqual(fake.events, ['Studio', 'Close Studio'])
+  const missing = phonePanelFake({ result: false })
+  await assert.rejects(setStudioDrawer(missing.page, 'result', true, missing.assertions), assert.AssertionError)
+  assert.deepEqual(missing.events, ['Studio'])
+  await assert.rejects(assertStudioDrawer(missing.page, 'result', true, missing.assertions), assert.AssertionError)
+  const stuck = phonePanelFake({ studio: true, sidebarStaysVisible: true })
+  await assert.rejects(setStudioDrawer(stuck.page, 'result', false, stuck.assertions), assert.AssertionError)
+  assert.deepEqual(stuck.events, ['Close Studio'])
+})
+
+test('WL43 phone Result accepts one empty block inside the visible expanded Studio sidebar', async () => {
+  const fake = phonePanelFake({ studio: true, resultVisible: false })
+  assert.equal(await fake.page.locator('.result-block').isVisible(), false)
+  await assertStudioDrawer(fake.page, 'result', true, fake.assertions)
+  for (const options of [{ resultCount: 0 }, { resultCount: 2 }, { resultInSidebar: false },
+    { studio: false }]) {
+    const invalid = phonePanelFake({ studio: true, resultVisible: false, ...options })
+    await assert.rejects(assertStudioDrawer(invalid.page, 'result', true, invalid.assertions), assert.AssertionError)
+  }
+})
+
+test('phone Result setup, activation and effect use Studio and require a result block', async () => {
+  const entry = buildFeatureMap().entries.find(entry => entry.id === 'drawer:result')
+  for (const state of ['closed', 'open']) {
+    const fake = phonePanelFake()
+    const probe = resolveProbe(entry, state)
+    const runtime = { page: fake.page, testInfo: { project: { name: 'phone' } } }
+    await setupStep(probe, runtime, probe.setup.steps.at(-1), fake.assertions)
+    const locator = await studioDrawerProbeLocator(fake.page, probe)
+    assert.equal(locator.kind, state === 'open' ? 'Close Studio' : 'Studio')
+    await locator.click()
+    await assertEffect(probe, runtime, locator, {}, fake.assertions)
+    assert.deepEqual(fake.events, state === 'open' ? ['Studio', 'Close Studio'] : ['Studio'])
+  }
+  const hidden = phonePanelFake({ result: false })
+  const probe = resolveProbe(entry, 'closed')
+  const locator = await studioDrawerProbeLocator(hidden.page, probe)
+  await locator.click()
+  await assert.rejects(assertEffect(probe, { page: hidden.page, testInfo: { project: { name: 'phone' } } },
+    locator, {}, hidden.assertions), assert.AssertionError)
+})
+
+test('Result retains legacy Workspace panels without Studio on phone and with Studio on desktop', async () => {
+  const entry = buildFeatureMap().entries.find(entry => entry.id === 'drawer:result')
+  for (const viewport of ['phone', 'desktop']) {
+    const legacy = phonePanelFake({ modern: false })
+    const modern = phonePanelFake()
+    const page = viewport === 'phone' ? legacy.page : { ...modern.page, getByRole: (role, options) =>
+      (role === 'group' ? legacy.page : modern.page).getByRole(role, options) }
+    const runtime = { page, testInfo: { project: { name: viewport } } }
+    for (const state of ['closed', 'open']) {
+      const probe = resolveProbe(entry, state)
+      await setupStep(probe, runtime, probe.setup.steps.at(-1), legacy.assertions)
+      if (viewport === 'phone') assert.equal(await studioDrawerProbeLocator(page, probe), null)
+      assert.equal(probe.locator.name, 'Result')
+      assert.equal(probe.locator.scope.name, 'Workspace panels')
+      const locator = page.getByRole(probe.locator.scope.role, probe.locator.scope)
+        .getByRole(probe.locator.role, probe.locator)
+      await locator.click()
+      await assertEffect(probe, runtime, locator, {}, legacy.assertions)
+    }
+    assert.deepEqual(legacy.events, ['Result', 'Result'])
+    assert.deepEqual(modern.events, [])
+  }
+})
+
+test('Studio drawer recipes resolve Jobs and nav on both viewports without using legacy controls', async () => {
+  const map = buildFeatureMap()
+  for (const viewport of ['desktop', 'phone']) {
+    for (const drawer of ['jobs', 'nav']) {
+      for (const state of ['closed', 'open']) {
+        const fake = phonePanelFake({ studio: state === 'open' })
+        const probe = resolveProbe(map.entries.find(entry => entry.id === `drawer:${drawer}`), state)
+        const locator = await studioDrawerProbeLocator(fake.page, probe)
+        assert.equal(locator.kind, state === 'open' ? 'Close Studio' : 'Studio')
+        await locator.click()
+        const runtime = { page: fake.page, testInfo: { project: { name: viewport } } }
+        await assertEffect(probe, runtime, locator, {}, fake.assertions)
+        assert.deepEqual(fake.events, [state === 'open' ? 'Close Studio' : 'Studio'])
+        assert.equal(await studioDrawerLocator(fake.page, drawer).isVisible(), state === 'closed')
+      }
+    }
+  }
+})
+
+test('phone nav open closes via Close Studio and rejects a still-visible nav', async () => {
+  const map = buildFeatureMap()
+  const probe = resolveProbe(map.entries.find(entry => entry.id === 'drawer:nav'), 'open')
+  for (const navStaysVisible of [false, true]) {
+    const fake = phonePanelFake({ studio: true, navStaysVisible })
+    const locator = await studioDrawerProbeLocator(fake.page, probe)
+    assert.equal(locator.kind, 'Close Studio')
+    await locator.click()
+    const check = () => assertEffect(probe, { page: fake.page, testInfo: { project: { name: 'phone' } } },
+      locator, {}, fake.assertions)
+    if (navStaysVisible) await assert.rejects(check(), assert.AssertionError)
+    else await check()
+    assert.deepEqual(fake.events, ['Close Studio'])
+  }
+})
+
+test('phone drawer activation descriptions identify the substituted Studio control only when present', async () => {
+  const map = buildFeatureMap()
+  for (const drawer of ['nav', 'jobs']) {
+    for (const state of ['open', 'closed']) {
+      const probe = resolveProbe(map.entries.find(entry => entry.id === `drawer:${drawer}`), state)
+      for (const modern of [true, false]) {
+        const fake = phonePanelFake({ modern, studio: state === 'open' })
+        const activationOptions = {}
+        const locator = await studioDrawerProbeLocator(fake.page, probe, locatorDescription => {
+          activationOptions.locatorDescription = locatorDescription
+        })
+        if (modern) {
+          assert.deepEqual(activationOptions, {
+            locatorDescription: { role: 'button', name: state === 'open' ? 'Close Studio' : 'Studio' },
+          })
+          assert.equal(locator.kind, activationOptions.locatorDescription.name)
+        } else {
+          assert.equal(locator, null)
+          assert.deepEqual(activationOptions, {})
+        }
+      }
+    }
+  }
+})
+
+test('WL45 phone drawer close receipts keep clipping diagnostics separate from persona measurements', async () => {
+  const map = buildFeatureMap()
+  for (const drawer of ['jobs', 'nav', 'result']) {
+    const fake = phonePanelFake({ studio: true })
+    const probe = resolveProbe(map.entries.find(entry => entry.id === `drawer:${drawer}`), 'open')
+    let locatorDescription, detached = false
+    const locator = await studioDrawerProbeLocator(fake.page, probe, description => { locatorDescription = description })
+    const parent = { tagName: 'SECTION', getAttribute: name => name === 'aria-label' ? 'Studio controls' : null }
+    const handle = { get isConnected() { return !detached }, contains: () => false,
+      boundingBox: async () => ({ x: 270.9, y: 365, width: 106, height: 44 }) }
+    locator.elementHandle = async () => handle
+    const page = { evaluate: async (callback, argument) => structuredClone(runInNewContext(`(${callback.toString()})(argument)`, {
+      argument, navigator: { maxTouchPoints: 1 },
+      window: { innerWidth: 390, innerHeight: 844, devicePixelRatio: 3, matchMedia: () => ({ matches: true }),
+        getComputedStyle: () => ({ borderTopLeftRadius: '8px', borderTopRightRadius: '8px',
+          borderBottomLeftRadius: '8px', borderBottomRightRadius: '8px' }) },
+      document: { elementFromPoint: (x, y) => x === 323.9 && y === 387 ? handle : parent },
+    })) }
+    const reference = `mobile-touch:drawer:${drawer}[open]@phone`
+    const bundleReference = `walk:drawer:${drawer}[open]@phone`
+    const evidence = { schema: 'leaf.walk-evidence.v1', featureId: probe.featureId, state: 'open', viewport: 'phone',
+      result: { result: 'passed' } }
+    const verdict = evidence.result
+    await activateWithMobileTouchMeasurements({ page, locator, probe, viewport: 'phone', locatorDescription, evidence,
+      addFragment: (persona, measurements) => addPersonaFragment(evidence, { persona, measurements, bundleReference }),
+      activate: async () => { await locator.click(); detached = true } })
+    await assertEffect(probe, { page: fake.page, testInfo: { project: { name: 'phone' } } }, locator, {}, fake.assertions)
+    assert.equal(evidence.result, verdict)
+    assert.equal(evidence.measurements.target.name, 'Close Studio')
+    assert.equal(evidence.measurements.control.reachable, true)
+    assert.equal(evidence.measurements.control.clipped, true)
+    assert.deepEqual(evidence.touchClipDiagnostic[reference].corners.map(corner => corner.hit),
+      Array.from({ length: 4 }, () => ({ tag: 'section', id: '', classes: [], role: '', name: 'Studio controls' })))
+    assert.deepEqual(evidence.touchClipDiagnostic[reference].corners.map(corner => corner.parentPath),
+      Array.from({ length: 4 }, () => []))
+    assert.deepEqual(evidence.touchClipDiagnostic[reference].borderRadiusPx,
+      { topLeft: 8, topRight: 8, bottomLeft: 8, bottomRight: 8 })
+    assert.equal(Object.hasOwn(evidence.measurements, 'diagnostic'), false)
+    assert.equal(Object.hasOwn(evidence.personaFragments[0].measurements, 'diagnostic'), false)
+    assert.equal(mobileTouch.evaluate(evidence).status, 'finding')
+  }
+})
+
+test('phone drawer:none resolves a visible Close Studio target while preserving keyboard Escape', async () => {
+  const map = buildFeatureMap()
+  const fake = phonePanelFake({ studio: true })
+  const probe = resolveProbe(map.entries.find(entry => entry.id === 'drawer:none'), 'drawer-open')
+  assert.equal(probe.locator.trigger, 'keyboard')
+  assert.equal(probe.locator.key, 'Escape')
+  assert.equal((await studioDrawerProbeLocator(fake.page, probe)).kind, 'Close Studio')
+  const legacy = phonePanelFake({ modern: false })
+  assert.equal(await studioDrawerProbeLocator(legacy.page, probe), null)
+})
+
+test('desktop Studio setup routes both job and tool rail states through the shared host', async () => {
+  for (const setter of [setJobRail, setToolRail]) {
+    const fake = phonePanelFake()
+    for (const open of [true, true, false, false]) await setter(fake.page, open, false, fake.assertions)
+    assert.deepEqual(fake.events, ['Studio', 'Close Studio'])
+  }
+})
+
+test('Studio Jobs uses visible empty or loading content when the ledger has no rows', async () => {
+  for (const state of [{ empty: true }, { skeleton: true }]) {
+    const fake = phonePanelFake({ studio: true, ledger: false, ...state })
+    assert.equal(await fake.page.locator('aside.rail .rail-ledger').isVisible(), false)
+    await assertStudioDrawer(fake.page, 'jobs', true, fake.assertions)
+    await assertPhonePanel(fake.page, 'Jobs', true, fake.assertions)
+    assert.equal(await readPhonePanel(fake.page, 'Jobs'), true)
+  }
+})
+
+test('Studio Jobs heading without visible loading, empty or row content cannot prove open', async () => {
+  const fake = phonePanelFake({ studio: true, ledger: false })
+  assert.equal(await fake.page.getByRole('heading', { name: /^Job monitor/ }).isVisible(), true)
+  await assert.rejects(assertStudioDrawer(fake.page, 'jobs', true, fake.assertions), assert.AssertionError)
+  await assert.rejects(assertPhonePanel(fake.page, 'Jobs', true, fake.assertions), assert.AssertionError)
+  assert.equal(await readPhonePanel(fake.page, 'Jobs'), false)
+})
+
+test('legacy tool rail keeps desktop spine and phone Tool rail transitions without Studio', async () => {
+  for (const phone of [false, true]) {
+    let open = false
+    const events = []
+    const button = collapse => ({
+      isVisible: async () => collapse ? open : phone || !open,
+      getAttribute: async () => String(open),
+      click: async () => { events.push(collapse ? 'Collapse the tool rail to a spine' : 'Tool rail'); open = !open },
+    })
+    const page = {
+      getByRole: (role, options) => {
+        if (role === 'navigation') return { getByRole: () => ({ isVisible: async () => false }) }
+        if (role === 'toolbar') return { isVisible: async () => true }
+        assert.equal(role, 'button')
+        assert.ok(['Tool rail', 'Collapse the tool rail to a spine'].includes(options.name))
+        return button(options.name !== 'Tool rail')
+      },
+      locator: selector => {
+        assert.equal(selector, 'aside.nav')
+        return { isVisible: async () => open, getAttribute: async () => String(!open) }
+      },
+    }
+    const assertions = value => ({
+      toBeVisible: async () => assert.equal(await value.isVisible(), true),
+      toBeHidden: async () => assert.equal(await value.isVisible(), false),
+      toHaveAttribute: async (name, expected) => assert.equal(await value.getAttribute(name), expected),
+    })
+    for (const desired of [false, true, false, false]) await setToolRail(page, desired, phone, assertions)
+    assert.deepEqual(events, ['Tool rail', phone ? 'Tool rail' : 'Collapse the tool rail to a spine'])
+  }
+})
+
+test('rail-expand selects the first visible family launcher and requires its contents after activation', async () => {
+  for (const contents of [true, false]) {
+    const fake = phonePanelFake()
+    const registry = { isVisible: async () => false }
+    const launchers = [false, true, true].map((visible, index) => ({
+      isVisible: async () => visible,
+      getAttribute: async () => `Open Family ${index} in the tool rail (2 tools)`,
+      click: async () => { fake.events.push(`Family ${index}`); await setStudioDrawer(fake.page, 'nav', true, fake.assertions) },
+    }))
+    const page = { ...fake.page,
+      getByRole: (role, options) => {
+        if (options.name instanceof RegExp && options.name.test('Open Family 1 in the tool rail (2 tools)')) {
+          return { count: async () => launchers.length, nth: index => launchers[index] }
+        }
+        if (options.name instanceof RegExp && options.name.test('Family 1 · 2 hide')) return { family: 'Family 1' }
+        return fake.page.getByRole(role, options)
+      },
+      locator: selector => {
+        if (selector !== 'aside.nav .section') return fake.page.locator(selector)
+        return { filter: ({ has }) => {
+          assert.equal(has.family, 'Family 1')
+          return { locator: selector => {
+            assert.equal(selector, '.section-body')
+            return { isVisible: async () => contents }
+          } }
+        } }
+      },
+    }
+    const probe = { featureId: 'action:rail-expand', state: 'ready', assertion: { target: 'drawer:nav', value: 'nav' } }
+    const runtime = { page, testInfo: { project: { name: 'desktop' } } }
+    let locatorDescription
+    const launcher = await railExpandLauncher(probe, runtime, registry, description => { locatorDescription = description })
+    assert.equal(launcher, launchers[1])
+    assert.deepEqual(locatorDescription, { role: 'button', name: 'Open Family 1 in the tool rail (2 tools)' })
+    await launcher.click()
+    assert.deepEqual(fake.events, ['Family 1', 'Studio'])
+    assert.equal(runtime.railExpandFamily, 'Family 1')
+    if (contents) await assertEffect(probe, runtime, launcher, {}, fake.assertions)
+    else await assert.rejects(assertEffect(probe, runtime, launcher, {}, fake.assertions), assert.AssertionError)
+    if (contents) await assertRailExpandFamily(page, 'Family 1', fake.assertions)
+  }
+})
+
+test('rail-expand keeps the missing-control failure when neither registry control nor launcher is visible', async () => {
+  const fake = phonePanelFake()
+  const registry = { isVisible: async () => false }
+  const runtime = { page: { getByRole: () => ({ count: async () => 0 }) },
+    testInfo: { project: { name: 'desktop' } } }
+  const probe = { featureId: 'action:rail-expand', state: 'ready' }
+  assert.equal(await railExpandLauncher(probe, runtime, registry), null)
+  await assert.rejects(fake.assertions(registry).toBeVisible(), assert.AssertionError)
+  assert.equal(runtime.railExpandFamily, undefined)
+  assert.equal(await railExpandLauncher(probe, runtime, { isVisible: async () => true }), null)
+  runtime.testInfo.project.name = 'phone'
+  assert.equal(await railExpandLauncher(probe, runtime, registry), null)
+})
+
+test('phone Plan discloses View and More panels and checks both content and drawer state', async () => {
+  const fake = phonePanelFake()
+  for (const open of [true, true, false, false]) {
+    await setPhonePanel(fake.page, 'Plan', open, fake.assertions)
+    assert.equal(await readPhonePanel(fake.page, 'Plan'), open)
+  }
+  assert.deepEqual(fake.events, ['View tab', 'More panels', 'properties', 'properties'])
+  const hidden = phonePanelFake({ drawer: 'plan', content: false })
+  await assert.rejects(assertPhonePanel(hidden.page, 'Plan', true, hidden.assertions), assert.AssertionError)
+  await assert.rejects(assertPhonePanel(hidden.page, 'Plan', false, hidden.assertions), assert.AssertionError)
+  const stale = phonePanelFake()
+  const wrongDrawer = { ...stale.page, locator: () => ({ getAttribute: async () => 'plan' }) }
+  await assert.rejects(assertPhonePanel(wrongDrawer, 'Plan', false, stale.assertions), assert.AssertionError)
+  const visible = phonePanelFake({ drawer: 'plan' })
+  const wrongOpenDrawer = { ...visible.page, locator: () => ({ getAttribute: async () => 'none' }) }
+  await assert.rejects(assertPhonePanel(wrongOpenDrawer, 'Plan', true, visible.assertions), assert.AssertionError)
+})
+
+test('phone panels retain legacy Workspace panels transitions without Workspace controls', async () => {
+  const fake = phonePanelFake({ modern: false })
+  for (const panel of ['Jobs', 'Plan']) {
+    for (const open of [true, true, false, false]) {
+      await setPhonePanel(fake.page, panel, open, fake.assertions)
+      assert.equal(await readPhonePanel(fake.page, panel), open)
+    }
+  }
+  assert.deepEqual(fake.events, ['Jobs', 'Jobs', 'Plan', 'Plan'])
+})
+
+test('desktop drawer-state uses Studio for Jobs and retains the legacy Plan button', async () => {
+  const legacy = phonePanelFake({ modern: false })
+  const modern = phonePanelFake()
+  const page = { ...modern.page, getByRole: (role, options) =>
+    (role === 'group' ? legacy.page : modern.page).getByRole(role, options) }
+  const runtime = { page, evidence: {}, testInfo: { project: { name: 'desktop' } } }
+  for (const name of ['Jobs', 'Plan']) {
+    for (const open of [true, true, false, false]) {
+      await setupStep({ featureId: `drawer:${name.toLowerCase()}` }, runtime,
+        { kind: 'drawer-state', name, open }, legacy.assertions)
+    }
+  }
+  assert.deepEqual(legacy.events, ['Plan', 'Plan'])
+  assert.deepEqual(modern.events, ['Studio', 'Close Studio'])
+})
+
+test('phone Properties oracle requires the inverse Plan content state on modern builds', async () => {
+  for (const visible of [false, true]) {
+    const fake = phonePanelFake({ drawer: visible ? 'none' : 'plan' })
+    const runtime = { page: fake.page, evidence: {}, testInfo: { project: { name: 'phone' } } }
+    const probe = { assertion: { target: 'properties-pane' } }
+    await assertEffect(probe, runtime, null, { visible }, fake.assertions)
+    assert.deepEqual(runtime.evidence.phoneProperties, { host: 'Plan', before: visible, after: !visible })
+    await assert.rejects(assertEffect(probe, runtime, null, { visible: !visible }, fake.assertions), assert.AssertionError)
+  }
+})
+
+test('phone Escape drawer recipes use Studio and oracles require both panels closed', async () => {
+  for (const featureId of ['drawer:none', 'action:bar-escape']) {
+    const fake = phonePanelFake()
+    const runtime = { page: fake.page, evidence: {}, testInfo: { project: { name: 'phone' } } }
+    const probe = { featureId, state: 'drawer-open', assertion: {
+      target: featureId === 'drawer:none' ? 'drawer:none' : 'escape:drawer', value: 'none',
+    } }
+    await setupStep(probe, runtime, { kind: 'drawer-state', name: 'Catalog', open: true }, fake.assertions)
+    assert.deepEqual(fake.events, ['Studio'])
+    const before = { command: 'keep this command' }
+    await assert.rejects(assertEffect(probe, runtime, null, before, fake.assertions), assert.AssertionError)
+    await setPhonePanel(fake.page, 'Jobs', false, fake.assertions)
+    await assertEffect(probe, runtime, null, before, fake.assertions)
+    await setPhonePanel(fake.page, 'Plan', true, fake.assertions)
+    await assert.rejects(assertEffect(probe, runtime, null, before, fake.assertions), assert.AssertionError)
+    await setPhonePanel(fake.page, 'Plan', false, fake.assertions)
+    if (featureId === 'action:bar-escape') {
+      await assert.rejects(assertEffect(probe, runtime, null, { command: 'changed' }, fake.assertions), assert.AssertionError)
+    }
+  }
+})
+
+test('Studio rail features contain exactly the four rail controls', () => {
+  assert.equal(Object.isFrozen(STUDIO_RAIL_FEATURES), true)
+  assert.deepEqual([...STUDIO_RAIL_FEATURES].sort(), [
+    'control:job-monitor-expand', 'control:linked-services', 'control:notification-collapse', 'control:objects',
+  ])
+})
+
+test('WL46b Tools enters the browser front door once without a drawing or upload', async () => {
+  const probe = resolveProbe(buildFeatureMap().entries.find(row => row.id === 'tab:project:tools'), 'ready')
+  for (const resume of [true, false]) {
+    const { page, events } = workspaceEnvironmentFake({ resume })
+    page.goto = async url => { events.push(`goto:${url}`) }
+    page.request = { post: async () => assert.fail('Tools entry must not upload a drawing') }
+    const runtime = { page, evidence: {} }
+    for (const recipe of probe.setup.steps) await setupStep(probe, runtime, recipe)
+    assert.deepEqual(events, ['goto:/app?surface=browser', ...(resume
+      ? ['Continue workspace', 'assert:data-entered=true']
+      : ['Open project or material', 'Close Project panel', 'assert:aria-expanded=false', 'assert:data-entered=true'])])
+    assert.equal(runtime.drawingId, undefined)
+    assert.equal(runtime.evidence.drawingId, undefined)
+  }
+})
+
+test('workspace entry continues an existing workspace and waits for entry', async () => {
+  const { page, events } = workspaceEnvironmentFake()
+  await enterWorkspaceEnvironment(page)
+  assert.deepEqual(events, ['Continue workspace', 'assert:data-entered=true'])
+})
+
+test('workspace entry opens project intake, closes Project and waits for entry', async () => {
+  const { page, events } = workspaceEnvironmentFake({ resume: false })
+  await enterWorkspaceEnvironment(page)
+  assert.deepEqual(events, ['Open project or material', 'Close Project panel',
+    'assert:aria-expanded=false', 'assert:data-entered=true'])
+})
+
+test('workspace entry leaves absent and already entered environments alone', async () => {
+  const { assertions } = boundedWorkspacePoll()
+  for (const options of [{ present: false }, { entered: 'true' }]) {
+    const { page, events } = workspaceEnvironmentFake(options)
+    await enterWorkspaceEnvironment(page, assertions)
+    assert.deepEqual(events, [])
+  }
+})
+
+test('workspace entry waits for the environment to attach on the third poll pass', async () => {
+  const fake = workspaceEnvironmentFake({ present: false })
+  const { polls, assertions } = boundedWorkspacePoll({ beforePass: pass => fake.setPresent(pass >= 3) })
+  await enterWorkspaceEnvironment(fake.page, assertions)
+  assert.deepEqual(polls, [{ timeout: 20_000, passes: 3 }])
+  assert.deepEqual(fake.events, ['Continue workspace', 'assert:data-entered=true'])
+})
+
+test('workspace entry tolerates an environment absent for the whole settle bound', async () => {
+  const { page, events } = workspaceEnvironmentFake({ present: false })
+  const { polls, assertions } = boundedWorkspacePoll()
+  await enterWorkspaceEnvironment(page, assertions)
+  assert.deepEqual(polls, [{ timeout: 20_000, passes: 4 }])
+  assert.deepEqual(events, [])
+})
+
+test('workspace entry refuses a fourth entry click with a data-entered diagnostic', async () => {
+  const { page, events } = workspaceEnvironmentFake({ settles: false })
+  const { polls, assertions } = boundedWorkspacePoll({ passes: 8 })
+  await assert.rejects(enterWorkspaceEnvironment(page, assertions), /data-entered.*3 clicks/)
+  assert.deepEqual(polls, [{ timeout: 20_000, passes: 4 }])
+  assert.equal(events.filter(event => event === 'Continue workspace').length, 3)
+})
+
+test('foreign checkout reload re-enters the chooser before restoring the ribbon tab', async () => {
+  const fake = workspaceEnvironmentFake({ entered: 'true' })
+  const { page, events } = fake
+  const getByRole = page.getByRole
+  const assertEntered = async () => assert.equal(
+    await page.locator('section.workspace-environment').getAttribute('data-entered'), 'true')
+  page.request = { post: async (path, options) => {
+    assert.equal(path, '/api/drawings/private/checkout')
+    assert.deepEqual(options, { data: { holder: 'walk-other-editor', ttl_s: 300 }, timeout: 15_000 })
+    return { status: () => 200, json: async () => ({ acquired: true }) }
+  } }
+  page.reload = async options => {
+    assert.equal(options, undefined)
+    events.push('reload')
+    fake.setEntered('false')
+  }
+  page.getByText = (text, options) => {
+    assert.equal(text, 'Editing locked by walk-other-editor')
+    assert.deepEqual(options, { exact: false })
+    return { _apiName: 'Locator', _expect: async expression => {
+      assert.equal(expression, 'to.be.visible')
+      await assertEntered()
+      events.push('lock visible')
+      return { matches: true, log: [] }
+    } }
+  }
+  page.getByRole = (role, options) => {
+    if (role === 'tablist') {
+      assert.deepEqual(options, { name: 'Ribbon', exact: true })
+      return { getByRole: (role, options) => {
+        assert.equal(role, 'tab')
+        assert.deepEqual(options, { name: 'Manage', exact: true })
+        return { click: async () => { await assertEntered(); events.push('Manage') } }
+      } }
+    }
+    if (role === 'button' && options.name === 'More panels') return { isVisible: async () => false }
+    return getByRole(role, options)
+  }
+  await setupStep({}, { page, evidence: {}, drawingId: 'private', ribbonTab: 'Manage' }, { kind: 'foreign-checkout' })
+  assert.deepEqual(events, ['reload', 'Continue workspace', 'assert:data-entered=true', 'lock visible', 'Manage'])
+})
+
+test('reloadAndReenter reloads once without entry clicks on builds without an environment', async () => {
+  const { page, events } = workspaceEnvironmentFake({ present: false })
+  const options = { timeout: 60_000 }
+  page.reload = async received => { assert.equal(received, options); events.push('reload') }
+  await reloadAndReenter(page, options)
+  assert.deepEqual(events, ['reload'])
+})
+
+function realProjectFake({ chooser = false, resetAfterCreation = false, missingBoard = false,
+  missingStart = false, failedReentry = false } = {}) {
+  const fake = workspaceEnvironmentFake({ entered: 'true' })
+  const { page, events } = fake
+  const environmentLocator = page.locator
+  let boardVisible = false, chooserVisible = false
+  const boardFailure = new Error('Project workspace board never appeared')
+  const org = { org_id: 'walk-org' }
+  const project = { project_id: 'walk-project', org_id: org.org_id, name: 'Walk project' }
+  const stateChecks = []
+  const boardLocator = (includeHidden = false) => ({
+    get visible() { return boardVisible },
+    isVisible: async () => boardVisible,
+    count: async () => boardVisible || includeHidden ? 1 : 0,
+    getAttribute: async name => {
+      assert.ok(boardVisible || includeHidden, 'Project workspace board does not resolve while hidden')
+      assert.equal(name, 'data-project-state')
+      stateChecks.push({ name, includeHidden })
+      return 'project'
+    },
+    getByText: (name, options) => {
+      assert.deepEqual(options, { exact: true })
+      stateChecks.push({ name, includeHidden })
+      return { countValue: 0 }
+    },
+    getByRole: (role, options) => {
+      assert.equal(role, 'button')
+      assert.equal(options.name, 'Create project from this drawing')
+      return { disabled: false, click: async () => {
+        events.push('Create project')
+        if (resetAfterCreation) {
+          fake.setEntered('false')
+          boardVisible = false
+          chooserVisible = resetAfterCreation !== 'hidden chooser'
+          if (failedReentry) fake.setPresent(false)
+        }
+      } }
+    },
+  })
+  const board = boardLocator()
+  const hiddenBoard = boardLocator(true)
+  page.request = { post: async path => {
+    assert.equal(path, '/api/orgs')
+    return { ok: () => true, json: async () => ({ org }) }
+  } }
+  page.evaluate = async (_callback, orgId) => { assert.equal(orgId, org.org_id); return null }
+  page.reload = async options => {
+    assert.deepEqual(options, { timeout: 60_000 })
+    events.push('reload')
+    fake.setEntered('false')
+  }
+  page.waitForResponse = async () => ({ ok: () => true, json: async () => ({ project }),
+    request: () => ({ headers: () => ({ 'x-org-id': org.org_id }) }) })
+  page.getByRole = (role, options) => {
+    if (role === 'region') {
+      assert.equal(options.name, 'Project workspace')
+      assert.equal(options.exact, true)
+      return options.includeHidden === true ? hiddenBoard : board
+    }
+    if (role === 'dialog') return { visible: false }
+    assert.equal(role, 'button')
+    if (options.name === 'Start') return { click: async () => {
+      assert.equal(await environmentLocator('section.workspace-environment').getAttribute('data-entered'), 'true')
+      events.push('Start'); boardVisible = !chooser && !missingStart; chooserVisible = chooser && !missingStart
+      if (chooserVisible) fake.setEntered('false')
+    } }
+    if (options.name === 'Open project or material') return {
+      isVisible: async () => chooserVisible
+        && await fake.environment.getAttribute('data-entered') !== 'true',
+      click: async options => {
+        assert.deepEqual(options, { timeout: 15_000 })
+        events.push('Open project or material'); chooserVisible = false
+        fake.setEntered('true'); boardVisible = !missingBoard
+      },
+    }
+    if (options.name === 'Return to drawing') return { isVisible: async () => boardVisible,
+      click: async () => { events.push('Return to drawing'); boardVisible = false } }
+    assert.ok(options.name.test('Run tool'))
+    return { countValue: 0 }
+  }
+  page.locator = selector => {
+    if (selector === '.workspace-summary') return { text: project.name }
+    if (selector === '.strip-failed, .strip-running') return { countValue: 0 }
+    return environmentLocator(selector)
+  }
+  page.getByTestId = id => {
+    events.push('tail assertions')
+    assert.equal(id, 'cockpit-status')
+    return { locator: selector => { assert.equal(selector, '.cockpit-sel'); return { text: 'no selection' } } }
+  }
+  const { polls, assertions: polling } = boundedWorkspacePoll()
+  const assertions = Object.assign(value => ({ ...censusAssertions(value),
+    toBeVisible: async options => {
+      if (value === board) {
+        assert.deepEqual(options, { timeout: 15_000 })
+        if (!boardVisible) throw boardFailure
+      } else await censusAssertions(value).toBeVisible()
+    },
+  }), { poll: polling.poll })
+  const runtime = { page, evidence: {}, cleanup: [] }
+  return { runtime, assertions, events, polls, project, org, boardFailure, stateChecks }
+}
+
+test('WL49 real project reload enters the workspace once before Start', async () => {
+  const { runtime, assertions, events, org, project } = realProjectFake()
+  await setupRealProject(runtime, assertions)
+  assert.deepEqual(events, ['reload', 'Continue workspace', 'assert:data-entered=true', 'Start',
+    'Create project', 'Return to drawing', 'tail assertions'])
+  assert.deepEqual(runtime.evidence.escapeProject, { orgId: org.org_id, projectId: project.project_id, name: project.name })
+})
+
+test('WL51 U1 studio Start follows the chooser into Project exactly once before creation', async () => {
+  const fake = realProjectFake({ chooser: true })
+  await setupRealProject(fake.runtime, fake.assertions)
+  assert.deepEqual(fake.events.slice(3), ['Start', 'Open project or material', 'Create project',
+    'Return to drawing', 'tail assertions'])
+  assert.deepEqual(fake.polls.map(poll => poll.timeout), [20_000, 15_000])
+})
+
+test('WL51 U2 legacy Start reaches the board without a chooser click', async () => {
+  const fake = realProjectFake()
+  await setupRealProject(fake.runtime, fake.assertions)
+  assert.deepEqual(fake.events.slice(3), ['Start', 'Create project', 'Return to drawing', 'tail assertions'])
+})
+
+test('WL51 U3 scope reset re-enters once before the tail, while entered environments skip entry', async () => {
+  for (const resetAfterCreation of [true, 'hidden chooser', false]) {
+    const fake = realProjectFake({ chooser: true, resetAfterCreation })
+    await setupRealProject(fake.runtime, fake.assertions)
+    const afterCreation = fake.events.slice(fake.events.indexOf('Create project') + 1)
+    assert.deepEqual(afterCreation, [...(resetAfterCreation
+      ? ['Continue workspace', 'assert:data-entered=true'] : ['Return to drawing']), 'tail assertions'])
+    assert.equal(fake.polls.filter(poll => poll.timeout === 20_000).length, resetAfterCreation ? 2 : 1)
+  }
+})
+
+test('WL51b U1 post-creation state checks resolve the hidden board after the studio scope reset', async () => {
+  for (const resetAfterCreation of [true, 'hidden chooser']) {
+    const fake = realProjectFake({ chooser: true, resetAfterCreation })
+    await setupRealProject(fake.runtime, fake.assertions)
+    assert.deepEqual(fake.stateChecks, [
+      { name: 'data-project-state', includeHidden: true },
+      { name: 'Versions live with a workspace project', includeHidden: true },
+      { name: 'Runs appear here with a project open', includeHidden: true },
+    ])
+    const { page } = fake.runtime
+    assert.equal(await page.getByRole('region', { name: 'Project workspace', exact: true }).count(), 0)
+    assert.equal(await page.getByRole('region', { name: 'Project workspace', exact: true, includeHidden: true }).count(), 1)
+  }
+})
+
+test('WL51b U2 a plain board locator cannot check project state after the studio scope reset', async () => {
+  const fake = realProjectFake({ chooser: true, resetAfterCreation: true })
+  await setupRealProject(fake.runtime, fake.assertions)
+  const board = fake.runtime.page.getByRole('region', { name: 'Project workspace', exact: true })
+  await assert.rejects(fake.assertions(board).toHaveAttribute('data-project-state', 'project'),
+    /Project workspace board does not resolve while hidden/)
+})
+
+test('WL51 U4 missing board after the chooser fails with its cause and no further clicks', async () => {
+  const fake = realProjectFake({ chooser: true, missingBoard: true })
+  await assert.rejects(setupRealProject(fake.runtime, fake.assertions), error => {
+    assert.equal(error.message, 'open-real-project: Start did not reach the Project workspace board')
+    assert.equal(error.cause, fake.boardFailure)
+    return true
+  })
+  assert.deepEqual(fake.events.slice(3), ['Start', 'Open project or material'])
+  assert.deepEqual(fake.runtime.evidence, {})
+})
+
+test('WL51 missing Start destination and failed scope re-entry name their steps and retain causes', async () => {
+  for (const missingStart of [true, false]) {
+    const fake = realProjectFake(missingStart ? { missingStart: true }
+      : { chooser: true, resetAfterCreation: true, failedReentry: true })
+    await assert.rejects(setupRealProject(fake.runtime, fake.assertions), error => {
+      assert.equal(error.message, missingStart
+        ? 'open-real-project: Start did not reach the Project workspace board'
+        : 'open-real-project: workspace did not re-enter after project creation')
+      assert.ok(error.cause instanceof Error)
+      return true
+    })
+    assert.equal(fake.events.includes('Return to drawing'), false)
+    assert.equal(fake.events.includes('tail assertions'), false)
+  }
+})
+
+test('session-details and sign-out oracles require the current Session details dialog', async () => {
+  for (const dialogName of ['Session details', 'Session · provenance']) {
+    for (const target of ['session-provenance', 'signed-out-session']) {
+      const workspace = workspaceEnvironmentFake({ entered: 'true' })
+      let open = target === 'session-provenance'
+      const panel = { visible: () => open && dialogName === 'Session details',
+        getByTestId: id => {
+          assert.equal(id, 'diagnostics-block')
+          return { text: 'session signed out' }
+        },
+        getByRole: (role, options) => {
+          assert.equal(role, 'button')
+          assert.deepEqual(options, { name: target === 'session-provenance' ? 'Close details' : 'Refresh', exact: true })
+          return { visible: panel.visible }
+        },
+      }
+      const page = { ...workspace.page, getByRole: (role, options) => {
+        if (role === 'dialog') {
+          assert.deepEqual(options, { name: 'Session details', exact: true })
+          return panel
+        }
+        assert.equal(role, 'button')
+        if (options.name === 'Sign out') return { count: 0 }
+        assert.deepEqual(options, { name: 'Details', exact: true })
+        return { count: 1, click: async () => { open = true } }
+      } }
+      const assertions = value => ({
+        toHaveCount: async expected => assert.equal(value.count, expected),
+        toBeVisible: async () => assert.equal(value.visible(), true),
+        toHaveText: async expected => assert.match(value.text, expected),
+      })
+      const check = () => assertEffect({ kind: 'control', assertion: { target } }, { page }, null, {}, assertions)
+      if (dialogName === 'Session details') await check()
+      else await assert.rejects(check, assert.AssertionError)
+    }
+  }
+})
+
+test('signed-out session enters the chooser before Details without clicking Sign in', async () => {
+  const { page, events } = workspaceEnvironmentFake({ resume: false })
+  const getByRole = page.getByRole
+  let detailsOpen = false
+  const panel = { visible: () => detailsOpen,
+    getByTestId: id => {
+      assert.equal(id, 'diagnostics-block')
+      return { text: 'session signed out' }
+    },
+    getByRole: (role, options) => {
+      assert.equal(role, 'button')
+      assert.deepEqual(options, { name: 'Refresh', exact: true })
+      return { visible: () => detailsOpen }
+    },
+  }
+  page.getByRole = (role, options) => {
+    if (role === 'navigation') return getByRole(role, options)
+    if (role === 'dialog') {
+      assert.deepEqual(options, { name: 'Session details', exact: true })
+      return panel
+    }
+    assert.equal(role, 'button')
+    assert.equal(options.exact, true)
+    if (options.name === 'Sign out') return { count: 0 }
+    assert.equal(options.name, 'Details', 'Sign in must never be used to enter the signed-out workspace')
+    return { count: 1, click: async () => {
+      assert.equal(await page.locator('section.workspace-environment').getAttribute('data-entered'), 'true')
+      events.push('Details'); detailsOpen = true
+    } }
+  }
+  const assertions = value => ({
+    toHaveCount: async expected => assert.equal(value.count, expected),
+    toBeVisible: async () => assert.equal(value.visible(), true),
+    toHaveText: async expected => assert.match(value.text, expected),
+  })
+  await assertEffect({ assertion: { target: 'signed-out-session' } }, { page }, null, null, assertions)
+  assert.deepEqual(events, ['Open project or material', 'Close Project panel',
+    'assert:aria-expanded=false', 'assert:data-entered=true', 'Details'])
+})
+
+test('workspace chooser entry ignores Describe and returns false when no entry is offered', async () => {
+  for (const options of [{ offered: false }, { present: false }, { entered: 'true' }]) {
+    // The fake rejects any button lookup or click for Describe what to create.
+    const { page, events } = workspaceEnvironmentFake(options)
+    assert.equal(await enterWorkspaceIfChooser(page), false)
+    assert.deepEqual(events, [])
+  }
+  for (const resume of [true, false]) {
+    const { page, events } = workspaceEnvironmentFake({ resume })
+    assert.equal(await enterWorkspaceIfChooser(page), true)
+    assert.equal(events[0], resume ? 'Continue workspace' : 'Open project or material')
+  }
+})
+
+test('private drawing canvas readiness re-enters after a workspace scope reset', async () => {
+  const fake = workspaceEnvironmentFake()
+  let canvasPasses = 0
+  const { polls, assertions } = boundedWorkspacePoll()
+  const page = { ...fake.page,
+    goto: async () => {},
+    request: {
+      post: async () => ({ status: () => 202, json: async () => ({ drawing_id: 'scope-reset-drawing' }) }),
+      get: async () => ({ ok: () => true, json: async () => ({ status: 'ready' }) }),
+    },
+    getByRole: (role, options) => {
+      if (role !== 'region') return fake.page.getByRole(role, options)
+      return { locator: () => ({ boundingBox: async () => {
+        if (++canvasPasses === 1) {
+          fake.setEntered('false')
+          return null
+        }
+        assert.equal(fake.events.filter(event => event === 'Continue workspace').length, 2)
+        return { width: 100, height: 100 }
+      } }) }
+    },
+  }
+  const runtime = { page, evidence: {} }
+  await setupStep({ setup: { steps: [], context: {} } }, runtime, { kind: 'open-private-drawing', surface: 'cad' }, assertions)
+  assert.equal(canvasPasses, 2)
+  assert.equal(fake.events.filter(event => event === 'Continue workspace').length, 2)
+  assert.deepEqual(polls, [
+    { timeout: 20_000, passes: 1 }, { timeout: 60_000, passes: 2 },
+  ])
+  assert.equal(runtime.evidence.drawingId, 'scope-reset-drawing')
+})
+
+test('Solar profile selection proves the environment profile and reuses workspace entry', async () => {
+  for (const resume of [true, false]) {
+    const { page, events } = workspaceEnvironmentFake({ resume })
+    await openSolarCadProfile(page)
+    assert.deepEqual(events, ['Select Solar CAD', 'assert:data-profile=solar',
+      ...(resume ? ['Continue workspace'] : ['Open project or material', 'Close Project panel', 'assert:aria-expanded=false']),
+      'assert:data-entered=true'])
+  }
+  const { page, events } = workspaceEnvironmentFake({ controlsPresent: false })
+  await openSolarCadProfile(page)
+  assert.deepEqual(events, ['Solar CAD'])
+})
+
+test('empty workspace setup enters immediately after navigation', async () => {
+  const { page, events } = workspaceEnvironmentFake()
+  page.goto = async url => { assert.equal(url, '/try?surface=cad'); events.push('navigate') }
+  await setupStep({}, { page, evidence: {} }, { kind: 'open-empty-workspace', surface: 'cad' })
+  assert.deepEqual(events, ['navigate', 'Continue workspace', 'assert:data-entered=true'])
+})
+
 function stagingVersionSelectionFake({ loads = true } = {}) {
   const events = [], canvas = { visible: true, count: 1, evaluate: async () => true }
   let loaded = false, polls = 0
@@ -1209,11 +4453,16 @@ test('WL16n project recipe uploads and extraction reads use setup headers, loadi
   probes.push(resolveProbe(map.entries.find((entry) => entry.id === 'action:bar-escape'), 'project-open'))
   for (const probe of probes) for (const authLive of [false, true]) {
     const calls = []
+    const environment = workspaceEnvironmentFake()
     let currentURL = 'about:blank'
     const runtime = { stack: { baseURL: 'http://walk' }, workerFacts: { authLive }, evidence: {}, cleanup: [],
       ...(probe.setup.context.projectSolar ? { projectSolar: {} } : {}), page: {
         url: () => currentURL,
-        goto: async (path) => { calls.push(['navigate', path]); currentURL = new URL(path, 'http://walk').href },
+        goto: async (path) => {
+          assert.deepEqual(environment.events, [])
+          calls.push(['navigate', path]); currentURL = new URL(path, 'http://walk').href
+        },
+        locator: environment.page.locator,
         evaluate: async () => {
           assert.equal(new URL(currentURL).origin, 'http://walk')
           return 'upload-page-token'
@@ -1236,7 +4485,10 @@ test('WL16n project recipe uploads and extraction reads use setup headers, loadi
             return { ok: () => true, json: async () => ({ status: 'ready' }) }
           },
         },
-        getByRole: () => ({ locator: () => ({ boundingBox: async () => ({ width: 100, height: 100 }) }) }),
+        getByRole: () => ({ locator: () => ({ boundingBox: async () => {
+          assert.deepEqual(environment.events, ['Continue workspace', 'assert:data-entered=true'])
+          return { width: 100, height: 100 }
+        } }) }),
       } }
     await setupStep(probe, runtime, probe.setup.steps[0])
     assert.deepEqual(calls, [
@@ -1372,6 +4624,234 @@ test('project Solar drawing opens a collapsed flow seat once and leaves open or 
     await assertProjectSolarDrawing(runtime, stagingAssertions)
     await assertProjectSolarDrawing(runtime, stagingAssertions)
     assert.equal(clicks, initial === 'false' ? 1 : 0)
+  }
+})
+
+function solarRequiredFormFake(tool, { blocked = false, prefilled = false, title = '', titleThrows = false,
+  fieldAlerts = [], equipmentReason = 'This form cannot run in the current scope.' } = {}) {
+  const fields = SOLAR_REQUIRED_FORM_INPUTS[tool] || {}
+  const schema = JSON.parse(readFileSync(new URL(`../../../server/solar_tools/${tool.replaceAll('-', '_')}.json`, import.meta.url), 'utf8')).record.params
+  const values = new Map(Object.keys(schema.properties).map(key => [key,
+    prefilled && fields[key] ? String(fields[key].value) : '']))
+  const inputs = [], checks = []
+  let visible = true, decisionVisible = false
+  const locator = { isVisible: async () => true }
+  const review = { click: async () => { decisionVisible = true }, getAttribute: async name => {
+    assert.equal(name, 'title')
+    if (titleThrows) throw new Error('Title read failed')
+    return title
+  } }
+  const reasonText = equipmentReason
+  const reason = { isVisible: async () => blocked && equipmentReason !== null, innerText: async () => reasonText }
+  const region = {
+    isVisible: async () => visible,
+    getByLabel: (name, options) => {
+      assert.deepEqual(options, { exact: true })
+      const key = Object.keys(schema.properties).find(key => {
+        const label = (schema.properties[key].title || key).replaceAll('_', ' ')
+        return label.charAt(0).toUpperCase() + label.slice(1) === name
+      })
+      const record = async (value, method) => { inputs.push({ key, value, method }); values.set(key, value) }
+      return { count: async () => Number(key !== undefined), inputValue: async () => values.get(key),
+        fill: value => record(value, 'fill'), selectOption: option => record(option.label, 'select') }
+    },
+    getByTestId: id => { assert.equal(id, 'project-solar-equipment-reason'); return reason },
+    getByRole: (role, options) => {
+      if (role === 'alert') return { count: async () => fieldAlerts.length, nth: index => ({
+        isVisible: async () => fieldAlerts[index].visible !== false,
+        innerText: async () => fieldAlerts[index].text,
+      }) }
+      return options.name === 'Review & run' ? review : { click: async () => { visible = false } }
+    },
+  }
+  const decision = { focus: async () => {} }
+  const runtime = { evidence: {}, page: {
+    getByRole: (role, options) => {
+      if (role === 'region') { assert.equal(options.name, `${tool} parameters`); return region }
+      assert.equal(options.name, `Run ${tool}`)
+      return decision
+    },
+    keyboard: { press: async () => { decisionVisible = false } },
+  } }
+  const assertions = value => ({
+    toBeVisible: async () => assert.equal(value === region ? visible : decisionVisible, true),
+    toBeHidden: async () => assert.equal(value === region ? visible : decisionVisible, false),
+    toBeFocused: async () => assert.equal(value, locator),
+    toEqual: expected => assert.deepEqual(value, expected),
+    toBeEnabled: async () => {
+      checks.push('enabled')
+      assert.equal(value, review)
+      for (const key of schema.required) assert.notEqual(values.get(key), '', `${key} must be filled before enabled check`)
+      assert.equal(blocked, false, 'Review & run remains disabled')
+    },
+  })
+  return { runtime, locator, assertions, inputs, checks, reasonText,
+    run: () => assertSolarStepEditor({ assertion: { tool } }, runtime, locator, { runRequests: [] }, assertions) }
+}
+
+for (const tool of Object.keys(SOLAR_REQUIRED_FORM_INPUTS)) {
+  test(`WL35 ${tool} fills every empty required field before checking Review & run`, async () => {
+    const fake = solarRequiredFormFake(tool)
+    await fake.run()
+    const fields = SOLAR_REQUIRED_FORM_INPUTS[tool]
+    assert.equal(fake.inputs.length, Object.keys(fields).length)
+    for (const [key, field] of Object.entries(fields)) {
+      assert.deepEqual(fake.inputs.filter(input => input.key === key), [{ key,
+        value: field.select ?? String(field.value), method: field.select === undefined ? 'fill' : 'select' }])
+    }
+    assert.deepEqual(fake.checks, ['enabled'])
+    assert.equal(fake.runtime.evidence.solarStepEditor.reviewed, true)
+  })
+  test(`WL35 ${tool} preserves required inputs already present`, async () => {
+    const fake = solarRequiredFormFake(tool, { prefilled: true })
+    await fake.run()
+    assert.deepEqual(fake.inputs, [])
+  })
+}
+
+test('WL35 a Solar tool outside the five receives no extra inputs', async () => {
+  const fake = solarRequiredFormFake('solar-unit-sync')
+  await fake.run()
+  assert.deepEqual(fake.inputs, [{ key: 'expected_rev', value: '0', method: 'fill' },
+    { key: 'distance_unit', value: 'Meters', method: 'select' }])
+})
+
+test('WL35 a disabled run records its visible reason and still fails', async () => {
+  const fake = solarRequiredFormFake('solar-nec-feeder-ocpd', {
+    blocked: true, title: 'Reading the drawing revision', equipmentReason: null,
+  })
+  await assert.rejects(fake.run(), /Review & run remains disabled/)
+  assert.deepEqual(fake.runtime.evidence.solarRunBlockedReason, {
+    source: 'button-title', text: 'Reading the drawing revision',
+  })
+  assert.equal(fake.runtime.evidence.solarStepEditor, undefined)
+})
+
+test('WL35b field alerts precede equipment text and include only non-empty visible reasons', async () => {
+  const fake = solarRequiredFormFake('solar-nec-feeder-ocpd', { blocked: true, title: '  ', fieldAlerts: [
+    { text: '  First field is required.  ' }, { text: 'Hidden field reason', visible: false },
+    { text: ' ' }, { text: 'Second field is required.' },
+  ] })
+  await assert.rejects(fake.run(), /Review & run remains disabled/)
+  assert.deepEqual(fake.runtime.evidence.solarRunBlockedReason, {
+    source: 'field-alerts', text: 'First field is required.; Second field is required.',
+  })
+})
+
+test('WL35b equipment text is the final non-empty reason source', async () => {
+  const fake = solarRequiredFormFake('solar-nec-feeder-ocpd', { blocked: true })
+  await assert.rejects(fake.run(), /Review & run remains disabled/)
+  assert.deepEqual(fake.runtime.evidence.solarRunBlockedReason, { source: 'equipment-reason', text: fake.reasonText })
+})
+
+test('WL35b an absent or empty reason is explicit and preserves the enabled failure', async () => {
+  for (const equipmentReason of [null, '  ']) {
+    const fake = solarRequiredFormFake('solar-nec-feeder-ocpd', { blocked: true, title: null, equipmentReason })
+    await assert.rejects(fake.run(), /Review & run remains disabled/)
+    assert.deepEqual(fake.runtime.evidence.solarRunBlockedReason, { source: 'none', text: '' })
+    assert.equal(fake.runtime.evidence.solarStepEditor, undefined)
+  }
+})
+
+test('WL35b a throwing title read falls back to the next reason source', async () => {
+  const fake = solarRequiredFormFake('solar-nec-feeder-ocpd', {
+    blocked: true, titleThrows: true, fieldAlerts: [{ text: 'A field is required.' }],
+  })
+  await assert.rejects(fake.run(), /Review & run remains disabled/)
+  assert.deepEqual(fake.runtime.evidence.solarRunBlockedReason, { source: 'field-alerts', text: 'A field is required.' })
+})
+
+test('WL35b a non-empty button title precedes field alerts and equipment text', async () => {
+  const fake = solarRequiredFormFake('solar-nec-feeder-ocpd', {
+    blocked: true, title: '  Reading the drawing revision  ', fieldAlerts: [{ text: 'A field is required.' }],
+  })
+  await assert.rejects(fake.run(), /Review & run remains disabled/)
+  assert.deepEqual(fake.runtime.evidence.solarRunBlockedReason, {
+    source: 'button-title', text: 'Reading the drawing revision',
+  })
+})
+
+test('WL35 the frozen table covers exactly the required schemas with auditable sources', () => {
+  assert.deepEqual(Object.keys(SOLAR_REQUIRED_FORM_INPUTS), ['solar-nec-ac-voltage-drop',
+    'solar-nec-ampacity-correction', 'solar-nec-conduit-fill', 'solar-nec-feeder-ocpd', 'solar-trench-manual'])
+  assert.ok(Object.isFrozen(SOLAR_REQUIRED_FORM_INPUTS))
+  for (const [tool, fields] of Object.entries(SOLAR_REQUIRED_FORM_INPUTS)) {
+    const schema = JSON.parse(readFileSync(new URL(`../../../server/solar_tools/${tool.replaceAll('-', '_')}.json`, import.meta.url), 'utf8')).record.params
+    assert.deepEqual(Object.keys(fields).sort(), [...schema.required].sort())
+    assert.ok(Object.isFrozen(fields))
+    for (const [key, field] of Object.entries(fields)) {
+      assert.ok(Object.isFrozen(field))
+      assert.match(field.source, /^(scenario\/test input|schema default|first enum option|schema numeric minimum): /)
+      const property = schema.properties[key]
+      assert.equal(typeof field.value, property.type === 'integer' ? 'number' : property.type)
+      if (property.enum) assert.ok(property.enum.includes(field.value))
+      if (property.minimum !== undefined) assert.ok(field.value >= property.minimum)
+      if (property.maximum !== undefined) assert.ok(field.value <= property.maximum)
+    }
+  }
+})
+
+test('G1 Solar editor reviews, dismisses and cancels without submitting a run', async () => {
+  for (const [tool, submitted, railVisible] of [
+    ['solar-unit-sync', false, true], ['solar-unit-sync', true, true], ['solar-design-presets', false, true],
+    ['solar-unit-sync', false, false], ['solar-unit-sync', true, false], ['solar-design-presets', false, false],
+  ]) {
+    const calls = []
+    const inputs = []
+    let listener, visible = true, decisionVisible = false, focused = null
+    const locator = { click: async () => { visible = true }, isVisible: async () => railVisible }
+    const more = {}
+    const field = { count: async () => 0 }
+    const review = { click: async () => {
+      calls.push('review'); decisionVisible = true
+      if (submitted) listener({ method: () => 'POST', url: () => 'http://walk/api/run?wait=1' })
+    } }
+    const cancel = { click: async () => { calls.push('cancel'); visible = false; focused = railVisible ? locator : more } }
+    const region = { getByLabel: (name) => {
+      if (name === 'Expected rev') return { count: async () => 1, inputValue: async () => '',
+        fill: async (value) => { inputs.push([name, value]) } }
+      if (name === 'Distance unit' && tool === 'solar-unit-sync' || name === 'Subcommand' && tool === 'solar-design-presets') {
+        return { count: async () => 1, selectOption: async (option) => { inputs.push([name, option]) } }
+      }
+      if (name === 'Name' && tool === 'solar-design-presets') return { count: async () => 1,
+        fill: async (value) => { inputs.push([name, value]) } }
+      return field
+    }, isVisible: async () => visible,
+      getByRole: (role, options) => options.name === 'Review & run' ? review : cancel }
+    const decision = { focus: async () => { calls.push('decision-focus') } }
+    const page = {
+      locator: (selector) => { assert.equal(selector, 'button[aria-controls="drafting-ribbon-panels"]'); return more },
+      on: (event, handler) => { assert.equal(event, 'request'); listener = handler },
+      off: (event, handler) => { assert.equal(event, 'request'); assert.equal(handler, listener); calls.push('unobserve') },
+      getByRole: (role, options) => {
+        if (role === 'region') { assert.equal(options.name, `${tool} parameters`); return region }
+        assert.equal(options.name, `Run ${tool}`); return decision
+      },
+      keyboard: { press: async (key) => { assert.equal(key, 'Escape'); calls.push('dismiss'); decisionVisible = false } },
+    }
+    const assertions = (value) => ({
+      toBeVisible: async () => assert.equal(value === region ? visible : decisionVisible, true),
+      toBeHidden: async () => assert.equal(value === region ? visible : decisionVisible, false),
+      toBeEnabled: async () => assert.equal(value, review),
+      toBeFocused: async () => { assert.equal(value, railVisible ? locator : more); assert.equal(focused, value) },
+      toEqual: (expected) => assert.deepEqual(value, expected),
+    })
+    const runtime = { page, cleanup: [], evidence: {} }
+    const before = observeSolarEditorRequests(runtime)
+    listener({ method: () => 'GET', url: () => 'http://walk/api/run' })
+    listener({ method: () => 'POST', url: () => 'http://walk/api/other' })
+    const probe = { kind: 'tool', assertion: { target: 'solar-step-editor', tool } }
+    const pending = assertEffect(probe, runtime, locator, before, assertions)
+    if (submitted) await assert.rejects(pending, assert.AssertionError)
+    else {
+      await pending
+      assert.deepEqual(runtime.evidence.solarStepEditor, { tool, reviewed: true, cancelled: true, runRequests: [] })
+    }
+    assert.deepEqual(inputs, tool === 'solar-unit-sync'
+      ? [['Expected rev', '0'], ['Distance unit', { label: 'Meters' }]]
+      : [['Expected rev', '0'], ['Subcommand', { label: 'Create' }], ['Name', 'Walk proof preset']])
+    await runtime.cleanup[0]()
+    assert.deepEqual(calls, ['review', 'decision-focus', 'dismiss', 'cancel', 'unobserve'])
   }
 })
 
@@ -1625,7 +5105,8 @@ import { captureEngineRepeat, activateEngineRepeat } from './fixtures.mjs'
 import { faultRouteOnce, drawingRequest, setupVersionFault, finishVersionFault,
   setupHistoryFault, assertHistoryRecovery, setupRealProject } from './fixtures.mjs'
 import { CENSUS_DISCLOSURES, censusDisclosureState, setupCensusDisclosure, setupCensusScript,
-  setupCensusDownloadOnly, activateCensusFileChooser, captureCensusEffect, assertCensusEffect } from './fixtures.mjs'
+  setupCensusDownloadOnly, activateCensusFileChooser, captureCensusEffect, assertCensusEffect,
+  observeDxfImportState, collectCadEditBundleProbe } from './fixtures.mjs'
 
 const censusAssertions = (value) => ({
   toBe: (expected) => assert.equal(value, expected),
@@ -1643,6 +5124,180 @@ const censusAssertions = (value) => ({
 })
 
 const fixtureSource = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
+
+test('only Objects census disclosure reveals Studio before its summary and restores it', async () => {
+  const map = buildFeatureMap()
+  for (const visible of [true, false]) {
+    for (const featureId of ['control:objects', 'control:linked-services']) {
+      for (const state of ['closed', 'open', 'failed-load']) {
+        const fake = studioRailFake({ visible })
+        const objects = featureId === 'control:objects'
+        const probe = resolveProbe(map.entries.find(entry => entry.id === 'control:objects'), state)
+        probe.featureId = featureId
+        const recipe = probe.setup.steps.find(step => step.kind === 'census-disclosure')
+        assert.ok(recipe)
+        let open = false
+        const summary = { visible: true, click: async () => { open = !open; fake.events.push('Objects click') } }
+        const body = { evaluate: async read => read({ open }) }
+        const studioLocator = fake.page.locator
+        fake.page.locator = selector => {
+          if (selector === '#project-workspace-activity') return studioLocator(selector)
+          if (visible && objects) assert.equal(fake.expanded(), 'true', 'Objects requires open Studio')
+          if (selector === 'details.drawing-objects-panel > summary') {
+            fake.events.push('Objects summary')
+            return summary
+          }
+          assert.equal(selector, 'details.drawing-objects-panel')
+          return body
+        }
+        const runtime = { page: fake.page, cleanup: [], evidence: {} }
+        await prepareStudioRail(probe, runtime, recipe, { enter: async () => {} })
+        assert.equal(runtime.cleanup.length, visible && objects ? 1 : 0)
+        await setupCensusDisclosure(runtime, recipe, censusAssertions)
+        assert.equal(open, recipe.expanded)
+        assert.equal(fake.events.filter(event => event === 'Studio click').length, visible && objects ? 1 : 0)
+        if (visible && objects) assert.ok(fake.events.indexOf('Studio click') < fake.events.indexOf('Objects summary'))
+        for (const cleanup of runtime.cleanup.reverse()) await cleanup()
+        assert.equal(open, false)
+        assert.equal(fake.expanded(), 'false')
+        assert.equal(runtime.evidence.censusDisclosure.cleaned, true)
+      }
+    }
+  }
+})
+
+test('rail recipes reveal Studio before their control and restore only panels they opened', async () => {
+  const map = buildFeatureMap()
+  for (const featureId of [...STUDIO_RAIL_FEATURES].filter(id => id !== 'control:objects').concat('control:session-details')) {
+    for (const state of ['ready', 'failed-load']) {
+      for (const initiallyOpen of [false, true]) {
+        const fake = studioRailFake({ expanded: String(initiallyOpen) })
+        const rail = STUDIO_RAIL_FEATURES.has(featureId)
+        const probe = resolveProbe(map.entries.find(entry => entry.id === featureId), state)
+        const recipe = probe.setup.steps.find(step => ['baseline-three-state', 'job-monitor-collapsed'].includes(step.kind))
+        assert.ok(recipe, `${featureId}/${state} has a rail setup hook`)
+        const studioRole = fake.page.getByRole
+        const controlLocator = { visible: true, countValue: 0, isVisible: async () => false,
+          getByRole: () => controlLocator }
+        fake.page.getByRole = (role, options) => {
+          if (role === 'navigation') return studioRole(role, options)
+          if (rail) assert.equal(fake.expanded(), 'true', 'control lookup requires open Studio')
+          fake.events.push('control lookup')
+          return controlLocator
+        }
+        const studioLocator = fake.page.locator
+        fake.page.locator = selector => selector === '#project-workspace-activity'
+          ? studioLocator(selector) : controlLocator
+        const runtime = { page: fake.page, cleanup: [], evidence: {} }
+        const enter = async actualRuntime => {
+          assert.equal(actualRuntime, runtime)
+          await enterWorkspaceEnvironment(fake.workspace.page)
+          fake.events.push('workspace ready')
+        }
+        const reveal = async page => {
+          assert.equal(page, fake.page)
+          assert.equal(fake.events.at(-1), 'workspace ready')
+          fake.events.push('Studio reveal')
+          return revealStudioRail(page)
+        }
+        await prepareStudioRail(probe, runtime, { kind: 'unrelated-recipe' }, { enter, reveal })
+        assert.deepEqual(fake.events, [])
+        await prepareStudioRail(probe, runtime, recipe, { enter, reveal })
+        assert.equal(fake.events.includes('workspace ready'), rail)
+        assert.equal(fake.events.includes('Studio reveal'), rail)
+        assert.equal(runtime.cleanup.length, rail && !initiallyOpen ? 1 : 0)
+        const control = recipe.control || { role: 'toolbar', name: 'Job monitor' }
+        fake.page.getByRole(control.role, { name: control.name })
+        if (rail && !initiallyOpen) {
+          assert.ok(fake.events.indexOf('workspace ready') < fake.events.indexOf('Studio click'))
+          assert.ok(fake.events.indexOf('Studio rail visible wait') < fake.events.indexOf('control lookup'))
+        }
+        for (const cleanup of runtime.cleanup.reverse()) await cleanup()
+        for (const cleanup of runtime.cleanup) await cleanup()
+        assert.equal(fake.expanded(), String(initiallyOpen))
+        assert.equal(fake.events.filter(event => event === 'Studio click').length, rail && !initiallyOpen ? 2 : 0)
+      }
+    }
+  }
+})
+
+const workspaceAssertionSource = fixtureSource.slice(fixtureSource.indexOf('export async function requireNoDrawing('),
+  fixtureSource.indexOf('async function setSection(')).replace('export ', '')
+const workspaceCanvasSource = fixtureSource.slice(fixtureSource.indexOf('const canvas ='),
+  fixtureSource.indexOf('async function viewportBounds('))
+const extractedRequireWorkspace = assertions => new Function('expect', 'enterWorkspaceEnvironment',
+  `${workspaceCanvasSource}\n${workspaceAssertionSource}; return requireWorkspace`)(assertions,
+  page => enterWorkspaceEnvironment(page, boundedWorkspacePoll().assertions))
+
+function requireWorkspaceFake({ present = true, failedDrawing = false } = {}) {
+  const environment = workspaceEnvironmentFake({ present })
+  const checked = []
+  const command = { name: 'command', visible: true }
+  const drawing = { name: 'canvas', get visible() {
+    return !present || environment.events.includes('assert:data-entered=true')
+  } }
+  const alert = { name: 'load error', visible: true }
+  const undo = { name: 'undo', visible: true, disabled: true }
+  const page = { ...environment.page, getByRole: (role, options) => {
+    assert.deepEqual(environment.events, present ? ['Continue workspace', 'assert:data-entered=true'] : [])
+    if (role === 'combobox') {
+      assert.deepEqual(options, { name: 'Command bar', exact: true })
+      return command
+    }
+    if (role === 'region') {
+      assert.equal(failedDrawing, false)
+      assert.deepEqual(options, { name: 'Drawing', exact: true })
+      return { locator: selector => { assert.equal(selector, 'canvas:visible'); return drawing } }
+    }
+    if (role === 'alert') return { filter: ({ hasText }) => {
+      assert.equal(hasText.test("Couldn't load drawing"), true)
+      assert.equal(hasText.test('Couldn’t load drawing'), true)
+      return alert
+    } }
+    assert.equal(role, 'toolbar')
+    assert.deepEqual(options, { name: 'Quick access', exact: true })
+    return { getByRole: (role, options) => {
+      assert.equal(role, 'button')
+      assert.deepEqual(options, { name: 'Undo version (unavailable: No saved versions yet)', exact: true })
+      return undo
+    } }
+  } }
+  const assertions = value => ({
+    toBeVisible: async () => { checked.push(`${value.name}:visible`); assert.equal(value.visible, true) },
+    toBeDisabled: async () => { checked.push(`${value.name}:disabled`); assert.equal(value.disabled, true) },
+  })
+  return { environment, drawing, alert, undo, checked,
+    run: () => extractedRequireWorkspace(assertions)({ page, failedDrawing }) }
+}
+
+test('requireWorkspace enters the chooser once before asserting the command bar and canvas', async () => {
+  const fake = requireWorkspaceFake()
+  assert.equal(fake.drawing.visible, false)
+  await fake.run()
+  assert.deepEqual(fake.environment.events, ['Continue workspace', 'assert:data-entered=true'])
+  assert.deepEqual(fake.checked, ['command:visible', 'canvas:visible'])
+})
+
+test('requireWorkspace without an environment asserts the workspace without clicks', async () => {
+  const fake = requireWorkspaceFake({ present: false })
+  await fake.run()
+  assert.deepEqual(fake.environment.events, [])
+  assert.deepEqual(fake.checked, ['command:visible', 'canvas:visible'])
+})
+
+test('requireWorkspace asserts the load error and no-drawing signal after entry', async () => {
+  const fake = requireWorkspaceFake({ failedDrawing: true })
+  await fake.run()
+  assert.deepEqual(fake.checked, ['command:visible', 'load error:visible', 'undo:visible', 'undo:disabled'])
+  fake.alert.visible = false
+  await assert.rejects(fake.run(), assert.AssertionError)
+  fake.alert.visible = true
+  fake.undo.visible = false
+  await assert.rejects(fake.run(), assert.AssertionError)
+  fake.undo.visible = true
+  fake.undo.disabled = false
+  await assert.rejects(fake.run(), assert.AssertionError)
+})
 
 test('project Solar walk functions and staging steps contain no untimed empty-argument clicks', () => {
   for (const name of ['assertProjectSolarDrawing', 'openProjectSolar', 'selectProjectSolarVersion',
@@ -1718,12 +5373,41 @@ test('WL14 owner Escape keeps command-bar focus through activation and menu dism
   await assert.rejects(activate(probe, runtime, bar), assert.AssertionError)
 })
 
+test('keyboard actions focus the visible Workspace controls Project button before dispatch', async () => {
+  const activate = extractedActivate(() => assert.fail('ordinary keyboard actions must not assert command-bar focus'))
+  for (const [key, target] of [['Escape', 'escape:drawer'], ['r', 'retry'], ['?', 'keyboard-shortcut-sheet']]) {
+    const events = []
+    const runtime = { page: {
+      getByRole: (role, options) => {
+        assert.equal(role, 'navigation')
+        assert.deepEqual(options, { name: 'Workspace controls', exact: true })
+        return { getByRole: (role, options) => {
+          assert.equal(role, 'button')
+          assert.deepEqual(options, { name: 'Project', exact: true })
+          return { isVisible: async () => true, focus: async () => events.push('project-focused') }
+        } }
+      },
+      keyboard: { press: async (pressed) => events.push(pressed) },
+    } }
+    await activate({ locator: { trigger: 'keyboard', key }, assertion: { target } }, runtime, {})
+    assert.deepEqual(events, ['project-focused', key])
+  }
+})
+
 test('other keyboard actions retain workspace-tab focus before dispatch', async () => {
   const activate = extractedActivate(() => assert.fail('ordinary keyboard actions must not assert command-bar focus'))
   for (const [key, target] of [['Escape', 'escape:drawer'], ['r', 'retry']]) {
     const events = []
     const runtime = { page: {
       getByRole: (role, options) => {
+        if (role === 'navigation') {
+          assert.deepEqual(options, { name: 'Workspace controls', exact: true })
+          return { getByRole: (role, options) => {
+            assert.equal(role, 'button')
+            assert.deepEqual(options, { name: 'Project', exact: true })
+            return { isVisible: async () => false, focus: () => assert.fail('absent Project button must not receive focus') }
+          } }
+        }
         assert.equal(role, 'tablist')
         assert.deepEqual(options, { name: 'Workspace profile', exact: true })
         return { getByRole: (role) => {
@@ -1908,7 +5592,7 @@ test('C2 and C3 disclosures click into each initial state, reject a wrong effect
       await assert.rejects(assertCensusEffect(probe, runtime, button, {}, censusAssertions), assert.AssertionError)
       await button.click({ timeout: 15_000 })
       // Import's input visibility follows the real pane posture.
-      page.getByLabel = () => ({ visible: open })
+      page.getByLabel = () => ({ visible: open, count: async () => 1 })
       await assertCensusEffect(probe, runtime, button, {}, censusAssertions)
       for (const cleanup of runtime.cleanup.reverse()) await cleanup()
       assert.equal(open, false)
@@ -1916,6 +5600,360 @@ test('C2 and C3 disclosures click into each initial state, reject a wrong effect
       if (target === 'ribbon-overflow-expanded') assert.equal(events.at(-1), 1440)
     }
   }
+})
+
+test('WL58 U1 DXF collapse requires a mounted control before accepting hidden', async () => {
+  for (const present of [true, false]) {
+    const page = {
+      locator: () => ({ getAttribute: async () => null }),
+      getByLabel: () => ({ visible: false, count: async () => Number(present) }),
+    }
+    const assertions = (value, message) => ({ ...censusAssertions(value),
+      toBeGreaterThan: expected => assert.ok(value > expected, message) })
+    assertions.poll = censusAssertions.poll
+    const run = assertCensusEffect({ assertion: { target: 'dxf-import-expanded', value: false } },
+      { page }, { getAttribute: async () => 'false' }, {}, assertions)
+    if (present) await run
+    else await assert.rejects(run, /DXF control must exist before it can be collapsed/)
+  }
+})
+
+function cadBundleFake({ marker = true, fail = false, cap = false, computed = false, oversized = false,
+  resources = [], scripts = [], preloads = [] } = {}) {
+  const requests = [], disposed = []
+  const bodies = {
+    '/.leaf-walk-build.json': JSON.stringify({ flags: { VITE_CAD_EDIT: '1', secret: 'PRIVATE_ENV' } }),
+    '/': '<script type="module" src="/assets/main.js?signature=PRIVATE_URL"></script><link rel="modulepreload" href="/assets/preload.js">',
+    '/assets/preload.js': 'export const preload = true',
+    '/assets/main.js': cap ? Array.from({ length: 41 }, (_, i) => `import("./chunk${i}.js")`).join(';')
+      : computed ? 'import(variable)' : 'import{preload}from"./preload.js";import("./chunk.js")',
+    '/assets/chunk.js': marker ? '/* PRIVATE_BODY cad-edit-workbench */' : '/* PRIVATE_BODY no surface */',
+  }
+  const page = {
+    url: () => 'https://walk.example/workspace?secret=PRIVATE_URL',
+    evaluate: async callback => runInNewContext(`(${callback.toString()})()`, {
+      URL, location: { origin: 'https://walk.example' },
+      performance: { getEntriesByType: type => { assert.equal(type, 'resource'); return resources } },
+      document: { baseURI: 'https://walk.example/workspace', scripts: scripts.map(src => ({ src })),
+        querySelectorAll: selector => {
+          assert.equal(selector, 'link[rel~="modulepreload"]')
+          return preloads.map(href => ({ href }))
+        } },
+    }),
+    locator: selector => ({ count: async () => selector === '#cockpit-import-pane' ? 1 : 0 }),
+    request: { get: async (href, options) => {
+      assert.ok(options.timeout > 0 && options.timeout <= 10_000)
+      assert.equal(options.maxRedirects, 0)
+      const url = new URL(href)
+      requests.push(url.pathname)
+      if (fail && url.pathname === '/assets/chunk.js') throw new Error('PRIVATE_FETCH_ERROR')
+      const body = Buffer.from(bodies[url.pathname] || 'export const chunk = true')
+      return { ok: () => true, status: () => 200,
+        headers: () => ({ 'content-length': String(oversized && url.pathname === '/assets/main.js' ? 31 * 1024 * 1024 : body.length) }),
+        body: async () => body, dispose: async () => { disposed.push(url.pathname) } }
+    } },
+  }
+  const runtime = { evidence: { consoleErrors: [{ text: 'CadEdit PRIVATE_CONSOLE' }, { text: 'other' }],
+    pageErrors: [{ message: 'EngineSession PRIVATE_PAGE_ERROR' }] }, testInfo: { workerIndex: 3 } }
+  return { page, runtime, requests, disposed }
+}
+
+function assertCadBundleWhitelist(probe) {
+  const keys = (value, expected) => assert.deepEqual(Object.keys(value).sort(), expected.sort())
+  keys(probe, ['manifestFlag', 'dom', 'servedJs', 'consoleErrorCount', 'binding'])
+  keys(probe.dom, ['workbench', 'objectsPanel', 'importPane'])
+  keys(probe.binding, ['worker', 'pageUrlPathSha256'])
+  keys(probe.servedJs, ['indexSha256', 'assets', 'markerFound', 'coverage', 'source', 'pageAssetCount', 'truncated'])
+  assert.ok(['page-loaded', 'index-fallback'].includes(probe.servedJs.source))
+  assert.ok(Number.isInteger(probe.servedJs.pageAssetCount) && probe.servedJs.pageAssetCount >= 0)
+  assert.equal(typeof probe.servedJs.truncated, 'boolean')
+  for (const value of Object.values(probe.dom)) assert.ok(value === null || Number.isInteger(value))
+  assert.ok(probe.consoleErrorCount === null || Number.isInteger(probe.consoleErrorCount))
+  for (const asset of probe.servedJs.assets) {
+    keys(asset, ['pathSha256', 'status', 'bytes', 'sha256'])
+    assert.match(asset.pathSha256, /^[a-f0-9]{64}$/)
+    if (asset.sha256 !== null) assert.match(asset.sha256, /^[a-f0-9]{64}$/)
+    for (const key of ['status', 'bytes']) assert.ok(asset[key] === null || Number.isInteger(asset[key]))
+  }
+  assert.doesNotMatch(JSON.stringify(probe), /PRIVATE_|walk\.example|assets\/|cad-edit-workbench|EngineSession/)
+}
+
+test('WL58 U2 bundle correlation follows one level of static and dynamic imports and whitelists output', async () => {
+  for (const marker of [true, false]) {
+    const fake = cadBundleFake({ marker })
+    const probe = await collectCadEditBundleProbe(fake.page, fake.runtime)
+    assert.equal(probe.manifestFlag, '1')
+    assert.deepEqual(probe.dom, { workbench: 0, objectsPanel: 0, importPane: 1 })
+    assert.equal(probe.consoleErrorCount, 2)
+    assert.equal(probe.binding.worker, 3)
+    assert.match(probe.binding.pageUrlPathSha256, /^[a-f0-9]{64}$/)
+    assert.match(probe.servedJs.indexSha256, /^[a-f0-9]{64}$/)
+    assert.equal(probe.servedJs.source, 'index-fallback')
+    assert.equal(probe.servedJs.pageAssetCount, 0)
+    assert.equal(probe.servedJs.markerFound, marker)
+    assert.equal(probe.servedJs.coverage, 'complete')
+    assert.equal(probe.servedJs.assets.length, 3)
+    assert.deepEqual(fake.requests, fake.disposed)
+    assertCadBundleWhitelist(probe)
+  }
+})
+
+test('WL60 U2 loaded scripts take precedence, with complete or UNKNOWN negative marker evidence', async () => {
+  for (const options of [{}, { marker: false }, { fail: true }]) {
+    const fake = cadBundleFake({ ...options, resources: [
+      { name: 'https://walk.example/assets/main.js', initiatorType: 'script' },
+      { name: 'https://walk.example/assets/chunk.js', initiatorType: 'script' },
+    ] })
+    const probe = await collectCadEditBundleProbe(fake.page, fake.runtime)
+    assert.equal(probe.servedJs.source, 'page-loaded')
+    assert.equal(probe.servedJs.pageAssetCount, 2)
+    assert.equal(probe.servedJs.indexSha256, null)
+    assert.equal(probe.servedJs.coverage, options.fail ? 'partial' : 'loaded-complete')
+    assert.equal(probe.servedJs.markerFound, options.fail ? 'UNKNOWN' : options.marker !== false)
+    assert.deepEqual(fake.requests, ['/.leaf-walk-build.json', '/assets/main.js', '/assets/chunk.js'])
+    assert.equal(probe.servedJs.assets.length, 2)
+    assertCadBundleWhitelist(probe)
+  }
+  const fallback = cadBundleFake()
+  const probe = await collectCadEditBundleProbe(fallback.page, fallback.runtime)
+  assert.equal(probe.servedJs.source, 'index-fallback')
+  assert.equal(probe.servedJs.pageAssetCount, 0)
+  assert.ok(fallback.requests.includes('/'))
+  assertCadBundleWhitelist(probe)
+})
+
+test('WL60 U2 page collection merges resource, script and preload URLs, deduplicates and caps at 40', async () => {
+  const fake = cadBundleFake({ marker: false, resources: [
+    { name: 'https://walk.example/assets/resource', initiatorType: 'script' },
+    { name: 'https://walk.example/assets/link', initiatorType: 'link' },
+    { name: 'https://walk.example/assets/worker.mjs?private=PRIVATE_URL', initiatorType: 'other' },
+    { name: 'https://walk.example/assets/chunk.js', initiatorType: 'fetch' },
+    { name: 'https://elsewhere.example/external.js', initiatorType: 'script' },
+    { name: 'https://walk.example/api/jobs', initiatorType: 'fetch' },
+  ], scripts: ['', '/assets/resource#duplicate', '/assets/document.js'],
+  preloads: ['/assets/document.js', '/assets/preload.js'] })
+  const probe = await collectCadEditBundleProbe(fake.page, fake.runtime)
+  assert.equal(probe.servedJs.pageAssetCount, 6)
+  assert.equal(probe.servedJs.coverage, 'loaded-complete')
+  assert.equal(probe.servedJs.markerFound, false)
+  assert.deepEqual(fake.requests, ['/.leaf-walk-build.json', '/assets/resource', '/assets/link',
+    '/assets/worker.mjs', '/assets/chunk.js', '/assets/document.js', '/assets/preload.js'])
+  assertCadBundleWhitelist(probe)
+  const capped = cadBundleFake({ scripts: Array.from({ length: 45 }, (_, i) => `/assets/loaded${i}.js`) })
+  const cappedProbe = await collectCadEditBundleProbe(capped.page, capped.runtime)
+  assert.equal(cappedProbe.servedJs.pageAssetCount, 45)
+  assert.equal(cappedProbe.servedJs.assets.length, 40)
+  assert.equal(capped.requests.length, 41)
+  assertCadBundleWhitelist(cappedProbe)
+})
+
+test('WL60b U1 loaded scripts beyond the cap leave absent marker evidence UNKNOWN', async () => {
+  const scripts = Array.from({ length: 44 }, (_, i) => `/assets/loaded${i}.js`)
+  scripts.push('/assets/chunk.js')
+  const fake = cadBundleFake({ scripts })
+  const probe = await collectCadEditBundleProbe(fake.page, fake.runtime)
+  assert.equal(probe.servedJs.pageAssetCount, 45)
+  assert.equal(probe.servedJs.truncated, true)
+  assert.equal(probe.servedJs.coverage, 'partial')
+  assert.equal(probe.servedJs.markerFound, 'UNKNOWN')
+  assert.equal(probe.servedJs.assets.length, 40)
+  assert.deepEqual(fake.requests, ['/.leaf-walk-build.json', ...scripts.slice(0, 40)])
+  assertCadBundleWhitelist(probe)
+})
+
+test('WL60b U2 a marker in a kept asset remains true with truncated coverage', async () => {
+  const scripts = ['/assets/chunk.js', ...Array.from({ length: 44 }, (_, i) => `/assets/loaded${i}.js`)]
+  const fake = cadBundleFake({ scripts })
+  const probe = await collectCadEditBundleProbe(fake.page, fake.runtime)
+  assert.equal(probe.servedJs.pageAssetCount, 45)
+  assert.equal(probe.servedJs.truncated, true)
+  assert.equal(probe.servedJs.coverage, 'partial')
+  assert.equal(probe.servedJs.markerFound, true)
+  assert.equal(probe.servedJs.assets.length, 40)
+  assert.deepEqual(fake.requests, ['/.leaf-walk-build.json', ...scripts.slice(0, 40)])
+  assertCadBundleWhitelist(probe)
+})
+
+test('WL60b U3 two fully fetched loaded assets retain complete coverage without truncation', async () => {
+  const scripts = ['/assets/main.js', '/assets/chunk.js']
+  const fake = cadBundleFake({ marker: false, scripts })
+  const probe = await collectCadEditBundleProbe(fake.page, fake.runtime)
+  assert.equal(probe.servedJs.pageAssetCount, 2)
+  assert.equal(probe.servedJs.truncated, false)
+  assert.equal(probe.servedJs.coverage, 'loaded-complete')
+  assert.equal(probe.servedJs.markerFound, false)
+  assert.equal(probe.servedJs.assets.length, 2)
+  assert.deepEqual(fake.requests, ['/.leaf-walk-build.json', ...scripts])
+  assertCadBundleWhitelist(probe)
+})
+
+test('WL58 U2 failed fetches, computed imports, byte budgets and asset caps leave negative coverage UNKNOWN', async () => {
+  for (const options of [{ fail: true }, { cap: true }, { computed: true }, { oversized: true }]) {
+    const fake = cadBundleFake(options)
+    const probe = await collectCadEditBundleProbe(fake.page, fake.runtime)
+    assert.equal(probe.servedJs.coverage, 'partial')
+    assert.equal(probe.servedJs.markerFound, 'UNKNOWN')
+    assert.ok(probe.servedJs.assets.length <= 40)
+    if (options.cap) assert.equal(probe.servedJs.assets.length, 40)
+    assertCadBundleWhitelist(probe)
+  }
+  const probe = await collectCadEditBundleProbe({}, {})
+  assert.equal(probe.manifestFlag, null)
+  assert.deepEqual(probe.dom, { workbench: null, objectsPanel: null, importPane: null })
+  assert.equal(probe.servedJs.markerFound, 'UNKNOWN')
+  assertCadBundleWhitelist(probe)
+})
+
+test('WL58 U3 Objects records missing-summary evidence before preserving its original visibility failure', async () => {
+  for (const present of [true, false]) {
+    const fake = cadBundleFake()
+    const originalError = new Error('original Objects visibility failure')
+    const button = { visible: present, count: async () => Number(present) }
+    const page = { ...fake.page }
+    const assertions = value => ({ ...censusAssertions(value), toBeVisible: async () => {
+      if (!value.visible) {
+        assert.ok(runtime.evidence.cadEditBundleProbe)
+        throw originalError
+      }
+    } })
+    assertions.poll = censusAssertions.poll
+    page.locator = selector => selector === 'details.drawing-objects-panel > summary' ? button
+      : selector === 'details.drawing-objects-panel' ? { evaluate: async () => false, count: async () => Number(present) }
+        : fake.page.locator(selector)
+    const runtime = { ...fake.runtime, page, cleanup: [] }
+    const run = setupCensusDisclosure(runtime, { target: 'drawing-objects-expanded', expanded: false,
+      control: { css: 'details.drawing-objects-panel > summary', name: 'Objects' } }, assertions)
+    if (present) {
+      await run
+      assert.equal(runtime.evidence.cadEditBundleProbe, undefined)
+    } else {
+      await assert.rejects(run, error => error === originalError)
+      assertCadBundleWhitelist(runtime.evidence.cadEditBundleProbe)
+    }
+  }
+})
+
+test('WL58 U3 both DXF expansion controls record absent-input evidence before the original failure', async () => {
+  for (const featureId of ['control:open-dxf', 'control:open-dxf-browser']) {
+    for (const present of [true, false]) {
+      const fake = dxfImportFixture({ featureId, present })
+      const bundle = cadBundleFake()
+      fake.page.url = bundle.page.url
+      fake.page.request = bundle.page.request
+      const locator = fake.page.locator
+      fake.page.locator = selector => selector === '#cockpit-import-pane' ? locator(selector) : bundle.page.locator(selector)
+      const assertions = value => ({ ...fake.assertions(value), toBeVisible: async () => {
+        if (!present) assert.ok(fake.runtime.evidence.cadEditBundleProbe)
+        await fake.assertions(value).toBeVisible()
+      } })
+      assertions.poll = censusAssertions.poll
+      const run = assertCensusEffect(fake.probe, fake.runtime, fake.button, {}, assertions)
+      if (present) {
+        await run
+        assert.equal(fake.runtime.evidence.cadEditBundleProbe, undefined)
+      } else {
+        await assert.rejects(run, error => error === fake.originalError)
+        assertCadBundleWhitelist(fake.runtime.evidence.cadEditBundleProbe)
+      }
+    }
+  }
+})
+
+function dxfImportFixture({ featureId = 'control:open-dxf', present = false, chooser = false, readFails = false,
+  enabled = true, picking = false } = {}) {
+  const originalError = new Error('original DXF file visibility failure')
+  let inputExpectationFailed = false
+  const page = new EventEmitter()
+  const pane = { count: async () => 1, isVisible: async () => true,
+    getAttribute: async (name) => {
+      // The disclosure oracle reads this flag before the input expectation.
+      if (readFails && inputExpectationFailed) throw new Error('diagnostic read failed')
+      return name === 'data-import-open' ? 'true' : picking ? '1' : null
+    } }
+  const input = { visible: present, count: async () => present ? 1 : 0,
+    isVisible: async () => input.visible, isEnabled: async () => enabled }
+  input.first = () => input
+  page.locator = (selector) => { assert.equal(selector, '#cockpit-import-pane'); return pane }
+  page.getByLabel = (name, options) => {
+    assert.equal(name, 'DXF file'); assert.deepEqual(options, { exact: true }); return input
+  }
+  const button = { getAttribute: async () => 'true', click: async () => {
+    if (['control:open-dxf', 'control:open-dxf-browser'].includes(featureId)) assert.equal(page.listenerCount('filechooser'), 1)
+    if (chooser) page.emit('filechooser', {})
+  } }
+  const assertions = (value) => ({ ...censusAssertions(value), toBeVisible: async () => {
+    if (!value.visible) {
+      inputExpectationFailed = true
+      throw originalError
+    }
+  } })
+  assertions.poll = censusAssertions.poll
+  const probe = { featureId, assertion: { target: 'dxf-import-expanded', value: true } }
+  const runtime = { page, evidence: {}, cleanup: [] }
+  return { page, probe, runtime, button, assertions, originalError }
+}
+
+test('Open DXF failures record the open flag and absent input while preserving the original error', async () => {
+  for (const featureId of ['control:open-dxf', 'control:open-dxf-browser']) {
+    const fake = dxfImportFixture({ featureId })
+    observeDxfImportState(fake.probe, fake.runtime)
+    await fake.button.click()
+    await assert.rejects(assertCensusEffect(fake.probe, fake.runtime, fake.button, {}, fake.assertions),
+      (error) => error === fake.originalError)
+    assert.deepEqual(fake.runtime.evidence.dxfImportState, { importOpen: true, paneVisible: true,
+      busy: null, picking: false, input: { count: 0, visible: null, enabled: null }, fileChooserOpened: false })
+    for (const cleanup of fake.runtime.cleanup.reverse()) await cleanup()
+    assert.equal(fake.page.listenerCount('filechooser'), 0)
+    assert.equal(fake.runtime.captureDxfImportState, undefined)
+  }
+})
+
+test('Open DXF observes a chooser emitted during activation and reads busy and picking from the DOM', async () => {
+  for (const featureId of ['control:open-dxf', 'control:open-dxf-browser']) {
+    const fake = dxfImportFixture({ featureId, chooser: true, present: true, enabled: false, picking: true })
+    // A hidden but mounted input still exposes its busy state.
+    fake.page.getByLabel('DXF file', { exact: true }).visible = false
+    observeDxfImportState(fake.probe, fake.runtime)
+    await fake.button.click()
+    await assert.rejects(assertCensusEffect(fake.probe, fake.runtime, fake.button, {}, fake.assertions),
+      (error) => error === fake.originalError)
+    assert.equal(fake.runtime.evidence.dxfImportState.fileChooserOpened, true)
+    assert.equal(fake.runtime.evidence.dxfImportState.busy, true)
+    assert.equal(fake.runtime.evidence.dxfImportState.picking, true)
+    assert.deepEqual(fake.runtime.evidence.dxfImportState.input, { count: 1, visible: false, enabled: false })
+    for (const cleanup of fake.runtime.cleanup.reverse()) await cleanup()
+    assert.equal(fake.page.listenerCount('filechooser'), 0)
+  }
+})
+
+test('passing Open DXF and another census control leave DXF diagnostic evidence absent', async () => {
+  const fake = dxfImportFixture({ present: true })
+  observeDxfImportState(fake.probe, fake.runtime)
+  await fake.button.click()
+  await assertCensusEffect(fake.probe, fake.runtime, fake.button, {}, fake.assertions)
+  assert.deepEqual(fake.runtime.evidence, {})
+  for (const cleanup of fake.runtime.cleanup.reverse()) await cleanup()
+  assert.equal(fake.page.listenerCount('filechooser'), 0)
+
+  const probe = { featureId: 'control:ribbon-script', assertion: { target: 'ribbon-script-text' }, locator: { inputValue: 'line' } }
+  const runtime = { page: new EventEmitter(), evidence: {}, cleanup: [] }
+  observeDxfImportState(probe, runtime)
+  await assertCensusEffect(probe, runtime, { text: 'line' }, {}, censusAssertions)
+  assert.deepEqual(runtime.evidence, {})
+  assert.equal(runtime.page.listenerCount('filechooser'), 0)
+  assert.equal(runtime.cleanup.length, 0)
+})
+
+test('a throwing DXF diagnostic read preserves the original input expectation failure', async () => {
+  const fake = dxfImportFixture({ readFails: true })
+  observeDxfImportState(fake.probe, fake.runtime)
+  await fake.button.click()
+  await assert.rejects(assertCensusEffect(fake.probe, fake.runtime, fake.button, {}, fake.assertions),
+    (error) => error === fake.originalError)
+  assert.equal(fake.runtime.evidence.dxfImportState.importOpen, null)
+  assert.equal(fake.runtime.evidence.dxfImportState.picking, null)
+  for (const cleanup of fake.runtime.cleanup.reverse()) await cleanup()
+  assert.equal(fake.page.listenerCount('filechooser'), 0)
 })
 
 test('C2 script setup holds genuine replies only for running and drains them before clearing text', async () => {
@@ -2256,6 +6294,7 @@ test('project Escape observes UI creation and rejects refused or cross-org recei
   for (const authLive of [false, true]) for (const fault of [null, 'refused', 'wrong-org']) {
     const events = []
     const board = { visible: true, attributes: { 'data-project-state': 'project' },
+      isVisible: async () => board.visible,
       getByRole: (role, options) => {
         assert.equal(role, 'button')
         assert.deepEqual(options, { name: 'Create project from this drawing', exact: true })
@@ -2293,16 +6332,19 @@ test('project Escape observes UI creation and rejects refused or cross-org recei
       getByRole: (role, options) => {
         if (role === 'region') return board
         if (role === 'dialog') return { visible: false }
+        if (options.name === 'Open project or material') return { isVisible: async () => false }
         if (options.name instanceof RegExp) return { countValue: 0 }
         return { isVisible: async () => true, click: async () => {
           events.push(options.name)
           if (options.name === 'Return to drawing') board.visible = false
         } }
       },
-      locator: (selector) => selector === '.workspace-summary' ? { text: project.name } : { countValue: 0 },
+      locator: (selector) => selector === '.workspace-summary' ? { text: project.name }
+        : selector === 'section.workspace-environment' ? { count: async () => 0 } : { countValue: 0 },
       getByTestId: () => ({ locator: () => ({ text: 'no selection' }) }),
     } }
     const assertions = (value) => ({ ...faultAssertions(value), toHaveText: async (expected) => assert.equal(value.text, expected) })
+    assertions.poll = faultAssertions.poll
     const probe = resolveProbe(buildFeatureMap().entries.find((entry) => entry.id === 'action:bar-escape'), 'project-open')
     const open = () => setupStep(probe, runtime, probe.setup.steps.at(-1), assertions)
     if (fault) {
@@ -2496,6 +6538,7 @@ test('phone Properties oracle follows Plan drawer state for both toggle directio
   for (const visible of [false, true]) {
     const runtime = { evidence: {}, testInfo: { project: { name: 'phone' } }, page: {
       getByRole: (role, options) => {
+        if (role === 'navigation') return { getByRole: () => ({ isVisible: async () => false }) }
         assert.equal(role, 'group'); assert.equal(options.name, 'Workspace panels')
         return { getByRole: (role, options) => { assert.equal(options.name, 'Plan'); return { expanded: String(!visible) } } }
       },
@@ -2553,16 +6596,19 @@ const expect = (value) => ({
 test('failed drawing setup accepts an empty canvas and requires the product no-drawing signal on each surface', async () => {
   for (const surface of ['cad', 'solar', 'browser', 'ios']) for (const status of [400, 404]) {
     const undo = { visible: true, disabled: true }
+    const environment = workspaceEnvironmentFake()
     const page = Object.assign(new EventEmitter(), {
       goto: async (url) => {
+        assert.deepEqual(environment.events, [])
         assert.equal(url, `/app?surface=${surface}&drawing=missing.invalid`)
         const response = { url: () => 'http://walk/api/session?dwg=missing.invalid',
           status: () => status, json: async () => ({ error: 'missing drawing' }) }
         page.emit('response', response)
         page.emit('requestfailed', timedRequest('/api/session?dwg=missing.invalid', { failure: 'late failure' }))
       },
-      locator: () => assert.fail('canvas count cannot establish drawing readiness'),
+      locator: environment.page.locator,
       getByRole: (role, options) => {
+        assert.deepEqual(environment.events, ['Continue workspace', 'assert:data-entered=true'])
         if (role === 'alert') return { filter: () => ({ visible: true }) }
         assert.equal(role, 'toolbar')
         assert.deepEqual(options, { name: 'Quick access', exact: true })
@@ -2783,7 +6829,7 @@ test('WL19 request evidence is capped at 50 and metadata errors cannot change a 
   assert.equal(JSON.stringify(evidence), before)
 })
 
-test('ready Solar catalog setup requires the browser drawing query and exact enabled tool', async () => {
+test('WL49 ready Solar catalog setup re-enters after the browser drawing query before restoring its tab', async () => {
   for (const [name, familyId, placement, surface, tab] of [
     ['solar-settings', 'stringing', undefined, 'solar', 'Manage'],
     ['solar-string-data', 'stringing', undefined, 'solar', 'Manage'],
@@ -2793,10 +6839,12 @@ test('ready Solar catalog setup requires the browser drawing query and exact ena
     ['solar-settings', 'solar-unit', { tab: 'view' }, 'solar', 'View'],
     ['solar-settings', 'solar-unit', { tab: 'view' }, 'cad', 'View'],
   ]) {
-    const events = []
+    const workspace = workspaceEnvironmentFake({ entered: 'true' })
+    const events = workspace.events
     const button = { visible: true, enabled: true }
     const page = {
       locator: (selector) => {
+        if (selector === 'section.workspace-environment') return workspace.page.locator(selector)
         assert.equal(selector, '.app')
         return { first: () => ({ getAttribute: async (name) => {
           assert.equal(name, 'data-surface')
@@ -2816,6 +6864,7 @@ test('ready Solar catalog setup requires the browser drawing query and exact ena
       goto: async (url) => {
         assert.equal(url, '/app?drawing=private&surface=solar')
         events.push('private drawing')
+        workspace.setEntered('false')
       },
       request: { get: async (path, options) => {
         assert.equal(options.timeout, 15_000)
@@ -2849,10 +6898,12 @@ test('ready Solar catalog setup requires the browser drawing query and exact ena
       toBeVisible: async () => { events.push('visible'); assert.equal(value.visible, true) },
       toBeEnabled: async () => { events.push('enabled'); assert.equal(value.enabled, true) },
     })
+    assertions.poll = boundedWorkspacePoll().assertions.poll
     const probe = { kind: 'tool', sourceId: name, state: 'ready', assertion: { kind: 'opens', target: 'catalog-run-decision' } }
     const runtime = { page, drawingId: 'private', drawingVersion: 2, evidence: {}, recipeAssertions: assertions }
     await setupStep(probe, runtime, { kind: 'catalog-tool', name })
-    assert.deepEqual(events, [tab, 'browser catalog', 'private drawing', tab, 'exact tool', 'visible', 'enabled'])
+    assert.deepEqual(events, [tab, 'browser catalog', 'private drawing', 'Continue workspace',
+      'assert:data-entered=true', tab, 'exact tool', 'visible', 'enabled'])
     assert.equal(runtime.ribbonTab, tab)
     assert.equal(runtime.evidence.browserCatalog.drawingId, 'private')
     button.enabled = false
@@ -2879,6 +6930,7 @@ test('catalog tools choose their first tab from the active surface without a rea
       const tabs = []
       const page = {
         locator: (selector) => {
+          if (selector === 'section.workspace-environment') assert.fail('without navigation this path must not enter the workspace')
           assert.equal(selector, '.app')
           return { first: () => ({ getAttribute: async (attribute) => {
             assert.equal(attribute, 'data-surface')
@@ -3171,10 +7223,97 @@ test('submission setup failure still drains routes through runProbe finally', as
   assert.equal(unroute, 1)
 })
 
+test('WL57 U2 running Escape checks detach evidence and uses Studio or the legacy spine; WL60 U1 finds the second child', async () => {
+  for (const studio of [true, false]) for (const initialOpen of [false, true]) for (const missingJob of [false, true]) {
+    let open = initialOpen
+    const events = []
+    const node = label => ({ get visible() {
+      events.push(label)
+      return label !== 'monitor job' || (open && !missingJob)
+    } })
+    const button = { isVisible: async () => studio,
+      getAttribute: async () => String(open),
+      click: async () => { events.push(open ? 'close Studio' : 'open Studio'); open = !open } }
+    const monitorChildren = ['another-tool', ...(missingJob ? [] : ['count-by-layer'])]
+    const monitor = { filter: ({ has }) => {
+      assert.ok(has)
+      return { getByText: (text, options) => {
+        assert.equal(text, 'count-by-layer'); assert.equal(options.exact, true)
+        assert.equal(monitorChildren.indexOf(text), missingJob ? -1 : 1)
+        return { first: () => node('monitor job') }
+      } }
+    } }
+    const page = {
+      request: { get: async url => {
+        assert.equal(url, '/api/jobs'); events.push('jobs')
+        return { ok: () => true, json: async () => ({ jobs: [{ job_id: 'pending-id' }] }) }
+      } },
+      getByRole: (role, options) => {
+        if (role === 'navigation') return { getByRole: (role, options) => {
+          assert.equal(role, 'button'); assert.equal(options.name, 'Studio'); return button
+        } }
+        if (role === 'region') {
+          assert.equal(options.name, 'Studio sidebar')
+          return { locator: selector => {
+            assert.equal(selector, 'aside.rail')
+            return monitor
+          }, getByRole: (role, options) => {
+            assert.equal(role, 'heading'); assert.ok(options.name.test('Job monitor (1 live)'))
+            return node('monitor heading')
+          } }
+        }
+        if (role === 'heading') {
+          assert.ok(options.name.test('Job monitor'))
+          return node('heading filter')
+        }
+        assert.equal(studio, false, 'Studio must never query a spine control')
+        assert.equal(role, 'button')
+        if (typeof options.name !== 'string') return { isVisible: async () => true,
+          click: async () => { events.push('expand spine') } }
+        assert.equal(options.name, 'Collapse the job monitor to a spine')
+        return node('spine wait')
+      },
+      locator: selector => {
+        if (selector === '.toast[role="status"]') return { getByText: (text, options) => {
+          assert.equal(text, 'Stopped following count-by-layer. It keeps running; find it in Jobs.')
+          assert.equal(options.exact, true); return node('toast')
+        } }
+        if (selector === '.strip-running') return { get countValue() { events.push('strip'); return 0 } }
+        if (selector === '#project-workspace-activity') return node('Studio visible')
+        if (selector === 'aside.rail .rail-ledger') return { countValue: 1 }
+        assert.equal(selector, 'aside.rail')
+        assert.equal(studio, false, 'Studio must search inside its sidebar region')
+        return { getByText: () => ({ first: () => node('legacy job') }) }
+      },
+    }
+    const assertions = value => ({ ...expect(value),
+      toHaveAttribute: async (name, expected) => assert.equal(await value.getAttribute(name), expected),
+    })
+    const runtime = { page, evidence: { pendingRun: { jobId: 'pending-id' } }, testInfo: { project: { name: 'desktop' } } }
+    const operation = () => assertEffect({ assertion: { target: 'escape:running' } }, runtime, {}, {}, assertions)
+    if (studio && missingJob) await assert.rejects(operation())
+    else {
+      await operation()
+      assert.equal(runtime.evidence.pendingRun.detached, true)
+    }
+    assert.deepEqual(events.slice(0, 3), ['toast', 'strip', 'jobs'])
+    assert.equal(open, initialOpen)
+    if (studio) {
+      assert.ok(events.includes('monitor heading'))
+      assert.ok(events.includes('monitor job'))
+      assert.equal(events.filter(event => event === 'open Studio').length, initialOpen ? 0 : 1)
+      assert.equal(events.filter(event => event === 'close Studio').length, initialOpen ? 0 : 1)
+      assert.equal(events.includes('spine wait'), false)
+    } else assert.ok(events.includes('expand spine') && events.includes('spine wait') && events.includes('legacy job'))
+  }
+})
+
 test('running Escape requires the detach message and removal of the running strip', async () => {
   const runtime = { evidence: { pendingRun: { jobId: 'pending-id' } }, testInfo: { project: { name: 'desktop' } }, page: {
     request: { get: async () => ({ ok: () => true, json: async () => ({ jobs: [{ job_id: 'pending-id' }] }) }) },
-    getByRole: () => ({ isVisible: async () => false, visible: true }),
+    getByRole: role => role === 'navigation'
+      ? { getByRole: () => ({ isVisible: async () => false }) }
+      : { isVisible: async () => false, visible: true },
     locator: (selector) => {
       if (selector === '.strip-running') return { countValue: 0 }
       if (selector === 'aside.rail .rail-ledger') return { countValue: 1 }
@@ -3210,6 +7349,10 @@ oracleAssertions.poll = (read) => ({ toBe: async (expected) => assert.equal(awai
 test('Jobs desktop setup expands and collapses the rail without querying phone panels', async () => {
   let open = false
   const page = { getByRole: (role, options) => {
+    if (role === 'navigation') {
+      assert.equal(options.name, 'Workspace controls')
+      return { getByRole: () => ({ isVisible: async () => false }) }
+    }
     assert.equal(role, 'button')
     const collapse = options.name === 'Collapse the job monitor to a spine'
     if (!collapse) assert.ok(options.name.test('Expand the job monitor (2 live)'))
@@ -3263,7 +7406,7 @@ test('no-rung keyboard actions preserve the workspace, refuse dispatch and leave
     const page = {
       on: (_, callback) => { requestObserver = callback }, off: () => {},
       evaluate: async (callback) => callback.toString().includes('requestAnimationFrame') ? undefined : structuredClone(state),
-      getByRole: (role) => role === 'combobox' ? input : { getByRole: () => ({ first: () => ({ focus: async () => {} }) }) },
+      getByRole: (role) => role === 'combobox' ? input : { getByRole: () => ({ isVisible: async () => false, first: () => ({ focus: async () => {} }) }) },
       keyboard: { press: async (pressed) => assert.equal(pressed, key) },
     }
     const probe = { featureId, kind: 'action', state: 'ready', locator: { trigger: 'keyboard', key }, assertion: { kind: 'disabled_with_reason' } }
@@ -3326,6 +7469,97 @@ function refusalRuntime() {
   } }
   return { runtime, state }
 }
+
+test('WL39b vertex-index setup fills the named input and requires idle Delete vertex', async () => {
+  const events = []
+  const button = { disabled: false }
+  const runtime = { evidence: {}, page: { getByTestId: (id) => {
+    assert.equal(id, 'cad-edit-workbench')
+    return { getByRole: (role, options) => {
+      assert.equal(options.exact, true)
+      if (role === 'textbox') {
+        assert.equal(options.name, 'vertex index')
+        return { fill: async value => events.push(['fill', value]) }
+      }
+      assert.equal(role, 'button'); assert.equal(options.name, 'Delete vertex')
+      return button
+    } }
+  } } }
+  await setupStep({}, runtime, { kind: 'vertex-index', value: '-1' }, oracleAssertions)
+  assert.deepEqual(events, [['fill', '-1']])
+  button.disabled = true
+  await assert.rejects(setupStep({}, runtime, { kind: 'vertex-index', value: '-1' }, oracleAssertions))
+})
+
+test('WL39b fake activation uses the real refusal oracle and typed red-hat verdict on both viewports', async () => {
+  const entry = buildFeatureMap().entries.find(row => row.id === 'control:delete-vertex')
+  for (const viewport of entry.viewports) for (const fault of [null, 'geometry', 'selection', 'history', 'clipboard', 'versions', 'dispatches', 'status']) {
+    const probe = resolveProbe(entry, 'invalid-vertex')
+    const { runtime, state } = refusalRuntime()
+    state.geometry.entities = [{ id: '1', type: 'LINE', vertices: [[0, 0], [10, 0]], layer: 'Walk' }]
+    state.selection = 'LINE #1; layer Walk'
+    state.status = ''
+    const evidence = runtime.evidence
+    Object.assign(evidence, { schema: 'leaf.walk-evidence.v1', featureId: probe.featureId, state: probe.state, viewport })
+    const observers = runtime.walkPersonaObservers = createWalkPersonaObservers({ probe, viewport, evidence })
+    const before = await captureEngineRefusal(runtime)
+    await observers.observe('red-hat', 'before', before)
+    let clicks = 0
+    const locator = { click: async () => {
+      clicks++
+      state.status = fault === 'status' ? '' : probe.assertion.refusal
+      if (fault === 'geometry') state.geometry.entities[0].layer = 'Changed'
+      if (fault === 'selection') state.selection = 'no selection'
+      if (fault === 'history') state.history[0].disabled = false
+      if (fault === 'clipboard') state.clipboard.title = 'changed'
+      if (fault === 'versions') state.versions.head++
+      if (fault === 'dispatches') state.dispatches.push({ type: 'edit', op: 'deleteVertex' })
+    } }
+    await locator.click()
+    let originalError
+    const assertions = value => ({ ...oracleAssertions(value),
+      toEqual: expected => {
+        try { oracleAssertions(value).toEqual(expected) }
+        catch (error) { originalError = error; throw error }
+      },
+      toHaveText: async expected => {
+        try { await oracleAssertions(value).toHaveText(expected) }
+        catch (error) { originalError = error; throw error }
+      },
+    })
+    const check = () => runProbeOracle(probe, runtime, locator, before, assertions)
+    if (fault) await assert.rejects(check(), error => error === originalError)
+    else await check()
+    assert.equal(clicks, 1)
+    assert.equal(evidence.engineRefusal.observed, state.status)
+    const verdict = redHat.evaluate(evidence).status
+    assert.equal(verdict, fault === 'status' ? 'unknown' : fault ? 'finding' : 'pass', `${viewport}/${fault}`)
+    if (fault !== 'status') {
+      assert.ok(evidence.personaFragments.some(fragment => fragment.persona === 'red-hat'))
+      assert.equal(evidence.measurements.reference, `walk:${probe.featureId}[${probe.state}]@${viewport}`)
+    }
+  }
+})
+
+test('WL39c failure-path observer errors are value-free and preserve the original oracle error', async () => {
+  const probe = resolveProbe(buildFeatureMap().entries.find(row => row.id === 'control:delete-vertex'), 'invalid-vertex')
+  const { runtime, state } = refusalRuntime()
+  const before = await captureEngineRefusal(runtime)
+  state.status = probe.assertion.refusal
+  state.dispatches.push({ type: 'edit', op: 'deleteVertex' })
+  const originalError = new Error('original functional error')
+  const assertions = value => ({ ...oracleAssertions(value), toEqual: () => { throw originalError } })
+  let finishes = 0
+  runtime.walkPersonaObservers = { observe: async () => {}, finish: async () => {
+    finishes++
+    throw new Error('private-observer-value')
+  } }
+  await assert.rejects(runProbeOracle(probe, runtime, {}, before, assertions), error => error === originalError)
+  assert.equal(finishes, 1)
+  assert.deepEqual(runtime.evidence.measurementDiagnostics,
+    [{ persona: 'red-hat', message: 'Optional persona observation failed' }])
+  assert.equal(JSON.stringify(runtime.evidence).includes('private-observer-value'), false)
+})
 
 test('engine refusal requires exact text and preserves geometry, selection, history, clipboard and dispatch', async () => {
   for (const field of ['status', 'geometry', 'selection', 'history', 'clipboard', 'versions', 'dispatches']) {

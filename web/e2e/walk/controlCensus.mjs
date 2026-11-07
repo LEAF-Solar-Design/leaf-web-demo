@@ -3,6 +3,8 @@ import { readControlInventory, resolveCensus, censusFailure, controlNameAttribut
 import { PRODUCT_SURFACES } from '../../src/site/productSurfaces.js'
 
 export { resolveCensus } from '../../walk/controlInventory.mjs'
+// The studio shell wraps the same rail column in a named region, which is not part of a control's identity.
+export const SHELL_WRAPPER_SCOPES = Object.freeze(['region:"Studio sidebar"'])
 export const INTERACTIVE_SELECTOR = 'button,a[href],area[href],input:not([type="hidden"]),select,textarea,summary,[contenteditable]:not([contenteditable="false"]),[role],[tabindex]'
 const interactiveRoles = ['button', 'link', 'checkbox', 'radio', 'switch', 'textbox', 'searchbox', 'combobox',
   'listbox', 'option', 'slider', 'spinbutton', 'tab', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'treeitem',
@@ -21,7 +23,7 @@ function snapshotIdentity(snapshot, fallback) {
 
 export async function enumerateControls(page) {
   const all = page.locator(INTERACTIVE_SELECTOR)
-  const controls = await all.evaluateAll((elements, { roles, containers }) => elements.map((element, index) => {
+  const controls = await all.evaluateAll((elements, { roles, containers, shellWrapperScopes }) => elements.map((element, index) => {
     const tag = element.tagName.toLowerCase(), explicitRole = element.getAttribute('role')?.split(/\s+/)[0]
     const nativeRoles = { button: 'button', a: 'link', area: 'link', select: element.multiple ? 'listbox' : 'combobox',
       textarea: 'textbox', summary: 'button', main: 'main', nav: 'navigation', aside: 'complementary',
@@ -58,11 +60,12 @@ export async function enumerateControls(page) {
       const name = named ? label(node) : node.tagName === 'FIELDSET' ? normalize(node.querySelector('legend')?.textContent) : ''
       if (name && ['main', 'navigation', 'complementary', 'banner', 'contentinfo', 'region', 'form', 'group',
         'toolbar', 'tablist', 'dialog', 'menu', 'menubar', 'listbox', 'tree', 'grid'].includes(landmark)) {
-        chain.unshift(`${landmark}:${JSON.stringify(name)}`)
+        const scope = `${landmark}:${JSON.stringify(name)}`
+        if (!shellWrapperScopes.includes(scope)) chain.unshift(scope)
       }
     }
     return { index, role, name: label(element), scope: chain.join(' > ') || 'document', disabled, visible }
-  }), { roles: interactiveRoles, containers: containerRoles })
+  }), { roles: interactiveRoles, containers: containerRoles, shellWrapperScopes: SHELL_WRAPPER_SCOPES })
   for (const control of controls.filter(Boolean)) {
     if (control.visible) Object.assign(control, snapshotIdentity(await all.nth(control.index).ariaSnapshot(), control))
     Object.assign(control, controlNameAttributes(control.name))
@@ -80,13 +83,23 @@ function recipeLocator(page, recipe) {
   return scope.getByRole(recipe.role, { name: recipe.name, exact: recipe.exact !== false })
 }
 
+export async function activeToolbarProfile(page) {
+  const select = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+    .getByRole('combobox', { name: 'Workspace profile', exact: true })
+  if (await select.count() === 1) {
+    const value = await select.inputValue()
+    return PRODUCT_SURFACES.find((surface) => surface.id === value)?.contract.toolbar?.profile
+  }
+  const selected = page.getByRole('tablist', { name: 'Workspace profile', exact: true }).getByRole('tab', { selected: true })
+  const selectedName = await selected.count() === 1 ? await selected.getAttribute('aria-label') : null
+  return PRODUCT_SURFACES.find((surface) => surface.label === selectedName)?.contract.toolbar?.profile
+}
+
 export async function censusControls(page, map, { state = 'ready', viewport = 'desktop', inventory = readControlInventory(map) } = {}) {
   // Enumerate first, independently of coverage, so missing registry entries
   // cannot remove controls from the census.
   const controls = await enumerateControls(page)
-  const selected = page.getByRole('tablist', { name: 'Workspace profile', exact: true }).getByRole('tab', { selected: true })
-  const selectedName = await selected.count() === 1 ? await selected.getAttribute('aria-label') : null
-  const profile = PRODUCT_SURFACES.find((surface) => surface.label === selectedName)?.contract.toolbar?.profile
+  const profile = await activeToolbarProfile(page)
   const derived = registryCensusMappings(controls, map, { profile, viewport })
   for (const entry of map.entries) {
     if (!entry.viewports.includes(viewport)) continue

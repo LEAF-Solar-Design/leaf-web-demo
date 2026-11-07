@@ -30,6 +30,8 @@
 // caller will retry forever.
 import { config, noteUnauthorized } from '../api.js'
 import { WORKSPACE_ORG_KEY } from '../controllers/workspace/createWorkspaceController.js'
+import { readActiveScope } from '../auth/activeScope.js'
+import { serviceState, serviceHeaders, serviceRequestAuthority } from '../lib/serviceAuthSession.js'
 
 const AUTH_KEY = 'leaf.jwt'
 // The actor's platform identity binding. platform/api.py has NO
@@ -50,10 +52,12 @@ function readStored(key) {
 }
 
 export function getStoredActorBindingId() {
+  if (serviceState().mode) return null
   return readStored(ACTOR_BINDING_KEY)
 }
 
 export function setStoredActorBindingId(id) {
+  if (serviceState().mode) return
   try {
     if (id) localStorage.setItem(ACTOR_BINDING_KEY, id)
     else localStorage.removeItem(ACTOR_BINDING_KEY)
@@ -75,6 +79,10 @@ function requireUuid(value, label) {
 
 // Read at call time (not module load) so a sign-in mid-session is picked up.
 function identityHeaders(orgId) {
+  const service = serviceState()
+  if (service.mode) {
+    return { ...serviceHeaders(config.apiBase), ...(service.identity?.org_id ? { 'X-Org-Id': service.identity.org_id } : {}) }
+  }
   const headers = {}
   const tok = readStored(AUTH_KEY)
   if (tok) headers.Authorization = `Bearer ${tok}`
@@ -117,10 +125,15 @@ function detailOf(body) {
 }
 
 async function request(path, opts = {}) {
-  const headers = { ...(opts.headers || {}), ...identityHeaders(opts.orgId) }
-  const { orgId: _ignored, ...init } = opts
+  const { responseType, expectedScope, ...options } = opts
+  if (expectedScope !== undefined && readActiveScope() !== expectedScope) {
+    throw new Error('Your account changed. Open the project again.')
+  }
+  const headers = { ...(options.headers || {}), ...identityHeaders(options.orgId) }
+  const { orgId: _ignored, ...init } = options
+  const serviceAuthority = serviceRequestAuthority()
   const res = await fetch(`${config.apiBase}${path}`, { ...init, headers })
-  if (res.status === 401) noteUnauthorized(res, path, headers.Authorization)
+  if (res.status === 401) noteUnauthorized(res, path, headers.Authorization, { serviceAuthority })
   if (!res.ok) {
     let body = null
     try { body = await res.clone().json() } catch { /* non-JSON error body */ }
@@ -137,7 +150,62 @@ async function request(path, opts = {}) {
     throw e
   }
   if (res.status === 204) return {}
+  if (responseType === 'blob') return res.blob()
   return res.json()
+}
+
+export function listProjectPhotos(projectId, { cursor, signal, expectedScope } = {}) {
+  const id = requireUuid(projectId, 'project')
+  return request(`/api/projects/${id}/materials${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`, { signal, expectedScope })
+}
+
+export function uploadProjectPhoto(projectId, file, { signal, expectedScope } = {}) {
+  const id = requireUuid(projectId, 'project')
+  if (!file || !file.size || file.size > 16 * 1024 * 1024) throw new Error('Choose a photo smaller than 16 MB.')
+  return request(`/api/projects/${id}/materials/images?filename=${encodeURIComponent(file.name)}`, {
+    method: 'POST', body: file, headers: { 'Content-Type': file.type || 'application/octet-stream' }, signal, expectedScope,
+  })
+}
+
+export function readProjectPhotoPreview(projectId, materialId, { signal, expectedScope } = {}) {
+  const id = requireUuid(projectId, 'project')
+  const material = requireUuid(materialId, 'photo')
+  return request(`/api/projects/${id}/materials/${material}/content?variant=preview`, {
+    signal, expectedScope, responseType: 'blob', cache: 'no-store',
+  })
+}
+
+export function listProjectReferences(projectId, { cursor, signal, expectedScope } = {}) {
+  const id = requireUuid(projectId, 'project')
+  const after = cursor ? requireUuid(cursor, 'reference cursor') : null
+  return request(`/api/projects/${id}/reference-files${after ? `?cursor=${encodeURIComponent(after)}` : ''}`, {
+    signal, expectedScope, cache: 'no-store',
+  })
+}
+
+export function uploadProjectReference(projectId, file, { signal, expectedScope } = {}) {
+  const id = requireUuid(projectId, 'project')
+  const name = String(file?.name || '').toLowerCase()
+  const extension = name.endsWith('.jsonl.gz') ? 'jsonl.gz' : name.split('.').pop()
+  const mediaType = { mov: 'video/quicktime', txt: 'text/plain', json: 'application/json', 'jsonl.gz': 'application/gzip' }[extension]
+  const maximum = ['mov', 'jsonl.gz'].includes(extension) ? 64 * 1024 * 1024 : 8 * 1024 * 1024
+  if (!mediaType || !file?.size || file.size > maximum) {
+    throw new Error('Choose an original MOV or gzip JSONL up to 64 MiB, or UTF-8 TXT/JSON up to 8 MiB.')
+  }
+  if (file.type && file.type !== 'application/octet-stream' && file.type.split(';')[0].toLowerCase() !== mediaType) {
+    throw new Error('The file extension and content type must agree (MOV, UTF-8 TXT/JSON or gzip JSONL).')
+  }
+  return request(`/api/projects/${id}/reference-files?filename=${encodeURIComponent(file.name)}`, {
+    method: 'POST', body: file, headers: { 'Content-Type': mediaType }, signal, expectedScope,
+  })
+}
+
+export function readProjectReferenceOriginal(projectId, materialId, { signal, expectedScope } = {}) {
+  const id = requireUuid(projectId, 'project')
+  const material = requireUuid(materialId, 'reference')
+  return request(`/api/projects/${id}/reference-files/${material}/content`, {
+    signal, expectedScope, responseType: 'blob', cache: 'no-store',
+  })
 }
 
 function mutation(method, body) {
@@ -170,6 +238,28 @@ export async function createBlankProject(name, orgId) {
 export async function getOrgIdentities(orgId) {
   const id = requireUuid(orgId, 'organization')
   return request(`/api/orgs/${id}/identities`, { orgId: id })
+}
+
+export function createOrgInvitation(orgId, label) {
+  const id = requireUuid(orgId, 'organization')
+  return request(`/api/orgs/${id}/invitations`, {
+    ...mutation('POST', { label: String(label ?? '').trim() || undefined }), orgId: id,
+  })
+}
+
+export function listOrgInvitations(orgId) {
+  const id = requireUuid(orgId, 'organization')
+  return request(`/api/orgs/${id}/invitations`, { orgId: id })
+}
+
+export function revokeOrgInvitation(orgId, invitationId) {
+  const id = requireUuid(orgId, 'organization')
+  const invitation = requireUuid(invitationId, 'invitation')
+  return request(`/api/orgs/${id}/invitations/${invitation}`, { ...mutation('DELETE'), orgId: id })
+}
+
+export function acceptOrgInvitation(token) {
+  return request('/api/invitations/accept', mutation('POST', { token }))
 }
 
 // PUT an owner-entered label on an existing organization binding.

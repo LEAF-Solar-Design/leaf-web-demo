@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { config } from '../../api.js'
+import { humanizeError } from '../../errorHumanize.js'
 import HistoryView from './HistoryView.jsx'
 import LabSaveBar from './LabSaveBar.jsx'
 import LabDiffView from './LabDiffView.jsx'
@@ -609,8 +610,19 @@ describe('Strategy revision ledger', () => {
       await expect(client.publish(id, 1)).rejects.toThrow('Enter a valid Document ID.')
     }
     expect(fetchImpl).not.toHaveBeenCalled()
-    expect(await client.save('strategy', first, null)).toEqual({ ok: false, status: 413, detail: 'Something went wrong. Try again.' })
+    expect(await client.save('strategy', first, null)).toEqual({ ok: false, status: 413, detail: 'This document is too large to save.' })
     expect(client.state.events).toEqual([])
+  })
+
+  it('maps a capacity 413 and a bare 413 to plain sentences', async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(response({ detail: 'lab_capacity_exceeded' }, 413))
+      .mockResolvedValueOnce(response({}, 413))
+      .mockResolvedValueOnce(response({ detail: 'lab_store_unavailable' }, 503))
+    const client = createLabArtifactsClient({ fetchImpl })
+    expect(await client.save('strategy', first, null)).toEqual({ ok: false, status: 413, detail: 'This save is over the Lab storage limit.' })
+    expect(await client.save('strategy', first, null)).toEqual({ ok: false, status: 413, detail: 'This document is too large to save.' })
+    expect(await client.save('strategy', first, null)).toEqual({ ok: false, status: 503, detail: humanizeError('lab_store_unavailable') })
   })
 
   it('bounds event history and notifies subscribers until they unsubscribe', async () => {

@@ -22,7 +22,7 @@ import tool_validate
 from leaf_platform import canonical_jobs as jobs, entitlements
 from solar_design_graph import GraphValidationError
 from test_sip_r3a_graph import UNITS, prepare as seed, publish, refused
-from test_sip_r3b_tools import chain, memory, manifest, prepare  # noqa: F401
+from test_sip_r3b_tools import TOOLS, chain, memory, manifest, prepare  # noqa: F401
 from test_sip_r3b_chain import ELEVEN, S, E, PANELS, rev4, commit, through_string
 from test_w1_design_graph import graph as graph_fixture  # noqa: F401
 from test_w1_equipment import case, equipment, licensed  # noqa: F401
@@ -32,6 +32,7 @@ SIMPLE = {"expected_rev": 1}
 M = {"expected_rev": 4, "operation": "add-strings", "string_length": 2,
      "ordered_panel_refs": PANELS}
 CLEAN = {
+    "solar-solaredge-accept": {"expected_rev": 1, "report_artifact_id": "a" * 64},
     "solar-correct-string": {"expected_rev": 1, "settings_changes": {"num_mppt": 2}},
     # R3e-2: grouping joins ordinary admission; nested validation still runs in preparation.
     "solar-panel-groups": {
@@ -145,7 +146,7 @@ def submit(a, **changes):
 
 
 def test_sip_r4_membership_and_worker_choice(monkeypatch):
-    assert graph.SUPPORTED_TOOLS == ELEVEN
+    assert graph.SUPPORTED_TOOLS == TOOLS and len(TOOLS) == 18
     assert set(worker.ADAPTERS) == {worker.autofill.TOOL_NAME, worker.arlo_design.TOOL_NAME}
     assert inspect.signature(worker.run_once).parameters["tool_name"].default == worker.autofill.TOOL_NAME
     source = inspect.getsource(worker.main)
@@ -161,7 +162,7 @@ def test_sip_r4_membership_and_worker_choice(monkeypatch):
             worker.main()
         assert exc.value.code == 0
     choice = next(action for action in parsers[0]._actions if action.dest == "tool")
-    assert choice.choices == sorted(set(worker.ADAPTERS) | ELEVEN)
+    assert choice.choices == sorted(set(worker.ADAPTERS) | TOOLS)
     assert choice.default == worker.autofill.TOOL_NAME
     calls = []
     monkeypatch.setattr(service, "run_once", lambda *a, **k: calls.append((a, k)) or False)
@@ -408,6 +409,7 @@ def test_sip_r4_every_tool_prepared_at_admission(admission, monkeypatch):
 
 
 PREREQUISITE_REFUSALS = {
+    "solar-solaredge-accept": "ARTIFACT_NOT_FOUND",
     "solar-panel-groups": "SIZING_CONFIRMATION_REQUIRED",
     "solar-assign-equipment": "SIZING_CONFIRMATION_REQUIRED", "solar-combiners": "VALID_SETTINGS_REQUIRED",
     "solar-feeders": "VALID_SETTINGS_REQUIRED", "solar-homeruns": "EQUIPMENT_ASSIGNMENT_REQUIRED",
@@ -420,8 +422,8 @@ PREREQUISITE_REFUSALS = {
 
 def test_sip_r4_prerequisite_refusals_at_admission(admission, monkeypatch):
     # On a seeded parent at the right revision the tool's own preparation decides admission, not only the
-    # context and revision checks: ten tools refuse with the worker's own code before the insert and the
-    # entitlement read, and the three with no unmet prerequisite are admitted.
+    # context and revision checks: eleven tools refuse with the worker's own code before the insert and the
+    # entitlement read, and the remaining tools are admitted.
     a = admission
     ctx = chain(a.s, 1)[-1][2]
     for tool, code in sorted(PREREQUISITE_REFUSALS.items()):
@@ -840,7 +842,8 @@ def test_sip_r4_terminal_evidence(memory, monkeypatch):
                         "receipt": json.loads(p.receipt_bytes)}
     source = inspect.getsource(platform_complete)
     for text in ("canonical-project-graph-success", "solar.graph.completed",
-                 "history.operation.appended", "lease_expires_at>clock_timestamp()"):
+                 "history.operation.appended", "FOR UPDATE",
+                 "lease_owner=%(worker)s AND attempt=%(attempt)s"):
         assert text in source
     refused("SIP_R4_JOB_BINDING_MISMATCH", lambda:
         service.complete_project_graph_job(memory.job, "owner", 1, {}))

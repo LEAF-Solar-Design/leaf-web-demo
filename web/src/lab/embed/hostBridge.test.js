@@ -1,4 +1,21 @@
 import { createHash, webcrypto } from 'node:crypto'
+import { serviceSession } from '../../lib/serviceAuthSession.js'
+
+it('hashes the exact server-verified service subject and refuses a selector without proof', async () => {
+  const service = serviceSession()
+  const selector = '11111111-1111-4111-8111-111111111111'
+  const subject = 'verified-machine@clients'
+  try {
+    service.select(selector)
+    await expect(sessionPrincipalProof({ cryptoImpl: webcrypto })).rejects.toThrow('subject is unavailable')
+    await service.probe({ origin: window.location.origin, fetchImpl: async () => ({ ok: true, json: async () => ({
+      authenticated: true, binding_id: selector, expires_at: new Date(Date.now() + 60000).toISOString(),
+      identity: { subject, sub: subject, iss: 'issuer', org_id: null, tenant_id: 'tenant', principal_type: 'service_admin' },
+    }) }) })
+    expect(await sessionPrincipalProof({ cryptoImpl: webcrypto })).toBe(createHash('sha256').update(subject).digest('hex'))
+    await expect(sessionPrincipalProof({ storage: { getItem: () => null }, cryptoImpl: webcrypto })).rejects.toThrow('subject is unavailable')
+  } finally { service.human() }
+})
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { canonicalJSON, createContract } from '../contract.js'
 import embedSchema from '../contract/lab-embed.v1.schema.json'
@@ -169,6 +186,7 @@ describe('admitted Lab channel', () => {
   it('refuses publication before admission and validates the document and exact source', async () => {
     const h = harness()
     const request = { doc: createWidgetDoc(), source: { artifact_id: 'widget-1', revision: 1, digest: '0'.repeat(64) } }
+    request.doc.formats.la.h = 128
     expect(await h.bridge.publishWidget(request)).toEqual({ ok: false, reason: 'not_admitted' })
     await h.bridge.start()
     expect(await h.bridge.publishWidget(request)).toEqual({ ok: false, reason: 'not_admitted' })
@@ -177,6 +195,10 @@ describe('admitted Lab channel', () => {
     const invalidUnicode = createWidgetDoc()
     invalidUnicode.formats.la.els = [{ ...newElement(invalidUnicode), text: '\ud800' }]
     expect(await h.bridge.publishWidget({ ...request, doc: invalidUnicode })).toEqual({ ok: false, reason: 'invalid_doc' })
+    const tall = createWidgetDoc()
+    expect(validateWidgetDoc(tall)).toEqual(tall)
+    expect(await h.bridge.publishWidget({ ...request, doc: tall })).toEqual({ ok: false, reason: 'la_too_tall' })
+    expect(h.sent()).toEqual([])
     for (const source of [null, {}, { ...request.source, extra: true }, { ...request.source, digest: 'A'.repeat(64) },
       { ...request.source, revision: 0 }, { ...request.source, revision: 1.5 },
       { ...request.source, revision: Number.MAX_SAFE_INTEGER + 1 }, { ...request.source, artifact_id: '../widget' },
@@ -210,6 +232,7 @@ describe('admitted Lab channel', () => {
     await h.bridge.start()
     await h.admit()
     const doc = createWidgetDoc()
+    doc.formats.la.h = 128
     const { text, preset, ...element } = newElement(doc)
     doc.formats.la.els = Array.from({ length: 6 }, (_, index) => ({ ...element, id: `path${index}`, kind: 'svg-path', path: 'M' }))
     doc.formats.la.els.push({ ...newElement(doc), id: 'unicode', text: 'é' })

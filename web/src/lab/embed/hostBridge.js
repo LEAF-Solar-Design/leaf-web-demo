@@ -1,6 +1,8 @@
 import { canonicalJSON } from '../contract.js'
+import { serviceState } from '../../lib/serviceAuthSession.js'
 import { hostOrigins } from './hostOrigins.js'
 import { validateWidgetDoc } from '../widgets/widgetDoc.js'
+import { laFitProblem } from '../widgets/laFit.js'
 import { RENDERER_VERSION } from '../widgets/widgetCatalog.js'
 
 const HASH = /^[0-9a-f]{64}$/
@@ -22,6 +24,11 @@ async function sha256(text, cryptoImpl) {
 // Decoding identifies the already authenticated session; it never authenticates it.
 // The rail's server response remains the authority to start this bridge.
 export async function sessionPrincipalProof({ storage = globalThis.localStorage, cryptoImpl = globalThis.crypto } = {}) {
+  const service = serviceState(storage)
+  if (service.mode) {
+    if (!service.identity) throw new Error('Lab session subject is unavailable')
+    return sha256(service.identity.sub, cryptoImpl)
+  }
   const token = storage?.getItem('leaf.jwt')
   const part = token?.split('.')[1]
   if (!part) throw new Error('Lab session subject is unavailable')
@@ -222,6 +229,7 @@ export function createLabHostBridge({
         canonicalJSON(validated)
       }
       catch { return Promise.resolve({ ok: false, reason: 'invalid_doc' }) }
+      if (laFitProblem(validated)) return Promise.resolve({ ok: false, reason: 'la_too_tall' })
       if (!source || typeof source !== 'object' || Array.isArray(source)
         || Reflect.ownKeys(source).length !== 3
         || !['artifact_id', 'revision', 'digest'].every((key) => Object.hasOwn(source, key))

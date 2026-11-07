@@ -145,6 +145,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   const projectFingerprint = () => {
     if (!projectScope()) return null
     try {
+      if (current.catalogDiscovery) return JSON.stringify(['discovery', sortedJson(current.catalogDiscovery)])
       return JSON.stringify([solarDrawingBindingKey(current.solarBinding), current.authorityKey,
         services.projectSolarClient?.getSnapshot().leaseRevision,
         sortedJson(current.projectIntents || [])])
@@ -327,8 +328,14 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     track('route.outcome', { outcome, ...(route.tool ? { tool: route.tool } : {}) })
   }
 
+  const isUnmatchedDecision = (decision) => decision?.lane === 'run' && !decision.slash &&
+    (decision.tool == null || (typeof decision.tool === 'string' && !decision.tool.trim()) ||
+      ((projectScope() || current.projectConversationScope) &&
+        Array.isArray(current.surfaceFamilyIds) && current.surfaceFamilyIds.length === 0))
+
   const commitDecision = (decision, { routeOutcome = 'invalidated', requestText = null } = {}) => {
-    const reason = decision?.lane === 'run' && solarRefusal(decision.tool, projectScope() ? decision.params ?? {} : decision.params)
+    const unmatched = isUnmatchedDecision(decision)
+    const reason = decision?.lane === 'run' && !unmatched && solarRefusal(decision.tool, projectScope() ? decision.params ?? {} : decision.params)
     if (reason) {
       adapters.dismissDecision?.()
       publish({ route: null, routeError: reason })
@@ -338,7 +345,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
       (typeof decision.tool !== 'string' || !decision.tool.trim())
     const count = refused ? (requestText === lastRefusedText ? refusedCount + 1 : 1) : 0
     const nextDecision = count >= 2 ? { ...decision, repeat: count } : decision
-    const committed = adapters.commitDecision ? adapters.commitDecision(nextDecision) : nextDecision
+    const committed = !unmatched && adapters.commitDecision ? adapters.commitDecision(nextDecision) : nextDecision
     if (committed !== undefined) {
       lastRefusedText = refused ? requestText : null
       refusedCount = count
@@ -368,6 +375,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     if (current.guestReadsPaused) return undefined
     const request = ++catalogRequest
     const project = projectScope()
+    const discovery = project && current.catalogDiscovery
     const fingerprint = projectFingerprint()
     const mock = current.mock
     const projectClient = services.projectSolarClient
@@ -393,7 +401,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     }
     publish({ catalogError: null })
     try {
-      if (project) {
+      if (project && !discovery) {
         if (!requestIsCurrent()) return undefined
         const clientScope = projectClient?.getSnapshot?.()
         if (!sameSolarDrawingBinding(current.solarBinding, clientScope?.binding) ||
@@ -417,7 +425,10 @@ export function createCatalogController({ services, adapters = {}, context = {} 
         }
         if (!isCurrent()) return undefined
       }
-      const catalog = project ? await services.getCapabilities(mock, {
+      if (discovery) isCurrent = requestIsCurrent
+      const catalog = discovery ? await services.getCapabilities(mock, {
+        catalogDiscovery: discovery,
+      }, { signal: catalogAbort.signal }) : project ? await services.getCapabilities(mock, {
         solarBinding: capturedBinding,
         authorityKey: capturedAuthorityKey,
         projectIntents,
@@ -445,6 +456,11 @@ export function createCatalogController({ services, adapters = {}, context = {} 
       if (project) {
         if (!isCurrent()) return undefined
         for (const [name, entitlement] of learned) learnedSolar.set(name, entitlement)
+        if (discovery) {
+          // Discovery is display-only: never issue a project admission receipt.
+          publish({ catalog: projectCatalogData, openFamilies, projectCatalog: null })
+          return projectCatalogData
+        }
         acceptedPreview = fingerprint
         publish({
           catalog: projectCatalogData,
@@ -519,7 +535,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     })
   }
 
-  const dispatch = async (override, { allowSecretOnce = false } = {}) => {
+  const dispatch = async (override, { allowSecretOnce = false, images = [] } = {}) => {
     // --- credential refusal: THE RENDER CHANNEL, not the guard (round 3) ---
     // The GUARD now sits on the wire (lib/secretGuardTransport.js, called by
     // api.nlPrompt and converse.postMessage). This function no longer decides
@@ -539,7 +555,8 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     // point, so a new bar cannot be added around it.
     //
     const activeDraft = ensureDraft()
-    const text = (typeof override === 'string' ? override : state.prompt).trim()
+    const originalText = typeof override === 'string' ? override : state.prompt
+    const text = originalText.trim()
     if (!text || state.routing || current.running) return undefined
     const generation = ++dispatchGeneration
     const scope = projectFingerprint()
@@ -588,12 +605,19 @@ export function createCatalogController({ services, adapters = {}, context = {} 
       const routed = await services.routePrompt(current.mock, text, state.tools, { allowSecretOnce })
       if (!requestIsCurrent()) return undefined
       const decision = solveRunDecision(routed)
-      if (decision.lane === 'run' && solarRefusal(decision.tool, decision.params)) {
+      const unmatched = isUnmatchedDecision(decision)
+      if (decision.lane === 'run' && !unmatched && solarRefusal(decision.tool, decision.params)) {
         return commitDecision(decision, { requestText: text })
       }
       const confidence = Number(decision.confidence) || 0
+      if (decision.lane === 'build' && adapters.openProjectSource) {
+        const handled = await adapters.openProjectSource(originalText, { allowSecretOnce,
+          ...(Array.isArray(images) && images.length ? { images } : {}) })
+        if (!requestIsCurrent()) return undefined
+        if (handled) return decision
+      }
       const chipOnly = current.agentDisabled ||
-        (decision.lane === 'run' && !!decision.tool && confidence >= thresholds.CHIP_ONLY)
+        (decision.lane === 'run' && !unmatched && !!decision.tool && confidence >= thresholds.CHIP_ONLY)
 
       if (chipOnly) {
         commitDecision(decision, { requestText: text })
@@ -607,7 +631,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
         }
         publish({ agentBanner: null })
         if (!requestIsCurrent()) return undefined
-        if (decision.lane === 'run' && !!decision.tool &&
+        if (decision.lane === 'run' && !unmatched && !!decision.tool &&
             (confidence >= thresholds.RACE_MIN || decision.routedLane === 'solve')) {
           commitDecision(decision, { requestText: text })
           try {
@@ -772,7 +796,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
       const modeChanged = Object.prototype.hasOwnProperty.call(next, 'mock') && next.mock !== current.mock
       const pausedChanged = Object.prototype.hasOwnProperty.call(next, 'guestReadsPaused') &&
         !!next.guestReadsPaused !== !!current.guestReadsPaused
-      const drawingChanged = ['drawingId', 'drawing_id', 'projectId', 'project_id',
+      const drawingChanged = ['drawingId', 'drawing_id', 'projectId', 'project_id', 'projectConversationScope',
         'drawingVersion', 'drawing_version'].some((key) =>
         Object.prototype.hasOwnProperty.call(next, key) && next[key] !== current[key])
       const derivedChanged = Object.prototype.hasOwnProperty.call(next, 'entitlements') &&

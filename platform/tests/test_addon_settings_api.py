@@ -102,8 +102,60 @@ def test_get_all_addons_default_off(route):
     client, _ = route
     response = client.get(f"/api/orgs/{ORG}/addons")
     assert response.status_code == 200
-    assert response.json() == {"addons": {
-        addon: {"mode": "off", "byo_ref": None} for addon in tenant_cost_store.ADDONS}}
+    assert response.json() == {"schema": "leaf.addons.v1", "reader_version": 1, "addons": {
+        addon: {"mode": "off", "byo_ref": None, "min_reader_version": 1}
+        for addon in tenant_cost_store.ADDONS}}
+
+
+def test_catalog_wire(route):
+    client, state = route
+    setting = {"mode": "byo", "byo_ref": "credentials/own-aps"}
+    response = put(client, setting)
+    assert response.status_code == 200
+    assert response.json() == setting
+    response = client.get(f"/api/orgs/{ORG}/addons")
+    assert response.status_code == 200
+    catalog = response.json()
+    assert catalog["schema"] == "leaf.addons.v1"
+    assert catalog["reader_version"] == 1
+    assert set(catalog["addons"]) == set(tenant_cost_store.ADDONS)
+    assert all(entry["min_reader_version"] == 1 for entry in catalog["addons"].values())
+    assert catalog["addons"]["aps_solve"] == {**setting, "min_reader_version": 1}
+    assert {addon: {key: entry[key] for key in ("mode", "byo_ref")}
+            for addon, entry in catalog["addons"].items()} == {
+        addon: setting if addon == "aps_solve" else {"mode": "off", "byo_ref": None}
+        for addon in tenant_cost_store.ADDONS}
+    assert state["settings"] == {"aps_solve": setting}
+    state["writes"].clear()
+    state["connections"].clear()
+
+    for addon in ("future_addon", "__proto__", "constructor", "prototype"):
+        response = put(client, {"mode": "off"}, addon=addon)
+        assert response.status_code == 404
+        assert response.json()["detail"] == "addon not found"
+    for body in ({"mode": "future"}, {"mode": "byo"},
+                 {"mode": "managed", "byo_ref": "credentials/own-aps"},
+                 {"mode": "off", "reader_version": 99},
+                 {"mode": "off", "min_reader_version": 99}):
+        assert put(client, body).status_code == 422
+    state["lookups"].clear()
+    other_org = uuid.uuid4()
+    for response in (client.get(f"/api/orgs/{other_org}/addons"),
+                     put(client, {"mode": "off"}, org=other_org)):
+        assert response.status_code == 404
+        assert response.json()["detail"] == "org not found"
+    assert state["lookups"] == []
+    state["known"] = False
+    for response in (client.get(f"/api/orgs/{ORG}/addons"), put(client, {"mode": "off"})):
+        assert response.status_code == 404
+        assert response.json()["detail"] == "org not found"
+    state["known"] = True
+    state["role"] = "reviewer"
+    response = put(client, {"mode": "managed"})
+    assert response.status_code == 403
+    assert response.json()["detail"] == "platform role does not permit mutation"
+    assert state["writes"] == state["connections"] == []
+    assert state["settings"] == {"aps_solve": setting}
 
 
 def test_get_cross_org_is_404(route):
@@ -130,8 +182,56 @@ def test_put_round_trip_and_verified_actor(route, setting):
     response = put(client, setting)
     assert response.status_code == 200
     assert response.json() == setting
-    assert client.get(f"/api/orgs/{ORG}/addons").json()["addons"]["aps_solve"] == setting
+    assert client.get(f"/api/orgs/{ORG}/addons").json()["addons"]["aps_solve"] == {
+        **setting, "min_reader_version": 1}
     assert state["writes"] == [("aps_solve", setting["mode"], setting["byo_ref"], SUBJECT)]
+
+
+def test_runner_put(route):
+    client, state = route
+    addon = "kashbot_runner"
+    ref = "kashbot-runner:7b51687d-2d39-47ac-b598-54f3d1fd9e22"
+    setting = {"mode": "byo", "byo_ref": ref}
+    assert client.get(f"/api/orgs/{ORG}/addons").json()["addons"][addon] == {
+        "mode": "off", "byo_ref": None, "min_reader_version": 1}
+    response = put(client, setting, addon=addon)
+    assert response.status_code == 200
+    assert response.json() == setting
+    assert client.get(f"/api/orgs/{ORG}/addons").json()["addons"][addon] == {
+        **setting, "min_reader_version": 1}
+    assert state["writes"] == [(addon, "byo", ref, SUBJECT)]
+    connections = list(state["connections"])
+    for body, detail in (
+        ({"mode": "managed"}, "mode must be byo or off for kashbot_runner"),
+        ({"mode": "byo"}, "byo_ref must be kashbot-runner:<runner_uuid>"),
+        ({"mode": "byo", "byo_ref": ref.upper()}, "byo_ref must be kashbot-runner:<runner_uuid>"),
+        ({"mode": "byo", "byo_ref": "kashbot-runner:" + str(ORG).upper()},
+         "byo_ref must be kashbot-runner:<runner_uuid>"),
+        ({"mode": "byo", "byo_ref": "credentials/runner"}, "byo_ref must be kashbot-runner:<runner_uuid>"),
+        ({"mode": "off", "byo_ref": ref}, "byo_ref must be null unless mode is byo"),
+    ):
+        response = put(client, body, addon=addon)
+        assert response.status_code == 422
+        assert response.json() == {"detail": detail}
+    assert put(client, {**setting, "actor": "forged"}, addon=addon).status_code == 422
+    assert put(client, setting, org=uuid.uuid4(), addon=addon).status_code == 404
+    state["known"] = False
+    assert put(client, setting, addon=addon).status_code == 404
+    state["known"] = True
+    state["role"] = "reviewer"
+    response = put(client, setting, addon=addon)
+    assert response.status_code == 403
+    assert response.json() == {"detail": "platform role does not permit mutation"}
+    assert state["writes"] == [(addon, "byo", ref, SUBJECT)]
+    assert state["settings"][addon] == setting
+    assert state["connections"] == connections
+    state["role"] = "editor"
+    response = put(client, {"mode": "off"}, addon=addon)
+    assert response.status_code == 200
+    assert response.json() == {"mode": "off", "byo_ref": None}
+    assert state["writes"][-1] == (addon, "off", None, SUBJECT)
+    assert client.get(f"/api/orgs/{ORG}/addons").json()["addons"][addon] == {
+        "mode": "off", "byo_ref": None, "min_reader_version": 1}
 
 
 @pytest.mark.parametrize("body,field", [

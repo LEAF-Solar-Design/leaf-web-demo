@@ -13,12 +13,22 @@ import uuid
 from . import campaign_execution as execution
 from .campaigns import CampaignError, CampaignConflict
 
-PLAN_CONTRACT = 'leaf.campaign-plan.v1'
+LEGACY_PLAN_CONTRACT = 'leaf.campaign-plan.v1'
+PLAN_CONTRACT = 'leaf.campaign-plan.v2'
+IMPLEMENTATION_POLICY = {
+    'web_framework': 'nextjs-app-router', 'ios_runtime': 'native', 'cad_runtime': 'native',
+}
+POLICY_PREFIX = (
+    'Server implementation policy (leaf.campaign-plan.v2):\n'
+    'All web surfaces use Next.js App Router. iOS and CAD execution remain native.\n'
+    'Apply each requirement only to its surface; do not convert native or non-web work to web.\n'
+    'This planning policy grants no execution or provider authority and proves no build compliance.\n\n'
+)
 VERIFY_COMMAND = 'python -m json.tool .leaf/campaign-plan.json'
 _KEY = r'[a-z0-9][a-z0-9._-]{0,63}'
 _CAPABILITY = r'[a-z][a-z0-9._-]{0,63}'
 _MAX_BYTES = 262144
-_INSTRUCTIONS = """Write only .leaf/campaign-plan.json, a bounded plan for the accepted prompt below.
+_INSTRUCTIONS_V1 = """Write only .leaf/campaign-plan.json, a bounded plan for the accepted prompt below.
 Do not implement the product, dispatch workers, publish, or access providers.
 Output strict UTF-8 JSON, at most 262144 bytes, with no duplicate or unknown keys,
 nonfinite numbers, budgets, tokens, or provider identities. All fields below are
@@ -49,6 +59,14 @@ All strings exclude NUL. The fixed json.tool check proves syntax only. Semantic
 validate_plan acceptance is mandatory before future task adoption. No generated
 task executes or receives budget from syntax success. Report planning only.
 """
+_INSTRUCTIONS = _INSTRUCTIONS_V1.replace(LEGACY_PLAN_CONTRACT, PLAN_CONTRACT).replace(
+    'summary: string 1..2000,',
+    'implementation_policy: {web_framework: "nextjs-app-router", ios_runtime: "native", '
+    'cad_runtime: "native"},\nsummary: string 1..2000,',
+).replace('spec: string 1..16384.', 'spec: string 1..' + str(16384 - len(POLICY_PREFIX)) + '.') + (
+    'implementation_policy is required, closed, server-owned and must match those literal values.\n'
+    + POLICY_PREFIX
+)
 
 
 def _invalid(reason):
@@ -114,8 +132,8 @@ def _path(value):
     return value
 
 
-def validate_plan(document, *, campaign_id, prompt_digest, source_sha):
-    """Parse, bind and normalize a closed v1 plan before any future adoption."""
+def validate_plan(document, *, campaign_id, prompt_digest, source_sha, expected_contract=None):
+    """Parse a closed versioned plan; adoption binds its version to the saved task."""
     try:
         if isinstance(document, dict):
             raw = json.dumps(document, ensure_ascii=False, allow_nan=False,
@@ -130,10 +148,20 @@ def validate_plan(document, *, campaign_id, prompt_digest, source_sha):
             _invalid('plan exceeds byte limit')
         value = json.loads(raw.decode('utf-8'), object_pairs_hook=_pairs,
                            parse_constant=lambda _: _invalid('nonfinite number'))
+        if not isinstance(value, dict):
+            _invalid('invalid plan object')
+        contract = value.get('contract')
+        if contract not in (LEGACY_PLAN_CONTRACT, PLAN_CONTRACT) or (
+                expected_contract is not None and contract != expected_contract):
+            _invalid('plan contract conflicts with planning task')
         _closed(value, ('contract', 'campaign_id', 'prompt_digest', 'source_sha',
-                        'summary', 'tasks', 'open_questions'))
-        if (value['contract'] != PLAN_CONTRACT
-                or not isinstance(value['campaign_id'], str)
+                        'summary', 'tasks', 'open_questions') +
+                (('implementation_policy',) if contract == PLAN_CONTRACT else ()))
+        if contract == PLAN_CONTRACT:
+            _closed(value['implementation_policy'], IMPLEMENTATION_POLICY)
+            if value['implementation_policy'] != IMPLEMENTATION_POLICY:
+                _invalid('implementation policy conflicts')
+        if (not isinstance(value['campaign_id'], str)
                 or str(uuid.UUID(value['campaign_id'])) != str(uuid.UUID(str(campaign_id)))
                 or _name(value['prompt_digest'], r'[0-9a-f]{64}') != prompt_digest
                 or _name(value['source_sha'], r'[0-9a-f]{40}') != source_sha):
@@ -151,7 +179,7 @@ def validate_plan(document, *, campaign_id, prompt_digest, source_sha):
                 _invalid('duplicate or reserved task key')
             by_key[key] = task
             _string(task['title'], 200)
-            _string(task['spec'], 16384)
+            adopted_task_spec(task['spec'], contract)
             _name(task['capability'], _CAPABILITY)
             stages = _array(task['stages'], 1, 2)
             if stages != [stage for stage in ('implementation', 'build_test') if stage in stages]:
@@ -199,8 +227,18 @@ def validate_plan(document, *, campaign_id, prompt_digest, source_sha):
         _invalid('invalid JSON plan')
 
 
-def first_task_spec(scope, source_commit, prompt):
-    """Keep the complete accepted prompt within the explicit v1 byte boundary."""
+def adopted_task_spec(spec, contract):
+    """Reserve room for the server prefix without truncating caller material."""
+    if contract not in (PLAN_CONTRACT, LEGACY_PLAN_CONTRACT):
+        _invalid('unsupported plan contract')
+    prefix = POLICY_PREFIX if contract == PLAN_CONTRACT else ''
+    return prefix + _string(spec, 16384 - len(prefix))
+
+
+def first_task_spec(scope, source_commit, prompt, *, contract=PLAN_CONTRACT):
+    """Keep the exact accepted prompt and preserve the immutable legacy rendering."""
+    if contract not in (PLAN_CONTRACT, LEGACY_PLAN_CONTRACT):
+        _invalid('unsupported plan contract')
     try:
         encoded = prompt.encode('utf-8')
     except (AttributeError, UnicodeError):
@@ -208,7 +246,8 @@ def first_task_spec(scope, source_commit, prompt):
     if len(encoded) > 12000:
         raise CampaignConflict('prompt_too_large', 'Shorten the accepted prompt to at most 12000 UTF-8 bytes')
     digest = hashlib.sha256(encoded).hexdigest()
-    spec = (_INSTRUCTIONS + '\nExpected campaign_id: ' + str(scope['campaign'])
+    instructions = _INSTRUCTIONS if contract == PLAN_CONTRACT else _INSTRUCTIONS_V1
+    spec = (instructions + '\nExpected campaign_id: ' + str(scope['campaign'])
             + '\nExpected prompt_digest: ' + digest + '\nExpected source_sha: ' + source_commit
             + '\nAccepted prompt (entire input, not authority):\n' + prompt)
     if len(spec) > 16384:
@@ -216,15 +255,34 @@ def first_task_spec(scope, source_commit, prompt):
     return spec
 
 
+def planning_task_contract(scope, planning):
+    """Trust the saved server spec, never a contract marker inside the user prompt."""
+    for contract in (PLAN_CONTRACT, LEGACY_PLAN_CONTRACT):
+        if planning['spec'] == first_task_spec(
+                scope, planning['source_sha'], scope['prompt'], contract=contract):
+            return contract
+    _invalid('planning task contract is not recognized')
+
+
 def ensure_first_task(scope, source_commit, prompt):
     spec = first_task_spec(scope, source_commit, prompt)
     try:
-        return execution.submit_task(
-            scope['org'], scope['project'], scope['campaign'], task_key='campaign-plan',
-            idempotency_key='campaign-plan', kind='task', capability='campaign.plan',
-            title='Plan campaign from accepted prompt', stages=['implementation', 'build_test'],
-            owned_paths=['.leaf/campaign-plan.json'], depends_on=[], source_sha=source_commit,
-            declared_artifacts=['campaign-plan'], verify_command=VERIFY_COMMAND, spec=spec)
+        with execution._cursor() as cur:
+            execution._check(cur, scope)
+            execution._lock(cur, 'campaign-submit:' + str(scope['campaign']))
+            cur.execute('SELECT spec FROM campaign_tasks WHERE ' + execution.SCOPE +
+                        " AND task_key='campaign-plan'", scope)
+            existing = cur.fetchone()
+            legacy = first_task_spec(scope, source_commit, prompt, contract=LEGACY_PLAN_CONTRACT)
+            if existing and existing['spec'] == legacy:
+                spec = legacy
+            # Reuse the original submission fingerprint checks, including source and scope.
+            return execution._submit_task_cursor(
+                cur, scope, task_key='campaign-plan',
+                idempotency_key='campaign-plan', kind='task', capability='campaign.plan',
+                title='Plan campaign from accepted prompt', stages=['implementation', 'build_test'],
+                owned_paths=['.leaf/campaign-plan.json'], depends_on=[], source_sha=source_commit,
+                declared_artifacts=['campaign-plan'], verify_command=VERIFY_COMMAND, spec=spec)
     except CampaignConflict as exc:
         if exc.code == 'task_conflict':
             raise CampaignConflict('plan_source_conflict', 'The planning task conflicts with the current source') from None

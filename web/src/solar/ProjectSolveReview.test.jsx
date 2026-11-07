@@ -2,6 +2,8 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import ProjectSolveReview, { ProjectSolarSchemaForm } from './ProjectSolveReview.jsx'
 import { createSolarProjectClient } from './solarProjectClient.js'
+import workerUnavailable from './__fixtures__/workerUnavailable.json'
+import { projectSolarWorkerRefusal } from './solarProjectCompletion.js'
 import { SEED_SETTINGS } from './solarSettingsModel.js'
 import { PROJECT_SOLAR_WORKSPACE_LABELS, PROJECT_SOLAR_WORKSPACE_REASONS } from './ProjectSolarReadPanel.jsx'
 
@@ -42,6 +44,44 @@ function fixture() {
   h.runs = () => h.fetch.mock.calls.filter(([url]) => url.endsWith('/api/run'))
   return h
 }
+
+it.each(['solar-solve-proposal', 'solar-correct-string'])('G20b %s releases a worker-refused schema form', async (name) => {
+  const h = fixture()
+  h.result = http(workerUnavailable, 503)
+  h.props.newProjectIntentKey.mockImplementation(() => 'review-intent-' + (h.props.newProjectIntentKey.mock.calls.length + 1))
+  const tool = { name, params: { type: 'object', properties: {} } }
+  render(<ProjectSolarSchemaForm {...h.props} tool={tool} />)
+  if (name === 'solar-solve-proposal') {
+    fireEvent.change(screen.getByLabelText('Frame'), { target: { value: 'frame-1' } })
+  }
+  const button = screen.getByRole('button', { name: name === 'solar-solve-proposal' ? 'Run solve' : 'Correct strings' })
+  fireEvent.click(button)
+  const refusal = projectSolarWorkerRefusal(name)
+  await waitFor(() => expect(screen.getByRole('status').textContent).toBe(`${refusal.message} (${refusal.reasonCode})`))
+  expect(screen.queryByText(PROJECT_SOLAR_WORKSPACE_REASONS.run_outcome_unknown)).toBeNull()
+  expect(screen.queryByRole('button', { name: /retry/i })).toBeNull()
+  expect(button.disabled).toBe(false)
+  expect(document.querySelector('fieldset').disabled).toBe(false)
+  fireEvent.click(button)
+  await waitFor(() => expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(2))
+  expect(h.props.newProjectIntentKey).toHaveBeenCalledTimes(2)
+  expect(h.props.onProjectSubmit.mock.calls[1][0]).not.toBe(h.props.onProjectSubmit.mock.calls[0][0])
+})
+
+it.each([true, false])('G20b commit worker refusal classification: %s', async (worker) => {
+  const h = fixture()
+  h.result = http(worker ? workerUnavailable : { error: { reason_code: 'OTHER' } }, 503)
+  render(<ProjectSolveReview {...h.props} />)
+  fireEvent.click(screen.getByRole('button', { name: 'Commit proposal' }))
+  const refusal = projectSolarWorkerRefusal('solar-commit-solve')
+  await waitFor(() => expect(screen.getByRole('status').textContent).toBe(worker
+    ? `${refusal.message} (${refusal.reasonCode})` : `${PROJECT_SOLAR_WORKSPACE_REASONS.run_outcome_unknown} (OTHER)`))
+  if (worker) {
+    expect(screen.queryByText(PROJECT_SOLAR_WORKSPACE_REASONS.run_outcome_unknown)).toBeNull()
+    expect(screen.queryByRole('button', { name: /retry/i })).toBeNull()
+    expect(screen.getByRole('button', { name: PROJECT_SOLAR_WORKSPACE_LABELS.solve_again_action }).disabled).toBe(false)
+  }
+})
 
 it('W1C5 renders frame, phase, counts and endpoints, bounded at 200 rows', () => {
   const h = fixture()

@@ -1,6 +1,8 @@
 """Records A/B/C; authority and execution rows use fake effects only."""
 from dataclasses import replace
 from datetime import datetime, timezone
+import errno
+import hashlib
 import importlib.util
 import io
 import json
@@ -27,6 +29,70 @@ p = _load()
 HASH = "a" * 64
 OTHER_HASH = "b" * 64
 ROOT = Path("C:/fake/run-test") if sys.platform == "win32" else Path("/fake/run-test")
+
+
+def r14f2_browser_records(organization_id="fakeorg"):
+    recovery = dict(scenario="capture-recovery", organization_id=organization_id, project_id="recovery-project",
+        drawing_id="recovery-drawing", input_version_id="panels-1", job_id="sizing-1", output_version_id="sized-1",
+        exchange_job_id="sizing-1", evidence_sha256=HASH, panels_in_sequence=27)
+    return {
+        "capture-recovery": recovery,
+        "read-custody": dict(scenario="read-custody", organization_id=organization_id, project_id="recovery-project",
+            drawing_id="recovery-drawing", source_version_id="sized-1", groups_job_id="groups-1", input_version_id="groups-output",
+            frame_count=1, tool="solar-string-data", request_sha256=HASH, output_sha256=OTHER_HASH),
+        "browser-response-discard": dict(recovery, scenario="browser-response-discard", project_id="submission-project",
+            drawing_id="submission-drawing", input_version_id="panels-2", job_id="sizing-2", output_version_id="sized-2",
+            exchange_job_id="sizing-2", submissions=2, same_submission=True),
+        "service-response-drop": dict(scenario="service-response-drop", organization_id=organization_id, project_id="service-project",
+            drawing_id="service-drawing", input_version_id="panels-3", job_id="sizing-3", status="failed",
+            reason_code="SIZING_OUTCOME_UNKNOWN", retryable=False),
+    }
+
+
+def r14f2_fixture_digests():
+    sizing = p._sizing_module()
+    fixture = json.loads((sizing.REPO / sizing.MANIFEST).read_bytes())["fixtures"][0]
+    return fixture["request_wire_sha256"], fixture["response_wire_sha256"]
+
+
+def r14f2_evidence(c):
+    facts, sizing = r14f1_facts(c), p._sizing_module()
+    request_sha256, response_sha256 = r14f2_fixture_digests()
+    prefix = "project:" + c.config.run_id + ":sizing:"
+    base = {key: facts[key] for key in ("run_id", "organization_id", "classification", "endpoint_sha256", "fixture_sha256")}
+    recovery = dict(base, project_id="recovery-project", job_id="sizing-1", output_version_id="sized-1", exchange_job_id="sizing-1",
+        evidence_sha256=HASH, request_sha256=request_sha256, response_sha256=response_sha256, panels_in_sequence=27, job_attempt=2,
+        sender_worker_id=prefix + "1", published_worker_id=prefix + "2", service_posts=1)
+    submission = {key: value for key, value in recovery.items() if key not in {"job_attempt", "sender_worker_id", "published_worker_id"}}
+    submission.update(project_id="submission-project", job_id="sizing-2", exchange_job_id="sizing-2", output_version_id="sized-2",
+                      submissions=2, same_submission=True, jobs_in_project=1, service_posts=2)
+    return {
+        "capture-recovery": recovery,
+        "read-custody": dict(run_id=c.config.run_id, organization_id=facts["organization_id"], project_id="recovery-project", source_version_id="sized-1",
+            input_version_id="groups-output", groups_job_id="groups-1", frame_count=1, request_sha256=HASH, output_sha256=OTHER_HASH,
+            refusals=dict(sizing.REFUSALS), control_read_passed=True, inventories_unchanged=True),
+        "browser-response-discard": submission,
+        "service-response-drop": dict(run_id=c.config.run_id, organization_id=facts["organization_id"], project_id="service-project", job_id="sizing-3",
+            status="failed", reason_code="SIZING_OUTCOME_UNKNOWN", retryable=False, exchange_state="outcome_unknown",
+            sender_worker_id=prefix + "2", reclaim_worker_id=prefix + "3", job_attempt=2, output_version_id=None,
+            service_posts=3, service_posts_final=3),
+    }
+
+
+def r14f2_replay(c):
+    sizing = p._sizing_module()
+    evidence = r14f2_evidence(c)
+    driver = {key: {name: value for name, value in evidence[key].items() if name in
+        {"job_id", "sender_worker_id", "published_worker_id", "reclaim_worker_id", "service_posts", "submissions", "same_submission"}}
+        for key in sizing.SCENARIOS}
+    driver["service_posts_final"] = 3
+    runtime = SimpleNamespace(plan=SimpleNamespace(public=lambda: r14f1_facts(c)), facts=driver,
+        start=lambda environment, deadline: dict(environment, **{
+            sizing.CONFIG_KEY: str(c.config.run_root / "project-replay/private.json"), sizing.CONFIG_HASH_KEY: HASH}),
+        launcher_argv=lambda argv: argv, launch_worker=lambda deadline: None, heartbeat=lambda deadline: None,
+        drive=lambda deadline: None, complete=lambda: True, close=lambda: True)
+    runtime.loop_heartbeat = lambda deadline: runtime.heartbeat(deadline)
+    return runtime
 
 
 def file(name, digest=HASH):
@@ -78,6 +144,7 @@ def fake_host():
 def fake_scope():
     scope = SimpleNamespace(cleanups=[])
     scope.acquire = lambda name, cleanup: scope.cleanups.append((name, cleanup))
+    scope.own_replay = lambda replay: scope.acquire(p.ResourceKind.REPLAY, replay.close)
     return scope
 
 
@@ -126,9 +193,60 @@ def profile(c):
             "LEAF_PROOF_PROJECT_KEY_SHA256": "fakekey", "LEAF_PROOF_PROJECT_JWKS_FILE": str(ROOT / "public-jwks.json")}
 
 
+def test_src_empty_tracked_file_accepted():
+    c = case()
+    empty = p.FileProof("server/authored/.gitkeep", hashlib.sha256(b"").hexdigest(), 0)
+    c.host.source = replace(c.host.source, files=(*c.host.source.files, empty))
+    assert p._files_ok(c.host.source.files)
+    assert admitted(c).source == c.host.source
+    assert "reserve" in c.host.events
+
+
+def test_src_empty_negative_size_refused():
+    c = case()
+    negative = p.FileProof("server/authored/.gitkeep", hashlib.sha256(b"").hexdigest(), -1)
+    c.host.source = replace(c.host.source, files=(*c.host.source.files, negative))
+    assert not p._files_ok(c.host.source.files)
+    refused(c, p.FailureCode.SOURCE)
+
+
 def environment(c, ambient=None):
     return p.project_environment(admitted(c), os_env=ambient or {}, dsn="fakedb",
                                  profile_env=profile(c), organization_id="fakeorg")
+
+
+def test_native_select_inspect_carries_keys(tmp_path, monkeypatch):
+    monkeypatch.setattr(p.os, "environ", {"PATH": "fakepath",
+        "LEAF_PROOF_PROJECT_AUTHORITY": "native", "LEAF_PG_BIN": "/opt/fake/bin",
+        "UNRELATED": "not carried"})
+    root = tmp_path / "run-test"
+    config = p.Config("run-test", root, root / "artifacts", p.Ports(0, 0, 0, 0))
+    facts = p.production_effects().host.inspect(config)
+    assert dict(facts.environment) == {"PATH": "fakepath",
+        "LEAF_PROOF_PROJECT_AUTHORITY": "native", "LEAF_PG_BIN": "/opt/fake/bin"}
+    assert p._authority_kind(facts.environment) == "native"
+
+
+def test_native_select_children_exclude_keys():
+    c = case()
+    c.host.facts = replace(c.host.facts, environment=p._host_environment({"PATH": "fakepath",
+        "LEAF_PROOF_PROJECT_AUTHORITY": "native", "LEAF_PG_BIN": "/opt/fake/bin"}))
+    env = environment(c, c.host.facts.environment)
+    assert "LEAF_PROOF_PROJECT_AUTHORITY" not in env
+    assert "LEAF_PG_BIN" not in env
+    assert env["PATH"] == "fakepath"
+    assert c.host.facts.environment["LEAF_PROOF_PROJECT_AUTHORITY"] == "native"
+    assert c.host.facts.environment["LEAF_PG_BIN"] == "/opt/fake/bin"
+
+
+def test_native_select_default_docker(tmp_path, monkeypatch):
+    monkeypatch.setattr(p.os, "environ", {"PATH": "fakepath"})
+    root = tmp_path / "run-test"
+    config = p.Config("run-test", root, root / "artifacts", p.Ports(0, 0, 0, 0))
+    facts = p.production_effects().host.inspect(config)
+    assert "LEAF_PROOF_PROJECT_AUTHORITY" not in facts.environment
+    assert "LEAF_PG_BIN" not in facts.environment
+    assert p._authority_kind(facts.environment) == "docker"
 
 
 class TestProjectBoundary:
@@ -147,7 +265,9 @@ class TestProjectBoundary:
             "ALLOCATION", "TRANSPORT", "MIGRATION_ENTRY", "MIGRATION_CORPUS", "MIGRATION_TIMEOUT",
             "MIGRATION_EXIT", "MIGRATION_RESULT", "SCHEMA", "IDENTITY", "BINDING",
             "LAUNCH", "OWNERSHIP", "READINESS", "HEARTBEAT", "AUTH", "BROWSER_EXIT",
-            "BROWSER_EVIDENCE", "CANONICAL"}
+            "BROWSER_EVIDENCE", "CANONICAL", "CANCELLED", "GUARDIAN", "CLEANUP_PROCESS",
+            "CLEANUP_IDENTITY", "CLEANUP_POOL", "CLEANUP_AUTHORITY", "CLEANUP_PRIVATE",
+            "RECEIPT", "INTERNAL", "USAGE"}
 
     def test_deployed_posture(self):
         for facts in ({"posture": "production"}, {"legacy_posture": "staging"}, {"synthetic": True}):
@@ -280,6 +400,7 @@ class TestProjectBoundary:
                     "LEAF_GUEST_DXF_EXTRACT": "local", "LEAF_CANONICAL_WORKER_TOOL": "solar-settings",
                     "LEAF_EXPECTED_WORKER_REVISION": "sha256:" + OTHER_HASH,
                     "LEAF_CANONICAL_WORKER_ID": "project:run-test", "LEAF_AGENT_STORE": "postgres",
+                    "LEAF_DRAWING_STORE": "postgres", "LEAF_UPLOAD_STORE": "postgres",
                     "LEAF_HARNESS_SESSION_STORE": "postgres", "LEAF_TENANT_CLAIM_NS": "https://leafdesign.ai/"}
         assert {key: env.get(key) for key in expected} == expected
         assert p.TIER == "hosted_pro" and p.PROFILE == "project"
@@ -306,7 +427,8 @@ class TestProjectBoundary:
         assert plan.descriptor is c.descriptor
         assert c.reads == [p.CanonicalRequest("descriptor", "solar-settings")]
         assert plan.required_test_ids == ("project_browser_create_import", "project_browser_bearer_required",
-                                          "project_settings_worker_readback")
+            "project_settings_worker_readback", "project_sizing_recovery_reopen", "project_sizing_read_custody",
+            "project_sizing_submission_unknown", "project_sizing_service_unknown")
         # Exercise the production reader with fake modules, never import server code here.
         loaded, descriptor_calls = [], []
         def descriptor(tool, *, server_dir):
@@ -657,10 +779,206 @@ def authority_refused(c, code, operation=prepare):
 
 
 class TestProjectAuthority:
+    def test_h_default_docker(self, monkeypatch):
+        calls = []
+        monkeypatch.delenv("LEAF_PROOF_PROJECT_AUTHORITY", raising=False)
+        monkeypatch.setattr(p, "_pg_module", lambda: SimpleNamespace(PgAuthority=SimpleNamespace(
+            start=lambda run_id: calls.append(("docker", run_id)) or SimpleNamespace())))
+        p.production_effects().authority_factory("run-test")
+        assert calls == [("docker", "run-test")]
+        calls.clear()
+        p._authority_factory("run-test", environ={"LEAF_PROOF_PROJECT_AUTHORITY": "docker"})
+        assert calls == [("docker", "run-test")]
+
+    def test_h_native_factory(self, monkeypatch):
+        calls = []
+        native = SimpleNamespace(readiness=lambda: "ready", dsn=lambda: "private", _stop_transport=lambda: "stopped")
+        monkeypatch.setattr(p, "_pg_module", lambda: SimpleNamespace(NativePgAuthority=SimpleNamespace(
+            start=lambda run_id, **kw: calls.append((run_id, kw)) or native)))
+        reservation = p.Reservation(ROOT, ROOT / "artifacts", database_port=55432,
+            database_handle=SimpleNamespace(close=lambda: calls.append("release")))
+        environment = {"LEAF_PROOF_PROJECT_AUTHORITY": "native", "LEAF_PG_BIN": "/fake"}
+        authority = p._authority_factory("run-test", reservation=reservation, environ=environment)
+        assert calls == ["release", ("run-test", {"run_root": ROOT, "port": 55432, "environ": environment})]
+        assert authority.readiness() == "ready" and authority.dsn() == "private" and authority.stop() == "stopped"
+
+    def test_h_selection_refusal(self, monkeypatch):
+        c = case()
+        c.host.facts = replace(c.host.facts, environment={"LEAF_PROOF_PROJECT_AUTHORITY": "other"})
+        refused(c, p.FailureCode.ENVIRONMENT)
+        monkeypatch.setattr(p, "_pg_module", lambda: pytest.fail("allocated for invalid selection"))
+        with pytest.raises(p.ProofRefused) as error:
+            p._authority_factory("run-test", environ={"LEAF_PROOF_PROJECT_AUTHORITY": ""})
+        assert error.value.failure == p.Failure(p.Stage.PREFLIGHT, p.FailureCode.ENVIRONMENT)
+
+    def test_h_native_reservation(self, tmp_path, monkeypatch):
+        c = case()
+        c.config = replace(c.config, run_root=tmp_path / "run", artifact_root=tmp_path / "run/artifacts")
+        c.host.facts = replace(c.host.facts, environment={"LEAF_PROOF_PROJECT_AUTHORITY": "native"}, vendor_candidates=())
+        plan = admitted(c)
+        calls = []
+        class Socket:
+            def setsockopt(self, *args):
+                pass
+            def bind(self, address):
+                calls.append(address)
+            def getsockname(self):
+                return ("127.0.0.1", 55432)
+            def close(self):
+                calls.append("closed")
+        monkeypatch.setattr(p.socket, "socket", Socket)
+        host = p._Host()
+        reservation = host.reserve(plan)
+        assert calls == [("127.0.0.1", port) for port in (8101, 8102, 8103, 8104, 0)]
+        assert reservation.database_port == 55432
+        assert host._native_context == ("run-test", c.config.run_root, 55432)
+        reservation.release_ports()
+        assert calls.count("closed") == 5
+
+    def test_h_prepare_native(self):
+        c = authority_case()
+        c.host.authority_inventory = lambda run_id: native_owned(present=c.allocated)
+        c.host.cleanup_owned_authority = lambda run_id, owned: c.events.append("native-remove")
+        prepared = prepare(c)
+        assert prepared.database.transport == "native-loopback"
+        assert prepared.database.ownership == native_owned()
+        assert prepared.database.schema_status == c.migration_proof
+        assert len(c.requests) == 2 and all(r.environment["DATABASE_URL"] == "fakedb" for r in c.requests)
+        for kind, cleanup in c.scope.cleanups:
+            cleanup()
+        assert c.events.index("stop-authority") < c.events.index("native-remove")
+
+    def test_h_native_inventory_adapter(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(p, "_pg_module", lambda: SimpleNamespace(_validate=lambda run_id: None,
+            native_inventory=lambda *args: calls.append(args) or p._native_capture(native_owned())))
+        host = p._Host()
+        host._native_context = ("run-test", ROOT, 55432)
+        assert host.authority_inventory("run-test") == native_owned()
+        assert calls == [("run-test", ROOT, 55432)]
+
+    def test_h_native_cleanup_adapter(self, monkeypatch):
+        calls = []
+        def cleanup(*args, **kwargs):
+            calls.append((args, kwargs))
+            return False
+        monkeypatch.setattr(p, "_pg_module", lambda: SimpleNamespace(cleanup_native=cleanup))
+        host = p._Host()
+        host._native_context = ("run-test", ROOT, 55432)
+        with pytest.raises(RuntimeError, match="removal unverified"):
+            host.cleanup_owned_authority("run-test", native_owned())
+        assert calls[0][0] == ("run-test", ROOT, 55432, p._native_capture(native_owned()))
+
+    def test_h_native_ownership_absence(self):
+        empty = native_owned(present=False)
+        assert p._validate_ownership(empty, "run-test", allocated=False) == empty
+        with pytest.raises(p.ProofRefused):
+            p._validate_ownership(replace(empty, present=True), "run-test", allocated=False)
+
+    def test_h_unknown_ownership_kind(self):
+        c = authority_case()
+        owned = c.host.authority_inventory("run-test")
+        with pytest.raises(p.ProofRefused):
+            p._validate_ownership(replace(owned, kind="other"), "run-test", allocated=False)
+
+    def test_h_native_guardian_observed(self):
+        c = authority_case()
+        seen = []
+        writer = p._RunWriter(c.effects.receipt_writer, SimpleNamespace(observe=seen.append))
+        journal = p.OwnershipJournal("run-test", ROOT, ROOT / "artifacts", c.effects.clock.utc_now(), native_owned())
+        writer.ownership(ROOT / "authority-observed.json", journal)
+        assert seen == [native_owned()]
+
+    def test_h_native_guardian_message(self):
+        c = authority_case()
+        guardian = p._GuardianLease(c.plan)
+        messages = []
+        guardian._send = messages.append
+        guardian._response = lambda: True
+        guardian.observe(native_owned())
+        assert messages == [{"event": "authority", "ownership": native_public(),
+            "identity": {"pid": 12345, "start_id": "ps:1700000000", "started_at": 1700000000}}]
+
+    def test_h_native_guardian_bin_environment(self, monkeypatch):
+        c = authority_case()
+        plan = replace(c.plan, host=replace(c.plan.host, environment={
+            "LEAF_PROOF_PROJECT_AUTHORITY": "native", "LEAF_PG_BIN": "/fake/custom-pg16",
+            "PGPASSWORD": "ambient", "TOKEN": "ambient"}),
+            reservation=replace(c.plan.reservation, root_identity=(1, 2)))
+        calls = []
+        process = SimpleNamespace(poll=lambda: None, stdin=io.BytesIO())
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="nt"))
+        monkeypatch.setattr(p.subprocess, "Popen", lambda argv, **kwargs: calls.append((argv, kwargs)) or process)
+        monkeypatch.setattr(p.threading, "Thread", lambda **kwargs: SimpleNamespace(start=lambda: None))
+        guardian = p._GuardianLease(plan)
+        guardian._response = lambda: True
+        guardian.arm()
+        assert calls[0][1]["env"]["LEAF_PG_BIN"] == "/fake/custom-pg16"
+        assert "PGPASSWORD" not in calls[0][1]["env"] and "TOKEN" not in calls[0][1]["env"]
+
+    def test_h_native_guardian_cleanup(self):
+        c, request = native_guardian_case()
+        assert p.guardian_main(request, effects=c.effects) == 0
+        assert c.teardown == ["native", "private"] and c.native_inventory == native_owned(present=False)
+
+    def test_h_native_guardian_foreign(self):
+        c, request = native_guardian_case()
+        c.native_inventory = replace(native_owned(), start_id="ps:1700000001")
+        assert p.guardian_main(request, effects=c.effects) == 1
+        assert "native" not in c.teardown and c.native_inventory.present
+
+    def test_h_native_guardian_unknown(self):
+        c, request = native_guardian_case()
+        request = replace(request, ownership=replace(request.ownership, kind="other"))
+        assert p.guardian_main(request, effects=c.effects) == 1
+        assert c.teardown == []
+
+    def test_h_native_guardian_entry(self, tmp_path, monkeypatch):
+        c, request = native_guardian_case()
+        root = tmp_path
+        info = root.stat()
+        messages = [{"event": "init", "run_id": "run-test", "run_root": str(root),
+            "root_identity": [info.st_dev, info.st_ino], "deadline": 1.0},
+            {"event": "authority", "ownership": native_public(),
+             "identity": {"pid": 12345, "start_id": "ps:1700000000", "started_at": 1700000000}}]
+        monkeypatch.setattr(p.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(
+            ("\n".join(json.dumps(value) for value in messages) + "\n").encode())))
+        monkeypatch.setattr(p.sys, "stdout", io.StringIO())
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        monkeypatch.setattr(p.threading, "Thread", lambda target, **kwargs: SimpleNamespace(start=target))
+        assert p._guardian_entry() == 0
+        assert c.host._native_context == ("run-test", root, 55432)
+        assert c.teardown == ["native", "private"]
+
+    def test_h_native_scrub_refusal(self, tmp_path):
+        root = tmp_path / "run"
+        root.mkdir()
+        (root / "postgres").mkdir()
+        (root / "postgres/foreign").write_bytes(b"keep")
+        info = root.stat()
+        reservation = p.Reservation(root, root / "artifacts", root_identity=(info.st_dev, info.st_ino))
+        assert p._Host.scrub(reservation, keep_safe=False) is False
+        assert (root / "postgres/foreign").read_bytes() == b"keep"
+
+    def test_h_native_honest_removal(self):
+        c = lifetime_case()
+        c.host.authority_inventory = lambda run_id: native_owned(present=c.allocated)
+        c.host.cleanup_owned_authority = lambda run_id, ownership: True  # A lying deletion return.
+        prepare(c)
+        proof = c.scope.close()
+        assert not proof.authority_removed and not proof.ok
+
+    def test_h_native_migration_measurement(self):
+        c = authority_case()
+        c.host.authority_inventory = lambda run_id: native_owned(present=c.allocated)
+        proof = p._measure_prepared(c.plan, effects=c.effects, scope=c.scope)
+        assert proof.ownership == native_owned() and proof.transport == "native-loopback"
+        assert proof.schema_status == c.migration_proof and "issuer" not in c.events
+
     def test_allocation_journal(self, monkeypatch):
         c = authority_case()
         prepared = prepare(c)
-        assert c.events.index("corpus") < c.events.index("acquire:authority") < c.events.index("authority-planned") < c.events.index("allocate")
+        assert c.events.index("corpus") < c.events.index("authority-planned") < c.events.index("allocate") < c.events.index("acquire:authority")
         assert c.events.index("allocate") < c.events.index("authority-observed") < c.events.index("launch:migration-child")
         assert prepared.database.authority_run_id == "run-test"
         assert prepared.database.ownership.containers == ("a" * 12, "b" * 12)
@@ -677,8 +995,8 @@ class TestProjectAuthority:
         c.effects = replace(c.effects, authority_factory=fail)
         error = authority_refused(c, p.FailureCode.ALLOCATION)
         assert "fakedb" not in str(error)
-        c.scope.cleanups[0][1]()
-        assert c.events[-1] == "emergency-cleanup" and c.launches == []
+        assert c.scope.cleanups == [] and c.launches == []
+        assert "emergency-cleanup" not in c.events
         c = authority_case()
         original_inventory = c.host.authority_inventory
         c.host.authority_inventory = lambda run_id: replace(original_inventory(run_id), run_id="run-else")
@@ -993,8 +1311,8 @@ def execution_case():
     c.result = p.BrowserResult("run-test", c.plan.source, "fakekey", 0,
         p.REQUIRED_TEST_IDS, p.REQUIRED_TEST_IDS, p.REQUIRED_TEST_IDS,
         tuple(p.TestOutcome(name, "passed", 0) for name in p.REQUIRED_TEST_IDS), (),
-        dict.fromkeys(p.CHECKPOINTS, True), c.evidence)
-    c.canonical = p.CanonicalProof(c.evidence, OTHER_HASH, OTHER_HASH)
+        dict.fromkeys(p.CHECKPOINTS, True), c.evidence, r14f2_browser_records())
+    c.canonical = p.CanonicalProof(c.evidence, OTHER_HASH, OTHER_HASH, r14f1_facts(c), r14f2_evidence(c))
     def children(pids):
         if c.dead:
             raise RuntimeError("dead")
@@ -1022,13 +1340,13 @@ def execution_case():
         return handle
     def canonical(request):
         c.canonical_requests.append(request)
-        return c.canonical
+        return c.canonical.sizing_evidence["read-custody"] if request.purpose == "custody" else c.canonical
     c.host.read_stack_ready = lambda path: c.stack_ready
     c.host.app_readiness = lambda request: c.app
     c.host.worker_heartbeat = lambda request: c.heartbeat
     c.host.organization_read = lambda request, *, authenticated: c.auth if authenticated else c.denied
     c.effects = replace(c.effects, process_launcher=launch, readiness_probe=readiness,
-        browser_runner=browser, canonical_reader=canonical)
+        browser_runner=browser, canonical_reader=canonical, replay_factory=lambda prepared, **kwargs: r14f2_replay(c))
     return c
 
 
@@ -1048,11 +1366,119 @@ def execution_refused(c, code):
     assert "fakedb" not in str(error.value) and "faketok" not in str(error.value)
 
 
+def _run_root_stores_case(tmp_path):
+    c = execution_case()
+    root = tmp_path / "run-test"
+    c.plan = replace(c.prepared.plan,
+        config=replace(c.prepared.plan.config, run_root=root, artifact_root=root / "artifacts"),
+        host=replace(c.prepared.plan.host, vendor_candidates=()))
+    lease = replace(c.prepared.identity_lease, jwks_path=root / "public-jwks.json",
+        profile={**dict(c.prepared.identity_lease.profile),
+                 "LEAF_PROOF_PROJECT_JWKS_FILE": str(root / "public-jwks.json")})
+    c.prepared = replace(c.prepared, plan=c.plan, identity_lease=lease)
+    return c
+
+
+def test_run_root_stores_created_before_launch(tmp_path, monkeypatch):
+    c = _run_root_stores_case(tmp_path)
+    root = c.plan.config.run_root
+    monkeypatch.setattr(p.socket, "socket", lambda: SimpleNamespace(
+        setsockopt=lambda *args: None, bind=lambda address: None, close=lambda: None))
+    host = p._Host()
+    reservation = host.reserve(c.plan)
+    try:
+        assert host._reservation is reservation
+        env = p.project_environment(c.plan, os_env=c.plan.host.environment, dsn=c.prepared.dsn,
+            profile_env=c.prepared.identity_lease.profile, organization_id=c.prepared.binding.organization_id)
+        for key in ("LEAF_STORE_DIR", "LEAF_GUEST_STORE_DIR", "LEAF_UPLOADS_DIR",
+                    "LEAF_GRANTS_DIR", "LEAF_TENANTS_DIR", "LEAF_TENANT_GIT_DIR",
+                    "LEAF_TENANT_MCP_DIR", "LEAF_MARATHON_RUNS_DIR", "LEAF_AGENT_STATE_DIR"):
+            path = Path(env[key])
+            assert path != root and path.is_relative_to(root) and path.is_dir()
+            assert p._path_safe(path)
+            if p.os.name != "nt":
+                assert path.stat().st_mode & 0o777 == 0o700
+        for key in ("JOBS_DB", "SESSIONS_DB", "LEAF_AGENT_LEDGER", "BROKER_LEDGER",
+                    "BROKER_TENANTS", "LEAF_GRANT_FILE"):
+            assert not Path(env[key]).exists()
+        assert c.launches == []
+    finally:
+        reservation.release_ports()
+
+
+def test_run_root_stores_removed_when_reservation_fails(tmp_path, monkeypatch):
+    def bind(address):
+        raise OSError("port taken")
+    monkeypatch.setattr(p.socket, "socket", lambda: SimpleNamespace(
+        setsockopt=lambda *args: None, bind=bind, close=lambda: None))
+    c = _run_root_stores_case(tmp_path)
+    with pytest.raises(RuntimeError, match="exclusive reservation failed"):
+        p._Host().reserve(c.plan)
+    assert not c.plan.config.run_root.exists()
+    assert c.launches == []
+
+    second = tmp_path / "second"
+    second.mkdir()
+    c = _run_root_stores_case(second)
+    root = c.plan.config.run_root
+    keep = root / "drawings" / "keep.txt"
+    private_directory = p._private_directory
+    def create_with_collision(path):
+        private_directory(path)
+        if path == root:
+            keep.parent.mkdir()
+            keep.write_bytes(b"keep these bytes")
+    monkeypatch.setattr(p, "_private_directory", create_with_collision)
+    with pytest.raises(RuntimeError, match="exclusive reservation failed"):
+        p._Host().reserve(c.plan)
+    assert keep.read_bytes() == b"keep these bytes"
+    assert root.is_dir()
+    assert all(not (root / relative).exists()
+               for relative in p._RUN_ROOT_DIRECTORY_STORES.values() if relative != "drawings")
+    assert c.launches == []
+
+
+def test_run_root_stores_agent_state_in_root(tmp_path):
+    c = _run_root_stores_case(tmp_path)
+    env = p.project_environment(c.plan, os_env=c.plan.host.environment, dsn=c.prepared.dsn,
+        profile_env=c.prepared.identity_lease.profile, organization_id=c.prepared.binding.organization_id)
+    path = Path(env["LEAF_AGENT_STATE_DIR"])
+    assert path == c.plan.config.run_root / "agent-state"
+    assert not path.is_relative_to(p.REPO)
+    assert not path.exists()
+
+
+def test_run_root_stores_refuse_link(tmp_path, monkeypatch):
+    c = _run_root_stores_case(tmp_path)
+    target = tmp_path / "foreign"
+    target.mkdir()
+    store = c.plan.config.run_root / "drawings"
+    private_directory = p._private_directory
+    def create_with_collision(path):
+        private_directory(path)
+        if path == c.plan.config.run_root:
+            try:
+                store.symlink_to(target, target_is_directory=True)
+            except OSError:
+                if p.os.name != "nt":
+                    raise
+                store.write_bytes(b"existing file")
+    monkeypatch.setattr(p, "_private_directory", create_with_collision)
+    monkeypatch.setattr(p.socket, "socket", lambda: pytest.fail("reserved ports for unsafe store"))
+    host = p._Host()
+    with pytest.raises(RuntimeError, match="exclusive reservation failed"):
+        host.reserve(c.plan)
+    assert not hasattr(host, "_reservation")
+    assert c.launches == []
+    assert list(target.iterdir()) == []
+
+
 def canonical_case():
     import hashlib
     from uuid import UUID
     from contextlib import contextmanager
-    c = SimpleNamespace(connections=0, closes=0, verifications=[], reads=[])
+    c = SimpleNamespace(connections=0, closes=0, verifications=[], reads=[],
+                        read_only=[], rollbacks=[], active_transaction=False, statements=[])
     ids = [str(UUID(int=i)) for i in range(1, 8)]
     c.before = SimpleNamespace(graph={"settings": {"pitch": 10}})
     c.stored = SimpleNamespace(graph={"settings": {"pitch": 20}})
@@ -1072,26 +1498,59 @@ def canonical_case():
         output_version_id=e.output_version_id, provenance={"worker_id": e.worker_id},
         result={"graph_commit": c.commit})
     def verify(job_id, result, *, expected, conn):
+        c.statements.append(c.active_transaction)
         c.verifications.append((job_id, result, expected))
         assert expected == c.commit and result is c.commit
         return {"output_version_id": e.output_version_id}
     def context(expected, version_id, conn):
+        c.statements.append(c.active_transaction)
         c.reads.append(str(version_id))
         return (c.before if str(version_id) == e.input_version_id else
                 c.stored if c.connections == 1 else c.reopened), None
     c.graph = SimpleNamespace(project_graph_job_provenance=verify, _stored_context=context,
                               local=SimpleNamespace(digest=c.digest))
     @contextmanager
-    def connection(environment, deadline):
+    def transaction(*, force_rollback):
+        c.rollbacks.append(force_rollback)
+        c.active_transaction = True
+        try:
+            yield
+        finally:
+            c.active_transaction = False
+    def execute(sql, args):
+        c.statements.append(c.active_transaction)
+        return SimpleNamespace(fetchone=lambda: c.job)
+    @contextmanager
+    def connection(environment, deadline, *, read_only=True):
         assert environment["DATABASE_URL"] == "fakedb" and deadline == 10
         c.connections += 1
+        c.read_only.append(read_only)
         try:
-            yield SimpleNamespace(execute=lambda sql, args: SimpleNamespace(fetchone=lambda: c.job))
+            yield SimpleNamespace(execute=execute, transaction=transaction)
         finally:
             c.closes += 1
     c.connection = connection
     c.request = p.CanonicalRequest("execution", p.WORKER_TOOL, {"DATABASE_URL": "fakedb"}, e, 10)
     return c
+
+
+def test_teardown_canonical_proof_rollback_connection(monkeypatch):
+    c = canonical_case()
+    p._canonical_database_proof(c.request, graph=c.graph, connection=c.connection)
+    assert c.connections == c.closes == 2
+    assert c.read_only == [False, False] and c.rollbacks == [True, True]
+    assert c.statements == [True] * 5 and not c.active_transaction
+    calls = []
+    monkeypatch.setitem(sys.modules, "psycopg", SimpleNamespace(
+        connect=lambda dsn, **kwargs: calls.append((dsn, kwargs))))
+    monkeypatch.setitem(sys.modules, "psycopg.rows", SimpleNamespace(dict_row=object()))
+    monkeypatch.setattr(p.os, "environ", {})
+    monkeypatch.setattr(p.time, "monotonic", lambda: 0)
+    p._project_connection({"DATABASE_URL": "fakedb"}, 10)
+    p._project_connection({"DATABASE_URL": "fakedb"}, 10, read_only=False)
+    assert [dsn for dsn, kwargs in calls] == ["fakedb", "fakedb"]
+    assert calls[0][1]["options"] == "-c statement_timeout=2000 -c default_transaction_read_only=on"
+    assert calls[1][1]["options"] == "-c statement_timeout=2000"
 
 
 class TestProjectExecution:
@@ -1294,7 +1753,7 @@ class TestProjectExecution:
             return old_mint(*args, **kwargs)
         c.prepared.identity_lease.issuer.mint = mint
         execute(c)
-        assert len(c.mints) == 2 and c.mints[0][1]["lifetime_s"] == 180 and c.mints[1][1]["lifetime_s"] == 360
+        assert len(c.mints) == 2 and c.mints[0][1]["lifetime_s"] == 180 and c.mints[1][1]["lifetime_s"] == 900
         assert "ready-done" not in order[0] and "ready-done" in order[1]
         assert "LEAF_E2E_TOKEN" not in c.launches[0].environment
         request = c.browser_requests[0]
@@ -1417,10 +1876,10 @@ class TestProjectExecution:
         execution_refused(c, p.FailureCode.CANONICAL)
         c = execution_case()
         proof = execute(c)
-        assert len(c.canonical_requests) == 1
+        assert len(c.canonical_requests) == 2
         request = c.canonical_requests[0]
         assert request.purpose == "execution" and request.environment["DATABASE_URL"] == "fakedb"
-        assert request.evidence == c.evidence and proof.canonical is c.canonical
+        assert request.evidence == c.evidence and proof.canonical == c.canonical
         assert "fakedb" not in repr(request) + repr(request.environment)
         # Exercise the independent production verifier with fake SQL and canonical library.
         c = canonical_case()
@@ -1464,3 +1923,4539 @@ def assert_redacted_mapping(mapping, values, capsys):
     assert dict(mapping) == values
     with pytest.raises(TypeError):
         mapping["TOKEN"] = "changed"
+
+# D's injected operation handles never spawn a thread, process or listener.
+class ImmediateOperation:
+    def __init__(self, callback):
+        self.value, self.error = None, None
+        try:
+            self.value = callback()
+        except BaseException as error:
+            self.error = error
+
+    def done(self):
+        return True
+
+    def result(self):
+        if self.error is not None:
+            raise self.error
+        return self.value
+
+
+def lifetime_case():
+    c = authority_case()
+    c.teardown, c.leases = [], []
+    c.private = True
+    c.host.begin_operation = ImmediateOperation
+    def scrub(reservation, *, keep_safe):
+        c.teardown.append("private")
+        c.private = False
+        return True
+    def cleanup(run_id):
+        c.teardown.append("authority")
+        c.allocated = False
+    def close_identity(lease):
+        c.teardown.append("identity")
+        c.leases.append(lease)
+        object.__setattr__(lease, "issuer", None)
+        c.published.discard(lease.jwks_path)
+    c.host.scrub = scrub
+    c.host.private_absent = lambda reservation: not c.private
+    c.host.cleanup_authority = cleanup
+    c.host.cleanup_owned_authority = lambda run_id, ownership: cleanup(run_id)
+    c.host.close_identity = close_identity
+    c.scope = p.RunScope(effects=c.effects)
+    return c
+
+
+def cancelled_stage(stage):
+    c = lifetime_case()
+    c.scope.own_reservation(c.plan.reservation)
+    clock = c.effects.clock
+    # An outstanding external operation becomes ready only after cancellation.
+    task = SimpleNamespace(done=lambda: clock.now >= 0.1, result=lambda: "done")
+    original = c.host.begin_operation
+    c.host.begin_operation = lambda callback: task
+    c.scope.cancelled = lambda: clock.now >= 0.05
+    with pytest.raises(p.ProofRefused) as error:
+        c.scope.perform(stage, lambda: None, deadline=1.0)
+    assert error.value.failure == p.Failure(stage, p.FailureCode.CANCELLED)
+    assert clock.now == 0.05  # Refused while pending, not after it completed.
+    c.host.begin_operation = original
+    proof = c.scope.close()
+    assert proof.ok and c.teardown == ["private"]
+    assert c.scope.failure == error.value.failure
+    assert 0.1 <= clock.now < 0.2
+    with pytest.raises(p.ProofRefused):
+        c.scope.commit_guard(lambda: pytest.fail("cancelled publication"))
+
+
+def acquisition_child(monkeypatch, role, kind):
+    c = lifetime_case()
+    stops = []
+    def start():
+        raise RuntimeError("fakedb")
+    child = SimpleNamespace(start=start, stop=lambda deadline: (stops.append(deadline), True)[1])
+    monkeypatch.setattr(p, "_RuntimeProcess", lambda spec: child)
+    spec = p.ProcessSpec(role, ("fake",), ROOT, {}, 1)
+    with pytest.raises(RuntimeError):
+        p._launch_runtime(spec, scope=c.scope)
+    assert [name for name, _ in c.scope._actions] == [kind]
+    proof = c.scope.close()
+    assert proof.processes_stopped and len(stops) == 1
+    assert stops[0] == p.CLEANUP_TIMEOUT_S or stops[0] > 0
+    assert c.scope.close() is proof and len(stops) == 1
+
+
+def cleanup_failure(kind, expected):
+    c = lifetime_case()
+    def fail():
+        c.teardown.append("failed")
+        raise RuntimeError("faketok")
+    c.scope.acquire(kind, fail)
+    c.scope.own_pool(SimpleNamespace(close=lambda: c.teardown.append("pool")))
+    c.scope.acquire(p.ResourceKind.AUTHORITY, lambda: c.teardown.append("authority"))
+    c.scope.own_reservation(c.plan.reservation)
+    proof = c.scope.close()
+    assert c.teardown[-2:] == ["authority", "private"]
+    assert "pool" in c.teardown and "failed" in c.teardown
+    assert proof.failures == (p.Failure(p.Stage.TEARDOWN, expected),)
+    assert not proof.ok and proof.observed_rows == ()
+    assert "faketok" not in repr(proof)
+    return c, proof
+
+
+def owned_authority_case():
+    """Keep inventory and deletion independent, including replacement IDs."""
+    c = lifetime_case()
+    inventory = c.host.authority_inventory
+    c.inventory = inventory("run-test")
+    c.removed, c.snapshots, c.inventory_reads, c.run_id_deletions = [], [], [], []
+    allocate = c.effects.authority_factory
+    def factory(run_id):
+        authority = allocate(run_id)
+        c.inventory = inventory(run_id)
+        return authority
+    def observe(run_id):
+        c.inventory_reads.append(run_id)
+        return c.inventory
+    def cleanup(run_id, ownership):
+        assert run_id == "run-test"
+        c.snapshots.append(ownership)
+        c.removed.extend(value for value in c.inventory.containers + c.inventory.networks
+                         if value in ownership.containers + ownership.networks)
+        c.inventory = replace(c.inventory,
+            containers=tuple(value for value in c.inventory.containers if value not in ownership.containers),
+            networks=tuple(value for value in c.inventory.networks if value not in ownership.networks))
+    c.host.authority_inventory = observe
+    c.host.cleanup_owned_authority = cleanup
+    def cleanup_by_run_id(run_id):
+        c.run_id_deletions.append(run_id)
+        c.removed.extend(c.inventory.containers + c.inventory.networks)
+        c.inventory = replace(c.inventory, containers=(), networks=())
+    c.host.cleanup_authority = cleanup_by_run_id
+    c.effects = replace(c.effects, authority_factory=factory)
+    c.scope = p.RunScope(effects=c.effects)
+    return c
+
+
+def assert_own_refusal(scope, operation, primary):
+    with pytest.raises(p.ProofRefused) as error:
+        operation()
+    assert error.value.failure is primary
+    assert scope.failure is primary
+    scope.close()
+    committed = []
+    def commit():
+        committed.append(True)
+        return "COMMITTED"
+    with pytest.raises(p.ProofRefused):
+        scope.commit_guard(commit)
+    assert committed == [] and scope.failure is primary
+
+
+def closing_job_race(monkeypatch, *, kill_succeeds):
+    """Replay Popen return after close entered and startup recovery timed out."""
+    import threading
+    c = lifetime_case()
+    c.private = False
+    c.events, c.errors, c.stops = [], [], []
+    entered, release = threading.Event(), threading.Event()
+    closing, finish_close = threading.Event(), threading.Event()
+    class Child:
+        live = True
+        def poll(self):
+            return None if self.live else 1
+        def kill(self):
+            c.events.append("child-kill")
+            if kill_succeeds:
+                self.live = False
+        def wait(self, timeout):
+            assert 0 <= timeout <= p.CLEANUP_TIMEOUT_S
+            c.events.append("child-wait")
+            if self.live:
+                raise subprocess.TimeoutExpired("fake", timeout)
+            return 1
+    c.child = Child()
+    class Job:
+        def close(self):
+            if not closing.is_set():
+                c.events.append("close-enter")
+                closing.set()
+                assert finish_close.wait(15), "job close was not released"
+                c.events.append("close-return")
+        def attach_and_resume(self, child):
+            assert child is c.child and closing.is_set()
+            c.events.append("attach-failed")
+            raise OSError("job closing")
+        def stop(self, deadline):
+            return False  # A closed job cannot verify its descendants.
+    def popen(*args, **kwargs):
+        entered.set()
+        assert release.wait(5), "Popen fake was not released"
+        c.events.append("popen-child")
+        return c.child
+    monkeypatch.setattr(p, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(p, "_WindowsJob", Job)
+    monkeypatch.setattr(p.subprocess, "Popen", popen)
+    c.process = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+    def start():
+        try:
+            c.process.start()
+        except BaseException as error:
+            c.errors.append(error)
+            c.events.append("start-failed")
+    worker = threading.Thread(target=start)
+    stopper = threading.Thread(target=lambda: c.stops.append(
+        c.process.stop(p.time.monotonic() + 1)))
+    channel = SimpleNamespace(receive=lambda timeout: "disarm",
+        acknowledge=lambda: c.events.append("ack-live" if c.child.live else "ack-stopped"))
+    c.request = p.GuardianRequest("run-test", c.plan.reservation,
+        c.host.authority_inventory("run-test"), channel, (c.process,), 1)
+    worker.start()
+    try:
+        assert entered.wait(5), "Popen fake was not entered"
+        stopper.start()
+        assert closing.wait(5), "stop did not enter job close"
+        release.set()
+        worker.join(timeout=8)  # Recovery must exhaust its real 5 s stop-lock budget.
+        assert not worker.is_alive() and not c.process._starting
+        assert c.process.process is c.child and c.child.live
+        assert [str(error) for error in c.errors] == ["runtime process start failed"]
+        assert c.stops == [] and "close-return" not in c.events
+        assert p.guardian_main(c.request, effects=c.effects) == 1
+        assert not any(event.startswith("ack") for event in c.events)
+    finally:
+        release.set()
+        finish_close.set()
+        worker.join(timeout=8)
+        if stopper.ident is not None:
+            stopper.join(timeout=5)
+    assert not worker.is_alive() and not stopper.is_alive()
+    assert c.events.index("close-enter") < c.events.index("popen-child")
+    assert c.events.index("attach-failed") < c.events.index("start-failed") < c.events.index("close-return")
+    return c
+
+
+def assert_entry_error(scope, operation, error, stage=p.Stage.TEARDOWN):
+    primary = scope.failure or p.Failure(stage, p.FailureCode.GUARDIAN)
+    with pytest.raises(type(error)) as caught:
+        operation()
+    assert caught.value is error and scope.failure == primary
+    remembered = scope.failure
+    scope.cancelled = lambda: False  # The remembered error alone must block commit.
+    scope.close()
+    assert scope.failure is remembered
+    committed = []
+    with pytest.raises(p.ProofRefused):
+        scope.commit_guard(lambda: (committed.append(True), "COMMITTED")[1])
+    assert committed == [] and scope.failure is remembered
+
+
+G_START = "Wed Oct 28 19:35:00 2026"
+G_PS = b"  7  1  7 Ss  Wed Oct 28 19:35:00 2026\n"
+
+
+def g_ps(monkeypatch, raw=G_PS, code=0):
+    """Fake the ps child and readiness, including bounded reads and reaping."""
+    calls, reads, waits, killed = [], [], [], []
+    class Output(io.BytesIO):
+        def read(self, size=-1):
+            assert 0 < size <= 1024
+            reads.append(size)
+            return super().read(size)
+    output = Output(raw)
+    def wait(timeout):
+        assert 0 <= timeout <= 2
+        waits.append(timeout)
+        return code
+    child = SimpleNamespace(stdout=output, poll=lambda: code, wait=wait,
+                            kill=lambda: killed.append(True))
+    def popen(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if child.stdout.closed:
+            child.stdout = Output(raw)
+        return child
+    monkeypatch.setattr(p, "_PLATFORM", "darwin")
+    monkeypatch.setattr(p.subprocess, "Popen", popen)
+    monkeypatch.setattr(p, "select", SimpleNamespace(select=lambda readers, w, x, timeout: (readers, [], [])))
+    return SimpleNamespace(calls=calls, reads=reads, waits=waits, killed=killed, child=child, output=output)
+
+
+def g_runtime(monkeypatch, *, platform="darwin", exited=False):
+    c = lifetime_case()
+    c.calls = []
+    c.process = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+    c.process.identity = p.ProcessIdentity("stack-launcher", 7, G_START, 1)
+    c.process.process = SimpleNamespace(pid=7, poll=lambda: 0 if exited else None,
+        terminate=lambda: c.calls.append("terminate"), kill=lambda: c.calls.append("kill"),
+        wait=lambda timeout: 0)
+    monkeypatch.setattr(p, "_PLATFORM", platform)
+    monkeypatch.setattr(p, "os", SimpleNamespace(name="posix", getpid=lambda: 1))
+    monkeypatch.setattr(p, "signal", SimpleNamespace(SIGKILL=9))
+    monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+    monkeypatch.setattr(p, "_signal_group", lambda pid, sig: c.calls.append((pid, sig)))
+    monkeypatch.setattr(p, "_group_empty", lambda pid, deadline: True)
+    return c
+
+
+def g_group(monkeypatch, *, start=G_START, empty=True, pgid=7):
+    calls, observed, checked = [], [], []
+    monkeypatch.setattr(p, "_PLATFORM", "darwin")
+    monkeypatch.setattr(p, "time", SimpleNamespace(monotonic=lambda: 0.0))
+    monkeypatch.setattr(p, "signal", SimpleNamespace(SIGKILL=9))
+    def observe(pid, *, timeout=2):
+        observed.append((pid, timeout))
+        return None if start is None else p._PosixProcessRow(pid, 1, pgid, start)
+    monkeypatch.setattr(p, "_darwin_process_row", observe)
+    monkeypatch.setattr(p, "_signal_group", lambda pid, sig: calls.append((pid, sig)))
+    monkeypatch.setattr(p, "_group_empty", lambda pid, deadline: (checked.append((pid, deadline)), empty)[1])
+    return SimpleNamespace(group=p._TransferredGroup(7, G_START, "stack-launcher"),
+                           calls=calls, observed=observed, checked=checked)
+
+
+def g_arm(monkeypatch, platform):
+    c = lifetime_case()
+    c.plan = replace(c.plan, reservation=replace(c.plan.reservation, root_identity=(1, 2)))
+    calls, sent = [], io.BytesIO()
+    child = SimpleNamespace(stdin=sent, stdout=io.BytesIO(b"OK\n"), poll=lambda: None)
+    def popen(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return child
+    monkeypatch.setattr(p, "_PLATFORM", platform)
+    monkeypatch.setattr(p.subprocess, "Popen", popen)
+    monkeypatch.setattr(p, "threading", SimpleNamespace(Thread=lambda *, target, daemon: SimpleNamespace(start=target)))
+    lease = p._GuardianLease(c.plan)
+    lease.arm()
+    return SimpleNamespace(lease=lease, calls=calls, sent=sent, child=child, plan=c.plan)
+
+
+def test_teardown_guardian_process_exits_hard(monkeypatch):
+    c = g_arm(monkeypatch, "darwin")
+    code = c.calls[0][0][3]
+    assert "m['_guardian_process_main']()" in code
+    assert "sys.exit(m['_guardian_entry']())" not in code
+    class HardExit(BaseException):
+        def __init__(self, code):
+            self.code = code
+    def exit_hard(code):
+        raise HardExit(code)
+    flushed = []
+    monkeypatch.setattr(p.os, "_exit", exit_hard)
+    monkeypatch.setattr(p, "sys", SimpleNamespace(
+        stdout=SimpleNamespace(flush=lambda: flushed.append("stdout")),
+        stderr=SimpleNamespace(flush=lambda: flushed.append("stderr"))))
+    for result, expected in ((0, 0), (3, 3), (None, 1), (True, 1), (256, 1), (-1, 1)):
+        monkeypatch.setattr(p, "_guardian_entry", lambda: result)
+        with pytest.raises(HardExit) as error:
+            p._guardian_process_main()
+        assert error.value.code == expected
+        assert flushed[-2:] == ["stdout", "stderr"]
+    def crash():
+        raise RuntimeError("entry failed")
+    monkeypatch.setattr(p, "_guardian_entry", crash)
+    with pytest.raises(HardExit) as error:
+        p._guardian_process_main()
+    assert error.value.code == 1 and flushed[-2:] == ["stdout", "stderr"]
+
+
+def g_entry(monkeypatch, items, *, main=None):
+    c = lifetime_case()
+    c.private = False
+    files = ReceiptFiles()
+    root = files.root / "guardian"
+    root.mkdir()
+    info = root.stat()
+    initial = {"event": "init", "run_id": "run-test", "run_root": str(root),
+        "root_identity": [info.st_dev, info.st_ino], "deadline": 10}
+    output = io.StringIO()
+    monkeypatch.setattr(p, "_PLATFORM", "darwin")
+    monkeypatch.setattr(p, "sys", SimpleNamespace(stdin=SimpleNamespace(buffer=io.BytesIO(
+        b"".join((json.dumps(item) + "\n").encode() for item in [initial, *items]))), stdout=output))
+    monkeypatch.setattr(p, "threading", SimpleNamespace(RLock=p.threading.RLock,
+        Thread=lambda *, target, daemon: SimpleNamespace(start=target)))
+    monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+    real_path = p.Path
+    monkeypatch.setattr(p, "Path", lambda value: root if value == str(root) else real_path(value))
+    if main is not None:
+        monkeypatch.setattr(p, "guardian_main", main)
+    return c, output
+
+
+class TestProjectLifetime:
+    def test_g_ps_identity(self, monkeypatch):
+        c = g_ps(monkeypatch, G_PS.replace(b"Oct 28", b"Oct   28"))
+        assert p._darwin_process_row(7) == p._PosixProcessRow(7, 1, 7, G_START)
+        assert c.calls == [(["/bin/ps", "-o", "pid=,ppid=,pgid=,stat=,lstart=", "-p", "7"],
+            {"env": {"LC_ALL": "C", "TZ": "UTC"}, "stdin": subprocess.DEVNULL,
+             "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT, "bufsize": 0})]
+        assert c.waits and c.output.closed
+
+    def test_g_ps_status_garbage(self, monkeypatch):
+        owner = SimpleNamespace(identity=p.ProcessIdentity("stack-launcher", 1, "owner", 0))
+        g_ps(monkeypatch, b"7 1 7 Sgarbage Wed Oct 28 19:35:00 2026")
+        with pytest.raises(RuntimeError):
+            p._darwin_process_row(7)
+        with pytest.raises(RuntimeError):
+            p._process_child(owner, "app", 7)
+
+    def test_g_ps_status_invalid_flag(self, monkeypatch):
+        # Every documented live state and non-exiting flag remains usable.
+        for status in ("I", "R", "S", "T", "U", "S+<>ALNSsVWX"):
+            g_ps(monkeypatch, G_PS.replace(b"Ss", status.encode()))
+            assert p._darwin_process_row(7) == p._PosixProcessRow(7, 1, 7, G_START)
+        for status in ("S-", "S?", "Sl", "W", "X", "E", "SE", "Zs"):
+            g_ps(monkeypatch, G_PS.replace(b"Ss", status.encode()))
+            with pytest.raises(RuntimeError):
+                p._darwin_process_row(7)
+
+    def test_g_ps_zombie(self, monkeypatch):
+        g_ps(monkeypatch, G_PS.replace(b"Ss", b"Z+"))
+        with pytest.raises(RuntimeError):
+            p._darwin_process_row(7)
+
+    def test_g_ps_exited(self, monkeypatch):
+        g_ps(monkeypatch, G_PS.replace(b"Ss", b"X"))
+        with pytest.raises(RuntimeError):
+            p._darwin_process_row(7)
+
+    def test_g_ps_wrong_pid(self, monkeypatch):
+        g_ps(monkeypatch, G_PS.replace(b"  7", b"  8", 1))
+        with pytest.raises(RuntimeError):
+            p._darwin_process_row(7)
+
+    def test_g_ps_lstart(self, monkeypatch):
+        g_ps(monkeypatch, G_PS.replace(b"Wed Oct 28", b"Wed Feb 30"))
+        with pytest.raises(RuntimeError):
+            p._darwin_process_row(7)
+
+    def test_g_ps_timeout(self, monkeypatch):
+        c = g_ps(monkeypatch)
+        def wait(timeout):
+            raise subprocess.TimeoutExpired("fake-ps", timeout)
+        c.child.wait = wait
+        with pytest.raises(RuntimeError):
+            p._darwin_process_row(7)
+        assert c.output.closed
+
+    def test_g_ps_missing(self, monkeypatch):
+        g_ps(monkeypatch)
+        def missing(*args, **kwargs):
+            raise FileNotFoundError("fake missing ps")
+        monkeypatch.setattr(p.subprocess, "Popen", missing)
+        with pytest.raises(RuntimeError):
+            p._darwin_process_row(7)
+
+    def test_g_ps_error_output(self, monkeypatch):
+        g_ps(monkeypatch, code=1)
+        with pytest.raises(RuntimeError):
+            p._darwin_process_row(7)
+
+    def test_g_ps_decimal(self, monkeypatch):
+        g_ps(monkeypatch, G_PS.replace(b"  1  7", b"  01  7"))
+        with pytest.raises(RuntimeError):
+            p._darwin_process_row(7)
+
+    def test_g_ps_overflow(self, monkeypatch):
+        c = g_ps(monkeypatch, b" " * 5000)
+        with pytest.raises(RuntimeError, match="exceeded bound"):
+            p._darwin_process_row(7)
+        assert sum(c.reads) == 4097 and c.output.closed and c.waits == []
+
+    def test_g_ps_read_deadline(self, monkeypatch):
+        c = g_ps(monkeypatch)
+        c.child.poll = lambda: None
+        monkeypatch.setattr(p, "select", SimpleNamespace(select=lambda *args: ([], [], [])))
+        with pytest.raises(RuntimeError, match="timed out"):
+            p._darwin_process_row(7)
+        assert c.killed == [True] and c.output.closed and c.waits
+
+    def test_g_ps_multiple_rows(self, monkeypatch):
+        g_ps(monkeypatch, G_PS + G_PS)
+        with pytest.raises(RuntimeError):
+            p._darwin_process_row(7)
+
+    def test_g_ps_empty_success(self, monkeypatch):
+        g_ps(monkeypatch, b"")
+        with pytest.raises(RuntimeError):
+            p._darwin_process_row(7)
+
+    def test_g_observe_gone(self, monkeypatch):
+        c = g_runtime(monkeypatch)
+        g_ps(monkeypatch, b"", code=1)
+        observed = []
+        def stop(request, **kwargs):
+            observed.append(request.observe())
+            return True
+        monkeypatch.setattr(p, "stop_owned", stop)
+        assert c.process.stop(p.time.monotonic() + 1)
+        assert observed == [None]
+
+    def test_g_observe_live(self, monkeypatch):
+        c = g_runtime(monkeypatch)
+        g_ps(monkeypatch)
+        observed = []
+        def stop(request, **kwargs):
+            observed.append(request.observe())
+            return True
+        monkeypatch.setattr(p, "stop_owned", stop)
+        assert c.process.stop(p.time.monotonic() + 1)
+        assert observed == [c.process.identity]
+
+    def test_g_start_darwin(self, monkeypatch):
+        c = g_runtime(monkeypatch)
+        seen = []
+        def popen(argv, **kwargs):
+            seen.append(kwargs)
+            return c.process.process
+        monkeypatch.setattr(p.subprocess, "Popen", popen)
+        monkeypatch.setattr(p, "_darwin_process_row", lambda pid: p._PosixProcessRow(pid, 1, pid, G_START))
+        process = p._RuntimeProcess(c.process.spec)
+        process.start()
+        assert process.identity == p.ProcessIdentity("stack-launcher", 7, G_START, 1)
+        assert seen[0]["start_new_session"] is True and seen[0]["creationflags"] == 0
+
+    def test_g_start_gone(self, monkeypatch):
+        c = g_runtime(monkeypatch)
+        monkeypatch.setattr(p.subprocess, "Popen", lambda *args, **kwargs: c.process.process)
+        monkeypatch.setattr(p, "_darwin_process_row", lambda pid: None)
+        process = p._RuntimeProcess(c.process.spec)
+        with pytest.raises(RuntimeError):
+            process.start()
+        assert process.identity is None and c.calls == [(7, 9)]
+
+    def test_g_custody_own_group(self, monkeypatch):
+        g_ps(monkeypatch)
+        owner = SimpleNamespace(identity=p.ProcessIdentity("stack-launcher", 1, "launcher", 0))
+        assert p._process_child(owner, "app", 7) == p.ProcessIdentity("app", 7, G_START, 1)
+
+    def test_g_custody_launcher_group(self, monkeypatch):
+        g_ps(monkeypatch, G_PS.replace(b"  1  7", b"  1  1"))
+        owner = SimpleNamespace(identity=p.ProcessIdentity("stack-launcher", 1, "launcher", 0))
+        assert p._process_child(owner, "app", 7) == p.ProcessIdentity("app", 7, G_START, 1)
+
+    def test_g_custody_parent(self, monkeypatch):
+        g_ps(monkeypatch, G_PS.replace(b"  1  7", b"  2  7"))
+        owner = SimpleNamespace(identity=p.ProcessIdentity("stack-launcher", 1, "launcher", 0))
+        with pytest.raises(RuntimeError):
+            p._process_child(owner, "app", 7)
+
+    def test_g_custody_group(self, monkeypatch):
+        g_ps(monkeypatch, G_PS.replace(b"  1  7", b"  1  8"))
+        owner = SimpleNamespace(identity=p.ProcessIdentity("stack-launcher", 1, "launcher", 0))
+        with pytest.raises(RuntimeError):
+            p._process_child(owner, "app", 7)
+
+    def test_g_darwin_group_stop(self, monkeypatch):
+        c = g_runtime(monkeypatch)
+        g_ps(monkeypatch)
+        observed, checked = [], []
+        def wait(timeout):
+            observed.append(timeout)
+            if len(observed) == 1:
+                raise subprocess.TimeoutExpired("fake", timeout)
+            return 0
+        c.process.process.wait = wait
+        monkeypatch.setattr(p, "_group_empty", lambda pid, deadline: (checked.append(pid), True)[1])
+        assert c.process.stop(p.time.monotonic() + 1)
+        assert c.calls == ["terminate", (7, 9), (7, 9)] and checked == [7]
+
+    def test_g_darwin_exited_group(self, monkeypatch):
+        c = g_runtime(monkeypatch, exited=True)
+        checked = []
+        monkeypatch.setattr(p, "_group_empty", lambda pid, deadline: (checked.append(pid), False)[1])
+        assert c.process.stop(p.time.monotonic() + 1) is False
+        assert c.calls == [(7, 9)] and checked == [7] and not c.process._stopped
+
+    def test_g_guardian_arm_posix(self, monkeypatch):
+        c = g_arm(monkeypatch, "darwin")
+        argv, options = c.calls[0]
+        assert options["start_new_session"] is True and "creationflags" not in options
+        assert options["stdin"] == options["stdout"] == subprocess.PIPE
+        assert options["stderr"] == subprocess.DEVNULL and argv[1:3] == ("-B", "-c")
+        initial = json.loads(c.sent.getvalue())
+        assert set(initial) == {"event", "run_id", "run_root", "root_identity", "deadline"}
+        assert initial["event"] == "init" and initial["run_id"] == "run-test"
+        assert len(c.sent.getvalue()) <= 16384
+
+    def test_g_guardian_arm_handshake(self, monkeypatch):
+        monkeypatch.setattr(p._GuardianLease, "_response", lambda self: False)
+        with pytest.raises(p.ProofRefused) as error:
+            g_arm(monkeypatch, "linux")
+        assert error.value.failure == p.Failure(p.Stage.ALLOCATION, p.FailureCode.GUARDIAN)
+
+    def test_g_guardian_own_group(self, monkeypatch):
+        c = g_arm(monkeypatch, "darwin")
+        c.sent.seek(0)
+        c.sent.truncate()
+        monkeypatch.setattr(c.lease, "_response", lambda: True)
+        child = SimpleNamespace(identity=p.ProcessIdentity("stack-launcher", 7, G_START, 1))
+        c.lease.own_process(child)
+        c.lease.own_process(child)
+        assert c.sent.getvalue() == (json.dumps({"event": "group", "pid": 7,
+            "start": G_START, "role": "stack-launcher"}, separators=(",", ":")) + "\n").encode()
+        assert c.lease.children == [child]
+
+    def test_g_guardian_identity_required(self, monkeypatch):
+        c = g_arm(monkeypatch, "darwin")
+        before = c.sent.getvalue()
+        monkeypatch.setattr(c.lease, "_response", lambda: True)
+        child = SimpleNamespace(identity=p.ProcessIdentity("stack-launcher", 7, "", 1))
+        with pytest.raises(p.ProofRefused):
+            c.lease.own_process(child)
+        with pytest.raises(p.ProofRefused):
+            c.lease.own_process(SimpleNamespace())
+        assert c.sent.getvalue() == before and c.lease.children == []
+
+    def test_g_guardian_own_ack(self, monkeypatch):
+        c = g_arm(monkeypatch, "darwin")
+        monkeypatch.setattr(c.lease, "_response", lambda: False)
+        child = SimpleNamespace(identity=p.ProcessIdentity("stack-launcher", 7, G_START, 1))
+        with pytest.raises(p.ProofRefused):
+            c.lease.own_process(child)
+        assert c.lease.sent_groups == set() and c.lease.children == []
+
+    def test_g_group_replacement(self, monkeypatch):
+        c = g_group(monkeypatch, start="replacement", empty=False)
+        assert c.group.stop(1) is False
+        assert c.calls == [] and c.observed == [(7, 1)] and c.checked == [(7, 1)]
+
+    def test_g_group_match(self, monkeypatch):
+        c = g_group(monkeypatch)
+        assert c.group.stop(1) is True
+        assert c.calls == [(7, 9)] and c.observed == [(7, 1)] and c.checked == [(7, 1)]
+        assert c.group.stop(1) is True and c.calls == [(7, 9)]
+
+    def test_g_group_lingers_recheck(self, monkeypatch):
+        c = g_group(monkeypatch, empty=False)
+        assert c.group.stop(1) is False and not c.group.stopped
+        monkeypatch.setattr(p, "_darwin_process_row",
+            lambda pid, **kwargs: p._PosixProcessRow(pid, 1, pid, "replacement"))
+        assert c.group.stop(1) is False
+        assert c.calls == [(7, 9)] and c.checked == [(7, 1), (7, 1)]
+
+    def test_g_group_gone(self, monkeypatch):
+        c = g_group(monkeypatch, start=None)
+        assert c.group.stop(1) is True
+        assert c.calls == [] and c.checked == [(7, 1)]
+
+    def test_g_group_observation_error(self, monkeypatch):
+        c = g_group(monkeypatch)
+        def denied(*args, **kwargs):
+            raise RuntimeError("fake denied ps")
+        monkeypatch.setattr(p, "_darwin_process_row", denied)
+        assert c.group.stop(1) is False and c.calls == [] and c.checked == []
+
+    def test_g_group_foreign_pgid(self, monkeypatch):
+        c = g_group(monkeypatch, pgid=8, empty=False)
+        assert c.group.stop(1) is False and c.calls == [] and c.checked == [(7, 1)]
+
+    def test_g_group_deadline(self, monkeypatch):
+        c = g_group(monkeypatch)
+        assert c.group.stop(0) is False and c.observed == [] and c.calls == []
+        def slow(pid, **kwargs):
+            monkeypatch.setattr(p, "time", SimpleNamespace(monotonic=lambda: 2.0))
+            return p._PosixProcessRow(pid, 1, pid, G_START)
+        monkeypatch.setattr(p, "_darwin_process_row", slow)
+        assert c.group.stop(1) is False and c.calls == [] and c.checked == []
+
+    def test_g_guardian_duplicate_keys(self, monkeypatch):
+        # Raw bytes retain ambiguity that json.dumps(dict) would erase.
+        messages = [
+            b'{"event":"group","pid":999,"pid":7,"start":"Wed Oct 28 19:35:00 2026","role":"stack-launcher"}',
+            b'{"event":"ignored","event":"disarm"}',
+            b'{"event":"job","handle":999,"handle":7}',
+        ]
+        owned = p._owned_public(lifetime_case().host.authority_inventory("run-test"))
+        authority = json.dumps({"event": "authority", "ownership": owned}).encode()
+        # Duplicate inside ownership and one level deeper inside labels.
+        messages.extend([
+            authority.replace(b'"run_id":', b'"run_id": "ignored", "run_id":', 1),
+            authority.replace(b'"leaf.proof-project.run":',
+                              b'"leaf.proof-project.run": "ignored", "leaf.proof-project.run":', 1),
+        ])
+        for raw in messages:
+            with monkeypatch.context() as patch:
+                group = g_group(patch)
+                _, output = g_entry(patch, [])
+                jobs = []
+                patch.setattr(p, "_TransferredJob", lambda handle: jobs.append(handle))
+                initial = p.sys.stdin.buffer.getvalue()
+                patch.setattr(p.sys.stdin, "buffer", io.BytesIO(
+                    initial + raw + b'\n{"event":"disarm"}\n'))
+                assert p._guardian_entry() == 1
+                assert output.getvalue() == "OK\n"
+                assert group.calls == [] and group.observed == [] and jobs == []
+
+    def test_g_guardian_duplicate_init(self, monkeypatch):
+        _, output = g_entry(monkeypatch, [{"event": "disarm"}])
+        raw = p.sys.stdin.buffer.getvalue().replace(
+            b'"event": "init"', b'"event":"ignored","event":"init"', 1)
+        monkeypatch.setattr(p.sys.stdin, "buffer", io.BytesIO(raw))
+        monkeypatch.setattr(p, "guardian_main", lambda *args, **kwargs: pytest.fail("ambiguous init dispatched"))
+        assert p._guardian_entry() == 1
+        assert output.getvalue() == ""
+
+    def test_g_entry_disarm(self, monkeypatch):
+        group = g_group(monkeypatch)
+        c, output = g_entry(monkeypatch, [{"event": "group", "pid": 7,
+            "start": G_START, "role": "stack-launcher"}, {"event": "disarm"}])
+        assert p._guardian_entry() == 0
+        assert output.getvalue() == "OK\nOK\nOK\n" and group.calls == [(7, 9)]
+        assert c.teardown == []
+
+    def test_g_entry_parent_loss(self, monkeypatch):
+        group = g_group(monkeypatch)
+        c, output = g_entry(monkeypatch, [{"event": "group", "pid": 7,
+            "start": G_START, "role": "stack-launcher"}])
+        assert p._guardian_entry() == 0
+        assert output.getvalue() == "OK\nOK\n" and group.calls == [(7, 9)]
+        assert c.teardown == ["authority", "private"]
+
+    def test_g_entry_exact_keys(self, monkeypatch):
+        group = g_group(monkeypatch)
+        _, output = g_entry(monkeypatch, [{"event": "group", "pid": 7,
+            "start": G_START, "role": "stack-launcher", "extra": True}])
+        assert p._guardian_entry() == 1 and output.getvalue() == "OK\n"
+        assert group.calls == []
+
+    def test_g_entry_bounded_strings(self, monkeypatch):
+        group = g_group(monkeypatch, start="x" * 129)
+        _, output = g_entry(monkeypatch, [{"event": "group", "pid": 7,
+            "start": "x" * 129, "role": "stack-launcher"}])
+        assert p._guardian_entry() == 1 and output.getvalue() == "OK\n" and group.calls == []
+
+    def test_g_entry_positive_pid(self, monkeypatch):
+        g_group(monkeypatch)
+        _, output = g_entry(monkeypatch, [{"event": "group", "pid": 0,
+            "start": G_START, "role": "stack-launcher"}])
+        assert p._guardian_entry() == 1 and output.getvalue() == "OK\n"
+
+    def test_g_entry_windows_refuses_group(self, monkeypatch):
+        group = g_group(monkeypatch)
+        _, output = g_entry(monkeypatch, [{"event": "group", "pid": 7,
+            "start": G_START, "role": "stack-launcher"}])
+        monkeypatch.setattr(p, "_PLATFORM", "win32")
+        assert p._guardian_entry() == 1 and output.getvalue() == "OK\n" and group.calls == []
+
+    def test_g_linux_unchanged(self, monkeypatch):
+        c = g_runtime(monkeypatch, platform="linux")
+        parts = ["S", "1", "7", "7"] + ["0"] * 46
+        parts[19] = "123"
+        text = "7 (fake name) " + " ".join(parts)
+        paths = []
+        def path(value):
+            paths.append(value)
+            return SimpleNamespace(read_text=lambda: text)
+        monkeypatch.setattr(p, "Path", path)
+        monkeypatch.setattr(p.subprocess, "Popen", lambda *args, **kwargs: c.process.process)
+        monkeypatch.setattr(p, "_darwin_process_row", lambda *args, **kwargs: pytest.fail("Linux called ps"))
+        process = p._RuntimeProcess(c.process.spec)
+        process.start()
+        assert process.identity == p.ProcessIdentity("stack-launcher", 7, "123", 1)
+        owner = SimpleNamespace(identity=p.ProcessIdentity("stack-launcher", 1, "launcher", 0))
+        assert p._process_child(owner, "app", 7) == p.ProcessIdentity("app", 7, "123", 1)
+        seen = []
+        def stop(request, **kwargs):
+            seen.append(request.observe())
+            return True
+        monkeypatch.setattr(p, "stop_owned", stop)
+        assert process.stop(p.time.monotonic() + 1)
+        assert seen == [process.identity] and paths == ["/proc/7/stat"] * 3
+
+    def test_g_linux_guardian(self, monkeypatch):
+        c = g_group(monkeypatch)
+        monkeypatch.setattr(p, "_PLATFORM", "linux")
+        parts = ["S", "1", "7", "7"] + ["0"] * 46
+        parts[19] = "123"
+        monkeypatch.setattr(p, "Path", lambda value: SimpleNamespace(read_text=lambda: "7 (fake) " + " ".join(parts)))
+        group = p._TransferredGroup(7, "123", "stack-launcher")
+        assert group.stop(1) is True and c.calls == [(7, 9)] and c.observed == []
+
+    def test_g_windows_unchanged(self, monkeypatch):
+        c = g_runtime(monkeypatch, platform="win32")
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="nt", getpid=lambda: 1))
+        calls, flags = [], []
+        job = SimpleNamespace(attach_and_resume=lambda child: (calls.append("attach"), "windows-start")[1],
+            stop=lambda deadline: (calls.append("job-stop"), True)[1], close=lambda: calls.append("close"))
+        monkeypatch.setattr(p, "_WindowsJob", lambda: job)
+        monkeypatch.setattr(p.subprocess, "Popen", lambda *args, **kwargs: (flags.append(kwargs), c.process.process)[1])
+        monkeypatch.setattr(p, "_darwin_process_row", lambda *args, **kwargs: pytest.fail("Windows called ps"))
+        process = p._RuntimeProcess(c.process.spec)
+        process.start()
+        assert process.identity == p.ProcessIdentity("stack-launcher", 7, "windows-start", 1)
+        assert flags[0]["creationflags"] == 0x08000004 and flags[0]["start_new_session"] is False
+        seen = []
+        def stop(request, **kwargs):
+            seen.append(request.observe())
+            return True
+        monkeypatch.setattr(p, "stop_owned", stop)
+        assert process.stop(p.time.monotonic() + 1) and seen == [process.identity]
+        assert calls == ["attach", "job-stop", "close"] and c.calls == []
+        armed = g_arm(monkeypatch, "win32")
+        assert armed.calls[0][1]["creationflags"] == 0x08000000
+        assert "start_new_session" not in armed.calls[0][1]
+
+    def test_g_windows_job_message(self, monkeypatch):
+        c = g_arm(monkeypatch, "win32")
+        c.sent.seek(0)
+        c.sent.truncate()
+        c.child._handle = 77
+        monkeypatch.setattr(c.lease, "_response", lambda: True)
+        calls = []
+        def duplicate(owner, handle, recipient, output, access, inherit, options):
+            calls.append((owner, handle, recipient, access, inherit, options))
+            output._obj.value = 88
+            return True
+        kernel = SimpleNamespace(GetCurrentProcess=lambda: 66, DuplicateHandle=duplicate)
+        child = SimpleNamespace(job=SimpleNamespace(handle=55, kernel=kernel))
+        c.lease.own_process(child)
+        c.lease.own_process(child)
+        assert json.loads(c.sent.getvalue()) == {"event": "job", "handle": 88}
+        assert calls == [(66, 55, 77, 0, False, 2)] and c.lease.children == [child]
+
+    def test_d_d_perform_deadline_after_completion(self):
+        c = lifetime_case()
+        clock = c.effects.clock
+        task = SimpleNamespace(checks=0, result=lambda: "done")
+        def done():
+            task.checks += 1
+            if task.checks == 1:
+                return False
+            clock.now = 2.0
+            return True
+        task.done = done
+        c.host.begin_operation = lambda operation: task
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.MIGRATION, lambda: "done", deadline=1)
+        assert task.checks == 2 and clock.now == 2.0
+        assert error.value.failure == p.Failure(p.Stage.MIGRATION, p.FailureCode.GUARDIAN)
+        assert c.scope.failure is error.value.failure
+        assert c.scope.close().ok
+        committed = []
+        with pytest.raises(p.ProofRefused):
+            c.scope.commit_guard(lambda: (committed.append(True), "COMMITTED")[1])
+        assert committed == [] and c.scope.failure is error.value.failure
+
+    def test_d_d_posix_exited_launcher_group_signalled(self, monkeypatch):
+        c = lifetime_case()
+        signals, checked = [], []
+        process = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+        process.identity = p.ProcessIdentity("stack-launcher", 7, "old", 1)
+        process.process = SimpleNamespace(pid=7, poll=lambda: 0)
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="posix"))
+        monkeypatch.setattr(p, "signal", SimpleNamespace(SIGKILL=9))
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        monkeypatch.setattr(p, "_signal_group", lambda pgid, sig: signals.append((pgid, sig)))
+        monkeypatch.setattr(p, "_group_empty",
+            lambda pgid, deadline: (checked.append((pgid, deadline)), True)[1])
+        deadline = p.time.monotonic() + 1
+        assert process.stop(deadline) is True
+        assert signals == [(7, p.signal.SIGKILL)]
+        assert checked == [(7, deadline)] and process._stopped
+
+    def test_d_d_posix_exited_launcher_group_lingers(self, monkeypatch):
+        c = lifetime_case()
+        signals, checked = [], []
+        process = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+        process.identity = p.ProcessIdentity("stack-launcher", 7, "old", 1)
+        process.process = SimpleNamespace(pid=7, poll=lambda: 0)
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="posix"))
+        monkeypatch.setattr(p, "signal", SimpleNamespace(SIGKILL=9))
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        monkeypatch.setattr(p, "_signal_group", lambda pgid, sig: signals.append((pgid, sig)))
+        monkeypatch.setattr(p, "_group_empty",
+            lambda pgid, deadline: (checked.append((pgid, deadline)), False)[1])
+        deadline = p.time.monotonic() + 1
+        assert process.stop(deadline) is False
+        assert signals == [(7, p.signal.SIGKILL)]
+        assert checked == [(7, deadline)] and not process._stopped
+        assert process.stop(deadline) is False
+        assert signals == [(7, p.signal.SIGKILL)] * 2
+        assert checked == [(7, deadline)] * 2 and not process._stopped
+
+    def test_d_c_disarm_stops_every_process(self):
+        c = lifetime_case()
+        c.private = False
+        stops, acknowledged = [], []
+        first = SimpleNamespace(stop=lambda deadline: (stops.append("first"), False)[1])
+        second = SimpleNamespace(stop=lambda deadline: (stops.append("second"), True)[1])
+        channel = SimpleNamespace(receive=lambda timeout: "disarm",
+                                  acknowledge=lambda: acknowledged.append(True))
+        request = p.GuardianRequest("run-test", c.plan.reservation,
+            c.host.authority_inventory("run-test"), channel, (first, second), 1)
+        assert p.guardian_main(request, effects=c.effects) == 1
+        assert stops == ["first", "second", "second", "first"]
+        assert acknowledged == []
+
+    def test_d_c_disarm_failure_falls_back(self):
+        c = lifetime_case()
+        events, acknowledged = [], []
+        inventory = c.host.authority_inventory
+        ownership = inventory("run-test")
+        def observe(run_id):
+            events.append("inventory")
+            return inventory(run_id)
+        def absent(reservation):
+            events.append("disarm-check")
+            return False
+        c.host.authority_inventory = observe
+        c.host.private_absent = absent
+        process = SimpleNamespace(stop=lambda deadline: (events.append("stop"), True)[1])
+        channel = SimpleNamespace(receive=lambda timeout: "disarm",
+                                  acknowledge=lambda: acknowledged.append(True))
+        request = p.GuardianRequest("run-test", c.plan.reservation,
+            ownership, channel, (process,), 1)
+        assert p.guardian_main(request, effects=c.effects) == 1
+        check = events.index("disarm-check")
+        assert events[:check].count("stop") == 1
+        assert events[check + 1:] == ["stop", "inventory", "inventory"]
+        assert c.teardown == ["authority", "private"] and not c.private
+        assert acknowledged == []
+
+    def test_d_c_disarm_success_acknowledges(self):
+        c = lifetime_case()
+        c.private = False
+        stops, acknowledged = [], []
+        first = SimpleNamespace(stop=lambda deadline: (stops.append("first"), True)[1])
+        second = SimpleNamespace(stop=lambda deadline: (stops.append("second"), True)[1])
+        channel = SimpleNamespace(receive=lambda timeout: "disarm",
+                                  acknowledge=lambda: acknowledged.append(True))
+        request = p.GuardianRequest("run-test", c.plan.reservation,
+            c.host.authority_inventory("run-test"), channel, (first, second), 1)
+        assert p.guardian_main(request, effects=c.effects) == 0
+        assert stops == ["first", "second"] and acknowledged == [True]
+        assert c.teardown == []
+
+    def test_d_c_posix_group_kill(self, monkeypatch):
+        c = lifetime_case()
+        calls = []
+        process = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+        process.identity = p.ProcessIdentity("stack-launcher", 7, "old", 1)
+        process.process = SimpleNamespace(pid=7, poll=lambda: None,
+            kill=lambda: calls.append("child-kill"))
+        def stop_owned(request, *, effects, deadline):
+            assert request.identity is process.identity and effects is c.effects
+            request.kill()
+            return True
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="posix"))
+        monkeypatch.setattr(p, "signal", SimpleNamespace(SIGKILL=9))
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        monkeypatch.setattr(p, "stop_owned", stop_owned)
+        monkeypatch.setattr(p, "_signal_group", lambda pgid, sig: calls.append((pgid, sig)))
+        monkeypatch.setattr(p, "_group_empty", lambda pgid, deadline: True)
+        assert process.stop(p.time.monotonic() + 1) is True
+        assert calls == [(7, p.signal.SIGKILL)] * 2
+
+    def test_d_c_posix_stop_group_empty(self, monkeypatch):
+        c = lifetime_case()
+        checked = []
+        process = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+        process.identity = p.ProcessIdentity("stack-launcher", 7, "old", 1)
+        process.process = SimpleNamespace(pid=7, poll=lambda: 0)
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="posix"))
+        monkeypatch.setattr(p, "signal", SimpleNamespace(SIGKILL=9))
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        monkeypatch.setattr(p, "stop_owned", lambda *args, **kwargs: True)
+        monkeypatch.setattr(p, "_signal_group", lambda pgid, sig: None)
+        monkeypatch.setattr(p, "_group_empty",
+            lambda pgid, deadline: (checked.append((pgid, deadline)), True)[1])
+        deadline = p.time.monotonic() + 1
+        assert process.stop(deadline) is True
+        assert checked == [(7, deadline)] and process._stopped
+
+    def test_d_c_posix_stop_group_lingers(self, monkeypatch):
+        c = lifetime_case()
+        checked = []
+        process = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+        process.identity = p.ProcessIdentity("stack-launcher", 7, "old", 1)
+        process.process = SimpleNamespace(pid=7, poll=lambda: 0)
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="posix"))
+        monkeypatch.setattr(p, "signal", SimpleNamespace(SIGKILL=9))
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        monkeypatch.setattr(p, "stop_owned", lambda *args, **kwargs: True)
+        monkeypatch.setattr(p, "_signal_group", lambda pgid, sig: None)
+        monkeypatch.setattr(p, "_group_empty",
+            lambda pgid, deadline: (checked.append((pgid, deadline)), False)[1])
+        deadline = p.time.monotonic() + 1
+        assert process.stop(deadline) is False
+        assert not process._stopped and checked == [(7, deadline)]
+        assert process.stop(deadline) is False
+        assert not process._stopped and checked == [(7, deadline), (7, deadline)]
+
+    def test_d_b_c1_cancel_error(self):
+        c = lifetime_case()
+        with pytest.raises(TypeError):
+            c.scope.cancel(unexpected=True)
+        primary = c.scope.failure
+        assert primary == p.Failure(p.Stage.TEARDOWN, p.FailureCode.GUARDIAN)
+        c.scope.close()
+        with pytest.raises(p.ProofRefused):
+            c.scope.commit_guard(lambda: pytest.fail("COMMITTED"))
+        assert c.scope.failure is primary
+
+    def test_d_b_c1_remember_error(self):
+        c = lifetime_case()
+        with pytest.raises(TypeError):
+            c.scope.remember()
+        primary = c.scope.failure
+        assert primary == p.Failure(p.Stage.TEARDOWN, p.FailureCode.GUARDIAN)
+        c.scope.close()
+        with pytest.raises(p.ProofRefused):
+            c.scope.commit_guard(lambda: pytest.fail("COMMITTED"))
+        assert c.scope.failure is primary
+
+    def test_d_b_c1_stop_close_race(self, monkeypatch):
+        c = closing_job_race(monkeypatch, kill_succeeds=True)
+        assert c.stops == [False] and not c.process._stopped
+        assert not c.child.live
+        assert c.events.index("close-return") < c.events.index("child-kill") < c.events.index("child-wait")
+        assert p.guardian_main(c.request, effects=c.effects) == 1
+        assert not any(event.startswith("ack") for event in c.events)
+
+    def test_d_b_c1_stop_close_live(self, monkeypatch):
+        c = closing_job_race(monkeypatch, kill_succeeds=False)
+        assert c.child.live
+        assert p.guardian_main(c.request, effects=c.effects) == 1
+        assert not any(event.startswith("ack") for event in c.events)
+        assert c.stops == [False] and not c.process._stopped
+        assert "child-kill" in c.events and "child-wait" in c.events
+
+    def test_d_b_c1_stop_no_child(self, monkeypatch):
+        calls = []
+        def popen(*args, **kwargs):
+            calls.append("popen-failed")
+            raise OSError("no child created")
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="nt"))
+        monkeypatch.setattr(p, "_WindowsJob", lambda: SimpleNamespace(close=lambda: calls.append("close")))
+        monkeypatch.setattr(p.subprocess, "Popen", popen)
+        process = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+        with pytest.raises(RuntimeError, match="runtime process start failed"):
+            process.start()
+        assert process.process is None and not process._starting and not process._stopped
+        assert process.stop(p.time.monotonic() + 1) is True
+        assert process._stopped and calls == ["popen-failed", "close", "close"]
+
+    def test_d_b_c1_perform_after_close(self):
+        c = owned_authority_case()
+        first = c.scope.close()
+        assert first.authority_removed and first.ok
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.ALLOCATION, lambda: prepare(c), deadline=1)
+        assert c.scope.failure is error.value.failure
+        assert c.scope.failure == p.Failure(p.Stage.ALLOCATION, p.FailureCode.GUARDIAN)
+        assert "allocate" not in c.events and c.inventory_reads == []
+        assert c.inventory.containers == c.inventory.networks == ()
+        assert c.scope._pending == [] and c.scope.close() is first
+        assert first.authority_removed and first.ok
+        with pytest.raises(p.ProofRefused):
+            c.scope.commit_guard(lambda: pytest.fail("post-close work published"))
+        assert c.scope.failure is error.value.failure
+
+    def test_d_b_c1_checkpoint_closed(self):
+        c = lifetime_case()
+        c.scope.close()
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.checkpoint(p.Stage.BINDING)
+        assert c.scope.failure is error.value.failure
+        assert c.scope.failure == p.Failure(p.Stage.BINDING, p.FailureCode.GUARDIAN)
+        with pytest.raises(p.ProofRefused):
+            c.scope.checkpoint(p.Stage.ALLOCATION)
+        assert c.scope.failure is error.value.failure
+
+    def test_d_b_c1_closing_admission(self):
+        c = owned_authority_case()
+        registered, refused = [], []
+        def done():
+            if c.scope._closing and not registered:
+                assert c.scope._draining
+                with pytest.raises(p.ProofRefused) as error:
+                    c.scope.perform(p.Stage.ALLOCATION, lambda: prepare(c), deadline=1)
+                refused.append(error.value.failure)
+                # This operation was pending before close: its late cleanup is owned.
+                c.scope.own_pool(SimpleNamespace(close=lambda: c.teardown.append("late-pool")))
+                registered.append(True)
+            return bool(registered)
+        c.scope._pending.append(SimpleNamespace(done=done))
+        proof = c.scope.close()
+        assert proof.ok and c.teardown == ["late-pool"]
+        assert refused == [p.Failure(p.Stage.ALLOCATION, p.FailureCode.GUARDIAN)]
+        assert c.scope.failure is refused[0] and "allocate" not in c.events
+        assert c.inventory.containers == c.inventory.networks == ()
+
+    def test_d_b_c1_pool_invalid_cleanup(self):
+        c = lifetime_case()
+        with pytest.raises(TypeError, match="invalid cleanup registration"):
+            c.scope.own_pool(SimpleNamespace(close=None))
+        primary = c.scope.failure
+        assert primary == p.Failure(p.Stage.TEARDOWN, p.FailureCode.GUARDIAN)
+        c.scope.close()
+        assert c.scope.failure is primary
+        with pytest.raises(p.ProofRefused):
+            c.scope.commit_guard(lambda: pytest.fail("COMMITTED"))
+        assert c.scope.failure is primary
+
+    def test_d_b_c1_acquire_invalid_kind(self):
+        c = lifetime_case()
+        with pytest.raises(TypeError, match="invalid cleanup registration"):
+            c.scope.acquire("pool", lambda: None)
+        assert c.scope.failure == p.Failure(p.Stage.TEARDOWN, p.FailureCode.GUARDIAN)
+        assert c.scope._actions == []
+        c.scope.close()
+        with pytest.raises(p.ProofRefused):
+            c.scope.commit_guard(lambda: pytest.fail("COMMITTED"))
+
+    def test_d_b_c1_browser_getter_error(self):
+        c = lifetime_case()
+        error = AttributeError("stop getter")
+        class Browser:
+            @property
+            def stop(self):
+                raise error
+        assert_entry_error(c.scope, lambda: c.scope.own_browser(Browser()), error)
+
+    def test_d_b_c1_reservation_getter_error(self):
+        c = lifetime_case()
+        error = AttributeError("release getter")
+        class Reservation:
+            @property
+            def release_ports(self):
+                raise error
+        assert_entry_error(c.scope, lambda: c.scope.own_reservation(Reservation()), error)
+
+    def test_d_b_c1_checkpoint_error_stage(self):
+        c = lifetime_case()
+        error = AttributeError("cancel getter")
+        def cancelled():
+            raise error
+        c.scope.cancelled = cancelled
+        assert_entry_error(c.scope, lambda: c.scope.checkpoint(stage=p.Stage.BROWSER),
+                           error, p.Stage.BROWSER)
+
+    def test_d_b_c1_perform_error_stage(self):
+        c = lifetime_case()
+        error = OSError("operation error")
+        def operation():
+            raise error
+        assert_entry_error(c.scope, lambda: c.scope.perform(p.Stage.MIGRATION, operation, deadline=1),
+                           error, p.Stage.MIGRATION)
+
+    def test_d_b_c1_error_first_failure(self):
+        c = lifetime_case()
+        primary = p.Failure(p.Stage.BINDING, p.FailureCode.BINDING)
+        c.scope.remember(primary)
+        error = AttributeError("pool getter")
+        class Pool:
+            @property
+            def close(self):
+                raise error
+        assert_entry_error(c.scope, lambda: c.scope.own_pool(Pool()), error)
+        assert c.scope.failure is primary
+
+    def test_d_b_owned_ids_only(self):
+        c = owned_authority_case()
+        prepared = prepare(c)
+        owned = prepared.database.ownership
+        assert owned.containers == ("a" * 12, "b" * 12) and owned.networks == ("c" * 12,)
+        foreign = replace(owned, containers=("d" * 12, "e" * 12), networks=("f" * 12,))
+        c.inventory = foreign
+        proof = c.scope.close()
+        assert c.snapshots == [owned] and c.removed == [] and c.inventory == foreign
+        assert not proof.authority_removed and not proof.ok
+        assert c.events.count("stop-authority") == 1
+
+    def test_d_b_owned_ids_removed(self):
+        c = owned_authority_case()
+        prepared = prepare(c)
+        proof = c.scope.close()
+        assert c.snapshots == [prepared.database.ownership]
+        assert c.removed == ["a" * 12, "b" * 12, "c" * 12]
+        assert c.inventory.containers == c.inventory.networks == ()
+        assert proof.authority_removed and proof.ok
+        assert len(c.inventory_reads) == 3
+
+    def test_d_b_snapshot_read_failure(self):
+        c = owned_authority_case()
+        inventory = c.host.authority_inventory
+        def observe(run_id):
+            result = inventory(run_id)
+            if len(c.inventory_reads) == 2:
+                raise OSError("fake")
+            return result
+        c.host.authority_inventory = observe
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.ALLOCATION, lambda: prepare(c), deadline=1)
+        proof = c.scope.close()
+        assert c.events.count("stop-authority") == 1
+        assert c.snapshots == c.removed == c.run_id_deletions == []
+        assert c.inventory.containers == ("a" * 12, "b" * 12)
+        assert not proof.authority_removed and not proof.ok
+        assert c.scope.failure is error.value.failure
+        assert c.scope.failure == p.Failure(p.Stage.ALLOCATION, p.FailureCode.ALLOCATION)
+
+    def test_d_b_failed_start_not_removed(self):
+        c = owned_authority_case()
+        allocate = c.effects.authority_factory
+        def fail(run_id):
+            allocate(run_id)
+            raise RuntimeError("fake")
+        c.effects = replace(c.effects, authority_factory=fail)
+        c.scope = p.RunScope(effects=c.effects)
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.ALLOCATION, lambda: prepare(c), deadline=1)
+        proof = c.scope.close()
+        assert c.inventory.containers and c.snapshots == c.removed == []
+        assert not proof.authority_removed and not proof.ok
+        assert c.scope.failure is error.value.failure
+        assert c.scope.failure == p.Failure(p.Stage.ALLOCATION, p.FailureCode.ALLOCATION)
+        assert proof.failures == (p.Failure(p.Stage.TEARDOWN, p.FailureCode.CLEANUP_AUTHORITY),)
+
+    def test_d_b_concurrent_stop_during_start(self, monkeypatch):
+        import threading
+        c = lifetime_case()
+        c.private = False
+        events, errors = [], []
+        entered, release = threading.Event(), threading.Event()
+        class Child:
+            live = True
+            def poll(self):
+                return None if self.live else 1
+            def kill(self):
+                events.append("child-kill")
+                self.live = False
+            def wait(self, timeout):
+                assert 0 <= timeout <= p.CLEANUP_TIMEOUT_S
+                if self.live:
+                    raise subprocess.TimeoutExpired("fake", timeout)
+                events.append("child-stopped")
+                return 1
+        child = Child()
+        class Job:
+            closed = False
+            def close(self):
+                events.append("job-close")
+                self.closed = True
+            def attach_and_resume(self, process):
+                assert process is child and self.closed
+                events.append("attach-failed")
+                raise OSError("closed")
+            def stop(self, deadline):
+                events.append("job-unverified")
+                return False
+        job = Job()
+        def popen(*args, **kwargs):
+            entered.set()
+            assert release.wait(3), "Popen fake was not released"
+            return child
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="nt"))
+        monkeypatch.setattr(p, "_WindowsJob", lambda: job)
+        monkeypatch.setattr(p.subprocess, "Popen", popen)
+        process = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+        def start():
+            try:
+                process.start()
+            except RuntimeError as error:
+                errors.append(str(error))
+                events.append("start-failed")
+        channel = SimpleNamespace(receive=lambda timeout: "disarm",
+            acknowledge=lambda: events.append("ack-live" if child.live else "ack-stopped"))
+        request = p.GuardianRequest("run-test", c.plan.reservation,
+            c.host.authority_inventory("run-test"), channel, (process,), 1)
+        worker = threading.Thread(target=start)
+        worker.start()
+        try:
+            assert entered.wait(3), "Popen fake was not entered"
+            assert process.stop(p.time.monotonic() + 1) is False
+            assert not process._stopped
+            assert p.guardian_main(request, effects=c.effects) == 1
+            assert not any(event.startswith("ack") for event in events)
+        finally:
+            release.set()
+            worker.join(timeout=3)
+        assert not worker.is_alive()
+        assert errors == ["runtime process start failed"]
+        assert not child.live
+        assert events.index("attach-failed") < events.index("child-kill") < events.index("child-stopped") < events.index("start-failed")
+        # An unverified closed job cannot authorize an acknowledgement either.
+        assert p.guardian_main(request, effects=c.effects) == 1
+        assert not any(event.startswith("ack") for event in events)
+
+    def test_d_b_stop_before_start(self):
+        process = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+        assert process.stop(p.time.monotonic() + 1) is False
+        assert not process._stopped
+        with pytest.raises(RuntimeError, match="runtime process start refused"):
+            process.start()
+        assert process.process is None
+
+    def test_d_b_own_pool_refusal(self):
+        c = lifetime_case()
+        primary = p.Failure(p.Stage.BINDING, p.FailureCode.BINDING)
+        class Pool:
+            @property
+            def close(self):
+                raise p.ProofRefused(primary)
+        assert_own_refusal(c.scope, lambda: c.scope.own_pool(Pool()), primary)
+
+    def test_d_b_own_browser_refusal(self):
+        c = lifetime_case()
+        primary = p.Failure(p.Stage.BINDING, p.FailureCode.BINDING)
+        class Browser:
+            @property
+            def stop(self):
+                raise p.ProofRefused(primary)
+        assert_own_refusal(c.scope, lambda: c.scope.own_browser(Browser()), primary)
+
+    def test_d_b_own_reservation_refusal(self):
+        c = lifetime_case()
+        primary = p.Failure(p.Stage.BINDING, p.FailureCode.BINDING)
+        class Reservation:
+            @property
+            def release_ports(self):
+                raise p.ProofRefused(primary)
+        assert_own_refusal(c.scope, lambda: c.scope.own_reservation(Reservation()), primary)
+
+    def test_d_b_planned_journal_collision(self):
+        c = owned_authority_case()
+        foreign = replace(c.inventory, containers=("d" * 12, "e" * 12), networks=("f" * 12,))
+        def journal(path, value):
+            assert path.name == "authority-planned.json"
+            assert value.authority.containers == value.authority.networks == ()
+            c.inventory = foreign
+            raise OSError("fake")
+        c.effects = replace(c.effects, receipt_writer=SimpleNamespace(ownership=journal))
+        c.scope = p.RunScope(effects=c.effects)
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.ALLOCATION, lambda: prepare(c), deadline=1)
+        proof = c.scope.close()
+        assert c.inventory == foreign and c.removed == c.snapshots == c.teardown == []
+        assert "allocate" not in c.events
+        assert not proof.authority_removed and not proof.ok
+        assert c.scope.failure is error.value.failure
+        assert c.scope.failure == p.Failure(p.Stage.ALLOCATION, p.FailureCode.ALLOCATION)
+
+    def test_d_b_post_cleanup_verification(self):
+        c = owned_authority_case()
+        prepare(c)
+        attempted = []
+        c.host.cleanup_owned_authority = lambda run_id, owned: attempted.append(owned)
+        proof = c.scope.close()
+        assert len(attempted) == 1 and c.inventory.containers and c.removed == []
+        assert not proof.authority_removed and not proof.ok
+        assert proof.failures == (p.Failure(p.Stage.TEARDOWN, p.FailureCode.CLEANUP_AUTHORITY),)
+
+    def test_d_b_never_entered(self):
+        c = lifetime_case()
+        reads = []
+        c.host.authority_inventory = lambda run_id: reads.append(run_id)
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.MIGRATION, lambda: pytest.fail("expired"), deadline=0)
+        proof = c.scope.close()
+        assert proof.authority_removed and proof.ok and reads == []
+        assert c.scope.failure is error.value.failure
+
+    def test_d_b_inventory_read_failure(self):
+        c = owned_authority_case()
+        prepare(c)
+        def fail(run_id):
+            raise OSError("fake")
+        c.host.authority_inventory = fail
+        proof = c.scope.close()
+        assert c.removed == ["a" * 12, "b" * 12, "c" * 12]
+        assert not proof.authority_removed and not proof.ok
+        assert proof.failures == (p.Failure(p.Stage.TEARDOWN, p.FailureCode.CLEANUP_AUTHORITY),)
+        assert c.scope.failure == proof.failures[0]
+        # No cleanup callback exists when the first inventory read fails.
+        c = owned_authority_case()
+        c.host.authority_inventory = fail
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.ALLOCATION, lambda: prepare(c), deadline=1)
+        proof = c.scope.close()
+        assert "allocate" not in c.events and c.removed == c.snapshots == []
+        assert not proof.authority_removed and not proof.ok
+        assert proof.failures == (p.Failure(p.Stage.TEARDOWN, p.FailureCode.CLEANUP_AUTHORITY),)
+        assert c.scope.failure is error.value.failure
+
+    def test_d_b_inventory_malformed(self):
+        c = owned_authority_case()
+        prepare(c)
+        c.host.authority_inventory = lambda run_id: {"containers": [], "networks": []}
+        proof = c.scope.close()
+        assert not proof.authority_removed and not proof.ok
+        assert proof.failures == (p.Failure(p.Stage.TEARDOWN, p.FailureCode.CLEANUP_AUTHORITY),)
+        # The malformed read must also prevent absence proof before allocation.
+        c = owned_authority_case()
+        c.host.authority_inventory = lambda run_id: {"containers": [], "networks": []}
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.ALLOCATION, lambda: prepare(c), deadline=1)
+        proof = c.scope.close()
+        assert "allocate" not in c.events and c.removed == c.snapshots == []
+        assert not proof.authority_removed and not proof.ok
+        assert proof.failures == (p.Failure(p.Stage.TEARDOWN, p.FailureCode.CLEANUP_AUTHORITY),)
+        assert c.scope.failure is error.value.failure
+
+    def test_d_b_preexisting_collision(self):
+        c = owned_authority_case()
+        foreign = replace(c.inventory, containers=("d" * 12, "e" * 12), networks=("f" * 12,))
+        c.inventory = foreign
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.ALLOCATION, lambda: prepare(c), deadline=1)
+        proof = c.scope.close()
+        assert "allocate" not in c.events and c.removed == c.snapshots == []
+        assert c.inventory == foreign and not proof.authority_removed and not proof.ok
+        assert c.scope.failure is error.value.failure
+
+    def test_d_b_production_stop_owned_only(self, monkeypatch):
+        c = owned_authority_case()
+        raw_allocate = c.effects.authority_factory
+        def factory(run_id):
+            raw = raw_allocate(run_id)
+            raw._stop_transport = lambda: c.events.append("stop-transport")
+            raw.stop = lambda: pytest.fail("PP-2 stop deletes by run ID")
+            return raw
+        monkeypatch.setattr(p, "_pg_module", lambda: SimpleNamespace(
+            PgAuthority=SimpleNamespace(start=factory)))
+        c.effects = replace(c.effects, authority_factory=p._authority_factory)
+        c.scope = p.RunScope(effects=c.effects)
+        prepared = prepare(c)
+        assert prepared.database.transport == "host-relay"
+        c.inventory = replace(c.inventory, containers=("d" * 12, "e" * 12), networks=("f" * 12,))
+        proof = c.scope.close()
+        assert c.events.count("stop-transport") == 1
+        assert c.removed == [] and not proof.authority_removed and not proof.ok
+
+    def test_d_b_inventory_after_all_cleanup(self):
+        c = owned_authority_case()
+        prepare(c)
+        owned = c.inventory
+        # Runs before the allocation's callback (reverse acquisition order).
+        c.scope.acquire(p.ResourceKind.AUTHORITY, lambda: c.events.append("earlier-cleanup"))
+        c.scope.own_guardian(SimpleNamespace(arm=lambda: None,
+            disarm=lambda: c.events.append("disarm")))
+        inventory = c.host.authority_inventory
+        def observe(run_id):
+            assert "earlier-cleanup" in c.events and c.snapshots == [owned]
+            assert c.removed == ["a" * 12, "b" * 12, "c" * 12]
+            assert "disarm" not in c.events
+            return inventory(run_id)
+        c.host.authority_inventory = observe
+        proof = c.scope.close()
+        assert proof.authority_removed and proof.ok
+        assert c.events[-1] == "disarm"
+        assert len(c.inventory_reads) == 3
+
+    def test_d_b_guardian_requires_verified_stop(self):
+        c = lifetime_case()
+        c.private = False
+        stops, acknowledgements = [], []
+        process = SimpleNamespace(stop=lambda deadline: stops.append(deadline))
+        channel = SimpleNamespace(receive=lambda timeout: "disarm",
+                                  acknowledge=lambda: acknowledgements.append(True))
+        request = p.GuardianRequest("run-test", c.plan.reservation,
+            c.host.authority_inventory("run-test"), channel, (process,), 1)
+        assert p.guardian_main(request, effects=c.effects) == 1
+        assert stops == [p.CLEANUP_TIMEOUT_S] * 2 and acknowledgements == []
+
+    def test_d_c1_disarm_live_job(self, monkeypatch):
+        c = lifetime_case()
+        c.private = False
+        child = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+        child.identity = p.ProcessIdentity("stack-launcher", 7, "old", 1)
+        child.process = SimpleNamespace(poll=lambda: 0)
+        checked, acknowledged = [], []
+        child.job = SimpleNamespace(
+            stop=lambda deadline: (checked.append(deadline), False)[1], close=lambda: None)
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        channel = SimpleNamespace(receive=lambda timeout: "disarm",
+                                  acknowledge=lambda: acknowledged.append(True))
+        request = p.GuardianRequest("run-test", c.plan.reservation,
+            c.host.authority_inventory("run-test"), channel, (child,), 1)
+        assert child.poll() == 0
+        assert p.guardian_main(request, effects=c.effects) == 1
+        assert acknowledged == [] and checked == [p.CLEANUP_TIMEOUT_S] * 2
+        assert not child._stopped
+
+    def test_d_c1_disarm_stopped_job(self, monkeypatch):
+        c = lifetime_case()
+        c.private = False
+        child = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+        child.identity = p.ProcessIdentity("stack-launcher", 7, "old", 1)
+        child.process = SimpleNamespace(poll=lambda: 0)
+        checked, acknowledged = [], []
+        child.job = SimpleNamespace(
+            stop=lambda deadline: (checked.append(deadline), True)[1], close=lambda: None)
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        channel = SimpleNamespace(receive=lambda timeout: "disarm",
+                                  acknowledge=lambda: acknowledged.append(True))
+        request = p.GuardianRequest("run-test", c.plan.reservation,
+            c.host.authority_inventory("run-test"), channel, (child,), 1)
+        assert child.poll() == 0
+        assert p.guardian_main(request, effects=c.effects) == 0
+        assert acknowledged == [True] and checked == [p.CLEANUP_TIMEOUT_S]
+        assert child._stopped
+
+    def test_d_c1_deadline_before_pool(self):
+        c = lifetime_case()
+        calls = []
+        assert c.effects.clock.now == 0
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.MIGRATION, lambda: calls.append("operation"), deadline=0)
+        primary = p.Failure(p.Stage.MIGRATION, p.FailureCode.GUARDIAN)
+        assert error.value.failure == primary
+        c.scope.own_pool(SimpleNamespace(close=lambda: False))
+        proof = c.scope.close()
+        assert proof.failures == (p.Failure(p.Stage.TEARDOWN, p.FailureCode.CLEANUP_POOL),)
+        assert c.scope.failure == primary and calls == []
+
+    def test_d_c1_deadline_blocks_commit(self):
+        c = lifetime_case()
+        calls = []
+        assert c.effects.clock.now == 0
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.MIGRATION, lambda: calls.append("operation"), deadline=0)
+        assert error.value.failure == p.Failure(p.Stage.MIGRATION, p.FailureCode.GUARDIAN)
+        assert c.scope.close().ok
+        with pytest.raises(p.ProofRefused):
+            c.scope.commit_guard(lambda: (calls.append("commit"), "COMMITTED")[1])
+        assert calls == [] and c.scope.failure == error.value.failure
+
+    def test_d_c1_begin_operation_error(self):
+        c = lifetime_case()
+        calls = []
+        failure = OSError("fake begin failure")
+        def begin(operation):
+            raise failure
+        c.host.begin_operation = begin
+        with pytest.raises(OSError) as error:
+            c.scope.perform(p.Stage.MIGRATION, lambda: calls.append("operation"), deadline=1)
+        assert error.value is failure
+        assert c.scope.failure == p.Failure(p.Stage.MIGRATION, p.FailureCode.GUARDIAN)
+        assert calls == [] and c.scope._pending == []
+        assert c.scope.close().ok
+
+    def test_d_c1_begin_operation_refusal(self):
+        c = lifetime_case()
+        primary = p.Failure(p.Stage.ALLOCATION, p.FailureCode.ALLOCATION)
+        def begin(operation):
+            raise p.ProofRefused(primary)
+        c.host.begin_operation = begin
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.MIGRATION, lambda: pytest.fail("operation ran"), deadline=1)
+        assert error.value.failure == primary and c.scope.failure == primary
+
+    def test_d_c1_acquire_refusal(self):
+        c = lifetime_case()
+        assert c.scope.close().ok
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.acquire(p.ResourceKind.POOL, lambda: None)
+        assert error.value.failure == p.Failure(p.Stage.TEARDOWN, p.FailureCode.GUARDIAN)
+        assert c.scope.failure == error.value.failure
+
+    def test_d_c1_checkpoint_refusal(self):
+        c = lifetime_case()
+        c.scope.cancel()
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.checkpoint(p.Stage.MIGRATION)
+        assert error.value.failure == p.Failure(p.Stage.MIGRATION, p.FailureCode.CANCELLED)
+        assert c.scope.failure == error.value.failure
+        with pytest.raises(p.ProofRefused):
+            c.scope.checkpoint(p.Stage.ALLOCATION)
+        assert c.scope.failure == error.value.failure
+
+    def test_d_c1_close_refusal(self):
+        c = lifetime_case()
+        refused = []
+        def close_again():
+            with pytest.raises(p.ProofRefused) as error:
+                c.scope.close()
+            refused.append(error.value.failure)
+        c.scope.own_pool(SimpleNamespace(close=close_again))
+        assert c.scope.close().ok
+        assert refused == [p.Failure(p.Stage.TEARDOWN, p.FailureCode.GUARDIAN)]
+        assert c.scope.failure == refused[0]
+
+    def test_d_c1_commit_guard_refusal(self):
+        c = lifetime_case()
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.commit_guard(lambda: pytest.fail("commit before cleanup"))
+        assert error.value.failure == p.Failure(p.Stage.TEARDOWN, p.FailureCode.CLEANUP_PRIVATE)
+        assert c.scope.failure == error.value.failure
+        assert c.scope.close().ok
+        with pytest.raises(p.ProofRefused):
+            c.scope.commit_guard(lambda: pytest.fail("forgotten refusal"))
+
+    def test_d_c1_guardian_arm_refusal(self):
+        c = lifetime_case()
+        primary = p.Failure(p.Stage.ALLOCATION, p.FailureCode.GUARDIAN)
+        def arm():
+            raise p.ProofRefused(primary)
+        guardian = SimpleNamespace(arm=arm, disarm=lambda: c.teardown.append("disarm"))
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.own_guardian(guardian)
+        assert error.value.failure == primary and c.scope.failure == primary
+        assert c.scope.close().ok and c.teardown == ["disarm"]
+
+    def test_d_c1_commit_callback_refusal(self):
+        c = lifetime_case()
+        primary = p.Failure(p.Stage.VERIFICATION, p.FailureCode.CANCELLED)
+        def commit():
+            raise p.ProofRefused(primary)
+        assert c.scope.close().ok
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.commit_guard(commit)
+        assert error.value.failure == primary and c.scope.failure == primary
+
+    def test_d_c1_planned_journal_collision(self):
+        c = lifetime_case()
+        assert not c.allocated
+        def journal(path, value):
+            assert path.name == "authority-planned.json"
+            assert value.authority.containers == value.authority.networks == ()
+            c.allocated = True  # Another allocation wins after the empty inventory.
+            raise OSError("fake planned journal failure")
+        c.effects = replace(c.effects, receipt_writer=SimpleNamespace(ownership=journal))
+        c.scope = p.RunScope(effects=c.effects)
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.ALLOCATION, lambda: prepare(c), deadline=1)
+        assert error.value.failure == p.Failure(p.Stage.ALLOCATION, p.FailureCode.ALLOCATION)
+        c.scope.close()
+        assert c.allocated and "authority" not in c.teardown
+        assert "allocate" not in c.events
+        assert c.scope.failure == error.value.failure
+
+    def test_d_c1_owned_authority_cleanup(self):
+        c = lifetime_case()
+        journal = c.effects.receipt_writer.ownership
+        def fail_observed(path, value):
+            journal(path, value)
+            if path.name == "authority-observed.json":
+                assert c.allocated
+                raise OSError("fake observed journal failure")
+        c.effects = replace(c.effects, receipt_writer=SimpleNamespace(ownership=fail_observed))
+        c.scope = p.RunScope(effects=c.effects)
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.ALLOCATION, lambda: prepare(c), deadline=1)
+        assert error.value.failure == p.Failure(p.Stage.ALLOCATION, p.FailureCode.ALLOCATION)
+        assert "allocate" in c.events
+        proof = c.scope.close()
+        assert proof.authority_removed and not c.allocated
+        assert c.teardown == ["authority"] and c.scope.failure == error.value.failure
+
+    def test_d_c1_migration_before_runtime(self, monkeypatch):
+        c = lifetime_case()
+        def child(spec):
+            return SimpleNamespace(start=lambda: None,
+                stop=lambda deadline: (c.teardown.append(spec.role), True)[1])
+        monkeypatch.setattr(p, "_RuntimeProcess", child)
+        for role in ("migration-child", "runtime-build"):
+            p._launch_runtime(p.ProcessSpec(role, ("fake",), ROOT, {}, 1), scope=c.scope)
+        assert c.scope.close().processes_stopped
+        assert c.teardown == ["migration-child", "runtime-build"]
+
+    def test_reverse_cleanup_order(self):
+        c = lifetime_case()
+        expected = ["browser_process", "stack_process", "seed_process", "migration_process",
+                    "runtime_process", "identity", "pool", "authority", "root", "guardian"]
+        # Scramble registration: order must follow dependencies, then LIFO.
+        for name in reversed(expected):
+            c.scope.acquire(p.ResourceKind(name), lambda name=name: c.teardown.append(name))
+        c.scope.acquire(p.ResourceKind.STACK_PROCESS, lambda: c.teardown.append("new-stack"))
+        proof = c.scope.close()
+        assert c.teardown == [expected[0], "new-stack", *expected[1:]]
+        assert proof.ok and proof.observed_rows == ("P10",) and proof.teardown_seconds == 0
+        assert c.scope.close() is proof
+        with pytest.raises(p.ProofRefused):
+            c.scope.acquire(p.ResourceKind.POOL, lambda: None)
+
+    def test_failure_after_root(self):
+        c = lifetime_case()
+        def journal(*args):
+            raise RuntimeError("fake")
+        c.effects = replace(c.effects, receipt_writer=SimpleNamespace(ownership=journal))
+        c.scope = p.RunScope(effects=c.effects)
+        with pytest.raises(p.ProofRefused):
+            p.preflight(c.config, effects=c.scope.bind_effects())
+        assert c.scope.close().private_material_removed
+        assert c.teardown == ["private"] and not c.private
+
+    def test_failure_after_guardian(self):
+        c = lifetime_case()
+        def arm():
+            c.teardown.append("arm")
+            raise RuntimeError("fake")
+        guardian = SimpleNamespace(arm=arm, disarm=lambda: c.teardown.append("disarm"))
+        with pytest.raises(RuntimeError):
+            c.scope.own_guardian(guardian)
+        assert c.scope.close().guardian_disarmed
+        assert c.teardown == ["arm", "disarm"]
+
+    def test_partial_allocation_failure(self):
+        c = lifetime_case()
+        def allocate(run_id):
+            c.allocated = True
+            # Match PP-2: failed startup cleans only its own creation receipt.
+            created = c.host.authority_inventory(run_id)
+            try:
+                raise RuntimeError("fakedb")
+            finally:
+                c.host.cleanup_owned_authority(run_id, created)
+        c.effects = replace(c.effects, authority_factory=allocate)
+        c.scope = p.RunScope(effects=c.effects)
+        with pytest.raises(p.ProofRefused) as error:
+            prepare(c)
+        c.scope.remember(error.value.failure)
+        proof = c.scope.close()
+        assert proof.authority_removed and not c.allocated
+        assert c.teardown == ["authority"]
+        assert c.scope.failure.fixed_code == p.FailureCode.ALLOCATION
+
+    def test_failure_after_migration_child(self, monkeypatch):
+        acquisition_child(monkeypatch, "migration-child", p.ResourceKind.MIGRATION_PROCESS)
+
+    def test_failure_after_issuer(self, monkeypatch):
+        c = lifetime_case()
+        monkeypatch.setattr(Path, "unlink", lambda *args, **kw: None)
+        monkeypatch.setattr(p, "_path_absent", lambda path: True)
+        def close(lease):
+            c.leases.append(lease)
+            c.teardown.append("identity")
+            p._Host.close_identity(lease)
+        c.host.close_identity = close
+        c.issuer.thumbprint = ""
+        with pytest.raises(p.ProofRefused):
+            prepare(c)
+        assert c.scope.close().identity_delivery_closed
+        assert len(c.leases) == 1 and c.leases[0].issuer is None
+        assert c.teardown == ["identity", "authority"]
+
+    def test_failure_after_jwks(self, monkeypatch):
+        c = lifetime_case()
+        lease = p.IdentityLease(c.issuer, "run-test", ROOT / "public-jwks.json", {})
+        exists = [True]
+        monkeypatch.setattr(Path, "unlink", lambda *args, **kw: exists.__setitem__(0, False))
+        monkeypatch.setattr(p, "_path_absent", lambda path: not exists[0])
+        c.scope.acquire(p.ResourceKind.IDENTITY, lambda: p._Host.close_identity(lease))
+        assert c.scope.close().identity_delivery_closed
+        assert lease.issuer is None and exists == [False]
+
+    def test_failure_after_seed_pool(self):
+        c = lifetime_case()
+        pool = SimpleNamespace(close=lambda: c.teardown.append("pool"))
+        c.scope.own_pool(pool)
+        c.scope.remember(p.Failure(p.Stage.BINDING, p.FailureCode.BINDING))
+        assert c.scope.close().pools_closed and c.teardown == ["pool"]
+
+    def test_failure_after_launcher(self, monkeypatch):
+        acquisition_child(monkeypatch, "stack-launcher", p.ResourceKind.STACK_PROCESS)
+
+    def test_failure_after_browser(self):
+        c = lifetime_case()
+        stops = []
+        browser = SimpleNamespace(stop=lambda deadline: (stops.append(deadline), True)[1])
+        c.scope.own_browser(browser)
+        c.scope.remember(p.Failure(p.Stage.BROWSER, p.FailureCode.BROWSER_EXIT))
+        assert c.scope.close().processes_stopped
+        assert stops == [p.CLEANUP_TIMEOUT_S]
+
+    def test_cancel_allocation(self):
+        cancelled_stage(p.Stage.ALLOCATION)
+
+    def test_cancel_migration(self):
+        cancelled_stage(p.Stage.MIGRATION)
+
+    def test_cancel_identity(self):
+        cancelled_stage(p.Stage.IDENTITY)
+
+    def test_cancel_readiness(self):
+        cancelled_stage(p.Stage.READINESS)
+
+    def test_cancel_browser(self):
+        cancelled_stage(p.Stage.BROWSER)
+
+    def test_cancel_publication(self):
+        c = lifetime_case()
+        assert c.scope.close().ok
+        c.scope.cancel()
+        commits = []
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.commit_guard(lambda: commits.append("commit"))
+        assert error.value.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.CANCELLED)
+        assert commits == []
+        c = lifetime_case()
+        c.scope.close()
+        assert c.scope.commit_guard(lambda: "committed") == "committed"
+
+    def test_process_cleanup_failure(self):
+        c, proof = cleanup_failure(p.ResourceKind.STACK_PROCESS, p.FailureCode.CLEANUP_PROCESS)
+        assert not proof.processes_stopped
+
+    def test_identity_cleanup_failure(self):
+        c, proof = cleanup_failure(p.ResourceKind.IDENTITY, p.FailureCode.CLEANUP_IDENTITY)
+        assert not proof.identity_delivery_closed
+
+    def test_pool_cleanup_failure(self):
+        c, proof = cleanup_failure(p.ResourceKind.POOL, p.FailureCode.CLEANUP_POOL)
+        assert not proof.pools_closed
+
+    def test_authority_stop_failure(self):
+        c = lifetime_case()
+        original = c.effects.authority_factory
+        def allocate(run_id):
+            authority = original(run_id)
+            def stop():
+                raise RuntimeError("fakedb")
+            authority.stop = stop
+            return authority
+        c.effects = replace(c.effects, authority_factory=allocate)
+        c.scope = p.RunScope(effects=c.effects)
+        prepare(c)
+        proof = c.scope.close()
+        assert not c.allocated and "authority" in c.teardown
+        assert proof.failures == (p.Failure(p.Stage.TEARDOWN, p.FailureCode.CLEANUP_AUTHORITY),)
+        assert not proof.authority_removed and not proof.ok
+
+    def test_removal_verification(self, monkeypatch):
+        reservation = p.Reservation(ROOT, ROOT / "artifacts", root_identity=(1, 2))
+        removals = []
+        monkeypatch.setattr(p, "_path_safe", lambda path: True)
+        original_stat = Path.stat
+        monkeypatch.setattr(Path, "stat", lambda path, *args, **kw:
+            SimpleNamespace(st_dev=1, st_ino=2, st_mode=0o40700) if path == ROOT else original_stat(path, *args, **kw))
+        assert not p._path_absent(SimpleNamespace(lstat=lambda: SimpleNamespace()))
+        def denied():
+            raise PermissionError("fake")
+        assert not p._path_absent(SimpleNamespace(lstat=denied))
+        def missing():
+            raise FileNotFoundError("fake")
+        assert p._path_absent(SimpleNamespace(lstat=missing))
+        monkeypatch.setattr(p.os.path, "lexists", lambda path: True)
+        monkeypatch.setattr(p, "_path_absent", lambda path: False)
+        monkeypatch.setattr(p.shutil, "rmtree", lambda path: removals.append(path))
+        assert p._Host.scrub(reservation, keep_safe=False) is False
+        assert removals == [ROOT]
+        # Identity replacement refuses before removal too.
+        assert p._Host.scrub(replace(reservation, root_identity=(1, 3)), keep_safe=False) is False
+        assert removals == [ROOT]
+
+    def test_scrub_failure(self):
+        c = lifetime_case()
+        c.host.scrub = lambda *args, **kw: False
+        c.scope.own_reservation(c.plan.reservation)
+        proof = c.scope.close()
+        assert not proof.private_material_removed and not proof.ok
+        assert proof.failures == (p.Failure(p.Stage.TEARDOWN, p.FailureCode.CLEANUP_PRIVATE),)
+        with pytest.raises(p.ProofRefused):
+            c.scope.commit_guard(lambda: pytest.fail("success despite scrub failure"))
+
+    def test_primary_failure_preserved(self):
+        c = lifetime_case()
+        primary = p.Failure(p.Stage.MIGRATION, p.FailureCode.MIGRATION_EXIT)
+        c.scope.remember(primary)
+        for kind in (p.ResourceKind.ROOT, p.ResourceKind.POOL, p.ResourceKind.STACK_PROCESS):
+            c.scope.acquire(kind, lambda: False)
+        proof = c.scope.close()
+        assert c.scope.failure is primary
+        assert [f.fixed_code for f in proof.failures] == [p.FailureCode.CLEANUP_PROCESS,
+            p.FailureCode.CLEANUP_POOL, p.FailureCode.CLEANUP_PRIVATE]
+
+    def test_reused_process_identity(self):
+        c = lifetime_case()
+        owner = p.ProcessIdentity("fake", 7, "old", 1)
+        signals = []
+        request = p.StopRequest(owner, lambda: replace(owner, start_id="new"),
+            lambda: signals.append("terminate"), lambda: signals.append("kill"), lambda timeout: True)
+        assert p.stop_owned(request, effects=c.effects, deadline=5)
+        assert signals == []
+        identities = iter((owner, replace(owner, start_id="new")))
+        request = replace(request, observe=lambda: next(identities), wait=lambda timeout: False)
+        assert p.stop_owned(request, effects=c.effects, deadline=5)
+        assert signals == ["terminate"]
+
+    def test_guardian_parent_loss(self):
+        c = lifetime_case()
+        c.allocated = True
+        ownership = c.host.authority_inventory("run-test")
+        def receive(timeout):
+            assert 0 < timeout <= 0.1
+            raise EOFError
+        channel = SimpleNamespace(receive=receive, acknowledge=lambda: pytest.fail("EOF disarmed"))
+        process = SimpleNamespace(stop=lambda deadline: (c.teardown.append("process"), True)[1])
+        request = p.GuardianRequest("run-test", c.plan.reservation, ownership, channel, (process,), 1)
+        assert p.guardian_main(request, effects=c.effects) == 0
+        assert c.teardown == ["process", "authority", "private"] and not c.allocated
+        assert c.effects.clock.now == 0  # EOF triggers immediate emergency cleanup.
+        # A stale guardian may not remove resources belonging to a later run.
+        c.allocated, c.private = True, True
+        c.teardown.clear()
+        stale = replace(request, ownership=replace(ownership, containers=("d" * 12,)))
+        assert p.guardian_main(stale, effects=c.effects) == 1
+        assert c.allocated and "authority" not in c.teardown
+
+    def test_guardian_early_disarm(self):
+        c = lifetime_case()
+        c.scope.own_guardian(SimpleNamespace(arm=lambda: None, disarm=lambda: c.teardown.append("disarm")))
+        c.scope.acquire(p.ResourceKind.ROOT, lambda: False)
+        proof = c.scope.close()
+        assert not proof.guardian_disarmed and c.teardown == []
+        assert [f.fixed_code for f in proof.failures] == [p.FailureCode.CLEANUP_PRIVATE, p.FailureCode.GUARDIAN]
+        c = lifetime_case()
+        channel = SimpleNamespace(receive=lambda timeout: "disarm", acknowledge=lambda: c.teardown.append("ack"))
+        request = p.GuardianRequest("run-test", c.plan.reservation,
+            c.host.authority_inventory("run-test"), channel, deadline=1)
+        assert p.guardian_main(request, effects=c.effects) == 1 and c.teardown == ["authority", "private"]
+        c.private = False
+        assert p.guardian_main(request, effects=c.effects) == 0 and c.teardown == ["authority", "private", "ack"]
+
+    def test_preexisting_run_collision(self, monkeypatch):
+        c = lifetime_case()
+        c.allocated = True
+        with pytest.raises(p.ProofRefused) as error:
+            prepare(c)
+        assert error.value.failure.fixed_code == p.FailureCode.ALLOCATION
+        c.scope.close()
+        assert c.allocated and c.teardown == [] and "allocate" not in c.events
+        # Collision after the empty inventory but inside PP-2's start lock.
+        c = lifetime_case()
+        def collide(run_id):
+            c.allocated = True
+            raise RuntimeError("run already exists")
+        monkeypatch.setattr(p, "_pg_module", lambda: SimpleNamespace(
+            PgAuthority=SimpleNamespace(start=collide)))
+        c.effects = replace(c.effects, authority_factory=p._authority_factory)
+        c.scope = p.RunScope(effects=c.effects)
+        with pytest.raises(p.ProofRefused):
+            prepare(c)
+        c.scope.close()
+        assert c.allocated and c.teardown == []
+
+    def test_bounded_escalation(self, monkeypatch):
+        c = lifetime_case()
+        owner = p.ProcessIdentity("fake", 7, "old", 1)
+        calls = []
+        def wait(timeout):
+            assert timeout is not None and 0 < timeout <= 3
+            calls.append(("wait", timeout))
+            c.effects.clock.wait(timeout)
+            return len(calls) > 3
+        request = p.StopRequest(owner, lambda: owner, lambda: calls.append("terminate"),
+            lambda: calls.append("kill"), wait)
+        assert p.stop_owned(request, effects=c.effects, deadline=3)
+        assert calls == ["terminate", ("wait", 1.0), "kill", ("wait", 2.0)]
+        assert c.effects.clock.now == 3
+        # An uncooperative pending operation stays owned and prevents deletion.
+        c = lifetime_case()
+        c.scope._pending.append(SimpleNamespace(done=lambda: False))
+        c.scope.own_reservation(c.plan.reservation)
+        c.scope.own_guardian(SimpleNamespace(arm=lambda: None, disarm=lambda: c.teardown.append("disarm")))
+        proof = c.scope.close()
+        assert not proof.ok and not proof.guardian_disarmed and c.private
+        assert c.teardown == [] and c.effects.clock.now == p.CLEANUP_TIMEOUT_S
+        # A parent exit does not establish absence of its owned descendants.
+        spec = p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 5)
+        owned = p._RuntimeProcess(spec)
+        owned.identity = owner
+        owned.process = SimpleNamespace(poll=lambda: 0)
+        jobs = []
+        owned.job = SimpleNamespace(stop=lambda deadline: (jobs.append("verify-job"), False)[1],
+                                    close=lambda: jobs.append("close-job"))
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        assert owned.stop(c.effects.clock.now + 3) is False
+        assert jobs == ["verify-job", "close-job"]
+        owned = p._RuntimeProcess(spec)
+        owned.identity = owner
+        owned.process = SimpleNamespace(poll=lambda: 0)
+        jobs.clear()
+        owned.job = SimpleNamespace(stop=lambda deadline: (jobs.append("verify-job"), True)[1],
+                                    close=lambda: jobs.append("close-job"))
+        assert owned.stop(c.effects.clock.now + 3)
+        assert owned.stop(c.effects.clock.now + 3)
+        assert jobs == ["verify-job", "close-job"]
+        # Acquisitions completed while settling a cancelled stage join teardown.
+        c = lifetime_case()
+        registered = []
+        def done():
+            if c.effects.clock.now >= 0.05 and not registered:
+                c.scope.own_pool(SimpleNamespace(close=lambda: c.teardown.append("late-pool")))
+                registered.append(True)
+            return c.effects.clock.now >= 0.1
+        c.scope._pending.append(SimpleNamespace(done=done))
+        assert c.scope.close().ok and c.teardown == ["late-pool"]
+
+
+# E: every external operation, including receipt filesystem operations, is fake.
+class ReceiptFiles:
+    def __init__(self):
+        self.files, self.directories, self.next_inode = {}, {}, 0
+        self.root = ReceiptPath(self, ROOT / "receipt-files")
+        for path in reversed((self.root.path, *self.root.path.parents)):
+            self.next_inode += 1
+            self.directories[path] = self.next_inode
+
+    def install(self, monkeypatch):
+        monkeypatch.setattr(p, "_private_directory", lambda path: path.mkdir())
+        real_lexists, real_rmtree = p.os.path.lexists, p.shutil.rmtree
+        monkeypatch.setattr(p.os.path, "lexists", lambda path: path.exists() if isinstance(path, ReceiptPath) else real_lexists(path))
+        def remove(root):
+            if not isinstance(root, ReceiptPath):
+                return real_rmtree(root)
+            assert root.path.is_relative_to(self.root.path) and root.path != self.root.path
+            self.files = {path: value for path, value in self.files.items() if not path.is_relative_to(root.path)}
+            self.directories = {path: value for path, value in self.directories.items() if not path.is_relative_to(root.path)}
+        monkeypatch.setattr(p.shutil, "rmtree", remove)
+        rename, overwrite = p.os.rename, p.os.replace
+        def move(source, target, *, replace=False):
+            if not isinstance(source, ReceiptPath):
+                return (overwrite if replace else rename)(source, target)
+            if target.exists() and not replace:
+                raise FileExistsError("fake collision")
+            self.files[target.path] = self.files.pop(source.path)
+        monkeypatch.setattr(p.os, "rename", move)
+        monkeypatch.setattr(p.os, "replace", lambda source, target: move(source, target, replace=True))
+        real_renameat2 = p._renameat2_noreplace
+        def rename_noreplace(source, target):
+            if not isinstance(source, ReceiptPath):
+                return real_renameat2(source, target)
+            if target.exists():
+                return errno.EEXIST
+            move(source, target)
+            return True
+        monkeypatch.setattr(p, "_renameat2_noreplace", rename_noreplace)
+        monkeypatch.setattr(p.os, "fsync", lambda fd: None)
+
+
+class ReceiptPath:
+    def __init__(self, files, path):
+        self.files, self.path = files, path
+    def __str__(self):
+        return str(self.path)
+    def __fspath__(self):
+        return str(self.path)
+    def __repr__(self):
+        return "<fake receipt path>"
+    def __hash__(self):
+        return hash(self.path)
+    def __eq__(self, other):
+        return self.path == (other.path if isinstance(other, ReceiptPath) else other)
+    def __truediv__(self, part):
+        return ReceiptPath(self.files, self.path / part)
+    def __getattr__(self, name):
+        return getattr(self.path, name)
+    @property
+    def parent(self):
+        return ReceiptPath(self.files, self.path.parent)
+    @property
+    def parents(self):
+        return tuple(ReceiptPath(self.files, path) for path in self.path.parents)
+    def with_name(self, name):
+        return ReceiptPath(self.files, self.path.with_name(name))
+    def exists(self):
+        return self.path in self.files.files or self.path in self.files.directories
+    def stat(self):
+        if self.path in self.files.directories:
+            return SimpleNamespace(st_dev=1, st_ino=self.files.directories[self.path],
+                st_mode=p.stat.S_IFDIR, st_file_attributes=0, st_size=0)
+        if self.path in self.files.files:
+            return SimpleNamespace(st_dev=1, st_ino=1000, st_mode=p.stat.S_IFREG,
+                st_file_attributes=0, st_size=len(self.files.files[self.path]))
+        raise FileNotFoundError("fake missing")
+    lstat = stat
+    def mkdir(self, **kwargs):
+        if self.exists() or self.path.parent not in self.files.directories:
+            raise FileExistsError("fake collision")
+        self.files.next_inode += 1
+        self.files.directories[self.path] = self.files.next_inode
+    def unlink(self, *, missing_ok=False):
+        if self.path not in self.files.files and not missing_ok:
+            raise FileNotFoundError("fake missing")
+        self.files.files.pop(self.path, None)
+    def write_bytes(self, value):
+        self.files.files[self.path] = value
+    def read_bytes(self):
+        if self.path not in self.files.files:
+            raise FileNotFoundError("fake missing")
+        return self.files.files[self.path]
+    def write_text(self, value, **kwargs):
+        self.write_bytes(value.encode("utf-8"))
+    def open(self, mode):
+        if mode == "rb":
+            return io.BytesIO(self.read_bytes())
+        assert mode == "xb"
+        if self.exists():
+            raise FileExistsError("fake collision")
+        path = self
+        class Stream(io.BytesIO):
+            def fileno(self):
+                return 7
+            def close(self):
+                if not self.closed:
+                    path.write_bytes(self.getvalue())
+                super().close()
+        return Stream()
+
+
+def native_owned(*, present=True):
+    return p.AuthorityOwnership("run-test", (), (), kind="native", data_dir="postgres/data", port=55432,
+        present=present, pid=12345 if present else 0, start_id="ps:1700000000" if present else "",
+        started_at=1700000000 if present else 0)
+
+
+def native_public():
+    return {"run_id": "run-test", "kind": "native", "data_dir": "postgres/data", "port": 55432}
+
+
+def native_guardian_case():
+    c = lifetime_case()
+    c.native_inventory = native_owned()
+    c.host.authority_inventory = lambda run_id: c.native_inventory
+    def remove(run_id, ownership):
+        assert ownership == native_owned()
+        c.teardown.append("native")
+        c.native_inventory = native_owned(present=False)
+    c.host.cleanup_owned_authority = remove
+    def receive(timeout):
+        raise EOFError
+    channel = SimpleNamespace(receive=receive, acknowledge=lambda: pytest.fail("EOF disarmed"))
+    return c, p.GuardianRequest("run-test", c.plan.reservation, native_owned(), channel, deadline=1)
+
+
+def receipt_case():
+    from contextlib import nullcontext
+    c = execution_case()
+    c.allocated, c.private = False, True
+    c.published.clear()
+    c.launches.clear()
+    c.events.clear()
+    c.journals.clear()
+    c.receipts, c.leases, c.retained = {}, [], []
+    c.on_publish = lambda: None
+    c.host.begin_operation = ImmediateOperation
+    def cancellation(scope):
+        c.run_scope = scope
+        return nullcontext()
+    c.host.cancellation = cancellation
+    def scrub(reservation, *, keep_safe):
+        c.events.append("scrub")
+        c.private = False
+        c.published.clear()
+        c.retained.clear()
+        return True
+    c.host.scrub = scrub
+    c.host.private_absent = lambda reservation: not c.private
+    def remove(run_id):
+        c.events.append("remove-authority")
+        c.allocated = False
+    c.host.cleanup_authority = remove
+    c.host.cleanup_owned_authority = lambda run_id, ownership: remove(run_id)
+    def close_identity(lease):
+        c.events.append("close-identity")
+        c.leases.append(lease)
+        object.__setattr__(lease, "issuer", None)
+        c.published.discard(lease.jwks_path)
+    c.host.close_identity = close_identity
+    def disarm():
+        c.events.append("disarm")
+        return not c.private and not c.allocated
+    c.guardian = SimpleNamespace(arm=lambda: c.events.append("arm"), disarm=disarm,
+        own_process=lambda child: c.events.append("own-process"),
+        observe=lambda ownership: c.events.append("guardian-authority"))
+    c.host.guardian = lambda plan: c.guardian
+    c.host.receipt_binding = lambda run_id, path, writer: p.ReceiptBinding(run_id, c.plan.source, "fakekey")
+    original_launcher = c.effects.process_launcher
+    def launch(spec, *, scope):
+        if spec.role == "stack-launcher":
+            return original_launcher(spec, scope=scope)
+        c.launches.append(spec)
+        kind = p.ResourceKind.MIGRATION_PROCESS if spec.role == "migration-child" else p.ResourceKind.RUNTIME_PROCESS
+        scope.acquire(kind, lambda: c.events.append("stop:" + spec.role))
+        return SimpleNamespace(poll=lambda: 0, stop=lambda deadline: True)
+    def canonical(request):
+        if request.purpose == "descriptor":
+            return c.descriptor
+        return c.canonical.sizing_evidence["read-custody"] if request.purpose == "custody" else c.canonical
+    def journal(path, value):
+        c.journals.append((path, value))
+        c.events.append("intent" if type(value) is p.PublicationIntent else path.stem)
+        if type(value) is p.PublicationIntent:
+            c.intent = value
+    def publish(path, publication):
+        c.events.append("publish-prepare")
+        c.on_publish()
+        def commit():
+            c.events.append("publish-commit")
+            if path in c.receipts:
+                raise FileExistsError("fake")
+            c.receipts[path] = json.loads(json.dumps(publication.document))
+        publication.commit(commit)
+    def read(path):
+        if path not in c.receipts:
+            raise FileNotFoundError("fake")
+        return c.receipts[path]
+    c.effects = replace(c.effects, process_launcher=launch, canonical_reader=canonical,
+        receipt_writer=SimpleNamespace(ownership=journal, publish=publish, read=read))
+    return c
+
+
+def successful_receipt():
+    c = receipt_case()
+    c.outcome = p.supervise(c.config, effects=c.effects)
+    assert c.outcome.exit_code == 0, c.outcome
+    c.document = c.receipts[c.outcome.receipt_path]
+    c.expected = p.ReceiptBinding(c.config.run_id, c.plan.source, "fakekey")
+    assert p.verify_receipt(c.outcome.receipt_path, expected=c.expected, effects=c.effects).ok
+    return c
+
+
+def verify_document(c, value):
+    c.receipts[c.outcome.receipt_path] = value
+    return p.verify_receipt(c.outcome.receipt_path, expected=c.expected, effects=c.effects)
+
+
+def clone_document(value):
+    return json.loads(json.dumps(value))
+
+
+def test_receipt_accepts_darwin_start_id():
+    c = successful_receipt()
+    document = clone_document(c.document)
+    for item in document["stack"]["owned_process_identities"]:
+        item["start_id"] = "Wed Oct 29 9:35:12 2026"
+    assert verify_document(c, document).ok
+    for start_id in ("Wed Oct 29\n9:35:12 2026", "", "x" * 129):
+        invalid = clone_document(document)
+        invalid["stack"]["owned_process_identities"][0]["start_id"] = start_id
+        assert not verify_document(c, invalid).ok
+
+
+def test_receipt_accepts_ready_optional_dependency():
+    c = successful_receipt()
+    document = clone_document(c.document)
+    dependency = next(iter(document["stack"]["app_readiness"]["dependencies"]))
+    document["stack"]["app_readiness"]["dependencies"][dependency]["required"] = False
+    assert verify_document(c, document).ok
+    for field, value in (("state", "degraded"), ("required", "yes")):
+        invalid = clone_document(document)
+        invalid["stack"]["app_readiness"]["dependencies"][dependency][field] = value
+        assert not verify_document(c, invalid).ok
+
+
+def test_src_empty_receipt_zero_size_file():
+    c = successful_receipt()
+    document = clone_document(c.document)
+    empty = {"path": "vendor/engine/.gitkeep", "sha256": hashlib.sha256(b"").hexdigest(), "size": 0}
+    document["runtime"]["vendor_source"].append(empty)
+    assert verify_document(c, document).ok
+    empty["size"] = -1
+    result = verify_document(c, document)
+    assert not result.ok
+    assert result.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
+
+
+def disk_publication(c, tmp_path, monkeypatch):
+    root = tmp_path / "owned-run"
+    root.mkdir()
+    (root / "artifacts").mkdir()
+    info = root.stat()
+    reservation = p.Reservation(root, root / "artifacts", root_identity=(info.st_dev, info.st_ino))
+    intent = replace(c.intent, reservation=reservation,
+        journal=replace(c.intent.journal, run_root=root, artifact_root=root / "artifacts"))
+    writer = p._ReceiptWriter()
+    writer.ownership(root / "publication-intent.json", intent)
+    assert p._Host.scrub(reservation, keep_safe=False)
+    return writer, root / "artifacts" / p.RECEIPT_NAME
+
+
+def canary_world(value, capsys):
+    from urllib.parse import quote
+    c = receipt_case()
+    c.retained.append(value)
+    c.host.facts = replace(c.host.facts, environment={"PATH": "fake", "PGPASSWORD": value,
+        "UNUSED_DATABASE_URL": value, "TOKEN": value, "CHECKOUT": value})
+    allocate = c.effects.authority_factory
+    def authority(run_id):
+        result = allocate(run_id)
+        result.dsn = lambda: value
+        return result
+    c.effects = replace(c.effects, authority_factory=authority)
+    c.host.database_module = lambda environment: c.db
+    c.issuer.private_key = value
+    result = p.supervise(c.config, effects=c.effects)
+    assert result.exit_code == 0 and not c.private and not c.retained
+    event = p._RetainedOutput(p._approved_event)
+    raw = json.dumps({"stage": "browser", "fixed_code": "BROWSER_EXIT", "diagnostic": value}).encode()
+    event.feed(raw)
+    retained = event.finish()
+    assert retained == b""
+    assert value not in repr(event)
+    good = p._RetainedOutput(p._approved_event)
+    good.feed(b'{"stage":"browser","fixed_code":"BROWSER_EXIT"}')
+    assert json.loads(good.finish()) == {"stage": "browser", "fixed_code": "BROWSER_EXIT"}
+    spec = p.ProcessSpec("runtime-build", ("fake",), ROOT,
+        {"DATABASE_URL": value, "TOKEN": value, "CHECKOUT": value, "KEY": value}, 1)
+    objects = (spec, spec.environment, p._SecretToken(value),
+        p.CanonicalRequest(environment={"DATABASE_URL": value}),
+        p.ReceiptBinding("run-test", c.plan.source, value))
+    rendered = repr(objects) + repr(spec.argv) + repr(c.journals) + json.dumps(list(c.receipts.values()))
+    assert value not in rendered and quote(value, safe="") not in rendered
+    # The parser must not echo arbitrary subcommands, options, values or an
+    # unambiguous prefix. Injection remains a Python API, not a CLI switch.
+    for argv in ([value], ["supervise", "--run-id", "run-test", "--run-root", str(ROOT), "--effects", value],
+                 ["supervise", "--run", value], ["verify-receipt", "--receipt", value]):
+        assert p.main(argv, effects=c.effects) == 2
+        output = capsys.readouterr()
+        assert output.out == "" and output.err == "USAGE: Invalid project proof command.\n"
+    # Raw exceptions can originate at any seam; no diagnostic string is kept.
+    failed = receipt_case()
+    failed.stack_ready["ports"] = dict(web=5275, app=8230, broker=8240, harness=8250)
+    def crash(*args, **kwargs):
+        raise RuntimeError(value)
+    failed.effects = replace(failed.effects, browser_runner=crash)
+    assert p.main(["supervise", "--run-id", "run-test", "--run-root", str(ROOT)], effects=failed.effects) == 1
+    output = capsys.readouterr()
+    assert output.out == "BROWSER_EXIT: Project proof command failed.\n" and output.err == ""
+    assert value not in repr(failed.journals) + json.dumps(list(failed.receipts.values()))
+    assert not failed.private and not failed.retained
+
+
+def correction_disk_case(monkeypatch):
+    c = receipt_case()
+    files = ReceiptFiles()
+    files.install(monkeypatch)
+    root = files.root / "corrected-run"
+    root.mkdir()
+    (root / "artifacts").mkdir()
+    info = root.stat()
+    c.config = replace(c.config, run_root=root, artifact_root=root / "artifacts")
+    c.profile = dict(c.profile, LEAF_PROOF_PROJECT_JWKS_FILE=str(root / "public-jwks.json"))
+    c.host.reserve = lambda plan: p.Reservation(root, root / "artifacts", root_identity=(info.st_dev, info.st_ino))
+    scrub = c.host.scrub
+    def remove(reservation, *, keep_safe):
+        return scrub(reservation, keep_safe=keep_safe) and p._Host.scrub(reservation, keep_safe=keep_safe)
+    c.host.scrub = remove
+    def cancellation(scope):
+        c.run_scope = scope
+        return p._Cancellation(scope)
+    c.host.cancellation = cancellation
+    writer = p._ReceiptWriter()
+    journal = c.effects.receipt_writer.ownership
+    def ownership(path, value):
+        journal(path, value)
+        if type(value) is p.PublicationIntent:
+            writer.ownership(path, value)
+    c.effects = replace(c.effects, receipt_writer=SimpleNamespace(
+        ownership=ownership, publish=writer.publish, read=writer.read))
+    c.files = files
+    return c
+
+
+class TestProjectReceipt:
+    def test_h_native_receipt(self):
+        c = receipt_case()
+        c.host.authority_inventory = lambda run_id: native_owned(present=c.allocated)
+        outcome = p.supervise(c.config, effects=c.effects)
+        assert outcome.exit_code == 0
+        document = c.receipts[outcome.receipt_path]
+        assert document["database"]["transport"] == "native-loopback"
+        assert document["database"]["ownership"] == native_public()
+        assert p.verify_receipt(outcome.receipt_path,
+            expected=p.ReceiptBinding("run-test", c.plan.source, "fakekey"), effects=c.effects).ok
+        assert "guardian-authority" in c.events
+
+    def test_h_native_with_docker_shape(self):
+        c = successful_receipt()
+        document = clone_document(c.document)
+        document["database"]["transport"] = "native-loopback"
+        assert not verify_document(c, document).ok
+
+    def test_h_docker_with_native_shape(self):
+        c = successful_receipt()
+        document = clone_document(c.document)
+        document["database"]["ownership"] = native_public()
+        assert not verify_document(c, document).ok
+
+    def test_h_receipt_unknown_transport(self):
+        c = successful_receipt()
+        document = clone_document(c.document)
+        document["database"]["transport"] = "native-remote"
+        assert not verify_document(c, document).ok
+
+    def test_h_native_shape_exact(self):
+        c = successful_receipt()
+        document = clone_document(c.document)
+        document["database"].update(transport="native-loopback", ownership=dict(native_public(), pid=12345))
+        assert not verify_document(c, document).ok
+
+    def test_h_native_path_refusal(self):
+        c = successful_receipt()
+        document = clone_document(c.document)
+        document["database"].update(transport="native-loopback", ownership=dict(native_public(), data_dir="../foreign"))
+        assert not verify_document(c, document).ok
+
+    def test_h_docker_receipt_unchanged(self):
+        c = successful_receipt()
+        assert c.document["database"]["transport"] == "docker-exec-relay"
+        assert c.document["database"]["ownership"] == {
+            "run_id": "run-test", "names": ["leafproof-run-test", "leafproof-run-test-pg", "leafproof-run-test-relay"],
+            "labels": {"leaf.proof-project.run": "run-test", "leaf.proof-project.owner": "proof_project_pg"},
+            "containers": ["a" * 12, "b" * 12], "networks": ["c" * 12]}
+
+    def test_h_native_private_values(self, capsys):
+        c = receipt_case()
+        c.host.authority_inventory = lambda run_id: native_owned(present=c.allocated)
+        allocate = c.effects.authority_factory
+        password = "native-secret/@:canary"
+        dsn = "postgresql://postgres:native-secret%2F%40%3Acanary@127.0.0.1:55432/leaf"
+        def factory(run_id):
+            authority = allocate(run_id)
+            authority.dsn = lambda: dsn
+            return authority
+        c.effects = replace(c.effects, authority_factory=factory)
+        c.host.database_module = lambda environment: c.db
+        outcome = p.supervise(c.config, effects=c.effects)
+        assert outcome.exit_code == 0
+        retained = repr(outcome) + json.dumps(list(c.receipts.values())) + repr(c.journals) + str(capsys.readouterr())
+        assert password not in retained and dsn not in retained
+        for secret in (password, dsn):
+            with pytest.raises(p.ProofRefused):
+                c.run_scope.private_values.check({"output": secret})
+            c.run_scope.private_values.rejected = False
+
+    def test_success_after_cleanup(self, monkeypatch):
+        c = successful_receipt()
+        assert c.events.index("intent") < c.events.index("scrub") < c.events.index("disarm") < c.events.index("publish-commit")
+        assert c.document["ok"] is True and c.document["failure"] is None
+        assert all(c.document["rows"].values())
+        assert all(c.document["cleanup"][name] for name in p._CLEANUP_FIELDS)
+        assert not c.allocated and not c.private and all(lease.issuer is None for lease in c.leases)
+        c = receipt_case()
+        c.on_publish = lambda: c.run_scope.cancel()
+        outcome = p.supervise(c.config, effects=c.effects)
+        assert outcome.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.CANCELLED)
+        assert outcome.receipt_path is None and c.receipts == {} and not c.private
+        c = receipt_case()
+        c.host.facts = replace(c.host.facts, output_owned=False)
+        outcome = p.supervise(c.config, effects=c.effects)
+        assert outcome.exit_code != 0 and not c.journals and not c.receipts
+        assert c.events == []
+        # The private guardian entry receives only public ownership over a
+        # fake pipe. Its adapter must actually reach D's guardian_main.
+        files = ReceiptFiles()
+        files.install(monkeypatch)
+        root = files.root / "guardian"
+        root.mkdir()
+        info = root.stat()
+        messages = [{"event": "init", "run_id": "run-test", "run_root": str(root),
+            "root_identity": [info.st_dev, info.st_ino], "deadline": 10}, {"event": "disarm"}]
+        output = io.StringIO()
+        monkeypatch.setattr(p, "sys", SimpleNamespace(stdin=SimpleNamespace(buffer=io.BytesIO(
+            b"".join((json.dumps(item) + "\n").encode() for item in messages))), stdout=output))
+        monkeypatch.setattr(p, "threading", SimpleNamespace(Thread=lambda *, target, daemon: SimpleNamespace(start=target)))
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        real_path = p.Path
+        monkeypatch.setattr(p, "Path", lambda value: root if value == str(root) else real_path(value))
+        calls = []
+        def guardian(request, *, effects):
+            calls.append(request.run_id)
+            assert request.channel.receive(1) == "disarm"
+            request.channel.acknowledge()
+            return 0
+        monkeypatch.setattr(p, "guardian_main", guardian)
+        assert p._guardian_entry() == 0 and calls == ["run-test"] and output.getvalue() == "OK\nOK\n"
+
+    def test_receipt_missing(self, capsys):
+        c = successful_receipt()
+        c.receipts.clear()
+        result = p.verify_receipt(c.outcome.receipt_path, expected=c.expected, effects=c.effects)
+        assert result == p.Verification(False, p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT))
+        with pytest.raises(Exception):
+            result.ok = True
+        assert p.main(["verify-receipt", "--run-id", "run-test", "--receipt", str(c.outcome.receipt_path)], effects=c.effects) == 1
+        assert capsys.readouterr().out == "RECEIPT: Project proof command failed.\n"
+
+    def test_receipt_malformed(self, monkeypatch):
+        c = successful_receipt()
+        for malformed in (None, [], {}, {"schema": p.SCHEMA}):
+            assert not verify_document(c, malformed).ok
+        for field, value in (("checkout_fence", "1"), ("settings_readback_sha256", "bad")):
+            malformed = clone_document(c.document)
+            malformed["canonical"][field] = value
+            assert not verify_document(c, malformed).ok
+        malformed = clone_document(c.document)
+        malformed["timings"]["migration"] = float("nan")
+        assert not verify_document(c, malformed).ok
+        malformed = clone_document(c.document)
+        malformed["stack"]["owned_process_identities"][1]["parent_pid"] = 999
+        assert not verify_document(c, malformed).ok
+        files = ReceiptFiles()
+        files.install(monkeypatch)
+        path = files.root / "receipt.json"
+        for raw in (b"{broken", b'{"ok":true,"ok":false}', b"x" * (p.RECEIPT_LIMIT + 1)):
+            path.write_bytes(raw)
+            effects = replace(c.effects, receipt_writer=p._ReceiptWriter())
+            assert not p.verify_receipt(path, expected=c.expected, effects=effects).ok
+
+    def test_receipt_binding(self):
+        c = successful_receipt()
+        expected = (replace(c.expected, run_id="run-other"), replace(c.expected, profile="account"),
+            replace(c.expected, schema=p.MIGRATION_SCHEMA), replace(c.expected, public_key_thumbprint="otherkey"),
+            replace(c.expected, source=replace(c.plan.source, commit="d" * 40)),
+            replace(c.expected, source=replace(c.plan.source, dirty_tree_sha256=OTHER_HASH)),
+            replace(c.expected, source=replace(c.plan.source, tested_source_manifest_sha256=HASH)))
+        for binding in expected:
+            assert not p.verify_receipt(c.outcome.receipt_path, expected=binding, effects=c.effects).ok
+
+    def test_receipt_unknown_fields(self, monkeypatch):
+        c = successful_receipt()
+        assert set(c.document) == p._RECEIPT_FIELDS | {"replay"}
+        for key in (None, "source", "identity", "database", "stack", "worker", "playwright", "rows", "canonical", "timings", "cleanup"):
+            malformed = clone_document(c.document)
+            (malformed if key is None else malformed[key])["diagnostic"] = "raw@key"
+            assert not verify_document(c, malformed).ok
+        files = ReceiptFiles()
+        files.install(monkeypatch)
+        writer, path = disk_publication(c, files.root, monkeypatch)
+        malformed = dict(c.document, diagnostic="raw@key")
+        with pytest.raises(p.ProofRefused):
+            writer.publish(path, p._Publication(malformed, lambda commit: commit()))
+        assert not path.exists()
+
+    def test_receipt_no_clobber(self, monkeypatch):
+        c = successful_receipt()
+        files = ReceiptFiles()
+        files.install(monkeypatch)
+        writer, path = disk_publication(c, files.root, monkeypatch)
+        events = []
+        sync = p.os.fsync
+        def fsync(fd):
+            events.append("fsync")
+            sync(fd)
+        monkeypatch.setattr(p.os, "fsync", fsync)
+        def race(commit):
+            assert len(events) == 3  # Recreated intent, absence marker, sibling temp.
+            path.write_bytes(b"older")
+            events.append("race")
+            return commit()
+        with pytest.raises((OSError, p.ProofRefused)):
+            writer.publish(path, p._Publication(c.document, race))
+        assert path.read_bytes() == b"older" and events[-1] == "race"
+        assert not path.with_name(path.name + ".pending").exists()
+        with pytest.raises(p.ProofRefused):
+            writer.publish(path.parent / "foreign.json", p._Publication(c.document, lambda commit: commit()))
+        # The same production decision path uses fake no-replace filesystem effects.
+        other = files.root / "control"
+        other.mkdir()
+        writer, path = disk_publication(c, other, monkeypatch)
+        writer.publish(path, p._Publication(c.document, lambda commit: commit()))
+        assert p.verify_receipt(path, expected=c.expected, effects=replace(c.effects, receipt_writer=writer)).ok
+
+    def test_receipt_failed_rows(self):
+        c = successful_receipt()
+        for name in p.REQUIRED_ROWS:
+            malformed = clone_document(c.document)
+            malformed["rows"][name] = False
+            assert not verify_document(c, malformed).ok
+        for name in p._CLEANUP_FIELDS:
+            malformed = clone_document(c.document)
+            malformed["cleanup"][name] = False
+            assert not verify_document(c, malformed).ok
+        for key in ("runtime", "database", "stack", "worker", "playwright", "canonical"):
+            malformed = clone_document(c.document)
+            malformed[key] = None
+            assert not verify_document(c, malformed).ok
+        for status in ("skipped", "flaky", "failed"):
+            malformed = clone_document(c.document)
+            malformed["playwright"]["outcomes"][0]["status"] = status
+            assert not verify_document(c, malformed).ok
+        failed = receipt_case()
+        def browser(*args, **kwargs):
+            raise p.ProofRefused(p.Failure(p.Stage.BROWSER, p.FailureCode.BROWSER_EXIT))
+        failed.effects = replace(failed.effects, browser_runner=browser)
+        failed.host.scrub = lambda *args, **kwargs: False
+        outcome = p.supervise(failed.config, effects=failed.effects)
+        assert outcome.failure == p.Failure(p.Stage.BROWSER, p.FailureCode.BROWSER_EXIT)
+        assert [item.fixed_code for item in outcome.cleanup_failures] == [p.FailureCode.CLEANUP_PRIVATE, p.FailureCode.GUARDIAN]
+        assert not failed.receipts
+
+    def test_migration_not_project(self):
+        c = receipt_case()
+        def forbidden(*args, **kwargs):
+            pytest.fail("migration-only command acquired identity or a stack")
+        c.effects = replace(c.effects, issuer_factory=forbidden, seed_operation=forbidden, browser_runner=forbidden)
+        result = p.measure_migration(c.config, effects=c.effects)
+        assert result.exit_code == 0 and result.receipt_path.name == p.MIGRATION_RECEIPT_NAME
+        document = c.receipts[result.receipt_path]
+        assert document["schema"] == p.MIGRATION_SCHEMA and document["ok"] is True
+        assert document["rows"]["P04"] and document["rows"]["P10"] and not document["rows"]["P09"]
+        assert document["identity"] is None and document["runtime"] is None
+        assert all(spec.role == "migration-child" for spec in c.launches)
+        assert not p.verify_receipt(result.receipt_path,
+            expected=p.ReceiptBinding(c.config.run_id, c.plan.source, "fakekey"), effects=c.effects).ok
+        assert not c.private and not c.allocated and c.mints == []
+
+    def test_raw_dsn_canary(self, capsys):
+        canary_world("db@:/pw", capsys)
+
+    def test_encoded_dsn_canary(self, capsys):
+        from urllib.parse import quote
+        canary_world(quote("db@:/pw", safe=""), capsys)
+
+    def test_bearer_canary(self, capsys):
+        canary_world("br+/?x", capsys)
+
+    def test_encoded_bearer_canary(self, capsys):
+        from urllib.parse import quote
+        canary_world(quote("br+/?x", safe=""), capsys)
+
+    def test_capability_canary(self, capsys):
+        canary_world("cp+/?x", capsys)
+
+    def test_encoded_capability_canary(self, capsys):
+        from urllib.parse import quote
+        canary_world(quote("cp+/?x", safe=""), capsys)
+
+    def test_private_key_canary(self, capsys):
+        canary_world("key+/=", capsys)
+        c = receipt_case()
+        c.issuer.private_key = "key+/="
+        outcome = p.supervise(c.config, effects=c.effects)
+        assert outcome.exit_code == 0 and c.leases and all(lease.issuer is None for lease in c.leases)
+        assert "key+/=" not in json.dumps(list(c.receipts.values())) + repr(c.journals)
+
+    def test_split_chunk_canaries(self, capsys):
+        from urllib.parse import quote
+        values = ("db@:/pw", "br+/?x", "cp+/?x", "key+/=")
+        for value in (*values, *(quote(item, safe="") for item in values)):
+            payload = json.dumps({"stage": "browser", "fixed_code": "BROWSER_EXIT", "diagnostic": value}).encode()
+            for split in range(1, len(value)):
+                boundary = payload.index(value.encode()) + split
+                output = p._RetainedOutput(p._approved_event)
+                output.feed(payload[:boundary])
+                output.feed(payload[boundary:])
+                retained = output.finish()
+                assert value.encode() not in retained
+                assert retained == b""
+                assert not output._raw
+            canary_world(value, capsys)
+
+    def test_bounded_output(self, monkeypatch):
+        output = p._RetainedOutput(p._approved_event, limit=64)
+        for _ in range(10000):
+            output.feed(b"x" * 32)
+            assert len(output._raw) <= 64
+        assert output.overflow and output.finish() == b"" and not output._raw
+        # Overflow cannot recover by accepting a later valid suffix.
+        output.feed(b'{"stage":"browser","fixed_code":"BROWSER_EXIT"}')
+        assert output.finish() == b""
+        output = p._RetainedOutput(p._approved_event)
+        output.feed(b'{"stage":"browser","fixed_code":"BROWSER_EXIT"}')
+        assert len(output.finish()) <= p.MAX_OUTPUT_BYTES
+        # Exercise the production launcher wiring with fake handles and pipes.
+        sinks = []
+        class Pipe:
+            def __init__(self, spec):
+                self.capture = p._RetainedOutput(lambda raw: p._child_public(spec, raw))
+                self.closed, self.retained, self.launched_count = False, None, 0
+                sinks.append(self)
+            def launched(self):
+                self.launched_count += 1
+            def close(self):
+                if not self.closed:
+                    self.retained = self.capture.finish()
+                    self.closed = True
+        def spawn(argv, **kwargs):
+            assert kwargs["stdout"] is sinks[0] and kwargs["stderr"] == p.subprocess.DEVNULL
+            kwargs["stdout"].capture.feed(b'{"diagnostic":"db@:/pw"}')
+            return SimpleNamespace(pid=77, poll=lambda: 0)
+        monkeypatch.setattr(p, "_OutputPipe", Pipe)
+        monkeypatch.setattr(p.subprocess, "Popen", spawn)
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="nt", getpid=lambda: 66))
+        monkeypatch.setattr(p, "_WindowsJob", lambda: SimpleNamespace(attach_and_resume=lambda child: "start77"))
+        child = p._RuntimeProcess(p.ProcessSpec("migration-child", ("fake",), ROOT, {}, 5, ROOT / "result.json"))
+        child.start()
+        assert child.poll() == 0 and sinks[0].launched_count == 1 and sinks[0].retained == b""
+
+    def test_safe_retention(self, monkeypatch):
+        files = ReceiptFiles()
+        files.install(monkeypatch)
+        for keep in (False, True):
+            for fail in (False, True):
+                c = receipt_case()
+                c.config = replace(c.config, keep_run_root=keep)
+                c.retained.extend(("db@:/pw", "br+/?x", "cp+/?x", "key+/="))
+                if fail:
+                    def crash(*args, **kwargs):
+                        raise RuntimeError("key+/=")
+                    c.effects = replace(c.effects, browser_runner=crash)
+                outcome = p.supervise(c.config, effects=c.effects)
+                assert (outcome.exit_code != 0) == fail
+                assert not c.private and not c.retained and all(lease.issuer is None for lease in c.leases)
+                assert outcome.receipt_path in c.receipts and len(c.receipts) == 1
+                assert c.receipts[outcome.receipt_path]["ok"] is (not fail)
+                assert all("key+/=" not in json.dumps(value) for value in c.receipts.values())
+                root = files.root / (str(keep) + str(fail))
+                root.mkdir()
+                (root / "artifacts").mkdir()
+                (root / "artifacts" / "raw.json").write_text("key+/=", encoding="utf-8")
+                info = root.stat()
+                reservation = p.Reservation(root, root / "artifacts", root_identity=(info.st_dev, info.st_ino))
+                assert p._SupervisorHost().scrub(reservation, keep_safe=keep)
+                assert not root.exists()
+        c = receipt_case()
+        c.host.recovery = lambda run_id, root: (c.plan.reservation, c.host.authority_inventory(run_id))
+        c.host.recovery_processes_absent = lambda run_id, root: True
+        proof = p.cleanup("run-test", run_root=ROOT, effects=c.effects)
+        assert proof.ok and not c.private and not c.allocated and c.receipts == {}
+        c = receipt_case()
+        c.host.recovery = lambda run_id, root: (c.plan.reservation, c.host.authority_inventory(run_id))
+        c.host.recovery_processes_absent = lambda run_id, root: False
+        proof = p.cleanup("run-test", run_root=ROOT, effects=c.effects)
+        assert not proof.ok and proof.failures[0].fixed_code == p.FailureCode.CLEANUP_PROCESS
+        assert c.private and c.receipts == {} and "remove-authority" not in c.events
+
+    def test_e_b_rename_fallback_link(self, monkeypatch):
+        source, target = ROOT / "receipt.pending", ROOT / "receipt.json"
+        calls = []
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="posix",
+            link=lambda source, target: calls.append(("link", source, target)),
+            unlink=lambda source: calls.append(("unlink", source))))
+        monkeypatch.setattr(p, "_renameat2_noreplace", lambda source, target: errno.EINVAL)
+        assert p._rename_noreplace(source, target) is None
+        assert calls == [("link", source, target), ("unlink", source)]
+
+    def test_e_b_rename_fallback_no_clobber(self, monkeypatch):
+        source, target = ROOT / "receipt.pending", ROOT / "receipt.json"
+        calls = []
+        def link(source, target):
+            calls.append(("link", source, target))
+            raise FileExistsError("fake")
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="posix", link=link,
+            unlink=lambda source: calls.append(("unlink", source))))
+        monkeypatch.setattr(p, "_renameat2_noreplace", lambda source, target: errno.ENOSYS)
+        with pytest.raises(p.ProofRefused) as error:
+            p._rename_noreplace(source, target)
+        assert error.value.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
+        assert calls == [("link", source, target)]
+
+    def test_e_b_rename_eexist_refused(self, monkeypatch):
+        source, target = ROOT / "receipt.pending", ROOT / "receipt.json"
+        calls = []
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="posix",
+            link=lambda source, target: calls.append(("link", source, target)),
+            unlink=lambda source: calls.append(("unlink", source))))
+        monkeypatch.setattr(p, "_renameat2_noreplace", lambda source, target: errno.EEXIST)
+        with pytest.raises(p.ProofRefused) as error:
+            p._rename_noreplace(source, target)
+        assert error.value.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
+        assert calls == []
+
+    def test_e_b_rename_other_errno_refused(self, monkeypatch):
+        source, target = ROOT / "receipt.pending", ROOT / "receipt.json"
+        calls = []
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="posix",
+            link=lambda source, target: calls.append(("link", source, target)),
+            unlink=lambda source: calls.append(("unlink", source))))
+        monkeypatch.setattr(p, "_renameat2_noreplace", lambda source, target: errno.EIO)
+        with pytest.raises(p.ProofRefused) as error:
+            p._rename_noreplace(source, target)
+        assert error.value.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
+        assert calls == []
+
+    def test_e_c1_signal_during_commit(self, monkeypatch):
+        import signal
+        c = correction_disk_case(monkeypatch)
+        stat = ReceiptPath.stat
+        delivered = []
+        def interrupt(path):
+            result = stat(path)
+            if path == c.config.artifact_root and any(name.name.endswith(".pending") for name in c.files.files):
+                delivered.append(True)
+                signal.getsignal(signal.SIGINT)(signal.SIGINT, None)
+            return result
+        monkeypatch.setattr(ReceiptPath, "stat", interrupt)
+        previous = signal.getsignal(signal.SIGINT)
+        outcome = p.supervise(c.config, effects=c.effects)
+        assert delivered and c.run_scope._cancelled
+        assert outcome.exit_code != 0 and outcome.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.CANCELLED)
+        assert outcome.receipt_path is None
+        assert not any(path.name in {p.RECEIPT_NAME, p.RECEIPT_NAME + ".pending"} for path in c.files.files)
+        assert signal.getsignal(signal.SIGINT) == previous
+        # Also exercise the narrow window after the final check, before rename.
+        monkeypatch.setattr(ReceiptPath, "stat", stat)
+        with monkeypatch.context() as patch:
+            c = correction_disk_case(patch)
+            rename = p._rename_noreplace
+            def interrupted_rename(source, target):
+                signal.getsignal(signal.SIGINT)(signal.SIGINT, None)
+                return rename(source, target)
+            patch.setattr(p, "_rename_noreplace", interrupted_rename)
+            outcome = p.supervise(c.config, effects=c.effects)
+            assert outcome.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.CANCELLED)
+            assert outcome.receipt_path is None
+            assert not any(path.name == p.RECEIPT_NAME for path in c.files.files)
+
+    def test_e_c1_cancel_before_rename(self, monkeypatch):
+        c = correction_disk_case(monkeypatch)
+        stat = ReceiptPath.stat
+        cancelled = []
+        def cancel(path):
+            result = stat(path)
+            if path == c.config.artifact_root and any(name.name.endswith(".pending") for name in c.files.files):
+                cancelled.append(True)
+                c.run_scope.cancel()
+            return result
+        monkeypatch.setattr(ReceiptPath, "stat", cancel)
+        outcome = p.supervise(c.config, effects=c.effects)
+        assert cancelled and outcome.exit_code != 0
+        assert outcome.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.CANCELLED)
+        assert outcome.receipt_path is None and not any(path.name == p.RECEIPT_NAME for path in c.files.files)
+
+    def test_e_c1_boolean_types(self):
+        c = successful_receipt()
+        paths = []
+        def visit(value, path=()):
+            if type(value) is bool:
+                paths.append(path)
+            elif isinstance(value, (dict, list)):
+                for key, item in (value.items() if isinstance(value, dict) else enumerate(value)):
+                    visit(item, (*path, key))
+        visit(c.document)
+        assert ("stack", "app_readiness", "dependencies", "broker", "required") in paths
+        for path in paths:
+            document = clone_document(c.document)
+            target = document
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = int(target[path[-1]])
+            assert verify_document(c, document) == p.Verification(False, p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)), path
+
+    def test_e_c1_integer_types(self):
+        c = successful_receipt()
+        paths = []
+        def visit(value, path=()):
+            if type(value) is int:
+                paths.append(path)
+            elif isinstance(value, (dict, list)):
+                for key, item in (value.items() if isinstance(value, dict) else enumerate(value)):
+                    visit(item, (*path, key))
+        visit(c.document)
+        assert ("canonical", "checkout_fence") in paths
+        assert ("database", "schema_status", "migration_count") in paths
+        for path in paths:
+            document = clone_document(c.document)
+            target = document
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = True
+            assert verify_document(c, document) == p.Verification(False, p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)), path
+
+    def test_e_c1_transport_exception(self, capsys):
+        c = receipt_case()
+        def crash(operation):
+            raise RuntimeError("PRIVATE_DETAIL")
+        c.host.begin_operation = crash
+        outcome = p.supervise(c.config, effects=c.effects)
+        assert outcome.failure == p.Failure(p.Stage.PREFLIGHT, p.FailureCode.INTERNAL)
+        assert outcome.exit_code != 0 and c.run_scope.failure == outcome.failure
+        assert p.main(["supervise", "--run-id", "run-test", "--run-root", str(ROOT)], effects=c.effects) == 1
+        output = capsys.readouterr()
+        assert output.out == "INTERNAL: Project proof command failed.\n" and output.err == ""
+        assert "PRIVATE_DETAIL" not in repr(outcome) + repr(c.journals) + json.dumps(list(c.receipts.values()))
+
+    def test_e_c1_adapter_baseexception(self, capsys):
+        c = receipt_case()
+        class AdapterCrash(BaseException):
+            pass
+        def crash(*args, **kwargs):
+            raise AdapterCrash("PRIVATE_DETAIL")
+        c.effects = replace(c.effects, browser_runner=crash)
+        outcome = p.supervise(c.config, effects=c.effects)
+        assert outcome.failure == p.Failure(p.Stage.BROWSER, p.FailureCode.BROWSER_EXIT)
+        assert outcome.exit_code != 0 and c.run_scope.failure == outcome.failure
+        assert outcome.receipt_path in c.receipts
+        assert c.receipts[outcome.receipt_path]["failure"] == {"stage": "browser", "fixed_code": "BROWSER_EXIT"}
+        assert "PRIVATE_DETAIL" not in repr(outcome) + repr(c.journals) + json.dumps(list(c.receipts.values()))
+        assert capsys.readouterr() == ("", "")
+
+    def test_e_c1_split_private_identifier(self):
+        password = "PasswordCanary7"
+        request = {"run_id": "run-test", "subject": "leaf-proof-project|run-test", "deadline": 5,
+            "result_path": str(ROOT / "binding-result.json")}
+        spec = p.ProcessSpec("seed-child", ("fake",), ROOT, {
+            "DATABASE_URL": "postgresql://leaf:" + password + "@localhost/leaf",
+            "LEAF_PROJECT_CHILD_REQUEST": json.dumps(request)}, 5)
+        raw = json.dumps({"organization_id": password, "binding_id": "binding", "subject": request["subject"],
+            "tier": "hosted_pro", "authority": "auth0", "role": "owner", "status": "active"}).encode()
+        for split in range(1, len(password)):
+            output = p._RetainedOutput(lambda raw: p._child_public(spec, raw))
+            boundary = raw.index(password.encode()) + split
+            output.feed(raw[:boundary])
+            output.feed(raw[boundary:])
+            assert output.finish() == b"" and not output._raw
+            assert output.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
+
+    def test_e_c1_private_receipt(self):
+        c = receipt_case()
+        password = "PasswordCanary7"
+        allocate = c.effects.authority_factory
+        def authority(run_id):
+            result = allocate(run_id)
+            result.dsn = lambda: "postgresql://leaf:" + password + "@localhost/leaf"
+            return result
+        c.effects = replace(c.effects, authority_factory=authority)
+        c.host.database_module = lambda environment: c.db
+        c.org.org_id = c.row.platform_tenant_id = password
+        c.binding = replace(c.binding, organization_id=password)
+        c.auth = (200, password, "hosted_pro", "active")
+        c.evidence = replace(c.evidence, organization_id=password)
+        c.result = replace(c.result, canonical=c.evidence, sizing=r14f2_browser_records(password))
+        c.canonical = replace(c.canonical, evidence=c.evidence, replay_facts=r14f1_facts(c), sizing_evidence=r14f2_evidence(c))
+        outcome = p.supervise(c.config, effects=c.effects)
+        assert outcome.exit_code != 0 and outcome.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
+        assert outcome.receipt_path is None and c.receipts == {}
+        assert not c.private and not c.allocated
+        assert password not in repr(c.journals)
+
+    def test_e_c1_known_private_values(self):
+        from urllib.parse import quote
+        c = receipt_case()
+        private = p._PrivateValues()
+        key, capability = "SigningKeyCanary+/=", "CheckoutCanary+/?"
+        c.issuer.private_key = key
+        bound = p._private_effects(c.effects, private)
+        issuer = bound.issuer_factory("run-test")
+        first = issuer.mint("run-test")
+        second = issuer.mint("run-test")
+        dsn = "postgresql://leaf:Password%2BCanary@localhost/leaf"
+        private.dsn(dsn)
+        private.capabilities(SimpleNamespace(checkout_capability=capability))
+        for secret in (dsn, "Password+Canary", first, second, key, capability):
+            for value in (secret, quote(secret, safe="")):
+                private.rejected = False
+                token = p._RUN_PRIVATE.set(private)
+                try:
+                    output = p._RetainedOutput(json.loads)
+                finally:
+                    p._RUN_PRIVATE.reset(token)
+                raw = json.dumps({"permitted": ["prefix" + value + "suffix"]}).encode()
+                output.feed(raw[:len(raw) // 2])
+                output.feed(raw[len(raw) // 2:])
+                assert output.finish() == b"" and not output._raw
+                assert output.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
+        assert first not in repr(private) and key not in repr(private)
+
+    def test_e_c1_failure_receipt(self, monkeypatch):
+        c = correction_disk_case(monkeypatch)
+        def crash(*args, **kwargs):
+            raise RuntimeError("PRIVATE_DETAIL")
+        c.effects = replace(c.effects, browser_runner=crash)
+        outcome = p.supervise(c.config, effects=c.effects)
+        assert outcome.failure == p.Failure(p.Stage.BROWSER, p.FailureCode.BROWSER_EXIT)
+        assert outcome.exit_code != 0 and outcome.cleanup_failures == ()
+        assert outcome.receipt_path is not None and outcome.receipt_path.exists()
+        document = json.loads(outcome.receipt_path.read_bytes())
+        assert document["ok"] is False
+        assert document["failure"] == {"stage": "browser", "fixed_code": "BROWSER_EXIT"}
+        assert all(document["cleanup"][name] is True for name in p._CLEANUP_FIELDS)
+        assert "PRIVATE_DETAIL" not in json.dumps(document)
+
+    def test_e_c1_pipe_private_failure(self, monkeypatch):
+        private = p._PrivateValues()
+        private.add("PasswordCanary7")
+        token = p._RUN_PRIVATE.set(private)
+        try:
+            capture = p._RetainedOutput(json.loads)
+        finally:
+            p._RUN_PRIVATE.reset(token)
+        capture.feed(b'{"organization_id":"PasswordCanary7"}')
+        pipe = object.__new__(p._OutputPipe)
+        pipe.closed, pipe.writer = False, None
+        pipe.done = SimpleNamespace(wait=lambda timeout: True)
+        pipe.capture = capture
+        pipe.spec = p.ProcessSpec("seed-child", ("fake",), ROOT, {}, 5, ROOT / "output.json")
+        writes = []
+        monkeypatch.setattr(p, "_write_synced", lambda *args: writes.append(args))
+        with pytest.raises(p.ProofRefused) as error:
+            pipe.close()
+        assert error.value.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
+        assert not writes and not capture._raw
+
+    def test_e_c1_publication_private_value(self, monkeypatch):
+        c = successful_receipt()
+        files = ReceiptFiles()
+        files.install(monkeypatch)
+        writer, path = disk_publication(c, files.root, monkeypatch)
+        private = p._PrivateValues()
+        private.add("PasswordCanary7")
+        document = clone_document(c.document)
+        document["identity"]["organization_id"] = "PasswordCanary7"
+        with pytest.raises(p.ProofRefused) as error:
+            writer.publish(path, p._Publication(document, lambda action: action(), private_values=private))
+        assert error.value.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
+        assert not path.exists() and not path.with_name(path.name + ".pending").exists()
+        assert not any(b"PasswordCanary7" in raw for raw in files.files.values())
+
+    def test_e_c1_bearers_in_receipt(self):
+        for leaked in ("ReadinessBearerCanary", "BrowserBearerCanary"):
+            c = receipt_case()
+            tokens = iter(("ReadinessBearerCanary", "BrowserBearerCanary"))
+            c.issuer.mint = lambda *args, **kwargs: next(tokens)
+            c.evidence = replace(c.evidence, project_id=leaked)
+            c.result = replace(c.result, canonical=c.evidence)
+            c.canonical = replace(c.canonical, evidence=c.evidence)
+            outcome = p.supervise(c.config, effects=c.effects)
+            assert outcome.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
+            assert outcome.exit_code != 0 and outcome.receipt_path is None and not c.receipts
+            assert not c.private
+
+    def test_e_c1_signing_key_receipt(self):
+        c = receipt_case()
+        c.issuer.private_key = "SigningKeyCanary"
+        c.evidence = replace(c.evidence, drawing_id="SigningKeyCanary")
+        c.result = replace(c.result, canonical=c.evidence)
+        c.canonical = replace(c.canonical, evidence=c.evidence)
+        outcome = p.supervise(c.config, effects=c.effects)
+        assert outcome.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
+        assert outcome.exit_code != 0 and outcome.receipt_path is None and not c.receipts
+        assert all(lease.issuer is None for lease in c.leases)
+
+    def test_e_c1_checkout_receipt(self):
+        c = receipt_case()
+        capability = "CheckoutCapabilityCanary"
+        browser = c.effects.browser_runner
+        def run(request, *, scope):
+            handle = browser(request, scope=scope)
+            poll = handle.poll
+            def result():
+                handle.checkout_capability = capability
+                return poll()
+            handle.poll = result
+            return handle
+        c.effects = replace(c.effects, browser_runner=run)
+        c.evidence = replace(c.evidence, job_id=capability)
+        c.result = replace(c.result, canonical=c.evidence)
+        c.canonical = replace(c.canonical, evidence=c.evidence)
+        outcome = p.supervise(c.config, effects=c.effects)
+        assert outcome.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
+        assert outcome.exit_code != 0 and outcome.receipt_path is None and not c.receipts
+        assert not c.private and not c.allocated
+
+
+# C1 drives guardian_main synchronously with fake channels, clocks and processes.
+def _h_c1_guardian(tmp_path, monkeypatch, *, disarm=False):
+    from test_proof_project_pg import _native_case, pg, RUN
+    c = _native_case(tmp_path, monkeypatch)
+    c.start()
+    c.pg, c.checks, c.signals, c.acks, c.block_signal = pg, [], [], [], False
+    def identity(pid):
+        c.checks.append(pid)
+        return c.table(pid)
+    def signal_process(pid, sig):
+        c.signals.append((pid, sig))
+        if c.block_signal:
+            raise PermissionError("fake signal refusal")
+        assert pid == 12345 and sig == pg.signal.SIGINT
+        c.alive = False
+    monkeypatch.setattr(pg, "native_process_identity", identity)
+    monkeypatch.setattr(pg.os, "kill", signal_process)
+    monkeypatch.setattr(pg.subprocess, "run", c.runner)
+    monkeypatch.setattr(pg, "resolve_native_binaries", lambda **kwargs: c.binaries)
+    monkeypatch.setattr(p, "_pg_module", lambda: pg)
+    host = p._Host()
+    host._native_context = (RUN, tmp_path, 55432)
+    host.begin_operation = ImmediateOperation
+    info = tmp_path.stat()
+    reservation = p.Reservation(tmp_path, tmp_path / "artifacts", root_identity=(info.st_dev, info.st_ino))
+    def receive(timeout):
+        if disarm:
+            return "disarm"
+        raise EOFError
+    channel = SimpleNamespace(receive=receive, acknowledge=lambda: c.acks.append("OK"))
+    c.request = p.GuardianRequest(RUN, reservation, p._native_ownership(RUN, 55432, c.authority._ownership),
+        channel, deadline=1)
+    c.effects = replace(lifetime_case().effects, host=host)
+    return c
+
+
+def test_h_c1_live_disarm(tmp_path, monkeypatch):
+    c = _h_c1_guardian(tmp_path, monkeypatch, disarm=True)
+    c.pg.shutil.rmtree(tmp_path)
+    c.block_signal = True
+    assert p.guardian_main(c.request, effects=c.effects) == 1
+    assert c.checks and c.alive and c.acks == []
+
+
+def test_h_c1_absent_disarm(tmp_path, monkeypatch):
+    c = _h_c1_guardian(tmp_path, monkeypatch, disarm=True)
+    c.alive = False
+    c.pg.shutil.rmtree(tmp_path)
+    assert p.guardian_main(c.request, effects=c.effects) == 0
+    assert c.checks == [12345] and c.acks == ["OK"] and c.signals == []
+    assert not any("stop" in argv for argv, kwargs in c.calls)
+
+
+def test_h_c1_parent_loss(tmp_path, monkeypatch):
+    c = _h_c1_guardian(tmp_path, monkeypatch)
+    assert p.guardian_main(c.request, effects=c.effects) == 0
+    assert not c.alive and not tmp_path.exists() and c.acks == []
+    assert c.checks.count(12345) >= 3
+    assert sum("stop" in argv for argv, kwargs in c.calls) == 1
+
+
+def test_h_c1_parent_loss_missing_directory(tmp_path, monkeypatch):
+    c = _h_c1_guardian(tmp_path, monkeypatch)
+    c.pg.shutil.rmtree(tmp_path)
+    assert p.guardian_main(c.request, effects=c.effects) == 0
+    assert not c.alive and c.acks == []
+    assert c.signals == [(12345, c.pg.signal.SIGINT)] and len(c.checks) >= 3
+
+
+def test_h_c1_parent_loss_reused_pid(tmp_path, monkeypatch):
+    c = _h_c1_guardian(tmp_path, monkeypatch)
+    c.pg.shutil.rmtree(tmp_path)
+    def replacement(pid):
+        c.checks.append(pid)
+        if len(c.checks) == 2:
+            c.identity.update(start_id="ps:1700000001", started_at=1700000001)
+        return c.table(pid)
+    monkeypatch.setattr(c.pg, "native_process_identity", replacement)
+    assert p.guardian_main(c.request, effects=c.effects) == 0
+    assert c.alive and c.signals == [] and c.acks == [] and len(c.checks) >= 2
+
+
+def test_h_a1e_guardian_interrupted_teardown(tmp_path, monkeypatch):
+    c = _h_c1_guardian(tmp_path, monkeypatch)
+    c.alive = False
+    c.pidfile.unlink()
+    c.calls.clear()
+    assert c.inventory() == dict(c.authority._ownership, pid=0, start_id="", started_at=0)
+    assert p.guardian_main(c.request, effects=c.effects) == 0
+    assert not tmp_path.exists() and c.inventory() is None
+    assert c.checks == [12345] and c.signals == [] and c.acks == [] and c.calls == []
+
+
+def test_h_a1e_subset_stopped():
+    captured = native_owned()
+    stopped = replace(captured, pid=0, start_id="", started_at=0)
+    assert stopped.present and p._native_subset(stopped, captured)
+    assert not p._native_subset(replace(stopped, port=55433), captured)
+    assert not p._native_subset(replace(stopped, run_id="foreign-run"), captured)
+
+
+def test_h_a1c_scrub_unreadable_root_refuses(tmp_path, monkeypatch):
+    info = tmp_path.stat()
+    reservation = p.Reservation(tmp_path, tmp_path / "artifacts",
+        root_identity=(info.st_dev, info.st_ino))
+    scandir = p.os.scandir
+    removals = []
+    def unreadable(root):
+        if root == tmp_path:
+            raise PermissionError("fake")
+        return scandir(root)
+    monkeypatch.setattr(p.os, "scandir", unreadable)
+    monkeypatch.setattr(p.shutil, "rmtree", lambda path: removals.append(path))
+    assert p._Host.scrub(reservation, keep_safe=False) is False
+    assert removals == []
+# PP-3B production browser boundary: only fake children and temporary evidence.
+def browser_case(tmp_path, monkeypatch):
+    from dataclasses import asdict
+    c = SimpleNamespace(exit_code=None, starts=[], stops=[], stopped=True)
+    c.repo = tmp_path / "repo"
+    c.cli = c.repo / "web/node_modules/@playwright/test/cli.js"
+    c.cli.parent.mkdir(parents=True)
+    c.cli.write_text("fake install marker", encoding="utf-8")
+    c.output = tmp_path / "artifacts"
+    c.output.mkdir()
+    c.scope = p.RunScope(effects=case().effects)
+    c.request = p.BrowserRequest("run-test", fake_host().source, "fakekey", "fakeorg", "fakebind",
+        "project:run-test", "http://127.0.0.1:8101", "http://127.0.0.1:8102", p.REQUIRED_TEST_IDS,
+        {"PATH": "fake-path", "SYSTEMROOT": "fake-system", "LEAF_E2E_TOKEN": "header.payload.signature",
+         "LEAF_E2E_MANAGED": "1", "LEAF_PROOF_PROJECT_RUN_ID": "run-test",
+         "VITE_API_BASE": "http://127.0.0.1:8102", "VITE_MOCK": "0", "VITE_TENANT_ID": "fakeorg",
+         "VITE_CAD_EDIT": "1", "VITE_SOLAR_FLOW_RAIL": "1", "VITE_SOLAR_SETTINGS_FORM": "1",
+         "DATABASE_URL": "DATABASE_CANARY", "NODE_OPTIONS": "NODE_CANARY",
+         "LEAF_PROJECT_BASE_URL": "http://foreign.invalid", "HTTPS_PROXY": "PROXY_CANARY",
+         "LEAF_PROJECT_REQUEST": "METADATA_CANARY"}, c.output, 123.5)
+    c.report = c.output / "project-browser/browser-result.json"
+    c.raw = {"schema": p.BROWSER_REPORT_SCHEMA, "run_id": c.request.run_id,
+        "source_binding": asdict(c.request.source_binding), "public_key_thumbprint": "fakekey",
+        "exit_code": 0, "selected_test_ids": list(p.REQUIRED_TEST_IDS),
+        "started_test_ids": list(p.REQUIRED_TEST_IDS), "completed_test_ids": list(p.REQUIRED_TEST_IDS),
+        "outcomes": [{"test_id": name, "status": "passed", "retry": 0} for name in p.REQUIRED_TEST_IDS],
+        "annotation_types": [], "checkpoints": dict.fromkeys(p.CHECKPOINTS, True),
+        "canonical": asdict(p.CanonicalEvidence("fakeorg", "project", "drawing", "input", "output", "job",
+            "fakebind", "project:run-test", 1, HASH, OTHER_HASH, OTHER_HASH)), "sizing": r14f2_browser_records()}
+    def child(spec):
+        c.spec = spec
+        def start():
+            assert [kind for kind, _ in c.scope._actions] == [p.ResourceKind.BROWSER_PROCESS]
+            c.starts.append(spec)
+        def stop(deadline):
+            c.stops.append(deadline)
+            return c.stopped
+        c.child = SimpleNamespace(start=start, stop=stop, poll=lambda: c.exit_code)
+        return c.child
+    monkeypatch.setattr(p, "REPO", c.repo)
+    monkeypatch.setattr(p.shutil, "which", lambda name, *, path: "fake-node" if (name, path) == ("node", "fake-path") else None)
+    monkeypatch.setattr(p, "_RuntimeProcess", child)
+    monkeypatch.setattr(p.subprocess, "Popen", lambda *a, **k: pytest.fail("real process forbidden"))
+    c.launch = lambda: p._run_project_browser(c.request, scope=c.scope)
+    c.write = lambda: c.report.write_text(json.dumps(c.raw), encoding="utf-8", newline="\n")
+    return c
+
+
+def browser_refused(action, code=p.FailureCode.BROWSER_EVIDENCE):
+    with pytest.raises(p.ProofRefused) as caught:
+        action()
+    assert caught.value.failure == p.Failure(p.Stage.BROWSER, code)
+    assert "CANARY" not in str(caught.value) and "header.payload.signature" not in str(caught.value)
+
+
+def _pp3b_c1_pipeline(tmp_path, monkeypatch):
+    # Run the actual pipeline, then give its unmodified BrowserRequest to the
+    # actual adapter. All authority, readiness and child processes are fakes.
+    c = execution_case()
+    b = browser_case(tmp_path, monkeypatch)
+    ports = p.Ports(5185, 8010, 8011, 8012)
+    ambient = {"PATH": "fake-path", "SYSTEMROOT": "fake-system",
+        "VITE_API_BASE": "http://foreign.invalid", "VITE_MOCK": "1",
+        "VITE_TENANT_ID": "foreign-tenant", "VITE_CAD_EDIT": "0",
+        "VITE_SOLAR_FLOW_RAIL": "0", "VITE_SOLAR_SETTINGS_FORM": "0",
+        "VITE_EXTRA": "PUBLIC_CANARY", "DSN": "DSN_CANARY",
+        "ACCESS_TOKEN": "TOKEN_CANARY", "LEAF_E2E_TOKEN": "AMBIENT_TOKEN_CANARY",
+        "HTTPS_PROXY": "PROXY_CANARY", "NODE_OPTIONS": "NODE_CANARY"}
+    c.plan = replace(c.prepared.plan,
+        config=replace(c.prepared.plan.config, ports=ports, artifact_root=b.output),
+        host=replace(c.prepared.plan.host, environment=ambient))
+    c.prepared = replace(c.prepared, plan=c.plan,
+        binding=replace(c.prepared.binding, organization_id="org-1"))
+    c.prepared.identity_lease.issuer.mint = lambda *a, **k: "header.payload.signature"
+    c.stack_ready["ports"] = dict(zip(("web", "app", "broker", "harness"), ports.values()))
+    c.auth = (200, "org-1", "hosted_pro", "active")
+    c.evidence = replace(c.evidence, organization_id="org-1")
+    c.result = replace(c.result, canonical=c.evidence, sizing=r14f2_browser_records("org-1"))
+    c.canonical = replace(c.canonical, evidence=c.evidence, replay_facts=r14f1_facts(c), sizing_evidence=r14f2_evidence(c))
+    execute(c)
+    b.request = c.browser_requests[0]
+    b.raw["canonical"]["organization_id"] = b.request.organization_id
+    b.raw["sizing"] = r14f2_browser_records(b.request.organization_id)
+    b.launch()
+    return c, b
+
+
+class TestProjectBrowser:
+    def test_pp3b_c1_integrated_settings(self, tmp_path, monkeypatch):
+        # Mutations: pipeline_drops_public / child_drops_public.
+        c, b = _pp3b_c1_pipeline(tmp_path, monkeypatch)
+        expected = {"VITE_API_BASE": "http://127.0.0.1:8010", "VITE_MOCK": "0",
+            "VITE_TENANT_ID": "org-1", "VITE_CAD_EDIT": "1",
+            "VITE_SOLAR_FLOW_RAIL": "1", "VITE_SOLAR_SETTINGS_FORM": "1"}
+        assert set(p.MANAGED_PUBLIC_UI_SETTINGS) == set(expected)
+        assert b.request.web_origin == "http://127.0.0.1:5185"
+        assert b.request.app_origin == expected["VITE_API_BASE"]
+        assert b.request.organization_id == expected["VITE_TENANT_ID"]
+        for env in (c.launches[0].environment, b.request.environment, b.spec.environment):
+            assert {key: value for key, value in env.items() if key.startswith("VITE_")} == expected
+        # Replay the read's counterexample at the compiler's process.env input:
+        # no empty API base, mock default, demo tenant, or web-port destination.
+        child = b.spec.environment
+        assert child["VITE_API_BASE"] + "/api/projects" == "http://127.0.0.1:8010/api/projects"
+        assert child["VITE_MOCK"] != "1" and child["VITE_TENANT_ID"] != "demo-tenant"
+
+    def test_pp3b_c1_wrong_api(self, tmp_path, monkeypatch):
+        # Mutation: accept_wrong_api.
+        c = browser_case(tmp_path, monkeypatch)
+        c.request = replace(c.request, environment={**c.request.environment,
+            "VITE_API_BASE": c.request.web_origin})
+        browser_refused(c.launch)
+        assert c.starts == [] and not c.report.parent.exists()
+
+    def test_pp3b_c1_mock_enabled(self, tmp_path, monkeypatch):
+        # Mutation: accept_mock_enabled.
+        c = browser_case(tmp_path, monkeypatch)
+        c.request = replace(c.request, environment={**c.request.environment, "VITE_MOCK": "1"})
+        browser_refused(c.launch)
+        assert c.starts == [] and not c.report.parent.exists()
+
+    def test_pp3b_c1_foreign_tenant(self, tmp_path, monkeypatch):
+        # Mutation: accept_foreign_tenant.
+        c = browser_case(tmp_path, monkeypatch)
+        c.request = replace(c.request, environment={**c.request.environment, "VITE_TENANT_ID": "foreign"})
+        browser_refused(c.launch)
+        assert c.starts == [] and not c.report.parent.exists()
+
+    def test_pp3b_c1_missing_flag(self, tmp_path, monkeypatch):
+        # Mutations: accept_missing_cad / accept_missing_rail / accept_missing_form.
+        for flag in ("VITE_CAD_EDIT", "VITE_SOLAR_FLOW_RAIL", "VITE_SOLAR_SETTINGS_FORM"):
+            with monkeypatch.context() as patch:
+                c = browser_case(tmp_path / flag, patch)
+                env = dict(c.request.environment)
+                del env[flag]
+                c.request = replace(c.request, environment=env)
+                browser_refused(c.launch)
+                assert c.starts == [] and not c.report.parent.exists()
+
+    def test_pp3b_c1_no_extra_environment(self, tmp_path, monkeypatch):
+        # Mutations: pipeline_copies_private / child_copies_private.
+        with monkeypatch.context() as patch:
+            pipeline, b = _pp3b_c1_pipeline(tmp_path / "pipeline", patch)
+            for env in (b.request.environment, b.spec.environment):
+                assert set(env) & {"DATABASE_URL", "DSN", "ACCESS_TOKEN", "HTTPS_PROXY", "NODE_OPTIONS"} == set()
+                assert "fakedb" not in json.dumps(dict(env)) and "CANARY" not in json.dumps(dict(env))
+                assert "VITE_EXTRA" not in env
+                assert env["LEAF_E2E_TOKEN"] == "header.payload.signature"
+            assert pipeline.launches[0].environment["DATABASE_URL"] == "fakedb"
+        c = browser_case(tmp_path / "child", monkeypatch)
+        private = {key: key + "_CANARY" for key in ("DATABASE_URL", "DSN", "ACCESS_TOKEN",
+            "LEAF_HARNESS_DATABASE_URL", "LEAF_PROOF_PROJECT_JWKS_FILE", "LEAF_E2E_OTHER_TOKEN",
+            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "NODE_OPTIONS",
+            "VITE_EXTRA", "vite_extra")}
+        c.request = replace(c.request, environment={**c.request.environment, **private})
+        c.launch()
+        assert not set(private) & set(c.spec.environment)
+        assert "CANARY" not in json.dumps(dict(c.spec.environment))
+        assert {key for key in c.spec.environment if key.upper().startswith("VITE_")} == {
+            "VITE_API_BASE", "VITE_MOCK", "VITE_TENANT_ID", "VITE_CAD_EDIT",
+            "VITE_SOLAR_FLOW_RAIL", "VITE_SOLAR_SETTINGS_FORM"}
+
+    def test_pp3b_c1_shared_constant(self, tmp_path, monkeypatch):
+        # Mutations: stack_hardcodes_flag / pipeline_hardcodes_flag / child_hardcodes_flag.
+        # Perturb both a fixed value and the key set to detect copied literals at
+        # any construction site; production still admits exactly the six keys.
+        settings = {**p.MANAGED_PUBLIC_UI_SETTINGS, "VITE_CAD_EDIT": "shared-flag",
+            "VITE_PP3B_C1_SENTINEL": "shared-key"}
+        monkeypatch.setattr(p, "MANAGED_PUBLIC_UI_SETTINGS", MappingProxyType(settings))
+        c, b = _pp3b_c1_pipeline(tmp_path, monkeypatch)
+        expected = {**settings, "VITE_API_BASE": "http://127.0.0.1:8010", "VITE_TENANT_ID": "org-1"}
+        for env in (c.launches[0].environment, b.request.environment, b.spec.environment):
+            assert {key: value for key, value in env.items() if key.startswith("VITE_")} == expected
+
+    def test_argv_environment_closed(self, tmp_path, monkeypatch):
+        from dataclasses import asdict
+        c = browser_case(tmp_path, monkeypatch)
+        c.launch()
+        assert c.spec.argv == ("fake-node", str(c.cli), "test", "-c", "playwright.project.config.mjs")
+        assert c.spec.cwd == c.repo / "web" and c.spec.deadline == 123.5
+        assert c.spec.output_path is None
+        env = dict(c.spec.environment)
+        assert set(env) == {"PATH", "SYSTEMROOT", "LEAF_E2E_TOKEN", "LEAF_E2E_MANAGED",
+            "LEAF_PROOF_PROJECT_RUN_ID", "LEAF_PROJECT_REQUEST", "LEAF_PROJECT_BASE_URL",
+            "LEAF_PROJECT_OUTPUT_DIR", "LEAF_PROJECT_PROOF_OUTPUT",
+            "VITE_API_BASE", "VITE_MOCK", "VITE_TENANT_ID",
+            "VITE_CAD_EDIT", "VITE_SOLAR_FLOW_RAIL", "VITE_SOLAR_SETTINGS_FORM"}
+        assert env["LEAF_E2E_TOKEN"] == "header.payload.signature"
+        assert env["LEAF_E2E_MANAGED"] == "1" and env["LEAF_PROOF_PROJECT_RUN_ID"] == "run-test"
+        assert env["LEAF_PROJECT_BASE_URL"] == c.request.web_origin
+        assert Path(env["LEAF_PROJECT_OUTPUT_DIR"]) == c.output / "project-browser/playwright-output"
+        assert Path(env["LEAF_PROJECT_PROOF_OUTPUT"]) == c.report
+        assert json.loads(env["LEAF_PROJECT_REQUEST"]) == json.loads(json.dumps({"profile": "project",
+            "run_id": c.request.run_id, "source_binding": asdict(c.request.source_binding),
+            "public_key_thumbprint": "fakekey", "organization_id": "fakeorg", "binding_id": "fakebind",
+            "worker_id": "project:run-test", "web_origin": c.request.web_origin,
+            "app_origin": c.request.app_origin, "required_test_ids": p.REQUIRED_TEST_IDS}))
+        assert "header.payload.signature" not in repr(c.spec.argv) + repr(c.spec)
+        assert "CANARY" not in json.dumps(env)
+        for patch in ({"LEAF_E2E_MANAGED": "0"}, {"LEAF_PROOF_PROJECT_RUN_ID": "wrong-run"},
+                      {"LEAF_E2E_TOKEN": "bad-token"}):
+            c.request = replace(c.request, environment={**dict(c.request.environment), **patch})
+            browser_refused(c.launch)
+        c.request = replace(c.request, web_origin="http://localhost:8101")
+        browser_refused(c.launch)
+
+    def test_output_fresh_existing_report(self, tmp_path, monkeypatch):
+        c = browser_case(tmp_path, monkeypatch)
+        c.report.parent.mkdir()
+        browser_refused(c.launch)
+        assert c.starts == []
+        c.report.write_bytes(b"existing report")
+        browser_refused(c.launch)
+        assert c.report.read_bytes() == b"existing report" and c.starts == []
+        c.report.unlink()
+        c.report.parent.rmdir()
+        c.launch()
+        assert c.report.parent.is_dir() and (c.report.parent / "playwright-output").is_dir()
+        assert not c.report.exists()
+        browser_refused(c.launch)
+        assert len(c.starts) == 1
+        # Refuse a report inserted after the fresh directories were created.
+        with monkeypatch.context() as race_patch:
+            race = browser_case(tmp_path / "race", race_patch)
+            mkdir = Path.mkdir
+            def insert_report(path, *args, **kwargs):
+                result = mkdir(path, *args, **kwargs)
+                if path == race.report.parent / "playwright-output":
+                    race.report.write_bytes(b"racing existing report")
+                return result
+            race_patch.setattr(Path, "mkdir", insert_report)
+            browser_refused(race.launch)
+            assert race.starts == [] and race.report.read_bytes() == b"racing existing report"
+
+    def test_registered_before_child(self, tmp_path, monkeypatch):
+        runtime_class = p._RuntimeProcess
+        c = browser_case(tmp_path, monkeypatch)
+        transfers = []
+        c.scope.guardian = SimpleNamespace(own_process=transfers.append)
+        browser = c.launch()
+        assert c.spec.role == "project-browser" and browser.process is c.child
+        assert transfers == [c.child]
+        assert len(c.scope._actions) == 1
+        assert c.scope._actions[0][0] is p.ResourceKind.BROWSER_PROCESS
+        assert c.scope._actions[0][1]() is True and len(c.stops) == 1
+        # Exercise the real role allowlist with a Popen fake that acquires nothing.
+        calls = []
+        def popen(*args, **kwargs):
+            calls.append(args)
+            raise OSError("FAKE_POPEN")
+        monkeypatch.setattr(p.subprocess, "Popen", popen)
+        monkeypatch.setattr(p, "_WindowsJob", lambda: SimpleNamespace(close=lambda: None))
+        with pytest.raises(RuntimeError, match="runtime process start failed"):
+            runtime_class(c.spec).start()
+        assert len(calls) == 1
+
+    def test_poll_none_while_running(self, tmp_path, monkeypatch):
+        c = browser_case(tmp_path, monkeypatch)
+        browser = c.launch()
+        assert browser.poll() is None
+        c.write()  # Even a complete report cannot outrun its owned child.
+        assert browser.poll() is None
+
+    def test_complete_report(self, tmp_path, monkeypatch):
+        c = browser_case(tmp_path, monkeypatch)
+        browser = c.launch()
+        c.write()
+        c.exit_code = 0
+        result = browser.poll()
+        assert type(result) is p.BrowserResult and result.source_binding == c.request.source_binding
+        assert all(type(item) is p.FileProof for item in result.source_binding.files)
+        assert type(result.canonical) is p.CanonicalEvidence
+        assert type(result.outcomes) is tuple and all(type(item) is p.TestOutcome for item in result.outcomes)
+        assert p._validate_browser(result, c.request) is result
+        assert result.exit_code == 0 and result.checkpoints == dict.fromkeys(p.CHECKPOINTS, True)
+
+    def test_missing_report(self, tmp_path, monkeypatch):
+        c = browser_case(tmp_path, monkeypatch)
+        browser = c.launch()
+        c.exit_code = 0
+        browser_refused(browser.poll)
+
+    def test_malformed_report(self, tmp_path, monkeypatch):
+        c = browser_case(tmp_path, monkeypatch)
+        browser = c.launch()
+        c.exit_code = 0
+        for payload in (b"{", b"\xff", b"null", b"[]", b'{"schema":NaN}'):
+            c.report.write_bytes(payload)
+            browser_refused(browser.poll)
+
+    def test_duplicate_keys(self, tmp_path, monkeypatch):
+        c = browser_case(tmp_path, monkeypatch)
+        browser = c.launch()
+        c.exit_code = 0
+        valid = json.dumps(c.raw)
+        for payload in (valid.replace('{', '{"schema":"leaf.project-browser.v1",', 1),
+                valid.replace('"checkout_fence": 1', '"checkout_fence": 1, "checkout_fence": 1')):
+            c.report.write_text(payload, encoding="utf-8", newline="\n")
+            browser_refused(browser.poll)
+
+    def test_oversize_report(self, tmp_path, monkeypatch):
+        c = browser_case(tmp_path, monkeypatch)
+        browser = c.launch()
+        c.exit_code = 0
+        c.report.write_bytes(json.dumps(c.raw).encode() + b" " * p.BROWSER_REPORT_LIMIT)
+        browser_refused(browser.poll)
+
+    def test_unknown_fields(self, tmp_path, monkeypatch):
+        c = browser_case(tmp_path, monkeypatch)
+        browser = c.launch()
+        c.exit_code = 0
+        for obj in (c.raw, c.raw["source_binding"], c.raw["source_binding"]["files"][0],
+                    c.raw["canonical"], c.raw["outcomes"][0], c.raw["checkpoints"]):
+            obj["unknown"] = "CANARY"
+            c.write()
+            browser_refused(browser.poll)
+            del obj["unknown"]
+        c.raw["schema"] = "leaf.project-browser.v0"
+        c.write()
+        browser_refused(browser.poll)
+        c.raw["schema"] = p.BROWSER_REPORT_SCHEMA
+        for obj, key, value in ((c.raw, "exit_code", False), (c.raw["outcomes"][0], "retry", False),
+                (c.raw["canonical"], "checkout_fence", True),
+                (c.raw["source_binding"]["files"][0], "size", True)):
+            old = obj[key]
+            obj[key] = value
+            c.write()
+            browser_refused(browser.poll)
+            obj[key] = old
+
+    def test_nonzero_exit(self, tmp_path, monkeypatch):
+        c = browser_case(tmp_path, monkeypatch)
+        browser = c.launch()
+        c.write()
+        for code in (1, -1, 2, False, "0"):
+            c.exit_code = code
+            browser_refused(browser.poll, p.FailureCode.BROWSER_EXIT)
+
+    def test_stop_delegates(self, tmp_path, monkeypatch):
+        c = browser_case(tmp_path, monkeypatch)
+        browser = c.launch()
+        assert browser.stop(99.25) is True
+        c.stopped = False
+        assert browser.stop(100.5) is False
+        assert c.stops == [99.25, 100.5]
+
+    def test_production_wiring(self, tmp_path, monkeypatch):
+        c = browser_case(tmp_path, monkeypatch)
+        effects = p.production_effects()
+        assert effects.browser_runner is p._run_project_browser
+        assert effects.browser_runner is not p._browser_unavailable
+        browser = effects.browser_runner(c.request, scope=c.scope)
+        assert browser.process is c.child and len(c.starts) == 1
+        # Real production lifecycle admission refuses a scope without D's custody.
+        browser_refused(lambda: p._browser_install(fake_scope(), c.request.environment),
+            p.FailureCode.BROWSER_UNAVAILABLE)
+
+    def test_missing_playwright_install(self, tmp_path, monkeypatch):
+        c = browser_case(tmp_path, monkeypatch)
+        c.cli.unlink()
+        browser_refused(c.launch, p.FailureCode.BROWSER_UNAVAILABLE)
+        assert c.starts == [] and not c.report.parent.exists()
+        c.cli.write_text("fake install", encoding="utf-8")
+        monkeypatch.setattr(p.shutil, "which", lambda *a, **k: None)
+        browser_refused(c.launch, p.FailureCode.BROWSER_UNAVAILABLE)
+        assert c.starts == []
+
+
+def _h_a1b_docker(run_id):
+    name = "leafproof-" + run_id
+    return p.AuthorityOwnership(run_id, (name, name + "-pg", name + "-relay"),
+        (("leaf.proof-project.run", run_id), ("leaf.proof-project.owner", "proof_project_pg")),
+        ("a" * 12, "b" * 12), ("c" * 12,))
+
+
+def _h_a1b_entry(root, monkeypatch, effects, ownerships, *, disarm=True, before_main=None):
+    info = root.stat()
+    messages = [{"event": "init", "run_id": ownerships[0].run_id, "run_root": str(root),
+        "root_identity": [info.st_dev, info.st_ino], "deadline": 1.0}]
+    for owned in ownerships:
+        item = {"event": "authority", "ownership": p._owned_public(owned)}
+        if owned.kind == "native":
+            item["identity"] = {"pid": owned.pid, "start_id": owned.start_id, "started_at": owned.started_at}
+        messages.append(item)
+    if disarm:
+        messages.append({"event": "disarm"})
+    state = SimpleNamespace(output=io.StringIO(), events=[], snapshots=[], contexts=[])
+    real_main = p.guardian_main
+    def main(request, *, effects):
+        state.request = request
+        receive = request.channel.receive
+        def observed_receive(timeout):
+            event = receive(timeout)
+            state.events.append(event)
+            state.snapshots.append(request.ownership)
+            state.contexts.append(getattr(effects.host, "_native_context", None))
+            return event
+        monkeypatch.setattr(request.channel, "receive", observed_receive)
+        if before_main is not None:
+            before_main()
+        return real_main(request, effects=effects)
+    monkeypatch.delattr(effects.host, "_native_context", raising=False)
+    monkeypatch.setattr(p, "sys", SimpleNamespace(stdin=SimpleNamespace(buffer=io.BytesIO(
+        b"".join((json.dumps(item) + "\n").encode() for item in messages))), stdout=state.output))
+    monkeypatch.setattr(p, "threading", SimpleNamespace(RLock=p.threading.RLock,
+        Thread=lambda *, target, daemon: SimpleNamespace(start=target)))
+    monkeypatch.setattr(p, "production_effects", lambda: effects)
+    monkeypatch.setattr(p, "guardian_main", main)
+    state.result = p._guardian_entry()
+    return state
+
+
+def test_h_a1b_native_then_docker_refused(tmp_path, monkeypatch):
+    c = _h_c1_guardian(tmp_path, monkeypatch)
+    owned = c.request.ownership
+    stop_checks = []
+    def runner(argv, **kwargs):
+        if "stop" in argv:
+            stop_checks.append(tuple(c.checks))
+        return c.runner(argv, **kwargs)
+    monkeypatch.setattr(c.pg.subprocess, "run", runner)
+    state = _h_a1b_entry(tmp_path, monkeypatch, c.effects, [owned, _h_a1b_docker(owned.run_id)])
+    assert state.result == 1 and state.output.getvalue() == "OK\nOK\n"
+    assert state.events == ["alive", "conflict"] and state.request.ownership == owned
+    assert state.snapshots[0] is state.snapshots[1]
+    assert stop_checks and stop_checks[0].count(12345) >= 3
+    assert not c.alive and not tmp_path.exists() and c.signals == []
+    assert sum("stop" in argv for argv, kwargs in c.calls) == 1
+
+
+def test_h_a1b_docker_then_native_refused(tmp_path, monkeypatch):
+    c = lifetime_case()
+    owned = _h_a1b_docker("run-test")
+    cleaned = []
+    cleanup = c.host.cleanup_owned_authority
+    def remove(run_id, ownership):
+        cleaned.append(ownership)
+        return cleanup(run_id, ownership)
+    c.host.cleanup_owned_authority = remove
+    state = _h_a1b_entry(tmp_path, monkeypatch, c.effects, [owned, native_owned()], disarm=False)
+    assert state.result == 1 and state.output.getvalue() == "OK\nOK\n"
+    assert state.events == ["alive", "conflict"] and state.request.ownership == owned
+    assert state.contexts == [None, None] and not hasattr(c.host, "_native_context")
+    assert cleaned == [owned] and c.teardown == ["authority", "private"]
+
+
+def test_h_a1b_native_identity_change_refused(tmp_path, monkeypatch):
+    for field, value in (("pid", 54321), ("start_id", "ps:1700000001"), ("started_at", 1700000001)):
+        root = tmp_path / field
+        root.mkdir()
+        with monkeypatch.context() as patch:
+            c = _h_c1_guardian(root, patch)
+            owned = c.request.ownership
+            replacement = replace(owned, **{field: value})
+            state = _h_a1b_entry(root, patch, c.effects, [owned, replacement])
+            assert state.result == 1 and state.output.getvalue() == "OK\nOK\n"
+            assert state.events == ["alive", "conflict"] and state.request.ownership == owned
+            assert state.snapshots[0] is state.snapshots[1]
+            assert c.checks and set(c.checks) == {12345} and c.signals == []
+            assert not c.alive and not root.exists()
+            assert sum("stop" in argv for argv, kwargs in c.calls) == 1
+
+
+def test_h_a1b_native_port_change_refused(tmp_path, monkeypatch):
+    c = _h_c1_guardian(tmp_path, monkeypatch)
+    owned = c.request.ownership
+    state = _h_a1b_entry(tmp_path, monkeypatch, c.effects, [owned, replace(owned, port=55433)])
+    assert state.result == 1 and state.output.getvalue() == "OK\nOK\n"
+    assert state.events == ["alive", "conflict"] and state.request.ownership == owned
+    assert c.effects.host._native_context == (owned.run_id, tmp_path, 55432)
+    assert state.contexts[0] is state.contexts[1]
+    assert not c.alive and not tmp_path.exists()
+    assert sum("stop" in argv for argv, kwargs in c.calls) == 1
+
+
+def test_h_a1b_native_repeat_identical(tmp_path, monkeypatch):
+    c = _h_c1_guardian(tmp_path, monkeypatch)
+    owned = c.request.ownership
+    def gone():
+        c.alive = False
+        c.pg.shutil.rmtree(tmp_path)
+    state = _h_a1b_entry(tmp_path, monkeypatch, c.effects, [owned, owned], before_main=gone)
+    assert state.result == 0 and state.output.getvalue() == "OK\nOK\nOK\nOK\n"
+    assert state.events == ["alive", "alive", "disarm"]
+    assert state.snapshots[0] is state.snapshots[1] is state.snapshots[2]
+    assert state.contexts[0] is state.contexts[1] is state.contexts[2]
+    assert state.request.ownership == owned and c.checks == [12345] and c.signals == []
+    assert not any("stop" in argv for argv, kwargs in c.calls)
+
+
+def test_h_a1b_docker_progressive_unchanged(tmp_path, monkeypatch):
+    c = lifetime_case()
+    c.private = False
+    full = _h_a1b_docker("run-test")
+    partial = replace(full, containers=full.containers[:1])
+    validate = p._validate_ownership
+    validated = []
+    def validate_progressive(owned, run_id, *, allocated):
+        # Exercise the post-validation update policy with a partial Docker fake;
+        # the production allocation validator still requires the complete set.
+        if allocated and owned == partial:
+            validate(full, run_id, allocated=True)
+            validated.append(owned)
+            return owned
+        result = validate(owned, run_id, allocated=allocated)
+        if allocated:
+            validated.append(owned)
+        return result
+    monkeypatch.setattr(p, "_validate_ownership", validate_progressive)
+    state = _h_a1b_entry(tmp_path, monkeypatch, c.effects, [partial, full])
+    assert state.result == 0 and state.output.getvalue() == "OK\nOK\nOK\nOK\n"
+    assert state.events == ["alive", "alive", "disarm"] and validated == [partial, full]
+    assert state.snapshots == [partial, full, full] and state.request.ownership == full
+    assert state.contexts == [None, None, None] and c.teardown == []
+
+
+def test_contract_heartbeat_runtime_python_form():
+    request = {"purpose": "heartbeat", "worker_id": "project:run-test"}
+    spec = p.ProcessSpec("canonical-child", ("fake",), ROOT,
+        {"LEAF_PROJECT_CANONICAL_REQUEST": json.dumps(request)}, 5)
+    heartbeat = {"worker_id": request["worker_id"], "tool_name": p.WORKER_TOOL,
+        "runtime": "python-3.12.14", "source_revision": "sha256:" + HASH,
+        "source_sha256": HASH, "observed_at": datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat()}
+    assert p._child_public(spec, json.dumps(heartbeat).encode()) == heartbeat
+    for runtime in ("3.12.14", "python-3.12"):
+        assert p._child_public(spec, json.dumps(dict(heartbeat, runtime=runtime)).encode()) is None
+
+
+def r14f1_facts(c):
+    sizing = p._sizing_module()
+    return dict(classification="synthetic", run_id=c.config.run_id, organization_id=c.evidence.organization_id,
+        source_sha256=c.plan.source.tested_source_manifest_sha256, endpoint_sha256=HASH,
+        manifest_sha256=sizing.MANIFEST_SHA256, fixture_sha256=sizing.FIXTURE_SHA256)
+
+
+def r14f1_attachment(facts):
+    request_sha256, response_sha256 = r14f2_fixture_digests()
+    return {**{key: facts[key] for key in ("run_id", "organization_id", "classification",
+            "endpoint_sha256", "fixture_sha256")},
+        "project_id": "sizing-project", "job_id": "sizing-job", "exchange_job_id": "sizing-job",
+        "output_version_id": "sizing-output", "evidence_sha256": HASH,
+        "request_sha256": request_sha256, "response_sha256": response_sha256}
+
+
+def r14f1_runtime(c):
+    sizing = p._sizing_module()
+    facts = r14f1_facts(c)
+    runtime = SimpleNamespace(plan=SimpleNamespace(public=lambda: dict(facts)), calls=[], closed=False)
+    def start(environment, deadline):
+        runtime.calls.append("start")
+        assert any(kind is p.ResourceKind.REPLAY for kind, _ in c.run_scope._actions)
+        return dict(environment, **{sizing.CONFIG_KEY: str(c.config.run_root / "project-replay/private.json"),
+                                    sizing.CONFIG_HASH_KEY: HASH})
+    def close():
+        runtime.calls.append("close")
+        runtime.closed = True
+        return True
+    runtime.start, runtime.close = start, close
+    runtime.launcher_argv = lambda argv: tuple([sys.executable, "-B", "fake-replay-launcher", *argv[3:]])
+    def launch_worker(deadline):
+        runtime.calls.append("sizing-worker")
+        child = SimpleNamespace(stop=lambda deadline: runtime.calls.append("stop-sizing") or True,
+                                identity=p.ProcessIdentity("sizing-worker", 900, "start900", 50))
+        c.run_scope.acquire(p.ResourceKind.STACK_PROCESS, lambda: child.stop(deadline))
+        c.guardian.own_process(child)
+        return child
+    runtime.launch_worker = launch_worker
+    runtime.heartbeat = lambda deadline: runtime.calls.append("sizing-heartbeat")
+    runtime.loop_heartbeat = lambda deadline: runtime.heartbeat(deadline)
+    runtime.drive = lambda deadline: runtime.calls.append("drive")
+    runtime.complete = lambda: True
+    runtime.facts = r14f2_replay(c).facts
+    c.effects = replace(c.effects, replay_factory=lambda prepared, **kwargs: runtime)
+    c.canonical = replace(c.canonical, replay_facts=facts)
+    return runtime
+
+
+def test_r14f1_supervisor_replay_lifecycle():
+    c = receipt_case()
+    runtime = r14f1_runtime(c)
+    outcome = p.supervise(c.config, effects=c.effects)
+    assert outcome.exit_code == 0, outcome
+    assert runtime.calls == ["start", "sizing-worker", "sizing-heartbeat", "drive", "sizing-heartbeat",
+                             "sizing-heartbeat", "stop-sizing", "close"]
+    document = c.receipts[outcome.receipt_path]
+    assert document["replay"]["facts"] == r14f1_facts(c)
+    assert document["replay"]["sizing_required"] is True
+    assert document["worker"]["tool"] == "solar-settings"
+    assert document["worker"]["initial_heartbeat"]["worker_id"] == "project:run-test"
+    assert document["worker"]["final_heartbeat"]["worker_id"] == "project:run-test"
+    assert not any("REPLAY" in key for key in c.browser_requests[0].environment)
+
+
+def test_r14f1_cleanup_registration():
+    c = lifetime_case()
+    closed = []
+    c.scope.own_replay(SimpleNamespace(close=lambda: closed.append("replay") or True))
+    proof = c.scope.close()
+    assert proof.ok and closed == ["replay"]
+
+
+def test_r14f1_replay_cleanup_failure_blocks_receipt():
+    c = receipt_case()
+    runtime = r14f1_runtime(c)
+    runtime.close = lambda: False
+    outcome = p.supervise(c.config, effects=c.effects)
+    assert outcome.exit_code != 0 and outcome.receipt_path is None and c.receipts == {}
+    assert any(item.fixed_code is p.FailureCode.CLEANUP_PRIVATE for item in outcome.cleanup_failures)
+    assert "disarm" not in c.events
+
+
+def test_r14f1_partial_replay_start_is_owned():
+    c = receipt_case()
+    runtime = r14f1_runtime(c)
+    def start(environment, deadline):
+        runtime.calls.append("partial-private-file")
+        raise RuntimeError("private fixture credential")
+    runtime.start = start
+    outcome = p.supervise(c.config, effects=c.effects)
+    assert outcome.exit_code != 0 and runtime.closed
+    assert runtime.calls == ["partial-private-file", "close"]
+    assert "private fixture credential" not in repr(outcome) + json.dumps(list(c.receipts.values()))
+
+
+def test_r14f1_parent_loss_reaps_replay_and_replacements():
+    c = lifetime_case()
+    stopped = []
+    processes = [SimpleNamespace(stop=lambda deadline, role=role: stopped.append(role) or True)
+                 for role in ("sizing-replay", "sizing-worker", "sizing-replacement")]
+    def receive(timeout):
+        raise EOFError
+    channel = SimpleNamespace(receive=receive, acknowledge=lambda: pytest.fail("parent loss acknowledged"))
+    request = p.GuardianRequest(c.config.run_id, c.plan.reservation,
+        c.host.authority_inventory(c.config.run_id), channel, processes, deadline=1)
+    assert p.guardian_main(request, effects=c.effects) == 0
+    assert set(stopped) == {"sizing-replay", "sizing-worker", "sizing-replacement"}
+    assert not c.private and c.teardown[-1] == "private"
+
+
+def test_r14f1_receipt_legacy_and_exact_replay():
+    c = successful_receipt()
+    assert c.document["replay"]["sizing_required"] is True
+    document = clone_document(c.document)
+    document["replay"] = dict(facts=r14f1_facts(c), sizing_required=False,
+                               sizing_evidence=None, canonical_sizing_sha256=None)
+    assert not verify_document(c, document).ok
+    document = clone_document(c.document)
+    for field in document["replay"]:
+        corrupt = clone_document(document)
+        del corrupt["replay"][field]
+        assert not verify_document(c, corrupt).ok
+    for field in document["replay"]["facts"]:
+        corrupt = clone_document(document)
+        corrupt["replay"]["facts"][field] = "contradictory"
+        assert not verify_document(c, corrupt).ok
+
+
+def test_r14f1_required_sizing_evidence():
+    c = successful_receipt()
+    document = clone_document(c.document)
+    facts = r14f1_facts(c)
+    evidence = r14f2_evidence(c)
+    document["replay"] = dict(facts=facts, sizing_required=True, sizing_evidence=evidence,
+                               canonical_sizing_sha256=p._sizing_attachment_hash(evidence))
+    assert verify_document(c, document).ok
+    execution = execute(execution_case())
+    bad_evidence = r14f1_attachment(facts)
+    for broken in (replace(execution, sizing_evidence=bad_evidence),
+                   replace(execution, sizing_evidence=bad_evidence,
+                           canonical=replace(execution.canonical, sizing_evidence=bad_evidence)),
+                   replace(execution, replay_facts=dict(facts, endpoint_sha256=OTHER_HASH))):
+        with pytest.raises(p.ProofRefused):
+            p._receipt_document(c.plan, None, c.prepared, broken, c.run_scope._closed, None)
+    corrupt = clone_document(document)
+    corrupt["replay"]["sizing_evidence"] = None
+    assert not verify_document(c, corrupt).ok
+    for key, value in (("classification", "live"), ("output_version_id", "substituted"),
+                       ("exchange_job_id", "foreign-job")):
+        corrupt = clone_document(document)
+        corrupt["replay"]["sizing_evidence"]["capture-recovery"][key] = value
+        assert not verify_document(c, corrupt).ok
+
+
+def test_r14f1_incomplete_browser_cannot_claim_sizing():
+    c = successful_receipt()
+    for field in ("selected_test_ids", "started_test_ids", "completed_test_ids"):
+        bad = clone_document(c.document)
+        bad["playwright"][field].pop()
+        assert not verify_document(c, bad).ok
+    for key, value in (("status", "skipped"), ("retry", 1)):
+        bad = clone_document(c.document)
+        bad["playwright"]["outcomes"][0][key] = value
+        assert not verify_document(c, bad).ok
+    bad = clone_document(c.document)
+    bad["playwright"]["annotation_types"] = ["skip"]
+    assert not verify_document(c, bad).ok
+
+
+def test_r14f1_canonical_replay_independent(monkeypatch):
+    c = canonical_case()
+    sizing = p._sizing_module()
+    facts = dict(classification="synthetic", run_id="run-test", organization_id=c.evidence.organization_id,
+        source_sha256=HASH, endpoint_sha256=OTHER_HASH, manifest_sha256=sizing.MANIFEST_SHA256,
+        fixture_sha256=sizing.FIXTURE_SHA256)
+    replay = SimpleNamespace(organization_id=c.evidence.organization_id,
+        endpoint="http://127.0.0.1:12345/string-length", public=lambda: facts)
+    reads = []
+    monkeypatch.setattr(sizing, "read_private_plan", lambda env: reads.append(env["DATABASE_URL"]) or replay)
+    c.graph.cloud = SimpleNamespace(SIZING_URL=replay.endpoint, SIZING_CLASSIFICATION="synthetic")
+    c.graph.SYNTHETIC_SIZING_PROOF_ACCEPTED = True
+    c.request = replace(c.request, environment={"DATABASE_URL": "fakedb", sizing.CONFIG_KEY: "private"})
+    result = p._canonical_database_proof(c.request, graph=c.graph, connection=c.connection)
+    assert result.replay_facts == facts and reads == ["fakedb"] and c.connections == 2
+    c.graph.cloud.SIZING_CLASSIFICATION = "live"
+    with pytest.raises(p.ProofRefused):
+        p._canonical_database_proof(c.request, graph=c.graph, connection=c.connection)
+    # The parent refuses a child that drops a requested sizing attachment.
+    attachment = r14f1_attachment(facts)
+    raw = dict(stored_settings_sha256=HASH, reopened_settings_sha256=HASH,
+               replay_facts=facts, sizing_evidence=None)
+    monkeypatch.setattr(p, "_RuntimeProcess", lambda spec: SimpleNamespace(
+        start=lambda: None, poll=lambda: 0, stop=lambda deadline: True))
+    monkeypatch.setattr(p._Host, "read_child_result", staticmethod(lambda path: raw))
+    request = replace(c.request, sizing_attachment=attachment, deadline=p.time.monotonic() + 10,
+        environment=dict(c.request.environment, LEAF_STORE_DIR=str(ROOT / "drawings")))
+    with pytest.raises(p.ProofRefused):
+        p._canonical_execution(request)
+    raw["sizing_evidence"] = attachment
+    assert p._canonical_execution(request).sizing_evidence == attachment
+
+
+def test_r14f1_canonical_child_bootstrap(monkeypatch, capsys):
+    from contextlib import contextmanager
+    sizing, called = p._sizing_module(), []
+    replay = object()
+    monkeypatch.setattr(sizing, "read_private_plan", lambda env: called.append("pins") or replay)
+    def bootstrap(plan, role, environment):
+        assert plan is replay and role == "canonical"
+        called.append("bootstrap")
+        return environment
+    monkeypatch.setattr(sizing, "bootstrap_child", bootstrap)
+    @contextmanager
+    def connection(environment, deadline):
+        assert called == ["pins", "bootstrap"] and environment["DATABASE_URL"] == "fakedb"
+        yield SimpleNamespace(execute=lambda sql, args: SimpleNamespace(fetchone=lambda: None))
+    monkeypatch.setattr(p, "_project_connection", connection)
+    request = dict(purpose="heartbeat", tool_name="solar-size-strings", evidence=None,
+                   deadline=10, worker_id="project:run-test:sizing:1")
+    monkeypatch.setattr(p.os, "environ", {"DATABASE_URL": "fakedb", sizing.CONFIG_KEY: "private",
+        "LEAF_PROJECT_CANONICAL_REQUEST": json.dumps(request)})
+    assert p._canonical_child_entry() == 0
+    assert capsys.readouterr().out == "null\n"
+
+
+def test_r14f1_sizing_worker_identity_and_descriptor():
+    c = execution_case()
+    sizing = p._sizing_module()
+    runtime = sizing.ReplayRuntime(c.prepared, c.effects, c.scope, p)
+    runtime.worker_identity = p.ProcessIdentity("sizing-worker", 900, "start900", 50)
+    runtime.worker = SimpleNamespace(identity=runtime.worker_identity, poll=lambda: None)
+    runtime.worker_id = "project:run-test:sizing:1"
+    runtime.environment = {"DATABASE_URL": "fakedb"}
+    runtime.descriptor = replace(c.descriptor, tool="solar-size-strings")
+    beat = replace(c.heartbeat, worker_id=runtime.worker_id, tool_name="solar-size-strings")
+    runtime.effects = replace(c.effects, canonical_reader=lambda request: beat)
+    assert runtime.heartbeat(10) == beat
+    for changed in (replace(beat, worker_id="foreign"), replace(beat, tool_name="solar-settings"),
+                    replace(beat, source_sha256=HASH)):
+        runtime.effects = replace(c.effects, canonical_reader=lambda request: changed)
+        with pytest.raises(sizing.ReplayRefused):
+            runtime.heartbeat(10)
+    runtime.effects = replace(c.effects, canonical_reader=lambda request: beat)
+    runtime.worker.identity = replace(runtime.worker_identity, start_id="reused-pid")
+    with pytest.raises(sizing.ReplayRefused):
+        runtime.heartbeat(10)
+
+
+def test_r14f1_replay_processes_use_guardian(monkeypatch):
+    c = lifetime_case()
+    owned = []
+    c.scope.guardian = SimpleNamespace(own_process=lambda child: owned.append(child))
+    starts = []
+    child = SimpleNamespace(start=lambda: starts.append("start"), stop=lambda deadline: True)
+    monkeypatch.setattr(p, "_RuntimeProcess", lambda spec: child)
+    for role in ("sizing-replay", "sizing-worker"):
+        assert p._launch_supervised(p.ProcessSpec(role, ("fake",), ROOT, {}, 5), scope=c.scope) is child
+    assert owned == [child, child] and starts == ["start", "start"]
+    assert len(c.scope._actions) == 2 and c.scope.close().ok
+
+
+def test_r14f1_replay_roles_launchable(monkeypatch):
+    class SpawnSentinel(RuntimeError):
+        pass
+    sentinel = SpawnSentinel()
+    calls = []
+    def popen(*args, **kwargs):
+        calls.append(args[0])
+        raise sentinel
+    monkeypatch.setattr(p.subprocess, "Popen", popen)
+    monkeypatch.setattr(p, "_WindowsJob", lambda: SimpleNamespace(close=lambda: None))
+    for role in ("sizing-replay", "sizing-worker"):
+        with pytest.raises(RuntimeError, match="^runtime process start failed$") as error:
+            p._RuntimeProcess(p.ProcessSpec(role, ("fake",), p.REPO, {}, 10)).start()
+        assert error.value.__context__ is sentinel
+    assert calls == [("fake",), ("fake",)]
+    with pytest.raises(RuntimeError, match="^unknown process role$"):
+        p._RuntimeProcess(p.ProcessSpec("not-a-role", ("fake",), p.REPO, {}, 10)).start()
+    assert len(calls) == 2
+
+
+def test_r14f1_private_replay_split_logs():
+    values = ("ephemeral-local-fixture-credential", "postgresql://local:secret@127.0.0.1/leaf")
+    for value in values:
+        raw = json.dumps({"stage": "browser", "fixed_code": "BROWSER_EXIT", "private": value}).encode()
+        for split in range(1, len(value)):
+            boundary = raw.index(value.encode()) + split
+            output = p._RetainedOutput(p._approved_event)
+            output.feed(raw[:boundary])
+            output.feed(raw[boundary:])
+            assert output.finish() == b"" and not output._raw
+    private = p._PrivateValues()
+    private.add(values[0])
+    private.dsn(values[1])
+    with pytest.raises(p.ProofRefused):
+        private.check({"fixture": values[0]})
+
+
+def test_r14f1_production_replay_wired():
+    assert p.production_effects().replay_factory is p._project_replay_factory
+
+
+def r14f2_request(c):
+    return p.BrowserRequest(c.config.run_id, c.plan.source, "fakekey", "fakeorg", "fakebind", "project:run-test",
+        "http://127.0.0.1:8101", "http://127.0.0.1:8102", p.REQUIRED_TEST_IDS, {}, ROOT, 900)
+
+
+def test_r14f2_seven_ids_and_explicit_checkpoints():
+    assert p.REQUIRED_TEST_IDS == ("project_browser_create_import", "project_browser_bearer_required", "project_settings_worker_readback",
+        "project_sizing_recovery_reopen", "project_sizing_read_custody", "project_sizing_submission_unknown", "project_sizing_service_unknown")
+    assert len(p.CHECKPOINTS) == len(set(p.CHECKPOINTS)) == 31
+    c = execution_case()
+    assert p._validate_browser(c.result, r14f2_request(c)) is c.result
+    for name in p.REQUIRED_TEST_IDS[3:]:
+        outcomes = tuple(replace(row, status="skipped") if row.test_id == name else row for row in c.result.outcomes)
+        browser_refused(lambda: p._validate_browser(replace(c.result, outcomes=outcomes), r14f2_request(c)))
+    browser_refused(lambda: p._validate_browser(replace(c.result, completed_test_ids=p.REQUIRED_TEST_IDS[:-1]), r14f2_request(c)))
+
+
+def test_r14f2_browser_sizing_is_read_only():
+    c = execution_case()
+    with pytest.raises(TypeError): c.result.sizing["capture-recovery"] = {}
+    with pytest.raises(TypeError): c.result.sizing["capture-recovery"]["job_id"] = "foreign"
+    raw = r14f2_browser_records()
+    result = replace(c.result, sizing=raw)
+    raw["capture-recovery"]["job_id"] = "changed"
+    assert result.sizing["capture-recovery"]["job_id"] == "sizing-1"
+
+
+def test_r14f2_browser_record_exact_keys_and_types():
+    c = execution_case()
+    for scenario, record in r14f2_browser_records().items():
+        for changed in (dict(record, extra=True), {key: value for key, value in record.items() if key != "project_id"},
+                        dict(record, organization_id="foreign"), dict(record, project_id="../foreign"), dict(record, scenario="foreign")):
+            sizing = r14f2_browser_records()
+            sizing[scenario] = changed
+            browser_refused(lambda: p._validate_browser(replace(c.result, sizing=sizing), r14f2_request(c)))
+
+
+def test_r14f2_browser_record_fixed_values():
+    c = execution_case()
+    mutations = {
+        "capture-recovery": {"exchange_job_id": "foreign-job", "evidence_sha256": "A" * 64, "panels_in_sequence": True, "output_version_id": "panels-1"},
+        "read-custody": {"tool": "foreign", "frame_count": 0, "request_sha256": "short", "output_sha256": "bad"},
+        "browser-response-discard": {"submissions": True, "same_submission": 1},
+        "service-response-drop": {"status": "complete", "reason_code": "other", "retryable": 0},
+    }
+    for scenario, changes in mutations.items():
+        for key, value in changes.items():
+            sizing = r14f2_browser_records()
+            sizing[scenario][key] = value
+            browser_refused(lambda: p._validate_browser(replace(c.result, sizing=sizing), r14f2_request(c)))
+
+
+def test_r14f2_browser_cross_record_binding():
+    c = execution_case()
+    for scenario, key, value in (("read-custody", "project_id", "foreign"), ("read-custody", "drawing_id", "foreign"),
+        ("read-custody", "source_version_id", "foreign"), ("service-response-drop", "job_id", "sizing-1"),
+        ("service-response-drop", "project_id", "recovery-project")):
+        sizing = r14f2_browser_records()
+        sizing[scenario][key] = value
+        browser_refused(lambda: p._validate_browser(replace(c.result, sizing=sizing), r14f2_request(c)))
+    for scenario in r14f2_browser_records():
+        sizing = r14f2_browser_records()
+        del sizing[scenario]
+        browser_refused(lambda: p._validate_browser(replace(c.result, sizing=sizing), r14f2_request(c)))
+
+
+def test_r14f2_report_reader_requires_sizing(tmp_path, monkeypatch):
+    c = browser_case(tmp_path, monkeypatch)
+    c.launch()
+    c.write()
+    assert set(p._read_browser_report(c.report, c.request).sizing) == set(r14f2_browser_records())
+    for bad in ({}, {"extra": {}}, None, []):
+        c.raw["sizing"] = bad
+        c.write()
+        browser_refused(lambda: p._read_browser_report(c.report, c.request))
+    del c.raw["sizing"]
+    c.write()
+    browser_refused(lambda: p._read_browser_report(c.report, c.request))
+
+
+@pytest.mark.parametrize("scenario", ("capture-recovery", "read-custody", "browser-response-discard", "service-response-drop"))
+@pytest.mark.parametrize("repeated", (False, True))
+def test_r14f2_report_reader_refuses_pair_array_records(tmp_path, monkeypatch, scenario, repeated):
+    c = browser_case(tmp_path, monkeypatch)
+    c.launch()
+    c.write()
+    assert p._read_browser_report(c.report, c.request).sizing[scenario]
+    pairs = list(c.raw["sizing"][scenario].items())
+    if repeated:
+        pairs.insert(0, ("organization_id", "foreign"))
+    c.raw["sizing"][scenario] = pairs
+    c.write()
+    browser_refused(lambda: p._read_browser_report(c.report, c.request))
+
+
+def test_r14f2_report_reader_refuses_cross_record_substitution(tmp_path, monkeypatch):
+    c = browser_case(tmp_path, monkeypatch)
+    c.launch()
+    c.raw["sizing"]["read-custody"]["source_version_id"] = "foreign-output"
+    c.write()
+    browser_refused(lambda: p._read_browser_report(c.report, c.request))
+
+
+def test_r14f2_pipeline_requires_replay_before_launch():
+    c = execution_case()
+    c.effects = replace(c.effects, replay_factory=None)
+    execution_refused(c, p.FailureCode.LAUNCH)
+    assert c.launches == [] and c.browser_requests == []
+
+
+def test_r14f2_pipeline_drives_and_requires_complete_schedule():
+    c = execution_case()
+    runtime = r14f2_replay(c)
+    calls = []
+    runtime.drive = lambda deadline: calls.append("drive")
+    runtime.heartbeat = lambda deadline: calls.append("heartbeat")
+    runtime.complete = lambda: calls.append("complete") or True
+    c.effects = replace(c.effects, replay_factory=lambda *args, **kwargs: runtime)
+    execute(c)
+    assert calls == ["heartbeat", "drive", "heartbeat", "complete", "heartbeat"]
+    runtime.complete = lambda: False
+    execution_refused(c, p.FailureCode.CANONICAL)
+
+
+def test_r14f2_budgets_and_independent_verification_deadline():
+    assert p.BROWSER_TIMEOUT_S == 840.0 and p.VERIFICATION_TIMEOUT_S == 300.0
+    c = execution_case()
+    runner, reader = c.effects.browser_runner, c.effects.canonical_reader
+    def browser(request, *, scope):
+        c.effects.clock.now += 800
+        return runner(request, scope=scope)
+    def canonical(request):
+        if request.purpose == "execution": c.effects.clock.now += 200
+        return reader(request)
+    c.effects = replace(c.effects, browser_runner=browser, canonical_reader=canonical)
+    execute(c)
+    assert c.canonical_requests[0].deadline == 1101.0 and c.effects.clock.now == 1001.0
+    assert c.mints[-1][1]["lifetime_s"] == 900
+    source = Path(p.__file__).read_text(encoding="utf-8")
+    assert "STACK_TIMEOUT_S + BROWSER_TIMEOUT_S + VERIFICATION_TIMEOUT_S + 5" in source
+
+
+def r14f2_observation():
+    sizing = p._sizing_module()
+    value = dict.fromkeys(sizing.OBSERVATION_FIELDS)
+    value.update(job_id="job-one", organization_id="fakeorg", project_id="project-one", project_name="PP3B run-test sizing recovery",
+        tool=sizing.TOOL, status="running", attempt=1, jobs_in_project=1, version_count=3, versions_before_job=3,
+        classification="synthetic", exchange_state="send_started", sender_worker="project:run-test:sizing:1", sender_attempt=1)
+    return value
+
+
+def test_r14f2_canonical_observation_closed_projection():
+    sizing = p._sizing_module()
+    value = r14f2_observation()
+    assert sizing.validate_observation(value) == value
+    for changed in (dict(value, extra=True), dict(value, attempt=True), dict(value, tool="foreign"), dict(value, classification="live"),
+                    dict(value, project_name="x" * 257), dict(value, sender_worker="../foreign")):
+        with pytest.raises(sizing.ReplayRefused): sizing.validate_observation(changed)
+
+
+def test_r14f2_canonical_purposes_and_query_shapes_refused(monkeypatch):
+    c = canonical_case()
+    for purpose, attachment in (("foreign", {}), ("replay-observe", {"query": "foreign"}), ("replay-observe", {"job_id": "../foreign"}),
+                                ("custody", {})):
+        request = p.CanonicalRequest(purpose, environment={"DATABASE_URL": "fakedb"}, evidence=c.evidence, sizing_attachment=attachment)
+        with pytest.raises(p.ProofRefused): p._canonical_execution(request)
+
+
+def test_r14f2_canonical_observation_child_response_shape(monkeypatch):
+    value = r14f2_observation()
+    monkeypatch.setattr(p.time, "monotonic", lambda: 1.0)
+    monkeypatch.setattr(p, "_RuntimeProcess", lambda spec: SimpleNamespace(start=lambda: None, poll=lambda: 0, stop=lambda deadline: True))
+    monkeypatch.setattr(p._Host, "read_child_result", staticmethod(lambda path: value))
+    request = p.CanonicalRequest("replay-observe", environment={"DATABASE_URL": "fakedb", "LEAF_STORE_DIR": str(ROOT / "drawings"),
+        p._sizing_module().CONFIG_KEY: "private"}, deadline=10, sizing_attachment={"job_id": "job-one"})
+    assert p._canonical_execution(request) == value
+    value["job_id"] = "foreign-job"
+    with pytest.raises(p.ProofRefused): p._canonical_execution(request)
+
+
+def test_r14f2_canonical_custody_child_response_binding(monkeypatch):
+    c = execution_case()
+    value = dict(c.canonical.sizing_evidence["read-custody"])
+    monkeypatch.setattr(p.time, "monotonic", lambda: 1.0)
+    monkeypatch.setattr(p, "_RuntimeProcess", lambda spec: SimpleNamespace(start=lambda: None, poll=lambda: 0, stop=lambda deadline: True))
+    monkeypatch.setattr(p._Host, "read_child_result", staticmethod(lambda path: value))
+    request = p.CanonicalRequest("custody", environment={"DATABASE_URL": "fakedb", "LEAF_STORE_DIR": str(ROOT / "drawings"),
+        p._sizing_module().CONFIG_KEY: "private"}, evidence=c.evidence, deadline=10,
+        sizing_attachment={"browser": r14f2_browser_records(), "driver": r14f2_replay(c).facts})
+    assert p._canonical_execution(request) == value
+    value["groups_job_id"] = "foreign-job"
+    with pytest.raises(p.ProofRefused): p._canonical_execution(request)
+
+
+def test_r14f2_canonical_execution_child_response_binding(monkeypatch):
+    c = execution_case()
+    raw = dict(stored_settings_sha256=OTHER_HASH, reopened_settings_sha256=OTHER_HASH, replay_facts=r14f1_facts(c),
+        sizing_evidence={key: dict(c.canonical.sizing_evidence[key]) for key in p._sizing_module().SCENARIOS})
+    monkeypatch.setattr(p._sizing_module(), "read_private_plan", lambda environment: SimpleNamespace(public=lambda: r14f1_facts(c)))
+    monkeypatch.setattr(p.time, "monotonic", lambda: 1.0)
+    monkeypatch.setattr(p, "_RuntimeProcess", lambda spec: SimpleNamespace(start=lambda: None, poll=lambda: 0, stop=lambda deadline: True))
+    monkeypatch.setattr(p._Host, "read_child_result", staticmethod(lambda path: raw))
+    request = p.CanonicalRequest("execution", environment={"DATABASE_URL": "fakedb", "LEAF_STORE_DIR": str(ROOT / "drawings"),
+        p._sizing_module().CONFIG_KEY: "private"}, evidence=c.evidence, deadline=10,
+        sizing_attachment={"browser": r14f2_browser_records(), "driver": r14f2_replay(c).facts})
+    assert p._canonical_execution(request).sizing_evidence == raw["sizing_evidence"]
+    raw["sizing_evidence"]["capture-recovery"]["job_id"] = "foreign-job"
+    with pytest.raises(p._sizing_module().ReplayRefused): p._canonical_execution(request)
+
+
+def test_r14f2d_empty_heartbeat_result_reads_as_not_yet(monkeypatch):
+    stops = []
+    monkeypatch.setattr(p.time, "monotonic", lambda: 1.0)
+    monkeypatch.setattr(p, "_RuntimeProcess", lambda spec: SimpleNamespace(
+        start=lambda: None, poll=lambda: 0, stop=lambda deadline: stops.append(deadline) or True))
+    monkeypatch.setattr(p, "_path_safe", lambda path: True)
+    monkeypatch.setattr(Path, "is_file", lambda path: True)
+    monkeypatch.setattr(Path, "open", lambda *args, **kwargs: io.BytesIO(b""))
+    monkeypatch.setattr(Path, "unlink", lambda *args, **kwargs: None)
+    request = p.CanonicalRequest("heartbeat", environment={"DATABASE_URL": "fakedb",
+        "LEAF_STORE_DIR": str(ROOT / "drawings")}, deadline=10, worker_id="project:run-test:sizing:2")
+    assert p._canonical_execution(request) is None
+    assert stops == [10]
+
+
+def test_r14f2d_empty_result_still_refuses_other_purposes(monkeypatch):
+    reads = []
+    open_file = Path.open
+    def empty_result(path):
+        reads.append(path.name)
+        return json.loads(b"")
+    monkeypatch.setattr(p.time, "monotonic", lambda: 1.0)
+    monkeypatch.setattr(p, "_RuntimeProcess", lambda spec: SimpleNamespace(
+        start=lambda: None, poll=lambda: 0, stop=lambda deadline: True))
+    monkeypatch.setattr(p._Host, "read_child_result", staticmethod(empty_result))
+    monkeypatch.setattr(p, "_path_safe", lambda path: True)
+    monkeypatch.setattr(Path, "is_file", lambda path: True)
+    monkeypatch.setattr(Path, "open", lambda path, *args, **kwargs: io.BytesIO(b"")
+        if path.name.endswith("-readback.json") else open_file(path, *args, **kwargs))
+    monkeypatch.setattr(Path, "unlink", lambda *args, **kwargs: None)
+    for purpose in ("execution", "replay-observe"):
+        c = execution_case()
+        def canonical(request):
+            attachment = {"query": "send_started"} if purpose == "replay-observe" else request.sizing_attachment
+            return p._canonical_execution(replace(request, purpose=purpose, sizing_attachment=attachment))
+        c.effects = replace(c.effects, canonical_reader=canonical)
+        with pytest.raises(p.ProofRefused) as error:
+            execute(c)
+        assert error.value.failure.fixed_code == p.FailureCode.CANONICAL
+        assert error.value.failure.stage == p.Stage.VERIFICATION
+        assert reads[-1] == purpose + "-readback.json"
+
+
+def test_r14f2d_replacement_poll_survives_a_not_yet_beat():
+    c = execution_case()
+    sizing = p._sizing_module()
+    runtime = sizing.ReplayRuntime(c.prepared, c.effects, c.scope, p)
+    runtime.worker_identity = p.ProcessIdentity("sizing-worker", 901, "start901", 50)
+    runtime.worker = SimpleNamespace(identity=runtime.worker_identity, poll=lambda: None)
+    runtime.worker_id = "project:run-test:sizing:2"
+    runtime.environment = {"DATABASE_URL": "fakedb"}
+    runtime.descriptor = replace(c.descriptor, tool="solar-size-strings")
+    beat = replace(c.heartbeat, worker_id=runtime.worker_id, tool_name="solar-size-strings")
+    pending, requests = iter((None, beat)), []
+    def canonical(request):
+        requests.append(request)
+        return next(pending)
+    runtime.effects = replace(c.effects, canonical_reader=canonical)
+    start = c.effects.clock.monotonic()
+    assert runtime.heartbeat(10, ready_s=5.0) == beat
+    assert c.effects.clock.monotonic() == start + 2.0
+    assert len(requests) == 2
+    assert all(request.purpose == "heartbeat" and request.worker_id == runtime.worker_id
+               and request.deadline == min(10, start + 5.0) for request in requests)
+    runtime.effects = replace(c.effects, canonical_reader=lambda request: replace(beat, worker_id="foreign"))
+    with pytest.raises(sizing.ReplayRefused):
+        runtime.heartbeat(10, ready_s=5.0)
+
+
+def test_r14f2_receipt_requires_sizing_and_all_scenarios():
+    c = successful_receipt()
+    assert c.document["replay"]["sizing_required"] is True
+    for key in p._sizing_module().BROWSER_SCENARIOS:
+        corrupt = clone_document(c.document)
+        del corrupt["replay"]["sizing_evidence"][key]
+        corrupt["replay"]["canonical_sizing_sha256"] = p._sizing_attachment_hash(corrupt["replay"]["sizing_evidence"])
+        assert not verify_document(c, corrupt).ok
+    corrupt = clone_document(c.document)
+    del corrupt["replay"]
+    assert not verify_document(c, corrupt).ok
+
+
+@pytest.mark.parametrize("scenario", ("capture-recovery", "browser-response-discard"))
+@pytest.mark.parametrize("field", ("request_sha256", "response_sha256"))
+def test_r14f2_receipt_requires_pinned_fixture_digests(scenario, field):
+    c = successful_receipt()
+    corrupt = clone_document(c.document)
+    row = corrupt["replay"]["sizing_evidence"][scenario]
+    assert row[field] != "0" * 64
+    row[field] = "0" * 64
+    corrupt["replay"]["canonical_sizing_sha256"] = p._sizing_attachment_hash(corrupt["replay"]["sizing_evidence"])
+    assert not verify_document(c, corrupt).ok
+
+
+def test_r14f2_receipt_every_fixed_sizing_value():
+    c = successful_receipt()
+    mutations = {
+        "capture-recovery": {"classification": "live", "panels_in_sequence": 26, "job_attempt": 1, "sender_worker_id": "project:run-test:sizing:2",
+            "published_worker_id": "project:run-test:sizing:1", "service_posts": 2},
+        "read-custody": {"control_read_passed": False, "inventories_unchanged": False, "frame_count": 0, "refusals": {}},
+        "browser-response-discard": {"submissions": 1, "same_submission": False, "jobs_in_project": 2, "service_posts": 3, "panels_in_sequence": 26},
+        "service-response-drop": {"status": "succeeded", "reason_code": "OTHER", "retryable": True, "exchange_state": "published",
+            "sender_worker_id": "foreign", "reclaim_worker_id": "foreign", "job_attempt": 1, "output_version_id": "foreign",
+            "service_posts": 4, "service_posts_final": 4},
+    }
+    for scenario, changes in mutations.items():
+        for key, value in changes.items():
+            corrupt = clone_document(c.document)
+            corrupt["replay"]["sizing_evidence"][scenario][key] = value
+            corrupt["replay"]["canonical_sizing_sha256"] = p._sizing_attachment_hash(corrupt["replay"]["sizing_evidence"])
+            assert not verify_document(c, corrupt).ok, (scenario, key)
+
+
+def test_r14f2_receipt_cross_record_binding_and_digest():
+    c = successful_receipt()
+    for scenario, key, value in (("read-custody", "source_version_id", "foreign"), ("read-custody", "project_id", "foreign"),
+        ("service-response-drop", "job_id", "sizing-1"), ("service-response-drop", "project_id", "recovery-project")):
+        corrupt = clone_document(c.document)
+        corrupt["replay"]["sizing_evidence"][scenario][key] = value
+        corrupt["replay"]["canonical_sizing_sha256"] = p._sizing_attachment_hash(corrupt["replay"]["sizing_evidence"])
+        assert not verify_document(c, corrupt).ok
+    corrupt = clone_document(c.document)
+    corrupt["replay"]["canonical_sizing_sha256"] = "0" * 64
+    assert not verify_document(c, corrupt).ok
+
+
+def test_r14f2_execution_facts_must_equal_canonical_facts():
+    c = execution_case()
+    execution = execute(c)
+    evidence = clone_document(execution.sizing_evidence)
+    evidence["capture-recovery"]["service_posts"] = 2
+    with pytest.raises(p.ProofRefused):
+        p._receipt_document(c.plan, None, c.prepared, replace(execution, sizing_evidence=evidence),
+                            p.CleanupProof(True, True, True, True, True, True, (), 0.0, ()), None)
+
+
+def test_r14f2_sizing_validation_mutation_marker_remains_single():
+    source = Path(p.__file__).read_text(encoding="utf-8")
+    assert source.count("# IGNORE_SIZING_EVIDENCE") == 1
+    assert "_validate_replay_sizing(replay)  # IGNORE_SIZING_EVIDENCE" in source
+    c = successful_receipt()
+    corrupt = clone_document(c.document)
+    corrupt["replay"]["sizing_evidence"]["service-response-drop"]["retryable"] = True
+    corrupt["replay"]["canonical_sizing_sha256"] = p._sizing_attachment_hash(corrupt["replay"]["sizing_evidence"])
+    assert not verify_document(c, corrupt).ok
+
+
+def test_r14f2_canonical_binding_rejects_substituted_job_and_driver_facts():
+    c = execution_case()
+    sizing = p._sizing_module()
+    records = {key: dict(c.canonical.sizing_evidence[key]) for key in sizing.SCENARIOS}
+    attachment = {"browser": r14f2_browser_records(), "driver": r14f2_replay(c).facts}
+    sizing.validate_execution_binding(records, attachment, "fakeorg")
+    for scenario, key, value in (("capture-recovery", "job_id", "foreign"), ("browser-response-discard", "submissions", 1),
+                                 ("service-response-drop", "service_posts_final", 4)):
+        corrupt = clone_document(records)
+        corrupt[scenario][key] = value
+        with pytest.raises(sizing.ReplayRefused): sizing.validate_execution_binding(corrupt, attachment, "fakeorg")
+
+
+def r14f2_child_projection(monkeypatch, purpose):
+    from dataclasses import asdict
+    c = execution_case()
+    sizing = p._sizing_module()
+    monkeypatch.setattr(sizing, "read_private_plan", lambda environment: SimpleNamespace(public=lambda: r14f1_facts(c)))
+    attachment = {"browser": r14f2_browser_records(), "driver": r14f2_replay(c).facts}
+    if purpose == "replay-observe":
+        attachment = {"job_id": "job-one"}
+        value = r14f2_observation()
+    elif purpose == "custody":
+        value = clone_document(c.canonical.sizing_evidence["read-custody"])
+    else:
+        value = dict(stored_settings_sha256=OTHER_HASH, reopened_settings_sha256=OTHER_HASH,
+            replay_facts=r14f1_facts(c), sizing_evidence={key: dict(c.canonical.sizing_evidence[key]) for key in sizing.SCENARIOS})
+    request = dict(purpose=purpose, tool_name=sizing.TOOL, evidence=asdict(c.evidence), deadline=10,
+                   worker_id="project:run-test", sizing_attachment=attachment)
+    spec = p.ProcessSpec("canonical-child", ("fake",), ROOT, {"DATABASE_URL": "fakedb", sizing.CONFIG_KEY: "private",
+        "LEAF_PROJECT_CANONICAL_REQUEST": json.dumps(request)}, 10)
+    return spec, value
+
+
+def r14f2_project_child(spec, value):
+    output = p._RetainedOutput(lambda raw: p._child_public(spec, raw))
+    output.feed(json.dumps(value).encode())
+    return output.finish()
+
+
+def test_r14f2_child_public_replay_observation_shared_validator(monkeypatch):
+    spec, value = r14f2_child_projection(monkeypatch, "replay-observe")
+    assert json.loads(r14f2_project_child(spec, value)) == value
+    for changed in (dict(value, extra=True), dict(value, job_id="foreign-job"), dict(value, sender_worker="../foreign")):
+        assert r14f2_project_child(spec, changed) == b""
+
+
+def test_r14f2_child_public_custody_shared_validator(monkeypatch):
+    spec, value = r14f2_child_projection(monkeypatch, "custody")
+    assert json.loads(r14f2_project_child(spec, value)) == value
+    for changed in (dict(value, extra=True), dict(value, groups_job_id="foreign-job"), dict(value, control_read_passed=False)):
+        assert r14f2_project_child(spec, changed) == b""
+
+
+def test_r14f2_child_public_execution_shared_validator(monkeypatch):
+    spec, value = r14f2_child_projection(monkeypatch, "execution")
+    assert json.loads(r14f2_project_child(spec, value)) == value
+    for path, changed in ((('sizing_evidence', 'capture-recovery', 'service_posts'), 2),
+        (('sizing_evidence', 'browser-response-discard', 'job_id'), 'foreign-job'),
+        (('sizing_evidence', 'service-response-drop', 'retryable'), True), (('replay_facts', 'classification'), 'live')):
+        corrupt = clone_document(value)
+        target = corrupt
+        for key in path[:-1]: target = target[key]
+        target[path[-1]] = changed
+        assert r14f2_project_child(spec, corrupt) == b""
+    assert r14f2_project_child(spec, dict(value, extra=True)) == b""
+
+
+def test_r14f2_child_public_refuses_unknown_canonical_purpose(monkeypatch):
+    spec, value = r14f2_child_projection(monkeypatch, "execution")
+    environment = dict(spec.environment)
+    request = json.loads(environment["LEAF_PROJECT_CANONICAL_REQUEST"])
+    request["purpose"] = "foreign-purpose"
+    environment["LEAF_PROJECT_CANONICAL_REQUEST"] = json.dumps(request)
+    assert r14f2_project_child(replace(spec, environment=environment), value) == b""
+
+
+def test_r14f2_receipt_groups_job_must_differ_from_every_sizing_job():
+    c = successful_receipt()
+    for scenario in p._sizing_module().SCENARIOS:
+        corrupt = clone_document(c.document)
+        evidence = corrupt["replay"]["sizing_evidence"]
+        evidence["read-custody"]["groups_job_id"] = evidence[scenario]["job_id"]
+        corrupt["replay"]["canonical_sizing_sha256"] = p._sizing_attachment_hash(evidence)
+        assert not verify_document(c, corrupt).ok
+    corrupt = clone_document(c.document)
+    evidence = corrupt["replay"]["sizing_evidence"]
+    evidence["read-custody"]["project_id"] = evidence["service-response-drop"]["project_id"]
+    corrupt["replay"]["canonical_sizing_sha256"] = p._sizing_attachment_hash(evidence)
+    assert not verify_document(c, corrupt).ok
+
+
+def test_r14f1_supervisor_ambient_replay_refusal():
+    for key in ("SYNTHETIC_SIZING_PROOF_ACCEPTED", "SIZING_CLASSIFICATION", "LEAF_PROJECT_REPLAY_CONFIG"):
+        c = case()
+        with pytest.raises(p.ProofRefused):
+            environment(c, {key: "ambient"})
+
+
+def test_r14f1_database_sizing_attachment():
+    from uuid import UUID
+    sizing = p._sizing_module()
+    ids = [str(UUID(int=index)) for index in range(1, 7)]
+    org, project, job_id, output, drawing, actor = ids
+    endpoint = "http://127.0.0.1:51234/string-length"
+    request, response = b"request", b"response"
+    record = dict(classification="synthetic", identity=dict(organization_id=org, project_id=project, job_id=job_id),
+                  producer={"service_identity": endpoint})
+    raw = json.dumps(record).encode()
+    exchange = dict(state="published", output_version_id=output, classification="synthetic",
+        request_bytes=request, response_bytes=response, evidence_bytes=raw,
+        request_sha256=sizing.digest(request), response_sha256=sizing.digest(response), evidence_sha256=sizing.digest(raw))
+    commit = dict(schema="fixture", attempt=2, tool="solar-size-strings", tool_manifest_sha256=HASH,
+        parameters={}, parent_intake_sha256=HASH, before_graph_sha256=HASH, graph_project_id=project, initialized=False)
+    job = dict(status="succeeded", tool_name="solar-size-strings", org_id=org, project_id=project,
+        request_tenant_id=org, input_version_id="input", output_version_id=output, result={"graph_commit": commit},
+        execution_context=dict(drawing_id=drawing, actor_binding_id=actor, checkout_fence="1"))
+    replay = SimpleNamespace(run_id="run-test", organization_id=org, endpoint=endpoint,
+        fixture_sha256=sizing.FIXTURE_SHA256,
+        fixture_map={sizing.digest(request): ("fixture", response, sizing.digest(response))})
+    attachment = dict(run_id="run-test", organization_id=org, project_id=project, job_id=job_id,
+        exchange_job_id=job_id, output_version_id=output, classification="synthetic",
+        endpoint_sha256=sizing.digest(endpoint.encode()), fixture_sha256=sizing.FIXTURE_SHA256,
+        evidence_sha256=sizing.digest(raw), request_sha256=sizing.digest(request), response_sha256=sizing.digest(response))
+    verified = []
+    def prove(job_uuid, observed, *, expected, conn):
+        assert str(job_uuid) == job_id and observed == commit
+        assert expected["organization_id"] == org and expected["project_id"] == project
+        assert expected["sizing_exchange"] == {"job_id": job_id, "evidence_sha256": sizing.digest(raw)}
+        verified.append(output)
+        return {"output_version_id": output}
+    graph = SimpleNamespace(_exchange_authority=lambda row: (SimpleNamespace(job_id=job_id), "lease"),
+        _exchanges=lambda: SimpleNamespace(get_exchange=lambda *args, **kwargs: exchange),
+        project_graph_job_provenance=prove)
+    conn = SimpleNamespace(execute=lambda sql, args: SimpleNamespace(fetchone=lambda: job))
+    assert sizing.observe_database_sizing(replay, attachment, graph=graph, conn=conn) == attachment
+    assert verified == [output]
+    job["request_tenant_id"] = "foreign"
+    with pytest.raises(sizing.ReplayRefused):
+        sizing.observe_database_sizing(replay, attachment, graph=graph, conn=conn)
+    assert verified == [output]
+
+
+def test_r14f1_replacement_keeps_scope_and_guardian(monkeypatch):
+    c = lifetime_case()
+    sizing = p._sizing_module()
+    events, owned = [], []
+    c.scope.guardian = SimpleNamespace(own_process=lambda child: owned.append(child))
+    def process(spec):
+        number = len(owned) + 1
+        identity = p.ProcessIdentity("sizing-worker", 900 + number, "start" + str(number), 50)
+        def start():
+            assert len(c.scope._actions) == number
+            events.append(("start", number))
+        return SimpleNamespace(identity=identity, start=start, poll=lambda: None,
+            stop=lambda deadline: events.append(("stop", number)) or True)
+    monkeypatch.setattr(p, "_RuntimeProcess", process)
+    runtime = sizing.ReplayRuntime(c.prepared if hasattr(c, "prepared") else None, c.effects, c.scope, p)
+    runtime.plan = sizing.ReplayPlan(run_id="run-test", run_root=ROOT, root_identity=(1, 2),
+        organization_id="fakeorg", endpoint="http://127.0.0.1:51234/string-length",
+        source_sha256=HASH, source_files=(), fixture_map={}, token="fake-fixture-credential")
+    runtime.environment = {"DATABASE_URL": "fakedb"}
+    runtime.descriptor = replace(c.descriptor, tool="solar-size-strings")
+    def reader(request):
+        d = runtime.descriptor
+        return p.HeartbeatProof(runtime.worker_id, d.tool, d.runtime, d.source_revision, d.source_sha256,
+                                c.effects.clock.utc_now())
+    runtime.effects = replace(c.effects, process_launcher=p._launch_supervised, canonical_reader=reader)
+    first = runtime.launch_worker(10)
+    schedule = sizing.FaultSchedule(runtime.plan)
+    barrier = sizing.arm_scenario(schedule, "capture-recovery", run_id="run-test", organization_id="fakeorg",
+                                 project_id="project", job_id="job")
+    captured = first.identity
+    first.identity = replace(captured, start_id="foreign-start")
+    with pytest.raises(sizing.ReplayRefused):
+        runtime.recover(barrier, barrier.binding, committed=True, captured_identity=captured, deadline=10)
+    assert events == [("start", 1)]
+    first.identity = captured
+    replacement = runtime.recover(barrier, barrier.binding, committed=True, captured_identity=first.identity, deadline=10)
+    assert replacement is not first and owned == [first, replacement]
+    assert runtime.worker_id == "project:run-test:sizing:2"
+    assert events[:3] == [("start", 1), ("stop", 1), ("start", 2)]
+    assert c.scope.close().ok and ("stop", 2) in events
+
+
+@pytest.fixture(autouse=True)
+def r14f1_no_external_effects(request, monkeypatch):
+    if request.node.name.startswith("test_r14f1_"):
+        def forbidden(*args, **kwargs):
+            pytest.fail("R14-F1 attempted a socket or subprocess")
+        class DeniedSocket(socket.socket):
+            def __init__(self, *args, **kwargs):
+                forbidden()
+        monkeypatch.setattr(socket, "socket", DeniedSocket)
+        monkeypatch.setattr(socket, "create_connection", forbidden)
+        monkeypatch.setattr(subprocess, "Popen", forbidden)
+        monkeypatch.setattr(subprocess, "run", forbidden)

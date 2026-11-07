@@ -444,7 +444,7 @@ def test_sip_r3a_proof_stored_companion_tampering(memory):
 def test_sip_r3a_legacy_bytes():
     raw = Path(local.__file__).read_bytes()
     prefix = raw[:raw.index(b"\n\ndef run_project_graph_seed")]
-    assert sha256(prefix).hexdigest() == "889f62cc4bfee44532ae6a6170852bc340bf5106a664c3c89d06c1a672dde005"
+    assert sha256(prefix).hexdigest() == "fe483f2b662237e7094733750cc0bbf0f62d1755dd493492a8891c0d243a2117"
     source_hash = sha256(local.canonical_bytes(INTAKE)).hexdigest()
     assert source_hash == "77e8d2aaf6f3b2eaff320e4ff2e55ccdaa4237a9a9e9adca5ef23a9e32c0d8ef"
     base = local.new_empty_graph(tenant_id="fixture-tenant", drawing_id="solar",
@@ -460,15 +460,17 @@ def test_sip_r3a_legacy_bytes():
         "schema_version": 1, "source_intake_sha256": source_hash, "units": deepcopy(UNITS)}}) == "ec73fc8a161f512cf3b8c554f4227b6f7547727a80f238e38b4f989f56b6b52c"
 
 
-# W1C-3 adds commit; fifteen supported tools, four creation tools.
+# SolarEdge acceptance joins the eighteen supported tools; four create entities.
 def test_sip_r3a_additive_entrypoints_no_activation(memory, monkeypatch):
     for name in ("run_project_graph_seed", "run_project_graph_commit", "project_graph_commit_provenance"):
         sentinel = object()
         monkeypatch.setattr(adapter, name, lambda *args, **kwargs: sentinel)
         assert getattr(local, name)("forwarded") is sentinel
     assert adapter.SUPPORTED_TOOLS == {"solar-settings", "solar-panels-from-drawing",
+        "solar-design-presets", "solar-trackers-to-panel-groups",
         "solar-size-strings", "solar-combiners", "solar-feeders", "solar-homeruns", "solar-schedule",
-        "solar-string-add", "solar-assign-equipment", "solar-string-multi-add", "solar-string-conductors", "solar-panel-groups", "solar-correct-string", "solar-solve-proposal", "solar-commit-solve"}
+        "solar-string-add", "solar-assign-equipment", "solar-string-multi-add", "solar-string-conductors", "solar-panel-groups", "solar-correct-string", "solar-solve-proposal", "solar-commit-solve",
+        "solar-solaredge-accept"}
     root = Path(local.__file__).parent
     worker = (root / "canonical_worker.py").read_text(encoding="utf-8")
     assert "if tool_name in solar_project_graph.SUPPORTED_TOOLS:" in worker

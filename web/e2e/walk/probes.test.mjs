@@ -3,13 +3,285 @@ import test from 'node:test'
 import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { ACTIONS, REASONS, accessibleName, reasonCode } from '../../src/lib/actionRegistry.js'
 import { effectAssertion, resolveProbe, normalizedControlKey, requireControlCensusBatch, CONTROL_CENSUS_BATCH, CENSUS_RECIPE_CONTROLS,
-  SOLAR_CHAIN_STAGES, SOLAR_TOOL_SETUP, solarChainSteps } from './probes.mjs'
+  SOLAR_CHAIN_STAGES, SOLAR_TOOL_SETUP, solarChainSteps, projectSharedShellProbe, PROJECT_WORKSPACE_PROBES } from './probes.mjs'
+import { jobMonitorLauncherRecipe } from './probes.mjs'
+import { assertCountControlIdentity } from './fixtures.mjs'
+import { activeToolbarProfile, enumerateControls, SHELL_WRAPPER_SCOPES, resolveCensus } from './controlCensus.mjs'
+import { readControlInventory } from '../../walk/controlInventory.mjs'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { ENGINE_WASM_ROUTE, observeSolarEditorRequests, solarAvailabilityProbe, requireSeededSolarReady } from './fixtures.mjs'
+import { ENGINE_WASM_ROUTE, solarAvailabilityProbe, requireSeededSolarReady } from './fixtures.mjs'
 import { setupStep, stackInstanceRef, UnsupportedLocalError, holdJobRoutes, discloseControlPanel, assertEffect, unsupportedBeforeSetup, UI_UNREACHABLE_STATES, VERSIONLESS_DRAWING_REASON, SOLAR_PANEL_CALIBRATION_REASON, workerCatalog, toolAvailabilityEvidence, FIXTURE_PICK_POINTS, exposedCalibrationPoints, solarCalibrationFailure, injectWalkEntities } from './fixtures.mjs'
 
 const map = buildFeatureMap()
+
+function profilePage({ values = [], selectedName = null } = {}) {
+  return { getByRole: (role, options) => {
+    if (role === 'navigation') {
+      assert.deepEqual(options, { name: 'Workspace controls', exact: true })
+      return { getByRole: (role, options) => {
+        assert.equal(role, 'combobox')
+        assert.deepEqual(options, { name: 'Workspace profile', exact: true })
+        return { count: async () => values.length, inputValue: async () => {
+          assert.equal(values.length, 1)
+          return values[0]
+        } }
+      } }
+    }
+    assert.equal(role, 'tablist')
+    assert.deepEqual(options, { name: 'Workspace profile', exact: true })
+    return { getByRole: (role, options) => {
+      assert.equal(role, 'tab')
+      assert.deepEqual(options, { selected: true })
+      return { count: async () => selectedName === null ? 0 : 1, getAttribute: async name => {
+        assert.equal(name, 'aria-label')
+        return selectedName
+      } }
+    } }
+  } }
+}
+
+test('WL61 census reads the studio profile select by surface id before selected tabs', async () => {
+  assert.equal(await activeToolbarProfile(profilePage({ values: ['cad'], selectedName: 'Browser' })), 'drafting')
+  assert.equal(await activeToolbarProfile(profilePage({ values: ['unknown-surface'], selectedName: 'CAD' })), undefined)
+})
+
+test('WL61 census falls back to the selected profile tab aria-label', async () => {
+  assert.equal(await activeToolbarProfile(profilePage({ selectedName: 'CAD' })), 'drafting')
+  assert.equal(await activeToolbarProfile(profilePage({ selectedName: 'Solar CAD' })), 'solar')
+})
+
+test('WL61 census leaves ambiguous or absent profile controls undefined without a selected tab', async () => {
+  assert.equal(await activeToolbarProfile(profilePage({ values: ['cad', 'cad'] })), undefined)
+  assert.equal(await activeToolbarProfile(profilePage()), undefined)
+})
+
+function enumerationPage(rows) {
+  const node = (tagName, attributes, parentElement = null) => ({
+    tagName, parentElement,
+    getAttribute: name => attributes[name] ?? null,
+    hasAttribute: name => Object.hasOwn(attributes, name),
+    getClientRects: () => [{}],
+    matches: () => false,
+  })
+  const elements = rows.map(({ name, ancestors = [] }) => {
+    const parent = ancestors.reduce((parent, { role, name }) =>
+      node('DIV', { role, 'aria-label': name }, parent), null)
+    return node('BUTTON', { 'aria-label': name }, parent)
+  })
+  return { locator: () => ({
+    evaluateAll: async (read, options) => new Function('elements', 'options', 'getComputedStyle',
+      `return (${read})(elements, options)`)(elements, options, () => ({ display: 'block', visibility: 'visible' })),
+    nth: index => ({ ariaSnapshot: async () => `- button ${JSON.stringify(rows[index].name)}` }),
+  }) }
+}
+
+test('WL68 shell wrapper scopes are frozen and limited to the Studio sidebar region', () => {
+  assert.ok(Object.isFrozen(SHELL_WRAPPER_SCOPES))
+  assert.deepEqual(SHELL_WRAPPER_SCOPES, ['region:"Studio sidebar"'])
+})
+
+test('WL68 enumeration skips the Studio wrapper and preserves other and nested landmarks', async () => {
+  const wrapper = { role: 'region', name: 'Studio sidebar' }
+  const drawing = { role: 'region', name: 'Drawing' }
+  const controls = await enumerateControls(enumerationPage([
+    { name: 'Collapse the notification inbox', ancestors: [wrapper] },
+    { name: 'Drawing control', ancestors: [drawing] },
+    { name: 'Nested control', ancestors: [wrapper, drawing] },
+    { name: 'Outer control', ancestors: [drawing, wrapper] },
+    { name: 'Same name in another landmark', ancestors: [{ role: 'group', name: 'Studio sidebar' }] },
+  ]))
+  assert.deepEqual(controls.map(({ scope }) => scope), ['document', 'region:"Drawing"',
+    'region:"Drawing"', 'region:"Drawing"', 'group:"Studio sidebar"'])
+  assert.equal(controls[0].name, 'Collapse the notification inbox')
+})
+
+test('WL68 Studio rail controls resolve against the existing document batch rows', async () => {
+  const controls = await enumerateControls(enumerationPage([
+    { name: 'Collapse the notification inbox', ancestors: [{ role: 'region', name: 'Studio sidebar' }] },
+    { name: 'Linked services 0 linked', ancestors: [{ role: 'region', name: 'Studio sidebar' }] },
+  ]))
+  const ids = ['control:notification-collapse', 'control:linked-services']
+  for (const state of ['ready', 'failed-load']) {
+    const census = resolveCensus(controls, [], map, readControlInventory(map), { state })
+    assert.deepEqual(census.resolved.map(({ feature_id }) => feature_id), ids)
+    assert.ok(census.resolved.every(({ scope }) => scope === 'document'))
+    const resolved = CONTROL_CENSUS_BATCH.filter(row => row.states.includes(state)
+      && row.feature_id !== 'control:job-monitor-expand' && !ids.includes(row.feature_id))
+    assert.equal(requireControlCensusBatch({ resolved: [...resolved, ...census.resolved] },
+      { state, studioShell: true }), true)
+  }
+})
+
+test('WL48 substituted monitor launcher records Studio identity and requires the inventoried spine absent', async () => {
+  const entry = map.entries.find(row => row.id === 'control:job-monitor-expand')
+  for (const state of entry.states) {
+    const probe = resolveProbe(entry, state)
+    const targetRecipe = jobMonitorLauncherRecipe(probe, true)
+    for (const count of [0, 1]) {
+      const evidence = {}
+      let absenceChecks = 0
+      const page = { getByRole: (role, options) => {
+        absenceChecks++
+        assert.equal(role, 'button')
+        assert.equal(options.includeHidden, true)
+        assert.equal(options.name.source, '^Expand the job monitor \\([0-9]+ live\\)$')
+        assert.match('Expand the job monitor (42 live)', options.name)
+        assert.doesNotMatch('Expand the job monitor (42 live) extra', options.name)
+        return { count: async () => count }
+      } }
+      const locator = { ariaSnapshot: () => assert.fail('Studio must not use the inventory name comparison') }
+      const assertions = value => ({ toHaveCount: async expected => assert.equal(await value.count(), expected) })
+      const check = assertCountControlIdentity(page, probe, targetRecipe, locator, evidence, assertions)
+      if (count) await assert.rejects(check)
+      else await check
+      assert.equal(absenceChecks, 1)
+      assert.deepEqual(evidence.controlIdentity, { launcher: { role: 'button', name: 'Studio' },
+        inventoryName: probe.locator.normalizedName, inventoryRendered: false })
+    }
+  }
+})
+
+test('WL48 legacy and spread recipes retain the exact normalized count comparison and evidence', async () => {
+  const probe = resolveProbe(map.entries.find(row => row.id === 'control:job-monitor-expand'), 'ready')
+  const renamed = 'Linked services {n} linked'
+  for (const targetRecipe of [jobMonitorLauncherRecipe(probe, false),
+    { ...probe.locator, panelName: 'Catalog' },
+    { ...probe.locator, exact: false, name: /unavailable/ },
+    { ...probe.locator, normalizedName: renamed }]) {
+    const liveName = targetRecipe.normalizedName === renamed ? 'Linked services 12 linked' : 'Expand the job monitor (12 live)'
+    for (const name of [liveName, 'Studio']) {
+      const evidence = {}
+      const comparisons = []
+      const assertions = value => ({
+        toBeTruthy: () => assert.ok(value),
+        toBe: expected => { comparisons.push([value, expected]); assert.equal(value, expected) },
+      })
+      const page = { getByRole: () => assert.fail('normalized recipes must not check inventory absence') }
+      const locator = { ariaSnapshot: async () => `- button ${JSON.stringify(name)}` }
+      const check = assertCountControlIdentity(page, probe, targetRecipe, locator, evidence, assertions)
+      if (name === 'Studio') await assert.rejects(check)
+      else {
+        await check
+        assert.deepEqual(evidence.controlIdentity, { rawName: liveName, normalizedName: targetRecipe.normalizedName })
+      }
+      assert.deepEqual(comparisons, [[normalizedControlKey({ scope: 'document', role: 'button', name }),
+        normalizedControlKey({ scope: 'document', role: 'button', name: targetRecipe.normalizedName })]])
+    }
+  }
+})
+
+test('WL47 monitor launcher uses Studio while retaining the legacy recipe and identity', () => {
+  const entry = map.entries.find(row => row.id === 'control:job-monitor-expand')
+  assert.deepEqual([...entry.states].sort(), ['failed-load', 'ready'])
+  for (const state of entry.states) {
+    const probe = resolveProbe(entry, state)
+    const before = structuredClone(probe)
+    assert.equal(jobMonitorLauncherRecipe(probe, false), probe.locator)
+    assert.equal(probe.setup.steps.at(-1).kind, 'job-monitor-collapsed')
+    assert.deepEqual(jobMonitorLauncherRecipe(probe, true), {
+      role: 'button', name: 'Studio', exact: true,
+      scope: { role: 'navigation', name: 'Workspace controls', exact: true }, trigger: 'click',
+    })
+    assert.deepEqual(probe, before)
+  }
+  const other = { featureId: 'control:linked-services', locator: { role: 'button', name: 'Linked services' } }
+  assert.equal(jobMonitorLauncherRecipe(other, true), other.locator)
+})
+
+test('WL39b resolves the bounded Delete vertex refusal on desktop and phone', () => {
+  const entry = map.entries.find(row => row.id === 'control:delete-vertex')
+  assert.deepEqual(entry.states, ['invalid-vertex'])
+  assert.deepEqual(entry.viewports, ['desktop', 'phone'])
+  assert.deepEqual(entry.sources, ['web/src/cadedit/CadEditSurface.jsx', 'web/src/cadedit/engineSession.test.jsx',
+    'web/walk/features.overrides.json'].sort())
+  for (const viewport of entry.viewports) {
+    const probe = resolveProbe(entry, 'invalid-vertex')
+    assert.equal(probe.assertion.target, 'engine-refusal', viewport)
+    assert.equal(probe.assertion.refusal, 'Delete vertex refused: vertex must be a non-negative integer.')
+    assert.equal(probe.locator.role, 'button')
+    assert.equal(probe.locator.name, 'Delete vertex')
+    assert.equal(probe.locator.exact, true)
+    assert.equal(probe.locator.trigger, 'click')
+    assert.deepEqual(probe.setup.steps, [
+      { kind: 'open-private-drawing', surface: 'cad' }, { kind: 'engine-ready' },
+      { kind: 'select-entity', type: 'LINE', editable: true }, { kind: 'vertex-index', value: '-1' },
+    ])
+    assert.equal(unsupportedBeforeSetup(probe, { engineMounted: true }), null)
+  }
+})
+
+test('WL36b project Activity and Project resolve to shared-shell controls and content oracles', () => {
+  for (const [tab, name, region, content] of [
+    ['activity', 'Studio', 'Studio sidebar', '#project-workspace-activity'],
+    ['project', 'Project', 'Project sidebar', '#environment-project-panel .ground-pane'],
+  ]) {
+    const probe = resolveProbe(map.entries.find(row => row.id === `tab:project:${tab}`), 'ready')
+    assert.equal(probe.workerOptions, undefined)
+    assert.deepEqual(probe.setup, { context: {}, steps: [
+      { kind: 'open-private-drawing', surface: 'browser', signedOut: false },
+    ] })
+    const resolved = projectSharedShellProbe(probe, { surface: 'browser', studioPresent: true })
+    assert.deepEqual(resolved.locator, { role: 'button', name, exact: true,
+      scope: { role: 'navigation', name: 'Workspace controls', exact: true }, trigger: 'click' })
+    assert.deepEqual(resolved.assertion, { ...probe.assertion, target: 'project-shared-sidebar', region, content })
+    assert.equal(resolved.setup, probe.setup)
+    assert.equal(resolved.featureId, probe.featureId)
+    assert.equal(resolved.state, probe.state)
+  }
+})
+
+test('WL40 Tools resolves to the empty-board opener and Tools content oracle', () => {
+  const probe = resolveProbe(map.entries.find(row => row.id === 'tab:project:tools'), 'ready')
+  assert.ok(Object.isFrozen(PROJECT_WORKSPACE_PROBES))
+  assert.deepEqual(PROJECT_WORKSPACE_PROBES, ['tab:project:tools/ready'])
+  assert.deepEqual(probe.workerOptions, { walkPostgres: true })
+  assert.deepEqual(probe.setup.steps, [
+    { kind: 'open-browser-workspace', url: '/app?surface=browser' },
+  ])
+  assert.doesNotMatch(JSON.stringify(probe.setup.steps), /open-private-drawing|drawing=|upload/)
+  assert.equal(unsupportedBeforeSetup(probe), 'walk_postgres_required')
+  assert.equal(unsupportedBeforeSetup(probe, { walkPostgres: true }), null)
+  assert.equal(unsupportedBeforeSetup(probe, { walkPostgres: true,
+    postgresUnavailableReason: 'postgres_binaries_missing' }), 'postgres_binaries_missing')
+  const resolved = projectSharedShellProbe(probe, { surface: 'browser', studioPresent: true })
+  assert.deepEqual(resolved.locator, { role: 'button', name: 'Open tools', exact: true,
+    scope: { role: 'region', name: 'Project sidebar', exact: true }, trigger: 'click' })
+  assert.equal(resolved.assertion.target, 'project-shared-tools')
+  assert.equal(resolved.assertion.region, 'Tools')
+  assert.equal(resolved.assertion.content, '#environment-project-panel .ground-pane[data-pane="tools"] > p:visible, #environment-project-panel .ground-pane[data-pane="tools"] > ul > li:visible')
+  assert.equal(resolved.setup, probe.setup)
+  assert.equal(resolved.featureId, probe.featureId)
+  assert.equal(resolved.state, probe.state)
+})
+
+test('WL36b absent Studio, other surfaces and other profiles retain their Ribbon recipes', () => {
+  for (const entry of map.entries.filter(row => row.kind === 'tab')) {
+    for (const state of entry.states) {
+      const probe = resolveProbe(entry, state)
+      assert.equal(projectSharedShellProbe(probe, { surface: 'browser', studioPresent: false }), probe)
+      assert.equal(projectSharedShellProbe(probe, { surface: 'cad', studioPresent: true }), probe)
+      if (entry.profile !== 'project' || state !== 'ready') {
+        assert.equal(projectSharedShellProbe(probe, { surface: 'browser', studioPresent: true }), probe)
+      }
+    }
+  }
+})
+
+test('WL32 chooser-open declares one desktop ready task using the provisioned drawing and visible label', () => {
+  const entry = map.entries.find(row => row.id === 'control:chooser-open')
+  assert.deepEqual(entry.states, ['ready'])
+  assert.deepEqual(entry.viewports, ['desktop'])
+  const probe = resolveProbe(entry, 'ready')
+  assert.deepEqual(probe.setup.steps, [
+    { kind: 'navigate', url: '/app?surface=cad&drawing=rooftop_demo' }, { kind: 'chooser-start' },
+  ])
+  assert.equal(probe.locator.role, 'button')
+  assert.equal(probe.locator.name, 'Open project or material')
+  assert.equal(probe.locator.trigger, 'click')
+  assert.equal(probe.assertion.kind, 'opens')
+  assert.equal(probe.assertion.target, 'chooser-project-sidebar')
+})
 
 test('engine wasm route matches versioned and unversioned wasm URLs only', () => {
   assert.ok(ENGINE_WASM_ROUTE.test('https://h/engine/engine_bg.wasm'))
@@ -239,70 +511,6 @@ test('Repeat uses Enter from eligible focus and seeds an accepted LINE only for 
   }
 })
 
-test('G1 Solar editor reviews, dismisses and cancels without submitting a run', async () => {
-  for (const [tool, submitted, railVisible] of [
-    ['solar-unit-sync', false, true], ['solar-unit-sync', true, true], ['solar-design-presets', false, true],
-    ['solar-unit-sync', false, false], ['solar-unit-sync', true, false], ['solar-design-presets', false, false],
-  ]) {
-    const calls = []
-    const inputs = []
-    let listener, visible = true, decisionVisible = false, focused = null
-    const locator = { click: async () => { visible = true }, isVisible: async () => railVisible }
-    const more = {}
-    const field = { count: async () => 0 }
-    const review = { click: async () => {
-      calls.push('review'); decisionVisible = true
-      if (submitted) listener({ method: () => 'POST', url: () => 'http://walk/api/run?wait=1' })
-    } }
-    const cancel = { click: async () => { calls.push('cancel'); visible = false; focused = railVisible ? locator : more } }
-    const region = { getByLabel: (name) => {
-      if (name === 'Expected rev') return { count: async () => 1, inputValue: async () => '',
-        fill: async (value) => { inputs.push([name, value]) } }
-      if (name === 'Distance unit' && tool === 'solar-unit-sync' || name === 'Subcommand' && tool === 'solar-design-presets') {
-        return { count: async () => 1, selectOption: async (option) => { inputs.push([name, option]) } }
-      }
-      if (name === 'Name' && tool === 'solar-design-presets') return { count: async () => 1,
-        fill: async (value) => { inputs.push([name, value]) } }
-      return field
-    }, isVisible: async () => visible,
-      getByRole: (role, options) => options.name === 'Review & run' ? review : cancel }
-    const decision = { focus: async () => { calls.push('decision-focus') } }
-    const page = {
-      locator: (selector) => { assert.equal(selector, 'button[aria-controls="drafting-ribbon-panels"]'); return more },
-      on: (event, handler) => { assert.equal(event, 'request'); listener = handler },
-      off: (event, handler) => { assert.equal(event, 'request'); assert.equal(handler, listener); calls.push('unobserve') },
-      getByRole: (role, options) => {
-        if (role === 'region') { assert.equal(options.name, `${tool} parameters`); return region }
-        assert.equal(options.name, `Run ${tool}`); return decision
-      },
-      keyboard: { press: async (key) => { assert.equal(key, 'Escape'); calls.push('dismiss'); decisionVisible = false } },
-    }
-    const assertions = (value) => ({
-      toBeVisible: async () => assert.equal(value === region ? visible : decisionVisible, true),
-      toBeHidden: async () => assert.equal(value === region ? visible : decisionVisible, false),
-      toBeEnabled: async () => assert.equal(value, review),
-      toBeFocused: async () => { assert.equal(value, railVisible ? locator : more); assert.equal(focused, value) },
-      toEqual: (expected) => assert.deepEqual(value, expected),
-    })
-    const runtime = { page, cleanup: [], evidence: {} }
-    const before = observeSolarEditorRequests(runtime)
-    listener({ method: () => 'GET', url: () => 'http://walk/api/run' })
-    listener({ method: () => 'POST', url: () => 'http://walk/api/other' })
-    const probe = { kind: 'tool', assertion: { target: 'solar-step-editor', tool } }
-    const pending = assertEffect(probe, runtime, locator, before, assertions)
-    if (submitted) await assert.rejects(pending, assert.AssertionError)
-    else {
-      await pending
-      assert.deepEqual(runtime.evidence.solarStepEditor, { tool, reviewed: true, cancelled: true, runRequests: [] })
-    }
-    assert.deepEqual(inputs, tool === 'solar-unit-sync'
-      ? [['Expected rev', '0'], ['Distance unit', { label: 'Meters' }]]
-      : [['Expected rev', '0'], ['Subcommand', { label: 'Create' }], ['Name', 'Walk proof preset']])
-    await runtime.cleanup[0]()
-    assert.deepEqual(calls, ['review', 'decision-focus', 'dismiss', 'cancel', 'unobserve'])
-  }
-})
-
 test('G1 run observation starts before activation and remains through Cancel', () => {
   const source = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
   const capture = source.slice(source.indexOf('async function captureBefore('), source.indexOf('async function activate('))
@@ -316,7 +524,8 @@ test('G1 Solar form probes retain the editor effect and catalog setup', () => {
   const snapshot = JSON.parse(readFileSync(new URL('../../walk/fixtures/capabilities.snapshot.json', import.meta.url), 'utf8'))
   for (const tool of snapshot.response.families.flatMap((family) => family.capabilities)) delete tool.availability
   const readyMap = buildFeatureMap({ snapshot })
-  for (const id of ['tool:solar-unit-sync', 'tool:solar-design-presets']) {
+  for (const id of ['tool:solar-unit-sync', 'tool:solar-design-presets', 'tool:solar-nec-ac-voltage-drop',
+    'tool:solar-nec-ampacity-correction', 'tool:solar-nec-conduit-fill', 'tool:solar-nec-feeder-ocpd', 'tool:solar-trench-manual']) {
     const probe = resolveProbe(readyMap.entries.find((row) => row.id === id), 'ready')
     assert.equal(probe.assertion.target, 'solar-step-editor')
     assert.equal(probe.assertion.tool, probe.sourceId)
@@ -1201,7 +1410,7 @@ test('batch three semantic oracles precede generic handlers and use real interac
     assert.ok(setup.includes(target), target + ' initial setup')
     assert.ok(oracle.indexOf(target) < oracle.indexOf("effect.kind === 'navigates'"), target + ' semantic oracle')
   }
-  for (const text of ['Session · provenance', 'Claude accounts', 'Linked services', 'Version history',
+  for (const text of ['Session details', 'Claude accounts', 'Linked services', 'Version history',
     'Close cost panel', 'rooftop_demo', 'Return to drawing', 'No matching object in this drawing.',
     'You hold the edit lock', 'slash-menu-listbox', 'aria-selected']) assert.ok(source.includes(text), text)
   assert.match(setup, /index\.resolve\(recipe\.control\.inputValue\)\.status/)
@@ -1232,7 +1441,7 @@ test('batch three corrections use the default shell demo, inbox disclosure and s
   const session = setup.slice(setup.indexOf("if (target === 'session-provenance')"),
     setup.indexOf("if (target === 'notification-inbox-collapsed')"))
   assert.match(session, /expect\(locator\)\.toHaveCount\(1\)/)
-  assert.match(session, /Session · provenance.*toBeHidden\(\)/)
+  assert.match(session, /Session details.*toBeHidden\(\)/)
   assert.doesNotMatch(session, /setDrawer|Workspace panels/)
   const panels = oracle.slice(oracle.indexOf('if (probe.kind === \'control\' && baselineThreePanels[target])'),
     oracle.indexOf("if (target === 'scope-build-picker'"))
@@ -1352,6 +1561,48 @@ test('presence obligations reject duplicate resolved observations even with the 
   assert.throws(() => requireControlCensusBatch({ resolved: [...resolved, resolved.at(-1)] }), /missing or misresolved/)
 })
 
+test('Studio census requires the spine Job monitor Expand control to be absent', () => {
+  for (const state of ['ready', 'failed-load']) {
+    const batch = CONTROL_CENSUS_BATCH.filter((row) => row.states.includes(state))
+    const expand = batch.find((row) => row.feature_id === 'control:job-monitor-expand')
+    const resolved = batch.filter((row) => row !== expand)
+    assert.equal(requireControlCensusBatch({ resolved }, { state, studioShell: true }), true)
+    for (const rows of [[expand], [expand, expand], [{ ...expand, feature_id: 'wrong-id' }]]) {
+      assert.throws(() => requireControlCensusBatch({ resolved: [...resolved, ...rows] }, { state, studioShell: true }),
+        /control-census: control expected absent on the studio shell: control:job-monitor-expand/)
+    }
+  }
+})
+
+test('non-Studio census still requires exactly one spine Job monitor Expand control', () => {
+  for (const state of ['ready', 'failed-load']) {
+    const resolved = CONTROL_CENSUS_BATCH.filter((row) => row.states.includes(state))
+    const expand = resolved.find((row) => row.feature_id === 'control:job-monitor-expand')
+    assert.equal(requireControlCensusBatch({ resolved }, { state, studioShell: false }), true)
+    assert.throws(() => requireControlCensusBatch({ resolved: resolved.filter((row) => row !== expand) },
+      { state, studioShell: false }), /control-census: required batch control missing or misresolved: control:job-monitor-expand/)
+    assert.throws(() => requireControlCensusBatch({ resolved: [...resolved, expand] },
+      { state, studioShell: false }), /control-census: required batch control missing or misresolved: control:job-monitor-expand/)
+  }
+})
+
+test('Studio shell does not change other census batch presence and identity obligations', () => {
+  for (const state of ['ready', 'failed-load']) {
+    for (const studioShell of [false, true]) {
+      const resolved = CONTROL_CENSUS_BATCH.filter((row) => row.states.includes(state)
+        && (!studioShell || row.feature_id !== 'control:job-monitor-expand'))
+      assert.equal(requireControlCensusBatch({ resolved }, { state, studioShell }), true)
+      for (const expected of resolved.filter((row) => row.feature_id !== 'control:job-monitor-expand')) {
+        const without = resolved.filter((row) => row !== expected)
+        for (const rows of [without, [...resolved, expected], [...without, { ...expected, feature_id: 'wrong-id' }]]) {
+          assert.throws(() => requireControlCensusBatch({ resolved: rows }, { state, studioShell }),
+            { message: 'control-census: required batch control missing or misresolved: ' + expected.feature_id })
+        }
+      }
+    }
+  }
+})
+
 test('camera navigation precedes URL navigation and collapse never invokes the reopening helper', () => {
   const source = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
   const oracle = source.slice(source.indexOf('async function assertEffect'))
@@ -1463,10 +1714,63 @@ test('Jobs uses desktop spine controls and preserves the phone drawer locator', 
       assert.doesNotMatch('Expand the job monitor (unknown live)', probe.locator.name)
     } else assert.equal(probe.locator.name, 'Collapse the job monitor to a spine')
     assert.equal(probe.locator.scope, undefined)
-    assert.equal(probe.locator.phone.name, 'Jobs')
-    assert.equal(probe.locator.phone.scope.name, 'Workspace panels')
+    assert.equal(probe.locator.phone.name, 'Studio')
+    assert.equal(probe.locator.phone.scope.name, 'Workspace controls')
     assert.deepEqual(probe.setup.steps.at(-1), { kind: 'job-rail-state', name: 'Jobs', open: state === 'open' })
   }
+})
+
+test('drawer recipes identify their Studio host while preserving legacy locators and Escape', () => {
+  for (const drawer of ['jobs', 'nav']) {
+    const entry = map.entries.find(entry => entry.id === `drawer:${drawer}`)
+    for (const state of ['closed', 'open']) {
+      assert.equal(resolveProbe(entry, state).locator.studioDrawer, drawer)
+    }
+  }
+  const none = map.entries.find(entry => entry.id === 'drawer:none')
+  for (const state of ['drawer-open', 'drawers-closed']) {
+    const probe = resolveProbe(none, state)
+    assert.equal(probe.locator.studioDrawer, 'jobs')
+    assert.equal(probe.locator.trigger, 'keyboard')
+    assert.equal(probe.locator.key, 'Escape')
+  }
+})
+
+test('Result recipes identify the Studio host while retaining the legacy activation and setup', () => {
+  const entry = map.entries.find(entry => entry.id === 'drawer:result')
+  for (const state of ['closed', 'open']) {
+    const probe = resolveProbe(entry, state)
+    assert.equal(probe.locator.studioDrawer, 'result')
+    assert.equal(probe.locator.name, 'Result')
+    assert.equal(probe.locator.scope.name, 'Workspace panels')
+    assert.deepEqual(probe.setup.steps.at(-1), { kind: 'drawer-state', name: 'Result', open: state === 'open' })
+  }
+})
+
+test('phone panel overrides preserve legacy locators and use the redesigned disclosures', () => {
+  const jobs = resolveProbe(map.entries.find(entry => entry.id === 'drawer:jobs'), 'closed')
+  assert.equal(jobs.locator.phone.legacy.name, 'Jobs')
+  assert.equal(jobs.locator.phone.legacy.scope.name, 'Workspace panels')
+  for (const [id, states, name, scope] of [
+    ['drawer:plan', ['closed', 'open'], 'properties', 'Drafting tools'],
+    ['action:properties-pane', ['ready', 'pane-open'], 'properties', 'Drafting tools'],
+    ['drawer:none', ['drawer-open', 'drawers-closed'], 'Studio', 'Workspace controls'],
+    ['action:bar-escape', ['drawer-open'], 'Studio', 'Workspace controls'],
+  ]) {
+    for (const state of states) {
+      const probe = resolveProbe(map.entries.find(entry => entry.id === id), state)
+      assert.equal(probe.locator.phone.name, name)
+      assert.equal(probe.locator.phone.scope.name, scope)
+      if (id === 'action:bar-escape') {
+        assert.equal(probe.locator.name, 'Command bar')
+        assert.equal(probe.locator.trigger, 'keyboard')
+        assert.equal(probe.locator.key, 'Escape')
+      }
+    }
+  }
+  const result = resolveProbe(map.entries.find(entry => entry.id === 'drawer:result'), 'closed')
+  assert.equal(result.locator.phone, undefined)
+  assert.equal(result.locator.name, 'Result')
 })
 
 test('Explode selects a known multi-segment polyline only in its ready recipe', () => {

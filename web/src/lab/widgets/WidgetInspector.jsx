@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { BINDING_FIELDS, FORMATS, PRESETS, RENDERER_VERSION } from './widgetCatalog.js'
 import { HEIGHT_BOUNDS } from './useWidgetEditor.js'
+import { LA_USABLE_HEIGHT } from './laFit.js'
 import { loadGraphOutputs } from './widgetsClient.js'
 
 const colors = ['auto', 'ink', 'leaf', 'slate', 'loss']
@@ -88,7 +89,8 @@ export default function WidgetInspector({ doc, selectedId, dispatch, local, onOu
       <Select label="Background" value={surface.bg} options={['black', 'blur', 'none']} onChange={(bg) => surfaceEdit({ bg })} />
       {FORMATS[format].accessory && check('Preview one-color', surface.vibrant, (vibrant) => surfaceEdit({ vibrant }))}
       {check('Include this format', surface.ship, (ship) => surfaceEdit({ ship }))}
-      {['la', 'diExp'].includes(format) && surface.h > 160 && <p>iOS cuts off content below 160 points.</p>}
+      {format === 'la' && surface.h > LA_USABLE_HEIGHT && <p>This design exceeds the 128 pt Live Activity content area. Reduce its height before publication.</p>}
+      {format === 'diExp' && surface.h > 160 && <p>iOS cuts off content below 160 points.</p>}
       {format === 'lockInline' && <p>Inline widgets support one line of text.</p>}
       <button type="button" onClick={() => { if (resetAt !== null && Date.now() - resetAt < 3000) { dispatch({ type: 'reset' }); setResetAt(null) } else setResetAt(Date.now()) }}>{resetAt !== null ? 'Click again to reset' : 'Reset this format'}</button>
     </> : <>
@@ -106,7 +108,7 @@ export default function WidgetInspector({ doc, selectedId, dispatch, local, onOu
       {element.count !== undefined && <NumberField label="Entries" value={element.count} min={1} max={['history', 'historyList'].includes(element.preset) ? 4 : 10} onChange={(count) => edit({ count: Math.round(count) })} />}
       {element.opacity !== undefined && <NumberField label="Opacity" type="range" value={element.opacity} min={0} max={1} step={0.05} onChange={(opacity) => edit({ opacity })} />}
       {element.tracking !== undefined && <NumberField label="Spacing" value={element.tracking} min={0} max={20} onChange={(tracking) => edit({ tracking })} />}
-      {element.kind === 'text' && (!element.preset || element.preset === 'text') && <label>Text<input value={element.text ?? ''} maxLength={40} onChange={(e) => edit({ text: e.target.value.slice(0, 40) })} /></label>}
+      {element.kind === 'text' && (!element.preset || element.preset === 'text' || (element.preset !== 'brand' && !element.binding)) && <label>Text<input value={element.text ?? ''} maxLength={40} onChange={(e) => edit({ text: e.target.value.slice(0, 40) })} /></label>}
       {check('Visible', element.visible, (visible) => edit({ visible }))}
       <BindingPicker key={element.id} element={element} edit={edit} local={local} onOutputs={onOutputs} graphOutputs={graphOutputs} />
       <div className="widget-toolbar"><button type="button" disabled={surface.els.length >= 32} onClick={() => dispatch({ type: 'duplicate' })}>Duplicate</button><button type="button" onClick={() => dispatch({ type: 'delete' })}>Remove</button></div>

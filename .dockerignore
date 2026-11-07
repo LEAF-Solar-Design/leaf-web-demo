@@ -5,6 +5,8 @@
 **/node_modules
 **/dist
 web/dist
+web/.next
+web/out
 harness/dist
 **/__pycache__
 **/*.pyc

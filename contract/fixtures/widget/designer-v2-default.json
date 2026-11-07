@@ -3,7 +3,7 @@
   "active": "la",
   "formats": {
     "la": {
-      "h": 160,
+      "h": 128,
       "radius": 22,
       "bg": "black",
       "vibrant": false,
@@ -64,34 +64,6 @@
           "visible": true,
           "arrows": true,
           "maxRows": 3
-        },
-        {
-          "id": "divider",
-          "kind": "divider",
-          "x": 14,
-          "y": 122,
-          "w": 333,
-          "h": 1,
-          "scale": 1,
-          "weight": 600,
-          "color": "slate",
-          "align": "left",
-          "visible": true,
-          "opacity": 0.35
-        },
-        {
-          "id": "history",
-          "kind": "history",
-          "x": 14,
-          "y": 125,
-          "w": 333,
-          "h": 32,
-          "scale": 1,
-          "weight": 500,
-          "color": "auto",
-          "align": "left",
-          "visible": true,
-          "count": 4
         }
       ]
     },

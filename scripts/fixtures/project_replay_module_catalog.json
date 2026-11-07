@@ -1,0 +1,24 @@
+{
+  "schema": "leaf.synthetic-module-catalog.v1",
+  "label": "SYNTHETIC, TEST ONLY: one-module String Sizer catalog for the project replay, not the live catalog.",
+  "response": {
+    "schema_version": 1,
+    "catalog": {
+      "source": "pvlib.CeCMod",
+      "pvlib_version": "synthetic",
+      "count": 1,
+      "sha256": "d1d602bbdb6f627ed06e284f9a26f71eda72985e3d66c3b4d650167dd0d0638f"
+    },
+    "modules": [
+      {
+        "key": "JA_Solar_JAM72D40-595/MB",
+        "stc_w": 595.0,
+        "n_s": null,
+        "v_oc_ref": 52.58,
+        "length_m": null,
+        "width_m": null
+      }
+    ],
+    "truncated": false
+  }
+}

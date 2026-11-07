@@ -39,8 +39,125 @@ from agent_policy import PolicyError  # noqa: E402
 SHIPPED = SERVER_DIR / "agent_policy.json"
 
 
+def test_photo_inspection_closed_read_only_contract():
+    from jsonschema import Draft7Validator
+    action = agent_policy.load_policy(SHIPPED).actions["inspect_project_photo"]
+    assert (action.rung, action.required_capability, action.policy) == (0, "converse", "auto")
+    assert action.tenant_tightenable is True
+    assert action.dispatch == {"kind": "app_api", "routes": ["POST /api/sessions/{session_id}/materials/inspect"]}
+    assert action.audit_extra == ()
+    validate = Draft7Validator(action.args_schema).is_valid
+    material = "33333333-3333-4333-8333-333333333333"
+    preview = {"op": "preview", "material_id": material, "expected_preview_sha256": "a" * 64,
+               "expected_revision": 0, "expected_digest": None}
+    assert validate({"op": "catalog"})
+    assert validate(preview)
+    assert validate({"op": "catalog", "cursor": material, "expected_revision": 7, "expected_digest": "b" * 64})
+    for body in ({}, {"op": "original"}, {"op": "catalog", "cursor": material},
+                 {"op": "catalog", "project_id": material}, {"op": "catalog", "uri": "https://invalid"},
+                 {"op": "catalog", "material_id": material}, {"op": "catalog", "expected_revision": 0},
+                 {**preview, "expected_digest": "a" * 64}, {**preview, "cursor": material},
+                 {**preview, "expected_revision": 1}, {**preview, "expected_preview_sha256": "A" * 64},
+                 {**preview, "material_id": "00000000-0000-0000-0000-000000000000"}):
+        assert not validate(body), body
+
+
 def _shipped_raw() -> dict:
     return json.loads(SHIPPED.read_text(encoding="utf-8"))
+
+
+@pytest.fixture(params=["shipped", "defaults"])
+def photo_assignment_action(request, tmp_path):
+    path = SHIPPED if request.param == "shipped" else tmp_path / "missing.json"
+    return agent_policy.load_policy(path).actions["propose_project_photo_assignments"]
+
+
+def _photo_assignment_request():
+    return {
+        "expected_revision": 1,
+        "expected_digest": "a" * 64,
+        "operations": [{
+            "op": "assign", "material_id": "abcdef12-3456-4789-abcd-0123456789ab",
+            "sha256": "b" * 64, "preview_sha256": "c" * 64,
+            "gallery_slug": "photos-1", "title": "", "alt": "A project photo",
+        }],
+    }
+
+
+def test_photo_assignment_review_only_contract(photo_assignment_action, tmp_path):
+    action = photo_assignment_action
+    assert action == agent_policy.load_policy(SHIPPED).actions["propose_project_photo_assignments"]
+    assert action == agent_policy.load_policy(tmp_path / "missing.json").actions["propose_project_photo_assignments"]
+    assert (action.rung, action.required_capability, action.policy) == (2, "converse", "auto")
+    assert action.enabled is True and action.tenant_tightenable is True
+    assert action.dispatch == {
+        "kind": "app_api",
+        "routes": ["POST /api/sessions/{session_id}/page/photo-assignment-proposals"],
+    }
+    assert action.rate_limit_category == "medium" and action.timeout_s == 60
+    assert action.audit_extra == ()
+
+
+def test_photo_assignment_closed_request(photo_assignment_action):
+    from jsonschema import Draft7Validator
+    validate = Draft7Validator(photo_assignment_action.args_schema).is_valid
+    body = _photo_assignment_request()
+    operation = body["operations"][0]
+    assert validate(body)
+    assert set(photo_assignment_action.args_schema["properties"]) == set(body)
+    assert set(photo_assignment_action.args_schema["properties"]["operations"]["items"]["properties"]) == set(operation)
+    for key in body:
+        assert not validate({k: v for k, v in body.items() if k != key}), key
+    for key in operation:
+        assert not validate({**body, "operations": [{k: v for k, v in operation.items() if k != key}]}), key
+    for key in ("authority", "authority_session_id", "turn_id", "session_id", "project_id",
+                "tenant_id", "org_id", "url", "uri", "source_url", "grants", "instruction"):
+        assert not validate({**body, key: "untrusted"}), key
+        assert not validate({**body, "operations": [{**operation, key: "untrusted"}]}), key
+    for op in ("remove", "replace", "move", "unassign", "preview", "save", "publish", "ASSIGN", None):
+        assert not validate({**body, "operations": [{**operation, "op": op}]}), op
+
+
+def test_photo_assignment_witnesses(photo_assignment_action):
+    from jsonschema import Draft7Validator
+    validate = Draft7Validator(photo_assignment_action.args_schema).is_valid
+    body = _photo_assignment_request()
+    operation = body["operations"][0]
+    for revision in (0, -1, 2147483648, True, False, "1", None, 1.5):
+        assert not validate({**body, "expected_revision": revision}), revision
+    for digest in (None, 1, "", "a" * 63, "a" * 65, "A" * 64, "g" * 64, "a" * 64 + "\n"):
+        assert not validate({**body, "expected_digest": digest}), digest
+        for key in ("sha256", "preview_sha256"):
+            assert not validate({**body, "operations": [{**operation, key: digest}]}), (key, digest)
+    material = operation["material_id"]
+    for invalid in (None, 1, "", "00000000-0000-0000-0000-000000000000", material.upper(),
+                    material.replace("-", ""), "{" + material + "}", material + "\n"):
+        assert not validate({**body, "operations": [{**operation, "material_id": invalid}]}), invalid
+
+
+def test_photo_assignment_bounds(photo_assignment_action):
+    from jsonschema import Draft7Validator
+    validate = Draft7Validator(photo_assignment_action.args_schema).is_valid
+    body = _photo_assignment_request()
+    operation = body["operations"][0]
+    for revision in (1, 2147483647):
+        assert validate({**body, "expected_revision": revision})
+    # Use distinct materials: duplicate-material checks remain with the producer.
+    operations = [{**operation, "material_id": f"{index:08x}-3456-4789-abcd-0123456789ab"}
+                  for index in range(200)]
+    assert validate({**body, "operations": operations})
+    for invalid in ([], operations + [operation], {}, None, "assign", [None]):
+        assert not validate({**body, "operations": invalid})
+    for key, valid_values, invalid_values in (
+        ("gallery_slug", ("a", "a" + "0-" * 23 + "z"),
+         ("", "a" * 49, "A", "1photo", "-photo", "a_b", "a/b", "a\n", None)),
+        ("title", ("", "t" * 200), ("t" * 201, None, 1)),
+        ("alt", ("a", "a" * 400), ("", "a" * 401, None, 1)),
+    ):
+        for value in valid_values:
+            assert validate({**body, "operations": [{**operation, key: value}]}), (key, value)
+        for value in invalid_values:
+            assert not validate({**body, "operations": [{**operation, key: value}]}), (key, value)
 
 
 def _write(tmp_path: Path, raw: dict) -> Path:
@@ -56,14 +173,21 @@ def test_shipped_catalog_loads_with_v1_shape():
     pol = agent_policy.load_policy(SHIPPED)
     assert set(pol.actions) == {
         "request_confirmation", "read_platform_state", "run_read_tool",
-        "run_write_tool", "submit_live_solve", "undo_drawing_version",
+        "run_write_tool", "run_solve_tool", "submit_live_solve", "undo_drawing_version",
         "author_tool", "request_publication", "register_tool", "customize_platform",
-        "propose_overlay", "finish_project", "read_integration_data", "save_integration_element",
+        "propose_overlay", "propose_project_page", "propose_project_photo_assignments", "inspect_project_photo", "finish_project", "read_integration_data", "save_integration_element",
     }
     assert pol.rate_limits == {"low": 120, "medium": 60, "high": 10}
     assert pol.approval_ttl_s == 300
 
     assert pol.actions["finish_project"].policy == "auto"
+
+    proposal = pol.actions["propose_project_page"]
+    assert (proposal.rung, proposal.required_capability, proposal.policy) == (2, "converse", "auto")
+    assert proposal.enabled is True and proposal.tenant_tightenable is True
+    assert proposal.dispatch == {"kind": "app_api", "routes": ["POST /api/sessions/{session_id}/page/proposals"]}
+    assert proposal.args_schema["required"] == ["instruction", "expected_revision", "expected_digest"]
+    assert proposal.args_schema["additionalProperties"] is False
 
     save = pol.actions["save_integration_element"]
     assert (save.rung, save.required_capability, save.policy) == (3, "converse", "auto")

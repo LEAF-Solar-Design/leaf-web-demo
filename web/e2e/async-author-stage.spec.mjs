@@ -111,10 +111,10 @@ for (const surface of SURFACES) {
     })
 
     await page.goto(surface.path)
+    if (surface.railButton) await page.getByRole('navigation', { name: 'Workspace controls' }).getByRole('button', { name: 'Studio', exact: true }).click()
     const catalogTab = page.getByRole('tab', { name: /Catalog/ })
-    if (await catalogTab.count()) await catalogTab.click()
-    // The studio shell starts with a collapsed tool rail; its band's Tool rail button expands it.
-    if (surface.railButton) await page.getByRole('button', { name: 'Tool rail', exact: true }).click()
+    if (!surface.railButton) await catalogTab.click()
+    // Opening Studio reveals the tool rail within the floating panel.
     const customFamily = page.getByRole('button', { name: /Custom authored tools/ })
     await expect(customFamily).toBeVisible({ timeout: 15_000 })
     if (await customFamily.getAttribute('aria-expanded') === 'false') await customFamily.click()
@@ -138,7 +138,7 @@ for (const surface of SURFACES) {
 
     const readsBeforeReload = pollReads
     await page.reload()
-    // The console rail remembers its expanded posture across reloads.
+    if (surface.railButton) await page.getByRole('navigation', { name: 'Workspace controls' }).getByRole('button', { name: 'Studio', exact: true }).click()
     await expect(page.getByLabel('Tool to revise')).toHaveValue(AUTHORED_TOOL.name, { timeout: 15_000 })
     await expect(page.getByText(/Reconnecting to authoring|Authoring with the agent/)).toBeVisible()
     await expect.poll(() => pollReads).toBeGreaterThan(readsBeforeReload)
@@ -156,7 +156,7 @@ for (const surface of SURFACES) {
     await expect.poll(() => page.evaluate(() => localStorage.getItem('leaf.inflightAuthor.v1'))).not.toBeNull()
 
     await page.reload()
-    // The remembered rail also keeps the staged revision visible after reload.
+    if (surface.railButton) await page.getByRole('navigation', { name: 'Workspace controls' }).getByRole('button', { name: 'Studio', exact: true }).click()
     await expect(page.locator('.authored')).toContainText('Repaired the exact existing custom tool.', { timeout: 30_000 })
     const terminalPointer = await page.evaluate(() => JSON.parse(localStorage.getItem('leaf.inflightAuthor.v1')))
     expect(terminalPointer).toMatchObject({
@@ -194,7 +194,7 @@ for (const surface of SURFACES) {
     await page.getByLabel('What should the tool do?').fill('author another tool after publication')
     await expect(page.getByRole('button', { name: 'Generate tool' })).toBeEnabled()
 
-    if (await catalogTab.count()) await catalogTab.click()
+    if (!surface.railButton) await catalogTab.click()
     const endFamily = page.getByRole('button', { name: /Custom authored tools/ })
     if (await endFamily.getAttribute('aria-expanded') === 'false') await endFamily.click()
     await expect(page.locator('.tool-card').filter({ hasText: AUTHORED_TOOL.name })).toHaveCount(1)

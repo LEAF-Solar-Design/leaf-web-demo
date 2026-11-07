@@ -1,4 +1,4 @@
-import { test as base, expect } from '@playwright/test'
+import { test as base, expect, request as playwrightRequest } from '@playwright/test'
 import { startStack } from '../../walk/stack.mjs'
 import { prepareProductionBundle } from '../../walk/sameOriginProxy.mjs'
 import { SERVER_ERROR_CAP, extractErrorId, serverDiagnostic } from '../../walk/serverDiagnostics.mjs'
@@ -11,14 +11,241 @@ import { familiesForSurface } from '../../src/lib/surfaceRails.js'
 import { buildViewSearch } from '../../src/lib/urlState.js'
 import { ACTIONS, accessibleName, reasonCode } from '../../src/lib/actionRegistry.js'
 import { PROMPTS } from '../../src/cadedit/promptKeys.js'
-import { normalizedControlKey, solarChainSteps } from './probes.mjs'
+import { normalizedControlKey, solarChainSteps, projectSharedShellProbe, jobMonitorLauncherRecipe } from './probes.mjs'
 import { solarToolReadyEffect } from '../../walk/featureMap.mjs'
 import { buildDrawingObjectIndex } from '../../src/lib/drawingObjectIndex.js'
 import { collectProbeUxEvidence, packUxEvidence } from './uxEvidence.mjs'
+import { activateWithMobileTouchMeasurements } from './mobileTouchMeasurements.mjs'
+import { createAccessibilityMeasurementCapture } from './accessibilityMeasurements.mjs'
+import { createEndUserMeasurementCapture } from './endUserMeasurements.mjs'
+import { collectSupportMeasurements } from './supportMeasurements.mjs'
+import { createOpsSreMeasurementCapture } from './opsSreMeasurements.mjs'
+import { createRedHatMeasurementCapture } from './redHatMeasurements.mjs'
+import { createPerformanceMeasurementCapture } from './performanceMeasurements.mjs'
+import { createQcDevMeasurementCapture } from './qcDevMeasurements.mjs'
+import { collectUiUxMeasurements } from './uiUxMeasurements.mjs'
+import { collectUnfamiliarMeasurements } from './unfamiliarMeasurements.mjs'
+import { composePersonaMeasurementBundle } from './personaMeasurementBundle.mjs'
 import { seedParams, runBody, expectHeadAdvanced } from '../solarGraphCommitProof.mjs'
 import { actionResponse, isUuid, projectBinding, observeProjectTraffic, readContext, runProjectTool } from '../local/solarProjectWalk.mjs'
 
 export { expect }
+
+export async function collectPromptRunDiagnostic(page, runtime) {
+  const read = async (operation, fallback = null) => {
+    let timer
+    try {
+      return await Promise.race([
+        Promise.resolve().then(operation),
+        new Promise(resolve => { timer = setTimeout(() => resolve(fallback), 2000) }),
+      ])
+    } catch { return fallback }
+    finally { clearTimeout(timer) }
+  }
+  const [barValue, runDisabled, resolverVisible, toolCommandsVisible, localDecisionRequests, statusText, alerts] = await Promise.all([
+    read(() => page.getByRole('combobox', { name: 'Command bar', exact: true }).inputValue({ timeout: 2000 })),
+    read(() => page.getByRole('button', { name: 'Run', exact: true }).isDisabled({ timeout: 2000 })),
+    read(() => page.getByRole('listbox', { name: 'Route resolver', exact: true }).isVisible({ timeout: 2000 })),
+    read(() => page.getByRole('listbox', { name: 'Tool commands', exact: true }).isVisible({ timeout: 2000 })),
+    read(() => (runtime?.localDecisionRequests || []).slice(0, 10).map(url => new URL(url, 'http://diagnostic.invalid').pathname), []),
+    read(async () => {
+      const text = await page.locator('.bar-dock .cockpit-engine-status:visible').first().textContent({ timeout: 2000 })
+      return text == null ? null : text.trim().slice(0, 160)
+    }),
+    read(() => page.locator('[role="alert"]:visible').evaluateAll(nodes =>
+      nodes.slice(0, 3).map(node => (node.textContent || '').trim().slice(0, 120))), []),
+  ])
+  return { barValue, runDisabled, resolverVisible, toolCommandsVisible, localDecisionRequests, statusText, alerts }
+}
+
+export const STUDIO_RAIL_FEATURES = Object.freeze(new Set([
+  'control:linked-services', 'control:job-monitor-expand', 'control:notification-collapse', 'control:objects',
+]))
+
+const studioRailButton = page => page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+  .getByRole('button', { name: 'Studio', exact: true })
+
+export async function revealStudioRail(page, assertions = expect) {
+  const button = studioRailButton(page)
+  if (!await button.isVisible() || await button.getAttribute('aria-expanded') === 'true') return false
+  await button.click()
+  await assertions(button).toHaveAttribute('aria-expanded', 'true')
+  await assertions(page.locator('#project-workspace-activity')).toBeVisible()
+  return true
+}
+
+export async function withCensusStudioRail(page, inventory, assertions = expect) {
+  const opened = await revealStudioRail(page, assertions)
+  try { return await inventory() }
+  finally {
+    if (opened) {
+      const button = studioRailButton(page)
+      await button.click()
+      await assertions(button).toHaveAttribute('aria-expanded', 'false')
+    }
+  }
+}
+
+export async function assertFirstRunCadProfile(page, assertions = expect) {
+  const profile = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+    .getByRole('combobox', { name: 'Workspace profile', exact: true })
+  if (await profile.count() > 0) await assertions(profile).toHaveValue('cad')
+  else await assertions(page.getByRole('tab', { name: 'CAD', exact: true })).toHaveAttribute('aria-selected', 'true')
+}
+
+export function mergeCensusCaptures(closed, studio) {
+  for (const capture of [closed, studio]) {
+    if (!capture || typeof capture !== 'object'
+      || !['resolved', 'baselined', 'unmapped', 'stale', 'controls'].every(key => Array.isArray(capture[key]))) {
+      throw new TypeError('Expected a control census capture')
+    }
+  }
+  const seen = new Set(), resolved = [], additions = []
+  for (const [capture, extra] of [[closed, false], [studio, true]]) {
+    for (const row of capture.resolved) {
+      if (!row || typeof row.feature_id !== 'string') throw new TypeError('Expected a census feature_id string')
+      if (seen.has(row.feature_id)) continue
+      seen.add(row.feature_id)
+      resolved.push(row)
+      if (extra) additions.push(row)
+    }
+  }
+  return { ...closed, resolved, controls: [...closed.controls, ...additions],
+    total: resolved.length + closed.baselined.length + closed.unmapped.length,
+    ok: closed.unmapped.length === 0 && closed.stale.length === 0 }
+}
+
+export async function captureClosedAndStudioCensus(page, inventory, assertions = expect) {
+  const button = studioRailButton(page)
+  const wasOpen = await button.isVisible() && await button.getAttribute('aria-expanded') === 'true'
+  if (wasOpen) {
+    await button.click()
+    await assertions(button).toHaveAttribute('aria-expanded', 'false')
+  }
+  try {
+    const closed = await inventory()
+    const studio = await withCensusStudioRail(page, async () => {
+      await assertions(page.getByRole('button', { name: /^Linked services [0-9]+ linked$/ })).toHaveAttribute('aria-expanded', 'false')
+      return inventory()
+    }, assertions)
+    return mergeCensusCaptures(closed, studio)
+  } finally {
+    if (wasOpen) await revealStudioRail(page, assertions)
+  }
+}
+
+export async function assertCountControlIdentity(page, probe, targetRecipe, locator, evidence, assertions = expect) {
+  if (targetRecipe.normalizedName) {
+    const snapshot = await locator.ariaSnapshot()
+    const match = snapshot.split('\n')[0].match(/^- button "((?:\\.|[^"\\])*)"/)
+    assertions(match, 'count control must expose its accessible name').toBeTruthy()
+    const liveName = JSON.parse('"' + match[1] + '"')
+    assertions(normalizedControlKey({ scope: 'document', role: 'button', name: liveName })).toBe(
+      normalizedControlKey({ scope: 'document', role: 'button', name: targetRecipe.normalizedName }))
+    evidence.controlIdentity = { rawName: liveName, normalizedName: targetRecipe.normalizedName }
+  } else if (probe.featureId === 'control:job-monitor-expand'
+    && targetRecipe !== probe.locator && probe.locator.normalizedName) {
+    evidence.controlIdentity = { launcher: { role: 'button', name: 'Studio' },
+      inventoryName: probe.locator.normalizedName, inventoryRendered: false }
+    await assertions(page.getByRole('button', {
+      name: /^Expand the job monitor \([0-9]+ live\)$/, includeHidden: true,
+    })).toHaveCount(0)
+  }
+}
+
+export async function prepareBrowserToolsProject(sidebar, assertions = expect) {
+  const openTools = sidebar.getByRole('button', { name: 'Open tools', exact: true })
+  try {
+    if (await openTools.isVisible()) return
+    // ProjectStartPanel.jsx:56-90 owns both bootstrap and project selection.
+    const unbound = sidebar.getByRole('region', { name: 'Create your workspace', exact: true })
+    const projects = sidebar.getByRole('region', { name: 'Workspace projects', exact: true })
+    await assertions(openTools.or(unbound).or(projects)).toBeVisible()
+    if (await openTools.isVisible()) return
+    if (await unbound.isVisible()) {
+      await unbound.getByRole('button', { name: 'Create workspace', exact: true }).click()
+      await assertions(projects).toBeVisible()
+    }
+    const listed = projects.getByRole('list', { name: 'Projects', exact: true }).getByRole('button')
+    // Wait for the loaded list or its explicit empty state before deciding to create.
+    await assertions(listed.first().or(projects.getByText('No projects yet.', { exact: true }))).toBeVisible()
+    if (await listed.count()) {
+      const name = await listed.first().innerText()
+      await projects.getByRole('list', { name: 'Projects', exact: true })
+        .getByRole('button', { name, exact: true }).first().click()
+    } else {
+      await projects.getByRole('textbox', { name: 'Project name', exact: true }).fill('WL46 walk project')
+      await projects.getByRole('button', { name: 'Create project', exact: true }).click()
+    }
+    await assertions.poll(async () => await openTools.isVisible() || !await sidebar.isVisible(),
+      { timeout: 15_000 }).toBe(true)
+    if (!await sidebar.isVisible()) {
+      const page = sidebar.page()
+      const chooser = page.getByRole('button', { name: 'Open project or material', exact: true })
+      const reopen = await chooser.isVisible() ? chooser
+        : page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+          .getByRole('button', { name: 'Project', exact: true })
+      await assertions(reopen).toBeVisible()
+      await reopen.click()
+    }
+    await assertions(openTools).toBeVisible()
+  } catch (error) {
+    throw new Error(`Open tools setup: browser workspace journey did not reach the Open tools board: ${error.message}`, { cause: error })
+  }
+}
+
+export async function prepareProjectSharedShell(probe, runtime, assertions = expect) {
+  if (probe.profile !== 'project' || probe.state !== 'ready'
+    || !['tab:project:activity', 'tab:project:project', 'tab:project:tools'].includes(probe.featureId)) return probe
+  const { page } = runtime
+  const surface = await page.locator('.app').first().getAttribute('data-surface')
+  if (surface !== 'browser') return probe
+  const resolved = projectSharedShellProbe(probe, { surface, studioPresent: await studioRailButton(page).isVisible() })
+  if (resolved === probe) return probe
+  const tools = probe.featureId === 'tab:project:tools'
+  const pane = tools ? page.locator('#environment-project-panel .ground-pane') : null
+  if (tools && await pane.count() !== 0) {
+    throw new Error('Open tools precondition: Project must start on the board with no pane open')
+  }
+  const navigation = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+  const regions = ['Studio', 'Project'].map(name => ({ name,
+    region: page.getByRole('region', { name: `${name} sidebar`, exact: true }),
+    button: navigation.getByRole('button', { name, exact: true }),
+  }))
+  const original = []
+  for (const panel of regions) if (await panel.region.isVisible()) original.push(panel)
+  const close = async panel => {
+    await panel.region.getByRole('button', { name: `Close ${panel.name}`, exact: true }).click()
+    await assertions(panel.region).toBeHidden()
+  }
+  runtime.cleanup.push(async () => {
+    if (tools && await pane.count() !== 0) {
+      await page.getByRole('region', { name: 'Project sidebar', exact: true })
+        .getByRole('button', { name: 'Back to board', exact: true }).click()
+      await assertions(page.locator('#environment-project-panel .ground-tile').first()).toBeVisible()
+    }
+    for (const panel of regions) if (await panel.region.isVisible()) await close(panel)
+    for (const panel of original) {
+      await panel.button.click()
+      await assertions(panel.region).toBeVisible()
+    }
+  })
+  if (tools) {
+    const project = regions.find(panel => panel.name === 'Project')
+    if (!await project.region.isVisible()) await project.button.click()
+    await assertions(project.region).toBeVisible()
+    await prepareBrowserToolsProject(project.region, assertions)
+    await assertions(page.locator('#environment-project-panel .ground-tile').first()).toBeVisible()
+    return resolved
+  }
+  for (const panel of original) await close(panel)
+  for (const panel of regions) if (await panel.region.isVisible()) await close(panel)
+  await assertions(page.getByRole('region', { name: resolved.assertion.region, exact: true })).toBeHidden()
+  return probe.featureId === 'tab:project:project'
+    ? { ...resolved, assertion: { ...resolved.assertion,
+      content: '#environment-project-panel :is(.ground-pane, .ground-tile, .project-material-intake):visible' } }
+    : resolved
+}
 
 export function redactSolarDiagnostic(value, { maxLength = 300 } = {}) {
   if (!['string', 'number', 'boolean'].includes(typeof value)) return '[unavailable]'
@@ -451,6 +678,157 @@ function catalogSha256(catalog) {
   return createHash('sha256').update(JSON.stringify(catalog)).digest('hex')
 }
 
+export function protectedStateDigest(snapshot) {
+  return createHash('sha256').update(JSON.stringify(snapshot)).digest('hex')
+}
+
+// Correlation evidence only: incomplete reads cannot establish an absent build marker.
+export async function collectCadEditBundleProbe(page, runtime) {
+  const result = {
+    manifestFlag: null,
+    dom: { workbench: null, objectsPanel: null, importPane: null },
+    servedJs: { indexSha256: null, assets: [], markerFound: 'UNKNOWN', coverage: 'partial',
+      source: 'index-fallback', pageAssetCount: 0, truncated: false },
+    consoleErrorCount: null,
+    binding: { worker: null, pageUrlPathSha256: null },
+  }
+  const deadline = Date.now() + 45_000
+  const hash = value => createHash('sha256').update(value).digest('hex')
+  const bounded = async (operation, end = deadline) => {
+    let timer
+    try {
+      return await Promise.race([Promise.resolve().then(operation), new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('probe deadline')), Math.max(1, Math.min(10_000, end - Date.now())))
+      })])
+    } finally { clearTimeout(timer) }
+  }
+  try {
+    for (const [key, selector] of Object.entries({ workbench: '[data-testid=cad-edit-workbench]',
+      objectsPanel: 'details.drawing-objects-panel', importPane: '#cockpit-import-pane' })) {
+      try { result.dom[key] = await bounded(() => page.locator(selector).count()) } catch { /* Unknown. */ }
+    }
+    try {
+      result.consoleErrorCount = [...(runtime.evidence?.consoleErrors || []), ...(runtime.evidence?.pageErrors || [])]
+        .filter(error => /CadEdit|EngineSession|cadedit/i.test(error.text || error.message || '')).length
+    } catch { /* Unknown. */ }
+    try {
+      const worker = runtime.testInfo?.workerIndex ?? runtime.workerIndex ?? runtime.shard
+      if (Number.isInteger(worker)) result.binding.worker = worker
+    } catch { /* Unknown. */ }
+    const url = new URL(page.url())
+    result.binding.pageUrlPathSha256 = hash(url.pathname)
+    let remaining = 30 * 1024 * 1024
+    const fetchBody = async (href, record) => {
+      let response
+      const end = Math.min(deadline, Date.now() + 10_000)
+      try {
+        if (Date.now() >= deadline || remaining <= 0) throw new Error('probe budget')
+        response = await bounded(() => page.request.get(href, {
+          timeout: Math.max(1, Math.min(10_000, deadline - Date.now())), maxRedirects: 0,
+        }), end)
+        if (record) record.status = response.status()
+        if (!response.ok()) throw new Error('probe response')
+        const length = Number(response.headers()['content-length'])
+        if (length > remaining) throw new Error('probe bytes')
+        const body = await bounded(() => response.body(), end)
+        if (body.length > remaining) { remaining = 0; throw new Error('probe bytes') }
+        remaining -= body.length
+        if (record) { record.bytes = body.length; record.sha256 = hash(body) }
+        return body
+      } finally {
+        try { await bounded(() => response?.dispose(), end) } catch { /* No response bodies retained. */ }
+      }
+    }
+    try {
+      // Reuse the walk's served marker and cached flags, never process.env.
+      const cached = runtime.workerFacts?.buildFlags || runtime.evidence?.buildFlags
+      const flags = cached || JSON.parse((await fetchBody(new URL('/.leaf-walk-build.json', url).href)).toString()).flags
+      const flag = flags?.VITE_CAD_EDIT
+      if (['0', '1', 0, 1, true, false].includes(flag)) result.manifestFlag = flag
+    } catch { /* Unknown manifest flag does not change JS coverage. */ }
+    let pageAssets = []
+    try {
+      const collection = await bounded(() => page.evaluate(() => {
+        const assets = new Set()
+        const kept = []
+        const add = href => {
+          if (!href) return
+          try {
+            const asset = new URL(href, document.baseURI)
+            asset.hash = ''
+            if (asset.origin === location.origin && !assets.has(asset.href)) {
+              assets.add(asset.href)
+              if (kept.length < 40) kept.push(asset.href)
+            }
+          } catch { /* Ignore invalid resource URLs. */ }
+        }
+        for (const entry of performance.getEntriesByType('resource')) {
+          try {
+            if (['script', 'link'].includes(entry.initiatorType) || /\.(?:js|mjs)$/.test(new URL(entry.name, document.baseURI).pathname)) add(entry.name)
+          } catch { /* Ignore invalid resource URLs. */ }
+        }
+        for (const script of document.scripts) add(script.src)
+        for (const link of document.querySelectorAll('link[rel~="modulepreload"]')) add(link.href)
+        return { assets: kept, total: assets.size }
+      }))
+      pageAssets = collection.assets
+      result.servedJs.pageAssetCount = collection.total
+    } catch { /* Fall back to the index when page assets are unavailable. */ }
+    result.servedJs.truncated = result.servedJs.pageAssetCount > pageAssets.length
+    const pageLoaded = pageAssets.length > 0
+    if (pageLoaded) result.servedJs.source = 'page-loaded'
+    let complete = !result.servedJs.truncated
+    let found = false
+    const queue = []
+    const seen = new Set()
+    const enqueue = (specifier, base, depth) => {
+      try {
+        if (depth > 0 && !/^(?:\.?\.?\/|\/|https?:\/\/)/.test(specifier)) { complete = false; return }
+        const asset = new URL(specifier, base)
+        asset.hash = ''
+        if (asset.origin !== url.origin) { complete = false; return }
+        if (seen.has(asset.href)) return
+        seen.add(asset.href)
+        if (queue.length >= 40) { complete = false; return }
+        queue.push({ url: asset, depth })
+      } catch { complete = false }
+    }
+    if (pageLoaded) {
+      for (const href of pageAssets) enqueue(href, url, 0)
+    } else {
+      const indexUrl = new URL('/', url)
+      const index = await fetchBody(indexUrl.href)
+      result.servedJs.indexSha256 = hash(index)
+      for (const tag of index.toString().matchAll(/<(?:script|link)\b[^>]*>/gi)) {
+        const attrs = Object.fromEntries([...tag[0].matchAll(/([\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g)]
+          .map(match => [match[1].toLowerCase(), match[2] ?? match[3] ?? match[4]]))
+        if (/^<script/i.test(tag[0]) && attrs.type === 'module' && attrs.src) enqueue(attrs.src, indexUrl, 0)
+        if (/^<script/i.test(tag[0]) && attrs.type === 'module' && !attrs.src) complete = false
+        if (/^<link/i.test(tag[0]) && attrs.rel?.split(/\s+/).includes('modulepreload') && attrs.href) enqueue(attrs.href, indexUrl, 0)
+      }
+    }
+    if (!queue.length) complete = false
+    for (const asset of queue) {
+      const record = { pathSha256: hash(asset.url.pathname), status: null, bytes: null, sha256: null }
+      result.servedJs.assets.push(record)
+      try {
+        const body = (await fetchBody(asset.url.href, record)).toString()
+        if (body.includes('cad-edit-workbench')) found = true
+        if (!pageLoaded && asset.depth === 0) {
+          for (const match of body.matchAll(/\b(?:import|export)\s*(?:[^;"'()]*?\bfrom\s*)?["']([^"']+)["']|\bimport\s*\(\s*["']([^"']+)["']\s*\)/g)) {
+            enqueue(match[1] || match[2], asset.url, 1)
+          }
+          if (/\bimport\s*\(\s*[^\s"']/.test(body)) complete = false
+        }
+      } catch { complete = false }
+      if (Date.now() >= deadline || remaining <= 0) { complete = false; break }
+    }
+    result.servedJs.coverage = complete ? (pageLoaded ? 'loaded-complete' : 'complete') : 'partial'
+    result.servedJs.markerFound = found ? true : complete ? false : 'UNKNOWN'
+  } catch { /* Best effort only; never mask the existing assertion. */ }
+  return result
+}
+
 const groupNames = { draw: 'Draw', modify: 'Modify', clipboard: 'Clipboard', properties: 'Properties',
       annotation: 'Annotation', block: 'Block', groups: 'Groups', 'solar-panels': 'Panel placement',
       view: 'View', version: 'Version', author: 'Author', rail: 'Rail' }
@@ -476,6 +854,619 @@ export async function discloseControlPanel(page, recipe) {
     await more.click({ timeout: 15_000 })
   }
 }
+
+export function studioJobMonitorContent(page) {
+  return page.locator('aside.rail').filter({ has: page.getByRole('heading', { name: /^Job monitor/ }) })
+    .locator('.rail-ske, .rail-empty, .rail-ledger > *').first()
+}
+
+export async function prepareStudioJobMonitor(page, assertions = expect) {
+  const studio = studioRailButton(page)
+  if (!await studio.isVisible()) return false
+  const close = page.getByRole('button', { name: 'Close Studio', exact: true })
+  if (await close.isVisible()) await close.click()
+  await assertions(studio).toHaveAttribute('aria-expanded', 'false')
+  await assertions(page.getByRole('region', { name: 'Studio sidebar', exact: true })).toBeHidden()
+  return true
+}
+
+export async function assertStudioJobMonitor(page, assertions = expect) {
+  const studio = studioRailButton(page)
+  if (!await studio.isVisible()) return false
+  const sidebar = page.getByRole('region', { name: 'Studio sidebar', exact: true })
+  await assertions(studio).toHaveAttribute('aria-expanded', 'true')
+  await assertions(sidebar).toBeVisible()
+  await assertions(sidebar.getByRole('heading', { name: /^Job monitor/ })).toBeVisible()
+  await assertions(studioJobMonitorContent(page)).toBeVisible()
+  for (const name of ['Collapse the job monitor', 'Collapse the job monitor to a spine']) {
+    await assertions(sidebar.getByRole('button', { name, exact: true, includeHidden: true })).toHaveCount(0)
+  }
+  await assertions(page.getByRole('toolbar', { name: 'Job monitor', exact: true, includeHidden: true })).toHaveCount(0)
+  return true
+}
+
+// Values are from same-tool server inputs, before schema defaults/enums/minima.
+// Labels and select option text follow SchemaForm's accessible names.
+export const SOLAR_REQUIRED_FORM_INPUTS = Object.freeze(Object.fromEntries(Object.entries({
+  'solar-nec-ac-voltage-drop': {
+    current_a: { label: 'Current a', value: 100 },
+    one_way_length_ft: { label: 'One way length ft', value: 100 },
+    r_ohm_per_1000ft: { label: 'R ohm per 1000ft', value: 0.1 },
+    x_ohm_per_1000ft: { label: 'X ohm per 1000ft', value: 0 },
+    power_factor: { label: 'Power factor', value: 1 },
+    phase: { label: 'Phase', value: 1, select: '1' },
+    source_voltage: { label: 'Source voltage', value: 480 },
+  },
+  'solar-nec-ampacity-correction': {
+    base_ampacity: { label: 'Base ampacity', value: 100 },
+    temp_factor: { label: 'Temp factor', value: 0.91 },
+    conduit_factor: { label: 'Conduit factor', value: 0.8 },
+  },
+  'solar-nec-conduit-fill': {
+    conductor_gauge: { label: 'Conductor gauge', value: '12 AWG', select: '12 AWG' },
+    current_carrying_count: { label: 'Current carrying count', value: 3 },
+    conduit_type: { label: 'Conduit type', value: 'EMT', select: 'EMT' },
+    conductor_insulation: { label: 'Conductor insulation', value: 'THWN2', select: 'THWN2' },
+  },
+  'solar-nec-feeder-ocpd': {
+    continuous_current_a: { label: 'Continuous current a', value: 100 },
+    is_continuous: { label: 'Is continuous', value: true, select: 'True' },
+    egc_material: { label: 'Egc material', value: 'Copper', select: 'Copper' },
+  },
+  'solar-trench-manual': {
+    operation: { label: 'Operation', value: 'add-trench', select: 'add-trench' },
+    expected_rev: { label: 'Expected rev', value: 0 },
+    start_x: { label: 'Start x', value: -80 },
+    start_y: { label: 'Start y', value: 0 },
+    end_x: { label: 'End x', value: 320 },
+    end_y: { label: 'End y', value: 0 },
+  },
+}).map(([tool, fields]) => [tool, Object.freeze(Object.fromEntries(Object.entries(fields).map(([key, field]) =>
+  [key, Object.freeze({ ...field, source: tool === 'solar-trench-manual'
+    ? `scenario/test input: server/tests/test_solar_tool_solar_trench_manual.py:${key === 'operation' ? 140 : 40}`
+    : 'scenario/test input: server/tests/test_sip_r6_read.py:28-33' })])))])))
+
+export const PANEL_PERFORMANCE_BUDGET_SOURCE = 'WL28-PANEL-PERFORMANCE-BUDGETS.md'
+export const PANEL_PERFORMANCE_VIEWPORTS = Object.freeze({
+  desktop: Object.freeze({ width: 1440, height: 1000 }),
+  phone: Object.freeze({ width: 390, height: 844 }),
+})
+// Product acceptance targets, not historical baselines. These probes currently
+// run on desktop only; retain the declared phone target without widening scope.
+export const PANEL_PERFORMANCE_BUDGETS = Object.freeze(Object.fromEntries([
+  'action:bar-shortcuts', 'control:claude-accounts', 'control:linked-services', 'control:version-history',
+].map(featureId => [featureId, Object.freeze({
+  source: PANEL_PERFORMANCE_BUDGET_SOURCE, state: 'ready', viewports: Object.freeze(['desktop']),
+  maxDurationMs: Object.freeze({ desktop: 2000, phone: 3000 }), maxRequiredSteps: 1,
+})])))
+
+export async function preparePanelPerformanceCapture({ page, probe, viewport, locator, evidence,
+  createCapture = createPerformanceMeasurementCapture, assertions = expect }) {
+  const budget = PANEL_PERFORMANCE_BUDGETS[probe.featureId]
+  if (!budget || probe.state !== budget.state || !budget.viewports.includes(viewport)) return null
+  const diagnostic = () => {
+    evidence.measurementDiagnostics ||= []
+    evidence.measurementDiagnostics.push({ persona: 'performance', message: 'Optional persona observation failed' })
+  }
+  try {
+    const url = page.url()
+    if (!/^\/app(?:\/|$)/.test(new URL(url).pathname)
+      || !await page.evaluate(() => document.readyState === 'complete') || page.url() !== url) return null
+    for (const role of ['dialog', 'alertdialog', 'menu', 'listbox']) {
+      const overlays = page.getByRole(role)
+      for (let index = 0; index < await overlays.count(); index++) {
+        if (await overlays.nth(index).isVisible()) return null
+      }
+    }
+    let launcher = locator
+    if (probe.featureId === 'action:bar-shortcuts') {
+      const project = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+        .getByRole('button', { name: 'Project', exact: true })
+      launcher = await project.isVisible() ? project
+        : page.getByRole('tablist', { name: 'Workspace profile', exact: true }).getByRole('tab').first()
+    }
+    if (!await launcher.isVisible() || !await launcher.isEnabled()) return null
+    const suffix = `${probe.featureId}[${probe.state}]@${viewport}`
+    let capture = createCapture({ reference: `performance:${suffix}`, baseline: {
+      reference: `${budget.source}:${probe.featureId}@${viewport}`,
+      maxDurationMs: budget.maxDurationMs[viewport], maxRequiredSteps: budget.maxRequiredSteps,
+    } })
+    let started = false
+    const observe = callback => {
+      if (!capture) return
+      try { callback(capture) } catch { capture = null; diagnostic() }
+    }
+    return {
+      // The real dispatch stays outside the optional observer's catch.
+      async dispatch(action) {
+        observe(current => {
+          if (!started) { current.start(); started = true }
+          current.requiredStep()
+        })
+        return action()
+      },
+      async finish() {
+        if (!capture || !started) return
+        try {
+          const spec = ACCESSIBILITY_DIALOG_SCOPE[probe.featureId]
+          const panel = page.getByRole('dialog', { name: spec.name, exact: true })
+          const closeName = probe.featureId === 'action:bar-shortcuts' ? 'Close'
+            : probe.featureId === 'control:version-history' ? 'Close version history' : spec.initialFocus.name
+          const close = panel.getByRole('button', { name: closeName, exact: true })
+          await assertions(panel).toBeVisible()
+          await assertions(close).toBeVisible()
+          await assertions(close).toBeEnabled()
+          const focus = spec.initialFocus.role ? panel.getByRole(spec.initialFocus.role,
+            { name: spec.initialFocus.name, exact: true }) : launcher
+          await assertions(focus).toBeFocused()
+          capture.observeWait({ observed: false, progress: '', reason: '' })
+          capture.finish()
+          const result = capture.result()
+          if (result) addPersonaFragment(evidence, { persona: 'performance', measurements: result,
+            bundleReference: `walk:${suffix}` })
+          else diagnostic()
+        } catch { diagnostic() }
+        capture = null
+      },
+    }
+  } catch { diagnostic(); return null }
+}
+
+export function studioDrawerLocator(page, drawer) {
+  if (!['jobs', 'nav', 'result'].includes(drawer)) throw new Error(`Unknown Studio drawer: ${drawer}`)
+  if (drawer === 'result') return page.locator('.result-block')
+  return drawer === 'jobs' ? studioJobMonitorContent(page) : page.locator('aside.nav')
+}
+
+export async function assertStudioDrawer(page, drawer, open, assertions = expect) {
+  const content = studioDrawerLocator(page, drawer)
+  const sidebar = page.getByRole('region', { name: 'Studio sidebar', exact: true })
+  if (open) {
+    await assertions(studioRailButton(page)).toHaveAttribute('aria-expanded', 'true')
+    await assertions(sidebar).toBeVisible()
+    if (drawer === 'jobs') await assertions(page.getByRole('heading', { name: /Job monitor/ })).toBeVisible()
+    if (drawer === 'result') await assertions(sidebar.locator('.result-block')).toHaveCount(1)
+    else await assertions(content).toBeVisible()
+  } else {
+    await assertions(sidebar).toBeHidden()
+    if (drawer === 'nav') await assertions(content).toBeHidden()
+  }
+}
+
+export async function setStudioDrawer(page, drawer, open, assertions = expect) {
+  if (open) await revealStudioRail(page)
+  else if (await page.getByRole('region', { name: 'Studio sidebar', exact: true }).isVisible()) {
+    await page.getByRole('button', { name: 'Close Studio', exact: true }).click()
+  }
+  await assertStudioDrawer(page, drawer, open, assertions)
+}
+
+export async function studioDrawerProbeLocator(page, probe, describeControl) {
+  const drawer = probe.locator.studioDrawer
+  if (!drawer || !await studioRailButton(page).isVisible()) return null
+  const closing = probe.state === 'open' || probe.state === 'drawer-open'
+  describeControl?.({ role: 'button', name: closing ? 'Close Studio' : 'Studio' })
+  return closing ? page.getByRole('button', { name: 'Close Studio', exact: true }) : studioRailButton(page)
+}
+
+export async function railExpandLauncher(probe, runtime, locator, describeControl) {
+  if (probe.featureId !== 'action:rail-expand' || probe.state !== 'ready'
+    || runtime.testInfo.project.name === 'phone' || await locator.isVisible()) return null
+  const launchers = runtime.page.getByRole('button', { name: /^Open .+ in the tool rail \([0-9]+ tools\)$/ })
+  for (let index = 0; index < await launchers.count(); index++) {
+    const launcher = launchers.nth(index)
+    if (!await launcher.isVisible()) continue
+    const name = await launcher.getAttribute('aria-label') || await launcher.getAttribute('title')
+    const family = name?.match(/^Open (.+) in the tool rail \([0-9]+ tools\)$/)?.[1]
+    if (!family) throw new Error('Tool rail launcher must identify its family')
+    runtime.railExpandFamily = family
+    describeControl?.({ role: 'button', name })
+    return launcher
+  }
+  return null
+}
+
+export async function assertRailExpandFamily(page, family, assertions = expect) {
+  await assertStudioDrawer(page, 'nav', true, assertions)
+  const name = new RegExp('^' + family.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*·')
+  const section = page.locator('aside.nav .section').filter({ has: page.getByRole('button', { name }) })
+  await assertions(section.locator('.section-body')).toBeVisible()
+}
+
+export async function prepareChooserStart(runtime, assertions = expect) {
+  const { page, evidence } = runtime
+  evidence.chooserTask = {
+    startingChooser: 'What would you like to work on?',
+    targetLabel: 'Open project or material',
+    nextStep: 'Project sidebar visible; Close Project focused; Project expanded',
+  }
+  const heading = page.getByRole('heading', { name: evidence.chooserTask.startingChooser, exact: true })
+  if (!await heading.isVisible()) {
+    await page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+      .getByRole('button', { name: 'Choose', exact: true }).click()
+  }
+  await assertions(heading).toBeVisible()
+  await assertions(page.getByRole('region', { name: 'Project sidebar', exact: true })).toBeHidden()
+}
+
+export async function assertChooserOpen(runtime, assertions = expect) {
+  const { page } = runtime
+  await assertions(page.getByRole('region', { name: 'Project sidebar', exact: true })).toBeVisible()
+  await assertions(page.getByRole('button', { name: 'Close Project', exact: true })).toBeFocused()
+  await assertions(page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+    .getByRole('button', { name: 'Project', exact: true })).toHaveAttribute('aria-expanded', 'true')
+}
+
+export async function runChooserOpen(probe, runtime, assertions = expect) {
+  const { page, evidence } = runtime
+  const primaryLocator = page.getByRole('button', { name: 'Open project or material', exact: true })
+  const navigationLocator = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+  let nextStepFound = false, failure
+  try {
+    await assertions(primaryLocator).toBeVisible()
+    await assertions(primaryLocator).toHaveCount(1)
+    await primaryLocator.click()
+    evidence.oracleReached = probe.assertion.assertionId
+    await assertEffect(probe, runtime, primaryLocator, {}, assertions)
+    nextStepFound = true
+  } catch (error) { failure = error }
+  try {
+    await navigationLocator.getByRole('button', { name: 'Choose', exact: true }).click()
+    await assertions(page.getByRole('heading', { name: 'What would you like to work on?', exact: true })).toBeVisible()
+  } catch (error) { failure ||= error }
+  try {
+    const measurements = await collectUnfamiliarMeasurements({ page, primaryLocator, navigationLocator,
+      nextStepFound, reference: 'unfamiliar:control:chooser-open[ready]@desktop' })
+    if (measurements) addPersonaFragment(evidence, { persona: 'unfamiliar', measurements,
+      bundleReference: 'walk:control:chooser-open[ready]@desktop' })
+  } catch { /* Optional evidence never changes the functional verdict. */ }
+  if (failure) throw failure
+}
+
+export function addPersonaFragment(evidence, { persona, measurements, bundleReference }) {
+  try {
+    const fragments = (evidence.personaFragments || []).filter(fragment => fragment.persona !== persona)
+    fragments.push({ persona, measurements })
+    let bundle = composePersonaMeasurementBundle({ reference: bundleReference, fragments })
+    if (!bundle) {
+      evidence.measurementDiagnostics ||= []
+      evidence.measurementDiagnostics.push({ message: 'Optional persona measurement fragment rejected' })
+      bundle = composePersonaMeasurementBundle({ reference: bundleReference, fragments: evidence.personaFragments || [] })
+    } else evidence.personaFragments = fragments
+    evidence.measurements = bundle?.measurements ?? null
+    evidence.measurementSources = bundle?.sources ?? []
+    evidence.measurementConflicts = bundle?.conflicts ?? []
+  } catch { /* Optional evidence never changes the functional verdict. */ }
+}
+
+// Optional observers consume only facts supplied at the existing assertion sites.
+export function createWalkPersonaObservers({ probe, viewport, evidence,
+  endUser = createEndUserMeasurementCapture, support = collectSupportMeasurements,
+  opsSre = createOpsSreMeasurementCapture, redHat = createRedHatMeasurementCapture,
+  qcDev = createQcDevMeasurementCapture, uiUx = collectUiUxMeasurements }) {
+  const captures = new Map(), observed = new Set()
+  const suffix = `${probe.featureId}[${probe.state}]@${viewport}`
+  const retry = probe.featureId === 'action:bar-retry' && probe.state === 'retry-history'
+  const diagnostic = (persona) => {
+    captures.delete(persona)
+    observed.delete(persona)
+    evidence.measurementDiagnostics ||= []
+    evidence.measurementDiagnostics.push({ persona, message: 'Optional persona observation failed' })
+  }
+  const create = (persona, factory, options = {}) => {
+    try {
+      const capture = factory({ reference: `${persona}:${suffix}`, ...options })
+      if (capture) captures.set(persona, capture)
+    } catch { diagnostic(persona) }
+  }
+  if (viewport === 'desktop' && probe.featureId === 'control:version-history' && probe.state === 'ready') {
+    create('end-user', endUser, { expectedEffect: 'version-history-open' })
+    try { captures.get('end-user')?.start() } catch { diagnostic('end-user') }
+    create('qc-dev', qcDev, { action: 'control:version-history', expectedResult: 'version-history-open',
+      expectedOrder: ['control:version-history', 'version-history-open'] })
+    captures.set('ui-ux-dev', uiUx)
+  }
+  if (retry && viewport === 'desktop') {
+    create('qc-dev', qcDev, { action: 'action:bar-retry', expectedResult: 'Versions restored',
+      expectedOrder: ['action:bar-retry', 'history-recovery-request', 'Versions restored'] })
+  }
+  if (retry && ['desktop', 'phone'].includes(viewport)) {
+    create('ops-sre', opsSre)
+    captures.set('support', support)
+  }
+  if (probe.featureId && probe.state && probe.assertion?.target === 'engine-refusal'
+    && ['desktop', 'phone'].includes(viewport)) create('red-hat', redHat)
+  return {
+    async observe(persona, event, value) {
+      const capture = captures.get(persona)
+      if (!capture) return
+      try {
+        if (persona === 'ui-ux-dev') {
+          if (event !== 'completion') return
+          const measurements = await capture({ ...value, reference: `ui-ux-dev:${suffix}` })
+          if (measurements) {
+            captures.set(persona, { ...measurements, coverage: { kind: 'automated-proxy',
+              predicates: ['ui-ux-dev.completion-proxy'] } })
+            observed.add(persona)
+          }
+        } else if (persona === 'support') {
+          if (event !== 'alert' || value.errorObserved !== true) return
+          const { page, alert } = value
+          const measurements = await capture({ page, errorObserved: true, reference: `support:${suffix}`,
+            errorLocator: alert.locator('.pane-fail-title'), explanationLocator: alert.locator('.pane-fail-reason'),
+            recoveryLocator: alert.getByRole('button', { name: 'Retry', exact: true }) })
+          if (measurements) { captures.set(persona, measurements); observed.add(persona) }
+        } else {
+          if (persona === 'red-hat' && ['before', 'after'].includes(event)) value = protectedStateDigest(value)
+          await capture[event](value)
+          if ((persona === 'end-user' && event === 'observeEffect')
+            || (persona === 'qc-dev' && event === 'start')
+            || (persona === 'ops-sre' && event === 'observeFailure' && value === true)
+            || (persona === 'red-hat' && event === 'observeRefusal' && value.observed === true)) observed.add(persona)
+        }
+      } catch { diagnostic(persona) }
+    },
+    async finish() {
+      for (const persona of observed) {
+        try {
+          const capture = captures.get(persona)
+          const measurements = ['support', 'ui-ux-dev'].includes(persona) ? capture
+            : persona === 'red-hat' ? await capture.result() : await capture.finish()
+          if (measurements) addPersonaFragment(evidence, { persona, measurements, bundleReference: `walk:${suffix}` })
+        } catch { diagnostic(persona) }
+      }
+      observed.clear()
+    },
+  }
+}
+
+export async function prepareQcDevHistory(probe, runtime, locator, before, assertions = expect) {
+  if (probe.featureId !== 'control:version-history' || probe.state !== 'ready'
+    || runtime.testInfo?.project?.name !== 'desktop') return
+  try {
+    // The private fixture must already be loaded; this observer never opens it.
+    if (!runtime.drawingId || runtime.evidence.drawingId !== runtime.drawingId || runtime.failedDrawing
+      || before.visible !== false) return
+    await assertions(canvas(runtime.page)).toBeVisible()
+    await assertions(runtime.page.getByRole('dialog', { name: 'Version history', exact: true })).toBeHidden()
+    await assertions(locator).toHaveAttribute('aria-expanded', 'false')
+    await runtime.walkPersonaObservers?.observe('qc-dev', 'start')
+  } catch { /* A failed precondition cannot produce a QC PASS. */ }
+}
+
+export function mergeAccessibilityMeasurements(existing, result) {
+  const merge = (previous, observed) => {
+    const merged = { ...previous }
+    for (const [key, value] of Object.entries(observed || {})) {
+      if (value === undefined) continue
+      merged[key] = value && typeof value === 'object' && !Array.isArray(value)
+        ? merge(previous?.[key], value) : value
+    }
+    return merged
+  }
+  return merge(existing, Object.fromEntries(['reference', 'overlay', 'focus']
+    .filter(key => result?.[key] !== undefined).map(key => [key, result[key]])))
+}
+
+export const ACCESSIBILITY_DIALOG_SCOPE = Object.freeze({
+  'control:linked-services': Object.freeze({ states: Object.freeze(['ready', 'failed-load']), name: 'Linked services',
+    initialFocus: Object.freeze({ role: 'button', name: 'Close linked services panel', key: 'close-linked-services' }),
+    expectedModal: false, expectedEscapeClosed: true }),
+  'control:claude-accounts': Object.freeze({ states: Object.freeze(['ready', 'failed-load']), name: 'Claude accounts',
+    initialFocus: Object.freeze({ role: 'button', name: 'Close Claude account panel', key: 'close-claude-accounts' }),
+    expectedModal: false, expectedEscapeClosed: true }),
+  'control:session-details': Object.freeze({ states: Object.freeze(['ready', 'failed-load']), name: 'Session details',
+    initialFocus: Object.freeze({ role: 'button', name: 'Close details', key: 'close-session-details' }),
+    expectedModal: false, expectedEscapeClosed: true }),
+  'control:version-history': Object.freeze({ states: Object.freeze(['ready']), name: 'Version history',
+    initialFocus: Object.freeze({ key: 'control:version-history' }), expectedModal: false, expectedEscapeClosed: true }),
+  'action:bar-shortcuts': Object.freeze({ states: Object.freeze(['ready']), name: 'Keyboard shortcuts',
+    initialFocus: Object.freeze({ role: 'switch', name: 'Single-key shortcuts', key: 'single-key-shortcuts' }),
+    // PR #2632 made the shortcut sheet modal.
+    expectedModal: true, expectedEscapeClosed: true }),
+})
+
+export async function accessibilityDialogTargets({ page, probe, viewport, locator }) {
+  const spec = ACCESSIBILITY_DIALOG_SCOPE[probe.featureId]
+  if (viewport !== 'desktop' || !spec?.states.includes(probe.state)) return null
+  let opener = locator
+  let key = probe.featureId
+  if (probe.featureId === 'action:bar-shortcuts') {
+    const project = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+      .getByRole('button', { name: 'Project', exact: true })
+    const projectVisible = await project.isVisible()
+    opener = projectVisible ? project : page.getByRole('tablist', { name: 'Workspace profile', exact: true })
+      .getByRole('tab').first()
+    key = projectVisible ? 'workspace-project' : 'workspace-profile-tab'
+  }
+  const target = { key, locator: opener }
+  const openTarget = spec.initialFocus?.role
+    ? { key: spec.initialFocus.key,
+      locator: page.getByRole(spec.initialFocus.role, { name: spec.initialFocus.name, exact: true }) } : target
+  return { openTarget, returnTarget: { ...target },
+    dialog: page.getByRole('dialog', { name: spec.name, exact: true }) }
+}
+
+function accessibilityDiagnostic(evidence, phase) {
+  evidence.accessibilityDiagnostics ||= []
+  evidence.accessibilityDiagnostics.push({ phase, message: 'Optional accessibility observation failed' })
+}
+
+export async function prepareAccessibilityCapture({ page, probe, viewport, locator, evidence, cleanup,
+  createCapture = createAccessibilityMeasurementCapture }) {
+  try {
+    const targets = await accessibilityDialogTargets({ page, probe, viewport, locator })
+    if (!targets) return null
+    const capture = createCapture({ page, ...targets,
+      reference: `accessibility:${probe.featureId}[${probe.state}]@${viewport}` })
+    cleanup.push(async () => {
+      try { await capture.dispose() } catch { accessibilityDiagnostic(evidence, 'dispose') }
+    })
+    return { ...capture, expectedModal: ACCESSIBILITY_DIALOG_SCOPE[probe.featureId].expectedModal }
+  } catch { accessibilityDiagnostic(evidence, 'prepare'); return null }
+}
+
+export async function followAccessibilityCapture({ capture, page, evidence,
+  bundleReference = `walk:${evidence.featureId}[${evidence.state}]@${evidence.viewport}` }) {
+  if (!capture) return
+  let phase = 'opened'
+  try {
+    await capture.opened()
+    phase = 'tab'
+    await page.keyboard.press('Tab')
+    await capture.afterTab()
+    phase = 'escape'
+    await page.keyboard.press('Escape')
+    await capture.afterEscape()
+  } catch { accessibilityDiagnostic(evidence, phase) }
+  try {
+    const result = capture.result()
+    const measurements = Object.fromEntries(['reference', 'overlay', 'focus']
+      .filter(key => result?.[key] !== undefined).map(key => [key, result[key]]))
+    if (typeof capture.expectedModal === 'boolean') {
+      measurements.overlay = { ...measurements.overlay, expectedModal: capture.expectedModal }
+    }
+    addPersonaFragment(evidence, { persona: 'accessibility', measurements, bundleReference })
+    evidence.accessibilityDiagnostics ||= []
+    if (result.diagnostics) evidence.accessibilityDiagnostics.push({ phase: 'observations', ...result.diagnostics })
+  } catch { accessibilityDiagnostic(evidence, 'result') }
+}
+
+async function disclosePhonePlan(page) {
+  const tab = page.getByRole('tablist', { name: 'Ribbon', exact: true })
+    .getByRole('tab', { name: 'View', exact: true })
+  if (await tab.getAttribute('aria-selected') !== 'true') await tab.click()
+  await discloseControlPanel(page, { group: 'view' })
+}
+
+export async function readPhonePanel(page, panel) {
+  if (!['Jobs', 'Plan'].includes(panel)) throw new Error(`Unknown phone panel: ${panel}`)
+  if (!await studioRailButton(page).isVisible()) return await panelButton(page, panel).getAttribute('aria-expanded') === 'true'
+  if (panel === 'Plan') return await page.getByRole('region', { name: 'Entitlements', exact: true }).isVisible()
+  return await page.getByRole('region', { name: 'Studio sidebar', exact: true }).isVisible()
+    && await page.getByRole('heading', { name: /Job monitor/ }).isVisible()
+    && await studioJobMonitorContent(page).isVisible()
+}
+
+export async function assertPhonePanel(page, panel, open, assertions = expect) {
+  if (!['Jobs', 'Plan'].includes(panel)) throw new Error(`Unknown phone panel: ${panel}`)
+  const studio = studioRailButton(page)
+  if (!await studio.isVisible()) {
+    await assertions(panelButton(page, panel)).toHaveAttribute('aria-expanded', String(open))
+    return
+  }
+  if (panel === 'Plan') {
+    await assertions(page.locator('.app')).toHaveAttribute('data-drawer', open ? 'plan' : 'none')
+    await assertions(page.getByRole('region', { name: 'Entitlements', exact: true }))[open ? 'toBeVisible' : 'toBeHidden']()
+    return
+  }
+  await assertions(studio).toHaveAttribute('aria-expanded', String(open))
+  await assertions(page.getByRole('region', { name: 'Studio sidebar', exact: true }))[open ? 'toBeVisible' : 'toBeHidden']()
+  if (open) {
+    await assertions(page.getByRole('heading', { name: /Job monitor/ })).toBeVisible()
+    await assertions(studioJobMonitorContent(page)).toBeVisible()
+  }
+}
+
+export async function setPhonePanel(page, panel, open, assertions = expect) {
+  if (!['Jobs', 'Plan'].includes(panel)) throw new Error(`Unknown phone panel: ${panel}`)
+  const studio = studioRailButton(page)
+  if (!await studio.isVisible()) {
+    const button = panelButton(page, panel)
+    await assertions(button).toBeVisible()
+    if ((await button.getAttribute('aria-expanded') === 'true') !== open) await button.click()
+  } else if (panel === 'Jobs') {
+    await setStudioDrawer(page, 'jobs', open, assertions)
+  } else if ((await page.locator('.app').getAttribute('data-drawer') === 'plan') !== open) {
+    await disclosePhonePlan(page)
+    await page.getByRole('toolbar', { name: 'Drafting tools', exact: true })
+      .getByRole('button', { name: 'properties', exact: true }).click()
+  }
+  await assertPhonePanel(page, panel, open, assertions)
+}
+
+async function phoneProbeLocator(page, probe) {
+  const recipe = probe.locator.phone
+  if (!recipe?.phonePanel) return null
+  if (!await studioRailButton(page).isVisible()) return recipe.legacy || probe.locator
+  if (recipe.phonePanel === 'Plan') await disclosePhonePlan(page)
+  return recipe
+}
+
+async function assertPhoneDrawersClosed(page, assertions) {
+  if (await studioRailButton(page).isVisible()) {
+    await assertPhonePanel(page, 'Jobs', false, assertions)
+    await assertPhonePanel(page, 'Plan', false, assertions)
+  } else {
+    for (const label of ['Catalog', 'Jobs', 'Result', 'Plan']) await assertions(panelButton(page, label)).toHaveAttribute('aria-expanded', 'false')
+  }
+}
+
+export function absenceNamePattern(locator) {
+  if (locator?.unavailableName !== undefined) {
+    if (locator.unavailableName instanceof RegExp
+      || typeof locator.unavailableName === 'string' && locator.unavailableName.trim()) return locator.unavailableName
+    throw new Error('Absence oracle requires a stable action name')
+  }
+  const name = locator?.availableName || locator?.name
+  const label = typeof name === 'string' ? name.split(' (unavailable: ')[0] : ''
+  if (!label.trim()) throw new Error('Absence oracle requires a stable action name')
+  return new RegExp('^' + label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?: \\(unavailable: .+\\))?$')
+}
+
+export async function resolveSurfaceControl(page, probe, evidence = {}) {
+  const profile = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+    .getByRole('combobox', { name: 'Workspace profile', exact: true })
+  const modern = await profile.isVisible()
+  const legacy = modern
+    ? page.getByRole('tablist', { name: 'Workspace profile', exact: true, includeHidden: true })
+      .getByRole('tab', { name: probe.locator.name, exact: probe.locator.exact !== false, includeHidden: true })
+    : control(page, probe.locator)
+  return {
+    locator: modern ? profile : legacy, legacy, modern,
+    activate: async () => {
+      if (modern) {
+        const offered = await profile.locator('option').evaluateAll(options => options.map(option => option.value))
+        if (!offered.includes(probe.sourceId)) {
+          evidence.surfacePrecondition = { surface: probe.sourceId, reason: 'profile not enabled on this target',
+            offered, source: 'web/src/site/productSurfaces.js:716' }
+          throw new Error(`surface precondition: ${probe.sourceId} is not an enabled workspace profile on this target`)
+        }
+        await profile.selectOption(probe.sourceId)
+      }
+      else await legacy.click()
+    },
+    assertSelected: async (assertions = expect) => {
+      if (modern) {
+        await assertions(profile).toHaveValue(probe.sourceId)
+        await assertions(page.locator('section.workspace-environment')).toHaveAttribute('data-profile', probe.sourceId)
+      } else await assertions(legacy).toHaveAttribute('aria-selected', 'true')
+    },
+  }
+}
+
+export async function assertSurfaceState(locator, state, assertions = expect) {
+  await assertions(locator.locator('[data-state]')).toHaveAttribute('data-state', state)
+}
+
+export async function assertBrowserAssetGround(page, assertions = expect) {
+  const asset = page.getByRole('region', { name: 'Browser asset', exact: true })
+  await assertions(asset).toBeVisible()
+  await assertions(asset.getByRole('heading', { name: 'No app to show yet', exact: true })
+    .or(asset.locator('iframe, .project-page, .portfolio')).first()).toBeVisible()
+  const project = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+    .getByRole('button', { name: 'Project', exact: true })
+  await assertions(project).toBeVisible()
+  await project.click()
+  try {
+    await assertions(page.getByRole('region', { name: 'Project workspace', exact: true })).toBeVisible()
+  } finally {
+    const close = page.getByRole('button', { name: 'Close Project', exact: true })
+    await assertions(close).toBeVisible()
+    await close.click()
+  }
+}
+
 const panelButton = (page, name) => page.getByRole('group', { name: 'Workspace panels', exact: true })
   .getByRole('button', { name, exact: true })
 const canvas = (page) => page.getByRole('region', { name: 'Drawing', exact: true }).locator('canvas:visible')
@@ -524,6 +1515,7 @@ export async function requireNoDrawing(page, assertions = expect) {
 }
 async function requireWorkspace(runtime) {
   const { page } = runtime
+  await enterWorkspaceEnvironment(page)
   await expect(page.getByRole('combobox', { name: 'Command bar', exact: true })).toBeVisible()
   if (runtime.failedDrawing) {
     await expect(page.getByRole('alert').filter({ hasText: /Couldn['’]t load drawing/ })).toBeVisible()
@@ -735,15 +1727,18 @@ async function setDrawer(page, name, open) {
   if ((await button.getAttribute('aria-expanded') === 'true') !== open) await button.click()
   await expect(button).toHaveAttribute('aria-expanded', String(open))
 }
-export async function setJobRail(page, open, phone = false, assertions = expect) {
-  if (phone) { await setDrawer(page, 'Jobs', open); return }
+export async function setJobRail(page, open, phone = false, assertions = expect, detectStudio = true) {
+  if (detectStudio && await studioRailButton(page).isVisible()) { await setStudioDrawer(page, 'jobs', open, assertions); return }
+  if (phone) { await setPhonePanel(page, 'Jobs', open, assertions); return }
   const expand = page.getByRole('button', { name: /^Expand the job monitor \([0-9]+ live\)$/ })
   const collapse = page.getByRole('button', { name: 'Collapse the job monitor to a spine', exact: true })
   if (open ? await expand.isVisible() : await collapse.isVisible()) await (open ? expand : collapse).click()
   await assertions(open ? collapse : expand).toBeVisible()
   await assertions(page.locator('aside.rail .rail-ledger')).toHaveCount(open ? 1 : 0)
 }
-async function setToolRail(page, open, phone) {
+export async function setToolRail(page, open, phone, assertions = expect, detectStudio = true) {
+  if (detectStudio && await studioRailButton(page).isVisible()) { await setStudioDrawer(page, 'nav', open, assertions); return }
+  const expect = assertions
   const expand = page.getByRole('button', { name: 'Tool rail', exact: true })
   const collapse = page.getByRole('button', { name: 'Collapse the tool rail to a spine', exact: true })
   if (phone) {
@@ -773,14 +1768,25 @@ async function setToolRail(page, open, phone) {
 const baselineThreePanels = Object.freeze({
   'claude-accounts-panel': { role: 'dialog', name: 'Claude accounts', close: 'Close Claude account panel' },
   'linked-services-panel': { role: 'dialog', name: 'Linked services', close: 'Close linked services panel' },
-  'session-provenance': { role: 'dialog', name: 'Session · provenance', close: 'Close details' },
+  'session-provenance': { role: 'dialog', name: 'Session details', close: 'Close details' },
   'version-history': { role: 'dialog', name: 'Version history', close: 'Close version history' },
   'cost-panel': { role: 'region', name: 'What Leaf costs to operate', close: 'Close cost panel' },
 })
 const namedPanel = (page, spec) => page.getByRole(spec.role, { name: spec.name, exact: true })
-async function closeBaselinePanel(page, spec) {
+export async function closeBaselinePanel(page, spec, evidence = {}) {
   const panel = namedPanel(page, spec)
-  if (await panel.isVisible()) await panel.getByRole('button', { name: spec.close, exact: true }).click()
+  if (await panel.isVisible()) {
+    const close = panel.getByRole('button', { name: spec.close, exact: true })
+    let exiting = false
+    try {
+      await close.waitFor({ state: 'attached', timeout: 2000 })
+    } catch (error) {
+      if (error.name !== 'TimeoutError') throw error
+      exiting = true
+      evidence.baselineCloseSkipped = 'panel-exiting'
+    }
+    if (!exiting) await close.click()
+  }
   await expect(panel).toBeHidden()
 }
 async function clearComposer(page) {
@@ -865,9 +1871,16 @@ export async function captureEngineRefusal(runtime) {
 
 export async function assertEngineRefusal(probe, runtime, before, assertions = expect) {
   const status = runtime.page.getByTestId('cad-edit-workbench').getByRole('status')
+  runtime.evidence.engineRefusal = { expected: probe.assertion.refusal, observed: await status.innerText(), before }
   await assertions(status).toHaveText(probe.assertion.refusal)
   const after = await captureEngineRefusal(runtime)
   runtime.evidence.engineRefusal = { expected: probe.assertion.refusal, observed: await status.innerText(), before, after }
+  if (probe.featureId && probe.state && probe.assertion.target === 'engine-refusal') {
+    await runtime.walkPersonaObservers?.observe('red-hat', 'observeRefusal', {
+      observed: true, visibleText: runtime.evidence.engineRefusal.observed,
+    })
+    await runtime.walkPersonaObservers?.observe('red-hat', 'after', after)
+  }
   assertions(after).toEqual(before)
 }
 
@@ -1084,7 +2097,7 @@ export async function completeSolarReadiness(probe, runtime, locator, assertions
   await workspace(probe, runtime)
   await assertions(runtime.page.locator('.workspace-card')).toHaveAttribute('data-engine-document',
     new RegExp(`^${runtime.drawingId}-v[1-9]\\d*\\.dxf$`), { timeout: 60_000 })
-  await assertions(locator.locator('[data-state]')).toHaveAttribute('data-state', 'available')
+  await assertSurfaceState(locator, 'available', assertions)
   await assertions(locator).toContainText('Ready')
   runtime.evidence.solarReadiness.released = 'Ready'
 }
@@ -1202,13 +2215,24 @@ export async function setupHistoryFault(probe, runtime, assertions = expect, his
   runtime.cleanup.push(runtime.releaseHistoryFault)
   await history(probe, runtime, assertions)
   await assertions(page.getByRole('dialog', { name: 'Version history', exact: true }).getByRole('alert')).toBeVisible()
+  if (probe.featureId === 'action:bar-retry' && probe.state === 'retry-history') {
+    const alert = page.getByRole('dialog', { name: 'Version history', exact: true }).getByRole('alert')
+    await runtime.walkPersonaObservers?.observe('ops-sre', 'observeFailure', true)
+    // No wait was observed by this setup. Elapsed request time is not UI evidence.
+    await runtime.walkPersonaObservers?.observe('ops-sre', 'observeWait', { observed: false, progress: '', reason: '' })
+    await runtime.walkPersonaObservers?.observe('support', 'alert', { page, alert, errorObserved: true })
+  }
   assertions(fault.failed.length).toBe(1)
   await runtime.releaseHistoryFault()
   const observe = (request) => {
-    if (request.method() === 'GET' && new URL(request.url()).pathname === path) fault.recovery.push(request.url())
+    if (request.method() === 'GET' && new URL(request.url()).pathname === path) {
+      fault.recovery.push(request.url())
+      void runtime.walkPersonaObservers?.observe('qc-dev', 'observeEvent', 'history-recovery-request')
+    }
   }
   page.on('request', observe)
   runtime.cleanup.push(async () => page.off('request', observe))
+  await runtime.walkPersonaObservers?.observe('qc-dev', 'start')
 }
 
 export async function assertHistoryRecovery(runtime, assertions = expect) {
@@ -1242,9 +2266,18 @@ export async function setupRealProject(runtime, assertions = expect) {
     }, previousOrg)
   })
   await page.reload({ timeout: 60_000 })
+  await enterWorkspaceEnvironment(page, assertions)
   await page.getByRole('button', { name: 'Start', exact: true }).click({ timeout: 15_000 })
   const board = page.getByRole('region', { name: 'Project workspace', exact: true })
-  await assertions(board).toBeVisible()
+  const openProject = page.getByRole('button', { name: 'Open project or material', exact: true })
+  try {
+    await assertions.poll(async () => await board.isVisible() || await openProject.isVisible(),
+      { timeout: 15_000 }).toBe(true)
+    if (await openProject.isVisible()) await openProject.click({ timeout: 15_000 })
+    await assertions(board).toBeVisible({ timeout: 15_000 })
+  } catch (cause) {
+    throw new Error('open-real-project: Start did not reach the Project workspace board', { cause })
+  }
   // WorkspaceProjectSlot supplies the drawing's name; the controller creates
   // and opens the project directly, without a name field or native dialog.
   const create = board.getByRole('button', { name: 'Create project from this drawing', exact: true })
@@ -1263,9 +2296,20 @@ export async function setupRealProject(runtime, assertions = expect) {
   assertions(name).toBeTruthy()
   evidence.escapeProject = { orgId: org.org_id, projectId: project.project_id, name }
   await assertions(page.locator('.workspace-summary')).toContainText(name)
-  await assertions(board).toHaveAttribute('data-project-state', 'project')
-  await assertions(board.getByText('Versions live with a workspace project', { exact: true })).toHaveCount(0)
-  await assertions(board.getByText('Runs appear here with a project open', { exact: true })).toHaveCount(0)
+  const projectStateBoard = page.getByRole('region', { name: 'Project workspace', exact: true, includeHidden: true })
+  await assertions(projectStateBoard).toHaveAttribute('data-project-state', 'project')
+  await assertions(projectStateBoard.getByText('Versions live with a workspace project', { exact: true })).toHaveCount(0)
+  await assertions(projectStateBoard.getByText('Runs appear here with a project open', { exact: true })).toHaveCount(0)
+  const environment = page.locator('section.workspace-environment')
+  try {
+    if (await openProject.isVisible()
+      || await environment.count() && await readLocatorAttribute(environment, 'data-entered') !== 'true') {
+      await enterWorkspaceEnvironment(page, assertions)
+      await assertions(environment).toHaveAttribute('data-entered', 'true', { timeout: 15_000 })
+    }
+  } catch (cause) {
+    throw new Error('open-real-project: workspace did not re-enter after project creation', { cause })
+  }
   const back = page.getByRole('button', { name: 'Return to drawing', exact: true })
   if (await back.isVisible()) await back.click({ timeout: 15_000 })
   await assertions(board).toBeHidden()
@@ -1412,6 +2456,81 @@ export async function openProjectSolar(runtime, assertions = expect) {
   })
 }
 
+const readLocatorAttribute = async (locator, name) => await locator.getAttribute?.(name) ?? null
+
+export async function closeProjectPanelIfOpen(page) {
+  const controls = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+  if (!await controls.count?.()) return
+  const project = controls.getByRole('button', { name: 'Project', exact: true })
+  if (!await project.count() || await readLocatorAttribute(project, 'aria-expanded') !== 'true') return
+  await walkClick(project, 'Close Project panel')
+  await expect(project).toHaveAttribute('aria-expanded', 'false', { timeout: 15_000 })
+}
+
+export async function enterWorkspaceIfChooser(page, beforeClick = () => {}) {
+  const environment = page.locator('section.workspace-environment')
+  if (!await environment.count() || await readLocatorAttribute(environment, 'data-entered') === 'true') return false
+  const resume = environment.getByRole('button', { name: 'Continue workspace', exact: true })
+  if (await resume.isVisible()) {
+    beforeClick()
+    await walkClick(resume, 'Continue workspace')
+  } else {
+    const open = environment.getByRole('button', { name: 'Open project or material', exact: true })
+    if (!await open.isVisible()) return false
+    beforeClick()
+    await walkClick(open, 'Enter workspace')
+    await closeProjectPanelIfOpen(page)
+  }
+  return true
+}
+
+export async function enterWorkspaceEnvironment(page, assertions = expect) {
+  const environment = page.locator('section.workspace-environment')
+  let attached = false, clicks = 0, entryLimitError
+  try {
+    await assertions.poll(async () => {
+      attached = !!await environment.count() || attached
+      try {
+        await enterWorkspaceIfChooser(page, () => {
+          if (clicks >= 3) {
+            entryLimitError = new Error('Workspace data-entered still requires entry after 3 clicks')
+            throw entryLimitError
+          }
+          clicks++
+        })
+      } catch (error) {
+        // Finish the poll before throwing: expect.poll retries predicate errors.
+        if (error === entryLimitError) return true
+        throw error
+      }
+      return !!await environment.count() && await readLocatorAttribute(environment, 'data-entered') === 'true'
+    }, { timeout: 20_000 }).toBe(true)
+  } catch (error) {
+    if (attached) throw error
+  }
+  if (entryLimitError) throw entryLimitError
+}
+
+export async function reloadAndReenter(page, options) {
+  await page.reload(options)
+  await enterWorkspaceEnvironment(page)
+}
+
+export async function openSolarCadProfile(page) {
+  const controls = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+  if (await controls.count?.()) {
+    const profile = controls.getByRole('combobox', { name: 'Workspace profile', exact: true })
+    if (await profile.count()) {
+      await profile.selectOption({ label: 'Solar CAD' })
+      const environment = page.locator('section.workspace-environment')
+      await expect.poll(() => readLocatorAttribute(environment, 'data-profile'), { timeout: 15_000 }).toBe('solar')
+      await enterWorkspaceEnvironment(page)
+      return
+    }
+  }
+  await walkClick(page.getByRole('tab', { name: 'Solar CAD', exact: true }), 'Open Solar CAD tab')
+}
+
 export async function selectProjectSolarVersion(runtime, assertions = expect) {
   const { page, projectSolar: solar } = runtime
   // web/src/site/BoardTiles.jsx:41,59-61 renders this count only from workspace versions;
@@ -1429,7 +2548,8 @@ export async function selectProjectSolarVersion(runtime, assertions = expect) {
   await assertions(version, `version ${solar.binding.input_version_id} is not listed in the Versions pane within 30 s`)
     .toBeVisible({ timeout: 30_000 })
   await version.click({ timeout: 30_000 })
-  await walkClick(page.getByRole('tab', { name: 'Solar CAD', exact: true }), 'Open Solar CAD tab')
+  await closeProjectPanelIfOpen(page)
+  await openSolarCadProfile(page)
   await assertProjectSolarDrawing(runtime, assertions)
 }
 
@@ -1440,6 +2560,7 @@ export async function openProjectSolarTool(runtime, tool, assertions = expect, {
     await walkClick(editor.getByRole('button', { name: /^(Close|Cancel)$/ }), 'Close Solar editor')
     await assertions(editor).toHaveCount(0)
   }
+  await closeProjectPanelIfOpen(page)
   await walkClick(page.getByRole('tab', { name: 'Solar', exact: true }), 'Open Solar tab')
   const ribbon = page.getByTestId('drafting-ribbon').locator(`button[data-tool="${tool}"]`)
   const rail = page.locator(`#solar-step-${tool}`)
@@ -1454,6 +2575,86 @@ export async function openProjectSolarTool(runtime, tool, assertions = expect, {
   return true
 }
 
+export async function releaseProjectSolarCheckout(runtime, { request = playwrightRequest, timeoutMs = 10_000 } = {}) {
+  const lease = runtime.projectSolarCheckout
+  if (!lease || lease.released) return
+  const deadline = Date.now() + timeoutMs
+  const bounded = async (action, budget = deadline - Date.now()) => {
+    let timer
+    try {
+      if (budget <= 0) throw new Error('release timeout')
+      return await Promise.race([
+        Promise.resolve().then(action),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('release timeout')), budget) }),
+      ])
+    } finally { clearTimeout(timer) }
+  }
+  let context
+  let uiReleaseFailed = false
+  try {
+    if (runtime.page && !runtime.page.isClosed?.()) {
+      try {
+        // Reserve half the remaining time for a page-independent fallback.
+        await bounded(() => runtime.projectSolarReleaseUI
+          ? runtime.projectSolarReleaseUI()
+          : releaseUI(), Math.max(1, Math.floor((deadline - Date.now()) / 2)))
+        lease.released = true
+        return
+      } catch {
+        // A closed, crashed or unresponsive page must not strand the lease.
+        uiReleaseFailed = true
+      }
+    }
+    await bounded(async () => {
+      context = await request.newContext()
+      if (Date.now() >= deadline) {
+        void context.dispose().catch(() => {})
+        throw new Error('release timeout')
+      }
+      const headers = { Authorization: `Bearer ${runtime.projectSolarToken || ''}` }
+      if (lease.capability) headers['X-Checkout-Capability'] = lease.capability
+      const response = await context.delete(`${lease.apiBase}${lease.path}`, {
+        headers, timeout: Math.max(1, deadline - Date.now()),
+      })
+      if ([404, 409].includes(response.status())) return
+      if (response.status() !== 200 || (await response.json()).released !== true) throw new Error('release rejected')
+    })
+    lease.released = true
+  } catch {
+    // Transport errors can contain request headers. Persist and return only a
+    // fixed diagnostic, never the transport message, bearer or capability.
+    const error = new Error('Project Solar checkout release failed or timed out')
+    runtime.evidence ||= {}
+    runtime.evidence.projectSolar ||= {}
+    runtime.evidence.projectSolar.releaseError = error.message
+    return error
+  } finally {
+    if (uiReleaseFailed) {
+      runtime.evidence ||= {}
+      runtime.evidence.projectSolar ||= {}
+      runtime.evidence.projectSolar.releaseUiError = 'Project checkout UI release failed'
+      lease.uiReleaseFailed = true
+    }
+    if (context) {
+      try {
+        // Start disposal even when the overall deadline has elapsed, aborting
+        // a DELETE whose transport did not honour its own timeout.
+        const disposal = Promise.resolve(context.dispose()).catch(() => {})
+        await bounded(() => disposal)
+      } catch { /* Release verdict is already recorded. */ }
+    }
+  }
+
+  async function releaseUI() {
+    const response = await actionResponse(runtime.page, lease.apiBase, 'DELETE', lease.path,
+      () => walkClick(runtime.page.getByRole('group', { name: 'Project checkout', exact: true })
+        .getByRole('button', { name: 'Release', exact: true }), 'Release Project checkout'))
+    const body = await projectSolarResponse(response, 'release Project checkout', [200])
+    expect(body.released).toBe(true)
+    expect(body.checkout).toBe(null)
+  }
+}
+
 export async function takeProjectSolarCheckout(runtime, assertions = expect, action = actionResponse) {
   const { page, projectSolar: solar, evidence: { projectSolar: proof } } = runtime
   const checkout = () => page.getByRole('group', { name: 'Project checkout', exact: true })
@@ -1462,15 +2663,22 @@ export async function takeProjectSolarCheckout(runtime, assertions = expect, act
     const response = await action(page, solar.apiBase, 'POST', path,
       () => walkClick(checkout().getByRole('button', { name: 'Take', exact: true }), 'Take Project checkout'))
     const lease = await projectSolarResponse(response, 'Project checkout', [200])
-    // Register release before validating the lease body so a later assertion
-    // failure still relinquishes an acquired checkout through the UI.
-    if (lease.acquired === true) runtime.cleanup.push(async () => {
-      const released = await action(page, solar.apiBase, 'DELETE', path,
-        () => walkClick(checkout().getByRole('button', { name: 'Release', exact: true }), 'Release Project checkout'))
-      const body = await projectSolarResponse(released, 'release Project checkout', [200])
-      assertions(body.released).toBe(true)
-      assertions(body.checkout).toBe(null)
-    })
+    // Record acquisition before validating the binding or lease body.
+    if (lease.acquired === true) {
+      runtime.projectSolarCheckout = { apiBase: solar.apiBase, path, capability: lease.checkout_capability, released: false }
+      runtime.projectSolarReleaseUI = async () => {
+        const released = await action(page, solar.apiBase, 'DELETE', path,
+          () => walkClick(checkout().getByRole('button', { name: 'Release', exact: true }), 'Release Project checkout'))
+        const body = await projectSolarResponse(released, 'release Project checkout', [200])
+        assertions(body.released).toBe(true)
+        assertions(body.checkout).toBe(null)
+      }
+      runtime.cleanup.push(async () => {
+        const error = await releaseProjectSolarCheckout(runtime)
+        if (error) throw error
+        if (runtime.projectSolarCheckout.uiReleaseFailed) throw new Error('Project checkout UI release failed')
+      })
+    }
     assertions(lease.acquired).toBe(true)
     for (const key of ['organization_id', 'project_id', 'drawing_id']) assertions(lease[key]).toBe(solar.binding[key])
     assertions(lease.checkout.fence).toMatch(/^[0-9]+$/)
@@ -1585,6 +2793,12 @@ export async function setupCensusDisclosure(runtime, recipe, assertions = expect
     await page.setViewportSize({ width: 900, height: original?.height || 900 })
   }
   const button = control(page, recipe.control)
+  try {
+    if (recipe.target === 'drawing-objects-expanded' && recipe.control?.name === 'Objects'
+      && typeof collectCadEditBundleProbe === 'function' && typeof button.count === 'function' && await button.count() === 0) {
+      runtime.evidence.cadEditBundleProbe = await collectCadEditBundleProbe(page, runtime)
+    }
+  } catch { /* Preserve the original visibility assertion. */ }
   await assertions(button).toBeVisible()
   const set = async (expanded) => {
     if (await censusDisclosureState(page, recipe.target, assertions) !== expanded) await button.click({ timeout: 15_000 })
@@ -1695,6 +2909,40 @@ export async function activateCensusFileChooser(runtime, locator) {
   })
 }
 
+export function observeDxfImportState(probe, runtime) {
+  if (!['control:open-dxf', 'control:open-dxf-browser'].includes(probe.featureId)) return
+  const { page } = runtime
+  let fileChooserOpened = null
+  const opened = () => { fileChooserOpened = true }
+  try {
+    page.on('filechooser', opened)
+    fileChooserOpened = false
+  } catch { /* A missing event API must not affect the probe. */ }
+  runtime.cleanup.push(async () => {
+    try { page.off('filechooser', opened) } catch { /* Optional diagnostic cleanup. */ }
+    delete runtime.captureDxfImportState
+  })
+  runtime.captureDxfImportState = async () => {
+    const read = async (callback) => { try { return await callback() } catch { return null } }
+    try {
+      const pane = page.locator('#cockpit-import-pane')
+      const input = page.getByLabel('DXF file', { exact: true })
+      const paneCount = await read(() => pane.count())
+      const count = await read(() => input.count())
+      const enabled = count > 0 ? await read(() => input.first().isEnabled({ timeout: 1000 })) : null
+      runtime.evidence.dxfImportState = {
+        importOpen: paneCount > 0 ? await read(async () => await pane.getAttribute('data-import-open') === 'true') : null,
+        paneVisible: paneCount > 0 ? await read(() => pane.isVisible()) : null,
+        // CadEditSurface's file input is disabled={busy}; there is no separate busy attribute.
+        busy: enabled === null ? null : !enabled,
+        picking: paneCount > 0 ? await read(async () => await pane.getAttribute('data-cockpit-picking') === '1') : null,
+        input: { count, visible: count > 0 ? await read(() => input.first().isVisible()) : null, enabled },
+        fileChooserOpened,
+      }
+    } catch { /* Diagnostics never replace the original expectation failure. */ }
+  }
+}
+
 export async function assertCensusEffect(probe, runtime, locator, before, assertions = expect) {
   const { page } = runtime
   const target = probe.assertion.target
@@ -1706,8 +2954,25 @@ export async function assertCensusEffect(probe, runtime, locator, before, assert
       await assertions(menu).toHaveCount(probe.assertion.value ? 1 : 0)
       if (probe.assertion.value) await assertions(menu).toBeVisible()
     }
-    if (target === 'dxf-import-expanded') await assertions(page.getByLabel('DXF file', { exact: true }))
-      [probe.assertion.value ? 'toBeVisible' : 'toBeHidden']()
+    if (target === 'dxf-import-expanded') {
+      try {
+        const input = page.getByLabel('DXF file', { exact: true })
+        try {
+          if (probe.assertion.value && ['control:open-dxf', 'control:open-dxf-browser'].includes(probe.featureId)
+            && typeof collectCadEditBundleProbe === 'function' && typeof input.count === 'function' && await input.count() === 0) {
+            runtime.evidence.cadEditBundleProbe = await collectCadEditBundleProbe(page, runtime)
+          }
+        } catch { /* Preserve the original input assertion. */ }
+        if (!probe.assertion.value) {
+          assertions(await input.count(), 'DXF control must exist before it can be collapsed').toBeGreaterThan(0)
+        }
+        await assertions(page.getByLabel('DXF file', { exact: true }))
+          [probe.assertion.value ? 'toBeVisible' : 'toBeHidden']()
+      } catch (error) {
+        try { await runtime.captureDxfImportState?.() } catch { /* Preserve the oracle failure. */ }
+        throw error
+      }
+    }
     if (target === 'drawing-objects-expanded') await assertions(page.locator('.drawing-objects-content'))
       .toHaveCount(probe.assertion.value ? 1 : 0)
     return
@@ -1775,6 +3040,13 @@ export async function assertSolarStepEditor(probe, runtime, locator, before, ass
   }
   const unit = region.getByLabel('Distance unit', { exact: true })
   if (await unit.count()) await unit.selectOption({ label: 'Meters' })
+  for (const fieldInput of Object.values(SOLAR_REQUIRED_FORM_INPUTS[tool] || {})) {
+    const field = region.getByLabel(fieldInput.label, { exact: true })
+    if (await field.count() && await field.inputValue() === '') {
+      if (fieldInput.select !== undefined) await field.selectOption({ label: fieldInput.select })
+      else await field.fill(String(fieldInput.value))
+    }
+  }
   if (tool === 'solar-design-presets') {
     for (const name of ['Subcommand', 'Action']) {
       const field = region.getByLabel(name, { exact: true })
@@ -1786,7 +3058,45 @@ export async function assertSolarStepEditor(probe, runtime, locator, before, ass
     }
   }
   const review = region.getByRole('button', { name: 'Review & run', exact: true })
-  await assertions(review).toBeEnabled()
+  try {
+    await assertions(review).toBeEnabled()
+  } catch (error) {
+    if (SOLAR_REQUIRED_FORM_INPUTS[tool]) {
+      let blockedReason = { source: 'none', text: '' }
+      try {
+        const text = (await review.getAttribute('title') || '').trim()
+        if (text) blockedReason = { source: 'button-title', text }
+      } catch {}
+      if (!blockedReason.text) {
+        const visibleReasons = []
+        // GenericSolarToolForm exposes invalid required fields as SchemaForm alerts.
+        try {
+          const alerts = region.getByRole('alert')
+          for (let index = 0; index < await alerts.count(); index++) {
+            try {
+              const alert = alerts.nth(index)
+              if (await alert.isVisible()) {
+                const text = (await alert.innerText()).trim()
+                if (text) visibleReasons.push(text)
+              }
+            } catch {}
+          }
+        } catch {}
+        if (visibleReasons.length) blockedReason = { source: 'field-alerts', text: visibleReasons.join('; ') }
+      }
+      if (!blockedReason.text) {
+        try {
+          const reason = region.getByTestId('project-solar-equipment-reason')
+          if (await reason.isVisible()) {
+            const text = (await reason.innerText()).trim()
+            if (text) blockedReason = { source: 'equipment-reason', text }
+          }
+        } catch {}
+      }
+      runtime.evidence.solarRunBlockedReason = blockedReason
+    }
+    throw error
+  }
   await review.click()
   const decision = page.getByRole('button', { name: `Run ${tool}`, exact: true })
   await assertions(decision).toBeVisible()
@@ -1943,18 +3253,21 @@ async function baselineThreeState(probe, runtime, recipe) {
   const target = recipe.target
   const panel = baselineThreePanels[target]
   if (panel) {
-    await closeBaselinePanel(page, panel)
-    runtime.cleanup.push(() => closeBaselinePanel(page, panel))
+    await closeBaselinePanel(page, panel, runtime.evidence)
+    runtime.cleanup.push(() => closeBaselinePanel(page, panel, runtime.evidence))
   }
   if (recipe.expanded !== undefined) await expect(locator).toHaveAttribute('aria-expanded', String(recipe.expanded))
   if (target === 'project-board') {
     const back = page.getByRole('button', { name: 'Return to drawing', exact: true })
-    if (await back.isVisible()) await back.click()
-    await expect(page.getByRole('heading', { name: 'Project board', exact: true })).toBeHidden()
-    runtime.cleanup.push(async () => {
-      if (await back.isVisible()) await back.click()
-      await expect(page.getByRole('heading', { name: 'Project board', exact: true })).toBeHidden()
-    })
+    const restore = async () => {
+      if (await page.locator('section.workspace-environment').count()) await enterWorkspaceEnvironment(page)
+      else {
+        if (await back.isVisible()) await back.click()
+        await expect(page.getByRole('heading', { name: 'Project board', exact: true })).toBeHidden()
+      }
+    }
+    await restore()
+    runtime.cleanup.push(restore)
   }
   if (['scope-build-picker', 'scope-picker', 'tool-commands', 'unknown-tool-resolver'].includes(target)) {
     const bar = await clearComposer(page)
@@ -1998,7 +3311,7 @@ async function baselineThreeState(probe, runtime, recipe) {
   if (target === 'session-provenance') {
     await expect(locator).toHaveCount(1)
     await expect(locator).toBeVisible()
-    await expect(page.getByRole('dialog', { name: 'Session · provenance', exact: true })).toBeHidden()
+    await expect(page.getByRole('dialog', { name: 'Session details', exact: true })).toBeHidden()
   }
   if (target === 'notification-inbox-collapsed') {
     await expect(locator).toBeVisible()
@@ -2037,17 +3350,18 @@ async function baselineThreeState(probe, runtime, recipe) {
   if (target === 'signed-out-session') {
     await expect(locator).toHaveCount(1)
     await expect(locator).toBeVisible()
-    await expect(page.getByRole('dialog', { name: 'Session · provenance', exact: true })).toBeHidden()
+    await expect(page.getByRole('dialog', { name: 'Session details', exact: true })).toBeHidden()
   }
 }
 
 export const HANDLED_SETUP_KINDS = Object.freeze(new Set([
   'census-disclosure', 'census-script', 'census-download-only',
   'fresh-sign-out-page', 'baseline-three-state', 'prepare-engine-transport', 'hold-engine-boot',
-  'navigate', 'open-failed-drawing', 'failed-drawing-ribbon-tab', 'open-empty-workspace',
+  'navigate', 'chooser-start', 'open-failed-drawing', 'failed-drawing-ribbon-tab', 'open-empty-workspace',
+  'open-browser-workspace',
   'open-private-drawing', 'ribbon-tab', 'control-pressed-state', 'engine-mode-state', 'fullscreen-state',
   'empty-view-history', 'previous-view-history', 'whole-drawing-view', 'engine-ready',
-  'select-entity', 'clear-selection', 'copy-selection', 'drawer-state', 'tool-rail-state', 'job-rail-state', 'zoom-inside-extents',
+  'select-entity', 'vertex-index', 'clear-selection', 'copy-selection', 'drawer-state', 'tool-rail-state', 'job-rail-state', 'zoom-inside-extents',
   'properties-state', 'properties-section-state', 'properties-close-state', 'layer-visible-state',
   'job-monitor-collapsed', 'overview-expanded-state', 'overview-pan-state', 'open-start',
   'open-escape-owner', 'find-submit-state', 'open-real-project',
@@ -2061,7 +3375,7 @@ export const HANDLED_SETUP_KINDS = Object.freeze(new Set([
   'require-solar-document', 'hold-solar-projection',
 ]))
 export const ENGINE_SETUP_KINDS = Object.freeze(new Set([
-  'engine-ready', 'select-entity', 'create-line', 'hold-engine-edit',
+  'engine-ready', 'select-entity', 'vertex-index', 'create-line', 'hold-engine-edit',
   'require-engine-state', 'crash-engine-worker',
   'require-solar-document',
 ]))
@@ -2140,7 +3454,7 @@ export function unsupportedBeforeSetup(probe, workerFacts = {}, checkAvailabilit
   // Keep the authenticated recipes intact for staging (F1).
   if (['open', 'published', 'form-switch'].includes(probe.setup?.context?.projectSolar)
     && workerFacts.authLive !== true) return PROJECT_SOLAR_AUTH_REASON
-  if (probe.setup?.context?.openProjectId) {
+  if (probe.setup?.context?.openProjectId || probe.workerOptions?.walkPostgres === true) {
     if (workerFacts.postgresUnavailableReason) return workerFacts.postgresUnavailableReason
     if (workerFacts.walkPostgres !== true) return 'walk_postgres_required'
   }
@@ -2290,10 +3604,25 @@ export async function seedSolarChain(runtime, recipe) {
   }
 }
 
+export async function prepareStudioRail(probe, runtime, recipe, { enter = requireWorkspace, reveal = revealStudioRail } = {}) {
+  const { page } = runtime
+  if (STUDIO_RAIL_FEATURES.has(probe.featureId)
+    && (['baseline-three-state', 'job-monitor-collapsed'].includes(recipe.kind)
+      || (probe.featureId === 'control:objects' && recipe.kind === 'census-disclosure'))) {
+    await enter(runtime)
+    if (await reveal(page)) runtime.cleanup.push(async () => {
+      const button = studioRailButton(page)
+      if (await button.getAttribute('aria-expanded') === 'true') await button.click()
+    })
+  }
+}
+
 export async function setupStep(probe, runtime, recipe, assertions = runtime.recipeAssertions || expect) {
   const { page, stack, evidence } = runtime
   if (probe.setup?.context?.projectSolar && !runtime.projectSolar) observeProjectSolarResponses(runtime)
+  if (recipe.kind !== 'job-monitor-collapsed') await prepareStudioRail(probe, runtime, recipe)
   switch (recipe.kind) {
+    case 'chooser-start': await prepareChooserStart(runtime, assertions); return
     case 'open-project-solar': await openProjectSolar(runtime, assertions); return
     case 'publish-project-solar': await publishProjectSolar(runtime, assertions); return
     case 'switch-project-solar-forms': await switchProjectSolarForms(runtime, assertions); return
@@ -2339,7 +3668,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       const chain = await verified.json()
       assertions(chain.versions.length).toBeGreaterThan(1)
       assertions(recipe.redo ? chain.head < chain.latest : chain.head > 1).toBe(true)
-      await page.reload({ timeout: 60_000 })
+      await reloadAndReenter(page, { timeout: 60_000 })
       await requireWorkspace(runtime)
       if (runtime.ribbonTab) await setupStep(probe, runtime, { kind: 'ribbon-tab', name: runtime.ribbonTab })
       evidence.savedVersionHistory = { head: chain.head, latest: chain.latest, versions: chain.versions, redo: recipe.redo }
@@ -2438,6 +3767,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
         page.off('response', onResponse)
         page.off('requestfailed', onFailed)
       }
+      await enterWorkspaceEnvironment(page)
       assertions([400, 404]).toContain(response.status())
       evidence.failedDrawing = { drawingId: 'missing.invalid', status: response.status(), response: await response.json() }
       await assertions(page.getByRole('alert').filter({ hasText: /Couldn['’]t load drawing/ })).toBeVisible()
@@ -2457,9 +3787,15 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       await expect(toolbar).toBeVisible()
       return
     }
+    case 'open-browser-workspace':
+      // Browser front-door pattern: web/e2e/workspace-create-no-prompt.spec.mjs:86.
+      await page.goto(recipe.url)
+      await enterWorkspaceEnvironment(page, assertions)
+      return
     case 'open-empty-workspace':
       if (recipe.signedOut) await page.addInitScript(() => localStorage.removeItem('leaf.jwt'))
       await page.goto(`/try?surface=${recipe.surface}`)
+      await enterWorkspaceEnvironment(page)
       return
     case 'open-private-drawing': {
       const selected = probe.setup.steps.find((step) => step.kind === 'select-entity')
@@ -2499,8 +3835,10 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
         return status.status
       }, { timeout: 60_000 }).toBe('ready')
       await page.goto(`/app?drawing=${receipt.drawing_id}&surface=${recipe.surface}`)
+      await enterWorkspaceEnvironment(page, assertions)
       if (recipe.surface === 'cad' || recipe.surface === 'solar') {
-        await expect.poll(async () => {
+        await assertions.poll(async () => {
+          await enterWorkspaceIfChooser(page)
           const box = await canvas(page).boundingBox().catch(() => null)
           return !!box && box.width > 0 && box.height > 0
         }, { timeout: 60_000 }).toBe(true)
@@ -2583,6 +3921,10 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       return
     }
     case 'engine-ready': await engineReady(probe, runtime); return
+    case 'vertex-index':
+      await page.getByTestId('cad-edit-workbench').getByRole('textbox', { name: 'vertex index', exact: true }).fill(recipe.value)
+      await assertions(page.getByTestId('cad-edit-workbench').getByRole('button', { name: 'Delete vertex', exact: true })).toBeEnabled()
+      return
     case 'select-entity': await selectEntity(probe, runtime, recipe); return
     case 'clear-selection': await page.keyboard.press('Escape'); return
     case 'copy-selection':
@@ -2590,12 +3932,27 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       await page.getByRole('toolbar', { name: 'Drafting tools', exact: true }).getByRole('group', { name: 'Clipboard', exact: true })
         .getByRole('button', { name: ACTIONS.find((action) => action.op === 'copyClip').label, exact: true }).click()
       return
-    case 'drawer-state': await setDrawer(page, recipe.name, recipe.open); return
-    case 'job-rail-state': await setJobRail(page, recipe.open, runtime.testInfo.project.name === 'phone', assertions); return
-    case 'tool-rail-state': await setToolRail(page, recipe.open, runtime.testInfo.project.name === 'phone'); return
+    case 'drawer-state':
+      if (runtime.testInfo?.project.name === 'phone' && probe.featureId === 'drawer:result'
+        && recipe.name === 'Result' && await studioRailButton(page).isVisible()) {
+        await setStudioDrawer(page, 'result', recipe.open, assertions)
+      } else if (probe.featureId === 'drawer:jobs' && recipe.name === 'Jobs' && await studioRailButton(page).isVisible()) {
+        await setStudioDrawer(page, 'jobs', recipe.open, assertions)
+      } else if (runtime.testInfo?.project.name === 'phone' && (probe.featureId === 'drawer:none'
+        || probe.featureId === 'action:bar-escape' && probe.state === 'drawer-open') && await studioRailButton(page).isVisible()) {
+        await setPhonePanel(page, 'Plan', false, assertions)
+        await setPhonePanel(page, 'Jobs', recipe.open, assertions)
+      } else if (runtime.testInfo?.project.name === 'phone' && ['Jobs', 'Plan'].includes(recipe.name)) {
+        await setPhonePanel(page, recipe.name, recipe.open, assertions)
+      } else await setDrawer(page, recipe.name, recipe.open)
+      return
+    case 'job-rail-state': await setJobRail(page, recipe.open, runtime.testInfo.project.name === 'phone', assertions,
+      probe.featureId === 'drawer:jobs'); return
+    case 'tool-rail-state': await setToolRail(page, recipe.open, runtime.testInfo.project.name === 'phone', assertions,
+      probe.featureId === 'drawer:nav'); return
     case 'properties-state': {
       if (runtime.testInfo?.project.name === 'phone') {
-        await setDrawer(page, 'Plan', recipe.open)
+        await setPhonePanel(page, 'Plan', recipe.open, assertions)
         evidence.phoneProperties = { host: 'Plan', open: recipe.open }
         return
       }
@@ -2642,6 +3999,11 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       return
     }
     case 'job-monitor-collapsed': {
+      if (await prepareStudioJobMonitor(page, assertions)) {
+        await requireWorkspace(runtime)
+        return
+      }
+      await prepareStudioRail(probe, runtime, recipe)
       const collapse = page.getByRole('button', { name: 'Collapse the job monitor to a spine', exact: true })
       if (await collapse.isVisible()) await collapse.click()
       const toolbar = page.getByRole('toolbar', { name: 'Job monitor', exact: true })
@@ -2684,7 +4046,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
         y: map.y + map.height * (center.y < map.y + map.height / 2 ? 0.65 : 0.35) }
       expect(Math.abs(point.x - center.x)).toBeGreaterThan(0.2)
       expect(Math.abs(point.y - center.y)).toBeGreaterThan(0.2)
-      runtime.overviewPan = { map, point, before: viewport }
+      runtime.overviewPan = { map, point, before: viewport, scale: await page.locator('.cockpit-scale b').innerText() }
       evidence.overviewPan = runtime.overviewPan
       return
     }
@@ -2760,6 +4122,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
         await page.goto(`/app?drawing=${encodeURIComponent(runtime.drawingId)}&surface=solar`)
         const response = await scopedCatalog
         await assertions(response.ok()).toBe(true)
+        await enterWorkspaceEnvironment(page, assertions)
         evidence.browserCatalog = { url: response.url(), drawingId: runtime.drawingId }
         await setupStep(probe, runtime, { kind: 'ribbon-tab', name: tab[0].toUpperCase() + tab.slice(1) })
         const button = control(page, { role: 'button', name: recipe.name, panelName: family.label,
@@ -2771,7 +4134,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
     }
     case 'seed-solar-chain': {
       await seedSolarChain(runtime, recipe)
-      await page.reload({ timeout: 60_000 })
+      await reloadAndReenter(page, { timeout: 60_000 })
       await requireWorkspace(runtime)
       return
     }
@@ -2811,7 +4174,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
         evidence.solarSeed = { drawingId: runtime.drawingId, parent: chain.head,
           version: runtime.drawingVersion, graphRev: receipt.result.after_rev }
       } finally { await release() }
-      await page.reload({ timeout: 60_000 })
+      await reloadAndReenter(page, { timeout: 60_000 })
       await requireWorkspace(runtime)
       return
     }
@@ -2819,7 +4182,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       const response = await page.request.post(`/api/drawings/${runtime.drawingId}/checkout`, { data: { holder: 'walk-other-editor', ttl_s: 300 }, timeout: 15_000 })
       expect(response.status()).toBe(200)
       expect((await response.json()).acquired).toBe(true)
-      await page.reload()
+      await reloadAndReenter(page)
       await expect(page.getByText('Editing locked by walk-other-editor', { exact: false })).toBeVisible()
       if (runtime.ribbonTab) await setupStep(probe, runtime, { kind: 'ribbon-tab', name: runtime.ribbonTab })
       return
@@ -2838,7 +4201,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       expect(policyResponse.entitlements[recipe.capability]).toBe(recipe.allowed)
       if (probe.featureId === 'action:author-tool') evidence.authorPolicy = { status: response.status(), policyResponse,
         beforeReload: await disclosureEvidence(page, 'Author') }
-      await page.reload({ timeout: 60_000 })
+      await reloadAndReenter(page, { timeout: 60_000 })
       if (probe.featureId === 'action:author-tool') {
         await requireWorkspace(runtime)
         evidence.authorPolicy.afterReload = await disclosureEvidence(page, 'Author')
@@ -2928,9 +4291,9 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       evidence.health = health
       if (runtime.releaseSolarProjection) {
         await assertions.poll(() => evidence.solarProjectionRequests.length).toBeGreaterThan(0)
-        const solar = page.getByRole('tablist', { name: 'Workspace profile', exact: true })
-          .getByRole('tab', { name: 'Solar CAD', exact: false })
-        await assertions(solar.locator('[data-state]')).toHaveAttribute('data-state', 'beta')
+        const solar = page.getByRole('tablist', { name: 'Workspace profile', exact: true, includeHidden: true })
+          .getByRole('tab', { name: 'Solar CAD', exact: false, includeHidden: true })
+        await assertSurfaceState(solar, 'beta', assertions)
         await assertions(solar).toContainText('Beta')
         await assertions(page.locator('.workspace-card')).not.toHaveAttribute('data-engine-document', /.+/)
         evidence.solarReadiness = { transport: 'drawing DXF projection held', pending: 'Beta' }
@@ -2999,8 +4362,11 @@ async function captureBefore(probe, runtime) {
   if (probe.featureId === 'control:view-back' && probe.state === 'empty-history') return viewState(page)
   if (target.startsWith('viewer-')) return { viewport: await viewportBounds(page) }
   if (target === 'properties-pane') return { visible: runtime.testInfo.project.name === 'phone'
-    ? await panelButton(page, 'Plan').getAttribute('aria-expanded') === 'true'
+    ? await readPhonePanel(page, 'Plan')
     : await page.getByRole('complementary', { name: 'Properties', exact: true }).isVisible() }
+  if (target === 'escape:drawer' && runtime.testInfo.project.name === 'phone') return {
+    command: await page.getByRole('combobox', { name: 'Command bar', exact: true }).inputValue(),
+  }
   if (target === 'version-history') return { visible: await page.getByRole('dialog', { name: 'Version history', exact: true }).isVisible() }
   if (target.startsWith('engine:') || target === 'browser-clipboard-cut') return { count: await engineCount(page) }
   if (target.startsWith('drawing-version-')) {
@@ -3018,6 +4384,10 @@ async function captureBefore(probe, runtime) {
 async function activate(probe, runtime, locator) {
   const { page } = runtime
   const recipe = probe.locator
+  if (probe.kind === 'surface' && recipe.role === 'tab') {
+    await (await resolveSurfaceControl(page, probe, runtime.evidence)).activate()
+    return
+  }
   if (recipe?.keyboardAction === 'engine:repeat' && typeof activateEngineRepeat === 'function') {
     await activateEngineRepeat(runtime, locator)
     return
@@ -3052,11 +4422,24 @@ async function activate(probe, runtime, locator) {
       await expect(bar).toBeFocused()
       await bar.press('Escape')
     }
+    else if (probe.featureId === 'action:bar-escape' && probe.state === 'drawer-open'
+      && runtime.testInfo.project.name === 'phone') {
+      await page.getByRole('combobox', { name: 'Command bar', exact: true }).press('Escape')
+    }
     else {
       // Focus a real non-text control without clicking outside a drawer.
       // That click could close it before the keyboard action under test.
-      await page.getByRole('tablist', { name: 'Workspace profile', exact: true }).getByRole('tab').first().focus()
-      await page.keyboard.press(recipe.key)
+      const project = page.getByRole('navigation', { name: 'Workspace controls', exact: true }).getByRole('button', { name: 'Project', exact: true })
+      if (await project.isVisible()) await project.focus()
+      else await page.getByRole('tablist', { name: 'Workspace profile', exact: true }).getByRole('tab').first().focus()
+      const press = async () => {
+        if (probe.featureId === 'action:bar-retry' && probe.state === 'retry-history') {
+          await runtime.walkPersonaObservers?.observe('qc-dev', 'observeEvent', 'action:bar-retry')
+        }
+        return page.keyboard.press(recipe.key)
+      }
+      if (runtime.panelPerformanceCapture) await runtime.panelPerformanceCapture.dispatch(press)
+      else await press()
     }
   } else if (recipe.trigger === 'navigate') await page.goto(recipe.url)
   else if (recipe.trigger === 'select') {
@@ -3065,7 +4448,16 @@ async function activate(probe, runtime, locator) {
     const choice = choices.find((value) => value !== current && value !== 'index...')
     expect(choice, 'a property change must offer another real value').toBeDefined()
     await locator.selectOption(choice)
-  } else await locator.click()
+  } else {
+    const click = async () => {
+      if (probe.featureId === 'control:version-history' && probe.state === 'ready') {
+        await runtime.walkPersonaObservers?.observe('qc-dev', 'observeEvent', 'control:version-history')
+      }
+      return locator.click()
+    }
+    if (runtime.panelPerformanceCapture) await runtime.panelPerformanceCapture.dispatch(click)
+    else await click()
+  }
 }
 
 export async function assertEffect(probe, runtime, locator, before, assertions = expect) {
@@ -3073,6 +4465,28 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
   const { page } = runtime
   const effect = probe.assertion
   const target = effect.target || ''
+  if (target === 'project-shared-tools') {
+    const region = page.getByRole('region', { name: effect.region, exact: true })
+    await expect(region).toBeVisible()
+    await expect(region).toHaveAttribute('data-pane', 'tools')
+    await expect(page.locator(effect.content).first()).toBeVisible()
+    return
+  }
+  if (target === 'project-shared-sidebar') {
+    await expect(page.getByRole('region', { name: effect.region, exact: true })).toBeVisible()
+    const content = page.locator(effect.content)
+    await expect(effect.region === 'Project sidebar' ? content.first() : content).toBeVisible()
+    return
+  }
+  if (target === 'chooser-project-sidebar') {
+    await assertChooserOpen(runtime, assertions)
+    return
+  }
+  if (probe.featureId === 'action:rail-expand' && probe.state === 'ready'
+    && runtime.testInfo.project.name !== 'phone' && runtime.railExpandFamily) {
+    await assertRailExpandFamily(page, runtime.railExpandFamily, assertions)
+    return
+  }
   if (probe.locator?.keyboardAction === 'engine:repeat' && typeof assertEngineRepeat === 'function') {
     await assertEngineRepeat(probe, runtime, before, assertions)
     return
@@ -3097,6 +4511,16 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     }
     await expect(panel.getByRole('button', { name: spec.close, exact: true })).toBeVisible()
     if (target === 'cost-panel') await expect(panel.getByRole('heading', { name: spec.name, exact: true })).toBeVisible()
+    if (probe.featureId === 'control:version-history' && probe.state === 'ready'
+      && runtime.testInfo.project.name === 'desktop' && !before.visible) {
+      await runtime.walkPersonaObservers?.observe('end-user', 'observeEffect', 'version-history-open')
+      await runtime.walkPersonaObservers?.observe('qc-dev', 'observeEvent', 'version-history-open')
+      await runtime.walkPersonaObservers?.observe('qc-dev', 'observeResult', 'version-history-open')
+      await runtime.walkPersonaObservers?.observe('ui-ux-dev', 'completion', { page,
+        controls: [{ id: 'history-trigger', locator },
+          { id: 'history-close', locator: panel.getByRole('button', { name: spec.close, exact: true }) }],
+        completionLocator: panel, completionObserved: true })
+    }
     return
   }
   if (target === 'scope-build-picker' || target === 'scope-picker') {
@@ -3116,8 +4540,14 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     return
   }
   if (target === 'project-board') {
-    await expect(page.getByRole('heading', { name: 'Project board', exact: true })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Return to drawing', exact: true })).toBeVisible()
+    const environment = page.locator('section.workspace-environment')
+    if (await environment.count()) {
+      await assertions(page.getByRole('heading', { name: 'What would you like to work on?', exact: true })).toBeVisible()
+      await assertions(environment).toHaveAttribute('data-entered', 'false')
+    } else {
+      await assertions(page.getByRole('heading', { name: 'Project board', exact: true })).toBeVisible()
+      await assertions(page.getByRole('button', { name: 'Return to drawing', exact: true })).toBeVisible()
+    }
     return
   }
   if (target === 'notification-inbox-collapsed') {
@@ -3127,18 +4557,29 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     return
   }
   if (target === 'unknown-tool-resolver') {
+    if (typeof collectPromptRunDiagnostic === 'function') {
+      runtime.evidence.promptRunDiagnostic = { atOracleEntry: await collectPromptRunDiagnostic(page, runtime) }
+    }
     const resolver = page.getByRole('listbox', { name: 'Route resolver', exact: true })
-    await expect(resolver).toBeVisible()
+    try {
+      await expect(resolver).toBeVisible()
+    } catch (error) {
+      if (typeof collectPromptRunDiagnostic === 'function') {
+        runtime.evidence.promptRunDiagnostic.atFailure = await collectPromptRunDiagnostic(page, runtime)
+      }
+      throw error
+    }
     await expect(resolver.getByText('“/w1k-no-such-tool” isn’t a tool in this catalog. Pick an alternative:', { exact: true })).toBeVisible()
     expect(runtime.localDecisionRequests).toEqual([])
     return
   }
   if (target === 'signed-out-session') {
     await expect(page.getByRole('button', { name: 'Sign out', exact: true })).toHaveCount(0)
+    await enterWorkspaceEnvironment(page)
     const details = page.getByRole('button', { name: 'Details', exact: true })
     await expect(details).toHaveCount(1)
     await details.click()
-    const panel = page.getByRole('dialog', { name: 'Session · provenance', exact: true })
+    const panel = page.getByRole('dialog', { name: 'Session details', exact: true })
     await expect(panel).toBeVisible()
     await expect(panel.getByTestId('diagnostics-block')).toHaveText(/(?:^|\n)session signed out(?:\n|$)/)
     await expect(panel.getByRole('button', { name: 'Refresh', exact: true })).toBeVisible()
@@ -3241,8 +4682,12 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
       return current.x !== before.viewport.x || current.y !== before.viewport.y
     }, { message: 'overview click must move the visible viewport rectangle' }).toBe(true)
     const after = await viewportBounds(page)
-    expect(Math.abs(after.width - before.viewport.width)).toBeLessThanOrEqual(0.2)
-    expect(Math.abs(after.height - before.viewport.height)).toBeLessThanOrEqual(0.2)
+    expect(await page.locator('.cockpit-scale b').innerText()).toBe(runtime.overviewPan.scale)
+    const { map } = runtime.overviewPan
+    expect(after.x).toBeGreaterThanOrEqual(map.x)
+    expect(after.y).toBeGreaterThanOrEqual(map.y)
+    expect(after.x + after.width).toBeLessThanOrEqual(map.x + map.width)
+    expect(after.y + after.height).toBeLessThanOrEqual(map.y + map.height)
     await expect(locator.locator('[data-overview-viewport]')).toBeVisible()
     runtime.evidence.overviewPan.after = after
     await requireWorkspace(runtime)
@@ -3286,6 +4731,8 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     return
   }
   if (target === 'job-monitor') {
+    const studio = await assertStudioJobMonitor(page, expect)
+    if (!studio) {
     await expect(page.getByRole('toolbar', { name: 'Job monitor', exact: true })).toHaveCount(0)
     await expect(page.getByRole('button', { name: /^Expand the job monitor \([0-9]+ live\)$/ })).toHaveCount(0)
     const rail = page.locator('aside.rail').filter({ has: page.getByRole('button', { name: 'Collapse the job monitor to a spine', exact: true }) })
@@ -3293,13 +4740,14 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     await expect(rail.locator('.rail-ledger')).toHaveCount(1)
     await expect(rail.locator('.rail-ske, .rail-empty, .rail-ledger > *').first()).toBeVisible()
     await expect(rail.getByRole('button', { name: 'Collapse the job monitor to a spine', exact: true })).toBeVisible()
+    }
     const beforeUrl = new URL(before.url)
     const afterUrl = new URL(page.url())
     expect(afterUrl.origin).toBe(beforeUrl.origin)
     expect(afterUrl.pathname).toBe(beforeUrl.pathname)
     expect(afterUrl.hash).toBe(beforeUrl.hash)
-    // App.jsx setJobRailExpanded seats drawer=jobs via useViewParamSeat in both ready and failed-load states.
-    expect(afterUrl.search).toBe(buildViewSearch(beforeUrl.search, { drawer: 'jobs' }))
+    // Studio toggles browserPanel; the legacy spine seats drawer=jobs via useViewParamSeat.
+    expect(afterUrl.search).toBe(studio ? beforeUrl.search : buildViewSearch(beforeUrl.search, { drawer: 'jobs' }))
     runtime.evidence.jobMonitorUrl = { before: before.url, after: page.url() }
     if (runtime.failedDrawing) await expect(page.getByRole('alert').filter({ hasText: /Couldn['’]t load drawing/ }))
       .toHaveText(before.workspace, { useInnerText: true })
@@ -3343,7 +4791,7 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
   if (target === 'properties-pane') {
     if (runtime.testInfo?.project.name === 'phone') {
       if (effect.value === false) expect(before.visible).toBe(true)
-      await expect(panelButton(page, 'Plan')).toHaveAttribute('aria-expanded', String(!before.visible))
+      await assertPhonePanel(page, 'Plan', !before.visible, assertions)
       runtime.evidence.phoneProperties = { host: 'Plan', before: before.visible, after: !before.visible }
       return
     }
@@ -3362,6 +4810,24 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     return
   }
   if (target.startsWith('drawer:')) {
+    if (runtime.testInfo.project.name === 'phone' && probe.featureId === 'drawer:result'
+      && target === 'drawer:result' && await studioRailButton(page).isVisible()) {
+      await assertStudioDrawer(page, 'result', effect.value !== 'none', assertions)
+      return
+    }
+    if (['drawer:jobs', 'drawer:nav'].includes(probe.featureId)
+      && ['drawer:jobs', 'drawer:nav'].includes(target) && await studioRailButton(page).isVisible()) {
+      await assertStudioDrawer(page, target.slice(7), effect.value !== 'none', assertions)
+      return
+    }
+    if (runtime.testInfo.project.name === 'phone' && ['drawer:plan', 'drawer:jobs'].includes(target)) {
+      await assertPhonePanel(page, target === 'drawer:plan' ? 'Plan' : 'Jobs', effect.value !== 'none', assertions)
+      return
+    }
+    if (runtime.testInfo.project.name === 'phone' && target === 'drawer:none') {
+      await assertPhoneDrawersClosed(page, assertions)
+      return
+    }
     if (target === 'drawer:jobs' && runtime.testInfo.project.name !== 'phone') {
       const open = effect.value !== 'none'
       await expect(page.getByRole('button', { name: open ? 'Collapse the job monitor to a spine' : /^Expand the job monitor \([0-9]+ live\)$/ })).toBeVisible()
@@ -3395,7 +4861,10 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
       await expect(bar).toBeFocused()
       runtime.evidence.escapeOwner.dismissed = true
     } else if (rung === 'drawer') {
-      for (const label of ['Catalog', 'Jobs', 'Result', 'Plan']) await expect(panelButton(page, label)).toHaveAttribute('aria-expanded', 'false')
+      if (runtime.testInfo.project.name === 'phone') {
+        await assertPhoneDrawersClosed(page, assertions)
+        await expect(page.getByRole('combobox', { name: 'Command bar', exact: true })).toHaveValue(before.command)
+      } else for (const label of ['Catalog', 'Jobs', 'Result', 'Plan']) await expect(panelButton(page, label)).toHaveAttribute('aria-expanded', 'false')
     } else if (rung === 'history') await expect(page.getByRole('dialog', { name: 'Version history', exact: true })).toBeHidden()
     else if (rung === 'start') await expect(page.getByRole('region', { name: 'Project workspace', exact: true })).toBeHidden()
     else if (rung === 'route') await expect(page.getByRole('button', { name: /^Run / })).toHaveCount(0)
@@ -3408,8 +4877,18 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
       const body = await reply.json()
       const jobs = Array.isArray(body) ? body : body.jobs
       expect(jobs.some((job) => job.job_id === runtime.evidence.pendingRun.jobId)).toBe(true)
-      await setJobRail(page, true, runtime.testInfo.project.name === 'phone', assertions)
-      await expect(page.locator('aside.rail').getByText('count-by-layer', { exact: true }).first()).toBeVisible()
+      if (await studioRailButton(page).isVisible()) {
+        await withCensusStudioRail(page, async () => {
+          await expect(page.getByRole('region', { name: 'Studio sidebar', exact: true })
+            .getByRole('heading', { name: /^Job monitor/ })).toBeVisible()
+          await expect(page.getByRole('region', { name: 'Studio sidebar' }).locator('aside.rail')
+            .filter({ has: page.getByRole('heading', { name: /^Job monitor/ }) })
+            .getByText('count-by-layer', { exact: true }).first()).toBeVisible()
+        }, assertions)
+      } else {
+        await setJobRail(page, true, runtime.testInfo.project.name === 'phone', assertions, false)
+        await expect(page.locator('aside.rail').getByText('count-by-layer', { exact: true }).first()).toBeVisible()
+      }
       runtime.evidence.pendingRun.detached = true
     }
     else if (rung === 'project') {
@@ -3421,7 +4900,17 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     else throw new Error(`No observable Escape oracle for ${rung}`)
     return
   }
-  if (target === 'retry:history') { await assertHistoryRecovery(runtime, assertions); return }
+  if (target === 'retry:history') {
+    await assertHistoryRecovery(runtime, assertions)
+    if (probe.featureId === 'action:bar-retry' && probe.state === 'retry-history') {
+      await runtime.walkPersonaObservers?.observe('qc-dev', 'observeEvent', 'Versions restored')
+      await runtime.walkPersonaObservers?.observe('qc-dev', 'observeResult', 'Versions restored')
+      await runtime.walkPersonaObservers?.observe('ops-sre', 'observeRecovery', {
+        action: 'Retry', outcome: 'Versions restored', outcomeVisible: true,
+      })
+    }
+    return
+  }
   if (target.startsWith('viewer-')) {
     if (target === 'viewer-home') {
       // CadOverview rounds SVG coordinates to tenths of an overview unit.
@@ -3476,15 +4965,22 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
       return
     }
     const surface = PRODUCT_SURFACES.find((surface) => surface.id === probe.sourceId)
+    let statusLocator = locator
     if (surface.contract.chrome.tab) {
-      await expect(locator).toHaveAttribute('aria-selected', 'true')
-      await expect(locator).toContainText(effect.label)
-      await expect(locator.locator('[data-state]')).toHaveAttribute('data-state', effect.state)
+      const resolved = await resolveSurfaceControl(page, probe)
+      await resolved.assertSelected(assertions)
+      statusLocator = resolved.legacy
+      await expect(statusLocator).toContainText(effect.label)
+      await assertSurfaceState(statusLocator, effect.state, assertions)
     }
     if (effect.ground === 'drawing' && effect.state !== 'setup' && effect.state !== 'sign-in') await expect(canvas(page)).toBeVisible()
-    else if (effect.ground === 'board') await expect(page.getByRole('region', { name: 'Project workspace', exact: true })).toBeVisible()
+    else if (effect.ground === 'board') {
+      if (probe.sourceId === 'browser' && await page.locator('section.workspace-environment').count()) {
+        await assertBrowserAssetGround(page, assertions)
+      } else await expect(page.getByRole('region', { name: 'Project workspace', exact: true })).toBeVisible()
+    }
     else if (effect.ground === 'sheet') { await expect(page).toHaveURL(/\/sheets$/); await expect(page.getByRole('main')).toBeVisible() }
-    await completeSolarReadiness(probe, runtime, locator, assertions)
+    await completeSolarReadiness(probe, runtime, statusLocator, assertions)
     return
   }
   if (target === 'browser-clipboard') {
@@ -3531,6 +5027,25 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
   throw new Error(`No effect oracle for ${probe.featureId}/${probe.state}: ${effect.kind} ${target}`)
 }
 
+export async function runProbeOracle(probe, runtime, locator, before, assertions = expect,
+  oracle = () => assertEffect(probe, runtime, locator, before, assertions)) {
+  try {
+    await oracle()
+  } catch (error) {
+    if (probe.assertion.target === 'engine-refusal' && typeof runtime.walkPersonaObservers?.finish === 'function') {
+      try {
+        await runtime.walkPersonaObservers.finish()
+      } catch {
+        runtime.evidence.measurementDiagnostics ||= []
+        runtime.evidence.measurementDiagnostics.push({ persona: 'red-hat', message: 'Optional persona observation failed' })
+      }
+    }
+    throw error
+  }
+  if (typeof runtime.panelPerformanceCapture?.finish === 'function') await runtime.panelPerformanceCapture.finish()
+  if (typeof runtime.walkPersonaObservers?.finish === 'function') await runtime.walkPersonaObservers.finish()
+}
+
 export async function runProbe(probe, runtime) {
   const { evidence } = runtime
   let page = runtime.page
@@ -3544,10 +5059,12 @@ export async function runProbe(probe, runtime) {
   const setupStartedAt = Date.now()
   let originalError
   try {
+    runtime.walkPersonaObservers = typeof createWalkPersonaObservers === 'function'
+      ? createWalkPersonaObservers({ probe, viewport: runtime.testInfo?.project?.name, evidence }) : null
     if (typeof observeProbeRequests === 'function' && typeof page.on === 'function') {
       runtime.cleanup.push(observeProbeRequests(page, evidence, setupStartedAt))
     }
-    const initialReason = (probe.setup?.context?.openProjectId
+    const initialReason = (probe.setup?.context?.openProjectId || probe.workerOptions?.walkPostgres === true
       || typeof UI_UNREACHABLE_STATES !== 'undefined' && UI_UNREACHABLE_STATES.has(probe.state))
       && typeof unsupportedBeforeSetup === 'function'
       ? unsupportedBeforeSetup(probe, runtime.workerFacts) : null
@@ -3594,6 +5111,15 @@ export async function runProbe(probe, runtime) {
     }
     page = runtime.page
     evidence.setupCompleted = { elapsedMs: Date.now() - setupStartedAt }
+    if (typeof prepareProjectSharedShell === 'function') {
+      probe = await prepareProjectSharedShell(probe, runtime)
+      if (['project-shared-sidebar', 'project-shared-tools'].includes(probe.assertion.target)) evidence.effectiveEffect = probe.assertion
+    }
+    if (probe.featureId === 'control:chooser-open' && typeof runChooserOpen === 'function') {
+      await runChooserOpen(probe, runtime, runtime.recipeAssertions || expect)
+      evidence.result = { result: 'passed', featureId: probe.featureId, state: probe.state }
+      return
+    }
     if (runtime.solarDocument && typeof solarDocumentProbe === 'function') {
       probe = solarDocumentProbe(probe, runtime.solarDocument)
       evidence.effectiveEffect = probe.assertion
@@ -3615,6 +5141,10 @@ export async function runProbe(probe, runtime) {
       }
     }
     let targetRecipe = runtime.catalogPanelName ? { ...probe.locator, panelName: runtime.catalogPanelName } : probe.locator
+    if (probe.featureId === 'control:job-monitor-expand' && typeof jobMonitorLauncherRecipe === 'function'
+      && typeof studioRailButton === 'function') {
+      targetRecipe = jobMonitorLauncherRecipe(probe, await studioRailButton(page).isVisible())
+    }
     if (probe.kind === 'action' && probe.assertion.kind === 'disabled_with_reason' && probe.locator?.keyboardAction !== 'engine:repeat') {
       // A changed refusal is an oracle verdict; only a missing action is a
       // pre-oracle failure. Match the stable label with any refusal suffix.
@@ -3626,7 +5156,22 @@ export async function runProbe(probe, runtime) {
     // Source-extracted fake runners may omit module dependencies.
     if (typeof discloseControlPanel === 'function') await discloseControlPanel(page, targetRecipe)
     if (typeof phoneRailAvailability === 'function') await phoneRailAvailability(probe, runtime)
-    const locator = control(page, runtime.testInfo.project.name === 'phone' && probe.locator.phone ? probe.locator.phone : targetRecipe)
+    const phoneRecipe = runtime.testInfo.project.name === 'phone' && typeof phoneProbeLocator === 'function'
+      ? await phoneProbeLocator(page, probe) : null
+    let locator = probe.kind === 'surface' && probe.locator.role === 'tab' && typeof resolveSurfaceControl === 'function'
+      ? (await resolveSurfaceControl(page, probe)).locator
+      : control(page, phoneRecipe || (runtime.testInfo.project.name === 'phone' && probe.locator.phone ? probe.locator.phone : targetRecipe))
+    let locatorDescription
+    if (typeof studioDrawerProbeLocator === 'function'
+      && (['drawer:jobs', 'drawer:nav'].includes(probe.featureId)
+        || probe.featureId === 'drawer:result' && runtime.testInfo.project.name === 'phone'
+        || probe.featureId === 'drawer:none' && probe.state === 'drawer-open' && runtime.testInfo.project.name === 'phone')) {
+      locator = await studioDrawerProbeLocator(page, probe, description => { locatorDescription = description }) || locator
+    }
+    if (typeof railExpandLauncher === 'function' && probe.featureId === 'action:rail-expand'
+      && probe.state === 'ready' && runtime.testInfo.project.name !== 'phone') {
+      locator = await railExpandLauncher(probe, runtime, locator, description => { locatorDescription = description }) || locator
+    }
     try {
       const observations = await collectProbeUxEvidence(probe, locator, runtime.testInfo.project.name)
       if (observations.length) Object.assign(evidence, packUxEvidence([...(evidence.ux_observations || []), ...observations]))
@@ -3646,7 +5191,7 @@ export async function runProbe(probe, runtime) {
         else await expect(failedDrawingGroup).toHaveCount(0)
         // Check the action globally as well: an absent scope alone would
         // make every scoped locator empty, even if the action moved elsewhere.
-        await expect(page.getByRole(probe.locator.role, { name: probe.locator.unavailableName, includeHidden: true })).toHaveCount(0)
+        await expect(page.getByRole(probe.locator.role, { name: typeof absenceNamePattern === 'function' ? absenceNamePattern(probe.locator) : probe.locator.unavailableName, includeHidden: true })).toHaveCount(0)
       })
       evidence.failedDrawing.actionAvailability = 'unavailable_not_rendered'
       evidence.result = { result: 'passed', featureId: probe.featureId, state: probe.state }
@@ -3656,17 +5201,22 @@ export async function runProbe(probe, runtime) {
     await expect(locator).toBeVisible()
     if (probe.kind === 'control') {
       await expect(locator).toHaveCount(1)
-      if (probe.locator.normalizedName) {
-        const snapshot = await locator.ariaSnapshot()
-        const match = snapshot.split('\n')[0].match(/^- button "((?:\\.|[^"\\])*)"/)
-        expect(match, 'count control must expose its accessible name').toBeTruthy()
-        const liveName = JSON.parse('"' + match[1] + '"')
-        expect(normalizedControlKey({ scope: 'document', role: 'button', name: liveName })).toBe(
-          normalizedControlKey({ scope: 'document', role: 'button', name: probe.locator.normalizedName }))
-        evidence.controlIdentity = { rawName: liveName, normalizedName: probe.locator.normalizedName }
+      if (typeof assertCountControlIdentity === 'function') {
+        await assertCountControlIdentity(page, probe, targetRecipe, locator, evidence)
       }
     }
     const before = await captureBefore(probe, runtime)
+    if (typeof prepareQcDevHistory === 'function') await prepareQcDevHistory(probe, runtime, locator, before)
+    if (probe.featureId && probe.state && probe.assertion.target === 'engine-refusal'
+      && typeof runtime.walkPersonaObservers?.observe === 'function') {
+      await runtime.walkPersonaObservers.observe('red-hat', 'before', before)
+    }
+    const accessibilityCapture = typeof prepareAccessibilityCapture === 'function'
+      ? await prepareAccessibilityCapture({ page, probe, viewport: runtime.testInfo.project.name,
+        locator, evidence, cleanup: runtime.cleanup }) : null
+    runtime.panelPerformanceCapture = typeof preparePanelPerformanceCapture === 'function'
+      ? await preparePanelPerformanceCapture({ page, probe, viewport: runtime.testInfo.project.name,
+        locator, evidence }) : null
     if (probe.kind === 'tool' && probe.sourceId === 'solar-solve-proposal' && probe.state === 'ready'
       && probe.assertion.target === 'catalog-run-decision') {
       runtime.catalogRunRequests = []
@@ -3676,13 +5226,32 @@ export async function runProbe(probe, runtime) {
       page.on('request', observe)
       runtime.cleanup.push(async () => page.off('request', observe))
     }
+    if (typeof observeDxfImportState === 'function') observeDxfImportState(probe, runtime)
     if (probe.assertion.kind !== 'disabled_with_reason' || probe.locator?.keyboardAction === 'engine:repeat') {
-      await test.step(`Activate ${probe.featureId}`, () => activate(probe, runtime, locator))
+      await test.step(`Activate ${probe.featureId}`, () => typeof activateWithMobileTouchMeasurements === 'function'
+        ? activateWithMobileTouchMeasurements({ page, locator, probe, viewport: runtime.testInfo.project.name, locatorDescription,
+          addFragment: (persona, measurements) => {
+            if (typeof addPersonaFragment === 'function') addPersonaFragment(evidence, { persona, measurements,
+              bundleReference: `walk:${probe.featureId}[${probe.state}]@${runtime.testInfo.project.name}` })
+          },
+          evidence, activate: () => activate(probe, runtime, locator) })
+        : activate(probe, runtime, locator))
     }
-    await test.step(probe.assertion.assertionId, () => {
+    const runOracle = () => test.step(probe.assertion.assertionId, () => {
       evidence.oracleReached = probe.assertion.assertionId
       return assertEffect(probe, runtime, locator, before)
     })
+    if (typeof runProbeOracle === 'function') {
+      await runProbeOracle(probe, runtime, locator, before, undefined, runOracle)
+    } else {
+      await runOracle()
+      if (typeof runtime.panelPerformanceCapture?.finish === 'function') await runtime.panelPerformanceCapture.finish()
+      if (typeof runtime.walkPersonaObservers?.finish === 'function') await runtime.walkPersonaObservers.finish()
+    }
+    if (typeof followAccessibilityCapture === 'function') {
+      await followAccessibilityCapture({ capture: accessibilityCapture, page, evidence,
+        bundleReference: `walk:${probe.featureId}[${probe.state}]@${runtime.testInfo.project.name}` })
+    }
     if (runtime.failedDrawing) evidence.failedDrawing.actionAvailability = probe.assertion.kind === 'disabled_with_reason'
       ? 'disabled_with_reason' : 'available'
     evidence.result = { result: 'passed', featureId: probe.featureId, state: probe.state }

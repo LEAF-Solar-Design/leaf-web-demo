@@ -22,6 +22,7 @@ import {
   authorCluster,
   catalogClusters,
   catalogTabClusters,
+  dropSurfaceWord,
   humanizeToolName,
   layersCluster,
   profileRibbonTabs,
@@ -44,6 +45,13 @@ describe('humanizeToolName', () => {
     ['string-autofill-opt', 'String autofill opt'],
     ['count-by-layer', 'Count by layer'],
     ['NEC_check', 'NEC check'],
+    ['nec_ampacity_correction', 'NEC ampacity correction'],
+    ['nec_ac_voltage_drop', 'NEC AC voltage drop'],
+    ['solar_pvcase_solve', 'Solar PVcase solve'],
+    ['dc_to_ac_ratio', 'DC to AC ratio'],
+    ['panel_bom_export', 'Panel BOM export'],
+    ['acre_area', 'Acre area'],
+    ['kw_target', 'KW target'],
     ['Already Fine', 'Already Fine'],
     ['', ''],
     [undefined, ''],
@@ -51,6 +59,22 @@ describe('humanizeToolName', () => {
     ['  a   b  ', 'A b'],
   ])('humanizes %j as %j', (name, expected) => {
     expect(humanizeToolName(name)).toBe(expected)
+  })
+})
+
+describe('dropSurfaceWord', () => {
+  it.each([
+    ['Solar panels from drawing', 'Panels from drawing'],
+    ['solar select by zone', 'Select by zone'],
+    ['Solar', 'Solar'],
+    ['Solarize roof', 'Solarize roof'],
+    ['Measure panel area', 'Measure panel area'],
+    ['Solar \t panels from drawing', 'Panels from drawing'],
+    ['Solar   ', 'Solar   '],
+    [undefined, undefined],
+    [42, 42],
+  ])('drops the surface word from %j as %j', (text, expected) => {
+    expect(dropSurfaceWord(text, 'Solar')).toBe(expected)
   })
 })
 
@@ -71,6 +95,11 @@ describe('solar-ui-rail', () => {
     return profileRibbonTabs('solar', { families, onRun, catalogOptions: gate,
       solarRail: { families, openName, onOpenForm } })[1].clusters[1].tools
   }
+
+  it('drops the Solar display prefix while keeping the row accessible label', () => {
+    const tool = project([solarRow('solar_select_by_zone')]).find((row) => row.id === 'solar_select_by_zone')
+    expect(tool).toMatchObject({ text: 'Select by zone', label: 'solar_select_by_zone' })
+  })
 
   it('SF2 row12 the typed form opens on a seed-eligible settings row', () => {
     const row = solarRow('solar-settings', { availability: A })
@@ -960,6 +989,42 @@ describe('CAD catalog solar availability', () => {
 })
 
 describe('catalogClusters', () => {
+  it('drops the surface word from catalog display text without a Solar rail', () => {
+    const families = [{ family_id: 'solar', label: 'Solar', capabilities: [{ name: 'solar_select_by_zone' }] }]
+    expect(catalogClusters(families, { surfaceWord: 'Solar' })[0].tools[0])
+      .toMatchObject({ text: 'Select by zone', label: 'solar_select_by_zone' })
+    expect(catalogClusters(families)[0].tools[0])
+      .toMatchObject({ text: 'Solar select by zone', label: 'solar_select_by_zone' })
+  })
+
+  it('drops the surface word from placed catalog display text without a Solar rail', () => {
+    const families = [{
+      family_id: 'solar', label: 'Solar',
+      capabilities: [{ name: 'solar_select_by_zone', placement: { tab: 'draw' }, capabilities: [] }],
+    }]
+    expect(catalogTabClusters(families, { surfaceWord: 'Solar' }).draw[0].tools[0])
+      .toMatchObject({ text: 'Select by zone', label: 'solar_select_by_zone' })
+    expect(catalogTabClusters(families).draw[0].tools[0])
+      .toMatchObject({ text: 'Solar select by zone', label: 'solar_select_by_zone' })
+  })
+
+  it('drops the surface word from Solar profile family tools without a Solar rail', () => {
+    const families = [{ family_id: 'stringing', label: 'Stringing', capabilities: [{ name: 'solar_commit_solve' }] }]
+    const tabs = profileRibbonTabs('solar', { families })
+    const stringing = tabs.flatMap((tab) => tab.clusters).find((cluster) => cluster.label === 'Stringing')
+    expect(stringing.tools.find((tool) => tool.id === 'solar_commit_solve'))
+      .toMatchObject({ text: 'Commit solve', label: 'solar_commit_solve' })
+  })
+
+  it.each([
+    [true, 'Commit solve'],
+    [false, 'Solar commit solve'],
+  ])('uses the Solar display prefix only off the Solar surface (solarRail: %j)', (solarRail, text) => {
+    const families = [{ family_id: 'solar', label: 'Solar', capabilities: [{ name: 'solar_commit_solve' }] }]
+    const tool = catalogClusters(families, { solarRail })[0].tools[0]
+    expect(tool).toMatchObject({ text, label: 'solar_commit_solve' })
+  })
+
   it('maps one family cluster per family and arms the catalog run path with ribbon attribution', () => {
     const onRequestRun = vi.fn()
     const clusters = catalogClusters(FAMS, { onRequestRun })

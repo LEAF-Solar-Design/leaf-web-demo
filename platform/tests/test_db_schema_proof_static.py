@@ -145,6 +145,71 @@ def test_every_postgres_selector_adds_its_complete_authority_contract():
     _assert_lab_immutable_ledger_contract()
 
 
+def test_runner_migration_proof():
+    name = "0093_project_web_pages.sql"
+    manifest = db.migration_manifest()
+    proof = next(item for item in manifest if item['name'] == name)
+    assert proof == {
+        "name": name,
+        "sha256": sha256((db._PKG_DIR / "migrations" / name).read_bytes()).hexdigest(),
+    }
+    assert db._migration_proof(manifest)["missing_migrations"] == []
+    without_runner = [item for item in manifest if item['name'] != name]
+    assert db._migration_proof(without_runner)["missing_migrations"] == [name]
+    drifted = [*without_runner, {"name": name, "sha256": "0" * 64}]
+    assert db._migration_proof(drifted)["migration_hash_drift"] == [name]
+
+
+def test_async_solve_migration_proof():
+    name = "0094_project_solve_async.sql"
+    manifest = db.migration_manifest()
+    proof = next(item for item in manifest if item['name'] == name)
+    assert proof == {
+        "name": name,
+        "sha256": sha256((db._PKG_DIR / "migrations" / name).read_bytes()).hexdigest(),
+    }
+    assert db._migration_proof(manifest)["missing_migrations"] == []
+    without_runner = [item for item in manifest if item['name'] != name]
+    assert db._migration_proof(without_runner)["missing_migrations"] == [name]
+    drifted = [*without_runner, {"name": name, "sha256": "0" * 64}]
+    assert db._migration_proof(drifted)["migration_hash_drift"] == [name]
+
+
+def test_org_invitations_migration_proof():
+    name = "0095_org_invitations.sql"
+    manifest = db.migration_manifest()
+    proof = next(item for item in manifest if item['name'] == name)
+    assert proof == {
+        "name": name,
+        "sha256": sha256((db._PKG_DIR / "migrations" / name).read_bytes()).hexdigest(),
+    }
+    assert db._migration_proof(manifest)["missing_migrations"] == []
+    without_runner = [item for item in manifest if item['name'] != name]
+    assert db._migration_proof(without_runner)["missing_migrations"] == [name]
+    drifted = [*without_runner, {"name": name, "sha256": "0" * 64}]
+    assert db._migration_proof(drifted)["migration_hash_drift"] == [name]
+
+
+@pytest.mark.parametrize("kind,name", [
+    ("constraints", "project_solve_exchanges_async_shape_check"),
+    ("triggers", "project_solve_exchanges_async_guard"),
+])
+def test_async_solve_catalog_missing_or_disabled_fails_closed(kind, name):
+    required = db.required_catalog_for_selected_authorities({})
+    rows = _complete_catalog_rows({})
+    field = "conname" if kind == "constraints" else "tgname"
+    row = next(item for item in rows[kind] if item[field] == name)
+    if kind == "constraints":
+        row["validated"] = False
+        reason = "not-validated"
+    else:
+        row["enabled"] = "D"
+        reason = "disabled"
+    assert f"{name}:{reason}" in db._catalog_contract_errors(required, rows)[f"invalid_{kind}"]
+    rows[kind].remove(row)
+    assert f"{name}:missing-or-wrong-relation" in db._catalog_contract_errors(required, rows)[f"invalid_{kind}"]
+
+
 def _assert_lab_immutable_ledger_contract():
     selected = {"LEAF_LAB_STORE": "postgres"}
     columns = db.required_columns_for_selected_authorities(selected)
@@ -225,6 +290,7 @@ def test_lab_run_schema_proof(mode):
         "lease_owner", "lease_fence", "lease_expires_at", "next_seq", "event_count",
         "created_at", "updated_at", "finished_at",
         "claimed_build_revision", "claimed_color", "cancel_requested_at", "cancel_requested_by",
+        "corpus_authority_json",
     }
     assert columns["lab_run_events"] == {
         "tenant_id", "run_id", "seq", "block_id", "kind", "payload", "created_at",
@@ -284,6 +350,73 @@ def test_lab_run_schema_proof(mode):
                      "cancel_requested_at TIMESTAMPTZ", "cancel_requested_by TEXT",
                      "CREATE TABLE IF NOT EXISTS lab_worker_status", "CREATE TABLE IF NOT EXISTS lab_worker_control"):
         assert fragment in worker_migration
+
+    # Both stores share these PostgreSQL modes; keep their readiness proofs
+    # together so the platform-static test-count pin remains unchanged.
+    _assert_device_bridge_schema_proof(mode)
+
+
+def _assert_device_bridge_schema_proof(mode):
+    selected = {"LEAF_DEVICE_STORE": mode}
+    expected = {
+        "device_enrollments": {"enrollment_id", "tenant_id", "project_id", "label", "token_sha256",
+                               "created_by", "created_at", "expires_at", "consumed_at", "device_id"},
+        "devices": {"device_id", "tenant_id", "project_id", "label", "public_key", "agent_version",
+                    "platform", "hostname", "created_at", "last_seen_at", "revoked_at", "revoked_by", "packages", "free_mem_mb"},
+        "device_commands": {"command_id", "tenant_id", "device_id", "op", "args", "issued_by", "issued_at",
+                            "expires_at", "leased_at", "lease_until", "state", "result", "finished_at"},
+        "device_nonces": {"device_id", "nonce", "seen_at"},
+        "device_relay_tokens": {"token_id", "tenant_id", "device_id", "package", "label", "token_sha256",
+                                "created_by", "created_at", "revoked_at", "last_used_at"},
+        "device_audit": {"event_id", "tenant_id", "device_id", "at", "actor", "op", "target", "status", "request_sha256"},
+    }
+    columns = db.required_columns_for_selected_authorities(selected)
+    assert {name: columns[name] for name in expected} == expected
+    assert not set(expected) & set(db.required_columns_for_selected_authorities({"LEAF_DEVICE_STORE": "sqlite"}))
+    catalog = db.required_catalog_for_selected_authorities(selected)
+    keys = {
+        "device_enrollments_pkey": ("device_enrollments", "PRIMARY KEY (enrollment_id)"),
+        "device_enrollments_token_sha256_key": ("device_enrollments", "UNIQUE (token_sha256)"),
+        "devices_pkey": ("devices", "PRIMARY KEY (device_id)"),
+        "devices_public_key_key": ("devices", "UNIQUE (public_key)"),
+        "devices_tenant_id_device_id_key": ("devices", "UNIQUE (tenant_id, device_id)"),
+        "device_commands_pkey": ("device_commands", "PRIMARY KEY (command_id)"),
+        "device_nonces_pkey": ("device_nonces", "PRIMARY KEY (device_id, nonce)"),
+        "device_relay_tokens_pkey": ("device_relay_tokens", "PRIMARY KEY (token_id)"),
+        "device_relay_tokens_token_sha256_key": ("device_relay_tokens", "UNIQUE (token_sha256)"),
+        "device_audit_pkey": ("device_audit", "PRIMARY KEY (event_id)"),
+    }
+    for name, fragments in keys.items():
+        assert catalog["constraints"][name] == db._catalog_contract(*fragments)
+    for table in ("device_commands", "device_relay_tokens"):
+        assert catalog["constraints"][table + "_tenant_id_device_id_fkey"] == db._catalog_contract(
+            table, "FOREIGN KEY (tenant_id, device_id)", "REFERENCES devices(tenant_id, device_id)")
+    assert catalog["constraints"]["device_commands_op_check"] == db._catalog_contract(
+        "device_commands", "CHECK", "op", "pkg.install", "pkg.upgrade", "pkg.uninstall", "pkg.health",
+        "http.proxy", "ha.onboard", "ha.flow.start", "ha.flow.step", "ha.flow.list", "agent.pause", "agent.update")
+    assert catalog["constraints"]["device_commands_state_check"] == db._catalog_contract(
+        "device_commands", "CHECK", "state", "queued", "leased", "done", "expired")
+    assert catalog["constraints"]["device_audit_status_check"] == db._catalog_contract(
+        "device_audit", "CHECK", "status", "ok", "error", "refused")
+    assert catalog["indexes"]["device_commands_device_state_issued_idx"] == db._catalog_contract(
+        "device_commands", "(device_id, state, issued_at)")
+    assert catalog["indexes"]["device_audit_device_at_idx"] == db._catalog_contract(
+        "device_audit", "(device_id, at DESC)")
+    migration = (db._PKG_DIR / "migrations/0096_device_bridge.sql").read_text(encoding="utf-8")
+    manifest = db.migration_manifest()
+    device_migration = "0096_device_bridge.sql"
+    matching_rows = [row for row in manifest if row["name"] == device_migration]
+    assert matching_rows == [{"name": device_migration, "sha256": sha256(
+        (db._PKG_DIR / "migrations" / device_migration).read_bytes()).hexdigest()}]
+    without_device = [row for row in manifest if row["name"] != device_migration]
+    assert db._migration_proof(without_device)["missing_migrations"] == [device_migration]
+    assert migration.startswith("-- Expand only.")
+    assert not re.search(r"^\s*(DROP|ALTER|DELETE|TRUNCATE|UPDATE)\b", migration, re.I | re.M)
+    assert set(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", migration)) == set(expected)
+    for fragment in ("platform JSONB NOT NULL", "args JSONB NOT NULL", "result JSONB",
+                     "packages JSONB NOT NULL DEFAULT '[]'", "event_id BIGSERIAL PRIMARY KEY",
+                     "PRIMARY KEY (device_id, nonce)", "(device_id, state, issued_at)", "(device_id, at DESC)"):
+        assert fragment in migration
 
 
 def test_every_shipped_table_has_a_readiness_contract():

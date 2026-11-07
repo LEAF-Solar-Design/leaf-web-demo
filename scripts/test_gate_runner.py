@@ -25,6 +25,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -32,6 +33,13 @@ import pytest
 
 SCRIPTS = Path(__file__).resolve().parent
 REPO = SCRIPTS.parent
+
+
+@pytest.fixture(autouse=True)
+def _isolate_nested_process_capture(monkeypatch):
+    # This suite runs within the outer supervisor; its drills must stay untraced.
+    monkeypatch.delenv("LEAF_PROCESS_CAPTURE_CONTEXT", raising=False)
+    monkeypatch.delenv("LEAF_PROCESS_CAPTURE_OUT", raising=False)
 
 
 def _load_runner():
@@ -44,6 +52,749 @@ def _load_runner():
     sys.modules["run_all_gates"] = mod
     spec.loader.exec_module(mod)
     return mod
+
+
+def _failed_log_retention_helper():
+    spec = importlib.util.spec_from_file_location(
+        "retain_failed_gate_logs", SCRIPTS / "ci/retain_failed_gate_logs.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _unprivileged_helper():
+    spec = importlib.util.spec_from_file_location(
+        "run_unprivileged_pytest", SCRIPTS / "ci/run_unprivileged_pytest.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_unprivileged_both_named_gates_preserve_contract(monkeypatch, tmp_path):
+    runner = _load_runner()
+    suites = {suite.id: suite for suite in runner.build_suites()}
+    for sid, target, floor, gated in (
+        ("server-lab-runs", "tests/test_lab_runs.py", 24, False),
+        ("server-lab-corpus-executor", "tests/test_lab_corpus_executor.py", 14, True),
+    ):
+        suite = suites[sid]
+        expected_argv = ([sys.executable, "-I", str(SCRIPTS / "ci/run_unprivileged_pytest.py"),
+                          *runner._py_pytest(target)[2:]] if sys.platform.startswith("linux")
+                         else runner._py_pytest(target))
+        assert suite.argv == expected_argv
+        assert suite.cwd == runner.SERVER
+        assert suite.uses_database and suite.db_gated == gated
+        assert suite.expected == floor
+        monkeypatch.setenv("LEAF_TRUSTED_CI_DIR", str(SCRIPTS / "ci"))
+        monkeypatch.setenv("LEAF_READSET_DIR", str(tmp_path / "readsets"))
+        env = runner.suite_trace_env(suite, tmp_path, 1)
+        command = runner.reporting_command(suite, suite.argv, env)
+        assert command[:len(suite.argv)] == suite.argv
+        assert command[len(suite.argv):len(suite.argv) + 2] == ["-p", "pytest_selection"]
+        assert "--leaf-output=" + env["LEAF_TEST_REPORT_DIR"] in command
+        assert json.loads((Path(env["LEAF_TEST_REPORT_DIR"]) / "report-only.json").read_text())["apply_filter"] is False
+
+
+@pytest.mark.parametrize("args", [[], ["sh", "-c", "id"], ["pytest", "tests/test_other.py"],
+    ["pytest", "tests/test_lab_runs.py", "--override-ini=pythonpath=/private"],
+    ["pytest", "tests/test_lab_runs.py", "-p", "arbitrary_plugin"],
+    ["pytest", "tests/test_lab_runs.py", "../tests/test_lab_runs.py"]])
+def test_unprivileged_refuses_other_commands(args):
+    with pytest.raises(ValueError):
+        _unprivileged_helper().validate_args(args)
+
+
+def test_unprivileged_nodeids_and_normal_options():
+    helper = _unprivileged_helper()
+    args = ["pytest", "tests/test_lab_runs.py::test_one", "tests/test_lab_runs.py::test_two",
+            "-q", "--color=no", "-r", "s", "-p", "no:cacheprovider"]
+    assert helper.validate_args(args) == args
+
+
+def test_unprivileged_source_snapshot_excludes_untracked_and_preserves_bytes(tmp_path, monkeypatch):
+    helper = _unprivileged_helper()
+    repo = tmp_path / "original"
+    repo.mkdir(mode=0o700)
+    paths = ["server/tests/test_lab_runs.py", "engine/pinned.tar.gz", "deploy/gen_seccomp_filter.c",
+             "scripts/proof_project_pg.py", "platform/module.py", "scripts/ci/run_unprivileged_pytest.py"]
+    before = {}
+    for name in paths:
+        path = repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"exact\x00bytes\xff")
+        path.chmod(0o600)
+        before[name] = (path.read_bytes(), path.stat().st_mode)
+    (repo / "secret-untracked").write_text("private")
+    monkeypatch.setattr(helper.subprocess, "run", lambda *a, **k: SimpleNamespace(
+        stdout=b"\0".join(name.encode() for name in paths[:-1]) + b"\0"))
+    copied = tmp_path / "snapshot"
+    helper.snapshot(repo, copied, helper.Budget())
+    assert not (copied / "secret-untracked").exists()
+    for name, (content, mode) in before.items():
+        assert (copied / name).read_bytes() == content
+        assert ((repo / name).read_bytes(), (repo / name).stat().st_mode) == (content, mode)
+
+
+def test_unprivileged_refuses_escaping_and_symlink_sources(tmp_path):
+    helper = _unprivileged_helper()
+    for name in ("../outside", "/etc/passwd", ".git/config", "bad\\path"):
+        with pytest.raises(ValueError):
+            helper.safe_file(tmp_path, name)
+    if sys.platform.startswith("linux"):
+        (tmp_path / "link").symlink_to("/etc/passwd")
+        with pytest.raises(ValueError, match="symlink"):
+            helper.safe_file(tmp_path, "link")
+        (tmp_path / "directory").symlink_to("/etc", target_is_directory=True)
+        with pytest.raises(ValueError, match="symlink"):
+            helper.safe_file(tmp_path, "directory/passwd")
+
+
+@pytest.mark.parametrize("limit", ["MAX_FILES", "MAX_BYTES"])
+def test_unprivileged_copy_budget_refuses_before_output(tmp_path, monkeypatch, limit):
+    helper = _unprivileged_helper()
+    original = tmp_path / "source"
+    original.write_bytes(b"bounded source")
+    monkeypatch.setattr(helper, limit, 0)
+    with pytest.raises(ValueError, match="budget"):
+        helper.Budget().copy(original, tmp_path / "destination")
+    assert not (tmp_path / "destination").exists()
+    assert original.read_bytes() == b"bounded source"
+
+
+def test_unprivileged_handback_maps_exact_output_refs_and_refuses_redirects(tmp_path):
+    helper = _unprivileged_helper()
+    private, original = tmp_path / "private", tmp_path / "original"
+    private.mkdir()
+    (private / "capture-suites.json").write_text(json.dumps([
+        {"outcomes_ref": str(private / "attempts-main.jsonl"), "test_ids": ["suite::test"]}]))
+    (private / "attempts-main.jsonl").write_text('{"outcome":"failed"}\n')
+    helper.handback(private, original, [(str(private), str(original))], helper.Budget())
+    assert json.loads((original / "capture-suites.json").read_text())[0]["outcomes_ref"] == str(original / "attempts-main.jsonl")
+    assert json.loads((original / "attempts-main.jsonl").read_text())["outcome"] == "failed"
+    with pytest.raises(ValueError, match="collision"):
+        helper.handback(private, original, [], helper.Budget())
+    if sys.platform.startswith("linux"):
+        (private / "redirect.json").symlink_to("/etc/passwd")
+        with pytest.raises(ValueError):
+            helper.handback(private, tmp_path / "other", [], helper.Budget())
+
+
+def test_unprivileged_real_clean_child_identity_and_nnp(tmp_path):
+    if not sys.platform.startswith("linux"):
+        return  # No Linux identity proof is asserted on other platforms.
+    helper = _unprivileged_helper()
+    # Exercise the actual child boundary, replacing only the final pytest exec.
+    program = (
+        "import importlib.util,os; "
+        f"s=importlib.util.spec_from_file_location('launcher',{str(helper.SELF)!r}); "
+        "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+        "os.execv=lambda *a: None; m.child(['pytest','tests/test_lab_runs.py'])"
+    )
+    command = [sys.executable, "-I", "-c", program]
+    if os.geteuid() == 0:
+        # Copy only this helper into a traversable private directory for UID10003.
+        with helper.tempfile.TemporaryDirectory(prefix="leaf-identity-", dir="/tmp") as raw:
+            directory = Path(raw)
+            copied = directory / "launcher.py"
+            copied.write_bytes(helper.SELF.read_bytes())
+            copied.chmod(0o600)
+            helper.own_tree(directory)
+            command[-1] = program.replace(repr(str(helper.SELF)), repr(str(copied)))
+            command = [shutil.which("setpriv") or "/usr/bin/setpriv", "--reuid=10003", "--regid=10003",
+                       "--clear-groups", "--bounding-set=-all", "--inh-caps=-all", "--ambient-caps=-all", *command]
+            result = subprocess.run(command, capture_output=True, text=True, cwd="/tmp", timeout=15)
+    else:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    assert "CapEff=0 CapPrm=0 CapInh=0 CapAmb=0 NNP=1" in result.stdout
+    assert "uid=0 " not in result.stdout
+    assert f"uid={10003 if os.geteuid() == 0 else os.geteuid()} " in result.stdout
+
+
+def test_unprivileged_rejects_privileged_identity(monkeypatch):
+    helper = _unprivileged_helper()
+    monkeypatch.setattr(helper.Path, "read_text", lambda self: (
+        "Uid:\t0 0 0 0\nCapEff:\t0\nCapPrm:\t0\nCapInh:\t0\nCapAmb:\t0\nNoNewPrivs:\t1\n"))
+    with pytest.raises(ValueError, match="identity"):
+        helper.identity()
+
+
+@pytest.mark.parametrize("field,value", [("CapEff", "1"), ("CapPrm", "1"),
+    ("CapInh", "1"), ("CapAmb", "1"), ("NoNewPrivs", "0")])
+def test_unprivileged_rejects_each_unclean_identity_field(monkeypatch, field, value):
+    helper = _unprivileged_helper()
+    fields = dict(Uid="10003 10003 10003 10003", CapEff="0", CapPrm="0", CapInh="0", CapAmb="0", NoNewPrivs="1")
+    fields[field] = value
+    monkeypatch.setattr(helper.Path, "read_text", lambda self: "\n".join(k + ": " + v for k, v in fields.items()))
+    with pytest.raises(ValueError, match="identity"):
+        helper.identity()
+
+
+def test_unprivileged_private_runtime_bytes_and_declared_readset_destination(tmp_path, monkeypatch):
+    helper = _unprivileged_helper()
+    trusted = tmp_path / "trusted"
+    trusted.mkdir(mode=0o700)
+    names = ("sitecustomize.py", "pytest_selection.py", "select_tests.py", "trace_reads.py")
+    for name in names:
+        (trusted / name).write_bytes(b"# frozen trusted bytes\n")
+        (trusted / name).chmod(0o600)
+    (trusted / "unrelated-secret").write_text("must not be copied")
+    private = tmp_path / "private"
+    private.mkdir()
+    monkeypatch.setattr(helper, "snapshot", lambda repo, dest, budget: dest.mkdir())
+    monkeypatch.setattr(helper, "own_tree", lambda directory: None)
+    env = {"LEAF_TRUSTED_CI_DIR": str(trusted), "PYTHONPATH": str(trusted),
+           "LEAF_READSET_DIR": str(tmp_path / "readsets"), "LEAF_READSET_SUITE": "suite/a.b",
+           "LEAF_READSET_ATTEMPT": "2", "DATABASE_URL": "private-dsn"}
+    source, args, child_env, outputs, mappings = helper.prepare(
+        private, ["pytest", "tests/test_lab_runs.py"], env)
+    copied = Path(child_env["LEAF_TRUSTED_CI_DIR"])
+    assert child_env["PYTHONPATH"] == str(copied)
+    assert sorted(p.name for p in copied.iterdir()) == sorted(names)
+    assert all((copied / name).read_bytes() == (trusted / name).read_bytes() for name in names)
+    assert outputs == [(Path(child_env["LEAF_READSET_DIR"]) / "suite%2Fa%2Eb/2",
+                        tmp_path / "readsets/suite%2Fa%2Eb/2")]
+    assert child_env["DATABASE_URL"] == "private-dsn"
+    assert "private-dsn" not in repr(args)
+    assert env["PYTHONPATH"] == str(trusted)
+
+
+def test_unprivileged_prepare_failure_cleans_private_tree_and_sanitizes(tmp_path, monkeypatch, capsys):
+    if not sys.platform.startswith("linux") or os.geteuid() != 0:
+        return
+    helper = _unprivileged_helper()
+    seen = []
+    def fail(directory, args, environment):
+        seen.append(directory)
+        (directory / "partial").write_text("private")
+        raise ValueError("private exception and DATABASE_URL")
+    monkeypatch.setattr(helper, "prepare", fail)
+    assert helper.main(["pytest", "tests/test_lab_runs.py"]) == 125
+    assert seen and not seen[0].exists()
+    output = capsys.readouterr()
+    assert output.err == "corpus launcher refused stage=prepare class=ValueError\n"
+
+
+def test_unprivileged_supervisor_reaps_detached_descendant_and_propagates_exit(tmp_path):
+    if not sys.platform.startswith("linux"):
+        return
+    helper = _unprivileged_helper()
+    pidfile = tmp_path / "pid"
+    program = (
+        "import os,time; pid=os.fork(); "
+        f"open({str(pidfile)!r},'w').write(str(pid)) if pid else None; "
+        "os._exit(9) if pid else None; os.setsid(); time.sleep(60)"
+    )
+    assert helper.supervise([sys.executable, "-I", "-c", program], tmp_path, os.environ.copy()) == 9
+    pid = int(pidfile.read_text())
+    assert not Path(f"/proc/{pid}").exists()
+
+
+def test_unprivileged_supervisor_reaps_exited_orphan_before_main_child_finishes(tmp_path):
+    if not sys.platform.startswith("linux"):
+        return
+    helper = _unprivileged_helper()
+    pidfile = tmp_path / "orphan-pid"
+    program = f"""
+import os, pathlib, time
+pidfile = pathlib.Path({str(pidfile)!r})
+parent = os.fork()
+if parent == 0:
+    orphan = os.fork()
+    if orphan:
+        os._exit(0)
+    os.setsid()
+    pidfile.write_text(str(os.getpid()))
+    time.sleep(0.15)
+    os._exit(0)
+os.waitpid(parent, 0)
+deadline = time.monotonic() + 3
+while not pidfile.exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
+while pidfile.exists() and pathlib.Path('/proc/' + pidfile.read_text()).exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
+os._exit(7 if pidfile.exists() and not pathlib.Path('/proc/' + pidfile.read_text()).exists() else 8)
+"""
+    assert helper.supervise([sys.executable, "-I", "-c", program], tmp_path, os.environ.copy()) == 7
+
+
+def test_unprivileged_supervisor_forwards_termination(tmp_path):
+    if not sys.platform.startswith("linux"):
+        return
+    helper = _unprivileged_helper()
+    pidfile = tmp_path / "child-pid"
+    child_code = f"import os,time; open({str(pidfile)!r},'w').write(str(os.getpid())); time.sleep(60)"
+    program = (
+        "import importlib.util,os,sys; "
+        f"s=importlib.util.spec_from_file_location('launcher',{str(helper.SELF)!r}); "
+        "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+        f"sys.exit(m.supervise([sys.executable,'-I','-c',{child_code!r}],{str(tmp_path)!r},os.environ.copy()))"
+    )
+    process = subprocess.Popen([sys.executable, "-I", "-c", program])
+    try:
+        deadline = time.monotonic() + 10
+        while not pidfile.exists() and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert pidfile.exists()
+        process.terminate()
+        assert process.wait(timeout=10) == 143
+        assert not Path("/proc/" + pidfile.read_text()).exists()
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+
+
+def test_unprivileged_real_root_private_inputs_reports_cleanup_and_exit(tmp_path, monkeypatch):
+    if not sys.platform.startswith("linux") or os.geteuid() != 0:
+        return  # Root-start proof must be supplied by the root Linux verifier.
+    helper = _unprivileged_helper()
+    repo = tmp_path / "repo"
+    (repo / "server").mkdir(parents=True, mode=0o700)
+    launcher = repo / "scripts/ci/run_unprivileged_pytest.py"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_bytes(helper.SELF.read_bytes())
+    # A tiny pytest module discriminates the launcher boundary without replaying suites.
+    probe = repo / "server/pytest.py"
+    probe.write_text(
+        "import json,os,sys\nfrom pathlib import Path\n"
+        "opts=dict(a.split('=',1) for a in sys.argv if a.startswith('--leaf-'))\n"
+        "assert json.loads(Path(opts['--leaf-selection']).read_text()) == {'apply_filter':False}\n"
+        "assert Path(os.environ['HOME']).stat().st_uid == os.getuid() != 0\n"
+        "assert Path(os.environ['TMPDIR']).stat().st_uid == os.getuid()\n"
+        "out=Path(opts['--leaf-output'])\n"
+        "(out/'completion-main.json').write_text(json.dumps({'outcomes_ref':str(out/'attempts-main.jsonl'),'source':str(Path.cwd().parent),'home':os.environ['HOME']}))\n"
+        "(out/'attempts-main.jsonl').write_text('{\"outcome\":\"failed\"}\\n')\n"
+        "sys.exit(7)\n")
+    probe.chmod(0o600)
+    report = tmp_path / "reports"
+    report.mkdir(mode=0o700)
+    selection = report / "report-only.json"
+    selection.write_text('{"apply_filter":false}')
+    monkeypatch.setattr(helper, "REPO", repo)
+    actual_run = helper.subprocess.run
+    def tracked(command, **kwargs):
+        if command[0] == "git":
+            return SimpleNamespace(stdout=b"server/pytest.py\0scripts/ci/run_unprivileged_pytest.py\0")
+        return actual_run(command, **kwargs)
+    monkeypatch.setattr(helper.subprocess, "run", tracked)
+    for key in ("PYTHONPATH", "LEAF_TRUSTED_CI_DIR", "LEAF_READSET_DIR", "LEAF_READSET_ROOT", "LEAF_PROCESS_CAPTURE_DIR"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("LEAF_TEST_REPORT_DIR", str(report))
+    before = (probe.read_bytes(), probe.stat().st_mode, repo.stat().st_mode)
+    code = helper.main(["pytest", "tests/test_lab_runs.py", "--leaf-output=" + str(report),
+                        "--leaf-selection=" + str(selection), "--leaf-repo=" + str(repo)])
+    assert code == 7
+    evidence = json.loads((report / "completion-main.json").read_text())
+    assert evidence["source"] == str(repo)
+    assert evidence["outcomes_ref"] == str(report / "attempts-main.jsonl")
+    assert not Path(evidence["home"]).parent.exists()
+    assert (probe.read_bytes(), probe.stat().st_mode, repo.stat().st_mode) == before
+    assert json.loads(selection.read_text()) == {"apply_filter": False}
+
+
+def _failed_log_retention_inputs(tmp_path, rows):
+    result = tmp_path / "result.json"
+    result.write_text(json.dumps({"results": rows}), encoding="utf-8")
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    return result, logs, tmp_path / "retained"
+
+
+def test_failed_log_retention_fail_only_retry_identity(tmp_path):
+    import hashlib
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [
+        {"id": "green", "status": "PASS", "attempts": 2},
+        {"id": "red", "status": "FAIL", "attempts": 3,
+         "test_report": {"path": str(tmp_path / "outside-secret")}}])
+    for name, content in [("green.log", b"passing"), ("red.log", b"first stack"),
+                          ("red.retry1.log", b"middle"), ("red.retry2.log", b"last stack")]:
+        (logs / name).write_bytes(content)
+    manifest = helper.retain_failed_logs(result, logs, output)
+    assert [e["source"] for e in manifest["files"]] == ["red.retry2.log", "red.log"]
+    assert set(p.name for p in output.iterdir()) == {"red.retry2.log", "red.log", "manifest.json"}
+    for entry in manifest["files"]:
+        content = (logs / entry["source"]).read_bytes()
+        assert (output / entry["copy"]).read_bytes() == content
+        assert entry["source_sha256"] == entry["copy_sha256"] == hashlib.sha256(content).hexdigest()
+        assert entry["original_size"] == entry["copied_size"] == len(content)
+        assert entry["truncated"] is False
+    assert json.loads((output / "manifest.json").read_text()) == manifest
+
+
+def test_failed_log_retention_identical_original(tmp_path):
+    helper = _failed_log_retention_helper()
+    args = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL", "attempts": 2}])
+    for name in ("red.log", "red.retry1.log"):
+        (args[1] / name).write_bytes(b"same stack")
+    manifest = helper.retain_failed_logs(*args)
+    assert manifest["copied_files"] == 1
+    assert manifest["files"][1]["status"] == "identical_to_latest"
+
+
+def test_failed_log_retention_missing_and_cli_diagnostics(tmp_path, capsys):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    assert helper.main(["--result", str(result), "--logs", str(logs), "--output", str(output)]) == 0
+    assert '"missing": 1' in capsys.readouterr().out
+    assert json.loads((output / "manifest.json").read_text())["files"][0]["status"] == "missing"
+    result.write_text("secret invalid JSON", encoding="utf-8")
+    assert helper.main(["--result", str(result), "--logs", str(logs), "--output", str(tmp_path / "bad")]) == 1
+    assert "secret" not in capsys.readouterr().out
+    assert not (tmp_path / "bad").exists()
+    result.unlink()
+    with pytest.raises(OSError):
+        helper.retain_failed_logs(result, logs, tmp_path / "missing")
+    assert not (tmp_path / "missing").exists()
+
+
+@pytest.mark.parametrize("suite", ["../outside", "/outside", "a/b", "a\\b", "..", "x" * 129])
+def test_failed_log_retention_unsafe_ids(tmp_path, suite):
+    helper = _failed_log_retention_helper()
+    args = _failed_log_retention_inputs(tmp_path, [{"id": suite, "status": "FAIL"}])
+    with pytest.raises(ValueError, match="unsafe_suite_id"):
+        helper.retain_failed_logs(*args)
+    assert not args[2].exists()
+
+
+def test_failed_log_retention_symlinks_no_external_access(tmp_path, monkeypatch):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "secret"
+    secret.write_bytes(b"never open me")
+    try:
+        (logs / "red.log").symlink_to(secret)
+        output.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation unavailable")
+    real_open = helper.os.open
+    def guarded_open(path, flags, *args, **kwargs):
+        assert str(path) != str(secret)
+        assert str(path) != str(outside)
+        return real_open(path, flags, *args, **kwargs)
+    monkeypatch.setattr(helper.os, "open", guarded_open)
+    with pytest.raises(ValueError, match="output_collision"):
+        helper.retain_failed_logs(result, logs, output)
+    assert set(p.name for p in outside.iterdir()) == {"secret"}
+    output.unlink()
+    manifest = helper.retain_failed_logs(result, logs, output)
+    assert manifest["files"][0]["status"] == "rejected"
+    assert manifest["copied_files"] == 0
+    assert secret.read_bytes() == b"never open me"
+
+
+@pytest.mark.parametrize("kind", ["result", "logs", "output-parent"])
+def test_failed_log_retention_symlink_path_components(tmp_path, kind):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    link = tmp_path / "link"
+    try:
+        link.symlink_to(tmp_path, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation unavailable")
+    args = {"result_path": result, "log_dir": logs, "output_dir": output}
+    args[{"result": "result_path", "logs": "log_dir", "output-parent": "output_dir"}[kind]] = (
+        link / {"result": "result.json", "logs": "logs", "output-parent": "retained"}[kind])
+    with pytest.raises(ValueError, match="unsafe_path"):
+        helper.retain_failed_logs(**args)
+    assert not output.exists()
+
+
+def test_failed_log_retention_special_files(tmp_path):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [
+        {"id": "directory", "status": "FAIL"}, {"id": "pipe", "status": "FAIL"}])
+    (logs / "directory.log").mkdir()
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(logs / "pipe.log")
+    else:
+        (logs / "pipe.log").mkdir()
+    manifest = helper.retain_failed_logs(result, logs, output)
+    assert [entry["status"] for entry in manifest["files"]] == ["rejected", "rejected"]
+    assert manifest["copied_files"] == 0
+
+
+def test_failed_log_retention_tail_and_total_budget(tmp_path):
+    import hashlib
+    helper = _failed_log_retention_helper()
+    rows = [{"id": f"red{i}", "status": "FAIL", "attempts": 2} for i in range(10)]
+    result, logs, output = _failed_log_retention_inputs(tmp_path, rows)
+    contents = b"discard head\n" * 30000 + b"ACTIONABLE FINAL STACK\n"
+    for row in rows:
+        (logs / (row["id"] + ".retry1.log")).write_bytes(contents)
+        (logs / (row["id"] + ".log")).write_bytes(b"original")
+    manifest = helper.retain_failed_logs(result, logs, output)
+    assert manifest["copied_bytes"] == helper.TOTAL_LIMIT
+    assert manifest["copied_files"] == 8
+    for entry in manifest["files"][:8]:
+        copied = (output / entry["copy"]).read_bytes()
+        assert copied == contents[-helper.FILE_LIMIT:]
+        assert entry["truncated"] and entry["original_size"] == len(contents)
+        assert entry["source_sha256"] == hashlib.sha256(contents).hexdigest()
+        assert entry["copy_sha256"] == hashlib.sha256(copied).hexdigest()
+    assert all(entry["status"] == "budget_exhausted" and entry["truncated"]
+               for entry in manifest["files"][8:])
+
+
+def test_failed_log_retention_count_cap_and_result_cap(tmp_path):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [
+        {"id": f"red{i}", "status": "FAIL"} for i in range(130)])
+    for i in range(130):
+        (logs / f"red{i}.log").write_bytes(b"stack")
+    manifest = helper.retain_failed_logs(result, logs, output)
+    assert manifest["copied_files"] == 128 and len(manifest["files"]) == 128
+    assert manifest["omitted_candidates"] == 2
+    result.write_bytes(b" " * (helper.RESULT_LIMIT + 1))
+    with pytest.raises(ValueError, match="result_too_large"):
+        helper.retain_failed_logs(result, logs, tmp_path / "oversize")
+    assert not (tmp_path / "oversize").exists()
+
+
+def test_failed_log_retention_no_fail_and_collision(tmp_path):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [
+        {"id": "green", "status": "PASS"}, {"id": "skip", "status": "SKIP"}])
+    (logs / "green.log").write_bytes(b"passing logs must not compete")
+    manifest = helper.retain_failed_logs(result, logs, output)
+    assert manifest["files"] == [] and manifest["copied_bytes"] == manifest["copied_files"] == 0
+    assert [p.name for p in output.iterdir()] == ["manifest.json"]
+    original = (output / "manifest.json").read_bytes()
+    with pytest.raises(ValueError, match="output_collision"):
+        helper.retain_failed_logs(result, logs, output)
+    assert (output / "manifest.json").read_bytes() == original
+    assert (logs / "green.log").read_bytes() == b"passing logs must not compete"
+
+
+def test_failed_log_retention_no_fail_needs_no_logs(tmp_path):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [])
+    logs.rmdir()
+    manifest = helper.retain_failed_logs(result, logs, output)
+    assert manifest["files"] == [] and manifest["copied_files"] == 0
+    assert not logs.exists()
+
+
+@pytest.mark.parametrize("payload", [{}, {"results": {}}, {"results": [None]},
+                                    {"results": [{"id": "red", "status": "FAIL", "attempts": True}]}])
+def test_failed_log_retention_malformed_shapes(tmp_path, payload):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [])
+    result.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError):
+        helper.retain_failed_logs(result, logs, output)
+    assert not output.exists()
+
+
+def test_failed_log_retention_result_symlink_no_read(tmp_path):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [])
+    outside = tmp_path / "outside-result"
+    outside.write_bytes(b"secret malformed result must never be parsed")
+    result.unlink()
+    try:
+        result.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation unavailable")
+    with pytest.raises((OSError, ValueError)) as caught:
+        helper.retain_failed_logs(result, logs, output)
+    assert "malformed_result" not in str(caught.value)
+    assert not output.exists()
+    assert outside.read_bytes() == b"secret malformed result must never be parsed"
+
+
+def test_failed_log_stdout_shell_advisory_order_and_verdict():
+    source = (REPO / ".codebuild/ci.sh").read_text(encoding="utf-8")
+    gate = source.index('python scripts/run-all-gates.py --jobs', source.index('# LEAF_DIAGNOSTIC_END'))
+    assert source.rindex('export PYTHONUNBUFFERED=1', 0, gate) < gate
+    capture = source.index('python -I -B scripts/ci/retain_failed_gate_logs.py', gate)
+    next_step = source.index('if [[ "$postgres_status" != 0 && "$gate_status" == 0 ]]', gate)
+    block = source[capture:next_step]
+    assert gate < capture < next_step
+    assert '|| gate_status=$?' in source[gate:capture]
+    assert '--result /tmp/gate-results/gate-result.json --logs /tmp/gate-logs --output /tmp/gate-results/failed-gate-logs' in block
+    assert "|| echo 'WARNING: failed gate log retention unavailable' >&2" in block
+    assert "gate_status=" not in block and 'if ' not in block
+    assert '--emit-stdout --source "$HEAD_SHA" --build-id "${CODEBUILD_BUILD_ID:-}"' in block
+    assert source.count('--emit-stdout --source "$HEAD_SHA" --build-id "${CODEBUILD_BUILD_ID:-}"') == 2
+    assert 'tail -c 16384 "/tmp/gate-logs/' not in source
+    assert 'lines = log_path.read_text' not in source
+    assert '--body /tmp/gate-results/gate-result.json' in source
+    assert source.rstrip().endswith('exit "$gate_status"')
+    assert subprocess.run(['bash', '-n', str(REPO / '.codebuild/ci.sh')], capture_output=True).returncode == 0
+
+
+def _failed_stdout_frames(text):
+    chunks, manifests = [], []
+    for line in text.splitlines():
+        if line.startswith('LEAF_FAILED_LOG_CHUNK '):
+            chunks.append(json.loads(line.split(' ', 1)[1]))
+        elif line.startswith('LEAF_FAILED_LOG_MANIFEST '):
+            manifests.append(json.loads(line.split(' ', 1)[1]))
+    return chunks, manifests
+
+
+def test_failed_log_stdout_playwright_original_retry_and_digests(tmp_path, capsys):
+    import hashlib
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [
+        {'id': 'browser-proof', 'status': 'FAIL', 'attempts': 2},
+        {'id': 'green', 'status': 'PASS'}])
+    case = '1) [chromium] > tests/project.spec.ts:42 > preserves project after reopen'
+    locator = "Locator: getByRole('button', { name: 'Reopen project', exact: true })"
+    block = case + '\nError: expect(locator).toBeVisible() failed\n' + locator + '\nExpected: visible\nReceived: hidden\n'
+    originals = {'browser-proof.log': block + 'Original attempt\n',
+                 'browser-proof.retry1.log': block + 'Retry attempt\n'}
+    for name, text in originals.items():
+        (logs / name).write_text(text, encoding='utf-8')
+    (logs / 'green.log').write_text('green content must not publish')
+    source, build = 'a' * 40, 'leaf-ci-test:' + '1' * 32
+    assert helper.main(['--result', str(result), '--logs', str(logs), '--output', str(output),
+                        '--emit-stdout', '--source', source, '--build-id', build]) == 0
+    printed = capsys.readouterr().out
+    chunks, manifests = _failed_stdout_frames(printed)
+    assert len(manifests) == 1 and len(manifests[0]['files']) == 2
+    assert 'green content' not in printed
+    for name, text in originals.items():
+        body = ''.join(c['text'] for c in chunks if c['log_name'] == name)
+        assert case in body and locator in body and body == text
+        entry = next(e for e in manifests[0]['files'] if e['source'] == name)
+        digest = hashlib.sha256(text.encode()).hexdigest()
+        assert entry['source_sha256'] == entry['copy_sha256'] == digest
+        assert entry['redacted_sha256'] == entry['published_sha256'] == digest
+        assert entry['published_bytes'] == len(text.encode())
+        assert not entry['publication_truncated']
+    assert all(c['source_sha'] == source and c['build_id'] == build for c in chunks)
+
+
+@pytest.mark.parametrize('shape', ['header', 'assignment', 'dsn', 'uri', 'signed', 'encoded_signed',
+                                  'relative_signed', 'encoded_relative_signed', 'environment',
+                                  'nested_context', 'unfinished_context', 'private_key'])
+def test_failed_log_stdout_secret_shapes_never_publish(tmp_path, shape):
+    import hashlib
+    import io
+    helper = _failed_log_retention_helper()
+    secret = 'unit' + '-private-value-never-publish'
+    if shape == 'header':
+        raw = ': '.join(('Authorization', ' '.join(('Bearer', secret))))
+    elif shape == 'assignment':
+        raw = json.dumps({'client_secret': secret})
+    elif shape == 'dsn':
+        raw = 'postgresql' + '://reader:' + secret + '@db.invalid/scratch'
+    elif shape == 'uri':
+        raw = 'https' + '://reader:' + secret + '@service.invalid/resource'
+    elif shape in ('signed', 'encoded_signed'):
+        key = 'X-Amz-Signature' if shape == 'signed' else '%58-Amz-Signature'
+        raw = 'https://files.invalid/input?' + key + '=' + secret + '&safe=value'
+    elif shape in ('relative_signed', 'encoded_relative_signed'):
+        key = 'X-Amz-Signature' if shape == 'relative_signed' else '%58-Amz-Signature'
+        raw = 'GET /input?' + key + '=' + secret + '&safe=value'
+    elif shape == 'environment':
+        raw = 'UNRECOGNIZED_SETTING=' + secret
+    elif shape == 'nested_context':
+        raw = 'context = {\n"member": {"display": "' + secret + '"}\n}\nLocator: safe button'
+    elif shape == 'unfinished_context':
+        raw = 'context = {\n"member": {"display": "' + secret + '"}'
+    else:
+        raw = '-' * 5 + 'BEGIN' + ' PRIVATE KEY' + '-' * 5 + '\n' + secret + '\n' + '-' * 5 + 'END' + ' PRIVATE KEY' + '-' * 5
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{'id': 'red', 'status': 'FAIL'}])
+    content = ('Exact failing case\n' + raw + '\n').encode()
+    (logs / 'red.log').write_bytes(content)
+    manifest = helper.retain_failed_logs(result, logs, output)
+    stream = io.StringIO()
+    published = helper.emit_failed_logs(manifest, output, 'a' * 40, 'leaf-ci-test:' + '1' * 32, stream)
+    assert secret not in stream.getvalue()
+    chunks, _ = _failed_stdout_frames(stream.getvalue())
+    body = ''.join(c['text'] for c in chunks)
+    assert 'Exact failing case' in body and 'REDACTED' in body
+    assert published['files'][0]['source_sha256'] == hashlib.sha256(content).hexdigest()
+    assert published['files'][0]['redacted_sha256'] == hashlib.sha256(body.encode()).hexdigest()
+    assert published['files'][0]['redacted_sha256'] != published['files'][0]['source_sha256']
+    assert (output / 'red.log').read_bytes() == content
+
+
+def test_failed_log_stdout_green_needs_no_identity_or_log_read(tmp_path, capsys):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{'id': 'green', 'status': 'PASS'}])
+    (logs / 'green.log').write_text('private green diagnostic')
+    assert helper.main(['--result', str(result), '--logs', str(logs), '--output', str(output), '--emit-stdout']) == 0
+    printed = capsys.readouterr().out
+    assert 'LEAF_FAILED_LOG_' not in printed and 'private green diagnostic' not in printed
+
+
+@pytest.mark.parametrize('change', ['symlink', 'modified', 'oversize', 'traversal'])
+def test_failed_log_stdout_refuses_changed_or_unsafe_copies(tmp_path, change):
+    import io
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{'id': 'red', 'status': 'FAIL'}])
+    (logs / 'red.log').write_text('known case')
+    manifest = helper.retain_failed_logs(result, logs, output)
+    outside = tmp_path / 'outside'
+    outside.write_text('outside content must never publish')
+    if change == 'symlink':
+        (output / 'red.log').unlink()
+        (output / 'red.log').symlink_to(outside)
+    elif change == 'modified':
+        (output / 'red.log').write_text('modified content must never publish')
+    elif change == 'oversize':
+        (output / 'red.log').write_bytes(b'x' * (helper.FILE_LIMIT + 1))
+    else:
+        manifest['files'][0]['copy'] = '../outside'
+    stream = io.StringIO()
+    if change == 'traversal':
+        with pytest.raises(ValueError, match='unsafe_publication_copy'):
+            helper.emit_failed_logs(manifest, output, 'a' * 40, 'leaf-ci-test:' + '1' * 32, stream)
+        assert stream.getvalue() == ''
+    else:
+        public = helper.emit_failed_logs(manifest, output, 'a' * 40, 'leaf-ci-test:' + '1' * 32, stream)
+        assert public['files'][0]['publication_status'] == 'copy_refused'
+        assert not _failed_stdout_frames(stream.getvalue())[0]
+    assert 'content must never publish' not in stream.getvalue()
+
+
+def test_failed_log_stdout_tail_drops_partial_line_and_wire_is_bounded(tmp_path, monkeypatch):
+    import hashlib
+    import io
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{'id': 'red', 'status': 'FAIL'}])
+    monkeypatch.setattr(helper, 'FILE_LIMIT', 80)
+    (logs / 'red.log').write_text('unlabelled-private-fragment' * 20 + '\nExact failing case\nLocator: visible button\n')
+    manifest = helper.retain_failed_logs(result, logs, output)
+    stream = io.StringIO()
+    public = helper.emit_failed_logs(manifest, output, 'a' * 40, 'leaf-ci-test:' + '1' * 32, stream)
+    chunks, _ = _failed_stdout_frames(stream.getvalue())
+    body = ''.join(c['text'] for c in chunks)
+    assert body == 'Exact failing case\nLocator: visible button\n'
+    assert public['files'][0]['partial_first_line_dropped']
+    assert public['files'][0]['published_sha256'] == hashlib.sha256(body.encode()).hexdigest()
+    assert len(stream.getvalue().encode()) <= helper.STDOUT_LIMIT
+
+
+def test_failed_log_stdout_wire_budget_caps_escaped_text(tmp_path):
+    import io
+    helper = _failed_log_retention_helper()
+    rows = [{'id': 'red' + str(i), 'status': 'FAIL'} for i in range(8)]
+    result, logs, output = _failed_log_retention_inputs(tmp_path, rows)
+    for row in rows:
+        (logs / (row['id'] + '.log')).write_bytes(b'"\\\n' * (helper.FILE_LIMIT // 3))
+    manifest = helper.retain_failed_logs(result, logs, output)
+    stream = io.StringIO()
+    public = helper.emit_failed_logs(manifest, output, 'a' * 40, 'leaf-ci-test:' + '1' * 32, stream)
+    assert len(stream.getvalue().encode()) <= helper.STDOUT_LIMIT
+    assert any(e['publication_truncated'] for e in public['files'])
+
+
+def test_failed_log_stdout_invalid_identity_is_not_echoed(tmp_path, capsys):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{'id': 'red', 'status': 'FAIL'}])
+    (logs / 'red.log').write_text('failure')
+    private = 'unit-private-identity'
+    assert helper.main(['--result', str(result), '--logs', str(logs), '--output', str(output),
+                        '--emit-stdout', '--source', 'a' * 40, '--build-id', private]) == 1
+    assert private not in capsys.readouterr().out
 
 
 def test_prod_readonly_contract_gate_registration():
@@ -68,7 +819,7 @@ def test_pp3a_gate_registration():
     assert suite.cwd == SCRIPTS
     assert suite.argv == runner._py_pytest("test_proof_project.py")
     assert suite.label == "scripts test_proof_project.py"
-    assert suite.kind == "pytest" and suite.expected == 69
+    assert suite.kind == "pytest" and suite.expected == 376
     assert not suite.db_gated and not suite.uses_database and not suite.opt_in_env
     assert suite.allowed_skip_reasons == suite.database_skip_reasons == ()
     selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
@@ -85,7 +836,7 @@ def test_pp2_gate_registration():
     assert suite.cwd == SCRIPTS
     assert suite.argv == runner._py_pytest("test_proof_project_pg.py")
     assert suite.label == "scripts test_proof_project_pg.py"
-    assert suite.kind == "pytest" and suite.expected == 49  # Measured 2026-10-13: PP-2d isolation, any-case names.
+    assert suite.kind == "pytest" and suite.expected == 89  # Measured 2026-10-13: PP-2d isolation, any-case names. A1/C1: +28 fake native rows and +7 C1 rows. A1d +2. A1e +2
     assert not suite.db_gated and not suite.uses_database and not suite.opt_in_env
     assert suite.allowed_skip_reasons == suite.database_skip_reasons == ()
     selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
@@ -129,9 +880,9 @@ def test_sip_r1_gate_registration():
         assert suite.db_gated is gated
         assert suite_id in selection["mandatory_suite_ids"]
         assert suite.allowed_skip_reasons == ((r"platform DB unreachable(?:: .+)?",) if gated else ())
-    assert suites["platform-static"].expected == 239  # +1 demo inventory/migration contract regression.
-    assert suites["platform"].expected == 1205  # LD1b: +1 demo classification regression.
-    assert suites["gate-runner-selftest"].expected == 244  # SEL-303b mirror registration.
+    assert suites["platform-static"].expected == 267  # Source-catalog row has a dedicated owner.
+    assert suites["platform"].expected == 558  # B1 transfers 647 cases to their owners.
+    assert suites["gate-runner-selftest"].expected == 272  # SEL-303b mirror registration.
     assert suites["server-postgres-authority-inventory"].expected == 9
     assert suites["migration-expand-contract"].expected == 12
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
@@ -205,7 +956,7 @@ def test_sip_r3b_gate_registration():
     suites = {suite.id: suite for suite in runner.build_suites()}
     selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
     for suite_id, directory, floor, database in (
-        ("server-sip-r3b-tools", "server", 24, False),
+            ("server-sip-r3b-tools", "server", 26, True),
             ("platform-sip-r3b-tools", "platform", 7, True)):
         suite = suites[suite_id]
         assert suite.cwd == REPO / directory
@@ -358,6 +1109,43 @@ def test_failed_suite_evidence_reports_no_matching_error(tmp_path):
         _evidence_result(g, log)])
 
 
+@pytest.mark.parametrize("marker", ["\u2718 26", "x 26", "1)"])
+def test_failed_suite_evidence_playwright_failure_beats_passing_policy_title(tmp_path, marker):
+    g = _load_runner()
+    log = tmp_path / "panels.log"
+    failure = f"  {marker} [chromium] \u203a e2e/actual.spec.mjs:42:3 \u203a selected project"
+    log.write_text(
+        "  \u2713 25 e2e/recovery-controls.spec.mjs:241:3 a failed policy read (10s)\n"
+        + failure + "\nError: locator.click: Test timeout of 120000ms exceeded.\n"
+        + "waiting for getByRole('button', {name: 'Save'})\n"
+        + "[WebServer] Circular dependency between chunks with runtime\n" * 80,
+        encoding="utf-8")
+    lines = g.failed_suite_evidence([_evidence_result(g, log)])
+    assert lines[1] == "  first error: " + failure
+    assert any("locator.click" in line for line in lines)
+    assert any("getByRole" in line for line in lines)
+    assert not any("[WebServer]" in line for line in lines)
+
+
+def test_failed_suite_evidence_does_not_call_a_passing_policy_case_an_error(tmp_path):
+    g = _load_runner()
+    log = tmp_path / "passing-title.log"
+    log.write_text("  \u2713 25 e2e/policy.spec.mjs:2:3 refused upload after failed read\n",
+                   encoding="utf-8")
+    lines = g.failed_suite_evidence([_evidence_result(g, log)])
+    assert lines[1] == "  first error: none matched"
+
+
+def test_failed_suite_evidence_retains_real_server_errors_and_scrubs_them(tmp_path):
+    g = _load_runner()
+    log = tmp_path / "startup.log"
+    log.write_text("[WebServer] compiling\n[WebServer] Error: failed to start token=private\n",
+                   encoding="utf-8")
+    lines = g.failed_suite_evidence([_evidence_result(g, log)])
+    assert lines[1] == "  first error: [WebServer] Error: failed to start token=[redacted]"
+    assert "private" not in "\n".join(lines)
+
+
 @pytest.mark.parametrize("path_kind", ["missing", "absent", "unreadable"])
 def test_failed_suite_evidence_handles_unavailable_logs(tmp_path, path_kind):
     g = _load_runner()
@@ -492,7 +1280,7 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     # Added test_acceptance_schema_readiness_contract on 2026-10-19: 211 -> 212.
     # Added +26 SP2 invite-only org gate on 2026-10-19: 212 -> 238.
     # Added demo inventory/migration contract regression: 238 -> 239.
-    assert static.expected == 239
+    assert static.expected == 267  # Source-catalog row has a dedicated owner.
     assert any(
         str(arg).endswith("platform/tests/test_soft_delete_guard_static.py")
         for arg in static.argv
@@ -564,12 +1352,16 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     for shard in range(1, 4):
         suite = suites[f"web-vitest-{shard}"]
         assert suite.argv == [
-            g._npm(), "run", "test:unit", "--", f"--shard={shard}/3", "--maxWorkers=2",
+            g._npm(), "run", "test:unit", "--", f"--shard={shard}/3",
+            "--exclude=src/site/surfaceGates.test.js",
+            "--exclude=src/site/toolCastStageBar.test.js",
+            "--maxWorkers=2",
         ]
         assert suite.allowed_vitest_skips == (
             ("src/cad/engineWasmHarness.realwasm.test.js", 1),
             ("src/cadedit/cadEditSurface.test.jsx", 16),
             ("src/cad/engineBatchAtomic.test.js", 12),
+            ("src/cad/engineBatchAtomic.test.js", 13),
         )
         assert suite.kind == "vitest" and suite.cwd == g.WEB
         assert suite.timeout_s == 900
@@ -633,7 +1425,7 @@ def test_executor_suite_is_registered_with_its_measured_floor():
 # The 34 skips are all one reason, LEAF_OPERATOR_TEST_DATABASE_URL unset, which
 # no workflow in this repo sets -- so CI executes these same counts.
 _OPERATOR_FLOORS = {
-    "server-probe-staging-async-job": 16,
+    "server-probe-staging-async-job": 24,
     "server-operator-authority": 7,
     "server-operator-credential-rotate": 19,
     "server-operator-egress-boundary": 27,
@@ -646,6 +1438,7 @@ _OPERATOR_FLOORS = {
     "server-operator-principals": 3,
     "server-operator-principals-static": 4,
     "server-operator-production-unreachable": 25,
+    "server-operator-router-authz-negative": 106,
     "server-operator-runbooks": 15,
     "server-operator-secret-broker": 31,
     "server-operator-stage-release": 22,
@@ -667,6 +1460,7 @@ _OPERATOR_NO_SKIP_FILES = frozenset({
     "server-operator-integration-drills",
     "server-operator-principals-static",
     "server-operator-production-unreachable",
+    "server-operator-router-authz-negative",
     "server-operator-secret-broker",
     "server-operator-vocab-freeze",
     "server-operator-worker-boundary",
@@ -804,7 +1598,7 @@ def test_studio_suites_are_registered_with_measured_floors():
     ):
         assert sid in suites, sid
         assert sid in g._MEASURED_EST_S, sid
-        assert g._MEASURED_EST_S[sid] >= 100.0, sid
+        assert g._MEASURED_EST_S[sid] > g._DEFAULT_EST_S, sid
 
 
 def test_host_capability_ci_producers_cover_unit_and_postgres_modules(tmp_path, monkeypatch):
@@ -1343,6 +2137,7 @@ def test_all_skipped_pytest_suite_fails_even_when_reason_is_allowlisted(tmp_path
 _GATE_DSN = "postgresql://postgres@127.0.0.1:5432/leaf_gate_fixture"
 _DATABASE_SUITE_IDS = (
     "server-lab-run-store",
+    "server-project-reference-materials",
     "server-w1-commit-solve-adapter", "server-jobs-tenant-inflight-cap",
     "server-drawing-authority-postgres", "server-agent-gate-postgres",
     "server-agent-ops-postgres", "server-broker-pg-store",
@@ -1389,6 +2184,16 @@ def test_lab_run_store_gate_registration():
 def test_database_suites_take_the_gate_dsn_and_no_longer_allowlist_its_absence():
     g = _load_runner()
     suites = {suite.id: suite for suite in g.build_suites()}
+    # The managed browser stack reads PostgreSQL overlays in every case.
+    # DB-less release producers must report that prerequisite as a suite skip.
+    assert suites["web-link-service-flow"].db_gated
+    assert suites["web-link-service-flow"].uses_database
+    # Corpus jobs require the real gate database; absent prerequisites cannot
+    # turn their execution or kernel-cage cases into accepted skips.
+    corpus = suites["server-lab-corpus-executor"]
+    assert corpus.uses_database and corpus.db_gated
+    assert corpus.expected == 14
+    assert corpus.allowed_skip_reasons == corpus.database_skip_reasons == ()
     for sid in _DATABASE_SUITE_IDS:
         suite = suites[sid]
         assert suite.uses_database, sid
@@ -1802,6 +2607,119 @@ def test_selected_script_environment_skip_is_a_failure(tmp_path):
 
     assert result.status == "FAIL"
     assert result.got == "err"
+
+
+@pytest.fixture
+def queued_launcher(tmp_path, monkeypatch):
+    """Real child exits, with a clock owned by the fixture rather than host uptime."""
+    g = _load_runner()
+    clock = {"now": 1000.0}
+    sleeps = []
+    counter = tmp_path / "launcher-attempts.txt"
+    launcher = tmp_path / "queued_launcher.py"
+    real_run = subprocess.run
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock["now"] += seconds
+
+    def timed_run(argv, **kwargs):
+        result = real_run(argv, **kwargs)
+        if str(launcher) in argv:
+            clock["now"] += 2.0
+        return result
+
+    monkeypatch.setattr(g, "time", SimpleNamespace(
+        perf_counter=lambda: clock["now"], sleep=sleep, strftime=time.strftime))
+    monkeypatch.setattr(g.subprocess, "run", timed_run)
+
+    def configure(queued_attempts, exit_code=0):
+        launcher.write_text(
+            "import sys\nfrom pathlib import Path\n"
+            f"counter = Path({str(counter)!r})\n"
+            "attempt = int(counter.read_text()) + 1 if counter.exists() else 1\n"
+            "counter.write_text(str(attempt))\n"
+            f"if attempt <= {queued_attempts}:\n"
+            "    print('Error: QUEUED: Less than 6 GiB free RAM', file=sys.stderr)\n"
+            "    sys.exit(75)\n"
+            f"sys.exit({exit_code})\n", encoding="utf-8")
+        suite = g.Suite("queued-walk", "queued walk", "script", SCRIPTS,
+                        [sys.executable, str(launcher)], None)
+        monkeypatch.setattr(g, "build_suites", lambda: [suite])
+        return SimpleNamespace(g=g, suite=suite, sleeps=sleeps, counter=counter)
+
+    return configure
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+@pytest.mark.parametrize("queued_attempts", [1, 2])
+def test_queued_launcher_recovers_without_spending_generic_retries(
+        queued_launcher, tmp_path, monkeypatch, capsys, jobs, queued_attempts):
+    case = queued_launcher(queued_attempts)
+    result_file = tmp_path / "result.json"
+    rc, output = _jobs_main(case.g, monkeypatch, capsys, tmp_path,
+        ["--jobs", str(jobs), "--retry", "0", "--result-json", str(result_file)])
+
+    row = json.loads(result_file.read_text(encoding="utf-8"))["results"][0]
+    assert rc == 0 and row["status"] == "PASS"
+    assert row["attempts"] == queued_attempts + 1
+    assert case.counter.read_text() == str(queued_attempts + 1)
+    assert case.sleeps == [15.0, 30.0][:queued_attempts]
+    assert row["queued_seconds"] == sum(case.sleeps)
+    assert row["seconds"] == 2.0 * (queued_attempts + 1), "exclude queue waits"
+    assert "flaked" not in row["note"]
+    attempts = [json.loads(line) for line in
+                (tmp_path / "attempts" / "queued-walk.jsonl").read_text().splitlines()]
+    assert [row["attempt"] for row in attempts] == list(range(1, queued_attempts + 2))
+    assert [row["status"] for row in attempts] == ["QUEUED"] * queued_attempts + ["PASS"]
+    assert [row["seconds"] for row in attempts] == [2.0] * (queued_attempts + 1)
+    assert all(row["note"] == "queued: Less than 6 GiB free RAM"
+               for row in attempts[:queued_attempts])
+    assert all((tmp_path / row["log_path"]).is_file() for row in attempts)
+    assert len([line for line in output.splitlines()
+                if line.startswith("GATE_QUEUED ")]) == queued_attempts
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_queued_launcher_budget_exhaustion_fails_without_generic_restart(
+        queued_launcher, tmp_path, monkeypatch, capsys, jobs):
+    case = queued_launcher(100)
+    result_file = tmp_path / "result.json"
+    rc, output = _jobs_main(case.g, monkeypatch, capsys, tmp_path,
+        ["--jobs", str(jobs), "--retry", "3", "--result-json", str(result_file)])
+
+    row = json.loads(result_file.read_text(encoding="utf-8"))["results"][0]
+    assert rc == 1 and row["status"] == "FAIL"
+    assert row["attempts"] == 11 and case.counter.read_text() == "11"
+    assert case.sleeps == [15.0, 30.0] + [60.0] * 8 + [53.0]
+    assert row["queued_seconds"] == 578.0 and row["seconds"] == 22.0
+    assert row["note"] == (
+        "queued: Less than 6 GiB free RAM after 11 attempts over 600.0 s")
+    assert "GATE_QUEUED id=queued-walk attempts=11 seconds=578.0" in output.splitlines()
+    assert "LEAF_EVENT" not in output
+    attempts = [json.loads(line) for line in
+                (tmp_path / "attempts" / "queued-walk.jsonl").read_text().splitlines()]
+    assert [row["attempt"] for row in attempts] == list(range(1, 12))
+    assert all(row["status"] == "QUEUED" and row["note"].startswith("queued:")
+               for row in attempts)
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_nonqueued_exit_one_keeps_single_attempt_failure(
+        queued_launcher, tmp_path, monkeypatch, capsys, jobs):
+    case = queued_launcher(0, exit_code=1)
+    result_file = tmp_path / "result.json"
+    rc, output = _jobs_main(case.g, monkeypatch, capsys, tmp_path,
+        ["--jobs", str(jobs), "--retry", "0", "--result-json", str(result_file)])
+
+    row = json.loads(result_file.read_text(encoding="utf-8"))["results"][0]
+    assert rc == 1 and row["status"] == "FAIL"
+    assert row["attempts"] == 1
+    assert row["note"] == (
+        "no output (exit 1): child failed to start or was killed externally")
+    assert row["seconds"] == 2.0 and row["queued_seconds"] == 0.0
+    assert case.counter.read_text() == "1" and case.sleeps == []
+    assert "GATE_QUEUED" not in output
 
 
 # --------------------------------------------------------------------------- #
@@ -2250,6 +3168,34 @@ def test_exact_vitest_file_and_skip_count_allowlist_passes(tmp_path):
     assert result.status == "PASS"
 
 
+@pytest.mark.parametrize(("path", "skipped", "status"), (
+    ("src/cad/engineBatchAtomic.test.js", 12, "PASS"),
+    ("src/cad/engineBatchAtomic.test.js", 13, "PASS"),
+    ("src/cad/engineBatchAtomic.test.js", 14, "FAIL"),
+    ("src/cad/unexpected.test.js", 13, "FAIL"),
+))
+def test_known_native_vitest_skip_counts_are_exact(tmp_path, path, skipped, status):
+    g = _load_runner()
+    output = (
+        f"{path} ({skipped + 1} tests | {skipped} skipped)\n"
+        f"Tests 1 passed | {skipped} skipped\n"
+    )
+    suite = g.Suite(
+        "vitest-native-skip", "vitest native skip", "vitest", SCRIPTS,
+        [sys.executable, "-c", f"print({output!r})"], 1,
+        allowed_vitest_skips=(
+            ("src/cad/engineBatchAtomic.test.js", 12),
+            ("src/cad/engineBatchAtomic.test.js", 13),
+        ),
+    )
+
+    result = g.run_suite(suite, tmp_path)
+
+    assert result.status == status
+    if status == "FAIL":
+        assert "non-allowlisted vitest skip" in result.note
+
+
 def test_all_skipped_vitest_suite_fails_even_when_every_skip_is_allowlisted(tmp_path):
     """The pytest-path twin of this rule shipped first and the vitest path kept
     the hole: parse_vitest reports `got` as passed+failed+skipped, so a suite
@@ -2681,12 +3627,244 @@ def test_every_platform_static_file_is_registered_in_platform_static():
     the gate because the platform-static target list is hand-written. Pin the
     list against the glob so the NEXT *_static.py cannot run nowhere."""
     g = _load_runner()
-    static = {s.id: s for s in g.build_suites()}["platform-static"]
+    suites = {s.id: s for s in g.build_suites()}
+    static = suites["platform-static"]
     registered = {Path(str(arg)).name for arg in static.argv if str(arg).endswith(".py")}
     on_disk = {p.name for p in (REPO / "platform" / "tests").glob("*_static.py")}
-    missing = sorted(on_disk - registered)
+    dedicated = {name for name, owner in g.PLATFORM_SINGLE_OWNER_FILES.items()
+                 if name.endswith("_static.py") and owner != static.id}
+    for name in dedicated:
+        owner = suites[g.PLATFORM_SINGLE_OWNER_FILES[name]]
+        assert (REPO / "platform/tests" / name).relative_to(owner.cwd).as_posix() in owner.argv
+    assert not registered & dedicated
+    missing = sorted(on_disk - registered - dedicated)
     assert missing == [], (
         f"platform/tests/*_static.py not registered in platform-static: {missing}")
+
+
+_PLATFORM_COLLECTION_MARKER = "CI10X_PLATFORM_COLLECTION="
+_PLATFORM_COLLECTION_DSN = "postgresql://ci10x:unused@127.0.0.1:1/collect_only"
+
+
+def _single_owner_named_plugins(names):
+    # Anonymous registrations use process-specific object ids as their names.
+    return sorted(name for name in names if not name.isdigit())
+
+
+def pytest_collection_finish(session):
+    """Collection-only observer, loaded explicitly with -p test_gate_runner.
+
+    Terminal verbosity (-q is already in suite.argv) can hide node IDs entirely.
+    Report actual items and pytest's resolved root/conftests rather than parsing
+    filenames or assuming how pytest chose its collection topology.
+    """
+    nodes = []
+    conftests = {}
+    for item in session.items:
+        # Resolve the file independently of rootdir before retaining its repo
+        # relative spelling; only the function/parameter suffix uses nodeid.
+        file = item.path.resolve().relative_to(REPO).as_posix()
+        suffix = item.nodeid.partition("::")[2]
+        nodes.append(file + "::" + suffix)
+        if file not in conftests:
+            conftests[file] = sorted(
+                str(Path(module.__file__).resolve()) for module in
+                session.config.pluginmanager._getconftestmodules(item.path))
+    config = session.config
+    manager = config.pluginmanager
+    payload = {"nodes": nodes, "conftests": conftests,
+               "rootdir": str(config.rootpath.resolve()),
+               "inifile": str(config.inipath.resolve()) if config.inipath else None,
+               "addopts": list(config.getini("addopts")),
+               "env_addopts": os.environ.get("PYTEST_ADDOPTS", ""),
+               "plugins": _single_owner_named_plugins(
+                   name for name, plugin in manager.list_name_plugin()
+                   if plugin is not None and plugin not in manager._conftest_plugins)}
+    session.config.pluginmanager.get_plugin("terminalreporter").write_line(
+        _PLATFORM_COLLECTION_MARKER + json.dumps(payload))
+
+
+def _platform_collection_env(g, suite):
+    # Same clean_env + gate-DSN/alias merge as run_suite, with a nonconnecting
+    # DSN instead of a live probe. DATABASE_URL is also required for the static
+    # owner: conftest otherwise ignores DB files and hides most of the catalog.
+    env = g.clean_env()
+    env["DATABASE_URL"] = _PLATFORM_COLLECTION_DSN
+    if suite.db_gated or suite.uses_database:
+        env.update(dict.fromkeys(suite.db_env_aliases, _PLATFORM_COLLECTION_DSN))
+    # Load only the observer above; suite targets, cwd, plugins and selection
+    # options are retained. This directory contains no platform shadow package.
+    env["PYTHONPATH"] = str(SCRIPTS) + (
+        os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return env
+
+
+def _collect_platform_suite(g, suite):
+    argv = [*suite.argv, "--collect-only", "-q", "-p", "test_gate_runner"]
+    proc = subprocess.run(
+        argv, cwd=suite.cwd, env=_platform_collection_env(g, suite),
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=min(suite.timeout_s, 180))
+    output = proc.stdout + "\n" + proc.stderr
+    assert proc.returncode == 0, f"{suite.id} collection failed:\n{output}"
+    reports = [line.removeprefix(_PLATFORM_COLLECTION_MARKER)
+               for line in proc.stdout.splitlines()
+               if line.startswith(_PLATFORM_COLLECTION_MARKER)]
+    assert len(reports) == 1, f"{suite.id}: missing collection evidence\n{output}"
+    report = json.loads(reports[0])
+    assert report["nodes"], f"{suite.id}: empty collection"
+    assert len(report["nodes"]) == len(set(report["nodes"])), (
+        f"{suite.id}: repeated nodes within suite")
+    return report
+
+
+@pytest.fixture(scope="module")
+def platform_family_collection():
+    from dataclasses import replace
+
+    g = _load_runner()
+    family = [s for s in g.build_suites()
+              if s.cwd == REPO / "platform" or s.id.startswith("platform")]
+    # The simulator is a script, not a pytest suite; it has no pytest nodes.
+    assert {s.id for s in family if s.kind != "pytest"} == {"platform-simgate-self-test"}
+    suites = {s.id: s for s in family if s.kind == "pytest"}
+    inventories = {sid: _collect_platform_suite(g, suite) for sid, suite in suites.items()}
+    broad = suites["platform"]
+    original = replace(broad, argv=g._py_pytest(f"{REPO.name}/platform/tests"))
+    baseline = _collect_platform_suite(g, original)
+    # These two proofs disappear in an unconfigured directory collection.
+    for name in ("test_overlay_store_postgres.py", "test_annotation_store_postgres.py"):
+        assert f"platform/tests/{name}" in baseline["conftests"]
+    return g, suites, inventories, baseline
+
+
+def _assert_platform_single_owner(g, inventories):
+    owners = {}
+    for sid, report in inventories.items():
+        for node in report["nodes"]:
+            owners.setdefault(node, []).append(sid)
+    duplicates = {node: ids for node, ids in owners.items()
+                  if len(ids) > 1 and node.partition("::")[0] not in
+                  g.JUSTIFIED_DUPLICATE_NODES}
+    assert not duplicates, "platform nodes have multiple owners:\n" + "\n".join(
+        f"{node}: {', '.join(ids)}" for node, ids in sorted(duplicates.items()))
+    assert all(reason.strip() for reason in g.JUSTIFIED_DUPLICATE_NODES.values())
+
+
+def test_platform_files_have_single_owner(platform_family_collection):
+    _g, _suites, inventories, _baseline = platform_family_collection
+    # Use actual collected items, not argv filenames: a registered file may
+    # still collect nothing because of conftest or a narrowing selection flag.
+    owners = {}
+    for sid, report in inventories.items():
+        for file in {node.partition("::")[0] for node in report["nodes"]}:
+            owners.setdefault(file, []).append(sid)
+    files = {path.relative_to(REPO).as_posix()
+             for path in (REPO / "platform" / "tests").glob("test_*.py")}
+    invalid = {file: owners.get(file, []) for file in files
+               if len(owners.get(file, [])) != 1}
+    assert not invalid, "platform files must have exactly one collected owner:\n" + "\n".join(
+        f"{file}: {', '.join(ids) or 'unowned'}" for file, ids in sorted(invalid.items()))
+
+
+def _single_owner_node_counts(nodes):
+    """UUID-normalized equivalence DIAGNOSTIC, not stable-id certification."""
+    # Collection-time UUID ids are unstable; preserve every other node segment
+    # and multiplicity so normalization cannot hide missing or extra cases.
+    uuid_param = re.compile(
+        r"\[[^\[\]]*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+        r"[0-9a-f]{4}-[0-9a-f]{12}[^\[\]]*\]")
+    return Counter(uuid_param.sub("[<uuid-param>]", node) for node in nodes)
+
+
+def test_single_owner_normalizes_random_param_ids():
+    node = "platform/tests/test_example.py::test_receipt"
+    before = [
+        node + "[project_id-ba9bd722-1234-4567-89ab-0123456789ab]",
+        node + "[project_id-ba9bd722-1234-4567-89ab-0123456789ac]",
+        node + "[stable-id]",
+    ]
+    after = [
+        node + "[project_id-8133d4f0-abcd-4567-89ab-abcdef012345]",
+        node + "[project_id-8133d4f0-abcd-4567-89ab-abcdef012346]",
+        node + "[stable-id]",
+    ]
+    expected = _single_owner_node_counts(before)
+    assert expected == _single_owner_node_counts(reversed(after))
+    assert expected != _single_owner_node_counts(after[1:])
+    assert expected != _single_owner_node_counts([*after, after[0]])
+    assert expected != _single_owner_node_counts(after[:-1])
+    assert expected != _single_owner_node_counts([*after, node + "[extra-id]"])
+    assert expected != _single_owner_node_counts([*after[:-1], node + "[changed-id]"])
+
+
+def test_single_owner_normalizes_anonymous_plugin_names():
+    before = ["139850275137792", "anyio", "test_gate_runner"]
+    after = ["test_gate_runner", "140401082378496", "anyio"]
+    expected = _single_owner_named_plugins(before)
+    assert expected == ["anyio", "test_gate_runner"]
+    assert expected == _single_owner_named_plugins(after)
+    assert expected != _single_owner_named_plugins([*after, "different_plugin"])
+    assert expected != _single_owner_named_plugins(["140401082378496", "anyio"])
+
+
+def test_platform_family_nodes_have_single_owner(platform_family_collection):
+    """Check ownership and a UUID-normalized collection equivalence DIAGNOSTIC."""
+    g, suites, inventories, baseline = platform_family_collection
+    _assert_platform_single_owner(g, inventories)
+    before = _single_owner_node_counts(baseline["nodes"])
+    after = _single_owner_node_counts(
+        node for report in inventories.values() for node in report["nodes"]
+        if node.startswith("platform/tests/"))
+    assert before == after, (
+        f"platform collection equivalence DIAGNOSTIC changed: missing={sorted(before - after)}, "
+        f"added={sorted(after - before)}")
+    # Recheck the recorded alias grep over all platform modules, covering every
+    # excluded file's platform import closure, including conftest's imports.
+    alias_readers = {p.name for p in (REPO / "platform").rglob("*.py")
+                     if any(alias in p.read_text(encoding="utf-8")
+                            for alias in suites["platform"].db_env_aliases)}
+    # bsp43_pg_probe.py lists the aliases and is imported only by
+    # test_bsp43_checkout_custody_postgres.py, which stays in platform.
+    assert alias_readers == {"test_overlay_store_postgres.py", "test_annotation_store_postgres.py",
+                             "bsp43_pg_probe.py"}
+    for filename, owner_id in g.PLATFORM_SINGLE_OWNER_FILES.items():
+        file = "platform/tests/" + filename
+        owner = suites[owner_id]
+        assert not owner.opt_in_env
+        assert not any(arg in ("-k", "-m", "--deselect") or
+                       arg.startswith(("--deselect=", "-k", "-m"))
+                       for arg in owner.argv[3:])
+        if not filename.endswith("_static.py") or filename == "test_db_primitives_static.py":
+            assert owner.db_gated or owner.uses_database, f"{file}: owner loses database"
+        original_nodes = _single_owner_node_counts(
+            node for node in baseline["nodes"] if node.partition("::")[0] == file)
+        owned_nodes = _single_owner_node_counts(
+            node for node in inventories[owner_id]["nodes"]
+            if node.partition("::")[0] == file)
+        assert original_nodes and original_nodes == owned_nodes, (
+            f"{file}: collection equivalence DIAGNOSTIC: owner drops nodes")
+        # Different rootdirs are equivalent only with the same configuration
+        # and plugins. Nodes above already use resolved file identities.
+        for setting in ("inifile", "addopts", "env_addopts", "plugins"):
+            assert inventories[owner_id][setting] == baseline[setting], (
+                f"{file}: {setting} differs: owner={inventories[owner_id][setting]!r}, "
+                f"baseline={baseline[setting]!r}")
+        assert inventories[owner_id]["conftests"][file] == baseline["conftests"][file], file
+
+
+def test_platform_single_owner_guard_rejects_restored_file(
+        platform_family_collection, monkeypatch):
+    g, suites, inventories, _baseline = platform_family_collection
+    filename = "test_ios_ship_source_catalog_static.py"
+    broad = suites["platform"]
+    target = f"{REPO.name}/platform/tests/{filename}"
+    assert target not in broad.argv
+    monkeypatch.setattr(broad, "argv", [*broad.argv, target])
+    changed = {**inventories, "platform": _collect_platform_suite(g, broad)}
+    with pytest.raises(AssertionError, match=filename + r".*platform, platform-ios-ship-source-catalog-static"):
+        _assert_platform_single_owner(g, changed)
 
 
 def _shard_stub_suites(g):
@@ -3010,6 +4188,59 @@ def test_fingerprint_ignores_toolchain_paths_but_not_targets():
     assert npx_instead != linux_npm
 
 
+def test_catalog_fingerprint_does_not_depend_on_the_checkout_directory_name(tmp_path, monkeypatch):
+    g = _load_runner()
+    for name in ("source", "relay-src.Ab12Cd"):
+        tests = tmp_path / name / "platform" / "tests"
+        tests.mkdir(parents=True)
+        (tests / "test_example.py").write_text("def test_example(): pass\n", encoding="utf-8")
+    source = g.selection_catalog(tmp_path / "source")
+    relay = g.selection_catalog(tmp_path / "relay-src.Ab12Cd")
+    assert source["catalog_sha256"] == relay["catalog_sha256"]
+
+    build_suites = g.build_suites
+
+    def changed_target():
+        suites = build_suites()
+        suite = next(s for s in suites if s.id == "platform")
+        target = suite.argv.index(f"{g.REPO.name}/platform/tests/test_example.py")
+        suite.argv[target] = f"{g.REPO.name}/platform/tests/test_changed.py"
+        return suites
+
+    monkeypatch.setattr(g, "build_suites", changed_target)
+    changed = g.selection_catalog(tmp_path / "relay-src.Ab12Cd")
+    assert changed["catalog_sha256"] != source["catalog_sha256"]
+
+
+@pytest.mark.parametrize("arg, expected", [
+    ("relay-src.Ab12Cd/platform/tests", "<REPO>/platform/tests"),
+    ("/x/relay-src.Ab12Cd/server/a.py", "<REPO>/server/a.py"),
+    ("relay-src.Ab12Cd", "<REPO>"),
+    ("/x/relay-src.Ab12Cd", "<REPO>"),
+    ("--rootdir=relay-src.Ab12Cd/platform", "--rootdir=<REPO>/platform"),
+    (r"relay-src.Ab12Cd\platform\tests", "<REPO>/platform/tests"),
+    (r"\x\relay-src.Ab12Cd\server\a.py", "<REPO>/server/a.py"),
+    ("-q", "-q"),
+    ("tests/x.py", "tests/x.py"),
+    ("/usr/bin/env", "/usr/bin/env"),
+    ("--maxWorkers=2", "--maxWorkers=2"),
+    ("relay-src.Ab12Cdx/y", "relay-src.Ab12Cdx/y"),
+    (r"tests\x.py", r"tests\x.py"),
+    (r"--rootdir=tests\x.py", r"--rootdir=tests\x.py"),
+])
+def test_fingerprint_arg_canonicalizes_only_checkout_targets(monkeypatch, arg, expected):
+    g = _load_runner()
+    monkeypatch.setattr(g, "REPO", Path("/x/relay-src.Ab12Cd"))
+    assert g._fingerprint_arg(arg, parent_relative=True) == expected
+    assert g._fingerprint_arg(
+        "relay-src.Ab12Cd/platform/tests", parent_relative=False) == "relay-src.Ab12Cd/platform/tests"
+    assert g._fingerprint_arg(
+        "/x/relay-src.Ab12Cd/server/a.py", parent_relative=False) == "<REPO>/server/a.py"
+    monkeypatch.setattr(g, "REPO", Path("/x/src"))
+    assert g._fingerprint_arg(
+        "src/components/x.test.js", parent_relative=False) == "src/components/x.test.js"
+
+
 def test_fingerprint_ignores_the_checkout_root_but_not_the_suite_directory(monkeypatch):
     """Run 32018150977 flipped the eight shards onto CodeBuild-hosted runners,
     which hand every job its OWN checkout root
@@ -3304,6 +4535,109 @@ def test_verify_gate_proof_refuses_every_forgery(tmp_path, capsys):
     assert rc == 1 and "unreadable proof file" in out
 
 
+def _emitted_proof_for_mode_tests(tmp_path):
+    g = _load_runner()
+    repo = _scratch_git_checkout(tmp_path)
+    out = tmp_path / "gate-proof.json"
+    assert g.emit_gate_proof(
+        out, fingerprint=g.catalog_fingerprint(g.build_suites()), total=1,
+        repo=repo, suite_statuses={s.id: "PASS" for s in g.build_suites()
+                                  if s.kind == "npm-audit"}) == ""
+    tree, _, _ = g.checkout_tree_identity(repo)
+    return g, out, tree, json.loads(out.read_text(encoding="utf-8"))
+
+
+def _wellformed_reused_from():
+    return {
+        "project": "leaf-ci-leaf-web-demo",
+        "source_revision": "a" * 40,
+        "builds": [f"leaf-ci-leaf-web-demo:00000000-0000-4000-a000-{i:012x}"
+                   for i in range(3)],
+        "result_sha256": [f"{i:064x}" for i in range(3)],
+        "receipt_sha256": [f"{i:064x}" for i in range(3, 6)],
+    }
+
+
+def test_verify_gate_proof_accepts_a_wellformed_reused_proof(tmp_path, capsys):
+    g, out, tree, data = _emitted_proof_for_mode_tests(tmp_path)
+    data.update(mode="reused", reused_from=_wellformed_reused_from())
+    out.write_text(json.dumps(data), encoding="utf-8")
+
+    assert g.verify_gate_proof(out, tree) == 0
+    assert "VERIFIED mode: reused from 3 CI builds" in capsys.readouterr().out
+
+
+def test_verify_gate_proof_keeps_mode_run_and_absent_unchanged(tmp_path, capsys):
+    g, out, tree, data = _emitted_proof_for_mode_tests(tmp_path)
+    for explicit_mode in (False, True):
+        if explicit_mode:
+            data["mode"] = "run"
+        out.write_text(json.dumps(data), encoding="utf-8")
+
+        assert g.verify_gate_proof(out, tree) == 0
+        output = capsys.readouterr().out
+        assert "VERIFIED: gate proof binds tree" in output
+        assert "VERIFIED mode: run" in output
+
+
+@pytest.mark.parametrize("mutate", [
+    pytest.param(lambda d: d.update(mode="skipped"), id="unknown-mode"),
+    pytest.param(lambda d: d.pop("reused_from"), id="missing-donor"),
+    pytest.param(lambda d: d["reused_from"].update(project="other-project"),
+                 id="wrong-project"),
+    pytest.param(lambda d: d["reused_from"].update(source_revision="a" * 39),
+                 id="short-revision"),
+    pytest.param(lambda d: d["reused_from"].update(source_revision="A" * 40),
+                 id="uppercase-revision"),
+    pytest.param(lambda d: d["reused_from"].update(builds=[]), id="zero-builds"),
+    pytest.param(lambda d: d["reused_from"].update(
+        builds=[f"leaf-ci-leaf-web-demo:00000000-0000-4000-a000-{i:012x}"
+                for i in range(9)]), id="nine-builds"),
+    pytest.param(lambda d: d["reused_from"]["builds"].__setitem__(
+        1, d["reused_from"]["builds"][0]), id="duplicate-build"),
+    pytest.param(lambda d: d["reused_from"]["builds"].__setitem__(
+        0, "other-project:00000000-0000-4000-a000-000000000000"),
+        id="other-project-build"),
+    pytest.param(lambda d: d["reused_from"]["builds"].__setitem__(
+        0, "leaf-ci-leaf-web-demo:not-a-uuid"), id="non-uuid-build"),
+    pytest.param(lambda d: d["reused_from"]["result_sha256"].pop(),
+                 id="short-result-list"),
+    pytest.param(lambda d: d["reused_from"]["receipt_sha256"].__setitem__(
+        0, "z" * 64), id="non-hex-receipt"),
+    pytest.param(lambda d: d["reused_from"].update(extra="unexpected"),
+                 id="extra-donor-key"),
+    pytest.param(lambda d: d["reused_from"].update(builds=None),
+                 id="null-builds"),
+    pytest.param(lambda d: d["reused_from"]["builds"].__setitem__(0, []),
+                 id="non-string-build"),
+    pytest.param(lambda d: d["reused_from"].update(result_sha256=None),
+                 id="null-result-list"),
+    pytest.param(lambda d: d["reused_from"]["receipt_sha256"].__setitem__(0, None),
+                 id="non-string-receipt"),
+])
+def test_verify_gate_proof_refuses_malformed_reused_proofs(tmp_path, capsys, mutate):
+    g, out, tree, data = _emitted_proof_for_mode_tests(tmp_path)
+    data.update(mode="reused", reused_from=_wellformed_reused_from())
+    mutate(data)
+    out.write_text(json.dumps(data), encoding="utf-8")
+
+    assert g.verify_gate_proof(out, tree) == 1
+    assert capsys.readouterr().out.startswith("NOT VERIFIED:")
+
+
+@pytest.mark.parametrize("reused_from", [
+    None, [], "x", {"builds": None},
+    {key: None for key in ("project", "source_revision", "builds",
+                           "result_sha256", "receipt_sha256")},
+])
+def test_reused_from_problem_never_raises(reused_from):
+    g = _load_runner()
+
+    problem = g.reused_from_problem(reused_from)
+
+    assert isinstance(problem, str) and problem
+
+
 def test_proof_cli_rejects_incoherent_flag_combinations(tmp_path):
     """Same silence class as the shard CLI guards: each of these would
     otherwise answer a different question than the one typed. All must exit 2
@@ -3559,7 +4893,10 @@ def test_jobs_four_keeps_the_same_scoreboard_and_catalog_order(
                         ["--retry", "0", "--jobs", "1"])
     parallel = _jobs_main(g, monkeypatch, capsys, tmp_path,
                           ["--retry", "0", "--jobs", "4"])
-    assert parallel == serial
+    assert parallel[0] == serial[0]
+    # Ordinary phased runs add completion blocks before the unchanged final rows.
+    assert (parallel[1].split("GATE_RESULT", 1)[0]
+            + parallel[1][parallel[1].index("  ... "):]) == serial[1]
     assert parallel[0] == 0
     rows = [line for line in parallel[1].splitlines() if line.startswith("pool suite")]
     assert len(rows) == len(suites)
@@ -3612,11 +4949,8 @@ def test_jobs_conflicts_are_classified_into_resource_lanes():
         "harness-tsc-noemit": "npm/npx",
         "harness-tsc-build": "npm/npx",
         "harness-audit-high": "npm/npx",
-        "web-vitest-1": "npm/npx",
-        "web-vitest-2": "npm/npx",
-        "web-vitest-3": "npm/npx",
         "web-build": "npm/npx",
-        "web-link-service-flow": "npm/npx",
+        "web-link-service-flow": "PostgreSQL",
         "web-demo-gate": "nested runner",
         "studio-walk-regressions": "nested stack",
         "server-sessions-e2e": "harness/dist",
@@ -3631,7 +4965,7 @@ def test_jobs_conflicts_are_classified_into_resource_lanes():
     for suite in suites:
         if suite.reset_authored or suite.db_gated:
             assert suite.id in serial_ids, suite.id
-        if suite.cwd in (g.HARNESS, g.WEB):
+        if suite.cwd == g.HARNESS or (suite.cwd == g.WEB and suite.id not in g._WEB_SOURCE_READERS):
             assert suite.id in serial_ids, suite.id
     assert "server-checkout-crossproc" not in serial_ids
     prelude, rest = g.plan_parallel_phases(suites)
@@ -3645,10 +4979,55 @@ def test_jobs_conflicts_are_classified_into_resource_lanes():
     assert {"web-tree", "harness-tree"} <= g.conflict_resources(by_id["web-link-service-flow"])
     assert g.conflict_resources(by_id["studio-walk-regressions"]) == frozenset({"web-tree", "harness-tree"})
     assert "studio-walk-regressions" in {s.id for s in prelude}
+    assert g.conflict_resources(by_id["server-backbone"]) == frozenset({"authored-store"})
     for shard in range(1, 4):
-        resources = g.conflict_resources(by_id[f"web-vitest-{shard}"])
+        suite = by_id[f"web-vitest-{shard}"]
+        resources = g.conflict_resources(suite)
+        assert suite.id not in g._WEB_SOURCE_READERS
+        assert "npm/npx shares node_modules" in g.serial_suite_reason(suite)
         assert resources == frozenset({"web-tree"})
+        assert "--no-cache" not in suite.argv
+        assert suite.argv[-1] == "--maxWorkers=2"
         assert not (g.conflict_resources(by_id["server-backbone"]) & resources)
+
+
+def test_web_source_readers_are_registered_read_only_pool_suites():
+    g = _load_runner()
+    by_id = {suite.id: suite for suite in g.build_suites()}
+    scripts = json.loads((g.WEB / "package.json").read_text(encoding="utf-8"))["scripts"]
+    assert isinstance(g._WEB_SOURCE_READERS, frozenset)
+    assert len(g._WEB_SOURCE_READERS) == 24
+    assert g._WEB_SOURCE_READERS
+    assert g._WEB_SOURCE_READERS <= by_id.keys()
+    # Vite is a server command; Vitest/startVitest is a separate unit runner.
+    forbidden = re.compile(r"playwright| dev|build|\bvite\b|serve|preview|install|proof:", re.IGNORECASE)
+    for sid in sorted(g._WEB_SOURCE_READERS):
+        suite = by_id[sid]
+        assert suite.cwd == g.WEB, sid
+        assert g.conflict_resources(suite) == frozenset(), sid
+        assert g.serial_suite_reason(suite) == "", sid
+        command = " ".join(suite.argv)
+        executable = str(suite.argv[0]).replace("\\", "/").rsplit("/", 1)[-1].lower()
+        if executable in ("npm", "npm.cmd", "npm.exe") and suite.argv[1:2] == ["run"]:
+            command += " " + scripts[suite.argv[2]]
+        assert not forbidden.search(command), (sid, command)
+    for suite in by_id.values():
+        if suite.cwd == g.WEB and suite.id not in g._WEB_SOURCE_READERS:
+            assert "web-tree" in g.conflict_resources(suite), suite.id
+
+
+@pytest.mark.parametrize("sid", [
+    "web-build", "web-demo-gate", "studio-walk-regressions", "web-link-service-flow",
+    "web-studio-panels-proof", "web-version-restore-proof", "web-async-author-stage",
+    "web-ios-ship-surface-proof", "web-lifecycle-panel-proof", "web-author-quota-gate",
+    "web-staging-fixes-check", "web-prod-readonly-contract", "web-walk-unit",
+])
+def test_web_writers_browser_proofs_and_nested_runners_keep_web_tree(sid):
+    g = _load_runner()
+    suite = next(suite for suite in g.build_suites() if suite.id == sid)
+    assert sid not in g._WEB_SOURCE_READERS
+    assert "web-tree" in g.conflict_resources(suite)
+    assert g.serial_suite_reason(suite)
 
 
 @pytest.mark.parametrize("prelude_slots", [(), (2, 9)])
@@ -3753,6 +5132,8 @@ def test_conflict_resources_maps_each_rule_to_its_lock(monkeypatch):
     # The override table wins over the generic rules.
     assert g.conflict_resources(stub("web-link-service-flow", g.WEB, ["npx", "playwright"])) \
         == {"web-tree", "harness-tree", "link-flow-ports"}
+    assert g.conflict_resources(stub("web-link-service-flow", g.WEB, ["npx", "playwright"], uses_database=True)) \
+        == {"web-tree", "harness-tree", "link-flow-ports", "postgres"}
     assert g.conflict_resources(stub("server-sessions-e2e", g.SERVER)) == {"harness-tree"}
     assert g.conflict_resources(stub("web-demo-gate", g.REPO, ["bash"])) == {"web-tree"}
     assert g.conflict_resources(stub("harness-container-smoke", g.REPO)) \
@@ -3812,7 +5193,10 @@ def test_jobs_red_and_spawn_retry_keep_the_verdict_rows_and_flaked_callout(
     serial = _jobs_main(g, monkeypatch, capsys, tmp_path, [*flags, "--jobs", "1"])
     serial_json = json.loads(result_file.read_text(encoding="utf-8"))
     parallel = _jobs_main(g, monkeypatch, capsys, tmp_path, [*flags, "--jobs", "4"])
-    assert parallel == serial
+    assert parallel[0] == serial[0]
+    # Ordinary phased runs add completion blocks before the unchanged final rows.
+    assert (parallel[1].split("GATE_RESULT", 1)[0]
+            + parallel[1][parallel[1].index("  ... "):]) == serial[1]
     assert parallel[0] == 1
     data = json.loads(result_file.read_text(encoding="utf-8"))
     assert data == serial_json
@@ -3865,13 +5249,19 @@ _GIB = 2 ** 30
 
 @pytest.mark.parametrize("cpus, mem_bytes, expected", [
     (8, 15 * _GIB, 4),
+    (8, 8 * _GIB, 4),  # leaf-ci-run-1 and run-2: cpus 8, 8 GiB
     (36, 72 * _GIB, 16),
     (4, 7 * _GIB, 2),
     (2, 3 * _GIB, 1),
     (1, None, 1),
     (72, 144 * _GIB, 16),
     (24, 72 * _GIB, 12),
-    (36, 9 * _GIB, 3),
+    (36, 9 * _GIB, 4),
+    (3, 12 * _GIB, 2),
+    (3, 5 * _GIB, 2),
+    (5, 15 * _GIB, 3),
+    (2.5, 8 * _GIB, 1),
+    (3.0, None, 2),
 ])
 def test_resolve_auto_jobs_is_bound_by_cpu_memory_and_the_cap(cpus, mem_bytes, expected):
     g = _load_runner()
@@ -4165,10 +5555,23 @@ def test_web_walk_unit_is_one_mandatory_fixed_script_row():
         "walk/controlInventory.test.mjs", "walk/processTable.test.mjs",
         "walk/stackEnv.test.mjs", "walk/stackPorts.test.mjs", "walk/serverDiagnostics.test.mjs", "walk/memory.test.mjs",
         "walk/buildFlags.test.mjs", "walk/engineArtifacts.test.mjs",
+        "walk/testIdentity.test.mjs",
+        "walk/stackIdentity.test.mjs",
         "walk/report.test.mjs", "walk/walkSpecs.test.mjs", "e2e/walk/collection.test.mjs", "e2e/walk/probes.test.mjs", "e2e/walk/stateRecipes.test.mjs", "e2e/walk/unsupported.test.mjs", "e2e/walk/lenses.test.mjs",
         "e2e/walk/uxMetrics.test.mjs",
         "e2e/walk/uxEvidence.test.mjs",
         "e2e/walk/uxProbe.test.mjs",
+        "e2e/walk/accessibilityMeasurements.test.mjs",
+        "e2e/walk/performanceMeasurements.test.mjs",
+        "e2e/walk/endUserMeasurements.test.mjs",
+        "e2e/walk/opsSreMeasurements.test.mjs",
+        "e2e/walk/qcDevMeasurements.test.mjs",
+        "e2e/walk/redHatMeasurements.test.mjs",
+        "e2e/walk/supportMeasurements.test.mjs",
+        "e2e/walk/uiUxMeasurements.test.mjs",
+        "e2e/walk/unfamiliarMeasurements.test.mjs",
+        "e2e/walk/personaMeasurementBundle.test.mjs",
+        "e2e/walk/mobileTouchMeasurements.test.mjs",
     ]
     selection = json.loads((REPO / "scripts/ci/test-selection-map.json").read_text(encoding="utf-8"))
     assert selection["mandatory_suite_ids"].count(suite.id) == 1
@@ -4199,10 +5602,24 @@ def test_studio_walk_nonzero_verdicts_fail_through_run_suite(code, tmp_path, mon
     g = _load_runner()
     suite = next(s for s in g.build_suites() if s.id == "studio-walk-regressions")
     monkeypatch.delenv("LEAF_GATE_FAULT_INJECT", raising=False)
+    if code == 75:
+        clock = {"now": 1000.0}
+        sleeps = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            clock["now"] += seconds
+
+        monkeypatch.setattr(g.time, "sleep", sleep)
+        monkeypatch.setattr(g.time, "perf_counter", lambda: clock["now"])
     monkeypatch.setattr(g.subprocess, "run", lambda *a, **k: SimpleNamespace(
         returncode=code, stdout=f"regression rejected: {code}\n", stderr=""))
     result = g.run_suite(suite, tmp_path, reporting_disabled=True)
     assert result.status == "FAIL"
+    if code == 75:
+        assert result.queued_exhausted is True
+        assert result.note.startswith("queued:")
+        assert result.note.endswith("over 600.0 s")
 
 
 @pytest.mark.parametrize("fault", ["spawn", "timeout"])
@@ -4283,8 +5700,9 @@ def test_R14C_32_mandatory_registration():
         assert ordered[start:start + 3] == wanted
     mandatory = selection["mandatory_suite_ids"]
     assert mandatory.count("platform-sip-r14-exchange") == 1
-    assert mandatory[-3:-1] == ["platform-sip-r14-exchange", "platform-sip-r14-sizing"]
-    assert suites["gate-runner-selftest"].expected == 244  # SEL-303b mirror registration.
+    start = mandatory.index("platform-sip-r14-exchange")
+    assert mandatory[start:start + 2] == ["platform-sip-r14-exchange", "platform-sip-r14-sizing"]
+    assert suites["gate-runner-selftest"].expected == 272  # SEL-303b mirror registration.
 
 
 def test_sip_r14_exchange_gate_registration():
@@ -4301,7 +5719,9 @@ def test_sip_r14_exchange_gate_registration():
     assert suite.database_skip_reasons == (
         r"PostgreSQL integration test requires DATABASE_URL",)
     assert selection["mandatory_suite_ids"].count(suite.id) == 1
-    assert selection["mandatory_suite_ids"][-3:-1] == [suite.id, "platform-sip-r14-sizing"]
+    mandatory = selection["mandatory_suite_ids"]
+    start = mandatory.index(suite.id)
+    assert mandatory[start:start + 2] == [suite.id, "platform-sip-r14-sizing"]
     assert selection["selection_enabled"] is False
     assert selection["phase"] == "shadow"
 
@@ -4378,9 +5798,9 @@ def test_sip_r3e_gate_registration():
         assert ordered[start:start + 4] == [
             "server-sip-r14-" + name for name in ("evidence", "admission", "worker", "proof")]
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
-    # LD1b adds one demo classification regression to the 1178 platform rows.
-    assert suites["platform"].expected == 1205
-    assert suites["gate-runner-selftest"].expected == 244  # SEL-303b mirror registration.
+    # B1 transfers 647 cases from the previous 1205 platform floor to their owners.
+    assert suites["platform"].expected == 558
+    assert suites["gate-runner-selftest"].expected == 272  # SEL-303b mirror registration.
 
 
 def test_demo_actor_gate_registration():
@@ -4411,7 +5831,7 @@ def test_demo_actor_gate_registration():
 
 
 def test_sip_r14_sizing_gate_registration():
-    """R14-E Exact row, database classification, measured floor and mandatory tail."""
+    """R14-E Exact row, database classification, floor and relative mandatory order."""
     runner = _load_runner()
     rows = runner.build_suites()
     ids = [suite.id for suite in rows]
@@ -4437,7 +5857,7 @@ def test_sip_r14_sizing_gate_registration():
         assert ordered.count(suite.id) == ordered.count("platform-sip-r14-exchange") == 1
         start = ordered.index("platform-sip-r14-exchange")
         assert ordered[start:start + 2] == ["platform-sip-r14-exchange", suite.id]
-    assert selection["mandatory_suite_ids"][-2] == suite.id
+    # Other mandatory suites may follow this group; its own adjacency is pinned above.
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
 
 
@@ -4453,7 +5873,8 @@ def test_sip_w1c_exchange_gate_registration():
         uses_database=True, db_gated=True,
         database_skip_reasons=(r"PostgreSQL integration test requires DATABASE_URL",))
     assert selection["mandatory_suite_ids"].count(suite.id) == 1
-    assert selection["mandatory_suite_ids"][-1] == suite.id
+    mandatory = selection["mandatory_suite_ids"]
+    assert mandatory[mandatory.index("platform-sip-r14-sizing") + 1] == suite.id
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
 
 
@@ -4485,7 +5906,7 @@ def test_w1c_commit_solve_gate_registration():
             uses_database=database, db_gated=database,
             database_skip_reasons=((r"PostgreSQL integration test requires DATABASE_URL",) if database else ()))
         assert selection["mandatory_suite_ids"].count(suite_id) == 1
-    assert suites["gate-runner-selftest"].expected == 244
+    assert suites["gate-runner-selftest"].expected == 272
 
 
 def test_lab_git_mirror_gate_registration():
@@ -4498,3 +5919,968 @@ def test_lab_git_mirror_gate_registration():
         uses_database=True, database_skip_reasons=(r"platform DB unreachable: .+",))
     selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
     assert selection["mandatory_suite_ids"].count(suite.id) == 1
+
+
+
+class TestProjectDispatch:
+    """PP-3A2 F: 25 source-contract rows; Linux CI needs no PowerShell or stack."""
+
+    RUNNER = REPO / "web/scripts/run_unified_local_proof.ps1"
+    START = "# >>> project dispatch (PP-3A2 F)"
+    END = "# <<< project dispatch"
+
+    def _source(self):
+        # Preserve line endings so the legacy hash also catches a CRLF rewrite.
+        with self.RUNNER.open(encoding="utf-8", newline="") as stream:
+            return stream.read()
+
+    def _parts(self):
+        text = self._source()
+        assert text.count(self.START) == text.count(self.END) == 1
+        prefix, rest = text.split(self.START + "\n")
+        block, suffix = rest.split(self.END + "\n")
+        return prefix, block, suffix
+
+    @staticmethod
+    def _code(text):
+        # Match the runner-source idiom in test_proof_string_sizer.py.
+        return re.sub(r"#[^\n]*", "", re.sub(r"<#.*?#>", "", text, flags=re.S))
+
+    @staticmethod
+    def _catalog():
+        source = (SCRIPTS / "run-all-gates.py").read_text(encoding="utf-8")
+        match = re.search(r"(?ms)^def build_suites\(.*?(?=^def |\Z)", source)
+        assert match is not None
+        return re.sub(r"(?m)^\s*#.*$", "", match.group())
+
+    def test_project_mode_admitted(self):
+        text = self._code(self._source())
+        match = re.search(r"\[ValidateSet\(([^)]*)\)\]\s*\[string\]\$Mode\s*=\s*'account'", text)
+        assert match is not None
+        assert re.findall(r"'([^']+)'", match[1]) == ["account", "guest", "project"]
+
+    def test_synthetic_mutual_exclusion(self):
+        prefix, _, _ = self._parts()
+        assert re.search(
+            r"if\s*\(\$SyntheticStringSizing\s+-and\s+\$SyntheticRooftop\)\s*\{\s*"
+            r"throw 'SyntheticRooftop and SyntheticStringSizing are mutually exclusive'\s*\}",
+            self._code(prefix))
+
+    def test_project_string_sizing_refused(self):
+        prefix, _, _ = self._parts()
+        assert re.search(
+            r"if\s*\(\$SyntheticStringSizing\s+-or\s+\$SyntheticRooftop\)\s*\{\s*"
+            r"if\s*\(\$Mode -ne 'account'\)\s*\{\s*"
+            r"throw 'Synthetic string sizing runs in account mode only'\s*\}",
+            self._code(prefix))
+
+    def test_project_rooftop_refused(self):
+        prefix, _, _ = self._parts()
+        assert re.search(
+            r"if\s*\(\$SyntheticStringSizing\s+-or\s+\$SyntheticRooftop\)\s*\{\s*"
+            r"if\s*\(\$Mode -ne 'account'\)\s*\{\s*"
+            r"throw 'Synthetic string sizing runs in account mode only'\s*\}",
+            self._code(prefix))
+
+    def test_early_project_dispatch(self):
+        prefix, _, suffix = self._parts()
+        legacy = self._code(prefix + suffix)
+        for pattern in (r"(?<!function )\bTest-PortOpen\s+\$port", r"\bInvoke-ProofRetentionPrune\b",
+                        r"\bNew-Item\b", r"\$env:\w+\s*=", r"\bGet-ProofRuntime\b"):
+            match = re.search(pattern, legacy)
+            assert match is not None, pattern
+            assert match.start() >= len(self._code(prefix)), pattern
+        assert "function Test-PortOpen" not in prefix
+
+    def test_project_runtime_requirements(self):
+        _, block, _ = self._parts()
+        block = self._code(block)
+        match = re.search(r"\$ppRequirements\s*=\s*@\((.*?)\n  \)", block, re.S)
+        assert match is not None
+        assert re.findall(r"\(Join-Path \$repoRoot '([^']+)'\)", match[1]) == [
+            r"server\requirements.txt", r"platform\requirements.txt", r"server\requirements-auth.txt"]
+        assert re.fullmatch(r"\s*\(Join-Path \$repoRoot '[^']+'\),\s*"
+                            r"\(Join-Path \$repoRoot '[^']+'\),\s*"
+                            r"\(Join-Path \$repoRoot '[^']+'\)\s*", match[1])
+        assert re.findall(r"Get-ProofRuntime[^\n]*", block) == [
+            "Get-ProofRuntime -RequirementFiles $ppRequirements"]
+        assert "$python = Get-ProofRuntime" in block
+        assert not re.search(r"\$ppRequirements\s*\+=", block)
+
+    def test_project_child_environment(self):
+        _, block, _ = self._parts()
+        assert not re.search(r"\$env:\w+\s*=|SetEnvironmentVariable|\bSet-Location\b|\bNew-Item\b",
+                             self._code(block), re.I)
+
+    def test_project_only_overrides(self):
+        prefix, block, suffix = self._parts()
+        code = self._code(block)
+        refusal = ("if ($Mode -ne 'project' -and $ProjectRunRoot) {\n"
+                   "  throw 'ProjectRunRoot applies to project mode only'\n}")
+        assert code.lstrip().startswith(refusal)
+        declaration = "  [string]$ProjectRunRoot = '',\n"
+        outside = prefix + suffix
+        assert outside.count(declaration) == 1
+        assert "  [string]$Mode = 'account',\n" + declaration in prefix
+        assert not re.search(r"\$Project\w+", outside.replace(declaration, "", 1), re.I)
+        assert "ProjectArtifactRoot" not in code and "ProjectRunId" not in code
+        assert code.count("if ($Mode -eq 'project') {") == 1
+
+    def test_supervisor_and_receipt(self):
+        _, block, _ = self._parts()
+        code = self._code(block)
+        call = r"& $python -B (Join-Path $repoRoot 'scripts\proof_project.py') "
+        statements = [
+            call + "supervise --run-id $ppRun --run-root $ppRunRoot",
+            "$ppExit = $LASTEXITCODE",
+            call + "verify-receipt --run-id $ppRun --receipt $ppReceipt",
+            "$ppReceiptExit = $LASTEXITCODE",
+            "if ($ppReceiptExit -ne 0) { throw 'Project proof receipt failed verification' }",
+            'Write-Host "Project proof run $ppRun receipt: $ppReceipt"',
+            "exit $ppExit",
+        ]
+        # Adjacent statements forbid success-only verification and an early exit.
+        assert re.search(r"\s+".join(map(re.escape, statements)), code)
+        assert code.count(call) == 2
+        assert "measure-migration" not in code
+
+    def test_legacy_bytes(self):
+        import hashlib
+
+        prefix, _, suffix = self._parts()
+        legacy = prefix + suffix
+        line = "  [string]$ProjectRunRoot = '',\n"
+        assert legacy.count(line) == 1
+        legacy = legacy.replace(line, "", 1)
+        validation = "[ValidateSet('account', 'guest', 'project')]"
+        assert legacy.count(validation) == 1
+        legacy = legacy.replace(validation, "[ValidateSet('account', 'guest')]", 1)
+        # git cat-file -p HEAD:web/scripts/run_unified_local_proof.ps1 at 0981c59c.
+        assert hashlib.sha256(legacy.encode("utf-8")).hexdigest() == (
+            "fd002fded0a25f78aaff528a2db68aa269d910d1789f6cf144527063667df458")
+
+    def test_gate_registration(self):
+        catalog_ids = re.findall(r'\bSuite\(\s*"([^"]+)"', self._catalog())
+        selection = (SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8")
+        mandatory = re.search(r'"mandatory_suite_ids"\s*:\s*\[([^\]]*)\]', selection, re.S)
+        assert mandatory is not None
+        mandatory_ids = re.findall(r'"([^"]+)"', mandatory[1])
+        for ids in (catalog_ids, mandatory_ids):
+            assert ids.count("scripts-proof-project-pg") == 1
+            assert ids.count("scripts-proof-project") == 1
+            assert ids.index("scripts-proof-project") == ids.index("scripts-proof-project-pg") + 1
+            assert [name for name in ids if name.startswith("scripts-proof-project-")] == [
+                "scripts-proof-project-pg", "scripts-proof-project-sizing"]
+
+    def test_fake_only_gate_policy(self):
+        catalog = self._catalog()
+        suite = re.search(r'\bSuite\("gate-runner-selftest",.*?(?=\n\s*Suite\(|\Z)', catalog, re.S)
+        assert suite is not None
+        selection = (SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8")
+        mandatory = re.search(r'"mandatory_suite_ids"\s*:\s*\[([^\]]*)\]', selection, re.S)
+        assert mandatory is not None
+        assert re.findall(r'"([^"]+)"', mandatory[1]).count("gate-runner-selftest") == 1
+        assert '_py_pytest("test_gate_runner.py")' in suite[0]
+        source = (SCRIPTS / "run-all-gates.py").read_text(encoding="utf-8")
+        defaults = re.search(r"(?ms)^class Suite:.*?(?=^@dataclass)", source)
+        assert defaults is not None
+        for name, value in (("db_gated", "False"), ("uses_database", "False"),
+                            ("opt_in_env", '""'), ("allowed_skip_reasons", "()"),
+                            ("database_skip_reasons", "()")):
+            assert re.search(rf"(?m)^    {name}:.*?=\s*{re.escape(value)}\s*(?:#.*)?$", defaults[0])
+            override = re.search(rf"\b{name}\s*=\s*([^\n]+)", suite[0])
+            if override is not None:
+                assert re.match(re.escape(value) + r"\s*(?:,|\))", override[1]), name
+
+    def test_project_test_grep_refused(self):
+        _, block, _ = self._parts()
+        assert "if ($TestGrep) { throw 'TestGrep does not apply to project mode' }" in self._code(block)
+
+    def test_project_keep_run_root_refused(self):
+        _, block, _ = self._parts()
+        assert "if ($KeepRunRoot) { throw 'KeepRunRoot does not apply to project mode' }" in self._code(block)
+
+    def test_project_nondefault_ports_refused(self):
+        _, block, _ = self._parts()
+        assert re.search(
+            re.escape("if ($WebPort -ne 5275 -or $AppPort -ne 8230 -or $BrokerPort -ne 8240 -or $HarnessPort -ne 8250)")
+            + r"\s*\{\s*throw 'Project mode requires the default ports'\s*\}", self._code(block))
+
+    def test_project_relative_root_refused(self):
+        _, block, _ = self._parts()
+        # IsPathRooted alone accepts drive-relative C:foo and root-relative \foo.
+        condition = r"if ($ProjectRunRoot -and (-not [System.IO.Path]::IsPathRooted($ProjectRunRoot) -or $ProjectRunRoot -notmatch '^(?:[a-zA-Z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+(?:[\\/]|$))'))"
+        assert re.search(re.escape(condition) + r"\s*\{\s*throw 'ProjectRunRoot must be an absolute path'\s*\}", self._code(block))
+
+    def test_project_root_trailing_separator(self):
+        _, block, _ = self._parts()
+        code = self._code(block)
+        normalized = r"$ppRunRoot = if ($ProjectRunRoot) { $ProjectRunRoot.TrimEnd([char[]]'\/') } else {"
+        receipt = "$ppReceipt = Join-Path (Join-Path $ppRunRoot 'artifacts') 'project-proof-receipt.json'"
+        supervisor = "supervise --run-id $ppRun --run-root $ppRunRoot"
+        verifier = "verify-receipt --run-id $ppRun --receipt $ppReceipt"
+        assert code.count(normalized) == 1
+        assert code.index("throw 'ProjectRunRoot must be an absolute path'") < code.index(normalized)
+        assert code.index(normalized) < code.index(receipt) < code.index(supervisor) < code.index(verifier)
+        assert len(re.findall(r"(?m)^\s*\$ppRunRoot\s*=", code)) == 1
+        assert len(re.findall(r"(?m)^\s*\$ppReceipt\s*=", code)) == 1
+
+    def test_project_drive_root_refused(self):
+        _, block, _ = self._parts()
+        code = self._code(block)
+        # GetPathRoot also covers UNC share roots; both slash styles are trimmed.
+        refusal = r"""  if ($ppRunRoot.Replace('/', '\') -eq [System.IO.Path]::GetPathRoot($ppRunRoot).TrimEnd([char[]]'\/')) {
+    throw 'ProjectRunRoot must not be a filesystem root'
+  }
+"""
+        assert code.count(refusal) == 1
+        assert code.index("$ppRunRoot =") < code.index(refusal) < code.index("$ppReceipt =")
+        assert code.index(refusal) < code.index("Get-ProofRuntime")
+
+    def test_project_refusals_before_side_effects(self):
+        prefix, block, _ = self._parts()
+        code = self._code(block)
+        # Pin the entire refusal prefix: inserted calls, environment writes, allocation,
+        # nested conditions or a guard moved below bootstrap cannot hide between checks.
+        refusals = r"""if ($Mode -ne 'project' -and $ProjectRunRoot) {
+  throw 'ProjectRunRoot applies to project mode only'
+}
+if ($Mode -eq 'project') {
+  if ($TestGrep) { throw 'TestGrep does not apply to project mode' }
+  if ($KeepRunRoot) { throw 'KeepRunRoot does not apply to project mode' }
+  if ($WebPort -ne 5275 -or $AppPort -ne 8230 -or $BrokerPort -ne 8240 -or $HarnessPort -ne 8250) {
+    throw 'Project mode requires the default ports'
+  }
+  if ($ProjectRunRoot -and (-not [System.IO.Path]::IsPathRooted($ProjectRunRoot) -or $ProjectRunRoot -notmatch '^(?:[a-zA-Z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+(?:[\\/]|$))')) {
+    throw 'ProjectRunRoot must be an absolute path'
+  }
+"""
+        assert code.startswith(refusals)
+        assert code.index('Get-ProofRuntime') > len(refusals)
+        assert not re.search(r"\b(?:Test-PortOpen|Invoke-ProofRetentionPrune|New-Item|Get-ProofRuntime)\b|\$env:\w+\s*=", self._code(prefix))
+
+    def test_project_run_identity_and_root(self):
+        _, block, _ = self._parts()
+        code = self._code(block)
+        assert code.count("$ppRun = 'pp3-' + [guid]::NewGuid().ToString('N')") == 1
+        assert re.findall(r"(?m)^\s*\$ppRun\s*=.*", code) == [
+            "  $ppRun = 'pp3-' + [guid]::NewGuid().ToString('N')"]
+        assert re.search(re.escape(r"$ppRunRoot = if ($ProjectRunRoot) { $ProjectRunRoot.TrimEnd([char[]]'\/') } else {")
+                         + r"\s*" + re.escape('Join-Path ([System.IO.Path]::GetTempPath()) "leaf-unified-project-e2e-$ppRun"')
+                         + r"\s*\}", code)
+        assert len(re.findall(r"(?m)^\s*\$ppRunRoot\s*=", code)) == 1
+
+    def test_project_supervise_exact_argv(self):
+        _, block, _ = self._parts()
+        code = self._code(block)
+        assert re.findall(r"(?m)^\s*&[^\n]+\bsupervise\b[^\n]*", code) == [
+            r"  & $python -B (Join-Path $repoRoot 'scripts\proof_project.py') supervise --run-id $ppRun --run-root $ppRunRoot"]
+        assert not re.search(r"--(?:artifact-root|\w+-port|keep-run-root)|@ppKeepArgs", code)
+
+    def test_project_receipt_exact_path(self):
+        _, block, _ = self._parts()
+        code = self._code(block)
+        assert re.findall(r"(?m)^\s*\$ppReceipt\s*=[^\n]+", code) == [
+            "  $ppReceipt = Join-Path (Join-Path $ppRunRoot 'artifacts') 'project-proof-receipt.json'"]
+        assert re.findall(r"(?m)^\s*&[^\n]+\bverify-receipt\b[^\n]*", code) == [
+            r"  & $python -B (Join-Path $repoRoot 'scripts\proof_project.py') verify-receipt --run-id $ppRun --receipt $ppReceipt"]
+
+    def test_project_receipt_failure_throws(self):
+        _, block, _ = self._parts()
+        assert re.search(re.escape("$ppReceiptExit = $LASTEXITCODE") + r"\s+"
+                         + re.escape("if ($ppReceiptExit -ne 0) { throw 'Project proof receipt failed verification' }"), self._code(block))
+
+    def test_project_supervisor_exit_preserved(self):
+        _, block, _ = self._parts()
+        code = self._code(block)
+        assert re.search(r"supervise --run-id \$ppRun --run-root \$ppRunRoot\s+"
+                         + re.escape("$ppExit = $LASTEXITCODE"), code)
+        assert re.findall(r"(?m)^\s*\$ppExit\s*=[^\n]+", code) == ["  $ppExit = $LASTEXITCODE"]
+        assert re.findall(r"(?m)^\s*exit\s+[^\n]+", code) == ["  exit $ppExit"]
+        assert code.rstrip().endswith("exit $ppExit\n}")
+
+    def test_project_summary_names_run_and_receipt(self):
+        _, block, _ = self._parts()
+        assert re.findall(r"(?m)^\s*Write-Host[^\n]+", self._code(block)) == [
+            '  Write-Host "Project proof run $ppRun receipt: $ppReceipt"']
+
+
+def test_pp3b_gate_registration():
+    runner = _load_runner()
+    suites = [s for s in runner.build_suites() if s.id == "web-project-proof-contract"]
+    assert len(suites) == 1
+    suite = suites[0]
+    assert suite.cwd == runner.WEB and suite.kind == "script" and suite.expected is None
+    assert suite.argv == ["node", "--input-type=module", "-e", "import { startVitest } from 'vitest/node'; const ctx = await startVitest('test', ['e2e/project/projectProof.test.mjs'], { config: false, run: true, environment: 'node', include: ['e2e/project/projectProof.test.mjs'], exclude: ['node_modules/**'], reporters: ['verbose'] }); if (!ctx) process.exitCode = 1; else { const rows = ctx.state.getFiles().flatMap(file => file.tasks); if (rows.length !== 28 || rows.some(row => row.type !== 'test' || row.result?.state !== 'pass')) process.exitCode = 1; await ctx.close(); }"]
+    assert not suite.db_gated and not suite.uses_database and not suite.opt_in_env
+    selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
+    assert selection["mandatory_suite_ids"].count(suite.id) == 1
+    source = (runner.WEB / "e2e/project/projectProof.test.mjs").read_text(encoding="utf-8")
+    assert len(re.findall(r"^it\('", source, re.MULTILINE)) == 28
+    assert runner.serial_suite_reason(suite) == ""
+    assert runner.conflict_resources(suite) == frozenset()
+
+
+def test_r14f1_gate_registration():
+    runner = _load_runner()
+    catalog = runner.build_suites()
+    suites = [suite for suite in catalog if suite.id == "scripts-proof-project-sizing"]
+    assert len(suites) == 1
+    suite = suites[0]
+    assert suite.cwd == SCRIPTS and suite.kind == "pytest" and suite.expected == 62
+    assert suite.argv == runner._py_pytest("test_proof_project_sizing.py")
+    assert not suite.db_gated and not suite.uses_database and not suite.opt_in_env
+    assert suite.allowed_skip_reasons == suite.database_skip_reasons == ()
+    selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
+    mandatory = selection["mandatory_suite_ids"]
+    assert mandatory.count(suite.id) == 1
+    assert mandatory.index(suite.id) == mandatory.index("scripts-proof-project") + 1
+    ids = [item.id for item in catalog]
+    assert ids.index(suite.id) == ids.index("scripts-proof-project") + 1
+    assert next(item for item in catalog if item.id == "scripts-proof-project").expected == 376
+
+
+# Early-feedback scheduler proofs use the actual runner with inert suite
+# processes. They prove ordering and reporting, not product correctness.
+def test_web_stage_contracts_have_one_early_owner():
+    g = _load_runner()
+    suites = g.build_suites()
+    rows = [s for s in suites if s.id == "web-stage-source-contracts"]
+    assert len(rows) == 1
+    row = rows[0]
+    files = ["src/site/surfaceGates.test.js", "src/site/toolCastStageBar.test.js"]
+    assert row.kind == "vitest" and row.cwd == g.WEB and row.expected == 1
+    assert row.argv == [g._npm(), "run", "test:unit", "--", *files, "--maxWorkers=1"]
+    assert row.id in g._EARLY_FEEDBACK_SUITES
+    import json
+    selection = json.loads((g.REPO / "scripts/ci/test-selection-map.json").read_text())
+    assert selection["mandatory_suite_ids"].count(row.id) == 1
+    for shard in range(1, 4):
+        heavy = next(s for s in suites if s.id == f"web-vitest-{shard}")
+        for file in files:
+            assert heavy.argv.count(f"--exclude={file}") == 1
+    assert not row.allowed_vitest_skips
+
+
+def test_early_feedback_collects_all_reds_and_never_starts_heavy(tmp_path, monkeypatch, capsys):
+    g = _load_runner()
+    suites = [g.Suite(name, name, "script", tmp_path, ["fixture"], None)
+              for name in ["web-build", "harness-tsc-noemit", "server-campaign-dxf-inventory", "gate-runner-selftest",
+                           "web-stage-source-contracts", "web-studio-panels-proof"]]
+    seen = []
+    def run(suite, *_args, **_kwargs):
+        seen.append(suite.id)
+        return g.Result(suite, "FAIL", "err", 0.01, note="fixture type/contract error")
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    monkeypatch.setattr(g.subprocess, "run", lambda *_args, **_kwargs: pytest.fail("heavy setup started"))
+    results, attempts = g.run_suites_parallel(suites, tmp_path, 2, 3, True,
+                                             early_feedback=True,
+                                             before_heavy_command=["trusted-ci", "--heavy-prerequisites"])
+    assert set(seen) == {"harness-tsc-noemit", "server-campaign-dxf-inventory", "gate-runner-selftest", "web-stage-source-contracts"}
+    assert len(seen) == 4 and all(n == 1 for n in attempts.values())
+    assert all(r.status == "FAIL" for r in results)
+    output = capsys.readouterr().out
+    assert "GATE_RESULT id=harness-tsc-noemit status=FAIL" in output
+    assert "GATE_RESULT id=server-campaign-dxf-inventory status=FAIL" in output
+    assert "GATE_RESULT id=web-stage-source-contracts status=FAIL" in output
+    assert "GATE_RESULT id=gate-runner-selftest status=FAIL" in output
+    assert "heavy_started=0" in output
+
+
+def test_early_feedback_healthy_catalog_parity_and_dependency_barrier(tmp_path, monkeypatch):
+    g = _load_runner()
+    names = ["web-studio-panels-proof", "harness-tsc-noemit", "web-build",
+             "server-campaign-dxf-inventory", "gate-runner-selftest", "web-stage-source-contracts", "other-full-control"]
+    suites = [g.Suite(name, name, "script", tmp_path, ["fixture"], None) for name in names]
+    seen = []
+    def run(suite, *_args, **_kwargs):
+        seen.append(suite.id)
+        return g.Result(suite, "PASS", "-", 0.01)
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    argv = ["/trusted/base/ci.sh", "--heavy-prerequisites"]
+    def prerequisites(command, **kwargs):
+        assert command == argv and kwargs == {"cwd": g.REPO, "check": False}
+        seen.append("heavy-prerequisites")
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(g.subprocess, "run", prerequisites)
+    results, attempts = g.run_suites_parallel(suites, tmp_path, 1, 0, True,
+                                             early_feedback=True, before_heavy_command=argv)
+    assert [r.suite.id for r in results] == names
+    assert set(attempts) == set(names) and set(attempts.values()) == {1}
+    assert len(seen) == len(names) + 1
+    assert max(seen.index(name) for name in g._EARLY_FEEDBACK_SUITES if name in names) < seen.index("heavy-prerequisites")
+    assert seen.index("heavy-prerequisites") < seen.index("web-build")
+    assert seen.index("web-build") < seen.index("web-studio-panels-proof")
+
+
+def test_ordinary_phased_run_streams_scrubbed_results(tmp_path, monkeypatch, capsys):
+    g = _load_runner()
+    suites = [g.Suite(name, name, "script", tmp_path, ["fixture"], None)
+              for name in ["ordinary-pass", "ordinary-fail"]]
+
+    def run(suite, *_args, **_kwargs):
+        if suite.id == "ordinary-fail":
+            return g.Result(suite, "FAIL", "err", 0.01, note="token=abc123")
+        return g.Result(suite, "PASS", "-", 0.01)
+
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    g.run_suites_parallel(suites, tmp_path, 2, 0, False, early_feedback=False)
+    lines = capsys.readouterr().out.splitlines()
+    streamed = [line for line in lines if line.startswith("GATE_RESULT ")]
+    assert len(streamed) == 2
+    assert any(line.startswith("GATE_RESULT id=ordinary-pass status=PASS ") for line in streamed)
+    failed = next(line for line in streamed if line.startswith("GATE_RESULT id=ordinary-fail status=FAIL "))
+    assert "note=token=[redacted]" in failed
+    assert "abc123" not in "\n".join(streamed)
+    rows = [line for line in lines if line.startswith("  ... ")]
+    assert [line.split()[1] for line in rows] == [suite.id for suite in suites]
+    assert max(lines.index(line) for line in streamed) < min(lines.index(line) for line in rows)
+
+
+def test_ordinary_phased_run_streams_and_still_honors_conflict_locks(tmp_path, monkeypatch, capsys):
+    g = _load_runner()
+    suites = [g.Suite(name, name, "script", g.WEB, ["npm", "test"], None)
+              for name in ["ordinary-web-first", "ordinary-web-second"]]
+    assert all(g.conflict_resources(suite) == {"web-tree"} for suite in suites)
+    lock = threading.Lock()
+    active = peak = 0
+    events = []
+
+    def run(suite, *_args, **_kwargs):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+            events.append((suite.id, "enter"))
+        try:
+            time.sleep(0.02)
+            return g.Result(suite, "PASS", "-", 0.02)
+        finally:
+            with lock:
+                events.append((suite.id, "exit"))
+                active -= 1
+
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    results, _ = g.run_suites_parallel(suites, tmp_path, 2, 0, False, early_feedback=False)
+    assert all(result.status == "PASS" for result in results)
+    assert active == 0 and peak == 1
+    assert events == [(suite.id, event) for suite in suites for event in ("enter", "exit")]
+    output = capsys.readouterr().out
+    for suite in suites:
+        assert f"GATE_RESULT id={suite.id} status=PASS" in output
+
+
+def test_ordinary_phased_run_streams_before_the_slowest_suite_finishes(tmp_path, monkeypatch, capsys):
+    g = _load_runner()
+    finished_fast = threading.Event()
+    release = threading.Event()
+    finished_slow = threading.Event()
+    slow = g.Suite("ordinary-slow", "slow", "script", tmp_path, ["fixture"], None)
+    fast = g.Suite("ordinary-fast", "fast", "script", tmp_path, ["fixture"], None)
+
+    def run(suite, *_args, **_kwargs):
+        if suite.id == slow.id:
+            assert release.wait(5), "test did not release slow suite"
+            finished_slow.set()
+        else:
+            finished_fast.set()
+        return g.Result(suite, "PASS", "-", 0.01)
+
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    thread = threading.Thread(target=lambda: g.run_suites_parallel(
+        [slow, fast], tmp_path, 2, 0, False, early_feedback=False))
+    thread.start()
+    try:
+        assert finished_fast.wait(5)
+        deadline = time.monotonic() + 5
+        output = ""
+        while "GATE_RESULT id=ordinary-fast status=PASS" not in output and time.monotonic() < deadline:
+            output += capsys.readouterr().out
+            time.sleep(0.01)
+        assert "GATE_RESULT id=ordinary-fast status=PASS" in output
+        assert not finished_slow.is_set(), "report must precede the slow suite finishing"
+        assert thread.is_alive()
+    finally:
+        release.set()
+        thread.join(5)
+    assert not thread.is_alive()
+
+
+def test_early_failure_is_visible_while_another_cheap_check_is_running(tmp_path, monkeypatch, capsys):
+    g = _load_runner()
+    failed = threading.Event()
+    release = threading.Event()
+    slow = g.Suite("server-campaign-dxf-inventory", "slow cheap", "script", tmp_path, ["fixture"], None)
+    fast = g.Suite("harness-tsc-noemit", "fast red", "script", tmp_path, ["fixture"], None)
+    def run(suite, *_args, **_kwargs):
+        if suite.id == slow.id:
+            assert release.wait(5), "test did not release second cheap check"
+            return g.Result(suite, "PASS", "-", 0.01)
+        failed.set()
+        return g.Result(suite, "FAIL", "err", 0.01, note="actionable fixture.ts type error")
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    thread = threading.Thread(target=lambda: g.run_suites_parallel([slow, fast], tmp_path, 2, 0, True,
+                                                                  early_feedback=True))
+    thread.start()
+    try:
+        assert failed.wait(5)
+        deadline = time.monotonic() + 5
+        output = ""
+        while "GATE_RESULT id=harness-tsc-noemit status=FAIL" not in output and time.monotonic() < deadline:
+            output += capsys.readouterr().out
+            time.sleep(0.01)
+        assert "actionable fixture.ts type error" in output
+        assert thread.is_alive(), "report must precede the other cheap check finishing"
+    finally:
+        release.set()
+        thread.join(5)
+    assert not thread.is_alive()
+
+
+def test_heavy_prerequisite_failure_preserves_cheap_results_and_cannot_pass(tmp_path, monkeypatch):
+    g = _load_runner()
+    cheap = g.Suite("harness-tsc-noemit", "cheap", "script", tmp_path, ["fixture"], None)
+    heavy = g.Suite("web-build", "heavy", "script", tmp_path, ["fixture"], None)
+    seen = []
+    def run(suite, *_args, **_kwargs):
+        seen.append(suite.id)
+        return g.Result(suite, "PASS", "-", 0.01)
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    monkeypatch.setattr(g.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=17))
+    with pytest.raises(g.HeavyPrerequisitesFailed) as raised:
+        g.run_suites_parallel([heavy, cheap], tmp_path, 2, 0, True,
+                              early_feedback=True, before_heavy_command=["trusted-ci"])
+    assert raised.value.status == 17
+    assert seen == [cheap.id]
+    assert raised.value.completed[cheap.id][0].status == "PASS"
+
+
+def test_early_feedback_shell_uses_exact_trusted_script_and_one_gate_invocation():
+    source = (REPO / ".codebuild/ci.sh").read_text()
+    assert 'LEAF_CI_SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"' in source
+    line = next(line for line in source.splitlines() if line.startswith("python scripts/run-all-gates.py --jobs"))
+    assert source.rindex('export PYTHONUNBUFFERED=1', 0, source.index(line)) < source.index(line)
+    assert '--early-feedback' in line and '--retry 0' in line
+    assert '--fail-fast' in line or ('"${gate_fail_fast_args[@]}"' in line
+                                     and 'gate_fail_fast_args=(--fail-fast)' in source)
+    assert '--before-heavy-command bash "$LEAF_CI_SCRIPT_PATH" --heavy-prerequisites' in line
+    assert '"${only_args[@]}"' in line
+    entry = source[source.index('if [[ "${1:-}" == --heavy-prerequisites') : source.index('# Freeze policy before any candidate installation')]
+    assert 'npm run build' in entry and 'check_license_fence.py --self-test' in entry
+    assert 'install_ci_browser npx playwright' in entry and 'install_ci_browser python -m playwright' in entry
+    assert 'for attempt in 1 2' not in entry
+    assert entry.count('"$@" install --with-deps chromium') == 1
+    assert entry.count('"$@" install chromium') == 1
+
+
+
+def test_early_feedback_heavy_setup_failure_main_writes_partial_evidence_not_green(tmp_path, monkeypatch):
+    g = _load_runner()
+    suites = [g.Suite(name, name, "script", tmp_path, ["fixture"], None)
+              for name in ["harness-tsc-noemit", "web-build"]]
+    monkeypatch.setattr(g, "build_suites", lambda: suites)
+    monkeypatch.setattr(g, "AUTHORED_TOOLS", tmp_path / "authored_tools.json")
+    monkeypatch.setattr(g, "migrate_gate_database", lambda _suites: "")
+    monkeypatch.setattr(g, "run_suite_guarded", lambda suite, *_args, **_kwargs:
+                        g.Result(suite, "PASS", "-", 0.01))
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    monkeypatch.setattr(g.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=17))
+    output = tmp_path / "result.json"
+    monkeypatch.setattr(sys, "argv", ["run-all-gates.py", "--early-feedback", "--jobs", "1",
+                                     "--result-json", str(output), "--log-dir", str(tmp_path),
+                                     "--before-heavy-command", "trusted-ci"])
+    assert g.main() == 1
+    document = json.loads(output.read_text())
+    assert len(document["results"]) == 1
+    assert document["results"][0]["id"] == "harness-tsc-noemit"
+    assert document["results"][0]["status"] == "PASS"
+    assert document["any_fail"] is True
+
+
+
+def test_early_feedback_actual_trusted_heavy_entry_preserves_producers(tmp_path):
+    g = _load_runner()
+    bash = g._bash()
+    bins = tmp_path / "bin"
+    bins.mkdir()
+    (tmp_path / "web").mkdir()
+    trace = tmp_path / "trace.log"
+    for name in ("npm", "npx", "python"):
+        script = bins / name
+        script.write_text("#!/usr/bin/env bash\n"
+                          "printf '%s %s\\n' \"$(basename \"$0\")\" \"$*\" >> \"$FIXTURE_TRACE\"\n"
+                          "if [[ \"${FIXTURE_FAIL_OS:-0}\" == 1 && \"$*\" == *'install --with-deps chromium' ]]; then exit 19; fi\n",
+                          encoding="utf-8", newline="\n")
+        script.chmod(0o755)
+    def shell_path(path):
+        text = path.resolve().as_posix()
+        return "/" + text[0].lower() + text[2:] if os.name == "nt" else text
+    def run(shard=None, fail_os=False):
+        trace.unlink(missing_ok=True)
+        env = dict(os.environ, CODEBUILD_SRC_DIR=shell_path(tmp_path), FIXTURE_BIN=shell_path(bins),
+                   FIXTURE_TRACE=shell_path(trace), CI_SCRIPT=shell_path(REPO / ".codebuild/ci.sh"),
+                   FIXTURE_FAIL_OS=str(int(fail_os)))
+        for key in ("CI_SHARD_TOTAL", "CI_SHARD_INDEX"):
+            env.pop(key, None)
+        if shard is not None:
+            env.update(CI_SHARD_TOTAL="2", CI_SHARD_INDEX=str(shard))
+        result = subprocess.run([bash, "--noprofile", "--norc", "-c",
+                                 'export PATH="$FIXTURE_BIN:$PATH"; exec bash "$CI_SCRIPT" --heavy-prerequisites'],
+                                env=env, capture_output=True, text=True, timeout=15)
+        assert result.returncode == 0, result.stdout + result.stderr
+        return trace.read_text().splitlines()
+    license_checks = ["npm run build", "python scripts/check_license_fence.py --self-test",
+                      "python scripts/check_license_fence.py ."]
+    browsers = ["npx playwright install --with-deps chromium", "python -m playwright install --with-deps chromium"]
+    assert run() == license_checks + browsers
+    assert run(shard=1) == browsers
+    assert run(fail_os=True) == license_checks + [browsers[0], "npx playwright install chromium",
+                                               browsers[1], "python -m playwright install chromium"]
+
+
+_SIP_EARLY_POLICY_IDS = (
+    "server-sip-r3b-chain", "server-sip-r4-jobs", "server-sip-r5-policy",
+    "server-sip-r6-routes", "server-sip-r3c-multi-add",
+    "server-sip-r3d-conductors", "server-sip-r3e-groups",
+    "server-start-leaf-harness-config",
+)
+
+
+@pytest.mark.parametrize("fail_fast", [False, True])
+@pytest.mark.parametrize("smoke_status", ["PASS", "FAIL", "UNAVAILABLE", "SKIP"])
+def test_service_smoke_phase_barrier_and_full_control_parity(tmp_path, monkeypatch, capsys, fail_fast, smoke_status):
+    g = _load_runner()
+    names = ["other-full-control", "web-build", "web-page-service-smoke",
+             "harness-tsc-noemit", "server-campaign-dxf-inventory"]
+    suites = [g.Suite(name, name, "script", tmp_path, ["fixture"], None) for name in names]
+    seen = []
+    def run(suite, *_args, **_kwargs):
+        seen.append(suite.id)
+        return g.Result(suite, smoke_status if suite.id == "web-page-service-smoke" else "PASS",
+                        "-", 0.01, note="fixture diagnostics")
+    def prerequisites(*_args, **_kwargs):
+        seen.append("prerequisites")
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    monkeypatch.setattr(g.subprocess, "run", prerequisites)
+    results, attempts = g.run_suites_parallel(suites, tmp_path, 1, 3, fail_fast,
+        early_feedback=True, before_heavy_command=["trusted-ci"])
+    expected = ["harness-tsc-noemit", "server-campaign-dxf-inventory", "prerequisites", "web-page-service-smoke"]
+    if smoke_status == "PASS":
+        expected += ["web-build", "other-full-control"]
+        assert [r.suite.id for r in results] == names
+    else:
+        assert "heavy_started=0" in capsys.readouterr().out
+        assert next(r for r in results if r.suite.id == "web-page-service-smoke").status != "PASS"
+    assert seen == expected
+    assert set(attempts.values()) == {1}
+    assert len(seen) == len(set(seen))
+
+
+@pytest.mark.parametrize("fail_fast", [False, True])
+def test_service_smoke_early_red_collects_both_failures(tmp_path, monkeypatch, capsys, fail_fast):
+    g = _load_runner()
+    names = ["web-page-service-smoke", "web-build", "harness-tsc-noemit", "server-campaign-dxf-inventory"]
+    suites = [g.Suite(name, name, "script", tmp_path, ["fixture"], None) for name in names]
+    seen = []
+    def run(suite, *_args, **_kwargs):
+        seen.append(suite.id)
+        return g.Result(suite, "FAIL", "err", 0.01, note=f"independent error {suite.id}")
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    monkeypatch.setattr(g.subprocess, "run", lambda *_args, **_kwargs: pytest.fail("prerequisites started"))
+    results, attempts = g.run_suites_parallel(suites, tmp_path, 2, 3, fail_fast,
+        early_feedback=True, before_heavy_command=["trusted-ci"])
+    assert set(seen) == set(names[2:]) and len(seen) == 2
+    assert len(results) == 2 and set(attempts.values()) == {1}
+    output = capsys.readouterr().out
+    for name in names[2:]:
+        assert f"GATE_RESULT id={name} status=FAIL" in output
+        assert f"independent error {name}" in output
+
+
+def test_service_smoke_prerequisite_failure_starts_no_service(tmp_path, monkeypatch):
+    g = _load_runner()
+    names = ["web-page-service-smoke", "web-build", "harness-tsc-noemit"]
+    suites = [g.Suite(name, name, "script", tmp_path, ["fixture"], None) for name in names]
+    seen = []
+    def run(suite, *_args, **_kwargs):
+        seen.append(suite.id)
+        return g.Result(suite, "PASS", "-", 0.01)
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    monkeypatch.setattr(g.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=17))
+    with pytest.raises(g.HeavyPrerequisitesFailed) as raised:
+        g.run_suites_parallel(suites, tmp_path, 2, 0, False,
+            early_feedback=True, before_heavy_command=["trusted-ci"])
+    assert raised.value.status == 17 and seen == ["harness-tsc-noemit"]
+
+
+def test_service_smoke_row_registration_is_unique_and_mandatory():
+    g = _load_runner()
+    suites = g.build_suites()
+    rows = [s for s in suites if s.id == "web-page-service-smoke"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.cwd == g.WEB and row.timeout_s == 600
+    assert row.uses_database and row.db_gated and row.requires_linux
+    assert not row.opt_in_env and not row.db_deferred
+    assert row.id not in g._EARLY_FEEDBACK_SUITES and len(g._EARLY_FEEDBACK_SUITES) == 17
+    assert "gate-runner-selftest" in g._EARLY_FEEDBACK_SUITES
+    assert row.argv[1:] == ["--no-install", "playwright", "test", "--config", "playwright.page-service.config.mjs", "--workers=1"]
+    assert all(not any("page-service.config" in arg or "project-page.service" in arg for arg in s.argv)
+               for s in suites if s.id != row.id)
+    manifest = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text())
+    assert manifest["mandatory_suite_ids"].count(row.id) == 1
+    # The new filename cannot be collected by existing Playwright default patterns.
+    assert not re.search(r"\.(spec|test)\.", "project-page.service.mjs")
+
+
+def test_service_smoke_non_linux_row_is_unavailable_before_database_probe(tmp_path, monkeypatch):
+    g = _load_runner()
+    row = next(s for s in g.build_suites() if s.id == "web-page-service-smoke")
+    monkeypatch.setattr(g.sys, "platform", "darwin")
+    monkeypatch.setattr(g, "probe_platform_db", lambda: pytest.fail("database probe on wrong OS"))
+    result = g.run_suite(row, tmp_path)
+    assert result.status == "UNAVAILABLE"
+    assert "linux-only service smoke" in result.note
+    assert result.log_path.read_text().strip() == result.note
+
+
+@pytest.mark.parametrize("early", [False, True])
+def test_service_smoke_non_linux_row_main_fails_and_blocks_serial_heavy(tmp_path, monkeypatch, early):
+    g = _load_runner()
+    smoke = g.Suite("web-page-service-smoke", "smoke", "script", tmp_path, ["fixture"], None, requires_linux=True)
+    heavy = g.Suite("web-build", "heavy", "script", tmp_path, ["fixture"], None)
+    monkeypatch.setattr(g, "build_suites", lambda: [heavy, smoke])
+    monkeypatch.setattr(g, "migrate_gate_database", lambda _suites: None)
+    monkeypatch.setattr(g.sys, "platform", "darwin")
+    monkeypatch.setattr(g.subprocess, "run", lambda *_args, **_kwargs: pytest.fail("heavy child started"))
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    output = tmp_path / "result.json"
+    monkeypatch.setattr(sys, "argv", ["run-all-gates.py", "--jobs", "1", "--retry", "0",
+        "--result-json", str(output), "--log-dir", str(tmp_path)] + (["--early-feedback"] if early else []))
+    assert g.main() == 1
+    document = json.loads(output.read_text())
+    assert document["any_fail"] is True
+    assert [(r["id"], r["status"]) for r in document["results"]] == [(smoke.id, "UNAVAILABLE")]
+
+
+def _load_page_smoke_producer():
+    spec = importlib.util.spec_from_file_location("page_smoke_producer", SCRIPTS / "page_editor_service_smoke.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("host,database,code,marker", [
+    ("win32", "postgresql://inert", 2, "LINUX_REQUIRED"),
+    ("darwin", "", 2, "LINUX_REQUIRED"),
+    ("linux", "", 3, "DATABASE_REQUIRED"),
+    ("linux", "  ", 3, "DATABASE_REQUIRED"),
+])
+def test_producer_rejects_before_optional_imports(monkeypatch, capsys, host, database, code, marker):
+    producer = _load_page_smoke_producer()
+    monkeypatch.setattr(producer.sys, "platform", host)
+    monkeypatch.setenv("DATABASE_URL", database)
+    monkeypatch.setattr(producer, "load_package", lambda *_args: pytest.fail("optional imports reached"))
+    monkeypatch.setattr(producer, "scrubber", lambda *_args: pytest.fail("logging reached"))
+    assert producer.main([]) == code
+    assert f"PAGE_SMOKE {marker}" in capsys.readouterr().err
+
+
+def test_service_smoke_retains_redacted_producer_failure(tmp_path, monkeypatch):
+    g = _load_runner()
+    row = g.Suite("web-page-service-smoke", "smoke", "script", tmp_path, ["fixture"], None)
+    secret = "postgresql://fixture:very-private-password@127.0.0.1/smoke"
+    def child(*_args, **kwargs):
+        directory = Path(kwargs["env"]["LEAF_PAGE_SMOKE_DIR"])
+        (directory / "server.log").write_text(f"PAGE_SMOKE START_OR_RUN_FAILED\nConnection refused: {secret}\n")
+        return SimpleNamespace(returncode=1, stdout="WebServer failed to start", stderr="")
+    monkeypatch.setattr(g.subprocess, "run", child)
+    result = g.run_suite(row, tmp_path, reporting_disabled=True)
+    assert result.status == "FAIL"
+    log = result.log_path.read_text()
+    assert "Connection refused" in log and "START_OR_RUN_FAILED" in log
+    assert "very-private-password" not in log and "[redacted]" in log
+
+
+def test_service_smoke_producer_logs_startup_exception_without_stdout(tmp_path, monkeypatch, capsys):
+    producer = _load_page_smoke_producer()
+    g = _load_runner()
+    monkeypatch.setattr(producer.sys, "platform", "linux")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fixture:private-password@localhost/smoke")
+    monkeypatch.setattr(producer, "scrubber", lambda *_args: g.scrub_evidence)
+    # Avoid altering the test harness's global logging handlers.
+    monkeypatch.setattr(producer.logging, "basicConfig", lambda **_kwargs: None)
+    def fail(*_args):
+        raise RuntimeError("migration refused " + os.environ["DATABASE_URL"])
+    monkeypatch.setattr(producer, "serve", fail)
+    ready, log = tmp_path / "ready.json", tmp_path / "server.log"
+    assert producer.main(["--port", "8189", "--ready-file", str(ready), "--log-file", str(log)]) == 1
+    assert not ready.exists()
+    assert "migration refused" in log.read_text() and "private-password" not in log.read_text()
+    assert capsys.readouterr().out == ""
+
+
+def test_service_smoke_producer_mount_seed_and_atomic_ready(tmp_path, monkeypatch):
+    import asyncio
+    import uuid
+    producer = _load_page_smoke_producer()
+    ready = tmp_path / "ready.json"
+    org_id, binding_id, project_id = (uuid.uuid4() for _ in range(3))
+    calls = []
+    router = object()
+    def org(**kwargs):
+        assert isinstance(kwargs["org_id"], uuid.UUID)
+        assert kwargs["name"].startswith("Page service smoke ")
+        calls.append("org")
+        return SimpleNamespace(org_id=org_id)
+    def binding(org, provider, subject, **kwargs):
+        assert org == org_id and provider == "auth0" and uuid.UUID(subject)
+        assert kwargs == {"role": "owner"}
+        calls.append("binding")
+        return SimpleNamespace(binding_id=binding_id)
+    def project(org, actor, **kwargs):
+        assert (org, actor) == (org_id, binding_id) and uuid.UUID(kwargs["idempotency_key"])
+        calls.append("project")
+        return {"project": {"project_id": str(project_id)}}
+    class App:
+        def include_router(self, value):
+            assert value is router
+            calls.append("router")
+    class Server:
+        def __init__(self, config):
+            assert config.host == "127.0.0.1" and config.port == 8189
+            assert config.timeout_graceful_shutdown == 10
+            self.started = False
+        async def startup(self, sockets=None):
+            assert not ready.exists(), "ready must follow socket startup"
+            self.started = True
+        def run(self):
+            asyncio.run(self.startup())
+            document = json.loads(ready.read_text())
+            assert set(document) == {"schema", "api_origin", "org_id", "binding_id", "project_id", "project_name"}
+            assert document["schema"] == "leaf.page-smoke.v1"
+            assert document["api_origin"] == "http://127.0.0.1:8189"
+            assert (document["org_id"], document["binding_id"], document["project_id"]) == tuple(map(str, (org_id, binding_id, project_id)))
+            assert not list(tmp_path.glob("*.tmp"))
+            calls.append("ready")
+    monkeypatch.setattr(producer, "load_package", lambda *_args: None)
+    monkeypatch.setitem(sys.modules, "leaf_platform", SimpleNamespace(
+        db=SimpleNamespace(apply_migration=lambda: calls.append("migration"), reset_pool=lambda: calls.append("reset")),
+        store=SimpleNamespace(create_org=org, create_identity_binding=binding),
+        project_lifecycle=SimpleNamespace(create_blank_project=project)))
+    monkeypatch.setitem(sys.modules, "leaf_platform.api", SimpleNamespace(router=router))
+    monkeypatch.setitem(sys.modules, "fastapi", SimpleNamespace(FastAPI=App))
+    monkeypatch.setitem(sys.modules, "uvicorn", SimpleNamespace(Server=Server, Config=lambda app, **kwargs: SimpleNamespace(**kwargs)))
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    producer.serve(SimpleNamespace(port=8189, ready_file=ready), time.monotonic())
+    assert os.environ["LEAF_AUTH_LIVE"] == "0"
+    assert calls == ["migration", "org", "binding", "project", "router", "ready", "reset"]
+    assert not ready.exists(), "normal shutdown must remove readiness"
+
+
+def test_service_smoke_log_scrubs_split_writes(monkeypatch):
+    import io
+    producer = _load_page_smoke_producer()
+    stream = io.StringIO()
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    log = producer.RedactedLog(stream, _load_runner().scrub_evidence)
+    log.write("password=")
+    log.write("private-value")
+    log.write("\nConnection refused\n")
+    assert "private-value" not in stream.getvalue()
+    assert "Connection refused" in stream.getvalue()
+
+
+@pytest.mark.parametrize("suite_id", _SIP_EARLY_POLICY_IDS)
+def test_sip_policy_feedback_red_blocks_heavy_without_retries(suite_id, tmp_path, monkeypatch, capsys):
+    g = _load_runner()
+    found = [suite for suite in g.build_suites() if suite.id == suite_id]
+    assert len(found) == 1
+    cheap = found[0]
+    assert suite_id in g._EARLY_FEEDBACK_SUITES
+    assert cheap.kind == "pytest" and cheap.cwd == g.SERVER
+    assert not cheap.db_gated and not cheap.uses_database and not cheap.reset_authored
+    assert not cheap.opt_in_env
+    assert "harness-vitest" not in g._EARLY_FEEDBACK_SUITES
+    heavy = g.Suite("web-build", "heavy writer", "script", tmp_path, ["fixture"], None)
+    seen = []
+    def run(suite, *_args, **_kwargs):
+        seen.append(suite.id)
+        return g.Result(suite, "FAIL", "err", 0.01, note="fixture authority/registry mismatch")
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    monkeypatch.setattr(g.subprocess, "run", lambda *_args, **_kwargs: pytest.fail("heavy setup admitted"))
+    results, attempts = g.run_suites_parallel([heavy, cheap], tmp_path, 2, 2, True,
+                                             early_feedback=True,
+                                             before_heavy_command=["trusted-ci"])
+    assert seen == [suite_id] and attempts == {suite_id: 1}
+    assert [result.suite.id for result in results] == [suite_id]
+    assert results[0].status == "FAIL"
+    output = capsys.readouterr().out
+    assert f"GATE_RESULT id={suite_id} status=FAIL" in output
+    assert "heavy_started=0" in output
+
+
+def test_sip_policy_feedback_green_runs_each_selected_control_once(tmp_path, monkeypatch):
+    g = _load_runner()
+    cheap = [suite for suite in g.build_suites() if suite.id in _SIP_EARLY_POLICY_IDS]
+    assert len(cheap) == len(_SIP_EARLY_POLICY_IDS)
+    heavy = g.Suite("web-build", "heavy writer", "script", tmp_path, ["fixture"], None)
+    suites, seen = [heavy, *cheap], []
+    def run(suite, *_args, **_kwargs):
+        seen.append(suite.id)
+        return g.Result(suite, "PASS", "-", 0.01)
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    results, attempts = g.run_suites_parallel(suites, tmp_path, 3, 0, True, early_feedback=True)
+    assert [result.suite.id for result in results] == [suite.id for suite in suites]
+    assert len(seen) == len(suites) and len(set(seen)) == len(seen)
+    assert set(attempts) == set(seen) and set(attempts.values()) == {1}
+    assert seen[-1] == heavy.id
+
+
+def test_failed_log_retention_actual_producer_size(tmp_path):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [])
+    # Synthetic producer-shaped result, not evidence of a live CI run.
+    payload = {"results": [{"id": "red", "status": "FAIL", "attempts": 1,
+                            "test_report": {"output": ""}}]}
+    target_bytes = 2349222
+    payload["results"][0]["test_report"]["output"] = "x" * (
+        target_bytes - len(json.dumps(payload).encode("utf-8")))
+    result.write_bytes(json.dumps(payload).encode("utf-8"))
+    assert result.stat().st_size == target_bytes
+    assert target_bytes > 2 * 1024 * 1024
+    (logs / "red.log").write_bytes(b"actionable failed stack\n")
+    manifest = helper.retain_failed_logs(result, logs, output)
+    assert manifest["failed_suites"] == manifest["copied_files"] == 1
+    assert manifest["files"][0]["status"] == "copied"
+    assert (output / "red.log").read_bytes() == b"actionable failed stack\n"
+    assert json.loads((output / "manifest.json").read_text()) == manifest
+
+
+
+def test_failed_log_retention_above_eight_mib_refused(tmp_path):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [])
+    assert helper.RESULT_LIMIT == 8 * 1024 * 1024
+    payload = {"results": [{"id": "red", "status": "FAIL",
+                            "test_report": {"output": "x" * (8 * 1024 * 1024)}}]}
+    result.write_bytes(json.dumps(payload).encode("utf-8"))
+    assert result.stat().st_size > helper.RESULT_LIMIT
+    (logs / "red.log").write_bytes(b"do not copy refused input")
+    with pytest.raises(ValueError, match="result_too_large"):
+        helper.retain_failed_logs(result, logs, output)
+    assert not output.exists()
+    assert (logs / "red.log").read_bytes() == b"do not copy refused input"

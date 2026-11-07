@@ -431,7 +431,9 @@ function validateControls(controls) {
           throw new Error('featureMap: control toggle needs opposite setup and effect states ' + record.id + '/' + state)
         }
       }
-      const fields = effect.kind === 'disabled_with_reason' ? ['kind', 'reason', 'reason_code'] : ['kind', 'target', 'value']
+      const fields = effect.kind === 'disabled_with_reason' ? ['kind', 'reason', 'reason_code']
+        : effect.kind === 'renders' && effect.target === 'engine-refusal' ? ['kind', 'target', 'value', 'refusal'] : ['kind', 'target', 'value']
+      if ('refusal' in effect && !nonempty(effect.refusal)) throw new Error('featureMap: empty control refusal ' + record.id)
       if (Object.keys(effect).some((key) => !fields.includes(key))) throw new Error('featureMap: unknown control effect field ' + record.id)
       if (effect.kind === 'disabled_with_reason' && effect.reason_code !== record.id + ':unavailable') {
         throw new Error('featureMap: invalid control reason code ' + record.id)

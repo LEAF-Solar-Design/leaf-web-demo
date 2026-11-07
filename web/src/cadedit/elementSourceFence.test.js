@@ -1,140 +1,67 @@
 // @vitest-environment node
-/** Ledger 9a: inspect real build bytes for the dev/staging source stamp.
- * Root measurement at 12c9902d with VITE_CAD_EDIT=1: production contained zero
- * data-element-source attributes, src/.../*.jsx paths with or without a
- * component suffix, and src/site/ fragments. Never weaken a marker to get green.
- * The round-1 reading that production legitimately contains src/site/ was a
- * NODE_ENV=test artefact: the inherited environment enabled development JSX.
- */
-import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it } from 'vitest'
+import { bundleGraph, emittedJavaScript } from '../../scripts/bundle-assets.mjs'
+import { nextFenceDirectory, NEXT_FENCE_TIMEOUT } from '../../scripts/next-fence-fixtures.mjs'
+import elementSourceStamp, { elementRef, resolveElementRefs } from '../../vite-plugins/elementSourceStamp.js'
 
-const WEB_ROOT = process.cwd()
 const MARKERS = [/data-element-source/g, /src\/[\w./-]+\.jsx(?::[A-Z][\w$]*)?/g, /src\/site\//g]
-
-function buildWithMode(mode, fenceRoot, envOverride = {}) {
-  const outDir = join(fenceRoot, mode)
-  const env = { ...process.env, VITE_CAD_EDIT: '1' }
-  delete env.NODE_ENV
-  delete env.LEAF_ELEMENT_REF_STAMP
-  // Vite build defaults to production even with --mode development.
-  // Keep the dev runtime and its source variable names for the positive control.
-  Object.assign(env, envOverride)
-  execFileSync(
-    process.execPath,
-    [join(WEB_ROOT, 'node_modules', 'vite', 'bin', 'vite.js'), 'build', '--mode', mode, '--outDir', outDir, '--emptyOutDir', ...(mode === 'development' ? ['--minify', 'false'] : [])],
-    {
-      cwd: WEB_ROOT,
-      env,
-      stdio: 'pipe',
-      timeout: 240_000,
-    },
-  )
-  return outDir
-}
-
-function emittedJavaScript(outDir) {
-  const assets = join(outDir, 'assets')
-  expect(existsSync(assets)).toBe(true)
-  const files = readdirSync(assets).filter((f) => f.endsWith('.js'))
-  expect(files.length).toBeGreaterThan(0)
-  return new Map(files.map((f) => [f, readFileSync(join(assets, f), 'utf8')]))
-}
-
-function allText(chunks) {
-  return [...chunks.values()].join('\n')
-}
-
-function chunksContaining(chunks, outDir, marker) {
-  const html = readFileSync(join(outDir, 'index.html'), 'utf8')
-  const hits = []
-  for (const [name, source] of chunks) {
-    if (!source.match(marker)) continue
-    const referencedBy = [...chunks]
-      .filter(([other, source2]) => other !== name && source2.includes(name))
-      .map(([other]) => other)
-    if (html.includes(name)) referencedBy.push('index.html')
-    hits.push({ name, referencedBy })
-  }
-  return hits
-}
+const REF = /["']data-element-ref["']\s*:\s*["']([^"'\\]*)["']/g
 
 describe('element source stamp build fence', () => {
-  let fenceRoot
-  let stagingDir
-  let productionDir
-  let stagingChunks
-  let productionChunks
+  let graph
+  let productionText
+  beforeAll(async () => {
+    const directory = await nextFenceDirectory('enabled')
+    graph = bundleGraph(directory)
+    productionText = [...emittedJavaScript(directory).values()].join('\n')
+  }, NEXT_FENCE_TIMEOUT)
 
-  beforeAll(() => {
-    // Unique outputs also isolate concurrent worktrees sharing node_modules.
-    fenceRoot = mkdtempSync(join(tmpdir(), 'leaf-element-source-fence-'))
-    stagingDir = buildWithMode('staging', fenceRoot)
-    stagingChunks = emittedJavaScript(stagingDir)
-    productionDir = buildWithMode('production', fenceRoot)
-    productionChunks = emittedJavaScript(productionDir)
-  }, 600_000)
-
-  afterAll(() => {
-    if (fenceRoot) rmSync(fenceRoot, { recursive: true, force: true })
+  it('ships zero readable source stamps or source paths in the actual production export', () => {
+    for (const marker of MARKERS) expect((productionText.match(marker) ?? []).length).toBe(0)
+    expect(productionText).not.toContain('jsxDEV(')
   })
 
-  it('ships source attributes and source stamp values in staging', () => {
-    for (const marker of MARKERS) expect((allText(stagingChunks).match(marker) ?? []).length).toBeGreaterThan(0)
+  it('ships opaque refs in reachable production chunks', () => {
+    const values = [...productionText.matchAll(REF)].map(match => match[1])
+    expect(values.length).toBeGreaterThan(0)
+    for (const value of values) expect(value).toMatch(/^[0-9a-f]{12}$/)
+    const chunks = [...graph.assets].filter(([file, code]) => file.endsWith('.js') && /["']data-element-ref["']\s*:/.test(code))
+    expect(chunks.length).toBeGreaterThan(0)
+    for (const [file] of chunks) expect(graph.reachable.has(file)).toBe(true)
   })
 
-  it('ships staging stamps in reachable chunks', () => {
-    for (const marker of MARKERS) {
-      const hits = chunksContaining(stagingChunks, stagingDir, marker)
-      expect(hits.length).toBeGreaterThan(0)
-      for (const hit of hits) expect(hit.referencedBy.length).toBeGreaterThan(0)
+  it('resolves every emitted ref to the exact current JSX source hash', () => {
+    const refs = [...new Set([...productionText.matchAll(REF)].map(match => match[1]))]
+    expect(refs.length).toBeGreaterThan(0)
+    const { matches, skipped } = resolveElementRefs(process.cwd(), refs)
+    expect(skipped).toBe(0)
+    for (const ref of refs) {
+      const sources = matches.get(ref)
+      expect(sources.length, `unresolved emitted element ref ${ref}`).toBeGreaterThan(0)
+      for (const source of sources) expect(elementRef(source)).toBe(ref)
     }
   })
 
-  it('ships zero source attributes, source paths or site fragments in production', () => {
-    for (const marker of MARKERS) expect((allText(productionChunks).match(marker) ?? []).length).toBe(0)
+  it('the shared transform emits readable development stamps and the same opaque refs', () => {
+    // Next dev is a server, not a production static-export variant. Exercise
+    // its actual pre-loader transform against real current application JSX.
+    const filename = join(process.cwd(), 'src/site/CockpitTopBand.jsx')
+    const source = readFileSync(filename, 'utf8')
+    const development = elementSourceStamp({ root: process.cwd(), source: true, ref: true }).transform(source, filename)
+    const production = elementSourceStamp({ root: process.cwd(), source: false, ref: true }).transform(source, filename)
+    expect(development).not.toBeNull()
+    expect(production).not.toBeNull()
+    const stamps = [...development.code.matchAll(/data-element-source="([^"]+)"/g)].map(match => match[1])
+    const refs = code => [...code.matchAll(/data-element-ref="([^"]+)"/g)].map(match => match[1])
+    expect(stamps.length).toBeGreaterThan(0)
+    expect(refs(development.code)).toEqual(refs(production.code))
+    expect(refs(production.code)).toEqual(stamps.map(elementRef))
+    expect(production.code).not.toContain('data-element-source=')
   })
 
-  it('ships opaque element refs in reachable production chunks', () => {
-    const marker = /["']data-element-ref["']\s*:\s*["']([^"'\\]*)["']/g
-    const values = [...allText(productionChunks).matchAll(marker)].map((match) => match[1])
-    expect(values.length).toBeGreaterThan(0)
-    for (const value of values) expect(value).toMatch(/^[0-9a-f]{12}$/)
-    const hits = chunksContaining(productionChunks, productionDir, marker)
-    expect(hits.length).toBeGreaterThan(0)
-    for (const hit of hits) expect(hit.referencedBy.length).toBeGreaterThan(0)
-  })
-
-  it('production refs equal the hashed staging source stamps', async () => {
-    const { elementRef } = await import('../../vite-plugins/elementSourceStamp.js')
-    const refMarker = /["']data-element-ref["']\s*:\s*["']([^"'\\]*)["']/g
-    const sourceMarker = /["']data-element-source["']\s*:\s*["']([^"'\\]*)["']/g
-    const productionRefs = new Set([...allText(productionChunks).matchAll(refMarker)].map((match) => match[1]))
-    const stagingRefs = new Set([...allText(stagingChunks).matchAll(refMarker)].map((match) => match[1]))
-    const stagingSourceValues = [...allText(stagingChunks).matchAll(sourceMarker)].map((match) => match[1])
-    expect(productionRefs.size).toBeGreaterThan(0)
-    expect(stagingSourceValues.length).toBeGreaterThan(0)
-    expect(productionRefs).toEqual(stagingRefs)
-    expect(stagingRefs).toEqual(new Set(stagingSourceValues.map(elementRef)))
-  })
-
-  it('ships no development JSX runtime markers in production', () => {
-    // Planner measured 1078 jsxDEV hits in the development App chunk, zero in production.
-    // fileName: had 1143 development hits but also names ordinary production app properties.
-    // esbuild emits no Babel _jsxFileName token; MARKERS above still checks source paths.
-    for (const marker of [/jsxDEV/g]) expect((allText(productionChunks).match(marker) ?? []).length).toBe(0)
-  })
-
-  it('J1 row9 development build retains the JSX development runtime marker', () => {
-    const developmentChunks = emittedJavaScript(buildWithMode('development', fenceRoot, { NODE_ENV: 'development' }))
-    for (const marker of [/jsxDEV/g]) expect((allText(developmentChunks).match(marker) ?? []).length).toBeGreaterThan(0)
-  }, 300_000)
-
-  it('keeps the app positive control in both builds', () => {
-    expect(allText(stagingChunks)).toContain('tc-rail-body')
-    expect(allText(productionChunks)).toContain('tc-rail-body')
+  it('keeps the application positive control in the inspected production output', () => {
+    expect(productionText).toContain('tc-rail-body')
   })
 })

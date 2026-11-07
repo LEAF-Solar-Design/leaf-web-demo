@@ -1,0 +1,1454 @@
+import React, { useState } from 'react'
+import { createHash, webcrypto } from 'node:crypto'
+import { Blob as NativeBlob } from 'node:buffer'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import ProjectPageEditor, { PagePreview } from './ProjectPageEditor.jsx'
+import { portfolioField } from './PortfolioEditor.jsx'
+import { cloneDocument, selectionIdentity } from './portfolioEdits.js'
+import { downloadProjectPageSource, loadProjectPage, saveProjectPage, submitProjectNativePreview, loadProjectNativePreview, downloadProjectNativePreviewScreenshot, proposeProjectPage } from './projectPageClient.js'
+import { listProjectPhotos, readProjectPhotoPreview } from '../projects/api.js'
+import { emptyPortfolio, importPortfolio, validatePortfolioDocument } from './portfolioDocument.js'
+import { registerEscapeOwner } from '../lib/useEscapeOwner.js'
+import ElementInspector from './ElementInspector.jsx'
+import CanvasToolbar from './CanvasToolbar.jsx'
+
+const auth = vi.hoisted(() => ({ logout: null, token: null, scope: 'account-a', org: 'org-a', actor: 'binding-a', unauthorized: vi.fn(), logouts: new Set(), tokens: new Set() }))
+vi.mock('../auth.js', () => ({
+  subscribeBeforeLogout: callback => { auth.logouts.add(callback); auth.logout = () => [...auth.logouts].forEach(fn => fn()); return () => auth.logouts.delete(callback) },
+  subscribeTokenStored: callback => { auth.tokens.add(callback); auth.token = () => [...auth.tokens].forEach(fn => fn()); return () => auth.tokens.delete(callback) },
+}))
+vi.mock('../auth/activeScope.js', async importOriginal => ({ ...await importOriginal(), readActiveScope: () => auth.scope }))
+vi.mock('../lib/composerDraft.js', () => ({ composerDraftAccountScope: () => auth.scope }))
+vi.mock('../api.js', () => ({
+  config: { apiBase: 'https://api.example.test' }, authHeaders: () => ({ Authorization: 'Bearer fixture' }),
+  getStoredOrgId: () => auth.org, noteUnauthorized: auth.unauthorized,
+}))
+vi.mock('../projects/api.js', () => ({ getStoredActorBindingId: () => auth.actor, listProjectPhotos: vi.fn(), readProjectPhotoPreview: vi.fn() }))
+vi.mock('./projectPageClient.js', async importOriginal => ({
+  ...await importOriginal(), loadProjectPage: vi.fn(), saveProjectPage: vi.fn(), downloadProjectPageSource: vi.fn(),
+  submitProjectNativePreview: vi.fn(), loadProjectNativePreview: vi.fn(), downloadProjectNativePreviewScreenshot: vi.fn(),
+  proposeProjectPage: vi.fn(),
+}))
+
+const PROJECT = '11111111-1111-4111-8111-111111111111'
+const OTHER = '22222222-2222-4222-8222-222222222222'
+const document = { label: 'A page', headline: 'Coming soon', description: 'A little news', status: 'Opening soon', theme: 'cream', alignment: 'center' }
+const page = (revision = 1, changes = {}) => ({ revision, digest: 'a'.repeat(64), document: { ...document, ...changes } })
+const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no }); return { promise, resolve, reject } }
+const button = name => screen.getByRole('button', { name })
+const disclose = name => fireEvent.click(screen.getByText(name, { selector: 'summary' }))
+const reveal = name => { if (!screen.getByText(name, { selector: 'summary' }).parentElement.open) disclose(name) }
+const setup = props => render(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" {...props} />)
+const openSaved = async () => { fireEvent.click(button('Open page')); await screen.findByDisplayValue('A page') }
+
+beforeEach(() => {
+  vi.clearAllMocks()
+  auth.scope = 'account-a'
+  auth.org = 'org-a'; auth.actor = 'binding-a'
+  auth.logouts.clear(); auth.tokens.clear()
+  listProjectPhotos.mockResolvedValue({ materials: [] })
+  readProjectPhotoPreview.mockResolvedValue(new Blob(['photo'], { type: 'image/jpeg' }))
+  loadProjectPage.mockResolvedValue(page())
+  saveProjectPage.mockImplementation(async (_id, document, revision) => ({ ...page(revision + 1), document }))
+  downloadProjectPageSource.mockResolvedValue(new Blob(['zip'], { type: 'application/zip' }))
+  submitProjectNativePreview.mockResolvedValue(nativeJob('queued'))
+  loadProjectNativePreview.mockResolvedValue(nativeJob('running'))
+  downloadProjectNativePreviewScreenshot.mockResolvedValue(new Blob(['png'], { type: 'image/png' }))
+  proposeProjectPage.mockResolvedValue(proposalResult())
+  vi.stubGlobal('fetch', vi.fn())
+  URL.createObjectURL = vi.fn(() => 'blob:page-source')
+  URL.revokeObjectURL = vi.fn()
+})
+
+const PHOTO = { material_id: '33333333-3333-4333-8333-333333333333', sha256: 'b'.repeat(64), preview_sha256: 'c'.repeat(64), name: 'Cake.jpg' }
+const PHOTO_TWO = { ...PHOTO, material_id: '44444444-4444-4444-8444-444444444444', sha256: 'd'.repeat(64), name: 'Bread.jpg' }
+const imageRef = row => ({ material_id: row.material_id, sha256: row.sha256, preview_sha256: row.preview_sha256, title: row.name, alt: row.name })
+const portfolioDraft = () => ({ ...emptyPortfolio(), categories: [{ slug: 'cakes', title: 'Cakes', description: '', hero: 0, images: [imageRef(PHOTO), imageRef(PHOTO_TWO)] }] })
+const nativeJob = (status, changes = {}) => ({ job_id: OTHER, status, revision: 7, document_sha256: 'a'.repeat(64), archive_sha256: 'b'.repeat(64),
+  ...(status === 'complete' ? { receipt: { kind: 'simulator', receipt_id: PROJECT, sha256: 'c'.repeat(64) }, evidence_basis: 'authenticated-worker-report' } : {}), ...changes })
+const openPortfolio = async () => {
+  loadProjectPage.mockResolvedValueOnce({ revision: 7, digest: 'a'.repeat(64), document: portfolioDraft() })
+  fireEvent.click(button('Open page'))
+  await screen.findByLabelText('Name')
+}
+const importFile = value => ({ name: 'portfolio.json', size: JSON.stringify(value).length, text: async () => JSON.stringify(value) })
+const importDraft = () => {
+  const value = portfolioDraft(); value.schema = 'leaf.portfolio.import.v1'
+  value.categories[0].images = [PHOTO, PHOTO_TWO].map(row => ({ source_sha256: row.sha256, title: row.name, alt: row.name }))
+  return value
+}
+
+const proposalResult = (changes = { headline: 'Selected baking work' }) => ({
+  source: { project_id: PROJECT, revision: 7, digest: 'a'.repeat(64) }, proposed_document: { ...portfolioDraft(), ...changes },
+  proposed_digest: 'd'.repeat(64), edits: Object.entries(changes).map(([id, value]) => ({ id, value })), model: 'fixture', usage: {},
+})
+const ask = () => {
+  fireEvent.change(screen.getByLabelText('What should change?'), { target: { value: 'Shorten the headline' } })
+  fireEvent.click(button('Generate proposal'))
+}
+
+const incoming = (result = proposalResult()) => ({ result, accountScope: 'account-a', activeScope: 'account-a',
+  isCurrent: () => true, consumed: vi.fn() })
+
+const assignmentDigest = value => createHash('sha256').update(JSON.stringify(value, (_, item) => item && typeof item === 'object' && !Array.isArray(item)
+  ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item)).digest('hex')
+const assignmentRequest = () => {
+  const document = portfolioDraft(), image = { ...imageRef({ ...PHOTO, material_id: OTHER }), title: 'Fresh bread', alt: 'Bread on a table' }
+  document.categories[0].images.push(image)
+  return { ...incoming({ schema: 'leaf.project-photo-assignment-proposal.v1', source: { ...proposalResult().source, digest: assignmentDigest(portfolioDraft()) },
+    proposed_document: document, proposed_digest: assignmentDigest(document), changes: [{ op: 'assign', material_id: OTHER,
+      material_name: 'Original bread.jpg', gallery_slug: 'cakes', gallery_title: 'Cakes', index: 2, title: image.title, alt: image.alt }] }),
+    provenance: { sessionId: 'session-a', turnId: 'turn-a', seq: 2, orgId: 'org-a', actorBindingId: 'binding-a' } }
+}
+const openAssignmentPortfolio = async () => {
+  loadProjectPage.mockResolvedValueOnce({ revision: 7, digest: assignmentDigest(portfolioDraft()), document: portfolioDraft() })
+  fireEvent.click(button('Open page'))
+  await screen.findByLabelText('Name')
+}
+
+describe('private photo assignment review', () => {
+  beforeEach(() => { vi.stubGlobal('crypto', webcrypto) })
+
+  it('reviews without mutation, discards, applies through history and undoes the complete append', async () => {
+    const onPreview = vi.fn(), onSession = vi.fn(), view = setup({ onPreview, onSession })
+    await openAssignmentPortfolio()
+    const request = assignmentRequest()
+    view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" onPreview={onPreview} onSession={onSession} incomingProposal={request} />)
+    const review = await screen.findByRole('region', { name: 'Review proposed photo assignments' })
+    expect(within(review).getByText('Original bread.jpg')).toBeTruthy()
+    expect(within(review).getByText(OTHER)).toBeTruthy()
+    expect(onPreview.mock.lastCall[0].document).toEqual(portfolioDraft())
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    fireEvent.click(button('Discard proposal'))
+    expect(onPreview.mock.lastCall[0].document).toEqual(portfolioDraft())
+    view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" onPreview={onPreview} onSession={onSession} incomingProposal={assignmentRequest()} />)
+    await screen.findByRole('region', { name: 'Review proposed photo assignments' })
+    fireEvent.click(button('Use proposed assignments'))
+    expect(onPreview.mock.lastCall[0].document).toEqual(request.result.proposed_document)
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    act(() => onSession.mock.lastCall[0].session.undo())
+    expect(onPreview.mock.lastCall[0].document).toEqual(portfolioDraft())
+    expect(button('Save page')).toBeDisabled()
+  })
+
+  it.each(['org', 'actor', 'current'])('rechecks %s at Use without changing the draft', async mode => {
+    let current = true
+    const onPreview = vi.fn(), view = setup({ onPreview })
+    await openAssignmentPortfolio()
+    const request = { ...assignmentRequest(), isCurrent: () => current }
+    view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" onPreview={onPreview} incomingProposal={request} />)
+    await screen.findByRole('region', { name: 'Review proposed photo assignments' })
+    if (mode === 'current') current = false
+    else auth[mode] = 'changed'
+    fireEvent.click(button('Use proposed assignments'))
+    expect(onPreview.mock.lastCall[0].document).toEqual(portfolioDraft())
+    expect(saveProjectPage).not.toHaveBeenCalled()
+  })
+
+  it.each(['draft', 'source', 'org', 'actor', 'scope', 'project', 'account', 'native busy', 'logout', 'unmount', 'new proposal'])('discards a late digest after %s changes', async mode => {
+    const hash = deferred(), digest = vi.fn(() => hash.promise), onPreview = vi.fn(), view = setup({ onPreview })
+    await openAssignmentPortfolio()
+    vi.stubGlobal('crypto', { subtle: { digest }, randomUUID: () => OTHER })
+    const request = assignmentRequest()
+    view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" onPreview={onPreview} incomingProposal={request} />)
+    await waitFor(() => expect(digest).toHaveBeenCalledTimes(1))
+    if (mode === 'draft') fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Keep my edit' } })
+    if (mode === 'source') {
+      loadProjectPage.mockResolvedValueOnce({ revision: 8, digest: 'e'.repeat(64), document: { ...portfolioDraft(), name: 'New source' } })
+      fireEvent.click(button('Reload saved page'))
+      await screen.findByDisplayValue('New source')
+    }
+    if (mode === 'org' || mode === 'actor') auth[mode] = 'changed'
+    if (mode === 'project' || mode === 'account') view.rerender(<ProjectPageEditor projectId={mode === 'project' ? OTHER : PROJECT} accountScope={mode === 'account' ? 'other' : 'account-a'} onPreview={onPreview} />)
+    if (mode === 'native busy') fireEvent.click(button('Build iOS preview'))
+    if (mode === 'scope') act(() => { auth.scope = 'other'; window.dispatchEvent(new Event('leaf:active-scope')) })
+    if (mode === 'logout') act(() => auth.logout())
+    if (mode === 'unmount') view.unmount()
+    if (mode === 'new proposal') view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" onPreview={onPreview} incomingProposal={incoming()} />)
+    await act(async () => hash.resolve(Uint8Array.from(Buffer.from(request.result.proposed_digest, 'hex')).buffer))
+    expect(screen.queryByRole('region', { name: 'Review proposed photo assignments' })).toBeNull()
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    if (mode === 'draft') expect(screen.getByLabelText('Name')).toHaveValue('Keep my edit')
+    if (mode === 'source') expect(screen.getByLabelText('Name')).toHaveValue('New source')
+  })
+
+  it('uses the real 409 response boundary, retains the draft and reloads the durable source', async () => {
+    const client = await vi.importActual('./projectPageClient.js'), onPreview = vi.fn(), view = setup({ onPreview })
+    await openAssignmentPortfolio()
+    const request = assignmentRequest()
+    view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" onPreview={onPreview} incomingProposal={request} />)
+    await screen.findByRole('region', { name: 'Review proposed photo assignments' })
+    fireEvent.click(button('Use proposed assignments'))
+    saveProjectPage.mockImplementationOnce(client.saveProjectPage)
+    fetch.mockResolvedValueOnce({ ok: false, status: 409 })
+    fireEvent.click(button('Save page'))
+    await screen.findByRole('alert')
+    expect(JSON.parse(fetch.mock.lastCall[1].body)).toEqual({ expected_revision: 7, document: request.result.proposed_document })
+    expect(onPreview.mock.lastCall[0].document).toEqual(request.result.proposed_document)
+    loadProjectPage.mockResolvedValueOnce({ revision: 7, digest: 'a'.repeat(64), document: portfolioDraft() })
+    fireEvent.click(button('Reload saved page'))
+    await waitFor(() => expect(onPreview.mock.lastCall[0].document).toEqual(portfolioDraft()))
+  })
+})
+
+
+describe('environment controls share the editor owner', () => {
+  function Studio() {
+    const [editor, setEditor] = useState(null), [style, setStyle] = useState('environment'), [selected, select] = useState(null)
+    return <>
+      <button onClick={() => setStyle(style === 'environment' ? 'sidebar' : 'environment')}>Switch editing style</button>
+      <div hidden={style !== 'sidebar'}><ProjectPageEditor projectId={PROJECT} accountScope="account-a" onSession={setEditor} selectedElement={selected} onSelectElement={select} /></div>
+      {editor && style === 'environment' && <section aria-label="Environment">
+        <button onClick={editor.session.open}>Open saved page</button>
+        <CanvasToolbar editor={editor} editing onEditing={() => {}} onOutline={() => {}} onSettings={() => {}} />
+        {editor.document && <><PagePreview document={editor.document} projectId={PROJECT} onInlineChange={editor.session.change} onSelectElement={select} selectedElement={selected} />
+          <ElementInspector document={editor.document} selected={selected} onSelect={select} onChange={editor.session.change} /></>}
+      </section>}
+    </>
+  }
+
+  it('edits theme/alignment and inline text, switches styles without loading, then saves and undoes the exact draft', async () => {
+    render(<Studio />)
+    fireEvent.click(screen.getByRole('button', { name: 'Open saved page' }))
+    let env = within(await screen.findByRole('region', { name: 'Environment' }))
+    await env.findByLabelText('Page theme')
+    fireEvent.change(env.getByLabelText('Page theme'), { target: { value: 'dark' } })
+    fireEvent.change(env.getByLabelText('Page alignment'), { target: { value: 'left' } })
+    fireEvent.change(env.getByLabelText('headline'), { target: { value: 'Changed in place' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Switch editing style' }))
+    expect(screen.getByLabelText('Headline', { selector: 'input' }).value).toBe('Changed in place')
+    expect(screen.getByLabelText('Theme').value).toBe('dark')
+    expect(screen.getByLabelText('Alignment').value).toBe('left')
+    fireEvent.click(screen.getByRole('button', { name: 'Switch editing style' }))
+    env = within(screen.getByRole('region', { name: 'Environment' }))
+    expect(env.getByLabelText('headline').value).toBe('Changed in place')
+    fireEvent.change(env.getByLabelText('headline'), { target: { value: 'Immediate save' } })
+    fireEvent.click(env.getByRole('button', { name: 'Save page' }))
+    await waitFor(() => expect(saveProjectPage).toHaveBeenCalledTimes(1))
+    expect(saveProjectPage.mock.lastCall[1]).toMatchObject({ headline: 'Immediate save', theme: 'dark', alignment: 'left' })
+    expect(saveProjectPage.mock.lastCall[2]).toBe(1)
+    await waitFor(() => expect(env.getByRole('button', { name: 'Undo' }).disabled).toBe(false))
+    fireEvent.click(env.getByRole('button', { name: 'Undo' }))
+    expect(env.getByLabelText('headline').value).toBe(document.headline)
+    expect(loadProjectPage).toHaveBeenCalledTimes(1)
+    expect(submitProjectNativePreview).not.toHaveBeenCalled()
+  })
+
+  it('traps a narrow inspector, closes on Escape and restores its trigger', () => {
+    vi.stubGlobal('matchMedia', () => ({ matches: true }))
+    const rects = vi.spyOn(HTMLElement.prototype, 'getClientRects').mockReturnValue([{}])
+    function Sheet() {
+      const [open, setOpen] = useState(false)
+      return <><button onClick={() => setOpen(true)}>Properties trigger</button>{open && <ElementInspector document={document} onSelect={() => {}} onChange={() => {}} onClose={() => setOpen(false)} />}</>
+    }
+    try {
+      render(<Sheet />)
+      const trigger = screen.getByRole('button', { name: 'Properties trigger' })
+      trigger.focus(); fireEvent.click(trigger)
+      const first = screen.getByRole('button', { name: 'Close properties' })
+      expect(window.document.activeElement).toBe(first)
+      fireEvent.keyDown(first, { key: 'Tab', shiftKey: true })
+      expect(window.document.activeElement).toBe(screen.getByRole('button', { name: 'Reset all design' }))
+      fireEvent.keyDown(window.document.activeElement, { key: 'Tab' })
+      expect(window.document.activeElement).toBe(first)
+      fireEvent.keyDown(window, { key: 'Escape' })
+      expect(screen.queryByRole('button', { name: 'Close properties' })).toBeNull()
+      expect(window.document.activeElement).toBe(trigger)
+    } finally { rects.mockRestore(); vi.unstubAllGlobals() }
+  })
+})
+
+describe('shared editor session history', () => {
+  it('publishes before open, saves an immediate edit, and keeps history across save', async () => {
+    let current
+    setup({ onSession: value => { current = value } })
+    expect(current.document).toBeNull()
+    const session = current.session
+    await act(async () => { await session.open() })
+    expect(loadProjectPage).toHaveBeenCalledTimes(1)
+    expect(current.session).toBe(session)
+    await act(async () => {
+      session.change({ ...current.document, headline: 'Immediate edit' }, { coalesceKey: 'headline' })
+      await session.save()
+    })
+    expect(saveProjectPage.mock.lastCall[1].headline).toBe('Immediate edit')
+    expect(saveProjectPage.mock.lastCall[2]).toBe(1)
+    expect(current.state.dirty).toBe(false)
+    act(() => session.undo())
+    expect(current.document.headline).toBe(document.headline)
+    expect(current.state.dirty).toBe(true)
+    act(() => session.redo())
+    expect(current.document.headline).toBe('Immediate edit')
+    expect(current.state.dirty).toBe(false)
+  })
+
+  it('coalesces one field, clears redo on a new edit, makes discard undoable and fences stale actions', async () => {
+    let current
+    setup({ onSession: value => { current = value } })
+    const session = current.session
+    await act(async () => { await session.open() })
+    act(() => session.change({ ...current.document, headline: 'One' }, { coalesceKey: 'headline' }))
+    act(() => session.change({ ...current.document, headline: 'Two' }, { coalesceKey: 'headline' }))
+    act(() => session.undo())
+    expect(current.document.headline).toBe(document.headline)
+    act(() => session.change({ ...current.document, description: 'Different field' }))
+    expect(current.state.canRedo).toBe(false)
+    act(() => session.discard())
+    expect(current.state.dirty).toBe(false)
+    act(() => session.undo())
+    expect(current.document.description).toBe('Different field')
+    act(() => auth.logout())
+    act(() => { session.change(document); session.undo(); session.redo(); session.save(); session.open() })
+    expect(current.document).toBeNull()
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    expect(loadProjectPage).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('conversation proposal intake', () => {
+  it('loads an unopened saved portfolio, then reviews and uses only a private draft', async () => {
+    const request = incoming(), onPreview = vi.fn()
+    loadProjectPage.mockResolvedValueOnce({ revision: 7, digest: 'a'.repeat(64), document: portfolioDraft() })
+    setup({ incomingProposal: request, onPreview })
+    await screen.findByRole('region', { name: 'Review proposed text' })
+    expect(loadProjectPage).toHaveBeenCalledTimes(1)
+    expect(request.consumed).toHaveBeenCalledExactlyOnceWith(true)
+    expect(onPreview).toHaveBeenCalledTimes(1)
+    expect(screen.getByLabelText('Headline').value).toBe('Selected work')
+    fireEvent.click(button('Use proposed changes'))
+    expect(screen.getByLabelText('Headline').value).toBe('Selected baking work')
+    expect(onPreview.mock.lastCall[0].document).toEqual(proposalResult().proposed_document)
+    expect(screen.getByText('Unsaved changes')).toBeTruthy()
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    expect(submitProjectNativePreview).not.toHaveBeenCalled()
+    expect(proposeProjectPage).not.toHaveBeenCalled()
+  })
+
+  it('discards incoming review and preserves the saved original and preview', async () => {
+    const onPreview = vi.fn(), view = setup({ onPreview })
+    await openPortfolio()
+    view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" onPreview={onPreview} incomingProposal={incoming()} />)
+    await screen.findByRole('region', { name: 'Review proposed text' })
+    fireEvent.click(button('Discard proposal'))
+    expect(screen.getByLabelText('Headline').value).toBe('Selected work')
+    expect(onPreview).toHaveBeenCalledTimes(1)
+    expect(button('Save page').disabled).toBe(true)
+    expect(saveProjectPage).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['stale revision', value => { value.source.revision++ }],
+    ['stale digest', value => { value.source.digest = 'e'.repeat(64) }],
+    ['foreign project', value => { value.source.project_id = OTHER }],
+    ['photo identity', value => { value.proposed_document.categories[0].images[0].sha256 = 'e'.repeat(64) }],
+    ['photo order', value => { value.proposed_document.categories[0].images.reverse() }],
+    ['navigation', value => { value.proposed_document.categories[0].slug = 'other' }],
+    ['layout', value => { value.proposed_document.galleryLayout = 'single' }],
+    ['outer wrapper', value => { value.extra = true }],
+    ['model control character', value => { value.model = 'bad\u0000model' }],
+    ['duplicate edit', value => { value.edits.push(value.edits[0]) }],
+    ['usage key', value => { value.usage.untrusted = 1 }],
+    ['UTF-8 byte limit', value => {
+      value.proposed_document.about = '😀'.repeat(8000)
+      value.edits = Array.from({ length: 32 }, (_, index) => ({ id: String(index), value: '😀'.repeat(8000) }))
+    }],
+  ])('rejects %s without replacing a good draft or review', async (_label, corrupt) => {
+    const view = setup()
+    await openPortfolio(); ask()
+    await screen.findByRole('region', { name: 'Review proposed text' })
+    // Drop the good review first so this rejection exercises the validator.
+    fireEvent.click(button('Discard proposal'))
+    const result = proposalResult(); corrupt(result)
+    const request = incoming(result)
+    view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" incomingProposal={request} />)
+    expect(request.consumed).toHaveBeenCalledExactlyOnceWith(false)
+    expect(screen.queryByRole('region', { name: 'Review proposed text' })).toBeNull()
+    expect(screen.getByLabelText('Headline').value).toBe('Selected work')
+    expect(saveProjectPage).not.toHaveBeenCalled()
+  })
+
+  it('keeps an existing review when another incoming proposal arrives', async () => {
+    const view = setup()
+    await openPortfolio(); ask()
+    await screen.findByRole('region', { name: 'Review proposed text' })
+    const request = incoming(proposalResult({ headline: 'Replacement' }))
+    view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" incomingProposal={request} />)
+    expect(request.consumed).toHaveBeenCalledWith(false)
+    expect(screen.getByText('Selected baking work', { exact: true })).toBeTruthy()
+  })
+
+  it.each(['dirty', 'invalid', 'busy', 'native', 'conflict', 'scope'])('refuses intake while %s', async mode => {
+    const view = setup()
+    await openPortfolio()
+    if (mode === 'dirty' || mode === 'conflict') fireEvent.change(screen.getByLabelText('Headline'), { target: { value: 'My draft' } })
+    if (mode === 'invalid') fireEvent.change(screen.getByLabelText('Name'), { target: { value: '' } })
+    if (mode === 'busy') {
+      proposeProjectPage.mockReturnValueOnce(deferred().promise)
+      ask()
+    }
+    if (mode === 'native') {
+      submitProjectNativePreview.mockReturnValueOnce(deferred().promise)
+      fireEvent.click(button('Build iOS preview'))
+    }
+    if (mode === 'conflict') {
+      saveProjectPage.mockRejectedValueOnce(Object.assign(new Error('Conflict'), { status: 409 }))
+      fireEvent.click(button('Save page')); await screen.findByRole('alert')
+    }
+    const request = incoming()
+    if (mode === 'scope') request.activeScope = 'other-org'
+    const original = screen.getByLabelText('Headline').value
+    view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" incomingProposal={request} />)
+    expect(request.consumed).toHaveBeenCalledWith(false)
+    expect(screen.getByLabelText('Headline').value).toBe(original)
+    expect(screen.queryByRole('region', { name: 'Review proposed text' })).toBeNull()
+  })
+
+  it('reports zero changes without a review or saving', async () => {
+    const view = setup(); await openPortfolio()
+    view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" incomingProposal={incoming(proposalResult({}))} />)
+    expect(screen.getByText('No text changes proposed.')).toBeTruthy()
+    expect(screen.queryByRole('region', { name: 'Review proposed text' })).toBeNull()
+    expect(saveProjectPage).not.toHaveBeenCalled()
+  })
+
+  it('rejects a request whose stream ended while the initial load was pending', async () => {
+    const load = deferred(), request = incoming()
+    let current = true
+    request.isCurrent = () => current
+    loadProjectPage.mockReturnValueOnce(load.promise)
+    setup({ incomingProposal: request })
+    current = false
+    await act(async () => load.resolve({ revision: 7, digest: 'a'.repeat(64), document: portfolioDraft() }))
+    expect(request.consumed).toHaveBeenCalledWith(false)
+    expect(screen.queryByRole('region', { name: 'Review proposed text' })).toBeNull()
+  })
+})
+
+describe('portfolio text proposal review', () => {
+  it('keeps generation separate from preview and save, then uses the proposal as an unsaved draft', async () => {
+    const previews = vi.fn()
+    function ActualPreview() {
+      const [value, setValue] = React.useState(null)
+      return <><ProjectPageEditor projectId={PROJECT} accountScope="account-a" onPreview={next => { previews(next); setValue(next.document) }} />
+        <section aria-label="Actual page preview"><PagePreview document={value} projectId={PROJECT} /></section></>
+    }
+    render(<ActualPreview />)
+    await openPortfolio()
+    const preview = within(screen.getByRole('region', { name: 'Actual page preview' }))
+    expect(preview.getByRole('heading', { name: 'Selected work', exact: true })).toBeTruthy()
+    const calls = previews.mock.calls.length
+    ask()
+    const review = await screen.findByRole('region', { name: 'Review proposed text' })
+    expect(within(review).getByRole('heading', { name: 'Headline', exact: true })).toBeTruthy()
+    expect(within(review).getByText('Selected work', { exact: true })).toBeTruthy()
+    expect(within(review).getByText('Selected baking work', { exact: true })).toBeTruthy()
+    expect(previews).toHaveBeenCalledTimes(calls)
+    expect(preview.getByRole('heading', { name: 'Selected work', exact: true })).toBeTruthy()
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    expect(proposeProjectPage).toHaveBeenCalledExactlyOnceWith(PROJECT,
+      { revision: 7, digest: 'a'.repeat(64), document: portfolioDraft() }, 'Shorten the headline', { signal: expect.any(AbortSignal) })
+    fireEvent.click(button('Use proposed changes'))
+    expect(screen.queryByRole('region', { name: 'Review proposed text' })).toBeNull()
+    expect(preview.getByRole('heading', { name: 'Selected baking work', exact: true })).toBeTruthy()
+    expect(previews).toHaveBeenCalledTimes(calls + 1)
+    expect(screen.getByLabelText('Headline').value).toBe('Selected baking work')
+    expect(screen.getByText('Review the draft, then Save page.')).toBeTruthy()
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    fireEvent.click(button('Save page'))
+    await waitFor(() => expect(saveProjectPage).toHaveBeenCalledTimes(1))
+    expect(saveProjectPage.mock.lastCall.slice(0, 3)).toEqual([PROJECT, proposalResult().proposed_document, 7])
+    expect(saveProjectPage.mock.lastCall[1].categories).toEqual(portfolioDraft().categories)
+  })
+
+  it('discards without changing the draft or preview, and reports an empty proposal', async () => {
+    const onPreview = vi.fn(); setup({ onPreview }); await openPortfolio()
+    ask(); await screen.findByRole('region', { name: 'Review proposed text' })
+    const calls = onPreview.mock.calls.length
+    fireEvent.click(button('Discard proposal'))
+    expect(screen.queryByRole('region', { name: 'Review proposed text' })).toBeNull()
+    expect(screen.getByLabelText('Headline').value).toBe('Selected work')
+    expect(onPreview).toHaveBeenCalledTimes(calls)
+    proposeProjectPage.mockResolvedValueOnce(proposalResult({}))
+    fireEvent.click(button('Generate proposal'))
+    await screen.findByText('No text changes proposed.')
+    expect(screen.queryByRole('button', { name: 'Use proposed changes' })).toBeNull()
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    expect(onPreview).toHaveBeenCalledTimes(calls)
+  })
+
+  it('guards unsaved, dirty and invalid portfolios and invalidates review on manual edit', async () => {
+    setup(); fireEvent.click(button('Create a portfolio'))
+    fireEvent.change(screen.getByLabelText('What should change?'), { target: { value: 'Shorten text' } })
+    expect(button('Generate proposal').disabled).toBe(true)
+    expect(screen.getByText('Save changes first to request a text proposal.')).toBeTruthy()
+    loadProjectPage.mockResolvedValueOnce({ revision: 7, digest: 'a'.repeat(64), document: portfolioDraft() })
+    fireEvent.click(button('Reload saved page'))
+    await waitFor(() => expect(screen.getByLabelText('Name').value).toBe('Your portfolio'))
+    await waitFor(() => expect(button('Reload saved page').disabled).toBe(false))
+    ask(); await screen.findByRole('region', { name: 'Review proposed text' })
+    fireEvent.change(screen.getByLabelText('Headline'), { target: { value: 'My own draft' } })
+    expect(screen.queryByRole('button', { name: 'Use proposed changes' })).toBeNull()
+    expect(button('Generate proposal').disabled).toBe(true)
+    fireEvent.click(button('Generate proposal'))
+    expect(proposeProjectPage).toHaveBeenCalledTimes(1)
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: '' } })
+    expect(button('Generate proposal').disabled).toBe(true)
+    expect(saveProjectPage).not.toHaveBeenCalled()
+  })
+
+  it('cancels its own operation, clears busy and ignores the late response after another request', async () => {
+    const pending = deferred(), next = deferred(), onPreview = vi.fn()
+    proposeProjectPage.mockReturnValueOnce(pending.promise).mockReturnValueOnce(next.promise)
+    setup({ onPreview }); await openPortfolio(); ask()
+    expect(button('Generating proposal…').disabled).toBe(true)
+    fireEvent.click(button('Generating proposal…'))
+    expect(proposeProjectPage).toHaveBeenCalledTimes(1)
+    const signal = proposeProjectPage.mock.lastCall[3].signal
+    fireEvent.click(button('Cancel generation'))
+    expect(signal.aborted).toBe(true)
+    expect(button('Generate proposal').disabled).toBe(false)
+    expect(screen.getByLabelText('What should change?').value).toBe('Shorten the headline')
+    fireEvent.click(button('Generate proposal'))
+    await act(async () => { pending.resolve(proposalResult()); await pending.promise })
+    expect(screen.queryByRole('region', { name: 'Review proposed text' })).toBeNull()
+    expect(button('Generating proposal…').disabled).toBe(true)
+    await act(async () => { next.resolve(proposalResult({ headline: 'New request result' })); await next.promise })
+    expect(screen.getByRole('region', { name: 'Review proposed text' }).textContent).toContain('New request result')
+    expect(onPreview).toHaveBeenCalledTimes(1)
+    expect(saveProjectPage).not.toHaveBeenCalled()
+  })
+
+  it.each(['logout', 'project', 'account', 'token', 'unmount'])('ignores pending proposals after %s', async mode => {
+    const pending = deferred(), onPreview = vi.fn()
+    proposeProjectPage.mockReturnValueOnce(pending.promise)
+    const view = setup({ onPreview }); await openPortfolio(); ask()
+    const signal = proposeProjectPage.mock.lastCall[3].signal
+    if (mode === 'logout') act(() => auth.logout())
+    if (mode === 'project') view.rerender(<ProjectPageEditor projectId={OTHER} accountScope="account-a" onPreview={onPreview} />)
+    if (mode === 'account') view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-b" onPreview={onPreview} />)
+    if (mode === 'token') act(() => { auth.scope = 'account-b'; auth.token() })
+    if (mode === 'unmount') view.unmount()
+    expect(signal.aborted).toBe(true)
+    await act(async () => { pending.resolve(proposalResult()); await pending.promise })
+    expect(screen.queryByRole('region', { name: 'Review proposed text' })).toBeNull()
+    expect(onPreview).toHaveBeenCalledTimes(1)
+    expect(saveProjectPage).not.toHaveBeenCalled()
+  })
+
+  it('clears a review on reload and import, preserving a replacement draft', async () => {
+    setup(); await openPortfolio(); ask(); await screen.findByRole('region', { name: 'Review proposed text' })
+    loadProjectPage.mockResolvedValueOnce({ revision: 8, digest: 'e'.repeat(64), document: { ...portfolioDraft(), headline: 'Saved elsewhere' } })
+    fireEvent.click(button('Reload saved page'))
+    await screen.findByDisplayValue('Saved elsewhere')
+    expect(screen.queryByRole('region', { name: 'Review proposed text' })).toBeNull()
+    ask(); await screen.findByRole('region', { name: 'Review proposed text' })
+    listProjectPhotos.mockResolvedValueOnce({ materials: [PHOTO, PHOTO_TWO] })
+    fireEvent.change(screen.getByLabelText('Import portfolio content'), { target: { files: [importFile(importDraft())] } })
+    await screen.findByText('Portfolio imported as an unsaved draft. Review it, then Save page.')
+    expect(screen.queryByRole('region', { name: 'Review proposed text' })).toBeNull()
+    expect(screen.getByLabelText('Headline').value).toBe('Selected work')
+    expect(saveProjectPage).not.toHaveBeenCalled()
+  })
+
+  it.each([500, 409])('preserves request, draft and preview on generation failure %s', async status => {
+    const onPreview = vi.fn()
+    proposeProjectPage.mockRejectedValueOnce(Object.assign(new Error('Proposal failed safely.'), { status }))
+    setup({ onPreview }); await openPortfolio(); ask()
+    await screen.findByRole('alert')
+    expect(screen.getByLabelText('Headline').value).toBe('Selected work')
+    expect(screen.getByLabelText('What should change?').value).toBe('Shorten the headline')
+    expect(onPreview).toHaveBeenCalledTimes(1)
+    expect(button('Reload saved page').disabled).toBe(false)
+    expect(button('Generate proposal').disabled).toBe(status === 409)
+    expect(saveProjectPage).not.toHaveBeenCalled()
+  })
+
+  it('preserves the explicitly accepted draft and normal reload recovery after a save conflict', async () => {
+    const onPreview = vi.fn()
+    saveProjectPage.mockRejectedValueOnce(Object.assign(new Error('The saved page changed elsewhere. Your draft is still here. Reload the saved page to continue.'), { status: 409 }))
+    setup({ onPreview }); await openPortfolio(); ask(); await screen.findByRole('region', { name: 'Review proposed text' })
+    fireEvent.click(button('Use proposed changes')); fireEvent.click(button('Save page'))
+    await screen.findByRole('alert')
+    expect(screen.getByLabelText('Headline').value).toBe('Selected baking work')
+    expect(onPreview.mock.lastCall[0].document.headline).toBe('Selected baking work')
+    expect(button('Save page').disabled).toBe(true)
+    expect(button('Reload saved page').disabled).toBe(false)
+    expect(saveProjectPage).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('portfolio project document', () => {
+  it.each(['callback', 'document'])('preserves manual portfolio navigation after a %s rerender with the same selection', mode => {
+    const original = portfolioDraft()
+    const headline = `${selectionIdentity(original)}:textStyles.headline`
+    const caption = `${selectionIdentity(original.categories[0].images[1])}:captionStyle`
+    const select = vi.fn()
+    const view = render(<PagePreview document={original} projectId={PROJECT} selectedElement={headline} onSelectField={select} />)
+    fireEvent.click(button('Cakes'))
+    expect(button('Edit Cakes caption for Bread.jpg')).toBeTruthy()
+    const document = mode === 'document' ? cloneDocument(original) : original
+    view.rerender(<PagePreview document={document} projectId={PROJECT} selectedElement={headline} onSelectField={() => {}} />)
+    expect(button('Edit Cakes caption for Bread.jpg')).toBeTruthy()
+    view.rerender(<PagePreview document={document} projectId={PROJECT} selectedElement={caption} onSelectField={select} />)
+    expect(button('Edit Cakes caption for Bread.jpg')).toBeTruthy()
+    view.rerender(<PagePreview document={document} projectId={PROJECT} selectedElement={headline} onSelectField={select} />)
+    expect(button('Edit headline')).toBeTruthy()
+    fireEvent.click(button('Cakes'))
+    view.rerender(<PagePreview document={document} projectId={PROJECT} selectedElement={headline} />)
+    view.rerender(<PagePreview document={document} projectId={PROJECT} selectedElement={headline} onSelectField={select} />)
+    expect(button('Edit headline')).toBeTruthy()
+  })
+
+  it('wires separate portfolio edit controls through PagePreview without nesting navigation or View actions', () => {
+    const original = portfolioDraft(), select = vi.fn()
+    original.resume = [{ heading: 'Experience', entries: [{ title: 'Baker', subtitle: '', dates: '', description: '' }] }]
+    const view = render(<PagePreview document={original} projectId={PROJECT} onSelectField={select} />)
+    fireEvent.click(button('Edit headline'))
+    expect(select).toHaveBeenLastCalledWith(portfolioField(original, { field: 'headline' }))
+    fireEvent.click(button('Edit Cakes gallery title'))
+    expect(select).toHaveBeenLastCalledWith(portfolioField(original, { field: 'gallery.title', gallery: 'cakes' }))
+    expect(view.container.querySelector('button button')).toBeNull()
+    fireEvent.click(button('Cakes'))
+    expect(select).toHaveBeenCalledTimes(2)
+    fireEvent.click(button('Edit Cakes caption for Cake.jpg'))
+    expect(select).toHaveBeenLastCalledWith(portfolioField(original, { field: 'caption', gallery: 'cakes', material: PHOTO.material_id }))
+    fireEvent.click(button('View Cake.jpg'))
+    expect(screen.getByRole('dialog')).toBeTruthy()
+    expect(select).toHaveBeenCalledTimes(3)
+    fireEvent.click(button('Close image'))
+    fireEvent.click(button('About / Contact'))
+    fireEvent.click(button('Edit About'))
+    expect(select).toHaveBeenLastCalledWith(portfolioField(original, { field: 'about' }))
+    fireEvent.click(button('Resume'))
+    fireEvent.click(button('Edit resume section 1 entry 1 title'))
+    expect(select.mock.lastCall[0]).toEqual({ field: 'resume.title', section: expect.any(String), entry: expect.any(String), document: expect.any(String) })
+    view.rerender(<PagePreview document={original} projectId={PROJECT} />)
+    expect(screen.queryAllByRole('button', { name: /^Edit / })).toHaveLength(0)
+    fireEvent.click(button('Cakes'))
+    fireEvent.click(button('View Cake.jpg'))
+    expect(screen.getByRole('dialog')).toBeTruthy()
+  })
+
+  it('reveals and focuses only selected fields, repeats requests, and saves only explicit edits at the saved revision', async () => {
+    const original = portfolioDraft(), bytes = JSON.stringify(original), onPreview = vi.fn()
+    loadProjectPage.mockResolvedValueOnce({ revision: 7, digest: 'a'.repeat(64), document: original })
+    const view = setup({ onPreview })
+    fireEvent.click(button('Open page'))
+    await screen.findByLabelText('Name')
+    let request = 0
+    const select = descriptor => view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" onPreview={onPreview} selectedField={{ field: portfolioField(original, descriptor), request: ++request }} />)
+    select({ field: 'headline' })
+    expect(window.document.activeElement).toBe(screen.getByLabelText('Headline'))
+    expect(view.container.querySelectorAll('details[open]')).toHaveLength(0)
+    select({ field: 'caption', gallery: 'cakes', material: PHOTO_TWO.material_id })
+    expect(window.document.activeElement).toBe(screen.getByLabelText('Caption 2'))
+    expect(view.container.querySelectorAll('details[open]')).toHaveLength(2)
+    expect(screen.getByLabelText('Caption 1').closest('details').open).toBe(false)
+    disclose('Photo 2: Bread.jpg')
+    disclose('Cakes · 2 photos')
+    screen.getByLabelText('Headline').focus()
+    select({ field: 'caption', gallery: 'cakes', material: PHOTO_TWO.material_id })
+    expect(window.document.activeElement).toBe(screen.getByLabelText('Caption 2'))
+    expect(view.container.querySelectorAll('details[open]')).toHaveLength(2)
+    select({ field: 'about' })
+    expect(window.document.activeElement).toBe(screen.getByLabelText('About'))
+    expect(screen.getByLabelText('About').closest('details').open).toBe(true)
+    expect(JSON.stringify(original)).toBe(bytes)
+    expect(onPreview).toHaveBeenCalledTimes(1)
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    expect(submitProjectNativePreview).not.toHaveBeenCalled()
+    expect(listProjectPhotos).not.toHaveBeenCalled()
+    expect(readProjectPhotoPreview).not.toHaveBeenCalled()
+    expect(button('Save page').disabled).toBe(true)
+    fireEvent.change(screen.getByLabelText('Headline'), { target: { value: 'New headline' } })
+    fireEvent.change(screen.getByLabelText('Caption 2'), { target: { value: 'New caption' } })
+    expect(onPreview.mock.lastCall[0].document.headline).toBe('New headline')
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    fireEvent.click(button('Save page'))
+    await screen.findByText('Saved')
+    const expected = JSON.parse(bytes)
+    expected.headline = 'New headline'; expected.categories[0].images[1].title = 'New caption'
+    expect(saveProjectPage).toHaveBeenCalledTimes(1)
+    expect(saveProjectPage).toHaveBeenCalledWith(PROJECT, expected, 7, { signal: expect.any(AbortSignal) })
+  })
+
+  it('tracks captions by material across reorder and ignores malformed, removed and stale scoped selections', async () => {
+    const onPreview = vi.fn(), view = setup({ onPreview })
+    await openPortfolio()
+    let request = 0
+    const select = field => view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" selectedField={{ field, request: ++request }} />)
+    const original = onPreview.mock.lastCall[0].document
+    const caption = portfolioField(original, { field: 'caption', gallery: 'cakes', material: PHOTO_TWO.material_id })
+    select(caption)
+    fireEvent.click(button('Move image 2 up'))
+    select(caption)
+    expect(window.document.activeElement).toBe(screen.getByLabelText('Caption 1'))
+    expect(screen.getByLabelText('Caption 1').value).toBe('Bread.jpg')
+    fireEvent.click(button('Remove image 1'))
+    const headline = screen.getByLabelText('Headline')
+    headline.focus()
+    const open = view.container.querySelectorAll('details[open]').length
+    for (const invalid of [caption, null, 'headline', [], portfolioField(original, { field: 'caption', gallery: 'cakes', material: 'missing' }), portfolioField(original, { field: 'about', extra: 'unexpected' }), { field: '__proto__' }, { field: { selector: 'input' } }, portfolioField(portfolioDraft(), { field: 'headline' })]) {
+      select(invalid)
+      expect(window.document.activeElement).toBe(headline)
+      expect(view.container.querySelectorAll('details[open]')).toHaveLength(open)
+    }
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    view.rerender(<ProjectPageEditor projectId={OTHER} accountScope="account-a" selectedField={{ field: caption, request: ++request }} />)
+    expect(screen.queryByLabelText('Headline')).toBeNull()
+    expect(screen.queryByLabelText('Caption 1')).toBeNull()
+    await openPortfolio()
+    expect(window.document.activeElement).not.toBe(screen.getByLabelText('Caption 2'))
+    expect(view.container.querySelectorAll('details[open]')).toHaveLength(0)
+    act(() => { auth.scope = 'account-b'; auth.token() })
+    expect(button('Open page').disabled).toBe(true)
+  })
+
+  it('selects resume entries inside their disclosure and preserves identity through draft changes', async () => {
+    const original = portfolioDraft(), onPreview = vi.fn(), select = vi.fn()
+    original.resume = [{ heading: 'Experience', entries: [{ title: 'Baker', subtitle: '', dates: '', description: '' }] }]
+    loadProjectPage.mockResolvedValueOnce({ revision: 7, digest: 'a'.repeat(64), document: original })
+    const view = setup({ onPreview })
+    fireEvent.click(button('Open page'))
+    await screen.findByLabelText('Name')
+    const preview = render(<PagePreview document={onPreview.mock.lastCall[0].document} projectId={PROJECT} onSelectField={select} />)
+    fireEvent.click(button('Resume'))
+    fireEvent.click(button('Edit resume section 1 entry 1 title'))
+    const field = select.mock.lastCall[0]
+    preview.unmount()
+    const request = number => view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" onPreview={onPreview} selectedField={{ field, request: number }} />)
+    request(1)
+    expect(window.document.activeElement).toBe(screen.getByLabelText('Entry title'))
+    expect(screen.getByLabelText('Entry title').closest('details').open).toBe(true)
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'New name' } })
+    screen.getByLabelText('Name').focus()
+    request(2)
+    expect(window.document.activeElement).toBe(screen.getByLabelText('Entry title'))
+    fireEvent.click(button('Remove entry 1'))
+    screen.getByLabelText('Name').focus()
+    request(3)
+    expect(window.document.activeElement).toBe(screen.getByLabelText('Name'))
+    expect(saveProjectPage).not.toHaveBeenCalled()
+  })
+
+  it('keeps 94 photos compact and disclosure neutral, then saves only explicit caption and hero edits', async () => {
+    const original = portfolioDraft()
+    original.categories = [32, 31, 31].map((length, ci) => ({ slug: `gallery-${ci}`, title: `Gallery name ${ci}`, description: '', hero: 0,
+      images: Array.from({ length }, (_, ii) => ({ ...imageRef(PHOTO), material_id: `33333333-3333-4333-8333-${String(ci * 32 + ii).padStart(12, '0')}`, title: `Photo name ${ci}-${ii}` })) }))
+    original.resume = [{ heading: 'Experience', entries: [] }]
+    const bytes = JSON.stringify(original), onPreview = vi.fn()
+    loadProjectPage.mockResolvedValueOnce({ revision: 7, digest: 'a'.repeat(64), document: original })
+    const view = setup({ onPreview })
+    fireEvent.click(button('Open page'))
+    await screen.findByLabelText('Name')
+    expect(view.container.querySelectorAll('details[open]')).toHaveLength(0)
+    expect(screen.getAllByText(/Gallery name .*photos/, { selector: 'summary' })).toHaveLength(3)
+    const saveButtons = screen.getAllByText('Save page', { selector: 'button' })
+    expect(saveButtons).toHaveLength(1)
+    expect(saveButtons[0]).toBeVisible()
+    disclose('Gallery name 2 · 31 photos')
+    disclose('Photo 31: Photo name 2-30')
+    disclose('Photo 31: Photo name 2-30')
+    disclose('Gallery name 2 · 31 photos')
+    expect(JSON.stringify(original)).toBe(bytes)
+    expect(onPreview).toHaveBeenCalledTimes(1)
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    expect(listProjectPhotos).not.toHaveBeenCalled()
+    expect(readProjectPhotoPreview).not.toHaveBeenCalled()
+    expect(submitProjectNativePreview).not.toHaveBeenCalled()
+    reveal('Gallery name 2 · 31 photos')
+    reveal('Photo 31: Photo name 2-30')
+    const gallery = screen.getByRole('region', { name: 'Gallery 3', exact: true })
+    expect(within(gallery).getByLabelText('Caption 31').value).toBe('Photo name 2-30')
+    fireEvent.change(within(gallery).getByLabelText('Caption 31'), { target: { value: 'Edited caption' } })
+    fireEvent.change(within(gallery).getByLabelText('Hero image'), { target: { value: '30' } })
+    const expected = JSON.parse(bytes)
+    expected.categories[2].images[30].title = 'Edited caption'; expected.categories[2].hero = 30
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByText('Save page', { selector: 'button' }))
+    await screen.findByText('Saved')
+    expect(saveProjectPage).toHaveBeenCalledTimes(1)
+    expect(saveProjectPage).toHaveBeenCalledWith(PROJECT, expected, 7, { signal: expect.any(AbortSignal) })
+    expect(JSON.stringify(original)).toBe(bytes)
+  })
+
+  it('keeps expansion with the material after reorder and removal and resets it on project switch', async () => {
+    const view = setup()
+    await openPortfolio()
+    reveal('Cakes · 2 photos'); reveal('Photo 2: Bread.jpg')
+    fireEvent.click(button('Move image 2 up'))
+    expect(screen.getByText('Photo 1: Bread.jpg', { selector: 'summary' }).parentElement.open).toBe(true)
+    expect(screen.getByText('Photo 2: Cake.jpg', { selector: 'summary' }).parentElement.open).toBe(false)
+    fireEvent.click(button('Remove image 1'))
+    expect(screen.getByText('Photo 1: Cake.jpg', { selector: 'summary' }).parentElement.open).toBe(false)
+    view.rerender(<ProjectPageEditor projectId={OTHER} accountScope="account-a" />)
+    await openPortfolio()
+    expect(view.container.querySelectorAll('details[open]')).toHaveLength(0)
+  })
+
+  it('reveals new fields and lets validation reopen hidden invalid photo fields without changing the draft', async () => {
+    const onPreview = vi.fn()
+    setup({ onPreview })
+    await openPortfolio()
+    reveal('Cakes · 2 photos'); reveal('Photo 1: Cake.jpg')
+    fireEvent.change(screen.getByLabelText('Alt text 1'), { target: { value: '' } })
+    disclose('Photo 1: Cake.jpg'); disclose('Cakes · 2 photos')
+    expect(button('Save page').disabled).toBe(true)
+    expect(screen.getByRole('alert').textContent).toContain('image alt text')
+    const changes = onPreview.mock.calls.length
+    fireEvent.click(button('Show all fields to review errors'))
+    expect(screen.getByText('Photo 1: Cake.jpg', { selector: 'summary' }).parentElement.open).toBe(true)
+    expect(screen.getByText('Cakes · 2 photos', { selector: 'summary' }).parentElement.open).toBe(true)
+    expect(onPreview).toHaveBeenCalledTimes(changes)
+    fireEvent.change(screen.getByLabelText('Alt text 1'), { target: { value: 'Cake' } })
+    fireEvent.click(button('Add gallery'))
+    expect(screen.getByText('New gallery · 0 photos', { selector: 'summary' }).parentElement.open).toBe(true)
+    fireEvent.click(button('Add resume section'))
+    expect(screen.getByText('Experience', { selector: 'summary' }).parentElement.open).toBe(true)
+    fireEvent.click(button('Add resume entry'))
+    expect(screen.getByLabelText('Entry title')).toBeTruthy()
+    expect(saveProjectPage).not.toHaveBeenCalled()
+  })
+
+  it('exports native source only from the exact saved portfolio revision', async () => {
+    loadProjectPage.mockResolvedValueOnce({ revision: 7, digest: 'a'.repeat(64), document: portfolioDraft() })
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    setup()
+    fireEvent.click(button('Open page'))
+    await screen.findByRole('button', { name: 'Download native iOS source' })
+    fireEvent.click(button('Download native iOS source'))
+    await waitFor(() => expect(downloadProjectPageSource).toHaveBeenCalledWith(PROJECT, 7, { signal: expect.any(AbortSignal), target: 'ios' }))
+    await screen.findByText(/This does not install or publish an app/)
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Edited portfolio' } })
+    expect(button('Download native iOS source')).toBeDisabled()
+    click.mockRestore()
+  })
+  it('converts a loaded legacy page to a portfolio using the loaded revision', async () => {
+    loadProjectPage.mockResolvedValueOnce(page(4))
+    listProjectPhotos.mockResolvedValueOnce({ materials: [PHOTO] })
+    setup()
+    await openSaved()
+    fireEvent.click(button('Create a portfolio'))
+    fireEvent.click(button('Load project photos'))
+    await screen.findByRole('option', { name: 'Cake.jpg' })
+    fireEvent.change(screen.getByLabelText('Add project photo to Selected work'), { target: { value: PHOTO.material_id } })
+    expect(screen.getByText('Photo 1: Cake.jpg', { selector: 'summary' }).parentElement.open).toBe(true)
+    fireEvent.click(button('Save page'))
+    await screen.findByText('Saved')
+    expect(saveProjectPage.mock.lastCall[2]).toBe(4)
+    expect(saveProjectPage.mock.lastCall[1].schema).toBe('leaf.portfolio.v1')
+  })
+
+  it('resolves paginated imports from project metadata and saves edited caption, hero and order', async () => {
+    const onPreview = vi.fn()
+    listProjectPhotos.mockResolvedValueOnce({ materials: [PHOTO], next_cursor: 'next' }).mockResolvedValueOnce({ materials: [PHOTO_TWO] })
+    setup({ onPreview })
+    fireEvent.change(screen.getByLabelText('Import portfolio content'), { target: { files: [importFile(importDraft())] } })
+    await screen.findByText('Cakes · 2 photos', { selector: 'summary' })
+    disclose('Cakes · 2 photos')
+    disclose('Photo 1: Cake.jpg')
+    expect(listProjectPhotos.mock.calls[1]).toEqual([PROJECT, expect.objectContaining({ cursor: 'next', expectedScope: 'account-a' })])
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    expect(onPreview.mock.lastCall[0].document.categories[0].images[0]).toEqual(imageRef(PHOTO))
+    fireEvent.change(screen.getByLabelText('Caption 1'), { target: { value: 'Chocolate celebration' } })
+    fireEvent.change(screen.getByLabelText('Hero image'), { target: { value: '1' } })
+    disclose('Photo 2: Bread.jpg')
+    fireEvent.click(button('Move image 2 up'))
+    expect(onPreview.mock.lastCall[0].document.categories[0]).toMatchObject({ hero: 0, images: [imageRef(PHOTO_TWO), { ...imageRef(PHOTO), title: 'Chocolate celebration' }] })
+    fireEvent.click(button('Save page'))
+    await screen.findByText('Saved')
+    expect(saveProjectPage.mock.lastCall[1].schema).toBe('leaf.portfolio.v1')
+    const saved = saveProjectPage.mock.lastCall[1]
+    // A saved response may replace document object identities; reopen real controls.
+    reveal('Cakes · 2 photos')
+    reveal('Photo 1: Bread.jpg')
+    loadProjectPage.mockResolvedValueOnce({ revision: 1, digest: 'a'.repeat(64), document: saved })
+    fireEvent.change(screen.getByLabelText('Caption 1'), { target: { value: 'Temporary edit' } })
+    fireEvent.click(button('Reload saved page'))
+    await screen.findByRole('button', { name: 'Reload saved page' })
+    reveal('Cakes · 2 photos')
+    reveal('Photo 1: Bread.jpg')
+    expect(screen.getByRole('textbox', { name: 'Caption 1' }).value).toBe('Bread.jpg')
+    expect(button('Download Next.js source').disabled).toBe(false)
+  })
+
+  it('retains the existing draft when a photo is missing or ambiguous and rejects trusted-metadata imports', async () => {
+    const onPreview = vi.fn()
+    setup({ onPreview })
+    fireEvent.click(button('Create a page'))
+    listProjectPhotos.mockResolvedValueOnce({ materials: [PHOTO] })
+    fireEvent.change(screen.getByLabelText('Import portfolio content'), { target: { files: [importFile(importDraft())] } })
+    await screen.findByText(/Missing photo/)
+    expect(screen.getByLabelText('Headline').value).toBe('Coming soon')
+    listProjectPhotos.mockResolvedValueOnce({ materials: [PHOTO, { ...PHOTO, material_id: OTHER }, PHOTO_TWO] })
+    fireEvent.change(screen.getByLabelText('Import portfolio content'), { target: { files: [importFile(importDraft())] } })
+    await screen.findByText(/Ambiguous photo/)
+    expect(onPreview).toHaveBeenCalledTimes(1)
+    const bad = importDraft(); bad.categories[0].images[0].material_id = PHOTO.material_id
+    await expect(importPortfolio(importFile(bad), PROJECT, {})).rejects.toThrow('Unsupported portfolio fields')
+  })
+
+  it('creates a portfolio with required photo guidance, supports resume editing, and clears on logout', async () => {
+    listProjectPhotos.mockResolvedValueOnce({ materials: [PHOTO] })
+    const onPreview = vi.fn()
+    setup({ onPreview })
+    fireEvent.click(button('Create a portfolio'))
+    expect(button('Save page').disabled).toBe(true)
+    fireEvent.click(button('Load project photos'))
+    await screen.findByRole('option', { name: 'Cake.jpg' })
+    fireEvent.change(screen.getByLabelText('Add project photo to Selected work'), { target: { value: PHOTO.material_id } })
+    fireEvent.click(button('Add resume section')); fireEvent.click(button('Add resume entry'))
+    fireEvent.change(screen.getByLabelText('Entry title'), { target: { value: 'Pastry chef' } })
+    expect(onPreview.mock.lastCall[0].document.resume[0].entries[0].title).toBe('Pastry chef')
+    expect(button('Save page').disabled).toBe(false)
+    act(() => auth.logout())
+    expect(screen.queryByLabelText('Name')).toBeNull()
+    expect(button('Create a portfolio').disabled).toBe(true)
+  })
+
+  it('fences an in-flight import on project and account switches', async () => {
+    const pending = deferred(), onPreview = vi.fn()
+    listProjectPhotos.mockReturnValueOnce(pending.promise)
+    const view = setup({ onPreview })
+    fireEvent.change(screen.getByLabelText('Import portfolio content'), { target: { files: [importFile(importDraft())] } })
+    await waitFor(() => expect(listProjectPhotos).toHaveBeenCalled())
+    auth.scope = 'account-b'
+    view.rerender(<ProjectPageEditor projectId={OTHER} accountScope="account-b" onPreview={onPreview} />)
+    await act(async () => pending.resolve({ materials: [PHOTO, PHOTO_TWO] }))
+    expect(onPreview).not.toHaveBeenCalled()
+    expect(screen.queryByLabelText('Name')).toBeNull()
+  })
+
+  it('loads private previews only for current views, closes by Escape, restores focus and revokes bytes', async () => {
+    const view = render(<PagePreview document={portfolioDraft()} projectId={PROJECT} />)
+    await waitFor(() => expect(readProjectPhotoPreview).toHaveBeenCalledTimes(1))
+    expect(readProjectPhotoPreview.mock.lastCall).toEqual([PROJECT, PHOTO.material_id, expect.objectContaining({ expectedScope: 'account-a', signal: expect.any(AbortSignal) })])
+    fireEvent.click(button('Cakes'))
+    const trigger = button('View Cake.jpg')
+    fireEvent.click(trigger)
+    await screen.findByRole('dialog')
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(window.document.activeElement).toBe(trigger)
+    view.unmount()
+    expect(URL.revokeObjectURL).toHaveBeenCalled()
+  })
+
+  it('shows a preview failure without an indefinite loading message', async () => {
+    readProjectPhotoPreview.mockRejectedValueOnce(new Error('Unavailable'))
+    render(<PagePreview document={portfolioDraft()} projectId={PROJECT} />)
+    await screen.findByRole('alert')
+    expect(screen.queryByText('Loading photo…')).toBeNull()
+  })
+
+  it('closes the image before an underlying Studio drawer on Escape', () => {
+    const closeDrawer = vi.fn()
+    const unregister = registerEscapeOwner('fixture-drawer', closeDrawer, { layer: 'drawer' })
+    try {
+      render(<PagePreview document={portfolioDraft()} projectId={PROJECT} />)
+      fireEvent.click(button('Cakes'))
+      fireEvent.click(button('View Cake.jpg'))
+      fireEvent.keyDown(window, { key: 'Escape' })
+      expect(screen.queryByRole('dialog')).toBeNull()
+      expect(closeDrawer).not.toHaveBeenCalled()
+    } finally { unregister() }
+  })
+
+  it('leaves Escape to the active workspace when a portfolio viewer is hidden', () => {
+    const view = render(<div data-testid="browser"><PagePreview document={portfolioDraft()} projectId={PROJECT} /></div>)
+    fireEvent.click(button('Cakes'))
+    fireEvent.click(button('View Cake.jpg'))
+    view.getByTestId('browser').hidden = true
+    const closeDrawer = vi.fn()
+    const unregister = registerEscapeOwner('fixture-drawer', closeDrawer, { layer: 'drawer' })
+    try {
+      fireEvent.keyDown(window, { key: 'Escape' })
+      expect(closeDrawer).toHaveBeenCalledTimes(1)
+    } finally { unregister() }
+  })
+
+  it('aborts old preview reads and drops their bytes on an account scope change', async () => {
+    const pending = deferred()
+    readProjectPhotoPreview.mockReturnValueOnce(pending.promise)
+    render(<PagePreview document={portfolioDraft()} projectId={PROJECT} />)
+    await waitFor(() => expect(readProjectPhotoPreview).toHaveBeenCalledTimes(1))
+    const oldSignal = readProjectPhotoPreview.mock.lastCall[2].signal
+    act(() => { auth.scope = 'account-b'; window.dispatchEvent(new Event('leaf:active-scope')) })
+    expect(oldSignal.aborted).toBe(true)
+    await waitFor(() => expect(readProjectPhotoPreview).toHaveBeenCalledTimes(2))
+    await screen.findByRole('img', { name: 'Cake.jpg' })
+    const urlsBeforeOldResponse = URL.createObjectURL.mock.calls.length
+    await act(async () => pending.resolve(new Blob(['old account photo'])))
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(urlsBeforeOldResponse)
+    expect(readProjectPhotoPreview.mock.lastCall[2].expectedScope).toBe('account-b')
+  })
+
+  it('rejects unknown nested keys, boolean heroes, duplicate materials, unsafe contact and excessive documents', () => {
+    const mutations = [d => { d.categories[0].hero = true }, d => { d.categories[0].slug = 'home' }, d => { d.contact.email = 'hello@example.com\n' },
+      d => { d.contact.extra = '' }, d => { d.categories[0].images.push(imageRef(PHOTO)) }, d => { d.about = 'https://example.com' },
+      d => { d.categories[0].images[0].preview_sha256 += '\n' }]
+    for (const mutate of mutations) { const value = portfolioDraft(); mutate(value); expect(() => validatePortfolioDocument(value)).toThrow() }
+    const value = portfolioDraft()
+    const detached = validatePortfolioDocument(value)
+    detached.categories[0].images[0].title = 'Changed'
+    expect(value.categories[0].images[0].title).toBe('Cake.jpg')
+  })
+})
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
+
+describe('project page editor', () => {
+  it('waits for explicit creation and sends generic content and each edit to the preview', () => {
+    const onPreview = vi.fn()
+    setup({ onPreview })
+    expect(loadProjectPage).not.toHaveBeenCalled()
+    expect(onPreview).not.toHaveBeenCalled()
+    fireEvent.click(button('Create a page'))
+    expect(screen.getByLabelText('Headline').value).toBe('Coming soon')
+    expect(onPreview.mock.lastCall[0].document.label).toBe('Your page')
+    fireEvent.change(screen.getByLabelText('Headline'), { target: { value: 'Fresh news' } })
+    expect(onPreview.mock.lastCall[0].document.headline).toBe('Fresh news')
+    expect(button('Download Next.js source').disabled).toBe(true)
+    expect(screen.getByText('Unsaved changes')).toBeTruthy()
+  })
+
+  it('opens only on request and saves against the loaded revision with duplicate protection', async () => {
+    const pending = deferred()
+    const onPreview = vi.fn()
+    setup({ onPreview })
+    await openSaved()
+    expect(onPreview).toHaveBeenCalledWith({ document, name: 'A page' })
+    fireEvent.change(screen.getByLabelText('Headline'), { target: { value: 'Updated' } })
+    saveProjectPage.mockReturnValueOnce(pending.promise)
+    fireEvent.click(button('Save page')); fireEvent.click(button('Save page'))
+    expect(saveProjectPage).toHaveBeenCalledTimes(1)
+    expect(saveProjectPage).toHaveBeenCalledWith(PROJECT, { ...document, headline: 'Updated' }, 1, { signal: expect.any(AbortSignal) })
+    expect(screen.getByText('Saving…')).toBeTruthy()
+    await act(async () => pending.resolve(page(2, { headline: 'Updated' })))
+    expect(screen.getByText('Saved')).toBeTruthy()
+    expect(button('Download Next.js source').disabled).toBe(false)
+  })
+
+  it('retains a failed draft and allows save retry', async () => {
+    setup()
+    fireEvent.click(button('Create a page'))
+    fireEvent.change(screen.getByLabelText('Headline'), { target: { value: 'Keep this draft' } })
+    saveProjectPage.mockRejectedValueOnce(new Error('Service unavailable. Try again.'))
+    fireEvent.click(button('Save page'))
+    await screen.findByRole('alert')
+    expect(screen.getByLabelText('Headline').value).toBe('Keep this draft')
+    expect(button('Save page').disabled).toBe(false)
+    fireEvent.click(button('Save page'))
+    await screen.findByText('Saved')
+    expect(saveProjectPage.mock.lastCall[2]).toBe(0)
+  })
+
+  it('keeps a conflicting draft until explicit reload and then uses the new revision', async () => {
+    setup()
+    await openSaved()
+    fireEvent.change(screen.getByLabelText('Headline'), { target: { value: 'My draft' } })
+    saveProjectPage.mockRejectedValueOnce(Object.assign(new Error('Saved page changed. Reload the saved page.'), { status: 409 }))
+    fireEvent.click(button('Save page'))
+    await screen.findByRole('alert')
+    expect(screen.getByLabelText('Headline').value).toBe('My draft')
+    expect(button('Save page').disabled).toBe(true)
+    loadProjectPage.mockResolvedValueOnce(page(4, { headline: 'Other edit' }))
+    fireEvent.click(button('Reload saved page'))
+    await screen.findByDisplayValue('Other edit')
+    fireEvent.change(screen.getByLabelText('Headline'), { target: { value: 'New draft' } })
+    fireEvent.click(button('Save page'))
+    await screen.findByText('Saved')
+    expect(saveProjectPage.mock.lastCall[2]).toBe(4)
+  })
+
+  it('distinguishes an absent page from an unavailable project without changing the preview', async () => {
+    const onPreview = vi.fn()
+    setup({ onPreview })
+    loadProjectPage.mockResolvedValueOnce(null)
+    fireEvent.click(button('Open page'))
+    await screen.findByText('No saved page yet. Choose Create a page to begin.')
+    loadProjectPage.mockRejectedValueOnce(Object.assign(new Error('This project is no longer available to you.'), { status: 404 }))
+    fireEvent.click(button('Open page'))
+    await screen.findByRole('alert')
+    expect(onPreview).not.toHaveBeenCalled()
+  })
+
+  it.each(['project', 'account'])('discards a pending load after a %s switch', async kind => {
+    const pending = deferred()
+    loadProjectPage.mockReturnValueOnce(pending.promise)
+    const onPreview = vi.fn()
+    const view = setup({ onPreview })
+    fireEvent.click(button('Open page'))
+    const signal = loadProjectPage.mock.lastCall[1].signal
+    view.rerender(<ProjectPageEditor projectId={kind === 'project' ? OTHER : PROJECT} accountScope={kind === 'account' ? 'account-b' : 'account-a'} onPreview={onPreview} />)
+    await act(async () => pending.resolve(page()))
+    expect(signal.aborted).toBe(true)
+    expect(onPreview).not.toHaveBeenCalled()
+    expect(screen.queryByLabelText('Headline')).toBeNull()
+  })
+
+  it('clears the editor on logout and ignores a late save', async () => {
+    const pending = deferred()
+    const onPreview = vi.fn()
+    setup({ onPreview })
+    fireEvent.click(button('Create a page'))
+    saveProjectPage.mockReturnValueOnce(pending.promise)
+    fireEvent.click(button('Save page'))
+    act(() => auth.logout())
+    const calls = onPreview.mock.calls.length
+    await act(async () => pending.resolve(page()))
+    expect(screen.queryByLabelText('Headline')).toBeNull()
+    expect(button('Create a page').disabled).toBe(true)
+    expect(onPreview).toHaveBeenCalledTimes(calls)
+  })
+
+  it('downloads only the saved revision through a fetched Blob and revokes it on unmount', async () => {
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    const view = setup()
+    await openSaved()
+    fireEvent.click(button('Download Next.js source'))
+    await waitFor(() => expect(click).toHaveBeenCalledTimes(1))
+    expect(downloadProjectPageSource).toHaveBeenCalledWith(PROJECT, 1, { signal: expect.any(AbortSignal) })
+    expect(click.mock.instances[0].href).toBe('blob:page-source')
+    expect(click.mock.instances[0].download).toBe('nextjs-page-r1.zip')
+    view.unmount()
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:page-source')
+  })
+
+  it('ignores an export arriving after unmount', async () => {
+    const pending = deferred()
+    downloadProjectPageSource.mockReturnValueOnce(pending.promise)
+    const view = setup()
+    await openSaved()
+    fireEvent.click(button('Download Next.js source'))
+    view.unmount()
+    await act(async () => pending.resolve(new Blob(['zip'])))
+    expect(URL.createObjectURL).not.toHaveBeenCalled()
+  })
+
+  it('renders text as text and focuses the inspector field selected from preview', () => {
+    const onSelectField = vi.fn()
+    const preview = render(<PagePreview document={{ ...document, headline: '<img src=x onerror=alert(1)>' }} onSelectField={onSelectField} />)
+    expect(preview.container.querySelector('img')).toBeNull()
+    fireEvent.click(button('Edit headline'))
+    expect(onSelectField).toHaveBeenCalledWith('headline')
+    preview.unmount()
+    const editor = setup({ selectedField: 'headline' })
+    fireEvent.click(button('Create a page'))
+    expect(window.document.activeElement).toBe(screen.getByLabelText('Headline'))
+    screen.getByLabelText('Headline').blur()
+    editor.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" selectedField={{ field: 'headline', request: 2 }} />)
+    expect(window.document.activeElement).toBe(screen.getByLabelText('Headline'))
+  })
+})
+
+describe('saved portfolio iOS preview', () => {
+  it('submits the exact revision once, polls serially, and displays the authenticated screenshot', async () => {
+    const pending = deferred()
+    submitProjectNativePreview.mockReturnValueOnce(pending.promise)
+    setup(); await openPortfolio()
+    vi.useFakeTimers()
+    try {
+      fireEvent.click(button('Build iOS preview')); fireEvent.click(button('Build iOS preview'))
+      expect(submitProjectNativePreview).toHaveBeenCalledTimes(1)
+      expect(submitProjectNativePreview).toHaveBeenCalledWith(PROJECT, 7, expect.any(String), { signal: expect.any(AbortSignal) })
+      await act(async () => pending.resolve(nativeJob('queued')))
+      expect(screen.getByText('Queued · Saved revision 7')).toBeTruthy()
+      const running = deferred()
+      loadProjectNativePreview.mockReturnValueOnce(running.promise).mockResolvedValueOnce(nativeJob('complete'))
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000) })
+      await act(async () => { await vi.advanceTimersByTimeAsync(10000) })
+      expect(loadProjectNativePreview).toHaveBeenCalledTimes(1)
+      await act(async () => running.resolve(nativeJob('running')))
+      expect(screen.getByText('Building · Saved revision 7')).toBeTruthy()
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000) })
+      expect(screen.getByText('Ready · Saved revision 7')).toBeTruthy()
+      expect(screen.getByRole('img', { name: 'iOS simulator preview of saved portfolio revision 7' }).getAttribute('src')).toBe('blob:page-source')
+      expect(downloadProjectNativePreviewScreenshot).toHaveBeenCalledWith(PROJECT, OTHER, { signal: expect.any(AbortSignal) })
+      await act(async () => { await vi.advanceTimersByTimeAsync(10000) })
+      expect(loadProjectNativePreview).toHaveBeenCalledTimes(2)
+    } finally { vi.useRealTimers() }
+  })
+
+  it('disables dirty submission and retains one key after an uncertain submission without losing edits', async () => {
+    submitProjectNativePreview.mockRejectedValueOnce(Object.assign(new Error('private server details'), { status: 409 }))
+    setup(); await openPortfolio()
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Unsaved work' } })
+    expect(button('Build iOS preview')).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: portfolioDraft().name } })
+    fireEvent.click(button('Build iOS preview'))
+    await screen.findByText(/Submission could not be confirmed/)
+    expect(screen.queryByText('private server details')).toBeNull()
+    const key = submitProjectNativePreview.mock.lastCall[2]
+    submitProjectNativePreview.mockResolvedValueOnce(nativeJob('failed'))
+    fireEvent.click(button('Build iOS preview'))
+    await screen.findByText('Failed · Saved revision 7')
+    expect(submitProjectNativePreview.mock.lastCall[2]).toBe(key)
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Keep this draft' } })
+    expect(screen.getByLabelText('Name').value).toBe('Keep this draft')
+    expect(button('Save page')).toBeEnabled()
+    fireEvent.click(button('Save page'))
+    await screen.findByText('Saved')
+    expect(saveProjectPage.mock.lastCall[2]).toBe(7)
+  })
+
+  it.each(['failed', 'cancelled'])('allows an explicit new build with a new key after %s', async status => {
+    submitProjectNativePreview.mockResolvedValueOnce(nativeJob(status)).mockResolvedValueOnce(nativeJob('failed'))
+    setup(); await openPortfolio()
+    fireEvent.click(button('Build iOS preview'))
+    await screen.findByText(`${status === 'failed' ? 'Failed' : 'Cancelled'} · Saved revision 7`)
+    const key = submitProjectNativePreview.mock.lastCall[2]
+    fireEvent.click(button('Build iOS preview'))
+    await waitFor(() => expect(submitProjectNativePreview).toHaveBeenCalledTimes(2))
+    expect(submitProjectNativePreview.mock.lastCall[2]).not.toBe(key)
+  })
+
+  it('retries a known-job read and screenshot failure with GET only', async () => {
+    submitProjectNativePreview.mockResolvedValueOnce(nativeJob('queued'))
+    loadProjectNativePreview.mockRejectedValueOnce(new Error('read failed')).mockResolvedValue(nativeJob('complete'))
+    downloadProjectNativePreviewScreenshot.mockRejectedValueOnce(new Error('image failed')).mockResolvedValue(new Blob(['png']))
+    setup(); await openPortfolio()
+    vi.useFakeTimers()
+    try {
+      fireEvent.click(button('Build iOS preview'))
+      await act(async () => {})
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000) })
+      expect(screen.getByText(/Could not check this preview/)).toBeTruthy()
+      await act(async () => { await vi.advanceTimersByTimeAsync(10000) })
+      expect(loadProjectNativePreview).toHaveBeenCalledTimes(1)
+      fireEvent.click(button('Check preview again'))
+      await act(async () => {})
+      expect(screen.queryByRole('img', { name: /iOS simulator/ })).toBeNull()
+      fireEvent.click(button('Check preview again'))
+      await act(async () => {})
+      expect(screen.getByText('Ready · Saved revision 7')).toBeTruthy()
+      expect(submitProjectNativePreview).toHaveBeenCalledTimes(1)
+      expect(loadProjectNativePreview).toHaveBeenCalledTimes(3)
+    } finally { vi.useRealTimers() }
+  })
+
+  it.each([{ job_id: PROJECT }, { revision: 8 }, { document_sha256: 'd'.repeat(64) }, { archive_sha256: 'd'.repeat(64) }])('rejects changed readback identity %j', async changes => {
+    submitProjectNativePreview.mockResolvedValueOnce(nativeJob('queued'))
+    loadProjectNativePreview.mockResolvedValueOnce(nativeJob('complete', changes))
+    setup(); await openPortfolio()
+    vi.useFakeTimers()
+    try {
+      fireEvent.click(button('Build iOS preview'))
+      await act(async () => {})
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000) })
+      expect(screen.getByText(/Could not check this preview/)).toBeTruthy()
+      expect(downloadProjectNativePreviewScreenshot).not.toHaveBeenCalled()
+    } finally { vi.useRealTimers() }
+  })
+
+  it('bounds observation at fifteen minutes and lets a known job be checked again', async () => {
+    const pending = deferred()
+    loadProjectNativePreview.mockReturnValueOnce(pending.promise)
+    const view = setup(); await openPortfolio()
+    vi.useFakeTimers()
+    try {
+      fireEvent.click(button('Build iOS preview'))
+      await act(async () => {})
+      await act(async () => { await vi.advanceTimersByTimeAsync(15 * 60 * 1000) })
+      expect(loadProjectNativePreview).toHaveBeenCalledTimes(1)
+      expect(loadProjectNativePreview.mock.lastCall[2].signal.aborted).toBe(true)
+      expect(screen.getByText(/Observation paused after 15 minutes/)).toBeTruthy()
+      expect(button('Check preview again')).toBeEnabled()
+      await act(async () => pending.resolve(nativeJob('complete')))
+      expect(downloadProjectNativePreviewScreenshot).not.toHaveBeenCalled()
+      view.unmount()
+    } finally { vi.useRealTimers() }
+  })
+
+  it.each(['project', 'account', 'scope', 'logout', 'unmount'])('aborts and ignores a late submission on %s invalidation', async kind => {
+    const pending = deferred()
+    submitProjectNativePreview.mockReturnValueOnce(pending.promise)
+    const view = setup(); await openPortfolio()
+    fireEvent.click(button('Build iOS preview'))
+    const signal = submitProjectNativePreview.mock.lastCall[3].signal
+    if (kind === 'unmount') view.unmount()
+    else if (kind === 'logout') act(() => auth.logout())
+    else if (kind === 'scope') act(() => { auth.scope = 'account-b'; window.dispatchEvent(new Event('leaf:active-scope')) })
+    else view.rerender(<ProjectPageEditor projectId={kind === 'project' ? OTHER : PROJECT} accountScope={kind === 'account' ? 'account-b' : 'account-a'} />)
+    expect(signal.aborted).toBe(true)
+    await act(async () => pending.resolve(nativeJob('complete')))
+    expect(downloadProjectNativePreviewScreenshot).not.toHaveBeenCalled()
+    expect(screen.queryByRole('region', { name: 'iOS preview' })).toBeNull()
+  })
+
+  it('revokes screenshots on replacement, saved revision change, and logout', async () => {
+    submitProjectNativePreview.mockResolvedValue(nativeJob('complete'))
+    loadProjectNativePreview.mockResolvedValue(nativeJob('complete'))
+    const view = setup(); await openPortfolio()
+    fireEvent.click(button('Build iOS preview'))
+    await screen.findByText('Ready · Saved revision 7')
+    fireEvent.click(button('Check preview again'))
+    await waitFor(() => expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:page-source'))
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'New saved work' } })
+    fireEvent.click(button('Save page'))
+    await screen.findByText('Saved')
+    expect(screen.queryByRole('img', { name: /iOS simulator/ })).toBeNull()
+    expect(button('Build iOS preview')).toBeEnabled()
+    submitProjectNativePreview.mockResolvedValueOnce(nativeJob('complete', { revision: 8 }))
+    fireEvent.click(button('Build iOS preview'))
+    await screen.findByText('Ready · Saved revision 8')
+    const count = URL.revokeObjectURL.mock.calls.length
+    act(() => auth.logout())
+    expect(URL.revokeObjectURL.mock.calls.length).toBeGreaterThan(count)
+    view.unmount()
+  })
+
+  it.each(['scope', 'logout', 'unmount'])('fences late screenshot bytes on %s', async kind => {
+    const pending = deferred()
+    submitProjectNativePreview.mockResolvedValueOnce(nativeJob('complete'))
+    downloadProjectNativePreviewScreenshot.mockReturnValueOnce(pending.promise)
+    const view = setup(); await openPortfolio()
+    fireEvent.click(button('Build iOS preview'))
+    await waitFor(() => expect(downloadProjectNativePreviewScreenshot).toHaveBeenCalledTimes(1))
+    const signal = downloadProjectNativePreviewScreenshot.mock.lastCall[2].signal
+    if (kind === 'unmount') view.unmount()
+    else if (kind === 'logout') act(() => auth.logout())
+    else act(() => { auth.scope = 'account-b'; window.dispatchEvent(new Event('leaf:active-scope')) })
+    expect(signal.aborted).toBe(true)
+    await act(async () => pending.resolve(new Blob(['late screenshot'])))
+    expect(URL.createObjectURL).not.toHaveBeenCalled()
+  })
+
+  it.each(['scope', 'unmount'])('revokes a ready screenshot on %s', async kind => {
+    submitProjectNativePreview.mockResolvedValueOnce(nativeJob('complete'))
+    const view = setup(); await openPortfolio()
+    fireEvent.click(button('Build iOS preview'))
+    await screen.findByText('Ready · Saved revision 7')
+    if (kind === 'unmount') view.unmount()
+    else act(() => { auth.scope = 'account-b'; window.dispatchEvent(new Event('leaf:active-scope')) })
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:page-source')
+  })
+})
+
+describe('authenticated page transport', () => {
+  it('uses producer-shaped native jobs and exact authenticated submit, status and screenshot contracts', async () => {
+    const client = await vi.importActual('./projectPageClient.js')
+    const png = new NativeBlob([Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64')], { type: 'image/png' })
+    fetch.mockResolvedValueOnce({ ok: true, status: 202, json: async () => nativeJob('queued') })
+    expect(await client.submitProjectNativePreview(PROJECT, 7, 'preview-key')).toEqual(nativeJob('queued'))
+    expect(fetch.mock.lastCall[0]).toBe(`https://api.example.test/api/projects/${PROJECT}/native-previews`)
+    expect(fetch.mock.lastCall[1]).toMatchObject({ method: 'POST', body: '{"revision":7}', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'preview-key' }, cache: 'no-store' })
+    for (const status of ['running', 'complete', 'failed', 'cancelled']) {
+      fetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => nativeJob(status) })
+      expect(await client.loadProjectNativePreview(PROJECT, OTHER)).toEqual(nativeJob(status))
+      expect(fetch.mock.lastCall[0]).toBe(`https://api.example.test/api/projects/${PROJECT}/native-previews/${OTHER}`)
+    }
+    fetch.mockResolvedValueOnce({ ok: true, status: 200, headers: new Headers({ 'content-type': 'image/png' }), blob: async () => png })
+    expect(await client.downloadProjectNativePreviewScreenshot(PROJECT, OTHER)).toBe(png)
+    expect(fetch.mock.lastCall[0]).toBe(`https://api.example.test/api/projects/${PROJECT}/native-previews/${OTHER}/screenshot`)
+    for (const [, options] of fetch.mock.calls) expect(options.headers).toMatchObject({ Authorization: 'Bearer fixture', 'X-Org-Id': 'org-a', 'X-Actor-Binding-Id': 'binding-a' })
+  })
+
+  it('rejects malformed native requests and producer status, identity, digest and receipt readbacks', async () => {
+    const client = await vi.importActual('./projectPageClient.js')
+    for (const [project, revision, key] of [[OTHER + '/x', 7, 'key'], [PROJECT + '\n', 7, 'key'], [PROJECT, 0, 'key'], [PROJECT, true, 'key'], [PROJECT, Number.MAX_SAFE_INTEGER + 1, 'key'], [PROJECT, 7, ''], [PROJECT, 7, 'x'.repeat(201)], [PROJECT, 7, 'bad\nkey'], [PROJECT, 7, 'key\n']]) {
+      await expect(client.submitProjectNativePreview(project, revision, key)).rejects.toThrow()
+    }
+    await expect(client.loadProjectNativePreview(PROJECT, '../job')).rejects.toThrow()
+    expect(fetch).not.toHaveBeenCalled()
+    for (const changes of [{ status: 'submitted' }, { job_id: PROJECT }, { job_id: OTHER + '\n' }, { document_sha256: 'A'.repeat(64) }, { document_sha256: 'a'.repeat(64) + '\n' }, { archive_sha256: 'short' }, { revision: true },
+      { receipt: { kind: 'fixture', receipt_id: PROJECT, sha256: 'c'.repeat(64) } }, { receipt: { kind: 'simulator', receipt_id: 'bad', sha256: 'c'.repeat(64) } }, { evidence_basis: 'fixture' }]) {
+      fetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => nativeJob('complete', changes) })
+      await expect(client.loadProjectNativePreview(PROJECT, OTHER)).rejects.toThrow('iOS preview')
+    }
+    fetch.mockResolvedValueOnce({ ok: true, status: 202, json: async () => nativeJob('queued', { revision: 8 }) })
+    await expect(client.submitProjectNativePreview(PROJECT, 7, 'key')).rejects.toThrow('iOS preview')
+  })
+
+  it('bounds PNG responses before buffering and rejects non-PNG bytes', async () => {
+    const client = await vi.importActual('./projectPageClient.js')
+    for (const response of [
+      { headers: new Headers({ 'content-type': 'text/html' }) },
+      { headers: new Headers({ 'content-type': 'image/png', 'content-length': String(16 * 1024 * 1024 + 1) }) },
+      { headers: new Headers({ 'content-type': 'image/png' }), blob: async () => new NativeBlob(['not png']) },
+      { headers: new Headers({ 'content-type': 'image/png' }), blob: async () => new NativeBlob(['x'.repeat(64)]) },
+    ]) {
+      fetch.mockResolvedValueOnce({ ok: true, status: 200, ...response })
+      await expect(client.downloadProjectNativePreviewScreenshot(PROJECT, OTHER)).rejects.toThrow('iOS preview')
+    }
+    const reader = { read: vi.fn().mockResolvedValue({ done: false, value: { byteLength: 16 * 1024 * 1024 + 1 } }), cancel: vi.fn(), releaseLock: vi.fn() }
+    fetch.mockResolvedValueOnce({ ok: true, status: 200, headers: new Headers({ 'content-type': 'image/png' }), body: { getReader: () => reader } })
+    await expect(client.downloadProjectNativePreviewScreenshot(PROJECT, OTHER)).rejects.toThrow('iOS preview')
+    expect(reader.read).toHaveBeenCalledTimes(1)
+    expect(reader.cancel).toHaveBeenCalled()
+    expect(reader.releaseLock).toHaveBeenCalled()
+  })
+
+  it('keeps native failures bounded, uses unauthorized handling and times out with abort cleanup', async () => {
+    const client = await vi.importActual('./projectPageClient.js')
+    fetch.mockResolvedValueOnce({ ok: false, status: 409, json: async () => ({ detail: 'SECRET' }) })
+    await expect(client.submitProjectNativePreview(PROJECT, 7, 'same-key')).rejects.toThrow('Could not access the iOS preview')
+    fetch.mockResolvedValueOnce({ ok: false, status: 401 })
+    await expect(client.loadProjectNativePreview(PROJECT, OTHER)).rejects.toMatchObject({ status: 401 })
+    expect(auth.unauthorized).toHaveBeenCalledTimes(1)
+    vi.useFakeTimers()
+    try {
+      fetch.mockImplementation(async (_url, { signal }) => ({ ok: true, status: 200,
+        json: () => new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true })),
+      }))
+      const timed = expect(client.loadProjectNativePreview(PROJECT, OTHER)).rejects.toThrow('iOS preview service took too long')
+      await vi.advanceTimersByTimeAsync(30000); await timed
+      const controller = new AbortController()
+      const cancelled = expect(client.loadProjectNativePreview(PROJECT, OTHER, { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+      await vi.advanceTimersByTimeAsync(0)
+      controller.abort(); await cancelled
+    } finally { vi.useRealTimers() }
+  })
+
+  it('uses the current project identity on reads, writes and exact revision exports', async () => {
+    const client = await vi.importActual('./projectPageClient.js')
+    fetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ page: null }) })
+    expect(await client.loadProjectPage(PROJECT)).toBeNull()
+    fetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ page: page() }) })
+    await client.saveProjectPage(PROJECT, document, 0)
+    expect(JSON.parse(fetch.mock.lastCall[1].body)).toEqual({ expected_revision: 0, document })
+    const blob = new Blob(['zip'])
+    fetch.mockResolvedValueOnce({ ok: true, status: 200, headers: new Headers({ 'content-type': 'application/zip' }), blob: async () => blob })
+    expect(await client.downloadProjectPageSource(PROJECT, 1)).toBe(blob)
+    expect(fetch.mock.lastCall[0]).toBe(`https://api.example.test/api/projects/${PROJECT}/page/source?revision=1`)
+    for (const [, options] of fetch.mock.calls) expect(options.headers).toMatchObject({ Authorization: 'Bearer fixture', 'X-Org-Id': 'org-a', 'X-Actor-Binding-Id': 'binding-a' })
+  })
+
+  it('retains status for stale recovery and uses the existing unauthorized rail', async () => {
+    const client = await vi.importActual('./projectPageClient.js')
+    fetch.mockResolvedValueOnce({ ok: false, status: 409 })
+    await expect(client.saveProjectPage(PROJECT, document, 1)).rejects.toMatchObject({ status: 409 })
+    fetch.mockResolvedValueOnce({ ok: false, status: 401 })
+    await expect(client.loadProjectPage(PROJECT)).rejects.toMatchObject({ status: 401 })
+    expect(auth.unauthorized).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects executable fields and malformed successful payloads before preview or download', async () => {
+    const client = await vi.importActual('./projectPageClient.js')
+    for (const headline of ['<script>x</script>', 'https://example.test', 'bad\u0000text', '  \n', 'bad\u200btext', 'bad\ud800text']) {
+      expect(() => client.validatePageDocument({ ...document, headline })).toThrow()
+    }
+    fetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ page: { ...page(), revision: 0 } }) })
+    await expect(client.loadProjectPage(PROJECT)).rejects.toThrow('invalid saved page')
+    fetch.mockResolvedValueOnce({ ok: true, status: 200, headers: new Headers({ 'content-type': 'text/html' }) })
+    await expect(client.downloadProjectPageSource(PROJECT, 1)).rejects.toThrow('source archive')
+  })
+
+  it('bounds response bodies with a timeout and preserves caller cancellation', async () => {
+    const client = await vi.importActual('./projectPageClient.js')
+    vi.useFakeTimers()
+    try {
+      fetch.mockImplementation(async (_url, { signal }) => ({ ok: true, status: 200,
+        json: () => new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true })),
+      }))
+      const timed = expect(client.loadProjectPage(PROJECT)).rejects.toThrow('took too long')
+      await vi.advanceTimersByTimeAsync(30000)
+      await timed
+      const controller = new AbortController()
+      const cancelled = expect(client.loadProjectPage(PROJECT, { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+      await vi.advanceTimersByTimeAsync(0)
+      controller.abort()
+      await cancelled
+    } finally { vi.useRealTimers() }
+  })
+})

@@ -1,0 +1,30 @@
+{
+  "schema": "leaf.auth0-staging-audience.v1",
+  "note": "Declared staging API audience (P-178 slice 1). scripts/auth0_staging_audience.py plans and applies it; production resources are never written.",
+  "production_identifier": "https://api.leafdesign.ai",
+  "resource_server": {
+    "identifier": "https://api-staging.leafdesign.ai",
+    "name": "Branch API (staging)",
+    "signing_alg": "RS256",
+    "token_lifetime": 86400,
+    "token_lifetime_for_web": 7200,
+    "allow_offline_access": true,
+    "skip_consent_for_verifiable_first_party_clients": true,
+    "token_dialect": "access_token",
+    "subject_type_authorization": {
+      "client": {"policy": "require_client_grant"},
+      "user": {"policy": "allow_all"}
+    },
+    "scopes": [
+      {"value": "capability:build", "description": "Invoke the build/v1 tool-authoring lane"}
+    ]
+  },
+  "grants": [
+    {"client_id": "pIijKCw7Q9KuEWqUNMkGfE119VHRr2kI", "name": "Leaf staging acceptance tenant A", "scope": []},
+    {"client_id": "Noa3pkZarByn3dLrKYEK3JCVzyCPnIgf", "name": "Leaf staging acceptance tenant B", "scope": []}
+  ],
+  "tenant_audience_clients": [
+    "pIijKCw7Q9KuEWqUNMkGfE119VHRr2kI",
+    "Noa3pkZarByn3dLrKYEK3JCVzyCPnIgf"
+  ]
+}

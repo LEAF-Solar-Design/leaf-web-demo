@@ -149,6 +149,7 @@ export default function ProductSurfaceTabs({ activeSurface, states, onSelect, mo
                 type="button"
                 role="tab"
                 aria-label={surface.label}
+                aria-describedby={`product-surface-tab-${surface.id}-status`}
                 aria-selected={selected}
                 aria-controls={controlsPanel ? 'product-surface-panel' : undefined}
                 tabIndex={selected ? 0 : -1}
@@ -156,7 +157,7 @@ export default function ProductSurfaceTabs({ activeSurface, states, onSelect, mo
                 onClick={() => onSelect(surface.id)}
               >
                 <span>{surface.label}</span>
-                <small data-state={status.state}>{status.label}</small>
+                <small id={`product-surface-tab-${surface.id}-status`} data-state={status.state}>{status.label}</small>
                 {sha8 && (
                   <span className="tc-surface-config-chip" data-testid="surface-config-provenance">
                     surface config authored by Claude · {sha8}

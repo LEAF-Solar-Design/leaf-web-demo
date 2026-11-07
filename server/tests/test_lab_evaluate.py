@@ -2,6 +2,7 @@
 from copy import deepcopy
 from dataclasses import FrozenInstanceError
 import json
+import hashlib
 import math
 from pathlib import Path
 from types import SimpleNamespace
@@ -53,6 +54,89 @@ def test_fixture_contract():
     assert FIXTURE["schema"] == "leaf.lab-graph-cases.v1"
     assert len(CASES) >= 25
     assert len({item["name"] for item in CASES}) == len(CASES)
+
+
+def arithmetic_graph(current=1010, open_count=3):
+    """The same pinned topology exercised by canvas.test.jsx; no legacy zero pins."""
+    registry = trusted_registry()
+    specs = [("base", "constant", 1000), ("current", "constant", current),
+             ("open", "constant", open_count), ("scale", "constant", 100),
+             ("change", "subtract", None), ("ratio", "divide", None),
+             ("percent", "multiply", None), ("reconstructed", "add", None)]
+    blocks = [{"id": node, "registry": {"id": kind, "version": "1.0.0",
+               "code_sha256": registry[f"{kind}@1.0.0"]["version"]["code_sha256"]},
+               "settings": {"value": value} if kind == "constant" else {}}
+              for node, kind, value in specs]
+    links = [("current", "change", "value"), ("base", "change", "auxiliary"),
+             ("change", "ratio", "value"), ("base", "ratio", "auxiliary"),
+             ("ratio", "percent", "value"), ("scale", "percent", "auxiliary"),
+             ("base", "reconstructed", "value"), ("change", "reconstructed", "auxiliary")]
+    return {"schema": "leaf.lab-graph.v1", "blocks": blocks,
+            "pipes": [{"from": {"node": node, "port": "result"},
+                       "to": {"node": target, "port": port}} for node, target, port in links],
+            "outputs": {name: {"node": node, "port": "result"} for name, node in (
+                ("total", "current"), ("change", "change"), ("percent", "percent"),
+                ("open", "open"), ("reconstructed", "reconstructed"))}}
+
+
+def test_arithmetic_fixture_contract_and_implementation_provenance():
+    root = Path(__file__).resolve().parents[2]
+    fixture = json.loads((root / "contract/fixtures/lab/blocks.json").read_text(encoding="utf-8"))
+    def digest(value):
+        return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                         ensure_ascii=False).encode("utf-8")).hexdigest()
+    assert len(fixture["manifests"]) == 19
+    assert digest({"source": fixture["source"], "manifests": fixture["manifests"][:14]}) == (
+        "8a0278c47091b2f5c14aa6ba0ae9b462418bb00250c8ee56a1f1f6e8e4153779")
+    local = fixture["local_source"]
+    assert local["normalization"] == "utf8_lf"
+    sources = {path: hashlib.sha256((root / path).read_text(encoding="utf-8").replace(
+        "\r\n", "\n").encode("utf-8")).hexdigest() for path in local["source_sha256"]}
+    assert sources == local["source_sha256"]
+    assert digest(sources) == local["implementation_sha256"]
+    assert local["ids"] == ["constant", "add", "subtract", "multiply", "divide"]
+    for kind in local["ids"]:
+        manifest = trusted_registry()[f"{kind}@1.0.0"]
+        assert manifest["version"]["code_sha256"] == local["implementation_sha256"]
+        assert manifest["effect"] == "pure"
+        assert manifest["lane"] == "processing"
+
+
+@pytest.mark.parametrize("current,open_count,expected", [
+    (1010, 3, {"total": 1010, "change": 10, "percent": 1, "open": 3, "reconstructed": 1010}),
+    (1020, 4, {"total": 1020, "change": 20, "percent": 2, "open": 4, "reconstructed": 1020}),
+])
+def test_arithmetic_pinned_graph(current, open_count, expected):
+    graph = json.loads(json.dumps(arithmetic_graph(current, open_count)))
+    result = evaluate_graph(graph, trusted_registry())
+    assert {name: value.data for name, value in result["outputs"].items()} == expected
+    assert all(value.error is None for value in result["outputs"].values())
+
+
+@pytest.mark.parametrize("kind,inputs", [
+    ("divide", {"value": 1, "auxiliary": 0}),
+    ("add", {"value": "1", "auxiliary": 2}),
+    ("subtract", {"value": 1}),
+    ("multiply", {"value": 1e308, "auxiliary": 1e308}),
+])
+def test_arithmetic_operator_refusals(kind, inputs):
+    result = evaluate_operation(kind, {name: runtime_value(value) for name, value in inputs.items()})
+    assert result.error == "operator-refused"
+    assert result.data is None
+
+
+def test_arithmetic_graph_refusals():
+    graph = arithmetic_graph()
+    graph["pipes"] = [pipe for pipe in graph["pipes"] if not (
+        pipe["to"] == {"node": "ratio", "port": "auxiliary"})]
+    with pytest.raises(GraphRefused, match="lab_graph_input_required"):
+        evaluate_graph(graph, trusted_registry())
+    graph = arithmetic_graph()
+    graph["blocks"][1]["settings"]["value"] = "1020"
+    with pytest.raises(GraphRefused, match="lab_graph_invalid_settings"):
+        evaluate_graph(graph, trusted_registry())
+    with pytest.raises(ValueRefused):
+        runtime_value(math.inf)
 
 
 def test_explicit_no_tool_adapter_keeps_effect_refusal(monkeypatch):

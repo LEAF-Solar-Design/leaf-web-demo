@@ -649,7 +649,7 @@ it('A2-28 preserves conversation entitlement and author build gates', async () =
     seed="Count panels" seedSignal={1} seedAutoSubmit />)
   await flush()
   expect(screen.getByRole('button', { name: 'Generate tool' })).toBeDisabled()
-  expect(screen.getByText(/Upgrade to build/)).toBeInTheDocument()
+  expect(screen.getByText(/Tool authoring is unavailable for this account or site/)).toBeInTheDocument()
   expect(onAuthor).not.toHaveBeenCalled()
 })
 

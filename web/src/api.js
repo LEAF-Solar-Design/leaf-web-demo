@@ -29,6 +29,8 @@ import { track, trackErrorShown } from './telemetry.js'
 import { SecretRefusedError, guardedText } from './lib/secretGuardTransport.js'
 import { createSolarProjectClient } from './solar/solarProjectClient.js'
 import { sameSolarDrawingBinding } from './solar/solarDrawingBinding.js'
+import { notifyActiveScopeChanged, readActiveScope } from './auth/activeScope.js'
+import { serviceState, serviceHeaders, serviceRequestAuthority, authorityStorage, rememberServiceResponse, invalidateServiceResponse } from './lib/serviceAuthSession.js'
 
 // A deployed static bundle talks to the app through the same public origin.
 // Local stacks pass VITE_API_BASE explicitly from .env or docker-compose.
@@ -52,7 +54,205 @@ const AUTH_KEY = 'leaf.jwt'
 const GUEST_SESSION_KEY = 'leaf.guest_session'
 const unauthorizedListeners = new Set()
 
-export const config = { apiBase: API_BASE, mockDefault: MOCK_DEFAULT, tenant: TENANT }
+export const config = { apiBase: API_BASE, get mockDefault() { return serviceState().mode ? false : MOCK_DEFAULT }, tenant: TENANT }
+
+const SOURCE_UUID = /^(?!00000000-0000-0000-0000-000000000000$)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const sourceHash = (value, size) => typeof value === 'string' && new RegExp(`^[0-9a-f]{${size}}$`).test(value)
+const sourceUnavailable = () => new Error('Project source is unavailable. Refresh to review its current state.')
+export function isSourceUuid(value) { return typeof value === 'string' && SOURCE_UUID.test(value) }
+function sourceId(value) {
+  if (!isSourceUuid(value)) throw sourceUnavailable()
+  return value
+}
+const SOURCE_FIELDS = ['schema', 'project_id', 'source_request_id', 'state', 'version', 'receipt_digest',
+  'base_commit', 'source_commit', 'source_tree', 'changed_paths', 'created_at', 'updated_at']
+const SOURCE_STATES = ['staged', 'awaiting_confirmation', 'publishing', 'published', 'rejected',
+  'conflicted', 'failed', 'superseded', 'rolled_back']
+function sourceTimestamp(value) {
+  if (typeof value !== 'string' || value.length > 64
+    || !/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})?$/.test(value)
+    || !Number.isFinite(Date.parse(value))) return false
+  const day = value.slice(0, 10)
+  return new Date(`${day}T00:00:00Z`).toISOString().slice(0, 10) === day
+}
+function sourceProfile(sourceContext = 'browser') {
+  if (sourceContext === 'browser') return { route: 'browser', schema: 'leaf.browser-project-source.v1' }
+  if (sourceContext === 'native') return { route: 'native', schema: 'leaf.native-project-source.v1' }
+  throw sourceUnavailable()
+}
+export function validateProjectSource(value, projectId, requestId, sourceContext = 'browser') {
+  const profile = sourceProfile(sourceContext)
+  if (!value || Object.keys(value).length !== SOURCE_FIELDS.length || SOURCE_FIELDS.some((key) => !Object.hasOwn(value, key))
+    || value.schema !== profile.schema || value.project_id !== projectId
+    || !isSourceUuid(value.project_id) || !isSourceUuid(value.source_request_id)
+    || (requestId && value.source_request_id !== requestId) || !SOURCE_STATES.includes(value.state)
+    || !Number.isInteger(value.version) || value.version < 1 || value.version > 2147483647
+    || !sourceHash(value.receipt_digest, 64) || !sourceHash(value.base_commit, 40)
+    || !sourceHash(value.source_commit, 40) || !sourceHash(value.source_tree, 40)
+    || !Array.isArray(value.changed_paths) || value.changed_paths.length > 1000
+    || value.changed_paths.some((path) => typeof path !== 'string' || !path || path.length > 4096
+      || path.startsWith('/') || path.includes('\\') || path.split('/').some((part) => !part || part === '..' || part === '.') || /[\x00-\x1f]/.test(path))
+    || new Set(value.changed_paths).size !== value.changed_paths.length
+    || !sourceTimestamp(value.created_at) || !sourceTimestamp(value.updated_at)
+    || Date.parse(value.updated_at) < Date.parse(value.created_at)) throw sourceUnavailable()
+  return value
+}
+function sourceBody(action, body, sourceContext) {
+  const fields = action === 'request'
+    ? ['source_request_id', 'requirements', 'source_operation', 'material_refs']
+    : ['receipt_digest', 'expected_version', ...(action === 'confirm' ? ['confirmation_id'] : [])]
+  if (!body || fields.some((key) => !Object.hasOwn(body, key))
+    || Object.keys(body).some((key) => !fields.includes(key) && !(action === 'request' && key === 'expected_base_commit'))) throw sourceUnavailable()
+  if (action === 'request') {
+    sourceId(body.source_request_id)
+    if (sourceContext === 'native' && body.source_operation === 'create' && (!body.material_refs?.length
+      || Object.hasOwn(body, 'expected_base_commit'))) throw sourceUnavailable()
+    if (typeof body.requirements !== 'string' || !body.requirements.trim() || body.requirements.includes('\0')
+      || new TextEncoder().encode(body.requirements).length > 16384
+      || !['create', 'edit'].includes(body.source_operation)
+      || (body.source_operation === 'edit' && !sourceHash(body.expected_base_commit, 40))
+      || (body.expected_base_commit !== undefined && !sourceHash(body.expected_base_commit, 40))
+      || !Array.isArray(body.material_refs) || body.material_refs.length > 8
+      || body.material_refs.some((ref) => !ref || Object.keys(ref).sort().join(',') !== 'material_id,sha256'
+        || !isSourceUuid(ref.material_id) || !sourceHash(ref.sha256, 64))
+      || new Set(body.material_refs.map((ref) => ref.material_id)).size !== body.material_refs.length) throw sourceUnavailable()
+  } else if (!sourceHash(body.receipt_digest, 64) || !Number.isInteger(body.expected_version)
+    || body.expected_version < 1 || body.expected_version > 2147483647
+    || (action === 'confirm' && !isSourceUuid(body.confirmation_id))) throw sourceUnavailable()
+}
+async function projectSourceRequest(projectId, requestId, action, body, { expectedScope, signal, authority, allowSecretOnce = false,
+  sourceContext = 'browser', materialMetadata } = {}) {
+  const profile = sourceProfile(sourceContext)
+  sourceId(projectId)
+  if (requestId !== null) sourceId(requestId)
+  if (action) {
+    sourceBody(action, body, sourceContext)
+    if (sourceContext === 'native' && action === 'request' && materialMetadata !== undefined) {
+      if (!Array.isArray(materialMetadata) || materialMetadata.length !== body.material_refs.length
+        || body.material_refs.some((ref) => {
+          const rows = materialMetadata.filter((row) => row?.material_id === ref.material_id)
+          const row = rows[0]
+          return rows.length !== 1 || row.project_id !== projectId || !isSourceUuid(row.org_id)
+            || !isSourceUuid(row.actor_binding_id) || row.sha256 !== ref.sha256 || typeof row.name !== 'string' || !row.name.trim()
+            || !['text/plain', 'application/json'].includes(row.media_type)
+            || !Number.isInteger(row.byte_size) || row.byte_size < 1 || row.byte_size > 1048576
+        }) || materialMetadata.reduce((total, row) => total + row.byte_size, 0) > 4194304) throw sourceUnavailable()
+    }
+    if (action === 'request') {
+      const verdict = guardedText(body.requirements, { allowSecretOnce })
+      if (!verdict.ok) throw new SecretRefusedError(verdict.refusal)
+    }
+    if ([authority?.session_id, authority?.turn_id].some((id) => typeof id !== 'string' || !id || id.length > 200 || /[\x00-\x20\x7f]/.test(id))) throw sourceUnavailable()
+  }
+  const current = () => expectedScope && !signal?.aborted && readActiveScope() === expectedScope && !!authHeaders().Authorization && !isMockConversation()
+  if (!current()) throw new Error('Sign in to the current account and open this project again.')
+  const path = `/api/projects/${projectId}/${profile.route}/source/requests${requestId ? `/${requestId}` : ''}${action && action !== 'request' ? `/${action}` : ''}`
+  const headers = { ...authHeaders(), ...(body ? { 'Content-Type': 'application/json',
+    'X-Authority-Session-Id': authority.session_id, 'X-Authority-Turn-Id': authority.turn_id } : {}) }
+  const response = await apiFetch(`${API_BASE}${path}`, { method: body ? 'POST' : 'GET', cache: 'no-store',
+    redirect: 'error', signal, headers, ...(body ? { body: JSON.stringify(body) } : {}) }, path)
+  if (!current()) throw sourceUnavailable()
+  if (!response.ok) {
+    const error = new Error(response.status === 409 ? 'Project source changed or its outcome is unknown. Refresh and review.'
+      : response.status === 403 ? 'Project source access denied.' : 'Project source is unavailable. Refresh to review its current state.')
+    error.status = response.status
+    throw error
+  }
+  const raw = await response.text()
+  if (new TextEncoder().encode(raw).length > 262144 || !current()) throw sourceUnavailable()
+  let value
+  try { value = JSON.parse(raw) } catch { throw sourceUnavailable() }
+  if (!body && !requestId) {
+    if (!Array.isArray(value) || value.length > 20 || new Set(value.map((row) => row?.source_request_id)).size !== value.length) throw sourceUnavailable()
+    return value.map((row) => validateProjectSource(row, projectId, undefined, sourceContext))
+  }
+  return validateProjectSource(value, projectId, requestId || body.source_request_id, sourceContext)
+}
+export const listProjectSourceRequests = (projectId, options) => projectSourceRequest(projectId, null, null, null, options)
+export const readProjectSourceRequest = (projectId, requestId, options) => projectSourceRequest(projectId, requestId, null, null, options)
+export const stageProjectSource = (projectId, body, options) => projectSourceRequest(projectId, null, 'request', body, options)
+export const confirmProjectSource = (projectId, requestId, body, options) => projectSourceRequest(projectId, requestId, 'confirm', body, options)
+export const recoverProjectSource = (projectId, requestId, body, options) => projectSourceRequest(projectId, requestId, 'recover', body, options)
+export const rejectProjectSource = (projectId, requestId, body, options) => projectSourceRequest(projectId, requestId, 'reject', body, options)
+
+export async function exportProjectSourceBundle(projectId, candidate, { expectedScope, signal, sourceContext = 'browser' } = {}) {
+  if (sourceProfile(sourceContext).route !== 'browser') throw sourceUnavailable()
+  sourceId(projectId)
+  // Freeze caller witnesses before the first await; they never select a newer version.
+  const row = { ...validateProjectSource(candidate, projectId) }
+  if (row.state !== 'published') throw sourceUnavailable()
+  const current = () => expectedScope && !signal?.aborted && readActiveScope() === expectedScope
+    && !!authHeaders().Authorization && !isMockConversation()
+  const check = () => { if (!current()) throw sourceUnavailable() }
+  check()
+  const query = new URLSearchParams({ source_commit: row.source_commit, source_tree: row.source_tree,
+    receipt_digest: row.receipt_digest, version: String(row.version) })
+  const path = `/api/projects/${projectId}/browser/source/requests/${row.source_request_id}/export?${query}`
+  let response
+  try {
+    response = await apiFetch(`${API_BASE}${path}`, { method: 'GET', cache: 'no-store', redirect: 'error',
+      signal, headers: authHeaders() }, path)
+  } catch { throw sourceUnavailable() }
+  check()
+  if (!response.ok) {
+    throw new Error(response.status === 403 ? 'Project source access denied.'
+      : response.status === 409 ? 'Project source changed. Refresh and review before downloading.'
+        : 'Project source download is unavailable. Try again later.')
+  }
+  const cap = 64 * 1024 * 1024
+  const headers = response.headers
+  const filename = `project-source-${row.source_commit}.bundle`
+  const declared = headers.get('Content-Length')
+  const sha256 = headers.get('X-Leaf-Bundle-Sha256')
+  if (headers.get('Content-Type') !== 'application/octet-stream'
+    || headers.get('Content-Disposition') !== `attachment; filename="${filename}"`
+    || !/^[1-9][0-9]{0,7}$/.test(declared || '') || Number(declared) > cap
+    || !sourceHash(sha256, 64) || headers.get('X-Leaf-Source-Commit') !== row.source_commit
+    || headers.get('X-Leaf-Source-Tree') !== row.source_tree
+    || headers.get('X-Leaf-Source-Version') !== String(row.version)
+    || headers.get('X-Leaf-Source-Receipt-Digest') !== row.receipt_digest
+    || headers.get('Cache-Control') !== 'private, no-store'
+    || headers.get('X-Content-Type-Options') !== 'nosniff'
+    || !['identity', null].includes(headers.get('Content-Encoding'))) throw sourceUnavailable()
+  let bytes
+  if (response.body?.getReader) {
+    // Use the intrinsic brand across realms without trusting a caller-supplied tag.
+    const typedArrayBrand = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), Symbol.toStringTag).get
+    bytes = new Uint8Array(Number(declared))
+    const reader = response.body.getReader()
+    let total = 0, complete = false
+    try {
+      while (true) {
+        check()
+        const { done, value } = await reader.read()
+        check()
+        if (done) { complete = true; break }
+        if (!ArrayBuffer.isView(value) || typedArrayBrand.call(value) !== 'Uint8Array'
+          || total + value.byteLength > Math.min(cap, Number(declared))) throw sourceUnavailable()
+        bytes.set(value, total)
+        total += value.byteLength
+      }
+      if (total !== Number(declared)) throw sourceUnavailable()
+    } finally {
+      if (!complete) { try { await reader.cancel() } catch { /* Discard rejected bytes. */ } }
+      reader.releaseLock()
+    }
+  } else {
+    // Bounded inert responses in tests; real Fetch responses provide a stream.
+    bytes = new Uint8Array(await response.arrayBuffer())
+  }
+  check()
+  if (bytes.byteLength !== Number(declared) || bytes.byteLength > cap || !globalThis.crypto?.subtle) throw sourceUnavailable()
+  const signature = new TextDecoder().decode(bytes.subarray(0, 16))
+  if (!signature.startsWith('# v2 git bundle\n') && !signature.startsWith('# v3 git bundle\n')) throw sourceUnavailable()
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes)
+  check()
+  const actual = Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, '0')).join('')
+  if (actual !== sha256) throw sourceUnavailable()
+  return { blob: new Blob([bytes], { type: 'application/octet-stream' }), filename, sha256,
+    sourceCommit: row.source_commit, sourceTree: row.source_tree, version: row.version,
+    receiptDigest: row.receipt_digest, sourceRequestId: row.source_request_id, projectId }
+}
 
 // Intake and catalog loads carry the shell's current mode, including empty or
 // fixture workspaces that skip intake. Conversation authoring reads that same
@@ -63,6 +263,7 @@ export function isMockConversation() { return conversationMock }
 // Read the bearer token at CALL time (not module load) so a sign-in mid-session
 // is picked up. Returns {} when absent -> merging it is a no-op off-auth.
 export function authHeaders() {
+  if (serviceState().mode) return serviceHeaders(API_BASE)
   try {
     const tok = localStorage.getItem(AUTH_KEY)
     return tok ? { Authorization: `Bearer ${tok}` } : {}
@@ -73,6 +274,7 @@ export function authHeaders() {
 // only for the uploaded-drawing endpoints that the server guest allowlist
 // exposes. It must never flow into run, solve, author, converse, or job calls.
 function storedGuestSession() {
+  if (serviceState().mode) return null
   try { return localStorage.getItem(GUEST_SESSION_KEY) }
   catch { return null }
 }
@@ -114,9 +316,18 @@ export function subscribeUnauthorized(listener) {
 // off a background call the stage never made). `fatal: false` returns the
 // response untouched: no localStorage wipe, no unauthorized listener firing.
 // Every other call site is unchanged (the default stays true).
-export function noteUnauthorized(response, source = 'api', sentAuth = undefined, { fatal = true } = {}) {
+export function noteUnauthorized(response, source = 'api', sentAuth = undefined, { fatal = true, serviceAuthority } = {}) {
   if (response?.status !== 401) return response
   if (!fatal) return response
+  if (typeof sentAuth === 'string' && sentAuth.startsWith('LeafServiceSession ')) {
+    if (!invalidateServiceResponse(response, sentAuth, serviceAuthority)) return response
+    notifyActiveScopeChanged()
+    for (const listener of unauthorizedListeners) {
+      try { listener(source) } catch { /* observer */ }
+    }
+    return response
+  }
+  if (serviceState().mode) return response
   const sentToken = typeof sentAuth === 'string' && sentAuth.startsWith('Bearer ')
     ? sentAuth.slice('Bearer '.length)
     : null
@@ -124,6 +335,7 @@ export function noteUnauthorized(response, source = 'api', sentAuth = undefined,
   try { stored = localStorage.getItem(AUTH_KEY) } catch { /* storage unavailable */ }
   if (!sentToken || !stored || sentToken !== stored) return response
   try { localStorage.removeItem(AUTH_KEY) } catch { /* storage unavailable */ }
+  notifyActiveScopeChanged()
   for (const listener of unauthorizedListeners) {
     try { listener(source) } catch { /* observers cannot change transport behavior */ }
   }
@@ -133,7 +345,8 @@ export function noteUnauthorized(response, source = 'api', sentAuth = undefined,
 async function apiFetch(input, init, source = 'api') {
   // Every api.js call site passes plain-object headers, so the sent bearer is
   // readable directly; a Headers instance would read as undefined -> no wipe.
-  return noteUnauthorized(await fetch(input, init), source, init?.headers?.Authorization)
+  const serviceAuthority = serviceRequestAuthority()
+  return noteUnauthorized(await fetch(input, init), source, init?.headers?.Authorization, { serviceAuthority })
 }
 
 export class BindingGrantError extends Error {
@@ -181,10 +394,11 @@ export function clearRequestFailures() { requestFailures.length = 0 }
 
 async function http(path, opts, timeoutMs = null) {
   const headers = { ...(opts?.headers || {}), ...authHeaders() }
+  const serviceAuthority = serviceRequestAuthority()
   const request = timeoutMs == null
     ? fetch(`${API_BASE}${path}`, { ...opts, headers })
     : fetchWithBudget(fetch, `${API_BASE}${path}`, { ...opts, headers }, timeoutMs)
-  const res = noteUnauthorized(await request, path, headers.Authorization)
+  const res = noteUnauthorized(await request, path, headers.Authorization, { serviceAuthority })
   if (!res.ok) {
     const e = new Error(`${opts?.method || 'GET'} ${path} -> ${res.status}`)
     e.status = res.status // callers gate on 401/403 without string-matching
@@ -381,14 +595,129 @@ const normalizeFamilies = (families) =>
 export function createProjectSolarClient(options = {}) {
   return createSolarProjectClient({
     apiBase: API_BASE,
-    fetchImpl: (...args) => globalThis.fetch(...args),
+    fetchImpl: async (...args) => {
+      const authority = serviceRequestAuthority()
+      return rememberServiceResponse(await globalThis.fetch(...args), authority)
+    },
     authHeaders,
     onUnauthorized: (response, sentAuth) => noteUnauthorized(response, 'project-solar', sentAuth),
     ...options,
   })
 }
 
+// Browser editor material stays on the canonical project's immutable version rail.
+// Capability values are transport inputs only, never retained in a public snapshot.
+export function createProjectDrawingEditorTransport({ fetchImpl = apiFetch } = {}) {
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+  const digest = /^[0-9a-f]{64}$/
+  const maximum = 16 * 1024 * 1024
+  const failure = (status, reason = 'project_editor_unavailable') => Object.assign(
+    new Error('The project drawing operation could not be completed.'), { status, reason })
+  const pathFor = (scope) => {
+    if (!scope || !['organization_id', 'project_id', 'drawing_id'].every((key) => uuid.test(scope[key]))) {
+      throw failure(null, 'project_editor_scope_invalid')
+    }
+    return `/api/projects/${scope.project_id}/drawings/${scope.drawing_id}`
+  }
+  const headersFor = (scope) => ({ ...authHeaders(), 'X-Org-Id': scope.organization_id,
+    'X-Project-Id': scope.project_id, 'X-Tenant-Id': scope.organization_id })
+  async function bounded(response, limit) {
+    if (Number(response.headers.get('content-length')) > limit) throw failure(response.status, 'project_editor_response_invalid')
+    if (!response.body?.getReader) {
+      const bytes = new Uint8Array(await response.arrayBuffer())
+      if (bytes.byteLength > limit) throw failure(response.status, 'project_editor_response_invalid')
+      return bytes
+    }
+    const reader = response.body.getReader()
+    const chunks = []
+    let size = 0
+    try {
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        size += value.byteLength
+        if (size > limit) { await reader.cancel(); throw failure(response.status, 'project_editor_response_invalid') }
+        chunks.push(value)
+      }
+    } finally { reader.releaseLock() }
+    const bytes = new Uint8Array(size)
+    let offset = 0
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
+    return bytes
+  }
+  async function request(scope, path, options, bytes = false) {
+    let response
+    try {
+      response = await fetchImpl(`${API_BASE}${path}`, { cache: 'no-store', redirect: 'error', ...options,
+        signal: options.signal || globalThis.AbortSignal?.timeout?.(30000),
+        headers: { ...headersFor(scope), ...options.headers } }, path)
+    } catch (error) {
+      const refused = failure(null)
+      refused.outcomeUnknown = options.method === 'POST'
+      throw refused
+    }
+    if (!response.ok) {
+      let reason
+      try { reason = JSON.parse(new TextDecoder().decode(await bounded(response, 1024 * 1024)))?.error?.reason_code } catch { /* sanitized refusal */ }
+      const refused = failure(response.status, typeof reason === 'string' && /^[A-Za-z0-9_]+$/.test(reason) ? reason : undefined)
+      refused.outcomeUnknown = options.method === 'POST' && response.status >= 500
+      throw refused
+    }
+    if (bytes) {
+      const source = response.headers.get('X-Leaf-Source-Sha256')
+      if (!digest.test(source || '') || response.headers.get('content-type')?.split(';', 1)[0].trim() !== 'application/dxf') {
+        throw failure(response.status, 'project_editor_response_invalid')
+      }
+      return { bytes: await bounded(response, maximum), source_sha256: source }
+    }
+    try { return JSON.parse(new TextDecoder().decode(await bounded(response, 1024 * 1024))) }
+    catch { const refused = failure(response.status, 'project_editor_response_invalid'); refused.outcomeUnknown = options.method === 'POST'; throw refused }
+  }
+  const versionPath = (scope) => {
+    const path = pathFor(scope)
+    if (!uuid.test(scope.input_version_id)) throw failure(null, 'project_editor_scope_invalid')
+    return `${path}/versions/${scope.input_version_id}`
+  }
+  const writeHeaders = ({ requestId, capability }) => {
+    if (!uuid.test(requestId) || typeof capability !== 'string' || !/^lco1\.[0-9a-f]{64}$/.test(capability)) {
+      throw failure(null, 'project_editor_checkout_required')
+    }
+    return { 'Idempotency-Key': requestId, 'X-Checkout-Capability': capability }
+  }
+  return {
+    read: (scope, { signal } = {}) => request(scope, `${versionPath(scope)}/dxf`, { method: 'GET', signal }, true),
+    save: (scope, bytes, options) => {
+      if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0 || bytes.byteLength > maximum) throw failure(null, 'project_editor_source_invalid')
+      return request(scope, `${versionPath(scope)}/editor`, { method: 'POST', body: bytes, signal: options.signal,
+        headers: { 'Content-Type': 'application/dxf', ...writeHeaders(options) } })
+    },
+    restore: (scope, versionId, options) => {
+      if (!uuid.test(versionId)) throw failure(null, 'project_editor_scope_invalid')
+      return request(scope, `${versionPath(scope)}/editor/restore`, { method: 'POST', body: JSON.stringify({ version_id: versionId }), signal: options.signal,
+        headers: { 'Content-Type': 'application/json', ...writeHeaders(options) } })
+    },
+    acquireCheckout: async (scope) => {
+      const body = await request(scope, `${pathFor(scope)}/checkout`, { method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ holder: 'Project drawing editor' }) })
+      if (body.project_id !== scope.project_id || body.drawing_id !== scope.drawing_id || body.organization_id !== scope.organization_id
+        || body.acquired !== true || !/^lco1\.[0-9a-f]{64}$/.test(body.checkout_capability || '')) throw failure(null, 'project_editor_response_invalid')
+      return { capability: body.checkout_capability }
+    },
+    releaseCheckout: (scope, capability) => request(scope, `${pathFor(scope)}/checkout`, { method: 'DELETE',
+      headers: { 'X-Checkout-Capability': capability } }),
+  }
+}
+
 export async function getCapabilities(mock, context, options = {}) {
+  if (context?.catalogDiscovery) {
+    const { projectId, orgId } = context.catalogDiscovery
+    if (mock || typeof projectId !== 'string' || !projectId.trim() ||
+        typeof orgId !== 'string' || !orgId.trim()) throw new Error('Project tools are unavailable.')
+    const data = await http(`/api/capabilities?project_id=${encodeURIComponent(projectId)}`, {
+      headers: { 'X-Org-Id': orgId, 'X-Project-Id': projectId }, signal: options.signal,
+    }, STARTUP_FETCH_TIMEOUT_MS)
+    return { families: normalizeFamilies(data.families || []), source: 'endpoint' }
+  }
   if (context && Object.hasOwn(context, 'solarBinding') && context.solarBinding !== undefined) {
     const client = options.projectClient
     const snapshot = client?.getSnapshot?.()
@@ -472,14 +801,17 @@ export async function submitSurfaceConfig(overlay) {
 const ORG_KEY = 'leaf.org_id'
 
 export function getStoredOrgId() {
-  try { return localStorage.getItem(ORG_KEY) || null } catch { return null }
+  const service = serviceState()
+  if (service.mode) return service.identity?.org_id || null
+  try { return authorityStorage()?.getItem(ORG_KEY) || null } catch { return null }
 }
 export function setStoredOrgId(id) {
-  try { if (id) localStorage.setItem(ORG_KEY, id); else localStorage.removeItem(ORG_KEY) } catch { /* noop */ }
+  try { if (id) authorityStorage()?.setItem(ORG_KEY, id); else authorityStorage()?.removeItem(ORG_KEY) } catch { /* noop */ }
+  notifyActiveScopeChanged()
 }
 // X-Org-Id header for the stored org (or {} when none — a no-op off-workspace).
 function orgHeaders(orgId) {
-  const id = orgId || getStoredOrgId()
+  const id = serviceState().mode ? getStoredOrgId() : orgId || getStoredOrgId()
   return id ? { 'X-Org-Id': id } : {}
 }
 
@@ -534,7 +866,7 @@ export async function importUploadedDrawingVersion(projectId, { drawingId, versi
     const headers = { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...orgHeaders(), ...authHeaders(), 'Idempotency-Key': idempotencyKey }
     const res = await apiFetch(`${API_BASE}${path}`, {
       method: 'POST', headers, signal: controller.signal,
-      body: JSON.stringify({ source: { drawing_id: drawingId, version }, name }),
+      body: JSON.stringify({ source: { kind: 'account_upload', drawing_id: drawingId, version }, name }),
     }, path)
     const invalid = () => Object.assign(new Error('invalid_response'), { status: res.status, code: 'invalid_response' })
     const successful = res.status >= 200 && res.status < 300
@@ -869,7 +1201,7 @@ export async function getJob(jobId) {
 // GET recent jobs for a tenant (reconnect-after-tab-close list).
 export async function listJobs(tenantId = TENANT, limit = 20) {
   // tenant scope is enforced from the header server-side; the query param is legacy/ignored
-  const data = await http(`/api/jobs?limit=${limit}`, { headers: { 'X-Tenant-Id': tenantId } })
+  const data = await http(`/api/jobs?limit=${limit}&summary=1`, { headers: { 'X-Tenant-Id': tenantId } })
   return data.jobs || []
 }
 
@@ -1361,9 +1693,10 @@ export async function fetchDrawingDxf(drawingId, { version = 'head', etag = null
   const path = `/api/drawings/${encodeURIComponent(drawingId)}/dxf?version=${encodeURIComponent(String(version))}`
   const headers = { 'X-Tenant-Id': TENANT, ...guestDrawingHeaders(drawingId), ...authHeaders() }
   if (etag) headers['If-None-Match'] = etag
+  const serviceAuthority = serviceRequestAuthority()
   const res = noteUnauthorized(
     await fetchWithBudget(fetchImpl, `${API_BASE}${path}`, { headers }, DRAWING_DXF_TIMEOUT_MS),
-    path, headers.Authorization,
+    path, headers.Authorization, { serviceAuthority },
   )
   const meta = {
     version: Number(res.headers.get('x-leaf-version')) || null,
@@ -1454,6 +1787,12 @@ export async function getDrawingVersions(mock, drawingId, { includeDeltas = fals
   })
 }
 
+export async function getDrawingVersionPlan(drawingId, version) {
+  return http(`/api/drawings/${encodeURIComponent(drawingId)}/versions/${encodeURIComponent(version)}/plan`, {
+    headers: { 'X-Tenant-Id': TENANT, ...guestDrawingHeaders(drawingId) },
+  })
+}
+
 // GET /api/operator/sessions -> {sessions:[...]}. Slice 10b's act-scope
 // palette artifact index. Operator-gated at the server (contract/OPERATOR.md
 // §1-2): a caller with no granted operator principal gets 404. That is not a
@@ -1466,28 +1805,24 @@ export async function listOperatorSessions(mock) {
     return await http('/api/operator/sessions', {
       headers: { 'X-Tenant-Id': TENANT },
     }, 4000)
-  } catch {
-    return { sessions: [] }
+  } catch (error) {
+    if (error?.status === 404) return { sessions: [] }
+    throw error
   }
 }
 
 // GET /api/search?q=&drawing_id= — slice 10c's search index, consumed by the
 // bar's find scope. Tenant-scoped and bounded server-side (server/routers/
 // search.py); this wrapper adds its own client-side timeout so a slow
-// backend never stalls the resolver's arrow/Enter keys, and folds any
-// failure into the honest empty-result shape rather than an error the
-// resolver has no row to render.
+// backend never stalls the resolver's arrow/Enter keys. Failures reject so
+// the resolver can show an error and offer a retry.
 export async function searchIndex(mock, q, { drawingId = null } = {}) {
   if (mock) return { query: String(q || ''), results: [] }
   const params = new URLSearchParams({ q: String(q || '') })
   if (drawingId) params.set('drawing_id', drawingId)
-  try {
-    return await http(`/api/search?${params.toString()}`, {
-      headers: { 'X-Tenant-Id': TENANT },
-    }, 4000)
-  } catch {
-    return { query: String(q || ''), results: [] }
-  }
+  return await http(`/api/search?${params.toString()}`, {
+    headers: { 'X-Tenant-Id': TENANT },
+  }, 4000)
 }
 
 // --- Single-writer checkout take / release (3B) -------------------------

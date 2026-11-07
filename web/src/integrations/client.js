@@ -29,7 +29,62 @@ export function validateWebhookReceipt(value, input) {
   return result
 }
 const slug = z.string().regex(/^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\s\S])/).min(1).max(128)
+const operationIds = z.array(slug).min(1).max(100).refine((ids) => new Set(ids).size === ids.length)
 const revision = z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
+const vercelState = z.string().regex(/^[A-Za-z0-9_-]{43}(?![\s\S])/)
+const vercelId = z.string().regex(/^[A-Za-z0-9_-]{1,256}(?![\s\S])/)
+const vercelCode = z.string().regex(/^[A-Za-z0-9_-]{1,2048}(?![\s\S])/)
+const vercelReadRevision = z.number().int().min(1).max(2147483647)
+const vercelWriteRevision = z.number().int().min(1).max(2147483646)
+const vercelSearch = z.string().max(100).refine((value) => !/[\x00-\x1f\x7f-\x9f]/.test(value))
+const vercelName = z.string().min(1).max(256).refine((value) => value.trim().length > 0 && !/[\x00-\x1f\x7f-\x9f]/.test(value))
+const vercelAccount = z.strictObject({ ownerId: vercelId, teamId: vercelId.nullable() })
+  .refine((value) => value.teamId === null || value.teamId === value.ownerId)
+const vercelProjectList = z.strictObject({ revision: vercelReadRevision, account: vercelAccount,
+  projects: z.array(z.strictObject({ id: vercelId, name: vercelName })).max(20)
+    .refine((values) => new Set(values.map((value) => value.id)).size === values.length), truncated: z.boolean() })
+const vercelDestination = z.strictObject({ projectId: vercelId, accountId: vercelId, name: vercelName })
+const vercelDestinationRead = z.strictObject({ revision: vercelReadRevision, account: vercelAccount,
+  destination: vercelDestination.nullable() })
+  .refine((value) => value.destination === null || value.destination.accountId === value.account.ownerId)
+const vercelPreviewPermission = z.strictObject({ enabled: z.boolean(), revision: vercelReadRevision,
+  grantRevision: revision, connectorRef: IntegrationRefV1, account: vercelAccount, destination: vercelDestination })
+  .refine((value) => value.destination.accountId === value.account.ownerId)
+const previewRunId = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![\s\S])/)
+const previewBinding = z.strictObject({ runId: previewRunId, savedRevision: revision })
+const previewUrl = z.string().max(2048).refine((value) => {
+  if (!/^https:\/\/(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+vercel\.app\/?(?![\s\S])/.test(value)) return false
+  try { const url = new URL(value); return url.hostname.length <= 253 && !url.port && !url.username && !url.password }
+  catch { return false }
+})
+const vercelPreviewRun = z.strictObject({ runId: previewRunId, savedRevision: revision,
+  status: z.enum(['uploading', 'creating', 'uncertain', 'submitted', 'ready', 'failed', 'failed_not_sent']),
+  deploymentId: z.string().regex(/^dpl_[A-Za-z0-9_-]{1,252}(?![\s\S])/).nullable(), url: previewUrl.nullable(),
+  reason: z.enum(['creation_unconfirmed', 'upload_unavailable', 'creation_not_sent', 'build_failed', 'build_canceled']).nullable(),
+  observation: z.literal('unavailable').optional(),
+}).refine((value) => (value.status !== 'ready' || (value.deploymentId !== null && value.url !== null && value.reason === null)) &&
+  (value.url === null || value.deploymentId !== null) && (value.status !== 'submitted' || value.deploymentId !== null))
+const vercelIssue = z.strictObject({ state: vercelState, expiresAt: z.string().datetime().max(64),
+  authorizationUrl: z.string().min(1).max(2048), callbackUri: z.string().min(1).max(2048) })
+const vercelCompletion = z.strictObject({ configurationId: vercelId, integrationId: vercelId, userId: vercelId,
+  teamId: vercelId.nullable(), ownerId: vercelId, revision,
+  cleanup: z.enum(['complete', 'needs-attention']) })
+  .refine((value) => value.ownerId === (value.teamId ?? value.userId))
+export function validateVercelDestinations(value, studioOrigin) {
+  const result = parse(vercelIssue, value)
+  try {
+    const auth = new URL(result.authorizationUrl)
+    const callback = new URL(result.callbackUri)
+    if (auth.protocol !== 'https:' || auth.host !== 'vercel.com' || auth.username || auth.password || auth.hash ||
+        result.authorizationUrl.includes('#') || auth.href !== result.authorizationUrl ||
+        !/^\/integrations\/[a-z0-9]+(?:-[a-z0-9]+)*\/new$/.test(auth.pathname) ||
+        [...auth.searchParams.keys()].length !== 1 || auth.searchParams.get('state') !== result.state ||
+        result.callbackUri !== `${studioOrigin}/vercel-callback.html` ||
+        callback.origin !== studioOrigin || callback.pathname !== '/vercel-callback.html' || callback.search ||
+        callback.hash || callback.username || callback.password) throw invalid()
+  } catch { throw invalid() }
+  return result
+}
 const scopeSchema = z.object({
   tenantId: z.string().uuid(), projectId: z.string().uuid(), platformUserId: z.string().uuid(),
   bindingId: z.string().uuid(), projectRole: z.enum(['owner', 'editor', 'reviewer', 'read_only']),
@@ -96,10 +151,42 @@ export function validateWorkflowSchedulePreview(value, input) {
       occurrence.occurrenceKey !== JSON.stringify(['daily', occurrence.timezone, occurrence.hour, occurrence.minute, occurrence.scheduledLocalDate])) throw invalid()
   return result
 }
+const materialLineage = z.strictObject({ kind: z.literal('project_material'), material_id: z.string().regex(UUID),
+  sha256: z.string().regex(/^[0-9a-f]{64}(?![\s\S])/), byte_length: z.number().int().min(1).max(8388608) })
+const forbiddenPointerKeys = new Set(['__proto__', 'prototype', 'constructor'])
+export function canonicalRecordsPointer(value) {
+  if (typeof value !== 'string' || value.length > 1024 || (value !== '' && !value.startsWith('/')) || /~(?:[^01]|$)/.test(value)) throw invalid()
+  const parts = value === '' ? [] : value.slice(1).split('/').map((part) => part.replace(/~1/g, '/').replace(/~0/g, '~'))
+  if (parts.length > 32 || parts.some((part) => forbiddenPointerKeys.has(part))) throw invalid()
+  return parts.length ? '/' + parts.map((part) => part.replace(/~/g, '~0').replace(/\//g, '~1')).join('/') : ''
+}
+export function recordsAtOriginal(original, pointer) {
+  const canonical = canonicalRecordsPointer(pointer)
+  let value = original
+  for (const part of canonical === '' ? [] : canonical.slice(1).split('/').map((key) => key.replace(/~1/g, '/').replace(/~0/g, '~'))) {
+    if (value === null || typeof value !== 'object' || !Object.hasOwn(value, part)) throw invalid()
+    value = value[part]
+  }
+  return value
+}
+const selectedMarker = z.strictObject({ schema: z.literal('leaf.selected-records-reference.v1'),
+  records_pointer: z.string(), row_count: z.number().int().nonnegative() })
+const materialContext = z.strictObject({ schema: z.literal('leaf.project-material-context.v1'), source: materialLineage,
+  selection: z.strictObject({ records_pointer: z.string() }), row_count: z.number().int().nonnegative(), envelope: z.unknown() })
+  .superRefine((value, ctx) => {
+    try {
+      boundedIntegrationBody(value)
+      const pointer = canonicalRecordsPointer(value.selection.records_pointer)
+      if (!pointer || pointer !== value.selection.records_pointer) throw invalid()
+      const marker = parse(selectedMarker, recordsAtOriginal(value.envelope, pointer))
+      if (marker.records_pointer !== pointer || marker.row_count !== value.row_count) throw invalid()
+    } catch { ctx.addIssue({ code: 'custom', message: 'Material context is unavailable or too large.' }) }
+  })
 const metadata = z.object({
   reference: IntegrationRefV1, revision, title: z.string().min(1).max(120),
   fields: z.array(DatasetFieldV1).min(1).max(100).refine((fields) => new Set(fields.map((field) => field.id)).size === fields.length),
   lastAttempt: z.unknown(), freshness: z.unknown(),
+  material_context: materialContext.optional(),
 })
 
 const title = z.string().min(1).max(120)
@@ -154,6 +241,23 @@ const registrationSchema = z.strictObject({ definition: DatasetDefinitionV1, map
   .refine(({ definition, mapping }) => definition.fields.length === mapping.fields.length &&
     definition.fields.every((field) => mapping.fields.some((entry) => entry.field_id === field.id)) &&
     definition.lineage.transform_ref === undefined)
+
+// Host-only lineage branch; safeExtend retains every common public refinement.
+const materialDefinition = DatasetDefinitionV1.safeExtend({ lineage: materialLineage })
+const materialImport = z.strictObject({ definition: materialDefinition, mapping: TransformMappingV1,
+  selection: z.strictObject({ records_pointer: z.string() }).optional() })
+  .refine(({ definition, mapping }) => definition.fields.length === mapping.fields.length &&
+    definition.fields.every((field) => mapping.fields.some((entry) => entry.field_id === field.id)))
+export function validateMaterialImport(value) {
+  const body = parse(materialImport, value)
+  if (body.selection) {
+    const pointer = canonicalRecordsPointer(body.selection.records_pointer)
+    if (pointer) body.selection = { records_pointer: pointer }
+    else delete body.selection
+  }
+  boundedIntegrationBody(body, 163840)
+  return body
+}
 
 export function boundedIntegrationBody(body, limit = 262144) {
   let encoded
@@ -210,13 +314,13 @@ async function boundedJson(response, signal) {
   let size = 0
   try {
     if (!/^application\/(?:json|[a-z0-9.+-]+\+json)(?:\s*;|$)/i.test(response.headers.get('content-type') || '')) throw invalid()
-    if (Number(response.headers.get('content-length')) > 262144) throw invalid()
+    if (Number(response.headers.get('content-length')) > 262144) throw new IntegrationError(0, 'Integration data is too large to display. The original and last valid dataset are retained.')
     while (true) {
       if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
       const { done, value } = await reader.read()
       if (done) break
       size += value.byteLength
-      if (size > 262144) throw invalid()
+      if (size > 262144) throw new IntegrationError(0, 'Integration data is too large to display. The original and last valid dataset are retained.')
       chunks.push(value)
     }
     if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
@@ -226,7 +330,7 @@ async function boundedJson(response, signal) {
     return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
   } catch (error) {
     await reader.cancel().catch(() => {})
-    if (error?.name === 'AbortError') throw error
+    if (error instanceof IntegrationError || error?.name === 'AbortError') throw error
     throw invalid()
   } finally { signal.removeEventListener('abort', abort); reader.releaseLock() }
 }
@@ -400,7 +504,7 @@ export function createIntegrationsClient({ origin = import.meta.env.VITE_INTEGRA
     },
     async publishConnector(id, connectorId, input, options) {
       parse(slug, connectorId)
-      const body = parse(z.strictObject({ version: revision, expectedRevision: revision, readOperationIds: z.array(slug).length(1) }), input)
+      const body = parse(z.strictObject({ version: revision, expectedRevision: revision, readOperationIds: operationIds }), input)
       return setupResponse(refResult, id, `connectors/${connectorId}/publish`, { ...options, method: 'POST', body },
         (value) => value.reference.id === connectorId && value.reference.version === body.version)
     },
@@ -415,14 +519,76 @@ export function createIntegrationsClient({ origin = import.meta.env.VITE_INTEGRA
     },
     async createConnection(id, input, options) {
       const body = parse(z.strictObject({ id: slug, title, connectorRef: IntegrationRefV1, origin: ConnectionV1.shape.origin,
-        operationIds: z.array(slug).length(1) }), input)
+        operationIds }), input)
       return setupResponse(ownerConnection, id, 'connections', { ...options, method: 'POST', body },
         (value) => value.id === body.id && value.title === body.title && sameRef(value.connector_ref, body.connectorRef) &&
-          value.origin === body.origin && value.operation_ids.length === 1 && value.operation_ids[0] === body.operationIds[0])
+          value.origin === body.origin && value.operation_ids.length === body.operationIds.length &&
+          body.operationIds.every((operationId) => value.operation_ids.includes(operationId)))
     },
     async getConnectionSummary(id, connectionId, options) {
       parse(slug, connectionId)
       return setupResponse(ownerConnection, id, `connections/${connectionId}`, options, (value) => value.id === connectionId)
+    },
+    async issueVercelConnection(id, connectionId, input, options) {
+      parse(slug, connectionId)
+      const body = parse(z.strictObject({ expectedRevision: revision }), input)
+      return setupResponse(vercelIssue, id, `connections/${connectionId}/vercel/attempt`,
+        { ...options, method: 'POST', body, bodyLimit: 4096 })
+    },
+    async completeVercelConnection(id, connectionId, input, options) {
+      parse(slug, connectionId)
+      const body = parse(z.strictObject({ expectedRevision: revision, state: vercelState, code: vercelCode, configurationId: vercelId }), input)
+      return setupResponse(vercelCompletion, id, `connections/${connectionId}/vercel/complete`,
+        { ...options, method: 'POST', body, bodyLimit: 4096 },
+        (value) => value.configurationId === body.configurationId && value.revision > body.expectedRevision)
+    },
+    async listVercelProjects(id, connectionId, input, options) {
+      parse(slug, connectionId)
+      const query = parse(z.strictObject({ expectedRevision: vercelReadRevision, search: vercelSearch.optional() }), input)
+      const params = new URLSearchParams({ expectedRevision: String(query.expectedRevision) })
+      if (query.search !== undefined) params.set('search', query.search)
+      return setupResponse(vercelProjectList, id, `connections/${connectionId}/vercel/projects?${params}`,
+        { signal: options?.signal, method: 'GET', bodyLimit: 4096 }, (value) => value.revision === query.expectedRevision)
+    },
+    async selectVercelProject(id, connectionId, input, options) {
+      parse(slug, connectionId)
+      const body = parse(z.strictObject({ expectedRevision: vercelWriteRevision, projectId: vercelId, search: vercelSearch.optional() }), input)
+      return setupResponse(vercelDestinationRead, id, `connections/${connectionId}/vercel/destination`,
+        { signal: options?.signal, method: 'PUT', body, bodyLimit: 4096 },
+        (value) => value.revision > body.expectedRevision && value.destination?.projectId === body.projectId)
+    },
+    async getVercelDestination(id, connectionId, options) {
+      parse(slug, connectionId)
+      return setupResponse(vercelDestinationRead, id, `connections/${connectionId}/vercel/destination`,
+        { signal: options?.signal, method: 'GET', bodyLimit: 4096 })
+    },
+    async getVercelPreviewPermission(id, connectionId, { signal } = {}) {
+      parse(slug, connectionId)
+      return setupResponse(vercelPreviewPermission, id, `connections/${connectionId}/vercel/preview-permission`, { signal, method: 'GET' })
+    },
+    async enableVercelPreviews(id, connectionId, input, { signal } = {}) {
+      parse(slug, connectionId)
+      const body = parse(z.strictObject({ expectedConnectionRevision: vercelReadRevision, expectedGrantRevision: revision }), input)
+      return setupResponse(vercelPreviewPermission, id, `connections/${connectionId}/vercel/preview-permission`,
+        { signal, method: 'PUT', body, bodyLimit: 4096 }, (value) => value.enabled &&
+          value.revision >= body.expectedConnectionRevision && value.grantRevision >= body.expectedGrantRevision)
+    },
+    async createVercelPreviewRun(id, input, { signal } = {}) {
+      const body = parse(z.strictObject({ runId: previewRunId, connectionId: slug, savedRevision: revision,
+        expectedConnectionRevision: vercelReadRevision, expectedGrantRevision: revision }), input)
+      return setupResponse(vercelPreviewRun, id, 'vercel-preview-runs', { signal, method: 'POST', body, bodyLimit: 4096 },
+        (value) => value.runId === body.runId && value.savedRevision === body.savedRevision)
+    },
+    async getVercelPreviewRun(id, runId, savedRevision, { signal } = {}) {
+      const expected = parse(previewBinding, { runId, savedRevision })
+      return setupResponse(vercelPreviewRun, id, `vercel-preview-runs/${expected.runId}`, { signal, method: 'GET' },
+        (value) => value.runId === expected.runId && value.savedRevision === expected.savedRevision)
+    },
+    async observeVercelPreviewRun(id, runId, savedRevision, { signal } = {}) {
+      const expected = parse(previewBinding, { runId, savedRevision })
+      return setupResponse(vercelPreviewRun, id, `vercel-preview-runs/${expected.runId}/observe`,
+        { signal, method: 'POST', body: {}, bodyLimit: 1024 },
+        (value) => value.runId === expected.runId && value.savedRevision === expected.savedRevision)
     },
     async revokeConnection(id, connectionId, expectedRevision, options) {
       parse(slug, connectionId); parse(revision, expectedRevision)
@@ -442,6 +608,13 @@ export function createIntegrationsClient({ origin = import.meta.env.VITE_INTEGRA
       const body = validateDatasetRegistration(input)
       return setupResponse(refResult, id, 'datasets', { ...options, method: 'POST', body, bodyLimit: 163840 },
         (value) => value.reference.id === body.definition.id && value.reference.version === body.definition.version)
+    },
+    async importProjectMaterial(id, input, { signal } = {}) {
+      const body = validateMaterialImport(input)
+      return setupResponse(z.strictObject({ reference: IntegrationRefV1, revision,
+        rowCount: z.number().int().nonnegative(), status: z.literal('complete') }), id, 'dataset-imports',
+      { signal, method: 'POST', body, bodyLimit: 163840 },
+      (value) => value.reference.id === body.definition.id && value.reference.version === body.definition.version)
     },
     async getDataset(id, reference, { revision: expected, ...options } = {}) {
       const ref = parse(IntegrationRefV1, reference)

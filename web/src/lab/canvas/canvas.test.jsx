@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { resolve } from 'node:path'
 import { StrictMode } from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
@@ -7,9 +8,11 @@ import LabCanvas from './LabCanvas.jsx'
 import GraphView from './GraphView.jsx'
 import { Measurement } from './LatencyPipe.jsx'
 import { BLOCK_MIME } from './Palette.jsx'
-import { contract, manifests, manifestFor, resolveManifest } from './registry.js'
+import { contract, manifests, manifestFor, resolveManifest, registry, registrySource, localSource } from './registry.js'
+import { canonicalJSON } from '../contract.js'
+import { evaluateGraph, evaluateOperation, runtimeValue } from '../runtime/evaluate.js'
 import { ELEMENT_FAMILIES, LANES } from './elementCatalog.js'
-import { addBlock, connectPipe, emptyGraph, inputValues, missingInputs, updateSettings, validateGraph } from './graphDoc.js'
+import { addBlock, connectPipe, emptyGraph, inputValues, missingInputs, removeBlock, removeOutput, roundTrip, setOutput, updateSettings, validateGraph } from './graphDoc.js'
 import { dependencyLayout, dependencyRanks } from './dependencyLayout.js'
 import * as layout from './dependencyLayout.js'
 
@@ -115,12 +118,139 @@ const pressEnter = button => {
   fireEvent.click(button, { detail: 0 })
 }
 
+function arithmeticGraph(current = 1010, open = 3) {
+  const specs = [['base', 'constant', 1000], ['current', 'constant', current], ['open', 'constant', open],
+    ['scale', 'constant', 100], ['change', 'subtract'], ['ratio', 'divide'], ['percent', 'multiply'], ['reconstructed', 'add']]
+  const blocks = specs.map(([id, kind, value]) => ({ id, registry: { id: kind, version: '1.0.0',
+    code_sha256: registry[`${kind}@1.0.0`].version.code_sha256 }, settings: kind === 'constant' ? { value } : {} }))
+  const links = [['current', 'change', 'value'], ['base', 'change', 'auxiliary'], ['change', 'ratio', 'value'],
+    ['base', 'ratio', 'auxiliary'], ['ratio', 'percent', 'value'], ['scale', 'percent', 'auxiliary'],
+    ['base', 'reconstructed', 'value'], ['change', 'reconstructed', 'auxiliary']]
+  return { schema: 'leaf.lab-graph.v1', blocks,
+    pipes: links.map(([node, target, port]) => ({ from: { node, port: 'result' }, to: { node: target, port } })),
+    outputs: Object.fromEntries([['total', 'current'], ['change', 'change'], ['percent', 'percent'], ['open', 'open'],
+      ['reconstructed', 'reconstructed']].map(([name, node]) => [name, { node, port: 'result' }])) }
+}
+
+describe('arithmetic', () => {
+  it('pins nineteen manifests and preserves imported provenance and implementation bytes', () => {
+    const fixture = JSON.parse(readFileSync(resolve(process.cwd(), '../contract/fixtures/lab/blocks.json'), 'utf8'))
+    const hash = value => createHash('sha256').update(value).digest('hex')
+    expect(manifests).toHaveLength(19)
+    expect(manifests).toEqual(fixture.manifests)
+    expect(registrySource).toEqual(fixture.source)
+    expect(localSource).toEqual(fixture.local_source)
+    expect(hash(canonicalJSON({ source: registrySource, manifests: manifests.slice(0, 14) })))
+      .toBe('8a0278c47091b2f5c14aa6ba0ae9b462418bb00250c8ee56a1f1f6e8e4153779')
+    expect(localSource.normalization).toBe('utf8_lf')
+    const sources = Object.fromEntries(Object.keys(localSource.source_sha256).map(path => [path,
+      hash(readFileSync(resolve(process.cwd(), '..', path), 'utf8').replaceAll('\r\n', '\n'))]))
+    expect(sources).toEqual(localSource.source_sha256)
+    expect(hash(canonicalJSON(sources))).toBe(localSource.implementation_sha256)
+    for (const id of localSource.ids) {
+      const item = registry[`${id}@1.0.0`]
+      expect(item.version.code_sha256).toBe(localSource.implementation_sha256)
+      expect(contract.block(item, item)).toBe(true)
+    }
+  })
+
+  it('evaluates settings through all five pinned operators and refuses unsafe arithmetic', () => {
+    for (const [current, open, expected] of [[1010, 3, [1010, 10, 1, 3, 1010]], [1020, 4, [1020, 20, 2, 4, 1020]]]) {
+      const graph = roundTrip(arithmeticGraph(current, open))
+      expect(contract.graph(graph, registry)).toBe(true)
+      const result = evaluateGraph(graph, registry)
+      expect(['total', 'change', 'percent', 'open', 'reconstructed'].map(name => result.outputs[name].data)).toEqual(expected)
+      expect(Object.values(result.outputs).every(value => value.error === null)).toBe(true)
+    }
+    for (const [id, inputs] of [['divide', { value: 1, auxiliary: 0 }], ['add', { value: '1', auxiliary: 2 }],
+      ['subtract', { value: 1 }], ['multiply', { value: 1e308, auxiliary: 1e308 }]]) {
+      expect(evaluateOperation(id, Object.fromEntries(Object.entries(inputs).map(([key, value]) => [key, runtimeValue(value)]))).error)
+        .toEqual({ code: 'operator-refused' })
+    }
+    expect(() => runtimeValue(Infinity)).toThrow()
+    const missing = arithmeticGraph()
+    missing.pipes = missing.pipes.filter(pipe => pipe.to.node !== 'ratio' || pipe.to.port !== 'auxiliary')
+    expect(() => evaluateGraph(missing, registry)).toThrow()
+  })
+
+  it('edits named outputs immutably and refuses invalid, stale and colliding endpoints', () => {
+    const graph = arithmeticGraph()
+    const before = roundTrip(graph)
+    expect(setOutput(graph, 'total', graph.outputs.total)).toEqual(graph)
+    for (const name of ['', 'Bad name', 'a'.repeat(65), 'bad_name']) expect(() => setOutput(graph, name, graph.outputs.total)).toThrow()
+    for (const endpoint of [{ node: 'absent', port: 'result' }, { node: 'current', port: 'absent' }]) {
+      expect(() => setOutput(graph, 'new', endpoint)).toThrow()
+    }
+    const stale = roundTrip(graph)
+    stale.blocks[1].registry.code_sha256 = 'f'.repeat(64)
+    expect(() => setOutput(stale, 'new', graph.outputs.total)).toThrow(/code changed/)
+    stale.blocks[1].registry.id = 'unknown'
+    expect(() => setOutput(stale, 'new', graph.outputs.total)).toThrow(/unknown block/)
+    expect(() => setOutput(graph, 'total', graph.outputs.open)).toThrow(/another endpoint/)
+    const full = { ...graph, outputs: Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`out-${i}`, graph.outputs.total])) }
+    expect(() => setOutput(full, 'extra', graph.outputs.total)).toThrow()
+    const removed = removeOutput(graph, 'total')
+    expect(removed.outputs).toEqual(Object.fromEntries(Object.entries(graph.outputs).filter(([name]) => name !== 'total')))
+    expect(removeBlock(graph, 'current').outputs.total).toBeUndefined()
+    expect(graph).toEqual(before)
+  })
+
+  it('uses mounted Number setup, ordinary connection selectors and output add/remove controls', async () => {
+    const changes = vi.fn()
+    const view = render(<LabCanvas onChange={changes} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Number', exact: true }))
+    fireEvent.change(screen.getByLabelText('value (required)', { exact: true }), { target: { value: '1000' } })
+    fireEvent.change(screen.getByLabelText('label (optional)', { exact: true }), { target: { value: 'Starting amount' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save settings', exact: true }))
+    fireEvent.click(screen.getByRole('button', { name: 'Number', exact: true }))
+    fireEvent.change(screen.getByLabelText('value (required)', { exact: true }), { target: { value: '10' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save settings', exact: true }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add', exact: true }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Configure', exact: true }))
+    for (const [port, node] of [['value', 'constant-1'], ['auxiliary', 'constant-2']]) {
+      fireEvent.change(screen.getByLabelText('Input', { exact: true }), { target: { value: port } })
+      fireEvent.change(screen.getByLabelText('Source', { exact: true }), { target: { value: JSON.stringify({ node, port: 'result' }) } })
+      fireEvent.click(screen.getByRole('button', { name: 'Connect pipe', exact: true }))
+    }
+    fireEvent.change(screen.getByLabelText('Output port'), { target: { value: 'result' } })
+    fireEvent.change(screen.getByLabelText('Output name'), { target: { value: 'Bad name' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add output', exact: true }))
+    expect(changes.mock.calls.at(-1)[0].document.outputs).toEqual({})
+    expect(within(screen.getByRole('region', { name: 'Block inspector' })).getByRole('status')).not.toHaveTextContent('Output added')
+    fireEvent.change(screen.getByLabelText('Output name'), { target: { value: 'total' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add output', exact: true }))
+    const saved = roundTrip(changes.mock.calls.at(-1)[0].document)
+    expect(saved.outputs).toEqual({ total: { node: 'add-1', port: 'result' } })
+    expect(evaluateGraph(saved, registry).outputs.total.data).toBe(1010)
+    fireEvent.click(screen.getByRole('button', { name: 'Select constant-1' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Configure', exact: true }))
+    fireEvent.change(screen.getByLabelText('Output port'), { target: { value: 'result' } })
+    fireEvent.change(screen.getByLabelText('Output name'), { target: { value: 'total' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add output', exact: true }))
+    expect(within(screen.getByRole('region', { name: 'Block inspector' })).getByRole('status')).toHaveTextContent('another endpoint')
+    expect(changes.mock.calls.at(-1)[0].document).toEqual(saved)
+    fireEvent.change(screen.getByLabelText('Output name'), { target: { value: 'base' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add output', exact: true }))
+    fireEvent.click(screen.getByRole('button', { name: 'Select add-1' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Configure', exact: true }))
+    fireEvent.click(screen.getByRole('button', { name: 'Remove output total' }))
+    expect(changes.mock.calls.at(-1)[0].document.outputs).toEqual({ base: { node: 'constant-1', port: 'result' } })
+    view.unmount()
+    render(<LabCanvas initialDocument={saved} onChange={changes} />)
+    expect(changes.mock.calls.at(-1)[0].document).toEqual(saved)
+    fireEvent.click(screen.getByRole('button', { name: 'Select add-1' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Configure', exact: true }))
+    expect(screen.getByRole('button', { name: 'Remove output total' })).toBeInTheDocument()
+    await act(async () => {})
+  })
+})
+
 describe('registry and deterministic dependencies', () => {
-  it('retains the trusted fixture manifests and exactly twelve families and nine Lanes', () => {
+  it('arithmetic registry retains the trusted fixture manifests and exactly seventeen families and nine Lanes', () => {
     const fixture = JSON.parse(readFileSync(resolve(process.cwd(), '../contract/fixtures/lab/blocks.json'), 'utf8'))
     expect(manifests).toEqual(fixture.manifests)
     manifests.forEach(item => expect(contract.block(item, item)).toBe(true))
-    expect(ELEMENT_FAMILIES).toHaveLength(12)
+    expect(ELEMENT_FAMILIES).toHaveLength(17)
     expect(LANES.map(lane => lane.title)).toEqual(['Processing', 'Ordering', 'Cash out', 'Strategies', 'Sizing', 'Admission', 'Observation', 'Capture', 'Lifecycle'])
   })
   it('aligns independent blocks, then ranks forks only from drawn pipes', async () => {
@@ -253,7 +383,7 @@ describe('canvas authoring', () => {
     render(<GraphView client={artifactsClient} initialDocument={initial} onRun={onRun} />)
     await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })
     const readiness = within(screen.getByRole('region', { name: 'Graph readiness' }))
-    expect(readiness.getByRole('status')).toHaveTextContent('Ready')
+    await waitFor(() => expect(readiness.getByRole('status')).toHaveTextContent('Ready'))
     expect(readiness.queryByRole('list')).not.toBeInTheDocument()
     const run = readiness.getByRole('button', { name: 'Run graph' })
     expect(run).toBeEnabled()
@@ -306,7 +436,8 @@ describe('canvas authoring', () => {
   })
   it('supports palette drag/drop and keeps Strategy limited to Signals and Rules', async () => {
     const { container } = render(<LabCanvas />)
-    expect(container.querySelectorAll('[data-element-family]')).toHaveLength(12)
+    expect(Array.from(container.querySelectorAll('[data-element-family]'),
+      element => element.dataset.elementFamily).sort()).toEqual(ELEMENT_FAMILIES.map(family => family.id).sort())
     const dataTransfer = { setData: vi.fn(), getData: vi.fn(() => 'adjust-none'), effectAllowed: '' }
     fireEvent.dragStart(within(container.querySelector('[data-element-family="adjust"]')).getAllByRole('button', { name: 'Strategy' })[0], { dataTransfer })
     expect(dataTransfer.setData).toHaveBeenCalledWith(BLOCK_MIME, 'adjust-none')
@@ -470,7 +601,7 @@ describe('canvas authoring', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Disconnect value' }))
     } else fireEvent.click(screen.getByRole('button', { name: 'Delete first pipe' }))
     expect(changed).toHaveBeenCalledTimes(2)
-    expect(changed.mock.calls[1][0]).toEqual({ document: initial, ready: false, problems: ['Test: input required'] })
+    expect(changed.mock.calls[1][0]).toEqual({ document: initial, ready: false, problems: [`${required.title}: input "value" needs a connection`] })
     expect(connected.document.pipes).toEqual([pipe])
 
     fireEvent.click(screen.getByRole('button', { name: 'Connect first pair' }))
@@ -497,7 +628,7 @@ describe('canvas authoring', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete first pipe' }))
     expect(readiness.getByRole('status')).toHaveTextContent('No valid graph')
-    expect(readiness.getByRole('listitem')).toHaveTextContent('Test: input required')
+    expect(readiness.getByRole('listitem')).toHaveTextContent(`${required.title}: input "value" needs a connection`)
     expect(run).toBeDisabled()
     fireEvent.click(run)
     expect(onRun).toHaveBeenCalledTimes(1)
@@ -722,5 +853,83 @@ describe('layout runner cancellation', () => {
     pending.resolve({ children: [{ id: 'adjust-none-1', x: 999 }] })
     runner.cancel()
     expect(secondWorker.terminateWorker).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('palette placement and actionable graph readiness', () => {
+  it('places three palette clicks in distinct, non-intersecting card boxes', () => {
+    render(<LabCanvas entries={entriesOf(manifest)} />)
+    vi.spyOn(screen.getByTestId('flow').parentElement, 'getBoundingClientRect')
+      .mockReturnValue({ left: 100, top: 60, width: 600, height: 400 })
+    const button = within(screen.getByRole('region', { name: 'Strategy palette' })).getByRole('button', { name: 'Strategy' })
+    for (let index = 0; index < 3; index += 1) fireEvent.click(button)
+    const positions = [1, 2, 3].map(index => JSON.parse(screen.getByTestId(`adjust-none-${index}`).getAttribute('data-position')))
+    expect(positions).toEqual([{ x: 400, y: 260 }, { x: 740, y: 260 }, { x: 1080, y: 260 }])
+    expect(new Set(positions.map(point => JSON.stringify(point))).size).toBe(3)
+    positions.forEach((point, index) => {
+      for (const other of positions.slice(index + 1)) {
+        expect(point.x < other.x + 310 && point.x + 310 > other.x &&
+          point.y < other.y + 360 && point.y + 360 > other.y).toBe(false)
+      }
+    })
+  })
+
+  it('preserves an explicit drop position even when that spot is occupied', () => {
+    render(<LabCanvas entries={entriesOf(manifest)} />)
+    const canvas = screen.getByTestId('flow').parentElement
+    const drop = () => fireEvent.drop(canvas, {
+      dataTransfer: { getData: type => type === BLOCK_MIME ? manifest.id : '' }, clientX: 120, clientY: 90,
+    })
+    drop()
+    const position = screen.getByTestId('adjust-none-1').getAttribute('data-position')
+    drop()
+    expect(screen.getByTestId('adjust-none-2')).toHaveAttribute('data-position', position)
+  })
+
+  it('names each missing top-level setting and its block in document order', () => {
+    const required = { ...manifest, title: 'Configured strategy', settings_schema: {
+      type: 'object', additionalProperties: false, properties: { first: { type: 'number' }, second: { type: 'number' } }, required: ['first', 'second'],
+    } }
+    const document = addBlock(addBlock(emptyGraph(), required), required)
+    document.blocks[1].settings = { first: 0 }
+    const problems = ['Configured strategy: setting "first" is required',
+      'Configured strategy: setting "second" is required', 'Configured strategy: setting "second" is required']
+    expect(validateGraph(document, entriesOf(required))).toMatchObject({ ready: false, problems, message: problems.join('; ') })
+  })
+
+  it('names a required unconnected input while allowing an input with a default', () => {
+    const required = { ...manifest, title: 'Connected strategy', inputs: {
+      value: { ...manifest.inputs.value, required: true, has_default: false },
+      auxiliary: { ...manifest.inputs.auxiliary, required: true, has_default: true, default: 0 },
+    } }
+    expect(validateGraph(addBlock(emptyGraph(), required), entriesOf(required))).toMatchObject({
+      ready: false, problems: ['Connected strategy: input "value" needs a connection'],
+      message: 'Connected strategy: input "value" needs a connection',
+    })
+  })
+
+  it('still validates a complete graph with required settings and a connected input as Ready', () => {
+    const required = { ...manifest, id: 'complete-strategy', inputs: {
+      value: { ...manifest.inputs.value, required: true, has_default: false },
+    }, settings_schema: { type: 'object', additionalProperties: false, properties: { amount: { type: 'number' } }, required: ['amount'] } }
+    const entries = entriesOf(manifest, required)
+    let document = addBlock(documentOf(1), required)
+    document = updateSettings(document, 'complete-strategy-1', { amount: 0 }, entries)
+    document = connectPipe(document, { from: { node: 'adjust-none-1', port: 'result' },
+      to: { node: 'complete-strategy-1', port: 'value' } }, entries)
+    expect(contract.graph(document, entries)).toBe(true)
+    expect(validateGraph(document, entries)).toMatchObject({ ready: true, problems: [], message: 'Ready' })
+  })
+
+  it('preserves contract errors when required fields are present but invalid', () => {
+    const required = { ...manifest, settings_schema: {
+      type: 'object', additionalProperties: false, properties: { amount: { type: 'number' } }, required: ['amount'],
+    } }
+    const document = addBlock(emptyGraph(), required)
+    document.blocks[0].settings = { amount: 'invalid' }
+    let message
+    try { contract.graph(document, entriesOf(required)) } catch (error) { message = error.message }
+    expect(message).toBeTruthy()
+    expect(validateGraph(document, entriesOf(required))).toMatchObject({ ready: false, problems: [message], message })
   })
 })

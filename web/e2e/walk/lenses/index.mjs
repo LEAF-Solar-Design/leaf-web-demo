@@ -90,7 +90,8 @@ export const accessibility = lens('accessibility', [predicate('accessibility.dia
   'focus.openTarget': nonempty, 'focus.actualOpenTarget': nonempty,
   'focus.tabRemainsInside': bool, 'focus.escapeClosed': bool,
   'focus.returnTarget': nonempty, 'focus.actualReturnTarget': nonempty,
-}, (m) => m.overlay.role === 'dialog' && m.overlay.name.trim() !== '' && m.overlay.modal
+}, (m) => m.overlay.role === 'dialog' && m.overlay.name.trim() !== ''
+  && m.overlay.modal === (typeof m.overlay.expectedModal === 'boolean' ? m.overlay.expectedModal : true)
   && m.focus.openTarget === m.focus.actualOpenTarget && m.focus.tabRemainsInside
   && m.focus.escapeClosed && m.focus.returnTarget === m.focus.actualReturnTarget,
 parts('Dialog semantics or keyboard transitions failed.', 'The overlay does not preserve its declared dialog and focus contract.',

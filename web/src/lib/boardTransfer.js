@@ -47,7 +47,7 @@ export function describePreviewOutcome(seq, view) {
 
 export function createPreviewRunner() {
   let pending = null
-  return (seq, preview, setStatus) => {
+  const run = (seq, preview, setStatus) => {
     if (pending !== null) {
       setStatus(`Wait for v${pending} to finish loading.`)
       return false
@@ -66,4 +66,6 @@ export function createPreviewRunner() {
     )
     return true
   }
+  run.isPending = () => pending !== null
+  return run
 }

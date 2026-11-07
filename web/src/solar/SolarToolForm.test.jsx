@@ -10,6 +10,8 @@ import snapshot from '../../../docs/parity/evidence/ground/generate/profile-sett
 import writeTools from '../../../server/write_tools.json'
 import SolarStepEditor from './SolarStepEditor.jsx'
 import { createSolarProjectClient } from './solarProjectClient.js'
+import workerUnavailable from './__fixtures__/workerUnavailable.json'
+import { projectSolarWorkerRefusal } from './solarProjectCompletion.js'
 import { SEED_SETTINGS } from './solarSettingsModel.js'
 import { PROJECT_EQUIPMENT_TOOL, deriveProjectEquipmentState, buildProjectEquipmentRequest,
   exactProjectEquipmentPreview, projectSolarFlowReason, solarFlowStepId } from './solarFlowModel.js'
@@ -99,6 +101,26 @@ async function equipmentMount(h = equipmentHarness()) {
   await equipmentReady()
   return { h, view }
 }
+
+it.each([true, false])('G20b equipment worker refusal classification: %s', async (worker) => {
+  const h = equipmentHarness()
+  h.submitResponses.push(equipmentResponse(worker ? workerUnavailable : { error: { reason_code: 'OTHER' } }, 503))
+  await equipmentMount(h)
+  fireEvent.click(equipmentReview())
+  const refusal = projectSolarWorkerRefusal('solar-assign-equipment')
+  await waitFor(() => expect(screen.getByTestId('project-solar-equipment-feedback').textContent).toBe(worker
+    ? `${refusal.message} (${refusal.reasonCode})` : `${projectSolarFlowReason('preview_refused')} (OTHER)`))
+  if (worker) {
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+    expect(screen.queryByText(/uncertain|outcome is unknown|retry the same request/i)).toBeNull()
+    const intent = h.props.onProjectSubmit.mock.calls[0][0]
+    equipmentRefresh(); await equipmentReady()
+    expect(h.props.newProjectIntentKey).toHaveBeenCalledTimes(2)
+    fireEvent.click(equipmentReview())
+    await waitFor(() => expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(2))
+    expect(h.props.onProjectSubmit.mock.calls[1][0]).not.toBe(intent)
+  }
+})
 function equipmentRebind(view, h, changes) {
   h.props = { ...h.props, ...changes }
   h.real.setScope(h.props.solarBinding, h.props.authorityKey)

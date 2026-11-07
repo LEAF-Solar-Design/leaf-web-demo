@@ -1,4 +1,4 @@
-import { test, expect, runProbe } from './fixtures.mjs'
+import { test, expect, runProbe, captureClosedAndStudioCensus } from './fixtures.mjs'
 import { CONTROL_CENSUS_BATCH, requireControlCensusBatch, resolveProbe } from './probes.mjs'
 import { censusControls, enumerateControls } from './controlCensus.mjs'
 import { buildFeatureMap } from '../../walk/featureMap.mjs'
@@ -31,8 +31,8 @@ test.describe('rendered control census', () => {
       }
       // Account and service discovery must settle before their exact identities are censused.
       await expect(page.getByRole('button', { name: 'Claude accounts not linked', exact: true })).toHaveAttribute('aria-expanded', 'false')
-      await expect(page.getByRole('button', { name: /^Linked services [0-9]+ linked$/ })).toHaveAttribute('aria-expanded', 'false')
-      const census = await censusControls(page, map, { state, viewport: 'desktop' })
+      const census = await captureClosedAndStudioCensus(page,
+        () => censusControls(page, map, { state, viewport: 'desktop' }))
       walkEvidence.censuses = [census]
       expect(census.total, 'a real workspace must render interactive controls').toBeGreaterThan(0)
       const ribbonPresent = await page.getByRole('tablist', { name: 'Ribbon', exact: true }).count() > 0
@@ -41,8 +41,11 @@ test.describe('rendered control census', () => {
       }
       if (state === 'ready') expect(census.resolved.some((row) => row.feature_id === 'action:fit'
         && row.scope === 'toolbar:"View"'), 'viewer Fit must resolve to its registry action').toBe(true)
-      expect(requireControlCensusBatch(census, { state, viewport: 'desktop' })).toBe(true)
-      const applicableBatch = CONTROL_CENSUS_BATCH.filter((row) => row.states.includes(state))
+      const studioShell = await page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+        .getByRole('button', { name: 'Studio', exact: true }).count() > 0
+      expect(requireControlCensusBatch(census, { state, viewport: 'desktop', studioShell })).toBe(true)
+      const applicableBatch = CONTROL_CENSUS_BATCH.filter((row) => row.states.includes(state)
+        && (!studioShell || row.feature_id !== 'control:job-monitor-expand'))
       expect(census.resolved.filter((row) => applicableBatch.some((expected) => expected.feature_id === row.feature_id)))
         .toHaveLength(applicableBatch.length)
       const path = process.env.LEAF_WALK_CENSUS_RECORD

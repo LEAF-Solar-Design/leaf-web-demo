@@ -1,0 +1,6 @@
+/* leaf-dp-v1 */
+.dp-keycap{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 var(--leaf-space-1);border:1px solid var(--leaf-line-control);border-radius:var(--leaf-radius-key);font-family:var(--leaf-font-text);font-size:var(--leaf-size-caption);line-height:var(--leaf-leading-caption);color:var(--leaf-ink)}
+.shortcut-sheet .row{display:flex;justify-content:space-between;gap:var(--leaf-space-3);min-height:var(--leaf-metric-row-compact);font-size:var(--leaf-size-dense);line-height:var(--leaf-leading-dense)}
+.shortcut-sheet h2.resolver-header{margin:0;font:inherit}
+.shortcut-sheet .shortcut-keys{display:inline-flex;align-items:center;gap:var(--leaf-space-1);flex-shrink:0}
+@media (pointer:coarse){.shortcut-sheet .row{min-height:var(--leaf-metric-row-comfortable)}}

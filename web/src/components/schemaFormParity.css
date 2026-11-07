@@ -1,0 +1,10 @@
+/* leaf-dp-v1 */
+[data-dp-field]{display:grid;gap:var(--leaf-space-1);min-width:0}
+[data-dp-field] label{font-size:var(--leaf-size-caption);line-height:var(--leaf-leading-caption);color:var(--leaf-ink-muted)}
+[data-dp-field] input,[data-dp-field] select,[data-dp-field] textarea{min-height:var(--leaf-metric-control);font-size:var(--leaf-size-dense);padding:0 9px;border-radius:var(--leaf-radius-field)}
+[data-dp-field].has-unit{position:relative}
+[data-dp-field].has-unit input{padding-right:var(--leaf-metric-unit-suffix)}
+[data-dp-field] .sf-unit{position:absolute;right:9px;bottom:0;height:var(--leaf-metric-control);display:inline-flex;align-items:center;font-size:var(--leaf-size-caption);color:var(--leaf-ink-muted)}
+[data-dp-field] [role="alert"]{font-size:var(--leaf-size-caption);line-height:var(--leaf-leading-caption);color:var(--leaf-error);display:flex;gap:var(--leaf-space-2);align-items:center}
+[data-dp-field] [role="alert"]::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+@media (pointer:coarse){[data-dp-field] input,[data-dp-field] select,[data-dp-field] textarea{min-height:var(--leaf-metric-control-touch);font-size:var(--leaf-size-touch)}}

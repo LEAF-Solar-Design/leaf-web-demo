@@ -1,0 +1,24 @@
+{
+  "source": "https://github.com/home-assistant/core/tree/2026.10.4/homeassistant/components",
+  "checked": ["config/config_entries.py", "hue/config_flow.py", "wiz/config_flow.py", "group/config_flow.py", "../helpers/data_entry_flow.py", "../helpers/schema_config_entry_flow.py", "../data_entry_flow.py"],
+  "hue": [
+    {"flow_id": "hue-user", "handler": "hue", "type": "form", "step_id": "manual", "errors": {}, "data_schema": [{"name": "host", "required": true, "type": "string"}]},
+    {"flow_id": "hue-user", "handler": "hue", "type": "form", "step_id": "link", "errors": {}, "data_schema": []},
+    {"flow_id": "hue-user", "handler": "hue", "type": "form", "step_id": "link", "errors": {"base": "register_failed"}, "data_schema": []},
+    {"flow_id": "hue-user", "handler": "hue", "type": "create_entry", "title": "Hue Bridge fixture", "version": 1, "minor_version": 2, "result": {"entry_id": "hue-entry", "domain": "hue", "title": "Hue Bridge fixture", "options": {}}}
+  ],
+  "wiz": [
+    {"flow_id": "wiz-user", "handler": "wiz", "type": "form", "step_id": "user", "errors": {}, "data_schema": [{"name": "host", "required": false, "default": "", "type": "string"}]},
+    {"flow_id": "wiz-user", "handler": "wiz", "type": "create_entry", "title": "WiZ fixture AABBCC", "version": 1, "minor_version": 1, "result": {"entry_id": "wiz-entry", "domain": "wiz", "title": "WiZ fixture AABBCC", "options": {}}}
+  ],
+  "group": [
+    {"flow_id": "group-user", "handler": "group", "type": "menu", "step_id": "user", "data_schema": [{"name": "next_step_id", "type": "select", "options": ["binary_sensor", "button", "cover", "event", "fan", "light", "lock", "media_player", "notify", "sensor", "switch", "valve"]}], "menu_options": ["binary_sensor", "button", "cover", "event", "fan", "light", "lock", "media_player", "notify", "sensor", "switch", "valve"]},
+    {"flow_id": "group-user", "handler": "group", "type": "form", "step_id": "light", "errors": {}, "preview": "group", "data_schema": [{"name": "name", "required": true, "selector": {"text": {}}}, {"name": "entities", "required": true, "selector": {"entity": {"domain": ["light"], "multiple": true, "reorder": true}}}, {"name": "hide_members", "required": true, "default": false, "selector": {"boolean": {}}}, {"name": "all", "required": true, "default": false, "selector": {"boolean": {}}}]},
+    {"flow_id": "group-user", "handler": "group", "type": "create_entry", "title": "Living room", "version": 1, "minor_version": 1, "result": {"entry_id": "group-entry", "domain": "group", "title": "Living room", "options": {"group_type": "light", "name": "Living room", "entities": ["light.one", "light.two"], "hide_members": false, "all": false}}}
+  ],
+  "progress": [
+    {"flow_id": "hue-discovered", "handler": "hue", "step_id": "link", "context": {"source": "zeroconf", "title_placeholders": {"name": "Hue Bridge", "host": "10.0.0.20"}, "unique_id": "fixture-hue"}},
+    {"flow_id": "wiz-discovered", "handler": "wiz", "step_id": "discovery_confirm", "context": {"source": "dhcp", "title_placeholders": {"name": "WiZ bulb", "host": "10.0.0.21"}}},
+    {"flow_id": "other-discovered", "handler": "met", "step_id": "user", "context": {"source": "onboarding"}}
+  ]
+}

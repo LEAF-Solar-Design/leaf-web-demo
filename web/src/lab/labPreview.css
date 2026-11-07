@@ -5,9 +5,9 @@
   min-width: 0;
   margin-block: 12px;
   padding: 12px;
-  color: var(--foreground, #18181b);
-  background: var(--card, #fff);
-  border: 1px solid var(--border, #d4d4d8);
+  color: var(--leaf-ink);
+  background: var(--leaf-ground);
+  border: 1px solid var(--leaf-line);
   border-radius: var(--leaf-radius-card);
   overflow-wrap: anywhere;
 }
@@ -20,17 +20,17 @@
   padding: 8px 12px;
   font: inherit;
   color: inherit;
-  background: var(--card, #fff);
-  border: 1px solid var(--border, #a1a1aa);
+  background: var(--leaf-ground);
+  border: 1px solid var(--leaf-ink-muted);
   border-radius: var(--leaf-radius-control);
   cursor: pointer;
 }
 .lab-preview [aria-selected="true"], .lab-preview-toggle[aria-expanded="true"] {
-  border-color: var(--primary, #15803d);
-  background: var(--accent-tint, #dcfce7);
+  border-color: var(--leaf-accent);
+  background: var(--leaf-accent-tint);
 }
 .lab-preview :is(button, input, textarea, select):focus-visible {
-  outline: 3px solid var(--primary, #15803d);
+  outline: 3px solid var(--leaf-accent);
   outline-offset: 2px;
 }
 .lab-preview [role="tabpanel"], .lab-preview .widgets-view { min-width: 0; max-width: 100%; box-sizing: border-box; }

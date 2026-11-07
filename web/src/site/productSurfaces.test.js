@@ -204,7 +204,7 @@ const CONTRACT_FIXTURE = {
     ground: 'board',
     scene: 'app',
     chrome: { shell: 'cockpit', productFrame: true, workspaceCard: false, cockpit: false, stageBranch: 'frame', projectSlot: null, tab: true },
-    toolbar: { profile: 'project', ribbon: true, home: 'project', quick: null },
+    toolbar: { profile: 'project', ribbon: false, home: 'project', quick: null },
     rails: { left: 'spine', right: 'job-spine', dock: null },
     groundMaterial: { layerAccent: null, solarStrings: false },
     commandLine: true,
@@ -506,10 +506,10 @@ describe('Surface Contract — equals today', () => {
       expect(surfaceContract(id).rails.dock).toEqual(['layers', 'drawing', 'selection', 'plan'])
     }
     const app = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
-    // J1 adds board-only actions and panels. CAD's Start board keeps its old
-    // tiles, and neither drawing profile starts the material upload hook.
-    expect(app).toContain("actions={surfaceSlots.ground === 'board' ? {")
-    expect(app).toContain("panel={surfaceSlots.ground === 'board' ? <>")
+    // The shared environment keeps one project subtree across profiles.
+    // Neither drawing profile starts an independent material upload hook.
+    expect(app).toContain("actions={boardHostsProject ? {")
+    expect(app).toContain("panel={boardHostsProject ? <>")
     expect(app).toContain('<ProjectWorkspacePanels')
     expect(app).toContain('<ProjectStartPanel')
     const appBody = app.slice(app.indexOf('export default function App()'))

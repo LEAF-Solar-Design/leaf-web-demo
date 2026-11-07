@@ -7,7 +7,6 @@ import { DemandCaptureCard } from '../../components/SessionGate.jsx';
 
 export const SHEET_CODES = ['l-000', 'g-000', 'a-101', 'a-102', 'e-401', 'c-201', 's-501'];
 
-const TRIAL_NOTE = '14-day trial · $299 / mo per daily active user';
 const DEPLOYED = 'Deployed at Black & Veatch and 40+ commercial EPCs';
 const BRANCH_DISCIPLINE = 'Branch · solar stringing for AutoCAD';
 const DRAWN_BY = 'Drawn by Leaf · reviewed by you';
@@ -113,7 +112,7 @@ export function L000Sheet() {
           <div className="sheet-cta-row">
             <TrialCta />
             <Chip target="#g-000">See Branch for solar stringing ↓</Chip>
-            <span className="sheet-cta-note">{TRIAL_NOTE}</span>
+            <span className="sheet-cta-note"><a href="/pricing">View current pricing</a></span>
           </div>
           <DeployedRow />
         </>
@@ -236,7 +235,7 @@ export function G000Sheet({ solve } = {}) {
           <div className="sheet-cta-row">
             <TrialCta />
             <Chip target="/try">Try it on this drawing</Chip>
-            <span className="sheet-cta-note">{TRIAL_NOTE}</span>
+            <span className="sheet-cta-note"><a href="/pricing">View current pricing</a></span>
           </div>
           <DeployedRow />
         </>
@@ -312,7 +311,7 @@ export function A101Sheet() {
           <div className="sheet-cta-row">
             <TrialCta />
             <Chip target="#a-102">How Branch works ↓</Chip>
-            <span className="sheet-cta-note">{TRIAL_NOTE}</span>
+            <span className="sheet-cta-note"><a href="/pricing">View current pricing</a></span>
           </div>
         </>
       }
@@ -384,7 +383,7 @@ export function A102Sheet() {
           <div className="sheet-cta-row">
             <TrialCta />
             <Chip target="#e-401">See the evidence ↓</Chip>
-            <span className="sheet-cta-note">{TRIAL_NOTE}</span>
+            <span className="sheet-cta-note"><a href="/pricing">View current pricing</a></span>
           </div>
         </>
       }
@@ -409,7 +408,6 @@ const E401_DEFAULT_STATS = {
   reworkDelta: '−73%',
   reworkNote: 'rework incidents per project',
   payback: '1 proj',
-  paybackNote: 'typical recoup at $299 / mo',
   // Neutral no-number fallback — live numbers arrive via <SheetsSet solve>.
   liveLine: 'Strung live in the demo · press T on the cover to watch it run',
 };
@@ -455,11 +453,6 @@ export function E401Sheet({ stats, receipt } = {}) {
               <span className="txt">{s.reworkNote}</span>
               <span className="cap">internal survey of 18 EPC firms</span>
             </div>
-            <div className="sheet-row">
-              <span className="num">{s.payback}</span>
-              <span className="txt">{s.paybackNote}</span>
-              <span className="cap">at one seat</span>
-            </div>
           </div>
           <blockquote className="sheet-quote">
             <p>
@@ -477,7 +470,7 @@ export function E401Sheet({ stats, receipt } = {}) {
           <div className="sheet-cta-row">
             <TrialCta />
             <Chip target="#c-201">Pricing ↓</Chip>
-            <span className="sheet-cta-note">{TRIAL_NOTE}</span>
+            <span className="sheet-cta-note"><a href="/pricing">View current pricing</a></span>
           </div>
         </>
       }
@@ -509,21 +502,7 @@ export function C201Sheet() {
             <p className="sheet-sub">One number. It covers the tool, the evidence bundles, and
               every rerun.</p>
           </div>
-          <div className="sheet-bignum-row price">
-            <span className="sheet-price">$299</span>
-            <span className="sheet-bignum-cap">
-              $299 / mo per daily active user · 14-day trial
-            </span>
-          </div>
-          <div className="sheet-rows">
-            <div className="sheet-row">
-              <span className="txt">14-day free trial · no credit card</span>
-            </div>
-            <div className="sheet-row">
-              <span className="txt">Typical payback: one project at $299 / mo</span>
-              <span className="cap">internal survey of 18 EPC firms</span>
-            </div>
-          </div>
+          <p>Current pricing and trial terms are on the pricing page. <a href="/pricing">View current pricing</a></p>
           <div className="sheet-cta-row">
             <TrialCta />
             <DemandCaptureCard compact />
@@ -581,7 +560,7 @@ export function S501Sheet({ capabilities } = {}) {
           <div className="sheet-cta-row">
             <TrialCta />
             <Chip target="/try">Try it on this drawing</Chip>
-            <span className="sheet-cta-note">{TRIAL_NOTE}</span>
+            <span className="sheet-cta-note"><a href="/pricing">View current pricing</a></span>
           </div>
         </>
       }

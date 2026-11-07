@@ -20,9 +20,36 @@ import {
   parseCamParam,
   pushOnOpen,
   readViewParam,
+  useAsyncScope,
   useViewParam,
   writeViewParams,
 } from './urlState.js'
+
+it('retires async requests on newer requests, scope changes, navigation and unmount', () => {
+  let begin
+  function Harness({ project = 'a', drawing = 'a' }) {
+    begin = useAsyncScope([project, drawing])
+    return null
+  }
+  const view = render(createElement(Harness))
+  const first = begin()
+  const second = begin()
+  expect(first()).toBe(false)
+  expect(second()).toBe(true)
+  view.rerender(createElement(Harness, { project: 'b' }))
+  expect(second()).toBe(false)
+  const project = begin()
+  view.rerender(createElement(Harness, { project: 'b', drawing: 'b' }))
+  expect(project()).toBe(false)
+  for (const event of ['popstate', 'leaf:navigate']) {
+    const pending = begin()
+    act(() => window.dispatchEvent(new Event(event)))
+    expect(pending()).toBe(false)
+  }
+  const pending = begin()
+  view.unmount()
+  expect(pending()).toBe(false)
+})
 
 // Boot flags and Auth0 keys in shapes URLSearchParams would NOT round-trip:
 // `%2F` (comes back `/`), `+` (comes back `%20`... or a space), `%3D%3D`, a

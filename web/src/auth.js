@@ -15,6 +15,7 @@
 
 import { track, flushNow } from './telemetry.js'
 import { clearComposerDrafts } from './lib/composerDraft.js'
+import { serviceSession, serviceState, serviceHeaders, authorityStorage } from './lib/serviceAuthSession.js'
 import {
   stageCheckoutAuthReturn,
   clearCheckoutAuthReturn,
@@ -24,6 +25,7 @@ import {
 const DOMAIN = import.meta.env.VITE_AUTH0_DOMAIN || ''
 const CLIENT_ID = import.meta.env.VITE_AUTH0_CLIENT_ID || ''
 const AUDIENCE = import.meta.env.VITE_AUTH0_AUDIENCE || ''
+const API_BASE = import.meta.env?.VITE_API_BASE ?? ''
 const JWT_KEY = 'leaf.jwt'
 const INFLIGHT_AUTHOR_KEY = 'leaf.inflightAuthor.v1'
 const AUTH_SEEN_KEY = 'leaf.auth.completed_before'
@@ -51,8 +53,10 @@ function trackAuthCompleted(ok) {
   }
 }
 
-// True only when all three public SPA config values are baked into the build.
-export const authConfigured = !!(DOMAIN && CLIENT_ID && AUDIENCE)
+// Explicit service mode also keeps auth failures on the signed-out gate; it
+// must never trigger the unconfigured-human demo fallback.
+const humanAuthConfigured = !!(DOMAIN && CLIENT_ID && AUDIENCE)
+export let authConfigured = humanAuthConfigured || serviceState().mode
 
 // Token-arrival seam. The `storage` event only fires in OTHER tabs, so a
 // same-tab write (the post-callback code exchange below) is invisible to every
@@ -62,6 +66,33 @@ export const authConfigured = !!(DOMAIN && CLIENT_ID && AUDIENCE)
 // Edge-triggered: one notification per stored token, no polling, no timer.
 const tokenStoredListeners = new Set()
 const beforeLogoutListeners = new Set()
+
+serviceSession().subscribe(() => {
+  const state = serviceState()
+  authConfigured = humanAuthConfigured || state.mode
+  for (const listener of tokenStoredListeners) {
+    try { listener(state.identity ? `service:${state.selector}:${state.generation}` : null) } catch { /* observer */ }
+  }
+  if (typeof window !== 'undefined') window.dispatchEvent(new window.Event('leaf:active-scope'))
+})
+
+export async function bootstrapServiceAuth() {
+  if (typeof window === 'undefined') return false
+  const url = new URL(window.location.href)
+  if (isAuthRedirectCallback(url.search)) { serviceSession().human(); return false }
+  if (url.searchParams.has('service_session')) {
+    serviceSession().select(url.searchParams.get('service_session'))
+    url.searchParams.delete('service_session')
+    window.history.replaceState({}, document.title, `${url.pathname}${url.search}${url.hash}`)
+  }
+  if (!serviceState().mode) return false
+  // A retained demo query must not turn failed service proof into demo authority.
+  if (url.searchParams.has('demo')) {
+    url.searchParams.delete('demo')
+    window.history.replaceState({}, document.title, `${url.pathname}${url.search}${url.hash}`)
+  }
+  return serviceSession().probe({ apiBase: API_BASE, origin: window.location.origin })
+}
 
 export function subscribeBeforeLogout(listener) {
   beforeLogoutListeners.add(listener)
@@ -75,37 +106,104 @@ export function subscribeTokenStored(listener) {
 
 function storeToken(token) {
   try { localStorage.setItem(JWT_KEY, token) } catch { return false }
+  serviceSession().human()
   for (const listener of tokenStoredListeners) {
     try { listener(token) } catch { /* observers cannot change the auth result */ }
   }
   return true
 }
 
+let _audienceP = null
+function resolveAudience() {
+  if (!_audienceP) {
+    _audienceP = (async () => {
+      const controller = new AbortController()
+      let timer
+      const deadline = new Promise((resolve) => {
+        timer = setTimeout(() => {
+          resolve(AUDIENCE)
+          controller.abort()
+        }, 1000)
+      })
+      try {
+        const runtime = (async () => {
+          const response = await fetch(`${API_BASE}/api/site/auth-config`, { signal: controller.signal })
+          if (!response.ok) return AUDIENCE
+          const body = await response.json()
+          return typeof body?.audience === 'string' && body.audience.startsWith('https://')
+            ? body.audience : AUDIENCE
+        })()
+        // The deadline covers both the HTTP response and its body parse. Only
+        // the race's result is memoized; a late response cannot change it.
+        return await Promise.race([runtime, deadline])
+      } catch {
+        return AUDIENCE
+      } finally {
+        clearTimeout(timer)
+      }
+    })()
+  }
+  return _audienceP
+}
+
 let _clientP = null
 async function client() {
-  if (!authConfigured) return null
+  if (!humanAuthConfigured) return null
   if (!_clientP) {
     // Dynamic import so a build without the vars never pulls the SDK.
-    _clientP = import('@auth0/auth0-spa-js').then(({ createAuth0Client }) =>
+    _clientP = Promise.all([import('@auth0/auth0-spa-js'), resolveAudience()]).then(([{ createAuth0Client }, audience]) =>
       createAuth0Client({
         domain: DOMAIN,
         clientId: CLIENT_ID,
-        authorizationParams: { audience: AUDIENCE, redirect_uri: window.location.origin },
+        authorizationParams: { audience, redirect_uri: window.location.origin },
         cacheLocation: 'localstorage',
-      }))
+      })).catch((error) => { _clientP = null; throw error })
   }
   return _clientP
 }
 
+export function preloadAuthClient() {
+  void client().catch(() => {})
+}
+
+export async function loginWithPopupFromClick() {
+  if (!humanAuthConfigured) return { ok: false, reason: 'unconfigured' }
+  serviceSession().human()
+  let popup
+  try {
+    // Open before the first await so the browser retains the click gesture.
+    popup = window.open('', 'leaf-auth', 'popup,width=480,height=680')
+    if (!popup) return { ok: false, reason: 'blocked' }
+    const c = await client()
+    const audience = await resolveAudience()
+    await c.loginWithPopup({
+      authorizationParams: { audience, redirect_uri: window.location.origin },
+    }, { popup, timeoutInSeconds: 120 })
+    const token = await c.getTokenSilently({ authorizationParams: { audience } })
+    if (!token || !storeToken(token)) throw new Error('Token storage failed')
+    return { ok: true }
+  } catch (error) {
+    try { if (popup && !popup.closed) popup.close() } catch { /* best-effort cleanup */ }
+    return { ok: false, reason: error?.error === 'cancelled' || error?.error === 'popup_closed' ? 'cancelled' : 'failed' }
+  }
+}
+
 // Kick the Authorization-Code + PKCE redirect to Auth0 Universal Login.
 export async function login() {
+  // Keep the no-argument declaration used by the checkout wiring checker.
+  const { isCurrent = () => true } = arguments[0] || {}
+  if (!isCurrent()) return
+  serviceSession().human()
   const c = await client()
-  if (c) {
+  if (c && isCurrent()) {
     const returnTo = `${window.location.pathname}${window.location.search}${window.location.hash}`
     stageCheckoutAuthReturn()
     try {
-      await c.loginWithRedirect({ appState: { returnTo } })
+      await c.loginWithRedirect({ authorizationParams: { audience: await resolveAudience() }, appState: { returnTo }, openUrl: (url) => {
+        if (isCurrent()) window.location.assign(url)
+      } })
     } catch (error) {
+      if (!isCurrent()) return
       clearCheckoutAuthReturn()
       throw error
     }
@@ -137,23 +235,28 @@ export function safeLocalReturnTo(value, fallback = '/') {
 // exchange, stash the api-audience access token as leaf.jwt, strip the query,
 // and return true so the caller can reload into an authenticated session.
 export async function handleRedirectCallback() {
-  if (!authConfigured) return false
+  const { isCurrent = () => true } = arguments[0] || {}
+  if (!humanAuthConfigured || !isCurrent()) return false
   const q = window.location.search
   if (!isAuthRedirectCallback(q)) return false
-  const c = await client()
-  if (!c) return false
+  serviceSession().human()
   let returnTo = window.location.pathname
   const clean = () => window.history.replaceState({}, document.title, safeLocalReturnTo(returnTo, '/'))
   try {
+    const c = await client()
+    if (!c || !isCurrent()) return false
     const result = await c.handleRedirectCallback()
+    if (!isCurrent()) return false
     returnTo = result?.appState?.returnTo || returnTo
-    const token = await c.getTokenSilently({ authorizationParams: { audience: AUDIENCE } })
+    const token = await c.getTokenSilently({ authorizationParams: { audience: await resolveAudience() } })
+    if (!isCurrent()) return false
     if (token) storeToken(token)
     if (token) completeCheckoutAuthReturn()
     clean()
     trackAuthCompleted(!!token)
     return !!token
   } catch (error) {
+    if (!isCurrent()) return false
     // Auth0's authentication error type carries the transaction appState. Restore
     // its exact local target and permit one clean reload so a checkout fallback
     // is not stranded when the user cancels Universal Login.
@@ -164,19 +267,37 @@ export async function handleRedirectCallback() {
     const reloadForCheckout = recoverableAuthError && completeCheckoutAuthReturn()
     clean()
     trackAuthCompleted(false)
-    return reloadForCheckout
+    if (reloadForCheckout) return true
+    throw error
   }
 }
 
 export function isSignedIn() {
+  const service = serviceState()
+  if (service.mode) return !!service.identity
   try { return !!localStorage.getItem(JWT_KEY) } catch { return false }
 }
 
 // Clear the local token and (best-effort) end the Auth0 session, returning to
 // the app origin -- which comes back up in the calm signed-out gate.
 export async function logout() {
+  const service = serviceState()
+  const jointHeaders = service.mode ? serviceHeaders(API_BASE) : null
+  const serviceStorage = service.mode ? authorityStorage() : null
   for (const listener of beforeLogoutListeners) {
     try { listener() } catch { /* an observer cannot prevent sign-out */ }
+  }
+  if (service.mode) {
+    serviceSession().logout()
+    try { serviceStorage?.removeItem(INFLIGHT_AUTHOR_KEY) } catch { /* storage unavailable */ }
+    clearComposerDrafts(serviceStorage)
+    if (jointHeaders?.Authorization) {
+      try {
+        await fetch(`${API_BASE}/api/auth/agent/logout`, { method: 'POST', credentials: 'same-origin', headers: jointHeaders })
+      } catch { /* local authority is already gone */ }
+    }
+    window.location.reload()
+    return
   }
   try {
     localStorage.removeItem(JWT_KEY)

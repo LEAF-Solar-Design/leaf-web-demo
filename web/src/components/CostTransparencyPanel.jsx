@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { authHeaders, config, getCost } from '../api.js'
 import './CostTransparencyPanel.css'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
@@ -9,6 +10,7 @@ const COPY = 'This page shows what Leaf actually costs to run and your share of 
 const dimensions = [['development', 'Development'], ['ci', 'CI'], ['fleet', 'Fleet'], ['unattributed', 'Unattributed']]
 const payerLabels = { tenant_plan: 'Your Claude plan', tenant_api_key: 'Your own API key', leaf: 'Leaf', mixed: 'Mixed payers', unknown: 'Payer unknown' }
 const statusLabels = { MEASURED: 'Measured', ESTIMATED: 'Estimated' }
+const historyStatusLabels = { published: 'Published', unpublished: 'Not yet published', unavailable: 'Unavailable' }
 const coverageLabels = { complete: 'Complete coverage', partial: 'Some use may be missing', unknown: 'Coverage unknown' }
 const unitLabels = {
   'engine-second': 'seconds of design processing',
@@ -109,7 +111,7 @@ function HistoryView({ data, loading, from, to, currentMonth, onFrom, onTo, onRe
     </div>
     <h3>Months</h3>
     <ul aria-label="Cost history months">{(data.months || []).map((month) => <li key={month.period}>
-      {month.period}: {month.status}. Your implied amount: {money(month.your_implied_cost_usd)}
+      {month.period}: {displayLabel(historyStatusLabels, month.status, 'Status unavailable')}. Your implied amount: {money(month.your_implied_cost_usd)}
       {month.provisional && ' (provisional)'}
     </li>)}</ul>
     <h3>Cumulative resource costs</h3>
@@ -190,14 +192,12 @@ export default function CostTransparencyPanel({ mock = false, readsPaused = fals
   // below it. The scope still orders it against a nested owner.
   useEscapeOwner('cost-panel', open && !mock, close, { layer: 'menu', scope: panelRef })
   if (mock) return null
+  // The header's stacking context is below the workspace strip; .app keeps shell theme tokens and restores direct-child pointer events.
+  const host = open ? trigger.current?.closest('.app') : null
   const resources = data?.resources || []
   const own = data?.own_use
-  return (
-    <div className="cost-transparency">
-      <button type="button" className="chip-neutral" ref={trigger} aria-expanded={open}
-        onClick={() => setOpen(!open)}>{TITLE}</button>
-      {open && (
-        <section ref={panelRef} className="cost-panel" aria-label={TITLE}>
+  const panel = open && (
+        <section ref={panelRef} className="cost-panel" aria-label={TITLE} style={{ fontSize: 'var(--leaf-size-caption)' }}>
           <button type="button" ref={closeButton} className="chip-neutral cost-close" onClick={close}>Close cost panel</button>
           <h2>{TITLE}</h2>
           <p>{COPY}</p>
@@ -228,12 +228,12 @@ export default function CostTransparencyPanel({ mock = false, readsPaused = fals
                   {payerLabels[payer] || payerLabels.unknown}: {quantity(bucket?.turns)} {bucket?.turns === 1 ? 'turn' : 'turns'} · {money(bucket?.usd_est)} API-equivalent value
                 </div>)}
               </dd>
-              <dt>CAD engine time and runs</dt><dd>{quantity(own?.cad?.engine_seconds)} seconds · {quantity(own?.cad?.runs)} runs</dd>
+              <dt>CAD processing time and runs</dt><dd>{quantity(own?.cad?.engine_seconds)} seconds · {quantity(own?.cad?.runs)} runs</dd>
               <dt>Marathon runs</dt><dd>{quantity(own?.marathon?.runs)} <small>not added to totals</small></dd>
               <dt>Storage</dt><dd>Unavailable. Direct storage use is not published.</dd>
             </dl>
             <h3>Leaf's costs and your share</h3>
-            {data.stale && <p role="status">Cost publication is stale. {data.stale_reason || 'Recent use may be missing.'}</p>}
+            {data.stale && <p role="status">Cost publication is stale. Recent use may be missing.</p>}
             {!data.publication_id ? <p>{data.degraded_mode ? 'Cost data for this month is unreadable. Publication details are unavailable.' : 'The publication for this month has not been made yet.'}</p> : <>
               <div className="cost-table-scroll" role="region" aria-label="Resource costs" tabIndex={0}>
                 <table>
@@ -258,13 +258,18 @@ export default function CostTransparencyPanel({ mock = false, readsPaused = fals
                   <tfoot><tr><th scope="row">Totals</th><td>Not applicable</td><td>{money(data.totals?.gross_cost_usd)}</td><td>{money(data.totals?.credits_usd)}</td><td>Not applicable</td><td>{money(data.your_total_implied_cost_usd)}</td><td>Not applicable</td><td>Not applicable</td></tr></tfoot>
                 </table>
               </div>
-              <p className="cost-footnote">Missing sources: {data.missing_sources?.length ? data.missing_sources.join(', ') : 'None reported'}. Published: {publicationDate(data.published_at)}.</p>
+              <p className="cost-footnote">Missing sources: {data.missing_sources?.length ? `${data.missing_sources.length} unavailable` : 'None reported'}. Published: {publicationDate(data.published_at)}.</p>
             </>}
           </>}
           </>}
           </>}
         </section>
-      )}
+  )
+  return (
+    <div className="cost-transparency">
+      <button type="button" className="chip-neutral" ref={trigger} aria-expanded={open}
+        onClick={() => setOpen(!open)}>{TITLE}</button>
+      {host ? createPortal(panel, host) : panel}
     </div>
   )
 }

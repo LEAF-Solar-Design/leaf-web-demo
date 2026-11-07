@@ -31,6 +31,24 @@ def enabled():
     return os.environ.get("LEAF_LAB_TOOL_NODES") == "1"
 
 
+def lab_tool_tier(tenant_id):
+    # Broker record first, active platform org second; fail closed.
+    try:
+        from deps import backedge_tier
+
+        tier = backedge_tier(tenant_id)
+        if tier is not None:
+            return tier
+        import platform_link
+
+        org = platform_link.platform_store().get_org(tenant_id)
+        if org is not None and org.status == "active":
+            return org.tier if isinstance(org.tier, str) and org.tier.strip() else "restricted"
+    except Exception:
+        return None
+    return None
+
+
 def tool_block_admissible(trusted, effects=("compute", "read")):
     return (trusted is not None and trusted.residency != "host"
             and trusted.aps_live is False
@@ -87,7 +105,8 @@ def _sandbox_seconds_today(tenant, midnight):
 class ToolNodeAdapter:
     def __init__(self, tenant, run_id, *, cancelled, submit=None, get_job=None,
                  list_jobs=None, tier_of=None, sandbox_seconds_today=None, now=None,
-                 sleep=time.sleep, monotonic=time.monotonic, effects=("compute", "read")):
+                 sleep=time.sleep, monotonic=time.monotonic, effects=("compute", "read"),
+                 corpus_authority=None, corpus_owned=None, corpus_cancel=None, corpus_requested=None):
         self.effects = tuple(effects)
         self.tenant, self.run_id, self.cancelled = str(tenant), run_id, cancelled
         self.submit, self.get_job, self.list_jobs = submit, get_job, list_jobs
@@ -95,6 +114,9 @@ class ToolNodeAdapter:
         self.sandbox_seconds_today = sandbox_seconds_today or _sandbox_seconds_today
         self.now = now or (lambda: datetime.now(timezone.utc))
         self.sleep, self.monotonic = sleep, monotonic
+        self.corpus_authority = corpus_authority
+        self.corpus_owned, self.corpus_cancel = corpus_owned, corpus_cancel
+        self.corpus_requested = corpus_requested
 
     def admissible(self, trusted):
         return tool_block_admissible(trusted, self.effects)
@@ -109,6 +131,10 @@ class ToolNodeAdapter:
             return {"error": "lab_tool_submit_unavailable"}
 
     def _call(self, block_id, trusted, manifest, inputs, settings, run_deadline):
+        if trusted is None:
+            return {"error": "lab_tool_effect_refused"}
+        if trusted.kind == 'corpus-evaluator':
+            return self._corpus(block_id, settings, run_deadline)
         def refuse(code):
             return {"error": "lab_tool_" + code}
 
@@ -158,8 +184,7 @@ class ToolNodeAdapter:
         try:
             required = entitlements.tool_required_capability(tool)
             if self.tier_of is None:
-                from deps import backedge_tier
-                tier_of = backedge_tier
+                tier_of = lab_tool_tier
             else:
                 tier_of = self.tier_of
             tier = tier_of(self.tenant)
@@ -248,3 +273,68 @@ class ToolNodeAdapter:
                     return refuse("output_invalid")
                 return {"outputs": {port: data.get(port) for port in ports}}
             self.sleep(max(0, min(0.5, deadline - self.monotonic())))
+
+    def _corpus(self, block_id, settings, deadline):
+        import jobs
+        import lab_corpus_executor as corpus
+        authority = self.corpus_authority
+        if (not authority or authority['tenant_id'] != self.tenant
+                or settings['project_id'] != authority['project_id']
+                or self.corpus_owned is None or not self.corpus_owned()):
+            return {'error': 'lab_corpus_authority_refused'}
+        def descriptor(value):
+            value = dict(value)
+            size = value.get('byte_size')
+            if type(size) is float and math.isfinite(size) and size.is_integer():
+                value['byte_size'] = int(size)
+            return value
+        context = corpus.validate_context({'schema': corpus.SCHEMA, 'tenant_id': self.tenant,
+            'org_id': self.tenant, 'project_id': authority['project_id'],
+            'actor_id': authority['actor_id'], 'corpus': descriptor(settings['corpus']), 'suite': descriptor(settings['suite']),
+            'capability_sha256': corpus.ARCHIVE_SHA256})
+        key = f'lab:{self.run_id}:{block_id}:corpus:v1'
+        job_id = jobs.submit_lab_corpus(self.tenant, self.tenant, authority['project_id'],
+            authority['actor_id'], context['corpus'], context['suite'],
+            capability_sha256=corpus.ARCHIVE_SHA256, idempotency_key=key)
+        stopping = None
+        cleanup_deadline = None
+        while True:
+            # Lease loss suspends this observer. It cannot cancel the shared
+            # intent that a successor Lab worker may already own.
+            if not self.corpus_owned():
+                raise RunCancelled()
+            expired = deadline is not None and self.monotonic() >= deadline
+            requested = bool(self.corpus_requested and self.corpus_requested())
+            if stopping is None and (expired or requested):
+                stopping = self.corpus_cancel(block_id, job_id, expired)
+                cleanup_deadline = self.monotonic() + 10
+                if stopping is None:
+                    return {'error': 'lab_corpus_cleanup_unconfirmed'}
+            if stopping is not None:
+                receipt = jobs.corpus_cleanup(job_id, self.tenant)
+                if (receipt and receipt.get('cancel') == stopping
+                        and (receipt.get('reaped') is True or receipt.get('not_started') is True)):
+                    if expired:
+                        raise RunBudgetExceeded()
+                    raise RunCancelled()
+                if self.monotonic() >= cleanup_deadline:
+                    return {'error': 'lab_corpus_cleanup_unconfirmed'}
+            else:
+                row = jobs.get_job(job_id)
+                if row is None or row['tenant_id'] != self.tenant:
+                    return {'error': 'lab_corpus_job_unavailable'}
+                if row['status'] == 'failed':
+                    return {'error': 'lab_corpus_failed'}
+                if row['status'] == 'complete':
+                    value = row['result']['result']
+                    if value['context'] != context:
+                        return {'error': 'lab_corpus_lineage_mismatch'}
+                    corpus.read_sources(context)
+                    projected = {key: value[key] for key in ('job_id', 'worker_id', 'attempt',
+                        'row_count', 'rows_sha256', 'result_sha256', 'context')}
+                    projected.update(run_id=self.run_id, block_id=block_id,
+                        doc_id=authority['doc_id'], graph_revision=authority['graph_revision'],
+                        graph_sha256=authority['graph_sha256'], verdict=value['result']['verdict'],
+                        reasons=value['result']['reasons'][:10])
+                    return {'outputs': {'result': canonical_json(projected)}}
+            self.sleep(0.25)

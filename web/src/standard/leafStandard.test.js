@@ -9,6 +9,22 @@ const expectedFonts = [...fontFiles, 'OFL-inter-tight.txt']
 const expectedBrand = ['leaf-automation-horizontal-on-dark.svg', 'leaf-automation-horizontal-on-light.svg']
 
 describe('vendored Leaf standard v1', () => {
+  it('pins the v1.3.0 token release and its provenance', () => {
+    expect(manifest).toMatchObject({
+      tag: 'leaf-standard-v1.3.0',
+      commit: '4e48663e874f11b9cae6e0404eae80da99a8f1ce',
+      path: 'tokens/dist/leaf-standard.css',
+      sha256: 'd9fde38c278750408a743d1275eac7df96b03034216829c2035813bc26b0e3de',
+      bytes: 8621,
+    })
+    expect(manifest.files.find(({ path }) => path === 'src/standard/leaf-standard.css')).toMatchObject({
+      ref: `${manifest.tag}@${manifest.commit}`,
+      upstream_path: manifest.path,
+      sha256: manifest.sha256,
+      bytes: manifest.bytes,
+    })
+  })
+
   it('lists exactly the eight pinned assets and no extra Inter Tight or brand files', () => {
     expect(manifest.schema).toBe('leaf.vendored-sources.v1')
     expect(manifest.files.map(({ path }) => path).sort()).toEqual([

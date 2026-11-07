@@ -14,15 +14,17 @@ describe('EscCap', () => {
     'Close version history',
     'Close Claude account panel',
     'Close linked services panel',
-  ])('keeps the existing cap DOM for %s without adding a type attribute', (label) => {
-    const { container } = render(<EscCap label={label} onClick={() => {}} />)
-    expect(container.innerHTML).toBe(`<button class="key hot" aria-label="${label}">Esc</button>`)
-    expect(screen.getByRole('button', { name: label }).hasAttribute('type')).toBe(false)
+  ])('keeps the cap appearance and accessible label for %s with a safe default type', (label) => {
+    render(<EscCap label={label} onClick={() => {}} />)
+    const button = screen.getByRole('button', { name: label })
+    expect(button.textContent).toBe('Esc')
+    expect(button).toHaveClass('key', 'hot', 'esc-cap', 'dp-focus')
+    expect(button.getAttribute('type')).toBe('button')
   })
 
-  it('keeps the explicit type before class and label, as in DetailsDrawer', () => {
-    const { container } = render(<EscCap type="button" label="Close details" />)
-    expect(container.innerHTML).toBe('<button type="button" class="key hot" aria-label="Close details">Esc</button>')
+  it('keeps the explicit button type and label, as in DetailsDrawer', () => {
+    render(<EscCap type="button" label="Close details" />)
+    expect(screen.getByRole('button', { name: 'Close details' }).getAttribute('type')).toBe('button')
   })
 
   it('forwards the ref to the focusable button and calls the dismiss handler', () => {

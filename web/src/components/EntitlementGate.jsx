@@ -54,10 +54,9 @@ const ROWS = [
   { key: 'converse', label: 'Chat with the assistant', hint: 'converse lane', short: 'chat' },
 ]
 
-// Unknown/absent capability -> permissive (the off-auth demo grants everything).
+// Missing capability values cannot confirm access.
 function entValue(ents, key) {
-  if (!ents || typeof ents[key] === 'undefined' || ents[key] === null) return true
-  return ents[key] !== false
+  return ents?.[key] === true
 }
 
 /** The consent switch. A real ARIA switch, not a checkbox pretending. Its
@@ -169,10 +168,9 @@ export default function EntitlementGate({
   const ents = entitlements?.entitlements || null
   // A real policy read exists only in live mode with the endpoint deployed.
   const known = !mock && !!entitlements
-  const source = entitlements?.source || null
-  const rows = ROWS.map((r) => ({ ...r, on: entValue(ents, r.key) }))
+  const rows = ROWS.map((r) => ({ ...r, on: mock || entValue(ents, r.key), unknown: !mock && (!known || ents?.[r.key] == null) }))
   const allOn = rows.every((r) => r.on)
-  const tierLabel = tier || 'demo'
+  const tierLabel = tier || (mock ? 'demo' : 'unavailable')
   const studioKnown = !mock && !loading && known
   const studioHead = mock ? START_BOARD_COPY.demoHead
     : loading ? START_BOARD_COPY.checkingHead
@@ -186,14 +184,14 @@ export default function EntitlementGate({
         <span className="ent-k">Entitlements</span>
         {studioPresentation ? <span className="ent-tier">{studioHead}</span> : <span className="ent-tier">tier {tierLabel}</span>}
         {studioPresentation ? null : known ? (
-          <span className="ent-src">enforced server-side{source ? ` · ${source}` : ''}</span>
+          <span className="ent-src">Plan checked</span>
         ) : (!mock && loading) ? (
           <span className="ent-src dim ent-checking">
             <span className="dot live pulse" aria-hidden="true" />
             Checking plan
           </span>
         ) : (
-          <span className="ent-src dim">demo · not signed in</span>
+          <span className="ent-src dim">{mock ? 'Demo preview' : guest ? 'Sign in to check your plan' : 'Plan unavailable'}</span>
         )}
       </div>
 
@@ -201,9 +199,9 @@ export default function EntitlementGate({
         {rows.map((r) => (
           <div key={r.key} className={`ent-row ${r.on ? 'on' : 'off'}`}>
             <span className="ent-label">
-              {r.label}{r.hint ? <span className="dim"> · {studioPresentation ? START_BOARD_COPY.entitlementHints[r.key] : r.hint}</span> : null}
+              {r.label}{r.hint ? <span className="dim"> · {START_BOARD_COPY.entitlementHints[r.key]}</span> : null}
             </span>
-            <span className={`ent-state ${r.on ? 'on' : ''}`}>{studioPresentation && !studioKnown ? studioState : r.on ? 'included' : 'not in plan'}</span>
+            <span className={`ent-state ${r.on ? 'on' : ''}`}>{studioPresentation && !studioKnown ? studioState : r.unknown ? (loading ? 'Checking' : guest ? 'Sign in to check' : 'Unavailable') : r.on ? 'included' : 'not in plan'}</span>
           </div>
         ))}
       </div>
@@ -217,7 +215,7 @@ export default function EntitlementGate({
       </>}
       {studioPresentation && (!studioKnown || allOn) ? null : !known ? (
         <p className="ent-note">
-          demo tier · full access. Entitlements apply once you sign in to a plan.
+          {mock ? 'Demo preview. Sign in to check your plan.' : loading ? 'Checking your plan.' : guest ? 'Sign in to check your plan.' : 'Your plan could not be loaded. Reopen this panel or refresh the page to try again.'}
         </p>
       ) : allOn ? (
         <p className="ent-note">All capabilities are included on the {tierLabel} plan.</p>
@@ -225,7 +223,7 @@ export default function EntitlementGate({
         // Name the ACTUAL missing capabilities — the policy file is operator-
         // tunable per key, so no fixed sentence stays true across policies.
         <p className="ent-note amber">
-          Some capabilities aren’t in the {tierLabel} plan ({rows.filter((r) => !r.on).map((r) => r.short).join(', ')}); a higher tier unlocks them.
+          {rows.some(r => r.unknown) ? 'Some plan details are unavailable. Refresh the page to try again.' : `Some capabilities aren’t in the ${tierLabel} plan (${rows.filter((r) => !r.on).map((r) => r.short).join(', ')}); a higher tier unlocks them.`}
         </p>
       )}
 

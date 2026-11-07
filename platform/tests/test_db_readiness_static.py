@@ -27,7 +27,58 @@ def test_acceptance_schema_readiness_contract(monkeypatch):
     catalog = db.required_catalog_for_selected_authorities({})
     assert "account_class" in columns["orgs"]
     assert "org_id" in columns["unit_economics_observations"]
+    assert columns["org_invitations"] == {
+        "id", "org_id", "token_hash", "role", "label", "created_by_binding_id",
+        "created_at", "expires_at", "accepted_at", "accepted_binding_id",
+        "revoked_at", "revoked_by_binding_id",
+    }
+    assert columns["org_invitation_receipts"] == {
+        "id", "invitation_id", "org_id", "event", "actor_binding_id", "at",
+    }
+    assert catalog["constraints"]["org_invitations_token_hash_key"] == db._catalog_contract(
+        "org_invitations", "UNIQUE (token_hash)")
+    assert catalog["constraints"]["org_invitations_role_check"] == db._catalog_contract(
+        "org_invitations", "CHECK", "role = 'editor'")
     assert "org_account_class" in columns["unit_economics_observations"]
+    assert columns['project_materials'] == {
+        'material_id', 'org_id', 'project_id', 'actor_binding_id', 'name',
+        'media_type', 'byte_size', 'sha256', 'width', 'height',
+        'preview_media_type', 'preview_sha256', 'created_at',
+    }
+    assert catalog['constraints']['project_materials_org_id_project_id_sha256_key'] == db._catalog_contract(
+        'project_materials', 'UNIQUE (org_id, project_id, sha256)')
+    assert catalog['indexes']['project_materials_scope_page'] == db._catalog_contract(
+        'project_materials', '(org_id, project_id, material_id)')
+    assert columns["project_reference_materials"] == {
+        "material_id", "org_id", "project_id", "actor_binding_id", "name",
+        "media_type", "byte_size", "sha256", "created_at",
+    }
+    reference_constraints = {
+        "project_reference_materials_pkey": db._catalog_contract(
+            "project_reference_materials", "PRIMARY KEY (material_id)"),
+        "reference_scope_digest": db._catalog_contract(
+            "project_reference_materials", "UNIQUE (org_id, project_id, sha256)"),
+        "reference_project_fk": db._catalog_contract(
+            "project_reference_materials", "FOREIGN KEY (org_id, project_id)",
+            "REFERENCES projects(org_id, project_id) ON DELETE CASCADE"),
+        "reference_actor_fk": db._catalog_contract(
+            "project_reference_materials", "FOREIGN KEY (org_id, actor_binding_id)",
+            "REFERENCES identity_bindings(platform_tenant_id, binding_id)"),
+        "project_reference_materials_name_check": db._catalog_contract(
+            "project_reference_materials", "CHECK", "char_length(name) >= 1", "char_length(name) <= 255"),
+        "project_reference_materials_media_type_check": db._catalog_contract(
+            "project_reference_materials", "CHECK", "media_type", "'video/quicktime'", "'text/plain'", "'application/json'", "'application/gzip'"),
+        "project_reference_materials_byte_size_check": db._catalog_contract(
+            "project_reference_materials", "CHECK", "byte_size >= 1", "byte_size <= 67108864"),
+        "reference_text_size": db._catalog_contract(
+            "project_reference_materials", "CHECK", "media_type", "'video/quicktime'", "'application/gzip'", "byte_size <= 8388608"),
+        "project_reference_materials_sha256_check": db._catalog_contract(
+            "project_reference_materials", "CHECK", "sha256 ~ '^[0-9a-f]{64}$'"),
+    }
+    assert {name: contract for name, contract in catalog["constraints"].items()
+            if contract["relation"] == "project_reference_materials"} == reference_constraints
+    assert catalog["indexes"]["reference_scope_page"] == db._catalog_contract(
+        "project_reference_materials", "(org_id, project_id, material_id)")
     assert catalog["constraints"]["orgs_account_class_check"] == db._catalog_contract(
         "orgs", "CHECK", "account_class", "'customer'", "'production_acceptance'", "'demo'")
     assert catalog["constraints"]["unit_economics_observations_org_class_check"] == db._catalog_contract(
@@ -35,8 +86,7 @@ def test_acceptance_schema_readiness_contract(monkeypatch):
         "org_id IS NOT NULL", "org_account_class", "'customer'", "'production_acceptance'", "'demo'")
     manifest = db.migration_manifest()
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
-    assert manifest[-1]["name"] == "0090_lab_git_authority.sql"
-    assert inventory["scope"]["migration_ids"][-1] == "0090"
+    assert [item["name"] for item in manifest] == inventory["scope"]["migration_files"]
 
     class Schema:
         absent = None
@@ -78,14 +128,26 @@ def test_acceptance_schema_readiness_contract(monkeypatch):
     monkeypatch.setattr(db, "required_catalog_for_selected_authorities", lambda: catalog)
     assert db.schema_status()["ok"]
     for table, column in (("orgs", "account_class"), ("unit_economics_observations", "org_id"),
+                          ("org_invitations", "token_hash"),
+                          ("org_invitations", "accepted_binding_id"),
+                          ("org_invitation_receipts", "event"),
                           ("unit_economics_observations", "org_account_class"),
                           ("demo_sessions", "revoked_at"),
+                          ("project_solve_exchanges", "grid_id"),
+                          ("project_solve_exchanges", "send_protocol"),
+                          ("project_solve_exchanges", "sent_at"),
+                          ("project_solve_exchanges", "send_principal_sha256"),
+                          ("project_materials", "preview_sha256"),
+                          ("project_materials", "org_id"),
                           ("demo_mint_counters", "count")):
         schema.absent = (table, column)
         status = db.schema_status()
         assert not status["ok"]
         assert column in status["missing"][table]
     for constraint in ("orgs_account_class_check", "unit_economics_observations_org_class_check",
+                       "org_invitations_token_hash_key", "org_invitations_role_check",
+                       "org_invitation_receipts_invitation_id_fkey",
+                       "project_solve_exchanges_async_shape_check",
                        "demo_sessions_subject_key", "demo_sessions_tenant_id_key",
                        "demo_sessions_subject_check", "demo_sessions_tenant_id_check",
                        "demo_sessions_client_ip_hash_check", "demo_sessions_check",
@@ -95,6 +157,39 @@ def test_acceptance_schema_readiness_contract(monkeypatch):
         status = db.schema_status()
         assert not status["ok"]
         assert f"{constraint}:missing-or-wrong-relation" in status["invalid_constraints"]
+    schema.absent = "project_solve_exchanges_async_guard"
+    status = db.schema_status()
+    assert not status["ok"]
+    assert "project_solve_exchanges_async_guard:missing-or-wrong-relation" in status["invalid_triggers"]
+    schema.absent = "org_invitation_receipts_immutable"
+    assert "org_invitation_receipts_immutable:missing-or-wrong-relation" in db.schema_status()["invalid_triggers"]
+    schema.absent = "org_invitations_pending_org_idx"
+    assert "org_invitations_pending_org_idx:missing-or-wrong-relation" in db.schema_status()["invalid_indexes"]
+    for constraint in ('project_materials_pkey', 'project_materials_org_id_project_id_sha256_key',
+                       'project_materials_org_id_project_id_fkey', 'project_materials_org_id_actor_binding_id_fkey'):
+        schema.absent = constraint
+        status = db.schema_status()
+        assert not status['ok']
+        assert f'{constraint}:missing-or-wrong-relation' in status['invalid_constraints']
+    schema.absent = 'project_materials_scope_page'
+    status = db.schema_status()
+    assert not status['ok']
+    assert 'project_materials_scope_page:missing-or-wrong-relation' in status['invalid_indexes']
+    schema.absent = None
+    for column in columns["project_reference_materials"]:
+        schema.absent = ("project_reference_materials", column)
+        status = db.schema_status()
+        assert not status["ok"]
+        assert column in status["missing"]["project_reference_materials"]
+    for constraint in reference_constraints:
+        schema.absent = constraint
+        status = db.schema_status()
+        assert not status["ok"]
+        assert f"{constraint}:missing-or-wrong-relation" in status["invalid_constraints"]
+    schema.absent = "reference_scope_page"
+    status = db.schema_status()
+    assert not status["ok"]
+    assert "reference_scope_page:missing-or-wrong-relation" in status["invalid_indexes"]
     schema.absent = None
     schema.definitions["unit_economics_observations_org_class_check"] = (
         "CHECK (org_account_class = 'production_acceptance')")
@@ -103,7 +198,84 @@ def test_acceptance_schema_readiness_contract(monkeypatch):
     assert "unit_economics_observations_org_class_check:definition-mismatch" in status["invalid_constraints"]
 
 
+def test_runner_registry(monkeypatch):
+    from contextlib import nullcontext
+    from leaf_platform.tenant_cost_store import ADDONS
+
+    sql = (db._PKG_DIR / "migrations/0091_kashbot_runner.sql").read_text(encoding="utf-8")
+    catalog = db.required_catalog_for_selected_authorities({})
+    columns = db.required_columns_for_selected_authorities({})
+    manifest = db.migration_manifest()
+    inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
+    assert [item["name"] for item in manifest] == inventory["scope"]["migration_files"]
+    _assert_manifest_matches_inventory([item["name"] for item in manifest], inventory["scope"]["migration_ids"])
+    assert len(ADDONS) == 12
+    assert "-- expand-contract: contract-of=0083" in sql
+    names = [f"{table}_addon_check" for table in ("tenant_cost_events", "tenant_addon_settings")]
+    for name in names:
+        match = re.search(rf"ADD CONSTRAINT {name} CHECK \(addon IN \((.*?)\)\)", sql, re.S)
+        assert match is not None
+        assert set(re.findall(r"'([^']+)'", match[1])) == set(ADDONS)
+        definition = " ".join(catalog["constraints"][name]["definition_fragments"])
+        assert set(re.findall(r"'([^']+)'", definition)) == set(ADDONS)
+
+    class Schema:
+        old_check = None
+
+        def cursor(self):
+            return nullcontext(self)
+
+        def connection(self):
+            return nullcontext(self)
+
+        def execute(self, sql, params=None):
+            self.sql = sql
+
+        def fetchall(self):
+            if "information_schema.columns" in self.sql:
+                required = {**columns, db._MIGRATION_LEDGER_TABLE: db._MIGRATION_LEDGER_COLUMNS}
+                return [{"table_name": table, "column_name": column}
+                        for table, fields in required.items() for column in fields]
+            for kind, source, field in (("constraints", "pg_constraint", "conname"),
+                                        ("indexes", "pg_index", "indexname"),
+                                        ("triggers", "pg_trigger", "tgname")):
+                if source in self.sql:
+                    rows = []
+                    for name, contract in catalog[kind].items():
+                        definition = " ".join(contract["definition_fragments"])
+                        if name == self.old_check:
+                            definition = definition.replace(", 'kashbot_runner'", "")
+                        rows.append({field: name, "relation_name": contract["relation"],
+                                     "definition": definition, "validated": True,
+                                     "valid": True, "ready": True, "enabled": "O"})
+                    return rows
+            assert "FROM leaf_schema_migrations" in self.sql
+            return manifest
+
+        def fetchone(self):
+            return {"database": "offline", "schema": "public"}
+
+    schema = Schema()
+    monkeypatch.setattr(db, "get_pool", lambda: schema)
+    monkeypatch.setattr(db, "required_columns_for_selected_authorities", lambda: dict(columns))
+    monkeypatch.setattr(db, "required_catalog_for_selected_authorities", lambda: catalog)
+    assert db.schema_status()["ok"]
+    for name in names:
+        schema.old_check = name
+        status = db.schema_status()
+        assert not status["ok"]
+        assert status["invalid_constraints"] == [f"{name}:definition-mismatch"]
+        assert status["missing_migrations"] == []
+    schema.old_check = None
+    assert db.schema_status()["ok"]
+
+
 def test_sip_r1_schema_contract_complete():
+    assert db._REQUIRED_COLUMNS["project_checkout_custody"] == {
+        "delegation_id", "tenant_id", "confirmation_id", "session_id", "subject",
+        "actor_binding_id", "input_binding", "approved_args", "fence", "expires_at",
+        "revoked_at", "created_at",
+    }
     assert db._REQUIRED_COLUMNS["project_drawing_checkouts"] == {
         "org_id", "project_id", "drawing_id", "holder", "holder_binding_id",
         "acquired_at", "expires_at", "fence", "updated_at",
@@ -168,12 +340,13 @@ def test_sip_r1_schema_contract_complete():
         "response_bytes", "response_sha256", "solver_endpoint", "solver_version",
         "candidate_bytes", "candidate_sha256", "proof_bytes", "proof_sha256",
         "sender_worker", "sender_attempt", "refusal_code", "created_at", "updated_at",
+        "grid_id", "send_protocol", "sent_at", "send_principal_sha256",
     }
     solve_constraints = {"project_solve_exchanges_" + suffix for suffix in (
         "pkey", "job_fk", "artifact_fk", "input_fk", "grant_check", "graph_check",
         "phase_check", "worker_check", "solver_check", "classification_check",
         "state_check", "hash_check", "digest_check", "shape_check", "request_check",
-        "response_check", "candidate_check", "proof_check")}
+        "response_check", "candidate_check", "proof_check", "async_shape_check")}
     assert solve_constraints <= set(catalog["constraints"])
     assert all(catalog["constraints"][name]["relation"] == "project_solve_exchanges"
                for name in solve_constraints)
@@ -183,24 +356,24 @@ def test_sip_r1_schema_contract_complete():
         "project_solve_exchanges", "BEFORE UPDATE", "FOR EACH ROW",
         "EXECUTE FUNCTION guard_project_solve_exchange()")
     sql = (db._PKG_DIR / "migrations/0078_project_solve_exchanges.sql").read_text(encoding="utf-8")
+    sql += (db._PKG_DIR / "migrations/0094_project_solve_async.sql").read_text(encoding="utf-8")
     assert solve_constraints == set(re.findall(r"CONSTRAINT (project_solve_exchanges_\w+)", sql))
 
 
 def test_sip_r1_migration_registration_complete():
     root = db._PKG_DIR.parent
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
-    ids = [f"{n:04d}" for n in range(1, 91)]
-    assert inventory["scope"]["migration_ids"] == ids
-    assert db.migration_manifest()[-1]["name"] == "0090_lab_git_authority.sql"
+    names = [item["name"] for item in db.migration_manifest()]
+    assert inventory["scope"]["migration_files"] == names
+    _assert_manifest_matches_inventory(names, inventory["scope"]["migration_ids"])
     ledger = next(a for a in inventory["authorities"] if a["id"] == "canonical_project_ledger")
     assert "project_drawing_checkouts" in ledger["postgres_tables"]
+    assert "project_checkout_custody" in ledger["postgres_tables"]
     assert "project_sizing_exchanges" in ledger["postgres_tables"]
     assert "project_solve_exchanges" in ledger["postgres_tables"]
-    for name in ("test_conversation_model.py", "test_template_store.py",
-                 "test_postgres_authority_inventory_contract.py"):
-        source = (root / "server/tests" / name).read_text(encoding="utf-8")
-        assert "range(1, 91)" in source
-        assert "range(1, 74)" not in source
+    assert 'project_materials' in ledger['postgres_tables']
+    assert "project_reference_materials" in ledger["postgres_tables"]
+
 
 
 def test_sip_r1_expand_only_migration():
@@ -313,10 +486,12 @@ def _assert_manifest_matches_inventory(manifest_names, migration_ids):
     )
     assert len(migration_ids) == len(set(migration_ids))
     assert migration_ids == sorted(migration_ids)
-    assert migration_ids == [
-        f"{number:04d}" for number in range(1, len(migration_ids) + 1)
-    ]
-    assert [name.split("_", 1)[0] for name in manifest_names] == migration_ids
+    assert manifest_names == sorted(manifest_names)
+    assert len(manifest_names) == len(set(manifest_names))
+    assert all(re.fullmatch(r"[0-9]{4}_[A-Za-z0-9_]+\.sql", name) for name in manifest_names)
+    # The producer ledger keys full filenames and digests. Parallel changes may
+    # share a numeric prefix or leave a gap without aliasing either migration.
+    assert sorted({name.split("_", 1)[0] for name in manifest_names}) == migration_ids
 
 
 @pytest.mark.parametrize("url", [
@@ -384,14 +559,8 @@ def test_annotation_migration_is_in_the_unconditional_readiness_inventory():
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
     assert "0042_annotation_batches.sql" in manifest_names
     _assert_closed_world_pin(
-        manifest_names[-1], "0090_lab_git_authority.sql",
-        "Update this pin to the new last migration filename once main adds "
-        "one (and the migration_ids pin below to match).",
-    )
-    _assert_closed_world_pin(
-        inventory["scope"]["migration_ids"][-1], "0090",
-        "Update this pin (and authority-inventory.json's "
-        "scope.migration_ids) to the new last migration id.",
+        manifest_names, inventory["scope"]["migration_files"],
+        "Record every complete migration filename in the authority inventory.",
     )
     assert "annotation_targets" in db._REQUIRED_COLUMNS
     assert "annotation_batches" in db._REQUIRED_COLUMNS
@@ -414,9 +583,9 @@ def test_annotation_migration_is_in_the_unconditional_readiness_inventory():
         (["0001_one.sql"], ["0001", "0002"]),
         (["0001_one.sql", "0002_two.sql"], ["0001", "0001"]),
         (["0001_one.sql", "0002_two.sql"], ["0002", "0001"]),
-        (["0001_one.sql", "0003_three.sql"], ["0001", "0003"]),
+        (["0001_one.sql", "0001_one.sql"], ["0001"]),
     ],
-    ids=["missing", "extra", "duplicate", "reordered", "noncontiguous"],
+    ids=["missing", "extra", "duplicate", "reordered", "duplicate-fullname"],
 )
 def test_migration_inventory_refuses_incomplete_or_ambiguous_ids(
     manifest_names, migration_ids,

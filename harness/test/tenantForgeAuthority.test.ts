@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { ForgeRemoteAuthorityOptions } from "../src/vendor/mushy-author/ports/impl/forgeRemoteAuthority.js";
+import { ForgeRemoteAuthority } from "../src/vendor/mushy-author/ports/impl/forgeRemoteAuthority.js";
 const capture = vi.hoisted(() => ({ options: undefined as ForgeRemoteAuthorityOptions | undefined }));
 vi.mock("../src/vendor/mushy-author/ports/impl/forgeRemoteAuthority.js", async importOriginal => {
   const actual = await importOriginal<typeof import("../src/vendor/mushy-author/ports/impl/forgeRemoteAuthority.js")>();
@@ -30,6 +32,42 @@ function fixture() {
   return { root, dir, map, remoteUrl, credential, env };
 }
 describe("trusted tenant Forge composition", () => {
+  it("initializes a bare cache with only its canonical directory trusted when setting the origin", async () => {
+    const root = mkdtempSync(join(tmpdir(), "tenant-forge-init-")); roots.push(root);
+    const git = (dir: string, args: string[]) => execFileSync("git", args, { cwd: dir, encoding: "utf8" }).trim();
+    const seed = join(root, "seed");
+    git(root, ["init", "--initial-branch=main", seed]);
+    writeFileSync(join(seed, "seed.txt"), "seed\n");
+    git(seed, ["add", "seed.txt"]);
+    git(seed, ["-c", "user.name=Leaf test", "-c", "user.email=test@example.invalid", "commit", "-m", "seed"]);
+    const remote = join(root, "remote.git");
+    git(root, ["clone", "--bare", seed, remote]);
+    const cache = join(root, "cache.git");
+    class RecordingAuthority extends ForgeRemoteAuthority {
+      readonly calls: Array<{ args: string[]; cwd: string }> = [];
+      protected override execute(args: string[], cwd: string, env: NodeJS.ProcessEnv) {
+        this.calls.push({ args: [...args], cwd });
+        return super.execute(args, cwd, env);
+      }
+    }
+    const authority = new RecordingAuthority({
+      locate: async () => remote,
+      credentials: async (tenantId, remoteUrl) => ({ tenantId, remoteUrl }),
+      allowLocalPathsForTests: true,
+    });
+    await authority.initialize("tenant-a", cache, remote);
+    const originCalls = authority.calls.filter(({ args }) =>
+      args.slice(-4).join("\0") === ["config", "--local", "remote.origin.url", remote].join("\0"));
+    expect(originCalls).toEqual([{
+      args: ["-c", "safe.directory=", "-c", `safe.directory=${realpathSync(cache).replaceAll("\\", "/")}`,
+        "config", "--local", "remote.origin.url", remote],
+      cwd: cache,
+    }]);
+    expect(originCalls[0]!.args).not.toContain("safe.directory=*");
+    expect(git(cache, ["rev-parse", "--is-bare-repository"])).toBe("true");
+    expect(git(cache, ["config", "--local", "--get", "remote.origin.url"])).toBe(remote);
+    expect(git(cache, ["rev-parse", "main"])).toBe(git(remote, ["rev-parse", "main"]));
+  });
   it("keeps unconfigured development optional but required mode cannot fall back", () => {
     expect(createTenantForgeConfigurationFromEnv({})).toBeUndefined();
     expect(() => createTenantForgeConfigurationFromEnv({ LEAF_TENANT_REPOSITORY_AUTHORITY: "forgejo" })).toThrow("refused");

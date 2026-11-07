@@ -550,11 +550,10 @@ def test_publication_failure_preserves_response(world, monkeypatch):
     assert _complete(s, completion)[0] == "applied"
 
 
-def test_lease_expiry_during_publication_rolls_back(world, monkeypatch):
+def test_lease_expiry_during_publication_still_settles(world, monkeypatch):
     s = world()
     _ready(s)
     completion = _completion(s)
-    before = _snapshot(s)
     insert_outbox = pg.jobs._insert_outbox
     observed = []
 
@@ -568,12 +567,24 @@ def test_lease_expiry_during_publication_rolls_back(world, monkeypatch):
 
     with monkeypatch.context() as patch:
         patch.setattr(pg.jobs, "_insert_outbox", expire_after_publication)
-        with pytest.raises(pg.jobs._GraphLeaseLost):
-            _complete(s, completion)
+        assert _complete(s, completion)[0] == "applied"
     assert observed == [True]
+    assert pg.load(s.job)["status"] == "succeeded"
+    assert _read(s)["response_bytes"] == RESPONSE and _read(s)["state"] == "published"
+
+
+def test_lease_expired_before_completion_is_refused(world):
+    s = world()
+    _ready(s)
+    completion = _completion(s)
+    with pg.db.transaction() as conn:
+        conn.execute("UPDATE jobs SET lease_expires_at=clock_timestamp() - interval '1 second' "
+                     "WHERE job_id=%s", (s.job,))
+    before = _snapshot(s)
+    with pytest.raises(exchanges.ExchangeLeaseLost):
+        _complete(s, completion)
     assert _snapshot(s) == before
     assert _read(s)["response_bytes"] == RESPONSE and _read(s)["state"] == "response_stored"
-    assert _complete(s, completion)[0] == "applied"
 
 
 def test_known_refusal_is_terminal(world):

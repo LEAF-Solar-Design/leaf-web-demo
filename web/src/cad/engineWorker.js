@@ -65,7 +65,7 @@ function defaultCreateWorker() {
   if (typeof Worker === 'undefined') {
     throw new Error('engineWorker: Worker API is not available in this environment')
   }
-  return new Worker(new URL(import.meta.url), { type: 'module' })
+  return new Worker(new URL('./engineWorker.js', import.meta.url), { type: 'module' })
 }
 
 // Main-thread handle onto the (possibly not-yet-instantiated) engine worker.
@@ -153,7 +153,7 @@ export class EngineBoundary {
 // worker scope. No WASM engine is loaded yet — the echo loop only proves the
 // boundary's validate-or-drop contract holds from the worker side too.
 if (
-  typeof window === 'undefined' &&
+  typeof globalThis.window === 'undefined' &&
   typeof self !== 'undefined' &&
   typeof self.postMessage === 'function' &&
   typeof importScripts === 'function'

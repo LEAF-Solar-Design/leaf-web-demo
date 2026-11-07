@@ -253,12 +253,22 @@ def _candidate(context, tool, params, initialized, job_id, *, conn=None, trusted
     trusted = {}
     if "source_intake" in solar_tools.get(tool)["trusted_inputs"]:
         trusted["source_intake"] = _canonical_source_intake(context)
+    if tool == 'solar-trackers-to-panel-groups':
+        from project_solar_materialization import canonical_ground_input, editor as drawing_editor
+        try:
+            trusted['physical_state'] = canonical_ground_input(context, conn=conn)
+        except drawing_editor.EditorError as exc:
+            raise GraphValidationError('GROUND_LAYOUT_INVALID', exc.code) from None
     if tool == "solar-commit-solve":
         from solar_project_solve import commit_candidate
         trusted["candidate"] = commit_candidate(context, trusted_proposal, conn=conn)
-    if not initialized and tool not in ("solar-settings", "solar-panels-from-drawing", SIZING_TOOL):
+    if not initialized and tool not in ("solar-settings", "solar-design-presets",
+                                       "solar-trackers-to-panel-groups", "solar-panels-from-drawing", SIZING_TOOL):
         require_project_sizing(context, conn=conn)
-    if _global_sizing(tool, params) and conn is not None:
+    if tool == "solar-solaredge-accept":
+        from solar_project_solaredge import accept
+        after = accept(context, builtin_params)
+    elif _global_sizing(tool, params) and conn is not None:
         after = _stored_sizing_graph(context, job_id, conn)
     else:
         after = _run_builtin(context, tool, copy.deepcopy(base if initialized else before),

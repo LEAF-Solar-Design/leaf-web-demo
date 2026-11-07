@@ -364,6 +364,55 @@ def load_physical_state(backend, tenant_id, drawing_id, artifact_id, *, project_
     return meta, document
 
 
+PARAMETERS_TOOL = "solar-physical-parameters"
+PARAMETERS_SCHEMA = "leaf.solar-physical-parameters.v1"
+
+
+def load_operation_parameters(backend, tenant_id, drawing_id, physical_meta, document):
+    """Read the request companion bound to this exact immutable physical source."""
+    context = {"project_id": physical_meta["project_id"],
+               "resolved_version": physical_meta["source_version"], "graph_sha256": physical_meta["graph_sha256"]}
+    binding = solar_artifacts.artifact_binding(tenant_id, drawing_id, context, PARAMETERS_TOOL,
+                                                document["source"]["sha256"])
+    from solar_sizing_client import digest
+    meta, raw = solar_artifacts.read_artifact(backend, tenant_id, drawing_id, digest(binding))
+    if (any(meta[key] != value for key, value in binding.items() if key != "schema")
+            or meta["media_type"] != MEDIA_TYPE or meta["filename"] != "physical-parameters.json"):
+        raise PhysicalStateError("PHYSICAL_STATE_CORRUPT")
+    try:
+        value = json.loads(raw, parse_constant=_refuse_constant)
+        if (type(value) is not dict or set(value) != {"schema", "operation", "generation", "piling"}
+                or value["schema"] != PARAMETERS_SCHEMA or type(value["operation"]) is not dict
+                or digest(value["operation"]) != document["source"]["sha256"]):
+            raise ValueError()
+    except (ValueError, TypeError, RecursionError):
+        raise PhysicalStateError("PHYSICAL_STATE_CORRUPT") from None
+    return value
+
+
+def store_operation_parameters(backend, tenant_id, drawing_id, context, request, document, *, previous=None):
+    """One bounded request snapshot in the existing artifact/retention rail."""
+    from solar_sizing_client import digest
+    value = {"schema": PARAMETERS_SCHEMA, "operation": request, "generation": None, "piling": None}
+    if previous is not None:
+        head, prior = previous
+        meta, _ = solar_artifacts.read_artifact(backend, tenant_id, drawing_id, head["state"]["artifact_id"])
+        try:
+            old = load_operation_parameters(backend, tenant_id, drawing_id, meta, prior)
+        except GraphValidationError as exc:
+            if exc.code != "ARTIFACT_NOT_FOUND":
+                raise
+        else:
+            value.update(generation=old["generation"], piling=old["piling"])
+    if document["capability"] == "frame-generate":
+        value["generation"] = request
+    elif document["capability"] == "piling-generate":
+        value["piling"] = request
+    raw = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    sink = solar_artifacts.ArtifactSink(backend, tenant_id, drawing_id, context, PARAMETERS_TOOL, digest(request), False)
+    return sink.finish(sink.prepare(solar_artifacts.ArtifactOutput({}, MEDIA_TYPE, "physical-parameters.json", raw)))
+
+
 def store_physical_state(backend, tenant_id, drawing_id, document, *, project_id=None):
     """Store the document bound to the drawing's head revision; the same bytes at the same
     head return the same reference. A parent must be a stored state of the same project."""

@@ -1,0 +1,404 @@
+import { authHeaders, config, getStoredOrgId, noteUnauthorized } from '../api.js'
+import { getStoredActorBindingId } from '../projects/api.js'
+import { validatePortfolioDocument } from './portfolioDocument.js'
+import { DESIGN_FIELDS, validateNodeDesign } from './pageDesign.js'
+
+const FIELDS = ['alignment', 'description', 'headline', 'label', 'status', 'theme']
+const LIMITS = { label: 120, headline: 240, description: 1200, status: 80 }
+
+export function validatePageDocument(document) {
+  if (document && Object.hasOwn(document, 'schema')) return validatePortfolioDocument(document)
+  if (!document || typeof document !== 'object' || Array.isArray(document)
+    || Object.keys(document).filter(key => !Object.hasOwn(DESIGN_FIELDS.page, key)).sort().join(',') !== FIELDS.join(',')) throw new Error('The page has an unsupported format.')
+  validateNodeDesign(document, 'page')
+  for (const [field, limit] of Object.entries(LIMITS)) {
+    const value = document[field]
+    if (typeof value !== 'string' || Array.from(value).length > limit || /[<>]/.test(value)
+      || /[\p{Cc}\p{Cf}\p{Cs}]/u.test(value.replaceAll('\n', ''))
+      || /(?:[a-z][a-z0-9+.-]*:\/\/|\b(?:https?|ftp|file|data|javascript):|\bwww\.)/i.test(value)
+      || (['label', 'headline'].includes(field) && !value.trim())) {
+      throw new Error(`Check the ${field}. Use plain text within ${limit} characters.`)
+    }
+  }
+  if (!['cream', 'light', 'dark'].includes(document.theme) || !['center', 'left'].includes(document.alignment)) {
+    throw new Error('Choose one of the available page layouts.')
+  }
+  if (new TextEncoder().encode(JSON.stringify(document)).length > 8192) throw new Error('Page exceeds 8192 bytes.')
+  return document
+}
+
+function pagePath(projectId) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(projectId || '')) {
+    throw new Error('Choose a project before opening a page.')
+  }
+  return `/api/projects/${projectId}/page`
+}
+
+async function request(path, { signal, native = false, proposal = false, ...options } = {}, consume = response => response) {
+  const headers = { ...authHeaders(), ...options.headers }
+  const org = getStoredOrgId()
+  const actor = getStoredActorBindingId()
+  if (org) headers['X-Org-Id'] = org
+  if (actor) headers['X-Actor-Binding-Id'] = actor
+  const controller = new AbortController()
+  const cancel = () => controller.abort()
+  let timedOut = false
+  if (signal?.aborted) cancel()
+  signal?.addEventListener('abort', cancel, { once: true })
+  const timeout = setTimeout(() => { timedOut = true; cancel() }, proposal ? 60000 : 30000)
+  const wait = promise => proposal ? abortable(promise, controller.signal) : promise
+  try {
+    let response
+    try {
+      if (controller.signal.aborted) throw new DOMException('Cancelled', 'AbortError')
+      response = await wait(fetch(`${config.apiBase}${path}`, { ...options, headers, signal: controller.signal, cache: 'no-store' }))
+    }
+    catch (error) {
+      if (error.name === 'AbortError') throw error
+      throw new Error('Could not reach the page service. Your draft is still here. Try again.')
+    }
+    if (response.status === 401) noteUnauthorized(response, path, headers.Authorization)
+    if (!response.ok) {
+      const messages = {
+        401: 'Sign in again to access this page.',
+        403: 'You do not have permission to access or change this page.',
+        404: 'This project is no longer available to you.',
+        409: 'The saved page changed elsewhere. Your draft is still here. Reload the saved page to continue.',
+        413: 'The page document is too large. Reduce its content and try again.',
+        422: 'Some page fields were not accepted. Check your draft and try again.',
+      }
+      let message = messages[response.status]
+      if (proposal && response.status === 429) message = 'The text proposal service is temporarily rate limited. Try again later. Your saved page and draft are unchanged.'
+      if (response.status === 422 && !proposal) {
+        try {
+          const { detail } = await response.json()
+          if (typeof detail === 'string' && /^Portfolio (?:previews exceed 64 MiB|(?:source|archive) exceeds 80 MiB)/.test(detail)) message = 'This portfolio is too large to export. Reduce the selected photos, save, and try again.'
+          if (typeof detail === 'string' && detail.startsWith('A portfolio photo is missing from this project')) message = 'A selected photo is missing or changed. Re-select it from this project, save, and try again.'
+        } catch { /* retain the bounded default message */ }
+      }
+      if (proposal) void response.body?.cancel?.().catch(() => {})
+      const error = new Error(message || 'The page action failed. Your draft is still here. Try again.')
+      error.status = response.status
+      throw error
+    }
+    return await wait(consume(response, controller.signal))
+  } catch (error) {
+    if (native) {
+      if (error.name === 'AbortError' && !timedOut) throw error
+      const failure = new Error(timedOut ? 'The iOS preview service took too long. Try again.' : 'Could not access the iOS preview. Try again.')
+      failure.status = error.status
+      throw failure
+    }
+    if (timedOut) throw new Error('The page service took too long. Your draft is still here. Try again.')
+    throw error
+  } finally {
+    clearTimeout(timeout)
+    signal?.removeEventListener('abort', cancel)
+  }
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const DIGEST = /^[0-9a-f]{64}$/
+const validUuid = value => typeof value === 'string' && value.length === 36 && UUID.test(value)
+const validDigest = value => typeof value === 'string' && value.length === 64 && DIGEST.test(value)
+const MAX_SCREENSHOT = 16 * 1024 * 1024
+const nativeInvalid = () => { throw new Error('The iOS preview response could not be verified. Try again.') }
+
+function abortable(promise, signal) {
+  return new Promise((resolve, reject) => {
+    const cancel = () => reject(new DOMException('Cancelled', 'AbortError'))
+    if (signal.aborted) cancel()
+    else signal.addEventListener('abort', cancel, { once: true })
+    Promise.resolve(promise).then(resolve, reject).finally(() => signal.removeEventListener('abort', cancel))
+  })
+}
+
+const proposalInvalid = () => { throw new Error('The text proposal could not be verified. Try again.') }
+const closed = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
+  && Object.keys(value).sort().join(',') === keys.split(' ').sort().join(',')
+const canonical = value => JSON.stringify(value, (_, item) => item && typeof item === 'object' && !Array.isArray(item)
+  ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item)
+
+// Traverse trusted portfolio structure directly. Model ids are never paths or labels.
+export function portfolioTextChanges(saved, proposed) {
+  try {
+    const copy = validatePortfolioDocument(saved)
+    validatePortfolioDocument(proposed)
+    const changes = []
+    const text = (target, next, field, label) => {
+      if (target[field] !== next[field]) changes.push({ label, before: target[field], after: next[field] })
+      target[field] = next[field]
+    }
+    for (const [field, label] of [['name', 'Name'], ['headline', 'Headline'], ['introduction', 'Introduction'], ['about', 'About']]) text(copy, proposed, field, label)
+    for (const field of ['email', 'location']) text(copy.contact, proposed.contact, field, `Contact ${field}`)
+    if (copy.resume.length !== proposed.resume.length || copy.categories.length !== proposed.categories.length) proposalInvalid()
+    copy.resume.forEach((section, index) => {
+      const next = proposed.resume[index], prefix = `Resume section ${index + 1}: ${section.heading}`
+      text(section, next, 'heading', `${prefix}: heading`)
+      if (section.entries.length !== next.entries.length) proposalInvalid()
+      section.entries.forEach((entry, entryIndex) => {
+        for (const field of ['title', 'subtitle', 'dates', 'description']) text(entry, next.entries[entryIndex], field, `${prefix}, entry ${entryIndex + 1}: ${field}`)
+      })
+    })
+    copy.categories.forEach((category, index) => {
+      const next = proposed.categories[index], prefix = `Gallery ${index + 1}: ${category.title}`
+      for (const field of ['title', 'description']) text(category, next, field, `${prefix}: ${field}`)
+      if (category.images.length !== next.images.length) proposalInvalid()
+      category.images.forEach((image, imageIndex) => {
+        for (const [field, label] of [['title', 'caption'], ['alt', 'alt text']]) text(image, next.images[imageIndex], field, `${prefix}, photo ${imageIndex + 1}: ${label}`)
+      })
+    })
+    if (canonical(copy) !== canonical(proposed)) proposalInvalid()
+    return changes
+  } catch { return proposalInvalid() }
+}
+
+async function readProposal(response, signal) {
+  const max = 1024 * 1024
+  let reader
+  try {
+    if ((response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase() !== 'application/json') proposalInvalid()
+    const length = response.headers.get('content-length')
+    if (length !== null && (!/^\d+$/.test(length) || Number(length) > max)) proposalInvalid()
+    reader = response.body?.getReader()
+    let encoded
+    if (reader) {
+      const chunks = []
+      let size = 0
+      while (true) {
+        const { done, value } = await abortable(reader.read(), signal)
+        if (done) break
+        size += value.byteLength
+        if (size > max) proposalInvalid()
+        chunks.push(value)
+      }
+      const bytes = new Uint8Array(size)
+      let offset = 0
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
+      encoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    } else encoded = await abortable(response.text(), signal)
+    if (new TextEncoder().encode(encoded).length > max) proposalInvalid()
+    return JSON.parse(encoded)
+  } catch (error) {
+    if (error.name === 'AbortError') throw error
+    return proposalInvalid()
+  } finally {
+    if (reader) {
+      void reader.cancel().catch(() => {})
+      reader.releaseLock()
+    } else if (response.body?.cancel) void response.body.cancel().catch(() => {})
+  }
+}
+
+export function validateProjectPageProposal(projectId, saved, value) {
+  if (!validUuid(projectId) || !Number.isSafeInteger(saved?.revision) || saved.revision < 1 || !validDigest(saved?.digest)) proposalInvalid()
+  let document
+  try {
+    if (new TextEncoder().encode(JSON.stringify(value)).length > 1024 * 1024) proposalInvalid()
+    document = validatePortfolioDocument(saved.document)
+  } catch { return proposalInvalid() }
+  const source = { project_id: projectId, revision: saved.revision, digest: saved.digest }
+  if (!closed(value, 'source proposed_document proposed_digest edits model usage')
+    || !closed(value.source, 'project_id revision digest') || canonical(value.source) !== canonical(source)
+    || !validDigest(value.proposed_digest) || typeof value.model !== 'string' || !value.model.trim()
+    || value.model.length > 128 || /[\p{Cc}\p{Cf}\p{Cs}]/u.test(value.model)
+    || !Array.isArray(value.edits) || value.edits.length > 32
+    || !value.usage || typeof value.usage !== 'object' || Array.isArray(value.usage)) proposalInvalid()
+  const ids = new Set()
+  for (const edit of value.edits) {
+    if (!closed(edit, 'id value') || typeof edit.id !== 'string' || !edit.id.trim() || edit.id.length > 128
+      || ids.has(edit.id) || typeof edit.value !== 'string' || Array.from(edit.value).length > 8000) proposalInvalid()
+    ids.add(edit.id)
+  }
+  const usageKeys = ['input_tokens', 'output_tokens', 'cache_creation_tokens', 'cache_read_tokens', 'cost_tokens']
+  for (const [key, count] of Object.entries(value.usage)) {
+    if (!usageKeys.includes(key) || !Number.isSafeInteger(count) || count < 0) proposalInvalid()
+  }
+  const changes = portfolioTextChanges(document, value.proposed_document)
+  const values = value.edits.map(edit => edit.value)
+  for (const change of changes) {
+    const index = values.indexOf(change.after)
+    if (index < 0) proposalInvalid()
+    values.splice(index, 1)
+  }
+  return value
+}
+
+export const PHOTO_PROPOSAL_SCHEMA = 'leaf.project-photo-assignment-proposal.v1'
+const freezeProposal = value => {
+  if (value && typeof value === 'object') {
+    Object.values(value).forEach(freezeProposal)
+    Object.freeze(value)
+  }
+  return value
+}
+
+export async function validateProjectPhotoAssignmentProposal(projectId, saved, input) {
+  const invalid = () => { throw new Error('The photo assignment proposal could not be verified. Try again.') }
+  try {
+    if (!closed(input, 'schema source proposed_document proposed_digest changes') || !closed(input.source, 'project_id revision digest')
+      || !Array.isArray(input.changes) || input.changes.length < 1 || input.changes.length > 200
+      || input.changes.some(change => !closed(change, 'op material_id material_name gallery_slug gallery_title index title alt'))) invalid()
+    // Detach before hashing: neither the producer nor a bus subscriber can change
+    // the document while WebCrypto yields, or after it has been reviewed.
+    const encoded = JSON.stringify(input)
+    if (new TextEncoder().encode(encoded).length > 1024 * 1024) invalid()
+    const value = JSON.parse(encoded)
+    if (!validUuid(projectId) || !Number.isSafeInteger(saved?.revision) || saved.revision < 1 || !validDigest(saved?.digest)
+      || !closed(value, 'schema source proposed_document proposed_digest changes') || value.schema !== PHOTO_PROPOSAL_SCHEMA
+      || !closed(value.source, 'project_id revision digest')
+      || canonical(value.source) !== canonical({ project_id: projectId, revision: saved.revision, digest: saved.digest })
+      || !validDigest(value.proposed_digest) || !Array.isArray(value.changes) || value.changes.length < 1 || value.changes.length > 200) invalid()
+    const expected = validatePortfolioDocument(saved.document)
+    validatePortfolioDocument(value.proposed_document)
+    const assigned = new Set(expected.categories.flatMap(gallery => gallery.images.map(image => image.material_id)))
+    for (const change of value.changes) {
+      if (!closed(change, 'op material_id material_name gallery_slug gallery_title index title alt') || change.op !== 'assign'
+        || !validUuid(change.material_id) || assigned.has(change.material_id)
+        || typeof change.material_name !== 'string' || Array.from(change.material_name).length < 1 || Array.from(change.material_name).length > 1024
+        || typeof change.gallery_slug !== 'string' || !/^[a-z][a-z0-9-]{0,47}$/.test(change.gallery_slug)
+        || !Number.isSafeInteger(change.index)) invalid()
+      const gallery = expected.categories.find(item => item.slug === change.gallery_slug)
+      const proposedGallery = value.proposed_document.categories.find(item => item.slug === change.gallery_slug)
+      const image = proposedGallery?.images[change.index]
+      if (!gallery || change.gallery_title !== gallery.title || change.index !== gallery.images.length
+        || !closed(image, 'material_id sha256 preview_sha256 title alt')
+        || image.material_id !== change.material_id || !validDigest(image.sha256) || !validDigest(image.preview_sha256)
+        || image.title !== change.title || image.alt !== change.alt) invalid()
+      gallery.images.push({ ...image })
+      assigned.add(change.material_id)
+    }
+    if (canonical(expected) !== canonical(value.proposed_document)) invalid()
+    const bytes = new TextEncoder().encode(canonical(value.proposed_document))
+    const hash = await globalThis.crypto.subtle.digest('SHA-256', bytes)
+    const digest = Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, '0')).join('')
+    if (digest !== value.proposed_digest) invalid()
+    return freezeProposal(value)
+  } catch { return invalid() }
+}
+
+export async function proposeProjectPage(projectId, saved, instruction, { signal } = {}) {
+  const path = pagePath(projectId)
+  if (!validUuid(projectId) || !Number.isSafeInteger(saved?.revision) || saved.revision < 1 || !validDigest(saved?.digest)
+    || typeof instruction !== 'string' || !instruction.trim() || Array.from(instruction).length > 4000) {
+    throw new Error('Save the portfolio and enter a text change of 1 to 4000 characters.')
+  }
+  let document
+  try { document = validatePortfolioDocument(saved.document) } catch { return proposalInvalid() }
+  const snapshot = { revision: saved.revision, digest: saved.digest, document }
+  const source = { project_id: projectId, revision: saved.revision, digest: saved.digest }
+  return request(`${path}/proposals`, { signal, proposal: true, method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ expected_revision: source.revision, expected_digest: source.digest, instruction }),
+  }, async (response, requestSignal) => {
+    const value = await readProposal(response, requestSignal)
+    return validateProjectPageProposal(projectId, snapshot, value)
+  })
+}
+
+function nativePath(projectId, jobId) {
+  if (!validUuid(projectId) || (jobId !== undefined && !validUuid(jobId))) nativeInvalid()
+  return `/api/projects/${projectId}/native-previews${jobId === undefined ? '' : `/${jobId}`}`
+}
+
+export function validateNativePreview(value, expected = {}) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || !validUuid(value.job_id)
+    || !Number.isSafeInteger(value.revision) || value.revision < 1
+    || !validDigest(value.document_sha256) || !validDigest(value.archive_sha256)
+    || !['queued', 'running', 'complete', 'failed', 'cancelled'].includes(value.status)) nativeInvalid()
+  for (const field of ['job_id', 'revision', 'document_sha256', 'archive_sha256']) {
+    if (expected[field] !== undefined && value[field] !== expected[field]) nativeInvalid()
+  }
+  if (value.status === 'complete') {
+    const receipt = value.receipt
+    if (value.evidence_basis !== 'authenticated-worker-report' || !receipt || Array.isArray(receipt)
+      || Object.keys(receipt).sort().join(',') !== 'kind,receipt_id,sha256'
+      || receipt.kind !== 'simulator' || !validUuid(receipt.receipt_id) || !validDigest(receipt.sha256)) nativeInvalid()
+  }
+  return { job_id: value.job_id, status: value.status, revision: value.revision,
+    document_sha256: value.document_sha256, archive_sha256: value.archive_sha256,
+    ...(value.status === 'complete' ? { receipt: { ...value.receipt }, evidence_basis: value.evidence_basis } : {}) }
+}
+
+export async function submitProjectNativePreview(projectId, revision, idempotencyKey, { signal } = {}) {
+  if (!Number.isSafeInteger(revision) || revision < 1 || typeof idempotencyKey !== 'string'
+    || idempotencyKey.length < 1 || idempotencyKey.length > 200 || /[^\x21-\x7e]/.test(idempotencyKey)) nativeInvalid()
+  return request(nativePath(projectId), { native: true, signal, method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
+    body: JSON.stringify({ revision }),
+  }, async response => validateNativePreview(await response.json(), { revision }))
+}
+
+export async function loadProjectNativePreview(projectId, jobId, { signal } = {}) {
+  return request(nativePath(projectId, jobId), { native: true, signal },
+    async response => validateNativePreview(await response.json(), { job_id: jobId }))
+}
+
+export async function downloadProjectNativePreviewScreenshot(projectId, jobId, { signal } = {}) {
+  return request(`${nativePath(projectId, jobId)}/screenshot`, { native: true, signal }, async response => {
+    if ((response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase() !== 'image/png') nativeInvalid()
+    const length = response.headers.get('content-length')
+    if (length && (!/^\d+$/.test(length) || Number(length) > MAX_SCREENSHOT)) nativeInvalid()
+    const reader = response.body?.getReader()
+    let blob
+    if (reader) {
+      const chunks = []
+      let size = 0
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          size += value.byteLength
+          if (size > MAX_SCREENSHOT) nativeInvalid()
+          chunks.push(value)
+        }
+        blob = new Blob(chunks, { type: 'image/png' })
+      } finally {
+        try { await reader.cancel() } finally { reader.releaseLock() }
+      }
+    } else blob = await response.blob()
+    if (blob.size < 33 || blob.size > MAX_SCREENSHOT) nativeInvalid()
+    const signature = new Uint8Array(await blob.slice(0, 16).arrayBuffer())
+    if (![137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82].every((byte, index) => signature[index] === byte)) nativeInvalid()
+    return blob
+  })
+}
+
+async function readPage(response, allowAbsent) {
+  const body = await response.json()
+  if (allowAbsent && body?.page === null) return null
+  const page = body?.page
+  if (!page || !Number.isSafeInteger(page.revision) || page.revision < 1 || !/^[0-9a-f]{64}$/.test(page.digest || '')) {
+    throw new Error('The page service returned an invalid saved page. Try opening it again.')
+  }
+  validatePageDocument(page.document)
+  return { revision: page.revision, digest: page.digest, document: page.document }
+}
+
+export async function loadProjectPage(projectId, { signal } = {}) {
+  return request(pagePath(projectId), { signal }, response => readPage(response, true))
+}
+
+export async function saveProjectPage(projectId, document, expectedRevision, { signal } = {}) {
+  validatePageDocument(document)
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) throw new Error('Open the page again before saving.')
+  return request(pagePath(projectId), {
+    method: 'PUT', signal, headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ expected_revision: expectedRevision, document }),
+  }, response => readPage(response, false))
+}
+
+export async function downloadProjectPageSource(projectId, revision, { signal, target = 'web' } = {}) {
+  if (!Number.isSafeInteger(revision) || revision < 1) throw new Error('Save your page before downloading its source.')
+  if (!['web', 'ios'].includes(target)) throw new Error('Choose a supported source format.')
+  const suffix = target === 'ios' ? '&target=ios' : ''
+  return request(`${pagePath(projectId)}/source?revision=${revision}${suffix}`, { signal }, async response => {
+    if (!(response.headers.get('content-type') || '').toLowerCase().startsWith('application/zip')) {
+      throw new Error('The page service did not return a source archive. Try again.')
+    }
+    const blob = await response.blob()
+    if (!blob.size || blob.size > 80 * 1024 * 1024) throw new Error('The source archive could not be downloaded. Try again.')
+    return blob
+  })
+}

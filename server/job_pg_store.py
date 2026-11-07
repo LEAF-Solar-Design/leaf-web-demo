@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 import time
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -82,18 +83,30 @@ def _record(row: Dict[str, Any]) -> Dict[str, Any]:
     completion = completion_record_context(_json(row.get("execution_json")) or {}, rec)
     if completion is not None:
         rec["completion_provenance"] = completion
+    from native_preview_job import record_context as native_record_context
+    native = native_record_context(_json(row.get("execution_json")) or {}, rec)
+    if native is not None:
+        rec["native_preview"] = native
+    from lab_corpus_executor import record_context as corpus_record_context
+    corpus = corpus_record_context(_json(row.get("execution_json")) or {}, rec)
+    if corpus is not None:
+        rec["lab_corpus"] = corpus
     return rec
 
 
 class PostgresJobStore:
     def linked_capability_job(self, canonical_id: str, tenant_id: str):
         """Resolve mirror linkage from stored rows, never a client spine selector."""
+        try:
+            job_uuid = uuid.UUID(str(canonical_id))
+        except (ValueError, TypeError, AttributeError):
+            return None
         with _db().cursor() as cur:
             cur.execute(
                 "SELECT a.* FROM jobs j JOIN async_jobs a ON a.job_id = j.spine_ref "
-                "WHERE j.job_id::text = %s AND a.tenant_id = %s "
+                "WHERE j.job_id = %s AND a.tenant_id = %s "
                 "AND (a.execution_json ? 'capability_provenance' OR a.execution_json ? 'completion_provenance')",
-                (canonical_id, tenant_id),
+                (job_uuid, tenant_id),
             )
             row = cur.fetchone()
         return _record(row) if row is not None else None
@@ -307,6 +320,26 @@ class PostgresJobStore:
             rows = cur.fetchall()
         return [_record(row) for row in rows]
 
+    def native_remote_candidates(self, binding: Dict[str, str], now: float,
+                                 max_attempts: int) -> List[Dict[str, Any]]:
+        """Bounded exact-scope discovery only; claim() remains the atomic owner."""
+        with _db().cursor() as cur:
+            cur.execute(
+                "SELECT * FROM async_jobs WHERE tenant_id = %s AND org_id = %s "
+                "AND project_id = %s AND tool = 'internal.native-preview' "
+                "AND execution_json->'native_preview'->>'schema' = 'leaf.native-preview-job.v2' "
+                "AND execution_json->'native_preview'->>'dispatch_kind' = 'remote-worker' "
+                "AND execution_json->'native_preview'->'worker_binding' = %s::jsonb "
+                "AND attempt < %s AND (started_at IS NULL OR started_at + "
+                "(execution_json->'native_preview'->>'budget_s')::double precision > %s) "
+                "AND progress <> 'closed' AND (status = 'submitted' OR "
+                "(status = 'running' AND lease_expires_at <= %s)) "
+                "ORDER BY created_at, job_id LIMIT 32",
+                (binding['org_id'], binding['org_id'], binding['project_id'], json.dumps(binding),
+                 max_attempts, now, now),
+            )
+            return [_record(row) for row in cur.fetchall()]
+
     def claim(
         self, job_id: str, worker_id: str, stamp: float, expires: float,
         max_attempts: int,
@@ -334,7 +367,7 @@ class PostgresJobStore:
 
     def heartbeat(
         self, job_id: str, worker_id: str, now: float, expires: float,
-        progress: Optional[str],
+        progress: Optional[str], *, attempt: Optional[int] = None,
     ) -> bool:
         db = _db()
         with db.transaction() as conn:
@@ -345,9 +378,13 @@ class PostgresJobStore:
                     progress = COALESCE(%s, progress)
                 WHERE job_id = %s AND status = 'running'
                   AND lease_owner = %s AND lease_expires_at >= %s
+                  AND (%s::integer IS NULL OR
+                       (progress <> 'closed' AND attempt = %s
+                        AND lease_expires_at > EXTRACT(EPOCH FROM clock_timestamp())
+                        AND %s > EXTRACT(EPOCH FROM clock_timestamp())))
                 RETURNING job_id
                 """,
-                (now, expires, now, progress, job_id, worker_id, now),
+                (now, expires, now, progress, job_id, worker_id, now, attempt, attempt, expires),
             ).fetchone()
         return row is not None
 
@@ -410,10 +447,56 @@ class PostgresJobStore:
             "elapsed_ms": row["elapsed_ms"],
         }
 
+    def expire_native_remote(self, job_id: str, expected_attempt: int) -> str:
+        """Reaper-only settlement; worker completion keeps its live deadline gate."""
+        import native_preview_job as native
+        from jobs import ErrorCode, error_obj, _terminal_fingerprint
+
+        with _db().transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM async_jobs WHERE job_id = %s FOR UPDATE", (job_id,),
+            ).fetchone()
+            if row is None:
+                return "missing"
+            if (row['status'] not in {'submitted', 'running'}
+                    or row['progress'] == 'closed'
+                    or int(row['attempt'] or 0) != expected_attempt):
+                return "not_owner"
+            try:
+                context = native.record_context(_json(row['execution_json']), row)
+            except (KeyError, TypeError, ValueError):
+                return "not_owner"
+            start = row['started_at']
+            if (context is None or context['schema'] != native.REMOTE_SCHEMA
+                    or type(start) not in (int, float) or not math.isfinite(start)):
+                return "not_owner"
+            # Read the database clock after acquiring the lock. Neither a stale
+            # caller timestamp nor a new environment budget can authorize expiry.
+            now = conn.execute(
+                "SELECT EXTRACT(EPOCH FROM clock_timestamp())::double precision AS now",
+            ).fetchone()['now']
+            if now < start + context['budget_s']:
+                return "not_owner"
+            error = error_obj(ErrorCode.TIMEOUT, "native preview execution budget expired", False)
+            provenance = {'attempt': expected_attempt, 'execution_path': 'native-worker'}
+            fingerprint = _terminal_fingerprint('failed', None, error, provenance)
+            conn.execute(
+                "UPDATE async_jobs SET status = 'failed', progress = 'error', "
+                "updated_at = %s, finished_at = %s, elapsed_ms = %s, "
+                "result_json = NULL, error_json = %s::jsonb, provenance_json = %s::jsonb, "
+                "terminal_fingerprint = %s, lease_owner = NULL, lease_expires_at = NULL "
+                "WHERE job_id = %s",
+                (now, now, int((now - start) * 1000), json.dumps(error),
+                 json.dumps(provenance), fingerprint, job_id),
+            )
+            import platform_link
+            platform_link.terminal_in_transaction(conn, job_id, 'failed', None, error)
+            return "applied"
+
     def complete(
         self, job_id: str, durable_attempt: int, status: str, result: Any,
         error: Any, provenance: Any, fingerprint: str, worker_id: Optional[str],
-        now: float, *, allow_closed: bool = False,
+        now: float, *, allow_closed: bool = False, deadline: Optional[float] = None,
     ) -> str:
         db = _db()
         with db.transaction() as conn:
@@ -431,6 +514,9 @@ class PostgresJobStore:
                 WHERE job_id = %(job_id)s AND attempt = %(attempt)s
                   AND status NOT IN ('complete', 'failed')
                   AND (%(allow_closed)s OR progress <> 'closed')
+                  AND (%(deadline)s::double precision IS NULL OR
+                       (EXTRACT(EPOCH FROM clock_timestamp()) < %(deadline)s AND
+                        lease_expires_at > EXTRACT(EPOCH FROM clock_timestamp())))
                   AND (%(worker_id)s::text IS NULL OR
                        (lease_owner = %(worker_id)s AND lease_expires_at >= %(now)s))
                 RETURNING job_id
@@ -444,6 +530,7 @@ class PostgresJobStore:
                     "fingerprint": fingerprint, "job_id": job_id,
                     "attempt": durable_attempt, "worker_id": worker_id,
                     "allow_closed": allow_closed,
+                    "deadline": deadline,
                 },
             ).fetchone()
             if row is not None:
@@ -494,8 +581,14 @@ class PostgresJobStore:
                 "SELECT job_id, progress FROM async_jobs "
                 "WHERE status IN ('submitted','running') AND "
                 "(updated_at < %s OR progress = %s OR "
-                "(lease_expires_at IS NOT NULL AND lease_expires_at < %s))",
-                (stale_before, closed, now),
+                "(lease_expires_at IS NOT NULL AND lease_expires_at < %s) OR "
+                "(tool = 'internal.native-preview' AND started_at IS NOT NULL "
+                "AND execution_json->'native_preview'->>'schema' = 'leaf.native-preview-job.v2' "
+                "AND execution_json->'native_preview'->>'dispatch_kind' = 'remote-worker' "
+                "AND started_at::numeric + CASE WHEN "
+                "jsonb_typeof(execution_json->'native_preview'->'budget_s') = 'number' "
+                "THEN (execution_json->'native_preview'->>'budget_s')::numeric END <= %s))",
+                (stale_before, closed, now, now),
             )
             return list(cur.fetchall())
 

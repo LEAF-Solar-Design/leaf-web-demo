@@ -74,7 +74,14 @@ const ProductionEngineHold = Function('useEngineSessionContext', 'useLayoutEffec
   useEngineSessionContext, useLayoutEffect, REACH_STATE, 'AutoCAD is connected. Disconnect to edit this drawing.')
 const provider = unique(node => node.type === 'JSXOpeningElement' && node.name.name === 'EngineSessionProvider').node
 const targetExpression = provider.attributes.find(attr => attr.name?.name === 'saveTarget').value.expression
-const productionSaveTarget = Function('localCadActive', 'engineSaveTarget', `return (${text(targetExpression)})`)
+// This is the complete input contract of the actual provider expression.
+// Keep project custody distinct from the standalone save callback and give a
+// newly introduced expression dependency a useful fixture failure.
+const targetInputs = ['localCadActive', 'projectMode', 'projectEditorTarget', 'engineSaveTarget']
+const productionSaveTarget = Function('env', `
+  const { ${targetInputs.join(', ')} } = env;
+  return (${text(targetExpression)});
+`)
 const saveObject = declaration('engineSaveTarget').node.init.consequent
 const saveCallback = saveObject.properties.find(property => property.key.name === 'save').value
 const productionSave = Function('env', `
@@ -137,10 +144,12 @@ function Harness({ initialIntake = null, initialActiveIntake = null, initialErro
   owner.current = bridge
   observed = { drawing, bridge, localCadActive, loadErr, drawingLoad, requestedDrawingIdRef,
     activeIntake, setActiveIntake, viewHistoryRef }
-  return <EngineSessionProvider saveTarget={productionSaveTarget(localCadActive, { save: apply })}>
+  return <EngineSessionProvider saveTarget={productionSaveTarget({
+    localCadActive, projectMode, projectEditorTarget: null, engineSaveTarget: { save: apply },
+  })}>
     <ProductionEngineHold active={localCadActive} /><EngineActions /><div className="viewer-toolbar">
     {bridge.localCadEligible && <LocalCadConnect {...bridge.localCadStatus}
-      onConnect={bridge.connectLocalCad} onDisconnect={bridge.stopLocalCad} />}
+      onConnect={bridge.connectLocalCad} onDisconnect={() => bridge.stopLocalCad({ forget: true })} />}
     <output>{drawing.shown?.dwg || 'empty'}</output>
     {loadErr && !localCadActive && <div role="alert">{loadErr}<button>Retry</button></div>}
     {drawing.historyOpen && <aside>{drawing.history?.versions.map(row => <span key={row.version}>Version {row.version}</span>)}</aside>}
@@ -165,6 +174,31 @@ beforeEach(() => {
   })
 })
 afterEach(() => { cleanup(); localStorage.clear(); vi.clearAllMocks() })
+
+it('the extracted provider save target names every input and preserves each custody branch', () => {
+  const referenced = []
+  function identifiers(node) {
+    if (!node || typeof node.type !== 'string') return
+    if (node.type === 'Identifier') referenced.push(node.name)
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) value.forEach(identifiers)
+      else if (value?.type) identifiers(value)
+    }
+  }
+  identifiers(targetExpression)
+  expect([...new Set(referenced)].sort()).toEqual([...targetInputs].sort())
+  const standalone = { save: vi.fn() }, project = { save: vi.fn() }
+  for (const localCadActive of [false, true]) {
+    for (const projectMode of [false, true]) {
+      for (const projectEditorTarget of [null, project]) {
+        expect(productionSaveTarget({ localCadActive, projectMode, projectEditorTarget,
+          engineSaveTarget: standalone })).toBe(localCadActive ? null : projectMode ? projectEditorTarget : standalone)
+      }
+    }
+  }
+  expect(standalone.save).not.toHaveBeenCalled()
+  expect(project.save).not.toHaveBeenCalled()
+})
 
 it('places the signed-out Solar CAD control after + inside the actual toolbar and before actions', () => {
   const control = unique(node => node.type === 'JSXElement' && node.openingElement.name.name === 'LocalCadConnect')
@@ -382,7 +416,7 @@ it.each([false, true])('an initial load completing after Connect (remembered=%s)
   expect(localStorage.getItem('leaf.localCad.connect')).toBe('1')
   act(() => { expect(observed.bridge.onDrawingLoad(initialGeneration + 1)).toBe(true) })
   expect(transport.snapshot().running).toBe(false)
-  expect(localStorage.getItem('leaf.localCad.connect')).toBeNull()
+  expect(localStorage.getItem('leaf.localCad.connect')).toBe('1')
 })
 
 it('honors a remembered choice only on eligible surfaces and starts once under StrictMode', async () => {
@@ -404,8 +438,35 @@ it('honors a remembered choice only on eligible surfaces and starts once under S
   }
 })
 
+it('reconnects after leaving a drafting surface while preserving the Connect choice', async () => {
+  const view = render(<Harness />)
+  fireEvent.click(screen.getByRole('button', { name: 'Connect AutoCAD' }))
+  const transport = transports.at(-1)
+  view.rerender(<Harness drafting={false} />)
+  expect(transport.snapshot().running).toBe(false)
+  expect(localStorage.getItem('leaf.localCad.connect')).toBe('1')
+  view.rerender(<Harness drafting />)
+  await act(async () => {})
+  expect(transports.at(-1).snapshot().running).toBe(true)
+  fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }))
+  expect(localStorage.getItem('leaf.localCad.connect')).toBeNull()
+})
+
 it('never starts on an eligible surface without a click or remembered choice', async () => {
   render(<StrictMode><Harness /></StrictMode>)
   await act(async () => {})
   expect(transports.every(bridge => bridge.start.mock.calls.length === 0)).toBe(true)
+})
+
+it('retires a queued remembered reconnect on surface change and unmount', async () => {
+  localStorage.setItem('leaf.localCad.connect', '1')
+  const view = render(<Harness />)
+  view.rerender(<Harness drafting={false} />)
+  await act(async () => {})
+  expect(transports.every(bridge => bridge.start.mock.calls.length === 0)).toBe(true)
+  view.rerender(<Harness drafting />)
+  view.unmount()
+  await act(async () => {})
+  expect(transports.every(bridge => bridge.start.mock.calls.length === 0)).toBe(true)
+  expect(localStorage.getItem('leaf.localCad.connect')).toBe('1')
 })

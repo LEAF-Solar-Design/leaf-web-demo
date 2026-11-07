@@ -11,6 +11,7 @@ import hashlib
 import argparse
 import base64
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 import importlib.util
 import os
 from pathlib import Path
@@ -413,6 +414,19 @@ def verify_git_images(images: dict, *, runner=subprocess.run) -> dict[str, str]:
     return versions
 
 
+def _prepare_authoring_source_context(root: Path, output: Path, source: str) -> None:
+    """Package only admitted Git objects, never host config or credentials."""
+    tree = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"], cwd=root, check=True,
+        text=True, capture_output=True, timeout=10,
+    ).stdout.strip()
+    path = root / "server/platform_source_snapshot.py"
+    namespace = {"__name__": "leaf_platform_source_snapshot", "__file__": str(path)}
+    # Loading the source must not leave bytecode in the admitted checkout.
+    exec(compile(path.read_bytes(), str(path), "exec"), namespace)
+    namespace["create_snapshot"](root, output, source, tree)
+
+
 def build_image(root: Path, service: str, source: str, build_number: int,
                 freshness: dict[str, str], metadata: Path, *,
                 solver_revision: str | None = None,
@@ -445,13 +459,20 @@ def build_image(root: Path, service: str, source: str, build_number: int,
     metadata = metadata if metadata.is_absolute() else root / metadata
     with metadata.open("x", encoding="utf-8") as stream:
         stream.write("{}")
-    if log_path is None:
-        subprocess.run(command, cwd=root, check=True, timeout=45 * 60)
-    else:
-        # Exclusive, like metadata: a retry never appends to a stale log.
-        with log_path.open("xb") as log:
-            subprocess.run(command, cwd=root, check=True, timeout=45 * 60,
-                           stdout=log, stderr=subprocess.STDOUT)
+    context = (tempfile.TemporaryDirectory(prefix="leaf-app-source-")
+               if service == "app" else nullcontext())
+    with context as scratch:
+        if service == "app":
+            snapshot = Path(scratch) / "snapshot"
+            _prepare_authoring_source_context(root, snapshot, source)
+            command[-1:-1] = ["--build-context", f"platform_source={snapshot}"]
+        if log_path is None:
+            subprocess.run(command, cwd=root, check=True, timeout=45 * 60)
+        else:
+            # Exclusive, like metadata: a retry never appends to a stale log.
+            with log_path.open("xb") as log:
+                subprocess.run(command, cwd=root, check=True, timeout=45 * 60,
+                               stdout=log, stderr=subprocess.STDOUT)
     result = json.loads(metadata.read_text(encoding="utf-8"))
     digest = result.get("containerimage.digest")
     if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
@@ -730,6 +751,41 @@ def _print_build_logs(work: Path, services, *, retry=False) -> None:
         print(tail, flush=True)
 
 
+def _app_frontend_closed_before_build(path: Path) -> bool:
+    """Recognize only a complete, bounded app syntax-frontend failure log."""
+    try:
+        with path.open("rb") as stream:
+            raw = stream.read(BUILD_LOG_TAIL_BYTES + 1)
+        if len(raw) > BUILD_LOG_TAIL_BYTES:
+            return False
+        text = raw.decode("utf-8")
+    except (OSError, UnicodeError):
+        return False
+    lines = text.rstrip("\r\n").splitlines()
+    if not lines or not lines[0].startswith('#0 building with '):
+        return False
+    required = ("#1 [internal] load build definition from Dockerfile.app",
+                "#2 resolve image config for docker-image://docker.io/docker/dockerfile:1",
+                "Dockerfile.app:1", "   1 | >>> # syntax=docker/dockerfile:1",
+                "ERROR: failed to build: failed to solve: frontend grpc server closed unexpectedly")
+    if any(lines.count(line) != 1 for line in required) or lines[-1] != required[-1]:
+        return False
+    # A later build vertex, source step or another diagnostic cannot qualify.
+    progress = [re.match(r"^#(\d+) (.*)$", line) for line in lines if line.startswith('#')]
+    if any(match is None or int(match[1]) > 3 for match in progress):
+        return False
+    if any('[' in match[2] and match[0] != required[0] for match in progress):
+        return False
+    if any(line and not line.startswith('#') and line not in ("Dockerfile.app:1", required[-1])
+           and re.fullmatch(r"-+|\s+\d+ \|.*", line) is None for line in lines):
+        return False
+    frontend = r"#3 docker-image://docker.io/docker/dockerfile:1@sha256:[0-9a-f]{64}"
+    return (sum(re.fullmatch(frontend, line) is not None for line in lines) == 1
+            and any(re.fullmatch(r"#1 DONE [0-9.]+s", line) for line in lines)
+            and any(re.fullmatch(r"#2 DONE [0-9.]+s", line) for line in lines)
+            and any(re.fullmatch(r"#3 DONE [0-9.]+s", line) for line in lines))
+
+
 def _build_images(root: Path, services, source: str, build_number: int,
                   freshness: dict, work: Path, extras: dict | None = None) -> dict:
     """Build the selected images and return them keyed in SERVICES order."""
@@ -746,20 +802,26 @@ def _build_images(root: Path, services, source: str, build_number: int,
     _print_build_logs(work, ordered)
     errors = {service: futures[service].exception() for service in ordered}
     results = {service: futures[service].result() for service in ordered if errors[service] is None}
-    # Bounded, one retry only on the InRelease pin race, re-pinning to the newer current index.
+    # One retry per image across both classes; never retry a retry's failure.
     for service in ordered:
-        if service == "web" or not isinstance(errors[service], subprocess.CalledProcessError):
+        if not isinstance(errors[service], subprocess.CalledProcessError):
             continue
-        tail = _build_log_tail(work / f"{service}.log")
-        if tail is None or not all(marker in tail for marker in PIN_RACE_MARKERS):
-            continue
-        try:
-            fresh = refresh_debian_freshness(service)
-        except Exception:
-            continue
-        if fresh == freshness[service]:
-            continue
-        print(f"image {service}: package index pin moved during build; rebuilding once with refreshed pins", flush=True)
+        if service == "app" and _app_frontend_closed_before_build(work / "app.log"):
+            fresh = freshness[service]
+            print("image app: syntax frontend transport closed before build; rebuilding once with identical inputs", flush=True)
+        else:
+            if service == "web":
+                continue
+            tail = _build_log_tail(work / f"{service}.log")
+            if tail is None or not all(marker in tail for marker in PIN_RACE_MARKERS):
+                continue
+            try:
+                fresh = refresh_debian_freshness(service)
+            except Exception:
+                continue
+            if fresh == freshness[service]:
+                continue
+            print(f"image {service}: package index pin moved during build; rebuilding once with refreshed pins", flush=True)
         try:
             results[service] = build_image(root, service, source, build_number, fresh,
                                           work / f"{service}.retry1.json",

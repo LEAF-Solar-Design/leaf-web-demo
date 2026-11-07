@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import SchemaForm, { defaultsOf } from '../components/SchemaForm.jsx'
 import { sameSolarDrawingBinding } from './solarDrawingBinding.js'
 import { deriveProjectSolarGraphFormState } from './solarProjectGraphFormModel.js'
-import { readSolarSolveProposal } from './solarProjectCompletion.js'
+import { readSolarSolveProposal, readProjectSolarWorkerRefusal, projectSolarWorkerRefusal } from './solarProjectCompletion.js'
 import { PROJECT_SOLAR_WORKSPACE_LABELS, PROJECT_SOLAR_WORKSPACE_REASONS } from './ProjectSolarReadPanel.jsx'
 
 const code = (value) => typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,127}$/.test(value) ? value : null
@@ -79,7 +79,12 @@ function useSubmission(props, tool) {
       const responseRun = await onProjectSubmit(intent, { binding: solarBinding, authorityKey,
         signal: submissionSignal, isCurrent: guard })
       if (!owner.alive || !guard()) return
-      if (responseRun?.ok === true && responseRun.status === 202) {
+      if (readProjectSolarWorkerRefusal(responseRun)) {
+        const refusal = projectSolarWorkerRefusal(tool)
+        owner.accepted = false
+        setAccepted(null)
+        setFeedback({ state: 'refused', reason: refusal.reasonCode, message: refusal.message })
+      } else if (responseRun?.ok === true && responseRun.status === 202) {
         setAccepted({ jobId: responseRun.data.job_id, current: guard })
         setFeedback({ state: 'submitted', reason: null })
       } else {
@@ -104,11 +109,11 @@ function useSubmission(props, tool) {
 
 function Feedback({ value }) {
   if (!value) return null
-  const text = value.state === 'submitted' || value.state === 'pending' ? PROJECT_SOLAR_WORKSPACE_REASONS.run_submitted
+  const text = value.message ?? (value.state === 'submitted' || value.state === 'pending' ? PROJECT_SOLAR_WORKSPACE_REASONS.run_submitted
     : value.state === 'succeeded' ? PROJECT_SOLAR_WORKSPACE_REASONS.run_published
       : value.state === 'proposal' ? PROJECT_SOLAR_WORKSPACE_REASONS.proposal_ready
         : value.state === 'outcome_unknown' ? PROJECT_SOLAR_WORKSPACE_REASONS.run_outcome_unknown
-          : PROJECT_SOLAR_WORKSPACE_REASONS.run_refused
+          : PROJECT_SOLAR_WORKSPACE_REASONS.run_refused)
   return <p role="status">{text}{value.reason && <> ({value.reason})</>}</p>
 }
 

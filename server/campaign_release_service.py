@@ -204,7 +204,12 @@ def compile_finish(tenant, project_id, campaign_id, finish):
     if finish['workflow'] != public['workflow']:
         deferred.append('Requested workflow beyond this release: ' + finish['workflow'][:900])
     deferred.extend('Deferred input: ' + path for path in finish['artifact_refs'] if path not in public['artifact_refs'])
-    return {**public, 'original_goal': campaign['prompt'], 'release_boundary': boundary,
+    return {**public, 'requested_workflow': finish['workflow'],
+            **({'scope_classification': {
+                'version': 1, 'capability': 'existing_artifact_delivery',
+                'requested_workflow_status': 'unverified',
+            }} if artifact and not (web_recipe or transform_recipe or cad_recipe) else {}),
+            'original_goal': campaign['prompt'], 'release_boundary': boundary,
             'deferred_items': deferred, 'selected_artifact': artifact,
             **({'web_recipe': web_recipe} if web_recipe else {}),
             **({'transform_recipe': transform_recipe} if transform_recipe else {}),

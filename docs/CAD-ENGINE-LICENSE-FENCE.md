@@ -24,6 +24,13 @@ pruned at any depth; `dist`/`build` are **not** pruned, because a built
 bundle is exactly where a license header comment gets stripped by
 minification.
 
+Next compiler metadata at exactly `web/.next/cache/` and `web/.next/trace`
+is excluded. The generated `.next/static`, `out`, and `dist` output remains
+scanned. Two Node build tools may contain exact worker path data: the
+fixture producer's quoted vendor directory and the container check's Docker
+COPY assertion. Only those literal spans are permitted by rule 3. Imports,
+other references and license headers in the same files still fail.
+
 Exactly 3 paths are excluded from the scan (`SELF_EXCLUDED_PATHS` in the
 script) because they are the fence's own tooling/doc and necessarily spell
 out these identifiers in prose or as pattern data:

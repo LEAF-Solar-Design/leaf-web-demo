@@ -68,6 +68,49 @@ def _build(monkeypatch, tools: List[Dict[str, Any]], **kwargs) -> Dict[str, Any]
     return context_packet.build_packet(TENANT, "demo", **kwargs)
 
 
+def test_project_section_budget_preserves_source_and_completeness(monkeypatch):
+    import copy
+    import platform_link
+
+    source = {"schema": "leaf.project-material-context.v1", "org_id": TENANT,
+              "project_id": "project", "page": {"revision": 9, "digest": "a" * 64,
+                  "fields": [{"id": f"f{i:04d}", "value": "\u2603" * 8000}
+                             for i in range(20)]},
+              "materials": {"observed_count": 200, "count_complete": False,
+                            "samples": [{"material_id": str(i), "sha256": "b" * 64}
+                                        for i in range(5)], "omitted_count": 195}}
+    before = copy.deepcopy(source)
+    monkeypatch.setattr(platform_link, "read_turn_project_materials",
+                        lambda *args: copy.deepcopy(source))
+    kwargs = {"project_principal": TENANT, "session_id": "s", "turn_id": "t"}
+    packet = _build(monkeypatch, _tools(61), **kwargs)
+    section = packet["project_material_context"]
+    assert len(context_packet._serialize(section)) <= 2400
+    assert len(context_packet._serialize(packet)) < context_packet.MAX_PACKET_CHARS
+    assert section["page"]["revision"] == 9 and section["page"]["digest"] == "a" * 64
+    assert section["page"]["text_truncated"] is True
+    assert section["materials"]["observed_count"] == 200
+    assert section["materials"]["count_complete"] is False
+    assert section["materials"]["omitted_count"] + len(section["materials"]["samples"]) == 200
+    assert packet["drawing"]["id"] == "demo"
+    assert source == before
+    assert _build(monkeypatch, _tools(61), **kwargs) == packet
+
+
+def test_unavailable_project_section_keeps_legacy_context(monkeypatch):
+    import platform_link
+
+    def unavailable(*args):
+        raise RuntimeError("protected project detail")
+
+    monkeypatch.setattr(platform_link, "read_turn_project_materials", unavailable)
+    packet = _build(monkeypatch, _tools(1), project_principal=TENANT,
+                    session_id="s", turn_id="t")
+    assert "project_material_context" not in packet
+    assert packet["drawing"]["id"] == "demo" and len(packet["catalog"]) == 1
+    assert "protected" not in context_packet._serialize(packet)
+
+
 # --------------------------------------------------------------------------- #
 # catalog cap + more marker
 # --------------------------------------------------------------------------- #

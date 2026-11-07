@@ -8,6 +8,36 @@
 // token every time -- every signed-in user landed back in the guest workspace.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { noteUnauthorized, subscribeUnauthorized } from './api.js'
+import { serviceSession, serviceState } from './lib/serviceAuthSession.js'
+
+it('invalidates only the exact sent service generation before notifying, without touching a human token', async () => {
+  const service = serviceSession()
+  const selector = '11111111-1111-4111-8111-111111111111'
+  const identity = { subject: 'machine', sub: 'machine', iss: 'issuer', org_id: null, tenant_id: 'tenant', principal_type: 'service_admin' }
+  const verify = () => service.probe({ origin: window.location.origin, fetchImpl: async () => ({ ok: true, json: async () => ({
+    authenticated: true, identity, binding_id: selector, expires_at: new Date(Date.now() + 60000).toISOString(),
+  }) }) })
+  const observed = []
+  const off = subscribeUnauthorized(() => observed.push(serviceState().identity))
+  localStorage.setItem('leaf.jwt', 'peer-human')
+  try {
+    service.select(selector)
+    await verify()
+    const old = serviceState()
+    await verify()
+    noteUnauthorized(res401, 'old', `LeafServiceSession ${selector}`, { serviceAuthority: old })
+    expect(serviceState().identity).toEqual(identity)
+    const current = serviceState()
+    noteUnauthorized(res401, 'advisory', `LeafServiceSession ${selector}`, { fatal: false, serviceAuthority: current })
+    noteUnauthorized(res401, 'anonymous')
+    noteUnauthorized(res401, 'stale-human', 'Bearer peer-human')
+    expect(observed).toEqual([])
+    noteUnauthorized(res401, 'current', `LeafServiceSession ${selector}`, { serviceAuthority: current })
+    expect(observed).toEqual([null])
+    expect(localStorage.getItem('leaf.jwt')).toBe('peer-human')
+    expect(serviceState().mode).toBe(true)
+  } finally { off(); service.human(); localStorage.removeItem('leaf.jwt') }
+})
 
 const AUTH_KEY = 'leaf.jwt'
 const res401 = { status: 401 }

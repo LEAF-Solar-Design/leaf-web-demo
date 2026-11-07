@@ -2,13 +2,14 @@ import { act, cleanup, fireEvent, render, renderHook, screen } from '@testing-li
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import IosSurface from './IosSurface.jsx'
 import { useIosShipController } from './useIosShipController.js'
-import { fetchIosShipReadiness, getIosShipExecution, requestIosShipLaunch } from '../site/iosShipReadiness.js'
+import { fetchIosShipReadiness, getIosShipExecution, requestIosShipLaunch, fetchIosShipSources, requestIosShipApproval } from '../site/iosShipReadiness.js'
 
 vi.mock('../site/iosShipReadiness.js', async (importOriginal) => ({
   ...await importOriginal(),
   fetchIosShipReadiness: vi.fn(),
   getIosShipExecution: vi.fn(),
   requestIosShipLaunch: vi.fn(),
+  requestIosShipApproval: vi.fn(),
   fetchIosShipSources: vi.fn(async () => ({ sources: [], approvals: [], sync: null, canApprove: false })),
 }))
 
@@ -31,8 +32,40 @@ beforeEach(() => {
   fetchIosShipReadiness.mockResolvedValue(ready)
   requestIosShipLaunch.mockResolvedValue({ execution: queued })
   getIosShipExecution.mockResolvedValue({ execution: queued })
+  fetchIosShipSources.mockResolvedValue({ sources: [], approvals: [], sync: null, canApprove: false })
 })
 afterEach(() => { cleanup(); vi.useRealTimers(); sessionStorage.clear() })
+
+it('F15 offers explicit native selection and owner approval in the mounted no-drawing flow', async () => {
+  const source = { source_revision: 'a'.repeat(40), source_sha256: 'b'.repeat(64),
+    bundle_identifier: 'com.example.app', marketing_version: '1.0', build_number: '12' }
+  const approval = { approval_id: 'native-approval', revision: source.source_revision, source_revision: source.source_revision, consumed_at: null }
+  const catalog = { sources: [source], approvals: [], sync: null, canApprove: true }
+  fetchIosShipSources.mockResolvedValue(catalog)
+  fetchIosShipReadiness.mockResolvedValue({ projectId: 'p1', launchable: false, reason: 'no_approved_project_revision' })
+  requestIosShipApproval.mockResolvedValue(approval)
+  function NativeLane() {
+    const ship = useIosShipController({ ...props, revision: null })
+    return <IosSurface enabled ship={ship} onLaunch={ship.launch} />
+  }
+  render(<NativeLane />)
+  await act(async () => {})
+  expect(screen.queryByTestId('ios-ship-approve')).not.toBeInTheDocument()
+  expect(fetchIosShipReadiness).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Select native source' }))
+  await act(async () => {})
+  expect(screen.getByTestId('ios-selected-source')).toHaveTextContent(source.source_revision)
+  expect(requestIosShipApproval).not.toHaveBeenCalled()
+  expect(requestIosShipLaunch).not.toHaveBeenCalled()
+  fetchIosShipSources.mockResolvedValue({ ...catalog, approvals: [approval] })
+  fetchIosShipReadiness.mockResolvedValue({ ...ready, approvedLaunch: { ...source, approval_id: approval.approval_id, revision: source.source_revision } })
+  fireEvent.click(screen.getByTestId('ios-ship-approve'))
+  await act(async () => {})
+  expect(requestIosShipApproval).toHaveBeenCalledWith({ projectId: 'p1', revision: source.source_revision, source })
+  expect(screen.getByText('approved for the selected version')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Launch TestFlight build' })).toBeEnabled()
+  expect(requestIosShipLaunch).not.toHaveBeenCalled()
+})
 
 it('S1-87 describes normal setup without an alert or raw setup identifiers', async () => {
   fetchIosShipReadiness.mockResolvedValue({ projectId: 'p1', launchable: false,

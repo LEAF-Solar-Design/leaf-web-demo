@@ -4,8 +4,10 @@ import { uploadProjectInput } from './api.js'
 import { useLoadingPhase } from '../lib/loadingTiming.js'
 import { humanizeError } from '../errorHumanize.js'
 import { authTenantScope } from '../drawing/drawingIdentity.js'
+import { serviceState, serviceScope } from '../lib/serviceAuthSession.js'
 import { subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
 import './campaigns.css'
+import { BrowserArtifactContext } from '../site/BrowserAssetGround.jsx'
 
 const conflictMessage = 'This question already has a different recorded answer. Reload to see it.'
 const messageOf = error => error?.code === 'answer_conflict' ? conflictMessage : humanizeError(error)
@@ -17,6 +19,7 @@ const nativeRelease = row => row.capability === 'campaign.native-release' || row
 const DraftContext = createContext(null)
 
 function readCampaignPrincipal() {
+  if (serviceState().mode) return serviceScope()
   try { return authTenantScope(localStorage.getItem('leaf.jwt')) } catch { return null }
 }
 
@@ -212,6 +215,7 @@ function humanBytes(value) {
 }
 
 function ReleaseOutputs({ campaign, completion, available, urlApi, sourceOnly = false }) {
+  const openBrowserArtifact = useContext(BrowserArtifactContext)
   const [preview, setPreview] = useState(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
@@ -241,7 +245,9 @@ function ReleaseOutputs({ campaign, completion, available, urlApi, sourceOnly = 
         let html
         try { html = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(result.bytes) }
         catch { throw new Error('The verified tool could not be opened because its HTML is not valid UTF-8.') }
-        setPreview({ html, name: result.name })
+        if (openBrowserArtifact) {
+          if (openBrowserArtifact({ html, name: result.name }) === false) throw new Error('The workspace changed. Open this verified tool again from the current project.')
+        } else setPreview({ html, name: result.name })
       } else {
         const url = urlApi.createObjectURL(new Blob([result.bytes], { type: result.mediaType }))
         const link = document.createElement('a')
@@ -298,7 +304,7 @@ function ReleaseOutputs({ campaign, completion, available, urlApi, sourceOnly = 
 }
 
 function RevisionForm({ campaign, release, action, busy }) {
-  const [workflow, setWorkflow] = useState(release.contract?.workflow || '')
+  const [workflow, setWorkflow] = useState(release.contract?.requested_workflow ?? release.contract?.workflow ?? '')
   const [reason, setReason] = useState('')
   const [expanded, setExpanded] = useState(false)
   const id = useId()
@@ -356,6 +362,11 @@ function CompletionPanel({ campaign, artifactUrlApi }) {
     <span role="status">{action.outcome}</span>
   </section>
   const contract = release.contract || {}
+  const scope = contract.scope_classification
+  const existingDelivery = !contract.web_recipe && !contract.transform_recipe && !contract.cad_recipe
+    && ((scope?.version === 1 && scope.capability === 'existing_artifact_delivery')
+      || (!scope && !!contract.selected_artifact))
+  const exactRequest = typeof contract.requested_workflow === 'string'
   const stages = releaseStages.map(stage => {
     const rows = (completion.stages || []).filter(row => row.stage === stage
       && (row.contract_version == null || row.contract_version === release.contract_version))
@@ -382,11 +393,22 @@ function CompletionPanel({ campaign, artifactUrlApi }) {
   return <section className="panel-sub campaign-completion" aria-label="Project delivery">
     <p role={currentFailure ? 'alert' : 'status'}>{currentFailure && historicalFinish
       ? `Previously completed release. Current verification ${currentFailure.status}.`
-      : finished ? 'Completed release' : historicalFinish ? 'Release completion evidence unavailable.' : `Release ${executionWords(release.status)}`}</p>
+      : finished ? (existingDelivery ? 'Existing file delivered' : 'Completed release')
+        : historicalFinish ? 'Release completion evidence unavailable.' : `Release ${executionWords(release.status)}`}</p>
     <ReleaseOutputs key={`${release.release_id}:${release.contract_version}:${finished}`} campaign={campaign}
       completion={completion} available={finished} urlApi={artifactUrlApi} />
     {!finished && <p>Output unavailable until the release has current, complete verification.</p>}
     <p>{textOf(release.scope_summary) || textOf(contract.release_boundary) || 'Release boundary unavailable.'}</p>
+    {existingDelivery && <section aria-label="Requested workflow scope">
+      <h4>Requested workflow (unverified)</h4>
+      <p>File-delivery checks verify the existing artifact only. Fulfillment of the requested workflow remains unverified; no design or transform execution is claimed.</p>
+      <p>{coverage.filter(row => row.status === 'passed').length} of {coverage.length} file-delivery checks passed.</p>
+      {exactRequest ? <p style={{ whiteSpace: 'pre-wrap' }}>{contract.requested_workflow}</p> : <>
+        <p>Legacy release: the exact requested workflow is unknown. The original goal and deferred evidence below are historical context, not an exact request.</p>
+        <p>Legacy original goal: {contract.original_goal || 'Unknown'}</p>
+        <EvidenceList items={release.deferred_items ?? contract.deferred_items} fallback="Legacy deferred evidence unavailable." />
+      </>}
+    </section>}
     {itemsOf(completion.next_action).length > 0 && <>
       <h4>What requires you</h4>
       <EvidenceList items={itemsOf(completion.next_action).map(nextActionText)} />
@@ -400,14 +422,16 @@ function CompletionPanel({ campaign, artifactUrlApi }) {
     <details className="campaign-disclosure">
     <summary>Release details</summary>
     <p>A completed release covers this boundary. It does not mean the entire original ambition is done.</p>
-    <h4>What works</h4>
+    <h4>{existingDelivery ? 'Passed file-delivery checks' : 'What works'}</h4>
     <EvidenceList items={coverage.filter(row => row.status === 'passed')} fallback="Verified checks unavailable." />
     <h4>What remains</h4>
     <EvidenceList items={[...coverage.filter(row => row.status !== 'passed')
       .map(row => `${row.description || row.check_id}: ${row.status}`),
     ...stages.filter(item => evidenceStatus(item.row?.status) !== 'passed').map(item => `${stageLabel(item.stage)}: ${evidenceStatus(item.row?.status)}`)]}
-    fallback={coverage.length ? 'No remaining required checks reported for this release.' : 'Required check evidence unavailable.'} />
-    <h4>Release stages</h4>
+    fallback={coverage.length ? (existingDelivery
+      ? 'No remaining file-delivery checks. Requested workflow fulfillment remains unverified.'
+      : 'No remaining required checks reported for this release.') : 'Required check evidence unavailable.'} />
+    <h4>{existingDelivery ? 'File-delivery stages' : 'Release stages'}</h4>
     <ul className="campaign-release-stages">{stages.map(({ stage, row }) => <li key={stage}>
       <strong>{stageLabel(stage)}</strong><span>{evidenceStatus(row?.status)}</span>
     </li>)}</ul>

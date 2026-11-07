@@ -3,7 +3,7 @@ import { defineConfig } from '@playwright/test'
 // iOS ship-surface browser proof (e2e/ios-ship-surface.spec.mjs).
 //
 // VITE_IOS_SURFACE is folded at build time (src/ios/flag.js), so no response
-// mock can turn the surface on or off. Each flag state gets its own local Vite
+// mock can turn the surface on or off. Each flag state gets its own local Next
 // instance and its own project; a project's grep keeps every test on the
 // server whose flag it asserts. Ports derive from LEAF_NATIVE_GATE_WORKER like
 // playwright.config.mjs, and the flag-on server sits 50 above so parallel
@@ -15,11 +15,12 @@ const onPort = offPort + 50
 const origin = (port) => `http://127.0.0.1:${port}`
 
 const server = (port, iosSurface) => ({
-  command: `npm run dev -- --host 127.0.0.1 --port ${port} --strictPort`,
+  command: `npm run dev -- --hostname 127.0.0.1 --port ${port}`,
   url: `${origin(port)}/app`,
   reuseExistingServer: false,
   timeout: 120_000,
   env: {
+    LEAF_NEXT_DEV_INSTANCE: `ios-${port}`,
     VITE_MOCK: '0',
     VITE_CAT_PROOF: '1',
     VITE_API_BASE: 'http://leaf-proof.invalid',

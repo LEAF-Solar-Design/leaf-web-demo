@@ -50,6 +50,9 @@ https://leafdesign.ai/tier        (string enum)        the §11.2 claim-mintable
 https://leafdesign.ai/roles       (string[], may be []) §11.5 role overlay, e.g. ["platform_admin"]
 ```
 
+The explicit M2M service-admin exception (§10) additionally stamps the optional
+`https://leafdesign.ai/principal_type` claim with the exact value `service_admin`.
+
 Namespace prefix is configurable via `LEAF_TENANT_CLAIM_NS` (default
 `https://leafdesign.ai/`; a trailing slash is added if omitted).
 
@@ -304,6 +307,45 @@ no class claim. An absent or invalid tier becomes `restricted`, which keeps the
 client read-only. Tenant and org IDs must match the canonical
 `^[a-z0-9][a-z0-9_-]{0,62}$` rule.
 
+**Explicit service-admin exception (operator-ratified 2026-11-07, Studio
+unattended admin mandate):** default M2M clients still cannot mint `admin` or
+`platform_admin`. The Action secret `LEAF_SERVICE_ADMIN_CLIENT_IDS` must be a
+JSON array of at most 16 unique, exact, case-sensitive client IDs, each 8–128
+ASCII alphanumeric, underscore or hyphen characters. Missing, malformed,
+non-array, duplicate, wildcard, whitespace or otherwise invalid entries make
+the entire allowlist inert. An empty array grants nothing. No trimming, case
+normalization, prefix matching or metadata-supplied allowlist is accepted.
+
+Only exact membership of `event.client.client_id` in that secret, together
+with exact `leaf_tier=admin` and all existing tenant/org/audience metadata
+checks, mints `tier=admin`, the implied `platform_admin` role and
+`https://leafdesign.ai/principal_type=service_admin`. The implied role reserves
+a slot within the existing 16-role cap. Other clients retain the existing tier
+fallback and role filtering; allowlisted clients requesting a non-admin tier
+also retain ordinary M2M behavior. Metadata alone cannot opt in. The Action
+does not mint a human subject or operator authority.
+
+After ordinary RS256, issuer, audience and expiry verification, the shared
+runtime verifier and `extract_tenant_claims` reject an admin-tier or
+`platform_admin` machine subject ending in `@clients` unless it carries that
+exact namespaced marker and an exact `azp` equal to the client ID before
+`@clients`. Any `service_admin` marker requires the same valid client-ID
+shape, `@clients` subject and matching `azp`, even at a non-admin tier; a human
+subject cannot carry it. There is no `gty` predicate. Human tokens and ordinary
+non-admin M2M tokens keep their existing behavior. The marker is necessary,
+never sufficient: the exact server-owned `LEAF_PLATFORM_ADMIN_SUBJECTS`
+allowlist and canonical active subject-to-tenant binding remain mandatory in
+the existing deps/workspace scopes. Tenant/version checks, operator grants,
+approvals, rollout, spend and release controls remain unchanged.
+
+Before production activation, provisioning must verify the actual Auth0
+producer's `sub`/`azp` shape, exact audience and tenant claims against the
+separate staging/production client allowlists and canonical bindings, including
+negative environment checks. Source code and offline fixtures are not producer
+proof. This API service identity does not establish browser login or C01
+readiness; browser session login is separate, with no token/cookie injection,
+localStorage injection or human impersonation.
+
 Verify locally with:
 
 ```bash
@@ -311,7 +353,10 @@ node server/auth0-actions/credentials-exchange-add-tenant-claim.test.js
 ```
 
 Before deployment, capture the current client metadata and the current
-`credentials-exchange` bindings. Roll back by restoring both captured values.
+`credentials-exchange` bindings and securely capture the Action secret
+configuration. Roll back by restoring the captured configuration; removing a
+client from the secret stops future service-admin minting. Removing its exact
+server admin allowlist entry revokes the second factor on the next request.
 
 ---
 
@@ -368,13 +413,15 @@ The **claim-mintable subset** {`restricted`, `self_hosted`, `hosted_free`, `host
 `hosted_pro`, `admin`} is the only vocabulary a verified identity can carry
 (JWT tier claim, stored org tier). `demo`/`guest`/`demo_live` are server-resolved
 identities and must never be minted into a JWT claim or stored as an org's billing
-tier. `admin` is claim-mintable but **never plan-derived**: the Post-Login
-Action mints it solely from a root-level `app_metadata.leaf_admin === true`
+tier. `admin` is claim-mintable but **never plan-derived**: for human tokens,
+the Post-Login Action mints it solely from a root-level `app_metadata.leaf_admin === true`
 flag an operator set by hand in the Auth0 dashboard (root level, so
 leaf_website subscription PATCHes replacing `app_metadata.leaf` can neither
 mint nor erase it); no `PLAN_TIER` value maps to it and
 `billing_tiers.derive_tier` never returns it, so no billing state can produce
-an admin identity. Revocation = remove the flag.
+an admin identity. Human revocation = remove the flag. The only M2M exception
+is the explicitly allowlisted service-admin path in §10; it adds no tier or
+capability vocabulary and does not change the human flag rule.
 
 `demo_live` is selected only by the server after verifying an enabled,
 unexpired, unrevoked PostgreSQL demo session. It MUST NEVER join the
@@ -430,8 +477,9 @@ ahead of it can never displace it past the cap (the last kept role is dropped
 instead). An *explicit* `platform_admin` without `leaf_admin` gets no
 reservation — it is subject to the plain cap like any other role. The M2M Action mints the same claim from
 optional comma-separated `leaf_roles` client metadata, with `platform_admin`
-**forbidden for machine clients** (a staff identity requires a human login,
-the same posture that keeps `admin` out of the M2M tier set).
+**forbidden by default for machine clients**. The operator-ratified §10
+service-admin exception implies both the admin tier and `platform_admin`
+solely for explicitly opted-in clients; metadata role names cannot bypass it.
 
 Server side, `server/roles.py` + the operator-tunable `server/roles.json`
 (override: `LEAF_ROLES_FILE`; hardcoded mirror + freeze gate, same discipline
@@ -453,8 +501,10 @@ independent operator factors, and the R7 rollout + always-confirm approval
 gates (docs/ADMIN-SELF-EDIT-LANE.md) apply unchanged.
 
 FROZEN by `tests/test_auth_vocab_freeze.py`: the claim spelling, the
-`platform_admin` semantics (staff-everything; never plan-derived; M2M-
-forbidden; the only role carrying `platform_customize`, elevated-only), the
+`platform_admin` semantics (staff-everything; never plan-derived; M2M denied
+by default with only the explicit §10 service exception; the only role carrying
+`platform_customize`, elevated-only), the optional service claim spelling
+`https://leafdesign.ai/principal_type` and exact value `service_admin`, the
 name rule + cap, and the capability KEY vocabulary inside grants (§11.3). The
 role NAME SET is deliberately operator-extensible: add an entry to
 `roles.json` and mint the matching claim; unknown names in a token are inert.

@@ -1070,6 +1070,18 @@ def resolve_local_file(tool: Dict[str, Any], tenant_id: Optional[str] = None) ->
     return None
 
 
+def _is_trusted_builtin_path(tool: Dict[str, Any], local: Path) -> bool:
+    try:
+        local.resolve().relative_to(BUILTIN_DIR.resolve())
+    except (OSError, ValueError):
+        return False
+    name = tool.get("name")
+    engine_op = tool.get("engine_op")
+    if not isinstance(name, str) or not isinstance(engine_op, str):
+        return False
+    return (name, engine_op, local.name) in _platform_builtin_package_ids()
+
+
 def is_trusted_builtin_tool(tool: Dict[str, Any],
                             tenant_id: Optional[str] = None) -> bool:
     """Return whether this run cannot load tenant-controlled Python in the broker.
@@ -1096,15 +1108,7 @@ def is_trusted_builtin_tool(tool: Dict[str, Any],
         # `engine_script`, an appbundle, an opaque `entry` like "solve_targets") never
         # executes a file in this process and stays trusted, as before.
         return not _declares_local_python(tool)
-    try:
-        local.resolve().relative_to(BUILTIN_DIR.resolve())
-    except (OSError, ValueError):
-        return False
-    name = tool.get("name")
-    engine_op = tool.get("engine_op")
-    if not isinstance(name, str) or not isinstance(engine_op, str):
-        return False
-    return (name, engine_op, local.name) in _platform_builtin_package_ids()
+    return _is_trusted_builtin_path(tool, local)
 
 
 def published_tool_source_sha256(tool: Dict[str, Any],
@@ -1322,8 +1326,18 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
             ErrorCode.TENANT_DISABLED,
             "staged test source requires configured sandbox execution",
             retryable=False, tool=name, version=version, timing_ms=_ms())
+    # The capability test mirrors write_loop.is_write_tool.
+    trusted_read_builtin = (
+        test_source is None and local is not None
+        and "drawing.write" not in ((tool or {}).get("capabilities") or [])
+        and _is_trusted_builtin_path(tool, local)
+    )
+    # Platform-release read built-ins execute in the broker process exactly as with
+    # the tier off; the sandbox exists for tenant-controlled code. Write built-ins
+    # stay sandboxed because a protected live write requires microvm provenance.
+    use_sandbox = tier != "off" and not trusted_read_builtin
     execution_provenance = None
-    if tier != "off":
+    if use_sandbox:
         if test_source is not None:
             assert test_filename is not None
             if tier == "microvm":

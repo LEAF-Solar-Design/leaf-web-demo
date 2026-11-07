@@ -15,14 +15,16 @@
 // - The run stops at the FIRST quota refusal. Any other non-2xx stops it at once.
 // - The bearer token is read in-process from LEAF_QUOTA_PROOF_JWT by name only. It
 //   never reaches argv, the plan, the receipt or a log; errors are scrubbed of it.
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, extname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 export const SCHEMA = 'leaf.author-quota-live-proof.v1'
 export const TOKEN_ENV = 'LEAF_QUOTA_PROOF_JWT'
 export const STAGE_PATH = '/api/author/stage'
+export const READY_PHASE = /Drawing ready|No drawing yet/
+export const DEFAULT_DRAWING_FIXTURE = 'web/e2e/fixtures/distinctive-panel.dxf'
 // One refused API probe plus the browser's one request is the smallest useful run.
 export const MIN_REQUESTS = 2
 // Hard ceiling: each accepted request is real authoring spend.
@@ -165,6 +167,10 @@ export function resolveConfig(env, args, randomId = () => randomBytes(6).toStrin
   if (tenantId !== null && !RUN_ID.test(tenantId)) refusals.push('LEAF_QUOTA_PROOF_TENANT_ID is malformed')
   const orgId = env.LEAF_QUOTA_PROOF_ORG_ID || null
   if (orgId !== null && !RUN_ID.test(orgId)) refusals.push('LEAF_QUOTA_PROOF_ORG_ID is malformed')
+  const drawingPath = env.LEAF_QUOTA_PROOF_DRAWING || join(REPO_ROOT, DEFAULT_DRAWING_FIXTURE)
+  if (!existsSync(drawingPath) || !['.dxf', '.dwg'].includes(extname(drawingPath).toLowerCase())) {
+    refusals.push('drawing fixture is missing or not .dxf/.dwg')
+  }
   const config = {
     runId,
     webOrigin,
@@ -173,6 +179,7 @@ export function resolveConfig(env, args, randomId = () => randomBytes(6).toStrin
     maxRequests,
     tenantId,
     orgId,
+    drawingPath,
     description: `${DEFAULT_REQUEST} (${runId})`,
     out: args.out ? resolve(args.out) : join(REPO_ROOT, 'artifacts', 'author-quota-live-proof', runId),
     tokenPresent: token.present,
@@ -342,6 +349,7 @@ export async function runExecution(config, { backend, browser, now = () => new D
       apiOrigin: config.apiOrigin,
       allowedHosts: config.allowedHosts,
       orgId: config.orgId,
+      drawingPath: config.drawingPath,
       description: config.description,
       readToken: config.readToken,
       takeRequest: () => budget.take('browser'),
@@ -395,6 +403,39 @@ export function createFetchBackend({ fetchImpl = globalThis.fetch, timeoutMs = S
     async stage({ apiOrigin, tenantId, description, idempotencyKey, readToken }) {
       const token = readToken()
       if (!token) throw new ProofError('configuration', `${TOKEN_ENV} is not set`)
+      const headers = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+        ...(tenantId ? { 'X-Tenant-Id': tenantId } : {}),
+      }
+      const authorityPost = async (path, body, code, valid) => {
+        let response
+        let result
+        try {
+          response = await fetchImpl(`${apiOrigin}${path}`, {
+            method: 'POST',
+            redirect: 'manual',
+            signal: AbortSignal.timeout(timeoutMs),
+            headers,
+            body: JSON.stringify(body),
+          })
+          result = await readBoundedJson(response)
+        } catch {
+          throw new ProofError(code, `${code}: HTTP ${response?.status ?? 0}`)
+        }
+        if (response.status < 200 || response.status >= 300 || !valid(result)) {
+          throw new ProofError(code, `${code}: HTTP ${response.status}`)
+        }
+        return result
+      }
+      const session = await authorityPost('/api/sessions', {
+        drawing_id: `quota-proof-${idempotencyKey}`,
+      }, 'authority_session_failed', (body) => typeof body?.session_id === 'string' && body.session_id.trim().length > 0)
+      const turn = await authorityPost(`/api/sessions/${encodeURIComponent(session.session_id)}/messages`, {
+        text: description,
+        classifier_hint: { source: 'author_panel', purpose: 'stage_authority' },
+      }, 'authority_turn_failed', (body) => typeof body?.turn_id === 'string' && body.turn_id.trim().length > 0
+        && !['queued', 'completed', 'failed', 'cancelled'].includes(body.status))
       let response
       try {
         response = await fetchImpl(`${apiOrigin}${STAGE_PATH}`, {
@@ -402,9 +443,9 @@ export function createFetchBackend({ fetchImpl = globalThis.fetch, timeoutMs = S
           redirect: 'manual',
           signal: AbortSignal.timeout(timeoutMs),
           headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-            ...(tenantId ? { 'X-Tenant-Id': tenantId } : {}),
+            ...headers,
+            'X-Authority-Session-Id': session.session_id,
+            'X-Authority-Turn-Id': turn.turn_id,
           },
           body: JSON.stringify({ description, mode: 'build', idempotency_key: idempotencyKey }),
         })
@@ -454,7 +495,21 @@ export function createPlaywrightBrowser({ chromiumImpl } = {}) {
         const page = await context.newPage()
         await page.goto('/try', { waitUntil: 'domcontentloaded', timeout: 120_000 })
         await page.getByTestId('operator-phase')
-          .filter({ hasText: 'Backend ready' })
+          .filter({ hasText: READY_PHASE })
+          .waitFor({ state: 'visible', timeout: 120_000 })
+        const uploadButton = page.getByRole('button', { name: 'Upload DWG or DXF', exact: true })
+        const uploadDeadline = Date.now() + 120_000
+        while (!await uploadButton.isEnabled()) {
+          if (Date.now() >= uploadDeadline) {
+            throw new ProofError('browser_timeout', 'drawing upload did not become enabled within 120000 ms')
+          }
+          await page.waitForTimeout(250)
+        }
+        await page.getByLabel('Drawing file', { exact: true }).setInputFiles(opts.drawingPath)
+        await page.getByTestId('operator-phase')
+          .filter({ hasText: 'Drawing ready' })
+          .waitFor({ state: 'visible', timeout: 120_000 })
+        await page.locator('#workspace-tab-author[aria-disabled="false"]')
           .waitFor({ state: 'visible', timeout: 120_000 })
         await page.getByRole('tab', { name: 'Author' }).click()
         await page.getByLabel('What should the tool do?').fill(opts.description)

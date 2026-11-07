@@ -711,8 +711,8 @@ export function terrainSummary(view) {
     if (frame.crs !== 'none' && !isEpsg(frame.crs)) return null
     if (frame.elevation_datum !== 'unrecorded' && !isEpsg(frame.elevation_datum)) return null
     const lines = [
-      line('head', 'Terrain state', head.state.artifact_id),
-      line('change', 'Terrain change', `${head.index + 1} of this drawing`),
+      line('head', 'Terrain', 'Saved in this drawing'),
+      line('change', 'Terrain revision', String(head.index + 1)),
       line('units', 'Drawing units', UNIT_LABELS[frame.drawing_units]),
       line('crs', 'Coordinate system', frame.crs === 'none' ? 'None' : frame.crs),
       line('datum', 'Elevation datum', frame.elevation_datum === 'unrecorded' ? 'Not recorded' : frame.elevation_datum),

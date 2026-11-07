@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+LEAF_CI_SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"
 # BEGIN SHARD ENV
 CI_SHARD_TOTAL_N=1
 CI_SHARD_INDEX_N=0
@@ -23,6 +24,63 @@ if [[ "$shard_env_valid" != 1 ]]; then
 fi
 echo "LEAF_EVENT shard mode=$CI_SHARD_MODE index=$CI_SHARD_INDEX_N total=$CI_SHARD_TOTAL_N"
 # END SHARD ENV
+# A post-cheap-phase callback re-enters this exact trusted script, not a
+# candidate helper. Only dependency-backed heavy prerequisites run here.
+if [[ "${1:-}" == --heavy-prerequisites ]]; then
+if [[ "${CI_SHARD_MODE:-all}" == all || "$CI_SHARD_INDEX_N" == 0 ]]; then
+echo "LEAF_T start webbundle $(date +%s%3N)"
+cd "$CODEBUILD_SRC_DIR/web"
+echo "--- 2/4 Build web bundle"
+npm run build
+echo "LEAF_T end webbundle $(date +%s%3N) rc=0"
+echo "LEAF_T start license-fence $(date +%s%3N)"
+cd "$CODEBUILD_SRC_DIR"
+echo "--- 3/4 License fence self-test"
+python scripts/check_license_fence.py --self-test
+cd "$CODEBUILD_SRC_DIR"
+echo "--- 4/4 License fence scan"
+python scripts/check_license_fence.py .
+echo "LEAF_T end license-fence $(date +%s%3N) rc=0"
+else
+  echo "license fence: runs on shard 0"
+fi
+
+echo "LEAF_T start chromium $(date +%s%3N)"
+cd "$CODEBUILD_SRC_DIR/web"
+echo "--- 5/6 Install Chromium for browser proofs"
+# LEAF_CI_BROWSER_INSTALL_BEGIN
+# standard:7.0 needs OS libraries, and --with-deps shells out to apt, so this
+# step used to inherit archive.ubuntu.com's availability. Measured 2026-09-11
+# between 06:37Z and 07:30Z: leaf-ci-leaf-web-demo failed SIX of seven
+# consecutive builds right here, on main and on every merge-queue group, with
+# "Could not connect to archive.ubuntu.com:80 ... connection timed out" against
+# all six mirror IPs, before a single suite ran, and every queued PR ejected
+# behind it. A fallback is honest rather than a papered-over failure because in
+# that same log every library Chromium needs read "is already the newest
+# version" (libasound2, libcairo2, libcups2, libdbus-1-3, libdrm2, libxkbcommon0,
+# libxrandr2, libatk*); the only packages the mirror could not serve were
+# optional FONT packages (fonts-ipafont-gothic, fonts-freefont-ttf,
+# fonts-unifont, fonts-wqy-zenhei, xfonts-*), which change glyph coverage in a
+# rendered page and nothing any suite in this repo asserts. Try the OS setup
+# once, then the distinct browser-only stage; repeating the same apt failure
+# adds no evidence. A missing BROWSER BINARY is
+# still a hard failure: the last call is unguarded, so set -e fails the build.
+install_ci_browser() {
+  if "$@" install --with-deps chromium; then
+    return 0
+  fi
+  echo "WARNING: $* dependency install failed; trying the distinct browser-only stage. Browser proofs still check OS runtime usability." >&2
+  "$@" install chromium
+}
+
+install_ci_browser npx playwright
+# Install the Python producer's pinned browser with the gate interpreter too.
+install_ci_browser python -m playwright
+echo "LEAF_T end chromium $(date +%s%3N) rc=0"
+# LEAF_CI_BROWSER_INSTALL_END
+  exit 0
+fi
+
 # Freeze policy before any candidate installation, import, or test collection.
 TRUSTED_SHA=""
 HEAD_SHA=""
@@ -104,6 +162,60 @@ event = {"provider": "github", "repo": "LEAF-Solar-Design/leaf-web-demo",
          "head_sha": e.get("CODEBUILD_RESOLVED_SOURCE_VERSION", ""),
          "head_ref": e.get("CODEBUILD_WEBHOOK_HEAD_REF", ""),
          "target_ref": e.get("CODEBUILD_WEBHOOK_BASE_REF", "")}
+try:
+    head, trusted = e["HEAD_SHA"], e["TRUSTED_SHA"]
+    relay_head = re.fullmatch(r"refs/pull/([1-9][0-9]*)/head", event["head_ref"])
+    relay_base = event["target_ref"]
+    operation = e.get("FORGE_CI_OPERATION", "")
+    if (initiator == "states/leaf-forge-ci-relay" and
+            event["event"] in ("PULL_REQUEST_CREATED", "PULL_REQUEST_UPDATED", "PULL_REQUEST_REOPENED") and
+            re.fullmatch(r"[0-9A-Fa-f]{40}", head) and re.fullmatch(r"[0-9A-Fa-f]{40}", trusted) and
+            relay_head and re.fullmatch(r"refs/heads/[A-Za-z0-9._/-]+", relay_base) and
+            ".." not in relay_base and re.fullmatch(r"[A-Za-z0-9._-]+", operation)):
+        manifest_sha256 = None
+        manifest_status = "unreadable"
+        try:
+            manifest_bytes = Path(e.get("LEAF_RELAY_MANIFEST", "/tmp/manifest.json")).read_bytes()
+            manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+            manifest = json.loads(manifest_bytes)
+            checks = (
+                ("schema", "leaf.forge-ci-relay.snapshot.v1"),
+                ("repository", "LEAF-Solar-Design/leaf-web-demo"),
+                ("head_sha", head), ("base_sha", trusted), ("base_ref", relay_base),
+                ("operation", operation),
+            )
+            manifest_status = "verified"
+            for field, expected in checks:
+                if not isinstance(manifest, dict) or manifest.get(field) != expected:
+                    manifest_status = "mismatch:" + field
+                    break
+            if manifest_status == "verified" and (
+                    not isinstance(manifest.get("bundle_sha256"), str) or
+                    not re.fullmatch(r"[0-9A-Fa-f]{64}", manifest["bundle_sha256"])):
+                manifest_status = "mismatch:bundle_sha256"
+        except FileNotFoundError:
+            manifest_status = "missing"
+        except (OSError, ValueError, UnicodeError):
+            pass
+        event.update(provider="forge", initiator="forge-ci-relay", source_version="",
+                     head_sha=head, target_sha=trusted, pr_number=int(relay_head[1]),
+                     provider_bound=manifest_status == "verified", relay_manifest=manifest_status,
+                     evidence_ref={"build": e.get("CODEBUILD_BUILD_ARN") or e.get("CODEBUILD_BUILD_ID", ""),
+                                   "manifest_sha256": manifest_sha256, "operation": operation})
+    elif (re.fullmatch(r"device:dv-[0-9a-f]{16}", event["build_id"]) and
+            event["event"] in ("PULL_REQUEST_CREATED", "PULL_REQUEST_UPDATED", "PULL_REQUEST_REOPENED") and
+            relay_head and re.fullmatch(r"refs/heads/[A-Za-z0-9._/-]+", relay_base) and
+            ".." not in relay_base and
+            re.fullmatch(r"[0-9A-Fa-f]{40}", head) and re.fullmatch(r"[0-9A-Fa-f]{40}", trusted) and
+            e.get("CODEBUILD_RESOLVED_SOURCE_VERSION") == head and
+            operation == "ci-" + hashlib.sha256(
+                ("LEAF-Solar-Design/leaf-web-demo|pull_request|" + relay_head[1] + "|" + head)
+                .encode("utf-8")).hexdigest()[:40]):
+        event.update(provider="forge-device", initiator="leaf-ci-device", provider_bound=True,
+                     source_version="", pr_number=int(relay_head[1]), head_sha=head, target_sha=trusted,
+                     evidence_ref={"build": event["build_id"], "operation": operation})
+except Exception:
+    pass
 # No queue/filter/revocation claim is manufactured from webhook presence.
 # Absent enforcement-producer evidence is a full-execution decision in S1.
 (directory / "event.json").write_bytes(canonical(event) + b"\n")
@@ -111,6 +223,9 @@ LEAF_SELECTION_INPUTS
         then
           pr_number="${CODEBUILD_SOURCE_VERSION:-}"
           pr_number="${pr_number#pr/}"
+          if [[ ! "${CODEBUILD_SOURCE_VERSION:-}" =~ ^pr/([1-9][0-9]*)$ && ( "${CODEBUILD_INITIATOR:-}" == "states/leaf-forge-ci-relay" || "${CODEBUILD_BUILD_ID:-}" =~ ^device:dv-[0-9a-f]{16}$ ) && "${CODEBUILD_WEBHOOK_HEAD_REF:-}" =~ ^refs/pull/([1-9][0-9]*)/head$ ]]; then
+            pr_number="${BASH_REMATCH[1]}"
+          fi
           if python -I -B "$selection_dir/select_tests.py" decide \
             --repo "$CODEBUILD_SRC_DIR" --trusted-sha "$TRUSTED_SHA" --head-sha "$HEAD_SHA" \
             --map "$selection_dir/test-selection-map.json" --out-dir "$selection_dir" \
@@ -123,6 +238,10 @@ LEAF_SELECTION_INPUTS
       selection_bootstrap_reason=catalog_load_failed
     fi
   fi
+fi
+
+if [[ "${LEAF_CI_FULL:-}" == 1 && -z "$selection_force_full_reason" ]]; then
+  selection_force_full_reason=explicit_full
 fi
 
 if [[ "${LEAF_PROOF_TRUSTED_SHA+x}" == x && "$trusted_sha_override" != 1 ]]; then
@@ -225,6 +344,7 @@ import datetime
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -258,6 +378,9 @@ ref = e.get("CODEBUILD_WEBHOOK_HEAD_REF", "")
 raw = e.get("CODEBUILD_WEBHOOK_EVENT", "")
 event = ("merge_group" if "gh-readonly-queue/" in ref else
          "pr" if source.startswith("pr/") and raw.startswith("PULL_REQUEST_") else
+         "pr" if (e.get("CODEBUILD_INITIATOR") == "states/leaf-forge-ci-relay" or
+                  re.fullmatch(r"device:dv-[0-9a-f]{16}", e.get("CODEBUILD_BUILD_ID", ""))) and
+         raw.startswith("PULL_REQUEST_") and re.fullmatch(r"refs/pull/[1-9][0-9]*/head", ref) else
          "main" if ref == "refs/heads/main" and raw == "PUSH" else
          "manual" if not raw and e.get("CODEBUILD_INITIATOR") else "unknown")
 ids = decision.get("selected_test_ids")
@@ -308,7 +431,14 @@ fi
 if [[ -f "$selection_dir/execution-mode" ]]; then
   selection_mode="$(<"$selection_dir/execution-mode")"
 fi
+# LEAF_PR_TIER_ACTIVATION_BEGIN
+# Use the gate's policy loader once, before the startup event declares its mode.
+pr_tier_active="$(python3 -I -B scripts/ci/build_pr_tier.py --active scripts/ci/pr-tier.json)"
 export LEAF_SELECTION_EXECUTION_MODE="$selection_mode"
+if [[ "$pr_tier_active" == 1 ]]; then
+  export LEAF_SELECTION_EXECUTION_MODE=selected
+fi
+# LEAF_PR_TIER_ACTIVATION_END
 if [[ -n "${CODEBUILD_BUILD_ID:-}" ]]; then
   receipt_failed=0
   aws s3api put-object --bucket leaf-mq-transport-807034087062-us-east-1 \
@@ -433,6 +563,42 @@ BASE_REF="${CODEBUILD_WEBHOOK_BASE_REF:-}"; BASE_REF="${BASE_REF##refs/heads/}";
 if git rev-parse --verify -q "origin/$BASE_REF" >/dev/null; then echo "origin/$BASE_REF"; elif git rev-parse --verify -q "$BASE_REF" >/dev/null; then echo "$BASE_REF"; else echo "FATAL: base ref $BASE_REF not in clone"; git branch -a | head -20; exit 1; fi > /tmp/base_ref
 echo "base=$(cat /tmp/base_ref) head=$(git rev-parse --short HEAD) event=${CODEBUILD_WEBHOOK_EVENT:-manual}"
 export BASE="$(cat /tmp/base_ref)"
+# LEAF_CI_CORPUS_CAGE_SUPPLY_BEGIN
+# The corpus executor requires this absolute path and seccomp capability.
+# Reuse the pinned device-image recipe only on incapable ephemeral CI images.
+echo "LEAF_T start corpus-cage-supply $(date +%s%3N)"
+if ! /usr/bin/setpriv --help 2>/dev/null | grep -Fq -- '--seccomp-filter'; then
+  if [[ "$(id -u)" != 0 ]]; then
+    echo 'corpus cage supply refused: root required to provision /usr/bin/setpriv' >&2
+    exit 1
+  fi
+  (
+    set -euo pipefail
+    supply_dir="$(mktemp -d /tmp/leaf-ci-setpriv.XXXXXX)"
+    trap 'rm -rf -- "$supply_dir"' EXIT
+    version=2.41.6
+    archive="$supply_dir/util-linux-${version}.tar.xz"
+    curl --proto '=https' --tlsv1.2 --fail --show-error --location \
+      --connect-timeout 15 --max-time 120 --output "$archive" \
+      "https://mirrors.edge.kernel.org/pub/linux/utils/util-linux/v2.41/util-linux-${version}.tar.xz"
+    echo "e596083744e746be7d2823b62b43f4418dd7bf56303b4dc09e6fe8112fe3d7ed  $archive" | sha256sum -c -
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libcap-ng-dev pkg-config
+    tar -xJf "$archive" -C "$supply_dir"
+    cd "$supply_dir/util-linux-${version}"
+    ./configure --disable-all-programs --enable-setpriv --disable-nls \
+      --without-python --without-systemd --without-udev --disable-bash-completion
+    make -j2 setpriv
+    dpkg-divert --local --rename --divert /usr/bin/setpriv.util-linux-2.37 --add /usr/bin/setpriv
+    install -m 0755 setpriv /usr/bin/setpriv
+  )
+fi
+/usr/bin/setpriv --help | grep -Fq -- '--seccomp-filter'
+/usr/bin/setpriv --version
+sha256sum /usr/bin/setpriv
+echo "corpus cage supply uid=$(id -u)"
+echo "LEAF_T end corpus-cage-supply $(date +%s%3N) rc=0"
+# LEAF_CI_CORPUS_CAGE_SUPPLY_END
 echo "LEAF_T end setup $(date +%s%3N) rc=0"
 
 if [[ "${CI_SHARD_MODE:-all}" == all || "$CI_SHARD_INDEX_N" == 0 ]]; then
@@ -457,23 +623,6 @@ cd "$CODEBUILD_SRC_DIR/web"
 echo "--- 1/4 Install web dependencies"
 npm ci
 echo "LEAF_T end webdeps $(date +%s%3N) rc=0"
-if [[ "${CI_SHARD_MODE:-all}" == all || "$CI_SHARD_INDEX_N" == 0 ]]; then
-echo "LEAF_T start webbundle $(date +%s%3N)"
-cd "$CODEBUILD_SRC_DIR/web"
-echo "--- 2/4 Build web bundle"
-npm run build
-echo "LEAF_T end webbundle $(date +%s%3N) rc=0"
-echo "LEAF_T start license-fence $(date +%s%3N)"
-cd "$CODEBUILD_SRC_DIR"
-echo "--- 3/4 License fence self-test"
-python scripts/check_license_fence.py --self-test
-cd "$CODEBUILD_SRC_DIR"
-echo "--- 4/4 License fence scan"
-python scripts/check_license_fence.py .
-echo "LEAF_T end license-fence $(date +%s%3N) rc=0"
-else
-  echo "license fence: runs on shard 0"
-fi
 
 echo "=== job test-gate ==="
 echo "LEAF_T start pydeps $(date +%s%3N)"
@@ -500,46 +649,7 @@ cd "$CODEBUILD_SRC_DIR/web"
 echo "--- 4/6 Reuse web dependencies"
 # The license-fence job installed a clean web tree in this same build.
 # No intervening step changes its dependencies, so reuse that npm ci.
-echo "LEAF_T start chromium $(date +%s%3N)"
-cd "$CODEBUILD_SRC_DIR/web"
-echo "--- 5/6 Install Chromium for browser proofs"
-# LEAF_CI_BROWSER_INSTALL_BEGIN
-# standard:7.0 needs OS libraries, and --with-deps shells out to apt, so this
-# step used to inherit archive.ubuntu.com's availability. Measured 2026-09-11
-# between 06:37Z and 07:30Z: leaf-ci-leaf-web-demo failed SIX of seven
-# consecutive builds right here, on main and on every merge-queue group, with
-# "Could not connect to archive.ubuntu.com:80 ... connection timed out" against
-# all six mirror IPs, before a single suite ran, and every queued PR ejected
-# behind it. A fallback is honest rather than a papered-over failure because in
-# that same log every library Chromium needs read "is already the newest
-# version" (libasound2, libcairo2, libcups2, libdbus-1-3, libdrm2, libxkbcommon0,
-# libxrandr2, libatk*); the only packages the mirror could not serve were
-# optional FONT packages (fonts-ipafont-gothic, fonts-freefont-ttf,
-# fonts-unifont, fonts-wqy-zenhei, xfonts-*), which change glyph coverage in a
-# rendered page and nothing any suite in this repo asserts. Two attempts, not
-# more: each failed --with-deps costs a full apt timeout against six unreachable
-# IPs, and the fallback is what saves the build. A missing BROWSER BINARY is
-# still a hard failure: the last call is unguarded, so set -e fails the build.
-install_ci_browser() {
-  local attempt
-  for attempt in 1 2; do
-    if "$@" install --with-deps chromium; then
-      return 0
-    fi
-    if [[ "$attempt" == 1 ]]; then
-      echo "WARNING: $* dependency install failed; retrying in 5 seconds (attempt 2/2)." >&2
-      sleep 5
-    fi
-  done
-  echo "WARNING: $* dependency install failed after 2 attempts; falling back to browser-only install. OS libraries may be missing; browser proofs will check runtime usability." >&2
-  "$@" install chromium
-}
 
-install_ci_browser npx playwright
-# Install the Python producer's pinned browser with the gate interpreter too.
-install_ci_browser python -m playwright
-echo "LEAF_T end chromium $(date +%s%3N) rc=0"
-# LEAF_CI_BROWSER_INSTALL_END
 echo "LEAF_T start gate $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR"
 echo "--- 6/6 Run unsharded test gate and print scoreboard"
@@ -639,6 +749,192 @@ else
   unset LEAF_TRUSTED_CI_DIR
 fi
 export PYTHONPATH="$selection_dir"
+# LEAF_PROCESS_CAPTURE_BEGIN
+process_capture_active=0
+if [[ "${LEAF_PROCESS_CAPTURE:-}" == 1 ]]; then
+  # Explicit requests cannot inherit an ambient context around the manual-event guard.
+  unset LEAF_PROCESS_CAPTURE_CONTEXT LEAF_PROCESS_CAPTURE_OUT
+  process_capture_reason=""
+  if [[ -n "${CODEBUILD_WEBHOOK_EVENT:-}" || -n "${CODEBUILD_WEBHOOK_HEAD_REF:-}" \
+        || -n "${CODEBUILD_WEBHOOK_BASE_REF:-}" || -n "${CODEBUILD_WEBHOOK_TRIGGER:-}" \
+        || "${CODEBUILD_INITIATOR:-}" == states/leaf-forge-ci-relay \
+        || -n "${FORGE_CI_OPERATION:-}" || -n "${LEAF_RELAY_MANIFEST:-}" \
+        || "${CODEBUILD_SOURCE_VERSION:-}" == pr/* || "${CODEBUILD_SOURCE_VERSION:-}" == refs/pull/* ]]; then
+    process_capture_reason=non_manual_event
+  elif [[ -n "${CI_SHARD_TOTAL:-}" && "${CI_SHARD_TOTAL}" != 1 ]]; then
+    process_capture_reason=sharded_build
+  fi
+  if [[ -z "$process_capture_reason" ]]; then
+    if ! { command -v strace >/dev/null 2>&1 && strace --version 2>/dev/null | head -1 | grep -q '^strace -- version 5\.16'; }; then
+      if ! { timeout 120 apt-get update -qq >&2 \
+          && DEBIAN_FRONTEND=noninteractive timeout 120 apt-get install -y 'strace=5.16*' >&2 \
+          && command -v strace >/dev/null 2>&1 \
+          && strace --version 2>/dev/null | head -1 | grep -q '^strace -- version 5\.16'; }; then
+        process_capture_reason=strace_unavailable
+      fi
+    fi
+  fi
+  if [[ -z "$process_capture_reason" ]]; then
+    capture_helpers_ready=1
+    for helper in trace_process_tree.py trace_supervisor.py external_inventory.py epoch_probe.py; do
+      if git --no-replace-objects show "$TRUSTED_SHA:scripts/ci/$helper" > "$selection_dir/$helper" \
+          && chmod 400 "$selection_dir/$helper"; then
+        :
+      else
+        capture_helpers_ready=0
+      fi
+    done
+    if [[ "$capture_helpers_ready" != 1 || "$tracing_helpers_ready" != 1 || "$reporters_ready" != 1 ]]; then
+      process_capture_reason=helpers_unavailable
+    elif mkdir -p /tmp/process-capture/out \
+      && python -I -B - "$selection_dir" "$CODEBUILD_SRC_DIR" "$HEAD_SHA" "${CODEBUILD_BUILD_ID:-}" \
+        "$(git --no-replace-objects rev-parse "$HEAD_SHA^{tree}")" \
+        "$(git --no-replace-objects rev-parse "$TRUSTED_SHA:scripts/ci/trace_reads.py")" \
+        "$(python -I -B -c 'import json,sys; print(json.load(open(sys.argv[1]))["catalog_sha256"])' "$selection_dir/catalog.json")" \
+        "${CODEBUILD_BUILD_IMAGE:-}" <<'LEAF_CAPTURE_BASE' >&2
+import hashlib
+import importlib.metadata
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+out, repo, head, run_id, source_tree, capture_sha, catalog_sha, image = sys.argv[1:]
+sys.path.insert(0, out)
+import external_inventory
+import full_run_manifest
+import trace_process_tree as tree
+
+
+def file_sha256(path):
+    hasher = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1048576), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def git(*args, data=None):
+    env = {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}
+    return subprocess.run(["git", "--no-replace-objects", "-C", repo, *args], input=data, env=env,
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True, timeout=120).stdout
+
+
+# Inventory: every tracked name, and each symlink's target text from one batched read.
+files, links = [], []
+for record in git("ls-tree", "-r", "-z", "--full-tree", head).split(b"\0"):
+    if not record:
+        continue
+    meta, _, name = record.partition(b"\t")
+    fields = meta.split(b" ")
+    files.append(name.decode("utf-8", "strict"))
+    if fields[0] == b"120000":
+        links.append((files[-1], fields[2].decode("ascii")))
+symlinks = {}
+if links:
+    batch = git("cat-file", "--batch", data=b"".join(sha.encode("ascii") + b"\n" for _, sha in links))
+    position = 0
+    for name, sha in links:
+        end = batch.index(b"\n", position)
+        header = batch[position:end].split(b" ")
+        if len(header) != 3 or header[0] != sha.encode("ascii") or header[1] != b"blob":
+            raise SystemExit("symlink_target_unreadable")
+        start = end + 1
+        symlinks[name] = batch[start:start + int(header[2])].decode("utf-8", "strict")
+        position = start + int(header[2]) + 1
+os_image = {"class": "os-image", "origin_category": "os-image"}
+supervisor = {"class": "supervisor", "origin_category": "supervisor"}
+roots = external_inventory.resolve_default_roots(os.environ)
+# Harness-owned: the trusted dir, the gate log directory and the result directory (Amendment 3).
+for root in (out, "/tmp/gate-logs", "/tmp/gate-results", "/tmp/process-capture"):
+    roots[root.rstrip("/")] = supervisor
+# Installed dependencies are os-image, pinned by their lockfiles and bound by the root digest.
+for path in sorted({Path(repo, "web", "node_modules"), *Path(repo).glob("node_modules"),
+                    *Path(repo).glob("*/node_modules")}):
+    if path.is_dir():
+        roots[str(path)] = os_image
+        if os.path.realpath(path) != str(path):
+            roots[os.path.realpath(path)] = os_image
+browsers = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or Path.home() / ".cache" / "ms-playwright")
+if browsers.is_absolute() and browsers.is_dir():
+    roots[str(browsers)] = os_image
+    if os.path.realpath(browsers) != str(browsers):
+        roots[os.path.realpath(browsers)] = os_image
+strace_package = None
+try:
+    probe = subprocess.run(["dpkg-query", "-W", "-f", "${Version}", "strace"], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30)
+    if probe.returncode == 0 and probe.stdout.strip():
+        strace_package = probe.stdout.decode("ascii", "strict").strip()
+except (OSError, UnicodeError, subprocess.SubprocessError):
+    pass
+node_identity = None
+node = shutil.which("node")
+if node:
+    try:
+        version = subprocess.run([node, "--version"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                 stderr=subprocess.DEVNULL, timeout=30, check=True).stdout.decode("ascii").strip()
+        node_identity = {"executable": node, "version": version,
+                         "executable_sha256": file_sha256(os.path.realpath(node))}
+    except (OSError, UnicodeError, subprocess.SubprocessError):
+        node_identity = None
+distributions = sorted({(str(d.metadata["Name"] or ""), str(d.version or ""))
+                        for d in importlib.metadata.distributions()})
+helpers = {name: file_sha256(Path(out) / name)
+           for name in ("pytest_selection.py", "full_run_manifest.py", "select_tests.py", "sitecustomize.py",
+                        "vitest-leaf.mjs", "playwright-leaf.mjs", "trace_supervisor.py",
+                        "trace_process_tree.py", "external_inventory.py", "epoch_probe.py") if (Path(out) / name).is_file()}
+context = {
+    "run_id": run_id, "source_sha": head, "source_tree": source_tree,
+    "capture_sha": capture_sha, "catalog_sha256": catalog_sha,
+    "source_root": repo, "initial_cwd": repo,
+    "inventory": {"files": files, "symlinks": symlinks}, "external_roots": roots,
+    "toolchain_fingerprint": full_run_manifest.toolchain_fingerprint(image, capture_sha),
+    "helper_blobs": {"trace_reads_sha256": file_sha256(Path(out) / "trace_reads.py"),
+                     "reporting_helper_sha256s": helpers},
+    "strace_package": strace_package,
+    # The provider exposes only the image label, never a manifest digest.
+    "image_manifest_digest": None, "image_manifest_digest_reason": "os_image_identity_unavailable",
+    "distribution_list_digest": tree.digest([list(row) for row in distributions]),
+    "interpreter_identity": {"executable": sys.executable, "version": sys.version,
+                             "executable_sha256": file_sha256(os.path.realpath(sys.executable))},
+    "node_identity": node_identity,
+}
+# The supervisor's own check with the runner's per-suite fields; a context it would refuse is never written.
+tree._validate(dict(context, capture_group="base", suites=[], suites_deferred=True,
+                    seed_fds={"1": {"kind": "supervisor"}, "2": {"kind": "supervisor"}}))
+context.update(capture_group="base", suites=[], suites_deferred=True,
+               seed_fds={"0": {"kind": "devnull"}, "1": {"kind": "supervisor"}, "2": {"kind": "supervisor"}})
+tree._atomic(Path("/tmp/process-capture/context.json"), context)
+print("TRACING capture_base_context files={} symlinks={} roots={} strace_package={} node={} image_manifest_digest=null "
+      "reason=os_image_identity_unavailable".format(len(files), len(symlinks), len(roots), strace_package,
+                                                    (node_identity or {}).get("version")))
+LEAF_CAPTURE_BASE
+    then
+      # -I implies -P, so a helper run as a script cannot import its siblings; load it from the dir.
+      if python -I -B -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from epoch_probe import main; sys.exit(main())' \
+          "$selection_dir" --context /tmp/process-capture/context.json \
+          --out /tmp/process-capture/capture-epoch.json --sink file; then
+        process_capture_active=1
+        export LEAF_PROCESS_CAPTURE_CONTEXT=/tmp/process-capture/context.json
+        export LEAF_PROCESS_CAPTURE_OUT=/tmp/process-capture/out
+        # Reuse the advisory readset publication path; LEAF_PROOF_TRACING stays independent.
+        tracing_ready=1
+      else
+        process_capture_reason=epoch_unavailable
+      fi
+    else
+      process_capture_reason=context_unavailable
+    fi
+  fi
+  if [[ -n "$process_capture_reason" ]]; then
+    echo "LEAF_CAPTURE refused $process_capture_reason"
+  fi
+  export process_capture_active
+fi
+# LEAF_PROCESS_CAPTURE_END
 if [[ "$tracing_ready" == 1 ]]; then
   export LEAF_READSET_DIR=/tmp/gate-logs/readsets
   export LEAF_READSET_RUN="${CODEBUILD_BUILD_ID:-}"
@@ -685,9 +981,71 @@ fi
 export LEAF_GATE_DATABASE_URL
 export LEAF_GATE_REQUIRE_DATABASE=1
 echo "LEAF_T end postgres $(date +%s%3N) rc=$postgres_status"
+# LEAF_DIAGNOSTIC_BEGIN
+# Server-owned exact-suite diagnostics never grant a full or shard verdict.
+if [[ "${LEAF_DIAGNOSTIC_PROFILE:-}" == web-demo-suite && "${LEAF_GATE_ONLY:-}" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]]; then
+  unset PYTHONSAFEPATH
+  export PYTHONUNBUFFERED=1
+  diagnostic_status=2
+  echo "LEAF_DIAGNOSTIC diagnostic-only/no-full-verdict suite=$LEAF_GATE_ONLY"
+  if python scripts/run-all-gates.py --list --catalog-root "$CODEBUILD_SRC_DIR" > "$selection_dir/diagnostic-catalog.json" \
+    && python -I -B - "$selection_dir/diagnostic-catalog.json" "$LEAF_GATE_ONLY" <<'LEAF_DIAGNOSTIC_EXACT'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as source:
+        catalog = json.load(source)
+    if catalog.get("schema") != "leaf.ci.catalog.v1" or not isinstance(catalog.get("suites"), list):
+        raise ValueError("invalid catalog")
+    ids = [row["id"] for row in catalog["suites"]]
+    if any(not isinstance(suite_id, str) for suite_id in ids):
+        raise ValueError("invalid suite ID")
+    if [suite_id for suite_id in ids if sys.argv[2] in suite_id] != [sys.argv[2]]:
+        raise ValueError("--only must select exactly the requested suite ID")
+except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+    print("LEAF_DIAGNOSTIC refused: " + str(exc)[:300], file=sys.stderr)
+    raise SystemExit(2)
+LEAF_DIAGNOSTIC_EXACT
+  then
+    diagnostic_status=0
+    python scripts/run-all-gates.py --jobs 1 --retry 0 --fail-fast --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs --only "$LEAF_GATE_ONLY" || diagnostic_status=$?
+  else
+    echo "LEAF_DIAGNOSTIC refused: catalog unavailable or selection not exact" >&2
+  fi
+  if [[ "$postgres_status" != 0 && "$diagnostic_status" == 0 ]]; then
+    echo "FATAL: diagnostic suite passed without its PostgreSQL proofs; failing the diagnostic" >&2
+    diagnostic_status=1
+  fi
+  printf 'LEAF_DIAGNOSTIC diagnostic-only/no-full-verdict suite=%s status=%s postgres_status=%s\n' \
+    "$LEAF_GATE_ONLY" "$diagnostic_status" "$postgres_status" | tee /tmp/gate-results/diagnostic.txt || true
+  # NO_SOURCE builds have no artifact download. Publish only sanitized retained evidence.
+  python -I -B scripts/ci/retain_failed_gate_logs.py \
+    --result /tmp/gate-results/gate-result.json --logs /tmp/gate-logs --output /tmp/gate-results/diagnostic-failed-gate-logs \
+    --emit-stdout --source "$HEAD_SHA" --build-id "${CODEBUILD_BUILD_ID:-}" \
+    || echo 'WARNING: failed diagnostic log publication unavailable' >&2
+  exit "$diagnostic_status"
+fi
+# LEAF_DIAGNOSTIC_END
 gate_status=0
+gate_fail_fast_args=(--fail-fast)
+if [[ "${process_capture_active:-0}" == 1 ]]; then
+  # Capture records every suite's reads; a failure still fails the job below.
+  gate_fail_fast_args=()
+fi
+gate_tier_args=()
+if [[ "$pr_tier_active" == 1 ]]; then
+  gate_tier_args=(--tier-file scripts/ci/pr-tier.json)
+fi
+echo "LEAF_EVENT gate fail_fast=${#gate_fail_fast_args[@]}" >&2
 unset PYTHONSAFEPATH
-python scripts/run-all-gates.py --jobs "${LEAF_GATE_JOBS:-auto}" --retry 1 --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs "${only_args[@]}" || gate_status=$?
+# Ensure gate rows reach the log even when the job is killed at its deadline.
+export PYTHONUNBUFFERED=1
+python scripts/run-all-gates.py --jobs "${LEAF_GATE_JOBS:-auto}" --retry 0 --early-feedback "${gate_fail_fast_args[@]}" --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs "${only_args[@]}" "${gate_tier_args[@]}" --before-heavy-command bash "$LEAF_CI_SCRIPT_PATH" --heavy-prerequisites || gate_status=$?
+python -I -B scripts/ci/retain_failed_gate_logs.py \
+  --result /tmp/gate-results/gate-result.json --logs /tmp/gate-logs --output /tmp/gate-results/failed-gate-logs \
+  --emit-stdout --source "$HEAD_SHA" --build-id "${CODEBUILD_BUILD_ID:-}" \
+  || echo 'WARNING: failed gate log retention unavailable' >&2
 if [[ "$postgres_status" != 0 && "$gate_status" == 0 ]]; then
   echo "FATAL: the gate passed without its PostgreSQL proofs; failing the build" >&2
   gate_status=1
@@ -697,63 +1055,29 @@ else
   gate_status=0
 fi
 echo "LEAF_T end gate $(date +%s%3N) rc=$gate_status"
-if [[ -f /tmp/gate-results/gate-result.json ]]; then
-  tail -n 200 /tmp/gate-results/gate-result.json || true
-  # BEGIN GATE FAIL NAMES
-  {
-    python3 - <<'PY'
-import json
-import re
-from pathlib import Path
-
-try:
-    result = json.loads(Path("/tmp/gate-results/gate-result.json").read_text())
-except Exception as exc:
-    print(f"gate fail names: result JSON unreadable ({type(exc).__name__})")
-    raise SystemExit(0)
-
-output_lines = 0
-
-def emit(text):
-    global output_lines
-    for line in str(text).splitlines() or [""]:
-        print(line)
-        output_lines += 1
-        if output_lines == 400:
-            print("gate fail names: output capped at 400 lines")
-            raise SystemExit(0)
-
-log_dir = Path("/tmp/gate-logs")
-markers = re.compile(r"\bFAIL\b|FAILED|\u00d7|\u2717|AssertionError|Error:|Timeout")
-for suite in result.get("results", []):
-    if suite.get("status") != "FAIL":
-        continue
-    suite_id = suite.get("id", "")
-    emit(f"GATE FAIL {suite_id}: {suite.get('note', '')}")
-    failed_ids = suite.get("test_report", {}).get("failed_test_ids", [])
-    for test_id in failed_ids[:20]:
-        emit(f"  failed test: {test_id}")
-    if len(failed_ids) > 20:
-        emit(f"  ... and {len(failed_ids) - 20} more failed tests")
-    log_path = log_dir / f"{suite_id}.log"
-    retry_pattern = re.compile(re.escape(suite_id) + r"\.retry(\d+)\.log")
-    try:
-        retries = [(int(match.group(1)), path)
-                   for path in log_dir.iterdir()
-                   if (match := retry_pattern.fullmatch(path.name))]
-        if retries:
-            log_path = max(retries, key=lambda retry: retry[0])[1]
-        lines = log_path.read_text(errors="replace").splitlines()
-    except OSError:
-        emit(f"  (no suite log at {log_path})")
-        continue
-    matching = [line for line in lines if markers.search(line)]
-    for line in matching[:40] if matching else lines[-20:]:
-        emit("  log: " + line[:300])
-PY
-  } || true
-  # END GATE FAIL NAMES
-else
+# Reuse evidence (plan ci-test-selection-20260925 S1): the shard's own result, immutable and advisory.
+if [[ -n "${CODEBUILD_BUILD_ID:-}" && -f /tmp/gate-results/gate-result.json ]]; then
+  aws s3api put-object --bucket leaf-mq-transport-807034087062-us-east-1 \
+    --key "mq/leaf-web-demo/selection/${CODEBUILD_BUILD_ID}.result.json" \
+    --body /tmp/gate-results/gate-result.json \
+    --content-type application/json --if-none-match '*' >/dev/null \
+    || echo 'WARNING: result_write_failed; reuse evidence absent for this build' >&2
+fi
+# Reuse donor pointer (plan ci-test-selection-20260925 S1b): only a green, full, main-push shard names itself.
+if [[ -n "${CODEBUILD_BUILD_ID:-}" && "${CODEBUILD_WEBHOOK_HEAD_REF:-}" == refs/heads/main \
+      && "${CODEBUILD_WEBHOOK_EVENT:-}" == PUSH && "$selection_mode" == full \
+      && "$trusted_sha_override" != 1 && "$gate_status" == 0 && "$postgres_status" == 0 \
+      && "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+  printf '{"build_id":"%s","schema":"leaf.ci.main-shard-pointer.v1","sha":"%s","shard_index":%d,"shard_total":%d}\n' \
+    "$CODEBUILD_BUILD_ID" "$HEAD_SHA" "$CI_SHARD_INDEX_N" "$CI_SHARD_TOTAL_N" > "$selection_dir/main-shard-pointer.json"
+  aws s3api put-object --bucket leaf-mq-transport-807034087062-us-east-1 \
+    --key "mq/leaf-web-demo/selection/main/${HEAD_SHA}/shard-${CI_SHARD_INDEX_N}-of-${CI_SHARD_TOTAL_N}.json" \
+    --body "$selection_dir/main-shard-pointer.json" \
+    --content-type application/json --if-none-match '*' >/dev/null \
+    || echo 'WARNING: pointer_write_failed; this shard is not a reuse donor' >&2
+fi
+# Sanitized retained-log frames above replace raw result/log tails and note dumps.
+if [[ ! -f /tmp/gate-results/gate-result.json ]]; then
   echo "No gate result JSON was written (runner exit $gate_status)"
 fi
 if [[ "${CI_SHARD_MODE:-all}" == all || "$CI_SHARD_INDEX_N" == 0 ]]; then
@@ -776,6 +1100,7 @@ if ! python -I -B - "$selection_dir" "$gate_status" "$tracing_ready" "$reporters
 import datetime
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -789,6 +1114,15 @@ try:
 except (OSError, ValueError):
     detail = {"schema": "leaf.ci.selection.v1", "execution_mode": "full",
               "fallback_reason": "receipt_prepare_failed"}
+# LEAF_TIER_RESULT_BEGIN
+try:
+    gate_result = json.loads(Path("/tmp/gate-results/gate-result.json").read_text(encoding="utf-8"))
+except (OSError, ValueError):
+    gate_result = {}
+if gate_result.get("mode") == "tier":
+    detail.update(execution_mode="selected", selection_mode="selected", selection_source="pr-tier", apply_filter=False,
+                  executed_suite_ids=gate_result["suite_ids"], expanded_suite_ids=gate_result["suite_ids"])
+# LEAF_TIER_RESULT_END
 records = []
 raw = b""
 expected = set(detail.get("executed_suite_ids", []))
@@ -862,6 +1196,8 @@ rejected_shards = 0
 if sys.argv[3] == "1":
     sys.path.insert(0, str(out))
     import full_run_manifest
+    if os.environ.get("process_capture_active") == "1":
+        full_run_manifest.stage_process_capture("/tmp/process-capture/out", Path("/tmp/gate-logs/readsets"), out)
     packed_catalog = json.loads((out / "catalog.json").read_text(encoding="utf-8"))
     rejected_shards = full_run_manifest.partition_readsets(
         Path("/tmp/gate-logs/readsets"), out / "readsets-rejected", packed_catalog, sys.argv[7])
@@ -926,7 +1262,7 @@ if detail.get("phase") == "shadow":
               "fallback_reason": detail.get("fallback_reason"),
               "assigned_arm": detail.get("assigned_arm"), "execution_mode": detail.get("execution_mode")}
     (out / "shadow.json").write_text(canonical(shadow) + "\n", encoding="utf-8")
-if sys.argv[3] == "1":
+if sys.argv[3] == "1" and detail.get("selection_source") != "pr-tier":
     helper = out / "full_run_manifest.py"
     if not helper.is_file() or not helper.stat().st_size:
         raise ValueError("manifest_helper_unavailable")
@@ -935,11 +1271,13 @@ if sys.argv[3] == "1":
               "execution_mode": detail["execution_mode"],
               "full_run_complete": detail["full_run_complete"],
               "test_id_reporting_complete": detail["test_id_reporting_complete"]}
+    capture_args = (["--reports", str(out / "reports")]
+                    if os.environ.get("process_capture_active") == "1" else [])
     result = subprocess.run([sys.executable, "-I", "-B", str(helper),
                              "--catalog", str(out / "catalog.json"),
                              "--readsets", "/tmp/gate-logs/readsets",
                              "--collection", str(out / "collection-ids.json"),
-                             "--output", str(out / "full-run.json")],
+                             "--output", str(out / "full-run.json")] + capture_args,
                             input=canonical(inputs), text=True)
     if result.returncode == 0 and not (out / "full-run.json").is_file():
         raise ValueError("manifest_output_missing")
@@ -964,7 +1302,7 @@ if [[ "$tracing_ready" == 1 ]]; then
     [[ -d /tmp/gate-logs/readsets ]] || return 0
     readsets_error="directory scan failed"
     entry="$(find /tmp/gate-logs/readsets -type f -print -quit)" || return 1
-    [[ -n "$entry" ]] || return 0
+    [[ -n "$entry" || "${process_capture_active:-0}" == 1 ]] || return 0
     readsets_error="archive creation failed"
     for member in catalog.json decision.json full-run.json; do
       [[ ! -f "$selection_dir/$member" ]] || selection_members+=("$member")
@@ -983,15 +1321,86 @@ if [[ "$tracing_ready" == 1 ]]; then
         report_members+=("${member#"$selection_dir/"}")
       done < <(find "$selection_dir/reports" -type f \( -name 'collection-*.json' -o -name 'completion-*.json' -o -name 'tests-*.json' \) -print0 | sort -z)
     fi
-    tar -czf "$archive" --no-recursion -C /tmp/gate-logs readsets -C "$selection_dir" "${selection_members[@]}" "${report_members[@]}" -C /tmp/gate-logs "${shard_members[@]}" "${attempt_members[@]}" 2>/dev/null || return 1
+    local -a capture_members=() diagnostic_members=()
+    if [[ "${process_capture_active:-0}" == 1 ]]; then
+      readsets_error="capture manifest failed"
+      [[ "$manifest_failed" == 0 && -f "$selection_dir/full-run.json" ]] || return 1
+      selection_members+=(capture-suites.json)
+      # Test reports remain available in ordinary archives; capture packs only map evidence.
+      report_members=()
+      while IFS= read -r -d '' member; do
+        report_members+=("${member#"$selection_dir/"}")
+      done < <(find "$selection_dir/reports" -type f \( -name 'collection-*.json' -o -name 'completion-*.json' \) -print0 | sort -z)
+      while IFS= read -r -d '' member; do
+        capture_members+=("${member#"$selection_dir/"}")
+      done < <(find "$selection_dir/capture" -type f -name '*.json' -print0 | sort -z)
+      while IFS= read -r -d '' member; do
+        report_members+=("${member#"$selection_dir/"}")
+      done < <(find "$selection_dir/reports" -maxdepth 1 -type f \( -name 'process-tree-*.json' -o -name 'trace-receipt-*.json' \) -print0 | sort -z)
+      if [[ -d /tmp/gate-logs/diagnostics ]]; then
+        while IFS= read -r -d '' member; do
+          diagnostic_members+=("${member#/tmp/gate-logs/}")
+        done < <(find /tmp/gate-logs/diagnostics -type f -print0 | sort -z)
+      fi
+      readsets_error="capture reference validation failed"
+      python -I -B - "$selection_dir" /tmp/gate-logs "${selection_members[@]}" "${report_members[@]}" "${capture_members[@]}" -- "${shard_members[@]}" "${attempt_members[@]}" <<'LEAF_CAPTURE_REFERENCES' || return 1
+import json
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import full_run_manifest
+boundary = sys.argv.index("--", 3)
+members = {name: Path(sys.argv[1]) / name for name in sys.argv[3:boundary]}
+members.update({name: Path(sys.argv[2]) / name for name in sys.argv[boundary + 1:]})
+full_run_manifest.validate_package({name: path for name, path in members.items() if path.is_file()})
+inventory = {"readsets": 0}
+for name, path in members.items():
+    if path.is_file():
+        top = name.split("/", 1)[0]
+        inventory[top] = inventory.get(top, 0) + path.stat().st_size
+print("LEAF_CAPTURE inventory " + json.dumps(inventory, sort_keys=True))
+LEAF_CAPTURE_REFERENCES
+    fi
+    tar -czf "$archive" --no-recursion -C /tmp/gate-logs readsets -C "$selection_dir" "${selection_members[@]}" "${report_members[@]}" "${capture_members[@]}" -C /tmp/gate-logs "${shard_members[@]}" "${attempt_members[@]}" 2>/dev/null || return 1
     readsets_archive_members="readsets ${selection_members[*]} ${report_members[*]} ${attempt_members[*]}"
+    if [[ "${process_capture_active:-0}" == 1 ]]; then
+      readsets_archive_members+=" ${capture_members[*]}"
+    fi
     readsets_error="archive measurement failed"
     readsets_bytes="$(wc -c < "$archive")" || return 1
     readsets_bytes="${readsets_bytes//[[:space:]]/}"
     digest="$(sha256sum "$archive")" || return 1
     readsets_sha256="${digest%% *}"
-    if (( readsets_bytes > 200 * 1024 * 1024 )); then
+    if [[ "${process_capture_active:-0}" == 1 && "${CODEBUILD_BUILD_ID:-}" =~ ^device:dv-[0-9a-f]{16}$ ]]; then
+      if mkdir -p /tmp/process-capture \
+        && cp "$archive" /tmp/process-capture/readsets.tar.gz \
+        && python -I -B - /tmp/process-capture/readsets.json "$CODEBUILD_BUILD_ID" "$HEAD_SHA" \
+          "$readsets_bytes" "$readsets_sha256" "$readsets_archive_members" <<'LEAF_DEVICE_CAPTURE_ARCHIVE'
+import json
+from pathlib import Path
+import sys
+
+receipt = {"schema": "leaf.ci.device-capture-archive.v1", "build_id": sys.argv[2],
+           "head_sha": sys.argv[3], "bytes": int(sys.argv[4]), "sha256": sys.argv[5],
+           "members": sys.argv[6].split()}
+Path(sys.argv[1]).write_text(json.dumps(receipt, sort_keys=True) + "\n", encoding="utf-8")
+LEAF_DEVICE_CAPTURE_ARCHIVE
+      then
+        echo "LEAF_CAPTURE device_archive $readsets_bytes $readsets_sha256"
+      else
+        echo 'LEAF_CAPTURE device_archive_copy_failed'
+      fi
+    fi
+    local archive_cap=209715200
+    if [[ "${process_capture_active:-0}" == 1 ]]; then
+      archive_cap=1073741824
+      echo "LEAF_CAPTURE archive_bytes $readsets_bytes"
+    fi
+    if (( readsets_bytes > archive_cap )); then
       readsets_status=too_large
+      if [[ "${process_capture_active:-0}" == 1 ]]; then
+        echo "LEAF_CAPTURE package_error archive_too_large"
+      fi
       return 0
     fi
     readsets_error="missing build id"
@@ -1004,10 +1413,31 @@ if [[ "$tracing_ready" == 1 ]]; then
       >/dev/null 2>&1 || { readsets_error="put-object exit $?"; return 1; }
     readsets_object="s3://leaf-mq-transport-807034087062-us-east-1/$key"
     readsets_status=uploaded
+    if [[ "${process_capture_active:-0}" == 1 && ${#diagnostic_members[@]} -gt 0 ]]; then
+      local diagnostics_archive="$selection_dir/capture-diagnostics.tar.gz" diagnostics_bytes
+      if tar -czf "$diagnostics_archive" --no-recursion -C /tmp/gate-logs "${diagnostic_members[@]}" 2>/dev/null; then
+        diagnostics_bytes="$(wc -c < "$diagnostics_archive")"
+        diagnostics_bytes="${diagnostics_bytes//[[:space:]]/}"
+        if (( diagnostics_bytes > 209715200 )); then
+          echo "LEAF_CAPTURE diagnostics_skipped too_large $diagnostics_bytes"
+        else
+          aws s3api put-object --bucket leaf-mq-transport-807034087062-us-east-1 \
+            --key "mq/leaf-web-demo/selection/${build_uuid}.capture-diagnostics.tar.gz" \
+            --body "$diagnostics_archive" --if-none-match '*' --checksum-algorithm SHA256 \
+            --metadata "build_id=${CODEBUILD_BUILD_ID},head_sha=${HEAD_SHA},trusted_sha=${TRUSTED_SHA},trusted_sha_override=${trusted_sha_override}" \
+            >/dev/null 2>&1 || echo 'LEAF_CAPTURE diagnostics_skipped upload_failed'
+        fi
+      else
+        echo 'LEAF_CAPTURE diagnostics_skipped archive_failed'
+      fi
+    fi
   }
   if ! publish_readsets; then
     readsets_status=upload_failed
     echo "WARNING: readsets upload failed ($readsets_error)" >&2
+    if [[ "${process_capture_active:-0}" == 1 ]]; then
+      echo "LEAF_CAPTURE package_error $readsets_error"
+    fi
   fi
 fi
 if [[ "$tracing_ready" == 1 && "$manifest_failed" == 1 ]]; then
@@ -1082,5 +1512,43 @@ then
   fi
 fi
 fi
+# LEAF_PROCESS_CAPTURE_SUMMARY_BEGIN
+if [[ "${process_capture_active:-0}" == 1 ]]; then
+  if [[ "$manifest_failed" == 1 ]]; then
+    echo 'LEAF_CAPTURE package_error manifest_failed'
+  fi
+  python -I -B - /tmp/process-capture/out "${readsets_bytes:-0}" /tmp/gate-logs/attempts <<'LEAF_CAPTURE_SUMMARY' || true
+import json
+from pathlib import Path
+import sys
+def summarize():
+    receipts, certificates, errors, wrapped = [], 0, 0, 0
+    for path in Path(sys.argv[1]).glob("*/*/reports/trace-receipt-*.json"):
+        try:
+            receipts.append(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            errors += 1
+    certificates = sum(1 for _ in Path(sys.argv[1]).glob("*/*/reports/process-tree-*.json"))
+    for path in Path(sys.argv[3]).glob("*.jsonl"):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                row = json.loads(line)
+                if "process_capture_exit_status" in row or row.get("process_capture_errors"):
+                    wrapped += 1
+                    if not row.get("process_capture_receipt"):
+                        errors += len(row.get("process_capture_errors") or [])
+            except ValueError:
+                errors += 1
+    print("LEAF_CAPTURE summary " + json.dumps(dict(mode="process", suites_wrapped=wrapped,
+          receipts=len(receipts), certificates=certificates,
+          capture_errors=errors + sum(len(receipt.get("capture_errors") or []) for receipt in receipts),
+          archive_bytes=int(sys.argv[2])), separators=(",", ":")))
+try:
+    summarize()
+except Exception as exc:
+    print("LEAF_CAPTURE package_error summary_failed:" + type(exc).__name__)
+LEAF_CAPTURE_SUMMARY
+fi
+# LEAF_PROCESS_CAPTURE_SUMMARY_END
 # LEAF_GATE_PROOF_END
 exit "$gate_status"

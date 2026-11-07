@@ -6,6 +6,7 @@ import { runInNewContext } from 'node:vm'
 import { createSolarProjectClient } from './solarProjectClient.js'
 import { PROJECT_SOLAR_RUN_REASONS } from './solarProjectCompletion.js'
 import { createProjectSolarRunController, PROJECT_SOLAR_RUN_POLL_MS, PROJECT_SOLAR_RUN_BUDGET_MS } from './createProjectSolarRunController.js'
+import workerUnavailable from './__fixtures__/workerUnavailable.json'
 
 const O = '11111111-1111-1111-1111-111111111111'
 const P = '22222222-2222-2222-2222-222222222222'
@@ -74,6 +75,84 @@ afterEach(async () => {
 })
 
 describe('bounded project Solar run controller', () => {
+  it('G17 real wire refusal is definite on first submit', async () => {
+    for (const [tool, label, suffix] of [
+      ['solar-panels-from-drawing', 'Import panels from drawing', ': Refresh preview, then Review & run.'],
+      ['solar-settings', 'Solar settings', '.'],
+    ]) {
+      for (const privateProse of [false, true]) {
+        const body = privateProse ? { ...workerUnavailable, error: { ...workerUnavailable.error,
+          message: 'private-message-sentinel', next_action: 'private-action-sentinel', actor: 'private-actor-sentinel' } }
+          : workerUnavailable
+        const fetchImpl = vi.fn(async () => http(body, 503))
+        const client = realClient(fetchImpl)
+        const readJob = vi.fn(client.readJob)
+        const onOutcome = vi.fn()
+        const controller = createProjectSolarRunController({ projectClient: { ...client, readJob }, onOutcome })
+        cleanups.push(() => controller.dispose())
+        const intent = client.prepareRun({ tool, params: { drawing_id: D, expected_rev: 0 },
+          catalogDigest: digest, idempotencyKey: 'request-1' })
+        expect(await controller.onProjectSubmit(intent, { binding: B, authorityKey, isCurrent: () => true }))
+          .toEqual(local('sip_r4_worker_unavailable', 503))
+        const result = { state: 'refused', jobId: null, outputVersionId: null,
+          reasonCode: 'sip_r4_worker_unavailable', message: `No worker was available to start ${label}. Try again later${suffix}` }
+        expect(await controller.whenSettled(B, authorityKey)).toEqual(result)
+        expect(onOutcome).toHaveBeenCalledOnce()
+        expect(onOutcome.mock.calls[0][0]).toEqual(result)
+        expect(JSON.stringify(result)).not.toContain('private-')
+        expect(fetchImpl).toHaveBeenCalledOnce()
+        expect(fetchImpl.mock.calls[0][0]).toContain('/api/run')
+        expect(fetchImpl.mock.calls[0][1].method).toBe('POST')
+        expect(readJob).not.toHaveBeenCalled()
+        expect(vi.getTimerCount()).toBe(0)
+      }
+    }
+  })
+  it('G17 lost submit then worker refusal stays unknown', async () => {
+    const fetchImpl = vi.fn().mockRejectedValueOnce(new Error('private lost request'))
+      .mockResolvedValueOnce(http(workerUnavailable, 503))
+    const client = realClient(fetchImpl)
+    const onOutcome = vi.fn()
+    const controller = createProjectSolarRunController({ projectClient: client, onOutcome })
+    cleanups.push(() => controller.dispose())
+    const intent = client.prepareRun({ tool: T, params: {}, catalogDigest: digest, idempotencyKey: 'same-key' })
+    expect(await controller.onProjectSubmit(intent, { binding: B, authorityKey, isCurrent: () => true }))
+      .toEqual(local('SIP_R13B_OUTCOME_UNKNOWN'))
+    expect(await controller.whenSettled(B, authorityKey)).toEqual(unknown(null))
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(fetchImpl.mock.calls[0][1].body).toBe(fetchImpl.mock.calls[1][1].body)
+    expect(onOutcome).toHaveBeenCalledOnce()
+    expect(onOutcome.mock.calls[0][0].state).toBe('outcome_unknown')
+    await vi.advanceTimersByTimeAsync(PROJECT_SOLAR_RUN_BUDGET_MS)
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('G17 malformed worker responses and accepted-job read failures stay unknown', async () => {
+    let reads = 0
+    const refusal = { ok: false, status: 503, reason: 'SIP_R4_WORKER_UNAVAILABLE', envelope: workerUnavailable }
+    const invalid = [
+      ...[500, 502, '503', undefined].map(status => ({ ...refusal, status })),
+      { ...refusal, reason: 'SIP_R1_STORE_UNAVAILABLE' },
+      { ...refusal, data: { status: 'submitted', job_id: J } },
+      { ...refusal, envelope: { ...workerUnavailable, ok: true } },
+      Object.defineProperty({ ...refusal }, 'reason', { get() { reads += 1; return refusal.reason } }),
+    ]
+    for (const value of invalid) {
+      const run = setup()
+      run.projectClient.submitRun.mockResolvedValueOnce(value)
+      expect(await run.start()).toEqual(local('SIP_R13B_OUTCOME_UNKNOWN'))
+      expect(await run.settled()).toEqual(unknown(null))
+      expect(run.projectClient.submitRun).toHaveBeenCalledOnce()
+      expect(run.projectClient.readJob).not.toHaveBeenCalled()
+      expect(vi.getTimerCount()).toBe(0)
+    }
+    expect(reads).toBe(0)
+    const acceptedRun = setup()
+    acceptedRun.projectClient.readJob.mockResolvedValueOnce(refusal)
+    expect(await acceptedRun.start()).toEqual(accepted)
+    expect(await acceptedRun.settled()).toEqual(unknown(J))
+    expect(acceptedRun.onOutcome.mock.calls[0][0].state).toBe('outcome_unknown')
+  })
   it('W1C5 follows proposal success and permits the next commit through the same controller', async () => {
     const run = setup()
     const solve = { ...run.preparedIntent, tool: 'solar-solve-proposal',

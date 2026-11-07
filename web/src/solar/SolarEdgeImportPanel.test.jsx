@@ -63,6 +63,47 @@ async function build() {
 }
 
 describe('SolarEdgeImportPanel', () => {
+  it('explicitly describes the legacy view without an export callback', async () => {
+    setup()
+    await upload(); await build()
+    expect(screen.queryByRole('button', { name: 'Download report' })).toBeNull()
+    expect(screen.getByText('Report download is unavailable in this view.')).toBeTruthy()
+  })
+
+  it('locks report download and other steps while exporting and aborts on version change', async () => {
+    const held = deferred(), onDownloadReport = vi.fn(() => held.promise)
+    const { props, rerender } = setup({ drawingVersion: 3, onDownloadReport })
+    await upload(); await build()
+    const download = screen.getByRole('button', { name: 'Download report' })
+    const click = f3ClickHandler(download)
+    act(() => { click(); click() })
+    expect(onDownloadReport).toHaveBeenCalledTimes(1)
+    expect(download.disabled).toBe(true)
+    expect(uploadButton().disabled).toBe(true)
+    expect(acceptButton().disabled).toBe(true)
+    const signal = onDownloadReport.mock.calls[0][1].signal
+    rerender(<SolarEdgeImportPanel {...props} drawingVersion={4} />)
+    expect(signal.aborted).toBe(true)
+    await act(async () => held.resolve({ ok: true }))
+    expect(screen.queryByText('Report downloaded.')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Download report' }).disabled).toBe(true)
+  })
+
+  it('shows canonical source UUIDs without passing them through the legacy integer contract', async () => {
+    const version = '44444444-4444-4444-4444-444444444444'
+    const canonicalSource = { ...source(), input_version_id: version }
+    const canonicalReport = { ...report(), input_version_id: version }
+    delete canonicalSource.source_version
+    delete canonicalReport.source_version
+    const { props } = setup({ drawingVersion: version, client: {
+      uploadPdf: vi.fn(async () => success(canonicalSource)), requestReport: vi.fn(async () => success(canonicalReport)),
+    } })
+    await upload(); await build()
+    expect(screen.getByText(`Report source version: ${version}.`)).toBeTruthy()
+    fireEvent.click(acceptButton())
+    expect(props.onAccept).toHaveBeenCalledWith({ expected_rev: 12, report_artifact_id: reportId })
+  })
+
   it('SE16 accepts one report once', async () => {
     const { props } = setup({ onAccept: vi.fn(() => undefined) })
     await upload(); await build()
@@ -163,6 +204,8 @@ describe('SolarEdgeImportPanel', () => {
   it('F3 21 preserves report counts and matching inputs', async () => {
     const { props } = setup()
     await upload()
+    expect(screen.getByRole('option', { name: 'Match automatically' }).value).toBe('unknown')
+    expect(screen.getByRole('option', { name: 'Use recorded order' }).value).toBe('recorded')
     fireEvent.change(screen.getByLabelText('Selection order'), { target: { value: 'recorded' } })
     await build()
     expect(props.client.requestReport).toHaveBeenCalledWith(expect.objectContaining({ alignmentTolerance: 0.5, selectionOrder: 'recorded' }))
@@ -250,7 +293,7 @@ describe('SolarEdgeImportPanel', () => {
     const file = selectFile()
     fireEvent.click(uploadButton())
     await waitFor(() => expect(screen.getByRole('status').textContent).toContain(sentence))
-    expect(screen.getByRole('status').textContent).toContain('retryable')
+    expect(screen.getByRole('status').textContent).not.toContain('retryable')
     expect(screen.getByLabelText('SolarEdge layout PDF').files[0]).toBe(file)
     expect(uploadButton().disabled).toBe(false)
     fireEvent.click(uploadButton())
@@ -505,7 +548,8 @@ describe('SolarEdgeImportPanel', () => {
     tolerance()
     fireEvent.click(buildButton())
     await waitFor(() => expect(status.textContent).toContain('Report failed.'))
-    expect(status.textContent).toContain('retryable')
+    expect(status.textContent).not.toContain('retryable')
+    expect(status.textContent.match(/try again/gi)).toHaveLength(1)
     expect(document.activeElement).toBe(buildButton())
     fireEvent.click(buildButton())
     await waitFor(() => expect(status.textContent).toContain('Report succeeded.'))

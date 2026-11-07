@@ -1081,6 +1081,35 @@ def test_require_broker_auth_enforced_when_secret_set_even_off_live(monkeypatch)
     assert broker.require_broker_auth(x_broker_secret="abc") is None
 
 
+@pytest.mark.parametrize("provider,tier", [("e2b", "microvm"), (None, "off"), ("bogus", "invalid")])
+def test_broker_health_reports_request_time_lab_sandbox_tier(monkeypatch, provider, tier):
+    monkeypatch.setenv("LEAF_BROKER_STORE", "legacy")
+    monkeypatch.setattr(broker, "_tenants", {})
+    monkeypatch.delenv("LEAF_SANDBOX", raising=False)
+    monkeypatch.delenv("LEAF_TOOL_SANDBOX_PROVIDER", raising=False)
+    client = TestClient(broker.app)
+    assert client.get("/broker/health").json()["lab_sandbox_tier"] == "off"
+    if provider is not None:
+        monkeypatch.setenv("LEAF_TOOL_SANDBOX_PROVIDER", provider)
+    response = client.get("/broker/health")
+    assert response.status_code == 200
+    assert response.json()["lab_sandbox_tier"] == tier
+
+
+def test_broker_health_sandbox_resolution_exception_is_invalid(monkeypatch):
+    monkeypatch.setenv("LEAF_BROKER_STORE", "legacy")
+    monkeypatch.setattr(broker, "_tenants", {})
+
+    def fail():
+        raise RuntimeError("private sandbox configuration")
+
+    monkeypatch.setattr(tool_loader, "_sandbox_tier", fail)
+    response = TestClient(broker.app).get("/broker/health")
+    assert response.status_code == 200
+    assert response.json()["lab_sandbox_tier"] == "invalid"
+    assert "private sandbox configuration" not in response.text
+
+
 def test_protected_routes_carry_auth_dependency_and_health_is_open():
     protected = {
         "/broker/run", "/broker/extract", "/broker/reap",

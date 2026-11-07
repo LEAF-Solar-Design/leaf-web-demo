@@ -3,7 +3,7 @@
 // rows: leading status dot (grammar: solid green = done, pulse = running,
 // hollow = queued, amber square = advisory/degraded, red = failed), 12.5px
 // event text, mono 11px clock column (day-grouped, clock-only inside groups —
-// TM1; hover reveals the absolute time). LIVE: the recent GET /api/jobs list
+// TM1; hover reveals the absolute time). LIVE: the recent cloud jobs list
 // for the demo tenant + a re-attach chip for the durable in-flight job pointer
 // (localStorage). Clicking a terminal row asks the parent to re-render its
 // stored envelope; the row showing in the center carries the SL1 current mark.
@@ -15,7 +15,7 @@
 // verbatim, so a broker row renders exactly as before. `builds` (optional,
 // GET /api/builds records already parsed) adds terminal receipts to matching
 // broker rows and adds records that the recent-jobs list does not carry.
-import { useEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import './rails.css'
 
 import BuildQueueCard from './BuildQueueCard.jsx'
@@ -132,6 +132,14 @@ function PendingRunNote({ pendingRun, onResumePendingRun, onDiscardPendingRun })
 // expanded rail's header. Both undefined = the rail exactly as before (rail
 // OFF is byte-identical by construction).
 export default function JobRail({ mock, jobs, currentJob, inflight, reattaching, onSelectJob, onRetryJob, loading, builds, buildFeed, spine = false, onExpand, onCollapse, staleResults, onDismissStale, pendingRun, onResumePendingRun, onDiscardPendingRun }) {
+  const toggleRef = useRef(null)
+  const restoreToggleFocus = useRef(false)
+  useLayoutEffect(() => {
+    if (restoreToggleFocus.current) {
+      toggleRef.current?.focus()
+      restoreToggleFocus.current = false
+    }
+  }, [spine])
   const list = jobs || []
   const knownIds = new Set(list.map((j) => j.job_id))
   const showCurrent = currentJob && (!currentJob.job_id || !knownIds.has(currentJob.job_id))
@@ -208,9 +216,10 @@ export default function JobRail({ mock, jobs, currentJob, inflight, reattaching,
           <button
             type="button"
             className="spine-btn spine-expand"
+            ref={toggleRef}
             aria-label={`Expand the job monitor (${liveCount} live)`}
             title="Expand the job monitor"
-            onClick={() => onExpand?.()}
+            onClick={(event) => { restoreToggleFocus.current = document.activeElement === event.currentTarget; onExpand?.() }}
           >
             «
           </button>
@@ -228,9 +237,10 @@ export default function JobRail({ mock, jobs, currentJob, inflight, reattaching,
           <button
             type="button"
             className="spine-btn spine-collapse"
-            aria-label="Collapse the job monitor to a spine"
-            title="Collapse to spine"
-            onClick={onCollapse}
+            ref={toggleRef}
+            aria-label="Collapse the job monitor"
+            title="Collapse the job monitor"
+            onClick={(event) => { restoreToggleFocus.current = document.activeElement === event.currentTarget; onCollapse() }}
           >
             »
           </button>
@@ -239,8 +249,7 @@ export default function JobRail({ mock, jobs, currentJob, inflight, reattaching,
 
       {mock && (
         <div className="rail-note">
-          Live mode lists your recent cloud jobs here (GET /api/jobs). In mock mode this shows the
-          run in this session.
+          This demo shows jobs from your current session. Sign in to see your recent cloud jobs.
         </div>
       )}
 

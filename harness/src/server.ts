@@ -47,8 +47,11 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer as createHttpServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { AuthorLoop, AuthorLoopError } from "./agent/authorLoop.js";
+import { PortfolioProposalError, PortfolioProposalService, type PortfolioProposalRequest } from "./agent/portfolioProposal.js";
 import { CAMPAIGN_SOURCE_BODY_LIMIT, dispatchCampaignSource, type CampaignSourceService } from "./agent/campaignSourceIntegration.js";
 import { ProjectRepositoryEditCoordinator, ProjectRepositoryEditSettlementUnavailable } from "./agent/projectRepositoryEditCoordinator.js";
+import { authorProjectSource, type ProjectSourceAuthorDependencies } from "./agent/projectSourceAuthoring.js";
+import { SdkRepoEditor } from "./vendor/mushy-author/ports/impl/repoEditRunner.js";
 import { redactTokens } from "./redact.js";
 import { createFileStoreProbe, createReadinessCheck } from "./storeReadiness.js";
 import type { StoreReadiness } from "./storeReadiness.js";
@@ -431,31 +434,36 @@ function readJsonBody(
       if (!raw) return resolve({});
       try {
         const body: unknown = JSON.parse(raw);
-        if (uniqueNestedKeys) {
+        if (uniqueFlatStringKeys && (!isRecord(body) || Object.values(body).some(value => typeof value !== "string"))) {
+          throw new Error("expected a flat string object");
+        }
+        if (uniqueNestedKeys || uniqueFlatStringKeys) {
+          // JSON.parse already checked syntax. Walk each token once, skipping
+          // string values without decoding them (material can be many MiB).
           const stack: (Set<string> | null)[] = [];
-          for (const token of raw.matchAll(/"(?:[^"\\]|\\.)*"|[{}\[\]]/g)) {
-            const value = token[0];
+          for (let i = 0; i < raw.length; i++) {
+            const value = raw[i];
             if (value === "{") stack.push(new Set());
             else if (value === "[") stack.push(null);
             else if (value === "}" || value === "]") stack.pop();
-            else if (/^\s*:/.test(raw.slice(token.index! + value.length))) {
-              const keys = stack[stack.length - 1];
-              const key = JSON.parse(value) as string;
-              if (!keys || keys.has(key)) throw new Error("duplicate JSON key");
-              keys.add(key);
+            else if (value === '"') {
+              const start = i++;
+              while (i < raw.length && raw[i] !== '"') {
+                if (raw[i] === "\\") i++;
+                i++;
+              }
+              const end = i + 1;
+              let next = end;
+              while (raw[next] === " " || raw[next] === "\t" || raw[next] === "\r" || raw[next] === "\n") next++;
+              if (raw[next] === ":") {
+                const keys = stack[stack.length - 1];
+                const key = JSON.parse(raw.slice(start, end)) as string;
+                if (!keys || keys.has(key)) throw new Error("duplicate JSON key");
+                keys.add(key);
+              }
+              i = next - 1;
             }
           }
-        }
-        if (uniqueFlatStringKeys) {
-          if (!isRecord(body) || Object.values(body).some(value => typeof value !== "string")) {
-            throw new Error("expected a flat string object");
-          }
-          // Tokenize complete strings so escaped quotes in values cannot look
-          // like keys. JSON.parse has already checked syntax; in a flat object,
-          // more raw keys than parsed keys means a duplicate, including escapes.
-          const keys = [...raw.matchAll(/"(?:[^"\\]|\\.)*"/g)]
-            .filter(match => /^\s*:/.test(raw.slice(match.index! + match[0].length)));
-          if (keys.length !== Object.keys(body).length) throw new Error("duplicate JSON key");
         }
         resolve(body as Record<string, unknown>);
       } catch (e) {
@@ -690,6 +698,17 @@ export function planFirstOption(req: IncomingMessage): { planFirst?: boolean } {
     : {};
 }
 
+function projectExecutionOption(req: IncomingMessage, authenticated: boolean): { projectExecution?: "canonical-read" } {
+  const name = "x-leaf-project-execution";
+  const value = req.headers[name];
+  const count = req.rawHeaders.filter((header, index) => index % 2 === 0 && header.toLowerCase() === name).length;
+  if (value === undefined && count === 0) return {};
+  if (!authenticated || count !== 1 || value !== "canonical-read") {
+    throw new AuthorLoopError("project execution marker is invalid", 400);
+  }
+  return { projectExecution: "canonical-read" };
+}
+
 function instantTurnOptions(req: IncomingMessage, authenticated: boolean): Pick<Extract<ConverseTurnValidation, { ok: true }>, "instantAssignment" | "instantDrawingContext"> {
   const encoded = req.headers["x-leaf-instant-assignment"];
   if (typeof encoded !== "string" || !encoded) return {};
@@ -738,7 +757,7 @@ async function streamTurn(
   res: ServerResponse,
   runner: ConverseRunner,
   input: ConverseTurnInput,
-  instant?: Pick<Extract<ConverseTurnValidation, { ok: true }>, "instantAssignment" | "instantDrawingContext"> & { planFirst?: boolean },
+  instant?: Pick<Extract<ConverseTurnValidation, { ok: true }>, "instantAssignment" | "instantDrawingContext"> & { planFirst?: boolean; projectExecution?: "canonical-read" },
 ): Promise<void> {
   const turnAbort = new AbortController();
   const iterator = runner.runTurn(input, { signal: turnAbort.signal, ...instant })[Symbol.asyncIterator]();
@@ -817,6 +836,8 @@ export interface Harness {
 export function createHarness(ports: HarnessPorts, opts?: {
   auth?: HarnessAuthConfig;
   projectRepositoryEdits?: CampaignSourceService;
+  projectSourceAuthoring?: ProjectSourceAuthorDependencies;
+  portfolioProposals?: Pick<PortfolioProposalService, "propose">;
   standardServicesApproval?: {
     dispatchSecret: string;
     host: LeafStandardServicesHumanApprovalHost;
@@ -943,10 +964,54 @@ export function createHarness(ports: HarnessPorts, opts?: {
         return send(res, 404, { error: { code: "not_found", message: "route not found" } });
       }
 
+      const auth = explicitAuth ?? resolveHarnessAuth();
+      if (method === "POST" && path === "/internal/portfolio/proposals") {
+        res.setHeader("cache-control", "private, no-store");
+        const requiredAuth = harnessAuthDenial(req, { ...auth, enabled: true });
+        if (requiredAuth) return send(res, 401, requiredAuth);
+        const tenant = authorityHeader(req, "x-tenant-id");
+        if (!tenant?.trim()) return send(res, 400, { error: { code: "invalid_request" } });
+        const service = opts?.portfolioProposals;
+        if (!service) return send(res, 503, { error: { code: "unavailable" } });
+        const abort = new AbortController();
+        const onAbort = (): void => { abort.abort(); };
+        const onClose = (): void => { if (!res.writableEnded) abort.abort(); };
+        req.on("aborted", onAbort);
+        res.on("close", onClose);
+        try {
+          let body: unknown;
+          try {
+            body = await readJsonBody(req, 256 * 1024, true, false, true);
+          } catch {
+            if (!res.destroyed) return send(res, abort.signal.aborted ? 499 : 400,
+              { error: { code: abort.signal.aborted ? "aborted" : "invalid_request" } });
+            return;
+          }
+          if (!isRecord(body) || body.tenant_id !== tenant) {
+            return send(res, 400, { error: { code: "invalid_request" } });
+          }
+          if (req.aborted || res.destroyed) abort.abort();
+          const result = await service.propose(body as unknown as PortfolioProposalRequest, abort.signal);
+          if (!res.destroyed) return send(res, 200, result);
+        } catch (error) {
+          if (res.destroyed) return;
+          if (error instanceof PortfolioProposalError) {
+            const code = error.code === "grant_unavailable" || error.code === "sdk_failure" || error.code === "settlement_failure"
+              ? "unavailable" : error.code;
+            const status = { invalid_request: 400, invalid_output: 502, unavailable: 503, rate_limit: 429, timeout: 504, aborted: 499 }[code];
+            return send(res, status, { error: { code } });
+          }
+          return send(res, 500, { error: { code: "internal_error" } });
+        } finally {
+          req.off("aborted", onAbort);
+          res.off("close", onClose);
+        }
+        return;
+      }
+
       // F5 caller-auth gate: every non-health route requires the shared secret when the
       // gate is enabled. Rejected BEFORE any body read, tenant resolution, or store touch,
       // so an unauthed caller can neither author, run, nor read/overwrite/delete a grant.
-      const auth = explicitAuth ?? resolveHarnessAuth();
       const denial = harnessAuthDenial(req, auth);
       if (denial) return send(res, 401, denial);
 
@@ -1146,6 +1211,32 @@ export function createHarness(ports: HarnessPorts, opts?: {
           return send(res, 409, { error: { code: "worker_run_not_active", message: "worker run not active" } });
         }
         return send(res, 200, binding);
+      }
+
+      if (method === "POST" && path === "/internal/project-repository-source/author") {
+        const requiredAuth = harnessAuthDenial(req, { ...auth, enabled: true });
+        if (requiredAuth) return send(res, 401, requiredAuth);
+        res.setHeader("cache-control", "no-store");
+        if (!authoredExecutionEnabled() || !opts?.projectRepositoryEdits || !opts.projectSourceAuthoring) {
+          return send(res, 503, { error: { code: "source_unavailable", message: "source is unavailable" } });
+        }
+        const controller = new AbortController();
+        const abort = () => { if (!res.writableEnded) controller.abort(); };
+        req.once("aborted", abort);
+        res.once("close", abort);
+        const timer = setTimeout(() => controller.abort(), 240000);
+        try {
+          const body = await readJsonBody(req, 12 * 1024 * 1024, true, false, true);
+          const staged = await authorProjectSource(opts.projectRepositoryEdits, opts.projectSourceAuthoring,
+            body, authorityHeader(req, "x-tenant-id"), controller.signal);
+          return send(res, 200, staged);
+        } catch {
+          return send(res, 409, { error: { code: "source_conflict", message: "source transaction failed" } });
+        } finally {
+          clearTimeout(timer);
+          req.removeListener("aborted", abort);
+          res.removeListener("close", abort);
+        }
       }
 
       if (method === "POST" && ["stage", "publish", "recover"].some(action =>
@@ -1528,7 +1619,7 @@ export function createHarness(ports: HarnessPorts, opts?: {
         // dropped: async-function `return somePromise` does not route through a local
         // catch, only `await` does.
         await streamTurn(req, res, ports.converseRunner, validated.input,
-          { ...instantTurnOptions(req, auth.enabled), ...planFirstOption(req) });
+          { ...instantTurnOptions(req, auth.enabled), ...planFirstOption(req), ...projectExecutionOption(req, auth.enabled) });
         return;
       }
 
@@ -1693,7 +1784,8 @@ export function createEnabledProductionInstantExecutorClient<T>(
 export async function startReal(port = 8130): Promise<Server> {
   const { AgentSdkRunner } = await import("./ports/impl/agentSdkRunner.js");
   const { BrokerApsClientHttp } = await import("./ports/impl/brokerApsClient.js");
-  const { createTenantGrantStore, OAuthGrantProviderImpl, resolveGrantsDir } = await import("./ports/impl/oauthGrantProvider.js");
+  const { createTenantGrantStore, OAuthGrantProviderImpl, resolveGrantsDir, resolveGrantStoreBackend } = await import("./ports/impl/oauthGrantProvider.js");
+  const { grantKeyProviderFromEnv } = await import("./security/grantEnvelope/fromEnv.js");
   const { TenantRepoProviderImpl } = await import("./ports/impl/tenantRepoProvider.js");
   const { CustomizationCoordinationClient } = await import("./ports/impl/customizationCoordinationClient.js");
   const { ProjectRepositoryEditCoordinationClient } = await import("./ports/impl/projectRepositoryEditCoordinationClient.js");
@@ -1720,22 +1812,25 @@ export async function startReal(port = 8130): Promise<Server> {
   const instantExecutor = createEnabledProductionInstantExecutorClient(
     (options) => new HttpInstantExecutorClient(options),
   );
-  // F18 seam: per-tenant grant + admin (one store); LEAF_GRANT_STORE=vault fails loudly.
+  // F18 seam: per-tenant grant + admin (one store); vault requires a KMS key provider.
   // The grant directory is resolved once and handed to both the store and its
   // readiness probe, so the two can never name different directories.
   const grantsDir = resolveGrantsDir();
-  const grantStore = createTenantGrantStore({ dir: grantsDir });
+  // Build the provider first so a bad LEAF_GRANT_STORE fails with the value-free error.
+  const grantKeyProvider = grantKeyProviderFromEnv(process.env);
+  const grantBackend = resolveGrantStoreBackend();
+  const grantStore = createTenantGrantStore({ dir: grantsDir, keyProvider: grantKeyProvider });
+  console.log(`grant_store_backend=${grantBackend}`);
   const standardServicesResolver = standardServicesResolverFromEnv();
   const oauth = new StandardServicesOAuthGrantProvider(
     new OAuthGrantProviderImpl({ store: grantStore }),
   );
   const sessionStore = appUrl && dispatchSecret ? createProbedSessionStore() : null;
   // GET /ready probes exactly the stores built above; nothing is constructed per request.
-  // createTenantGrantStore has already failed loudly for an unwired vault, so the
-  // grant store here is the file store.
+  // File and vault records share the grant directory, so both use its directory probe.
   const readiness = createReadinessCheck({
     session: sessionStore ? sessionStore.readiness : null,
-    grants: { kind: "file", probe: createFileStoreProbe(grantsDir) },
+    grants: { kind: grantBackend, probe: createFileStoreProbe(grantsDir) },
   });
   const converseRunner = sessionStore
     ? new SpineTurnAdapter({
@@ -1811,7 +1906,9 @@ export async function startReal(port = 8130): Promise<Server> {
     coordination: new ProjectRepositoryEditCoordinationClient({ baseUrl: appUrl, dispatchSecret }),
   }) : undefined;
   const server = createHarness(ports, {
-    ...(projectRepositoryEdits ? { projectRepositoryEdits } : {}),
+    ...(projectRepositoryEdits ? { projectRepositoryEdits,
+      projectSourceAuthoring: { oauth, editor: new SdkRepoEditor({ maxTurns: 24, maxWallTimeMs: 240000 }) } } : {}),
+    portfolioProposals: new PortfolioProposalService({ oauth }),
     readiness,
   }).listen(port);
   if (sessionStore) {

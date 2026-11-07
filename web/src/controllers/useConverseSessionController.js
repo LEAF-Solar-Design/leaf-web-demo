@@ -29,6 +29,7 @@ export default function useConverseSessionController({ drawingId, retryNotFound 
   const sessionRef = useRef(null)
   const drawingRef = useRef(drawingId)
   const projectRef = useRef(null)
+  const projectContextRef = useRef(null)
   const generationRef = useRef(0)
   const attachmentRef = useRef(null)
 
@@ -48,8 +49,12 @@ export default function useConverseSessionController({ drawingId, retryNotFound 
     setRequestStatus(null)
   }, [drawingId])
 
-  const setProjectContext = useCallback((projectId) => {
+  const setProjectContext = useCallback((projectId, inputVersionId = null) => {
     const nextProjectId = projectId || null
+    // The selected version belongs to this request, not conversation identity.
+    projectContextRef.current = nextProjectId && inputVersionId
+      ? { project_id: nextProjectId, input_version_id: inputVersionId }
+      : null
     if (projectRef.current === nextProjectId) return
     generationRef.current += 1
     attachmentRef.current = null
@@ -122,12 +127,15 @@ export default function useConverseSessionController({ drawingId, retryNotFound 
     }
     const requestedProjectId = projectRef.current
     const requestedDrawingId = drawingRef.current
+    const requestedProjectContext = projectContextRef.current
+      ? { ...projectContextRef.current } : null
     const requestId = requestedProjectId ? createRequestId() : null
     const send = async (id) => {
       if (projectRef.current !== requestedProjectId || drawingRef.current !== requestedDrawingId) {
         throw new Error('Project changed while starting the conversation')
       }
       const payload = { text, classifier_hint: classifierHint, allowSecretOnce }
+      if (requestedProjectContext) payload.projectContext = requestedProjectContext
       if (requestedProjectId) {
         payload.queue = !requireImmediateTurn
         payload.request_id = requestId

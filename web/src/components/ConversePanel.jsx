@@ -42,6 +42,12 @@ import { moveRovingTab } from '../lib/roving.js'
 import EngineChangesTab from './EngineChangesTab.jsx'
 import { isCompositionKey } from '../lib/keyComposition.js'
 import { humanizeError } from '../errorHumanize.js'
+import { composerDraftAccountScope } from '../lib/composerDraft.js'
+import { readActiveScope, subscribeActiveScope } from '../auth/activeScope.js'
+import { subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
+import { deliverProjectPageProposal } from '../site/projectPageProposalDelivery.js'
+import { getStoredOrgId } from '../api.js'
+import { getStoredActorBindingId } from '../projects/api.js'
 
 // Calm inline parameter summary — the same rendering RoutePanel gives a
 // route's params ("layer roofline · n 4"). Always the SERVER-truth dict.
@@ -251,6 +257,7 @@ function notifyCatalogPublication(env, openedSession, active, sessionRef, callba
 
 export default function ConversePanel({
   sessionId,
+  projectContext = null,
   userTurns = [],            // [{turnId, text}] — turns App dispatched into this session
   onDismiss,                 // hide the panel (the server-side turn is never cancelled)
   onLinkClaude,              // grant_required CTA -> open the Claude account panel
@@ -261,6 +268,8 @@ export default function ConversePanel({
   // approval is held with the one-head sentence.
   engineDirty = false,
   onBeforeWriteApproval = null,
+  prepareApprovedProjectRun = null,
+  canonicalProjectWriteTools = null,
   onCatalogChanged = null,
   consumeCatalogPublication = null,
 }) {
@@ -310,13 +319,36 @@ export default function ConversePanel({
   const writeLockedRef = useRef(writeLocked)
   const engineDirtyRef = useRef(engineDirty)
   const onBeforeWriteApprovalRef = useRef(onBeforeWriteApproval)
+  const prepareApprovedProjectRunRef = useRef(prepareApprovedProjectRun)
+  const projectContextRef = useRef(projectContext)
+  const approvalScopeRef = useRef({ sessionId, projectContext, revision: 0 })
+  if (approvalScopeRef.current.sessionId !== sessionId
+    || approvalScopeRef.current.projectContext?.project_id !== projectContext?.project_id
+    || approvalScopeRef.current.projectContext?.input_version_id !== projectContext?.input_version_id) {
+    approvalScopeRef.current = { sessionId, projectContext, revision: approvalScopeRef.current.revision + 1 }
+  }
   const sessionIdRef = useRef(sessionId)
+  const authoredViewTurns = useRef(new Map())
+  const authoredViewReceipts = useRef(new WeakSet())
+  // App-dispatched prompts carry ephemeral POST receipts too. Bind each once
+  // to the project lifetime that received it; old receipts cannot be rebound.
+  for (const receipt of userTurns) {
+    if (!receipt || typeof receipt !== 'object' || authoredViewReceipts.current.has(receipt)) continue
+    authoredViewReceipts.current.add(receipt)
+    if (!sessionId || !projectContext?.project_id) continue
+    const key = receipt.status === 'started' ? receipt.turnId
+      : receipt.status === 'queued' && receipt.requestId ? `queue:${receipt.requestId}` : null
+    if (key) authoredViewTurns.current.set(key, approvalScopeRef.current)
+    if (authoredViewTurns.current.size > 32) authoredViewTurns.current.delete(authoredViewTurns.current.keys().next().value)
+  }
   const onCatalogChangedRef = useRef(onCatalogChanged)
   const consumeCatalogPublicationRef = useRef(consumeCatalogPublication)
   const refreshApprovalsRef = useRef(null)
   writeLockedRef.current = writeLocked
   engineDirtyRef.current = engineDirty
   onBeforeWriteApprovalRef.current = onBeforeWriteApproval
+  prepareApprovedProjectRunRef.current = prepareApprovedProjectRun
+  projectContextRef.current = projectContext
   sessionIdRef.current = sessionId
   onCatalogChangedRef.current = onCatalogChanged
   consumeCatalogPublicationRef.current = consumeCatalogPublication
@@ -360,15 +392,101 @@ export default function ConversePanel({
     setQueueState(createQueuedTurnState())
     track('conversation.opened') // P2: panel opened/reopened a session — no session id in labels (identity is server-stamped)
     let active = true
+    const accountScope = composerDraftAccountScope()
+    const activeScope = readActiveScope()
+    let photoIdentity = null
+    let photoTurn = null
+    let photoScopeLive = true
+    let proposalScopeLive = true
+    const invalidateProposals = () => { proposalScopeLive = false }
+    const checkProposalScope = () => {
+      if (composerDraftAccountScope() !== accountScope || readActiveScope() !== activeScope) invalidateProposals()
+      if (photoIdentity && (getStoredOrgId() !== photoIdentity.orgId || getStoredActorBindingId() !== photoIdentity.actorBindingId)) photoScopeLive = false
+    }
+    const logoutProposals = subscribeBeforeLogout(invalidateProposals)
+    const tokenProposals = subscribeTokenStored(checkProposalScope)
+    const scopeProposals = subscribeActiveScope(checkProposalScope)
+    const currentProposalScope = () => active && proposalScopeLive && sessionIdRef.current === sessionId
+      && accountScope && accountScope !== 'guest' && activeScope
+      && composerDraftAccountScope() === accountScope && readActiveScope() === activeScope
+    const notifyPageProposal = env => {
+      try {
+        if (env?.type === 'turn_started' && env.session_id === sessionId) {
+          // A new turn invalidates prior photo reviews, including repeated ids.
+          photoTurn = { id: env.turn_id, seq: env.seq }
+          const queueKey = `queue:${env.data?.queued_id}`
+          const lifetime = authoredViewTurns.current.get(queueKey)
+          if (lifetime === approvalScopeRef.current) {
+            authoredViewTurns.current.set(env.turn_id, lifetime)
+            authoredViewTurns.current.delete(queueKey)
+          }
+        }
+        const photo = env?.data?.tool === 'propose_project_photo_assignments'
+        const view = env?.data?.tool === 'run_capability' && env?.data?.result?.contract === 'leaf.authored-view.v1'
+        if (!currentProposalScope() || env?.session_id !== sessionId || env.type !== 'tool_result'
+          || !env.data || Array.isArray(env.data) || (!view && !photo && env.data.tool !== 'propose_project_page') || env.data.ok !== true
+          || !Number.isSafeInteger(env.seq) || env.seq < 1) return
+        if (view) {
+          const result = env.data.result
+          const turn = photoTurn
+          const projectLifetime = authoredViewTurns.current.get(env.turn_id)
+          const projectId = projectLifetime?.projectContext?.project_id
+          const current = () => currentProposalScope() && approvalScopeRef.current === projectLifetime
+            && projectContextRef.current?.project_id === projectId && photoTurn === turn
+            && authoredViewTurns.current.get(env.turn_id) === projectLifetime
+          if (!current() || !projectId || result.session_id !== sessionId || result.turn_id !== env.turn_id
+            || typeof env.turn_id !== 'string' || !env.turn_id.trim() || env.turn_id.length > 200 || /[\p{C}]/u.test(env.turn_id)
+            || turn?.id !== env.turn_id || !Number.isSafeInteger(turn.seq) || env.seq <= turn.seq
+            || result.kind !== 'view' || result.route !== 'view' || result.tenant_id !== getStoredOrgId()
+            || typeof result.tool !== 'string' || !/^[a-z0-9]+(?:-[a-z0-9]+)*(?![\s\S])/.test(result.tool) || result.tool.length > 200
+            || typeof result.catalog_commit !== 'string' || !/^[0-9a-f]{40}(?![\s\S])/.test(result.catalog_commit)
+            || typeof result.effective_catalog_digest !== 'string' || !/^[0-9a-f]{64}(?![\s\S])/.test(result.effective_catalog_digest)
+            || typeof result.tool_manifest_sha256 !== 'string' || !/^sha256:[0-9a-f]{64}(?![\s\S])/.test(result.tool_manifest_sha256)
+            || result.catalog_digest !== result.tool_manifest_sha256
+            || new TextEncoder().encode(JSON.stringify(env)).length > 16384) return
+          const key = JSON.stringify([sessionId, env.turn_id, env.seq, result.tool, result.catalog_commit])
+          deliverProjectPageProposal({ accountScope, activeScope, projectId, key,
+            result: JSON.parse(JSON.stringify(result)), provenance: { sessionId, turnId: env.turn_id, seq: env.seq }, isCurrent: current })
+          return
+        }
+        const turn = photoTurn
+        const turnId = env.turn_id, seq = env.seq
+        if (photo && !photoIdentity) photoIdentity = { orgId: getStoredOrgId(), actorBindingId: getStoredActorBindingId() }
+        const { orgId, actorBindingId } = photoIdentity || {}
+        const current = photo ? () => {
+          checkProposalScope()
+          return currentProposalScope() && photoScopeLive && photoTurn === turn
+            && Boolean(orgId && actorBindingId) && typeof turnId === 'string'
+            && turnId.trim().length > 0 && turnId.length <= 200 && turn?.id === turnId
+            && Number.isSafeInteger(turn.seq) && turn.seq > 0 && seq > turn.seq
+        } : currentProposalScope
+        if (!current()) return
+        const result = env.data.result
+        if (!result || typeof result !== 'object' || Array.isArray(result)
+          || (photo && result.schema !== 'leaf.project-photo-assignment-proposal.v1')
+          || typeof result.proposed_digest !== 'string' || !/^[0-9a-f]{64}$/.test(result.proposed_digest)
+          || new TextEncoder().encode(JSON.stringify(env)).length > 1024 * 1024) return
+        const key = JSON.stringify([sessionId, env.seq, result.proposed_digest])
+        deliverProjectPageProposal({ accountScope, activeScope, result: JSON.parse(JSON.stringify(result)), key,
+          ...(photo ? { provenance: { sessionId, turnId, seq, orgId, actorBindingId } } : {}),
+          isCurrent: current })
+      } catch { /* rejected proposals never prevent transcript ingestion */ }
+    }
     const stream = openStream(sessionId, 0, {
       onStreamDown: () => { if (active) setConnectionState('retrying') },
       onConnectionState: (state) => { if (active) setConnectionState(state) },
       onEvent: (env) => {
         if (!active) return
         notifyCatalogPublication(env, sessionId, active, sessionIdRef, onCatalogChangedRef, consumeCatalogPublicationRef)
+        notifyPageProposal(env)
         const queued = reconcileQueuedTurn(queueStateRef.current, env)
+        const queuedViewKey = `queue:${queueStateRef.current.queuedTurn?.queuedId}`
+        const queuedViewLifetime = authoredViewTurns.current.get(queuedViewKey)
         setQueueState(queued.state)
         if (queued.action === 'promote') {
+          if (queuedViewLifetime === approvalScopeRef.current) authoredViewTurns.current.set(queued.turn.turnId, queuedViewLifetime)
+          authoredViewTurns.current.delete(queuedViewKey)
+          if (authoredViewTurns.current.size > 32) authoredViewTurns.current.delete(authoredViewTurns.current.keys().next().value)
           setLocalTurns((prev) => [...prev, queued.turn])
         }
         if (env.type === 'job_linked' && env.data?.job_id && !jobSeenRef.current.has(env.data.job_id)) {
@@ -379,7 +497,11 @@ export default function ConversePanel({
       },
     })
     streamRef.current = stream
-    return () => { active = false; streamRef.current = null; stream.close() }
+    return () => {
+      active = false; invalidateProposals()
+      logoutProposals(); tokenProposals(); scopeProposals()
+      streamRef.current = null; stream.close()
+    }
   }, [sessionId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -549,6 +671,7 @@ export default function ConversePanel({
       const t = turnOf(env.turn_id)
         if (type === 'turn_started') {
           t.started = true
+          if (typeof data.text === 'string' && data.text.trim()) t.userText = data.text
           t.images = thumbnailImages(data.images)
           t.imageDescriptors = (data.images || []).filter((image) => !image?.data)
         quota = false; quotaRetry = null; grant = false // a fresh turn clears the paused banners
@@ -606,6 +729,10 @@ export default function ConversePanel({
             : null
         } else if (code === 'grant_required') grant = true
         else t.feed.push({ kind: 'error', code, message: humanizeError(STOP_NOTES[code] || data.error?.message || 'The assistant could not finish this reply. Try again.') })
+        if (typeof data.stop_reason === 'string' && data.stop_reason) {
+          if (!t.stopReason) t.stopReason = data.stop_reason
+          completed.add(t.turnId)
+        }
       }
     }
     // A stop can confirm completion before the terminal event is recovered.
@@ -627,14 +754,15 @@ export default function ConversePanel({
              activeTurnId: activeTurn ? activeTurn.turnId : null }
   }, [events, stoppedTurns, endedTurns])
 
-  // User bubbles come from the dispatching side (§3 has no user-message event):
-  // App-dispatched turns + panel-sent follow-ups, keyed by turn_id.
+  // Durable turn text survives remounts. Current App-dispatched turns and
+  // panel-sent follow-ups retain their existing precedence, keyed by turn_id.
   const allUserTurns = useMemo(() => [...userTurns, ...localTurns], [userTurns, localTurns])
   const userTextByTurn = useMemo(() => {
     const m = new Map()
+    for (const t of model.turns) if (t.userText) m.set(t.turnId, t.userText)
     for (const u of allUserTurns) if (u.turnId && u.text) m.set(u.turnId, u.text)
     return m
-  }, [allUserTurns])
+  }, [allUserTurns, model.turns])
 
   const localImagesByTurn = useMemo(() => {
     const m = new Map()
@@ -716,20 +844,36 @@ export default function ConversePanel({
   const send = async (nextText = input, { allowSecretOnce = false, includeAttachments = true, clearInput = true } = {}) => {
     const text = String(nextText).trim()
     if ((!text && !(includeAttachments && attachments.length)) || busy) return false
+    // Capture before reading image files or waiting for either transport try.
+    const requestedProjectContext = projectContext ? {
+      project_id: projectContext.project_id,
+      input_version_id: projectContext.input_version_id,
+    } : null
+    const authoredViewLifetime = approvalScopeRef.current
     let delivered = false
     setSending(true); setSendErr(null)
     restoreComposerFocus()
     const accept = (res, images) => {
       if (res.status === 'queued') {
+        if (res.queued_id && approvalScopeRef.current === authoredViewLifetime) {
+          authoredViewTurns.current.set(`queue:${res.queued_id}`, authoredViewLifetime)
+          if (authoredViewTurns.current.size > 32) authoredViewTurns.current.delete(authoredViewTurns.current.keys().next().value)
+        }
         const queued = acceptQueuedTurn(queueStateRef.current, {
           queuedId: res.queued_id || null,
           text,
         })
         setQueueState(queued.state)
         if (queued.action === 'promote') {
+          if (approvalScopeRef.current === authoredViewLifetime) authoredViewTurns.current.set(queued.turn.turnId, authoredViewLifetime)
+          authoredViewTurns.current.delete(`queue:${res.queued_id}`)
           setLocalTurns((prev) => [...prev, queued.turn])
         }
       } else {
+        if (approvalScopeRef.current === authoredViewLifetime && sessionIdRef.current === sessionId) {
+          authoredViewTurns.current.set(res.turn_id, authoredViewLifetime)
+          if (authoredViewTurns.current.size > 32) authoredViewTurns.current.delete(authoredViewTurns.current.keys().next().value)
+        }
         setLocalTurns((prev) => [...prev, { turnId: res.turn_id, text, images }])
       }
       if (clearInput) setInput('')
@@ -746,12 +890,15 @@ export default function ConversePanel({
         accept(await postMessage(sessionId, {
           ...(text ? { text } : {}),
           ...(images.length ? { images } : {}),
+          ...(requestedProjectContext ? { projectContext: requestedProjectContext } : {}),
           allowSecretOnce,
         }), images)
         track('conversation.message_sent', { input_kind: text ? 'typed' : 'image_only', text_len: text.length })
       } catch (e) {
         if (!shouldRetryWithQueue(classifyAgentError(e), { text, images })) throw e
-        accept(await postMessage(sessionId, { text, queue: true, allowSecretOnce }), images)
+        accept(await postMessage(sessionId, { text, queue: true, allowSecretOnce,
+          ...(requestedProjectContext ? { projectContext: requestedProjectContext } : {}),
+        }), images)
         // P2: the direct post failed (turn busy) and the queued retry landed —
         // the panel recovered the send rather than surfacing an error.
         track('conversation.recovered', { reason: 'busy_retry_queued' })
@@ -814,15 +961,36 @@ export default function ConversePanel({
   // accepts no other spelling.
   const decide = async (
     confirmationId, ok, blocked = false, owningSessionId = sessionId,
-    decisionRecorded = false, isWrite = false,
+    decisionRecorded = false, isWrite = false, tool = null, isSolve = false,
   ) => {
     if (deciding || (ok && blocked)) return
+    const requestedContext = projectContext
+    const requestedRevision = approvalScopeRef.current.revision
+    const prepare = prepareApprovedProjectRunRef.current
+    const current = () => approvalScopeRef.current.revision === requestedRevision
+      && sessionIdRef.current === owningSessionId
+      && projectContextRef.current?.project_id === requestedContext?.project_id
+      && projectContextRef.current?.input_version_id === requestedContext?.input_version_id
+      && !(ok && isWrite && (writeLockedRef.current || engineDirtyRef.current))
     setDeciding(confirmationId); setSendErr(null)
     try {
       if (ok && isWrite && !(writeLockedRef.current || engineDirtyRef.current)) onBeforeWriteApprovalRef.current?.()
       const res = await resolveApproval(
         confirmationId, owningSessionId, ok, decisionRecorded, {
-          beforeResume: () => !(ok && isWrite && (writeLockedRef.current || engineDirtyRef.current)),
+          beforeResume: async () => {
+            if (!current()) return false
+            if (!ok || !(isWrite || isSolve) || !requestedContext
+              || (canonicalProjectWriteTools && !canonicalProjectWriteTools.has(tool))) return true
+            if (typeof prepare !== 'function') return false
+            let grant
+            try {
+              grant = await prepare({ confirmationId, sessionId: owningSessionId,
+                projectContext: requestedContext })
+            } catch { return false }
+            if (!grant) return false
+            if (!current() || !grant.isCurrent()) { await grant.revoke(); return false }
+            return true
+          },
         })
       if (res.held) {
         await refreshApprovalsRef.current?.()
@@ -892,6 +1060,8 @@ export default function ConversePanel({
               approval.session_id,
               true,
               isWrite,
+              approval.tool,
+              approval.capability === 'solve',
             )}
           >
             {deciding === approval.confirmation_id
@@ -906,7 +1076,8 @@ export default function ConversePanel({
               disabled={deciding === approval.confirmation_id || hold.held}
               title={hold.held ? hold.title : undefined}
               onClick={() => decide(
-                approval.confirmation_id, true, hold.held, approval.session_id, false, isWrite)}
+                approval.confirmation_id, true, hold.held, approval.session_id, false, isWrite, approval.tool,
+                approval.capability === 'solve')}
             >
               {deciding === approval.confirmation_id ? 'Sending…' : (hold.held ? hold.label : 'Approve')}
             </button>
@@ -1059,7 +1230,8 @@ export default function ConversePanel({
                 className="chip-act"
                 disabled={deciding === item.id || hold.held}
                 title={hold.held ? hold.title : undefined}
-                onClick={() => decide(item.id, true, hold.held, sessionId, false, isWrite)}
+                onClick={() => decide(item.id, true, hold.held, sessionId, false, isWrite, item.tool,
+                  item.capability === 'solve')}
               >
                 {deciding === item.id ? 'Sending…' : (hold.held ? hold.label : 'Approve')}
               </button>

@@ -156,6 +156,19 @@ _RUN_TOOL_SCHEMA: Dict[str, Any] = {
     "additionalProperties": False,
 }
 
+_SOLVE_TOOL_SCHEMA: Dict[str, Any] = {
+    **_RUN_TOOL_SCHEMA,
+    "properties": {**_RUN_TOOL_SCHEMA["properties"],
+        "tool": {"type": "string", "const": "solar-solve-proposal"},
+        "solve_context": {"type": "object", "properties": {
+            "frame_ref": {"type": "string", "minLength": 1},
+            "expected_rev": {"type": "integer", "minimum": 0},
+            "phase": {"type": "string", "enum": ["initial", "background"]}},
+            "required": ["frame_ref", "expected_rev", "phase"], "additionalProperties": False}},
+    "required": ["tool", "params", "dwg", "catalog_digest", "catalog_commit",
+                 "effective_catalog_digest", "tool_manifest_sha256", "solve_context"],
+}
+
 _HARDCODED_DEFAULTS: Dict[str, Any] = {
     "version": 1,
     "approval_ttl_s": 300,
@@ -794,6 +807,15 @@ _HARDCODED_DEFAULTS: Dict[str, Any] = {
             "rate_limit_category": "medium", "timeout_s": 120,
             "audit_extra": ["tool", "dwg"], "cost_class": "write",
         },
+        "run_solve_tool": {
+            "description": "Request a Leaf cloud Solar proposal for the selected project. Every solve requires a fresh approval; it does not change the drawing.",
+            "rung": 4, "required_capability": "solve", "policy": "always-confirm",
+            "tenant_tightenable": False,
+            "dispatch": {"kind": "app_api", "routes": ["POST /api/run"]},
+            "args_schema": _SOLVE_TOOL_SCHEMA,
+            "rate_limit_category": "high", "timeout_s": 600,
+            "audit_extra": ["tool", "dwg"], "cost_class": "leaf_cloud_solve",
+        },
         "submit_live_solve": {
             "description": "Dispatch a live APS run (real USD; R4). Broker USD-cap preflight still fires underneath.",
             "rung": 4, "required_capability": "run_write", "policy": "confirm-once",
@@ -889,6 +911,85 @@ _HARDCODED_DEFAULTS: Dict[str, Any] = {
                             "additionalProperties": False},
             "rate_limit_category": "high", "timeout_s": 600,
             "audit_extra": ["title", "change_id"],
+        },
+        "inspect_project_photo": {
+            "description": "Read catalog metadata and JPEG previews for the authenticated active project turn. No edits, saves or publication.",
+            "rung": 0, "required_capability": "converse",
+            "policy": "auto", "tenant_tightenable": True,
+            "dispatch": {"kind": "app_api", "routes": ["POST /api/sessions/{session_id}/materials/inspect"]},
+            "args_schema": {
+                "type": "object", "additionalProperties": False,
+                "properties": {
+                    "op": {"enum": ["catalog", "preview"]},
+                    "cursor": {"type": "string", "pattern": "^(?!00000000-0000-0000-0000-000000000000$)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+                    "material_id": {"type": "string", "pattern": "^(?!00000000-0000-0000-0000-000000000000$)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+                    "expected_revision": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+                    "expected_digest": {"anyOf": [{"type": "null"}, {"type": "string", "pattern": "^[0-9a-f]{64}$"}]},
+                    "expected_preview_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                },
+                "required": ["op"],
+                "allOf": [
+                    {"if": {"properties": {"op": {"const": "catalog"}}},
+                     "then": {"not": {"anyOf": [{"required": ["material_id"]}, {"required": ["expected_preview_sha256"]}]}},
+                     "else": {"required": ["material_id", "expected_preview_sha256", "expected_revision", "expected_digest"],
+                              "not": {"required": ["cursor"]}}},
+                    {"if": {"required": ["cursor"]}, "then": {"required": ["expected_revision", "expected_digest"]}},
+                    {"if": {"anyOf": [{"required": ["expected_revision"]}, {"required": ["expected_digest"]}]},
+                     "then": {"required": ["expected_revision", "expected_digest"],
+                              "if": {"properties": {"expected_revision": {"const": 0}}},
+                              "then": {"properties": {"expected_digest": {"type": "null"}}},
+                              "else": {"properties": {"expected_digest": {"type": "string"}}}}},
+                ],
+            },
+            "rate_limit_category": "low", "timeout_s": 45, "audit_extra": [],
+        },
+        "propose_project_page": {
+            "description": "Propose saved portfolio text for private review in the active project conversation. Does not save or publish.",
+            "rung": 2, "required_capability": "converse",
+            "policy": "auto", "tenant_tightenable": True,
+            "dispatch": {"kind": "app_api", "routes": ["POST /api/sessions/{session_id}/page/proposals"]},
+            "args_schema": {
+                "type": "object",
+                "properties": {
+                    "instruction": {"type": "string", "minLength": 1, "maxLength": 4000},
+                    "expected_revision": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+                    "expected_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                },
+                "required": ["instruction", "expected_revision", "expected_digest"],
+                "additionalProperties": False,
+            },
+            "rate_limit_category": "medium", "timeout_s": 60, "audit_extra": [],
+        },
+        "propose_project_photo_assignments": {
+            "description": "Propose photo assignments for private review in the active project conversation. Does not save or publish; source, role and text validation remain with the producer.",
+            "rung": 2, "required_capability": "converse",
+            "policy": "auto", "tenant_tightenable": True,
+            "dispatch": {"kind": "app_api", "routes": ["POST /api/sessions/{session_id}/page/photo-assignment-proposals"]},
+            "args_schema": {
+                "type": "object", "additionalProperties": False,
+                "properties": {
+                    "expected_revision": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+                    "expected_digest": {"type": "string", "pattern": "^[0-9a-f]{64}(?![\\s\\S])"},
+                    "operations": {
+                        "type": "array", "minItems": 1, "maxItems": 200,
+                        "items": {
+                            "type": "object", "additionalProperties": False,
+                            "properties": {
+                                "op": {"const": "assign"},
+                                "material_id": {"type": "string", "pattern": "^(?!00000000-0000-0000-0000-000000000000(?![\\s\\S]))[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![\\s\\S])"},
+                                "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}(?![\\s\\S])"},
+                                "preview_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}(?![\\s\\S])"},
+                                "gallery_slug": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,47}(?![\\s\\S])"},
+                                "title": {"type": "string", "minLength": 0, "maxLength": 200},
+                                "alt": {"type": "string", "minLength": 1, "maxLength": 400},
+                            },
+                            "required": ["op", "material_id", "sha256", "preview_sha256", "gallery_slug", "title", "alt"],
+                        },
+                    },
+                },
+                "required": ["expected_revision", "expected_digest", "operations"],
+            },
+            "rate_limit_category": "medium", "timeout_s": 60, "audit_extra": [],
         },
         "propose_overlay": {
             "description": "T1 runtime overlay: open a PENDING colour/copy preview for THIS session (server/overlay_propose.py). Writes one session-scoped row, changes nothing another user can see, and expires by lease. Deliberately `auto`: the proposal is the cheap half, and the irreversible half is the operator tap that applies it to the tenant, which carries its own CAS witness and audit row. Requiring a confirmation here would buy nothing and cost the immediacy the tier exists for.",

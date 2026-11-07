@@ -60,7 +60,7 @@ _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 # The complete character set an edit path may use. Verified against every one
 # of the repo's tracked files (984 at 2026-08-03): zero fall outside it.
-_PATH_ALLOWED_RE = re.compile(r"[A-Za-z0-9._/+@-]+")
+_PATH_ALLOWED_RE = re.compile(r"[A-Za-z0-9._/+@\[\]-]+")
 
 MAX_EDITS = 200
 MAX_EDIT_BYTES = 1_000_000  # per file
@@ -70,6 +70,9 @@ MAX_TITLE = 200
 # bounded: a listing never walks more than one tree level, a file read is
 # size-checked BEFORE its bytes leave git, and the change list caps its page.
 MAX_SOURCE_BYTES = 262_144  # per file read
+MAX_SOURCE_RANGE_FILE_BYTES = 4_194_304
+MAX_SOURCE_RANGE_BYTES = 32_768
+MAX_SOURCE_RANGE_LINES = 400
 MAX_TREE_ENTRIES = 500      # per directory listing
 MAX_LIST = 50               # per change-list page
 
@@ -110,6 +113,12 @@ def repo_dir() -> Path:
 
 def base_ref() -> str:
     return os.environ.get("LEAF_PLATFORM_REPO_BASE_REF", "").strip() or "refs/heads/main"
+
+
+def source_ref(*, fallback: Optional[str] = None) -> str:
+    """Authoring snapshot, independent of the logical PR target."""
+    return (os.environ.get("LEAF_PLATFORM_REPO_SOURCE_REF", "").strip()
+            or (fallback if fallback is not None else base_ref()))
 
 
 def state_dir() -> Path:
@@ -215,7 +224,8 @@ def _git_trust(*paths: Path) -> list[str]:
     # paths while the PUBLISHED commit differs from the real base — and git
     # excludes replacement refs from pack transfer, so the remote sees the
     # unapproved change. The oracle must read real objects (sol-critic #423 r6).
-    flags: list[str] = ["--no-replace-objects"]
+    # Next.js route brackets name literal files, never Git wildcard matches.
+    flags: list[str] = ["--no-replace-objects", "--literal-pathspecs"]
     for path in paths:
         try:
             resolved = str(path.resolve(strict=False))
@@ -306,8 +316,8 @@ def _validated_repo_path(raw: Any) -> str:
     # U+3164 Lo) are invisible, and homoglyphs read as the wrong file — and
     # they span half the Unicode category table, so each denied class leaves
     # the next (sol-critic PR #417 rounds 3-4). ALLOWLIST instead: every one
-    # of this repo's 984 tracked paths uses only these characters, so nothing
-    # legitimate is refused and every confusable spelling is.
+    # tracked paths use only these readable ASCII characters, including Next.js
+    # route brackets. Git receives literal pathspecs for these names.
     if _PATH_ALLOWED_RE.fullmatch(raw) is None:
         raise PlatformCustomizeError("edit_path_invalid", 422, "charset")
     return raw
@@ -441,12 +451,14 @@ def load_record(change_id: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 def propose(*, tenant_id: str, subject: str, title: str,
             edits: list[Mapping[str, Any]]) -> dict[str, Any]:
-    """Create ONE commit on ONE new lane branch from the base ref tip.
+    """Create ONE commit from the source snapshot for the bound PR target.
 
     Never touches HEAD, never advances any existing ref, never pushes. The
     returned record is the durable authority for everything after (co-sign,
     land); the branch ref in the local repo is derived state.
     """
+    proposal_base_ref = base_ref()
+    proposal_source_ref = source_ref(fallback=proposal_base_ref)
     title = str(title or "").strip()
     if not title or len(title) > MAX_TITLE:
         raise PlatformCustomizeError("title_invalid", 422)
@@ -483,7 +495,7 @@ def propose(*, tenant_id: str, subject: str, title: str,
     fundamental = classify_fundamental([e["path"] for e in normalized])
 
     git_dir = repo_dir()
-    base_sha = _git(git_dir, "rev-parse", "--verify", base_ref() + "^{commit}")
+    base_sha = _git(git_dir, "rev-parse", "--verify", proposal_source_ref + "^{commit}")
     if not _SHA_RE.fullmatch(base_sha):
         raise PlatformCustomizeError(
             "platform_repo_unavailable", 503, f"base_unresolvable: {base_sha!r}")
@@ -663,7 +675,8 @@ def propose(*, tenant_id: str, subject: str, title: str,
         "author_subject": str(subject),
         "title": title,
         "branch_ref": ref,
-        "base_ref": base_ref(),
+        "base_ref": proposal_base_ref,
+        "source_ref": proposal_source_ref,
         "base_sha": base_sha,
         "commit_sha": commit_sha,
         "paths": [e["path"] for e in normalized],
@@ -1553,10 +1566,10 @@ def _git_out(git_dir: Path, *args: str, timeout: int = 30) -> bytes:
     return result.stdout
 
 
-def _base_tip(git_dir: Path) -> str:
-    """The base-ref tip commit — proves the repo is reachable, so a later
+def _base_tip(git_dir: Path, ref: Optional[str] = None) -> str:
+    """The authoring-source commit — proves the repo is reachable, so a later
     per-object failure can honestly be attributed to the PATH, not the repo."""
-    return _git(git_dir, "rev-parse", "--verify", base_ref() + "^{commit}")
+    return _git(git_dir, "rev-parse", "--verify", (ref if ref is not None else source_ref()) + "^{commit}")
 
 
 def _validated_query_path(raw: Any) -> str:
@@ -1576,16 +1589,28 @@ def _object_type(git_dir: Path, spec: str) -> str:
         raise PlatformCustomizeError("source_not_found", 404, exc.detail) from exc
 
 
-def read_source(*, path: str) -> dict[str, Any]:
-    """Read ONE file from the platform repo at the base-ref tip.
+def read_source(*, path: str, start_line: int | None = None,
+                max_lines: int | None = None,
+                expected_commit: str | None = None) -> dict[str, Any]:
+    """Read ONE file from the platform repo's authoring-source snapshot.
 
     Same path discipline as an edit (`_validated_repo_path`: no traversal, no
     `.git`, allowlisted charset), size-checked before the bytes are read, and
-    binary content is reported by size only, never returned.
+    binary content is reported by size only, never returned. Optional ranges
+    bind every page to one source commit and keep whole lines within a separate
+    response budget; they do not raise the legacy whole-file limit.
     """
     rel = _validated_query_path(path)
+    ranged = any(value is not None for value in (start_line, max_lines, expected_commit))
+    if ranged and (type(start_line) is not int or start_line < 1
+                   or type(max_lines) is not int or not 1 <= max_lines <= MAX_SOURCE_RANGE_LINES
+                   or type(expected_commit) is not str or not _SHA_RE.fullmatch(expected_commit)):
+        raise PlatformCustomizeError("source_range_invalid", 422)
     git_dir = repo_dir()
-    tip = _base_tip(git_dir)
+    ref = source_ref()
+    tip = _base_tip(git_dir, ref)
+    if ranged and tip != expected_commit:
+        raise PlatformCustomizeError("source_changed", 409)
     spec = f"{tip}:{rel}"
     obj_type = _object_type(git_dir, spec)
     if obj_type == "tree":
@@ -1593,12 +1618,12 @@ def read_source(*, path: str) -> dict[str, Any]:
     if obj_type != "blob":
         raise PlatformCustomizeError("source_not_found", 404, f"{rel}: {obj_type}")
     size = int(_git(git_dir, "cat-file", "-s", spec))
-    if size > MAX_SOURCE_BYTES:
+    if size > (MAX_SOURCE_RANGE_FILE_BYTES if ranged else MAX_SOURCE_BYTES):
         raise PlatformCustomizeError("source_too_large", 413, f"{rel}: {size} bytes")
     blob = _git_out(git_dir, "cat-file", "blob", spec)
     view: dict[str, Any] = {
         "contract": "leaf.platform-customize.v1",
-        "ref": base_ref(),
+        "ref": ref,
         "commit": tip,
         "path": rel,
         "size": size,
@@ -1607,18 +1632,44 @@ def read_source(*, path: str) -> dict[str, Any]:
         view["binary"] = True
         return view
     view["binary"] = False
-    view["content"] = blob.decode("utf-8", errors="replace")
+    content = blob.decode("utf-8", errors="replace")
+    if not ranged:
+        view["content"] = content
+        return view
+    lines = content.splitlines(keepends=True)
+    total = len(lines)
+    if start_line > max(1, total):
+        raise PlatformCustomizeError("source_range_out_of_bounds", 422)
+    selected: list[str] = []
+    byte_count = 0
+    for line in lines[start_line - 1:start_line - 1 + max_lines]:
+        line_bytes = len(line.encode("utf-8"))
+        if byte_count + line_bytes > MAX_SOURCE_RANGE_BYTES:
+            if not selected:
+                raise PlatformCustomizeError("source_line_too_large", 413)
+            break
+        selected.append(line)
+        byte_count += line_bytes
+    end_line = start_line + len(selected) - 1 if selected else 0
+    eof = end_line >= total
+    view["content"] = "".join(selected)
+    view["range"] = {
+        "start_line": start_line, "end_line": end_line,
+        "next_line": None if eof else end_line + 1,
+        "total_lines": total, "eof": eof,
+    }
     return view
 
 
 def list_source(*, dir: str = "") -> dict[str, Any]:
-    """List ONE directory level of the platform repo at the base-ref tip.
+    """List ONE directory level of the authoring-source snapshot.
 
     Empty ``dir`` lists the repo root. Bounded at MAX_TREE_ENTRIES with an
     honest ``truncated`` flag — a silent cap would read as "that was all".
     """
     git_dir = repo_dir()
-    tip = _base_tip(git_dir)
+    ref = source_ref()
+    tip = _base_tip(git_dir, ref)
     rel = _validated_query_path(dir) if dir else ""
     spec = f"{tip}:{rel}" if rel else tip
     if rel and _object_type(git_dir, spec) == "blob":
@@ -1653,7 +1704,7 @@ def list_source(*, dir: str = "") -> dict[str, Any]:
         entries.append(entry)
     return {
         "contract": "leaf.platform-customize.v1",
-        "ref": base_ref(),
+        "ref": ref,
         "commit": tip,
         "dir": rel,
         "entries": entries,

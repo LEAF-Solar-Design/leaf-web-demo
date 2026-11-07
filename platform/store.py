@@ -621,22 +621,46 @@ def create_identity_binding(org_id: uuid.UUID, external_authority: str, external
     if role not in {"owner", "editor", "reviewer", "read_only"}:
         raise ValueError("role must be owner, editor, reviewer, or read_only")
     with cursor() as cur:
-        cur.execute(
-            "INSERT INTO identity_bindings (binding_id, external_authority, external_subject, "
-            "platform_tenant_id, platform_user_id, role) VALUES (%(binding_id)s, %(authority)s, "
-            "%(subject)s, %(org_id)s, %(user_id)s, %(role)s) "
-            "ON CONFLICT (external_authority, external_subject) WHERE status = 'active' "
-            "DO NOTHING "
-            "RETURNING binding_id, external_authority, external_subject, platform_tenant_id, "
-            "platform_user_id, status, created_at",
-            {"binding_id": new_uuid(), "authority": external_authority,
-             "subject": external_subject, "org_id": org_id,
-              "user_id": platform_user_id or new_uuid(), "role": role},
-        )
-        row = cur.fetchone()
+        return _create_identity_binding_on_cursor(
+            cur, org_id, external_authority, external_subject, platform_user_id, role=role)
+
+
+def _create_identity_binding_on_cursor(
+    cur, org_id: uuid.UUID, external_authority: str, external_subject: str,
+    platform_user_id: Optional[uuid.UUID] = None, *, role: str = "owner",
+    require_new: bool = False,
+) -> IdentityBinding:
+    """Use the caller's transaction; require_new refuses even same-org conflicts."""
+    if not external_authority or not external_subject:
+        raise ValueError("external authority and subject are required")
+    if role not in {"owner", "editor", "reviewer", "read_only"}:
+        raise ValueError("role must be owner, editor, reviewer, or read_only")
+    cur.execute(
+        "INSERT INTO identity_bindings (binding_id, external_authority, external_subject, "
+        "platform_tenant_id, platform_user_id, role) VALUES (%(binding_id)s, %(authority)s, "
+        "%(subject)s, %(org_id)s, %(user_id)s, %(role)s) "
+        "ON CONFLICT (external_authority, external_subject) WHERE status = 'active' "
+        "DO NOTHING "
+        "RETURNING binding_id, external_authority, external_subject, platform_tenant_id, "
+        "platform_user_id, status, created_at",
+        {"binding_id": new_uuid(), "authority": external_authority,
+         "subject": external_subject, "org_id": org_id,
+         "user_id": platform_user_id or new_uuid(), "role": role},
+    )
+    row = cur.fetchone()
     if row is not None:
         return IdentityBinding.from_row(row)
-    existing = resolve_active_identity_binding(external_authority, external_subject)
+    if require_new:
+        raise ValueError("already_member")
+    cur.execute(
+        "SELECT binding_id, external_authority, external_subject, platform_tenant_id, "
+        "platform_user_id, status, created_at FROM identity_bindings "
+        "WHERE external_authority = %(authority)s AND external_subject = %(subject)s "
+        "AND status = 'active'",
+        {"authority": external_authority, "subject": external_subject},
+    )
+    row = cur.fetchone()
+    existing = IdentityBinding.from_row(row) if row is not None else None
     if existing is None:  # pragma: no cover - concurrent revoke edge
         raise RuntimeError("identity binding conflict could not be resolved")
     if existing.platform_tenant_id != org_id:

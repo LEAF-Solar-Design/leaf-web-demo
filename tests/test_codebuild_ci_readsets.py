@@ -35,16 +35,130 @@ def fixture_catalog(extra_suites=()):
 
 @unittest.skipUnless(BASH, "bash is not on PATH; read-set publication requires bash")
 class TestCodebuildCiReadsets(unittest.TestCase):
+    def test_process_capture_packaging_closes_references_without_changing_verdict(self):
+        from test_full_run_manifest_certificates import capture_fixture
+
+        source = CI_PATH.read_text(encoding="utf-8")
+        publication = source[source.index('readsets_object=""'):source.index(
+            'export readsets_object readsets_sha256 readsets_bytes readsets_status readsets_archive_members')]
+        for missing in (None, "certificate", "outcome"):
+            for gate_status in (0, 7):
+                with self.subTest(missing=missing, gate_status=gate_status), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    _, catalog, _, _, members, readsets, selection = capture_fixture(root)
+                    (selection / "catalog.json").write_text(json.dumps(catalog), encoding="utf-8")
+                    (selection / "readsets-partitioned").write_text("ready\n", encoding="ascii")
+                    for name in ("full_run_manifest.py", "select_tests.py"):
+                        shutil.copyfile(ROOT / "scripts/ci" / name, selection / name)
+                    if missing:
+                        shard = json.loads(next(readsets.rglob("*.json")).read_text())
+                        reference = shard["process_tree_ref" if missing == "certificate" else "outcomes_ref"]
+                        members[reference].unlink()
+                    body = publication.replace("/tmp/gate-logs", str(readsets.parent))
+                    command = ('set -euo pipefail\n'
+                               'aws() { printf "published\\n"; }\n'
+                               + body + '\nexit "$gate_status"\n')
+                    env = dict(os.environ, selection_dir=str(selection), process_capture_active="1",
+                               tracing_ready="1", manifest_failed="0", CODEBUILD_BUILD_ID=BUILD_ID,
+                               HEAD_SHA="a" * 40, TRUSTED_SHA="b" * 40, trusted_sha_override="0",
+                               gate_status=str(gate_status))
+                    result = subprocess.run([BASH, "-c", command], env=env,
+                                            capture_output=True, text=True)
+                    self.assertEqual(result.returncode, gate_status, result.stdout + result.stderr)
+                    archive = selection / "readsets.tar.gz"
+                    if missing:
+                        self.assertIn("LEAF_CAPTURE package_error", result.stdout)
+                        self.assertNotIn("published", result.stdout)
+                        self.assertFalse(archive.exists())
+                    else:
+                        self.assertNotIn("package_error", result.stdout + result.stderr)
+                        with tarfile.open(archive, "r:gz") as packed:
+                            names = packed.getnames()
+                            self.assertEqual(len(names), len(set(names)))
+                            self.assertEqual(len([name for name in names if name.startswith(
+                                "reports/process-tree-")]), 2)
+                            self.assertEqual(len([name for name in names if name.startswith(
+                                "reports/trace-receipt-")]), 2)
+                            self.assertIn("capture/context.json", names)
+                            self.assertIn("capture/capture-epoch.json", names)
+                            self.assertFalse(any(name.startswith("diagnostics/") for name in names))
+                            self.assertIn("capture-suites.json", names)
+                            self.assertEqual(json.loads(packed.extractfile("catalog.json").read()), catalog)
+                            for name in names:
+                                if name.startswith("readsets/") and name.endswith(".json"):
+                                    shard = json.loads(packed.extractfile(name).read())
+                                    self.assertIn(shard["process_tree_ref"], names)
+                                    self.assertIn(shard["outcomes_ref"], names)
+                        with tarfile.open(selection / "capture-diagnostics.tar.gz", "r:gz") as packed:
+                            self.assertEqual(packed.getnames(), ["diagnostics/startup.json"])
+                        inventory = next(json.loads(line.removeprefix("LEAF_CAPTURE inventory "))
+                                         for line in result.stdout.splitlines()
+                                         if line.startswith("LEAF_CAPTURE inventory "))
+                        expected = {}
+                        for name in names:
+                            top = name.split("/", 1)[0]
+                            expected.setdefault(top, 0)
+                            if name != "readsets":
+                                path = (readsets.parent if top == "readsets" else selection) / name
+                                expected[top] += path.stat().st_size
+                        self.assertEqual(inventory, expected)
+                        self.assertIn(f"LEAF_CAPTURE archive_bytes {archive.stat().st_size}", result.stdout)
+
+    def test_capture_archive_caps_and_advisory_diagnostics(self):
+        from test_full_run_manifest_certificates import capture_fixture
+
+        source = CI_PATH.read_text(encoding="utf-8")
+        publication = source[source.index('readsets_object=""'):source.index(
+            'export readsets_object readsets_sha256 readsets_bytes readsets_status readsets_archive_members')]
+        self.assertIn("local archive_cap=209715200", publication)
+        for primary_bytes, diagnostics_bytes, uploads in (
+                (209715201, 209715201, 1), (1073741824, 209715200, 2),
+                (1073741825, 1, 0)):
+            with self.subTest(primary_bytes=primary_bytes), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                *_, readsets, selection = capture_fixture(root)
+                (selection / "readsets-partitioned").touch()
+                for name in ("full_run_manifest.py", "select_tests.py"):
+                    shutil.copyfile(ROOT / "scripts/ci" / name, selection / name)
+                body = publication.replace("/tmp/gate-logs", str(readsets.parent)).replace(
+                    '$(wc -c < "$archive")', str(primary_bytes)).replace(
+                    '$(wc -c < "$diagnostics_archive")', str(diagnostics_bytes))
+                calls = root / "calls"
+                command = ('set -euo pipefail\n'
+                           'aws() { printf "%s\\n" "$*" >> "$CALLS"; }\n' + body +
+                           '\nprintf "STATUS %s\\n" "$readsets_status"\n')
+                env = dict(os.environ, selection_dir=str(selection), process_capture_active="1",
+                           tracing_ready="1", manifest_failed="0", CODEBUILD_BUILD_ID=BUILD_ID,
+                           HEAD_SHA="a" * 40, TRUSTED_SHA="b" * 40, trusted_sha_override="0",
+                           CALLS=str(calls))
+                result = subprocess.run([BASH, "-c", command], env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                published = calls.read_text().splitlines() if calls.exists() else []
+                self.assertEqual(len(published), uploads)
+                if uploads:
+                    self.assertIn("STATUS uploaded", result.stdout)
+                    self.assertIn(".readsets.tar.gz", published[0])
+                    if diagnostics_bytes > 209715200:
+                        self.assertIn("LEAF_CAPTURE diagnostics_skipped too_large 209715201", result.stdout)
+                        self.assertNotIn("package_error", result.stdout)
+                    else:
+                        self.assertIn("12345678-1234-1234-1234-123456789abc.capture-diagnostics.tar.gz",
+                                      published[1])
+                else:
+                    self.assertIn("LEAF_CAPTURE package_error archive_too_large", result.stdout)
+
     def run_publication(self, *, tracing=True, aws_status=0, gate_status=0,
                         missing_decision=False, malformed_manifest=False, foreign_shards=False,
                         foreign_attempts=False, missing_completion=False, differing_collection=False,
-                        extra_attempts=(), vitest_reports=None):
+                        extra_attempts=(), vitest_reports=None, archive_bytes=None):
         script = CI_PATH.read_text(encoding="utf-8")
         export_start = script.index('  export LEAF_READSET_CATALOG_SHA256=')
         export_end = script.index('LEAF_CAPTURE_ID\n)"', export_start) + len('LEAF_CAPTURE_ID\n)"')
         catalog_export = script[export_start:export_end]
         # Run the real post-gate publication and finalizer with isolated log paths.
         script = script[script.index("# Read-set publication is advisory"):]
+        if archive_bytes is not None:
+            script = script.replace('$(wc -c < "$archive")', str(archive_bytes))
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             selection = root / "selection"
@@ -230,6 +344,11 @@ class TestCodebuildCiReadsets(unittest.TestCase):
             archive = selection / "readsets.tar.gz"
             return (result, final, calls, archive.read_bytes() if archive.exists() else None,
                     tar_calls_path.read_text(encoding="utf-8") if tar_calls_path.exists() else "")
+
+    def test_ordinary_readsets_keep_200_mib_cap(self):
+        _, final, calls, _, _ = self.run_publication(archive_bytes=209715201)
+        self.assertEqual(final["readsets_status"], "too_large")
+        self.assertEqual(calls, [])
 
     def test_tracing_upload_is_immutable_and_receipted(self):
         result, final, calls, archive, tar_calls = self.run_publication()

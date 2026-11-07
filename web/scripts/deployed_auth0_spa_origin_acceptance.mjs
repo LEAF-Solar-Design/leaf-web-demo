@@ -29,7 +29,15 @@ const SOURCE_SHA = /^[0-9a-f]{40}$/
 const JWT = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/
 const TASK_DEFINITION = /^arn:aws:ecs:us-east-1:807034087062:task-definition\/leaf-platform-web(?:-alt)?:[1-9][0-9]*$/
 const IMAGE_DIGEST = /^sha256:[0-9a-f]{64}$/
-const ASSET_PATH = /^\/assets\/[A-Za-z0-9_-]+\.js$/
+const ASSET_PATH = /^\/(?:assets\/[A-Za-z0-9_-]+\.js|_next\/static\/(?:[A-Za-z0-9_@.\[\]-]+\/)*[A-Za-z0-9_@.\[\]-]+\.js)$/
+
+export function canonicalScriptPath(value) {
+  if (typeof value !== 'string') return null
+  // Next encodes dynamic route brackets in HTML. Decode only those bytes;
+  // never normalize dots, encoded separators, remote URLs, or double encoding.
+  const path = value.replace(/%5[bd]/gi, token => token.toLowerCase() === '%5b' ? '[' : ']')
+  return ASSET_PATH.test(path) && !/\s/.test(path) && !path.split('/').some(part => part === '.' || part === '..') ? path : null
+}
 
 function fail(message) {
   throw new Error(message)
@@ -106,7 +114,7 @@ function validateSourceTuple(value, label = 'deployed web source tuple') {
   if (!['leaf-platform-web', 'leaf-platform-web-alt'].includes(value.service_name)) fail(`${label} service is invalid`)
   if (!TASK_DEFINITION.test(value.task_definition_arn) || value.task_definition_arn.split('/').at(-1).split(':')[0] !== value.service_name) fail(`${label} task definition is invalid`)
   if (!IMAGE_DIGEST.test(value.image_digest) || !SOURCE_SHA.test(value.source_revision)) fail(`${label} immutable source is invalid`)
-  if (!ASSET_PATH.test(value.asset_path) || !SHA256.test(value.asset_sha256)) fail(`${label} asset identity is invalid`)
+  if (!canonicalScriptPath(value.asset_path) || !SHA256.test(value.asset_sha256)) fail(`${label} asset identity is invalid`)
 }
 
 function validateExpectedPrincipal(value) {
@@ -301,9 +309,11 @@ export async function collectInteractiveProof(config, dependencies = {}) {
       const response = await fetch(assetPath, { cache: 'no-store' })
       const bytes = await response.arrayBuffer()
       const digest = await crypto.subtle.digest('SHA-256', bytes)
-      return { status: response.status, sha256: [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('') }
+      return { status: response.status, sha256: [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join(''), scripts: [...document.scripts].map(script => script.getAttribute('src')).filter(Boolean) }
     }, config.deployedWebSource.asset_path)
     if (asset.status !== 200 || asset.sha256 !== config.deployedWebSource.asset_sha256) fail('deployed web asset identity is not exact')
+    if (!Array.isArray(asset.scripts) || asset.scripts.some(path => !canonicalScriptPath(path)) ||
+        !asset.scripts.map(canonicalScriptPath).includes(canonicalScriptPath(config.deployedWebSource.asset_path))) fail('deployed script references are missing or unsafe')
     const before = await signedOutStatus(page)
     const firstCycle = await waitForInteractiveLogin(page, authorizationRequests, callbacks, 1, notify)
     const first = await protectedSession(page)

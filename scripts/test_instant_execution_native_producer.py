@@ -4,8 +4,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -21,14 +23,15 @@ def test_static_scanner_and_shell_contract():
     assert raw.splitlines()[0] == b'#!/usr/bin/env bash'
     source = raw.decode()
     for required in (PIN, "TRIVY_VERSION='0.75.0'", 'public.ecr.aws/aquasecurity/trivy-db:2',
-                     'public.ecr.aws/aquasecurity/trivy-java-db:1', 'python3.12 -I', '--kill-after=30s'):
+                     'public.ecr.aws/aquasecurity/trivy-java-db:1', '"$python_bin" -I', '--kill-after=30s',
+                     'sys.version_info < (3, 12)', r'^3\.12\.[0-9]+$'):
         assert required in source
     for forbidden in ('--push', '--cache-to', '--cache-from', 'github.com', 'ghcr.io',
                       'curl', 'wget', 'set -x', 'describe-images'):
         assert forbidden not in source
 
 
-FAKE = r'''#!/usr/bin/env python3.12
+FAKE = '#!' + sys.executable + r'''
 import json
 import os
 from pathlib import Path
@@ -45,7 +48,19 @@ if name == 'aws':
     if fault == 'aws': sys.exit(1)
     print('secret-password')
 elif args[:2] == ['buildx', 'build']:
-    if fault == 'build': sys.exit(1)
+    phrases = {
+        'build-ratelimit': 'toomanyrequests: You have reached your pull rate limit',
+        'build-nobuildx': "docker: 'buildx' is not a docker command.",
+        'build-daemon': 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock',
+        'build-context': 'failed to compute cache key: "/executor/x.py": not found',
+    }
+    if fault in phrases:
+        print(phrases[fault], file=sys.stderr)
+        print(str(root) + '/secret-password', file=sys.stderr)
+        sys.exit(1)
+    if fault == 'build':
+        print(str(root) + '/secret-password', file=sys.stderr)
+        sys.exit(1)
 elif args[:2] == ['image', 'inspect']:
     counter = root / 'inspect-count'
     count = int(counter.read_text()) + 1 if counter.exists() else 1
@@ -67,7 +82,9 @@ elif args[0] == 'run':
     elif fault == 'large-report': report.write_bytes(b' ' * 16777217)
     else: report.write_text('{"Results":[]}')
     if fault == 'vulnerability': sys.exit(1)
-    if fault == 'scanner-error': sys.exit(2)
+    if fault == 'scanner-error':
+        print(str(work) + '/secret-password', file=sys.stderr)
+        sys.exit(2)
 elif args[0] == 'login':
     assert sys.stdin.read().strip() == 'secret-password'
     if fault == 'login': sys.exit(1)
@@ -111,14 +128,14 @@ def case(tmp_path):
     executable(tools / 'aws', FAKE)
     # Keep setup Git real; drive Git through a logging PATH transport.
     real_git = shutil.which('git')
-    executable(tools / 'git', '#!/usr/bin/env python3.12\n'
+    executable(tools / 'git', '#!' + sys.executable + '\n'
                'import json, os, subprocess, sys\n'
                'from pathlib import Path\n'
                "with (Path(os.environ['FAKE_ROOT']) / 'calls.jsonl').open('a') as stream:\n"
                "    stream.write(json.dumps(['git', *sys.argv[1:]]) + '\\n')\n"
                f'sys.exit(subprocess.run([{real_git!r}, *sys.argv[1:]], timeout=9).returncode)\n')
     real_timeout = shutil.which('timeout')
-    executable(tools / 'timeout', '#!/usr/bin/env python3.12\n'
+    executable(tools / 'timeout', '#!' + sys.executable + '\n'
                'import os, sys\n'
                "if os.environ.get('FAKE_FAULT') == 'timeout' and sys.argv[3:5] == ['docker', 'run']:\n"
                '    sys.exit(124)\n'
@@ -160,6 +177,21 @@ def no_publication(output, calls):
 def test_success_exact_build_scan_publish_and_evidence(tmp_path):
     source, output, request, env = case(tmp_path)
     completed, calls = drive(request, env)
+    assert_success(output, request, completed, calls)
+
+
+@POSIX
+def test_long_relay_snapshot_key_succeeds(tmp_path):
+    source, output, request, env = case(tmp_path)
+    prefix = 'forge-ci-relay/LEAF-Solar-Design/leaf-web-demo/snapshots/' + 'a' * 40 + '/'
+    suffix = '/source.zip'
+    request['source_snapshot']['key'] = prefix + 'b' * (300 - len(prefix) - len(suffix)) + suffix
+    request['executor_package']['version_id'] = 'v' * 200
+    completed, calls = drive(request, env)
+    assert_success(output, request, completed, calls)
+
+
+def assert_success(output, request, completed, calls):
     assert completed.returncode == 0, completed.stderr
     uri = REGISTRY + '/leaf-platform-instant-execution:sha-' + request['source_revision']
     docker = [call[1:] for call in calls if call[0] == 'docker']
@@ -189,11 +221,49 @@ def test_success_exact_build_scan_publish_and_evidence(tmp_path):
     assert not Path(mount).exists()
 
 
+def pyenv_fakes(tmp_path, versions):
+    tools = tmp_path / 'tools'
+    executable(tools / 'python3.12', '#!' + sys.executable + '\n'
+               'import os, sys\n'
+               "if os.environ.get('PYENV_VERSION') != '3.12.15':\n"
+               "    print('pyenv: python3.12: command not found', file=sys.stderr)\n"
+               '    sys.exit(127)\n'
+               f'os.execv({sys.executable!r}, [{sys.executable!r}, *sys.argv[1:]])\n')
+    executable(tools / 'python3', '#!' + sys.executable + '\n'
+               'import sys\n'
+               'sys.exit(1)\n')
+    executable(tools / 'pyenv', '#!' + sys.executable + '\n'
+               'import sys\n'
+               "assert sys.argv[1:] == ['versions', '--bare']\n"
+               f'print({versions!r})\n')
+
+
+@POSIX
+def test_pyenv_shim_selects_highest_python312_and_succeeds(tmp_path):
+    source, output, request, env = case(tmp_path)
+    pyenv_fakes(tmp_path, '3.11.9\n3.12.9\n3.12.15')
+    env['PYENV_VERSION'] = '3.12.15'
+    completed, calls = drive(request, env)
+    assert_success(output, request, completed, calls)
+
+
+@POSIX
+def test_no_usable_python_has_no_provider_calls(tmp_path):
+    source, output, request, env = case(tmp_path)
+    pyenv_fakes(tmp_path, '3.11.9')
+    env['PYENV_VERSION'] = '3.12.15'
+    completed, calls = drive(request, env)
+    assert completed.returncode == 2
+    assert list(output.iterdir()) == []
+    assert calls == []
+
+
 @POSIX
 @pytest.mark.parametrize('fault', ['schema', 'extra-key', 'duplicate-key', 'noncanonical', 'base64',
     'encoding-mismatch', 'sha', 'head', 'tree', 'repository', 'repository-id', 'snapshot-mismatch',
     'path', 'disabled', 'arguments', 'dirty', 'untracked', 'output-mode', 'output-entry', 'inside-source',
-    'request-symlink', 'output-symlink', 'source-symlink', 'nested-key', 'missing-tool'])
+    'request-symlink', 'output-symlink', 'source-symlink', 'nested-key', 'missing-tool',
+    'key-too-long', 'version-too-long'])
 def test_invalid_input_has_no_provider_calls(tmp_path, fault):
     source, output, request, env = case(tmp_path)
     raw, arguments = None, ()
@@ -214,6 +284,8 @@ def test_invalid_input_has_no_provider_calls(tmp_path, fault):
     if fault == 'repository-id': request['source_snapshot']['repository']['id'] = True
     if fault == 'snapshot-mismatch': request['source_snapshot']['commit'] = '0' * 40
     if fault == 'path': request['executor_package']['key'] = '../escape.zip'
+    if fault == 'key-too-long': request['source_snapshot']['key'] = 'k/' + 'x' * 1023
+    if fault == 'version-too-long': request['executor_package']['version_id'] = 'v' * 1025
     if fault == 'disabled': env['LEAF_INSTANT_EXECUTION_ENABLED'] = 'false'
     if fault == 'arguments': arguments = ('unexpected',)
     if fault == 'dirty': (source / 'deploy/Dockerfile.instant-execution').write_text('changed')
@@ -245,12 +317,76 @@ def test_invalid_input_has_no_provider_calls(tmp_path, fault):
         for name in ('bash', 'python3.12', 'timeout', 'mktemp', 'rm'):
             path = tools / name
             if path.exists(): path.unlink()
-            path.symlink_to(shutil.which(name))
+            path.symlink_to(sys.executable if name == 'python3.12' else shutil.which(name))
         env['PATH'] = str(tools)
     completed, calls = drive(request, env, raw, arguments)
     assert completed.returncode != 0
     assert not any(call[0] in ('aws', 'docker') for call in calls)
     assert not (output / 'producer-result.json').exists()
+
+
+@POSIX
+@pytest.mark.parametrize('fault, stage', [('git', 'git'), ('build', 'build'), ('scanner-error', 'scan')])
+def test_refusal_names_stage_without_leaking_details(tmp_path, fault, stage):
+    source, output, request, env = case(tmp_path)
+    if fault == 'git':
+        (source / 'secret-password').write_text('untracked')
+    else:
+        env['FAKE_FAULT'] = fault
+    completed, calls = drive(request, env)
+    assert completed.returncode == 1
+    assert re.fullmatch(
+        r'Instant execution producer refused publication or evidence '
+        r'\(stage=' + stage + r', error=[A-Za-z_][A-Za-z0-9_]*, cause=[a-z_]+, status=(?:none|[0-9]+)\)\n', completed.stderr)
+    for private in (str(tmp_path), str(source), env['LEAF_FORGE_REQUEST_FILE'],
+                    '/tmp/leaf-instant-producer.', 'secret-password'):
+        assert private not in completed.stderr
+    no_publication(output, calls)
+
+
+@POSIX
+@pytest.mark.parametrize('fault, cause', [
+    ('build', 'unclassified'), ('build-ratelimit', 'registry_rate_limited'),
+    ('build-nobuildx', 'buildx_missing'), ('build-daemon', 'docker_daemon_unavailable'),
+    ('build-context', 'build_context_missing')])
+def test_build_failure_names_cause_without_leaking(tmp_path, fault, cause):
+    source, output, request, env = case(tmp_path)
+    env['FAKE_FAULT'] = fault
+    completed, calls = drive(request, env)
+    assert completed.returncode == 1
+    assert re.fullmatch(
+        r'Instant execution producer refused publication or evidence '
+        r'\(stage=build, error=[A-Za-z_][A-Za-z0-9_]*, cause=' + cause + r', status=1\)\n',
+        completed.stderr)
+    for private in ('secret-password', str(tmp_path), 'toomanyrequests'):
+        assert private not in completed.stdout + completed.stderr
+    no_publication(output, calls)
+
+
+@POSIX
+def test_scan_timeout_names_timeout_cause(tmp_path):
+    source, output, request, env = case(tmp_path)
+    env['FAKE_FAULT'] = 'timeout'
+    completed, calls = drive(request, env)
+    assert completed.returncode == 1
+    assert re.fullmatch(
+        r'Instant execution producer refused publication or evidence '
+        r'\(stage=scan, error=[A-Za-z_][A-Za-z0-9_]*, cause=timeout, status=124\)\n',
+        completed.stderr)
+    no_publication(output, calls)
+
+
+@POSIX
+def test_input_refusal_has_no_cause(tmp_path):
+    source, output, request, env = case(tmp_path)
+    request['executor_package']['extra'] = 'unexpected'
+    completed, calls = drive(request, env)
+    assert completed.returncode == 1
+    assert re.fullmatch(
+        r'Instant execution producer refused publication or evidence '
+        r'\(stage=inputs, error=[A-Za-z_][A-Za-z0-9_]*, cause=none, status=none\)\n',
+        completed.stderr)
+    no_publication(output, calls)
 
 
 @POSIX

@@ -3,6 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import CampaignPanel from './CampaignPanel.jsx'
 import useCampaigns from './useCampaigns.js'
 import { uploadProjectInput } from './api.js'
+import { BrowserArtifactContext } from '../site/BrowserAssetGround.jsx'
+import WorkspaceEnvironment from '../site/WorkspaceEnvironment.jsx'
+import { useState } from 'react'
 
 vi.mock('./useCampaigns.js', async importOriginal => ({ ...await importOriginal(), default: vi.fn() }))
 vi.mock('./api.js', () => ({ uploadProjectInput: vi.fn() }))
@@ -34,6 +37,30 @@ beforeEach(() => {
 afterEach(cleanup)
 
 const panel = props => <CampaignPanel projectId={P} projectName="Document studio" signedIn {...props} />
+
+function EnvironmentCampaign({ profile }) {
+  const [edgePanel, setEdgePanel] = useState('none')
+  return <WorkspaceEnvironment scopeKey={P} profile={profile} panel={edgePanel} onPanel={setEdgePanel}>
+    {panel()}
+  </WorkspaceEnvironment>
+}
+
+it('retains one campaign subtree and its draft through edge-panel and profile changes', () => {
+  const { container, rerender } = render(<EnvironmentCampaign profile="browser" />)
+  fireEvent.click(screen.getByRole('button', { name: 'Project' }))
+  const field = screen.getByLabelText('Prompt')
+  const campaignNode = container.querySelector('.campaign-panel')
+  fireEvent.change(field, { target: { value: 'Keep this project request' } })
+  for (const profile of ['cad', 'solar', 'ios', 'ops', 'browser']) {
+    fireEvent.click(screen.getByRole('button', { name: 'Studio' }))
+    rerender(<EnvironmentCampaign profile={profile} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Project' }))
+    expect(container.querySelectorAll('.campaign-panel')).toHaveLength(1)
+    expect(container.querySelector('.campaign-panel')).toBe(campaignNode)
+    expect(screen.getByLabelText('Prompt')).toBe(field)
+    expect(field.value).toBe('Keep this project request')
+  }
+})
 
 // Existing control/security cases exercise the controls after explicit expansion.
 function render(ui) {
@@ -642,6 +669,61 @@ describe('release evidence panel', () => {
     campaign.completion.release.contract.cad_recipe = { recipe_id: 'dxf-layer-summary', recipe_version: 1,
       source_artifact: { sha256: 'b'.repeat(64), size_bytes: 4, path: 'https://untrusted.test/source' } }
   }
+  it.each([
+    'Design feeder routing, parts and cost.\n' + 'Keep this constraint.\n'.repeat(60) + 'Final constraint.',
+    'Deliver feeder_request.json unchanged.\nVerify the downloaded file.',
+  ])('keeps requested scope unverified while delivering the existing file: %s', async requested => {
+    readyOutput('feeder_request.json', 'application/json')
+    Object.assign(campaign.completion.release.contract, {
+      requested_workflow: requested,
+      scope_classification: { version: 1, capability: 'existing_artifact_delivery', requested_workflow_status: 'unverified' },
+      required_checks: stages.map(stage => ({ check_id: stage, stage, description: `Verify ${stage}` })),
+    })
+    campaign.completion.coverage = stages.map(stage => ({ check_id: stage, status: 'passed' }))
+    const before = structuredClone(campaign.completion)
+    const urlApi = { createObjectURL: vi.fn().mockReturnValue('blob:existing'), revokeObjectURL: vi.fn() }
+    const clicked = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    try {
+      renderCollapsed(panel({ artifactUrlApi: urlApi }))
+      expect(screen.getByText('Existing file delivered')).toBeTruthy()
+      const scope = screen.getByRole('region', { name: 'Requested workflow scope' })
+      expect(scope.closest('details')).toBeNull()
+      expect(scope.textContent).toContain(requested)
+      expect(within(scope).getByText('Requested workflow (unverified)')).toBeTruthy()
+      expect(within(scope).getByText('5 of 5 file-delivery checks passed.')).toBeTruthy()
+      expect(screen.queryByText('Completed release')).toBeNull()
+      expect(screen.queryByText('No remaining required checks reported for this release.')).toBeNull()
+      expect(screen.getByText('Passed file-delivery checks')).toBeTruthy()
+      fireEvent.click(screen.getByRole('button', { name: 'Download feeder_request.json' }))
+      await waitFor(() => expect(clicked).toHaveBeenCalledOnce())
+      expect(campaign.downloadReleaseArtifact).toHaveBeenCalledOnce()
+      expect(campaign.completion).toEqual(before)
+    } finally { clicked.mockRestore() }
+  })
+  it('qualifies legacy existing-file scope without reconstructing the exact request or changing receipts', () => {
+    readyOutput('feeder_request.json', 'application/json')
+    campaign.completion.release.contract.selected_artifact = { name: 'feeder_request.json' }
+    campaign.completion.release.deferred_items = ['Requested workflow beyond this release: truncated context']
+    const before = structuredClone(campaign.completion)
+    const view = renderCollapsed(panel())
+    const scope = screen.getByRole('region', { name: 'Requested workflow scope' })
+    expect(scope.textContent).toContain('the exact requested workflow is unknown')
+    expect(scope.textContent).toContain('Legacy original goal: Organize all family recipes')
+    expect(scope.textContent).toContain('truncated context')
+    expect(screen.getByText('Existing file delivered')).toBeTruthy()
+    expect(campaign.completion).toEqual(before)
+    campaign.completion.current_verification = { status: 'failed', reason: 'Artifact access revoked' }
+    view.rerender(panel())
+    expect(screen.queryByText('Existing file delivered')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Download feeder_request.json' })).toBeNull()
+  })
+  it.each(['web_recipe', 'transform_recipe', 'cad_recipe'])('keeps specialized %s out of existing-file classification', recipe => {
+    readyOutput('records.csv', 'text/csv')
+    Object.assign(campaign.completion.release.contract, { selected_artifact: { name: 'records.csv' }, [recipe]: {} })
+    render(panel())
+    expect(screen.getByText('Completed release')).toBeTruthy()
+    expect(screen.queryByRole('region', { name: 'Requested workflow scope' })).toBeNull()
+  })
   it('downloads verified source bytes as source.dxf and revokes the URL', async () => {
     readySource()
     campaign.downloadReleaseSource.mockResolvedValue({ name: 'source.dxf', mediaType: 'application/dxf', bytes: new Uint8Array([1, 2, 3, 4]).buffer })
@@ -734,6 +816,31 @@ describe('release evidence panel', () => {
     }
     expect(screen.getByRole('button', { name: 'Record answer' }).closest('details')).toBeNull()
     expect(screen.queryByRole('button', { name: 'Open tool records-to-csv.html' })).toBeNull()
+  })
+  it('hands verified UTF-8 HTML to the Browser provider instead of opening an inline preview', async () => {
+    readyOutput()
+    const accept = vi.fn().mockReturnValue(true)
+    render(<BrowserArtifactContext.Provider value={accept}>{panel()}</BrowserArtifactContext.Provider>)
+    fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
+    await waitFor(() => expect(accept).toHaveBeenCalledWith({ html: toolHtml, name: 'records-to-csv.html' }))
+    expect(screen.queryByTitle('Release tool: records-to-csv.html')).toBeNull()
+  })
+  it('does not hand malformed UTF-8 HTML to Browser', async () => {
+    readyOutput()
+    campaign.downloadReleaseArtifact.mockResolvedValue({ name: 'records-to-csv.html', mediaType: 'text/html', bytes: new Uint8Array([0xff]) })
+    const accept = vi.fn()
+    render(<BrowserArtifactContext.Provider value={accept}>{panel()}</BrowserArtifactContext.Provider>)
+    fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
+    await screen.findByText('The verified tool could not be opened because its HTML is not valid UTF-8.')
+    expect(accept).not.toHaveBeenCalled()
+  })
+  it('reports a refused stale handoff without falling back to an inline preview', async () => {
+    readyOutput()
+    const accept = vi.fn().mockReturnValue(false)
+    render(<BrowserArtifactContext.Provider value={accept}>{panel()}</BrowserArtifactContext.Provider>)
+    fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
+    await screen.findByText('The workspace changed. Open this verified tool again from the current project.')
+    expect(screen.queryByTitle('Release tool: records-to-csv.html')).toBeNull()
   })
   it('renders exact UTF-8 HTML with srcdoc and removes it on close, replacement and unmount', async () => {
     const artifact = readyOutput()

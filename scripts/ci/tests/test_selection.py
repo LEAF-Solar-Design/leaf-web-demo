@@ -180,6 +180,84 @@ class PluginBindingContracts(unittest.TestCase):
                 self.assertEqual(rows, state.attempts)
 
 
+class CatalogBindingContracts(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.catalog = {"schema": "leaf.ci.test-catalog.v1", "kind": "pytest",
+                        "suites": [{"id": "z", "test_ids": ["test_z.py::test_z"]},
+                                   {"id": "a", "test_ids": ["test_a.py::test_a"]}]}
+        self.catalog_path = self.root / "catalog.json"
+        self.catalog_path.write_text(json.dumps(self.catalog), encoding="utf-8")
+        self.event_path = self.root / "event.json"
+
+    def choose(self, event_name):
+        self.event_path.write_text(json.dumps({"event": event_name}), encoding="utf-8")
+        return selector.decide(self.root, "trusted", "head", self.root / "missing-map.json",
+                               event_evidence=self.event_path, catalog_path=self.catalog_path)
+
+    def assert_bound(self, decision):
+        self.assertEqual(decision["catalog_sha256"], selector.catalog_info(self.catalog)[1])
+        self.assertEqual(decision["catalog_kind"], "pytest")
+        self.assertEqual(decision["catalog_suite_ids"], ["a", "z"])
+        self.assertEqual(decision["executed_suite_ids"], decision["catalog_suite_ids"])
+        self.assertEqual(decision["execution_mode"], "full")
+        self.assertIs(decision["apply_filter"], False)
+
+    def test_non_pr_full_run_binds_catalog(self):
+        for event_name in ("MANUAL", "PUSH"):
+            with self.subTest(event=event_name):
+                decision = self.choose(event_name)
+                self.assert_bound(decision)
+                self.assertIn("non_pr_event", decision["reasons"])
+                self.assertEqual(decision["selection_mode"], "full")
+                self.assertIsNone(decision["assigned_arm"])
+
+    def test_unavailable_or_invalid_catalog_stays_unbound(self):
+        self.catalog_path.unlink()
+        for contents in (None, "not json", "{}", "[]", "\ufffd"):
+            with self.subTest(contents=contents):
+                if contents is not None:
+                    self.catalog_path.write_text(contents, encoding="utf-8")
+                decision = self.choose("MANUAL")
+                self.assertIsNone(decision["catalog_sha256"])
+                self.assertEqual(decision["catalog_suite_ids"], [])
+                self.assertEqual(decision["executed_suite_ids"], [])
+                self.assertIn("non_pr_event", decision["reasons"])
+
+    def test_existing_binding_is_never_replaced(self):
+        decision = {"catalog_sha256": "existing", "catalog_suite_ids": ["original"],
+                    "catalog_kind": "web", "selection_mode": "selected",
+                    "execution_mode": "selected", "apply_filter": True,
+                    "assigned_arm": "selected", "reasons": ["existing"]}
+        original = copy.deepcopy(decision)
+        selector.bind_catalog(decision, self.catalog_path)
+        self.assertEqual(decision, original)
+
+    def test_binding_only_changes_catalog_fields(self):
+        decision = {"catalog_sha256": None, "catalog_suite_ids": [],
+                    "selection_mode": "shadow", "execution_mode": "full",
+                    "apply_filter": False, "assigned_arm": "control", "reasons": ["original"]}
+        original = copy.deepcopy(decision)
+        selector.bind_catalog(decision, self.catalog_path)
+        for key in ("selection_mode", "execution_mode", "apply_filter", "assigned_arm", "reasons"):
+            self.assertEqual(decision[key], original[key])
+        self.assertEqual(decision["catalog_sha256"], selector.catalog_info(self.catalog)[1])
+
+    def test_selector_exception_fallback_binds_catalog(self):
+        output = self.root / "out"
+        with mock.patch.object(selector, "decide", side_effect=RuntimeError("synthetic exception")):
+            rc = selector.main(["decide", "--repo", str(self.root), "--trusted-sha", "trusted",
+                                "--head-sha", "head", "--map", str(self.root / "map.json"),
+                                "--catalog", str(self.catalog_path), "--out-dir", str(output)])
+        self.assertEqual(rc, 1)
+        decision = json.loads((output / "decision.json").read_text(encoding="utf-8"))
+        self.assert_bound(decision)
+        self.assertEqual(decision["reasons"], ["selector_exception"])
+        self.assertEqual((output / "only-args.nul").read_bytes(), b"")
+
+
 class SelectionContracts(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="selection-contract-",
@@ -316,7 +394,7 @@ class SelectionContracts(unittest.TestCase):
                                "repo": "fixture/repo", "revoked_map_shas": [],
                                "map_sha": self.git("rev-parse", self.trusted + ":" + selector.MAP_PATH)}}
 
-    def choose(self, event=None, env=None, expected_rc=0):
+    def choose(self, event=None, env=None, expected_rc=0, capture_epoch_manifest=None):
         event = self.evidence() if event is None else event
         event_path = self.inputs / "event.json"
         event_path.write_text(json.dumps(event), encoding="utf-8")
@@ -325,6 +403,8 @@ class SelectionContracts(unittest.TestCase):
                    "--head-sha", self.git("rev-parse", "HEAD"),
                    "--map", str(self.inputs / "map.json"), "--catalog", str(self.inputs / "catalog.json"),
                    "--event-evidence", str(event_path), "--out-dir", str(self.out)]
+        if capture_epoch_manifest is not None:
+            command.extend(["--capture-epoch-manifest", str(capture_epoch_manifest)])
         result = subprocess.run(command, capture_output=True, env=env or self.env, timeout=30)
         self.assertEqual(result.returncode, expected_rc, result.stderr.decode(errors="replace"))
         return json.loads((self.out / "decision.json").read_text(encoding="utf-8"))
@@ -358,6 +438,146 @@ class SelectionContracts(unittest.TestCase):
         self.catalog["runner_path"] = "scripts/run-all-gates.py"
         self.catalog["runner_blob_sha"] = self.git("rev-parse", self.trusted + ":scripts/run-all-gates.py")
         self.rebase_fixture()
+
+    def compact_fixture(self):
+        """Encode real suite rows with shared reads, missing reads and interned edges."""
+        rows = self.mapping["suites"]
+        paths = set()
+        for row in rows.values():
+            paths.update(row["read_paths"])
+            paths.update(row.get("negative_lookup_paths", []))
+            for directory in row.get("directory_reads", []):
+                paths.add(directory["path"])
+                paths.update(directory["members"])
+        paths = sorted(paths)
+        index = {path: i for i, path in enumerate(paths)}
+        shared = {paths[0]}
+        self.mapping.update(schema="leaf.ci.test-selection-map.v2", paths=paths,
+                            format={"paths": "interned", "session": "intersection"},
+                            session={"read_idx": [index[paths[0]]], "negative_idx": [],
+                                     "directory_reads": [], "directory_members": []})
+        for row in rows.values():
+            reads = set(row.pop("read_paths"))
+            row["read_extra_idx"] = sorted(index[p] for p in reads - shared)
+            row["read_missing_idx"] = sorted(index[p] for p in shared - reads)
+            row["negative_extra_idx"] = sorted(index[p] for p in row.pop("negative_lookup_paths", []))
+            row["directory_extra"] = [
+                {"path_idx": index[d["path"]], "member_idx": sorted(index[p] for p in d["members"])}
+                for d in sorted(row.pop("directory_reads", []), key=lambda d: d["path"])]
+
+    def process_fixture(self):
+        self.mapping.update(trace_kind=selector.PROCESS_TRACE_KIND,
+                            phase="shadow", selection_enabled=False)
+        entry = next(row for row in self.catalog["suites"] if row["id"] == "native")
+        entry.update(trace_kind=selector.PROCESS_TRACE_KIND, python_only=False)
+        self.mapping["suites"]["native"]["mappable"] = True
+        manifest = {"schema": "leaf.ci.capture-epoch.v1", "external_root_digests": {},
+                    "external_root_table": {}, "reporting_helper_sha256s": {}}
+        self.mapping["capture_epoch"] = selector.normalized_epoch(manifest)
+        self.mapping["external_root_digests"] = {}
+        path = self.inputs / "epoch.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        return path
+
+    def test_compact_session_edges_expand_and_validate(self):
+        compact = {
+            "schema": "leaf.ci.test-selection-map.v2",
+            "format": {"paths": "interned", "session": "intersection"},
+            "paths": [".", "data", "data/a", "data/b", "missing"],
+            "session": {"read_idx": [2], "negative_idx": [4],
+                        "collection_idx": [3], "directory_reads": [0, 1],
+                        "directory_members": [[1], [2]]},
+            "suites": {"sample": {"read_extra_idx": [3], "read_missing_idx": [2],
+                                   "negative_extra_idx": [], "directory_missing_idx": [0],
+                                   "directory_extra": [{"path_idx": 1, "member_idx": [3],
+                                                        "member_missing_idx": [2]}]}}}
+        expanded = selector.expand_map(compact)
+        row = expanded["suites"]["sample"]
+        self.assertEqual(row["read_paths"], ["data/b"])
+        self.assertEqual(row["negative_lookup_paths"], ["missing"])
+        self.assertEqual(row["directory_reads"], [{"path": "data", "members": ["data/b"]}])
+        self.assertEqual(expanded["session"]["collection_paths"], ["data/b"])
+        self.assertEqual(row["directory_trie"], selector.directory_trie(["data/b"]))
+        for field, value in (("read_extra_idx", [True]), ("read_extra_idx", [99]),
+                             ("read_extra_idx", [2]), ("read_missing_idx", [3]),
+                             ("negative_extra_idx", [4]), ("directory_missing_idx", [3])):
+            with self.subTest(field=field, value=value):
+                malformed = copy.deepcopy(compact)
+                malformed["suites"]["sample"][field] = value
+                with self.assertRaisesRegex(selector.InvalidInput, "invalid_map"):
+                    selector.expand_map(malformed)
+        self.assertEqual(compact["suites"]["sample"]["read_extra_idx"], [3])
+
+    def test_v2_matches_v1_decision(self):
+        self.change()
+        original = self.choose()
+        self.compact_fixture()
+        self.rebase_fixture()
+        self.change(text="good\n\n\n")
+        compact = self.choose()
+        for field in ("selection_mode", "proposed_suite_ids", "expanded_suite_ids", "known_read_paths"):
+            self.assertEqual(compact[field], original[field])
+
+    def test_process_entry_missed_edge_is_excluded(self):
+        epoch = self.process_fixture()
+        self.compact_fixture()
+        self.rebase_fixture()
+        self.change()
+        decision = self.choose(capture_epoch_manifest=epoch)
+        self.assertEqual(decision["selection_mode"], "shadow")
+        self.assertEqual(decision["proposed_suite_ids"], ["a", "mandatory"])
+
+    def test_process_entry_matching_edge_is_required(self):
+        epoch = self.process_fixture()
+        self.rebase_fixture()
+        self.change("native/input.json", '"changed"\n')
+        decision = self.choose(capture_epoch_manifest=epoch)
+        self.assertEqual(decision["selection_mode"], "shadow")
+        self.assertEqual(decision["proposed_suite_ids"], ["mandatory", "native"])
+
+    def test_process_epoch_fails_closed(self):
+        epoch = self.process_fixture()
+        self.rebase_fixture()
+        self.change()
+        for manifest, reason in ((None, "epoch_unavailable"),
+                                 (self.inputs / "missing.json", "epoch_unavailable"),
+                                 (epoch, "epoch_mismatch")):
+            if manifest == epoch:
+                epoch.write_text(json.dumps({"schema": "leaf.ci.capture-epoch.v1",
+                                             "external_root_digests": {"changed": "digest"}}),
+                                 encoding="utf-8")
+            decision = self.choose(capture_epoch_manifest=manifest)
+            self.assert_full(decision, reason)
+            self.assertEqual(decision["executed_suite_ids"], sorted(self.mapping["suites"]))
+
+    def test_process_entry_floors(self):
+        epoch = self.process_fixture()
+        entry = next(row for row in self.catalog["suites"] if row["id"] == "native")
+        for classification, contracts in (("mandatory", False), ("mapped", True)):
+            entry.update(classification=classification, contract_assertions=contracts)
+            self.rebase_fixture()
+            self.change(text="good\n" + "\n" * (1 if contracts else 2))
+            decision = self.choose(capture_epoch_manifest=epoch)
+            self.assertEqual(decision["selection_mode"], "shadow")
+            self.assertIn("native", decision["proposed_suite_ids"])
+            self.assertIn("mandatory", decision["proposed_suite_ids"])
+
+    def test_process_negative_listing_and_prefix_edges(self):
+        epoch = self.process_fixture()
+        row = self.mapping["suites"]["native"]
+        row["negative_lookup_paths"] = ["new/missing.json"]
+        row["directory_reads"] = [{"path": "listed", "members": []}]
+        row["generated_rules"] = [{"output": "native/input.json", "inputs": ["src/"],
+                                   "evidence_ref": "fixture-policy"}]
+        self.compact_fixture()
+        self.rebase_fixture()
+        for path in ("new/missing.json", "listed/new.json", "src/new.json"):
+            with self.subTest(path=path):
+                self.change(path, '{}\n')
+                decision = self.choose(capture_epoch_manifest=epoch)
+                self.assertEqual(decision["selection_mode"], "shadow")
+                self.assertIn("native", decision["proposed_suite_ids"])
+                self.assertFalse(decision["apply_filter"])
 
     def test_mixed_mapped(self):
         self.put("src/a.py", "good\n\n")
@@ -519,14 +739,92 @@ class SelectionContracts(unittest.TestCase):
                 revised = plugin.validate_collection_or_choose_full(changed, baseline, self.catalog)
                 self.assertFalse(revised["apply_filter"])
 
-    def test_catalog_change(self):
+    def test_catalog_metadata_change_is_not_suite_drift(self):
         self.change()
         for field, value in (("cwd", "elsewhere"), ("command", ["false"]),
                              ("floor", 9), ("skip_rule", "skip-everything")):
             changed = copy.deepcopy(self.catalog)
             changed["suites"][0][field] = value
             (self.inputs / "catalog.json").write_text(json.dumps(changed))
-            self.assert_full(self.choose(), "catalog_change")
+            decision = self.choose()
+            self.assertEqual(decision["execution_mode"], "selected")
+            self.assertNotEqual(decision["catalog_sha256"], decision["map_catalog_sha256"])
+            self.assertEqual(decision["catalog_drift"],
+                             {"new": [], "changed": [], "removed": [], "ratio": 0.0})
+
+    def test_catalog_drift_within_bound_is_not_catalog_change(self):
+        del self.mapping["suites"]["idle"]
+        self.rebase_fixture()
+        self.change()
+        decision = self.choose()
+        self.assertEqual(decision["execution_mode"], "selected")
+        self.assertIn("idle", decision["proposed_suite_ids"])
+        self.assertEqual(decision["catalog_drift"],
+                         {"new": ["idle"], "changed": [], "removed": [], "ratio": 0.2})
+        self.assertEqual(decision["known_read_paths"]["idle"], [])
+
+    def test_catalog_drift_above_bound_falls_back(self):
+        for sid in ("b", "idle"):
+            del self.mapping["suites"][sid]
+        self.rebase_fixture()
+        self.change()
+        decision = self.choose()
+        self.assert_full(decision, "catalog_change")
+        self.assertEqual(decision["catalog_drift"],
+                         {"new": ["b", "idle"], "changed": [], "removed": [], "ratio": 0.4})
+        self.mapping["max_catalog_drift_ratio"] = 0.5
+        self.rebase_fixture()
+        self.change(text="good\n\n\n")
+        decision = self.choose()
+        self.assertEqual(decision["execution_mode"], "selected")
+        self.assertTrue({"b", "idle"} <= set(decision["proposed_suite_ids"]))
+
+    def test_changed_test_ids_force_the_suite_required(self):
+        row = self.mapping["suites"]["idle"]
+        row["test_ids"] = ["tests/test_idle.py::test_old"]
+        row["read_paths"] = ["missing/stale.py"]
+        row["generated_rules"] = [None]
+        row["shared_state_dependencies"] = ["missing"]
+        self.rebase_fixture()
+        self.change()
+        decision = self.choose()
+        self.assertEqual(decision["execution_mode"], "selected")
+        self.assertIn("idle", decision["proposed_suite_ids"])
+        self.assertEqual(decision["catalog_drift"],
+                         {"new": [], "changed": ["idle"], "removed": [], "ratio": 0.2})
+        self.assertEqual(decision["known_read_paths"]["idle"], [])
+
+    def test_removed_suites_are_reported_not_fatal(self):
+        self.mapping["suites"]["retired"] = {"read_paths": ["missing/stale.py"]}
+        self.mapping["mandatory_suite_ids"] = ["retired", "missing-mandatory"]
+        self.mapping["always_select_suite_ids"] = ["retired", "missing-always"]
+        self.mapping["suites"]["b"]["shared_state_dependencies"] = ["retired"]
+        self.rebase_fixture()
+        self.change()
+        decision = self.choose()
+        self.assertEqual(decision["execution_mode"], "selected")
+        self.assertEqual(decision["catalog_drift"],
+                         {"new": [], "changed": [], "removed": ["retired"], "ratio": 0.0})
+        self.assertEqual(decision["mandatory_suite_ids"], [])
+        self.assertTrue(set(decision["proposed_suite_ids"]) <= set(decision["catalog_suite_ids"]))
+
+    def test_invalid_max_catalog_drift_ratio(self):
+        for value in (True, "0.2", -0.1, 1.5):
+            with self.subTest(value=value):
+                self.mapping["max_catalog_drift_ratio"] = value
+                self.rebase_fixture()
+                self.change(text="good\n" + repr(value) + "\n")
+                self.assert_full(self.choose(), "invalid_policy")
+
+    def test_rowless_map_still_falls_back(self):
+        self.mapping["suites"] = {}
+        self.rebase_fixture()
+        self.change()
+        decision = self.choose()
+        self.assert_full(decision, "catalog_change")
+        self.assertEqual(decision["catalog_drift"],
+                         {"new": sorted(row["id"] for row in self.catalog["suites"]), "changed": [],
+                          "removed": [], "ratio": 1.0})
 
     def test_hostile_policy(self):
         self.change(selector.MAP_PATH, '{"suites":{}}\n')
@@ -546,6 +844,116 @@ class SelectionContracts(unittest.TestCase):
         (self.inputs / "select_tests.py").write_text(trusted_source, encoding="utf-8")
         self.assert_full(self.choose(), "policy_path_changed")
         self.assertFalse(sentinel.exists())
+
+    def forge_evidence(self):
+        event = self.evidence()
+        event.update(provider="forge", initiator="forge-ci-relay", source_version="",
+                     head_ref="refs/pull/" + str(self.pr) + "/head", relay_manifest="verified",
+                     evidence_ref={"build": "fixture-build", "manifest_sha256": "a" * 64,
+                                   "operation": "ci-fixture"})
+        return event
+
+    def test_forge_relay_event_validates(self):
+        event = self.forge_evidence()
+        slug, number, bucket = selector.validate_event(event, event["head_sha"], "fixture/repo", self.pr)
+        self.assertEqual((slug, number), ("fixture/repo", self.pr))
+        self.assertEqual(bucket, selector.validate_event(self.evidence(), event["head_sha"], None, None)[2])
+
+    def forge_device_evidence(self):
+        event = self.forge_evidence()
+        build_id = "device:dv-0123456789abcdef"
+        operation = "ci-" + hashlib.sha256(
+            ("fixture/repo|pull_request|" + str(self.pr) + "|" + event["head_sha"])
+            .encode("utf-8")).hexdigest()[:40]
+        event.update(provider="forge-device", initiator="leaf-ci-device", build_id=build_id,
+                     evidence_ref={"build": build_id, "operation": operation})
+        event.pop("relay_manifest")
+        return event
+
+    def test_forge_device_event_validates(self):
+        event = self.forge_device_evidence()
+        slug, number, bucket = selector.validate_event(event, event["head_sha"], "fixture/repo", self.pr)
+        self.assertEqual((slug, number), ("fixture/repo", self.pr))
+        self.assertEqual(bucket, selector.validate_event(self.evidence(), event["head_sha"], None, None)[2])
+
+    def test_forge_device_event_refusals(self):
+        evidence = self.forge_device_evidence()["evidence_ref"]
+        cases = [({"provider_bound": False}, "unverified_event"),
+                 ({"provider_bound": 1}, "unverified_event"),
+                 ({"initiator": "forge-ci-relay"}, "unverified_event"),
+                 ({"build_id": "fixture-build"}, "unverified_event"),
+                 ({"build_id": "device:dv-0123456789abcde"}, "unverified_event"),
+                 ({"build_id": "device:dv-0123456789abcdeg"}, "unverified_event"),
+                 ({"build_id": 42}, "unverified_event"),
+                 ({"evidence_ref": "receipt"}, "unverified_event"),
+                 ({"evidence_ref": dict(evidence, build="other-build")}, "unverified_event"),
+                 ({"evidence_ref": dict(evidence, operation="ci-fixture")}, "unverified_event"),
+                 ({"evidence_ref": dict(evidence, operation="ci-" + "a" * 39)}, "unverified_event"),
+                 ({"evidence_ref": dict(evidence, operation="ci-" + "g" * 40)}, "unverified_event"),
+                 ({"evidence_ref": dict(evidence, operation=42)}, "unverified_event"),
+                 ({"source_version": "pr/7"}, "contradictory_event"),
+                 ({"head_ref": "refs/heads/feature"}, "contradictory_event"),
+                 ({"target_sha": "bad"}, "contradictory_event"),
+                 ({"event": "PUSH"}, "non_pr_event")]
+        for changes, reason in cases:
+            with self.subTest(changes=changes):
+                event = dict(self.forge_device_evidence(), **changes)
+                with self.assertRaisesRegex(selector.InvalidInput, "^" + reason + "$"):
+                    selector.validate_event(event, event["head_sha"], None, None)
+
+    def test_forge_event_refusals(self):
+        cases = [({"provider_bound": False}, "unverified_event"),
+                 ({"initiator": "GitHub-Hook"}, "unverified_event"),
+                 ({"evidence_ref": {"build": "fixture-build", "operation": "ci-fixture"}}, "unverified_event"),
+                 ({"source_version": "pr/7"}, "contradictory_event"),
+                 ({"head_ref": "refs/heads/feature"}, "contradictory_event"),
+                 ({"target_sha": "bad"}, "contradictory_event"),
+                 ({"provider": "unknown"}, "unverified_event"),
+                 ({"build_id": 42}, "unverified_event"),
+                 ({"evidence_ref": {"build": "fixture-build", "operation": "ci-fixture",
+                                    "manifest_sha256": "z" * 64}}, "unverified_event")]
+        for changes, reason in cases:
+            with self.subTest(changes=changes):
+                event = dict(self.forge_evidence(), **changes)
+                with self.assertRaisesRegex(selector.InvalidInput, "^" + reason + "$"):
+                    selector.validate_event(event, event["head_sha"], None, None)
+
+    def test_shadow_tolerates_unverified_merge_gate(self):
+        for phase in ("shadow", "active"):
+            self.mapping["phase"] = phase
+            self.rebase_fixture()
+            self.change(text="good\n" + phase + "\n")
+            event = self.evidence()
+            event.pop("merge_gate")
+            decision = self.choose(event)
+            self.assertIs(decision["merge_gate_verified"], False)
+            if phase == "shadow":
+                self.assertNotIn("merge_gate_unverified", decision["reasons"])
+                self.assertEqual(decision["merge_base_sha"], self.trusted)
+            else:
+                self.assert_full(decision, "merge_gate_unverified")
+
+    def test_shadow_revocation_evidence(self):
+        self.mapping["phase"] = "shadow"
+        self.rebase_fixture()
+        self.change()
+        event = self.evidence()
+        event["merge_gate"].pop("revoked_map_shas")
+        decision = self.choose(event)
+        self.assertIs(decision["merge_gate_verified"], False)
+        self.assertNotIn("revocation_unknown", decision["reasons"])
+        event["merge_gate"]["provider_bound"] = False
+        event["merge_gate"]["revoked_map_shas"] = [event["merge_gate"]["map_sha"]]
+        self.assert_full(self.choose(event), "map_revoked")
+
+    def test_forge_target_uses_origin(self):
+        self.change()
+        event = self.forge_evidence()
+        self.assert_full(self.choose(event), "target_mismatch")
+        self.git("update-ref", "refs/remotes/origin/main", self.trusted)
+        decision = self.choose(event)
+        self.assertEqual(decision["merge_base_sha"], self.trusted)
+        self.assertNotIn("target_mismatch", decision["reasons"])
 
     def test_non_pr_event(self):
         self.change()

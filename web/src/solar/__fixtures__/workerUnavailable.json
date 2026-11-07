@@ -1,0 +1,19 @@
+{
+  "ok": false,
+  "tool": null,
+  "version": null,
+  "result": null,
+  "overlay": null,
+  "timing_ms": 0,
+  "cost": null,
+  "error": {
+    "error_code": "INTERNAL",
+    "message": "Project Solar admission unavailable.",
+    "retryable": true,
+    "retry_class": "backoff",
+    "actor": "service",
+    "next_action": "Wait a short time, then retry the request.",
+    "reason_code": "SIP_R4_WORKER_UNAVAILABLE"
+  },
+  "degraded_mode": false
+}

@@ -7,10 +7,13 @@ uses zero-based original matrix indices. No drawing is changed.
 from __future__ import annotations
 
 import hashlib
+import base64
+from email.utils import parsedate_to_datetime
 import json
 import re
 import time
 from typing import Annotated, Literal
+from uuid import UUID
 
 import requests
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -425,6 +428,105 @@ def post_stringer(request: StringerRequest, grant: CloudGrant, *, preserve_uncer
         if preserve_uncertainty and not _known_prewrite_failure(exc):
             raise CloudError("solve_outcome_unknown", 502) from None
         raise CloudError("cloud_upstream_failure", 502) from None
+
+
+def grant_principal_sha256(grant: CloudGrant) -> str:
+    """Read custody identity only; grant resolution remains the authorization boundary."""
+    try:
+        payload = grant.access_token.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        issuer, subject = claims["iss"], claims["sub"]
+        if not all(isinstance(value, str) and value for value in (issuer, subject)):
+            raise ValueError()
+        return hashlib.sha256((issuer + "|" + subject).encode()).hexdigest()
+    except (ValueError, IndexError, KeyError, TypeError, UnicodeError):
+        raise CloudError("cloud_auth_missing", 401) from None
+
+
+def _async_stringer_call(method, url, grant, *, remaining_seconds, request=None,
+                         idempotency_key=None, grid_id=None):
+    if remaining_seconds <= 0:
+        return "retryable", 0.0
+    deadline = time.monotonic() + min(50, remaining_seconds)
+    headers = {"Authorization": "Bearer " + grant.access_token}
+    kwargs = {}
+    if request is not None:
+        headers.update({"Content-Type": "application/json", "Idempotency-Key": idempotency_key,
+                        "Prefer": "respond-async"})
+        kwargs["data"] = canonical_bytes(request.wire_payload())
+    try:
+        with method(url, headers=headers,
+                    timeout=(min(5, remaining_seconds / 2), min(45, remaining_seconds / 2)),
+                    allow_redirects=False, stream=True, **kwargs) as response:
+            status = response.status_code
+            if status == 401:
+                raise CloudError("cloud_auth_missing", 401)
+            if status == 403:
+                raise CloudError("cloud_tenant_unauthorized", 403)
+            if status == 409:
+                raise CloudError("cloud_request_invalid", 400)
+            if status == 503:
+                retry_after = response.headers.get("Retry-After", "5")
+                try:
+                    delay = float(retry_after)
+                except (ValueError, TypeError):
+                    try:
+                        delay = max(0.0, parsedate_to_datetime(retry_after).timestamp() - time.time())
+                    except (ValueError, TypeError, OverflowError, AttributeError):
+                        delay = 5.0
+                if not 0 <= delay <= 60:
+                    delay = 60.0 if delay > 60 else 5.0
+                return "busy", min(delay, remaining_seconds)
+            if status in (408, 429) or status >= 500:
+                return "retryable", min(5.0, remaining_seconds)
+            if grid_id is not None and status == 404:
+                return "missing", None
+            if status not in (200, 202):
+                raise CloudError("cloud_upstream_failure", 502)
+            chunks = bytearray()
+            for chunk in response.iter_content(16384):
+                chunks.extend(chunk)
+                if len(chunks) > MAX_RESPONSE_BYTES:
+                    raise CloudError("cloud_response_invalid", 502)
+                if time.monotonic() >= deadline:
+                    return "retryable", 0.0
+            raw = bytes(chunks)
+            try:
+                value = json.loads(raw)
+                if status == 202:
+                    if grid_id is not None and value["status"] == "running":
+                        return "pending", None
+                    if grid_id is None and value["status"] == "accepted":
+                        return "accepted", UUID(value["grid_id"])
+                    raise ValueError()
+                if grid_id is not None and value["status"] == "expired":
+                    return "expired", None
+                if value["status"] != "completed":
+                    raise ValueError()
+                if grid_id is not None and UUID(value["job_id"]) != grid_id:
+                    raise ValueError()
+                return "completed", raw
+            except (ValueError, KeyError, TypeError, AttributeError):
+                raise CloudError("cloud_response_invalid", 502) from None
+    except requests.RequestException:
+        # This API is used only for recorded async custody. The same key is safe
+        # even after a write followed by a timeout or connection reset.
+        return "retryable", min(5.0, remaining_seconds)
+
+
+def submit_stringer_async(request: StringerRequest, grant: CloudGrant, idempotency_key: str,
+                          *, remaining_seconds=600):
+    return _async_stringer_call(requests.post, SOLVER_URL, grant,
+        remaining_seconds=remaining_seconds, request=request, idempotency_key=idempotency_key)
+
+
+def get_stringer_result(grid_id, grant: CloudGrant, *, remaining_seconds=600):
+    try:
+        grid_id = UUID(str(grid_id))
+    except (ValueError, TypeError, AttributeError):
+        raise CloudError("cloud_request_invalid", 400) from None
+    return _async_stringer_call(requests.get, SOLVER_URL + "jobs/" + str(grid_id) + "/result",
+        grant, remaining_seconds=remaining_seconds, grid_id=grid_id)
 
 
 def proposal(params: dict, tenant_id: str, job_id: str) -> dict:

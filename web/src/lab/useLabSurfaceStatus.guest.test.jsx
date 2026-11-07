@@ -2,9 +2,9 @@
 import { act, cleanup, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
+const tokenEvents = vi.hoisted(() => new Set())
 vi.mock('../auth.js', async () => {
   const beforeLogoutListeners = new Set()
-  const tokenStoredListeners = new Set()
   return {
     ...await vi.importActual('../auth.js'),
     authConfigured: true,
@@ -15,8 +15,8 @@ vi.mock('../auth.js', async () => {
       return () => beforeLogoutListeners.delete(listener)
     },
     subscribeTokenStored: (listener) => {
-      tokenStoredListeners.add(listener)
-      return () => tokenStoredListeners.delete(listener)
+      tokenEvents.add(listener)
+      return () => tokenEvents.delete(listener)
     },
   }
 })
@@ -54,4 +54,16 @@ it('a signed-in session still probes', async () => {
   renderHook(() => useLabSurfaceStatus(false))
   await act(async () => {})
   expect(fetchLabStatus).toHaveBeenCalledTimes(1)
+})
+
+it('refreshes a known guest after popup token storage and unsubscribes on unmount', async () => {
+  const { result, unmount } = renderHook(() => useLabSurfaceStatus(false))
+  expect(result.current).toEqual({ state: 'signed-out', posture: null })
+  expect(fetchLabStatus).not.toHaveBeenCalled()
+  isSignedIn.mockReturnValue(true)
+  await act(async () => { for (const listener of tokenEvents) listener() })
+  expect(fetchLabStatus).toHaveBeenCalledTimes(1)
+  expect(result.current).toEqual({ state: 'on', posture: null })
+  unmount()
+  expect(tokenEvents.size).toBe(0)
 })

@@ -1,5 +1,6 @@
 import { createSolarDrawingBinding, sameSolarDrawingBinding } from './solarDrawingBinding.js'
-import { PROJECT_SOLAR_RUN_REASONS, projectSolarRunFailure, readProjectSolarCompletion } from './solarProjectCompletion.js'
+import { PROJECT_SOLAR_RUN_REASONS, projectSolarRunFailure, readProjectSolarCompletion,
+  readProjectSolarWorkerRefusal, projectSolarWorkerRefusal } from './solarProjectCompletion.js'
 import { projectSolarIntentExtras } from '../runIntent.js'
 
 export const PROJECT_SOLAR_RUN_POLL_MS = 1000
@@ -31,9 +32,12 @@ const deferred = () => {
 }
 
 // Only the transport projection is inspected. Unrelated envelope data stays private to R7.
-function transport(value, submitting) {
+function transport(value, submitting, tool) {
   let definiteFailure = false
   try {
+    const workerReason = submitting ? readProjectSolarWorkerRefusal(value) : null
+    if (workerReason) return { kind: 'refused', status: 503, reason: workerReason,
+      failure: projectSolarWorkerRefusal(tool) }
     const ok = field(value, 'ok')
     assert(typeof ok === 'boolean')
     definiteFailure = ok === false
@@ -189,7 +193,7 @@ export function createProjectSolarRunController({ projectClient, onOutcome = () 
       run.sent = true
       return projectClient.submitRun(run.preparedIntent, { signal: run.controller.signal })
     })
-    const parsed = result.lost ? { kind: 'lost' } : transport(result.value, submitting)
+    const parsed = result.lost ? { kind: 'lost' } : transport(result.value, submitting, run.tool)
     const stopped = check(run)
     if (stopped) throw stopped
     if (parsed.kind === 'stale' || parsed.kind === 'aborted') {

@@ -127,6 +127,36 @@
   --cad-properties-pane: var(--ck-pane);
   --cad-status-bar: var(--ck-status);
 }
+/* The grounds are portaled outside .app, so they take the cockpit's dark mapping of the legacy variables here. */
+.studio-shell:has(.app[data-studio-shell="cockpit"]) .studio-ground {
+  color: var(--leaf-ink);
+  --background: var(--leaf-surface);
+  --card: var(--leaf-ground);
+  --border: var(--leaf-line);
+  --primary: var(--leaf-accent);
+  --primary-hover: var(--leaf-accent-hover);
+  --on-accent: var(--leaf-on-accent);
+  --foreground: var(--leaf-ink);
+  --muted: var(--leaf-ink-muted);
+  --muted-2: var(--leaf-ink-muted);
+  --card-grad: linear-gradient(180deg, var(--leaf-surface), var(--leaf-surface));
+  --accent-tint: var(--leaf-accent-tint);
+  --accent-tint-hover: var(--leaf-accent-tint-strong);
+  --rule-strong: var(--leaf-cad-ink-off);
+  --hover-tint: var(--leaf-hover-tint);
+  --hover-tint-strong: var(--leaf-hover-tint-strong);
+  --well: var(--leaf-ground);
+  --well-border: var(--leaf-line);
+  --well-chip: var(--leaf-raised);
+  --well-text: var(--leaf-ink);
+  --well-dim: var(--leaf-ink-muted);
+  --well-faint: var(--leaf-cad-ink-off);
+  --well-accent: var(--leaf-accent);
+  --well-accent-tint: var(--leaf-accent-tint);
+  --ink: var(--foreground);
+  --ink-2: var(--muted);
+  --rule: var(--border);
+}
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top {
   height: var(--ck-top); min-height: 0; box-sizing: border-box;
   padding: 0 4px 0 6px; gap: 4px; flex-wrap: nowrap; overflow: hidden;
@@ -157,13 +187,15 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs { gap: 2px; margin: 0; padding: 0; border: 0; background: transparent; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs [role="tab"] {
     height: 22px; padding: 0 8px; gap: 5px; border-radius: var(--leaf-radius-key); border: 1px solid transparent;
-    font: 400 var(--leaf-size-caption) var(--ck-font); color: var(--leaf-ink-muted); background: transparent; box-shadow: none; align-items: center;
+    font: 400 var(--leaf-size-caption) var(--ck-font); color: var(--leaf-ink-muted); background: transparent; box-shadow: none; align-items: center; flex-direction: row;
   }
 @media (hover: hover) and (pointer: fine) { .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs [role="tab"]:hover { background: var(--ck-hover); color: var(--leaf-ink); } }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs [role="tab"][aria-selected="true"] {
     background: var(--ck-title); border-color: var(--leaf-line); color: var(--leaf-ink); box-shadow: none;
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs [role="tab"] small { font: 400 var(--leaf-size-caption) var(--ck-font); letter-spacing: 0; text-transform: none; color: var(--ck-label); }
+/* The status takes no space where the row is tight; the tab announces it as its accessible description. */
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs [role="tab"] small { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-nav .tc-account-signout { display: none; }
 }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] main.center-scroll { padding: 0; }
@@ -217,6 +249,10 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] .tc-product-tabs { gap: 2px; margin: 0; padding: 0; border: 0; background: transparent; flex-wrap: nowrap; flex-shrink: 0; height: 22px; min-height: 0; box-sizing: border-box; align-self: flex-start; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] .tc-product-tabs [role="tab"] { flex-shrink: 0; white-space: nowrap; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] { --ck-rail-width: 300px; --ck-overview-reserve: 212px; }
+/* A mounted but hidden Studio rail must not reserve canvas or tool width. */
+.studio-shell .app[data-studio-shell="cockpit"]:is([data-surface="cad"], [data-surface="solar"])[data-environment-panel] { --ck-rail-width: 0px; }
+.studio-shell .app[data-studio-shell="cockpit"]:is([data-surface="cad"], [data-surface="solar"])[data-environment-panel="studio"] { --ck-rail-width: 300px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface="solar"][data-environment-panel] { grid-template-columns: var(--ck-nav-width) minmax(0, 1fr) var(--ck-rail-width); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"]:has(.cad-overview) .converse-card {
     margin-right: var(--ck-overview-reserve);
   }
@@ -310,7 +346,7 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[aria-expanded="true"] { background: var(--ck-hover); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool .ribbon-tool-label { display: none; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="large"] {
-  grid-row: 1 / span 3; width: 57px; height: 78px; box-sizing: border-box;
+  grid-row: 1 / span 3; width: 66px; height: 78px; box-sizing: border-box;
   flex-direction: column; justify-content: space-between; padding: 5px 2px 4px; gap: 3px;
 }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="large"] .ribbon-tool-label {
@@ -507,7 +543,7 @@
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]) .tc-product-tabs { align-self: flex-start; }
 }
-/* Browser, Ops and the other non-CAD grounds keep the own-row tabs from 1440 px up, because the pinned header row overlaps the header controls below about 1780 px. iOS keeps the pinned row there until its ground window is measured with the own row. */
+/* Browser, Ops and the other non-CAD grounds keep the own-row tabs from 1440 px up, because the pinned header row overlaps the header controls below about 1780 px. iOS keeps the pinned row (the own row broke its ship-surface proof) and anchors it after its one ribbon tab, Ship, so it clears the account controls. */
 @media (min-width: 1440px) {
 .studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]):not([data-surface="ios"]) { --ck-canvas-top: 183px; --ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px)); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]):not([data-surface="ios"]) .tc-product-nav {
@@ -521,6 +557,9 @@
     height: 30px; min-height: 30px; padding-top: 2px; align-items: flex-start;
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]):not([data-surface="ios"]) .tc-product-tabs { align-self: flex-start; }
+/* The own row has room, so status appears inline after the surface name. */
+.studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]):not([data-surface="ios"]) .tc-product-tabs [role="tab"] small { position: static; width: auto; height: auto; overflow: visible; clip-path: none; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface="ios"] .tc-product-nav { left: 440px; }
 }
 @media (pointer: coarse) and (max-width: 1439px), (max-width: 1023px) {
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] { --ck-ribbon: 151px; }
@@ -758,4 +797,15 @@
     overflow-x: auto; flex-wrap: nowrap; background: transparent; isolation: isolate; pointer-events: auto;
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface="solar"] .tc-product-tabs { flex-wrap: nowrap; flex-shrink: 0; height: 22px; min-height: 0; margin: 0; padding: 0; box-sizing: border-box; align-self: flex-start; }
+}
+
+/* Wide desktop: large tool labels stop at two lines with an ellipsis; title and aria-label carry the full name (rule L1). */
+@media (min-width: 1440px) {
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="large"] .ribbon-tool-label { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
+}
+
+/* Desktop: row tools and profile command rows grow to fit their label, within bounds (rule L1). */
+@media (min-width: 1024px) {
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="row"] { width: auto; min-width: 104px; max-width: 180px; }
+.studio-shell .app[data-studio-shell="cockpit"] .studio-chrome-host[data-ribbon-context="workspace"] .ribbon-tool { width: auto; min-width: 168px; max-width: 220px; }
 }

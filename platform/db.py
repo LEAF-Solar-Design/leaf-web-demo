@@ -50,6 +50,27 @@ _MIGRATION_LEDGER_COLUMNS = {"name", "sha256", "applied_at"}
 # compatibility contract, not a provider choice. Additions stay additive so an
 # older application can continue to read a database prepared by a newer image.
 _REQUIRED_COLUMNS = {
+    "project_checkout_custody": {
+        "delegation_id", "tenant_id", "confirmation_id", "session_id", "subject",
+        "actor_binding_id", "input_binding", "approved_args", "fence", "expires_at",
+        "revoked_at", "created_at",
+    },
+    "org_invitations": {
+        "id", "org_id", "token_hash", "role", "label", "created_by_binding_id",
+        "created_at", "expires_at", "accepted_at", "accepted_binding_id",
+        "revoked_at", "revoked_by_binding_id",
+    },
+    "org_invitation_receipts": {
+        "id", "invitation_id", "org_id", "event", "actor_binding_id", "at",
+    },
+    "service_login_challenges": {
+        "id", "nonce_hash", "environment", "origin", "expires_at", "approved_at",
+        "consumed_at", "sealed_token", "subject", "token_expires_at",
+    },
+    "service_browser_sessions": {
+        "binding_id", "secret_hash", "sealed_token", "subject", "environment",
+        "origin", "created_at", "expires_at", "revoked_at",
+    },
     "project_solve_exchanges": {
         "job_id", "org_id", "project_id", "drawing_id", "input_version_id",
         "parent_intake_sha256", "graph_revision", "graph_sha256", "frame_id", "phase",
@@ -57,6 +78,7 @@ _REQUIRED_COLUMNS = {
         "response_bytes", "response_sha256", "solver_endpoint", "solver_version",
         "candidate_bytes", "candidate_sha256", "proof_bytes", "proof_sha256",
         "sender_worker", "sender_attempt", "refusal_code", "created_at", "updated_at",
+        "grid_id", "send_protocol", "sent_at", "send_principal_sha256",
     },
     "demo_sessions": {
         "id", "subject", "tenant_id", "org_id", "created_at", "expires_at",
@@ -353,6 +375,18 @@ _REQUIRED_COLUMNS = {
         "content_sha256", "revision", "created_by_binding_id", "created_at",
         "updated_at",
     },
+    "project_web_page_revisions": {
+        "org_id", "project_id", "revision", "document", "digest", "actor_binding_id", "created_at",
+    },
+    "project_materials": {
+        "material_id", "org_id", "project_id", "actor_binding_id", "name",
+        "media_type", "byte_size", "sha256", "width", "height",
+        "preview_media_type", "preview_sha256", "created_at",
+    },
+    "project_reference_materials": {
+        "material_id", "org_id", "project_id", "actor_binding_id", "name",
+        "media_type", "byte_size", "sha256", "created_at",
+    },
     "project_lifecycle_receipts": {
         "receipt_id", "org_id", "project_id", "action", "actor_binding_id",
         "idempotency_key", "input_digest", "result_json", "created_at",
@@ -433,6 +467,19 @@ _REQUIRED_COLUMNS = {
 # Legacy values intentionally add nothing. Session shadow and dual-write modes
 # still write PostgreSQL, so they require the same proof as canonical reads.
 _AUTHORITY_REQUIRED_COLUMNS = {
+    "devices": {
+        "device_enrollments": {"enrollment_id", "tenant_id", "project_id", "label", "token_sha256",
+                               "created_by", "created_at", "expires_at", "consumed_at", "device_id"},
+        "devices": {"device_id", "tenant_id", "project_id", "label", "public_key", "agent_version",
+                    "platform", "hostname", "created_at", "last_seen_at", "revoked_at", "revoked_by",
+                    "packages", "free_mem_mb"},
+        "device_commands": {"command_id", "tenant_id", "device_id", "op", "args", "issued_by", "issued_at",
+                            "expires_at", "leased_at", "lease_until", "state", "result", "finished_at"},
+        "device_nonces": {"device_id", "nonce", "seen_at"},
+        "device_relay_tokens": {"token_id", "tenant_id", "device_id", "package", "label", "token_sha256",
+                                "created_by", "created_at", "revoked_at", "last_used_at"},
+        "device_audit": {"event_id", "tenant_id", "device_id", "at", "actor", "op", "target", "status", "request_sha256"},
+    },
     "lab_runs": {
         "lab_activations": {"tenant_id", "activation_id", "doc_id", "revision", "graph_sha256",
                             "registry_digest", "ops_revision", "input_digest", "principal", "interval_s",
@@ -445,7 +492,8 @@ _AUTHORITY_REQUIRED_COLUMNS = {
                      "registry_digest", "ops_revision", "input_digest", "adapter_revision",
                      "build_revision", "state", "lease_owner", "lease_fence", "lease_expires_at",
                      "next_seq", "event_count", "created_at", "updated_at", "finished_at",
-                     "claimed_build_revision", "claimed_color", "cancel_requested_at", "cancel_requested_by"},
+                     "claimed_build_revision", "claimed_color", "cancel_requested_at", "cancel_requested_by",
+                     "corpus_authority_json"},
         "lab_run_events": {"tenant_id", "run_id", "seq", "block_id", "kind", "payload", "created_at"},
         "lab_worker_status": {"worker_id", "build_revision", "color", "heartbeat_at", "active_runs", "queued_runs"},
         "lab_worker_control": {"id", "paused", "reason", "updated_by", "updated_at"},
@@ -473,7 +521,7 @@ _AUTHORITY_REQUIRED_COLUMNS = {
             "lease_owner", "lease_expires_at", "heartbeat_at", "provenance_json",
             "terminal_fingerprint", "terminal_conflict_json", "org_id", "project_id",
             "authority_mode", "idempotency_key", "submission_fingerprint", "dwg_version",
-            "aps_workitem_id", "aps_workitem_attempt",
+            "aps_workitem_id", "aps_workitem_attempt", "corpus_cancel_json", "corpus_cleanup_json",
         },
         "async_job_terminal_conflicts": {
             "job_id", "fingerprint", "evidence_json", "received_at",
@@ -738,6 +786,26 @@ def _catalog_contract(relation: str, *definition_fragments: str) -> Dict[str, An
 # stores, the project lifecycle is part of the canonical platform API whenever
 # this application image is running.
 _REQUIRED_CONSTRAINTS = {
+    "org_invitations_pkey": _catalog_contract("org_invitations", "PRIMARY KEY (id)"),
+    "org_invitations_token_hash_key": _catalog_contract("org_invitations", "UNIQUE (token_hash)"),
+    "org_invitations_role_check": _catalog_contract("org_invitations", "CHECK", "role = 'editor'"),
+    "org_invitations_org_id_fkey": _catalog_contract(
+        "org_invitations", "FOREIGN KEY (org_id)", "REFERENCES orgs(org_id)"),
+    "org_invitations_created_by_binding_id_fkey": _catalog_contract(
+        "org_invitations", "FOREIGN KEY (created_by_binding_id)", "REFERENCES identity_bindings(binding_id)"),
+    "org_invitations_accepted_binding_id_fkey": _catalog_contract(
+        "org_invitations", "FOREIGN KEY (accepted_binding_id)", "REFERENCES identity_bindings(binding_id)"),
+    "org_invitations_revoked_by_binding_id_fkey": _catalog_contract(
+        "org_invitations", "FOREIGN KEY (revoked_by_binding_id)", "REFERENCES identity_bindings(binding_id)"),
+    "org_invitation_receipts_pkey": _catalog_contract("org_invitation_receipts", "PRIMARY KEY (id)"),
+    "org_invitation_receipts_invitation_id_fkey": _catalog_contract(
+        "org_invitation_receipts", "FOREIGN KEY (invitation_id)", "REFERENCES org_invitations(id)"),
+    "org_invitation_receipts_org_id_fkey": _catalog_contract(
+        "org_invitation_receipts", "FOREIGN KEY (org_id)", "REFERENCES orgs(org_id)"),
+    "org_invitation_receipts_actor_binding_id_fkey": _catalog_contract(
+        "org_invitation_receipts", "FOREIGN KEY (actor_binding_id)", "REFERENCES identity_bindings(binding_id)"),
+    "org_invitation_receipts_event_check": _catalog_contract(
+        "org_invitation_receipts", "CHECK", "event", "'created'", "'accepted'", "'revoked'"),
     "tenant_cost_events_pkey": _catalog_contract(
         "tenant_cost_events", "PRIMARY KEY (id)"),
     "tenant_cost_events_org_id_fkey": _catalog_contract(
@@ -745,7 +813,7 @@ _REQUIRED_CONSTRAINTS = {
     "tenant_cost_events_event_key_key": _catalog_contract(
         "tenant_cost_events", "UNIQUE (event_key)"),
     "tenant_cost_events_addon_check": _catalog_contract(
-        "tenant_cost_events", "CHECK", "addon = ANY (ARRAY['aps_solve', 'e2b_exec', 'marathon', 'forge_hosting', 'aws_resources', 'storage', 'canonical_solve', 'tool_ci', 'gpu_inference', 'ios_build', 'app_auth'])"),
+        "tenant_cost_events", "CHECK", "addon = ANY (ARRAY['aps_solve', 'e2b_exec', 'marathon', 'forge_hosting', 'aws_resources', 'storage', 'canonical_solve', 'tool_ci', 'gpu_inference', 'ios_build', 'app_auth', 'kashbot_runner'])"),
     "tenant_cost_events_mode_check": _catalog_contract(
         "tenant_cost_events", "CHECK", "mode = ANY (ARRAY['managed', 'byo'])"),
     # Vendor names have 1 to 100 characters; units have 1 to 50 characters.
@@ -775,7 +843,7 @@ _REQUIRED_CONSTRAINTS = {
     "tenant_addon_settings_org_id_fkey": _catalog_contract(
         "tenant_addon_settings", "FOREIGN KEY (org_id)", "REFERENCES orgs(org_id)"),
     "tenant_addon_settings_addon_check": _catalog_contract(
-        "tenant_addon_settings", "CHECK", "addon = ANY (ARRAY['aps_solve', 'e2b_exec', 'marathon', 'forge_hosting', 'aws_resources', 'storage', 'canonical_solve', 'tool_ci', 'gpu_inference', 'ios_build', 'app_auth'])"),
+        "tenant_addon_settings", "CHECK", "addon = ANY (ARRAY['aps_solve', 'e2b_exec', 'marathon', 'forge_hosting', 'aws_resources', 'storage', 'canonical_solve', 'tool_ci', 'gpu_inference', 'ios_build', 'app_auth', 'kashbot_runner'])"),
     "tenant_addon_settings_mode_check": _catalog_contract(
         "tenant_addon_settings", "CHECK", "mode = ANY (ARRAY['managed', 'byo', 'off'])"),
     # Credential names have 1 to 128 characters.
@@ -843,6 +911,12 @@ _REQUIRED_CONSTRAINTS = {
         "response_sha256 = encode(sha256(response_bytes), 'hex')",
         "candidate_sha256 = encode(sha256(candidate_bytes), 'hex')",
         "proof_sha256 = encode(sha256(proof_bytes), 'hex')"),
+    "project_solve_exchanges_async_shape_check": _catalog_contract(
+        "project_solve_exchanges", "CHECK", "send_protocol IS NULL",
+        "send_protocol = 'async-idempotent-v1'", "grid_id IS NULL",
+        "'prepared'", "'outcome_unknown'", "sent_at IS NULL", "sent_at IS NOT NULL",
+        "send_principal_sha256 IS NULL", "send_principal_sha256 IS NOT NULL",
+        "send_principal_sha256 ~ '^[0-9a-f]{64}$'"),
     "project_solve_exchanges_shape_check": _catalog_contract(
         "project_solve_exchanges", "CHECK", "response_bytes IS NULL", "response_sha256 IS NULL",
         "candidate_bytes IS NULL", "candidate_sha256 IS NULL", "proof_bytes IS NULL",
@@ -1082,6 +1156,64 @@ _REQUIRED_CONSTRAINTS = {
         "project_files", "CHECK (revision > 0)"),
     "project_files_scope_path_unique": _catalog_contract(
         "project_files", "UNIQUE (org_id, project_id, path)"),
+    "project_web_page_revisions_pkey": _catalog_contract(
+        "project_web_page_revisions", "PRIMARY KEY (org_id, project_id, revision)"),
+    "project_web_page_revisions_org_id_project_id_fkey": _catalog_contract(
+        "project_web_page_revisions", "FOREIGN KEY (org_id, project_id)",
+        "REFERENCES projects(org_id, project_id) ON DELETE CASCADE"),
+    "project_web_page_revisions_org_id_actor_binding_id_fkey": _catalog_contract(
+        "project_web_page_revisions", "FOREIGN KEY (org_id, actor_binding_id)",
+        "REFERENCES identity_bindings(platform_tenant_id, binding_id)"),
+    "project_web_page_revisions_revision_check": _catalog_contract(
+        "project_web_page_revisions", "CHECK (revision > 0)"),
+    "project_web_page_revisions_document_check": _catalog_contract(
+        "project_web_page_revisions", "CHECK", "jsonb_typeof(document) = 'object'"),
+    "project_web_page_revisions_digest_check": _catalog_contract(
+        "project_web_page_revisions", "CHECK", "digest ~ '^[0-9a-f]{64}$'"),
+    "project_reference_materials_pkey": _catalog_contract(
+        "project_reference_materials", "PRIMARY KEY (material_id)"),
+    "reference_scope_digest": _catalog_contract(
+        "project_reference_materials", "UNIQUE (org_id, project_id, sha256)"),
+    "reference_project_fk": _catalog_contract(
+        "project_reference_materials", "FOREIGN KEY (org_id, project_id)",
+        "REFERENCES projects(org_id, project_id) ON DELETE CASCADE"),
+    "reference_actor_fk": _catalog_contract(
+        "project_reference_materials", "FOREIGN KEY (org_id, actor_binding_id)",
+        "REFERENCES identity_bindings(platform_tenant_id, binding_id)"),
+    "project_reference_materials_name_check": _catalog_contract(
+        "project_reference_materials", "CHECK", "char_length(name) >= 1", "char_length(name) <= 255"),
+    "project_reference_materials_media_type_check": _catalog_contract(
+        "project_reference_materials", "CHECK", "media_type", "'video/quicktime'", "'text/plain'", "'application/json'", "'application/gzip'"),
+    "project_reference_materials_byte_size_check": _catalog_contract(
+        "project_reference_materials", "CHECK", "byte_size >= 1", "byte_size <= 67108864"),
+    "reference_text_size": _catalog_contract(
+        "project_reference_materials", "CHECK", "media_type", "'video/quicktime'", "'application/gzip'", "byte_size <= 8388608"),
+    "project_reference_materials_sha256_check": _catalog_contract(
+        "project_reference_materials", "CHECK", "sha256 ~ '^[0-9a-f]{64}$'"),
+    "project_materials_pkey": _catalog_contract(
+        "project_materials", "PRIMARY KEY (material_id)"),
+    "project_materials_org_id_project_id_sha256_key": _catalog_contract(
+        "project_materials", "UNIQUE (org_id, project_id, sha256)"),
+    "project_materials_org_id_project_id_fkey": _catalog_contract(
+        "project_materials", "FOREIGN KEY (org_id, project_id)",
+        "REFERENCES projects(org_id, project_id) ON DELETE CASCADE"),
+    "project_materials_org_id_actor_binding_id_fkey": _catalog_contract(
+        "project_materials", "FOREIGN KEY (org_id, actor_binding_id)",
+        "REFERENCES identity_bindings(platform_tenant_id, binding_id)"),
+    "project_materials_name_check": _catalog_contract(
+        "project_materials", "CHECK", "char_length(name) >= 1", "char_length(name) <= 255"),
+    "project_materials_media_type_check": _catalog_contract(
+        "project_materials", "CHECK", "media_type", "'image/jpeg'", "'image/png'", "'image/heif'"),
+    "project_materials_byte_size_check": _catalog_contract(
+        "project_materials", "CHECK", "byte_size >= 1", "byte_size <= 16777216"),
+    "project_materials_sha256_check": _catalog_contract(
+        "project_materials", "CHECK", "sha256 ~ '^[0-9a-f]{64}$'"),
+    "project_materials_width_check": _catalog_contract(
+        "project_materials", "CHECK (width > 0)"),
+    "project_materials_preview_media_type_check": _catalog_contract(
+        "project_materials", "CHECK", "preview_media_type = 'image/jpeg'"),
+    "project_materials_preview_sha256_check": _catalog_contract(
+        "project_materials", "CHECK", "preview_sha256 ~ '^[0-9a-f]{64}$'"),
     "project_lifecycle_receipts_pkey": _catalog_contract(
         "project_lifecycle_receipts", "PRIMARY KEY (receipt_id)"),
     "project_lifecycle_receipts_project_fk": _catalog_contract(
@@ -1106,6 +1238,8 @@ _REQUIRED_CONSTRAINTS = {
 }
 
 _REQUIRED_INDEXES = {
+    "org_invitations_pending_org_idx": _catalog_contract(
+        "org_invitations", "(org_id)", "WHERE", "accepted_at IS NULL", "revoked_at IS NULL"),
     "idx_tenant_cost_events_org_period": _catalog_contract(
         "tenant_cost_events", "(org_id, occurred_at)"),
     "idx_tenant_cost_events_org_addon_period": _catalog_contract(
@@ -1140,6 +1274,10 @@ _REQUIRED_INDEXES = {
         "project_member_bindings", "(org_id, project_id, created_at, membership_id)"),
     "idx_project_files_scope": _catalog_contract(
         "project_files", "(org_id, project_id, path)"),
+    "reference_scope_page": _catalog_contract(
+        "project_reference_materials", "(org_id, project_id, material_id)"),
+    "project_materials_scope_page": _catalog_contract(
+        "project_materials", "(org_id, project_id, material_id)"),
     "idx_project_lifecycle_receipts_scope": _catalog_contract(
         "project_lifecycle_receipts", "(org_id, project_id, created_at, receipt_id)"),
     "project_lifecycle_receipts_create_idempotency": _catalog_contract(
@@ -1154,12 +1292,21 @@ _REQUIRED_INDEXES = {
 }
 
 _REQUIRED_TRIGGERS = {
+    "org_invitation_receipts_immutable": _catalog_contract(
+        "org_invitation_receipts", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
+        "EXECUTE FUNCTION reject_org_invitation_receipt_mutation()"),
+    "project_web_page_revisions_immutable": _catalog_contract(
+        "project_web_page_revisions", "BEFORE UPDATE", "FOR EACH ROW",
+        "EXECUTE FUNCTION leaf_web_page_revision_immutable()"),
     "tenant_cost_events_immutable": _catalog_contract(
         "tenant_cost_events", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
         "EXECUTE FUNCTION leaf_reject_tenant_cost_mutation()"),
     "project_solve_exchanges_guard": _catalog_contract(
         "project_solve_exchanges", "BEFORE UPDATE", "FOR EACH ROW",
         "EXECUTE FUNCTION guard_project_solve_exchange()"),
+    "project_solve_exchanges_async_guard": _catalog_contract(
+        "project_solve_exchanges", "BEFORE UPDATE", "FOR EACH ROW",
+        "EXECUTE FUNCTION guard_project_solve_async()"),
     "project_sizing_exchange_completion": _catalog_contract(
         "project_sizing_exchanges", "AFTER INSERT OR UPDATE",
         "DEFERRABLE INITIALLY DEFERRED", "FOR EACH ROW",
@@ -1212,6 +1359,27 @@ _REQUIRED_TRIGGERS = {
 # Names below are stable database API. They enforce idempotency, fencing, state
 # shape, referential integrity, and immutable audit records used by callers.
 _AUTHORITY_REQUIRED_CONSTRAINTS = {
+    "devices": {
+        "device_enrollments_pkey": _catalog_contract("device_enrollments", "PRIMARY KEY (enrollment_id)"),
+        "device_enrollments_token_sha256_key": _catalog_contract("device_enrollments", "UNIQUE (token_sha256)"),
+        "devices_pkey": _catalog_contract("devices", "PRIMARY KEY (device_id)"),
+        "devices_public_key_key": _catalog_contract("devices", "UNIQUE (public_key)"),
+        "devices_tenant_id_device_id_key": _catalog_contract("devices", "UNIQUE (tenant_id, device_id)"),
+        "device_commands_pkey": _catalog_contract("device_commands", "PRIMARY KEY (command_id)"),
+        "device_commands_tenant_id_device_id_fkey": _catalog_contract(
+            "device_commands", "FOREIGN KEY (tenant_id, device_id)", "REFERENCES devices(tenant_id, device_id)"),
+        "device_commands_op_check": _catalog_contract(
+            "device_commands", "CHECK", "op", "pkg.install", "pkg.upgrade", "pkg.uninstall", "pkg.health",
+            "http.proxy", "ha.onboard", "ha.flow.start", "ha.flow.step", "ha.flow.list", "agent.pause", "agent.update"),
+        "device_commands_state_check": _catalog_contract("device_commands", "CHECK", "state", "queued", "leased", "done", "expired"),
+        "device_nonces_pkey": _catalog_contract("device_nonces", "PRIMARY KEY (device_id, nonce)"),
+        "device_relay_tokens_pkey": _catalog_contract("device_relay_tokens", "PRIMARY KEY (token_id)"),
+        "device_relay_tokens_token_sha256_key": _catalog_contract("device_relay_tokens", "UNIQUE (token_sha256)"),
+        "device_relay_tokens_tenant_id_device_id_fkey": _catalog_contract(
+            "device_relay_tokens", "FOREIGN KEY (tenant_id, device_id)", "REFERENCES devices(tenant_id, device_id)"),
+        "device_audit_pkey": _catalog_contract("device_audit", "PRIMARY KEY (event_id)"),
+        "device_audit_status_check": _catalog_contract("device_audit", "CHECK", "status", "ok", "error", "refused"),
+    },
     "lab_runs": {
         "lab_activations_pkey": _catalog_contract("lab_activations", "PRIMARY KEY (tenant_id, activation_id)"),
         "lab_activations_interval_s_check": _catalog_contract("lab_activations", "CHECK", "interval_s", "60", "86400"),
@@ -1710,6 +1878,10 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
 }
 
 _AUTHORITY_REQUIRED_INDEXES = {
+    "devices": {
+        "device_commands_device_state_issued_idx": _catalog_contract("device_commands", "(device_id, state, issued_at)"),
+        "device_audit_device_at_idx": _catalog_contract("device_audit", "(device_id, at DESC)"),
+    },
     "lab": {
         "lab_git_pending_live_idx": _catalog_contract(
             "lab_git_pending", "CREATE UNIQUE INDEX", "(tenant_id, doc_id)", "WHERE", "state <> 'abandoned'"),
@@ -1903,6 +2075,7 @@ _AUTHORITY_REQUIRED_TRIGGERS = {
 _TRIGGER_ENABLED_MODES = frozenset({"O", "A"})
 
 _AUTHORITY_SELECTORS = {
+    "LEAF_DEVICE_STORE": {"postgres": "devices", "postgres_required": "devices"},
     "LEAF_LAB_RUN_STORE": {"postgres": "lab_runs", "postgres_required": "lab_runs"},
     "LEAF_LAB_STORE": {"postgres": "lab"},
     "LEAF_JOBS_STORE": {"postgres": "jobs"},

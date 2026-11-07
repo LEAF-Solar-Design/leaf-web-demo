@@ -14,7 +14,12 @@ import type {
   ResultEnvelope,
   SubmitRunRequest,
   SubmitRunResponse,
+  ProjectPageProposalInput,
 } from "../index.js";
+import { CanonicalChangeSetId } from "../index.js";
+import { AppRunClientError, projectAuthorStageStatus } from "../impl/appRunClient.js";
+import type { ProjectPhotoInspectionInput } from "../../agent/projectPhotoInspection.js";
+import type { DeviceOperation, DeviceToolResult } from "../../agent/deviceTools.js";
 
 export const FAKE_CATALOG: CapabilityEntry[] = [
   {
@@ -72,6 +77,61 @@ function envelopeFor(tool: string): ResultEnvelope {
 }
 
 export class FakeAppRunClient implements AppRunClient {
+  readonly photoInspectionCalls: Array<{ tenantId: string; sessionId: string;
+    body: ProjectPhotoInspectionInput;
+    authority: { sessionId: string; turnId: string } }> = [];
+  photoInspectionResult: Record<string, unknown> = {};
+  async inspectProjectPhoto(
+    tenantId: string, sessionId: string,
+    body: ProjectPhotoInspectionInput,
+    authority: { sessionId: string; turnId: string },
+  ): Promise<Record<string, unknown>> {
+    this.methodLog.push("inspectProjectPhoto");
+    this.photoInspectionCalls.push({ tenantId, sessionId, body, authority });
+    return structuredClone(this.photoInspectionResult);
+  }
+  readonly authorStageStatusCalls: Array<{ tenantId: string; changeSetId: string }> = [];
+  /** Explicit tenant-scoped producer fixtures; a missing row never invents success. */
+  readonly authorStages = new Map<string, Map<string, Record<string, unknown>>>();
+
+  async getAuthorStageStatus(tenantId: string, changeSetId: string): Promise<Record<string, unknown>> {
+    if (!CanonicalChangeSetId.safeParse(changeSetId).success) {
+      throw new AppRunClientError("Author stage status unavailable.", 400);
+    }
+    this.methodLog.push("getAuthorStageStatus");
+    this.authorStageStatusCalls.push({ tenantId, changeSetId });
+    const row = this.authorStages.get(tenantId)?.get(changeSetId);
+    if (!row) throw new AppRunClientError("Author stage status unavailable.", 404);
+    return projectAuthorStageStatus(changeSetId, row);
+  }
+  readonly deviceToolCalls: Array<{
+    tenantId: string; operation: DeviceOperation; body: Record<string, unknown>;
+    authority: { sessionId: string; turnId: string };
+  }> = [];
+  deviceToolResult: DeviceToolResult = { ok: true, result: {} };
+
+  async deviceTool(
+    tenantId: string, operation: DeviceOperation, body: Record<string, unknown>,
+    authority: { sessionId: string; turnId: string },
+  ): Promise<DeviceToolResult> {
+    this.methodLog.push("deviceTool");
+    this.deviceToolCalls.push({ tenantId, operation, body, authority });
+    return this.deviceToolResult;
+  }
+  readonly pageProposalCalls: Array<{
+    tenantId: string; sessionId: string; body: ProjectPageProposalInput;
+    authority: { sessionId: string; turnId: string };
+  }> = [];
+  pageProposalResult: Record<string, unknown> = {};
+
+  async proposeProjectPage(
+    tenantId: string, sessionId: string, body: ProjectPageProposalInput,
+    authority: { sessionId: string; turnId: string },
+  ): Promise<Record<string, unknown>> {
+    this.methodLog.push("proposeProjectPage");
+    this.pageProposalCalls.push({ tenantId, sessionId, body, authority });
+    return this.pageProposalResult;
+  }
   /** Every submitRun payload, verbatim (the invariant spy inspects these). */
   readonly submitCalls: SubmitRunRequest[] = [];
   readonly authorCalls: Array<{
@@ -159,6 +219,7 @@ export class FakeAppRunClient implements AppRunClient {
     sessionId: string;
     tokens: Record<string, string>;
     requestText: string;
+    authority?: { sessionId?: string; turnId?: string };
   }> = [];
 
   async proposeOverlay(
@@ -166,8 +227,9 @@ export class FakeAppRunClient implements AppRunClient {
     sessionId: string,
     tokens: Record<string, string>,
     requestText: string,
+    authority?: { sessionId?: string; turnId?: string },
   ): Promise<Record<string, unknown>> {
-    this.proposeOverlayCalls.push({ tenantId, sessionId, tokens, requestText });
+    this.proposeOverlayCalls.push({ tenantId, sessionId, tokens, requestText, authority });
     return {
       proposal_id: "fake-overlay-proposal",
       tokens,

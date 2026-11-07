@@ -109,6 +109,7 @@ function environment(intake = graphIntake(), scene, binding = B) {
   legacy.polylines = [{ handle: 'EE', layer: 'Engine', pts: [[90, 100], [190, 250]] },
     { handle: 'EF', layer: 'Legacy', pts: [[30, 40], [50, 60]] }]
   return { projectMode: true, projectSolar: { scope: { binding } },
+    projectEditorEngine: null, projectEditorKey: '', projectEditorBinding: null,
     projectSolarRuntime: { contextView: contextOf(intake, binding), contextCurrent: () => true, visibleLayers: {}, setVisibleLayers: vi.fn() },
     viewerRef: { current: { getDrawingScene: () => scene ?? { intake, drawingKey: keyOf(binding), ready: true } } },
     activeIntake: legacy, shown: legacy, intake: legacy, standaloneVisibleLayers: {}, setStandaloneVisibleLayers: vi.fn(),
@@ -117,7 +118,7 @@ function environment(intake = graphIntake(), scene, binding = B) {
 }
 function projection(env) {
   const scope = { ...env }
-  for (const name of ['projectScene', 'projectDrawing', 'drawingIntake', 'projectDrawingName', 'visibleLayers', 'setVisibleLayers'])
+  for (const name of ['projectScene', 'projectDrawing', 'projectEngineIntake', 'drawingIntake', 'projectDrawingName', 'visibleLayers', 'setVisibleLayers'])
     scope[name] = evaluate(decl(name).init, scope)
   return scope
 }
@@ -171,7 +172,7 @@ it('R13G2A-03 engine presentation cannot overwrite the project drawing', async (
     return one(node => node.type === 'LogicalExpression' && node.right === target).left
   }
   const env = { ENV_CAD_EDIT: true, studioGround: true, drafting: true, activeSurface: 'solar', groundShowsDrawing: () => true,
-    engineViewArmed: true }
+    engineViewArmed: true, projectEditorBinding: null }
   const mounted = mode => evaluate(gate('EngineDocumentView'), { ...env, projectMode: mode })
     ? <EngineDocumentView viewerRef={viewerRef} /> : null
   const view = render(mounted(false))
@@ -198,6 +199,7 @@ it('R13G2A-04 drawing facts and object identity follow the canonical intake', ()
   const env = { ...base, useMemo: fn => fn(), studioGround: true, drafting: true, drawingExtents, drawingPropertyName,
     engineHistory: { undoDepth: 90 }, projectName: 'legacy', drawingName: 'legacy', mock: true,
     layerCounts: {}, toggleLayer: vi.fn(), colorForLayer: vi.fn(), onOpenStart: vi.fn() }
+  env.activeDrawingName = evaluate(decl('activeDrawingName').init, env)
   const facts = evaluate(decl('paneDrawingFacts').init.arguments[0], env)()
   expect(facts).toMatchObject({ name: 'canonical.dwg', entities: 1, layers: 1, layersShown: 1, source: 'project drawing' })
   expect(facts.undoDepth).toBeUndefined()
@@ -395,7 +397,7 @@ it('R13G2A-14 a retained engine document returns after a project closes', () => 
     // EngineDocumentView precedes the Viewer, as in App: the card renders before the ground portal.
     const viewerRef = useRef(null)
     const engineViewArmed = useEngineViewArmed(projectMode)
-    const gateEnv = { ENV_CAD_EDIT: true, studioGround: true, projectMode, engineViewArmed }
+    const gateEnv = { ENV_CAD_EDIT: true, studioGround: true, projectMode, engineViewArmed, projectEditorBinding: null }
     const key = evaluate(viewerKey, { projectMode, projectDrawing: { drawingKey: 'project:canonical' } })
     return <>
       {evaluate(engineGate, gateEnv) ? <EngineDocumentView viewerRef={viewerRef} consoleIntake={legacy} /> : null}
@@ -416,6 +418,22 @@ it('R13G2A-14 a retained engine document returns after a project closes', () => 
   expect(shown.at(-1)).toBe('engine.dxf')
   expect(shown.lastIndexOf('legacy.dwg')).toBeLessThan(shown.lastIndexOf('engine.dxf'))
 }, 30_000)
+
+it('BSP53 admits the selected canonical editor while rejecting a retained foreign engine scope', () => {
+  const target = element('EngineDocumentView')
+  const gate = one(node => node.type === 'LogicalExpression' && node.right === target).left
+  const env = { ENV_CAD_EDIT: true, studioGround: true, projectMode: true, engineViewArmed: false }
+  expect(Boolean(evaluate(gate, { ...env, projectEditorBinding: null }))).toBe(false)
+  expect(Boolean(evaluate(gate, { ...env, projectEditorBinding: { ...B } }))).toBe(true)
+  const canonical = graphIntake(), edited = intakeOf('canonical-edit.dxf', 'ED')
+  const key = JSON.stringify([B.organization_id, B.project_id, B.drawing_id, B.input_version_id])
+  const good = projection({ ...environment(canonical), projectEditorKey: key,
+    projectEditorEngine: { scopeKey: key, intake: edited } })
+  expect(good.drawingIntake).toBe(edited)
+  const foreign = projection({ ...environment(canonical), projectEditorKey: key,
+    projectEditorEngine: { scopeKey: 'another project', intake: edited } })
+  expect(foreign.drawingIntake).toBe(canonical)
+})
 
 it('R13G2A-13 project drawing status uses the retained publication retry', async () => {
   const wrap = one(node => node.type === 'JSXElement' && node.openingElement.attributes.some(a => a.name?.name === 'className' && a.value?.value === 'viewer-wrap'))

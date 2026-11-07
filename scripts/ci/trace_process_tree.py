@@ -1,0 +1,2893 @@
+"""Decode a sanitized, receipt-bound Linux process tree without filesystem inference.
+
+Only local input/output filenames reach the host filesystem. Traced names are
+POSIX strings interpreted against the launch inventory, never against this host.
+Completeness is evidence in the documents, not the decode command's exit status.
+Amendment 6: a positive POLICY-derived TRACED set is bound into syscall_policy_digest.
+Amendment 6: successful path calls are dependencies; writable opens are also generated outputs.
+Amendment 6: directory membership comes from the launch inventory, never d_name buffers.
+Amendment 6: unknown descriptors are counters unless needed to resolve a path.
+Amendment 6: interrupted calls touch no descriptors or dependencies and are not malformed.
+Amendment 6: pairing uses (pid, name), one slot per pid; only path or creator gaps are reasons.
+Amendment 6: live and total task caps are separate; reports retain at most 65,536 task records.
+Amendment 6: PR_SET_VMA remains compatible and parser version s15a-6 changes the epoch.
+Amendment 7: AT_EMPTY_PATH stats use descriptors and retain st_size or stx_size evidence.
+Amendment 7: getdents proves directoryness; only consumed repo listings require EOF.
+Amendment 7: indexed inventory directories and source-attributed bytecode are inputs.
+Amendment 7: unlisted inputs are unresolved generated inputs, not capture loss.
+Amendment 7: resumed endpoint outputs survive pairing; alias races require prior use.
+Amendment 7: unknown fd samples are bounded; creation evidence (A7-10) is deferred.
+"""
+
+import argparse
+import hashlib
+import json
+import math
+import os
+import re
+import sys
+import tempfile
+from pathlib import Path
+from urllib.parse import quote
+from dataclasses import dataclass, field
+from collections import OrderedDict
+
+try:
+    import resource
+except ImportError:  # Windows: the live-state counter stands in for measured RSS.
+    resource = None
+
+
+BINDINGS = ("run_id", "source_sha", "source_tree", "capture_sha", "catalog_sha256")
+PARSER_VERSION = "s15b-6-wd1"
+# A child left by a killed parent calls within this window of the parent's end, or it is not that child.
+ORPHAN_FORK_WINDOW_S = 2.0
+# max_state_bytes: 2 GiB, compared against measured peak RSS (Amendment 5); the counter it
+# replaced only ever added, so a 40 M-line stream tripped it on cumulative allocation.
+LIMITS = dict(max_live_tasks=65536, max_total_tasks=4194304, max_fds_per_task=65536, max_record_bytes=1048576,
+              max_dependencies=3000000, max_state_bytes=2 * 1024 ** 3, max_reasons=256,
+              max_attribution_windows=1000000, max_attribution_subjects=1000000,
+              max_attribution_dependencies=3000000)
+# ru_maxrss is KiB on Linux, bytes on macOS; sampled once per RSS_INTERVAL lines.
+RSS_SCALE, RSS_INTERVAL = (1 if sys.platform == "darwin" else 1024), 65536
+# Calibration instrument bounds: distinct sanitized shapes kept, names counted, names reported.
+SAMPLE_LIMIT, NAME_LIMIT, NAME_REPORT = 32, 4096, 32
+# Raw bytes kept per sampled line; shaping collapses any quoted string the cut leaves open.
+SAMPLE_PREFIX = 512
+POLICY = {
+    # Legacy decoder compatibility; the capture selects only the positive TRACED set below.
+    "noise": ("brk madvise mprotect munmap arch_prctl set_tid_address set_robust_list get_robust_list rseq rt_sigaction "
+              "rt_sigprocmask rt_sigreturn sigaltstack rt_sigsuspend rt_sigtimedwait rt_sigpending restart_syscall "
+              "sched_yield nanosleep clock_nanosleep getpid getppid gettid getuid geteuid getgid getegid getgroups "
+              "getrlimit prlimit64 getrusage times clock_gettime gettimeofday time getrandom sched_getaffinity "
+              "sched_getparam sched_getscheduler futex").split(),
+    "path": "open openat openat2 creat execve execveat readlink readlinkat access faccessat faccessat2 stat lstat newfstatat statx statfs getcwd chdir fchdir getxattr lgetxattr listxattr llistxattr truncate".split(),
+    "descriptor": "read pread64 readv preadv preadv2 mmap mremap munmap mprotect lseek dup dup2 dup3 fcntl close pipe pipe2 socketpair write pwrite64 writev pwritev pwritev2 truncate ftruncate fsync fdatasync fadvise64 posix_fadvise readahead sync_file_range flock fgetxattr flistxattr sendfile copy_file_range splice".split(),
+    "metadata_mutation": "chmod fchmod fchmodat chown fchown fchownat lchown utimensat futimesat".split(),
+    "internal_object": "memfd_create timerfd_create signalfd signalfd4".split(),
+    "fd_table": "dup dup2 dup3 fcntl close close_range pipe pipe2 socketpair socket accept accept4 memfd_create timerfd_create eventfd eventfd2 epoll_create epoll_create1 signalfd signalfd4 inotify_init inotify_init1 inotify_add_watch inotify_rm_watch pidfd_open pidfd_getfd".split(),
+    "lifecycle": "fork vfork clone clone3 exit exit_group".split(),
+    "legacy_stat": "fstat fstatfs".split(),
+    "filesystem_events": "inotify_init inotify_init1 inotify_add_watch inotify_rm_watch".split(),
+    "directory": "getdents getdents64 mkdir mkdirat rmdir unlink unlinkat rename renameat renameat2 link linkat symlink symlinkat".split(),
+    "process": "fork vfork clone wait4 waitid exit exit_group setsid setpgid getpid getppid gettid".split(),
+    "network": "socket connect bind listen accept accept4 sendto recvfrom sendmsg recvmsg sendmmsg recvmmsg getsockopt setsockopt getpeername getsockname shutdown".split(),
+    "namespace": "unshare setns chroot pivot_root mount umount2".split(),
+    "reject": "ptrace process_vm_readv process_vm_writev io_setup io_submit io_getevents io_cancel io_destroy io_uring_setup io_uring_enter io_uring_register fanotify_init fanotify_mark open_by_handle_at name_to_handle_at tee vmsplice bpf userfaultfd shmget shmat shmdt shmctl semget semop semctl msgget msgsnd msgrcv msgctl".split(),
+    # Modern calls decode normally; ENOSYS probes on older kernels are no-ops.
+    "abi": "openat2 clone3 close_range pidfd_open pidfd_getfd faccessat2".split(),
+    "runtime": "brk madvise arch_prctl set_tid_address set_robust_list get_robust_list futex rseq rt_sigaction rt_sigprocmask rt_sigreturn sigaltstack rt_sigsuspend rt_sigtimedwait rt_sigpending restart_syscall kill tkill tgkill sched_yield nanosleep clock_nanosleep poll ppoll select pselect6 epoll_create epoll_create1 epoll_ctl epoll_wait epoll_pwait eventfd eventfd2 alarm setitimer getitimer getuid geteuid getgid getegid getgroups uname getrlimit prlimit64 getrusage times umask clock_gettime clock_getres gettimeofday time getrandom sched_getaffinity sched_getparam sched_getscheduler prctl ioctl sysinfo getpgrp getpgid setrlimit capget sched_setaffinity timer_create timer_settime timer_gettime timer_delete timerfd_settime timerfd_gettime mincore msync mlock munlock".split(),
+    "ioctl": "TCGETS TCSETS TCSETSW TCSETSF TIOCGWINSZ TIOCGPGRP TIOCSPGRP FIONBIO FIOCLEX FIONCLEX FIONREAD".split(),
+    "prctl": ("PR_SET_NAME PR_GET_NAME PR_SET_PDEATHSIG PR_GET_DUMPABLE PR_SET_DUMPABLE PR_CAPBSET_READ PR_SET_NO_NEW_PRIVS "
+              "PR_GET_NO_NEW_PRIVS PR_SET_CHILD_SUBREAPER PR_GET_CHILD_SUBREAPER PR_SET_KEEPCAPS PR_GET_SECCOMP "
+              "PR_SET_TIMERSLACK PR_GET_TIMERSLACK PR_SET_PTRACER PR_SET_VMA 0x53564d41").split(),
+    "fcntl": ("F_DUPFD F_DUPFD_CLOEXEC F_SETFD F_GETFD F_GETFL F_SETFL F_GETLK F_SETLK F_SETLKW F_OFD_GETLK F_OFD_SETLK "
+              "F_OFD_SETLKW F_GETPIPE_SZ F_SETPIPE_SZ F_GETOWN F_SETOWN F_GETSIG F_SETSIG F_ADD_SEALS F_GET_SEALS").split(),
+    "open_flags": "O_RDONLY O_WRONLY O_RDWR O_APPEND O_ASYNC O_CLOEXEC O_CREAT O_DIRECT O_DIRECTORY O_DSYNC O_EXCL O_LARGEFILE O_NOATIME O_NOCTTY O_NOFOLLOW O_NONBLOCK O_NDELAY O_PATH O_SYNC O_TRUNC O_RSYNC O_TMPFILE".split(),
+    "clone_flags": "CLONE_VM CLONE_FS CLONE_FILES CLONE_SIGHAND CLONE_PTRACE CLONE_VFORK CLONE_PARENT CLONE_THREAD CLONE_SYSVSEM CLONE_SETTLS CLONE_PARENT_SETTID CLONE_CHILD_CLEARTID CLONE_DETACHED CLONE_UNTRACED CLONE_CHILD_SETTID CLONE_IO SIGCHLD".split(),
+    "nondeterminism_boundary": ["clock", "randomness", "scheduling"],
+}
+# Keep splice in its original capture position although it is now a supported copy.
+TRACED = list(dict.fromkeys(
+    POLICY["path"] + POLICY["directory"] + POLICY["metadata_mutation"] + POLICY["lifecycle"]
+    + POLICY["fd_table"] + [name for name in POLICY["network"] if name in {"connect", "bind"}]
+    + POLICY["namespace"] + [call for name in POLICY["reject"]
+                             for call in (("splice", "tee") if name == "tee" else (name,))]))
+# Both the policy and its ordered capture projection participate in the epoch digest.
+POLICY["traced"] = TRACED
+PATH_ARGS = {
+    **{n: (0,) for n in "open creat execve readlink access stat lstat statfs chdir truncate mkdir rmdir unlink chroot getxattr lgetxattr listxattr llistxattr chmod chown lchown".split()},
+    **{n: (1,) for n in "openat openat2 execveat readlinkat faccessat faccessat2 newfstatat fstatat statx mkdirat unlinkat fchmodat fchownat utimensat futimesat".split()},
+    "rename": (0, 1), "link": (0, 1), "symlink": (0, 1),
+    "renameat": (1, 3), "renameat2": (1, 3), "linkat": (1, 3), "symlinkat": (0, 2),
+}
+FD_ARGS = {
+    **{n: (0,) for n in "read pread64 readv preadv preadv2 write pwrite64 writev pwritev pwritev2 fstat fstatfs fchdir lseek dup fcntl close getdents getdents64 ioctl ftruncate fsync fdatasync connect bind listen accept accept4 sendto recvfrom sendmsg recvmsg sendmmsg recvmmsg getsockopt setsockopt getpeername getsockname shutdown".split()},
+    **{n: (0,) for n in "openat openat2 execveat readlinkat faccessat faccessat2 newfstatat fstatat statx mkdirat unlinkat pidfd_getfd".split()},
+    **{n: (0,) for n in "fadvise64 posix_fadvise readahead sync_file_range flock fgetxattr flistxattr fchmod fchown fchmodat fchownat utimensat futimesat".split()},
+    "dup2": (0, 1), "dup3": (0, 1), "mmap": (4,), "renameat": (0, 2),
+    "renameat2": (0, 2), "linkat": (0, 2), "symlinkat": (1,), "epoll_ctl": (0, 2),
+    "epoll_wait": (0,), "epoll_pwait": (0,),
+    # sendfile(out, in, ...), copy_file_range(in, off, out, ...).
+    "sendfile": (0, 1), "copy_file_range": (0, 2), "splice": (0, 2),
+}
+# (in, out) descriptor argument indices of the in-kernel copy calls.
+COPIES = {"sendfile": (1, 0), "copy_file_range": (0, 2), "splice": (0, 2)}
+READS = set("read pread64 readv preadv preadv2".split())
+WRITES = set("write pwrite64 writev pwritev pwritev2 ftruncate fsync fdatasync".split())
+LOOKUPS = set("stat lstat newfstatat fstatat statx access faccessat faccessat2 readlink readlinkat statfs getxattr lgetxattr listxattr llistxattr".split())
+MUTATIONS = set(POLICY["directory"]) - {"getdents", "getdents64"}
+METADATA_MUTATIONS = set(POLICY["metadata_mutation"])
+FD_LOOKUPS = {"fstat", "fstatfs", "fgetxattr", "flistxattr"}
+# fstatat is a transcript alias; Linux strace's capture name is newfstatat.
+KNOWN = frozenset({"fstatat"}).union(*(POLICY[k] for k in ("path", "descriptor", "directory", "process", "network", "namespace", "runtime",
+                                                "metadata_mutation", "internal_object", "filesystem_events", "noise", "legacy_stat", "abi")))
+FD_CREATORS = set(POLICY["fd_table"]) - {"close", "close_range", "inotify_add_watch", "inotify_rm_watch"}
+PAIR_REQUIRED = set(PATH_ARGS) | set(POLICY["path"]) | {"connect", "bind", "fork", "vfork", "clone", "clone3"} | FD_CREATORS
+FORK_CALLS = frozenset({"fork", "vfork", "clone", "clone3"})
+QUOTED = re.compile(r'"(?:\\.|[^"\\])*(?:"|\\?$)')
+# Each alternative stops at the next '<', so the substitution stays linear in the line.
+ANNOTATION = re.compile(r"<[^<]*?>(?=[\s,)\]}]|$)|<[^<>]*$")
+LEADING = re.compile(r"(?:\[pid +\d+\] |\d+ +)?(?:\d+\.\d+ )?(?:<\.\.\. ([A-Za-z_]\w*) resumed>|([A-Za-z_]\w*)\(|(\+\+\+)|(---)|(strace:))")
+# Arguments, return value, optional return annotation, then the tail (aux, errno, duration).
+RETURNED = re.compile(r"(.*)\)\s+=\s+(\?|0x[0-9a-fA-F]+|-?\d+)(?:<(.*?)>(?= |$))?(.*)")
+# Amendment 5 drops -T: the duration is optional, still accepted when present.
+TRAILER = re.compile(r"(?: ([A-Z][A-Z0-9_]+)(?: \([^\n]*\))?)?(?: <(\d+\.\d+|unavailable)>)?")
+RX_HEX_BYTE = re.compile(r"[0-9a-fA-F]{2}")
+RX_ABBREVIATED_STRING = re.compile(r'"\s*\.\.\.$')
+RX_FD_TOKEN = re.compile(r"(-?\d+)(?:<(.*)>)?")
+RX_DIRENT = re.compile(r'\{d_ino=(\d+), d_off=(-?\d+), d_reclen=(\d+), d_type=(DT_[A-Z]+), d_name=("(?:\\.|[^"\\])*")\}')
+RX_STAT_SIZE = re.compile(r"\b(?:st_size|stx_size)=(\d+)(?:,|\})")
+RX_STAT_SYMLINK = re.compile(r"\b(?:st_mode|stx_mode)=S_IFLNK\b")
+RX_AT_FLAGS = re.compile(r"AT_[A-Z_]+(?:\|AT_[A-Z_]+)*")
+RX_FD_PAIR = re.compile(r"\[\s*\d+(?:<[^>]*>)?\s*,\s*\d+(?:<[^>]*>)?\s*\]")
+RX_FLAGS = re.compile(r"[A-Z][A-Z0-9_]*(?:\|[A-Z][A-Z0-9_]*)*")
+RX_INTEGER = re.compile(r"-?\d+")
+RX_SUBTYPE = re.compile(r"[A-Za-z0-9_]{1,64}")
+RX_STRUCT_FLAGS = re.compile(r"(?:^|[,{]\s*)flags=([^,}]+)(?:[,}]|$)")
+RX_NUMERIC_FLAGS = re.compile(r"(?:[A-Z][A-Z0-9_]*|[0-9]+)(?:\|[A-Z][A-Z0-9_]*)*")
+RX_HEX_INTEGER = re.compile(r"0x[0-9a-fA-F]+")
+RX_UNIX_PEER = re.compile(r'\bsa_family=AF_UNIX,\s*sun_path=("(?:\\.|[^"\\])*")')
+# tools-29 rule C: a network row's peer comes from the sockaddr strace prints for connect, bind and sendto.
+RX_SA_FAMILY = re.compile(r"\bsa_family=AF_([A-Z0-9_]+)")
+RX_SA_PORT = re.compile(r"\bsin6?_port=htons\((\d{1,5})\)")
+RX_SA_INET = re.compile(r'\bsin_addr=inet_addr\(("(?:\\.|[^"\\])*")\)')
+RX_SA_INET6 = re.compile(r'\binet_pton\(AF_INET6,\s*("(?:\\.|[^"\\])*")')
+SOCKET_FAMILIES = {"INET": "inet", "INET6": "inet6", "UNIX": "unix", "LOCAL": "unix"}
+SOCKADDR_ARG = {"bind": 1, "connect": 1, "sendto": 4}
+RX_ATTACH_LINE = re.compile(r"strace: Process (\d+) (attached|detached)")
+RX_TIMED_LINE = re.compile(r"(?:\[pid +(\d+)\] |(\d+) +)?(\d+\.\d+) (.*)")
+RX_EXIT_LINE = re.compile(r"\+\+\+ exited with (\d+) \+\+\+")
+RX_KILLED_LINE = re.compile(r"\+\+\+ killed by (SIG[A-Z0-9]+)(?: \(core dumped\))? \+\+\+")
+RX_SIGNAL_LINE = re.compile(r"--- (?:stopped by )?(SIG[A-Z0-9]+)(?: \{.*\})? ---")
+RX_CALL_START = re.compile(r"([a-zA-Z_][a-zA-Z_0-9]*)\(")
+RX_CALL_RESUME = re.compile(r"<\.\.\. ([a-zA-Z_][a-zA-Z_0-9]*) resumed>")
+RX_OUTPUT_ID = re.compile(r"[A-Za-z0-9_-]+")
+RX_PID_PREFIX = re.compile(r"(?:\[pid +(\d+)\] |(\d+) +)")
+RX_DRAIN_LINE = re.compile(r"(?:\[pid +(\d+)\] |(\d+) +)?(?:\d+\.\d+ )?(.*)")
+RX_DRAIN_EXIT = re.compile(r"(?:exit_group|exit)\(|\+\+\+ (?:exited|killed)")
+RX_DRAIN_RESUME = re.compile(r"<\.\.\. ([A-Za-z_]\w*) resumed>")
+RX_ENDPOINT_ANNOTATION = re.compile(r"(?:pipe:|socket:|UNIX:|TCP:|anon_inode:)")
+RX_BYTECODE_PATH = re.compile(r"(?:(.*)/)?__pycache__/([^/]+?)\.[^.\/]+(?:\.opt-\d+)?(?:-pytest-[\d.]+)?\.pyc")
+# tools-25 rule B: device nodes and kernel pseudo-files have no content identity; they bind by class.
+PSEUDO_ROOTS = (("/dev", "device"), ("/proc", "kernel"), ("/sys", "kernel"))
+CONTAINER_RUNTIME_ROOTS = ("/etc/hosts", "/etc/resolv.conf", "/etc/host.conf", "/etc/hostname")
+# Fields an identity table (decoder context or supervisor evidence) may bind onto an external row.
+IDENTITY_FIELDS = ("identity_sha256", "inventory_ref", "resolved", "reason", "size",
+                   "derived_from", "identity_kind", "refused_class")
+CLOSERS = {")": "(", "]": "[", "}": "{"}
+SPLIT_BYTES = re.compile(rb'"(?:\\.|[^"\\])*"|["<>\[\](){},]')
+C_STRING_BYTES = re.compile(rb'"(?:[\x20-\x21\x23-\x5b\x5d-\x7e]|\\(?:[ntrfvab\\"]|x[0-9a-fA-F]{2}|[0-3][0-7]{2}|[0-7]{1,2}(?![0-7])))*"')
+REASON_UNSET = object()
+DESCRIPTOR_MUTATIONS = WRITES | {"close", "close_range", "dup", "dup2", "dup3", "fcntl", "ioctl"}
+STAT_FLAG_INDEX = {"newfstatat": 3, "fstatat": 3, "statx": 2}
+
+
+def _balanced(text, start):
+    """End (exclusive) of the bracket group opening at text[start]; quoted strings are skipped.
+
+    Linear in the text; raises malformed_line on a mismatched or unclosed bracket.
+    """
+    stack, quoted, i = [], False, start
+    while i < len(text):
+        c = text[i]
+        if quoted:
+            if c == "\\":
+                i += 1
+            elif c == '"':
+                quoted = False
+        elif c == '"':
+            quoted = True
+        elif c in "([{":
+            stack.append(c)
+        elif c in CLOSERS:
+            if not stack or stack.pop() != CLOSERS[c]:
+                raise ValueError("malformed_line")
+            if not stack:
+                return i + 1
+        i += 1
+    raise ValueError("malformed_line")
+
+
+def malformed_shape(line):
+    """Sanitized shape of an undecodable line: never carries a quoted string's content.
+
+    Quoted strings (terminated or not) collapse first, then annotations, hex, digits;
+    truncation happens only after every substitution.
+    """
+    shape = QUOTED.sub('"…"', line)
+    shape = ANNOTATION.sub("<…>", shape)
+    shape = re.sub(r"0x[0-9a-fA-F]+", "0xN", shape)
+    shape = re.sub(r"\d+", "N", shape)
+    return shape[:200]
+
+
+def line_kind(line):
+    """Leading syscall name, or a line kind, for the malformed counters."""
+    m = LEADING.match(line)
+    if not m:
+        return "other"
+    return m[1] or m[2] or ("terminal" if m[3] else "signal" if m[4] else "strace")
+
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=True, allow_nan=False).encode("utf-8")
+
+
+def digest(value):
+    return hashlib.sha256(canonical(value)).hexdigest()
+
+
+def decode_c_string(token):
+    """Decode exactly one quoted strace string, without accepting truncation."""
+    if len(token) < 2 or token[0] != '"' or token[-1] != '"':
+        raise ValueError("malformed_string")
+    if "\\" not in token:
+        try:
+            data = token.encode("ascii")
+        except UnicodeError:
+            raise ValueError("malformed_string") from None
+        if not C_STRING_BYTES.fullmatch(data):
+            raise ValueError("malformed_string")
+        return data[1:-1]
+    out = bytearray()
+    i = 1
+    escapes = {"n": 10, "t": 9, "r": 13, "f": 12, "v": 11, "a": 7, "b": 8, "\\": 92, '"': 34}
+    while i < len(token) - 1:
+        c = token[i]
+        i += 1
+        if c == "\\":
+            if i >= len(token) - 1:
+                raise ValueError("malformed_string")
+            c = token[i]
+            i += 1
+            if c == "x":
+                h = token[i:i + 2]
+                if len(h) != 2 or not RX_HEX_BYTE.fullmatch(h):
+                    raise ValueError("malformed_string")
+                out.append(int(h, 16))
+                i += 2
+            elif c in "01234567":
+                h = c
+                while i < len(token) - 1 and len(h) < 3 and token[i] in "01234567":
+                    h += token[i]
+                    i += 1
+                if int(h, 8) > 255:
+                    raise ValueError("malformed_string")
+                out.append(int(h, 8))
+            elif c in escapes:
+                out.append(escapes[c])
+            else:
+                raise ValueError("malformed_string")
+        elif not 32 <= ord(c) <= 126 or c == '"':
+            raise ValueError("malformed_string")
+        else:
+            out.append(ord(c))
+    return bytes(out)
+
+
+def _string(token):
+    if RX_ABBREVIATED_STRING.search(token):
+        raise ValueError("abbreviated_required_string")
+    try:
+        value = decode_c_string(token).decode("utf-8", "strict")
+    except UnicodeError:
+        raise ValueError("unsupported_path_encoding") from None
+    if "\x00" in value:
+        raise ValueError("malformed_string")
+    return value
+
+
+def _split(raw):
+    """Split arguments without retaining any quoted buffers in the result event."""
+    items, start, depth, angle = [], 0, 0, False
+    inner = 0
+    try:
+        data = raw.encode("ascii")
+    except UnicodeError:
+        raise ValueError("malformed_string") from None
+    for match in SPLIT_BYTES.finditer(data):
+        i, token = match.start(), match[0]
+        c = token[0]
+        if c == 34:
+            if not C_STRING_BYTES.fullmatch(token):
+                raise ValueError("malformed_string")
+        elif angle:
+            # Socket annotations carry '->' inside brackets (<TCP:[a->b]>): only a
+            # '>' outside the annotation's own brackets closes it.
+            if c == 91:
+                inner += 1
+            elif c == 93:
+                inner -= 1
+            elif c == 62 and inner <= 0:
+                angle = False
+        elif c == 60:
+            angle, inner = True, 0
+        elif not angle:
+            if c in (40, 91, 123):
+                depth += 1
+            elif c in (41, 93, 125):
+                depth -= 1
+            elif c == 44 and depth == 0:
+                items.append(raw[start:i].strip())
+                start = i + 1
+    items.append(raw[start:].strip())
+    return items
+
+
+def _fd(raw):
+    if raw == "AT_FDCWD":
+        return {"fd": "AT_FDCWD", "annotation": None, "deleted": False}
+    match = RX_FD_TOKEN.fullmatch(raw)
+    if not match:
+        raise ValueError("unresolved_file_descriptor")
+    annotation = match[2]
+    # -xx escapes every path byte; -x escapes only non-ASCII bytes, anywhere in the path.
+    if annotation and (annotation.startswith("\\x") or (annotation.startswith("/") and "\\" in annotation)):
+        annotation = _string('"' + annotation + '"')
+    deleted = bool(annotation and annotation.endswith(" (deleted)"))
+    if deleted:
+        annotation = annotation[:-10]
+    return {"fd": int(match[1]), "annotation": annotation, "deleted": deleted}
+
+
+def _entries(raw):
+    if not raw.startswith("[") or not raw.endswith("]") or "..." in raw:
+        raise ValueError("directory_enumeration_incomplete")
+    rows = []
+    if raw == "[]":
+        return rows
+    for record in _split(raw[1:-1]):
+        m = RX_DIRENT.fullmatch(record)
+        if not m or m[4] not in {"DT_UNKNOWN", "DT_FIFO", "DT_CHR", "DT_DIR", "DT_BLK", "DT_REG", "DT_LNK", "DT_SOCK", "DT_WHT"}:
+            raise ValueError("directory_enumeration_incomplete")
+        name = _string(m[5])
+        if "/" in name or not name:
+            raise ValueError("directory_enumeration_incomplete")
+        length = int(m[3])
+        if length != ((20 + len(name.encode("utf-8")) + 7) // 8) * 8:
+            raise ValueError("directory_enumeration_incomplete")
+        rows.append({"name": name, "reclen": length, "type": m[4], "cookie": int(m[2])})
+    return rows
+
+
+def _args(event, raw, resumed=False):
+    args = _split(raw)
+    name = event["name"]
+    event.update(paths={}, fds={}, scalars={}, flags=[], entries=None, endpoints=[])
+    if name in POLICY["abi"] and event["errno"] == "ENOSYS":
+        return
+    if name in {"fstat", "newfstatat", "fstatat", "statx"}:
+        size = RX_STAT_SIZE.search(raw)
+        # A symlink's own size is never its content's size.
+        if size and not RX_STAT_SYMLINK.search(raw):
+            event["observed_size"] = int(size[1])
+    # Retain only an argument index, never an unfinished output buffer.
+    if not resumed and event["kind"] == "unfinished" and name in {"newfstatat", "fstatat", "statx", "fstat"}:
+        event["stat_resume_index"] = len(args) - (1 if args[-1] == "" else 0)
+    # A resumed tail needs its matched entry to establish argument positions.
+    if resumed:
+        # Evidence only: these tokens must not change the semantic flags below.
+        event["witness_flags"] = [malformed_shape(token) for token in args
+                                  if RX_AT_FLAGS.fullmatch(token)][:8]
+        if name in {"newfstatat", "fstatat", "statx"}:
+            event["stat_tail_flags"] = {
+                i: token.split("|") for i, token in enumerate(args)
+                if RX_AT_FLAGS.fullmatch(token)}
+            event["stat_tail_values"] = {
+                i: int(token, 16 if token.startswith("0x") else 10)
+                for i, token in enumerate(args)
+                if RX_INTEGER.fullmatch(token) or RX_HEX_INTEGER.fullmatch(token)}
+        if name in {"pipe", "pipe2", "socketpair"}:
+            for token in args:
+                if RX_FD_PAIR.fullmatch(token):
+                    event["endpoints"] = [_fd(x) for x in _split(token[1:-1])]
+                elif RX_FLAGS.fullmatch(token):
+                    event["flags"].extend(token.split("|"))
+        return
+    for i in PATH_ARGS.get(name, ()):
+        # utimensat(fd, NULL, ...) names the descriptor itself, not a path.
+        if i < len(args) and args[i] and args[i] != "NULL":
+            event["paths"][i] = _string(args[i])
+    for i in FD_ARGS.get(name, ()):
+        if i < len(args) and args[i]:
+            event["fds"][i] = _fd(args[i])
+    # Only scalar literals/flag expressions survive. Never retain unknown text,
+    # argv/envp, structures, addresses, read/write buffers or socket payloads.
+    for i, token in enumerate(args):
+        if RX_INTEGER.fullmatch(token):
+            event["scalars"][i] = int(token)
+        elif RX_FLAGS.fullmatch(token):
+            event["scalars"][i] = token
+            event["flags"].extend(token.split("|"))
+    flag_index = STAT_FLAG_INDEX.get(name)
+    if flag_index is not None and flag_index < len(args):
+        token = args[flag_index]
+        if RX_INTEGER.fullmatch(token) or RX_HEX_INTEGER.fullmatch(token):
+            event["stat_flags_value"] = int(token, 16 if token.startswith("0x") else 10)
+        elif RX_AT_FLAGS.fullmatch(token):
+            event["stat_flags_value"] = token.split("|")
+    if name in {"ioctl", "fcntl", "prctl"}:
+        # Leading identifier or number of the subtype argument, for the subtype counters only.
+        index = 0 if name == "prctl" else 1
+        label = RX_SUBTYPE.match(args[index]) if index < len(args) else None
+        event["subtype_label"] = label[0] if label else "unknown"
+    if name in {"clone", "clone3", "openat2"}:
+        token = args[0] if name == "clone3" else args[2] if name == "openat2" and len(args) > 2 else raw
+        m = RX_STRUCT_FLAGS.search(token)
+        if not m:
+            if name in {"clone", "clone3"} and event["kind"] == "unfinished":
+                event["fork_flags_readable"] = False
+                event["flags"] = ["unknown"]
+            elif name == "clone":
+                raise ValueError("unsupported_kernel_abi")
+            elif event["errno"] is None:
+                raise ValueError("malformed_line")
+        else:
+            value = m[1].strip()
+            # Keep flag literals only, never arbitrary struct text or pointers.
+            if not RX_NUMERIC_FLAGS.fullmatch(value):
+                value = "unknown"
+            event["flags"] = [] if value == "0" else value.split("|")
+            if name in {"clone", "clone3"}:
+                event["fork_flags_readable"] = value == "0" or all(
+                    flag in POLICY["clone_flags"] or flag.startswith("CLONE_NEW")
+                    for flag in event["flags"])
+            if name == "openat2":
+                event["scalars"][2] = int(value) if value.isdecimal() else value
+    if name == "close_range":
+        for i, token in enumerate(args[:2]):
+            if token == "~0U":
+                event["scalars"][i] = 4294967295
+            elif RX_HEX_INTEGER.fullmatch(token):
+                event["scalars"][i] = int(token, 16)
+    # Amendment 6: getdents buffers, including abbreviated and resumed ones, are not evidence.
+    if name in {"pipe", "pipe2", "socketpair"}:
+        index = 3 if name == "socketpair" else 0
+        if len(args) > index and args[index].startswith("["):
+            event["endpoints"] = [_fd(x) for x in _split(args[index][1:-1])]
+    if name in {"poll", "ppoll", "select", "pselect6"}:
+        event["poll_fds"] = [int(x) for x in re.findall(r"\bfd=(\d+)", raw)]
+        if name in {"select", "pselect6"}:
+            event["poll_fds"] = [int(x) for a in args[1:4] if a.startswith("[") for x in re.findall(r"\d+", a)]
+    if name in {"sendmsg", "recvmsg", "sendmmsg", "recvmmsg"}:
+        event["rights"] = "SCM_RIGHTS" in raw
+    if name in {"bind", "connect"} and len(args) > 1:
+        match = RX_UNIX_PEER.search(args[1])
+        if match:
+            event["unix_peer"] = _string(match[1])
+    if name in SOCKADDR_ARG and len(args) > SOCKADDR_ARG[name]:
+        peer = _sockaddr(args[SOCKADDR_ARG[name]])
+        if peer is not None:
+            event["peer"] = peer
+
+
+def _socket_family(name):
+    """'AF_INET' -> 'inet'; AF_LOCAL is unix; any other family keeps its lower-case name."""
+    return SOCKET_FAMILIES.get(name, name.lower())
+
+
+def _sockaddr(token):
+    """Peer {family, address, port} of one printed sockaddr, {family} when unparseable, None without one."""
+    match = RX_SA_FAMILY.search(token)
+    if not match:
+        return None
+    family = _socket_family(match[1])
+    try:
+        if family == "unix":
+            path = RX_UNIX_PEER.search(token)
+            if path:
+                return {"family": family, "address": _string(path[1]), "port": None}
+        elif family in ("inet", "inet6"):
+            port = RX_SA_PORT.search(token)
+            address = (RX_SA_INET if family == "inet" else RX_SA_INET6).search(token)
+            if port and address and int(port[1]) <= 65535:
+                return {"family": family, "address": _string(address[1]), "port": int(port[1])}
+    except ValueError:
+        pass
+    return {"family": family}
+
+
+def _parse_line(line, sequence):
+    event = dict(sequence=sequence, pid=None, time=None, kind=None, name=None,
+                 errno=None, return_value=None, duration=None)
+    m = RX_ATTACH_LINE.fullmatch(line)
+    if m:
+        event.update(pid=int(m[1]), kind=m[2])
+        return event
+    # strace -f -o prints no pid until a second process exists (pid None: the root);
+    # pids are left-justified in five columns; stderr output uses "[pid N] ".
+    m = RX_TIMED_LINE.fullmatch(line)
+    if not m:
+        raise ValueError("malformed_line")
+    pid = m[1] or m[2]
+    event.update(pid=None if pid is None else int(pid), time=m[3])
+    body = m[4]
+    if body.startswith(("????(", "<... ???? resumed>")):
+        event.update(kind="interrupted", name="????")
+        return event
+    terminal = RX_EXIT_LINE.fullmatch(body)
+    if terminal:
+        event.update(kind="exit", status=int(terminal[1]))
+        return event
+    terminal = RX_KILLED_LINE.fullmatch(body)
+    if terminal:
+        event.update(kind="killed", signal=terminal[1])
+        return event
+    signal = RX_SIGNAL_LINE.fullmatch(body)
+    if signal:
+        event.update(kind="signal", signal=signal[1])
+        return event
+    start = RX_CALL_START.match(body)
+    resumed = RX_CALL_RESUME.match(body)
+    if not start and not resumed:
+        raise ValueError("malformed_line")
+    match = start or resumed
+    event.update(name=match[1], kind="resumed" if resumed else "syscall")
+    rest = body[match.end():]
+    if rest.endswith(" <unfinished ...>") and not resumed:
+        event["kind"] = "unfinished"
+        _args(event, rest[:-17])
+        return event
+    # The return annotation ends at a '>' followed by a space or end of line, never
+    # at a '>' inside it (<TCP:[a->b]>, <UNIX:[1->2]>).
+    returned = RETURNED.fullmatch(rest)
+    if not returned:
+        raise ValueError("malformed_line")
+    tail = returned[4]
+    if tail.startswith(" ("):
+        # Auxiliary return decoding: = 1 ([{fd=5, revents=POLLIN}]), = 0x8000 (flags O_RDONLY).
+        tail = tail[_balanced(tail, 1):]
+    trailer = TRAILER.fullmatch(tail)
+    if not trailer:
+        raise ValueError("malformed_line")
+    ret, errno, duration = returned[2], trailer[1], trailer[2]
+    event.update(return_value=None if ret == "?" else int(ret, 16 if ret.startswith("0x") else 10),
+                 errno=errno, duration=None if duration == "unavailable" else duration)
+    # Dying tasks can leave arbitrary argument fragments, including a resumed tail.
+    if ret == "?":
+        if resumed:
+            event["unknown_return"] = True
+        else:
+            event["kind"] = "interrupted"
+        return event
+    _args(event, returned[1], resumed=bool(resumed))
+    if returned[3] is not None:
+        event["return_fd"] = _fd(ret + "<" + returned[3] + ">")
+    return event
+
+
+def _stream(data):
+    # Iteration avoids a second transcript-sized splitlines allocation.
+    start, sequence = 0, 0
+    while start < len(data):
+        end = data.find(b"\n", start)
+        if end < 0:
+            yield sequence, data[start:], False
+            return
+        yield sequence, data[start:end], True
+        sequence += 1
+        start = end + 1
+
+
+def parse_stream(data):
+    events, reasons, pending = [], [], {}
+    for sequence, raw, terminated in _stream(data):
+        if not terminated:
+            reasons.append("trace_loss")
+            continue
+        try:
+            event = _parse_line(raw.decode("ascii", "strict"), sequence)
+            events.append(event)
+            key = (event["pid"], event["name"])
+            if event["kind"] == "unfinished":
+                previous = pending.get(event["pid"])
+                if previous is not None and previous[1] in PAIR_REQUIRED:
+                    reasons.append("unpaired_syscall")
+                pending[event["pid"]] = key
+            elif event["kind"] == "resumed":
+                previous = pending.pop(event["pid"], None)
+                if previous != key and (event["name"] in PAIR_REQUIRED or previous and previous[1] in PAIR_REQUIRED):
+                    reasons.append("unpaired_syscall")
+            elif event["kind"] == "detached":
+                reasons.append("trace_loss")
+            elif event["kind"] in {"exit", "killed", "interrupted"}:
+                # A task that exits mid-syscall never resumes it.
+                pending.pop(event["pid"], None)
+        except (ValueError, UnicodeError) as exc:
+            reasons.append("malformed_string" if isinstance(exc, UnicodeError) else str(exc))
+    if any(key[1] in PAIR_REQUIRED for key in pending.values()):
+        reasons.append("unpaired_syscall")
+    return events, sorted(set(reasons))
+
+
+def _under(path, root):
+    return path == root or path.startswith(root.rstrip("/") + "/")
+
+
+def _lexical(path):
+    parts = []
+    for p in path.split("/"):
+        if p == "..":
+            if parts:
+                parts.pop()
+        elif p and p != ".":
+            parts.append(p)
+    return "/" + "/".join(parts)
+
+
+def _is_supervisor(resolution):
+    return bool(resolution.external) and resolution.external.get("class") == "supervisor"
+
+
+@dataclass
+class Resolution:
+    absolute: str = None
+    path: str = None
+    external: dict = None
+    aliases: list = field(default_factory=list)
+    followed_links: list = field(default_factory=list)
+    reasons: list = field(default_factory=list)
+
+
+def _root_class(value):
+    return value if isinstance(value, str) else value.get("class") if isinstance(value, dict) else None
+
+
+def _supervisor(path, context):
+    """Harness-owned control roots (selection dir, scratch log) are never inputs."""
+    return any(_root_class(value) == "supervisor" and _under(path, root)
+               for root, value in context["external_roots"].items())
+
+
+def _pseudo_class(path):
+    """Device, kernel and container-runtime paths bind by class, never content."""
+    if any(_under(path, root) for root in CONTAINER_RUNTIME_ROOTS):
+        return "container-runtime"
+    return next((name for root, name in PSEUDO_ROOTS if _under(path, root)), None)
+
+
+def _bytecode_source(path):
+    """Rule A: the source an absolute bytecode path derives from, else None.
+
+    <dir>/__pycache__/<name>.<tag>.pyc and a legacy <dir>/<name>.pyc both name <dir>/<name>.py.
+    """
+    match = RX_BYTECODE_PATH.fullmatch(path)
+    if match:
+        return (match[1] or "") + "/" + match[2] + ".py"
+    if path.endswith(".pyc") and "/__pycache__/" not in path:
+        return path[:-4] + ".py"
+    return None
+
+
+def _inventory_ref(path, context):
+    """The epoch inventory entry naming an external path: its digested root and root-relative path."""
+    root = max((r for r in context["external_roots"] if _under(path, r)), key=len, default=None)
+    if root is None:
+        return None
+    return "external_root_digests[" + root + "]/" + path[len(root.rstrip("/")) + 1:]
+
+
+def _bind_identity(row, table):
+    """Copy a token's bound identity onto its external row; idempotent.
+
+    Rule B: a class-bound row (device, kernel) is never a content input and ignores the table.
+    Rule A: a bytecode row the table does not name binds to its source token's identity, or
+    stays unresolved as bytecode_without_source. An empty table means binding has not run yet.
+    Rule D: a class_not_admissible refusal names the class it refused.
+    """
+    if row.get("identity_kind") == "class":
+        return row
+    identity = table.get(row["path_token"])
+    source = row.get("source_token")
+    if identity is None and source is not None and table:
+        found = table.get(source)
+        if found:
+            # The source's own verdict and inventory_ref (the source entry) carry over.
+            identity = {k: found[k] for k in IDENTITY_FIELDS if k in found}
+            identity["derived_from"] = "bytecode"
+        else:
+            identity = {"identity_sha256": None, "resolved": False, "reason": "bytecode_without_source",
+                        "derived_from": "bytecode"}
+    if identity:
+        row.update({k: identity[k] for k in IDENTITY_FIELDS if k in identity})
+    if row.get("reason") == "class_not_admissible":
+        row.setdefault("refused_class", row.get("class"))
+    else:
+        row.pop("refused_class", None)
+    return row
+
+
+def _external(path, context):
+    matches = [r for r in context["external_roots"] if _under(path, r)]
+    value = context["external_roots"][max(matches, key=len)] if matches else {}
+    if isinstance(value, str):
+        value = {"class": value, "origin_category": value}
+    source = context.get("source_root", "").rstrip("/")
+    if source and _under(path, source):
+        relative = path[len(source):].lstrip("/")
+        files = context["inventory"]["files"]
+        if relative not in files and path not in files:
+            value = {"class": "checkout-untracked", "origin_category": "generated"}
+    if _supervisor(path, context):
+        value = {"class": "supervisor", "origin_category": "supervisor"}
+    row = {"class": value.get("class", "unresolved_external"),
+            "origin_category": value.get("origin_category", value.get("category", "unknown")),
+            "path_token": digest(path)[:16], "identity_sha256": None,
+            "inventory_ref": None, "resolved": False, "reason": "identity_binding_pending"}
+    pseudo = _pseudo_class(path) if row["class"] != "supervisor" else None
+    if pseudo is not None:
+        row.update({"class": pseudo, "origin_category": pseudo, "resolved": True, "reason": None,
+                    "identity_kind": "class"})
+    elif row["class"] == "checkout-untracked":
+        row["identity_kind"] = "file"
+    elif row["class"] != "supervisor":
+        source = _bytecode_source(path)
+        if source is not None:
+            row["source_token"] = digest(source)[:16]
+    return _bind_identity(row, context.get("external_identities", {}))
+
+
+def resolve_path(cwd, dirfd_path, raw, context, state):
+    """Resolve components in order, following only inventory/witnessed symlinks."""
+    result = Resolution()
+    if not isinstance(raw, str) or "\x00" in raw:
+        result.reasons.append("malformed_string")
+        return result
+    base = dirfd_path if dirfd_path is not None else cwd
+    if not raw.startswith("/") and not base:
+        result.reasons.append("unknown_path_base")
+        return result
+    source = context["source_root"].rstrip("/") or "/"
+    links = context["inventory"]["symlinks"].copy()
+    links.update(state.get("symlinks", {}))
+    links = {(k if k.startswith("/") else source + "/" + k): v for k, v in links.items()}
+    todo = (raw if raw.startswith("/") else base.rstrip("/") + "/" + raw).split("/")
+    parts, count, escaped = [], 0, False
+    while todo:
+        part = todo.pop(0)
+        if not part or part == ".":
+            continue
+        if part == "..":
+            if "/" + "/".join(parts) == source:
+                escaped = True
+            if parts:
+                parts.pop()
+            continue
+        parts.append(part)
+        prefix = "/" + "/".join(parts)
+        if prefix in links and not (state.get("nofollow") and not todo):
+            result.followed_links.append(prefix)
+            count += 1
+            if count > 40:
+                result.reasons.append("symlink_loop")
+                return result
+            target = links[prefix]
+            target_abs = target if target.startswith("/") else "/" + "/".join(parts[:-1]) + "/" + target
+            normalized_target = _lexical(target_abs)
+            if _under(prefix, source) and _under(normalized_target, source):
+                result.aliases.append({"link": prefix[len(source):].lstrip("/"),
+                                       "target": normalized_target[len(source):].lstrip("/")})
+            else:
+                escaped = True
+            todo = target_abs.split("/") + todo
+            parts = []
+    result.absolute = "/" + "/".join(parts)
+    if _supervisor(result.absolute, context):
+        result.external = _external(result.absolute, context)
+    elif _under(result.absolute, source) and not escaped:
+        result.path = result.absolute[len(source):].lstrip("/") or "."
+    else:
+        result.external = _external(result.absolute, context)
+    return result
+
+
+def _validate(context):
+    if not isinstance(context, dict):
+        raise ValueError("invalid_context")
+    for key in BINDINGS + ("capture_group", "source_root", "initial_cwd"):
+        if not isinstance(context.get(key), str) or not context[key]:
+            raise ValueError("invalid_context")
+    if not RX_OUTPUT_ID.fullmatch(context["capture_group"]):
+        raise ValueError("invalid_context")
+    # Absent or null root_pid: the decoder adopts the first parsed event's pid.
+    if context.get("root_pid") is not None and (type(context["root_pid"]) is not int or context["root_pid"] <= 0):
+        raise ValueError("invalid_context")
+    if not context["source_root"].startswith("/") or not context["initial_cwd"].startswith("/"):
+        raise ValueError("invalid_context")
+    inventory = context.get("inventory")
+    if not isinstance(inventory, dict) or not isinstance(inventory.get("files"), (list, dict)) or not isinstance(inventory.get("symlinks"), dict):
+        raise ValueError("invalid_context")
+    if not isinstance(context.get("seed_fds"), dict) or not isinstance(context.get("external_roots"), dict):
+        raise ValueError("invalid_context")
+    for fd, row in context["seed_fds"].items():
+        if not str(fd).isdigit() or not isinstance(row, dict) or row.get("kind") not in {"file", "devnull", "supervisor", "tty", "deleted"}:
+            raise ValueError("invalid_context")
+        if row["kind"] == "file" and not isinstance(row.get("path"), str):
+            raise ValueError("invalid_context")
+    for root, value in context["external_roots"].items():
+        if not isinstance(root, str) or not isinstance(value, (str, dict)):
+            raise ValueError("invalid_context")
+    # suites_deferred permits an empty catalog until the supervisor can load it.
+    validate_suites(context.get("suites"), allow_empty=context.get("suites_deferred") is True)
+    canonical(context)
+
+
+def validate_suites(suites, allow_empty=False):
+    if not isinstance(suites, list) or (not suites and not allow_empty):
+        raise ValueError("invalid_context")
+    for suite in suites:
+        if (not isinstance(suite, dict) or not isinstance(suite.get("suite_id"), str) or not suite["suite_id"]
+                or type(suite.get("attempt")) is not int or suite["attempt"] < 1
+                or not isinstance(suite.get("worker"), str) or not RX_OUTPUT_ID.fullmatch(suite["worker"])
+                or not isinstance(suite.get("test_ids"), list)
+                or any(not isinstance(t, str) for t in suite["test_ids"])
+                or not isinstance(suite.get("outcomes_ref"), str)):
+            raise ValueError("invalid_context")
+    return suites
+
+
+DEPENDENCY_FIELDS = ("reads", "negative_lookups", "directory_reads", "path_aliases",
+                     "external_inputs", "generated_inputs")
+MARKER = re.compile(r"/leaf-ci-marker/v1/([0-9a-f]{32})/(main|gw[0-9]+)/([1-9][0-9]*)/"
+                    r"(test|fixture)/([^/]+)/(setup|call|teardown)/(begin|end)")
+
+
+class _DependencyTable(dict):
+    """Observe occurrences before the tree's global deduplication."""
+    def __init__(self, decoder, field):
+        super().__init__()
+        self.decoder, self.field = decoder, field
+
+    def __setitem__(self, key, value):
+        self.decoder.attribute(self.field, value)
+        super().__setitem__(key, value)
+
+
+def _dependency_set():
+    return {field: {} for field in DEPENDENCY_FIELDS + ("generated_outputs",)}
+
+
+def _sealed_dependencies(rows):
+    result = {field: [row for _, row in sorted(rows[field].items())] for field in DEPENDENCY_FIELDS}
+    result["sha256"] = digest(result)
+    # Output evidence is bound by the certificate seal; retain the legacy input-set digest.
+    if rows["generated_outputs"]:
+        result["generated_outputs"] = [row for _, row in sorted(rows["generated_outputs"].items())]
+    return result
+
+
+def _event_time(event):
+    try:
+        value = float(event.get("time"))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+class _Decoder:
+    def __init__(self, context, limits):
+        self.context, self.limits = context, limits
+        self.reasons, self.reason_count = set(), 0
+        self.reason_samples, self.reason_sample_counts = [], {}
+        self.reason_event, self.reason_fd, self.reason_task = {}, None, None
+        self.stopped = False
+        self.limit_trip, self.decoder_stop, self.witnesses = {}, None, {}
+        self.stop_pids, self.stop_pending, self.stop_terminals = set(), set(), set()
+        self.post_stop_resumes = 0
+        self.active_at_stop = []
+        self.pid_witnesses, self.birth_returns, self.interrupted_names = {}, [], []
+        # Live-state estimate: rises on retain, falls on release; the cap reads measured RSS
+        # where resource exists and this counter's peak only where it does not.
+        self.state_bytes = self.state_peak = self.measured_peak = 0
+        # Descriptor tables by identity: [table, live holders]; released when the last holder goes.
+        self.tables = {}
+        self.syscall_name, self.line = "other", (0, b"")
+        self.trace_lost = False
+        self.tasks, self.active, self.pending, self.unfinished = [], {}, {}, {}
+        self.fork_entries, self.orphan_forks = {}, {}
+        self.last_event_sequence, self.last_event_time = -1, None
+        self.adopted_births = {"count": 0, "samples": []}
+        self.reuse_pending = {}
+        self.tasks_total = self.observed_exits = 0
+        self.marker_token = context.get("marker_token")
+        self.attribution_attempted = False
+        self.attribution_disabled = False
+        self.attribution_task = None
+        self.session_dependencies, self.suite_deltas = _dependency_set(), {}
+        self.marker_workers, self.marker_counters, self.marker_subjects = {}, {}, set()
+        self.window_count = 0
+        self.attribution_dependencies = 0
+        self.suites_seen, self.tests_seen = set(), set()
+        self.attribution_counts = {"attribution_outside_window": 0, "attribution_lingering_child": 0}
+        self.suite_hashes, self.test_hashes = {}, {}
+        self.catalog_suites = {suite["suite_id"] for suite in context["suites"]}
+        for suite in context["suites"]:
+            sid = suite["suite_id"]
+            self.suite_hashes[hashlib.sha256(sid.encode()).hexdigest()[:16]] = sid
+            for tid in suite["test_ids"]:
+                # Some older catalogs prefix an already full nodeid with the suite.
+                candidates = [tid]
+                if tid.startswith(sid + "::" + sid + "::"):
+                    candidates.append(tid[len(sid) + 2:])
+                for nodeid in candidates:
+                    self.test_hashes[(sid, hashlib.sha256(nodeid.encode()).hexdigest()[:16])] = tid
+        self.reads = _DependencyTable(self, "reads")
+        self.external = _DependencyTable(self, "external_inputs")
+        self.negative = {}
+        self.aliases = _DependencyTable(self, "path_aliases")
+        self.negative_events = 0
+        self.external_paths, self.written_paths, self.observed_sizes = {}, set(), {}
+        self.directories, self.enumerations, self.created, self.internal = {}, [], set(), set()
+        self.created_directories = set()
+        self.generated_repo_paths = set()
+        self.inventory_membership_entries = 0
+        source = context["source_root"].rstrip("/")
+        def relative(path):
+            return path[len(source) + 1:] if path.startswith(source + "/") else path
+        self.files = frozenset(relative(path) for path in context["inventory"]["files"])
+        self.inventory_links = frozenset(relative(path) for path in context["inventory"]["symlinks"])
+        self.dirs, self.children = {"."}, {}
+        for path in self.files | self.inventory_links:
+            parts = path.split("/")
+            for i in range(len(parts)):
+                parent = "/".join(parts[:i]) or "."
+                self.dirs.add(parent)
+                self.children.setdefault(parent, set()).add("/".join(parts[:i + 1]))
+        self.children = {path: sorted(members) for path, members in self.children.items()}
+        self.cache_dirs = frozenset((path.rsplit("/", 1)[0] + "/" if "/" in path else "") + "__pycache__"
+                                    for path in self.files if path.endswith(".py"))
+        self.generated_inputs, self.listings, self.consumed_directories = {}, {}, set()
+        self.followed_links = {}
+        self.links = {}
+        self.alias_generation = 0
+        self.path_cache = OrderedDict()
+        self.supervisor_reads = 0
+        self.unix_peers, self.unix_sockets = {}, []
+        self.event_count = self.syscall_count = 0
+        self.loss = dict(unpaired=0, malformed=0, interrupted=0, unknown_returns=0, unknown_syscalls=0, oversize=0,
+                         unknown_descriptors=0, failed_fd_ops=0)
+        self.loss["unknown_fd_samples"] = []
+        self.fd_sample = None
+        # Calibration instrument: sanitized shapes and bounded name counters.
+        self.malformed_samples, self.malformed_by_name, self.unsupported_by_name = {}, {}, {}
+        self.unpaired_samples, self.unpaired_by_name, self.unknown_fd_by_name = {}, {}, {}
+        self.subtypes = {"prctl": {}, "fcntl": {}}
+        self.root = None
+        # Under strace the tracee pid is known only from the stream; strace -f
+        # always opens with the tracee's execve, so the first event names it.
+        self.adopt_root = context.get("root_pid") is None
+        if not self.adopt_root:
+            self.birth_root(context["root_pid"])
+
+    def attribute(self, field, row):
+        if not self.marker_token or self.attribution_disabled:
+            return
+        task = self.attribution_task
+        stack = task.get("windows", []) if task else []
+        shared = not stack or (task and task.get("promoted")) or any(
+            window["closed"] or window["shared"] for window in stack)
+        suite = next((w["suite"] for w in reversed(stack) if w["suite"]), None)
+        if shared or suite is None:
+            target = self.session_dependencies
+        else:
+            target = self.suite_deltas.get(suite)
+            if target is None:
+                target = self.suite_deltas[suite] = _dependency_set()
+        key = canonical({k: v for k, v in row.items() if k != "sequence"}) if field == "negative_lookups" else canonical(row)
+        if key not in target[field]:
+            self.attribution_dependencies += 1
+            if self.attribution_dependencies > self.limits["max_attribution_dependencies"]:
+                if self.attribution_attempted:
+                    self.reason("attribution_limit_exceeded")
+                self.attribution_disabled = True
+                return
+        target[field].setdefault(key, row)
+        if not stack:
+            self.attribution_counts["attribution_outside_window"] += 1
+        if task and task["inherited"] and not task["promoted"]:
+            task["history"][field].setdefault(key, row)
+
+    def close_window(self, window):
+        window["closed"] = True
+        for child in list(window["children"].values()):
+            if not child["promoted"]:
+                child["promoted"] = True
+                self.attribution_counts["attribution_lingering_child"] += 1
+                for field in DEPENDENCY_FIELDS + ("generated_outputs",):
+                    self.session_dependencies[field].update(child["history"][field])
+                child["history"] = _dependency_set()
+        window["children"].clear()
+
+    def attribution_exit(self, task):
+        for window in task["windows"]:
+            if window["owner"] is task:
+                self.reason("attribution_boundary_unpaired")
+                self.close_window(window)
+            else:
+                window["children"].pop(id(task), None)
+        task["windows"] = []
+        task["history"] = _dependency_set()
+
+    def marker(self, task, event):
+        if not self.marker_token:
+            return False
+        paths = [path for path in event["paths"].values() if path.startswith("/leaf-ci-marker/")]
+        if not paths:
+            return False
+        path = paths[0]
+        match = MARKER.fullmatch(path)
+        valid_call = (event["name"] == "access" and event["paths"].get(0) == path and
+                      event["scalars"].get(1) in ("F_OK", 0)) or (
+            event["name"] == "newfstatat" and event["paths"].get(1) == path and
+            event["fds"].get(0, {}).get("fd") == "AT_FDCWD" and event.get("stat_flags_value") == 0)
+        valid = bool(match and match[1] == self.marker_token and valid_call)
+        if valid:
+            token, worker, counter, kind, subject, phase, edge = match.groups()
+            valid = bool(re.fullmatch(r"[0-9a-f]{16}-[0-9a-f]{16}-[1-9][0-9]*", subject) if kind == "test"
+                         else re.fullmatch(r"(session|package|module|class)-[0-9a-f]{16}", subject))
+            valid = valid and (kind == "test" or phase != "call")
+        if not valid or event.get("errno") != "ENOENT" or event.get("return_value") != -1:
+            self.reason("attribution_marker_collision")
+            # Marker namespace entries never become dependencies, even on collision.
+            return len(paths) == len(event["paths"])
+        self.attribution_attempted = True
+        if self.attribution_disabled:
+            self.reason("attribution_limit_exceeded")
+            return True
+        identity = (task["record"]["pid"], task["record"]["birth_sequence"])
+        if (worker in self.marker_workers and self.marker_workers[worker] != identity or
+                int(counter) <= self.marker_counters.get(worker, 0) or
+                worker not in self.marker_counters and counter != "1"):
+            self.reason("attribution_worker_conflict")
+            return True
+        self.marker_workers[worker], self.marker_counters[worker] = identity, int(counter)
+        self.marker_subjects.add((kind, subject))
+        if len(self.marker_subjects) > self.limits["max_attribution_subjects"]:
+            self.reason("attribution_limit_exceeded")
+            self.attribution_disabled = True
+            return True
+        key = (worker, kind, subject, phase)
+        if edge == "end":
+            if not task["windows"] or task["windows"][-1]["key"] != key or task["windows"][-1]["owner"] is not task:
+                self.reason("attribution_boundary_unpaired")
+            else:
+                self.close_window(task["windows"].pop())
+            return True
+        self.window_count += 1
+        if self.window_count > self.limits["max_attribution_windows"]:
+            self.reason("attribution_limit_exceeded")
+            self.attribution_disabled = True
+            return True
+        suite = None
+        if kind == "test":
+            if task["windows"]:
+                self.reason("attribution_worker_conflict")
+                return True
+            suite_hash, test_hash, attempt = subject.split("-")
+            suite = self.suite_hashes.get(suite_hash)
+            if suite is None:
+                suite = "sha256:" + suite_hash
+            self.suites_seen.add(suite)
+            self.tests_seen.add((suite, self.test_hashes.get((suite, test_hash), "sha256:" + test_hash)))
+        window = {"key": key, "suite": suite, "owner": task, "closed": False,
+                  "shared": kind == "fixture" and subject.split("-")[0] in {"session", "package"},
+                  "children": {}}
+        task["windows"].append(window)
+        return True
+
+    def attribution_result(self):
+        # The live stream can publish its catalog only after its last chunk.
+        suite_hashes, test_hashes = {}, {}
+        for suite in self.context["suites"]:
+            sid = suite["suite_id"]
+            suite_hashes["sha256:" + hashlib.sha256(sid.encode()).hexdigest()[:16]] = sid
+            for tid in suite["test_ids"]:
+                candidates = [tid]
+                if tid.startswith(sid + "::" + sid + "::"):
+                    candidates.append(tid[len(sid) + 2:])
+                for nodeid in candidates:
+                    test_hashes[(sid, "sha256:" + hashlib.sha256(nodeid.encode()).hexdigest()[:16])] = tid
+        catalog = {suite["suite_id"] for suite in self.context["suites"]}
+        resolve = lambda sid: sid if sid in catalog else suite_hashes.get(sid, sid)
+        self.suites_seen = {resolve(sid) for sid in self.suites_seen}
+        self.tests_seen = {(resolve(sid), test_hashes.get((resolve(sid), tid), tid))
+                           for sid, tid in self.tests_seen}
+        unresolved = sorted(self.suites_seen - catalog)
+        deltas = {}
+        for sid, rows in self.suite_deltas.items():
+            sid = resolve(sid)
+            target = deltas.setdefault(sid, _dependency_set()) if sid in catalog else self.session_dependencies
+            for field in DEPENDENCY_FIELDS + ("generated_outputs",):
+                target[field].update(rows[field])
+        self.suite_deltas = deltas
+        if self.attribution_attempted:
+            expected = {suite["suite_id"] for suite in self.context["suites"]}
+            if expected - self.suites_seen:
+                self.reason("attribution_coverage_incomplete")
+            for task in self.active.values():
+                if any(w["owner"] is task for w in task["windows"]):
+                    self.reason("attribution_boundary_unpaired")
+        for rows in [self.session_dependencies] + list(self.suite_deltas.values()):
+            rows["external_inputs"] = {key: row for key, row in rows["external_inputs"].items()
+                                       if row["class"] != "checkout-untracked" or
+                                       (row["class"], row["path_token"]) in self.external}
+            for row in rows["directory_reads"].values():
+                row["complete"] = self.listings.get(row["path"], True)
+            rows["generated_inputs"] = {key: row for key, row in rows["generated_inputs"].items()
+                                        if row["path"] in self.generated_inputs and
+                                        self.context["source_root"].rstrip("/") + "/" + row["path"] not in self.written_paths}
+        return {"version": "s15b-2", "marker_token": bool(self.marker_token),
+                "mode": "session+suite" if self.attribution_attempted else "none",
+                "session_dependencies": _sealed_dependencies(self.session_dependencies),
+                "suite_deltas": {sid: _sealed_dependencies(self.suite_deltas.get(sid, _dependency_set()))
+                                 for sid in sorted(self.suites_seen & catalog)},
+                "unresolved_suites": unresolved[:100],
+                "boundary_coverage": {"suites_with_windows": sorted(self.suites_seen),
+                                      "tests_with_windows": [{"suite_id": sid, "test_id": tid} for sid, tid in sorted(self.tests_seen)],
+                                      "tests_total": sum(len(s["test_ids"]) for s in self.context["suites"])},
+                "counts": dict(self.attribution_counts, windows=self.window_count, subjects=len(self.marker_subjects),
+                               unresolved_suites=len(unresolved))}
+
+    def birth_root(self, pid):
+        self.adopt_root = False
+        self.root = self.birth(pid, 0, None, [])
+        if self.root is not None:
+            for fd, seed in self.context["seed_fds"].items():
+                if self.stopped:
+                    break
+                desc = dict(seed)
+                if desc["kind"] == "file":
+                    path = desc["path"]
+                    if not path.startswith("/"):
+                        path = self.context["source_root"] + "/" + path
+                    desc["resolution"] = resolve_path(None, None, path, self.context, {})
+                    desc["path"] = desc["resolution"].absolute
+                self.putfd(self.root, int(fd), desc, bool(seed.get("cloexec")))
+
+    @staticmethod
+    def count(table, key):
+        if key in table or len(table) < NAME_LIMIT:
+            table[key] = table.get(key, 0) + 1
+        else:
+            table["(other)"] = table.get("(other)", 0) + 1
+
+    @staticmethod
+    def sample(table, raw):
+        """Count a line's sanitized shape; at most SAMPLE_LIMIT distinct shapes are kept."""
+        shape = malformed_shape(raw[:SAMPLE_PREFIX].decode("ascii", "replace"))
+        if shape in table or len(table) < SAMPLE_LIMIT:
+            table[shape] = table.get(shape, 0) + 1
+
+    def malformed(self, raw, reason):
+        """Count an undecodable line by leading name and sanitized shape; never keep the line."""
+        text = raw.decode("ascii", "replace")
+        self.count(self.malformed_by_name, line_kind(text))
+        self.sample(self.malformed_samples, raw)
+        self.reason(reason)
+
+    def unpaired(self, name, raw, event=None):
+        previous = self.reason_event, self.reason_fd, self.reason_task
+        if event is not None:
+            self.reason_context(event)
+        self.count(self.unpaired_by_name, name)
+        self.sample(self.unpaired_samples, raw)
+        if name in POLICY["reject"]:
+            self.reason("unsupported_syscall:" + name)
+        if name in PAIR_REQUIRED:
+            self.reason("unpaired_syscall")
+        else:
+            self.loss["unpaired"] += 1
+        self.reason_event, self.reason_fd, self.reason_task = previous
+
+    def claims_root(self, event, pid):
+        """Is an unknown prefixed pid the unprefixed root rather than an unborn child?
+
+        It is the root when it resumes a syscall the root left unfinished, or when no
+        traced task has a fork in flight (no unborn child can exist). Otherwise the
+        event waits as pending; an unresolved wait ends as unexplained_pid.
+        """
+        if pid in self.pending:
+            return False
+        if event["kind"] == "resumed" and (None, event["name"]) in self.unfinished:
+            return True
+        return (not self.orphan_forks and
+                not any(name in FORK_CALLS for _, name in self.unfinished))
+
+    def name_root(self, pid):
+        record = self.root["record"]
+        old_identity = (record["pid"], record["birth_sequence"])
+        record["pid"] = pid
+        for worker, identity in self.marker_workers.items():
+            if identity == old_identity:
+                self.marker_workers[worker] = (pid, record["birth_sequence"])
+        self.active[pid] = self.active.pop(None)
+        for key in [key for key in self.unfinished if key[0] is None]:
+            self.unfinished[(pid, key[1])] = self.unfinished.pop(key)
+
+    def reason_context(self, event, task=None):
+        self.reason_event = event
+        self.reason_task = task
+        self.reason_fd = REASON_UNSET
+
+    def reason_line(self, sequence, raw):
+        self.line = (sequence, raw)
+        self.reason_event, self.reason_task, self.reason_fd = None, None, REASON_UNSET
+
+    def materialize_reason_context(self):
+        if self.reason_event is None:
+            sequence, raw = self.line
+            prefix = raw[:SAMPLE_PREFIX].decode("ascii", "replace")
+            pid = RX_PID_PREFIX.match(prefix)
+            self.reason_event = {"sequence": sequence, "pid": int(pid[1] or pid[2]) if pid else None,
+                                 "name": line_kind(prefix)}
+        if self.reason_task is None:
+            self.reason_task = self.active.get(self.reason_event.get("pid"))
+        if self.reason_fd is REASON_UNSET:
+            argument = next(iter(self.reason_event.get("fds", {}).values()), None)
+            self.reason_fd = argument["fd"] if argument else None
+
+    def reason(self, value):
+        self.materialize_reason_context()
+        if value == "unknown_path_base" and value not in self.witnesses:
+            event, task, fd = self.reason_event, self.reason_task, self.reason_fd
+            entry = task["fds"].get(fd) if task else None
+            desc = entry["description"] if entry else {}
+            paths = list(event.get("paths", {}).values())
+            self.witnesses[value] = [{"resumed_shape": event.get("resumed_shape"),
+                                     "resume_matched": event.get("resume_matched", False),
+                                     "flags_token": event.get("witness_flags", event.get("flags", []))[:8],
+                                     "descriptor_kind": desc.get("kind", "unknown"),
+                                     "open_shape": desc.get("open_shape"),
+                                     "pathname_emptiness": ("empty" if "" in paths else
+                                                            "non-empty" if paths else "unknown")}]
+        count = self.reason_sample_counts.get(value, 0)
+        if count < 8 and (count or len(self.reason_sample_counts) < 32):
+            event, fd, task = self.reason_event, self.reason_fd, self.reason_task
+            sequence = event.get("sequence", self.line[0])
+            entry = task["fds"].get(fd) if task is not None else None
+            raw = self.line[1] if sequence == self.line[0] else b""
+            shape = event.get("_reason_shape")
+            if shape is None:
+                shape = malformed_shape(raw[:SAMPLE_PREFIX].decode("ascii", "replace"))
+            self.reason_samples.append({"reason": value, "sequence": sequence,
+                                        "pid": event.get("pid"), "syscall": event.get("name"),
+                                        "fd": fd, "fd_kind": (entry["description"]["kind"] if entry
+                                                                 else "unknown" if fd is not None else None),
+                                        "shape": shape})
+            self.reason_sample_counts[value] = count + 1
+        if value == "trace_loss":
+            self.trace_lost = True
+        if value == "unpaired_syscall":
+            self.loss["unpaired"] += 1
+        elif value.startswith("malformed"):
+            self.loss["malformed"] += 1
+        elif value.startswith("unsupported_syscall"):
+            self.loss["unknown_syscalls"] += 1
+            self.count(self.unsupported_by_name, value[len("unsupported_syscall:"):])
+        elif value == "unresolved_file_descriptor":
+            self.loss["unknown_descriptors"] += 1
+            self.count(self.unknown_fd_by_name, self.syscall_name)
+            self.sample_fd()
+        if value in self.reasons:
+            return
+        self.reason_count += 1
+        if len(self.reasons) < self.limits["max_reasons"]:
+            self.reasons.add(value)
+        elif not self.stopped:
+            self.reasons.remove(max(self.reasons))
+            self.reasons.add("capture_limit_exceeded:max_reasons")
+            self.record_stop("max_reasons")
+            self.stopped = True
+            self.reads.clear()
+            self.external.clear()
+            self.negative.clear()
+            self.aliases.clear()
+            self.directories.clear()
+
+    def record_stop(self, name, accounting=None):
+        self.materialize_reason_context()
+        event, task, fd = self.reason_event, self.reason_task, self.reason_fd
+        entry = task["fds"].get(fd) if task else None
+        desc = entry["description"] if entry else {}
+        path = desc.get("resolution")
+        directory = path.path if path is not None else None
+        if name not in self.limit_trip:
+            self.limit_trip[name] = {
+                "limit": name, "threshold": self.limits[name], "accounting": accounting,
+                "components": {"inventory_membership_entries": sum(map(len, self.directories.values())),
+                               "reads": len(self.reads), "external_inputs": len(self.external),
+                               "negative_lookups": len(self.negative), "negative_events": self.negative_events,
+                               "directories": len(self.directories),
+                               "generated_inputs": len(self.generated_inputs), "live_tasks": len(self.active),
+                               "total_tasks": self.tasks_total, "fds_per_task": len(task["fds"]) if task else 0,
+                               "record_bytes": getattr(self, "record_bytes", len(self.line[1])),
+                               "state_bytes": self.peak_bytes, "reasons": self.reason_count},
+                "syscall": event.get("name"), "pid": event.get("pid"), "descriptor": fd,
+                "directory_shape": malformed_shape(json.dumps(directory)) if directory is not None else None,
+                "directory_member_count": len(self.children.get(directory, [])),
+                "entry_sequence": event.get("sequence", self.line[0]), "processing_sequence": self.line[0]}
+        if self.decoder_stop is None:
+            self.stop_pids = set(self.active)
+            self.stop_pending = set(self.unfinished)
+            self.decoder_stop = {"sequence": self.line[0], "reason": name,
+                                 "pending_calls": [{"pid": pid, "syscall": call,
+                                                    "entry_sequence": pending[0]["sequence"]}
+                                                   for (pid, call), pending in list(self.unfinished.items())[:16]]}
+            self.active_at_stop = [{"pid": pid, "birth_sequence": task["record"]["birth_sequence"],
+                                    "parent_pid": task["record"]["parent"]["pid"] if task["record"]["parent"] else None}
+                                   for pid, task in list(self.active.items())[:64]]
+
+    def drain_diagnostic(self, raw):
+        # Match only the bounded prefix. No dependency decoding or state mutation.
+        text = raw[:SAMPLE_PREFIX].decode("ascii", "replace")
+        match = RX_DRAIN_LINE.match(text)
+        if not match:
+            return
+        pid = int(match[1] or match[2]) if match[1] or match[2] else (self.root["record"]["pid"] if self.root else None)
+        if pid not in self.stop_pids:
+            return
+        tail = match[3]
+        if RX_DRAIN_EXIT.match(tail):
+            self.stop_terminals.add(pid)
+        resumed = RX_DRAIN_RESUME.match(tail)
+        if resumed and (pid, resumed[1]) in self.stop_pending:
+            self.stop_pending.remove((pid, resumed[1]))
+            self.post_stop_resumes += 1
+
+    def cap(self, name, accounting=None):
+        self.record_stop(name, accounting)
+        self.reason("capture_limit_exceeded:" + name)
+        self.stopped = True
+        # Discard the entire dependency payload, never a seemingly complete prefix.
+        self.reads.clear()
+        self.external.clear()
+        self.negative.clear()
+        self.aliases.clear()
+        self.directories.clear()
+
+    def alias_users(self, alias):
+        """Current users, including dirfd provenance frozen at syscall entry."""
+        live = set()
+        for owner in self.active.values():
+            for fd, entry in owner["fds"].items():
+                if alias in entry["description"].get("followed_links", ()):
+                    live.add((id(owner["fds"]), fd))
+        inflight = 0
+        for pending, _, _, _, _, _ in self.unfinished.values():
+            inflight += alias in pending.get("resolution_links", ())
+        return len(live), inflight
+
+    def alias_witness(self, resolution, event, users=None):
+        if "unsupported_alias_race" in self.witnesses:
+            return
+        alias = resolution.absolute
+        live, inflight = users if users is not None else self.alias_users(alias)
+        target = self.links.get(alias)
+        if target is None:
+            links = self.context["inventory"]["symlinks"]
+            target = links.get(alias, links.get(resolution.path))
+        self.witnesses["unsupported_alias_race"] = [{
+            "alias_token": malformed_shape(json.dumps(alias)),
+            "origin": "inventory" if resolution.path in self.inventory_links else "runtime",
+            "target_token": malformed_shape(json.dumps(target)) if target is not None else None,
+            "prior_follow_sequence": self.followed_links.get(alias),
+            "mutation_entry_sequence": event["sequence"], "mutation_completion_sequence": self.line[0],
+            "live_descriptors": live, "inflight_resolutions": inflight}]
+
+    def unknown_pid_witness(self, pid, event):
+        if pid in self.pid_witnesses:
+            return
+        if len(self.pid_witnesses) >= 3:
+            # A stream of resolved early children must not hide the first orphan.
+            replace = next((key for key, row in reversed(list(self.pid_witnesses.items()))
+                            if row["queue_resolved"]), None)
+            if replace is None:
+                return
+            self.witnesses["unexplained_pid"].remove(self.pid_witnesses.pop(replace))
+        row = {"pid": pid, "first_sequence": event["sequence"],
+               "pending_birth_calls": [{"pid": owner, "syscall": name, "entry_sequence": pending[0]["sequence"]}
+                                       for (owner, name), pending in self.unfinished.items()
+                                       if name in {"fork", "vfork", "clone", "clone3"}][:16],
+               "interrupted_calls": list(self.interrupted_names), "birth_returns": list(self.birth_returns),
+               "prior_generations": [task["record"]["birth_sequence"] for task in self.tasks
+                                     if task["record"]["pid"] == pid][:16], "queue_resolved": False}
+        self.pid_witnesses[pid] = row
+        self.witnesses.setdefault("unexplained_pid", []).append(row)
+
+    def retain(self, amount):
+        self.state_bytes += amount
+        if self.state_bytes > self.state_peak:
+            self.state_peak = self.state_bytes
+            if resource is None and self.state_bytes > self.limits["max_state_bytes"] and not self.stopped:
+                self.cap("max_state_bytes")
+
+    def release(self, amount):
+        self.state_bytes = max(0, self.state_bytes - amount)
+
+    def measure(self):
+        """Live cap: this process's measured peak RSS against max_state_bytes (no-op without resource)."""
+        if resource is None:
+            return
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * RSS_SCALE
+        self.measured_peak = max(self.measured_peak, peak)
+        if peak > self.limits["max_state_bytes"] and not self.stopped:
+            self.cap("max_state_bytes")
+
+    @property
+    def peak_bytes(self):
+        return self.measured_peak if resource is not None else self.state_peak
+
+    def hold(self, table):
+        entry = self.tables.get(id(table))
+        if entry is None:
+            self.tables[id(table)] = [table, 1]
+        else:
+            entry[1] += 1
+
+    def drop(self, table):
+        """One holder of a descriptor table is gone; True when it was the last and the table is released."""
+        entry = self.tables.get(id(table))
+        if entry is None:
+            return False
+        entry[1] -= 1
+        if entry[1] > 0:
+            return False
+        del self.tables[id(table)]
+        self.release(128 * len(table))
+        return True
+
+    def birth(self, pid, sequence, parent, flags):
+        if pid in self.reuse_pending:
+            self.unknown_pid_witness(pid, {"sequence": self.line[0]})
+            self.reason("unexplained_pid")
+            return None
+        if len(self.active) + len(self.reuse_pending) >= self.limits["max_live_tasks"]:
+            self.cap("max_live_tasks")
+            return None
+        if self.tasks_total >= self.limits["max_total_tasks"]:
+            self.cap("max_total_tasks")
+            return None
+        if pid in self.active and self.active[pid]["record"]["exit"] is None:
+            old = self.active.pop(pid)
+            reuse_sequence = self.line[0]
+            old["record"]["exit"] = {"kind": "reuse_pending", "sequence": reuse_sequence}
+            self.reuse_pending[pid] = old
+            self.attribution_exit(old)
+            for key in [key for key in self.unfinished if key[0] == pid]:
+                pending = self.unfinished.pop(key)
+                self.release(pending[5])
+                self.finish_fork(pending[0]["sequence"])
+            # Release the old holder exactly once. A parent sharing this table
+            # keeps it alive; the new child's CLONE_FILES flag controls sharing.
+            shared = parent is not None and old["fds"] is parent["fds"] and "CLONE_FILES" in flags
+            released = self.drop(old["fds"])
+            old["fds"] = {}
+            witnesses = self.witnesses.setdefault("pid_reuse_in_flight", [])
+            if len(witnesses) < SAMPLE_LIMIT:
+                witnesses.append({"pid": pid, "birth_sequence": old["record"]["birth_sequence"],
+                                  "reuse_sequence": reuse_sequence,
+                                  "parent_pid": parent["record"]["pid"] if parent else None,
+                                  "syscall": self.syscall_name, "descriptor_table_shared": shared,
+                                  "descriptor_table_released": released})
+        shares = [s for s in ("CLONE_FS", "CLONE_FILES") if s in flags]
+        record = dict(pid=pid, birth_sequence=sequence,
+                      parent=None if parent is None else {k: parent["record"][k] for k in ("pid", "birth_sequence")},
+                      shares=shares, exec_count=0, exit=None)
+        if parent is None:
+            cwd, fds = {"path": self.context["initial_cwd"]}, {}
+        else:
+            cwd = parent["cwd"] if "CLONE_FS" in flags else dict(parent["cwd"])
+            fds = parent["fds"] if "CLONE_FILES" in flags else {k: dict(v) for k, v in parent["fds"].items()}
+        task = dict(record=record, cwd=cwd, fds=fds, last=None, retained=self.tasks_total < 65536)
+        task.update(windows=list(parent["windows"]) if parent else [],
+                    inherited=bool(parent and parent["windows"]), promoted=bool(parent and parent["promoted"]),
+                    history=_dependency_set())
+        for window in task["windows"]:
+            window["children"][id(task)] = task
+        self.tasks_total += 1
+        if len(self.tasks) < 65536:
+            self.tasks.append(task)
+        self.active[pid] = task
+        self.hold(fds)
+        self.retain(256 + (0 if parent is not None and "CLONE_FILES" in flags else 128 * len(fds)))
+        return task
+
+    def remember_fork(self, task, event):
+        """Keep the entry-time birth state, holding shared tables across caller death."""
+        flags = event["flags"] if event["name"] in {"clone", "clone3"} else []
+        shared = "CLONE_FILES" in flags
+        table = task["fds"] if shared else {fd: dict(row) for fd, row in task["fds"].items()}
+        parent = dict(record=task["record"], fds=table,
+                      cwd=task["cwd"] if "CLONE_FS" in flags else dict(task["cwd"]),
+                      windows=list(task["windows"]), promoted=task["promoted"])
+        self.fork_entries[event["sequence"]] = {
+            "parent": parent, "flags": flags, "event": event,
+            "readable": event["name"] in {"fork", "vfork"} or event.get("fork_flags_readable", False)}
+        self.hold(table)
+        self.retain(256 + (0 if shared else 128 * len(table)))
+
+    def release_fork(self, candidate):
+        self.drop(candidate["parent"]["fds"])
+        self.release(256)
+
+    def finish_fork(self, sequence, via=None, end_time=None):
+        candidate = self.fork_entries.pop(sequence, None)
+        if candidate is not None:
+            if via is None:
+                self.release_fork(candidate)
+            else:
+                candidate["via"] = via
+                candidate["end_time"] = end_time
+                self.orphan_forks[sequence] = candidate
+
+    def orphan_eligible(self, sequence, candidate, first):
+        first_time, end_time = _event_time(first), candidate["end_time"]
+        return (sequence < first["sequence"] and first_time is not None and end_time is not None
+                and first_time <= end_time + ORPHAN_FORK_WINDOW_S)
+
+    def expire_orphans(self, now):
+        if now is None or not self.orphan_forks:
+            return
+        for sequence, candidate in list(self.orphan_forks.items()):
+            end_time = candidate["end_time"]
+            if end_time is None or end_time + ORPHAN_FORK_WINDOW_S >= now:
+                continue
+            if any(self.orphan_eligible(sequence, candidate, queued[0][0])
+                   for queued in self.pending.values()):
+                continue
+            del self.orphan_forks[sequence]
+            self.release_fork(candidate)
+            self.adopted_births["expired"] = self.adopted_births.get("expired", 0) + 1
+
+    def adopt_pending(self, at_stop=False):
+        """A unique orphan may explain one queued pid, after witnessed births win."""
+        if not self.orphan_forks or not self.pending or self.stopped or self.last_event_time is None:
+            return
+        for pid in sorted(self.pending, key=lambda pid: self.pending[pid][0][0]["sequence"]):
+            if pid not in self.pending or self.stopped:
+                continue
+            if not at_stop and any(name in FORK_CALLS and owner in self.active
+                                   for owner, name in self.unfinished):
+                return
+            first = self.pending[pid][0][0]
+            eligible = [(sequence, candidate) for sequence, candidate in self.orphan_forks.items()
+                        if self.orphan_eligible(sequence, candidate, first)]
+            if len(eligible) != 1 or not eligible[0][1]["readable"]:
+                continue
+            sequence, candidate = eligible[0]
+            del self.orphan_forks[sequence]
+            self.reason_context(candidate["event"], candidate["parent"])
+            self.policy(candidate["event"], candidate["parent"])
+            if self.stopped:
+                self.release_fork(candidate)
+                return
+            child = self.birth(pid, sequence, candidate["parent"], candidate["flags"])
+            self.release_fork(candidate)
+            if child is None:
+                continue
+            self.adopted_births["count"] += 1
+            if len(self.adopted_births["samples"]) < 64:
+                self.adopted_births["samples"].append({
+                    "pid": pid, "parent_pid": candidate["parent"]["record"]["pid"],
+                    "entry_sequence": sequence, "first_event_sequence": first["sequence"],
+                    "via": candidate["via"]})
+            if pid in self.pid_witnesses:
+                self.pid_witnesses[pid]["queue_resolved"] = True
+            for queued, amount in self.pending.pop(pid, []):
+                self.release(amount)
+                self.process(queued)
+
+    def putfd(self, task, fd, desc, cloexec=False):
+        if self.stopped:
+            return
+        if fd not in task["fds"]:
+            if len(task["fds"]) >= self.limits["max_fds_per_task"]:
+                self.reason_task, self.reason_fd = task, fd
+                self.cap("max_fds_per_task")
+                return
+            self.retain(128)
+        task["fds"][fd] = {"description": desc, "cloexec": cloexec, "created_sequence": self.line[0]}
+
+    def closefd(self, task, fd):
+        if task["fds"].pop(fd, None) is not None:
+            self.release(128)
+
+    def fd(self, task, argument, required=False):
+        self.reason_task = task
+        self.reason_fd = argument["fd"] if argument else None
+        entry = task["fds"].get(argument["fd"]) if argument is not None else None
+        desc = entry["description"] if entry else None
+        if desc is None or desc["kind"] in {"deleted", "unknown"}:
+            self.fd_sample = {"fd": argument["fd"] if argument else None, "syscall": self.syscall_name,
+                              "root": task is self.root, "sequence": self.syscall_sequence}
+            if required:
+                self.reason("unresolved_file_descriptor")
+            else:
+                self.loss["unknown_descriptors"] += 1
+                self.count(self.unknown_fd_by_name, self.syscall_name)
+                self.sample_fd()
+            self.fd_sample = None
+            return None
+        annotation = argument.get("annotation")
+        if annotation:
+            if desc["kind"] == "file":
+                resolution = self.resolve_cached(task["cwd"]["path"], None, annotation)
+                if resolution.absolute != desc.get("path"):
+                    self.reason("descriptor_annotation_mismatch")
+                if argument.get("deleted"):
+                    desc["deleted"] = True
+            elif desc["kind"] == "endpoint":
+                if not RX_ENDPOINT_ANNOTATION.match(annotation):
+                    self.reason("descriptor_annotation_mismatch")
+        return desc
+
+    def sample_fd(self):
+        if len(self.loss["unknown_fd_samples"]) < SAMPLE_LIMIT:
+            self.loss["unknown_fd_samples"].append(self.fd_sample or {
+                "fd": None, "syscall": self.syscall_name, "root": None, "sequence": self.line[0]})
+
+    def invalidate_paths(self):
+        self.alias_generation += 1
+        self.path_cache.clear()
+
+    def resolve_cached(self, cwd, dirfd_path, raw, nofollow=False):
+        key = (cwd, dirfd_path, raw, self.alias_generation, nofollow)
+        result = self.path_cache.get(key)
+        if result is None:
+            result = resolve_path(cwd, dirfd_path, raw, self.context,
+                                  {"symlinks": self.links, "nofollow": nofollow})
+            self.path_cache[key] = result
+            if len(self.path_cache) > 4096:
+                self.path_cache.popitem(last=False)
+        else:
+            self.path_cache.move_to_end(key)
+        # Callers add descriptor provenance; no mutable result is shared with the cache.
+        return Resolution(result.absolute, result.path, dict(result.external) if result.external else None,
+                          [dict(alias) for alias in result.aliases], list(result.followed_links), list(result.reasons))
+
+    def resolve(self, task, event, index, nofollow=False):
+        argument = event["fds"].get(index - 1)
+        self.reason_fd = argument["fd"] if argument else None
+        raw = event["paths"].get(index)
+        if raw is None:
+            self.reason("malformed_string")
+            return Resolution()
+        base = None
+        inherited_links = ()
+        if not raw.startswith("/") and index > 0 and index - 1 in event["fds"]:
+            arg = event["fds"][index - 1]
+            if arg["fd"] != "AT_FDCWD":
+                desc = self.fd(task, arg, required=True)
+                base = desc.get("path") if desc else None
+                inherited_links = desc.get("followed_links", ()) if desc else ()
+                if base is None:
+                    self.reason("unknown_path_base")
+                    return Resolution()
+        if raw == "" and "AT_EMPTY_PATH" not in event["flags"]:
+            self.reason("unknown_path_base")
+            return Resolution()
+        resolution = self.resolve_cached(event.get("entry_cwd", task["cwd"]["path"]), base, raw, nofollow)
+        resolution.followed_links = list(dict.fromkeys(list(inherited_links) + resolution.followed_links))
+        for reason in resolution.reasons:
+            self.reason(reason)
+        for alias in resolution.aliases:
+            self.aliases[canonical(alias)] = alias
+        for link in resolution.followed_links:
+            for pending, _, _, _, _, _ in self.unfinished.values():
+                if link in pending.get("alias_overlap", {}):
+                    live, inflight = pending["alias_overlap"][link]
+                    pending["alias_overlap"][link] = (live, max(1, inflight))
+            if _under(link, self.context["source_root"]):
+                self.followed_links.setdefault(link, event["sequence"])
+        return resolution
+
+    def directory(self, path):
+        absolute = self.context["source_root"].rstrip("/") + "/" + path
+        if self.self_generated(absolute):
+            self.generated_output(path)
+            return
+        # A plain open can precede the getdents witness that this is a directory.
+        token = digest(self.context["source_root"].rstrip("/") + "/" + path)[:16]
+        if self.external.pop(("checkout-untracked", token), None) is not None:
+            self.external_paths.pop(token, None)
+        self.attribute("directory_reads", {"path": path, "members": self.children.get(path, []), "complete": True})
+        if path not in self.directories:
+            members = self.children.get(path, [])
+            self.directories[path] = members
+            self.inventory_membership_entries += len(members)
+            self.retain(160 + sum(64 + len(member.encode("utf-8")) for member in members))
+
+    def bytecode_source(self, path):
+        match = RX_BYTECODE_PATH.fullmatch(path)
+        if match:
+            source = (match[1] + "/" if match[1] else "") + match[2] + ".py"
+            if source in self.files:
+                return source
+        return None
+
+    def observed_size(self, resolution, event):
+        if resolution.absolute and "observed_size" in event and resolution.absolute not in self.observed_sizes:
+            self.observed_sizes[resolution.absolute] = event["observed_size"]
+            self.retain(64)
+
+    def edge(self, resolution, kind, event, allow_missing=False):
+        if not resolution.absolute or self.stopped:
+            return
+        if self.marker_token and resolution.absolute.startswith("/leaf-ci-marker/"):
+            return
+        if _is_supervisor(resolution):
+            # Harness control files: counted, never a dependency or lookup.
+            self.supervisor_reads += 1
+            return
+        if resolution.path is not None and self.self_generated(resolution.absolute):
+            self.generated_output(resolution.path)
+            return
+        error = event.get("errno")
+        added = False
+        if error in {"ENOENT", "ENOTDIR"}:
+            self.negative_events += 1
+            added = resolution.absolute not in self.negative
+            if added or self.marker_token:
+                row = {"path_or_class": resolution.path if resolution.path is not None else resolution.external["class"],
+                       "scope": "repo" if resolution.path is not None else "external",
+                       "errno": error, "syscall": event["name"], "sequence": event["sequence"]}
+                if resolution.path is None:
+                    row["path_token"] = resolution.external["path_token"]
+                self.attribute("negative_lookups", row)
+            if added:
+                self.negative[resolution.absolute] = row
+                self.retain(len(resolution.absolute.encode("utf-8")))
+        elif resolution.absolute in self.created and resolution.path is None:
+            token = digest(resolution.absolute)[:16]
+            added = token not in self.internal
+            self.internal.add(token)
+        elif resolution.path is not None:
+            path = resolution.path
+            source = self.bytecode_source(path)
+            directory = path in self.dirs or path in self.cache_dirs or path in self.directories
+            if directory:
+                self.directory(path)
+            elif resolution.absolute not in self.created and resolution.absolute not in self.written_paths:
+                if not error:
+                    parts = path.split("/")
+                    for i in range(len(parts)):
+                        parent = "/".join(parts[:i]) or "."
+                        if parent in self.listings:
+                            self.consumed_directories.add(parent)
+                if source:
+                    path, kind = source, "bytecode"
+                elif path not in self.files and path not in self.inventory_links and not allow_missing:
+                    # Relay-delivered checkout files are inputs bound by their bytes.
+                    external = Resolution(absolute=resolution.absolute,
+                                          external=_external(resolution.absolute, self.context))
+                    self.edge(external, kind, event)
+                    return
+            row = {"path": path, "kind": kind}
+            if error:
+                row["errno"] = error
+            key = canonical(row)
+            added = key not in self.reads
+            self.reads[key] = row
+        elif resolution.external:
+            row = resolution.external
+            added = (row["class"], row["path_token"]) not in self.external
+            self.external[(row["class"], row["path_token"])] = row
+            if row["path_token"] not in self.external_paths:
+                entry = {"path": resolution.absolute, "class": row["class"], "origin_category": row["origin_category"]}
+                if row.get("identity_kind") == "class":
+                    entry["identity_kind"] = "class"
+                elif "source_token" in row:
+                    # Rule A: the supervisor hashes the source, never the bytecode.
+                    source = _bytecode_source(resolution.absolute)
+                    entry.update(source_path=source, inventory_ref=_inventory_ref(source, self.context))
+                    self.retain(2 * len(source.encode("utf-8")) + 64)
+                self.external_paths[row["path_token"]] = entry
+                self.retain(len(resolution.absolute.encode("utf-8")) + 128)
+        self.check_dependencies()
+        if added:
+            self.retain(160)
+
+    def check_dependencies(self):
+        if (self.inventory_membership_entries + len(self.directories)
+                + len(self.generated_inputs) + len(self.reads) + len(self.external)
+                + len(self.negative) > self.limits["max_dependencies"]):
+            self.cap("max_dependencies",
+                     "inventory_membership_entries+directories+generated_inputs+reads+external_inputs+negative_lookups")
+
+    def self_generated(self, path):
+        if path in self.created:
+            return True
+        parent = path
+        while parent and parent != "/":
+            if parent in self.created_directories:
+                return True
+            parent = parent.rsplit("/", 1)[0]
+        return False
+
+    def generated_output(self, path):
+        if path not in self.generated_repo_paths:
+            self.generated_repo_paths.add(path)
+            self.retain(64 + len(path.encode("utf-8")))
+        self.attribute("generated_outputs", {"path": path})
+
+    def written(self, path):
+        if path is not None and _under(path, self.context["source_root"]):
+            relative = path[len(self.context["source_root"].rstrip("/")):].lstrip("/") or "."
+            self.generated_output(relative)
+        if path not in self.written_paths:
+            self.written_paths.add(path)
+            self.retain(64)
+
+    def enumerate(self, desc, event):
+        ret = event["return_value"]
+        if ret is None or ret < 0:
+            return
+        if not desc or desc["kind"] != "file":
+            return
+        path = desc["resolution"].path
+        if not desc.get("directory"):
+            if desc.get("read_or_seek"):
+                if path is not None:
+                    self.directory(path)
+                    self.listings.setdefault(path, False)
+                return
+            desc["directory"] = True
+        if "enumeration" not in desc:
+            desc["enumeration"] = dict(path=desc["path"], eof=False, started=False)
+            self.enumerations.append(desc["enumeration"])
+        enumeration = desc["enumeration"]
+        enumeration["started"] = True
+        enumeration["eof"] |= ret == 0
+        if path is not None:
+            self.directory(path)
+            self.generated_inputs.pop(path, None)
+            self.listings[path] = self.listings.get(path, False) or enumeration["eof"]
+            self.check_dependencies()
+        else:
+            self.edge(desc["resolution"], "stat", event)
+
+    def policy(self, event, task):
+        name, flags = event["name"], event["flags"]
+        if name in POLICY["namespace"] or any(f.startswith("CLONE_NEW") for f in flags):
+            self.invalidate_paths()
+            self.reason("namespace_change")
+        if name in POLICY["abi"] and event["errno"] == "ENOSYS":
+            return False
+        # syscall_0xNN / syscall_NNN (unnamed by strace) are never known.
+        if name in POLICY["reject"] or name not in KNOWN:
+            self.reason("unsupported_syscall:" + name)
+            return False
+        if name in {"ioctl", "fcntl", "prctl"}:
+            subtype = event["scalars"].get(0 if name == "prctl" else 1, "unknown")
+            if name == "prctl" and event.get("subtype_label") in {"PR_SET_VMA", "0x53564d41"}:
+                subtype = event["subtype_label"]
+            if subtype not in POLICY[name]:
+                if name in self.subtypes:
+                    # The reason keeps the bounded ':unknown' form; the counter keeps the name.
+                    self.count(self.subtypes[name], event.get("subtype_label", "unknown"))
+                self.reason("unsupported_syscall:" + name + ":" + str(subtype))
+                return False
+        if name in {"open", "openat", "openat2"}:
+            index = 2 if name in {"openat", "openat2"} else 1
+            value = event["scalars"].get(index)
+            if isinstance(value, str):
+                if any(flag not in POLICY["open_flags"] for flag in value.split("|")):
+                    self.reason("unsupported_kernel_abi")
+            elif value not in {0, 1, 2} and not (name == "openat2" and event["errno"]):
+                self.reason("unsupported_kernel_abi")
+        if name in {"clone", "clone3"} and any(flag not in POLICY["clone_flags"] and not flag.startswith("CLONE_NEW") for flag in flags):
+            self.reason("unsupported_kernel_abi")
+        # Amendment 4 withdrew the shared-futex rule: a futex is not a file input.
+        for fd in event.get("poll_fds", []):
+            self.fd(task, {"fd": fd})
+        if name in POLICY["network"]:
+            if event.get("rights"):
+                self.reason("unsupported_syscall:" + name + ":SCM_RIGHTS")
+        return True
+
+    def filesystem_events(self):
+        """inotify is an external input the capture cannot bind: an unresolved marker row."""
+        row = _external("filesystem-events", {"external_roots": {}})
+        row.update({"class": "filesystem-events", "origin_category": "filesystem-events"})
+        self.external[("filesystem-events", row["path_token"])] = row
+
+    def metadata_mutation(self, task, event):
+        """chmod/chown/utimensat families write metadata: the target counts as written."""
+        name, flags = event["name"], event["flags"]
+        index = PATH_ARGS.get(name, (None,))[0]
+        if index is not None and index in event["paths"]:
+            nofollow = name == "lchown" or "AT_SYMLINK_NOFOLLOW" in flags
+            path = self.resolve(task, event, index, nofollow=nofollow).absolute
+        else:
+            # fchmod/fchown, and utimensat(fd, NULL, ...), act on the descriptor.
+            argument = event["fds"].get(0)
+            if argument is None or argument["fd"] == "AT_FDCWD":
+                self.reason("unknown_path_base")
+                return
+            desc = self.fd(task, argument, required=name in {"fchmodat", "fchownat", "utimensat", "futimesat"})
+            path = desc.get("path") if desc else None
+        if path and event["return_value"] is not None and event["return_value"] >= 0:
+            self.written(path)
+
+    def network_input(self, peer=None):
+        """One unresolved network row per distinct peer; the peer names who a judge must trust."""
+        peer = peer or {"family": "unknown"}
+        row = _external("network", {"external_roots": {}})
+        row.update({"class": "network", "origin_category": "network", "peer": peer,
+                    "path_token": digest({"network": peer})[:16]})
+        self.external[("network", row["path_token"])] = row
+
+    def network(self, task, event):
+        name, ret = event["name"], event["return_value"]
+        success = ret is not None and ret >= 0
+        if name == "socket":
+            family = next((_socket_family(flag[3:]) for flag in event["flags"] if flag.startswith("AF_")), "unknown")
+            if success:
+                desc = {"kind": "network", "unix": "AF_UNIX" in event["flags"], "verified_peer": False,
+                        "family": family}
+                self.putfd(task, ret, desc, "SOCK_CLOEXEC" in event["flags"])
+                if desc["unix"]:
+                    self.unix_sockets.append(desc)
+                    return
+            self.network_input({"family": family})
+            return
+        if name == "setsockopt":
+            # Socket configuration is a no-op for inputs; the descriptor must still resolve.
+            if 0 in event["fds"]:
+                self.fd(task, event["fds"][0])
+            return
+        entry = task["fds"].get(event["fds"].get(0, {}).get("fd"))
+        desc = entry["description"] if entry else None
+        peer = event.get("unix_peer")
+        if desc and desc.get("unix") and peer is not None:
+            resolved = resolve_path(task["cwd"]["path"], None, peer, self.context, {})
+            if name == "bind" and success and resolved.absolute:
+                self.unix_peers[resolved.absolute] = desc
+                return
+            target = self.unix_peers.get(resolved.absolute)
+            if name == "connect" and success and target:
+                desc.update(kind="endpoint", verified_peer=True)
+                target.update(kind="endpoint", verified_peer=True)
+                return
+        if desc and desc["kind"] == "endpoint":
+            if name in {"accept", "accept4"} and success:
+                self.putfd(task, ret, {"kind": "endpoint"}, "SOCK_CLOEXEC" in event["flags"])
+            return
+        # Listening on a newly bound UNIX endpoint is provisional until its
+        # in-tree peer is witnessed. A socket with no such peer rejects closure.
+        if desc and desc.get("unix") and name == "listen":
+            return
+        peer = event.get("peer")
+        if peer is None and desc and desc.get("family"):
+            peer = {"family": desc["family"]}
+        self.network_input(peer)
+        if name in {"accept", "accept4"} and success:
+            self.putfd(task, ret, {"kind": "network"}, "SOCK_CLOEXEC" in event["flags"])
+
+    def copy(self, task, event):
+        """In-kernel copies: a read edge for the in-descriptor's path, a write for the out's."""
+        ret = event["return_value"]
+        source, sink = (event["fds"].get(i) for i in COPIES[event["name"]])
+        if source is None or sink is None:
+            self.reason("unresolved_file_descriptor")
+            return
+        into, out = self.fd(task, source), self.fd(task, sink)
+        if into is None or out is None or ret is None or ret < 0:
+            return
+        if into["kind"] == "file":
+            self.edge(into["resolution"], "open", event)
+        if out["kind"] == "file":
+            out["written"] = True
+            self.written(out["path"])
+
+    def syscall(self, task, event):
+        self.reason_context(event, task)
+        self.attribution_task = task
+        if self.marker(task, event):
+            return
+        name, ret, flags = event["name"], event["return_value"], event["flags"]
+        success = ret is not None and ret >= 0
+        self.syscall_name = name
+        self.syscall_sequence = event["sequence"]
+        if name in POLICY["abi"] and event["errno"] == "ENOSYS":
+            return
+        if event["errno"]:
+            # A failed operation cannot prove that an absent descriptor was open.
+            # dup2/dup3's destination is an output, not a required input.
+            inputs = [arg["fd"] for i, arg in event["fds"].items()
+                      if arg["fd"] != "AT_FDCWD" and not (name in {"dup2", "dup3"} and i == 1)
+                      and not (name == "mmap" and "MAP_ANONYMOUS" in flags)]
+            inputs.extend(event.get("poll_fds", []))
+            if any(fd not in task["fds"] for fd in inputs):
+                self.loss["failed_fd_ops"] += 1
+                return
+        if not self.policy(event, task):
+            return
+        if self.empty_fdcwd_enoent(event):
+            return
+        if name in {"fork", "vfork", "clone", "clone3"} and success and ret > 0:
+            birth_return = {"pid": event["pid"], "child_pid": ret, "syscall": name,
+                            "entry_sequence": event["sequence"], "completion_sequence": self.line[0]}
+            self.birth_returns.append(birth_return)
+            del self.birth_returns[:-16]
+            for witness in self.pid_witnesses.values():
+                if not witness["queue_resolved"]:
+                    witness["birth_returns"].append(birth_return)
+                    del witness["birth_returns"][:-16]
+            child = self.birth(ret, event["sequence"], task, flags)
+            if child:
+                if ret in self.pid_witnesses:
+                    self.pid_witnesses[ret]["queue_resolved"] = True
+                for queued, amount in self.pending.pop(ret, []):
+                    self.release(amount)
+                    self.process(queued)
+            return
+        if name in {"pidfd_open", "pidfd_getfd"}:
+            if success:
+                self.putfd(task, ret, {"kind": "internal"}, True)
+            return
+        if name == "close_range":
+            if success:
+                first, last = event["scalars"].get(0), event["scalars"].get(1)
+                if not isinstance(first, int) or not isinstance(last, int):
+                    self.reason("malformed_line")
+                    return
+                if "CLOSE_RANGE_UNSHARE" in flags:
+                    table = {fd: dict(entry) for fd, entry in task["fds"].items()}
+                    self.drop(task["fds"])
+                    task["fds"] = table
+                    self.hold(table)
+                    self.retain(128 * len(table))
+                for fd in list(task["fds"]):
+                    if first <= fd <= last:
+                        if fd in event.get("protected_fds", ()):
+                            continue
+                        if "CLOSE_RANGE_CLOEXEC" in flags:
+                            task["fds"][fd]["cloexec"] = True
+                        else:
+                            self.closefd(task, fd)
+            return
+        if name in COPIES:
+            self.copy(task, event)
+            return
+        if name in POLICY["network"]:
+            self.network(task, event)
+            return
+        if name in POLICY["internal_object"]:
+            if success:
+                if name == "memfd_create":
+                    self.internal.add(digest([event["pid"], event["sequence"], ret])[:16])
+                    self.retain(64)
+                self.putfd(task, ret, {"kind": "internal" if name == "memfd_create" else "endpoint"},
+                           any(flag in flags for flag in ("MFD_CLOEXEC", "TFD_CLOEXEC", "SFD_CLOEXEC")))
+            return
+        if name in POLICY["filesystem_events"]:
+            if name.startswith("inotify_init") and success:
+                self.putfd(task, ret, {"kind": "endpoint"}, "IN_CLOEXEC" in flags)
+            self.filesystem_events()
+            return
+        if name in METADATA_MUTATIONS:
+            self.metadata_mutation(task, event)
+            return
+        if name in {"open", "openat", "openat2", "creat"}:
+            if success and "O_TMPFILE" in flags:
+                resolution = self.resolve(task, event, 1 if name in {"openat", "openat2"} else 0)
+                if resolution.path is not None:
+                    self.edge(resolution, "open", event, allow_missing=True)
+                    self.written(resolution.absolute)
+                token = digest([event["pid"], event["sequence"], ret])[:16]
+                self.internal.add(token)
+                self.putfd(task, ret, {"kind": "internal"}, "O_CLOEXEC" in flags)
+                return
+            index = 1 if name in {"openat", "openat2"} else 0
+            resolution = self.resolve(task, event, index, nofollow="O_NOFOLLOW" in flags)
+            writable = name == "creat" or bool(set(flags) & {"O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC"}) or event["scalars"].get(index + 1) in {1, 2}
+            if success and writable:
+                self.written(resolution.absolute)
+            if "O_CREAT" in flags or name == "creat":
+                if success:
+                    if name == "creat" or "O_EXCL" in flags or "O_TRUNC" in flags or resolution.path not in self.files:
+                        self.created.add(resolution.absolute)
+            if not success:
+                self.edge(resolution, "open", event)
+            else:
+                desc = dict(kind="file", path=resolution.absolute, resolution=resolution, flags=flags,
+                            open_shape=event.get("_reason_shape", malformed_shape(self.raw_of(event).decode("ascii", "replace"))),
+                            followed_links=tuple(resolution.followed_links),
+                            deleted=False, written=False,
+                            directory="O_DIRECTORY" in flags or resolution.path in self.dirs or resolution.path in self.cache_dirs)
+                if desc["directory"] and resolution.path is not None:
+                    self.directory(resolution.path)
+                self.putfd(task, ret, desc, "O_CLOEXEC" in flags)
+                if "return_fd" in event:
+                    self.fd(task, event["return_fd"])
+                self.edge(resolution, "open", event, allow_missing=desc["directory"] or resolution.absolute in self.created)
+            return
+        if name in {"execve", "execveat"}:
+            resolution = self.resolve(task, event, 1 if name == "execveat" else 0)
+            self.edge(resolution, "exec", event)
+            if success:
+                task["record"]["exec_count"] += 1
+                # Exec unshares the descriptor table, then closes its CLOEXEC fds.
+                table = {fd: dict(v) for fd, v in task["fds"].items() if not v["cloexec"]}
+                self.drop(task["fds"])
+                task["fds"] = table
+                self.hold(table)
+                self.retain(128 * len(table))
+            return
+        if name in LOOKUPS:
+            index = 1 if name in {"newfstatat", "fstatat", "statx", "faccessat", "faccessat2", "readlinkat"} else 0
+            if event["paths"].get(index) == "" and "AT_EMPTY_PATH" in flags:
+                desc = self.fd(task, event["fds"].get(index - 1), required=True)
+                if desc and desc["kind"] == "file":
+                    self.edge(desc["resolution"], "stat", event)
+                    if success:
+                        self.observed_size(desc["resolution"], event)
+                return
+            nofollow = name in {"readlink", "readlinkat", "lstat", "lgetxattr", "llistxattr"} or "AT_SYMLINK_NOFOLLOW" in flags
+            resolution = self.resolve(task, event, index, nofollow=nofollow)
+            self.edge(resolution, "readlink" if name.startswith("readlink") else "stat", event)
+            if success:
+                self.observed_size(resolution, event)
+            if success and name.startswith("readlink"):
+                followed = self.resolve(task, event, index)
+                for alias in followed.aliases:
+                    self.aliases[canonical(alias)] = alias
+            if name == "statfs":
+                row = _external("filesystem-capacity", {"external_roots": {}})
+                row.update({"class": "filesystem-capacity", "origin_category": "filesystem-capacity"})
+                self.external[(row["class"], row["path_token"])] = row
+            return
+        if name == "chdir" and success:
+            resolution = self.resolve(task, event, 0)
+            task["cwd"]["path"] = resolution.absolute
+            return
+        if name in MUTATIONS or name == "truncate":
+            indices = PATH_ARGS.get(name, ())
+            if name.startswith("symlink"):
+                indices = indices[-1:]
+            resolutions = [self.resolve(task, event, i, nofollow=True) for i in indices]
+            for resolution in resolutions:
+                if success and (not name.startswith(("link", "symlink")) or resolution is resolutions[-1]):
+                    self.written(resolution.absolute)
+                alias = resolution.absolute
+                live, inflight = self.alias_users(alias)
+                prior = event.get("alias_overlap", {}).get(alias, (0, 0))
+                users = max(live, prior[0]), max(inflight, prior[1])
+                if success and (resolution.path in self.inventory_links
+                                or alias in self.followed_links or any(users)):
+                    closed = (name in {"unlink", "unlinkat"} and alias in self.links
+                              and resolution.path not in self.inventory_links
+                              and alias in self.followed_links
+                              and self.followed_links[alias] < event["sequence"] and not any(users))
+                    if closed:
+                        self.followed_links.pop(alias, None)
+                    else:
+                        self.alias_witness(resolution, event, users)
+                        self.reason("unsupported_alias_race")
+            if success and resolutions:
+                if name.startswith(("mkdir", "rename", "link", "symlink")):
+                    target = resolutions[-1]
+                    self.created.add(target.absolute)
+                    if name.startswith("mkdir") or (name.startswith("rename") and
+                            (resolutions[0].absolute in self.created_directories or resolutions[0].path in self.dirs)):
+                        self.created_directories.add(target.absolute)
+                    if name.startswith("symlink"):
+                        self.links[target.absolute] = event["paths"][0]
+                    if name.startswith("link"):
+                        origin = resolutions[0]
+                        if origin.absolute in self.links:
+                            self.links[target.absolute] = self.links[origin.absolute]
+                        elif origin.absolute in self.created:
+                            pass
+                        elif origin.path in self.files:
+                            # The new name carries the inventory file's bytes: the origin is read.
+                            self.edge(origin, "open", event)
+                        else:
+                            self.reason("unsupported_syscall:" + name + ":unwitnessed_origin")
+                    if name.startswith("rename"):
+                        origin = resolutions[0]
+                        link = self.links.pop(origin.absolute, None)
+                        self.links.pop(target.absolute, None)
+                        if link is not None:
+                            self.links[target.absolute] = link
+                if name.startswith("unlink"):
+                    self.links.pop(resolutions[0].absolute, None)
+                if name.startswith(("unlink", "rename")):
+                    for owner in self.active.values():
+                        for entry in owner["fds"].values():
+                            if entry["description"].get("path") == resolutions[0].absolute:
+                                entry["description"]["deleted"] = True
+            if success:
+                self.invalidate_paths()
+            return
+        if name in {"pipe", "pipe2", "socketpair"} and success:
+            if len(event["endpoints"]) != 2:
+                self.reason("unresolved_file_descriptor")
+            for endpoint in event["endpoints"]:
+                self.putfd(task, endpoint["fd"], {"kind": "endpoint"}, "O_CLOEXEC" in flags or "SOCK_CLOEXEC" in flags)
+            return
+        if name in {"epoll_create", "epoll_create1", "eventfd", "eventfd2"} and success:
+            self.putfd(task, ret, {"kind": "endpoint"}, "EPOLL_CLOEXEC" in flags or "EFD_CLOEXEC" in flags)
+            return
+        if name == "mmap" and "MAP_ANONYMOUS" in flags:
+            if "MAP_SHARED" in flags:
+                self.reason("unsupported_syscall:mmap:shared_anonymous")
+            return
+        if not event["fds"]:
+            return
+        argument = event["fds"].get(4 if name == "mmap" else 0)
+        if argument is None or argument["fd"] == "AT_FDCWD":
+            return
+        protected = event.get("protected_fds", ())
+        if name == "close" and argument["fd"] in protected:
+            return
+        if name in {"dup2", "dup3"} and success and ret in protected:
+            return
+        entry_descriptions = event.get("entry_descriptions", {})
+        if argument["fd"] in protected and entry_descriptions.get(argument["fd"]) is not None:
+            desc = entry_descriptions[argument["fd"]]
+        else:
+            desc = self.fd(task, argument, required=name == "fchdir")
+        if desc is None:
+            if success and (name in {"dup", "dup2", "dup3"} or name == "fcntl" and event["scalars"].get(1) in {"F_DUPFD", "F_DUPFD_CLOEXEC"}):
+                self.closefd(task, ret)
+            return
+        fd = argument["fd"]
+        if name in READS | FD_LOOKUPS | {"mmap"} and success:
+            if desc["kind"] == "file":
+                if name in READS:
+                    desc["read_or_seek"] = True
+                self.observed_size(desc["resolution"], event)
+                if name == "mmap" and "MAP_SHARED" in flags and "PROT_WRITE" in flags:
+                    self.written(desc["path"])
+                self.edge(desc["resolution"], "mmap" if name == "mmap" else "stat" if name in FD_LOOKUPS else "open", event)
+            elif desc["kind"] not in {"devnull", "supervisor", "endpoint", "internal"}:
+                self.reason("unresolved_file_descriptor")
+        elif name in WRITES and success:
+            desc["written"] = True
+            if desc.get("path"):
+                self.written(desc["path"])
+        elif name == "fchdir" and success:
+            if desc["kind"] != "file" or not desc.get("path"):
+                self.reason("unknown_path_base")
+            else:
+                desc["directory"] = True
+                task["cwd"]["path"] = desc["path"]
+        elif name in {"dup", "dup2", "dup3"} and success:
+            destination = event["fds"].get(1)
+            if destination and destination["fd"] in task["fds"]:
+                self.fd(task, destination)
+            self.putfd(task, ret, desc, name == "dup3" and "O_CLOEXEC" in flags)
+            if "return_fd" in event:
+                self.fd(task, event["return_fd"])
+        elif name == "fcntl" and success:
+            command = event["scalars"].get(1)
+            if command in {"F_DUPFD", "F_DUPFD_CLOEXEC"}:
+                self.putfd(task, ret, desc, command == "F_DUPFD_CLOEXEC")
+                if "return_fd" in event:
+                    self.fd(task, event["return_fd"])
+            elif command == "F_SETFD" and fd not in protected:
+                task["fds"][fd]["cloexec"] = "FD_CLOEXEC" in flags or event["scalars"].get(2) == 1
+        elif name == "ioctl" and success and fd not in protected and event["scalars"].get(1) in {"FIOCLEX", "FIONCLEX"}:
+            task["fds"][fd]["cloexec"] = event["scalars"][1] == "FIOCLEX"
+        elif name in {"getdents", "getdents64"}:
+            self.enumerate(desc, event)
+        elif name == "lseek" and success:
+            desc["read_or_seek"] = True
+        elif name == "close" and success:
+            self.closefd(task, fd)
+
+    def process(self, event):
+        if self.stopped:
+            return
+        # Replaying a queued child must not rewind the last decoded event's clock.
+        if event["sequence"] > self.last_event_sequence:
+            self.last_event_sequence, self.last_event_time = event["sequence"], _event_time(event)
+            self.expire_orphans(self.last_event_time)
+        self.reason_context(event)
+        kind, pid = event["kind"], event["pid"]
+        if pid is None:
+            # No pid prefix: strace has traced one process so far, so the line is the
+            # root's. The first such line births a root whose pid is learned later.
+            if self.adopt_root:
+                self.birth_root(None)
+            if self.root is None:
+                if not self.stopped:
+                    self.reason("unexplained_pid")
+                return
+            pid = event["pid"] = self.root["record"]["pid"]
+        elif self.adopt_root:
+            self.birth_root(pid)
+        elif self.root is not None and self.root["record"]["pid"] is None and pid not in self.active:
+            if kind != "attached" and self.claims_root(event, pid):
+                self.name_root(pid)
+        if self.stopped:
+            return
+        if kind == "attached":
+            return
+        if kind == "detached":
+            self.reason("trace_loss")
+            return
+        if kind in {"exit", "killed"} and pid in self.reuse_pending:
+            old = self.reuse_pending.pop(pid)
+            old["record"]["exit"] = {"kind": "exited" if kind == "exit" else kind,
+                                     "sequence": event["sequence"]}
+            old["record"]["exit"].update({"status": event["status"]} if kind == "exit"
+                                        else {"signal": event["signal"]})
+            self.observed_exits += 1
+            if kind == "killed" and old is self.root:
+                self.reason_task = old
+                self.reason("root_killed")
+            if not old["retained"]:
+                self.release(256)
+            return
+        task = self.active.get(pid)
+        self.reason_task = task
+        if task is None or task["record"]["exit"] is not None:
+            self.unknown_pid_witness(pid, event)
+            event["_reason_shape"] = malformed_shape(self.raw_of(event).decode("ascii", "replace"))
+            amount = len(canonical(event))
+            self.pending.setdefault(pid, []).append((event, amount))
+            self.retain(amount)
+            return
+        raw = self.raw_of(event)
+        task["last"] = (event["sequence"], raw)
+        for pending, _, _, _, _, _ in self.unfinished.values():
+            for alias, previous in pending.get("alias_overlap", {}).items():
+                users = self.alias_users(alias)
+                pending["alias_overlap"][alias] = tuple(max(a, b) for a, b in zip(previous, users))
+        if kind in {"exit", "killed"}:
+            self.attribution_exit(task)
+            # A syscall still unfinished when its task exits never resumes: not unpaired.
+            for key in [key for key in self.unfinished if key[0] == pid]:
+                pending = self.unfinished.pop(key)
+                self.release(pending[5])
+                self.finish_fork(pending[0]["sequence"], "caller_died", _event_time(event))
+            task["record"]["exit"] = dict(kind=kind, sequence=event["sequence"])
+            task["record"]["exit"].update({"status": event["status"]} if kind == "exit" else {"signal": event["signal"]})
+            # A descendant killed by a signal is an ordinary exit record; only the root's is fatal.
+            if kind == "killed" and task is self.root:
+                self.reason("root_killed")
+            self.drop(task["fds"])
+            task["fds"] = {}
+            self.active.pop(pid)
+            self.observed_exits += 1
+            if not task["retained"]:
+                self.release(256)
+            return
+        if kind == "signal":
+            return
+        key = (pid, event["name"])
+        if kind == "interrupted":
+            self.interrupted_names.append(event["name"])
+            del self.interrupted_names[:-16]
+            for witness in self.pid_witnesses.values():
+                if not witness["queue_resolved"] and len(witness["interrupted_calls"]) < 16:
+                    witness["interrupted_calls"].append(event["name"])
+            self.loss["interrupted"] += 1
+            for previous in [key for key in self.unfinished if key[0] == pid]:
+                pending = self.unfinished.pop(previous)
+                self.release(pending[5])
+                self.finish_fork(pending[0]["sequence"])
+            return
+        if kind == "unfinished":
+            for previous in [key for key in self.unfinished if key[0] == pid]:
+                old = self.unfinished.pop(previous)
+                self.release(old[5])
+                self.finish_fork(old[0]["sequence"])
+                self.unpaired(previous[1], old[4], old[0])
+            # Capture the entry cwd and the descriptions of the descriptors this call uses only.
+            snapshot = {fd: (task["fds"].get(fd) or {}).get("description") for fd in self.used_fds(event)}
+            if event["name"] == "close_range":
+                first, last = event["scalars"].get(0), event["scalars"].get(1)
+                if isinstance(first, int) and isinstance(last, int):
+                    snapshot.update((fd, entry["description"]) for fd, entry in task["fds"].items()
+                                    if first <= fd <= last)
+            event.setdefault("_reason_shape", malformed_shape(raw.decode("ascii", "replace")))
+            provenance = set()
+            for index, path in event["paths"].items():
+                desc = snapshot.get(event["fds"].get(index - 1, {}).get("fd")) or {}
+                resolved = self.resolve_cached(task["cwd"]["path"], desc.get("path"), path,
+                                               event["name"] in MUTATIONS)
+                provenance.update(resolved.followed_links)
+                if not path.startswith("/"):
+                    provenance.update(desc.get("followed_links", ()))
+                if event["name"] in {"unlink", "unlinkat"}:
+                    event.setdefault("alias_overlap", {})[resolved.absolute] = self.alias_users(resolved.absolute)
+            event["resolution_links"] = tuple(provenance)
+            amount = 256 + len(raw) + 64 * len(snapshot)
+            self.unfinished[key] = (event, task["cwd"]["path"], snapshot, task, raw, amount)
+            if event["name"] in FORK_CALLS:
+                self.remember_fork(task, event)
+            self.retain(amount)
+            return
+        if kind == "resumed":
+            if event.get("unknown_return"):
+                self.loss["unknown_returns"] += 1
+            pending = self.unfinished.pop(key, None)
+            if pending is None:
+                for previous in [key for key in self.unfinished if key[0] == pid]:
+                    old = self.unfinished.pop(previous)
+                    self.release(old[5])
+                    self.finish_fork(old[0]["sequence"])
+                    self.unpaired(previous[1], old[4], old[0])
+                self.unpaired(event["name"], raw)
+                return
+            original, cwd, snapshot, owner, _, amount = pending
+            self.release(amount)
+            self.finish_fork(original["sequence"], "unknown_return" if event.get("unknown_return") else None,
+                             _event_time(event))
+            if event.get("unknown_return"):
+                # No return was observed, so there is no completed effect to apply.
+                return
+            joined = dict(original)
+            joined["resume_matched"] = True
+            joined["resumed_shape"] = malformed_shape(raw.decode("ascii", "replace"))
+            joined["witness_flags"] = list(dict.fromkeys(original.get("flags", []) + event.get("witness_flags", [])))[:8]
+            for field_name in ("return_value", "return_fd", "errno", "duration", "observed_size"):
+                if field_name in event:
+                    joined[field_name] = event[field_name]
+            if event["endpoints"]:
+                joined["endpoints"] = event["endpoints"]
+            joined["flags"] = list(dict.fromkeys(original["flags"] + event["flags"]))
+            flag_index = STAT_FLAG_INDEX.get(event["name"])
+            offset = original.get("stat_resume_index")
+            if flag_index is not None and offset is not None:
+                joined["flags"].extend(event.get("stat_tail_flags", {}).get(flag_index - offset, []))
+                tail_index = flag_index - offset
+                if tail_index in event.get("stat_tail_values", {}):
+                    joined["stat_flags_value"] = event["stat_tail_values"][tail_index]
+                elif tail_index in event.get("stat_tail_flags", {}):
+                    joined["stat_flags_value"] = event["stat_tail_flags"][tail_index]
+            joined["kind"] = "syscall"
+            joined["entry_cwd"] = cwd
+            self.reason_context(joined, owner)
+            # Sibling threads may change unrelated table rows; only this call's own inputs matter.
+            relative = any(not p.startswith("/") for p in original["paths"].values())
+            if self.empty_fdcwd_enoent(joined):
+                relative = False
+            changed = {fd for fd, desc in snapshot.items()
+                       if (owner["fds"].get(fd) or {}).get("description") is not desc}
+            if event["name"] == "close_range":
+                first, last = original["scalars"].get(0), original["scalars"].get(1)
+                if isinstance(first, int) and isinstance(last, int):
+                    changed.update(fd for fd in owner["fds"] if first <= fd <= last and fd not in snapshot)
+            unexplained = changed
+            if event["name"] in DESCRIPTOR_MUTATIONS:
+                # A completion acts on the entry-time object, never a reused table slot.
+                joined["entry_descriptions"] = snapshot
+                joined["protected_fds"] = changed
+                unexplained = {fd for fd in changed
+                               if (owner["fds"].get(fd) or {}).get("created_sequence", -1) <= original["sequence"]}
+            if (relative and cwd != owner["cwd"]["path"]) or unexplained:
+                self.reason("ambiguous_shared_state")
+                if event["name"] in {"newfstatat", "fstatat", "statx", "fstat"}:
+                    return
+            self.syscall(owner, joined)
+            return
+        self.syscall(task, event)
+
+    def raw_of(self, event):
+        """Bounded raw prefix of the event's own line; empty for a replayed pending event."""
+        sequence, raw = self.line
+        return raw[:SAMPLE_PREFIX] if sequence == event["sequence"] else b""
+
+    @staticmethod
+    def empty_fdcwd_enoent(event):
+        if event["name"] not in STAT_FLAG_INDEX or event.get("errno") != "ENOENT":
+            return False
+        value = event.get("stat_flags_value")
+        no_empty_path = ((isinstance(value, int) and not value & 0x1000)
+                         or (isinstance(value, list) and "AT_EMPTY_PATH" not in value))
+        return (event.get("kind") == "syscall"
+                and event.get("return_value") == -1 and event.get("paths", {}).get(1) == ""
+                and event.get("fds", {}).get(0, {}).get("fd") == "AT_FDCWD" and no_empty_path)
+
+    @staticmethod
+    def used_fds(event):
+        used = [a["fd"] for a in event["fds"].values() if a["fd"] != "AT_FDCWD"]
+        return used + [fd for fd in event.get("poll_fds", ()) if fd not in used]
+
+
+def decode(data, context, limits=None):
+    return decode_stream((data,), context, limits)
+
+
+def _chunk_lines(chunks, decoder, counters):
+    partial = bytearray()
+    sequence, length = 0, 0
+    for chunk in chunks:
+        counters["hash"].update(chunk)
+        counters["byte_count"] += len(chunk)
+        if chunk:
+            counters["terminated"] = chunk.endswith(b"\n")
+        start = 0
+        while start < len(chunk):
+            end = chunk.find(b"\n", start)
+            stop = len(chunk) if end < 0 else end
+            length += stop - start
+            if length <= decoder.limits["max_record_bytes"]:
+                partial.extend(chunk[start:stop])
+            else:
+                del partial[SAMPLE_PREFIX:]
+                partial.extend(chunk[start:stop][:max(0, SAMPLE_PREFIX - len(partial))])
+            if end < 0:
+                break
+            if length > decoder.limits["max_record_bytes"]:
+                decoder.reason_line(sequence, bytes(partial))
+                decoder.record_bytes = length
+                decoder.loss["oversize"] += 1
+                decoder.cap("max_record_bytes")
+                partial.clear()
+            yield sequence, bytes(partial), True
+            sequence += 1
+            partial.clear()
+            length = 0
+            start = end + 1
+    if length:
+        if length > decoder.limits["max_record_bytes"]:
+            decoder.reason_line(sequence, bytes(partial))
+            decoder.record_bytes = length
+            decoder.loss["oversize"] += 1
+            decoder.cap("max_record_bytes")
+            partial.clear()
+        yield sequence, bytes(partial), False
+
+
+def _ranked(table):
+    return sorted(table.items(), key=lambda row: (-row[1], row[0]))
+
+
+def _context_header(context):
+    return {key: context.get(key) for key in ("source_root", "initial_cwd")}
+
+
+def decode_stream(chunks, context, limits=None):
+    _validate(context)
+    caps = dict(LIMITS)
+    for key, value in (limits or {}).items():
+        if key not in caps or type(value) is not int or value < 1:
+            raise ValueError("invalid_limit")
+        caps[key] = value
+    decoder = _Decoder(context, caps)
+    counters = {"hash": hashlib.sha256(), "byte_count": 0, "terminated": False}
+    for sequence, raw, terminated in _chunk_lines(chunks, decoder, counters):
+        decoder.reason_line(sequence, raw)
+        decoder.event_count = sequence + 1
+        if sequence % RSS_INTERVAL == 0:
+            decoder.measure()
+        if not terminated:
+            decoder.reason("trace_loss")
+            continue
+        if len(raw) > caps["max_record_bytes"]:
+            decoder.loss["oversize"] += 1
+            decoder.cap("max_record_bytes")
+        if decoder.stopped:
+            decoder.drain_diagnostic(raw)
+            continue
+        try:
+            event = _parse_line(raw.decode("ascii", "strict"), sequence)
+            if event["kind"] in {"syscall", "unfinished"}:
+                decoder.syscall_count += 1
+            decoder.process(event)
+            if decoder.pending and decoder.orphan_forks:
+                decoder.adopt_pending()
+        except (ValueError, UnicodeError) as exc:
+            reason = "malformed_string" if isinstance(exc, UnicodeError) else str(exc)
+            if reason.startswith("malformed"):
+                decoder.malformed(raw, reason)
+            else:
+                decoder.syscall_name = line_kind(raw[:SAMPLE_PREFIX].decode("ascii", "replace"))
+                decoder.reason(reason)
+    if not decoder.stopped:
+        # Replaying an adopted child can reveal another unfinished fork at EOF.
+        while decoder.fork_entries and not decoder.stopped:
+            for sequence in list(decoder.fork_entries):
+                decoder.finish_fork(sequence, "unfinished_at_stop", decoder.last_event_time)
+            decoder.adopt_pending(at_stop=True)
+    decoder.measure()
+    for (_, name), pending in list(decoder.unfinished.items()):
+        decoder.unpaired(name, pending[4], pending[0])
+    if decoder.pending:
+        decoder.reason_context(next(iter(decoder.pending.values()))[0][0])
+        decoder.reason("unexplained_pid")
+    if decoder.root is None and not decoder.stopped:
+        decoder.reason("missing_terminal")
+    missing_exits = []
+    for pid, task in decoder.reuse_pending.items():
+        record = task["record"]
+        witness = {"pid": pid, "birth_sequence": record["birth_sequence"],
+                   "reuse_sequence": record["exit"]["sequence"]}
+        witnesses = decoder.witnesses.setdefault("reuse_exit_unobserved", [])
+        if len(witnesses) < SAMPLE_LIMIT:
+            witnesses.append(witness)
+        decoder.reason_context({"pid": pid, "sequence": record["exit"]["sequence"]}, task)
+        decoder.reason("reuse_exit_unobserved")
+    for task in decoder.active.values():
+        if task["record"]["exit"] is None:
+            last = task["last"]
+            decoder.reason_context({"pid": task["record"]["pid"],
+                                    "sequence": last[0] if last else task["record"]["birth_sequence"],
+                                    "name": line_kind(last[1].decode("ascii", "replace")) if last else None,
+                                    "_reason_shape": malformed_shape(last[1].decode("ascii", "replace")) if last else ""}, task)
+            decoder.reason("missing_terminal" if task is decoder.root else "descendant_outlived_tree")
+            if len(missing_exits) < SAMPLE_LIMIT:
+                record, last = task["record"], task["last"]
+                missing_exits.append({"pid": record["pid"], "birth_sequence": record["birth_sequence"],
+                                      "parent_pid": record["parent"]["pid"] if record["parent"] else None,
+                                      "last_sequence": last[0] if last else None,
+                                      "last_shape": malformed_shape(last[1].decode("ascii", "replace")) if last else None})
+    if not decoder.stopped and any(not desc["verified_peer"] for desc in decoder.unix_sockets):
+        decoder.network_input({"family": "unix"})
+    if not decoder.stopped and any(not decoder.listings[path] for path in decoder.consumed_directories):
+        decoder.reason("directory_enumeration_incomplete")
+    sha = counters["hash"].hexdigest()
+    receipt = context.get("terminal_receipt", {})
+    matched = isinstance(receipt, dict) and receipt.get("byte_count") == counters["byte_count"] and receipt.get("sha256") == sha
+    if not matched or not counters["terminated"]:
+        decoder.reason_line(*decoder.line)
+        decoder.reason("trace_loss")
+    if decoder.stopped:
+        decoder.reads.clear()
+        decoder.external.clear()
+        decoder.negative.clear()
+        decoder.aliases.clear()
+        decoder.directories.clear()
+    attribution = decoder.attribution_result()
+    reasons = sorted(decoder.reasons)
+    records = [task["record"] for task in decoder.tasks]
+    exits = decoder.observed_exits
+    children = (not any(task is not decoder.root for task in decoder.active.values())
+                and not decoder.pending and not decoder.reuse_pending and not decoder.stopped)
+    complete = decoder.reason_count == 0 and matched and exits == decoder.tasks_total and decoder.root is not None
+    seeds = {}
+    for fd, seed in context["seed_fds"].items():
+        row = {"kind": seed["kind"]}
+        if seed["kind"] == "file":
+            path = seed["path"]
+            resolution = resolve_path(context["source_root"], None, path, context, {})
+            if resolution.path is not None:
+                row["path"] = resolution.path
+        seeds[str(fd)] = row
+    certificate = {key: context[key] for key in BINDINGS}
+    certificate.update(_context_header(context))
+    certificate.update(schema="leaf.ci.process-tree.v1", capture_group=context["capture_group"],
+                       root={"pid": decoder.root["record"]["pid"] if decoder.root is not None else context.get("root_pid"),
+                             "birth_sequence": 0},
+                       seed_fds=seeds, tasks=records, tasks_total=decoder.tasks_total,
+                       tasks_truncated=decoder.tasks_total > len(records), expected_exits=decoder.tasks_total, observed_exits=exits,
+                       event_count=decoder.event_count, syscall_count=decoder.syscall_count,
+                       transcript_bytes=counters["byte_count"], transcript_sha256=sha, receipt_matched=matched,
+                       capture_epoch=context.get("capture_epoch"), capture_epoch_manifest=context.get("capture_epoch_manifest"),
+                       syscall_policy_digest=digest(POLICY), loss_counters=decoder.loss,
+                       adopted_births=decoder.adopted_births,
+                       reason_samples=decoder.reason_samples,
+                       limit_trip=decoder.limit_trip, decoder_stop=decoder.decoder_stop,
+                       post_stop={"terminals_seen": len(decoder.stop_terminals),
+                                  "terminals_missing": len(decoder.stop_pids - decoder.stop_terminals),
+                                  "resumes_matched": decoder.post_stop_resumes,
+                                  "pids_active_at_stop": len(decoder.stop_pids)},
+                       active_at_stop=decoder.active_at_stop, witnesses=decoder.witnesses,
+                       malformed_samples=[{"shape": shape, "count": n} for shape, n in _ranked(decoder.malformed_samples)],
+                       malformed_by_name=dict(_ranked(decoder.malformed_by_name)[:NAME_REPORT]),
+                       unsupported_by_name=dict(_ranked(decoder.unsupported_by_name)),
+                       unpaired_samples=[{"shape": shape, "count": n} for shape, n in _ranked(decoder.unpaired_samples)],
+                       unpaired_by_name=dict(_ranked(decoder.unpaired_by_name)[:NAME_REPORT]),
+                       unknown_fd_by_name=dict(_ranked(decoder.unknown_fd_by_name)[:NAME_REPORT]),
+                       missing_exit_samples=missing_exits,
+                       prctl_subtypes=dict(_ranked(decoder.subtypes["prctl"])[:NAME_REPORT]),
+                       fcntl_subtypes=dict(_ranked(decoder.subtypes["fcntl"])[:NAME_REPORT]),
+                       internal_objects={"count": len(decoder.internal), "sample": sorted(decoder.internal)[:32]},
+                       supervisor_reads=decoder.supervisor_reads,
+                       reasons=reasons, reasons_truncated=decoder.reason_count > len(reasons),
+                       reason_count=decoder.reason_count, trace_loss=decoder.trace_lost or decoder.loss["malformed"] > 0,
+                       decoder_complete=not decoder.stopped and decoder.loss["malformed"] == 0,
+                       complete=complete)
+    # The tree union lives once, in the certificate; shards reference it (union_ref).
+    generated = []
+    generated_inputs = []
+    if not decoder.stopped:
+        output_paths = set(decoder.generated_repo_paths)
+        for path in sorted(p for p in decoder.written_paths if p is not None):
+            resolution = resolve_path(None, None, path, context, {})
+            if resolution.path is not None:
+                output_paths.add(resolution.path)
+        generated = [{"path": path} for path in sorted(output_paths)]
+        generated_inputs = [row for path, row in sorted(decoder.generated_inputs.items())
+                            if context["source_root"].rstrip("/") + "/" + path not in decoder.written_paths]
+    certificate.update(generated_outputs=generated,
+                       generated_inputs=generated_inputs, generated_inputs_resolved=not generated_inputs,
+                       reads=sorted(decoder.reads.values(), key=lambda r: (r["path"], r["kind"], r.get("errno", ""))),
+                       directory_reads=[{"path": p, "members": m, "complete": decoder.listings.get(p, True)}
+                                        for p, m in sorted(decoder.directories.items())],
+                       external_inputs=[r for _, r in sorted(decoder.external.items())],
+                       external_inputs_resolved=all(r["resolved"] for r in decoder.external.values()),
+                       negative_events=decoder.negative_events,
+                       negative_lookups=sorted(decoder.negative.values(), key=lambda r: (r["path_or_class"], r["sequence"])),
+                       path_aliases=[r for _, r in sorted(decoder.aliases.items())])
+    certificate["attribution"] = attribution
+    certificate["external_paths"] = _external_paths_table(decoder)
+    reference = "reports/process-tree-" + context["capture_group"] + ".json"
+    shards = []
+    for suite in context["suites"]:
+        shard = {key: context[key] for key in BINDINGS}
+        shard.update({key: suite[key] for key in ("suite_id", "attempt", "worker", "test_ids", "outcomes_ref")})
+        prefix = suite["suite_id"] + "::"
+        shard.update(schema="leaf.ci.readset.v1", nodeids=[t[len(prefix):] if t.startswith(prefix) else t for t in suite["test_ids"]],
+                     trace_kind="linux-process-tree", python_only=False,
+                     capture_epoch=context.get("capture_epoch"), capture_epoch_manifest=context.get("capture_epoch_manifest"),
+                     process_tree_ref=reference, union_ref=reference,
+                     process_tree_sha256=digest(certificate), attribution_scope="tree-union",
+                     reads=[], directory_reads=[], external_inputs=[], negative_lookups=[], path_aliases=[],
+                     generated_inputs=generated_inputs, generated_inputs_resolved=not generated_inputs,
+                     generated_outputs=generated,
+                     shared_state_dependencies=[], shared_state_closure_resolved=True,
+                     external_dependency_classes=[],
+                     external_inputs_resolved=certificate["external_inputs_resolved"], children_complete=children,
+                     completion_marker=bool(decoder.root and decoder.root["record"]["exit"] and matched),
+                     trace_loss=certificate["trace_loss"], decoder_complete=certificate["decoder_complete"],
+                     capture_complete=complete, incomplete_reasons=reasons)
+        if attribution["mode"] == "session+suite" and not any(r.startswith("attribution_") for r in reasons):
+            delta = attribution["suite_deltas"][suite["suite_id"]]
+            shard.update({field: delta[field] for field in DEPENDENCY_FIELDS})
+            shard["generated_outputs"] = delta.get("generated_outputs", [])
+            shard.update(attribution_scope="session+suite",
+                         session_ref={"sha256": attribution["session_dependencies"]["sha256"],
+                                      "process_tree_sha256": digest(certificate)},
+                         generated_inputs_resolved=not (delta["generated_inputs"] or attribution["session_dependencies"]["generated_inputs"]),
+                         external_inputs_resolved=all(row["resolved"] for row in
+                             delta["external_inputs"] + attribution["session_dependencies"]["external_inputs"]))
+        shards.append(shard)
+    paths = {} if decoder.stopped else decoder.external_paths
+    for row in paths.values():
+        row.update(size=decoder.observed_sizes.get(row["path"]), written=row["path"] in decoder.written_paths)
+    return {"certificate": certificate, "shards": shards, "external_paths": paths,
+            "decoder_peak_bytes": decoder.peak_bytes}
+
+
+def _external_paths_table(decoder):
+    """Rule C: token -> {path, class, origin_category, reason} for every external token the report names.
+
+    Runner paths are not secrets; without this table an unresolved token is anonymous offline.
+    Marker rows (network, filesystem-events, filesystem-capacity) name no path. Bounded by the
+    report's own external_inputs and negative_lookups; empty when the decoder stopped.
+    """
+    table = {}
+    for (_, token), row in sorted(decoder.external.items()):
+        seen = decoder.external_paths.get(token, {})
+        table[token] = {"path": seen.get("path"), "class": row["class"],
+                        "origin_category": row["origin_category"], "reason": row["reason"]}
+        if "peer" in row:
+            # tools-29 rule C: a network token names its peer in place of the null path.
+            del table[token]["path"]
+            table[token]["peer"] = row["peer"]
+    for path, row in sorted(decoder.negative.items()):
+        token = row.get("path_token")
+        if token is not None and token not in table:
+            table[token] = {"path": path, "class": row["path_or_class"],
+                            "origin_category": _external(path, decoder.context)["origin_category"],
+                            "reason": "negative_lookup"}
+    return table
+
+
+def bind_external_identities(result, table):
+    """Bind supervisor evidence onto every external row and refresh the token table's reasons.
+
+    Rows live in the certificate's union; shard digests are recomputed after binding.
+    """
+    certificate = result["certificate"]
+    paths = certificate.get("external_paths", {})
+    for row in certificate["external_inputs"]:
+        _bind_identity(row, table)
+        if row["path_token"] in paths:
+            paths[row["path_token"]]["reason"] = row["reason"]
+    certificate["external_inputs_resolved"] = all(row["resolved"] for row in certificate["external_inputs"])
+    attribution = certificate.get("attribution", {})
+    for rows in [attribution.get("session_dependencies", {})] + list(attribution.get("suite_deltas", {}).values()):
+        if not rows:
+            continue
+        for row in rows["external_inputs"]:
+            _bind_identity(row, table)
+        rows["sha256"] = digest({field: rows[field] for field in DEPENDENCY_FIELDS})
+    for shard in result["shards"]:
+        shard.update(external_inputs_resolved=certificate["external_inputs_resolved"],
+                     process_tree_sha256=digest(certificate))
+        if shard.get("attribution_scope") == "session+suite":
+            shard["session_ref"] = {"sha256": attribution["session_dependencies"]["sha256"],
+                                    "process_tree_sha256": digest(certificate)}
+            shard["external_inputs_resolved"] = all(row["resolved"] for row in
+                shard["external_inputs"] + attribution["session_dependencies"]["external_inputs"])
+    return result
+
+
+def _atomic(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix="." + path.name, dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(canonical(value) + b"\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def write_outputs(result, out_dir):
+    root = Path(out_dir)
+    group = result["certificate"]["capture_group"]
+    if not RX_OUTPUT_ID.fullmatch(group):
+        raise ValueError("invalid_capture_group")
+    _atomic(root / "reports" / ("process-tree-" + group + ".json"), result["certificate"])
+    for shard in result["shards"]:
+        suite = quote(str(shard["suite_id"]), safe="").replace(".", "%2E") or "%00"
+        if not RX_OUTPUT_ID.fullmatch(shard["worker"]) or type(shard["attempt"]) is not int or shard["attempt"] < 1:
+            raise ValueError("invalid_output_identity")
+        _atomic(root / "readsets" / suite / str(shard["attempt"]) / (shard["worker"] + "-process.json"), shard)
+
+
+def _pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate_json_key")
+        result[key] = value
+    return result
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    command = sub.add_parser("decode")
+    command.add_argument("--trace", required=True)
+    command.add_argument("--context", required=True)
+    command.add_argument("--context-key")
+    command.add_argument("--out", required=True)
+    command.add_argument("--limit", action="append", default=[])
+    args = parser.parse_args(argv)
+    try:
+        context = json.loads(Path(args.context).read_bytes().decode("utf-8"), object_pairs_hook=_pairs,
+                             parse_constant=lambda _: (_ for _ in ()).throw(ValueError("invalid_json")))
+        if args.context_key:
+            context = context[args.context_key]
+        limits = {}
+        for limit in args.limit:
+            name, value = limit.split("=", 1)
+            limits[name] = int(value)
+        result = decode(Path(args.trace).read_bytes(), context, limits)
+        write_outputs(result, args.out)
+        return 0
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError):
+        # Do not echo exception messages: they can contain raw trace or paths.
+        print("trace_process_tree: invalid input, context, limit or output", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

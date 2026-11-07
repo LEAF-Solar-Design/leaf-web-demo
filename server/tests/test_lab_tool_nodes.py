@@ -181,6 +181,116 @@ def test_binding_unavailable(rig, tier):
     assert not rig.calls
 
 
+@pytest.mark.parametrize("tier", ["hosted_pro", "demo_live", "", "  ", " hosted_pro "])
+def test_default_tier_preserves_broker_record(rig, monkeypatch, tier):
+    import platform_link
+
+    reads = []
+    platform_reads = []
+    def broker_tier(tenant):
+        reads.append(tenant)
+        return tier
+    def platform_store():
+        platform_reads.append(True)
+        raise AssertionError("broker tier must be authoritative")
+    monkeypatch.setattr(deps, "backedge_tier", broker_tier)
+    monkeypatch.setattr(platform_link, "platform_store", platform_store)
+    assert nodes.lab_tool_tier(TENANT) == tier
+    rig.options["tier_of"] = None
+    if not tier.strip():
+        expected = {"error": "lab_tool_binding_unavailable"}
+    elif nodes.entitlements.entitlements_for(tier).get("run_read"):
+        expected = {"outputs": {"result": 7}}
+    else:
+        expected = {"error": "lab_tool_entitlement_required"}
+    assert rig.call() == expected
+    assert bool(rig.calls) == ("outputs" in expected)
+    assert reads == [TENANT, TENANT]
+    assert not platform_reads
+
+
+@pytest.mark.parametrize("capability,required", [("drawing.read", "run_read"), ("drawing.write", "run_write")])
+def test_default_tier_active_platform_org_preserves_tier(rig, monkeypatch, capability, required):
+    import platform_link
+
+    # SEL-316j2: preserve padded tiers exactly as the API does to prevent elevation.
+    reads = []
+    def get_org(tenant):
+        reads.append(tenant)
+        return SimpleNamespace(status="active", tier=" hosted_pro ")
+    monkeypatch.setattr(deps, "backedge_tier", lambda tenant: None)
+    monkeypatch.setattr(platform_link, "platform_store", lambda: SimpleNamespace(get_org=get_org))
+    assert nodes.lab_tool_tier(TENANT) == " hosted_pro "
+    rig.tool["capabilities"] = [capability]
+    rig.options["tier_of"] = None
+    policy = nodes.entitlements.entitlements_for
+    tiers = []
+    def entitlements_for(resolved):
+        tiers.append(resolved)
+        return policy(resolved)
+    monkeypatch.setattr(nodes.entitlements, "entitlements_for", entitlements_for)
+    expected = ({"outputs": {"result": 7}} if policy(" hosted_pro ").get(required)
+                else {"error": "lab_tool_entitlement_required"})
+    assert rig.call() == expected
+    assert tiers == [" hosted_pro "]
+    assert reads == [TENANT, TENANT]
+    assert bool(rig.calls) == ("outputs" in expected)
+
+
+def test_default_tier_broker_error_fails_closed(rig, monkeypatch):
+    def broker_tier(tenant):
+        raise RuntimeError("unavailable")
+    monkeypatch.setattr(deps, "backedge_tier", broker_tier)
+    assert nodes.lab_tool_tier(TENANT) is None
+    rig.options["tier_of"] = None
+    assert rig.call() == {"error": "lab_tool_binding_unavailable"}
+    assert not rig.calls
+
+
+@pytest.mark.parametrize("authority", ["inactive", "missing", "store_error", "lookup_error"])
+def test_default_tier_platform_authority_fails_closed(rig, monkeypatch, authority):
+    import platform_link
+
+    def get_org(tenant):
+        assert tenant == TENANT
+        if authority == "lookup_error":
+            raise RuntimeError("unavailable")
+        return None if authority == "missing" else SimpleNamespace(status="inactive", tier="hosted_pro")
+    def platform_store():
+        if authority == "store_error":
+            raise RuntimeError("unavailable")
+        return SimpleNamespace(get_org=get_org)
+    monkeypatch.setattr(deps, "backedge_tier", lambda tenant: None)
+    monkeypatch.setattr(platform_link, "platform_store", platform_store)
+    rig.options["tier_of"] = None
+    assert rig.call() == {"error": "lab_tool_binding_unavailable"}
+    assert not rig.calls
+
+
+@pytest.mark.parametrize("tier", ["", "  ", None, 7])
+@pytest.mark.parametrize("capability,required", [("drawing.read", "run_read"), ("drawing.write", "run_write")])
+def test_default_tier_blank_platform_tier_uses_restricted_policy(rig, monkeypatch, tier, capability, required):
+    import platform_link
+
+    monkeypatch.setattr(deps, "backedge_tier", lambda tenant: None)
+    monkeypatch.setattr(platform_link, "platform_store", lambda: SimpleNamespace(
+        get_org=lambda tenant: SimpleNamespace(status="active", tier=tier)))
+    assert nodes.lab_tool_tier(TENANT) == "restricted"
+    rig.tool["capabilities"] = [capability]
+    rig.options["tier_of"] = None
+    policy = nodes.entitlements.entitlements_for
+    tiers = []
+    def entitlements_for(resolved):
+        tiers.append(resolved)
+        return policy(resolved)
+    monkeypatch.setattr(nodes.entitlements, "entitlements_for", entitlements_for)
+    expected = ({"outputs": {"result": 7}} if policy("restricted").get(required)
+                else {"error": "lab_tool_entitlement_required"})
+    assert rig.call() == expected
+    assert tiers == ["restricted"]
+    assert bool(rig.calls) == ("outputs" in expected)
+
+
 def test_entitlement_required(rig, monkeypatch):
     monkeypatch.setattr(nodes.entitlements, "entitlements_for", lambda tier: {})
     assert rig.call() == {"error": "lab_tool_entitlement_required"}

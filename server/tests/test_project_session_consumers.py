@@ -141,3 +141,277 @@ def test_revoked_member_cannot_mint_or_execute_mcp_authority(monkeypatch):
         )
 
     assert exc.value.status_code == 403
+
+
+@pytest.fixture
+def material_source(monkeypatch):
+    from types import SimpleNamespace
+    import copy
+    import session_store
+
+    platform_link._ensure_platform_package()
+    from leaf_platform import project_materials, project_web_page, project_page_proposal
+
+    project = "22222222-2222-4222-8222-222222222222"
+    session = {"session_id": "s", "tenant_id": ORG_ID, "org_id": ORG_ID,
+               "project_id": project, "active_turn_id": "t"}
+    binding = SimpleNamespace(platform_tenant_id=ORG_ID, binding_id="binding")
+    monkeypatch.setattr(session_store, "get_session", lambda sid: session if sid == "s" else None)
+    monkeypatch.setattr(session_store, "active_turn_subject",
+                        lambda sid, tid, tenant, age: "auth0|editor" if tid == "t" else None)
+    monkeypatch.setattr(platform_link, "resolve_caller_binding", lambda tenant: binding)
+    checks = []
+
+    def access(tenant, pid, *, write, binding):
+        assert write is False
+        assert pid == project and str(tenant) == ORG_ID
+        checks.append(pid)
+        return ORG_ID
+
+    monkeypatch.setattr(platform_link, "require_project_access", access)
+    document = {"schema": "leaf.portfolio.v1", "name": "Jessica", "headline": "Selected work",
+                "introduction": "Cakes", "about": "Baking", "theme": "light",
+                "contact": {"email": "jessica@example.com", "location": "Portland"},
+                "resume": [], "categories": [{"slug": "cakes", "title": "Cakes",
+                    "description": "Celebrations", "hero": 0, "images": [{
+                        "material_id": "33333333-3333-4333-8333-333333333333",
+                        "sha256": "a" * 64, "preview_sha256": "b" * 64,
+                        "title": "Cake", "alt": "Chocolate cake"}]}]}
+    page = {"revision": 7, "digest": project_page_proposal.document_digest(document),
+            "document": document}
+    rows = [{"material_id": str(i), "name": "cake.jpg", "media_type": "image/jpeg",
+             "width": 100, "height": 80, "sha256": "a" * 64, "preview_sha256": "b" * 64,
+             "storage_key": "secret", "url": "https://private.invalid", "payload": b"private"}
+            for i in range(94)]
+
+    def read(*scope):
+        assert scope == (ORG_ID, project, "binding")
+        return copy.deepcopy(page)
+
+    def listing(*scope, limit):
+        assert scope == (ORG_ID, project, "binding") and limit == 200
+        return {"materials": copy.deepcopy(rows), "next_cursor": None}
+
+    monkeypatch.setattr(project_web_page, "read", read)
+    monkeypatch.setattr(project_materials, "list_materials", listing)
+    return session, page, rows, checks, project_materials
+
+
+def test_project_material_read_uses_catalog_and_does_not_mutate(material_source):
+    import copy
+    session, page, rows, checks, _ = material_source
+    before = copy.deepcopy((session, page, rows))
+    result = platform_link.read_turn_project_materials(_tenant(), "s", "t", 300)
+    assert result["page"]["revision"] == 7
+    assert result["page"]["digest"] == page["digest"]
+    assert result["page"]["fields"][0] == {"id": "f0001", "value": "Jessica"}
+    assert result["materials"]["observed_count"] == 94
+    assert result["materials"]["count_complete"] is True
+    assert result["materials"]["omitted_count"] == 89
+    assert "storage_key" not in json.dumps(result) and "private" not in json.dumps(result)
+    assert len(checks) == 2
+    assert (session, page, rows) == before
+
+
+@pytest.mark.parametrize("failure", ["foreign", "wrong_turn", "missing", "revoked", "late", "scope"])
+def test_project_material_authority_fails_closed(monkeypatch, material_source, failure):
+    import context_packet
+    session, _, _, _, materials = material_source
+    principal = _tenant()
+    if failure == "foreign":
+        session["org_id"] = "44444444-4444-4444-8444-444444444444"
+    elif failure == "wrong_turn":
+        session["active_turn_id"] = "other"
+    elif failure == "missing":
+        principal = ORG_ID
+    elif failure == "revoked":
+        monkeypatch.setattr(platform_link, "resolve_caller_binding", lambda tenant: None)
+    else:
+        original = materials.list_materials
+
+        def listing(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if failure == "late":
+                monkeypatch.setattr(platform_link, "resolve_caller_binding", lambda tenant: None)
+            else:
+                session["project_id"] = "55555555-5555-4555-8555-555555555555"
+            return result
+
+        monkeypatch.setattr(materials, "list_materials", listing)
+    assert context_packet._project_material_context(principal, "s", "t", 300) is None
+
+
+def test_material_pagination_is_a_lower_bound(monkeypatch, material_source):
+    _, _, rows, _, materials = material_source
+    monkeypatch.setattr(materials, "list_materials", lambda *args, **kwargs: {
+        "materials": rows, "next_cursor": "continue"})
+    result = platform_link.read_turn_project_materials(_tenant(), "s", "t", 300)
+    assert result["materials"]["observed_count"] == 94
+    assert result["materials"]["count_complete"] is False
+
+
+def test_memory_queue_preserves_verified_project_principal(monkeypatch, material_source):
+    import turn_runner
+
+    principal = _tenant()
+    monkeypatch.setattr(turn_runner, "_queued", {})
+    monkeypatch.setattr(turn_runner.request_journal, "enabled", lambda: False)
+    monkeypatch.setattr(turn_runner.session_store, "append_event", lambda *args: None)
+    monkeypatch.setattr(turn_runner.entitlements, "resolve_tier", lambda tenant: "pro")
+    monkeypatch.setattr(turn_runner.entitlements, "resolve_roles", lambda tenant: ((), False))
+    status, _ = turn_runner.try_enqueue_turn(principal, "s", text="Use my saved portfolio")
+    assert status == "queued"
+    queued = turn_runner._queued["s"]
+    assert queued["tenant_id"] is principal
+    assert platform_link.read_turn_project_materials(
+        queued["tenant_id"], "s", "t", 300)["page"]["revision"] == 7
+
+
+@pytest.mark.parametrize("flags", [{"backedge": True}, {"verified_demo": True},
+                                   {"authority_resolved": False}])
+def test_non_verified_project_principals_get_no_grounding(material_source, flags):
+    values = {"subject": "auth0|editor", "authority_resolved": True, **flags}
+    principal = deps.TenantContext(ORG_ID, **values)
+    assert platform_link.read_turn_project_materials(principal, "s", "t", 300) is None
+
+
+@pytest.fixture
+def page_proposal_http(monkeypatch, material_source):
+    from types import SimpleNamespace
+    from uuid import UUID
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from routers import sessions
+    from leaf_platform import project_page_proposal as proposals, project_web_page, project_lifecycle
+
+    session, page, _, _, _ = material_source
+    state = {"active": True, "revoked": False, "calls": 0, "late": False}
+    binding = SimpleNamespace(platform_tenant_id=UUID(ORG_ID),
+                              binding_id=UUID("44444444-4444-4444-8444-444444444444"))
+    monkeypatch.setenv("LEAF_APP_DISPATCH_SECRET", "proposal-test-secret")
+    monkeypatch.setattr(deps, "auth_live", lambda: True)
+    monkeypatch.setattr(deps, "backedge_tier", lambda tenant: "pro")
+    monkeypatch.setattr(deps, "resolve_active_platform_tenant_authority", lambda subject: (ORG_ID, "pro"))
+    monkeypatch.setattr(sessions.session_store, "active_turn_subject", lambda sid, tid, tenant, age:
+                        "auth0|editor" if state["active"] and (sid, tid, tenant) == ("s", "t", ORG_ID) else None)
+    monkeypatch.setattr(platform_link, "resolve_caller_binding", lambda tenant: binding)
+
+    def access(tenant, project_id, *, write, binding=None):
+        assert write is True
+        if state["revoked"]:
+            raise platform_link.ProjectSessionForbidden()
+        return ORG_ID
+
+    monkeypatch.setattr(platform_link, "require_project_access", access)
+    monkeypatch.setattr(project_lifecycle, "require_project_role", lambda *args, **kwargs: None)
+    monkeypatch.setattr(project_web_page, "read", lambda *args: page)
+    monkeypatch.setattr(project_web_page, "save", lambda *args, **kwargs: pytest.fail("proposal saved a page"))
+
+    def transport(payload):
+        state["calls"] += 1
+        assert payload["tenant_id"] == ORG_ID
+        if state["late"]:
+            state["active"] = False
+        return json.dumps({"source": payload["source"], "edits": [{"id": "f0002", "value": "New headline"}],
+                           "model": "claude-haiku-5-5", "usage": {"input_tokens": 12}}).encode()
+
+    monkeypatch.setattr(proposals, "_transport", transport)
+    app = FastAPI()
+    app.include_router(sessions.router)
+    with TestClient(app) as client:
+        yield client, session, page, state
+
+
+def _page_proposal_post(fixture, *, body=None, route="s", authority="s", turn="t"):
+    client, _, page, _ = fixture
+    return client.post(f"/api/sessions/{route}/page/proposals", headers={
+        "X-Tenant-Id": ORG_ID, "X-Dispatch-Secret": "proposal-test-secret",
+        "X-Authority-Session-Id": authority, "X-Authority-Turn-Id": turn,
+    }, json=body if body is not None else {
+        "instruction": "Shorten the headline", "expected_revision": page["revision"],
+        "expected_digest": page["digest"],
+    })
+
+
+def test_page_proposal_http_active_editor_exact_private_result(page_proposal_http):
+    response = _page_proposal_post(page_proposal_http)
+    _, session, page, state = page_proposal_http
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "private, no-store"
+    result = response.json()
+    assert set(result) == {"source", "proposed_document", "proposed_digest", "edits", "model", "usage"}
+    assert result["source"] == {"project_id": session["project_id"], "revision": 7, "digest": page["digest"]}
+    assert result["proposed_document"]["headline"] == "New headline"
+    assert page["document"]["headline"] == "Selected work"
+    assert state["calls"] == 1
+
+
+@pytest.mark.parametrize("failure", ["revoked", "foreign", "stale", "non_project", "late", "outage", "tenant"])
+def test_page_proposal_http_authority_refuses(page_proposal_http, monkeypatch, failure):
+    _, session, _, state = page_proposal_http
+    options = {}
+    if failure == "revoked":
+        state["revoked"] = True
+    elif failure == "foreign":
+        options["authority"] = "foreign"
+    elif failure == "stale":
+        options["turn"] = "old-turn"
+    elif failure == "non_project":
+        session.pop("org_id")
+        session.pop("project_id")
+    elif failure == "late":
+        state["late"] = True
+    elif failure == "tenant":
+        session["org_id"] = "55555555-5555-4555-8555-555555555555"
+    else:
+        def unavailable(*args, **kwargs):
+            raise RuntimeError("private store exception")
+        monkeypatch.setattr(platform_link, "resolve_caller_binding", unavailable)
+    response = _page_proposal_post(page_proposal_http, **options)
+    assert response.status_code in (403, 404, 503)
+    assert state["calls"] == (1 if failure == "late" else 0)
+    assert "private store exception" not in response.text
+    assert "proposed_document" not in response.json()
+
+
+@pytest.mark.parametrize("patch", [
+    {"subject": "auth0|other"}, {"instruction": " "}, {"instruction": 7},
+    {"expected_revision": True}, {"expected_revision": "7"},
+    {"expected_digest": "A" * 64}, {"expected_revision": 8},
+])
+def test_page_proposal_http_closed_types_and_saved_source(page_proposal_http, patch):
+    _, _, page, state = page_proposal_http
+    body = {"instruction": "Shorten", "expected_revision": page["revision"], "expected_digest": page["digest"], **patch}
+    response = _page_proposal_post(page_proposal_http, body=body)
+    assert response.status_code == (409 if patch == {"expected_revision": 8} else 422)
+    assert state["calls"] == 0
+
+
+def test_page_proposal_http_assembled_response_limit(page_proposal_http, monkeypatch):
+    from leaf_platform import project_page_proposal as proposals
+    monkeypatch.setattr(proposals, "propose", lambda *args, **kwargs: {"document": "x" * (1024 * 1024)})
+    response = _page_proposal_post(page_proposal_http)
+    assert response.status_code == 502
+    assert len(response.content) < 200
+
+
+def test_page_proposal_http_dispatch_identity_outage_is_private(page_proposal_http, monkeypatch):
+    def unavailable(*args):
+        raise RuntimeError("private identity diagnostic")
+    monkeypatch.setattr(deps, "backedge_tier", unavailable)
+    response = _page_proposal_post(page_proposal_http)
+    assert response.status_code == 503
+    assert response.headers["cache-control"] == "private, no-store"
+    assert response.json() == {"detail": "Portfolio proposal service is unavailable."}
+    assert page_proposal_http[3]["calls"] == 0
+
+
+def test_page_proposal_http_package_outage_is_private(page_proposal_http, monkeypatch):
+    def unavailable():
+        raise RuntimeError("private package diagnostic")
+    monkeypatch.setattr(platform_link, "_ensure_platform_package", unavailable)
+    response = _page_proposal_post(page_proposal_http)
+    assert response.status_code == 503
+    assert response.headers["cache-control"] == "private, no-store"
+    assert response.json() == {"detail": "Portfolio proposal service is unavailable."}
+    assert page_proposal_http[3]["calls"] == 0

@@ -44,7 +44,8 @@ function expectAnchored({ origin, rect, minorPx, majorPx, minor, major }) {
     return Math.min(diff, size - diff)
   }
   expect(minorPx).toBeGreaterThanOrEqual(12)
-  expect(majorPx).toBeCloseTo(minorPx * 5, 3)
+  // CSSOM rounds the two serialized pixel sizes independently.
+  expect(Math.abs(majorPx - minorPx * 5)).toBeLessThanOrEqual(0.001)
   expect(near(origin.x - rect.left, minor[0], minorPx)).toBeLessThan(0.75)
   expect(near(origin.y - rect.top, minor[1], minorPx)).toBeLessThan(0.75)
   expect(near(origin.x - rect.left, major[0], majorPx)).toBeLessThan(0.75)
@@ -57,6 +58,7 @@ test('the grid toggle shows and hides a camera-anchored grid behind the drawing;
   page.on('pageerror', (error) => pageErrors.push(error.message))
   await install(page)
   await page.goto('/app')
+  await page.getByRole('navigation', { name: 'Workspace controls' }).getByRole('button', { name: 'Studio', exact: true }).click()
   await expect(page.locator('.studio-ground .viewer-canvas canvas')).toHaveCount(1, { timeout: 30_000 })
 
   const grid = page.locator('[data-toggle="grid"]')

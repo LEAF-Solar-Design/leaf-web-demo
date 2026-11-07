@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
 let SurfaceGrounds
 let load
@@ -63,14 +63,20 @@ it('loads once, hides pending on switches, and retains the loaded node with curr
   const first = { surface: 'ops', projectId: 'project-one', session: firstSession, signedIn: true, accountScope: 'one' }
   const { container, rerender } = render(<SurfaceGrounds {...first} studioShell />)
   await waitFor(() => expect(load).toHaveBeenCalledOnce())
-  const pending = screen.getByText('Loading Ops workspace…').closest('[data-ground="ops"]')
+  const pending = (await screen.findByRole('status')).closest('[data-ground="ops"]')
+  expect(screen.getByRole('status')).toHaveTextContent('Loading Ops workspace')
   expect(pending).not.toHaveAttribute('hidden')
   expect(pending.querySelector('.ops-workspace')).toHaveAttribute('data-measured', 'true')
   rerender(<SurfaceGrounds {...first} surface="browser" studioShell />)
   expect(pending).toHaveAttribute('hidden')
-  expect(container.querySelector('[data-ground="browser"]')).not.toHaveAttribute('hidden')
+  expect(container.querySelector('[data-ground="browser-asset"]')).not.toHaveAttribute('hidden')
+  expect(screen.queryByRole('region', { name: 'Project workspace' })).toBeNull()
   rerender(<SurfaceGrounds {...first} boardVisible studioShell />)
-  expect(pending).toHaveAttribute('hidden')
+  // The shared shell overlays Project instead of replacing the Ops ground.
+  expect(pending).not.toHaveAttribute('hidden')
+  fireEvent.click(screen.getByRole('button', { name: 'Project', exact: true }))
+  expect(screen.getByRole('region', { name: 'Project sidebar' })).toBeVisible()
+  expect(pending).not.toHaveAttribute('hidden')
   rerender(<SurfaceGrounds {...first} surface="ios" leavingGround="integrations" studioShell />)
   expect(pending).not.toHaveAttribute('hidden')
   expect(pending).toHaveAttribute('inert')
@@ -106,14 +112,16 @@ it('contains a rejected load locally and applies ground visibility to its failur
   vi.spyOn(console, 'error').mockImplementation(() => {})
   const { container, rerender } = render(<SurfaceGrounds surface="ops" />)
   await waitFor(() => expect(load).toHaveBeenCalledOnce())
-  const pendingWindow = screen.getByText('Loading Ops workspace…').closest('.ops-workspace')
+  // The unmeasured window is hidden, including its delayed status.
+  const pendingWindow = (await screen.findByRole('status', { hidden: true })).closest('.ops-workspace')
   expect(pendingWindow).toHaveAttribute('data-measured', 'false')
   expect(pendingWindow.style.visibility).toBe('hidden')
   rerender(<SurfaceGrounds surface="browser" />)
   await act(async () => { rejectLoad(new Error('Chunk unavailable')) })
-  const failure = await screen.findByText('Ops workspace could not be loaded. Reload the page to try again.')
+  const failure = await screen.findByRole('alert', { hidden: true })
   const ops = failure.closest('[data-ground="ops"]')
   expect(failure).toHaveAttribute('role', 'alert')
+  expect(failure).toHaveTextContent('The Ops workspace did not load. Your project and session are unchanged.')
   expect(ops).toHaveAttribute('hidden')
   expect(container.querySelector('[data-ground="browser"]')).not.toHaveAttribute('hidden')
   rerender(<SurfaceGrounds surface="ios" leavingGround="integrations" />)

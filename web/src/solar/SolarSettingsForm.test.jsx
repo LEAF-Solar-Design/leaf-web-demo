@@ -7,6 +7,8 @@ import SolarSettingsForm from './SolarSettingsForm.jsx';
 import { L2_COLLECTORS_NOTE, SOLAR_SETTINGS_REASONS, PROJECT_SETTINGS_REASONS, deriveProjectSettingsState } from './solarSettingsModel.js';
 import { solarSettingsRunFeedback } from './solarSettingsWire.js';
 import { createSolarProjectClient } from './solarProjectClient.js';
+import workerUnavailable from './__fixtures__/workerUnavailable.json';
+import { projectSolarWorkerRefusal } from './solarProjectCompletion.js';
 
 const SHA = 'a'.repeat(64);
 
@@ -87,6 +89,28 @@ function rerenderProject(view, harness, changes) {
 const previewCalls = (harness) => harness.fetchImpl.mock.calls.filter(([url]) => url.includes('/api/capabilities?'));
 
 describe('Canonical Solar settings form through the merged project client', () => {
+  it.each([true, false])('G20b settings worker refusal classification: %s', async (worker) => {
+    const h = projectHarness();
+    h.submitResponses.push(projectResponse(worker ? workerUnavailable : { error: { reason_code: 'OTHER' } }, 503));
+    await editProject(h);
+    await readyProject();
+    fireEvent.click(screen.getByRole('button', { name: 'Apply settings' }));
+    const refusal = projectSolarWorkerRefusal('solar-settings');
+    await waitFor(() => expect(screen.getByTestId('solar-settings-run').textContent).toBe(worker
+      ? `${refusal.message} (${refusal.reasonCode})` : `${PROJECT_SETTINGS_REASONS.preview_refused} (OTHER)`));
+    expect(screen.getByLabelText('MPPT count').disabled).toBe(false);
+    if (worker) {
+      expect(screen.queryByText(/uncertain|outcome is unknown|retry the same request/i)).toBeNull();
+      const intent = h.props.onProjectSubmit.mock.calls[0][0];
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh preview' }));
+      await readyProject();
+      expect(h.props.newProjectIntentKey).toHaveBeenCalledTimes(2);
+      fireEvent.click(screen.getByRole('button', { name: 'Apply settings' }));
+      await waitFor(() => expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(2));
+      expect(h.props.onProjectSubmit.mock.calls[1][0]).not.toBe(intent);
+    }
+  });
+
   it.each([true, false])('W1C-31 reports the busy state when submission is unavailable (busy=%s)', async (busy) => {
     const h = projectHarness();
     render(<SolarSettingsForm {...h.props} busy={busy} onProjectSubmit={undefined} />);

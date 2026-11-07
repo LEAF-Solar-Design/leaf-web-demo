@@ -1,4 +1,31 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { serviceSession } from './serviceAuthSession.js'
+
+it('uses verified service scope in tab storage and never falls into the human or guest draft partition', async () => {
+  const service = serviceSession()
+  const selector = '11111111-1111-4111-8111-111111111111'
+  const humanScope = 'account:human'
+  const humanKey = composerDraftKey(humanScope, '/app')
+  localStorage.setItem(humanKey, 'human draft')
+  let writer
+  try {
+    service.select(selector)
+    expect(composerDraftAccountScope()).toBeNull()
+    expect(composerDraftAccountScope(memoryStorage())).toBe('guest')
+    const identity = { subject: 'machine', sub: 'machine', iss: 'issuer', org_id: 'org', tenant_id: 'tenant', principal_type: 'service_admin' }
+    await service.probe({ origin: window.location.origin, fetchImpl: async () => ({ ok: true, json: async () => ({
+      authenticated: true, identity, binding_id: selector, expires_at: new Date(Date.now() + 60000).toISOString(),
+    }) }) })
+    expect(composerDraftAccountScope()).toBe(`account:${JSON.stringify(['issuer', 'machine', 'org', 'tenant'])}`)
+    writer = createComposerDraft({ route: '/app' })
+    writer.update('service draft'); writer.flush()
+    expect(writer.restore()).toBe('service draft')
+    expect(localStorage.getItem(writer.key)).toBeNull()
+    service.logout()
+    expect(composerDraftAccountScope()).toBeNull()
+    expect(localStorage.getItem(humanKey)).toBe('human draft')
+  } finally { writer?.dispose({ save: false }); service.human(); localStorage.removeItem(humanKey) }
+})
 
 vi.mock('../telemetry.js', () => ({ track: vi.fn() }))
 

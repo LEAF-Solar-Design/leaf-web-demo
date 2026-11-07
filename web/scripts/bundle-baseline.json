@@ -344,5 +344,15 @@
     "chunks_source": "full in-memory production build of the merged tree dffe7464 (PR 2326 plus main at 34b0693f) on the Mac mini (mini_node job 47819bdb); d8f3998c alone measured 1417903 there and on native CI",
     "isolated_reseed_job": "54fe5071 (before 716be039 1417872, after d8f3998c 1417903, delta 31)",
     "merged_main": "34b0693f (#2327 W1C-27 had reseeded this file to 1385224, ceiling 1417992; the merge took this branch's side and the merged tree was re-measured)"
+  },
+  "next": {
+    "framework": "next@16.4.3",
+    "method": "gzip-9 of every emitted JS/CSS asset in the enabled static export",
+    "total": 1882216,
+    "startup": 260873,
+    "files": 52,
+    "source_head": "220a8bf928cb1ae91e83c4f1050768584966583e",
+    "measurement_job": "7c8ad755211b49c39da1a8ef0b02a69c",
+    "basis": "Operator confirmed all web surfaces use Next.js on 2026-10-26. Framework migration adds 456741 bytes over the historical Vite baseline. Preserve the existing 32768-byte growth allowance. The full-export cap replaces Rollup-specific stem caps; retain lazy canvas and real worker reachability checks."
   }
 }

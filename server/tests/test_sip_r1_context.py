@@ -21,6 +21,8 @@ NOW = datetime(2030, 1, 1, tzinfo=timezone.utc)
 class Memory:
     """Injected canonical records, blobs and rollback-capable transactions."""
 
+    INITIAL_PUBLICATION_SCHEMA = service.graph_store().INITIAL_PUBLICATION_SCHEMA
+
     def __init__(self):
         self.tenant = deps.TenantContext(str(O1), org_id=str(O1), subject="synthetic-editor")
         self.binding = SimpleNamespace(platform_tenant_id=O1, binding_id=A)

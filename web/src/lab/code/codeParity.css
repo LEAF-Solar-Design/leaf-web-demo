@@ -1,0 +1,6 @@
+/* leaf-dp-v1 */
+.dp-code-block{border:1px solid var(--leaf-line);border-radius:var(--leaf-radius-card);background:var(--leaf-surface);min-width:0}
+.dp-code-header{min-height:32px;display:flex;align-items:center;justify-content:space-between;padding:0 var(--leaf-space-3);font-size:var(--leaf-size-caption);color:var(--leaf-ink-muted);border-bottom:1px solid var(--leaf-line)}
+.lab-inspector .dp-code-block pre,.dp-code-block pre{margin:0;padding:var(--leaf-space-4);overflow-x:auto;font-family:var(--leaf-font-data);font-size:var(--leaf-size-dense);line-height:var(--leaf-leading-code);font-weight:var(--leaf-weight-regular);font-variant-ligatures:none;tab-size:2;white-space:pre;overflow-wrap:normal}
+.dp-code-block code{font:inherit}
+.dp-code-header > button{min-height:0;height:24px;padding:0 var(--leaf-space-2);border:0;background:transparent;color:inherit;font:inherit;cursor:pointer}

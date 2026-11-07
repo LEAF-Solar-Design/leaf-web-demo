@@ -4,6 +4,7 @@ import {
   emptyIosShipReadiness, fetchIosShipReadiness, getIosShipExecution,
   getIosShipReceipt, iosShipLaunchAffordance, makeIosShipLaunchKey,
   requestIosShipLaunch, fetchIosShipSources, requestIosShipApproval, iosSourceApprovalState,
+  IOS_SOURCE_FIELDS,
 } from '../site/iosShipReadiness.js'
 
 const terminal = (execution) => ['succeeded', 'failed'].includes(execution?.status)
@@ -15,7 +16,7 @@ const FOLLOW_LIMIT = 30 * 60 * 1000
 const SOURCE_DEFAULTS = Object.freeze({ sources: [], approvals: [], sync: null, canApprove: false, sourcesError: null })
 const UNKNOWN_APPROVAL = "The last approval's outcome is unknown. Refresh the sources to confirm it before approving again."
 
-// Catalog reads belong to the project, while approval writes belong to a drawing version.
+// Catalog reads belong to the project; approvals use the explicitly chosen revision label.
 function useShipSources({ projectId, tenantKey, enabled, sessionActive }) {
   const pendingApproval = useMemo(() => new Map(), [projectId, tenantKey])
   const scope = useMemo(() => ({}), [projectId, tenantKey, enabled, sessionActive])
@@ -80,10 +81,18 @@ function storage(key, action, value) {
   return null
 }
 
-export function useIosShipController({ projectId, revision, sessionActive, enabled = true, tenantKey }) {
+export function useIosShipController({ projectId, revision: legacyRevision, sessionActive, enabled = true, tenantKey }) {
   const catalog = useShipSources({ projectId, tenantKey, enabled, sessionActive })
   const { refreshSources, update: updateSources, pendingApproval } = catalog
-  const owner = JSON.stringify([tenantKey, projectId, revision])
+  const selectionScope = useMemo(() => ({}), [tenantKey, projectId, sessionActive])
+  const [selection, setSelection] = useState(null)
+  useEffect(() => { setSelection(null) }, [selectionScope])
+  const selected = selection?.scope === selectionScope ? selection.source : null
+  const selectedSource = selected && catalog.sources.find((source) => IOS_SOURCE_FIELDS.every((field) => source[field] === selected[field]))
+  const revision = selected ? selected.source_revision : legacyRevision
+  const sourceConsumed = selectedSource && iosSourceApprovalState(selectedSource, catalog.approvals, revision) === 'consumed'
+  const projectOwner = JSON.stringify([tenantKey, projectId])
+  const owner = JSON.stringify([tenantKey, projectId, revision, selected && IOS_SOURCE_FIELDS.map((field) => selected[field])])
   const ownership = useMemo(() => ({}), [owner])
   const currentOwnership = useRef(ownership)
   currentOwnership.current = ownership
@@ -93,6 +102,7 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
   const mounted = useRef(false)
   const flight = useRef(null)
   const approveFlight = useRef(null)
+  const unknownLaunches = useRef(new Map())
   const receiptReads = useRef(new Map())
   const following = useRef(null)
   const executionGeneration = useRef(0)
@@ -111,6 +121,20 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
       setState((old) => live() ? ({ ...(old.owner === owner ? old : { ...SOURCE_DEFAULTS, approving: false, execution: null, receipt: null }), owner, ...patch }) : old)
     }
   }, [live, owner, updateSources])
+
+  const recoveryPointer = storage(pointerKey, 'read')
+  const selectionLocked = visible.launching || visible.approving || Boolean(visible.execution && !terminal(visible.execution))
+    || unknownLaunches.current.has(projectOwner) || pendingApproval.size > 0
+    || Boolean(recoveryPointer?.execution_id && (recoveryPointer.revision === revision || /^[0-9a-f]{40}$/.test(recoveryPointer.revision)))
+  const selectSource = useCallback((sourceRevision) => {
+    if (!live() || !enabled || !sessionActive || !projectId || selectionLocked
+      || flight.current || approveFlight.current) return false
+    const source = catalog.sources.find((item) => item.source_revision === sourceRevision)
+    if (!source) return false
+    current.current = null // Fence callbacks immediately, including before React commits the selection.
+    setSelection({ scope: selectionScope, source })
+    return true
+  }, [live, enabled, sessionActive, projectId, selectionLocked, catalog.sources, selectionScope])
 
   useEffect(() => {
     mounted.current = true
@@ -159,16 +183,17 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
     let cancelled = false
     const generation = executionGeneration.current
     const pointer = storage(pointerKey, 'read')
-    if (typeof pointer?.execution_id !== 'string' || !pointer.execution_id || pointer.revision !== revision) return undefined
+    if (typeof pointer?.execution_id !== 'string' || !pointer.execution_id
+      || (pointer.revision !== revision && (selected || !/^[0-9a-f]{40}$/.test(pointer.revision)))) return undefined
     getIosShipExecution({ projectId, executionId: pointer.execution_id }).then((response) => {
       if (!cancelled && live() && executionGeneration.current === generation) update({ execution: response.execution })
     }).catch((cause) => {
       if (cancelled || !live() || executionGeneration.current !== generation) return
-      if (cause?.status === 404) storage(pointerKey, 'remove')
+      if (cause?.status === 404) { storage(pointerKey, 'remove'); update({}) }
       else update({ error: message(cause) })
     })
     return () => { cancelled = true }
-  }, [enabled, sessionActive, projectId, revision, pointerKey, live, update])
+  }, [enabled, sessionActive, projectId, revision, pointerKey, live, update, selected])
 
   const executionId = visible.execution?.execution_id
   useEffect(() => {
@@ -249,7 +274,10 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
 
   const launch = useCallback(async () => {
     if (flight.current !== null) return null
-    if (!live() || !enabled
+    const unknown = unknownLaunches.current.get(projectOwner)
+    if (unknown && (unknown.owner !== owner || Object.keys(unknown.approvedLaunch).some((field) => unknown.approvedLaunch[field] !== visible.readiness?.approvedLaunch?.[field]))) return undefined
+    if (visible.execution && !terminal(visible.execution)) return undefined
+    if (!live() || !enabled || sourceConsumed || (selected && (!selectedSource || !IOS_SOURCE_FIELDS.every((field) => visible.readiness?.approvedLaunch?.[field] === selectedSource[field])))
       || !iosShipLaunchAffordance(visible.readiness, { projectId, revision, sessionActive })) return undefined
     flight.current = scope
     executionGeneration.current += 1
@@ -257,23 +285,27 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
     try {
       const response = await requestIosShipLaunch({ projectId, approvedLaunch: visible.readiness.approvedLaunch,
         idempotencyKey: makeIosShipLaunchKey(projectId, visible.readiness.approvedLaunch) })
+      unknownLaunches.current.delete(projectOwner)
       if (!live()) return undefined
       storage(pointerKey, 'write', { execution_id: response.execution.execution_id, revision, at: new Date().toISOString() })
       update({ execution: response.execution, receipt: null, launching: false })
       setFollow((n) => n + 1)
       return response
     } catch (cause) {
+      if (cause?.status == null || cause.status >= 500) unknownLaunches.current.set(projectOwner, { owner, approvedLaunch: visible.readiness.approvedLaunch })
       update({ error: message(cause), launching: false })
       return undefined
     } finally {
       if (flight.current === scope) flight.current = null
     }
-  }, [live, enabled, scope, visible.execution, visible.readiness, projectId, revision, sessionActive, update, pointerKey])
+  }, [live, enabled, scope, visible.execution, visible.readiness, projectId, revision, sessionActive, update, pointerKey, selected, selectedSource, sourceConsumed, owner, projectOwner])
 
   const approve = useCallback(async (sourceRevision) => {
     if (approveFlight.current !== null) return null
     if (!live() || !enabled || !sessionActive || catalog.canApprove !== true || !revision) return undefined
+    if (flight.current || unknownLaunches.current.has(projectOwner) || (visible.execution && !terminal(visible.execution))) return undefined
     const source = catalog.sources.find((item) => item.source_revision === sourceRevision)
+    if (selected && (!selectedSource || source !== selectedSource)) return undefined
     if (!source || iosSourceApprovalState(source, catalog.approvals, revision) !== 'unapproved') return undefined
     const tuple = `${projectId}\n${revision}\n${sourceRevision}`
     if (pendingApproval.has(tuple)) {
@@ -314,9 +346,12 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
     } finally {
       if (approveFlight.current === scope) approveFlight.current = null
     }
-  }, [live, enabled, sessionActive, catalog.canApprove, catalog.sources, catalog.approvals, revision, scope, update, projectId, refreshSources, refresh, pendingApproval])
+  }, [live, enabled, sessionActive, catalog.canApprove, catalog.sources, catalog.approvals, revision, scope, update, projectId, refreshSources, refresh, pendingApproval, selected, selectedSource, projectOwner, visible.execution])
 
-  const readiness = visible.readiness || decorate(emptyIosShipReadiness())
+  const readiness = selected && (!selectedSource || sourceConsumed || (visible.readiness?.approvedLaunch
+    && !IOS_SOURCE_FIELDS.every((field) => visible.readiness.approvedLaunch[field] === selectedSource[field])))
+    ? decorate(emptyIosShipReadiness('revision_mismatch', null, projectId))
+    : visible.readiness || decorate(emptyIosShipReadiness())
   const phase = !enabled || !sessionActive ? 'idle'
     : visible.launching ? 'launching'
       : visible.execution ? terminal(visible.execution) ? visible.execution.status : 'running'
@@ -325,6 +360,7 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
             : /^(http_|unreachable$|readiness_unavailable$|provider_unavailable$)/.test(readiness.reason || '') ? 'unavailable'
               : readiness.setupState !== 'none' ? 'setup-required' : 'unavailable'
   return Object.freeze({ readiness, execution: visible.execution, receipt: visible.receipt, error: visible.error,
+    revision, selectedSourceRevision: selected?.source_revision || null, selectedSourceAvailable: Boolean(selectedSource), selectSource, selectionLocked,
     busy: phase === 'launching', phase, launch, refresh, nextBuild, loading: visible.loading, followStopped: visible.followStopped === true,
     sources: catalog.sources, approvals: catalog.approvals, sync: catalog.sync, canApprove: catalog.canApprove,
     sourcesError: catalog.sourcesError, approving: visible.approving, approve, refreshSources })

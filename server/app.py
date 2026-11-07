@@ -72,6 +72,7 @@ from routers import (
     jobs as jobs_router,
     mcp_gateway,
     integration_tools,
+    device_tools,
     mcp_status,
     ops,
     ops_metrics,
@@ -86,6 +87,8 @@ from routers import (
     templates as templates_router,
     tenant,
     tenant_mcp,
+    devices,
+    device_relay,
     tools,
     uploads,
     usage, overlay, cost as cost_router)
@@ -166,6 +169,18 @@ _campaign_release_worker_stop: threading.Event | None = None
 _campaign_release_worker_thread: threading.Thread | None = None
 _campaign_release_worker_lock = threading.Lock()
 _ios_callback_tls_server: ios_ship_callback_listener.CallbackTlsServer | None = None
+
+
+@app.on_event("startup")
+def initialize_job_runtime() -> None:
+    """Validate authority, then recover durable work without a new submission."""
+    import platform_link
+
+    platform_link.validate_postgres_startup()
+    job_store.validate_store_startup()
+    # Keep executor ownership, submitted-row recovery and the reaper under the
+    # existing per-process startup lock in ensure_started().
+    job_store.ensure_started()
 
 
 @app.on_event("startup")
@@ -387,6 +402,7 @@ app.include_router(capabilities.router)
 app.include_router(mcp_status.router)
 app.include_router(mcp_gateway.router)
 app.include_router(integration_tools.router)
+app.include_router(device_tools.router)
 app.include_router(deployment_identity.router)
 app.include_router(demand.router)  # public waitlist capture, no auth required
 app.include_router(author.router)
@@ -404,9 +420,12 @@ app.include_router(usage.router)  # UI wave 1: per-tenant spend/quota meter (GET
 app.include_router(cost_router.router)  # TCM-09a: the caller's view of the monthly resource share ledger (GET /api/cost)
 app.include_router(ops.router)  # UI wave 2: ops surface (role-gated tenant spend + kill-switch proxy)
 app.include_router(__import__("routers.engine_changes", fromlist=["router"]).router)
+app.include_router(__import__("routers.lab_mirror_ops", fromlist=["router"]).router)  # SEL-316b: operator-only Lab git mirror enable (X-Ops-Secret)
 app.include_router(ops_metrics.router)  # APS observability read-API: fleet metrics + in-flight tail + ledger<->job drill-down (X-Ops-Secret)
 app.include_router(tenant.router)  # wave 4: per-tenant Claude grant linking (proxy to harness store)
 app.include_router(tenant_mcp.router)  # slice 8b: tenant MCP server registry (server-side OAuth connect)
+app.include_router(devices.router)  # Device bridge: tenant management and signed outbound agent polling
+app.include_router(device_relay.router)
 app.include_router(site.router)  # public site-facing namespace for the leaf_website Next app (/api/site/*)
 app.include_router(uploads.router)  # §19 guest/account drawing uploads (+ /api/site/guest-upload-policy in site.router)
 app.include_router(telemetry.router)  # P2 product-event ingest (always 202; identity server-stamped; docs/PLATFORM_TELEMETRY.md)
@@ -497,6 +516,12 @@ _mount_platform_router()
 from routers import project_repository_edit as project_repository_edit_router  # noqa: E402
 
 app.include_router(project_repository_edit_router.router)
+from routers import browser_project  # noqa: E402
+app.middleware("http")(browser_project.no_store_responses)
+app.include_router(browser_project.router)
+from routers import native_project  # noqa: E402
+app.middleware("http")(native_project.no_store_responses)
+app.include_router(native_project.router)
 
 
 # --- operator control plane (contract/OPERATOR.md; Wave 1, dark by default) --- #
@@ -653,6 +678,12 @@ def ready() -> JSONResponse:
         content=with_envelope_fields(report, degraded_mode=report["status"] != "ready"),
     )
 
+
+from routers import service_browser_auth
+from service_browser_sessions import ServiceBrowserSessionMiddleware
+
+app.include_router(service_browser_auth.router)
+app.add_middleware(ServiceBrowserSessionMiddleware)
 
 # Last-added is outermost among the application's own middleware, including
 # project_drawings.no_store_responses and CORS. Keep this registration last.

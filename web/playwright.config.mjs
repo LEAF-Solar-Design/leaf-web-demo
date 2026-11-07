@@ -7,6 +7,7 @@ const baseURL = `http://127.0.0.1:${port}`
 
 export default defineConfig({
   testDir: './e2e',
+  testIgnore: ['**/project/**'],
   workers: 1,
   outputDir: '../artifacts/cat-operator-proof/test-results',
   reporter: [['list'], ['html', {
@@ -23,7 +24,7 @@ export default defineConfig({
     viewport: { width: 1600, height: 1000 },
   },
   webServer: {
-    command: `npm run dev -- --host 127.0.0.1 --port ${port} --strictPort`,
+    command: `npm run dev -- --hostname 127.0.0.1 --port ${port}`,
     url: `${baseURL}/app`,
     reuseExistingServer: false,
     timeout: 120_000,
@@ -31,6 +32,7 @@ export default defineConfig({
       VITE_MOCK: '0',
       VITE_CAT_PROOF: '1',
       VITE_API_BASE: 'http://leaf-proof.invalid',
+      VITE_INTEGRATIONS_API_ORIGIN: 'https://ops-proof.invalid',
       VITE_TENANT_ID: 'cat-litmus-tenant',
     },
   },

@@ -84,35 +84,30 @@ test('org and project creation go through the inline switcher form with no nativ
   })
 
   await page.goto('/app?surface=browser')
+  const controls = page.getByRole('navigation', { name: 'Workspace controls' })
+  await controls.getByRole('button', { name: 'Project', exact: true }).click()
   const board = page.locator('[data-ground="browser"]')
   await expect(board).toBeVisible({ timeout: 20_000 })
+  await controls.getByRole('button', { name: 'Studio', exact: true }).click()
   const switcher = page.locator('header.top .proj-switch')
   const chip = switcher.locator('button.proj-chip')
-  const openTool = page.locator('.ribbon-tool[data-tool="project:open"]')
-  const createTool = page.locator('.ribbon-tool[data-tool="project:create"]')
-
-  // Org: no org yet, so Create project waits and the switcher offers the
-  // inline workspace form.
-  await expect(createTool).toBeDisabled({ timeout: 20_000 })
-  await expect(openTool).toBeEnabled({ timeout: 20_000 })
-  await openTool.click()
+  // Browser exposes the workspace form through the Studio project switcher.
+  await expect(chip).toBeEnabled({ timeout: 20_000 })
+  await chip.click()
   await expect(chip).toHaveAttribute('aria-expanded', 'true')
   const orgField = switcher.getByLabel('Workspace name')
   await expect(orgField).toBeVisible()
+  await orgField.fill('')
+  await expect(switcher.getByRole('button', { name: 'Create workspace org' })).toBeDisabled()
   await orgField.fill('Ridge workspace')
   await switcher.getByRole('button', { name: 'Create workspace org' }).click()
   await expect.poll(() => calls.filter(([kind]) => kind === 'org')).toEqual([['org', { name: 'Ridge workspace' }]])
   await expect.poll(() => page.evaluate(() => localStorage.getItem('leaf.org_id'))).toBe('stu2h-org')
-
-  // Project: the ribbon's Create project now opens the same switcher on its
-  // focused inline field instead of a native prompt.
-  await chip.click()
-  await expect(chip).toHaveAttribute('aria-expanded', 'false')
-  await expect(createTool).toBeEnabled({ timeout: 20_000 })
-  await createTool.click()
+  // Org creation keeps the inline form open and offers project creation.
   await expect(chip).toHaveAttribute('aria-expanded', 'true')
   const projectField = switcher.getByLabel('New project')
   await expect(projectField).toBeVisible()
+  await projectField.click()
   await expect(projectField).toBeFocused()
   await projectField.fill('Maple roof')
   await switcher.getByRole('button', { name: 'Create project', exact: true }).click()

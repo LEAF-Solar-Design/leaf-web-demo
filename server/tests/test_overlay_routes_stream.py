@@ -40,11 +40,13 @@ class FakeStore:
 
     def __init__(self):
         self.decided = None
+        self.proposed = []
 
     def document(self, tenant_id):
         return {"tenant_id": tenant_id, "version": 3, "tokens": {}}
 
     def create_proposal(self, **kw):
+        self.proposed.append(kw)
         return {**kw, "state": "pending", "revision": 0,
                 "lease_expires_at": "2026-08-05T00:00:00Z"}
 
@@ -113,6 +115,178 @@ def test_an_unknown_session_is_refused_BEFORE_any_write(store):
     assert res.status_code == 404
 
 
+@pytest.fixture()
+def project_overlay(monkeypatch):
+    """Real active-turn lookup and session guard, with a fresh membership seam."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import deps
+
+    org_id = "11111111-1111-4111-8111-111111111111"
+    project_id = "22222222-2222-4222-8222-222222222222"
+    monkeypatch.setenv("LEAF_SESSIONS_STORE", "legacy")
+    session_id = session_store.get_or_create_session(
+        org_id, f"dwg-{os.urandom(4).hex()}")["session_id"]
+    turn_id = "overlay-active-turn"
+    subject = "auth0|project-editor"
+    assert session_store.try_begin_turn(
+        session_id, turn_id, 300, tier="pro", subject=subject)
+    original_get = session_store.get_session
+
+    def get_session(target):
+        row = original_get(target)
+        if row is not None and target == session_id:
+            return {**row, "org_id": org_id, "project_id": project_id}
+        return row
+
+    monkeypatch.setattr(session_store, "get_session", get_session)
+    monkeypatch.setattr(
+        deps, "resolve_active_platform_tenant_authority",
+        lambda actor: (org_id, "pro") if actor == subject else ("foreign", "pro"),
+    )
+    membership = {"role": "editor", "checks": []}
+
+    def require_project_access(tenant, target_project, *, write):
+        # This is the existing guard's fresh-membership boundary, not a role
+        # asserted by the transport or saved on the active turn.
+        assert tenant.subject == subject
+        assert str(tenant) == org_id
+        assert target_project == project_id
+        assert write is True
+        membership["checks"].append(membership["role"])
+        if membership["role"] not in {"owner", "editor"}:
+            raise overlay_router.platform_link.ProjectSessionForbidden("write refused")
+        return org_id
+
+    monkeypatch.setattr(overlay_router.platform_link, "require_project_access",
+                        require_project_access)
+    store = FakeStore()
+    store.session_id = session_id
+    monkeypatch.setattr(overlay_router, "_store", lambda: store)
+    context = deps.TenantContext(org_id, org_id=org_id, backedge=True)
+    app = FastAPI()
+    app.include_router(overlay_router.router)
+    app.dependency_overrides[deps.require_tenant] = lambda: context
+    client = TestClient(app)
+    yield {
+        "client": client, "app": app, "store": store,
+        "session": session_id, "turn": turn_id, "org": org_id,
+        "subject": subject, "membership": membership,
+        "headers": {"X-Authority-Session-Id": session_id,
+                    "X-Authority-Turn-Id": turn_id},
+    }
+    session_store.end_turn(session_id, turn_id)
+
+
+def _project_preview(project, *, headers=None, target=None):
+    return project["client"].post(
+        "/api/overlay/proposals",
+        json={"session_id": target or project["session"],
+              "tokens": {"color.border": "#123456"}, "request_text": "private preview"},
+        headers=project["headers"] if headers is None else headers,
+    )
+
+
+@pytest.mark.parametrize("role", ["owner", "editor"])
+def test_dispatch_overlay_uses_active_author_and_fresh_project_write_role(project_overlay, role):
+    project = project_overlay
+    project["membership"]["role"] = role
+    response = _project_preview(project)
+    assert response.status_code == 200, response.text
+    assert project["membership"]["checks"] == [role]
+    assert len(project["store"].proposed) == 1
+    assert project["store"].proposed[0]["session_id"] == project["session"]
+    assert project["store"].proposed[0]["tenant_id"] == project["org"]
+    assert [e["type"] for e in _events(project["session"])] == ["overlay_proposed"]
+
+
+@pytest.mark.parametrize("failure", [
+    "missing", "session_only", "turn_only", "mismatch", "superseded",
+    "completed", "stale", "foreign_turn", "foreign_binding", "binding_outage",
+    "unknown_target", "foreign_target",
+])
+def test_invalid_dispatch_overlay_authority_never_mutates(project_overlay, monkeypatch, failure):
+    import deps
+    import turn_runner
+
+    project = project_overlay
+    headers = dict(project["headers"])
+    target = project["session"]
+    foreign = session_store.get_or_create_session(
+        "foreign-org", f"dwg-{os.urandom(4).hex()}")["session_id"]
+    if failure == "missing":
+        headers = {}
+    elif failure == "session_only":
+        headers.pop("X-Authority-Turn-Id")
+    elif failure == "turn_only":
+        headers.pop("X-Authority-Session-Id")
+    elif failure == "mismatch":
+        other = session_store.get_or_create_session(
+            project["org"], f"dwg-{os.urandom(4).hex()}")["session_id"]
+        assert session_store.try_begin_turn(other, "other-turn", 300, subject=project["subject"])
+        headers = {"X-Authority-Session-Id": other, "X-Authority-Turn-Id": "other-turn"}
+    elif failure == "superseded":
+        headers["X-Authority-Turn-Id"] = "previous-turn"
+    elif failure == "completed":
+        session_store.end_turn(target, project["turn"])
+    elif failure == "stale":
+        monkeypatch.setattr(turn_runner, "turn_max_s", lambda: -1)
+    elif failure == "foreign_turn":
+        assert session_store.try_begin_turn(foreign, "foreign-turn", 300, subject=project["subject"])
+        target = foreign
+        headers["X-Authority-Session-Id"] = foreign
+        headers["X-Authority-Turn-Id"] = "foreign-turn"
+    elif failure == "foreign_binding":
+        monkeypatch.setattr(deps, "resolve_active_platform_tenant_authority",
+                            lambda subject: ("foreign-org", "pro"))
+    elif failure == "binding_outage":
+        def unavailable(subject):
+            raise RuntimeError("binding unavailable")
+        monkeypatch.setattr(deps, "resolve_active_platform_tenant_authority", unavailable)
+    elif failure in {"unknown_target", "foreign_target"}:
+        target = "sess-does-not-exist" if failure == "unknown_target" else foreign
+        headers["X-Authority-Session-Id"] = target
+
+    response = _project_preview(project, headers=headers, target=target)
+    assert response.status_code == 404, response.text
+    assert "session_not_found" in response.text
+    assert project["store"].proposed == []
+    assert project["membership"]["checks"] == []
+    assert _events(project["session"]) == []
+    assert _events(foreign) == []
+
+
+@pytest.mark.parametrize("role", ["revoked", "read_only", "reviewer"])
+def test_dispatch_overlay_does_not_restore_project_write_access(project_overlay, role):
+    project = project_overlay
+    project["membership"]["role"] = role
+    response = _project_preview(project)
+    assert response.status_code == 403, response.text
+    assert project["membership"]["checks"] == [role]
+    assert project["store"].proposed == []
+    assert _events(project["session"]) == []
+
+
+@pytest.mark.parametrize("subject", [None, "auth0|project-editor"])
+def test_direct_overlay_does_not_borrow_turn_authority(project_overlay, monkeypatch, subject):
+    import deps
+
+    project = project_overlay
+    context = deps.TenantContext(project["org"], org_id=project["org"], subject=subject)
+    project["app"].dependency_overrides[deps.require_tenant] = lambda: context
+    session_store.end_turn(project["session"], project["turn"])
+    monkeypatch.setattr(deps, "stage_author_identity",
+                        lambda *args: pytest.fail("a direct caller must not borrow an actor"))
+    if subject is None:
+        def forbidden(*args, **kwargs):
+            raise overlay_router.platform_link.ProjectSessionForbidden("no verified subject")
+        monkeypatch.setattr(overlay_router.platform_link, "require_project_access", forbidden)
+    response = _project_preview(project, headers={} if subject else project["headers"])
+    assert response.status_code == (200 if subject else 403), response.text
+    assert len(project["store"].proposed) == (1 if subject else 0)
+    assert len(_events(project["session"])) == (1 if subject else 0)
+
+
 # --------------------------------------------------------------------------- #
 # Decide
 # --------------------------------------------------------------------------- #
@@ -157,6 +331,192 @@ def test_a_blank_actor_never_reaches_the_store(store, session):
         x_actor="   ", tenant=TENANT)
     assert res.status_code == 400
     assert store.decided is None
+
+
+@pytest.fixture()
+def decision_identity(monkeypatch):
+    """Exercise the canonical caller resolver, replacing only its store IO."""
+    import uuid
+    from types import SimpleNamespace
+    import deps
+
+    state = SimpleNamespace(
+        binding=SimpleNamespace(platform_tenant_id=TENANT, binding_id=uuid.uuid4()),
+        lookups=[], error=None,
+    )
+
+    def resolve(authority, subject):
+        state.lookups.append((authority, subject))
+        if state.error is not None:
+            raise state.error
+        return state.binding
+
+    binding_store = SimpleNamespace(resolve_active_identity_binding=resolve)
+    monkeypatch.setattr(overlay_router.platform_link, "_load_platform",
+                        lambda: (binding_store, None, None))
+    state.tenant = deps.TenantContext(
+        TENANT, subject="auth0|overlay-reviewer", authority_resolved=True)
+    return state
+
+
+@pytest.mark.parametrize("approve", [False, True])
+@pytest.mark.parametrize("actor", [None, "spoofed@browser"])
+def test_verified_decision_records_canonical_binding(store, session, decision_identity,
+                                                    approve, actor):
+    identity = decision_identity
+    kwargs = {} if actor is None else {"x_actor": actor}
+    out = overlay_router.decide_overlay(
+        DecideBody(proposal_id="p-1", approve=approve,
+                   decision_key="verified-key", document_version=3),
+        tenant=identity.tenant, **kwargs)
+    assert out["state"] == ("approved" if approve else "denied")
+    assert identity.lookups == [("auth0", identity.tenant.subject)]
+    assert store.decided == ("approve" if approve else "deny", {
+        "proposal_id": "p-1", "tenant_id": TENANT,
+        "actor": str(identity.binding.binding_id), "decision_key": "verified-key",
+        "expected_version": 3,
+    })
+
+
+@pytest.mark.parametrize("failure", ["revoked", "foreign", "outage"])
+def test_verified_decision_never_falls_back_to_supplied_actor(
+        store, session, decision_identity, failure):
+    identity = decision_identity
+    if failure == "revoked":
+        identity.binding = None
+    elif failure == "foreign":
+        identity.binding.platform_tenant_id = "foreign-tenant"
+    else:
+        identity.error = RuntimeError("private binding outage")
+    res = overlay_router.decide_overlay(
+        DecideBody(proposal_id="p-1", approve=False,
+                   decision_key="verified-key", document_version=3),
+        x_actor="fallback@browser", tenant=identity.tenant)
+    assert res.status_code == (503 if failure == "outage" else 403)
+    assert store.decided is None
+    assert store.proposed == []
+    assert _events(session) == []
+    assert b"private binding outage" not in res.body
+
+
+@pytest.mark.parametrize("approve", [False, True])
+@pytest.mark.parametrize("code", ["version_conflict", "decision_key_reused"])
+def test_verified_decision_preserves_store_witness_refusals(
+        store, session, decision_identity, monkeypatch, approve, code):
+    class WitnessRefused(Exception):
+        status_code = 409
+
+    def refuse(**kwargs):
+        assert kwargs["expected_version"] == 3
+        assert kwargs["decision_key"] == "verified-key"
+        error = WitnessRefused()
+        error.code = code
+        raise error
+
+    monkeypatch.setattr(store, "approve" if approve else "deny", refuse)
+    res = overlay_router.decide_overlay(
+        DecideBody(proposal_id="p-1", approve=approve,
+                   decision_key="verified-key", document_version=3),
+        tenant=decision_identity.tenant)
+    assert res.status_code == 409
+    assert code.encode() in res.body
+    assert store.decided is None
+    assert _events(session) == []
+
+
+@pytest.mark.parametrize("kind", ["plain", "unresolved", "subjectless", "backedge", "demo"])
+def test_unverified_decision_does_not_gain_an_actor(store, session, monkeypatch, kind):
+    import deps
+
+    contexts = {
+        "plain": TENANT,
+        "unresolved": deps.TenantContext(TENANT, subject="auth0|unverified"),
+        "subjectless": deps.TenantContext(TENANT, authority_resolved=True),
+        "backedge": deps.TenantContext(TENANT, subject="auth0|backedge",
+                                     authority_resolved=True, backedge=True),
+        "demo": deps.TenantContext(TENANT, subject="demo|subject",
+                                 authority_resolved=True, verified_demo=True),
+    }
+    monkeypatch.setattr(
+        overlay_router.platform_link, "resolve_caller_binding",
+        lambda *_: pytest.fail("this caller has no normal verified authority"))
+    res = overlay_router.decide_overlay(
+        DecideBody(proposal_id="p-1", approve=False,
+                   decision_key="verified-key", document_version=3),
+        tenant=contexts[kind])
+    assert res.status_code == 400
+    assert b"actor_required" in res.body
+    assert store.decided is None
+    assert _events(session) == []
+
+
+@pytest.mark.parametrize("failure", ["revoked_role", "foreign_session"])
+def test_verified_decision_rechecks_project_session(
+        project_overlay, decision_identity, monkeypatch, failure):
+    import deps
+
+    project = project_overlay
+    tenant = deps.TenantContext(project["org"], subject=project["subject"],
+                                authority_resolved=True)
+    decision_identity.binding.platform_tenant_id = project["org"]
+    monkeypatch.setattr(
+        overlay_router.platform_link, "resolve_caller_binding",
+        lambda *_: pytest.fail("forbidden project must be rejected before actor lookup"))
+    if failure == "revoked_role":
+        project["membership"]["role"] = "revoked"
+    else:
+        foreign = session_store.get_or_create_session(
+            "foreign-org", f"dwg-{os.urandom(4).hex()}")["session_id"]
+        project["store"].session_id = foreign
+    res = overlay_router.decide_overlay(
+        DecideBody(proposal_id="p-1", approve=False,
+                   decision_key="verified-key", document_version=3), tenant=tenant)
+    assert res.status_code == (403 if failure == "revoked_role" else 404)
+    assert project["store"].decided is None
+    assert project["store"].proposed == []
+    assert _events(project["session"]) == []
+    if failure == "foreign_session":
+        assert _events(foreign) == []
+
+
+@pytest.mark.parametrize("actor", [None, "spoofed@browser"])
+def test_http_authenticated_denial_without_browser_actor(
+        store, session, decision_identity, monkeypatch, actor):
+    from types import SimpleNamespace
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import auth
+    import deps
+    import tenancy
+
+    identity = decision_identity
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+
+    def verify(authorization):
+        assert authorization == "Bearer test"
+        ns = auth.claim_ns()
+        return {"sub": identity.tenant.subject, ns + "tenant_id": TENANT,
+                ns + "org_id": TENANT, ns + "tier": "pro"}
+
+    monkeypatch.setattr(auth, "verify_platform_token", verify)
+    monkeypatch.setattr(deps, "resolve_active_platform_tenant_authority",
+                        lambda subject: (TENANT, "pro"))
+    monkeypatch.setattr(tenancy, "get_store", lambda: SimpleNamespace(
+        resolve_workspace=lambda _: None))
+    app = FastAPI()
+    app.include_router(overlay_router.router)
+    headers = {"Authorization": "Bearer test"}
+    if actor is not None:
+        headers["X-Actor"] = actor
+    with TestClient(app) as client:
+        response = client.post("/api/overlay/decisions", headers=headers, json={
+            "proposal_id": "p-1", "approve": False,
+            "decision_key": "verified-key", "document_version": 3,
+        })
+    assert response.status_code == 200, response.text
+    assert response.json()["state"] == "denied"
+    assert store.decided[1]["actor"] == str(identity.binding.binding_id)
+    assert identity.lookups == [("auth0", identity.tenant.subject)]
 
 
 # --------------------------------------------------------------------------- #

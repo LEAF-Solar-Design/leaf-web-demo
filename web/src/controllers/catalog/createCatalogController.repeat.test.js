@@ -51,17 +51,16 @@ describe('consecutive refused dispatches', () => {
     expect(controller.getState().route).not.toHaveProperty('repeat')
   })
 
-  it('commits repeat 2 and 3 for the same trimmed request', async () => {
+  it('displays repeat 2 and 3 for the same trimmed request without arming execution', async () => {
     const { controller, adapters } = setup()
     controller.actions.setPrompt('move all panels 500 units north')
     await controller.actions.dispatch()
     expect(controller.getState().route).not.toHaveProperty('repeat')
     await controller.actions.dispatch('  move all panels 500 units north  ')
-    expect(adapters.commitDecision).toHaveBeenLastCalledWith({ ...refusal, repeat: 2 })
-    expect(controller.getState().route.repeat).toBe(2)
+    expect(controller.getState().route).toEqual({ ...refusal, repeat: 2 })
     await controller.actions.dispatch()
-    expect(adapters.commitDecision).toHaveBeenLastCalledWith({ ...refusal, repeat: 3 })
-    expect(controller.getState().route.repeat).toBe(3)
+    expect(controller.getState().route).toEqual({ ...refusal, repeat: 3 })
+    expect(adapters.commitDecision).not.toHaveBeenCalled()
   })
 
   it('resets for a different case-sensitive request', async () => {

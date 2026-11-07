@@ -93,7 +93,8 @@ describe('the console render (no stage props) is byte-identical to before slice 
     const { container } = mount()
     fireEvent.drop(container.querySelector('.bar'), { dataTransfer: { files: [new File(['x'], 'm.json')] } })
     expect(container.querySelector('.strip-failed')).not.toBeNull()
-    expect(container.querySelector('.strip-failed').textContent).toContain('m.json')
+    expect(container.querySelector('.strip-failed')).toHaveAttribute('role', 'alert')
+    expect(container.querySelector('.strip-failed').textContent).toContain('Use the drawing upload control.')
   })
 })
 

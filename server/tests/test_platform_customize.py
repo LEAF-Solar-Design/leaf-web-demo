@@ -77,6 +77,7 @@ def lane_env(tmp_path, platform_repo, monkeypatch):
     monkeypatch.setenv("LEAF_CUSTOMIZATION_APPROVAL_SECRET", "approval-secret")
     monkeypatch.delenv("LEAF_PLATFORM_REPO_PUSH", raising=False)
     monkeypatch.delenv("LEAF_PLATFORM_REPO_BASE_REF", raising=False)
+    monkeypatch.delenv("LEAF_PLATFORM_REPO_SOURCE_REF", raising=False)
     return {"repo": platform_repo, "manifest": manifest, "tmp": tmp_path}
 
 
@@ -457,6 +458,24 @@ def test_every_tracked_repo_path_passes_the_charset(lane_env):
     offenders = [p for p in paths
                  if lane._PATH_ALLOWED_RE.fullmatch(p) is None]
     assert offenders == [], offenders
+
+
+@pytest.mark.parametrize('route', ['[slug]', '[[...slug]]'])
+def test_next_route_names_are_literal_and_preserve_neighbors(lane_env, route):
+    repo = lane_env['repo']
+    path = f'web/src/app/{route}/page.jsx'
+    neighbor = 'web/src/app/s/page.jsx'
+    for name in (path, neighbor):
+        target = repo / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('original\n', encoding='utf-8')
+    _git(repo, 'add', '-A')
+    _git(repo, 'commit', '-m', 'route fixtures')
+    main_before = _git(repo, 'rev-parse', 'main')
+    view = _propose(edits=[{'path': path, 'content': 'edited route\n'}])
+    assert _git(repo, 'show', view['commit_sha'] + ':' + path) == 'edited route'
+    assert _git(repo, 'show', view['commit_sha'] + ':' + neighbor) == 'original'
+    assert _git(repo, 'rev-parse', 'main') == main_before
 
 
 def test_absent_manifest_makes_everything_fundamental(lane_env, monkeypatch):
@@ -1557,6 +1576,100 @@ def test_admin_tier_is_sole_platform_customize_grant():
 # --------------------------------------------------------------------------- #
 # 5. read side: source browse + change listing (the lane's eyes)
 # --------------------------------------------------------------------------- #
+
+@pytest.fixture()
+def authoring_snapshot(lane_env):
+    """A newer immutable snapshot while main retains its original commit."""
+    repo = lane_env["repo"]
+    original = _git(repo, "rev-parse", "refs/heads/main")
+    _git(repo, "checkout", "--detach", original)
+    (repo / "README.md").write_text("current source\n", encoding="utf-8")
+    (repo / "source-only.txt").write_text("snapshot\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "current authoring source")
+    current = _git(repo, "rev-parse", "HEAD")
+    ref = f"refs/leaf/review-base/{current}"
+    _git(repo, "update-ref", ref, current)
+    _git(repo, "checkout", "main")
+    return {"ref": ref, "sha": current, "main": original}
+
+
+def test_source_ref_reads_and_lists_snapshot_without_moving_main(lane_env, authoring_snapshot, monkeypatch):
+    repo = lane_env["repo"]
+    monkeypatch.setenv("LEAF_PLATFORM_REPO_SOURCE_REF", authoring_snapshot["ref"])
+    refs = _git(repo, "show-ref")
+    read = lane.read_source(path="README.md")
+    listing = lane.list_source()
+    assert read["content"] == "current source\n"
+    for view in (read, listing):
+        assert view["ref"] == authoring_snapshot["ref"]
+        assert view["commit"] == authoring_snapshot["sha"]
+    assert "source-only.txt" in {entry["name"] for entry in listing["entries"]}
+    assert _git(repo, "show-ref") == refs
+    assert (repo / "README.md").read_text(encoding="utf-8") == "hello\n"
+
+
+def test_source_ref_proposal_parent_and_frozen_main_pr_target(pushable, authoring_snapshot, monkeypatch):
+    repo = pushable["repo"]
+    monkeypatch.setenv("LEAF_PLATFORM_REPO_SOURCE_REF", authoring_snapshot["ref"])
+    monkeypatch.setenv("LEAF_PLATFORM_PR_OPEN", "1")
+    monkeypatch.setenv("LEAF_PLATFORM_PR_REPO", "o/r")
+    monkeypatch.setenv("LEAF_PLATFORM_PR_TOKEN", "test-token")
+    calls = []
+    _fake_github(monkeypatch, {
+        ("GET", "/repos/o/r/pulls?"): (200, []),
+        ("POST", "/repos/o/r/pulls"): (
+            201, {"number": 3, "html_url": "https://github.com/o/r/pull/3"}),
+    }, calls)
+    prior_branch = "refs/heads/admin-customize/12345678-1234-1234-1234-1234567890ab"
+    _git(repo, "update-ref", prior_branch, authoring_snapshot["main"])
+    view = _propose()
+    record = lane.load_record(view["change_id"])
+    assert record["source_ref"] == authoring_snapshot["ref"]
+    assert record["base_ref"] == "refs/heads/main"
+    assert view["base_sha"] == authoring_snapshot["sha"]
+    assert _git(repo, "rev-parse", view["commit_sha"] + "^") == authoring_snapshot["sha"]
+    assert _git(repo, "show", view["commit_sha"] + ":README.md") == "current source"
+    # Deployment/config changes after proposal cannot retarget its PR or parent.
+    monkeypatch.setenv("LEAF_PLATFORM_REPO_SOURCE_REF", "refs/leaf/review-base/missing")
+    monkeypatch.setenv("LEAF_PLATFORM_REPO_BASE_REF", "refs/heads/release")
+    landed = _land(view)
+    assert landed["pr"]["number"] == 3
+    assert calls[-1][2]["base"] == "main"
+    assert _git(repo, "rev-parse", "refs/heads/main") == authoring_snapshot["main"]
+    assert _git(repo, "rev-parse", prior_branch) == authoring_snapshot["main"]
+    assert _git(repo, "rev-parse", authoring_snapshot["ref"]) == authoring_snapshot["sha"]
+
+
+@pytest.mark.parametrize("operation", ["read", "list", "propose"])
+def test_missing_source_ref_fails_closed_without_new_refs(lane_env, monkeypatch, operation):
+    repo = lane_env["repo"]
+    refs = _git(repo, "show-ref")
+    monkeypatch.setenv("LEAF_PLATFORM_REPO_SOURCE_REF", "refs/leaf/review-base/missing")
+    with pytest.raises(lane.PlatformCustomizeError) as exc:
+        if operation == "read":
+            lane.read_source(path="README.md")
+        elif operation == "list":
+            lane.list_source()
+        else:
+            _propose()
+    assert exc.value.code == "platform_repo_unavailable"
+    assert _git(repo, "show-ref") == refs
+
+
+def test_unset_source_ref_preserves_configured_base_behavior(lane_env, monkeypatch):
+    repo = lane_env["repo"]
+    original = _git(repo, "rev-parse", "refs/heads/main")
+    _git(repo, "update-ref", "refs/heads/release", original)
+    monkeypatch.setenv("LEAF_PLATFORM_REPO_BASE_REF", "refs/heads/release")
+    assert lane.source_ref() == "refs/heads/release"
+    assert lane.read_source(path="README.md")["ref"] == "refs/heads/release"
+    view = _propose()
+    record = lane.load_record(view["change_id"])
+    assert record["source_ref"] == record["base_ref"] == "refs/heads/release"
+    assert view["base_sha"] == original
+
+
 def test_read_source_returns_committed_bytes(lane_env):
     repo = lane_env["repo"]
     view = lane.read_source(path="README.md")

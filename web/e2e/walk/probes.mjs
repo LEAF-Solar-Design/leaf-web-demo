@@ -155,10 +155,19 @@ export function controlName(context) {
   return new RegExp('^' + context.name.split('{n}').map(escapePattern).join(count) + '$')
 }
 
-export function requireControlCensusBatch(census, { state = 'ready', viewport = 'desktop' } = {}) {
+// App.jsx ~4774/4776 keeps Studio's Job monitor expanded without Collapse, per the WL47 ruling.
+const STUDIO_SHELL_ABSENT_BY_DESIGN = Object.freeze(new Set(['control:job-monitor-expand']))
+
+export function requireControlCensusBatch(census, { state = 'ready', viewport = 'desktop', studioShell = false } = {}) {
   for (const expected of CONTROL_CENSUS_BATCH) {
     if (!expected.states.includes(state) || !expected.viewports.includes(viewport)) continue
     const matches = census.resolved.filter((row) => normalizedControlKey(row) === normalizedControlKey(expected))
+    if (studioShell && STUDIO_SHELL_ABSENT_BY_DESIGN.has(expected.feature_id)) {
+      if (matches.length !== 0) {
+        throw new Error('control-census: control expected absent on the studio shell: ' + expected.feature_id)
+      }
+      continue
+    }
     if (matches.length !== 1 || matches[0].feature_id !== expected.feature_id) {
       throw new Error('control-census: required batch control missing or misresolved: ' + expected.feature_id)
     }
@@ -174,6 +183,7 @@ function actionRecord(entry) {
 
 export function locatorRecipe(entry, state) {
   const effect = entry.expected_effect[state]
+  if (entry.id === 'control:chooser-open') return { ...role('button', 'Open project or material'), trigger: 'click' }
   if (entry.kind === 'control') {
     const context = entry.state_contexts[state]
     if (entry.id === 'control:objects') return {
@@ -202,7 +212,10 @@ export function locatorRecipe(entry, state) {
     if (action.surface === 'bar') {
       // The registry declares keyboard-only actions. Their reachable control
       // is the command bar; do not invent a clickable Escape or Retry button.
-      return { ...role('combobox', 'Command bar'), trigger: 'keyboard', key: action.kbd, actionLabel: action.label }
+      return { ...role('combobox', 'Command bar'), trigger: 'keyboard', key: action.kbd, actionLabel: action.label,
+        ...(entry.id === 'action:bar-escape' && state === 'drawer-open' ? {
+          phone: { ...role('button', 'Studio', role('navigation', 'Workspace controls')), phonePanel: 'Jobs' },
+        } : {}) }
     }
     if (action.surface === 'slash') return { ...role('option', new RegExp(`^/${action.label}(?:\\s|$)`)), trigger: 'click' }
     const property = ['setColor', 'setLinetype', 'setLineweight'].includes(action.op)
@@ -231,7 +244,10 @@ export function locatorRecipe(entry, state) {
       role('toolbar', 'Drafting tools')), trigger: property ? 'select' : 'click',
     ...(effect.kind === 'disabled_with_reason' ? { unavailableName: new RegExp(`^${escapePattern(property ? action.text : action.label)}(?: \\(unavailable: .+\\))?$`) } : {}),
     ...(state === 'no-drawing' ? { availableName: property ? action.text : action.label } : {}),
-    ...(action.panel || action.cluster || action.group ? { group: action.panel || action.cluster || action.group } : {}) }
+    ...(action.panel || action.cluster || action.group ? { group: action.panel || action.cluster || action.group } : {}),
+    ...(entry.id === 'action:properties-pane' && ['ready', 'pane-open'].includes(state) ? {
+      phone: { ...role('button', 'properties', role('toolbar', 'Drafting tools')), phonePanel: 'Plan' },
+    } : {}) }
   }
   if (entry.kind === 'surface') {
     const record = PRODUCT_SURFACES.find((surface) => surface.id === entry.source_id)
@@ -254,14 +270,24 @@ export function locatorRecipe(entry, state) {
     if (!STUDIO_DRAWERS.includes(entry.source_id)) throw new Error(`No drawer registry record for ${entry.id}`)
     if (entry.source_id === 'nav') return {
       ...role('button', state === 'open' ? 'Collapse the tool rail to a spine' : 'Tool rail'), trigger: 'click',
+      studioDrawer: 'nav',
       phone: { ...role('button', 'Tool rail'), trigger: 'click' },
     }
     if (entry.source_id === 'jobs') return {
       ...role('button', state === 'open' ? 'Collapse the job monitor to a spine' : /^Expand the job monitor \([0-9]+ live\)$/), trigger: 'click',
-      phone: { ...role('button', 'Jobs', role('group', 'Workspace panels')), trigger: 'click' },
+      studioDrawer: 'jobs',
+      phone: { ...role('button', 'Studio', role('navigation', 'Workspace controls')), trigger: 'click', phonePanel: 'Jobs',
+        legacy: { ...role('button', 'Jobs', role('group', 'Workspace panels')), trigger: 'click' } },
     }
     return { ...role('button', drawerNames[entry.source_id], role('group', 'Workspace panels')),
-      trigger: entry.source_id === 'none' ? 'keyboard' : 'click', key: 'Escape' }
+      trigger: entry.source_id === 'none' ? 'keyboard' : 'click', key: 'Escape',
+      ...(entry.source_id === 'none' ? { studioDrawer: 'jobs' } : {}),
+      ...(entry.source_id === 'result' ? { studioDrawer: 'result' } : {}),
+      ...(entry.source_id === 'plan' ? {
+        phone: { ...role('button', 'properties', role('toolbar', 'Drafting tools')), phonePanel: 'Plan' },
+      } : entry.source_id === 'none' ? {
+        phone: { ...role('button', 'Studio', role('navigation', 'Workspace controls')), phonePanel: 'Jobs' },
+      } : {}) }
   }
   if (entry.kind === 'tool') {
     const record = tools.find((tool) => tool.name === entry.source_id)
@@ -288,14 +314,22 @@ function actionTab(action) {
 export function stateRecipe(entry, state) {
   const context = structuredClone(entry.state_contexts?.[state] || {})
   const effect = entry.expected_effect[state]
+  if (entry.id === 'control:chooser-open') return { context, steps: [
+    step('navigate', { url: '/app?surface=cad&drawing=rooftop_demo' }), step('chooser-start'),
+  ] }
   const surface = entry.kind === 'tab' ? profileSurfaces[entry.profile]
     : entry.kind === 'surface' ? entry.source_id
       : entry.kind === 'tool' && entry.source_id.startsWith('solar-') && state === 'ready' ? 'solar'
       : entry.kind === 'action' && actionRecord(entry).panel === 'solar-panels' ? 'solar' : 'cad'
   const steps = []
-  // A project context is a recipe requirement, regardless of feature kind.
-  // Open it after the drawing/surface setup so navigation cannot clear it.
-  const projectSteps = () => context.openProjectId ? [step('open-real-project')] : []
+  // Tools follows the browser workspace journey after shared-sidebar preparation.
+  // Other project contexts retain their existing drawing-backed setup.
+  const projectSteps = () => entry.id === 'tab:project:tools' && state === 'ready' ? []
+    : context.openProjectId || PROJECT_WORKSPACE_PROBES.includes(`${entry.id}/${state}`)
+    ? [step('open-real-project')] : []
+  if (entry.id === 'tab:project:tools' && state === 'ready') return { context, steps: [
+    step('open-browser-workspace', { url: '/app?surface=browser' }),
+  ] }
   if (entry.id === 'surface:solar' && context.projectSolar) {
     if (context.projectSolar === 'proposal-offline') return { context, steps: [step('require-local-state', {
       reason: 'cloud_service_offline: project Solar proposal requires server/solar_project_solve.py (cloud stringer) and a retained proposal for review',
@@ -341,6 +375,9 @@ export function stateRecipe(entry, state) {
       : step('open-private-drawing', { surface: 'cad' }))
     const locator = locatorRecipe(entry, state)
     if (entry.source_id === 'find-drawing-submit') steps.push(step('find-submit-state'))
+    if (entry.id === 'control:delete-vertex' && state === 'invalid-vertex') steps.push(
+      step('engine-ready'), step('select-entity', { type: 'LINE', editable: true }),
+      step('vertex-index', { value: '-1' }))
     if (["control:scope-add","control:demo-return","control:claude-accounts","control:drawing-close-start","control:notification-collapse","control:session-details","control:version-history","control:linked-services","control:project-board","control:prompt-run","control:prompt-scope","control:sign-out","control:start-board","control:take-edit-lock","control:cost-panel","control:command-bar","control:find-drawing"].includes(entry.id)) {
       steps.push(step('baseline-three-state', { sourceId: entry.source_id, target: effect.target, control: locator, expanded: context.expanded }))
     }
@@ -482,6 +519,8 @@ export function effectAssertion(entry, state) {
     ...(effect.target === 'cockpit-prompt' ? { verb: PROMPTS[effect.operation]?.verb } : {}) }
 }
 
+export const PROJECT_WORKSPACE_PROBES = Object.freeze(['tab:project:tools/ready'])
+
 export function resolveProbe(entry, state) {
   if (!entry.states.includes(state)) throw new Error(`Unknown state ${state} for ${entry.id}`)
   const assertion = effectAssertion(entry, state)
@@ -491,6 +530,30 @@ export function resolveProbe(entry, state) {
     certification: ['unsupported_local', 'staging'].includes(entry.certify)
       ? { result: entry.certify, reason: entry.certify_reason } : null,
     setup: stateRecipe(entry, state), locator: locatorRecipe(entry, state), assertion,
-    ...(entry.state_contexts?.[state]?.openProjectId ? { workerOptions: { walkPostgres: true } } : {}),
+    ...(entry.state_contexts?.[state]?.openProjectId || PROJECT_WORKSPACE_PROBES.includes(`${entry.id}/${state}`)
+      ? { workerOptions: { walkPostgres: true } } : {}),
+  }
+}
+
+export function jobMonitorLauncherRecipe(probe, studioPresent) {
+  if (probe.featureId !== 'control:job-monitor-expand' || !studioPresent) return probe.locator
+  return { role: 'button', name: 'Studio', exact: true,
+    scope: { role: 'navigation', name: 'Workspace controls', exact: true }, trigger: 'click' }
+}
+
+export function projectSharedShellProbe(probe, { surface, studioPresent } = {}) {
+  if (surface !== 'browser' || !studioPresent || probe.profile !== 'project' || probe.state !== 'ready'
+    || !['tab:project:activity', 'tab:project:project', 'tab:project:tools'].includes(probe.featureId)) return probe
+  if (probe.featureId === 'tab:project:tools') return { ...probe,
+    locator: { ...role('button', 'Open tools', role('region', 'Project sidebar')), trigger: 'click' },
+    assertion: { ...probe.assertion, target: 'project-shared-tools', region: 'Tools',
+      content: '#environment-project-panel .ground-pane[data-pane="tools"] > p:visible, #environment-project-panel .ground-pane[data-pane="tools"] > ul > li:visible' },
+  }
+  const activity = probe.featureId === 'tab:project:activity'
+  return { ...probe,
+    locator: { ...role('button', activity ? 'Studio' : 'Project', role('navigation', 'Workspace controls')), trigger: 'click' },
+    assertion: { ...probe.assertion, target: 'project-shared-sidebar',
+      region: activity ? 'Studio sidebar' : 'Project sidebar',
+      content: activity ? '#project-workspace-activity' : '#environment-project-panel .ground-pane' },
   }
 }

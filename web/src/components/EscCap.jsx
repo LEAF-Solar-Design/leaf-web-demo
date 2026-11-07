@@ -1,8 +1,8 @@
 import { forwardRef } from 'react'
 
-const EscCap = forwardRef(function EscCap({ label, type, ...props }, ref) {
+const EscCap = forwardRef(function EscCap({ label = 'Close', type, className = '', style, ...props }, ref) {
   return (
-    <button ref={ref} {...(type === undefined ? {} : { type })} className="key hot" {...props} aria-label={label}>Esc</button>
+    <button ref={ref} type={type ?? 'button'} className={`key hot esc-cap dp-focus ${className}`.trim()} style={{ borderRadius: 'var(--leaf-radius-key)', ...style }} {...props} aria-label={label}>Esc</button>
   )
 })
 

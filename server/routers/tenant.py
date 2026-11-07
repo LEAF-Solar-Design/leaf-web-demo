@@ -180,7 +180,7 @@ def _diagnostic_body(harness_json: Dict[str, Any]) -> Dict[str, Any]:
         if harness_json.get("kind") in {"oauth", "api_key", "missing"} else "missing",
         "linked_at": harness_json.get("linked_at")
         if isinstance(harness_json.get("linked_at"), str) else None,
-        "backend": "file",
+        "backend": "vault" if harness_json.get("backend") == "vault" else "file",
         "path_class": harness_json.get("path_class")
         if harness_json.get("path_class") in {"efs_access_point", "local_file", "environment"}
         else "local_file",

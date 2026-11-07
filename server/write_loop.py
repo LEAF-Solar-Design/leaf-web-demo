@@ -41,7 +41,7 @@ import time
 from contextlib import contextmanager
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from envelopes import DEFAULT_HTTP_STATUS, ErrorCode, err_envelope, ok_envelope
 import entity_scope_containment as containment
@@ -485,6 +485,20 @@ def edited_source_key(tenant_id: str, drawing_id: str, version: int) -> str:
 def edited_source_proof_key(tenant_id: str, drawing_id: str, version: int) -> str:
     """Binding proof for an edited DXF and its version payload."""
     return edited_source_key(tenant_id, drawing_id, version) + ".proof.json"
+
+
+def version_content_sha256(backend, tenant_id: str, drawing_id: str,
+                           version: int) -> Optional[str]:
+    """Digest the stored sidecar or DWG source, never synthesized DXF."""
+    import store
+    v, vkey = store.resolve_version(backend, tenant_id, drawing_id, version)
+    skey = edited_source_key(tenant_id, drawing_id, v)
+    if backend.exists(skey):
+        return hashlib.sha256(backend.get(skey)).hexdigest()
+    source = backend.get(vkey)
+    if source.startswith(DWG_MAGIC):
+        return hashlib.sha256(source).hexdigest()
+    return None
 
 
 def publish_edited_source(backend, tenant_id: str, drawing_id: str, version: int,
@@ -1378,7 +1392,9 @@ def _put_bytes_version(backend, tenant_id: str, drawing_id: str, data: bytes,
                        holder: Optional[str] = None,
                        fence: Optional[int] = None,
                        require_parent_is_head: bool = False,
-                       graph_bundle: Optional[Dict[str, Any]] = None) -> int:
+                       graph_bundle: Optional[Dict[str, Any]] = None,
+                       mutation_plan_bytes: Optional[bytes] = None,
+                       prepare_mutation_plan: Optional[Callable[[int], bool]] = None) -> int:
     """put_drawing takes a local path (immutability + sha are computed there), so
     stage `data` to a temp file and append the new version.
 
@@ -1395,7 +1411,9 @@ def _put_bytes_version(backend, tenant_id: str, drawing_id: str, data: bytes,
                                  parent_version=parent_version, meta=meta,
                                  holder=holder, fence=fence,
                                  require_parent_is_head=require_parent_is_head,
-                                 graph_bundle=graph_bundle)
+                                 graph_bundle=graph_bundle,
+                                 mutation_plan_bytes=mutation_plan_bytes,
+                                 prepare_mutation_plan=prepare_mutation_plan)
     finally:
         try:
             os.remove(tmp)
@@ -1424,6 +1442,114 @@ def apply_graph_version(backend, tenant_id: str, drawing_id: str, dwg: bytes,
             parent_version=interchange.get("source_version"),
             meta={"tool": "solar.graph.commit"}, holder=holder, fence=fence,
             require_parent_is_head=True, graph_bundle=interchange)
+
+
+def commit_physical_version(backend, tenant_id, drawing_id, *, project_id, parent_version,
+                            physical, holder, fence, apply_id) -> tuple[int, bool]:
+    """Append a physical binding on the existing authorized drawing mutation rail."""
+    import store
+    from leaf_cloud_client import canonical_bytes
+
+    if type(parent_version) is not int or parent_version < 1:
+        raise ValueError("invalid parent version")
+    if type(apply_id) is not str or re.fullmatch(r"[A-Za-z0-9_-]{1,96}", apply_id) is None:
+        raise ValueError("invalid apply id")
+    if type(project_id) is not str or not 1 <= len(project_id) <= 100:
+        raise ValueError("invalid project identity")
+    physical = store.check_physical_reference(physical)
+    if (type(holder) is not str or not holder or holder == store.ANONYMOUS_HOLDER
+            or type(fence) is not int or fence < 1):
+        raise store.CheckoutDenied("physical commits require a holder and checkout fence")
+    with drawing_mutation_commit_guard() as allowed:
+        if not allowed:
+            raise ValueError("drawing mutations are disabled")
+        if not store.physical_versioned_enabled():
+            raise ValueError("physical version binding is disabled")
+        m = store.load_manifest(backend, tenant_id, drawing_id)
+
+        def authorize(manifest):
+            checkout = manifest.get("checkout")
+            if (not store.checkout_active(checkout) or checkout.get("holder") != holder
+                    or checkout.get("fence") != fence):
+                raise store.CheckoutDenied("physical commits require a holder and checkout fence")
+
+        authorize(m)
+        parent_row = next((e for e in m["versions"] if int(e["v"]) == parent_version), None)
+        if parent_row is None:
+            raise ValueError("version not in manifest")
+        bundle_parent = (parent_row.get("note") or "").startswith("solar-bundle:")
+        workitem = ("solar:" if bundle_parent else "solar-physical:") + apply_id
+
+        def replay(manifest):
+            for row in manifest["versions"]:
+                if row.get("workitem_id") != workitem:
+                    continue
+                if (row.get("tool") != "solar-physical" or row.get("parent") != parent_version
+                        or (not bundle_parent and row.get("note") != store.physical_ref_note(physical))):
+                    raise ValueError("apply id was reused with different content")
+                try:
+                    recorded = store.read_version_physical(
+                        backend, tenant_id, drawing_id, int(row["v"]), project_id=project_id)[1]
+                except ValueError:
+                    raise ValueError("apply id was reused with different content") from None
+                if recorded != physical:
+                    raise ValueError("apply id was reused with different content")
+                return int(row["v"]), False
+            return None
+
+        found = replay(m)
+        if found is not None:
+            return found
+        import solar_physical_head as ph
+        view, _ = ph.load_physical_entry(backend, tenant_id, drawing_id, physical["head_index"],
+                                         project_id=project_id)
+        if (view["state"]["artifact_id"] != physical["state_artifact_id"]
+                or view["state"]["content_sha256"] != physical["state_content_sha256"]):
+            raise store.PhysicalReferenceInvalid("invalid physical reference")
+        data = backend.get(store.drawing_version_key(tenant_id, drawing_id, parent_version))
+        if len(data) != parent_row["bytes"] or hashlib.sha256(data).hexdigest() != parent_row["sha256"]:
+            raise store.PhysicalReferenceInvalid("invalid physical reference")
+        graph_bundle = None
+        if bundle_parent:
+            parent = store.read_graph_bundle(backend, tenant_id, drawing_id, parent_version)
+            parent_project = parent["receipt"]["project_id"]
+            graph_bundle = {name: parent[name] for name in ("graph", "intake", "mapping")}
+            graph_bundle.update(project_id=project_id, apply_id=apply_id,
+                                source_version=parent_version, source_sha256=parent_row["sha256"],
+                                source_rev=parent["graph"]["rev"], physical=physical,
+                                physical_only=True)
+            meta = {"tool": "solar-physical"}
+        else:
+            try:
+                parent = json.loads(data)
+            except (ValueError, UnicodeError, RecursionError):
+                raise ValueError("physical commit requires a graph version") from None
+            if type(parent) is not dict or type(parent.get("solar_design_graph")) is not dict:
+                raise ValueError("physical commit requires a graph version")
+            project = parent["solar_design_graph"].get("project")
+            parent_project = project.get("id") if type(project) is dict else None
+            data = canonical_bytes(dict(parent, solar_physical=physical))
+            meta = {"tool": "solar-physical", "workitem_id": workitem,
+                    "note": store.physical_ref_note(physical)}
+        if parent_project != project_id:
+            raise store.PhysicalReferenceScopeMismatch("physical reference project mismatch")
+        if store.read_version_physical(backend, tenant_id, drawing_id, parent_version,
+                                       project_id=project_id)[1] == physical:
+            return parent_version, False
+        latest_before = int(m["latest"])
+        try:
+            v = _put_bytes_version(backend, tenant_id, drawing_id, data,
+                                   parent_version=parent_version, meta=meta, holder=holder,
+                                   fence=fence, require_parent_is_head=True, graph_bundle=graph_bundle)
+        except ValueError as exc:
+            if str(exc).startswith(("stale parent ", "stale drawing head:")):
+                fresh = store.load_manifest(backend, tenant_id, drawing_id)
+                authorize(fresh)
+                found = replay(fresh)
+                if found is not None:
+                    return found
+            raise
+        return v, v > latest_before
 
 
 # --------------------------------------------------------------------------- #
@@ -3315,6 +3441,7 @@ def _apply_plan_live(*, tenant_id: str, drawing_id: str, head_v: int,
                   "source_ref": source_ref,
                   "note": meta_note},
             holder=holder, fence=fence, require_parent_is_head=True,
+            mutation_plan_bytes=plan_bytes,
         )
         version_write_ms = int(
             (time.perf_counter() - version_write_started) * 1000)

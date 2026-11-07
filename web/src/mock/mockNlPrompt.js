@@ -9,7 +9,7 @@
 //
 // Lanes (mirroring the design's Run/Solve/Build hit-indicators):
 //   run   -> execute a catalog capability (returns tool + params)
-//   solve -> a cloud-solver job (string/combiner/route) — not wired in this demo
+//   solve -> routes a solve request to a solver tool in live mode; the offline mock returns no tool
 //   build -> author a NEW capability (routes to the author flow)
 // Confidence >= 0.7 => a confident prefill; < 0.7 => best-guess + alternatives.
 
@@ -66,7 +66,7 @@ export function matchPrompt(text, tools = []) {
           'optimal route', 'milp', 'annual shade', 'iv curve', 'inverter')) {
     return {
       lane: 'solve', tool: null, params: {}, confidence: 0.78, alternatives: [],
-      rationale: 'This is a cloud-solver job (string / combiner / route). The solve lane is not wired into this demo yet.',
+      rationale: 'This is a solver job (string / combiner / route). Pick a solver to run it.',
     }
   }
 

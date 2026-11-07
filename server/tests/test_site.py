@@ -218,6 +218,22 @@ def test_site_endpoints_public_when_auth_live(monkeypatch, intake, site_env):
     assert r3.status_code == 401, r3.text
 
 
+@pytest.mark.parametrize("audience", [None, "https://api-staging.leafdesign.ai", ""])
+def test_auth_config_public_no_store(monkeypatch, audience):
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    if audience is None:
+        monkeypatch.delenv("LEAF_AUTH0_AUDIENCE", raising=False)
+    else:
+        monkeypatch.setenv("LEAF_AUTH0_AUDIENCE", audience)
+
+    response = _client().get("/api/site/auth-config")  # No auth or tenant header
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "audience": "https://api.leafdesign.ai" if audience is None else audience,
+    }
+    assert response.headers["Cache-Control"] == "no-store"
+
+
 # --------------------------------------------------------------------------- #
 # 5. ETag / If-None-Match -> 304 (+ exact cache headers)
 # --------------------------------------------------------------------------- #

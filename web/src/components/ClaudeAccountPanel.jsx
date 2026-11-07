@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import EscCap from './EscCap.jsx'
 import './popovers.css'
 import useExit from '../useExit.js'
@@ -34,7 +34,17 @@ export default function ClaudeAccountPanel({
   const [confirmRemove, setConfirmRemove] = useState(null)
   const [showAdd, setShowAdd] = useState(false)
   const rootRef = useRef(null)
+  const triggerRef = useRef(null)
+  const dialogRef = useRef(null)
+  const closeRef = useRef(null)
+  const wasOpen = useRef(false)
   const pop = useExit(open)
+  useLayoutEffect(() => {
+    if (mock) return
+    if (open) closeRef.current?.focus()
+    else if (wasOpen.current && (document.activeElement === document.body || dialogRef.current?.contains(document.activeElement))) triggerRef.current?.focus()
+    wasOpen.current = open
+  }, [open, mock])
   const known = typeof grant?.linked === 'boolean'
   const restricted = grant?.read_status === 'restricted'
   const canManage = !loading && known
@@ -43,7 +53,7 @@ export default function ClaudeAccountPanel({
   const shownAccounts = accounts.length
     ? accounts
     : linked
-      ? [{ id: null, label: grant.kind === 'api_key' ? 'Anthropic API key' : 'Legacy Claude mount', kind: grant.kind, linked_at: grant.linked_at, active: true }]
+      ? [{ id: null, label: grant.kind === 'api_key' ? 'Anthropic API key' : 'Claude account', kind: grant.kind, linked_at: grant.linked_at, active: true }]
       : []
 
   // S27: Escape is the owner stack's (menu layer: an anchored popover); the
@@ -92,27 +102,28 @@ export default function ClaudeAccountPanel({
   }
 
   const stateLabel = signedOut ? 'sign in' : loading ? 'checking' : restricted ? 'access restricted'
-    : !known ? 'unavailable' : linked ? `${shownAccounts.length} mounted` : 'not linked'
+    : !known ? 'unavailable' : linked ? `${shownAccounts.length} linked` : 'not linked'
   const isApiKey = kind === 'api_key'
 
   return (
     <span className="claude-acct" ref={rootRef}>
       <button
         className="claude-trigger"
+        ref={triggerRef}
         onClick={() => onToggle(!open)}
         aria-expanded={open}
         aria-haspopup="dialog"
-        title="Manage tenant-owned Claude subscription and API-key mounts"
+        title="Manage linked Claude accounts and API keys"
       >
         <span className="ca-k">Claude accounts</span>
         <span className={`ca-state ${linked ? 'on' : ''}`}>{stateLabel}</span>
       </button>
 
       {pop.shown && (
-        <div className={`claude-pop${pop.exiting ? ' exit' : ''}`} role="dialog" aria-label="Claude accounts">
+        <div ref={dialogRef} inert={!open ? '' : undefined} aria-hidden={!open || undefined} title={busy ? 'Please wait for the account update.' : undefined} className={`claude-pop${pop.exiting ? ' exit' : ''}`} role="dialog" aria-label="Claude accounts">
           <div className="ca-head">
-            <span>Claude mounts</span>
-            <EscCap onClick={() => onToggle(false)} label="Close Claude account panel" />
+            <span>Claude accounts</span>
+            <EscCap ref={closeRef} onClick={() => onToggle(false)} label="Close Claude account panel" />
           </div>
 
           {signedOut && <p className="ca-copy" role="status">Sign in to view or link Claude accounts.</p>}
@@ -120,14 +131,14 @@ export default function ClaudeAccountPanel({
           {!signedOut && !loading && !known && (
             <p className="ca-copy" role="status">
               {restricted
-                ? 'Only the tenant owner can view or manage Claude accounts. This does not indicate whether authoring is available.'
+                ? 'Only the workspace owner can view or manage Claude accounts. This does not indicate whether authoring is available.'
                 : 'Claude account status is unavailable. This does not indicate whether an account is linked.'}
             </p>
           )}
           {!signedOut && canManage && linked && (
             <div className="ca-linked">
-              <div className="ca-kindline">automatic tenant routing</div>
-              <p className="ca-copy">Each turn uses the least-used eligible mount in this tenant. Mounts are never pooled across tenants.</p>
+              <div className="ca-kindline">Automatic account selection</div>
+              <p className="ca-copy">Each request uses an available account in your workspace. Accounts are never shared with other workspaces.</p>
               <div className="ca-account-list">
                 {shownAccounts.map((account) => {
                   const key = account.id || 'legacy'
@@ -136,12 +147,12 @@ export default function ClaudeAccountPanel({
                       <div className="ca-account-main">
                         <b>{account.label}</b>
                         <span>{account.kind === 'api_key' ? 'API key' : `${account.plan ? `${account.plan} ` : ''}subscription`}</span>
-                        {account.active && <span className="ca-route">recently routed</span>}
+                        {account.active && <span className="ca-route">Recently used</span>}
                       </div>
                       <div className="ca-account-meta">
-                        {typeof account.usage_tokens === 'number' && <span>{account.usage_tokens.toLocaleString()} routed tokens</span>}
+                        {typeof account.usage_tokens === 'number' && <span>{account.usage_tokens.toLocaleString()} tokens used</span>}
                         {account.cooldown_until && <span title={absoluteWithZone(Date.parse(account.cooldown_until))}>cooldown until {relativeTime(Date.parse(account.cooldown_until), now)}</span>}
-                        {account.linked_at && <span title={absoluteWithZone(Date.parse(account.linked_at))}>mounted {relativeTime(Date.parse(account.linked_at), now)}</span>}
+                        {account.linked_at && <span title={absoluteWithZone(Date.parse(account.linked_at))}>Linked {relativeTime(Date.parse(account.linked_at), now)}</span>}
                       </div>
                       <div className="ca-account-actions">
                         {confirmRemove !== key ? (
@@ -159,7 +170,7 @@ export default function ClaudeAccountPanel({
                   )
                 })}
               </div>
-              {!showAdd && <button className="btn ca-act" onClick={() => setShowAdd(true)} disabled={busy}>Add another mount</button>}
+              {!showAdd && <button className="btn ca-act" onClick={() => setShowAdd(true)} disabled={busy} title={busy ? 'Please wait for the account update.' : undefined}>Link another account</button>}
             </div>
           )}
 
@@ -172,7 +183,7 @@ export default function ClaudeAccountPanel({
 
               {!isApiKey && (
                 <>
-                  <p className="ca-copy">Mount your authorized <b>Claude Pro, Max, Team, or Enterprise</b> subscription.</p>
+                  <p className="ca-copy">Link your authorized <b>Claude Pro, Max, Team, or Enterprise</b> subscription.</p>
                   <ol className="ca-steps">
                     <li>Run <code>claude setup-token</code> in a terminal.</li>
                     <li>Approve the request for your Claude subscription.</li>
@@ -184,13 +195,13 @@ export default function ClaudeAccountPanel({
                     ))}
                   </div>
                   <label className="ca-field">
-                    <span className="ca-field-k">Mount label</span>
+                    <span className="ca-field-k">Account label</span>
                     <input type="text" value={label} onChange={(event) => setLabel(event.target.value)} placeholder="Design team east" maxLength={120} disabled={busy} />
                   </label>
                 </>
               )}
 
-              {isApiKey && <p className="ca-copy">Mount an Anthropic organization API key billed at API rates.</p>}
+              {isApiKey && <p className="ca-copy">Link an Anthropic organization API key billed at API rates.</p>}
               <label className={`ca-field${error ? ' field-invalid' : ''}`}>
                 <span className="ca-field-k">{isApiKey ? 'Anthropic API key' : 'Claude setup token'}</span>
                 <input
@@ -208,11 +219,11 @@ export default function ClaudeAccountPanel({
                   aria-label={isApiKey ? 'Anthropic API key' : 'Claude token'}
                 />
               </label>
-              <button className="btn primary ca-act" onClick={submit} disabled={busy || !token.trim() || (!isApiKey && (!label.trim() || !plan))}>
+              <button className="btn primary ca-act" onClick={submit} disabled={busy || !token.trim() || (!isApiKey && (!label.trim() || !plan))} title={busy ? 'Please wait for the account update.' : !token.trim() ? 'Enter your credential to link an account.' : !isApiKey && (!label.trim() || !plan) ? 'Choose a plan and enter an account label.' : undefined}>
                 {busy ? 'Linking…' : isApiKey ? 'Link API key' : 'Link Claude account'}
               </button>
               {linked && <button className="chip-neutral" onClick={() => setShowAdd(false)} disabled={busy}>Cancel</button>}
-              <p className="ca-note">Credentials stay server-side, tenant-isolated, and never appear again after mounting.</p>
+              <p className="ca-note">Credentials are stored securely for your workspace and are hidden after linking.</p>
             </div>
           )}
           {!signedOut && error && <div className="field-err" role="alert"><span className="dot red" />{humanizeError(error)}</div>}

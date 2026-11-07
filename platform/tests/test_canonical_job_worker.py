@@ -40,88 +40,93 @@ def _provenance(attempt=1):
 
 def test_submission_fails_closed_until_postgres_and_is_idempotent(make_org):
     org, project = _project(make_org)
+    tenant_id = f"tenant-a-{org.org_id}"
     with pytest.raises(ValueError, match="not postgres_canonical"):
         canonical_jobs.submit_solve_job(
-            org.org_id, project.project_id, "tenant-a", "string-autofill-opt", {}, "req-1")
+            org.org_id, project.project_id, tenant_id, "string-autofill-opt", {}, "req-1")
     store.set_project_authority_mode(org.org_id, project.project_id, "postgres_canonical")
     other_org, other_project = _project(make_org, "Other owner")
     foreign_version = store.create_drawing_version(other_org.org_id, other_project.project_id)
     with pytest.raises(ValueError, match="unavailable"):
         canonical_jobs.submit_solve_job(
-            org.org_id, project.project_id, "tenant-a", "string-autofill-opt", {},
+            org.org_id, project.project_id, tenant_id, "string-autofill-opt", {},
             "foreign-version", input_version_id=foreign_version.version_id)
     first = canonical_jobs.submit_solve_job(
-        org.org_id, project.project_id, "tenant-a", "string-autofill-opt",
+        org.org_id, project.project_id, tenant_id, "string-autofill-opt",
         {"panelsPerString": 10}, "req-1")
     repeated = canonical_jobs.submit_solve_job(
-        org.org_id, project.project_id, "tenant-a", "string-autofill-opt",
+        org.org_id, project.project_id, tenant_id, "string-autofill-opt",
         {"panelsPerString": 10}, "req-1")
     assert repeated["job_id"] == first["job_id"]
     assert set(first["execution_context"]["snapshot_pins"]) == {"catalog", "standards", "ahj"}
     assert first["execution_context"]["capability_state"] == "connected_degraded"
     with pytest.raises(ValueError, match="different run input"):
         canonical_jobs.submit_solve_job(
-            org.org_id, project.project_id, "tenant-a", "string-autofill-opt",
+            org.org_id, project.project_id, tenant_id, "string-autofill-opt",
             {"panelsPerString": 11}, "req-1")
 
 
 def test_two_claimers_get_one_owner_and_tenant_reads_are_isolated(make_org):
     org, project = _project(make_org)
+    tenant_id = f"tenant-claim-{org.org_id}"
+    other_tenant_id = f"other-tenant-{org.org_id}"
     store.set_project_authority_mode(org.org_id, project.project_id, "postgres_canonical")
     job = canonical_jobs.submit_solve_job(
-        org.org_id, project.project_id, "tenant-claim", "string-autofill-opt", {}, "claim-1")
+        org.org_id, project.project_id, tenant_id, "string-autofill-opt", {}, "claim-1")
     with ThreadPoolExecutor(max_workers=2) as pool:
         claims = list(pool.map(
-            lambda owner: canonical_jobs.claim_next(owner, request_tenant_id="tenant-claim"),
+            lambda owner: canonical_jobs.claim_next(owner, request_tenant_id=tenant_id),
             ("worker-a", "worker-b")))
     winners = [claim for claim in claims if claim is not None]
     assert len(winners) == 1
     assert winners[0]["job_id"] == job["job_id"]
     assert winners[0]["attempt"] == 1
-    assert canonical_jobs.get_job_for_tenant(job["job_id"], "other-tenant") is None
-    assert canonical_jobs.list_jobs_for_tenant("other-tenant") == []
+    assert canonical_jobs.get_job_for_tenant(job["job_id"], other_tenant_id) is None
+    assert canonical_jobs.list_jobs_for_tenant(other_tenant_id) == []
 
 
 def test_tool_scoped_worker_claims_only_its_exact_adapter(make_org):
     org, project = _project(make_org)
+    tenant_id = f"tenant-tools-{org.org_id}"
     store.set_project_authority_mode(org.org_id, project.project_id, "postgres_canonical")
     unsupported = canonical_jobs.submit_solve_job(
-        org.org_id, project.project_id, "tenant-tools", "future-canonical-tool", {},
+        org.org_id, project.project_id, tenant_id, "future-canonical-tool", {},
         "tool-unsupported")
     supported = canonical_jobs.submit_solve_job(
-        org.org_id, project.project_id, "tenant-tools", "string-autofill-opt", {},
+        org.org_id, project.project_id, tenant_id, "string-autofill-opt", {},
         "tool-supported")
 
     claimed = canonical_jobs.claim_next(
-        "worker-autofill", request_tenant_id="tenant-tools",
+        "worker-autofill", request_tenant_id=tenant_id,
         tool_name="string-autofill-opt")
 
     assert claimed["job_id"] == supported["job_id"]
     assert claimed["tool_name"] == "string-autofill-opt"
     untouched = canonical_jobs.get_job_for_tenant(
-        unsupported["job_id"], "tenant-tools")
+        unsupported["job_id"], tenant_id)
     assert untouched["status"] == "queued"
     assert untouched["attempt"] == 0
 
 
 def test_tool_scoped_cleanup_does_not_fail_expired_unsupported_job(make_org):
     org, project = _project(make_org)
+    tenant_id = f"tenant-cleanup-{org.org_id}"
     store.set_project_authority_mode(org.org_id, project.project_id, "postgres_canonical")
     unsupported = canonical_jobs.submit_solve_job(
-        org.org_id, project.project_id, "tenant-cleanup", "future-canonical-tool", {},
+        org.org_id, project.project_id, tenant_id, "future-canonical-tool", {},
         "cleanup-unsupported", max_attempts=1)
     started = datetime(2026, 7, 24, 12, 0, tzinfo=timezone.utc)
     claimed_unsupported = canonical_jobs.claim_next(
         "worker-future", lease_seconds=1, now=started,
-        request_tenant_id="tenant-cleanup", tool_name="future-canonical-tool")
+        request_tenant_id=tenant_id, tool_name="future-canonical-tool")
     assert claimed_unsupported["job_id"] == unsupported["job_id"]
 
     assert canonical_jobs.claim_next(
-        "worker-autofill", request_tenant_id="tenant-cleanup",
+        "worker-autofill", request_tenant_id=tenant_id,
         tool_name="string-autofill-opt", now=started + timedelta(seconds=2)) is None
 
     untouched = canonical_jobs.get_job_for_tenant(
-        unsupported["job_id"], "tenant-cleanup")
+        unsupported["job_id"], tenant_id)
     assert untouched["status"] == "running"
     assert untouched["attempt"] == 1
 
@@ -133,13 +138,14 @@ def test_claim_rejects_blank_tool_filter():
 
 def test_heartbeat_and_stale_completion_require_current_unexpired_lease(make_org):
     org, project = _project(make_org)
+    tenant_id = f"tenant-lease-{org.org_id}"
     store.set_project_authority_mode(org.org_id, project.project_id, "postgres_canonical")
     job = canonical_jobs.submit_solve_job(
-        org.org_id, project.project_id, "tenant-lease", "string-autofill-opt", {}, "lease-1")
+        org.org_id, project.project_id, tenant_id, "string-autofill-opt", {}, "lease-1")
     start = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
     assert canonical_jobs.claim_next(
         "worker-a", lease_seconds=10, now=start,
-        request_tenant_id="tenant-lease")["job_id"] == job["job_id"]
+        request_tenant_id=tenant_id)["job_id"] == job["job_id"]
     assert canonical_jobs.heartbeat(job["job_id"], "worker-b", now=start) is False
     assert canonical_jobs.heartbeat(job["job_id"], "worker-a", now=start + timedelta(seconds=5))
     assert canonical_jobs.complete_solve(
@@ -149,10 +155,11 @@ def test_heartbeat_and_stale_completion_require_current_unexpired_lease(make_org
 
 def test_completion_atomically_writes_one_solve_history_and_outbox(make_org):
     org, project = _project(make_org)
+    tenant_id = f"tenant-complete-{org.org_id}"
     store.set_project_authority_mode(org.org_id, project.project_id, "postgres_canonical")
     job = canonical_jobs.submit_solve_job(
-        org.org_id, project.project_id, "tenant-complete", "string-autofill-opt", {}, "done-1")
-    claimed = canonical_jobs.claim_next("worker-complete", request_tenant_id="tenant-complete")
+        org.org_id, project.project_id, tenant_id, "string-autofill-opt", {}, "done-1")
+    claimed = canonical_jobs.claim_next("worker-complete", request_tenant_id=tenant_id)
     assert claimed["job_id"] == job["job_id"]
     result, provenance = _result(), _provenance()
     assert canonical_jobs.complete_solve(
@@ -162,7 +169,7 @@ def test_completion_atomically_writes_one_solve_history_and_outbox(make_org):
     conflicting = _result(answer=30)
     assert canonical_jobs.complete_solve(
         job["job_id"], "worker-complete", conflicting, provenance) == "conflict"
-    saved = canonical_jobs.get_job_for_tenant(job["job_id"], "tenant-complete")
+    saved = canonical_jobs.get_job_for_tenant(job["job_id"], tenant_id)
     assert saved["status"] == "succeeded"
     assert saved["result"]["solver_result"] == result["solver_result"]
     assert saved["result"]["solve_hash"]
@@ -185,10 +192,11 @@ def test_completion_atomically_writes_one_solve_history_and_outbox(make_org):
 
 def test_completion_rejects_false_hash_bool_attempt_and_provenance_mismatch(make_org):
     org, project = _project(make_org)
+    tenant_id = f"tenant-invalid-{org.org_id}"
     store.set_project_authority_mode(org.org_id, project.project_id, "postgres_canonical")
     job = canonical_jobs.submit_solve_job(
-        org.org_id, project.project_id, "tenant-invalid", "string-autofill-opt", {}, "invalid-1")
-    canonical_jobs.claim_next("worker-invalid", request_tenant_id="tenant-invalid")
+        org.org_id, project.project_id, tenant_id, "string-autofill-opt", {}, "invalid-1")
+    canonical_jobs.claim_next("worker-invalid", request_tenant_id=tenant_id)
     bad_hash = _result()
     bad_hash["result_sha256"] = "b" * 64
     with pytest.raises(ValueError, match="does not match"):
@@ -211,18 +219,19 @@ def test_completion_rejects_false_hash_bool_attempt_and_provenance_mismatch(make
     mismatch["runtime"] = "python-other"
     with pytest.raises(ValueError, match="does not match provenance"):
         canonical_jobs.complete_solve(job["job_id"], "worker-invalid", mismatch, _provenance())
-    assert canonical_jobs.get_job_for_tenant(job["job_id"], "tenant-invalid")["status"] == "running"
+    assert canonical_jobs.get_job_for_tenant(job["job_id"], tenant_id)["status"] == "running"
 
 
 def test_retry_is_bounded_and_expired_owner_cannot_release(make_org):
     org, project = _project(make_org)
+    tenant_id = f"tenant-retry-{org.org_id}"
     store.set_project_authority_mode(org.org_id, project.project_id, "postgres_canonical")
     job = canonical_jobs.submit_solve_job(
-        org.org_id, project.project_id, "tenant-retry", "string-autofill-opt", {},
+        org.org_id, project.project_id, tenant_id, "string-autofill-opt", {},
         "retry-1", max_attempts=2)
     start = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
     canonical_jobs.claim_next(
-        "worker-1", lease_seconds=10, now=start, request_tenant_id="tenant-retry")
+        "worker-1", lease_seconds=10, now=start, request_tenant_id=tenant_id)
     error = {"error_code": "SOLVER_FAILED", "message": "temporary", "retryable": True}
     assert canonical_jobs.fail_or_retry(
         job["job_id"], "worker-1", error, _provenance(),
@@ -231,24 +240,24 @@ def test_retry_is_bounded_and_expired_owner_cannot_release(make_org):
         job["job_id"], "worker-1", error, _provenance(),
         now=start + timedelta(seconds=5)) == "retry"
     second = canonical_jobs.claim_next(
-        "worker-2", now=start + timedelta(seconds=6), request_tenant_id="tenant-retry")
+        "worker-2", now=start + timedelta(seconds=6), request_tenant_id=tenant_id)
     assert second["attempt"] == 2
     assert canonical_jobs.fail_or_retry(
         job["job_id"], "worker-2", error, _provenance(2),
         now=start + timedelta(seconds=7)) == "failed"
-    assert canonical_jobs.get_job_for_tenant(job["job_id"], "tenant-retry")["status"] == "failed"
+    assert canonical_jobs.get_job_for_tenant(job["job_id"], tenant_id)["status"] == "failed"
 
 
 def test_worker_health_is_short_lived():
     observed = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
+    # worker_health reads the newest heartbeat for a tool, so this test owns its tool name: a real
+    # string-autofill-opt worker that heartbeat on the same database would otherwise be newer and win.
+    tool, worker = f"health-tool-{store.new_uuid()}", f"health-worker-{store.new_uuid()}"
     canonical_jobs.record_worker_heartbeat(
-        "health-worker", "string-autofill-opt", "python-test", "revision-test", "c" * 64,
-        now=observed)
-    health = canonical_jobs.worker_health(
-        "string-autofill-opt", now=observed + timedelta(seconds=5))
-    assert health["worker_id"] == "health-worker"
-    assert canonical_jobs.worker_health(
-        "string-autofill-opt", now=observed + timedelta(seconds=16)) is None
+        worker, tool, "python-test", "revision-test", "c" * 64, now=observed)
+    health = canonical_jobs.worker_health(tool, now=observed + timedelta(seconds=5))
+    assert health["worker_id"] == worker
+    assert canonical_jobs.worker_health(tool, now=observed + timedelta(seconds=16)) is None
 
 
 def test_worker_heartbeat_is_exact_and_fresh():

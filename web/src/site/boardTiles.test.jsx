@@ -18,6 +18,40 @@ const props = {
 }
 const makeActions = () => Object.fromEntries(['onOpenDrawing', 'onOpenVersion', 'onOpenJob', 'onOpenTool', 'onOpenFamily', 'onOpenCapability'].map((name) => [name, vi.fn()]))
 
+it('F64 opens tools from an empty project through SurfaceGrounds without a tool argument', () => {
+  const actions = makeActions()
+  const workspace = { ...props.workspace, built_tools: [] }
+  const { container } = render(<SurfaceGrounds surface="browser" {...props} workspace={workspace} actions={actions} />)
+  expect(screen.getByText('No built tools yet')).toBeVisible()
+  const button = screen.getByRole('button', { name: 'Open tools' })
+  expect(button.tagName).toBe('BUTTON')
+  expect(button.type).toBe('button')
+  expect(button).toHaveClass('ground-row-action')
+  expect(button.closest('[data-tile]')).toHaveAttribute('data-tile', 'tools')
+  expect(container.querySelector('[data-element-id^="tool:"]')).toBeNull()
+  expect(actions.onOpenTool).not.toHaveBeenCalled()
+  fireEvent.click(button)
+  expect(actions.onOpenTool).toHaveBeenCalledTimes(1)
+  expect(actions.onOpenTool).toHaveBeenCalledWith()
+  expect(workspace.built_tools).toEqual([])
+})
+
+it('F64 omits Open tools without a workspace or callable callback', () => {
+  const actions = makeActions()
+  const { rerender } = render(<BoardTiles {...props} workspace={null} actions={actions} />)
+  for (const workspace of [null, undefined]) {
+    rerender(<BoardTiles {...props} workspace={workspace} actions={actions} />)
+    expect(screen.getByText('Authored tools attach to the project')).toBeVisible()
+    expect(screen.queryByRole('button', { name: 'Open tools' })).toBeNull()
+  }
+  for (const absentActions of [undefined, null, {}, { onOpenTool: true }]) {
+    rerender(<BoardTiles {...props} workspace={{ ...props.workspace, built_tools: [] }} actions={absentActions} />)
+    expect(screen.getByText('No built tools yet')).toBeVisible()
+    expect(screen.queryByRole('button', { name: 'Open tools' })).toBeNull()
+  }
+  expect(actions.onOpenTool).not.toHaveBeenCalled()
+})
+
 it('BI03-01 Project settings opens from both board layouts', () => {
   for (const contained of [false, true]) {
     for (const worldSpace of [false, true]) {
@@ -165,6 +199,7 @@ it('B2 row1 preserves the markup without callbacks', () => {
 it('B2 row2 opens real board objects and keeps tile identities', () => {
   const actions = makeActions()
   const { container } = render(<BoardTiles {...props} actions={actions} />)
+  expect(screen.queryByRole('button', { name: 'Open tools' })).toBeNull()
   expect([...container.querySelectorAll('[data-tile]')].map((tile) => tile.dataset.tile))
     .toEqual(['drawing', 'versions', 'jobs', 'tools', 'catalog', 'shared'])
   for (const [kind, name, row, id] of [
@@ -175,6 +210,7 @@ it('B2 row2 opens real board objects and keeps tile identities', () => {
     expect(button.closest('li')).toHaveAttribute('data-element-id', `${kind}:${id}`)
     expect(button).toHaveAttribute('data-id', id)
     fireEvent.click(button)
+    expect(actions[name]).toHaveBeenCalledTimes(1)
     expect(actions[name]).toHaveBeenCalledWith(row)
   }
   fireEvent.click(screen.getByRole('button', { name: 'Roof' }))

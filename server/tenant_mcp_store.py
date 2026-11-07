@@ -223,6 +223,23 @@ def _prune_pending(entries: List[Dict[str, Any]], *, now: float) -> List[Dict[st
     return [e for e in entries if now - float(e.get("created_at", 0.0)) <= PENDING_TTL_S]
 
 
+def pending_authorize_url(tenant_id: str, server_id: str, redirect_uri: str) -> Optional[str]:
+    """Resume a live flow only for its exact tenant, server and callback binding.
+
+    This private lookup does not consume or extend the pending flow's lifetime.
+    Older pending records without an authorization URL cannot be resumed.
+    """
+    raw = _read_bounded(_pending_file(), MAX_PENDING_FILE_BYTES) or []
+    for entry in _prune_pending(raw, now=time.time()):
+        if (entry.get("tenant_id") == tenant_id
+                and entry.get("server_id") == server_id
+                and entry.get("redirect_uri") == redirect_uri):
+            url = entry.get("authorize_url")
+            if isinstance(url, str) and url:
+                return url
+    return None
+
+
 def create_pending(state: str, entry: Dict[str, Any]) -> None:
     """Register one in-flight OAuth request keyed by its unguessable `state`.
 

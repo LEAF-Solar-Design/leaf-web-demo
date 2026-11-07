@@ -40,10 +40,25 @@ export const ZOOM_OUT = 0.8
 // palette. Past this the cluster says how many more live in the pane.
 export const MAX_LAYER_TOOLS = 10
 
+const TOOL_NAME_ACRONYMS = Object.freeze({
+  nec: 'NEC', ac: 'AC', dc: 'DC', pv: 'PV', bom: 'BOM', dxf: 'DXF', dwg: 'DWG',
+  ocpd: 'OCPD', mppt: 'MPPT', pvcase: 'PVcase', gcr: 'GCR', kw: 'kW', kwh: 'kWh',
+})
+
 export function humanizeToolName(name) {
   if (typeof name !== 'string') return ''
+  // Acronyms read as acronyms; every other word keeps its case.
   const text = name.replace(/[-_]+/g, ' ').trim().replace(/\s+/g, ' ')
+    .split(' ').map((word) => Object.hasOwn(TOOL_NAME_ACRONYMS, word.toLowerCase())
+      ? TOOL_NAME_ACRONYMS[word.toLowerCase()] : word).join(' ')
   return text.charAt(0).toUpperCase() + text.slice(1)
+}
+
+// The ribbon already names the surface, so its tools do not repeat it.
+export function dropSurfaceWord(text, word) {
+  if (typeof text !== 'string' || text.slice(0, word.length).toLowerCase() !== word.toLowerCase()) return text
+  const match = text.slice(word.length).match(/^\s+(\S[\s\S]*)$/)
+  return match ? match[1].charAt(0).toUpperCase() + match[1].slice(1) : text
 }
 
 export const SOLAR_REFUSAL_REASONS = Object.freeze({
@@ -408,7 +423,7 @@ function solarRailTools(rows, gate, { openName, onOpenForm }, onRun, solarTypedF
       return {
         id: row.name,
         label: row.name,
-        text: row.label || humanizeToolName(row.name) || row.name,
+        text: dropSurfaceWord(row.label || humanizeToolName(row.name) || row.name, 'Solar'),
         icon: toolIcon(row),
         size: toolPlacementSize(row),
         title: row.description || row.name,
@@ -464,6 +479,7 @@ export function profileRibbonTabs(profile, ctx = {}) {
     const gate = {
       ...catalogOptions,
       solarRail,
+      surfaceWord: 'Solar',
       writeEntitled: catalogOptions.writeEntitled ?? true,
       onRequestRun: onRun ? (tool) => onRun(tool) : undefined,
     }
@@ -590,6 +606,7 @@ export function catalogClusters(families, {
   onRequestRun,
   onOpenFamily = null,
   solarRail = null,
+  surfaceWord = null,
   running = false,
   previewing = false,
   writeLocked = false,
@@ -601,7 +618,7 @@ export function catalogClusters(families, {
   if (list.length === 0) {
     return [{ id: 'tools', label: 'Tools', kind: 'group', note: 'No tools for this surface yet.', tools: [] }]
   }
-  const gate = { onRequestRun, running, previewing, writeLocked, writeEntitled, writeLockNote, engineDirty, solarRail }
+  const gate = { onRequestRun, running, previewing, writeLocked, writeEntitled, writeLockNote, engineDirty, solarRail, surfaceWord }
   // Tools that name their own tab leave this cluster (they are built by
   // catalogTabClusters instead); a family whose tools ALL moved leaves no
   // empty panel behind.
@@ -631,6 +648,7 @@ export function catalogTabClusters(families, {
   onRequestRun,
   onOpenFamily = null,
   solarRail = null,
+  surfaceWord = null,
   running = false,
   previewing = false,
   writeLocked = false,
@@ -639,7 +657,7 @@ export function catalogTabClusters(families, {
   engineDirty = false,
 } = {}) {
   const list = Array.isArray(families) ? families : []
-  const gate = { onRequestRun, running, previewing, writeLocked, writeEntitled, writeLockNote, engineDirty, solarRail }
+  const gate = { onRequestRun, running, previewing, writeLocked, writeEntitled, writeLockNote, engineDirty, solarRail, surfaceWord }
   const byTab = {}
   for (const fam of list) {
     // One pass per family, bucketed by tab: no per-tab rescan of the catalog.
@@ -674,6 +692,7 @@ function familyCluster(fam, tools, gate, onOpenFamily) {
     onLabelClick: onOpenFamily ? () => onOpenFamily(fam) : null,
     labelTitle: onOpenFamily ? `Open ${fam.label} in the tool rail (${(fam.capabilities || []).length} tools)` : '',
     tools: tools.map((tool) => {
+      const base = tool.label || humanizeToolName(tool.name) || tool.name
       const result = solarView(tool)
       const isWrite = isWriteTool(tool)
       const locked = !!writeLocked && isWrite
@@ -708,7 +727,7 @@ function familyCluster(fam, tools, gate, onOpenFamily) {
       return {
         id: tool.name,
         label: tool.name,
-        text: tool.label || humanizeToolName(tool.name) || tool.name,
+        text: gate.solarRail || gate.surfaceWord ? dropSurfaceWord(base, gate.surfaceWord || 'Solar') : base,
         // The record's own answer, with today's literals as the default.
         icon: toolIcon(tool),
         size: toolPlacementSize(tool),

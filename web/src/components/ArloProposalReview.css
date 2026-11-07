@@ -5,9 +5,9 @@
 .arlo-review textarea { min-height: 70px; resize: vertical; }
 .arlo-geometry { margin: 1rem 0; }
 .arlo-geometry svg { display: block; width: 100%; max-height: 280px; }
-.arlo-geometry figcaption { font-size: .85em; }
+.arlo-geometry figcaption { font-size: var(--leaf-size-caption); }
 .arlo-actions { display: flex; gap: .6rem; flex-wrap: wrap; }
-.arlo-review pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8em; }
+.arlo-review pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--leaf-size-caption); }
 .arlo-review details { margin-top: 1rem; }
 .arlo-review summary { cursor: pointer; }
 .arlo-review th, .arlo-review td { overflow-wrap: anywhere; }

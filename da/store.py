@@ -27,10 +27,12 @@ da/client.py OSS helpers).
 from __future__ import annotations
 
 import contextlib
+from collections import OrderedDict
 import errno
 import hashlib
 import importlib.util
 import json
+import logging
 import os
 import re
 import sys
@@ -55,6 +57,146 @@ import requests  # noqa: E402  (only OSSBackend.exists references requests.HTTPE
 import tenant_id_validator as _tid  # noqa: E402  (the ONE shared reject-don't-collapse rule)
 
 _platform_db = None
+LOGGER = logging.getLogger(__name__)
+
+PHYSICAL_REF_KEYS = frozenset({"head_index", "state_artifact_id", "state_content_sha256"})
+PHYSICAL_MAX_INDEX = 4095
+PHYSICAL_INTAKE_KEY = "solar_physical"
+PHYSICAL_BUNDLE_KEY = "physical"
+PHYSICAL_INTAKE_MAX_BYTES = 64 * 1024 * 1024
+PHYSICAL_MEMO_MAX = 1024
+_physical_memo = OrderedDict()
+_physical_memo_lock = threading.Lock()
+
+
+class PhysicalReferenceInvalid(ValueError):
+    """A version's physical reference or its immutable record is corrupt."""
+
+
+class PhysicalReferenceScopeMismatch(ValueError):
+    """A bound version belongs to a different project."""
+
+
+def physical_versioned_enabled():
+    return os.environ.get("LEAF_SOLAR_PHYSICAL_VERSIONED", "0").strip().lower() in {
+        "1", "true", "yes", "on"}
+
+
+def check_physical_reference(value) -> dict:
+    if (type(value) is not dict or set(value) != PHYSICAL_REF_KEYS
+            or type(value["head_index"]) is not int
+            or not 0 <= value["head_index"] <= PHYSICAL_MAX_INDEX
+            or any(type(value[name]) is not str
+                   or re.fullmatch(r"[0-9a-f]{64}", value[name]) is None
+                   for name in ("state_artifact_id", "state_content_sha256"))):
+        raise PhysicalReferenceInvalid("invalid physical reference")
+    return dict(value)
+
+
+def physical_ref_note(ref) -> str:
+    raw = json.dumps(check_physical_reference(ref), sort_keys=True,
+                     separators=(",", ":")).encode("utf-8")
+    return "solar-physical:" + hashlib.sha256(raw).hexdigest()
+
+
+def _physical_memo_clear():
+    with _physical_memo_lock:
+        _physical_memo.clear()
+
+
+def read_version_physical(backend, tenant_id, drawing_id, version="head", *,
+                          project_id=None) -> tuple[int | None, dict | None]:
+    """Resolve a version with exactly one manifest read and at most one object read
+    (none on a memo hit). Non-bundle objects over 64 MiB are never read. Every
+    unreadable bound record fails closed; only manifest absence means no drawing.
+    """
+    tid, did = sanitize_id(tenant_id), sanitize_id(drawing_id)
+    try:
+        m = load_manifest(backend, tid, did)
+    except KeyError:
+        return None, None
+    except requests.HTTPError as exc:
+        if getattr(exc.response, "status_code", None) == 404:
+            return None, None
+        raise
+    if version != "head" and (type(version) is not int or version < 1):
+        raise ValueError("invalid version")
+    try:
+        if type(m["head"]) is not int or m["head"] < 1 or type(m["versions"]) is not list:
+            raise PhysicalReferenceInvalid("invalid physical reference")
+        v = m["head"] if version == "head" else version
+        row = next((e for e in m["versions"] if int(e["v"]) == v), None)
+        if row is not None and ("bytes" not in row or type(row["sha256"]) is not str
+                                or not (row["note"] is None or type(row["note"]) is str)):
+            raise PhysicalReferenceInvalid("invalid physical reference")
+    except (KeyError, TypeError, ValueError, OverflowError):
+        raise PhysicalReferenceInvalid("invalid physical reference") from None
+    if row is None:
+        if version == "head":
+            raise PhysicalReferenceInvalid("invalid physical reference")
+        raise ValueError("version not in manifest")
+    memo_key = (tid, did, v, row["sha256"], row["note"] or "")
+
+    def outcome(ref, recorded_project, *, remember=True):
+        if ref is not None and project_id is not None and project_id != recorded_project:
+            raise PhysicalReferenceScopeMismatch("physical reference project mismatch")
+        if remember:
+            with _physical_memo_lock:
+                _physical_memo[memo_key] = (dict(ref) if ref is not None else None, recorded_project)
+                while len(_physical_memo) > PHYSICAL_MEMO_MAX:
+                    _physical_memo.popitem(last=False)
+        return v, dict(ref) if ref is not None else None
+
+    with _physical_memo_lock:
+        cached = _physical_memo.get(memo_key)
+    if cached is not None:
+        return outcome(*cached, remember=False)
+    try:
+        note = row["note"] or ""
+        if note.startswith("solar-bundle:"):
+            digest = note[len("solar-bundle:"):]
+            if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                raise PhysicalReferenceInvalid("invalid physical reference")
+            raw = backend.get(_graph_bundle_key(tid, did, digest))
+            if len(raw) > 16 * 1024 * 1024 or _sha256(raw) != digest:
+                raise PhysicalReferenceInvalid("invalid physical reference")
+            if b'"physical"' not in raw:
+                return outcome(None, None)
+            bundle = json.loads(raw)
+            receipt = bundle["receipt"]
+            if (type(bundle) is not dict or type(receipt) is not dict
+                    or receipt["tenant_id"] != tid or receipt["drawing_id"] != did
+                    or type(receipt["project_id"]) is not str):
+                raise PhysicalReferenceInvalid("invalid physical reference")
+            if PHYSICAL_BUNDLE_KEY not in bundle:
+                return outcome(None, None)
+            return outcome(check_physical_reference(bundle[PHYSICAL_BUNDLE_KEY]), receipt["project_id"])
+        if type(row["bytes"]) is not int or row["bytes"] > PHYSICAL_INTAKE_MAX_BYTES:
+            return outcome(None, None)
+        raw = backend.get(drawing_version_key(tid, did, v))
+        if len(raw) != row["bytes"] or _sha256(raw) != row["sha256"]:
+            raise PhysicalReferenceInvalid("invalid physical reference")
+        if b'"solar_physical"' not in raw:
+            return outcome(None, None)
+        try:
+            payload = json.loads(raw)
+        except (ValueError, UnicodeError, RecursionError):
+            return outcome(None, None)
+        if (type(payload) is not dict or type(payload.get("solar_design_graph")) is not dict
+                or PHYSICAL_INTAKE_KEY not in payload):
+            return outcome(None, None)
+        recorded_project = payload["solar_design_graph"]["project"]["id"]
+        if type(recorded_project) is not str:
+            raise PhysicalReferenceInvalid("invalid physical reference")
+        return outcome(check_physical_reference(payload[PHYSICAL_INTAKE_KEY]), recorded_project)
+    except PhysicalReferenceScopeMismatch:
+        raise
+    except (KeyError, ValueError, TypeError, UnicodeError, RecursionError):
+        raise PhysicalReferenceInvalid("invalid physical reference") from None
+    except requests.HTTPError as exc:
+        if getattr(exc.response, "status_code", None) == 404:
+            raise PhysicalReferenceInvalid("invalid physical reference") from None
+        raise
 
 
 def authority_mode() -> str:
@@ -233,6 +375,31 @@ def drawing_prefix(tenant_id: str, drawing_id: str) -> str:
     particular file is for.
     """
     return f"tenants/{sanitize_id(tenant_id)}/drawings/{sanitize_id(drawing_id)}"
+
+
+def version_plan_key(tenant_id: str, drawing_id: str, version: int) -> str:
+    """The immutable mutation plan beside one version's payload."""
+    return drawing_version_key(tenant_id, drawing_id, version)[:-4] + ".plan.txt"
+
+
+# The PostgreSQL schema has no extensible version metadata column. Keep the
+# additive plan fields in its existing note slot, decoding back to the original
+# public note in _pg_manifest. Legacy manifests store the fields directly.
+_PLAN_NOTE_PREFIX = "leaf-version-plan-v1:"
+
+
+def _version_plan_fields(meta: dict, parent_version: int) -> dict:
+    return {"plan_sha256": meta["plan_sha256"],
+            "parent_version": int(parent_version)}
+
+
+def _decode_plan_note(entry: dict) -> dict:
+    note = entry.get("note")
+    if isinstance(note, str) and note.startswith(_PLAN_NOTE_PREFIX):
+        metadata = json.loads(note[len(_PLAN_NOTE_PREFIX):])
+        entry.update(note=metadata["note"], plan_sha256=metadata["plan_sha256"],
+                     parent_version=metadata["parent_version"])
+    return entry
 
 
 def manifest_key(tenant_id: str, drawing_id: str) -> str:
@@ -564,6 +731,10 @@ class StorageBackend:
     def exists(self, key: str) -> bool:
         raise NotImplementedError
 
+    def delete(self, key: str) -> None:
+        """Roll back an unpublished plan while the drawing commit is held."""
+        raise NotImplementedError
+
     def drawing_object_keys(self, tenant_id: str, drawing_id: str) -> set | None:
         """Every object key currently under ONE drawing, or None if this backend
         cannot enumerate them.
@@ -622,6 +793,9 @@ class InMemoryBackend(StorageBackend):
     def exists(self, key: str) -> bool:
         return key in self._blobs
 
+    def delete(self, key: str) -> None:
+        self._blobs.pop(key, None)
+
     def put_if_absent_or_verify(self, key: str, data: bytes) -> None:
         payload = bytes(data)
         winner = self._blobs.setdefault(key, payload)
@@ -648,6 +822,9 @@ class OSSBackend(StorageBackend):
 
     def get(self, key: str) -> bytes:
         return client.download_object(key)
+
+    def delete(self, key: str) -> None:
+        client.delete_object(key)
 
     def put(self, key: str, data: bytes) -> None:
         # client.upload_object takes a local path (signed-S3 3-step), so stage bytes.
@@ -833,6 +1010,12 @@ class FilesystemBackend(StorageBackend):
     def exists(self, key: str) -> bool:
         return os.path.exists(self._path(key))
 
+    def delete(self, key: str) -> None:
+        try:
+            os.remove(self._path(key))
+        except FileNotFoundError:
+            pass
+
     def drawing_object_keys(self, tenant_id: str, drawing_id: str) -> set | None:
         """Walk the drawing's prefix, separating ABSENCE from a FAILED SCAN.
 
@@ -930,7 +1113,7 @@ def _pg_manifest(tenant_id: str, drawing_id: str) -> dict:
         "drawing_id": drawing_id,
         "head": int(manifest_row["head"]),
         "latest": ready_latest,
-        "versions": [{
+        "versions": [_decode_plan_note({
             "v": int(row["version"]),
             "parent": (int(row["parent_version"])
                        if row["parent_version"] is not None else None),
@@ -941,7 +1124,7 @@ def _pg_manifest(tenant_id: str, drawing_id: str) -> dict:
             "tool": row["tool"],
             "note": row["note"],
             "source_ref": row["source_ref"],
-        } for row in rows],
+        }) for row in rows],
         "checkout": checkout,
     }
 
@@ -1293,6 +1476,8 @@ def _pg_put(
     parent_version: Optional[int], meta: dict, *,
     holder: Optional[str] = None, fence: Optional[int] = None,
     bundle: dict | None = None,
+    mutation_plan_bytes: bytes | None = None,
+    prepare_mutation_plan: Callable[[int], bool] | None = None,
 ) -> int:
     db = _db()
     digest = _sha256(data)
@@ -1396,6 +1581,24 @@ def _pg_put(
         _pg_mark_version_state(tenant_id, drawing_id, version, "orphaned")
         raise
 
+    plan_key = version_plan_key(tenant_id, drawing_id, version)
+    note = meta.get("note")
+    if (mutation_plan_bytes is not None and prepare_mutation_plan is not None
+            and not prepare_mutation_plan(version)):
+        mutation_plan_bytes = None
+    if mutation_plan_bytes is not None:
+        try:
+            backend.put_if_absent_or_verify(plan_key, mutation_plan_bytes)
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                backend.delete(plan_key)
+            LOGGER.warning("Plan write failed drawing=%s version=%s exception=%s",
+                           drawing_id, version, type(exc).__name__)
+        else:
+            note = _PLAN_NOTE_PREFIX + json.dumps({
+                "note": note, **_version_plan_fields(meta, parent_version),
+            }, separators=(",", ":"))
+
     def finalize(conn):
         updated = conn.execute(
             """
@@ -1430,18 +1633,29 @@ def _pg_put(
             return False
         conn.execute(
             """
-            UPDATE drawing_store_versions SET state = 'ready', ready_at = NOW()
+            UPDATE drawing_store_versions
+            SET state = 'ready', ready_at = NOW(), note = %(note)s
             WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
               AND version = %(version)s AND state = 'reserved'
             """,
             {
                 "tenant": tenant_id, "drawing": drawing_id,
-                "version": version,
+                "version": version, "note": note,
             },
         )
         return True
 
-    if not db.run_transaction(finalize, isolation="serializable"):
+    try:
+        finalized = db.run_transaction(finalize, isolation="serializable")
+    except Exception:
+        if mutation_plan_bytes is not None:
+            with contextlib.suppress(Exception):
+                backend.delete(plan_key)
+        raise
+    if not finalized:
+        if mutation_plan_bytes is not None:
+            with contextlib.suppress(Exception):
+                backend.delete(plan_key)
         if bundle is not None:
             # A concurrent retry may have finalized the same apply while this
             # reservation was uploading. It is a success only for exact bytes.
@@ -1769,6 +1983,8 @@ def read_graph_bundle(backend, tenant_id, drawing_id, version="head", *,
     if len(raw) > 16 * 1024 * 1024 or _sha256(raw) != digest:
         raise ValueError("graph bundle hash mismatch")
     bundle = json.loads(raw)
+    if PHYSICAL_BUNDLE_KEY in bundle:
+        check_physical_reference(bundle[PHYSICAL_BUNDLE_KEY])
     from solar_design_graph import validate_graph
     graph = validate_graph(bundle["graph"])
     receipt = bundle["receipt"]
@@ -1802,7 +2018,7 @@ def _prepare_graph_bundle(backend, tid, did, data, parent_version, request):
                 "source_version", "source_sha256", "source_rev"}
     if not isinstance(request, dict) or not required.issubset(request):
         raise ValueError("incomplete graph interchange result")
-    if set(request) - required - {"restore_version"}:
+    if set(request) - required - {"restore_version", "physical", "physical_only"}:
         raise ValueError("unknown graph interchange field")
     if (type(request["apply_id"]) is not str
             or re.fullmatch(r"[a-zA-Z0-9_-]{1,96}", request["apply_id"]) is None):
@@ -1829,11 +2045,21 @@ def _prepare_graph_bundle(backend, tid, did, data, parent_version, request):
     if (request["source_rev"] != expected_rev
             or (request["source_rev"] is not None and type(request["source_rev"]) is not int)):
         raise ValueError("stale graph source revision")
-    if "restore_version" in request:
+    physical = (check_physical_reference(request["physical"]) if "physical" in request
+                else previous.get("physical") if previous else None)
+    physical_only = request.get("physical_only") is True
+    if physical_only:
+        if ("physical" not in request or previous is None or "restore_version" in request
+                or any(request[name] != previous[name] for name in ("graph", "intake", "mapping"))
+                or graph["rev"] != previous["graph"]["rev"] or _sha256(data) != source["sha256"]):
+            raise ValueError("physical commit must copy the parent graph bundle")
+    elif "restore_version" in request:
         restored = read_graph_bundle(backend, tid, did, request["restore_version"],
                                      project_id=request["project_id"])
-        if any(request[name] != restored[name] for name in ("graph", "intake", "mapping")):
+        if (any(request[name] != restored[name] for name in ("graph", "intake", "mapping"))
+                or request.get("physical") != restored.get("physical")):
             raise ValueError("restore must copy the complete graph bundle")
+        physical = restored.get("physical")
     elif graph["rev"] != (expected_rev + 1 if expected_rev is not None else 0):
         raise ValueError("graph revision must advance once")
     bundle = {name: request[name] for name in ("graph", "intake", "mapping")}
@@ -1844,6 +2070,10 @@ def _prepare_graph_bundle(backend, tid, did, data, parent_version, request):
     receipt["hashes"]["dwg"] = _sha256(data)
     if "restore_version" in request:
         receipt["restore_version"] = request["restore_version"]
+    if physical_only:
+        receipt["physical_only"] = True
+    if physical is not None:
+        bundle["physical"] = physical
     bundle["receipt"] = receipt
     return bundle
 
@@ -1852,12 +2082,18 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
                 parent_version, meta: dict | None = None, *,
                 holder: str | None = None, fence: int | None = None,
                 require_parent_is_head: bool = False,
-                graph_bundle: dict | None = None) -> int:
+                graph_bundle: dict | None = None,
+                mutation_plan_bytes: bytes | None = None,
+                prepare_mutation_plan: Callable[[int], bool] | None = None) -> int:
     """Append a NEW immutable version (v = latest+1, parent = parent_version) and
     advance head + latest. This is the primitive the DWG write path calls.
 
     Returns the new integer version. A write from a non-latest head branches the
     DAG (parent linkage is enough; we keep the model simple).
+
+    `prepare_mutation_plan(version)` publishes prerequisites at the reserved
+    version before storing a plan or exposing its metadata. False omits the
+    optional plan while preserving the version commit.
 
     ABANDONED BLOBS (legacy authority). A publication that wrote its DWG and
     then failed to save the manifest leaves a blob beyond latest that no
@@ -1902,6 +2138,18 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
     did = sanitize_id(drawing_id)
     bundle = None
     data = _read(local_path)
+    if mutation_plan_bytes is not None:
+        if (not isinstance(mutation_plan_bytes, bytes)
+                or not mutation_plan_bytes.startswith(b"LEAF_MUTATION_PLAN|")
+                or len(mutation_plan_bytes) > 1_048_576):
+            raise ValueError("invalid mutation plan bytes")
+        if type(parent_version) is not int or parent_version < 1:
+            raise ValueError("mutation plan requires a positive parent version")
+        plan_digest = _sha256(mutation_plan_bytes)
+        if (meta or {}).get("plan_sha256", plan_digest) != plan_digest:
+            raise ValueError("mutation plan digest mismatch")
+        meta = dict(meta or {}, plan_sha256=plan_digest)
+        require_parent_is_head = True
     if graph_bundle is not None:
         if holder is None or type(fence) is not int or fence < 1:
             raise CheckoutDenied("graph commits require a holder and checkout fence")
@@ -1917,6 +2165,8 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
             backend, tid, did, data,
             int(parent_version) if parent_version is not None else None,
             meta or {}, holder=holder, fence=fence, bundle=bundle,
+            mutation_plan_bytes=mutation_plan_bytes,
+            prepare_mutation_plan=prepare_mutation_plan,
         )
     # Under the SAME guard as acquire/release, because this is a load, edit,
     # save of the same one manifest document and `save_manifest` writes the
@@ -2014,7 +2264,30 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
         })
         m["head"] = new_v
         m["latest"] = new_v
-        save_manifest(backend, tid, did, m)
+        if (mutation_plan_bytes is not None and prepare_mutation_plan is not None
+                and not prepare_mutation_plan(new_v)):
+            mutation_plan_bytes = None
+        if mutation_plan_bytes is None:
+            save_manifest(backend, tid, did, m)
+        else:
+            plan_key = version_plan_key(tid, did, new_v)
+            try:
+                plan_existed = backend.exists(plan_key)
+                backend.put_if_absent_or_verify(plan_key, mutation_plan_bytes)
+            except Exception as exc:
+                with contextlib.suppress(Exception):
+                    backend.delete(plan_key)
+                LOGGER.warning("Plan write failed drawing=%s version=%s exception=%s",
+                               did, new_v, type(exc).__name__)
+            else:
+                m["versions"][-1].update(_version_plan_fields(meta, parent_version))
+            try:
+                save_manifest(backend, tid, did, m)
+            except Exception:
+                if "plan_sha256" in m["versions"][-1] and not plan_existed:
+                    with contextlib.suppress(Exception):
+                        backend.delete(plan_key)
+                raise
         return new_v
 
 

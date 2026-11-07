@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import { parse } from '@babel/parser'
 import { act, cleanup, fireEvent, render, renderHook, screen } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
-import useJobController, { PENDING_RUN_KEY } from './controllers/useJobController.js'
+import useJobController, { PENDING_RUN_KEY, savePendingRun } from './controllers/useJobController.js'
 import SolarToolForm from './solar/SolarToolForm.jsx'
 import { humanizeError } from './errorHumanize.js'
 
@@ -64,9 +64,9 @@ it('shows a local sign-in refusal while signed-in job errors remain hidden', () 
 })
 
 it('keeps saved inputs through a refused resume and clears them only after arming', async () => {
-  const record = { v: 1, tool: tool.name, params: { spacing: 8 }, ts: Date.now() }
-  const map = new Map([[PENDING_RUN_KEY, JSON.stringify(record)]])
+  const map = new Map()
   const storage = { getItem: key => map.get(key) ?? null, setItem: (key, value) => map.set(key, value), removeItem: key => map.delete(key) }
+  const record = savePendingRun(tool.name, { spacing: 8 }, storage)
   const hook = renderHook(() => useJobController({ storage, services: { listJobs: async () => [] }, pollIntervalMs: 1000000000 }))
   const env = {
     mock: false, pendingRun: record, refuseProjectSolar: () => false,

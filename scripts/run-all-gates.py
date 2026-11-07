@@ -183,6 +183,7 @@ class Suite:
     database_skip_reasons: tuple[str, ...] = ()
     opt_in_env: str = ""           # SKIP unless this env flag is truthy (opt-in suite)
     timeout_s: int = 900           # per-attempt subprocess timeout
+    requires_linux: bool = False  # unavailable, never a passing skip, elsewhere
 
 
 @dataclass
@@ -196,11 +197,25 @@ class Result:
     counts: dict = field(default_factory=dict)
     test_report: dict = field(default_factory=dict)
     skipped_by_gate: str = ""
+    process_capture: dict = field(default_factory=dict)
+    attempts: int = 1             # physical launcher calls, including QUEUED
+    queued_seconds: float = 0.0   # waits only; excluded from seconds
+    queued_exhausted: bool = False
+    attempt_seconds: Optional[float] = None
+    queued_budget_used: float = 0.0  # preserve the budget across generic retries
 
 
 def _py_pytest(target: str) -> List[str]:
     return [sys.executable, "-m", "pytest", target, "-q", "--color=no",
             "-r", "s", "-p", "no:cacheprovider"]
+
+
+def _unprivileged_pytest(target: str) -> List[str]:
+    if not sys.platform.startswith("linux"):
+        return _py_pytest(target)
+    # Keep the literal pytest token for reporting_command's plugin injection.
+    return [sys.executable, "-I", str(SCRIPTS_DIR / "ci/run_unprivileged_pytest.py"),
+            *_py_pytest(target)[2:]]
 
 
 def _npm() -> str:
@@ -272,8 +287,81 @@ def normalize_spawn_command(
     return subprocess.list2cmdline(normalized), True, interpreter
 
 
+# B1 file-by-file ownership audit. All owners target the entire file, with no
+# -k/-m/--deselect or opt-in flag. Database cases retain the gate DATABASE_URL;
+# *_static cases need no migration, except db_primitives whose owner also gets
+# DATABASE_URL. SIP owners use platform/ as cwd; paths in their imports and DB
+# configuration are __file__-relative. The single_owner collection guard proves
+# identical nodes, rootdir and conftest chains under both registered setups.
+# Alias grep for EVERY exclusion below:
+#   rg -n 'OVERLAY_PG_URL|ANNOTATION_PG_URL' platform -g '*.py'
+# Only test_overlay_store_postgres.py, test_annotation_store_postgres.py and
+# bsp43_pg_probe.py match. None is imported by these files or their imported
+# platform modules (bsp43_pg_probe.py only by test_bsp43_checkout_custody_postgres.py);
+# all remain in platform. Thus the aliases absent from the owners are unread.
+PLATFORM_SINGLE_OWNER_FILES = {
+    "test_org_invitations.py": "platform-org-invitations",
+    "test_project_editor_publication.py": "platform-project-editor-publication",
+    "test_native_service_binding.py": "platform-native-service-binding",
+    "test_tenant_cost_store.py": "platform-tenant-cost-store",
+    "test_aps_cost_sync.py": "platform-aps-cost-sync",
+    "test_billing_statement.py": "platform-billing-statement",
+    "test_addon_settings_api.py": "platform-addon-settings-api",
+    "test_sip_r3b_tools.py": "platform-sip-r3b-tools",
+    "test_sip_r3b_chain.py": "platform-sip-r3b-chain",
+    "test_sip_r3a_graph.py": "platform-sip-r3a-graph",
+    "test_sip_r5_admission.py": "platform-sip-r5-admission",
+    "test_sip_r6_outputs.py": "platform-sip-r6-outputs",
+    "test_sip_w1c_exchange.py": "platform-sip-w1c-exchange",
+    "test_sip_r14_exchange.py": "platform-sip-r14-exchange",
+    "test_sip_r14_sizing.py": "platform-sip-r14-sizing",
+    "test_sip_r4_jobs.py": "platform-sip-r4-jobs",
+    "test_sip_r2_publication.py": "platform-sip-r2-publication",
+    "test_sip_r1_checkout.py": "platform-sip-r1-checkout",
+    "test_sip_r3c_multi_add.py": "platform-sip-r3c-multi-add",
+    "test_sip_r3e_groups.py": "platform-sip-r3e-groups",
+    "test_sip_r3d_conductors.py": "platform-sip-r3d-conductors",
+    "test_ios_ship_source_catalog.py": "platform-ios-ship-source-catalog",
+    "test_ios_ship_source_catalog_static.py": "platform-ios-ship-source-catalog-static",
+    "test_demo_session_deps.py": "platform-demo-session-deps",
+    "test_org_acceptance.py": "platform-org-acceptance",
+    "test_ledger_static.py": "platform-static",
+    "test_hashing_static.py": "platform-static",
+    "test_replay_static.py": "platform-static",
+    "test_evidence_freeze_static.py": "platform-static",
+    "test_db_primitives_static.py": "platform-static",
+    "test_db_readiness_static.py": "platform-static",
+    "test_demo_inventory_contract_static.py": "platform-static",
+    "test_db_schema_proof_static.py": "platform-static",
+    "test_overlay_store_static.py": "platform-static",
+    "test_ios_ship_schema_static.py": "platform-static",
+    "test_annotation_store_static.py": "platform-static",
+    "test_soft_delete_guard_static.py": "platform-static",
+    "test_identity_display_name_static.py": "platform-static",
+    "test_binding_grant_static.py": "platform-static",
+    "test_binding_grant_issuance_static.py": "platform-static",
+    "test_org_self_provision_gate_static.py": "platform-static",
+    "test_org_export_scope_static.py": "platform-static",
+    "test_campaign_plan_policy_static.py": "platform-static",
+    "test_web_page_template_static.py": "platform-static",
+    "test_drawing_import_contract_static.py": "platform-static",
+}
+
+# Keys are repository-relative files, never suite IDs or filename patterns.
+# An owner losing DATABASE_URL for a database case must retain the overlap here.
+JUSTIFIED_DUPLICATE_NODES: dict[str, str] = {}
+
+
 def build_suites() -> List[Suite]:
     repo_name = REPO.name  # "leaf-web-demo"
+    platform_argv = _py_pytest(f"{repo_name}/platform/tests")
+    # conftest's pytest_ignore_collect returns False and overrides --ignore.
+    # Explicit targets avoid that hook while discovering new files each build.
+    platform_argv[3:4] = [
+        f"{repo_name}/platform/tests/{path.name}"
+        for path in sorted((REPO / "platform" / "tests").glob("test_*.py"))
+        if path.name not in PLATFORM_SINGLE_OWNER_FILES
+    ]
     suites: List[Suite] = [
         # Executed-count floors: seventeen were re-baselined on 2026-07-25
         # because they sat BELOW their suite's real executed count. A low floor
@@ -387,7 +475,7 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_ground_string_decode_memo.py"), 30),
         # sf-w3-conversion-graph piece 2: the physical head's trackers as compact Ground frames; 87 cases.
         Suite("server-solar-ground-conversion", "server tests/test_solar_ground_conversion.py", "pytest",
-              SERVER, _py_pytest("tests/test_solar_ground_conversion.py"), 87),
+              SERVER, _py_pytest("tests/test_solar_ground_conversion.py"), 94),
         # sf-units-ground-conversion: converted Ground frame geometry is metres in both drawing units; 12 cases.
         Suite("server-solar-ground-conversion-units", "server tests/test_solar_ground_conversion_units.py", "pytest",
               SERVER, _py_pytest("tests/test_solar_ground_conversion_units.py"), 12),
@@ -987,7 +1075,7 @@ def build_suites() -> List[Suite]:
         # report whether the stored frame elevations and piles still match the current grid. Hermetic and
         # nothing skips: the floor is the exact count, 106.
         Suite("server-solar-frames-piles", "server tests/test_solar_frames_piles.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_frames_piles.py"), 106),
+              "pytest", SERVER, _py_pytest("tests/test_solar_frames_piles.py"), 111),
         # sf-w3-tracker-rows-domain: explicit manual tracker rows created once on the drawing's physical
         # head (server/solar_tracker_rows.py), converted end to end by the Ground conversion kernel.
         # Hermetic and nothing skips: the floor is the exact count, 38.
@@ -1110,6 +1198,12 @@ def build_suites() -> List[Suite]:
                 _py_pytest("tests/test_campaign_acquisition_service.py"), 22),
           Suite("server-campaign-transform", "server tests/test_campaign_transform_job.py", "pytest", SERVER,
                 _py_pytest("tests/test_campaign_transform_job.py") + ["tests/test_campaign_execution_policy.py"], 30),
+          Suite("server-native-preview-job", "server tests/test_native_preview_job.py", "pytest", SERVER,
+                _py_pytest("tests/test_native_preview_job.py"), 41, uses_database=True,
+                database_skip_reasons=(r"DATABASE_URL is required for PostgreSQL job tests",)),
+          Suite("server-native-preview-remote", "server tests/test_native_preview_remote.py", "pytest", SERVER,
+              _py_pytest("tests/test_native_preview_remote.py"), 137, uses_database=True,
+                database_skip_reasons=(r"DATABASE_URL is required for PostgreSQL job tests",)),
           Suite("server-campaign-transform-admission", "server tests/test_campaign_transform_admission.py", "pytest", SERVER,
                 _py_pytest("tests/test_campaign_transform_admission.py"), 12),
           Suite("server-campaign-web-release", "server tests/test_campaign_web_release.py", "pytest", SERVER,
@@ -1140,7 +1234,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_project_repository_source.py"), 8),
         Suite("server-dependency-health", "server tests/test_dependency_health.py", "pytest",
               SERVER, _py_pytest("tests/test_dependency_health.py") +
-              ["tests/test_solar_worker_coverage.py", "tests/test_leaf_cloud_grants_m2m.py"], 20),
+              ["tests/test_solar_worker_coverage.py", "tests/test_solar_worker_refusal_wire.py",
+               "tests/test_leaf_cloud_grants_m2m.py"], 20),
         Suite("server-auth", "server test_auth.py", "pytest", SERVER,
               _py_pytest("test_auth.py"), 14),
         Suite("server-auth-envelope", "server tests/test_auth_envelope.py", "pytest", SERVER,
@@ -1172,7 +1267,10 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_mcp_staging_probe.py"), 24),
         Suite("server-probe-staging-async-job",
               "server tests/test_probe_staging_async_job.py", "pytest", SERVER,
-              _py_pytest("tests/test_probe_staging_async_job.py"), 16),
+              _py_pytest("tests/test_probe_staging_async_job.py"), 24),
+        Suite("server-probe-conv-durable-restart",
+              "server tests/test_probe_conv_durable_restart.py", "pytest", SERVER,
+              _py_pytest("tests/test_probe_conv_durable_restart.py"), 16),
         Suite("server-mcp-tenant-registry",
               "server tests/test_tenant_mcp.py", "pytest", SERVER,
               _py_pytest("tests/test_tenant_mcp.py"), 33,
@@ -1284,6 +1382,10 @@ def build_suites() -> List[Suite]:
         # real git repos and toggles the R7 rollout env.
         Suite("server-platform-customize", "server tests/test_platform_customize.py",
               "pytest", SERVER, _py_pytest("tests/test_platform_customize.py"), 95),
+        Suite("server-platform-source-snapshot", "server tests/test_platform_source_snapshot.py",
+              "pytest", SERVER, _py_pytest("tests/test_platform_source_snapshot.py"), 19),
+        Suite("server-platform-source-ranges", "server commit-bound platform source ranges",
+              "pytest", SERVER, _py_pytest("tests/test_platform_source_ranges.py"), 18),
         Suite("server-agent-router", "server tests/test_agent_router.py", "pytest", SERVER,
               # Four section-18 tests are intentionally parked because the
               # section-2.1 lane replaced that surface. Pin the complete reason
@@ -1302,6 +1404,10 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_contract_freeze.py"), 14),
         Suite("server-lab-contract", "server tests/test_lab_contract.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_contract.py"), 117),
+        Suite("server-lab-honesty", "server tests/test_lab_honesty.py", "pytest", SERVER,
+              _py_pytest("tests/test_lab_honesty.py"), 28),
+        Suite("server-capture-lab-wave3", "server tests/test_capture_lab_wave3.py", "pytest", SERVER,
+              _py_pytest("tests/test_capture_lab_wave3.py"), 76),
         Suite("server-lab-ops", "server tests/test_lab_ops_conformance.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_ops_conformance.py"), 188),
         Suite("server-lab-evaluate", "server tests/test_lab_evaluate.py", "pytest", SERVER,
@@ -1341,7 +1447,7 @@ def build_suites() -> List[Suite]:
               database_skip_reasons=(r"platform DB unreachable: .+",)),
         # 48 collected: 24 SQLite cases and 24 PostgreSQL twins.
         Suite("server-lab-runs", "server tests/test_lab_runs.py", "pytest", SERVER,
-              _py_pytest("tests/test_lab_runs.py"), 24, uses_database=True,
+              _unprivileged_pytest("tests/test_lab_runs.py"), 24, uses_database=True,
               database_skip_reasons=(r"platform DB unreachable: .+",)),
         Suite("server-lab-stream", "server tests/test_lab_stream.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_stream.py"), 30, uses_database=True,
@@ -1520,6 +1626,8 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_agent_approvals.py"), 24),
         Suite("server-engine-changes", "server tests/test_engine_changes.py", "pytest",
               SERVER, _py_pytest("tests/test_engine_changes.py"), 23, db_gated=True),
+        Suite("server-lab-mirror-ops", "server tests/test_lab_mirror_ops.py", "pytest",
+              SERVER, _py_pytest("tests/test_lab_mirror_ops.py"), 23),
         Suite("server-approval-consume", "server tests/test_approval_consume.py", "pytest",
               SERVER, _py_pytest("tests/test_approval_consume.py"), 20),
         Suite("server-drawings-bootstrap", "server tests/test_drawings_bootstrap.py", "pytest",
@@ -1578,6 +1686,8 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_hardening_quota.py"), 11),
         Suite("server-quota-shape", "server tests/test_quota_shape.py", "pytest", SERVER,
               _py_pytest("tests/test_quota_shape.py"), 12),
+        Suite("server-session-event-cas", "server conditional session event append", "pytest", SERVER,
+              _py_pytest("tests/test_session_event_cas.py"), 60),
         Suite("server-session-store", "server tests/test_session_store.py", "pytest", SERVER,
               _py_pytest("tests/test_session_store.py"), 24),
         Suite("server-sessions-routes", "server tests/test_sessions_routes.py", "pytest",
@@ -1812,6 +1922,14 @@ def build_suites() -> List[Suite]:
         Suite("server-unit-economics-ops",
               "server tests/test_unit_economics_ops.py", "pytest", SERVER,
               _py_pytest("tests/test_unit_economics_ops.py"), 5),  # +1 org attribution
+        Suite("platform-org-invitations", "platform single-use org invitations", "pytest",
+              REPO_PARENT, _py_pytest(f"{repo_name}/platform/tests/test_org_invitations.py"), 30,
+              uses_database=True, database_skip_reasons=(
+                  r"PostgreSQL integration test requires DATABASE_URL",)),
+        Suite("platform-native-service-binding", "platform pinned native service binding", "pytest",
+              REPO_PARENT, _py_pytest(f"{repo_name}/platform/tests/test_native_service_binding.py"), 8,
+              uses_database=True, database_skip_reasons=(
+                  r"PostgreSQL integration test requires DATABASE_URL",)),
         # Explicit file target keeps 19 pure tests running without DATABASE_URL.
         Suite("platform-tenant-cost-store", "platform tenant cost ledger and add-on settings", "pytest",
               REPO_PARENT, _py_pytest(f"{repo_name}/platform/tests/test_tenant_cost_store.py"), 19,
@@ -2020,7 +2138,9 @@ def build_suites() -> List[Suite]:
         Suite("server-sip-r3a-graph", "server canonical Solar graph adapter", "pytest", SERVER,
               _py_pytest("tests/test_sip_r3a_graph.py"), 24),
         Suite("server-sip-r3b-tools", "server canonical Solar tool chain", "pytest", SERVER,
-      _py_pytest("tests/test_sip_r3b_tools.py"), 24),
+              _py_pytest("tests/test_sip_r3b_tools.py"), 26,
+              uses_database=True, db_gated=True, database_skip_reasons=(
+                  r"PostgreSQL integration test requires DATABASE_URL",)),
         Suite("platform-sip-r3b-tools", "platform canonical Solar tool publication", "pytest",
               REPO / "platform", _py_pytest("tests/test_sip_r3b_tools.py"), 7,
               uses_database=True, db_gated=True, database_skip_reasons=(
@@ -2115,6 +2235,13 @@ def build_suites() -> List[Suite]:
               REPO / "platform", _py_pytest("tests/test_sip_r2_publication.py"), 17,
         uses_database=True, db_gated=True, database_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
+        Suite("platform-project-editor-publication", "platform project editor canonical publication", "pytest",
+              REPO / "platform", _py_pytest("tests/test_project_editor_publication.py"), 14,
+              uses_database=True),
+        Suite("server-project-drawing-editor", "server project editor custody and disposable PG authority", "pytest",
+              SERVER, _py_pytest("tests/test_project_drawing_editor.py"), 25, uses_database=True),
+        Suite("server-project-editor-upload-source", "server original DXF custody before ready", "pytest",
+              SERVER, _py_pytest("tests/test_project_editor_upload_source.py"), 3, uses_database=True),
         Suite("server-sip-r2-publication", "server canonical publication readback", "pytest",
               SERVER, _py_pytest("tests/test_sip_r2_publication.py"), 10),
         Suite("server-sip-r1-context", "server canonical project context", "pytest",
@@ -2312,6 +2439,8 @@ def build_suites() -> List[Suite]:
         # status). Was never registered, so none of it ran in CI.
         Suite("server-customization-async-stage", "server customization async stage", "pytest",
               SERVER, _py_pytest("tests/test_customization_async_stage.py"), 82),
+        Suite("server-author-stage-status", "server author stage status", "pytest",
+              SERVER, _py_pytest("tests/test_author_stage_status.py"), 41),
         Suite("server-customization-stage-recovery",
               "server customization stage recovery", "pytest",
               SERVER, _py_pytest("tests/test_customization_stage_recovery.py"), 27),
@@ -2455,7 +2584,10 @@ def build_suites() -> List[Suite]:
               # 2026-10-11: sip-r3d adds six conductor PostgreSQL rows (322 -> 328).
               # 2026-10-13: R3e-2 adds six to the measured 1162-row PostgreSQL baseline.
               # 2026-10-13: R14-E adds ten sizing rows; measured 1178 passing on PostgreSQL.
-              _py_pytest(f"{repo_name}/platform/tests"), 1205, db_gated=True,
+              platform_argv, 558, db_gated=True,
+              # Transfer the old 1205 floor's 647 dedicated/static cases to
+              # their owners (648 summed floors minus the triple-owned row).
+              # This is a transferred lower bound, not a new measured baseline.
               # The overlay and annotation PostgreSQL proofs skipif-gate on
               # their own variables, so they get the gate DSN under those too.
               db_env_aliases=("OVERLAY_PG_URL", "ANNOTATION_PG_URL")),
@@ -2474,7 +2606,8 @@ def build_suites() -> List[Suite]:
         # Dependency-free *_static proofs must run even with NO Postgres: the
         # conftest's pytest_ignore_collect exempts them, so this un-gated suite
         # keeps them in the gate on a clean checkout.
-        # This list must name EVERY platform/tests/*_static.py. The db_primitives
+        # This list must name EVERY platform/tests/*_static.py except the source
+        # catalog row with its dedicated owner above. The db_primitives
         # and db_readiness files were missing, and because the `platform` suite
         # above is db_gated they ran NOWHERE on a clean checkout -- 26 tests
         # outside the gate entirely, 24 of them dependency-free and 2 DB-gated
@@ -2523,7 +2656,8 @@ def build_suites() -> List[Suite]:
                  f"{repo_name}/platform/tests/test_db_schema_proof_static.py",
                  f"{repo_name}/platform/tests/test_overlay_store_static.py",
                  f"{repo_name}/platform/tests/test_ios_ship_schema_static.py",
-                 f"{repo_name}/platform/tests/test_ios_ship_source_catalog_static.py",
+                 # Owned by platform-ios-ship-source-catalog-static; same
+                 # conftest chain, no DB/alias reads (see B1 audit above).
                  f"{repo_name}/platform/tests/test_annotation_store_static.py",
                  # The soft-delete guard (migration 0050). Registered in the
                  # SAME change that adds the file, because
@@ -2536,8 +2670,11 @@ def build_suites() -> List[Suite]:
                  f"{repo_name}/platform/tests/test_binding_grant_static.py",
                  f"{repo_name}/platform/tests/test_binding_grant_issuance_static.py",
                  f"{repo_name}/platform/tests/test_org_self_provision_gate_static.py",  # SP2 invite-only org gate
-                 f"{repo_name}/platform/tests/test_org_export_scope_static.py"  # P-153 export ownership scope
-                 ], 239,  # +1 demo inventory/migration contract regression
+                 f"{repo_name}/platform/tests/test_org_export_scope_static.py",  # P-153 export ownership scope
+                 f"{repo_name}/platform/tests/test_campaign_plan_policy_static.py",
+                 f"{repo_name}/platform/tests/test_web_page_template_static.py",
+                 f"{repo_name}/platform/tests/test_drawing_import_contract_static.py",  # UI import source kind contract
+                 ], 267,  # The source-catalog static row has its own owner.
               uses_database=True, database_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
         # The committed replay fixture is dependency-free and catches hash or
@@ -2559,29 +2696,32 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("test_mq_review_codebuild.py"), 40),
         Suite("scripts-native-release-producer", "scripts test_native_release_producer.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_native_release_producer.py"), 32),
+        Suite("scripts-native-preview-worker", "scripts tests/test_native_preview_worker.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("tests/test_native_preview_worker.py"), 184),
+        Suite("scripts-native-preview-service", "scripts tests/test_native_preview_service.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("tests/test_native_preview_service.py"), 48),
+        Suite("scripts-native-preview-session", "scripts tests/test_native_preview_session.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("tests/test_native_preview_session.py"), 61),
+        Suite("scripts-native-preview-host", "scripts tests/test_native_preview_host.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("tests/test_native_preview_host.py"), 43),
+        Suite("scripts-native-preview-store", "scripts tests/test_native_preview_store.py", "pytest",
+                SCRIPTS_DIR, _py_pytest("tests/test_native_preview_store.py"), 157),
+        Suite("scripts-native-preview-entry", "scripts tests/test_native_preview_entry.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("tests/test_native_preview_entry.py"), 18),
         # Proves labelled sizing replay isolation; opens loopback sockets and short-lived child Pythons only.
         Suite("scripts-proof-string-sizer", "scripts test_proof_string_sizer.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_proof_string_sizer.py"), 70),
         Suite("scripts-seed-proof-drawings", "scripts test_seed_proof_drawings.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_seed_proof_drawings.py"), 5),
-        # 34 -> 47 measured 2026-10-13: PP-2d libpq environment isolation and real startup packets.
+        # 34 -> 47 measured 2026-10-13: PP-2d libpq environment isolation and real startup packets. A1/C1: 85 collected, +28 fake native rows and +7 C1 rows. A1d +2. A1e +2
         Suite("scripts-proof-project-pg", "scripts test_proof_project_pg.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_proof_project_pg.py"), 49),
-        # Records A/B/C: measured 32 boundary/runtime + 15 authority + 22 execution rows.
+              SCRIPTS_DIR, _py_pytest("test_proof_project_pg.py"), 89),
+        # Records A/A2/B/C/D/E/A1/C1/A1c/A1e and PP-3B: measured 32 boundary/runtime + 34 authority + 22 execution + 134 lifetime + 45 receipt + 5 C1 + 1 A1c + 2 A1e + 21 browser + 6 A1b rows + 3 source rows + 3 native selection rows + 3 run-root store rows + 1 heartbeat runtime row + 1 reservation rollback row + 4 teardown and receipt rows + 18 R14-F1 replay custody rows.
         Suite("scripts-proof-project", "scripts test_proof_project.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_proof_project.py"), 69),
-        # 26 -> 30 on 2026-09-22: two changes landed together. The groups family took its
-        # contract v2 shape (neutral names, handle-value membership order, refused
-        # non-handle member ids), and the adapter's input scan got its own bounds sized for
-        # a real drawing (a drawing-sized graph now produces evidence, an oversized evidence
-        # document is still refused). All four tests are hermetic and unconditional.
-        # 30 -> 41 on 2026-09-22: the zones family joined the adapter (the zone's own
-        # name compared as given, membership by handle value, and rule Z7's equipment
-        # and sizing records null and named as fallbacks with the raw values kept in
-        # provenance.zone_fields), as 3 tests plus one parametrization over 8 literal
-        # malformed zones. Every case is hermetic and unconditional.
-        Suite("scripts-solar-receipt", "scripts test_solar_receipt.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_solar_receipt.py"), 41),
+              SCRIPTS_DIR, _py_pytest("test_proof_project.py"), 376),
+        # R14-F1: 29 injected-effect replay custody rows.
+        Suite("scripts-proof-project-sizing", "scripts test_proof_project_sizing.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_proof_project_sizing.py"), 62),
         Suite("scripts-solar-w1-studio-solve", "scripts test_solar_w1_studio_solve.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_solve.py"), 12),
         # S11 unit sync (2026-09-22): the declaration-only builtin, its producer on a
@@ -2701,147 +2841,6 @@ def build_suites() -> List[Suite]:
         Suite("scripts-solar-w1-studio-string-multi-add",
               "scripts test_solar_w1_studio_string_multi_add.py", "pytest", SCRIPTS_DIR,
               _py_pytest("test_solar_w1_studio_string_multi_add.py"), 17),
-        # S26 (2026-09-22): the shared probe-file normalizer, contract v5 rules E1-E5.
-        # Every DEMO probe file becomes `exports` evidence the frozen comparator
-        # accepts, from either side, through the same code. Covers the evidence
-        # shape, rule E4's identity mapping, rule E3's file order across the
-        # conduit-fill file's four batteries, rule E1 (the fixture is the INPUTS, so
-        # two files with equal scenarios and different results share it), the pass
-        # verdict for Studio against the licensed capture, one altered result
-        # producing exactly one row's diffs, an unobserved reopen refused, and the
-        # malformed documents and arguments that are refused rather than answered.
-        # Studio's own probe files are generated in tmp_path by
-        # scripts/solar_nec_probes.py, so the suite is hermetic and never skips:
-        # without the licensed capture the comparison runs against Studio's own file
-        # read back from a second path. S28 (2026-09-22) added rule E5's CSV
-        # projection and the four calculation capabilities, whose licensed capture IS
-        # committed, so their half compares Studio against the artifact: the `#`
-        # preamble skipped, values kept as TEXT with the quantity parsed back out of
-        # them, CRLF and LF reading identically (a committed capture is line-ending
-        # translated on checkout, so a verdict must not depend on a git setting), the
-        # headerless, blank-named, repeated-name and ragged files refused, and the
-        # declared non-numeric quantity applying only where a section declares it.
-        # The floor was 118 after S28 (26 test functions, 15 parametrized over the
-        # six NEC demos, the nine committed S28 files, or literal malformed inputs).
-        # S31 (2026-09-22) added rule E5's XLSX projection through
-        # server/solar_xlsx.py: one row record per non-empty sheet row, keyed
-        # `<sheet>:<row index>`, cells as a list, `format` naming the sheet list, and
-        # the three new probe types (harness-cable-plan, harness-bom-export,
-        # tracker-bom-xlsx-export). Its half compares Studio against the four new
-        # committed licensed files, and adds the comparator pass on each of them.
-        # Floor MEASURED at 151 on the first green run after S31 (2026-09-22, 2.6 s);
-        # it was 118 after S28 and 61 before that. S32 (2026-09-23) adds the six
-        # terrain and irradiance CSVs (four carrying Encoding.UTF8's byte order
-        # mark, which the CSV reader now drops as encoding) with a comparator pass
-        # on each against its committed licensed capture: 28 more cases, so the
-        # floor is COUNTED at 179 until the first green run measures it. S33
-        # (2026-09-23) adds the XML path (one row per KML or LandXML document,
-        # keyed by file name, its canonical lines verbatim, root element checked,
-        # hostile XML refused) and the five new probe types, with a comparator pass
-        # on each of the eighteen committed licensed files: floor MEASURED at 258
-        # on the first green run (2026-09-23, 5.0 s).
-        Suite("scripts-solar-probe-evidence", "scripts test_solar_probe_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_probe_evidence.py"), 258),
-        # S22 (2026-09-22): contract rule G9 on the Studio evidence adapter, the first
-        # test file it has. A set-valued list (unassigned_panels, duplicate_panels) is
-        # emitted in ascending neutral-id order, so the same set recorded in two orders
-        # compares equal; a string's ordered_membership is the capability's output and
-        # keeps its order, which the comparator still reports as a diff when reversed.
-        # Every graph is authored in the file (no capture, no fixture, no network), so
-        # the floor is the exact count on every runner: 7 tests + one parametrization
-        # over 4 literal malformed sets = 11.
-        Suite("scripts-solar-studio-evidence", "scripts test_solar_studio_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_studio_evidence.py"), 11),
-        # S37 (2026-09-23): Studio's ground evidence per G14 step from a G11 intake
-        # (contract v6, G10 to G16), each step computed from Studio's own prior state
-        # (G13). Small intakes authored in the file cover every row kind, id and vertex
-        # ordering, pile-set grouping, the terrain-mesh row, chaining, the frozen
-        # comparator passing every document against itself, the comparator's document
-        # bounds, and malformed-intake refusals. COUNTED: 18 tests + 10 more
-        # parametrizations of the malformed-intake case = 29 collected; the one CLI case
-        # that commits its intake needs a git executable, so the floor is the 28 that
-        # never skip and that one skip reason is allowed.
-        Suite("scripts-solar-ground-studio-evidence", "scripts test_solar_ground_studio_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_studio_evidence.py"), 37,
-              allowed_skip_reasons=(r"needs a git executable",)),
-        # S40 (2026-09-23): paired evidence shards (contract G19) for a step whose two
-        # sides together exceed the comparator's 100,000-node document bound (terrain t1,
-        # piling t4). Every document is authored in the file (no capture, no git, no
-        # network), so the floor is the exact count on every runner: 15 plain tests plus
-        # 5 tampered shards, 5 malformed inputs and the 2 real step shapes = 27.
-        Suite("scripts-solar-evidence-shard", "scripts test_solar_evidence_shard.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_evidence_shard.py"), 27),
-        Suite("scripts-solar-ground-analysis-evidence", "scripts test_solar_ground_analysis_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_analysis_evidence.py"), 25),
-        Suite("scripts-solar-ground-layout-evidence", "scripts test_solar_ground_layout_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_layout_evidence.py"), 17),
-        Suite("scripts-solar-ground-scene-evidence", "scripts test_solar_ground_scene_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_scene_evidence.py"), 20),
-        # W5 batch 2 evidence (2026-09-24, contract G36): the producers over synthetic intakes authored in
-        # the file or committed intakes, so each floor is the exact collected count: 12 (including two k2 cases), 5 and 3.
-        Suite("scripts-solar-batch2-simple-evidence", "scripts test_solar_batch2_simple_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_batch2_simple_evidence.py"), 12),
-        # ImportSolarEdgePDF evidence (2026-09-24): the producer over the committed PDF and drawing intake: 8.
-        Suite("scripts-solar-solaredge-import-evidence", "scripts test_solar_solaredge_import_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_solaredge_import_evidence.py"), 8),
-        Suite("scripts-solar-guardrails-evidence", "scripts test_solar_guardrails_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_guardrails_evidence.py"), 5),
-        Suite("scripts-solar-pile-block-mapping-evidence", "scripts test_solar_pile_block_mapping_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_pile_block_mapping_evidence.py"), 3),
-        Suite("scripts-solar-ground-buildout-evidence", "scripts test_solar_ground_buildout_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_buildout_evidence.py"), 18),
-        Suite("scripts-solar-ground-shade-evidence", "scripts test_solar_ground_shade_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_shade_evidence.py"), 17),
-        Suite("scripts-solar-ground-reports-evidence", "scripts test_solar_ground_reports_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_reports_evidence.py"), 17),
-        # G27 rooftop chain evidence (c1 to c7, c9, c10, c11): a synthetic intake authored in the file
-        # plus the committed rooftop intake (no capture, no git: the CLI cases pin the revision), so
-        # the floor is the exact count on every runner. COUNTED: 30 tests + 13 more
-        # parametrizations = 43.
-        Suite("scripts-solar-rooftop-chain-evidence", "scripts test_solar_rooftop_chain_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_rooftop_chain_evidence.py"), 43),
-        # G33 PVcase-solve evidence (v1): a synthetic intake authored in the file plus the committed
-        # intake (no git: every case pins the revision), so the floor is the exact count on every
-        # runner. MEASURED: 13 tests + 6 more parametrizations = 19 passed.
-        Suite("scripts-solar-pvcase-solve-evidence", "scripts test_solar_pvcase_solve_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_pvcase_solve_evidence.py"), 19),
-        # G35 inverter-family evidence producers (synthetic states in each file). MEASURED.
-        Suite("scripts-solar-inverter-devices-evidence", "scripts test_solar_inverter_devices_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_inverter_devices_evidence.py"), 9),
-        Suite("scripts-solar-inverter-strings-evidence", "scripts test_solar_inverter_strings_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_inverter_strings_evidence.py"), 7),
-        Suite("scripts-solar-inverter-outputs-evidence", "scripts test_solar_inverter_outputs_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_inverter_outputs_evidence.py"), 6),
-        Suite("scripts-solar-inverter-cabling-evidence", "scripts test_solar_inverter_cabling_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_inverter_cabling_evidence.py"), 3),
-        Suite("scripts-solar-ground-dsteps-evidence", "scripts test_solar_ground_dsteps_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_dsteps_evidence.py"), 12),
-        # G30 dialog-batch evidence (e1, e4, e6): the committed terrain intake and pile-template
-        # BEFORE store plus hand-made states (no capture, no git: the CLI cases pin the revision),
-        # so the floor is the exact count on every runner. COUNTED: 17 tests, no parametrizations.
-        Suite("scripts-solar-ground-dialogs-evidence", "scripts test_solar_ground_dialogs_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_dialogs_evidence.py"), 17),
-        # G32 design-profile evidence (f1 to f5 from an empty profile store): the committed generate
-        # intake and settings snapshot only (no capture, no git beyond the untracked-intake refusal),
-        # so the floor is the exact count on every runner. COUNTED: 12 tests, no parametrizations.
-        Suite("scripts-solar-design-profiles-evidence", "scripts test_solar_design_profiles_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_design_profiles_evidence.py"), 12),
-        # G34/G34a/G34b Rooftop flow evidence (flow-step and flow-event rows in the G34b envelope):
-        # the committed drawings of the three fixture states plus hand-made intakes (no capture; the
-        # CLI cases pin the revision or run outside any git work tree), so the floor is the exact
-        # count on every runner. COUNTED: 23 tests + 20 more parametrizations = 43.
-        Suite("scripts-solar-workflow-flow-evidence", "scripts test_solar_workflow_flow_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_workflow_flow_evidence.py"), 43),
-        # The parity oracle itself: the ledger rules, the receipt rules, the fail-closed
-        # inputs, and (S29, 2026-09-22) the declared divergence a known plugin defect
-        # gets, which is the ONLY way a failing comparator settles a capability: the
-        # exact declared diff set, a committed finding under docs/parity/divergences/,
-        # and every receipt rule still passing. Hermetic (each case builds its ledger,
-        # receipts and finding under tmp_path; the one repo file it reads is the shipped
-        # ledger, read never written), so the floor is the exact count on every runner:
-        # 66 test functions, one parametrized over 2 comparator names = 67.
-        Suite("scripts-solar-parity-status", "scripts test_solar_parity_status.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_parity_status.py"), 69),
         Suite("scripts-solar-parity-reachability", "scripts test_solar_parity_reachability.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_parity_reachability.py"), 43),
         # Registered per the #29 fix-then-register rule (shipped without a
@@ -2887,6 +2886,12 @@ def build_suites() -> List[Suite]:
         # parametrize, so 14 = its 14 test functions on every runner.
         Suite("auth0-action-drift-check", "scripts test_check_auth0_action_drift.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_check_auth0_action_drift.py"), 14),
+        # SPA client drift (P-160): 12 fake-transport tests, no network.
+        Suite("auth0-spa-client-drift-check", "scripts test_check_auth0_spa_client_drift.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_check_auth0_spa_client_drift.py"), 12),
+        # Staging audience (P-178): 14 offline plan/apply tests, no network.
+        Suite("auth0-staging-audience-check", "scripts test_auth0_staging_audience.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_auth0_staging_audience.py"), 14),
         # 33 cases: 19 original functions (27 parametrized cases), plus three
         # dry-run plans, two digest round trips and the CI deploy contract. No network.
         Suite("auth0-action-deploy", "scripts test_deploy_auth0_actions.py",
@@ -3202,7 +3207,25 @@ def build_suites() -> List[Suite]:
               # 2026-10-19: su-a4a adds one production proof registration row (238 -> 239).
               # W1C-3 adds the commit suite registration contract.
               # SEL-303b adds the mirror/stage-policy registration contract.
-              ["test_studio_walk_regression_gate.py"], 244),
+              # PP-3A2 F: 25 dispatch rows; measured 266 + 6 = 272.
+              ["test_studio_walk_regression_gate.py"], 272),
+        # Dormant process-capture core: pure Python fixtures, no strace or network.
+        Suite("ci-process-capture-core", "scripts ci process capture core", "pytest",
+              SCRIPTS_DIR, _py_pytest("ci/tests/test_process_capture_core.py"), 14),
+        # cwd is the repo root; -P keeps it off sys.path so the repo's platform/
+        # package cannot shadow the stdlib (the same reason as the executor suite).
+        Suite("ci-process-capture-runner", "process capture runner", "pytest",
+              REPO, [sys.executable, "-P", "-m", "pytest", "tests/test_process_capture_runner.py", "-q",
+                     "--color=no", "-r", "s", "-p", "no:cacheprovider"], None),
+        # Capture packaging (slice P3): the multiple-certificate manifest runs everywhere; the
+        # strace smoke tests run only where strace exists (dedicated capture builds install it).
+        Suite("ci-full-run-manifest-certificates", "process capture manifest certificates", "pytest",
+              REPO, [sys.executable, "-P", "-m", "pytest", "tests/test_full_run_manifest_certificates.py", "-q",
+                     "--color=no", "-r", "s", "-p", "no:cacheprovider"], None),
+        Suite("ci-trace-smoke-linux", "process capture strace smoke", "pytest",
+              REPO, [sys.executable, "-P", "-m", "pytest", "tests/test_trace_smoke_linux.py", "-q",
+                     "--color=no", "-r", "s", "-p", "no:cacheprovider"], None,
+              allowed_skip_reasons=(r"strace or Linux unavailable",)),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
@@ -3214,7 +3237,7 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("test_migration_expand_contract_gate.py"), 12),
         # --- harness (cwd=harness) --- #
         Suite("harness-vitest", "harness npm test (vitest)", "vitest", HARNESS,
-              [_npm(), "test"], 317,
+              [_npm(), "test", "--", "--exclude", "test/projectPhotoAssignmentCaller.test.ts"], 317,
               allowed_vitest_skips=(
                   # Actual producer: project-lifecycle-postgres.yml,
                   # Run canonical project source PostgreSQL tests. These
@@ -3228,6 +3251,8 @@ def build_suites() -> List[Suite]:
                   # DATABASE_URL / PG_SESSION_STORE_TEST_URL), one test.
                   ("test/conversation.test.ts", 1),
               )),
+        Suite("harness-project-photo-assignment-caller", "harness trusted photo assignment caller", "vitest", HARNESS,
+              [_npm(), "test", "--", "test/projectPhotoAssignmentCaller.test.ts"], 104),
         # --- web unit (cwd=web) --- #
         # The web workspace had NO unit runner until the T1 overlay card; its
         # only specs were Playwright e2e, which this gate runs separately. A
@@ -3330,8 +3355,17 @@ def build_suites() -> List[Suite]:
         # The historical 752-test floor above covered the whole suite. Vitest
         # shards files, not test counts; require nonempty execution until CI
         # supplies measured per-shard floors (752 / 3 is not a safe floor).
+        # Includes src/solar/solarProjectMaterializationClient.test.js through
+        # the normal src/**/*.test.{js,jsx} discovery, including initial publication.
+        # These existing source-only contracts need installed Vitest dependencies,
+        # not browser or build output. Run them once in the cheap phase.
+        Suite("web-stage-source-contracts", "web stage and surface source contracts", "vitest", WEB,
+              [_npm(), "run", "test:unit", "--", "src/site/surfaceGates.test.js",
+               "src/site/toolCastStageBar.test.js", "--maxWorkers=1"], 1),
         *(Suite(f"web-vitest-{shard}", f"web npm run test:unit (vitest {shard}/3)", "vitest", WEB,
-              [_npm(), "run", "test:unit", "--", f"--shard={shard}/3", "--maxWorkers=2"], 1,
+              [_npm(), "run", "test:unit", "--", f"--shard={shard}/3",
+               "--exclude=src/site/surfaceGates.test.js",
+               "--exclude=src/site/toolCastStageBar.test.js", "--maxWorkers=2"], 1,
               allowed_vitest_skips=(
                   # Day-3 CAD engine real-build round trip: needs a compiled
                   # wasm artifact, which needs a Rust toolchain, so it exists
@@ -3345,15 +3379,11 @@ def build_suites() -> List[Suite]:
                   # cases, the three W4d Draw-group cases, and the lossless
                   # u64-handle collision regression.
                   ("src/cadedit/cadEditSurface.test.jsx", 16),
-                  # W4g-6: the worker's `batch` op on the REAL compiled engine
-                  # (a three-step fillet in one reply, an atomic refusal, the
-                  # bounds, a refused create keeping the document), gated on the
-                  # same machine-local pkg-node build. Four describes (the W4g-6 batch,
-                  # W4g-7b-01c blocks, W4g-7c-2c Create Block and MLEADER
-                  # rows: eight tests) require the rebuilt engine;
-                  # numbers on PRs #1036, #1107 and #1140; W4g-7c-2d adds the
-                  # handle-retention row (nine tests).
+                  # The optional real-engine batch suite has 12 baseline cases.
+                  # BSP2 adds the layer/save/reopen/undo case, verified on the
+                  # compiled engine. Keep both exact counts while older PRs finish.
                   ("src/cad/engineBatchAtomic.test.js", 12),
+                  ("src/cad/engineBatchAtomic.test.js", 13),
               )) for shard in range(1, 4)),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
@@ -3411,6 +3441,8 @@ def build_suites() -> List[Suite]:
         Suite("web-proof-receipt-contract",
               "web proof receipt contract", "script", WEB,
               [_npm(), "run", "check:proof-receipt"], None),
+        # The proof's adapter contract had no automated consumer.
+        Suite("web-author-quota-live-proof", "web author quota live proof contract", "script", WEB, [_npm(), "run", "check:author-quota-live-proof"], None),
         # The seeded workbench id is the deployed acceptance driver's contract
         # with the surface: it seeds a server-canonical id and requires that
         # exact drawing to open.
@@ -3427,6 +3459,10 @@ def build_suites() -> List[Suite]:
         # could gate anything.
         Suite("web-app-wiring", "App.jsx structural wiring pins", "script", WEB,
               [_npm(), "run", "check:app-wiring"], None),
+        # PP-3B: explicit discovery; the script itself requires all 21 rows to pass.
+        Suite("web-project-proof-contract", "web managed project proof contract", "script", WEB,
+              ["node", "--input-type=module", "-e",
+               "import { startVitest } from 'vitest/node'; const ctx = await startVitest('test', ['e2e/project/projectProof.test.mjs'], { config: false, run: true, environment: 'node', include: ['e2e/project/projectProof.test.mjs'], exclude: ['node_modules/**'], reporters: ['verbose'] }); if (!ctx) process.exitCode = 1; else { const rows = ctx.state.getFiles().flatMap(file => file.tasks); if (rows.length !== 28 || rows.some(row => row.type !== 'test' || row.result?.state !== 'pass')) process.exitCode = 1; await ctx.close(); }"], None),
         Suite("web-walk-unit", "Studio walk unit tests", "script", WEB,
               [_npm(), "run", "check:walk-unit"], None),
         Suite("web-elk-rank", "web node --test scripts/elk_rank.test.mjs", "script", WEB,
@@ -3507,6 +3543,22 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_broker_blank_dwg.py"), 18),
         Suite("server-build-queue", "server tests/test_build_queue.py", "pytest", SERVER,
               _py_pytest("tests/test_build_queue.py"), 86),
+        Suite("server-device-bridge-contract", "server tests/test_device_bridge_contract.py", "pytest", SERVER,
+              _py_pytest("tests/test_device_bridge_contract.py"), 8),
+        Suite("server-device-auth", "server tests/test_device_auth.py", "pytest", SERVER,
+              _py_pytest("tests/test_device_auth.py"), 19),
+        Suite("server-device-relay", "server tests/test_device_relay.py", "pytest", SERVER,
+              _py_pytest("tests/test_device_relay.py"), 56),
+        Suite("server-devices-router", "server tests/test_devices_router.py", "pytest", SERVER,
+              _py_pytest("tests/test_devices_router.py"), 60),
+        Suite("server-device-tools", "server tests/test_device_tools.py", "pytest", SERVER,
+              _py_pytest("tests/test_device_tools.py"), 52),
+        Suite("device-agent-tests", "device-agent tests", "pytest", REPO / "device-agent",
+              _py_pytest("tests"), 71),
+        # 48 collected: 24 SQLite cases and 24 PostgreSQL twins.
+        Suite("server-device-store", "server tests/test_device_store.py", "pytest", SERVER,
+              _py_pytest("tests/test_device_store.py"), 24, uses_database=True,
+              database_skip_reasons=(r"platform DB unreachable: DATABASE_URL unset",)),
         Suite("server-builds-route", "server tests/test_builds_route.py", "pytest", SERVER,
               _py_pytest("tests/test_builds_route.py"), 10),
         # TCM-08 pooled AWS lines split by the Environment tag: hermetic (fake ce client), exact count.
@@ -3560,6 +3612,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_drawings_cross_tenant_canary.py"), 10),
         Suite("server-router-authz-negative", "server tests/test_router_authz_negative.py", "pytest", SERVER,
               _py_pytest("tests/test_router_authz_negative.py"), 102),
+        Suite("server-operator-router-authz-negative", "server tests/test_operator_router_authz_negative.py", "pytest", SERVER,
+              _py_pytest("tests/test_operator_router_authz_negative.py"), 106),
         Suite("server-mutation-scope-diff", "server tests/test_mutation_scope_diff.py", "pytest", SERVER,
               _py_pytest("tests/test_mutation_scope_diff.py"), 20),
         # Registered WITH the file, per the #29 fix-then-register rule. The
@@ -3585,6 +3639,47 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_glug_routes.py"), 12),
         Suite("server-image-turns", "server tests/test_image_turns.py", "pytest", SERVER,
               _py_pytest("tests/test_image_turns.py"), 15),
+        Suite("server-project-material-images", "server tests/test_project_material_images.py", "pytest", SERVER,
+              _py_pytest("tests/test_project_material_images.py"), 13),
+        Suite("server-project-material-inspection", "server tests/test_project_material_inspection.py", "pytest", SERVER,
+              _py_pytest("tests/test_project_material_inspection.py"), 134),
+        Suite("server-project-reference-materials", "server tests/test_project_reference_materials.py", "pytest", SERVER,
+              _py_pytest("tests/test_project_reference_materials.py"), 40,
+              uses_database=True, db_gated=True, database_skip_reasons=(
+                  r"requires managed or verified canonical disposable PostgreSQL producer",)),
+        Suite("server-lab-corpus-executor", "server pinned corpus evaluator and durable job custody", "pytest", SERVER,
+              _unprivileged_pytest("tests/test_lab_corpus_executor.py"), 14,
+              uses_database=True, db_gated=True),
+        # BSP43 accepted focused floors; run through the normal server CI rail.
+        Suite("server-project-solar-materialization", "server canonical physical layout publication", "pytest", SERVER,
+              _py_pytest("tests/test_project_solar_materialization.py"), 30, uses_database=True),
+        Suite("server-solar-native-layout-dxf", "server native Solar layout serialization", "pytest", SERVER,
+              _py_pytest("tests/test_solar_native_layout_dxf.py"), 35,
+              allowed_skip_reasons=(r"could not import 'ezdxf\.recover': .*",)),
+        Suite("server-project-checkout-custody", "server private project checkout custody", "pytest", SERVER,
+              _py_pytest("tests/test_project_checkout_custody.py"), 35),
+        Suite("server-conversational-project-write", "server canonical conversational project write", "pytest", SERVER,
+              _py_pytest("tests/test_conversational_project_write.py"), 31),
+        Suite("server-canonical-solve-approval", "server canonical solve approval policy", "pytest", SERVER,
+              _py_pytest("tests/test_canonical_solve_approval.py"), 6),
+        Suite("server-conversational-project-solve", "server canonical conversational project solve", "pytest", SERVER,
+              _py_pytest("tests/test_conversational_project_solve.py"), 15),
+        Suite("server-native-project-authoring", "server fixed Native source authoring", "pytest", SERVER,
+              _py_pytest("tests/test_native_project_authoring.py"), 31),
+        Suite("server-native-project-routes", "server authenticated Native source routes", "pytest", SERVER,
+              _py_pytest("tests/test_native_project_routes.py"), 55),
+        Suite("server-browser-project-flow", "server shared Browser source flow", "pytest", SERVER,
+              _py_pytest("tests/test_browser_project_flow.py"), 35),
+        Suite("server-browser-project-routes", "server public Browser source routes", "pytest", SERVER,
+              _py_pytest("tests/test_browser_project_routes.py"), 18),
+        Suite("server-browser-project-authoring", "server tests/test_browser_project_authoring.py", "pytest", SERVER,
+              _py_pytest("tests/test_browser_project_authoring.py"), 30),
+        Suite("server-browser-project-source-export", "server verified Browser source export", "pytest", SERVER,
+              _py_pytest("tests/test_browser_project_source_export.py"), 31),
+        Suite("server-project-solaredge", "server tests/test_project_solaredge.py", "pytest", SERVER,
+              _py_pytest("tests/test_project_solaredge.py"), 23),
+        Suite("server-project-preview-source", "server tests/test_project_preview_source.py", "pytest", SERVER,
+              _py_pytest("tests/test_project_preview_source.py"), 87),
         Suite("server-instant-artifact-registry", "server tests/test_instant_artifact_registry.py", "pytest", SERVER,
               _py_pytest("tests/test_instant_artifact_registry.py"), 5),
         Suite("server-instant-session-wiring", "server tests/test_instant_session_wiring.py", "pytest", SERVER,
@@ -3665,6 +3760,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_reconcile_authority_source_schema.py"), 7),
         Suite("server-request-journal", "server tests/test_request_journal.py", "pytest", SERVER,
               _py_pytest("tests/test_request_journal.py"), 22),
+        Suite("server-project-execution-context", "server tests/test_project_execution_context.py", "pytest", SERVER,
+              _py_pytest("tests/test_project_execution_context.py"), 26),
         Suite("server-roles", "server tests/test_roles.py", "pytest", SERVER,
               _py_pytest("tests/test_roles.py"), 22),
         Suite("server-sample-dxf-asset", "server tests/test_sample_dxf_asset.py", "pytest", SERVER,
@@ -3674,6 +3771,10 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_cost_vendors.py"), 15),
         Suite("server-save-plan-version", "server tests/test_save_plan_version.py", "pytest", SERVER,
               _py_pytest("tests/test_save_plan_version.py"), 39),
+        Suite("server-version-plan-route", "server tests/test_version_plan_route.py", "pytest", SERVER,
+              _py_pytest("tests/test_version_plan_route.py"), 26),
+        Suite("server-tool-envelopes", "server tests/test_tool_envelopes.py", "pytest", SERVER,
+              _py_pytest("tests/test_tool_envelopes.py"), 14),
         Suite("server-search", "server tests/test_search.py", "pytest", SERVER,
               _py_pytest("tests/test_search.py"), 9),
         Suite("server-session-fanout", "server tests/test_session_fanout.py", "pytest", SERVER,
@@ -3731,7 +3832,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_write_path_telemetry.py"), 9),
         Suite("web-link-service-flow", "web managed link service OAuth flow", "script", WEB,
               [_npx(), "--no-install", "playwright", "test", "--config", "playwright.local.config.mjs",
-               "e2e/local/link-service-flow.spec.mjs", "e2e/local/trust-state.spec.mjs", "--workers=1"], None),
+               "e2e/local/link-service-flow.spec.mjs", "e2e/local/trust-state.spec.mjs", "--workers=1"], None,
+              uses_database=True, db_gated=True),
         # Browser proofs from studio-lanes-20260930 (lanes C, stu2-d, stu2-h, the
         # lifecycle panel, the iOS ship surface, the viewer grid toggle). One row
         # per Playwright config; every config derives its dev server port from
@@ -3741,8 +3843,12 @@ def build_suites() -> List[Suite]:
               [_npx(), "--no-install", "playwright", "test", "--config", "playwright.config.mjs",
                "e2e/campaign-panel.spec.mjs", "e2e/recovery-controls.spec.mjs",
                "e2e/workspace-create-no-prompt.spec.mjs", "e2e/viewer-grid-toggle.spec.mjs",
-               "e2e/studio-ux-regressions.spec.mjs",
-               "--workers=1"], None),
+               "e2e/studio-ux-regressions.spec.mjs", "e2e/project-page-editor.spec.mjs",
+               # Two browser workers over the six spec files: the suite was the longest in every full
+               # run (256 s on run-1, 296 s in job 14667) and B2 proved per-spec isolation at
+               # --workers=2 on the mini; project-page-editor.spec.mjs bounds the pair until the
+               # editor lane splits it. Every other Playwright suite keeps --workers=1.
+               "--workers=2"], None),
         Suite("web-lifecycle-panel-proof", "web mounted project lifecycle panel browser proof", "script", WEB,
               [_npx(), "--no-install", "playwright", "test", "--config", "playwright.lifecycle.config.mjs",
                "e2e/project-lifecycle-panel.spec.mjs", "--workers=1"], None),
@@ -3750,6 +3856,10 @@ def build_suites() -> List[Suite]:
               "script", WEB,
               [_npx(), "--no-install", "playwright", "test", "--config", "playwright.ios.config.mjs",
                "e2e/ios-ship-surface.spec.mjs", "--workers=1"], None),
+        Suite("web-page-service-smoke", "page editor real HTTP and PostgreSQL", "script", WEB,
+              [_npx(), "--no-install", "playwright", "test", "--config",
+               "playwright.page-service.config.mjs", "--workers=1"], None,
+              uses_database=True, db_gated=True, requires_linux=True, timeout_s=600),
         Suite("web-build", "web production build", "script", WEB,
               [_npm(), "run", "build"], None),
         # --- containerized harness smoke (census #13) — OPT-IN --- #
@@ -3856,6 +3966,8 @@ def clean_env() -> dict:
         env.pop(k, None)
     env["PY_COLORS"] = "0"
     env["PYTHONIOENCODING"] = "utf-8"
+    if process_capture_enabled():
+        env = scrub_process_capture_env(env)
     return env
 
 
@@ -3867,6 +3979,88 @@ def _text(value) -> str:
 
 def encoded_suite_id(suite_id: str) -> str:
     return quote(suite_id, safe="").replace(".", "%2E") or "%00"
+
+
+PROCESS_CAPTURE_DECODE_BUDGET_S = 1800
+PROCESS_CAPTURE_TERMINATE_GRACE_S = 45
+# Isolated Python omits the script directory; explicitly load the trusted helpers.
+CAPTURE_WRAPPER = ("import sys; sys.path.insert(0, sys.argv.pop(1)); "
+                   "from trace_supervisor import main; sys.exit(main())")
+
+
+def process_capture_enabled() -> bool:
+    context = os.environ.get("LEAF_PROCESS_CAPTURE_CONTEXT")
+    output = os.environ.get("LEAF_PROCESS_CAPTURE_OUT")
+    return bool(context and output and Path(context).is_file() and
+                Path(output).is_dir() and os.access(output, os.W_OK))
+
+
+# Suites that run strace themselves: ptrace cannot nest, so wrapping them makes every case fail
+# with tracer_nonzero_exit (capture build ab0b70fc, 2026-11-01). They stay unmapped and always run.
+PROCESS_CAPTURE_EXEMPT = frozenset({"ci-trace-smoke-linux"})
+
+
+def process_capture_eligible(suite: Suite) -> bool:
+    return suite.kind == "pytest" and suite.id not in PROCESS_CAPTURE_EXEMPT
+
+
+def scrub_process_capture_env(env: dict) -> dict:
+    env = dict(env)
+    env.pop("LEAF_PROCESS_CAPTURE_CONTEXT", None)
+    env.pop("LEAF_PROCESS_CAPTURE_OUT", None)
+    return env
+
+
+def capture_spawn(suite: Suite, attempt: int, command, trace_env: dict):
+    if not (process_capture_enabled() and process_capture_eligible(suite)):
+        return None
+    output = (Path(os.environ["LEAF_PROCESS_CAPTURE_OUT"]).resolve() /
+              encoded_suite_id(suite.id) / str(attempt))
+    output.mkdir(parents=True, exist_ok=True)
+    suites_file = output / "capture-suites.json"
+    suites_file.unlink(missing_ok=True)
+    trace_env["LEAF_PROCESS_CAPTURE_DIR"] = str(output)
+    trusted = os.environ.get("LEAF_TRUSTED_CI_DIR") or str(SCRIPTS_DIR / "ci")
+    return ([sys.executable, "-I", "-B", "-c", CAPTURE_WRAPPER, trusted,
+             "run", "--context", str(Path(os.environ["LEAF_PROCESS_CAPTURE_CONTEXT"]).resolve()),
+             "--out", str(output), "--suites-file", str(suites_file), "--sink", "file",
+             "--spool-quota-bytes", "8589934592", "--", *command], output)
+
+
+def run_capture_command(command, **kwargs):
+    """Let the supervisor forward TERM and finish its receipt before escalation."""
+    timeout = kwargs.pop("timeout")
+    kwargs.pop("capture_output")
+    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs) as proc:
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+            try:
+                stdout, stderr = proc.communicate(timeout=PROCESS_CAPTURE_TERMINATE_GRACE_S)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                stdout, stderr = proc.communicate()
+            raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
+        return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
+
+
+def capture_attempt_evidence(output: Path, rc: int) -> tuple[dict, int]:
+    paths = sorted((output / "reports").glob("trace-receipt-*.json"))
+    evidence = {"process_capture_receipt": str(paths[0]) if len(paths) == 1 else None,
+                "process_capture_exit_status": rc, "process_capture_errors": []}
+    try:
+        if len(paths) != 1:
+            raise ValueError("receipt_unavailable")
+        receipt = json.loads(paths[0].read_text(encoding="utf-8"))
+        evidence["process_capture_errors"] = receipt.get("capture_errors", [])
+        code = receipt.get("command_exit_code")
+        if type(code) is int and rc != 124:
+            rc = code
+        evidence["process_capture_command_exit_status"] = code
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        evidence["process_capture_errors"] = [f"receipt_unavailable:{type(exc).__name__}"]
+    return evidence, rc
 
 
 def suite_trace_env(suite: Suite, log_dir: Path, attempt: int) -> dict:
@@ -3888,15 +4082,20 @@ def reporting_command(suite: Suite, argv: List[str], trace_env: dict) -> List[st
     """Add reporting only; pytest selection remains at the runner's suite level."""
     argv = [os.fsdecode(word) for word in argv]
     trusted = os.environ.get("LEAF_TRUSTED_CI_DIR")
-    if not trusted:
+    capturing = process_capture_enabled() and process_capture_eligible(suite)
+    if not trusted and not capturing:
         return argv
-    directory = Path(trusted)
+    directory = Path(trusted) if trusted else SCRIPTS_DIR / "ci"
     output = Path(trace_env["LEAF_TEST_REPORT_DIR"])
     output.mkdir(parents=True, exist_ok=True)
     # S8c (measured 2026-09-25, proofs E3 and 148574c1): the shadow plugin's per-test outcome path costs about 150 ms per
     # test in CI (a 356-test suite 0.5 s -> 54 s), so pytest loads it only on tracing builds, where the parent carries
     # LEAF_READSET_DIR. PR and merge-group suites run plain pytest; their attempt records stay reporting-incomplete.
-    if suite.kind == "pytest" and "pytest" in argv and "-I" not in argv and os.environ.get("LEAF_READSET_DIR"):
+    corpus_launcher = str(SCRIPTS_DIR / "ci/run_unprivileged_pytest.py") in argv
+    if suite.kind == "pytest" and "pytest" in argv and ("-I" not in argv or corpus_launcher) and (os.environ.get("LEAF_READSET_DIR") or capturing):
+        if capturing and not trusted:
+            trace_env["PYTHONPATH"] = str(directory) + (os.pathsep + os.environ["PYTHONPATH"]
+                                                       if os.environ.get("PYTHONPATH") else "")
         # Report-only inputs deliberately cannot enable the core's module filter.
         decision = output / "report-only.json"
         catalog = output / "report-catalog.json"
@@ -4028,6 +4227,11 @@ def read_test_report(suite: Suite, log_dir: Path, attempt: int, status: str = ""
 
 def record_attempt(result: Result, log_dir: Path, attempt: int) -> None:
     """Append before retries replace Result or add cumulative durations."""
+    # Exhaustion has no new launcher outcome: its last QUEUED row is already
+    # durable. Other results name the final physical attempt of the call.
+    if result.queued_exhausted:
+        return
+    attempt += result.attempts - 1
     try:
         report = read_test_report(result.suite, log_dir, attempt, result.status)
         if result.test_report.get("test_report_incomplete_reasons"):
@@ -4039,10 +4243,17 @@ def record_attempt(result: Result, log_dir: Path, attempt: int) -> None:
                           test_ids=[], failed_test_ids=[], collection_ids_sha256=None, test_report_refs=[])
         result.test_report = report
         row = dict(report, suite_id=result.suite.id, attempt=attempt,
-                   status=result.status, seconds=result.seconds,
+                   status=result.status,
+                   seconds=(result.attempt_seconds if result.attempt_seconds is not None
+                            else result.seconds),
+                   note=result.note, queued_seconds=result.queued_seconds,
                    run_id=os.environ.get("LEAF_READSET_RUN", ""),
                    log_path=(os.path.relpath(result.log_path, log_dir).replace("\\", "/")
                              if result.log_path else None))
+        if getattr(result.suite, "pr_tier_mode", None) == "tier":
+            row.update(mode="tier", execution_mode="tier", selection_mode="tier")
+        if process_capture_eligible(result.suite):
+            row.update(result.process_capture)
         readsets = Path(os.environ.get("LEAF_READSET_DIR", str(log_dir.resolve() / "readsets")))
         shards = sorted((readsets / encoded_suite_id(result.suite.id) / str(attempt)).glob("*.json"))
         row["readsets_ref"] = str(readsets / encoded_suite_id(result.suite.id) / str(attempt))
@@ -4634,6 +4845,11 @@ def run_npm_audit_suite(suite: Suite, log_path: Path) -> Result:
 # --------------------------------------------------------------------------- #
 # runner
 # --------------------------------------------------------------------------- #
+QUEUED_BUDGET_S = 600.0
+QUEUED_INITIAL_BACKOFF_S = 15.0
+QUEUED_MAX_BACKOFF_S = 60.0
+
+
 def reset_authored_tools(log_dir: Path) -> str:
     """Reset server/authored_tools.json to a clean {"tools": []}, backing up the
     prior content into the log dir first. Returns a human note."""
@@ -4648,9 +4864,65 @@ def reset_authored_tools(log_dir: Path) -> str:
 
 
 def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
-              reporting_disabled: bool = False) -> Result:
+              reporting_disabled: bool = False,
+              queued_budget_s: Optional[float] = None) -> Result:
+    """Exit 75 reserves the same attempt slot, with its own bounded backoff."""
+    budget = QUEUED_BUDGET_S if queued_budget_s is None else queued_budget_s
+    started = time.perf_counter()
+    backoff = QUEUED_INITIAL_BACKOFF_S
+    seconds = queued_seconds = 0.0
+    number = 0
+    while True:
+        number += 1
+        physical_attempt = attempt + number - 1
+        result = _run_suite_attempt(suite, log_dir, physical_attempt,
+                                   reporting_disabled=reporting_disabled)
+        seconds += result.seconds
+        if result.status != "QUEUED":
+            break
+        result.queued_seconds = queued_seconds
+        record_attempt(result, log_dir, physical_attempt)
+        remaining = budget - (time.perf_counter() - started)
+        if remaining > 0:
+            delay = min(backoff, remaining)
+            with result.log_path.open("a", encoding="utf-8") as stream:
+                stream.write(f"\n[QUEUED: {result.note}; retrying in {delay:g}s]\n")
+            print(f"\nGATE_QUEUED id={suite.id} attempts={physical_attempt} "
+                  f"seconds={queued_seconds:.1f} wait_seconds={delay:g}", flush=True)
+            waiting = time.perf_counter()
+            time.sleep(delay)
+            queued_seconds += time.perf_counter() - waiting
+            backoff = min(backoff * 2, QUEUED_MAX_BACKOFF_S)
+        elapsed = time.perf_counter() - started
+        if elapsed >= budget:
+            result.status = "FAIL"
+            result.got = "err"
+            total_elapsed = QUEUED_BUDGET_S - budget + elapsed
+            result.note = (f"{result.note} after {physical_attempt} attempts "
+                           f"over {total_elapsed:.1f} s")
+            result.queued_exhausted = True
+            with result.log_path.open("a", encoding="utf-8") as stream:
+                stream.write("\n" + result.note + "\n")
+            print(f"\nGATE_QUEUED id={suite.id} attempts={physical_attempt} "
+                  f"seconds={queued_seconds:.1f}", flush=True)
+            break
+    result.attempt_seconds = result.seconds
+    result.seconds = seconds
+    result.attempts = number
+    result.queued_seconds = queued_seconds
+    if number > 1 or result.queued_exhausted:
+        result.queued_budget_used = time.perf_counter() - started
+    return result
+
+
+def _run_suite_attempt(suite: Suite, log_dir: Path, attempt: int = 1,
+                       reporting_disabled: bool = False) -> Result:
     log_path = log_dir / (f"{suite.id}.log" if attempt == 1
                           else f"{suite.id}.retry{attempt - 1}.log")
+    if suite.requires_linux and sys.platform != "linux":
+        note = "linux-only service smoke: Linux required"
+        log_path.write_text(note + "\n", encoding="utf-8")
+        return Result(suite, "UNAVAILABLE", "unavailable", 0.0, note=note, log_path=log_path)
 
     # DB-gated suites: probe first, SKIP-with-reason when unreachable. On
     # REACHABLE, inject the resolved DSN as DATABASE_URL for the child: the
@@ -4749,6 +5021,26 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
     if fault and attempt == 1 and fault == f"{suite.id}:spawn":
         argv = [argv[0] + ".fault-injected-missing.exe"] + argv[1:]
     spawn_command, use_shell, shell_executable = normalize_spawn_command(argv)
+    capture_output = None
+    capture_evidence = {}
+    timeout_s = suite.timeout_s
+    try:
+        captured = capture_spawn(suite, attempt, spawn_command, trace_env)
+        if captured is not None:
+            spawn_command, capture_output = captured
+            use_shell, shell_executable = False, None
+            timeout_s += PROCESS_CAPTURE_DECODE_BUDGET_S
+    except Exception as exc:
+        capture_evidence = {"process_capture_errors": [f"capture_setup_failed:{type(exc).__name__}"]}
+    service_env = {}
+    service_log = None
+    if suite.id in _SERVICE_SMOKE_SUITES:
+        import uuid
+        service_dir = (log_dir / f"page-service-{uuid.uuid4().hex}").resolve()
+        service_dir.mkdir(parents=True)
+        service_log = service_dir / "server.log"
+        service_env = {"LEAF_PAGE_SMOKE_DIR": str(service_dir),
+                       "LEAF_PAGE_SMOKE_PYTHON": sys.executable}
     spawn_err = ""
     with open(log_path, "w", encoding="utf-8", errors="replace") as logf:
         logf.write(f"$ (cwd={suite.cwd})\n$ {' '.join(argv)}\n"
@@ -4757,10 +5049,12 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
             logf.write("WARNING: " + report_failure["test_report_incomplete_reasons"][0] + "\n")
         logf.flush()
         try:
-            proc = subprocess.run(
+            corpus_launcher = str(SCRIPTS_DIR / "ci/run_unprivileged_pytest.py") in argv
+            spawn = run_capture_command if capture_output is not None or corpus_launcher else subprocess.run
+            proc = spawn(
                 spawn_command,
-                cwd=str(suite.cwd), env={**clean_env(), **db_env, **trace_env},
-                capture_output=True, text=True, timeout=suite.timeout_s,
+                cwd=str(suite.cwd), env={**clean_env(), **db_env, **trace_env, **service_env},
+                capture_output=True, text=True, timeout=timeout_s,
                 shell=use_shell, executable=shell_executable,
                 # text=True without an explicit encoding decodes with the system
                 # ANSI codepage (cp1252 here), and vitest/tsc emit UTF-8 box and
@@ -4773,7 +5067,7 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
             rc = proc.returncode
         except subprocess.TimeoutExpired as exc:
             out = (_text(exc.stdout) + "\n" + _text(exc.stderr)
-                   + f"\n[TIMEOUT >{suite.timeout_s}s]")
+                   + f"\n[TIMEOUT >{timeout_s}s]")
             rc = 124
         except OSError as exc:
             # Spawn failure (missing binary, AV/file lock, process pressure).
@@ -4783,8 +5077,29 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
             spawn_err = f"{type(exc).__name__}: {str(exc)[:160]}"
             out = f"[SPAWN FAILURE] {spawn_err}"
             rc = 127
+        if service_log is not None:
+            try:
+                with service_log.open("rb") as diagnostic:
+                    diagnostic.seek(0, os.SEEK_END)
+                    diagnostic.seek(max(0, diagnostic.tell() - 64000))
+                    detail = diagnostic.read().decode("utf-8", errors="replace")
+            except OSError as exc:
+                detail = f"producer log unavailable: {type(exc).__name__}"
+            out = scrub_evidence(out + "\nPAGE_SMOKE producer diagnostics\n" + detail)
         logf.write(out)
+    if capture_output is not None:
+        capture_evidence, rc = capture_attempt_evidence(capture_output, rc)
     seconds = time.perf_counter() - t0
+
+    if rc == 75:
+        reason = next((line.split("QUEUED:", 1)[1].strip()
+                       for line in out.splitlines() if "QUEUED:" in line), "")
+        if not reason:
+            reason = next((line.strip() for line in reversed(out.splitlines())
+                           if line.strip()), "exit 75")
+        return Result(suite, "QUEUED", "-", seconds,
+                      note=f"queued: {scrub_evidence(reason)[:240]}", log_path=log_path,
+                      process_capture=capture_evidence)
 
     if reporting_injected and rc != 0:
         # Playwright's list reporter uses the same passed/failed count words.
@@ -4803,8 +5118,8 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
     fail_hint = ""
     if spawn_err:
         fail_hint = f"spawn failure: {spawn_err}"
-    elif rc == 124 and f"[TIMEOUT >{suite.timeout_s}s]" in out:
-        fail_hint = f"[TIMEOUT >{suite.timeout_s}s]"
+    elif rc == 124 and f"[TIMEOUT >{timeout_s}s]" in out:
+        fail_hint = f"[TIMEOUT >{timeout_s}s]"
     elif rc != 0 and not out.strip():
         fail_hint = f"no output (exit {rc}): child failed to start or was killed externally"
 
@@ -4841,7 +5156,8 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
         if not passed and not note:
             note = "suite FAILED"
         return Result(suite, "PASS" if passed else "FAIL", str(c["got"]), seconds,
-                      note=note.strip(), log_path=log_path, counts=c, test_report=report_failure)
+                      note=note.strip(), log_path=log_path, counts=c, test_report=report_failure,
+                      process_capture=capture_evidence)
 
     if suite.kind == "vitest":
         c = parse_vitest(out)
@@ -4852,10 +5168,12 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
         if c.get("skipped"):
             note = (note + " " if note else "") + f"{c['skipped']} skipped"
             actual = dict(c["skipped_files"])
-            allowed = dict(suite.allowed_vitest_skips)
+            allowed = {}
+            for path, count in suite.allowed_vitest_skips:
+                allowed.setdefault(path, set()).add(count)
             reported = sum(actual.values())
             unexpected = {path: count for path, count in actual.items()
-                          if allowed.get(path) != count}
+                          if count not in allowed.get(path, set())}
             if reported != c["skipped"]:
                 passed = False
                 note += (f"; skip details incomplete: vitest reported {c['skipped']} "
@@ -4896,14 +5214,17 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
 
 
 def run_suite_guarded(suite: Suite, log_dir: Path, attempt: int,
-                      reporting_disabled: bool = False) -> Result:
+                      reporting_disabled: bool = False,
+                      queued_budget_s: Optional[float] = None) -> Result:
     """One suite must never take down the whole gate: any unexpected
     runner-side exception (parse bug, log-dir I/O, ...) becomes a FAIL row on
     the scoreboard instead of an uncaught crash that loses every remaining
     suite and the scoreboard itself."""
     try:
         return run_suite(suite, log_dir, attempt=attempt,
-                         **({"reporting_disabled": True} if reporting_disabled else {}))
+                         **({"reporting_disabled": True} if reporting_disabled else {}),
+                         **({"queued_budget_s": queued_budget_s}
+                            if queued_budget_s is not None else {}))
     except Exception as exc:  # noqa: BLE001 — the scoreboard is the contract
         return Result(suite, "FAIL", "err", 0.0,
                       note=f"runner error: {type(exc).__name__}: {str(exc)[:160]}")
@@ -4976,6 +5297,153 @@ def describe_selection(patterns: List[str]) -> str:
     return f"{flags}  (union of {len(patterns)} substrings)"
 
 
+PR_TIER_SCHEMA = "leaf.ci.pr-tier.v1"
+PR_TIER_PREREQUISITES = ("web-build", "harness-tsc-build", "ci-full-run-manifest-certificates")
+
+
+def pr_tier_path(value: str) -> str:
+    """Unify historical web test names without conflating server/harness paths."""
+    value = value.replace("\\", "/").split("::", 1)[0]
+    while value.startswith("./"):
+        value = value[2:]
+    if value.startswith("src/"):
+        value = "web/" + value
+    elif "/" not in value and (value.endswith((".js", ".jsx")) or "." not in value):
+        value = "web/src/" + value
+    if value.startswith("web/src/"):
+        value = re.sub(r"\.(?:jsx|js)$", "", value)
+    return value.rstrip("/")
+
+
+def pr_tier_owned_paths(row: dict) -> List[str]:
+    """Declared file/directory targets; npm scripts without targets stay unknown."""
+    paths = []
+    for arg in row["command"][1:]:
+        target = arg.split("::", 1)[0].replace("\\", "/")
+        if target.startswith("-") or "=" in target:
+            continue
+        if not (re.search(r"\.(?:py|[cm]?js|jsx|tsx?)$", target)
+                or target.rstrip("/").endswith(("/tests", "/test"))
+                or target in ("tests", "test")):
+            continue
+        if target.startswith("<REPO>/"):
+            target = target[len("<REPO>/"):]
+        elif row["cwd"] not in (".", ".."):
+            target = row["cwd"].rstrip("/") + "/" + target
+        paths.append(pr_tier_path(target))
+    return paths
+
+
+def pr_tier_owns(row: dict, path: str) -> bool:
+    identity = pr_tier_path(path)
+    # Older device logs omit the harness cwd from its test/ paths.
+    identities = {identity}
+    if identity.startswith("test/"):
+        identities.add("harness/" + identity)
+    for target in pr_tier_owned_paths(row):
+        if any(p == target or p.startswith(target + "/") for p in identities):
+            return True
+    # Vitest's shard membership is determined at collection, so all shards own
+    # the directory. Never guess one shard from an incomplete history.
+    if row["kind"] == "vitest":
+        return any(p.startswith(row["cwd"].rstrip("/") + "/") for p in identities)
+    return False
+
+
+def pr_tier_closure(selected, catalog_ids, dependencies=None):
+    selected = set(selected) & set(catalog_ids)
+    selected.update(set(PR_TIER_PREREQUISITES) & set(catalog_ids))
+    dependencies = dependencies or {}
+    while True:
+        expanded = selected | {dep for sid in selected for dep in dependencies.get(sid, [])}
+        if not expanded <= set(catalog_ids):
+            raise ValueError("prerequisite absent from catalog")
+        if expanded == selected:
+            return selected
+        selected = expanded
+
+
+def load_pr_tier(path: str, *, quiet: bool = False):
+    """An unusable or disabled policy preserves the pre-tier execution path."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        if (not isinstance(data, dict) or data.get("schema") != PR_TIER_SCHEMA
+                or type(data.get("enabled")) is not bool):
+            raise ValueError("invalid schema or enabled flag")
+        if not data["enabled"]:
+            if not quiet:
+                print("INFO: PR tier disabled; using existing gate selection")
+            return None
+        for key in ("suite_ids", "catalog_suite_ids"):
+            values = data.get(key)
+            if (not isinstance(values, list) or not values
+                    or any(not isinstance(v, str) or not v for v in values)
+                    or len(values) != len(set(values))):
+                raise ValueError("invalid " + key)
+        if not set(data["suite_ids"]) <= set(data["catalog_suite_ids"]):
+            raise ValueError("tier IDs outside recorded catalog")
+        dependencies = data.get("prerequisites", {})
+        if (not isinstance(dependencies, dict)
+                or any(not isinstance(k, str) or not isinstance(v, list)
+                       or any(not isinstance(d, str) or not d for d in v)
+                       for k, v in dependencies.items())):
+            raise ValueError("invalid prerequisites")
+        return data
+    except (OSError, ValueError, UnicodeError) as exc:
+        if not quiet:
+            print(f"INFO: PR tier unavailable ({exc}); using existing gate selection")
+        return None
+
+
+def pr_tier_changed_paths() -> List[str]:
+    """Use explicit paths when supplied, otherwise diff the PR against its base."""
+    raw = os.environ.get("LEAF_CHANGED_PATHS")
+    if raw is not None:
+        paths = json.loads(raw)
+        if not isinstance(paths, list) or any(not isinstance(p, str) or not p for p in paths):
+            raise ValueError("LEAF_CHANGED_PATHS must be a JSON list of paths")
+        return paths
+    base = os.environ.get("TRUSTED_SHA") or os.environ.get("CODEBUILD_WEBHOOK_BASE_REF", "origin/main")
+    if base.startswith("refs/heads/"):
+        base = "refs/remotes/origin/" + base[len("refs/heads/"):]
+    proc = subprocess.run(
+        ["git", "--no-replace-objects", "diff", "--no-renames", "--name-only", "-z", base + "...HEAD", "--"],
+        cwd=REPO, capture_output=True, text=True, timeout=30)
+    if proc.returncode:
+        raise ValueError("PR changed paths unavailable")
+    return [p for p in proc.stdout.split("\0") if p]
+
+
+def select_pr_tier(suites: List[Suite], tier: dict) -> List[Suite]:
+    ids = {s.id for s in suites}
+    selected = set(tier["suite_ids"]) & ids
+    new = ids - set(tier["catalog_suite_ids"])
+    selected.update(new)
+    if new:
+        print("INFO: mode=tier including new catalog suites: " + ", ".join(sorted(new)))
+    try:
+        changed = pr_tier_changed_paths()
+        priority = os.environ.get("LEAF_PRIORITY_SUITES", "")
+        priority = json.loads(priority) if priority.startswith("[") else priority.replace(",", " ").split()
+        if not isinstance(priority, list) or any(not isinstance(p, str) for p in priority):
+            raise ValueError("invalid LEAF_PRIORITY_SUITES")
+        selected.update(ids & set(priority))
+        for suite in suites:
+            row = {"command": _fingerprint_argv(suite.argv, cwd=suite.cwd),
+                   "cwd": _fingerprint_cwd(suite.cwd), "kind": suite.kind}
+            if ((not pr_tier_owned_paths(row) and row["kind"] != "vitest")
+                    or any(pr_tier_owns(row, path) for path in changed)):
+                selected.add(suite.id)
+        selected = pr_tier_closure(selected, ids, tier.get("prerequisites"))
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        print(f"INFO: mode=tier using all suites ({exc})")
+        selected = ids
+    omitted = sorted(ids - selected)
+    if omitted:
+        print("INFO: mode=tier omitting catalog suites outside tier and changed tests: " + ", ".join(omitted))
+    return [s for s in suites if s.id in selected]
+
+
 # --------------------------------------------------------------------------- #
 # sharding: deterministic partition + result files + fan-in verifier
 #
@@ -5018,22 +5486,21 @@ def describe_selection(patterns: List[str]) -> str:
 # gate-runner-selftest pins every key here to a registered suite id so a
 # rename cannot strand a weight.
 _MEASURED_EST_S = {
-    # Studio suite medians measured on the CI runner on 2026-09-23 across eight
-    # green builds: 0a6da3b1 7d0f4a21 6810678d 01ed60fc 85f91706
-    # 92ba1605 68abb5ed 7c8c895a. Without these, the partitioner weighted
-    # them at the 2.0s default and stacked two in one pool group.
-    "scripts-solar-w1-studio-string-add": 344.9,
-    "scripts-solar-w1-studio-string-delete": 336.6,
-    "scripts-solar-w1-studio-string-multi-add": 211.7,
-    "scripts-solar-w1-studio-solve": 121.0,
+    # Studio suite seconds measured 2026-10-28 on BUILD_GENERAL1_LARGE (gate build c5a2fa32, one run). The
+    # 2026-09-23 medians (344.9, 336.6, 211.7, 121.0) were about 5x high after the graph memo and left the
+    # shards that held them light. Without an entry they would fall back to the 2.0 s default.
+    "scripts-solar-w1-studio-string-add": 68.4,
+    "scripts-solar-w1-studio-string-delete": 65.1,
+    "scripts-solar-w1-studio-string-multi-add": 38.0,
+    "scripts-solar-w1-studio-solve": 28.5,
     # Refreshed 2026-09-23 from build leaf-ci-leaf-web-demo:ab6b3982 (BUILD_GENERAL1_XLARGE, jobs auto=8).
     "web-vitest-1": 140.0,
     "web-vitest-2": 140.0,
     "web-vitest-3": 140.0,
     "web-link-service-flow": 17.0,
-    "harness-vitest": 13.7,
-    "server-sessions-e2e": 12.1,
-    "platform-static": 18.1,
+    "harness-vitest": 23.5,
+    "server-sessions-e2e": 16.3,
+    "platform-static": 26.8,
     # Operator control-plane suites, MEASURED on the CI runner from the shard
     # logs of run 33283298381 (the registration PR's own first green run), the
     # same provenance as the 2026-08-17 entries below.
@@ -5050,22 +5517,22 @@ _MEASURED_EST_S = {
     # exist on the Linux runner. Recorded because the direction is the trap --
     # over-weighting cannot fail a gate, so nothing would have complained while
     # the packer reserved a shard's worth of phantom load.
-    "server-operator-production-unreachable": 3.4,
-    "web-version-restore-proof": 61.1,
-    "server-checkout-crossproc": 60.3,
-    "server-backbone": 45.8,
-    "web-async-author-stage": 45.8,
-    "build-platform-images-workflow": 43.8,
-    "server-sessions-router": 27.9,
-    "executor": 20.9,
-    "server-turn-runner": 15.8,
-    "server-task-local-state-authority": 14.0,
-    "web-author-quota-gate": 14.0,
-    "server-write-loop": 8.9,
-    "server-sessions-routes": 7.0,
-    "server-wave5": 6.9,
-    "server-wave3": 5.9,
-    "server-hardening-3b": 5.8,
+    "server-operator-production-unreachable": 6.2,
+    "web-version-restore-proof": 163.9,
+    "server-checkout-crossproc": 63.7,
+    "server-backbone": 57.4,
+    "web-async-author-stage": 116.0,
+    "build-platform-images-workflow": 49.0,
+    "server-sessions-router": 30.3,
+    "executor": 21.4,
+    "server-turn-runner": 25.3,
+    "server-task-local-state-authority": 73.4,
+    "web-author-quota-gate": 41.1,
+    "server-write-loop": 12.0,
+    "server-sessions-routes": 8.5,
+    "server-wave5": 9.8,
+    "server-wave3": 11.4,
+    "server-hardening-3b": 10.1,
     # web-pending-approvals-contract carried 7.3 here until #883. Its tests
     # took 22ms; the rest was node:test waiting on telemetry.js's never-
     # unref'd flush timer, misattributed to converse.js when first measured.
@@ -5073,26 +5540,163 @@ _MEASURED_EST_S = {
     # 2026-09-02, against 7.33/7.42s on 575bc57 for the A/B), so it takes the
     # default like the other eight .test.mjs suites. Do not re-add it from a
     # pre-#883 measurement.
-    "server-mcp-gateway-authority": 5.1,
-    "server-platform-customize": 4.9,
-    "server-wave4": 4.9,
-    "harness-tsc-noemit": 4.8,
-    "server-microvm": 4.7,
-    "server-agent-e2e": 4.0,
-    "server-jobs-connection-ownership": 4.0,
-    "server-dynamic-loader": 3.9,
-    "server-guest-purge": 3.9,
-    "web-demo-gate": 3.9,
-    "server-guest-uploads": 3.8,
+    "server-mcp-gateway-authority": 5.2,
+    "server-platform-customize": 6.0,
+    "server-wave4": 6.9,
+    "harness-tsc-noemit": 6.0,
+    "server-microvm": 5.3,
+    "server-agent-e2e": 6.6,
+    "server-jobs-connection-ownership": 8.3,
+    "server-dynamic-loader": 7.0,
+    "server-guest-purge": 6.5,
+    "web-demo-gate": 52.0,
+    "server-guest-uploads": 11.5,
     "harness-tsc-build": 3.7,
-    "server-ui-wave": 3.7,
-    "server-wave2": 3.6,
-    "server-dependency-health": 3.2,
-    "server-dwg-local-extract": 3.1,
-    "server-submit-latency-metric": 3.1,
-    "web-build": 3.1,
+    "server-ui-wave": 7.7,
+    "server-wave2": 7.0,
+    "server-dependency-health": 16.9,
+    "server-dwg-local-extract": 5.4,
+    "server-submit-latency-metric": 5.7,
+    "web-build": 48.4,
     "server-customization-adversarial": 3.0,
-    "server-job-lanes": 3.0,
+    "server-job-lanes": 7.5,
+    # Measured 2026-10-28 on BUILD_GENERAL1_LARGE (gate build 6adf7f0a, 719 suites, one run): every suite of 5 s or
+    # more, from the run's summary rows. Re-measure the same way after a runner or catalog-wide change.
+    "gate-runner-selftest": 18.0,
+    "merge-queue-workflow": 40.2,
+    "prewarm-staging-cutover-workflow": 16.3,
+    "scripts-native-release-producer": 16.4,
+    "scripts-proof-string-sizer": 19.4,
+    "scripts-solar-parity-reachability": 5.1,
+    "scripts-solar-w1-studio-autofill": 16.4,
+    "scripts-solar-w1-studio-autofill-solve": 116.1,
+    "server-approval-policy": 17.4,
+    "server-broker-boundary": 5.0,
+    "server-campaigns": 11.2,
+    "server-cat-oracle": 14.3,
+    "server-customization-async-stage": 9.2,
+    "server-customization-runtime": 14.2,
+    "server-demo-actor": 7.8,
+    "server-demo-sessions": 5.2,
+    "server-e2e-golden": 7.3,
+    "server-entity-scope-binding": 47.2,
+    "server-guest-fail-closed": 5.1,
+    "server-guest-session-auth": 5.7,
+    "server-hardening-1c": 5.3,
+    "server-ios-ship-provider": 5.0,
+    "server-lab-activation": 10.2,
+    "server-lab-artifacts": 7.2,
+    "server-lab-artifacts-git": 8.4,
+    "server-lab-git-cutover": 13.6,
+    "server-lab-git-write": 11.6,
+    "server-lab-run-store": 5.1,
+    "server-lab-runs": 12.4,
+    "server-lab-stream": 7.6,
+    "server-lab-widgets": 7.6,
+    "server-lab-worker": 13.3,
+    "server-mcp-tenant-registry": 10.5,
+    "server-no-da-imports": 9.5,
+    "server-operator-integration-drills": 6.2,
+    "server-operator-router-authz-negative": 7.5,
+    "server-operator-vocab-freeze": 5.6,
+    "server-project-proof-identity": 7.2,
+    "server-router-authz-negative": 17.3,
+    "server-sip-r14-proof": 7.6,
+    "server-sip-r3b-tools": 57.7,
+    "server-sip-r3c-multi-add": 7.4,
+    "server-sip-r3d-conductors": 5.9,
+    "server-sip-r3e-groups": 9.3,
+    "server-sip-r4-runtime": 6.5,
+    "server-sip-r5-routes": 12.9,
+    "server-sip-r6-artifacts": 103.6,
+    "server-sip-r6-routes": 7.7,
+    "server-solar-civil-operations": 30.3,
+    "server-solar-civil-route": 64.7,
+    "server-solar-combiner-graph": 35.3,
+    "server-solar-combiner-intake-import": 35.7,
+    "server-solar-combiner-units": 40.3,
+    "server-solar-design-survives-saves": 19.7,
+    "server-solar-feeder-graph": 27.0,
+    "server-solar-feeder-units": 12.5,
+    "server-solar-frames-piles": 59.8,
+    "server-solar-graph-date-time": 5.9,
+    "server-solar-ground-compact-consumers": 22.6,
+    "server-solar-ground-compact-graph": 15.6,
+    "server-solar-ground-compact-string-tools": 22.9,
+    "server-solar-ground-conversion": 21.0,
+    "server-solar-ground-conversion-evidence": 5.7,
+    "server-solar-ground-equipment": 32.5,
+    "server-solar-ground-export-currency": 61.6,
+    "server-solar-ground-graph-codec": 21.6,
+    "server-solar-ground-invalidation": 10.8,
+    "server-solar-ground-outlines": 10.1,
+    "server-solar-ground-physical-admission": 13.8,
+    "server-solar-ground-route-kinds": 6.4,
+    "server-solar-ground-shade": 5.7,
+    "server-solar-ground-string-decode-memo": 36.5,
+    "server-solar-ground-terrain-adapter": 21.3,
+    "server-solar-import-sources": 12.1,
+    "server-solar-landxml-import": 6.9,
+    "server-solar-landxml-route": 10.9,
+    "server-solar-local-read": 7.1,
+    "server-solar-module-catalog": 5.7,
+    "server-solar-physical-state": 44.7,
+    "server-solar-pvcase-admission": 42.2,
+    "server-solar-pvcase-conversion": 7.9,
+    "server-solar-pvcase-graph": 20.4,
+    "server-solar-pvcase-outputs": 51.3,
+    "server-solar-pvcase-sources": 15.2,
+    "server-solar-settings-invalidation": 12.8,
+    "server-solar-solaredge-flow": 118.8,
+    "server-solar-solaredge-import": 11.0,
+    "server-solar-solaredge-parse": 9.5,
+    "server-solar-solaredge-parse-deadline": 16.1,
+    "server-solar-solaredge-pdf": 11.4,
+    "server-solar-solaredge-report": 22.3,
+    "server-solar-terrain-route": 6.7,
+    "server-solar-tool-cable-export": 43.1,
+    "server-solar-tool-central-inverter-add": 10.6,
+    "server-solar-tool-color-strings": 6.7,
+    "server-solar-tool-combiners": 37.1,
+    "server-solar-tool-design-presets": 6.6,
+    "server-solar-tool-electrical-schedules": 17.3,
+    "server-solar-tool-equipment-move": 8.1,
+    "server-solar-tool-feeders": 35.5,
+    "server-solar-tool-feeders-ground": 10.1,
+    "server-solar-tool-panel-groups": 12.5,
+    "server-solar-tool-panels-from-drawing": 8.7,
+    "server-solar-tool-solar-assign-strings": 7.9,
+    "server-solar-tool-solar-autofill": 29.4,
+    "server-solar-tool-solar-autofill-plan": 85.9,
+    "server-solar-tool-solar-elevation-zones": 13.4,
+    "server-solar-tool-solar-string-midpoint": 21.7,
+    "server-solar-tool-solar-string-multi-add": 6.5,
+    "server-solar-tool-solaredge-accept": 29.4,
+    "server-solar-tool-solaredge-tracking-read": 28.7,
+    "server-solar-tool-terrain-read": 10.8,
+    "server-solar-tool-trackers-to-panel-groups": 18.5,
+    "server-solar-tracker-rows-route": 6.7,
+    "server-solar-w1-route-consumers": 6.1,
+    "server-string-panels-units": 24.6,
+    "server-turn-queue": 5.0,
+    "server-version-plan-route": 6.0,
+    "server-w1-authored-reports": 8.5,
+    "server-w1-commit-solve-adapter": 38.3,
+    "server-w1-local-graph-jobs": 5.7,
+    "server-w1-local-graph-rail": 6.3,
+    "server-w1-project-settings": 5.0,
+    "server-w1-rooftop-acceptance": 194.1,
+    "server-w1-solve-commit": 5.1,
+    "server-w1-solve-parity": 7.0,
+    "server-w1-solve-split": 16.7,
+    "server-w1c-commit-solve": 8.3,
+    "server-w1c-solve-proposal": 7.8,
+    "studio-walk-regressions": 30.6,
+    "web-app-wiring": 31.7,
+    "web-ios-ship-surface-proof": 103.9,
+    "web-lifecycle-panel-proof": 58.6,
+    "web-staging-fixes-check": 34.7,
+    "web-studio-panels-proof": 265.5,
 }
 _DEFAULT_EST_S = 2.0
 
@@ -5153,11 +5757,41 @@ _SERIAL_SUITE_REASONS = {
         "server-operator-stage-release",
     ), "shared PostgreSQL schema"),
     "server-sessions-e2e": "rebuilds shared harness/dist with npm",
-    "web-elk-rank": "node --test shares web/node_modules and build outputs in its cwd",
     "web-demo-gate": "nested runner rebuilds web/dist and may unpack node_modules",
     "studio-walk-regressions": "nested stack boots services and rebuilds shared production bundle",
     "harness-container-smoke": "fixed compose project and container ports 8130/8150",
 }
+
+
+# Read-only: no server, port, build, install or write under web/ or ../artifacts/.
+# Eight green runs: jobs=3 wall p50 1402-1561s vs ~2900 suite-seconds;
+# the web-tree chain alone cost ~1100s. Only audited source readers bypass it.
+_WEB_SOURCE_READERS = frozenset({
+    "web-customization-check",
+    "web-customize-panel-check",
+    "web-checkout-identity-check",
+    "web-deployed-acceptance-contract",
+    "web-deployed-surface-synthetic-acceptance",
+    "web-deployed-auth0-spa-origin-acceptance",
+    "web-deployed-auth0-production-spa-origin-acceptance",
+    "web-collect-staging-auth0-principal-b",
+    "web-proof-receipt-contract",
+    "web-author-quota-live-proof",
+    "web-workbench-id-contract",
+    "web-app-wiring",
+    "web-project-proof-contract",
+    "web-elk-rank",
+    "web-honesty-ladder",
+    "web-tour-anchors",
+    "web-composer-contract",
+    "web-project-session-binding",
+    "web-markdown-contract",
+    "web-panel-fold-contract",
+    "web-pending-approvals-contract",
+    "web-route-scene-contract",
+    "web-usage-contract",
+    "web-error-classify-contract",
+})
 
 
 def serial_suite_reason(suite: Suite) -> str:
@@ -5166,6 +5800,8 @@ def serial_suite_reason(suite: Suite) -> str:
         return "resets shared authored_tools.json"
     if suite.db_gated or suite.uses_database:
         return "shared PostgreSQL through DATABASE_URL"
+    if suite.id in _WEB_SOURCE_READERS:
+        return ""
     executable = str(suite.argv[0]).replace("\\", "/").rsplit("/", 1)[-1].lower()
     if executable in ("npm", "npm.cmd", "npm.exe", "npx", "npx.cmd", "npx.exe"):
         return "npm/npx shares node_modules and build outputs in its cwd"
@@ -5196,6 +5832,35 @@ _PRELUDE_WRITERS = frozenset({
 })
 
 
+# These checks consume source/runtime dependencies, not the build outputs
+# produced by _PRELUDE_WRITERS. Their observed failures cost seconds while
+# browser/native suites cost minutes. Unknown suites remain in the full phase.
+_EARLY_FEEDBACK_SUITES = frozenset({
+    # Existing inert framework/registration checks run once, before expensive
+    # prerequisites, so stale catalog contracts cannot consume a full run.
+    "gate-runner-selftest", "web-stage-source-contracts",
+    "harness-tsc-noemit", "server-campaign-dxf-inventory",
+    "server-campaign-release-service", "server-entity-scope-admission",
+    "server-entity-scope-transport", "server-sip-r5-routes", "web-app-wiring",
+    # Existing deterministic Solar authority/registry contracts use patched
+    # in-memory graph/blob/transaction fixtures; launcher processes are doubles.
+    # They require installed Python dependencies, not writer/build/browser output.
+    "server-sip-r3b-chain", "server-sip-r4-jobs", "server-sip-r5-policy",
+    "server-sip-r6-routes", "server-sip-r3c-multi-add",
+    "server-sip-r3d-conductors", "server-sip-r3e-groups",
+    "server-start-leaf-harness-config",
+})
+
+
+_SERVICE_SMOKE_SUITES = frozenset({"web-page-service-smoke"})
+
+
+class HeavyPrerequisitesFailed(Exception):
+    def __init__(self, status, completed):
+        self.status, self.completed = status, completed
+        super().__init__(f"heavy prerequisites failed with exit {status}")
+
+
 def conflict_resources(suite: Suite) -> frozenset[str]:
     """The named locks a suite holds while it runs; empty means it conflicts with nothing.
 
@@ -5207,7 +5872,8 @@ def conflict_resources(suite: Suite) -> frozenset[str]:
         return frozenset()
     override = _CONFLICT_RESOURCES_OVERRIDE.get(suite.id)
     if override is not None:
-        return override
+        # Explicit filesystem/port locks cannot drop a declared database lock.
+        return override | (frozenset({"postgres"}) if suite.db_gated or suite.uses_database else frozenset())
     table_reason = _SERIAL_SUITE_REASONS.get(suite.id, "")
     held = set()
     # server/authored_tools.json is reset in place before the suite runs.
@@ -5256,30 +5922,41 @@ def plan_parallel_phases(suites: List[Suite]) -> tuple[List[Suite], List[Suite]]
 
 def _run_parallel_suite(suite: Suite, log_dir: Path, retry: int) -> tuple[Result, int]:
     # Mirror the serial retry contract without changing the default code path.
-    def attempt(number: int, reporting_disabled: bool = False) -> Result:
+    def attempt(number: int, reporting_disabled: bool = False,
+                queued_budget_s: Optional[float] = None) -> Result:
         try:
             return run_suite_guarded(suite, log_dir, attempt=number,
-                                    **({"reporting_disabled": True} if reporting_disabled else {}))
+                                    **({"reporting_disabled": True} if reporting_disabled else {}),
+                                    **({"queued_budget_s": queued_budget_s}
+                                       if queued_budget_s is not None else {}))
         except Exception as exc:
             return Result(suite, "FAIL", "err", 0.0,
                           note=f"runner error: {type(exc).__name__}: {str(exc)[:160]}")
 
     res = attempt(1)
     record_attempt(res, log_dir, 1)
-    attempts = 1
-    while res.status == "FAIL" and attempts <= retry:
-        attempts += 1
+    attempts = res.attempts
+    retries = 0
+    while res.status == "FAIL" and not res.queued_exhausted and retries < retry:
+        retries += 1
         prev_secs = res.seconds
         prev_note = res.note
-        res = attempt(attempts, reporting_disabled="reporter_startup_failure" in
-                      res.test_report.get("test_report_incomplete_reasons", []))
-        record_attempt(res, log_dir, attempts)
+        prev_queued = res.queued_seconds
+        prev_budget = res.queued_budget_used
+        res = attempt(attempts + 1, reporting_disabled="reporter_startup_failure" in
+                      res.test_report.get("test_report_incomplete_reasons", []),
+                      queued_budget_s=max(0.0, QUEUED_BUDGET_S - prev_budget)
+                      if prev_budget else None)
+        record_attempt(res, log_dir, attempts + 1)
+        attempts += res.attempts
         res.seconds += prev_secs
+        res.queued_seconds += prev_queued
+        res.queued_budget_used += prev_budget
         if res.status == "PASS":
-            res.note = (f"flaked; passed on attempt {attempts}/{retry + 1}"
+            res.note = (f"flaked; passed on attempt {retries + 1}/{retry + 1}"
                         + (f" (prev: {prev_note})" if prev_note else "")
                         + (f" ({res.note})" if res.note else ""))
-    if res.status == "FAIL" and attempts > 1:
+    if res.status == "FAIL" and retries > 0 and not res.queued_exhausted:
         res.note = (f"FAIL after {attempts} attempts"
                     + (f" ({res.note})" if res.note else ""))
     return res, attempts
@@ -5303,7 +5980,8 @@ def run_lanes(suites: List[Suite], log_dir: Path, jobs: int, retry: int,
     Results land in `completed` (id -> (Result, attempts)) and the first
     fail-fast red in state["stopped_after"]. Admission and that publication
     share the condition, so after the first red no new suite starts; suites
-    already admitted finish, including retries. Only the caller prints.
+    already admitted finish, including retries. Early-feedback mode streams
+    scrubbed completion blocks; the caller keeps final rows in catalog order.
     Each claim costs O(resources x queue length), never a scan of the catalog.
     """
     if not suites:
@@ -5379,6 +6057,17 @@ def run_lanes(suites: List[Suite], log_dir: Path, jobs: int, retry: int,
                 with ready:
                     if res is not None:
                         completed[suite.id] = (res, attempts)
+                        if state.get("stream_results"):
+                            # Stream one atomic, scrubbed completion block while
+                            # other lanes continue; catalog-order rows stay below.
+                            print(f"GATE_RESULT id={suite.id} status={res.status} "
+                                  f"seconds={res.seconds:.1f} attempts={attempts} "
+                                  f"queued_seconds={res.queued_seconds:.1f} "
+                                  f"note={scrub_evidence(res.note)}", flush=True)
+                            if res.status == "FAIL":
+                                for line in failed_suite_evidence([res], max_suites=1,
+                                                                  tail_lines=6, max_chars=1400):
+                                    print(line, flush=True)
                         if (fail_fast and res.status == "FAIL"
                                 and state["stopped_after"] is None):
                             state["stopped_after"] = suite.id
@@ -5400,17 +6089,58 @@ def run_lanes(suites: List[Suite], log_dir: Path, jobs: int, retry: int,
 
 
 def run_suites_parallel(suites: List[Suite], log_dir: Path, jobs: int,
-                        retry: int, fail_fast: bool) -> tuple[List[Result], dict]:
+                        retry: int, fail_fast: bool, *, early_feedback: bool = False,
+                        before_heavy_command=None) -> tuple[List[Result], dict]:
     completed = {}
-    state = {"stopped_after": None}
-    prelude, rest = plan_parallel_phases(suites)
-    run_lanes(prelude, log_dir, jobs, retry, fail_fast, completed, state)
-    # A fail-fast red in the prelude must not start any other suite.
-    if state["stopped_after"] is None:
-        run_lanes(rest, log_dir, jobs, retry, fail_fast, completed, state)
+    state = {"stopped_after": None, "stream_results": True}
+    early = [s for s in suites if early_feedback and s.id in _EARLY_FEEDBACK_SUITES]
+    remaining = [s for s in suites if s not in early]
+    # Collect all cheap failures, never retry them or let fail-fast hide one.
+    run_lanes(early, log_dir, jobs, 0, False, completed, state)
+    early_red = next((s.id for s in early if completed[s.id][0].status != "PASS"), None)
+    if early_red is not None:
+        state["stopped_after"] = early_red
+        for suite in early:
+            result = completed[suite.id][0]
+            if result.status != "PASS" and result.status != "FAIL":
+                result.note = f"early check not proven ({result.status}): {result.note}"
+                result.status = "FAIL"
+        print(f"EARLY_FEEDBACK RED after={early_red} heavy_started=0", flush=True)
+    else:
+        if early_feedback:
+            print(f"EARLY_FEEDBACK GREEN checks={len(early)}", flush=True)
+        if before_heavy_command:
+            prerequisite_started = time.perf_counter()
+            try:
+                status = subprocess.run(before_heavy_command, cwd=REPO, check=False).returncode
+            except OSError as exc:
+                print(f"heavy prerequisites could not start: {type(exc).__name__}", flush=True)
+                status = 127
+            if any(s.id in _SERVICE_SMOKE_SUITES for s in remaining):
+                print(f"SERVICE_SMOKE prerequisites_exit={status} "
+                      f"prerequisites_s={time.perf_counter() - prerequisite_started:.3f}", flush=True)
+            if status:
+                raise HeavyPrerequisitesFailed(status, completed)
+        smoke = [s for s in remaining if s.id in _SERVICE_SMOKE_SUITES]
+        remaining = [s for s in remaining if s.id not in _SERVICE_SMOKE_SUITES]
+        run_lanes(smoke, log_dir, jobs, 0, False, completed, state)
+        smoke_red = next((s.id for s in smoke if completed[s.id][0].status != "PASS"), None)
+        if smoke_red is not None:
+            state["stopped_after"] = smoke_red
+            result = completed[smoke_red][0]
+            if result.status == "SKIP":
+                result.note = f"service smoke not proven (SKIP): {result.note}"
+                result.status = "FAIL"
+            print(f"SERVICE_SMOKE RED after={smoke_red} heavy_started=0", flush=True)
+        prelude, rest = plan_parallel_phases(remaining)
+        if state["stopped_after"] is None:
+            run_lanes(prelude, log_dir, jobs, retry, fail_fast, completed, state)
+        # A fail-fast red in the prelude must not start any other suite.
+        if state["stopped_after"] is None:
+            run_lanes(rest, log_dir, jobs, retry, fail_fast, completed, state)
     stopped_after = state["stopped_after"]
 
-    # Only this thread prints. Completion order must never reorder the rows or
+    # Final rows stay catalog ordered. Streamed completion blocks above never reorder
     # their FLAKED/skip/audit callouts (or the machine-readable result file).
     results = []
     attempts_by_id = {}
@@ -5429,7 +6159,28 @@ def run_suites_parallel(suites: List[Suite], log_dir: Path, jobs: int,
     return results, attempts_by_id
 
 
-def _fingerprint_argv(argv: List[str]) -> List[str]:
+def _fingerprint_arg(arg: str, *, parent_relative: bool = False) -> str:
+    """Hash a target relative to the checkout, never through the checkout's own directory name or absolute
+    location: the relay clones each CI shard into a random /tmp/relay-src.* and the native gate into work/source,
+    so a raw `<checkout-name>/platform/...` target made every shard's fingerprint different. Flags, values and
+    targets outside the checkout hash unchanged."""
+    original = str(arg)
+    flag, value = "", original
+    if original.startswith("-") and "=" in original:
+        flag, value = original.split("=", 1)
+        flag += "="
+    normalized = value.replace("\\", "/")
+    repo_abs = str(REPO).replace("\\", "/")
+    name = REPO.name
+    for prefix in ((repo_abs, name) if parent_relative else (repo_abs,)):
+        if normalized == prefix:
+            return flag + "<REPO>"
+        if normalized.startswith(prefix + "/"):
+            return flag + "<REPO>/" + normalized[len(prefix) + 1:]
+    return original
+
+
+def _fingerprint_argv(argv: List[str], *, cwd=None) -> List[str]:
     """argv[0] is resolved from the ENVIRONMENT (sys.executable, shutil.which
     for npm/npx, Git Bash discovery), so its absolute path legitimately
     differs between jobs of one CI run: shard jobs run setup-node, the
@@ -5455,7 +6206,9 @@ def _fingerprint_argv(argv: List[str]) -> List[str]:
                 name = name[: -len(ext)]
         if name in ("npm", "npx", "bash"):
             head = f"<{name.upper()}>"
-    return [head] + [str(a) for a in argv[1:]]
+    return [head] + [_fingerprint_arg(
+        str(a), parent_relative=(cwd is not None and Path(cwd).absolute() == REPO_PARENT.absolute()))
+        for a in argv[1:]]
 
 
 def _fingerprint_cwd(cwd: Path) -> str:
@@ -5499,11 +6252,12 @@ def catalog_fingerprint(suites: List[Suite]) -> str:
     a runner that hands every job its own checkout directory."""
     entries = [{
         "id": s.id, "label": s.label, "kind": s.kind, "cwd": _fingerprint_cwd(s.cwd),
-        "argv": _fingerprint_argv(s.argv), "expected": s.expected,
+        "argv": _fingerprint_argv(s.argv, cwd=s.cwd), "expected": s.expected,
         "allowed_skip_reasons": list(s.allowed_skip_reasons),
         "allowed_vitest_skips": [list(pair) for pair in s.allowed_vitest_skips],
         "reset_authored": s.reset_authored, "db_gated": s.db_gated,
         "uses_database": s.uses_database,
+        "requires_linux": s.requires_linux,
         "database_skip_reasons": list(s.database_skip_reasons),
         "opt_in_env": s.opt_in_env, "timeout_s": s.timeout_s,
     } for s in suites]
@@ -5526,7 +6280,7 @@ def selection_catalog(root: Path) -> dict:
             raise ValueError("duplicate_catalog_id")
         rows = []
         for suite in suites:
-            command = _fingerprint_argv(suite.argv)
+            command = _fingerprint_argv(suite.argv, cwd=suite.cwd)
             python_child = command[0] == "<PYTHON>" and "-I" not in command
             row = {
                 "id": suite.id, "label": suite.label, "kind": suite.kind,
@@ -5542,6 +6296,8 @@ def selection_catalog(root: Path) -> dict:
                 "trace_kind": "python" if python_child else "unsupported",
                 "python_only": False, "classification": "unclassified",
             }
+            if process_capture_enabled() and process_capture_eligible(suite):
+                row["capture"] = "linux-process-tree"
             rows.append(row)
         return {"schema": "leaf.ci.catalog.v1", "kind": "web",
                 "catalog_sha256": catalog_fingerprint(suites), "suites": rows}
@@ -5700,6 +6456,40 @@ def emit_gate_proof(path: Path, *, fingerprint: str, total: int,
     return ""
 
 
+_REUSED_FROM_KEYS = frozenset({"project", "source_revision", "builds", "result_sha256", "receipt_sha256"})
+_REUSED_BUILD_ID = re.compile(r"leaf-ci-leaf-web-demo:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+
+
+def reused_from_problem(reused_from) -> str:
+    """Pure: '' when `reused_from` is a well-formed donor record, else the first problem (never raises)."""
+    if not isinstance(reused_from, dict):
+        return "must be a dict"
+    if set(reused_from) != _REUSED_FROM_KEYS:
+        return "must contain exactly the donor record keys"
+    if reused_from["project"] != "leaf-ci-leaf-web-demo":
+        return "wrong project"
+    revision = reused_from["source_revision"]
+    if not isinstance(revision, str) or not _HEX40.fullmatch(revision):
+        return "source_revision must be 40 lowercase hex characters"
+    builds = reused_from["builds"]
+    if not isinstance(builds, list) or not 1 <= len(builds) <= 8:
+        return "builds must be a list of 1 to 8 build ids"
+    if any(not isinstance(build, str) or not _REUSED_BUILD_ID.fullmatch(build)
+           for build in builds):
+        return "builds must contain valid project build ids"
+    if len(set(builds)) != len(builds):
+        return "builds must be unique"
+    for key in ("result_sha256", "receipt_sha256"):
+        digests = reused_from[key]
+        if not isinstance(digests, list) or len(digests) != len(builds):
+            return f"{key} must be a list matching builds in length"
+        if any(not isinstance(digest, str) or not _HEX64.fullmatch(digest)
+               for digest in digests):
+            return f"{key} must contain 64 lowercase hex characters per digest"
+    return ""
+
+
 def verify_gate_proof(proof_path: Path, expect_tree: str) -> int:
     """Exit code for --verify-gate-proof: 0 only when the document is a
     schema-2 tree-bound gate proof whose tree equals `expect_tree`, whose
@@ -5777,12 +6567,22 @@ def verify_gate_proof(proof_path: Path, expect_tree: str) -> int:
               f"evidence-free proof is never reused as a green skip, the "
               f"next build must re-run the gate")
         return 1
+    mode = data.get("mode", "run")
+    if mode not in ("run", "reused"):
+        print(f"NOT VERIFIED: unknown proof mode {mode!r}; only run and reused are accepted")
+        return 1
+    if mode == "reused":
+        problem = reused_from_problem(data.get("reused_from"))
+        if problem:
+            print(f"NOT VERIFIED: reused proof has a malformed reused_from ({problem})")
+            return 1
     src = data.get("source") if isinstance(data.get("source"), dict) else {}
     print(f"VERIFIED: gate proof binds tree {tree} on catalog fingerprint "
           f"{fingerprint} (self-reported mint: run {src.get('run_id') or '?'} "
           f"attempt {src.get('run_attempt') or '?'}, event "
           f"{src.get('event') or '?'} — informational; provenance comes from "
           f"the artifact's workflow_run metadata)")
+    print(f"VERIFIED mode: {mode}" + (f" from {len(data['reused_from']['builds'])} CI builds" if mode == "reused" else ""))
     return 0
 
 
@@ -5805,7 +6605,8 @@ def executed_count(res: Result) -> Optional[int]:
 def write_result_json(path: str, *, fingerprint: str, total: int,
                       shard_count: int, shard_index: int, selection: str,
                       suites: List[Suite], results: List[Result],
-                      attempts_by_id: dict, wall: float) -> None:
+                      attempts_by_id: dict, wall: float,
+                      execution_failure: bool = False, mode=None) -> None:
     """One shard's machine-readable outcome, written even when suites failed
     so the fan-in can name the failure instead of reporting a missing shard."""
     entries = []
@@ -5818,6 +6619,7 @@ def write_result_json(path: str, *, fingerprint: str, total: int,
             "expected": r.suite.expected,
             "attempts": attempts_by_id.get(r.suite.id, 1),
             "seconds": round(r.seconds, 1),
+            "queued_seconds": round(r.queued_seconds, 1),
             "note": r.note,
             "test_report": r.test_report,
         })
@@ -5831,9 +6633,14 @@ def write_result_json(path: str, *, fingerprint: str, total: int,
         "suite_ids": [s.id for s in suites],
         "results": entries,
         "executed_total": sum(e["executed"] or 0 for e in entries),
-        "any_fail": any(r.status == "FAIL" for r in results),
+        "any_fail": execution_failure or any(r.status == "FAIL" or
+            (r.suite.id in _SERVICE_SMOKE_SUITES and r.status != "PASS") for r in results),
         "wall_seconds": round(wall, 1),
     }
+    if mode == "tier":
+        payload.update(mode="tier", execution_mode="tier", selection_mode="tier")
+        for entry in entries:
+            entry["mode"] = "tier"
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, indent=1), encoding="utf-8")
@@ -5974,6 +6781,8 @@ def verify_shard_results(results_dir: Path, *,
     if shard_count >= 1:
         expected_partition = partition_suites(suites, shard_count)
         for path, d in parsed:
+            if any(d.get(key) == "tier" for key in ("mode", "execution_mode", "selection_mode")):
+                problems.append(f"{path.name}: mode=tier cannot prove a full gate")
             i = d.get("shard_index")
             if not isinstance(i, int) or not (0 <= i < shard_count):
                 problems.append(f"{path.name}: shard_index {i!r} outside 0..{shard_count - 1}")
@@ -6211,11 +7020,23 @@ def failed_suite_evidence(results, *, max_suites=5, tail_lines=30,
             block = [heading, "  log is unavailable"]
         else:
             header = re.compile(r"^\$ (?:attempt \d+ @ |\(cwd=)")
+            # Dev-server progress/warnings can bury the browser failure. Keep
+            # genuine server errors, but exclude ordinary WebServer chatter.
+            server_error = re.compile(
+                r"(?i)(?:error:|exception:|traceback|fatal\b|failed to|could not|unhandled)")
             lines = [line for line in scrub_evidence(text).splitlines()
-                     if not header.match(line)]
-            first = next((line for line in strip_ansi(text).splitlines() if re.search(
+                     if not header.match(line) and not (
+                         line.lstrip().startswith('[WebServer]')
+                         and not server_error.search(line))]
+            playwright_failure = re.compile(r"^\s*(?:[\u2718\u00d7x]\s+\d+\b|\d+\)\s+)")
+            spec_path = re.compile(r"\S+\.spec\.[cm]?[jt]sx?(?::\d+){1,2}\b")
+            # Passing titles can contain words such as 'failed' or 'refused'.
+            # Prefer an actual Playwright failure marker with its source path.
+            first = next((line for line in lines if playwright_failure.search(line)
+                          and spec_path.search(line)), None)
+            first = first or next((line for line in lines if re.search(
                 r"(?i)\b(error|exception|traceback|failed|fatal|panic|cannot|refused|timed out)\b",
-                line) and not header.match(line)), "none matched")
+                line) and not re.match(r"^\s*[\u2713\u2714]\s+\d+\b", line)), "none matched")
             nonempty = [line for line in lines if line.strip()]
             tail = nonempty[-tail_lines:] if tail_lines > 0 else []
             block = [heading, f"  first error: {scrub_evidence(first)[:400]}", "  tail:"]
@@ -6229,6 +7050,12 @@ def failed_suite_evidence(results, *, max_suites=5, tail_lines=30,
 
 def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
                      selection: str = NO_FILTER) -> None:
+    def emit(*values):
+        if selection.startswith("mode=tier ") and values:
+            print("mode=tier", *values)
+        else:
+            print(*values)
+
     rows = []
     for r in results:
         if r.suite.expected is None:
@@ -6275,15 +7102,15 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
         return "  ".join(cells).rstrip()
 
     line = "-" * (sum(widths) + 2 * (len(headers) - 1))
-    print()
-    print("=" * len(line))
-    print("  leaf-web-demo -- GATE SCOREBOARD")
-    print("=" * len(line))
-    print(fmt(headers))
-    print(line)
+    emit()
+    emit("=" * len(line))
+    emit("  leaf-web-demo -- GATE SCOREBOARD")
+    emit("=" * len(line))
+    emit(fmt(headers))
+    emit(line)
     for row in rows:
-        print(fmt(row))
-    print(line)
+        emit(fmt(row))
+    emit(line)
 
     npass = sum(1 for r in results if r.status == "PASS")
     nfail = sum(1 for r in results if r.status == "FAIL")
@@ -6291,15 +7118,15 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
     nunavailable = sum(1 for r in results if r.status == "UNAVAILABLE")
     total_tests = sum(r.counts.get("passed", 0) for r in results)
     total_skipped = sum(r.counts.get("skipped", 0) for r in results)
-    print(f"  suites: {npass} PASS  {nfail} FAIL  {nskip} SKIP  "
+    emit(f"  suites: {npass} PASS  {nfail} FAIL  {nskip} SKIP  "
           f"{nunavailable} UNAVAILABLE   "
           f"| test cases passed: {total_tests}  skipped: {total_skipped}   "
           f"| wall: {wall:.1f}s")
     # The counts above are only meaningful next to WHICH suites they counted.
     # Echo the selection so a scoreboard can be checked against the command that
     # produced it instead of being trusted to answer the question that was asked.
-    print(f"  filter: {selection}")
-    print(f"  logs:   {log_dir}")
+    emit(f"  filter: {selection}")
+    emit(f"  logs:   {log_dir}")
 
     # A suite that only went green on a retry is NOT the same as a green suite,
     # and one annotated row inside a 90-row scoreboard is easy to miss. Call the
@@ -6307,11 +7134,11 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
     # passed the second time".
     flaked = [r.suite.id for r in results if r.status == "PASS" and "flaked" in r.note]
     if flaked:
-        print(f"  FLAKED (passed only on retry, so this run's green is soft): "
+        emit(f"  FLAKED (passed only on retry, so this run's green is soft): "
               f"{', '.join(flaked)}")
     allskip = [r.suite.id for r in results if r.status == "SKIP" and r.got == "0"]
     if allskip:
-        print(f"  NO COVERAGE (every test skipped, host artifact absent): "
+        emit(f"  NO COVERAGE (every test skipped, host artifact absent): "
               f"{', '.join(allskip)}")
     # A registry outage is a distinct outcome, not a failed gate, and a single
     # row in a long scoreboard is exactly as easy to miss as a flake -- call it
@@ -6329,18 +7156,20 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
     for r in results:
         if r.status == "UNAVAILABLE":
             detail = r.note or f"{r.suite.id} registry unavailable"
-            print(f"  NOT PROVEN BY AUDIT: {detail}")
+            emit(f"  NOT PROVEN BY AUDIT: {detail}")
     for evidence_line in failed_suite_evidence(results):
-        print(evidence_line)
-    print("=" * len(line))
+        emit(evidence_line)
+    emit("=" * len(line))
 
 
 # --jobs auto sizing. Measured 2026-09-23 on leaf-ci-leaf-web-demo (428 suites):
 # 8 vCPU / 15 GB ran jobs 4 = 1048 s, jobs 6 = 982 s, jobs 8 = 975 s.
 # At 8 workers pool suite-seconds inflate x1.57 (browser suites x1.8-1.96), so a worker needs ~2 vCPU.
+# Round CPU workers half up: job 12613's 3 CPU / 12 GiB ran serially into the deadline.
 _AUTO_CPUS_PER_WORKER = 2
-# Heavy browser suites plus their servers peak near 3 GiB per worker on that same 15 GB box.
-_AUTO_GIB_PER_WORKER = 3
+# Browser suites peaked near 3 GiB per worker in 2026-09, but every web suite now holds the web-tree lock, so one browser suite runs at a time and the other workers run pytest.
+# 2 GiB per worker lets an 8 CPU / 8 GiB worker run 4 jobs instead of 2 (2026-11-07, unmeasured until the first full run).
+_AUTO_GIB_PER_WORKER = 2
 # Conflict lanes (#1400) and the graph memo (#1402) removed the old floor; on 36 vCPU XLARGE,
 # 2026-09-24, gate wall was 276 s at 8, 227 s at 12, 207 s at 16 workers, 0 FAIL/RETRY each.
 # 16 is also --jobs' own upper bound.
@@ -6350,8 +7179,11 @@ _AUTO_READ_LIMIT = 8192
 
 
 def resolve_auto_jobs(cpus: float, mem_bytes: int | None) -> int:
-    """Pure: workers = min(cpus / 2, mem_gib / 3, 16), floored, never below 1."""
-    bounds = [int(cpus // _AUTO_CPUS_PER_WORKER), _AUTO_MAX_JOBS]
+    """Pure: min(cpus / 2 rounded half up, mem_gib / 2 floored, 16), at least 1.
+
+    Job 12613's 3 CPU / 12 GiB ran serially into the deadline with CPU flooring.
+    """
+    bounds = [int((cpus + _AUTO_CPUS_PER_WORKER / 2) // _AUTO_CPUS_PER_WORKER), _AUTO_MAX_JOBS]
     if mem_bytes is not None:
         bounds.append(int(mem_bytes // (_AUTO_GIB_PER_WORKER * 2 ** 30)))
     return max(1, min(bounds))
@@ -6452,8 +7284,14 @@ def _jobs_count(value: str) -> int | str:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Leaf web demo full gate runner")
     ap.add_argument("--list", action="store_true", help="print the suite catalog; execute nothing")
+    ap.add_argument("--early-feedback", action="store_true",
+                    help="collect source-only cheap checks before heavy suites; no cheap retries")
+    ap.add_argument("--before-heavy-command", nargs=argparse.REMAINDER,
+                    help="trusted caller argv for heavy prerequisites, after early GREEN")
     ap.add_argument("--catalog-root", default=None, metavar="DIR",
                     help="checkout root used to normalize --list declarations")
+    ap.add_argument("--tier-file", default=None, metavar="PATH",
+                    help="opt-in PR tier policy; missing, invalid or disabled preserves existing selection")
     ap.add_argument("--fail-fast", action="store_true",
                     help="stop at the first failing gate (default: run all). With "
                          "--jobs > 1, stop dispatching new suites and wait for "
@@ -6520,6 +7358,11 @@ def main() -> int:
                          "the proof document.")
     args = ap.parse_args()
 
+    if args.before_heavy_command is not None and not args.early_feedback:
+        ap.error("--before-heavy-command requires --early-feedback")
+    if args.before_heavy_command == []:
+        ap.error("--before-heavy-command requires nonempty argv")
+
     if args.list:
         try:
             document = selection_catalog(Path(args.catalog_root) if args.catalog_root else REPO)
@@ -6531,12 +7374,19 @@ def main() -> int:
     if args.catalog_root:
         ap.error("--catalog-root requires --list")
 
+    tier = load_pr_tier(args.tier_file) if args.tier_file else None
+    if tier is not None and (args.only or args.verify_shard_results or args.verify_gate_proof
+                             or args.expect_tree or args.emit_proof):
+        print("mode=tier cannot combine with --only or proof/fan-in modes")
+        return 2
+
     if args.jobs == "auto":
         cpus = _effective_cpus()
         mem_bytes = _effective_mem_bytes()
         args.jobs = resolve_auto_jobs(cpus, mem_bytes)
         mem_gib = "unknown" if mem_bytes is None else f"{mem_bytes / 2 ** 30:.1f}"
-        print(f"jobs=auto resolved to {args.jobs} (cpus={cpus:.1f} mem_gib={mem_gib})")
+        mode_label = " mode=tier" if tier is not None else ""
+        print(f"jobs=auto resolved to {args.jobs} (cpus={cpus:.1f} mem_gib={mem_gib}){mode_label}")
 
     if args.verify_gate_proof or args.expect_tree:
         if not (args.verify_gate_proof and args.expect_tree):
@@ -6621,7 +7471,23 @@ def main() -> int:
     fingerprint = catalog_fingerprint(suites)
     only: List[str] = args.only or []
     selection = describe_selection(only)
-    if only:
+    if tier is not None:
+        suites = select_pr_tier(suites, tier)
+        if args.shard_index is not None:
+            tier_suites = suites
+            partition = partition_suites(suites, args.shard_count)[args.shard_index]
+            try:
+                local_ids = pr_tier_closure({s.id for s in partition}, {s.id for s in tier_suites},
+                                           tier.get("prerequisites"))
+                suites = [s for s in tier_suites if s.id in local_ids]
+            except ValueError as exc:
+                print(f"INFO: mode=tier using all tier suites on this shard ({exc})")
+        for suite in suites:
+            suite.pr_tier_mode = "tier"
+        selection = f"mode=tier --tier-file {args.tier_file}  -> {len(suites)} of {total} suites"
+        if args.shard_index is not None:
+            selection += f" --shard-count {args.shard_count} --shard-index {args.shard_index}"
+    elif only:
         suites, dead = select_suites(suites, only)
         if dead:
             for pattern in dead:
@@ -6636,8 +7502,9 @@ def main() -> int:
                      f"--shard-index {args.shard_index}"
                      f"  -> {len(suites)} of {total} suites")
 
+    mode_label = " mode=tier" if tier is not None else ""
     print(f"leaf-web-demo gate runner -- {len(suites)} suites, "
-          f"separate processes, logs -> {log_dir}")
+          f"separate processes, logs -> {log_dir}{mode_label}")
     print(f"  selection: {selection}")
 
     # Before any suite: some suites migrate the schema in their own fixtures
@@ -6662,32 +7529,44 @@ def main() -> int:
     results: List[Result] = []
     attempts_by_id: dict = {}
     wall0 = time.perf_counter()
+    prerequisite_failure = 0
+    phased = args.jobs > 1 or args.early_feedback or any(s.id in _SERVICE_SMOKE_SUITES for s in suites)
     try:
-      if args.jobs > 1:
+      if phased:
         results, attempts_by_id = run_suites_parallel(
-            suites, log_dir, args.jobs, args.retry, args.fail_fast)
-      for suite in suites if args.jobs == 1 else ():
+            suites, log_dir, args.jobs, args.retry, args.fail_fast,
+            early_feedback=args.early_feedback,
+            before_heavy_command=args.before_heavy_command)
+      for suite in suites if not phased else ():
         print(f"  ... {suite.id:<22} ", end="", flush=True)
         res = run_suite_guarded(suite, log_dir, attempt=1)
         record_attempt(res, log_dir, 1)
-        attempts = 1
+        attempts = res.attempts
+        retries = 0
         # Retry a FAILED integration suite (these boot real servers -> load
         # flakes), including spawn failures — a child that never started is
         # retried exactly like a red one.
-        while (res.status == "FAIL" and attempts <= args.retry):
-            attempts += 1
+        while (res.status == "FAIL" and not res.queued_exhausted and retries < args.retry):
+            retries += 1
             prev_secs = res.seconds
             prev_note = res.note
+            prev_queued = res.queued_seconds
+            prev_budget = res.queued_budget_used
             retry_options = ({"reporting_disabled": True} if "reporter_startup_failure" in
                              res.test_report.get("test_report_incomplete_reasons", []) else {})
-            res = run_suite_guarded(suite, log_dir, attempt=attempts, **retry_options)
-            record_attempt(res, log_dir, attempts)
+            if prev_budget:
+                retry_options["queued_budget_s"] = max(0.0, QUEUED_BUDGET_S - prev_budget)
+            res = run_suite_guarded(suite, log_dir, attempt=attempts + 1, **retry_options)
+            record_attempt(res, log_dir, attempts + 1)
+            attempts += res.attempts
             res.seconds += prev_secs  # cumulative time spent on this row
+            res.queued_seconds += prev_queued
+            res.queued_budget_used += prev_budget
             if res.status == "PASS":
-                res.note = (f"flaked; passed on attempt {attempts}/{args.retry + 1}"
+                res.note = (f"flaked; passed on attempt {retries + 1}/{args.retry + 1}"
                             + (f" (prev: {prev_note})" if prev_note else "")
                             + (f" ({res.note})" if res.note else ""))
-        if res.status == "FAIL" and attempts > 1:
+        if res.status == "FAIL" and retries > 0 and not res.queued_exhausted:
             res.note = (f"FAIL after {attempts} attempts"
                         + (f" ({res.note})" if res.note else ""))
         attempts_by_id[suite.id] = attempts
@@ -6702,6 +7581,11 @@ def main() -> int:
         if res.status == "FAIL" and args.fail_fast:
             print(f"  --fail-fast: stopping after {suite.id}")
             break
+    except HeavyPrerequisitesFailed as exc:
+        prerequisite_failure = exc.status
+        results = [exc.completed[s.id][0] for s in suites if s.id in exc.completed]
+        attempts_by_id = {sid: item[1] for sid, item in exc.completed.items()}
+        print(f"FAIL: {exc}; required suites remain unexecuted", flush=True)
     finally:
         # Restore authored_tools.json to the operator's pre-run content (or remove
         # it if it did not exist before) so the gate run leaves no side effect.
@@ -6719,11 +7603,14 @@ def main() -> int:
             shard_count=args.shard_count,
             shard_index=args.shard_index if args.shard_index is not None else 0,
             selection=selection, suites=suites, results=results,
-            attempts_by_id=attempts_by_id, wall=wall)
+            attempts_by_id=attempts_by_id, wall=wall,
+            execution_failure=bool(prerequisite_failure),
+            **({"mode": "tier"} if tier is not None else {}))
 
     # EXIT 0 iff every non-skipped gate passed.
-    any_fail = any(r.status == "FAIL" for r in results)
-    return 1 if any_fail else 0
+    any_fail = any(r.status == "FAIL" or
+                   (r.suite.id in _SERVICE_SMOKE_SUITES and r.status != "PASS") for r in results)
+    return 1 if any_fail or prerequisite_failure else 0
 
 
 if __name__ == "__main__":

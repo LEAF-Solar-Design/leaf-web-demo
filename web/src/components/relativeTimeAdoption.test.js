@@ -53,7 +53,7 @@ describe('shared time formatter adoption', () => {
     const versionTime = container.querySelector('.vh-when')
     const checkout = container.querySelector('.checkout-chip')
     expect(engineTime.textContent).toBe('now')
-    expect(mounted.textContent).toBe('mounted now')
+    expect(mounted.textContent).toBe('Linked now')
     expect(versionTime.textContent).toBe('now')
     expect(engineTime.title).toBe('Oct 5, 2:13 PM CT')
     expect(mounted.title).toBe('Oct 5, 2:13 PM CT')
@@ -65,7 +65,7 @@ describe('shared time formatter adoption', () => {
 
     act(() => vi.advanceTimersByTime(60_000))
     expect(engineTime.textContent).toBe('1 m')
-    expect(mounted.textContent).toBe('mounted 1 m')
+    expect(mounted.textContent).toBe('Linked 1 m')
     expect(versionTime.textContent).toBe('1 m')
     expect(versionTime.getAttributeNames()).toEqual(['class'])
     expect(checkout.querySelector('.t-rel')).toBeNull()

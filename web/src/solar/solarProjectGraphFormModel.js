@@ -1,5 +1,6 @@
 import { createSolarDrawingBinding, sameSolarDrawingBinding } from './solarDrawingBinding.js'
 import { deriveProjectSettingsState } from './solarSettingsModel.js'
+import { readProjectSolarWorkerRefusal, projectSolarWorkerRefusal } from './solarProjectCompletion.js'
 
 export const PROJECT_SOLAR_GRAPH_TOOLS = Object.freeze([
   'solar-panels-from-drawing', 'solar-panel-groups', 'solar-homeruns', 'solar-feeders', 'solar-schedule',
@@ -294,45 +295,95 @@ export function buildProjectSolarGraphRequest({ tool, binding, state, currentSta
   return { ok: true, request: { tool, params, catalogDigest, idempotencyKey } }
 }
 
+function previewField(value, key) {
+  if (value == null) return undefined
+  if (typeof value !== 'object' || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) {
+    throw new TypeError('Invalid preview record')
+  }
+  const descriptor = Object.getOwnPropertyDescriptor(value, key)
+  if (!descriptor) return undefined
+  if (!Object.hasOwn(descriptor, 'value')) throw new TypeError('Invalid preview field')
+  return descriptor.value
+}
+
+function previewList(value, limit) {
+  if (!Array.isArray(value) || value.length > limit) throw new TypeError('Invalid preview list')
+  const copy = []
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index))
+    if (!descriptor || !Object.hasOwn(descriptor, 'value')) throw new TypeError('Invalid preview item')
+    copy.push(descriptor.value)
+  }
+  return copy
+}
+
 export function exactProjectSolarGraphPreview(input) {
   try {
     const { tool, catalogDigest, outcome } = input
     const fail = (reasonCode = null) => ({ accepted: false, reasonCode })
-    if (outcome?.ok !== true) return fail(boundedCode(outcome?.envelope?.error?.reason_code) ?? boundedCode(outcome?.reason))
-    const families = outcome.data?.families
+    if (previewField(outcome, 'ok') !== true) {
+      const submission = feedbackSubmission(outcome)
+      const codes = [submission?.reason, submission?.reason_code, submission?.reasonCode,
+        submission?.error?.reason_code, submission?.envelope?.reason_code,
+        submission?.envelope?.error?.reason_code]
+      if (codes.some((code) => typeof code === 'string' && code.toLowerCase() === 'sip_r4_worker_unavailable')) {
+        return fail(readProjectSolarWorkerRefusal(submission))
+      }
+      return fail(boundedCode(submission?.envelope?.error?.reason_code) ?? boundedCode(submission?.reason))
+    }
+    const families = previewField(previewField(outcome, 'data'), 'families')
     if (!PROJECT_SOLAR_GRAPH_TOOLS.includes(tool) || typeof catalogDigest !== 'string' || !DIGEST.test(catalogDigest)
         || !Array.isArray(families) || families.length > 64) return fail()
     const rows = []
     let total = 0
-    for (const family of families) {
-      if (!Array.isArray(family?.capabilities)) return fail()
-      total += family.capabilities.length
+    for (const family of previewList(families, 64)) {
+      const capabilities = previewList(previewField(family, 'capabilities'), 1024)
+      total += capabilities.length
       if (total > 1024) return fail()
-      for (const row of family.capabilities) if (row?.name === tool) rows.push(row)
+      for (const row of capabilities) if (previewField(row, 'name') === tool) rows.push(row)
     }
     if (!rows.length) return fail()
     let accepted = true
     const codes = new Set()
     for (const row of rows) {
-      const view = row.availability
-      const ready = row.catalog_digest === catalogDigest && view?.admission_checked === true
-        && view.admission?.status_code === 200 && view.admission.error === null
-        && ['entitled', 'engine_ready', 'implemented', 'input_ready', 'runnable'].every((key) => view[key] === true)
-        && Array.isArray(view.refusal_reasons) && view.refusal_reasons.length === 0
+      const view = previewField(row, 'availability')
+      const admission = previewField(view, 'admission')
+      const error = previewField(admission, 'error')
+      const rawListed = previewField(view, 'refusal_reasons')
+      const listed = Array.isArray(rawListed) ? previewList(rawListed, 1024) : null
+      const ready = previewField(row, 'catalog_digest') === catalogDigest && previewField(view, 'admission_checked') === true
+        && previewField(admission, 'status_code') === 200 && error === null
+        && ['entitled', 'engine_ready', 'implemented', 'input_ready', 'runnable'].every((key) => previewField(view, key) === true)
+        && listed !== null && listed.length === 0
       if (!ready) accepted = false
-      const admissionCode = boundedCode(view?.admission?.error?.reason_code)
+      const admissionCode = boundedCode(previewField(error, 'reason_code'))
       if (admissionCode) codes.add(admissionCode)
-      else if (Array.isArray(view?.refusal_reasons)) {
-        if (view.refusal_reasons.length > 1024) return fail()
-        for (const value of view.refusal_reasons) {
+      else if (listed) {
+        for (const value of listed) {
           const code = boundedCode(value)
           if (code) codes.add(code)
         }
       }
+      // A worker denial must agree with every reported reason, including the list
+      // accompanying an admission error. Other catalog refusal precedence is unchanged.
+      if (admissionCode?.toLowerCase() === 'sip_r4_worker_unavailable'
+          || (Array.isArray(listed) && listed.some((code) =>
+            typeof code === 'string' && code.toLowerCase() === 'sip_r4_worker_unavailable'))) {
+        if (!Array.isArray(listed) || listed.length > 1024 || listed.some((code) =>
+          !boundedCode(code) || code.toLowerCase() !== 'sip_r4_worker_unavailable')
+          || (admissionCode && admissionCode.toLowerCase() !== 'sip_r4_worker_unavailable')) return fail()
+        if (!readProjectSolarWorkerRefusal({ ok: false, status: 503, reason: 'sip_r4_worker_unavailable', error })) return fail()
+        const outerReason = previewField(outcome, 'reason')
+        if (outerReason != null && (typeof outerReason !== 'string'
+            || outerReason.toLowerCase() !== 'sip_r4_worker_unavailable')) return fail()
+        codes.delete(admissionCode)
+        for (const code of listed) codes.delete(code)
+        codes.add('sip_r4_worker_unavailable')
+      }
     }
     if (accepted) return { accepted: true, reasonCode: null }
     if (!codes.size) {
-      const code = boundedCode(outcome.reason)
+      const code = boundedCode(previewField(outcome, 'reason'))
       if (code) codes.add(code)
     }
     return fail(codes.size === 1 ? [...codes][0] : null)
@@ -349,14 +400,40 @@ function refusalText(code, tool) {
   }
 }
 
+// Read only the feedback projection. Accessors in these fields cannot manufacture
+// a definite refusal (or run while we decide whether a response is uncertain).
+function feedbackSubmission(value, depth = 0) {
+  if (value == null) return value
+  if (depth > 2 || typeof value !== 'object' ||
+      ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new TypeError('Invalid submission')
+  const copy = {}
+  for (const key of ['ok', 'status', 'status_code', 'state', 'reason', 'reason_code', 'reasonCode', 'job_id', 'jobId',
+    'output_version_id', 'outputVersionId', 'result', 'job', 'data', 'envelope', 'error']) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key)
+    if (!descriptor) continue
+    if (!Object.hasOwn(descriptor, 'value')) throw new TypeError('Invalid submission field')
+    copy[key] = ['data', 'envelope', 'error'].includes(key)
+      ? feedbackSubmission(descriptor.value, depth + 1) : descriptor.value
+  }
+  return copy
+}
+
 export function projectSolarGraphFeedback(input) {
   try {
-    const { tool, submission, completion } = input
+    const { tool, completion } = input
+    const submission = input.submission === undefined ? undefined : feedbackSubmission(input.submission)
     const result = (state, reasonCode = null, jobId = null, outputVersionId = null) => ({ state, reasonCode,
       text: state === 'refused' || (state === 'failed' && reasonCode !== null) ? refusalText(reasonCode, tool)
         : projectSolarGraphReason(state === 'stale' ? 'scope_stale' : state, tool), jobId, outputVersionId })
     if ((submission !== undefined) === (completion !== undefined)) return result('outcome_unknown')
     if (submission !== undefined) {
+      const workerReason = readProjectSolarWorkerRefusal(submission)
+      // Preview denials already use a synthetic 409; apply the same guarded
+      // reason agreement without changing catalog readiness or admission.
+      const previewWorkerReason = submission?.status === 409
+        ? readProjectSolarWorkerRefusal({ ...submission, status: 503 }) : null
+      if (workerReason || previewWorkerReason) return { ...result('refused', 'sip_r4_worker_unavailable'),
+        text: projectSolarWorkerRefusal(tool).message }
       if (submission?.ok === true && submission.status === 202 && submission.data?.status === 'submitted'
           && validUuid(submission.data.job_id) && submission.reason == null && submission.error == null
           && submission.envelope?.error == null && submission.data.error == null) {

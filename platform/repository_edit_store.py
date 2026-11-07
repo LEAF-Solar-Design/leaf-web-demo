@@ -256,6 +256,72 @@ def await_confirmation(edit_id: object, *, expected_version: int,
                        expected_version=expected_version, transition_key=transition_key)
 
 
+def _scope_values(tenant_id, organization_id, project_id, repo_key):
+    return {field: _uuid(value, field) for field, value in zip(
+        ("tenant_id", "organization_id", "project_id", "repo_key"),
+        (tenant_id, organization_id, project_id, repo_key))}
+
+
+_SCOPED_EDIT = (
+    "e.tenant_id=%(tenant_id)s AND e.organization_id=%(organization_id)s "
+    "AND e.project_id=%(project_id)s AND e.repo_key=%(repo_key)s "
+    "AND EXISTS (SELECT 1 FROM project_repository_authorities a WHERE "
+    "a.tenant_id=e.tenant_id AND a.organization_id=e.organization_id "
+    "AND a.project_id=e.project_id AND a.repo_key=e.repo_key)"
+)
+
+
+def get_edit(tenant_id, organization_id, project_id, repo_key, edit_id):
+    """Conceal missing, foreign and replaced repository mappings alike."""
+    values = _scope_values(tenant_id, organization_id, project_id, repo_key)
+    values["edit_id"] = _uuid(edit_id, "edit_id")
+    with db.cursor() as cur:
+        cur.execute("SELECT e.* FROM project_repository_edits e WHERE " +
+                    _SCOPED_EDIT + " AND e.edit_id=%(edit_id)s", values)
+        return _mapping(cur.fetchone())
+
+
+def list_edits(tenant_id, organization_id, project_id, repo_key, *, limit=20):
+    values = _scope_values(tenant_id, organization_id, project_id, repo_key)
+    values["limit"] = min(_positive(limit, "limit"), 20)
+    with db.cursor() as cur:
+        cur.execute("SELECT e.* FROM project_repository_edits e WHERE " +
+                    _SCOPED_EDIT + " ORDER BY e.created_at DESC,e.edit_id DESC LIMIT %(limit)s", values)
+        return [_mapping(row) for row in cur.fetchall()]
+
+
+def reject_edit(tenant_id, organization_id, project_id, repo_key, edit_id, *,
+                receipt_digest, expected_version, transition_key):
+    values = _scope_values(tenant_id, organization_id, project_id, repo_key)
+    values.update(edit_id=_uuid(edit_id, "edit_id"),
+                  receipt_digest=_digest(receipt_digest, "receipt_digest"),
+                  version=_positive(expected_version, "expected_version"),
+                  key=_key(transition_key))
+
+    def operation(conn):
+        with conn.cursor() as cur:
+            cur.execute("SELECT e.* FROM project_repository_edits e WHERE " +
+                        _SCOPED_EDIT + " AND e.edit_id=%(edit_id)s FOR UPDATE OF e", values)
+            row = _mapping(cur.fetchone())
+            if row is None:
+                raise RepositoryEditStoreError("edit_not_found")
+            if (row["state"] not in ("staged", "awaiting_confirmation")
+                    or row["version"] != values["version"]
+                    or row["receipt_digest"] != values["receipt_digest"]
+                    or row["confirmation_id"] is not None):
+                raise RepositoryEditStoreError("stale_transition")
+            cur.execute("SELECT 1 FROM project_repository_edit_confirmations "
+                        "WHERE edit_id=%(edit_id)s AND consumed_at IS NOT NULL", values)
+            if cur.fetchone() is not None:
+                raise RepositoryEditStoreError("confirmation_already_consumed")
+            cur.execute("UPDATE project_repository_edits SET state='rejected',"
+                        "version=version+1,updated_at=NOW() WHERE edit_id=%(edit_id)s RETURNING *", values)
+            updated = _mapping(cur.fetchone())
+            _audit(cur, updated, row["state"], "rejected", values["key"])
+            return updated
+    return db.run_transaction(operation, isolation="serializable")
+
+
 def put_confirmation(confirmation: Any, *, expected_edit_version: int,
                      transition_key: str) -> dict[str, Any]:
     try:
@@ -305,7 +371,10 @@ def put_confirmation(confirmation: Any, *, expected_edit_version: int,
             stored = _mapping(cur.fetchone())
             if stored is None or any(stored.get(field) != str(values[target]) for field, target in (
                 ("receipt_digest", "receipt"), ("edit_id", "edit"), ("writer_lease_id", "lease"),
-                ("staged_tree", "tree"), ("idempotency_key", "key"))):
+                ("staged_tree", "tree"), ("idempotency_key", "key"),
+                ("approver_binding_id", "approver"), ("tenant_id", "tenant"),
+                ("organization_id", "organization"), ("project_id", "project"),
+                ("repo_key", "repo"))) or stored["writer_lease_generation"] != values["generation"]:
                 raise RepositoryEditStoreError("confirmation_conflict")
             return stored
     return db.run_transaction(operation, isolation="serializable")

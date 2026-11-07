@@ -104,7 +104,12 @@ export function BoardTiles({ workspace, drawing, catalog, renderTile, studioPres
                   </li>
                 )
               })}</ul>
-            ) : <p className="ground-empty">{workspace ? 'No built tools yet' : 'Authored tools attach to the project'}</p>}
+            ) : (
+              <>
+                <p className="ground-empty">{workspace ? 'No built tools yet' : 'Authored tools attach to the project'}</p>
+                {workspace && typeof actions?.onOpenTool === 'function' && <button type="button" className="ground-row-action" onClick={() => actions.onOpenTool()}>Open tools</button>}
+              </>
+            )}
           </section>
           <section className="ground-tile" data-tile="catalog" aria-label="Catalog">
             <h3>Catalog</h3>

@@ -14,10 +14,17 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
+import { z } from "zod";
 import { SPINE_SYSTEM_PROMPT } from "./spineSystemPrompt.js";
-import { INTEGRATION_TOOL_INPUTS, SPINE_TOOL_NAMES } from "../ports/index.js";
+import { ProjectPhotoInspection, photoRequest, PHOTO_FAILURE } from "./projectPhotoInspection.js";
+import { INTEGRATION_TOOL_INPUTS, SPINE_TOOL_NAMES, ProjectPhotoAssignmentRequest, PHOTO_ASSIGNMENT_FAILURE, PHOTO_ASSIGNMENT_SUMMARY, type ProjectPhotoAssignmentInput } from "../ports/index.js";
+import {
+  DEVICE_TOOL_GUIDANCE, DEVICE_TOOL_INPUTS, DEVICE_TOOL_OPERATIONS,
+  DeviceToolResponse, deviceToolError, isDeviceTool,
+} from "./deviceTools.js";
 import {
   IntegrationClientError, integrationErrorMessage, validateIntegrationResponse,
+  ProjectPageProposalRequest,
 } from "../ports/impl/appRunClient.js";
 import type { IntegrationTool } from "../ports/impl/appRunClient.js";
 import type {
@@ -48,6 +55,7 @@ import type {
   IntegrationQueryInput,
   IntegrationSaveElementInput,
   IntegrationToolResult,
+  PlatformSourceRange,
 } from "../ports/index.js";
 
 // --------------------------------------------------------------------------- //
@@ -153,6 +161,8 @@ export interface ConverseMessageInput {
   /** Authenticated app-only instant route, never model input. */
   instantAssignment?: InstantSessionAssignment;
   instantDrawingContext?: InstantDrawingContext;
+  /** Private authenticated transport marker; authority remains on the app back-edge. */
+  projectExecution?: "canonical-read";
   authoritySessionId?: string;
   authorityTurnId?: string;
   /** App-owned identity and lease mount for the standard-service facade. */
@@ -195,15 +205,24 @@ export class ConverseLoop {
     jobId: string,
   ): Promise<
     | { ok: true; status: "complete"; result?: unknown }
-    | { ok: false; message: string }
+    | { ok: true; status: "submitted" | "running"; pending: true;
+        observation: "timeout" | "unavailable"; message: string;
+        next_action: { tool: "job_status"; args: { job_id: string } } }
+    | { ok: false; status: "failed" | "invalid"; message: string }
   > {
     const deadline = Date.now() + this.readWaitS * 1000;
+    let lastStatus: "submitted" | "running" = "submitted";
+    const pending = (observation: "timeout" | "unavailable") => ({
+      ok: true as const, status: lastStatus, pending: true as const, observation,
+      message: "The job was accepted. Use job_status with this job_id to follow it; do not dispatch it again.",
+      next_action: { tool: "job_status" as const, args: { job_id: jobId } },
+    });
     while (Date.now() < deadline) {
       let row: Record<string, unknown>;
       try {
         row = await appRun.getJob(tenantId, jobId);
       } catch {
-        return { ok: false, message: "job status was unavailable after dispatch" };
+        return pending("unavailable");
       }
       const status = String(row.status ?? "");
       if (status === "complete") {
@@ -214,14 +233,15 @@ export class ConverseLoop {
         };
       }
       if (status === "failed") {
-        return { ok: false, message: "job failed after dispatch" };
+        return { ok: false, status: "failed", message: "job failed after dispatch" };
       }
       if (!status || !["submitted", "running"].includes(status)) {
-        return { ok: false, message: "job status was invalid after dispatch" };
+        return { ok: false, status: "invalid", message: "job status was invalid after dispatch" };
       }
+      lastStatus = status as "submitted" | "running";
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
-    return { ok: false, message: "job polling timed out after dispatch" };
+    return pending("timeout");
   }
 
   /** Idempotent per (tenant, drawing) — section-1 POST /converse/sessions. */
@@ -511,8 +531,10 @@ export class ConverseLoop {
       const tools = this.buildExecutor(session, turnId, state, emit, {
         instantAssignment: input.instantAssignment,
         instantDrawingContext: input.instantDrawingContext,
+        projectExecution: input.projectExecution,
         authoritySessionId: input.authoritySessionId,
         authorityTurnId: input.authorityTurnId,
+        pageProposalSource: pageProposalSource(input.contextPacket, session.tenant_id),
       });
       const canUseTool: CanUseTool = async (toolName, toolInput) => {
         if (isSpineTool(baseToolName(toolName))) {
@@ -541,7 +563,8 @@ export class ConverseLoop {
             : packet, intent);
       }
       const run = this.ports.runner.run({
-        systemPrompt: SPINE_SYSTEM_PROMPT,
+        systemPrompt: SPINE_SYSTEM_PROMPT + "\nFor saved portfolio TEXT changes, use propose_project_page with the current project_material_context page revision and digest. It creates a private review proposal only. Use neither drawing overlays nor customize_platform for portfolio text." +
+          "\nFor requested photo inspection use inspect_project_photo: page through catalog using next_cursor and source witnesses, then request previews by stable material ID and preview digest. Only preview image blocks provide actual pixels; never claim unseen images were inspected. Assignments describe the current saved page only. After actual pixel inspection and the source catalog, use propose_project_photo_assignments for requested photo assignments with the current saved page revision/digest and material digest witnesses. Never infer photo content from filenames alone. Review privately; do not autonomously save or publish photos." + DEVICE_TOOL_GUIDANCE,
         userMessage,
         ...(resumeSdkSessionId ? { resumeSdkSessionId } : {}),
         ...(resumeSdkSessionId
@@ -678,8 +701,10 @@ export class ConverseLoop {
     instant: {
       instantAssignment?: InstantSessionAssignment;
       instantDrawingContext?: InstantDrawingContext;
+      projectExecution?: "canonical-read";
       authoritySessionId?: string;
       authorityTurnId?: string;
+      pageProposalSource?: PageProposalSource;
     },
   ): ToolExecutor {
     const { appRun, gate, store } = this.ports;
@@ -698,10 +723,14 @@ export class ConverseLoop {
       return state.catalog ?? [];
     };
 
+    const photoInspection = new ProjectPhotoInspection({ orgId: tenantId,
+      sessionId: instant.authoritySessionId ?? "", turnId: instant.authorityTurnId ?? "" });
+
     /** A tool we cannot find in the catalog is treated as a WRITE (never fast-waited). */
-    const capabilityOf = async (toolName: string): Promise<"drawing.read" | "drawing.write"> => {
+    const capabilityOf = async (toolName: string): Promise<"drawing.read" | "drawing.write" | "solve"> => {
       const entry = (await catalogFor()).find((c) => c.name === toolName);
       if (!entry) return "drawing.write";
+      if (toolName === "solar-solve-proposal" && hasServerCapability(entry, "solve")) return "solve";
       return entry.capabilities.includes("drawing.write") ? "drawing.write" : "drawing.read";
     };
 
@@ -716,6 +745,13 @@ export class ConverseLoop {
       args: Record<string, unknown>,
     ): Promise<{ action: string; args: Record<string, unknown> }> => {
       switch (tool) {
+        case "device_list":
+        case "device_install_package":
+        case "device_ha_step":
+        case "device_light":
+        case "device_light_states":
+        case "device_command_status":
+          throw new Error("Device tools require host authority.");
         case "integration_datasets":
         case "integration_action_catalog":
         case "integration_query":
@@ -731,6 +767,9 @@ export class ConverseLoop {
           return { action: "read_platform_state", args: { what: "capabilities" } };
         case "job_status":
           return { action: "read_platform_state", args: { what: "jobs" } };
+        case "author_stage_status":
+          authorStageStatusId(args);
+          return { action: "read_platform_state", args: { what: "jobs" } };
         case "run_capability": {
           const target = String(args.tool ?? "");
           const entry = (await catalogFor()).find((c) => c.name === target);
@@ -739,6 +778,10 @@ export class ConverseLoop {
           if (typeof catalogDigest !== "string" || !catalogDigest) {
             throw new Error("run_capability requires a current server-issued catalog digest");
           }
+          if (entry?.kind === "view") {
+            return { action: "run_read_tool", args: { tool: target, params: {},
+              dwg: session.drawing_id, catalog_digest: catalogDigest } };
+          }
           // A local dry run is non-mutating, so it uses the read rung. This
           // prevents preview approval from becoming a confirm-once grant for
           // the later real write. Live APS stays on its cost-bearing rung.
@@ -746,12 +789,21 @@ export class ConverseLoop {
           const action =
             entry?.aps_live === true
               ? "submit_live_solve"
+              : target === "solar-solve-proposal" && hasServerCapability(entry, "solve")
+                ? "run_solve_tool"
               : entry && params.dry_run === true
                 ? "run_read_tool"
                 : !entry || entry.capabilities.includes("drawing.write")
                 ? "run_write_tool"
                 : "run_read_tool";
-          const dwg = String(args.dwg ?? session.drawing_id);
+          const projectState = await appRun.getProjectDrawingState?.();
+          const solveContext = action === "run_solve_tool"
+            ? canonicalSolveContext(args.solve_context, projectState?.graph_revision) : undefined;
+          if (projectState && ((args.dwg != null && args.dwg !== projectState.binding.drawing_id) ||
+              (params.drawing_id != null && params.drawing_id !== projectState.binding.drawing_id))) {
+            throw new Error("project capability drawing must match the stored app turn");
+          }
+          const dwg = projectState?.binding.drawing_id ?? String(args.dwg ?? session.drawing_id);
           if (
             entry?.aps_live === true &&
             typeof args.dwg === "string" &&
@@ -767,10 +819,36 @@ export class ConverseLoop {
           ) {
             params = { ...params, drawing_id: dwg };
           }
-          let drawingPins: Record<string, unknown> = {};
+          if (projectState && action !== "run_read_tool" && !projectState.is_head) {
+            throw new Error("project write preparation requires the current immutable version");
+          }
+          if (projectState && action !== "run_read_tool" && target === "solar-settings") {
+            if (projectState.graph_revision === null) {
+              const initialize = params.initialize;
+              if (!initialize || typeof initialize !== "object" || Array.isArray(initialize)) {
+                throw new Error("project Solar settings require explicit graph initialization units");
+              }
+              params = { ...params, expected_rev: 0, initialize: { ...initialize,
+                source_intake_sha256: projectState.binding.intake_sha256 } };
+            } else {
+              params = { ...params, expected_rev: projectState.graph_revision };
+            }
+          }
+          let drawingPins: Record<string, unknown> = projectState ? {
+            project_execution_context: projectState.binding,
+            input_version_id: projectState.binding.input_version_id,
+            intake_sha256: projectState.binding.intake_sha256,
+            drawing_version: projectState.revision,
+          } : {};
+          const canonicalRead = instant.projectExecution === "canonical-read" &&
+            action === "run_read_tool" &&
+            (entry?.capabilities.includes("drawing.read") || entry?.capabilities.includes("drawing.write"));
+          if (canonicalRead && dwg !== session.drawing_id) {
+            throw new Error("project capability drawing must match the current session drawing");
+          }
           if (
-            entry?.capabilities.includes("drawing.read") ||
-            entry?.capabilities.includes("drawing.write")
+            !projectState && !canonicalRead && (entry?.capabilities.includes("drawing.read") ||
+            entry?.capabilities.includes("drawing.write"))
           ) {
             const versions = await appRun.getDrawingState(tenantId, dwg, "versions");
             const head = Number(versions.head);
@@ -802,6 +880,7 @@ export class ConverseLoop {
               params,
               dwg,
               catalog_digest: catalogDigest,
+              ...(solveContext ? { solve_context: solveContext } : {}),
               ...drawingPins,
               ...(typeof args.confirmation_id === "string"
                 ? { confirmation_id: args.confirmation_id }
@@ -825,6 +904,12 @@ export class ConverseLoop {
             action: "request_publication",
             args: { change_set_id: String(args.change_set_id ?? "") },
           };
+        case "propose_project_page":
+          return { action: "propose_project_page", args: ProjectPageProposalRequest.parse(args) };
+        case "propose_project_photo_assignments":
+          return { action: tool, args: ProjectPhotoAssignmentRequest.parse(args) };
+        case "inspect_project_photo":
+          return { action: "inspect_project_photo", args: photoRequest(args) };
         case "propose_overlay":
           return {
             action: "propose_overlay",
@@ -842,6 +927,7 @@ export class ConverseLoop {
           // turns into confirmation_required (wire contract sections 5 + 6).
           return { action: "request_confirmation", args };
         case "customize_platform": {
+          customizeSourceRange(args);
           const op = customizeOp(args.op);
           if (op === "status" || op === "list" || op === "read_source" || op === "list_source") {
             // Read-only ops have no side effect; the read rung records them
@@ -934,13 +1020,54 @@ export class ConverseLoop {
       await emit("tool_call", { tool, args_summary: argsSummary(tool, args) });
 
       let result: SpineToolResult;
+      let pageProposalResult: Record<string, unknown> | undefined;
+      let authoredViewResult: Record<string, unknown> | undefined;
       try {
+        if (tool === "propose_project_photo_assignments") {
+          args = ProjectPhotoAssignmentRequest.parse(args);
+          const source = instant.pageProposalSource;
+          const validAuthority = (id: unknown): id is string => typeof id === "string" &&
+            id.length > 0 && id.length <= 200 && id.trim() === id && !/[\p{C}]/u.test(id);
+          if (!source || source.revision !== args.expected_revision || source.digest !== args.expected_digest ||
+              !validAuthority(instant.authoritySessionId) || !validAuthority(instant.authorityTurnId) ||
+              !appRun.proposeProjectPhotoAssignments) throw new Error(PHOTO_ASSIGNMENT_FAILURE);
+        }
+        if (tool === "inspect_project_photo") {
+          args = photoRequest(args);
+          if (!instant.authoritySessionId || !instant.authorityTurnId) throw new Error(PHOTO_FAILURE);
+        }
+        if (tool === "propose_project_page") {
+          const parsed = ProjectPageProposalRequest.safeParse(args);
+          if (!parsed.success) throw new Error("Invalid portfolio proposal request.");
+          if (!instant.authoritySessionId || !instant.authorityTurnId) throw new Error("Portfolio proposal authority is unavailable.");
+          args = parsed.data;
+        }
         // Integrations execute behind the host's sole gate and already return
         // their result. All other tools retain consult/check/dispatch.
         let hosted: IntegrationToolResult<unknown> | undefined;
+        let deviceResult: SpineToolResult | undefined;
         let consult: { action: string; args: Record<string, unknown> };
         let verdict: GateCheckResult;
-        if (isIntegrationTool(tool)) {
+        if (isDeviceTool(tool)) {
+          const parsed = DEVICE_TOOL_INPUTS[tool].safeParse(args);
+          const validAuthority = (id: unknown): id is string => typeof id === "string" &&
+            id.length > 0 && id.length <= 200 && id.trim() === id && !/[\u0000-\u001f\u007f-\u009f]/.test(id);
+          let response = deviceToolError("unavailable");
+          if (!parsed.success) {
+            response = deviceToolError("invalid_input");
+          } else if (validAuthority(instant.authoritySessionId) && validAuthority(instant.authorityTurnId) && appRun.deviceTool) {
+            args = parsed.data;
+            const body = JSON.stringify(args);
+            response = Buffer.byteLength(body, "utf8") > 16 * 1024
+              ? deviceToolError("invalid_input")
+              : DeviceToolResponse.parse(await appRun.deviceTool(tenantId, DEVICE_TOOL_OPERATIONS[tool], args, {
+                sessionId: instant.authoritySessionId, turnId: instant.authorityTurnId,
+              }));
+          }
+          deviceResult = { content: JSON.stringify(response), ...(!response.ok ? { isError: true } : {}) };
+          consult = { action: tool, args };
+          verdict = { decision: "allow" };
+        } else if (isIntegrationTool(tool)) {
           const parsed = INTEGRATION_TOOL_INPUTS[tool].safeParse(args);
           if (!parsed.success) throw new IntegrationClientError("invalid_input");
           args = parsed.data;
@@ -973,7 +1100,12 @@ export class ConverseLoop {
           consult = { action: tool, args };
         } else {
           consult = await gateConsultFor(tool, args);
-          verdict = await gate.check(consult.action, consult.args, { tenantId, sessionId, turnId });
+          verdict = await gate.check(consult.action, consult.args, {
+            tenantId, sessionId, turnId,
+            ...(tool === "propose_project_page" || tool === "inspect_project_photo" || tool === "propose_project_photo_assignments" ? {
+              authoritySessionId: instant.authoritySessionId, authorityTurnId: instant.authorityTurnId,
+            } : {}),
+          });
         }
 
         // A deny is a RELAYABLE result, not a crash: the model explains it calmly.
@@ -987,7 +1119,11 @@ export class ConverseLoop {
             }),
           );
 
-        if (verdict.decision === "deny") {
+        if (tool === "propose_project_photo_assignments" && verdict.decision !== "allow") {
+          result = err(PHOTO_ASSIGNMENT_FAILURE);
+        } else if (tool === "inspect_project_photo" && verdict.decision !== "allow") {
+          result = err(PHOTO_FAILURE);
+        } else if (verdict.decision === "deny") {
           result = relayDeny(verdict.reason ?? "denied by policy");
         } else if (verdict.decision === "awaiting_approval" && !verdict.confirmation_id) {
           // ONLY the app's pending store mints approvable ids (wire contract
@@ -1045,12 +1181,31 @@ export class ConverseLoop {
             });
             result = ok(JSON.stringify({ pending: true, confirmation_id: confirmationId }));
           }
+        } else if (deviceResult) {
+          result = deviceResult;
         } else if (hosted) {
           result = ok(JSON.stringify(hosted.result));
+        } else if (tool === "propose_project_photo_assignments") {
+          const body = ProjectPhotoAssignmentRequest.parse(args);
+          const value = await appRun.proposeProjectPhotoAssignments!(tenantId, instant.authoritySessionId!, ProjectPhotoAssignmentRequest.parse(body),
+            { sessionId: instant.authoritySessionId!, turnId: instant.authorityTurnId! });
+          pageProposalResult = validatePhotoAssignmentProposal(value, instant.pageProposalSource!, body);
+          result = pageProposalResult ? ok(PHOTO_ASSIGNMENT_SUMMARY) : err(PHOTO_ASSIGNMENT_FAILURE);
+        } else if (tool === "inspect_project_photo") {
+          result = await photoInspection.inspect(args, body => appRun.inspectProjectPhoto(
+            tenantId, instant.authoritySessionId!, body,
+            { sessionId: instant.authoritySessionId!, turnId: instant.authorityTurnId! },
+          ));
         } else {
           const executionArgs = tool === "run_capability"
             ? { ...args, ...consult.args }
             : args;
+          if (tool === "run_capability" && instant.projectExecution === "canonical-read" &&
+              consult.action === "run_read_tool") {
+            // The selected immutable version is resolved from the stored app turn.
+            // An omitted normalized pin must not resurrect the model's integer.
+            delete executionArgs.drawing_version;
+          }
           result = await this.dispatchAllowed(
             tool,
             executionArgs,
@@ -1066,11 +1221,18 @@ export class ConverseLoop {
               },
               turnState: state,
               ...instant,
+              capturePageProposal: value => { pageProposalResult = value; },
+              captureAuthoredView: value => { authoredViewResult = value; },
             },
           );
         }
       } catch (e) {
-        result = isIntegrationTool(tool)
+        result = tool === "propose_project_photo_assignments" ? err(PHOTO_ASSIGNMENT_FAILURE)
+          : tool === "inspect_project_photo" ? err(PHOTO_FAILURE) : tool === "propose_project_page"
+          ? err("Portfolio proposal failed.")
+          : isDeviceTool(tool)
+          ? err(JSON.stringify(deviceToolError("unavailable")))
+          : isIntegrationTool(tool)
           ? err(e instanceof IntegrationClientError ? integrationErrorMessage(e.code) : integrationErrorMessage("unavailable"))
           : err(`tool error: ${(e as Error).message}`);
       }
@@ -1083,6 +1245,10 @@ export class ConverseLoop {
         ok: !result.isError,
         summary: resultSummary(tool, result),
         ...(publicationResult ? { result: publicationResult } : {}),
+        ...(tool === "run_capability" && !result.isError && authoredViewResult
+          ? { result: authoredViewResult } : {}),
+        ...((tool === "propose_project_page" || tool === "propose_project_photo_assignments") && !result.isError && pageProposalResult
+          ? { result: pageProposalResult } : {}),
       });
       return result;
     };
@@ -1099,19 +1265,46 @@ export class ConverseLoop {
       turnId: string;
       emit: (type: ConverseEventType, data: Record<string, unknown>) => Promise<void>;
       catalogFor: () => Promise<CapabilityEntry[]>;
-      capabilityOf: (toolName: string) => Promise<"drawing.read" | "drawing.write">;
+      capabilityOf: (toolName: string) => Promise<"drawing.read" | "drawing.write" | "solve">;
       invalidateCatalog: () => void;
       turnState: TurnState;
       instantAssignment?: InstantSessionAssignment;
       instantDrawingContext?: InstantDrawingContext;
       authoritySessionId?: string;
       authorityTurnId?: string;
+      pageProposalSource?: PageProposalSource;
+      capturePageProposal?: (value: Record<string, unknown>) => void;
+      captureAuthoredView?: (value: Record<string, unknown>) => void;
     },
   ): Promise<SpineToolResult> {
     const { appRun, instantExecutor } = this.ports;
     const tenantId = ctx.session.tenant_id;
 
     switch (tool) {
+      case "propose_project_photo_assignments":
+        return err(PHOTO_ASSIGNMENT_FAILURE); // Only the bound per-turn executor may propose.
+      case "inspect_project_photo":
+        return err(PHOTO_FAILURE); // Only the per-turn witness executor may inspect.
+      case "device_list":
+      case "device_install_package":
+      case "device_ha_step":
+      case "device_light":
+      case "device_light_states":
+      case "device_command_status":
+        return err(JSON.stringify(deviceToolError("unavailable")));
+      case "propose_project_page": {
+        const body = ProjectPageProposalRequest.parse(args);
+        const source = ctx.pageProposalSource;
+        if (!source || source.revision !== body.expected_revision || source.digest !== body.expected_digest ||
+            !ctx.authoritySessionId || !ctx.authorityTurnId) return err("Portfolio proposal source or authority is unavailable.");
+        const value = await appRun.proposeProjectPage(tenantId, ctx.authoritySessionId, body, {
+          sessionId: ctx.authoritySessionId, turnId: ctx.authorityTurnId,
+        });
+        const checked = validatePageProposal(value, source);
+        if (!checked) return err("Invalid portfolio proposal response.");
+        ctx.capturePageProposal?.(checked);
+        return ok(`Portfolio text proposed from revision ${source.revision}; private review only. Nothing saved or published.`);
+      }
       case "integration_datasets":
       case "integration_action_catalog":
       case "integration_query":
@@ -1184,9 +1377,28 @@ export class ConverseLoop {
         if (typeof catalogDigest !== "string" || !catalogDigest) {
           return err("run_capability requires a current server-issued catalog digest");
         }
+        if (catalogEntry?.kind === "view") {
+          const commit = catalogEntry.catalog_commit, manifest = catalogEntry.tool_manifest_sha256;
+          const effective = catalogEntry.effective_catalog_digest;
+          const identity = (value: unknown, pattern: RegExp) => typeof value === "string" && pattern.test(value);
+          const authority = (value: unknown) => typeof value === "string" && value.trim() === value && value.length > 0 && value.length <= 200 && !/[\p{C}]/u.test(value);
+          if (!identity(target, /^[a-z0-9]+(?:-[a-z0-9]+)*(?![\s\S])/) || target.length > 200
+              || !identity(commit, /^[0-9a-f]{40}(?![\s\S])/)
+              || !identity(manifest, /^sha256:[0-9a-f]{64}(?![\s\S])/)
+              || !identity(effective, /^[0-9a-f]{64}(?![\s\S])/)
+              || catalogDigest !== manifest || !authority(ctx.authoritySessionId) || !authority(ctx.authorityTurnId)) {
+            return err("view capability lacks pinned catalog identity or current session authority");
+          }
+          const descriptor = { contract: "leaf.authored-view.v1", route: "view", tool: target, kind: "view",
+            tenant_id: tenantId, session_id: ctx.authoritySessionId, turn_id: ctx.authorityTurnId,
+            catalog_commit: commit, effective_catalog_digest: effective,
+            tool_manifest_sha256: manifest, catalog_digest: catalogDigest };
+          ctx.captureAuthoredView?.(descriptor);
+          return ok(JSON.stringify(descriptor));
+        }
         const capability = await ctx.capabilityOf(target);
         const drawingVersion =
-          (capability === "drawing.read" || capability === "drawing.write") &&
+          (capability === "drawing.read" || capability === "drawing.write" || capability === "solve") &&
           typeof args.drawing_version === "number" &&
           Number.isInteger(args.drawing_version) &&
           args.drawing_version >= 0
@@ -1210,11 +1422,11 @@ export class ConverseLoop {
               job_id: fallback.job_id, tool: target, route: "batch_fallback", reason,
             });
             const terminal = await this.pollReadJob(appRun, tenantId, fallback.job_id);
-            if (!terminal.ok) return err(terminal.message);
+            const { ok: observed, ...observation } = terminal;
+            if (!observed) return err(JSON.stringify({ job_id: fallback.job_id, ...observation }));
             return ok(JSON.stringify({
               route: "batch_fallback", reason,
-              job_id: fallback.job_id, status: terminal.status,
-              ...(terminal.result !== undefined ? { result: terminal.result } : {}),
+              job_id: fallback.job_id, ...observation,
             }));
           };
           const instant = validateInstantRoute({
@@ -1271,18 +1483,19 @@ export class ConverseLoop {
             ...(drawingVersion !== undefined
               ? { drawingVersion }
               : {}),
-            ...(capability === "drawing.write" && Number.isInteger(expectedDrawingHead)
+            ...(capability !== "drawing.read" && Number.isInteger(expectedDrawingHead)
               ? { expectedDrawingHead }
               : {}),
-            ...(capability === "drawing.write" && typeof catalogCommit === "string"
+            ...(capability !== "drawing.read" && typeof catalogCommit === "string"
               ? { catalogCommit }
               : {}),
-            ...(capability === "drawing.write" && typeof effectiveCatalogDigest === "string"
+            ...(capability !== "drawing.read" && typeof effectiveCatalogDigest === "string"
               ? { effectiveCatalogDigest }
               : {}),
-            ...(capability === "drawing.write" && typeof toolManifestSha256 === "string"
+            ...(capability !== "drawing.read" && typeof toolManifestSha256 === "string"
               ? { toolManifestSha256 }
               : {}),
+            ...(capability === "solve" ? { solveContext: canonicalSolveContext(args.solve_context) } : {}),
             wait: false,
           });
         } catch {
@@ -1291,11 +1504,10 @@ export class ConverseLoop {
         await ctx.emit("job_linked", { job_id: res.job_id, tool: target });
         if (capability === "drawing.read") {
           const terminal = await this.pollReadJob(appRun, tenantId, res.job_id);
-          if (!terminal.ok) return err(terminal.message);
+          const { ok: observed, ...observation } = terminal;
+          if (!observed) return err(JSON.stringify({ job_id: res.job_id, ...observation }));
           return ok(JSON.stringify({
-            job_id: res.job_id,
-            status: terminal.status,
-            ...(terminal.result !== undefined ? { result: terminal.result } : {}),
+            job_id: res.job_id, ...observation,
           }));
         }
         return ok(
@@ -1312,6 +1524,12 @@ export class ConverseLoop {
         if (!jobId) return err("job_status requires args.job_id");
         const row = await appRun.getJob(tenantId, jobId);
         return ok(JSON.stringify(row));
+      }
+
+      case "author_stage_status": {
+        const changeSetId = authorStageStatusId(args);
+        const status = await appRun.getAuthorStageStatus(tenantId, changeSetId);
+        return ok(JSON.stringify(status));
       }
 
       case "author_tool": {
@@ -1374,6 +1592,7 @@ export class ConverseLoop {
               ctx.authoritySessionId ?? "",
               tokens,
               String(args.request_text ?? ""),
+              { sessionId: ctx.authoritySessionId, turnId: ctx.authorityTurnId },
             ),
           ),
         );
@@ -1397,7 +1616,10 @@ export class ConverseLoop {
         if (op === "read_source") {
           const path = String(args.path ?? "").trim();
           if (!path) return err("customize_platform read_source requires args.path");
-          return ok(JSON.stringify(await appRun.customizeReadSource(tenantId, path)));
+          const range = customizeSourceRange(args);
+          return ok(JSON.stringify(await (range
+            ? appRun.customizeReadSource(tenantId, path, range)
+            : appRun.customizeReadSource(tenantId, path))));
         }
         if (op === "list_source") {
           const dir = String(args.dir ?? "").trim();
@@ -1534,6 +1756,12 @@ function err(content: string): SpineToolResult {
 
 /** Strip an MCP server prefix (mcp__spine__catalog_search -> catalog_search). */
 function baseToolName(name: string): string {
+  if (name.endsWith("__propose_project_photo_assignments") && name !== "mcp__spine__propose_project_photo_assignments") return name;
+  if (name.endsWith("__inspect_project_photo") && name !== "mcp__spine__inspect_project_photo") return name;
+  // The host-only tool belongs solely to the private spine server. Preserve
+  // legacy normalization for the vendored tools without accepting an alias
+  // from another MCP server for this authority-bearing action.
+  if (name.endsWith("__propose_project_page") && name !== "mcp__spine__propose_project_page") return name;
   return name.replace(/^mcp__.+?__/, "");
 }
 
@@ -1555,12 +1783,66 @@ function customizeOp(raw: unknown): CustomizeOp {
   }
 }
 
+const SOURCE_RANGE_KEYS = ["start_line", "max_lines", "expected_commit"] as const;
+const SourceRangeInput = z.strictObject({
+  start_line: z.number().int().positive().refine(Number.isSafeInteger),
+  max_lines: z.number().int().min(1).max(400),
+  expected_commit: z.string().length(40).regex(/^[0-9a-f]{40}$/),
+});
+
+/** Range fields are one read-only unit, never silently dropped on another op. */
+function customizeSourceRange(args: Record<string, unknown>): PlatformSourceRange | undefined {
+  const present = SOURCE_RANGE_KEYS.filter(key => Object.hasOwn(args, key));
+  if (present.length === 0) return undefined;
+  if (customizeOp(args.op) !== "read_source" || present.length !== SOURCE_RANGE_KEYS.length) {
+    throw new Error("Source ranges require read_source with start_line, max_lines and expected_commit together.");
+  }
+  const parsed = SourceRangeInput.safeParse(Object.fromEntries(SOURCE_RANGE_KEYS.map(key => [key, args[key]])));
+  if (!parsed.success) throw new Error("Invalid platform source range.");
+  return { startLine: parsed.data.start_line, maxLines: parsed.data.max_lines,
+    expectedCommit: parsed.data.expected_commit };
+}
+
 function isSpineTool(name: string): name is SpineToolName {
   return (SPINE_TOOL_NAMES as readonly string[]).includes(name);
 }
 
 function isIntegrationTool(name: string): name is IntegrationTool {
   return name === "integration_datasets" || name === "integration_action_catalog" || name === "integration_query" || name === "integration_save_element";
+}
+
+function authorStageStatusId(args: Record<string, unknown>): string {
+  const prototype = Object.getPrototypeOf(args);
+  const keys = Reflect.ownKeys(args);
+  const field = Object.getOwnPropertyDescriptor(args, "change_set_id");
+  if ((prototype !== Object.prototype && prototype !== null) ||
+      keys.length !== 1 || keys[0] !== "change_set_id" ||
+      !field || !Object.hasOwn(field, "value") ||
+      typeof field.value !== "string" || field.value.length !== 36 ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(field.value)) {
+    throw new Error("author_stage_status requires only a canonical args.change_set_id");
+  }
+  return field.value;
+}
+
+/** Host catalog extensions retain their server vocabulary outside the shared tool capability union. */
+function hasServerCapability(entry: { capabilities: readonly string[] } | undefined, capability: string): boolean {
+  return entry?.capabilities.some(value => value === capability) ?? false;
+}
+
+function canonicalSolveContext(value: unknown, graphRevision?: number | null): {
+  frame_ref: string; expected_rev: number; phase: "initial" | "background";
+} {
+  const context = asRecord(value);
+  if (Object.keys(context).sort().join(",") !== "expected_rev,frame_ref,phase"
+      || typeof context.frame_ref !== "string" || !context.frame_ref
+      || typeof context.expected_rev !== "number" || !Number.isInteger(context.expected_rev)
+      || context.expected_rev < 0 || (context.phase !== "initial" && context.phase !== "background")
+      || (graphRevision !== undefined && context.expected_rev !== graphRevision)) {
+    throw new Error("Solar solve requires an exact frame, graph revision and phase");
+  }
+  return { frame_ref: context.frame_ref, expected_rev: context.expected_rev,
+    phase: context.phase as "initial" | "background" };
 }
 
 function asRecord(v: unknown): Record<string, unknown> {
@@ -1644,6 +1926,8 @@ function truncate(s: string, n: number): string {
 
 /** Short HUMAN summary — never the full params (wire contract section 3). */
 function argsSummary(tool: SpineToolName, args: Record<string, unknown>): string {
+  if (tool === "inspect_project_photo") return "inspect current project photo";
+  if (isDeviceTool(tool)) return `home device: ${DEVICE_TOOL_OPERATIONS[tool]}`;
   switch (tool) {
     case "integration_datasets":
       return "discover datasets";
@@ -1663,10 +1947,16 @@ function argsSummary(tool: SpineToolName, args: Record<string, unknown>): string
       return `tool=${String(args.tool ?? "?")}${args.confirmation_id ? " (confirmed)" : ""}`;
     case "job_status":
       return `job_id=${String(args.job_id ?? "?")}`;
+    case "author_stage_status":
+      return "read author stage status";
     case "author_tool":
       return `mode=${String(args.mode ?? "build")}`;
     case "request_publication":
       return `change_set_id=${String(args.change_set_id ?? "?")}`;
+    case "propose_project_page":
+      return "portfolio text proposal for private review";
+    case "propose_project_photo_assignments":
+      return "photo assignment proposal for private review";
     case "request_confirmation":
       return `kind=${String(args.kind ?? "confirm")}`;
     case "customize_platform":
@@ -1750,6 +2040,224 @@ function sanitizeCustomizeEdits(
   return out;
 }
 
+interface PageProposalSource { project_id: string; revision: number; digest: string }
+const proposalUuid = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![\s\S])/)
+  .refine(value => value !== "00000000-0000-0000-0000-000000000000");
+const proposalDigest = z.string().regex(/^[0-9a-f]{64}(?![\s\S])/);
+const proposalCount = z.number().int().nonnegative().refine(Number.isSafeInteger);
+const proposalSourceSchema = z.strictObject({
+  project_id: proposalUuid, revision: proposalCount.refine(value => value > 0), digest: proposalDigest,
+});
+function pageProposalSource(packet: Record<string, unknown>, tenantId: string): PageProposalSource | undefined {
+  const section = asRecord(packet.project_material_context);
+  if (section.schema !== "leaf.project-material-context.v1" || section.org_id !== tenantId) return undefined;
+  const page = asRecord(section.page);
+  const parsed = proposalSourceSchema.safeParse({
+    project_id: section.project_id, revision: page.revision, digest: page.digest,
+  });
+  return parsed.success ? parsed.data : undefined;
+}
+
+function proposalText(low: number, high: number) {
+  return z.string().refine(value => Array.from(value).length >= low && Array.from(value).length <= high &&
+    (!low || value.trim().length > 0) && !/[<>]/.test(value) &&
+    !/[\p{Cc}\p{Cf}\p{Cs}]/u.test(value.replaceAll("\n", "")) &&
+    !/(?:[a-z][a-z0-9+.-]*:\/\/|\b(?:https?|ftp|file|data|javascript):|\bwww\.)/i.test(value));
+}
+const proposalDocumentSchema = z.strictObject({
+  schema: z.literal("leaf.portfolio.v1"), theme: z.literal("light"),
+  galleryLayout: z.enum(["grid", "single"]).optional(),
+  name: proposalText(1, 120), headline: proposalText(1, 240),
+  introduction: proposalText(0, 2400), about: proposalText(0, 8000),
+  contact: z.strictObject({
+    email: z.string().max(254).refine(value => !value ||
+      /^[A-Za-z0-9]+(?:[._+-][A-Za-z0-9]+)*@[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*(?:\.[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)+(?![\s\S])/.test(value)),
+    location: proposalText(0, 160),
+  }),
+  resume: z.array(z.strictObject({
+    heading: proposalText(1, 120), entries: z.array(z.strictObject({
+      title: proposalText(0, 200), subtitle: proposalText(0, 240),
+      dates: proposalText(0, 120), description: proposalText(0, 2400),
+    })).max(20),
+  })).max(8),
+  categories: z.array(z.strictObject({
+    slug: z.string().regex(/^[a-z][a-z0-9-]{0,47}(?![\s\S])/)
+      .refine(value => !["home", "about", "resume"].includes(value)),
+    title: proposalText(1, 120), description: proposalText(0, 1200), hero: proposalCount,
+    images: z.array(z.strictObject({
+      material_id: proposalUuid, sha256: proposalDigest, preview_sha256: proposalDigest,
+      title: proposalText(0, 200), alt: proposalText(1, 400),
+    })).min(1).max(200),
+  })).min(1).max(12),
+});
+const pageProposalSchema = z.strictObject({
+  source: proposalSourceSchema, proposed_document: proposalDocumentSchema,
+  proposed_digest: proposalDigest,
+  model: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}(?![\s\S])/),
+  edits: z.array(z.strictObject({
+    id: z.string().regex(/^f[0-9]{4}(?![\s\S])/)
+      .refine(value => Number(value.slice(1)) >= 1 && Number(value.slice(1)) <= 1024),
+    value: z.string().refine(value => Array.from(value).length <= 8000 && !/[\p{Cs}]/u.test(value)),
+  })).max(32),
+  usage: z.strictObject({
+    input_tokens: proposalCount.optional(), output_tokens: proposalCount.optional(),
+    cache_creation_tokens: proposalCount.optional(), cache_read_tokens: proposalCount.optional(),
+    cost_tokens: proposalCount.optional(),
+  }),
+});
+
+// Optional producer design fields are closed as well. Keep the existing text
+// proposal contract unchanged; photo proposals may retain empty galleries.
+const designColor = z.string().regex(/^#[0-9a-fA-F]{6}(?![\s\S])/);
+const designAlign = z.enum(["left", "center", "right"]);
+const designFont = z.enum(["classic", "serif", "sans", "mono"]);
+const designWeight = z.enum(["regular", "medium", "bold"]);
+const designAspect = z.enum(["natural", "square", "landscape", "portrait"]);
+const designFocal = z.enum(["center", "top", "bottom", "left", "right", "top-left", "top-right", "bottom-left", "bottom-right"]);
+const designFit = z.enum(["contain", "cover"]);
+const designInt = (low: number, high: number) => z.number().int().min(low).max(high);
+const nonemptyDesign = <S extends z.ZodRawShape>(shape: S) =>
+  z.strictObject(shape).partial().refine(value => Object.keys(value).length > 0);
+const designTextShape = {
+  font: designFont, size: designInt(12, 96), weight: designWeight, color: designColor, align: designAlign,
+  lineHeight: z.number().min(1).max(2.5), letterSpacing: designInt(-1, 8),
+  italic: z.literal(true), underline: z.literal(true), hidden: z.literal(true),
+};
+const designText = nonemptyDesign(designTextShape);
+const designContainerShape = {
+  align: designAlign, columns: designInt(1, 4), mobileColumns: designInt(1, 2), gap: designInt(0, 96),
+  padding: designInt(0, 96), maxWidth: designInt(240, 1800), background: designColor, radius: designInt(0, 64),
+  borderWidth: designInt(0, 8), borderColor: designColor, shadow: z.enum(["none", "soft", "strong"]), hidden: z.literal(true),
+};
+const designContainer = nonemptyDesign(designContainerShape);
+const designStyles = (names: string[]) => nonemptyDesign(Object.fromEntries(names.map(name => [name, designText])));
+const photoAssignmentImageSchema = proposalDocumentSchema.shape.categories.element.shape.images.element.extend({
+  display: nonemptyDesign({ fit: designFit, aspect: designAspect, focal: designFocal,
+    span: designInt(1, 2), radius: designInt(0, 64), hidden: z.literal(true) }).optional(),
+  captionStyle: designText.optional(),
+});
+const photoAssignmentDocumentSchema = proposalDocumentSchema.extend({
+  appearance: nonemptyDesign({
+    font: designFont, scale: z.enum(["compact", "regular", "large"]), spacing: z.enum(["tight", "regular", "airy"]),
+    width: z.enum(["narrow", "regular", "wide"]),
+    palette: nonemptyDesign({ background: designColor, text: designColor, muted: designColor, accent: designColor }),
+    gap: designContainerShape.gap, padding: designContainerShape.padding, maxWidth: designContainerShape.maxWidth,
+    headingWeight: designWeight, align: designAlign, columns: designContainerShape.columns,
+    mobileColumns: designContainerShape.mobileColumns, imageFit: designFit, aspect: designAspect, focal: designFocal,
+  }).optional(),
+  textStyles: designStyles(["name", "headline", "introduction", "about", "aboutHeading", "contactHeading", "location", "email", "resumeHeading"]).optional(),
+  labels: nonemptyDesign({ aboutHeading: proposalText(1, 80), contactHeading: proposalText(1, 80),
+    resumeHeading: proposalText(1, 80), viewerClose: proposalText(1, 80) }).optional(),
+  nav: nonemptyDesign({ homeLabel: proposalText(1, 40), aboutLabel: proposalText(1, 40), resumeLabel: proposalText(1, 40),
+    order: z.array(z.enum(["home", "galleries", "about", "resume"])).max(4).refine(value => new Set(value).size === value.length),
+    hideHome: z.literal(true), hideAbout: z.literal(true), hideResume: z.literal(true), hidden: z.literal(true),
+    layout: z.enum(["row", "column"]), appearance: nonemptyDesign({
+      font: designFont, size: designTextShape.size, weight: designWeight, color: designColor, align: designAlign,
+      lineHeight: designTextShape.lineHeight, letterSpacing: designTextShape.letterSpacing,
+      italic: z.literal(true), underline: z.literal(true),
+    }), gap: designContainerShape.gap, padding: designContainerShape.padding, background: designColor, radius: designContainerShape.radius,
+  }).optional(),
+  resume: z.array(proposalDocumentSchema.shape.resume.element.extend({
+    layout: designContainer.optional(), headingStyle: designText.optional(),
+    entries: z.array(proposalDocumentSchema.shape.resume.element.shape.entries.element.extend({
+      layout: designContainer.optional(), textStyles: designStyles(["title", "subtitle", "dates", "description"]).optional(),
+    })).max(20),
+  })).max(8),
+  categories: z.array(proposalDocumentSchema.shape.categories.element.extend({
+    layout: designContainer.optional(), hidden: z.literal(true).optional(), navLabel: proposalText(1, 40).optional(),
+    textStyles: designStyles(["title", "description", "navigation"]).optional(),
+    images: z.array(photoAssignmentImageSchema).max(200),
+  })).min(1).max(12),
+});
+const photoAssignmentProposalSchema = z.strictObject({
+  schema: z.literal("leaf.project-photo-assignment-proposal.v1"), source: proposalSourceSchema,
+  proposed_document: photoAssignmentDocumentSchema, proposed_digest: proposalDigest,
+  changes: z.array(z.strictObject({
+    op: z.literal("assign"), material_id: proposalUuid,
+    material_name: z.string().refine(value => Array.from(value).length >= 1 && Array.from(value).length <= 1024 && !/\p{Cs}/u.test(value)),
+    gallery_slug: z.string().regex(/^[a-z][a-z0-9-]{0,47}(?![\s\S])/), gallery_title: proposalText(1, 120),
+    index: proposalCount, title: proposalText(0, 200), alt: proposalText(1, 400),
+  })).min(1).max(200),
+});
+
+/** Shape, source and operation witnesses only. The browser independently checks
+ * canonical digest and full append-only comparison against its saved document. */
+function validatePhotoAssignmentProposal(
+  value: unknown, source: PageProposalSource, request: ProjectPhotoAssignmentInput,
+): Record<string, unknown> | undefined {
+  try {
+    const raw = JSON.stringify(value);
+    if (Buffer.byteLength(raw, "utf8") > 1024 * 1024) return undefined;
+    if (!photoAssignmentProposalSchema.safeParse(value).success) return undefined;
+    const detached: unknown = JSON.parse(raw);
+    const parsed = photoAssignmentProposalSchema.safeParse(detached);
+    if (!parsed.success) return undefined;
+    const result = parsed.data;
+    if (result.source.project_id !== source.project_id || result.source.revision !== source.revision ||
+        result.source.digest !== source.digest || result.changes.length !== request.operations.length) return undefined;
+    const document = result.proposed_document;
+    if (Buffer.byteLength(JSON.stringify(document), "utf8") > 512 * 1024 ||
+        new Set(document.categories.map(category => category.slug)).size !== document.categories.length) return undefined;
+    let total = 0;
+    const references = new Map<string, string>();
+    const occurrences = new Map<string, number>();
+    for (const category of document.categories) {
+      total += category.images.length;
+      if (total > 200 || (category.images.length ? category.hero >= category.images.length : category.hero !== 0) ||
+          new Set(category.images.map(image => image.material_id)).size !== category.images.length) return undefined;
+      for (const image of category.images) {
+        const digest = `${image.sha256}:${image.preview_sha256}`;
+        if (references.has(image.material_id) && references.get(image.material_id) !== digest) return undefined;
+        references.set(image.material_id, digest);
+        occurrences.set(image.material_id, (occurrences.get(image.material_id) ?? 0) + 1);
+      }
+    }
+    const nextIndex = new Map<string, number>();
+    for (const [index, operation] of request.operations.entries()) {
+      const change = result.changes[index]!;
+      const category = document.categories.find(item => item.slug === operation.gallery_slug);
+      const image = category?.images[change.index];
+      if (!category || !image || change.material_id !== operation.material_id || change.gallery_slug !== operation.gallery_slug ||
+          change.gallery_title !== category.title || change.title !== operation.title || change.alt !== operation.alt ||
+          image.material_id !== operation.material_id || image.sha256 !== operation.sha256 ||
+          image.preview_sha256 !== operation.preview_sha256 || image.title !== operation.title || image.alt !== operation.alt ||
+          occurrences.get(operation.material_id) !== 1 ||
+          (nextIndex.has(category.slug) && nextIndex.get(category.slug) !== change.index)) return undefined;
+      nextIndex.set(category.slug, change.index + 1);
+    }
+    if (document.categories.some(category => nextIndex.has(category.slug) && nextIndex.get(category.slug) !== category.images.length)) return undefined;
+    return detached as Record<string, unknown>;
+  } catch { return undefined; }
+}
+
+/** Closed UI-only projection; full photo/source comparison remains in the browser. */
+function validatePageProposal(value: unknown, source: PageProposalSource): Record<string, unknown> | undefined {
+  try {
+    if (Buffer.byteLength(JSON.stringify(value), "utf8") > 1024 * 1024) return undefined;
+    const parsed = pageProposalSchema.safeParse(value);
+    if (!parsed.success) return undefined;
+    const result = parsed.data;
+    if (result.source.project_id !== source.project_id || result.source.revision !== source.revision ||
+        result.source.digest !== source.digest || new Set(result.edits.map(edit => edit.id)).size !== result.edits.length) return undefined;
+    const document = result.proposed_document;
+    if (Buffer.byteLength(JSON.stringify(document), "utf8") > 512 * 1024 ||
+        new Set(document.categories.map(category => category.slug)).size !== document.categories.length) return undefined;
+    let count = 0;
+    const references = new Map<string, string>();
+    for (const category of document.categories) {
+      count += category.images.length;
+      if (count > 200 || category.hero >= category.images.length ||
+          new Set(category.images.map(image => image.material_id)).size !== category.images.length) return undefined;
+      for (const image of category.images) {
+        const digest = `${image.sha256}:${image.preview_sha256}`;
+        if (references.has(image.material_id) && references.get(image.material_id) !== digest) return undefined;
+        references.set(image.material_id, digest);
+      }
+    }
+    return result;
+  } catch { return undefined; }
+}
+
 /** Project only the validated service fields, never the human-facing summary. */
 function projectPublicationResult(content: string): Record<string, unknown> | undefined {
   let parsed: unknown;
@@ -1783,6 +2291,17 @@ function projectPublicationResult(content: string): Record<string, unknown> | un
 }
 
 function resultSummary(tool: SpineToolName, result: SpineToolResult): string {
+  if (tool === "inspect_project_photo") return result.isError ? PHOTO_FAILURE : "Project photo inspection returned privately.";
+  if (isDeviceTool(tool)) {
+    const response = DeviceToolResponse.safeParse(safeDeviceJson(result.content));
+    if (!response.success) return "device request unavailable";
+    if (!response.data.ok) return truncate(response.data.error.message, 120);
+    const value = response.data.result;
+    if (typeof value.command_id === "string") return `command ${truncate(value.command_id, 80)} queued`;
+    if (tool === "device_list") return `${Array.isArray(value.devices) ? value.devices.length : 0} devices`;
+    if (tool === "device_command_status") return `command ${String(value.state ?? "status unavailable")}`;
+    return "device request complete";
+  }
   if (result.isError) {
     try {
       const parsed = JSON.parse(result.content) as Record<string, unknown>;
@@ -1809,6 +2328,10 @@ function resultSummary(tool: SpineToolName, result: SpineToolResult): string {
     // non-JSON content: fall through
   }
   return tool === "drawing_state" ? "ok" : truncate(result.content, 80);
+}
+
+function safeDeviceJson(content: string): unknown {
+  try { return JSON.parse(content); } catch { return undefined; }
 }
 
 /** Deterministic catalog ranking: name hits weigh 3x description hits. */

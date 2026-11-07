@@ -4,7 +4,7 @@ import { writeProofReceipt } from '../proofReceipt.mjs'
 import { requireLocalReady } from './requireReady.mjs'
 
 const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
-const TENANT_HEADERS = { 'X-Tenant-Id': 'demo-tenant' }
+const TENANT_HEADERS = { 'X-Tenant-Id': process.env.LEAF_E2E_TENANT_ID || 'demo-tenant' }
 const DUMMY_TOKEN = 'sk-ant-oat01-local-e2e-nonsecret-placeholder'
 const PROOF_DIR = join(process.cwd(), '..', 'artifacts', 'unified-surface-proof', 'local')
 
@@ -88,7 +88,7 @@ test('trust rail reflects real health, plan, usage, and Claude grant state', asy
 
   const entitlementPanel = panel.getByRole('region', { name: 'Entitlements' })
   await expect(entitlementPanel).toContainText(`tier ${entitlements.tier}`)
-  await expect(entitlementPanel).toContainText('enforced server-side')
+  await expect(entitlementPanel).toContainText('Plan checked')
   for (const [key, label] of [
     ['run_read', 'Run read-only tools'],
     ['run_write', 'Run editing tools'],
@@ -114,7 +114,7 @@ test('trust rail reflects real health, plan, usage, and Claude grant state', asy
   })
   await page.getByRole('button', { name: 'Link Claude account' }).click()
   expect((await linkResponse).status()).toBe(200)
-  await expect(panel.locator('.claude-trigger')).toContainText('1 mounted')
+  await expect(panel.locator('.claude-trigger')).toContainText('1 linked')
   const accountDialog = page.getByRole('dialog', { name: 'Claude accounts' })
   await expect(accountDialog).toContainText(/pro subscription/i)
 

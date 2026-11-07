@@ -3,16 +3,17 @@ import { act, renderHook } from '@testing-library/react'
 import { useLayoutEffect, useMemo } from 'react'
 import { useBoardConversation } from '../workspace/ProjectWorkspacePanels.jsx'
 import useConverseSessionController from './useConverseSessionController.js'
-import { ensureSession, postMessage } from '../converse.js'
+import { classifyAgentError, ensureSession, postMessage } from '../converse.js'
 
 vi.mock('../converse.js', () => ({
   ensureSession: vi.fn(), postMessage: vi.fn(), resetSession: vi.fn(),
-  classifyAgentError: () => 'busy', projectActivityProjection: (value) => value,
+  classifyAgentError: vi.fn(() => 'busy'), projectActivityProjection: (value) => value,
 }))
 
 beforeEach(() => {
   vi.clearAllMocks()
   ensureSession.mockResolvedValue({ session_id: 'session-a' })
+  classifyAgentError.mockReturnValue('busy')
 })
 
 function projectController() {
@@ -20,6 +21,52 @@ function projectController() {
   act(() => hook.result.current.setProjectContext('project-a'))
   return hook
 }
+
+const SELECTED_PROJECT = '11111111-1111-4111-8111-111111111111'
+const VERSION_ONE = '22222222-2222-4222-8222-222222222222'
+const VERSION_TWO = '33333333-3333-4333-8333-333333333333'
+
+it('captures selected version before attachment without changing conversation identity', async () => {
+  let resolveAttachment
+  ensureSession.mockImplementationOnce(() => new Promise((resolve) => { resolveAttachment = resolve }))
+  postMessage.mockResolvedValue({ status: 'started', turn_id: 'turn-one' })
+  const { result } = renderHook(() => useConverseSessionController({ drawingId: 'legacy-drawing' }))
+  act(() => result.current.setProjectContext(SELECTED_PROJECT, VERSION_ONE))
+  let pending
+  await act(async () => { pending = result.current.startTurn('read selected historical version') })
+  act(() => result.current.setProjectContext(SELECTED_PROJECT, VERSION_TWO))
+  await act(async () => { resolveAttachment({ session_id: 'same-conversation' }); await pending })
+  expect(ensureSession).toHaveBeenCalledExactlyOnceWith('legacy-drawing', SELECTED_PROJECT)
+  expect(postMessage.mock.calls[0][1].projectContext).toEqual({
+    project_id: SELECTED_PROJECT, input_version_id: VERSION_ONE,
+  })
+  expect(result.current.sessionId).toBe('same-conversation')
+  await act(async () => { await result.current.startTurn('read newly selected version') })
+  expect(ensureSession).toHaveBeenCalledTimes(1)
+  expect(postMessage.mock.calls[1][1].projectContext.input_version_id).toBe(VERSION_TWO)
+})
+
+it('retains captured selected version and request identity across a not-found retry', async () => {
+  const { result } = renderHook(() => useConverseSessionController({ drawingId: 'legacy-drawing', retryNotFound: true }))
+  act(() => result.current.setProjectContext(SELECTED_PROJECT, VERSION_ONE))
+  classifyAgentError.mockReturnValue('not_found')
+  postMessage.mockImplementationOnce(async () => {
+    result.current.setProjectContext(SELECTED_PROJECT, VERSION_TWO)
+    throw new Error('session disappeared')
+  }).mockResolvedValueOnce({ status: 'started', turn_id: 'retried' })
+  await act(async () => { await result.current.startTurn('keep the original input') })
+  expect(postMessage).toHaveBeenCalledTimes(2)
+  expect(postMessage.mock.calls[1][1]).toEqual(postMessage.mock.calls[0][1])
+  expect(postMessage.mock.calls[1][1].projectContext.input_version_id).toBe(VERSION_ONE)
+  expect(ensureSession).toHaveBeenCalledTimes(2)
+})
+
+it('keeps unselected ordinary conversation available without a request pin', async () => {
+  postMessage.mockResolvedValue({ status: 'started', turn_id: 'ordinary' })
+  const { result } = projectController()
+  await act(async () => { await result.current.startTurn('discuss this project') })
+  expect(postMessage.mock.calls[0][1]).not.toHaveProperty('projectContext')
+})
 
 it('A2-13 attaches a project without a drawing', async () => {
   const { result } = renderHook(() => useConverseSessionController({ drawingId: null }))

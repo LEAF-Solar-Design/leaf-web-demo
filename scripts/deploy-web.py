@@ -33,6 +33,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -159,8 +160,8 @@ def build() -> None:
         fail("`npm run build` failed")
 
 
-def preflight() -> str:
-    """Check dist is deployable. Returns the entry JS asset filename."""
+def preflight() -> list[str]:
+    """Check dist is deployable. Return every referenced local script."""
     index = DIST / "index.html"
     if not index.exists():
         fail(f"{index} missing — run without --no-build")
@@ -190,11 +191,11 @@ def preflight() -> str:
             "redirect and every deep route 404s). Remove it."
         )
 
-    html = index.read_text(encoding="utf-8")
-    m = re.search(r'assets/index-[A-Za-z0-9_-]+\.js', html)
-    if not m:
-        fail("could not find the entry asset reference in dist/index.html")
-    entry = m.group(0)
+    from production_web_release import referenced_scripts, ReleaseError
+    try:
+        entry = referenced_scripts(index.read_text(encoding="utf-8"), DIST)
+    except ReleaseError as exc:
+        fail(str(exc))
     print(f"  preflight ok — entry asset {entry}")
     return entry
 
@@ -232,7 +233,7 @@ def fetch(url: str, timeout: int = 30):
         return None, str(e)
 
 
-def verify(entry: str) -> None:
+def verify(entry: list[str]) -> None:
     """The deploy is only done when the live domain serves THIS build."""
     print(f"-> verifying {DOMAIN}")
 
@@ -240,7 +241,12 @@ def verify(entry: str) -> None:
     served = None
     for attempt in range(6):
         status, body = fetch(DOMAIN + "/")
-        if status == 200 and entry in body:
+        from production_web_release import referenced_scripts, ReleaseError
+        try:
+            matches = status == 200 and referenced_scripts(body) == entry
+        except ReleaseError:
+            matches = False
+        if matches:
             served = entry
             break
         time.sleep(5)
@@ -250,6 +256,11 @@ def verify(entry: str) -> None:
             "~30s — the alias may still be pointing at the previous deployment"
         )
     print(f"  live entry matches build: {entry}")
+
+    for asset in entry:
+        status, body = fetch(DOMAIN + "/" + urllib.parse.quote(asset, safe="/"))
+        if status != 200 or body != (DIST / asset).read_text(encoding="utf-8", errors="replace"):
+            fail(f"live script bytes differ from this build: {asset}")
 
     bad = []
     for route in ROUTES:

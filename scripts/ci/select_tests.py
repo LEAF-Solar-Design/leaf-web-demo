@@ -1,6 +1,7 @@
 """Trusted, offline test selection. Inputs are supplied by the trusted loader."""
 
 import argparse
+import copy
 import datetime as dt
 import fnmatch
 import hashlib
@@ -34,6 +35,45 @@ def digest(value):
     return hashlib.sha256(canonical(value)).hexdigest()
 
 
+def normalize_root_name(path):
+    """Replace only the three approved mktemp segment shapes."""
+    return "/".join(re.sub(r"^(tmp\.)[A-Za-z0-9]{10}$|^(leaf-selection\.)[A-Za-z0-9]{8}$|^(relay-src\.)[A-Za-z0-9]{6}$",
+                           lambda match: next(group for group in match.groups() if group) + "*", segment)
+                    for segment in path.split("/"))
+
+
+def _normalize_epoch_manifest(manifest):
+    if not isinstance(manifest, dict):
+        raise ValueError("invalid_capture_epoch_manifest")
+    result = copy.deepcopy(manifest)
+    tables, conflicts = {}, set()
+    for field in ("external_root_table", "external_root_digests"):
+        if not isinstance(manifest.get(field), dict):
+            continue
+        groups = {}
+        for raw, value in manifest[field].items():
+            groups.setdefault(normalize_root_name(raw), []).append((raw, value))
+        tables[field] = {key: rows[0][1] for key, rows in groups.items()}
+        for rows in groups.values():
+            if any(value != rows[0][1] for _, value in rows[1:]):
+                conflicts.update(raw for raw, _ in rows)
+    if conflicts:
+        # Preserve both raw tables when either table has an ambiguous identity.
+        result["external_root_conflicts"] = sorted(conflicts | set(result.get("external_root_conflicts", [])))
+    else:
+        result.update(tables)
+    # The selector decides; it never shapes what a traced run reads, so its bytes leave the epoch.
+    if isinstance(result.get("reporting_helper_sha256s"), dict):
+        result["reporting_helper_sha256s"].pop("select_tests.py", None)
+    result["root_name_normalization"] = "s15b-4"
+    return result
+
+
+def normalized_epoch(manifest):
+    # Same canonical sha256 as trace_process_tree.digest, defined locally so this file imports alone.
+    return digest(_normalize_epoch_manifest(manifest))
+
+
 def _pairs(pairs):
     result = {}
     for key, value in pairs:
@@ -54,6 +94,94 @@ def load_json(path):
         return value, raw
     except (OSError, ValueError, TypeError) as exc:
         raise InvalidInput("unreadable_input") from exc
+
+
+def directory_trie(paths):
+    """Self-contained copy of the builder's deterministic three-level trie."""
+    root = {"paths": [], "children": {}}
+    for path in sorted(set(paths)):
+        node = root
+        for component in path.split("/")[:-1][:3]:
+            node = node["children"].setdefault(component, {"paths": [], "children": {}})
+        node["paths"].append(path)
+    return root
+
+
+def expand_map(mapping):
+    """Validate the compact wire format before exposing any selection edges."""
+    try:
+        if mapping.get("schema") != "leaf.ci.test-selection-map.v2":
+            raise ValueError()
+        paths, session = mapping["paths"], mapping["session"]
+        if (not isinstance(paths, list) or any(not isinstance(p, str) for p in paths)
+                or paths != sorted(set(paths)) or not isinstance(session, dict)
+                or mapping.get("format") not in (
+                    {"paths": "interned", "session": "intersection"},
+                    {"paths": "interned", "session": "intersection",
+                     "collection": "session catalog reads excluded from suite reads"})):
+            raise ValueError()
+        for path in paths:
+            if path != ".":
+                repo_path(path)
+
+        def indices(value):
+            if (not isinstance(value, list) or any(type(i) is not int or not 0 <= i < len(paths) for i in value)
+                    or value != sorted(set(value))):
+                raise ValueError()
+            return set(value)
+
+        reads = indices(session["read_idx"])
+        collection = indices(session.get("collection_idx", []))
+        negative = indices(session["negative_idx"])
+        dirs = indices(session["directory_reads"])
+        member_rows = session.get("directory_members", [[] for _ in dirs])
+        if not isinstance(member_rows, list) or len(member_rows) != len(dirs):
+            raise ValueError()
+        members = {i: indices(row) for i, row in zip(sorted(dirs), member_rows)}
+        if not isinstance(mapping["suites"], dict):
+            raise ValueError()
+        expanded = dict(mapping, suites={})
+        expanded["session"] = dict(session, collection_paths=[paths[i] for i in sorted(collection)])
+        for sid, compact in mapping["suites"].items():
+            if not isinstance(compact, dict):
+                raise ValueError()
+            row = dict(compact)
+            for field, shared, prefix in (("read_paths", reads, "read"),
+                                          ("negative_lookup_paths", negative, "negative")):
+                extra = indices(row.pop(prefix + "_extra_idx"))
+                missing = indices(row.pop(prefix + "_missing_idx", []))
+                if extra & shared or not missing <= shared:
+                    raise ValueError()
+                row[field] = [paths[i] for i in sorted((shared - missing) | extra)]
+                if "." in row[field]:
+                    raise ValueError()
+            absent = indices(row.pop("directory_missing_idx", []))
+            if not absent <= dirs:
+                raise ValueError()
+            own = {i: set(values) for i, values in members.items() if i not in absent}
+            additions = row.pop("directory_extra")
+            if not isinstance(additions, list):
+                raise ValueError()
+            previous = -1
+            for entry in additions:
+                i = entry["path_idx"]
+                indices([i])
+                if i <= previous or i in absent:
+                    raise ValueError()
+                previous = i
+                extra = indices(entry["member_idx"])
+                missing = indices(entry.get("member_missing_idx", []))
+                base = own.get(i, set())
+                if extra & base or not missing <= base:
+                    raise ValueError()
+                own[i] = (base - missing) | extra
+            row["directory_reads"] = [{"path": paths[i], "members": [paths[j] for j in sorted(values)]}
+                                      for i, values in sorted(own.items())]
+            row["directory_trie"] = directory_trie(row["read_paths"])
+            expanded["suites"][sid] = row
+        return expanded
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise InvalidInput("invalid_map") from exc
 
 
 def atomic_write(path, data):
@@ -208,6 +336,18 @@ def catalog_info(catalog):
     return entries, fingerprint
 
 
+def bind_catalog(decision, catalog_path):
+    if decision.get("catalog_sha256") is not None or catalog_path is None:
+        return
+    try:
+        catalog, _ = load_json(catalog_path)
+        entries, fingerprint = catalog_info(catalog)
+    except (InvalidInput, OSError, ValueError, UnicodeError):
+        return
+    decision.update(catalog_sha256=fingerprint, catalog_suite_ids=sorted(entries),
+                    catalog_kind=catalog.get("kind"))
+
+
 def collection_digest(ids):
     return digest(sorted(strings(list(ids), "invalid_collection")))
 
@@ -263,9 +403,34 @@ def validate_event(event, head, repo_slug, pr_number):
     if event.get("event") not in ("PULL_REQUEST_CREATED", "PULL_REQUEST_UPDATED",
                                   "PULL_REQUEST_REOPENED"):
         raise InvalidInput("non_pr_event")
-    if (event.get("provider") != "github" or event.get("initiator") != "GitHub-Hook" or
-            event.get("provider_bound") is not True or not event.get("build_id") or
-            not event.get("evidence_ref")):
+    provider = event.get("provider")
+    if provider == "github":
+        if (event.get("initiator") != "GitHub-Hook" or
+                event.get("provider_bound") is not True or not event.get("build_id") or
+                not event.get("evidence_ref")):
+            raise InvalidInput("unverified_event")
+    elif provider == "forge":
+        evidence = event.get("evidence_ref")
+        if (event.get("initiator") != "forge-ci-relay" or
+                event.get("provider_bound") is not True or
+                not isinstance(event.get("build_id"), str) or not event["build_id"] or
+                not isinstance(evidence, dict) or
+                not isinstance(evidence.get("manifest_sha256"), str) or
+                not re.fullmatch(r"[0-9A-Fa-f]{64}", evidence["manifest_sha256"]) or
+                any(not isinstance(evidence.get(k), str) or not evidence[k]
+                    for k in ("build", "operation"))):
+            raise InvalidInput("unverified_event")
+    elif provider == "forge-device":
+        evidence = event.get("evidence_ref")
+        if (event.get("initiator") != "leaf-ci-device" or
+                event.get("provider_bound") is not True or
+                not isinstance(event.get("build_id"), str) or
+                not re.fullmatch(r"device:dv-[0-9a-f]{16}", event["build_id"]) or
+                not isinstance(evidence, dict) or evidence.get("build") != event["build_id"] or
+                not isinstance(evidence.get("operation"), str) or
+                not re.fullmatch(r"ci-[0-9a-f]{40}", evidence["operation"])):
+            raise InvalidInput("unverified_event")
+    else:
         raise InvalidInput("unverified_event")
     number = event.get("pr_number")
     if type(number) is not int or number <= 0:
@@ -275,10 +440,15 @@ def validate_event(event, head, repo_slug, pr_number):
         raise InvalidInput("invalid_pr_identity")
     if ((repo_slug is not None and repo_slug != slug) or
             (pr_number is not None and int(pr_number) != number) or
-            event.get("source_version") != "pr/" + str(number) or
+            event.get("source_version") != ("" if provider in ("forge", "forge-device") else "pr/" + str(number)) or
             event.get("head_sha") != head):
         raise InvalidInput("contradictory_event")
-    for key in ("head_ref", "target_ref"):
+    if provider in ("forge", "forge-device") and (
+            event.get("head_ref") != "refs/pull/" + str(number) + "/head" or
+            not isinstance(event.get("target_sha"), str) or
+            not re.fullmatch(r"[0-9A-Fa-f]{40}", event["target_sha"])):
+        raise InvalidInput("contradictory_event")
+    for key in (("target_ref",) if provider in ("forge", "forge-device") else ("head_ref", "target_ref")):
         ref = event.get(key)
         if (not isinstance(ref, str) or not ref.startswith("refs/heads/") or
                 not ref[len("refs/heads/"):] or any(c in ref for c in " ~^:?*[\\") or
@@ -310,9 +480,34 @@ def _eligible_suite(row):
             not row.get("capture_errors") and not row.get("incomplete_reasons"))
 
 
+PROCESS_TRACE_KIND = "linux-process-tree"
+
+
+def _process_entry(entry):
+    return entry.get("trace_kind") == PROCESS_TRACE_KIND and entry.get("python_only") is False
+
+
+def verify_capture_epoch(mapping, manifest_path):
+    """The selecting build's epoch and external-root digests must equal the map's."""
+    if manifest_path is None:
+        raise InvalidInput("epoch_unavailable")
+    try:
+        manifest, _ = load_json(manifest_path)
+    except InvalidInput as exc:
+        raise InvalidInput("epoch_unavailable") from exc
+    if (manifest.get("schema") != "leaf.ci.capture-epoch.v1" or
+            not isinstance(mapping.get("capture_epoch"), str) or
+            normalized_epoch(manifest) != mapping["capture_epoch"] or
+            not isinstance(manifest.get("external_root_digests"), dict) or
+            _normalize_epoch_manifest(manifest)["external_root_digests"] !=
+            _normalize_epoch_manifest({"external_root_digests": mapping.get("external_root_digests")}).get("external_root_digests")):
+        raise InvalidInput("epoch_mismatch")
+    return manifest
+
+
 def decide(repo, trusted_sha, head_sha, map_path, event_evidence=None, policy_path=None,
            catalog_path=None, repo_slug=None, pr_number=None, window_path=None,
-           environ=None, now=None):
+           environ=None, now=None, capture_epoch_manifest=None):
     decision = {
         "schema": DECISION_SCHEMA, "selection_mode": "full", "execution_mode": "full",
         "assigned_arm": None, "assignment_bucket": None, "assignment_rule": "sha256-pr-v1",
@@ -337,7 +532,10 @@ def decide(repo, trusted_sha, head_sha, map_path, event_evidence=None, policy_pa
         mapping, map_raw = load_json(map_path)
         bind_blob(map_raw, trusted_tree, MAP_PATH)
         decision["map_sha"] = trusted_tree[MAP_PATH][2]
-        if mapping.get("schema") != "leaf.ci.test-selection-map.v1" or mapping.get("repo") != slug:
+        if mapping.get("schema") == "leaf.ci.test-selection-map.v2":
+            mapping = expand_map(mapping)
+        if (mapping.get("schema") not in ("leaf.ci.test-selection-map.v1", "leaf.ci.test-selection-map.v2") or
+                mapping.get("repo") != slug):
             raise InvalidInput("invalid_map")
         policy = mapping
         if policy_path is not None:
@@ -354,24 +552,56 @@ def decide(repo, trusted_sha, head_sha, map_path, event_evidence=None, policy_pa
         entries, fingerprint = catalog_info(catalog)
         decision.update(catalog_sha256=fingerprint, catalog_suite_ids=sorted(entries),
                         executed_suite_ids=sorted(entries), catalog_kind=catalog.get("kind"))
-        if mapping.get("catalog_sha256") != fingerprint:
+        suites = mapping.get("suites")
+        if not isinstance(suites, dict) or any(not isinstance(row, dict) for row in suites.values()):
+            raise InvalidInput("invalid_map")
+        new = set(entries) - set(suites)
+        removed = set(suites) - set(entries)
+        changed = {sid for sid in set(entries) & set(suites)
+                   if suites[sid].get("test_ids") is not None and
+                   sorted(strings(suites[sid]["test_ids"])) != sorted(entries[sid]["test_ids"])}
+        ratio = round((len(new) + len(changed)) / len(entries), 6)
+        decision["map_catalog_sha256"] = mapping.get("catalog_sha256")
+        decision["catalog_drift"] = {"new": sorted(new), "changed": sorted(changed),
+                                     "removed": sorted(removed), "ratio": ratio}
+        max_ratio = policy.get("max_catalog_drift_ratio", 0.25)
+        if (isinstance(max_ratio, bool) or not isinstance(max_ratio, (int, float)) or
+                not 0 <= max_ratio <= 1):
+            raise InvalidInput("invalid_policy")
+        if ratio > max_ratio:
             raise InvalidInput("catalog_change")
         if catalog.get("kind") not in ("pytest", "web"):
             raise InvalidInput("invalid_catalog")
         if catalog["kind"] == "pytest" and ("PR_BASE_SHA" in environ or "BASE_SHA" in environ):
             raise InvalidInput("base_override_env")
         gate = event.get("merge_gate", {})
-        if (not isinstance(gate, dict) or gate.get("provider_bound") is not True or
+        gate_verified = not (not isinstance(gate, dict) or gate.get("provider_bound") is not True or
                 gate.get("kind") != "github-merge-queue" or
                 any(gate.get(k) is not True for k in ("queue_protected", "webhook_filter", "full_status")) or
                 not gate.get("evidence_ref") or gate.get("head_sha") != head_sha or
-                gate.get("repo") != slug or gate.get("map_sha") != decision["map_sha"]):
+                gate.get("repo") != slug or gate.get("map_sha") != decision["map_sha"])
+        decision["merge_gate_verified"] = gate_verified
+        if not gate_verified and policy.get("phase") != "shadow":
             raise InvalidInput("merge_gate_unverified")
-        revoked = gate.get("revoked_map_shas")
-        strings(revoked, "revocation_unknown")
-        if decision["map_sha"] in revoked:
+        revoked = gate.get("revoked_map_shas") if isinstance(gate, dict) else None
+        if gate_verified:
+            try:
+                strings(revoked, "revocation_unknown")
+            except InvalidInput:
+                decision["merge_gate_verified"] = False
+                if policy.get("phase") != "shadow":
+                    raise
+        if isinstance(revoked, list) and decision["map_sha"] in revoked:
             raise InvalidInput("map_revoked")
-        target = git.resolve(event["target_ref"] + "^{commit}")
+        target_ref = event["target_ref"]
+        if event.get("provider") == "forge":
+            target_ref = "refs/remotes/origin/" + target_ref[len("refs/heads/"):]
+        try:
+            target = git.resolve(target_ref + "^{commit}")
+        except InvalidInput:
+            if event.get("provider") == "forge":
+                raise InvalidInput("target_mismatch")
+            raise
         if event.get("target_sha") != target:
             raise InvalidInput("target_mismatch")
         bases = git.run("merge-base", "--all", target, head_sha).decode("ascii").splitlines()
@@ -388,11 +618,11 @@ def decide(repo, trusted_sha, head_sha, map_path, event_evidence=None, policy_pa
         if not paths:
             raise InvalidInput("empty_diff")
         for path in paths:
-            old, new = base_tree.get(path), head_tree.get(path)
-            if not old and not new:
+            old_entry, new_entry = base_tree.get(path), head_tree.get(path)
+            if not old_entry and not new_entry:
                 raise InvalidInput("unreadable_changed_path")
             if any(entry and (entry[0] not in ("100644", "100755") or entry[1] != "blob")
-                   for entry in (old, new)):
+                   for entry in (old_entry, new_entry)):
                 raise InvalidInput("submodule_or_symlink")
         rules = strings(policy.get("force_full_rules", []), "invalid_policy")
         if any(protected_path(path, rules) for path in paths):
@@ -409,30 +639,41 @@ def decide(repo, trusted_sha, head_sha, map_path, event_evidence=None, policy_pa
                 raise InvalidInput("catalog_runner_change")
         if catalog["kind"] == "web" and not runner:
             raise InvalidInput("catalog_runner_unbound")
-        suites = mapping.get("suites")
-        if not isinstance(suites, dict) or set(suites) - set(entries):
-            raise InvalidInput("invalid_map")
         mandatory = set(strings(mapping.get("mandatory_suite_ids")))
         mandatory.update(strings(policy.get("mandatory_suite_ids")))
         required = mandatory | set(strings(mapping.get("always_select_suite_ids", [])))
-        if not mandatory or not required <= set(entries):
+        if not mandatory:
             raise InvalidInput("missing_mandatory_id")
+        mandatory.intersection_update(entries)
+        required.intersection_update(entries)
         decision["mandatory_suite_ids"] = sorted(mandatory)
         decision["known_read_paths"] = {}
+        decision["known_read_prefixes"] = {}
         edges = {}
+        lookups = {}
+        prefix_edges = {}
+        prefix_known = {}
         shared = {}
+        process_map = mapping.get("trace_kind") == PROCESS_TRACE_KIND
+        if process_map and any(_process_entry(entry) for entry in entries.values()):
+            verify_capture_epoch(mapping, capture_epoch_manifest)
         for sid, entry in entries.items():
             row = suites.get(sid, {})
+            if sid in new or sid in changed:
+                required.add(sid)
+                row = {}
             if not isinstance(row, dict):
                 raise InvalidInput("invalid_map")
-            if (not _eligible_suite(row) or entry.get("trace_kind") != "python" or
-                    entry.get("python_only") is not True or
+            python_entry = entry.get("trace_kind") == "python" and entry.get("python_only") is True
+            if (not _eligible_suite(row) or
+                    not (python_entry or (process_map and _process_entry(entry))) or
                     entry.get("classification") not in ("mapped", "mandatory") or
                     entry.get("classification") == "mandatory" or entry.get("contract_assertions")):
                 required.add(sid)
             if row.get("test_ids") is not None and sorted(strings(row["test_ids"])) != sorted(entry["test_ids"]):
                 raise InvalidInput("collection_drift")
             reads = set(repo_path(p) for p in strings(row.get("read_paths", [])))
+            prefixes = set()
             generated = row.get("generated_rules", [])
             if not isinstance(generated, list):
                 raise InvalidInput("generated_closure_incomplete")
@@ -443,7 +684,36 @@ def decide(repo, trusted_sha, head_sha, map_path, event_evidence=None, policy_pa
                 inputs = strings(rule.get("inputs"), "generated_closure_incomplete")
                 if not inputs:
                     raise InvalidInput("generated_closure_incomplete")
-                reads.update(repo_path(p) for p in inputs)
+                for value in inputs:
+                    if value.endswith("/"):
+                        prefixes.add(repo_path(value.rstrip("/")))
+                    else:
+                        reads.add(repo_path(value))
+            for prefix in prefixes:
+                if prefix not in prefix_known:
+                    prefix_known[prefix] = any(path.startswith(prefix + "/") and item[1] == "blob"
+                                               for tree in (base_tree, head_tree)
+                                               for path, item in tree.items())
+                if not prefix_known[prefix]:
+                    raise InvalidInput("unresolved_read_path")
+                prefix_edges.setdefault(prefix, set()).add(sid)
+            if prefixes:
+                decision["known_read_prefixes"][sid] = sorted(prefixes)
+            directories = row.get("directory_reads", [])
+            if not isinstance(directories, list):
+                raise InvalidInput("invalid_map")
+            for directory in directories:
+                if not isinstance(directory, dict):
+                    raise InvalidInput("invalid_map")
+                path = directory.get("path")
+                if path != ".":
+                    repo_path(path)
+                for member in strings(directory.get("members"), "invalid_map"):
+                    repo_path(member)
+                    start = "" if path == "." else path + "/"
+                    if not member.startswith(start) or "/" in member[len(start):]:
+                        raise InvalidInput("invalid_map")
+                prefix_edges.setdefault(path, set()).add(sid)
             for path in reads:
                 if path not in base_tree and path not in head_tree:
                     raise InvalidInput("unresolved_read_path")
@@ -452,13 +722,19 @@ def decide(repo, trusted_sha, head_sha, map_path, event_evidence=None, policy_pa
                     raise InvalidInput("ambiguous_read_path")
                 edges.setdefault(path, set()).add(sid)
             decision["known_read_paths"][sid] = sorted(reads)
-            shared[sid] = set(strings(row.get("shared_state_dependencies", [])))
+            for path in strings(row.get("negative_lookup_paths", []), "invalid_map"):
+                lookups.setdefault(repo_path(path), set()).add(sid)
+            shared[sid] = set(strings(row.get("shared_state_dependencies", []))) - removed
             if not shared[sid] <= set(entries):
                 raise InvalidInput("shared_closure_incomplete")
         for path in paths:
-            if path not in edges:
+            hits = edges.get(path, set()) | lookups.get(path, set()) | prefix_edges.get(".", set())
+            parts = path.split("/")
+            for depth in range(1, len(parts) + 1):
+                hits = hits | prefix_edges.get("/".join(parts[:depth]), set())
+            if not hits:
                 raise InvalidInput("unknown_path")
-            required.update(edges[path])
+            required.update(hits)
         # Shared state is conservatively undirected: either endpoint requires both.
         while True:
             previous = set(required)
@@ -505,6 +781,7 @@ def decide(repo, trusted_sha, head_sha, map_path, event_evidence=None, policy_pa
                             executed_suite_ids=expanded)
         return decision
     except (InvalidInput, UnicodeError) as exc:
+        bind_catalog(decision, catalog_path)
         return full(decision, str(exc) if isinstance(exc, InvalidInput) else "invalid_encoding")
 
 
@@ -565,6 +842,7 @@ def main(argv=None):
         choose.add_argument(option, required=True)
     for name in ("event-evidence", "policy", "catalog", "repo-slug", "pr-number", "window"):
         choose.add_argument("--" + name)
+    choose.add_argument("--capture-epoch-manifest")
     emit = commands.add_parser("emit-web-args")
     for name in ("decision", "catalog", "out"):
         emit.add_argument("--" + name, required=True)
@@ -577,7 +855,7 @@ def main(argv=None):
         atomic_write(out / "only-args.nul", b"")
         decision = decide(args.repo, args.trusted_sha, args.head_sha, args.map,
                           args.event_evidence, args.policy, args.catalog, args.repo_slug,
-                          args.pr_number, args.window)
+                          args.pr_number, args.window, capture_epoch_manifest=args.capture_epoch_manifest)
         if decision.get("catalog_kind") == "web" and decision["apply_filter"]:
             catalog, _ = load_json(args.catalog)
             atomic_write(out / "only-args.nul", validated_web_args(decision, catalog))
@@ -588,7 +866,12 @@ def main(argv=None):
         # Exceptions are not a valid successful decision. Clear filter state and
         # leave a diagnostic fallback when possible; the loader owns recovery.
         if args.command == "decide":
-            fallback = full({"schema": DECISION_SCHEMA}, "selector_exception")
+            fallback = {"schema": DECISION_SCHEMA}
+            try:
+                bind_catalog(fallback, args.catalog)
+            except Exception:
+                pass
+            full(fallback, "selector_exception")
             try:
                 atomic_write(Path(args.out_dir) / "only-args.nul", b"")
                 write_json(Path(args.out_dir) / "decision.json", fallback)

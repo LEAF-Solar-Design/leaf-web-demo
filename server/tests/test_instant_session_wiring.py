@@ -3,10 +3,13 @@ from __future__ import annotations
 import hashlib
 import base64
 import json
+import re
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from uuid import UUID
 
 import pytest
 
@@ -56,6 +59,55 @@ def _assignment(tenant_id="tenant-demo", session_id="22222222-2222-4222-8222-222
         "issued_at": "2099-07-28T16:00:00Z",
         "expires_at": "2099-07-28T16:05:00Z",
     }
+
+
+@pytest.mark.parametrize(
+    "drawing_id", sorted(instant_execution.drawing_identity.CURATED_DEMO.aliases),
+)
+def test_request_drawing_reference_matches_executor_assignment_schema(monkeypatch, drawing_id):
+    schema_path = (
+        Path(__file__).resolve().parents[2]
+        / "executor/contracts/schemas/session-assignment.v1.schema.json"
+    )
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    drawing_schema = schema["properties"]["drawing_context"]
+    assert drawing_schema["additionalProperties"] is False
+
+    identity = instant_execution.drawing_identity.CURATED_DEMO
+    monkeypatch.setattr(
+        instant_execution.deps, "load_cached_intake", lambda: {"layers": ["Panels"]},
+    )
+    artifact = instant_execution.InstantArtifact(
+        tool_id="instant-read", tool_version="1.0.0", execution_class="instant",
+        runtime="python-3.12", capability_id="drawing.read",
+        catalog_commit="a" * 40, entrypoint="tool.py",
+        params_schema_digest="sha256:" + "b" * 64, limits={},
+        code_digest="sha256:" + "c" * 64, artifact_digest="sha256:" + "d" * 64,
+        source=b"def run(intake, params): return {'ok': True}\n",
+    )
+    body = instant_execution._request_body(
+        "tenant-demo", _assignment()["session_id"], drawing_id,
+        artifact, "sha256:" + "e" * 64,
+    )
+    reference = body["drawing_context"]["reference"]
+    assert reference["drawing_id"] == drawing_id
+    store_body = instant_execution._request_body(
+        "tenant-demo", _assignment()["session_id"], identity.store_id,
+        artifact, "sha256:" + "e" * 64,
+    )
+    store_reference = store_body["drawing_context"]["reference"]
+    for key in ("version_id", "content_digest", "geometry_ref"):
+        assert reference[key] == store_reference[key], key
+    properties = drawing_schema["properties"]
+    assert set(reference) == set(properties)
+    for key, field_schema in properties.items():
+        value = reference[key]
+        assert isinstance(value, str), key
+        if "pattern" in field_schema:
+            assert re.fullmatch(field_schema["pattern"], value), key
+        else:
+            assert field_schema["format"] == "uuid", key
+            assert str(UUID(value)) == value, key
 
 
 def test_prepare_assigns_and_loads_before_reporting_ready(monkeypatch, tmp_path):
@@ -182,6 +234,7 @@ def test_control_transport_requires_mtls_and_rejects_nonloopback_http(monkeypatc
 
 def test_assignment_validation_rejects_digest_substitution_and_expiry():
     assignment = _assignment()
+    assignment["drawing_context"]["drawing_id"] = "rooftop_demo"
     expected = {
         "effective_catalog_digest": assignment["effective_catalog_digest"],
         "artifact": {
@@ -199,6 +252,13 @@ def test_assignment_validation_rejects_digest_substitution_and_expiry():
     assert not instant_execution._assignment_valid(
         substituted, assignment["tenant_id"], assignment["session_id"], expected,
     )
+
+    for key, value in (("content_digest", "sha256:" + "f" * 64), ("drawing_id", "demo")):
+        substituted = dict(assignment)
+        substituted["drawing_context"] = {**assignment["drawing_context"], key: value}
+        assert not instant_execution._assignment_valid(
+            substituted, assignment["tenant_id"], assignment["session_id"], expected,
+        ), key
 
     expired = dict(assignment)
     expired["expires_at"] = "2000-01-01T00:00:00Z"

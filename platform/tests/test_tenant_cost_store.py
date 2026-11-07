@@ -1,5 +1,6 @@
 """Pure validation always runs; PostgreSQL coverage uses isolated fixture orgs."""
 from copy import deepcopy
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import uuid
@@ -51,6 +52,9 @@ def test_enum_fields_fail_closed():
             with pytest.raises(ValueError, match=field):
                 store.validate_cost_event(event(**{field: value}))
     for addon in store.ADDONS:
+        if addon == "kashbot_runner":
+            assert store.validate_cost_event(event(addon=addon, mode="byo", cost_usd=0))["addon"] == addon
+            continue
         assert store.validate_cost_event(event(addon=addon))["addon"] == addon
 
 
@@ -121,6 +125,32 @@ def test_byo_events_have_zero_platform_cost():
         store.validate_cost_event(event(mode="byo"))
 
 
+def test_runner_cost_event_managed_refused():
+    facts = event(addon="kashbot_runner", mode="managed", cost_usd=10)
+    calls = []
+
+    class Connection:
+        def cursor(self):
+            calls.append("cursor")
+            return nullcontext(self)
+
+        def execute(self, query, params):
+            calls.append((query, params))
+
+    with pytest.raises(ValueError, match="^mode must be byo for kashbot_runner$"):
+        store.validate_cost_event(facts)
+    with pytest.raises(ValueError, match="^mode must be byo for kashbot_runner$"):
+        store.record_cost_event(Connection(), facts)
+    assert calls == []
+
+
+def test_runner_cost_event_byo_validates():
+    result = store.validate_cost_event(event(addon="kashbot_runner", mode="byo", cost_usd=0))
+    assert result["addon"] == "kashbot_runner"
+    assert result["mode"] == "byo"
+    assert result["cost_usd"] == 0
+
+
 def test_event_key_is_deterministic_and_binds_each_input():
     values = [ORG, "aps_solve", "adapter", "job:123"]
     key = store.cost_event_key(*values)
@@ -157,6 +187,42 @@ def test_other_modes_require_null_ref():
             store.validate_addon_mode(ORG, "aps_solve", mode, byo_ref="vault/key", actor="operator")
 
 
+def test_runner_modes():
+    ref = "kashbot-runner:b15f227e-ecb7-4c58-82ad-05360542a56c"
+    writes = []
+
+    class Connection:
+        def cursor(self):
+            return nullcontext(self)
+
+        def execute(self, query, params):
+            writes.append(params)
+
+    conn = Connection()
+    store.set_addon_mode(conn, ORG, "kashbot_runner", "byo", byo_ref=ref, actor="operator")
+    assert writes == [{"org_id": ORG, "addon": "kashbot_runner", "mode": "byo",
+                       "byo_ref": ref, "actor": "operator"}]
+    for invalid in (None, "", 123, [], {}, "kashbot-runner:not-a-uuid", str(ORG),
+                    ref.replace("kashbot-runner:", "runner:"), ref.upper(),
+                    "kashbot-runner:" + str(ORG).upper(),
+                    ref.replace("-", "", 1), "kashbot-runner:" + ORG.hex,
+                    "kashbot-runner:{" + str(ORG) + "}",
+                    "kashbot-runner:urn:uuid:" + str(ORG), ref + "\n", " " + ref):
+        with pytest.raises(ValueError) as exc:
+            store.set_addon_mode(conn, ORG, "kashbot_runner", "byo", byo_ref=invalid, actor="operator")
+        assert str(exc.value) == "byo_ref must be kashbot-runner:<runner_uuid>"
+    with pytest.raises(ValueError) as exc:
+        store.set_addon_mode(conn, ORG, "kashbot_runner", "managed", actor="operator")
+    assert str(exc.value) == "mode must be byo or off for kashbot_runner"
+    with pytest.raises(ValueError) as exc:
+        store.set_addon_mode(conn, ORG, "kashbot_runner", "off", byo_ref=ref, actor="operator")
+    assert str(exc.value) == "byo_ref must be null unless mode is byo"
+    assert len(writes) == 1
+    store.set_addon_mode(conn, ORG, "kashbot_runner", "off", actor="operator")
+    assert writes[-1] == {"org_id": ORG, "addon": "kashbot_runner", "mode": "off",
+                          "byo_ref": None, "actor": "operator"}
+
+
 def test_list_validation_precedes_database_access():
     for changes, field in (({"limit": 10001}, "limit"), ({"limit": 0}, "limit"),
                            ({"limit": True}, "limit"), ({"limit": 1.5}, "limit"),
@@ -181,6 +247,48 @@ def test_writes_validate_before_using_connection():
         store.record_cost_event(None, event(addon="bad"))
     with pytest.raises(ValueError, match="byo_ref"):
         store.set_addon_mode(None, ORG, "aps_solve", "byo", actor="operator")
+
+
+def test_settings_ignore_unknown_rows():
+    rows = [
+        {"addon": "future_addon", "mode": {"arbitrary": []}, "byo_ref": False},
+        {"addon": "aps_solve", "mode": "byo", "byo_ref": "vault/team:aps"},
+        {"addon": "__proto__"},
+        {"addon": "constructor"},
+        {"addon": "storage", "mode": "managed", "byo_ref": None},
+        {"addon": "prototype"},
+    ]
+    original = deepcopy(rows)
+    calls = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def execute(self, query, params):
+            calls.append((query, params))
+
+        def fetchall(self):
+            return rows
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+    settings = store.get_addon_settings(Connection(), str(ORG))
+    assert calls == [("SELECT addon, mode, byo_ref FROM tenant_addon_settings WHERE org_id = %s", (ORG,))]
+    assert set(settings) == set(store.ADDONS)
+    assert settings["aps_solve"] == {"mode": "byo", "byo_ref": "vault/team:aps"}
+    assert settings["storage"] == {"mode": "managed", "byo_ref": None}
+    assert all(settings[addon] == {"mode": "off", "byo_ref": None}
+               for addon in store.ADDONS if addon not in ("aps_solve", "storage"))
+    settings["aps_solve"]["byo_ref"] = "changed"
+    settings["e2b_exec"]["mode"] = "managed"
+    assert settings["tool_ci"] == {"mode": "off", "byo_ref": None}
+    assert rows == original
 
 
 def test_db_insert_duplicate_and_conflicting_replays(make_org):

@@ -1,9 +1,12 @@
 // @vitest-environment jsdom
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
-import useJobController, { readInflightJob, readPendingRun } from './useJobController.js'
+import useJobController, { PENDING_RUN_KEY, PENDING_RUN_LOGOUT_KEY, canSeePendingRun, readInflightJob, readPendingRun, savePendingRun } from './useJobController.js'
+import controllerSource from './useJobController.js?raw'
+import * as api from '../api.js'
+import * as auth from '../auth.js'
 
-afterEach(cleanup)
+afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
 function memoryStorage() {
   const values = new Map()
@@ -26,6 +29,197 @@ function renderController({ services, storage, readsPaused = false, onAuthRequir
     readsPaused, services, storage, onAuthRequired, pollIntervalMs: 60000,
   }), { initialProps: { readsPaused } })
 }
+
+function accountToken(sub) {
+  return `header.${btoa(JSON.stringify({ iss: 'studio', sub }))}.signature`
+}
+
+it.each([
+  [null, null, false],
+  [{ account: null }, null, true],
+  [{ account: 'studio:designer-a' }, 'studio:designer-a', true],
+  [{ account: 'studio:designer-a' }, null, false],
+  [{ account: 'studio:designer-a' }, 'studio:designer-b', false],
+  [{ account: null }, 'studio:designer-a', false],
+  [{ account: null }, undefined, true],
+  [{ account: null }, '', true],
+  [{ account: null }, 42, true],
+])('checks pending-run visibility for record %j and account %j', (record, account, visible) => {
+  expect(canSeePendingRun(record, account)).toBe(visible)
+})
+
+it('keeps saved inputs across a cross-tab token expiry and restores them for the same account', async () => {
+  const storage = memoryStorage()
+  const token = accountToken('designer-a')
+  storage.setItem('leaf.jwt', token)
+  savePendingRun('count', { panels: 8 }, storage)
+  const saved = storage.getItem(PENDING_RUN_KEY)
+  const hook = renderController({ storage, readsPaused: true, services: {} })
+  expect(hook.result.current.pendingRun.params).toEqual({ panels: 8 })
+  act(() => {
+    storage.removeItem('leaf.jwt')
+    window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt', oldValue: token, newValue: null }))
+  })
+  expect(hook.result.current.pendingRun).toBeNull()
+  expect(storage.getItem(PENDING_RUN_KEY)).toBe(saved)
+  act(() => {
+    storage.setItem('leaf.jwt', token)
+    window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt', newValue: token }))
+  })
+  expect(hook.result.current.pendingRun.params).toEqual({ panels: 8 })
+})
+
+it('publishes an explicit logout marker and clears pending inputs before logout', () => {
+  let logout
+  vi.spyOn(auth, 'subscribeBeforeLogout').mockImplementation(callback => { logout = callback; return () => {} })
+  const storage = memoryStorage()
+  storage.setItem('leaf.jwt', accountToken('designer-a'))
+  savePendingRun('count', { panels: 8 }, storage)
+  const hook = renderController({ storage, readsPaused: true, services: {} })
+  act(() => logout())
+  expect(storage.getItem(PENDING_RUN_LOGOUT_KEY)).toEqual(expect.any(String))
+  expect(storage.getItem(PENDING_RUN_KEY)).toBeNull()
+  expect(hook.result.current.pendingRun).toBeNull()
+})
+
+it('clears saved inputs when another tab broadcasts explicit logout', () => {
+  const storage = memoryStorage()
+  storage.setItem('leaf.jwt', accountToken('designer-a'))
+  savePendingRun('count', { panels: 8 }, storage)
+  const hook = renderController({ storage, readsPaused: true, services: {} })
+  act(() => {
+    window.dispatchEvent(new StorageEvent('storage', { key: PENDING_RUN_LOGOUT_KEY, newValue: 'logout-1' }))
+  })
+  expect(storage.getItem(PENDING_RUN_KEY)).toBeNull()
+  expect(hook.result.current.pendingRun).toBeNull()
+})
+
+it('keeps saved account inputs hidden when a different account signs in after token expiry', () => {
+  const storage = memoryStorage()
+  storage.setItem('leaf.jwt', accountToken('designer-a'))
+  savePendingRun('count', { panels: 8 }, storage)
+  const hook = renderController({ storage, readsPaused: true, services: {} })
+  act(() => {
+    storage.removeItem('leaf.jwt')
+    window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt', newValue: null }))
+  })
+  const token = accountToken('designer-b')
+  act(() => {
+    storage.setItem('leaf.jwt', token)
+    window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt', newValue: token }))
+  })
+  expect(storage.getItem(PENDING_RUN_KEY)).not.toBeNull()
+  expect(hook.result.current.pendingRun).toBeNull()
+})
+
+it('hides saved account inputs after a 401 until the same account signs back in', async () => {
+  let unauthorized
+  vi.spyOn(api, 'subscribeUnauthorized').mockImplementation(callback => { unauthorized = callback; return () => {} })
+  const storage = memoryStorage()
+  const token = accountToken('designer-a')
+  storage.setItem('leaf.jwt', token)
+  const pending = deferred()
+  const hook = renderController({ services: { listJobs: vi.fn(async () => []) }, storage })
+  let run
+  act(() => {
+    run = hook.result.current.runJob({
+      toolName: 'count', execute: () => pending.promise, submission: { params: { panels: 8 } },
+    })
+  })
+  act(() => {
+    storage.removeItem('leaf.jwt')
+    unauthorized()
+  })
+  await act(async () => {
+    pending.reject(Object.assign(new Error('expired'), { status: 401 }))
+    await run
+  })
+  const saved = storage.getItem(PENDING_RUN_KEY)
+  expect(hook.result.current.pendingRun).toBeNull()
+  expect(JSON.parse(saved).account).toBe(JSON.stringify(['studio', 'designer-a', '']))
+  act(() => {
+    storage.setItem('leaf.jwt', token)
+    window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt', newValue: token }))
+  })
+  expect(hook.result.current.pendingRun.params).toEqual({ panels: 8 })
+})
+
+it('shows an anonymous 401 save in every signed-out tab and retains it after token events', async () => {
+  const sameTabStorage = memoryStorage()
+  const pending = deferred()
+  const sameTab = renderController({ services: { listJobs: vi.fn(async () => []) }, storage: sameTabStorage })
+  let run
+  act(() => {
+    run = sameTab.result.current.runJob({
+      toolName: 'count', execute: () => pending.promise, submission: { params: { panels: 6 } },
+    })
+  })
+  await act(async () => {
+    pending.reject(Object.assign(new Error('expired'), { status: 401 }))
+    await run
+  })
+  expect(sameTab.result.current.pendingRun.params).toEqual({ panels: 6 })
+  const otherTab = renderController({ services: {}, storage: sameTabStorage, readsPaused: true })
+  expect(otherTab.result.current.pendingRun.params).toEqual({ panels: 6 })
+  const saved = sameTabStorage.getItem(PENDING_RUN_KEY)
+
+  const crossTabStorage = memoryStorage()
+  savePendingRun('count', { panels: 10 }, crossTabStorage)
+  const crossTab = renderController({ services: {}, storage: crossTabStorage, readsPaused: true })
+  expect(crossTab.result.current.pendingRun.params).toEqual({ panels: 10 })
+  act(() => {
+    window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt', newValue: null }))
+  })
+  expect(crossTab.result.current.pendingRun.params).toEqual({ panels: 10 })
+  expect(crossTabStorage.getItem(PENDING_RUN_KEY)).not.toBeNull()
+  expect(otherTab.result.current.pendingRun.params).toEqual({ panels: 6 })
+  expect(sameTabStorage.getItem(PENDING_RUN_KEY)).toBe(saved)
+})
+
+it('hides a 401 save after another tab removes the token until the same account returns', async () => {
+  const storage = memoryStorage()
+  const token = accountToken('designer-a')
+  storage.setItem('leaf.jwt', token)
+  const pending = deferred()
+  const hook = renderController({ services: { listJobs: vi.fn(async () => []) }, storage })
+  let run
+  act(() => {
+    run = hook.result.current.runJob({
+      toolName: 'count', execute: () => pending.promise, submission: { params: { panels: 8 } },
+    })
+  })
+  act(() => {
+    storage.removeItem('leaf.jwt')
+    window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt', oldValue: token, newValue: null }))
+  })
+  expect(hook.result.current.pendingRun).toBeNull()
+  expect(storage.getItem(PENDING_RUN_LOGOUT_KEY)).toBeNull()
+  await act(async () => {
+    pending.reject(Object.assign(new Error('expired'), { status: 401 }))
+    await run
+  })
+  expect(hook.result.current.pendingRun).toBeNull()
+  const saved = storage.getItem(PENDING_RUN_KEY)
+  expect(JSON.parse(saved).account).toBe(JSON.stringify(['studio', 'designer-a', '']))
+  expect(JSON.parse(saved).params).toEqual({ panels: 8 })
+  act(() => {
+    storage.setItem('leaf.jwt', token)
+    window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt', newValue: token }))
+  })
+  expect(hook.result.current.pendingRun.params).toEqual({ panels: 8 })
+  expect(storage.getItem(PENDING_RUN_KEY)).toBe(saved)
+})
+
+it('routes every non-null pending-run publication through the identity guard', () => {
+  const source = controllerSource
+  const guardStart = source.indexOf('const publishPendingRun')
+  const guardEnd = source.indexOf('\n  useEffect(', guardStart)
+  const publications = [...source.matchAll(/setPendingRun\((?!null\))/g)].map(match => match.index)
+  expect(guardStart).toBeGreaterThan(-1)
+  expect(publications).toHaveLength(1)
+  expect(publications[0]).toBeGreaterThan(guardStart)
+  expect(publications[0]).toBeLessThan(guardEnd)
+})
 
 it('masks signed-in job data on the first paused render', async () => {
   const storage = memoryStorage()

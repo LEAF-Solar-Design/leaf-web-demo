@@ -19,12 +19,76 @@ from production_web_release import (  # noqa: E402
     deployment_receipt,
     extract_artifact,
     prepare,
+    referenced_scripts,
 )
 
 
 SOURCE = "a" * 40
 RELEASE_RUN_ID = "123456"
 RELEASE_ATTEMPT = "2"
+
+
+def test_next_script_elements_and_vite_rollback(tmp_path: Path):
+    paths = ["_next/static/chunks/webpack-a123.js", "_next/static/chunks/app/page-b456.js"]
+    for path in paths:
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("self.webpackChunk_N_E = []", encoding="utf-8")
+    html = "".join(f'<script src="/{path}" async=""></script>' for path in paths)
+    assert referenced_scripts(html, tmp_path) == paths
+    assert referenced_scripts('<script type="module" src="/assets/index-old.js"></script>') == ["assets/index-old.js"]
+
+
+def test_next_encoded_catchall_references_real_file(tmp_path: Path):
+    relative = "_next/static/chunks/app/[[...slug]]/page-proof.js"
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True)
+    target.write_text("self.webpackChunk_N_E = []", encoding="utf-8")
+    encoded = "/_next/static/chunks/app/%5B%5B...slug%5D%5D/page-proof.js"
+    assert referenced_scripts(f'<script src="{encoded}" async=""></script>', tmp_path) == [relative]
+    assert referenced_scripts(f'<script src="/{relative}"></script>', tmp_path) == [relative]
+    target.unlink()
+    with pytest.raises(ReleaseError):
+        referenced_scripts(f'<script src="{encoded}"></script>', tmp_path)
+
+
+@pytest.mark.parametrize("source", [
+    "https://evil.example/_next/static/chunks/a.js", "//evil.example/a.js",
+    "/_next/static/../secret.js", "/_next/static/%2e%2e/secret.js",
+    "/_next/static/chunks/a.js?replacement=1", "/_next/static/chunks/a.js#x",
+    "/_next/static/chunks/./a.js", "/assets/../secret.js", "/src/main.jsx",
+    "/_next/static/chunks/app/%5B%5B...slug%5D%5D/../../secret.js",
+    "/_next/static/chunks/%2Fsecret.js", "/_next/static/chunks/%5Csecret.js",
+    "/_next/static/chunks/%255Bslug%255D/a.js", "/_next/static/chunks/%ZZ/a.js",
+])
+def test_rejects_unsafe_script_elements(source: str):
+    with pytest.raises(ReleaseError):
+        referenced_scripts(f'<script src="{source}"></script>')
+
+
+def test_rejects_missing_and_substituted_scripts(tmp_path: Path):
+    with pytest.raises(ReleaseError):
+        referenced_scripts('<script src="/_next/static/chunks/missing.js"></script>', tmp_path)
+    with pytest.raises(ReleaseError):
+        referenced_scripts('<script>const fake = "assets/index-good.js";</script>')
+    with pytest.raises(ReleaseError):
+        referenced_scripts('<script src="/assets/ok.js" src="/assets/other.js"></script>')
+
+
+def test_encoded_next_path_does_not_allow_symlink(tmp_path: Path):
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "page-proof.js").write_text("real bytes", encoding="utf-8")
+    route = tmp_path / "_next/static/chunks/app/[[...slug]]"
+    route.parent.mkdir(parents=True)
+    try:
+        route.symlink_to(real, target_is_directory=True)
+    except OSError:
+        pytest.skip("host does not permit creating symlinks")
+    with pytest.raises(ReleaseError):
+        referenced_scripts('<script src="/_next/static/chunks/app/%5B%5B...slug%5D%5D/page-proof.js"></script>', tmp_path)
+
+
 DIGESTS = {
     name: f"sha256:{index:064x}"
     for index, name in enumerate(
@@ -162,6 +226,30 @@ def _inspect(deployment_id: str, url: str) -> dict:
         "readyState": "READY",
         "projectId": PROJECT_ID,
     }
+
+
+def test_prepare_accepts_multiple_next_scripts_with_bound_artifact(tmp_path: Path):
+    dist, _ = _dist(tmp_path)
+    scripts = ["_next/static/chunks/webpack-proof.js", "_next/static/chunks/app/[[...slug]]/page-proof.js"]
+    for script in scripts:
+        target = dist / script
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("console.log('Next export')", encoding="utf-8")
+    (dist / "index.html").write_text(
+        "".join(f'<script src="/{script.replace("[", "%5B").replace("]", "%5D")}" async=""></script>' for script in scripts),
+        encoding="utf-8",
+    )
+    digest = web_dist_digest(dist)
+    output = tmp_path / "output"
+    proof = prepare(_handoff(digest), dist, output, source=SOURCE,
+                    release_run_id=RELEASE_RUN_ID, release_attempt=RELEASE_ATTEMPT,
+                    expected_web_sha256=digest)
+    assert proof["web_artifact_sha256"] == digest
+    assert proof["entry_asset"] == scripts[0]
+    for script in scripts:
+        assert (output / "static" / script).read_bytes() == (dist / script).read_bytes()
+    routes = json.loads((output / "config.json").read_text())["routes"]
+    assert routes[-2] == {"src": "/(?:_next/static|assets)/.*", "status": 404}
 
 
 def test_prepare_reuses_exact_web_bytes_and_builds_static_output(tmp_path: Path):

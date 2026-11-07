@@ -2,9 +2,8 @@
 //
 // One state matrix over four controls, each driven through the real dev
 // server with mocked APIs:
-//   - JobInbox: a notice with a recorded action retries exactly once per
-//     click; a notice without one shows a disabled Retry with its reason and
-//     dispatches nothing.
+//   - JobInbox: a real version notice restores the drawing through Undo;
+//     dismiss hides only that notice. Component tests cover disabled actions.
 //   - CustomizePanel: no entry and no drawer without platform_customize; with
 //     it, an empty proposal is refused locally, 403 and 503 refusals each cost
 //     exactly one request, and an awaiting_cosign record offers no Land.
@@ -65,75 +64,46 @@ async function signIn(page) {
 
 async function openConsole(page, query = '') {
   await page.goto(`/app?surface=browser${query}`)
+  await page.getByRole('navigation', { name: 'Workspace controls' }).getByRole('button', { name: 'Project', exact: true }).click()
   await expect(page.locator('[data-ground="browser"]')).toBeVisible({ timeout: 20_000 })
+  await page.getByRole('navigation', { name: 'Workspace controls' }).getByRole('button', { name: 'Studio', exact: true }).click()
 }
 
 test.describe('JobInbox recovery', () => {
-  test('a recorded retry dispatches once per click and a notice without one dispatches nothing', async ({ page }) => {
+  test('a recorded Undo restores the drawing once and dismiss only hides its notice', async ({ page }) => {
     test.setTimeout(90_000)
-    await signIn(page)
-    const log = await routeApi(page, ({ path }) => (
-      path.startsWith('/api/recovery-proof/') ? { status: 200, body: { ok: true } } : null
-    ))
-    await openConsole(page)
+    await page.goto('/app?demo=tour')
+    await page.getByRole('navigation', { name: 'Workspace controls' }).getByRole('button', { name: 'Studio', exact: true }).click()
+    const tour = page.getByRole('dialog', { name: 'Guided demo tour' })
+    await expect(tour).toBeVisible()
+    await tour.getByRole('button', { name: 'Skip', exact: true }).click()
+
+    const command = page.getByRole('combobox', { name: 'Command bar' })
+    await command.fill('delete panel 7FA3')
+    await command.press('Enter')
+    await page.getByRole('button', { name: 'Run delete-marked-panel', exact: true }).click()
+    await expect(page.locator('body')).toContainText(/Entities\s*2,344/)
+
     const inbox = page.locator('aside.job-inbox')
-    await expect(inbox).toBeVisible({ timeout: 20_000 })
-
-    // Push onto the SAME singleton bus the app reads (vite serves the source
-    // module at one URL, so this import is the app's own instance).
-    await page.evaluate(async () => {
-      const { notificationBus } = await import('/src/lib/notifications.js')
-      window.__recoveryRetries = 0
-      notificationBus.push({ kind: 'warn', text: 'Recovery proof: export has no follow-up' })
-      notificationBus.push({
-        kind: 'error',
-        text: 'Recovery proof: count-panels failed',
-        action: {
-          label: 'Re-run count-panels',
-          onClick: () => {
-            window.__recoveryRetries += 1
-            fetch('http://leaf-proof.invalid/api/recovery-proof/retry').catch(() => {})
-          },
-        },
-      })
-    })
-
-    const retryRow = inbox.locator('.inbox-row').filter({ hasText: 'Recovery proof: count-panels failed' })
-    const plainRow = inbox.locator('.inbox-row').filter({ hasText: 'Recovery proof: export has no follow-up' })
-    await expect(retryRow).toHaveCount(1)
-    await expect(plainRow).toHaveCount(1)
-
-    // Retry with a recorded action: enabled, and one activation is one
-    // dispatch. At 1600x1000 on the Browser surface the board's .ground-desk
-    // takes the pointer over the expanded inbox, so the row is driven the way
-    // JobInbox.jsx:12 documents for keyboard users: focus plus Enter on the
-    // native button, which fires the same onClick a pointer press would.
-    const retry = retryRow.getByRole('button', { name: 'Re-run count-panels', exact: true })
-    await expect(retry).toBeEnabled()
-    await expect(retryRow.locator('.lock-note')).toHaveCount(0)
-    await retry.press('Enter')
-    await expect.poll(() => count(log, 'GET /api/recovery-proof/retry')).toBe(1)
+    await expect(inbox).toBeVisible()
+    const versionRow = inbox.locator('.inbox-row').filter({ hasText: 'Version 2 created' })
+    await expect(versionRow).toHaveCount(1)
+    const undo = versionRow.getByRole('button', { name: 'Undo', exact: true })
+    await expect(undo).toBeEnabled()
+    await expect(versionRow.locator('.lock-note')).toHaveCount(0)
+    await undo.click()
+    await expect(page.locator('body')).toContainText(/Entities\s*2,345/)
+    const restored = inbox.locator('.inbox-row').filter({ hasText: 'Reverted to version 1' })
+    await expect(restored).toHaveCount(1)
     await page.waitForTimeout(SETTLE_MS)
-    expect(await page.evaluate(() => window.__recoveryRetries)).toBe(1)
-    expect(count(log, 'GET /api/recovery-proof/retry')).toBe(1)
+    await expect(restored).toHaveCount(1)
 
-    // No recorded action: disabled with its reason in prose, and even a
-    // forced click event dispatches nothing.
-    const dead = plainRow.getByRole('button', { name: 'Retry', exact: true })
-    await expect(dead).toBeDisabled()
-    await expect(plainRow.locator('.lock-note')).toHaveText(
-      'This notice recorded no follow-up action, so there is nothing here to retry.',
-    )
-    await dead.dispatchEvent('click')
-    await page.waitForTimeout(SETTLE_MS)
-    expect(await page.evaluate(() => window.__recoveryRetries)).toBe(1)
-    expect(log.filter((line) => line.includes('/api/recovery-proof/'))).toEqual(['GET /api/recovery-proof/retry'])
-
-    // Dismiss hides the row from this view only; nothing is dispatched.
-    await retryRow.getByRole('button', { name: 'Dismiss', exact: true }).press('Enter')
-    await expect(retryRow).toHaveCount(0)
-    await expect(plainRow).toHaveCount(1)
-    expect(log.filter((line) => line.includes('/api/recovery-proof/'))).toEqual(['GET /api/recovery-proof/retry'])
+    await versionRow.getByRole('button', { name: 'Dismiss', exact: true }).click()
+    await expect(versionRow).toHaveCount(0)
+    await expect(restored).toHaveCount(1)
+    await expect(page.locator('body')).toContainText(/Entities\s*2,345/)
+    // JobInbox.test.jsx keeps the exact-once callback and disabled/no-action
+    // checks at the component boundary, without importing a dev-server module.
   })
 })
 

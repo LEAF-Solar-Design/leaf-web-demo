@@ -3,6 +3,7 @@ import { expect, test } from '@playwright/test'
 async function openTour(page, viewport) {
   await page.setViewportSize(viewport)
   await page.goto('/app?demo=tour')
+  await page.getByRole('navigation', { name: 'Workspace controls' }).getByRole('button', { name: 'Studio', exact: true }).click()
   const tour = page.getByRole('dialog', { name: 'Guided demo tour' })
   await expect(tour).toBeVisible()
   return tour

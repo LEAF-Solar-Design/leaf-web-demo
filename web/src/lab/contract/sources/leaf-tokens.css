@@ -1,6 +1,6 @@
 /* Profiles publish inherited light/dark pairs; roles recompute on profile and theme-bearing elements, with nearest theme winning and explicit light winning on the same element.
    Consumers read --leaf-<role> only; --leaf-light-*, --leaf-dark-* pairs and --leaf-when-* toggles are internal. */
-/* Generated from leaf-tokens.v1.json sha256:d4d59287ebda4bce8bf4188eadbe3e8f1fbe356ff52be3ba482f72c67b53cd3c. Do not edit. */
+/* Generated from leaf-tokens.v1.json sha256:7dd685dc36a72990da72760b49fc4d54848181564714d48feae5d60d396ead29. Do not edit. */
 :root {
   --leaf-when-dark: initial;
   --leaf-when-light: ;
@@ -263,14 +263,14 @@
   --leaf-type-metric-weight: var(--leaf-when-dark, var(--leaf-light-type-metric-weight)) var(--leaf-when-light, var(--leaf-dark-type-metric-weight));
 }
 [data-leaf-profile="studio"] {
-  --leaf-light-color-background: #2a2a2a;
-  --leaf-dark-color-background: #2a2a2a;
-  --leaf-light-color-bg: #2a2a2a;
-  --leaf-dark-color-bg: #2a2a2a;
-  --leaf-light-color-border: #424242;
-  --leaf-dark-color-border: #424242;
-  --leaf-light-color-command: #04b255;
-  --leaf-dark-color-command: #04b255;
+  --leaf-light-color-background: #050706;
+  --leaf-dark-color-background: #050706;
+  --leaf-light-color-bg: #050706;
+  --leaf-dark-color-bg: #050706;
+  --leaf-light-color-border: #262a27;
+  --leaf-dark-color-border: #262a27;
+  --leaf-light-color-command: #28d66f;
+  --leaf-dark-color-command: #28d66f;
   --leaf-light-color-data-series-1: #2f6f9f;
   --leaf-dark-color-data-series-1: #5b9bd5;
   --leaf-light-color-data-series-2: #146c43;
@@ -281,20 +281,20 @@
   --leaf-dark-color-data-series-4: #9b87e8;
   --leaf-light-color-data-series-5: #64748b;
   --leaf-dark-color-data-series-5: #9aa1ac;
-  --leaf-light-color-foreground: #e2e2e2;
-  --leaf-dark-color-foreground: #e2e2e2;
-  --leaf-light-color-primary: #1390cc;
-  --leaf-dark-color-primary: #1390cc;
-  --leaf-light-color-success: #04b255;
-  --leaf-dark-color-success: #04b255;
-  --leaf-light-color-surface: #232323;
-  --leaf-dark-color-surface: #232323;
-  --leaf-light-font-label: system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  --leaf-dark-font-label: system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  --leaf-light-font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --leaf-dark-font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --leaf-light-font-sans: system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  --leaf-dark-font-sans: system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --leaf-light-color-foreground: #f4f4f5;
+  --leaf-dark-color-foreground: #f4f4f5;
+  --leaf-light-color-primary: #28d66f;
+  --leaf-dark-color-primary: #28d66f;
+  --leaf-light-color-success: #28d66f;
+  --leaf-dark-color-success: #28d66f;
+  --leaf-light-color-surface: #0e110f;
+  --leaf-dark-color-surface: #0e110f;
+  --leaf-light-font-label: 'Inter Tight', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --leaf-dark-font-label: 'Inter Tight', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --leaf-light-font-mono: 'IBM Plex Mono', ui-monospace, 'Cascadia Mono', monospace;
+  --leaf-dark-font-mono: 'IBM Plex Mono', ui-monospace, 'Cascadia Mono', monospace;
+  --leaf-light-font-sans: 'Inter Tight', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --leaf-dark-font-sans: 'Inter Tight', system-ui, -apple-system, 'Segoe UI', sans-serif;
   --leaf-light-radius-chrome: 3px;
   --leaf-dark-radius-chrome: 3px;
   --leaf-light-radius-control: 0.5rem;
@@ -309,10 +309,10 @@
   --leaf-dark-spacing-panel-padding: 16px;
   --leaf-light-spacing-target-min: 44px;
   --leaf-dark-spacing-target-min: 44px;
-  --leaf-light-type-body: system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  --leaf-dark-type-body: system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  --leaf-light-type-code: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --leaf-dark-type-code: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --leaf-light-type-body: 'Inter Tight', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --leaf-dark-type-body: 'Inter Tight', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --leaf-light-type-code: 'IBM Plex Mono', ui-monospace, 'Cascadia Mono', monospace;
+  --leaf-dark-type-code: 'IBM Plex Mono', ui-monospace, 'Cascadia Mono', monospace;
   --leaf-light-type-figure-family: mono;
   --leaf-dark-type-figure-family: mono;
   --leaf-light-type-figure-numeric: tabular-nums;
@@ -321,8 +321,8 @@
   --leaf-dark-type-label-letter-spacing-em: 0.08em;
   --leaf-light-type-label-line-height: 1.2;
   --leaf-dark-type-label-line-height: 1.2;
-  --leaf-light-type-label-size-px: 11px;
-  --leaf-dark-type-label-size-px: 11px;
+  --leaf-light-type-label-size-px: 12px;
+  --leaf-dark-type-label-size-px: 12px;
   --leaf-light-type-label-transform: uppercase;
   --leaf-dark-type-label-transform: uppercase;
   --leaf-light-type-label-weight: 600;
