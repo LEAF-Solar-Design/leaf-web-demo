@@ -28,9 +28,12 @@ def test_shared_placement(item):
 
 
 def test_every_snapshot_block_runs_on_bot():
-    manifests = trusted_registry().values()
-    assert len(manifests) == 14
-    assert all(placement(manifest) == "bot" for manifest in manifests)
+    # The arithmetic builtins evaluate here; every strategy block in the snapshot runs on the bot.
+    manifests = list(trusted_registry().values())
+    assert len(manifests) == 19
+    here = {manifest["id"] for manifest in manifests if placement(manifest) == "here"}
+    assert here == {"constant", "add", "subtract", "multiply", "divide"}
+    assert all(placement(manifest) == "bot" for manifest in manifests if manifest["id"] not in here)
 
 
 def test_tool_case_matches_real_projection():

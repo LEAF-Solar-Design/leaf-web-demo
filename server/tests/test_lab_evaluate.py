@@ -15,7 +15,7 @@ from lab_doc_validators import InvalidGraph, TooLarge
 from lab_evaluate import (Budget, GraphRefused, RunBudgetExceeded, RunCancelled,
                           ValueRefused, evaluate_graph, evaluate_operation,
                           export_value, inherited, runtime_value, trusted_registry)
-from lab_ops import MAX_ROWS, UNDEFINED
+from lab_ops import MAX_ROWS, UNDEFINED, has_operator
 from lab_canonical import canonical_json
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures/lab-graph-cases.v1.json").read_text(encoding="utf-8"))
@@ -77,7 +77,7 @@ def test_config_digest_keeps_output_validation():
     assert value.data is None and value.error == "output-refused"
 
 
-@pytest.mark.parametrize("manifest", list(trusted_registry().values()), ids=lambda manifest: manifest["id"])
+@pytest.mark.parametrize("manifest", [m for m in trusted_registry().values() if not (m["kind"] == "builtin" and has_operator(m["id"]))], ids=lambda manifest: manifest["id"])
 def test_placeholder_runs_only_on_bot(manifest):
     settings = {name: manifest["settings_schema"]["properties"][name].get("minimum", 0)
                 for name in manifest["settings_schema"].get("required", [])}

@@ -23,9 +23,11 @@ describe('shared placement conformance', () => {
     expect(placement(manifest, options)).toBe(item.expect);
     expect(manifest).toEqual(before);
   });
-  it('places all 14 snapshot blocks on the bot and all 11 generated transforms in the browser', () => {
-    expect(manifests).toHaveLength(14);
-    for (const manifest of manifests) expect(placement(manifest)).toBe('bot');
+  it('places the 14 strategy snapshot blocks on the bot, the 5 arithmetic builtins here and all 11 generated transforms in the browser', () => {
+    expect(manifests).toHaveLength(19);
+    const here = new Set(manifests.filter(manifest => placement(manifest) === 'here').map(manifest => manifest.id));
+    expect(here).toEqual(new Set(['constant', 'add', 'subtract', 'multiply', 'divide']));
+    for (const manifest of manifests) if (!here.has(manifest.id)) expect(placement(manifest)).toBe('bot');
     const transforms = Object.values(transformManifests());
     expect(transforms).toHaveLength(11);
     for (const manifest of transforms) expect(placement(manifest)).toBe('browser');

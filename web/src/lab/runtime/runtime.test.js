@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { canonicalJSON, compatible } from '../contract.js';
 import { sha256Hex } from './sha256.js';
+import { hasOperator } from './ops.js';
 import cases from '../contract/fixtures/ops-conformance.json';
 import { contract, runtimeValue, sourceAge, evaluateOperation, evaluateGraph, exportValue,
   createPoller, pollIntervalMs, createStudioSources, MAX_ROWS, runOperator } from './index.js';
@@ -130,7 +131,8 @@ describe('placement execution boundaries', () => {
     const { graph, registry } = single(config, { k_min: 4 });
     expect(evaluateGraph(graph, registry).outputs.result).toMatchObject({ data: null, error: { code: 'output-refused' } });
   });
-  it.each(blocks.manifests)('refuses the placeholder $id with no data', manifest => {
+  // Builtins with a pure operator evaluate here; every other snapshot block is a placeholder that runs on the bot.
+  it.each(blocks.manifests.filter(manifest => !(manifest.kind === 'builtin' && hasOperator(manifest.id))))('refuses the placeholder $id with no data', manifest => {
     const settings = Object.fromEntries((manifest.settings_schema.required || []).map(name =>
       [name, manifest.settings_schema.properties[name].minimum ?? 0]));
     const { graph, registry } = single(manifest, settings);
