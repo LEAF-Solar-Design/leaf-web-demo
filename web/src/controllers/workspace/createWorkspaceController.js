@@ -1,4 +1,5 @@
 import { humanizeError } from '../../errorHumanize.js'
+import { authorityStorage, authorityKey, serviceState } from '../../lib/serviceAuthSession.js'
 
 export const WORKSPACE_ORG_KEY = 'leaf.org_id'
 
@@ -18,7 +19,13 @@ function writeStoredProjectId(orgId, projectId, storage) {
 }
 
 function browserStorage() {
-  try { return globalThis.localStorage } catch { return null }
+  // Resolve every operation against the current authority, including after login.
+  return {
+    getItem: key => key === WORKSPACE_ORG_KEY && serviceState().mode
+      ? serviceState().identity?.org_id || null : authorityStorage()?.getItem(key),
+    setItem: (key, value) => authorityStorage()?.setItem(key, value),
+    removeItem: key => authorityStorage()?.removeItem(key),
+  }
 }
 
 export function readStoredOrgId(storage = browserStorage()) {
@@ -68,17 +75,20 @@ export function createWorkspaceController({
   mock = false,
   authLive = false,
   services,
-  storage = browserStorage(),
+  storage,
   formatError = defaultFormatError,
   isBootstrapRequired = defaultIsBootstrapRequired,
   callbacks = {},
 } = {}) {
   if (!services) throw new TypeError('createWorkspaceController requires services')
+  const followsAuthority = storage === undefined
+  storage = storage === undefined ? browserStorage() : storage
 
   const listeners = new Set()
   let disposed = false
   let readsPaused = false // a known guest: loadProjects publishes the empty, error-free snapshot and reads nothing
   const generations = { projects: 0, workspace: 0, org: 0, project: 0 }
+  const authorities = {}
   let inFlightOpen = null
   let resumeAttempted = false
   let state = {
@@ -117,9 +127,11 @@ export function createWorkspaceController({
   }
   const nextGeneration = (lane) => {
     if (lane === 'workspace') inFlightOpen = null
+    authorities[lane] = authorityKey()
     return ++generations[lane]
   }
   const isCurrent = (lane, request) => !disposed && generations[lane] === request
+    && (!followsAuthority || authorities[lane] === authorityKey())
   const invalidateAll = () => Object.keys(generations).forEach((lane) => { nextGeneration(lane) })
   const explain = (error) => {
     try { return formatError(error) } catch { return defaultFormatError(error) }

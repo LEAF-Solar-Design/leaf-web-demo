@@ -30,6 +30,7 @@ import { SecretRefusedError, guardedText } from './lib/secretGuardTransport.js'
 import { createSolarProjectClient } from './solar/solarProjectClient.js'
 import { sameSolarDrawingBinding } from './solar/solarDrawingBinding.js'
 import { notifyActiveScopeChanged, readActiveScope } from './auth/activeScope.js'
+import { serviceState, serviceHeaders, serviceRequestAuthority, authorityStorage, rememberServiceResponse, invalidateServiceResponse } from './lib/serviceAuthSession.js'
 
 // A deployed static bundle talks to the app through the same public origin.
 // Local stacks pass VITE_API_BASE explicitly from .env or docker-compose.
@@ -53,7 +54,7 @@ const AUTH_KEY = 'leaf.jwt'
 const GUEST_SESSION_KEY = 'leaf.guest_session'
 const unauthorizedListeners = new Set()
 
-export const config = { apiBase: API_BASE, mockDefault: MOCK_DEFAULT, tenant: TENANT }
+export const config = { apiBase: API_BASE, get mockDefault() { return serviceState().mode ? false : MOCK_DEFAULT }, tenant: TENANT }
 
 const SOURCE_UUID = /^(?!00000000-0000-0000-0000-000000000000$)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const sourceHash = (value, size) => typeof value === 'string' && new RegExp(`^[0-9a-f]{${size}}$`).test(value)
@@ -262,6 +263,7 @@ export function isMockConversation() { return conversationMock }
 // Read the bearer token at CALL time (not module load) so a sign-in mid-session
 // is picked up. Returns {} when absent -> merging it is a no-op off-auth.
 export function authHeaders() {
+  if (serviceState().mode) return serviceHeaders(API_BASE)
   try {
     const tok = localStorage.getItem(AUTH_KEY)
     return tok ? { Authorization: `Bearer ${tok}` } : {}
@@ -272,6 +274,7 @@ export function authHeaders() {
 // only for the uploaded-drawing endpoints that the server guest allowlist
 // exposes. It must never flow into run, solve, author, converse, or job calls.
 function storedGuestSession() {
+  if (serviceState().mode) return null
   try { return localStorage.getItem(GUEST_SESSION_KEY) }
   catch { return null }
 }
@@ -313,9 +316,18 @@ export function subscribeUnauthorized(listener) {
 // off a background call the stage never made). `fatal: false` returns the
 // response untouched: no localStorage wipe, no unauthorized listener firing.
 // Every other call site is unchanged (the default stays true).
-export function noteUnauthorized(response, source = 'api', sentAuth = undefined, { fatal = true } = {}) {
+export function noteUnauthorized(response, source = 'api', sentAuth = undefined, { fatal = true, serviceAuthority } = {}) {
   if (response?.status !== 401) return response
   if (!fatal) return response
+  if (typeof sentAuth === 'string' && sentAuth.startsWith('LeafServiceSession ')) {
+    if (!invalidateServiceResponse(response, sentAuth, serviceAuthority)) return response
+    notifyActiveScopeChanged()
+    for (const listener of unauthorizedListeners) {
+      try { listener(source) } catch { /* observer */ }
+    }
+    return response
+  }
+  if (serviceState().mode) return response
   const sentToken = typeof sentAuth === 'string' && sentAuth.startsWith('Bearer ')
     ? sentAuth.slice('Bearer '.length)
     : null
@@ -333,7 +345,8 @@ export function noteUnauthorized(response, source = 'api', sentAuth = undefined,
 async function apiFetch(input, init, source = 'api') {
   // Every api.js call site passes plain-object headers, so the sent bearer is
   // readable directly; a Headers instance would read as undefined -> no wipe.
-  return noteUnauthorized(await fetch(input, init), source, init?.headers?.Authorization)
+  const serviceAuthority = serviceRequestAuthority()
+  return noteUnauthorized(await fetch(input, init), source, init?.headers?.Authorization, { serviceAuthority })
 }
 
 export class BindingGrantError extends Error {
@@ -381,10 +394,11 @@ export function clearRequestFailures() { requestFailures.length = 0 }
 
 async function http(path, opts, timeoutMs = null) {
   const headers = { ...(opts?.headers || {}), ...authHeaders() }
+  const serviceAuthority = serviceRequestAuthority()
   const request = timeoutMs == null
     ? fetch(`${API_BASE}${path}`, { ...opts, headers })
     : fetchWithBudget(fetch, `${API_BASE}${path}`, { ...opts, headers }, timeoutMs)
-  const res = noteUnauthorized(await request, path, headers.Authorization)
+  const res = noteUnauthorized(await request, path, headers.Authorization, { serviceAuthority })
   if (!res.ok) {
     const e = new Error(`${opts?.method || 'GET'} ${path} -> ${res.status}`)
     e.status = res.status // callers gate on 401/403 without string-matching
@@ -581,7 +595,10 @@ const normalizeFamilies = (families) =>
 export function createProjectSolarClient(options = {}) {
   return createSolarProjectClient({
     apiBase: API_BASE,
-    fetchImpl: (...args) => globalThis.fetch(...args),
+    fetchImpl: async (...args) => {
+      const authority = serviceRequestAuthority()
+      return rememberServiceResponse(await globalThis.fetch(...args), authority)
+    },
     authHeaders,
     onUnauthorized: (response, sentAuth) => noteUnauthorized(response, 'project-solar', sentAuth),
     ...options,
@@ -784,15 +801,17 @@ export async function submitSurfaceConfig(overlay) {
 const ORG_KEY = 'leaf.org_id'
 
 export function getStoredOrgId() {
-  try { return localStorage.getItem(ORG_KEY) || null } catch { return null }
+  const service = serviceState()
+  if (service.mode) return service.identity?.org_id || null
+  try { return authorityStorage()?.getItem(ORG_KEY) || null } catch { return null }
 }
 export function setStoredOrgId(id) {
-  try { if (id) localStorage.setItem(ORG_KEY, id); else localStorage.removeItem(ORG_KEY) } catch { /* noop */ }
+  try { if (id) authorityStorage()?.setItem(ORG_KEY, id); else authorityStorage()?.removeItem(ORG_KEY) } catch { /* noop */ }
   notifyActiveScopeChanged()
 }
 // X-Org-Id header for the stored org (or {} when none — a no-op off-workspace).
 function orgHeaders(orgId) {
-  const id = orgId || getStoredOrgId()
+  const id = serviceState().mode ? getStoredOrgId() : orgId || getStoredOrgId()
   return id ? { 'X-Org-Id': id } : {}
 }
 
@@ -1674,9 +1693,10 @@ export async function fetchDrawingDxf(drawingId, { version = 'head', etag = null
   const path = `/api/drawings/${encodeURIComponent(drawingId)}/dxf?version=${encodeURIComponent(String(version))}`
   const headers = { 'X-Tenant-Id': TENANT, ...guestDrawingHeaders(drawingId), ...authHeaders() }
   if (etag) headers['If-None-Match'] = etag
+  const serviceAuthority = serviceRequestAuthority()
   const res = noteUnauthorized(
     await fetchWithBudget(fetchImpl, `${API_BASE}${path}`, { headers }, DRAWING_DXF_TIMEOUT_MS),
-    path, headers.Authorization,
+    path, headers.Authorization, { serviceAuthority },
   )
   const meta = {
     version: Number(res.headers.get('x-leaf-version')) || null,

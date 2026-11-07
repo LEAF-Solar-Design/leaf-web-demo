@@ -31,6 +31,7 @@
 import { config, noteUnauthorized } from '../api.js'
 import { WORKSPACE_ORG_KEY } from '../controllers/workspace/createWorkspaceController.js'
 import { readActiveScope } from '../auth/activeScope.js'
+import { serviceState, serviceHeaders, serviceRequestAuthority } from '../lib/serviceAuthSession.js'
 
 const AUTH_KEY = 'leaf.jwt'
 // The actor's platform identity binding. platform/api.py has NO
@@ -51,10 +52,12 @@ function readStored(key) {
 }
 
 export function getStoredActorBindingId() {
+  if (serviceState().mode) return null
   return readStored(ACTOR_BINDING_KEY)
 }
 
 export function setStoredActorBindingId(id) {
+  if (serviceState().mode) return
   try {
     if (id) localStorage.setItem(ACTOR_BINDING_KEY, id)
     else localStorage.removeItem(ACTOR_BINDING_KEY)
@@ -76,6 +79,10 @@ function requireUuid(value, label) {
 
 // Read at call time (not module load) so a sign-in mid-session is picked up.
 function identityHeaders(orgId) {
+  const service = serviceState()
+  if (service.mode) {
+    return { ...serviceHeaders(config.apiBase), ...(service.identity?.org_id ? { 'X-Org-Id': service.identity.org_id } : {}) }
+  }
   const headers = {}
   const tok = readStored(AUTH_KEY)
   if (tok) headers.Authorization = `Bearer ${tok}`
@@ -124,8 +131,9 @@ async function request(path, opts = {}) {
   }
   const headers = { ...(options.headers || {}), ...identityHeaders(options.orgId) }
   const { orgId: _ignored, ...init } = options
+  const serviceAuthority = serviceRequestAuthority()
   const res = await fetch(`${config.apiBase}${path}`, { ...init, headers })
-  if (res.status === 401) noteUnauthorized(res, path, headers.Authorization)
+  if (res.status === 401) noteUnauthorized(res, path, headers.Authorization, { serviceAuthority })
   if (!res.ok) {
     let body = null
     try { body = await res.clone().json() } catch { /* non-JSON error body */ }

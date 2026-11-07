@@ -4,6 +4,7 @@ import { uploadProjectInput } from './api.js'
 import { useLoadingPhase } from '../lib/loadingTiming.js'
 import { humanizeError } from '../errorHumanize.js'
 import { authTenantScope } from '../drawing/drawingIdentity.js'
+import { serviceState, serviceScope } from '../lib/serviceAuthSession.js'
 import { subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
 import './campaigns.css'
 import { BrowserArtifactContext } from '../site/BrowserAssetGround.jsx'
@@ -18,6 +19,7 @@ const nativeRelease = row => row.capability === 'campaign.native-release' || row
 const DraftContext = createContext(null)
 
 function readCampaignPrincipal() {
+  if (serviceState().mode) return serviceScope()
   try { return authTenantScope(localStorage.getItem('leaf.jwt')) } catch { return null }
 }
 

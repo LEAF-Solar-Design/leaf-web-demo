@@ -6,6 +6,117 @@ import { afterEach, expect, it, vi } from 'vitest'
 const DRAWING_KEY = 'leaf.cat.workbench.id.v1'
 let originalAddress, identity
 
+it('bootstraps joint proof without borrowing a human token and logs out locally before failed revocation', async () => {
+  vi.resetModules()
+  const auth = await import('./auth.js')
+  const { serviceSession, serviceState, authorityStorage } = await import('./lib/serviceAuthSession.js')
+  const { authHeaders, config, getSessionIdentity } = await import('./api.js')
+  const service = serviceSession()
+  const selector = '11111111-1111-4111-8111-111111111111'
+  const realWindow = window
+  originalAddress = realWindow.location.pathname + realWindow.location.search + realWindow.location.hash
+  realWindow.history.replaceState({}, '', `/?service_session=${selector}&demo=1&keep=yes#target`)
+  localStorage.setItem('leaf.jwt', 'human-token')
+  localStorage.setItem('leaf.org_id', 'human-org')
+  let completeProof, rejectRevoke
+  const fetcher = vi.fn((url, init) => {
+    if (url.endsWith('/api/auth/agent/session')) return new Promise(resolve => { completeProof = resolve })
+    if (url.endsWith('/api/auth/agent/logout')) {
+      expect(auth.isSignedIn()).toBe(false)
+      expect(serviceState().identity).toBeNull()
+      expect(init.headers.Authorization).toBe(`LeafServiceSession ${selector}`)
+      return new Promise((_, reject) => { rejectRevoke = reject })
+    }
+    throw new Error(`Unexpected request ${url}`)
+  })
+  vi.stubGlobal('fetch', fetcher)
+  const before = vi.fn()
+  const off = auth.subscribeBeforeLogout(before)
+  const reload = vi.fn()
+  try {
+    const pending = auth.bootstrapServiceAuth()
+    expect(auth.isSignedIn()).toBe(false)
+    expect(authHeaders()).toEqual({})
+    expect(config.mockDefault).toBe(false)
+    expect(auth.authConfigured).toBe(true)
+    await expect(getSessionIdentity(false)).rejects.toMatchObject({ status: 401 })
+    expect(fetcher).toHaveBeenCalledOnce()
+    expect(realWindow.location.search).toBe('?keep=yes')
+    expect(realWindow.location.hash).toBe('#target')
+    expect(fetcher.mock.calls[0][1]).toMatchObject({ credentials: 'same-origin', headers: { Authorization: `LeafServiceSession ${selector}` } })
+    completeProof({ ok: true, json: async () => ({ authenticated: true, binding_id: selector,
+      expires_at: new Date(Date.now() + 60000).toISOString(), identity: { subject: 'machine', sub: 'machine',
+        iss: 'issuer', org_id: 'service-org', tenant_id: 'tenant', principal_type: 'service_admin' } }) })
+    expect(await pending).toBe(true)
+    expect(auth.isSignedIn()).toBe(true)
+    expect(authHeaders()).toMatchObject({ Authorization: `LeafServiceSession ${selector}`, 'X-Tenant-Id': 'tenant' })
+    const scoped = authorityStorage()
+    scoped.setItem('leaf.inflightAuthor.v1', 'service pointer')
+    vi.stubGlobal('window', new Proxy(realWindow, {
+      get(target, key) { return key === 'location' ? { origin: realWindow.location.origin, reload } : Reflect.get(target, key, target) },
+    }))
+    const logout = auth.logout()
+    expect(before).toHaveBeenCalledOnce()
+    expect(serviceState().identity).toBeNull()
+    expect(scoped.getItem('leaf.inflightAuthor.v1')).toBeNull()
+    expect(localStorage.getItem('leaf.jwt')).toBe('human-token')
+    expect(localStorage.getItem('leaf.org_id')).toBe('human-org')
+    rejectRevoke(new Error('offline'))
+    await logout
+    expect(reload).toHaveBeenCalledOnce()
+    expect(serviceState().mode).toBe(true)
+    expect(auth.isSignedIn()).toBe(false)
+  } finally { off(); service.human(); localStorage.removeItem('leaf.org_id') }
+})
+
+it('does not probe service auth on an ordinary human boot', async () => {
+  vi.resetModules()
+  const auth = await import('./auth.js')
+  const { serviceSession } = await import('./lib/serviceAuthSession.js')
+  serviceSession().human()
+  originalAddress = window.location.pathname + window.location.search + window.location.hash
+  window.history.replaceState({}, '', '/app?keep=human')
+  const fetcher = vi.fn()
+  vi.stubGlobal('fetch', fetcher)
+  expect(await auth.bootstrapServiceAuth()).toBe(false)
+  expect(fetcher).not.toHaveBeenCalled()
+  expect(window.location.search).toBe('?keep=human')
+})
+
+it('defers SiteRoot module evaluation and proofBridge installation until joint proof resolves', async () => {
+  vi.resetModules()
+  const order = []
+  vi.doMock('./site/SiteRoot.jsx', () => {
+    order.push('evaluate')
+    return { default: () => <div data-testid="verified-site-root" /> }
+  })
+  vi.doMock('./proofBridge.js', () => ({ installSurfaceConfigProofBridge: () => { order.push('bridge') } }))
+  const selector = '11111111-1111-4111-8111-111111111111'
+  originalAddress = window.location.pathname + window.location.search + window.location.hash
+  window.history.replaceState({}, '', `/?service_session=${selector}`)
+  let complete
+  const fetcher = vi.fn(() => new Promise(resolve => { complete = resolve }))
+  vi.stubGlobal('fetch', fetcher)
+  const { serviceSession } = await import('./lib/serviceAuthSession.js')
+  try {
+    const { default: StudioRoot } = await import('./main.jsx')
+    expect(fetcher).toHaveBeenCalledOnce()
+    expect(order).toEqual([])
+    const view = render(<StudioRoot />)
+    expect(view.queryByTestId('verified-site-root')).toBeNull()
+    await act(async () => {
+      complete({ ok: true, json: async () => ({ authenticated: true, binding_id: selector,
+        expires_at: new Date(Date.now() + 60000).toISOString(), identity: { subject: 'machine', sub: 'machine',
+          iss: 'issuer', org_id: null, tenant_id: 'tenant', principal_type: 'service_admin' } }) })
+    })
+    await view.findByTestId('verified-site-root')
+    expect(order).toEqual(['evaluate', 'bridge'])
+  } finally {
+    cleanup(); serviceSession().human()
+    vi.doUnmock('./site/SiteRoot.jsx'); vi.doUnmock('./proofBridge.js')
+  }
+})
+
 async function scopedAuth(sdk, createClient = async () => sdk) {
   vi.resetModules()
   for (const key of ['DOMAIN', 'CLIENT_ID', 'AUDIENCE']) vi.stubEnv(`VITE_AUTH0_${key}`, 'configured')
