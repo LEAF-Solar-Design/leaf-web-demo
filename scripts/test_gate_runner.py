@@ -5249,15 +5249,16 @@ _GIB = 2 ** 30
 
 @pytest.mark.parametrize("cpus, mem_bytes, expected", [
     (8, 15 * _GIB, 4),
+    (8, 8 * _GIB, 4),  # leaf-ci-run-1 and run-2: cpus 8, 8 GiB
     (36, 72 * _GIB, 16),
     (4, 7 * _GIB, 2),
     (2, 3 * _GIB, 1),
     (1, None, 1),
     (72, 144 * _GIB, 16),
     (24, 72 * _GIB, 12),
-    (36, 9 * _GIB, 3),
+    (36, 9 * _GIB, 4),
     (3, 12 * _GIB, 2),
-    (3, 5 * _GIB, 1),
+    (3, 5 * _GIB, 2),
     (5, 15 * _GIB, 3),
     (2.5, 8 * _GIB, 1),
     (3.0, None, 2),
