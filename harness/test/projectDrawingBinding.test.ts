@@ -21,7 +21,7 @@ async function setup(reply: unknown = state, status = 200, solveArgs?: Record<st
     fetchImpl: (async (url, init) => {
       const path = new URL(String(url)).pathname;
       requests.push({ path, body: init?.body ? JSON.parse(String(init.body)) : null });
-      if (path === "/internal/agent/project-drawing-state") return new Response(JSON.stringify(reply), { status });
+      if (path === "/internal/integrations/project-drawing-state") return new Response(JSON.stringify(reply), { status });
       if (path === "/api/capabilities") return Response.json({ families: [{ capabilities:
         [...FAKE_CATALOG, { ...FAKE_CATALOG.find(c => c.name === "add-panel"), name: "solar-settings" },
           { ...FAKE_CATALOG.find(c => c.name === "add-panel"), name: "solar-solve-proposal",

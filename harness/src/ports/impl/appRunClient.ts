@@ -717,7 +717,7 @@ export class HttpAppRunClient implements AppRunClient {
     const { tenantId, sessionId, turnId } = authority;
     const client = this;
     const resolve = async (): Promise<ProjectDrawingState | null> => {
-      const value = await client.request(tenantId, "POST", "/internal/agent/project-drawing-state", {
+      const value = await client.request(tenantId, "POST", "/internal/integrations/project-drawing-state", {
         tenant_id: tenantId, session_id: sessionId, turn_id: turnId,
       });
       if (Object.keys(value).length === 1 && value.binding === null) return null;
