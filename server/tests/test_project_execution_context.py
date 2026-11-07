@@ -253,11 +253,33 @@ def test_private_assistant_state_refuses_bad_stored_authority(assistant_state, m
     assert "binding" not in json.loads(response.body)
 
 
-def test_private_assistant_unbound_is_explicit_and_project_missing_pin_refuses(assistant_state, monkeypatch):
+def test_private_assistant_unbound_is_explicit_for_project_and_legacy(assistant_state, monkeypatch):
     from routers import agent
     monkeypatch.setenv("LEAF_APP_DISPATCH_SECRET", "synthetic")
     monkeypatch.setattr(session_store, "turn_started_data", lambda *_a: {})
     request = agent.ProjectDrawingStateRequest(tenant_id=ORG, session_id="session-1", turn_id="turn-1")
-    assert agent.internal_project_drawing_state(request, "synthetic").status_code == 409
+    response = agent.internal_project_drawing_state(request, "synthetic")
+    assert response.status_code == 200
+    assert json.loads(response.body) == {"binding": None}
     assistant_state.update(project_id=None, org_id=None)
     assert json.loads(agent.internal_project_drawing_state(request, "synthetic").body) == {"binding": None}
+
+
+def test_drawing_state_allows_unbound_active_project_turn(custody, monkeypatch):
+    _session, calls = custody
+    monkeypatch.setattr(session_store, "turn_started_data", lambda *_a: {})
+    assert context.drawing_state("session-1", "turn-1", ORG) == {"binding": None}
+    assert calls == []
+
+
+def test_resolve_turn_binding_still_requires_project_binding_by_default(custody, monkeypatch):
+    monkeypatch.setattr(session_store, "turn_started_data", lambda *_a: {})
+    with pytest.raises(context.ContextError, match="^project_execution_context_required$"):
+        context.resolve_turn_binding("session-1", "turn-1", ORG)
+
+
+def test_drawing_state_refuses_unbound_inactive_project_turn(custody, monkeypatch):
+    monkeypatch.setattr(session_store, "turn_started_data", lambda *_a: {})
+    with pytest.raises(context.ContextError, match="^project_turn_authority_required$") as exc:
+        context.drawing_state("session-1", "other-turn", ORG)
+    assert exc.value.status_code == 403

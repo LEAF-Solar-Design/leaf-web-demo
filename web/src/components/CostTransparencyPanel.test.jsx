@@ -61,7 +61,57 @@ async function openPanel() {
   return screen.getByRole('region', { name: title })
 }
 
+async function openPanelInAppRoot() {
+  const { container } = render(<div className="app"><header className="top"><div className="who">
+    <CostTransparencyPanel />
+  </div></header></div>)
+  const trigger = screen.getByRole('button', { name: title })
+  fireEvent.click(trigger)
+  await waitFor(() => expect(screen.queryByText('Loading costs…')).not.toBeInTheDocument())
+  return { app: container.querySelector('.app'), header: container.querySelector('header'),
+    trigger, panel: screen.getByRole('region', { name: title }) }
+}
+
 describe('cost transparency', () => {
+  it.each(['ready', 'failed-load'])('the open panel is a direct child of the app root in the %s state', async (state) => {
+    const fetchMock = respond()
+    if (state === 'failed-load') fetchMock.mockRejectedValueOnce(new TypeError('offline'))
+    const { app, header, trigger, panel } = await openPanelInAppRoot()
+    expect(panel.parentElement).toBe(app)
+    expect(header).not.toContainElement(panel)
+    expect(header).toContainElement(trigger)
+    expect(trigger).toHaveAttribute('aria-expanded', 'true')
+    expect(panel.style.fontSize).toBe('var(--leaf-size-caption)')
+    expect(screen.getByRole('button', { name: 'Close cost panel' })).toHaveFocus()
+    if (state === 'failed-load') expect(screen.getByRole('button', { name: 'Retry costs' })).toBeInTheDocument()
+  })
+
+  it('a panel in the app root closes from Close and returns focus to the trigger', async () => {
+    respond()
+    const { trigger } = await openPanelInAppRoot()
+    fireEvent.click(screen.getByRole('button', { name: 'Close cost panel' }))
+    expect(screen.queryByRole('region', { name: title })).not.toBeInTheDocument()
+    expect(trigger).toHaveFocus()
+    expect(trigger).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  it('Escape closes a panel in the app root from inside and returns focus to the trigger', async () => {
+    respond()
+    const { trigger } = await openPanelInAppRoot()
+    const close = screen.getByRole('button', { name: 'Close cost panel' })
+    expect(close).toHaveFocus()
+    fireEvent.keyDown(close, { key: 'Escape' })
+    expect(screen.queryByRole('region', { name: title })).not.toBeInTheDocument()
+    expect(trigger).toHaveFocus()
+    expect(trigger).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  it('with no app root the panel renders in place', async () => {
+    respond()
+    const panel = await openPanel()
+    expect(panel.parentElement).toHaveClass('cost-transparency')
+  })
+
   it.each(['success', 'failure-with-retry', 'unpublished', 'unreadable'])('has no button name matching run in the %s state', async (state) => {
     const fetchMock = respond(state === 'unpublished' || state === 'unreadable'
       ? { ...fixture, publication_id: null, resources: [], degraded_mode: state === 'unreadable' }

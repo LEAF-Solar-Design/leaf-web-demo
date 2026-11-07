@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { authHeaders, config, getCost } from '../api.js'
 import './CostTransparencyPanel.css'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
@@ -191,14 +192,12 @@ export default function CostTransparencyPanel({ mock = false, readsPaused = fals
   // below it. The scope still orders it against a nested owner.
   useEscapeOwner('cost-panel', open && !mock, close, { layer: 'menu', scope: panelRef })
   if (mock) return null
+  // The header's stacking context is below the workspace strip; .app keeps shell theme tokens and restores direct-child pointer events.
+  const host = open ? trigger.current?.closest('.app') : null
   const resources = data?.resources || []
   const own = data?.own_use
-  return (
-    <div className="cost-transparency">
-      <button type="button" className="chip-neutral" ref={trigger} aria-expanded={open}
-        onClick={() => setOpen(!open)}>{TITLE}</button>
-      {open && (
-        <section ref={panelRef} className="cost-panel" aria-label={TITLE}>
+  const panel = open && (
+        <section ref={panelRef} className="cost-panel" aria-label={TITLE} style={{ fontSize: 'var(--leaf-size-caption)' }}>
           <button type="button" ref={closeButton} className="chip-neutral cost-close" onClick={close}>Close cost panel</button>
           <h2>{TITLE}</h2>
           <p>{COPY}</p>
@@ -265,7 +264,12 @@ export default function CostTransparencyPanel({ mock = false, readsPaused = fals
           </>}
           </>}
         </section>
-      )}
+  )
+  return (
+    <div className="cost-transparency">
+      <button type="button" className="chip-neutral" ref={trigger} aria-expanded={open}
+        onClick={() => setOpen(!open)}>{TITLE}</button>
+      {host ? createPortal(panel, host) : panel}
     </div>
   )
 }

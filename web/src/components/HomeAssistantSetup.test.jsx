@@ -138,6 +138,7 @@ it('hue manual step rejects an invalid IP', async () => {
 })
 
 it('walks Hue link, retains the flow after not_linked and retries Continue to success', async () => {
+  vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
   outcomes.push(
     ok({ flow_id: 'hue-flow', type: 'form', step_id: 'link' }),
     ok({ flow_id: 'hue-flow', type: 'form', step_id: 'link', errors: { base: 'not_linked' } }),
