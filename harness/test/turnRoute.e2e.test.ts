@@ -92,11 +92,13 @@ function postTurn(
   baseUrl: string,
   body: Record<string, unknown>,
   headers: Record<string, string> = {},
+  signal?: AbortSignal,
 ): Promise<Response> {
   return fetch(`${baseUrl}/turn`, {
     method: "POST",
     headers: { "content-type": "application/json", ...headers },
     body: JSON.stringify(body),
+    signal,
   });
 }
 
@@ -112,10 +114,17 @@ afterEach(() => {
 
 describe("POST /turn - streaming", () => {
   it("streams events chunk-by-chunk: the first event arrives well before the stream ends", async () => {
+    // The producer holds the rest of the turn until the test has seen the first event on
+    // the wire. A buffered response cannot deliver that event while the producer is held,
+    // so the bounded guard below fails it; no wall-clock gap is measured.
+    let releaseRest!: () => void;
+    const restReleased = new Promise<void>((resolve) => {
+      releaseRest = resolve;
+    });
     const chunkedRunner: ConverseRunner = {
       async *runTurn(_input: ConverseTurnInput): AsyncGenerator<HarnessTurnEvent> {
         yield { type: "text_delta", data: { text: "hello" } };
-        await delay(150); // a real gap: proves the first write wasn't buffered with the rest
+        await restReleased;
         yield { type: "text_delta", data: { text: " world" } };
         yield { type: "turn_complete", data: { stop_reason: "end_turn" } };
       },
@@ -123,41 +132,64 @@ describe("POST /turn - streaming", () => {
     const { server: s, baseUrl } = listen(basePorts(chunkedRunner));
     server = s;
 
-    const res = await postTurn(baseUrl, validBody());
-    expect(res.status).toBe(200);
-    expect(res.headers.get("content-type")).toContain("application/x-ndjson");
-    expect(res.body).not.toBeNull();
-
-    const reader = res.body!.getReader();
     const decoder = new TextDecoder();
+    // Aborting tears down a fetch still waiting for headers and any pending or late body read.
+    const request = new AbortController();
+    let finished = false;
+    let guardTimer: ReturnType<typeof setTimeout> | undefined;
+    const guard = new Promise<never>((_, reject) => {
+      guardTimer = setTimeout(
+        () => reject(new Error("first NDJSON event did not arrive while the producer was held: the response is buffered")),
+        2000,
+      );
+    });
+    try {
+      // Headers and the first complete line must both arrive while the producer is held.
+      const { reader, firstLine } = await Promise.race([
+        (async () => {
+          const res = await postTurn(baseUrl, validBody(), {}, request.signal);
+          expect(res.status).toBe(200);
+          expect(res.headers.get("content-type")).toContain("application/x-ndjson");
+          expect(res.body).not.toBeNull();
+          const bodyReader = res.body!.getReader();
+          let buffered = "";
+          while (!buffered.includes("\n")) {
+            const { done, value } = await bodyReader.read();
+            if (done) throw new Error("stream ended before its first event");
+            buffered += decoder.decode(value, { stream: true });
+          }
+          return { reader: bodyReader, firstLine: buffered };
+        })(),
+        guard,
+      ]);
+      const [firstEvent, ...early] = firstLine.split("\n");
+      expect(JSON.parse(firstEvent)).toMatchObject({ type: "text_delta", data: { text: "hello" } });
+      expect(early.join("")).toBe("");
 
-    const t0 = Date.now();
-    const first = await reader.read();
-    const tFirst = Date.now();
-    expect(first.done).toBe(false);
-    const firstChunk = decoder.decode(first.value ?? new Uint8Array());
-    expect(JSON.parse(firstChunk.trim())).toMatchObject({ type: "text_delta", data: { text: "hello" } });
+      releaseRest();
+      let rest = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        rest += decoder.decode(value, { stream: true });
+      }
+      finished = true;
 
-    let rest = "";
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      rest += decoder.decode(value);
+      const lines = rest
+        .trim()
+        .split("\n")
+        .filter((l) => l.length > 0)
+        .map((l) => JSON.parse(l) as HarnessTurnEvent);
+      expect(lines.map((l) => l.type)).toEqual(["text_delta", "turn_complete"]);
+      expect(lines[0]).toMatchObject({ type: "text_delta", data: { text: " world" } });
+      expect(lines[lines.length - 1]).toMatchObject({ type: "turn_complete", data: { stop_reason: "end_turn" } });
+    } finally {
+      // Never leave the producer held or the body open, whichever step failed.
+      clearTimeout(guardTimer);
+      guard.catch(() => {});
+      releaseRest();
+      if (!finished) request.abort();
     }
-    const tEnd = Date.now();
-
-    // The first chunk arrived well before the stream finished (it did NOT wait for the
-    // 150ms inter-event gap), and later chunks arrived only after that gap.
-    expect(tFirst - t0).toBeLessThan(100);
-    expect(tEnd - tFirst).toBeGreaterThanOrEqual(100);
-
-    const lines = rest
-      .trim()
-      .split("\n")
-      .filter((l) => l.length > 0)
-      .map((l) => JSON.parse(l) as HarnessTurnEvent);
-    expect(lines.map((l) => l.type)).toEqual(["text_delta", "turn_complete"]);
-    expect(lines[lines.length - 1]).toMatchObject({ type: "turn_complete", data: { stop_reason: "end_turn" } });
   });
 });
 
