@@ -3216,7 +3216,8 @@ def build_suites() -> List[Suite]:
         # Dormant process-capture core: pure Python fixtures, no strace or network.
         Suite("ci-process-capture-core", "scripts ci process capture core", "pytest",
               SCRIPTS_DIR, _py_pytest("ci/tests/test_process_capture_core.py"), 14),
-        # Vendored from claude-config 1cf534ee9ebde9acb99f5a584119935366006700.
+        # Vendored from claude-config: read_audit.py at 1cf534ee9ebde9acb99f5a584119935366006700,
+        # suite_reads.py at 89fa6192b97587c43065ee8a2a3fe5758a7d080f.
         # SHA256 read_audit.py: d4e26776d461d2e99e4ce74fe6906ed6a50086d93bdce98a541115458cc8a3c1
         # SHA256 suite_reads.py: 5060dc0ac14d0bdb102be662f29b78dc3ae5cd4b855ad39ef0ca0df7768014e8
         Suite("scripts-ci-read-audit", "scripts ci read audit", "pytest",
@@ -3224,7 +3225,7 @@ def build_suites() -> List[Suite]:
               requires_linux=True,
               allowed_skip_reasons=(r"pytest-xdist is not installed in leaf-web-demo CI",)),
         Suite("scripts-ci-suite-reads", "scripts ci suite reads", "pytest",
-              SCRIPTS_DIR, _py_pytest("ci/tests/test_suite_reads.py"), 299),
+              SCRIPTS_DIR, _py_pytest("ci/tests/test_suite_reads.py"), 322),
         # cwd is the repo root; -P keeps it off sys.path so the repo's platform/
         # package cannot shadow the stdlib (the same reason as the executor suite).
         Suite("ci-process-capture-runner", "process capture runner", "pytest",

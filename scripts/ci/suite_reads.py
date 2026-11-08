@@ -28,6 +28,15 @@ def _strings(values):
             and values == sorted(set(values)))
 
 
+def _backslash_parent(value):
+    if (isinstance(value, str) and "\\" in value and not value.startswith("/")
+            and "\0" not in value and ".." not in value.split("/")):
+        parent = value.rsplit("/", 1)[0] if "/" in value else "."
+        if _path(parent):
+            return parent
+    return None
+
+
 def _keys(value, keys):
     return isinstance(value, dict) and set(value) == set(keys)
 
@@ -159,7 +168,8 @@ def _logs(directory):
                 if kind in ("f", "d", "e"):
                     if not _keys(entry, ("k", "p")):
                         raise Unusable(f"invalid audit path ({repr(entry)[:200]})")
-                    if not _path(entry["p"]):
+                    if not _path(entry["p"]) and not (
+                            kind == "e" and _backslash_parent(entry["p"]) is not None):
                         raise Unusable(f"invalid audit path ({repr(entry['p'])[:200]})")
                 elif kind == "x":
                     if (not _keys({key: value for key, value in entry.items()
@@ -213,6 +223,8 @@ def _observed(root, directory, ignore, tracked_sets=None):
             children.setdefault(json.dumps(key, sort_keys=True), entry)
             continue
         path = entry["p"]
+        if kind == "e" and not _path(path):
+            path, kind = _backslash_parent(path), "d"
         if _any(path, ignore):
             continue
         if kind == "f" and (path in tracked or path in tracked_dirs or not os.path.exists(root / path)):
@@ -227,9 +239,11 @@ def _observed(root, directory, ignore, tracked_sets=None):
 
 def _undeclared(observed, suite):
     files, dirs, exists, children = observed
+    # e carries existence/type only: M cannot change it; A/D/T under a listed dir select.
     return ([path for path in files if not _covered(path, "files", suite)],
             [path for path in dirs if path not in suite["files"] and not _covered(path, "dirs", suite)],
             [path for path in exists if path not in suite["files"]
+             and (path.rsplit("/", 1)[0] if "/" in path else ".") not in suite["dirs"]
              and not _covered(path, "exists", suite)],
             [child for child in children if not _child_covered(child, suite)])
 
@@ -301,9 +315,10 @@ def _record(args, data, root, declared):
         raise Unusable("invalid suite name")
     observed = _observed(root, Path(args.audit_dir), data["ignore"])
     suite = data["suites"].setdefault(args.suite, {"globs": [], "files": [], "dirs": [], "exists": [], "children": []})
-    files, dirs, exists, children = _undeclared(observed, suite)
-    suite["files"] = sorted(set(suite["files"]) | set(files))
+    files, dirs, _, children = _undeclared(observed, suite)
     suite["dirs"] = sorted(set(suite["dirs"]) | set(dirs))
+    _, _, exists, _ = _undeclared(observed, suite)
+    suite["files"] = sorted(set(suite["files"]) | set(files))
     suite["exists"] = sorted(set(suite["exists"]) | set(exists))
     changed = []
     notices = []

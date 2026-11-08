@@ -1122,3 +1122,96 @@ def test_e8_ignore_keeps_children_and_requires_exact_argv_after_filtering(reposi
         data["suites"]["alpha"]["children"].append({**child, "argv": [exe, "second"]})
     manifest(repository)
     assert run(repository, "check")[0] == 0
+
+
+@pytest.mark.parametrize("path,dirs,expected", [
+    ("alpha/other", ["alpha"], 0),
+    ("alpha/nested/missing", ["alpha"], 1),
+    ("alpha/nested/missing", ["alpha/nested"], 0),
+    ("unread", ["."], 0),
+    ("unread", ["alpha"], 1),
+    ("alpha/other", ["."], 1),
+])
+def test_exists_is_covered_only_by_direct_parent_listing(repository, path, dirs, expected):
+    repository[3]["suites"]["alpha"] = suite(dirs=dirs)
+    manifest(repository)
+    log(repository, {"k": "e", "p": path})
+    code, output = run(repository, "check")
+    assert code == expected
+    if expected:
+        assert f"undeclared exists: {path}" in output
+
+
+@pytest.mark.parametrize("existing", [[], ["D/x"]])
+def test_record_uses_observed_listing_without_pruning_existing_exists(repository, existing):
+    root, declared, logs, data, base = repository
+    write(root, "D/x")
+    commit(root)
+    data["suites"]["alpha"] = suite(exists=existing)
+    manifest(repository)
+    log(repository, {"k": "d", "p": "D"}, {"k": "e", "p": "D/x"},
+        {"k": "e", "p": "D/y/z"})
+    assert run(repository, "record")[0] == 0
+    before = declared.read_bytes()
+    recorded = json.loads(before)["suites"]["alpha"]
+    assert recorded["dirs"] == ["D"]
+    assert recorded["exists"] == sorted([*existing, "D/y/z"])
+    assert run(repository, "check")[0] == 0
+    assert run(repository, "record")[0] == 0
+    assert declared.read_bytes() == before
+
+
+@pytest.mark.parametrize("kind", ["A", "D", "T", "M"])
+def test_parent_listing_selects_existence_changes_but_not_content(repository, monkeypatch, kind):
+    root, declared, logs, data, base = repository
+    write(root, "D/x")
+    commit(root)
+    data["suites"]["alpha"] = suite(dirs=["D"])
+    monkeypatch.setattr(suite_reads, "_diff", lambda *args: [(kind, "D/x")])
+    selections, reason = suite_reads._select(None, data, root)
+    assert selections == {"alpha": int(kind != "M"), "beta": 0}
+    assert reason == "selected"
+
+
+@pytest.mark.parametrize("extra", ["size", "mtime"])
+def test_existence_log_cannot_carry_content_metadata(repository, extra):
+    log(repository, {"k": "e", "p": "alpha/other", extra: 123})
+    code, output = run(repository, "check")
+    assert code == 2
+    assert "invalid audit path" in output
+
+
+@pytest.mark.parametrize("parent,path", [
+    ("da", "da/C:\\Program Files\\Autodesk"),
+    (".", "C:\\Program Files\\Autodesk"),
+])
+def test_backslash_existence_depends_on_parent_listing(repository, parent, path):
+    root, declared, logs, data, base = repository
+    write(root, "da/tracked")
+    commit(root)
+    data["suites"]["alpha"] = suite()
+    manifest(repository)
+    log(repository, {"k": "e", "p": path})
+    code, output = run(repository, "check")
+    assert code == 1
+    assert f"undeclared dir: {parent}" in output
+    assert run(repository, "record")[0] == 0
+    recorded = json.loads(declared.read_bytes())["suites"]["alpha"]
+    assert recorded == suite(dirs=[parent])
+    assert run(repository, "check")[0] == 0
+
+
+@pytest.mark.parametrize("entry", [
+    {"k": "f", "p": "da/C:\\x"},
+    {"k": "d", "p": "da/C:\\x"},
+    {"k": "x", "exe": "opaque", "cwd": ".", "paths": ["da/C:\\x"]},
+    {"k": "e", "p": "/da/C:\\x"},
+    {"k": "e", "p": "da/../C:\\x"},
+    {"k": "e", "p": "da/C:\\x\0"},
+    {"k": "e", "p": "da\\bad/C:\\x"},
+])
+def test_backslash_exception_rejects_other_kinds_and_invalid_parents(repository, entry):
+    log(repository, entry)
+    code, output = run(repository, "check")
+    assert code == 2
+    assert "invalid audit" in output
