@@ -2,7 +2,9 @@
  * an app's own Mach-O, and a child inherits it; a launchd job or a script main
  * executable never gets it (finding F10). Reads Contents/Resources/run.args:
  * line 1 lan status path, line 2 log path, then argv, one per line.
- * Build: clang -O1 -arch arm64 -arch x86_64 -o leaf-ha-launcher leaf-ha-launcher.c */
+ * Build: clang -O1 -arch arm64 -arch x86_64 -mmacosx-version-min=13.0 -o leaf-ha-launcher leaf-ha-launcher.c
+ * Keep the minimum: a binary built without it requires the build Mac's macOS, and
+ * LaunchServices refuses it on older hubs with error -10825 (finding F20). */
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>

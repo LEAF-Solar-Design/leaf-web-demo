@@ -12,6 +12,7 @@ import { connectionStatus } from './portCompat.js'
 import { createDependencyLayoutRunner } from './dependencyLayout.js'
 import { pushRecent } from './libraryCategories.js'
 import { graphLayouts } from '../history/labArtifactsClient.js'
+import { humanizeError } from '../../errorHumanize.js'
 
 const nodeTypes = { block: NodeCard }
 const edgeTypes = { latency: LatencyPipe }
@@ -35,7 +36,6 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
   const [armed, setArmed] = useState(null)
   const [pending, setPending] = useState(null)
   const [message, setMessage] = useState('')
-  const [layoutMs, setLayoutMs] = useState(null)
   const [layoutBusy, setLayoutBusy] = useState(false)
   const request = useRef(0)
   const lastRefusal = useRef('')
@@ -83,17 +83,16 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
       })
       commit(next); setSelected(id); setMessage(`${manifest.title} added`)
       try { pushRecent(globalThis.localStorage, manifest.id) } catch { /* Storage may be unavailable. */ }
-    } catch (error) { setMessage(error.message) }
+    } catch (error) { setMessage(humanizeError(error)) }
   }
   const runLayout = useCallback(async (layoutDocument, dimensions, stored) => {
     const token = ++request.current
-    const started = performance.now()
     try {
       const [next, saved] = await Promise.all([layoutRunner.run(layoutDocument, dimensions), stored])
       if (token !== request.current) return
       for (const block of layoutDocument.blocks) if (saved?.positions?.[block.id]) next[block.id] = saved.positions[block.id]
-      setPositions(next); setLayoutMs(performance.now() - started); setMessage('Layout updated')
-    } catch (error) { if (token === request.current) setMessage(error.message) }
+      setPositions(next); setMessage('Layout updated')
+    } catch (error) { if (token === request.current) setMessage(humanizeError(error)) }
     finally { if (token === request.current) setLayoutBusy(false) }
   }, [layoutRunner])
   const relayout = () => {
@@ -141,7 +140,7 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
   }}>
     <Palette entries={entries} onAdd={add} armed={armed} onArm={setArmed} searchRef={search} tools={tools} onLoadTools={onLoadTools} />
     <section className="lab-canvas-region" aria-label="Dependency canvas">
-      <header><h2>Dependency canvas</h2><button type="button" disabled={layoutBusy} onClick={relayout}>Relayout</button>
+      <header><h2>Dependency canvas</h2><button type="button" disabled={layoutBusy} title={layoutBusy ? 'Arranging the blocks. Please wait.' : undefined} onClick={relayout}>Relayout</button>
         <button type="button" onClick={() => flow.fitView({ padding: 0.2 })}>Fit cards</button></header>
       <div className="lab-flow" ref={canvas} onDragOver={event => { event.preventDefault(); event.dataTransfer.dropEffect = 'copy' }}
         onDrop={event => {
@@ -177,18 +176,16 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
           isValidConnection={connection => {
             let status
             try { status = connectionStatus(document, asPipe(connection), entries) }
-            catch (error) { status = { ok: false, reason: error.message } }
+            catch (error) { status = { ok: false, reason: humanizeError(error) } }
             lastRefusal.current = status.reason
             return status.ok
           }}
-          onConnect={connection => { try { connect(asPipe(connection)) } catch (error) { setMessage(error.message) } }}>
+          onConnect={connection => { try { connect(asPipe(connection)) } catch (error) { setMessage(humanizeError(error)) } }}>
           <Background color="var(--leaf-color-border)" /><Controls />
         </ReactFlow>
       </div>
       {!document.blocks.length && <p>Add a block from the palette to begin.</p>}
-      <footer><p role="status">{message}</p><p>{validation.ready ? 'Ready' : `Not ready: ${validation.message}`}</p>
-        <span className="leaf-timing">Layout {layoutMs === null ? 'not measured' : `${layoutMs.toFixed(2)} ms`}</span>{' · '}
-        <span className="leaf-timing">Validation {validation.ms.toFixed(2)} ms</span></footer>
+      <footer><p role="status">{message}</p><p>{validation.ready ? 'Ready' : 'Review the blocks and connections before continuing.'}</p></footer>
     </section>
     <OutputActionsContext.Provider value={{ set: (name, endpoint) => commit(setOutput(current.current, name, endpoint, entries)),
       remove: name => commit(removeOutput(current.current, name)) }}>

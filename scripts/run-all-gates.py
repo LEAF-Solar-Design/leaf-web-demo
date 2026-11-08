@@ -74,6 +74,7 @@ USAGE
     python scripts/run-all-gates.py --only server-backbone --only harness-vitest
                                                  # repeatable: runs the UNION of both
     python scripts/run-all-gates.py --log-dir DIR # where per-suite logs land
+    python scripts/run-all-gates.py --read-audit DIR # opt-in pytest read evidence
     python scripts/run-all-gates.py --jobs 6     # bounded pool; conflicts stay serial
 
 EXIT CODE
@@ -184,6 +185,7 @@ class Suite:
     opt_in_env: str = ""           # SKIP unless this env flag is truthy (opt-in suite)
     timeout_s: int = 900           # per-attempt subprocess timeout
     requires_linux: bool = False  # unavailable, never a passing skip, elsewhere
+    read_audit_dir: Optional[Path] = None  # runtime-only opt-in evidence destination
 
 
 @dataclass
@@ -3216,6 +3218,15 @@ def build_suites() -> List[Suite]:
         # Dormant process-capture core: pure Python fixtures, no strace or network.
         Suite("ci-process-capture-core", "scripts ci process capture core", "pytest",
               SCRIPTS_DIR, _py_pytest("ci/tests/test_process_capture_core.py"), 14),
+        # Vendored from claude-config 1cf534ee9ebde9acb99f5a584119935366006700.
+        # SHA256 read_audit.py: d4e26776d461d2e99e4ce74fe6906ed6a50086d93bdce98a541115458cc8a3c1
+        # SHA256 suite_reads.py: 5060dc0ac14d0bdb102be662f29b78dc3ae5cd4b855ad39ef0ca0df7768014e8
+        Suite("scripts-ci-read-audit", "scripts ci read audit", "pytest",
+              SCRIPTS_DIR, _py_pytest("ci/tests/test_read_audit.py"), 316,
+              requires_linux=True,
+              allowed_skip_reasons=(r"pytest-xdist is not installed in leaf-web-demo CI",)),
+        Suite("scripts-ci-suite-reads", "scripts ci suite reads", "pytest",
+              SCRIPTS_DIR, _py_pytest("ci/tests/test_suite_reads.py"), 299),
         # cwd is the repo root; -P keeps it off sys.path so the repo's platform/
         # package cannot shadow the stdlib (the same reason as the executor suite).
         Suite("ci-process-capture-runner", "process capture runner", "pytest",
@@ -3983,6 +3994,63 @@ def _text(value) -> str:
 
 def encoded_suite_id(suite_id: str) -> str:
     return quote(suite_id, safe="").replace(".", "%2E") or "%00"
+
+
+_READ_AUDIT_LOCK = threading.Lock()
+
+
+def read_audit_reason(suite: Suite) -> str:
+    if suite.kind != "pytest":
+        return "not pytest"
+    if "-I" in suite.argv:
+        return "isolated launcher (-I)"
+    if "pytest" not in suite.argv:
+        return "pytest token missing"
+    return ""
+
+
+def record_unaudited(suite: Suite, reason: str) -> None:
+    """Best-effort evidence, one row per suite even across retries and workers."""
+    if suite.read_audit_dir is None:
+        return
+    try:
+        with _READ_AUDIT_LOCK:
+            directory = Path(suite.read_audit_dir)
+            directory.mkdir(parents=True, exist_ok=True)
+            path = directory / "unaudited.jsonl"
+            if path.exists() and any(json.loads(line).get("suite_id") == suite.id
+                                     for line in path.read_text(encoding="utf-8").splitlines()):
+                return
+            with path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps({"suite_id": suite.id, "reason": reason}) + "\n")
+    except Exception:
+        pass  # Evidence failures never change a suite's verdict.
+
+
+def read_audit_command(suite: Suite, argv: List[str], trace_env: dict,
+                       attempt: int) -> List[str]:
+    """Commit audit injection only after setup succeeds; inert unless requested."""
+    if suite.read_audit_dir is None:
+        return argv
+    reason = read_audit_reason(suite)
+    if reason:
+        record_unaudited(suite, reason)
+        return argv
+    try:
+        output = Path(suite.read_audit_dir).resolve() / encoded_suite_id(suite.id) / str(attempt)
+        output.mkdir(parents=True, exist_ok=True)
+        inherited = trace_env.get("PYTHONPATH", os.environ.get("PYTHONPATH", ""))
+        audit_env = {
+            "LEAF_READ_AUDIT_DIR": str(output),
+            "LEAF_READ_AUDIT_ROOT": str(REPO),
+            "PYTHONPATH": str(SCRIPTS_DIR / "ci") + (os.pathsep + inherited if inherited else ""),
+        }
+        command = argv + ["-p", "read_audit"]
+        trace_env.update(audit_env)
+        return command
+    except Exception as exc:
+        record_unaudited(suite, f"audit setup failed: {type(exc).__name__}")
+        return argv
 
 
 PROCESS_CAPTURE_DECODE_BUDGET_S = 1800
@@ -4871,6 +4939,10 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
               reporting_disabled: bool = False,
               queued_budget_s: Optional[float] = None) -> Result:
     """Exit 75 reserves the same attempt slot, with its own bounded backoff."""
+    if suite.read_audit_dir is not None:
+        reason = read_audit_reason(suite)
+        if reason:
+            record_unaudited(suite, reason)
     budget = QUEUED_BUDGET_S if queued_budget_s is None else queued_budget_s
     started = time.perf_counter()
     backoff = QUEUED_INITIAL_BACKOFF_S
@@ -4881,6 +4953,8 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
         physical_attempt = attempt + number - 1
         result = _run_suite_attempt(suite, log_dir, physical_attempt,
                                    reporting_disabled=reporting_disabled)
+        if result.status in ("SKIP", "UNAVAILABLE"):
+            record_unaudited(suite, result.note or "suite did not run")
         seconds += result.seconds
         if result.status != "QUEUED":
             break
@@ -4951,6 +5025,7 @@ def _run_suite_attempt(suite: Suite, log_dir: Path, attempt: int = 1,
             if database_required():
                 note = (f"PostgreSQL required (LEAF_GATE_REQUIRE_DATABASE=1) but "
                         f"unreachable ({msg})")
+                record_unaudited(suite, note)
                 with open(log_path, "w", encoding="utf-8", errors="replace") as logf:
                     logf.write(f"[DATABASE REQUIRED] {note}\n")
                 return Result(suite, "FAIL", "err", 0.0, note=note, log_path=log_path)
@@ -5017,6 +5092,7 @@ def _run_suite_attempt(suite: Suite, log_dir: Path, attempt: int = 1,
             "test_report_complete": False,
             "test_report_incomplete_reasons": [f"reporting_injection_failed:{type(exc).__name__}"],
         }
+    argv = read_audit_command(suite, argv, trace_env, attempt)
     # Fault-injection drill: LEAF_GATE_FAULT_INJECT="<suite-id>:spawn" points
     # this suite's FIRST attempt at a nonexistent binary, exercising the real
     # spawn-failure path end to end (attempt 2+ runs the real argv, so the
@@ -7320,6 +7396,8 @@ def main() -> int:
                          "masked. Use --retry 0 to capture raw first-attempt results.")
     ap.add_argument("--log-dir", default=None,
                     help="directory for per-suite logs (default: C:/tmp/leaf-web-demo-gates)")
+    ap.add_argument("--read-audit", default=None, metavar="DIR",
+                    help="opt-in pytest read audit directory; unsupported suites are recorded in unaudited.jsonl")
     ap.add_argument("--shard-count", type=int, default=1, metavar="N",
                     help="partition the catalog into N deterministic shards and run "
                          "only one of them (see --shard-index). Suites inside a shard "
@@ -7505,6 +7583,10 @@ def main() -> int:
         selection = (f"--shard-count {args.shard_count} "
                      f"--shard-index {args.shard_index}"
                      f"  -> {len(suites)} of {total} suites")
+
+    if args.read_audit is not None:
+        for suite in suites:
+            suite.read_audit_dir = Path(args.read_audit)
 
     mode_label = " mode=tier" if tier is not None else ""
     print(f"leaf-web-demo gate runner -- {len(suites)} suites, "

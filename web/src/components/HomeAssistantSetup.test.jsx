@@ -147,7 +147,7 @@ it('walks Hue link, retains the flow after not_linked and retries Continue to su
   render(<Harness />)
   fireEvent.click(screen.getByRole('button', { name: 'Link Hue bridge' }))
   expect(await screen.findByText('Press the round button on top of your Hue bridge, then click Continue')).toBeInTheDocument()
-  expect(screen.getByText('30 s remaining')).toBeInTheDocument()
+  expect(await screen.findByText('30 s remaining')).toBeInTheDocument()
   expect(step('Link Hue bridge').queryByText('Done')).not.toBeInTheDocument()
   fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
   expect(await screen.findByRole('alert')).toHaveTextContent('The Hue button has not been detected yet.')
