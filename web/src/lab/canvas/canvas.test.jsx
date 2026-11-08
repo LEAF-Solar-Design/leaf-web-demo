@@ -15,6 +15,8 @@ import { ELEMENT_FAMILIES, LANES } from './elementCatalog.js'
 import { addBlock, connectPipe, emptyGraph, inputValues, missingInputs, removeBlock, removeOutput, roundTrip, setOutput, updateSettings, validateGraph } from './graphDoc.js'
 import { dependencyLayout, dependencyRanks } from './dependencyLayout.js'
 import * as layout from './dependencyLayout.js'
+import { createLabArtifactsClient } from '../history/labArtifactsClient.js'
+import { colorLiteralsIn } from '../standardsChecks.js'
 
 // Detect even an attempted import, not just construction of the real engine.
 const elkImport = vi.hoisted(() => vi.fn())
@@ -242,6 +244,110 @@ describe('arithmetic', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Configure', exact: true }))
     expect(screen.getByRole('button', { name: 'Remove output total' })).toBeInTheDocument()
     await act(async () => {})
+  })
+})
+
+function layoutLedger(initial = documentOf(2)) {
+  const layouts = new Map()
+  const rows = [{ revision: 1, sha256: 'a'.repeat(64), graph: initial }]
+  const reply = data => ({ ok: true, json: async () => JSON.parse(JSON.stringify(data)) })
+  const fetchImpl = vi.fn(async (url, init) => {
+    const path = new URL(url, 'https://example.test').pathname.split('/').slice(5).join('/')
+    if (path.startsWith('layout/')) {
+      const sha256 = path.slice(7)
+      if (init.method === 'PUT') { layouts.set(sha256, JSON.parse(init.body)); return reply({}) }
+      return reply({ layout: layouts.get(sha256) || null })
+    }
+    if (path === 'head') return reply(rows.at(-1))
+    if (path === 'revisions') return reply({ revisions: rows })
+    if (path.startsWith('revisions/')) return reply(rows[Number(path.slice(10)) - 1])
+    if (path === 'save') {
+      const { graph, expected_head: expected } = JSON.parse(init.body)
+      expect(expected).toBe(rows.at(-1).revision)
+      const same = rows.find(row => JSON.stringify(row.graph) === JSON.stringify(graph))
+      const row = { revision: rows.length + 1, graph, sha256: same?.sha256 || 'b'.repeat(64) }
+      rows.push(row)
+      return reply(row)
+    }
+    if (path === 'restore') {
+      const { revision } = JSON.parse(init.body)
+      const row = { ...rows[revision - 1], revision: rows.length + 1 }
+      rows.push(row)
+      return reply(row)
+    }
+    throw new Error(`Unexpected request ${url}`)
+  })
+  return { client: createLabArtifactsClient({ fetchImpl }), fetchImpl, layouts, rows }
+}
+
+describe('revision display layouts', () => {
+  it('applies stored positions by block id and leaves other cards in dependency layout', async () => {
+    const { client, layouts, rows } = layoutLedger()
+    layouts.set(rows[0].sha256, { schema: 'leaf.lab-layout.v1', positions: {
+      'adjust-none-1': { x: -123, y: 456 }, foreign: { x: 9, y: 9 },
+    } })
+    const opened = await client.revision('strategy', 1)
+    render(<LabCanvas initialDocument={opened.graph} />)
+    await waitFor(() => expect(screen.getByTestId('adjust-none-1')).toHaveAttribute('data-position', JSON.stringify({ x: -123, y: 456 })))
+    expect(JSON.parse(screen.getByTestId('adjust-none-2').dataset.position)).toEqual({ x: 400, y: 30 })
+    expect(screen.queryByTestId('foreign')).not.toBeInTheDocument()
+  })
+
+  it('saves positions for the new digest and reads them back through a fresh client and canvas', async () => {
+    const { client, layouts, fetchImpl, rows } = layoutLedger(documentOf(1))
+    const opened = await client.revision('strategy', 1)
+    const changed = vi.fn()
+    const view = render(<LabCanvas initialDocument={opened.graph} onChange={changed} />)
+    await screen.findByText('Layout updated')
+    fireEvent.click(screen.getByTestId('library-add-adjust-none'))
+    fireEvent.click(screen.getByRole('button', { name: 'Move adjust-none-1' }))
+    const positions = {
+      'adjust-none-1': JSON.parse(screen.getByTestId('adjust-none-1').dataset.position),
+      'adjust-none-2': JSON.parse(screen.getByTestId('adjust-none-2').dataset.position),
+    }
+    expect(positions['adjust-none-1']).toEqual({ x: 777, y: 888 })
+    const draft = changed.mock.calls.at(-1)[0].document
+    const bytes = JSON.stringify(draft)
+    const put = vi.spyOn(client, 'putLayout')
+    const saved = await client.save('strategy', draft, 1)
+    expect(saved.sha256).toBe('b'.repeat(64))
+    expect(put).toHaveBeenCalledWith('strategy', saved.sha256, { schema: 'leaf.lab-layout.v1', positions })
+    expect(JSON.stringify(draft)).toBe(bytes)
+    expect(JSON.stringify(rows.at(-1).graph)).toBe(bytes)
+    expect(Object.keys(draft).sort()).toEqual(['blocks', 'outputs', 'pipes', 'schema'])
+    view.unmount()
+    const fresh = createLabArtifactsClient({ fetchImpl })
+    const head = await fresh.head('strategy')
+    render(<LabCanvas initialDocument={head.graph} />)
+    await waitFor(() => expect(screen.getByTestId('adjust-none-1')).toHaveAttribute('data-position', JSON.stringify({ x: 777, y: 888 })))
+    expect(layouts.get(saved.sha256).positions['adjust-none-1']).toEqual({ x: 777, y: 888 })
+  })
+
+  it('loads a restored revision through the existing GraphView mount', async () => {
+    const { client, layouts, rows } = layoutLedger(documentOf(1))
+    layouts.set(rows[0].sha256, { schema: 'leaf.lab-layout.v1', positions: { 'adjust-none-1': { x: 51, y: 62 } } })
+    await client.restore('strategy', 1, 1)
+    render(<GraphView client={client} />)
+    await waitFor(() => expect(screen.getByTestId('adjust-none-1')).toHaveAttribute('data-position', JSON.stringify({ x: 51, y: 62 })), { timeout: 15000 })
+  }, 20000)
+
+  it('does not overwrite a move when an earlier stored layout arrives late', async () => {
+    const { client, fetchImpl } = layoutLedger(documentOf(1))
+    const opened = await client.revision('strategy', 1)
+    const pending = deferred()
+    fetchImpl.mockImplementationOnce(() => pending.promise)
+    render(<LabCanvas initialDocument={opened.graph} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Move adjust-none-1' }))
+    await act(async () => pending.resolve({ ok: true, json: async () => ({ layout: {
+      schema: 'leaf.lab-layout.v1', positions: { 'adjust-none-1': { x: -1, y: -2 } },
+    } }) }))
+    expect(screen.getByTestId('adjust-none-1')).toHaveAttribute('data-position', JSON.stringify({ x: 777, y: 888 }))
+  })
+
+  it('keeps the canvas and layout client source free of color literals', () => {
+    for (const path of ['canvas/LabCanvas.jsx', 'history/labArtifactsClient.js']) {
+      expect(colorLiteralsIn(readFileSync(resolve(process.cwd(), 'src/lab', path), 'utf8'))).toEqual([])
+    }
   })
 })
 
