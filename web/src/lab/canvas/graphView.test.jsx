@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
+import { readFileSync } from 'node:fs'
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import GraphView, { LiveValues, useLiveGraph } from './GraphView.jsx'
+import BlockPanel from './BlockPanel.jsx'
 import LabWorkbench from '../LabWorkbench.jsx'
 import { createHostProvider } from '../host/hostProvider.js'
 import * as hostProviderModule from '../host/hostProvider.js'
@@ -12,6 +14,9 @@ import { registry } from './registry.js'
 import { setLayoutEngineLoader } from './dependencyLayout.js'
 import { createLabArtifactsClient } from '../history/labArtifactsClient.js'
 import { labValueStore } from '../runs/valueStore.js'
+import { canonicalJSON } from '../contract.js'
+import { colorLiteralsIn, replacedWordsIn } from '../standardsChecks.js'
+import { sentence } from '../honesty.js'
 
 const elkImport = vi.hoisted(() => vi.fn())
 const authLifecycle = vi.hoisted(() => ({ logouts: new Set(), stored: new Set() }))
@@ -46,6 +51,8 @@ vi.mock('@xyflow/react', () => ({
 
 const now = 1800000000000
 const fixedClock = () => 1
+const placementFixture = JSON.parse(readFileSync(`${process.cwd()}/../server/tests/fixtures/lab-placement-cases.v1.json`, 'utf8'))
+const configManifest = placementFixture.cases.find(item => item.name === 'settings-digest').manifest
 const rows = [{ source: 'markets', as_of: now, data: { price: 42, marker: 'CANARY-5e1d' } }]
 const pipe = (from, port, to) => ({ from: { node: from, port }, to: { node: to, port: 'value' } })
 function graphOf(provider, ids) {
@@ -186,6 +193,76 @@ describe('project corpus evaluation flow', () => {
 })
 
 describe('first-click live graph', () => {
+  it('keeps graph timing apart from every card, block and pipe measurement', () => {
+    const provider = hostProvider()
+    let tick = 0
+    const clock = () => tick++
+    const { result } = renderHook(() => useLiveGraph({ provider, clock }))
+    expect(labValueStore.getRun('local').timing.graph_latency).toEqual({ p50_us: null, p99_us: null, samples: 0 })
+    act(() => result.current.onChange({ document: graphOf(provider, ['host-source', 'count']) }))
+    const timing = labValueStore.getRun('local').timing
+    expect(timing.graph_latency).toEqual({ p50_us: 1000, p99_us: 1000, samples: 1 })
+    expect(timing.times).toEqual([1])
+    expect(Object.keys(timing.measurements.pipes)).toHaveLength(1)
+    for (const value of [...result.current.values, ...Object.values(timing.measurements.blocks), ...Object.values(timing.measurements.pipes)]) {
+      expect(value.p50_us).toBeNull()
+      expect(value.p99_us).toBeNull()
+    }
+    render(<LiveValues values={result.current.values} provider={provider} />)
+    expect(within(cardNamed('Count')).getByText(sentence('latency_not_measured'))).toHaveAttribute('data-badge')
+  })
+
+  it('shows the bot sentence on an empty placeholder value card', () => {
+    const provider = hostProvider()
+    const { result } = renderHook(() => useLiveGraph({ provider, clock: fixedClock }))
+    act(() => result.current.onChange({ document: addBlock(emptyGraph(), registry['adjust-none@1.0.0']) }))
+    expect(result.current.values[0]).toMatchObject({ kind: 'empty', display: sentence('runs_on_bot') })
+    render(<LiveValues values={result.current.values} provider={provider} />)
+    expect(cards().getByText(sentence('runs_on_bot'))).toBeVisible()
+    expect(cards().getByText(sentence('latency_not_measured'))).toBeVisible()
+  })
+
+  it.each(['placeholder', 'transform', 'settings'])('shows placement and Data out apart from the %s sample', kind => {
+    const manifest = kind === 'placeholder' ? registry['adjust-none@1.0.0']
+      : kind === 'transform' ? hostProvider().entries()['count@1.0.0'] : configManifest
+    const graph = addBlock(emptyGraph(), manifest)
+    const block = graph.blocks[0]
+    if (kind === 'settings') block.settings = { k_min: 4 }
+    const entries = { [`${manifest.id}@${manifest.version.semver}`]: manifest }
+    const port = Object.keys(manifest.outputs)[0]
+    const data = kind === 'placeholder' ? null : kind === 'transform' ? 0
+      : runtime.evaluateGraph(graph, entries).values[block.id][port].data
+    render(<BlockPanel block={block} document={graph} entries={entries} upstream={{ [`${block.id}/${port}`]: data }} />)
+    fireEvent.click(screen.getByRole('tab', { name: 'Test' }))
+    const panel = screen.getByRole('tabpanel')
+    const view = within(panel)
+    const placement = kind === 'placeholder' ? sentence('runs_on_bot') : kind === 'transform'
+      ? sentence('browser_only_block') : 'Runs here as you edit and on the Lab server when you press Run.'
+    expect(view.getAllByText(placement).length).toBe(kind === 'placeholder' ? 2 : 1)
+    const dataOut = view.getByRole('heading', { name: 'Data out' }).nextElementSibling
+    expect(within(dataOut).getByText(data === null ? sentence('runs_on_bot') : canonicalJSON(data))).toBeVisible()
+    expect(view.getByRole('heading', { name: 'Declared sample, not a measurement' }).nextElementSibling)
+      .toHaveTextContent(canonicalJSON(manifest.sample_output))
+    if (kind === 'placeholder') expect(view.getByText(sentence('placeholder_block'))).toBeVisible()
+    const text = [...panel.children].filter(child => !child.hidden).map(child => child.textContent).join(' ')
+    expect(replacedWordsIn(text)).toEqual([])
+  })
+
+  it.each([false, null, undefined, { count: 2 }])('shows Data out %j without substituting its declared sample', data => {
+    const manifest = configManifest
+    const graph = addBlock(emptyGraph(), manifest)
+    const block = { ...graph.blocks[0], settings: { k_min: 4 } }
+    render(<BlockPanel block={block} document={graph} entries={{ 'kashbot2-config@1.0.0': manifest }}
+      upstream={{ [`${block.id}/config-hash`]: data }} />)
+    fireEvent.click(screen.getByRole('tab', { name: 'Test' }))
+    const dataOut = screen.getByRole('heading', { name: 'Data out' }).nextElementSibling
+    expect(within(dataOut).getByText(data == null ? 'No value' : canonicalJSON(data))).toBeVisible()
+  })
+
+  it.each(['canvas/GraphView.jsx', 'canvas/BlockPanel.jsx', 'runtime/placement.js', 'runtime/sha256.js'])('keeps color literals out of %s', path => {
+    expect(colorLiteralsIn(readFileSync(`${process.cwd()}/src/lab/${path}`, 'utf8'))).toEqual([])
+  })
+
   it('mounts a collapsed report-only rail beside Live values only when a controller is present', () => {
     const provider = hostProvider()
     const view = render(<LiveValues values={[]} provider={provider} />)
@@ -799,7 +876,7 @@ describe('first-click live graph', () => {
     render(<GraphView initialDocument={graphOf(provider, ['studio-jobs', 'count'])} />)
     await waitFor(() => expect(within(cardNamed('Count')).getByText('2')).toBeVisible())
     expect(within(cardNamed('Count')).getByText(`as of ${age / 1000}s ago`)).toHaveAttribute('data-badge')
-    expect(within(cardNamed('Count')).getByText(/p50 .* ms · p99 .* ms/)).toHaveAttribute('data-badge')
+    expect(within(cardNamed('Count')).getByText(sentence('latency_not_measured'))).toHaveAttribute('data-badge')
     expect(within(cardNamed('Count')).queryByText('stale') !== null).toBe(stale)
   })
 

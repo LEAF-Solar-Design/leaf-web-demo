@@ -238,3 +238,31 @@ def test_packaged_asset_is_universal_macho():
     metadata = tomllib.loads(project.read_text())
     assert metadata["tool"]["setuptools"]["package-data"]["leaf_agent.packages"] == ["assets/*"]
     assert metadata["project"]["version"] == __version__
+
+
+def _launcher_min_macos(data):
+    """Minimum macOS (major, minor) per architecture, from each slice's LC_BUILD_VERSION."""
+    import struct
+    nfat = struct.unpack(">I", data[4:8])[0]
+    found = []
+    for i in range(nfat):
+        _, _, offset, _, _ = struct.unpack(">iiIII", data[8 + 20 * i:28 + 20 * i])
+        magic, _, _, _, ncmds, _, _, _ = struct.unpack("<IiiIIIII", data[offset:offset + 32])
+        assert magic == 0xFEEDFACF
+        at = offset + 32
+        for _ in range(ncmds):
+            cmd, size = struct.unpack("<II", data[at:at + 8])
+            if cmd == 0x32:  # LC_BUILD_VERSION
+                minos = struct.unpack("<I", data[at + 12:at + 16])[0]
+                found.append((minos >> 16, (minos >> 8) & 0xFF))
+            at += size
+    return found
+
+
+def test_packaged_launcher_runs_on_older_macos():
+    # F20: a launcher built without -mmacosx-version-min required macOS 27 and
+    # LaunchServices refused it on a macOS 26.5 hub with error -10825.
+    asset = Path(homeassistant.__file__).parent / "assets/leaf-ha-launcher"
+    found = _launcher_min_macos(asset.read_bytes())
+    assert len(found) == 2
+    assert all(version <= (13, 0) for version in found), found

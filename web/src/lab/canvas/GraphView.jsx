@@ -19,6 +19,7 @@ import { newSubmissionId, openRunStream, submitRun } from '../runs/runStream.js'
 import { formatLabRoute } from '../labRoute.js'
 import { readController } from '../changes/controller.js'
 import TestsKeepersRail from '../changes/TestsKeepersRail.jsx'
+import { sentence } from '../honesty.js'
 
 // Both mounts pass the values returned by useLiveGraph to LiveValues. Keep
 // their display context out of the values and the proposal document itself.
@@ -34,7 +35,7 @@ function runAccount() {
   } catch { return null }
 }
 const tick = () => performance.now()
-const summary = value => value.error ? `error: ${value.error.code}`
+const summary = value => value.error?.code === 'runs_on_bot' ? sentence('runs_on_bot') : value.error ? `error: ${value.error.code}`
   : value.data === null ? 'null' : Array.isArray(value.data) ? `${value.data.length} rows`
     : typeof value.data === 'number' ? String(value.data) : 'text'
 const seriesOf = data => Array.isArray(data) ? data.map(item => typeof item === 'number' ? item
@@ -77,8 +78,9 @@ export function useLiveGraph({ provider, registry: base = registry, now = wallTi
   const current = evaluation.draft === draft && evaluation.entries === entries
   const result = current ? evaluation.result : null
   const sorted = [...times].sort((a, b) => a - b)
-  const percentile = rank => sorted.length ? sorted[Math.ceil(sorted.length * rank) - 1] * 1000 : 0
-  const latency = { p50_us: percentile(.5), p99_us: percentile(.99) }
+  const percentile = rank => sorted.length ? sorted[Math.ceil(sorted.length * rank) - 1] * 1000 : null
+  const graph_latency = { p50_us: percentile(.5), p99_us: percentile(.99), samples: times.length }
+  const latency = { p50_us: null, p99_us: null }
   const measurements = { blocks: {}, pipes: {} }
   const upstream = {}
   const values = []
@@ -110,7 +112,7 @@ export function useLiveGraph({ provider, registry: base = registry, now = wallTi
   }
   const hasValues = values.length > 0
   useEffect(() => {
-    labValueStore.setLocal(values, { times, count, measurements })
+    labValueStore.setLocal(values, { times, count, measurements, graph_latency })
   }, [result, currentTime, count])
   useEffect(() => {
     if (!hasValues) return undefined
@@ -151,13 +153,13 @@ const StoredBlockValues = memo(function StoredBlockValues({ id, runId, store, te
     const kind = value.error || block.error || value.data === null ? 'empty'
       : Array.isArray(value.data) ? series.length && series.every(Number.isFinite) ? 'chart' : 'rows'
         : ['number', 'string', 'boolean'].includes(typeof value.data) ? 'value' : 'empty'
-    return { ...template, port, kind, series, display: block.error ? `error: ${block.error}`
+    return { ...template, port, kind, series, display: block.error === 'runs_on_bot' ? sentence('runs_on_bot') : block.error ? `error: ${block.error}`
       : kind === 'value' ? String(value.data) : summary(value),
     as_of: value.as_of, age_ms: Number.isFinite(value.as_of) ? Math.max(0, Date.now() - value.as_of) : null, stale: value.stale, simulated: value.simulated,
     truncated: value.truncated, host_tainted: value.host_tainted }
   })
   return <>
-    {block?.error && !values.length && <article data-value-kind="empty"><h3>{templates[0]?.title || id}</h3><p>error: {block.error}</p></article>}
+    {block?.error && !values.length && <article data-value-kind="empty"><h3>{templates[0]?.title || id}</h3><p>{block.error === 'runs_on_bot' ? sentence('runs_on_bot') : `error: ${block.error}`}</p></article>}
     {values.map(value => {
         const low = Math.min(...value.series)
         const high = Math.max(...value.series)
@@ -172,7 +174,8 @@ const StoredBlockValues = memo(function StoredBlockValues({ id, runId, store, te
           <span data-badge>{value.age_ms === null ? 'age unknown' : `as of ${Math.floor(value.age_ms / 1000)}s ago`}</span>
           {['stale', 'simulated', 'truncated'].map(badge => value[badge] && <span data-badge key={badge}>{badge}</span>)}
           {value.host_tainted && <span data-badge>host data</span>}
-          <span data-badge>p50 {value.p50_us / 1000} ms · p99 {value.p99_us / 1000} ms</span>
+          <span data-badge>{value.p50_us == null ? sentence('latency_not_measured')
+            : `p50 ${value.p50_us / 1000} ms · p99 ${value.p99_us / 1000} ms`}</span>
         </article>
       })}
   </>
