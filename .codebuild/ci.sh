@@ -27,24 +27,12 @@ echo "LEAF_EVENT shard mode=$CI_SHARD_MODE index=$CI_SHARD_INDEX_N total=$CI_SHA
 # A post-cheap-phase callback re-enters this exact trusted script, not a
 # candidate helper. Only dependency-backed heavy prerequisites run here.
 if [[ "${1:-}" == --heavy-prerequisites ]]; then
-if [[ "${CI_SHARD_MODE:-all}" == all || "$CI_SHARD_INDEX_N" == 0 ]]; then
-echo "LEAF_T start webbundle $(date +%s%3N)"
-cd "$CODEBUILD_SRC_DIR/web"
-echo "--- 2/4 Build web bundle"
-npm run build
-echo "LEAF_T end webbundle $(date +%s%3N) rc=0"
-echo "LEAF_T start license-fence $(date +%s%3N)"
-cd "$CODEBUILD_SRC_DIR"
-echo "--- 3/4 License fence self-test"
-python scripts/check_license_fence.py --self-test
-cd "$CODEBUILD_SRC_DIR"
-echo "--- 4/4 License fence scan"
-python scripts/check_license_fence.py .
-echo "LEAF_T end license-fence $(date +%s%3N) rc=0"
-else
-  echo "license fence: runs on shard 0"
-fi
-
+browser_log_dir="$(mktemp -d)"
+# Give the browser and its children a process group for failure cleanup.
+set -m
+(
+set -euo pipefail
+trap 'exit 143' TERM
 echo "LEAF_T start chromium $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR/web"
 echo "--- 5/6 Install Chromium for browser proofs"
@@ -78,6 +66,43 @@ install_ci_browser npx playwright
 install_ci_browser python -m playwright
 echo "LEAF_T end chromium $(date +%s%3N) rc=0"
 # LEAF_CI_BROWSER_INSTALL_END
+) > "$browser_log_dir/chromium.log" 2>&1 &
+browser_pid=$!
+set +m
+cleanup_ci_browser() {
+  local rc=$?
+  kill -- "-$browser_pid" 2>/dev/null || true
+  wait "$browser_pid" 2>/dev/null || true
+  cat "$browser_log_dir/chromium.log"
+  rm -rf "$browser_log_dir"
+  return "$rc"
+}
+trap cleanup_ci_browser EXIT
+if [[ "${CI_SHARD_MODE:-all}" == all || "$CI_SHARD_INDEX_N" == 0 ]]; then
+echo "LEAF_T start webbundle $(date +%s%3N)"
+cd "$CODEBUILD_SRC_DIR/web"
+echo "--- 2/4 Build web bundle"
+npm run build
+echo "LEAF_T end webbundle $(date +%s%3N) rc=0"
+echo "LEAF_T start license-fence $(date +%s%3N)"
+cd "$CODEBUILD_SRC_DIR"
+echo "--- 3/4 License fence self-test"
+python scripts/check_license_fence.py --self-test
+cd "$CODEBUILD_SRC_DIR"
+echo "--- 4/4 License fence scan"
+python scripts/check_license_fence.py .
+echo "LEAF_T end license-fence $(date +%s%3N) rc=0"
+else
+  echo "license fence: runs on shard 0"
+fi
+browser_rc=0
+wait "$browser_pid" || browser_rc=$?
+trap - EXIT
+cat "$browser_log_dir/chromium.log"
+rm -rf "$browser_log_dir"
+if (( browser_rc != 0 )); then
+  exit "$browser_rc"
+fi
   exit 0
 fi
 
@@ -617,14 +642,21 @@ else
   echo "contract: runs on shard 0"
 fi
 
+# LEAF_CI_SETUP_DEPS_BEGIN
 echo "=== job license-fence ==="
+echo "=== job test-gate ==="
+setup_log_dir="$(mktemp -d)"
+(
+set -euo pipefail
 echo "LEAF_T start webdeps $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR/web"
 echo "--- 1/4 Install web dependencies"
 npm ci
 echo "LEAF_T end webdeps $(date +%s%3N) rc=0"
-
-echo "=== job test-gate ==="
+) > "$setup_log_dir/webdeps.log" 2>&1 &
+webdeps_pid=$!
+(
+set -euo pipefail
 echo "LEAF_T start pydeps $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR"
 echo "--- 1/6 Upgrade pip"
@@ -640,11 +672,39 @@ python -m pip install \
   -r executor/control_plane/requirements.txt \
   -r executor/runtime/requirements.txt
 echo "LEAF_T end pydeps $(date +%s%3N) rc=0"
+) > "$setup_log_dir/pydeps.log" 2>&1 &
+pydeps_pid=$!
+(
+set -euo pipefail
 echo "LEAF_T start harness-deps $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR/harness"
 echo "--- 3/6 Install harness dependencies"
 npm ci
 echo "LEAF_T end harness-deps $(date +%s%3N) rc=0"
+) > "$setup_log_dir/harness-deps.log" 2>&1 &
+harness_deps_pid=$!
+webdeps_rc=0
+pydeps_rc=0
+harness_deps_rc=0
+wait "$webdeps_pid" || webdeps_rc=$?
+wait "$pydeps_pid" || pydeps_rc=$?
+wait "$harness_deps_pid" || harness_deps_rc=$?
+cat "$setup_log_dir/webdeps.log" "$setup_log_dir/pydeps.log" "$setup_log_dir/harness-deps.log"
+rm -rf "$setup_log_dir"
+setup_rc=0
+for setup_step in webdeps pydeps harness-deps; do
+  case "$setup_step" in
+    webdeps) step_rc=$webdeps_rc ;;
+    pydeps) step_rc=$pydeps_rc ;;
+    harness-deps) step_rc=$harness_deps_rc ;;
+  esac
+  if (( step_rc != 0 )); then
+    echo "setup: $setup_step failed rc=$step_rc"
+    if (( setup_rc == 0 )); then setup_rc=$step_rc; fi
+  fi
+done
+if (( setup_rc != 0 )); then exit "$setup_rc"; fi
+# LEAF_CI_SETUP_DEPS_END
 cd "$CODEBUILD_SRC_DIR/web"
 echo "--- 4/6 Reuse web dependencies"
 # The license-fence job installed a clean web tree in this same build.
