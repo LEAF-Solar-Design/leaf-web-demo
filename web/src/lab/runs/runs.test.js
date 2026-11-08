@@ -466,7 +466,7 @@ describe('authenticated run requests and SSE', () => {
     open({ runIds: ['r', 'other'], store, fetchImpl })
     await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2))
     expect(fetchImpl.mock.calls[1][0]).toContain('runs=other&')
-    expect(fetchImpl.mock.calls[1][1].headers['Last-Event-ID']).toBe('other:-1')
+    expect(fetchImpl.mock.calls[1][1].headers).not.toHaveProperty('Last-Event-ID')
   })
   it('F5 removes a finished run from the stream even when a new run evicts it', async () => {
     const store = createValueStore({ maxRuns: 2 })
@@ -481,7 +481,7 @@ describe('authenticated run requests and SSE', () => {
     await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2))
     expect(store.getRun('r')).toBeUndefined()
     expect(fetchImpl.mock.calls[1][0]).toContain('runs=other&')
-    expect(fetchImpl.mock.calls[1][1].headers['Last-Event-ID']).toBe('other:-1')
+    expect(fetchImpl.mock.calls[1][1].headers).not.toHaveProperty('Last-Event-ID')
   })
   it('marks a run_missing close explicitly', async () => {
     const store = createValueStore()
