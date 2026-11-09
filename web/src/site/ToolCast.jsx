@@ -8,6 +8,7 @@ import {
   getDrawingVersions,
   getJob,
   getSession,
+  getSessionIdentity,
   isWorkspaceBootstrapRequired,
   getTools,
   listProjects,
@@ -565,15 +566,15 @@ export default function ToolCast({
       }
       // A signed-in user with no drawing yet still needs to learn whether they
       // own a tenant workspace: without this probe the bootstrap-required 403
-      // (only surfaced by /api/session) never fires on the empty landing, the
+      // from the identity endpoint never fires on the empty landing, the
       // "Create your Leaf workspace" gate never renders, and their first upload
       // 403s with no path forward (found by the 2026-08-17 staging walk). The
-      // probe is authority-only: it seats no intake and leaves phase 'empty'.
+      // probe is drawing-independent: it seats no intake and leaves phase 'empty'.
       let probeLive = true
       // checking() first: the activate guard (createSessionController) only
       // admits a proof from `checking` or `active`, never over a latched gate.
       platformSession.actions.checking()
-      getSession(false, 'rooftop_demo')
+      getSessionIdentity(false)
         .then((data) => {
           if (!probeLive) return
           setWorkspaceBootstrapRequired(false)
