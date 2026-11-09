@@ -27,6 +27,10 @@ echo "LEAF_EVENT shard mode=$CI_SHARD_MODE index=$CI_SHARD_INDEX_N total=$CI_SHA
 # A post-cheap-phase callback re-enters this exact trusted script, not a
 # candidate helper. Only dependency-backed heavy prerequisites run here.
 if [[ "${1:-}" == --heavy-prerequisites ]]; then
+  if [[ "${LEAF_CI_POSTGRES_SETUP_STATUS:-0}" != 0 ]]; then
+    echo "FATAL: ephemeral PostgreSQL did not start; refusing browser and web setup so this build fails before them" >&2
+    exit 1
+  fi
 browser_log_dir="$(mktemp -d)"
 # Give the browser and its children a process group for failure cleanup.
 set -m
@@ -1040,6 +1044,7 @@ if ! LEAF_GATE_DATABASE_URL="$(bash "$CODEBUILD_SRC_DIR/scripts/ci/start_ephemer
 fi
 export LEAF_GATE_DATABASE_URL
 export LEAF_GATE_REQUIRE_DATABASE=1
+export LEAF_CI_POSTGRES_SETUP_STATUS="$postgres_status"
 echo "LEAF_T end postgres $(date +%s%3N) rc=$postgres_status"
 # LEAF_DIAGNOSTIC_BEGIN
 # Server-owned exact-suite diagnostics never grant a full or shard verdict.
