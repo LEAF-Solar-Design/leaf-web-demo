@@ -268,6 +268,11 @@ def test_corpus_closed_intent_waits_actual_reap_not_generic_terminal(corpus_join
     lane = corpus_join
     run_id, _ = corpus_admit(lane)
     _, lease, adapter = corpus_adapter(lane, run_id)
+    deadline_started = [None]
+    if reason == 'deadline':
+        # Exercise expiry after a real child starts, not during job admission.
+        adapter.monotonic = lambda: (0.0 if deadline_started[0] is None
+            else 1.0 + time.monotonic() - deadline_started[0])
     children, stages = [], []
     reaped, acknowledge = threading.Event(), threading.Event()
     real_popen, terminate = subprocess.Popen, corpus._terminate
@@ -287,13 +292,18 @@ def test_corpus_closed_intent_waits_actual_reap_not_generic_terminal(corpus_join
         future = pool.submit(adapter, 'corpus-evaluator-1', trusted, lane.manifest, {},
             lane.graph['blocks'][0]['settings'], deadline_s=0.3 if reason == 'deadline' else 30)
         stop = time.monotonic() + 5
-        while not children and time.monotonic() < stop:
+        while not children and not future.done() and time.monotonic() < stop:
             time.sleep(0.01)
+        if not children and future.done():
+            future.result()
+            pytest.fail('Corpus adapter returned before child startup.')
         assert children
         rows = lane.jobs.list_jobs(str(lane.tenant), 200)
         job_id = rows[0]['job_id']
         if reason == 'cancel':
             store.request_cancel(str(lane.tenant), run_id, 'operator')
+        else:
+            deadline_started[0] = time.monotonic()
         assert reaped.wait(5)
         assert lane.jobs.corpus_cleanup(job_id, str(lane.tenant)) is None
         # A generic reaper terminal is not evidence that staged files have gone.
