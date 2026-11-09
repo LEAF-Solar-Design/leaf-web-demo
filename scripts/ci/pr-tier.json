@@ -338,6 +338,7 @@
     "server-lab-git-cutover",
     "server-lab-git-write",
     "server-lab-honesty",
+    "server-lab-layouts",
     "server-lab-mirror-ops",
     "server-lab-ops",
     "server-lab-placement",
@@ -754,7 +755,7 @@
   ],
   "enabled": true,
   "generated_from": {
-    "catalog_sha256": "4878b250f473ea241661084afc1b74f0146f49d8f05da5788f8f228405e5292f",
+    "catalog_sha256": "699d03955b6ba4fe451d056bb1cbb714692e85ae69ee67822960adc24bde4926",
     "input_sha256s": {
       "fail30": "1d12f16a43d821eed38c6c411a1639d2e0af5241db8ae50e372bfa2c02443d4a",
       "proposal": "b7ee7af28e7da38b36ec81821a9ad977d7100b40a2047318603ac8c6b7929f87",

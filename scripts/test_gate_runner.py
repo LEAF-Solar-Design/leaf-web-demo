@@ -490,7 +490,7 @@ def test_unprivileged_supervisor_forwards_termination(tmp_path):
     process = subprocess.Popen([sys.executable, "-I", "-c", program])
     try:
         deadline = time.monotonic() + 10
-        while not pidfile.exists() and process.poll() is None and time.monotonic() < deadline:
+        while not (pidfile.exists() and pidfile.read_text()) and process.poll() is None and time.monotonic() < deadline:
             time.sleep(0.02)
         assert pidfile.exists()
         process.terminate()
