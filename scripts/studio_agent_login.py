@@ -45,7 +45,9 @@ class NoRedirect(HTTPRedirectHandler):
 def request_json(url, *, body=None, bearer=None):
     if not (url.startswith(ISSUER) or any(url.startswith(v[0] + "/") for v in TARGETS.values())):
         raise LoginFailure()
-    headers = {"Accept": "application/json", "Cache-Control": "no-cache, no-store"}
+    # Cloudflare answers the default Python-urllib agent with Error 1010, so name this client.
+    headers = {"Accept": "application/json", "Cache-Control": "no-cache, no-store",
+               "User-Agent": "leaf-studio-agent-login/1"}
     if body is not None:
         headers["Content-Type"] = "application/json"
     if bearer is not None:
