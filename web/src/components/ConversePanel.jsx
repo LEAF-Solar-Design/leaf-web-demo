@@ -1031,7 +1031,7 @@ export default function ConversePanel({
     const summary = paramsSummary(approval.params)
     const resumeRequired = approval.resume_required === true
     return (
-      <div key={approval.confirmation_id} className="strip-decision converse-confirm" data-element-id={formatElementId('approval', approval.confirmation_id) || undefined}>
+      <div key={approval.confirmation_id} className="strip-decision converse-confirm" data-converse-role="decision" data-ink={resumeRequired ? (approval.approved ? 'approved' : 'denied') : 'needs-ok'} data-element-id={formatElementId('approval', approval.confirmation_id) || undefined}>
         <span className="dot square" aria-hidden="true" />
         <span className="strip-sentence">
           {approval.kind === 'customize_platform' ? (
@@ -1102,7 +1102,7 @@ export default function ConversePanel({
       // real elements, and anything HTML-shaped stays literal text.
       if (!item.text) return null
       return (
-        <div key={i} className="converse-msg assistant">
+        <div key={i} className="converse-msg assistant" data-converse-role="assistant">
           <Markdown text={item.text} />
           <WrittenByChip by={item.writtenBy} />
         </div>
@@ -1124,7 +1124,7 @@ export default function ConversePanel({
       const object = c.summary
       const outcome = c.result && c.result !== c.summary ? c.result : ''
       return (
-        <span key={i} className="converse-tool-chip converse-step" data-state={st.state} title={c.tool || undefined}>
+        <li key={i} className="converse-tool-chip converse-step" data-state={st.state} title={c.tool || undefined}>
           <span className={st.dot} aria-hidden="true" />
           <span className="converse-step-state">{st.word}</span>
           {expandable ? (
@@ -1162,7 +1162,7 @@ export default function ConversePanel({
               )}
             </span>
           )}
-        </span>
+        </li>
       )
     }
     if (item.kind === 'job') {
@@ -1194,7 +1194,7 @@ export default function ConversePanel({
       if (!settled && pendingApprovals.some(
         (approval) => approval.confirmation_id === item.id)) return null
       return (
-        <div key={i} className="strip-decision converse-confirm" data-element-id={formatElementId('item', item.id) || undefined}>
+        <div key={i} className="strip-decision converse-confirm" data-converse-role="decision" data-ink={settled ? (settledOk ? 'approved' : 'denied') : 'needs-ok'} data-element-id={formatElementId('item', item.id) || undefined}>
           <span className="dot square" aria-hidden="true" />
           <span className="strip-sentence">
             {item.kind === 'proposal' ? (
@@ -1249,8 +1249,9 @@ export default function ConversePanel({
       )
     }
     if (item.kind === 'question') {
+      const resolved = questionChoiceState(events, item.id)
       return (
-        <div key={i} className="strip-decision converse-question">
+        <div key={i} className="strip-decision converse-question" data-converse-role="question" data-ink={resolved.answered ? 'answered' : 'question'}>
           <span className="dot square" aria-hidden="true" />
           <span className="strip-sentence">{item.question}</span>
           <span className="converse-question-options">
@@ -1260,7 +1261,6 @@ export default function ConversePanel({
               // option the user actually sent reads "selected"; a card the
               // user moved past (dismissed) simply inerts — the renderer must
               // never invent a historical selection (review round 2).
-              const resolved = questionChoiceState(events, item.id)
               const inert = resolved.answered || resolved.dismissed
               const isSelected = resolved.selectedLabel === label.trim()
               const sendingChoice = questionChoices.sendingQuestionIds.includes(item.id)
@@ -1283,7 +1283,7 @@ export default function ConversePanel({
     }
     if (item.kind === 'error') {
       return (
-        <div key={i} className="converse-note">
+        <div key={i} className="converse-note" data-converse-role="error" role="alert">
           <span className="dot square" aria-hidden="true" />
           <span className="dim">{item.message}</span>
           {item.code && <details><summary>Error details</summary><code>{item.code}</code></details>}
@@ -1366,7 +1366,7 @@ export default function ConversePanel({
         {model.turns.map((t) => (
           <div key={t.turnId} className="converse-turn" data-element-id={formatElementId('turn', t.turnId) || undefined}>
             {userTextByTurn.get(t.turnId) && (
-              <div className="converse-msg user">{userTextByTurn.get(t.turnId)}</div>
+              <div className="converse-msg user" data-converse-role="user">{userTextByTurn.get(t.turnId)}</div>
             )}
             {(t.images?.length ? t.images : localImagesByTurn.get(t.turnId))?.map((src, index) => (
               <img key={`${t.turnId}-image-${index}`} src={src} alt="User attached image" width="96" height="72" style={{ objectFit: 'cover', margin: '4px 4px 4px 0' }} />
@@ -1374,7 +1374,15 @@ export default function ConversePanel({
             {t.imageDescriptors?.length > 0 && (
               <div className="converse-note"><span className="dim">{t.imageDescriptors.length} image attachment{t.imageDescriptors.length === 1 ? '' : 's'} sent. Preview is unavailable after reload.</span></div>
             )}
-            {t.feed.map((item, i) => renderFeedItem(item, i, t.turnId))}
+            {t.feed.map((item, i) => {
+              if (item.kind !== 'tool') return renderFeedItem(item, i, t.turnId)
+              if (t.feed[i - 1]?.kind === 'tool') return null
+              const chips = []
+              for (let j = i; j < t.feed.length && t.feed[j].kind === 'tool'; j++) {
+                chips.push(renderFeedItem(t.feed[j], j, t.turnId))
+              }
+              return <ul key={i} className="converse-tool-row" aria-label="Tools used" data-converse-role="tool">{chips}</ul>
+            })}
             {stoppedTurns.has(t.turnId) && !t.stopReason && (
               <div className="converse-note"><span className="dim">Reply stopped.</span></div>
             )}
@@ -1405,7 +1413,7 @@ export default function ConversePanel({
         )}
         {pendingUserTurns.map((u) => (
           <div key={u.turnId} className="converse-turn" data-element-id={formatElementId('turn', u.turnId) || undefined}>
-            {(u.text || u.images?.length > 0) && <div className="converse-msg user">{u.text}</div>}
+            {(u.text || u.images?.length > 0) && <div className="converse-msg user" data-converse-role="user">{u.text}</div>}
             {thumbnailImages(u.images).map((src, index) => (
               <img key={`${u.turnId}-pending-image-${index}`} src={src} alt="Pending image attachment" width="96" height="72" style={{ objectFit: 'cover', margin: '4px 4px 4px 0' }} />
             ))}
