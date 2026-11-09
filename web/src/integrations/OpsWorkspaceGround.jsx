@@ -14,6 +14,8 @@ import { ActionDefinitionPanel } from './ActionDefinitionPanel.jsx'
 import { WorkflowSchedulePreviewPanel } from './WorkflowSchedulePreviewPanel.jsx'
 import { WebhookReceiptPanel } from './WebhookReceiptPanel.jsx'
 import { WorkflowScheduleDraftBrowser } from './WorkflowScheduleDraftBrowser.jsx'
+import OpsHomePanel from './OpsHomePanel.jsx'
+import { useSurfaceFrame } from '../site/SurfaceFrame.jsx'
 import { NO_OCCLUDERS, useGroundWindow, windowStyle } from '../site/groundWindow.js'
 import './ops-workspace.css'
 import { humanizeError } from '../errorHumanize.js'
@@ -189,6 +191,8 @@ function ProjectMaterialImport({ projectId, client, signal, guard, onImported, o
 
 export function OpsWorkspaceGround({ active = false, projectId = null, projectLabel, session, signedIn = false, accountScope, mock = false,
   leavingGround = null, studioShell = false, occluders = NO_OCCLUDERS, client: suppliedClient, mode }) {
+  const devices = useSurfaceFrame()?.devices
+  const hasLinkedDevice = Array.isArray(devices?.devices) && devices.devices.length > 0
   const client = useMemo(() => suppliedClient || createIntegrationsClient(), [suppliedClient])
   const [state, setState] = useState(empty)
   const [form, setForm] = useState(blankForm)
@@ -530,9 +534,11 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
     <div className="ops-workspace" style={windowStyle(win)}>
       <h1>Ops workspace</h1><p>{projectLabel?.trim() || (projectId ? 'Project name unavailable' : 'No project open')}</p>
       {message ? <p role="status">{message}</p> : visible && <>
+        <OpsHomePanel active={active} />
         <p role="status" aria-live="polite" tabIndex={-1} ref={resultRef}>{state.notice || state.pending}</p>
         {state.error && <div role="alert"><p>{humanizeError(state.error)}</p>{state.retryable && <button onClick={() => setRetry((value) => value + 1)}>Retry integrations</button>}</div>}
-        {state.scope && <>
+        {state.scope && <details className="ops-advanced" open={!hasLinkedDevice}>
+          <summary>Workflows and data</summary>
           {['owner', 'editor'].includes(state.scope.projectRole) && context.current && <WorkflowScheduleDraftBrowser
             key={JSON.stringify(['schedule-drafts', identity.key, context.current.cacheIdentity])}
             contextKey={JSON.stringify([identity.key, context.current.cacheIdentity])} client={client} projectId={projectId}
@@ -655,7 +661,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
             {!state.read && !pending && <button onClick={() => operation('Loading view…', (ctx) => readView(state.selected, state.historical, ctx))}>Retry view</button>}
             </>}
           </section>}
-        </>}
+        </details>}
       </>}
     </div>
   </section>
