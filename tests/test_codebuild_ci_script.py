@@ -34,6 +34,65 @@ def _bash_runs_python() -> bool:
 
 
 class TestCodebuildCiScript(unittest.TestCase):
+    def _run_heavy_prerequisites(self, postgres_status):
+        env = {key: value for key, value in os.environ.items()
+               if key not in ("CI_SHARD_TOTAL", "CI_SHARD_INDEX", "BASH_ENV",
+                              "LEAF_CI_POSTGRES_SETUP_STATUS")}
+        if postgres_status is not None:
+            env["LEAF_CI_POSTGRES_SETUP_STATUS"] = postgres_status
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / "web").mkdir()
+            stub_dir = directory / "bin"
+            stub_dir.mkdir()
+            calls_path = directory / "calls"
+            for name in ("npx", "npm", "python"):
+                stub = stub_dir / name
+                stub.write_text(
+                    '#!/usr/bin/env bash\n'
+                    'printf "%s %s\\n" "${0##*/}" "$*" >> "$TEST_CALLS"\n'
+                    'exit 0\n', encoding="utf-8")
+                stub.chmod(0o755)
+            env.update(CODEBUILD_SRC_DIR=directory.as_posix(),
+                       TEST_CALLS=calls_path.as_posix(),
+                       PATH=str(stub_dir) + os.pathsep + env.get("PATH", ""),
+                       MSYS_NO_PATHCONV="1", MSYS2_ARG_CONV_EXCL="*")
+            result = subprocess.run(
+                [BASH, CI_PATH.as_posix(), "--heavy-prerequisites"],
+                env=env, capture_output=True, text=True, timeout=30)
+            calls = calls_path.read_text(encoding="utf-8") if calls_path.exists() else ""
+            return result, calls
+
+    @unittest.skipUnless(BASH, "bash is not on PATH; heavy prerequisites require bash")
+    def test_heavy_prerequisites_stop_when_postgres_failed(self):
+        result, calls = self._run_heavy_prerequisites("1")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("ephemeral PostgreSQL did not start", result.stderr)
+        self.assertEqual(calls, "")
+
+    @unittest.skipUnless(BASH, "bash is not on PATH; heavy prerequisites require bash")
+    def test_heavy_prerequisites_run_when_postgres_is_healthy(self):
+        for postgres_status in ("0", None):
+            with self.subTest(postgres_status=postgres_status):
+                result, calls = self._run_heavy_prerequisites(postgres_status)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("playwright install", calls)
+                self.assertIn("run build", calls)
+
+    def test_postgres_setup_status_is_exported_before_the_gate_runs(self):
+        script = CI_PATH.read_text(encoding="utf-8")
+        export_position = script.index('export LEAF_CI_POSTGRES_SETUP_STATUS="$postgres_status"')
+        self.assertLess(script.index("postgres_status=1"), export_position)
+        runner_positions = [match.start() for match in re.finditer(
+            re.escape("python scripts/run-all-gates.py --jobs"), script)]
+        self.assertEqual(len(runner_positions), 2)
+        for runner_position in runner_positions:
+            self.assertLess(export_position, runner_position)
+        reentry_position = script.index('if [[ "${1:-}" == --heavy-prerequisites ]]; then')
+        check_position = script.index(
+            'if [[ "${LEAF_CI_POSTGRES_SETUP_STATUS:-0}" != 0 ]]; then', reentry_position)
+        self.assertLess(check_position, script.index('browser_log_dir="$(mktemp -d)"', reentry_position))
+
     def _run_diagnostic(self, overrides, ids=None, runner_status=0, postgres_status=0,
                         catalog_status=0, raw_catalog=None):
         script = CI_PATH.read_text(encoding="utf-8")
