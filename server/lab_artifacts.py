@@ -149,6 +149,12 @@ CREATE TRIGGER IF NOT EXISTS lab_publish_receipts_immutable_update BEFORE UPDATE
  BEGIN SELECT RAISE(ABORT, 'immutable lab receipt'); END;
 CREATE TRIGGER IF NOT EXISTS lab_publish_receipts_immutable_delete BEFORE DELETE ON lab_publish_receipts
  BEGIN SELECT RAISE(ABORT, 'immutable lab receipt'); END;
+CREATE TABLE IF NOT EXISTS lab_layouts (
+ tenant_id TEXT NOT NULL, doc_id TEXT NOT NULL, sha256 TEXT NOT NULL,
+ layout_text TEXT NOT NULL, byte_count INTEGER NOT NULL, updated_at REAL NOT NULL,
+ PRIMARY KEY (tenant_id, doc_id, sha256),
+ FOREIGN KEY (tenant_id, sha256) REFERENCES lab_blobs (tenant_id, sha256)
+);
 """
 
 

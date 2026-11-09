@@ -1069,7 +1069,7 @@ except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
 LEAF_DIAGNOSTIC_EXACT
   then
     diagnostic_status=0
-    python scripts/run-all-gates.py --jobs 1 --retry 0 --fail-fast --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs --only "$LEAF_GATE_ONLY" || diagnostic_status=$?
+    python scripts/run-all-gates.py --jobs 1 --retry 0 --fail-fast --early-feedback --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs --only "$LEAF_GATE_ONLY" --before-heavy-command bash "$LEAF_CI_SCRIPT_PATH" --heavy-prerequisites || diagnostic_status=$?
   else
     echo "LEAF_DIAGNOSTIC refused: catalog unavailable or selection not exact" >&2
   fi

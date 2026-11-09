@@ -16,6 +16,7 @@ if str(SERVER_DIR) not in sys.path:
 
 import deps  # noqa: E402
 import lab_artifacts as ledger  # noqa: E402
+import lab_layouts  # noqa: E402
 import lab_run_store as run_store  # noqa: E402
 import tenancy  # noqa: E402
 from routers import deployment_identity, lab_activation, lab_artifacts, lab_router, lab_runs, lab_stream, lab_widgets  # noqa: E402
@@ -78,8 +79,16 @@ def _owner_snapshot(db):
             f"SELECT * FROM {table} WHERE tenant_id=? ORDER BY rowid",
             ("tenant-a",),
         ).fetchall() for table in (
-            "lab_documents", "lab_blobs", "lab_revisions", "lab_publish_receipts",
+            "lab_documents", "lab_blobs", "lab_revisions", "lab_publish_receipts", "lab_layouts",
         )}
+
+
+def _owner_layout_request():
+    revision = ledger.get("tenant-a", DOC)
+    layout = {"schema": "leaf.lab-layout.v1", "positions": {
+        block["id"]: {"x": 12, "y": -34} for block in revision["graph"]["blocks"]
+    }}
+    return f'{BASE}/layout/{revision["sha256"]}', layout
 
 
 @pytest.fixture()
@@ -219,6 +228,8 @@ def test_route_inventory_is_complete():
         ("GET", "/api/lab/docs/{doc_id}/diff"),
         ("POST", "/api/lab/docs/{doc_id}/restore"),
         ("POST", "/api/lab/docs/{doc_id}/publish"),
+        ("GET", "/api/lab/docs/{doc_id}/layout/{sha256}"),
+        ("PUT", "/api/lab/docs/{doc_id}/layout/{sha256}"),
     }
 
 
@@ -375,6 +386,106 @@ def test_lab_route_refuses_wrong_tenant(
     assert _owner_snapshot(db) == before
     with pytest.raises(ledger.NotFound):
         ledger.get("tenant-b", DOC)
+
+
+@pytest.mark.parametrize("method", ["GET", "PUT"])
+def test_lab_layout_refuses_unauthenticated(client, owner, monkeypatch, method):
+    path, layout = _owner_layout_request()
+    digest = ledger.get("tenant-a", DOC)["sha256"]
+    lab_layouts.put_layout("tenant-a", DOC, digest, layout)
+    db, _ = owner
+    before = _owner_snapshot(db)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("unauthenticated Lab layout request reached persistence")
+
+    monkeypatch.setattr(lab_layouts, "get_layout", forbidden)
+    monkeypatch.setattr(lab_layouts, "put_layout", forbidden)
+    response = client.request(method, path, json=layout if method == "PUT" else None,
+                              headers={})
+    assert response.status_code == 401, response.text
+    assert response.json() == {"detail": "missing bearer token (Authorization header)"}
+    assert _owner_snapshot(db) == before
+
+
+def test_lab_layout_isolates_foreign_tenant(client, owner, monkeypatch):
+    revision = ledger.get("tenant-a", DOC)
+    path, layout = _owner_layout_request()
+    with monkeypatch.context() as owner_auth:
+        owner_auth.setattr(deps, "resolve_active_platform_tenant_authority",
+                           lambda subject: ("tenant-a", "hosted_pro"))
+        response = client.put(path, json=layout, headers=_h("tenant-a"))
+        assert response.status_code == 204, response.text
+        owner_read = client.get(path, headers=_h("tenant-a"))
+        assert owner_read.status_code == 200, owner_read.text
+        assert owner_read.json() == {"layout": layout}
+    db, _ = owner
+    before = _owner_snapshot(db)
+
+    missing = client.get(f'{BASE}-missing/layout/{revision["sha256"]}',
+                         headers=_h("tenant-b"))
+    assert missing.status_code == 200, missing.text
+    assert missing.json() == {"layout": None}
+    response = client.get(path, headers=_h("tenant-b"))
+    # Missing and foreign layouts share the existing optional-layout response.
+    assert response.status_code == 200, response.text
+    assert response.json() == {"layout": None}
+    assert (response.status_code, response.json()) == (missing.status_code, missing.json())
+    assert MARKER not in response.text and "tenant-a" not in response.text
+
+    moved = {"schema": layout["schema"], "positions": {
+        block_id: {"x": 90, "y": 80} for block_id in layout["positions"]
+    }}
+    response = client.put(path, json=moved, headers=_h("tenant-b"))
+    assert response.status_code == 400, response.text
+    assert response.json() == {"code": "lab_layout_unknown_revision"}
+    assert MARKER not in response.text and "tenant-a" not in response.text
+    with monkeypatch.context() as owner_auth:
+        owner_auth.setattr(deps, "resolve_active_platform_tenant_authority",
+                           lambda subject: ("tenant-a", "hosted_pro"))
+        response = client.get(path, headers=_h("tenant-a"))
+        assert response.status_code == 200, response.text
+        assert response.content == owner_read.content
+    assert _owner_snapshot(db) == before
+
+
+def test_lab_layout_owner_control_puts_and_gets(client, owner, monkeypatch):
+    monkeypatch.setattr(deps, "resolve_active_platform_tenant_authority",
+                        lambda subject: ("tenant-a", "hosted_pro"))
+    path, layout = _owner_layout_request()
+    response = client.put(path, json=layout, headers=_h("tenant-a"))
+    assert response.status_code == 204, response.text
+    assert response.content == b""
+    response = client.get(path, headers=_h("tenant-a"))
+    assert response.status_code == 200, response.text
+    assert response.json() == {"layout": layout}
+
+
+@pytest.mark.parametrize("setting,status,detail", [
+    ("LEAF_LAB_SURFACE_ENABLED", 404,
+     {"ok": False, "status": "refused", "reason": "lab_surface_disabled"}),
+    ("LEAF_AUTH_LIVE", 503,
+     {"ok": False, "status": "refused", "reason": "lab_auth_live_required"}),
+])
+@pytest.mark.parametrize("method", ["GET", "PUT"])
+def test_lab_layout_parent_guards_precede_tenant_and_storage(
+    client, owner, monkeypatch, method, setting, status, detail,
+):
+    path, layout = _owner_layout_request()
+    monkeypatch.setenv(setting, "0")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("closed Lab layout guard reached tenant authority or persistence")
+
+    monkeypatch.setattr(deps, "resolve_active_platform_tenant_authority", forbidden)
+    monkeypatch.setattr(lab_layouts, "get_layout", forbidden)
+    monkeypatch.setattr(lab_layouts, "put_layout", forbidden)
+    response = client.request(method, path, json=layout if method == "PUT" else None,
+                              headers=_h("tenant-b"))
+    assert response.status_code == status, response.text
+    assert response.json() == {"detail": detail}
+    db, before = owner
+    assert _owner_snapshot(db) == before
 
 
 def test_lab_first_save_with_same_id_creates_only_callers_data(client, owner):

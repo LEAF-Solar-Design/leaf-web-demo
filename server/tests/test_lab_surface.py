@@ -29,6 +29,8 @@ LAB_PATHS = [
     "/api/lab/docs/{doc_id}/diff",
     "/api/lab/docs/{doc_id}/restore",
     "/api/lab/docs/{doc_id}/publish",
+    "/api/lab/docs/{doc_id}/layout/{sha256}",
+    "/api/lab/docs/{doc_id}/layout/{sha256}",
     "/api/lab/widgets/{doc_id}/values",
     "/api/lab/runs/corpus-options",
     "/api/lab/runs",
