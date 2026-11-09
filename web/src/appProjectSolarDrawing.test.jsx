@@ -385,7 +385,8 @@ it('R13G2A-14 a retained engine document returns after a project closes', () => 
   const useEngineViewArmed = Function('useState', 'useLayoutEffect', `return (${text(hook)})`)(useState, useLayoutEffect)
   const armedAt = one(node => node.type === 'VariableDeclarator' && node.id.name === 'engineViewArmed').init
   expect(text(armedAt)).toBe('useEngineViewArmed(projectMode)')
-  const engineGate = one(node => node.type === 'LogicalExpression' && node.right === element('EngineDocumentView')).left
+  const engineView = element('EngineDocumentView')
+  const engineGate = one(node => node.type === 'LogicalExpression' && node.right === engineView).left
   const viewerKey = prop(element('Viewer'), 'key')
   const legacy = intakeOf('legacy.dwg', 'LG')
   const canonical = intakeOf('canonical.dwg', 'CA')
