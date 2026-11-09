@@ -27,6 +27,7 @@ const fixture = vi.hoisted(() => {
 
 vi.mock('../api.js', async (importOriginal) => ({ ...(await importOriginal()),
   getSession: vi.fn(async () => ({tenant: 'tenant'})), getDrawingVersions: vi.fn(),
+  getSessionIdentity: vi.fn(async () => ({tenant: 'tenant'})),
   getTools: vi.fn(async () => []), getCapabilities: vi.fn(async () => ({families: [], source: 'test'})),
   nlPrompt: vi.fn(async (_mock, text, _tools, options) => {
     const {guardedText, SecretRefusedError} = await import('../lib/secretGuardTransport.js')
@@ -134,7 +135,7 @@ async function setup(surface = 'ops') {
   const api = await import('../api.js')
   const converse = await import('../converse.js')
   const view = render(<ToolCast active />)
-  await waitFor(() => expect(api.getSession).toHaveBeenCalled())
+  await waitFor(() => expect(api.getSessionIdentity).toHaveBeenCalled())
   const input = document.querySelector('.tc-bar textarea')
   expect(input).toBeTruthy()
   const type = text => fireEvent.change(input, {target: {value: text}})
