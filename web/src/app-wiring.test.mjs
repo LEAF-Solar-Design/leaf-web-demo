@@ -5544,7 +5544,7 @@ describe('App.jsx wiring', () => {
     const grounds = appNoComments.match(/<SurfaceGrounds\s[\s\S]*?\/>/)?.[0]
     assert.ok(grounds, 'SurfaceGrounds mount exists')
     assert.match(grounds, new RegExp('occluders=\\{STUDIO_DRAWING_OCCLUDERS\\}'))
-    assert.match(grounds, /onCreateProject=\{onCreateProject\}/)
+    assert.match(grounds, /onCreateProject=\{onCreateProjectFromDrawing\}/)
     for (const component of ['SurfaceFrame', 'SurfaceGrounds']) {
       const mount = new RegExp('<' + component + '\\s[\\s\\S]*?/>|<' + component + '\\s[\\s\\S]*?>')
       // J1 gives the ground nested JSX panel props; its first /> now closes

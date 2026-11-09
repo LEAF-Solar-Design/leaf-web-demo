@@ -174,6 +174,7 @@ import {
   saveDrawingVersionPlan,
   fetchDrawingDxf,
   fetchSampleDxf,
+  importUploadedDrawingVersion,
 } from './api.js'
 import { matchPrompt } from './mock/mockNlPrompt.js'
 import { shouldStartTour } from './demo/tourEntry.js'
@@ -208,6 +209,7 @@ import ProjectMaterialIntake from './workspace/ProjectMaterialIntake.jsx'
 import PhotoMaterialIntake from './workspace/PhotoMaterialIntake.jsx'
 import useMaterialIntake from './workspace/useMaterialIntake.js'
 import ProjectStartPanel from './workspace/ProjectStartPanel.jsx'
+import { mountedDrawingSource, createProjectFromDrawing } from './workspace/createProjectFromDrawing.js'
 import useCatalogController from './controllers/catalog/useCatalogController.js'
 import useSessionController from './controllers/session/useSessionController.js'
 import { consoleAuthRequired, consoleSignedOut, consoleKnownGuest } from './controllers/session/consoleGate.js'
@@ -2632,6 +2634,42 @@ export default function App() {
     return createWorkspaceProject(givenName)
   }, [createWorkspaceProject])
 
+  const mountedDrawingRef = useRef(null)
+  const drawingAttachProjectRef = useRef(openProjectId)
+  drawingAttachProjectRef.current = openProjectId
+  const onCreateProjectFromDrawing = useCallback(async (givenName) => {
+    if (typeof givenName !== 'string' || !givenName.trim()) return
+    // Capture drawing custody at the click, before creating opens another project.
+    const mounted = mountedDrawingRef.current
+    const source = mounted?.mounted ? mountedDrawingSource(mounted) : null
+    const result = await createProjectFromDrawing({ name: givenName, source,
+      createProject: createWorkspaceProject, importUpload: importUploadedDrawingVersion })
+    if (!result) return
+    const projectId = result.project.project_id ?? result.project.id
+    if (result.attached) {
+      if (drawingAttachProjectRef.current === projectId) await rehydrate()
+    } else if (result.reason === 'attach-failed') {
+      const notifyAttachFailure = (error) => showToast({
+        text: `Project created, but this drawing was not added: ${error?.message || String(error)}.`,
+        kind: 'error',
+        action: { label: 'Retry', onClick: async () => {
+          try {
+            // Retry only the attach, retaining the project, drawing and key.
+            await result.retry()
+            if (drawingAttachProjectRef.current === projectId) await rehydrate()
+            showToast({ text: 'Drawing added to the project.' })
+          } catch (retryError) {
+            notifyAttachFailure(retryError)
+          }
+        } },
+      })
+      notifyAttachFailure(result.error)
+    } else if (mounted?.mounted) {
+      showToast({ text: 'Project created. This drawing is not saved to your account, so it was not added.' })
+    }
+    return result.project
+  }, [createWorkspaceProject, rehydrate, showToast])
+
   const prepareRunParams = useCallback((tool, params, options) => {
     const isWrite = (tool.capabilities || []).includes('drawing.write')
     const overlays = admittedOverlays(tool?.params, catalogRunOverlays({ enabled: ENV_SOLAR_SETTINGS_FORM, toolName: tool?.name, selectedHandle, isWrite }))
@@ -4839,6 +4877,8 @@ export default function App() {
   const activeDrawingName = projectMode ? projectDrawingName
     : activeIntake ? drawingPropertyName(activeDocumentIsHead ? mountedDrawingFile : '', activeIntake.documentId)
       : shown ? mountedDrawingFile || `${projectName}.dwg` : ''
+  mountedDrawingRef.current = { drawingState, requestedDrawingId: REQUESTED_DRAWING_ID,
+    name: activeDrawingName, mounted: Boolean(shown) && !projectMode }
   const sourceDrawingSummary = drawingIntake?.sourceSummary
   const drawingMetadata = sourceDrawingSummary
     ? `${sourceDrawingSummary.entityCount} entities · ${Object.keys(sourceDrawingSummary.countsByLayer).length} layers`
@@ -4982,7 +5022,7 @@ export default function App() {
       studioShell={studioShell}
       headingRef={boardHeadingRef}
       onSelect={onSelectSurface}
-      onCreateProject={onCreateProject}
+      onCreateProject={onCreateProjectFromDrawing}
       projectSlot={surfaceSlots.chrome.projectSlot === 'ios-surface'
         ? <IosSurface enabled={ENV_IOS_SURFACE} contract={iosContract} ship={ship} onLaunch={ship.onLaunch} />
         : null}
@@ -5418,7 +5458,7 @@ export default function App() {
             leavingGround={leavingGround}
             startFocusRequest={startFocusRequest}
             onReturnToDrawing={drafting ? onReturnToDrawing : null}
-            onCreateProject={onCreateProject}
+            onCreateProject={onCreateProjectFromDrawing}
             headingRef={boardHeadingRef}
             workspaceProject={workspaceProjectState}
             actions={boardHostsProject ? {

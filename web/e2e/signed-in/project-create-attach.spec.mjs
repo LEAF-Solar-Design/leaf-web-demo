@@ -47,7 +47,6 @@ test('creating a project from this drawing attaches its first drawing version', 
   expect(response.ok()).toBe(true)
   const workspace = await response.json()
   expect(Array.isArray(workspace.drawing_versions)).toBe(true)
-  test.fail(true, 'finding 1: Create project from this drawing leaves the project with zero drawing versions')
   await expect.poll(async () => {
     try {
       const response = await page.request.get(`/api/projects/${project.project_id}`, { headers: signedInUser.headers })
