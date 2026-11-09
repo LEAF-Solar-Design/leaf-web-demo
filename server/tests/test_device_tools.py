@@ -200,11 +200,11 @@ def test_other_summary_has_only_safe_fields(tools):
     store.lease_commands(device_id)
     secret = "a" * 43
     store.complete_command(device_id, command_id, {"command_id": command_id, "status": "ok", "finished_at": store._now().isoformat(),
-        "data": {"flow_id": "flow", "step_id": "step", "type": "form", "title": secret,
+        "data": {"flow_id": "01JC9XQ2V7M3K8T4P6R5S0W1YZ", "step_id": "step", "type": "form", "title": secret,
                  "errors": {"base": "cannot_connect", "access_token": secret}, "body_json": {"token": secret}}})
     response = call(tools, "command_status", {"device_id": device_id, "command_id": command_id})
     assert secret not in response.text
-    assert response.json()["result"]["summary"] == {"status": "ok", "flow_id": "flow", "step_id": "step", "type": "form",
+    assert response.json()["result"]["summary"] == {"status": "ok", "flow_id": "01JC9XQ2V7M3K8T4P6R5S0W1YZ", "step_id": "step", "type": "form",
                                                      "errors": {"base": "cannot_connect"}}
 
 
@@ -401,3 +401,31 @@ def test_admin_turn_tier_uses_session_tenant_when_different_from_org(tools, monk
     assert len(commands) == 1
     assert commands[0]["command_id"] == response.json()["result"]["command_id"]
     assert commands[0]["args"]["path"] == "/api/services/light/turn_on"
+
+
+@pytest.mark.parametrize("op", ["ha.flow.start", "ha.flow.step"])
+def test_flow_summary_preserves_ulid(op):
+    data = {"flow_id": "01JC9XQ2V7M3K8T4P6R5S0W1YZ", "step_id": "link", "type": "form"}
+    assert service._summary({"op": op}, {"data": data}) == data
+
+
+@pytest.mark.parametrize("flow_id", ["a1" * 16, "01jc9xq2v7m3k8t4p6r5s0w1yz"])
+def test_flow_summary_rejects_non_ulid(flow_id):
+    assert service._summary({"op": "ha.flow.start"}, {"data": {"flow_id": flow_id}}) == {}
+
+
+def test_flow_list_summary_filters_ids_and_handlers():
+    data = [
+        {"flow_id": "01JC9XQ2V7M3K8T4P6R5S0W1YZ", "handler": "hue", "step_id": "link"},
+        {"flow_id": "bad", "handler": "hue"},
+        {"flow_id": "01JC9XQ2V7M3K8T4P6R5S0W1YA", "handler": "zwave"},
+    ]
+    assert service._summary({"op": "ha.flow.list"}, {"data": data}) == {"flows": [
+        {"flow_id": "01JC9XQ2V7M3K8T4P6R5S0W1YZ", "handler": "hue", "step_id": "link"}]}
+
+
+def test_flow_list_summary_is_filtered_and_bounded():
+    flow = {"flow_id": "01JC9XQ2V7M3K8T4P6R5S0W1YZ", "handler": "wiz"}
+    data = [None, {"flow_id": flow["flow_id"], "handler": []}]
+    data += [dict(flow, step_id="a1" * 16, title="hidden") for _ in range(25)]
+    assert service._summary({"op": "ha.flow.list"}, {"data": data}) == {"flows": [flow] * 20}

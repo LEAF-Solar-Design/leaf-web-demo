@@ -23,6 +23,7 @@ MESSAGES = {"invalid_input": "The request is invalid.", "unauthenticated": "Auth
             "conflict": "The operation cannot run now.", "unavailable": "The device service is unavailable."}
 WRITES = {"install_package", "ha_step", "light"}
 ENTITY = re.compile(r"(?:light|group)\.[a-z0-9_]{1,64}")
+HA_FLOW_ID = re.compile(r"[0-7][0-9A-HJKMNP-TV-Z]{25}")
 
 
 def failure(code):
@@ -104,8 +105,29 @@ def _text(value):
     return value
 
 
+def _flow_id(value):
+    return value if type(value) is str and HA_FLOW_ID.fullmatch(value) else None
+
+
 def _summary(command, result):
     data = result.get("data")
+    if command["op"] == "ha.flow.list" and type(data) is list:
+        flows = []
+        for entry in data:
+            if type(entry) is not dict:
+                continue
+            flow_id = _flow_id(entry.get("flow_id"))
+            handler = entry.get("handler")
+            if flow_id is None or type(handler) is not str or handler not in {"hue", "wiz"}:
+                continue
+            flow = {"flow_id": flow_id, "handler": handler}
+            step_id = _text(entry.get("step_id"))
+            if step_id is not None:
+                flow["step_id"] = step_id
+            flows.append(flow)
+            if len(flows) == 20:
+                break
+        return {"flows": flows}
     data = data if type(data) is dict else {}
     if command["op"] == "http.proxy" and command["args"].get("method") == "GET" and command["args"].get("path") == "/api/states":
         lights = []
@@ -137,7 +159,7 @@ def _summary(command, result):
         value = data.get(key, result.get(key))
         if key == "status" and type(value) is int and 100 <= value <= 599:
             summary[key] = value
-        elif _text(value) is not None:
+        elif (_flow_id(value) if key == "flow_id" else _text(value)) is not None:
             summary[key] = value
     lan_access = data.get("lan_access", result.get("lan_access"))
     if _text(lan_access) in {"ok", "denied", "unknown"}:
