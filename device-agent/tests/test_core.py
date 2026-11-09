@@ -304,3 +304,57 @@ def test_client_requests_send_agent_user_agent(config, studio, enrolled):
     for _, _, _, headers in studio.seen:
         assert headers["User-Agent"] == f"leaf-device-agent/{leaf_agent.__version__}"
         assert not headers["User-Agent"].startswith("Python-urllib")
+
+
+def test_refused_result_is_dropped_and_polling_resumes(config, studio, enrolled, registry, monkeypatch, caplog):
+    agent = Agent(config, enrolled, registry, sleep=lambda _: None, executor=inline)
+    result = agent.execute(command())
+    posts = []
+    def refuse(results):
+        posts.append(results)
+        return {"accepted": 0}
+    monkeypatch.setattr(enrolled, "post_results", refuse)
+    try:
+        agent.flush_results()
+        assert agent.db.execute("SELECT pending FROM results").fetchall() == [(0,)]
+        assert posts == [[result], [result]]
+        assert caplog.messages.count("Studio refused a stale result; dropped") == 1
+        assert result["command_id"] not in caplog.text
+    finally:
+        agent.db.close()
+    restarted = Agent(config, enrolled, registry, sleep=lambda _: None, executor=inline)
+    assert restarted.run(max_cycles=1) == 0
+    assert any(target.startswith("/api/devices/agent/poll?") for _, target, _, _ in studio.seen)
+    assert len(posts) == 2
+
+
+def test_partial_result_acknowledgement_retries_each_row(config, enrolled, registry, monkeypatch):
+    agent = Agent(config, enrolled, registry, executor=inline)
+    results = [agent.execute(command()), agent.execute(command())]
+    responses = iter([{"accepted": 1}, {"accepted": 1}, {"accepted": 0}])
+    posts = []
+    def acknowledge(rows):
+        posts.append(rows)
+        return next(responses)
+    monkeypatch.setattr(enrolled, "post_results", acknowledge)
+    try:
+        agent.flush_results()
+        assert agent.db.execute("SELECT pending FROM results ORDER BY rowid").fetchall() == [(0,), (0,)]
+        assert posts == [results, [results[0]], [results[1]]]
+    finally:
+        agent.db.close()
+
+
+def test_invalid_result_acknowledgement_stays_pending(config, enrolled, registry, monkeypatch):
+    agent = Agent(config, enrolled, registry, executor=inline)
+    agent.execute(command())
+    clock = Clock()
+    enrolled.backoff = Backoff(enrolled.device_id, clock.sleep)
+    monkeypatch.setattr(enrolled, "post_results", lambda rows: {"error": "x"})
+    try:
+        with pytest.raises(ClientError, match="Invalid result acknowledgement"):
+            agent.flush_results()
+        assert agent.db.execute("SELECT pending FROM results").fetchall() == [(1,)]
+        assert len(clock.delays) == 1
+    finally:
+        agent.db.close()
