@@ -1128,3 +1128,44 @@ def _run_all() -> int:
 
 if __name__ == "__main__":
     sys.exit(_run_all())
+
+
+def test_service_browser_cli_sends_named_user_agent(monkeypatch):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("studio_agent_login_agent_unit",
+                                                SERVER_DIR.parent / "scripts/studio_agent_login.py")
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    recorded = []
+
+    class FakeResponse:
+        status = 200
+
+        def __init__(self, req):
+            self.req = req
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def geturl(self):
+            return self.req.full_url
+
+        def read(self, n):
+            return b'{"ok": true}'
+
+    class FakeOpener:
+        def open(self, req, timeout=None):
+            recorded.append(req.get_header("User-agent"))
+            return FakeResponse(req)
+
+    def fake_build_opener(*args):
+        return FakeOpener()
+
+    monkeypatch.setattr(cli, "build_opener", fake_build_opener)
+    result = cli.request_json("https://platform-staging.leafdesign.ai/api/health")
+    assert recorded == ["leaf-studio-agent-login/1"]
+    assert not recorded[0].startswith("Python-urllib")
+    assert result == {"ok": True}
