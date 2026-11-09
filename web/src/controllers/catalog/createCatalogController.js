@@ -638,7 +638,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
             if (!requestIsCurrent()) return undefined
             await adapters.startAgentTurn(text, hint, { allowSecretOnce })
             if (!requestIsCurrent()) return undefined
-            publish({ agentMode: 'race' })
+            publish({ agentMode: 'race', prompt: '' })
           } catch (error) {
             if (!requestIsCurrent()) return undefined
             // A credential refusal is not an agent outage. It must reach the
@@ -653,7 +653,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
             if (!requestIsCurrent()) return undefined
             await adapters.startAgentTurn(text, hint, { allowSecretOnce })
             if (!requestIsCurrent()) return undefined
-            publish({ agentMode: 'primary' })
+            publish({ agentMode: 'primary', prompt: '' })
           } catch (error) {
             if (!requestIsCurrent()) return undefined
             if (isSecretRefused(error)) throw error
