@@ -1,0 +1,10 @@
+.ops-home { padding: 16px; color: var(--leaf-ink); background: var(--leaf-raised); border: 1px solid var(--leaf-line); border-radius: var(--leaf-radius-card); font-family: var(--leaf-font-text); }
+.ops-home header, .ops-home footer { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.ops-home h2 { margin: 0; font-size: var(--leaf-size-heading); }
+.ops-home-lights { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr)); gap: 12px; padding: 0; list-style: none; }
+.ops-home-light { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 16px; border: 1px solid var(--leaf-line); border-radius: var(--leaf-radius-control); overflow-wrap: anywhere; }
+.ops-home-light.stale { border-style: dashed; opacity: .65; }
+.ops-home-swatch { width: 24px; height: 24px; border: 1px solid var(--leaf-line); border-radius: var(--leaf-radius-key); }
+.ops-home button { min-height: 44px; padding: 8px 12px; color: inherit; background: var(--leaf-raised); border: 1px solid var(--leaf-line); border-radius: var(--leaf-radius-control); font: inherit; cursor: pointer; }
+.ops-home button:disabled { cursor: default; opacity: .65; }
+.ops-home :focus-visible { outline: 2px solid var(--leaf-focus); outline-offset: 3px; }
