@@ -8,7 +8,7 @@
 // Approve = §7 split turn: record the approval, then post the confirm message
 // that starts the resume turn — the deterministic dispatch happens server-side.
 
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import {
   openStream,
   postMessage,
@@ -358,6 +358,11 @@ export default function ConversePanel({
   }
   const attachmentUrlsRef = useRef(new Set())
   const logRef = useRef(null)
+  const [logEl, setLogEl] = useState(null)
+  const attachLog = useCallback((el) => {
+    logRef.current = el
+    setLogEl(el)
+  }, [])
   const jobSeenRef = useRef(new Set())
   const queueStateRef = useRef(createQueuedTurnState())
   const setQueueState = (next) => {
@@ -610,14 +615,16 @@ export default function ConversePanel({
   }
   useEffect(() => {
     const el = logRef.current
+    // History backfill also follows until the reader's own scroll releases it.
     if (el && nearBottomRef.current) el.scrollTop = el.scrollHeight
-  }, [events])
+  }, [events, logEl])
   // A reader's own new turn resumes following, even after the log was re-seated.
   const latestUserTurnId = (localTurns[localTurns.length - 1] || userTurns[userTurns.length - 1])?.turnId
   const seenUserTurnIdsRef = useRef(null)
   useEffect(() => {
     if (seenUserTurnIdsRef.current === null) {
       seenUserTurnIdsRef.current = new Set(latestUserTurnId ? [latestUserTurnId] : [])
+      if (latestUserTurnId) jumpToLatest()
       return
     }
     if (!latestUserTurnId || seenUserTurnIdsRef.current.has(latestUserTurnId)) return
@@ -625,7 +632,7 @@ export default function ConversePanel({
     jumpToLatest()
   }, [latestUserTurnId]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
-    const el = logRef.current
+    const el = logEl
     if (!el || typeof ResizeObserver === 'undefined') return undefined
     let previousHeight = el.clientHeight
     const observer = new ResizeObserver(() => {
@@ -636,7 +643,7 @@ export default function ConversePanel({
     })
     observer.observe(el)
     return () => observer.disconnect()
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [logEl]) // eslint-disable-line react-hooks/exhaustive-deps
   // The chip's End keycap is live, and only while the chip is shown. It
   // defers to anything nearer that handled the key (the tab strip's roving
   // End) and never steals End from a text field or from outside this panel.
@@ -1376,7 +1383,7 @@ export default function ConversePanel({
 
       <LiveRegion
         className="converse-log"
-        ref={logRef}
+        ref={attachLog}
         onScroll={onLogScroll}
         role="log"
         atomic={false}
