@@ -52,8 +52,12 @@ function verifyPublication(receipt, scope, requestId, expectedDigest = null) {
   return Object.freeze({ ...receipt, drawing_version: Object.freeze({ ...version }) })
 }
 
+// publishHeld(kind, scope, value, { requestId }) publishes through a project checkout that is
+// already held elsewhere and stays private there. It resolves the receipt, resolves null when no
+// such checkout is held for this exact scope, or throws the refusal. This adapter never sees it.
 export function createProjectDrawingEditor({ getScope, importFile, transport, getCapability = () => null,
-  acquireCheckout, releaseCheckout, newRequestId = () => globalThis.crypto.randomUUID() } = {}) {
+  acquireCheckout, releaseCheckout, publishHeld = null,
+  newRequestId = () => globalThis.crypto.randomUUID() } = {}) {
   if (typeof getScope !== 'function' || !transport || typeof transport.read !== 'function'
       || typeof transport.save !== 'function' || typeof transport.restore !== 'function') {
     throw new TypeError('Project editor requires its scoped transport.')
@@ -136,6 +140,18 @@ export function createProjectDrawingEditor({ getScope, importFile, transport, ge
     request.running = true
     let settled = false
     try {
+      // A held project checkout publishes first: acquiring a second one would be refused.
+      if (!request.capability && typeof publishHeld === 'function') {
+        const held = await publishHeld(kind, scope, kind === 'save' ? request.bytes : value,
+          { requestId: request.requestId })
+        if (held !== null && held !== undefined) {
+          const receipt = verifyPublication(held, scope, request.requestId, expectedDigest)
+          settled = true
+          assertCurrent(captured)
+          return Object.freeze({ ...receipt, projectOperation: kind })
+        }
+        assertCurrent(captured)
+      }
       if (!request.capability) {
         request.capability = getCapability(scope)
         if (!request.capability) {

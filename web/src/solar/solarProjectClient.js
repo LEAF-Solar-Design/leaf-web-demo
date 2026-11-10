@@ -480,6 +480,32 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
         validate: (data, selected) => (typeof data?.job_id === 'string' && UUID.test(data.job_id) && data.status === 'submitted')
           || terminalRun(data, selected, intent.tool) })
     }),
+    // Editor Save and Undo restore under the checkout this client already holds. The proof is
+    // attached here and never leaves the client. No held checkout answers locally, sending nothing.
+    publishDrawing: (options = {}) => guarded((scope) => {
+      assert(plain(options))
+      const { kind, bytes, versionId, requestId, signal } = options
+      assert((kind === 'save' || kind === 'restore') && typeof requestId === 'string' && UUID.test(requestId))
+      if (!capability) return local('SIP_R7_CHECKOUT_NOT_HELD')
+      const b = scope.binding
+      const path = `/api/projects/${b.project_id}/drawings/${b.drawing_id}/versions/${b.input_version_id}/editor`
+      const headers = { 'Idempotency-Key': requestId, ...proof() }
+      const validate = (data, selected) => plain(data) && plain(data.drawing_version)
+        && data.organization_id === selected.organization_id && data.project_id === selected.project_id
+        && data.drawing_id === selected.drawing_id && data.parent_version_id === selected.input_version_id
+        && data.request_id === requestId && UUID.test(data.drawing_version.version_id)
+        && data.drawing_version.version_id !== selected.input_version_id
+        && data.drawing_version.drawing_id === selected.drawing_id
+      if (kind === 'save') {
+        assert(Object.prototype.toString.call(bytes) === '[object Uint8Array]'
+          && bytes.byteLength > 0 && bytes.byteLength <= MAX_ARTIFACT)
+        return request(path, { scope, signal, method: 'POST', body: bytes,
+          headers: { ...headers, 'Content-Type': 'application/dxf' }, validate })
+      }
+      assert(typeof versionId === 'string' && UUID.test(versionId))
+      return request(`${path}/restore`, { scope, signal, method: 'POST',
+        body: JSON.stringify({ version_id: versionId }), headers, validate })
+    }),
     uploadSolarEdgePdf: (options = {}) => guarded((scope) => {
       assert(plain(options))
       const { file, signal } = options
