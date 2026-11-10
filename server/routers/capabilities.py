@@ -289,6 +289,25 @@ def _capabilities(x_internal_role, x_ops_secret, tenant, drawing_id, project_id,
                                        "content": json.loads(response.body)})
                     states[name] = state
                 row["availability"] = deepcopy(states[name])
+        # Non-Solar tools in a project: a generic drawing read joins the existing project
+        # read executor, pinned to this exact canonical version; anything else is typed
+        # unavailable because no project executor exists for it.
+        try:
+            exact_version = input_version_id is not None and bool(UUID(str(input_version_id)))
+        except (ValueError, TypeError, AttributeError):
+            exact_version = False
+        drawing_states = {}
+        for family in families:
+            for row in family.get("capabilities") or []:
+                name = row.get("name")
+                if name in names or not isinstance(name, str):
+                    continue
+                if name not in drawing_states:
+                    tool = raw_by_name.get(name, {})
+                    drawing_states[name] = solar_project_admission.project_drawing_tool_availability(
+                        tool, tenant, read_tool=jobs_router._is_project_read_tool(tool),
+                        exact_version=exact_version)
+                row["availability"] = deepcopy(drawing_states[name])
     else:
         families = availability.annotate_w1_availability(
             families, tenant, drawing_id,
