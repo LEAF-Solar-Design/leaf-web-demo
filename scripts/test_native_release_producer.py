@@ -311,16 +311,36 @@ ERROR: failed to build: failed to solve: frontend grpc server closed unexpectedl
 '''
 
 
-def test_frontend_app_retries_once_same_inputs_preserving_siblings(tmp_path, monkeypatch, git_smoke_calls):
-    run, calls, refreshes, _, _ = pin_race_case(tmp_path, monkeypatch, service="app", markers=APP_FRONTEND_LOG)
+@pytest.mark.parametrize('unchanged', [False, True])
+def test_frontend_app_retries_once_with_refreshed_pins_preserving_siblings(tmp_path, monkeypatch, git_smoke_calls,
+                                                                          capsys, unchanged):
+    # 11-10 publisher a64c6119: the frontend retry reused trixie pins that had moved.
+    run, calls, refreshes, _, fresh = pin_race_case(tmp_path, monkeypatch, service="app",
+                                                    markers=APP_FRONTEND_LOG, unchanged=unchanged)
     images = run()
-    assert refreshes == []
+    assert refreshes == ['app']
     assert {name: len(rows) for name, rows in calls.items()} == {name: 2 if name == 'app' else 1 for name in SERVICES}
-    assert calls['app'][1] == (calls['app'][0][0], tmp_path / 'app.retry1.json', tmp_path / 'app.retry1.log')
-    assert calls['app'][1][0] is calls['app'][0][0]
+    assert calls['app'][1] == (fresh, tmp_path / 'app.retry1.json', tmp_path / 'app.retry1.log')
+    assert calls['app'][1][0] is fresh
+    if not unchanged:
+        assert calls['app'][1][0] != calls['app'][0][0]
     assert images == {name: {'service': name, 'attempt': 2 if name == 'app' else 1} for name in SERVICES}
     assert git_smoke_calls == [images]
     assert (tmp_path / 'app.log').read_text() == APP_FRONTEND_LOG
+    state = 'pins unchanged' if unchanged else 'pins refreshed'
+    assert capsys.readouterr().out.count(
+        f'image app: syntax frontend transport closed before build; rebuilding once with identical source ({state})\n') == 1
+
+
+def test_frontend_app_refresh_failure_keeps_original_error_without_retry(tmp_path, monkeypatch):
+    run, calls, refreshes, original, _ = pin_race_case(
+        tmp_path, monkeypatch, service="app", markers=APP_FRONTEND_LOG,
+        refresh_error=ValueError("channel unavailable"))
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        run()
+    assert raised.value is original
+    assert refreshes == ['app']
+    assert all(len(rows) == 1 for rows in calls.values())
 
 
 @pytest.mark.parametrize('retry_log', [APP_FRONTEND_LOG, 'InRelease: FAILED\ncomputed checksum did NOT match\n'])
@@ -337,7 +357,8 @@ def test_frontend_second_failure_is_terminal_without_pin_retry(tmp_path, monkeyp
     monkeypatch.setattr(producer, 'build_image', again)
     with pytest.raises(subprocess.CalledProcessError) as raised:
         run()
-    assert raised.value is failure and refreshes == []
+    # One refresh before the single retry; a retry failure is never retried again.
+    assert raised.value is failure and refreshes == ['app']
     assert len(calls['app']) == 2
     assert all(len(calls[name]) == 1 for name in SERVICES if name != 'app')
 

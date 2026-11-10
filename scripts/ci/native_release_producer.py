@@ -807,8 +807,16 @@ def _build_images(root: Path, services, source: str, build_number: int,
         if not isinstance(errors[service], subprocess.CalledProcessError):
             continue
         if service == "app" and _app_frontend_closed_before_build(work / "app.log"):
-            fresh = freshness[service]
-            print("image app: syntax frontend transport closed before build; rebuilding once with identical inputs", flush=True)
+            # The retry starts minutes later, and Debian may have republished an
+            # -updates InRelease meanwhile (11-10 publisher a64c6119 reused moved
+            # trixie pins and failed). Re-read the same validated channels; if
+            # they cannot be read, the original failure stands with no retry.
+            try:
+                fresh = refresh_debian_freshness(service)
+            except Exception:
+                continue
+            moved = "pins refreshed" if fresh != freshness[service] else "pins unchanged"
+            print(f"image app: syntax frontend transport closed before build; rebuilding once with identical source ({moved})", flush=True)
         else:
             if service == "web":
                 continue
