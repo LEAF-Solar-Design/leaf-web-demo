@@ -374,7 +374,7 @@ def kernel_filter(tmp_path_factory):
 
 
 def ephemeral_seccomp_toolchain(directory, env, compiler):
-    """Extract authenticated APT supply privately; never install host packages."""
+    """Own authenticated APT metadata with a bounded private refresh; never install."""
     def command(argv, *, cwd=directory):
         result = subprocess.run(argv, cwd=cwd, env=env, capture_output=True,
                                 text=True, timeout=90)
@@ -389,18 +389,44 @@ def ephemeral_seccomp_toolchain(directory, env, compiler):
         return dict(line.split(': ', 1) for line in text.splitlines() if ': ' in line and not line.startswith(' '))
 
     arch = command(['dpkg', '--print-architecture'])
+    apt_options = []
+    names = ('libseccomp-dev', 'libseccomp2')
+
+    def candidate_for(name):
+        policy = command(['apt-cache', *apt_options, 'policy', name])
+        return next((line.split(':', 1)[1].strip() for line in policy.splitlines()
+                     if line.strip().startswith('Candidate:')), '')
+
+    candidates = {name: candidate_for(name) for name in names}
+    # This fixture owns its metadata; no other CI stage must refresh host lists.
+    if any(not candidate or candidate == '(none)' for candidate in candidates.values()):
+        state = directory / 'apt-state'
+        state.mkdir(mode=0o700)
+        lists, cache = state / 'lists', state / 'cache'
+        (lists / 'partial').mkdir(parents=True)
+        (cache / 'archives' / 'partial').mkdir(parents=True)
+        apt_options = ['-o', 'Dir::State::lists=' + str(lists),
+                       '-o', 'Dir::Cache=' + str(cache),
+                       '-o', 'Dir::Cache::archives=' + str(cache / 'archives')]
+        print('L03_EPHEMERAL_SUPPLY metadata=private-refresh')
+        try:
+            refreshed = subprocess.run(['apt-get', *apt_options, 'update'], cwd=directory,
+                                      env=env, capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            raise AssertionError('Ephemeral canonical seccomp supply unavailable: metadata_refresh') from None
+        if refreshed.returncode != 0:
+            raise AssertionError('Ephemeral canonical seccomp supply unavailable: metadata_refresh')
+        candidates = {name: candidate_for(name) for name in names}
     expected = {}
-    for name in ('libseccomp-dev', 'libseccomp2'):
-        policy = command(['apt-cache', 'policy', name])
-        candidate = next((line.split(':', 1)[1].strip() for line in policy.splitlines()
-                          if line.strip().startswith('Candidate:')), '')
+    for name in names:
+        candidate = candidates[name]
         assert candidate and candidate != '(none)', 'No authenticated seccomp package candidate.'
-        records = [fields(part) for part in command(['apt-cache', 'show', name + '=' + candidate]).split('\n\n')]
+        records = [fields(part) for part in command(['apt-cache', *apt_options, 'show', name + '=' + candidate]).split('\n\n')]
         metadata = next((row for row in records if row.get('Package') == name
                          and row.get('Version') == candidate and row.get('Architecture') == arch), None)
         assert metadata and len(metadata.get('SHA256', '')) == 64, 'Missing trusted seccomp package digest.'
         expected[name] = metadata
-        command(['apt-get', 'download', name + '=' + candidate])
+        command(['apt-get', *apt_options, 'download', name + '=' + candidate])
     packages = list(directory.glob('*.deb'))
     assert len(packages) == 2, 'Unexpected ephemeral seccomp supply set.'
     prefix = directory / 'toolchain'
@@ -423,6 +449,151 @@ def ephemeral_seccomp_toolchain(directory, env, compiler):
     assert multiarch and '/' not in multiarch and '..' not in multiarch
     library = str(prefix / 'usr/lib' / multiarch)
     return dict(env, CPATH=str(prefix / 'usr/include'), LIBRARY_PATH=library, LD_LIBRARY_PATH=library)
+
+
+@pytest.fixture
+def ephemeral_seccomp_commands(monkeypatch):
+    calls = []
+
+    def install(*, missing_host=(), missing_private=(), absent_candidate='(none)', refresh_failure=None):
+        payloads = {name: (name + ' fake archive').encode()
+                    for name in ('libseccomp-dev', 'libseccomp2')}
+
+        def run(argv, **kwargs):
+            calls.append((list(argv), kwargs))
+            args = [argv[0]]
+            options = {}
+            index = 1
+            while index < len(argv):
+                if argv[index] == '-o':
+                    key, value = argv[index + 1].split('=', 1)
+                    options[key] = value
+                    index += 2
+                else:
+                    args.append(argv[index])
+                    index += 1
+            stdout = ''
+            if args == ['dpkg', '--print-architecture']:
+                stdout = 'amd64\n'
+            elif args[:2] == ['apt-cache', 'policy']:
+                missing = missing_private if options else missing_host
+                version = absent_candidate if args[2] in missing else ('2.6.0' if options else '2.5.0')
+                stdout = '  Candidate: ' + version + '\n'
+            elif args == ['apt-get', 'update']:
+                if refresh_failure == 'timeout':
+                    raise subprocess.TimeoutExpired(argv, kwargs['timeout'],
+                                                    output='private apt diagnostic', stderr='private apt diagnostic')
+                if refresh_failure == 'exit':
+                    return subprocess.CompletedProcess(argv, 100, 'private apt diagnostic', 'private apt diagnostic')
+            elif args[:2] == ['apt-cache', 'show']:
+                name, version = args[2].split('=', 1)
+                stdout = ('Package: ' + name + '\nVersion: ' + version + '\nArchitecture: amd64\nSHA256: '
+                          + hashlib.sha256(payloads[name]).hexdigest() + '\n')
+            elif args[:2] == ['apt-get', 'download']:
+                name, version = args[2].split('=', 1)
+                (Path(kwargs['cwd']) / (name + '_' + version + '.deb')).write_bytes(payloads[name])
+            elif args[:2] == ['dpkg-deb', '--field']:
+                name, version = Path(args[2]).stem.split('_', 1)
+                stdout = 'Package: ' + name + '\nVersion: ' + version + '\nArchitecture: amd64\n'
+            elif args[:2] == ['dpkg-deb', '--extract']:
+                prefix = Path(args[3])
+                (prefix / 'usr/include').mkdir(parents=True, exist_ok=True)
+                (prefix / 'usr/lib/x86_64-linux-gnu').mkdir(parents=True, exist_ok=True)
+            elif args == ['fake-cc', '-print-multiarch']:
+                stdout = 'x86_64-linux-gnu\n'
+            else:
+                raise AssertionError('Unexpected ephemeral seccomp command: ' + repr(argv))
+            return subprocess.CompletedProcess(argv, 0, stdout, '')
+
+        monkeypatch.setattr(subprocess, 'run', run)
+        return calls
+
+    yield install
+    assert not any(forbidden in argument for argv, _ in calls for argument in argv
+                   for forbidden in ('allow-unauthenticated', 'AllowInsecure', 'allow-insecure', 'trusted=yes'))
+
+
+def test_ephemeral_seccomp_host_metadata(tmp_path, ephemeral_seccomp_commands, capsys):
+    calls = ephemeral_seccomp_commands()
+    env = {'PATH': '/fake/bin', 'HOME': str(tmp_path)}
+    result = ephemeral_seccomp_toolchain(tmp_path, env, 'fake-cc')
+    assert not any(argv[0] == 'apt-get' and 'update' in argv for argv, _ in calls)
+    assert all('-o' not in argv for argv, _ in calls)
+    assert [argv for argv, _ in calls if argv[:2] == ['apt-cache', 'policy']] == [
+        ['apt-cache', 'policy', 'libseccomp-dev'], ['apt-cache', 'policy', 'libseccomp2']]
+    assert not (tmp_path / 'apt-state').exists()
+    assert result == dict(env, CPATH=str(tmp_path / 'toolchain/usr/include'),
+                          LIBRARY_PATH=str(tmp_path / 'toolchain/usr/lib/x86_64-linux-gnu'),
+                          LD_LIBRARY_PATH=str(tmp_path / 'toolchain/usr/lib/x86_64-linux-gnu'))
+    output = capsys.readouterr().out
+    assert 'metadata=private-refresh' not in output
+    assert output.count('L03_EPHEMERAL_SUPPLY package=') == 2
+
+
+@pytest.mark.parametrize('missing', ['libseccomp-dev', 'libseccomp2'])
+@pytest.mark.parametrize('absent_candidate', ['', '(none)'])
+def test_ephemeral_seccomp_private_refresh(tmp_path, ephemeral_seccomp_commands, capsys,
+                                          missing, absent_candidate):
+    calls = ephemeral_seccomp_commands(missing_host=(missing,), absent_candidate=absent_candidate)
+    env = {'PATH': '/fake/bin', 'HOME': str(tmp_path)}
+    result = ephemeral_seccomp_toolchain(tmp_path, env, 'fake-cc')
+    updates = [(index, argv, kwargs) for index, (argv, kwargs) in enumerate(calls)
+               if argv[0] == 'apt-get' and 'update' in argv]
+    assert len(updates) == 1
+    index, argv, kwargs = updates[0]
+    options = ['-o', 'Dir::State::lists=' + str(tmp_path / 'apt-state/lists'),
+               '-o', 'Dir::Cache=' + str(tmp_path / 'apt-state/cache'),
+               '-o', 'Dir::Cache::archives=' + str(tmp_path / 'apt-state/cache/archives')]
+    assert argv == ['apt-get', *options, 'update']
+    assert kwargs == dict(cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120)
+    assert (tmp_path / 'apt-state/lists/partial').is_dir()
+    assert (tmp_path / 'apt-state/cache/archives/partial').is_dir()
+    before = [argv for argv, _ in calls[:index] if argv[0].startswith('apt-')]
+    assert before == [['apt-cache', 'policy', 'libseccomp-dev'], ['apt-cache', 'policy', 'libseccomp2']]
+    later = [argv for argv, _ in calls[index + 1:] if argv[0] in ('apt-cache', 'apt-get')]
+    assert later == [
+        ['apt-cache', *options, 'policy', 'libseccomp-dev'],
+        ['apt-cache', *options, 'policy', 'libseccomp2'],
+        ['apt-cache', *options, 'show', 'libseccomp-dev=2.6.0'],
+        ['apt-get', *options, 'download', 'libseccomp-dev=2.6.0'],
+        ['apt-cache', *options, 'show', 'libseccomp2=2.6.0'],
+        ['apt-get', *options, 'download', 'libseccomp2=2.6.0']]
+    assert result == dict(env, CPATH=str(tmp_path / 'toolchain/usr/include'),
+                          LIBRARY_PATH=str(tmp_path / 'toolchain/usr/lib/x86_64-linux-gnu'),
+                          LD_LIBRARY_PATH=str(tmp_path / 'toolchain/usr/lib/x86_64-linux-gnu'))
+    assert env == {'PATH': '/fake/bin', 'HOME': str(tmp_path)}
+    output = capsys.readouterr().out
+    assert output.count('L03_EPHEMERAL_SUPPLY metadata=private-refresh\n') == 1
+    assert output.count('L03_EPHEMERAL_SUPPLY package=') == 2
+
+
+@pytest.mark.parametrize('missing', ['libseccomp-dev', 'libseccomp2'])
+def test_ephemeral_seccomp_candidate_still_missing(tmp_path, ephemeral_seccomp_commands, missing):
+    calls = ephemeral_seccomp_commands(missing_host=(missing,), missing_private=(missing,))
+    with pytest.raises(AssertionError, match=r'^No authenticated seccomp package candidate\.'):
+        ephemeral_seccomp_toolchain(tmp_path, {}, 'fake-cc')
+    assert sum(argv[0] == 'apt-get' and 'update' in argv for argv, _ in calls) == 1
+
+
+def test_ephemeral_seccomp_refresh_failure(tmp_path, ephemeral_seccomp_commands):
+    calls = ephemeral_seccomp_commands(missing_host=('libseccomp-dev',), refresh_failure='exit')
+    with pytest.raises(AssertionError) as error:
+        ephemeral_seccomp_toolchain(tmp_path, {}, 'fake-cc')
+    assert str(error.value) == 'Ephemeral canonical seccomp supply unavailable: metadata_refresh'
+    assert 'private apt diagnostic' not in str(error.value)
+    assert sum(argv[0] == 'apt-get' and 'update' in argv for argv, _ in calls) == 1
+    assert calls[-1][0][-1] == 'update'
+
+
+def test_ephemeral_seccomp_refresh_timeout(tmp_path, ephemeral_seccomp_commands):
+    calls = ephemeral_seccomp_commands(missing_host=('libseccomp-dev',), refresh_failure='timeout')
+    with pytest.raises(AssertionError) as error:
+        ephemeral_seccomp_toolchain(tmp_path, {}, 'fake-cc')
+    assert str(error.value) == 'Ephemeral canonical seccomp supply unavailable: metadata_refresh'
+    assert 'private apt diagnostic' not in str(error.value)
+    assert sum(argv[0] == 'apt-get' and 'update' in argv for argv, _ in calls) == 1
+    assert calls[-1][1]['timeout'] == 120
+    assert calls[-1][0][-1] == 'update'
 
 
 @pytest.fixture
