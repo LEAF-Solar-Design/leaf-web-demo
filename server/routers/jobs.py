@@ -688,6 +688,71 @@ def _run_project_read(tool, tenant, headers, req, params, *, persist=False,
     return JSONResponse(status_code=status, content=body, headers={"Cache-Control": "no-store"})
 
 
+def _is_project_write_tool(tool):
+    """A registered drawing.write builtin with a server-owned project producer."""
+    import project_drawing_write
+    return project_drawing_write.producer_entry(tool) is not None
+
+
+def _run_project_write(tool, tenant, headers, req, params, *, idempotency_key, capability):
+    """Reviewed project write: one confirmation commits one immutable project version."""
+    import project_drawing_editor
+    import project_drawing_write
+    import solar_project_context
+    from routers import project_drawings
+
+    try:
+        # Same verified identity, org header, demo actor and exact-version binding as reads.
+        context = _resolve_project_read_context(tenant, headers, req, params)
+        binding = context.binding
+        committed = project_drawing_write.commit(
+            tenant, binding.project_id, binding.drawing_id, binding.input_version_id,
+            tool, params, catalog_digest=req.catalog_digest,
+            idempotency_key=idempotency_key, capability=capability)
+    except project_drawing_write.ProducerRefused as exc:
+        return JSONResponse(status_code=exc.status, content=with_envelope_fields({
+            "error": error_obj(ErrorCode.BAD_PARAMS, exc.code, retryable=False),
+            "reason_code": exc.code,
+        }), headers={"Cache-Control": "no-store"})
+    except project_drawing_editor.EditorError as exc:
+        return JSONResponse(status_code=exc.status, content=with_envelope_fields({
+            "error": error_obj(ErrorCode.BAD_PARAMS, exc.code, retryable=exc.retryable),
+            "reason_code": exc.code,
+        }), headers={"Cache-Control": "no-store"})
+    except DemoActorRefused:
+        return _demo_refusal()
+    except jobs.platform_link.ProjectSessionForbidden:
+        return error_response(ErrorCode.FORBIDDEN, "project access denied",
+                              retryable=False, status_code=403)
+    except (jobs.platform_link.ProjectAuthorityNotFound, LookupError):
+        return project_drawings._dispatch(lambda: solar_project_context.refuse("CONTEXT_NOT_FOUND"))
+    except solar_project_context.ProjectContextError as exc:
+        if exc.reason_code == "SIP_R1_PROJECT_FORBIDDEN":
+            return error_response(ErrorCode.FORBIDDEN, "project access denied",
+                                  retryable=False, status_code=403)
+        def refusal():
+            raise exc
+        return project_drawings._dispatch(refusal)
+    except ValueError as exc:
+        message = str(exc)
+        return error_response(ErrorCode.BAD_PARAMS, message, retryable=False,
+                              status_code=400 if "required" in message else 409)
+    except Exception:
+        return project_drawings._dispatch(lambda: solar_project_context.refuse("STORE_UNAVAILABLE"))
+    receipt = committed["receipt"]
+    body = {
+        "ok": True, "tool": tool["name"], "version": receipt["drawing_version"],
+        "result": committed["result"], "overlay": committed["overlay"],
+        "producer": committed["producer"],
+        "project_context": {
+            "organization_id": receipt["organization_id"], "project_id": receipt["project_id"],
+            "drawing_id": receipt["drawing_id"], "input_version_id": receipt["parent_version_id"],
+            "intake_sha256": committed["producer"]["input_intake_sha256"],
+        },
+    }
+    return JSONResponse(status_code=200, content=body, headers={"Cache-Control": "no-store"})
+
+
 def _checkout_identity(tenant_id: Any, drawing_id: str,
                        capability: Optional[str]) -> Tuple[str, Optional[int]]:
     """Exchange the presented capability for the (holder, fence) the write path
@@ -1003,6 +1068,17 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
             tool, tenant_id, (x_org_id, x_project_id), req, params,
             persist=persist == 1 or selected_binding is not None,
             idempotency_key=idempotency_key, selected_binding=selected_binding)
+
+    if isinstance(x_project_id, str) and x_project_id and _is_project_write_tool(tool):
+        if selected_binding is not None:
+            return error_response(ErrorCode.BAD_PARAMS, "project_adapter_unavailable",
+                                  retryable=False, status_code=409)
+        # The tool's legacy "demo" default never names a project drawing.
+        if "drawing_id" not in (req.params or {}):
+            params.pop("drawing_id", None)
+        return _run_project_write(tool, tenant_id, (x_org_id, x_project_id), req, params,
+                                  idempotency_key=idempotency_key,
+                                  capability=x_checkout_capability)
 
     # An authored tool that declares the W1 graph intake is pinned and anonymous
     # exactly like the trusted read kind; only the broker's execution differs.

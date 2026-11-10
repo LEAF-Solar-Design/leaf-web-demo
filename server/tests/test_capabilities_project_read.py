@@ -60,10 +60,22 @@ def test_drawing_backed_project_read_is_runnable(lane, monkeypatch):
     assert state["admission_checked"] is False and state["admission"] is None
 
 
-def test_drawing_write_has_no_project_executor(lane):
+def test_registered_write_builtin_has_a_project_producer(lane, monkeypatch):
+    granted = entitlements.entitlements_for
+    monkeypatch.setattr(entitlements, "entitlements_for",
+                        lambda *args, **kwargs: {**granted(*args, **kwargs), "run_write": True})
+    assert jobs_router._is_project_write_tool(DELETE) is True
     state = _project_states(lane)["delete-marked-panel"]
-    assert state["project_read"] is False and state["runnable"] is False
-    assert state["engine_ready"] is False
+    assert state["project_write"] is True and state["project_read"] is False
+    assert state["runnable"] is True and state["refusal_reasons"] == []
+
+
+def test_unregistered_write_tool_has_no_project_executor(lane):
+    lane.tools["authored-write"] = {**deepcopy(DELETE), "name": "authored-write"}
+    assert jobs_router._is_project_write_tool(lane.tools["authored-write"]) is False
+    state = _project_states(lane)["authored-write"]
+    assert state["project_read"] is False and state["project_write"] is False
+    assert state["runnable"] is False and state["engine_ready"] is False
     assert state["refusal_reasons"] == ["project_adapter_unavailable"]
 
 

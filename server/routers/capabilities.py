@@ -306,7 +306,8 @@ def _capabilities(x_internal_role, x_ops_secret, tenant, drawing_id, project_id,
                     tool = raw_by_name.get(name, {})
                     drawing_states[name] = solar_project_admission.project_drawing_tool_availability(
                         tool, tenant, read_tool=jobs_router._is_project_read_tool(tool),
-                        exact_version=exact_version)
+                        exact_version=exact_version,
+                        write_tool=jobs_router._is_project_write_tool(tool))
                 row["availability"] = deepcopy(drawing_states[name])
     else:
         families = availability.annotate_w1_availability(

@@ -13,12 +13,14 @@ const ready = { entitled: true, engine_ready: true, implemented: true, input_rea
   refusal_reasons: [], runnable: true, admission_checked: false, admission: null, project_read: true }
 const noExecutor = { entitled: true, engine_ready: false, implemented: true, input_ready: false,
   refusal_reasons: ['project_adapter_unavailable'], runnable: false, admission_checked: false,
-  admission: null, project_read: false }
+  admission: null, project_read: false, project_write: false }
+const writable = { ...ready, project_read: false, project_write: true }
 
 function setup(countAvailability = ready) {
   const rows = [
     { name: 'count-by-layer', label: 'Count by layer', capabilities: ['drawing.read'], availability: countAvailability },
-    { name: 'delete-marked-panel', label: 'Delete marked panel', capabilities: ['drawing.write'], availability: noExecutor },
+    { name: 'delete-marked-panel', label: 'Delete marked panel', capabilities: ['drawing.write'], availability: writable },
+    { name: 'authored-write', label: 'Authored write', capabilities: ['drawing.write'], availability: noExecutor },
   ]
   const fetchImpl = vi.fn(async () => ({ ok: true, status: 200,
     json: async () => ({ families: [{ family_id: 'drawing', capabilities: rows }] }) }))
@@ -47,11 +49,33 @@ describe('project drawing catalog reads', () => {
     } finally { run.retire() }
   })
 
-  it('a drawing.write tool keeps its typed no-executor refusal', async () => {
+  it('a server-marked project write reaches review on a current receipt', async () => {
     const run = setup()
     try {
       await run.controller.actions.loadCatalog()
       run.controller.actions.commitDecision({ lane: 'run', tool: 'delete-marked-panel', params: {} })
+      expect(run.controller.getState().routeError).toBeNull()
+      expect(run.adapters.commitDecision).toHaveBeenCalledWith(expect.objectContaining({ tool: 'delete-marked-panel' }))
+    } finally { run.retire() }
+  })
+
+  it('a stale receipt refuses the project write until the catalog reloads', async () => {
+    const run = setup()
+    try {
+      await run.controller.actions.loadCatalog()
+      run.client.setScope(otherBinding, 'session-1')
+      run.controller.setContext({ solarBinding: otherBinding, authorityKey: 'session-1' })
+      run.controller.actions.commitDecision({ lane: 'run', tool: 'delete-marked-panel', params: {} })
+      expect(run.adapters.commitDecision).not.toHaveBeenCalled()
+      expect(run.controller.getState().routeError).toBe('project_request_required')
+    } finally { run.retire() }
+  })
+
+  it('a drawing.write tool without a producer keeps its typed refusal', async () => {
+    const run = setup()
+    try {
+      await run.controller.actions.loadCatalog()
+      run.controller.actions.commitDecision({ lane: 'run', tool: 'authored-write', params: {} })
       expect(run.controller.getState().routeError).toBe('project_adapter_unavailable')
       expect(run.adapters.commitDecision).not.toHaveBeenCalled()
     } finally { run.retire() }
