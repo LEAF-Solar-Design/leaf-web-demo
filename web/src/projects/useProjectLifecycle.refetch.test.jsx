@@ -9,12 +9,13 @@ vi.mock('./api.js', () => ({
   getOrgIdentities: vi.fn(),
   getProjectLifecycle: vi.fn(),
   inviteMember: vi.fn(),
+  renameProject: vi.fn(),
   resetProject: vi.fn(),
   revokeMember: vi.fn(),
   setIdentityDisplayName: vi.fn(),
 }))
 
-import { exportProject, getProjectLifecycle, inviteMember, setIdentityDisplayName } from './api.js'
+import { exportProject, getProjectLifecycle, inviteMember, renameProject, setIdentityDisplayName } from './api.js'
 import useProjectLifecycle from './useProjectLifecycle.js'
 
 function snapshot(projectId) {
@@ -334,5 +335,31 @@ it('LCR13 a mutation resolving inside the commit that removes the hook refetches
     globalThis.IS_REACT_ACT_ENVIRONMENT = actEnvironment
   }
   expect(order).toEqual(['removed'])
+  expect(lifecycleCalls('A')).toBe(1)
+})
+
+it('rename shows the server name at once and a failed refresh does not fail the rename', async () => {
+  getProjectLifecycle.mockReset()
+  getProjectLifecycle.mockResolvedValueOnce({ ...snapshot('A'), project: { project_id: 'A', org_id: 'org-A', name: 'Old Name' } })
+  const { result } = renderHook(() => useProjectLifecycle('A', { enabled: true }))
+  await waitFor(() => expect(result.current.project?.name).toBe('Old Name'))
+  getProjectLifecycle.mockRejectedValueOnce(new Error('refresh failed'))
+  renameProject.mockResolvedValueOnce({ project_id: 'A', status: 'renamed', name: 'New Name', previous_name: 'Old Name' })
+  let outcome
+  await act(async () => { outcome = await result.current.actions.rename('New Name') })
+  expect(outcome.name).toBe('New Name')
+  expect(renameProject).toHaveBeenCalledWith('A', 'New Name')
+  expect(result.current.project.name).toBe('New Name')
+  expect(lifecycleCalls('A')).toBe(2)
+})
+
+it('a refused rename rethrows and leaves the name and the read count alone', async () => {
+  getProjectLifecycle.mockReset()
+  getProjectLifecycle.mockResolvedValueOnce({ ...snapshot('A'), project: { project_id: 'A', org_id: 'org-A', name: 'Old Name' } })
+  const { result } = renderHook(() => useProjectLifecycle('A', { enabled: true }))
+  await waitFor(() => expect(result.current.project?.name).toBe('Old Name'))
+  renameProject.mockRejectedValueOnce(Object.assign(new Error('taken'), { status: 409 }))
+  await act(async () => { await expect(result.current.actions.rename('Taken')).rejects.toThrow('taken') })
+  expect(result.current.project.name).toBe('Old Name')
   expect(lifecycleCalls('A')).toBe(1)
 })

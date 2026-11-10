@@ -315,6 +315,16 @@ export async function cloneProject(projectId, name) {
   return request(`/api/projects/${id}/clone`, mutation('POST', { name: trimmed }))
 }
 
+// POST /api/projects/{id}/rename {name} -> {project_id, status, name,
+// previous_name, receipt, replayed}. The project keeps its id and everything in
+// it; a name another live project holds is refused with 409 and nothing changes.
+export async function renameProject(projectId, name) {
+  const id = requireUuid(projectId, 'project')
+  const trimmed = String(name ?? '').trim()
+  if (!trimmed) throw new Error('A project needs a name before it can be renamed.')
+  return request(`/api/projects/${id}/rename`, mutation('POST', { name: trimmed }))
+}
+
 // POST /api/projects/{id}/export -> {export, export_sha256, file_count,
 // member_count, receipt}. `export` is the sanitized artifact itself
 // (leaf.project-export.v1), already stripped of draft/working state server-side.

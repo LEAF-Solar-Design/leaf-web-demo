@@ -1228,7 +1228,7 @@ _REQUIRED_CONSTRAINTS = {
     "project_lifecycle_receipts_action_check": _catalog_contract(
         "project_lifecycle_receipts", "CHECK", "project_created", "member_invited",
         "member_revoked", "file_put", "file_deleted", "project_cloned",
-        "project_exported", "project_reset", "project_deleted"),
+        "project_exported", "project_reset", "project_deleted", "project_renamed"),
     "project_lifecycle_receipts_idempotency_key_check": _catalog_contract(
         "project_lifecycle_receipts", "CHECK", "char_length(idempotency_key) >= 1",
         "char_length(idempotency_key) <= 200"),
