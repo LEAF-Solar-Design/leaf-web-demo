@@ -5146,10 +5146,14 @@ def test_jobs_conflicts_are_classified_into_resource_lanes():
         resources = g.conflict_resources(suite)
         assert suite.id not in g._WEB_SOURCE_READERS
         assert "npm/npx shares node_modules" in g.serial_suite_reason(suite)
-        assert resources == frozenset({"web-tree"})
+        assert resources == frozenset({"web-vitest"})
         assert "--no-cache" not in suite.argv
         assert suite.argv[-1] == "--maxWorkers=2"
         assert not (g.conflict_resources(by_id["server-backbone"]) & resources)
+    assert g.conflict_resources(by_id["web-stage-source-contracts"]) == frozenset({"web-tree", "web-vitest"})
+    for suite in suites:
+        if "web-vitest" in g.conflict_resources(suite):
+            assert suite.kind == "vitest" and suite.cwd == g.WEB, suite.id
 
 
 def test_web_source_readers_are_registered_read_only_pool_suites():
@@ -5174,7 +5178,10 @@ def test_web_source_readers_are_registered_read_only_pool_suites():
         assert not forbidden.search(command), (sid, command)
     for suite in by_id.values():
         if suite.cwd == g.WEB and suite.id not in g._WEB_SOURCE_READERS:
-            assert "web-tree" in g.conflict_resources(suite), suite.id
+            if suite.id.startswith("web-vitest-"):
+                assert g.conflict_resources(suite) == frozenset({"web-vitest"}), suite.id
+            else:
+                assert "web-tree" in g.conflict_resources(suite), suite.id
 
 
 @pytest.mark.parametrize("sid", [
@@ -5280,6 +5287,45 @@ def test_jobs_lanes_never_overlap_a_shared_resource_and_never_exceed_jobs(
     first_rest_start = min(i for i, (sid, event) in enumerate(events)
                            if sid not in prelude_ids and event == "start")
     assert last_prelude_end < first_rest_start
+
+
+def test_web_vitest_shards_run_beside_the_web_tree_chain_one_at_a_time(tmp_path, monkeypatch):
+    g = _load_runner()
+    chain = [g.Suite(f"web-chain-{i}", f"web chain {i}", "script", g.WEB, ["npm", "test"], None)
+             for i in range(3)]
+    shards = [g.Suite(f"web-vitest-{i}", f"web vitest {i}", "vitest", g.WEB,
+                      ["npm", "run", "test:unit"], 1) for i in range(1, 4)]
+    suites = chain + shards
+    locks = {s.id: g.conflict_resources(s) for s in suites}
+    assert all(locks[s.id] == frozenset({"web-tree"}) for s in chain)
+    assert all(locks[s.id] == frozenset({"web-vitest"}) for s in shards)
+    # The first chain suite and the first shard must run at the same time. A
+    # scheduler that keeps them on one chain breaks the barrier: a red row, never a hang.
+    beside = threading.Barrier(2)
+    guard = threading.Lock()
+    active: set = set()
+    vitest_overlap = []
+
+    def tracked_suite(suite, log_dir, retry):
+        with guard:
+            if suite.id.startswith("web-vitest-") and any(
+                    other.startswith("web-vitest-") for other in active):
+                vitest_overlap.append(suite.id)
+            active.add(suite.id)
+        try:
+            if suite.id in ("web-chain-0", "web-vitest-1"):
+                beside.wait(timeout=5)
+            time.sleep(0.05)
+            return g.Result(suite, "PASS", "1", 0.05), 1
+        finally:
+            with guard:
+                active.discard(suite.id)
+
+    monkeypatch.setattr(g, "_run_parallel_suite", tracked_suite)
+    results, _ = g.run_suites_parallel(suites, tmp_path, 4, 0, False)
+    assert [r.suite.id for r in results] == [s.id for s in suites]
+    assert all(r.status == "PASS" for r in results), [r.note for r in results]
+    assert vitest_overlap == []
 
 
 def test_conflict_resources_maps_each_rule_to_its_lock(monkeypatch):
