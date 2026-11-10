@@ -184,6 +184,7 @@ import { editFixture, pendingEditDemo, editFixtureV2 } from './mock/editFixture.
 import { resumeHref } from './components/ConversationList.jsx'
 import LiveRegion, { HIDE_WITH_STYLE } from './components/LiveRegion.jsx'
 import ConversePanel from './components/ConversePanel.jsx'
+import { conversationDestination as resolveConversationDestination } from './site/conversationDestination.js'
 import AuthorPanel from './components/AuthorPanel.jsx'
 import useProjectSourceController from './site/useProjectSourceController.js'
 import ProjectSourceCandidateReview from './site/ProjectSourceCandidateReview.jsx'
@@ -1204,6 +1205,7 @@ export default function App() {
   }, [openProjectId, REQUESTED_DRAWING_ID, labStatus, request])
   const [projectPane, setProjectPane] = useState(null)
   const [conversationSource, setConversationSource] = useState(null)
+  const [commandTranscriptHost, setCommandTranscriptHost] = useState(null)
   const [conversationDestination, setConversationDestination] = useState(null)
   const [annotationSource, setAnnotationSource] = useState(null)
   const [annotationDestination, setAnnotationDestination] = useState(null)
@@ -4117,6 +4119,20 @@ export default function App() {
   }, [projectMode, mock, surfaceSlots.toolbar.profile, catalogRunContext?.drawingId, catalogRunContext?.drawingVersion, catalogRunContext?.projectId])
   const boardVisible = !!studioGround && (startOpen || surfaceSlots.ground === 'board')
   const [browserPanel, setBrowserPanel] = useState('none')
+  const transcriptDestination = resolveConversationDestination({
+    hasDockHost: Boolean(commandTranscriptHost), agentMode, sessionId: agentSessionId,
+  })
+  const latestAgentTurn = agentTurns.at(-1)
+  const latestAgentTurnId = latestAgentTurn?.turnId || latestAgentTurn?.requestId
+  const lastTranscriptTurn = useRef(null)
+  useEffect(() => {
+    if (!agentSessionId || !latestAgentTurnId) return
+    const previous = lastTranscriptTurn.current
+    if (previous?.sessionId === agentSessionId && previous?.turnId === latestAgentTurnId) return
+    // Record dock turns too: moving an existing turn to the rail must not reopen it.
+    lastTranscriptTurn.current = { sessionId: agentSessionId, turnId: latestAgentTurnId }
+    if (transcriptDestination === 'rail') setBrowserPanel('studio')
+  }, [agentSessionId, latestAgentTurnId, transcriptDestination])
   // One persistent Project subtree owns campaigns and pane seats across all Studio profiles.
   const boardHostsProject = (!!studioGround && surfaceSlots.chrome.shell === 'cockpit') || (boardVisible && surfaceSlots.ground === 'board')
   const paneSeats = deriveBoardPaneSeats({
@@ -6397,7 +6413,7 @@ export default function App() {
         <PersistentSeat destination={studioShell ? studioActivityHost : activityFallback}>
         <div ref={setConversationSource} />
         {paneSeats.conversationMounted && (
-          <PersistentSeat destination={paneSeats.conversationTarget}>
+          <PersistentSeat destination={transcriptDestination === 'dock' ? commandTranscriptHost : paneSeats.conversationTarget}>
           <ConversePanel
             sessionId={agentSessionId}
             projectContext={conversationProjectContext}
@@ -6463,6 +6479,7 @@ export default function App() {
         </main>
 
         <div className="bar-dock">
+          <div className="command-transcript-host" data-testid="command-transcript-host" ref={setCommandTranscriptHost} />
           {boardVisible && <p className="start-board-gloss">{START_BOARD_COPY.gloss}{mock && <> {START_BOARD_COPY.mockGloss}</>}</p>}
           {/* W4e slice H: the engine's command prompt ("LINE  Specify first
               point:") portals here, the line above the command input, on the
