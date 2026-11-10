@@ -166,7 +166,7 @@ import useExit from './useExit.js'
 import DetailsDrawer, { ServiceStatus } from './components/DetailsDrawer.jsx'
 import ShortcutSheet from './components/ShortcutSheet.jsx'
 import {
-  config, authHeaders, getSessionIdentity, getSession, getTools, getCapabilities, runTool, runToolAsync,
+  config, authHeaders, getSessionIdentity, getSession, getTools, getCapabilities, runTool, runToolAsync, attachToJob,
   getJob, recordToEnvelope, publishStagedAuthor, getDrawingIntake,
   getDrawingVersions, undoDrawing, redoDrawing, takeCheckout, releaseCheckout, nlPrompt,
   createOrg, listProjects, createProject, openProject, subscribeUnauthorized,
@@ -415,6 +415,42 @@ export async function seatProjectDrawingPublication(controller, receipt, isCurre
       && row.drawing_id === version.drawing_id && row.project_id === version.project_id && row.org_id === version.org_id)) return false
   controller.selectCanonicalVersion(version.version_id)
   return true
+}
+
+// A confirmed catalog run inside a project goes through the project's own client, which holds the
+// project checkout proof privately. The result is the real queued job or the bound terminal envelope.
+export async function runProjectCatalogTool({ projectSolar, tool, params, context, catalogDigest, idempotencyKey,
+  onSubmit, onStatus, signal, attach = attachToJob }) {
+  const refused = (code, message) => ({ ok: false, tool: tool.name, version: null, result: null, overlay: null,
+    timing_ms: 0, cost: null, degraded_mode: false, error: { error_code: code, message, retryable: false } })
+  const client = projectSolar?.ready ? projectSolar.projectClient : null
+  const binding = client?.getSnapshot().binding
+  if (!binding || binding.project_id !== context.projectId || binding.organization_id !== context.orgId
+    || binding.input_version_id !== context.drawingId) {
+    return refused('project_request_required', 'This project drawing changed. Review the run again.')
+  }
+  const { drawing_id: _legacyDrawing, ...bound } = params || {}
+  let intent
+  try {
+    intent = client.prepareRun({ tool: tool.name, params: bound, catalogDigest,
+      idempotencyKey: idempotencyKey || crypto.randomUUID() })
+  } catch {
+    return refused('project_request_invalid', 'This run could not be prepared for the project. Review it again.')
+  }
+  const outcome = await client.submitRun(intent, { signal })
+  if (!outcome.ok) {
+    const reason = outcome.reason || 'HTTP_ERROR'
+    const detail = outcome.envelope?.error?.message
+    return { ...refused(reason, typeof detail === 'string' && detail ? detail
+      : `The project refused this run (${reason}).`), reason_code: reason }
+  }
+  const data = outcome.data
+  if (typeof data.job_id === 'string') {
+    onSubmit?.(data.job_id)
+    onStatus?.({ status: 'submitted', progress: 'queued', elapsed_ms: null, job_id: data.job_id })
+    return attach(data.job_id, { onStatus, signal })
+  }
+  return data
 }
 
 export async function seatSolarProjectPublication(controller, receipt, captured, isCurrent) {
@@ -2954,6 +2990,11 @@ export default function App() {
       submission: { params: merged },
       execute: ({ onSubmit, onStatus, signal }) => (mock
         ? runTool(mock, tool, merged, shown)
+        : executionContext.projectId ? runProjectCatalogTool({
+          projectSolar, tool, params: merged, context: executionContext,
+          catalogDigest: (runContext?.toolSnapshot?.catalogDigest
+            || createCatalogToolSnapshot(tool).catalogDigest || undefined),
+          idempotencyKey, onSubmit, onStatus, signal })
         : runToolAsync(tool, merged, executionContext.drawingId, {
           orgId: executionContext.orgId || undefined,
           projectId: executionContext.projectId || undefined,
@@ -2972,10 +3013,15 @@ export default function App() {
 
     if (!mock) {
       loadUsage(); checkout.actions.refresh()
-      if (openProjectId) rehydrate()
+      // A project write names its new canonical version: reconcile once and select it, so CAD,
+      // the board and Undo all read the written version. Any other run only reconciles.
+      const written = executionContext.projectId && envelope?.ok === true
+        && envelope.version && typeof envelope.version === 'object' ? envelope.version : null
+      if (written) await seatProjectDrawingPublication(workspaceController, { drawing_version: written })
+      else if (openProjectId) rehydrate()
     }
     return envelope
-  }, [agentMode, catalogRunContext, checkout.actions, clearAgentMode, dismissRoute, loadUsage, mock,
+  }, [agentMode, catalogRunContext, checkout.actions, clearAgentMode, dismissRoute, loadUsage, mock, projectSolar, workspaceController,
     health?.aps_live, openProjectId, prepareRunParams, markRefreshFailure, previewing, rehydrate, runJob,
     shown, writeLocked, closeStartForChange, refuseProjectSolar])
 
