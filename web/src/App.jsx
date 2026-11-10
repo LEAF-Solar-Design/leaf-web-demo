@@ -2083,8 +2083,12 @@ export default function App() {
   // Tick the calm "running · N.Ns" clock while a live job runs (no animated loader).
   // --- NT2 toast plumbing (one slot — newest replaces; Toast auto-fades ~5s) --
   // showToast / onToastDone now come from useToastBus() above (slice 13a).
+  // The result lives in the Studio sidebar host, which is hidden and inert until its panel is open. View
+  // opens that panel (and the phone Result drawer) first, then scrolls once the host is visible.
+  const revealResultRef = useRef(null)
   const viewResult = useCallback(() => {
-    resultBlockRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    revealResultRef.current?.()
+    setTimeout(() => resultBlockRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 0)
   }, [])
   const viewViewer = useCallback(() => {
     workspaceCardRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' })
@@ -4384,6 +4388,11 @@ export default function App() {
     setNavExpanded(true)
     if (studioShell) setBrowserPanel('studio')
   }, [studioShell, setNavExpanded, setBrowserPanel])
+  revealResultRef.current = () => {
+    if (!studioShell) return
+    setBrowserPanel('studio')
+    if (drawerViewport) setStudioDrawer('result')
+  }
   const toggleStudioToolRail = useCallback(() => {
     if (browserPanel === 'studio' && (drawerViewport ? studioDrawer === 'nav' : navExpanded)) {
       setBrowserPanel('none')
