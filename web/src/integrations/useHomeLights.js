@@ -3,17 +3,34 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 const interval = 15000
 const byte = (value) => Number.isInteger(value) && value >= 0 && value <= 255
 
+export function kelvinToRgb(kelvin) {
+  if (!Number.isFinite(kelvin) || kelvin < 1000 || kelvin > 12000) return null
+  const temperature = kelvin / 100
+  const red = temperature <= 66 ? 255 : 329.698727446 * Math.pow(temperature - 60, -0.1332047592)
+  const green = temperature <= 66 ? 99.4708025861 * Math.log(temperature) - 161.1195681661 : 288.1221695283 * Math.pow(temperature - 60, -0.0755148492)
+  const blue = temperature >= 66 ? 255 : temperature <= 19 ? 0 : 138.5177312231 * Math.log(temperature - 10) - 305.0447927307
+  return [red, green, blue].map((value) => Math.round(Math.max(0, Math.min(255, value))))
+}
+
 function projectLights(rows) {
   const lights = new Map()
   for (const row of rows) {
     if (typeof row?.entity_id !== 'string' || !/^light\.[a-z0-9_]+$/.test(row.entity_id) || !['on', 'off'].includes(row.state)) continue
     const attributes = row.attributes || {}
+    const colour = [
+      Array.isArray(attributes.rgb_color) && attributes.rgb_color.length === 3 ? attributes.rgb_color : null,
+      attributes.rgbw_color,
+      attributes.rgbww_color,
+    ].find((value) => Array.isArray(value) && value.length >= 3 && [0, 1, 2].every((index) => byte(value[index])))
+    const kelvin = !colour && Number.isFinite(attributes.color_temp_kelvin) && attributes.color_temp_kelvin >= 1000 && attributes.color_temp_kelvin <= 12000 ? Math.round(attributes.color_temp_kelvin) : null
     lights.set(row.entity_id, {
       entity_id: row.entity_id,
       name: typeof attributes.friendly_name === 'string' && attributes.friendly_name ? attributes.friendly_name : row.entity_id,
       state: row.state,
       brightness_pct: byte(attributes.brightness) ? Math.round(attributes.brightness * 100 / 255) : null,
-      rgb: Array.isArray(attributes.rgb_color) && attributes.rgb_color.length === 3 && attributes.rgb_color.every(byte) ? [...attributes.rgb_color] : null,
+      rgb: colour ? colour.slice(0, 3) : kelvin !== null ? kelvinToRgb(attributes.color_temp_kelvin) : null,
+      kelvin,
+      color_mode: typeof attributes.color_mode === 'string' && attributes.color_mode.length <= 32 ? attributes.color_mode : null,
     })
     if (lights.size === 100) break
   }

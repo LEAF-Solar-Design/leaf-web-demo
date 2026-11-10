@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, renderHook, screen, within } from '@testing-library/react'
 import OpsHomePanel from './OpsHomePanel.jsx'
-import useHomeLights from './useHomeLights.js'
+import useHomeLights, { kelvinToRgb } from './useHomeLights.js'
 
 const surface = vi.hoisted(() => ({ frame: undefined }))
 vi.mock('../site/SurfaceFrame.jsx', () => ({ useSurfaceFrame: () => surface.frame }))
@@ -102,7 +102,70 @@ it('bounds projection and omits invalid brightness and colour values', async () 
   const { result } = renderHook(() => useHomeLights(props()))
   await flush()
   expect(result.current.lights).toHaveLength(100)
-  expect(result.current.lights[0]).toEqual({ entity_id: 'light.bulb_0', name: 'light.bulb_0', state: 'on', brightness_pct: null, rgb: null })
+  expect(result.current.lights[0]).toEqual({ entity_id: 'light.bulb_0', name: 'light.bulb_0', state: 'on', brightness_pct: null, rgb: null, kelvin: null, color_mode: null })
+})
+
+it('converts warm and daylight kelvin values to approximate RGB', () => {
+  const [red, green, blue] = kelvinToRgb(2700)
+  expect(red).toBe(255)
+  expect(green).toBeGreaterThanOrEqual(150)
+  expect(green).toBeLessThanOrEqual(190)
+  expect(blue).toBeGreaterThanOrEqual(60)
+  expect(blue).toBeLessThanOrEqual(120)
+  for (const channel of kelvinToRgb(6500)) expect(channel).toBeGreaterThanOrEqual(240)
+})
+
+it.each([
+  [{ color_temp_kelvin: 2700, color_mode: 'color_temp' }, kelvinToRgb(2700), 2700],
+  [{ rgbw_color: [10, 20, 30, 0] }, [10, 20, 30], null],
+  [{ rgbww_color: [40, 50, 60, 0, 255] }, [40, 50, 60], null],
+  [{ rgb_color: [12, 34, 56], color_temp_kelvin: 2700 }, [12, 34, 56], null],
+  [{}, null, null],
+])('renders the derived colour and kelvin label for %j', async (attributes, rgb, kelvin) => {
+  onGetCommand.mockResolvedValue(success([{ entity_id: 'light.bulb', state: 'on', attributes }]))
+  render(<OpsHomePanel active />)
+  await flush()
+  if (rgb) {
+    expect(screen.getByTestId('light-swatch')).toHaveStyle({ background: `rgb(${rgb.join(', ')})` })
+    expect(screen.getByTestId('light-swatch')).toHaveAttribute('aria-label', kelvin !== null ? `White ${kelvin} K` : `Colour ${rgb.join(', ')}`)
+  } else expect(screen.queryByTestId('light-swatch')).not.toBeInTheDocument()
+  if (kelvin !== null) expect(screen.getByText(`${kelvin} K`)).toBeInTheDocument()
+  else expect(screen.queryByText(/\d+ K/)).not.toBeInTheDocument()
+})
+
+it.each([
+  [{ rgb_color: [1, 2, 3.5], rgbw_color: [10, 20, 30, 0], rgbww_color: [40, 50, 60, 0, 0], color_temp_kelvin: 2700 }, [10, 20, 30], null],
+  [{ rgbw_color: [256, 20, 30, 0], rgbww_color: [40, 50, 60, 0, 0] }, [40, 50, 60], null],
+  [{ rgb_color: [1, 2], rgbw_color: [10, -1, 30, 0], color_temp_kelvin: 2700.4 }, kelvinToRgb(2700.4), 2700],
+])('falls back to the first valid colour source for %j', async (attributes, rgb, kelvin) => {
+  onGetCommand.mockResolvedValue(success([{ entity_id: 'light.bulb', state: 'off', attributes }]))
+  const { result } = renderHook(() => useHomeLights(props()))
+  await flush()
+  expect(result.current.lights[0]).toMatchObject({ state: 'off', rgb, kelvin })
+})
+
+it.each([999, 12001, NaN, Infinity, '2700', null])('rejects invalid kelvin %j', async (kelvin) => {
+  expect(kelvinToRgb(kelvin)).toBeNull()
+  onGetCommand.mockResolvedValue(success([{ entity_id: 'light.bulb', state: 'on', attributes: { color_temp_kelvin: kelvin } }]))
+  const { result } = renderHook(() => useHomeLights(props()))
+  await flush()
+  expect(result.current.lights[0]).toMatchObject({ rgb: null, kelvin: null })
+})
+
+it.each([1000, 12000])('clamps kelvin %i to integer RGB channels', (kelvin) => {
+  for (const channel of kelvinToRgb(kelvin)) {
+    expect(Number.isInteger(channel)).toBe(true)
+    expect(channel).toBeGreaterThanOrEqual(0)
+    expect(channel).toBeLessThanOrEqual(255)
+  }
+})
+
+it.each(['color_temp', 'x'.repeat(32), 'x'.repeat(33), 123])('bounds the projected color_mode %j', async (color_mode) => {
+  onGetCommand.mockResolvedValue(success([{ entity_id: 'light.bulb', state: 'off', attributes: { color_mode, color_temp_kelvin: 2700 } }]))
+  const { result } = renderHook(() => useHomeLights(props()))
+  await flush()
+  expect(result.current.lights[0]).toMatchObject({ rgb: kelvinToRgb(2700), kelvin: 2700,
+    color_mode: typeof color_mode === 'string' && color_mode.length <= 32 ? color_mode : null })
 })
 
 it('polls at 15 seconds after success and Refresh triggers one immediate read', async () => {
