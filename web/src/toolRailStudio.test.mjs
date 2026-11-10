@@ -123,3 +123,29 @@ it('App transforms and retains the executable tool rail callback', () => {
   const transformed = parse(code, { sourceType: 'module' })
   assert.equal(find(node => node.type === 'VariableDeclarator' && node.id.name === 'openToolRail', transformed).length, 1)
 })
+
+it('toast View reveals the hidden Studio result host before scrolling to it', () => {
+  const declarations = find(node => node.type === 'VariableDeclarator' && node.id.name === 'viewResult')
+  assert.equal(declarations.length, 1)
+  const view = declarations[0].init.arguments[0]
+  // View calls the reveal and then scrolls the result block; it never only scrolls.
+  assert.equal(references(view, 'revealResultRef').length, 1)
+  assert.equal(references(view, 'resultBlockRef').length, 1)
+  const assignments = find(node => node.type === 'AssignmentExpression'
+    && node.left.type === 'MemberExpression' && node.left.object.name === 'revealResultRef')
+  assert.equal(assignments.length, 1)
+  const reveal = assignments[0].right
+  for (const studioShell of [false, true]) {
+    for (const drawerViewport of [false, true]) {
+      const events = []
+      evaluate(reveal, {
+        studioShell,
+        drawerViewport,
+        setBrowserPanel: value => events.push(['panel', value]),
+        setStudioDrawer: value => events.push(['drawer', value]),
+      })()
+      const expected = !studioShell ? [] : drawerViewport ? [['panel', 'studio'], ['drawer', 'result']] : [['panel', 'studio']]
+      assert.deepEqual(events, expected, `studioShell=${studioShell} drawerViewport=${drawerViewport}`)
+    }
+  }
+})
