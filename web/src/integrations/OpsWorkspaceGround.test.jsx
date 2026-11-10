@@ -7,6 +7,8 @@ import { Blob } from 'node:buffer'
 import { OpsWorkspaceGround, scopeCacheIdentity } from './OpsWorkspaceGround.jsx'
 import { createIntegrationsClient } from './client.js'
 import { listProjectReferences, readProjectReferenceOriginal } from '../projects/api.js'
+import * as groundWindow from '../site/groundWindow.js'
+import { STUDIO_DRAWING_OCCLUDERS } from '../site/drawingOccluders.js'
 
 const surface = vi.hoisted(() => ({ frame: undefined }))
 vi.mock('../site/SurfaceFrame.jsx', () => ({ useSurfaceFrame: () => surface.frame }))
@@ -131,6 +133,55 @@ async function observeUncertainAction() {
 beforeEach(() => { surface.frame = undefined; vi.stubGlobal('TextDecoder', TextDecoder); vi.stubGlobal('TextEncoder', TextEncoder) })
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 async function loaded() { await screen.findByRole('option', { name: 'Authorized orders · version 3' }) }
+
+it.each([true, false])('adds measured Studio chrome only when studioShell is %s', async (studioShell) => {
+  const { props } = setup()
+  const occluders = [['.custom-occluder', 'left']]
+  const chromeSelectors = ['header.top', '#drafting-ribbon', '.bar.bar-command-line', 'footer.foot-bar']
+  const useGroundWindow = vi.spyOn(groundWindow, 'useGroundWindow')
+  const originalRect = HTMLElement.prototype.getBoundingClientRect
+  const rect = (top, height) => ({ left: 0, right: 1904, top, bottom: top + height, width: 1904, height })
+  const measurements = [
+    ['.studio-ground-ops', rect(0, 985)],
+    ['header.top', rect(0, 95)],
+    ['#drafting-ribbon', rect(95, 95)],
+    ['.bar.bar-command-line', rect(913, 41)],
+    ['footer.foot-bar', rect(954, 31)],
+  ]
+  const measure = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
+    return measurements.find(([selector]) => this.matches(selector))?.[1] || originalRect.call(this)
+  })
+  let view
+  try {
+    view = render(<>
+      <header className="top" /><div id="drafting-ribbon" />
+      <div className="bar bar-command-line" /><footer className="foot-bar" />
+      <OpsWorkspaceGround {...props} studioShell={studioShell} occluders={occluders} />
+    </>)
+    await loaded()
+    const passedOccluders = useGroundWindow.mock.calls.at(-1)[3]
+    const existingOccluders = [...occluders, ['aside.nav', 'nearest'], ['.studio-profile-info', 'nearest']]
+    if (studioShell) {
+      const chrome = STUDIO_DRAWING_OCCLUDERS.filter(([selector]) => chromeSelectors.includes(selector))
+      expect(chrome).toHaveLength(4)
+      expect(passedOccluders).toEqual([...existingOccluders, ...chrome])
+      expect(passedOccluders).toContainEqual(['.bar.bar-command-line', 'bottom', { reserve: 50 }])
+      const workspace = view.container.querySelector('.ops-workspace')
+      const top = parseFloat(workspace.style.top)
+      const bottom = top + parseFloat(workspace.style.height)
+      expect(top).toBeGreaterThanOrEqual(190)
+      expect(bottom).toBeLessThanOrEqual(954)
+      expect(bottom).toBeLessThanOrEqual(913 - 50)
+    } else {
+      expect(passedOccluders).toEqual(existingOccluders)
+      expect(passedOccluders.some(([selector]) => chromeSelectors.includes(selector))).toBe(false)
+    }
+  } finally {
+    view?.unmount()
+    measure.mockRestore()
+    useGroundWindow.mockRestore()
+  }
+})
 
 it('renders Home before the collapsed workflows and data when a home device is linked', async () => {
   surface.frame = { devices: { devices: [{ device_id: 'device-1', label: 'Home mini', status: 'active',
