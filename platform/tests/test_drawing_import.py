@@ -551,3 +551,99 @@ def test_concurrent_exact_replay_creates_one_version(make_org):
             (org.org_id, project.project_id),
         )
         assert cur.fetchone()["count"] == 1
+
+
+def _artifacts(org_id, project_id):
+    with cursor() as cur:
+        cur.execute(
+            "SELECT drawing_id, name, status FROM drawing_artifacts "
+            "WHERE org_id = %s AND project_id = %s ORDER BY created_at, drawing_id",
+            (org_id, project_id),
+        )
+        return [(str(row["drawing_id"]), row["name"], row["status"]) for row in cur.fetchall()]
+
+
+def _import(client, org, project, binding, drawing_id, key, name):
+    return client.post(
+        f"/api/projects/{project.project_id}/drawing-versions/import",
+        headers=_headers(org.org_id, binding.binding_id, key),
+        json=_body(drawing_id, name=name),
+    )
+
+
+def test_second_upload_with_the_same_name_imports_under_its_own_name(client, make_org):
+    org, project = _canonical_project(make_org, "Same name drawing import")
+    binding = _binding(org.org_id)
+    first_id, *_ = _ready_upload(org.org_id)
+    second_id, _digest, second_object, *_ = _ready_upload(org.org_id)
+    name = "distinctive-panel.dxf"
+
+    first = _import(client, org, project, binding, first_id, "same-name-a", name)
+    assert first.status_code == 201, first.text
+    before = _artifacts(org.org_id, project.project_id)
+    assert before == [(first_id, name, "active")]
+
+    # A different upload of a file with the same name is its own drawing.
+    second = _import(client, org, project, binding, second_id, "same-name-b", name)
+    assert second.status_code == 201, second.text
+    version = second.json()["drawing_version"]
+    assert second.json()["replayed"] is False
+    assert version["drawing_id"] == second_id and version["seq"] == 1
+    assert version["oss_object"] == second_object
+    assert version["provenance"]["source"]["drawing_id"] == second_id
+
+    rows = _artifacts(org.org_id, project.project_id)
+    assert rows[0] == before[0]  # the first import keeps its row and its name
+    stored = dict((drawing, label) for drawing, label, _status in rows)[second_id]
+    assert stored != name and len(stored) <= 200
+    assert stored == f"distinctive-panel ({uuid.UUID(second_id).hex[:8]}).dxf"
+    assert len(rows) == 2
+
+    replay = _import(client, org, project, binding, second_id, "same-name-b", name)
+    assert replay.status_code == 201, replay.text
+    assert replay.json()["replayed"] is True
+    assert replay.json()["drawing_version"] == version
+    assert _artifacts(org.org_id, project.project_id) == rows
+
+    # The first upload still replays as itself, and a changed input under its key is refused.
+    again = _import(client, org, project, binding, first_id, "same-name-a", name)
+    assert again.json()["replayed"] is True
+    assert again.json()["drawing_version"] == first.json()["drawing_version"]
+    assert _import(client, org, project, binding, second_id, "same-name-a", name).status_code == 409
+
+
+def test_same_name_import_keeps_a_200_character_name_within_bounds(client, make_org):
+    org, project = _canonical_project(make_org, "Long name drawing import")
+    binding = _binding(org.org_id)
+    first_id, *_ = _ready_upload(org.org_id)
+    second_id, *_ = _ready_upload(org.org_id)
+    name = "p" * 196 + ".dxf"
+    assert len(name) == 200
+
+    assert _import(client, org, project, binding, first_id, "long-name-a", name).status_code == 201
+    second = _import(client, org, project, binding, second_id, "long-name-b", name)
+    assert second.status_code == 201, second.text
+    stored = dict((drawing, label) for drawing, label, _status in
+                  _artifacts(org.org_id, project.project_id))
+    assert stored[first_id] == name
+    assert len(stored[second_id]) == 200 and stored[second_id] != name
+    assert stored[second_id].endswith(f" ({uuid.UUID(second_id).hex[:8]}).dxf")
+
+
+def test_archived_artifact_still_reserves_its_name(client, make_org):
+    org, project = _canonical_project(make_org, "Archived name drawing import")
+    binding = _binding(org.org_id)
+    first_id, *_ = _ready_upload(org.org_id)
+    second_id, *_ = _ready_upload(org.org_id)
+    name = "Rooftop Demo"
+    assert _import(client, org, project, binding, first_id, "archived-name-a", name).status_code == 201
+    with cursor() as cur:
+        cur.execute("UPDATE drawing_artifacts SET status = 'archived' WHERE drawing_id = %s", (first_id,))
+        assert cur.rowcount == 1
+
+    second = _import(client, org, project, binding, second_id, "archived-name-b", name)
+    assert second.status_code == 201, second.text
+    stored = dict((drawing, label) for drawing, label, _status in
+                  _artifacts(org.org_id, project.project_id))
+    assert stored[first_id] == name
+    assert stored[second_id] == f"Rooftop Demo ({uuid.UUID(second_id).hex[:8]})"
