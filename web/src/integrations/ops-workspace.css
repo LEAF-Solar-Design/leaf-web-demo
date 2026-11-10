@@ -2,6 +2,14 @@
 .studio-ground-ops[hidden] { display: none; }
 .studio-shell .studio-ground-ops[data-studio-shell="cockpit"] { --leaf-card: var(--leaf-raised); --leaf-foreground: var(--leaf-ink); --leaf-border: var(--leaf-line); --leaf-ring: var(--leaf-focus); }
 .ops-workspace { position: absolute; top: var(--ground-top, 180px); left: var(--ground-left, 16px); right: var(--ground-right, 16px); height: var(--ground-window, calc(100% - 280px)); overflow: auto; overscroll-behavior: contain; box-sizing: border-box; padding: 16px; min-width: 0; pointer-events: auto; background: var(--leaf-card, var(--leaf-raised)); color: var(--leaf-foreground, var(--leaf-ink)); border-radius: var(--leaf-radius-card); }
+/* Measured chrome: 95px header + 95px ribbon; 31px status + 41px command dock clearance. */
+.studio-ground-ops .ops-workspace {
+  top: calc(var(--drawer-top, 95px) + var(--ck-ribbon, 95px) + 10px);
+  bottom: calc(var(--ck-status, 31px) + 41px);
+  left: 16px;
+  right: 16px;
+  height: auto;
+}
 .ops-workspace h1 { font-size: var(--leaf-size-subtitle); }
 .ops-workspace h2 { font-size: var(--leaf-size-heading); }
 .ops-workspace p, .ops-workspace li { overflow-wrap: anywhere; }
