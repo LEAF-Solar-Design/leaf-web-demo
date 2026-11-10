@@ -8,6 +8,8 @@ import { OpsWorkspaceGround, scopeCacheIdentity } from './OpsWorkspaceGround.jsx
 import { createIntegrationsClient } from './client.js'
 import { listProjectReferences, readProjectReferenceOriginal } from '../projects/api.js'
 
+const surface = vi.hoisted(() => ({ frame: undefined }))
+vi.mock('../site/SurfaceFrame.jsx', () => ({ useSurfaceFrame: () => surface.frame }))
 vi.mock('../api.js', () => ({ authHeaders: () => ({ Authorization: 'Bearer current' }), noteUnauthorized: vi.fn() }))
 vi.mock('../projects/api.js', () => ({ listProjectReferences: vi.fn(), readProjectReferenceOriginal: vi.fn() }))
 // Keep the real dataset chart, formatter, and table. Only supply layout dimensions.
@@ -126,9 +128,50 @@ async function observeUncertainAction() {
   fireEvent.click(await screen.findByRole('button', { name: 'Check status' }))
   await screen.findByText('Uncertain. Outcome unknown.')
 }
-beforeEach(() => { vi.stubGlobal('TextDecoder', TextDecoder); vi.stubGlobal('TextEncoder', TextEncoder) })
+beforeEach(() => { surface.frame = undefined; vi.stubGlobal('TextDecoder', TextDecoder); vi.stubGlobal('TextEncoder', TextEncoder) })
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 async function loaded() { await screen.findByRole('option', { name: 'Authorized orders · version 3' }) }
+
+it('renders Home before the collapsed workflows and data when a home device is linked', async () => {
+  surface.frame = { devices: { devices: [{ device_id: 'device-1', label: 'Home mini', status: 'active',
+    last_seen_at: new Date().toISOString(), packages: [{ package: 'homeassistant', version: '2026.11.0', status: 'running' }] }] } }
+  const { props } = setup()
+  const { container } = render(<OpsWorkspaceGround {...props} />)
+  await waitFor(() => expect(container.querySelector('.ops-advanced')).toBeInTheDocument())
+  const home = screen.getByRole('region', { name: 'Home' })
+  const advanced = screen.getByText('Workflows and data').closest('details')
+  expect(advanced).not.toHaveAttribute('open')
+  expect(home.compareDocumentPosition(advanced) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  expect(advanced).not.toContainElement(home)
+  expect(within(home).getByText('Online')).toBeInTheDocument()
+  expect(within(home).getByText('Home Assistant')).toBeInTheDocument()
+  for (const name of ['Saved schedule drafts', 'Webhook admission receipt', 'Integration datasets']) {
+    const panel = container.querySelector(`section[aria-label="${name}"]`)
+    expect(advanced).toContainElement(panel)
+    expect(home.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  }
+})
+
+it('opens workflows and data and shows the Home empty state when no device is linked', async () => {
+  surface.frame = { devices: { devices: [] } }
+  const { props } = setup()
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  expect(screen.getByText('Workflows and data').closest('details')).toHaveAttribute('open')
+  expect(within(screen.getByRole('region', { name: 'Home' })).getByText('No home device linked')).toBeInTheDocument()
+})
+
+it('keeps Home visible when the integration scope is unavailable', async () => {
+  surface.frame = { devices: { devices: [] } }
+  const { props } = setup()
+  vi.spyOn(props.client, 'getScope').mockRejectedValueOnce({ status: 403 })
+  render(<OpsWorkspaceGround {...props} />)
+  await screen.findByText('You do not have permission to view these integrations.')
+  expect(screen.getByRole('region', { name: 'Home' })).toBeInTheDocument()
+  expect(screen.getByText('No home device linked')).toBeInTheDocument()
+  expect(screen.queryByText('Workflows and data')).toBeNull()
+  expect(screen.queryByRole('region', { name: 'Integration datasets' })).toBeNull()
+})
 
 async function materialHarness(original, pointer = '/rows') {
   vi.stubGlobal('crypto', webcrypto)
