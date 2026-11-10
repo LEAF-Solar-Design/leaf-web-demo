@@ -979,3 +979,75 @@ describe('synchronous project run results', () => {
     expect(outcome).toMatchObject({ ok: true, data: { job_id: J, status: 'submitted' } })
   })
 })
+
+describe('editor publication under the held project checkout', () => {
+  const R = '77777777-7777-4777-8777-777777777777'
+  const N = '66666666-6666-4666-8666-666666666666'
+  const PRIOR = '88888888-8888-4888-8888-888888888888'
+  const published = (changes = {}) => ({ organization_id: O, project_id: P, drawing_id: D, parent_version_id: V,
+    request_id: R, source_sha256: 'a'.repeat(64), intake_sha256: 'b'.repeat(64),
+    drawing_version: { version_id: N, drawing_id: D, project_id: P, org_id: O, seq: 3 }, ...changes })
+  const held = async () => {
+    const lane = setup()
+    lane.fetchImpl.mockResolvedValueOnce(response(acquired()))
+    expect((await lane.client.acquireCheckout()).ok).toBe(true)
+    return lane
+  }
+
+  it('restores through the exact editor route with the private proof and request id', async () => {
+    const { client, fetchImpl } = await held()
+    fetchImpl.mockResolvedValueOnce(response(published()))
+    const outcome = await client.publishDrawing({ kind: 'restore', versionId: PRIOR, requestId: R })
+    expect(outcome.ok).toBe(true)
+    expect(outcome.data.drawing_version.version_id).toBe(N)
+    expect(url(fetchImpl)).toBe(`https://api.test/api/projects/${P}/drawings/${D}/versions/${V}/editor/restore`)
+    expect(init(fetchImpl).headers).toMatchObject({ 'Idempotency-Key': R, 'X-Checkout-Capability': token(),
+      'X-Org-Id': O, 'X-Project-Id': P })
+    expect(JSON.parse(init(fetchImpl).body)).toEqual({ version_id: PRIOR })
+    for (const value of [outcome, client.getSnapshot()]) expect(JSON.stringify(value)).not.toContain(token())
+    expect(Object.keys(client)).not.toContain('getCapability')
+  })
+
+  it('saves the exact bytes as DXF with the private proof', async () => {
+    const { client, fetchImpl } = await held()
+    const bytes = new Uint8Array([48, 10, 69, 79, 70, 10])
+    fetchImpl.mockResolvedValueOnce(response(published()))
+    expect((await client.publishDrawing({ kind: 'save', bytes, requestId: R })).ok).toBe(true)
+    expect(url(fetchImpl)).toBe(`https://api.test/api/projects/${P}/drawings/${D}/versions/${V}/editor`)
+    expect(init(fetchImpl).headers).toMatchObject({ 'Content-Type': 'application/dxf', 'Idempotency-Key': R,
+      'X-Checkout-Capability': token() })
+    expect(init(fetchImpl).body).toBe(bytes)
+  })
+
+  it('sends nothing without a held checkout', async () => {
+    const { client, fetchImpl } = setup()
+    const outcome = await client.publishDrawing({ kind: 'restore', versionId: PRIOR, requestId: R })
+    expect(outcome).toMatchObject({ ok: false, reason: 'SIP_R7_CHECKOUT_NOT_HELD' })
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['another parent', { parent_version_id: PRIOR }],
+    ['another drawing', { drawing_id: PRIOR }],
+    ['another request', { request_id: PRIOR }],
+    ['an output equal to its input', { drawing_version: { version_id: V, drawing_id: D } }],
+  ])('refuses a receipt for %s', async (_name, changes) => {
+    const { client, fetchImpl } = await held()
+    fetchImpl.mockResolvedValueOnce(response(published(changes)))
+    expect(await client.publishDrawing({ kind: 'restore', versionId: PRIOR, requestId: R }))
+      .toMatchObject({ ok: false, reason: 'SIP_R7_RESPONSE_INVALID' })
+  })
+
+  it('passes a server refusal through and refuses malformed requests locally', async () => {
+    const { client, fetchImpl } = await held()
+    fetchImpl.mockResolvedValueOnce(response(refusal('SIP_R1_CHECKOUT_DENIED'), 403))
+    expect(await client.publishDrawing({ kind: 'restore', versionId: PRIOR, requestId: R }))
+      .toMatchObject({ ok: false, status: 403, reason: 'SIP_R1_CHECKOUT_DENIED' })
+    const before = fetchImpl.mock.calls.length
+    for (const bad of [{ kind: 'delete', requestId: R }, { kind: 'restore', versionId: 'nope', requestId: R },
+      { kind: 'save', bytes: new Uint8Array(0), requestId: R }, { kind: 'restore', versionId: PRIOR, requestId: 'r' }]) {
+      expect((await client.publishDrawing(bad)).reason).toBe('SIP_R7_REQUEST_INVALID')
+    }
+    expect(fetchImpl.mock.calls.length).toBe(before)
+  })
+})

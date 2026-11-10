@@ -489,7 +489,30 @@ export function projectEditorScope({ enabled, orgId, projectId, workspace, versi
 
 // This mounted project adapter reuses the existing upload/adoption controller.
 // Opening a file cannot silently retain the standalone drawing's save target.
-export function ProjectDrawingEditorBridge({ scope, onTarget, transport: suppliedTransport = null }) {
+// Editor Save and Undo restore go through the project checkout the project client already holds.
+// Resolves null when that client holds none for this exact scope, so the editor takes its own.
+export function publishThroughProjectClient(client) {
+  return async (kind, scope, value, { requestId }) => {
+    const snapshot = client?.getSnapshot?.()
+    const binding = snapshot?.binding
+    if (!snapshot?.ownsCheckout || !binding || binding.organization_id !== scope.organization_id
+      || binding.project_id !== scope.project_id || binding.drawing_id !== scope.drawing_id
+      || binding.input_version_id !== scope.input_version_id) return null
+    const outcome = await client.publishDrawing({ kind, requestId,
+      ...(kind === 'save' ? { bytes: value } : { versionId: value }) })
+    if (outcome.ok) return outcome.data
+    if (outcome.reason === 'SIP_R7_CHECKOUT_NOT_HELD') return null
+    // A local failure may have reached the server: keep the request for an idempotent retry.
+    throw Object.assign(new Error(outcome.envelope?.error?.message
+      || `The project drawing was not saved (${outcome.reason || 'HTTP_ERROR'}).`),
+    Number.isInteger(outcome.status) ? { status: outcome.status, code: outcome.reason }
+      : { outcomeUnknown: true, code: outcome.reason })
+  }
+}
+
+export function ProjectDrawingEditorBridge({ scope, onTarget, transport: suppliedTransport = null, projectClient = null }) {
+  const projectClientRef = useRef(projectClient)
+  projectClientRef.current = projectClient
   const scopeRef = useRef(scope)
   scopeRef.current = scope
   const attachedRef = useRef(null)
@@ -504,6 +527,7 @@ export function ProjectDrawingEditorBridge({ scope, onTarget, transport: supplie
     transport,
     acquireCheckout: transport.acquireCheckout,
     releaseCheckout: transport.releaseCheckout,
+    publishHeld: (...args) => publishThroughProjectClient(projectClientRef.current)(...args),
     importFile: async (file, captured) => {
       attachedRef.current = null
       const material = intakeRef.current
@@ -5071,7 +5095,7 @@ export default function App() {
   const engineScope = (node) => (ENV_CAD_EDIT ? (
     <EngineSessionProvider saveTarget={localCadActive ? null : projectMode ? projectEditorTarget : engineSaveTarget} onSaved={onEngineSaved} onDirtyChange={onEngineDirtyChange} onDocumentChange={setEngineDocument} onBeforeEdit={closeStartForChange} onBeforeArm={onBeforeArm}>
       <LocalCadEngineHold active={localCadActive} />
-      {projectMode && <ProjectDrawingEditorBridge key={session.generation} scope={projectEditorBinding} onTarget={setProjectEditorTarget} />}
+      {projectMode && <ProjectDrawingEditorBridge key={session.generation} scope={projectEditorBinding} onTarget={setProjectEditorTarget} projectClient={projectSolar.projectClient} />}
       {projectMode && <ProjectDrawingEngineOpener scope={projectEditorBinding} target={projectEditorTarget} />}
       {node}
     </EngineSessionProvider>
