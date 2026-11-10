@@ -57,11 +57,33 @@ echo "--- 5/6 Install Chromium for browser proofs"
 # once, then the distinct browser-only stage; repeating the same apt failure
 # adds no evidence. A missing BROWSER BINARY is
 # still a hard failure: the last call is unguarded, so set -e fails the build.
+# The OS stage is also time-bounded. On 2026-11-10 the mirrors stopped
+# answering on port 80 instead of refusing; jobs 18313 and 18316 were still
+# inside --with-deps after 8m39s with nothing but the 3600 s job deadline to
+# stop apt, so it could consume that whole deadline. Normal setup for both producers
+# takes about 48 s and a slow but live mirror needed 323 s for apt update
+# alone, so 420 s keeps that case. timeout kills the whole process group, apt
+# included. After one bounded stage times out, later producers skip straight to
+# the browser-only stage, because a second wait on the same mirror adds no
+# evidence.
+browser_deps_timeout_s=420
+browser_deps_unavailable=0
 install_ci_browser() {
-  if "$@" install --with-deps chromium; then
-    return 0
+  local status=0
+  if [[ "$browser_deps_unavailable" == 0 ]]; then
+    timeout --kill-after=15 "$browser_deps_timeout_s" "$@" install --with-deps chromium || status=$?
+    if [[ "$status" == 0 ]]; then
+      return 0
+    fi
+    if [[ "$status" == 124 || "$status" == 137 ]]; then
+      browser_deps_unavailable=1
+      echo "WARNING: $* dependency install exceeded ${browser_deps_timeout_s}s; trying the distinct browser-only stage and skipping later dependency stages. Browser proofs still check OS runtime usability." >&2
+    else
+      echo "WARNING: $* dependency install failed; trying the distinct browser-only stage. Browser proofs still check OS runtime usability." >&2
+    fi
+  else
+    echo "WARNING: an earlier dependency stage exceeded ${browser_deps_timeout_s}s; $* goes straight to the distinct browser-only stage." >&2
   fi
-  echo "WARNING: $* dependency install failed; trying the distinct browser-only stage. Browser proofs still check OS runtime usability." >&2
   "$@" install chromium
 }
 
