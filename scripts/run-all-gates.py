@@ -1739,6 +1739,9 @@ def build_suites() -> List[Suite]:
         Suite("server-capabilities-promotion", "server tests/test_capabilities_promotion.py",
               "pytest", SERVER, _py_pytest("tests/test_capabilities_promotion.py") +
               ["tests/test_capabilities_project_runs_post.py"], 11),
+        # Like test_capabilities_project_runs_post.py, uses the test_sip_r5_routes lane fixture with plain server pytest and no database flags.
+        Suite("server-capabilities-project-read", "server tests/test_capabilities_project_read.py",
+              "pytest", SERVER, _py_pytest("tests/test_capabilities_project_read.py"), 8),
         # The two cross-repo contract checks read the website validator out of a
         # SIBLING checkout that this deliberately hermetic workflow does not have,
         # so they skip on CI and execute only on an operator box that has both
@@ -3665,6 +3668,10 @@ def build_suites() -> List[Suite]:
                   r"requires managed or verified canonical disposable PostgreSQL producer",)),
         Suite("server-lab-corpus-executor", "server pinned corpus evaluator and durable job custody", "pytest", SERVER,
               _unprivileged_pytest("tests/test_lab_corpus_executor.py"), 14,
+              uses_database=True, db_gated=True),
+        # Uses job-private PG16 through test_lab_corpus_executor.private_pg, with the same unprivileged launcher and database flags as server-lab-corpus-executor.
+        Suite("server-project-drawing-write", "server C01 project drawing.write producer on a private PostgreSQL project", "pytest", SERVER,
+              _unprivileged_pytest("tests/test_project_drawing_write.py"), 9,
               uses_database=True, db_gated=True),
         # BSP43 accepted focused floors; run through the normal server CI rail.
         Suite("server-project-solar-materialization", "server canonical physical layout publication", "pytest", SERVER,

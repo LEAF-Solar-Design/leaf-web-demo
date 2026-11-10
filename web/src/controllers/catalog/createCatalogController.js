@@ -281,6 +281,23 @@ export function createCatalogController({ services, adapters = {}, context = {} 
       .flatMap((family) => family.capabilities || []).find((tool) => tool.name === name)
     if (projectScope()) {
       const availability = entry?.availability
+      // A generic drawing read joins the server's project read executor, pinned to the exact
+      // canonical version. The server derives project_read from that executor's own admission
+      // rule; it needs a current project catalog receipt but no Solar intent.
+      const projectDrawing = availability?.project_read === true || availability?.project_write === true
+      if (entry && projectDrawing && solarView(entry).state === 'absent') {
+        if (!state.projectCatalog?.isCurrent()) return 'project_request_required'
+        if (!AVAILABILITY_KEYS.every((key) => availability[key] === true)) {
+          return availability.refusal_reasons?.[0] || 'capability_not_ready'
+        }
+        return null
+      }
+      // A non-Solar tool the server typed unavailable (no project executor, e.g. drawing.write)
+      // keeps that typed reason instead of a generic request refusal.
+      if (entry && availability?.project_read === false && !projectDrawing && solarView(entry).state === 'absent' &&
+          typeof availability.refusal_reasons?.[0] === 'string') {
+        return availability.refusal_reasons[0]
+      }
       if (!entry || !acceptedPreview || acceptedPreview !== projectFingerprint() ||
           !state.projectCatalog?.isCurrent()) return 'project_request_required'
       if (availability?.admission_checked !== true || !availability.admission ||

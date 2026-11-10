@@ -264,6 +264,44 @@ def project_tool_admission(tool, tenant, *, org_header, project_header, authoriz
         return _refusal("SIP_R1_INTERNAL", status=500)
 
 
+def project_drawing_tool_availability(tool, tenant, *, read_tool, exact_version, write_tool=False):
+    """Project availability for a non-Solar catalog tool, derived from its executor.
+
+    read_tool is the run route's own admission predicate for the existing project read
+    executor (routers.jobs._is_project_read_tool), which binds the run to an exact canonical
+    version. write_tool is the run route's project write predicate (a registered drawing.write
+    builtin with a server-owned producer in project_drawing_write). Only such a tool with an
+    exact version is available, and only when the tenant is entitled to the tool's required
+    capability. Every other non-Solar tool has no project executor and stays typed
+    unavailable. Never raises.
+    """
+    entitled = False
+    entitlement_reason = None
+    try:
+        tier = entitlements.resolve_tier(tenant)
+        roles, elevated = entitlements.resolve_roles(tenant)
+        required = entitlements.tool_required_capability(tool)
+        entitled = bool(entitlements.entitlements_for(tier, roles, elevated).get(required, False))
+        if not entitled:
+            entitlement_reason = "entitlement_required"
+    except entitlements.EntitlementsError:
+        entitlement_reason = "entitlement_policy_unavailable"
+    engine = bool(read_tool or write_tool)
+    ready = engine and bool(exact_version)
+    engine_reason = None if engine else "project_adapter_unavailable"
+    input_reason = None if ready else (engine_reason or "project_request_required")
+    reason = engine_reason or (None if ready else input_reason) or entitlement_reason
+    return {
+        "entitled": entitled, "engine_ready": engine, "implemented": True,
+        "input_ready": ready, "input_reason": input_reason,
+        "entitlement_reason": entitlement_reason, "engine_reason": engine_reason,
+        "implementation_reason": None, "refusal_reasons": [reason] if reason else [],
+        "runnable": entitled and ready, "admission_checked": False, "admission": None,
+        "project_read": ready and bool(read_tool),
+        "project_write": ready and bool(write_tool) and not read_tool,
+    }
+
+
 def project_catalog_availability(tool, *, enabled, admission=None):
     """Project policy and required worker coverage without resolving a request."""
     entitled = engine = ready = checked = False

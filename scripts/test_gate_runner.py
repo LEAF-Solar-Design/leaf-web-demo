@@ -227,13 +227,17 @@ def _unprivileged_helper():
     return mod
 
 
-def test_unprivileged_both_named_gates_preserve_contract(monkeypatch, tmp_path):
+def test_unprivileged_named_gates_preserve_contract(monkeypatch, tmp_path):
     runner = _load_runner()
     suites = {suite.id: suite for suite in runner.build_suites()}
     for sid, target, floor, gated in (
         ("server-lab-runs", "tests/test_lab_runs.py", 24, False),
         ("server-lab-corpus-executor", "tests/test_lab_corpus_executor.py", 14, True),
+        ("server-project-drawing-write", "tests/test_project_drawing_write.py", 9, True),
     ):
+        # The launcher must accept every target the registry routes through it (job 18101).
+        launched = runner._py_pytest(target)[2:]
+        assert _unprivileged_helper().validate_args(launched) == launched
         suite = suites[sid]
         expected_argv = ([sys.executable, "-I", str(SCRIPTS / "ci/run_unprivileged_pytest.py"),
                           *runner._py_pytest(target)[2:]] if sys.platform.startswith("linux")
