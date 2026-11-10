@@ -23,6 +23,15 @@ RULES (per ``NNNN_name.sql`` in ``platform/migrations``):
     The referenced number must be an EARLIER migration that exists. The marker
     is the reviewer's hook: it turns "this drop looks scary" into "this drop
     completes 0017's expand, whose readers migrated in between".
+  * ONE drop is additive and needs no marker: widening a value-list CHECK.
+    ``ALTER TABLE t DROP CONSTRAINT c;`` immediately followed by
+    ``ALTER TABLE t ADD CONSTRAINT c CHECK (col IN (...));`` passes only when
+    the earlier migrations define that same constraint on that same table as
+    ``CHECK (col IN (...))`` over the same column and every old literal is
+    still in the new list. Every value the previous image writes stays valid.
+    Anything else about the pair (a removed literal, another column, another
+    table or name, a statement between them, an unknown prior definition)
+    leaves the DROP a contract-phase statement.
   * Applied migrations are GRANDFATHERED by number (the ledger stores each
     file's sha256, so retro-editing an applied file to add a marker would
     break ``assert_schema_current``). The grandfather set is frozen below —
@@ -85,7 +94,14 @@ def strip_sql_noise(text: str) -> str:
     cannot confuse the result. Dollar-quoted bodies ($$...$$) are stripped
     too — a function body is not schema DDL this gate should read.
     """
+    return _strip_sql_noise(text)[0]
+
+
+def _strip_sql_noise(text: str) -> tuple[str, dict[int, str]]:
+    """strip_sql_noise plus each string literal's value, keyed by the offset of
+    its ``''`` placeholder in the stripped text."""
     out: list[str] = []
+    literals: dict[int, str] = {}
     i, n = 0, len(text)
     while i < n:
         ch = text[i]
@@ -117,6 +133,7 @@ def strip_sql_noise(text: str) -> str:
                 if text[j] == "'" and not text.startswith("''", j):
                     break
                 j += 2 if text.startswith("''", j) else 1
+            literals[sum(map(len, out))] = text[i + 1:j].replace("''", "'")
             i = min(j + 1, n)
             out.append("''")
         elif ch == '"':
@@ -130,7 +147,95 @@ def strip_sql_noise(text: str) -> str:
         else:
             out.append(ch)
             i += 1
-    return "".join(out)
+    return "".join(out), literals
+
+
+_IDENT = r"[A-Za-z_][A-Za-z_0-9$]*"
+_VALUE_LIST = r"\(\s*((?:''\s*,\s*)*'')\s*\)"
+_VALUE_CHECK = rf"CHECK\s*\(\s*({_IDENT})\s+IN\s*{_VALUE_LIST}\s*\)"
+_CREATE_TABLE = re.compile(
+    rf"\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?({_IDENT})\s*\(", re.IGNORECASE)
+_INLINE_CHECK = re.compile(rf"\bCONSTRAINT\s+({_IDENT})\s+{_VALUE_CHECK}", re.IGNORECASE)
+_DROP_CHECK = re.compile(
+    rf"\s*ALTER\s+TABLE\s+({_IDENT})\s+(DROP)\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?({_IDENT})\s*;",
+    re.IGNORECASE)
+_ADD_CHECK = re.compile(
+    rf"\s*ALTER\s+TABLE\s+({_IDENT})\s+ADD\s+CONSTRAINT\s+({_IDENT})\s+{_VALUE_CHECK}\s*;",
+    re.IGNORECASE)
+
+
+def _literal_values(literals: dict[int, str], start: int, placeholders: str):
+    """The literal values behind a run of ``''`` placeholders, or None."""
+    values = []
+    for match in re.finditer("''", placeholders):
+        value = literals.get(start + match.start())
+        if value is None:
+            return None
+        values.append(value)
+    return frozenset(values) if len(set(values)) == len(values) else None
+
+
+def check_widening_drops(stripped: str, literals: dict[int, str],
+                         definitions: dict[tuple[str, str], tuple[str, frozenset]],
+                         tables: set[str]) -> set[int]:
+    """Offsets of DROP keywords that only widen a known value-list CHECK.
+
+    ``definitions`` maps (table, constraint) to (column, allowed literals) as the
+    earlier statements left it, and is advanced by this file's statements.
+    ``tables`` holds every table a CREATE TABLE has already named. It fails
+    closed: a statement that names a tracked constraint in any shape this
+    function does not fully recognize forgets that constraint; a second CREATE
+    TABLE of a known table (a no-op under IF NOT EXISTS, so its text proves
+    nothing), a DROP TABLE or any RENAME naming a tracked table forgets that
+    table's constraints; and a file with a tagged dollar body or a SQL compound
+    body forgets everything.
+    """
+    if re.search(r"\$[A-Za-z_][A-Za-z_0-9]*\$|\bBEGIN\s+ATOMIC\b", stripped, re.IGNORECASE):
+        definitions.clear()
+        return set()
+    allowed: set[int] = set()
+    statements = list(re.finditer(r"[^;]*;", stripped))
+    for index, statement in enumerate(statements):
+        sql, base = statement.group(), statement.start()
+        defined: dict[tuple[str, str], tuple[str, frozenset]] = {}
+        table = _CREATE_TABLE.match(sql)
+        if table and table[1].lower() in tables:
+            for key in [key for key in definitions if key[0] == table[1].lower()]:
+                del definitions[key]
+        elif table:
+            tables.add(table[1].lower())
+            for check in _INLINE_CHECK.finditer(sql):
+                values = _literal_values(literals, base + check.start(3), check[3])
+                if values is not None:
+                    defined[(table[1].lower(), check[1].lower())] = (check[2].lower(), values)
+        add = _ADD_CHECK.fullmatch(sql)
+        if add:
+            values = _literal_values(literals, base + add.start(4), add[4])
+            if values is not None:
+                defined[(add[1].lower(), add[2].lower())] = (add[3].lower(), values)
+        drop = _DROP_CHECK.fullmatch(sql)
+        pair = None
+        if drop and index + 1 < len(statements):
+            following = statements[index + 1]
+            readd = _ADD_CHECK.fullmatch(following.group())
+            key = (drop[1].lower(), drop[3].lower())
+            prior = definitions.get(key)
+            if readd and prior and (readd[1].lower(), readd[2].lower()) == key:
+                values = _literal_values(literals, following.start() + readd.start(4), readd[4])
+                if values is not None and readd[3].lower() == prior[0] and prior[1] <= values:
+                    pair = key
+                    allowed.add(base + drop.start(2))
+        # Forget any tracked constraint this statement names without redefining it,
+        # except the DROP half of a recognized widening pair.
+        for key in list(definitions):
+            if key in defined or key == pair:
+                continue
+            reshapes_table = (re.search(r"\bDROP\s+TABLE\b|\bRENAME\b", sql, re.IGNORECASE)
+                              and re.search(rf"\b{re.escape(key[0])}\b", sql, re.IGNORECASE))
+            if reshapes_table or re.search(rf"\b{re.escape(key[1])}\b", sql, re.IGNORECASE):
+                del definitions[key]
+        definitions.update(defined)
+    return allowed
 
 
 def initial_table_revokes(stripped: str) -> set[int]:
@@ -184,13 +289,18 @@ def check_migrations(migrations_dir: Path) -> list[str]:
         numbered.add(number)
         migrations.append((number, path))
 
+    check_definitions: dict[tuple[str, str], tuple[str, frozenset]] = {}
+    created_tables: set[str] = set()
     for number, path in migrations:
         name = path.name
         text = path.read_text(encoding="utf-8")
-        stripped = strip_sql_noise(text)
+        stripped, literals = _strip_sql_noise(text)
         initial_revokes = initial_table_revokes(stripped)
+        widening_drops = check_widening_drops(
+            stripped, literals, check_definitions, created_tables)
+        exempt = {"REVOKE": initial_revokes, "DROP": widening_drops}
         hits = [label for label, pattern in CONTRACT_PATTERNS
-                if any(label != "REVOKE" or match.start() not in initial_revokes
+                if any(match.start() not in exempt.get(label, ())
                        for match in pattern.finditer(stripped))]
         if number in GRANDFATHERED:
             continue  # applied before the gate; ledger-pinned bytes

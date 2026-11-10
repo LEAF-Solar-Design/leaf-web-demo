@@ -237,3 +237,105 @@ def test_cli_exit_codes(tmp_path, capsys):
     bad = _dir(tmp_path / "bad", {"0023_bad.sql": "DROP TABLE a;\n"})
     assert gate.main(["--migrations-dir", str(bad)]) == 1
     assert "FAIL" in capsys.readouterr().out
+
+
+# --- widening a value-list CHECK is additive ---------------------------------
+
+_BASE = ("CREATE TABLE IF NOT EXISTS receipts (\n  id UUID PRIMARY KEY,\n  action TEXT NOT NULL,\n"
+         "  CONSTRAINT receipts_action_check\n    CHECK (action IN (\n      'created', 'reset'\n    )),\n"
+         "  CONSTRAINT receipts_key_check CHECK (char_length(action) BETWEEN 1 AND 200)\n);\n")
+_WIDEN = ("ALTER TABLE receipts DROP CONSTRAINT IF EXISTS receipts_action_check;\n"
+          "ALTER TABLE receipts ADD CONSTRAINT receipts_action_check CHECK (action IN (\n"
+          "  'created', 'reset',\n  'renamed'\n));\n")
+
+
+def _widening(tmp_path, change, base=_BASE):
+    return gate.check_migrations(_dir(tmp_path, {
+        "0038_receipts.sql": base, "0103_change.sql": change}))
+
+
+def test_widening_a_value_list_check_needs_no_marker(tmp_path):
+    assert _widening(tmp_path, "-- adds one action\n" + _WIDEN) == []
+    assert _widening(tmp_path / "lower", _WIDEN.lower()) == []
+
+
+def test_widening_twice_is_grounded_in_the_latest_definition(tmp_path):
+    again = _WIDEN.replace("'renamed'", "'renamed', 'archived'")
+    root = _dir(tmp_path, {"0038_receipts.sql": _BASE, "0103_change.sql": _WIDEN, "0104_more.sql": again})
+    assert gate.check_migrations(root) == []
+    # 0104 dropping what 0103 added is a narrowing, judged against 0103, not 0038.
+    narrowed = _dir(tmp_path / "n", {"0038_receipts.sql": _BASE, "0103_change.sql": _WIDEN,
+                                     "0104_less.sql": _WIDEN.replace(",\n  'renamed'", "")})
+    assert [v.split(":")[0] for v in gate.check_migrations(narrowed)] == ["0104_less.sql"]
+
+
+@pytest.mark.parametrize("change", [
+    # a literal removed
+    _WIDEN.replace("'created', ", ""),
+    # same count, one literal replaced
+    _WIDEN.replace("'reset'", "'restarted'"),
+    # the drop alone
+    "ALTER TABLE receipts DROP CONSTRAINT IF EXISTS receipts_action_check;\n",
+    # re-added under another name
+    _WIDEN.replace("ADD CONSTRAINT receipts_action_check", "ADD CONSTRAINT receipts_action_check2"),
+    # re-added on another table
+    _WIDEN.replace("ALTER TABLE receipts ADD", "ALTER TABLE other ADD"),
+    # another column
+    _WIDEN.replace("CHECK (action IN", "CHECK (kind IN"),
+    # a statement between the pair
+    _WIDEN.replace(";\nALTER TABLE receipts ADD", ";\nSELECT 1;\nALTER TABLE receipts ADD"),
+    # not a value list
+    _WIDEN.split(";\n")[0] + ";\nALTER TABLE receipts ADD CONSTRAINT receipts_action_check CHECK (action <> '');\n",
+    # a different constraint that was never a value list
+    _WIDEN.replace("receipts_action_check", "receipts_key_check"),
+    # a constraint no earlier migration defines
+    _WIDEN.replace("receipts_action_check", "receipts_unknown_check"),
+    # the widening pair does not excuse another drop in the file
+    _WIDEN + "ALTER TABLE receipts DROP COLUMN action;\n",
+    _WIDEN + "DROP TABLE receipts;\n",
+    # a duplicated literal is not a clean list
+    _WIDEN.replace("'renamed'", "'renamed', 'created'"),
+    # tagged dollar bodies are not read, so nothing is excused
+    "DO $b$ BEGIN NULL; END $b$;\n" + _WIDEN,
+])
+def test_anything_but_a_pure_widening_still_needs_a_marker(tmp_path, change):
+    violations = _widening(tmp_path, change)
+    assert len(violations) == 1 and violations[0].startswith("0103_change.sql")
+    assert "DROP" in violations[0]
+
+
+def test_an_unrecognized_touch_forgets_the_prior_definition(tmp_path):
+    # 0050 re-shapes the constraint in a form the gate does not read, so 0103
+    # can no longer be proved a widening of what the database holds.
+    reshaped = ("-- expand-contract: contract-of=0038\n"
+                "ALTER TABLE receipts DROP CONSTRAINT receipts_action_check;\n"
+                "ALTER TABLE receipts ADD CONSTRAINT receipts_action_check CHECK (action <> 'x');\n")
+    root = _dir(tmp_path, {"0038_receipts.sql": _BASE, "0050_reshape.sql": reshaped, "0103_change.sql": _WIDEN})
+    assert [v.split(":")[0] for v in gate.check_migrations(root)] == ["0103_change.sql"]
+
+
+def test_widening_with_a_marker_or_in_the_defining_file_behaves_as_before(tmp_path):
+    marked = "-- expand-contract: contract-of=0038\n" + _WIDEN.replace("'created', ", "")
+    assert _widening(tmp_path, marked) == []
+    same_file = _dir(tmp_path / "same", {"0103_all.sql": _BASE + _WIDEN})
+    assert gate.check_migrations(same_file) == []
+
+
+def test_real_rename_receipt_migration_is_the_recognized_widening():
+    text = (gate.DEFAULT_MIGRATIONS_DIR / "0103_project_rename_receipt.sql").read_text(encoding="utf-8")
+    assert "DROP CONSTRAINT IF EXISTS project_lifecycle_receipts_action_check" in text
+    assert "contract-of" not in text
+
+
+@pytest.mark.parametrize("between", [
+    # A second CREATE TABLE IF NOT EXISTS is a no-op: its text is not the live constraint.
+    "CREATE TABLE IF NOT EXISTS receipts (id UUID, action TEXT,\n"
+    "  CONSTRAINT receipts_action_check CHECK (action IN ('created')));\n",
+    # The table was dropped (with its marker) and no longer holds the tracked constraint.
+    "-- expand-contract: contract-of=0038\nDROP TABLE receipts;\n",
+    # A rename of the column or the table breaks the tracked identity.
+    "-- expand-contract: contract-of=0038\nALTER TABLE receipts RENAME COLUMN action TO kind;\n",
+])
+def test_a_table_reshaped_in_between_forgets_its_constraints(tmp_path, between):
+    root = _dir(tmp_path, {"0038_receipts.sql": _BASE, "0050_between.sql": between, "0103_change.sql": _WIDEN})
+    assert [v.split(":")[0] for v in gate.check_migrations(root)] == ["0103_change.sql"]
