@@ -107,6 +107,18 @@ it('Studio hides only the activity region and leaves command and header chrome o
     assert.ok(!activity.includes(landmark))
   }
   assert.ok(source.includes('destination={studioShell ? studioActivityHost : activityFallback}'))
+  const dock = elements.find(node => attribute(node, 'className')?.value?.value === 'bar-dock')
+  const firstChild = dock.children.find(node => node.type !== 'JSXText' || node.value.trim())
+  assert.equal(attribute(firstChild, 'className')?.value?.value, 'command-transcript-host')
+  assert.equal(attribute(firstChild, 'data-testid')?.value?.value, 'command-transcript-host')
+  assert.equal(attribute(firstChild, 'ref')?.value?.expression?.name, 'setCommandTranscriptHost')
+  const conversePanels = elements.filter(node => node.openingElement.name.name === 'ConversePanel')
+  assert.equal(conversePanels.length, 1)
+  const seat = elements.find(node => node.children.includes(conversePanels[0]))
+  assert.equal(seat.openingElement.name.name, 'PersistentSeat')
+  const destination = attribute(seat, 'destination').value.expression
+  assert.equal(source.slice(destination.start, destination.end),
+    "transcriptDestination === 'dock' ? commandTranscriptHost : paneSeats.conversationTarget")
 })
 
 it('main keeps telemetry first and installs the proof bridge once after render using the existing API clients', () => {
@@ -2365,7 +2377,7 @@ describe('project board live pane wiring', () => {
     const seats = elements('PersistentSeat')
     assert.ok(seats.some((seat) => seat.children.includes(panels[0])))
     binding(seats.find((seat) => seat.children.includes(panels[0])),
-      'destination', 'paneSeats.conversationTarget')
+      'destination', "transcriptDestination === 'dock' ? commandTranscriptHost : paneSeats.conversationTarget")
     guard('ConversePanel', 'paneSeats.conversationMounted')
     const derived = appSeats()
     assert.equal(derived.conversationTarget, 'conversation-board')
@@ -2374,6 +2386,41 @@ describe('project board live pane wiring', () => {
     assert.ok(appSource.includes("const boardHostsProject = (!!studioGround && surfaceSlots.chrome.shell === 'cockpit') || (boardVisible && surfaceSlots.ground === 'board')"))
     assert.ok(appSource.includes('if (mock || session.status !== \'active\') clearAgentSession()'))
     assert.ok(!appSource.includes('!signedIn || session.status !== \'active\') clearAgentSession()'))
+  })
+  it('opens the fallback Studio rail once per new turn and respects Close', () => {
+    const effects = []
+    csuWalk(tree, node => {
+      if (node.type === 'CallExpression' && node.callee.name === 'useEffect'
+          && source(node.arguments[0]).includes('lastTranscriptTurn.current')) effects.push(node)
+    })
+    assert.equal(effects.length, 1)
+    const calls = []
+    const scope = {
+      agentSessionId: 'session-a', latestAgentTurnId: null,
+      transcriptDestination: 'rail', lastTranscriptTurn: { current: null },
+      setBrowserPanel: panel => calls.push(panel),
+    }
+    const run = () => evaluate(effects[0].arguments[0], scope)()
+    run()
+    assert.deepEqual(calls, [])
+    scope.latestAgentTurnId = 'turn-1'
+    run()
+    assert.deepEqual(calls, ['studio'])
+    scope.setBrowserPanel('none') // user Close
+    run()
+    assert.deepEqual(calls, ['studio', 'none'])
+    scope.latestAgentTurnId = 'turn-2'
+    run()
+    assert.deepEqual(calls, ['studio', 'none', 'studio'])
+    scope.transcriptDestination = 'dock'
+    scope.latestAgentTurnId = 'turn-3'
+    run()
+    scope.transcriptDestination = 'rail'
+    run()
+    assert.deepEqual(calls, ['studio', 'none', 'studio'])
+    scope.agentSessionId = 'session-b'
+    run()
+    assert.deepEqual(calls, ['studio', 'none', 'studio', 'studio'])
   })
   it('A2-02 wires Annotations to the single App subscription and decision actions', () => {
     assert.ok(slot('annotations').includes('AnnotationPaneState annotations={annotations}'))
@@ -4958,7 +5005,7 @@ describe('Start is a view inside the current workspace profile', () => {
   it('shows the Run and Build gloss beside the shared prompt for every visible board', () => {
     const dock = appNoComments.indexOf('<div className="bar-dock">')
     assert.notEqual(dock, -1)
-    const gloss = appNoComments.slice(dock, dock + 280)
+    const gloss = appNoComments.slice(dock, appNoComments.indexOf('</p>', dock))
     assert.match(gloss, /boardVisible &&/)
     assert.match(gloss, /START_BOARD_COPY\.gloss/)
     assert.match(gloss, /mock &&/)

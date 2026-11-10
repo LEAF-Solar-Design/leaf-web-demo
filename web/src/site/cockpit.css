@@ -8,6 +8,18 @@
 }
 .viewer-marquee[data-mode="crossing"] { border-style: dashed; }
 
+.command-transcript-host {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-height: 0;
+  max-height: min(52vh, 560px);
+  overflow: auto;
+}
+.command-transcript-host:empty { display: none; }
+.command-transcript-host .converse-log { max-height: none; }
+.command-transcript-host .converse-input { display: none; }
+
 /* ================= W4e: the reference cockpit, band for band ===============
    Operator, 2026-09-03: "no pixel parity, no organization, no icons, dont
    stop until its all literally perfect." The reference (OpenCADStudio at
