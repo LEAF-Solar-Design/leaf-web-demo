@@ -149,6 +149,69 @@ def test_cross_tenant_and_foreign_version_do_not_publish(lane, run):
     assert len(versions(lane)) == 1
 
 
+def _groups(*pairs):
+    return "".join(f"{code}\n{value}\n" for code, value in pairs).encode()
+
+
+HEADER = b"9\n$ACADVER\n1\nAC1015\n9\n$HANDSEED\n5\n200\n9\n$INSUNITS\n70\n1\n"
+NOTES_LAYER = b"0\nLAYER\n5\n11\n2\nNotes\n70\n0\n62\n1\n6\nDASHED\n"
+SPLINE = _groups((0, "SPLINE"), (5, "C100"), (330, "1F"), (100, "AcDbEntity"), (8, "Notes"),
+                 (100, "AcDbSpline"), (70, 8), (71, 3), (72, 8), (73, 4), *[(40, k) for k in (0, 0, 0, 0, 1, 1, 1, 1)],
+                 (10, 0), (20, 0), (30, 0), (10, 1), (20, 2), (30, 0), (10, 2), (20, 2), (30, 0),
+                 (10, 3), (20, 0), (30, 0))
+TEXT = _groups((0, "TEXT"), (5, "B100"), (8, "Notes"), (10, 0), (20, 650), (40, 8), (1, "Keep me"))
+
+
+def _panel(handle, x, reactor=False):
+    owner = [(102, "{ACAD_REACTORS"), (330, "1F0"), (102, "}")] if reactor else []
+    return _groups((0, "LWPOLYLINE"), (5, handle), *owner, (330, "1F"), (100, "AcDbEntity"),
+                   (8, "Panels"), (100, "AcDbPolyline"), (90, 4), (70, 1), (10, x), (20, 0),
+                   (10, x + 40), (20, 0), (10, x + 40), (20, 78), (10, x), (20, 78))
+
+
+def _rich(reactor=False):
+    """A richer DXF: header metadata, a layer table, an entity the intake does not model."""
+    return (b"0\nSECTION\n2\nHEADER\n" + HEADER + b"0\nENDSEC\n"
+            b"0\nSECTION\n2\nTABLES\n0\nTABLE\n2\nLAYER\n5\n2\n70\n2\n"
+            b"0\nLAYER\n5\n10\n2\nPanels\n70\n0\n62\n3\n6\nCONTINUOUS\n" + NOTES_LAYER +
+            b"0\nENDTAB\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n"
+            + _panel("A100", 0, reactor) + _panel("A101", 60) + SPLINE + TEXT
+            + b"0\nENDSEC\n0\nEOF\n")
+
+
+def _parent(lane, raw, cap):
+    saved = lane.http.post(lane.base + f"/versions/{lane.parent.version_id}/editor", content=raw,
+                           headers={"Content-Type": "application/dxf", "Idempotency-Key": str(uuid4()),
+                                    "X-Checkout-Capability": cap})
+    assert saved.status_code == 200, saved.text
+    return saved.json()["drawing_version"]["version_id"]
+
+
+def test_write_preserves_unrelated_source_entities_and_metadata(lane, run):
+    cap = checkout(lane)
+    parent = _parent(lane, _rich(), cap)
+    response = run(version=parent, cap=cap)
+    assert response.status_code == 200, response.text
+    assert response.json()["producer"]["source_mutation"] == "splice"
+    child = response.json()["version"]["version_id"]
+    out = lane.http.get(lane.base + f"/versions/{child}/dxf").content
+    # The entity the intake does not model, the header and the table survive byte-exact.
+    for unrelated in (SPLINE, TEXT, b"9\n$INSUNITS\n70\n1\n", NOTES_LAYER, _panel("A101", 60)):
+        assert unrelated in out
+    assert _panel("A100", 0) not in out and b"\n5\nA100\n" not in out
+    assert out.count(b"\nLEAF_WRITE_PROBE\n") == 2  # registered layer + marker
+    assert len(versions(lane)) == 3
+
+
+def test_non_representable_source_fails_closed_before_any_write(lane, run):
+    cap = checkout(lane)
+    parent = _parent(lane, _rich(reactor=True), cap)
+    refused = run(version=parent, cap=cap)
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["reason_code"] == "PROJECT_WRITE_SOURCE_NOT_REPRESENTABLE"
+    assert len(versions(lane)) == 2
+
+
 def test_missing_confirmation_and_missing_target_do_not_publish(lane, run):
     cap = checkout(lane)
     unconfirmed = run(cap=cap, digest=False)
