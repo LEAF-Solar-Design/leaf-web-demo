@@ -866,7 +866,7 @@ printf '%s\\n' "$gate_status"
                         self.assertEqual(result.stdout.strip(), str(status))
 
     def test_workflow_commands(self):
-        """Pin CodeBuild's deliberate --with-deps deviation from the workflow."""
+        """Pin CodeBuild's browser producers and conditional OS dependency setup."""
         script = CI_PATH.read_text(encoding="utf-8")
         self.assertTrue(script.startswith("#!/usr/bin/env bash\n"))
         commands = [line.strip() for line in script.splitlines()
