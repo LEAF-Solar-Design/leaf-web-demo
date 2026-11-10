@@ -49,7 +49,10 @@ export function BoardTiles({ workspace, drawing, catalog, renderTile, studioPres
             {drawing ? (
               <>
                 {actions?.onOpenDrawing ? <button type="button" className="ground-row-action" data-action="drawing" data-id={drawing.drawing_id} onClick={() => actions.onOpenDrawing()}>{drawing.name}</button> : <strong>{drawing.name}</strong>}
-                <p>{drawing.polylines} polylines · {drawing.layers} layers</p>
+                {drawing.version_id && <p>Version <code>{drawing.version_id}</code></p>}
+                {drawing.pending
+                  ? <p className="ground-empty">This version's drawing facts are not available yet.</p>
+                  : <p>{drawing.polylines} polylines · {drawing.layers} layers</p>}
               </>
             ) : <p className="ground-empty">No drawing mounted</p>}
             {canTransferVersion && typeof actions.transferStatus === 'string' && actions.transferStatus && <p role="status" data-testid="board-transfer-status">{actions.transferStatus}</p>}

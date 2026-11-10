@@ -453,6 +453,21 @@ export async function runProjectCatalogTool({ projectSolar, tool, params, contex
   return data
 }
 
+// The board's Drawing tile. In a project it reports only the selected project version and its
+// current scoped projection; it never falls back to the standalone drawing's name or counts.
+export function boardDrawingFacts({ projectMode, shown, standaloneName, selectedVersion, binding, projectIntake }) {
+  if (!projectMode) {
+    return shown ? { name: standaloneName, polylines: shown.polylines.length, layers: shown.layers.length } : null
+  }
+  if (!selectedVersion || !binding || binding.input_version_id !== selectedVersion.version_id
+    || binding.drawing_id !== selectedVersion.drawing_id) return null
+  const facts = { project: true, version_id: selectedVersion.version_id, drawing_id: selectedVersion.drawing_id,
+    name: (typeof projectIntake?.dwg === 'string' && projectIntake.dwg) || selectedVersion.name || 'Project drawing' }
+  return Array.isArray(projectIntake?.polylines) && Array.isArray(projectIntake?.layers)
+    ? { ...facts, polylines: projectIntake.polylines.length, layers: projectIntake.layers.length }
+    : { ...facts, pending: true }
+}
+
 export async function seatSolarProjectPublication(controller, receipt, captured, isCurrent) {
   const current = controller.getSnapshot()
   const selected = current.workspace?.drawing_versions?.find(row => row.version_id === current.canonicalVersionId)
@@ -5636,7 +5651,9 @@ export default function App() {
               )}
             </> : undefined}
             workspace={!mock && openProjectId ? workspace : null}
-            drawing={shown ? { name: projectName, polylines: shown.polylines.length, layers: shown.layers.length } : null}
+            drawing={boardDrawingFacts({ projectMode, shown, standaloneName: projectName,
+              selectedVersion: projectSelectedDrawingVersion, binding: projectSolar.scope.binding,
+              projectIntake: projectDrawing.intake })}
             catalog={catalog}
             mock={mock}
             iosEnabled={ENV_IOS_SURFACE}
