@@ -203,7 +203,6 @@ echo browser-install-complete
 case "$*" in
   'playwright install --with-deps chromium'|'playwright install chromium')
     browser_install npx ;;
-  'playwright pdf about:blank '*) ;;
   *) exit 8 ;;
 esac
 """)
@@ -217,7 +216,6 @@ case "$*" in
     echo license-scan-complete ;;
   '-m playwright install --with-deps chromium'|'-m playwright install chromium')
     browser_install python ;;
-  '-m playwright pdf about:blank '*) ;;
   *) exit 8 ;;
 esac
 """)
