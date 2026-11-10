@@ -67,6 +67,131 @@ it.each(['Offline', 'Paused', 'Revoked'])('shows the device label and %s without
   expect(onCommand).not.toHaveBeenCalled()
 })
 
+it.each([{ status: 'revoked' }, { revoked_at: '2026-11-09T11:59:00Z' }])('selects the online Home Assistant device after a revoked row %j', async (revoked) => {
+  surface.frame.devices.devices = [{ ...device, device_id: 'revoked', label: 'Old mini', ...revoked }, device]
+  render(<OpsHomePanel active />)
+  await flush()
+  expect(screen.getByText('Home mini')).toBeInTheDocument()
+  expect(screen.getByText('Online')).toBeInTheDocument()
+  expect(screen.queryByText('Revoked')).not.toBeInTheDocument()
+  expect(onCommand.mock.calls[0][0]).toBe('device-1')
+})
+
+it('selects an offline non-revoked device instead of the first revoked row', () => {
+  device.last_seen_at = '2026-11-01T00:00:00Z'
+  surface.frame.devices.devices = [{ ...device, device_id: 'revoked', label: 'Old mini', status: 'revoked' }, device]
+  render(<OpsHomePanel active />)
+  expect(screen.getByText('Home mini')).toBeInTheDocument()
+  expect(screen.getByText('Offline')).toBeInTheDocument()
+  expect(screen.queryByText('Revoked')).not.toBeInTheDocument()
+  expect(onCommand).not.toHaveBeenCalled()
+})
+
+it('selects the newest non-revoked last-seen time when no online Home Assistant is running', () => {
+  device.last_seen_at = '2026-11-08T00:00:00Z'
+  surface.frame.devices.devices = [
+    { ...device, device_id: 'revoked', label: 'Revoked mini', status: 'revoked' },
+    { ...device, device_id: 'unknown', label: 'Unknown mini', last_seen_at: null },
+    { ...device, device_id: 'older', label: 'Older mini', last_seen_at: '2026-11-01T00:00:00Z' },
+    device,
+  ]
+  render(<OpsHomePanel active />)
+  expect(screen.getByText('Home mini')).toBeInTheDocument()
+  expect(screen.getByText('Offline')).toBeInTheDocument()
+  expect(onCommand).not.toHaveBeenCalled()
+})
+
+it('keeps the selected hub and its stale tiles when its last-seen time ages past 90 seconds', async () => {
+  const revoked = { ...device, device_id: 'revoked', label: 'Old mini', status: 'revoked' }
+  surface.frame.devices.devices = [revoked, device]
+  const { rerender } = render(<OpsHomePanel active />)
+  await flush()
+  await advance(90000)
+  expect(screen.getByText('Home mini')).toBeInTheDocument()
+  expect(screen.getByText('Offline')).toBeInTheDocument()
+  expect(screen.queryByText('Revoked')).not.toBeInTheDocument()
+  expect(screen.getAllByRole('listitem')).toHaveLength(2)
+  for (const tile of screen.getAllByRole('listitem')) expect(tile).toHaveClass('stale')
+  expect(screen.getByRole('button', { name: 'Refresh' })).toBeDisabled()
+  const calls = onCommand.mock.calls.length
+  surface.frame.devices.devices = [revoked, { ...device, device_id: 'other', label: 'Other hub', last_seen_at: new Date().toISOString() }, device]
+  rerender(<OpsHomePanel active />)
+  await advance(30000)
+  expect(screen.getByText('Home mini')).toBeInTheDocument()
+  expect(screen.queryByText('Other hub')).not.toBeInTheDocument()
+  expect(onCommand).toHaveBeenCalledTimes(calls)
+})
+
+it.each(['removed', 'revoked'])('reselects when the selected hub is %s', async (change) => {
+  const other = { ...device, device_id: 'other', label: 'Other hub' }
+  surface.frame.devices.devices = [device, other]
+  const { rerender } = render(<OpsHomePanel active />)
+  await flush()
+  expect(screen.getByText('Home mini')).toBeInTheDocument()
+  surface.frame.devices.devices = change === 'removed' ? [other] : [{ ...device, status: 'revoked' }, other]
+  rerender(<OpsHomePanel active />)
+  await flush()
+  expect(screen.getByText('Other hub')).toBeInTheDocument()
+  expect(screen.queryByText('Revoked')).not.toBeInTheDocument()
+  expect(onCommand.mock.calls.at(-1)[0]).toBe('other')
+})
+
+it('refreshes the device list every 30 seconds only while active, visible and live', async () => {
+  const onRefresh = vi.fn().mockResolvedValue([])
+  surface.frame.devices.onRefresh = onRefresh
+  const { rerender, unmount } = render(<OpsHomePanel active />)
+  await advance(29999)
+  expect(onRefresh).not.toHaveBeenCalled()
+  await advance(1)
+  expect(onRefresh).toHaveBeenCalledTimes(1)
+  await advance(30000)
+  expect(onRefresh).toHaveBeenCalledTimes(2)
+  hide('hidden')
+  await advance(60000)
+  expect(onRefresh).toHaveBeenCalledTimes(2)
+  hide('visible')
+  await advance(30000)
+  expect(onRefresh).toHaveBeenCalledTimes(3)
+  rerender(<OpsHomePanel active={false} />)
+  await advance(60000)
+  expect(onRefresh).toHaveBeenCalledTimes(3)
+  surface.frame.devices.mock = true
+  rerender(<OpsHomePanel active />)
+  await advance(60000)
+  expect(onRefresh).toHaveBeenCalledTimes(3)
+  surface.frame.devices.mock = false
+  rerender(<OpsHomePanel active />)
+  await advance(30000)
+  expect(onRefresh).toHaveBeenCalledTimes(4)
+  unmount()
+  await advance(60000)
+  expect(onRefresh).toHaveBeenCalledTimes(4)
+})
+
+it('skips refresh ticks until the pending refresh settles, including across activation changes', async () => {
+  let settle
+  const onRefresh = vi.fn().mockImplementationOnce(() => new Promise((resolve) => { settle = resolve })).mockResolvedValue([])
+  surface.frame.devices.onRefresh = onRefresh
+  const { rerender } = render(<OpsHomePanel active />)
+  await advance(90000)
+  expect(onRefresh).toHaveBeenCalledTimes(1)
+  rerender(<OpsHomePanel active={false} />)
+  rerender(<OpsHomePanel active />)
+  await advance(30000)
+  expect(onRefresh).toHaveBeenCalledTimes(1)
+  await act(async () => settle([]))
+  await advance(30000)
+  expect(onRefresh).toHaveBeenCalledTimes(2)
+})
+
+it('allows later device refreshes after a rejected refresh', async () => {
+  const onRefresh = vi.fn().mockRejectedValueOnce(new Error('Unavailable')).mockResolvedValue([])
+  surface.frame.devices.onRefresh = onRefresh
+  render(<OpsHomePanel active />)
+  await advance(60000)
+  expect(onRefresh).toHaveBeenCalledTimes(2)
+})
+
 it.each([[], [{ package: 'homeassistant', status: 'stopped' }]])('shows Home Assistant setup state for packages %j', (packages) => {
   device.packages = packages
   render(<OpsHomePanel active />)
