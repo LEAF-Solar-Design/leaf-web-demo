@@ -9,6 +9,12 @@ finds checkout paths from its own config files, or from env vars outside the git
 candidate list for non-git children, or a read through an untracked symlink inside
 the checkout, is not seen. The check reports the normalized command so a person
 can judge it.
+Module attribution is opt-in via LEAF_READ_AUDIT_ATTRIBUTE=module. Consumers
+compute static import closures: i:true with m:null is a runner import (including
+test files and conftest), covered by that closure, not a global read. An m:null
+entry without i is a global read.
+pytest finds its ini file before loading -p plugins, so repository pytest config
+files belong in run_all.
 """
 
 import atexit
@@ -17,6 +23,8 @@ import builtins
 import functools
 import glob
 import hashlib
+import importlib
+import importlib.util
 import inspect
 import io
 import json
@@ -30,10 +38,12 @@ import tempfile
 import threading
 import traceback
 import types
+import urllib.parse
 
 
 ENV_DIR = "LEAF_READ_AUDIT_DIR"
 ENV_ROOT = "LEAF_READ_AUDIT_ROOT"
+ENV_ATTRIBUTE = "LEAF_READ_AUDIT_ATTRIBUTE"
 MAX_ENTRIES = 100_000
 CACHE_MAX = 200_000
 TRACE_MAX = 500_000
@@ -134,6 +144,56 @@ def _under(path, root):
         return False
 
 
+def _module_relative(filename):
+    cache = _state["module_cache"]
+    if filename not in cache:
+        relative = None
+        if filename and not filename.startswith("<") and filename not in {"built-in", "frozen"}:
+            try:
+                absolute = os.path.abspath(filename)
+                real = os.path.realpath(absolute)
+                if (real != _state["audit_file"] and
+                        not any(_under(path, temp) for path in (absolute, real)
+                                for temp in _state["temp_roots"])):
+                    relative = _relative_to_root(real, _state["real_root"])
+            except (OSError, ValueError):
+                pass
+        cache[filename] = relative
+    return cache[filename]
+
+
+def _module_context():
+    # Module attribution is sound under caching: a cached value reaches a test only through code it imports, so attribute the read to that code, not to the current test.
+    frame = sys._getframe(1)
+    imported = False
+    busy = getattr(_local, "busy", False)
+    _local.busy = True
+    try:
+        # Internal helpers do not consume the wrapper caller's frame budget.
+        while frame is not None and frame.f_code.co_filename == __file__:
+            frame = frame.f_back
+        for _ in range(64):
+            if frame is None:
+                break
+            filename = frame.f_code.co_filename
+            imported |= filename.startswith("<frozen importlib")
+            relative = _module_relative(filename)
+            if relative is not None:
+                return relative, imported
+            frame = frame.f_back
+        return None, imported
+    finally:
+        del frame
+        _local.busy = busy
+
+
+def _attributed(entry, context):
+    entry["m"] = context[0]
+    if context[1]:
+        entry["i"] = True
+    return entry
+
+
 def _trace(state, entry, key):
     if not state["trace"] or state["trace_overflow"]:
         return
@@ -173,10 +233,14 @@ def _close_trace(state=None):
 
 def _emit(entry):
     state = _state
+    if state["attribute"] and "m" not in entry:
+        _attributed(entry, _module_context())
     key = ((entry["k"], entry["p"]) if entry["k"] in {"f", "d", "e"}
            else (entry["exe"], entry["cwd"], entry.get("sub"),
                  tuple(entry.get("opts", [])), tuple(entry["paths"]),
                  tuple(entry.get("argv", []))))
+    if state["attribute"]:
+        key = (*key, entry["m"])
     with state["lock"]:
         if state["trace"]:
             _trace(state, entry, key)
@@ -192,7 +256,9 @@ def _emit(entry):
         state["count"] += 1
 
 
-def _path(kind, path, dir_fd=None):
+def _path(kind, path, dir_fd=None, context=None):
+    if _state["attribute"] and context is None:
+        context = _module_context()
     epoch = _cwd_epoch
     absolute = (os.path.abspath(os.fsdecode(os.fspath(path)))
                 if dir_fd is None and path is not None and not isinstance(path, int) else None)
@@ -206,15 +272,16 @@ def _path(kind, path, dir_fd=None):
     resolved = (os.path.join(base, os.fsdecode(os.fspath(path))) if base is not None else
                 path if dir_fd is not None else absolute)
     for relative in _relative(resolved, None, True):
-        _emit({"k": kind, "p": relative})
-    key = _fast_key(kind, path, dir_fd)
+        entry = {"k": kind, "p": relative}
+        _emit(_attributed(entry, context) if context is not None else entry)
+    key = _fast_key(kind, path, dir_fd, context)
     if key is not None and _cwd_epoch == epoch and len(_fast) < CACHE_MAX:
         cached = _state["cache"].get(absolute)
         if cached is not None and not cached[1]:
             _fast.add(key)
 
 
-def _fast_key(kind, raw, dir_fd=None):
+def _fast_key(kind, raw, dir_fd=None, context=None):
     # Fast path covers Path objects and relative paths too; a relative key carries the cwd epoch so a chdir can never reuse a stale key. improver measured +30 percent CPU without it.
     if dir_fd is not None:
         return None
@@ -225,8 +292,12 @@ def _fast_key(kind, raw, dir_fd=None):
             return None
     if isinstance(raw, (str, bytes)):
         if os.path.isabs(raw):
-            return (kind, raw)
-        return None if _chdir_pending else (kind, raw, _cwd_epoch)
+            key = (kind, raw)
+        else:
+            if _chdir_pending:
+                return None
+            key = (kind, raw, _cwd_epoch)
+        return (*key, context[0]) if context is not None else key
     return None
 
 
@@ -705,6 +776,69 @@ def _process(original, process_name):
     return wrapped
 
 
+def _import_edges(result, name, globals_, fromlist, level, context):
+    try:
+        if name is None:
+            name = vars(result).get("__name__")
+        if level:
+            package = (globals_ or {}).get("__package__")
+            if package is None:
+                package = getattr((globals_ or {}).get("__spec__"), "parent", None)
+            name = importlib.util.resolve_name("." * level + name, package)
+        module = sys.modules.get(name)
+        if not isinstance(module, types.ModuleType):
+            return
+        modules = [module]
+        parent = name.rpartition(".")[0]
+        while parent:
+            modules.append(sys.modules.get(parent))
+            parent = parent.rpartition(".")[0]
+        modules.extend(vars(module).get(item) for item in (fromlist or ())
+                       if isinstance(item, str))
+    except (AttributeError, ImportError, TypeError, ValueError):
+        return
+    # Import edges are recorded on cache hits too: a dynamic import of a module already in sys.modules reads nothing, and the consumer must still see the edge.
+    for module in modules:
+        if not isinstance(module, types.ModuleType):
+            continue
+        cache = _state["import_cache"]
+        if module not in cache:
+            attributes = vars(module)
+            filename = attributes.get("__file__")
+            if not filename:
+                filename = getattr(attributes.get("__spec__"), "origin", None)
+            relative = _module_relative(filename) if filename else None
+            cache[module] = (relative,) if relative is not None else ()
+        for relative in cache[module]:
+            key = ("f", relative, context[0])
+            if not _state["trace"] and key in _state["seen"]:
+                continue
+            _emit({"k": "f", "p": relative, "m": context[0], "i": True})
+
+
+def _import_wrap(original, module_call=False):
+    @functools.wraps(original)
+    def wrapped(*args, **kwargs):
+        result = original(*args, **kwargs)
+        state = _state
+        if (state is None or state["pid"] != os.getpid() or
+                getattr(_local, "busy", False)):
+            return result
+        name = args[0] if args else kwargs.get("name", "")
+        if module_call:
+            # import_module returns the fully resolved module, including relatives.
+            globals_, fromlist, level = None, (), 0
+            name = None
+        else:
+            globals_ = args[1] if len(args) > 1 else kwargs.get("globals")
+            fromlist = args[3] if len(args) > 3 else kwargs.get("fromlist", ())
+            level = args[4] if len(args) > 4 else kwargs.get("level", 0)
+        _guard(_import_edges, result, name, globals_, fromlist, level, _module_context())
+        return result
+
+    return wrapped
+
+
 def _chdir(original):
     @functools.wraps(original)
     def wrapped(*args, **kwargs):
@@ -760,10 +894,11 @@ class _Entry:
         return self._entry.path
 
     def stat(self, *, follow_symlinks=True):
+        context = _module_context() if _state is not None and _state["attribute"] else None
         if (_state is not None and not _state["trace"] and
-                _fast_key("f", self._entry.path, self._dir_fd) in _fast):
+                _fast_key("f", self._entry.path, self._dir_fd, context) in _fast):
             return self._entry.stat(follow_symlinks=follow_symlinks)
-        _guard(_path, "f", self._entry.path, self._dir_fd)
+        _guard(_path, "f", self._entry.path, self._dir_fd, context)
         return self._entry.stat(follow_symlinks=follow_symlinks)
 
 
@@ -795,11 +930,14 @@ class _Scandir:
         return self._iterator.__exit__(*args)
 
 
-def _wrap(original, scandir=False, opening=False, kind="f", sqlite=False):
+def _wrap(original, scandir=False, opening=False, kind="f", sqlite=False, import_read=False):
     @functools.wraps(original)
     def wrapped(*args, **kwargs):
         if getattr(_local, "busy", False):
             return original(*args, **kwargs)
+        context = _module_context() if _state is not None and _state["attribute"] else None
+        if context is not None and import_read:
+            context = (context[0], True)
         path = args[0] if args else kwargs.get(
             "path", kwargs.get("file", kwargs.get("database", kwargs.get("self"))))
         if kind == "d" and path is None:
@@ -809,12 +947,17 @@ def _wrap(original, scandir=False, opening=False, kind="f", sqlite=False):
             if database == ":memory:" or (database.startswith("file:") and
                                            "mode=memory" in database.partition("?")[2].split("&")):
                 return original(*args, **kwargs)
+            if kwargs.get("uri", args[7] if len(args) > 7 else False) and database.startswith("file:"):
+                # A SQLite URI names a file: strip the scheme and query, or a temp database reads as a new checkout path on every run.
+                path = urllib.parse.unquote(urllib.parse.urlsplit(database).path)
+                if not path:
+                    return original(*args, **kwargs)
         if opening:
             state = _state
             if state is None or state["pid"] != os.getpid():
                 return original(*args, **kwargs)
-            if state["trace"] or _fast_key(kind, path, kwargs.get("dir_fd")) not in _fast:
-                _guard(_path, kind, path, kwargs.get("dir_fd"))
+            if state["trace"] or _fast_key(kind, path, kwargs.get("dir_fd"), context) not in _fast:
+                _guard(_path, kind, path, kwargs.get("dir_fd"), context)
             # Never hold the audit lock across a real call: a blocking open (FIFO) or a lazy import inside it deadlocks other threads (#5119 review).
             busy = getattr(_local, "busy", False)
             _local.busy = True
@@ -823,8 +966,8 @@ def _wrap(original, scandir=False, opening=False, kind="f", sqlite=False):
             finally:
                 _local.busy = busy
         if ((_state is not None and _state["trace"]) or
-                _fast_key(kind, path, kwargs.get("dir_fd")) not in _fast):
-            _guard(_path, kind, path, kwargs.get("dir_fd"))
+                _fast_key(kind, path, kwargs.get("dir_fd"), context) not in _fast):
+            _guard(_path, kind, path, kwargs.get("dir_fd"), context)
         if kind == "e":
             busy = getattr(_local, "busy", False)
             _local.busy = True
@@ -978,7 +1121,12 @@ def install() -> bool:
         for module in (builtins, io, _io):
             wrap(module, "open", opening=True)
         for module in (io, _io):
-            wrap(module, "open_code", opening=True)
+            wrap(module, "open_code", opening=True, import_read=True)
+        attribute = os.environ.get(ENV_ATTRIBUTE) == "module"
+        if attribute:
+            wrap(builtins, "__import__", factory=_import_wrap)
+            wrap(importlib, "__import__", factory=_import_wrap)
+            wrap(importlib, "import_module", factory=_import_wrap, module_call=True)
         for name in ("stat", "lstat", "access", "readlink"):
             wrap(os, name)
         wrap(os, "open", opening=True)
@@ -1015,6 +1163,8 @@ def install() -> bool:
                   "fd": fd, "seen": set(), "cache": {}, "count": 0,
                   "overflow": False, "lock": threading.RLock(), "temp_roots": temp_roots,
                   "argv_temp_roots": argv_temp_roots,
+                  "attribute": attribute, "module_cache": {}, "import_cache": {},
+                  "audit_file": os.path.realpath(__file__),
                   "trace": os.environ.get("LEAF_READ_AUDIT_TRACE") == "1",
                   "trace_path": os.path.join(directory, f"{pid}-{os.urandom(4).hex()}.trace"),
                   "trace_fd": None, "replacements": replacements,
@@ -1037,3 +1187,11 @@ def install() -> bool:
 
 def pytest_configure(config):
     getattr(sys, "_leaf_read_audit_owner", sys.modules[__name__]).install()
+
+
+# pytest loads initial conftests before pytest_configure, so a -p plugin installs at import or those conftests and everything they import are invisible (strace capture, leaf-web-demo: 461 of 499 suites missed a conftest).
+if __name__ == "read_audit" and os.environ.get(ENV_DIR):
+    try:
+        install()
+    except Exception as exc:
+        _error(os.environ[ENV_DIR], exc)
