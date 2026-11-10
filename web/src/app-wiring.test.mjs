@@ -5961,7 +5961,7 @@ describe('S25 version Mod+Z wiring', () => {
   it('S25 App hands the key ladder the ribbon version gates and the ribbon onUndo / onRedo', () => {
     const effect = between(appNoComments, 'const shell = ' + LB, 'ladderListener(shell, ladderHandlers, markInstant)')
     for (const line of [
-      'hasVersions: !!drawingState,', 'canUndo,', 'canRedo,', 'versionBusy: !!versionBusy,',
+      'hasVersions,', 'canUndo,', 'canRedo,', 'versionBusy: !!versionBusy,',
       'previewing: !!previewing,', 'mutationsBlocked: !!drawingMutationsBlocked,',
       'onUndo: () => ' + LB + ' void onUndo() ' + RB, 'onRedo: () => ' + LB + ' void onRedo() ' + RB,
     ]) assert.ok(effect.includes(line), `the ladder effect carries ${line}`)
