@@ -11,6 +11,7 @@ describes the proof relationship; private identifiers stay outside this guide.
 
 The inventory must explicitly bind Test trade, Practice, Rust pending-version
 activation and restart, and the report-only Keeper to their selected slices.
+Under the Kashbot v2 contract (SEL-221 re-scope, 2026-11-09), the Rust pending-version activation, restart and Keeper bindings describe the old runner, so the checker reports them out of stage, never as passed.
 Run `node scripts/verify-lab-program.mjs` for offline dossier inspection; use
 `--manifest FILE` and `--receipts-root DIR` for alternate local inputs. Missing
 receipts are pending unless `--require-selected-receipts` is supplied. Exit 1
@@ -527,8 +528,8 @@ and manifest agreement; an empty table cannot ratify a populated inventory.
   identity, rollback, operator steps and a review gate.
 - Test trade: the bounded SEL-221 money walk proof, without general trade authority.
 - Practice: the SEL-112 practice release walk, distinct from production approval.
-- Rust: the SEL-221 pending-version activation and restart proof binding.
-- Keeper: the SEL-221 report-only observer; it has no approval or execution authority.
+- Rust: the SEL-221 pending-version activation and restart proof binding. Old runner, v1 contract only.
+- Keeper: the SEL-221 report-only observer; it has no approval or execution authority. Old runner, v1 contract only.
 - Ratification: acceptance of evidence, without production authorization.
 - Production gate: a separate authorization requirement before production action.
 - Replay: reconstruction and reconciliation of ledger revisions into git history.
