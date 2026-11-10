@@ -17,8 +17,12 @@ import { WorkflowScheduleDraftBrowser } from './WorkflowScheduleDraftBrowser.jsx
 import OpsHomePanel from './OpsHomePanel.jsx'
 import { useSurfaceFrame } from '../site/SurfaceFrame.jsx'
 import { NO_OCCLUDERS, useGroundWindow, windowStyle } from '../site/groundWindow.js'
+import { STUDIO_DRAWING_OCCLUDERS } from '../site/drawingOccluders.js'
 import './ops-workspace.css'
 import { humanizeError } from '../errorHumanize.js'
+
+const STUDIO_CHROME_OCCLUDERS = Object.freeze(STUDIO_DRAWING_OCCLUDERS.filter(([selector]) =>
+  ['header.top', '#drafting-ribbon', '.bar.bar-command-line', 'footer.foot-bar'].includes(selector)))
 
 const empty = () => ({ scope: null, datasets: [], elements: [], datasetCursor: null, elementCursor: null, selected: null, read: null, action: null, historical: false, pending: '', error: '', notice: '' })
 const blankForm = () => ({ dataset: '', id: '', title: '', kind: 'table', columns: [], x: '', y: '', editing: null })
@@ -224,7 +228,8 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   // These shell cards can float over the Ground at tablet widths.
   const shellOccluders = useMemo(() => [
     ...occluders, ['aside.nav', 'nearest'], ['.studio-profile-info', 'nearest'],
-  ], [occluders])
+    ...(studioShell ? STUDIO_CHROME_OCCLUDERS : NO_OCCLUDERS),
+  ], [occluders, studioShell])
   const win = useGroundWindow(active || leaving, studioShell, boardRef, shellOccluders)
 
   function invalidate() {
