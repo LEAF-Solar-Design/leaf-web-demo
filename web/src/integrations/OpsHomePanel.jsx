@@ -37,7 +37,10 @@ export default function OpsHomePanel({ active }) {
           {lights.map((light) => <li key={light.entity_id} className={`ops-home-light${stale ? ' stale' : ''}`}>
             <b>{light.name}</b><span>{light.state === 'on' ? 'On' : 'Off'}</span>
             {light.brightness_pct !== null && <span>{light.brightness_pct}%</span>}
-            {light.rgb && <span className="ops-home-swatch" data-testid="light-swatch" aria-label={`Colour ${light.rgb.join(', ')}`} style={{ background: `rgb(${light.rgb.join(',')})` }} />}
+            {light.rgb && <span className="ops-home-colour">
+              <span className="ops-home-swatch" data-testid="light-swatch" aria-label={light.kelvin !== null ? `White ${light.kelvin} K` : `Colour ${light.rgb.join(', ')}`} style={{ background: `rgb(${light.rgb.join(',')})` }} />
+              {light.kelvin !== null && <span>{light.kelvin} K</span>}
+            </span>}
           </li>)}
         </ul>
         <footer>{updatedAt !== null && <span>Updated {new Date(updatedAt).toLocaleTimeString()}</span>}
