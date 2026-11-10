@@ -20,7 +20,7 @@ import tempfile
 import time
 from urllib.parse import quote
 
-TARGETS = {"tests/test_lab_runs.py", "tests/test_lab_corpus_executor.py"}
+TARGETS = {"tests/test_lab_runs.py", "tests/test_lab_corpus_executor.py", "tests/test_project_drawing_write.py"}
 UID = GID = 10003
 MAX_FILES = 10000
 MAX_BYTES = 300 * 1024 * 1024
