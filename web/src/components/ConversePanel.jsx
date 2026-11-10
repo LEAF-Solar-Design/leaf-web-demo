@@ -612,6 +612,31 @@ export default function ConversePanel({
     const el = logRef.current
     if (el && nearBottomRef.current) el.scrollTop = el.scrollHeight
   }, [events])
+  // A reader's own new turn resumes following, even after the log was re-seated.
+  const latestUserTurnId = (localTurns[localTurns.length - 1] || userTurns[userTurns.length - 1])?.turnId
+  const seenUserTurnIdsRef = useRef(null)
+  useEffect(() => {
+    if (seenUserTurnIdsRef.current === null) {
+      seenUserTurnIdsRef.current = new Set(latestUserTurnId ? [latestUserTurnId] : [])
+      return
+    }
+    if (!latestUserTurnId || seenUserTurnIdsRef.current.has(latestUserTurnId)) return
+    seenUserTurnIdsRef.current.add(latestUserTurnId)
+    jumpToLatest()
+  }, [latestUserTurnId]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const el = logRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return undefined
+    let previousHeight = el.clientHeight
+    const observer = new ResizeObserver(() => {
+      const height = el.clientHeight
+      if (previousHeight === 0 && height > 0) jumpToLatest()
+      else if (nearBottomRef.current) el.scrollTop = el.scrollHeight
+      previousHeight = height
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
   // The chip's End keycap is live, and only while the chip is shown. It
   // defers to anything nearer that handled the key (the tab strip's roving
   // End) and never steals End from a text field or from outside this panel.
