@@ -226,11 +226,33 @@ const offTool = ({ id, label, icon, reason = NOT_IN_ENGINE }, size = 'small') =>
   id, label, text: label, icon, size, title: label, disabled: true, reason, onClick: () => {},
 })
 
+// The one reason the download tool is ever disabled for. A reasons map, so the honesty ladder reads it.
+const PROJECT_DXF_DOWNLOAD_REASONS = Object.freeze({
+  unsaved: 'Save your edits as a version first, then download the saved version.',
+})
+
+// Characters a file name cannot carry. A string and a loop, not a regular expression: the honesty
+// ladder's scanner masks quoted strings but not regular expression literals, so a quote inside a
+// regex character class would read as the start of a string and unbalance its brace count.
+const UNSAFE_FILENAME_CHARS = '\\/:*?"<>|'
+
+function safeFilenameText(text) {
+  let out = ''
+  let previousWasUnsafe = false
+  for (const ch of text) {
+    const unsafe = ch.charCodeAt(0) < 32 || UNSAFE_FILENAME_CHARS.includes(ch)
+    if (!unsafe) out += ch
+    else if (!previousWasUnsafe) out += '_'
+    previousWasUnsafe = unsafe
+  }
+  return out
+}
+
 // The file name for a downloaded project drawing: the document's own name with a .dxf extension.
 export function projectDxfFilename(documentId) {
-  const base = typeof documentId === 'string' ? documentId.trim().replace(/[\\/:*?"<>|\u0000-\u001f]+/g, '_') : ''
+  const base = typeof documentId === 'string' ? safeFilenameText(documentId.trim()) : ''
   if (!base) return 'project.dxf'
-  return /\.dxf$/i.test(base) ? base : `${base}.dxf`
+  return base.toLowerCase().endsWith('.dxf') ? base : `${base}.dxf`
 }
 
 // projectDownload, when a project's saved version is open: { key, versionId, read(versionId) } where
@@ -256,9 +278,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const [downloading, setDownloading] = useState(false)
   const projectDownloadRef = useRef(projectDownload)
   projectDownloadRef.current = projectDownload
-  const downloadReason = !projectDownload ? ''
-    : session?.dirty === true ? 'Save your edits as a version first, then download the saved version.'
-      : downloading ? 'Preparing the download…' : ''
+  const downloadBlocked = !!projectDownload && session?.dirty === true
   const downloadSavedVersion = async () => {
     const started = projectDownloadRef.current
     if (!started || downloading || session?.dirty === true) return
@@ -899,9 +919,9 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
       text: 'Download DXF',
       icon: 'save',
       size: 'large',
-      title: downloadReason || 'Download the saved version of this drawing as a DXF file',
-      disabled: !!downloadReason,
-      reason: downloadReason,
+      title: downloading ? 'Preparing the download…' : 'Download the saved version of this drawing as a DXF file',
+      disabled: downloadBlocked,
+      reason: PROJECT_DXF_DOWNLOAD_REASONS.unsaved,
       onClick: () => { void downloadSavedVersion() },
     }] : []),
   ]
