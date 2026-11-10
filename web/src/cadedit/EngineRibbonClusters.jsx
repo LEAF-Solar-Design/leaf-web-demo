@@ -226,7 +226,16 @@ const offTool = ({ id, label, icon, reason = NOT_IN_ENGINE }, size = 'small') =>
   id, label, text: label, icon, size, title: label, disabled: true, reason, onClick: () => {},
 })
 
-export default function EngineRibbonClusters({ importOpen = false, onToggleImport, panels = ['draw', 'modify'] }) {
+// The file name for a downloaded project drawing: the document's own name with a .dxf extension.
+export function projectDxfFilename(documentId) {
+  const base = typeof documentId === 'string' ? documentId.trim().replace(/[\\/:*?"<>|\u0000-\u001f]+/g, '_') : ''
+  if (!base) return 'project.dxf'
+  return /\.dxf$/i.test(base) ? base : `${base}.dxf`
+}
+
+// projectDownload, when a project's saved version is open: { key, versionId, read(versionId) } where
+// key names the project scope and version and read is the project editor's verified readVersion.
+export default function EngineRibbonClusters({ importOpen = false, onToggleImport, panels = ['draw', 'modify'], projectDownload = null }) {
   const { session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap, snapModes, setSnapMode, snapLimited, reach, selectGroup, refuse, pending = null, setPending } = useEngineSessionContext()
   const held = reach?.state === REACH_STATE.HELD ? reach.sentence : ''
   // Keep the registry's ordinary ladders (including moved-head STALE) intact.
@@ -244,6 +253,41 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const property = held || propertyReason(session, reach)
   const draw = held || drawReason(session, reach)
   const save = saveReason(session, canSave)
+  const [downloading, setDownloading] = useState(false)
+  const projectDownloadRef = useRef(projectDownload)
+  projectDownloadRef.current = projectDownload
+  const downloadReason = !projectDownload ? ''
+    : session?.dirty === true ? 'Save your edits as a version first, then download the saved version.'
+      : downloading ? 'Preparing the download…' : ''
+  const downloadSavedVersion = async () => {
+    const started = projectDownloadRef.current
+    if (!started || downloading || session?.dirty === true) return
+    setDownloading(true)
+    try {
+      const result = await started.read(started.versionId)
+      if (projectDownloadRef.current?.key !== started.key) {
+        refuse(cadMessage('The project drawing changed. Open the version and try again.'))
+        return
+      }
+      let url
+      let link
+      try {
+        url = URL.createObjectURL(new Blob([result.bytes], { type: 'application/dxf' }))
+        link = document.createElement('a')
+        link.href = url
+        link.download = projectDxfFilename(result.documentId)
+        document.body.appendChild(link)
+        link.click()
+      } finally {
+        link?.remove()
+        if (url) setTimeout(() => URL.revokeObjectURL(url), 0)
+      }
+    } catch (error) {
+      refuse(cadMessage(error?.message || 'The drawing could not be downloaded. Try again.'))
+    } finally {
+      setDownloading(false)
+    }
+  }
   const { applyEdit, create, copyToClipboard, pasteFromClipboard } = session.actions
   const pendingRef = useRef(pending)
   const refocusOpRef = useRef(null)
@@ -849,6 +893,17 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
         }
       },
     },
+    ...(projectDownload ? [{
+      id: 'download-dxf',
+      label: 'download-dxf',
+      text: 'Download DXF',
+      icon: 'save',
+      size: 'large',
+      title: downloadReason || 'Download the saved version of this drawing as a DXF file',
+      disabled: !!downloadReason,
+      reason: downloadReason,
+      onClick: () => { void downloadSavedVersion() },
+    }] : []),
   ]
   // W4f slice F: the engine's own Undo / Redo (a bytes-snapshot stack,
   // distinct from the console's version undo on the View tab), each disabled
@@ -864,7 +919,8 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   )
   // The same commands as quick-access buttons in the top band (data-tool
   // "quick-<id>", the band's locator contract).
-  const quick = fileTools.map((tool) => ({ ...tool, id: `quick-${tool.id}`, dataTool: `quick-${tool.id}`, label: tool.text }))
+  const quick = fileTools.filter((tool) => tool.id !== 'download-dxf')
+    .map((tool) => ({ ...tool, id: `quick-${tool.id}`, dataTool: `quick-${tool.id}`, label: tool.text }))
 
   // S26: a dimension field's edit, commit, arrow step and label scrub.
   const dropRefusedDimension = (key) => setRefusedDimensions((prev) => {

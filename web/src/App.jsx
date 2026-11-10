@@ -1409,6 +1409,12 @@ export default function App() {
     && workspace.drawing_versions.some((row) => row.drawing_id === projectSelectedDrawingVersion.drawing_id
       && row.seq < projectSelectedDrawingVersion.seq) : standaloneCanUndo
   const canRedo = !projectMode && standaloneCanRedo
+  // The File panel's Download DXF: the selected SAVED project version's verified bytes, only while the
+  // editor target is for exactly that version. Standalone has no such source.
+  const projectDxfDownload = useMemo(() => projectMode && projectSelectedDrawingVersion && projectEditorTarget?.readVersion
+    && projectEditorTarget.headVersion === projectSelectedDrawingVersion.version_id
+    ? { key: projectEditorTarget.scopeKey, versionId: projectSelectedDrawingVersion.version_id, read: projectEditorTarget.readVersion }
+    : null, [projectMode, projectSelectedDrawingVersion, projectEditorTarget])
   const hasVersions = versionsAvailable({ projectMode, projectVersion: projectSelectedDrawingVersion, drawingState })
   const projectSolarAccountScope = composerDraftAccountScope()
   const projectSolarSession = {
@@ -5933,6 +5939,7 @@ export default function App() {
                   every tab; the tab picks which panels the band shows. */}
               {ENV_CAD_EDIT && drafting && (
                 <EngineRibbonClusters
+                  projectDownload={projectDxfDownload}
                   importOpen={importOpen}
                   onToggleImport={() => { returnToDrawing(); setImportOpen((o) => !o) }}
                   panels={activeRibbonTab === 'solar' ? ['solar-panels'] : activeRibbonTab === 'insert' ? ['file', 'block'] : activeRibbonTab === 'annotate' ? ['annotation'] : activeRibbonTab === 'draw' ? ['draw', 'modify', 'annotation', 'block', 'clipboard', 'properties', 'groups'] : activeRibbonTab === 'view' ? ['script'] : []}
