@@ -102,7 +102,8 @@
       "0099",
       "0100",
       "0101",
-      "0102"
+      "0102",
+      "0103"
     ],
     "migration_files": [
       "0001_project_job.sql",
@@ -206,7 +207,8 @@
       "0099_lab_corpus_reference_materials.sql",
       "0100_lab_corpus_run_authority.sql",
       "0101_service_browser_sessions.sql",
-      "0102_lab_layouts.sql"
+      "0102_lab_layouts.sql",
+      "0103_project_rename_receipt.sql"
     ],
     "completeness": "partial",
     "reason": "Historical backfill commands are not present in this repository, and most live staging and production selector values are still unrecorded. A recorded value names the task-definition revision, and where the value is the shipped image default, the image digest it was read from. Status measured_no_override means no deployment-layer override was set and the value is the repository default the image bakes; it is not an operator selection for that environment. Every named revision and digest ages."

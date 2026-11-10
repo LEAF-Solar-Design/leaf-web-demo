@@ -143,6 +143,12 @@ class CloneProjectBody(BaseModel):
     name: str = Field(min_length=1, max_length=200)
 
 
+class RenameProjectBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=200)
+
+
 class AccountUploadSourceBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1090,6 +1096,19 @@ def export_org(
         ))
     except org_export.OrgExportForbidden:
         raise HTTPException(status_code=403, detail="org access denied") from None
+
+
+@router.post("/projects/{project_id}/rename")
+def rename_project(
+    project_id: uuid.UUID,
+    body: RenameProjectBody,
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+    actor: _LifecycleActor = Depends(_get_lifecycle_actor),
+):
+    return _lifecycle_response(lambda: project_lifecycle.rename_project(
+        actor.org_id, project_id, actor.binding_id, name=body.name,
+        idempotency_key=idempotency_key,
+    ))
 
 
 @router.post("/projects/{project_id}/reset")
