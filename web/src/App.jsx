@@ -468,6 +468,12 @@ export function boardDrawingFacts({ projectMode, shown, standaloneName, selected
     : { ...facts, pending: true }
 }
 
+// The version buttons' first gate. In a project it is the selected project drawing version;
+// the standalone drawing's version state says nothing about a project.
+export function versionsAvailable({ projectMode, projectVersion, drawingState }) {
+  return projectMode ? !!projectVersion : !!drawingState
+}
+
 export async function seatSolarProjectPublication(controller, receipt, captured, isCurrent) {
   const current = controller.getSnapshot()
   const selected = current.workspace?.drawing_versions?.find(row => row.version_id === current.canonicalVersionId)
@@ -1403,6 +1409,7 @@ export default function App() {
     && workspace.drawing_versions.some((row) => row.drawing_id === projectSelectedDrawingVersion.drawing_id
       && row.seq < projectSelectedDrawingVersion.seq) : standaloneCanUndo
   const canRedo = !projectMode && standaloneCanRedo
+  const hasVersions = versionsAvailable({ projectMode, projectVersion: projectSelectedDrawingVersion, drawingState })
   const projectSolarAccountScope = composerDraftAccountScope()
   const projectSolarSession = {
     authenticated: !mock && session.status === 'active',
@@ -4416,7 +4423,7 @@ export default function App() {
       rTarget,
       // S25: the version undo / redo records' own gates, so Mod+Z off the
       // drafting surface answers to exactly the ribbon's Undo and Redo.
-      hasVersions: !!drawingState,
+      hasVersions,
       canUndo,
       canRedo,
       versionBusy: !!versionBusy,
@@ -4456,7 +4463,7 @@ export default function App() {
   }, [startOpen, onReturnToDrawing, drawer, drawerViewport, studioShell, studioDrawer, historyOpen, route, routeErr, runErr, running, selectedHandle,
       onStopRun, onDispatch, openProjectId, onCloseProject, rTarget,
       closeHistory, loadHistory, retryTools, loadCatalog, onRetryViewerRefresh, dismissRoute, clearRouteError,
-      onDismissSolarFlowRoute, drawingState, canUndo, canRedo, versionBusy, previewing, drawingMutationsBlocked, onUndo, onRedo])
+      onDismissSolarFlowRoute, drawingState, hasVersions, canUndo, canRedo, versionBusy, previewing, drawingMutationsBlocked, onUndo, onRedo])
   // S27: Escape from inside the typed Solar settings form closes it through
   // the one owner stack (edit layer, scoped to the form's wrapper; while the
   // wrapper is not mounted the owner claims nothing).
@@ -4735,7 +4742,7 @@ export default function App() {
       onBeforeJump: pushViewSnapshot,
     })
     const version = versionCluster({
-      hasVersions: !!drawingState,
+      hasVersions,
       canUndo,
       canRedo,
       versionBusy: !!versionBusy,
@@ -4894,7 +4901,7 @@ export default function App() {
       ],
     }
   }, [projectMode, projectDrawing.mode, drawingIntake, studioShell, browserPanel, openToolRail, toggleStudioToolRail, drafting, profileTabs, surfaceSlots.toolbar.profile, activeRibbonTab, navExpanded, navSpine, setNavExpanded, toggleStudioDrawer, drawerViewport, studioDrawer,
-    shown, drawingState, canUndo, canRedo, versionBusy, running, previewing,
+    shown, drawingState, hasVersions, canUndo, canRedo, versionBusy, running, previewing,
     drawingMutationsBlocked, historyOpen, onUndo, onRedo, onToggleHistoryTracked, layerCounts, visibleLayers,
     toggleLayer, railFamilies, onRequestCatalogRun, writeLocked, canRunWrite, canBuild, entOf, ribbonTab, colorForLayer, paneOpen,
     pushViewSnapshot, lastAuthoredTool, onUseAuthored, setFamilyOpen, engineDirty])
@@ -5136,7 +5143,7 @@ export default function App() {
       // field as undefined and answer with the ladder's own "no drawing in
       // the browser engine yet", never a fabricated availability.
       contextMenuCtx={{
-        hasVersions: !!drawingState,
+        hasVersions,
         canUndo,
         canRedo,
         versionBusy: !!versionBusy,
