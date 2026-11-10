@@ -41,35 +41,32 @@ echo "LEAF_T start chromium $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR/web"
 echo "--- 5/6 Install Chromium for browser proofs"
 # LEAF_CI_BROWSER_INSTALL_BEGIN
-# standard:7.0 needs OS libraries, and --with-deps shells out to apt, so this
-# step used to inherit archive.ubuntu.com's availability. Measured 2026-09-11
-# between 06:37Z and 07:30Z: leaf-ci-leaf-web-demo failed SIX of seven
-# consecutive builds right here, on main and on every merge-queue group, with
-# "Could not connect to archive.ubuntu.com:80 ... connection timed out" against
-# all six mirror IPs, before a single suite ran, and every queued PR ejected
-# behind it. A fallback is honest rather than a papered-over failure because in
-# that same log every library Chromium needs read "is already the newest
-# version" (libasound2, libcairo2, libcups2, libdbus-1-3, libdrm2, libxkbcommon0,
-# libxrandr2, libatk*); the only packages the mirror could not serve were
-# optional FONT packages (fonts-ipafont-gothic, fonts-freefont-ttf,
-# fonts-unifont, fonts-wqy-zenhei, xfonts-*), which change glyph coverage in a
-# rendered page and nothing any suite in this repo asserts. Try the OS setup
-# once, then the distinct browser-only stage; repeating the same apt failure
-# adds no evidence. A missing BROWSER BINARY is
-# still a hard failure: the last call is unguarded, so set -e fails the build.
-# The OS stage is also time-bounded. On 2026-11-10 the mirrors stopped
-# answering on port 80 instead of refusing; jobs 18313 and 18316 were still
-# inside --with-deps after 8m39s with nothing but the 3600 s job deadline to
-# stop apt, so it could consume that whole deadline. Normal setup for both producers
-# takes about 48 s and a slow but live mirror needed 323 s for apt update
-# alone, so 420 s keeps that case. timeout kills the whole process group, apt
-# included. After one bounded stage times out, later producers skip straight to
-# the browser-only stage, because a second wait on the same mirror adds no
-# evidence.
+# Install the browser first; a missing binary is a hard failure under set -e.
+# Then check a real headless launch through the same producer, bounded to 60 s.
+# Run apt via --with-deps only after a failed launch, bounded to 420 s.
+# On 2026-09-11 mirror failures stopped six of seven builds even though runtime
+# libraries were already installed; only optional fonts could not be served.
+# On 2026-11-10 jobs 18313 and 18316 waited over 8m39s on silent mirrors.
+# Recent per-job apt updates fetched 50.9 MB with zero new packages; setup
+# medians were 31.8 s on run workers and 58.8 s on WSL, with stalls over 1000 s.
+# timeout kills the whole process group. After one dependency timeout, skip
+# later dependency stages; browser proofs still check OS runtime usability.
 browser_deps_timeout_s=420
+browser_launch_check_timeout_s=60
 browser_deps_unavailable=0
 install_ci_browser() {
-  local status=0
+  local status=0 launch_file launch_started
+  "$@" install chromium
+  launch_file="$(mktemp)"
+  launch_started="$(date +%s%3N)"
+  timeout --kill-after=15 "$browser_launch_check_timeout_s" "$@" pdf about:blank "$launch_file" || status=$?
+  rm -f "$launch_file"
+  if [[ "$status" == 0 ]]; then
+    echo "browser launch check passed for $*; OS dependency stage skipped ($(( $(date +%s%3N) - launch_started )) ms)"
+    return 0
+  fi
+  echo "WARNING: $* launch check failed; running the OS dependency stage" >&2
+  status=0
   if [[ "$browser_deps_unavailable" == 0 ]]; then
     timeout --kill-after=15 "$browser_deps_timeout_s" "$@" install --with-deps chromium || status=$?
     if [[ "$status" == 0 ]]; then
@@ -77,14 +74,14 @@ install_ci_browser() {
     fi
     if [[ "$status" == 124 || "$status" == 137 ]]; then
       browser_deps_unavailable=1
-      echo "WARNING: $* dependency install exceeded ${browser_deps_timeout_s}s; trying the distinct browser-only stage and skipping later dependency stages. Browser proofs still check OS runtime usability." >&2
+      echo "WARNING: $* dependency install exceeded ${browser_deps_timeout_s}s; skipping later dependency stages. Browser proofs still check OS runtime usability." >&2
     else
-      echo "WARNING: $* dependency install failed; trying the distinct browser-only stage. Browser proofs still check OS runtime usability." >&2
+      echo "WARNING: $* dependency install failed. Browser proofs still check OS runtime usability." >&2
     fi
   else
-    echo "WARNING: an earlier dependency stage exceeded ${browser_deps_timeout_s}s; $* goes straight to the distinct browser-only stage." >&2
+    echo "WARNING: an earlier dependency stage exceeded ${browser_deps_timeout_s}s; skipping $* dependency stage. Browser proofs still check OS runtime usability." >&2
   fi
-  "$@" install chromium
+  return 0
 }
 
 install_ci_browser npx playwright

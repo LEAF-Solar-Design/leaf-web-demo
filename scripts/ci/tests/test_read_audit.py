@@ -48,6 +48,7 @@ def environment(tmp_path, monkeypatch):
     monkeypatch.setenv(audit.ENV_DIR, str(logs))
     monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
     monkeypatch.setenv("PYTHONPATH", "")
+    monkeypatch.delenv(audit.ENV_ATTRIBUTE, raising=False)
     monkeypatch.chdir(root)
     audit._state = None
     yield root, logs
@@ -88,6 +89,273 @@ def entries(logs):
 
 def reads(logs, kind):
     return [entry["p"] for entry in entries(logs) if entry.get("k") == kind]
+
+
+def repo_code(root, filename, source):
+    namespace = {"__name__": "audit_fixture", "__file__": str(root / filename)}
+    exec(compile(source, str(root / filename), "exec"), namespace)
+    return namespace
+
+
+@pytest.mark.parametrize("attribute", [None, "test", "MODULE"])
+def test_module_attribution_off_never_walks_or_wraps_imports(environment, monkeypatch, attribute):
+    root, logs = environment
+    (root / "data.json").write_text("{}", encoding="utf-8")
+    original_import = builtins.__import__
+    original_importlib_import = importlib.__import__
+    original_module = importlib.import_module
+    calls = []
+
+    def unexpected():
+        calls.append(True)
+        raise AssertionError("attribution is off")
+
+    monkeypatch.setattr(audit, "_module_context", unexpected)
+    if attribute is not None:
+        monkeypatch.setenv(audit.ENV_ATTRIBUTE, attribute)
+    assert audit.install()
+    assert builtins.__import__ is original_import
+    assert importlib.__import__ is original_importlib_import
+    assert importlib.import_module is original_module
+    with open("data.json") as stream:
+        assert json.load(stream) == {}
+    os.listdir(root)
+    os.path.exists(root / "missing")
+    audit._guard(audit._child, None, ["opaque"], root, {})
+    assert not calls
+    assert all("m" not in entry and "i" not in entry for entry in entries(logs))
+
+
+def test_module_reads_dedupe_per_reader_and_keep_cwd_epoch(environment, monkeypatch):
+    root, logs = environment
+    (root / "data.json").write_text('{"value": 1}', encoding="utf-8")
+    (root / "other").mkdir()
+    (root / "other" / "data.json").write_text('{"value": 2}', encoding="utf-8")
+    a = repo_code(root, "pkg/a.py", "def read():\n    with open('data.json') as f: return f.read()\n")
+    b = repo_code(root, "pkg/b.py", "import json\ndef read():\n    with open('data.json') as f: return json.load(f)\n")
+    monkeypatch.setenv(audit.ENV_ATTRIBUTE, "module")
+    assert audit.install()
+    assert a["read"]() == a["read"]() == '{"value": 1}'
+    assert b["read"]() == {"value": 1}
+    data = [entry for entry in entries(logs) if entry.get("p") == "data.json"]
+    assert data == [{"k": "f", "p": "data.json", "m": "pkg/a.py"},
+                    {"k": "f", "p": "data.json", "m": "pkg/b.py"}]
+    os.chdir(root / "other")
+    assert a["read"]() == '{"value": 2}'
+    assert {"k": "f", "p": "other/data.json", "m": "pkg/a.py"} in entries(logs)
+    assert not list(logs.glob("*.error"))
+
+
+def test_module_directory_existence_and_child_entries(environment, monkeypatch):
+    root, logs = environment
+    helper = repo_code(root, "pkg/d.py", "import os, subprocess, sys\ndef run():\n    os.listdir('.')\n    os.path.exists('missing')\n    subprocess.run([sys.executable, '-I', '-c', 'pass'], env={}, check=True, timeout=20)\n")
+    monkeypatch.setenv(audit.ENV_ATTRIBUTE, "module")
+    assert audit.install()
+    helper["run"]()
+    observed = entries(logs)
+    assert {"k": "d", "p": ".", "m": "pkg/d.py"} in observed
+    assert {"k": "e", "p": "missing", "m": "pkg/d.py"} in observed
+    child, = [entry for entry in observed if entry.get("k") == "x"]
+    assert child["m"] == "pkg/d.py"
+    assert "i" not in child
+    assert not list(logs.glob("*.error"))
+
+
+def test_module_no_repo_frame_and_frame_budget(environment, monkeypatch):
+    root, logs = environment
+    (root / "data").write_text("payload", encoding="utf-8")
+    code = compile("with open('data') as stream: stream.read()", "<string>", "exec")
+    monkeypatch.setenv(audit.ENV_ATTRIBUTE, "module")
+    assert audit.install()
+    exec(code, {})
+    assert {"k": "f", "p": "data", "m": None} in entries(logs)
+    external = {}
+    exec(compile("def recurse(n):\n    if n: return recurse(n - 1)\n    with open('data') as stream: return stream.read()\n",
+                 "<string>", "exec"), external)
+    caller = repo_code(root, "caller.py", "def run(recurse): return recurse(65)\n")
+    assert caller["run"](external["recurse"]) == "payload"
+    assert not any(entry.get("p") == "data" and entry.get("m") == "caller.py"
+                   for entry in entries(logs))
+
+
+def test_module_filenames_resolve_once_and_skip_temp_and_audit(environment, monkeypatch):
+    root, logs = environment
+    scratch = root / "scratch"
+    scratch.mkdir()
+    (root / "data").write_text("payload", encoding="utf-8")
+    source = "def read():\n    with open('data') as stream: return stream.read()\n"
+    helper = repo_code(root, "pkg/helper.py", source)
+    temporary = repo_code(root, "scratch/helper.py", source)
+    own = {}
+    exec(compile(source, audit.__file__, "exec"), own)
+    monkeypatch.setenv("TMPDIR", str(scratch))
+    monkeypatch.setenv(audit.ENV_ATTRIBUTE, "module")
+    assert audit.install()
+    original = os.path.realpath
+    resolved = []
+
+    def counting(path, *args, **kwargs):
+        resolved.append(os.fspath(path))
+        return original(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os.path, "realpath", counting)
+        assert helper["read"]() == helper["read"]() == "payload"
+        assert temporary["read"]() == "payload"
+        assert own["read"]() == "payload"
+    assert resolved.count(str(root / "pkg/helper.py")) == 1
+    observed = [entry for entry in entries(logs) if entry.get("p") == "data"]
+    assert {entry["m"] for entry in observed} == {"pkg/helper.py", None}
+    assert not list(logs.glob("*.error"))
+
+
+@pytest.mark.parametrize("method", ["import_module", "fromlist", "importlib_import", "relative"])
+def test_module_import_edges_include_cache_hits(environment, monkeypatch, method):
+    root, logs = environment
+    package = root / "audit_edge_pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "c.py").write_text("value = 42\n", encoding="utf-8")
+    first = repo_code(root, "first.py", "def run():\n    import audit_edge_pkg.c\n")
+    sources = {
+        "import_module": "import importlib\nimportlib.import_module('audit_edge_pkg.c')",
+        "fromlist": "from audit_edge_pkg import c",
+        "importlib_import": "import importlib\nimportlib.__import__('audit_edge_pkg.c')",
+        "relative": "import importlib\nimportlib.import_module('.c', 'audit_edge_pkg')",
+    }
+    source = "def run():\n" + "\n".join("    " + line for line in sources[method].splitlines())
+    second = repo_code(root, "second.py", source)
+    monkeypatch.syspath_prepend(str(root))
+    monkeypatch.setenv(audit.ENV_ATTRIBUTE, "module")
+    try:
+        assert audit.install()
+        first["run"]()
+        second["run"]()
+        second["run"]()
+        for reader in ("first.py", "second.py"):
+            matching = [entry for entry in entries(logs) if entry.get("k") == "f"
+                        and entry.get("p") == "audit_edge_pkg/c.py" and entry.get("m") == reader]
+            assert matching == [{"k": "f", "p": "audit_edge_pkg/c.py", "m": reader, "i": True}]
+        assert not list(logs.glob("*.error"))
+    finally:
+        sys.modules.pop("audit_edge_pkg.c", None)
+        sys.modules.pop("audit_edge_pkg", None)
+
+
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("statement", [
+    "import audit_nested_pkg.sub.leaf",
+    "import importlib\nimportlib.__import__('audit_nested_pkg.sub.leaf')",
+    "import importlib\nimportlib.import_module('audit_nested_pkg.sub.leaf')",
+    "import importlib\nimportlib.import_module('.leaf', 'audit_nested_pkg.sub')",
+])
+def test_module_import_edges_include_all_parent_packages(environment, monkeypatch, cached, statement):
+    root, logs = environment
+    package = root / "audit_nested_pkg"
+    sub = package / "sub"
+    sub.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (sub / "__init__.py").write_text("", encoding="utf-8")
+    (sub / "leaf.py").write_text("value = 42\n", encoding="utf-8")
+    source = "def run():\n" + "\n".join("    " + line for line in statement.splitlines())
+    caller = repo_code(root, "importer.py", source)
+    monkeypatch.syspath_prepend(str(root))
+    monkeypatch.setenv(audit.ENV_ATTRIBUTE, "module")
+    try:
+        if cached:
+            importlib.import_module("audit_nested_pkg.sub.leaf")
+        assert audit.install()
+        caller["run"]()
+        caller["run"]()
+        observed = entries(logs)
+        for path in ("audit_nested_pkg/__init__.py", "audit_nested_pkg/sub/__init__.py",
+                     "audit_nested_pkg/sub/leaf.py"):
+            matching = [entry for entry in observed if entry.get("k") == "f"
+                        and entry.get("p") == path and entry.get("m") == "importer.py"]
+            assert matching == [{"k": "f", "p": path, "m": "importer.py", "i": True}]
+        assert not list(logs.glob("*.error"))
+    finally:
+        for name in ("audit_nested_pkg.sub.leaf", "audit_nested_pkg.sub", "audit_nested_pkg"):
+            sys.modules.pop(name, None)
+
+
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("package_source", ["package", "spec"])
+def test_module_relative_fromlist_edges_include_cache_hits(environment, monkeypatch, cached, package_source):
+    root, logs = environment
+    package = root / "audit_relative_pkg"
+    sub = package / "sub"
+    sub.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (sub / "__init__.py").write_text("", encoding="utf-8")
+    (sub / "leaf.py").write_text("value = 42\n", encoding="utf-8")
+    caller = repo_code(root, "audit_relative_pkg/sub/other.py",
+                       "def run():\n    from . import leaf\n    return leaf.value\n")
+    if package_source == "package":
+        caller["__package__"] = "audit_relative_pkg.sub"
+    else:
+        caller["__spec__"] = types.SimpleNamespace(parent="audit_relative_pkg.sub")
+    monkeypatch.syspath_prepend(str(root))
+    monkeypatch.setenv(audit.ENV_ATTRIBUTE, "module")
+    try:
+        if cached:
+            importlib.import_module("audit_relative_pkg.sub.leaf")
+        assert audit.install()
+        assert caller["run"]() == caller["run"]() == 42
+        matching = [entry for entry in entries(logs) if entry.get("k") == "f"
+                    and entry.get("p") == "audit_relative_pkg/sub/leaf.py"
+                    and entry.get("m") == "audit_relative_pkg/sub/other.py"]
+        assert matching == [{"k": "f", "p": "audit_relative_pkg/sub/leaf.py",
+                             "m": "audit_relative_pkg/sub/other.py", "i": True}]
+        assert not list(logs.glob("*.error"))
+    finally:
+        for name in ("audit_relative_pkg.sub.leaf", "audit_relative_pkg.sub", "audit_relative_pkg"):
+            sys.modules.pop(name, None)
+
+
+def test_module_open_code_and_runner_import_are_import_reads(environment, monkeypatch):
+    root, logs = environment
+    (root / "audit_runner_module.py").write_text("value = 1\n", encoding="utf-8")
+    (root / "loaded.py").write_text("value = 2\n", encoding="utf-8")
+    (root / "direct.py").write_text("value = 3\n", encoding="utf-8")
+    caller = repo_code(root, "loader.py", "import importlib.util\ndef load():\n    spec = importlib.util.spec_from_file_location('audit_loaded', 'loaded.py')\n    module = importlib.util.module_from_spec(spec)\n    spec.loader.exec_module(module)\n    return module.value\n")
+    direct = repo_code(root, "direct_loader.py", "import io\ndef load():\n    with io.open_code('direct.py') as stream: return stream.read()\n")
+    monkeypatch.syspath_prepend(str(root))
+    monkeypatch.setenv(audit.ENV_ATTRIBUTE, "module")
+    try:
+        assert audit.install()
+        importlib.import_module("audit_runner_module")
+        assert caller["load"]() == 2
+        assert direct["load"]() == b"value = 3\n"
+        observed = entries(logs)
+        assert {"k": "f", "p": "audit_runner_module.py", "m": None, "i": True} in observed
+        assert {"k": "f", "p": "loaded.py", "m": "loader.py", "i": True} in observed
+        assert {"k": "f", "p": "direct.py", "m": "direct_loader.py", "i": True} in observed
+        assert not list(logs.glob("*.error"))
+    finally:
+        sys.modules.pop("audit_runner_module", None)
+
+
+def test_module_import_origins_and_filtered_modules(environment, monkeypatch):
+    root, logs = environment
+    scratch = root / "scratch"
+    scratch.mkdir()
+    locations = {"origin": str(root / "cached.py"),
+                 "outside": str(root.parent / "outside.py"),
+                 "temporary": str(scratch / "temporary.py"), "namespace": None}
+    for name, location in locations.items():
+        module = types.ModuleType("audit_edge_" + name)
+        module.__spec__ = types.SimpleNamespace(origin=location)
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+    caller = repo_code(root, "importer.py", "import importlib\ndef load(name): return importlib.import_module(name)\n")
+    monkeypatch.setenv("TMPDIR", str(scratch))
+    monkeypatch.setenv(audit.ENV_ATTRIBUTE, "module")
+    assert audit.install()
+    for name in locations:
+        assert caller["load"]("audit_edge_" + name) is sys.modules["audit_edge_" + name]
+    observed = [entry for entry in entries(logs) if entry.get("k") == "f"]
+    assert observed == [{"k": "f", "p": "cached.py", "m": "importer.py", "i": True}]
+    assert not list(logs.glob("*.error"))
 
 
 def test_inert_without_environment(environment, monkeypatch):
@@ -535,6 +803,57 @@ def test_sqlite_and_copy_sources(environment):
     assert {"source", "data.db", "mode-source", "stat-source", "tree-source"} <= set(reads(logs, "f"))
     assert ":memory:" not in reads(logs, "f")
     assert not any("mode=memory" in path for path in reads(logs, "f"))
+
+
+@pytest.mark.parametrize("form", ["absolute", "triple-slash", "localhost", "relative", "encoded"])
+@pytest.mark.parametrize("positional", [False, True])
+def test_sqlite_uri_records_filename(environment, form, positional):
+    root, logs = environment
+    name = "my db.sqlite" if form == "encoded" else "db.sqlite"
+    database = root / name
+    sqlite3.connect(str(database)).close()
+    if form == "triple-slash":
+        uri = database.as_uri()
+    elif form == "localhost":
+        uri = "file://localhost" + str(database)
+    elif form == "relative":
+        uri = "file:" + name
+    else:
+        uri = "file:" + str(database).replace(" ", "%20")
+    uri += "?mode=ro"
+    assert audit.install()
+    if positional:
+        sqlite3.connect(uri, 5.0, 0, "", True, sqlite3.Connection, 128, True).close()
+    else:
+        sqlite3.connect(uri, uri=True).close()
+    assert reads(logs, "f") == [name]
+
+
+def test_sqlite_uri_temp_filename_is_skipped(environment, monkeypatch):
+    root, logs = environment
+    scratch = root / "scratch"
+    scratch.mkdir()
+    database = scratch / "db.sqlite"
+    sqlite3.connect(str(database)).close()
+    monkeypatch.setenv("TMPDIR", str(scratch))
+    assert audit.install()
+    sqlite3.connect("file:" + str(database) + "?mode=ro", uri=True).close()
+    assert reads(logs, "f") == []
+
+
+@pytest.mark.parametrize("database,uri,expected", [
+    ("file:name", False, ["file:name"]),
+    ("file:x?mode=memory", True, []),
+    ("file:?mode=ro", True, []),
+])
+def test_sqlite_uri_literal_memory_and_empty_filenames(environment, database, uri, expected):
+    root, logs = environment
+    assert audit.install()
+    try:
+        sqlite3.connect(database, uri=uri).close()
+    except sqlite3.OperationalError:
+        pass
+    assert reads(logs, "f") == expected
 
 
 def test_overflow_once_then_stops(environment, monkeypatch):
@@ -1586,6 +1905,72 @@ def test_real_pytest_traces_nodeid_and_maps_rewrite_cache(environment):
     assert {"k": "f", "p": "input", "t": "test_probe.py::test_reads"} in records
     assert not any("-pytest-" in entry.get("p", "") for entry in entries(logs))
     assert not list(logs.glob("*.error"))
+
+
+def test_plugin_import_records_initial_conftest_and_its_reads(environment):
+    root, logs = environment
+    (root / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    (root / "helper.py").write_text("VALUE = 'payload'\n", encoding="utf-8")
+    (root / "data.txt").write_text("payload", encoding="utf-8")
+    (root / "conftest.py").write_text(
+        "import helper\n"
+        "with open('data.txt', encoding='utf-8') as stream:\n"
+        "    assert stream.read() == helper.VALUE\n", encoding="utf-8")
+    (root / "test_probe.py").write_text("def test_ok():\n    pass\n", encoding="utf-8")
+    env = {**os.environ, "PYTHONPATH": str(MODULE.parent),
+           audit.ENV_DIR: str(logs), audit.ENV_ROOT: str(root),
+           "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "PYTEST_ADDOPTS": ""}
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "read_audit", "-q",
+         "-p", "no:cacheprovider", "test_probe.py"],
+        cwd=root, env=env, capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "1 passed" in result.stdout
+    assert {"conftest.py", "helper.py", "data.txt"} <= set(reads(logs, "f"))
+    assert not list(logs.glob("*.error"))
+
+
+def test_plugin_import_without_audit_directory_is_inert(environment):
+    root, logs = environment
+    code = (
+        "import builtins, os, sys\n"
+        "originals = [builtins.open, os.stat, os.scandir]\n"
+        "pythonpath = os.environ['PYTHONPATH']\n"
+        "import read_audit\n"
+        "assert read_audit._state is None\n"
+        "assert not hasattr(sys, '_leaf_read_audit_owner')\n"
+        "assert [builtins.open, os.stat, os.scandir] == originals\n"
+        "assert os.environ['PYTHONPATH'] == pythonpath\n"
+    )
+    env = {key: value for key, value in os.environ.items() if key != audit.ENV_DIR}
+    env["PYTHONPATH"] = str(MODULE.parent)
+    result = subprocess.run([sys.executable, "-c", code], cwd=root, env=env,
+                            capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not list(logs.iterdir())
+
+
+def test_plugin_import_install_failure_writes_marker_and_continues(environment):
+    root, logs = environment
+    code = (
+        "import os\n"
+        "original_abspath = os.path.abspath\n"
+        "def failing_abspath(path):\n"
+        "    if path == os.environ['LEAF_READ_AUDIT_DIR']:\n"
+        "        raise RuntimeError('import-time install failed')\n"
+        "    return original_abspath(path)\n"
+        "os.path.abspath = failing_abspath\n"
+        "import read_audit\n"
+        "assert read_audit._state is None\n"
+    )
+    env = {**os.environ, "PYTHONPATH": str(MODULE.parent)}
+    result = subprocess.run([sys.executable, "-c", code], cwd=root, env=env,
+                            capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stderr == ""
+    error, = logs.glob("*.error")
+    assert error.read_text(encoding="utf-8").startswith("RuntimeError: import-time install failed\n")
 
 
 def test_retargeted_symlink_records_both_targets(environment):

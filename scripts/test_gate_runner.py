@@ -6639,6 +6639,16 @@ def test_early_feedback_shell_uses_exact_trusted_script_and_one_gate_invocation(
     assert 'for attempt in 1 2' not in entry
     assert entry.count('"$@" install --with-deps chromium') == 1
     assert entry.count('"$@" install chromium') == 1
+    browser_block = entry.split('# LEAF_CI_BROWSER_INSTALL_BEGIN\n', 1)[1].split(
+        '# LEAF_CI_BROWSER_INSTALL_END', 1)[0]
+    assert 'browser_deps_timeout_s=420' in browser_block.splitlines()
+    assert 'browser_launch_check_timeout_s=60' in browser_block.splitlines()
+    launch_check = ('timeout --kill-after=15 "$browser_launch_check_timeout_s" '
+                    '"$@" pdf about:blank "$launch_file"')
+    dependency_install = ('timeout --kill-after=15 "$browser_deps_timeout_s" '
+                          '"$@" install --with-deps chromium')
+    assert browser_block.index('"$@" install chromium') < browser_block.index(launch_check)
+    assert browser_block.index(launch_check) < browser_block.index(dependency_install)
 
 
 
@@ -6677,17 +6687,19 @@ def test_early_feedback_actual_trusted_heavy_entry_preserves_producers(tmp_path)
         script = bins / name
         script.write_text("#!/usr/bin/env bash\n"
                           "printf '%s %s\\n' \"$(basename \"$0\")\" \"$*\" >> \"$FIXTURE_TRACE\"\n"
-                          "if [[ \"${FIXTURE_FAIL_OS:-0}\" == 1 && \"$*\" == *'install --with-deps chromium' ]]; then exit 19; fi\n",
+                          "if [[ \"${FIXTURE_FAIL_LAUNCH:-0}\" == 1 && \"$*\" == *'pdf about:blank '* ]]; then exit 18; fi\n"
+                          "if [[ \"${FIXTURE_FAIL_DEPS:-0}\" == 1 && \"$*\" == *'install --with-deps chromium' ]]; then exit 19; fi\n",
                           encoding="utf-8", newline="\n")
         script.chmod(0o755)
     def shell_path(path):
         text = path.resolve().as_posix()
         return "/" + text[0].lower() + text[2:] if os.name == "nt" else text
-    def run(shard=None, fail_os=False):
+    def run(shard=None, fail_launch=False, fail_deps=False):
         trace.unlink(missing_ok=True)
         env = dict(os.environ, CODEBUILD_SRC_DIR=shell_path(tmp_path), FIXTURE_BIN=shell_path(bins),
                    FIXTURE_TRACE=shell_path(trace), CI_SCRIPT=shell_path(REPO / ".codebuild/ci.sh"),
-                   FIXTURE_FAIL_OS=str(int(fail_os)))
+                   FIXTURE_FAIL_LAUNCH=str(int(fail_launch)),
+                   FIXTURE_FAIL_DEPS=str(int(fail_deps)))
         for key in ("CI_SHARD_TOTAL", "CI_SHARD_INDEX"):
             env.pop(key, None)
         if shard is not None:
@@ -6696,21 +6708,25 @@ def test_early_feedback_actual_trusted_heavy_entry_preserves_producers(tmp_path)
                                  'export PATH="$FIXTURE_BIN:$PATH"; exec bash "$CI_SCRIPT" --heavy-prerequisites'],
                                 env=env, capture_output=True, text=True, timeout=15)
         assert result.returncode == 0, result.stdout + result.stderr
-        return trace.read_text().splitlines()
+        # Normalize only the random PDF destination, preserving the launch call.
+        return [re.sub(r"(pdf about:blank) .*$", r"\1 <temp>", call)
+                for call in trace.read_text().splitlines()]
     license_checks = ["npm run build", "python scripts/check_license_fence.py --self-test",
                       "python scripts/check_license_fence.py ."]
-    browsers = ["npx playwright install --with-deps chromium", "python -m playwright install --with-deps chromium"]
+    browsers = ["npx playwright install chromium", "npx playwright pdf about:blank <temp>",
+                "python -m playwright install chromium", "python -m playwright pdf about:blank <temp>"]
     calls = run()
     assert [call for call in calls if call in license_checks] == license_checks
     assert [call for call in calls if call in browsers] == browsers
     assert sorted(calls) == sorted(license_checks + browsers)
     assert run(shard=1) == browsers
-    calls = run(fail_os=True)
-    expected_browsers = [browsers[0], "npx playwright install chromium",
-                         browsers[1], "python -m playwright install chromium"]
-    assert [call for call in calls if call in license_checks] == license_checks
-    assert [call for call in calls if call in expected_browsers] == expected_browsers
-    assert sorted(calls) == sorted(license_checks + expected_browsers)
+    expected_browsers = [*browsers[:2], "npx playwright install --with-deps chromium",
+                         *browsers[2:], "python -m playwright install --with-deps chromium"]
+    for fail_deps in (False, True):
+        calls = run(fail_launch=True, fail_deps=fail_deps)
+        assert [call for call in calls if call in license_checks] == license_checks
+        assert [call for call in calls if call in expected_browsers] == expected_browsers
+        assert sorted(calls) == sorted(license_checks + expected_browsers)
 
 
 _SIP_EARLY_POLICY_IDS = (
