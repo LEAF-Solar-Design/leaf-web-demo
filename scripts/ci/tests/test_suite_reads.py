@@ -1,6 +1,7 @@
 """Hermetic repositories exercise read-set checking, selection, and recording."""
 
 import copy
+from argparse import Namespace
 import importlib.util
 import json
 from pathlib import Path
@@ -107,13 +108,41 @@ def test_check_covered_and_counts(repository):
     assert run(repository, "check") == (0, "suite read check: ok suite=alpha files=3 dirs=1 children=1\n")
 
 
+@pytest.mark.parametrize("kind", ["f", "d", "e"])
+def test_run_all_reads_need_no_declaration(repository, kind):
+    root, declared, logs, data, base = repository
+    data["run_all"] = ["scripts/ci/**"]
+    data["suites"]["alpha"] = suite()
+    manifest(repository)
+    log(repository, {"k": kind, "p": "scripts/ci/x.py"})
+    assert run(repository, "check")[0] == 0
+    assert run(repository, "record")[0] == 0
+    assert json.loads(declared.read_text(encoding="utf-8"))["suites"]["alpha"] == suite()
+
+
+def test_run_all_keeps_child_paths(repository):
+    root, declared, logs, data, base = repository
+    data["run_all"] = ["scripts/ci/**"]
+    data["suites"]["alpha"] = suite()
+    manifest(repository)
+    child = {"k": "x", "exe": "opaque", "cwd": ".", "paths": ["scripts/ci/x.py"]}
+    log(repository, child)
+    assert suite_reads._observed(root, logs, data["ignore"], run_all=data["run_all"])[3] == [child]
+    code, output = run(repository, "check")
+    assert code == 1
+    assert "paths=scripts/ci/x.py" in output
+    assert run(repository, "record", "--children")[0] == 0
+    recorded = json.loads(declared.read_text(encoding="utf-8"))["suites"]["alpha"]
+    assert recorded["children"][0]["reads"] == ["scripts/ci/x.py"]
+
+
 def test_check_reports_all_undeclared_kinds(repository):
     log(repository, {"k": "f", "p": "unread"}, {"k": "f", "p": "missing/probe"},
         {"k": "d", "p": "beta"}, {"k": "x", "exe": "git", "cwd": ".", "paths": ["unread"]})
     code, output = run(repository, "check")
     assert code == 1
     assert "FAIL suite=alpha undeclared=4" in output
-    for line in ("  undeclared file: unread", "  undeclared file: missing/probe",
+    for line in ("  undeclared file: unread", "  undeclared exists: missing/probe",
                  "  undeclared dir: beta", "  undeclared child: git cwd=. paths=unread"):
         assert line in output
     assert f"--audit-dir {repository[2]}, then declare any child by hand" in output
@@ -195,6 +224,31 @@ def test_file_probe_of_tracked_directory_requires_declaration(repository):
     data["suites"]["alpha"]["files"].append("beta")
     manifest(repository)
     assert run(repository, "check") == (0, "suite read check: ok suite=alpha files=1 dirs=0 children=0\n")
+
+
+@pytest.mark.parametrize("dirs,expected", [(["pkg"], 0), ([], 1)])
+def test_missing_import_probes_use_parent_listing(repository, dirs, expected):
+    repository[3]["suites"]["alpha"] = suite(dirs=dirs)
+    manifest(repository)
+    paths = ["pkg/__init__.cpython-312-aarch64-linux-gnu.so", "pkg/__init__.abi3.so"]
+    log(repository, *({"k": "f", "p": path} for path in paths))
+    code, output = run(repository, "check")
+    assert code == expected
+    for path in paths:
+        assert (f"undeclared exists: {path}" in output) == bool(expected)
+        assert f"undeclared file: {path}" not in output
+    assert run(repository, "record")[0] == 0
+    recorded = json.loads(repository[1].read_text(encoding="utf-8"))["suites"]["alpha"]
+    assert recorded == suite(dirs=dirs, exists=paths if expected else [])
+
+
+def test_tracked_file_read_is_not_covered_by_parent_listing(repository):
+    repository[3]["suites"]["alpha"] = suite(dirs=["alpha"])
+    manifest(repository)
+    log(repository, {"k": "f", "p": "alpha/input"})
+    code, output = run(repository, "check")
+    assert code == 1
+    assert "undeclared file: alpha/input" in output
 
 
 def test_check_ignores_existing_untracked_and_ignored_observations(repository):
@@ -316,9 +370,9 @@ def test_select_child_reads_and_existence(repository, monkeypatch, field, kind, 
         data["suites"]["alpha"]["exists"] = ["scripts"]
     manifest(repository)
     monkeypatch.setattr(suite_reads, "_diff", lambda *args: [(kind, path)])
-    selections, reason = suite_reads._select(None, suite_reads._load(repository[1]), repository[0])
+    selections, reason = suite_reads._select(Namespace(cached=True), suite_reads._load(repository[1]), repository[0])
     expected = int((path == "scripts" or path.startswith("scripts/"))
-                   and (kind != "M" or field == "reads"))
+                   and (field == "reads" or kind in {"A", "D"} or path == "scripts" and kind == "T"))
     assert selections == {"alpha": expected, "beta": 0}
     assert reason == "selected"
 
@@ -327,8 +381,10 @@ def test_select_child_existence_symlink_modification(repository, monkeypatch):
     repository[3]["suites"]["alpha"] = suite(children=[
         {"exe": "git", "cwd": ".", "reads": ["scripts/**"]},
     ])
-    monkeypatch.setattr(suite_reads, "_git", lambda *args:
-                        b":120000 120000 1234567 7654321 M\0scripts/link\0")
+    original_git = suite_reads._git
+    monkeypatch.setattr(suite_reads, "_git", lambda root, *args:
+                        b":120000 120000 1234567 7654321 M\0scripts/link\0"
+                        if args[0] == "diff" else original_git(root, *args))
     args = type("Arguments", (), {"cached": True})()
     assert suite_reads._select(args, repository[3], repository[0]) == (
         {"alpha": 1, "beta": 0}, "selected")
@@ -353,7 +409,7 @@ def test_select_descendant_of_file_probe(repository, status, probe):
     git(root, "commit", "--quiet", "-m", "change descendant")
     head = git(root, "rev-parse", "HEAD")
     assert selected(repository, "--base", base, "--head", head) == (
-        {"alpha": "1", "beta": "0"}, "selected")
+        {"alpha": str(int(probe == "x")), "beta": "0"}, "selected")
 
 
 def test_select_invalid_manifest_and_failed_git_are_full(repository):
@@ -397,7 +453,8 @@ def test_record_sorted_files_dirs_and_manual_children(repository):
     assert "undeclared child: git cwd=. paths=unread" in output
     text = declared.read_text(encoding="utf-8")
     recorded = json.loads(text)
-    assert recorded["suites"]["alpha"]["files"] == ["a-missing", "alpha/input", "beta/input", "unread"]
+    assert recorded["suites"]["alpha"]["files"] == ["alpha/input", "beta/input", "unread"]
+    assert recorded["suites"]["alpha"]["exists"] == ["a-missing"]
     assert recorded["suites"]["alpha"]["dirs"] == ["a-missing-dir", "alpha", "beta"]
     assert recorded["suites"]["alpha"]["children"] == []
     assert text == json.dumps(recorded, indent=1) + "\n"
@@ -601,7 +658,7 @@ def test_check_existence_reads(repository, path, coverage):
     manifest(repository)
     log(repository, {"k": "e", "p": path})
     code, output = run(repository, "check")
-    if coverage is None or coverage == "dirs":
+    if coverage is None:
         assert code == 1
         assert f"  undeclared exists: {path}\n" in output
     else:
@@ -610,6 +667,9 @@ def test_check_existence_reads(repository, path, coverage):
 
 @pytest.mark.parametrize("path", ["unread", "beta", "missing/probe"])
 def test_exists_declaration_never_covers_content_reads(repository, path):
+    if path == "missing/probe":
+        write(repository[0], path)
+        git(repository[0], "add", path)
     repository[3]["suites"]["alpha"] = suite(exists=[path])
     manifest(repository)
     log(repository, {"k": "f", "p": path})
@@ -629,7 +689,7 @@ def test_check_ignores_untracked_and_ignored_existence_reads(repository):
 
 
 @pytest.mark.parametrize("change,expected", [
-    ("modify", "0"), ("delete", "1"), ("add-descendant", "1"),
+    ("modify", "0"), ("delete", "1"), ("add-descendant", "0"),
     ("replace-with-symlink", "1"), ("retarget-symlink", "1"),
     ("modify-file-read", "1"), ("modify-descendant", "0"),
     ("rename", "1"),
@@ -683,7 +743,9 @@ def test_raw_modes_classify_changes(repository, monkeypatch, old_mode, new_mode,
 
     def raw_diff(root, *args):
         calls.append(args)
-        return f":{old_mode} {new_mode} 1234567 7654321 {status}\0a.txt\0".encode()
+        if args[0] == "diff":
+            return f":{old_mode} {new_mode} 1234567 7654321 {status}\0a.txt\0".encode()
+        return b"a.txt\0"
 
     monkeypatch.setattr(suite_reads, "_git", raw_diff)
     args = type("Arguments", (), {"cached": True})()
@@ -701,8 +763,8 @@ def test_existence_ancestors_select_structural_changes(repository, monkeypatch, 
     data = repository[3]
     data["suites"]["alpha"] = suite(exists=[probe])
     monkeypatch.setattr(suite_reads, "_diff", lambda *args: [(kind, "dir/nested/input")])
-    selections, reason = suite_reads._select(None, data, repository[0])
-    assert selections == {"alpha": 1, "beta": 0}
+    selections, reason = suite_reads._select(Namespace(cached=True), data, repository[0])
+    assert selections == {"alpha": int(probe == "dir" and kind != "T"), "beta": 0}
     assert reason == "selected"
 
 
@@ -836,9 +898,9 @@ def test_check_all_output_caps_and_counts_after_truncation(repository, capsys):
     assert lines[-1] == "  ... output truncated"
     assert lines.count("  ... output truncated") == 1
     assert lines[0] == "suite read check: FAIL suite=suite-00 undeclared=205"
-    assert lines[200] == "  undeclared file: missing-199"
+    assert lines[200] == "  undeclared exists: missing-199"
     assert lines[201].startswith("  fix:")
-    assert "  undeclared file: missing-200" not in lines
+    assert "  undeclared exists: missing-200" not in lines
     (repository[2] / "zzz-unknown").mkdir()
     assert suite_reads.main(batch_arguments(repository)) == 2
     assert len(capsys.readouterr().out.splitlines()) == 2001
@@ -865,8 +927,8 @@ def test_r10_exact_directory_coverage_agrees_with_selection(repository, monkeypa
         assert suite_reads._child_covered(entry, declared)
     repository[3]["suites"]["alpha"] = declared
     monkeypatch.setattr(suite_reads, "_diff", lambda *args: [(kind, "alpha/nested/input")])
-    selections, _ = suite_reads._select(None, repository[3], repository[0])
-    assert selections["alpha"] == int(kind != "M" or coverage == "reads")
+    selections, _ = suite_reads._select(Namespace(cached=True), repository[3], repository[0])
+    assert selections["alpha"] == int(coverage == "reads" or coverage == "globs" and kind != "M")
 
 
 @pytest.mark.parametrize("patterns,expected", [([], False), (["scripts/**"], False),
@@ -980,7 +1042,7 @@ def test_c13_tracked_symlink_directory_listing_requires_coverage_and_selects_typ
     manifest(repository)
     assert run(repository, "check")[0] == 0
     monkeypatch.setattr(suite_reads, "_diff", lambda *args: [("T", "listed-link")])
-    selections, reason = suite_reads._select(None, data, root)
+    selections, reason = suite_reads._select(Namespace(cached=True), data, root)
     assert selections == {"alpha": 1, "beta": 0}
     assert reason == "selected"
 
@@ -1050,13 +1112,17 @@ def test_d6_observed_children_dedupe_argv_only_for_pathless_non_git(repository, 
 @pytest.mark.parametrize("kind", ["f", "e"])
 @pytest.mark.parametrize("path", ["unread", "alpha", "missing/probe"])
 def test_d7_directory_declarations_never_cover_file_or_existence_entries(repository, kind, path):
+    if kind == "f" and path == "missing/probe":
+        write(repository[0], path)
+        git(repository[0], "add", path)
     data = repository[3]
     data["suites"]["alpha"] = suite(dirs=[path])
     manifest(repository)
     log(repository, {"k": kind, "p": path})
     code, output = run(repository, "check")
-    assert code == 1
-    assert f"undeclared {'file' if kind == 'f' else 'exists'}: {path}" in output
+    assert code == (1 if kind == "f" else 0)
+    if kind == "f":
+        assert f"undeclared file: {path}" in output
     data["suites"]["alpha"]["files" if kind == "f" else "exists"] = [path]
     manifest(repository)
     assert run(repository, "check")[0] == 0
@@ -1068,7 +1134,7 @@ def test_d8_ancestors_of_declared_entries_select_structural_changes(repository, 
     data = repository[3]
     data["suites"]["alpha"] = suite(**{field: ["link/deep/input"]})
     monkeypatch.setattr(suite_reads, "_diff", lambda *args: [(kind, "link")])
-    selections, _ = suite_reads._select(None, data, repository[0])
+    selections, _ = suite_reads._select(Namespace(cached=True), data, repository[0])
     assert selections == {"alpha": int(kind != "M"), "beta": 0}
 
 
@@ -1124,6 +1190,71 @@ def test_e8_ignore_keeps_children_and_requires_exact_argv_after_filtering(reposi
     assert run(repository, "check")[0] == 0
 
 
+@pytest.mark.parametrize("entry", [
+    {"k": "f", "p": "alpha/input"},
+    {"k": "d", "p": "alpha"},
+    {"k": "e", "p": "missing/probe"},
+    {"k": "x", "exe": "opaque", "cwd": ".", "paths": ["unread"], "argv": ["opaque", "unread"]},
+])
+@pytest.mark.parametrize("attribution", [{"m": None}, {"m": "test_example"}, {"i": True},
+                                         {"m": "test_example", "i": True}])
+def test_attribution_does_not_change_observations_or_check(repository, entry, attribution):
+    log(repository, entry)
+    expected = run(repository, "check")
+    observed = suite_reads._observed(repository[0], repository[2], [])
+    log(repository, {**entry, **attribution})
+    assert run(repository, "check") == expected
+    assert suite_reads._observed(repository[0], repository[2], []) == observed
+    # Attribution must not prevent identical children from being deduplicated.
+    log(repository, entry, {**entry, **attribution})
+    assert suite_reads._observed(repository[0], repository[2], []) == observed
+
+
+@pytest.mark.parametrize("entry", [
+    {"k": "f", "p": "alpha/input"}, {"k": "d", "p": "alpha"},
+    {"k": "e", "p": "unread"}, {"k": "x", "exe": "opaque", "cwd": ".", "paths": []},
+])
+@pytest.mark.parametrize("extra", [{"extra": True}, {"m": 42}, {"i": False}, {"i": 1}, {"i": None}])
+def test_attribution_keeps_log_schema_strict(repository, entry, extra):
+    log(repository, {**entry, **extra})
+    assert run(repository, "check")[0] == 2
+
+
+@pytest.mark.parametrize("path,expected,reason", [
+    ("alpha/input", {"alpha": "1", "beta": "0"}, "selected"),
+    ("alpha/new", {"alpha": "1", "beta": "0"}, "selected"),
+    ("beta", {"alpha": "0", "beta": "1"}, "selected"),
+    ("unread", {"alpha": "0", "beta": "0"}, "selected"),
+    (".codebuild/ci.sh", {"alpha": "1", "beta": "1"}, "run_all .codebuild/ci.sh"),
+])
+def test_paths_select_as_added_changes(repository, path, expected, reason):
+    assert selected(repository, "--paths", path) == (expected, reason)
+
+
+def test_paths_select_existence_and_multiple_paths(repository):
+    repository[3]["suites"]["alpha"] = suite(exists=["missing/probe"])
+    manifest(repository)
+    assert selected(repository, "--paths", "missing/probe", "beta/input")[0] == {"alpha": "1", "beta": "1"}
+
+
+@pytest.mark.parametrize("other", [["--cached"], ["--base", "HEAD", "--head", "HEAD"]])
+def test_paths_excludes_other_diff_modes(repository, other):
+    result = subprocess.run(
+        [sys.executable, str(TOOL), "select", "--root", str(repository[0]),
+         "--paths", "alpha/input", *other], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 2
+    assert "not allowed with argument" in result.stderr
+
+
+def test_paths_with_root_never_calls_git(repository, monkeypatch, capsys):
+    def forbidden(*args):
+        pytest.fail("--paths with --root must not invoke git")
+
+    monkeypatch.setattr(suite_reads, "_git", forbidden)
+    assert suite_reads.main(["select", "--root", str(repository[0]), "--paths", "alpha/new"]) == 0
+    assert capsys.readouterr().out == "alpha=1\nbeta=0\nscope reason: selected\n"
+
+
 @pytest.mark.parametrize("path,dirs,expected", [
     ("alpha/other", ["alpha"], 0),
     ("alpha/nested/missing", ["alpha"], 1),
@@ -1131,6 +1262,7 @@ def test_e8_ignore_keeps_children_and_requires_exact_argv_after_filtering(reposi
     ("unread", ["."], 0),
     ("unread", ["alpha"], 1),
     ("alpha/other", ["."], 1),
+    ("x/y", ["x/y"], 0),
 ])
 def test_exists_is_covered_only_by_direct_parent_listing(repository, path, dirs, expected):
     repository[3]["suites"]["alpha"] = suite(dirs=dirs)
@@ -1168,7 +1300,7 @@ def test_parent_listing_selects_existence_changes_but_not_content(repository, mo
     commit(root)
     data["suites"]["alpha"] = suite(dirs=["D"])
     monkeypatch.setattr(suite_reads, "_diff", lambda *args: [(kind, "D/x")])
-    selections, reason = suite_reads._select(None, data, root)
+    selections, reason = suite_reads._select(Namespace(cached=True), data, root)
     assert selections == {"alpha": int(kind != "M"), "beta": 0}
     assert reason == "selected"
 
@@ -1215,3 +1347,213 @@ def test_backslash_exception_rejects_other_kinds_and_invalid_parents(repository,
     code, output = run(repository, "check")
     assert code == 2
     assert "invalid audit" in output
+
+
+@pytest.mark.parametrize("suffix", ["pyvenv.cfg", "conda-meta/history", "__init__.py"])
+@pytest.mark.parametrize("prefix,dirs,expected", [
+    ("x", ["."], 0), ("x", [], 1), ("a/x", ["a"], 0), ("b/x", ["a"], 1),
+])
+def test_pytest_probe_covered_by_entry_parent_listing(repository, suffix, prefix, dirs, expected):
+    repository[3]["suites"]["alpha"] = suite(dirs=dirs)
+    manifest(repository)
+    path = f"{prefix}/{suffix}"
+    log(repository, {"k": "e", "p": path})
+    code, output = run(repository, "check")
+    assert code == expected
+    assert (f"undeclared exists: {path}" in output) == bool(expected)
+    assert run(repository, "record")[0] == 0
+    recorded = json.loads(repository[1].read_text(encoding="utf-8"))["suites"]["alpha"]
+    assert recorded["exists"] == ([path] if expected else [])
+    assert run(repository, "check")[0] == 0
+
+
+@pytest.mark.parametrize("kind,path", [("e", "x/other.txt"), ("f", "x/__init__.py")])
+def test_pytest_probe_rule_does_not_cover_other_reads(repository, kind, path):
+    repository[3]["suites"]["alpha"] = suite(dirs=["."])
+    manifest(repository)
+    if kind == "f":
+        write(repository[0], path)
+        git(repository[0], "add", path)
+    log(repository, {"k": kind, "p": path})
+    code, output = run(repository, "check")
+    assert code == 1
+    assert f"undeclared {'file' if kind == 'f' else 'exists'}: {path}" in output
+
+
+@pytest.mark.parametrize("path,owner", [
+    ("x/pyvenv.cfg", "x"), ("a/x/conda-meta/history", "a/x"),
+    ("a/x/__init__.py", "a/x"), ("pyvenv.cfg", None),
+    ("conda-meta/history", None), ("__init__.py", None),
+    ("x/other.txt", None), ("x/pyvenv.cfg/extra", None),
+])
+def test_pytest_probe_owner(path, owner):
+    assert suite_reads._pytest_probe_owner(path) == owner
+
+
+def selection_arguments(root, base, cached):
+    if cached:
+        return ["--cached"]
+    git(root, "commit", "--quiet", "-m", "change")
+    return ["--base", base, "--head", git(root, "rev-parse", "HEAD")]
+
+
+@pytest.mark.parametrize("cached", [False, True], ids=["commits", "index"])
+@pytest.mark.parametrize("before,path,declared,expected", [
+    (["src/x/keep"], "src/x/new.ts", suite(dirs=["."]), "0"),
+    ([], "new.ts", suite(dirs=["."]), "1"),
+    (["src/x/keep"], "src/x/new.ts", suite(dirs=["src/x"]), "1"),
+    (["src/x/keep"], "src/x/y/new.ts", suite(dirs=["src/x"]), "1"),
+    (["src/x/y/keep"], "src/x/y/new.ts", suite(dirs=["src/x"]), "0"),
+    (["src/x/keep"], "src/x/y/z.ts", suite(exists=["src/x/y"]), "1"),
+    (["src/x/y/keep"], "src/x/y/z.ts", suite(exists=["src/x/y"]), "0"),
+    (["src/x/keep"], "src/x/y/z.ts", suite(files=["src/x/y"]), "1"),
+    (["src/x/keep"], "src/x/y/z.ts", suite(dirs=["src/x/y"]), "1"),
+    (["src/x/y/keep"], "src/x/y/z.ts", suite(files=["src/x"]), "0"),
+    (["src/x/y/keep"], "src/x/y/z.ts", suite(exists=["src/x"]), "0"),
+    (["src/x/keep"], "src/x/y/z.ts", suite(globs=["src"]), "1"),
+    (["src/x/keep"], "src/x/y/z.ts", suite(children=[
+        {"exe": "opaque", "cwd": ".", "reads": ["src"]}]), "1"),
+])
+def test_select_additions_use_direct_children(repository, cached, before, path, declared, expected):
+    root, _, _, data, _ = repository
+    data["suites"]["alpha"] = declared
+    manifest(repository)
+    for tracked in before:
+        write(root, tracked)
+    base = commit(root)
+    # A disk-only directory is still fresh in the tracked tree on the before side.
+    write(root, str(Path(path).parent / "untracked"))
+    write(root, path)
+    git(root, "add", "--", path)
+    assert selected(repository, *selection_arguments(root, base, cached)) == (
+        {"alpha": expected, "beta": "0"}, "selected")
+
+
+@pytest.mark.parametrize("cached", [False, True], ids=["commits", "index"])
+def test_select_last_file_deletion_uses_nearest_surviving_directory(repository, cached):
+    root, _, _, data, _ = repository
+    data["suites"] = {
+        "root": suite(dirs=["."]), "parent": suite(dirs=["src"]),
+        "removed": suite(exists=["src/x"]), "listed": suite(dirs=["src/x"]),
+        "file-probe": suite(files=["src/x"]), "surviving": suite(exists=["src"]),
+    }
+    manifest(repository)
+    write(root, "src/keep")
+    write(root, "src/x/only.ts")
+    base = commit(root)
+    # An untracked survivor on disk must not hide removal of the tracked directory.
+    write(root, "src/x/untracked")
+    (root / "src/x/only.ts").unlink()
+    git(root, "add", "--", "src/x/only.ts")
+    assert selected(repository, *selection_arguments(root, base, cached)) == (
+        {"root": "0", "parent": "1", "removed": "1", "listed": "1",
+         "file-probe": "1", "surviving": "0"}, "selected")
+
+
+@pytest.mark.parametrize("cached", [False, True], ids=["commits", "index"])
+def test_select_type_change_uses_direct_parent(repository, cached):
+    root, _, _, data, _ = repository
+    data["suites"] = {
+        "root": suite(dirs=["."]), "parent": suite(dirs=["src/x"]),
+        "exact": suite(exists=["src/x/f"]), "ancestor": suite(exists=["src/x"]),
+        "file-probe": suite(files=["src"]),
+    }
+    manifest(repository)
+    write(root, "src/x/f")
+    base = commit(root)
+    (root / "src/x/f").unlink()
+    (root / "src/x/f").symlink_to("../../unread")
+    git(root, "add", "--", "src/x/f")
+    assert selected(repository, *selection_arguments(root, base, cached)) == (
+        {"root": "0", "parent": "1", "exact": "1", "ancestor": "0", "file-probe": "0"},
+        "selected")
+
+
+@pytest.mark.parametrize("cached", [False, True], ids=["commits", "index"])
+def test_select_file_becoming_directory_selects_file_probe(repository, cached):
+    root, _, _, data, _ = repository
+    data["suites"]["alpha"] = suite(files=["a"])
+    manifest(repository)
+    write(root, "a")
+    base = commit(root)
+    (root / "a").unlink()
+    write(root, "a/b")
+    git(root, "add", "--", "a")
+    assert selected(repository, *selection_arguments(root, base, cached)) == (
+        {"alpha": "1", "beta": "0"}, "selected")
+
+
+@pytest.mark.parametrize("cached", [False, True], ids=["commits", "index"])
+def test_select_rename_uses_both_direct_parent_listings(repository, cached):
+    root, _, _, data, _ = repository
+    data["suites"] = {
+        "root": suite(dirs=["."]), "source": suite(dirs=["a"]),
+        "destination": suite(dirs=["b"]), "old": suite(files=["a/old.ts"]),
+        "new": suite(exists=["b/new.ts"]), "surviving": suite(exists=["a", "b"]),
+    }
+    manifest(repository)
+    for path in ("a/old.ts", "a/keep", "b/keep"):
+        write(root, path)
+    base = commit(root)
+    git(root, "mv", "a/old.ts", "b/new.ts")
+    args = selection_arguments(root, base, cached)
+    diff_args = ["--cached"] if cached else [args[1], args[3]]
+    assert "R100" in git(root, "diff", "--name-status", "--find-renames", *diff_args)
+    assert selected(repository, *args) == (
+        {"root": "0", "source": "1", "destination": "1", "old": "1", "new": "1",
+         "surviving": "0"}, "selected")
+
+
+@pytest.mark.parametrize("declared,path", [
+    (suite(dirs=["."]), "src/x/new.ts"),
+    (suite(exists=["src"]), "src/x/new.ts"),
+    (suite(files=["src/x/deep/input"]), "src"),
+])
+def test_paths_keeps_wide_ancestor_rule(repository, declared, path):
+    repository[3]["suites"]["alpha"] = declared
+    manifest(repository)
+    assert selected(repository, "--paths", path) == ({"alpha": "1", "beta": "0"}, "selected")
+
+
+@pytest.mark.parametrize("cached", [False, True], ids=["commits", "index"])
+def test_selection_loads_each_tracked_tree_once(repository, monkeypatch, cached):
+    root, _, _, data, base = repository
+    data["suites"].update({f"suite-{index}": suite(dirs=["."]) for index in range(10)})
+    manifest(repository)
+    write(root, "alpha/new")
+    git(root, "add", "alpha/new")
+    options = selection_arguments(root, base, cached)
+    calls = []
+    original_git = suite_reads._git
+
+    def counted_git(root, *args):
+        calls.append(args)
+        return original_git(root, *args)
+
+    monkeypatch.setattr(suite_reads, "_git", counted_git)
+    arguments = Namespace(cached=cached, base=base, head=options[-1])
+    selections, reason = suite_reads._select(arguments, data, root)
+    assert reason == "selected"
+    assert selections["alpha"] == 1
+    tree_calls = [args for args in calls if args[0] != "diff"]
+    assert tree_calls == (
+        [("ls-tree", "-r", "-z", "--name-only", "HEAD"), ("ls-files", "-z")] if cached else
+        [("ls-tree", "-r", "-z", "--name-only", base),
+         ("ls-tree", "-r", "-z", "--name-only", options[-1])])
+
+
+@pytest.mark.parametrize("cached", [False, True], ids=["commits", "index"])
+def test_selection_failed_ls_tree_prints_every_suite(repository, monkeypatch, capsys, cached):
+    root, _, _, _, base = repository
+    original_git = suite_reads._git
+
+    def failed_tree(root, *args):
+        if args[0] == "ls-tree":
+            raise suite_reads.Unusable("git command failed (ls-tree)")
+        return original_git(root, *args)
+
+    monkeypatch.setattr(suite_reads, "_git", failed_tree)
+    options = ["--cached"] if cached else ["--base", base, "--head", base]
+    assert suite_reads.main(["select", "--root", str(root), *options]) == 0
+    assert capsys.readouterr().out == (
+        "alpha=1\nbeta=1\nscope reason: git command failed (ls-tree)\n")

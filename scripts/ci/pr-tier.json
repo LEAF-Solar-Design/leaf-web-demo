@@ -185,6 +185,7 @@
     "server-canonical-worker",
     "server-canonical-worker-deploy-contract",
     "server-capabilities-cold-import",
+    "server-capabilities-project-read",
     "server-capabilities-promotion",
     "server-capture-lab-wave3",
     "server-cat-litmus-offline",
@@ -419,6 +420,7 @@
     "server-product-capability-catalog",
     "server-project-checkout-custody",
     "server-project-drawing-editor",
+    "server-project-drawing-write",
     "server-project-editor-upload-source",
     "server-project-execution-context",
     "server-project-material-images",
@@ -755,7 +757,7 @@
   ],
   "enabled": true,
   "generated_from": {
-    "catalog_sha256": "699d03955b6ba4fe451d056bb1cbb714692e85ae69ee67822960adc24bde4926",
+    "catalog_sha256": "eb5638e6bbf99748ac8196b7f3cee815b7e9c06564d07dce524a97009db39935",
     "input_sha256s": {
       "fail30": "1d12f16a43d821eed38c6c411a1639d2e0af5241db8ae50e372bfa2c02443d4a",
       "proposal": "b7ee7af28e7da38b36ec81821a9ad977d7100b40a2047318603ac8c6b7929f87",

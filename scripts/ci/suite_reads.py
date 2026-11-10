@@ -1,4 +1,8 @@
-"""Declared suite read sets: check a run against them, select suites for a diff, record new reads."""
+"""Declared suite read sets: check a run against them, select suites for a diff, record new reads.
+
+Existence on each side comes from git's tracked tree. A directory present only
+because of untracked files is treated as fresh, checking more entries, never fewer.
+"""
 
 import argparse
 import fnmatch
@@ -165,6 +169,12 @@ def _logs(directory):
                 kind = entry.get("k")
                 if kind == "o":
                     raise Unusable("audit overflow")
+                if kind in ("f", "d", "e", "x"):
+                    if (("m" in entry and entry["m"] is not None
+                         and not isinstance(entry["m"], str))
+                            or ("i" in entry and entry["i"] is not True)):
+                        raise Unusable(f"invalid audit attribution ({repr(entry)[:200]})")
+                    entry = {key: value for key, value in entry.items() if key not in {"m", "i"}}
                 if kind in ("f", "d", "e"):
                     if not _keys(entry, ("k", "p")):
                         raise Unusable(f"invalid audit path ({repr(entry)[:200]})")
@@ -209,7 +219,7 @@ def _tracked(root):
     return tracked, tracked_dirs
 
 
-def _observed(root, directory, ignore, tracked_sets=None):
+def _observed(root, directory, ignore, tracked_sets=None, run_all=()):
     entries = _logs(directory)
     tracked, tracked_dirs = _tracked(root) if tracked_sets is None else tracked_sets
     files, dirs, exists, children = set(), set(), set(), {}
@@ -225,8 +235,12 @@ def _observed(root, directory, ignore, tracked_sets=None):
         path = entry["p"]
         if kind == "e" and not _path(path):
             path, kind = _backslash_parent(path), "d"
-        if _any(path, ignore):
+        # A read of a run_all path needs no declaration: a change to it already runs every suite.
+        if _any(path, ignore) or _any(path, run_all):
             continue
+        # Reading a missing path reveals only that it is missing: record it as existence, so import probes whose names vary by interpreter and CPU are covered by the parent listing like any other existence read.
+        if kind == "f" and path not in tracked and path not in tracked_dirs and not os.path.exists(root / path):
+            kind = "e"
         if kind == "f" and (path in tracked or path in tracked_dirs or not os.path.exists(root / path)):
             files.add(path)
         elif kind == "d" and (path in tracked or path in tracked_dirs or not os.path.exists(root / path)):
@@ -237,13 +251,25 @@ def _observed(root, directory, ignore, tracked_sets=None):
     return sorted(files), sorted(dirs), sorted(exists), [children[key] for key in sorted(children)]
 
 
+def _pytest_probe_owner(path):
+    for suffix in ("/pyvenv.cfg", "/__init__.py", "/conda-meta/history"):
+        if path.endswith(suffix):
+            return path[:-len(suffix)] or None
+    return None
+
+
 def _undeclared(observed, suite):
     files, dirs, exists, children = observed
     # e carries existence/type only: M cannot change it; A/D/T under a listed dir select.
+    # pytest probes <entry>/pyvenv.cfg, conda-meta/history and __init__.py for every entry of a directory it scans. Each new file would add undeclared probes and fail unrelated PRs; the listing of that directory already covers adds and deletes there.
+    # An existence read of a listed directory changes only with an add, delete or type change at or under it, which selection already catches.
     return ([path for path in files if not _covered(path, "files", suite)],
             [path for path in dirs if path not in suite["files"] and not _covered(path, "dirs", suite)],
             [path for path in exists if path not in suite["files"]
+             and path not in suite["dirs"]
              and (path.rsplit("/", 1)[0] if "/" in path else ".") not in suite["dirs"]
+             and not ((owner := _pytest_probe_owner(path)) is not None
+                      and (owner.rsplit("/", 1)[0] if "/" in owner else ".") in suite["dirs"])
              and not _covered(path, "exists", suite)],
             [child for child in children if not _child_covered(child, suite)])
 
@@ -263,7 +289,8 @@ def _details(missing):
 def _check(args, data, root, tracked_sets=None, emit=print):
     if args.suite not in data["suites"]:
         raise Unusable("unknown suite")
-    observed = _observed(root, Path(args.audit_dir), data["ignore"], tracked_sets)
+    observed = _observed(root, Path(args.audit_dir), data["ignore"], tracked_sets,
+                         run_all=data["run_all"])
     missing = _undeclared(observed, data["suites"][args.suite])
     count = sum(map(len, missing))
     if not count:
@@ -313,7 +340,7 @@ def _check_all(args, data, root):
 def _record(args, data, root, declared):
     if not _SUITE_NAME.fullmatch(args.suite):
         raise Unusable("invalid suite name")
-    observed = _observed(root, Path(args.audit_dir), data["ignore"])
+    observed = _observed(root, Path(args.audit_dir), data["ignore"], run_all=data["run_all"])
     suite = data["suites"].setdefault(args.suite, {"globs": [], "files": [], "dirs": [], "exists": [], "children": []})
     files, dirs, _, children = _undeclared(observed, suite)
     suite["dirs"] = sorted(set(suite["dirs"]) | set(dirs))
@@ -417,26 +444,63 @@ def _diff(args, root):
     return changes
 
 
+def _selection_dirs(args, root):
+    sides = (("ls-tree", "-r", "-z", "--name-only", "HEAD"), ("ls-files", "-z")) if args.cached else (
+        ("ls-tree", "-r", "-z", "--name-only", args.base),
+        ("ls-tree", "-r", "-z", "--name-only", args.head))
+    directories = []
+    for command in sides:
+        dirs = {"."}
+        for path in _git(root, *command).split(b"\0"):
+            if path:
+                dirs.update(_ancestors(os.fsdecode(path)))
+        directories.append(dirs)
+    return directories
+
+
+def _structural_covered(kind, path, suite, trees, ancestors):
+    parents = _ancestors(path)
+    keys = ("files", "dirs", "exists")
+    if trees is None:
+        return (any(path in suite[key] for key in keys)
+                or path in ancestors
+                or any(parent in suite[key] for parent in parents for key in keys))
+    before, after = trees
+    missing = before if kind == "A" else after if kind == "D" else None
+    fresh = [parent for parent in parents if parent != "." and parent not in missing] if missing is not None else []
+    nearest = next(parent for parent in reversed(parents) if parent in before and parent in after)
+    # A listing reveals only direct children: an add or delete changes the listing of its nearest surviving ancestor and the existence of every directory it creates or removes, nothing above them.
+    return (any(candidate in suite[key] for candidate in [path, *fresh] for key in keys)
+            or path in ancestors
+            or nearest in suite["dirs"])
+
+
 def _select(args, data, root):
     try:
-        changes = _diff(args, root)
+        paths = getattr(args, "paths", None)
+        trees = None
+        if paths is not None:
+            if not all(_path(path) for path in paths):
+                raise Unusable("invalid supplied path")
+            changes = [("A", path) for path in paths]
+        else:
+            changes = _diff(args, root)
+            trees = _selection_dirs(args, root)
         for _, path in changes:
             if _any(path, data["run_all"]):
                 return {name: 1 for name in data["suites"]}, "run_all " + path
         selected = {}
         for name, suite in data["suites"].items():
             ancestors = {parent for key in ("files", "dirs", "exists")
-                         for path in suite[key] for parent in _ancestors(path)}
+                         for declared in suite[key] for parent in _ancestors(declared)}
             selected[name] = int(any(
                 _covered(path, "files", suite)
                 or any(_any(candidate, child["reads"])
                        for child in suite["children"] for candidate in [path, *_ancestors(path)])
                 or (kind in {"A", "D", "T"} and (
-                    path in suite["exists"] or path in suite["dirs"] or path in ancestors
+                    _structural_covered(kind, path, suite, trees, ancestors)
                     or any(_any(candidate, suite["globs"])
-                           for candidate in [path, *_ancestors(path)])
-                    or any(parent in suite["dirs"] or parent in suite["files"]
-                           or parent in suite["exists"] for parent in _ancestors(path))))
+                           for candidate in [path, *_ancestors(path)])))
                 for kind, path in changes))
         return selected, "selected" if changes else "no changes"
     except Unusable as exc:
@@ -466,6 +530,7 @@ def main(argv=None):
             group = command.add_mutually_exclusive_group(required=True)
             group.add_argument("--cached", action="store_true")
             group.add_argument("--base")
+            group.add_argument("--paths", nargs="+")
             command.add_argument("--head")
         elif name == "check":
             group = command.add_mutually_exclusive_group(required=True)
