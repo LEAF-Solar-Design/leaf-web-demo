@@ -933,3 +933,49 @@ describe('project Solar transport and lifecycle', () => {
     expect(outcome).not.toHaveProperty('data')
   })
 })
+
+describe('synchronous project run results', () => {
+  const N = '66666666-6666-6666-6666-666666666666'
+  const context = { organization_id: O, project_id: P, drawing_id: D, input_version_id: V }
+  const terminal = (changes = {}) => ({ ok: true, tool: 'delete-marked-panel', result: { deleted_handle: 'ABCD' },
+    project_context: context, version: { version_id: N, org_id: O, project_id: P, drawing_id: D, seq: 2 }, ...changes })
+  const run = async (data) => {
+    const { client, fetchImpl } = setup(data)
+    const prepared = client.prepareRun({ tool: 'delete-marked-panel', params: {}, catalogDigest: digest, idempotencyKey: 'confirm-1' })
+    return { outcome: await client.submitRun(prepared), fetchImpl }
+  }
+
+  it('accepts a terminal write bound to the captured context and names its output version', async () => {
+    const { outcome, fetchImpl } = await run(terminal())
+    expect(outcome.ok).toBe(true)
+    expect(outcome.data.version.version_id).toBe(N)
+    expect(url(fetchImpl)).toBe('https://api.test/api/run')
+    expect(JSON.parse(init(fetchImpl).body)).toMatchObject({ tool: 'delete-marked-panel', dwg: V, catalog_digest: digest, params: { drawing_id: D } })
+    expect(init(fetchImpl).headers).toMatchObject({ 'X-Org-Id': O, 'X-Project-Id': P, 'Idempotency-Key': 'confirm-1' })
+  })
+
+  it('accepts a terminal read that creates no version', async () => {
+    const { outcome } = await run(terminal({ version: null, result: { counts: { Panels: 1 }, total: 1 } }))
+    expect(outcome.ok).toBe(true)
+    expect(outcome.data.result.total).toBe(1)
+  })
+
+  it.each([
+    ['another tool', terminal({ tool: 'count-by-layer' })],
+    ['another project', terminal({ project_context: { ...context, project_id: N } })],
+    ['another input version', terminal({ project_context: { ...context, input_version_id: N } })],
+    ['no context', terminal({ project_context: undefined })],
+    ['a non-boolean ok', terminal({ ok: 'yes' })],
+    ['an output version of another drawing', terminal({ version: { version_id: N, org_id: O, project_id: P, drawing_id: N } })],
+    ['an output version equal to its input', terminal({ version: { version_id: V, org_id: O, project_id: P, drawing_id: D } })],
+    ['a job id beside a terminal result', terminal({ job_id: J })],
+  ])('refuses %s', async (_name, data) => {
+    const { outcome } = await run(data)
+    expect(outcome).toMatchObject({ ok: false, reason: 'SIP_R7_RESPONSE_INVALID' })
+  })
+
+  it('still attaches a real queued job', async () => {
+    const { outcome } = await run({ job_id: J, status: 'submitted' })
+    expect(outcome).toMatchObject({ ok: true, data: { job_id: J, status: 'submitted' } })
+  })
+})

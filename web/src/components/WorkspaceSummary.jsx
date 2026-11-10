@@ -77,8 +77,9 @@ export default function WorkspaceSummary({
           >
             <option value="">Select a drawing version</option>
             {versions.map((version) => (
-              <option key={version.version_id} value={version.version_id}>
-                {String(version.drawing_id).slice(0, 8)} · v{version.seq}
+              <option key={version.version_id} value={version.version_id}
+                title={`Version ${version.version_id} of drawing ${version.drawing_id}`}>
+                {String(version.version_id).slice(0, 8)} · v{version.seq}
               </option>
             ))}
           </select>

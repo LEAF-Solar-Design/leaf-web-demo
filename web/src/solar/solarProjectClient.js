@@ -475,7 +475,10 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
         idempotencyKey: intent.idempotencyKey, checkoutCapability: capability,
         ...projectSolarIntentExtras(intent.tool, intent) })
       return request('/api/run', { scope, method: 'POST', body: JSON.stringify(built.body), headers: built.headers, signal,
-        validate: (data) => typeof data?.job_id === 'string' && UUID.test(data.job_id) && data.status === 'submitted' })
+        // A queued run answers with its real job; a synchronous project run answers with a terminal
+        // envelope, accepted only when it is bound to this exact captured context and tool.
+        validate: (data, selected) => (typeof data?.job_id === 'string' && UUID.test(data.job_id) && data.status === 'submitted')
+          || terminalRun(data, selected, intent.tool) })
     }),
     uploadSolarEdgePdf: (options = {}) => guarded((scope) => {
       assert(plain(options))
@@ -638,6 +641,21 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
   }
   publish()
   return Object.freeze(client)
+}
+
+// A synchronous project run result: never a job, and bound to the captured project context.
+// An output version, when the server names one, is a new version of the same project drawing.
+function terminalRun(data, binding, tool) {
+  const context = data?.project_context
+  if (!plain(data) || Object.hasOwn(data, 'job_id') || typeof data.ok !== 'boolean' || data.tool !== tool
+    || !plain(context) || context.organization_id !== binding.organization_id
+    || context.project_id !== binding.project_id || context.drawing_id !== binding.drawing_id
+    || context.input_version_id !== binding.input_version_id) return false
+  const version = data.version
+  if (version === undefined || version === null || typeof version !== 'object') return true
+  return plain(version) && typeof version.version_id === 'string' && UUID.test(version.version_id)
+    && version.version_id !== binding.input_version_id && version.org_id === binding.organization_id
+    && version.project_id === binding.project_id && version.drawing_id === binding.drawing_id
 }
 
 function validJob(data, binding, jobId, tool) {
