@@ -5907,6 +5907,19 @@ _CONFLICT_RESOURCES_OVERRIDE = {
     "studio-walk-regressions": frozenset({"web-tree", "harness-tree"}),
     # One fixed compose project on container ports 8130/8150.
     "harness-container-smoke": frozenset({"compose-8130-8150"}),
+    # Web Vitest runs leave the web-tree chain but share one web-vitest lock, so
+    # only one locked Vitest suite runs in web/ at a time. They read web/src, web/public,
+    # web/scripts, vendor and web/node_modules, and write only Vitest's results
+    # cache (read and written inside try/catch, used only for file order; shard
+    # membership is a sha1 of each path) and the runner's .leaf-ci reporter copy,
+    # which the shared lock keeps from being rewritten under a running suite.
+    # Studio job 12198 (2026-11-05) ran all three shards at once beside browser
+    # suites: shard 3 took 597 s with 5,000 and 30,000 ms timeouts. PR job 18879
+    # spent 886 s of a 976 s gate on the web chain, 360 s of it in these shards.
+    "web-stage-source-contracts": frozenset({"web-tree", "web-vitest"}),
+    "web-vitest-1": frozenset({"web-vitest"}),
+    "web-vitest-2": frozenset({"web-vitest"}),
+    "web-vitest-3": frozenset({"web-vitest"}),
 }
 
 # Suites that rewrite build outputs (web/dist, harness/dist) other suites may
@@ -7254,7 +7267,7 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
 # At 8 workers pool suite-seconds inflate x1.57 (browser suites x1.8-1.96), so a worker needs ~2 vCPU.
 # Round CPU workers half up: job 12613's 3 CPU / 12 GiB ran serially into the deadline.
 _AUTO_CPUS_PER_WORKER = 2
-# Browser suites peaked near 3 GiB per worker in 2026-09, but every web suite now holds the web-tree lock, so one browser suite runs at a time and the other workers run pytest.
+# Browser suites peaked near 3 GiB per worker in 2026-09, but every browser web suite holds the web-tree lock, so one browser suite runs at a time; the Vitest shards hold web-vitest and run one at a time beside it.
 # 2 GiB per worker lets an 8 CPU / 8 GiB worker run 4 jobs instead of 2 (2026-11-07, unmeasured until the first full run).
 _AUTO_GIB_PER_WORKER = 2
 # Conflict lanes (#1400) and the graph memo (#1402) removed the old floor; on 36 vCPU XLARGE,
