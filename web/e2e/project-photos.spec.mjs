@@ -44,7 +44,7 @@ test('project photos upload through Material and fit the phone panel', async ({ 
   const sidebar = page.getByRole('region', { name: 'Project sidebar', exact: true })
   await sidebar.getByRole('button', { name: PROJECT.name, exact: true }).click()
   await page.getByRole('button', { name: 'Open project or material', exact: true }).click()
-  await sidebar.getByRole('button', { name: 'Photos', exact: true }).click()
+  await sidebar.getByRole('button', { name: 'Material', exact: true }).click()
   const panel = sidebar.getByRole('region', { name: 'Project photos', exact: true })
   await expect(panel).toBeVisible()
   await panel.getByLabel('Photo files').setInputFiles({ name: 'Original cake photo.png', mimeType: 'image/png', buffer: PNG })
