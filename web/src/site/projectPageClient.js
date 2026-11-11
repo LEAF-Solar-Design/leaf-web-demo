@@ -6,10 +6,27 @@ import { DESIGN_FIELDS, validateNodeDesign } from './pageDesign.js'
 const FIELDS = ['alignment', 'description', 'headline', 'label', 'status', 'theme']
 const LIMITS = { label: 120, headline: 240, description: 1200, status: 80 }
 
+// Match the closed action grammar in platform/web_page_template.py. In
+// particular, mailto is one address, with no recipient list or headers.
+const ACTION_HTTPS = /^https:\/\/[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?::[0-9]{1,5})?(?:[/?#](?:[A-Za-z0-9._~!$&()*+,;=:@/?#-]|%[0-9A-Fa-f]{2})*)?$/
+const ACTION_EMAIL = /^mailto:[A-Za-z0-9]+(?:[._+-][A-Za-z0-9]+)*@[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*(?:\.[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)+$/
+const ACTION_LABEL_URL = /(?:[a-z][a-z0-9+.-]*:\/\/|(?<![\p{L}\p{N}_])(?:(?:https?|ftp|file|data|javascript):|www\.))/iu
+
+export function isValidPageAction(action) {
+  if (!action || typeof action !== 'object' || Array.isArray(action)
+    || Object.keys(action).length !== 2 || !Object.hasOwn(action, 'label') || !Object.hasOwn(action, 'href')) return false
+  const { label, href } = action
+  return typeof label === 'string' && Boolean(label.trim()) && Array.from(label).length <= 60
+    && !/[<>\p{Cc}\p{Cf}\p{Cs}]/u.test(label) && !ACTION_LABEL_URL.test(label)
+    && typeof href === 'string' && href.length <= 2048
+    && !/[\s<>"'\p{Cc}\p{Cf}\p{Cs}]/u.test(href)
+    && (ACTION_HTTPS.test(href) || ACTION_EMAIL.test(href))
+}
+
 export function validatePageDocument(document) {
   if (document && Object.hasOwn(document, 'schema')) return validatePortfolioDocument(document)
   if (!document || typeof document !== 'object' || Array.isArray(document)
-    || Object.keys(document).filter(key => !Object.hasOwn(DESIGN_FIELDS.page, key)).sort().join(',') !== FIELDS.join(',')) throw new Error('The page has an unsupported format.')
+    || Object.keys(document).filter(key => key !== 'action' && !Object.hasOwn(DESIGN_FIELDS.page, key)).sort().join(',') !== FIELDS.join(',')) throw new Error('The page has an unsupported format.')
   validateNodeDesign(document, 'page')
   for (const [field, limit] of Object.entries(LIMITS)) {
     const value = document[field]
@@ -22,6 +39,9 @@ export function validatePageDocument(document) {
   }
   if (!['cream', 'light', 'dark'].includes(document.theme) || !['center', 'left'].includes(document.alignment)) {
     throw new Error('Choose one of the available page layouts.')
+  }
+  if (Object.hasOwn(document, 'action') && !isValidPageAction(document.action)) {
+    throw new Error('Enter a plain contact label and a valid HTTPS link or mailto address.')
   }
   if (new TextEncoder().encode(JSON.stringify(document)).length > 8192) throw new Error('Page exceeds 8192 bytes.')
   return document
