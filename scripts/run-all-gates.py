@@ -3552,7 +3552,7 @@ def build_suites() -> List[Suite]:
         Suite("server-approval-policy", "server tests/test_approval_policy.py", "pytest", SERVER,
               _py_pytest("tests/test_approval_policy.py"), 30),
         Suite("server-arlo-lab-inputs", "server tests/test_arlo_lab_inputs.py", "pytest", SERVER,
-              _py_pytest("tests/test_arlo_lab_inputs.py"), 23),
+              _py_pytest("tests/test_arlo_lab_inputs.py"), 23, uses_database=True),
         Suite("server-arlo-review", "server tests/test_arlo_review.py", "pytest", SERVER,
               _py_pytest("tests/test_arlo_review.py"), 20),
         Suite("server-author-live-harness", "server tests/test_author_live_harness.py", "pytest", SERVER,

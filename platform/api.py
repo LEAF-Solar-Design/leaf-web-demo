@@ -885,6 +885,16 @@ def register_arlo_example(project_id: uuid.UUID, example_id: str, body: Register
         example_version=body.example_version, idempotency_key=idempotency_key))
 
 
+@router.post("/projects/{project_id}/reference-files/{material_id}/arlo-input", status_code=201)
+def register_arlo_reference(project_id: uuid.UUID, material_id: uuid.UUID,
+                            idempotency_key: str = Header(alias="Idempotency-Key"),
+                            actor: _LifecycleActor = Depends(_get_lifecycle_actor)):
+    result = _reference_response(lambda: arlo_lab.register_reference_input(
+        actor.org_id, project_id, actor.binding_id, material_id=material_id,
+        idempotency_key=idempotency_key))
+    return JSONResponse(result, status_code=201, headers={"Cache-Control": "private, no-store"})
+
+
 @router.get("/projects/{project_id}/arlo-jobs/{job_id}")
 def get_arlo_job(project_id: uuid.UUID, job_id: uuid.UUID,
                  actor: _LifecycleActor = Depends(_get_lifecycle_actor)):

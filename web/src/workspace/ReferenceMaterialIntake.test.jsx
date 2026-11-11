@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ReferenceMaterialIntake from './ReferenceMaterialIntake.jsx'
-import { listProjectReferences, readProjectReferenceOriginal, uploadProjectReference } from '../projects/api.js'
+import { listProjectReferences, readProjectReferenceOriginal, registerProjectArloInput, uploadProjectReference } from '../projects/api.js'
 
 const authority = vi.hoisted(() => ({ scope: 'account-a', listeners: new Set(), logouts: new Set() }))
 vi.mock('../auth.js', () => ({ subscribeBeforeLogout: fn => { authority.logouts.add(fn); return () => authority.logouts.delete(fn) } }))
@@ -9,11 +9,15 @@ vi.mock('../auth/activeScope.js', () => ({
   readActiveScope: () => authority.scope,
   subscribeActiveScope: fn => { authority.listeners.add(fn); return () => authority.listeners.delete(fn) },
 }))
-vi.mock('../projects/api.js', () => ({ listProjectReferences: vi.fn(), readProjectReferenceOriginal: vi.fn(), uploadProjectReference: vi.fn() }))
+vi.mock('../projects/api.js', () => ({
+  listProjectReferences: vi.fn(), readProjectReferenceOriginal: vi.fn(),
+  registerProjectArloInput: vi.fn(), uploadProjectReference: vi.fn(),
+}))
 
 const project = '11111111-2222-4333-8444-555555555555'
 const otherProject = '22222222-3333-4444-8555-666666666666'
 const cursor = 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff'
+const orgId = '99999999-8888-4777-8666-555555555555'
 const row = (name, id = name) => ({
   material_id: id, name, byte_size: 14, media_type: 'text/plain',
   sha256: 'a'.repeat(64), created_at: '2026-10-01T12:00:00Z',
@@ -25,6 +29,13 @@ const ready = () => waitFor(() => expect(screen.getByRole('button', { name: 'Add
 const saved = () => within(screen.getByRole('list', { name: 'Saved reference files' }))
 const changeScope = scope => act(() => { authority.scope = scope; for (const listener of authority.listeners) listener() })
 const logout = () => act(() => { for (const clear of authority.logouts) clear() })
+const arloMaterial = { ...row('feeder.json', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'), media_type: 'application/json' }
+const arloInput = {
+  organization_id: orgId, project_id: project, material_id: arloMaterial.material_id,
+  original_sha256: arloMaterial.sha256, input_version_id: '44444444-5555-4666-8777-888888888888',
+  request: { contract: 'arlo_design_request_v1', seed: 17 },
+}
+const runArlo = () => fireEvent.click(screen.getByRole('button', { name: 'Run ARLO with feeder.json' }))
 
 beforeEach(() => {
   vi.resetAllMocks()
@@ -45,6 +56,58 @@ afterEach(() => {
 })
 
 describe('shared project original reference intake', () => {
+  it('runs only after an explicit click and reuses the retry key for the registered source', async () => {
+    const onRunArlo = vi.fn().mockRejectedValueOnce(new Error('Could not reach ARLO. Try again.'))
+      .mockResolvedValueOnce({ ok: true })
+    registerProjectArloInput.mockResolvedValue(arloInput)
+    uploadProjectReference.mockResolvedValue({ material: arloMaterial })
+    render(<ReferenceMaterialIntake projectId={project} orgId={orgId} onRunArlo={onRunArlo} />)
+    await ready()
+    choose(new File(['{}'], arloMaterial.name, { type: 'application/json' }))
+    await screen.findByRole('button', { name: 'Run ARLO with feeder.json' })
+    expect(registerProjectArloInput).not.toHaveBeenCalled()
+    expect(onRunArlo).not.toHaveBeenCalled()
+
+    runArlo()
+    expect((await screen.findByRole('alert')).textContent).toContain('Could not reach ARLO')
+    runArlo()
+    await screen.findByText('ARLO result saved to this project.')
+    expect(registerProjectArloInput).toHaveBeenCalledTimes(2)
+    expect(registerProjectArloInput).toHaveBeenCalledWith(project, arloMaterial.material_id,
+      expect.objectContaining({ orgId, expectedScope: 'account-a', key: `arlo-reference-${arloMaterial.material_id}` }))
+    expect(onRunArlo).toHaveBeenCalledTimes(2)
+    expect(onRunArlo).toHaveBeenCalledWith(arloInput,
+      expect.objectContaining({ scope: 'account-a', idempotencyKey: expect.any(String) }))
+    expect(onRunArlo.mock.calls[0][1].idempotencyKey).toBe(onRunArlo.mock.calls[1][1].idempotencyKey)
+  })
+
+  it('refuses a registration for a different material', async () => {
+    const onRunArlo = vi.fn()
+    listProjectReferences.mockResolvedValue({ materials: [arloMaterial] })
+    registerProjectArloInput.mockResolvedValue({ ...arloInput, material_id: otherProject })
+    render(<ReferenceMaterialIntake projectId={project} orgId={orgId} onRunArlo={onRunArlo} />)
+    await ready()
+    runArlo()
+    expect((await screen.findByRole('alert')).textContent).toContain('did not match')
+    expect(onRunArlo).not.toHaveBeenCalled()
+  })
+
+  it('drops a late registration after the active account changes', async () => {
+    const pending = deferred()
+    const onRunArlo = vi.fn()
+    listProjectReferences.mockResolvedValueOnce({ materials: [arloMaterial] })
+    registerProjectArloInput.mockReturnValue(pending.promise)
+    render(<ReferenceMaterialIntake projectId={project} orgId={orgId} onRunArlo={onRunArlo} />)
+    await ready()
+    runArlo()
+    const options = registerProjectArloInput.mock.calls[0][2]
+    changeScope('account-b')
+    await act(async () => pending.resolve(arloInput))
+    expect(options.signal.aborted).toBe(true)
+    expect(onRunArlo).not.toHaveBeenCalled()
+    expect(screen.queryByText('Preparing ARLO input…')).toBeNull()
+  })
+
   it('offers complete gzip JSONL originals and connects picker to upload, saved list and download', async () => {
     const { gzipSync } = await import('node:zlib')
     const compressed = gzipSync(Array.from({ length: 6001 }, (_, row) => JSON.stringify({ row })).join('\n'))
@@ -74,7 +137,7 @@ describe('shared project original reference intake', () => {
     await ready()
     expect(saved().getByText('shared.txt')).toBeTruthy()
     expect(saved().getByText('Uploaded · Preview unavailable · Model not consumed')).toBeTruthy()
-    expect(screen.getByText(/These files have not been consumed by a model/)).toBeTruthy()
+    expect(screen.getByText(/Uploading does not start an author turn or build/)).toBeTruthy()
     expect(readProjectReferenceOriginal).not.toHaveBeenCalled()
     expect(uploadProjectReference).not.toHaveBeenCalled()
     const firstSignal = listProjectReferences.mock.calls[0][1].signal

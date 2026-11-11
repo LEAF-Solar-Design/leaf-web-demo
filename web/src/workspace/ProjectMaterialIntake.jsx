@@ -7,7 +7,7 @@ export function materialError(error) {
   return humanizeError(/\bHTTP\s+\d{3}\b|\bat\s+\S+\s*\(/i.test(raw) ? null : raw)
 }
 
-export default function ProjectMaterialIntake({ project, upload = {}, intake = {}, artifacts, onStartUpload, onRetry, mock, photos }) {
+export default function ProjectMaterialIntake({ project, upload = {}, intake = {}, artifacts, onStartUpload, onRetry, mock, photos, onRunArlo }) {
   if (mock) return <section className="ground-pane" data-pane="material-intake">
     <DrawingUploadControl disabled={!project || mock === true} />
     <p>Uploads are unavailable in this demo.</p>
@@ -27,7 +27,8 @@ export default function ProjectMaterialIntake({ project, upload = {}, intake = {
   return (
     <section className="ground-pane" data-pane="material-intake">
       {photos}
-      {project?.project_id && <ReferenceMaterialIntake projectId={project.project_id} />}
+      {project?.project_id && <ReferenceMaterialIntake projectId={project.project_id}
+        orgId={project.org_id} onRunArlo={onRunArlo} />}
       {photos && <h3>Drawings</h3>}
       <DrawingUploadControl {...upload} error={null} phase={upload.phase === 'ready' ? 'idle' : upload.phase}
         disabled={!project} onUpload={onStartUpload} onCancel={upload.actions?.cancel} onEngineChange={upload.actions?.setEngine} />
