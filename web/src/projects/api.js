@@ -208,6 +208,18 @@ export function readProjectReferenceOriginal(projectId, materialId, { signal, ex
   })
 }
 
+export async function registerProjectArloInput(projectId, materialId, { orgId, key, signal, expectedScope }) {
+  const project = requireUuid(projectId, 'project')
+  const material = requireUuid(materialId, 'reference')
+  const org = requireUuid(orgId, 'organization')
+  const result = await request(`/api/projects/${project}/reference-files/${material}/arlo-input`, {
+    method: 'POST', orgId: org, signal, expectedScope,
+    headers: { 'Idempotency-Key': key },
+  })
+  requireUuid(result?.input_version_id, 'ARLO input version')
+  return result
+}
+
 function mutation(method, body) {
   const opts = {
     method,

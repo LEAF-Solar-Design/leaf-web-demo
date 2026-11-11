@@ -1,21 +1,22 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { readActiveScope, subscribeActiveScope } from '../auth/activeScope.js'
 import { subscribeBeforeLogout } from '../auth.js'
-import { listProjectReferences, readProjectReferenceOriginal, uploadProjectReference } from '../projects/api.js'
+import { listProjectReferences, readProjectReferenceOriginal, registerProjectArloInput, uploadProjectReference } from '../projects/api.js'
 import { humanizeError } from '../errorHumanize.js'
 
 const message = error => humanizeError(error?.message || 'Reference files could not be loaded. Try again.')
 const merge = (rows, added) => [...new Map([...rows, ...added].map(row => [row.material_id, row])).values()]
 
-export default function ReferenceMaterialIntake({ projectId }) {
+export default function ReferenceMaterialIntake({ projectId, orgId, onRunArlo }) {
   const scope = useSyncExternalStore(subscribeActiveScope, readActiveScope, () => null)
   if (!projectId || !scope) return <section aria-label="Reference files">
     <h3>Reference files</h3><p>Sign in and open a project to add original reference files.</p>
   </section>
-  return <ReferenceSession key={`${scope}:${projectId}`} projectId={projectId} scope={scope} />
+  return <ReferenceSession key={`${scope}:${orgId}:${projectId}`} projectId={projectId}
+    orgId={orgId} scope={scope} onRunArlo={onRunArlo} />
 }
 
-function ReferenceSession({ projectId, scope }) {
+function ReferenceSession({ projectId, orgId, scope, onRunArlo }) {
   const [rows, setRows] = useState([])
   const [queue, setQueue] = useState([])
   const [busy, setBusy] = useState(false)
@@ -23,10 +24,13 @@ function ReferenceSession({ projectId, scope }) {
   const [cursor, setCursor] = useState(null)
   const [error, setError] = useState('')
   const [downloading, setDownloading] = useState(null)
+  const [arlo, setArlo] = useState(null)
   const input = useRef(null)
   const live = useRef(false)
   const running = useRef(false)
   const downloadRunning = useRef(false)
+  const arloRunning = useRef(false)
+  const arloKeys = useRef(new Map())
   const abort = useRef(null)
   const urls = useRef(new Map())
   const current = () => live.current && readActiveScope() === scope
@@ -53,6 +57,8 @@ function ReferenceSession({ projectId, scope }) {
       abort.current.abort()
       for (const [url, timer] of urls.current) { clearTimeout(timer); URL.revokeObjectURL(url) }
       urls.current.clear()
+      arloKeys.current.clear()
+      setArlo(null)
       setRows([]); setQueue([]); setBusy(false); setLoading(false); setError(''); setDownloading(null)
     }
     const logout = subscribeBeforeLogout(clear)
@@ -112,12 +118,45 @@ function ReferenceSession({ projectId, scope }) {
       if (current() && cause?.name !== 'AbortError') setError(message(cause))
     } finally { downloadRunning.current = false; if (current()) setDownloading(null) }
   }
+  const runArlo = async row => {
+    if (!current() || arloRunning.current || !onRunArlo || !orgId) return
+    arloRunning.current = true
+    const materialId = row.material_id
+    const signal = abort.current.signal
+    const status = (detail, running = true) => setArlo({ materialId, detail, running })
+    status('Preparing ARLO input…')
+    try {
+      let key = arloKeys.current.get(materialId)
+      if (!key) {
+        key = crypto.randomUUID()
+        arloKeys.current.set(materialId, key)
+      }
+      const input = await registerProjectArloInput(projectId, materialId, {
+        orgId, key: `arlo-reference-${materialId}`, ...options(),
+      })
+      if (!current() || signal.aborted) return
+      if (input?.project_id !== projectId || input.organization_id !== orgId
+          || input.material_id !== materialId || input.original_sha256 !== row.sha256
+          || input.request?.contract !== 'arlo_design_request_v1') {
+        throw new Error('The ARLO input did not match this project reference.')
+      }
+      status('Running ARLO…')
+      const result = await onRunArlo(input, { scope, signal, idempotencyKey: key })
+      if (!current() || signal.aborted) return
+      if (!result?.ok) throw new Error(result?.error?.message || 'ARLO could not finish this run. Try again.')
+      status('ARLO result saved to this project.', false)
+    } catch (cause) {
+      if (current() && !signal.aborted && cause?.name !== 'AbortError') setArlo({ materialId, error: message(cause) })
+    } finally {
+      arloRunning.current = false
+    }
+  }
   const failed = queue.filter(item => item.state === 'failed').length
   const uploaded = queue.filter(item => item.state === 'uploaded').length
   return <section aria-label="Reference files">
     <h3>Reference files</h3>
     <p>Original MOV and gzip JSONL corpora up to 64 MiB; UTF-8 TXT and JSON up to 8 MiB each. Originals stay with this shared project.</p>
-    <p>Preview unavailable. These files have not been consumed by a model. Uploading does not start an author turn or build.</p>
+    <p>Preview unavailable. Uploading does not start an author turn or build.</p>
     <input ref={input} type="file" aria-label="Original reference files" accept=".mov,.txt,.json,.jsonl.gz" multiple hidden disabled={busy || loading} onChange={choose} />
     <button type="button" disabled={busy || loading} onClick={() => input.current?.click()}>Add reference files</button>
     <p role="status">{busy ? `Uploading reference files: ${uploaded} of ${queue.length} uploaded.` : loading ? 'Loading reference files…' : `${rows.length} reference files in this project.${queue.length ? ` ${uploaded} uploaded; ${failed} need a retry.` : ''}`}</p>
@@ -134,6 +173,13 @@ function ReferenceSession({ projectId, scope }) {
       <button type="button" disabled={downloading !== null} onClick={() => void download(row)}>
         {downloading === row.material_id ? 'Downloading…' : `Download original ${row.name}`}
       </button>
+      {onRunArlo && orgId && row.media_type === 'application/json' && <>
+        <button type="button" disabled={Boolean(arlo?.running)} onClick={() => void runArlo(row)}>
+          Run ARLO with {row.name}
+        </button>
+        {arlo?.materialId === row.material_id && (arlo.error
+          ? <p role="alert">{arlo.error}</p> : <p role="status">{arlo.detail}</p>)}
+      </>}
     </li>)}</ul>}
     {cursor && <button type="button" disabled={loading || busy} onClick={() => void load(cursor)}>Load more reference files</button>}
   </section>

@@ -151,6 +151,7 @@ import { fetchIosSurfaceStatus } from './ios/iosSurfaceStatus.js'
 // `logout` is no longer imported here: the session controller owns ending a
 // session (useSessionController defaults endSession to auth.js logout).
 import { authConfigured, login as authLogin, isSignedIn, handleRedirectCallback, isAuthRedirectCallback } from './auth.js'
+import { readActiveScope } from './auth/activeScope.js'
 import { shouldAutoDemo, explicitDemo } from './demoState.js'
 import { humanizeError } from './errorHumanize.js'
 import { classifyDrawingLoadFailure } from './drawing/loadFailure.js'
@@ -387,7 +388,7 @@ function ProjectSolarCheckoutControls({ projectClient, checkout, isCurrent }) {
 
 // Mount the upload controller only on the live material pane. Its policy
 // request must not run when the drawing profiles or offline demo boot.
-function LiveProjectMaterialIntake({ project, artifacts, onAttached }) {
+function LiveProjectMaterialIntake({ project, artifacts, onAttached, onRunArlo }) {
   const projectUpload = useDrawingUploadController()
   const materialIntake = useMaterialIntake({ upload: projectUpload, onAttached })
   const startMaterialUpload = (file) => {
@@ -398,7 +399,7 @@ function LiveProjectMaterialIntake({ project, artifacts, onAttached }) {
   }
   return <ProjectMaterialIntake project={project} upload={projectUpload}
     intake={materialIntake} artifacts={artifacts} onStartUpload={startMaterialUpload}
-    onRetry={materialIntake.retry} mock={false}
+    onRetry={materialIntake.retry} mock={false} onRunArlo={onRunArlo}
     photos={<PhotoMaterialIntake projectId={project?.project_id} />} />
 }
 
@@ -3081,6 +3082,33 @@ export default function App() {
     health?.aps_live, openProjectId, prepareRunParams, markRefreshFailure, previewing, rehydrate, runJob,
     shown, writeLocked, closeStartForChange, refuseProjectSolar])
 
+  const onRunArloReference = useCallback(async (input, { scope, signal, idempotencyKey }) => {
+    const currentProject = () => {
+      const current = workspaceController.getSnapshot()
+      return readActiveScope() === scope && current.openProjectId === input.project_id
+        && current.workspace?.project?.org_id === input.organization_id
+    }
+    if (!signedIn || mock || signal.aborted || !currentProject()) return null
+    if (running) return { ok: false, error: { message: 'Wait for the current tool run to finish before starting ARLO.' } }
+
+    const envelope = await runJob({
+      toolName: 'arlo-design',
+      execute: async ({ onSubmit, onStatus, signal: jobSignal }) => {
+        if (signal.aborted || jobSignal.aborted || !currentProject()) return null
+        const output = await runToolAsync('arlo-design', input.request, input.input_version_id, {
+          orgId: input.organization_id, projectId: input.project_id, idempotencyKey,
+          signal: jobSignal,
+          onSubmit: id => { if (currentProject()) onSubmit(id) },
+          onStatus: status => { if (currentProject()) onStatus(status) },
+        })
+        return currentProject() ? output : null
+      },
+    })
+    if (!currentProject()) return null
+    await rehydrate()
+    return currentProject() ? envelope : null
+  }, [mock, rehydrate, runJob, running, signedIn, workspaceController])
+
   const onConfirmCatalogRun = useCallback(async (intent, tool, params) => {
     if (refuseProjectSolar(intent?.toolName || tool?.name, intent?.context)) {
       runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current, intent?.intentId)
@@ -5656,6 +5684,7 @@ export default function App() {
                       project={workspace.project}
                       artifacts={workspace.drawing_artifacts || []}
                       onAttached={rehydrate}
+                      onRunArlo={onRunArloReference}
                     /> : <p>Material will be available after the project opens.</p>,
                   catalog: <ul>{railFamilies.map((family) => <li key={family.family_id}>{family.label}</li>)}</ul>,
                   conversation: <BoardPaneState pane="conversation" context={boardPaneContext}>
