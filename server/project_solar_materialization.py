@@ -17,9 +17,46 @@ KEY = 'solar_physical_layout'
 
 
 def initial_parameters(body):
-    if type(body) is not dict or set(body) != {'boundary', 'preset', 'drawing_units'}:
+    if type(body) is not dict:
         fail('REQUEST_INVALID', 400)
-    return deepcopy(body)
+    if set(body) == {'boundary', 'preset', 'drawing_units'}:
+        return deepcopy(body)
+    if (set(body) != {'original_intake', 'grid_long_axis'}
+            or type(body['original_intake']) is not str
+            or type(body['grid_long_axis']) is not int
+            or not 2 <= body['grid_long_axis'] <= 300):
+        fail('REQUEST_INVALID', 400)
+    try:
+        if not 0 < len(body['original_intake'].encode('utf-8')) <= 2 * 1024 * 1024:
+            fail('REQUEST_INVALID', 400)
+    except UnicodeError:
+        fail('REQUEST_INVALID', 400)
+    return dict(body)
+
+
+def _original_generation(body):
+    """Keep source custody apart from the frame operation's input schema."""
+    raw = body['original_intake'].encode('utf-8')
+    try:
+        original = json.loads(raw.decode('utf-8-sig'), object_pairs_hook=project._object_pairs,
+                              parse_constant=project._nonfinite, parse_float=project._json_float)
+        if (type(original) is not dict
+                or set(original) != {'units', 'boundary', 'active_preset', 'pile_template'}):
+            fail('REQUEST_INVALID', 400)
+        preset, template = original['active_preset'], original['pile_template']
+        if (type(preset) is not dict or type(template) is not dict
+                or not isinstance(template.get('Name'), str) or not template['Name'].strip()
+                or preset.get('PileTemplateName') != template['Name']):
+            fail('REQUEST_INVALID', 400)
+        digest(original)  # Reject unbounded or invalid JSON before the kernel.
+    except (ValueError, TypeError, UnicodeError, RecursionError, GraphValidationError):
+        fail('REQUEST_INVALID', 400)
+    generation = {'boundary': original['boundary'], 'preset': preset,
+                  'drawing_units': original['units']}
+    provenance = {'sha256': editor._sha(raw), 'pile_template': template,
+                  'requested_grid_long_axis': body['grid_long_axis'],
+                  'terrain_grid_applied': False}
+    return generation, provenance
 
 
 def _initial_scope(tenant, project_id):
@@ -76,14 +113,18 @@ def publish_initial_layout(tenant, project_id, body, *, request_id):
     _initial_scope(tenant, project_id)
     if project.write_loop.drawing_mutations_refusal() is not None:
         project.refuse('WRITES_DRAINED')
+    generation, original = _original_generation(body) if 'original_intake' in body else (body, None)
     try:
-        document, inputs = fp.prepare_initial_frames(**body, current_native=True)
+        document, inputs = fp.prepare_initial_frames(**generation, current_native=True)
     except (fp.FramesPilesError, state.PhysicalStateError) as exc:
         raise editor.EditorError(exc.code, 422) from None
     drawing_id = uuid5(project_id, 'solar-initial:' + str(request_id))
-    _generation_provenance(inputs, document, body['preset'])
+    _generation_provenance(inputs, document, generation['preset'])
     generation_source = {'parameters_sha256': digest(body),
                          'physical_content_sha256': editor._sha(state.encode_document(document))}
+    if original is not None:
+        inputs['original_intake'] = original
+        generation_source['original_intake_sha256'] = original['sha256']
     # No imported source, synthetic base drawing, or canonical row exists here.
     output = materialize_native_layout({'organization_id': org, 'project_id': project_id,
         'actor_binding_id': actor, 'drawing_id': drawing_id}, None, deepcopy(document), None,

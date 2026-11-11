@@ -14,7 +14,7 @@ import { createSolarTrackerRowsClient } from './solarTrackerRowsClient.js'
 import SolarEdgeImportPanel, { SOLAREDGE_PANEL_REASONS } from './SolarEdgeImportPanel.jsx'
 import { createSolarImportClient } from './solarImportClient.js'
 import { FLOW_PANELS } from './solarWorkspacePanels.js'
-import { captureSolarPublication, createSolarProjectMaterializationClient, initialSolarParameters, solarPublicationMatches } from './solarProjectMaterializationClient.js'
+import { captureSolarPublication, createSolarProjectMaterializationClient, initialSolarParameters, originalSolarParameters, solarPublicationMatches } from './solarProjectMaterializationClient.js'
 import './solarFlow.css'
 
 export const SOLAREDGE_WORKSPACE_REASONS = Object.freeze({
@@ -189,8 +189,18 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
   const [initialBoundary, setInitialBoundary] = useState('')
   const [initialPreset, setInitialPreset] = useState('')
   const [initialUnits, setInitialUnits] = useState('m')
+  const [originalIntake, setOriginalIntake] = useState(null)
+  const [gridLongAxis, setGridLongAxis] = useState('150')
+  const initialProject = JSON.stringify([projectScope?.organization_id, projectId])
+  const selectedOriginal = originalIntake?.project === initialProject ? originalIntake : null
   let initialParameters = null
-  try { initialParameters = initialSolarParameters(JSON.parse(initialBoundary), JSON.parse(initialPreset), initialUnits) } catch { /* incomplete input */ }
+  let originalSummary = null
+  if (selectedOriginal) {
+    initialParameters = originalSolarParameters(selectedOriginal.text, Number(gridLongAxis))
+    if (initialParameters) originalSummary = JSON.parse(selectedOriginal.text.replace(/^\uFEFF/, ''))
+  } else {
+    try { initialParameters = initialSolarParameters(JSON.parse(initialBoundary), JSON.parse(initialPreset), initialUnits) } catch { /* incomplete input */ }
+  }
   const publicationPending = useRef(false)
   const publicationCurrent = useRef(null)
   publicationCurrent.current = { scope: projectScope, head: physicalHead, readback: publicationReadback,
@@ -591,6 +601,23 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
     return captured
   }
 
+  async function chooseOriginalIntake(event) {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    const selection = { project: initialProject, name: file.name }
+    setOriginalIntake(selection)
+    try {
+      if (!file.size || file.size > 2 * 1024 * 1024) throw new Error('invalid size')
+      const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(await file.arrayBuffer())
+      if (!originalSolarParameters(text, 150)) throw new Error('invalid intake')
+      setOriginalIntake(current => current === selection ? { ...selection, text } : current)
+    } catch {
+      setOriginalIntake(current => current === selection
+        ? { ...selection, error: 'Choose a complete UTF-8 layout intake JSON file within the 2 MiB publication limit.' } : current)
+    }
+  }
+
   async function readPublicationHead() {
     if (publicationPending.current || busy || !projectScope) return
     publicationPending.current = true
@@ -744,14 +771,27 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
       data-physical-head-index={physicalHead?.index ?? undefined}>
       {hasProjectPublication && <div aria-label="Project layout publication">
         {projectScope?.drawing_id === null && projectScope?.input_version_id === null && <div>
-          <p>Use the original boundary and complete preset. No drawing upload is required.</p>
-          <label>Site boundary (JSON)<textarea value={initialBoundary} maxLength={2000000}
-            onChange={event => setInitialBoundary(event.target.value)} /></label>
-          <label>Complete preset (JSON)<textarea value={initialPreset} maxLength={2000000}
-            onChange={event => setInitialPreset(event.target.value)} /></label>
-          <label>Drawing units for publication<select value={initialUnits} onChange={event => setInitialUnits(event.target.value)}>
-            <option value="m">Metres</option><option value="ft">Feet</option>
-          </select></label>
+          <label>Original layout intake (JSON)<input type="file" accept=".json,application/json"
+            disabled={publication.phase === 'pending'} onChange={chooseOriginalIntake} /></label>
+          {selectedOriginal ? <>
+            <p>{selectedOriginal.name}</p>
+            {selectedOriginal.error && <p role="alert">{selectedOriginal.error}</p>}
+            {originalSummary && <p>Preset {originalSummary.active_preset.Name} · {originalSummary.units === 'm' ? 'Meters' : 'Feet'}
+              {' · '}Pile template {originalSummary.pile_template.Name}</p>}
+            <label>Terrain grid cells on longer axis<input type="number" min={2} max={300} step={1}
+              value={gridLongAxis} onChange={event => setGridLongAxis(event.target.value)} /></label>
+            <p>This layout is terrain-free. The grid setting is recorded for provenance.</p>
+            <button type="button" disabled={publication.phase === 'pending'}
+              onClick={() => setOriginalIntake(null)}>Clear original intake</button>
+          </> : <>
+            <label>Site boundary (JSON)<textarea value={initialBoundary} maxLength={2000000}
+              onChange={event => setInitialBoundary(event.target.value)} /></label>
+            <label>Complete preset (JSON)<textarea value={initialPreset} maxLength={2000000}
+              onChange={event => setInitialPreset(event.target.value)} /></label>
+            <label>Drawing units for publication<select value={initialUnits} onChange={event => setInitialUnits(event.target.value)}>
+              <option value="m">Metres</option><option value="ft">Feet</option>
+            </select></label>
+          </>}
         </div>}
         <button type="button" disabled={publication.phase === 'pending' || busy || !projectScope}
           onClick={readPublicationHead}>Read current layout for publication</button>

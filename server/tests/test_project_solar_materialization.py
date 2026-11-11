@@ -1,6 +1,7 @@
 """Canonical layout publication, with licensed runtime explicitly out of scope."""
 from uuid import uuid4
 from copy import deepcopy
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -243,6 +244,56 @@ def test_initial_real_storage_metadata_replay_and_normal_history(fresh, monkeypa
         layout.UUID(restored.json()['drawing_version']['version_id']), drawing_id=layout.UUID(drawing))
     assert restored_context.intake[layout.KEY] == metadata
     assert lane.http.post(route, json=body, headers={'Idempotency-Key': str(request)}).json() == receipt
+
+
+def test_original_intake_custody_in_canonical_layout_export(fresh):
+    import solar_frames_piles as fp
+    import solar_native_layout_dxf as native
+
+    lane, project = fresh
+    base = initial_body()
+    template = {'Name': 'Supplied', 'PlacementMode': 'Grid', 'HorizontalDistancesM': [1.0, 2.0],
+                'VerticalDistancesM': [0.5], 'Stations': [], 'PileDiameterM': 0.0,
+                'RevealBucketBoundariesM': [0.9144, 1.2192, 0.9144]}
+    preset = {**base['preset'], 'PileTemplateName': template['Name']}
+    original = {'units': 'm', 'boundary': base['boundary'], 'active_preset': preset,
+                'pile_template': template}
+    text = json.dumps(original, indent=2).replace('\n', '\r\n') + '\r\n'
+    body = {'original_intake': text, 'grid_long_axis': 150}
+    original_sha = hashlib.sha256(text.encode('utf-8')).hexdigest()
+    headers = {'Idempotency-Key': str(uuid4())}
+    route = f'/api/projects/{project}/solar-layout'
+    first = lane.http.post(route, json=body, headers=headers)
+    assert first.status_code == 200, first.text
+    receipt = first.json()
+    assert receipt['generation_source']['original_intake_sha256'] == original_sha
+    assert lane.http.post(route, json=body, headers=headers).json() == receipt
+    for changed in ({**body, 'grid_long_axis': 151}, {**body, 'original_intake': text.replace('\r\n', '\n')}):
+        assert lane.http.post(route, json=changed, headers=headers).status_code == 409
+
+    drawing_id = receipt['drawing_id']
+    version_id = receipt['drawing_version']['version_id']
+    drawing_route = f'/api/projects/{project}/drawings/{drawing_id}'
+    reopened = lane.http.get(f'{drawing_route}/versions/{version_id}/solar-layout')
+    assert reopened.status_code == 200, reopened.text
+    exported = lane.http.get(f'{drawing_route}/versions/{version_id}/dxf')
+    assert exported.status_code == 200, exported.text
+    decoded = native.decode_native_layout(exported.content)
+    assert decoded.parameters['original_intake'] == {
+        'sha256': original_sha, 'pile_template': template,
+        'requested_grid_long_axis': 150, 'terrain_grid_applied': False,
+    }
+    assert decoded.parameters['generation']['preset'] == preset
+    assert set(decoded.parameters['generation']) == {'operation', 'base', 'drawing_units', 'boundary', 'preset'}
+    assert decoded.document['units'] == {'drawing_units': 'm', 'meters_per_unit': 1.0}
+    state = decoded.document['state']
+    assert state['grid'] is None and state['piles'] == [] and state['frames']
+    changed_generation, _ = layout._original_generation({**body, 'grid_long_axis': 151})
+    comparison, _ = fp.prepare_initial_frames(**changed_generation, current_native=True)
+    assert comparison == decoded.document
+    context = layout.project.resolve_context(lane.tenant, project, layout.UUID(version_id),
+                                             drawing_id=layout.UUID(drawing_id))
+    assert context.intake[layout.KEY]['request']['original_intake'].encode('utf-8') == text.encode('utf-8')
 
 
 def test_initial_existing_project_refuses_before_writer(lane, monkeypatch):

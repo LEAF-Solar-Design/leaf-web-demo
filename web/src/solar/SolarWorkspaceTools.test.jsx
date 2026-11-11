@@ -1259,6 +1259,35 @@ describe('canonical project layout publication action', () => {
       preset: generationIntake.active_preset, drawing_units: 'm' })
     expect(f.props.transport.publicationCheckout.acquireCheckout).not.toHaveBeenCalled()
   })
+  it('captures original CRLF intake and terrain setting across publication recovery', async () => {
+    const initial = { ...scope, drawing_id: null, input_version_id: null }
+    const f = fixture({ drawingId: null, projectScope: initial, checkoutHeld: false })
+    f.api.read.mockResolvedValue({ ok: true, value: { ...source, mode: 'initial', drawing_id: null,
+      parent_version_id: null, physical_source: undefined } })
+    f.api.publish.mockResolvedValueOnce({ ok: false, outcomeUnknown: true })
+    const original = JSON.stringify({
+      units: 'm', boundary: generationIntake.boundary,
+      active_preset: { ...generationIntake.active_preset, PileTemplateName: 'Supplied' },
+      pile_template: { Name: 'Supplied', HorizontalDistancesM: [1, 2] },
+    }, null, 2).replaceAll('\n', '\r\n') + '\r\n'
+    const bytes = new TextEncoder().encode(original)
+    const file = { name: 'layout.json', size: bytes.byteLength, arrayBuffer: async () => bytes.buffer }
+    render(<SolarWorkspaceTools {...f.props} />)
+    fireEvent.change(screen.getByLabelText('Original layout intake (JSON)'), { target: { files: [file] } })
+    await screen.findByText(/Meters.*Pile template Supplied/)
+    fireEvent.change(screen.getByLabelText('Terrain grid cells on longer axis'), { target: { value: '150' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Read current layout for publication' }))
+    const generate = screen.getByRole('button', { name: 'Generate editable project drawing' })
+    await waitFor(() => expect(generate.disabled).toBe(false))
+    fireEvent.click(generate)
+    const reconcile = await screen.findByRole('button', { name: 'Reconcile layout publication' })
+    fireEvent.click(reconcile)
+    await waitFor(() => expect(f.api.publish).toHaveBeenCalledTimes(2))
+    const [first, retry] = f.api.publish.mock.calls.map(([captured]) => captured)
+    expect(JSON.parse(first.parameters_json)).toEqual({ original_intake: original, grid_long_axis: 150 })
+    expect(retry).toEqual(first)
+    expect(f.props.transport.publicationCheckout.acquireCheckout).not.toHaveBeenCalled()
+  })
   it('does not expose the project publication action in standalone mode', () => {
     render(<SolarWorkspaceTools {...supplied()} />)
     expect(screen.queryByRole('button', { name: 'Publish layout as editable drawing' })).toBeNull()
