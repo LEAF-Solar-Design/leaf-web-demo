@@ -90,7 +90,7 @@ export function ProjectBoardGround({
           <button type="button" onClick={actions.onOpenSettings}>Project settings</button>
         )}
         {typeof actions?.onOpenPhotos === 'function' && (
-          <button type="button" onClick={actions.onOpenPhotos}>Photos</button>
+          <button type="button" onClick={actions.onOpenPhotos}>Material</button>
         )}
         {panel}
         {worldSpace ? (
