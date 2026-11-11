@@ -2511,9 +2511,9 @@ export async function enterWorkspaceEnvironment(page, assertions = expect) {
   if (entryLimitError) throw entryLimitError
 }
 
-export async function reloadAndReenter(page, options) {
+export async function reloadAndReenter(page, options, assertions = expect) {
   await page.reload(options)
-  await enterWorkspaceEnvironment(page)
+  await enterWorkspaceEnvironment(page, assertions)
 }
 
 export async function openSolarCadProfile(page) {

@@ -3827,7 +3827,17 @@ test('reloadAndReenter reloads once without entry clicks on builds without an en
   const { page, events } = workspaceEnvironmentFake({ present: false })
   const options = { timeout: 60_000 }
   page.reload = async received => { assert.equal(received, options); events.push('reload') }
-  await reloadAndReenter(page, options)
+  await reloadAndReenter(page, options, {
+    poll(fn, opts) {
+      assert.equal(opts.timeout, 20_000)
+      return { toBe: async expected => {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          if (await fn() === expected) return
+        }
+        throw new Error(`Timeout ${opts.timeout}ms exceeded while polling`)
+      } }
+    },
+  })
   assert.deepEqual(events, ['reload'])
 })
 
