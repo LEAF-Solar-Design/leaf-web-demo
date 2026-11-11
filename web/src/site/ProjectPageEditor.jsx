@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react'
 import { subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
 import { composerDraftAccountScope } from '../lib/composerDraft.js'
 import { downloadProjectPageSource, loadProjectPage, saveProjectPage, validatePageDocument, submitProjectNativePreview, loadProjectNativePreview, downloadProjectNativePreviewScreenshot, validateNativePreview, proposeProjectPage, portfolioTextChanges, validateProjectPageProposal, PHOTO_PROPOSAL_SCHEMA, validateProjectPhotoAssignmentProposal } from './projectPageClient.js'
+import { isValidPageAction } from './projectPageClient.js'
 import { getStoredOrgId } from '../api.js'
 import { getStoredActorBindingId } from '../projects/api.js'
 import PortfolioEditor, { PortfolioPreview } from './PortfolioEditor.jsx'
@@ -30,6 +31,9 @@ export function PagePreview({ document, onSelectField, projectId, onInlineChange
       <h1 className="project-page__headline" data-element={`${selectionIdentity(document)}:textStyles.headline`} style={design('headline')}>{text('headline')}</h1>
       {(document.description || onInlineChange) && <p className="project-page__description" data-element={`${selectionIdentity(document)}:textStyles.description`} style={design('description')}>{text('description')}</p>}
       {(document.status || onInlineChange) && <p className="project-page__status" data-element={`${selectionIdentity(document)}:textStyles.status`} style={design('status')}>{text('status')}</p>}
+      {isValidPageAction(document.action) && <p className="project-page__action">
+        <a href={document.action.href} onClick={event => event.preventDefault()} onAuxClick={event => event.preventDefault()}>{document.action.label}</a>
+      </p>}
     </div>
   </main>
 }
@@ -251,6 +255,13 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
     const document = cloneDocument(sourceSnapshot.current.draft)
     document[field] = value
     changePortfolio(document, { coalesceKey: field })
+  }
+  const changeAction = (field, value) => {
+    const document = cloneDocument(sourceSnapshot.current.draft)
+    const action = { label: '', href: '', ...document.action, [field]: value }
+    if (action.label || action.href) document.action = action
+    else delete document.action
+    changePortfolio(document, { coalesceKey: `action.${field}` })
   }
   const travel = direction => {
     if (!live.current || !enabled || operation.current) return
@@ -499,6 +510,11 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
             ? <textarea id={`${id}-${field}`} ref={node => { fields.current[field] = node }} value={draft[field]} maxLength={limit} rows={4} onChange={event => change(field, event.target.value)} />
             : <input id={`${id}-${field}`} ref={node => { fields.current[field] = node }} value={draft[field]} maxLength={limit} onChange={event => change(field, event.target.value)} />}
         </label>)}
+          <label><span>Contact link label</span><input value={draft.action?.label ?? ''} maxLength={120}
+            onChange={event => changeAction('label', event.target.value)} /></label>
+          <label><span>Contact link URL</span><input value={draft.action?.href ?? ''} maxLength={2048}
+            onChange={event => changeAction('href', event.target.value)} /></label>
+          <p className="project-page-editor__note">Optional. Use an HTTPS link or mailto address. Clear both fields to remove the link.</p>
         <label htmlFor={`${id}-theme`}><span>Theme</span><select id={`${id}-theme`} value={draft.theme} onChange={event => change('theme', event.target.value)}>
           <option value="cream">Cream</option><option value="light">Light</option><option value="dark">Dark</option>
         </select></label>

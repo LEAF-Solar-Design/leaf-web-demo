@@ -998,6 +998,72 @@ describe('portfolio project document', () => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 describe('project page editor', () => {
+  it('authors a contact action and preserves it through the saved page and revision export', async () => {
+    const client = await vi.importActual('./projectPageClient.js')
+    loadProjectPage.mockImplementation(client.loadProjectPage)
+    saveProjectPage.mockImplementation(client.saveProjectPage)
+    downloadProjectPageSource.mockImplementation(client.downloadProjectPageSource)
+    const action = { label: 'Email the team', href: 'mailto:contact@example.test' }
+    const stored = page(2, { action })
+    const json = value => ({ ok: true, status: 200, json: async () => ({ page: value }) })
+    fetch.mockResolvedValueOnce(json(page())).mockResolvedValueOnce(json(stored)).mockResolvedValueOnce(json(stored))
+      .mockResolvedValueOnce({ ok: true, status: 200, headers: new Headers({ 'content-type': 'application/zip' }),
+        blob: async () => new Blob(['fixture archive'], { type: 'application/zip' }) })
+    const clickDownload = vi.spyOn(window.HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    function EditorAndPreview() {
+      const [preview, setPreview] = useState(null)
+      return <><ProjectPageEditor projectId={PROJECT} accountScope="account-a" onPreview={setPreview} />
+        <PagePreview document={preview?.document} /></>
+    }
+    render(<EditorAndPreview />)
+    await openSaved()
+    const label = screen.getByLabelText('Contact link label'), href = screen.getByLabelText('Contact link URL')
+    expect(label.value).toBe('')
+    fireEvent.change(label, { target: { value: action.label } })
+    expect(button('Save page').disabled).toBe(true)
+    fireEvent.change(href, { target: { value: 'javascript:void(0)' } })
+    expect(screen.queryByRole('link', { name: action.label })).toBeNull()
+    expect(button('Save page').disabled).toBe(true)
+    expect(fetch).toHaveBeenCalledTimes(1)
+    fireEvent.change(href, { target: { value: action.href } })
+    const link = screen.getByRole('link', { name: action.label })
+    expect(link.getAttribute('href')).toBe(action.href)
+    expect(fireEvent.click(link)).toBe(false)
+    expect(fetch).toHaveBeenCalledTimes(1)
+    fireEvent.click(button('Save page'))
+    await waitFor(() => expect(button('Download Next.js source').disabled).toBe(false))
+    expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({ expected_revision: 1, document: stored.document })
+    fireEvent.change(label, { target: { value: 'Discard this edit' } })
+    fireEvent.click(button('Reload saved page'))
+    await waitFor(() => expect(screen.getByLabelText('Contact link label').value).toBe(action.label))
+    expect(screen.getByLabelText('Contact link URL').value).toBe(action.href)
+    expect(screen.getByRole('link', { name: action.label }).getAttribute('href')).toBe(action.href)
+    fireEvent.click(button('Download Next.js source'))
+    await waitFor(() => expect(clickDownload).toHaveBeenCalledTimes(1))
+    expect(fetch.mock.calls[3][0]).toBe('https://api.example.test/api/projects/' + PROJECT + '/page/source?revision=2')
+    fireEvent.change(screen.getByLabelText('Contact link label'), { target: { value: '' } })
+    fireEvent.change(screen.getByLabelText('Contact link URL'), { target: { value: '' } })
+    expect(screen.queryByRole('link', { name: action.label })).toBeNull()
+    expect(button('Save page').disabled).toBe(false)
+  })
+
+  it('enforces the server contact action shape, lengths and URL grammar before transport', async () => {
+    const client = await vi.importActual('./projectPageClient.js')
+    const action = { label: 'Get updates', href: 'https://example.test:443/updates?q=some%20news#contact' }
+    expect(client.validatePageDocument(document)).toEqual(document)
+    expect(client.validatePageDocument({ ...document, action }).action).toEqual(action)
+    expect(client.validatePageDocument({ ...document, action: { ...action, href: 'mailto:hello.team+updates@example-domain.test' } }).action.label).toBe(action.label)
+    for (const invalid of [
+      null, [], { label: 'Contact' }, { ...action, html: '<b>Contact</b>' },
+      ...['', '   ', 'x'.repeat(61), '<Contact>', 'Contact\nus', 'https://example.test'].map(label => ({ ...action, label })),
+      ...['http://example.test', '//example.test', 'javascript:alert(1)', 'data:text/html,x', 'file:///tmp/x',
+        'https://user@example.test', 'https:///example.test', 'https://example.test/%ZZ', 'https://example.test/a b',
+        'https://example.test/' + 'x'.repeat(2048), 'mailto:no-domain', 'mailto:a@example.test?subject=x',
+        'mailto:a@example.test,b@example.test', 'mailto:a@example.test%0D%0A', 'mailto:a@example.test\n'].map(href => ({ ...action, href })),
+    ]) await expect(client.saveProjectPage(PROJECT, { ...document, action: invalid }, 1)).rejects.toThrow('contact label')
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
   it('waits for explicit creation and sends generic content and each edit to the preview', () => {
     const onPreview = vi.fn()
     setup({ onPreview })
