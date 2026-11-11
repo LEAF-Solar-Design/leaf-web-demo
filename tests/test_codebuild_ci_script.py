@@ -37,7 +37,9 @@ class TestCodebuildCiScript(unittest.TestCase):
     def _run_heavy_prerequisites(self, postgres_status):
         env = {key: value for key, value in os.environ.items()
                if key not in ("CI_SHARD_TOTAL", "CI_SHARD_INDEX", "BASH_ENV",
-                              "LEAF_CI_POSTGRES_SETUP_STATUS")}
+                              "LEAF_CI_POSTGRES_SETUP_STATUS", "LEAF_CI_CACHE_DIR",
+                              "LEAF_CI_CACHE_WRITABLE", "LEAF_DEP_CACHE_HELPER",
+                              "LEAF_DEP_CACHE_OFF", "PLAYWRIGHT_BROWSERS_PATH")}
         if postgres_status is not None:
             env["LEAF_CI_POSTGRES_SETUP_STATUS"] = postgres_status
         with tempfile.TemporaryDirectory() as temporary:

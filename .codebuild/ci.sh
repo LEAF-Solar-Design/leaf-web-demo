@@ -84,9 +84,19 @@ install_ci_browser() {
   return 0
 }
 
+if [[ -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" ]]; then
+  timeout --kill-after=5 120 python -I -B "$LEAF_DEP_CACHE_HELPER" seed --kind pw --repo "$CODEBUILD_SRC_DIR" \
+    --cache-dir "$LEAF_CI_CACHE_DIR" --writable "${LEAF_CI_CACHE_WRITABLE:-0}" --run "${CODEBUILD_BUILD_ID:-local}" \
+    || echo "LEAF_DEP_CACHE kind=pw action=seed result=error"
+fi
 install_ci_browser npx playwright
 # Install the Python producer's pinned browser with the gate interpreter too.
 install_ci_browser python -m playwright
+if [[ -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" && "${LEAF_CI_CACHE_WRITABLE:-0}" == 1 ]]; then
+  timeout --kill-after=5 240 python -I -B "$LEAF_DEP_CACHE_HELPER" publish --kind pw --repo "$CODEBUILD_SRC_DIR" \
+    --cache-dir "$LEAF_CI_CACHE_DIR" --writable 1 --run "${CODEBUILD_BUILD_ID:-local}" \
+    || echo "LEAF_DEP_CACHE kind=pw action=publish result=error"
+fi
 echo "LEAF_T end chromium $(date +%s%3N) rc=0"
 # LEAF_CI_BROWSER_INSTALL_END
 ) > "$browser_log_dir/chromium.log" 2>&1 &
@@ -381,6 +391,17 @@ if git --no-replace-objects show "$TRUSTED_SHA:scripts/ci/full_run_manifest.py" 
 else
   echo 'WARNING: trusted full-run manifest helper unavailable' >&2
 fi
+# LEAF_DEP_CACHE_HELPER_BEGIN
+# The dependency cache helper shares the frozen commit; without it every job downloads as before.
+unset LEAF_DEP_CACHE_HELPER
+if [[ -n "${LEAF_CI_CACHE_DIR:-}" && "${LEAF_DEP_CACHE_OFF:-}" != 1 && "$TRUSTED_SHA" =~ ^[0-9a-f]{40}$ ]] \
+   && git --no-replace-objects show "$TRUSTED_SHA:scripts/ci/dep_cache.py" > "$selection_dir/dep_cache.py" 2>/dev/null \
+   && chmod 400 "$selection_dir/dep_cache.py"; then
+  export LEAF_DEP_CACHE_HELPER="$selection_dir/dep_cache.py"
+elif [[ -n "${LEAF_CI_CACHE_DIR:-}" ]]; then
+  echo "LEAF_DEP_CACHE kind=all action=load result=off"
+fi
+# LEAF_DEP_CACHE_HELPER_END
 # Only explicit tracing proofs enable capture; webhook builds stay fast.
 tracing_ready=0
 if [[ "$tracing_helpers_ready" == 1 && "${LEAF_PROOF_TRACING:-}" == 1 ]]; then
@@ -600,6 +621,25 @@ if __name__ == "__main__":
     disable_unused_chrome_sources(Path("/etc/apt"))
 LEAF_CI_APT_SOURCE_FILTER
 
+# LEAF_DEP_CACHE_SEED_BEGIN
+dep_cache_npm_seeded=0
+dep_cache_pip_dir=""
+dep_cache_npm_dir=""
+if [[ -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" ]]; then
+  echo "LEAF_T start depcache-seed $(date +%s%3N)"
+  dep_cache_pip_dir="$(timeout 30 python -m pip cache dir 2>/dev/null || true)"
+  dep_cache_npm_dir="$(timeout 30 npm config get cache 2>/dev/null || true)"
+  dep_cache_line="$(timeout --kill-after=5 90 python -I -B "$LEAF_DEP_CACHE_HELPER" seed --kind dl \
+    --repo "$CODEBUILD_SRC_DIR" --cache-dir "$LEAF_CI_CACHE_DIR" --writable "${LEAF_CI_CACHE_WRITABLE:-0}" \
+    --run "${CODEBUILD_BUILD_ID:-local}" --day "$(date -u +%Y%m%d)" \
+    --pip-cache "$dep_cache_pip_dir" --npm-cache "$dep_cache_npm_dir" --node-version "$(node -v 2>/dev/null || true)")" \
+    || dep_cache_line="LEAF_DEP_CACHE kind=dl action=seed result=error"
+  echo "$dep_cache_line"
+  if [[ "$dep_cache_line" == *" npm=seeded"* ]]; then dep_cache_npm_seeded=1; fi
+  echo "LEAF_T end depcache-seed $(date +%s%3N) rc=0"
+fi
+# LEAF_DEP_CACHE_SEED_END
+
 # leaf-web-demo native CI: contract, license-fence, and Test gate UNSHARDED.
 # The queue leg lives in .codebuild/mq.sh and is not this script's job.
 # Workflows still dark: speculate-platform-images, prewarm-staging-cutover,
@@ -671,6 +711,7 @@ echo "=== job test-gate ==="
 setup_log_dir="$(mktemp -d)"
 (
 set -euo pipefail
+if [[ "${dep_cache_npm_seeded:-0}" == 1 ]]; then export npm_config_prefer_offline=true; fi
 echo "LEAF_T start webdeps $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR/web"
 echo "--- 1/4 Install web dependencies"
@@ -699,6 +740,7 @@ echo "LEAF_T end pydeps $(date +%s%3N) rc=0"
 pydeps_pid=$!
 (
 set -euo pipefail
+if [[ "${dep_cache_npm_seeded:-0}" == 1 ]]; then export npm_config_prefer_offline=true; fi
 echo "LEAF_T start harness-deps $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR/harness"
 echo "--- 3/6 Install harness dependencies"
@@ -728,6 +770,21 @@ for setup_step in webdeps pydeps harness-deps; do
 done
 if (( setup_rc != 0 )); then exit "$setup_rc"; fi
 # LEAF_CI_SETUP_DEPS_END
+# LEAF_DEP_CACHE_PUBLISH_BEGIN
+dep_cache_publish_pid=""
+if [[ -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" && "${LEAF_CI_CACHE_WRITABLE:-0}" == 1 ]]; then
+  if dep_cache_publish_log="$(mktemp)"; then
+    timeout --kill-after=5 180 python -I -B "$LEAF_DEP_CACHE_HELPER" publish --kind dl \
+      --repo "$CODEBUILD_SRC_DIR" --cache-dir "$LEAF_CI_CACHE_DIR" --writable 1 \
+      --run "${CODEBUILD_BUILD_ID:-local}" --day "$(date -u +%Y%m%d)" \
+      --pip-cache "$dep_cache_pip_dir" --npm-cache "$dep_cache_npm_dir" --node-version "$(node -v 2>/dev/null || true)" \
+      > "$dep_cache_publish_log" 2>&1 &
+    dep_cache_publish_pid=$!
+  else
+    echo "LEAF_DEP_CACHE kind=dl action=publish result=error"
+  fi
+fi
+# LEAF_DEP_CACHE_PUBLISH_END
 cd "$CODEBUILD_SRC_DIR/web"
 echo "--- 4/6 Reuse web dependencies"
 # The license-fence job installed a clean web tree in this same build.
@@ -769,6 +826,18 @@ print(revision)
 LEAF_AUTOFILL_PIN
 )" || { autofill_solver_fail "pin read"; return 1; }
   [[ "$autofill_solver_revision" =~ ^[0-9a-f]{40}$ ]] || { autofill_solver_fail "pin read"; return 1; }
+  local seeded=0
+  if [[ -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" ]]; then
+    work="$(mktemp -d)" || { autofill_solver_fail "mktemp"; return 1; }
+    # Seed only into an absent destination; keep existing job caches untouched.
+    if rmdir "$work" && { timeout --kill-after=5 30 python3 -I -B "$LEAF_DEP_CACHE_HELPER" seed --kind as --cache-dir "$LEAF_CI_CACHE_DIR" --writable "${LEAF_CI_CACHE_WRITABLE:-0}" --run "${CODEBUILD_BUILD_ID:-local}" --revision "$autofill_solver_revision" --dest "$work" >&2 || { echo "LEAF_DEP_CACHE kind=as action=seed result=error" >&2; false; }; } && [[ -s "$work/snapshot.bundle" ]]; then
+      seeded=1
+      autofill_solver_key="dep-cache"
+    else
+      rm -rf "$work"
+    fi
+  fi
+  if [[ "$seeded" != 1 ]]; then
   local prefix="forge-ci-relay/LEAF-Solar-Design/autofill-solver/${autofill_solver_revision}/"
   listing="$(timeout 10 aws s3api list-objects-v2 --bucket "$bucket" --prefix "$prefix" \
     --max-items 1000 --output json 2>/dev/null)" || { autofill_solver_fail "snapshot list"; return 1; }
@@ -808,6 +877,7 @@ if manifest.get("head_sha") != revision:
 if manifest.get("repository") != "LEAF-Solar-Design/autofill-solver":
     sys.exit(1)
 LEAF_AUTOFILL_EXTRACT
+  fi
   rm -rf /tmp/autofill-solver
   timeout 15 git clone -q --no-checkout "$work/snapshot.bundle" /tmp/autofill-solver \
     || { autofill_solver_fail "bundle clone"; return 1; }
@@ -815,6 +885,7 @@ LEAF_AUTOFILL_EXTRACT
     || { autofill_solver_fail "revision checkout"; return 1; }
   [[ "$(timeout 5 git -C /tmp/autofill-solver rev-parse HEAD)" == "$autofill_solver_revision" ]] \
     || { autofill_solver_fail "HEAD verification"; return 1; }
+  if [[ -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" && "${LEAF_CI_CACHE_WRITABLE:-0}" == 1 ]]; then timeout --kill-after=5 30 python3 -I -B "$LEAF_DEP_CACHE_HELPER" publish --kind as --cache-dir "$LEAF_CI_CACHE_DIR" --writable 1 --run "${CODEBUILD_BUILD_ID:-local}" --revision "$autofill_solver_revision" --src "$work" >&2 || echo "LEAF_DEP_CACHE kind=as action=publish result=error" >&2; fi
   rm -rf "$work"
 }
 if fetch_autofill_solver; then
@@ -1042,6 +1113,11 @@ else
 fi
 if [[ "$tracing_helpers_ready" != 1 || "$reporters_ready" != 1 ]]; then
   echo 'WARNING: trusted capture unavailable; readsets and test reports remain incomplete' >&2
+fi
+if [[ -n "${dep_cache_publish_pid:-}" ]]; then
+  wait "$dep_cache_publish_pid" || echo "LEAF_DEP_CACHE kind=dl action=publish result=error"
+  cat "$dep_cache_publish_log" || true
+  rm -f "$dep_cache_publish_log" || true
 fi
 if [[ "${CI_SHARD_MODE:-all}" == all || ${#only_args[@]} == 0 || "$CI_SHARD_INDEX_N" == 0 ]]; then
 if [[ "${CI_SHARD_MODE:-all}" == shard && ${#only_args[@]} == 0 ]]; then
