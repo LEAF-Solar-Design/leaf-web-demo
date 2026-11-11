@@ -18,6 +18,30 @@ export function initialSolarParameters(boundary, preset, drawing_units) {
   } catch { return null }
 }
 
+export function originalSolarParameters(original_intake, grid_long_axis) {
+  if (typeof original_intake !== 'string' || !Number.isInteger(grid_long_axis)
+      || grid_long_axis < 2 || grid_long_axis > 300) return null
+  try {
+    const original = JSON.parse(original_intake.replace(/^\uFEFF/, ''))
+    if (Object.keys(original).sort().join(',') !== 'active_preset,boundary,pile_template,units'
+        || !initialSolarParameters(original.boundary, original.active_preset, original.units)
+        || typeof original.pile_template?.Name !== 'string' || !original.pile_template.Name.trim()
+        || original.pile_template.Name !== original.active_preset.PileTemplateName) return null
+    const parameters = { original_intake, grid_long_axis }
+    return new TextEncoder().encode(JSON.stringify(parameters)).length <= 2 * 1024 * 1024 ? parameters : null
+  } catch { return null }
+}
+
+function checkedInitialParameters(parameters) {
+  if (!parameters) return null
+  const keys = Object.keys(parameters).sort().join(',')
+  if (keys === 'grid_long_axis,original_intake') {
+    return originalSolarParameters(parameters.original_intake, parameters.grid_long_axis)
+  }
+  return keys === 'boundary,drawing_units,preset'
+    ? initialSolarParameters(parameters.boundary, parameters.preset, parameters.drawing_units) : null
+}
+
 function readbackMatches(scope, readback) {
   const initial = scope?.drawing_id === null && scope?.input_version_id === null
   if (!scope || !['organization_id', 'project_id'].every(key => uuid(scope[key]))
@@ -57,7 +81,7 @@ export function captureSolarPublication(scope, readback, requestId, parameters =
   const initial = scope?.drawing_id === null && scope?.input_version_id === null
   const source = readback?.physical_source
   if (!readbackMatches(scope, readback) || !uuid(requestId)) return null
-  const inputs = initial ? initialSolarParameters(parameters?.boundary, parameters?.preset, parameters?.drawing_units) : null
+  const inputs = initial ? checkedInitialParameters(parameters) : null
   if (initial && !inputs) return null
   return Object.freeze({ mode: initial ? 'initial' : 'successor', organization_id: scope.organization_id, project_id: scope.project_id,
     drawing_id: scope.drawing_id, input_version_id: scope.input_version_id,
@@ -120,8 +144,7 @@ export function createSolarProjectMaterializationClient({ fetchImpl = fetch, api
     if (!captured || !['initial', 'successor'].includes(captured.mode) || !uuid(captured.request_id)
       || !['organization_id', 'project_id', 'drawing_id'].every(key => uuid(captured[key]))
         && !(initial && captured.drawing_id === null && uuid(captured.organization_id) && uuid(captured.project_id))
-      || (initial ? captured.input_version_id !== null || !initialSolarParameters(inputs?.boundary, inputs?.preset, inputs?.drawing_units)
-        || Object.keys(inputs).sort().join(',') !== 'boundary,drawing_units,preset'
+      || (initial ? captured.input_version_id !== null || !checkedInitialParameters(inputs)
         : !uuid(captured.input_version_id) || !digest(captured.physical_head) || !digest(captured.physical_content_sha256)
           || !Number.isSafeInteger(captured.physical_index) || captured.physical_index < 0))
       return { ok: false, code: 'PROJECT_LAYOUT_SCOPE_INVALID', outcomeUnknown: false }
