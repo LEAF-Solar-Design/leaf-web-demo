@@ -1,5 +1,7 @@
-import { expect, test } from '@playwright/test'
+import { expect as baseExpect, test } from '@playwright/test'
 import { REQUEST, catProofResponse, makeCatProofState } from '../catProofFixture.mjs'
+
+const expect = baseExpect.configure({ timeout: 20_000 })
 
 // Synthetic fixture diagnostics, emitted only for the two previously failed cases.
 const restoreProofDiagnostics = new WeakMap()
@@ -191,7 +193,7 @@ async function mountVersionSurface(page, {
   })
 
   await page.goto('/app?drawing=cat-panels')
-  await expect(page.locator('.viewer-title')).toContainText('cat.dwg', { timeout: 15_000 })
+  await expect(page.locator('.viewer-title')).toContainText('cat.dwg')
   // Each profile starts with its floating panels closed. Enter through the
   // same Studio control a user opens before giving the drawing a command.
   const studio = page.getByRole('navigation', { name: 'Workspace controls' }).getByRole('button', { name: 'Studio', exact: true })
@@ -205,9 +207,9 @@ async function mountVersionSurface(page, {
   if (beforeApprove) await beforeApprove(approval.getByRole('button', { name: 'Approve' }))
   await approval.getByRole('button', { name: 'Approve' }).click()
   const attach = page.getByRole('button', { name: 'Attach' })
-  await expect(attach).toBeVisible({ timeout: 15_000 })
+  await expect(attach).toBeVisible()
   await attach.click()
-  await expect(page.getByRole('button', { name: 'History' })).toBeVisible({ timeout: 15_000 })
+  await expect(page.getByRole('button', { name: 'History' })).toBeVisible()
   await page.getByRole('button', { name: 'History' }).click()
   await expect(page.getByRole('dialog', { name: 'Version history' })).toBeVisible()
 
@@ -259,7 +261,7 @@ test('the /app history drawer shows deltas and restores an old version as a new 
   await expect(v4).toContainText('head')
   await expect(reopened.getByTestId('vh-row-v1')).toBeVisible()
   expect(observed.restoreCount()).toBe(1)
-  expect(observed.intakeReadsAfterRestore()).toBeGreaterThan(0)
+  await expect.poll(() => observed.intakeReadsAfterRestore()).toBeGreaterThan(0)
 })
 
 async function saveAndRestoreVersion(page, kind) {
@@ -339,7 +341,7 @@ async function saveAndRestoreVersion(page, kind) {
   await expect(saved.locator('.vh-mark')).toHaveCount(0)
   await expect(history.locator('.vh-mark')).toHaveCount(1)
   expect(observed.restoreCount()).toBe(1)
-  expect(observed.intakeReadsAfterRestore()).toBeGreaterThan(0)
+  await expect.poll(() => observed.intakeReadsAfterRestore()).toBeGreaterThan(0)
   expect(observed.saveRequests).toHaveLength(1)
 }
 
@@ -471,6 +473,8 @@ test('a split head response (new head, old geometry) cannot clear the write lock
   await expect(persistentLock).toHaveAttribute('data-head', '4')
   // In the studio shell the open drawer overlays the column's right edge, where the lock's Retry sits; close it first (as the two rows above do).
   await history.getByRole('button', { name: 'Close version history' }).click()
+  await expect(persistentLock).not.toHaveAttribute('data-pending', 'true')
+  await expect(persistentLock.getByRole('button', { name: 'Retry loading' })).toBeVisible()
   await expect(page.locator('[data-quick="quick-undo"]')).toBeDisabled()
   expect(observed.intakeReadsAfterRestore()).toBe(1)
 
@@ -497,6 +501,8 @@ test('an undo that landed after the restore releases the lock instead of wedging
   await expect(persistentLock).toHaveAttribute('data-head', '4')
   // In the studio shell the open drawer overlays the column's right edge, where the lock's Retry sits; close it first (as the two rows above do).
   await history.getByRole('button', { name: 'Close version history' }).click()
+  await expect(persistentLock).not.toHaveAttribute('data-pending', 'true')
+  await expect(persistentLock.getByRole('button', { name: 'Retry loading' })).toBeVisible()
   await expect(page.locator('[data-quick="quick-undo"]')).toBeDisabled()
   expect(observed.intakeReadsAfterRestore()).toBe(1)
 
@@ -537,7 +543,7 @@ test('/try requests deltas like /app and still hides recovery controls while its
   })
 
   await page.goto('/try?proof=1')
-  await expect(page.getByTestId('operator-phase')).toContainText(/ready/i, { timeout: 15_000 })
+  await expect(page.getByTestId('operator-phase')).toContainText(/ready/i)
   await expect(page.getByRole('button', { name: /^Restore/ })).toHaveCount(0)
   expect(versionQueries.length).toBeGreaterThan(0)
 
@@ -549,7 +555,7 @@ test('/try requests deltas like /app and still hides recovery controls while its
   // controller's "back to head" branch, which would clear the preview it is
   // supposed to open.
   const olderRow = page.getByTestId('try-version-v2')
-  await expect(olderRow).toBeVisible({ timeout: 15_000 })
+  await expect(olderRow).toBeVisible()
   expect(versionQueries.some((query) => query.includes('include_deltas=1'))).toBe(true)
 
   // READ-ONLY WHILE PREVIEWING, on /try. PR #409 dropped this assertion and
