@@ -1297,6 +1297,61 @@ def test_failed_suite_evidence_does_not_call_a_passing_policy_case_an_error(tmp_
     assert lines[1] == "  first error: none matched"
 
 
+@pytest.mark.parametrize("extension", ["mjs", "ts"])
+def test_failed_suite_evidence_keeps_deep_first_assertion_and_spec_frame(tmp_path, extension):
+    g = _load_runner()
+    log = tmp_path / "deep-playwright.log"
+    failure = f"  x 1 e2e/restore.spec.{extension}:42:3 restore version"
+    assertion = "Error: expect(locator).toBeVisible() token=private"
+    frame = f"    at restore (/work/e2e/restore.spec.{extension}:346:7)"
+    log.write_text(
+        failure + "\n" + "progress\n" * 100
+        + "\x1b[31m" + assertion + "\x1b[0m\n" + frame + "\n"
+        + "Error: later assertion\n"
+        + f"    at later (/work/e2e/later.spec.{extension}:999:1)\n"
+        + "ordinary output\n" * 100, encoding="utf-8")
+    lines = g.failed_suite_evidence([_evidence_result(g, log)])
+    assert lines[:5] == [
+        "FAILED SUITE EVIDENCE: studio-walk-regressions",
+        "  first error: " + failure,
+        "  assertion: Error: expect(locator).toBeVisible() token=[redacted]",
+        "  spec frame: " + frame,
+        "  tail:",
+    ]
+    assert sum("expect(locator)" in line for line in lines) == 1
+    assert sum(":346:7" in line for line in lines) == 1
+    assert not any("later assertion" in line or ":999:1" in line for line in lines)
+    assert len("\n".join(lines)) <= 3000
+
+
+def test_failed_suite_evidence_bounds_assertion_and_frame_without_repeating_first(tmp_path):
+    g = _load_runner()
+    log = tmp_path / "long-playwright.log"
+    assertion = "Error: " + "!" * 600
+    frame = "    at /work/" + "a" * 450 + ".spec.mjs:346:7"
+    log.write_text("x 1 e2e/restore.spec.mjs:42:3 restore\n"
+                   + assertion + "\n" + frame + "\n", encoding="utf-8")
+    result = _evidence_result(g, log)
+    lines = g.failed_suite_evidence([result], tail_lines=0)
+    assert lines[2] == "  assertion: " + assertion[:400]
+    assert lines[3] == "  spec frame: " + frame[:400]
+    assert len("\n".join(g.failed_suite_evidence([result], max_chars=150))) <= 150
+    log.write_text(assertion + "\n" + frame + "\n", encoding="utf-8")
+    lines = g.failed_suite_evidence([result], tail_lines=0)
+    assert lines[1] == "  first error: " + assertion[:400]
+    assert not any(line.startswith("  assertion:") for line in lines)
+
+
+def test_failed_suite_evidence_without_assertion_or_frame_is_unchanged(tmp_path):
+    g = _load_runner()
+    log = tmp_path / "plain.log"
+    log.write_text("$ python test.py\nfailed check\nordinary output\n", encoding="utf-8")
+    assert "\n".join(g.failed_suite_evidence([_evidence_result(g, log)])) == (
+        "FAILED SUITE EVIDENCE: studio-walk-regressions\n"
+        "  first error: failed check\n  tail:\n"
+        "$ python test.py\nfailed check\nordinary output")
+
+
 def test_failed_suite_evidence_retains_real_server_errors_and_scrubs_them(tmp_path):
     g = _load_runner()
     log = tmp_path / "startup.log"
@@ -3709,6 +3764,18 @@ def test_measured_weights_name_only_registered_suites():
     ids = {s.id for s in g.build_suites()}
     stale = sorted(set(g._MEASURED_EST_S) - ids)
     assert stale == [], f"weights for unregistered suite ids: {stale}"
+
+
+@pytest.mark.parametrize("suite_id, seconds", [
+    ("device-agent-tests", 59.6),
+    ("platform", 66.6),
+    ("server-reconcile-sessions-authority", 59.1),
+])
+def test_full_mode_measured_weights_replace_default(suite_id, seconds):
+    g = _load_runner()
+    suite = next(s for s in g.build_suites() if s.id == suite_id)
+    assert g.suite_weight(suite) == seconds
+    assert g.suite_weight(suite) != g._DEFAULT_EST_S
 
 
 def test_partition_is_deterministic_disjoint_and_exact():

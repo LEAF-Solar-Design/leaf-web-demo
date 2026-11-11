@@ -5573,6 +5573,10 @@ def select_pr_tier(suites: List[Suite], tier: dict) -> List[Suite]:
 # gate-runner-selftest pins every key here to a registered suite id so a
 # rename cannot strand a weight.
 _MEASURED_EST_S = {
+    # Measured 2026-11-11 from a full-mode gate job: previously unweighted suites above 50 s.
+    "device-agent-tests": 59.6,
+    "platform": 66.6,
+    "server-reconcile-sessions-authority": 59.1,
     # Studio suite seconds measured 2026-10-28 on BUILD_GENERAL1_LARGE (gate build c5a2fa32, one run). The
     # 2026-09-23 medians (344.9, 336.6, 211.7, 121.0) were about 5x high after the graph memo and left the
     # shards that held them light. Without an entry they would fall back to the 2.0 s default.
@@ -7139,7 +7143,16 @@ def failed_suite_evidence(results, *, max_suites=5, tail_lines=30,
                 line) and not re.match(r"^\s*[\u2713\u2714]\s+\d+\b", line)), "none matched")
             nonempty = [line for line in lines if line.strip()]
             tail = nonempty[-tail_lines:] if tail_lines > 0 else []
-            block = [heading, f"  first error: {scrub_evidence(first)[:400]}", "  tail:"]
+            block = [heading, f"  first error: {scrub_evidence(first)[:400]}"]
+            assertion = next((line for line in lines if line.lstrip().startswith("Error:")), None)
+            frame = next((line for line in lines if re.search(
+                r"^\s*at\s+.*\S+\.spec\.(?:mjs|ts):\d+\b", line)), None)
+            seen = {first}
+            for label, line in (("assertion", assertion), ("spec frame", frame)):
+                if line is not None and line not in seen:
+                    block.append(f"  {label}: {scrub_evidence(line)[:400]}")
+                    seen.add(line)
+            block.append("  tail:")
             block.extend(line[:300] for line in tail)
         output.extend("\n".join(block)[:max(0, max_chars)].splitlines())
     omitted = len(failed) - max(0, max_suites)
