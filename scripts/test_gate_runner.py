@@ -6746,7 +6746,9 @@ def test_early_feedback_actual_trusted_heavy_entry_preserves_producers(tmp_path)
                    FIXTURE_TRACE=shell_path(trace), CI_SCRIPT=shell_path(REPO / ".codebuild/ci.sh"),
                    FIXTURE_FAIL_LAUNCH=str(int(fail_launch)),
                    FIXTURE_FAIL_DEPS=str(int(fail_deps)))
-        for key in ("CI_SHARD_TOTAL", "CI_SHARD_INDEX"):
+        for key in ("CI_SHARD_TOTAL", "CI_SHARD_INDEX", "LEAF_CI_CACHE_DIR",
+                    "LEAF_CI_CACHE_WRITABLE", "LEAF_DEP_CACHE_HELPER", "LEAF_DEP_CACHE_OFF",
+                    "PLAYWRIGHT_BROWSERS_PATH"):
             env.pop(key, None)
         if shard is not None:
             env.update(CI_SHARD_TOTAL="2", CI_SHARD_INDEX=str(shard))

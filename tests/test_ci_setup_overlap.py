@@ -44,7 +44,9 @@ class TestCiSetupOverlap(unittest.TestCase):
                         FIXTURE_BIN=shell_path(self.bins),
                         FIXTURE_ROOT=shell_path(self.directory),
                         TMPDIR=shell_path(self.directory / "tmp"))
-        for key in ("CI_SHARD_TOTAL", "CI_SHARD_INDEX", "BASH_ENV"):
+        for key in ("CI_SHARD_TOTAL", "CI_SHARD_INDEX", "BASH_ENV", "LEAF_CI_CACHE_DIR",
+                    "LEAF_CI_CACHE_WRITABLE", "LEAF_DEP_CACHE_HELPER", "LEAF_DEP_CACHE_OFF",
+                    "PLAYWRIGHT_BROWSERS_PATH"):
             self.env.pop(key, None)
 
     def stub(self, name, body):
