@@ -540,6 +540,26 @@ def test_sip_r3e_readiness(monkeypatch):
     assert availability.w1_graph_readiness(ground)[TOOL]["input_ready"] is False
 
 
+def test_sip_r3e_manual_discovery_readiness(monkeypatch):
+    w, ctx = world(monkeypatch, manual=True)
+    before = deepcopy(ctx.graph)
+    assert availability.w1_graph_readiness(ctx.graph)[TOOL] == {
+        "input_ready": True, "input_reason": None}
+    assert ctx.graph == before
+    a = policy_setup(w, ctx, monkeypatch)
+    params = {"expected_rev": ctx.graph["rev"], "discover": {
+        "BranchMaxOffset": 1, "AlignmentTolerance": .5, "InstallationDesign": "Roof"}}
+    assert request(a, ctx, params)["status_code"] == 200
+    policy.assert_refusal(request(a, ctx, groups(ctx)), "MODULE_POWER_REQUIRED")
+    invalid = deepcopy(ctx.graph)
+    invalid["settings"]["extra"]["string_sizing"]["basis_sha256"] = "0" * 64
+    assert availability.w1_graph_readiness(invalid)[TOOL] == {
+        "input_ready": False, "input_reason": "sizing_confirmation_required"}
+    ground = deepcopy(ctx.graph)
+    ground["project"]["installation_design"] = "Ground"
+    assert availability.w1_graph_readiness(ground)[TOOL]["input_ready"] is False
+
+
 def test_sip_r3e_downstream_chain(monkeypatch):
     """R3e-2-12 Nine proved publications close the frame and downstream output gap."""
     w, ctx = world(monkeypatch)

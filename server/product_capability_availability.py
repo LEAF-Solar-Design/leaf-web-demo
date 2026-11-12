@@ -405,14 +405,18 @@ def w1_graph_readiness(graph):
             sizing_reason = project_reasons[0]
     mark(["solar-size-strings"], settings_ready, sizing_reason)
     sized = False
+    manual_geometry = False
     if settings_ready:
         try:
-            require_sizing(graph)
+            sizing = require_sizing(graph)
             sized = True
+            manual_geometry = sizing["mode"] == "manual-global"
         except (KeyError, ValueError, TypeError):
             pass
     mark(["solar-panel-groups"], sized, "sizing_confirmation_required")
-    if sized and not sizing_power_ready(graph):
+    # Verified manual length enables explicit geometric discovery. Request preparation
+    # still requires proven power for caller-selected groups and electrical operations.
+    if sized and not manual_geometry and not sizing_power_ready(graph):
         mark(["solar-panel-groups"], False, "module_power_required")
     if graph["project"]["installation_design"] != "Roof":
         # builtins/solar_panel_groups.py makes Roof frames only; validate_graph refuses them on a

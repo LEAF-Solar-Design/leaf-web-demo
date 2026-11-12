@@ -39,6 +39,9 @@ the unchanged electrical power checks. Cloud global/zone discovery retains its
 proven rated power. A geometry stringer request uses placement and the confirmed
 length, not watts; actual service execution still uses the existing grants and
 custody rails.
+Tool readiness accepts that verified manual evidence for geometric discovery.
+The request-specific checks still refuse caller-selected groups without proven
+power; electrical readiness and validity retain their existing requirements.
 Canonical jobs retain the project, drawing, version, checkout and replay fences.
 The specialised grouping form needs to send `discover` to select this mode;
 manual `groups` keep their existing meaning.
