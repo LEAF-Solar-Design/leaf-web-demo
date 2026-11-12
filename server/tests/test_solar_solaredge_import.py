@@ -168,6 +168,37 @@ def test_bridge_string_handles_come_from_the_matched_sub_grids():
     assert result["unassigned"] == []
 
 
+def test_explicit_review_choices_preserve_bridge_membership_and_defer_partial_bridges():
+    matrices = [two_block_grid()]
+    panels = row_panels("A", 3) + row_panels("B", 3, x0=1000.0)
+    groups = [{"block": "GA", "panels": [p["handle"] for p in panels[:3]]},
+              {"block": "GB", "panels": [p["handle"] for p in panels[3:]]}]
+    original = copy.deepcopy((matrices, groups, panels))
+    def run(choices=None):
+        return si.run_import(matrices, groups, panels, alignment_tolerance=1.0,
+                             review=True, associations=choices)
+    automatic = run()
+    assert automatic["strings"] == automatic["bridge_strings"] == []
+    partial = run({"GA": 0})
+    assert [row["panels"] for row in partial["strings"]] == [["A00", "A01"]]
+    assert partial["bridge_strings"] == []
+    assert partial["unassigned"] == ["A02", "B00", "B01", "B02"]
+    resolved = run({"GA": 0, "GB": 1})
+    assert [row["panels"] for row in resolved["bridge_strings"]] == [["A02", "B00", "B01"]]
+    swapped = run({"GA": 1, "GB": 0})
+    assert [row["panels"] for row in swapped["strings"]] == [["A02"], ["B00", "B01"]]
+    assert [row["panels"] for row in swapped["bridge_strings"]] == [["B02", "A00", "A01"]]
+    for value in (resolved, swapped):
+        bridge = value["bridge_strings"][0]
+        assert (bridge["inverter_id"], bridge["string_input_number"]) == (2, 4)
+        assert bridge["source"] == {"kind": "bridge", "original_index": 0}
+        assigned = [handle for row in value["strings"] + value["bridge_strings"] for handle in row["panels"]]
+        assert len(assigned) == len(set(assigned)) == len(panels)
+        assert value["unassigned"] == []
+    assert run({}) == automatic
+    assert (matrices, groups, panels) == original
+
+
 def test_draw_cuts_by_sequences_skips_missing_entities_and_keeps_a_partial():
     merged = {"Sequences": [2, 3], "Rows": [{"Panels": [
         {"Code": 1, "Id": "a1", "Seq": 1, "InverterId": 5, "StringInputNumber": 2},

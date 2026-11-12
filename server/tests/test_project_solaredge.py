@@ -259,6 +259,34 @@ def test_explicit_association_review_reuse_reset_and_canonical_acceptance(review
         for row in stored["matches"]]
 
 
+def test_explicit_bridge_review_accepts_complete_choices_without_electrical_entities(review_lane, monkeypatch):
+    s = review_lane
+    monkeypatch.setattr(se.reports, "parse_source", lambda data: [samples.two_block_grid()])
+    refs = [frame["id"] for frame in s.ctx.graph["frames"]]
+    panel_ref = {panel["provenance"]["source_handle"]: panel["id"] for panel in s.ctx.graph["panels"]}
+    before = (s.head, len(s.versions), deepcopy(s.ctx.graph))
+    partial = report(s, selection_order="unknown", associations={refs[0]: 0})
+    assert partial["counts"]["matched_frames"] == 1
+    assert partial["counts"]["bridge_strings"] == 0
+    assert partial["counts"]["unassigned_panels"] == 4
+    refused(se.tracking.REPORT_INVALID, lambda: se.accept(s.ctx, params(s, partial)))
+    assert (s.head, len(s.versions), s.ctx.graph) == before
+    choices = {refs[0]: 0, refs[1]: 1}
+    complete = report(s, selection_order="unknown", associations=choices)
+    _, stored = se._load_report(s.ctx, complete["report"]["artifact_id"])
+    bridge = next(row for row in stored["strings"] if row["source"] == "bridge")
+    assert bridge["panel_refs"] == [panel_ref[handle] for handle in ("A02", "B00", "B01")]
+    assert (bridge["pdf_inverter_id"], bridge["pdf_string_input"], bridge["pdf_matrix"]) == (2, 4, 0)
+    assert complete["counts"]["bridge_strings"] == 1
+    assert complete["counts"]["unassigned_panels"] == 0
+    _, _, accepted = accept(s, complete)
+    output = read(s, accepted)["output"]
+    assert output["provenance"]["request"]["associations"] == choices
+    assert next(row for row in output["items"] if row["source"] == "bridge")["panel_refs"] == bridge["panel_refs"]
+    for key in ("panels", "frames", "strings", "inverters", "routes", "schedules"):
+        assert accepted.graph[key] == before[2][key]
+
+
 @pytest.mark.parametrize("case", ["list", "bool", "negative", "float", "unknown", "out-of-range", "duplicate"])
 def test_explicit_association_refusal_preserves_source_graph_and_artifacts(review_lane, case):
     s = review_lane
