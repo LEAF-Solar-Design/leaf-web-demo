@@ -26,6 +26,7 @@ LAB_PATHS = [
     "/api/lab/docs/{doc_id}/head",
     "/api/lab/docs/{doc_id}/revisions",
     "/api/lab/docs/{doc_id}/revisions/{revision}",
+    "/api/lab/docs/{doc_id}/revisions/{revision}/export",
     "/api/lab/docs/{doc_id}/diff",
     "/api/lab/docs/{doc_id}/restore",
     "/api/lab/docs/{doc_id}/publish",
