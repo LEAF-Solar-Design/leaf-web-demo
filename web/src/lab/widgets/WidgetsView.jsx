@@ -2,10 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import WidgetDesigner from './WidgetDesigner.jsx'
 import WidgetPreview from './WidgetPreview.jsx'
 import { createEditorState, createWidgetDoc, sameDocument, widgetEditorReducer } from './useWidgetEditor.js'
-import { DESIGNER_DEFAULT_DOC } from './designerDefault.js'
 import { validateWidgetDoc } from './widgetDoc.js'
 import { laFitProblem } from './laFit.js'
-import { loadWidget, saveWidget } from './widgetsClient.js'
+import { claimLegacyWidget, loadProjectWidget, loadWidget, projectWidgetId, saveWidget, widgetProjectKey } from './widgetsClient.js'
 import './widgets.css'
 
 const validId = (id) => /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}(?![\s\S])/.test(id)
@@ -21,12 +20,16 @@ function validationError(doc) {
     return { detail: error.message, pointer: '/formats' }
   }
 }
-export function WidgetsView({ scopeKey, hidden = false, host = null, requestPublication }) {
+export function WidgetsView({ projectId = null, accountScope = null, ...props }) {
+  return <ProjectWidgetsView key={JSON.stringify([projectId, accountScope])} projectId={projectId} accountScope={accountScope} {...props} />
+}
+function ProjectWidgetsView({ projectId, accountScope, scopeKey, hidden = false, host = null, requestPublication }) {
   const local = typeof scopeKey === 'string' && scopeKey.trim().length > 0
   const [drafts, setDrafts] = useState(() => new Map())
   const [storeState, setStoreState] = useState(null)
   const [docId, setDocId] = useState('')
   const [loadedId, setLoadedId] = useState(null)
+  const [artifactId, setArtifactId] = useState(null)
   const [head, setHead] = useState(null)
   const [sha256, setSha256] = useState(null)
   const [publication, setPublication] = useState(null)
@@ -35,11 +38,25 @@ export function WidgetsView({ scopeKey, hidden = false, host = null, requestPubl
   const [graphOutputs, setGraphOutputs] = useState(() => new Map())
   const onOutputs = useCallback((id, outputs) => setGraphOutputs((previous) => new Map(previous).set(id, outputs)), [])
   const requestGeneration = useRef(0)
+  const restored = useRef(false)
+  const projectKey = projectId ? widgetProjectKey(projectId, accountScope) : null
   const storeRef = useRef(storeState)
   storeRef.current = storeState
   const empty = useRef(createEditorState())
   const state = local ? drafts.get(scopeKey) ?? empty.current : storeState
   useEffect(() => { requestGeneration.current += 1; return () => { requestGeneration.current += 1 } }, [scopeKey])
+  useEffect(() => () => { restored.current = false }, [projectKey])
+  useEffect(() => {
+    if (local || hidden || !projectKey || restored.current) return
+    restored.current = true
+    try {
+      const id = localStorage.getItem(projectKey)
+      if (validId(id ?? '')) void load(id)
+    } catch { /* The server document can still be reopened by name. */ }
+  }, [local, hidden, projectKey])
+  function remember(id) {
+    if (projectKey) try { localStorage.setItem(projectKey, id) } catch { /* Optional last-opened name. */ }
+  }
   const dispatch = useCallback((action) => {
     if (local) setDrafts((previous) => {
       const next = new Map(previous)
@@ -69,28 +86,41 @@ export function WidgetsView({ scopeKey, hidden = false, host = null, requestPubl
   }, [state?.doc, graphOutputs])
   async function load(id = docId) {
     const ticket = ++requestGeneration.current
-    setStatus('loading'); setFailure(null); setPublication(null)
-    const result = await loadWidget(id)
+    setDocId(id); setStatus('loading'); setFailure(null); setPublication(null)
+    const result = await (projectId ? loadProjectWidget(projectId, id, { accountScope }) : loadWidget(id))
     if (ticket !== requestGeneration.current) return
     if (!result.ok) { setStatus('error'); setFailure(result); return }
     try {
-      const doc = result.doc ? validateWidgetDoc(result.doc) : createWidgetDoc(DESIGNER_DEFAULT_DOC)
-      dispatch({ type: 'load', doc }); setLoadedId(id); setDocId(id); setHead(result.revision ?? null)
+      const doc = result.doc ? validateWidgetDoc(result.doc) : createWidgetDoc()
+      if (result.legacy && !claimLegacyWidget(projectId, id, accountScope)) {
+        setStatus('error'); setFailure({ detail: 'This legacy document could not be associated with the selected project.' }); return
+      }
+      dispatch({ type: 'load', doc }); setLoadedId(id); setArtifactId(result.artifactId ?? id); setDocId(id); setHead(result.revision ?? null)
       setSha256(result.sha256 ?? null)
       setStatus(result.doc ? 'saved' : 'editing')
+      if (result.doc) remember(id)
     } catch (error) { setStatus('invalid'); setFailure({ detail: error.message, pointer: '/graph' }) }
   }
   function newDocument() {
     requestGeneration.current += 1
-    dispatch({ type: 'load', doc: createWidgetDoc(DESIGNER_DEFAULT_DOC) }); setLoadedId(docId); setHead(null); setSha256(null); setPublication(null); setFailure(null); setStatus('editing')
+    dispatch({ type: 'load', doc: createWidgetDoc() }); setLoadedId(docId); setArtifactId(null); setHead(null); setSha256(null); setPublication(null); setFailure(null); setStatus('editing')
   }
   async function save() {
     if (local || invalid || !state || state.transaction || !validId(loadedId ?? '')) return
     const ticket = ++requestGeneration.current, sentDoc = state.doc
     setStatus('saving'); setFailure(null); setPublication(null)
-    const result = await saveWidget(loadedId, sentDoc, head)
+    let id = artifactId ?? loadedId
+    if (!artifactId && projectId) {
+      try { id = await projectWidgetId(projectId, loadedId) }
+      catch {
+        if (ticket === requestGeneration.current) { setStatus('error'); setFailure({ detail: 'Unable to resolve the project document ID.' }) }
+        return
+      }
+      if (ticket !== requestGeneration.current) return
+    }
+    const result = await saveWidget(id, sentDoc, head)
     if (ticket !== requestGeneration.current) return
-    if (result.ok) { setHead(result.revision); setSha256(result.sha256 ?? null); setStatus(sameDocument(storeRef.current?.doc, sentDoc) ? 'saved' : 'editing') }
+    if (result.ok) { setArtifactId(id); setHead(result.revision); setSha256(result.sha256 ?? null); setStatus(sameDocument(storeRef.current?.doc, sentDoc) ? 'saved' : 'editing'); remember(loadedId) }
     else if (result.status === 422 && !sameDocument(storeRef.current?.doc, sentDoc)) { setStatus('editing') }
     else { setFailure(result); setStatus(result.status === 409 ? 'conflict' : result.status === 422 ? 'invalid' : 'error') }
   }
@@ -125,7 +155,9 @@ export function WidgetsView({ scopeKey, hidden = false, host = null, requestPubl
         <button type="button" disabled={!canDownload} onClick={downloadDefinition}>Download widget definition</button>
         {requestPublication && <button type="button" disabled={!loadedId || !head || !sha256 || status !== 'saved' || Boolean(invalid) || Boolean(state?.transaction) || docId !== loadedId}
           onClick={async () => {
-            const result = await requestPublication({ doc: state.doc, source: { artifact_id: loadedId, revision: head, digest: sha256 } })
+            const ticket = requestGeneration.current, sentDoc = state.doc
+            const result = await requestPublication({ doc: sentDoc, source: { artifact_id: artifactId ?? loadedId, revision: head, digest: sha256 } })
+            if (ticket !== requestGeneration.current || !sameDocument(storeRef.current?.doc, sentDoc)) return
             setPublication(result.ok ? 'Publication requested' : result.reason === 'la_too_tall' ? laFitProblem(state.doc) : result.reason)
           }}>Request publication</button>}
       </div>
@@ -137,7 +169,7 @@ export function WidgetsView({ scopeKey, hidden = false, host = null, requestPubl
       {status === 'conflict' && <button type="button" onClick={() => load(loadedId)}>Reload</button>}
     </>}
     {state && <WidgetDesigner key={local ? scopeKey : loadedId ?? 'store'} state={state} dispatch={dispatch} local={local} hidden={hidden || (!local && status === 'loading')} invalid={Boolean(invalid)} onOutputs={onOutputs} graphOutputs={graphOutputs} />}
-    {!local && !hidden && status !== 'loading' && state && loadedId && head != null && !invalid && <WidgetPreview docId={loadedId} doc={state.doc} format={state.doc.active} host={host} />}
+    {!local && !hidden && status !== 'loading' && state && loadedId && head != null && !invalid && <WidgetPreview docId={artifactId ?? loadedId} doc={state.doc} format={state.doc.active} host={host} />}
   </section>
 }
 export default WidgetsView

@@ -1,7 +1,41 @@
 import { manifestFor } from '../canvas/registry.js'
 import { authHeaders, config } from '../../api.js'
+import { digest } from '../contract.js'
 
 const validId = (id) => typeof id === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}(?![\s\S])/.test(id)
+// These keys separate client journeys; the server still authorizes every request.
+export function widgetProjectKey(projectId, accountScope) {
+  return `leaf.lab.widgets.v1:${JSON.stringify([config.apiBase, config.tenant, accountScope ?? null, projectId])}`
+}
+export async function projectWidgetId(projectId, docId) {
+  if (!validId(docId)) throw new Error('Enter a valid document ID.')
+  if (!projectId) return docId
+  return `widget-${await digest([projectId, docId])}`
+}
+const legacyKey = (docId, accountScope) => `${widgetProjectKey(null, accountScope)}:legacy:${docId}`
+export function claimLegacyWidget(projectId, docId, accountScope) {
+  try {
+    const key = legacyKey(docId, accountScope), owner = localStorage.getItem(key)
+    if (owner !== null && owner !== projectId) return false
+    localStorage.setItem(key, projectId)
+    return true
+  } catch { return false }
+}
+export async function loadProjectWidget(projectId, docId, { accountScope, ...options } = {}) {
+  let artifactId
+  try { artifactId = await projectWidgetId(projectId, docId) }
+  catch { return { ok: false, status: 400, detail: 'Unable to resolve the project document ID.' } }
+  const result = await loadWidget(artifactId, options)
+  if (!projectId || !result.ok || result.doc) return { ...result, artifactId }
+  // Old documents have no project metadata. The first explicit open associates
+  // one with the selected project, without rewriting or deleting its revisions.
+  try {
+    const owner = localStorage.getItem(legacyKey(docId, accountScope))
+    if (owner !== null && owner !== projectId) return { ...result, artifactId }
+  } catch { return { ...result, artifactId } }
+  const legacy = await loadWidget(docId, options)
+  return legacy.ok && !legacy.doc ? { ...result, artifactId } : { ...legacy, artifactId: docId, legacy: true }
+}
 async function request(docId, suffix, { fetch: fetchImpl = globalThis.fetch, timeout = 10000, ...options } = {}) {
   if (!validId(docId)) return { ok: false, status: 400, detail: 'Enter a valid document ID.' }
   const controller = new AbortController()
