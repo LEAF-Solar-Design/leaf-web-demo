@@ -50,6 +50,8 @@ import { AuthorLoop, AuthorLoopError } from "./agent/authorLoop.js";
 import { PortfolioProposalError, PortfolioProposalService, type PortfolioProposalRequest } from "./agent/portfolioProposal.js";
 import { CAMPAIGN_SOURCE_BODY_LIMIT, dispatchCampaignSource, type CampaignSourceService } from "./agent/campaignSourceIntegration.js";
 import { ProjectRepositoryEditCoordinator, ProjectRepositoryEditSettlementUnavailable } from "./agent/projectRepositoryEditCoordinator.js";
+import { authorProjectSource, type ProjectSourceAuthorDependencies } from "./agent/projectSourceAuthoring.js";
+import { SdkRepoEditor } from "./vendor/mushy-author/ports/impl/repoEditRunner.js";
 import { redactTokens } from "./redact.js";
 import { createFileStoreProbe, createReadinessCheck } from "./storeReadiness.js";
 import type { StoreReadiness } from "./storeReadiness.js";
@@ -432,31 +434,36 @@ function readJsonBody(
       if (!raw) return resolve({});
       try {
         const body: unknown = JSON.parse(raw);
-        if (uniqueNestedKeys) {
+        if (uniqueFlatStringKeys && (!isRecord(body) || Object.values(body).some(value => typeof value !== "string"))) {
+          throw new Error("expected a flat string object");
+        }
+        if (uniqueNestedKeys || uniqueFlatStringKeys) {
+          // JSON.parse already checked syntax. Walk each token once, skipping
+          // string values without decoding them (material can be many MiB).
           const stack: (Set<string> | null)[] = [];
-          for (const token of raw.matchAll(/"(?:[^"\\]|\\.)*"|[{}\[\]]/g)) {
-            const value = token[0];
+          for (let i = 0; i < raw.length; i++) {
+            const value = raw[i];
             if (value === "{") stack.push(new Set());
             else if (value === "[") stack.push(null);
             else if (value === "}" || value === "]") stack.pop();
-            else if (/^\s*:/.test(raw.slice(token.index! + value.length))) {
-              const keys = stack[stack.length - 1];
-              const key = JSON.parse(value) as string;
-              if (!keys || keys.has(key)) throw new Error("duplicate JSON key");
-              keys.add(key);
+            else if (value === '"') {
+              const start = i++;
+              while (i < raw.length && raw[i] !== '"') {
+                if (raw[i] === "\\") i++;
+                i++;
+              }
+              const end = i + 1;
+              let next = end;
+              while (raw[next] === " " || raw[next] === "\t" || raw[next] === "\r" || raw[next] === "\n") next++;
+              if (raw[next] === ":") {
+                const keys = stack[stack.length - 1];
+                const key = JSON.parse(raw.slice(start, end)) as string;
+                if (!keys || keys.has(key)) throw new Error("duplicate JSON key");
+                keys.add(key);
+              }
+              i = next - 1;
             }
           }
-        }
-        if (uniqueFlatStringKeys) {
-          if (!isRecord(body) || Object.values(body).some(value => typeof value !== "string")) {
-            throw new Error("expected a flat string object");
-          }
-          // Tokenize complete strings so escaped quotes in values cannot look
-          // like keys. JSON.parse has already checked syntax; in a flat object,
-          // more raw keys than parsed keys means a duplicate, including escapes.
-          const keys = [...raw.matchAll(/"(?:[^"\\]|\\.)*"/g)]
-            .filter(match => /^\s*:/.test(raw.slice(match.index! + match[0].length)));
-          if (keys.length !== Object.keys(body).length) throw new Error("duplicate JSON key");
         }
         resolve(body as Record<string, unknown>);
       } catch (e) {
@@ -691,6 +698,17 @@ export function planFirstOption(req: IncomingMessage): { planFirst?: boolean } {
     : {};
 }
 
+function projectExecutionOption(req: IncomingMessage, authenticated: boolean): { projectExecution?: "canonical-read" } {
+  const name = "x-leaf-project-execution";
+  const value = req.headers[name];
+  const count = req.rawHeaders.filter((header, index) => index % 2 === 0 && header.toLowerCase() === name).length;
+  if (value === undefined && count === 0) return {};
+  if (!authenticated || count !== 1 || value !== "canonical-read") {
+    throw new AuthorLoopError("project execution marker is invalid", 400);
+  }
+  return { projectExecution: "canonical-read" };
+}
+
 function instantTurnOptions(req: IncomingMessage, authenticated: boolean): Pick<Extract<ConverseTurnValidation, { ok: true }>, "instantAssignment" | "instantDrawingContext"> {
   const encoded = req.headers["x-leaf-instant-assignment"];
   if (typeof encoded !== "string" || !encoded) return {};
@@ -739,7 +757,7 @@ async function streamTurn(
   res: ServerResponse,
   runner: ConverseRunner,
   input: ConverseTurnInput,
-  instant?: Pick<Extract<ConverseTurnValidation, { ok: true }>, "instantAssignment" | "instantDrawingContext"> & { planFirst?: boolean },
+  instant?: Pick<Extract<ConverseTurnValidation, { ok: true }>, "instantAssignment" | "instantDrawingContext"> & { planFirst?: boolean; projectExecution?: "canonical-read" },
 ): Promise<void> {
   const turnAbort = new AbortController();
   const iterator = runner.runTurn(input, { signal: turnAbort.signal, ...instant })[Symbol.asyncIterator]();
@@ -818,6 +836,7 @@ export interface Harness {
 export function createHarness(ports: HarnessPorts, opts?: {
   auth?: HarnessAuthConfig;
   projectRepositoryEdits?: CampaignSourceService;
+  projectSourceAuthoring?: ProjectSourceAuthorDependencies;
   portfolioProposals?: Pick<PortfolioProposalService, "propose">;
   standardServicesApproval?: {
     dispatchSecret: string;
@@ -1192,6 +1211,32 @@ export function createHarness(ports: HarnessPorts, opts?: {
           return send(res, 409, { error: { code: "worker_run_not_active", message: "worker run not active" } });
         }
         return send(res, 200, binding);
+      }
+
+      if (method === "POST" && path === "/internal/project-repository-source/author") {
+        const requiredAuth = harnessAuthDenial(req, { ...auth, enabled: true });
+        if (requiredAuth) return send(res, 401, requiredAuth);
+        res.setHeader("cache-control", "no-store");
+        if (!authoredExecutionEnabled() || !opts?.projectRepositoryEdits || !opts.projectSourceAuthoring) {
+          return send(res, 503, { error: { code: "source_unavailable", message: "source is unavailable" } });
+        }
+        const controller = new AbortController();
+        const abort = () => { if (!res.writableEnded) controller.abort(); };
+        req.once("aborted", abort);
+        res.once("close", abort);
+        const timer = setTimeout(() => controller.abort(), 240000);
+        try {
+          const body = await readJsonBody(req, 12 * 1024 * 1024, true, false, true);
+          const staged = await authorProjectSource(opts.projectRepositoryEdits, opts.projectSourceAuthoring,
+            body, authorityHeader(req, "x-tenant-id"), controller.signal);
+          return send(res, 200, staged);
+        } catch {
+          return send(res, 409, { error: { code: "source_conflict", message: "source transaction failed" } });
+        } finally {
+          clearTimeout(timer);
+          req.removeListener("aborted", abort);
+          res.removeListener("close", abort);
+        }
       }
 
       if (method === "POST" && ["stage", "publish", "recover"].some(action =>
@@ -1574,7 +1619,7 @@ export function createHarness(ports: HarnessPorts, opts?: {
         // dropped: async-function `return somePromise` does not route through a local
         // catch, only `await` does.
         await streamTurn(req, res, ports.converseRunner, validated.input,
-          { ...instantTurnOptions(req, auth.enabled), ...planFirstOption(req) });
+          { ...instantTurnOptions(req, auth.enabled), ...planFirstOption(req), ...projectExecutionOption(req, auth.enabled) });
         return;
       }
 
@@ -1861,7 +1906,8 @@ export async function startReal(port = 8130): Promise<Server> {
     coordination: new ProjectRepositoryEditCoordinationClient({ baseUrl: appUrl, dispatchSecret }),
   }) : undefined;
   const server = createHarness(ports, {
-    ...(projectRepositoryEdits ? { projectRepositoryEdits } : {}),
+    ...(projectRepositoryEdits ? { projectRepositoryEdits,
+      projectSourceAuthoring: { oauth, editor: new SdkRepoEditor({ maxTurns: 24, maxWallTimeMs: 240000 }) } } : {}),
     portfolioProposals: new PortfolioProposalService({ oauth }),
     readiness,
   }).listen(port);

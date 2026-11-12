@@ -153,6 +153,80 @@ def context(response):
     return {"org_id": ORG, "project_id": PROJECT, "input_version_id": response["input_version_id"]}
 
 
+def test_project_reference_registration_postgres(tmp_path, monkeypatch):
+    import os
+    from test_project_drawing_editor import canonical_ci_pg
+
+    if not ((os.environ.get("LEAF_E364B_PG_PARENT") and os.environ.get("DATABASE_URL"))
+            or canonical_ci_pg()):
+        pytest.skip("requires managed or verified canonical disposable PostgreSQL")
+
+    import write_loop
+    import store as blobs
+    from leaf_platform import project_lifecycle, store as metadata_store
+
+    db = platform_link.platform_db()
+    db.apply_migration()
+    backend = blobs.FilesystemBackend(str(tmp_path))
+    monkeypatch.setattr(write_loop, "upload_backend_for_tenant", lambda tenant: backend)
+    org = metadata_store.create_org(name="ARLO reference proof")
+    actor = metadata_store.create_identity_binding(org.org_id, "auth0", str(uuid.uuid4()), role="owner")
+
+    def new_project(name):
+        return project_lifecycle.create_blank_project(
+            org.org_id, actor.binding_id, name=name,
+            idempotency_key=str(uuid.uuid4()))["project"]["project_id"]
+
+    project, other = new_project("ARLO input"), new_project("ARLO other")
+    monkeypatch.setattr(api.platform_deps, "auth_live", lambda: True)
+    monkeypatch.setattr(api.platform_deps, "_verified_identity", lambda authorization:
+                        SimpleNamespace(platform_tenant_id=org.org_id, binding_id=actor.binding_id))
+    app = FastAPI()
+    app.include_router(api.router)
+    reference_url = f"/api/projects/{project}/reference-files"
+    request = arlo_lab.load_example("feeder-lab-v1", "1")
+    request["seed"] = 17
+    raw = json.dumps(request, indent=2).encode()
+
+    with TestClient(app) as web:
+        def upload(filename, content_type, data):
+            result = web.post(f"{reference_url}?filename={filename}", content=data,
+                              headers={**headers(), "Content-Type": content_type})
+            assert result.status_code == 201, result.text
+            return result.json()["material"]["material_id"]
+
+        material = upload("request.json", "application/json", raw)
+        url = f"{reference_url}/{material}/arlo-input"
+        registered = web.post(url, headers=headers())
+        assert registered.status_code == 201, registered.text
+        result = registered.json()
+        assert web.post(url, headers=headers()).json() == result
+        assert result["organization_id"] == str(org.org_id) and result["project_id"] == project
+        assert result["material_id"] == material
+        assert result["original_sha256"] == hashlib.sha256(raw).hexdigest()
+        assert result["input_sha256"] == arlo_lab.digest(request)
+        assert web.get(f"{reference_url}/{material}/content", headers=headers()).content == raw
+
+        changed = upload("changed.json", "application/json", json.dumps({**request, "seed": 18}).encode())
+        assert web.post(f"{reference_url}/{changed}/arlo-input", headers=headers()).status_code == 409
+        unsupported = upload("notes.txt", "text/plain", b"not an ARLO request")
+        assert web.post(f"{reference_url}/{unsupported}/arlo-input", headers=headers()).status_code == 422
+        wrong_project = f"/api/projects/{other}/reference-files/{material}/arlo-input"
+        assert web.post(wrong_project, headers=headers()).status_code == 404
+
+    version = result["input_version_id"]
+    scope = {"org_id": org.org_id, "project_id": project, "input_version_id": version}
+    assert arlo_lab.load_registered_request(scope, result["request"]) == request
+    with pytest.raises(ValueError, match="differs"):
+        arlo_lab.load_registered_request(scope, {**request, "seed": 18})
+    with db.connection() as conn:
+        row = conn.execute("SELECT provenance FROM drawing_versions WHERE version_id = %s",
+                           (version,)).fetchone()
+    assert row["provenance"]["material_id"] == material
+    assert row["provenance"]["original_sha256"] == result["original_sha256"]
+    assert row["provenance"]["input_sha256"] == result["input_sha256"]
+
+
 def test_registration_replays_exact_immutable_input_and_ignores_org_header(client, store):
     first = client.post(endpoint(), headers=headers(), json={"example_version": "1"})
     second = client.post(endpoint(), headers=headers(), json={"example_version": "1"})

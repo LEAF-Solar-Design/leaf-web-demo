@@ -669,6 +669,61 @@ describe('release evidence panel', () => {
     campaign.completion.release.contract.cad_recipe = { recipe_id: 'dxf-layer-summary', recipe_version: 1,
       source_artifact: { sha256: 'b'.repeat(64), size_bytes: 4, path: 'https://untrusted.test/source' } }
   }
+  it.each([
+    'Design feeder routing, parts and cost.\n' + 'Keep this constraint.\n'.repeat(60) + 'Final constraint.',
+    'Deliver feeder_request.json unchanged.\nVerify the downloaded file.',
+  ])('keeps requested scope unverified while delivering the existing file: %s', async requested => {
+    readyOutput('feeder_request.json', 'application/json')
+    Object.assign(campaign.completion.release.contract, {
+      requested_workflow: requested,
+      scope_classification: { version: 1, capability: 'existing_artifact_delivery', requested_workflow_status: 'unverified' },
+      required_checks: stages.map(stage => ({ check_id: stage, stage, description: `Verify ${stage}` })),
+    })
+    campaign.completion.coverage = stages.map(stage => ({ check_id: stage, status: 'passed' }))
+    const before = structuredClone(campaign.completion)
+    const urlApi = { createObjectURL: vi.fn().mockReturnValue('blob:existing'), revokeObjectURL: vi.fn() }
+    const clicked = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    try {
+      renderCollapsed(panel({ artifactUrlApi: urlApi }))
+      expect(screen.getByText('Existing file delivered')).toBeTruthy()
+      const scope = screen.getByRole('region', { name: 'Requested workflow scope' })
+      expect(scope.closest('details')).toBeNull()
+      expect(scope.textContent).toContain(requested)
+      expect(within(scope).getByText('Requested workflow (unverified)')).toBeTruthy()
+      expect(within(scope).getByText('5 of 5 file-delivery checks passed.')).toBeTruthy()
+      expect(screen.queryByText('Completed release')).toBeNull()
+      expect(screen.queryByText('No remaining required checks reported for this release.')).toBeNull()
+      expect(screen.getByText('Passed file-delivery checks')).toBeTruthy()
+      fireEvent.click(screen.getByRole('button', { name: 'Download feeder_request.json' }))
+      await waitFor(() => expect(clicked).toHaveBeenCalledOnce())
+      expect(campaign.downloadReleaseArtifact).toHaveBeenCalledOnce()
+      expect(campaign.completion).toEqual(before)
+    } finally { clicked.mockRestore() }
+  })
+  it('qualifies legacy existing-file scope without reconstructing the exact request or changing receipts', () => {
+    readyOutput('feeder_request.json', 'application/json')
+    campaign.completion.release.contract.selected_artifact = { name: 'feeder_request.json' }
+    campaign.completion.release.deferred_items = ['Requested workflow beyond this release: truncated context']
+    const before = structuredClone(campaign.completion)
+    const view = renderCollapsed(panel())
+    const scope = screen.getByRole('region', { name: 'Requested workflow scope' })
+    expect(scope.textContent).toContain('the exact requested workflow is unknown')
+    expect(scope.textContent).toContain('Legacy original goal: Organize all family recipes')
+    expect(scope.textContent).toContain('truncated context')
+    expect(screen.getByText('Existing file delivered')).toBeTruthy()
+    expect(campaign.completion).toEqual(before)
+    campaign.completion.current_verification = { status: 'failed', reason: 'Artifact access revoked' }
+    view.rerender(panel())
+    expect(screen.queryByText('Existing file delivered')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Download feeder_request.json' })).toBeNull()
+  })
+  it.each(['web_recipe', 'transform_recipe', 'cad_recipe'])('keeps specialized %s out of existing-file classification', recipe => {
+    readyOutput('records.csv', 'text/csv')
+    Object.assign(campaign.completion.release.contract, { selected_artifact: { name: 'records.csv' }, [recipe]: {} })
+    render(panel())
+    expect(screen.getByText('Completed release')).toBeTruthy()
+    expect(screen.queryByRole('region', { name: 'Requested workflow scope' })).toBeNull()
+  })
   it('downloads verified source bytes as source.dxf and revokes the URL', async () => {
     readySource()
     campaign.downloadReleaseSource.mockResolvedValue({ name: 'source.dxf', mediaType: 'application/dxf', bytes: new Uint8Array([1, 2, 3, 4]).buffer })

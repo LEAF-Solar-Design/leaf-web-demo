@@ -10,7 +10,7 @@ const json = (body, status = 200) => ({ ok: status < 400, status, json: async ()
 const catalog = [{ package: 'homeassistant', display_name: 'Home Assistant', version: 'catalog-v2', port: 8123, health_path: '/api/', relay_allow: [] }]
 const device = (over = {}) => ({
   device_id: 'd1', project_id: 'p1', label: 'Mac mini', hostname: 'mini.local',
-  agent_version: '1.0', status: 'online', last_seen_at: new Date().toISOString(), revoked_at: null,
+  agent_version: '1.0', status: 'online', last_seen_at: new Date(Date.now() - 5000).toISOString(), revoked_at: null,
   packages: [{ package: 'homeassistant', version: 'pinned-v1', status: 'installed', last_health_at: null }], ...over,
 })
 function Harness({ mock = false, initiallyOpen = true }) {
@@ -142,6 +142,109 @@ it.each([
 it('renders nothing without device wiring', () => {
   const { container } = render(<LinkDeviceDrawer />)
   expect(container).toBeEmptyDOMElement()
+})
+
+it('refreshes on open and every 15 s while open, and stops after close', async () => {
+  vi.useFakeTimers()
+  const onRefresh = vi.fn().mockResolvedValue([])
+  const devices = [device()]
+  const { rerender, unmount } = render(<LinkDeviceDrawer devices={devices} onRefresh={onRefresh} />)
+  expect(onRefresh).not.toHaveBeenCalled()
+  rerender(<LinkDeviceDrawer open devices={devices} onRefresh={onRefresh} />)
+  await flush()
+  expect(onRefresh).toHaveBeenCalledTimes(1)
+  await act(async () => vi.advanceTimersByTimeAsync(14999))
+  expect(onRefresh).toHaveBeenCalledTimes(1)
+  await act(async () => vi.advanceTimersByTimeAsync(1))
+  expect(onRefresh).toHaveBeenCalledTimes(2)
+  await act(async () => vi.advanceTimersByTimeAsync(15000))
+  expect(onRefresh).toHaveBeenCalledTimes(3)
+  rerender(<LinkDeviceDrawer devices={devices} onRefresh={onRefresh} />)
+  await act(async () => vi.advanceTimersByTimeAsync(30000))
+  expect(onRefresh).toHaveBeenCalledTimes(3)
+  rerender(<LinkDeviceDrawer open devices={devices} onRefresh={onRefresh} />)
+  await flush()
+  expect(onRefresh).toHaveBeenCalledTimes(4)
+  unmount()
+  await act(async () => vi.advanceTimersByTimeAsync(30000))
+  expect(onRefresh).toHaveBeenCalledTimes(4)
+})
+
+it('a stale device returns to Online after a background refresh and the setup panel reappears', async () => {
+  vi.useFakeTimers()
+  const packages = [{ package: 'homeassistant', version: 'pinned-v1', status: 'running', last_health_at: null }]
+  const onRefresh = vi.fn().mockResolvedValue(undefined)
+  function RefreshHarness() {
+    const [devices, setDevices] = useState([device({ last_seen_at: new Date(Date.now() - 100000).toISOString(), packages })])
+    return <LinkDeviceDrawer open devices={devices} onRefresh={() => onRefresh().then(() => {
+      if (onRefresh.mock.calls.length > 1) setDevices([device({ packages })])
+    })} />
+  }
+  render(<RefreshHarness />)
+  await flush()
+  expect(screen.getByText('Offline')).toBeInTheDocument()
+  expect(screen.queryByRole('region', { name: 'Home Assistant setup' })).not.toBeInTheDocument()
+  fireEvent.change(screen.getByLabelText('Device label'), { target: { value: 'Next Mac' } })
+  await act(async () => vi.advanceTimersByTimeAsync(15000))
+  expect(screen.getByText('Online')).toBeInTheDocument()
+  const setup = screen.getByRole('region', { name: 'Home Assistant setup' })
+  fireEvent.change(screen.getByLabelText('Connector label'), { target: { value: 'My connector' } })
+  expect(screen.getByLabelText('Device label')).toHaveValue('Next Mac')
+  await act(async () => vi.advanceTimersByTimeAsync(15000))
+  expect(screen.getByRole('region', { name: 'Home Assistant setup' })).toBe(setup)
+  expect(screen.getByLabelText('Connector label')).toHaveValue('My connector')
+  expect(screen.getByLabelText('Device label')).toHaveValue('Next Mac')
+})
+
+it('a rejected background refresh shows no error', async () => {
+  vi.useFakeTimers()
+  const onRefresh = vi.fn().mockRejectedValue(new Error('Background refresh failed'))
+  render(<LinkDeviceDrawer open devices={[device()]} onRefresh={onRefresh} />)
+  await flush()
+  expect(onRefresh).toHaveBeenCalledTimes(1)
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  await act(async () => vi.advanceTimersByTimeAsync(15000))
+  expect(onRefresh).toHaveBeenCalledTimes(2)
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  expect(screen.queryByText('Background refresh failed')).not.toBeInTheDocument()
+})
+
+it('no background refresh in mock mode', async () => {
+  vi.useFakeTimers()
+  const onRefresh = vi.fn()
+  render(<LinkDeviceDrawer open mock devices={[]} onRefresh={onRefresh} />)
+  await act(async () => vi.advanceTimersByTimeAsync(45000))
+  expect(onRefresh).not.toHaveBeenCalled()
+})
+
+it('skips background ticks while a refresh is in flight', async () => {
+  vi.useFakeTimers()
+  let settle
+  const onRefresh = vi.fn().mockImplementationOnce(() => new Promise((resolve) => { settle = resolve })).mockResolvedValue([])
+  render(<LinkDeviceDrawer open devices={[]} onRefresh={onRefresh} />)
+  await act(async () => vi.advanceTimersByTimeAsync(30000))
+  expect(onRefresh).toHaveBeenCalledTimes(1)
+  await act(async () => settle([]))
+  await act(async () => vi.advanceTimersByTimeAsync(15000))
+  expect(onRefresh).toHaveBeenCalledTimes(2)
+})
+
+it('skips background ticks during an action and the enrollment countdown', async () => {
+  vi.useFakeTimers()
+  let settle
+  const onEnroll = vi.fn(() => new Promise((resolve) => { settle = resolve }))
+  const onRefresh = vi.fn().mockResolvedValue([])
+  render(<LinkDeviceDrawer open devices={[]} onRefresh={onRefresh} onEnroll={onEnroll} />)
+  await flush()
+  fireEvent.change(screen.getByLabelText('Device label'), { target: { value: 'New Mac' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Link a device' }))
+  await act(async () => vi.advanceTimersByTimeAsync(15000))
+  expect(onRefresh).toHaveBeenCalledTimes(1)
+  await act(async () => settle({ install_command: 'official installer', expires_at: new Date(Date.now() + 60000).toISOString() }))
+  await act(async () => vi.advanceTimersByTimeAsync(15000))
+  // Only the countdown's five 3 s polls run alongside the opening refresh.
+  expect(onRefresh).toHaveBeenCalledTimes(6)
+  expect(screen.getByLabelText('Install command')).toBeInTheDocument()
 })
 
 it('renders a marked demo drawer and setup panel with no network calls', () => {
@@ -348,6 +451,19 @@ it.each([
 it('exposes setup for a running package even when its health timestamp is null', () => {
   render(<LinkDeviceDrawer open devices={[device({ packages: [{ package: 'homeassistant', version: 'pinned-v1', status: 'running', last_health_at: null }] })]} />)
   expect(screen.getByRole('region', { name: 'Home Assistant setup' })).toBeInTheDocument()
+})
+
+it.each(['p1', ''])('passes the device project %j to Home Assistant setup', (projectId) => {
+  render(<LinkDeviceDrawer open onRelayToken={vi.fn()} devices={[device({ project_id: projectId,
+    packages: [{ package: 'homeassistant', version: 'pinned-v1', status: 'running', last_health_at: null }] })]} />)
+  const button = screen.getByRole('button', { name: 'Use in Ops' })
+  if (projectId) {
+    expect(button).not.toBeDisabled()
+    expect(screen.queryByText('Open a project first')).not.toBeInTheDocument()
+  } else {
+    expect(button).toBeDisabled()
+    expect(screen.getByText('Open a project first')).toBeInTheDocument()
+  }
 })
 
 it('rejects a late enrollment response after Escape closes the drawer', async () => {

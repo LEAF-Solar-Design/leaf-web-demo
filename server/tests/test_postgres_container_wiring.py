@@ -299,8 +299,8 @@ def _single_stage(dockerfile: str) -> None:
     each `FROM` starts a fresh stage: a later stage inherits nothing unless it
     copies it, so a COPY in an earlier stage says nothing about the published
     image. Rather than re-implement stage inheritance, fail closed and make a
-    human re-examine this guard when a stage is added. deploy/Dockerfile.app
-    has exactly one stage today.
+    human re-examine this guard when a stage is added. App checks pass the
+    explicitly selected final runtime stage rather than the full build file.
     """
     stages = [argument for keyword, argument in _instructions(dockerfile)
               if keyword == "FROM"]
@@ -653,9 +653,9 @@ def _shipped_instructions(path: str) -> list[tuple[str, str]]:
 
     Each `FROM` starts a fresh stage and a later stage inherits nothing it does
     not copy, so an earlier stage's COPY says nothing about the published image.
-    `_single_stage` refuses a multi-stage file rather than reason about this,
-    which is right for deploy/Dockerfile.app and unusable for the two images
-    that ARE multi-stage. Reading the last stage is sound only because the build
+    `_single_stage` refuses a multi-stage file rather than reason about this.
+    App, broker and harness checks select the final stage explicitly instead.
+    Reading the last stage is sound only because the build
     never selects another one, which
     `test_the_image_build_never_selects_a_stage_other_than_the_last` pins
     independently of anything here.
@@ -665,6 +665,45 @@ def _shipped_instructions(path: str) -> list[tuple[str, str]]:
               if keyword == "FROM"]
     assert starts, f"{path} declares no FROM"
     return instructions[starts[-1]:]
+
+
+def _app_runtime_dockerfile() -> str:
+    instructions = _shipped_instructions("deploy/Dockerfile.app")
+    # This view does not implement stage inheritance. The published app starts
+    # from its independent Python base; prior source-stage files get no credit.
+    assert instructions[0] == ("FROM", "python:3.12-slim AS app"), (
+        "app runtime base must remain the independent Python stage"
+    )
+    return "\n".join(f"{keyword} {argument}" for keyword, argument in instructions)
+
+
+def test_app_runtime_view_does_not_credit_source_stage_files_or_identity(monkeypatch):
+    source = (
+        "FROM scratch AS platform_source\n"
+        "COPY scripts/source_only.py /app/scripts/source_only.py\n"
+        "USER 9999\n"
+        "FROM python:3.12-slim AS app\n"
+        "COPY scripts/runtime.py /app/scripts/runtime.py\n"
+        "COPY --from=platform_source / /opt/leaf-platform-source/\n"
+        "USER 10003:10003\n"
+    )
+    monkeypatch.setitem(globals(), "_read", lambda path: source)
+    runtime = _app_runtime_dockerfile()
+    _single_stage(runtime)
+    assert _copied_scripts(runtime) == {"runtime.py": "/app/scripts/runtime.py"}
+    assert _user_in_effect(_instructions(runtime)) == "10003:10003"
+
+    # A final-stage import cannot impersonate this repository's shipped script.
+    source += "COPY --from=platform_source scripts/source_only.py /app/scripts/source_only.py\n"
+    with pytest.raises(AssertionError, match="--from"):
+        _copied_scripts(_app_runtime_dockerfile())
+
+
+def test_app_runtime_view_refuses_inheriting_the_source_stage(monkeypatch):
+    source = "FROM scratch AS platform_source\nFROM platform_source AS app\n"
+    monkeypatch.setitem(globals(), "_read", lambda path: source)
+    with pytest.raises(AssertionError, match="runtime base"):
+        _app_runtime_dockerfile()
 
 
 _GLOB_METACHARACTERS = re.compile(r"[*?\[]")
@@ -1368,7 +1407,7 @@ def test_documented_authority_commands_resolve_in_the_image():
     committed). Once it is gone nothing here re-proves it; the static assertions
     below are what stand.
     """
-    dockerfile = _app_dockerfile()
+    dockerfile = _app_runtime_dockerfile()
     _single_stage(dockerfile)
 
     copies = _copied_scripts(dockerfile)
@@ -1553,7 +1592,7 @@ def test_the_image_asserts_its_own_reconcilers_at_build_time():
     cannot drift between the four images. What differs per image is only the
     COPY map it is derived from and the allowlist it needs, both stated there.
     """
-    dockerfile = _app_dockerfile()
+    dockerfile = _app_runtime_dockerfile()
     _single_stage(dockerfile)
 
     copies = _copied_scripts(dockerfile)

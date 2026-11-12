@@ -1,4 +1,27 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { serviceSession } from './serviceAuthSession.js'
+
+it('partitions verified service preferences in this tab and isolates injected storage', async () => {
+  const service = serviceSession()
+  const selector = '11111111-1111-4111-8111-111111111111'
+  try {
+    service.select(selector)
+    expect(readProjectPrincipal()).toBeNull()
+    await service.probe({ origin: window.location.origin, fetchImpl: async () => ({ ok: true, json: async () => ({
+      authenticated: true, binding_id: selector, expires_at: new Date(Date.now() + 60000).toISOString(),
+      identity: { subject: 'machine', sub: 'machine', iss: 'issuer', org_id: 'org', tenant_id: 'tenant', principal_type: 'service_admin' },
+    }) }) })
+    const principal = JSON.stringify(['issuer', 'machine', 'org'])
+    expect(readProjectPrincipal()).toBe(principal)
+    expect(readProjectPrincipal(memoryStorage())).toBeNull()
+    writeRecentProjects(principal, { recent: ['service-project'], pinned: [] })
+    expect(readRecentProjects(principal).recent).toEqual(['service-project'])
+    expect(localStorage.getItem(recentProjectsKey(principal))).toBeNull()
+    service.logout()
+    expect(readProjectPrincipal()).toBeNull()
+    expect(readRecentProjects(principal).recent).toEqual([])
+  } finally { service.human() }
+})
 import {
   RECENT_PROJECTS_KEY, addRecentProject, readProjectPrincipal, readRecentProjects,
   recentProjectsKey, togglePinnedProject, writeRecentProjects,

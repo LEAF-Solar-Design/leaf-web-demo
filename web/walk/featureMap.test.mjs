@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { ACTIONS, ESCAPE_RUNGS, RETRY_RUNGS, reasonCode, REASONS, DRAW_REASONS, MODIFY_REASONS, REPEAT_REASONS } from '../src/lib/actionRegistry.js'
 import { PRODUCT_SURFACES } from '../src/site/productSurfaces.js'
 import { PROFILE_RIBBON_TABS } from '../src/lib/ribbonTabs.data.js'
@@ -1017,6 +1017,39 @@ test('state viewports remove desktop overlay cases while preserving phone and ot
   assert.deepEqual(fit.state_viewports.ready, ['phone'])
   const consumer = readFileSync(new URL('../e2e/walk/collection.mjs', import.meta.url), 'utf8')
   assert.ok(consumer.includes('entry.state_viewports?.[state] || entry.viewports'))
+})
+
+// Shrink this list in the PR that adds a missing tool to the catalog snapshot.
+const KNOWN_SNAPSHOT_GAP = {
+  'tool:solar-central-inverter-add': 'absent from the catalog snapshot; validateOverrides rejects it',
+  'tool:solar-feeders': 'absent from the catalog snapshot; validateOverrides rejects it',
+  'tool:solar-physical-export': 'absent from the catalog snapshot; validateOverrides rejects it',
+  'tool:solar-physical-shade': 'absent from the catalog snapshot; validateOverrides rejects it',
+  'tool:solar-pvcase-convert': 'absent from the catalog snapshot; validateOverrides rejects it',
+  'tool:solar-pvcase-export': 'absent from the catalog snapshot; validateOverrides rejects it',
+  'tool:solar-pvcase-solve': 'absent from the catalog snapshot; validateOverrides rejects it',
+  'tool:solar-takeoff': 'absent from the catalog snapshot; validateOverrides rejects it',
+  'tool:solar-terrain-read': 'absent from the catalog snapshot; validateOverrides rejects it',
+}
+
+test('Solar descriptor census pins 54 tools, each mapped, exempted or a known snapshot gap', () => {
+  const directory = new URL('../../server/solar_tools/', import.meta.url)
+  const descriptors = readdirSync(directory).filter((name) => name.endsWith('.json')).sort()
+  // Move this pin only in a PR that adds or removes a descriptor file.
+  assert.equal(descriptors.length, 54, 'Solar descriptor count changed; review the census pin')
+  const covered = new Set(map.entries.map((entry) => entry.id))
+  const exempted = new Set(map.exemptions.filter((entry) =>
+    typeof entry.reason === 'string' && entry.reason.trim().length > 0).map((entry) => entry.id))
+  for (const [id, reason] of Object.entries(KNOWN_SNAPSHOT_GAP)) {
+    assert.ok(!covered.has(id), `${id} is now mapped; remove it from KNOWN_SNAPSHOT_GAP`)
+    assert.equal(reason, 'absent from the catalog snapshot; validateOverrides rejects it')
+  }
+  const uncovered = descriptors.map((name) => {
+    const descriptor = JSON.parse(readFileSync(new URL(name, directory), 'utf8'))
+    assert.ok(typeof descriptor.name === 'string' && descriptor.name.trim(), `${name} needs a tool name`)
+    return featureId('tool', descriptor.name)
+  }).filter((id) => !covered.has(id) && !exempted.has(id) && !Object.hasOwn(KNOWN_SNAPSHOT_GAP, id))
+  assert.deepEqual(uncovered, [], `Uncovered Solar descriptor ids: ${uncovered.join(', ')}`)
 })
 
 test('catalog snapshot preserves the isolated catalog and expands every tool with its version', () => {

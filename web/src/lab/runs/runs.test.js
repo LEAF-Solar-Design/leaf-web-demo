@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import * as api from '../../api.js'
 import { createValueStore, useBlockValue } from './valueStore.js'
-import { cancelRun, openRunStream, submitRun } from './runStream.js'
+import { cancelRun, newSubmissionId, openRunStream, submitRun } from './runStream.js'
 
 const handles = []
 const open = options => { const handle = openRunStream(options); handles.push(handle); return handle }
@@ -18,6 +18,24 @@ function stream(chunks, hold = false) {
 }
 const parked = () => stream([], true)
 afterEach(() => { cleanup(); handles.splice(0).forEach(handle => handle.stop()); localStorage.removeItem('leaf.jwt'); vi.restoreAllMocks() })
+
+it('keeps unknown submission intent for explicit recovery and separates rejection', async () => {
+  const submissionId = newSubmissionId()
+  expect(submissionId).toMatch(/^v1\.[0-9]{13}\.[0-9a-f]{32}$/)
+  expect(newSubmissionId()).not.toBe(submissionId)
+  const fetchImpl = vi.fn().mockRejectedValueOnce(new Error('response lost'))
+    .mockResolvedValueOnce(json({ run_id: 'existing', state: 'running' }, 202))
+    .mockResolvedValueOnce(json({ detail: 'lab_submission_mismatch' }, 409))
+    .mockResolvedValueOnce(json({ detail: 'lab_run_queue_full' }, 409))
+    .mockResolvedValueOnce(json({}, 202))
+  const args = { docId: 'doc', graphRevision: 1, submissionId, fetchImpl }
+  expect(await submitRun(args)).toMatchObject({ ok: false, outcomeUnknown: true })
+  expect(await submitRun({ ...args, reconcileOnly: true })).toEqual({ ok: true, runId: 'existing', state: 'running' })
+  expect(JSON.parse(fetchImpl.mock.calls[1][1].body)).toMatchObject({ submission_id: submissionId, reconcile_only: true })
+  expect(await submitRun(args)).toMatchObject({ ok: false, detail: 'lab_submission_mismatch', outcomeUnknown: false })
+  expect(await submitRun(args)).toMatchObject({ ok: false, detail: 'lab_run_queue_full', outcomeUnknown: false })
+  expect(await submitRun(args)).toMatchObject({ ok: false, outcomeUnknown: true })
+})
 
 describe('bounded shared values', () => {
   it('delegates auth-change resume only to a paused run with a supporting control', () => {
@@ -173,6 +191,61 @@ describe('bounded shared values', () => {
 })
 
 describe('authenticated run requests and SSE', () => {
+  it('J15A starts an unseen run without a negative Last-Event-ID', async () => {
+    const store = createValueStore()
+    store.upsertRun('r', { state: 'queued' })
+    const fetchImpl = vi.fn(async (url, init) => {
+      // The real server accepts -1 only in the query, not in the resume header.
+      if (init.headers['Last-Event-ID']?.includes(':-1')) return json({}, 400)
+      return stream([runFrame(0), frame('run', { run_id: 'r', seq: 1, kind: 'finished' })])
+    })
+    open({ runIds: ['r'], store, fetchImpl, sleep: () => new Promise(() => {}) })
+    await waitFor(() => expect(store.getRun('r')?.transport.status).toBe('finished'))
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(fetchImpl.mock.calls[0][0]).toContain('after_seq=-1')
+    expect(fetchImpl.mock.calls[0][1].headers).not.toHaveProperty('Last-Event-ID')
+    expect(store.getBlock('r', 'a').value.result).toBe(0)
+  })
+  it('J15A keeps known cursors when another run has no events', async () => {
+    const store = createValueStore()
+    store.apply('s', event(9))
+    const fetchImpl = vi.fn().mockResolvedValue(parked())
+    open({ runIds: ['r', 's'], store, fetchImpl })
+    await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1))
+    expect(fetchImpl.mock.calls[0][1].headers['Last-Event-ID']).toBe('s:9')
+  })
+  it('J15A hydrates a finished recovered run without another submission or stream', async () => {
+    const store = createValueStore()
+    store.upsertRun('r', { state: 'finished', graph_revision: 1 })
+    const fetchImpl = vi.fn().mockResolvedValueOnce(json({ state: 'finished', graph_revision: 1 }))
+      .mockResolvedValueOnce(json({ events: [event(0, 'a', { result: 7 }), { seq: 1, kind: 'finished' }] }))
+    open({ runIds: ['r'], store, fetchImpl })
+    await waitFor(() => expect(store.getRun('r')?.transport.status).toBe('finished'))
+    expect(store.getBlock('r', 'a').value.result).toBe(7)
+    expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual([
+      expect.stringContaining('/runs/r'), expect.stringContaining('/runs/r/events?after_seq=-1&limit=500'),
+    ])
+    expect(fetchImpl.mock.calls.every(([, init]) => init.method === 'GET')).toBe(true)
+    const settled = vi.fn()
+    open({ runIds: ['r'], store, fetchImpl: settled })
+    expect(settled).not.toHaveBeenCalled()
+  })
+  it('J15A preserves auth refusal and resume during initial terminal hydration', async () => {
+    const store = createValueStore()
+    store.upsertRun('r', { state: 'finished' })
+    const fetchImpl = vi.fn().mockResolvedValueOnce(json({}, 401))
+      .mockResolvedValueOnce(json({ state: 'finished' }))
+      .mockResolvedValueOnce(json({ events: [event(0, 'a', { result: 7 }), { seq: 1, kind: 'finished' }] }))
+    const handle = open({ runIds: ['r'], store, fetchImpl })
+    store.setStreamControl('r', handle)
+    await waitFor(() => expect(store.getRun('r')?.transport.status).toBe('auth_expired'))
+    expect(store.getBlock('r', 'a')).toBeUndefined()
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(store.resume('r')).toBe(true)
+    await waitFor(() => expect(store.getRun('r')?.transport.status).toBe('finished'))
+    expect(store.getBlock('r', 'a').value.result).toBe(7)
+    expect(fetchImpl).toHaveBeenCalledTimes(3)
+  })
   it('submits exactly the saved identity and cancels by POST', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(json({ run_id: 'r', state: 'queued' }, 202))
     expect(await submitRun({ docId: 'strategy', graphRevision: 3, fetchImpl })).toEqual({ ok: true, runId: 'r', state: 'queued' })
@@ -202,7 +275,7 @@ describe('authenticated run requests and SSE', () => {
     expect(url).not.toMatch(/token|jwt|ticket|authority/)
     expect(url).toContain('after_seq=-1')
   })
-  it('resumes every run cursor and ignores replayed duplicates', async () => {
+  it('J15A resumes every run cursor and ignores replayed duplicates', async () => {
     const store = createValueStore(), block = vi.fn()
     store.apply('s', event(9)); store.subscribeBlock('r', 'a', block)
     const sleep = vi.fn().mockResolvedValue()
@@ -393,7 +466,7 @@ describe('authenticated run requests and SSE', () => {
     open({ runIds: ['r', 'other'], store, fetchImpl })
     await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2))
     expect(fetchImpl.mock.calls[1][0]).toContain('runs=other&')
-    expect(fetchImpl.mock.calls[1][1].headers['Last-Event-ID']).toBe('other:-1')
+    expect(fetchImpl.mock.calls[1][1].headers).not.toHaveProperty('Last-Event-ID')
   })
   it('F5 removes a finished run from the stream even when a new run evicts it', async () => {
     const store = createValueStore({ maxRuns: 2 })
@@ -408,7 +481,7 @@ describe('authenticated run requests and SSE', () => {
     await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2))
     expect(store.getRun('r')).toBeUndefined()
     expect(fetchImpl.mock.calls[1][0]).toContain('runs=other&')
-    expect(fetchImpl.mock.calls[1][1].headers['Last-Event-ID']).toBe('other:-1')
+    expect(fetchImpl.mock.calls[1][1].headers).not.toHaveProperty('Last-Event-ID')
   })
   it('marks a run_missing close explicitly', async () => {
     const store = createValueStore()

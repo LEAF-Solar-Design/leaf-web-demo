@@ -578,8 +578,11 @@ reporter.onEnd({status: 'passed'});
         self.assertFalse(any(line.startswith("export PYTHONSAFEPATH") for line in lines))
         unset_index = lines.index("unset PYTHONSAFEPATH")
         gate_index = next(index for index, line in enumerate(lines)
-                          if line.startswith("python scripts/run-all-gates.py"))
+                          if line.startswith(("python scripts/run-all-gates.py ",
+                                              "python -u scripts/run-all-gates.py ")))
         self.assertLess(unset_index, gate_index)
+        self.assertTrue(lines[gate_index].startswith("python -u ") or
+                        "export PYTHONUNBUFFERED=1" in lines[:gate_index])
 
 
 if __name__ == "__main__":

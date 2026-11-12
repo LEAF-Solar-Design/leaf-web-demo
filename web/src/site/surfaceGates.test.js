@@ -401,18 +401,34 @@ const SURFACE_LITERAL = /activeSurface\s*[!=]==\s*['"]/
 // The frame and the grounds hold the surface as `surface` / `surface.id`, so a
 // literal comparison there hides from the activeSurface probe. Second probe.
 const SURFACE_ID_LITERAL = /\bsurface(?:\.id)?\s*[!=]==\s*['"]/
+// Source profile selection is payload routing, not a shell chrome predicate.
+// Remove only this controller's exact Native/Browser context expression; keep
+// every other expression in the call and every shell predicate visible.
+const SOURCE_PROFILE_CONTEXT = /(\buseProjectSourceController\(\{[^}]*?\bsourceContext:)\s*activeSurface\s*===\s*['"]ios['"]\s*\?\s*['"]native['"]\s*:\s*['"]browser['"]/g
+const chromeGateSource = source => source.replace(SOURCE_PROFILE_CONTEXT, '$1 declaredSourceProfile')
 
 describe('Surface Contract — no surface-literal chrome gate survives', () => {
   for (const relative of SHELLS) {
     it(`${relative} compares no surface id to a string literal`, () => {
       const source = readFileSync(new URL(relative, import.meta.url), 'utf8')
-      expect(source).not.toMatch(SURFACE_LITERAL)
-      expect(source).not.toMatch(SURFACE_ID_LITERAL)
+      const chrome = chromeGateSource(source)
+      expect(chrome).not.toMatch(SURFACE_LITERAL)
+      expect(chrome).not.toMatch(SURFACE_ID_LITERAL)
       // The file must still be the one that renders the surface, or the pins
       // above pass vacuously against an unrelated module.
       expect(source).toMatch(/activeSurface|\bsurface\b/)
     })
   }
+
+  it('admits only source context routing and still rejects adjacent chrome predicates', () => {
+    const profile = `sourceContext: activeSurface ${'==='} 'ios' ? 'native' : 'browser'`
+    const controller = `useProjectSourceController({ ${profile} })`
+    expect(chromeGateSource(controller)).not.toMatch(SURFACE_LITERAL)
+    const chrome = `showFrame: activeSurface ${'==='} 'ios'`
+    expect(chromeGateSource(`useProjectSourceController({ ${chrome}, ${profile} })`)).toMatch(SURFACE_LITERAL)
+    expect(chromeGateSource(`useProjectSourceController({ ${profile}, ${chrome} })`)).toMatch(SURFACE_LITERAL)
+    expect(chromeGateSource(`anotherController({ ${profile} })`)).toMatch(SURFACE_LITERAL)
+  })
 
   it('the probes would catch a reintroduced literal (positive control)', () => {
     // Without this, a broken regex would report GREEN forever. Built from

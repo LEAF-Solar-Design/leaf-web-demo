@@ -113,7 +113,7 @@ describe('NavRail catalog states', () => {
     advance(200)
     expect(screen.getByRole('status')).toBeTruthy()
     rerender(<NavRail {...props} {...failure} />)
-    expect(screen.getByRole('alert').textContent).toBe('The tool list did not load. Your saved tools are still available below.Retry')
+    expect(screen.getByRole('alert').textContent).toBe('The tool list did not load. Try again.Retry')
     expect(screen.queryByRole('status')).toBeNull()
     expect(screen.queryByRole('button', { name: /Measurement/ })).toBeNull()
     const key = container.querySelector('.key')

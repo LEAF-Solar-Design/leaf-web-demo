@@ -11,9 +11,10 @@ import { navigate } from './router.js'
 import { loadDemoSolve } from './intakeCache.js'
 import { submitDemandCapture } from '../api.js'
 import { humanizeError } from '../errorHumanize.js'
+import { isSignedIn } from '../auth.js'
 
 export function enterWorkspace() {
-  navigate('/try')
+  navigate(isSignedIn() ? '/app' : '/try')
 }
 
 export function enterDemo() {
@@ -91,7 +92,7 @@ export default function LandingCast({ onTryTool = enterWorkspace, onTryDemo = en
         </h1>
         <div className="lp-sub">
           Leaf Automation Studio builds CAD tools from plain English and runs them on your drawing.
-          Branch is stringing this 3.2 MW rooftop live behind this page: 25 hours of drafting in 3 minutes, zero NEC violations.
+          Explore a sample rooftop and its stringing results. This preview can show saved sample results instead of a new calculation.
         </div>
         <div className="lp-cta-row">
           <button type="button" className="lp-cta" onClick={onTryDemo}>Try Branch on the sample rooftop</button>
@@ -122,7 +123,7 @@ export default function LandingCast({ onTryTool = enterWorkspace, onTryDemo = en
       <div className="lp-solver" data-cast="site" style={{ '--rank': 1 }}>
         <div className="lp-solver-head">
           <span className="dot live" />
-          <span className="lp-solver-title">String solver</span>
+          <span className="lp-solver-title">Sample stringing results</span>
         </div>
         <div className="lp-solver-row">
           <span>Q.Peak 425</span>

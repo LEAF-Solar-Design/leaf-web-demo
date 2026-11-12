@@ -340,6 +340,45 @@ def validate_action_catalog(value, limit):
     return value
 
 
+def validate_material_context(value):
+    """Retain complete untrusted file context, never interpret it as authority."""
+    if type(value) is not dict or set(value) != {"schema", "source", "selection", "row_count", "envelope"}:
+        raise ReadFailure("invalid_response")
+    if value["schema"] != "leaf.project-material-context.v1":
+        raise ReadFailure("invalid_response")
+    source = value["source"]
+    if (type(source) is not dict or set(source) != {"kind", "material_id", "sha256", "byte_length"}
+            or source["kind"] != "project_material" or type(source["material_id"]) is not str
+            or re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", source["material_id"]) is None
+            or type(source["sha256"]) is not str or re.fullmatch(r"[a-f0-9]{64}", source["sha256"]) is None
+            or type(source["byte_length"]) is not int or not 1 <= source["byte_length"] <= 8 * 1024 * 1024):
+        raise ReadFailure("invalid_response")
+    selection = value["selection"]
+    if type(selection) is not dict or set(selection) != {"records_pointer"}:
+        raise ReadFailure("invalid_response")
+    pointer, count = selection["records_pointer"], value["row_count"]
+    if (type(pointer) is not str or not 1 <= len(pointer) <= 1024 or not pointer.startswith("/")
+            or re.search(r"~(?:[^01]|$)", pointer) or type(count) is not int or not 0 <= count <= 100_000):
+        raise ReadFailure("invalid_response")
+    parts = [part.replace("~1", "/").replace("~0", "~") for part in pointer[1:].split("/")]
+    if len(parts) > 32 or any(part in {"__proto__", "prototype", "constructor"} for part in parts):
+        raise ReadFailure("invalid_response")
+    selected = value["envelope"]
+    for part in parts:
+        if type(selected) is dict and part in selected:
+            selected = selected[part]
+        elif type(selected) is list and re.fullmatch(r"0|[1-9][0-9]*", part) and int(part) < len(selected):
+            selected = selected[int(part)]
+        else:
+            raise ReadFailure("invalid_response")
+    marker = {"schema": "leaf.selected-records-reference.v1", "records_pointer": pointer, "row_count": count}
+    if type(selected) is not dict or selected != marker or type(selected.get("row_count")) is not int:
+        raise ReadFailure("invalid_response")
+    if len(json.dumps(value, allow_nan=False, separators=(",", ":")).encode("utf-8")) > RESPONSE_CAP:
+        raise ReadFailure("response_too_large")
+    return value
+
+
 def project_discovery(value, limit):
     """Project the Ops application-service discovery envelope, without receipts."""
     if type(value) is not dict or set(value) != {"records", "nextCursor"}:
@@ -387,9 +426,18 @@ def project_discovery(value, limit):
                 status = "empty" if attempt["row_count"] == 0 else "ready"
             else:
                 status = "stale" if freshness is not None else "unavailable"
-        datasets.append({"dataset_ref": reference, "title": title, "fields": fields,
-                         "freshness": freshness, "status": status})
-    return {"datasets": datasets, "next_cursor": cursor}
+        dataset = {"dataset_ref": reference, "title": title, "fields": fields,
+                   "freshness": freshness, "status": status}
+        if "material_context" in record:
+            context = validate_material_context(record["material_context"])
+            if attempt is None or attempt.get("row_count") != context["row_count"]:
+                raise ReadFailure("invalid_response")
+            dataset["material_context"] = context
+        datasets.append(dataset)
+    result = {"datasets": datasets, "next_cursor": cursor}
+    if len(json.dumps(result, allow_nan=False, separators=(",", ":")).encode("utf-8")) > RESPONSE_CAP:
+        raise ReadFailure("response_too_large")
+    return result
 
 
 async def bounded_http(method, url, token, body, deadline, transport=None, *, save=False,
@@ -562,7 +610,9 @@ class IntegrationToolService:
                             else:
                                 projected = (project_discovery(value, args["limit"]) if operation == "datasets"
                                              else validate_read(value, args["dataset_ref"]))
-                        except ReadFailure:
+                        except ReadFailure as exc:
+                            if str(exc) == "response_too_large":
+                                raise
                             raise ReadFailure("invalid_response") from None
                         output["result"] = projected
                     if _reflection(output, token):

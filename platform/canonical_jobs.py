@@ -19,6 +19,7 @@ _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _TERMINAL = {"succeeded", "failed", "cancelled"}
 _SNAPSHOT_KINDS = ("catalog", "standards", "ahj")
 PROJECT_GRAPH_JOB_SCHEMA = "leaf.solar-project-graph-job.v1"
+PROJECT_READ_JOB_SCHEMA = "leaf.project-read-job.v1"
 
 
 def _is_project_graph_job(row):
@@ -62,6 +63,81 @@ def _job_columns() -> str:
         "lease_owner, lease_expires_at, heartbeat_at, provenance, terminal_fingerprint, "
         "terminal_conflict, execution_context, created_at, updated_at, started_at, finished_at"
     )
+
+
+def reserve_project_read_job(org_id, project_id, request_tenant_id, tool_name, params,
+                             idempotency_key, *, input_version_id, execution_context, conn):
+    """Reserve an inline read inside its caller's transaction, never a queued worker job."""
+    from .project_graph_store import _ids
+    _ids(org_id, project_id, input_version_id)
+    if (not isinstance(idempotency_key, str) or not idempotency_key.strip()
+            or len(idempotency_key) > 255):
+        raise ValueError("Idempotency-Key is required for project-scoped reads")
+    if (not request_tenant_id or not isinstance(tool_name, str) or not tool_name
+            or not isinstance(params, dict)
+            or execution_context.get("schema") != PROJECT_READ_JOB_SCHEMA):
+        raise ValueError("invalid project read submission")
+    fingerprint = _fingerprint("canonical-project-read", {
+        "org_id": str(org_id), "project_id": str(project_id),
+        "request_tenant_id": str(request_tenant_id), "tool_name": tool_name,
+        "params": params, "input_version_id": str(input_version_id),
+        "execution_context": execution_context,
+    })
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO jobs (job_id, org_id, project_id, request_tenant_id, kind, "
+            "tool_name, params, input_version_id, idempotency_key, submission_fingerprint, "
+            "execution_context, status, attempt, max_attempts, started_at) "
+            "VALUES (%(job)s, %(org)s, %(project)s, %(tenant)s, 'run', %(tool)s, "
+            "%(params)s, %(input)s, %(key)s, %(fingerprint)s, %(context)s, 'running', 1, 1, "
+            "clock_timestamp()) ON CONFLICT (org_id, project_id, idempotency_key) "
+            "WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING *",
+            {"job": new_uuid(), "org": org_id, "project": project_id,
+             "tenant": str(request_tenant_id), "tool": tool_name, "params": Jsonb(params),
+             "input": input_version_id, "key": idempotency_key,
+             "fingerprint": fingerprint, "context": Jsonb(execution_context)})
+        row = cur.fetchone()
+        if row is not None:
+            return _record(row), True
+        # A concurrent insert's unique-key wait finishes only after its transaction settles.
+        cur.execute(
+            "SELECT * FROM jobs WHERE org_id=%(org)s AND project_id=%(project)s "
+            "AND idempotency_key=%(key)s FOR UPDATE",
+            {"org": org_id, "project": project_id, "key": idempotency_key})
+        row = cur.fetchone()
+    if (row is None or row.get("deleted_at") is not None
+            or row.get("submission_fingerprint") != fingerprint
+            or row.get("request_tenant_id") != str(request_tenant_id)
+            or row.get("status") not in {"succeeded", "failed"}):
+        raise ValueError("idempotency key already exists with different or incomplete read input")
+    return _record(row), False
+
+
+def finish_project_read_job(job, result, *, conn):
+    """Complete the actual reserved row before the enclosing transaction can commit."""
+    context = job["execution_context"]
+    binding = {key: context[key] for key in (
+        "organization_id", "project_id", "drawing_id", "input_version_id", "intake_sha256")}
+    if (context.get("schema") != PROJECT_READ_JOB_SCHEMA
+            or result.get("project_context") != binding or type(result.get("ok")) is not bool):
+        raise ValueError("invalid project read completion")
+    status = "succeeded" if result["ok"] else "failed"
+    fingerprint = _fingerprint("canonical-project-read-terminal", {"status": status, "result": result})
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE jobs SET status=%(status)s, result=%(result)s, error=%(error)s, "
+            "terminal_fingerprint=%(fingerprint)s, finished_at=clock_timestamp(), "
+            "updated_at=clock_timestamp() WHERE job_id=%(job)s AND org_id=%(org)s "
+            "AND project_id=%(project)s AND request_tenant_id=%(tenant)s "
+            "AND status='running' AND kind='run' AND deleted_at IS NULL RETURNING *",
+            {"status": status, "result": Jsonb(result),
+             "error": Jsonb(result.get("error")) if not result["ok"] else None,
+             "fingerprint": fingerprint, "job": job["job_id"], "org": job["org_id"],
+             "project": job["project_id"], "tenant": job["request_tenant_id"]})
+        row = cur.fetchone()
+    if row is None:
+        raise ValueError("project read completion lost its reserved job")
+    return _record(row)
 
 
 def _resolve_snapshot_pins(cur: Any, channel: str = "local-candidate") -> Dict[str, Dict[str, str]]:

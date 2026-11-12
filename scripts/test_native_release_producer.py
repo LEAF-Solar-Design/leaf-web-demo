@@ -290,6 +290,107 @@ def test_inrelease_refresh_failure_preserves_original_build_error(tmp_path, monk
     assert all(len(items) == 1 for items in calls.values())
 
 
+APP_FRONTEND_LOG = '''#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile.app
+#1 transferring dockerfile: 18.41kB done
+#1 DONE 0.0s
+
+#2 resolve image config for docker-image://docker.io/docker/dockerfile:1
+#2 DONE 0.2s
+
+#3 docker-image://docker.io/docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+#3 resolve docker.io/docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e done
+#3 DONE 0.3s
+Dockerfile.app:1
+--------------------
+   1 | >>> # syntax=docker/dockerfile:1
+   2 |     #
+--------------------
+ERROR: failed to build: failed to solve: frontend grpc server closed unexpectedly
+'''
+
+
+@pytest.mark.parametrize('unchanged', [False, True])
+def test_frontend_app_retries_once_with_refreshed_pins_preserving_siblings(tmp_path, monkeypatch, git_smoke_calls,
+                                                                          capsys, unchanged):
+    # 11-10 publisher a64c6119: the frontend retry reused trixie pins that had moved.
+    run, calls, refreshes, _, fresh = pin_race_case(tmp_path, monkeypatch, service="app",
+                                                    markers=APP_FRONTEND_LOG, unchanged=unchanged)
+    images = run()
+    assert refreshes == ['app']
+    assert {name: len(rows) for name, rows in calls.items()} == {name: 2 if name == 'app' else 1 for name in SERVICES}
+    assert calls['app'][1] == (fresh, tmp_path / 'app.retry1.json', tmp_path / 'app.retry1.log')
+    assert calls['app'][1][0] is fresh
+    if not unchanged:
+        assert calls['app'][1][0] != calls['app'][0][0]
+    assert images == {name: {'service': name, 'attempt': 2 if name == 'app' else 1} for name in SERVICES}
+    assert git_smoke_calls == [images]
+    assert (tmp_path / 'app.log').read_text() == APP_FRONTEND_LOG
+    state = 'pins unchanged' if unchanged else 'pins refreshed'
+    assert capsys.readouterr().out.count(
+        f'image app: syntax frontend transport closed before build; rebuilding once with identical source ({state})\n') == 1
+
+
+def test_frontend_app_refresh_failure_keeps_original_error_without_retry(tmp_path, monkeypatch):
+    run, calls, refreshes, original, _ = pin_race_case(
+        tmp_path, monkeypatch, service="app", markers=APP_FRONTEND_LOG,
+        refresh_error=ValueError("channel unavailable"))
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        run()
+    assert raised.value is original
+    assert refreshes == ['app']
+    assert all(len(rows) == 1 for rows in calls.values())
+
+
+@pytest.mark.parametrize('retry_log', [APP_FRONTEND_LOG, 'InRelease: FAILED\ncomputed checksum did NOT match\n'])
+def test_frontend_second_failure_is_terminal_without_pin_retry(tmp_path, monkeypatch, retry_log):
+    failure = subprocess.CalledProcessError(2, ['docker', 'buildx'])
+    run, calls, refreshes, _, _ = pin_race_case(tmp_path, monkeypatch, service='app', markers=APP_FRONTEND_LOG, retry_error=failure)
+    build = producer.build_image
+    def again(*args, **kwargs):
+        try:
+            return build(*args, **kwargs)
+        finally:
+            if kwargs.get('log_path') == tmp_path / 'app.retry1.log':
+                kwargs['log_path'].write_text(retry_log)
+    monkeypatch.setattr(producer, 'build_image', again)
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        run()
+    # One refresh before the single retry; a retry failure is never retried again.
+    assert raised.value is failure and refreshes == ['app']
+    assert len(calls['app']) == 2
+    assert all(len(calls[name]) == 1 for name in SERVICES if name != 'app')
+
+
+@pytest.mark.parametrize('fault', ['missing', 'truncated-start', 'oversized', 'later-step', 'extra-error', 'incomplete',
+                                 'wrong-dockerfile', 'wrong-frontend', 'nonprocess', 'broker', 'web'])
+def test_frontend_nonqualifying_failure_remains_terminal(tmp_path, monkeypatch, fault):
+    log = APP_FRONTEND_LOG
+    if fault == 'truncated-start': log = log[log.index('#1'):]
+    if fault == 'oversized': log = 'x' * (producer.BUILD_LOG_TAIL_BYTES + 1) + log
+    if fault == 'later-step': log = log.replace('Dockerfile.app:1', '#4 [build 1/1] RUN compile\nDockerfile.app:1')
+    if fault == 'extra-error': log = log.replace('Dockerfile.app:1', 'ERROR: source compilation failed\nDockerfile.app:1')
+    if fault == 'incomplete': log = log.replace('#3 DONE 0.3s\n', '')
+    if fault == 'wrong-dockerfile': log = log.replace('Dockerfile.app', 'Dockerfile.broker')
+    if fault == 'wrong-frontend': log = log.replace('docker/dockerfile:1', 'other/frontend:1')
+    error = ValueError('not a build process failure') if fault == 'nonprocess' else None
+    service = fault if fault in ('broker', 'web') else 'app'
+    run, calls, refreshes, original, _ = pin_race_case(tmp_path, monkeypatch, service=service, markers=log, error=error)
+    build = producer.build_image
+    def maybe_missing(*args, **kwargs):
+        try:
+            return build(*args, **kwargs)
+        finally:
+            if fault == 'missing' and kwargs.get('log_path') == tmp_path / 'app.log':
+                kwargs['log_path'].unlink()
+    monkeypatch.setattr(producer, 'build_image', maybe_missing)
+    with pytest.raises(type(original)) as raised:
+        run()
+    assert raised.value is original and refreshes == []
+    assert all(len(rows) == 1 for rows in calls.values())
+
+
 def test_refresh_debian_freshness_fetches_only_service_channels(monkeypatch):
     urls = []
 
@@ -427,6 +528,19 @@ def forge_case(tmp_path, monkeypatch):
         forge_request_bytes=lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")).encode(),
         parse_forge_descriptor=lambda value, mode: SimpleNamespace(**value), read_forge_release=read_gate)
     monkeypatch.setattr(producer, "load_forge_contract", lambda *args: (contract, bootstrap))
+    def fake_authoring_snapshot(root, output, source):
+        # This orchestration fixture doubles Git and buildx. The separate real
+        # Git context test below exercises the actual snapshot producer.
+        assert root == roots["source_snapshot"] and source == request["source_revision"]
+        output.mkdir()
+        bundle = b"explicit orchestration fixture, not a Git bundle"
+        (output / "snapshot.bundle").write_bytes(bundle)
+        (output / "manifest.json").write_text(json.dumps({
+            "schema": "leaf.platform-source-snapshot.v1", "source_sha": source,
+            "source_tree": request["source_tree"],
+            "bundle_sha256": hashlib.sha256(bundle).hexdigest(),
+        }))
+    monkeypatch.setattr(producer, "_prepare_authoring_source_context", fake_authoring_snapshot)
     monkeypatch.setattr(producer, "host_gate_jobs", lambda root: 1)
     monkeypatch.setattr(producer, "resolve_freshness", lambda root:
         {service: {name: "b" * 64 for name in FRESHNESS.get(service, TRIXIE)} for service in SERVICES})
@@ -1433,6 +1547,8 @@ def fake_buildx(monkeypatch, tmp_path):
         return SimpleNamespace(stdout="")
 
     monkeypatch.setattr(producer.subprocess, "run", run)
+    monkeypatch.setattr(producer, "_prepare_authoring_source_context",
+                        lambda root, output, source: output.mkdir())
     return calls
 
 
@@ -2056,3 +2172,59 @@ def test_native_entrypoints_release_mode_unchanged(native_install_case, entrypoi
     gate = [call for call in case.recorded("python") if
             "scripts/ci/native_release_producer.py" in call["args"]]
     assert len(gate) == 1
+
+def test_authoring_source_build_context_contains_exact_local_snapshot(tmp_path, monkeypatch):
+    import shutil
+    real_run = subprocess.run
+    root = tmp_path / 'checkout'
+    root.mkdir()
+    def git(*args):
+        return real_run(['git', '-c', 'core.hooksPath=', '-C', str(root), *args],
+                        check=True, capture_output=True, text=True).stdout.strip()
+    git('init', '-b', 'main')
+    git('config', 'user.email', 'test@example.com')
+    git('config', 'user.name', 'Test')
+    (root / 'server').mkdir()
+    shutil.copyfile(Path(__file__).resolve().parents[1] / 'server/platform_source_snapshot.py',
+                    root / 'server/platform_source_snapshot.py')
+    (root / 'README.md').write_text('source material\n')
+    git('add', '.')
+    git('commit', '-m', 'source')
+    sha, tree = git('rev-parse', 'HEAD'), git('rev-parse', 'HEAD^{tree}')
+    refs = git('show-ref')
+    (root / '.git' / 'private-config-marker').write_text('not part of image')
+    metadata = tmp_path / 'image.json'
+    seen = []
+    def run(command, **kwargs):
+        if command[0] != 'docker':
+            return real_run(command, **kwargs)
+        assert command[:3] == ['docker', 'buildx', 'build']
+        index = command.index('--build-context', command.index('--tag') + 1)
+        name, directory = command[index + 1].split('=', 1)
+        assert name == 'platform_source'
+        snapshot = Path(directory)
+        assert {p.name for p in snapshot.iterdir()} == {'snapshot.bundle', 'manifest.json'}
+        manifest = json.loads((snapshot / 'manifest.json').read_text())
+        assert manifest['source_sha'] == sha and manifest['source_tree'] == tree
+        assert manifest['bundle_sha256'] == hashlib.sha256((snapshot / 'snapshot.bundle').read_bytes()).hexdigest()
+        seen.append(snapshot)
+        metadata.write_text(json.dumps({'containerimage.digest': 'sha256:' + 'c' * 64}))
+        return SimpleNamespace(stdout='')
+    monkeypatch.setattr(producer.subprocess, 'run', run)
+    result = producer.build_image(root, 'app', sha, 7,
+                                  {name: 'b' * 64 for name in TRIXIE}, metadata)
+    assert result['source_revision'] == sha
+    assert len(seen) == 1 and not seen[0].exists()
+    assert git('status', '--porcelain') == ''
+    assert git('show-ref') == refs
+    assert (root / '.git' / 'private-config-marker').read_text() == 'not part of image'
+
+
+def test_authoring_source_context_is_only_added_for_app(tmp_path, monkeypatch):
+    write_integration_config(tmp_path)
+    calls = fake_buildx(monkeypatch, tmp_path)
+    monkeypatch.setattr(producer, '_prepare_authoring_source_context',
+                        lambda *args: pytest.fail('web must not prepare source objects'))
+    producer.build_image(tmp_path, 'web', 'a' * 40, 7,
+                         {name: 'b' * 64 for name in FRESHNESS['web']}, tmp_path / 'image.json')
+    assert not any('platform_source=' in str(part) for part in calls[-1][0])

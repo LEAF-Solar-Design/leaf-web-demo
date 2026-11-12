@@ -23,9 +23,9 @@ def _reset_provider():
 def _fixture(make_org, label, *, approve_failure=True, role="reviewer"):
     org, project, solve_id = _completed_solve(make_org, label)
     run = compliance_store.record_run(org.org_id, project.project_id, solve_id, PACK, INPUTS)
-    owner = store.create_identity_binding(org.org_id, "auth0", f"{label}-owner", role="owner")
+    owner = store.create_identity_binding(org.org_id, "auth0", f"{label}-owner-{org.org_id}", role="owner")
     actor = (owner if role == "owner" else store.create_identity_binding(
-        org.org_id, "auth0", f"{label}-actor", role=role))
+        org.org_id, "auth0", f"{label}-actor-{org.org_id}", role=role))
     if approve_failure:
         waiver = compliance_store.propose_waiver(
             org.org_id, project.project_id, uuid.UUID(run["findings"][0]["finding_id"]),
@@ -40,7 +40,7 @@ def _fixture(make_org, label, *, approve_failure=True, role="reviewer"):
         serialization.Encoding.Raw, serialization.PublicFormat.Raw)
     now = datetime.now(timezone.utc)
     credential = signing.register_credential(
-        org.org_id, actor.binding_id, jurisdiction="MN", license_ref=f"PE-{label}",
+        org.org_id, actor.binding_id, jurisdiction="MN", license_ref=f"PE-{label}-{org.org_id}",
         algorithm="ed25519", public_key=public_key, provider_key_ref=f"local:{label}",
         verified_by="credential-operator", verified_at=now - timedelta(days=1),
         expires_at=now + timedelta(days=365))
@@ -238,13 +238,13 @@ def test_concurrent_replay_creates_one_signature_and_history_operation(make_org)
 def test_concurrent_different_credentials_cannot_orphan_history(make_org):
     org, project, bundle, actor, credential, key = _fixture(make_org, "concurrent-identity")
     second_actor = store.create_identity_binding(
-        org.org_id, "auth0", "concurrent-identity-second", role="reviewer")
+        org.org_id, "auth0", f"concurrent-identity-second-{org.org_id}", role="reviewer")
     second_key = ed25519.Ed25519PrivateKey.generate()
     second_public_key = second_key.public_key().public_bytes(
         serialization.Encoding.Raw, serialization.PublicFormat.Raw)
     now = datetime.now(timezone.utc)
     second_credential = signing.register_credential(
-        org.org_id, second_actor.binding_id, jurisdiction="MN", license_ref="PE-second",
+        org.org_id, second_actor.binding_id, jurisdiction="MN", license_ref=f"PE-second-{org.org_id}",
         algorithm="ed25519", public_key=second_public_key,
         provider_key_ref="local:concurrent-identity-second",
         verified_by="credential-operator", verified_at=now - timedelta(days=1),
@@ -307,7 +307,7 @@ def test_credential_role_and_provider_signature_are_enforced(make_org):
             org.org_id, project.project_id, uuid.UUID(bundle["bundle_id"]),
             uuid.UUID(credential["credential_id"]), actor.binding_id, "wrong-key")
     editor = store.create_identity_binding(
-        org.org_id, "auth0", "invalid-provider-editor", role="editor")
+        org.org_id, "auth0", f"invalid-provider-editor-{org.org_id}", role="editor")
     public_key = wrong_key.public_key().public_bytes(
         serialization.Encoding.Raw, serialization.PublicFormat.Raw)
     now = datetime.now(timezone.utc)

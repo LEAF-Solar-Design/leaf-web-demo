@@ -1145,6 +1145,20 @@ def create_drawing_version(org_id: uuid.UUID, project_id: uuid.UUID, *,
             return DrawingVersion.from_row(cur.fetchone())
 
 
+def _disambiguated_import_name(name: str, drawing_id: uuid.UUID) -> str:
+    """A stable display name for an upload whose own name is taken in its project.
+
+    Deterministic in (name, drawing_id), at most 200 characters, extension kept.
+    """
+    tag = f" ({uuid.UUID(str(drawing_id)).hex[:8]})"
+    stem, dot, extension = name.rpartition(".")
+    if not dot or not stem or len(extension) > 16:
+        stem, suffix = name, ""
+    else:
+        suffix = "." + extension
+    return stem[:200 - len(tag) - len(suffix)].rstrip() + tag + suffix
+
+
 def import_ready_account_upload(
     org_id: uuid.UUID,
     project_id: uuid.UUID,
@@ -1332,6 +1346,17 @@ def import_ready_account_upload(
                 "imported_by_binding_id": str(actor_binding_id),
             }
 
+            # A project names each drawing once, archived rows included. A different
+            # upload of a same-named file is its own drawing, so it takes a stable
+            # disambiguated name; the earlier drawing keeps its row and its name.
+            disambiguated = _disambiguated_import_name(name, canonical_drawing_id)
+            cur.execute(
+                "SELECT 1 FROM drawing_artifacts WHERE project_id = %(project_id)s "
+                "AND name = %(name)s AND drawing_id <> %(drawing_id)s LIMIT 1",
+                {"project_id": project_id, "name": name, "drawing_id": canonical_drawing_id},
+            )
+            artifact_name = disambiguated if cur.fetchone() is not None else name
+
             # The deterministic canonical UUID prevents the same immutable
             # source upload from being attached to a different project.
             cur.execute(
@@ -1340,7 +1365,7 @@ def import_ready_account_upload(
                 "VALUES (%(drawing_id)s, %(project_id)s, %(org_id)s, %(name)s) "
                 "ON CONFLICT (drawing_id) DO NOTHING",
                 {"drawing_id": canonical_drawing_id, "project_id": project_id,
-                 "org_id": org_id, "name": name},
+                 "org_id": org_id, "name": artifact_name},
             )
             cur.execute(
                 "SELECT drawing_id, project_id, name FROM drawing_artifacts "
@@ -1349,7 +1374,8 @@ def import_ready_account_upload(
                 {"org_id": org_id, "drawing_id": canonical_drawing_id},
             )
             artifact = cur.fetchone()
-            if artifact is None or artifact["project_id"] != project_id or artifact["name"] != name:
+            if (artifact is None or artifact["project_id"] != project_id
+                    or artifact["name"] not in (name, disambiguated)):
                 raise DrawingImportUnavailable(
                     "project or source account upload is unavailable")
 

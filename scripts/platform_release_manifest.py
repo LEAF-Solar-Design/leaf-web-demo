@@ -63,6 +63,7 @@ SURFACE_INPUTS: dict[str, tuple[str, ...]] = {
     "app": (
         ".dockerignore",
         "deploy/Dockerfile.app",
+        "deploy/platform-source-absent.json",
         "deploy/gen_seccomp_filter.c",
         "server",
         "da",
@@ -234,7 +235,9 @@ def _dockerfile_contract(
             tokens = shlex.split(instruction)
             if len(tokens) < 2:
                 raise ContractError("Dockerfile FROM instruction is malformed")
-            external_images.add(tokens[1])
+            # Docker's reserved empty base has no registry object or digest.
+            if tokens[1].lower() != "scratch":
+                external_images.add(tokens[1])
             if len(tokens) >= 4 and tokens[-2].upper() == "AS":
                 aliases.add(tokens[-1])
         elif upper.startswith("ARG "):

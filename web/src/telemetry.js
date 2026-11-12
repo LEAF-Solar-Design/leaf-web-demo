@@ -23,6 +23,7 @@
 // here instead would drift the moment a route is added, and a hand-rolled one
 // is exactly how a customer name reaches BigQuery inside a pathname.
 import { sceneForPath } from './site/routeScene.js'
+import { serviceState, serviceHeaders, serviceRequestAuthority, invalidateServiceResponse } from './lib/serviceAuthSession.js'
 // The consent rail (slice 13c). A second leaf module — pure, no imports of
 // its own beyond the platform — so it cannot form a cycle either. The rule it
 // carries is documented at buildEvent: usage-shaped events need the viewer's
@@ -132,6 +133,7 @@ function endpoint() {
 }
 
 function identityHeaders() {
+  if (serviceState().mode) return serviceHeaders(API_BASE)
   // Auth-off parity with every other client call: the ingest door resolves
   // this stub tenant exactly as api.js's calls do. Built OUTSIDE the storage
   // try so a throwing localStorage can never drop it.
@@ -156,12 +158,15 @@ function payload(events) {
 }
 
 async function post(events) {
+  const serviceAuthority = serviceRequestAuthority()
+  const headers = { 'Content-Type': 'application/json', ...identityHeaders() }
   const res = await fetch(endpoint(), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...identityHeaders() },
+    headers,
     body: payload(events),
     keepalive: true,
   })
+  if (res.status === 401) invalidateServiceResponse(res, headers.Authorization, serviceAuthority)
   if (!res.ok) throw new Error(`telemetry ${res.status}`)
 }
 

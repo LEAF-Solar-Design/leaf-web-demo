@@ -894,14 +894,142 @@ fn validate_block_names(document: &CadDocument, definitions: usize) -> Result<()
     Ok(())
 }
 
+// The upstream reader starts with defaults before importing file records. Only
+// repair defaults whose absence in the source proves they were generated here.
+// In particular, an object-handle remap must not change a layout's BLOCK_RECORD
+// reference merely because an unrelated generated dictionary had that number.
+fn reconcile_generated_defaults(document: &mut CadDocument, bytes: &[u8]) {
+    if bytes.starts_with(b"AutoCAD Binary DXF") { return; }
+    let text = match std::str::from_utf8(bytes) { Ok(text) => text, Err(_) => return };
+    let lines: Vec<_> = text.lines().collect();
+    if lines.len() % 2 != 0 { return; }
+    let mut source_handles = HashSet::new();
+    let mut source_objects = false;
+    let mut source_active_vport = false;
+    let mut section = "";
+    let mut record = "";
+    for pair in lines.chunks_exact(2) {
+        let code = match pair[0].trim().parse::<i32>() { Ok(code) => code, Err(_) => return };
+        let value = pair[1].trim();
+        if code == 0 {
+            record = value;
+            if value == "ENDSEC" { section = ""; }
+        } else if code == 2 && record == "SECTION" {
+            section = value;
+            source_objects |= value == "OBJECTS";
+        } else if code == 2 && section == "TABLES" && record == "VPORT" {
+            source_active_vport |= value.eq_ignore_ascii_case("*Active");
+        }
+        if matches!(code, 5 | 105) {
+            if let Ok(handle) = u64::from_str_radix(value, 16) {
+                source_handles.insert(Handle::new(handle));
+            }
+        }
+    }
+    // Keep every file-sourced handle. Only the absent, synthesized *Active
+    // viewport can be moved, and only when it collides with a source handle.
+    if !source_active_vport {
+        let collision = document.vports.get("*Active")
+            .map_or(false, |vport| source_handles.contains(&vport.handle));
+        if collision {
+            let handle = document.allocate_handle();
+            if let Some(vport) = document.vports.get_mut("*Active") { vport.handle = handle; }
+        }
+    }
+    // Reading any OBJECTS section clears upstream's generated object set.
+    // Its layouts/styles are therefore source-owned and must remain untouched.
+    if source_objects { return; }
+    let model = document.block_records.get("*Model_Space").map(|block| block.handle);
+    let paper = document.block_records.get("*Paper_Space").map(|block| block.handle);
+    let standard = document.text_styles.iter()
+        .find(|style| style.name.eq_ignore_ascii_case("Standard")).map(|style| style.handle);
+    let mut layout_links = Vec::new();
+    for object in document.objects.values_mut() {
+        match object {
+            ObjectType::Layout(layout) => {
+                let block = match layout.name.as_str() { "Model" => model, "Layout1" => paper, _ => None };
+                if let Some(block) = block {
+                    layout.block_record = block;
+                    layout_links.push((block, layout.handle));
+                }
+            }
+            ObjectType::MultiLeaderStyle(style) if style.name == "Standard" => {
+                if let Some(standard) = standard { style.text_style_handle = Some(standard); }
+            }
+            _ => {}
+        }
+    }
+    for block in document.block_records.iter_mut() {
+        if let Some((_, layout)) = layout_links.iter().find(|(handle, _)| *handle == block.handle) {
+            block.layout = *layout;
+        }
+    }
+}
+
 fn parse_dxf_core(bytes: &[u8]) -> Result<ParsedDxf, Refusal> {
     let definitions = raw_block_definition_count(bytes)?;
     let mut inner = DxfReader::from_reader(std::io::Cursor::new(bytes.to_vec()))
         .map_err(|e| e.to_string())?.read().map_err(|e| e.to_string())?;
+    reconcile_generated_defaults(&mut inner, bytes);
     validate_block_names(&inner, definitions)?;
     let unknown_block_bases = retain_block_bases(&mut inner, bytes)?;
     convert_mlinestyle_angles(&mut inner);
     Ok(ParsedDxf { group_names: group_names(&inner), inner, block_base_patched: Cell::new(false), block_bases_unknown: bytes.starts_with(b"AutoCAD Binary DXF"), unknown_block_bases, mlstyle_segments: scan_mlstyle_segments(bytes) })
+}
+
+#[cfg(test)]
+mod bsp6_generated_defaults {
+    use super::*;
+
+    const ROOFTOP: &[u8] = include_bytes!("../fixtures/bsp6-rooftop.dxf");
+
+    fn references(document: &CadDocument) -> serde_json::Value {
+        let mut layouts: Vec<_> = document.objects.values().filter_map(|object| match object {
+            ObjectType::Layout(layout) => Some((layout.name.clone(), layout.handle.value(), layout.block_record.value())),
+            _ => None,
+        }).collect();
+        layouts.sort();
+        let mut styles: Vec<_> = document.objects.values().filter_map(|object| match object {
+            ObjectType::MultiLeaderStyle(style) => Some((style.name.clone(), style.handle.value(), style.text_style_handle.map(|h| h.value()))),
+            _ => None,
+        }).collect();
+        styles.sort();
+        serde_json::json!({"layouts": layouts, "styles": styles,
+            "active": document.vports.get("*Active").unwrap().handle.value()})
+    }
+
+    #[test]
+    fn bsp6_fixture_reproduces_the_three_upstream_default_failures() {
+        let document = DxfReader::from_reader(std::io::Cursor::new(ROOFTOP.to_vec())).unwrap().read().unwrap();
+        assert_eq!(document.vports.get("*Active").unwrap().handle, document.block_records.get("*Model_Space").unwrap().handle);
+        let paper = document.block_records.get("*Paper_Space").unwrap().handle;
+        assert!(document.objects.values().any(|object| matches!(object,
+            ObjectType::Layout(layout) if layout.name == "Layout1" && layout.block_record != paper)));
+        let standard = document.text_styles.iter().find(|s| s.name.eq_ignore_ascii_case("Standard")).unwrap().handle;
+        assert!(document.objects.values().any(|object| matches!(object,
+            ObjectType::MultiLeaderStyle(style) if style.name == "Standard" && style.text_style_handle != Some(standard))));
+    }
+
+    #[test]
+    fn bsp6_reconciles_generated_defaults_and_preserves_source_owned_references_on_reopen() {
+        let parsed = parse_dxf_core(ROOFTOP).unwrap();
+        let document = &parsed.inner;
+        assert_ne!(document.vports.get("*Active").unwrap().handle, document.block_records.get("*Model_Space").unwrap().handle);
+        for (name, block_name) in [("Model", "*Model_Space"), ("Layout1", "*Paper_Space")] {
+            let block = document.block_records.get(block_name).unwrap();
+            assert!(document.objects.values().any(|object| matches!(object,
+                ObjectType::Layout(layout) if layout.name == name && layout.block_record == block.handle && layout.handle == block.layout)));
+        }
+        let standard = document.text_styles.iter().find(|s| s.name.eq_ignore_ascii_case("Standard")).unwrap().handle;
+        assert!(document.objects.values().any(|object| matches!(object,
+            ObjectType::MultiLeaderStyle(style) if style.name == "Standard" && style.text_style_handle == Some(standard))));
+        let before = references(document);
+        let written = write_dxf_core(&parsed).unwrap();
+        let reopened = parse_dxf_core(&written).unwrap();
+        assert_eq!(references(&reopened.inner), before);
+        let twice = parse_dxf_core(&write_dxf_core(&reopened).unwrap()).unwrap();
+        assert_eq!(references(&twice.inner), before);
+    }
 }
 
 // Validate all BLOCK layouts before emitting any replacement. Keep every byte

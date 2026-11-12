@@ -51,7 +51,7 @@ describe('w3 ToolCast issue sweep', () => {
   })
 
   it('S1-86 exposes the empty-drawing session probe failure instead of swallowing it', () => {
-    const probe = section("getSession(false, 'rooftop_demo')", 'let live = true')
+    const probe = section('getSessionIdentity(false)', 'let live = true')
     expect(probe).toContain('setSessionError(humanizeError(cause))')
     expect(probe).toContain("setPhase('failed')")
   })

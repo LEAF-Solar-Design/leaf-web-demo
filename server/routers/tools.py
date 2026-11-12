@@ -24,6 +24,22 @@ router = APIRouter()
 _PUBLISHED_CACHE = {"Cache-Control": "private, max-age=300"}
 
 
+@router.get("/api/tools/{name}/view-source")
+def authored_view_source(name: str, project_id: str, session_id: str, catalog_commit: str,
+                         effective_catalog_digest: str, tool_manifest_sha256: str,
+                         catalog_digest: str, tenant=Depends(deps.require_tenant)) -> Response:
+    from authored_view_source import AuthoredViewError, resolve_authored_view
+    headers = {"Cache-Control": "no-store"}
+    try:
+        return JSONResponse(resolve_authored_view(
+            tenant, project_id=project_id, session_id=session_id, name=name,
+            catalog_commit=catalog_commit, effective_catalog_digest=effective_catalog_digest,
+            tool_manifest_sha256=tool_manifest_sha256, catalog_digest=catalog_digest), headers=headers)
+    except AuthoredViewError as exc:
+        return JSONResponse({"detail": "Authored view unavailable", "reason_code": exc.code},
+                            status_code=exc.status, headers=headers)
+
+
 @router.get("/api/tool-envelopes")
 def published_tools(tenant=Depends(deps.require_active_tenant)) -> Response:
     return JSONResponse({"tools": tool_envelopes.published_catalog().list()}, headers=_PUBLISHED_CACHE)

@@ -296,16 +296,17 @@ function observations(feature_id, state, viewport, evidence) {
  * in evidence.cases; constrained wire rows retain their feature id and context in
  * reason/evidence. expected_effect is canonical JSON because the schema says string.
  */
-export function buildReceipt({ playwrightReport, featureMap, identity }) {
+export function buildReceipt({ playwrightReport, featureMap, identity, productionBundle = identity?.production_bundle }) {
   boundInput(playwrightReport)
   boundInput(featureMap)
   boundInput(identity)
+  boundInput(productionBundle)
   if (!Array.isArray(playwrightReport?.suites) || !Array.isArray(featureMap?.entries)) throw new Error('Report and feature map need suites and entries')
   const receipt = { schema: 'leaf.studio-walk.v1', feature_id: 'walk:run',
     deployment_identity: identity?.deployment_identity, fixture_version: identity?.fixture_version,
     catalog_version: identity?.catalog_version, browser_version: identity?.browser_version, attempt: identity?.attempt,
     created_at: new Date().toISOString(), verdicts: [], coverage_gaps: [], flakes: [], unavailable_features: [], failures: [], findings: [],
-    evidence: { cases: [], coverage_gaps: [], flakes: [], unavailable: [] } }
+    evidence: { cases: [], coverage_gaps: [], flakes: [], unavailable: [], production_bundle: bundleEvidence(productionBundle) } }
   if (playwrightReport.stats?.startTime) {
     receipt.started_at = playwrightReport.stats.startTime
     if (Number.isFinite(playwrightReport.stats.duration) && playwrightReport.stats.duration >= 0
@@ -498,17 +499,32 @@ function readJsonInput(file) {
   try { return JSON.parse(bytes.toString('utf8')) } catch { throw new Error('Input is not JSON') }
 }
 
+// Only an explicit snapshot from this run is evidence. Never consult ambient dist.
+function bundleEvidence(marker) {
+  if (!marker) return { engine: { ready: false, reason: 'Run-bound production bundle marker unavailable', files: {} } }
+  const engine = marker.engine
+  const files = engine?.files
+  const identified = ['engine.js', 'engine_bg.wasm'].every((name) => /^[a-f0-9]{64}$/.test(files?.[name]?.sha256)
+    && Number.isSafeInteger(files?.[name]?.bytes) && files[name].bytes > 0)
+  const knownBuild = marker.buildProvenance === 'built' && validDateTime(String(marker.builtAt || ''))
+    && validDateTime(String(marker.lastUsedAt || '')) && ['built', 'reused'].includes(marker.provenance)
+  const ready = marker.flags?.VITE_CAD_EDIT === '1' && engine?.ready === true && engine.reason === null && identified && knownBuild
+  return { ...marker, engine: { ...engine, ready, files: files || {},
+    reason: ready ? null : engine?.reason || marker.engine_unavailable_reason || 'Production bundle engine readiness or build identity unavailable' } }
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const flags = new Map()
     for (let index = 2; index < process.argv.length; index += 2) {
       const key = process.argv[index], value = process.argv[index + 1]
-      if (!['--report', '--identity', '--out'].includes(key) || !value || flags.has(key)) throw new Error('Usage: --report <json> --identity <json> --out <json>')
+      if (!['--report', '--identity', '--out', '--bundle-marker'].includes(key) || !value || flags.has(key)) throw new Error('Usage: --report <json> --identity <json> --out <json> [--bundle-marker <json>]')
       flags.set(key, value)
     }
-    if (flags.size !== 3) throw new Error('Usage: --report <json> --identity <json> --out <json>')
+    if (!['--report', '--identity', '--out'].every((key) => flags.has(key))) throw new Error('Usage: --report <json> --identity <json> --out <json> [--bundle-marker <json>]')
     const receipt = buildReceipt({ playwrightReport: readJsonInput(flags.get('--report')),
-      featureMap: buildFeatureMap(), identity: readJsonInput(flags.get('--identity')) })
+      featureMap: buildFeatureMap(), identity: readJsonInput(flags.get('--identity')),
+      ...(flags.has('--bundle-marker') ? { productionBundle: readJsonInput(flags.get('--bundle-marker')) } : {}) })
     const validation = validateReceipt(receipt)
     if (!validation.valid) throw new Error(validation.errors[0])
     writeFileSync(flags.get('--out'), JSON.stringify(receipt) + '\n', 'utf8')

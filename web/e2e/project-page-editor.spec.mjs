@@ -146,8 +146,14 @@ async function openProject(page) {
   await page.getByRole('button', { name: 'Project', exact: true }).click()
   const sidebar = page.getByRole('region', { name: 'Project sidebar', exact: true })
   const projects = sidebar.getByRole('region', { name: 'Workspace projects', exact: true })
-  await projects.getByRole('button', { name: PROJECT.name, exact: true }).click({ timeout: 30_000 })
-  await page.getByRole('button', { name: 'Project', exact: true }).click()
+  const project = projects.getByRole('button', { name: PROJECT.name, exact: true })
+  const selected = page.getByRole('button', { name: `Projects: change project. Project ${PROJECT.name}`, exact: true })
+  await expect(selected.or(project)).toBeVisible({ timeout: 30_000 })
+  if (!await selected.isVisible()) {
+    await project.click({ timeout: 30_000 })
+    await page.getByRole('button', { name: 'Project', exact: true }).click()
+  }
+  await expect(selected).toBeVisible({ timeout: 30_000 })
   const editor = sidebar.getByRole('region', { name: 'Page editor', exact: true })
   await expect(editor).toBeVisible()
   return editor

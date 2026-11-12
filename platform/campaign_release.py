@@ -116,10 +116,13 @@ def _contract(value, profile):
         'deferred_items', 'artifact_refs', 'required_checks',
         'selected_artifact', 'request_digest', 'request_key_digest', 'web_recipe',
         'transform_recipe', 'cad_recipe', 'deadline_at', 'priority_score',
+        'requested_workflow', 'scope_classification',
     }:
         _invalid('invalid contract fields')
     for field in ('original_goal', 'intended_user', 'workflow', 'release_boundary'):
         _string(value.get(field), field, 16384)
+    if 'requested_workflow' in value:
+        _string(value['requested_workflow'], 'requested_workflow', 16384)
     _strings(value.get('deferred_items', []), 'deferred_items')
     _strings(value.get('artifact_refs', []), 'artifact_refs')
     if 'deadline_at' in value:
@@ -138,6 +141,17 @@ def _contract(value, profile):
         if field in value and not re.fullmatch(r'[0-9a-f]{64}', value[field] or ''):
             _invalid('invalid ' + field)
     _selected_artifact(value.get('selected_artifact'))
+    if 'scope_classification' in value:
+        classification = value['scope_classification']
+        if (not isinstance(classification, dict)
+                or set(classification) != {'version', 'capability', 'requested_workflow_status'}
+                or type(classification['version']) is not int or classification['version'] != 1
+                or classification['capability'] != 'existing_artifact_delivery'
+                or classification['requested_workflow_status'] != 'unverified'):
+            _invalid('invalid scope classification')
+        if (not value.get('selected_artifact') or 'requested_workflow' not in value
+                or any(key in value for key in ('web_recipe', 'transform_recipe', 'cad_recipe'))):
+            _invalid('scope classification requires an existing artifact and requested workflow without a recipe')
     recipe = value.get('web_recipe')
     if sum(key in value for key in ('web_recipe', 'transform_recipe', 'cad_recipe')) > 1:
         _invalid('release recipes are mutually exclusive')

@@ -77,3 +77,70 @@ it('counts non-finite geometry and malformed explicit bounds, without inventing 
 })
 
 function shapeWithInvalidPoint() { return { handle: 'A', pts: [[0, 0], [Infinity, 1]] } }
+
+// APS/DXF producer shape: raw WCS insertion point, radians, kind-based children.
+const serverBlocks = () => ({
+  polylines: [],
+  blocks: { Fixture: { base: [10, 20, 0], count: 1, complete: true,
+    children: [{ kind: 'LINE', layer: '0', pts: [[10, 20, 0], [14, 22, 0]] }] } },
+  inserts: [{ handle: 'A100', name: 'Fixture', layer: 'Panels', x: 100, y: 200, z: 0,
+    rot: Math.PI / 2, scale: [-2, 3, 1], nrm: [0, 0, 1] }],
+})
+const blockBounds = { minX: 94, minY: 192, maxX: 100, maxY: 200 }
+
+it('indexes the exact server block geometry once under its parent handle without changing the scene identity', () => {
+  const intake = serverBlocks(), before = structuredClone(intake), index = build({ intake })
+  expect(index.intake).toBe(intake)
+  expect(index.resolve('A100')).toMatchObject({ status: 'unique', matches: [{ id: 'h:A100', bounds: blockBounds }] })
+  expect(index.byHandle.get('A100')).toMatchObject({ kind: 'INSERT', physicalParentId: 'layer:Panels', handles: ['A100'] })
+  expect(index.byId.get('layer:Panels').bounds).toEqual(blockBounds)
+  expect(index.records).toHaveLength(2)
+  expect(intake).toEqual(before)
+  intake.inserts[0].x = 110
+  expect(index.byHandle.get('A100').bounds).toEqual(blockBounds)
+  expect(build({ intake }).byHandle.get('A100').bounds).toEqual({ ...blockBounds, minX: 104, maxX: 110 })
+})
+
+it('keeps explicit child layers separate from the INSERT physical parent', () => {
+  const intake = serverBlocks()
+  intake.blocks.Fixture.children[0].layer = 'Detail'
+  const index = build({ intake })
+  expect(index.byHandle.get('A100')).toMatchObject({ bounds: blockBounds, physicalParentId: 'layer:Panels' })
+  expect(index.byId.get('layer:Detail').bounds).toEqual(blockBounds)
+  expect(index.byId.get('layer:Panels').bounds).toBeNull()
+  expect(index.records.filter((record) => record.kind !== 'layer')).toHaveLength(1)
+})
+
+it('keeps partial server geometry and an honest insertion fallback without inventing missing block extents', () => {
+  const intake = serverBlocks()
+  intake.blocks.Fixture.complete = false
+  intake.blocks.Fixture.children[0].layer = 'Detail'
+  const partial = build({ intake })
+  expect(partial.byHandle.get('A100').bounds).toEqual(blockBounds)
+  expect(partial.byId.get('layer:Detail').bounds).toEqual(blockBounds)
+  expect(partial.byId.get('layer:Panels').bounds).toEqual({ minX: 99.5, minY: 199.5, maxX: 100.5, maxY: 200.5 })
+  intake.blocks = {}
+  const fallback = build({ intake })
+  expect(fallback.byHandle.get('A100').bounds).toEqual({ minX: 99.5, minY: 199.5, maxX: 100.5, maxY: 200.5 })
+  intake.inserts[0].x = Infinity
+  expect(build({ intake }).byHandle.get('A100').bounds).toBeNull()
+})
+
+it.each(['engine', 'bridge'])('keeps already projected %s block geometry without projecting definitions again', (source) => {
+  const intake = serverBlocks()
+  intake.source = source
+  intake.polylines = [{ handle: 'A100', sourceHandle: 'A100', layer: 'Panels', pts: [[94, 192, 0], [100, 200, 0]] }]
+  intake.inserts = [{ handle: 'A100', name: 'Fixture', layer: 'Panels', pt: [100, 200, 0], incomplete: false }]
+  const index = build({ intake })
+  expect(index.byHandle.get('A100').bounds).toEqual(blockBounds)
+  expect(index.byId.get('layer:Panels').bounds).toEqual(blockBounds)
+  expect(index.records).toHaveLength(2)
+})
+
+it('uses the shared projector for OCS child coordinates without changing drawing units', () => {
+  const intake = serverBlocks()
+  intake.blocks.Fixture.base = [0, 0, 0]
+  intake.blocks.Fixture.children[0].pts = [[0, 0, 0], [2, 3, 4]]
+  Object.assign(intake.inserts[0], { x: 10, y: 20, z: 30, rot: 0, scale: [1, 1, 1], nrm: [0, 1, 0] })
+  expect(build({ intake }).byHandle.get('A100').bounds).toEqual({ minX: 8, minY: 20, maxX: 10, maxY: 24 })
+})

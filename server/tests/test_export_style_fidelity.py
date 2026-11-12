@@ -263,7 +263,7 @@ def test_an_adapter_error_fails_the_style_receipt_closed():
 
 def test_style_cli_exits_zero_with_identity_adapter(capsys):
     assert fidelity.main(["--adapter=identity", "--styles"]) == 0
-    assert "# STYLE RESULT: ALL DRAWINGS OK (8 drawings, adapter='identity')" in capsys.readouterr().out
+    assert "# STYLE RESULT: ALL DRAWINGS OK (9 drawings, adapter='identity')" in capsys.readouterr().out
 
 
 # --- Declared-style proof (STU3-STYLE) -------------------------------------
@@ -614,7 +614,7 @@ FAKE_METADATA = {
 def test_style_proof_cli_exits_zero_with_identity_adapter(capsys):
     assert fidelity.main(["--adapter=identity", "--style-proof"]) == 0
     out = capsys.readouterr().out
-    assert "# STYLE PROOF RESULT: ALL DRAWINGS OK (8 drawings, adapter='identity')" in out
+    assert "# STYLE PROOF RESULT: ALL DRAWINGS OK (9 drawings, adapter='identity')" in out
 
 
 def test_a_failed_proof_exits_one_and_keeps_its_failure_evidence(tmp_path, monkeypatch, capsys):
