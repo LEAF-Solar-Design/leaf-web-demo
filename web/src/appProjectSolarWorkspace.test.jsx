@@ -7,6 +7,7 @@ import ProjectSolarWorkspace from './solar/ProjectSolarWorkspace.jsx'
 import ProjectSolarGraphForm from './solar/ProjectSolarGraphForm.jsx'
 import SolarStepEditor from './solar/SolarStepEditor.jsx'
 import SolarFlowRail from './solar/SolarFlowRail.jsx'
+import SolarFlowSeat from './solar/SolarFlowSeat.jsx'
 import { useAppProjectSolarRuntime } from './solar/useAppProjectSolarRuntime.js'
 import { sameSolarDrawingBinding } from './solar/solarDrawingBinding.js'
 import { PROJECT_SOLAR_APP_REASONS, projectSolarAppReason } from './solar/solarProjectAppModel.js'
@@ -148,7 +149,7 @@ const useAdapter = Function('React', 'sameSolarDrawingBinding', 'useEscapeOwner'
     ${text(refusalDerived)}
     ${adapterSource}
     ${text(declaration('ribbonClusters').parent)}
-    return { ribbonClusters, solarFlowSeated, projectSolarHostEnabled, projectSolarRows,
+    return { ribbonClusters, solarFlowSeated, projectSolarHostEnabled, projectSolarWorkspaceEnabled, projectSolarRows,
       projectSolarRefusal: typeof projectSolarRefusal === 'undefined' ? null : projectSolarRefusal,
       projectSolarWorkspaceRef, projectSolarOpenerRef, onOpenProjectSolarTool, onCloseProjectSolarTool }
   }
@@ -163,7 +164,7 @@ function store(initial) {
 const drain = async () => { for (let i = 0; i < 45; i++) await Promise.resolve() }
 const response = data => ({ ok: true, status: 200, data })
 const OUTPUT = '66666666-6666-4666-8666-666666666666'
-async function setup({ names = ['solar-settings', ...STEP, ...GRAPH, ...READ], ...changes } = {}) {
+async function setup({ names = ['solar-settings', ...STEP, ...GRAPH, ...READ], clientOverrides = {}, ...changes } = {}) {
   const h = { rows: names.map(name => Row(name)), token: { live: true }, epoch: 0,
     legacy: Object.fromEntries(['run', 'checkoutCapability', 'readIntake', 'saveSettings', 'saveGraph', 'flow', 'close', 'form'].map(k => [k, vi.fn()])),
     key: vi.fn(() => 'intent-g2b'), returnToDrawing: vi.fn(), steps: [], graphs: [], rails: [], workspaces: [] }
@@ -178,6 +179,7 @@ async function setup({ names = ['solar-settings', ...STEP, ...GRAPH, ...READ], .
     submitRun: vi.fn(async () => accepted()), readJob: vi.fn(() => h.job.promise),
     readSolar: vi.fn(async ({ tool }) => readResult(tool)), downloadArtifact: vi.fn(),
     readIntake: h.legacy.readIntake,
+    ...clientOverrides,
   })
   h.ws = store({ orgId: B.organization_id, openProjectId: B.project_id, canonicalVersionId: B.input_version_id })
   h.ws.rehydrate = vi.fn(async () => h.ws.getSnapshot().workspace)
@@ -222,10 +224,12 @@ async function setup({ names = ['solar-settings', ...STEP, ...GRAPH, ...READ], .
       catalogRunContext: {}, canOpenSolarSettingsForm: () => false, solarFlowRunsFor: () => ({}),
       solarFlowRuns: {}, running: false, onOpenSolarFlowStep: h.legacy.run, onSolarFlowChange: h.legacy.flow,
       authConfigured: false, signedIn: false, onLogin: () => {} }
-    return <><div data-testid="seat">{element(hostBranch, bindings, { ProjectSolarWorkspace: Workspace,
+    const seatProps = Object.fromEntries(seat.openingElement.attributes.map(attribute =>
+      [attribute.name.name, evaluate(attribute.value.expression, bindings)]))
+    return <><SolarFlowSeat {...seatProps}><div data-testid="seat">{element(hostBranch, bindings, { ProjectSolarWorkspace: Workspace,
       ProjectLayoutPublicationTools: () => null,
       ProjectSolarGraphForm: Graph, SolarStepEditor: Step, SolarFlowRail: Rail })}</div>
-      {element(hostStatus, bindings)}
+      {element(hostStatus, bindings)}</SolarFlowSeat>
       <nav aria-label="Fixture ribbon">{adapter.ribbonClusters.flatMap(c => c.tools).map(tool =>
         <button key={tool.id} data-testid={'ribbon-' + tool.id} disabled={tool.disabled}
           aria-controls={tool.controls} aria-expanded={tool.expanded} onClick={tool.onClick}>{tool.label}</button>)}</nav></>
@@ -269,6 +273,171 @@ it('R13G2B-03 workspace is absent on other profiles', async () => {
     absent(h); h.view.unmount()
   }
 })
+
+function edgeMaterial(report = false) {
+  const artifact = report ? 'c'.repeat(64) : 'b'.repeat(64)
+  return { ...B, source_intake_sha256: 'a'.repeat(64), graph_sha256: 'b'.repeat(64),
+    page_count: 1, counts: { pdf_matrices: 1, pdf_panels: 2, matchable_grids: 1,
+      bridge_grids: 0, frames: 1, matched_frames: 1, group_strings: 1, bridge_strings: 0,
+      strings: 1, assigned_panels: 2, unassigned_panels: 0, partial_strings: 0 },
+    [report ? 'report' : 'source']: { artifact_id: artifact, filename: report ? 'report.json' : 'layout.pdf' },
+  }
+}
+async function openEdgeUpload(h) {
+  await h.open('solar-solaredge-accept')
+  const input = await screen.findByLabelText('SolarEdge layout PDF')
+  const file = new File(['%PDF synthetic layout'], 'layout.pdf', { type: 'application/pdf' })
+  fireEvent.change(input, { target: { files: [file] } })
+  fireEvent.click(screen.getByRole('button', { name: 'Upload', exact: true }))
+  await waitFor(() => expect(h.client.uploadSolarEdgePdf).toHaveBeenCalledOnce())
+  return { input, file, signal: h.client.uploadSolarEdgePdf.mock.calls[0][0].signal }
+}
+const profile = name => ({ surfaceSlots: { toolbar: { profile: name } } })
+
+it.each(['current', 'refused', 'stale', 'dirty', 'denied'])(
+  'SolarEdge approval keeps canonical project custody when %s', async outcome => {
+    // Execute the actual downstream approval handler with App's actual set.
+    const panelSource = readFileSync(`${process.cwd()}/src/components/ConversePanel.jsx`, 'utf8')
+    const panelTree = parse(panelSource, { sourceType: 'module', plugins: ['jsx'] })
+    let decideNode
+    function walk(node) {
+      if (!node || typeof node.type !== 'string') return
+      if (node.type === 'VariableDeclarator' && node.id.name === 'decide') decideNode = node.init
+      for (const child of Object.values(node)) {
+        if (Array.isArray(child)) child.forEach(walk)
+        else if (child && typeof child.type === 'string') walk(child)
+      }
+    }
+    walk(panelTree)
+    expect(decideNode).toBeTruthy()
+    const canonicalProjectWriteTools = evaluate(declaration('PROJECT_SOLAR_SUPPORTED_TOOLS').node.init, {})
+    expect(canonicalProjectWriteTools.has('solar-solaredge-accept')).toBe(true)
+    const grant = { isCurrent: () => outcome !== 'stale', revoke: vi.fn() }
+    const prepare = vi.fn(async () => outcome === 'refused' ? null : grant)
+    const resume = vi.fn()
+    const projectContext = { project_id: B.project_id, input_version_id: B.input_version_id }
+    const scope = {
+      deciding: null, projectContext, sessionId: 'session-1', canonicalProjectWriteTools,
+      approvalScopeRef: { current: { revision: 1 } }, sessionIdRef: { current: 'session-1' },
+      projectContextRef: { current: projectContext }, prepareApprovedProjectRunRef: { current: prepare },
+      engineDirtyRef: { current: outcome === 'dirty' }, writeLockedRef: { current: false },
+      onBeforeWriteApprovalRef: { current: vi.fn() }, refreshApprovalsRef: { current: vi.fn() },
+      setDeciding: vi.fn(), setSendErr: vi.fn(), setDecidedLocal: vi.fn(),
+      setPendingApprovals: vi.fn(), setLocalTurns: vi.fn(), bannerFor: vi.fn(), classifyAgentError: vi.fn(),
+      resolveApproval: vi.fn(async (_id, _session, _ok, _recorded, hooks) => {
+        if (!await hooks.beforeResume()) return { held: true }
+        resume()
+        return { turn_id: 'resumed' }
+      }),
+    }
+    const decide = Function(...Object.keys(scope),
+      `return (${panelSource.slice(decideNode.start, decideNode.end)})`)(...Object.values(scope))
+    await decide('approval-1', outcome !== 'denied', false, 'session-1', false, true, 'solar-solaredge-accept')
+    expect(prepare).toHaveBeenCalledTimes(['dirty', 'denied'].includes(outcome) ? 0 : 1)
+    expect(resume).toHaveBeenCalledTimes(['current', 'denied'].includes(outcome) ? 1 : 0)
+    expect(grant.revoke).toHaveBeenCalledTimes(outcome === 'stale' ? 1 : 0)
+  },
+)
+
+it('retains a submitted graph form and one runtime request while the profile is hidden', async () => {
+  const h = await setup()
+  await submitGraph(h)
+  const form = screen.getByTestId('project-solar-graph-form')
+  const signal = h.runtime.submissionSignal
+  for (const name of ['cad', 'browser']) {
+    await h.update(profile(name))
+    expect(form.isConnected).toBe(true)
+    expect(screen.queryByRole('button', { name: 'Review & run' })).toBeNull()
+    expect(screen.getByTestId('solar-flow-seat').hidden).toBe(true)
+    expect(h.runtime.submissionSignal).toBe(signal)
+    await h.update(profile('solar'))
+    expect(screen.getByTestId('project-solar-graph-form')).toBe(form)
+  }
+  expect(h.client.submitRun).toHaveBeenCalledOnce()
+  expect(h.runtime.busy).toBe(true)
+  noLegacy(h)
+})
+
+it('retains one SolarEdge PDF upload and report across hidden profile round trips', async () => {
+  const upload = deferred(), report = deferred()
+  const h = await setup({ names: ['solar-solaredge-accept'], clientOverrides: {
+    uploadSolarEdgePdf: vi.fn(() => upload.promise), reportSolarEdgePdf: vi.fn(() => report.promise),
+  } })
+  const material = await openEdgeUpload(h)
+  const workspace = h.view.container.querySelector('.project-solar-workspace')
+  const away = document.createElement('button')
+  away.textContent = 'Other profile control'
+  document.body.appendChild(away)
+  try {
+    await h.update(profile('cad'))
+    away.focus()
+    const seat = screen.getByTestId('solar-flow-seat')
+    expect(seat.hidden).toBe(true)
+    expect(seat.hasAttribute('inert')).toBe(true)
+    expect(seat.getAttribute('aria-hidden')).toBe('true')
+    expect(screen.queryByRole('region', { name: 'Project SolarEdge import' })).toBeNull()
+    expect(material.input.disabled).toBe(true)
+    expect(material.signal.aborted).toBe(false)
+    await act(async () => { upload.resolve(response(edgeMaterial())); await drain() })
+    expect(document.activeElement).toBe(away)
+    await h.update(profile('solar'))
+    expect(h.view.container.querySelector('.project-solar-workspace')).toBe(workspace)
+    expect(screen.getByLabelText('SolarEdge layout PDF')).toBe(material.input)
+    expect(material.input.files[0]).toBe(material.file)
+    fireEvent.change(screen.getByLabelText('Alignment tolerance'), { target: { value: '0.5' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Build report' }))
+    await waitFor(() => expect(h.client.reportSolarEdgePdf).toHaveBeenCalledOnce())
+    const signal = h.client.reportSolarEdgePdf.mock.calls[0][0].signal
+    await h.update(profile('browser'))
+    away.focus()
+    expect(signal.aborted).toBe(false)
+    await act(async () => { report.resolve(response(edgeMaterial(true))); await drain() })
+    expect(document.activeElement).toBe(away)
+    expect(screen.queryByRole('region', { name: 'Report review' })).toBeNull()
+    await h.update(profile('solar'))
+    const review = screen.getByRole('region', { name: 'Report review' })
+    expect(screen.getByLabelText('Alignment tolerance').value).toBe('0.5')
+    expect(screen.getByText(`Report source version: ${B.input_version_id}.`)).toBeTruthy()
+    await h.update(profile('cad'))
+    await h.update(profile('solar'))
+    expect(screen.getByRole('region', { name: 'Report review' })).toBe(review)
+    expect(material.input.files[0]).toBe(material.file)
+    expect(h.client.uploadSolarEdgePdf).toHaveBeenCalledOnce()
+    expect(h.client.reportSolarEdgePdf).toHaveBeenCalledOnce()
+    expect(h.client.prepareRun).not.toHaveBeenCalled()
+    expect(h.client.submitRun).not.toHaveBeenCalled()
+    noLegacy(h)
+  } finally { away.remove() }
+})
+
+it.each(['authority', 'project_id', 'drawing_id', 'input_version_id'])(
+  'retires a hidden SolarEdge upload when %s changes', async field => {
+    const upload = deferred()
+    const h = await setup({ names: ['solar-solaredge-accept'], clientOverrides: {
+      uploadSolarEdgePdf: vi.fn(() => upload.promise), reportSolarEdgePdf: vi.fn(),
+    } })
+    const material = await openEdgeUpload(h)
+    await h.update(profile('browser'))
+    h.token.live = false
+    h.epoch++
+    const binding = field === 'authority' ? B : { ...B, [field]: OUTPUT }
+    const authorityKey = field === 'authority' ? 'epoch-2' : 'epoch-1'
+    const owner = { ...h.owner, scope: { binding, authorityKey }, isCurrent: () => true }
+    const receipt = { ...h.receipt, binding, authorityKey, isCurrent: () => true }
+    await act(async () => { h.client.change({ binding, authorityKey }) })
+    await h.update({ projectSolar: owner, catalogState: { projectCatalog: receipt } })
+    absent(h)
+    expect(material.signal.aborted).toBe(true)
+    await act(async () => { upload.resolve(response(edgeMaterial())); await drain() })
+    await h.update(profile('solar'))
+    await h.open('solar-solaredge-accept')
+    expect(screen.queryByText(/Uploaded PDF:/)).toBeNull()
+    expect(screen.queryByRole('region', { name: 'Report review' })).toBeNull()
+    expect(h.client.uploadSolarEdgePdf).toHaveBeenCalledOnce()
+    expect(h.client.reportSolarEdgePdf).not.toHaveBeenCalled()
+    expect(h.client.submitRun).not.toHaveBeenCalled()
+  },
+)
 it('R13G2B-04 all feature and cockpit fences are required', async () => {
   for (const flag of ['ENV_SOLAR_FLOW_RAIL', 'ENV_CAD_EDIT', 'ENV_SOLAR_SETTINGS_FORM', 'drafting']) {
     const h = await setup({ [flag]: false }); absent(h); h.view.unmount()

@@ -745,7 +745,7 @@ const PROJECT_SOLAR_SUPPORTED_TOOLS = new Set([
   'solar-settings', 'solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
   'solar-string-conductors', 'solar-assign-equipment', 'solar-panels-from-drawing', 'solar-panel-groups',
   'solar-homeruns', 'solar-schedule', 'solar-feeders', 'solar-string-data',
-  'solar-electrical-schedules', 'solar-cable-export',
+  'solar-electrical-schedules', 'solar-cable-export', 'solar-solaredge-accept',
 ])
 
 function useEngineViewArmed(projectMode) {
@@ -4474,6 +4474,23 @@ export default function App() {
     : solarOverlayStatusOf(solarOverlayReason)
   const solarFlowSeated = ENV_SOLAR_FLOW_RAIL && ENV_CAD_EDIT && ENV_SOLAR_SETTINGS_FORM && drafting && surfaceSlots.toolbar.profile === 'solar'
   const projectSolarHostEnabled = projectMode && solarFlowSeated
+  const [projectSolarRetainedScope, setProjectSolarRetainedScope] = useState(null)
+  const projectSolarWorkspaceEnabled = projectMode && ENV_SOLAR_FLOW_RAIL && ENV_CAD_EDIT
+    && ENV_SOLAR_SETTINGS_FORM && drafting && (solarFlowSeated || (
+      projectSolar.ready && projectSolar.isCurrent()
+      && projectSolarRetainedScope?.authorityKey === projectSolar.scope.authorityKey
+      && projectSolarRetainedScope?.client === projectSolar.projectClient
+      && sameSolarDrawingBinding(projectSolarRetainedScope?.binding, projectSolar.scope.binding)))
+  useLayoutEffect(() => {
+    if (!projectSolarHostEnabled || !projectSolar.ready || !projectSolar.isCurrent()) return
+    setProjectSolarRetainedScope(previous => previous?.authorityKey === projectSolar.scope.authorityKey
+      && previous?.client === projectSolar.projectClient
+      && sameSolarDrawingBinding(previous?.binding, projectSolar.scope.binding) ? previous : {
+        authorityKey: projectSolar.scope.authorityKey, binding: projectSolar.scope.binding,
+        client: projectSolar.projectClient,
+      })
+  }, [projectSolarHostEnabled, projectSolar.ready, projectSolar.scope.authorityKey,
+    projectSolar.scope.binding, projectSolar.projectClient, projectSolar.isCurrent])
   const projectSolarWorkspaceRef = useRef(null)
   const projectSolarOpenerRef = useRef(null)
   const [projectSolarFocusRequest, setProjectSolarFocusRequest] = useState(0)
@@ -5926,7 +5943,7 @@ export default function App() {
               )}
             </div>
           )}
-          <SolarFlowSeat seated={solarFlowSeated}>
+          <SolarFlowSeat seated={solarFlowSeated} retain={projectSolarWorkspaceEnabled}>
           {solarOverlayStatus && (
             <p role="status" aria-live="polite" aria-atomic="true"
               className="solar-workspace-announce" data-testid="solar-graph-overlay-status">
@@ -5934,7 +5951,7 @@ export default function App() {
             </p>
           )}
           {projectMode ? (
-            solarFlowSeated ? (
+            projectSolarWorkspaceEnabled ? (
               <div id="solar-tool-form" ref={projectSolarWorkspaceRef} tabIndex={-1}
                 style={drawerViewport ? { maxHeight: '40dvh', overflowY: 'auto', flexShrink: 0 } : undefined}>
                 <ProjectSolarWorkspace
@@ -5953,7 +5970,7 @@ export default function App() {
                   openTool={projectSolarRuntime.openTool}
                   onOpenTool={onOpenProjectSolarTool}
                   onClose={onCloseProjectSolarTool}
-                  busy={projectSolarRuntime.busy}
+                  busy={projectSolarRuntime.busy || !projectSolarHostEnabled}
                   projectRunMemory={projectSolarRuntime.projectRunMemory}
                   projectPending={projectSolarRuntime.projectPending}
                   projectOutcome={projectSolarRuntime.projectOutcome}

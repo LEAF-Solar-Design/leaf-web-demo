@@ -42,7 +42,7 @@ function revealSettingsStart(seat, start) {
   else if (after.top < top) seat.scrollTop += after.top - top
 }
 
-export default function SolarFlowSeat({ seated, children }) {
+export default function SolarFlowSeat({ seated, retain = false, children }) {
   const [open, setOpen] = useState(false)
   const userOpen = useRef(false)
   const contentRef = useRef(null)
@@ -56,12 +56,12 @@ export default function SolarFlowSeat({ seated, children }) {
     setOpen(activeForm ? true : userOpen.current)
   }, [activeForm])
   useLayoutEffect(() => {
-    if (!activeForm || (seated && !open)) return
+    if (!activeForm || (retain && !seated) || (seated && !open)) return
     const host = (contentRef.current || document).querySelector(`#${formId}`)
     const control = host?.querySelector('input:not([type="hidden"]):not(:disabled), select:not(:disabled), textarea:not(:disabled), button:not(:disabled), [tabindex="0"]')
     if (host && !control && !host.hasAttribute('tabindex')) host.tabIndex = -1
     ;(control || host)?.focus()
-  }, [activeForm, formId, open, seated])
+  }, [activeForm, formId, open, seated, retain])
   // SEATSTART2: on the desktop cockpit, an open settings form's Start is brought into the seat once per mount or
   // expansion, so the user never has to scroll the seat to find it. Focus and page scroll are untouched.
   useLayoutEffect(() => {
@@ -81,8 +81,10 @@ export default function SolarFlowSeat({ seated, children }) {
     observer?.observe(seat, { childList: true, subtree: true })
     return () => observer?.disconnect()
   }, [seated, open])
-  if (!seated) return children
-  return <div className="solar-flow-seat" data-testid="solar-flow-seat" data-expanded={open}>
+  if (!seated && !retain) return children
+  return <div className="solar-flow-seat" data-testid="solar-flow-seat" data-expanded={open}
+    hidden={!seated} inert={!seated ? '' : undefined} aria-hidden={!seated ? 'true' : undefined}
+    style={!seated ? { display: 'none' } : undefined}>
     <button type="button" className="solar-flow-seat-toggle" aria-expanded={open}
       aria-controls={contentId} onClick={() => {
         userOpen.current = !open
