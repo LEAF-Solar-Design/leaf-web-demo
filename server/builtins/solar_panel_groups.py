@@ -203,7 +203,8 @@ def run(graph, params, *, _creation=None, source_intake=None):
         result = checked_graph(graph, params.get("expected_rev"))
         if params.get("cancel", False):
             return result
-        require_sizing(result)
+        sizing = require_sizing(result)
+        geometry_only = "discover" in params and sizing["mode"] == "manual-global"
         if "discover" in params:
             groups = _discover_groups(result, params["discover"], source_intake)
             if not 1 <= len(groups) <= 128:
@@ -329,12 +330,15 @@ def run(graph, params, *, _creation=None, source_intake=None):
                                     "string_input_number": input_number})
             frame = {
                 "id": frame_id, "kind": "frame", "rev": result["rev"],
-                "extra": {}, "validity": {"state": "valid", "reasons": []},
+                "extra": ({"grouping_basis": "geometry-only", "module_power_status": "unknown",
+                           "sizing_evidence_mode": "manual-global"} if geometry_only else {}),
+                "validity": {"state": "valid", "reasons": []},
                 "name": group["name"], "panel_refs": refs[:],
                 "insertion_point": members[0]["centre"][:], "installation_design": "Roof",
                 "module_rows": len(matrix), "module_columns": len(matrix[0]),
                 "module_slots": len(matrix) * len(matrix[0]),
-                "module_power_watts": frame_module_power(result, refs, zone_ref),
+                "module_power_watts": (0.0 if geometry_only
+                                       else frame_module_power(result, refs, zone_ref)),
                 "module_width_along_row": group["module_width_along_row"],
                 "module_height_across_row": group["module_height_across_row"],
                 "electrical_zone_ref": zone_ref, "matrix": matrix,

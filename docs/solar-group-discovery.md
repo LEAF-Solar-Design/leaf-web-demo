@@ -28,8 +28,17 @@ by connected roof island and angle. Singleton islands remain groups. Existing
 groups stay intact. Names are deterministic from source handles. Matrices use
 the existing cumulative graph budget and standard commit validation.
 
-The existing sizing requirement still applies. This change does not provide an
-electrical recommendation or alter stringing, sizing or module-power rules.
+Verified sizing evidence is still required. Explicit discovery also accepts the
+existing confirmed manual-length evidence for geometric grouping. In that case
+frames retain `module_power_watts: 0` and carry `extra.grouping_basis:
+"geometry-only"`, `extra.module_power_status: "unknown"`, and
+`extra.sizing_evidence_mode: "manual-global"`. Zero is not a rated power or an
+electrical recommendation. The server neither requests nor invents module power.
+Manual caller-selected groups still require proven positive module power, as do
+the unchanged electrical power checks. Cloud global/zone discovery retains its
+proven rated power. A geometry stringer request uses placement and the confirmed
+length, not watts; actual service execution still uses the existing grants and
+custody rails.
 Canonical jobs retain the project, drawing, version, checkout and replay fences.
 The specialised grouping form needs to send `discover` to select this mode;
 manual `groups` keep their existing meaning.
