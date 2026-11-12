@@ -24,7 +24,7 @@ import { humanizeError } from '../errorHumanize.js'
 const STUDIO_CHROME_OCCLUDERS = Object.freeze(STUDIO_DRAWING_OCCLUDERS.filter(([selector]) =>
   ['header.top', '#drafting-ribbon', '.bar.bar-command-line', 'footer.foot-bar'].includes(selector)))
 
-const empty = () => ({ scope: null, datasets: [], elements: [], datasetCursor: null, elementCursor: null, selected: null, read: null, action: null, historical: false, pending: '', error: '', notice: '' })
+const empty = () => ({ scope: null, datasets: [], elements: [], datasetCursor: null, elementCursor: null, selected: null, read: null, readIdentity: null, previousRead: false, action: null, historical: false, pending: '', error: '', notice: '' })
 const blankForm = () => ({ dataset: '', id: '', title: '', kind: 'table', columns: [], x: '', y: '', editing: null })
 const xKinds = ['date', 'instant', 'number', 'count']
 const yKinds = ['number', 'count', 'money', 'ratio', 'duration']
@@ -272,7 +272,8 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       setState({ ...empty(), identity, error: 'You do not have permission to view these integrations.' })
       setForm(blankForm())
       setRevision('')
-    } else setState((old) => ({ ...old, pending: '', error: humanizeError(error), retryable: error?.retryable !== false && ![401, 403, 404, 409, 422].includes(error?.status) }))
+    } else setState((old) => ({ ...old, ...(error?.status === 401 ? { read: null, readIdentity: null, previousRead: false } : {}),
+      pending: '', error: humanizeError(error), retryable: error?.retryable !== false && ![401, 403, 404, 409, 422].includes(error?.status) }))
   }
   useLayoutEffect(() => {
     invalidate()
@@ -360,9 +361,11 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   }
   async function readView(record, historical, ctx, cursor) {
     const request = ++viewGeneration.current
+    const readIdentity = JSON.stringify([ctx.cacheIdentity, record.revision, record.element])
+    const retain = state.readIdentity === readIdentity && state.read && ['ready', 'empty', 'partial', 'stale'].includes(state.read.status)
     ctx.action?.controller.abort()
     ctx.action = null
-    setState((old) => ({ ...old, selected: record, historical, read: null, action: null }))
+    setState((old) => ({ ...old, selected: record, historical, read: retain ? old.read : null, readIdentity, previousRead: Boolean(retain), action: null }))
     if (record.element.kind === 'integration.action') {
       if (historical || !['owner', 'editor'].includes(state.scope?.projectRole)) return
       const binding = { record, ctx, request, controller: new AbortController(), grantRevision: null, availability: 'unavailable' }
@@ -371,11 +374,16 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       await refreshAction(binding)
       return
     }
+    if (retain) {
+      await guardSchedulePreview(ctx.controller.signal)
+      if (!current(ctx) || request !== viewGeneration.current) return
+    }
     const read = await client.queryDataset(projectId, record.element.dataset_ref,
       DatasetQueryV1.parse({ ...record.element.query, ...(cursor ? { cursor } : {}) }), { signal: ctx.controller.signal })
     if (!current(ctx) || request !== viewGeneration.current) return
     if (read.status === 'forbidden') { fail({ status: 403 }, ctx); return }
-    setState((old) => ({ ...old, read }))
+    if (retain && ['failed', 'unavailable', 'invalid'].includes(read.status)) throw new Error('The dataset could not be loaded.')
+    setState((old) => ({ ...old, read, previousRead: false, error: '' }))
   }
   const currentAction = (binding) => current(binding.ctx) && binding.ctx.action === binding &&
     viewGeneration.current === binding.request && !binding.controller.signal.aborted
@@ -531,6 +539,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   }
   const dataset = state.datasets.find((item) => referenceKey(item.reference) === form.dataset)
   const pending = Boolean(state.pending)
+  const viewError = state.error && state.read && state.previousRead
   const message = mock ? 'Integrations are unavailable in demo mode.' : !signedIn ? 'Sign in to view integrations.' :
     !UUID.test(projectId || '') ? 'Open a project to view integrations.' : status !== 'active' ? 'An active session is required to view integrations.' : null
   return <section ref={boardRef} className="studio-ground-ops" data-ground="ops" hidden={!active && !leaving}
@@ -541,7 +550,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       {message ? <p role="status">{message}</p> : visible && <>
         <OpsHomePanel active={active} />
         <p role="status" aria-live="polite" tabIndex={-1} ref={resultRef}>{state.notice || state.pending}</p>
-        {state.error && <div role="alert"><p>{humanizeError(state.error)}</p>{state.retryable && <button onClick={() => setRetry((value) => value + 1)}>Retry integrations</button>}</div>}
+        {state.error && !viewError && <div role="alert"><p>{humanizeError(state.error)}</p>{state.retryable && <button onClick={() => setRetry((value) => value + 1)}>Retry integrations</button>}</div>}
         {state.scope && <details className="ops-advanced" open={!hasLinkedDevice}>
           <summary>Workflows and data</summary>
           {['owner', 'editor'].includes(state.scope.projectRole) && context.current && <WorkflowScheduleDraftBrowser
@@ -643,6 +652,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
               : 'Views query live data; this is not an immutable evidence snapshot.'}</p>
             {state.selected.element.kind !== 'integration.action' && !state.historical && <button disabled={pending || !state.datasets.some((item) => referenceKey(item.reference) === referenceKey(state.selected.element.dataset_ref))} onClick={editSelected}>Edit current recipe</button>}
             <form onSubmit={(event) => { event.preventDefault(); operation('Loading historical recipe…', async (ctx) => {
+              if (Number(revision) !== state.selected.revision) setState((old) => ({ ...old, read: null, readIdentity: null, previousRead: false }))
               const record = await client.getElement(projectId, state.selected.element.id, { revision: Number(revision), signal: ctx.controller.signal })
               if (current(ctx)) { setForm(blankForm()); await readView(record, true, ctx) }
             }) }}><label>Earlier recipe revision<input type="number" min="1" step="1" required value={revision} onChange={(event) => setRevision(event.target.value)} /></label><button disabled={pending}>Read revision</button></form>
@@ -660,10 +670,12 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
                 {state.action.availability !== 'ready' && <button disabled={pending} onClick={() => refreshAction(state.action.binding)}>Retry action authority</button>}
               </>}
             </> : <>
+            {state.read && state.previousRead && <p role="status">Previous result. {pending ? 'Refreshing view…' : 'The latest read failed; showing the last successful result.'}</p>}
+            {viewError && <div role="alert"><p>{humanizeError(state.error)}</p>{state.retryable && <button disabled={pending} onClick={() => operation('Loading view…', (ctx) => readView(state.selected, state.historical, ctx))}>Retry view</button>}</div>}
             {(state.read || pending) && <DatasetElement element={state.selected.element} read={state.read} preferences={preferences} isLoading={pending}
               onRetry={() => operation('Loading view…', (ctx) => readView(state.selected, state.historical, ctx))}
               onLoadMore={(cursor) => operation('Loading view data…', (ctx) => readView(state.selected, state.historical, ctx, cursor))} />}
-            {!state.read && !pending && <button onClick={() => operation('Loading view…', (ctx) => readView(state.selected, state.historical, ctx))}>Retry view</button>}
+            {!state.read && !pending && !viewError && <button onClick={() => operation('Loading view…', (ctx) => readView(state.selected, state.historical, ctx))}>Retry view</button>}
             </>}
           </section>}
         </details>}
