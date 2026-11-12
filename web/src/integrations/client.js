@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { authHeaders, noteUnauthorized } from '../api.js'
+import { serviceRequestAuthority, rememberServiceResponse } from '../lib/serviceAuthSession.js'
 import { parseScheduleDraftReferencePage } from '../../../vendor/assistant-react/src/actions/workflow-schedule-draft-picker-state'
 import { ConnectionV1, DatasetElementV1, DatasetQueryV1, DatasetReadV1, DatasetFieldV1, IntegrationRefV1,
   ConnectorDefinitionV1, DatasetDefinitionV1, TransformMappingV1, IntegrationWorkflowScheduleDraftV1,
@@ -365,14 +366,20 @@ export function createIntegrationsClient({ origin = import.meta.env.VITE_INTEGRA
     if (!UUID.test(projectId) || !signal) throw invalid()
     if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
     const encoded = body === undefined ? undefined : boundedIntegrationBody(body, bodyLimit)
+    const authority = serviceRequestAuthority()
+    const service = authority.mode === true
     const auth = authHeaders()
-    if (!/^Bearer \S+(?![\s\S])/.test(auth.Authorization || '')) throw new IntegrationError(401, 'Sign in to view integrations.')
+    if (service ? !authority.identity || auth.Authorization !== `LeafServiceSession ${authority.selector}`
+      : !/^Bearer \S+(?![\s\S])/.test(auth.Authorization || '')) throw new IntegrationError(401, 'Sign in to view integrations.')
     try {
-      const response = await fetchImpl(`${destination}/api/v1/projects/${projectId}${path}`, {
-        method, signal, credentials: 'omit', redirect: 'error', cache: 'no-store',
-        headers: { ...auth, Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}), ...(match !== undefined ? { 'If-Match': String(match) } : {}) },
+      const response = await fetchImpl(`${service ? '' : destination}/api/v1/projects/${projectId}${path}`, {
+        method, signal, credentials: service ? 'same-origin' : 'omit', redirect: 'error', cache: 'no-store',
+        headers: { ...auth, Accept: 'application/json',
+          ...(service ? { 'X-Leaf-Integration-Origin': destination } : {}),
+          ...(body ? { 'Content-Type': 'application/json' } : {}), ...(match !== undefined ? { 'If-Match': String(match) } : {}) },
         ...(body ? { body: encoded } : {}),
       })
+      if (service) rememberServiceResponse(response, authority)
       noteUnauthorized(response, 'integrations', auth.Authorization, { fatal: false })
       if (!response.ok) {
         response.body?.cancel?.().catch(() => {})
