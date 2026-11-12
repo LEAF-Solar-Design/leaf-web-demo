@@ -16,13 +16,13 @@ The harness checks frame bytes, manifest digest/identity and complete transcript
 
 Video input is currently limited to native create. Existing browser and text-only native create/edit inputs retain their behavior. The UI selection files belong to I02 integration and are not changed here. No new HTTP route is added.
 
-## Packaging handoff to the canonical image owner
+## Canonical packaging and remaining runtime proof
 
-install-dependencies.sh is an additive build-time dependency recipe. This worker has not run it or changed deploy/Dockerfile.app. It records installed package versions in the produced image.
+The existing pinned apt stanza in deploy/Dockerfile.app now declares ffmpeg (which supplies ffprobe) and bubblewrap beside its existing util-linux package. It retains the signed update-digest checks, pinned git install prefix and existing USER 10003:10003 caller. Build-time executable checks cover all four fixed decoder tools. No second caller identity or privilege is introduced. The superseded standalone dependency installer is removed.
 
-Exact shared integration needed: deploy/Dockerfile.app, its apt install stanza near lines 119-121 (or a COPY plus build-time invocation of this recipe). That shared file remains root-owned under the I01 source admission. The image owner must also provide a non-root decoder caller and a runtime that actually permits the required user/network/PID namespaces. Installation alone does not prove containment. If those capabilities are absent, video remains visibly unavailable.
+This worker has not built an image or installed production packages. The image owner still needs to prove that the actual runtime permits the required user/network/PID namespaces under the existing non-root caller. Installation alone does not prove containment. If those capabilities are absent, video remains visibly unavailable. No privileged-mode, host setting or bare-decoder fallback is permitted.
 
-Root owns the exact-source image build, supply/containment proof with synthetic media, subsequent authorized original-video/provider execution, deployment, readiness and scored acceptance. Do not remove the merge-conductor hold based on these source tests.
+Root owns the exact-source image build, supply/containment proof with synthetic media, subsequent authorized original-video/provider execution, deployment, readiness and scored acceptance. Exact-head full native CI and canonical queue submission are worker-owned; these focused tests do not establish original I01 acceptance.
 
 Decoder option sources: [FFmpeg MOV demuxer](https://ffmpeg.org/ffmpeg-formats.html#mov_002fmp4_002f3gp) and [FFprobe frame counting](https://ffmpeg.org/ffprobe.html). External data references and absolute paths are disabled and input protocols are restricted to file inside the namespace.
 
