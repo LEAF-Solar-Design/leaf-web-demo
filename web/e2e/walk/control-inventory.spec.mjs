@@ -1,6 +1,6 @@
 import { test, expect, runProbe, captureClosedAndStudioCensus } from './fixtures.mjs'
 import { CONTROL_CENSUS_BATCH, requireControlCensusBatch, resolveProbe } from './probes.mjs'
-import { censusControls, enumerateControls } from './controlCensus.mjs'
+import { CENSUS_TRACE, censusControls, enumerateControls } from './controlCensus.mjs'
 import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { censusFailure, controlKey, controlNameAttributes, resolveCensus } from '../../walk/controlInventory.mjs'
 import { writeFileSync } from 'node:fs'
@@ -11,6 +11,7 @@ const recorded = new Map()
 // Keep both observations in one worker. Record mode replaces the destination
 // with this run's union, rather than preserving rows from an earlier run.
 test.describe('rendered control census', () => {
+  test.use({ trace: CENSUS_TRACE })
   test.describe.configure({ mode: 'serial' })
   for (const state of ['ready', 'failed-load']) {
     test(`control-census:studio [${state}] @desktop`, async ({ page, stack, walkEvidence }, testInfo) => {
