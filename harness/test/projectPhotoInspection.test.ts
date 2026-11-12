@@ -25,6 +25,38 @@ const request = (saved = false) => ({ op: "preview", material_id: id(1), expecte
   expected_revision: saved ? 7 : 0, expected_digest: saved ? "a".repeat(64) : null });
 
 describe("closed project photo consumer", () => {
+  it("accepts a bounded derivative while preserving immutable assignment witnesses", async () => {
+    const helper = new ProjectPhotoInspection(authority);
+    await helper.inspect({ op: "catalog" }, async () => catalog(true));
+    const derivative = Buffer.from([255, 216, 255, 1, 2, 3, 255, 217]);
+    const result = await helper.inspect(request(true), async () => ({ ...image(true),
+      data: derivative.toString("base64"), byte_size: derivative.length,
+      inspection_sha256: createHash("sha256").update(derivative).digest("hex"), derived_from_sha256: hash }));
+    expect(result.isError).toBeUndefined();
+    expect(JSON.parse(result.content).preview_sha256).toBe(hash);
+    expect(JSON.parse(result.content).assignments).toEqual(labels);
+    expect(projectPhotoResult(result).content).toContainEqual({ type: "image", mimeType: "image/jpeg", data: derivative.toString("base64") });
+    expect(helper.reconciliation().inspected_ids).toEqual([id(1)]);
+  });
+
+  it.each(["missing_digest", "missing_source", "wrong_source", "wrong_bytes", "wrong_saved_preview", "foreign_project", "extra_field"])(
+    "rejects invalid inspection derivative %s without emitting pixels", async kind => {
+      const helper = new ProjectPhotoInspection(authority);
+      await helper.inspect({ op: "catalog" }, async () => catalog());
+      const payload: Record<string, unknown> = { ...image(), inspection_sha256: hash, derived_from_sha256: hash };
+      if (kind === "missing_digest") delete payload.inspection_sha256;
+      if (kind === "missing_source") delete payload.derived_from_sha256;
+      if (kind === "wrong_source") payload.derived_from_sha256 = "c".repeat(64);
+      if (kind === "wrong_bytes") payload.inspection_sha256 = "c".repeat(64);
+      if (kind === "wrong_saved_preview") payload.sha256 = "c".repeat(64);
+      if (kind === "foreign_project") payload.project_id = id(9);
+      if (kind === "extra_field") payload.unknown = "unexpected";
+      const result = await helper.inspect(request(), async () => payload);
+      expect(result.isError).toBe(true);
+      expect(projectPhotoResult(result).content.some(block => block.type === "image")).toBe(false);
+      expect(helper.reconciliation().inspected_ids).toEqual([]);
+    });
+
   it.each([false, true])("emits true JPEG blocks only after catalog validation (saved=%s)", async saved => {
     const helper = new ProjectPhotoInspection(authority);
     const first = await helper.inspect({ op: "catalog" }, async () => catalog(saved));

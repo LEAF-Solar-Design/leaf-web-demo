@@ -14,7 +14,7 @@ import project_material_images
 import session_store
 
 MAX_INPUT_BYTES = 4096
-MAX_IMAGE_BYTES = 1024 * 1024
+MAX_IMAGE_BYTES = project_material_images.MAX_PREVIEW_BYTES
 MAX_RESPONSE_BYTES = 1536 * 1024
 _HEX = re.compile(r'[0-9a-f]{64}')
 _PUBLIC = ('material_id', 'name', 'media_type', 'byte_size', 'sha256',
@@ -206,18 +206,25 @@ def inspect(tenant, session_id, authority_session_id, turn_id, body):
             raise InspectionError(409)
         labels = assigned(material)
         raw = read(lambda: project_material_images.read_content(*scope[:2], material, 'preview'))
-        if (type(raw) is not bytes or not 0 < len(raw) <= MAX_IMAGE_BYTES
+        if (type(raw) is not bytes or not 0 < len(raw) <= project_material_images.MAX_BYTES
                 or not raw.startswith(b'\xff\xd8\xff') or not raw.endswith(b'\xff\xd9')):
             raise InspectionError(422)
         if hashlib.sha256(raw).hexdigest() != material['preview_sha256']:
             raise InspectionError(409)
+        try:
+            bounded = read(lambda: project_material_images.inspection_image(raw))
+        except project_material_images.InvalidImage:
+            raise InspectionError(422) from None
         current = read(lambda: project_materials.get_material(*scope[:3], body['material_id']))
         if current != material:
             raise InspectionError(409)
         result.update(schema='leaf.project-material-image.v1', material_id=material['material_id'],
                       original_sha256=material['sha256'], preview_sha256=material['preview_sha256'],
-                      media_type='image/jpeg', sha256=material['preview_sha256'], byte_size=len(raw),
-                      data=base64.b64encode(raw).decode('ascii'), assignments=labels)
+                      media_type='image/jpeg', sha256=material['preview_sha256'], byte_size=len(bounded),
+                      data=base64.b64encode(bounded).decode('ascii'), assignments=labels)
+        if bounded != raw:
+            result.update(inspection_sha256=hashlib.sha256(bounded).hexdigest(),
+                          derived_from_sha256=material['preview_sha256'])
     if page_source()[0] != source:
         raise InspectionError(409)
     recheck()
