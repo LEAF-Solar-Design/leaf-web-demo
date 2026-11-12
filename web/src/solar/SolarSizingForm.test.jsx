@@ -756,11 +756,13 @@ describe('SolarSizingForm', () => {
     const labels = [...Object.keys(fields), ...Object.keys(r14Tracker), 'Use module parameters', ...Object.values(MODULE_PARAMETER_LABELS)]
     expect(labels).toHaveLength(28)
     for (const mode of ['global', 'manual-global']) {
+      const h = r14Harness()
+      render(<SolarSizingForm {...h.props} />)
+      await r9Ready()
+      await r14Fill({ tracker: true, parameters: true })
+      await r9Ready()
       for (const label of labels) {
-        const h = r14Harness()
-        render(<SolarSizingForm {...h.props} />)
-        await r9Ready()
-        await r14Fill({ tracker: true, parameters: true })
+        change('Scope', 'global')
         await r9Ready()
         const old = r9Deferred(), current = r9Deferred()
         h.client.catalog.mockReturnValueOnce(old.promise).mockReturnValue(current.promise)
@@ -790,8 +792,8 @@ describe('SolarSizingForm', () => {
         expect(nextIntent.idempotencyKey).not.toBe(oldIntent.idempotencyKey)
         await act(async () => current.resolve(r9Preview(r9Tool)))
         await r9Ready()
-        cleanup()
       }
+      cleanup()
     }
     // Hidden tracker and module fields remain part of the raw declaration, even in manual mode.
     const source = readFileSync(resolve(process.cwd(), 'src/solar/SolarSizingForm.jsx'), 'utf8')

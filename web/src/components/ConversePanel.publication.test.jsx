@@ -1,8 +1,10 @@
 import React from 'react'
+import { createHash, webcrypto } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 
-const proposalAuth = vi.hoisted(() => ({ account: 'account-a', scope: 'org-a', logout: new Set(), token: new Set(), active: new Set() }))
+const proposalAuth = vi.hoisted(() => ({ account: 'account-a', scope: 'org-a', org: 'org-a', actor: 'actor-a', logout: new Set(), token: new Set(), active: new Set() }))
+vi.mock('../api.js', async importOriginal => ({ ...await importOriginal(), getStoredOrgId: () => proposalAuth.org }))
 vi.mock('../lib/composerDraft.js', async importOriginal => ({ ...await importOriginal(), composerDraftAccountScope: () => proposalAuth.account }))
 vi.mock('../auth/activeScope.js', async importOriginal => ({ ...await importOriginal(),
   readActiveScope: () => proposalAuth.scope,
@@ -18,6 +20,7 @@ vi.mock('../site/projectPageClient.js', async importOriginal => ({ ...await impo
   loadProjectPage: vi.fn(), saveProjectPage: vi.fn(), submitProjectNativePreview: vi.fn(),
 }))
 vi.mock('../projects/api.js', async importOriginal => ({ ...await importOriginal(),
+  getStoredActorBindingId: () => proposalAuth.actor,
   listProjectPhotos: vi.fn(async () => ({ materials: [] })),
   readProjectPhotoPreview: vi.fn(async () => new Blob(['photo'], { type: 'image/jpeg' })),
 }))
@@ -93,6 +96,7 @@ function cycle(o, count = 1) {
 beforeEach(() => {
   subscriptions.length = 0
   proposalAuth.account = 'account-a'; proposalAuth.scope = 'org-a'
+  proposalAuth.org = 'org-a'; proposalAuth.actor = 'actor-a'
   proposalAuth.logout.clear(); proposalAuth.token.clear(); proposalAuth.active.clear()
   openStream.mockImplementation((_session, _seq, handlers) => {
     const close = vi.fn()
@@ -112,6 +116,107 @@ const savedPortfolio = () => ({ revision: 7, digest: H, document: { ...projectPr
 function proposalGround(props = {}) {
   return <BrowserAssetGround signedIn accountScope="account-a" projectId={I} browserActive {...props} />
 }
+
+const hashDocument = value => createHash('sha256').update(JSON.stringify(value, (_, item) => item && typeof item === 'object' && !Array.isArray(item)
+  ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item)).digest('hex')
+const photoSource = () => { const source = savedPortfolio(); source.digest = hashDocument(source.document); return source }
+const photoResult = () => {
+  const source = photoSource(), document = JSON.parse(JSON.stringify(source.document))
+  const material_id = '22222222-2222-4222-8222-222222222222'
+  document.categories[0].images.push({ material_id, sha256: 'c'.repeat(64), preview_sha256: 'd'.repeat(64), title: 'Crème cake', alt: 'Cake on a plate' })
+  return { schema: 'leaf.project-photo-assignment-proposal.v1', source: { project_id: I, revision: source.revision, digest: source.digest },
+    proposed_document: document, proposed_digest: hashDocument(document), changes: [{ op: 'assign', material_id, material_name: 'Original cake.jpg',
+      gallery_slug: 'selected-work', gallery_title: 'Selected work', index: 1, title: 'Crème cake', alt: 'Cake on a plate' }] }
+}
+const photoEvent = (patch = {}) => event({ seq: 2, data: { tool: 'propose_project_photo_assignments', ok: true, result: photoResult() }, ...patch })
+const startPhotoTurn = () => deliver(event({ type: 'turn_started', data: {} }))
+
+describe('original-photo stream delivery to review and revision CAS', () => {
+  beforeEach(() => {
+    vi.stubGlobal('crypto', webcrypto)
+    loadProjectPage.mockImplementation(async () => photoSource())
+    URL.createObjectURL = vi.fn(() => 'blob:photo-review')
+    URL.revokeObjectURL = vi.fn()
+  })
+
+  it('reviews the actual A shape through Browser, detaches delivery and explicitly saves the entire draft with revision CAS', async () => {
+    const o = await owner(), client = await vi.importActual('../site/projectPageClient.js')
+    const fetchPage = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ page: { revision: 8, digest: photoResult().proposed_digest, document: photoResult().proposed_document } }) }))
+    vi.stubGlobal('fetch', fetchPage)
+    saveProjectPage.mockImplementationOnce(client.saveProjectPage)
+    render(<>{proposalGround()}{panel(o)}</>)
+    await startPhotoTurn()
+    const env = photoEvent(), expected = JSON.parse(JSON.stringify(env.data.result.proposed_document))
+    await deliver(env)
+    const review = await screen.findByRole('region', { name: 'Review proposed photo assignments' })
+    expect(review).toHaveTextContent('Original cake.jpg')
+    expect(review).toHaveTextContent('Crème cake')
+    expect(review).toHaveTextContent('Cake on a plate')
+    env.data.result.proposed_document.categories[0].images[0].title = 'Injected'
+    env.data.result.proposed_document.categories[0].images[1].sha256 = '0'.repeat(64)
+    env.data.result.changes[0].title = 'Injected'
+    // A normal completed turn leaves explicit review available.
+    await deliver(event({ seq: 3, type: 'turn_completed', data: {} }))
+    expect(fetchPage).not.toHaveBeenCalled()
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Use proposed assignments' }))
+    const editor = within(screen.getByRole('region', { name: 'Page editor' }))
+    expect(editor.getByText('Review the draft, then Save page.')).toBeTruthy()
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    fireEvent.click(editor.getByRole('button', { name: 'Save page' }))
+    await waitFor(() => expect(fetchPage).toHaveBeenCalledTimes(1))
+    expect(saveProjectPage.mock.lastCall.slice(0, 3)).toEqual([I, expected, 7])
+    expect(JSON.parse(fetchPage.mock.lastCall[1].body)).toEqual({ expected_revision: 7, document: expected })
+    expect(fetchPage.mock.lastCall[0]).toContain(`/api/projects/${I}/page`)
+    expect(fetchPage.mock.lastCall[1].method).toBe('PUT')
+    expect(expected.categories[0].images[0]).toEqual(photoSource().document.categories[0].images[0])
+    expect(submitProjectNativePreview).not.toHaveBeenCalled()
+  })
+
+  it.each(['missing start', 'missing turn', 'foreign turn', 'blank turn', 'long turn', 'zero seq', 'wrong session', 'wrong schema'])('rejects %s before review', async mode => {
+    const o = await owner()
+    render(<>{proposalGround()}{panel(o)}</>)
+    if (mode !== 'missing start') await startPhotoTurn()
+    const env = photoEvent()
+    if (mode === 'missing turn') delete env.turn_id
+    if (mode === 'foreign turn') env.turn_id = 'other-turn'
+    if (mode === 'blank turn') env.turn_id = ' '
+    if (mode === 'long turn') env.turn_id = 't'.repeat(201)
+    if (mode === 'zero seq') env.seq = 0
+    if (mode === 'wrong session') env.session_id = 'other-session'
+    if (mode === 'wrong schema') env.data.result.schema = 'unknown'
+    await deliver(env)
+    await flush()
+    expect(screen.queryByRole('region', { name: 'Review proposed photo assignments' })).toBeNull()
+    expect(saveProjectPage).not.toHaveBeenCalled()
+  })
+
+  it.each(['turn', 'org', 'actor', 'session', 'account', 'scope', 'logout', 'unmount'])('refuses Use after %s changes', async mode => {
+    const o = await owner(), view = render(<>{proposalGround()}{panel(o)}</>)
+    await startPhotoTurn(); await deliver(photoEvent())
+    await screen.findByRole('region', { name: 'Review proposed photo assignments' })
+    if (mode === 'turn') await deliver(event({ type: 'turn_started', turn_id: 'turn-2', seq: 3, data: {} }))
+    if (mode === 'org' || mode === 'actor') proposalAuth[mode] = 'changed'
+    if (mode === 'session') view.rerender(<>{proposalGround()}{panel(o, { sessionId: 'session-2' })}</>)
+    if (mode === 'account') { proposalAuth.account = 'other'; act(() => [...proposalAuth.token].forEach(fn => fn())) }
+    if (mode === 'scope') { proposalAuth.scope = 'other'; act(() => [...proposalAuth.active].forEach(fn => fn())) }
+    if (mode === 'logout') act(() => [...proposalAuth.logout].forEach(fn => fn()))
+    if (mode === 'unmount') view.unmount()
+    const use = screen.queryByRole('button', { name: 'Use proposed assignments' })
+    if (use) fireEvent.click(use)
+    expect(screen.queryByText('Review the draft, then Save page.')).toBeNull()
+    expect(saveProjectPage).not.toHaveBeenCalled()
+  })
+
+  it('keeps the photo tool discriminator separate from the legacy text result', async () => {
+    const o = await owner()
+    render(<>{proposalGround()}{panel(o)}</>)
+    await startPhotoTurn()
+    await deliver(photoEvent({ data: { tool: 'propose_project_photo_assignments', ok: true, result: projectProposal() } }))
+    expect(screen.queryByRole('region', { name: 'Review proposed text' })).toBeNull()
+    expect(saveProjectPage).not.toHaveBeenCalled()
+  })
+})
 
 describe('conversation delivery to private portfolio review', () => {
   beforeEach(() => {
@@ -251,6 +356,7 @@ afterEach(() => {
   cleanup()
   for (const controller of owners.splice(0)) controller.destroy()
   vi.clearAllMocks()
+  vi.unstubAllGlobals()
 })
 
 describe('chat publication delivery to the catalog owner', () => {

@@ -1,6 +1,16 @@
 #!/bin/sh
 set -eu
 
+# Import the immutable image snapshot before requests, so the first source read
+# does not spend the gate deadline unpacking Git objects. A failed import keeps
+# the new source ref selected; authoring refuses rather than reading stale main.
+if [ -n "${LEAF_PLATFORM_SOURCE_SNAPSHOT_DIR:-}" ] && [ -z "${LEAF_PLATFORM_REPO_SOURCE_REF:-}" ]; then
+  export LEAF_PLATFORM_REPO_SOURCE_REF="refs/leaf/deployed/${LEAF_SOURCE_SHA:-unknown}"
+  if ! python -c 'import os; from pathlib import Path; from platform_customize import repo_dir; from platform_source_snapshot import install_snapshot; install_snapshot(Path(os.environ["LEAF_PLATFORM_SOURCE_SNAPSHOT_DIR"]), repo_dir(), os.environ.get("LEAF_SOURCE_SHA", ""))' >/dev/null 2>&1; then
+    printf '%s\n' 'platform_source_snapshot_unavailable' >&2
+  fi
+fi
+
 credential_dir="/tmp/leaf-instant-control"
 
 cleanup_raw_credentials() {

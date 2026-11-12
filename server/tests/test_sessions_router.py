@@ -147,7 +147,7 @@ class _StubHandler(http.server.BaseHTTPRequestHandler):
 def _spawn_stub() -> Tuple[str, _StubState, _StubServer]:
     state = _StubState()
     srv = _StubServer(state)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
     return f"http://127.0.0.1:{srv.server_address[1]}", state, srv
 
 
@@ -531,7 +531,7 @@ def test_relay_lands_stream_events_durably_ascending(client, wired):
 
 def test_stream_route_replays_relayed_events_after_seq(client, wired, monkeypatch):
     monkeypatch.setattr(sessions_router, "STREAM_POLL_S", 0.01)
-    monkeypatch.setattr(sessions_router, "STREAM_DEADLINE_S", 5.0)
+    monkeypatch.setattr(sessions_router, "STREAM_DEADLINE_S", 1.0)
     url, state = wired
     state.scripts.append([
         {"type": "text_delta", "data": {"text": "hello"}},

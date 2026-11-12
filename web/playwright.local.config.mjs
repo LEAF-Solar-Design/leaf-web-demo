@@ -69,7 +69,9 @@ if (linkFlowBoot) {
   webServer = {
     command: 'npm --prefix harness run build && python scripts/start-leaf.py --strict-ports --with-harness --broker-port 8240 --app-port 8230 --harness-port 8250 --web-port 5275',
     cwd: repo,
-    url: 'http://127.0.0.1:5275',
+    // Readiness waits on /app so Next dev compiles it inside webServer.timeout
+    // (180 s), not inside a test's 60 s budget. Same as playwright.config.mjs:28.
+    url: 'http://127.0.0.1:5275/app',
     reuseExistingServer: false,
     stdout: 'pipe',
     timeout: 180_000,

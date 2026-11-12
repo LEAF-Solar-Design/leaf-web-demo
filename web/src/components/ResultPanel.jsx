@@ -257,6 +257,16 @@ function ResultObjectLinks({ result, navigation, announce }) {
 // `notices` is the NR banner slot: ongoing-condition banners dock UNDER the
 // header of the pane they affect, so App passes them in and they render
 // immediately after the <h3> — never above the pane.
+// A tool run carries its tool version as a string or number. A project write carries the new
+// canonical drawing version as an object, which must never be rendered as a React child.
+export function versionLabel(version) {
+  if (version === null || typeof version !== 'object') return `v${version}`
+  const id = typeof version.version_id === 'string' && version.version_id ? version.version_id.slice(0, 8) : null
+  const seq = Number.isSafeInteger(version.seq) && version.seq > 0 ? version.seq : null
+  if (id === null && seq === null) return 'drawing version not reported'
+  return `drawing version${seq === null ? '' : ` ${seq}`}${id === null ? '' : ` (${id})`}`
+}
+
 export default function ResultPanel({ running, error, result, tool, onRetry, notices, navigation, density,
   solarBinding, authorityKey, projectClient, catalogDigest, projectCurrent, save }) {
   const [announcement, setAnnouncement] = useState('')
@@ -326,7 +336,7 @@ export default function ResultPanel({ running, error, result, tool, onRetry, not
             <span className={`ok ${result.ok ? 'yes' : (calm ? 'quota' : 'no')}`}>
               {result.ok ? 'Passed' : (isDailyQuota ? 'Daily limit' : (isQuota ? 'Spend cap' : (isEnt ? 'Plan' : 'Failed')))}
             </span>
-            <span className="result-tool">{result.tool} <span className="dim">v{result.version}</span></span>
+            <span className="result-tool">{result.tool} <span className="dim">{versionLabel(result.version)}</span></span>
             {result.degraded_mode && (
               <span className="degraded">local fallback</span>
             )}

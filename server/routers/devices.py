@@ -243,10 +243,17 @@ def _package():
 
 
 @router.get("/agent/package.tar.gz")
-def agent_package():
+def agent_package(request: Request):
+    query = _query(request, {"sha256"})
+    sha256 = query.get("sha256")
+    if sha256 is not None and not re.fullmatch(r"[0-9a-f]{64}", sha256):
+        raise DeviceError(400, "invalid_request")
     archive, _, digest = _package()
+    if sha256 is not None and sha256 != digest:
+        raise DeviceError(404, "not_found")
     return Response(archive, media_type="application/gzip", headers={
-        "Cache-Control": "public, max-age=31536000, immutable", "ETag": '"' + digest + '"',
+        "Cache-Control": "public, max-age=31536000, immutable" if sha256 is not None else "no-store",
+        "ETag": '"' + digest + '"',
         "X-Leaf-Document-Sha256": digest})
 
 

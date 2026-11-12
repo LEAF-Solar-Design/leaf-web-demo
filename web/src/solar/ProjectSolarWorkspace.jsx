@@ -4,11 +4,12 @@ import SolarSettingsForm from './SolarSettingsForm.jsx'
 import { canOpenSolarSettingsForm } from './solarSettingsWire.js'
 import ProjectSolarReadPanel, { PROJECT_SOLAR_WORKSPACE_LABELS, projectSolarWorkspaceReason } from './ProjectSolarReadPanel.jsx'
 import ProjectSolveReview, { ProjectSolarSchemaForm } from './ProjectSolveReview.jsx'
+import ProjectSolarEdgePanel from './ProjectSolarEdgePanel.jsx'
 
 const STEP_TOOLS = ['solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
   'solar-string-conductors', 'solar-assign-equipment']
 const GRAPH_TOOLS = ['solar-panels-from-drawing', 'solar-panel-groups', 'solar-homeruns', 'solar-schedule', 'solar-feeders']
-const READ_TOOLS = ['solar-string-data', 'solar-electrical-schedules', 'solar-cable-export']
+const READ_TOOLS = ['solar-string-data', 'solar-electrical-schedules', 'solar-cable-export', 'solar-solaredge-tracking-read']
 const SOLVE_TOOLS = ['solar-solve-proposal', 'solar-commit-solve', 'solar-correct-string']
 const DIGEST = new RegExp('^sha256:[0-9a-f]{64}$')
 const TOOL_NAME = new RegExp('^[a-z0-9][a-z0-9-]{0,127}$')
@@ -141,6 +142,7 @@ const sameOwner = (left, right) => !!left?.bindingKey && left.bindingKey === rig
 const schemaDeclaration = (row) => JSON.stringify(declaration(row.params_schema ?? row.params))
 
 function hostFor(row, props) {
+  if (row?.name === 'solar-solaredge-accept') return 'solaredge'
   if (row?.name === 'solar-settings') return 'settings'
   if (SOLVE_TOOLS.includes(row?.name)) return 'solve'
   if (STEP_TOOLS.includes(row?.name)) return props.StepEditor ? 'step' : 'host_unavailable'
@@ -333,6 +335,8 @@ export default function ProjectSolarWorkspace(props) {
   if (host === 'step') editor = <StepEditor {...shared} row={editorRow} />
   if (host === 'graph') editor = <GraphForm {...shared} tool={editorRow} isCurrent={scope.isCurrent}
     projectOutcome={projectOutcome} submissionSignal={submissionSignal} />
+  if (host === 'solaredge') editor = <ProjectSolarEdgePanel {...shared} isCurrent={scope.isCurrent}
+    submissionSignal={submissionSignal} />
   if (host === 'read') editor = <ProjectSolarReadPanel tool={editorRow} solarBinding={owner.binding}
     authorityKey={owner.authorityKey} projectClient={owner.projectClient} projectCatalog={owner.projectCatalog}
     isCurrent={scope.isCurrent} busy={busy} />
@@ -367,7 +371,8 @@ export default function ProjectSolarWorkspace(props) {
   }
   const opening = !owner.reason && !!FlowRail && typeof props.onOpenTool === 'function'
   const inspectionRows = owner.rows.filter((row, index, rows) =>
-    (GRAPH_TOOLS.includes(row.name) || READ_TOOLS.includes(row.name)) && rows.findIndex((item) => item.name === row.name) === index)
+    (GRAPH_TOOLS.includes(row.name) || READ_TOOLS.includes(row.name) || row.name === 'solar-solaredge-accept') &&
+      rows.findIndex((item) => item.name === row.name) === index)
   return <section className="project-solar-workspace">
     {FlowRail && <FlowRail solarBinding={owner.binding} authorityKey={owner.authorityKey} projectClient={owner.projectClient}
       projectCatalog={owner.reason ? null : owner.projectCatalog} projectRunMemory={projectRunMemory}

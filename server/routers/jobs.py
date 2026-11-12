@@ -284,6 +284,19 @@ def _record_body(rec: Dict[str, Any]) -> Dict[str, Any]:
     return body
 
 
+_LIST_SUMMARY_DROP = ("result", "params", "provenance", "execution_context")
+
+
+def _summary_body(rec: Dict[str, Any]) -> Dict[str, Any]:
+    body = _record_body(rec)
+    result = rec.get("result")
+    if not body.get("cost") and isinstance(result, dict) and "cost" in result:
+        body["cost"] = result["cost"]
+    for key in _LIST_SUMMARY_DROP:
+        body.pop(key, None)
+    return body
+
+
 def _job_for_tenant(job_id: str, tenant_id: str) -> Optional[Dict[str, Any]]:
     legacy = jobs.get_job(job_id)
     if legacy is not None:
@@ -296,8 +309,9 @@ def _job_for_tenant(job_id: str, tenant_id: str) -> Optional[Dict[str, Any]]:
         **({"strict": True} if is_demo_context(tenant_id) else {}))
 
 
-def _capability_access(rec, tenant, *, write=False):
+def _capability_access(rec, tenant, *, write=False, binding=None, bound_tenant_id=None):
     """Authorize with the verified caller and stored project on every observation."""
+    access_options = {"binding": binding} if binding is not None else {}
     actor = resolve_demo_actor(tenant)
     if actor is not None:
         if rec is None:
@@ -312,12 +326,14 @@ def _capability_access(rec, tenant, *, write=False):
     context = rec.get("execution_context")
     if isinstance(context, dict) and context.get("schema") == "leaf.solar-project-graph-job.v1":
         if (not isinstance(tenant, deps.TenantContext) or not tenant.subject
-                or rec.get("tenant_id") != _bound_tenant_id(tenant)
+                or rec.get("tenant_id") != (bound_tenant_id if bound_tenant_id is not None
+                                             else _bound_tenant_id(tenant))
                 or (actor is None and rec.get("org_id") != rec.get("tenant_id"))):
             raise LookupError("job unavailable")
         org_id = uuid.UUID(str(rec.get("org_id")))
         project_id = uuid.UUID(str(rec.get("project_id")))
-        org = jobs.platform_link.require_project_access(tenant, project_id, write=write)
+        org = jobs.platform_link.require_project_access(tenant, project_id, write=write,
+                                                       **access_options)
         if str(org) != str(org_id):
             raise LookupError("job unavailable")
         return
@@ -332,20 +348,24 @@ def _capability_access(rec, tenant, *, write=False):
         from campaign_capability_job import validate_context
     context = validate_context(rec[kinds[0]])
     if (not isinstance(tenant, deps.TenantContext) or not tenant.subject
-            or rec.get("tenant_id") != _bound_tenant_id(tenant)
+            or rec.get("tenant_id") != (bound_tenant_id if bound_tenant_id is not None
+                                         else _bound_tenant_id(tenant))
             or rec.get("tenant_id") != context["tenant_id"]
             or rec.get("org_id") != context["org_id"]
             or rec.get("project_id") != context["project_id"]
             or rec.get("tool") != context["tool_name"]):
         raise LookupError("job unavailable")
-    org = jobs.platform_link.require_project_access(tenant, rec["project_id"], write=write)
+    org = jobs.platform_link.require_project_access(tenant, rec["project_id"], write=write,
+                                                   **access_options)
     if str(org) != rec["org_id"]:
         raise LookupError("job unavailable")
 
 
-def _access_error(rec, tenant, job_id, *, write=False):
+def _access_error(rec, tenant, job_id, *, write=False, binding=None, bound_tenant_id=None):
     try:
-        _capability_access(rec, tenant, write=write)
+        options = ({"binding": binding, "bound_tenant_id": bound_tenant_id}
+                   if binding is not None else {})
+        _capability_access(rec, tenant, write=write, **options)
     except DemoActorRefused:
         return _demo_refusal()
     except DemoActorUnavailable:
@@ -396,7 +416,8 @@ def _catalog_digest_matches(candidate, current):
 
 
 def _project_solar_admission(tool, tenant, req, org_header, project_header,
-                             authorization, checkout_header, *, idempotency_key, preview):
+                             authorization, checkout_header, *, idempotency_key, preview,
+                             expected_intake_sha256=None):
     """Share transport pins between exact catalog previews and submissions."""
     digest = deps.catalog_tool_digest(tool)
     if not _catalog_digest_matches(req.catalog_digest, digest):
@@ -421,6 +442,11 @@ def _project_solar_admission(tool, tenant, req, org_header, project_header,
     if "drawing_id" not in req.params and isinstance(defaults, dict):
         drawing_id = defaults.get("drawing_id")
     auth = authorization if isinstance(authorization, str) else None
+    checkout = checkout_header if isinstance(checkout_header, str) else None
+    if checkout_header is not None and not isinstance(checkout_header, str):
+        from project_checkout_custody import DelegatedCheckout
+        if isinstance(checkout_header, DelegatedCheckout):
+            checkout = checkout_header
     result = solar_project_admission.project_tool_admission(
         tool, tenant,
         org_header=org_header if isinstance(org_header, str) else None,
@@ -429,7 +455,9 @@ def _project_solar_admission(tool, tenant, req, org_header, project_header,
         input_version_id=req.dwg, drawing_id=drawing_id, params=req.params,
         catalog_digest=req.catalog_digest,
         idempotency_key=idempotency_key if isinstance(idempotency_key, str) else None,
-        checkout_capability=checkout_header if isinstance(checkout_header, str) else None,
+        checkout_capability=checkout,
+        **({"expected_intake_sha256": expected_intake_sha256}
+           if expected_intake_sha256 is not None else {}),
         preview=preview, **({"proposal_job_id": req.proposal_job_id}
                           if req.tool == "solar-commit-solve" else {}),
         **({"solve_context": req.solve_context.model_dump()}
@@ -568,13 +596,22 @@ def _resolve_project_read_context(tenant, headers, req, params):
         tenant, project_id, version_id, drawing_id=drawing_id, write=False)
 
 
-def _run_project_read(tool, tenant, headers, req, params):
+def _run_project_read(tool, tenant, headers, req, params, *, persist=False,
+                      idempotency_key=None, selected_binding=None):
     import solar_project_context
     import tool_loader
     from routers import project_drawings
 
     try:
         context = _resolve_project_read_context(tenant, headers, req, params)
+        if selected_binding is not None and (
+            str(context.binding.organization_id) != selected_binding["organization_id"]
+            or str(context.binding.project_id) != selected_binding["project_id"]
+            or str(context.binding.drawing_id) != selected_binding["drawing_id"]
+            or str(context.binding.input_version_id) != selected_binding["input_version_id"]
+            or context.intake_sha256 != selected_binding["intake_sha256"]
+        ):
+            raise ValueError("selected project execution context changed")
         org_id = context.binding.organization_id
         jobs.platform_link.platform_store()
         import leaf_platform.entitlements as platform_entitlements
@@ -603,9 +640,34 @@ def _run_project_read(tool, tenant, headers, req, params):
                               status_code=400 if "required" in message else 409)
     except Exception:
         return project_drawings._dispatch(lambda: solar_project_context.refuse("STORE_UNAVAILABLE"))
-    env = tool_loader.run_tool_dynamic(
-        tool, context.intake, params, aps_live=False, da=None,
-        tenant_id=str(tenant) if is_demo_context(tenant) else str(org_id))
+    def execute_read():
+        return tool_loader.run_tool_dynamic(
+            tool, context.intake, params, aps_live=False, da=None,
+            tenant_id=str(tenant) if is_demo_context(tenant) else str(org_id))
+
+    if persist:
+        try:
+            record = jobs.platform_link.run_project_read_job(
+                tenant, context, {**tool, "catalog_digest": req.catalog_digest},
+                params, idempotency_key, execute_read)
+        except jobs.platform_link.CanonicalEntitlementDenied as exc:
+            return exc.response
+        except jobs.platform_link.ProjectSessionForbidden:
+            return error_response(ErrorCode.FORBIDDEN, "project access denied",
+                                  retryable=False, status_code=403)
+        except solar_project_context.ProjectContextError as exc:
+            def refusal():
+                raise exc
+            return project_drawings._dispatch(refusal)
+        except ValueError as exc:
+            return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
+                                  status_code=400 if "required" in str(exc) else 409)
+        except Exception:
+            return project_drawings._dispatch(lambda: solar_project_context.refuse("STORE_UNAVAILABLE"))
+        return JSONResponse(status_code=202, content=record,
+                            headers={"Cache-Control": "no-store"})
+
+    env = execute_read()
     body = {
         key: env[key]
         for key in (
@@ -624,6 +686,71 @@ def _run_project_read(tool, tenant, headers, req, params):
     status = 200 if body.get("ok") else DEFAULT_HTTP_STATUS.get(
         (body.get("error") or {}).get("error_code"), 500)
     return JSONResponse(status_code=status, content=body, headers={"Cache-Control": "no-store"})
+
+
+def _is_project_write_tool(tool):
+    """A registered drawing.write builtin with a server-owned project producer."""
+    import project_drawing_write
+    return project_drawing_write.producer_entry(tool) is not None
+
+
+def _run_project_write(tool, tenant, headers, req, params, *, idempotency_key, capability):
+    """Reviewed project write: one confirmation commits one immutable project version."""
+    import project_drawing_editor
+    import project_drawing_write
+    import solar_project_context
+    from routers import project_drawings
+
+    try:
+        # Same verified identity, org header, demo actor and exact-version binding as reads.
+        context = _resolve_project_read_context(tenant, headers, req, params)
+        binding = context.binding
+        committed = project_drawing_write.commit(
+            tenant, binding.project_id, binding.drawing_id, binding.input_version_id,
+            tool, params, catalog_digest=req.catalog_digest,
+            idempotency_key=idempotency_key, capability=capability)
+    except project_drawing_write.ProducerRefused as exc:
+        return JSONResponse(status_code=exc.status, content=with_envelope_fields({
+            "error": error_obj(ErrorCode.BAD_PARAMS, exc.code, retryable=False),
+            "reason_code": exc.code,
+        }), headers={"Cache-Control": "no-store"})
+    except project_drawing_editor.EditorError as exc:
+        return JSONResponse(status_code=exc.status, content=with_envelope_fields({
+            "error": error_obj(ErrorCode.BAD_PARAMS, exc.code, retryable=exc.retryable),
+            "reason_code": exc.code,
+        }), headers={"Cache-Control": "no-store"})
+    except DemoActorRefused:
+        return _demo_refusal()
+    except jobs.platform_link.ProjectSessionForbidden:
+        return error_response(ErrorCode.FORBIDDEN, "project access denied",
+                              retryable=False, status_code=403)
+    except (jobs.platform_link.ProjectAuthorityNotFound, LookupError):
+        return project_drawings._dispatch(lambda: solar_project_context.refuse("CONTEXT_NOT_FOUND"))
+    except solar_project_context.ProjectContextError as exc:
+        if exc.reason_code == "SIP_R1_PROJECT_FORBIDDEN":
+            return error_response(ErrorCode.FORBIDDEN, "project access denied",
+                                  retryable=False, status_code=403)
+        def refusal():
+            raise exc
+        return project_drawings._dispatch(refusal)
+    except ValueError as exc:
+        message = str(exc)
+        return error_response(ErrorCode.BAD_PARAMS, message, retryable=False,
+                              status_code=400 if "required" in message else 409)
+    except Exception:
+        return project_drawings._dispatch(lambda: solar_project_context.refuse("STORE_UNAVAILABLE"))
+    receipt = committed["receipt"]
+    body = {
+        "ok": True, "tool": tool["name"], "version": receipt["drawing_version"],
+        "result": committed["result"], "overlay": committed["overlay"],
+        "producer": committed["producer"],
+        "project_context": {
+            "organization_id": receipt["organization_id"], "project_id": receipt["project_id"],
+            "drawing_id": receipt["drawing_id"], "input_version_id": receipt["parent_version_id"],
+            "intake_sha256": committed["producer"]["input_intake_sha256"],
+        },
+    }
+    return JSONResponse(status_code=200, content=body, headers={"Cache-Control": "no-store"})
 
 
 def _checkout_identity(tenant_id: Any, drawing_id: str,
@@ -659,7 +786,8 @@ def _checkout_identity(tenant_id: Any, drawing_id: str,
 
 
 @router.post("/api/run")
-def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_tenant),
+def run(req: RunRequest, wait: int = 0, persist: int = 0,
+        tenant_id: Any = Depends(deps.require_tenant),
         x_org_id: Optional[str] = Header(default=None),
         x_project_id: Optional[str] = Header(default=None),
         idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
@@ -774,24 +902,134 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
             retryable=False, tool=req.tool, status_code=409,
         )
 
-    if binding is not None and (
-        (tool.get("name") in capability_catalog.SOLAR_CAPABILITIES
-         and capability_catalog.capability_adapter(tool.get("name")) != capability_catalog.CLOUD_PROPOSAL_ADAPTER)
-        or tool.get("canonical_only")
-        or x_org_id is not None or x_project_id is not None
-    ):
+    def scoped_project_refusal():
         return JSONResponse(status_code=403, content=with_envelope_fields({
             "error": error_obj(ErrorCode.FORBIDDEN, entity_scope.SCOPED_MUTATION_MESSAGE,
                                retryable=False),
             "reason_code": entity_scope.SCOPED_MUTATION_REASON,
         }))
 
+    # Preserve the existing entity-scope refusal before resolving new project custody.
+    if binding is not None and (
+        (tool.get("name") in capability_catalog.SOLAR_CAPABILITIES
+         and capability_catalog.capability_adapter(tool.get("name")) != capability_catalog.CLOUD_PROPOSAL_ADAPTER)
+        or tool.get("canonical_only")
+        or x_org_id is not None or x_project_id is not None
+    ):
+        return scoped_project_refusal()
+
+    selected_binding = None
+    delegated_checkout = None
+    selected_solve = (capability_catalog.capability_adapter(tool.get("name"))
+                      == capability_catalog.CLOUD_PROPOSAL_ADAPTER)
+    if session_id is not None and (selected_solve or any(
+        cap in ("drawing.read", "drawing.write") for cap in tool.get("capabilities", [])
+    )):
+        import project_execution_context
+        try:
+            selected_binding = project_execution_context.resolve_turn_binding(
+                session_id, turn_id, tenant_id)
+        except project_execution_context.ContextError as exc:
+            return JSONResponse(status_code=exc.status_code, content=with_envelope_fields({
+                "error": error_obj(
+                    ErrorCode.FORBIDDEN if exc.status_code == 403 else ErrorCode.BAD_PARAMS,
+                    exc.code, retryable=False),
+                "reason_code": exc.code,
+            }))
+        if selected_binding is not None:
+            if binding is not None:
+                return scoped_project_refusal()
+            selected_custodied = not _is_project_read_tool(tool)
+            if selected_custodied and ((not selected_solve
+                    and "drawing.write" not in tool.get("capabilities", []))
+                    or solar_project_admission._trusted(tool)[1] is not None):
+                return error_response(ErrorCode.BAD_PARAMS,
+                    "selected project execution requires a trusted canonical Solar tool",
+                    retryable=False, status_code=409)
+            if (req.dwg not in (selected_binding["drawing_id"], selected_binding["input_version_id"])
+                    or (isinstance(x_project_id, str)
+                        and x_project_id != selected_binding["project_id"])
+                    or (isinstance(x_org_id, str)
+                        and x_org_id != selected_binding["organization_id"])):
+                return error_response(ErrorCode.BAD_PARAMS, "selected project drawing conflicts with request",
+                                      retryable=False, status_code=409)
+            if selected_custodied:
+                if not solar_project_admission.project_runs_enabled():
+                    return JSONResponse(status_code=409, content=solar_project_admission._refusal(
+                        "project_execution_disabled")["content"])
+                supplied_drawing = req.params.get("drawing_id")
+                if supplied_drawing is not None and supplied_drawing != selected_binding["drawing_id"]:
+                    return error_response(ErrorCode.BAD_PARAMS, "selected project drawing conflicts with request",
+                                          retryable=False, status_code=409)
+                try:
+                    if not all((req.catalog_commit, req.effective_catalog_digest,
+                                req.tool_manifest_sha256)):
+                        raise ValueError("execution approval is missing exact catalog generation pins")
+                    if not text_matches(req.tool_manifest_sha256, current_catalog_digest):
+                        raise ValueError("tool manifest changed after approval; refresh tools and confirm again")
+                    current_pin = (customization_service.effective_catalog_pin(str(tenant_id))
+                                   or deps.base_catalog_pin(deps.all_tools(str(tenant_id))))
+                    if not (text_matches(req.catalog_commit, current_pin["catalog_commit"])
+                            and text_matches(req.effective_catalog_digest,
+                                             current_pin["effective_catalog_digest"])):
+                        raise ValueError("effective catalog changed after approval; refresh tools and confirm again")
+                    if req.dwg_version is not None or req.expected_drawing_head is not None:
+                        import solar_project_context as project_context
+                        current = project_context.resolve_context(tenant_id,
+                            uuid.UUID(selected_binding["project_id"]),
+                            uuid.UUID(selected_binding["input_version_id"]),
+                            drawing_id=uuid.UUID(selected_binding["drawing_id"]), write=True)
+                        # These legacy pins identify the approved immutable input.
+                        # New submissions enforce head at canonical admission;
+                        # stored idempotent jobs remain replayable after publication.
+                        if (current.intake_sha256 != selected_binding["intake_sha256"]
+                                or any(pin is not None and pin != current.binding.version.seq
+                                       for pin in (req.dwg_version, req.expected_drawing_head))):
+                            raise ValueError("approved drawing version does not match selected project head")
+                except ValueError as exc:
+                    return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False, status_code=409)
+                except Exception:
+                    return error_response(ErrorCode.BAD_PARAMS, "selected project context unavailable",
+                                          retryable=False, status_code=409)
+                import project_checkout_custody
+                try:
+                    delegated_checkout = project_checkout_custody.resolve_for_turn(
+                        tenant_id, session_id, turn_id, tool=req.tool, params=req.params,
+                        catalog_pins={key: getattr(req, key) for key in (
+                            "catalog_digest", "catalog_commit", "effective_catalog_digest",
+                            "tool_manifest_sha256")}, input_binding=selected_binding,
+                        run_extras={key: value for key, value in {
+                            "solve_context": req.solve_context.model_dump()
+                                if req.solve_context is not None else None,
+                            "proposal_job_id": req.proposal_job_id,
+                        }.items() if value is not None})
+                    if not isinstance(delegated_checkout, project_checkout_custody.DelegatedCheckout):
+                        raise project_checkout_custody.CustodyError("checkout_custody_required", 403)
+                    if isinstance(idempotency_key, str) and idempotency_key != delegated_checkout.idempotency_key:
+                        return error_response(ErrorCode.BAD_PARAMS, "checkout custody idempotency conflict",
+                                              retryable=False, status_code=409)
+                    idempotency_key = delegated_checkout.idempotency_key
+                except project_checkout_custody.CustodyError as exc:
+                    return JSONResponse(status_code=exc.status_code, content=with_envelope_fields({
+                        "error": error_obj(ErrorCode.FORBIDDEN if exc.status_code == 403
+                                           else ErrorCode.BAD_PARAMS, exc.code, retryable=False),
+                        "reason_code": exc.code,
+                    }))
+            x_org_id = selected_binding["organization_id"]
+            x_project_id = selected_binding["project_id"]
+            # Legacy integer pins cannot substitute for the stored selected UUID.
+            req = req.model_copy(update={"dwg": selected_binding["input_version_id"],
+                                         "dwg_version": None, "expected_drawing_head": None})
+
     if (solar_project_admission.project_runs_enabled()
             and (isinstance(x_org_id, str) or isinstance(x_project_id, str))
             and tool.get("name") in capability_catalog.SOLAR_CAPABILITIES):
         response = _project_solar_admission(
             tool, tenant_id, req, x_org_id, x_project_id, authorization,
-            x_checkout_capability, idempotency_key=idempotency_key, preview=False)
+            delegated_checkout if delegated_checkout is not None else x_checkout_capability,
+            idempotency_key=idempotency_key, preview=False,
+            **({"expected_intake_sha256": selected_binding["intake_sha256"]}
+               if delegated_checkout is not None else {}))
         if wait and response.status_code == 202:
             return _wait_project_solar(response, tenant_id)
         return response
@@ -826,7 +1064,21 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
     params.update(req.params or {})
 
     if isinstance(x_project_id, str) and x_project_id and _is_project_read_tool(tool):
-        return _run_project_read(tool, tenant_id, (x_org_id, x_project_id), req, params)
+        return _run_project_read(
+            tool, tenant_id, (x_org_id, x_project_id), req, params,
+            persist=persist == 1 or selected_binding is not None,
+            idempotency_key=idempotency_key, selected_binding=selected_binding)
+
+    if isinstance(x_project_id, str) and x_project_id and _is_project_write_tool(tool):
+        if selected_binding is not None:
+            return error_response(ErrorCode.BAD_PARAMS, "project_adapter_unavailable",
+                                  retryable=False, status_code=409)
+        # The tool's legacy "demo" default never names a project drawing.
+        if "drawing_id" not in (req.params or {}):
+            params.pop("drawing_id", None)
+        return _run_project_write(tool, tenant_id, (x_org_id, x_project_id), req, params,
+                                  idempotency_key=idempotency_key,
+                                  capability=x_checkout_capability)
 
     # An authored tool that declares the W1 graph intake is pinned and anonymous
     # exactly like the trusted read kind; only the broker's execution differs.
@@ -1315,7 +1567,7 @@ def _trim_list_body(body):
 
 
 @router.get("/api/jobs")
-def list_jobs(limit: int = 20, tenant=Depends(deps.require_tenant)):
+def list_jobs(limit: int = 20, tenant=Depends(deps.require_tenant), summary: bool = False):
     # Scope strictly to the RESOLVED caller tenant; a client-supplied tenant_id is
     # never trusted (security-audit F1 — this endpoint had no auth + unbound scope).
     actor = None
@@ -1328,19 +1580,29 @@ def list_jobs(limit: int = 20, tenant=Depends(deps.require_tenant)):
             return error_response(ErrorCode.INTERNAL, "job store unavailable",
                                   retryable=True, status_code=503)
     try:
+        access_options = {}
         if actor is not None:
+            bound_tenant_id = actor.server_tenant
             canonical = jobs.platform_link.list_canonical_jobs(actor.server_tenant, limit=limit, strict=True)
             legacy = jobs.list_jobs(actor.server_tenant, limit)
         else:
-            canonical = jobs.platform_link.list_canonical_jobs(_bound_tenant_id(tenant), limit=limit)
-            legacy = jobs.list_jobs(_bound_tenant_id(tenant), limit)
+            if deps.auth_live() and isinstance(tenant, deps.TenantContext) and tenant.subject:
+                # Fresh once for THIS response, including project membership checks.
+                # A context marker or a prior request's binding is not authority.
+                binding = jobs.platform_link.resolve_caller_binding(tenant)
+                bound_tenant_id = str(binding.platform_tenant_id) if binding is not None else str(tenant)
+                if binding is not None:
+                    access_options = {"binding": binding, "bound_tenant_id": bound_tenant_id}
+            else:
+                bound_tenant_id = _bound_tenant_id(tenant)
+            canonical = jobs.platform_link.list_canonical_jobs(bound_tenant_id, limit=limit)
+            legacy = jobs.list_jobs(bound_tenant_id, limit)
         visible = []
         seen = set()
         for rec in canonical + legacy:
             if jobs.job_store_mode() == "postgres" and rec in canonical:
                 rec = jobs._pg_store.linked_capability_job(
-                    str(rec["job_id"]),
-                    actor.server_tenant if actor is not None else _bound_tenant_id(tenant)) or rec
+                    str(rec["job_id"]), bound_tenant_id) or rec
             if actor is not None:
                 # The entry lookup already validated this actor's live membership.
                 if (rec.get("tenant_id") != actor.server_tenant
@@ -1348,14 +1610,17 @@ def list_jobs(limit: int = 20, tenant=Depends(deps.require_tenant)):
                         or str(rec.get("project_id")) != str(actor.project_id)
                         or rec["job_id"] in seen):
                     continue
-            elif (rec.get("tenant_id") != _bound_tenant_id(tenant)
-                    or _access_error(rec, tenant, rec["job_id"]) is not None
+            elif (rec.get("tenant_id") != bound_tenant_id
+                    or _access_error(rec, tenant, rec["job_id"], **access_options) is not None
                     or rec["job_id"] in seen):
                 continue
             visible.append(rec)
             seen.add(rec["job_id"])
         return with_envelope_fields(
-            {"jobs": [_trim_list_body(_record_body(r)) for r in visible[:limit]]}
+            {"jobs": [
+                _summary_body(r) if summary else _trim_list_body(_record_body(r))
+                for r in visible[:limit]
+            ]}
         )
     except Exception:
         if actor is None:

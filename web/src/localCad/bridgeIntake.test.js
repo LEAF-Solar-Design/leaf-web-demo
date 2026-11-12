@@ -4,6 +4,33 @@ import { textGlyphs } from './bridgeText.js'
 import { textGlyphPolylines } from '../components/viewerIntake.js'
 import { expandBulgedPolylines, intakeRoundPolylines } from '../cadedit/engineIntake.js'
 
+const viewerPointCount = intake => [...expandBulgedPolylines(intake.polylines), ...intakeRoundPolylines(intake)]
+  .reduce((n, row) => n + row.pts.length, intake.inserts.length)
+const straightPoints = count => Array.from({ length: count }, (_, i) => [i, 0, 0])
+const bulgeFixtures = [
+  { name: 'negative semicircle', pts: [[0, 0], [2, 0]], bulges: [-1, 0] },
+  { name: 'short bulge', pts: [[0, 0], [2, 0]], bulges: [0.01, 0] },
+  { name: 'tiny bulges', pts: [[0, 0], [2, 0], [4, 0]], bulges: [1e-10, -1e-12, 0] },
+  { name: 'terminal bulge', pts: [[0, 0], [2, 0]], bulges: [0, 1] },
+  { name: 'coincident chord', pts: [[0, 0], [0, 0], [2, 0]], bulges: [1, 0, 0] },
+  { name: 'degenerate short chord', pts: [[0, 0], [1e-13, 0]], bulges: [1, 0] },
+  { name: 'terminal bulge with duplicates', pts: [[0, 0], [0, 0]], bulges: [0, 1] },
+  { name: 'closed bulges', pts: [[0, 0], [2, 0], [2, 2]], bulges: [1, -0.5, 0.01], closed: true },
+  { name: 'rounded samples', pts: [[1e16, 1e16], [1e16 + 2, 1e16]], bulges: [0.01, 0] },
+  { name: 'invalid bulges', pts: [[0, 0], [2, 0], [4, 0]], bulges: [NaN, Infinity, '1'] },
+]
+const arcFixtures = [
+  { name: 'wrapped arc', start_deg: 350, end_deg: 10 },
+  { name: 'full arc', start_deg: 10, end_deg: 10 },
+  { name: 'full positive turn', start_deg: 0, end_deg: 360 },
+  { name: 'full negative turn', start_deg: 360, end_deg: 0 },
+  { name: 'short arc', start_deg: 0, end_deg: 1 },
+  { name: 'step boundary', start_deg: 0, end_deg: 60 },
+  { name: 'past step boundary', start_deg: 0, end_deg: 60.00000001 },
+  { name: 'multiple turns', start_deg: -720, end_deg: 725 },
+  { name: 'huge angles', start_deg: -Number.MAX_VALUE, end_deg: Number.MAX_VALUE },
+].map(row => ({ c: [0, 0], r: 1, ...row }))
+
 it('matches viewerIntake glyph contours point for point without its shape machinery', () => {
   for (const text of ['AB', 'PV-01', 'Az 180°', '?']) {
     const row = { text, pt: [3, 7, 2], height: 2.5, handle: 'label', layer: 'Notes' }
@@ -112,8 +139,78 @@ it('limits total points, including the sampling the Viewer will perform', () => 
   expect(mapped.polylines).toHaveLength(1)
   expect(mapped.circles).toHaveLength(0)
   const bulged = bridgeToIntake({ polylines: [{ pts: pts.slice(0, 5000), bulges: Array(5000).fill(1), closed: true }] })
-  expect(bulged.truncated).toBe(true)
-  expect(bulged.polylines).toHaveLength(0)
+  expect(bulged.truncated).toBe(false)
+  expect(bulged.polylines).toHaveLength(1)
+  expect(bulged.polylines[0].pts).toHaveLength(5000)
+  expect(bulged.polylines[0].bulges).toEqual(Array(5000).fill(1))
+  expect(bulged.points).toBeLessThan(200_000)
+  expect(bulged.points).toBe(viewerPointCount(bulged))
+})
+
+it.each(bulgeFixtures)('matches Viewer sampling for $name', fixture => {
+  const mapped = bridgeToIntake({ polylines: [{ ...fixture, handle: 'bulge', layer: 'Curves' }] })
+  expect(mapped.truncated).toBe(false)
+  expect(mapped.points).toBe(viewerPointCount(mapped))
+  expect(mapped.polylines[0]).toMatchObject({ handle: 'bulge', layer: 'Curves', pts: fixture.pts.map(p => [...p, 0]) })
+  expect(mapped.layers).toContain('Curves')
+})
+
+it.each(arcFixtures)('matches Viewer sampling for $name', fixture => {
+  const mapped = bridgeToIntake({ arcs: [{ ...fixture, handle: 'arc', layer: 'Curves' }] })
+  expect(mapped.truncated).toBe(false)
+  expect(mapped.points).toBe(viewerPointCount(mapped))
+  expect(mapped.arcs[0]).toMatchObject({ handle: 'arc', layer: 'Curves' })
+})
+
+it.each([
+  ...bulgeFixtures.map(row => ({ name: row.name, kind: 'polylines', row })),
+  ...arcFixtures.map(row => ({ name: row.name, kind: 'arcs', row })),
+  { name: 'circle', kind: 'circles', row: { c: [0, 0], r: 1 } },
+])('admits exactly the sampled cap and rejects cap plus one for $name', ({ kind, row }) => {
+  const candidate = { ...row, handle: 'candidate', layer: 'Candidate' }
+  const cost = viewerPointCount(bridgeToIntake({ [kind]: [candidate] }))
+  for (const excess of [0, 1]) {
+    const filler = { pts: straightPoints(200_000 - cost + excess), handle: 'filler' }
+    const payload = kind === 'polylines' ? { polylines: [filler, candidate] }
+      : { polylines: [filler], [kind]: [candidate] }
+    const mapped = bridgeToIntake(payload)
+    expect(mapped.truncated).toBe(excess === 1)
+    expect(mapped.points).toBe(excess ? filler.pts.length : 200_000)
+    expect(mapped.points).toBe(viewerPointCount(mapped))
+    expect(mapped[kind].some(item => item.handle === 'candidate')).toBe(excess === 0)
+    expect(mapped.layers.includes('Candidate')).toBe(excess === 0)
+  }
+})
+
+it('budgets mixed entities cumulatively and continues after a rejected entity', () => {
+  const geometry = {
+    lines: [{ pts: [[0, 0], [1, 0]], handle: 'line' }],
+    polylines: bulgeFixtures.map(row => ({ ...row })),
+    circles: [{ c: [0, 0], r: 2 }], arcs: arcFixtures.map(row => ({ ...row })),
+    inserts: [{ pt: [0, 0], name: 'Panel', handle: 'insert' }],
+  }
+  const sampled = viewerPointCount(bridgeToIntake(geometry))
+  geometry.polylines.unshift({ pts: straightPoints(200_000 - sampled) })
+  const exact = bridgeToIntake(geometry)
+  expect(exact.truncated).toBe(false)
+  expect(exact.points).toBe(200_000)
+  expect(exact.points).toBe(viewerPointCount(exact))
+  geometry.arcs.push({ c: [0, 0], r: 1, start_deg: 0, end_deg: 1, handle: 'over', layer: 'Rejected' })
+  const over = bridgeToIntake(geometry)
+  expect(over.truncated).toBe(true)
+  expect(over.points).toBe(200_000)
+  expect(over.points).toBe(viewerPointCount(over))
+  expect(over.arcs.some(row => row.handle === 'over')).toBe(false)
+  expect(over.layers).not.toContain('Rejected')
+  expect(over.inserts[0].handle).toBe('insert')
+})
+
+it('counts duplicate vertices as the Viewer does when the raw row exceeds the cap', () => {
+  const pts = Array.from({ length: 200_001 }, () => [0, 0])
+  const mapped = bridgeToIntake({ polylines: [{ pts, bulges: [1] }] })
+  expect(mapped.truncated).toBe(false)
+  expect(mapped.points).toBe(1)
+  expect(mapped.points).toBe(viewerPointCount(mapped))
 })
 
 it('skips malformed geometry and returns an empty, usable intake', () => {

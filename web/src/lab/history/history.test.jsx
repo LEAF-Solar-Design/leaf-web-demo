@@ -56,6 +56,42 @@ function ledger() {
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
 describe('Strategy revision ledger', () => {
+  it('gets and puts layouts at the digest path using the shared tenant request helper', async () => {
+    const sha256 = 'a'.repeat(64)
+    const layout = { schema: 'leaf.lab-layout.v1', positions: { 'field-1': { x: 12, y: -34 } } }
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(response({ layout }))
+      .mockResolvedValueOnce({ ok: true, status: 204, json: async () => { throw new SyntaxError('Empty body') } })
+    const client = createLabArtifactsClient({ fetchImpl })
+    expect(await client.getLayout('strategy', sha256)).toEqual(layout)
+    expect(await client.putLayout('strategy', sha256, layout)).toBe(true)
+    expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual([
+      `${config.apiBase}/api/lab/docs/strategy/layout/${sha256}`,
+      `${config.apiBase}/api/lab/docs/strategy/layout/${sha256}`,
+    ])
+    expect(fetchImpl.mock.calls[0][1]).toMatchObject({ method: 'GET', credentials: 'same-origin', redirect: 'error',
+      headers: { 'X-Tenant-Id': config.tenant } })
+    expect(fetchImpl.mock.calls[0][1]).not.toHaveProperty('body')
+    expect(fetchImpl.mock.calls[1][1]).toMatchObject({ method: 'PUT', body: JSON.stringify(layout),
+      headers: { 'X-Tenant-Id': config.tenant, 'content-type': 'application/json' } })
+  })
+
+  it('returns null and false for failed layout requests without throwing', async () => {
+    const fetchImpl = vi.fn().mockRejectedValue(new TypeError('Offline'))
+    const client = createLabArtifactsClient({ fetchImpl })
+    await expect(client.getLayout('strategy', 'a'.repeat(64))).resolves.toBeNull()
+    await expect(client.putLayout('strategy', 'a'.repeat(64), {})).resolves.toBe(false)
+    fetchImpl.mockResolvedValue(response({ code: 'lab_layout_unknown_revision' }, 400))
+    expect(await client.getLayout('strategy', 'a'.repeat(64))).toBeNull()
+    expect(await client.putLayout('strategy', 'a'.repeat(64), {})).toBe(false)
+    fetchImpl.mockResolvedValue(response({ layout: null }))
+    expect(await client.getLayout('strategy', 'a'.repeat(64))).toBeNull()
+    fetchImpl.mockClear()
+    expect(await client.getLayout('../other', 'a'.repeat(64))).toBeNull()
+    expect(await client.putLayout('../other', 'a'.repeat(64), {})).toBe(false)
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
   it('P1-a captures the live edit after Save started before taking theirs', async () => {
     const { client, append, fetchImpl } = ledger()
     await client.save('strategy', first, null)

@@ -27,6 +27,7 @@ SUPPORTED_READ_TOOLS = frozenset((
     "solar-string-rebuild", "solar-string-data", "solar-color-strings", "solar-guardrails-read",
     "solar-electrical-schedules", "solar-cable-export", "solar-nec-ampacity-correction",
     "solar-nec-ac-voltage-drop", "solar-nec-conduit-fill", "solar-nec-feeder-ocpd",
+    "solar-solaredge-tracking-read",
 ))
 
 
@@ -75,7 +76,8 @@ def _trusted(tenant, name, catalog_digest):
     module = local._load_builtin(name)
     if (type(declaration) is not dict or declaration["adapter"] != "local-graph-read" or declaration["trusted_inputs"]
             or entitlements.tool_required_capability(trusted) != "run_read"
-            or local._reads_physical_head(module) or local._reads_version_history(module)):
+            or local._reads_physical_head(module)
+            or (local._reads_version_history(module) and name != "solar-solaredge-tracking-read")):
         _fail("SIP_R6_TOOL_UNSUPPORTED")
     return trusted
 
@@ -116,7 +118,15 @@ def run_project_read(tenant, project_id, drawing_id, input_version_id, tool_name
     graph_adapter.require_project_sizing(context)
     sink = artifacts.ProjectArtifactSink(None, artifacts.project_artifact_binding(
         context, tool_name, catalog_digest, request_sha))
-    output, data = local._read_output(tool_name, context.graph, normalized, sink)
+    if tool_name == "solar-solaredge-tracking-read":
+        from solar_project_solaredge import read_tracking
+        output = read_tracking(tenant, context, normalized)
+        _bounded_json(output)
+        data = canonical_bytes(output)
+        if len(data) > MAX_OUTPUT_BYTES:
+            _fail("READ_OUTPUT_LIMIT_EXCEEDED")
+    else:
+        output, data = local._read_output(tool_name, context.graph, normalized, sink)
     result = {"schema": RESULT_SCHEMA, "adapter": "project-local-graph-read",
         **{key: value for key, value in request.items() if key not in ("schema", "parameters")},
         "graph_project_id": context.graph_project_id,

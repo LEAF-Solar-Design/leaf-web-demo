@@ -7,6 +7,11 @@
 # Listens on :8130. NEVER holds the APS credential (that is the broker's job) —
 # all APS-capable execution goes out over BROKER_URL. Author path goes to the
 # harness over LEAF_AUTHOR_HARNESS_URL.
+# Native production supplies this stage as a local, source-bound named context.
+# Legacy builds retain an explicit unavailable marker, never a host .git tree.
+FROM scratch AS platform_source
+COPY deploy/platform-source-absent.json /unavailable.json
+
 FROM python:3.12-slim AS app
 
 WORKDIR /app
@@ -112,7 +117,7 @@ RUN printf '%s\n' "$TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256" \
       /var/lib/apt/lists/deb.debian.org_debian_dists_trixie-updates_InRelease \
       | sha256sum -c - \
  && apt-get upgrade -y \
- && apt-get install -y --no-install-recommends git curl ca-certificates \
+ && apt-get install -y --no-install-recommends git curl ca-certificates util-linux \
       xz-utils gcc make libc6-dev libseccomp-dev \
  && curl -fsSL https://github.com/LibreDWG/libredwg/releases/download/0.14.8584/libredwg-0.14.8584.tar.xz \
       -o /tmp/libredwg.tar.xz \
@@ -174,6 +179,7 @@ RUN pip install --no-cache-dir playwright==1.60.0 \
 COPY server/    /app/server/
 COPY da/        /app/da/
 COPY engine/    /app/engine/
+RUN python /app/server/lab_corpus_executor.py --install
 COPY platform/  /app/platform/
 COPY contract/  /app/contract/
 COPY device-agent/ /app/device-agent/
@@ -183,6 +189,7 @@ COPY scripts/reconcile_sessions_authority.py /app/scripts/reconcile_sessions_aut
 COPY scripts/reconcile_drawing_authority.py /app/scripts/reconcile_drawing_authority.py
 COPY scripts/reconcile_upload_authority.py /app/scripts/reconcile_upload_authority.py
 COPY server/start-app.sh /app/server/start-app.sh
+COPY --from=platform_source / /opt/leaf-platform-source/
 # 0555 ROOT-OWNED, and the ownership is the point. This image now drops
 # privilege (below), so the runtime uid must be able to EXECUTE its entrypoint —
 # the previous 0500 root-owned mode would have made the container unable to
@@ -284,6 +291,7 @@ ENV APS_LIVE=0 \
     LEAF_DRAWING_STORE=legacy \
     LEAF_UPLOAD_STORE=legacy \
     LEAF_SOURCE_SHA=${LEAF_SOURCE_SHA} \
+    LEAF_PLATFORM_SOURCE_SNAPSHOT_DIR=/opt/leaf-platform-source \
     LEAF_APP_VERSION=${LEAF_SOURCE_SHA} \
     LEAF_DWG_CONVERT_REQUIRE_CAGE=1 \
     PYTHONUNBUFFERED=1 \

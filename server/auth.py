@@ -171,6 +171,7 @@ def verify_platform_token(authorization: Optional[str]) -> Dict[str, Any]:
 
     Returns the decoded JWT payload. Raises HTTPException(401) on any
     signature / audience / issuer / expiry / malformed-header failure.
+    A verified but inconsistent service-admin principal raises HTTPException(403).
     """
     token = _bearer(authorization)
     header, peek = _peek_unverified(token)
@@ -207,12 +208,13 @@ def verify_platform_token(authorization: Optional[str]) -> Dict[str, Any]:
                     not all(type(payload[k]) is int for k in ("exp", "iat")) or
                     payload["exp"] - payload["iat"] > policy.MAX_LIFETIME_S):
                 raise ValueError
-            return payload
         except Exception:
             raise HTTPException(status_code=401, detail="fixture identity verification failed") from None
+        _validate_service_admin_principal(payload)
+        return payload
     try:
         key = _signing_key(token)
-        return jwt.decode(
+        payload = jwt.decode(
             token,
             key,
             algorithms=["RS256"],
@@ -232,6 +234,36 @@ def verify_platform_token(authorization: Optional[str]) -> Dict[str, Any]:
         raise
     except jwt.PyJWTError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"invalid token: {exc}")
+    # Platform callers also use this verifier without extracting tenant claims.
+    # Principal checks run only after ordinary JWT verification has succeeded.
+    _validate_service_admin_principal(payload)
+    return payload
+
+
+def _validate_service_admin_principal(payload: Dict[str, Any]) -> None:
+    """Reject elevated machine claims unless their service identity is exact.
+
+    This marker is necessary, never sufficient authority: canonical tenant
+    bindings and the server-owned admin subject allowlist still apply in deps.
+    """
+    ns = claim_ns()
+    subject = payload.get("sub")
+    machine = isinstance(subject, str) and subject.endswith("@clients")
+    service_admin = payload.get(ns + "principal_type") == "service_admin"
+    raw_roles = payload.get(ns + "roles")
+    admin_role = isinstance(raw_roles, (list, tuple)) and any(
+        isinstance(role, str) and role.strip().lower() == "platform_admin"
+        for role in raw_roles
+    )
+    elevated = payload.get(ns + "tier") == "admin" or admin_role
+    if service_admin or (machine and elevated):
+        if (not service_admin or not isinstance(subject, str)
+                or re.fullmatch(r"[A-Za-z0-9_-]{8,128}@clients", subject) is None
+                or payload.get("azp") != subject[:-len("@clients")]):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="invalid service-admin principal",
+            )
 
 
 def extract_tenant_claims(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -253,6 +285,7 @@ def extract_tenant_claims(payload: Dict[str, Any]) -> Dict[str, Any]:
             detail=(f"token verified but missing tenant claim '{ns}tenant_id'; "
                     "this identity is not provisioned for a Leaf workspace"),
         )
+    _validate_service_admin_principal(payload)
     return {
         "tenant_id": tenant_id,
         "org_id": payload.get(ns + "org_id"),

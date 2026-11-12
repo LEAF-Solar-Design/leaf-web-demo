@@ -26,3 +26,5 @@
   .integration-setup-grid { grid-template-columns: minmax(0, 1fr); }
   .integration-setup button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 }
+.ops-advanced { margin-block: 16px; padding: 12px; border: 1px solid var(--leaf-border, var(--leaf-line)); border-radius: var(--leaf-radius-control); }
+.ops-advanced > summary { min-height: 44px; align-content: center; font-size: var(--leaf-size-heading); cursor: pointer; }

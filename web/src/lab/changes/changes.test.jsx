@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { readController } from './controller.js'
 import TestsKeepersRail from './TestsKeepersRail.jsx'
 import LivePredictionGap from './LivePredictionGap.jsx'
+import zeroFee from '../history/__fixtures__/practice-zero-fee.json'
 
 afterEach(cleanup)
 const at = '2026-10-26T12:00:00Z'
@@ -112,11 +113,17 @@ describe('Live versus predicted gap', () => {
     expect(screen.getByText('Live versus predicted gap: not measured (no matched comparison receipt)')).toBeVisible()
     expect(screen.queryByText(/Simulated replay/)).toBeNull()
     view.rerender(<LivePredictionGap comparison={{ deltas: { net_after_fees_cents: -125 } }} />)
-    expect(screen.getByText('Simulated replay, not a verdict · Candidate-minus-Live net delta: -$1.25')).toBeVisible()
+    expect(screen.getByText('Simulated replay · Candidate-minus-Live net delta: -$1.25 · execution discrepancy. Direction only. Never evidence and never a gate.')).toBeVisible()
     view.rerender(<LivePredictionGap comparison={{ deltas: { net_after_fees_cents: 0 } }} />)
     expect(screen.getByText(/Candidate-minus-Live net delta: \$0.00/)).toBeVisible()
     view.rerender(<LivePredictionGap comparison={{ deltas: { net_after_fees_cents: {} } }} />)
     expect(screen.getByText(/Candidate-minus-Live net delta: Not reported/)).toBeVisible()
     expect(screen.queryAllByRole('button')).toHaveLength(0)
+  })
+
+  it('withholds a Practice delta when either side has trades without fees', () => {
+    render(<LivePredictionGap comparison={zeroFee} />)
+    expect(screen.getByText('Live versus predicted gap: not measured (no matched comparison receipt)')).toBeVisible()
+    expect(screen.getByRole('region')).not.toHaveTextContent(/delta|net|\$/i)
   })
 })

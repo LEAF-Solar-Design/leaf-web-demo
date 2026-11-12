@@ -1,7 +1,10 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
 import { composerDraftAccountScope } from '../lib/composerDraft.js'
-import { downloadProjectPageSource, loadProjectPage, saveProjectPage, validatePageDocument, submitProjectNativePreview, loadProjectNativePreview, downloadProjectNativePreviewScreenshot, validateNativePreview, proposeProjectPage, portfolioTextChanges, validateProjectPageProposal } from './projectPageClient.js'
+import { downloadProjectPageSource, loadProjectPage, saveProjectPage, validatePageDocument, submitProjectNativePreview, loadProjectNativePreview, downloadProjectNativePreviewScreenshot, validateNativePreview, proposeProjectPage, portfolioTextChanges, validateProjectPageProposal, PHOTO_PROPOSAL_SCHEMA, validateProjectPhotoAssignmentProposal } from './projectPageClient.js'
+import { isValidPageAction } from './projectPageClient.js'
+import { getStoredOrgId } from '../api.js'
+import { getStoredActorBindingId } from '../projects/api.js'
 import PortfolioEditor, { PortfolioPreview } from './PortfolioEditor.jsx'
 import { emptyPortfolio, importPortfolio } from './portfolioDocument.js'
 import { readActiveScope, subscribeActiveScope } from '../auth/activeScope.js'
@@ -28,6 +31,9 @@ export function PagePreview({ document, onSelectField, projectId, onInlineChange
       <h1 className="project-page__headline" data-element={`${selectionIdentity(document)}:textStyles.headline`} style={design('headline')}>{text('headline')}</h1>
       {(document.description || onInlineChange) && <p className="project-page__description" data-element={`${selectionIdentity(document)}:textStyles.description`} style={design('description')}>{text('description')}</p>}
       {(document.status || onInlineChange) && <p className="project-page__status" data-element={`${selectionIdentity(document)}:textStyles.status`} style={design('status')}>{text('status')}</p>}
+      {isValidPageAction(document.action) && <p className="project-page__action">
+        <a href={document.action.href} onClick={event => event.preventDefault()} onAuxClick={event => event.preventDefault()}>{document.action.label}</a>
+      </p>}
     </div>
   </main>
 }
@@ -72,7 +78,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
   if (draft) {
     try { validatePageDocument(draft) } catch (failure) { validation = failure.message }
   }
-  sourceSnapshot.current = { saved, draft }
+  sourceSnapshot.current = { saved, draft, busy, enabled }
   useEffect(() => { setProposal(null) }, [draft, saved])
   useEffect(() => { setInstruction('') }, [saved])
 
@@ -250,6 +256,13 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
     document[field] = value
     changePortfolio(document, { coalesceKey: field })
   }
+  const changeAction = (field, value) => {
+    const document = cloneDocument(sourceSnapshot.current.draft)
+    const action = { label: '', href: '', ...document.action, [field]: value }
+    if (action.label || action.href) document.action = action
+    else delete document.action
+    changePortfolio(document, { coalesceKey: `action.${field}` })
+  }
   const travel = direction => {
     if (!live.current || !enabled || operation.current) return
     const stack = history.current, source = direction === 'undo' ? stack.past : stack.future
@@ -288,6 +301,28 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
         return
       }
       if (proposalBlocked || !draft || draft.schema !== 'leaf.portfolio.v1' || proposal) { finish(false); return }
+      if (incomingProposal.result?.schema === PHOTO_PROPOSAL_SCHEMA) {
+        const snapshot = sourceSnapshot.current
+        const provenance = incomingProposal.provenance
+        const scope = readActiveScope()
+        const current = () => live.current && intake.current === pending && enabled
+          && composerDraftAccountScope() === accountScope && readActiveScope() === scope
+          && incomingProposal.isCurrent() && provenance?.orgId && provenance?.actorBindingId
+          && getStoredOrgId() === provenance.orgId && getStoredActorBindingId() === provenance.actorBindingId
+          && typeof provenance.sessionId === 'string' && Boolean(provenance.sessionId)
+          && typeof provenance.turnId === 'string' && Boolean(provenance.turnId.trim()) && provenance.turnId.length <= 200
+          && Number.isSafeInteger(provenance.seq) && provenance.seq > 0
+          && sourceSnapshot.current.saved === snapshot.saved && sourceSnapshot.current.draft === snapshot.draft
+          && sourceSnapshot.current.enabled && !sourceSnapshot.current.busy && !operation.current && !nativeSession.current?.active
+        if (!current()) { finish(false); return }
+        let cancelled = false
+        void validateProjectPhotoAssignmentProposal(projectId, saved, incomingProposal.result).then(value => {
+          if (cancelled || !current()) { finish(false); return }
+          setProposal({ photo: true, snapshot: { ...snapshot, isCurrent: current }, document: value.proposed_document, changes: value.changes })
+          finish(true)
+        }).catch(() => finish(false))
+        return () => { cancelled = true }
+      }
       const value = validateProjectPageProposal(projectId, saved, incomingProposal.result)
       const document = JSON.parse(JSON.stringify(value.proposed_document))
       const changes = portfolioTextChanges(saved.document, document)
@@ -319,7 +354,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
     if (!live.current || !proposal || proposalBlocked || operation.current || nativeSession.current?.active || sourceSnapshot.current.saved !== proposal.snapshot.saved
       || sourceSnapshot.current.draft !== proposal.snapshot.draft || (proposal.snapshot.isCurrent && !proposal.snapshot.isCurrent())) { setProposal(null); return }
     const document = proposal.document
-    portfolioTextChanges(saved.document, document)
+    if (!proposal.photo) portfolioTextChanges(saved.document, document)
     changePortfolio(cloneDocument(document, sourceSnapshot.current.draft), { coalesceKey: null })
     setNotice('Review the draft, then Save page.')
   }
@@ -444,15 +479,19 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
           <button type="button" onClick={generateProposal} disabled={proposalBlocked || !instruction.trim() || Array.from(instruction).length > 4000}>{busy === 'proposing' ? 'Generating proposal…' : 'Generate proposal'}</button>
           {busy === 'proposing' && <button type="button" onClick={cancelProposal}>Cancel generation</button>}
         </div>
-        {proposal && <section aria-label="Review proposed text" className="project-page-editor__proposal-review">
-          <h4>Review proposed text</h4>
+        {proposal && <section aria-label={proposal.photo ? 'Review proposed photo assignments' : 'Review proposed text'} className="project-page-editor__proposal-review">
+          <h4>{proposal.photo ? 'Review proposed photo assignments' : 'Review proposed text'}</h4>
           <p className="project-page-editor__note">Your draft and preview stay as they are until you use these changes.</p>
+          {proposal.photo && <p>Use proposed assignments to review the draft, then Save page.</p>}
           <ol>{proposal.changes.map((change, index) => <li key={index}>
-            <h5>{change.label}</h5>
-            <dl><dt>Current text</dt><dd>{change.before || '(Empty)'}</dd><dt>Proposed text</dt><dd>{change.after || '(Empty)'}</dd></dl>
+            {proposal.photo ? <><h5>{change.material_name}</h5>
+              <dl><dt>Original photo ID</dt><dd>{change.material_id}</dd><dt>Target gallery</dt><dd>{change.gallery_title} ({change.gallery_slug})</dd>
+                <dt>Caption</dt><dd>{change.title || '(Empty)'}</dd><dt>Alt text</dt><dd>{change.alt}</dd></dl></> : <>
+              <h5>{change.label}</h5>
+              <dl><dt>Current text</dt><dd>{change.before || '(Empty)'}</dd><dt>Proposed text</dt><dd>{change.after || '(Empty)'}</dd></dl></>}
           </li>)}</ol>
           <div className="project-page-editor__actions">
-            <button type="button" onClick={useProposal} disabled={proposalBlocked}>Use proposed changes</button>
+            <button type="button" onClick={useProposal} disabled={proposalBlocked}>{proposal.photo ? 'Use proposed assignments' : 'Use proposed changes'}</button>
             <button type="button" onClick={() => { setProposal(null); setNotice('Proposal discarded. Your draft is unchanged.') }}>Discard proposal</button>
           </div>
         </section>}
@@ -471,6 +510,11 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
             ? <textarea id={`${id}-${field}`} ref={node => { fields.current[field] = node }} value={draft[field]} maxLength={limit} rows={4} onChange={event => change(field, event.target.value)} />
             : <input id={`${id}-${field}`} ref={node => { fields.current[field] = node }} value={draft[field]} maxLength={limit} onChange={event => change(field, event.target.value)} />}
         </label>)}
+          <label><span>Contact link label</span><input value={draft.action?.label ?? ''} maxLength={120}
+            onChange={event => changeAction('label', event.target.value)} /></label>
+          <label><span>Contact link URL</span><input value={draft.action?.href ?? ''} maxLength={2048}
+            onChange={event => changeAction('href', event.target.value)} /></label>
+          <p className="project-page-editor__note">Optional. Use an HTTPS link or mailto address. Clear both fields to remove the link.</p>
         <label htmlFor={`${id}-theme`}><span>Theme</span><select id={`${id}-theme`} value={draft.theme} onChange={event => change('theme', event.target.value)}>
           <option value="cream">Cream</option><option value="light">Light</option><option value="dark">Dark</option>
         </select></label>

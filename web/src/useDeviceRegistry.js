@@ -47,6 +47,7 @@ const errorWords = {
   unsupported_op: 'This agent does not support that action. Update the agent and retry.',
   upstream_error: 'Home Assistant could not be reached on the device. Check Health and retry.',
   path_denied: 'This action is not allowed by the device catalog.',
+  no_wiz_light: 'No WiZ light answered at that address. Check the light is powered on and the IP is right. On a Mac, also allow Python under System Settings > Privacy & Security > Local Network.',
   invalid_args: 'The device could not accept these settings. Check them and retry.',
   not_linked: 'The Hue button has not been detected yet. Press it and try Continue again.',
   forbidden: 'Only a project owner can link devices. Ask your workspace owner to make you an owner of this project.',

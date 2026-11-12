@@ -153,15 +153,15 @@ def _object_text(value, code, names=("Name",)):
     return text
 
 
-def load_preset(preset):
-    """(FramePreset, FramePresetStore) loaded the way the evidence producer loads its intake's
-    active preset (Newtonsoft list reuse replicated, as the plugin reads it)."""
+def load_preset(preset, *, replicate_list_reuse=True):
+    """Historical evidence loading by default; current native loading explicitly replaces lists."""
     _object_text(preset, "FRAMES_PILES_PRESET_INVALID", ("Name", "PileTemplateName"))
     name = preset.get("Name")
     if type(name) is not str or not name.strip():
         raise FramesPilesError("FRAMES_PILES_PRESET_INVALID")
     try:
-        store = frames.load_frame_preset_store(json.dumps({"ActiveName": name, "Presets": [preset]}))
+        store = frames.load_frame_preset_store(json.dumps({"ActiveName": name, "Presets": [preset]}),
+                                               replicate_list_reuse=replicate_list_reuse)
         loaded = store.get_active()
         if store.corrupt or loaded.name is None or loaded.name.lower() != name.lower():
             raise FramesPilesError("FRAMES_PILES_PRESET_INVALID")
@@ -171,6 +171,16 @@ def load_preset(preset):
     if not (math.isfinite(width) and math.isfinite(height)) or width <= 0.0 or height <= 0.0:
         raise FramesPilesError("FRAMES_PILES_PRESET_INVALID")
     return loaded, store
+
+
+def load_current_preset(preset):
+    """Current native JsonStoreSettings.Replace, distinct from historical snapshot reuse.
+
+    Branch2025 f1d98c0f FramePresetStore.Load/Import use ObjectCreationHandling.Replace.
+    Preserve every supplied segment. Mechanical frame serialization does not
+    assert module-matrix groupability; the grouping converter validates that law.
+    """
+    return load_preset(preset, replicate_list_reuse=False)
 
 
 def load_pile_store(template, preset, preset_store):
@@ -383,6 +393,10 @@ def _operate(backend, tenant_id, drawing_id, operation, base, project_id, reques
                        terrain_view, summary, standing)
     document = ps.physical_document(state, drawing_units=units, source_sha256=request_sha256,
                                     capability=operation, parent=base, frame=frame)
+    # A companion in the existing immutable artifact store preserves original
+    # requests without changing established physical-state bytes or geometry.
+    ps.store_operation_parameters(backend, tenant_id, drawing_id, context, request, document,
+                                  previous=(head, head_document) if head is not None else None)
     published = ph.publish_physical_state(backend, tenant_id, drawing_id, document, project_id=project)
     return _result(operation, "published" if published["created"] else "retry", published["created"],
                    drawing_id, project, base, document, published["head"], terrain_view, summary, standing)
@@ -495,6 +509,65 @@ def generate_frames(backend, tenant_id, drawing_id, *, base, boundary, preset, d
                "preset": preset}
     return _operate(backend, tenant_id, drawing_id, GENERATE, base, project_id, request,
                     {"boundary": boundary, "preset": loaded}, drawing_units)
+
+
+def prepare_initial_frames(*, boundary, preset, drawing_units, current_native=False):
+    """Parameter-only preparation; canonical callers select the current native store law."""
+    if type(drawing_units) is not str or drawing_units not in ps.UNITS:
+        raise FramesPilesError("FRAMES_PILES_DRAWING_UNITS_INVALID")
+    boundary = _boundary(boundary)
+    loaded, _ = (load_current_preset if current_native else load_preset)(preset)
+    request = {"operation": GENERATE, "base": None, "drawing_units": drawing_units,
+               "boundary": boundary, "preset": json.loads(json.dumps(preset))}
+    state = {key: (list(value) if type(value) is list else value) for key, value in NEW_STATE}
+    try:
+        _generate(state, ps.UNITS[drawing_units], {"boundary": boundary, "preset": loaded})
+        terrain_standing(state, ps.UNITS[drawing_units])
+        document = ps.physical_document(state, drawing_units=drawing_units,
+            source_sha256=canonical_sha256(request), capability=GENERATE, parent=None,
+            frame=json.loads(json.dumps(ps.DEFAULT_FRAME)))
+    except frames.GroundFramesError as exc:
+        raise FramesPilesError(_kernel_refusal(exc)) from None
+    return document, {"schema": ps.PARAMETERS_SCHEMA, "operation": request,
+                      "generation": request, "piling": None}
+
+
+def continue_physical_document(document, parameters, operation, values, *, current_native=False):
+    """Run kernels without changing stored models; the caller selects the new preset's loading law."""
+    document = ps.decode_document(ps.encode_document(document))
+    parameters = json.loads(json.dumps(parameters, allow_nan=False))
+    state, units = document['state'], document['units']['drawing_units']
+    base = hashlib.sha256(ps.encode_document(document)).hexdigest()
+    if type(values) is not dict:
+        raise FramesPilesError('FRAMES_PILES_STATE_INVALID')
+    if operation == GENERATE and set(values) == {'boundary', 'preset', 'drawing_units'}:
+        if values['drawing_units'] != units:
+            raise FramesPilesError('FRAMES_PILES_UNITS_MISMATCH')
+        boundary = _boundary(values['boundary'])
+        preset, _ = (load_current_preset if current_native else load_preset)(values['preset'])
+        request = {'operation': GENERATE, 'base': base, 'boundary': boundary,
+                   'preset': values['preset'], 'drawing_units': units}
+        inputs = {'boundary': boundary, 'preset': preset}
+    elif operation == PILING and set(values) == {'preset', 'pile_template'}:
+        preset, presets = (load_current_preset if current_native else load_preset)(values['preset'])
+        inputs = {'preset': preset, 'pile_store': load_pile_store(values['pile_template'], preset, presets)}
+        request = {'operation': PILING, 'base': base, **values}
+    else:
+        raise FramesPilesError('FRAMES_PILES_STATE_INVALID')
+    terrain_standing(state, ps.UNITS[units])
+    try:
+        _RUN[operation](state, ps.UNITS[units], inputs)
+        terrain_standing(state, ps.UNITS[units])
+    except frames.GroundFramesError as exc:
+        raise FramesPilesError(_kernel_refusal(exc)) from None
+    result = ps.physical_document(state, drawing_units=units, source_sha256=canonical_sha256(request),
+                                  capability=operation, parent=base, frame=document['frame'])
+    parameters['operation'] = request
+    key = 'generation' if operation == GENERATE else 'piling'
+    history = parameters.setdefault(key + '_history', [parameters[key]] if parameters.get(key) else [])
+    history.append(request)
+    parameters[key] = request
+    return result, parameters
 
 
 def detect_collisions(backend, tenant_id, drawing_id, *, base, project_id=None):

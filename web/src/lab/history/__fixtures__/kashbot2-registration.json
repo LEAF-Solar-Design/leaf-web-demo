@@ -1,0 +1,35 @@
+{
+  "_provenance": "synthetic-from-contract",
+  "rows": [
+    {
+      "schema": "leaf.kashbot2-registration-state.v1", "state": "open",
+      "slot_ordinal": 1, "slot_class": "ECONOMIC",
+      "config_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "economic_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "source_sha": "cccccccccccccccccccccccccccccccccccccccc",
+      "days_utc_first": "2026-11-06", "days_utc_last": "2026-11-30",
+      "days_reconciled_green": 2, "clean_days_remaining": 8, "looks": 5, "lookers": 3,
+      "received_at": "2026-11-05T00:05:00.000Z"
+    },
+    {
+      "schema": "leaf.kashbot2-registration-state.v1", "state": "closed",
+      "slot_ordinal": 2, "slot_class": "FLOOR",
+      "config_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "economic_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "source_sha": "cccccccccccccccccccccccccccccccccccccccc",
+      "days_utc_first": "2026-10-01", "days_utc_last": "2026-10-31",
+      "days_reconciled_green": null, "clean_days_remaining": null, "looks": null, "lookers": null,
+      "received_at": "2026-11-05T00:05:00.000Z"
+    },
+    {
+      "schema": "leaf.kashbot2-registration-state.v1", "state": "voided",
+      "slot_ordinal": 3, "slot_class": "REPAIR",
+      "config_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "economic_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "source_sha": "cccccccccccccccccccccccccccccccccccccccc",
+      "days_utc_first": "2026-12-31", "days_utc_last": "2026-12-31",
+      "days_reconciled_green": null, "clean_days_remaining": null, "looks": null, "lookers": null,
+      "received_at": "2026-11-05T00:05:00.000Z"
+    }
+  ]
+}

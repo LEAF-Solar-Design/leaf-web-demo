@@ -117,6 +117,12 @@ def validate_claim(value, scope, now):
     require(type(job['deadline']) in (int, float) and math.isfinite(job['deadline'])
             and now < job['deadline'] <= now + 3600)
     d = job['descriptor']
+    if type(d) is dict and d.get('schema') == NATIVE_SCHEMA:
+        try:
+            native_descriptor(d, scope['org_id'], scope['project_id'])
+        except (ValueError, TypeError, KeyError):
+            raise WorkerError('invalid-protocol') from None
+        return job
     require(type(d) is dict and set(d) == {'schema', 'target', 'org_id', 'project_id',
                                          'revision', 'document_sha256', 'archive_sha256', 'byte_size'})
     require(d['schema'] == 'leaf.project-preview-source.v1' and d['target'] == 'ios-simulator')
@@ -129,6 +135,12 @@ def validate_claim(value, scope, now):
 
 def verify_source(raw, descriptor):
     """Treat even authenticated ZIP entries as hostile until exact regeneration."""
+    if descriptor.get('schema') == NATIVE_SCHEMA:
+        try:
+            verify_native_archive(raw, descriptor)
+            return raw
+        except (ValueError, TypeError, KeyError, OSError, zipfile.BadZipFile, UnicodeError):
+            raise WorkerError('source-integrity') from None
     template = producer()
     require(type(raw) is bytes and len(raw) == descriptor['byte_size']
             and len(raw) <= template.MAX_ARCHIVE_BYTES
@@ -344,7 +356,16 @@ def make_receipt(job, scope, facts, image):
     keys = {'simulator_udid', 'simulator_runtime', 'bundle_id', 'allocator_ticket',
             'build_exit_code', 'install_exit_code', 'launch_exit_code',
             'cleanup_complete', 'allocator_release_confirmed', 'screenshot_sha256'}
+    native_source = job['descriptor'].get('schema') == NATIVE_SCHEMA
+    if native_source:
+        keys.add('build_artifact')
     require(type(facts) is dict and set(facts) == keys, 'invalid-native-facts')
+    if native_source:
+        try:
+            validate_native_artifact(facts['build_artifact'], job['descriptor'])
+        except (ValueError, TypeError, KeyError):
+            raise WorkerError('invalid-native-facts') from None
+        require(facts.get('bundle_id') == facts['build_artifact']['bundle_id'], 'invalid-native-facts')
     canonical_uuid(facts['simulator_udid'])
     for key in ('simulator_runtime', 'bundle_id', 'allocator_ticket'):
         require(type(facts[key]) is str and SAFE.fullmatch(facts[key]), 'invalid-native-facts')
@@ -369,8 +390,7 @@ def run_once(scope, http, native, output, *, clock=time.time, journal=None):
     failure_settlement = 'not-attempted-authority-lost'
     try:
         guard.record({'event': 'claim', 'job_id': job['job_id'], 'attempt': job['attempt'],
-                      'source': {k: job['descriptor'][k] for k in
-                                 ('revision', 'document_sha256', 'archive_sha256')},
+                      'source': native_identity(job['descriptor']),
                       'deadline': job['deadline']})
         guard.start()
         raw = http.request('GET', job['job_id'] + '/source?' + urllib.parse.urlencode(guard.identity),
@@ -428,6 +448,9 @@ def run_once(scope, http, native, output, *, clock=time.time, journal=None):
                      'failure_settlement': failure_settlement,
                      **{k: report[k] for k in ('cleanup_complete', 'allocator_release_confirmed')
                                  if type(report.get(k)) is bool}}
+            if job['descriptor'].get('schema') == NATIVE_SCHEMA and type(report.get('build_artifact')) is dict:
+                validate_native_artifact(report['build_artifact'], job['descriptor'])
+                local['build_artifact'] = report['build_artifact']
             Path(output).mkdir(parents=True, exist_ok=True)
             with (Path(output) / (job['job_id'] + '-' + str(job['attempt']) + '-failure.json')).open('x') as stream:
                 json.dump(local, stream)
@@ -455,6 +478,205 @@ def main(argv=None):
         result = {'stage': 'worker', 'result': 'unavailable'}
     print(json.dumps(result))
     return 0 if result['result'] in ('empty', 'complete') else 1
+
+
+
+
+# Captured from nativeProjectSourceProfile.ts. Tests bind these bytes to that producer.
+NATIVE_SCHEMA = 'leaf.project-repository-preview-source.v1'
+NATIVE_PROFILE = 'ios-swiftui-xcodegen-v1'
+NATIVE_LIMIT = 16 * 1024 * 1024
+NATIVE_MANIFEST = '.leaf-native-sdk-manifest.json'
+NATIVE_FIELDS = frozenset(('schema', 'target', 'source_profile', 'org_id', 'project_id',
+    'actor_binding_id', 'repo_key', 'source_request_id', 'source_operation', 'source_version',
+    'receipt_digest', 'source_commit', 'source_tree', 'material_refs', 'bundle_sha256',
+    'archive_sha256', 'byte_size'))
+NATIVE_APP_SOURCE = 'import SwiftUI\n\n@main\nstruct LeafProjectApp: App {\n    var body: some Scene {\n        WindowGroup {\n            ContentView()\n        }\n    }\n}\n'
+NATIVE_PROJECT_SPEC = 'name: LeafProject\noptions:\n  deploymentTarget:\n    iOS: "17.0"\nsettings:\n  base:\n    SWIFT_VERSION: "5.0"\n    IPHONEOS_DEPLOYMENT_TARGET: "17.0"\n    SDKROOT: iphonesimulator\n    SUPPORTED_PLATFORMS: iphonesimulator\n    SUPPORTS_MACCATALYST: NO\n    CODE_SIGNING_ALLOWED: NO\n    CODE_SIGNING_REQUIRED: NO\ntargets:\n  LeafProject:\n    type: application\n    platform: iOS\n    sources:\n      - path: Sources\n      - path: Resources/Input\n        type: folder\n        buildPhase: resources\n        optional: true\n    settings:\n      base:\n        PRODUCT_BUNDLE_IDENTIFIER: ${bundleId}\n        PRODUCT_NAME: LeafProject\n        GENERATE_INFOPLIST_FILE: YES\n        INFOPLIST_KEY_UILaunchScreen_Generation: YES\n        TARGETED_DEVICE_FAMILY: "1,2"\n        MARKETING_VERSION: "1.0"\n        CURRENT_PROJECT_VERSION: "1"\n'
+
+
+def _native_need(value):
+    if not value:
+        raise ValueError('Invalid Native source custody.')
+
+
+def _native_json(value):
+    return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=True,
+                      allow_nan=False).encode()
+
+
+def native_identity(descriptor):
+    if descriptor.get('schema') == NATIVE_SCHEMA:
+        return {k: descriptor[k] for k in ('schema', 'source_profile', 'repo_key',
+            'source_request_id', 'source_version', 'receipt_digest', 'source_commit',
+            'source_tree', 'archive_sha256')}
+    return {k: descriptor[k] for k in ('revision', 'document_sha256', 'archive_sha256')}
+
+
+def native_descriptor(value, org, project):
+    from uuid import UUID
+    _native_need(type(value) is dict and set(value) == NATIVE_FIELDS)
+    d = dict(value)
+    _native_need(d['schema'] == NATIVE_SCHEMA and d['target'] == 'ios-simulator'
+        and d['source_profile'] == NATIVE_PROFILE and d['source_operation'] == 'create'
+        and d['org_id'] == org and d['project_id'] == project)
+    for key in ('org_id', 'project_id', 'actor_binding_id', 'repo_key', 'source_request_id'):
+        _native_need(type(d[key]) is str and str(UUID(d[key])) == d[key] and UUID(d[key]).int != 0)
+    for key in ('receipt_digest', 'bundle_sha256', 'archive_sha256', 'source_commit', 'source_tree'):
+        size = 40 if key in ('source_commit', 'source_tree') else 64
+        _native_need(type(d[key]) is str and re.fullmatch('[0-9a-f]{'+str(size)+'}', d[key]) is not None)
+    _native_need(type(d['source_version']) is int and 1 <= d['source_version'] <= 2147483647
+        and type(d['byte_size']) is int and 0 < d['byte_size'] <= NATIVE_LIMIT)
+    refs = d['material_refs']
+    _native_need(type(refs) is list and 1 <= len(refs) <= 8)
+    ids, total = set(), 0
+    for ref in refs:
+        _native_need(type(ref) is dict and set(ref) == {'material_id', 'sha256', 'byte_size', 'path'})
+        mid = ref['material_id']
+        _native_need(type(mid) is str and str(UUID(mid)) == mid and UUID(mid).int != 0 and mid not in ids)
+        ids.add(mid)
+        _native_need(type(ref['sha256']) is str and re.fullmatch('[0-9a-f]{64}', ref['sha256']) is not None
+            and type(ref['byte_size']) is int and 0 < ref['byte_size'] <= 1048576
+            and ref['path'] in ('Resources/Input/'+mid+'.txt', 'Resources/Input/'+mid+'.json'))
+        total += ref['byte_size']
+    _native_need(total <= 4194304)
+    return d
+
+
+def _native_path(path):
+    _native_need(type(path) is str and 0 < len(path.encode('utf-8')) <= 512
+        and not path.startswith('/') and re.fullmatch(r'[A-Za-z0-9_./-]+', path) is not None)
+    for part in path.split('/'):
+        _native_need(part not in ('', '.', '..') and not part.endswith('.')
+            and re.fullmatch(r'(?i:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\..*)?', part) is None)
+    return path
+
+
+def native_tree(files):
+    """Git object/tree hashing over the complete regular-file current tree."""
+    tree = {}
+    aliases = set()
+    for path, (mode, raw) in files.items():
+        _native_path(path)
+        _native_need(path.casefold() not in aliases and mode in ('100644', '100755') and type(raw) is bytes)
+        aliases.add(path.casefold())
+        parts = path.split('/')
+        node = tree
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+            _native_need(type(node) is dict)
+        _native_need(parts[-1] not in node)
+        node[parts[-1]] = (mode, hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).digest())
+    def digest(node):
+        entries = []
+        for name, item in node.items():
+            directory = type(item) is dict
+            mode, oid = ('40000', digest(item)) if directory else item
+            entries.append(((name+('/' if directory else '')).encode(), mode.encode()+b' '+name.encode()+b'\0'+oid))
+        raw = b''.join(value for _, value in sorted(entries))
+        return hashlib.sha1(b'tree '+str(len(raw)).encode()+b'\0'+raw).digest()
+    return digest(tree).hex()
+
+
+def native_files_policy(files, descriptor):
+    _native_need(0 < len(files) <= 1000 and sum(len(v[1]) for v in files.values()) <= NATIVE_LIMIT)
+    _native_need(native_tree(files) == descriptor['source_tree'])
+    bundle = 'private.leaf.project.p'+descriptor['project_id'].replace('-', '')
+    expected = NATIVE_PROJECT_SPEC.replace('${bundleId}', bundle).encode()
+    _native_need(files.get('project.yml') == ('100644', expected)
+        and files.get('Sources/LeafProjectApp.swift') == ('100644', NATIVE_APP_SOURCE.encode()))
+    content = files.get('Sources/ContentView.swift')
+    _native_need(content is not None and content[0] == '100644' and bool(content[1].strip()))
+    total = 0
+    for path, (mode, raw) in files.items():
+        _native_need(len(raw) <= NATIVE_LIMIT)
+        if path.startswith('Sources/'):
+            _native_need(mode == '100644' and path.endswith('.swift') and len(raw) <= 1048576)
+            text = raw.decode('utf-8')
+            _native_need(path == 'Sources/LeafProjectApp.swift' or re.search(r'@\s*main\b', text) is None)
+        if path.startswith('Resources/Input/'):
+            _native_need(mode == '100644' and len(raw) <= 1048576)
+            total += len(raw)
+    _native_need(total <= 4194304)
+    for ref in descriptor['material_refs']:
+        mode, raw = files.get(ref['path'], (None, None))
+        _native_need(mode == '100644' and type(raw) is bytes and len(raw) == ref['byte_size']
+            and hashlib.sha256(raw).hexdigest() == ref['sha256'])
+        raw.decode('utf-8')
+
+
+def native_archive(files, descriptor):
+    native_files_policy(files, descriptor)
+    _native_need(NATIVE_MANIFEST not in files)
+    manifest = {'schema': 'leaf.native-sdk-tree.v1', 'source': native_identity(descriptor),
+                'files': [{'path': p, 'mode': mode,
+                    'blob': hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).hexdigest()}
+                    for p, (mode, raw) in sorted(files.items())]}
+    # Archive digest is an outer descriptor field, never circular manifest input.
+    manifest['source'].pop('archive_sha256')
+    members = dict(files, **{NATIVE_MANIFEST: ('100644', _native_json(manifest))})
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_STORED) as archive:
+        for path, (mode, raw) in sorted(members.items()):
+            info = zipfile.ZipInfo(path, (1980, 1, 1, 0, 0, 0))
+            info.create_system = 3
+            info.external_attr = (stat.S_IFREG | (0o755 if mode == '100755' else 0o644)) << 16
+            archive.writestr(info, raw)
+    raw = output.getvalue()
+    _native_need(0 < len(raw) <= NATIVE_LIMIT)
+    return raw
+
+
+def verify_native_archive(raw, descriptor):
+    d = native_descriptor(descriptor, descriptor['org_id'], descriptor['project_id'])
+    _native_need(type(raw) is bytes and len(raw) == d['byte_size'] and len(raw) <= NATIVE_LIMIT
+        and hashlib.sha256(raw).hexdigest() == d['archive_sha256'])
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        infos = archive.infolist()
+        _native_need(1 < len(infos) <= 1001 and len({i.filename for i in infos}) == len(infos)
+            and sum(i.file_size for i in infos) <= NATIVE_LIMIT and not archive.comment)
+        files = {}
+        for i in infos:
+            _native_path(i.filename)
+            _native_need(not i.is_dir() and not i.flag_bits & 1 and not i.extra and not i.comment
+                and i.compress_type == zipfile.ZIP_STORED and i.file_size <= NATIVE_LIMIT
+                and stat.S_IFMT(i.external_attr >> 16) == stat.S_IFREG)
+            mode = '100755' if i.external_attr >> 16 & 0o111 else '100644'
+            if i.filename != NATIVE_MANIFEST:
+                files[i.filename] = (mode, archive.read(i))
+        native_files_policy(files, d)
+        _native_need(native_archive(files, d) == raw)
+    return files
+
+
+def validate_native_artifact(value, descriptor):
+    _native_need(type(value) is dict and set(value) == {'source', 'bundle_id', 'sdk',
+        'app_tree_sha256', 'file_count', 'xcodegen_exit_code', 'xcode_version', 'xcodegen_version', 'sdk_version'})
+    _native_need(value['source'] == native_identity(descriptor) and value['sdk'] == 'iphonesimulator'
+        and value['bundle_id'] == 'private.leaf.project.p'+descriptor['project_id'].replace('-', '')
+        and type(value['app_tree_sha256']) is str and re.fullmatch('[0-9a-f]{64}', value['app_tree_sha256']) is not None
+        and type(value['file_count']) is int and 0 < value['file_count'] <= 10000
+        and type(value['xcodegen_exit_code']) is int and value['xcodegen_exit_code'] == 0)
+    for key in ('xcode_version', 'xcodegen_version', 'sdk_version'):
+        text = value[key]
+        _native_need(type(text) is str and 0 < len(text) <= 256
+            and all(c in '\n\r\t' or 32 <= ord(c) < 127 for c in text))
+    return value
+
+
+def validate_native_identity(value):
+    from uuid import UUID
+    fields = {'schema', 'source_profile', 'repo_key', 'source_request_id', 'source_version',
+              'receipt_digest', 'source_commit', 'source_tree', 'archive_sha256'}
+    _native_need(type(value) is dict and set(value) == fields
+        and value['schema'] == NATIVE_SCHEMA and value['source_profile'] == NATIVE_PROFILE
+        and type(value['source_version']) is int and 1 <= value['source_version'] <= 2147483647)
+    for key in ('repo_key', 'source_request_id'):
+        _native_need(type(value[key]) is str and str(UUID(value[key])) == value[key] and UUID(value[key]).int != 0)
+    for key in ('receipt_digest', 'source_commit', 'source_tree', 'archive_sha256'):
+        size = 40 if key in ('source_commit', 'source_tree') else 64
+        _native_need(type(value[key]) is str and re.fullmatch('[0-9a-f]{'+str(size)+'}', value[key]) is not None)
+    return value
 
 
 if __name__ == '__main__':

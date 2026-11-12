@@ -1365,6 +1365,8 @@ def restore_drawing_version(tenant_id: str, drawing_id: str, target_version: int
                         apply_id=f"restore-{source_v}-from-{parent_version}",
                         source_version=parent_version, source_sha256=parent_entry["sha256"],
                         source_rev=parent_rev, restore_version=source_v)
+                    if "physical" in source_bundle:
+                        graph_bundle["physical"] = source_bundle["physical"]
                 try:
                     new_version = write_loop._put_bytes_version(
                         backend, tenant_id, drawing_id, source_bytes,

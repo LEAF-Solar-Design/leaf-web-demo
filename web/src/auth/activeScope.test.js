@@ -2,8 +2,32 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { setStoredOrgId } from '../api.js'
 import { notifyActiveScopeChanged, readActiveScope, subscribeActiveScope } from './activeScope.js'
+import { serviceSession } from '../lib/serviceAuthSession.js'
 
 const token = (claims) => `header.${btoa(JSON.stringify(claims))}.signature`
+
+it('uses only verified service issuer/subject/org and preserves injected human scopes', async () => {
+  const service = serviceSession()
+  const selector = '11111111-1111-4111-8111-111111111111'
+  localStorage.setItem('leaf.jwt', token({ iss: 'human', sub: 'peer', org_id: 'peer-org' }))
+  localStorage.setItem('leaf.org_id', 'peer-org')
+  try {
+    service.select(selector)
+    expect(readActiveScope()).toBeNull()
+    const foreign = { getItem: key => key === 'leaf.jwt' ? token({ iss: 'injected', sub: 'test' }) : null }
+    expect(readActiveScope(foreign)).toBe(JSON.stringify(['injected', 'test', '']))
+    const identity = { iss: 'https://leafautomation.us.auth0.com/', subject: 'machine@clients',
+      sub: 'machine@clients', org_id: 'real-org', tenant_id: 'real-tenant', principal_type: 'service_admin' }
+    await service.probe({ origin: window.location.origin, fetchImpl: async () => ({ ok: true, json: async () => ({
+      authenticated: true, identity, binding_id: selector, expires_at: new Date(Date.now() + 60000).toISOString(),
+    }) }) })
+    const scope = JSON.stringify([identity.iss, identity.sub, identity.org_id])
+    expect(readActiveScope()).toBe(scope)
+    expect(localStorage.getItem('leaf.org_id')).toBe('peer-org')
+    service.logout()
+    expect(readActiveScope()).toBeNull()
+  } finally { service.human() }
+})
 
 afterEach(() => { vi.restoreAllMocks(); localStorage.clear() })
 

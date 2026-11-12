@@ -281,6 +281,23 @@ export function createCatalogController({ services, adapters = {}, context = {} 
       .flatMap((family) => family.capabilities || []).find((tool) => tool.name === name)
     if (projectScope()) {
       const availability = entry?.availability
+      // A generic drawing read joins the server's project read executor, pinned to the exact
+      // canonical version. The server derives project_read from that executor's own admission
+      // rule; it needs a current project catalog receipt but no Solar intent.
+      const projectDrawing = availability?.project_read === true || availability?.project_write === true
+      if (entry && projectDrawing && solarView(entry).state === 'absent') {
+        if (!state.projectCatalog?.isCurrent()) return 'project_request_required'
+        if (!AVAILABILITY_KEYS.every((key) => availability[key] === true)) {
+          return availability.refusal_reasons?.[0] || 'capability_not_ready'
+        }
+        return null
+      }
+      // A non-Solar tool the server typed unavailable (no project executor, e.g. drawing.write)
+      // keeps that typed reason instead of a generic request refusal.
+      if (entry && availability?.project_read === false && !projectDrawing && solarView(entry).state === 'absent' &&
+          typeof availability.refusal_reasons?.[0] === 'string') {
+        return availability.refusal_reasons[0]
+      }
       if (!entry || !acceptedPreview || acceptedPreview !== projectFingerprint() ||
           !state.projectCatalog?.isCurrent()) return 'project_request_required'
       if (availability?.admission_checked !== true || !availability.admission ||
@@ -329,7 +346,9 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   }
 
   const isUnmatchedDecision = (decision) => decision?.lane === 'run' && !decision.slash &&
-    (decision.tool == null || (typeof decision.tool === 'string' && !decision.tool.trim()))
+    (decision.tool == null || (typeof decision.tool === 'string' && !decision.tool.trim()) ||
+      ((projectScope() || current.projectConversationScope) &&
+        Array.isArray(current.surfaceFamilyIds) && current.surfaceFamilyIds.length === 0))
 
   const commitDecision = (decision, { routeOutcome = 'invalidated', requestText = null } = {}) => {
     const unmatched = isUnmatchedDecision(decision)
@@ -533,7 +552,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     })
   }
 
-  const dispatch = async (override, { allowSecretOnce = false } = {}) => {
+  const dispatch = async (override, { allowSecretOnce = false, images = [] } = {}) => {
     // --- credential refusal: THE RENDER CHANNEL, not the guard (round 3) ---
     // The GUARD now sits on the wire (lib/secretGuardTransport.js, called by
     // api.nlPrompt and converse.postMessage). This function no longer decides
@@ -553,7 +572,8 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     // point, so a new bar cannot be added around it.
     //
     const activeDraft = ensureDraft()
-    const text = (typeof override === 'string' ? override : state.prompt).trim()
+    const originalText = typeof override === 'string' ? override : state.prompt
+    const text = originalText.trim()
     if (!text || state.routing || current.running) return undefined
     const generation = ++dispatchGeneration
     const scope = projectFingerprint()
@@ -607,6 +627,12 @@ export function createCatalogController({ services, adapters = {}, context = {} 
         return commitDecision(decision, { requestText: text })
       }
       const confidence = Number(decision.confidence) || 0
+      if (decision.lane === 'build' && adapters.openProjectSource) {
+        const handled = await adapters.openProjectSource(originalText, { allowSecretOnce,
+          ...(Array.isArray(images) && images.length ? { images } : {}) })
+        if (!requestIsCurrent()) return undefined
+        if (handled) return decision
+      }
       const chipOnly = current.agentDisabled ||
         (decision.lane === 'run' && !unmatched && !!decision.tool && confidence >= thresholds.CHIP_ONLY)
 
@@ -629,7 +655,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
             if (!requestIsCurrent()) return undefined
             await adapters.startAgentTurn(text, hint, { allowSecretOnce })
             if (!requestIsCurrent()) return undefined
-            publish({ agentMode: 'race' })
+            publish({ agentMode: 'race', prompt: '' })
           } catch (error) {
             if (!requestIsCurrent()) return undefined
             // A credential refusal is not an agent outage. It must reach the
@@ -644,7 +670,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
             if (!requestIsCurrent()) return undefined
             await adapters.startAgentTurn(text, hint, { allowSecretOnce })
             if (!requestIsCurrent()) return undefined
-            publish({ agentMode: 'primary' })
+            publish({ agentMode: 'primary', prompt: '' })
           } catch (error) {
             if (!requestIsCurrent()) return undefined
             if (isSecretRefused(error)) throw error
@@ -787,7 +813,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
       const modeChanged = Object.prototype.hasOwnProperty.call(next, 'mock') && next.mock !== current.mock
       const pausedChanged = Object.prototype.hasOwnProperty.call(next, 'guestReadsPaused') &&
         !!next.guestReadsPaused !== !!current.guestReadsPaused
-      const drawingChanged = ['drawingId', 'drawing_id', 'projectId', 'project_id',
+      const drawingChanged = ['drawingId', 'drawing_id', 'projectId', 'project_id', 'projectConversationScope',
         'drawingVersion', 'drawing_version'].some((key) =>
         Object.prototype.hasOwnProperty.call(next, key) && next[key] !== current[key])
       const derivedChanged = Object.prototype.hasOwnProperty.call(next, 'entitlements') &&

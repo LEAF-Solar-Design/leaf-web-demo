@@ -3,6 +3,8 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { canonicalJSON, compatible } from '../contract.js';
+import { sha256Hex } from './sha256.js';
+import { hasOperator } from './ops.js';
 import cases from '../contract/fixtures/ops-conformance.json';
 import { contract, runtimeValue, sourceAge, evaluateOperation, evaluateGraph, exportValue,
   createPoller, pollIntervalMs, createStudioSources, MAX_ROWS, runOperator } from './index.js';
@@ -15,6 +17,8 @@ const firstCut = fixture('graphs/first-cut.json');
 const golden = fixture('lab-embed.v1.golden.json');
 const ports = fixture('port-compat.v1.json');
 const vectors = fixture('digest-vectors.json');
+const placementCases = JSON.parse(readFileSync(resolve(process.cwd(), '../server/tests/fixtures/lab-placement-cases.v1.json'), 'utf8'));
+const configManifest = placementCases.cases.find(item => item.name === 'settings-digest').manifest;
 
 const clone = value => JSON.parse(JSON.stringify(value));
 const trusted = Object.fromEntries(blocks.manifests.map(block => [`${block.id}@${block.version.semver}`, block]));
@@ -89,6 +93,57 @@ function chain(count = 3, effect = 'pure') {
     },
   };
 }
+
+describe('placement execution boundaries', () => {
+  function single(manifest, settings = {}) {
+    const port = Object.keys(manifest.outputs)[0];
+    return { registry: { [`${manifest.id}@${manifest.version.semver}`]: manifest }, graph: {
+      schema: 'leaf.lab-graph.v1', blocks: [{ id: 'block', registry: {
+        id: manifest.id, version: manifest.version.semver, code_sha256: manifest.version.code_sha256,
+      }, settings }], pipes: [], outputs: { result: { node: 'block', port } },
+    } };
+  }
+  it.each([0, 4, -1, 100])('hashes only the config settings, synchronously (%i)', k_min => {
+    const settings = { k_min };
+    const { graph, registry } = single(configManifest, settings);
+    const result = evaluateGraph(graph, registry);
+    expect(result.outputs.result).toMatchObject({ data: sha256Hex(canonicalJSON(settings)), mode: 'scalar', error: null });
+    expect(result.outputs.result.data).toBe(createHash('sha256').update(canonicalJSON(settings)).digest('hex'));
+  });
+  it('inherits config input metadata without changing scalar mode', () => {
+    const config = clone(configManifest);
+    const source = manifest('host-source', 'read');
+    source.outputs.result = pin({ type: 'number' }); source.sample_output = { result: 7 };
+    const { graph, registry } = single(config, { k_min: 4 });
+    registry['host-source@1.0.0'] = source;
+    graph.blocks.unshift({ id: 'source', registry: { id: source.id, version: '1.0.0', code_sha256: source.version.code_sha256 }, settings: {} });
+    graph.pipes = [{ from: { node: 'source', port: 'result' }, to: { node: 'block', port: 'value' } }];
+    const result = evaluateGraph(graph, registry, { sources: { source: runtimeValue(7, {
+      as_of: 10, stale: true, simulated: true, truncated: true,
+    }) } });
+    expect(result.outputs.result).toMatchObject({ data: sha256Hex('{"k_min":4}'), mode: 'scalar', error: null,
+      host_tainted: true, as_of: 10, stale: true, simulated: true, truncated: true });
+  });
+  it('keeps config output pin validation', () => {
+    const config = clone(configManifest);
+    config.outputs['config-hash'].schema = { type: 'number' };
+    config.sample_output['config-hash'] = 0;
+    const { graph, registry } = single(config, { k_min: 4 });
+    expect(evaluateGraph(graph, registry).outputs.result).toMatchObject({ data: null, error: { code: 'output-refused' } });
+  });
+  // Builtins with a pure operator evaluate here; every other snapshot block is a placeholder that runs on the bot.
+  it.each(blocks.manifests.filter(manifest => !(manifest.kind === 'builtin' && hasOperator(manifest.id))))('refuses the placeholder $id with no data', manifest => {
+    const settings = Object.fromEntries((manifest.settings_schema.required || []).map(name =>
+      [name, manifest.settings_schema.properties[name].minimum ?? 0]));
+    const { graph, registry } = single(manifest, settings);
+    expect(evaluateGraph(graph, registry).outputs.result).toMatchObject({ data: null, error: { code: 'runs_on_bot' } });
+  });
+  it.each([['host-intent', 'settings'], ['kashbot2-config', 'builtin']])('does not hash %s as %s', (id, kind) => {
+    const manifest = { ...clone(configManifest), id, kind };
+    const { graph, registry } = single(manifest, { k_min: 4 });
+    expect(evaluateGraph(graph, registry).outputs.result).toMatchObject({ data: null, error: { code: 'browser-execution-refused' } });
+  });
+});
 
 describe('fixed operators and metadata', () => {
   const data = runtimeValue([{ n: 3 }, { n: 1 }, { n: 2 }], { host_tainted: true, as_of: 10, simulated: true, stale: true, truncated: true });

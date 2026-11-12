@@ -1,15 +1,21 @@
 import React from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { afterEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import ProjectSolarGraphForm from './ProjectSolarGraphForm.jsx'
 import { SEED_SETTINGS } from './solarSettingsModel.js'
 import { createProjectSolarRunController } from './createProjectSolarRunController.js'
 import { createSolarProjectClient } from './solarProjectClient.js'
 import workerUnavailable from './__fixtures__/workerUnavailable.json'
 
+const realSetTimeout = globalThis.setTimeout
+beforeEach(() => {
+  // Real-timer tests only need the 300 ms input debounce to elapse; the W1C-28 fake-timer tests still pin 300.
+  globalThis.setTimeout = (fn, delay, ...rest) => realSetTimeout(fn, delay === 300 ? 0 : delay, ...rest)
+})
 afterEach(() => {
   cleanup()
   vi.useRealTimers()
+  globalThis.setTimeout = realSetTimeout
 })
 
 const binding = { kind: 'project', organization_id: '11111111-1111-1111-1111-111111111111',

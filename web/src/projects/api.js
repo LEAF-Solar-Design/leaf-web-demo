@@ -31,6 +31,7 @@
 import { config, noteUnauthorized } from '../api.js'
 import { WORKSPACE_ORG_KEY } from '../controllers/workspace/createWorkspaceController.js'
 import { readActiveScope } from '../auth/activeScope.js'
+import { serviceState, serviceHeaders, serviceRequestAuthority } from '../lib/serviceAuthSession.js'
 
 const AUTH_KEY = 'leaf.jwt'
 // The actor's platform identity binding. platform/api.py has NO
@@ -51,10 +52,12 @@ function readStored(key) {
 }
 
 export function getStoredActorBindingId() {
+  if (serviceState().mode) return null
   return readStored(ACTOR_BINDING_KEY)
 }
 
 export function setStoredActorBindingId(id) {
+  if (serviceState().mode) return
   try {
     if (id) localStorage.setItem(ACTOR_BINDING_KEY, id)
     else localStorage.removeItem(ACTOR_BINDING_KEY)
@@ -76,6 +79,10 @@ function requireUuid(value, label) {
 
 // Read at call time (not module load) so a sign-in mid-session is picked up.
 function identityHeaders(orgId) {
+  const service = serviceState()
+  if (service.mode) {
+    return { ...serviceHeaders(config.apiBase), ...(service.identity?.org_id ? { 'X-Org-Id': service.identity.org_id } : {}) }
+  }
   const headers = {}
   const tok = readStored(AUTH_KEY)
   if (tok) headers.Authorization = `Bearer ${tok}`
@@ -124,8 +131,9 @@ async function request(path, opts = {}) {
   }
   const headers = { ...(options.headers || {}), ...identityHeaders(options.orgId) }
   const { orgId: _ignored, ...init } = options
+  const serviceAuthority = serviceRequestAuthority()
   const res = await fetch(`${config.apiBase}${path}`, { ...init, headers })
-  if (res.status === 401) noteUnauthorized(res, path, headers.Authorization)
+  if (res.status === 401) noteUnauthorized(res, path, headers.Authorization, { serviceAuthority })
   if (!res.ok) {
     let body = null
     try { body = await res.clone().json() } catch { /* non-JSON error body */ }
@@ -165,6 +173,51 @@ export function readProjectPhotoPreview(projectId, materialId, { signal, expecte
   return request(`/api/projects/${id}/materials/${material}/content?variant=preview`, {
     signal, expectedScope, responseType: 'blob', cache: 'no-store',
   })
+}
+
+export function listProjectReferences(projectId, { cursor, signal, expectedScope } = {}) {
+  const id = requireUuid(projectId, 'project')
+  const after = cursor ? requireUuid(cursor, 'reference cursor') : null
+  return request(`/api/projects/${id}/reference-files${after ? `?cursor=${encodeURIComponent(after)}` : ''}`, {
+    signal, expectedScope, cache: 'no-store',
+  })
+}
+
+export function uploadProjectReference(projectId, file, { signal, expectedScope } = {}) {
+  const id = requireUuid(projectId, 'project')
+  const name = String(file?.name || '').toLowerCase()
+  const extension = name.endsWith('.jsonl.gz') ? 'jsonl.gz' : name.split('.').pop()
+  const mediaType = { mov: 'video/quicktime', txt: 'text/plain', json: 'application/json', 'jsonl.gz': 'application/gzip' }[extension]
+  const maximum = ['mov', 'jsonl.gz'].includes(extension) ? 64 * 1024 * 1024 : 8 * 1024 * 1024
+  if (!mediaType || !file?.size || file.size > maximum) {
+    throw new Error('Choose an original MOV or gzip JSONL up to 64 MiB, or UTF-8 TXT/JSON up to 8 MiB.')
+  }
+  if (file.type && file.type !== 'application/octet-stream' && file.type.split(';')[0].toLowerCase() !== mediaType) {
+    throw new Error('The file extension and content type must agree (MOV, UTF-8 TXT/JSON or gzip JSONL).')
+  }
+  return request(`/api/projects/${id}/reference-files?filename=${encodeURIComponent(file.name)}`, {
+    method: 'POST', body: file, headers: { 'Content-Type': mediaType }, signal, expectedScope,
+  })
+}
+
+export function readProjectReferenceOriginal(projectId, materialId, { signal, expectedScope } = {}) {
+  const id = requireUuid(projectId, 'project')
+  const material = requireUuid(materialId, 'reference')
+  return request(`/api/projects/${id}/reference-files/${material}/content`, {
+    signal, expectedScope, responseType: 'blob', cache: 'no-store',
+  })
+}
+
+export async function registerProjectArloInput(projectId, materialId, { orgId, key, signal, expectedScope }) {
+  const project = requireUuid(projectId, 'project')
+  const material = requireUuid(materialId, 'reference')
+  const org = requireUuid(orgId, 'organization')
+  const result = await request(`/api/projects/${project}/reference-files/${material}/arlo-input`, {
+    method: 'POST', orgId: org, signal, expectedScope,
+    headers: { 'Idempotency-Key': key },
+  })
+  requireUuid(result?.input_version_id, 'ARLO input version')
+  return result
 }
 
 function mutation(method, body) {
@@ -272,6 +325,16 @@ export async function cloneProject(projectId, name) {
   const trimmed = String(name ?? '').trim()
   if (!trimmed) throw new Error('A clone needs a name before it can be created.')
   return request(`/api/projects/${id}/clone`, mutation('POST', { name: trimmed }))
+}
+
+// POST /api/projects/{id}/rename {name} -> {project_id, status, name,
+// previous_name, receipt, replayed}. The project keeps its id and everything in
+// it; a name another live project holds is refused with 409 and nothing changes.
+export async function renameProject(projectId, name) {
+  const id = requireUuid(projectId, 'project')
+  const trimmed = String(name ?? '').trim()
+  if (!trimmed) throw new Error('A project needs a name before it can be renamed.')
+  return request(`/api/projects/${id}/rename`, mutation('POST', { name: trimmed }))
 }
 
 // POST /api/projects/{id}/export -> {export, export_sha256, file_count,

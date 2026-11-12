@@ -89,6 +89,37 @@ def test_valid_query(proxy):
     assert proxy.response.closed
 
 
+@pytest.mark.xfail(
+    strict=True, raises=AssertionError,
+    reason="CATALOG_URL host is denied by operator_egress_guard Layer 1; staging module search returns 502 (live 2026-11-04)",
+)
+def test_catalog_host_is_not_denied_by_operator_egress_guard(monkeypatch):
+    import importlib.util
+    from pathlib import Path
+    import sys
+    from urllib.parse import urlsplit
+
+    # Audit hooks are permanent. Load the real guard privately and call its
+    # callback directly so this pin cannot install a hook into other tests.
+    spec = importlib.util.spec_from_file_location(
+        "catalog_egress_guard", Path(__file__).resolve().parents[1] / "operator_egress_guard.py")
+    guard = importlib.util.module_from_spec(spec)
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, "addaudithook", lambda hook: None)
+        spec.loader.exec_module(guard)
+    monkeypatch.setattr(guard, "_log_egress_denied", lambda *args: None)
+    monkeypatch.setattr(guard, "_emit_egress_denied_event", lambda *args: None)
+    monkeypatch.setattr(guard, "_emit_egress_denied_metric", lambda *args: None)
+    host = urlsplit(catalog.CATALOG_URL).hostname
+    assert host
+    denial = None
+    try:
+        guard._audit_hook("socket.getaddrinfo", (host, 443, 0, 0, 0))
+    except guard.OperatorEgressDenied as error:
+        denial = error
+    assert denial is None, str(denial)
+
+
 def test_valid_query_with_one_character_token_preserves_wire_query(proxy):
     assert query(proxy, q="a-").status_code == 200
     assert proxy.calls[0][1]["params"]["q"] == "a-"

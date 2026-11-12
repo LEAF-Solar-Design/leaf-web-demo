@@ -340,14 +340,13 @@ class YieldTests(unittest.TestCase):
         inside its window, so a reconciler that took the shared staging lock
         from it would worsen exactly the split it exists to close.
         """
-        for status, reason in (("in_progress", "RELAY_LIVE"), ("queued", "RELAY_LIVE")):
-            with self.subTest(status=status):
-                plan = subject.build_plan(fixture(relay_status=status))
-                self.assertEqual(plan["yield"]["status"], "yielded")
-                self.assertEqual(plan["yield"]["reason"], reason)
-
-        plan = subject.build_plan(fixture(deploy_status="in_progress"))
-        self.assertEqual(plan["yield"]["reason"], "STAGING_DEPLOY_LIVE")
+        for status in ("queued", "in_progress", "waiting", "requested", "pending"):
+            for field, reason in (("relay_status", "RELAY_LIVE"), ("deploy_status", "STAGING_DEPLOY_LIVE")):
+                with self.subTest(status=status, field=field):
+                    plan = subject.build_plan(fixture(**{field: status}))
+                    self.assertEqual(plan["yield"]["status"], "yielded")
+                    self.assertEqual(plan["yield"]["reason"], reason)
+                    self.assertFalse(plan["armable"])
 
     def test_a_quiet_window_is_clear(self) -> None:
         plan = subject.build_plan(fixture())
@@ -711,6 +710,13 @@ class LaneShapeTests(unittest.TestCase):
             "group": "reconcile-staging-fleet",
             "cancel-in-progress": False,
         })
+        relay_path = Path(__file__).resolve().parents[1] / ".github" / "workflows" / RELAY_WF
+        relay = yaml.safe_load(relay_path.read_text(encoding="utf-8"))
+        self.assertEqual(relay["jobs"]["dispatch"]["concurrency"], {
+            "group": "dispatch-staging-fleet",
+            "cancel-in-progress": False,
+        })
+        self.assertNotEqual(lane["concurrency"]["group"], relay["jobs"]["dispatch"]["concurrency"]["group"])
 
     def test_the_diagnostic_upload_is_best_effort_and_short_lived(self) -> None:
         """The plan artifact has no consumer in the repo: every later step
@@ -1013,6 +1019,33 @@ class RelayExecutionTests(unittest.TestCase):
         shared = subject.plan_release(release, subject._settled_service_state(provider),
                                       subject.yield_check(provider), plan["supply_evidence"], plan["consumer_contract"])
         self.assertEqual(plan, shared)
+
+    def test_scheduled_executor_yields_between_serial_legs_when_activity_arrives(self):
+        from unittest.mock import patch
+        for repository, workflow, reason in ((APP, RELAY_WF, "RELAY_LIVE"),
+                                             (TF, DEPLOY_WF, "STAGING_DEPLOY_LIVE")):
+            with self.subTest(workflow=workflow):
+                provider = fixture(lagging=subject.NON_RELAY_SERVICES)
+                context = frozen_context()
+                plan = subject.build_relay_plan(provider, context)
+                self.assertTrue(plan["armable"], plan["not_armable_because"])
+                contract = subject._decode_envelope(context["contract"])
+                self.assertEqual(contract["contract"]["consumer"]["pins"]["mutation_group"],
+                                 "leaf-platform-staging-ecs-mutation")
+                executor = RecordingExecutor()
+
+                def landed(provider, run_id, step, context):
+                    endpoint = (repository, runs_endpoint(workflow, "per_page=50"))
+                    provider.json_values[endpoint]["workflow_runs"][0]["status"] = "pending"
+                    return {"run_id": run_id, "service": step["service"], "kind": step["kind"]}
+
+                with patch.object(subject, "validate_leg", side_effect=landed):
+                    result = subject.execute_plan(provider, plan, context, executor=executor)
+                self.assertEqual(result["status"], "yielded")
+                self.assertEqual(result["reason"], reason)
+                self.assertEqual([event[0] for event in executor.events], ["dispatch", "watch"])
+                self.assertEqual(len(result["children"]), 1)
+                self.assertIsNone(result["restamp_frontier"])
 
     def test_busy_timeout_and_rollback_plan_stop_before_any_dispatch(self):
         for failure in ("busy", "timeout", "rollback"):

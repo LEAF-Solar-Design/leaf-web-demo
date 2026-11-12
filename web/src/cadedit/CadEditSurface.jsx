@@ -136,7 +136,9 @@ export default function CadEditSurface({
       <h3 className="cad-edit-workbench-title">Edit a DXF drawing</h3>
       <p className="cad-edit-workbench-hint">
         Leaf Automation accepts DXF input (ASCII or binary) up to 16 MiB, checks size before parsing, and determines acceptance from the file contents.{' '}
-        {canSave
+        {session.projectMode
+          ? 'Opening a drawing imports it into this project. Edits run in the isolated browser engine; Save creates a new version of this project drawing.'
+          : canSave
           ? 'Edits run entirely in your browser, inside the isolated engine worker. Nothing leaves it until you explicitly save a new version to the project or download the result.'
           : 'Runs entirely in your browser, inside the isolated engine worker. Nothing is uploaded and nothing is saved to the project. Download the result to keep it.'}
       </p>

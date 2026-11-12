@@ -6,10 +6,27 @@ import { DESIGN_FIELDS, validateNodeDesign } from './pageDesign.js'
 const FIELDS = ['alignment', 'description', 'headline', 'label', 'status', 'theme']
 const LIMITS = { label: 120, headline: 240, description: 1200, status: 80 }
 
+// Match the closed action grammar in platform/web_page_template.py. In
+// particular, mailto is one address, with no recipient list or headers.
+const ACTION_HTTPS = /^https:\/\/[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?::[0-9]{1,5})?(?:[/?#](?:[A-Za-z0-9._~!$&()*+,;=:@/?#-]|%[0-9A-Fa-f]{2})*)?$/
+const ACTION_EMAIL = /^mailto:[A-Za-z0-9]+(?:[._+-][A-Za-z0-9]+)*@[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*(?:\.[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)+$/
+const ACTION_LABEL_URL = /(?:[a-z][a-z0-9+.-]*:\/\/|(?<![\p{L}\p{N}_])(?:(?:https?|ftp|file|data|javascript):|www\.))/iu
+
+export function isValidPageAction(action) {
+  if (!action || typeof action !== 'object' || Array.isArray(action)
+    || Object.keys(action).length !== 2 || !Object.hasOwn(action, 'label') || !Object.hasOwn(action, 'href')) return false
+  const { label, href } = action
+  return typeof label === 'string' && Boolean(label.trim()) && Array.from(label).length <= 60
+    && !/[<>\p{Cc}\p{Cf}\p{Cs}]/u.test(label) && !ACTION_LABEL_URL.test(label)
+    && typeof href === 'string' && href.length <= 2048
+    && !/[\s<>"'\p{Cc}\p{Cf}\p{Cs}]/u.test(href)
+    && (ACTION_HTTPS.test(href) || ACTION_EMAIL.test(href))
+}
+
 export function validatePageDocument(document) {
   if (document && Object.hasOwn(document, 'schema')) return validatePortfolioDocument(document)
   if (!document || typeof document !== 'object' || Array.isArray(document)
-    || Object.keys(document).filter(key => !Object.hasOwn(DESIGN_FIELDS.page, key)).sort().join(',') !== FIELDS.join(',')) throw new Error('The page has an unsupported format.')
+    || Object.keys(document).filter(key => key !== 'action' && !Object.hasOwn(DESIGN_FIELDS.page, key)).sort().join(',') !== FIELDS.join(',')) throw new Error('The page has an unsupported format.')
   validateNodeDesign(document, 'page')
   for (const [field, limit] of Object.entries(LIMITS)) {
     const value = document[field]
@@ -22,6 +39,9 @@ export function validatePageDocument(document) {
   }
   if (!['cream', 'light', 'dark'].includes(document.theme) || !['center', 'left'].includes(document.alignment)) {
     throw new Error('Choose one of the available page layouts.')
+  }
+  if (Object.hasOwn(document, 'action') && !isValidPageAction(document.action)) {
+    throw new Error('Enter a plain contact label and a valid HTTPS link or mailto address.')
   }
   if (new TextEncoder().encode(JSON.stringify(document)).length > 8192) throw new Error('Page exceeds 8192 bytes.')
   return document
@@ -222,6 +242,59 @@ export function validateProjectPageProposal(projectId, saved, value) {
     values.splice(index, 1)
   }
   return value
+}
+
+export const PHOTO_PROPOSAL_SCHEMA = 'leaf.project-photo-assignment-proposal.v1'
+const freezeProposal = value => {
+  if (value && typeof value === 'object') {
+    Object.values(value).forEach(freezeProposal)
+    Object.freeze(value)
+  }
+  return value
+}
+
+export async function validateProjectPhotoAssignmentProposal(projectId, saved, input) {
+  const invalid = () => { throw new Error('The photo assignment proposal could not be verified. Try again.') }
+  try {
+    if (!closed(input, 'schema source proposed_document proposed_digest changes') || !closed(input.source, 'project_id revision digest')
+      || !Array.isArray(input.changes) || input.changes.length < 1 || input.changes.length > 200
+      || input.changes.some(change => !closed(change, 'op material_id material_name gallery_slug gallery_title index title alt'))) invalid()
+    // Detach before hashing: neither the producer nor a bus subscriber can change
+    // the document while WebCrypto yields, or after it has been reviewed.
+    const encoded = JSON.stringify(input)
+    if (new TextEncoder().encode(encoded).length > 1024 * 1024) invalid()
+    const value = JSON.parse(encoded)
+    if (!validUuid(projectId) || !Number.isSafeInteger(saved?.revision) || saved.revision < 1 || !validDigest(saved?.digest)
+      || !closed(value, 'schema source proposed_document proposed_digest changes') || value.schema !== PHOTO_PROPOSAL_SCHEMA
+      || !closed(value.source, 'project_id revision digest')
+      || canonical(value.source) !== canonical({ project_id: projectId, revision: saved.revision, digest: saved.digest })
+      || !validDigest(value.proposed_digest) || !Array.isArray(value.changes) || value.changes.length < 1 || value.changes.length > 200) invalid()
+    const expected = validatePortfolioDocument(saved.document)
+    validatePortfolioDocument(value.proposed_document)
+    const assigned = new Set(expected.categories.flatMap(gallery => gallery.images.map(image => image.material_id)))
+    for (const change of value.changes) {
+      if (!closed(change, 'op material_id material_name gallery_slug gallery_title index title alt') || change.op !== 'assign'
+        || !validUuid(change.material_id) || assigned.has(change.material_id)
+        || typeof change.material_name !== 'string' || Array.from(change.material_name).length < 1 || Array.from(change.material_name).length > 1024
+        || typeof change.gallery_slug !== 'string' || !/^[a-z][a-z0-9-]{0,47}$/.test(change.gallery_slug)
+        || !Number.isSafeInteger(change.index)) invalid()
+      const gallery = expected.categories.find(item => item.slug === change.gallery_slug)
+      const proposedGallery = value.proposed_document.categories.find(item => item.slug === change.gallery_slug)
+      const image = proposedGallery?.images[change.index]
+      if (!gallery || change.gallery_title !== gallery.title || change.index !== gallery.images.length
+        || !closed(image, 'material_id sha256 preview_sha256 title alt')
+        || image.material_id !== change.material_id || !validDigest(image.sha256) || !validDigest(image.preview_sha256)
+        || image.title !== change.title || image.alt !== change.alt) invalid()
+      gallery.images.push({ ...image })
+      assigned.add(change.material_id)
+    }
+    if (canonical(expected) !== canonical(value.proposed_document)) invalid()
+    const bytes = new TextEncoder().encode(canonical(value.proposed_document))
+    const hash = await globalThis.crypto.subtle.digest('SHA-256', bytes)
+    const digest = Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, '0')).join('')
+    if (digest !== value.proposed_digest) invalid()
+    return freezeProposal(value)
+  } catch { return invalid() }
 }
 
 export async function proposeProjectPage(projectId, saved, instruction, { signal } = {}) {

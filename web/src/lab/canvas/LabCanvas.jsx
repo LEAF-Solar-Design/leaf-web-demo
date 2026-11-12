@@ -3,12 +3,16 @@ import { Background, Controls, ReactFlow, ReactFlowProvider, useReactFlow } from
 import '@xyflow/react/dist/style.css'
 import Palette, { BLOCK_MIME } from './Palette.jsx'
 import Inspector from './Inspector.jsx'
+import { OutputActionsContext } from './BlockPanel.jsx'
 import NodeCard from './NodeCard.jsx'
 import LatencyPipe from './LatencyPipe.jsx'
 import { contract, resolveManifest, registry } from './registry.js'
-import { addBlock, connectPipe, disconnectPipe, emptyGraph, missingInputs, pipeId, removeBlock, roundTrip, updateSettings, validateGraph } from './graphDoc.js'
+import { addBlock, connectPipe, disconnectPipe, emptyGraph, missingInputs, pipeId, removeBlock, removeOutput, roundTrip, setOutput, updateSettings, validateGraph } from './graphDoc.js'
 import { connectionStatus } from './portCompat.js'
 import { createDependencyLayoutRunner } from './dependencyLayout.js'
+import { pushRecent } from './libraryCategories.js'
+import { graphLayouts } from '../history/labArtifactsClient.js'
+import { humanizeError } from '../../errorHumanize.js'
 
 const nodeTypes = { block: NodeCard }
 const edgeTypes = { latency: LatencyPipe }
@@ -20,10 +24,18 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
   const [layoutRunner] = useState(createDependencyLayoutRunner)
   const current = useRef(document)
   const [positions, setPositions] = useState({})
+  const placed = useRef(positions)
+  placed.current = positions
+  const draft = graph => {
+    const next = roundTrip(graph)
+    graphLayouts.set(next, { positions: () => Object.fromEntries(graph.blocks.map((block, index) =>
+      [block.id, placed.current[block.id] || { x: index * 370, y: 30 }])) })
+    return next
+  }
   const [selected, setSelected] = useState(null)
+  const [armed, setArmed] = useState(null)
   const [pending, setPending] = useState(null)
   const [message, setMessage] = useState('')
-  const [layoutMs, setLayoutMs] = useState(null)
   const [layoutBusy, setLayoutBusy] = useState(false)
   const request = useRef(0)
   const lastRefusal = useRef('')
@@ -36,7 +48,7 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
     if (initialReported.current) return
     initialReported.current = true
     const { ready, problems } = validation
-    onChange?.({ document: roundTrip(document), ready, problems })
+    onChange?.({ document: draft(document), ready, problems })
   }, [document, onChange, validation])
   const commit = next => {
     // Deliver every draft so the host cannot retain an earlier valid graph.
@@ -45,7 +57,7 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
     request.current += 1; layoutRunner.cancel(); setLayoutBusy(false)
     setDocument(current.current)
     const { ready, problems } = validateGraph(current.current, entries)
-    onChange?.({ document: roundTrip(current.current), ready, problems })
+    onChange?.({ document: draft(current.current), ready, problems })
   }
   const connect = pipe => { commit(connectPipe(current.current, pipe, entries)); setMessage('Pipe connected') }
   const disconnect = id => { commit(disconnectPipe(current.current, id)); setMessage('Pipe disconnected') }
@@ -57,18 +69,30 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
       const centre = position || flow.screenToFlowPosition({ x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 })
       const next = addBlock(current.current, manifest)
       const id = next.blocks.at(-1).id
-      setPositions(previous => ({ ...previous, [id]: centre }))
+      setPositions(previous => {
+        let placement = centre
+        if (!position) {
+          for (let index = 0; index < 50; index += 1) {
+            placement = { x: centre.x + (index % 4) * 340, y: centre.y + Math.floor(index / 4) * 400 }
+            if (!Object.values(previous).some(point =>
+              placement.x < point.x + 310 && placement.x + 310 > point.x &&
+              placement.y < point.y + 360 && placement.y + 360 > point.y)) break
+          }
+        }
+        return { ...previous, [id]: placement }
+      })
       commit(next); setSelected(id); setMessage(`${manifest.title} added`)
-    } catch (error) { setMessage(error.message) }
+      try { pushRecent(globalThis.localStorage, manifest.id) } catch { /* Storage may be unavailable. */ }
+    } catch (error) { setMessage(humanizeError(error)) }
   }
-  const runLayout = useCallback(async (layoutDocument, dimensions) => {
+  const runLayout = useCallback(async (layoutDocument, dimensions, stored) => {
     const token = ++request.current
-    const started = performance.now()
     try {
-      const next = await layoutRunner.run(layoutDocument, dimensions)
+      const [next, saved] = await Promise.all([layoutRunner.run(layoutDocument, dimensions), stored])
       if (token !== request.current) return
-      setPositions(next); setLayoutMs(performance.now() - started); setMessage('Layout updated')
-    } catch (error) { if (token === request.current) setMessage(error.message) }
+      for (const block of layoutDocument.blocks) if (saved?.positions?.[block.id]) next[block.id] = saved.positions[block.id]
+      setPositions(next); setMessage('Layout updated')
+    } catch (error) { if (token === request.current) setMessage(humanizeError(error)) }
     finally { if (token === request.current) setLayoutBusy(false) }
   }, [layoutRunner])
   const relayout = () => {
@@ -77,7 +101,7 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
     runLayout(current.current, dimensions)
   }
   useEffect(() => {
-    runLayout(initialLayoutDocument, {})
+    runLayout(initialLayoutDocument, {}, graphLayouts.get(initialDocument)?.load?.())
     return () => { request.current += 1; layoutRunner.cancel() }
     // Initial layout only. Editing never discards user positions.
   }, [initialLayoutDocument, layoutRunner, runLayout])
@@ -109,13 +133,14 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
     data: { measurement: measurements.pipes?.[pipeId(pipe)], budget: source.problem || target.problem ? null : source.manifest.latency_budget_us, disconnect } }
   })
   return <div className="lab-home lab-canvas-editor" data-canvas-editor tabIndex={-1} onKeyDown={event => {
+    if (event.key === 'Escape') setArmed(null)
     if (event.key !== '/' || event.ctrlKey || event.metaKey || event.altKey ||
       event.target.closest?.('input,textarea,select,[contenteditable="true"]') || event.currentTarget.closest('[hidden]')) return
     event.preventDefault(); search.current?.focus()
   }}>
-    <Palette entries={entries} onAdd={add} searchRef={search} tools={tools} onLoadTools={onLoadTools} />
+    <Palette entries={entries} onAdd={add} armed={armed} onArm={setArmed} searchRef={search} tools={tools} onLoadTools={onLoadTools} />
     <section className="lab-canvas-region" aria-label="Dependency canvas">
-      <header><h2>Dependency canvas</h2><button type="button" disabled={layoutBusy} onClick={relayout}>Relayout</button>
+      <header><h2>Dependency canvas</h2><button type="button" disabled={layoutBusy} title={layoutBusy ? 'Arranging the blocks. Please wait.' : undefined} onClick={relayout}>Relayout</button>
         <button type="button" onClick={() => flow.fitView({ padding: 0.2 })}>Fit cards</button></header>
       <div className="lab-flow" ref={canvas} onDragOver={event => { event.preventDefault(); event.dataTransfer.dropEffect = 'copy' }}
         onDrop={event => {
@@ -126,7 +151,10 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
         }}>
         <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
           minZoom={0.1} maxZoom={3} fitView nodesConnectable edgesReconnectable={false}
-          onNodeClick={(_, node) => setSelected(node.id)} onPaneClick={() => setSelected(null)}
+          onNodeClick={(_, node) => setSelected(node.id)} onPaneClick={event => {
+            if (armed) { add(armed, flow.screenToFlowPosition({ x: event.clientX, y: event.clientY })); setArmed(null) }
+            else setSelected(null)
+          }}
           onNodesChange={changes => {
             const removed = changes.filter(change => change.type === 'remove').map(change => change.id)
             if (removed.length) {
@@ -148,22 +176,23 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
           isValidConnection={connection => {
             let status
             try { status = connectionStatus(document, asPipe(connection), entries) }
-            catch (error) { status = { ok: false, reason: error.message } }
+            catch (error) { status = { ok: false, reason: humanizeError(error) } }
             lastRefusal.current = status.reason
             return status.ok
           }}
-          onConnect={connection => { try { connect(asPipe(connection)) } catch (error) { setMessage(error.message) } }}>
+          onConnect={connection => { try { connect(asPipe(connection)) } catch (error) { setMessage(humanizeError(error)) } }}>
           <Background color="var(--leaf-color-border)" /><Controls />
         </ReactFlow>
       </div>
       {!document.blocks.length && <p>Add a block from the palette to begin.</p>}
-      <footer><p role="status">{message}</p><p>{validation.ready ? 'Ready' : `Not ready: ${validation.message}`}</p>
-        <span className="leaf-timing">Layout {layoutMs === null ? 'not measured' : `${layoutMs.toFixed(2)} ms`}</span>{' · '}
-        <span className="leaf-timing">Validation {validation.ms.toFixed(2)} ms</span></footer>
+      <footer><p role="status">{message}</p><p>{validation.ready ? 'Ready' : 'Review the blocks and connections before continuing.'}</p></footer>
     </section>
+    <OutputActionsContext.Provider value={{ set: (name, endpoint) => commit(setOutput(current.current, name, endpoint, entries)),
+      remove: name => commit(removeOutput(current.current, name)) }}>
     <Inspector block={document.blocks.find(block => block.id === selected)} document={document} entries={entries} upstream={upstream} codeEvidence={codeEvidence}
       onSettings={settings => commit(updateSettings(current.current, selected, settings, entries))}
       onConnect={connect} onDisconnect={disconnect} onRemove={remove} onClose={() => setSelected(null)} />
+    </OutputActionsContext.Provider>
   </div>
 }
 

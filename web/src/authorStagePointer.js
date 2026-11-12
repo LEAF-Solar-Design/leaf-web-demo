@@ -1,3 +1,5 @@
+import { serviceState, authorityStorage } from './lib/serviceAuthSession.js'
+
 export const INFLIGHT_AUTHOR_KEY = 'leaf.inflightAuthor.v1'
 export const AUTHOR_POINTER_TTL_MS = 24 * 60 * 60 * 1000
 
@@ -32,7 +34,7 @@ function validPriorFailure(prior) {
 }
 
 function browserStorage() {
-  try { return window.localStorage } catch { return null }
+  return authorityStorage()
 }
 
 function jwtSubject(storage) {
@@ -49,6 +51,11 @@ function jwtSubject(storage) {
 }
 
 export function authorAccountScope(tenant, storage = browserStorage()) {
+  const service = serviceState(storage)
+  if (service.mode) {
+    const value = service.identity
+    return value ? JSON.stringify([value.iss, value.sub, value.org_id || '', value.tenant_id]) : null
+  }
   let org = null
   try { org = storage?.getItem('leaf.org_id') || null } catch { /* absent */ }
   const subject = jwtSubject(storage)
@@ -88,7 +95,7 @@ export function readInflightAuthor(storage = browserStorage()) {
 }
 
 export function authorPointerValid(pointer, accountScope, now = Date.now()) {
-  if (!pointer) return false
+  if (!pointer || !accountScope) return false
   return pointer.account_scope === accountScope && Number(pointer.expires_at) > now
 }
 

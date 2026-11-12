@@ -53,7 +53,8 @@ import { ENV_SOLAR_FLOW_RAIL } from './solar/flag.js'
 import { SOLAR_SETTINGS_TOOL_NAME } from './solar/solarSettingsWire.js'
 import SolarFlowRail from './solar/SolarFlowRail.jsx'
 import SolarFlowSeat from './solar/SolarFlowSeat.jsx'
-import SolarWorkspaceTools from './solar/SolarWorkspaceTools.jsx'
+import SolarWorkspaceTools, { ProjectLayoutPublicationTools } from './solar/SolarWorkspaceTools.jsx'
+import { solarPublicationReceiptMatches } from './solar/solarProjectMaterializationClient.js'
 import SolarStepEditor from './solar/SolarStepEditor.jsx'
 import { DEFAULT_SOLAR_FLOW, MAX_FLOW_STEPS, admittedOverlays, solarFlowId, solarFlowRecordRun, solarFlowRunOutcome, solarFlowRunStatus, solarFlowRunsFor } from './solar/solarFlowModel.js'
 import { resolvePublishedCatalogTool } from './site/publishedCatalogTool.js'
@@ -123,7 +124,9 @@ import CommandLineArmer from './cadedit/CommandLineArmer.jsx'
 import CockpitEngineStatus from './site/CockpitEngineStatus.jsx'
 import StatusModesBridge from './cadedit/StatusModesBridge.jsx'
 import EngineDocumentView from './cadedit/EngineDocumentView.jsx'
-import EngineHeadOpener from './cadedit/EngineHeadOpener.jsx'
+import EngineHeadOpener, { holdsHeadDocument } from './cadedit/EngineHeadOpener.jsx'
+import { createProjectDrawingEditor, projectDrawingEditorScopeKey } from './cadedit/projectDrawingEditor.js'
+import { createProjectDrawingEditorTransport } from './api.js'
 import SolarStarterOpener, { SOLAR_STARTER_EMPTY_INTAKE } from './cadedit/SolarStarterOpener.jsx'
 import CanvasPointPicker from './cadedit/CanvasPointPicker.jsx'
 import { COCKPIT_COMMAND_EVENT, parseDrawingCommand } from './lib/commandWords.js'
@@ -148,6 +151,7 @@ import { fetchIosSurfaceStatus } from './ios/iosSurfaceStatus.js'
 // `logout` is no longer imported here: the session controller owns ending a
 // session (useSessionController defaults endSession to auth.js logout).
 import { authConfigured, login as authLogin, isSignedIn, handleRedirectCallback, isAuthRedirectCallback } from './auth.js'
+import { readActiveScope } from './auth/activeScope.js'
 import { shouldAutoDemo, explicitDemo } from './demoState.js'
 import { humanizeError } from './errorHumanize.js'
 import { classifyDrawingLoadFailure } from './drawing/loadFailure.js'
@@ -163,7 +167,7 @@ import useExit from './useExit.js'
 import DetailsDrawer, { ServiceStatus } from './components/DetailsDrawer.jsx'
 import ShortcutSheet from './components/ShortcutSheet.jsx'
 import {
-  config, authHeaders, getSessionIdentity, getSession, getTools, getCapabilities, runTool, runToolAsync,
+  config, authHeaders, getSessionIdentity, getSession, getTools, getCapabilities, runTool, runToolAsync, attachToJob,
   getJob, recordToEnvelope, publishStagedAuthor, getDrawingIntake,
   getDrawingVersions, undoDrawing, redoDrawing, takeCheckout, releaseCheckout, nlPrompt,
   createOrg, listProjects, createProject, openProject, subscribeUnauthorized,
@@ -171,6 +175,7 @@ import {
   saveDrawingVersionPlan,
   fetchDrawingDxf,
   fetchSampleDxf,
+  importUploadedDrawingVersion,
 } from './api.js'
 import { matchPrompt } from './mock/mockNlPrompt.js'
 import { shouldStartTour } from './demo/tourEntry.js'
@@ -180,7 +185,10 @@ import { editFixture, pendingEditDemo, editFixtureV2 } from './mock/editFixture.
 import { resumeHref } from './components/ConversationList.jsx'
 import LiveRegion, { HIDE_WITH_STYLE } from './components/LiveRegion.jsx'
 import ConversePanel from './components/ConversePanel.jsx'
+import { conversationDestination as resolveConversationDestination } from './site/conversationDestination.js'
 import AuthorPanel from './components/AuthorPanel.jsx'
+import useProjectSourceController from './site/useProjectSourceController.js'
+import ProjectSourceCandidateReview from './site/ProjectSourceCandidateReview.jsx'
 import ProjectLifecyclePanel from './projects/ProjectLifecyclePanel.jsx'
 import { ENV_LIFECYCLE_UI } from './projects/flag.js'
 import {
@@ -203,6 +211,7 @@ import ProjectMaterialIntake from './workspace/ProjectMaterialIntake.jsx'
 import PhotoMaterialIntake from './workspace/PhotoMaterialIntake.jsx'
 import useMaterialIntake from './workspace/useMaterialIntake.js'
 import ProjectStartPanel from './workspace/ProjectStartPanel.jsx'
+import { mountedDrawingSource, createProjectFromDrawing } from './workspace/createProjectFromDrawing.js'
 import useCatalogController from './controllers/catalog/useCatalogController.js'
 import useSessionController from './controllers/session/useSessionController.js'
 import { consoleAuthRequired, consoleSignedOut, consoleKnownGuest } from './controllers/session/consoleGate.js'
@@ -379,7 +388,7 @@ function ProjectSolarCheckoutControls({ projectClient, checkout, isCurrent }) {
 
 // Mount the upload controller only on the live material pane. Its policy
 // request must not run when the drawing profiles or offline demo boot.
-function LiveProjectMaterialIntake({ project, artifacts, onAttached }) {
+function LiveProjectMaterialIntake({ project, artifacts, onAttached, onRunArlo }) {
   const projectUpload = useDrawingUploadController()
   const materialIntake = useMaterialIntake({ upload: projectUpload, onAttached })
   const startMaterialUpload = (file) => {
@@ -390,8 +399,191 @@ function LiveProjectMaterialIntake({ project, artifacts, onAttached }) {
   }
   return <ProjectMaterialIntake project={project} upload={projectUpload}
     intake={materialIntake} artifacts={artifacts} onStartUpload={startMaterialUpload}
-    onRetry={materialIntake.retry} mock={false}
+    onRetry={materialIntake.retry} mock={false} onRunArlo={onRunArlo}
     photos={<PhotoMaterialIntake projectId={project?.project_id} />} />
+}
+
+export async function seatProjectDrawingPublication(controller, receipt, isCurrent = () => true) {
+  if (!isCurrent()) return false
+  const version = receipt?.drawing_version
+  const before = controller.getSnapshot()
+  if (!version || before.openProjectId !== version.project_id || before.orgId !== version.org_id) return false
+  const workspace = await controller.rehydrate()
+  const after = controller.getSnapshot()
+  if (!isCurrent() || after.openProjectId !== version.project_id || after.orgId !== version.org_id
+    || after.canonicalVersionId !== before.canonicalVersionId
+    || !workspace?.drawing_versions?.some((row) => row.version_id === version.version_id
+      && row.drawing_id === version.drawing_id && row.project_id === version.project_id && row.org_id === version.org_id)) return false
+  controller.selectCanonicalVersion(version.version_id)
+  return true
+}
+
+// A confirmed catalog run inside a project goes through the project's own client, which holds the
+// project checkout proof privately. The result is the real queued job or the bound terminal envelope.
+export async function runProjectCatalogTool({ projectSolar, tool, params, context, catalogDigest, idempotencyKey,
+  onSubmit, onStatus, signal, attach = attachToJob }) {
+  const refused = (code, message) => ({ ok: false, tool: tool.name, version: null, result: null, overlay: null,
+    timing_ms: 0, cost: null, degraded_mode: false, error: { error_code: code, message, retryable: false } })
+  const client = projectSolar?.ready ? projectSolar.projectClient : null
+  const binding = client?.getSnapshot().binding
+  if (!binding || binding.project_id !== context.projectId || binding.organization_id !== context.orgId
+    || binding.input_version_id !== context.drawingId) {
+    return refused('project_request_required', 'This project drawing changed. Review the run again.')
+  }
+  const { drawing_id: _legacyDrawing, ...bound } = params || {}
+  let intent
+  try {
+    intent = client.prepareRun({ tool: tool.name, params: bound, catalogDigest,
+      idempotencyKey: idempotencyKey || crypto.randomUUID() })
+  } catch {
+    return refused('project_request_invalid', 'This run could not be prepared for the project. Review it again.')
+  }
+  const outcome = await client.submitRun(intent, { signal })
+  if (!outcome.ok) {
+    const reason = outcome.reason || 'HTTP_ERROR'
+    const detail = outcome.envelope?.error?.message
+    return { ...refused(reason, typeof detail === 'string' && detail ? detail
+      : `The project refused this run (${reason}).`), reason_code: reason }
+  }
+  const data = outcome.data
+  if (typeof data.job_id === 'string') {
+    onSubmit?.(data.job_id)
+    onStatus?.({ status: 'submitted', progress: 'queued', elapsed_ms: null, job_id: data.job_id })
+    return attach(data.job_id, { onStatus, signal })
+  }
+  return data
+}
+
+// The board's Drawing tile. In a project it reports only the selected project version and its
+// current scoped projection; it never falls back to the standalone drawing's name or counts.
+export function boardDrawingFacts({ projectMode, shown, standaloneName, selectedVersion, binding, projectIntake }) {
+  if (!projectMode) {
+    return shown ? { name: standaloneName, polylines: shown.polylines.length, layers: shown.layers.length } : null
+  }
+  if (!selectedVersion || !binding || binding.input_version_id !== selectedVersion.version_id
+    || binding.drawing_id !== selectedVersion.drawing_id) return null
+  const facts = { project: true, version_id: selectedVersion.version_id, drawing_id: selectedVersion.drawing_id,
+    name: (typeof projectIntake?.dwg === 'string' && projectIntake.dwg) || selectedVersion.name || 'Project drawing' }
+  return Array.isArray(projectIntake?.polylines) && Array.isArray(projectIntake?.layers)
+    ? { ...facts, polylines: projectIntake.polylines.length, layers: projectIntake.layers.length }
+    : { ...facts, pending: true }
+}
+
+// The version buttons' first gate. In a project it is the selected project drawing version;
+// the standalone drawing's version state says nothing about a project.
+export function versionsAvailable({ projectMode, projectVersion, drawingState }) {
+  return projectMode ? !!projectVersion : !!drawingState
+}
+
+export async function seatSolarProjectPublication(controller, receipt, captured, isCurrent) {
+  const current = controller.getSnapshot()
+  const selected = current.workspace?.drawing_versions?.find(row => row.version_id === current.canonicalVersionId)
+  if (!solarPublicationReceiptMatches(receipt, captured) || typeof isCurrent !== 'function' || !isCurrent()
+    || current.orgId !== captured?.organization_id || current.openProjectId !== captured?.project_id
+    || (current.canonicalVersionId ?? null) !== captured?.input_version_id
+    || (selected?.drawing_id ?? null) !== captured?.drawing_id) return false
+  return seatProjectDrawingPublication(controller, receipt, isCurrent)
+}
+
+export function projectEditorScope({ enabled, orgId, projectId, workspace, versionId }) {
+  if (!enabled || !orgId || !projectId || workspace?.project?.project_id !== projectId
+    || workspace.project.org_id !== orgId) return null
+  const version = workspace.drawing_versions?.find((row) => row.version_id === versionId)
+  if (versionId && (!version || version.org_id !== orgId || version.project_id !== projectId)) return null
+  return { organization_id: orgId, project_id: projectId,
+    drawing_id: version?.drawing_id ?? null, input_version_id: version?.version_id ?? null }
+}
+
+// This mounted project adapter reuses the existing upload/adoption controller.
+// Opening a file cannot silently retain the standalone drawing's save target.
+// Editor Save and Undo restore go through the project checkout the project client already holds.
+// Resolves null when that client holds none for this exact scope, so the editor takes its own.
+export function publishThroughProjectClient(client) {
+  return async (kind, scope, value, { requestId }) => {
+    const snapshot = client?.getSnapshot?.()
+    const binding = snapshot?.binding
+    if (!snapshot?.ownsCheckout || !binding || binding.organization_id !== scope.organization_id
+      || binding.project_id !== scope.project_id || binding.drawing_id !== scope.drawing_id
+      || binding.input_version_id !== scope.input_version_id) return null
+    const outcome = await client.publishDrawing({ kind, requestId,
+      ...(kind === 'save' ? { bytes: value } : { versionId: value }) })
+    if (outcome.ok) return outcome.data
+    if (outcome.reason === 'SIP_R7_CHECKOUT_NOT_HELD') return null
+    // A local failure may have reached the server: keep the request for an idempotent retry.
+    throw Object.assign(new Error(outcome.envelope?.error?.message
+      || `The project drawing was not saved (${outcome.reason || 'HTTP_ERROR'}).`),
+    Number.isInteger(outcome.status) ? { status: outcome.status, code: outcome.reason }
+      : { outcomeUnknown: true, code: outcome.reason })
+  }
+}
+
+export function ProjectDrawingEditorBridge({ scope, onTarget, transport: suppliedTransport = null, projectClient = null }) {
+  const projectClientRef = useRef(projectClient)
+  projectClientRef.current = projectClient
+  const scopeRef = useRef(scope)
+  scopeRef.current = scope
+  const attachedRef = useRef(null)
+  const upload = useDrawingUploadController()
+  const intake = useMaterialIntake({ upload, onAttached: (drawing) => { attachedRef.current = drawing } })
+  const uploadRef = useRef(upload), intakeRef = useRef(intake)
+  uploadRef.current = upload
+  intakeRef.current = intake
+  const transport = useMemo(() => suppliedTransport || createProjectDrawingEditorTransport(), [suppliedTransport])
+  const editor = useMemo(() => createProjectDrawingEditor({
+    getScope: () => scopeRef.current,
+    transport,
+    acquireCheckout: transport.acquireCheckout,
+    releaseCheckout: transport.releaseCheckout,
+    publishHeld: (...args) => publishThroughProjectClient(projectClientRef.current)(...args),
+    importFile: async (file, captured) => {
+      attachedRef.current = null
+      const material = intakeRef.current
+      if (!material.begin({ projectId: captured.project_id, fileName: file.name })) {
+        throw new Error('Wait for the current drawing upload to finish.')
+      }
+      uploadRef.current.actions.setEngine('local')
+      const result = await uploadRef.current.actions.upload(file)
+      const drawing = attachedRef.current
+      if (!result || !drawing) throw new Error('The drawing could not be attached to this project. Try again.')
+      return { drawing_version: drawing }
+    },
+  }), [transport])
+  const scopeKey = projectDrawingEditorScopeKey(scope)
+  useLayoutEffect(() => {
+    scopeRef.current = scope
+    if (!scope) { onTarget(null); return }
+    onTarget(editor.getSaveTarget())
+  }, [editor, scopeKey, onTarget])
+  useLayoutEffect(() => {
+    scopeRef.current = scope
+    return () => {
+      scopeRef.current = null
+      uploadRef.current.actions.cancel()
+      intakeRef.current.reset()
+      onTarget(null)
+    }
+  }, [scope?.organization_id, scope?.project_id, onTarget])
+  return null
+}
+
+function ProjectDrawingEngineOpener({ scope, target }) {
+  const { session, setReach } = useEngineSessionContext()
+  const scopeKey = projectDrawingEditorScopeKey(scope)
+  const [failure, setFailure] = useState(false)
+  const [retry, setRetry] = useState(0)
+  useEffect(() => {
+    let alive = true
+    if (!scope?.input_version_id || target?.scopeKey !== scopeKey) return undefined
+    setFailure(false)
+    setReach({ state: REACH_STATE.OPENING, sentence: 'Opening the saved project drawing.' })
+    Promise.resolve(session.actions.openProjectVersion(scope.input_version_id)).then((result) => {
+      if (!alive) return
+      if (result === false || result === null) { setFailure(true); return }
+      setReach({ state: REACH_STATE.OPEN, sentence: '' })
+    }, () => { if (alive) setFailure(true) })
+    return () => { alive = false }
+  }, [scopeKey, target?.scopeKey, retry, session.actions, setReach])
+  return failure ? <button className="btn ghost" onClick={() => setRetry((value) => value + 1)}>Retry saved drawing</button> : null
 }
 
 function promoteStandaloneUpload({ receipt }, attempt, current, setFromUpload) {
@@ -991,8 +1183,8 @@ export default function App() {
     shown,
     visibleLayers: standaloneVisibleLayers,
     drawingState,
-    canUndo,
-    canRedo,
+    canUndo: standaloneCanUndo,
+    canRedo: standaloneCanRedo,
     versionBusy,
     overlayStale,
     historyOpen,
@@ -1095,6 +1287,7 @@ export default function App() {
   }, [openProjectId, REQUESTED_DRAWING_ID, labStatus, request])
   const [projectPane, setProjectPane] = useState(null)
   const [conversationSource, setConversationSource] = useState(null)
+  const [commandTranscriptHost, setCommandTranscriptHost] = useState(null)
   const [conversationDestination, setConversationDestination] = useState(null)
   const [annotationSource, setAnnotationSource] = useState(null)
   const [annotationDestination, setAnnotationDestination] = useState(null)
@@ -1207,6 +1400,23 @@ export default function App() {
   catalogRunContextRef.current = catalogRunContext
   const projectMode = !mock && !!openProjectId
   projectModeRef.current = projectMode
+  const [projectEditorTarget, setProjectEditorTarget] = useState(null)
+  const [projectEditorEngine, setProjectEditorEngine] = useState(null)
+  const projectEditorBinding = projectEditorScope({ enabled: projectMode && session.status === 'active',
+    orgId, projectId: openProjectId, workspace, versionId: canonicalVersionId })
+  const projectEditorKey = projectDrawingEditorScopeKey(projectEditorBinding)
+  const projectSelectedDrawingVersion = workspace?.drawing_versions?.find((row) => row.version_id === canonicalVersionId)
+  const canUndo = projectMode ? !!projectSelectedDrawingVersion && !!projectEditorTarget?.restoreVersion
+    && workspace.drawing_versions.some((row) => row.drawing_id === projectSelectedDrawingVersion.drawing_id
+      && row.seq < projectSelectedDrawingVersion.seq) : standaloneCanUndo
+  const canRedo = !projectMode && standaloneCanRedo
+  // The File panel's Download DXF: the selected SAVED project version's verified bytes, only while the
+  // editor target is for exactly that version. Standalone has no such source.
+  const projectDxfDownload = useMemo(() => projectMode && projectSelectedDrawingVersion && projectEditorTarget?.readVersion
+    && projectEditorTarget.headVersion === projectSelectedDrawingVersion.version_id
+    ? { key: projectEditorTarget.scopeKey, versionId: projectSelectedDrawingVersion.version_id, read: projectEditorTarget.readVersion }
+    : null, [projectMode, projectSelectedDrawingVersion, projectEditorTarget])
+  const hasVersions = versionsAvailable({ projectMode, projectVersion: projectSelectedDrawingVersion, drawingState })
   const projectSolarAccountScope = composerDraftAccountScope()
   const projectSolarSession = {
     authenticated: !mock && session.status === 'active',
@@ -1281,6 +1491,7 @@ export default function App() {
       setTimeout(() => authorSectionRef.current?.scrollIntoView({ block: 'nearest' }), 0)
     },
     startAgentTurn: (...args) => catalogUiRef.current.startAgentTurn?.(...args),
+    openProjectSource: (...args) => catalogUiRef.current.openProjectSource?.(...args),
     agentBannerFor,
     // W2b: same edge, same source name /try already uses. The controller
     // records WHICH surface refused (`sources`) instead of collapsing every
@@ -1873,8 +2084,12 @@ export default function App() {
   // Tick the calm "running · N.Ns" clock while a live job runs (no animated loader).
   // --- NT2 toast plumbing (one slot — newest replaces; Toast auto-fades ~5s) --
   // showToast / onToastDone now come from useToastBus() above (slice 13a).
+  // The result lives in the Studio sidebar host, which is hidden and inert until its panel is open. View
+  // opens that panel (and the phone Result drawer) first, then scrolls once the host is visible.
+  const revealResultRef = useRef(null)
   const viewResult = useCallback(() => {
-    resultBlockRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    revealResultRef.current?.()
+    setTimeout(() => resultBlockRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 0)
   }, [])
   const viewViewer = useCallback(() => {
     workspaceCardRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' })
@@ -1975,9 +2190,47 @@ export default function App() {
   // the server a turn id that has already finished.
   const authorProjectRef = useRef(openProjectId || null)
   authorProjectRef.current = openProjectId || null
+  const conversationProjectContext = useMemo(() => openProjectId && canonicalVersionId
+    ? { project_id: openProjectId, input_version_id: canonicalVersionId }
+    : null, [openProjectId, canonicalVersionId])
+  const assistantCheckoutRef = useRef(null)
+  const assistantCheckoutBinding = projectSolar.ready ? projectSolar.projectClient.getSnapshot().binding : null
+  assistantCheckoutRef.current = { projectSolar, controller: session.controller,
+    generation: session.generation, sessionId: agentSessionId, projectContext: conversationProjectContext }
+  const prepareApprovedProjectRun = useCallback(async ({ confirmationId, sessionId: owningSessionId, projectContext }) => {
+    const owner = projectSolar
+    const client = owner.projectClient
+    if (!owner.ready || !client) return null
+    const stillCurrent = () => {
+      const live = assistantCheckoutRef.current
+      const next = live.projectSolar
+      const snapshot = client.getSnapshot()
+      return projectModeRef.current && owner.ready && next.ready && owner.isCurrent()
+        && live.controller === session.controller && live.generation === session.generation
+        && session.controller.getSnapshot().generation === session.generation
+        && live.sessionId === owningSessionId && agentSessionId === owningSessionId
+        && next.projectClient === client && next.scope.authorityKey === owner.scope.authorityKey
+        && snapshot.binding === assistantCheckoutBinding
+        && snapshot.authorityKey === owner.scope.authorityKey
+        && sameSolarDrawingBinding(snapshot.binding, owner.scope.binding)
+        && live.projectContext?.project_id === projectContext?.project_id
+        && live.projectContext?.input_version_id === projectContext?.input_version_id
+        && projectContext?.project_id === owner.scope.binding?.project_id
+        && projectContext?.input_version_id === owner.scope.binding?.input_version_id
+    }
+    if (!stillCurrent()) return null
+    const outcome = await client.delegateApprovedRun({ confirmationId, sessionId: owningSessionId,
+      inputVersionId: projectContext.input_version_id })
+    if (!outcome.ok) return null
+    const revoke = () => client.revokeApprovedRun({ confirmationId, sessionId: owningSessionId,
+      delegationId: outcome.data.delegation_id })
+    if (!stillCurrent()) { await revoke(); return null }
+    return { isCurrent: stillCurrent, revoke }
+  }, [projectSolar.projectClient, projectSolar.ready, projectSolar.isCurrent, projectSolar.scope.binding,
+    projectSolar.scope.authorityKey, assistantCheckoutBinding, session.controller, session.generation, agentSessionId])
   useLayoutEffect(() => {
-    setProjectContext(openProjectId || null)
-  }, [openProjectId, setProjectContext])
+    setProjectContext(openProjectId || null, canonicalVersionId || null)
+  }, [openProjectId, canonicalVersionId, setProjectContext])
   const authorAuthorityProvider = useCallback(async (description, { allowSecretOnce = false, projectId } = {}) => {
     // No entitlement pre-check here: entitlements load async, and a stage
     // click can beat them (proven by the e2e). A mint against a tenant that
@@ -2124,7 +2377,8 @@ export default function App() {
       current: projectScene.ready === true,
     } : null,
   })
-  const drawingIntake = projectMode ? projectDrawing.intake : activeIntake || shown
+  const projectEngineIntake = projectEditorEngine?.scopeKey === projectEditorKey ? projectEditorEngine.intake : null
+  const drawingIntake = projectMode ? projectEngineIntake || projectDrawing.intake : activeIntake || shown
   const projectDrawingName = projectDrawing.intake?.dwg || projectSolar.scope.binding?.drawing_id || ''
   const visibleLayers = projectMode ? projectSolarRuntime.visibleLayers : standaloneVisibleLayers
   const setVisibleLayers = projectMode ? projectSolarRuntime.setVisibleLayers : setStandaloneVisibleLayers
@@ -2398,15 +2652,28 @@ export default function App() {
   // version-navigation gestures; action is the closed vocabulary
   // undo/redo/history/preview, counted only when the navigation happened.
   const undoCurrentVersion = useCallback(async () => {
+    if (projectModeRef.current) {
+      const current = workspaceController.getSnapshot()
+      const selected = current.workspace?.drawing_versions?.find((row) => row.version_id === current.canonicalVersionId)
+      const previous = current.workspace?.drawing_versions?.filter((row) => row.drawing_id === selected?.drawing_id && row.seq < selected.seq)
+        .sort((a, b) => b.seq - a.seq)[0]
+      if (!previous || !projectEditorTarget?.restoreVersion) return null
+      try {
+        const receipt = await projectEditorTarget.restoreVersion(previous.version_id)
+        if (await seatProjectDrawingPublication(workspaceController, receipt)) showToast({ text: 'Previous project drawing restored.' })
+        return receipt
+      } catch (error) { showToast({ text: humanizeError(error) }); return null }
+    }
     const view = await undoDrawingVersion()
     if (view) {
       track('drawing.version_navigated', { action: 'undo' })
       showToast({ text: `Reverted to version ${view.head}`, action: versionViewAction(drawingState?.drawing_id, view.head) })
     }
-  }, [drawingState, showToast, undoDrawingVersion, versionViewAction])
+  }, [drawingState, showToast, undoDrawingVersion, versionViewAction, workspaceController, projectEditorTarget])
   undoActionRef.current = undoCurrentVersion
 
   const onRedo = useCallback(async () => {
+    if (projectModeRef.current) return null
     const view = await redoDrawingVersion()
     if (view) {
       track('drawing.version_navigated', { action: 'redo' })
@@ -2415,6 +2682,11 @@ export default function App() {
   }, [drawingState, redoDrawingVersion, showToast, versionViewAction])
 
   const onToggleHistoryTracked = useCallback(() => {
+    if (projectModeRef.current) {
+      setProjectPane('versions')
+      setBrowserPanel('project')
+      return
+    }
     returnToDrawing()
     if (!historyOpen) track('drawing.version_navigated', { action: 'history' })
     onToggleHistory()
@@ -2456,6 +2728,42 @@ export default function App() {
     if (typeof givenName !== 'string' || !givenName.trim()) return
     return createWorkspaceProject(givenName)
   }, [createWorkspaceProject])
+
+  const mountedDrawingRef = useRef(null)
+  const drawingAttachProjectRef = useRef(openProjectId)
+  drawingAttachProjectRef.current = openProjectId
+  const onCreateProjectFromDrawing = useCallback(async (givenName) => {
+    if (typeof givenName !== 'string' || !givenName.trim()) return
+    // Capture drawing custody at the click, before creating opens another project.
+    const mounted = mountedDrawingRef.current
+    const source = mounted?.mounted ? mountedDrawingSource(mounted) : null
+    const result = await createProjectFromDrawing({ name: givenName, source,
+      createProject: createWorkspaceProject, importUpload: importUploadedDrawingVersion })
+    if (!result) return
+    const projectId = result.project.project_id ?? result.project.id
+    if (result.attached) {
+      if (drawingAttachProjectRef.current === projectId) await rehydrate()
+    } else if (result.reason === 'attach-failed') {
+      const notifyAttachFailure = (error) => showToast({
+        text: `Project created, but this drawing was not added: ${error?.message || String(error)}.`,
+        kind: 'error',
+        action: { label: 'Retry', onClick: async () => {
+          try {
+            // Retry only the attach, retaining the project, drawing and key.
+            await result.retry()
+            if (drawingAttachProjectRef.current === projectId) await rehydrate()
+            showToast({ text: 'Drawing added to the project.' })
+          } catch (retryError) {
+            notifyAttachFailure(retryError)
+          }
+        } },
+      })
+      notifyAttachFailure(result.error)
+    } else if (mounted?.mounted) {
+      showToast({ text: 'Project created. This drawing is not saved to your account, so it was not added.' })
+    }
+    return result.project
+  }, [createWorkspaceProject, rehydrate, showToast])
 
   const prepareRunParams = useCallback((tool, params, options) => {
     const isWrite = (tool.capabilities || []).includes('drawing.write')
@@ -2579,7 +2887,10 @@ export default function App() {
     }
     return armed
   }, [tools, mock, session.status, prepareRunParams, running, previewing, writeLocked, canRunWrite, catalogRunContext, engineDirty, refuseProjectSolar])
-  catalogUiRef.current = { armDecision, startAgentTurn, running }
+  const projectSource = useProjectSourceController({ projectId: openProjectId, orgId, signedIn, mock, startAgentTurn,
+    sourceContext: activeSurface === 'ios' ? 'native' : 'browser' })
+  catalogUiRef.current = { armDecision, startAgentTurn, running,
+    openProjectSource: (text, options) => ['browser', 'ios'].includes(activeSurface) ? projectSource.open(text, options) : false }
 
   const onRequestCatalogRun = useCallback((tool, params, rationale = null, source = 'catalog', { complete = false } = {}) => {
     if (!tool) return
@@ -2736,6 +3047,11 @@ export default function App() {
       submission: { params: merged },
       execute: ({ onSubmit, onStatus, signal }) => (mock
         ? runTool(mock, tool, merged, shown)
+        : executionContext.projectId ? runProjectCatalogTool({
+          projectSolar, tool, params: merged, context: executionContext,
+          catalogDigest: (runContext?.toolSnapshot?.catalogDigest
+            || createCatalogToolSnapshot(tool).catalogDigest || undefined),
+          idempotencyKey, onSubmit, onStatus, signal })
         : runToolAsync(tool, merged, executionContext.drawingId, {
           orgId: executionContext.orgId || undefined,
           projectId: executionContext.projectId || undefined,
@@ -2754,12 +3070,44 @@ export default function App() {
 
     if (!mock) {
       loadUsage(); checkout.actions.refresh()
-      if (openProjectId) rehydrate()
+      // A project write names its new canonical version: reconcile once and select it, so CAD,
+      // the board and Undo all read the written version. Any other run only reconciles.
+      const written = executionContext.projectId && envelope?.ok === true
+        && envelope.version && typeof envelope.version === 'object' ? envelope.version : null
+      if (written) await seatProjectDrawingPublication(workspaceController, { drawing_version: written })
+      else if (openProjectId) rehydrate()
     }
     return envelope
-  }, [agentMode, catalogRunContext, checkout.actions, clearAgentMode, dismissRoute, loadUsage, mock,
+  }, [agentMode, catalogRunContext, checkout.actions, clearAgentMode, dismissRoute, loadUsage, mock, projectSolar, workspaceController,
     health?.aps_live, openProjectId, prepareRunParams, markRefreshFailure, previewing, rehydrate, runJob,
     shown, writeLocked, closeStartForChange, refuseProjectSolar])
+
+  const onRunArloReference = useCallback(async (input, { scope, signal, idempotencyKey }) => {
+    const currentProject = () => {
+      const current = workspaceController.getSnapshot()
+      return readActiveScope() === scope && current.openProjectId === input.project_id
+        && current.workspace?.project?.org_id === input.organization_id
+    }
+    if (!signedIn || mock || signal.aborted || !currentProject()) return null
+    if (running) return { ok: false, error: { message: 'Wait for the current tool run to finish before starting ARLO.' } }
+
+    const envelope = await runJob({
+      toolName: 'arlo-design',
+      execute: async ({ onSubmit, onStatus, signal: jobSignal }) => {
+        if (signal.aborted || jobSignal.aborted || !currentProject()) return null
+        const output = await runToolAsync('arlo-design', input.request, input.input_version_id, {
+          orgId: input.organization_id, projectId: input.project_id, idempotencyKey,
+          signal: jobSignal,
+          onSubmit: id => { if (currentProject()) onSubmit(id) },
+          onStatus: status => { if (currentProject()) onStatus(status) },
+        })
+        return currentProject() ? output : null
+      },
+    })
+    if (!currentProject()) return null
+    await rehydrate()
+    return currentProject() ? envelope : null
+  }, [mock, rehydrate, runJob, running, signedIn, workspaceController])
 
   const onConfirmCatalogRun = useCallback(async (intent, tool, params) => {
     if (refuseProjectSolar(intent?.toolName || tool?.name, intent?.context)) {
@@ -3307,11 +3655,12 @@ export default function App() {
     return catalogActions.dispatch(override, options)
   }, [catalogActions, running, prompt, refuseProjectSolar])
 
-  const onOpenAuthor = useCallback(() => {
+  const onOpenAuthor = useCallback((options) => {
+    if (catalogUiRef.current.openProjectSource?.(prompt, options)) return
     if (!authorPendingRef.current) setAuthorTargetTool(null)
     setAuthorOpen(true)
     setTimeout(() => authorSectionRef.current?.scrollIntoView({ block: 'nearest' }), 0)
-  }, [])
+  }, [prompt])
 
   // --- M5 guided tour: canned prompts ride the REAL handlers ----------------
   // The tour types its beat into the real command bar, dispatches it through the
@@ -3900,6 +4249,20 @@ export default function App() {
   }, [projectMode, mock, surfaceSlots.toolbar.profile, catalogRunContext?.drawingId, catalogRunContext?.drawingVersion, catalogRunContext?.projectId])
   const boardVisible = !!studioGround && (startOpen || surfaceSlots.ground === 'board')
   const [browserPanel, setBrowserPanel] = useState('none')
+  const transcriptDestination = resolveConversationDestination({
+    hasDockHost: Boolean(commandTranscriptHost), agentMode, sessionId: agentSessionId,
+  })
+  const latestAgentTurn = agentTurns.at(-1)
+  const latestAgentTurnId = latestAgentTurn?.turnId || latestAgentTurn?.requestId
+  const lastTranscriptTurn = useRef(null)
+  useEffect(() => {
+    if (!agentSessionId || !latestAgentTurnId) return
+    const previous = lastTranscriptTurn.current
+    if (previous?.sessionId === agentSessionId && previous?.turnId === latestAgentTurnId) return
+    // Record dock turns too: moving an existing turn to the rail must not reopen it.
+    lastTranscriptTurn.current = { sessionId: agentSessionId, turnId: latestAgentTurnId }
+    if (transcriptDestination === 'rail') setBrowserPanel('studio')
+  }, [agentSessionId, latestAgentTurnId, transcriptDestination])
   // One persistent Project subtree owns campaigns and pane seats across all Studio profiles.
   const boardHostsProject = (!!studioGround && surfaceSlots.chrome.shell === 'cockpit') || (boardVisible && surfaceSlots.ground === 'board')
   const paneSeats = deriveBoardPaneSeats({
@@ -4053,6 +4416,17 @@ export default function App() {
     setNavExpanded(true)
     if (studioShell) setBrowserPanel('studio')
   }, [studioShell, setNavExpanded, setBrowserPanel])
+  revealResultRef.current = () => {
+    if (!studioShell) return
+    setBrowserPanel('studio')
+    if (drawerViewport) setStudioDrawer('result')
+  }
+  const toggleStudioToolRail = useCallback(() => {
+    if (browserPanel === 'studio' && (drawerViewport ? studioDrawer === 'nav' : navExpanded)) {
+      setBrowserPanel('none')
+      setNavExpanded(false)
+    } else openToolRail()
+  }, [browserPanel, drawerViewport, studioDrawer, navExpanded, setBrowserPanel, setNavExpanded, openToolRail])
   const browserAssetActive = studioShell && surfaceSlots.ground === 'board'
   useDockRise(projectLayout.appRef, studioShell)
   // Build routing and "Open author flow" both use setAuthorOpen. The studio
@@ -4092,7 +4466,7 @@ export default function App() {
       rTarget,
       // S25: the version undo / redo records' own gates, so Mod+Z off the
       // drafting surface answers to exactly the ribbon's Undo and Redo.
-      hasVersions: !!drawingState,
+      hasVersions,
       canUndo,
       canRedo,
       versionBusy: !!versionBusy,
@@ -4132,7 +4506,7 @@ export default function App() {
   }, [startOpen, onReturnToDrawing, drawer, drawerViewport, studioShell, studioDrawer, historyOpen, route, routeErr, runErr, running, selectedHandle,
       onStopRun, onDispatch, openProjectId, onCloseProject, rTarget,
       closeHistory, loadHistory, retryTools, loadCatalog, onRetryViewerRefresh, dismissRoute, clearRouteError,
-      onDismissSolarFlowRoute, drawingState, canUndo, canRedo, versionBusy, previewing, drawingMutationsBlocked, onUndo, onRedo])
+      onDismissSolarFlowRoute, drawingState, hasVersions, canUndo, canRedo, versionBusy, previewing, drawingMutationsBlocked, onUndo, onRedo])
   // S27: Escape from inside the typed Solar settings form closes it through
   // the one owner stack (edit layer, scoped to the form's wrapper; while the
   // wrapper is not mounted the owner claims nothing).
@@ -4401,7 +4775,7 @@ export default function App() {
           { id: 'quick-rail', dataTool: 'rail-expand', label: 'Tool rail', icon: 'sidebar',
             expanded: studioShell ? browserPanel === 'studio' && (drawerViewport ? studioDrawer === 'nav' : navExpanded) : drawerViewport ? studioDrawer === 'nav' : navExpanded,
             onClick: () => studioShell
-              ? drawerViewport && browserPanel === 'studio' && studioDrawer === 'nav' ? toggleStudioDrawer('nav') : openToolRail()
+              ? toggleStudioToolRail()
               : drawerViewport ? toggleStudioDrawer('nav') : setNavExpanded(!navExpanded) },
         ], view: null, version: null, rail: [], author: null }
     }
@@ -4411,7 +4785,7 @@ export default function App() {
       onBeforeJump: pushViewSnapshot,
     })
     const version = versionCluster({
-      hasVersions: !!drawingState,
+      hasVersions,
       canUndo,
       canRedo,
       versionBusy: !!versionBusy,
@@ -4564,13 +4938,13 @@ export default function App() {
           { id: 'quick-rail', dataTool: 'rail-expand', label: 'Tool rail', icon: 'sidebar', title: 'Expand the tool rail',
             expanded: studioShell ? browserPanel === 'studio' && (drawerViewport ? studioDrawer === 'nav' : navExpanded) : drawerViewport ? studioDrawer === 'nav' : navExpanded,
             onClick: () => studioShell
-              ? drawerViewport && browserPanel === 'studio' && studioDrawer === 'nav' ? toggleStudioDrawer('nav') : openToolRail()
+              ? toggleStudioToolRail()
               : drawerViewport ? toggleStudioDrawer('nav') : setNavExpanded(true) },
         ] : []),
       ],
     }
-  }, [projectMode, projectDrawing.mode, drawingIntake, studioShell, browserPanel, openToolRail, drafting, profileTabs, surfaceSlots.toolbar.profile, activeRibbonTab, navExpanded, navSpine, setNavExpanded, toggleStudioDrawer, drawerViewport, studioDrawer,
-    shown, drawingState, canUndo, canRedo, versionBusy, running, previewing,
+  }, [projectMode, projectDrawing.mode, drawingIntake, studioShell, browserPanel, openToolRail, toggleStudioToolRail, drafting, profileTabs, surfaceSlots.toolbar.profile, activeRibbonTab, navExpanded, navSpine, setNavExpanded, toggleStudioDrawer, drawerViewport, studioDrawer,
+    shown, drawingState, hasVersions, canUndo, canRedo, versionBusy, running, previewing,
     drawingMutationsBlocked, historyOpen, onUndo, onRedo, onToggleHistoryTracked, layerCounts, visibleLayers,
     toggleLayer, railFamilies, onRequestCatalogRun, writeLocked, canRunWrite, canBuild, entOf, ribbonTab, colorForLayer, paneOpen,
     pushViewSnapshot, lastAuthoredTool, onUseAuthored, setFamilyOpen, engineDirty])
@@ -4647,16 +5021,34 @@ export default function App() {
   // Named apart from the version bootstrap's `drawingSummary`: a shadowing
   // name makes the build transform rename one of them and the App wiring
   // pins (src/app-wiring.test.mjs) then miss the bootstrap's pattern.
+  // A hand import's id is its filename; a head copy's id is internal. The mounted drawing names only this drawing's head.
+  const mountedDrawingFile = drawingName && (/\.dxf$/i.test(drawingName) ? drawingName : `${drawingName}.dwg`)
+  const activeDocumentIsHead = !!activeIntake && engineDocument?.documentId === activeIntake.documentId
+    && holdsHeadDocument(engineDocument, REQUESTED_DRAWING_ID)
+  const activeDrawingName = projectMode ? projectDrawingName
+    : activeIntake ? drawingPropertyName(activeDocumentIsHead ? mountedDrawingFile : '', activeIntake.documentId)
+      : shown ? mountedDrawingFile || `${projectName}.dwg` : ''
+  mountedDrawingRef.current = { drawingState, requestedDrawingId: REQUESTED_DRAWING_ID,
+    name: activeDrawingName, mounted: Boolean(shown) && !projectMode }
+  const sourceDrawingSummary = drawingIntake?.sourceSummary
+  const drawingMetadata = sourceDrawingSummary
+    ? `${sourceDrawingSummary.entityCount} entities · ${Object.keys(sourceDrawingSummary.countsByLayer).length} layers`
+    : shown ? `${shown.polylines.length} polylines · ${shown.layers.length} layers` : ''
   const paneDrawingFacts = useMemo(() => {
     if (!(studioGround && drafting && drawingIntake)) return null
-    const layers = Array.isArray(drawingIntake.layers) ? drawingIntake.layers : []
-    const polylines = Array.isArray(drawingIntake.polylines) ? drawingIntake.polylines.length : 0
-    const inserts = Array.isArray(drawingIntake.inserts) ? drawingIntake.inserts.length : 0
-    const faces = Array.isArray(drawingIntake.faces3d) ? drawingIntake.faces3d.length : 0
+    const source = drawingIntake.sourceSummary
+    const layers = source ? Object.keys(source.countsByLayer)
+      : Array.isArray(drawingIntake.layers) ? drawingIntake.layers : []
+    const polylines = source ? (source.countsByType.LWPOLYLINE || 0) + (source.countsByType.POLYLINE || 0)
+      : Array.isArray(drawingIntake.polylines) ? drawingIntake.polylines.length : 0
+    const inserts = source ? source.countsByType.INSERT || 0
+      : Array.isArray(drawingIntake.inserts) ? drawingIntake.inserts.length : 0
+    const faces = source ? source.countsByType['3DFACE'] || source.countsByType.FACE3D || 0
+      : Array.isArray(drawingIntake.faces3d) ? drawingIntake.faces3d.length : 0
     return {
       // Same gate and value as the document tab and the footer.
-      name: projectMode ? projectDrawingName : drawingPropertyName(shown ? `${projectName}.dwg` : '', activeIntake?.documentId),
-      entities: polylines + inserts + faces,
+      name: activeDrawingName,
+      entities: source ? source.entityCount : polylines + inserts + faces,
       polylines,
       inserts,
       faces,
@@ -4666,7 +5058,7 @@ export default function App() {
       source: projectMode ? 'project drawing' : activeIntake ? 'browser drawing' : mock ? 'sample data' : 'project drawing',
       ...(!projectMode && activeIntake && engineHistory ? engineHistory : {}),
     }
-  }, [projectMode, projectDrawingName, studioGround, drafting, drawingIntake, activeIntake, engineHistory, shown, drawingName, projectName, visibleLayers, mock])
+  }, [projectMode, activeDrawingName, studioGround, drafting, drawingIntake, activeIntake, engineHistory, visibleLayers, mock])
 
   // W4d Slice A: the ONE engine-session mount wraps the drawing workspace,
   // so the ribbon's engine clusters and the import pane consume the same
@@ -4679,7 +5071,7 @@ export default function App() {
   // NEW VERSION of the open drawing. The engine supplies its committed
   // parent; the server's compare-and-set still guards the race. Mock/demo
   // stays download-only, honestly.
-  const engineSaveTarget = !mock && intake ? {
+  const engineSaveTarget = !mock && !projectMode && intake ? {
     drawingId: REQUESTED_DRAWING_ID,
     headVersion: null,
     // W4g-3b (one head): a save that carries a `plan` (the store's diff of
@@ -4743,12 +5135,20 @@ export default function App() {
     },
   } : null
   const onEngineSaved = (receipt) => {
+    if (receipt?.drawing_version) {
+      return seatProjectDrawingPublication(workspaceController, receipt)
+    }
     if (receipt?.new_version) {
       completedVersionRef.current?.(receipt.new_version, { result: {} })
     }
   }
   const engineScope = (node) => (ENV_CAD_EDIT ? (
-    <EngineSessionProvider saveTarget={localCadActive ? null : engineSaveTarget} onSaved={onEngineSaved} onDirtyChange={onEngineDirtyChange} onDocumentChange={setEngineDocument} onBeforeEdit={closeStartForChange} onBeforeArm={onBeforeArm}><LocalCadEngineHold active={localCadActive} />{node}</EngineSessionProvider>
+    <EngineSessionProvider saveTarget={localCadActive ? null : projectMode ? projectEditorTarget : engineSaveTarget} onSaved={onEngineSaved} onDirtyChange={onEngineDirtyChange} onDocumentChange={setEngineDocument} onBeforeEdit={closeStartForChange} onBeforeArm={onBeforeArm}>
+      <LocalCadEngineHold active={localCadActive} />
+      {projectMode && <ProjectDrawingEditorBridge key={session.generation} scope={projectEditorBinding} onTarget={setProjectEditorTarget} projectClient={projectSolar.projectClient} />}
+      {projectMode && <ProjectDrawingEngineOpener scope={projectEditorBinding} target={projectEditorTarget} />}
+      {node}
+    </EngineSessionProvider>
   ) : node)
 
   return (
@@ -4773,7 +5173,7 @@ export default function App() {
       studioShell={studioShell}
       headingRef={boardHeadingRef}
       onSelect={onSelectSurface}
-      onCreateProject={onCreateProject}
+      onCreateProject={onCreateProjectFromDrawing}
       projectSlot={surfaceSlots.chrome.projectSlot === 'ios-surface'
         ? <IosSurface enabled={ENV_IOS_SURFACE} contract={iosContract} ship={ship} onLaunch={ship.onLaunch} />
         : null}
@@ -4786,7 +5186,7 @@ export default function App() {
       // field as undefined and answer with the ladder's own "no drawing in
       // the browser engine yet", never a fabricated availability.
       contextMenuCtx={{
-        hasVersions: !!drawingState,
+        hasVersions,
         canUndo,
         canRedo,
         versionBusy: !!versionBusy,
@@ -4978,8 +5378,8 @@ export default function App() {
             onOpenProject={onOpenProject}
           />
           <span className="meta">
-            {shown
-              ? `${shown.polylines.length} polylines · ${shown.layers.length} layers`
+            {drawingMetadata
+              ? drawingMetadata
               : drawingLoadShown && (
                 <span className="meta-loading" role="status">
                   <span className="dot hollow" aria-hidden="true" />Loading drawing
@@ -5189,6 +5589,7 @@ export default function App() {
             the ground attaches on the first render none of this renders. */}
         {studioGround && createPortal(
           <SurfaceGrounds
+            canApplyLayout={canOpenCustomize}
             projectId={openProjectId || null}
             session={session}
             signedIn={signedIn}
@@ -5208,7 +5609,7 @@ export default function App() {
             leavingGround={leavingGround}
             startFocusRequest={startFocusRequest}
             onReturnToDrawing={drafting ? onReturnToDrawing : null}
-            onCreateProject={onCreateProject}
+            onCreateProject={onCreateProjectFromDrawing}
             headingRef={boardHeadingRef}
             workspaceProject={workspaceProjectState}
             actions={boardHostsProject ? {
@@ -5283,6 +5684,7 @@ export default function App() {
                       project={workspace.project}
                       artifacts={workspace.drawing_artifacts || []}
                       onAttached={rehydrate}
+                      onRunArlo={onRunArloReference}
                     /> : <p>Material will be available after the project opens.</p>,
                   catalog: <ul>{railFamilies.map((family) => <li key={family.family_id}>{family.label}</li>)}</ul>,
                   conversation: <BoardPaneState pane="conversation" context={boardPaneContext}>
@@ -5324,7 +5726,9 @@ export default function App() {
               )}
             </> : undefined}
             workspace={!mock && openProjectId ? workspace : null}
-            drawing={shown ? { name: projectName, polylines: shown.polylines.length, layers: shown.layers.length } : null}
+            drawing={boardDrawingFacts({ projectMode, shown, standaloneName: projectName,
+              selectedVersion: projectSelectedDrawingVersion, binding: projectSolar.scope.binding,
+              projectIntake: projectDrawing.intake })}
             catalog={catalog}
             mock={mock}
             iosEnabled={ENV_IOS_SURFACE}
@@ -5420,6 +5824,23 @@ export default function App() {
                   projectPending={projectSolarRuntime.projectPending}
                   projectOutcome={projectSolarRuntime.projectOutcome}
                 />
+                {projectEditorBinding && (
+                  <ProjectLayoutPublicationTools
+                    drawingId={projectEditorBinding.drawing_id}
+                    projectId={projectEditorBinding.project_id}
+                    busy={!!running || projectSolarRuntime.busy}
+                    projectScope={projectEditorBinding}
+                    getProjectScope={() => {
+                      const current = workspaceController.getSnapshot()
+                      return projectEditorScope({
+                        enabled: projectModeRef.current && sessionProof.current() && session.controller.getSnapshot().status === 'active',
+                        orgId: current.orgId, projectId: current.openProjectId,
+                        workspace: current.workspace, versionId: current.canonicalVersionId,
+                      })
+                    }}
+                    onProjectDrawingPublished={(receipt, captured, isCurrent) => seatSolarProjectPublication(workspaceController, receipt, captured, isCurrent)}
+                  />
+                )}
               </div>
             ) : <p role="status" aria-live="polite">
               {projectSolarAppReason('project_unavailable')}
@@ -5556,6 +5977,7 @@ export default function App() {
                   every tab; the tab picks which panels the band shows. */}
               {ENV_CAD_EDIT && drafting && (
                 <EngineRibbonClusters
+                  projectDownload={projectDxfDownload}
                   importOpen={importOpen}
                   onToggleImport={() => { returnToDrawing(); setImportOpen((o) => !o) }}
                   panels={activeRibbonTab === 'solar' ? ['solar-panels'] : activeRibbonTab === 'insert' ? ['file', 'block'] : activeRibbonTab === 'annotate' ? ['annotation'] : activeRibbonTab === 'draw' ? ['draw', 'modify', 'annotation', 'block', 'clipboard', 'properties', 'groups'] : activeRibbonTab === 'view' ? ['script'] : []}
@@ -5591,7 +6013,7 @@ export default function App() {
               the card carries data-engine-document for the pins. */}
           {ENV_CAD_EDIT && <EngineObjectBridge active={!projectMode && !!studioGround && groundShowsDrawing(activeSurface)} intake={activeIntake} />}
           {!localCadActive && <>
-          {ENV_CAD_EDIT && studioGround && !projectMode && engineViewArmed && (
+          {ENV_CAD_EDIT && studioGround && (projectMode ? !!projectEditorBinding?.input_version_id : engineViewArmed) && (
             <EngineDocumentView
               viewerRef={viewerRef}
               consoleIntake={intake}
@@ -5600,6 +6022,9 @@ export default function App() {
               registerCanvasPick={registerCanvasPick}
               registerCanvasMarquee={registerCanvasMarquee}
               onShown={(intake, history) => {
+                if (projectMode) {
+                  setProjectEditorEngine(intake ? { scopeKey: projectEditorKey, intake } : null)
+                }
                 setActiveIntake(intake)
                 setEngineHistory(history ? { undoDepth: history.undoDepth, redoDepth: history.redoDepth } : null)
                 if (!intake || (resultCandidate && resultCandidate.documentId !== intake.documentId)) {
@@ -5616,6 +6041,7 @@ export default function App() {
                 else delete el.dataset.engineDocument
               }}
               onHidden={() => {
+                if (projectMode) setProjectEditorEngine(null)
                 setActiveIntake(null)
                 setEngineHistory(null)
                 setResultCandidate(null)
@@ -5678,13 +6104,12 @@ export default function App() {
               {projectMode ? <>{projectDrawingName} <code>{projectSolar.scope.binding?.input_version_id}</code></> : <>
               {/* One loading voice per pane — the pulse-dot line in the viewer
                   announces loading; the title placeholder stays a muted dash. */}
-              {shown ? `${projectName}.dwg` : <span className="dim">—</span>}
-              {shown && (
+              {activeDrawingName || <span className="dim">—</span>}
+              {drawingMetadata && (
                 <span className="dim">
-                  {' · '}{shown.polylines.length} polylines
-                  {shown.inserts?.length ? ` · ${shown.inserts.length} inserts` : ''}
-                  {shown.faces3d?.length ? ` · ${shown.faces3d.length} faces` : ''}
-                  {' · '}{shown.layers.length} layers
+                  {' · '}{drawingMetadata}
+                  {!sourceDrawingSummary && shown?.inserts?.length ? ` · ${shown.inserts.length} inserts` : ''}
+                  {!sourceDrawingSummary && shown?.faces3d?.length ? ` · ${shown.faces3d.length} faces` : ''}
                 </span>
               )}
               </>}
@@ -5781,7 +6206,7 @@ export default function App() {
                     >
                       History{previewing ? ` · v${previewing.version}` : ''}
                     </button>
-                    {historyExit.shown && (
+                    {!projectMode && historyExit.shown && (
                       <VersionHistory
                         data={history}
                         error={historyErr}
@@ -6127,9 +6552,10 @@ export default function App() {
         <PersistentSeat destination={studioShell ? studioActivityHost : activityFallback}>
         <div ref={setConversationSource} />
         {paneSeats.conversationMounted && (
-          <PersistentSeat destination={paneSeats.conversationTarget}>
+          <PersistentSeat destination={transcriptDestination === 'dock' ? commandTranscriptHost : paneSeats.conversationTarget}>
           <ConversePanel
             sessionId={agentSessionId}
+            projectContext={conversationProjectContext}
             userTurns={agentTurns}
             onCatalogChanged={refreshCatalog}
             consumeCatalogPublication={catalogController.consumeCatalogPublication}
@@ -6138,6 +6564,8 @@ export default function App() {
             onAttachJob={onAttachAgentJob}
             onJobLinked={refreshJobs}
             onBeforeWriteApproval={closeStartForChange}
+            prepareApprovedProjectRun={prepareApprovedProjectRun}
+            canonicalProjectWriteTools={PROJECT_SOLAR_SUPPORTED_TOOLS}
             engineDirty={engineDirty}
           />
           </PersistentSeat>
@@ -6190,6 +6618,7 @@ export default function App() {
         </main>
 
         <div className="bar-dock">
+          <div className="command-transcript-host" data-testid="command-transcript-host" ref={setCommandTranscriptHost} />
           {boardVisible && <p className="start-board-gloss">{START_BOARD_COPY.gloss}{mock && <> {START_BOARD_COPY.mockGloss}</>}</p>}
           {/* W4e slice H: the engine's command prompt ("LINE  Specify first
               point:") portals here, the line above the command input, on the
@@ -6347,7 +6776,7 @@ export default function App() {
             the reference's Model tab, the drawing's name, and + (the project
             board). Every other surface: nothing here. */}
         {studioShell && (drafting ? (
-          <StatusTabs name={projectMode ? projectDrawingName : shown ? `${projectName}.dwg` : ''} onStart={onOpenStart} />
+          <StatusTabs name={activeDrawingName} onStart={onOpenStart} />
         ) : (
           <span className="cockpit-status-tabs" data-testid="cockpit-status-tabs">
             <span className="foot-model-tab">{surfaceSlots.ground === 'device-stage' ? 'Revision' : 'Project'}</span>
@@ -6413,6 +6842,7 @@ export default function App() {
       <DetailsDrawer data={sessionDetails} onClose={() => setDrawer(null)} />
 
       <ShortcutSheet open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+      <ProjectSourceCandidateReview controller={projectSource} />
 
       {/* M5: the ?demo=tour walkthrough. Mock-only — the tour drives real mock
           handlers, so it must never point at a live/paid backend. */}

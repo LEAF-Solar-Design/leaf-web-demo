@@ -35,6 +35,8 @@ export default function LinkDeviceDrawer({
   const live = useRef(open)
   live.current = open
   const lock = useRef(false)
+  const refreshing = useRef(false)
+  const backgroundRefresh = useRef(null)
   const enrollmentIds = useRef(new Set())
   const [label, setLabel] = useState('')
   const [enrollment, setEnrollment] = useState(null)
@@ -56,6 +58,7 @@ export default function LinkDeviceDrawer({
   const catalogVersion = Array.isArray(catalog) ? catalog.find((pkg) => pkg?.package === 'homeassistant')?.version : null
   const version = !catalogLoading && !catalogError && typeof catalogVersion === 'string' && catalogVersion.trim() ? catalogVersion : null
   const expiresIn = enrollment ? Math.max(0, Math.ceil((Date.parse(enrollment.expires_at) - now) / 1000)) : 0
+  backgroundRefresh.current = { onRefresh, enrolling: !!enrollment && expiresIn > 0 }
 
   useEscapeOwner('link-device', open, () => onToggle?.(false), { layer: 'menu', scope: root })
   useLayoutEffect(() => {
@@ -92,6 +95,20 @@ export default function LinkDeviceDrawer({
       document.removeEventListener('mousedown', outside)
     }
   }, [open, mock, onToggle])
+
+  useEffect(() => {
+    if (!open || !wired || mock) return undefined
+    const refresh = async () => {
+      if (refreshing.current || backgroundRefresh.current.enrolling || lock.current) return
+      refreshing.current = true
+      try { await backgroundRefresh.current.onRefresh?.() }
+      catch { /* Background list errors are handled by the registry. */ }
+      finally { refreshing.current = false }
+    }
+    void refresh()
+    const timer = setInterval(refresh, 15000)
+    return () => clearInterval(timer)
+  }, [open, wired, mock])
 
   useEffect(() => {
     if (!open || !enrollment || !expiresIn || mock) return undefined
@@ -167,12 +184,12 @@ export default function LinkDeviceDrawer({
   return (
     <span className="claude-acct link-svc" ref={root}>
       <button className="link-svc-trigger" ref={trigger} aria-haspopup="dialog" aria-expanded={open} onClick={() => onToggle?.(!open)}>
-        <span className="ca-k">Devices</span><span className="ca-state">{loading ? 'Checking' : listFailed ? 'Unavailable' : list.length}</span>
+        <span className="ca-k">Devices</span><span className="ca-state">{loading && !list.length ? 'Checking' : listFailed ? 'Unavailable' : list.length}</span>
       </button>
       {pop.shown && <div className={`claude-pop vh-pop${pop.exiting ? ' exit' : ''}`} ref={dialog} role="dialog" aria-label="Devices" inert={!open ? '' : undefined} aria-hidden={!open || undefined}>
         <div className="ca-head"><span>Link a device</span><EscCap ref={close} onClick={() => onToggle?.(false)} label="Close devices panel" /></div>
         {mock && <p className="ca-note"><span className="dot square" />Demo devices. Actions are unavailable; no device is contacted.</p>}
-        {loading && <div className="skeleton-stack" role="status" aria-label="Loading devices"><div className="skeleton-row" /></div>}
+        {loading && !list.length && <div className="skeleton-stack" role="status" aria-label="Loading devices"><div className="skeleton-row" /></div>}
         {/* Mutations are caught beside their action; registry errors outlive a drawer session. */}
         {listFailed && <div className="field-err" role="alert"><span className="dot red" />{error.message}
           <button className="chip-act" disabled={loading || mock} onClick={error.retry || onRefresh}>Retry</button>
@@ -224,7 +241,7 @@ export default function LinkDeviceDrawer({
                 {!activity[device.device_id].length && <p className="ca-copy">No activity yet. Device actions appear here.</p>}
                 {activity[device.device_id].map((event, index) => <p className="ca-copy" key={index}><time>{event.at}</time> {event.actor} {event.op} {event.target} <span className="state sub">{event.status}</span></p>)}
               </section>}
-              {isHealthy && open && <HomeAssistantSetup deviceId={device.device_id} mock={mock} active={open} disabled={busy || working} onCommand={onCommand} onGetCommand={onGetCommand} onRelayToken={onRelayToken} />}
+              {isHealthy && open && <HomeAssistantSetup deviceId={device.device_id} projectId={device.project_id} mock={mock} active={open} disabled={busy || working} onCommand={onCommand} onGetCommand={onGetCommand} onRelayToken={onRelayToken} />}
             </div>
           })}
         </div>
