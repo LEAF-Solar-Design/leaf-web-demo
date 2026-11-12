@@ -3,8 +3,10 @@ import { startStack } from '../../walk/stack.mjs'
 import { prepareProductionBundle } from '../../walk/sameOriginProxy.mjs'
 import { SERVER_ERROR_CAP, extractErrorId, serverDiagnostic } from '../../walk/serverDiagnostics.mjs'
 import { readFile, writeFile } from 'node:fs/promises'
+import { readFileSync, readdirSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { basename, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { PRODUCT_SURFACES } from '../../src/site/productSurfaces.js'
 import { toolPlacementTab } from '../../src/lib/toolRecord.js'
 import { familiesForSurface } from '../../src/lib/surfaceRails.js'
@@ -30,6 +32,30 @@ import { seedParams, runBody, expectHeadAdvanced } from '../solarGraphCommitProo
 import { actionResponse, isUuid, projectBinding, observeProjectTraffic, readContext, runProjectTool } from '../local/solarProjectWalk.mjs'
 
 export { expect }
+
+// A string literal from the CAD engine's browser worker.
+export const ENGINE_WORKER_MARKER = 'engine_bg.wasm'
+
+export function engineWorkerChunkPath(distDir = fileURLToPath(new URL('../../dist', import.meta.url))) {
+  const matches = []
+  const visit = (relative) => {
+    let entries
+    try { entries = readdirSync(join(distDir, relative), { withFileTypes: true }) }
+    catch (error) {
+      if (error.code === 'ENOENT') return
+      throw error
+    }
+    for (const entry of entries) {
+      const path = `${relative}/${entry.name}`
+      if (entry.isDirectory()) visit(path)
+      else if (entry.isFile() && entry.name.endsWith('.js')
+        && readFileSync(join(distDir, path), 'utf8').includes(ENGINE_WORKER_MARKER)) matches.push(`/${path}`)
+    }
+  }
+  visit('_next/static/chunks')
+  if (matches.length !== 1) throw new Error(`engine worker chunk not found: expected exactly one, found ${matches.length}`)
+  return matches[0]
+}
 
 export async function collectPromptRunDiagnostic(page, runtime) {
   const read = async (operation, fallback = null) => {
@@ -1818,14 +1844,14 @@ export async function readWalkBuildFlags(probe, runtime) {
 
 // A passive tap: native worker input and delivery are forwarded unchanged.
 // Full reparsed entity records avoid accepting a count-only geometry oracle.
-export function installGeometryObserver() {
+export function installGeometryObserver({ engineWorkerPath = '' } = {}) {
   const NativeWorker = globalThis.Worker
   const observations = { geometry: null, dispatches: [] }
   globalThis.__walkGeometry = observations
   globalThis.Worker = class extends NativeWorker {
     constructor(url, options) {
       super(url, options)
-      this.walkGeometryEngine = String(url).includes('worker-browser')
+      this.walkGeometryEngine = String(url).includes('worker-browser') || (engineWorkerPath && String(url).includes(engineWorkerPath))
       if (this.walkGeometryEngine) super.addEventListener('message', ({ data }) => {
         if (['documentLoaded', 'editApplied'].includes(data?.type) && Array.isArray(data.entities)) {
           observations.geometry = structuredClone({ documentId: data.documentId, entities: data.entities,
@@ -3684,14 +3710,14 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
     }
     case 'baseline-three-state': await baselineThreeState(probe, runtime, recipe); return
     case 'prepare-engine-transport':
-      await page.addInitScript(() => {
+      await page.addInitScript(({ engineWorkerPath = '' } = {}) => {
         const NativeWorker = globalThis.Worker
         const transport = { hold: false, pending: [] }
         globalThis.__walkEngineTransport = transport
         globalThis.Worker = class extends NativeWorker {
           constructor(url, options) {
             super(url, options)
-            this.walkEngine = String(url).includes('worker-browser')
+            this.walkEngine = String(url).includes('worker-browser') || (engineWorkerPath && String(url).includes(engineWorkerPath))
             this.walkListeners = new Map()
           }
           addEventListener(type, listener, options) {
@@ -3711,7 +3737,8 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
             return super.removeEventListener(type, this.walkListeners.get(listener) || listener, options)
           }
         }
-      })
+      }, { engineWorkerPath: typeof runtime.engineWorkerPath === 'string' && runtime.engineWorkerPath
+        ? runtime.engineWorkerPath : engineWorkerChunkPath() })
       runtime.cleanup.push(async () => {
         await page.evaluate(() => {
           const transport = globalThis.__walkEngineTransport
@@ -4278,7 +4305,9 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       if (await page.getByTestId('cad-edit-entity-count').count()) await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('0')
       return
     case 'crash-engine-worker': {
-      const worker = page.workers().find((worker) => /worker-browser/.test(worker.url()))
+      const engineWorkerPath = typeof runtime.engineWorkerPath === 'string' && runtime.engineWorkerPath
+        ? runtime.engineWorkerPath : engineWorkerChunkPath()
+      const worker = page.workers().find((worker) => /worker-browser/.test(worker.url()) || worker.url().includes(engineWorkerPath))
       if (!worker) await unsupported(probe, runtime, 'No browser engine worker is mounted to exercise its crash recovery')
       // Real worker failure, never a manufactured disabled attribute.
       await worker.evaluate(() => { setTimeout(() => { throw new Error('walk fixture: engine crash') }, 0) })
@@ -5093,7 +5122,10 @@ export async function runProbe(probe, runtime) {
     if (typeof installGeometryObserver === 'function' && (probe.locator?.keyboardAction === 'engine:repeat'
       || barNoRung(probe) || ['engine-refusal', 'engine:explode', 'browser-clipboard'].includes(probe.assertion.target)
       || (probe.state === 'multiple-selected' && ['engine:delete', 'cockpit-prompt'].includes(probe.assertion.target))
-      || probe.assertion.target?.startsWith('drawing-version-'))) await page.addInitScript(installGeometryObserver)
+      || probe.assertion.target?.startsWith('drawing-version-'))) await page.addInitScript(installGeometryObserver, {
+        engineWorkerPath: typeof runtime.engineWorkerPath === 'string' && runtime.engineWorkerPath
+          ? runtime.engineWorkerPath : engineWorkerChunkPath(),
+      })
     for (const recipe of probe.setup.steps) {
       await (runtime.runStep || test.step)(`Setup: ${recipe.kind}`, async () => {
         try {
