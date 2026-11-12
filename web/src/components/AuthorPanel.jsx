@@ -459,7 +459,7 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, onStag
   // current error and lasts only as long as the gate it stands in for.
   const hiddenGrantFailure = !err && grantGate && !linkGateShown ? authorStartFailureOf(stageActivity?.error) : null
   const gatedGrantFailure = hiddenGrantFailure?.kind === 'grant' ? hiddenGrantFailure : null
-  const authorError = err ? errorPresentation(err, 'Tool authoring failed.') : null
+  const authorError = err ? errorPresentation(err, 'Tool authoring failed.', err?.body?.reason_code) : null
   const publicationError = publishErr ? errorPresentation(publishErr, lifecycleMessage(publishErr)) : null
   const provLine = authored ? authoredProvLine(authored) : null
   const publicationStatus = authored?.publication_status || null
