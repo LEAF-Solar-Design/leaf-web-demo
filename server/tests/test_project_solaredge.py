@@ -287,6 +287,42 @@ def test_explicit_bridge_review_accepts_complete_choices_without_electrical_enti
         assert accepted.graph[key] == before[2][key]
 
 
+@pytest.mark.parametrize("evidence_case", ["valid", "basis", "length"])
+def test_labels_only_import_requires_verified_manual_geometry_with_unknown_power(review_lane, evidence_case):
+    s = review_lane
+    graph = deepcopy(s.ctx.graph)
+    for frame in graph["frames"]:
+        frame["module_power_watts"] = 0.0
+        frame["extra"].update(grouping_basis="geometry-only", module_power_status="unknown",
+                              sizing_evidence_mode="manual-global")
+    graph["settings"]["voc_cold"] = graphs.cloud.manual_voltage()
+    graph["settings"]["global_string_sizing_confirmed"] = True
+    graph["settings"]["extra"]["string_sizing"] = graphs.cloud.manual_sizing_evidence(graph)
+    if evidence_case == "basis":
+        graph["settings"]["extra"]["string_sizing"]["basis_sha256"] = "0" * 64
+    elif evidence_case == "length":
+        graph["settings"]["panels_in_sequence"] += 1
+    s.set_parent(tools.embedded(graph))
+    s.ctx = graphs.resolve_project_graph_context(s.context())
+    before = (s.head, len(s.versions), deepcopy(s.ctx.graph), deepcopy(s.blobs), len(s.writes))
+    if evidence_case != "valid":
+        refused("SIP_R3_PROOF_REJECTED", lambda: upload(s))
+        assert (s.head, len(s.versions), s.ctx.graph, s.blobs, len(s.writes)) == before
+        return
+    source = upload(s)
+    refs = [frame["id"] for frame in graph["frames"]]
+    result = report(s, source, selection_order="unknown", associations={refs[0]: 0, refs[1]: 1})
+    assert result["counts"]["assigned_panels"] == len(graph["panels"])
+    _, _, accepted = accept(s, result)
+    output = read(s, accepted)["output"]
+    assert output["accepted"] is True and output["labels_only"] is True
+    assert output["provenance"]["source"]["content_sha256"] == source["source"]["content_sha256"]
+    for key in ("panels", "frames", "strings", "inverters", "routes", "schedules"):
+        assert accepted.graph[key] == graph[key]
+    assert all(frame["module_power_watts"] == 0.0 for frame in accepted.graph["frames"])
+    assert accepted.graph["settings"]["voc_cold"] == graphs.cloud.manual_voltage()
+
+
 @pytest.mark.parametrize("case", ["list", "bool", "negative", "float", "unknown", "out-of-range", "duplicate"])
 def test_explicit_association_refusal_preserves_source_graph_and_artifacts(review_lane, case):
     s = review_lane
