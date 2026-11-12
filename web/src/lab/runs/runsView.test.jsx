@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import RunsView from './RunsView.jsx'
 import { createValueStore } from './valueStore.js'
 import { config } from '../../api.js'
+import { addBlock, connectPipe, emptyGraph, updateSettings } from '../canvas/graphDoc.js'
+import { registry } from '../canvas/registry.js'
 
 const surface = vi.hoisted(() => ({ current: null }))
 vi.mock('../useLabSurfaceStatus.js', () => ({ useLabSurfaceStatus: () => surface.current }))
@@ -13,8 +15,95 @@ const seed = () => {
   store.apply('r', { seq: 0, kind: 'value', block_id: 'count', payload: { result: { data: 3, as_of: Date.now() - 120000 } } })
   return store
 }
+const evidenceRun = (confirmation = true) => {
+  const store = createValueStore()
+  const digest = 'a'.repeat(64), parent = 'b'.repeat(64), rows = 'c'.repeat(64)
+  const report = { schema: 'leafhft.block-suite-result.v1', suite_sha256: 'd'.repeat(64), rows_sha256: rows,
+    candidates: [{ child_min_k: 1, select_tickets: 7, select_total_c: -0.0000000000001 }],
+    chosen: confirmation ? { child_min_k: 1, select_tickets: 7 } : null,
+    verdict: confirmation ? 'fail' : 'no_candidate', reasons: ['selection and confirmation remain distinct'],
+    confirm_report: confirmation ? { verdict: 'insufficient', reasons: ['too few confirmation tickets'],
+      parent: { select: { n_tickets: 7 }, confirm: { n_tickets: 2 } },
+      child: { select: { n_tickets: 7 }, confirm: { n_tickets: 2 } },
+      calibration: { parent: { n: 0, mean_claimed_prob: null, win_rate: null },
+        child: { n: 2, mean_claimed_prob: 0.5000000000000001, win_rate: 0 } },
+      confirm_comparison: { paired_ci95_c: [null, null], child_minus_parent_mean_c: -0.0000000000001 },
+      confirm_tickets: { parent: [], child: [{ market_id: 'synthetic-final-ticket' }] },
+      protocol: { draws: 10, seed: 7 }, splits: { select: { rows: 30 }, confirm: { rows: 20 } } } : null }
+  const evidence = { policy: { schema: 'leaf.lab-corpus-policy.v1', version: 1, digest,
+    parent_suite_sha256: parent, parameters: { min_select_tickets: 0 },
+    lineage: { doc_id: 'saved-composition', graph_revision: 2, graph_sha256: 'e'.repeat(64) } },
+    policy_digest: digest, evaluated_suite_sha256: report.suite_sha256,
+    context: { corpus: { material_id: 'synthetic-corpus', sha256: rows },
+      suite: { material_id: 'synthetic-suite', sha256: parent } },
+    row_count: 80, rows_sha256: rows, result_sha256: 'f'.repeat(64),
+    run_id: 'evaluation', job_id: 'durable-evaluation', worker_id: 'evaluator', attempt: 2, evaluation: report }
+  store.upsertRun('evaluation', { state: 'running', graph_revision: 2 })
+  store.apply('evaluation', { seq: 0, kind: 'value', block_id: 'corpus', payload: { result: { data: JSON.stringify(evidence) } } })
+  store.apply('evaluation', { seq: 1, kind: 'finished', payload: {} })
+  return { store, evidence }
+}
 
 describe('Runs view', () => {
+  it('displays complete policy and evaluation evidence without rounding an insufficient outcome into success', () => {
+    const { store, evidence } = evidenceRun()
+    render(<RunsView store={store} mock />)
+    const section = within(screen.getByRole('region', { name: 'Corpus evaluation evidence' }))
+    expect(section.getByText(`Policy digest: ${evidence.policy_digest}`)).toBeVisible()
+    expect(section.getByText(`Parent suite digest: ${evidence.policy.parent_suite_sha256}`)).toBeVisible()
+    expect(section.getByText('Policy version: 1')).toBeVisible()
+    expect(section.getByText('Verdict: fail')).toBeVisible()
+    expect(section.getByText('Confirmation verdict: insufficient')).toBeVisible()
+    const field = label => section.getByRole('heading', { name: label }).nextElementSibling
+    expect(JSON.parse(field('Policy and graph lineage').textContent)).toEqual(evidence.policy)
+    expect(JSON.parse(field('Selection evidence').textContent)).toEqual({
+      candidates: evidence.evaluation.candidates, chosen: evidence.evaluation.chosen })
+    expect(JSON.parse(field('Calibration').textContent)).toEqual(evidence.evaluation.confirm_report.calibration)
+    expect(JSON.parse(field('Uncertainty').textContent)).toEqual(evidence.evaluation.confirm_report.confirm_comparison)
+    expect(field('Confirmation reasons')).toHaveTextContent('too few confirmation tickets')
+    expect(field('Input identities')).toHaveTextContent('synthetic-corpus')
+    expect(field('Input identities')).toHaveTextContent('durable-evaluation')
+    fireEvent.click(section.getByText('Complete evaluation evidence'))
+    expect(field('Evaluation report')).toBeVisible()
+    expect(JSON.parse(field('Evaluation report').textContent)).toEqual(evidence.evaluation)
+  })
+  it('keeps missing confirmation, calibration and uncertainty explicit after completion', () => {
+    const { store } = evidenceRun(false)
+    render(<RunsView store={store} mock />)
+    const section = within(screen.getByRole('region', { name: 'Corpus evaluation evidence' }))
+    expect(section.getByText('Verdict: no_candidate')).toBeVisible()
+    expect(section.getByText('Confirmation verdict: Unavailable (not evaluated)')).toBeVisible()
+    for (const label of ['Confirmation evidence', 'Calibration', 'Uncertainty']) {
+      expect(section.getByRole('heading', { name: label }).nextElementSibling).toHaveTextContent('Unavailable (not evaluated)')
+    }
+    expect(section.queryByText('Verdict: pass')).toBeNull()
+  })
+  it('rejects invalid composition edits while retaining the last composition and completed evidence', () => {
+    const { store, evidence } = evidenceRun()
+    const manifest = registry['constant@1.0.0']
+    let graph = addBlock(emptyGraph(), manifest)
+    graph = updateSettings(graph, graph.blocks[0].id, { value: 3 })
+    const previous = JSON.stringify(graph)
+    const previousRun = store.getRun('evaluation')
+    expect(() => { graph = updateSettings(graph, graph.blocks[0].id, { value: 'invalid' }) }).toThrow()
+    expect(() => { graph = connectPipe(graph, {
+      from: { node: graph.blocks[0].id, port: 'result' }, to: { node: graph.blocks[0].id, port: 'missing' },
+    }) }).toThrow()
+    expect(JSON.stringify(graph)).toBe(previous)
+    expect(store.getRun('evaluation')).toBe(previousRun)
+    render(<RunsView store={store} mock />)
+    expect(screen.getByText(`Policy digest: ${evidence.policy_digest}`)).toBeVisible()
+    expect(screen.getByText('Confirmation verdict: insufficient')).toBeVisible()
+  })
+  it('shows execution failure as an explicit output error', () => {
+    const store = createValueStore()
+    store.upsertRun('failed-evaluation', { state: 'running' })
+    store.apply('failed-evaluation', { seq: 0, kind: 'value', block_id: 'corpus',
+      payload: { result: { data: null, error: { code: 'lab_corpus_failed' } } } })
+    render(<RunsView store={store} mock />)
+    expect(screen.getByText('Output error: {"code":"lab_corpus_failed"}')).toBeVisible()
+    expect(screen.queryByRole('region', { name: 'Corpus evaluation evidence' })).toBeNull()
+  })
   it('says the worker status is unavailable instead of offline when the store read failed', () => {
     surface.current = { worker: { state: 'unavailable', reason: 'lab_store_unavailable' } }
     render(<RunsView store={createValueStore()} />)
