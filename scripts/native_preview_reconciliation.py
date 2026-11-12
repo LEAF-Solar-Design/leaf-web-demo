@@ -30,6 +30,9 @@ PRE_EXECUTION_WORKER_SHA256 = 'd0fa9e9778490278988382f573555538a2fe204160f8d57da
 # Current connected Native producer; hash derived after the frozen source change.
 REVIEWED_WORKER_SHA256 = frozenset({'acc9c1219ee4246f6b39da6a3c439add24f6573c0e54626eca8b3752b790ee37', PRE_EXECUTION_WORKER_SHA256,
     '6ad5eb2b343e3d9f749769805001d74282519d6ce41cdf7996999573fa306197'})
+# Native create/edit custody changes only package validation, not claim/settlement ordering.
+EDIT_CUSTODY_WORKER_SHA256 = '1d2844f0937c498ab7b5b743e40e6b2421c3571f8c722dd6abe027e5ebb13087'
+REVIEWED_WORKER_SHA256 = REVIEWED_WORKER_SHA256 | {EDIT_CUSTODY_WORKER_SHA256}
 PRE_EXECUTION_JOURNAL_SOURCE_SHA256 = 'a8f668f0f84866ebf342229c7b707f6b985a66ad256d71f71e0431fde1a5a599'
 # Same ordering, with writable-descriptor receipt replay for Windows fsync.
 PRE_EXECUTION_CORRECTED_JOURNAL_SOURCE_SHA256 = '3375d56dcc1609b6b160e5af39365a8afc1b60d9d05c4360a88971931aea6ac0'
@@ -485,7 +488,9 @@ def pre_execution_source(revision):
         producer_sha = sha(producer)
         need(producer_sha in REVIEWED_WORKER_SHA256)
         journal_sha = journal_source_sha(journal)
-        if journal_sha == PRE_EXECUTION_CONNECTED_JOURNAL_SOURCE_SHA256:
+        if producer_sha == EDIT_CUSTODY_WORKER_SHA256:
+            need(journal_sha == PRE_EXECUTION_CONNECTED_JOURNAL_SOURCE_SHA256)
+        elif journal_sha == PRE_EXECUTION_CONNECTED_JOURNAL_SOURCE_SHA256:
             need(producer_sha == CONNECTED_WORKER_SHA256)
         else:
             need(journal_sha in (PRE_EXECUTION_JOURNAL_SOURCE_SHA256,
