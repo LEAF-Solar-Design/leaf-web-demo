@@ -1,6 +1,8 @@
 import { z } from 'zod'
 import { authHeaders, noteUnauthorized } from '../api.js'
 import { serviceRequestAuthority, rememberServiceResponse } from '../lib/serviceAuthSession.js'
+import { DatasetDerivationCapabilitiesV1, DatasetDerivationRequestV1, DatasetDerivationResultV1,
+  DatasetDerivationLineageV1 } from '../../../vendor/assistant-contract/src/dataset-derivation'
 import { parseScheduleDraftReferencePage } from '../../../vendor/assistant-react/src/actions/workflow-schedule-draft-picker-state'
 import { ConnectionV1, DatasetElementV1, DatasetQueryV1, DatasetReadV1, DatasetFieldV1, IntegrationRefV1,
   ConnectorDefinitionV1, DatasetDefinitionV1, TransformMappingV1, IntegrationWorkflowScheduleDraftV1,
@@ -202,7 +204,7 @@ const materialContext = z.strictObject({ schema: z.literal('leaf.project-materia
       if (marker.records_pointer !== pointer || marker.row_count !== value.row_count) throw invalid()
     } catch { ctx.addIssue({ code: 'custom', message: 'Material context is unavailable or too large.' }) }
   })
-const metadata = z.object({
+const metadataBase = z.object({
   reference: IntegrationRefV1, revision, title: z.string().min(1).max(120),
   fields: z.array(DatasetFieldV1).min(1).max(100).refine((fields) => new Set(fields.map((field) => field.id)).size === fields.length),
   lastAttempt: z.unknown(), freshness: z.unknown(),
@@ -256,7 +258,38 @@ const syncResult = refResult.extend({ receipt: syncReceipt, status: z.enum(['rea
   .refine((value) => sameRef(value.reference, value.receipt.dataset_ref) &&
     (value.receipt.outcome === 'success' ? value.status === (value.receipt.row_count ? 'ready' : 'empty') :
       ['stale', 'unavailable'].includes(value.status)))
-const datasetMetadata = metadata.extend({ lastAttempt: syncReceipt.nullable(), freshness: DatasetReadV1.shape.freshness.nullable() })
+const derivedMetadata = z.strictObject({
+  reference: metadataBase.shape.reference, revision, title: metadataBase.shape.title,
+  fields: metadataBase.shape.fields, derivation: DatasetDerivationLineageV1,
+  input_freshness: z.array(z.strictObject({ alias: z.enum(['primary', 'events', 'domain']),
+    semantic_digest: IntegrationRefV1.shape.digest, freshness: DatasetReadV1.shape.freshness })).min(1).max(2),
+  diagnostics: z.strictObject({ excluded_domain_rows: z.number().int().min(0).max(100000),
+    null_event_time_rows: z.number().int().min(0).max(100000) }),
+  computed_at: instant, freshness: DatasetReadV1.shape.freshness,
+  lastAttempt: z.strictObject({ outcome: z.literal('success'), row_count: z.number().int().min(0).max(100000) }),
+}).superRefine((value, ctx) => {
+  const aliases = value.input_freshness.map(input => input.alias)
+  if (value.reference.digest !== value.derivation.derivation_digest
+    || new Set(aliases).size !== aliases.length || aliases.length !== value.derivation.inputs.length
+    || value.derivation.inputs.some(input => !aliases.includes(input.alias))) {
+    ctx.addIssue({ code: 'custom', message: 'Derived metadata evidence does not match its lineage.' })
+  }
+})
+function metadataVariant(raw) {
+  // Select before parsing: an invalid derived branch cannot fall back to a raw
+  // schema that strips its evidence. Raw connector receipts keep their checks.
+  return z.unknown().transform((value, ctx) => {
+    const derived = value && typeof value === 'object' && ['derivation', 'input_freshness', 'diagnostics', 'computed_at']
+      .some(key => Object.hasOwn(value, key))
+    const result = (derived ? derivedMetadata : raw).safeParse(value)
+    if (result.success) return result.data
+    ctx.addIssue({ code: 'custom', message: 'Dataset metadata is invalid.' })
+    return z.NEVER
+  })
+}
+const metadata = metadataVariant(metadataBase)
+const datasetMetadata = metadataVariant(metadataBase.extend({ lastAttempt: syncReceipt.nullable(),
+  freshness: DatasetReadV1.shape.freshness.nullable() }))
 const registrationSchema = z.strictObject({ definition: DatasetDefinitionV1, mapping: TransformMappingV1 })
   .refine(({ definition, mapping }) => definition.fields.length === mapping.fields.length &&
     definition.fields.every((field) => mapping.fields.some((entry) => entry.field_id === field.id)) &&
@@ -642,18 +675,27 @@ export function createIntegrationsClient({ origin = import.meta.env.VITE_INTEGRA
       { signal, method: 'POST', body, bodyLimit: 163840 },
       (value) => value.reference.id === body.definition.id && value.reference.version === body.definition.version)
     },
+    async getDatasetDerivationCapabilities(id, options) {
+      return setupResponse(DatasetDerivationCapabilitiesV1, id, 'dataset-derivations/capabilities', options)
+    },
+    async createDatasetDerivation(id, input, options) {
+      const body = parse(DatasetDerivationRequestV1, input)
+      return setupResponse(DatasetDerivationResultV1, id, 'dataset-derivations',
+        { ...options, method: 'POST', body, bodyLimit: 163840 },
+        value => value.reference.id === body.output.id && value.reference.version === body.output.version)
+    },
     async getDataset(id, reference, { revision: expected, ...options } = {}) {
       const ref = parse(IntegrationRefV1, reference)
       if (expected !== undefined) parse(revision, expected)
       return setupResponse(datasetMetadata, id, `datasets/${ref.id}/versions/${ref.version}${expected === undefined ? '' : `?revision=${expected}`}`, options,
         (value) => sameRef(value.reference, ref) && (expected === undefined || value.revision === expected) &&
-          (!value.lastAttempt || sameRef(value.lastAttempt.dataset_ref, ref)))
+          (value.derivation !== undefined || !value.lastAttempt || sameRef(value.lastAttempt.dataset_ref, ref)))
     },
     async getDatasetVersion(id, datasetId, version, options) {
       parse(slug, datasetId); parse(revision, version)
       return setupResponse(datasetMetadata, id, `datasets/${datasetId}/versions/${version}`, options,
         (value) => value.reference.id === datasetId && value.reference.version === version &&
-          (!value.lastAttempt || sameRef(value.lastAttempt.dataset_ref, value.reference)))
+          (value.derivation !== undefined || !value.lastAttempt || sameRef(value.lastAttempt.dataset_ref, value.reference)))
     },
     async syncDataset(id, reference, options) {
       const ref = parse(IntegrationRefV1, reference)

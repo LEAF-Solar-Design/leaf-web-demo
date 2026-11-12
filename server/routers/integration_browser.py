@@ -85,6 +85,10 @@ def _route(request, project_id, resource):
         methods, query = {"GET"}, set()
     elif resource == "integrations/dataset-imports":
         methods, query = {"POST"}, set()
+    elif resource == "integrations/dataset-derivations/capabilities":
+        methods, query = {"GET"}, set()
+    elif resource == "integrations/dataset-derivations":
+        methods, query = {"POST"}, set()
     elif resource in {"integrations/datasets", "integrations/elements"}:
         methods = {"GET"} if resource.endswith("datasets") else {"GET", "POST"}
         query = {"limit", "after"} if request.method == "GET" else set()
@@ -149,7 +153,8 @@ def _json(raw):
 
 
 async def _body(request, resource):
-    cap = 65536 if resource == "integrations/dataset-imports" else 262144
+    cap = (65536 if resource == "integrations/dataset-imports" else
+           163840 if resource == "integrations/dataset-derivations" else 262144)
     if request.method == "GET":
         cap = 0
     elif not _JSON.fullmatch(_one(request, "content-type", required=True) or ""):
