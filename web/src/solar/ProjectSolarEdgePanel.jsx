@@ -123,13 +123,23 @@ export default function ProjectSolarEdgePanel({ solarBinding, authorityKey, proj
       if (!saved || !current() || drawingId !== binding.drawing_id || projectId !== binding.project_id) return { ok: false, code: 'SIP_R7_SCOPE_STALE' }
       const requestKey = JSON.stringify([sourceArtifactId, alignmentTolerance, selectionOrder])
       const choices = scope.reviewRequest === requestKey ? { ...scope.choices } : {}
+      const previousReport = scope.report, previousInspection = inspection
       scope.report = null
       setInspection(null)
-      const outcome = await projectClient.reportSolarEdgePdf({ sourceArtifactId, alignmentTolerance, selectionOrder,
-        ...(Object.keys(choices).length ? { associations: choices } : {}), signal })
+      let outcome
+      try {
+        outcome = await projectClient.reportSolarEdgePdf({ sourceArtifactId, alignmentTolerance, selectionOrder,
+          ...(Object.keys(choices).length ? { associations: choices } : {}), signal })
+      } catch { outcome = { ok: false, reason: 'SIP_R7_RESPONSE_INVALID' } }
       if (!current() || signal?.aborted) return { ok: false, code: 'SIP_R7_SCOPE_STALE' }
-      if (!outcome.ok || !identity(outcome.data, binding) || outcome.data.graph_sha256 !== saved.graph || outcome.data.source_intake_sha256 !== saved.intake)
+      if (!outcome.ok || !identity(outcome.data, binding) || outcome.data.graph_sha256 !== saved.graph || outcome.data.source_intake_sha256 !== saved.intake) {
+        scope.report = previousReport
+        setInspection(previousReport ? {
+          ...(previousInspection?.report === previousReport ? previousInspection : {}),
+          scope, report: previousReport, pending: false,
+        } : null)
         return { ok: false, code: outcome.reason || 'SIP_R7_RESPONSE_INVALID' }
+      }
       scope.choices = choices
       scope.appliedChoices = choices
       scope.reviewRequest = requestKey

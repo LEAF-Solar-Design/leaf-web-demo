@@ -249,6 +249,48 @@ it('S02 correction refuses duplicate grid choices and clears choices when report
   expect(props.onProjectSubmit).not.toHaveBeenCalled()
 })
 
+it('S02 keeps verified choices editable after a correction report is refused', async () => {
+  downloads()
+  const { fetchImpl, props } = setup({ reportBytes: matchReport() })
+  await upload(); await report()
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect group matches' }))
+  fireEvent.change(await screen.findByLabelText('PDF choice for roof-south'), { target: { value: '1' } })
+  fetchImpl.mockResolvedValueOnce({ ok: false, status: 409,
+    json: async () => ({ error: { reason_code: 'REPORT_ASSOCIATIONS_INVALID' } }) })
+  fireEvent.click(screen.getByRole('button', { name: 'Build report' }))
+  await screen.findByText(/Report failed\./)
+  expect(screen.getByLabelText('PDF choice for roof-south').value).toBe('1')
+  expect(screen.getByRole('button', { name: 'Accept tracking labels' }).disabled).toBe(true)
+  fireEvent.click(screen.getByRole('button', { name: 'Clear association choices' }))
+  expect(screen.getByLabelText('PDF choice for roof-south').value).toBe('')
+  fireEvent.click(screen.getByRole('button', { name: 'Build report' }))
+  await screen.findByRole('button', { name: 'Inspect group matches' })
+  const calls = fetchImpl.mock.calls.filter(([url]) => url.endsWith('/report'))
+  expect(calls).toHaveLength(3)
+  expect(JSON.parse(calls.at(-1)[1].body)).not.toHaveProperty('associations')
+  expect(props.onProjectSubmit).not.toHaveBeenCalled()
+})
+
+it('S02 never restores refused correction choices into a different drawing version', async () => {
+  downloads()
+  const { fetchImpl, props, client, view } = setup({ reportBytes: matchReport() })
+  await upload(); await report()
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect group matches' }))
+  fireEvent.change(await screen.findByLabelText('PDF choice for roof-south'), { target: { value: '1' } })
+  const pending = deferred()
+  fetchImpl.mockImplementationOnce(() => pending.promise)
+  fireEvent.click(screen.getByRole('button', { name: 'Build report' }))
+  const signal = fetchImpl.mock.calls.at(-1)[1].signal
+  const next = { ...binding, input_version_id: NEXT }
+  act(() => { client.setScope(next, 'session-1'); view.rerender(<ProjectSolarEdgePanel {...props} solarBinding={next} />) })
+  expect(signal.aborted).toBe(true)
+  await act(async () => { pending.resolve({ ok: false, status: 409,
+    json: async () => ({ error: { reason_code: 'REPORT_ASSOCIATIONS_INVALID' } }) }); await Promise.resolve() })
+  expect(screen.queryByLabelText('PDF choice for roof-south')).toBeNull()
+  expect(screen.queryByRole('region', { name: 'Group match inspection' })).toBeNull()
+  expect(props.onProjectSubmit).not.toHaveBeenCalled()
+})
+
 it('S02 correction controls stay locked while canonical acceptance is in flight', async () => {
   downloads()
   const { props } = setup({ reportBytes: matchReport() })
