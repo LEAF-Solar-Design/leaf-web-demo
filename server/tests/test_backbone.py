@@ -1087,19 +1087,19 @@ def test_2_progression_envelope_and_restart_durability(stack, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# 3. JOB_MAX_S=2 + sleep>2s tool -> failed with error_code == TIMEOUT
+# 3. JOB_MAX_S=1 + sleep>1s tool -> failed with error_code == TIMEOUT
 # --------------------------------------------------------------------------- #
 def test_3_job_timeout(stack, tmp_path):
     port = free_port()
     env = dict(stack["app_env"])
     env["JOBS_DB"] = tmp_path / "timeout_jobs.db"
-    env["JOB_MAX_S"] = "2"
+    env["JOB_MAX_S"] = "1"
     app = start_uvicorn("app:app", port, env, tmp_path / "timeout_app.log")
     base = f"http://127.0.0.1:{port}"
     try:
         wait_ready(f"{base}/api/health", app, log_path=tmp_path / "timeout_app.log")
         payload = confirmed_requests_payload(
-            base, "count-by-layer", {"_qa_sleep_s": 6}, "rooftop_demo")
+            base, "count-by-layer", {"_qa_sleep_s": 3}, "rooftop_demo")
         r = requests.post(f"{base}/api/run", json=payload, timeout=10)
         assert r.status_code == 202
         job_id = r.json()["job_id"]
@@ -1220,11 +1220,11 @@ def test_6_ledger_attribution(stack):
 
     Scoped to the tenants THIS test owns rather than to a global before/after
     line count. Earlier tests leave real /broker/run calls IN FLIGHT: test_3 runs
-    a 6s job under JOB_MAX_S=2, and the app abandons each timed-out attempt while
+    a 3s job under JOB_MAX_S=1, and the app abandons each timed-out attempt while
     the broker keeps executing it (jobs.py `_run_job`: the inner thread is a
     daemon and the retry path re-dispatches, so one test_3 job makes up to
     JOB_MAX_ATTEMPTS distinct broker runs -- 3 by default, and the env can raise
-    it -- each appending its own line ~6s later). Those are correct writes, one
+    it -- each appending its own line ~3s later). Those are correct writes, one
     per run, but they land AFTER test_3
     returned. A global count therefore reads them as extra lines and fails
     nondeterministically: CI showed `assert 10 == (6 + 3)`, and a local serial

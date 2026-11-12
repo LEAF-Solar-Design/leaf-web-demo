@@ -21,6 +21,14 @@ switch and credential, a fresh operator approval naming the exact commit, and
 a twice-executed same-tree guard; it is not on the harness back-edge, so the
 drawer is the only door.
 
+PR provider: ``LEAF_PLATFORM_PR_PROVIDER=forge`` selects the canonical Forge
+API for new PRs. The existing scoped PR and merge token references must belong
+to that provider. Existing records without a provider retain GitHub identity;
+when configuration changes provider, their network review reads report unknown
+rather than forwarding the replacement credential to GitHub. Forge requests
+refuse redirects and noncanonical API origins. This adapter does not activate
+staging configuration, alter credentials, or change receipt producers.
+
 FUNDAMENTAL PATHS (auth, billing, agent spine — see
 ``platform_fundamental_paths.json``) require the out-of-band co-sign before the
 branch may land: an approver presents ``LEAF_CUSTOMIZATION_APPROVAL_SECRET``
@@ -70,6 +78,9 @@ MAX_TITLE = 200
 # bounded: a listing never walks more than one tree level, a file read is
 # size-checked BEFORE its bytes leave git, and the change list caps its page.
 MAX_SOURCE_BYTES = 262_144  # per file read
+MAX_SOURCE_RANGE_FILE_BYTES = 4_194_304
+MAX_SOURCE_RANGE_BYTES = 32_768
+MAX_SOURCE_RANGE_LINES = 400
 MAX_TREE_ENTRIES = 500      # per directory listing
 MAX_LIST = 50               # per change-list page
 
@@ -110,6 +121,12 @@ def repo_dir() -> Path:
 
 def base_ref() -> str:
     return os.environ.get("LEAF_PLATFORM_REPO_BASE_REF", "").strip() or "refs/heads/main"
+
+
+def source_ref(*, fallback: Optional[str] = None) -> str:
+    """Authoring snapshot, independent of the logical PR target."""
+    return (os.environ.get("LEAF_PLATFORM_REPO_SOURCE_REF", "").strip()
+            or (fallback if fallback is not None else base_ref()))
 
 
 def state_dir() -> Path:
@@ -442,12 +459,14 @@ def load_record(change_id: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 def propose(*, tenant_id: str, subject: str, title: str,
             edits: list[Mapping[str, Any]]) -> dict[str, Any]:
-    """Create ONE commit on ONE new lane branch from the base ref tip.
+    """Create ONE commit from the source snapshot for the bound PR target.
 
     Never touches HEAD, never advances any existing ref, never pushes. The
     returned record is the durable authority for everything after (co-sign,
     land); the branch ref in the local repo is derived state.
     """
+    proposal_base_ref = base_ref()
+    proposal_source_ref = source_ref(fallback=proposal_base_ref)
     title = str(title or "").strip()
     if not title or len(title) > MAX_TITLE:
         raise PlatformCustomizeError("title_invalid", 422)
@@ -484,7 +503,7 @@ def propose(*, tenant_id: str, subject: str, title: str,
     fundamental = classify_fundamental([e["path"] for e in normalized])
 
     git_dir = repo_dir()
-    base_sha = _git(git_dir, "rev-parse", "--verify", base_ref() + "^{commit}")
+    base_sha = _git(git_dir, "rev-parse", "--verify", proposal_source_ref + "^{commit}")
     if not _SHA_RE.fullmatch(base_sha):
         raise PlatformCustomizeError(
             "platform_repo_unavailable", 503, f"base_unresolvable: {base_sha!r}")
@@ -664,7 +683,8 @@ def propose(*, tenant_id: str, subject: str, title: str,
         "author_subject": str(subject),
         "title": title,
         "branch_ref": ref,
-        "base_ref": base_ref(),
+        "base_ref": proposal_base_ref,
+        "source_ref": proposal_source_ref,
         "base_sha": base_sha,
         "commit_sha": commit_sha,
         "paths": [e["path"] for e in normalized],
@@ -963,6 +983,51 @@ def _github_request(method: str, path: str, *, token: str,
     return status, data
 
 
+
+# Keep historical PR numbers bound to their original provider. Configuration
+# selects the provider only when opening a new PR.
+def _pr_provider(record=None):
+    pr = record.get("pr") if isinstance(record, Mapping) else None
+    provider = (pr.get("provider", "github") if isinstance(pr, Mapping)
+                and pr.get("number") else
+                os.environ.get("LEAF_PLATFORM_PR_PROVIDER", "github").strip())
+    if provider not in {"github", "forge"}:
+        raise ValueError("unsupported PR provider")
+    return provider
+
+
+def _pr_request(method, path, *, token, payload=None, provider="github"):
+    if provider == "github":
+        return _github_request(method, path, token=token, payload=payload)
+    if provider != "forge":
+        raise ValueError("unsupported PR provider")
+    import urllib.error
+    import urllib.request
+    root = os.environ.get("LEAF_PLATFORM_FORGE_API", "").strip() or "https://forge.leafdesign.ai/api/v1"
+    # This credential must never be sent to an arbitrary configured origin.
+    if root.rstrip("/") != "https://forge.leafdesign.ai/api/v1":
+        raise ValueError("invalid Forge API origin")
+    body = json.dumps(payload).encode("utf-8") if payload is not None else None
+    request = urllib.request.Request(root.rstrip("/") + path, data=body,
+        method=method, headers={"Authorization": f"token {token}",
+        "Accept": "application/json", "Content-Type": "application/json",
+        "User-Agent": "leaf-platform-customize"})
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+    try:
+        opener = urllib.request.build_opener(NoRedirect())
+        with opener.open(request, timeout=15) as response:
+            raw, status = response.read(), response.status
+    except urllib.error.HTTPError as exc:
+        raw, status = exc.read(), exc.code
+    try:
+        data = json.loads(raw.decode("utf-8")) if raw else None
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        data = None
+    return status, data
+
+
 def _pr_body(record: Mapping[str, Any]) -> str:
     fundamental = list(record.get("fundamental_paths") or [])
     cosign = record.get("cosign") or {}
@@ -990,7 +1055,7 @@ def _pr_body(record: Mapping[str, Any]) -> str:
 
 
 def _pr_view(data: Mapping[str, Any], *, slug: str,
-             reused: bool) -> Optional[dict[str, Any]]:
+             reused: bool, provider: str = "github") -> Optional[dict[str, Any]]:
     """Validate the fields we persist — a misconfigured API root must not be
     able to plant junk in the record the drawer renders as a link.
 
@@ -1003,9 +1068,14 @@ def _pr_view(data: Mapping[str, Any], *, slug: str,
     number, url = data.get("number"), data.get("html_url")
     if type(number) is not int or number <= 0:
         return None
-    if url != f"https://github.com/{slug}/pull/{number}":
+    origin, segment = (("https://forge.leafdesign.ai", "pulls") if provider == "forge"
+                       else ("https://github.com", "pull"))
+    if url != f"{origin}/{slug}/{segment}/{number}":
         return None
-    return {"number": number, "url": url, "reused": reused, "at": _now()}
+    view = {"number": number, "url": url, "reused": reused, "at": _now()}
+    if provider == "forge":
+        view["provider"] = provider
+    return view
 
 
 def _pr_settled(pr: Any) -> bool:
@@ -1058,6 +1128,12 @@ def _fetch_review(record: Mapping[str, Any]) -> dict[str, Any]:
         return {"state": "unknown", "error": creds, "checked_at": at}
     slug, token = creds
     try:
+        provider = _pr_provider(record)
+        if provider != _pr_provider():
+            # The configured token belongs to one provider. Historical records
+            # must not send a replacement provider's credential to the old host.
+            return {"state": "unknown", "error": "review_provider_mismatch",
+                    "checked_at": at}
         # Inside the guarded path: a malformed record (pr: null, junk number)
         # must degrade to unknown, never raise out of a status read.
         pr = record.get("pr")
@@ -1065,8 +1141,8 @@ def _fetch_review(record: Mapping[str, Any]) -> dict[str, Any]:
         if type(number) is not int or number <= 0:
             return {"state": "unknown", "error": "review_pr_number_invalid",
                     "checked_at": at}
-        status, data = _github_request(
-            "GET", f"/repos/{slug}/pulls/{number}", token=token)
+        status, data = _pr_request(
+            "GET", f"/repos/{slug}/pulls/{number}", token=token, provider=provider)
         if status != 200 or not isinstance(data, Mapping):
             return {"state": "unknown", "error": f"review_http_{int(status)}",
                     "checked_at": at}
@@ -1089,14 +1165,14 @@ def _fetch_review(record: Mapping[str, Any]) -> dict[str, Any]:
         base_repo_name = str(base_repo.get("full_name") or "")[:200]
         merge_commit = str(data.get("merge_commit_sha") or "") \
             if data.get("merged") is True else ""
-        status2, agg = _github_request(
-            "GET", f"/repos/{slug}/commits/{head}/status", token=token)
+        status2, agg = _pr_request(
+            "GET", f"/repos/{slug}/commits/{head}/status", token=token, provider=provider)
         if status2 != 200 or not isinstance(agg, Mapping):
             return {"state": "unknown", "error": f"review_http_{int(status2)}",
                     "pr_state": pr_state, "head_sha": head, "checked_at": at}
         verdict, description = "none", None
         for item in agg.get("statuses") or []:
-            if isinstance(item, Mapping) and item.get("context") == REVIEW_CONTEXT:
+            if isinstance(item, Mapping) and item.get("context") == ("critic-review" if provider == "forge" else REVIEW_CONTEXT):
                 raw = str(item.get("state") or "")
                 verdict = {"success": "passed", "failure": "failed",
                            "error": "error_verdict",
@@ -1255,9 +1331,23 @@ def merge(*, change_id: str, tenant_id: str, ack_commit_sha: str,
         # GitHub's own same-tree guard: `sha` pins the exact head this
         # approval covers; a head moved between our check and this PUT
         # answers 409 instead of merging different bytes.
-        status, data = _github_request(
-            "PUT", f"/repos/{slug}/pulls/{number}/merge", token=merge_token,
-            payload={"sha": commit_sha, "merge_method": "squash"})
+        provider = _pr_provider(record)
+        status, data = _pr_request(
+            "POST" if provider == "forge" else "PUT",
+            f"/repos/{slug}/pulls/{number}/merge", token=merge_token,
+            provider=provider,
+            payload=({"Do": "squash", "head_commit_id": commit_sha,
+                      "delete_branch_after_merge": False} if provider == "forge"
+                     else {"sha": commit_sha, "merge_method": "squash"}))
+        if provider == "forge" and status in (200, 201):
+            settled = _fetch_review(record)
+            if (settled.get("pr_state") != "merged"
+                    or settled.get("head_sha") != commit_sha
+                    or settled.get("base_ref") != expected_base
+                    or settled.get("base_repo") != slug
+                    or not _SHA_RE.fullmatch(str(settled.get("merge_commit_sha") or ""))):
+                raise ValueError("Forge merge completion unverified")
+            status, data = 200, {"merged": True, "sha": settled["merge_commit_sha"]}
     except Exception as exc:  # noqa: BLE001
         detail = f"{type(exc).__name__}: {exc}".replace(
             merge_token, "[redacted-token]")
@@ -1283,9 +1373,12 @@ def merge(*, change_id: str, tenant_id: str, ack_commit_sha: str,
     branch_deleted = False
     try:
         ref = _assert_branch_only(str(record.get("branch_ref", "")))
-        status2, _ = _github_request(
-            "DELETE", f"/repos/{slug}/git/refs/{ref[len('refs/'):]}",
-            token=merge_token)
+        from urllib.parse import quote
+        delete_path = (f"/repos/{slug}/branches/{quote(ref[len('refs/heads/'):], safe='')}"
+                       if provider == "forge" else
+                       f"/repos/{slug}/git/refs/{ref[len('refs/'):]}")
+        status2, _ = _pr_request("DELETE", delete_path,
+                                 token=merge_token, provider=provider)
         branch_deleted = status2 in (204, 422)  # 422: already gone
     except Exception:  # noqa: BLE001
         pass
@@ -1368,30 +1461,43 @@ def _open_pull_request(record: Mapping[str, Any]) -> dict[str, Any]:
                  f"&head={quote(f'{owner}:{branch}', safe='')}"
                  f"&base={quote(base, safe='')}")
     try:
-        status, data = _github_request("GET", list_path, token=token)
+        provider = _pr_provider()
+        status, data = _pr_request("GET", list_path, token=token, provider=provider)
         if status == 200 and isinstance(data, list):
             for item in data:
                 if isinstance(item, Mapping):
-                    view = _pr_view(item, slug=slug, reused=True)
+                    if provider == "forge" and (
+                            (item.get("head") or {}).get("ref") != branch
+                            or (item.get("head") or {}).get("sha") != record.get("commit_sha")
+                            or (item.get("base") or {}).get("ref") != base
+                            or ((item.get("base") or {}).get("repo") or {}).get("full_name") != slug):
+                        continue
+                    view = _pr_view(item, slug=slug, reused=True, provider=provider)
                     if view:
                         return view
-        status, data = _github_request("POST", f"/repos/{slug}/pulls", token=token, payload={
+        status, data = _pr_request("POST", f"/repos/{slug}/pulls", token=token, provider=provider, payload={
             "title": f"admin-customize: {record.get('title')}",
             "head": branch,
             "base": base,
             "body": _pr_body(record),
         })
         if status == 201 and isinstance(data, Mapping):
-            view = _pr_view(data, slug=slug, reused=False)
+            view = _pr_view(data, slug=slug, reused=False, provider=provider)
             if view:
                 return view
         if status == 422:
-            # a racing lander (or a previous half-failure) already opened it
-            status2, data2 = _github_request("GET", list_path, token=token)
+            # A racing lander may already have opened the exact branch.
+            status2, data2 = _pr_request("GET", list_path, token=token, provider=provider)
             if status2 == 200 and isinstance(data2, list):
                 for item in data2:
                     if isinstance(item, Mapping):
-                        view = _pr_view(item, slug=slug, reused=True)
+                        if provider == "forge" and (
+                                (item.get("head") or {}).get("ref") != branch
+                                or (item.get("head") or {}).get("sha") != record.get("commit_sha")
+                                or (item.get("base") or {}).get("ref") != base
+                                or ((item.get("base") or {}).get("repo") or {}).get("full_name") != slug):
+                            continue
+                        view = _pr_view(item, slug=slug, reused=True, provider=provider)
                         if view:
                             return view
         _LOG.warning("platform_customize: PR open answered %s for change %s",
@@ -1554,10 +1660,10 @@ def _git_out(git_dir: Path, *args: str, timeout: int = 30) -> bytes:
     return result.stdout
 
 
-def _base_tip(git_dir: Path) -> str:
-    """The base-ref tip commit — proves the repo is reachable, so a later
+def _base_tip(git_dir: Path, ref: Optional[str] = None) -> str:
+    """The authoring-source commit — proves the repo is reachable, so a later
     per-object failure can honestly be attributed to the PATH, not the repo."""
-    return _git(git_dir, "rev-parse", "--verify", base_ref() + "^{commit}")
+    return _git(git_dir, "rev-parse", "--verify", (ref if ref is not None else source_ref()) + "^{commit}")
 
 
 def _validated_query_path(raw: Any) -> str:
@@ -1577,16 +1683,28 @@ def _object_type(git_dir: Path, spec: str) -> str:
         raise PlatformCustomizeError("source_not_found", 404, exc.detail) from exc
 
 
-def read_source(*, path: str) -> dict[str, Any]:
-    """Read ONE file from the platform repo at the base-ref tip.
+def read_source(*, path: str, start_line: int | None = None,
+                max_lines: int | None = None,
+                expected_commit: str | None = None) -> dict[str, Any]:
+    """Read ONE file from the platform repo's authoring-source snapshot.
 
     Same path discipline as an edit (`_validated_repo_path`: no traversal, no
     `.git`, allowlisted charset), size-checked before the bytes are read, and
-    binary content is reported by size only, never returned.
+    binary content is reported by size only, never returned. Optional ranges
+    bind every page to one source commit and keep whole lines within a separate
+    response budget; they do not raise the legacy whole-file limit.
     """
     rel = _validated_query_path(path)
+    ranged = any(value is not None for value in (start_line, max_lines, expected_commit))
+    if ranged and (type(start_line) is not int or start_line < 1
+                   or type(max_lines) is not int or not 1 <= max_lines <= MAX_SOURCE_RANGE_LINES
+                   or type(expected_commit) is not str or not _SHA_RE.fullmatch(expected_commit)):
+        raise PlatformCustomizeError("source_range_invalid", 422)
     git_dir = repo_dir()
-    tip = _base_tip(git_dir)
+    ref = source_ref()
+    tip = _base_tip(git_dir, ref)
+    if ranged and tip != expected_commit:
+        raise PlatformCustomizeError("source_changed", 409)
     spec = f"{tip}:{rel}"
     obj_type = _object_type(git_dir, spec)
     if obj_type == "tree":
@@ -1594,12 +1712,12 @@ def read_source(*, path: str) -> dict[str, Any]:
     if obj_type != "blob":
         raise PlatformCustomizeError("source_not_found", 404, f"{rel}: {obj_type}")
     size = int(_git(git_dir, "cat-file", "-s", spec))
-    if size > MAX_SOURCE_BYTES:
+    if size > (MAX_SOURCE_RANGE_FILE_BYTES if ranged else MAX_SOURCE_BYTES):
         raise PlatformCustomizeError("source_too_large", 413, f"{rel}: {size} bytes")
     blob = _git_out(git_dir, "cat-file", "blob", spec)
     view: dict[str, Any] = {
         "contract": "leaf.platform-customize.v1",
-        "ref": base_ref(),
+        "ref": ref,
         "commit": tip,
         "path": rel,
         "size": size,
@@ -1608,18 +1726,44 @@ def read_source(*, path: str) -> dict[str, Any]:
         view["binary"] = True
         return view
     view["binary"] = False
-    view["content"] = blob.decode("utf-8", errors="replace")
+    content = blob.decode("utf-8", errors="replace")
+    if not ranged:
+        view["content"] = content
+        return view
+    lines = content.splitlines(keepends=True)
+    total = len(lines)
+    if start_line > max(1, total):
+        raise PlatformCustomizeError("source_range_out_of_bounds", 422)
+    selected: list[str] = []
+    byte_count = 0
+    for line in lines[start_line - 1:start_line - 1 + max_lines]:
+        line_bytes = len(line.encode("utf-8"))
+        if byte_count + line_bytes > MAX_SOURCE_RANGE_BYTES:
+            if not selected:
+                raise PlatformCustomizeError("source_line_too_large", 413)
+            break
+        selected.append(line)
+        byte_count += line_bytes
+    end_line = start_line + len(selected) - 1 if selected else 0
+    eof = end_line >= total
+    view["content"] = "".join(selected)
+    view["range"] = {
+        "start_line": start_line, "end_line": end_line,
+        "next_line": None if eof else end_line + 1,
+        "total_lines": total, "eof": eof,
+    }
     return view
 
 
 def list_source(*, dir: str = "") -> dict[str, Any]:
-    """List ONE directory level of the platform repo at the base-ref tip.
+    """List ONE directory level of the authoring-source snapshot.
 
     Empty ``dir`` lists the repo root. Bounded at MAX_TREE_ENTRIES with an
     honest ``truncated`` flag — a silent cap would read as "that was all".
     """
     git_dir = repo_dir()
-    tip = _base_tip(git_dir)
+    ref = source_ref()
+    tip = _base_tip(git_dir, ref)
     rel = _validated_query_path(dir) if dir else ""
     spec = f"{tip}:{rel}" if rel else tip
     if rel and _object_type(git_dir, spec) == "blob":
@@ -1654,7 +1798,7 @@ def list_source(*, dir: str = "") -> dict[str, Any]:
         entries.append(entry)
     return {
         "contract": "leaf.platform-customize.v1",
-        "ref": base_ref(),
+        "ref": ref,
         "commit": tip,
         "dir": rel,
         "entries": entries,

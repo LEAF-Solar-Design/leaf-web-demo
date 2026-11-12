@@ -254,3 +254,18 @@ it('B2 row10 forwards board actions to version and job tiles in flat mode', () =
   expect(actions.onOpenJob).toHaveBeenCalledTimes(1)
   expect(actions.onOpenJob).toHaveBeenCalledWith(job)
 })
+
+it('C02 names the shared project material entry and preserves its callback', () => {
+  const onOpenPhotos = vi.fn()
+  const { rerender } = render(<ProjectBoardGround active worldSpace={false}
+    workspace={{ drawing_versions: [], jobs: [], built_tools: [] }} actions={{ onOpenPhotos }} />)
+  const material = screen.getByRole('button', { name: 'Material', exact: true })
+  expect(material).toBeVisible()
+  expect(material).toHaveAttribute('type', 'button')
+  expect(screen.queryByRole('button', { name: 'Photos', exact: true })).toBeNull()
+  expect(onOpenPhotos).not.toHaveBeenCalled()
+  fireEvent.click(material)
+  expect(onOpenPhotos).toHaveBeenCalledTimes(1)
+  rerender(<ProjectBoardGround active worldSpace={false} actions={{}} />)
+  expect(screen.queryByRole('button', { name: 'Material', exact: true })).toBeNull()
+})

@@ -675,3 +675,82 @@ def test_real_postgres_capability_job_context_and_operation_replay(
         jobs.complete_callback(jid, "complete", result_env={"ok": True}, worker_id="forged",
                                provenance={"attempt": 2, "execution_path": "local"})
     assert build_receipts.read_terminal_receipt(jid) == receipt
+
+
+@pytest.fixture
+def linked_capability_db(monkeypatch):
+    import job_pg_store
+
+    class FakeDb:
+        def __init__(self):
+            self.cursor_calls = 0
+            self.executions = []
+            self.row = None
+
+        def cursor(self):
+            self.cursor_calls += 1
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def execute(self, sql, params):
+            self.executions.append((sql, params))
+
+        def fetchone(self):
+            return self.row
+
+    fake = FakeDb()
+    monkeypatch.setattr(job_pg_store, "_db", lambda: fake)
+    return fake
+
+
+@pytest.mark.parametrize("canonical_id", [
+    "12345678-abcd-4abc-8def-123456789abc",
+    "12345678-ABCD-4ABC-8DEF-123456789ABC",
+    "{12345678-abcd-4abc-8def-123456789abc}",
+])
+def test_linked_capability_job_queries_uuid_primary_key(linked_capability_db, canonical_id):
+    import job_pg_store
+
+    store = job_pg_store.PostgresJobStore()
+    assert store.linked_capability_job(canonical_id, "tenant-a") is None
+    assert linked_capability_db.cursor_calls == 1
+    assert len(linked_capability_db.executions) == 1
+    sql, params = linked_capability_db.executions[0]
+    assert "j.job_id = %s" in sql
+    assert "::text" not in sql
+    assert params == (uuid.UUID("12345678-abcd-4abc-8def-123456789abc"), "tenant-a")
+
+
+@pytest.mark.parametrize("canonical_id", ["job-legacy-1", "", None])
+def test_linked_capability_job_invalid_id_opens_no_cursor(linked_capability_db, canonical_id):
+    import job_pg_store
+
+    store = job_pg_store.PostgresJobStore()
+    assert store.linked_capability_job(canonical_id, "tenant-a") is None
+    assert linked_capability_db.cursor_calls == 0
+    assert linked_capability_db.executions == []
+
+
+def test_linked_capability_job_converts_matching_row(linked_capability_db, monkeypatch):
+    import job_pg_store
+
+    row = {"job_id": "linked-job"}
+    linked_capability_db.row = row
+    received = []
+
+    def record_spy(value):
+        received.append(value)
+        return value
+
+    monkeypatch.setattr(job_pg_store, "_record", record_spy)
+    store = job_pg_store.PostgresJobStore()
+    assert store.linked_capability_job(
+        "12345678-abcd-4abc-8def-123456789abc", "tenant-a",
+    ) is row
+    assert len(received) == 1
+    assert received[0] is row

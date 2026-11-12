@@ -215,6 +215,7 @@ async function setup({ names = ['solar-settings', ...STEP, ...GRAPH, ...READ], .
       projectMode: input.projectMode, projectSolarRefusal: adapter.projectSolarRefusal,
       solarOverlayStatusOf, projectDrawing: { reason: null }, solarOverlayReason: null })
     const bindings = { ...input, ...adapter, projectSolarRuntime: runtime, mintCorrelationId: h.key, solarOverlayStatus,
+      projectEditorBinding: input.projectMode ? input.projectSolar.scope.binding : null,
       projectSolarAppReason, projectDrawing: { mode: 'ready' }, onRequestCatalogRun: h.legacy.run, onSubmitSolarFlowStep: h.legacy.run,
       onCloseSolarFlowStep: h.legacy.close, solarFormTool: null, solarFlowEditor: null,
       solarFlowPending: null, catalog: { families: [] }, solarFlowFamiliesDrawingId: null, mock: true,
@@ -222,6 +223,7 @@ async function setup({ names = ['solar-settings', ...STEP, ...GRAPH, ...READ], .
       solarFlowRuns: {}, running: false, onOpenSolarFlowStep: h.legacy.run, onSolarFlowChange: h.legacy.flow,
       authConfigured: false, signedIn: false, onLogin: () => {} }
     return <><div data-testid="seat">{element(hostBranch, bindings, { ProjectSolarWorkspace: Workspace,
+      ProjectLayoutPublicationTools: () => null,
       ProjectSolarGraphForm: Graph, SolarStepEditor: Step, SolarFlowRail: Rail })}</div>
       {element(hostStatus, bindings)}
       <nav aria-label="Fixture ribbon">{adapter.ribbonClusters.flatMap(c => c.tools).map(tool =>

@@ -1,6 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, readdirSync } from 'node:fs'
+import { readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
 import { runInNewContext } from 'node:vm'
 import { ACTIONS, accessibleName } from '../../src/lib/actionRegistry.js'
@@ -20,6 +22,63 @@ import { jobMonitorLauncherRecipe } from './probes.mjs'
 import { prepareStudioJobMonitor, assertStudioJobMonitor } from './fixtures.mjs'
 import { collectPromptRunDiagnostic } from './fixtures.mjs'
 import { withCensusStudioRail, mergeCensusCaptures, captureClosedAndStudioCensus, assertFirstRunCadProfile } from './fixtures.mjs'
+import { ENGINE_WORKER_MARKER, engineWorkerChunkPath } from './fixtures.mjs'
+
+test('WL72 U1 finds exactly one engine marker in nested JavaScript chunks', t => {
+  const dist = mkdtempSync(join(tmpdir(), 'walk-engine-worker-'))
+  t.after(() => rmSync(dist, { recursive: true, force: true }))
+  const notFound = count => ({ message: `engine worker chunk not found: expected exactly one, found ${count}` })
+  assert.throws(() => engineWorkerChunkPath(dist), notFound(0))
+  const chunks = join(dist, '_next', 'static', 'chunks')
+  mkdirSync(join(chunks, 'nested'), { recursive: true })
+  writeFileSync(join(chunks, 'other.js'), 'unrelated worker')
+  writeFileSync(join(chunks, '7183.abc.js'), 'batch_restore_failed:')
+  writeFileSync(join(chunks, 'ignored.js.map'), ENGINE_WORKER_MARKER)
+  writeFileSync(join(dist, 'outside.js'), ENGINE_WORKER_MARKER)
+  assert.throws(() => engineWorkerChunkPath(dist), notFound(0))
+  writeFileSync(join(chunks, 'nested', '128.abc.js'), `throw new Error('${ENGINE_WORKER_MARKER}')`)
+  assert.equal(engineWorkerChunkPath(dist), '/_next/static/chunks/nested/128.abc.js')
+  writeFileSync(join(chunks, 'second.js'), ENGINE_WORKER_MARKER)
+  assert.throws(() => engineWorkerChunkPath(dist), notFound(2))
+})
+
+test('WL72 U2 serialized geometry observer matches the served chunk and legacy worker URL only', () => {
+  const engineWorkerPath = '/_next/static/chunks/128.abc.js'
+  for (const argument of [{ engineWorkerPath }, undefined]) {
+    const sandbox = { argument, structuredClone, Worker: class {
+      constructor() { this.listeners = [] }
+      addEventListener(type, listener) { assert.equal(type, 'message'); this.listeners.push(listener) }
+      postMessage() {}
+    } }
+    runInNewContext(`(${installGeometryObserver.toString()})(argument)`, sandbox)
+    const other = new sandbox.Worker('/_next/static/chunks/999.def.js')
+    assert.equal(other.listeners.length, 0)
+    const chunk = new sandbox.Worker(`https://walk.example${engineWorkerPath}`)
+    assert.equal(chunk.listeners.length, argument ? 1 : 0)
+    const legacy = new sandbox.Worker('/engine/worker-browser.js')
+    assert.equal(legacy.listeners.length, 1)
+    assert.equal(sandbox.__walkGeometry.geometry, null)
+    const worker = argument ? chunk : legacy
+    const entities = [{ id: '1', type: 'LINE', vertices: [[0, 0], [10, 0]] }]
+    worker.listeners[0]({ data: { type: 'documentLoaded', documentId: 'head.dxf', entities } })
+    assert.deepEqual(sandbox.__walkGeometry.geometry.entities, entities)
+    assert.equal(sandbox.__walkGeometry.geometry.documentId, 'head.dxf')
+  }
+})
+
+test('WL72 U3 engine marker remains present in the vendored worker', () => {
+  assert.equal(ENGINE_WORKER_MARKER, 'engine_bg.wasm')
+  const vendor = new URL('../../../vendor/', import.meta.url)
+  const workerDirs = readdirSync(vendor, { withFileTypes: true })
+    .filter(entry => entry.isDirectory())
+    .filter(entry => {
+      const files = readdirSync(new URL(`${entry.name}/`, vendor))
+      return files.includes('pkg-web') || files.includes('worker-browser.mjs')
+    })
+  assert.equal(workerDirs.length, 1)
+  assert.ok(readFileSync(new URL(`${workerDirs[0].name}/worker-browser.mjs`, vendor), 'utf8')
+    .includes(ENGINE_WORKER_MARKER))
+})
 
 test('WL57 U1 merge preserves closed rows, adds unique Studio features and recomputes census totals', () => {
   const capture = resolved => ({ ok: false, total: 999, resolved,
@@ -3827,7 +3886,17 @@ test('reloadAndReenter reloads once without entry clicks on builds without an en
   const { page, events } = workspaceEnvironmentFake({ present: false })
   const options = { timeout: 60_000 }
   page.reload = async received => { assert.equal(received, options); events.push('reload') }
-  await reloadAndReenter(page, options)
+  await reloadAndReenter(page, options, {
+    poll(fn, opts) {
+      assert.equal(opts.timeout, 20_000)
+      return { toBe: async expected => {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          if (await fn() === expected) return
+        }
+        throw new Error(`Timeout ${opts.timeout}ms exceeded while polling`)
+      } }
+    },
+  })
   assert.deepEqual(events, ['reload'])
 })
 
@@ -6014,7 +6083,11 @@ test('C2 busy recipes reuse worker transport cleanup that releases every queued 
     removeEventListener(_type, callback) { assert.equal(callback, listener); events.push('removed') }
   }
   try {
-    const runtime = { page: { addInitScript: async (install) => install(), evaluate: async (read) => read() }, cleanup: [], evidence: {} }
+    const engineWorkerPath = '/_next/static/chunks/128.abc.js'
+    const runtime = { engineWorkerPath, page: { addInitScript: async (install, argument) => {
+      assert.deepEqual(argument, { engineWorkerPath })
+      install(argument)
+    }, evaluate: async (read) => read() }, cleanup: [], evidence: {} }
     await setupStep({}, runtime, { kind: 'prepare-engine-transport' }, censusAssertions)
     const worker = new globalThis.Worker('/engine/worker-browser.js')
     const delivered = (event) => events.push(event.data)

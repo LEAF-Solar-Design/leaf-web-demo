@@ -1,3 +1,5 @@
+import { serviceState, authorityKey, authorityStorage } from '../../lib/serviceAuthSession.js'
+
 const initialState = Object.freeze({
   status: 'checking',
   reason: null,
@@ -44,10 +46,12 @@ export function createSessionController({
   }
 
   const readToken = () => {
+    if (serviceState(storage).mode) return authorityKey(storage)
     try { return storage?.getItem('leaf.jwt') || null } catch { return null }
   }
 
   const clearToken = () => {
+    if (serviceState(storage).mode) return
     try { storage?.removeItem('leaf.jwt') } catch { /* storage unavailable */ }
   }
 
@@ -140,7 +144,7 @@ export function createSessionController({
   }
 
   const signOut = async () => {
-    try { storage?.removeItem('leaf.inflightAuthor.v1') } catch { /* storage unavailable */ }
+    try { (serviceState(storage).mode ? authorityStorage() : storage)?.removeItem('leaf.inflightAuthor.v1') } catch { /* storage unavailable */ }
     // An explicit sign-out is the second channel that may delete the token.
     requireAuth('signout', { tokenInvalidated: true })
     await endSession?.()

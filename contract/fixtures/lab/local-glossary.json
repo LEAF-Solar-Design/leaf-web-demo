@@ -1,0 +1,31 @@
+{
+  "schema": "leaf.lab-local-glossary.v1",
+  "source": "blocks.json#local_source",
+  "terms": [
+    {
+      "id": "constant",
+      "plain": "Number",
+      "means": "A fixed numeric value used as an input to a calculation."
+    },
+    {
+      "id": "add",
+      "plain": "Add",
+      "means": "Calculate the sum of two numbers."
+    },
+    {
+      "id": "subtract",
+      "plain": "Subtract",
+      "means": "Subtract the second number from the first number."
+    },
+    {
+      "id": "multiply",
+      "plain": "Multiply",
+      "means": "Calculate the product of two numbers."
+    },
+    {
+      "id": "divide",
+      "plain": "Divide",
+      "means": "Divide the first number by the second number."
+    }
+  ]
+}

@@ -81,6 +81,7 @@ import type {
 } from "../index.js";
 import { SPINE_TOOL_NAMES } from "../index.js";
 import { INTEGRATION_TOOL_INPUTS } from "../integrationTools.js";
+import { z as contractZ } from "zod";
 import { buildScrubbedEnv } from "./agentSdkRunner.js";
 import { composeRunnerCapabilities } from "./runnerCapabilities.js";
 import { createStandardServicesFacade } from "./standardServicesFacade.js";
@@ -130,6 +131,20 @@ function dynImport(parts: string[]): Promise<unknown> {
 
 /** The seven spine tools as mounted MCP names (server key "spine"). */
 export const SPINE_MCP_TOOL_NAMES = SPINE_TOOL_NAMES.map((n) => `mcp__spine__${n}`);
+
+// Keep the approval-bound solve input closed even when a host invokes the
+// mounted handler directly instead of relying on SDK argument validation.
+const SOLVE_CONTEXT_INPUT = contractZ.object({
+  frame_ref: contractZ.string().min(1),
+  expected_rev: contractZ.number().int().nonnegative(),
+  phase: contractZ.enum(["initial", "background"]),
+}).strict();
+
+const PLATFORM_SOURCE_RANGE_INPUT = contractZ.object({
+  start_line: contractZ.number().int().positive(),
+  max_lines: contractZ.number().int().min(1).max(400),
+  expected_commit: contractZ.string().regex(/^[0-9a-f]{40}$/),
+}).strict();
 
 /** Rate-limit horizon split (plan B3 / wire contract section 3 stop reasons):
  *  a 429 whose retry-after horizon exceeds this is EXHAUSTION (degraded mode),
@@ -182,7 +197,7 @@ const TOOL_DESCRIPTIONS: Record<SpineToolName, string> = {
   request_confirmation:
     "Ask the user to explicitly approve something before proceeding. Args {kind, payload?}. After a pending result, summarize and end your turn.",
   customize_platform:
-    "Propose a change to the PLATFORM'S OWN code and UI (the product itself, not the drawing) through the audited admin self-edit lane. Args {op: 'propose'|'status'|'land'|'list'|'read_source'|'list_source', ...}. Read-only ops need no approval: list_source {dir?} lists one source directory at the review base, read_source {path} reads one file, list {limit?} recovers this workspace's past changes (change_id, state, commit_sha), status needs {change_id}. Read the files you intend to change BEFORE proposing. propose needs {title, edits:[{path, content?, delete?}]} and returns a change_id + commit_sha after approval; land needs {change_id, commit_sha} and pushes the change as a BRANCH for review — it does NOT change the running product. Admin-only; every propose/land takes a fresh user approval.",
+    "Propose a change to the PLATFORM'S OWN code and UI (the product itself, not the drawing) through the audited admin self-edit lane. Args {op: 'propose'|'status'|'land'|'list'|'read_source'|'list_source', ...}. Read-only ops need no approval: list_source {dir?} lists one source directory and its exact commit, read_source {path} reads one file. For a large file, read_source accepts all three of {start_line: positive integer, max_lines: 1..400, expected_commit: exact lowercase 40-hex commit from list_source}; follow range.next_line until null, keeping the same commit. Range content is bounded to whole lines and 32768 UTF-8 bytes; do not guess a commit or raise the whole-file cap. Range fields are only valid for read_source. list {limit?} recovers this workspace's past changes (change_id, state, commit_sha), status needs {change_id}. Read the files you intend to change BEFORE proposing. propose needs {title, edits:[{path, content?, delete?}]} and returns a change_id + commit_sha after approval; land needs {change_id, commit_sha} and pushes the change as a BRANCH for review — it does NOT change the running product. Admin-only; every propose/land takes a fresh user approval.",
   finish_project:
     "Record a bounded release goal for THIS project and let the platform's completion engine drive it (implementation, publication, deployment, user verification, delivery). Args {title, prompt, delivery_profile, intended_user, workflow, artifact_refs}. delivery_profile names the bounded shape of the release (e.g. 'web_tool', 'cad_file'); intended_user and workflow are short plain-language descriptions; artifact_refs names existing project files the release should deliver, if any. This records a GOAL, not a completion claim — starting a bounded release never marks the wider ambition finished, and any remaining or unavailable coverage stays visible in project_completion_status. The project is resolved from this conversation automatically; do not ask the user for a project id.",
   project_completion_status:
@@ -284,6 +299,7 @@ export class ConverseSdkRunner implements SpineConverseRunner {
         params: z.record(z.unknown()).optional(),
         dwg: z.string().optional(),
         confirmation_id: z.string().optional(),
+        solve_context: SOLVE_CONTEXT_INPUT.optional(),
       },
       job_status: { job_id: z.string() },
       author_tool: {
@@ -314,6 +330,9 @@ export class ConverseSdkRunner implements SpineConverseRunner {
         commit_sha: z.string().optional(),
         confirmation_id: z.string().optional(),
         path: z.string().optional(),
+        start_line: PLATFORM_SOURCE_RANGE_INPUT.shape.start_line.optional(),
+        max_lines: PLATFORM_SOURCE_RANGE_INPUT.shape.max_lines.optional(),
+        expected_commit: PLATFORM_SOURCE_RANGE_INPUT.shape.expected_commit.optional(),
         dir: z.string().optional(),
         limit: z.number().optional(),
       },
@@ -332,6 +351,25 @@ export class ConverseSdkRunner implements SpineConverseRunner {
     };
     const tools = SPINE_TOOL_NAMES.map((name) =>
       sdk.tool(name, TOOL_DESCRIPTIONS[name], schemas[name], async (args) => {
+        if (name === "customize_platform"
+            && ["start_line", "max_lines", "expected_commit"].some((key) => args[key] !== undefined)) {
+          const parsed = PLATFORM_SOURCE_RANGE_INPUT.safeParse({
+            start_line: args.start_line,
+            max_lines: args.max_lines,
+            expected_commit: args.expected_commit,
+          });
+          if (args.op !== "read_source" || !parsed.success) {
+            return toResult({ content: "Invalid platform source range", isError: true });
+          }
+          return toResult(await input.tools.execute(name, { ...args, ...parsed.data }));
+        }
+        if (name === "run_capability" && args.solve_context !== undefined) {
+          const parsed = SOLVE_CONTEXT_INPUT.safeParse(args.solve_context);
+          if (!parsed.success) {
+            return toResult({ content: "Invalid solve context", isError: true });
+          }
+          return toResult(await input.tools.execute(name, { ...args, solve_context: parsed.data }));
+        }
         if (Object.prototype.hasOwnProperty.call(INTEGRATION_TOOL_INPUTS, name)) {
           const schema = INTEGRATION_TOOL_INPUTS[name as keyof typeof INTEGRATION_TOOL_INPUTS];
           const parsed = schema.safeParse(args);

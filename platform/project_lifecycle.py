@@ -983,6 +983,60 @@ def export_project(
     return run_transaction(operation, isolation="serializable")
 
 
+def rename_project(
+    org_id: uuid.UUID, project_id: uuid.UUID, actor_binding_id: uuid.UUID, *,
+    name: str, idempotency_key: str,
+) -> Dict[str, Any]:
+    """Change only a live project's name. Its id and everything it owns stay as they are."""
+    idempotency_key = _validate_idempotency_key(idempotency_key)
+    name = _validate_project_name(name)
+    input_digest = _canonical_digest({"project_id": str(project_id), "name": name})
+
+    def operation(conn: Any) -> Dict[str, Any]:
+        with conn.cursor() as cur:
+            project = _project_row(cur, org_id, project_id)
+            _require_project_role(
+                cur, org_id, project_id, actor_binding_id, write=True,
+            )
+            replay = _receipt_replay(
+                cur, org_id, project_id, "project_renamed", idempotency_key,
+                input_digest,
+            )
+            if replay is not None:
+                return replay
+            previous = project["name"]
+            if previous != name:
+                # Another live project holding the normalized name refuses; this
+                # project's own name (a change of case or spacing) does not.
+                cur.execute(
+                    "SELECT 1 FROM projects WHERE org_id = %(org_id)s AND status = 'active' "
+                    "AND deleted_at IS NULL AND project_id <> %(project_id)s "
+                    "AND lower(btrim(name)) = lower(btrim(%(name)s)) LIMIT 1",
+                    {"org_id": org_id, "project_id": project_id, "name": name},
+                )
+                if cur.fetchone() is not None:
+                    raise LifecycleConflict(
+                        "a project with that name already exists in this workspace"
+                    )
+                cur.execute(
+                    "UPDATE projects SET name = %(name)s, updated_at = NOW() "
+                    "WHERE org_id = %(org_id)s AND project_id = %(project_id)s",
+                    {"org_id": org_id, "project_id": project_id, "name": name},
+                )
+            result = {
+                "project_id": str(project_id),
+                "status": "renamed",
+                "name": name,
+                "previous_name": previous,
+            }
+            return _write_receipt(
+                cur, org_id, project_id, actor_binding_id, "project_renamed",
+                idempotency_key, input_digest, result,
+            )
+
+    return run_transaction(operation, isolation="serializable")
+
+
 def reset_project(
     org_id: uuid.UUID, project_id: uuid.UUID, actor_binding_id: uuid.UUID, *,
     idempotency_key: str,

@@ -58,9 +58,9 @@ CONVERTED_BASIS = "fb773c11b8a39a7e5786b4301a4a3e66cb568fb6273214f4b92c6409e09a7
 SIZED_SHA = "aa7e815c169780207578046380c915903180340502f5c0071f623205b0e07fd8"
 STRUNG_SHA = "d9fbe549a60289ec083f339992f9bd580207c0bded2197535627df5dcf9e6717"
 EQUIPPED_SHA = "9f344ba1e0746ccf22364e550e5a0ae11f5564f35fda61bfacd70c165ee83b47"
-# The whole readiness map has 53 entries after the three PVcase tools.
+# The whole readiness map has 54 entries after solar-takeoff.
 # The PVcase readers require conversion on this W1 fixture.
-W1_READINESS_SHA = "b823899eccecf01a72b2c335dce5c64dc2714bd2943b6cd2aa9c503ba6045b8c"
+W1_READINESS_SHA = "ddf17a13b6c27bae2113d96ef094815e9cde9d391b62cd251f1a8cf1eedf6cad"
 
 
 class FixedDatetime:

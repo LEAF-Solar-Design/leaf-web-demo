@@ -20,6 +20,7 @@ MAX_RESPONSE_BYTES = 128 * 1024
 OPERATION_SECONDS = 40
 CONNECT_SECONDS = 3
 READ_SECONDS = 35
+NO_PAGE_DIGEST = '0' * 64
 _USAGE_KEYS = {'input_tokens', 'output_tokens', 'cache_creation_tokens',
                'cache_read_tokens', 'cost_tokens'}
 logger = logging.getLogger(__name__)
@@ -88,9 +89,10 @@ def parse_request(raw):
     body = _json(raw, 422)
     if (not _closed(body, 'expected_revision expected_digest instruction')
             or type(body['expected_revision']) is not int
-            or not 1 <= body['expected_revision'] <= 2147483647
+            or not 0 <= body['expected_revision'] <= 2147483647
             or type(body['expected_digest']) is not str
             or re.fullmatch('[0-9a-f]{64}', body['expected_digest']) is None
+            or (body['expected_revision'] == 0 and body['expected_digest'] != NO_PAGE_DIGEST)
             or type(body['instruction']) is not str
             or not 1 <= len(body['instruction']) <= 4000 or not body['instruction'].strip()):
         raise ProposalError(422)
@@ -221,6 +223,54 @@ def _result(raw, source, targets):
     return result
 
 
+def _propose_first_page(org_id, project_id, actor_id, instruction, correlation_id):
+    if project_web_page.read(org_id, project_id, actor_id) is not None:
+        raise lifecycle.LifecycleConflict('Portfolio proposal source changed.')
+    document = {'label': '', 'headline': '', 'description': '', 'status': '',
+                'theme': 'cream', 'alignment': 'center'}
+    action = {'label': '', 'href': ''}
+    fields, targets = [], {}
+    for container, key, limit, role in [
+            (document, 'label', 120, 'page label'),
+            (document, 'headline', 240, 'headline'),
+            (document, 'description', 1200, 'description'),
+            (document, 'status', 80, 'status line'),
+            (action, 'label', 60, 'contact button label'),
+            (action, 'href', 2048, 'contact link')]:
+        field_id = f'f{len(fields) + 1:04d}'
+        fields.append({'id': field_id, 'value': '', 'max_length': limit, 'role': role})
+        targets[field_id] = (container, key, limit)
+    source = {'project_id': str(project_id), 'revision': 0, 'digest64hex': NO_PAGE_DIGEST}
+    payload = {'tenant_id': str(org_id), 'source': source, 'instruction': instruction, 'fields': fields}
+    try:
+        result = _result(_transport(payload), source, targets)
+        for edit in result['edits']:
+            container, key, _ = targets[edit['id']]
+            container[key] = edit['value']
+        if action['label'] and action['href']:
+            document['action'] = action
+        try:
+            document = validate_document(document)
+            digest = document_digest(document)
+        except (ValueError, UnicodeError):
+            raise ProposalError(502, stage='document', code='invalid_document') from None
+    except ProposalError as error:
+        stage, code, upstream_status = _diagnostic(error.stage, error.code, error.upstream_status)
+        try:
+            logger.warning('portfolio_proposal_failed correlation_id=%s stage=%s code=%s upstream_status=%s',
+                           correlation_id, stage, code, upstream_status)
+        except Exception:
+            # A failing logging handler must not change the fixed service result.
+            pass
+        raise
+    lifecycle.require_project_role(org_id, project_id, actor_id, write=True)
+    if project_web_page.read(org_id, project_id, actor_id) is not None:
+        raise lifecycle.LifecycleConflict('Portfolio proposal source changed.')
+    return {'source': {'project_id': str(project_id), 'revision': 0, 'digest': NO_PAGE_DIGEST},
+            'proposed_document': document, 'proposed_digest': digest,
+            'edits': result['edits'], 'model': result['model'], 'usage': result['usage']}
+
+
 def propose(org_id, project_id, actor_id, *, expected_revision, expected_digest, instruction):
     correlation_id = str(uuid4())
     # Also enforce the closed input contract for direct service callers.
@@ -231,6 +281,8 @@ def propose(org_id, project_id, actor_id, *, expected_revision, expected_digest,
         raise ProposalError(422) from None
     parse_request(raw)
     lifecycle.require_project_role(org_id, project_id, actor_id, write=True)
+    if expected_revision == 0:
+        return _propose_first_page(org_id, project_id, actor_id, instruction, correlation_id)
     page = project_web_page.read(org_id, project_id, actor_id)
     if page is None or page['document'].get('schema') != 'leaf.portfolio.v1':
         raise ProposalError(422)

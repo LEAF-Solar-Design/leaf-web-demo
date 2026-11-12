@@ -27,11 +27,11 @@ import test_sip_r4_jobs as r4
 import test_w1_design_graph as w1
 
 
-# W1C-3 adds commit; fifteen supported tools, four creation tools.
+# Historical sixteen-tool policy scenarios remain fixed; r3b.TOOLS pins current admission.
 ELEVEN = frozenset((
     "solar-assign-equipment", "solar-combiners", "solar-feeders", "solar-homeruns",
     "solar-panels-from-drawing", "solar-schedule", "solar-settings",
-    "solar-size-strings", "solar-string-add", "solar-string-multi-add", "solar-string-conductors", "solar-panel-groups", "solar-correct-string", "solar-solve-proposal", "solar-commit-solve",
+    "solar-size-strings", "solar-string-add", "solar-string-multi-add", "solar-string-conductors", "solar-panel-groups", "solar-correct-string", "solar-solve-proposal", "solar-commit-solve", "solar-solaredge-accept",
 ))
 
 
@@ -112,7 +112,7 @@ def test_sip_r5_flag_defaults_off(monkeypatch):
 
 def test_sip_r5_exact_supported_identity(monkeypatch):
     a = setup(monkeypatch)
-    assert graph.SUPPORTED_TOOLS == ELEVEN and len(solar_tools.entries()) == 53
+    assert graph.SUPPORTED_TOOLS == r3b.TOOLS and len(solar_tools.entries()) == 54
     calls = []
     monkeypatch.setattr(service, "submit_project_graph_job", lambda *args, **kwargs:
         calls.append((args, kwargs)) or {"admissible": True, "replay": False})
@@ -132,14 +132,14 @@ def test_sip_r5_exact_supported_identity(monkeypatch):
     for name in ("solar-assign-strings", "solar-pvcase-convert"):
         assert_refusal(request(a, {}, tool_name=name), "SIP_R3_TOOL_UNSUPPORTED",
             message="Project Solar admission unavailable.")
-    assert len(calls) == 15
+    assert len(calls) == 16
     r3a.refused("SIP_R3_TOOL_UNSUPPORTED", lambda: graph._tool("solar-assign-strings", "x"))
     r3a.refused("SIP_R3_TOOL_MANIFEST_MISMATCH", lambda: graph._tool("solar-string-multi-add", "x"))
     r3a.refused("SIP_R3_TOOL_MANIFEST_MISMATCH", lambda: graph._tool("solar-settings", "x"))
     result = request(a, {}, tenant=str(UUID(int=999)))
-    assert result["status_code"] == 409 and len(calls) == 15
+    assert result["status_code"] == 409 and len(calls) == 16
     monkeypatch.setattr(deps, "auth_live", lambda: True)
-    assert request(a, {})["status_code"] == 409 and len(calls) == 15
+    assert request(a, {})["status_code"] == 409 and len(calls) == 16
     tenant = deps.TenantContext(str(a.s.org), subject="verified-subject")
     assert request(a, {}, tenant=tenant)["status_code"] == 200
     assert calls[-1][0][0] is tenant
@@ -577,5 +577,5 @@ def test_sip_r5_legacy_projection_unchanged(monkeypatch):
     assert snapshot() == before
     assert shared_tables() == shared_before
     assert legacy == original and tools == tools_before
-    assert solar_tools.manifest() == manifest and len(manifest) == 53
+    assert solar_tools.manifest() == manifest and len(manifest) == 54
     assert {name: deps.catalog_tool_digest(tool) for name, tool in solar_tools.trusted_snapshot().items()} == digests

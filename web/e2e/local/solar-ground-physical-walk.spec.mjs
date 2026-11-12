@@ -1,3 +1,4 @@
+import { requireSolarFlags, installSpendGuard } from './solarProofGuard.mjs'
 import { expect as playwrightExpect, test } from '@playwright/test'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
@@ -16,11 +17,6 @@ const PROOF_DIR = join(process.cwd(), '..', 'artifacts', 'unified-surface-proof'
 const BOUNDARY = [[-90, -90], [90, -90], [90, 90], [-90, 90]]
 const REFUSAL = 'This read is not in the current tool catalog, so refresh the tools and run it again.'
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
-function flagsOn(testInfo) {
-  if (process.env.VITE_CAD_EDIT === '1' && process.env.VITE_SOLAR_FLOW_RAIL === '1' && process.env.VITE_SOLAR_SETTINGS_FORM === '1') return true
-  testInfo.annotations.push({ type: 'flag-gate', description: 'Requires VITE_CAD_EDIT=1, VITE_SOLAR_FLOW_RAIL=1 and VITE_SOLAR_SETTINGS_FORM=1.' })
-  return false
-}
 async function ownsCentre(control) {
   await control.scrollIntoViewIfNeeded()
   await expect(control).toBeVisible()
@@ -52,8 +48,9 @@ async function readFields(root, fields) {
 }
 
 test('GP-01 Ground Mount Physical browser walk at 1280x800', async ({ page }, testInfo) => {
+  requireSolarFlags()
+  const assertNoSpend = await installSpendGuard(page)
   test.setTimeout(900_000)
-  if (!flagsOn(testInfo)) return
   page.setDefaultTimeout(30_000)
   page.setDefaultNavigationTimeout(60_000)
   await page.setViewportSize({ width: 1280, height: 800 })
@@ -662,4 +659,5 @@ test('GP-01 Ground Mount Physical browser walk at 1280x800', async ({ page }, te
       'Rail aria-current identifies the last enabled catalog tool, not completion of the five conceptual stages.',
       'Frozen arithmetic measurements are expectations; this receipt is written only after the positive browser assertions.'],
   })
+  assertNoSpend()
 })

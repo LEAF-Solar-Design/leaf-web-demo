@@ -290,6 +290,7 @@ def test_lab_run_schema_proof(mode):
         "lease_owner", "lease_fence", "lease_expires_at", "next_seq", "event_count",
         "created_at", "updated_at", "finished_at",
         "claimed_build_revision", "claimed_color", "cancel_requested_at", "cancel_requested_by",
+        "corpus_authority_json",
     }
     assert columns["lab_run_events"] == {
         "tenant_id", "run_id", "seq", "block_id", "kind", "payload", "created_at",
@@ -403,9 +404,12 @@ def _assert_device_bridge_schema_proof(mode):
         "device_audit", "(device_id, at DESC)")
     migration = (db._PKG_DIR / "migrations/0096_device_bridge.sql").read_text(encoding="utf-8")
     manifest = db.migration_manifest()
-    assert manifest[-1] == {"name": "0096_device_bridge.sql", "sha256": sha256(
-        (db._PKG_DIR / "migrations/0096_device_bridge.sql").read_bytes()).hexdigest()}
-    assert db._migration_proof(manifest[:-1])["missing_migrations"] == ["0096_device_bridge.sql"]
+    device_migration = "0096_device_bridge.sql"
+    matching_rows = [row for row in manifest if row["name"] == device_migration]
+    assert matching_rows == [{"name": device_migration, "sha256": sha256(
+        (db._PKG_DIR / "migrations" / device_migration).read_bytes()).hexdigest()}]
+    without_device = [row for row in manifest if row["name"] != device_migration]
+    assert db._migration_proof(without_device)["missing_migrations"] == [device_migration]
     assert migration.startswith("-- Expand only.")
     assert not re.search(r"^\s*(DROP|ALTER|DELETE|TRUNCATE|UPDATE)\b", migration, re.I | re.M)
     assert set(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", migration)) == set(expected)

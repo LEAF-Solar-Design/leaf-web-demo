@@ -32,6 +32,27 @@ import React from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { noteUnauthorized } from '../api.js'
+import { serviceSession } from '../lib/serviceAuthSession.js'
+
+it('retains drawings on same-principal service renewal and resets for an issuer change', async () => {
+  const service = serviceSession()
+  const selector = '11111111-1111-4111-8111-111111111111'
+  const verify = issuer => service.probe({ origin: window.location.origin, fetchImpl: async () => ({ ok: true, json: async () => ({
+    authenticated: true, binding_id: selector, expires_at: new Date(Date.now() + 60000).toISOString(),
+    identity: { subject: 'machine', sub: 'machine', iss: issuer, org_id: 'org', tenant_id: 'tenant', principal_type: 'service_admin' },
+  }) }) })
+  try {
+    service.select(selector)
+    await verify('issuer-a')
+    render(<DrawingIdentityProvider mode="console" scene="app" search="?drawing=service-drawing"
+      publicDemo={false} liveDemo={false}><ConsoleProbe /></DrawingIdentityProvider>)
+    expect(shown('drawing-id')).toBe('service-drawing')
+    await act(async () => { await verify('issuer-a') })
+    expect(shown('drawing-id')).toBe('service-drawing')
+    await act(async () => { await verify('issuer-b') })
+    expect(shown('drawing-id')).toBe('null')
+  } finally { cleanup(); service.human() }
+})
 import { bootWantsApp } from '../site/authBoot.js'
 import { searchForProductSurface } from '../site/productSurfaces.js'
 import { forgetLiveDrawingId, liveDrawingId, WORKBENCH_ID_KEY } from '../site/workbenchId.js'

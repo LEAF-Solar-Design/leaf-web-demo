@@ -19,6 +19,32 @@ MAX_EVENTS = 10000
 MAX_QUEUED_PER_TENANT = 16
 MAX_ACTIVE_PER_TENANT = 4
 _PIN = re.compile(r"[A-Za-z0-9._:-]{1,128}")
+_SUBMISSION = re.compile(r"v1\.([0-9]{13})\.[0-9a-f]{32}")
+SUBMISSION_TTL = timedelta(hours=24)
+
+
+class SubmissionConflict(Exception):
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
+
+def submission_run_id(tenant, authority, submission_id):
+    """Closed timestamp/random intent, bound to server-resolved authority.
+
+    No schema change: the primary key is the intent slot and existing immutable
+    columns are its fingerprint. Retain these rows for the entire retry window.
+    Graph pins include drawing project identity; Lab has no project column.
+    """
+    match = _SUBMISSION.fullmatch(submission_id) if isinstance(submission_id, str) else None
+    if match is None:
+        raise InvalidGraph("invalid_lab_submission_id")
+    issued = datetime.fromtimestamp(int(match[1]) / 1000, timezone.utc)
+    age = _now() - issued
+    if age < -timedelta(minutes=5) or age >= SUBMISSION_TTL:
+        raise SubmissionConflict("lab_submission_expired")
+    identity = json.dumps([tenant, authority, submission_id], separators=(",", ":"))
+    return "s1." + hashlib.sha256(identity.encode()).hexdigest()
 _SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS lab_runs (
  tenant_id TEXT NOT NULL, doc_id TEXT NOT NULL, run_id TEXT NOT NULL,
@@ -28,7 +54,7 @@ CREATE TABLE IF NOT EXISTS lab_runs (
  state TEXT NOT NULL CHECK (state IN ('queued','running','finished','failed','cancelled')),
  lease_owner TEXT, lease_fence INTEGER NOT NULL DEFAULT 0, lease_expires_at TEXT,
  claimed_build_revision TEXT, claimed_color TEXT CHECK (claimed_color IN ('active','idle')),
- cancel_requested_at TEXT, cancel_requested_by TEXT,
+ cancel_requested_at TEXT, cancel_requested_by TEXT, corpus_authority_json TEXT,
  next_seq INTEGER NOT NULL DEFAULT 0, event_count INTEGER NOT NULL DEFAULT 0,
  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, finished_at TEXT,
  PRIMARY KEY (tenant_id, run_id)
@@ -127,6 +153,7 @@ def _run(tenant, operation, *, write=False):
             ("claimed_build_revision", "TEXT"),
             ("claimed_color", "TEXT CHECK (claimed_color IN ('active','idle'))"),
             ("cancel_requested_at", "TEXT"), ("cancel_requested_by", "TEXT"),
+            ("corpus_authority_json", "TEXT"),
         ):
             if name not in columns:
                 conn.execute("ALTER TABLE lab_runs ADD COLUMN " + name + " " + definition)
@@ -191,16 +218,43 @@ def release_stream(tenant, principal, stream_id):
 
 
 def create(tenant, doc_id, run_id, graph_revision, graph_sha256, ops_revision,
-           input_digest, adapter_revision, build_revision, *, registry_digest=None):
+           input_digest, adapter_revision, build_revision, *, registry_digest=None,
+           submission_id=None, authority=None, reconcile_only=False, corpus_authority=None):
     for value in (doc_id, run_id, graph_sha256, ops_revision, input_digest, adapter_revision, build_revision):
         _pin(value)
     if type(graph_revision) is not int or graph_revision < 1:
         raise InvalidGraph("invalid_lab_graph_revision")
+    if corpus_authority is not None:
+        corpus_authority = validate_corpus_authority(corpus_authority)
+        if any(corpus_authority[k] != v for k, v in {
+                'tenant_id': tenant, 'doc_id': doc_id, 'graph_revision': graph_revision,
+                'graph_sha256': graph_sha256}.items()):
+            raise InvalidGraph('lab_corpus_authority_mismatch')
     digest = globals()["registry_digest"]()
     if registry_digest is not None and _pin(registry_digest) != digest:
         raise InvalidGraph("lab_registry_digest_mismatch")
+    if type(reconcile_only) is not bool or (reconcile_only and submission_id is None):
+        raise InvalidGraph("invalid_lab_submission_recovery")
+    if submission_id is not None:
+        if not isinstance(authority, str) or not authority:
+            raise InvalidGraph("invalid_lab_submission_authority")
+        run_id = submission_run_id(tenant, authority, submission_id)
 
     def operation(sql):
+        if submission_id is not None:
+            # Recheck time after acquiring the tenant transaction lock.
+            submission_run_id(tenant, authority, submission_id)
+            existing = _row(sql, tenant, run_id)
+            if existing is not None:
+                expected = (doc_id, graph_revision, graph_sha256, digest, ops_revision,
+                            input_digest, adapter_revision, build_revision)
+                fields = ("doc_id", "graph_revision", "graph_sha256", "registry_digest",
+                          "ops_revision", "input_digest", "adapter_revision", "build_revision")
+                if tuple(existing[key] for key in fields) != expected:
+                    raise SubmissionConflict("lab_submission_mismatch")
+                return dict(existing)
+            if reconcile_only:
+                raise SubmissionConflict("lab_submission_missing")
         queued = sql.execute("SELECT COUNT(*) AS count FROM lab_runs WHERE tenant_id=? AND state='queued'",
                              (tenant,)).fetchone()["count"]
         if queued >= MAX_QUEUED_PER_TENANT:
@@ -211,8 +265,80 @@ def create(tenant, doc_id, run_id, graph_revision, graph_sha256, ops_revision,
                     " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (tenant, doc_id, run_id, graph_revision, graph_sha256, digest, ops_revision,
                      input_digest, adapter_revision, build_revision, "queued", now, now))
+        if corpus_authority is not None:
+            sql.execute('UPDATE lab_runs SET corpus_authority_json=? WHERE tenant_id=? AND run_id=?',
+                        (json.dumps(corpus_authority, sort_keys=True), tenant, run_id))
         return dict(_row(sql, tenant, run_id))
 
+    return _run(tenant, operation, write=True)
+
+
+def validate_corpus_authority(value):
+    import uuid
+    fields = {'schema', 'tenant_id', 'project_id', 'actor_id', 'doc_id',
+              'graph_revision', 'graph_sha256'}
+    if (type(value) is not dict or set(value) != fields
+            or value['schema'] != 'leaf.lab-corpus-authority.v1'):
+        raise InvalidGraph('lab_corpus_authority_missing')
+    for key in ('tenant_id', 'project_id', 'actor_id'):
+        if type(value[key]) is not str or str(uuid.UUID(value[key])) != value[key]:
+            raise InvalidGraph('lab_corpus_authority_mismatch')
+    if (type(value['graph_revision']) is not int or value['graph_revision'] < 1
+            or not isinstance(value['doc_id'], str) or not value['doc_id']
+            or not isinstance(value['graph_sha256'], str) or len(value['graph_sha256']) != 64):
+        raise InvalidGraph('lab_corpus_authority_mismatch')
+    return json.loads(json.dumps(value))
+
+
+def corpus_authority(row):
+    value = row.get('corpus_authority_json')
+    if value is None:
+        return None
+    value = json.loads(value) if isinstance(value, str) else value
+    value = validate_corpus_authority(value)
+    if any(value[k] != row[k] for k in ('tenant_id', 'doc_id', 'graph_revision', 'graph_sha256')):
+        raise InvalidGraph('lab_corpus_authority_mismatch')
+    from lab_canonical import graph_digest
+    if graph_digest(value) != row['input_digest']:
+        raise InvalidGraph('lab_corpus_authority_mismatch')
+    return value
+
+
+def owns_corpus_run(tenant, run_id, owner, fence):
+    return _run(tenant, lambda sql: _holder(sql, tenant, run_id, owner, fence, _now()) is not None)
+
+
+def cancel_corpus_job(tenant, run_id, owner, fence, block_id, job_id, *, deadline=False):
+    """Serialize cancellation with Lab takeover; never wait while holding locks."""
+    if store_mode() != 'postgres':
+        return None
+    def operation(sql):
+        row = _holder(sql, tenant, run_id, owner, fence, _now())
+        if row is None or (row['cancel_requested_at'] is None and not deadline):
+            return None
+        authority = corpus_authority(dict(row))
+        if authority is None:
+            return None
+        job = sql.execute('SELECT * FROM async_jobs WHERE job_id=? AND tenant_id=? FOR UPDATE',
+                          (job_id, tenant)).fetchone()
+        if (job is None or job['tool'] != 'internal.lab-corpus-evaluate'
+                or job['project_id'] != authority['project_id']
+                or job['idempotency_key'] != f'lab:{run_id}:{block_id}:corpus:v1'):
+            return None
+        existing = job['corpus_cancel_json']
+        if existing is not None:
+            return json.loads(existing) if isinstance(existing, str) else existing
+        if job['status'] in {'complete', 'failed'}:
+            return None
+        tag = {'run_id': run_id, 'fence': fence, 'block_id': block_id,
+               'attempt': int(job['attempt']), 'reason': 'deadline' if deadline else 'cancel'}
+        sql.execute("UPDATE async_jobs SET progress='closed',lease_owner=NULL,"
+                    "lease_expires_at=NULL,heartbeat_at=NULL,corpus_cancel_json=? WHERE job_id=?",
+                    (json.dumps(tag, sort_keys=True), job_id))
+        if job['status'] == 'submitted' and int(job['attempt']) == 0:
+            sql.execute('UPDATE async_jobs SET corpus_cleanup_json=? WHERE job_id=?',
+                (json.dumps({'attempt': 0, 'cancel': tag, 'not_started': True}), job_id))
+        return tag
     return _run(tenant, operation, write=True)
 
 
@@ -546,13 +672,17 @@ def sweep(now):
                    sql.execute("SELECT DISTINCT tenant_id FROM lab_runs").fetchall()])
     for tenant in tenants:
         def operation(sql):
-            rows = sql.execute("SELECT run_id,doc_id FROM lab_runs WHERE tenant_id=?"
+            rows = sql.execute("SELECT run_id,doc_id,state,created_at FROM lab_runs WHERE tenant_id=?"
                                " ORDER BY created_at DESC,run_id DESC", (tenant,)).fetchall()
             counts = {}
             for row in rows:
                 doc = row["doc_id"]
                 counts[doc] = counts.get(doc, 0) + 1
                 if counts[doc] > 50:
+                    if row["run_id"].startswith("s1.") and (
+                            row["state"] in {"queued", "running"}
+                            or _date(now) - _date(row["created_at"]) < SUBMISSION_TTL + timedelta(minutes=5)):
+                        continue
                     sql.execute("DELETE FROM lab_runs WHERE tenant_id=? AND run_id=?", (tenant, row["run_id"]))
             sql.execute("DELETE FROM lab_run_events WHERE tenant_id=? AND created_at<?", (tenant, cutoff))
             sql.execute("UPDATE lab_runs SET event_count=(SELECT COUNT(*) FROM lab_run_events e"

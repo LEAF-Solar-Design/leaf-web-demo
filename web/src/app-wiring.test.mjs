@@ -31,6 +31,53 @@ import { solarSettingsScope } from './solar/solarSettingsWire.js'
 import { SOLAR_SETTINGS_TOOL_NAME } from './solar/solarSettingsWire.js'
 import { projectSolarAppReason } from './solar/solarProjectAppModel.js'
 
+it('every solar panel module is mounted from App or explicitly API-only or tutorial-only', () => {
+  const exceptions = {
+    'SolarPvcasePanel.jsx': 'tutorial-only: PVcase parity is a tutorial flow without a workspace mount',
+  }
+  const solarDirectory = new URL('./solar/', import.meta.url)
+  const panels = readdirSync(solarDirectory).filter((name) => name.endsWith('Panel.jsx'))
+  const mounted = new Set()
+  const visited = new Set()
+  function inspect(url) {
+    if (visited.has(url.href)) return
+    visited.add(url.href)
+    const tree = parseJs(readFileSync(url, 'utf8'), { sourceType: 'module', plugins: ['jsx'] })
+    const imports = new Map()
+    const dependencies = []
+    for (const node of tree.program.body) {
+      if (node.type !== 'ImportDeclaration' || !node.source.value.startsWith('.')) continue
+      const dependency = new URL(node.source.value, url)
+      if (!/\.(?:jsx|js|mjs)$/.test(dependency.pathname)) continue
+      dependencies.push(dependency)
+      for (const specifier of node.specifiers) imports.set(specifier.local.name, dependency.href)
+    }
+    function walk(node) {
+      if (!node || typeof node !== 'object') return
+      if (node.type === 'JSXOpeningElement' && node.name.type === 'JSXIdentifier') {
+        const module = imports.get(node.name.name)
+        if (module) mounted.add(module)
+      }
+      for (const value of Object.values(node)) {
+        if (Array.isArray(value)) value.forEach(walk)
+        else if (value && typeof value.type === 'string') walk(value)
+      }
+    }
+    walk(tree)
+    dependencies.forEach(inspect)
+  }
+  inspect(new URL('./App.jsx', import.meta.url))
+  for (const [name, reason] of Object.entries(exceptions)) {
+    assert.ok(panels.includes(name), `stale panel exception: ${name}`)
+    assert.match(reason, /^(?:API-only|tutorial-only): .+/)
+    assert.ok(!mounted.has(new URL(name, solarDirectory).href), `remove the exception for mounted ${name}`)
+  }
+  for (const name of panels) {
+    assert.ok(mounted.has(new URL(name, solarDirectory).href) || Object.hasOwn(exceptions, name),
+      `${name} needs an App-reachable JSX mount or a documented API-only/tutorial-only exception`)
+  }
+})
+
 it('Studio hides only the activity region and leaves command and header chrome outside it', () => {
   const source = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
   const tree = parseJs(source, { sourceType: 'module', plugins: ['jsx'] })
@@ -60,6 +107,18 @@ it('Studio hides only the activity region and leaves command and header chrome o
     assert.ok(!activity.includes(landmark))
   }
   assert.ok(source.includes('destination={studioShell ? studioActivityHost : activityFallback}'))
+  const dock = elements.find(node => attribute(node, 'className')?.value?.value === 'bar-dock')
+  const firstChild = dock.children.find(node => node.type !== 'JSXText' || node.value.trim())
+  assert.equal(attribute(firstChild, 'className')?.value?.value, 'command-transcript-host')
+  assert.equal(attribute(firstChild, 'data-testid')?.value?.value, 'command-transcript-host')
+  assert.equal(attribute(firstChild, 'ref')?.value?.expression?.name, 'setCommandTranscriptHost')
+  const conversePanels = elements.filter(node => node.openingElement.name.name === 'ConversePanel')
+  assert.equal(conversePanels.length, 1)
+  const seat = elements.find(node => node.children.includes(conversePanels[0]))
+  assert.equal(seat.openingElement.name.name, 'PersistentSeat')
+  const destination = attribute(seat, 'destination').value.expression
+  assert.equal(source.slice(destination.start, destination.end),
+    "transcriptDestination === 'dock' ? commandTranscriptHost : paneSeats.conversationTarget")
 })
 
 it('main keeps telemetry first and installs the proof bridge once after render using the existing API clients', () => {
@@ -80,12 +139,44 @@ it('main keeps telemetry first and installs the proof bridge once after render u
   assert.equal(imports.some(node => node.source.value === 'react-dom/client'), false, 'Next owns the root')
   const root = body.find(node => node.type === 'ExportDefaultDeclaration').declaration
   assert.equal(root.id.name, 'StudioRoot')
-  const effect = root.body.body.find(node => node.type === 'ExpressionStatement').expression
+  const effects = root.body.body
+    .filter(node => node.type === 'ExpressionStatement' && node.expression.type === 'CallExpression' && node.expression.callee.name === 'useEffect')
+    .map(node => node.expression)
+  const bridgeEffects = effects.filter(effect => effect.arguments[0].body.body.some(node =>
+    node.type === 'ExpressionStatement' && node.expression.type === 'CallExpression' && node.expression.callee.name === 'installSurfaceConfigProofBridge'))
+  assert.equal(bridgeEffects.length, 1)
+  const effect = bridgeEffects[0]
   assert.equal(effect.callee.name, 'useEffect')
-  assert.deepEqual(effect.arguments[1].elements, [], 'install after the root mounts')
-  const calls = effect.arguments[0].body.body.map(node => node.expression)
-  assert.equal(calls.length, 1)
+  assert.equal(effect.arguments[1].type, 'ArrayExpression')
+  assert.deepEqual(effect.arguments[1].elements.map(node => [node.type, node.name]), [['Identifier', 'SiteRoot']], 'install once SiteRoot is ready')
+  const statements = effect.arguments[0].body.body
+  assert.equal(statements.length, 2)
+  const guard = statements[0]
+  assert.equal(guard.type, 'IfStatement')
+  assert.equal(guard.test.type, 'UnaryExpression')
+  assert.equal(guard.test.operator, '!')
+  assert.equal(guard.test.argument.type, 'Identifier')
+  assert.equal(guard.test.argument.name, 'SiteRoot')
+  assert.equal(guard.alternate, null)
+  const returns = guard.consequent.type === 'BlockStatement' ? guard.consequent.body : [guard.consequent]
+  assert.equal(returns.length, 1)
+  assert.equal(returns[0].type, 'ReturnStatement')
+  assert.equal(returns[0].argument, null)
+  assert.equal(statements[1].type, 'ExpressionStatement')
+  const calls = [statements[1].expression]
+  assert.equal(calls[0].type, 'CallExpression')
   assert.equal(calls[0].callee.name, 'installSurfaceConfigProofBridge')
+  const installerCalls = []
+  function walk(node) {
+    if (!node || typeof node !== 'object') return
+    if (node.type === 'CallExpression' && node.callee.type === 'Identifier' && node.callee.name === 'installSurfaceConfigProofBridge') installerCalls.push(node)
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) value.forEach(walk)
+      else if (value && typeof value.type === 'string') walk(value)
+    }
+  }
+  body.forEach(walk)
+  assert.equal(installerCalls.length, 1)
   const text = (node) => source.slice(node.start, node.end)
   assert.equal(calls[0].arguments.length, 2)
   assert.equal(text(calls[0].arguments[0]), 'window')
@@ -142,6 +233,79 @@ function r13Evaluate(node, env) {
 }
 const r13Text = (node) => appSource.slice(node.start, node.end).replace(/\r\n/g, '\n')
 const r13Hash = (value) => createHash('sha256').update(value).digest('hex')
+
+// Inspect the mounted engine, not a particular spelling of its project branch.
+function assertEngineDocumentGate() {
+  const engine = r13One(node => node.type === 'JSXElement' && node.openingElement.name.name === 'EngineDocumentView')
+  const guards = r13Find(node => node.type === 'LogicalExpression' && node.operator === '&&'
+    && node.right === engine)
+  assert.equal(guards.length, 1)
+  for (const ENV_CAD_EDIT of [false, true]) for (const studioGround of [false, true]) {
+    for (const projectMode of [false, true]) for (const engineViewArmed of [false, true]) {
+      for (const projectEditorBinding of [null, { input_version_id: 'project-version' }]) {
+        assert.equal(Boolean(r13Evaluate(guards[0].left, {
+          ENV_CAD_EDIT, studioGround, projectMode, engineViewArmed, projectEditorBinding,
+        })), ENV_CAD_EDIT && studioGround && (projectMode ? !!projectEditorBinding : engineViewArmed))
+      }
+    }
+  }
+}
+
+function assertShownDocumentCustody() {
+  const engine = r13One(node => node.type === 'JSXOpeningElement' && node.name.name === 'EngineDocumentView')
+  const callback = name => engine.attributes.find(attr => attr.name?.name === name).value.expression
+  for (const projectMode of [false, true]) for (const intake of [null, { documentId: 'engine.dxf' }]) {
+    const writes = { project: [], active: [], history: [] }, dataset = {}
+    const env = {
+      projectMode, projectEditorKey: 'project-scope', resultCandidate: null,
+      workspaceCardRef: { current: { dataset } },
+      setProjectEditorEngine: value => writes.project.push(value),
+      setActiveIntake: value => writes.active.push(value),
+      setEngineHistory: value => writes.history.push(value),
+      setResultCandidate: () => {}, setOffscreenResult: () => {},
+    }
+    r13Evaluate(callback('onShown'), env)(intake, { undoDepth: 2, redoDepth: 1 })
+    assert.deepEqual(writes.active, [intake])
+    assert.deepEqual(writes.history, [{ undoDepth: 2, redoDepth: 1 }])
+    assert.deepEqual(writes.project, projectMode ? [intake ? { scopeKey: 'project-scope', intake } : null] : [])
+    assert.equal(dataset.engineDocument, intake?.documentId)
+    r13Evaluate(callback('onHidden'), env)()
+    assert.deepEqual(writes.active, [intake, null])
+    assert.deepEqual(writes.history, [{ undoDepth: 2, redoDepth: 1 }, null])
+    assert.deepEqual(writes.project, projectMode ? [intake ? { scopeKey: 'project-scope', intake } : null, null] : [])
+  }
+}
+
+function assertCanonicalSaveCustody() {
+  const target = r13One(node => node.type === 'VariableDeclarator' && node.id.name === 'engineSaveTarget').init
+  for (const mock of [false, true]) for (const projectMode of [false, true]) for (const intake of [null, {}]) {
+    const value = r13Evaluate(target, { mock, projectMode, intake, REQUESTED_DRAWING_ID: 'standalone' })
+    if (mock || projectMode || !intake) assert.equal(value, null)
+    else { assert.equal(value.drawingId, 'standalone'); assert.equal(typeof value.save, 'function') }
+  }
+  const provider = r13One(node => node.type === 'JSXOpeningElement' && node.name.name === 'EngineSessionProvider')
+  const expression = provider.attributes.find(attr => attr.name?.name === 'saveTarget').value.expression
+  const standalone = {}, project = {}
+  for (const localCadActive of [false, true]) for (const projectMode of [false, true]) {
+    for (const projectEditorTarget of [null, project]) {
+      assert.equal(r13Evaluate(expression, { localCadActive, projectMode, projectEditorTarget,
+        engineSaveTarget: standalone }), localCadActive ? null : projectMode ? projectEditorTarget : standalone)
+    }
+  }
+  const calls = [], controller = {}, receipt = { drawing_version: {}, new_version: {} }, result = {}
+  const saved = r13One(node => node.type === 'VariableDeclarator' && node.id.name === 'onEngineSaved').init
+  const complete = r13Evaluate(saved, { workspaceController: controller,
+    seatProjectDrawingPublication: (...args) => { calls.push(['project', ...args]); return result },
+    completedVersionRef: { current: (...args) => calls.push(['standalone', ...args]) } })
+  assert.equal(complete(receipt), result)
+  assert.deepEqual(calls, [['project', controller, receipt]], 'canonical receipt never falls through to demo')
+  calls.length = 0
+  complete({ new_version: receipt.new_version })
+  assert.deepEqual(calls, [['standalone', receipt.new_version, { result: {} }]])
+  calls.length = 0
+  complete(null)
+  assert.deepEqual(calls, [])
+}
 
 it('S1-68 retained Undo refuses a different version or drawing', () => {
   let calls = 0
@@ -201,13 +365,22 @@ it('S1-68 View from another scene requests the recorded drawing and version', ()
 
 it('S1-68 redo notices bind View to the resulting drawing version', async () => {
   const target = { label: 'View' }, toasts = []
-  await r13Evaluate(r13Callback('onRedo'), {
-    redoDrawingVersion: async () => ({ head: 3 }), drawingState: { drawing_id: 'roof' },
+  const projectModeRef = { current: true }
+  let redoCalls = 0
+  const redo = r13Evaluate(r13Callback('onRedo'), {
+    projectModeRef,
+    redoDrawingVersion: async () => { redoCalls++; return { head: 3 } }, drawingState: { drawing_id: 'roof' },
     track: () => {}, showToast: notice => toasts.push(notice),
     versionViewAction: (drawingId, version) => {
       assert.equal(drawingId, 'roof'); assert.equal(version, 3); return target
     },
-  })()
+  })
+  assert.equal(await redo(), null)
+  assert.equal(redoCalls, 0)
+  assert.deepEqual(toasts, [])
+  projectModeRef.current = false
+  await redo()
+  assert.equal(redoCalls, 1)
   assert.deepEqual(toasts, [{ text: 'Advanced to version 3', action: target }])
 })
 
@@ -224,6 +397,42 @@ it('R13G2B-01 standalone ribbon and host keep their exact reference and bytes', 
     'solarReadResultStandalone.main-a021056e.json': 'e3c8dafa5a78cd21c7ef21f07e3a17dab34fb8ae852b972a6992302ae5ca3ae9',
     'solarSizingConductorStandalone.main-f139ceba.json': '16aa78d0485629b7485619fc88862693ad5d80ff9b6c8742cd23fb3143e8b6de',
   })) assert.equal(r13Hash(readFileSync(`${process.cwd()}/src/solar/__fixtures__/${name}`)), hash, name)
+})
+
+it('J10-PROJECT-MOUNT routes initial and successor publication through the canonical project host', () => {
+  const { branch } = r13ProjectHosts()
+  const findPublication = node => r13Find(n => n.type === 'JSXOpeningElement' && n.name.name === 'ProjectLayoutPublicationTools', node)
+  assert.equal(findPublication(branch.alternate).length, 0)
+  const [mount] = findPublication(branch.consequent)
+  assert.ok(mount)
+  const prop = name => mount.attributes.find(attribute => attribute.name.name === name).value.expression
+  assert.equal(r13Text(prop('projectScope')), 'projectEditorBinding')
+  assert.equal(r13Text(prop('drawingId')), 'projectEditorBinding.drawing_id')
+  assert.equal(r13Text(prop('projectId')), 'projectEditorBinding.project_id')
+  const scopeHelper = r13One(n => n.type === 'FunctionDeclaration' && n.id.name === 'projectEditorScope')
+  const projectEditorScope = r13Evaluate(scopeHelper, {})
+  const initial = { orgId: 'org', openProjectId: 'project', canonicalVersionId: null,
+    workspace: { project: { org_id: 'org', project_id: 'project' }, drawing_versions: [] } }
+  let current = initial, active = true, authoritative = true
+  const read = r13Evaluate(prop('getProjectScope'), {
+    projectEditorScope, projectModeRef: { current: true },
+    workspaceController: { getSnapshot: () => current },
+    sessionProof: { current: () => authoritative },
+    session: { controller: { getSnapshot: () => ({ status: active ? 'active' : 'required' }) } },
+  })
+  assert.deepEqual(read(), { organization_id: 'org', project_id: 'project', drawing_id: null, input_version_id: null })
+  const version = { org_id: 'org', project_id: 'project', drawing_id: 'drawing', version_id: 'version' }
+  current = { ...initial, canonicalVersionId: 'version', workspace: { ...initial.workspace, drawing_versions: [version] } }
+  assert.deepEqual(read(), { organization_id: 'org', project_id: 'project', drawing_id: 'drawing', input_version_id: 'version' })
+  current = { ...current, orgId: 'foreign' }
+  assert.equal(read(), null)
+  current = initial
+  authoritative = false
+  assert.equal(read(), null)
+  authoritative = true
+  active = false
+  assert.equal(read(), null)
+  assert.match(r13Text(prop('onProjectDrawingPublished')), /seatSolarProjectPublication\(workspaceController, receipt, captured, isCurrent\)/)
 })
 
 it('R13G2B-05 workspace props use the existing canonical owners', () => {
@@ -267,7 +476,7 @@ it('R13G2B-22 workspace stays in the existing Solar seat with one drawing owner'
   assert.ok(r13Text(overlay).includes('!projectMode'))
   const engine = r13One(n => n.type === 'VariableDeclarator' && n.id.name === 'engineViewArmed')
   assert.equal(r13Text(engine.init), 'useEngineViewArmed(projectMode)')
-  assert.ok(appSource.includes('engineViewArmed &&'))
+  assertEngineDocumentGate()
 })
 
 it('R13G-01 App owns one runtime beside the existing scope owner', () => {
@@ -679,7 +888,7 @@ describe('R13F project Solar execution and form ingresses', () => {
         }
       }
     }
-    assert.equal(r13Hash(r13Text(r13Callback('onRun'))), '688612676474cf1de98e15efd6249ec92f57c9b3ec0809aa2df56fa2fdc320b8')
+    assert.equal(r13Hash(r13Text(r13Callback('onRun'))), '09289e9426a9e9d36c84fe9d583a340e386b9bb0a420e1bde5df952bcf980bf8')
   })
 
   it('R13F-20 App retains one refusal helper and admits the project workspace', () => {
@@ -734,14 +943,15 @@ describe('R13F project Solar execution and form ingresses', () => {
     assert.equal(r13Find(refusal).length, 21)
     for (const [name, hash] of Object.entries({
       // SW save-lock labels holders for display; SCB3e suspension guards remain intact.
-      engineSaveTarget: '9aaa29714109c98e27011d8fd021efe45d3da5f4aebe9a5c3e64eb1503d32b3c',
-      onEngineSaved: 'db8ca9aaf81fb303cf41077443a8f66a0feebf74c05c1763430385b26247d4f6',
+      engineSaveTarget: '06d0e28a19d194c630cc12c67343d021614cd756aff0d3d446425845d384e84b',
+      onEngineSaved: 'cb635c9b798a35f39291384c8eb0fe5b63cc8e89e4fc1d3e406bb432b005ff3a',
       onRetryViewerRefresh: '08119f70ab2f65dd12b1c5f2d45a79529b11efb549e16fc70b27c59fdeeb31ec',
       retryUnreadableHead: '89cf46eab49e0a3bc2184456848017a3267afd2ad590682fb3308de3492698f9',
     })) {
       const declaration = r13One((node) => node.type === 'VariableDeclarator' && node.id.name === name)
       assert.equal(r13Hash(r13Text(declaration.init)), hash, name + ' remains unchanged')
     }
+    assertCanonicalSaveCustody()
     const job = r13One((node) => node.type === 'CallExpression' && node.callee.name === 'useJobController')
     assert.equal(r13Hash(r13Text(job)), '3ceaf226d1b00ac4275f446a376165f7a9d690c2f9a6478c2727f96dcc97d89e')
     for (const name of ['useProjectSolarScope', 'useCatalogController', 'useProjectCheckoutController']) {
@@ -1552,7 +1762,7 @@ describe('A1b-2 stored Solar graph wiring', () => {
     assert.ok(!body.slice(body.indexOf('return () =>')).includes('stateRef.current'))
     const build = effects.find(effect => text(effect.arguments[0], viewerSource).includes('new THREE.WebGLRenderer'))
     const buildBody = text(build.arguments[0], viewerSource)
-    assert.ok(buildBody.includes('const solarGroup = new THREE.Group(); scene.add(solarGroup)'))
+    assert.ok(buildBody.includes('const solarGroup = new THREE.Group(); root.add(solarGroup)'))
     assert.ok(buildBody.includes('const sceneState ='))
     assert.ok(buildBody.includes('solarGroup, solarLayer: null'))
     const disposeAt = buildBody.indexOf('sceneState.solarLayer?.dispose()')
@@ -1831,7 +2041,8 @@ describe('C4-1b publication shell bindings', () => {
       controller: { consumeCatalogPublication: (...args) => { calls.claim.push(args); return true } },
     }
     const author = (...args) => { calls.author.push(args) }
-    return { value, calls, extra: { onPublishAuthor: author, publishAuthoredTool: author } }
+    return { value, calls, extra: { onPublishAuthor: author, publishAuthoredTool: author,
+      conversationProjectContext: null } }
   }
   // Both bindings are pinned with no conversation yet and with one turn already sent: the panel
   // receives the history either way, and neither binding may depend on it.
@@ -1844,6 +2055,7 @@ describe('C4-1b publication shell bindings', () => {
       const publication = { sessionId: 'session-1', changeSetId: 'change-1', catalogDigest: 'digest-1' }
       assert.equal(wiring.panel.sessionId, publication.sessionId)
       assert.equal(wiring.panel.userTurns, history)
+      if (shell === 'studio') assert.equal(wiring.panel.projectContext, null)
       assert.equal(wiring.panel.consumeCatalogPublication(publication), true)
       wiring.panel.onCatalogChanged(publication)
       assert.deepEqual(o.calls.claim, [[publication]])
@@ -2165,7 +2377,7 @@ describe('project board live pane wiring', () => {
     const seats = elements('PersistentSeat')
     assert.ok(seats.some((seat) => seat.children.includes(panels[0])))
     binding(seats.find((seat) => seat.children.includes(panels[0])),
-      'destination', 'paneSeats.conversationTarget')
+      'destination', "transcriptDestination === 'dock' ? commandTranscriptHost : paneSeats.conversationTarget")
     guard('ConversePanel', 'paneSeats.conversationMounted')
     const derived = appSeats()
     assert.equal(derived.conversationTarget, 'conversation-board')
@@ -2174,6 +2386,41 @@ describe('project board live pane wiring', () => {
     assert.ok(appSource.includes("const boardHostsProject = (!!studioGround && surfaceSlots.chrome.shell === 'cockpit') || (boardVisible && surfaceSlots.ground === 'board')"))
     assert.ok(appSource.includes('if (mock || session.status !== \'active\') clearAgentSession()'))
     assert.ok(!appSource.includes('!signedIn || session.status !== \'active\') clearAgentSession()'))
+  })
+  it('opens the fallback Studio rail once per new turn and respects Close', () => {
+    const effects = []
+    csuWalk(tree, node => {
+      if (node.type === 'CallExpression' && node.callee.name === 'useEffect'
+          && source(node.arguments[0]).includes('lastTranscriptTurn.current')) effects.push(node)
+    })
+    assert.equal(effects.length, 1)
+    const calls = []
+    const scope = {
+      agentSessionId: 'session-a', latestAgentTurnId: null,
+      transcriptDestination: 'rail', lastTranscriptTurn: { current: null },
+      setBrowserPanel: panel => calls.push(panel),
+    }
+    const run = () => evaluate(effects[0].arguments[0], scope)()
+    run()
+    assert.deepEqual(calls, [])
+    scope.latestAgentTurnId = 'turn-1'
+    run()
+    assert.deepEqual(calls, ['studio'])
+    scope.setBrowserPanel('none') // user Close
+    run()
+    assert.deepEqual(calls, ['studio', 'none'])
+    scope.latestAgentTurnId = 'turn-2'
+    run()
+    assert.deepEqual(calls, ['studio', 'none', 'studio'])
+    scope.transcriptDestination = 'dock'
+    scope.latestAgentTurnId = 'turn-3'
+    run()
+    scope.transcriptDestination = 'rail'
+    run()
+    assert.deepEqual(calls, ['studio', 'none', 'studio'])
+    scope.agentSessionId = 'session-b'
+    run()
+    assert.deepEqual(calls, ['studio', 'none', 'studio', 'studio'])
   })
   it('A2-02 wires Annotations to the single App subscription and decision actions', () => {
     assert.ok(slot('annotations').includes('AnnotationPaneState annotations={annotations}'))
@@ -2401,7 +2648,14 @@ describe('project board live pane wiring', () => {
     for (const name of ['useProjectLifecycle', 'getProjectLifecycle', 'getOrgIdentities', 'onLoadIdentities']) {
       assert.ok(!appSource.includes(name), `App does not own ${name}`)
     }
-    assert.ok(appSource.includes('setProjectContext(openProjectId || null)'))
+    const contextCalls = []
+    csuWalk(tree, (node) => {
+      if (node.type === 'CallExpression' && node.callee.type === 'Identifier'
+        && node.callee.name === 'setProjectContext') contextCalls.push(node)
+    })
+    assert.equal(contextCalls.length, 1)
+    assert.deepEqual(contextCalls[0].arguments.map(source),
+      ['openProjectId || null', 'canonicalVersionId || null'])
   })
   it('BI03-19 App binds the Settings action slot and eligibility inputs', () => {
     const grounds = elements('SurfaceGrounds')[0]
@@ -3941,14 +4195,16 @@ describe('J1 Browser composition', () => {
     assert.match(live, /project:\s*workspace.project/)
     assert.match(live, /onAttached:\s*rehydrate/)
     assert.match(live, /artifacts:\s*workspace\.drawing_artifacts \|\| \[\]/)
-    assert.equal((compiled.match(/= useDrawingUploadController\(/g) || []).length, 2)
-    assert.equal((compiled.match(/= useMaterialIntake\(/g) || []).length, 1)
 
     // Execute only the mounted adapter, with the two IO controllers replaced.
     // This pins ordering and refusal without making an upload or a project write.
     const adapterNode = parseJs(appSource, { sourceType: 'module', plugins: ['jsx'] }).program.body
       .find((node) => node.type === 'FunctionDeclaration' && node.id?.name === 'LiveProjectMaterialIntake')
     assert.ok(adapterNode, 'the mounted material adapter must exist')
+    for (const name of ['useDrawingUploadController', 'useMaterialIntake']) {
+      assert.equal(r13Find(node => node.type === 'CallExpression' && node.callee.name === name, adapterNode).length, 1,
+        name + ' has one owner in the mounted material adapter')
+    }
     const adapter = esbuild.transformSync(appSource.slice(adapterNode.start, adapterNode.end), { loader: 'jsx' }).code
     const events = []
     const project = { project_id: 'project-j1', name: 'J1 roof' }
@@ -4171,7 +4427,7 @@ describe('C-04C Solar shown-document readiness', () => {
     for (const state of ['idle', 'opening', 'open', 'failed']) assert.equal(ready(null, document, 'solar', state), false)
     assert.doesNotMatch(derivation, /solarStarter|hasDrawing|session\.engineParsed/)
     assert.match(appSource, new RegExp(String.raw`productSurfaceStates\(\{[\s\S]*?\bsolarReady,\s*\}\), \[mock, signedOut, shown, health, iosShipController.phase, solarReady\]`))
-    assert.match(appSource, new RegExp(String.raw`onShown=\{\(intake, history\) => \{\s*setActiveIntake\(intake\)`))
+    assertShownDocumentCustody()
   })
 
   it('C-04C row6 shown starter requires surface, shown intake, matching document and load provenance', () => {
@@ -4466,7 +4722,7 @@ describe('W4g bleed-2b: profile presentation preserves the engine document', () 
     const engine = appSource.indexOf('<EngineDocumentView')
     assert.ok(ribbonStart >= 0 && ribbonEnd > ribbonStart)
     assert.ok(engine > ribbonEnd)
-    assert.match(appSource.slice(ribbonEnd, engine), new RegExp('\\)\\}\\s*[\\s\\S]*?\\{ENV_CAD_EDIT && studioGround && !projectMode && engineViewArmed && \\(\\s*$'))
+    assertEngineDocumentGate()
     assert.equal(appSource.split('<EngineDocumentView').length - 1, 1)
   })
   it('closes Start before requesting a profile and commits the URL with the state', () => {
@@ -4749,7 +5005,7 @@ describe('Start is a view inside the current workspace profile', () => {
   it('shows the Run and Build gloss beside the shared prompt for every visible board', () => {
     const dock = appNoComments.indexOf('<div className="bar-dock">')
     assert.notEqual(dock, -1)
-    const gloss = appNoComments.slice(dock, dock + 280)
+    const gloss = appNoComments.slice(dock, appNoComments.indexOf('</p>', dock))
     assert.match(gloss, /boardVisible &&/)
     assert.match(gloss, /START_BOARD_COPY\.gloss/)
     assert.match(gloss, /mock &&/)
@@ -4923,15 +5179,24 @@ describe('App.jsx wiring', () => {
     // The engine paints the viewer while shown; the console intake remains
     // the exact fallback when the consumer closes or unmounts.
     it('binds selection, geometry, legend, dock totals and status to the active intake', () => {
-      assert.match(stripped, /const drawingIntake = projectMode \? projectDrawing.intake : activeIntake \|\| shown/)
+      const drawing = r13One(node => node.type === 'VariableDeclarator' && node.id.name === 'drawingIntake').init
+      const engineIntake = r13One(node => node.type === 'VariableDeclarator' && node.id.name === 'projectEngineIntake').init
+      const canonical = {}, active = {}, shown = {}, edited = {}
+      for (const projectMode of [false, true]) for (const activeIntake of [null, active]) {
+        for (const projectEditorEngine of [null, { scopeKey: 'current', intake: edited }, { scopeKey: 'stale', intake: edited }]) {
+          const projectEngineIntake = r13Evaluate(engineIntake, { projectEditorEngine, projectEditorKey: 'current' })
+          assert.equal(projectEngineIntake, projectEditorEngine?.scopeKey === 'current' ? edited : null)
+          assert.equal(r13Evaluate(drawing, { projectMode, projectEngineIntake, projectDrawing: { intake: canonical }, activeIntake, shown }),
+            projectMode ? projectEngineIntake || canonical : activeIntake || shown)
+        }
+      }
       assert.match(stripped, /countEntitiesByLayer\(drawingIntake\)/)
       assert.match(stripped, /selectEntity\(drawingIntake, selectedHandle,/)
       assert.match(stripped, /drawingIntake\.polylines \|\| \[\]/)
       assert.match(stripped, /drawingExtents\(drawingIntake\.polylines\)/)
       assert.match(appNoComments, new RegExp('<Legend\\s+layers=\\{drawingIntake.layers\\}'))
       assert.match(appNoComments, new RegExp('<CockpitStatus[^>]*shown=\\{drawingIntake\\}'))
-      assert.match(appNoComments, new RegExp('onShown=\\{\\(intake, history\\) => \\{\\s*setActiveIntake\\(intake\\)'))
-      assert.match(appNoComments, new RegExp('onHidden=\\{\\(\\) => \\{\\s*setActiveIntake\\(null\\)'))
+      assertShownDocumentCustody()
       assert.match(appNoComments, /undoDepth: history.undoDepth, redoDepth: history.redoDepth/)
     })
     it('drops a result from a different document before resolving its handle', () => {
@@ -5326,7 +5591,7 @@ describe('App.jsx wiring', () => {
     const grounds = appNoComments.match(/<SurfaceGrounds\s[\s\S]*?\/>/)?.[0]
     assert.ok(grounds, 'SurfaceGrounds mount exists')
     assert.match(grounds, new RegExp('occluders=\\{STUDIO_DRAWING_OCCLUDERS\\}'))
-    assert.match(grounds, /onCreateProject=\{onCreateProject\}/)
+    assert.match(grounds, /onCreateProject=\{onCreateProjectFromDrawing\}/)
     for (const component of ['SurfaceFrame', 'SurfaceGrounds']) {
       const mount = new RegExp('<' + component + '\\s[\\s\\S]*?/>|<' + component + '\\s[\\s\\S]*?>')
       // J1 gives the ground nested JSX panel props; its first /> now closes
@@ -5696,7 +5961,7 @@ describe('S25 version Mod+Z wiring', () => {
   it('S25 App hands the key ladder the ribbon version gates and the ribbon onUndo / onRedo', () => {
     const effect = between(appNoComments, 'const shell = ' + LB, 'ladderListener(shell, ladderHandlers, markInstant)')
     for (const line of [
-      'hasVersions: !!drawingState,', 'canUndo,', 'canRedo,', 'versionBusy: !!versionBusy,',
+      'hasVersions,', 'canUndo,', 'canRedo,', 'versionBusy: !!versionBusy,',
       'previewing: !!previewing,', 'mutationsBlocked: !!drawingMutationsBlocked,',
       'onUndo: () => ' + LB + ' void onUndo() ' + RB, 'onRedo: () => ' + LB + ' void onRedo() ' + RB,
     ]) assert.ok(effect.includes(line), `the ladder effect carries ${line}`)
@@ -5746,15 +6011,15 @@ describe('KEYS-b the phone Studio drawer is an Escape owner', () => {
   })
 })
 
-// Frozen predecessor values below were measured at e9f3628b. These rows execute
-// App AST sites, and keep the generic operation owners distinct from presentation.
+// Unchanged operation pins retain the e9f3628b predecessor values. Canonical
+// custody pins below bind current source together with explicit branch checks.
 it('R13G2A-10 drawing activation preserves tool-agnostic operations', async () => {
   const hashes = {
     onUndo: 'ae7f7d8ea55310a93f4599ce6be8a70a53c52a14a46a02cbc106ad2ef64081f4',
-    onRedo: '8ead5e6dbeecad3503382bc09117b3e90f8198dade34d75c9aca5c00b1bd94c8',
+    onRedo: 'da27b4a464e6fc6a0d9fb8ffd0355ac87bab162d47906a73e3a8824ba051e8d2',
     // SW save-lock labels holders for display; SCB3e suspension guards remain intact.
-    engineSaveTarget: '9aaa29714109c98e27011d8fd021efe45d3da5f4aebe9a5c3e64eb1503d32b3c',
-    onEngineSaved: 'db8ca9aaf81fb303cf41077443a8f66a0feebf74c05c1763430385b26247d4f6',
+    engineSaveTarget: '06d0e28a19d194c630cc12c67343d021614cd756aff0d3d446425845d384e84b',
+    onEngineSaved: 'cb635c9b798a35f39291384c8eb0fe5b63cc8e89e4fc1d3e406bb432b005ff3a',
     onRetryViewerRefresh: '08119f70ab2f65dd12b1c5f2d45a79529b11efb549e16fc70b27c59fdeeb31ec',
     retryUnreadableHead: '89cf46eab49e0a3bc2184456848017a3267afd2ad590682fb3308de3492698f9',
   }
@@ -5762,6 +6027,7 @@ it('R13G2A-10 drawing activation preserves tool-agnostic operations', async () =
     const node = r13One(node => node.type === 'VariableDeclarator' && node.id.name === name)
     assert.equal(r13Hash(r13Text(node.init)), hash, name)
   }
+  assertCanonicalSaveCustody()
   const job = r13One(node => node.type === 'CallExpression' && node.callee.name === 'useJobController')
   assert.equal(r13Hash(r13Text(job)), '3ceaf226d1b00ac4275f446a376165f7a9d690c2f9a6478c2727f96dcc97d89e')
   const head = r13One(node => node.type === 'JSXElement' && node.openingElement.name.name === 'EngineHeadOpener')
@@ -5776,11 +6042,19 @@ it('R13G2A-10 drawing activation preserves tool-agnostic operations', async () =
     const attribute = r13One(node => node.type === 'JSXAttribute' && node.name.name === name, head.openingElement)
     assert.equal(r13Text(attribute.value.expression), expression, name)
   }
-  let undo = 0, redo = 0
+  let undo = 0
   const projectModeRef = { current: true }
   assert.equal(r13Evaluate(r13Callback('onUndo'), { projectModeRef, undoActionRef: { current: () => ++undo } })(), 1)
-  await r13Evaluate(r13Callback('onRedo'), { projectModeRef, redoDrawingVersion: async () => { redo++; return null } })()
-  assert.equal(redo, 1)
+  for (const projectMode of [false, true]) {
+    let redo = 0
+    projectModeRef.current = projectMode
+    const outcome = await r13Evaluate(r13Callback('onRedo'), {
+      projectModeRef, redoDrawingVersion: async () => { redo++; return null },
+    })()
+    assert.equal(redo, projectMode ? 0 : 1, 'only standalone invokes legacy redo')
+    assert.equal(outcome, projectMode ? null : undefined)
+  }
+  projectModeRef.current = true
   const calls = [], view = { intake: {} }, metadata = { canonical: true }, canonical = { outputVersionId: 'canonical' }
   const env = { projectModeRef, isScopeCurrent: () => true, mock: false,
     getDrawingIntake: async (...args) => { calls.push(['read', ...args]); return view },
@@ -5827,7 +6101,10 @@ it('R13G2A-11 standalone arms and captures retain their predecessor bytes', () =
   const title = r13One(node => node.type === 'JSXElement' && node.openingElement.attributes.some(a => a.name?.name === 'className' && a.value?.value === 'viewer-title'))
   const titleBranch = r13One(n => n.type === 'ConditionalExpression' && n.test.name === 'projectMode', title)
   const interior = fragment => appSource.slice(fragment.openingFragment.end, fragment.closingFragment.start).replace(/\r\n/g, '\n').trim()
-  assert.equal(r13Hash(interior(titleBranch.alternate)), 'd37ef2de2b3b6c413842e7fc8f117bb71a717de5571446fe23310acf3177cd9a')
+  // BSP5 intentionally replaces sample labels with the active document's facts.
+  assert.equal(r13Find(node => node.type === 'LogicalExpression' && node.operator === '||'
+    && node.left.type === 'Identifier' && node.left.name === 'activeDrawingName', titleBranch.alternate).length, 1)
+  assert.match(interior(titleBranch.alternate), /\{' · '\}\{drawingMetadata\}/)
   const wrap = r13One(node => node.type === 'JSXElement' && node.openingElement.attributes.some(a => a.name?.name === 'className' && a.value?.value === 'viewer-wrap'))
   const status = r13One(n => n.type === 'ConditionalExpression' && n.test.name === 'projectMode' && n.consequent.type === 'JSXFragment', wrap)
   // SCB3e: the loading line must require a pending load so restoring an empty pre-bridge workspace never claims to be loading forever.
@@ -5847,6 +6124,83 @@ it('R13G2A-11 standalone arms and captures retain their predecessor bytes', () =
     'solarReadResultStandalone.main-a021056e.json': 'e3c8dafa5a78cd21c7ef21f07e3a17dab34fb8ae852b972a6992302ae5ca3ae9',
     'solarSizingConductorStandalone.main-f139ceba.json': '16aa78d0485629b7485619fc88862693ad5d80ff9b6c8742cd23fb3143e8b6de',
   })) assert.equal(r13Hash(readFileSync(`${process.cwd()}/src/solar/__fixtures__/${name}`)), hash, name)
+})
+
+it('BSP3 Tool rail closes the actual Studio panel on phone and desktop', () => {
+  for (const drawerViewport of [true, false]) {
+    const calls = []
+    const env = { browserPanel: 'studio', drawerViewport, studioDrawer: 'nav', navExpanded: true,
+      setBrowserPanel: value => calls.push(['panel', value]), setNavExpanded: value => calls.push(['nav', value]),
+      openToolRail: () => calls.push(['open']) }
+    r13Evaluate(r13Callback('toggleStudioToolRail'), env)()
+    assert.deepEqual(calls, [['panel', 'none'], ['nav', false]])
+    calls.length = 0
+    r13Evaluate(r13Callback('toggleStudioToolRail'), { ...env, browserPanel: 'none' })()
+    assert.deepEqual(calls, [['open']])
+  }
+})
+
+it('BSP5 imported drawing labels and counts follow source objects', () => {
+  const init = name => r13One(node => node.type === 'VariableDeclarator' && node.id.name === name).init
+  const openerImport = r13One(node => node.type === 'ImportDeclaration'
+    && node.source.value === './cadedit/EngineHeadOpener.jsx')
+  assert.ok(openerImport.specifiers.some(node => node.type === 'ImportSpecifier'
+    && node.imported.name === 'holdsHeadDocument' && node.local.name === 'holdsHeadDocument'))
+  // Node cannot import the JSX module; mirror its pure id-shape and origin rules.
+  const holdsHeadDocument = (session, drawingId, openedDocumentId) => {
+    const id = session?.documentId
+    if (typeof id !== 'string' || !/-v\d+\.dxf$/.test(id)) return false
+    if (typeof drawingId !== 'string' || drawingId === '') return false
+    const prefix = `${drawingId}-v`
+    if (!id.startsWith(prefix) || !/^\d+\.dxf$/.test(id.slice(prefix.length))) return false
+    return session.documentOrigin === 'head'
+      || (session.documentOrigin === null && id === openedDocumentId)
+  }
+  const label = env => {
+    const scope = {
+      projectMode: false, projectDrawingName: 'project.dwg', activeIntake: null,
+      shown: { polylines: Array(2345), layers: ['Panels'] }, projectName: 'sample',
+      drawingName: null, engineDocument: null, REQUESTED_DRAWING_ID: 'demo', holdsHeadDocument,
+      drawingPropertyName: (preferred, fallback) => preferred || fallback || '', ...env,
+    }
+    scope.mountedDrawingFile = r13Evaluate(init('mountedDrawingFile'), scope)
+    scope.activeDocumentIsHead = r13Evaluate(init('activeDocumentIsHead'), scope)
+    return r13Evaluate(init('activeDrawingName'), scope)
+  }
+  assert.equal(label({ activeIntake: { documentId: 'rooftop.dxf' } }), 'rooftop.dxf')
+  assert.equal(label({}), 'sample.dwg')
+  assert.equal(label({ shown: null }), '')
+  assert.equal(label({ projectMode: true, activeIntake: { documentId: 'rooftop.dxf' } }), 'project.dwg')
+  const head = (documentId, drawingId = 'demo', drawingName = 'rooftop_demo') => ({
+    activeIntake: { documentId }, engineDocument: { documentId, documentOrigin: 'head' },
+    REQUESTED_DRAWING_ID: drawingId, drawingName,
+  })
+  const uploadId = '5ecede53-1e27-49cf-9829-841b2939e635'
+  assert.equal(label(head(`${uploadId}-v1.dxf`, uploadId, 'walk.dxf')), 'walk.dxf')
+  assert.equal(label(head('demo-v1.dxf')), 'rooftop_demo.dwg')
+  assert.equal(label(head('demo-v7.dxf')), 'rooftop_demo.dwg')
+  assert.equal(label(head('demo-v1.dxf', 'demo', null)), 'demo-v1.dxf')
+  assert.equal(label({ ...head('rooftop.dxf', 'demo', 'old_drawing'),
+    engineDocument: { documentId: 'rooftop.dxf', documentOrigin: 'import' } }), 'rooftop.dxf')
+  assert.equal(label({ ...head('demo-v1.dxf', 'demo', 'old_drawing'),
+    engineDocument: { documentId: 'demo-v1.dxf', documentOrigin: 'import' } }), 'demo-v1.dxf')
+  assert.equal(label(head('other-v1.dxf', 'demo', 'old_drawing')), 'other-v1.dxf')
+  assert.equal(label({ ...head('a-v1.dxf', 'a', 'old_drawing'),
+    engineDocument: { documentId: 'b-v1.dxf', documentOrigin: 'head' } }), 'a-v1.dxf')
+  assert.equal(label({ activeIntake: null, drawingName: 'walk.dxf' }), 'walk.dxf')
+  assert.equal(label({ ...head('demo-v1.dxf'), projectMode: true }), 'project.dwg')
+  const countsByLayer = Object.fromEntries(['Roof', 'Zones', 'Obstructions', 'Panels', 'Strings', 'Inverters', 'StringLabels', 'InverterLabels'].map(layer => [layer, 1]))
+  const summary = { entityCount: 80, countsByType: { LWPOLYLINE: 74, TEXT: 6 }, countsByLayer }
+  assert.equal(r13Evaluate(init('drawingMetadata'), { sourceDrawingSummary: summary, shown: null }), '80 entities · 8 layers')
+  const drawingIntake = { sourceSummary: summary, polylines: Array(96), layers: Object.keys(countsByLayer) }
+  const facts = r13Evaluate(init('paneDrawingFacts').arguments[0], {
+    studioGround: true, drafting: true, drawingIntake, activeDrawingName: 'rooftop.dxf',
+    projectMode: false, activeIntake: { documentId: 'rooftop.dxf' }, engineHistory: { canUndo: true },
+    visibleLayers: { Panels: false }, drawingExtents: () => null, mock: true,
+  })()
+  assert.deepEqual({ name: facts.name, entities: facts.entities, polylines: facts.polylines,
+    inserts: facts.inserts, faces: facts.faces, layers: facts.layers, layersShown: facts.layersShown, canUndo: facts.canUndo },
+  { name: 'rooftop.dxf', entities: 80, polylines: 74, inserts: 0, faces: 0, layers: 8, layersShown: 7, canUndo: true })
 })
 
 it('R13G2A-12 drawing activation retains one Viewer and the existing owners', () => {

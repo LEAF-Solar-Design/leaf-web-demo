@@ -306,14 +306,22 @@ def test_roles_file_gained_no_operator_role():
 # S35 extends only read_integration_data with bounded native action discovery.
 # PR2607 adds only private saved-portfolio proposals through the active turn.
 # Save, publish and operator authority remain separately enforced.
+# B02 adds only inspect_project_photo: tenant-tightenable, read-only, active-turn
+# catalog/JPEG inspection. Removing that entry reproduces the preceding pin
+# 6df63b574aa1130698de053541055bd550db676ad2c575a553e1caa2707b5df8;
+# every existing action and top-level policy setting remains identical.
+# BSP47 (6e3c4288) adds run_solve_tool with fresh confirmation; reviewed photo
+# assignments (8c8b32ac) add private proposals only. Removing just those two
+# entries restores the preceding 542a65ca pin; operator authority is unchanged.
 FROZEN_TENANT_POLICY_SHA256 = (
-    "6df63b574aa1130698de053541055bd550db676ad2c575a553e1caa2707b5df8")
+    "a42921368b79f06ae95ab32440c41c103355cd8509843c5a314a8b82f90d223e")
 
 FROZEN_TENANT_ACTIONS = {
     "request_confirmation": "always-confirm",
     "read_platform_state": "auto",
     "run_read_tool": "auto",
     "run_write_tool": "always-confirm",
+    "run_solve_tool": "always-confirm",
     "submit_live_solve": "confirm-once",
     "undo_drawing_version": "auto",
     "author_tool": "confirm-once",
@@ -322,6 +330,8 @@ FROZEN_TENANT_ACTIONS = {
     "customize_platform": "always-confirm",
     "propose_overlay": "auto",
     "propose_project_page": "auto",
+    "propose_project_photo_assignments": "auto",
+    "inspect_project_photo": "auto",
     "finish_project": "auto",
     "save_integration_element": "auto",
     "read_integration_data": "auto",

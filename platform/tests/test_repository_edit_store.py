@@ -102,6 +102,96 @@ def test_store_has_no_git_filesystem_route_or_provider_authority():
         assert forbidden not in source
 
 
+def test_scoped_reads_retain_receipt_order_and_conceal_foreign_tuples(authority):
+    org, project, ids = authority
+    first = _receipt(org, project, ids)
+    repository_edit_store.record_staged(first, staged_receipt_digest(first), expected_version=0,
+                                       transition_key='stage-one')
+    second_ids = dict(ids, edit=str(uuid.uuid4()), lease=str(uuid.uuid4()))
+    second = _receipt(org, project, second_ids, idempotency_key='stage-two')
+    repository_edit_store.record_staged(second, staged_receipt_digest(second), expected_version=0,
+                                       transition_key='stage-two')
+    scope = (str(org.org_id), str(org.org_id), str(project.project_id), ids['repo'])
+    # Each call opens its own database read; no in-process candidate cache.
+    reopened = repository_edit_store.get_edit(*scope, ids['edit'])
+    assert reopened['receipt_json'] == first.to_mapping()
+    assert reopened['receipt_digest'] == staged_receipt_digest(first)
+    rows = repository_edit_store.list_edits(*scope, limit=20)
+    assert [row['edit_id'] for row in rows] == [second_ids['edit'], ids['edit']]
+    assert len(repository_edit_store.list_edits(*scope, limit=1)) == 1
+    for index in range(4):
+        foreign = list(scope)
+        foreign[index] = str(uuid.uuid4())
+        assert repository_edit_store.get_edit(*foreign, ids['edit']) is None
+        assert repository_edit_store.list_edits(*foreign) == []
+    with db.connection() as conn:
+        conn.execute('UPDATE project_repository_authorities SET repo_key=%s WHERE project_id=%s',
+                     (uuid.uuid4(), project.project_id))
+    assert repository_edit_store.get_edit(*scope, ids['edit']) is None
+    assert repository_edit_store.list_edits(*scope) == []
+
+
+def test_rejection_preserves_receipt_prior_published_source_and_audit(authority):
+    org, project, ids = authority
+    receipt = _receipt(org, project, ids)
+    digest = staged_receipt_digest(receipt)
+    repository_edit_store.record_staged(receipt, digest, expected_version=0, transition_key='stage-one')
+    scope = (str(org.org_id), str(org.org_id), str(project.project_id), ids['repo'])
+    prior_ids = dict(ids, edit=str(uuid.uuid4()), lease=str(uuid.uuid4()), confirmation=str(uuid.uuid4()))
+    prior_receipt = _receipt(org, project, prior_ids, idempotency_key='prior-source')
+    repository_edit_store.record_staged(prior_receipt, staged_receipt_digest(prior_receipt),
+        expected_version=0, transition_key='prior-source')
+    repository_edit_store.await_confirmation(prior_ids['edit'], expected_version=1, transition_key='prior-wait')
+    repository_edit_store.put_confirmation(_confirmation(prior_receipt, prior_ids),
+        expected_edit_version=2, transition_key='prior-confirm')
+    repository_edit_store.consume_for_publish(prior_ids['edit'], prior_ids['confirmation'], expected_version=2,
+        transition_key='prior-publish', publish_lease_id=uuid.uuid4(), publish_lease_generation=8)
+    prior = repository_edit_store.settle_publish(prior_ids['edit'], private_ref_commit='2' * 40,
+        main_commit='2' * 40, main_tree='3' * 40, expected_version=3, transition_key='prior-settle')
+    waiting = repository_edit_store.await_confirmation(ids['edit'], expected_version=1, transition_key='wait')
+    for kwargs in (dict(receipt_digest='0' * 64, expected_version=2),
+                   dict(receipt_digest=digest, expected_version=1)):
+        with pytest.raises(repository_edit_store.RepositoryEditStoreError):
+            repository_edit_store.reject_edit(*scope, ids['edit'], transition_key='reject', **kwargs)
+    rejected = repository_edit_store.reject_edit(*scope, ids['edit'], receipt_digest=digest,
+        expected_version=waiting['version'], transition_key='reject')
+    assert rejected['state'] == 'rejected' and rejected['version'] == 3
+    for key in ('receipt_json', 'receipt_digest', 'staged_head_commit', 'staged_tree', 'base_commit'):
+        assert rejected[key] == waiting[key]
+    assert rejected['confirmation_id'] is None and rejected['observed_main_commit'] is None
+    assert repository_edit_store.get_edit(*scope, prior_ids['edit']) == prior
+    with pytest.raises(repository_edit_store.RepositoryEditStoreError):
+        repository_edit_store.reject_edit(*scope, ids['edit'], receipt_digest=digest,
+            expected_version=3, transition_key='reject-again')
+    with db.cursor() as cur:
+        cur.execute('SELECT prior_state,next_state FROM project_repository_edit_audit_events '
+                    'WHERE edit_id=%s ORDER BY event_id', (ids['edit'],))
+        assert [(row['prior_state'], row['next_state']) for row in cur.fetchall()] == [
+            ('created', 'staged'), ('staged', 'awaiting_confirmation'), ('awaiting_confirmation', 'rejected')]
+
+
+def test_reject_cannot_change_consumed_or_published_candidate(authority):
+    org, project, ids = authority
+    receipt = _receipt(org, project, ids)
+    digest = staged_receipt_digest(receipt)
+    repository_edit_store.record_staged(receipt, digest, expected_version=0, transition_key='stage-one')
+    repository_edit_store.await_confirmation(ids['edit'], expected_version=1, transition_key='wait')
+    repository_edit_store.put_confirmation(_confirmation(receipt, ids), expected_edit_version=2,
+                                           transition_key='confirm')
+    repository_edit_store.consume_for_publish(ids['edit'], ids['confirmation'], expected_version=2,
+        transition_key='publish', publish_lease_id=uuid.uuid4(), publish_lease_generation=8)
+    scope = (str(org.org_id), str(org.org_id), str(project.project_id), ids['repo'])
+    with pytest.raises(repository_edit_store.RepositoryEditStoreError):
+        repository_edit_store.reject_edit(*scope, ids['edit'], receipt_digest=digest,
+            expected_version=3, transition_key='reject')
+    settled = repository_edit_store.settle_publish(ids['edit'], private_ref_commit='2' * 40,
+        main_commit='2' * 40, main_tree='3' * 40, expected_version=3, transition_key='settle')
+    with pytest.raises(repository_edit_store.RepositoryEditStoreError):
+        repository_edit_store.reject_edit(*scope, ids['edit'], receipt_digest=digest,
+            expected_version=settled['version'], transition_key='reject')
+    assert repository_edit_store.get_edit(*scope, ids['edit']) == settled
+
+
 @pytest.fixture
 def authority(make_org):
     ids = _ids()

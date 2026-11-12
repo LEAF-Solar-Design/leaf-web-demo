@@ -98,6 +98,9 @@ def canonical_request_id(value: Optional[str]) -> str:
 
 
 def payload_digest(value: Dict[str, Any]) -> str:
+    if "project_context" in value:
+        import project_execution_context
+        value = {**value, "project_context": project_execution_context.validate_request(value["project_context"])}
     raw = json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
         allow_nan=False,
@@ -151,9 +154,13 @@ def validate_recoverable_payload(value: Dict[str, Any]) -> Dict[str, Any]:
     """Clone a bounded queue payload only after secret-shape refusal."""
     if contains_credential_material(value):
         raise CredentialMaterial("queue payload contains credential material")
-    return _json_object(
+    result = _json_object(
         value, maximum=_MAX_RECOVERABLE_BYTES, label="recoverable payload",
     )
+    if "project_execution_context" in result:
+        import project_execution_context
+        result[project_execution_context.KEY] = project_execution_context.validate_binding(result[project_execution_context.KEY])
+    return result
 
 
 def _canonical_project_scope(

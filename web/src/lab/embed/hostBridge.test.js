@@ -1,4 +1,21 @@
 import { createHash, webcrypto } from 'node:crypto'
+import { serviceSession } from '../../lib/serviceAuthSession.js'
+
+it('hashes the exact server-verified service subject and refuses a selector without proof', async () => {
+  const service = serviceSession()
+  const selector = '11111111-1111-4111-8111-111111111111'
+  const subject = 'verified-machine@clients'
+  try {
+    service.select(selector)
+    await expect(sessionPrincipalProof({ cryptoImpl: webcrypto })).rejects.toThrow('subject is unavailable')
+    await service.probe({ origin: window.location.origin, fetchImpl: async () => ({ ok: true, json: async () => ({
+      authenticated: true, binding_id: selector, expires_at: new Date(Date.now() + 60000).toISOString(),
+      identity: { subject, sub: subject, iss: 'issuer', org_id: null, tenant_id: 'tenant', principal_type: 'service_admin' },
+    }) }) })
+    expect(await sessionPrincipalProof({ cryptoImpl: webcrypto })).toBe(createHash('sha256').update(subject).digest('hex'))
+    await expect(sessionPrincipalProof({ storage: { getItem: () => null }, cryptoImpl: webcrypto })).rejects.toThrow('subject is unavailable')
+  } finally { service.human() }
+})
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { canonicalJSON, createContract } from '../contract.js'
 import embedSchema from '../contract/lab-embed.v1.schema.json'

@@ -1,0 +1,124 @@
+{
+  "schema": "leaf.lab-placement-cases.v1",
+  "cases": [
+    {
+      "name": "browser-count",
+      "manifest": { "id": "count", "kind": "builtin", "effect": "pure", "residency": "tenant" },
+      "trusted_ids": [], "expect": "browser"
+    },
+    {
+      "name": "trusted-count",
+      "manifest": { "id": "count", "kind": "builtin", "effect": "pure", "residency": "tenant" },
+      "trusted_ids": ["count"], "expect": "here"
+    },
+    { "name": "adjust-none", "manifest_ref": "adjust-none@1.0.0", "trusted_ids": null, "expect": "bot" },
+    { "name": "custom-strategy", "manifest_ref": "custom-strategy@1.0.0", "trusted_ids": null, "expect": "bot" },
+    {
+      "name": "settings-digest",
+      "manifest": {
+        "schema_version": 1, "id": "kashbot2-config", "title": "Settings", "profile": "lab-registry",
+        "version": { "semver": "1.0.0", "code_sha256": "1111111111111111111111111111111111111111111111111111111111111111" },
+        "kind": "settings", "effect": "pure", "residency": "tenant", "execution_target": "runner",
+        "inputs": {
+          "value": { "mode": "scalar", "schema": { "type": "number" }, "unit": "none", "nullable": false, "required": false, "has_default": false }
+        },
+        "outputs": {
+          "config-hash": { "mode": "scalar", "schema": { "type": "string", "minLength": 64, "maxLength": 64 }, "unit": "none", "nullable": false, "required": false, "has_default": false }
+        },
+        "settings_schema": { "type": "object", "additionalProperties": false, "required": ["k_min"], "properties": { "k_min": { "type": "integer" } } },
+        "ui_schema": {}, "sample_input": {},
+        "sample_output": { "config-hash": "0000000000000000000000000000000000000000000000000000000000000000" },
+        "latency_budget_us": { "profile": "legacy-us-to-std4-ns-ms-v1", "p50": 10, "p99": 100 },
+        "lane": "lifecycle", "permissions": [], "state": "stateless", "tests": ["sample"]
+      },
+      "trusted_ids": [], "expect": "here"
+    },
+    {
+      "name": "trusted-settings-digest",
+      "manifest": { "id": "kashbot2-config", "kind": "settings", "effect": "pure" },
+      "trusted_ids": ["kashbot2-config"], "expect": "here"
+    },
+    {
+      "name": "trusted-config-builtin",
+      "manifest": { "id": "kashbot2-config", "kind": "builtin", "effect": "pure" },
+      "trusted_ids": ["kashbot2-config"], "expect": "bot"
+    },
+    {
+      "name": "untrusted-config-builtin",
+      "manifest": { "id": "kashbot2-config", "kind": "builtin", "effect": "pure" },
+      "trusted_ids": [], "expect": "server"
+    },
+    {
+      "name": "config-read-is-not-a-digest",
+      "manifest": { "id": "kashbot2-config", "kind": "settings", "effect": "read" },
+      "trusted_ids": ["kashbot2-config"], "expect": "bot"
+    },
+    {
+      "name": "host-intent",
+      "manifest": { "id": "host-intent", "kind": "settings", "effect": "pure", "residency": "tenant" },
+      "trusted_ids": ["host-intent"], "expect": "host"
+    },
+    {
+      "name": "host-source",
+      "manifest": { "id": "host-source", "kind": "settings", "effect": "read", "residency": "tenant" },
+      "trusted_ids": [], "expect": "host"
+    },
+    {
+      "name": "studio-jobs",
+      "manifest": { "id": "studio-jobs", "kind": "settings", "effect": "read" },
+      "trusted_ids": [], "expect": "host"
+    },
+    {
+      "name": "studio-capabilities",
+      "manifest": { "id": "studio-capabilities", "kind": "settings", "effect": "read" },
+      "trusted_ids": [], "expect": "host"
+    },
+    {
+      "name": "host-residency-before-operator",
+      "manifest": { "id": "count", "kind": "builtin", "effect": "pure", "residency": "host" },
+      "trusted_ids": ["count"], "expect": "host"
+    },
+    {
+      "name": "host-residency-before-digest",
+      "manifest": { "id": "kashbot2-config", "kind": "settings", "effect": "pure", "residency": "host" },
+      "trusted_ids": [], "expect": "host"
+    },
+    {
+      "name": "effect-before-operator",
+      "manifest": { "id": "count", "kind": "builtin", "effect": "write" },
+      "trusted_ids": ["count"], "expect": "bot"
+    },
+    {
+      "name": "untrusted-unknown",
+      "manifest": { "id": "not-an-operator", "kind": "builtin", "effect": "pure" },
+      "trusted_ids": [], "expect": "server"
+    },
+    {
+      "name": "projected-tool",
+      "manifest": {
+        "schema_version": 1, "id": "qa-read-tool", "title": "qa-read-tool", "profile": "lab-registry",
+        "version": { "semver": "1.2.3", "code_sha256": "6ba99f2d13e23769ee08b10779d4a9cea973f519e601b6ab7ead8f250663fcb7" },
+        "kind": "builtin", "inputs": {},
+        "outputs": {
+          "result": { "mode": "scalar", "schema": { "type": "number" }, "unit": "none", "nullable": false, "required": false, "has_default": false }
+        },
+        "settings_schema": {
+          "type": "object", "additionalProperties": false, "required": ["drawing"],
+          "properties": { "drawing": {
+            "type": "object", "additionalProperties": false, "required": ["project_id", "drawing_id", "dwg_version"],
+            "properties": {
+              "project_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+              "drawing_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+              "dwg_version": { "type": "integer", "minimum": 1 }
+            }
+          } }
+        },
+        "ui_schema": {}, "sample_input": {}, "sample_output": { "result": 0 },
+        "latency_budget_us": { "profile": "legacy-us-to-std4-ns-ms-v1", "p50": 10000000, "p99": 600000000 },
+        "lane": "processing", "effect": "read", "execution_target": "runner", "residency": "tenant",
+        "permissions": [], "state": "stateless", "tests": ["lab-tool-node-admission"]
+      },
+      "trusted_ids": [], "expect": "server"
+    }
+  ]
+}

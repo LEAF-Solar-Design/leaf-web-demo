@@ -110,7 +110,8 @@ function receiptPass(slice, value) {
   const kinds = { 'SEL-008': 'smoke-proof', 'SEL-107': 'host-embed-proof',
     'SEL-112': 'practice-release-walk', 'SEL-221': 'money-walk-proof' };
   return Object.hasOwn(kinds, slice) && value.kind === kinds[slice] && value.pass === true
-    && (slice !== 'SEL-221' || value.checker_exit === 0);
+    && (slice !== 'SEL-221' || (value.checker_exit === 0
+      && (!Object.hasOwn(value, 'contract') || value.contract === 'kashbot2-v1')));
 }
 
 const bindings = [
@@ -187,8 +188,11 @@ async function verify(options, io = disk) {
   check('manifest.ids', entries.every(entry => object(entry) && text(entry.id))
     && new Set(entries.map(entry => entry?.id)).size === entries.length);
   check('manifest.privacy', !Object.values(privacy).some(pattern => pattern.test(strings(manifest))));
-  for (const [name, slice, pattern] of bindings) check(`binding.${name}`,
-    entries.some(entry => object(entry) && entry.slice === slice && typeof entry.identity === 'string' && pattern.test(entry.identity)));
+  const bindingChecks = bindings.map(([name, slice, pattern]) => ({ code: `binding.${name}`,
+    ok: entries.some(entry => object(entry) && entry.slice === slice
+      && typeof entry.identity === 'string' && pattern.test(entry.identity)) }));
+  checks.push(...bindingChecks);
+  let kashbot2 = false;
   for (let index = 0; index < entries.length; index++) {
     const entry = entries[index];
     const code = `receipt.${index}`;
@@ -206,15 +210,26 @@ async function verify(options, io = disk) {
     if (!inside || inside.startsWith('..') || win32.isAbsolute(inside)) continue;
     const readback = await read(path, code, true);
     if (!readback) continue;
-    check(`${code}.hash`, hash(readback.bytes) === entry.receipt_sha256);
+    const hashMatched = hash(readback.bytes) === entry.receipt_sha256;
+    check(`${code}.hash`, hashMatched);
     const value = json(readback, code);
-    check(`${code}.pass`, receiptPass(entry.slice, value));
+    const passed = receiptPass(entry.slice, value);
+    check(`${code}.pass`, passed);
+    if (entry.slice === 'SEL-221' && hashMatched && passed && value.contract === 'kashbot2-v1') kashbot2 = true;
     check(`${code}.privacy`, !Object.values(privacy).some(pattern => pattern.test(strings(value))));
+  }
+  const outOfStage = [];
+  for (const binding of bindingChecks) {
+    if (kashbot2 && ['binding.rust-activation', 'binding.restart', 'binding.keeper'].includes(binding.code)) {
+      Object.assign(binding, { ok: false, out_of_stage: true, contract: 'kashbot2-v1' });
+      outOfStage.push(binding.code);
+    } else if (!binding.ok) failed = true;
   }
   const doc = await read(options.doc, 'doc');
   docChecks(doc?.source, entries.filter(object), check);
   const verdict = failed ? 'fail' : missing ? (options.required ? 'missing' : 'pending') : 'pass';
-  return { output: { schema: 'leaf.lab-program-verdict.v1', verdict, checks },
+  return { output: { schema: 'leaf.lab-program-verdict.v1', verdict, checks,
+    ...(outOfStage.length ? { out_of_stage: outOfStage } : {}) },
     exit: failed ? 1 : missing && options.required ? 3 : 0 };
 }
 
@@ -307,6 +322,50 @@ async function selfTest() {
     outcomes.push(result.exit === exit && result.output.checks.some(check => check.code === code && !check.ok));
   };
   outcomes.push((await run()).output.verdict === 'pass');
+  const oldRunnerCodes = ['binding.rust-activation', 'binding.restart', 'binding.keeper'];
+  const v1 = await run();
+  outcomes.push(v1.exit === 0 && v1.output.verdict === 'pass'
+    && !Object.hasOwn(v1.output, 'out_of_stage')
+    && oldRunnerCodes.every(code => v1.output.checks.some(check => check.code === code && check.ok === true)));
+  const expectedCodes = ['manifest.fields', 'manifest.coverage', 'manifest.ids', 'manifest.privacy',
+    ...bindings.map(([name]) => `binding.${name}`),
+    ...slices.flatMap((slice, index) => ['metadata', 'containment', 'hash', 'pass', 'privacy']
+      .map(name => `receipt.${index}.${name}`)),
+    'doc.readable', ...Object.keys(privacy).map(rule => `doc.privacy.${rule}`), 'doc.naming',
+    ...headings.map((heading, index) => `doc.heading.${index}`),
+    'doc.gates', 'doc.migration', 'doc.paging', 'doc.worker', 'doc.receipts.table',
+    'doc.receipts.agreement', 'doc.glossary'];
+  outcomes.push(JSON.stringify(v1.output.checks.map(check => check.code)) === JSON.stringify(expectedCodes));
+  const setContract = (data, contract) => {
+    data.values[5].contract = contract;
+    const entry = data.manifest.capabilities[5];
+    const previous = entry.receipt_sha256;
+    entry.receipt_sha256 = hash(Buffer.from(JSON.stringify(data.values[5])));
+    data.doc = data.doc.replace(previous, entry.receipt_sha256);
+    entry.identity = 'Test trade on Kashbot v2 from the Studio button';
+  };
+  const v2 = await run(data => { setContract(data, 'kashbot2-v1'); });
+  outcomes.push(v2.output.verdict === 'pass' && v2.exit === 0
+    && JSON.stringify(v2.output.out_of_stage) === JSON.stringify(oldRunnerCodes)
+    && oldRunnerCodes.every(code => v2.output.checks.some(check => check.code === code
+      && check.ok === false && check.out_of_stage === true && check.contract === 'kashbot2-v1'))
+    && v2.output.checks.filter(check => !check.ok).length === 3);
+  await expect('binding.test-trade', data => {
+    setContract(data, 'kashbot2-v1');
+    data.manifest.capabilities[5].identity = 'Kashbot v2 from the Studio button';
+  });
+  for (const contract of ['v1', null, 7, '']) {
+    outcomes.push(!receiptPass('SEL-221', { ...fixture().values[5], contract }));
+    await expect('receipt.5.pass', data => { setContract(data, contract); });
+  }
+  const mismatched = await run(data => {
+    setContract(data, 'kashbot2-v1');
+    data.values[5].extra = true;
+  });
+  outcomes.push(mismatched.exit === 1 && !Object.hasOwn(mismatched.output, 'out_of_stage')
+    && mismatched.output.checks.some(check => check.code === 'receipt.5.hash' && !check.ok)
+    && oldRunnerCodes.every(code => mismatched.output.checks.some(check => check.code === code
+      && check.ok === false && !Object.hasOwn(check, 'out_of_stage'))));
   for (let index = 0; index < slices.length; index++) {
     const path = `/virtual/receipts/${slices[index]}.json`;
     const code = `receipt.${index}`;

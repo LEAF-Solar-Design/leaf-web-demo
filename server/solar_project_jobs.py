@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sys
 import threading
 import time
@@ -67,8 +68,12 @@ def _validate_new_project_graph_params(context, tool_name, params, *, checkout,
 def submit_project_graph_job(
     tenant, project_id, drawing_id, input_version_id, tool_name, params, *,
     tool_manifest_sha256, checkout_capability, idempotency_key, preview=False, solve_context=None,
-    proposal_job_id=None,
+    proposal_job_id=None, expected_intake_sha256=None,
 ):
+    if expected_intake_sha256 is not None and (
+            type(expected_intake_sha256) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", expected_intake_sha256) is None):
+        project.refuse("INVALID_BINDING")
     if is_demo_context(tenant):
         reason = demo_run_verdict(tenant, tool_name, params)
         if reason:
@@ -88,6 +93,10 @@ def submit_project_graph_job(
     if existing is not None:
         if existing.get("deleted_at") is not None:
             project.refuse("CONTEXT_NOT_FOUND")
+        if expected_intake_sha256 is not None and (
+                existing.get("execution_context", {}).get("parent_intake_sha256")
+                != expected_intake_sha256):
+            raise project.ProjectContextError("SIP_R4_IDEMPOTENCY_CONFLICT")
         normalized = graph._parameters(SimpleNamespace(drawing_id=drawing_id), params)
         if tool_name == solve.TOOL_NAME:
             try:
@@ -113,6 +122,9 @@ def submit_project_graph_job(
         return jobs._graph_replay(existing, fingerprint)
     admission = project.verify_at_admission(tenant, project_id, drawing_id, input_version_id,
                                            checkout_capability=checkout_capability)
+    if (expected_intake_sha256 is not None
+            and admission.context.intake_sha256 != expected_intake_sha256):
+        project.refuse("INTAKE_DIGEST_MISMATCH")
     graph._tool(tool_name, tool_manifest_sha256)
     context = graph.resolve_project_graph_context(admission.context)
     normalized = graph._parameters(context, params)

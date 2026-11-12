@@ -4,6 +4,7 @@ import { setLabSurfaceStatus } from '../site/productSurfaces.js'
 import { authConfigured, isAuthRedirectCallback, isSignedIn, subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
 import { consoleKnownGuest } from '../controllers/session/consoleGate.js'
 import { subscribeUnauthorized } from '../api.js'
+import { authorityKey } from '../lib/serviceAuthSession.js'
 
 let status = null
 let started = false
@@ -12,7 +13,7 @@ let liveUsers = 0
 let unsubscribeAuthority = null
 let authority
 const readAuthority = () => {
-  try { return localStorage.getItem('leaf.jwt') } catch { return null }
+  return authorityKey()
 }
 const listeners = new Set()
 const subscribe = (listener) => {
@@ -37,8 +38,9 @@ function probeStatus() {
     return
   }
   const probe = generation
+  const proofAuthority = readAuthority()
   fetchLabStatus().then((next) => {
-    if (probe === generation) publish(next)
+    if (probe === generation && proofAuthority === readAuthority()) publish(next)
   })
 }
 

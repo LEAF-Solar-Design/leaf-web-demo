@@ -5,6 +5,8 @@ import graphSchema from '../contract/lab-graph.v1.schema.json';
 import embedSchema from '../contract/lab-embed.v1.schema.json';
 import manifestSchema from '../contract/leaf-block-manifest.v1.schema.json';
 import { MAX_ROWS, STREAM_ADAPTERS, hasOperator, runOperator } from './ops.js';
+import { placement, SETTINGS_DIGEST_ID } from './placement.js';
+import { sha256Hex } from './sha256.js';
 
 export const contract = createContract({
   'lab-block.v1.schema.json': blockSchema,
@@ -125,13 +127,16 @@ export function evaluateGraph(graph, registry, { sources = {}, now = clock } = {
       if (!own(inputs, port) && pin.has_default) inputs[port] = runtimeValue(pin.default, { mode: pin.mode });
     }
     const metadata = inherited(Object.values(inputs));
+    const target = placement(manifest);
     let result;
     if (manifest.effect === 'read' && ['studio-jobs', 'studio-capabilities', 'host-source'].includes(manifest.id)) {
       const supplied = own(sources, id) ? requireValue(sources[id]) : null;
       result = supplied ? runtimeValue(supplied.data, { ...supplied, ...inherited([...Object.values(inputs), supplied]), host_tainted: true })
         : runtimeValue(null, { ...metadata, host_tainted: true, error: { code: 'source-unavailable' } });
+    } else if (target === 'here' && manifest.id === SETTINGS_DIGEST_ID) {
+      result = runtimeValue(sha256Hex(canonicalJSON(block.settings)), { ...metadata, mode: 'scalar' });
     } else if (manifest.effect !== 'pure' || manifest.kind !== 'builtin' || !hasOperator(manifest.id)) {
-      result = runtimeValue(null, { ...metadata, error: { code: 'browser-execution-refused' } });
+      result = runtimeValue(null, { ...metadata, error: { code: target === 'bot' ? 'runs_on_bot' : 'browser-execution-refused' } });
     } else {
       const outputMode = Object.values(manifest.outputs)[0].mode;
       result = evaluateOperation(manifest.id, inputs, block.settings, { outputMode });

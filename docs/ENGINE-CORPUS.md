@@ -187,6 +187,16 @@ The table below is the tracked set in run order. The ratchet rejects any new
 `web/e2e/fixtures` or `web/public` that is absent from `TRACKED_DRAWINGS`.
 Adding a drawing requires adding its export proof.
 
+The current tracked set has nine drawings. The BSP6 shared rooftop fixture
+`vendor/acadrust-worker/fixtures/bsp6-rooftop.dxf` adds 13,936 bytes,
+74 polylines, 6 text entities, 80 real handles and 4 BLOCKS records. Its
+source SHA256 is `27a1a309ca8c55580770bba1925a6624ef9e963106412a9b3db9db9e12eeda62`.
+The identity receipt requires all counts, handles, geometry, layers and block
+records to survive with the source unchanged. The independent BSP6 saved and
+reopened DXF audit separately proves 80 entities in inches with zero errors
+or repairs after the intended panel move. The dated eight-drawing measurements
+below describe their original runs; they do not claim coverage of this addition.
+
 Build from `vendor/acadrust-worker` with the same RUSTFLAGS as the spike:
 
 ```powershell
@@ -203,7 +213,7 @@ python engine/export_fidelity.py --adapter=acadrust
 python engine/export_fidelity.py
 ```
 
-Require the compiled build for the eight-drawing test gate from `server/`:
+Require the compiled build for the nine-drawing test gate from `server/`:
 
 ```powershell
 $env:LEAF_REQUIRE_REAL_ENGINE = '1'

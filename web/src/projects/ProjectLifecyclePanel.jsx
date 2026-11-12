@@ -17,7 +17,7 @@
  * is `ENV_LIFECYCLE_UI && ...` at the ToolCast call site, which is what keeps
  * this whole subtree out of a flag-off bundle (see flag.js, bundleFence.test.js).
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import CloneDialog from './CloneDialog.jsx'
 import DangerZone from './DangerZone.jsx'
@@ -34,6 +34,50 @@ import useProjectLifecycle from './useProjectLifecycle.js'
 function exportFilename(name) {
   const slug = String(name || 'project').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
   return `${slug || 'project'}-export.json`
+}
+
+// Rename keeps the project and everything in it; only the name changes. The
+// result line is the server's answer for THIS project, never a carried-over one.
+function RenameProject({ projectId, name, onRename }) {
+  const [draft, setDraft] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState(null)
+  const current = useRef(projectId)
+  current.current = projectId
+  useEffect(() => { setDraft(''); setBusy(false); setMessage(null) }, [projectId])
+  const proposed = draft.trim()
+  const submit = async (event) => {
+    event.preventDefault()
+    if (!proposed || busy) return
+    const startedFor = projectId
+    setBusy(true)
+    setMessage(null)
+    try {
+      const result = await onRename(proposed)
+      if (current.current !== startedFor) return
+      setMessage({ ok: true, text: `Renamed to ${result?.name ?? proposed}.` })
+      setDraft('')
+    } catch (error) {
+      if (current.current !== startedFor) return
+      setMessage({ ok: false, text: error?.message || 'The project was not renamed.' })
+    } finally {
+      if (current.current === startedFor) setBusy(false)
+    }
+  }
+  return (
+    <form className="project-lifecycle-rename" aria-label="Rename project" onSubmit={submit}>
+      <p>Current name: <span data-testid="project-current-name">{name}</span></p>
+      <label>
+        New project name
+        <input type="text" value={draft} maxLength={200} disabled={busy}
+          onChange={(event) => setDraft(event.target.value)} />
+      </label>
+      <button type="submit" disabled={busy || !proposed || proposed === name}>
+        {busy ? 'Renaming…' : 'Rename project'}
+      </button>
+      {message && <p role={message.ok ? 'status' : 'alert'}>{message.text}</p>}
+    </form>
+  )
 }
 
 export default function ProjectLifecyclePanel({
@@ -164,6 +208,11 @@ export default function ProjectLifecyclePanel({
               <OrgInvitations key={lifecycle.project?.org_id} orgId={lifecycle.project?.org_id} />
             )}
           </div>
+
+          {lifecycle.authority?.can_manage && (
+            <RenameProject projectId={projectId} name={name}
+              onRename={async (proposed) => remember(await actions.rename(proposed))} />
+          )}
 
           <div className="project-lifecycle-tools">
             <button type="button" className="chip-act" onClick={() => setOpenTool('clone')}>Clone project</button>

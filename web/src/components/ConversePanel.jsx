@@ -8,7 +8,7 @@
 // Approve = §7 split turn: record the approval, then post the confirm message
 // that starts the resume turn — the deterministic dispatch happens server-side.
 
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import {
   openStream,
   postMessage,
@@ -46,6 +46,8 @@ import { composerDraftAccountScope } from '../lib/composerDraft.js'
 import { readActiveScope, subscribeActiveScope } from '../auth/activeScope.js'
 import { subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
 import { deliverProjectPageProposal } from '../site/projectPageProposalDelivery.js'
+import { getStoredOrgId } from '../api.js'
+import { getStoredActorBindingId } from '../projects/api.js'
 
 // Calm inline parameter summary — the same rendering RoutePanel gives a
 // route's params ("layer roofline · n 4"). Always the SERVER-truth dict.
@@ -255,6 +257,7 @@ function notifyCatalogPublication(env, openedSession, active, sessionRef, callba
 
 export default function ConversePanel({
   sessionId,
+  projectContext = null,
   userTurns = [],            // [{turnId, text}] — turns App dispatched into this session
   onDismiss,                 // hide the panel (the server-side turn is never cancelled)
   onLinkClaude,              // grant_required CTA -> open the Claude account panel
@@ -265,6 +268,8 @@ export default function ConversePanel({
   // approval is held with the one-head sentence.
   engineDirty = false,
   onBeforeWriteApproval = null,
+  prepareApprovedProjectRun = null,
+  canonicalProjectWriteTools = null,
   onCatalogChanged = null,
   consumeCatalogPublication = null,
 }) {
@@ -314,13 +319,36 @@ export default function ConversePanel({
   const writeLockedRef = useRef(writeLocked)
   const engineDirtyRef = useRef(engineDirty)
   const onBeforeWriteApprovalRef = useRef(onBeforeWriteApproval)
+  const prepareApprovedProjectRunRef = useRef(prepareApprovedProjectRun)
+  const projectContextRef = useRef(projectContext)
+  const approvalScopeRef = useRef({ sessionId, projectContext, revision: 0 })
+  if (approvalScopeRef.current.sessionId !== sessionId
+    || approvalScopeRef.current.projectContext?.project_id !== projectContext?.project_id
+    || approvalScopeRef.current.projectContext?.input_version_id !== projectContext?.input_version_id) {
+    approvalScopeRef.current = { sessionId, projectContext, revision: approvalScopeRef.current.revision + 1 }
+  }
   const sessionIdRef = useRef(sessionId)
+  const authoredViewTurns = useRef(new Map())
+  const authoredViewReceipts = useRef(new WeakSet())
+  // App-dispatched prompts carry ephemeral POST receipts too. Bind each once
+  // to the project lifetime that received it; old receipts cannot be rebound.
+  for (const receipt of userTurns) {
+    if (!receipt || typeof receipt !== 'object' || authoredViewReceipts.current.has(receipt)) continue
+    authoredViewReceipts.current.add(receipt)
+    if (!sessionId || !projectContext?.project_id) continue
+    const key = receipt.status === 'started' ? receipt.turnId
+      : receipt.status === 'queued' && receipt.requestId ? `queue:${receipt.requestId}` : null
+    if (key) authoredViewTurns.current.set(key, approvalScopeRef.current)
+    if (authoredViewTurns.current.size > 32) authoredViewTurns.current.delete(authoredViewTurns.current.keys().next().value)
+  }
   const onCatalogChangedRef = useRef(onCatalogChanged)
   const consumeCatalogPublicationRef = useRef(consumeCatalogPublication)
   const refreshApprovalsRef = useRef(null)
   writeLockedRef.current = writeLocked
   engineDirtyRef.current = engineDirty
   onBeforeWriteApprovalRef.current = onBeforeWriteApproval
+  prepareApprovedProjectRunRef.current = prepareApprovedProjectRun
+  projectContextRef.current = projectContext
   sessionIdRef.current = sessionId
   onCatalogChangedRef.current = onCatalogChanged
   consumeCatalogPublicationRef.current = consumeCatalogPublication
@@ -330,6 +358,11 @@ export default function ConversePanel({
   }
   const attachmentUrlsRef = useRef(new Set())
   const logRef = useRef(null)
+  const [logEl, setLogEl] = useState(null)
+  const attachLog = useCallback((el) => {
+    logRef.current = el
+    setLogEl(el)
+  }, [])
   const jobSeenRef = useRef(new Set())
   const queueStateRef = useRef(createQueuedTurnState())
   const setQueueState = (next) => {
@@ -366,10 +399,14 @@ export default function ConversePanel({
     let active = true
     const accountScope = composerDraftAccountScope()
     const activeScope = readActiveScope()
+    let photoIdentity = null
+    let photoTurn = null
+    let photoScopeLive = true
     let proposalScopeLive = true
     const invalidateProposals = () => { proposalScopeLive = false }
     const checkProposalScope = () => {
       if (composerDraftAccountScope() !== accountScope || readActiveScope() !== activeScope) invalidateProposals()
+      if (photoIdentity && (getStoredOrgId() !== photoIdentity.orgId || getStoredActorBindingId() !== photoIdentity.actorBindingId)) photoScopeLive = false
     }
     const logoutProposals = subscribeBeforeLogout(invalidateProposals)
     const tokenProposals = subscribeTokenStored(checkProposalScope)
@@ -379,16 +416,65 @@ export default function ConversePanel({
       && composerDraftAccountScope() === accountScope && readActiveScope() === activeScope
     const notifyPageProposal = env => {
       try {
+        if (env?.type === 'turn_started' && env.session_id === sessionId) {
+          // A new turn invalidates prior photo reviews, including repeated ids.
+          photoTurn = { id: env.turn_id, seq: env.seq }
+          const queueKey = `queue:${env.data?.queued_id}`
+          const lifetime = authoredViewTurns.current.get(queueKey)
+          if (lifetime === approvalScopeRef.current) {
+            authoredViewTurns.current.set(env.turn_id, lifetime)
+            authoredViewTurns.current.delete(queueKey)
+          }
+        }
+        const photo = env?.data?.tool === 'propose_project_photo_assignments'
+        const view = env?.data?.tool === 'run_capability' && env?.data?.result?.contract === 'leaf.authored-view.v1'
         if (!currentProposalScope() || env?.session_id !== sessionId || env.type !== 'tool_result'
-          || !env.data || Array.isArray(env.data) || env.data.tool !== 'propose_project_page' || env.data.ok !== true
+          || !env.data || Array.isArray(env.data) || (!view && !photo && env.data.tool !== 'propose_project_page') || env.data.ok !== true
           || !Number.isSafeInteger(env.seq) || env.seq < 1) return
+        if (view) {
+          const result = env.data.result
+          const turn = photoTurn
+          const projectLifetime = authoredViewTurns.current.get(env.turn_id)
+          const projectId = projectLifetime?.projectContext?.project_id
+          const current = () => currentProposalScope() && approvalScopeRef.current === projectLifetime
+            && projectContextRef.current?.project_id === projectId && photoTurn === turn
+            && authoredViewTurns.current.get(env.turn_id) === projectLifetime
+          if (!current() || !projectId || result.session_id !== sessionId || result.turn_id !== env.turn_id
+            || typeof env.turn_id !== 'string' || !env.turn_id.trim() || env.turn_id.length > 200 || /[\p{C}]/u.test(env.turn_id)
+            || turn?.id !== env.turn_id || !Number.isSafeInteger(turn.seq) || env.seq <= turn.seq
+            || result.kind !== 'view' || result.route !== 'view' || result.tenant_id !== getStoredOrgId()
+            || typeof result.tool !== 'string' || !/^[a-z0-9]+(?:-[a-z0-9]+)*(?![\s\S])/.test(result.tool) || result.tool.length > 200
+            || typeof result.catalog_commit !== 'string' || !/^[0-9a-f]{40}(?![\s\S])/.test(result.catalog_commit)
+            || typeof result.effective_catalog_digest !== 'string' || !/^[0-9a-f]{64}(?![\s\S])/.test(result.effective_catalog_digest)
+            || typeof result.tool_manifest_sha256 !== 'string' || !/^sha256:[0-9a-f]{64}(?![\s\S])/.test(result.tool_manifest_sha256)
+            || result.catalog_digest !== result.tool_manifest_sha256
+            || new TextEncoder().encode(JSON.stringify(env)).length > 16384) return
+          const key = JSON.stringify([sessionId, env.turn_id, env.seq, result.tool, result.catalog_commit])
+          deliverProjectPageProposal({ accountScope, activeScope, projectId, key,
+            result: JSON.parse(JSON.stringify(result)), provenance: { sessionId, turnId: env.turn_id, seq: env.seq }, isCurrent: current })
+          return
+        }
+        const turn = photoTurn
+        const turnId = env.turn_id, seq = env.seq
+        if (photo && !photoIdentity) photoIdentity = { orgId: getStoredOrgId(), actorBindingId: getStoredActorBindingId() }
+        const { orgId, actorBindingId } = photoIdentity || {}
+        const current = photo ? () => {
+          checkProposalScope()
+          return currentProposalScope() && photoScopeLive && photoTurn === turn
+            && Boolean(orgId && actorBindingId) && typeof turnId === 'string'
+            && turnId.trim().length > 0 && turnId.length <= 200 && turn?.id === turnId
+            && Number.isSafeInteger(turn.seq) && turn.seq > 0 && seq > turn.seq
+        } : currentProposalScope
+        if (!current()) return
         const result = env.data.result
         if (!result || typeof result !== 'object' || Array.isArray(result)
+          || (photo && result.schema !== 'leaf.project-photo-assignment-proposal.v1')
           || typeof result.proposed_digest !== 'string' || !/^[0-9a-f]{64}$/.test(result.proposed_digest)
           || new TextEncoder().encode(JSON.stringify(env)).length > 1024 * 1024) return
         const key = JSON.stringify([sessionId, env.seq, result.proposed_digest])
         deliverProjectPageProposal({ accountScope, activeScope, result: JSON.parse(JSON.stringify(result)), key,
-          isCurrent: currentProposalScope })
+          ...(photo ? { provenance: { sessionId, turnId, seq, orgId, actorBindingId } } : {}),
+          isCurrent: current })
       } catch { /* rejected proposals never prevent transcript ingestion */ }
     }
     const stream = openStream(sessionId, 0, {
@@ -399,8 +485,13 @@ export default function ConversePanel({
         notifyCatalogPublication(env, sessionId, active, sessionIdRef, onCatalogChangedRef, consumeCatalogPublicationRef)
         notifyPageProposal(env)
         const queued = reconcileQueuedTurn(queueStateRef.current, env)
+        const queuedViewKey = `queue:${queueStateRef.current.queuedTurn?.queuedId}`
+        const queuedViewLifetime = authoredViewTurns.current.get(queuedViewKey)
         setQueueState(queued.state)
         if (queued.action === 'promote') {
+          if (queuedViewLifetime === approvalScopeRef.current) authoredViewTurns.current.set(queued.turn.turnId, queuedViewLifetime)
+          authoredViewTurns.current.delete(queuedViewKey)
+          if (authoredViewTurns.current.size > 32) authoredViewTurns.current.delete(authoredViewTurns.current.keys().next().value)
           setLocalTurns((prev) => [...prev, queued.turn])
         }
         if (env.type === 'job_linked' && env.data?.job_id && !jobSeenRef.current.has(env.data.job_id)) {
@@ -524,8 +615,35 @@ export default function ConversePanel({
   }
   useEffect(() => {
     const el = logRef.current
+    // History backfill also follows until the reader's own scroll releases it.
     if (el && nearBottomRef.current) el.scrollTop = el.scrollHeight
-  }, [events])
+  }, [events, logEl])
+  // A reader's own new turn resumes following, even after the log was re-seated.
+  const latestUserTurnId = (localTurns[localTurns.length - 1] || userTurns[userTurns.length - 1])?.turnId
+  const seenUserTurnIdsRef = useRef(null)
+  useEffect(() => {
+    if (seenUserTurnIdsRef.current === null) {
+      seenUserTurnIdsRef.current = new Set(latestUserTurnId ? [latestUserTurnId] : [])
+      if (latestUserTurnId) jumpToLatest()
+      return
+    }
+    if (!latestUserTurnId || seenUserTurnIdsRef.current.has(latestUserTurnId)) return
+    seenUserTurnIdsRef.current.add(latestUserTurnId)
+    jumpToLatest()
+  }, [latestUserTurnId]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const el = logEl
+    if (!el || typeof ResizeObserver === 'undefined') return undefined
+    let previousHeight = el.clientHeight
+    const observer = new ResizeObserver(() => {
+      const height = el.clientHeight
+      if (previousHeight === 0 && height > 0) jumpToLatest()
+      else if (nearBottomRef.current) el.scrollTop = el.scrollHeight
+      previousHeight = height
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [logEl]) // eslint-disable-line react-hooks/exhaustive-deps
   // The chip's End keycap is live, and only while the chip is shown. It
   // defers to anything nearer that handled the key (the tab strip's roving
   // End) and never steals End from a text field or from outside this panel.
@@ -585,6 +703,7 @@ export default function ConversePanel({
       const t = turnOf(env.turn_id)
         if (type === 'turn_started') {
           t.started = true
+          if (typeof data.text === 'string' && data.text.trim()) t.userText = data.text
           t.images = thumbnailImages(data.images)
           t.imageDescriptors = (data.images || []).filter((image) => !image?.data)
         quota = false; quotaRetry = null; grant = false // a fresh turn clears the paused banners
@@ -642,6 +761,10 @@ export default function ConversePanel({
             : null
         } else if (code === 'grant_required') grant = true
         else t.feed.push({ kind: 'error', code, message: humanizeError(STOP_NOTES[code] || data.error?.message || 'The assistant could not finish this reply. Try again.') })
+        if (typeof data.stop_reason === 'string' && data.stop_reason) {
+          if (!t.stopReason) t.stopReason = data.stop_reason
+          completed.add(t.turnId)
+        }
       }
     }
     // A stop can confirm completion before the terminal event is recovered.
@@ -663,14 +786,15 @@ export default function ConversePanel({
              activeTurnId: activeTurn ? activeTurn.turnId : null }
   }, [events, stoppedTurns, endedTurns])
 
-  // User bubbles come from the dispatching side (§3 has no user-message event):
-  // App-dispatched turns + panel-sent follow-ups, keyed by turn_id.
+  // Durable turn text survives remounts. Current App-dispatched turns and
+  // panel-sent follow-ups retain their existing precedence, keyed by turn_id.
   const allUserTurns = useMemo(() => [...userTurns, ...localTurns], [userTurns, localTurns])
   const userTextByTurn = useMemo(() => {
     const m = new Map()
+    for (const t of model.turns) if (t.userText) m.set(t.turnId, t.userText)
     for (const u of allUserTurns) if (u.turnId && u.text) m.set(u.turnId, u.text)
     return m
-  }, [allUserTurns])
+  }, [allUserTurns, model.turns])
 
   const localImagesByTurn = useMemo(() => {
     const m = new Map()
@@ -752,20 +876,36 @@ export default function ConversePanel({
   const send = async (nextText = input, { allowSecretOnce = false, includeAttachments = true, clearInput = true } = {}) => {
     const text = String(nextText).trim()
     if ((!text && !(includeAttachments && attachments.length)) || busy) return false
+    // Capture before reading image files or waiting for either transport try.
+    const requestedProjectContext = projectContext ? {
+      project_id: projectContext.project_id,
+      input_version_id: projectContext.input_version_id,
+    } : null
+    const authoredViewLifetime = approvalScopeRef.current
     let delivered = false
     setSending(true); setSendErr(null)
     restoreComposerFocus()
     const accept = (res, images) => {
       if (res.status === 'queued') {
+        if (res.queued_id && approvalScopeRef.current === authoredViewLifetime) {
+          authoredViewTurns.current.set(`queue:${res.queued_id}`, authoredViewLifetime)
+          if (authoredViewTurns.current.size > 32) authoredViewTurns.current.delete(authoredViewTurns.current.keys().next().value)
+        }
         const queued = acceptQueuedTurn(queueStateRef.current, {
           queuedId: res.queued_id || null,
           text,
         })
         setQueueState(queued.state)
         if (queued.action === 'promote') {
+          if (approvalScopeRef.current === authoredViewLifetime) authoredViewTurns.current.set(queued.turn.turnId, authoredViewLifetime)
+          authoredViewTurns.current.delete(`queue:${res.queued_id}`)
           setLocalTurns((prev) => [...prev, queued.turn])
         }
       } else {
+        if (approvalScopeRef.current === authoredViewLifetime && sessionIdRef.current === sessionId) {
+          authoredViewTurns.current.set(res.turn_id, authoredViewLifetime)
+          if (authoredViewTurns.current.size > 32) authoredViewTurns.current.delete(authoredViewTurns.current.keys().next().value)
+        }
         setLocalTurns((prev) => [...prev, { turnId: res.turn_id, text, images }])
       }
       if (clearInput) setInput('')
@@ -782,12 +922,15 @@ export default function ConversePanel({
         accept(await postMessage(sessionId, {
           ...(text ? { text } : {}),
           ...(images.length ? { images } : {}),
+          ...(requestedProjectContext ? { projectContext: requestedProjectContext } : {}),
           allowSecretOnce,
         }), images)
         track('conversation.message_sent', { input_kind: text ? 'typed' : 'image_only', text_len: text.length })
       } catch (e) {
         if (!shouldRetryWithQueue(classifyAgentError(e), { text, images })) throw e
-        accept(await postMessage(sessionId, { text, queue: true, allowSecretOnce }), images)
+        accept(await postMessage(sessionId, { text, queue: true, allowSecretOnce,
+          ...(requestedProjectContext ? { projectContext: requestedProjectContext } : {}),
+        }), images)
         // P2: the direct post failed (turn busy) and the queued retry landed —
         // the panel recovered the send rather than surfacing an error.
         track('conversation.recovered', { reason: 'busy_retry_queued' })
@@ -850,15 +993,36 @@ export default function ConversePanel({
   // accepts no other spelling.
   const decide = async (
     confirmationId, ok, blocked = false, owningSessionId = sessionId,
-    decisionRecorded = false, isWrite = false,
+    decisionRecorded = false, isWrite = false, tool = null, isSolve = false,
   ) => {
     if (deciding || (ok && blocked)) return
+    const requestedContext = projectContext
+    const requestedRevision = approvalScopeRef.current.revision
+    const prepare = prepareApprovedProjectRunRef.current
+    const current = () => approvalScopeRef.current.revision === requestedRevision
+      && sessionIdRef.current === owningSessionId
+      && projectContextRef.current?.project_id === requestedContext?.project_id
+      && projectContextRef.current?.input_version_id === requestedContext?.input_version_id
+      && !(ok && isWrite && (writeLockedRef.current || engineDirtyRef.current))
     setDeciding(confirmationId); setSendErr(null)
     try {
       if (ok && isWrite && !(writeLockedRef.current || engineDirtyRef.current)) onBeforeWriteApprovalRef.current?.()
       const res = await resolveApproval(
         confirmationId, owningSessionId, ok, decisionRecorded, {
-          beforeResume: () => !(ok && isWrite && (writeLockedRef.current || engineDirtyRef.current)),
+          beforeResume: async () => {
+            if (!current()) return false
+            if (!ok || !(isWrite || isSolve) || !requestedContext
+              || (canonicalProjectWriteTools && !canonicalProjectWriteTools.has(tool))) return true
+            if (typeof prepare !== 'function') return false
+            let grant
+            try {
+              grant = await prepare({ confirmationId, sessionId: owningSessionId,
+                projectContext: requestedContext })
+            } catch { return false }
+            if (!grant) return false
+            if (!current() || !grant.isCurrent()) { await grant.revoke(); return false }
+            return true
+          },
         })
       if (res.held) {
         await refreshApprovalsRef.current?.()
@@ -899,7 +1063,7 @@ export default function ConversePanel({
     const summary = paramsSummary(approval.params)
     const resumeRequired = approval.resume_required === true
     return (
-      <div key={approval.confirmation_id} className="strip-decision converse-confirm" data-element-id={formatElementId('approval', approval.confirmation_id) || undefined}>
+      <div key={approval.confirmation_id} className="strip-decision converse-confirm" data-converse-role="decision" data-ink={resumeRequired ? (approval.approved ? 'approved' : 'denied') : 'needs-ok'} data-element-id={formatElementId('approval', approval.confirmation_id) || undefined}>
         <span className="dot square" aria-hidden="true" />
         <span className="strip-sentence">
           {approval.kind === 'customize_platform' ? (
@@ -928,6 +1092,8 @@ export default function ConversePanel({
               approval.session_id,
               true,
               isWrite,
+              approval.tool,
+              approval.capability === 'solve',
             )}
           >
             {deciding === approval.confirmation_id
@@ -942,7 +1108,8 @@ export default function ConversePanel({
               disabled={deciding === approval.confirmation_id || hold.held}
               title={hold.held ? hold.title : undefined}
               onClick={() => decide(
-                approval.confirmation_id, true, hold.held, approval.session_id, false, isWrite)}
+                approval.confirmation_id, true, hold.held, approval.session_id, false, isWrite, approval.tool,
+                approval.capability === 'solve')}
             >
               {deciding === approval.confirmation_id ? 'Sending…' : (hold.held ? hold.label : 'Approve')}
             </button>
@@ -967,7 +1134,7 @@ export default function ConversePanel({
       // real elements, and anything HTML-shaped stays literal text.
       if (!item.text) return null
       return (
-        <div key={i} className="converse-msg assistant">
+        <div key={i} className="converse-msg assistant" data-converse-role="assistant">
           <Markdown text={item.text} />
           <WrittenByChip by={item.writtenBy} />
         </div>
@@ -989,7 +1156,7 @@ export default function ConversePanel({
       const object = c.summary
       const outcome = c.result && c.result !== c.summary ? c.result : ''
       return (
-        <span key={i} className="converse-tool-chip converse-step" data-state={st.state} title={c.tool || undefined}>
+        <li key={i} className="converse-tool-chip converse-step" data-state={st.state} title={c.tool || undefined}>
           <span className={st.dot} aria-hidden="true" />
           <span className="converse-step-state">{st.word}</span>
           {expandable ? (
@@ -1027,7 +1194,7 @@ export default function ConversePanel({
               )}
             </span>
           )}
-        </span>
+        </li>
       )
     }
     if (item.kind === 'job') {
@@ -1059,7 +1226,7 @@ export default function ConversePanel({
       if (!settled && pendingApprovals.some(
         (approval) => approval.confirmation_id === item.id)) return null
       return (
-        <div key={i} className="strip-decision converse-confirm" data-element-id={formatElementId('item', item.id) || undefined}>
+        <div key={i} className="strip-decision converse-confirm" data-converse-role="decision" data-ink={settled ? (settledOk ? 'approved' : 'denied') : 'needs-ok'} data-element-id={formatElementId('item', item.id) || undefined}>
           <span className="dot square" aria-hidden="true" />
           <span className="strip-sentence">
             {item.kind === 'proposal' ? (
@@ -1095,7 +1262,8 @@ export default function ConversePanel({
                 className="chip-act"
                 disabled={deciding === item.id || hold.held}
                 title={hold.held ? hold.title : undefined}
-                onClick={() => decide(item.id, true, hold.held, sessionId, false, isWrite)}
+                onClick={() => decide(item.id, true, hold.held, sessionId, false, isWrite, item.tool,
+                  item.capability === 'solve')}
               >
                 {deciding === item.id ? 'Sending…' : (hold.held ? hold.label : 'Approve')}
               </button>
@@ -1113,8 +1281,9 @@ export default function ConversePanel({
       )
     }
     if (item.kind === 'question') {
+      const resolved = questionChoiceState(events, item.id)
       return (
-        <div key={i} className="strip-decision converse-question">
+        <div key={i} className="strip-decision converse-question" data-converse-role="question" data-ink={resolved.answered ? 'answered' : 'question'}>
           <span className="dot square" aria-hidden="true" />
           <span className="strip-sentence">{item.question}</span>
           <span className="converse-question-options">
@@ -1124,7 +1293,6 @@ export default function ConversePanel({
               // option the user actually sent reads "selected"; a card the
               // user moved past (dismissed) simply inerts — the renderer must
               // never invent a historical selection (review round 2).
-              const resolved = questionChoiceState(events, item.id)
               const inert = resolved.answered || resolved.dismissed
               const isSelected = resolved.selectedLabel === label.trim()
               const sendingChoice = questionChoices.sendingQuestionIds.includes(item.id)
@@ -1147,7 +1315,7 @@ export default function ConversePanel({
     }
     if (item.kind === 'error') {
       return (
-        <div key={i} className="converse-note">
+        <div key={i} className="converse-note" data-converse-role="error" role="alert">
           <span className="dot square" aria-hidden="true" />
           <span className="dim">{item.message}</span>
           {item.code && <details><summary>Error details</summary><code>{item.code}</code></details>}
@@ -1215,7 +1383,7 @@ export default function ConversePanel({
 
       <LiveRegion
         className="converse-log"
-        ref={logRef}
+        ref={attachLog}
         onScroll={onLogScroll}
         role="log"
         atomic={false}
@@ -1230,7 +1398,7 @@ export default function ConversePanel({
         {model.turns.map((t) => (
           <div key={t.turnId} className="converse-turn" data-element-id={formatElementId('turn', t.turnId) || undefined}>
             {userTextByTurn.get(t.turnId) && (
-              <div className="converse-msg user">{userTextByTurn.get(t.turnId)}</div>
+              <div className="converse-msg user" data-converse-role="user">{userTextByTurn.get(t.turnId)}</div>
             )}
             {(t.images?.length ? t.images : localImagesByTurn.get(t.turnId))?.map((src, index) => (
               <img key={`${t.turnId}-image-${index}`} src={src} alt="User attached image" width="96" height="72" style={{ objectFit: 'cover', margin: '4px 4px 4px 0' }} />
@@ -1238,7 +1406,15 @@ export default function ConversePanel({
             {t.imageDescriptors?.length > 0 && (
               <div className="converse-note"><span className="dim">{t.imageDescriptors.length} image attachment{t.imageDescriptors.length === 1 ? '' : 's'} sent. Preview is unavailable after reload.</span></div>
             )}
-            {t.feed.map((item, i) => renderFeedItem(item, i, t.turnId))}
+            {t.feed.map((item, i) => {
+              if (item.kind !== 'tool') return renderFeedItem(item, i, t.turnId)
+              if (t.feed[i - 1]?.kind === 'tool') return null
+              const chips = []
+              for (let j = i; j < t.feed.length && t.feed[j].kind === 'tool'; j++) {
+                chips.push(renderFeedItem(t.feed[j], j, t.turnId))
+              }
+              return <ul key={i} className="converse-tool-row" aria-label="Tools used" data-converse-role="tool">{chips}</ul>
+            })}
             {stoppedTurns.has(t.turnId) && !t.stopReason && (
               <div className="converse-note"><span className="dim">Reply stopped.</span></div>
             )}
@@ -1269,7 +1445,7 @@ export default function ConversePanel({
         )}
         {pendingUserTurns.map((u) => (
           <div key={u.turnId} className="converse-turn" data-element-id={formatElementId('turn', u.turnId) || undefined}>
-            {(u.text || u.images?.length > 0) && <div className="converse-msg user">{u.text}</div>}
+            {(u.text || u.images?.length > 0) && <div className="converse-msg user" data-converse-role="user">{u.text}</div>}
             {thumbnailImages(u.images).map((src, index) => (
               <img key={`${u.turnId}-pending-image-${index}`} src={src} alt="Pending image attachment" width="96" height="72" style={{ objectFit: 'cover', margin: '4px 4px 4px 0' }} />
             ))}

@@ -34,6 +34,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { humanizeError } from '../errorHumanize.js'
 import {
   cloneProject,
+  renameProject,
   deleteProject,
   exportProject,
   getOrgIdentities,
@@ -270,6 +271,18 @@ export default function useProjectLifecycle(projectId, { enabled = true } = {}) 
       return result
     },
     clone: (name) => runThenRefetch(() => cloneProject(projectId, name)),
+    rename: async (name) => {
+      const result = await renameProject(projectId, name)
+      if (!stillCurrent(projectId)) return result
+      // The rename is durable once the server answers. Show its name now; a slow
+      // or failed refresh must not read as a failed rename.
+      if (typeof result?.name === 'string') {
+        setData((current) => current.project?.project_id === projectId
+          ? { ...current, project: { ...current.project, name: result.name } } : current)
+      }
+      try { await load({ refresh: true }) } catch { /* the rename already landed */ }
+      return result
+    },
     export: async (options) => {
       const result = await exportProject(projectId, options)
       // The artifact is ready. A slow or failed refresh must not turn this

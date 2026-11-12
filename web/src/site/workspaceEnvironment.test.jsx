@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { parse } from '@babel/parser'
@@ -7,6 +7,7 @@ import { surfaceContract } from './productSurfaces.js'
 import WorkspaceEnvironment, { ENVIRONMENT_OCCLUDERS } from './WorkspaceEnvironment.jsx'
 import { STUDIO_DRAWING_OCCLUDERS } from './drawingOccluders.js'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
+import * as api from '../api.js'
 
 afterEach(cleanup)
 const profiles = ['browser', 'cad', 'solar', 'ios', 'ops', 'lab'].map(id => ({ id, label: id }))
@@ -222,6 +223,26 @@ it('reserves drawing space for docked instruments and edge panels, never the who
   expect(ENVIRONMENT_OCCLUDERS.some(([selector]) => selector.startsWith('.app'))).toBe(false)
 })
 
+it('previews header position without remounting content, then clears on close, profile and scope changes', () => {
+  const props = { scopeKey: 'tenant/project', profile: 'cad', profiles, onPanel: vi.fn(), hasContent: true }
+  const { container, rerender } = render(<WorkspaceEnvironment {...props}><input aria-label="Preserved project" defaultValue="Keep" /></WorkspaceEnvironment>)
+  const project = screen.getByLabelText('Preserved project')
+  const preview = () => { fireEvent.click(screen.getByRole('button', { name: 'Layout', exact: true })); fireEvent.click(screen.getByRole('button', { name: 'Below tools' })) }
+  preview()
+  expect(environment(container).dataset.workspaceHeader).toBe('below-tools')
+  expect(screen.getByLabelText('Preserved project')).toBe(project)
+  fireEvent.click(screen.getByRole('button', { name: 'Close layout' }))
+  expect(environment(container).dataset.workspaceHeader).toBe('above-tools')
+  preview()
+  rerender(<WorkspaceEnvironment {...props} profile="solar"><input aria-label="Preserved project" defaultValue="Keep" /></WorkspaceEnvironment>)
+  expect(environment(container).dataset.workspaceHeader).toBe('above-tools')
+  expect(screen.queryByRole('region', { name: 'Workspace layout' })).toBeNull()
+  preview()
+  rerender(<WorkspaceEnvironment {...props} profile="solar" scopeKey="tenant/other"><input aria-label="Preserved project" defaultValue="Keep" /></WorkspaceEnvironment>)
+  expect(environment(container).dataset.workspaceHeader).toBe('above-tools')
+  expect(screen.getByLabelText('Preserved project')).toBe(project)
+})
+
 it('App keeps the Project owner independent of the edge toggle on every Studio profile', () => {
   const source = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8').replace(/\r\n/g, '\n')
   const tree = parse(source, { sourceType: 'module', plugins: ['jsx'] })
@@ -251,4 +272,30 @@ it('App keeps the Project owner independent of the edge toggle on every Studio p
     }
   }
   expect(hasPanel(false)).toBe(false)
+})
+
+it('keeps the layout owner mounted through Apply and readback even when Close or Escape is requested', async () => {
+  const receipt = { sha256: 'a'.repeat(64), authored_at: '2026-11-01T12:00:00Z' }
+  let surfaces = {}
+  let resolvePost
+  vi.spyOn(api, 'getSurfaceConfig').mockImplementation(async () => ({ surfaces, source: receipt }))
+  const submit = vi.spyOn(api, 'submitSurfaceConfig').mockImplementation(next => {
+    surfaces = next
+    return new Promise(resolve => { resolvePost = resolve })
+  })
+  const { container } = render(<WorkspaceEnvironment scopeKey="tenant/project" profile="cad" profiles={profiles}
+    onPanel={vi.fn()} mock={false} canApplyLayout />)
+  fireEvent.click(screen.getByRole('button', { name: 'Layout', exact: true }))
+  fireEvent.click(screen.getByRole('button', { name: 'Below tools' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Apply layout' }))
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce())
+  expect(screen.getByRole('button', { name: 'Close layout' })).toBeDisabled()
+  fireEvent.keyDown(window, { key: 'Escape' })
+  fireEvent.click(screen.getByRole('button', { name: 'Layout', exact: true }))
+  expect(screen.getByRole('region', { name: 'Workspace layout' })).toBeTruthy()
+  await act(async () => resolvePost(receipt))
+  await screen.findByText('Layout saved.')
+  fireEvent.click(screen.getByRole('button', { name: 'Close layout' }))
+  expect(screen.queryByRole('region', { name: 'Workspace layout' })).toBeNull()
+  expect(environment(container).dataset.workspaceHeader).toBe('below-tools')
 })

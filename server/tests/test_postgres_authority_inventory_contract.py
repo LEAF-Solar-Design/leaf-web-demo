@@ -24,7 +24,10 @@ import re
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INVENTORY_PATH = REPO_ROOT / "platform" / "authority-inventory.json"
 
-EXPECTED_MIGRATIONS = [f"{number:04d}" for number in range(1, 97)]
+EXPECTED_MIGRATION_FILES = sorted(
+    path.name for path in (REPO_ROOT / "platform" / "migrations").glob("*.sql")
+)
+EXPECTED_MIGRATIONS = sorted({name.split("_", 1)[0] for name in EXPECTED_MIGRATION_FILES})
 EXPECTED_SELECTOR_DEFAULTS = {
     "LEAF_DEVICE_STORE": "sqlite",
     "LEAF_LAB_RUN_STORE": "sqlite",
@@ -328,6 +331,8 @@ def _inventory_errors(inventory: dict) -> list[str]:
         errors.append(f"missing authority coverage {sorted(missing_coverage)}")
 
     scope = inventory.get("scope", {})
+    if scope.get("migration_files") != EXPECTED_MIGRATION_FILES:
+        errors.append("scope migration_files must match the complete filename manifest")
     if scope.get("migration_ids") != EXPECTED_MIGRATIONS:
         # Derived, not spelled out: the previous literal message said "0001
         # through 0025" long after the constant above reached 0028, so a
@@ -361,10 +366,10 @@ def test_inventory_is_complete_about_its_known_gaps_and_schema() -> None:
     inventory = _load_inventory()
     assert _inventory_errors(inventory) == []
 
-    migration_ids = [
+    migration_ids = sorted({
         path.name.split("_", 1)[0]
-        for path in sorted((REPO_ROOT / "platform" / "migrations").glob("*.sql"))
-    ]
+        for path in (REPO_ROOT / "platform" / "migrations").glob("*.sql")
+    })
     assert migration_ids == EXPECTED_MIGRATIONS
 
 
