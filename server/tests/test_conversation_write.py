@@ -754,3 +754,37 @@ def test_demo_message_uses_leaf_demo_binding(monkeypatch):
     response = conversations_router._resolve_and_write(tenant, "project", "conversation", "hello", {}, "key")
     assert response.status_code == 200
     assert seen == [(tenant.org_id, "project", "conversation", binding)]
+
+
+def test_post_message_route_runs_dispatch_off_event_loop_thread(monkeypatch):
+    import asyncio
+    import threading
+
+    from starlette.requests import Request
+    from routers import sessions as sessions_router
+
+    request = Request({"type": "http"})
+    req = sessions_router.MessageRequest(text="hello")
+    tenant = _Tenant("tenant-1")
+    expected = {"status": "dispatched"}
+    dispatch_threads = []
+
+    def fake_post_message(session_id, message, http_request, caller):
+        dispatch_threads.append(threading.get_ident())
+        assert (session_id, message, http_request, caller) == (
+            "session-1", req, request, tenant,
+        )
+        return expected
+
+    monkeypatch.setattr(sessions_router, "post_message", fake_post_message)
+
+    async def invoke_route():
+        loop_thread = threading.get_ident()
+        result = await sessions_router.post_message_route(
+            "session-1", request, req, tenant,
+        )
+        assert result is expected
+        assert len(dispatch_threads) == 1
+        assert dispatch_threads[0] != loop_thread
+
+    asyncio.run(invoke_route())

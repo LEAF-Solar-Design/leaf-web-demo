@@ -71,6 +71,181 @@ def facts():
                 allocator_release_confirmed=True, screenshot_sha256=hashlib.sha256(png()).hexdigest())
 
 
+@pytest.fixture
+def native_package():
+    """Authored-source-shaped fixture only, not model or SDK execution evidence."""
+    data = b'{"complete":"input values"}\n'
+    files = {'project.yml':('100644',worker.NATIVE_PROJECT_SPEC.replace('${bundleId}','private.leaf.project.p'+PROJECT.replace('-','')).encode()),
+        'Sources/LeafProjectApp.swift':('100644',worker.NATIVE_APP_SOURCE.encode()),
+        'Sources/ContentView.swift':('100644',b'import SwiftUI\nstruct ContentView: View { var body: some View { Text("Input") } }\n'),
+        'Resources/Input/'+MID+'.json':('100644',data)}
+    d = dict(schema=worker.NATIVE_SCHEMA,target='ios-simulator',source_profile=worker.NATIVE_PROFILE,
+        org_id=ORG,project_id=PROJECT,actor_binding_id=ACTOR,repo_key=OWNER,source_request_id=JOB,
+        source_operation='create',source_version=4,receipt_digest='a'*64,source_commit='b'*40,
+        source_tree=worker.native_tree(files),material_refs=[dict(material_id=MID,
+            sha256=hashlib.sha256(data).hexdigest(),byte_size=len(data),path='Resources/Input/'+MID+'.json')],
+        bundle_sha256='c'*64,archive_sha256='0'*64,byte_size=1)
+    raw=worker.native_archive(files,d)
+    d.update(archive_sha256=hashlib.sha256(raw).hexdigest(),byte_size=len(raw))
+    job=dict(job_id=JOB,lease_owner=OWNER,attempt=1,descriptor=d,deadline=time.time()+300)
+    return raw,job
+
+
+def test_native_package_is_complete_tree_and_matches_captured_profile(native_package):
+    raw,job=native_package
+    assert worker.validate_claim({'job':job},SCOPE,time.time()) == job
+    assert worker.verify_source(raw,job['descriptor']) == raw
+    files=worker.verify_native_archive(raw,job['descriptor'])
+    assert worker.native_tree(files)==job['descriptor']['source_tree']
+    profile=(Path(__file__).resolve().parents[2]/'harness/src/agent/nativeProjectSourceProfile.ts').read_text()
+    import re
+    assert worker.NATIVE_APP_SOURCE==re.search(r'const APP_SOURCE = `(.*?)`;',profile,re.S).group(1)
+    assert worker.NATIVE_PROJECT_SPEC==re.search(r'"project.yml": `(.*?)`,',profile,re.S).group(1)
+
+
+@pytest.mark.parametrize('kind',['profile','foreign','hash','tree','empty-material','oversize-material','operation','corrupt'])
+def test_native_refusal_precedes_allocator(native_package,monkeypatch,kind):
+    import copy
+    raw,job=copy.deepcopy(native_package)
+    d=job['descriptor']
+    if kind=='profile':d['source_profile']='web-next-static-v1'
+    elif kind=='foreign':d['project_id']=ACTOR
+    elif kind=='hash':d['archive_sha256']='f'*64
+    elif kind=='tree':d['source_tree']='f'*40
+    elif kind=='empty-material':d['material_refs']=[]
+    elif kind=='oversize-material':d['material_refs'][0]['byte_size']=1048577
+    elif kind=='operation':d['source_operation']='edit'
+    else:raw=b'corrupt ZIP'
+    monkeypatch.setattr(mac,'canonical_allocator',lambda:pytest.fail('allocator reached'))
+    if kind=='foreign':
+        with pytest.raises(worker.WorkerError):worker.validate_claim({'job':job},SCOPE,time.time())
+    else:
+        with pytest.raises(worker.WorkerError):mac.MacAdapter()(raw,job,types.SimpleNamespace())
+
+
+def test_native_worker_completion_carries_sdk_identity(native_package,tmp_path):
+    raw,job=native_package
+    http=Transport(native_package)
+    bundle='private.leaf.project.p'+PROJECT.replace('-','')
+    result_facts=dict(facts(),bundle_id=bundle,build_artifact=dict(source=worker.native_identity(job['descriptor']),
+        bundle_id=bundle,sdk='iphonesimulator',app_tree_sha256='d'*64,file_count=5,xcodegen_exit_code=0,
+        xcode_version='Xcode fixture',xcodegen_version='fixture version',sdk_version='fixture sdk'))
+    result=worker.run_once(SCOPE,http,lambda *a:(result_facts,png()),tmp_path)
+    assert result['result']=='complete'
+    receipt=http.calls[-1][2]['receipt']
+    assert receipt['build_artifact']['source']['source_tree']==job['descriptor']['source_tree']
+    assert receipt['bundle_id']==bundle
+
+
+def test_native_recovery_projection_preserves_source_and_rejects_drift(native_package):
+    _,job=native_package
+    identity=worker.native_identity(job['descriptor'])
+    assert reconciliation.source(identity)==identity
+    assert 'revision' not in identity and 'document_sha256' not in identity
+    claim=dict(job_id=JOB,source=identity)
+    status=worker.encode(dict(job_id=JOB,status='failed',**identity))
+    assert reconciliation.settled_failure_status(status,claim)['backend_status_sha256']==hashlib.sha256(status).hexdigest()
+    with pytest.raises(worker.WorkerError):
+        reconciliation.settled_failure_status(worker.encode(dict(job_id=JOB,status='failed',**dict(identity,source_commit='f'*40))),claim)
+
+
+@pytest.mark.parametrize('fail_install',[False,True,'xcodegen-unavailable'])
+def test_native_driver_generates_fixed_project_builds_and_hashes_copied_app(native_package,tmp_path,capsys,fail_install):
+    raw,job=native_package
+    owned,derived,internal=tmp_path/'owned',tmp_path/'derived',tmp_path/'internal'
+    owned.mkdir()
+    commands=[]
+    bundle='private.leaf.project.p'+PROJECT.replace('-','')
+    runtime='com.apple.CoreSimulator.SimRuntime.iOS-26-0'
+    def checked(argv,timeout=30,cwd=None):
+        commands.append(argv)
+        if argv==['/usr/bin/xcodebuild','-version']:return b'Xcode fixture\nBuild fixture'
+        if argv==['/Users/evanhaug/xcodegen/xcodegen/bin/xcodegen','--version']:return b'fixture version'
+        if argv==['/usr/bin/xcrun','--sdk','iphonesimulator','--show-sdk-version']:return b'26.0'
+        if argv[0]=='/Users/evanhaug/xcodegen/xcodegen/bin/xcodegen':
+            assert argv==['/Users/evanhaug/xcodegen/xcodegen/bin/xcodegen','generate','--spec','project.yml']
+            assert cwd==owned/'source'
+            if fail_install=='xcodegen-unavailable':raise FileNotFoundError('fixed managed XcodeGen unavailable')
+        elif argv[0]=='/usr/bin/xcodebuild':
+            assert argv[argv.index('-project')+1]=='LeafProject.xcodeproj'
+            assert argv[argv.index('-scheme')+1]=='LeafProject'
+            assert 'CODE_SIGNING_ALLOWED=NO' in argv and UDID not in str(argv)
+            app=derived/'Build/Products/Debug-iphonesimulator/LeafProject.app'
+            app.mkdir(parents=True)
+            (app/'Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier':bundle}))
+            (app/'LeafProject').write_bytes(b'not a real SDK binary; fixture only')
+        elif argv[0]=='/usr/bin/ditto':shutil.copytree(argv[1],argv[2])
+        else:
+            assert argv[:2]==['/usr/bin/xcrun','simctl']
+            if argv[2]=='list':return json.dumps({'devices':{runtime:[dict(udid=UDID,isAvailable=True,deviceTypeIdentifier='com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro-Max')]}}).encode()
+            if argv[2]=='listapps':return plistlib.dumps({})
+            if argv[2]=='install':
+                assert argv[-1].endswith('LeafProject.app')
+                if fail_install: raise RuntimeError('fixture installation failed after SDK build')
+            if argv[2]=='launch':assert argv[-1]==bundle
+            if argv[2]=='io':Path(argv[-1]).write_bytes(png())
+        return b''
+    payload=dict(archive=base64.b64encode(raw).decode(),byte_size=len(raw),sha256=hashlib.sha256(raw).hexdigest(),
+        budget=500,udid=UDID,ticket='fixture-ticket',name='fixture-owned',descriptor=job['descriptor'])
+    namespace=dict(base64=base64,hashlib=hashlib,io=io,json=json,plistlib=plistlib,zipfile=zipfile,
+        time=types.SimpleNamespace(sleep=lambda _:None),sys=types.SimpleNamespace(stdin=io.StringIO(json.dumps(payload))),
+        roots=lambda _:(owned,derived,internal),permitted=lambda _:None,checked=checked,application_inventory=plistlib.loads)
+    if fail_install=='xcodegen-unavailable':
+        with pytest.raises(FileNotFoundError,match='fixed managed XcodeGen unavailable'):
+            exec(mac.native_remote_policy()+mac.DRIVER,namespace)
+        assert commands==[['/Users/evanhaug/xcodegen/xcodegen/bin/xcodegen','generate','--spec','project.yml']]
+        assert not (owned/'sdk-build.json').exists() and not (owned/'install-owned').exists()
+        return
+    if fail_install:
+        with pytest.raises(RuntimeError,match='after SDK build'):
+            exec(mac.native_remote_policy()+mac.DRIVER,namespace)
+        result={'build_artifact':json.loads((owned/'sdk-build.json').read_text())}
+    else:
+        exec(mac.native_remote_policy()+mac.DRIVER,namespace)
+        result=json.loads(capsys.readouterr().out)
+    artifact=result['build_artifact']
+    assert artifact['source']==worker.native_identity(job['descriptor']) and artifact['bundle_id']==bundle
+    copied=internal/'LeafProject.app'
+    manifest={str(p.relative_to(copied)):hashlib.sha256(p.read_bytes()).hexdigest() for p in copied.rglob('*') if p.is_file()}
+    assert artifact['app_tree_sha256']==hashlib.sha256(worker._native_json(manifest)).hexdigest()
+    worker.validate_native_artifact(artifact,job['descriptor'])
+    assert commands.index(['/Users/evanhaug/xcodegen/xcodegen/bin/xcodegen','generate','--spec','project.yml']) < next(i for i,c in enumerate(commands) if '-project' in c)
+    assert ['/Users/evanhaug/xcodegen/xcodegen/bin/xcodegen','--version'] in commands
+    capture=next(node for node in ast.parse(mac.REMOTE_COMMON).body if isinstance(node,ast.FunctionDef) and node.name=='checked').body[0]
+    assert eval(compile(ast.Expression(capture.value),'<capture>','eval'),{'argv':['/Users/evanhaug/xcodegen/xcodegen/bin/xcodegen','--version']}) is True
+    assert (owned/'install-owned').read_text()==bundle
+
+
+@pytest.mark.skipif(sys.platform=='win32',reason='Remote cleanup owns POSIX Mac directories and locks')
+def test_native_cleanup_removes_only_project_bound_install(tmp_path):
+    owned,derived,internal=tmp_path/'owned',tmp_path/'derived',tmp_path/'internal'
+    name='fixture-owned'
+    for folder in (owned,derived,internal):
+        folder.mkdir();(folder/'owner').write_text(name)
+    bundle='private.leaf.project.p'+PROJECT.replace('-','')
+    (owned/'install-owned').write_text(bundle)
+    state=dict(booted=True,installed=True)
+    calls=[]
+    def checked(argv):
+        if argv[2]=='list':return json.dumps({'devices':{'runtime':[dict(udid=UDID,state='Booted' if state['booted'] else 'Shutdown')]}}).encode()
+        assert argv[2]=='listapps'
+        return plistlib.dumps({bundle:{}} if state['installed'] else {})
+    def run(argv,**kwargs):
+        calls.append(argv)
+        if argv[2]=='uninstall':assert argv[-1]==bundle;state['installed']=False
+        elif argv[2]=='shutdown':state['booted']=False
+        elif argv[2]=='terminate':assert argv[-1]==bundle
+        return types.SimpleNamespace(returncode=0)
+    namespace=dict(json=json,re=__import__('re'),os=__import__('os'),time=time,shutil=shutil,
+        subprocess=types.SimpleNamespace(run=run),fcntl=__import__('fcntl'),
+        sys=types.SimpleNamespace(stdin=io.StringIO(json.dumps(dict(ticket='fixture-ticket',udid=UDID,name=name,native_project_id=PROJECT)))),
+        roots=lambda _:(owned,derived,internal),checked=checked,application_inventory=plistlib.loads)
+    exec(mac.CLEANUP,namespace)
+    assert not state['installed'] and not state['booted']
+    assert not any(folder.exists() for folder in (owned,derived,internal))
+    assert all(mac.BUNDLE not in argv for argv in calls)
+
+
 class Transport:
     def __init__(self, source):
         self.raw, self.job = source
@@ -1309,3 +1484,21 @@ def test_uncertain_success_settlement_diagnostics(source, tmp_path, monkeypatch,
     assert local['execution_stage'] == 'completion'
     assert local['failure_settlement'] == expected
     assert len([p for _, p, _, _ in http.calls if p.endswith('/complete')]) == 1
+
+
+def test_native_sdk_predecessor_survives_later_preview_failure(native_package,tmp_path):
+    raw,job=native_package
+    bundle='private.leaf.project.p'+PROJECT.replace('-','')
+    artifact=dict(source=worker.native_identity(job['descriptor']),bundle_id=bundle,
+        sdk='iphonesimulator',app_tree_sha256='a'*64,file_count=3,xcodegen_exit_code=0,
+        xcode_version='fixture',xcodegen_version='fixture',sdk_version='fixture')
+    class LaterFailure:
+        report=dict(build_artifact=artifact,cleanup_complete=True,allocator_release_confirmed=True)
+        def __call__(self,raw,job,guard):
+            guard.stage('mac-producer')
+            raise worker.WorkerError('mac-producer-failed')
+    result=worker.run_once(SCOPE,Transport(native_package),LaterFailure(),tmp_path)
+    assert result['result']=='failed'
+    local=json.loads((tmp_path/(JOB+'-1-failure.json')).read_text())
+    assert local['build_artifact']==artifact and local['cleanup_complete'] is True
+    assert local['failure_settlement']=='accepted'

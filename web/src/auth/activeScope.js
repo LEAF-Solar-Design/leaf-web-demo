@@ -1,5 +1,7 @@
+import { serviceState, serviceScope } from '../lib/serviceAuthSession.js'
 // Comparison key only: the server remains the authority for authentication.
 export function readActiveScope(storage) {
+  if (serviceState(storage).mode) return serviceScope(storage)
   try {
     const target = storage === undefined ? globalThis.localStorage : storage
     const token = target?.getItem('leaf.jwt')

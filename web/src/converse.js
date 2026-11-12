@@ -2,7 +2,7 @@
 // Mirrors api.js conventions exactly: same API_BASE / X-Tenant-Id / authHeaders
 // on every call, errors tagged with .status/.body so callers gate without
 // string-matching, and the same belt-and-suspenders stream pattern subscribeJob
-// uses (EventSource for low latency PLUS a poll fallback — here the durable
+// uses (SSE for low latency PLUS a poll fallback — here the durable
 // transcript, deduped by seq, so replay after a reconnect is exact).
 //
 // This lane is ADDITIVE: the deterministic §12 prompt router stays the floor.
@@ -309,6 +309,7 @@ function isCompletedJournalReply(res, body, requestId) {
 export async function postMessage(sessionId, {
   text, confirm, images, classifier_hint, credential_grant, queue, request_id,
   entity_scope,
+  projectContext,
   // Slice 6b hand-off identity: WHO asked for this background start. Bounded
   // and trimmed below before it can reach the wire; slice 11 is its consumer
   // (the build queue card), and nothing in this slice reads it back.
@@ -337,6 +338,14 @@ export async function postMessage(sessionId, {
   if (queue === true) payload.queue = true
   if (request_id != null) payload.request_id = request_id
   if (entity_scope !== undefined) payload.entity_scope = entity_scope
+  // A selection is a request pin for app validation, never model authority.
+  // Confirmations recover their original binding from the stored proposal.
+  if (confirm == null && projectContext != null) {
+    payload.project_context = {
+      project_id: projectContext.project_id,
+      input_version_id: projectContext.input_version_id,
+    }
+  }
   // Only a QUEUED start is a background hand-off, and only a bounded non-empty
   // string rides along: an over-long or blank value is dropped here rather
   // than posted for the server to refuse. Never logged, never echoed.
@@ -449,7 +458,7 @@ export async function approveStandardService(approvalId, argumentDigest) {
 }
 
 /**
- * Re-read the caller's hold across the approval-recording async boundary.
+ * Await the caller's hold after recording approval and before submitting its resume.
  * A held resolution leaves the approval recorded server-side, where the next
  * pending-approvals poll reports it as resume-required. Nothing is lost and
  * nothing runs until the caller permits the resume.
@@ -460,7 +469,7 @@ export async function resolveApproval(
   if (!decisionRecorded) {
     await approve(confirmationId, approved)
   }
-  if (approved && typeof beforeResume === 'function' && beforeResume() === false) {
+  if (approved && typeof beforeResume === 'function' && (await beforeResume()) === false) {
     return { held: true, recorded: true }
   }
   return postMessage(owningSessionId, {
@@ -469,15 +478,14 @@ export async function resolveApproval(
 }
 
 // --- Event stream ---------------------------------------------------------
-// EventSource on GET /api/sessions/{id}/stream?after_seq=N with automatic
+// SSE on GET /api/sessions/{id}/stream?after_seq=N with automatic
 // reconnect (replaying from the last seen seq — the harness replays from
 // sessions.db), PLUS a transcript poll fallback that works when SSE is
 // blocked. Both channels feed one seq-deduped deliver(), so overlap is safe
 // and events arrive exactly once, in order.
 //
-// EventSource cannot carry headers, so like the job stream it rides the
-// server's default tenant resolution; the poll fallback sends the full
-// X-Tenant-Id + auth headers (same documented limitation as api.js:427-489).
+// Authenticated SSE uses fetch so it carries the same bearer and tenant as
+// polling. Public callers may still use native EventSource.
 //
 // handlers: { [eventType]: (data, envelope) => {}, onEvent(envelope),
 //             onStreamDown() } — all optional. Returns { close(), seq }.
@@ -494,10 +502,25 @@ export function openStream(sessionId, afterSeq = 0, handlers = {}) {
   let reconnectTimer = null
   let retryMs = 1000
   let pollTimer = null
+  let pollTimeout = null
   let pollLimit = POLL_LIMIT
   let polling = null
   let pollController = null
+  let streamController = null
+  let streamReader = null
+  let useFetch = false
   const connection = (state) => { if (!closed) handlers.onConnectionState?.(state) }
+
+  const stop = () => {
+    closed = true
+    pollController?.abort()
+    streamController?.abort()
+    if (streamReader) { void streamReader.cancel().catch(() => {}) }
+    if (es) { try { es.close() } catch { /* noop */ } es = null }
+    if (reconnectTimer) clearTimeout(reconnectTimer)
+    if (pollTimer) clearInterval(pollTimer)
+    if (pollTimeout) clearTimeout(pollTimeout)
+  }
 
   const deliver = (envelope) => {
     if (closed || !envelope || !envelope.type) return
@@ -509,7 +532,7 @@ export function openStream(sessionId, afterSeq = 0, handlers = {}) {
     try {
       const h = handlers[envelope.type]
       if (h) h(envelope.data || {}, envelope)
-      if (handlers.onEvent) handlers.onEvent(envelope)
+      if (!closed && handlers.onEvent) handlers.onEvent(envelope)
     } catch { /* a handler exception must never kill the stream */ }
   }
 
@@ -517,8 +540,89 @@ export function openStream(sessionId, afterSeq = 0, handlers = {}) {
     try { return JSON.parse(raw) } catch { return null }
   }
 
+  const retry = () => {
+    if (closed) return
+    handlers.onStreamDown?.()
+    connection('retrying')
+    trackStreamDown(1)
+    if (closed) return
+    reconnectTimer = setTimeout(openEs, retryMs)
+    retryMs = Math.min(retryMs * 2, 10000)
+  }
+
+  const openFetch = async (headers) => {
+    const controller = new AbortController()
+    streamController = controller
+    let reader = null
+    try {
+      const path = `/api/sessions/${encodeURIComponent(sessionId)}/stream`
+      const res = await fetch(`${API_BASE}${path}?after_seq=${lastSeq}`, {
+        method: 'GET', headers: { Accept: 'text/event-stream', 'X-Tenant-Id': TENANT, ...headers },
+        signal: controller.signal, cache: 'no-store', redirect: 'error',
+      })
+      if (closed) return
+      noteUnauthorized(res, path, headers.Authorization)
+      if (res.status === 401 || res.status === 403) {
+        connection(res.status === 401 ? 'authentication' : 'workspace')
+        stop()
+        return
+      }
+      if (!res.ok || !res.body?.getReader) throw new Error('Stream unavailable')
+      reader = res.body.getReader()
+      streamReader = reader
+      connection('connected')
+      void reconcile()
+      const decoder = new TextDecoder()
+      let line = '', data = [], skipLF = false
+      const consumeLine = () => {
+        if (!line) {
+          const env = parse(data.join('\n'))
+          data = []
+          if (env && typeof env.type === 'string' && STREAM_EVENT_TYPES.includes(env.type)
+            && Number.isSafeInteger(env.seq) && env.seq > 0) {
+            retryMs = 1000
+            deliver(env)
+          }
+        } else if (!line.startsWith(':')) {
+          const colon = line.indexOf(':')
+          if ((colon < 0 ? line : line.slice(0, colon)) === 'data') {
+            let value = colon < 0 ? '' : line.slice(colon + 1)
+            if (value.startsWith(' ')) value = value.slice(1)
+            data.push(value)
+          }
+        }
+        line = ''
+      }
+      while (!closed) {
+        const chunk = await reader.read()
+        if (closed || controller.signal.aborted || chunk.done) break
+        for (const char of decoder.decode(chunk.value, { stream: true })) {
+          if (closed) break
+          if (skipLF && char === '\n') { skipLF = false; continue }
+          skipLF = char === '\r'
+          if (char === '\r' || char === '\n') consumeLine()
+          else line += char
+        }
+      }
+    } catch { /* polling covers disconnects and unavailable streaming bodies */ }
+    finally {
+      controller.abort()
+      if (reader) {
+        try { await reader.cancel() } catch { /* disconnected */ }
+        reader.releaseLock()
+      }
+      streamReader = null
+      streamController = null
+      retry()
+    }
+  }
+
   const openEs = () => {
-    if (closed || typeof EventSource === 'undefined') return
+    if (closed) return
+    const headers = authHeaders()
+    useFetch = useFetch || !!headers.Authorization
+    if (useFetch) { void openFetch(headers); return }
+    if (typeof EventSource === 'undefined') return
     try {
       es = new EventSource(
         `${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/stream?after_seq=${lastSeq}`,
@@ -536,19 +640,14 @@ export function openStream(sessionId, afterSeq = 0, handlers = {}) {
       // poll keeps events flowing while the SSE leg is down.
       try { es.close() } catch { /* noop */ }
       es = null
-      if (closed) return
-      if (handlers.onStreamDown) handlers.onStreamDown()
-      connection('retrying')
-      trackStreamDown(1)  // P2: streaming reliability as users feel it (capped 10/session)
-      reconnectTimer = setTimeout(openEs, retryMs)
-      retryMs = Math.min(retryMs * 2, 10000)
+      retry()
     }
   }
 
   const pollOnce = async () => {
     if (closed) return
     pollController = new AbortController()
-    const timeout = setTimeout(() => pollController?.abort(), 8000)
+    pollTimeout = setTimeout(() => pollController?.abort(), 8000)
     try {
       for (;;) {
         if (closed) return
@@ -557,12 +656,10 @@ export function openStream(sessionId, afterSeq = 0, handlers = {}) {
           `${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/transcript?limit=${pollLimit}`,
           { headers, signal: pollController.signal },
         ), `/api/sessions/${sessionId}/transcript`, headers.Authorization)
+        if (closed) return
         if (res.status === 401) {
           connection('authentication')
-          closed = true
-          if (es) { try { es.close() } catch { /* noop */ } es = null }
-          if (reconnectTimer) clearTimeout(reconnectTimer)
-          if (pollTimer) clearInterval(pollTimer)
+          stop()
           return
         }
         if (!res.ok) { connection(res.status === 403 ? 'workspace' : 'retrying'); return }
@@ -587,7 +684,7 @@ export function openStream(sessionId, afterSeq = 0, handlers = {}) {
         return
       }
     } catch { connection('retrying') }
-    finally { clearTimeout(timeout); pollController = null }
+    finally { clearTimeout(pollTimeout); pollTimeout = null; pollController = null }
   }
   const reconcile = () => {
     if (!polling) polling = pollOnce().finally(() => { polling = null })
@@ -600,13 +697,7 @@ export function openStream(sessionId, afterSeq = 0, handlers = {}) {
 
   return {
     reconcile,
-    close() {
-      closed = true
-      pollController?.abort()
-      if (es) { try { es.close() } catch { /* noop */ } es = null }
-      if (reconnectTimer) clearTimeout(reconnectTimer)
-      if (pollTimer) clearInterval(pollTimer)
-    },
+    close: stop,
     get seq() { return lastSeq },
   }
 }

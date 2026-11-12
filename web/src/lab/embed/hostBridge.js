@@ -1,4 +1,5 @@
 import { canonicalJSON } from '../contract.js'
+import { serviceState } from '../../lib/serviceAuthSession.js'
 import { hostOrigins } from './hostOrigins.js'
 import { validateWidgetDoc } from '../widgets/widgetDoc.js'
 import { laFitProblem } from '../widgets/laFit.js'
@@ -23,6 +24,11 @@ async function sha256(text, cryptoImpl) {
 // Decoding identifies the already authenticated session; it never authenticates it.
 // The rail's server response remains the authority to start this bridge.
 export async function sessionPrincipalProof({ storage = globalThis.localStorage, cryptoImpl = globalThis.crypto } = {}) {
+  const service = serviceState(storage)
+  if (service.mode) {
+    if (!service.identity) throw new Error('Lab session subject is unavailable')
+    return sha256(service.identity.sub, cryptoImpl)
+  }
   const token = storage?.getItem('leaf.jwt')
   const part = token?.split('.')[1]
   if (!part) throw new Error('Lab session subject is unavailable')

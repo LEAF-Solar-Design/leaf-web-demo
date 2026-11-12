@@ -18,12 +18,14 @@ const TENANT_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 
 // Roles (contract/AUTH.md §11.5): optional client metadata `leaf_roles`, a
 // comma-separated list (Auth0 client metadata values are strings). Same shape
-// rule + cap as server/roles.py. `platform_admin` is EXCLUDED for machine
-// clients — the same posture that keeps `admin` out of VALID_TIERS above: a
-// staff identity requires a human login, never a client secret.
+// rule + cap as server/roles.py. Default machine clients cannot mint
+// `platform_admin` or the admin tier. The explicit service-admin exception
+// below additionally requires the operator-owned Action secret allowlist.
 const ROLE_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 const MAX_ROLES = 16;
 const M2M_FORBIDDEN_ROLES = new Set(['platform_admin']);
+const SERVICE_ADMIN_CLIENT_ID_PATTERN = /^[A-Za-z0-9_-]{8,128}$/;
+const MAX_SERVICE_ADMIN_CLIENT_IDS = 16;
 
 function stringValue(value) {
   return typeof value === 'string' ? value : '';
@@ -39,6 +41,26 @@ function deriveRoles(metadata) {
     }
   }
   return Array.from(seen).sort().slice(0, MAX_ROLES);
+}
+
+function isServiceAdminClient(event) {
+  const raw = event && event.secrets && event.secrets.LEAF_SERVICE_ADMIN_CLIENT_IDS;
+  if (typeof raw !== 'string') {
+    return false;
+  }
+  let ids;
+  try {
+    ids = JSON.parse(raw);
+  } catch {
+    return false;
+  }
+  if (!Array.isArray(ids) || ids.length > MAX_SERVICE_ADMIN_CLIENT_IDS
+      || ids.some(id => typeof id !== 'string' || id.trim() !== id
+        || !SERVICE_ADMIN_CLIENT_ID_PATTERN.test(id))
+      || new Set(ids).size !== ids.length) {
+    return false;
+  }
+  return ids.includes(event && event.client && event.client.client_id);
 }
 
 function deriveClaims(event) {
@@ -62,7 +84,18 @@ function deriveClaims(event) {
   }
   const orgId = configuredOrgId || tenantId;
   const requestedTier = stringValue(metadata.leaf_tier);
-  const tier = VALID_TIERS.has(requestedTier) ? requestedTier : DEFAULT_TIER;
+  const serviceAdmin = requestedTier === 'admin' && isServiceAdminClient(event);
+  const tier = serviceAdmin ? 'admin'
+    : (VALID_TIERS.has(requestedTier) ? requestedTier : DEFAULT_TIER);
+  const roles = deriveRoles(metadata);
+  if (serviceAdmin) {
+    // Reserve a slot so the admin tier and implied role always stay in step.
+    if (roles.length === MAX_ROLES) {
+      roles.pop();
+    }
+    roles.push('platform_admin');
+    roles.sort();
+  }
   const tenantClass = stringValue(metadata.leaf_tenant_class) === ACCEPTANCE_TENANT_CLASS
     ? ACCEPTANCE_TENANT_CLASS
     : null;
@@ -71,7 +104,8 @@ function deriveClaims(event) {
     tenant_id: tenantId,
     org_id: orgId,
     tier,
-    roles: deriveRoles(metadata),
+    roles,
+    ...(serviceAdmin ? { principal_type: 'service_admin' } : {}),
     ...(tenantClass ? { tenant_class: tenantClass } : {}),
   };
 }
@@ -86,6 +120,9 @@ exports.onExecuteCredentialsExchange = async (event, api) => {
   api.accessToken.setCustomClaim(CLAIM_NS + 'org_id', claims.org_id);
   api.accessToken.setCustomClaim(CLAIM_NS + 'tier', claims.tier);
   api.accessToken.setCustomClaim(CLAIM_NS + 'roles', claims.roles);
+  if (claims.principal_type) {
+    api.accessToken.setCustomClaim(CLAIM_NS + 'principal_type', claims.principal_type);
+  }
   if (claims.tenant_class) {
     api.accessToken.setCustomClaim(CLAIM_NS + 'tenant_class', claims.tenant_class);
   }

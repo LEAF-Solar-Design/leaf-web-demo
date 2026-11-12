@@ -31,6 +31,7 @@ vi.mock('./api.js', () => ({
   getProjectLifecycle: vi.fn(),
   inviteMember: vi.fn(),
   listOrgInvitations: vi.fn(),
+  renameProject: vi.fn(),
   resetProject: vi.fn(),
   revokeMember: vi.fn(),
   setIdentityDisplayName: vi.fn(),
@@ -803,5 +804,69 @@ describe('board Settings lifecycle seating', () => {
     expect(screen.getByLabelText('Type the project name to confirm delete').value).toBe('Rooftop Array')
     expect(view.counts).toEqual({ mounts: 1, unmounts: 0 })
     expect(getProjectLifecycle).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('project rename in the lifecycle panel', () => {
+  const OTHER_ID = '99999999-2222-4333-8444-555555555555'
+  const renamed = (name) => ({ project_id: PROJECT_ID, status: 'renamed', name, previous_name: 'Rooftop Array',
+    receipt: { receipt_id: 'r-rename', project_id: PROJECT_ID, action: 'project_renamed', input_digest: 'e'.repeat(64),
+      created_at: '2026-11-10T00:00:00+00:00' }, replayed: false })
+  const form = () => within(screen.getByRole('form', { name: 'Rename project' }))
+  let renameProject
+  beforeEach(async () => {
+    renameProject = (await import('./api.js')).renameProject
+    renameProject.mockReset()
+    getProjectLifecycle.mockReset()
+    getProjectLifecycle.mockResolvedValue(SNAPSHOT)
+  })
+
+  it('shows the current name, submits the proposed name once and shows the server result', async () => {
+    renameProject.mockResolvedValue(renamed('Rooftop Array (attempt 4)'))
+    render(<ProjectLifecyclePanel enabled projectId={PROJECT_ID} />)
+    expect((await screen.findByTestId('project-current-name')).textContent).toBe('Rooftop Array')
+    const submit = form().getByRole('button', { name: 'Rename project' })
+    expect(submit.disabled).toBe(true)
+    fireEvent.change(form().getByLabelText('New project name'), { target: { value: '  Rooftop Array (attempt 4) ' } })
+    getProjectLifecycle.mockResolvedValue({ ...SNAPSHOT, project: { ...SNAPSHOT.project, name: 'Rooftop Array (attempt 4)' } })
+    fireEvent.click(submit)
+    expect((await form().findByRole('status')).textContent).toBe('Renamed to Rooftop Array (attempt 4).')
+    expect(renameProject).toHaveBeenCalledTimes(1)
+    expect(renameProject).toHaveBeenCalledWith(PROJECT_ID, 'Rooftop Array (attempt 4)')
+    await waitFor(() => expect(screen.getByTestId('project-current-name').textContent).toBe('Rooftop Array (attempt 4)'))
+  })
+
+  it('shows a refusal and keeps the old name', async () => {
+    renameProject.mockRejectedValue(Object.assign(new Error('a project with that name already exists in this workspace'), { status: 409 }))
+    render(<ProjectLifecyclePanel enabled projectId={PROJECT_ID} />)
+    await screen.findByTestId('project-current-name')
+    fireEvent.change(form().getByLabelText('New project name'), { target: { value: 'Already Here' } })
+    fireEvent.click(form().getByRole('button', { name: 'Rename project' }))
+    expect((await form().findByRole('alert')).textContent).toBe('a project with that name already exists in this workspace')
+    expect(screen.getByTestId('project-current-name').textContent).toBe('Rooftop Array')
+    expect(form().getByLabelText('New project name').value).toBe('Already Here')
+  })
+
+  it('offers no rename to a member who cannot manage the project', async () => {
+    getProjectLifecycle.mockResolvedValue({ ...SNAPSHOT, viewer: { ...SNAPSHOT.viewer, role: 'reviewer', can_invite: false, can_manage: false } })
+    render(<ProjectLifecyclePanel enabled projectId={PROJECT_ID} />)
+    await screen.findByText('Clone project')
+    expect(screen.queryByRole('form', { name: 'Rename project' })).toBeNull()
+  })
+
+  it('a result for one project is not painted onto another', async () => {
+    let finish
+    renameProject.mockReturnValue(new Promise((resolve) => { finish = resolve }))
+    const view = render(<ProjectLifecyclePanel enabled projectId={PROJECT_ID} />)
+    await screen.findByTestId('project-current-name')
+    fireEvent.change(form().getByLabelText('New project name'), { target: { value: 'Late Name' } })
+    fireEvent.click(form().getByRole('button', { name: 'Rename project' }))
+    getProjectLifecycle.mockResolvedValue({ ...SNAPSHOT, project: { ...SNAPSHOT.project, project_id: OTHER_ID, name: 'Other Project' } })
+    view.rerender(<ProjectLifecyclePanel enabled projectId={OTHER_ID} />)
+    await waitFor(() => expect(screen.getByTestId('project-current-name').textContent).toBe('Other Project'))
+    await act(async () => { finish(renamed('Late Name')) })
+    expect(form().queryByRole('status')).toBeNull()
+    expect(screen.getByTestId('project-current-name').textContent).toBe('Other Project')
+    expect(form().getByLabelText('New project name').value).toBe('')
   })
 })

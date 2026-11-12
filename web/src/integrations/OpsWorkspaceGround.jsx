@@ -4,7 +4,8 @@ import { IntegrationActionForm } from '../../../vendor/assistant-react/src/actio
 import { IntegrationActionPreflightError } from '../../../vendor/assistant-react/src/actions'
 import { DisplayPreferencesSchema } from '../../../vendor/assistant-react/src/datasets/formatting'
 import { DatasetElementV1, DatasetQueryV1 } from '../../../vendor/assistant-contract/src/integration'
-import { actionRunMatches, createIntegrationsClient, UUID } from './client.js'
+import { actionRunMatches, canonicalRecordsPointer, recordsAtOriginal, createIntegrationsClient, UUID } from './client.js'
+import { listProjectReferences, readProjectReferenceOriginal } from '../projects/api.js'
 import { IntegrationSetupPanel } from './IntegrationSetupPanel.jsx'
 import { ManualWorkflowRunPanel } from './ManualWorkflowRunPanel.jsx'
 import { ManualWorkflowStartPanel } from './ManualWorkflowStartPanel.jsx'
@@ -13,9 +14,15 @@ import { ActionDefinitionPanel } from './ActionDefinitionPanel.jsx'
 import { WorkflowSchedulePreviewPanel } from './WorkflowSchedulePreviewPanel.jsx'
 import { WebhookReceiptPanel } from './WebhookReceiptPanel.jsx'
 import { WorkflowScheduleDraftBrowser } from './WorkflowScheduleDraftBrowser.jsx'
+import OpsHomePanel from './OpsHomePanel.jsx'
+import { useSurfaceFrame } from '../site/SurfaceFrame.jsx'
 import { NO_OCCLUDERS, useGroundWindow, windowStyle } from '../site/groundWindow.js'
+import { STUDIO_DRAWING_OCCLUDERS } from '../site/drawingOccluders.js'
 import './ops-workspace.css'
 import { humanizeError } from '../errorHumanize.js'
+
+const STUDIO_CHROME_OCCLUDERS = Object.freeze(STUDIO_DRAWING_OCCLUDERS.filter(([selector]) =>
+  ['header.top', '#drafting-ribbon', '.bar.bar-command-line', 'footer.foot-bar'].includes(selector)))
 
 const empty = () => ({ scope: null, datasets: [], elements: [], datasetCursor: null, elementCursor: null, selected: null, read: null, action: null, historical: false, pending: '', error: '', notice: '' })
 const blankForm = () => ({ dataset: '', id: '', title: '', kind: 'table', columns: [], x: '', y: '', editing: null })
@@ -26,8 +33,170 @@ export function scopeCacheIdentity(scope, generation) {
   return JSON.stringify([scope.tenantId, scope.projectId, scope.platformUserId, scope.bindingId, scope.projectRole, scope.externalAuthority, scope.externalSubject, generation])
 }
 
+function ProjectMaterialImport({ projectId, client, signal, guard, onImported, onForbidden }) {
+  const [references, setReferences] = useState([])
+  const [cursor, setCursor] = useState(null)
+  const [source, setSource] = useState(null)
+  const [arrays, setArrays] = useState([])
+  const [pointer, setPointer] = useState(null)
+  const [fields, setFields] = useState([])
+  const [id, setId] = useState('')
+  const [title, setTitle] = useState('')
+  const [version, setVersion] = useState(1)
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  const [contextBytes, setContextBytes] = useState(null)
+  const request = useRef(null)
+  useLayoutEffect(() => {
+    const abort = () => request.current?.abort()
+    signal.addEventListener('abort', abort)
+    return () => { signal.removeEventListener('abort', abort); abort() }
+  }, [signal])
+  const alive = (controller) => request.current === controller && !controller.signal.aborted && !signal.aborted
+  async function run(action) {
+    request.current?.abort()
+    const controller = new AbortController()
+    request.current = controller
+    setPending(true); setError(''); setNotice('')
+    try {
+      await guard(controller.signal)
+      if (alive(controller)) await action(controller)
+    } catch (failure) {
+      if (!alive(controller) || failure?.name === 'AbortError') return
+      if (failure?.status === 403) onForbidden()
+      else setError(failure.message || 'The original is unavailable. Nothing was imported.')
+    } finally { if (alive(controller)) setPending(false) }
+  }
+  function loadReferences(after) {
+    run(async (controller) => {
+      const page = await listProjectReferences(projectId, { signal: controller.signal, cursor: after })
+      await guard(controller.signal)
+      if (!alive(controller)) return
+      if (!Array.isArray(page.materials) || (page.next_cursor !== null && !UUID.test(page.next_cursor || ''))) throw new Error('Project originals are unavailable.')
+      const eligible = page.materials.filter((item) => item.project_id === projectId && item.media_type === 'application/json' &&
+        UUID.test(item.material_id) && /^[0-9a-f]{64}(?![\s\S])/.test(item.sha256) && Number.isInteger(item.byte_size) && item.byte_size > 0 && item.byte_size <= 8388608)
+      setReferences((old) => after ? [...old, ...eligible] : eligible); setCursor(page.next_cursor)
+      if (!eligible.length) setNotice('No eligible JSON originals on this page. JSON originals must be at most 8 MiB.')
+    })
+  }
+  function chooseOriginal(materialId) {
+    setSource(null); setArrays([]); setPointer(null); setFields([]); setContextBytes(null)
+    const material = references.find((item) => item.material_id === materialId)
+    if (!material) { request.current?.abort(); setPending(false); return }
+    run(async (controller) => {
+      const blob = await readProjectReferenceOriginal(projectId, materialId, { signal: controller.signal })
+      if (blob.size !== material.byte_size || blob.size > 8388608) throw new Error('The original byte size changed. Nothing was imported.')
+      if (!globalThis.crypto?.subtle) throw new Error('Original digest verification is unavailable in this browser.')
+      const bytes = await blob.arrayBuffer()
+      const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (byte) => byte.toString(16).padStart(2, '0')).join('')
+      if (digest !== material.sha256) throw new Error('The original digest changed. Nothing was imported.')
+      let original
+      try { original = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) }
+      catch { throw new Error('The original must contain valid UTF-8 JSON.') }
+      const found = []
+      const stack = [{ value: original, path: '', depth: 0 }]
+      let arrayListBytes = 2
+      let limited = false
+      for (let position = 0; position < stack.length; position += 1) {
+        const { value, path, depth } = stack[position]
+        if (Array.isArray(value)) {
+          const entry = { pointer: path, count: value.length }
+          arrayListBytes += new TextEncoder().encode(JSON.stringify(entry)).byteLength + 1
+          if (arrayListBytes > 262144) { limited = true; break }
+          found.push(entry)
+        }
+        if (value && typeof value === 'object' && depth < 32) {
+          for (const key of Object.keys(value)) {
+            const child = `${path}/${key.replace(/~/g, '~0').replace(/\//g, '~1')}`
+            try { canonicalRecordsPointer(child) } catch { continue }
+            if (value[key] && typeof value[key] === 'object') stack.push({ value: value[key], path: child, depth: depth + 1 })
+          }
+        }
+      }
+      await guard(controller.signal)
+      if (!alive(controller)) return
+      setSource({ material, original }); setArrays(found)
+      if (limited) setNotice('Additional array paths are unavailable because the array list is too large. The original is retained; choose one of the listed arrays.')
+      if (!found.length) setError('No safe record arrays are available in this original.')
+    })
+  }
+  function selectArray(value) {
+    setPointer(value); setFields([]); setError(''); setContextBytes(null)
+    if (value === null || !source) return
+    const rows = recordsAtOriginal(source.original, value)
+    if (!Array.isArray(rows)) return
+    if (value) {
+      try {
+        const envelope = JSON.parse(JSON.stringify(source.original))
+        const split = value.lastIndexOf('/')
+        const parent = recordsAtOriginal(envelope, value.slice(0, split))
+        const key = value.slice(split + 1).replace(/~1/g, '/').replace(/~0/g, '~')
+        parent[key] = { schema: 'leaf.selected-records-reference.v1', records_pointer: value, row_count: rows.length }
+        const context = { schema: 'leaf.project-material-context.v1', source: { kind: 'project_material', material_id: source.material.material_id,
+          sha256: source.material.sha256, byte_length: source.material.byte_size }, selection: { records_pointer: value }, row_count: rows.length, envelope }
+        const size = new TextEncoder().encode(JSON.stringify(context)).byteLength
+        setContextBytes(size)
+        if (size > 262144) { setPointer(null); setError('Complete material context is too large to display. The original and last valid dataset are retained.'); return }
+      } catch { setPointer(null); setError('Complete material context is unavailable. The original and last valid dataset are retained.'); return }
+    }
+    const first = rows.find((row) => row && typeof row === 'object' && !Array.isArray(row))
+    setFields(Object.keys(first || {}).filter((key) => /^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(key) &&
+      !['__proto__', 'prototype', 'constructor'].includes(key)).slice(0, 100).map((key, index) => ({
+      id: key, label: key, pointer: `/${key}`, kind: 'text', conversion: 'identity', key: index === 0, nullable: false,
+    })))
+  }
+  function updateField(index, key, value) { setFields((old) => old.map((field, position) => position === index ? { ...field, [key]: value } : field)) }
+  function submit(event) {
+    event.preventDefault()
+    run(async (controller) => {
+      if (!source || pointer === null || !Array.isArray(recordsAtOriginal(source.original, pointer))) throw new Error('Choose an original and records array.')
+      const definition = { schema_version: 1, id, version: Number(version), title, reporting_time_zone: 'UTC', retention_days: 365,
+        fields: fields.map((field) => ({ id: field.id, label: field.label, type: { kind: field.kind }, nullable: field.nullable, sensitivity: 'internal' })),
+        key_fields: fields.filter((field) => field.key).map((field) => field.id),
+        lineage: { kind: 'project_material', material_id: source.material.material_id, sha256: source.material.sha256, byte_length: source.material.byte_size } }
+      const mapping = { schema_version: 1, fields: fields.map((field) => ({ field_id: field.id, pointer: field.pointer, conversion: field.conversion })) }
+      const result = await client.importProjectMaterial(projectId, { definition, mapping, ...(pointer ? { selection: { records_pointer: pointer } } : {}) }, { signal: controller.signal })
+      await guard(controller.signal)
+      if (!alive(controller)) return
+      await onImported(result.reference, controller.signal)
+      if (alive(controller)) setNotice(`Imported ${result.rowCount} records. Original bytes and source clocks are retained.`)
+    })
+  }
+  return <section aria-label="Import project original"><h2>Import project original</h2>
+    <button disabled={pending} onClick={() => loadReferences()}>List JSON originals</button>
+    {cursor && <button disabled={pending} onClick={() => loadReferences(cursor)}>More originals</button>}
+    <label>Project original<select defaultValue="" onChange={(event) => chooseOriginal(event.target.value)}>
+      <option value="">Select original</option>{references.map((item) => <option key={item.material_id} value={item.material_id}>{item.name}</option>)}
+    </select></label>
+    {pending && <p role="status">Reading or importing original…</p>}{error && <p role="alert">{error}</p>}{notice && <p role="status">{notice}</p>}
+    {source && <><pre aria-label="Original provenance">{JSON.stringify(source.material, null, 2)}</pre>
+      {contextBytes !== null && <p>Complete material context: {contextBytes} UTF-8 bytes. Source capture and ingestion clocks remain unchanged.</p>}
+      <label>Records array<select value={pointer === null ? 'unselected' : pointer} disabled={pending} onChange={(event) => selectArray(event.target.value === 'unselected' ? null : event.target.value)}>
+        <option value="unselected">Select records array</option>{arrays.map((item) => <option key={item.pointer} value={item.pointer}>{item.pointer || '(root)'} · {item.count} records</option>)}
+      </select></label>
+      <form aria-label="Map project records" onSubmit={submit}><fieldset disabled={pending || pointer === null}>
+        <label>Import dataset ID<input required value={id} onChange={(event) => setId(event.target.value)} /></label>
+        <label>Import dataset title<input required value={title} onChange={(event) => setTitle(event.target.value)} /></label>
+        <label>Import dataset version<input required type="number" min="1" value={version} onChange={(event) => setVersion(event.target.value)} /></label>
+        {fields.map((field, index) => <fieldset key={index}><legend>Import field {index + 1}</legend>
+          {['id', 'label', 'pointer'].map((key) => <label key={key}>{`Field ${index + 1} ${key}`}<input required value={field[key]} onChange={(event) => updateField(index, key, event.target.value)} /></label>)}
+          <label>{`Field ${index + 1} type`}<select value={field.kind} onChange={(event) => updateField(index, 'kind', event.target.value)}>{['text', 'identifier', 'count', 'number', 'boolean', 'date', 'instant'].map((kind) => <option key={kind}>{kind}</option>)}</select></label>
+          <label>{`Field ${index + 1} conversion`}<select value={field.conversion} onChange={(event) => updateField(index, 'conversion', event.target.value)}>{['identity', 'string_number', 'iso_instant'].map((kind) => <option key={kind}>{kind}</option>)}</select></label>
+          <label><input type="checkbox" checked={field.key} onChange={(event) => updateField(index, 'key', event.target.checked)} />{`Field ${index + 1} key`}</label>
+          <label><input type="checkbox" checked={field.nullable} onChange={(event) => updateField(index, 'nullable', event.target.checked)} />{`Field ${index + 1} nullable`}</label>
+          <button type="button" onClick={() => setFields((old) => old.filter((_, position) => position !== index))}>Remove field {index + 1}</button>
+        </fieldset>)}
+        <button type="button" disabled={fields.length >= 100} onClick={() => setFields((old) => [...old, { id: '', label: '', pointer: '', kind: 'text', conversion: 'identity', key: false, nullable: false }])}>Add import field</button>
+        <button type="submit">Import selected records</button>
+      </fieldset></form></>}
+  </section>
+}
+
 export function OpsWorkspaceGround({ active = false, projectId = null, projectLabel, session, signedIn = false, accountScope, mock = false,
   leavingGround = null, studioShell = false, occluders = NO_OCCLUDERS, client: suppliedClient, mode }) {
+  const devices = useSurfaceFrame()?.devices
+  const hasLinkedDevice = Array.isArray(devices?.devices) && devices.devices.length > 0
   const client = useMemo(() => suppliedClient || createIntegrationsClient(), [suppliedClient])
   const [state, setState] = useState(empty)
   const [form, setForm] = useState(blankForm)
@@ -59,7 +228,8 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   // These shell cards can float over the Ground at tablet widths.
   const shellOccluders = useMemo(() => [
     ...occluders, ['aside.nav', 'nearest'], ['.studio-profile-info', 'nearest'],
-  ], [occluders])
+    ...(studioShell ? STUDIO_CHROME_OCCLUDERS : NO_OCCLUDERS),
+  ], [occluders, studioShell])
   const win = useGroundWindow(active || leaving, studioShell, boardRef, shellOccluders)
 
   function invalidate() {
@@ -369,9 +539,11 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
     <div className="ops-workspace" style={windowStyle(win)}>
       <h1>Ops workspace</h1><p>{projectLabel?.trim() || (projectId ? 'Project name unavailable' : 'No project open')}</p>
       {message ? <p role="status">{message}</p> : visible && <>
+        <OpsHomePanel active={active} />
         <p role="status" aria-live="polite" tabIndex={-1} ref={resultRef}>{state.notice || state.pending}</p>
         {state.error && <div role="alert"><p>{humanizeError(state.error)}</p>{state.retryable && <button onClick={() => setRetry((value) => value + 1)}>Retry integrations</button>}</div>}
-        {state.scope && <>
+        {state.scope && <details className="ops-advanced" open={!hasLinkedDevice}>
+          <summary>Workflows and data</summary>
           {['owner', 'editor'].includes(state.scope.projectRole) && context.current && <WorkflowScheduleDraftBrowser
             key={JSON.stringify(['schedule-drafts', identity.key, context.current.cacheIdentity])}
             contextKey={JSON.stringify([identity.key, context.current.cacheIdentity])} client={client} projectId={projectId}
@@ -412,11 +584,22 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
             signal={context.current.controller.signal} guard={guardSetup}
             onForbidden={() => { const ctx = context.current; if (ctx) fail({ status: 403 }, ctx) }}
             onDatasetReady={refreshSetupDataset} />}
+          {state.scope.projectRole === 'owner' && context.current && <ProjectMaterialImport
+            key={JSON.stringify(['material-import', identity.key, context.current.cacheIdentity])} projectId={projectId} client={client}
+            signal={context.current.controller.signal} guard={guardSetup}
+            onForbidden={() => { const ctx = context.current; if (ctx) fail({ status: 403 }, ctx) }}
+            onImported={async (_reference, signal) => {
+              const ctx = context.current
+              const page = await client.listDatasets(projectId, { signal })
+              await guardSetup(signal)
+              if (ctx && current(ctx) && !signal.aborted) setState((old) => ({ ...old, datasets: page.records, datasetCursor: page.nextCursor }))
+            }} />}
           <section aria-label="Integration datasets"><h2>Datasets</h2>
             {!state.datasets.length && <p>{state.scope.projectRole === 'owner'
               ? 'No datasets are available yet. Use integration setup to connect your data.'
               : 'No datasets are available yet. Ask the project owner to connect your data.'}</p>}
-            <ul>{state.datasets.map((item) => <li key={`${item.reference.id}:${item.reference.version}`}>{item.title} · version {item.reference.version}</li>)}</ul>
+            <ul>{state.datasets.map((item) => <li key={`${item.reference.id}:${item.reference.version}`}>{item.title} · version {item.reference.version}
+              {item.material_context && <pre aria-label={`Material context for ${item.title}`}>{JSON.stringify(item.material_context, null, 2)}</pre>}</li>)}</ul>
             {state.datasetCursor && <button disabled={pending} onClick={() => loadMore('datasets')}>Load more datasets</button>}
           </section>
           <section aria-label="Saved views"><h2>Saved views</h2>
@@ -483,7 +666,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
             {!state.read && !pending && <button onClick={() => operation('Loading view…', (ctx) => readView(state.selected, state.historical, ctx))}>Retry view</button>}
             </>}
           </section>}
-        </>}
+        </details>}
       </>}
     </div>
   </section>

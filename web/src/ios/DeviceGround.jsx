@@ -1,7 +1,13 @@
 import { useRef } from 'react'
 import { deriveIosState, humanizeStage, IOS_STATE_LABEL, ShipStage } from './IosSurface.jsx'
 import { formatElementId } from '../lib/elementIdentity.js'
-import { NO_OCCLUDERS, shortId, useGroundWindow, windowStyle } from '../site/groundWindow.js'
+import { NO_OCCLUDERS, useGroundWindow, windowStyle } from '../site/groundWindow.js'
+
+const SHIP_LABELS = {
+  idle: 'Not started', loading: 'Checking setup', 'setup-required': 'Setup needed',
+  ready: 'Ready to build', launching: 'Starting build', running: 'Building',
+  succeeded: 'Build complete', failed: 'Build failed', unavailable: 'Status unavailable',
+}
 
 // ---------------------------------------------------------------------------
 // iOS: the device stage. A phone silhouette whose screen carries the ship
@@ -23,9 +29,10 @@ export function DeviceGround({
     ? 'Not available yet'
     : state === 'malformed' ? 'Status unreadable' : IOS_STATE_LABEL[state]
   const stage = state === 'in-progress' ? humanizeStage(contract?.build_stage) : null
+  const shipStage = humanizeStage(ship?.execution?.failed_stage || ship?.execution?.stage)
   const rungs = [
     { id: 'revision', label: 'Approved revision', lit: Boolean(revision) },
-    { id: 'readiness', label: 'Mounted Apple readiness', lit: state === 'ready' || state === 'in-progress' },
+    { id: 'readiness', label: 'Apple account connected', lit: state === 'ready' || state === 'in-progress' },
     { id: 'build', label: 'TestFlight build', lit: state === 'ready' },
   ]
   return (
@@ -47,11 +54,11 @@ export function DeviceGround({
           <span className="device-notch" aria-hidden="true" />
           <div className="device-screen">
             <span className="device-k">{ship ? 'Build and delivery status' : 'TestFlight lane'}</span>
-            <strong className="device-v" data-testid="device-state">{ship ? ship.phase : label}</strong>
-            {(ship ? ship.execution?.failed_stage || ship.execution?.stage : stage) && <span className="device-stage">{ship ? ship.execution?.failed_stage || ship.execution?.stage : stage}</span>}
+            <strong className="device-v" data-testid="device-state">{ship ? SHIP_LABELS[ship.phase] || SHIP_LABELS.unavailable : label}</strong>
+            {(ship ? shipStage : stage) && <span className="device-stage">{ship ? shipStage : stage}</span>}
             {(projectLabel || revision) && (
               <span className="device-meta">
-                {projectLabel || 'project'}{revision ? ` · ${shortId(revision)}` : ''}
+                {projectLabel || 'Project'}{revision ? ' · Revision selected' : ''}
               </span>
             )}
           </div>
@@ -69,11 +76,11 @@ export function DeviceGround({
           {/* Receipt identity is readiness detail: never shown while dormant. */}
           {state !== 'dormant' && contract?.receipt_id && (
             <p className="ground-note">
-              receipt {shortId(contract.receipt_id, 12)}{contract.reported_at ? ` · ${contract.reported_at}` : ''}
+              Build status recorded{contract.reported_at ? ` · ${contract.reported_at}` : ''}
             </p>
           )}
           {state === 'dormant' && <p className="ground-note">iOS setup status isn’t available yet.</p>}
-          {state === 'never-configured' && <p className="ground-note">No ship-lane readiness has been published for this revision.</p>}
+          {state === 'never-configured' && <p className="ground-note">Build setup has not been completed for this revision.</p>}
           </>}
         </div>
       </div>

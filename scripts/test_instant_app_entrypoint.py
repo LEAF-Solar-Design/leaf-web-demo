@@ -1,5 +1,10 @@
 from pathlib import Path
+import os
+import shutil
+import subprocess
 import unittest
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,3 +46,55 @@ class InstantAppEntrypointTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.mark.parametrize("install_exit", [0, 1])
+def test_source_bootstrap_selects_deployed_ref_even_when_install_fails(tmp_path, install_exit):
+    shell = shutil.which("sh")
+    if not shell:
+        pytest.skip("POSIX shell unavailable")
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    for name, text in {
+        "python": '#!/bin/sh\nprintf "%s" "$LEAF_PLATFORM_REPO_SOURCE_REF" > "$PROBE_INSTALL"\nexit "$PROBE_EXIT"\n',
+        "uvicorn": '#!/bin/sh\nprintf "%s" "$LEAF_PLATFORM_REPO_SOURCE_REF" > "$PROBE_SERVE"\n',
+    }.items():
+        path = commands / name
+        path.write_text(text, encoding="utf-8", newline="\n")
+        path.chmod(0o755)
+    env = {key: os.environ[key] for key in ("PATH", "SYSTEMROOT", "COMSPEC", "TEMP", "TMP") if key in os.environ}
+    env.update(PATH=str(commands) + os.pathsep + env.get("PATH", ""),
+               LEAF_PLATFORM_SOURCE_SNAPSHOT_DIR=str(tmp_path / "snapshot"),
+               LEAF_SOURCE_SHA="a" * 40, LEAF_INSTANT_EXECUTION_ENABLED="0",
+               PROBE_INSTALL=str(tmp_path / "install"), PROBE_SERVE=str(tmp_path / "serve"),
+               PROBE_EXIT=str(install_exit))
+    result = subprocess.run([shell, str(ROOT / "server/start-app.sh")], env=env,
+                            capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0
+    expected = "refs/leaf/deployed/" + "a" * 40
+    assert (tmp_path / "install").read_text() == expected
+    assert (tmp_path / "serve").read_text() == expected
+    assert result.stderr.strip() == ("platform_source_snapshot_unavailable" if install_exit else "")
+
+
+def test_source_bootstrap_preserves_explicit_authoring_override(tmp_path):
+    shell = shutil.which("sh")
+    if not shell:
+        pytest.skip("POSIX shell unavailable")
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    python = commands / "python"
+    python.write_text("#!/bin/sh\nexit 42\n", newline="\n")
+    python.chmod(0o755)
+    uvicorn = commands / "uvicorn"
+    uvicorn.write_text('#!/bin/sh\nprintf "%s" "$LEAF_PLATFORM_REPO_SOURCE_REF"\n', newline="\n")
+    uvicorn.chmod(0o755)
+    env = {key: os.environ[key] for key in ("PATH", "SYSTEMROOT", "COMSPEC", "TEMP", "TMP") if key in os.environ}
+    env.update(PATH=str(commands) + os.pathsep + env.get("PATH", ""),
+               LEAF_PLATFORM_SOURCE_SNAPSHOT_DIR=str(tmp_path / "snapshot"),
+               LEAF_PLATFORM_REPO_SOURCE_REF="refs/heads/operator-pin",
+               LEAF_INSTANT_EXECUTION_ENABLED="0")
+    result = subprocess.run([shell, str(ROOT / "server/start-app.sh")], env=env,
+                            capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0 and result.stdout == "refs/heads/operator-pin"
+    assert result.stderr == ""

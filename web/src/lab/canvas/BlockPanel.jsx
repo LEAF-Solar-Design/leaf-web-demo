@@ -1,12 +1,21 @@
-import { useEffect, useRef, useState } from 'react'
+import { createContext, useContext, useEffect, useRef, useState } from 'react'
 import { canonicalJSON } from '../contract.js'
 import { manifestFor, registry } from './registry.js'
 import { connectionStatus } from './portCompat.js'
-import { inputValues, pipeId, validateGraph } from './graphDoc.js'
+import { pipeId, validateGraph } from './graphDoc.js'
 import CodeTab, { SettingField, SettingsJSON } from '../code/CodeTab.jsx'
+import { placement } from '../runtime/placement.js'
+import { sentence } from '../honesty.js'
+
+// Inspector also serves read-only views; edit actions come from the owning canvas.
+export const OutputActionsContext = createContext(null)
 
 export default function BlockPanel({ block, document, onSettings, onConnect, onDisconnect, entries = registry, upstream = {}, evidence = null, codeEvidence }) {
+  const outputActions = useContext(OutputActionsContext)
+  const [outputName, setOutputName] = useState('')
+  const [outputPort, setOutputPort] = useState('')
   const manifest = manifestFor(block, entries)
+  const targetPlacement = placement(manifest)
   const [tab, setTab] = useState('Setup')
   const [draft, setDraft] = useState(block.settings)
   const [json, setJson] = useState(canonicalJSON(block.settings))
@@ -65,6 +74,21 @@ export default function BlockPanel({ block, document, onSettings, onConnect, onD
           {pipe.from.node}/{pipe.from.port} → {pipe.to.port} <button type="button" onClick={() => onDisconnect(pipeId(pipe))}>Disconnect {pipe.to.port}</button>
         </p>)}
         {Object.entries(manifest.inputs).map(([name, pin]) => <p key={name}>{name}: {pin.has_default ? `omitted uses default ${JSON.stringify(pin.default)}` : pin.required ? 'pipe required' : 'optional, no declared default'}</p>)}
+        {outputActions && <fieldset><legend>Expose as output</legend>
+          <label>Output port<select value={outputPort} onChange={event => setOutputPort(event.target.value)}>
+            <option value="">Choose output port</option>{Object.keys(manifest.outputs).map(port => <option key={port}>{port}</option>)}
+          </select></label>
+          <label>Output name<input value={outputName} onChange={event => setOutputName(event.target.value)} /></label>
+          <button type="button" disabled={!outputPort} onClick={() => {
+            try { outputActions.set(outputName, { node: block.id, port: outputPort }); setMessage('Output added') }
+            catch (error) { setMessage(error.message) }
+          }}>Add output</button>
+          {Object.entries(document.outputs).filter(([, endpoint]) => endpoint.node === block.id).map(([name, endpoint]) =>
+            <p key={name}>{name} / {endpoint.port} <button type="button" onClick={() => {
+              try { outputActions.remove(name); setMessage('Output removed') }
+              catch (error) { setMessage(error.message) }
+            }}>Remove output {name}</button></p>)}
+        </fieldset>}
         <details><summary>Submit settings JSON</summary>
           <SettingsJSON value={json} onChange={value => { setJson(value); dirty.current = true }} onApply={() => { try { save(JSON.parse(json)) } catch (error) { setMessage(error.message) } }} />
         </details>
@@ -72,9 +96,16 @@ export default function BlockPanel({ block, document, onSettings, onConnect, onD
       {tab === 'Test' && <>
         <button type="button" onClick={() => setTest(validateGraph(document, entries))}>Validate graph</button>
         {test && <p role="status">{test.message} <span className="leaf-timing">{test.ms.toFixed(2)} ms</span></p>}
-        <p>Validation checks wiring and settings. Execution is unavailable here.</p>
-        <h3>Resolved inputs</h3><pre>{canonicalJSON(inputValues(document, block, upstream, entries))}</pre>
-        <h3>Declared sample output</h3><pre>{canonicalJSON(manifest.sample_output)}</pre>
+        <p>{({ here: 'Runs here as you edit and on the Lab server when you press Run.',
+          browser: sentence('browser_only_block'), server: 'Runs on the Lab server when you press Run.',
+          bot: sentence('runs_on_bot'), host: 'Reads from the host.' })[targetPlacement]}</p>
+        <h3>Data out</h3>
+        {Object.keys(manifest.outputs).map(port => <div key={port}>
+          <p>{port}</p><pre>{upstream[`${block.id}/${port}`] != null ? canonicalJSON(upstream[`${block.id}/${port}`])
+            : targetPlacement === 'bot' ? sentence('runs_on_bot') : 'No value'}</pre>
+        </div>)}
+        <h3>Declared sample, not a measurement</h3><pre>{canonicalJSON(manifest.sample_output)}</pre>
+        {manifest.version.code_sha256 === '0'.repeat(64) && <p className="lab-measurement">{sentence('placeholder_block')}</p>}
       </>}
       <div hidden={tab !== 'Code'}><CodeTab key={block.id} block={block} manifest={manifest} evidence={codeEvidence ? codeEvidence(block) : evidence} onSettings={applySettings} /></div>
     </div>

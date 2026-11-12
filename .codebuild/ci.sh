@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+LEAF_CI_SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"
 # BEGIN SHARD ENV
 CI_SHARD_TOTAL_N=1
 CI_SHARD_INDEX_N=0
@@ -23,6 +24,121 @@ if [[ "$shard_env_valid" != 1 ]]; then
 fi
 echo "LEAF_EVENT shard mode=$CI_SHARD_MODE index=$CI_SHARD_INDEX_N total=$CI_SHARD_TOTAL_N"
 # END SHARD ENV
+# A post-cheap-phase callback re-enters this exact trusted script, not a
+# candidate helper. Only dependency-backed heavy prerequisites run here.
+if [[ "${1:-}" == --heavy-prerequisites ]]; then
+  if [[ "${LEAF_CI_POSTGRES_SETUP_STATUS:-0}" != 0 ]]; then
+    echo "FATAL: ephemeral PostgreSQL did not start; refusing browser and web setup so this build fails before them" >&2
+    exit 1
+  fi
+browser_log_dir="$(mktemp -d)"
+# Give the browser and its children a process group for failure cleanup.
+set -m
+(
+set -euo pipefail
+trap 'exit 143' TERM
+echo "LEAF_T start chromium $(date +%s%3N)"
+cd "$CODEBUILD_SRC_DIR/web"
+echo "--- 5/6 Install Chromium for browser proofs"
+# LEAF_CI_BROWSER_INSTALL_BEGIN
+# Install the browser first; a missing binary is a hard failure under set -e.
+# Then check a real headless launch through the same producer, bounded to 60 s.
+# Run apt via --with-deps only after a failed launch, bounded to 420 s.
+# On 2026-09-11 mirror failures stopped six of seven builds even though runtime
+# libraries were already installed; only optional fonts could not be served.
+# On 2026-11-10 jobs 18313 and 18316 waited over 8m39s on silent mirrors.
+# Recent per-job apt updates fetched 50.9 MB with zero new packages; setup
+# medians were 31.8 s on run workers and 58.8 s on WSL, with stalls over 1000 s.
+# timeout kills the whole process group. After one dependency timeout, skip
+# later dependency stages; browser proofs still check OS runtime usability.
+browser_deps_timeout_s=420
+browser_launch_check_timeout_s=60
+browser_deps_unavailable=0
+install_ci_browser() {
+  local status=0 launch_file launch_started
+  "$@" install chromium
+  launch_file="$(mktemp)"
+  launch_started="$(date +%s%3N)"
+  timeout --kill-after=15 "$browser_launch_check_timeout_s" "$@" pdf about:blank "$launch_file" || status=$?
+  rm -f "$launch_file"
+  if [[ "$status" == 0 ]]; then
+    echo "browser launch check passed for $*; OS dependency stage skipped ($(( $(date +%s%3N) - launch_started )) ms)"
+    return 0
+  fi
+  echo "WARNING: $* launch check failed; running the OS dependency stage" >&2
+  status=0
+  if [[ "$browser_deps_unavailable" == 0 ]]; then
+    timeout --kill-after=15 "$browser_deps_timeout_s" "$@" install --with-deps chromium || status=$?
+    if [[ "$status" == 0 ]]; then
+      return 0
+    fi
+    if [[ "$status" == 124 || "$status" == 137 ]]; then
+      browser_deps_unavailable=1
+      echo "WARNING: $* dependency install exceeded ${browser_deps_timeout_s}s; skipping later dependency stages. Browser proofs still check OS runtime usability." >&2
+    else
+      echo "WARNING: $* dependency install failed. Browser proofs still check OS runtime usability." >&2
+    fi
+  else
+    echo "WARNING: an earlier dependency stage exceeded ${browser_deps_timeout_s}s; skipping $* dependency stage. Browser proofs still check OS runtime usability." >&2
+  fi
+  return 0
+}
+
+if [[ -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" ]]; then
+  timeout --kill-after=5 120 python -I -B "$LEAF_DEP_CACHE_HELPER" seed --kind pw --repo "$CODEBUILD_SRC_DIR" \
+    --cache-dir "$LEAF_CI_CACHE_DIR" --writable "${LEAF_CI_CACHE_WRITABLE:-0}" --run "${CODEBUILD_BUILD_ID:-local}" \
+    || echo "LEAF_DEP_CACHE kind=pw action=seed result=error"
+fi
+install_ci_browser npx playwright
+# Install the Python producer's pinned browser with the gate interpreter too.
+install_ci_browser python -m playwright
+if [[ -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" && "${LEAF_CI_CACHE_WRITABLE:-0}" == 1 ]]; then
+  timeout --kill-after=5 240 python -I -B "$LEAF_DEP_CACHE_HELPER" publish --kind pw --repo "$CODEBUILD_SRC_DIR" \
+    --cache-dir "$LEAF_CI_CACHE_DIR" --writable 1 --run "${CODEBUILD_BUILD_ID:-local}" \
+    || echo "LEAF_DEP_CACHE kind=pw action=publish result=error"
+fi
+echo "LEAF_T end chromium $(date +%s%3N) rc=0"
+# LEAF_CI_BROWSER_INSTALL_END
+) > "$browser_log_dir/chromium.log" 2>&1 &
+browser_pid=$!
+set +m
+cleanup_ci_browser() {
+  local rc=$?
+  kill -- "-$browser_pid" 2>/dev/null || true
+  wait "$browser_pid" 2>/dev/null || true
+  cat "$browser_log_dir/chromium.log"
+  rm -rf "$browser_log_dir"
+  return "$rc"
+}
+trap cleanup_ci_browser EXIT
+if [[ "${CI_SHARD_MODE:-all}" == all || "$CI_SHARD_INDEX_N" == 0 ]]; then
+echo "LEAF_T start webbundle $(date +%s%3N)"
+cd "$CODEBUILD_SRC_DIR/web"
+echo "--- 2/4 Build web bundle"
+npm run build
+echo "LEAF_T end webbundle $(date +%s%3N) rc=0"
+echo "LEAF_T start license-fence $(date +%s%3N)"
+cd "$CODEBUILD_SRC_DIR"
+echo "--- 3/4 License fence self-test"
+python scripts/check_license_fence.py --self-test
+cd "$CODEBUILD_SRC_DIR"
+echo "--- 4/4 License fence scan"
+python scripts/check_license_fence.py .
+echo "LEAF_T end license-fence $(date +%s%3N) rc=0"
+else
+  echo "license fence: runs on shard 0"
+fi
+browser_rc=0
+wait "$browser_pid" || browser_rc=$?
+trap - EXIT
+cat "$browser_log_dir/chromium.log"
+rm -rf "$browser_log_dir"
+if (( browser_rc != 0 )); then
+  exit "$browser_rc"
+fi
+  exit 0
+fi
+
 # Freeze policy before any candidate installation, import, or test collection.
 TRUSTED_SHA=""
 HEAD_SHA=""
@@ -144,6 +260,18 @@ try:
                      provider_bound=manifest_status == "verified", relay_manifest=manifest_status,
                      evidence_ref={"build": e.get("CODEBUILD_BUILD_ARN") or e.get("CODEBUILD_BUILD_ID", ""),
                                    "manifest_sha256": manifest_sha256, "operation": operation})
+    elif (re.fullmatch(r"device:dv-[0-9a-f]{16}", event["build_id"]) and
+            event["event"] in ("PULL_REQUEST_CREATED", "PULL_REQUEST_UPDATED", "PULL_REQUEST_REOPENED") and
+            relay_head and re.fullmatch(r"refs/heads/[A-Za-z0-9._/-]+", relay_base) and
+            ".." not in relay_base and
+            re.fullmatch(r"[0-9A-Fa-f]{40}", head) and re.fullmatch(r"[0-9A-Fa-f]{40}", trusted) and
+            e.get("CODEBUILD_RESOLVED_SOURCE_VERSION") == head and
+            operation == "ci-" + hashlib.sha256(
+                ("LEAF-Solar-Design/leaf-web-demo|pull_request|" + relay_head[1] + "|" + head)
+                .encode("utf-8")).hexdigest()[:40]):
+        event.update(provider="forge-device", initiator="leaf-ci-device", provider_bound=True,
+                     source_version="", pr_number=int(relay_head[1]), head_sha=head, target_sha=trusted,
+                     evidence_ref={"build": event["build_id"], "operation": operation})
 except Exception:
     pass
 # No queue/filter/revocation claim is manufactured from webhook presence.
@@ -153,7 +281,7 @@ LEAF_SELECTION_INPUTS
         then
           pr_number="${CODEBUILD_SOURCE_VERSION:-}"
           pr_number="${pr_number#pr/}"
-          if [[ ! "${CODEBUILD_SOURCE_VERSION:-}" =~ ^pr/([1-9][0-9]*)$ && "${CODEBUILD_INITIATOR:-}" == "states/leaf-forge-ci-relay" && "${CODEBUILD_WEBHOOK_HEAD_REF:-}" =~ ^refs/pull/([1-9][0-9]*)/head$ ]]; then
+          if [[ ! "${CODEBUILD_SOURCE_VERSION:-}" =~ ^pr/([1-9][0-9]*)$ && ( "${CODEBUILD_INITIATOR:-}" == "states/leaf-forge-ci-relay" || "${CODEBUILD_BUILD_ID:-}" =~ ^device:dv-[0-9a-f]{16}$ ) && "${CODEBUILD_WEBHOOK_HEAD_REF:-}" =~ ^refs/pull/([1-9][0-9]*)/head$ ]]; then
             pr_number="${BASH_REMATCH[1]}"
           fi
           if python -I -B "$selection_dir/select_tests.py" decide \
@@ -168,6 +296,10 @@ LEAF_SELECTION_INPUTS
       selection_bootstrap_reason=catalog_load_failed
     fi
   fi
+fi
+
+if [[ "${LEAF_CI_FULL:-}" == 1 && -z "$selection_force_full_reason" ]]; then
+  selection_force_full_reason=explicit_full
 fi
 
 if [[ "${LEAF_PROOF_TRUSTED_SHA+x}" == x && "$trusted_sha_override" != 1 ]]; then
@@ -259,6 +391,17 @@ if git --no-replace-objects show "$TRUSTED_SHA:scripts/ci/full_run_manifest.py" 
 else
   echo 'WARNING: trusted full-run manifest helper unavailable' >&2
 fi
+# LEAF_DEP_CACHE_HELPER_BEGIN
+# The dependency cache helper shares the frozen commit; without it every job downloads as before.
+unset LEAF_DEP_CACHE_HELPER
+if [[ -n "${LEAF_CI_CACHE_DIR:-}" && "${LEAF_DEP_CACHE_OFF:-}" != 1 && "$TRUSTED_SHA" =~ ^[0-9a-f]{40}$ ]] \
+   && git --no-replace-objects show "$TRUSTED_SHA:scripts/ci/dep_cache.py" > "$selection_dir/dep_cache.py" 2>/dev/null \
+   && chmod 400 "$selection_dir/dep_cache.py"; then
+  export LEAF_DEP_CACHE_HELPER="$selection_dir/dep_cache.py"
+elif [[ -n "${LEAF_CI_CACHE_DIR:-}" ]]; then
+  echo "LEAF_DEP_CACHE kind=all action=load result=off"
+fi
+# LEAF_DEP_CACHE_HELPER_END
 # Only explicit tracing proofs enable capture; webhook builds stay fast.
 tracing_ready=0
 if [[ "$tracing_helpers_ready" == 1 && "${LEAF_PROOF_TRACING:-}" == 1 ]]; then
@@ -304,7 +447,8 @@ ref = e.get("CODEBUILD_WEBHOOK_HEAD_REF", "")
 raw = e.get("CODEBUILD_WEBHOOK_EVENT", "")
 event = ("merge_group" if "gh-readonly-queue/" in ref else
          "pr" if source.startswith("pr/") and raw.startswith("PULL_REQUEST_") else
-         "pr" if e.get("CODEBUILD_INITIATOR") == "states/leaf-forge-ci-relay" and
+         "pr" if (e.get("CODEBUILD_INITIATOR") == "states/leaf-forge-ci-relay" or
+                  re.fullmatch(r"device:dv-[0-9a-f]{16}", e.get("CODEBUILD_BUILD_ID", ""))) and
          raw.startswith("PULL_REQUEST_") and re.fullmatch(r"refs/pull/[1-9][0-9]*/head", ref) else
          "main" if ref == "refs/heads/main" and raw == "PUSH" else
          "manual" if not raw and e.get("CODEBUILD_INITIATOR") else "unknown")
@@ -356,7 +500,14 @@ fi
 if [[ -f "$selection_dir/execution-mode" ]]; then
   selection_mode="$(<"$selection_dir/execution-mode")"
 fi
+# LEAF_PR_TIER_ACTIVATION_BEGIN
+# Use the gate's policy loader once, before the startup event declares its mode.
+pr_tier_active="$(python3 -I -B scripts/ci/build_pr_tier.py --active scripts/ci/pr-tier.json)"
 export LEAF_SELECTION_EXECUTION_MODE="$selection_mode"
+if [[ "$pr_tier_active" == 1 ]]; then
+  export LEAF_SELECTION_EXECUTION_MODE=selected
+fi
+# LEAF_PR_TIER_ACTIVATION_END
 if [[ -n "${CODEBUILD_BUILD_ID:-}" ]]; then
   receipt_failed=0
   aws s3api put-object --bucket leaf-mq-transport-807034087062-us-east-1 \
@@ -470,6 +621,25 @@ if __name__ == "__main__":
     disable_unused_chrome_sources(Path("/etc/apt"))
 LEAF_CI_APT_SOURCE_FILTER
 
+# LEAF_DEP_CACHE_SEED_BEGIN
+dep_cache_npm_seeded=0
+dep_cache_pip_dir=""
+dep_cache_npm_dir=""
+if [[ -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" ]]; then
+  echo "LEAF_T start depcache-seed $(date +%s%3N)"
+  dep_cache_pip_dir="$(timeout 30 python -m pip cache dir 2>/dev/null || true)"
+  dep_cache_npm_dir="$(timeout 30 npm config get cache 2>/dev/null || true)"
+  dep_cache_line="$(timeout --kill-after=5 90 python -I -B "$LEAF_DEP_CACHE_HELPER" seed --kind dl \
+    --repo "$CODEBUILD_SRC_DIR" --cache-dir "$LEAF_CI_CACHE_DIR" --writable "${LEAF_CI_CACHE_WRITABLE:-0}" \
+    --run "${CODEBUILD_BUILD_ID:-local}" --day "$(date -u +%Y%m%d)" \
+    --pip-cache "$dep_cache_pip_dir" --npm-cache "$dep_cache_npm_dir" --node-version "$(node -v 2>/dev/null || true)")" \
+    || dep_cache_line="LEAF_DEP_CACHE kind=dl action=seed result=error"
+  echo "$dep_cache_line"
+  if [[ "$dep_cache_line" == *" npm=seeded"* ]]; then dep_cache_npm_seeded=1; fi
+  echo "LEAF_T end depcache-seed $(date +%s%3N) rc=0"
+fi
+# LEAF_DEP_CACHE_SEED_END
+
 # leaf-web-demo native CI: contract, license-fence, and Test gate UNSHARDED.
 # The queue leg lives in .codebuild/mq.sh and is not this script's job.
 # Workflows still dark: speculate-platform-images, prewarm-staging-cutover,
@@ -481,6 +651,42 @@ BASE_REF="${CODEBUILD_WEBHOOK_BASE_REF:-}"; BASE_REF="${BASE_REF##refs/heads/}";
 if git rev-parse --verify -q "origin/$BASE_REF" >/dev/null; then echo "origin/$BASE_REF"; elif git rev-parse --verify -q "$BASE_REF" >/dev/null; then echo "$BASE_REF"; else echo "FATAL: base ref $BASE_REF not in clone"; git branch -a | head -20; exit 1; fi > /tmp/base_ref
 echo "base=$(cat /tmp/base_ref) head=$(git rev-parse --short HEAD) event=${CODEBUILD_WEBHOOK_EVENT:-manual}"
 export BASE="$(cat /tmp/base_ref)"
+# LEAF_CI_CORPUS_CAGE_SUPPLY_BEGIN
+# The corpus executor requires this absolute path and seccomp capability.
+# Reuse the pinned device-image recipe only on incapable ephemeral CI images.
+echo "LEAF_T start corpus-cage-supply $(date +%s%3N)"
+if ! /usr/bin/setpriv --help 2>/dev/null | grep -Fq -- '--seccomp-filter'; then
+  if [[ "$(id -u)" != 0 ]]; then
+    echo 'corpus cage supply refused: root required to provision /usr/bin/setpriv' >&2
+    exit 1
+  fi
+  (
+    set -euo pipefail
+    supply_dir="$(mktemp -d /tmp/leaf-ci-setpriv.XXXXXX)"
+    trap 'rm -rf -- "$supply_dir"' EXIT
+    version=2.41.6
+    archive="$supply_dir/util-linux-${version}.tar.xz"
+    curl --proto '=https' --tlsv1.2 --fail --show-error --location \
+      --connect-timeout 15 --max-time 120 --output "$archive" \
+      "https://mirrors.edge.kernel.org/pub/linux/utils/util-linux/v2.41/util-linux-${version}.tar.xz"
+    echo "e596083744e746be7d2823b62b43f4418dd7bf56303b4dc09e6fe8112fe3d7ed  $archive" | sha256sum -c -
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libcap-ng-dev pkg-config
+    tar -xJf "$archive" -C "$supply_dir"
+    cd "$supply_dir/util-linux-${version}"
+    ./configure --disable-all-programs --enable-setpriv --disable-nls \
+      --without-python --without-systemd --without-udev --disable-bash-completion
+    make -j2 setpriv
+    dpkg-divert --local --rename --divert /usr/bin/setpriv.util-linux-2.37 --add /usr/bin/setpriv
+    install -m 0755 setpriv /usr/bin/setpriv
+  )
+fi
+/usr/bin/setpriv --help | grep -Fq -- '--seccomp-filter'
+/usr/bin/setpriv --version
+sha256sum /usr/bin/setpriv
+echo "corpus cage supply uid=$(id -u)"
+echo "LEAF_T end corpus-cage-supply $(date +%s%3N) rc=0"
+# LEAF_CI_CORPUS_CAGE_SUPPLY_END
 echo "LEAF_T end setup $(date +%s%3N) rc=0"
 
 if [[ "${CI_SHARD_MODE:-all}" == all || "$CI_SHARD_INDEX_N" == 0 ]]; then
@@ -499,31 +705,22 @@ else
   echo "contract: runs on shard 0"
 fi
 
+# LEAF_CI_SETUP_DEPS_BEGIN
 echo "=== job license-fence ==="
+echo "=== job test-gate ==="
+setup_log_dir="$(mktemp -d)"
+(
+set -euo pipefail
+if [[ "${dep_cache_npm_seeded:-0}" == 1 ]]; then export npm_config_prefer_offline=true; fi
 echo "LEAF_T start webdeps $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR/web"
 echo "--- 1/4 Install web dependencies"
 npm ci
 echo "LEAF_T end webdeps $(date +%s%3N) rc=0"
-if [[ "${CI_SHARD_MODE:-all}" == all || "$CI_SHARD_INDEX_N" == 0 ]]; then
-echo "LEAF_T start webbundle $(date +%s%3N)"
-cd "$CODEBUILD_SRC_DIR/web"
-echo "--- 2/4 Build web bundle"
-npm run build
-echo "LEAF_T end webbundle $(date +%s%3N) rc=0"
-echo "LEAF_T start license-fence $(date +%s%3N)"
-cd "$CODEBUILD_SRC_DIR"
-echo "--- 3/4 License fence self-test"
-python scripts/check_license_fence.py --self-test
-cd "$CODEBUILD_SRC_DIR"
-echo "--- 4/4 License fence scan"
-python scripts/check_license_fence.py .
-echo "LEAF_T end license-fence $(date +%s%3N) rc=0"
-else
-  echo "license fence: runs on shard 0"
-fi
-
-echo "=== job test-gate ==="
+) > "$setup_log_dir/webdeps.log" 2>&1 &
+webdeps_pid=$!
+(
+set -euo pipefail
 echo "LEAF_T start pydeps $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR"
 echo "--- 1/6 Upgrade pip"
@@ -539,55 +736,60 @@ python -m pip install \
   -r executor/control_plane/requirements.txt \
   -r executor/runtime/requirements.txt
 echo "LEAF_T end pydeps $(date +%s%3N) rc=0"
+) > "$setup_log_dir/pydeps.log" 2>&1 &
+pydeps_pid=$!
+(
+set -euo pipefail
+if [[ "${dep_cache_npm_seeded:-0}" == 1 ]]; then export npm_config_prefer_offline=true; fi
 echo "LEAF_T start harness-deps $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR/harness"
 echo "--- 3/6 Install harness dependencies"
 npm ci
 echo "LEAF_T end harness-deps $(date +%s%3N) rc=0"
+) > "$setup_log_dir/harness-deps.log" 2>&1 &
+harness_deps_pid=$!
+webdeps_rc=0
+pydeps_rc=0
+harness_deps_rc=0
+wait "$webdeps_pid" || webdeps_rc=$?
+wait "$pydeps_pid" || pydeps_rc=$?
+wait "$harness_deps_pid" || harness_deps_rc=$?
+cat "$setup_log_dir/webdeps.log" "$setup_log_dir/pydeps.log" "$setup_log_dir/harness-deps.log"
+rm -rf "$setup_log_dir"
+setup_rc=0
+for setup_step in webdeps pydeps harness-deps; do
+  case "$setup_step" in
+    webdeps) step_rc=$webdeps_rc ;;
+    pydeps) step_rc=$pydeps_rc ;;
+    harness-deps) step_rc=$harness_deps_rc ;;
+  esac
+  if (( step_rc != 0 )); then
+    echo "setup: $setup_step failed rc=$step_rc"
+    if (( setup_rc == 0 )); then setup_rc=$step_rc; fi
+  fi
+done
+if (( setup_rc != 0 )); then exit "$setup_rc"; fi
+# LEAF_CI_SETUP_DEPS_END
+# LEAF_DEP_CACHE_PUBLISH_BEGIN
+dep_cache_publish_pid=""
+if [[ -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" && "${LEAF_CI_CACHE_WRITABLE:-0}" == 1 ]]; then
+  if dep_cache_publish_log="$(mktemp)"; then
+    timeout --kill-after=5 180 python -I -B "$LEAF_DEP_CACHE_HELPER" publish --kind dl \
+      --repo "$CODEBUILD_SRC_DIR" --cache-dir "$LEAF_CI_CACHE_DIR" --writable 1 \
+      --run "${CODEBUILD_BUILD_ID:-local}" --day "$(date -u +%Y%m%d)" \
+      --pip-cache "$dep_cache_pip_dir" --npm-cache "$dep_cache_npm_dir" --node-version "$(node -v 2>/dev/null || true)" \
+      > "$dep_cache_publish_log" 2>&1 &
+    dep_cache_publish_pid=$!
+  else
+    echo "LEAF_DEP_CACHE kind=dl action=publish result=error"
+  fi
+fi
+# LEAF_DEP_CACHE_PUBLISH_END
 cd "$CODEBUILD_SRC_DIR/web"
 echo "--- 4/6 Reuse web dependencies"
 # The license-fence job installed a clean web tree in this same build.
 # No intervening step changes its dependencies, so reuse that npm ci.
-echo "LEAF_T start chromium $(date +%s%3N)"
-cd "$CODEBUILD_SRC_DIR/web"
-echo "--- 5/6 Install Chromium for browser proofs"
-# LEAF_CI_BROWSER_INSTALL_BEGIN
-# standard:7.0 needs OS libraries, and --with-deps shells out to apt, so this
-# step used to inherit archive.ubuntu.com's availability. Measured 2026-09-11
-# between 06:37Z and 07:30Z: leaf-ci-leaf-web-demo failed SIX of seven
-# consecutive builds right here, on main and on every merge-queue group, with
-# "Could not connect to archive.ubuntu.com:80 ... connection timed out" against
-# all six mirror IPs, before a single suite ran, and every queued PR ejected
-# behind it. A fallback is honest rather than a papered-over failure because in
-# that same log every library Chromium needs read "is already the newest
-# version" (libasound2, libcairo2, libcups2, libdbus-1-3, libdrm2, libxkbcommon0,
-# libxrandr2, libatk*); the only packages the mirror could not serve were
-# optional FONT packages (fonts-ipafont-gothic, fonts-freefont-ttf,
-# fonts-unifont, fonts-wqy-zenhei, xfonts-*), which change glyph coverage in a
-# rendered page and nothing any suite in this repo asserts. Two attempts, not
-# more: each failed --with-deps costs a full apt timeout against six unreachable
-# IPs, and the fallback is what saves the build. A missing BROWSER BINARY is
-# still a hard failure: the last call is unguarded, so set -e fails the build.
-install_ci_browser() {
-  local attempt
-  for attempt in 1 2; do
-    if "$@" install --with-deps chromium; then
-      return 0
-    fi
-    if [[ "$attempt" == 1 ]]; then
-      echo "WARNING: $* dependency install failed; retrying in 5 seconds (attempt 2/2)." >&2
-      sleep 5
-    fi
-  done
-  echo "WARNING: $* dependency install failed after 2 attempts; falling back to browser-only install. OS libraries may be missing; browser proofs will check runtime usability." >&2
-  "$@" install chromium
-}
 
-install_ci_browser npx playwright
-# Install the Python producer's pinned browser with the gate interpreter too.
-install_ci_browser python -m playwright
-echo "LEAF_T end chromium $(date +%s%3N) rc=0"
-# LEAF_CI_BROWSER_INSTALL_END
 echo "LEAF_T start gate $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR"
 echo "--- 6/6 Run unsharded test gate and print scoreboard"
@@ -624,6 +826,18 @@ print(revision)
 LEAF_AUTOFILL_PIN
 )" || { autofill_solver_fail "pin read"; return 1; }
   [[ "$autofill_solver_revision" =~ ^[0-9a-f]{40}$ ]] || { autofill_solver_fail "pin read"; return 1; }
+  local seeded=0
+  if [[ -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" ]]; then
+    work="$(mktemp -d)" || { autofill_solver_fail "mktemp"; return 1; }
+    # Seed only into an absent destination; keep existing job caches untouched.
+    if rmdir "$work" && { timeout --kill-after=5 30 python3 -I -B "$LEAF_DEP_CACHE_HELPER" seed --kind as --cache-dir "$LEAF_CI_CACHE_DIR" --writable "${LEAF_CI_CACHE_WRITABLE:-0}" --run "${CODEBUILD_BUILD_ID:-local}" --revision "$autofill_solver_revision" --dest "$work" >&2 || { echo "LEAF_DEP_CACHE kind=as action=seed result=error" >&2; false; }; } && [[ -s "$work/snapshot.bundle" ]]; then
+      seeded=1
+      autofill_solver_key="dep-cache"
+    else
+      rm -rf "$work"
+    fi
+  fi
+  if [[ "$seeded" != 1 ]]; then
   local prefix="forge-ci-relay/LEAF-Solar-Design/autofill-solver/${autofill_solver_revision}/"
   listing="$(timeout 10 aws s3api list-objects-v2 --bucket "$bucket" --prefix "$prefix" \
     --max-items 1000 --output json 2>/dev/null)" || { autofill_solver_fail "snapshot list"; return 1; }
@@ -663,6 +877,7 @@ if manifest.get("head_sha") != revision:
 if manifest.get("repository") != "LEAF-Solar-Design/autofill-solver":
     sys.exit(1)
 LEAF_AUTOFILL_EXTRACT
+  fi
   rm -rf /tmp/autofill-solver
   timeout 15 git clone -q --no-checkout "$work/snapshot.bundle" /tmp/autofill-solver \
     || { autofill_solver_fail "bundle clone"; return 1; }
@@ -670,6 +885,7 @@ LEAF_AUTOFILL_EXTRACT
     || { autofill_solver_fail "revision checkout"; return 1; }
   [[ "$(timeout 5 git -C /tmp/autofill-solver rev-parse HEAD)" == "$autofill_solver_revision" ]] \
     || { autofill_solver_fail "HEAD verification"; return 1; }
+  if [[ -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" && "${LEAF_CI_CACHE_WRITABLE:-0}" == 1 ]]; then timeout --kill-after=5 30 python3 -I -B "$LEAF_DEP_CACHE_HELPER" publish --kind as --cache-dir "$LEAF_CI_CACHE_DIR" --writable 1 --run "${CODEBUILD_BUILD_ID:-local}" --revision "$autofill_solver_revision" --src "$work" >&2 || echo "LEAF_DEP_CACHE kind=as action=publish result=error" >&2; fi
   rm -rf "$work"
 }
 if fetch_autofill_solver; then
@@ -898,6 +1114,11 @@ fi
 if [[ "$tracing_helpers_ready" != 1 || "$reporters_ready" != 1 ]]; then
   echo 'WARNING: trusted capture unavailable; readsets and test reports remain incomplete' >&2
 fi
+if [[ -n "${dep_cache_publish_pid:-}" ]]; then
+  wait "$dep_cache_publish_pid" || echo "LEAF_DEP_CACHE kind=dl action=publish result=error"
+  cat "$dep_cache_publish_log" || true
+  rm -f "$dep_cache_publish_log" || true
+fi
 if [[ "${CI_SHARD_MODE:-all}" == all || ${#only_args[@]} == 0 || "$CI_SHARD_INDEX_N" == 0 ]]; then
 if [[ "${CI_SHARD_MODE:-all}" == shard && ${#only_args[@]} == 0 ]]; then
   only_args+=(--shard-count "$CI_SHARD_TOTAL_N" --shard-index "$CI_SHARD_INDEX_N")
@@ -918,6 +1139,7 @@ if ! LEAF_GATE_DATABASE_URL="$(bash "$CODEBUILD_SRC_DIR/scripts/ci/start_ephemer
 fi
 export LEAF_GATE_DATABASE_URL
 export LEAF_GATE_REQUIRE_DATABASE=1
+export LEAF_CI_POSTGRES_SETUP_STATUS="$postgres_status"
 echo "LEAF_T end postgres $(date +%s%3N) rc=$postgres_status"
 # LEAF_DIAGNOSTIC_BEGIN
 # Server-owned exact-suite diagnostics never grant a full or shard verdict.
@@ -947,7 +1169,7 @@ except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
 LEAF_DIAGNOSTIC_EXACT
   then
     diagnostic_status=0
-    python scripts/run-all-gates.py --jobs 1 --retry 0 --fail-fast --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs --only "$LEAF_GATE_ONLY" || diagnostic_status=$?
+    python scripts/run-all-gates.py --jobs 1 --retry 0 --fail-fast --early-feedback --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs --only "$LEAF_GATE_ONLY" --before-heavy-command bash "$LEAF_CI_SCRIPT_PATH" --heavy-prerequisites || diagnostic_status=$?
   else
     echo "LEAF_DIAGNOSTIC refused: catalog unavailable or selection not exact" >&2
   fi
@@ -957,19 +1179,32 @@ LEAF_DIAGNOSTIC_EXACT
   fi
   printf 'LEAF_DIAGNOSTIC diagnostic-only/no-full-verdict suite=%s status=%s postgres_status=%s\n' \
     "$LEAF_GATE_ONLY" "$diagnostic_status" "$postgres_status" | tee /tmp/gate-results/diagnostic.txt || true
-  # Reuse the runner's result and suite log, bounding each text excerpt to 16 KiB.
-  tail -c 16384 /tmp/gate-results/gate-result.json 2>/dev/null | tee -a /tmp/gate-results/diagnostic.txt || true
-  tail -c 16384 "/tmp/gate-logs/$LEAF_GATE_ONLY.log" 2>/dev/null | tee -a /tmp/gate-results/diagnostic.txt || true
+  # NO_SOURCE builds have no artifact download. Publish only sanitized retained evidence.
+  python -I -B scripts/ci/retain_failed_gate_logs.py \
+    --result /tmp/gate-results/gate-result.json --logs /tmp/gate-logs --output /tmp/gate-results/diagnostic-failed-gate-logs \
+    --emit-stdout --source "$HEAD_SHA" --build-id "${CODEBUILD_BUILD_ID:-}" \
+    || echo 'WARNING: failed diagnostic log publication unavailable' >&2
   exit "$diagnostic_status"
 fi
 # LEAF_DIAGNOSTIC_END
 gate_status=0
+gate_fail_fast_args=(--fail-fast)
+if [[ "${process_capture_active:-0}" == 1 ]]; then
+  # Capture records every suite's reads; a failure still fails the job below.
+  gate_fail_fast_args=()
+fi
+gate_tier_args=()
+if [[ "$pr_tier_active" == 1 ]]; then
+  gate_tier_args=(--tier-file scripts/ci/pr-tier.json)
+fi
+echo "LEAF_EVENT gate fail_fast=${#gate_fail_fast_args[@]}" >&2
 unset PYTHONSAFEPATH
 # Ensure gate rows reach the log even when the job is killed at its deadline.
 export PYTHONUNBUFFERED=1
-python scripts/run-all-gates.py --jobs "${LEAF_GATE_JOBS:-auto}" --retry 1 --fail-fast --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs "${only_args[@]}" || gate_status=$?
+python scripts/run-all-gates.py --jobs "${LEAF_GATE_JOBS:-auto}" --retry 0 --early-feedback "${gate_fail_fast_args[@]}" --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs "${only_args[@]}" "${gate_tier_args[@]}" --before-heavy-command bash "$LEAF_CI_SCRIPT_PATH" --heavy-prerequisites || gate_status=$?
 python -I -B scripts/ci/retain_failed_gate_logs.py \
   --result /tmp/gate-results/gate-result.json --logs /tmp/gate-logs --output /tmp/gate-results/failed-gate-logs \
+  --emit-stdout --source "$HEAD_SHA" --build-id "${CODEBUILD_BUILD_ID:-}" \
   || echo 'WARNING: failed gate log retention unavailable' >&2
 if [[ "$postgres_status" != 0 && "$gate_status" == 0 ]]; then
   echo "FATAL: the gate passed without its PostgreSQL proofs; failing the build" >&2
@@ -1001,63 +1236,8 @@ if [[ -n "${CODEBUILD_BUILD_ID:-}" && "${CODEBUILD_WEBHOOK_HEAD_REF:-}" == refs/
     --content-type application/json --if-none-match '*' >/dev/null \
     || echo 'WARNING: pointer_write_failed; this shard is not a reuse donor' >&2
 fi
-if [[ -f /tmp/gate-results/gate-result.json ]]; then
-  tail -n 200 /tmp/gate-results/gate-result.json || true
-  # BEGIN GATE FAIL NAMES
-  {
-    python3 - <<'PY'
-import json
-import re
-from pathlib import Path
-
-try:
-    result = json.loads(Path("/tmp/gate-results/gate-result.json").read_text())
-except Exception as exc:
-    print(f"gate fail names: result JSON unreadable ({type(exc).__name__})")
-    raise SystemExit(0)
-
-output_lines = 0
-
-def emit(text):
-    global output_lines
-    for line in str(text).splitlines() or [""]:
-        print(line)
-        output_lines += 1
-        if output_lines == 400:
-            print("gate fail names: output capped at 400 lines")
-            raise SystemExit(0)
-
-log_dir = Path("/tmp/gate-logs")
-markers = re.compile(r"\bFAIL\b|FAILED|\u00d7|\u2717|AssertionError|Error:|Timeout")
-for suite in result.get("results", []):
-    if suite.get("status") != "FAIL":
-        continue
-    suite_id = suite.get("id", "")
-    emit(f"GATE FAIL {suite_id}: {suite.get('note', '')}")
-    failed_ids = suite.get("test_report", {}).get("failed_test_ids", [])
-    for test_id in failed_ids[:20]:
-        emit(f"  failed test: {test_id}")
-    if len(failed_ids) > 20:
-        emit(f"  ... and {len(failed_ids) - 20} more failed tests")
-    log_path = log_dir / f"{suite_id}.log"
-    retry_pattern = re.compile(re.escape(suite_id) + r"\.retry(\d+)\.log")
-    try:
-        retries = [(int(match.group(1)), path)
-                   for path in log_dir.iterdir()
-                   if (match := retry_pattern.fullmatch(path.name))]
-        if retries:
-            log_path = max(retries, key=lambda retry: retry[0])[1]
-        lines = log_path.read_text(errors="replace").splitlines()
-    except OSError:
-        emit(f"  (no suite log at {log_path})")
-        continue
-    matching = [line for line in lines if markers.search(line)]
-    for line in matching[:40] if matching else lines[-20:]:
-        emit("  log: " + line[:300])
-PY
-  } || true
-  # END GATE FAIL NAMES
-else
+# Sanitized retained-log frames above replace raw result/log tails and note dumps.
+if [[ ! -f /tmp/gate-results/gate-result.json ]]; then
   echo "No gate result JSON was written (runner exit $gate_status)"
 fi
 if [[ "${CI_SHARD_MODE:-all}" == all || "$CI_SHARD_INDEX_N" == 0 ]]; then
@@ -1094,6 +1274,15 @@ try:
 except (OSError, ValueError):
     detail = {"schema": "leaf.ci.selection.v1", "execution_mode": "full",
               "fallback_reason": "receipt_prepare_failed"}
+# LEAF_TIER_RESULT_BEGIN
+try:
+    gate_result = json.loads(Path("/tmp/gate-results/gate-result.json").read_text(encoding="utf-8"))
+except (OSError, ValueError):
+    gate_result = {}
+if gate_result.get("mode") == "tier":
+    detail.update(execution_mode="selected", selection_mode="selected", selection_source="pr-tier", apply_filter=False,
+                  executed_suite_ids=gate_result["suite_ids"], expanded_suite_ids=gate_result["suite_ids"])
+# LEAF_TIER_RESULT_END
 records = []
 raw = b""
 expected = set(detail.get("executed_suite_ids", []))
@@ -1233,7 +1422,7 @@ if detail.get("phase") == "shadow":
               "fallback_reason": detail.get("fallback_reason"),
               "assigned_arm": detail.get("assigned_arm"), "execution_mode": detail.get("execution_mode")}
     (out / "shadow.json").write_text(canonical(shadow) + "\n", encoding="utf-8")
-if sys.argv[3] == "1":
+if sys.argv[3] == "1" and detail.get("selection_source") != "pr-tier":
     helper = out / "full_run_manifest.py"
     if not helper.is_file() or not helper.stat().st_size:
         raise ValueError("manifest_helper_unavailable")
@@ -1342,6 +1531,26 @@ LEAF_CAPTURE_REFERENCES
     readsets_bytes="${readsets_bytes//[[:space:]]/}"
     digest="$(sha256sum "$archive")" || return 1
     readsets_sha256="${digest%% *}"
+    if [[ "${process_capture_active:-0}" == 1 && "${CODEBUILD_BUILD_ID:-}" =~ ^device:dv-[0-9a-f]{16}$ ]]; then
+      if mkdir -p /tmp/process-capture \
+        && cp "$archive" /tmp/process-capture/readsets.tar.gz \
+        && python -I -B - /tmp/process-capture/readsets.json "$CODEBUILD_BUILD_ID" "$HEAD_SHA" \
+          "$readsets_bytes" "$readsets_sha256" "$readsets_archive_members" <<'LEAF_DEVICE_CAPTURE_ARCHIVE'
+import json
+from pathlib import Path
+import sys
+
+receipt = {"schema": "leaf.ci.device-capture-archive.v1", "build_id": sys.argv[2],
+           "head_sha": sys.argv[3], "bytes": int(sys.argv[4]), "sha256": sys.argv[5],
+           "members": sys.argv[6].split()}
+Path(sys.argv[1]).write_text(json.dumps(receipt, sort_keys=True) + "\n", encoding="utf-8")
+LEAF_DEVICE_CAPTURE_ARCHIVE
+      then
+        echo "LEAF_CAPTURE device_archive $readsets_bytes $readsets_sha256"
+      else
+        echo 'LEAF_CAPTURE device_archive_copy_failed'
+      fi
+    fi
     local archive_cap=209715200
     if [[ "${process_capture_active:-0}" == 1 ]]; then
       archive_cap=1073741824

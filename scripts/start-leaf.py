@@ -456,6 +456,8 @@ def main() -> int:
     )
     ap.add_argument("--no-web", action="store_true", help="skip the Vite web dev server (backend only)")
     ap.add_argument("--canonical-worker-tool", metavar="TOOL")
+    ap.add_argument("--no-canonical-worker", action="store_true", help="skip the canonical worker")
+    ap.add_argument("--test-identity", action="store_true", help="verify live local test identity configuration")
     ap.add_argument("--canonical-worker-id", metavar="ID")
     ap.add_argument("--with-harness", action="store_true",
                     help="also boot the compiled Agent-SDK harness sidecar (Build lane)")
@@ -469,6 +471,10 @@ def main() -> int:
                     help="inherit only named variables plus OS essentials (repeatable)")
     ap.add_argument("--print-child-env", action="store_true", help="print the base child environment as JSON and exit")
     args = ap.parse_args()
+
+    if args.no_canonical_worker and args.canonical_worker_tool is not None:
+        print("--no-canonical-worker conflicts with --canonical-worker-tool.", file=sys.stderr)
+        return 2
 
     # Refuse explicit project-worker configuration before ports, files or children.
     if args.canonical_worker_tool is not None and not CANONICAL_WORKER_TOOL_RE.fullmatch(
@@ -492,6 +498,16 @@ def main() -> int:
 
     operator_env = build_child_env(os.environ, args.env_allowlist)
     base_env = dict(operator_env, APS_LIVE="0")
+    if args.test_identity:
+        if not (
+                args.env_allowlist is not None
+                and base_env.get("LEAF_AUTH_LIVE") == "1"
+                and base_env.get("LEAF_RUNTIME_ENV") in ("local", "test")
+                and Path(base_env.get("LEAF_AUTH0_JWKS_FILE", "")).is_file()
+                and base_env.get("LEAF_AUTH0_ISSUER", "").startswith("https://test-identity.leaf.invalid/")
+                and base_env.get("LEAF_AUTH0_AUDIENCE")):
+            print("--test-identity requires an allowlisted live local/test identity with an existing JWKS file, test issuer and audience.", file=sys.stderr)
+            return 2
     if args.canonical_worker_tool is not None:
         if not platform_database_configured(base_env):
             print("Canonical worker selection requires a platform database.", file=sys.stderr)
@@ -501,7 +517,7 @@ def main() -> int:
             print("Canonical worker tool conflicts with the child environment.", file=sys.stderr)
             return 2
         base_env["LEAF_CANONICAL_WORKER_TOOL"] = args.canonical_worker_tool
-    if args.env_allowlist is not None:
+    if args.env_allowlist is not None and not args.test_identity:
         base_env["LEAF_AUTH_LIVE"] = "0"
     if args.print_child_env:
         base_env.setdefault(
@@ -602,7 +618,7 @@ def main() -> int:
     # ---- 2) canonical solver worker (shared PostgreSQL authority) -----------
     # Local Projects should exercise the same queued job boundary as staging.
     # Without this process, readiness is degraded and string-autofill is offline.
-    worker_enabled = platform_database_configured(base_env)
+    worker_enabled = not args.no_canonical_worker and platform_database_configured(base_env)
     if worker_enabled:
         base_env.setdefault("LEAF_CANONICAL_WORKER_REQUIRED", "1")
         worker_argv = [sys.executable, "canonical_worker.py"]

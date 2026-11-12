@@ -87,6 +87,41 @@ def test_inventory_has_capture_2_image_roots(modules, path):
     }
 
 
+@pytest.mark.parametrize("root_name", ["node_modules", "installed"])
+def test_inventory_runtime_cache_scope(modules, tmp_path, root_name):
+    inventory = modules["external_inventory"]
+    root = tmp_path / root_name
+    root.mkdir()
+    (root / "package.json").write_text("installed bytes", encoding="utf-8")
+    before = inventory.digest_root(str(root))
+    assert before["complete"] is True
+    assert before["files"] == 1
+    for relative in (".leaf-ci/x.mjs", ".vite/vitest/h/results.json", ".vite-temp/t.mjs"):
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("runtime bytes", encoding="utf-8")
+        after = inventory.digest_root(str(root))
+        assert after["complete"] is True
+        if root_name == "node_modules":
+            assert after == before
+        else:
+            assert after["sha256"] != before["sha256"]
+    assert after["files"] == (1 if root_name == "node_modules" else 4)
+
+
+def test_inventory_nested_runtime_named_directory_counts(modules, tmp_path):
+    root = tmp_path / "node_modules"
+    root.mkdir()
+    before = modules["external_inventory"].digest_root(str(root))
+    path = root / "pkg" / ".vite" / "file"
+    path.parent.mkdir(parents=True)
+    path.write_text("installed nested bytes", encoding="utf-8")
+    after = modules["external_inventory"].digest_root(str(root))
+    assert after["complete"] is True
+    assert after["files"] == 1
+    assert after["sha256"] != before["sha256"]
+
+
 # Documented strace -f -ttt -x line formats: a normal call and its split equivalent.
 @pytest.mark.parametrize("transcript,kinds", [
     (b'123 1700000000.000001 openat(AT_FDCWD, "config.json", O_RDONLY|O_CLOEXEC) = 3\n',

@@ -2060,24 +2060,96 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 }
 .converse-turn { display: flex; flex-direction: column; gap: 8px; }
 .converse-msg { font-size: var(--leaf-size-dense); line-height: 1.5; white-space: pre-wrap; }
-.converse-msg.user {
+.converse-msg[data-converse-role="user"] {
   align-self: flex-end;
   max-width: 85%;
   color: var(--foreground);
   background: var(--accent-tint);
   border-radius: var(--leaf-radius-control);
-  padding: 7px 11px;
+  padding: 8px 12px;
 }
-.converse-msg.assistant { color: var(--foreground); }
+.converse-msg[data-converse-role="assistant"] {
+  align-self: stretch; width: 100%;
+  color: var(--foreground); background: transparent;
+  font-size: var(--leaf-size-body);
+}
+.converse-msg[data-converse-role="user"]::before,
+.converse-msg[data-converse-role="assistant"]::before,
+.converse-confirm[data-converse-role="decision"]::before,
+.converse-question[data-converse-role="question"]::before {
+  display: block;
+  font-size: calc(var(--leaf-size-caption) - 1px);
+  font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em;
+}
+.converse-msg[data-converse-role="user"]::before { content: "You"; }
+.converse-msg[data-converse-role="assistant"]::before { content: "Assistant"; }
+.converse-tool-row[data-converse-role="tool"] {
+  display: flex; gap: 8px; flex-wrap: wrap;
+  list-style: none; margin: 0; padding: 0;
+}
 .converse-tool-chip {
-  display: inline-flex; align-items: center; gap: 7px;
+  display: inline-flex; flex-wrap: wrap; align-items: center; gap: 7px;
   align-self: flex-start;
-  font: 500 var(--leaf-size-caption) var(--font-mono);
-  color: var(--muted);
-  background: var(--bar-chip);
-  border-radius: var(--leaf-radius-key);
+  font: 500 var(--leaf-size-dense) var(--font-mono);
+  color: var(--foreground);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 999px;
   padding: 3px 9px;
+  box-sizing: border-box;
+  min-width: 0;
   max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.converse-tool-chip[data-state] > .dot { display: none; }
+.converse-tool-chip[data-state="running"]::before { content: "◌"; }
+.converse-tool-chip[data-state="done"]::before { content: "✓"; color: var(--status-success); }
+.converse-tool-chip[data-state="failed"]::before { content: "✕"; color: var(--status-danger); }
+.converse-tool-chip[data-state="failed"] > .converse-step-state { font-size: 0; }
+.converse-tool-chip[data-state="failed"] > .converse-step-state::before {
+  content: "Unavailable"; font-size: var(--leaf-size-dense);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .converse-tool-chip[data-state="running"]::before {
+    animation: converse-tool-pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes converse-tool-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+  }
+}
+.converse-tool-chip > * {
+  box-sizing: border-box; min-width: 0; max-width: 100%;
+}
+.converse-tool-chip > .dot,
+.converse-tool-chip > .converse-step-state {
+  flex: none; white-space: nowrap;
+}
+.converse-tool-chip > .converse-tool-toggle,
+.converse-tool-chip > .converse-step-verb,
+.converse-tool-chip > .dim,
+.converse-tool-chip > .converse-tool-detail {
+  flex: 0 1 100%;
+}
+.converse-tool-chip .route-tool,
+.converse-tool-chip .dim,
+.converse-tool-chip .converse-tool-toggle {
+  color: inherit;
+}
+.converse-tool-chip .converse-tool-toggle {
+  font: inherit; text-align: left;
+  background: transparent; border: 0; padding: 2px 0;
+  white-space: normal; overflow-wrap: anywhere; cursor: pointer;
+}
+.converse-tool-chip .converse-step-object { display: block; }
+.converse-tool-chip .converse-tool-toggle:focus-visible {
+  outline: 2px solid currentColor; outline-offset: 2px;
+}
+.converse-tool-chip .converse-tool-detail pre {
+  box-sizing: border-box; min-width: 0; max-width: 100%;
+  margin: 0; white-space: pre-wrap; overflow-wrap: anywhere;
+  color: inherit; background: transparent;
 }
 .converse-tool-chip .dim { font-family: var(--sans); }
 .converse-jobrow {
@@ -2085,6 +2157,40 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   font-size: var(--leaf-size-caption);
 }
 .converse-confirm { align-self: stretch; } /* the strip-decision confirm card spans the log */
+.converse-confirm[data-converse-role="decision"],
+.converse-question[data-converse-role="question"] {
+  display: flex; flex-wrap: wrap; gap: 8px; align-self: stretch;
+  border: 1px solid var(--border); border-left-width: 3px;
+  border-radius: var(--leaf-radius-control);
+  background: var(--card); padding: 10px 12px;
+}
+.converse-confirm[data-converse-role="decision"][data-ink="needs-ok"],
+.converse-question[data-converse-role="question"][data-ink="question"] {
+  border-left-color: var(--status-warning);
+}
+.converse-confirm[data-converse-role="decision"][data-ink="approved"],
+.converse-confirm[data-converse-role="decision"][data-ink="denied"],
+.converse-question[data-converse-role="question"][data-ink="answered"] {
+  border-left-color: var(--border);
+}
+.converse-confirm[data-converse-role="decision"]::before,
+.converse-question[data-converse-role="question"]::before { flex-basis: 100%; }
+.converse-confirm[data-converse-role="decision"][data-ink="needs-ok"]::before { content: "NEEDS YOUR OK"; }
+.converse-question[data-converse-role="question"][data-ink="question"]::before { content: "QUESTION"; }
+.converse-confirm[data-converse-role="decision"][data-ink="approved"]::before { content: "APPROVED"; }
+.converse-confirm[data-converse-role="decision"][data-ink="denied"]::before { content: "DENIED"; }
+.converse-question[data-converse-role="question"][data-ink="answered"]::before { content: "ANSWERED"; }
+.converse-question[data-converse-role="question"] .converse-question-options {
+  display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; max-width: 100%;
+}
+.converse-confirm[data-converse-role="decision"] button,
+.converse-question[data-converse-role="question"] button {
+  min-height: 44px; min-width: 120px; max-width: 100%;
+  white-space: normal; overflow-wrap: break-word; word-break: normal;
+}
+.converse-note[data-converse-role="error"] {
+  border-left: 3px solid var(--status-danger); padding: 8px 12px;
+}
 /* Platform self-edit chip: one line per file so the paths are readable at a
    glance — they are what tells an approver a file they never asked about is
    in the change. */

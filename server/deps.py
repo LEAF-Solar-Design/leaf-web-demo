@@ -998,6 +998,11 @@ def _dispatch_backedge_route(method: str, path: str) -> bool:
         return False
     if path in ("/api/capabilities", "/api/tools"):
         return True
+    if path.startswith("/api/author/stages/"):
+        return re.fullmatch(
+            r"/api/author/stages/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            path,
+        ) is not None
     if path in (
         # R7 read side: the spine's read-only customize ops (change list,
         # source file read, source tree listing). Each route re-runs the full
@@ -1295,6 +1300,9 @@ def require_tenant(
     authorization = request.headers.get("authorization", authorization)
     dispatch_leg = (auth_live() and x_dispatch_secret is not None and x_tenant_id
                     and _dispatch_backedge_route(request.method, request.url.path)
+                    and (not request.url.path.startswith("/api/author/stages/")
+                         or request.scope.get("raw_path", request.url.path.encode()).split(b"?", 1)[0]
+                         == request.url.path.encode())
                     and _dispatch_secret_ok(x_dispatch_secret))
     import demo_sessions
     record = demo_sessions.resolve_demo_session(

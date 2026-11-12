@@ -108,6 +108,7 @@ import deps
 import emf_metrics
 import entitlements
 import entity_scope
+import project_execution_context
 import instant_execution
 from demo_actor import DemoActorRefused, DemoActorUnavailable, is_demo_context
 import platform_link
@@ -217,6 +218,117 @@ async def propose_project_page(
         return fail(404, "Portfolio proposal session is unavailable.")
     except Exception:  # noqa: BLE001 - never expose provider/store exceptions
         return fail(503, "Portfolio proposal service is unavailable.")
+
+
+@router.post("/api/sessions/{session_id}/page/photo-assignment-proposals")
+async def propose_project_photo_assignments(session_id: str, request: Request):
+    import project_photo_assignment_proposal as proposals
+
+    headers = {"Cache-Control": "private, no-store"}
+
+    def fail(status):
+        exc = proposals.ProposalError(status)
+        return JSONResponse({"code": exc.code, "detail": str(exc)}, status_code=status, headers=headers)
+
+    try:
+        # Keep header failures inside this route's fixed private error envelope.
+        if (not request.headers.get('x-tenant-id')
+                or not deps._dispatch_secret_ok(request.headers.get('x-dispatch-secret'))):
+            return fail(403)
+        tenant = _page_proposal_tenant(request)
+        authority_session_id = request.headers.get('X-Authority-Session-Id')
+        turn_id = request.headers.get('X-Authority-Turn-Id')
+        scope = await run_in_threadpool(proposals.authority, tenant, session_id, authority_session_id, turn_id)
+        raw = bytearray()
+        async for chunk in request.stream():
+            if len(raw) + len(chunk) > proposals.MAX_INPUT_BYTES:
+                return fail(413)
+            raw.extend(chunk)
+        body = proposals.parse_request(bytes(raw))
+        if await run_in_threadpool(proposals.authority, tenant, session_id, authority_session_id, turn_id) != scope:
+            return fail(403)
+        result = await run_in_threadpool(proposals.propose, tenant, session_id, authority_session_id, turn_id, body)
+        if await run_in_threadpool(proposals.authority, tenant, session_id, authority_session_id, turn_id) != scope:
+            return fail(403)
+        response = JSONResponse(result, headers=headers)
+        if len(response.body) > proposals.MAX_RESPONSE_BYTES:
+            return fail(422)
+        if await run_in_threadpool(proposals.authority, tenant, session_id, authority_session_id, turn_id) != scope:
+            return fail(403)
+        return response
+    except proposals.ProposalError as exc:
+        return fail(exc.status)
+    except HTTPException as exc:
+        return fail(503 if exc.status_code >= 500 else 403)
+    except platform_link.ProjectSessionForbidden:
+        return fail(403)
+    except LookupError:
+        return fail(404)
+    except Exception as exc:  # noqa: BLE001 - never expose storage or identity diagnostics
+        lifecycle = sys.modules.get('leaf_platform.project_lifecycle')
+        if lifecycle is not None:
+            if isinstance(exc, lifecycle.LifecycleForbidden):
+                return fail(403)
+            if isinstance(exc, lifecycle.LifecycleConflict):
+                return fail(409)
+            if isinstance(exc, lifecycle.LifecycleUnavailable):
+                return fail(404)
+        return fail(503)
+
+
+@router.post("/api/sessions/{session_id}/materials/inspect")
+async def inspect_project_materials(
+    session_id: str, request: Request,
+    tenant=Depends(_page_proposal_tenant),
+    authority_session_id: Optional[str] = Header(default=None, alias="X-Authority-Session-Id"),
+    authority_turn_id: Optional[str] = Header(default=None, alias="X-Authority-Turn-Id"),
+):
+    import project_material_inspection as inspection
+
+    headers = {"Cache-Control": "private, no-store"}
+
+    def fail(status):
+        exc = inspection.InspectionError(status)
+        return JSONResponse({"code": exc.code, "detail": str(exc)}, status_code=status, headers=headers)
+
+    try:
+        scope = await run_in_threadpool(
+            inspection.authority, tenant, session_id, authority_session_id, authority_turn_id)
+        raw = bytearray()
+        async for chunk in request.stream():
+            if len(raw) + len(chunk) > inspection.MAX_INPUT_BYTES:
+                return fail(413)
+            raw.extend(chunk)
+        body = inspection.parse_request(bytes(raw))
+        if await run_in_threadpool(
+                inspection.authority, tenant, session_id, authority_session_id, authority_turn_id) != scope:
+            return fail(403)
+        result = await run_in_threadpool(
+            inspection.inspect, tenant, session_id, authority_session_id, authority_turn_id, body)
+        if await run_in_threadpool(
+                inspection.authority, tenant, session_id, authority_session_id, authority_turn_id) != scope:
+            return fail(403)
+        response = JSONResponse(result, headers=headers)
+        if len(response.body) > inspection.MAX_RESPONSE_BYTES:
+            return fail(422)
+        return response
+    except inspection.InspectionError as exc:
+        return fail(exc.status)
+    except platform_link.ProjectSessionForbidden:
+        return fail(403)
+    except LookupError:
+        return fail(404)
+    except Exception as exc:  # noqa: BLE001 - never expose storage diagnostics
+        # Package loading itself may fail, so classify only already-loaded errors.
+        lifecycle = sys.modules.get('leaf_platform.project_lifecycle')
+        if lifecycle is not None:
+            if isinstance(exc, lifecycle.LifecycleForbidden):
+                return fail(403)
+            if isinstance(exc, lifecycle.LifecycleConflict):
+                return fail(409)
+            if isinstance(exc, lifecycle.LifecycleUnavailable):
+                return fail(404)
+        return fail(503)
 
 
 # --------------------------------------------------------------------------- #
@@ -528,6 +640,8 @@ def _session_row(sess: Dict[str, Any]) -> Dict[str, Any]:
 
 
 class MessageRequest(BaseModel):
+    # Selection is a request pin. Organization, drawing and content proof are server-owned.
+    project_context: Any = None
     # P5a idempotency identity. In PostgreSQL sessions mode, eligible plain-text
     # messages receive a server UUID when absent and may supply that UUID on an
     # ambiguous retry. Confirmations, images, and credential-bearing turns keep
@@ -1156,7 +1270,8 @@ def list_sessions(scope: Optional[str] = None, limit: int = LIST_DEFAULT_LIMIT,
 async def post_message_route(session_id: str, request: Request,
                              req: MessageRequest,
                              tenant=Depends(deps.require_active_tenant)):
-    return post_message(session_id, req, request, tenant)
+    # Keep blocking turn dispatch off the loop: the harness calls back into this app before its first event.
+    return await run_in_threadpool(post_message, session_id, req, request, tenant)
 
 
 def post_message(session_id: str, req: MessageRequest, request: Request,
@@ -1301,6 +1416,20 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
                               "ENTITLEMENT_REQUIRED")
         return entitlements.entitlement_denied_response("converse", tier)
 
+    requested_project_context = None
+    frozen_project_context = None
+    supplied_project_context = "project_context" in req.model_fields_set
+    if has_confirm and (supplied_project_context or "project_context" in (req.confirm or {})):
+        return error_response(ErrorCode.BAD_PARAMS, "confirm turns cannot supply project_context",
+                              retryable=False, status_code=400)
+    if supplied_project_context:
+        try:
+            requested_project_context = project_execution_context.validate_request(req.project_context)
+            frozen_project_context = project_execution_context.freeze(tenant, session, requested_project_context)
+        except project_execution_context.ContextError as exc:
+            return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
+                                  status_code=exc.status_code)
+
     # P5a admission is deliberately narrow: plain-text messages only. Those
     # are the requests that may enter the queue and can be safely recovered
     # without persisting a credential, image bytes, or approval material.
@@ -1332,6 +1461,8 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
                 "classifier_hint": req.classifier_hint,
                 "model": req.model,
             }
+            if frozen_project_context is not None:
+                queue_probe[project_execution_context.KEY] = frozen_project_context
             try:
                 request_journal.validate_recoverable_payload(queue_probe)
             except request_journal.CredentialMaterial:
@@ -1348,6 +1479,8 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
         }
         if requested_scope is not None:
             digest_input["entity_scope"] = requested_scope
+        if requested_project_context is not None:
+            digest_input["project_context"] = requested_project_context
         digest = request_journal.payload_digest(digest_input)
         try:
             journal_row, inserted = request_journal.admit_request(
@@ -1455,6 +1588,17 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
             frozen_scope = entity_scope.stored_binding(stored_payload)
         except entity_scope.ScopeError as exc:
             return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False, status_code=409)
+        try:
+            frozen_project_context = project_execution_context.stored_binding(stored_payload)
+            if frozen_project_context is not None:
+                frozen_project_context = project_execution_context.revalidate(tenant, session, frozen_project_context)
+            elif (session.get("project_id") is not None
+                  and (approval.get("capability") in ("drawing.read", "drawing.write")
+                       or approval.get("kind") == "run_capability")):
+                raise project_execution_context.ContextError("project_execution_context_required")
+        except project_execution_context.ContextError as exc:
+            return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
+                                  status_code=exc.status_code)
         stored_dwg = (
             stored_payload.get("dwg")
             if isinstance(stored_payload, dict)
@@ -1499,6 +1643,7 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
             request_id=journal_request_id,
             **({"integration_capture": integration_capture} if integration_capture is not None else {}),
             **({"entity_scope": frozen_scope} if frozen_scope is not None else {}),
+            **({"project_execution_context": frozen_project_context} if frozen_project_context is not None else {}),
         )
     except turn_runner.TurnBusy:
         # OPT-IN queue: a text prompt with queue=true parks (cap 1) instead of
@@ -1510,7 +1655,8 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
                 q_status, queued_id = turn_runner.try_enqueue_turn(
                     tenant, session_id, text=req.text,
                     classifier_hint=req.classifier_hint, model=req.model,
-                    request_id=journal_request_id)
+                    request_id=journal_request_id,
+                    **({"project_execution_context": frozen_project_context} if frozen_project_context is not None else {}))
             except turn_runner.TurnRejected as exc:
                 return _turn_rejected_response(exc, tenant=tenant, session_id=session_id)
             if q_status == "queued":

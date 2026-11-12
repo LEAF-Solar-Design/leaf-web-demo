@@ -317,3 +317,28 @@ describe('ResultPanel canonical project Solar dispatch', () => {
     }
   })
 })
+
+describe('ResultPanel version label', () => {
+  // The shape of a synchronous project write: version is the new canonical drawing version.
+  const projectWrite = { ok: true, tool: 'delete-marked-panel',
+    version: { version_id: '66666666-6666-4666-8666-666666666666', drawing_id: '33333333-3333-4333-8333-333333333333',
+      project_id: '22222222-2222-4222-8222-222222222222', org_id: '11111111-1111-4111-8111-111111111111', seq: 2 },
+    result: { deleted_handle: 'ABCD', added_marker_handle: 'ABCE' }, overlay: null,
+    project_context: { input_version_id: '44444444-4444-4444-8444-444444444444' } }
+
+  it('renders a project write whose version is an object, naming the drawing version', () => {
+    render(<ResultPanel running={false} result={projectWrite} />)
+    expect(screen.getByText('Passed')).toBeTruthy()
+    expect(screen.getByText('drawing version 2 (66666666)')).toBeTruthy()
+  })
+
+  it('keeps a primitive tool version exactly as before', () => {
+    render(<ResultPanel running={false} result={{ ok: true, tool: 'count-by-layer', version: '1.0.0', result: { total: 1 } }} />)
+    expect(screen.getByText('v1.0.0')).toBeTruthy()
+  })
+
+  it('does not invent a version from a malformed object', () => {
+    render(<ResultPanel running={false} result={{ ok: true, tool: 'delete-marked-panel', version: { seq: 'two' }, result: {} }} />)
+    expect(screen.getByText('drawing version not reported')).toBeTruthy()
+  })
+})

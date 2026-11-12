@@ -66,6 +66,48 @@ def save_widget():
     return ledger.save("tenant-a", "widget", PARITY["doc"], None, "member", kind="widget")
 
 
+def test_arithmetic_saved_graph_widget_values_update_reopen_and_tenant_boundary():
+    from test_lab_evaluate import arithmetic_graph
+
+    # Existing graph()/save_source() helpers intentionally retain legacy zero-hash pins.
+    # This path saves current fixture pins through the ordinary graph HTTP route.
+    graph_doc = arithmetic_graph()
+    widget_doc = copy.deepcopy(PARITY["doc"])
+    widget_doc["formats"]["la"]["els"][1]["binding"] = binding()
+    saved_widget = client().post("/api/lab/docs/widget/save", json={
+        "kind": "widget", "graph": widget_doc, "expected_head": None})
+    assert saved_widget.status_code == 200, saved_widget.text
+    saved = client().post("/api/lab/docs/source/save", json={
+        "kind": "graph", "graph": graph_doc, "expected_head": None})
+    assert saved.status_code == 200, saved.text
+    bindings = [binding(output=name) for name in ("total", "change", "percent", "open", "reconstructed")]
+    path = "/api/lab/widgets/widget/values"
+    for revision, expected in [(1, [1010, 10, 1, 3, 1010]), (2, [1020, 20, 2, 4, 1020])]:
+        if revision == 2:
+            graph_doc["blocks"][1]["settings"]["value"] = 1020
+            graph_doc["blocks"][2]["settings"]["value"] = 4
+            updated = client().post("/api/lab/docs/source/save", json={
+                "kind": "graph", "graph": graph_doc, "expected_head": 1})
+            assert updated.status_code == 200, updated.text
+        reopened = ledger.get("tenant-a", "source")
+        assert reopened["graph"] == graph_doc
+        result = client().post(path, json={"bindings": bindings})
+        assert result.status_code == 200, result.text
+        values = result.json()["values"]
+        assert [value["status"] for value in values] == ["resolved"] * 5
+        assert [value["value"] for value in values] == expected
+        assert all(value["pins"]["graph_revision"] == revision for value in values)
+        assert all(value["pins"]["graph_sha256"] == reopened["sha256"] for value in values)
+    assert client("tenant-b").post(path, json={"bindings": bindings}).status_code == 404
+    assert client("tenant-b").get("/api/lab/docs/source/head").status_code == 404
+    # A foreign tenant's own widget still cannot bind tenant-a's source.
+    ledger.save("tenant-b", "widget", widget_doc, None, "member", kind="widget")
+    foreign = client("tenant-b").post(path, json={"bindings": bindings})
+    assert foreign.status_code == 200
+    assert all(value == {"status": "unavailable", "reason": "missing-document", "truncated": False}
+               for value in foreign.json()["values"])
+
+
 def size(value):
     return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 

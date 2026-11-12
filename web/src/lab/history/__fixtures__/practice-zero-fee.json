@@ -1,0 +1,36 @@
+{
+  "_provenance": "synthetic-from-schema",
+  "handle": "practice-zero-fee",
+  "state": "finished",
+  "reason": null,
+  "revision": 1,
+  "document_sha256": "231d5b031e0e116910f8f44d956d8245a32dd1e5547c972613312b1c3a8bd3cc",
+  "created_at": "2026-10-30T16:00:00Z",
+  "finished_at": "2026-10-30T16:00:01Z",
+  "coverage": { "markets_covered": ["BTC-15M", "ETH-1H"], "gaps": 0, "tape_hours_covered": 4 },
+  "fee_schedule_id": "kalshi-2026-07",
+  "candidate": {
+    "trades": 2, "resized": 1, "skipped": 1, "new_buys": 2,
+    "net_after_fees_cents": 30, "worst_trade_cents": -5,
+    "without_best_and_worst_cents": 0, "net_per_dollar_risked": 0.5,
+    "costs": { "fees_cents": 0, "slippage_cents": 3 }
+  },
+  "live": {
+    "trades": 0, "resized": 0, "skipped": 0, "new_buys": 0,
+    "net_after_fees_cents": 0, "worst_trade_cents": 0,
+    "without_best_and_worst_cents": 0, "net_per_dollar_risked": 0,
+    "costs": { "fees_cents": 0, "slippage_cents": 0 }
+  },
+  "deltas": {
+    "trades": 2, "resized": 1, "skipped": 1, "new_buys": 2,
+    "net_after_fees_cents": 30, "worst_trade_cents": -5,
+    "without_best_and_worst_cents": 0, "net_per_dollar_risked": 0.5,
+    "costs": { "fees_cents": 4, "slippage_cents": 3 }
+  },
+  "blocks": [
+    { "block_id": "signal", "registry_id": "signal", "triggered": 0, "reached": 2 },
+    { "block_id": "unreached", "registry_id": "adjust-none", "triggered": 0, "reached": 0 }
+  ],
+  "latency": { "p50_us": 0, "p99_us": 0 },
+  "elapsed_ms": 1000
+}

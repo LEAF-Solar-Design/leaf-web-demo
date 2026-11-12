@@ -3,12 +3,31 @@ import { act, cleanup, fireEvent, render, screen, within, waitFor } from '@testi
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { parse } from '@babel/parser'
+import { createHash, webcrypto } from 'node:crypto'
+import { composerDraftAccountScope } from '../lib/composerDraft.js'
+import { readActiveScope } from '../auth/activeScope.js'
+import { deliverProjectPageProposal } from './projectPageProposalDelivery.js'
+import ConversePanel from '../components/ConversePanel.jsx'
 import { BrowserArtifactContext, BrowserAssetGround } from './BrowserAssetGround.jsx'
 import { loadProjectPage, saveProjectPage } from './projectPageClient.js'
 
 vi.mock('./projectPageClient.js', async importOriginal => ({ ...await importOriginal(), loadProjectPage: vi.fn(), saveProjectPage: vi.fn() }))
+import * as api from '../api.js'
 
-vi.mock('./ProjectBoardGround.jsx', () => ({ ProjectBoardGround: ({ panel, active }) => <div hidden={!active}>{panel}</div> }))
+vi.mock('./ProjectBoardGround.jsx', () => ({ ProjectBoardGround: ({ panel, active, mock }) => <div data-testid="project-board-ground" data-mock={String(mock)} hidden={!active}>{panel}</div> }))
+const viewConverse = vi.hoisted(() => ({ streams: new Map(), postMessage: vi.fn() }))
+vi.mock('../converse.js', async importOriginal => ({ ...await importOriginal(),
+  openStream: (sessionId, _afterSeq, handlers) => {
+    viewConverse.streams.set(sessionId, handlers)
+    return { close: () => viewConverse.streams.delete(sessionId) }
+  },
+  postMessage: viewConverse.postMessage,
+  listPendingApprovals: async () => [],
+}))
+vi.mock('../engineChanges.js', async importOriginal => ({ ...await importOriginal(),
+  listEngineChanges: async () => ({ kind: 'ok', cards: [], unread_count: 0 }),
+}))
+vi.mock('../telemetry.js', async importOriginal => ({ ...await importOriginal(), track: vi.fn() }))
 const auth = vi.hoisted(() => ({ configured: true, signedIn: true, listeners: new Set(), login: vi.fn() }))
 vi.mock('../auth.js', async importOriginal => ({
   ...await importOriginal(),
@@ -26,8 +45,177 @@ beforeEach(() => {
   auth.listeners.clear()
   auth.login.mockReset()
   loadProjectPage.mockReset(); saveProjectPage.mockReset()
+  viewConverse.streams.clear(); viewConverse.postMessage.mockReset()
 })
 afterEach(cleanup)
+
+function authoredViewFixture() {
+  const saved = new Map(['leaf.jwt', 'leaf.org_id', 'leaf.actor_binding_id'].map(key => [key, localStorage.getItem(key)]))
+  const tenant = '11111111-1111-4111-8111-111111111111'
+  const project = '22222222-2222-4222-8222-222222222222'
+  localStorage.setItem('leaf.jwt', `header.${btoa(JSON.stringify({ iss: 'https://view.test/', sub: 'auth0|viewer', org_id: tenant }))}.signature`)
+  localStorage.setItem('leaf.org_id', tenant)
+  localStorage.setItem('leaf.actor_binding_id', '33333333-3333-4333-8333-333333333333')
+  const descriptor = { contract: 'leaf.authored-view.v1', route: 'view', kind: 'view', tool: 'fixture-view',
+    tenant_id: tenant, session_id: 'view-session', turn_id: 'view-turn', catalog_commit: 'a'.repeat(40),
+    effective_catalog_digest: 'b'.repeat(64), catalog_digest: `sha256:${'c'.repeat(64)}`,
+    tool_manifest_sha256: `sha256:${'c'.repeat(64)}` }
+  const html = '<!doctype html><meta charset="utf-8"><h1>Arbitrary café view</h1><script>document.title="view"</script>\n'
+  const source = { ...descriptor, project_id: project, entry: 'tools/fixture-view/nested/custom.htm',
+    media_type: 'text/html', html, size_bytes: new TextEncoder().encode(html).length,
+    sha256: createHash('sha256').update(html).digest('hex') }
+  let live = true
+  const request = { projectId: project, accountScope: composerDraftAccountScope(), activeScope: readActiveScope(),
+    result: descriptor, key: 'view-session:view-turn:3', provenance: { sessionId: 'view-session', turnId: 'view-turn', seq: 3 },
+    isCurrent: () => live }
+  const mountedProps = { ...props, projectId: project, accountScope: request.accountScope }
+  const response = (body = source) => new Response(JSON.stringify(body), {
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } })
+  const fetcher = vi.fn().mockImplementation(async () => response())
+  vi.stubGlobal('fetch', fetcher)
+  vi.stubGlobal('crypto', webcrypto)
+  return { request, source, html, response, fetcher, mountedProps, expire: () => { live = false },
+    restore: () => {
+      cleanup(); vi.unstubAllGlobals()
+      for (const [key, value] of saved) {
+        if (value === null) localStorage.removeItem(key)
+        else localStorage.setItem(key, value)
+      }
+    } }
+}
+
+it('authored_view fetches exact registered HTML into the existing sandbox', async () => {
+  const fixture = authoredViewFixture()
+  try {
+    const { container } = render(<BrowserAssetGround {...fixture.mountedProps} />)
+    act(() => expect(deliverProjectPageProposal(fixture.request)).toBe(true))
+    await waitFor(() => expect(container.querySelector('iframe')).toBeTruthy())
+    const iframe = container.querySelector('iframe')
+    expect(iframe.getAttribute('srcdoc')).toBe(fixture.html)
+    expect(iframe.getAttribute('sandbox')).toBe('allow-scripts allow-downloads')
+    expect(fixture.fetcher).toHaveBeenCalledTimes(1)
+    const [path, options] = fixture.fetcher.mock.calls[0]
+    const url = new URL(path, window.location.origin)
+    expect(url.origin).toBe(window.location.origin)
+    expect(url.pathname).toBe('/api/tools/fixture-view/view-source')
+    expect(url.searchParams.get('project_id')).toBe(fixture.mountedProps.projectId)
+    expect(url.searchParams.get('session_id')).toBe('view-session')
+    expect(url.searchParams.get('tool_manifest_sha256')).toBe(fixture.source.tool_manifest_sha256)
+    expect(options).toMatchObject({ credentials: 'same-origin', redirect: 'error', cache: 'no-store',
+      headers: { 'Authorization': expect.stringContaining('Bearer ') } })
+    act(() => expect(deliverProjectPageProposal(fixture.request)).toBe(false))
+  } finally { fixture.restore() }
+})
+
+it.each(['success', 'app-receipt', 'text-only', 'failed', 'foreign-session', 'replayed', 'session-change', 'project-change'])(
+  'authored_view mounted conversation intake and source verification (%s)', async mode => {
+    const fixture = authoredViewFixture()
+    try {
+      const sessionId = fixture.source.session_id
+      const projectId = fixture.mountedProps.projectId
+      const ui = (session = sessionId, project = projectId) => <>
+        <ConversePanel sessionId={session} projectContext={{ project_id: project, input_version_id: 'version-one' }}
+          userTurns={mode === 'app-receipt' ? [{ turnId: fixture.source.turn_id, text: 'Open my view', status: 'started' }] : []} />
+        <BrowserAssetGround {...fixture.mountedProps} projectId={project} />
+      </>
+      viewConverse.postMessage.mockResolvedValue({ status: 'started', turn_id: fixture.source.turn_id })
+      let resolveFetch
+      if (mode.endsWith('-change')) fixture.fetcher.mockReturnValue(new Promise(resolve => { resolveFetch = resolve }))
+      const { container, rerender } = render(ui())
+      if (mode !== 'replayed' && mode !== 'app-receipt') {
+        await act(async () => {
+          fireEvent.change(screen.getByLabelText('Reply to the assistant'), { target: { value: 'Open my view' } })
+          fireEvent.keyDown(screen.getByLabelText('Reply to the assistant'), { key: 'Enter' })
+        })
+        expect(viewConverse.postMessage).toHaveBeenCalledWith(sessionId,
+          expect.objectContaining({ projectContext: { project_id: projectId, input_version_id: 'version-one' } }))
+      }
+      const handlers = viewConverse.streams.get(sessionId)
+      const result = mode === 'foreign-session' ? { ...fixture.request.result, session_id: 'foreign-session' }
+        : mode === 'text-only' ? JSON.stringify(fixture.request.result) : fixture.request.result
+      act(() => {
+        handlers.onEvent({ type: 'turn_started', session_id: sessionId, turn_id: fixture.source.turn_id, seq: 1, data: {} })
+        handlers.onEvent({ type: 'tool_result', session_id: sessionId, turn_id: fixture.source.turn_id, seq: 3,
+          data: { tool: 'run_capability', ok: mode !== 'failed', result } })
+      })
+      if (mode === 'success' || mode === 'app-receipt') {
+        await waitFor(() => expect(container.querySelector('iframe')?.getAttribute('srcdoc')).toBe(fixture.html))
+        expect(container.querySelector('iframe').getAttribute('sandbox')).toBe('allow-scripts allow-downloads')
+        expect(fixture.fetcher).toHaveBeenCalledTimes(1)
+      } else if (mode.endsWith('-change')) {
+        await waitFor(() => expect(fixture.fetcher).toHaveBeenCalledTimes(1))
+        rerender(mode === 'session-change' ? ui('new-session') : ui(sessionId, 'new-project'))
+        await act(async () => { resolveFetch(fixture.response()) })
+        expect(container.querySelector('iframe')).toBeNull()
+      } else {
+        expect(fixture.fetcher).not.toHaveBeenCalled()
+        expect(container.querySelector('iframe')).toBeNull()
+      }
+    } finally { fixture.restore() }
+  })
+
+it.each(['hash', 'project', 'commit', 'session', 'tenant', 'kind', 'size', 'oversize', 'surrogate', 'redirect', 'request-project'])(
+  'authored_view refuses unverified source (%s)', async failure => {
+    const fixture = authoredViewFixture()
+    try {
+      const body = { ...fixture.source }
+      if (failure === 'hash') body.sha256 = '0'.repeat(64)
+      if (failure === 'project') body.project_id = 'foreign-project'
+      if (failure === 'commit') body.catalog_commit = '0'.repeat(40)
+      if (failure === 'session') body.session_id = 'foreign-session'
+      if (failure === 'tenant') body.tenant_id = 'foreign-tenant'
+      if (failure === 'kind') body.kind = 'script'
+      if (failure === 'size') body.size_bytes++
+      if (failure === 'oversize') body.size_bytes = 1024 * 1024 + 1
+      if (failure === 'surrogate') {
+        body.html = '\ud800'; body.size_bytes = 3
+        body.sha256 = createHash('sha256').update(body.html).digest('hex')
+      }
+      if (failure === 'request-project') fixture.request.projectId = 'foreign-project'
+      let consumed = false
+      fixture.fetcher.mockImplementation(async () => {
+        const response = fixture.response(body)
+        if (failure === 'redirect') Object.defineProperty(response, 'redirected', { value: true })
+        consumed = true
+        return response
+      })
+      const { container } = render(<BrowserAssetGround {...fixture.mountedProps} />)
+      await act(async () => { deliverProjectPageProposal(fixture.request) })
+      if (failure !== 'request-project') await waitFor(() => expect(consumed).toBe(true))
+      // Flush transport read + crypto continuations, including mismatched hashes.
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)) })
+      expect(container.querySelector('iframe')).toBeNull()
+      if (failure === 'request-project') expect(fixture.fetcher).not.toHaveBeenCalled()
+    } finally { fixture.restore() }
+  })
+
+it.each(['project', 'logout', 'session', 'account', 'active-scope'])(
+  'authored_view drops an in-flight source after %s lifetime changes', async change => {
+    const fixture = authoredViewFixture()
+    try {
+      let resolveFetch
+      fixture.fetcher.mockReturnValue(new Promise(resolve => { resolveFetch = resolve }))
+      const { container, rerender } = render(<BrowserAssetGround {...fixture.mountedProps} />)
+      act(() => deliverProjectPageProposal(fixture.request))
+      await waitFor(() => expect(fixture.fetcher).toHaveBeenCalledTimes(1))
+      act(() => {
+        if (change === 'project') rerender(<BrowserAssetGround {...fixture.mountedProps} projectId="another-project" />)
+        if (change === 'account') rerender(<BrowserAssetGround {...fixture.mountedProps} accountScope="account:another" />)
+        if (change === 'session') fixture.expire()
+        if (change === 'logout') {
+          localStorage.removeItem('leaf.jwt')
+          window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt' }))
+        }
+        if (change === 'active-scope') {
+          localStorage.setItem('leaf.org_id', 'another-org')
+          window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.org_id' }))
+        }
+      })
+      await act(async () => { resolveFetch(fixture.response()); await Promise.resolve() })
+      expect(container.querySelector('iframe')).toBeNull()
+      expect(fixture.fetcher).toHaveBeenCalledTimes(1)
+    } finally { fixture.restore() }
+  })
 
 it('switches personal editing styles around one dirty owner without loading or saving', async () => {
   const key = 'leaf.editingStyle.v1:' + encodeURIComponent(props.accountScope)
@@ -310,4 +498,18 @@ it('keeps phone panels inside the viewport with an internal scroller and sticky 
   expect(css).toContain('overscroll-behavior: contain')
   expect(css).toContain('position: sticky; top: 0')
   expect(css).toContain('.browser-asset-ground { position: fixed; inset: 0;')
+})
+
+it.each([
+  { signedIn: true, canApplyLayout: true, mock: false, eligible: true },
+  { signedIn: false, canApplyLayout: true, mock: false, eligible: false },
+  { signedIn: true, canApplyLayout: false, mock: false, eligible: false },
+  { signedIn: true, canApplyLayout: true, mock: true, eligible: false },
+  { signedIn: true, mock: false, eligible: false },
+])('forwards layout authority while preserving ProjectBoard mock mode: %j', ({ eligible, ...state }) => {
+  vi.spyOn(api, 'getSurfaceConfig').mockResolvedValue({ surfaces: {} })
+  render(<BrowserAssetGround {...props} profile="cad" {...state} />)
+  fireEvent.click(screen.getByRole('button', { name: 'Layout', exact: true }))
+  expect(screen.getByRole('button', { name: 'Apply layout' }).disabled).toBe(!eligible)
+  expect(screen.getByTestId('project-board-ground').dataset.mock).toBe(String(state.mock))
 })

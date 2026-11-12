@@ -203,7 +203,7 @@ const assertions = {
     rerender(<CatalogStatus state="failed" onRetry={onRetry} />)
     expect(screen.getAllByRole('alert')).toHaveLength(1)
     expect(screen.getByRole('alert').querySelector('p').textContent)
-      .toBe('The tool list did not load. Your saved tools are still available below.')
+      .toBe('The tool list did not load. Try again.')
     expect(screen.queryByRole('status')).toBeNull()
     fireEvent.click(within(screen.getByRole('alert')).getByRole('button', { name: 'Retry' }))
     expect(onRetry).toHaveBeenCalledTimes(1)

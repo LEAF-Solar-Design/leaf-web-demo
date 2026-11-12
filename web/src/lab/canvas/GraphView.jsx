@@ -1,8 +1,9 @@
 import { lazy, memo, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { registry, withTools } from './registry.js'
 import { fetchLabTools } from './toolNodes.js'
-import { pipeId, validateGraph } from './graphDoc.js'
+import { addBlock, pipeId, validateGraph } from './graphDoc.js'
 import { authHeaders, config } from '../../api.js'
+import { subscribeBeforeLogout, subscribeTokenStored } from '../../auth.js'
 import { fetchWithBudget } from '../../fetchBudget.js'
 import { createHostProvider } from '../host/hostProvider.js'
 import { evidenceFor } from '../code/hostEvidence.js'
@@ -14,18 +15,27 @@ import AfterSavePanel from '../history/AfterSavePanel.jsx'
 import { createAfterSaveClient } from '../history/afterSaveClient.js'
 import { canonicalJSON } from '../contract.js'
 import { labValueStore, terminalState, useBlockValue, useRun, useRunStatus } from '../runs/valueStore.js'
-import { openRunStream, submitRun } from '../runs/runStream.js'
+import { newSubmissionId, openRunStream, submitRun } from '../runs/runStream.js'
 import { formatLabRoute } from '../labRoute.js'
 import { readController } from '../changes/controller.js'
 import TestsKeepersRail from '../changes/TestsKeepersRail.jsx'
+import { sentence } from '../honesty.js'
 
 // Both mounts pass the values returned by useLiveGraph to LiveValues. Keep
 // their display context out of the values and the proposal document itself.
 const displayContexts = new WeakMap()
 
 const wallTime = () => Date.now()
+// Display partition only. The server verifies authority on every request.
+function runAccount() {
+  try {
+    const token = authHeaders().Authorization?.split(' ')[1]
+    const payload = token?.split('.')[1]
+    return payload ? JSON.parse(atob(payload.replaceAll('-', '+').replaceAll('_', '/'))).sub || null : null
+  } catch { return null }
+}
 const tick = () => performance.now()
-const summary = value => value.error ? `error: ${value.error.code}`
+const summary = value => value.error?.code === 'runs_on_bot' ? sentence('runs_on_bot') : value.error ? `error: ${value.error.code}`
   : value.data === null ? 'null' : Array.isArray(value.data) ? `${value.data.length} rows`
     : typeof value.data === 'number' ? String(value.data) : 'text'
 const seriesOf = data => Array.isArray(data) ? data.map(item => typeof item === 'number' ? item
@@ -68,8 +78,9 @@ export function useLiveGraph({ provider, registry: base = registry, now = wallTi
   const current = evaluation.draft === draft && evaluation.entries === entries
   const result = current ? evaluation.result : null
   const sorted = [...times].sort((a, b) => a - b)
-  const percentile = rank => sorted.length ? sorted[Math.ceil(sorted.length * rank) - 1] * 1000 : 0
-  const latency = { p50_us: percentile(.5), p99_us: percentile(.99) }
+  const percentile = rank => sorted.length ? sorted[Math.ceil(sorted.length * rank) - 1] * 1000 : null
+  const graph_latency = { p50_us: percentile(.5), p99_us: percentile(.99), samples: times.length }
+  const latency = { p50_us: null, p99_us: null }
   const measurements = { blocks: {}, pipes: {} }
   const upstream = {}
   const values = []
@@ -101,7 +112,7 @@ export function useLiveGraph({ provider, registry: base = registry, now = wallTi
   }
   const hasValues = values.length > 0
   useEffect(() => {
-    labValueStore.setLocal(values, { times, count, measurements })
+    labValueStore.setLocal(values, { times, count, measurements, graph_latency })
   }, [result, currentTime, count])
   useEffect(() => {
     if (!hasValues) return undefined
@@ -142,13 +153,13 @@ const StoredBlockValues = memo(function StoredBlockValues({ id, runId, store, te
     const kind = value.error || block.error || value.data === null ? 'empty'
       : Array.isArray(value.data) ? series.length && series.every(Number.isFinite) ? 'chart' : 'rows'
         : ['number', 'string', 'boolean'].includes(typeof value.data) ? 'value' : 'empty'
-    return { ...template, port, kind, series, display: block.error ? `error: ${block.error}`
+    return { ...template, port, kind, series, display: block.error === 'runs_on_bot' ? sentence('runs_on_bot') : block.error ? `error: ${block.error}`
       : kind === 'value' ? String(value.data) : summary(value),
     as_of: value.as_of, age_ms: Number.isFinite(value.as_of) ? Math.max(0, Date.now() - value.as_of) : null, stale: value.stale, simulated: value.simulated,
     truncated: value.truncated, host_tainted: value.host_tainted }
   })
   return <>
-    {block?.error && !values.length && <article data-value-kind="empty"><h3>{templates[0]?.title || id}</h3><p>error: {block.error}</p></article>}
+    {block?.error && !values.length && <article data-value-kind="empty"><h3>{templates[0]?.title || id}</h3><p>{block.error === 'runs_on_bot' ? sentence('runs_on_bot') : `error: ${block.error}`}</p></article>}
     {values.map(value => {
         const low = Math.min(...value.series)
         const high = Math.max(...value.series)
@@ -163,7 +174,8 @@ const StoredBlockValues = memo(function StoredBlockValues({ id, runId, store, te
           <span data-badge>{value.age_ms === null ? 'age unknown' : `as of ${Math.floor(value.age_ms / 1000)}s ago`}</span>
           {['stale', 'simulated', 'truncated'].map(badge => value[badge] && <span data-badge key={badge}>{badge}</span>)}
           {value.host_tainted && <span data-badge>host data</span>}
-          <span data-badge>p50 {value.p50_us / 1000} ms · p99 {value.p99_us / 1000} ms</span>
+          <span data-badge>{value.p50_us == null ? sentence('latency_not_measured')
+            : `p50 ${value.p50_us / 1000} ms · p99 ${value.p99_us / 1000} ms`}</span>
         </article>
       })}
   </>
@@ -209,6 +221,13 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
   const [local] = useState(() => createHostProvider({ framed: false, operator, onChange: () => setRevision(value => value + 1) }))
   const provider = supplied || local
   const [tools, setTools] = useState([])
+  const [corpusPanel, setCorpusPanel] = useState(false)
+  const [corpusOptions, setCorpusOptions] = useState(null)
+  const [corpusProject, setCorpusProject] = useState('')
+  const [corpusMaterial, setCorpusMaterial] = useState('')
+  const [corpusSuite, setCorpusSuite] = useState('')
+  const [corpusMessage, setCorpusMessage] = useState('')
+  const corpusRequest = useRef(0)
   const toolsRequest = useRef(null)
   const toolsActive = useRef(true)
   useEffect(() => {
@@ -226,14 +245,93 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
     }
     return toolsRequest.current
   }, [])
-  const toolEntries = useMemo(() => withTools(entries || registry, tools), [entries, tools])
+  const toolEntries = useMemo(() => ({ ...withTools(entries || registry, tools),
+    ...(corpusOptions?.manifest ? { 'corpus-evaluator@1.0.0': corpusOptions.manifest } : {}) }), [entries, tools, corpusOptions])
   const live = useLiveGraph({ provider, registry: toolEntries, revision: supplied ? revision : localRevision, artifacts: client })
   const [, refreshHead] = useState(0)
   const [runMessage, setRunMessage] = useState('')
+  const [reopenMessage, setReopenMessage] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const submissionPending = useRef(false)
   const streams = useRef(new Set())
   const mounted = useRef(false)
+  const submissionIntent = useRef(null)
+  const logoutGeneration = useRef(0)
+  const explicitlySignedOut = useRef(false)
+  const loadCorpusOptions = async (project = '') => {
+    const request = ++corpusRequest.current
+    const generation = logoutGeneration.current
+    const requestAuthority = authHeaders().Authorization
+    setCorpusOptions(previous => previous ? { ...previous, materials: [] } : null)
+    setCorpusMessage('Loading project reference files…')
+    try {
+      const response = await fetchWithBudget(fetch, `${config.apiBase}/api/lab/runs/corpus-options${project ? `?project_id=${encodeURIComponent(project)}` : ''}`,
+        { headers: authHeaders(), cache: 'no-store' })
+      if (!response.ok) throw new Error('Corpus evaluation is unavailable for this project.')
+      const options = await response.json()
+      if (request !== corpusRequest.current || generation !== logoutGeneration.current
+          || explicitlySignedOut.current || authHeaders().Authorization !== requestAuthority) return
+      setCorpusOptions(options)
+      setCorpusMessage(options.limited ? 'Showing the first available projects.' : '')
+    } catch (error) {
+      if (request === corpusRequest.current && generation === logoutGeneration.current) {
+        setCorpusOptions(null); setCorpusMessage(error.message)
+      }
+    }
+  }
+  const openCorpus = () => {
+    setCorpusPanel(true)
+    const existing = live.draft?.document.blocks.find(block => block.registry.id === 'corpus-evaluator')
+    const project = existing?.settings.project_id || route?.params?.project_id || ''
+    setCorpusProject(project)
+    setCorpusMaterial(existing?.settings.corpus.material_id || '')
+    setCorpusSuite(existing?.settings.suite.material_id || '')
+    void loadCorpusOptions(project)
+  }
+  const addCorpus = () => {
+    const original = live.draft?.document
+    const material = corpusOptions?.materials?.find(item => item.material_id === corpusMaterial && item.media_type === 'application/gzip')
+    const suite = corpusOptions?.materials?.find(item => item.material_id === corpusSuite && item.media_type === 'application/json')
+    if (!original) { setCorpusMessage('Wait for the graph to finish loading, then add the evaluation.'); return }
+    if (!material || !suite || !corpusProject) { setCorpusMessage('Wait for the selected project files to finish loading, then add the evaluation.'); return }
+    if (original.blocks.some(block => block.registry.id === 'corpus-evaluator' && block.settings.project_id !== corpusProject)) {
+      setCorpusMessage('This graph already uses another project. Select that project to keep its material scope.'); return
+    }
+    const next = addBlock(original, corpusOptions.manifest)
+    const descriptor = value => Object.fromEntries(['material_id', 'sha256', 'byte_size'].map(key => [key, value[key]]))
+    next.blocks[next.blocks.length - 1].settings = { project_id: corpusProject, corpus: descriptor(material), suite: descriptor(suite) }
+    client.takeGraph(next)
+    setCorpusMessage('Corpus evaluation added. Save this graph, then run it to evaluate the complete original.')
+  }
+  useEffect(() => {
+    const graph = restored.graph || initialDocument
+    const block = graph?.blocks?.find(item => item.registry.id === 'corpus-evaluator')
+    if (block && !hidden) {
+      setCorpusProject(block.settings.project_id)
+      setCorpusMaterial(block.settings.corpus.material_id)
+      setCorpusSuite(block.settings.suite.material_id)
+      void loadCorpusOptions(block.settings.project_id)
+    } else if (corpusPanel && !hidden) {
+      void loadCorpusOptions(corpusProject)
+    }
+    return () => { corpusRequest.current += 1 }
+  }, [restored.key, hidden])
+  const [outcomeUnknown, setOutcomeUnknown] = useState(false)
+  const currentRunScope = () => JSON.stringify([config.apiBase, config.tenant, runAccount() || authHeaders().Authorization || '',
+    client.currentDocId(), client.state.head, logoutGeneration.current])
+  const account = useRef(runAccount())
+  const observedAccount = runAccount()
+  if (observedAccount) account.current = observedAccount
+  const displayScope = JSON.stringify([config.apiBase, config.tenant, account.current, client.currentDocId(), client.state.head, logoutGeneration.current])
+  const scopeIdentity = useRef({ key: displayScope, value: {} })
+  if (scopeIdentity.current.key !== displayScope) scopeIdentity.current = { key: displayScope, value: {} }
+  useEffect(() => {
+    submissionIntent.current = null
+    setOutcomeUnknown(false)
+    setRunMessage('')
+    streams.current.forEach(stream => { stream.stop(); stream.unsubscribe() })
+    streams.current.clear()
+  }, [displayScope])
   const latest = useRef(null)
   const saveHintId = useId()
   const draftBaseline = useRef(null)
@@ -250,6 +348,30 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
   latest.current = { document: live.draft?.document, head: client.state.head, docId: client.currentDocId() }
   useEffect(() => client.subscribe(() => refreshHead(value => value + 1)), [client])
   useEffect(() => {
+    // Lab retains its hidden views while logout awaits the provider redirect.
+    // Use the explicit lifecycle event, since a 401 must keep renewal possible.
+    const offLogout = subscribeBeforeLogout(() => {
+      logoutGeneration.current += 1
+      explicitlySignedOut.current = true
+      corpusRequest.current += 1
+      setCorpusOptions(null)
+      setCorpusPanel(false)
+      setCorpusProject(''); setCorpusMaterial(''); setCorpusSuite(''); setCorpusMessage('')
+      account.current = null
+      submissionIntent.current = null
+      streams.current.forEach(stream => { stream.stop(); stream.unsubscribe() })
+      streams.current.clear()
+      setOutcomeUnknown(false)
+      setRunMessage('')
+      refreshHead(value => value + 1)
+    })
+    const offStored = subscribeTokenStored(() => {
+      explicitlySignedOut.current = false
+      refreshHead(value => value + 1)
+    })
+    return () => { offLogout(); offStored() }
+  }, [])
+  useEffect(() => {
     mounted.current = true
     const resumeOnFocus = () => streams.current.forEach(stream => {
       labValueStore.resumeIfAuthChanged(stream.runId)
@@ -261,19 +383,40 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
       streams.current.forEach(stream => { stream.stop(); stream.unsubscribe() }); streams.current.clear()
     }
   }, [])
-  const runSnapshot = () => labValueStore.getRuns().filter(run => run.id !== 'local' && run.doc_id === client.currentDocId()
+  useEffect(() => {
+    if (!opened || explicitlySignedOut.current) return
+    const reopenGeneration = logoutGeneration.current
+    client.reopenRemembered?.().then(result => {
+      if (!mounted.current || explicitlySignedOut.current || reopenGeneration !== logoutGeneration.current) return
+      if (result.state === 'ready') {
+        const pristine = latest.current.document == null || draftBaseline.current === null
+          || canonicalJSON(latest.current.document) === draftBaseline.current
+        if (pristine && client.isCurrentOperation(result.token)) {
+          client.takeGraph(result.graph)
+          setReopenMessage(`Reopened ${result.docId} r${result.revision}`)
+        } else if (!pristine) {
+          setReopenMessage(`Saved graph ${result.docId} r${result.revision} was not reopened because the canvas has edits. Choose Open to load it.`)
+        }
+      } else if (result.state === 'failed') {
+        setReopenMessage(`Could not reopen ${client.currentDocId()}: ${result.detail || 'unavailable'}`)
+      }
+    })
+  }, [client, opened])
+  const runSnapshot = () => explicitlySignedOut.current ? '' : labValueStore.getRuns().filter(run => run.id !== 'local' && run.doc_id === client.currentDocId()
+    && (run.run_scope === undefined || run.run_scope === scopeIdentity.current.value)
     && run.graph_revision === client.state.head).map(run => run.id).join(',')
   const matchingRuns = useSyncExternalStore(labValueStore.subscribeRuns, runSnapshot)
   const valueRunId = matchingRuns.split(',')[0] || 'local'
   const activeRunStatus = useRunStatus(labValueStore, valueRunId)
   const localTiming = useRun(labValueStore, 'local')?.timing
   async function runSaved() {
-    if (submissionPending.current || !client.state.headLoaded || client.state.head == null || !live.ready) return
+    if (explicitlySignedOut.current || submissionPending.current || !client.state.headLoaded || client.state.head == null || !live.ready) return
     submissionPending.current = true
     setSubmitting(true); setRunMessage('')
     const { docId, head, document } = latest.current
+    const scope = currentRunScope()
     try {
-      if (!labValueStore.canAddRun()) { setRunMessage('Too many active runs (20). Wait for one to finish.'); return }
+      if (!submissionIntent.current?.unknown && !labValueStore.canAddRun()) { setRunMessage('Too many active runs (20). Wait for one to finish.'); return }
       const saved = await client.revision(docId, head)
       if (!mounted.current) return
       if (!saved.ok) {
@@ -284,15 +427,34 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
         || canonicalJSON(saved.graph) !== canonicalJSON(latest.current.document)) {
         setRunMessage('Save before running'); return
       }
-      if (!labValueStore.canAddRun()) { setRunMessage('Too many active runs (20). Wait for one to finish.'); return }
-      const result = await submitRun({ docId, graphRevision: head })
-      if (!mounted.current) return
+      if (!submissionIntent.current?.unknown && !labValueStore.canAddRun()) { setRunMessage('Too many active runs (20). Wait for one to finish.'); return }
+      if (scope !== currentRunScope()) return
+      let intent = submissionIntent.current
+      if (!intent || intent.scope !== scope) intent = { scope, id: newSubmissionId(), unknown: false }
+      submissionIntent.current = intent
+      const result = await submitRun({ docId, graphRevision: head, submissionId: intent.id,
+        reconcileOnly: intent.unknown })
+      if (!mounted.current || scope !== currentRunScope()) return
       if (!result.ok) {
-        setRunMessage(result.status === 401 ? 'Sign in again' : result.status === 409 ? 'Run queue full'
+        if (result.outcomeUnknown) {
+          intent.unknown = true
+          setOutcomeUnknown(true)
+          setRunMessage('Run outcome unknown. Retry to recover this submission.')
+          return
+        }
+        if (!intent.unknown) submissionIntent.current = null
+        setRunMessage(result.status === 401 ? 'Sign in again' : result.detail === 'lab_run_queue_full' ? 'Run queue full'
+          : result.detail === 'lab_submission_mismatch' ? 'Submission intent changed. Recovery refused.'
+          : result.detail === 'lab_submission_missing' ? 'Previous submission was not found. Start a new run explicitly.'
+          : result.detail === 'lab_submission_expired' ? 'Submission recovery expired. Start a new run explicitly.'
           : typeof result.detail === 'string' ? result.detail : result.detail?.code || 'Run unavailable')
         return
       }
-      labValueStore.upsertRun(result.runId, { state: result.state, graph_revision: head, doc_id: docId })
+      submissionIntent.current = null
+      setOutcomeUnknown(false)
+      labValueStore.upsertRun(result.runId, { state: result.state, graph_revision: head, doc_id: docId,
+        run_scope: scopeIdentity.current.value })
+      if ([...streams.current].some(stream => stream.runId === result.runId)) return
       const stream = openRunStream({ runIds: [result.runId], store: labValueStore })
       stream.runId = result.runId
       const stop = stream.stop
@@ -306,7 +468,15 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
         }
       })
       streams.current.add(stream)
-    } catch { if (mounted.current) setRunMessage('Run unavailable') }
+    } catch {
+      if (mounted.current && scope === currentRunScope()) {
+        if (submissionIntent.current) {
+          submissionIntent.current.unknown = true
+          setOutcomeUnknown(true)
+        }
+        setRunMessage('Run outcome unknown. Retry to recover this submission.')
+      }
+    }
     finally { submissionPending.current = false; if (mounted.current) setSubmitting(false) }
   }
   useEffect(() => {
@@ -372,10 +542,13 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
         <section className="lab-graph-status" aria-label="Graph readiness">
           <p role="status">{validDocument ? 'Ready' : 'No valid graph'}</p>
           {live.problems.length > 0 && <ul>{live.problems.map((problem, index) => <li key={index}>{problem}</li>)}</ul>}
-          <button type="button" disabled={!validDocument || (!onRun && (!client.state.headLoaded || client.state.head == null || submitting))}
+          <button type="button" disabled={!validDocument || (!onRun && (explicitlySignedOut.current || !client.state.headLoaded || client.state.head == null || submitting))}
             aria-describedby={!onRun && client.state.head == null ? saveHintId : undefined}
             onClick={() => { if (validDocument) { if (onRun) onRun(validDocument); else void runSaved() } }}>
-            {onRun || client.state.head == null ? 'Run graph' : `Run saved revision r${client.state.head}`}</button>
+            {outcomeUnknown ? 'Recover previous run' : onRun || client.state.head == null ? 'Run graph' : `Run saved revision r${client.state.head}`}</button>
+          {outcomeUnknown && <button type="button" disabled={submitting} onClick={() => {
+            submissionIntent.current = null; setOutcomeUnknown(false); setRunMessage('')
+          }}>Start a new deliberate run</button>}
           <a href={formatLabRoute({ view: 'test-trade', params: route?.params ?? {} })}
             onClick={(event) => {
               if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
@@ -385,8 +558,26 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
             }}>Test trade evidence</a>
           {!onRun && client.state.head == null && <p id={saveHintId}>Save this graph before running it</p>}
           {runMessage && <p role="status">{runMessage}</p>}
+          {reopenMessage && <p role="status">{reopenMessage}</p>}
           {activeRunStatus.endsWith('/auth_expired') && <p>Sign in again, then resume <button type="button" onClick={() => labValueStore.resume(valueRunId)}>Resume</button></p>}
         </section>
+        <button type="button" onClick={openCorpus}>Evaluate project corpus</button>
+        {corpusPanel && <section aria-label="Project corpus evaluation">
+          <label>Project<select value={corpusProject} onChange={event => {
+            const project = event.target.value; setCorpusProject(project); setCorpusMaterial(''); setCorpusSuite('');
+            void loadCorpusOptions(project)
+          }}><option value="">Choose project</option>{(corpusOptions?.projects || []).map(project =>
+            <option key={project.project_id} value={project.project_id}>{project.name}</option>)}</select></label>
+          <label>Original corpus<select value={corpusMaterial} onChange={event => setCorpusMaterial(event.target.value)}>
+            <option value="">Choose original corpus</option>{(corpusOptions?.materials || []).filter(item => item.media_type === 'application/gzip').map(item =>
+              <option key={item.material_id} value={item.material_id}>{item.name}</option>)}</select></label>
+          <label>Evaluation suite<select value={corpusSuite} onChange={event => setCorpusSuite(event.target.value)}>
+            <option value="">Choose evaluation suite</option>{(corpusOptions?.materials || []).filter(item => item.media_type === 'application/json').map(item =>
+              <option key={item.material_id} value={item.material_id}>{item.name}</option>)}</select></label>
+          <button type="button" disabled={!live.draft?.document || !corpusProject || !corpusMaterial || !corpusSuite || !corpusOptions?.manifest} onClick={addCorpus}>Add corpus evaluation</button>
+          <p>Original files stay in this project. Running evaluates the complete corpus without starting a model or trade.</p>
+          {corpusMessage && <p role="status">{corpusMessage}</p>}
+        </section>}
         <LabSaveBar document={live.draft?.document} ready={live.ready} client={client} onTakeTheirs={graph => client.takeGraph(graph)} />
         <LiveValues values={live.values} provider={provider} saveBar={false} runId={onRun ? 'local' : valueRunId} renderProbe={renderProbe} />
         <Suspense fallback={<p role="status" aria-label="Loading dependency canvas">Loading dependency canvas…</p>}>

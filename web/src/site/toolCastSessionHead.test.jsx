@@ -19,7 +19,7 @@ const fixture = vi.hoisted(() => {
       bindConverseProject: noop,
       drawing: { actions: {}, shown: null, drawingState: null, visibleLayers: {} },
     },
-    catalog: { state: { tools: [], catalog: { families: [] }, openFamilies: {} }, actions: {}, controller: {} },
+    catalog: { state: { tools: [], catalog: { families: [] }, openFamilies: {} }, actions: {}, controller: { setContext: vi.fn() } },
     jobs: { jobs: [], reset: noop },
     platform: { isEntitled: () => true, actions: {} },
     checkout: { actions: {} },

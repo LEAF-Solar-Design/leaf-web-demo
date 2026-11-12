@@ -76,14 +76,17 @@ it('family openers use the shared tool rail opener except in the project catalog
   assert.equal(catalogHandlers, 1)
 })
 
-it('each Tool rail quick action reopens a hidden Studio host and closes only an expanded drawer', () => {
+it('each Tool rail quick action opens the Studio host or closes its panel and navigation together', () => {
+  const toggles = find(node => node.type === 'VariableDeclarator' && node.id.name === 'toggleStudioToolRail')
+  assert.equal(toggles.length, 1)
+  const toggle = toggles[0].init.arguments[0]
   const actions = find(node => node.type === 'ObjectExpression' && property(node, 'dataTool')?.value === 'rail-expand')
   assert.ok(actions.length > 0)
   for (const action of actions) {
     const expanded = property(action, 'expanded')
     const onClick = property(action, 'onClick')
     assert.ok(references(expanded, 'browserPanel').length)
-    assert.ok(calls(onClick, 'openToolRail').length)
+    assert.ok(calls(onClick, 'toggleStudioToolRail').length)
     for (const studioShell of [false, true]) {
       for (const drawerViewport of [false, true]) {
         for (const browserPanel of ['studio', 'assets']) {
@@ -95,15 +98,17 @@ it('each Tool rail quick action reopens a hidden Studio host and closes only an 
                 openToolRail: () => events.push(['open']),
                 toggleStudioDrawer: value => events.push(['toggle', value]),
                 setNavExpanded: value => events.push(['nav', value]),
+                setBrowserPanel: value => events.push(['panel', value]),
               }
+              env.toggleStudioToolRail = evaluate(toggle, env)
               const visible = (!studioShell || browserPanel === 'studio')
                 && (drawerViewport ? studioDrawer === 'nav' : navExpanded)
               assert.equal(evaluate(expanded, env), visible)
               evaluate(onClick, env)()
               const expected = studioShell
-                ? drawerViewport && visible ? ['toggle', 'nav'] : ['open']
-                : drawerViewport ? ['toggle', 'nav'] : ['nav', property(action, 'title') ? true : !navExpanded]
-              assert.deepEqual(events, [expected], JSON.stringify({ studioShell, drawerViewport, browserPanel, studioDrawer, navExpanded }))
+                ? visible ? [['panel', 'none'], ['nav', false]] : [['open']]
+                : [drawerViewport ? ['toggle', 'nav'] : ['nav', property(action, 'title') ? true : !navExpanded]]
+              assert.deepEqual(events, expected, JSON.stringify({ studioShell, drawerViewport, browserPanel, studioDrawer, navExpanded }))
             }
           }
         }
@@ -117,4 +122,30 @@ it('App transforms and retains the executable tool rail callback', () => {
   assert.match(code, /\bopenToolRail\b/)
   const transformed = parse(code, { sourceType: 'module' })
   assert.equal(find(node => node.type === 'VariableDeclarator' && node.id.name === 'openToolRail', transformed).length, 1)
+})
+
+it('toast View reveals the hidden Studio result host before scrolling to it', () => {
+  const declarations = find(node => node.type === 'VariableDeclarator' && node.id.name === 'viewResult')
+  assert.equal(declarations.length, 1)
+  const view = declarations[0].init.arguments[0]
+  // View calls the reveal and then scrolls the result block; it never only scrolls.
+  assert.equal(references(view, 'revealResultRef').length, 1)
+  assert.equal(references(view, 'resultBlockRef').length, 1)
+  const assignments = find(node => node.type === 'AssignmentExpression'
+    && node.left.type === 'MemberExpression' && node.left.object.name === 'revealResultRef')
+  assert.equal(assignments.length, 1)
+  const reveal = assignments[0].right
+  for (const studioShell of [false, true]) {
+    for (const drawerViewport of [false, true]) {
+      const events = []
+      evaluate(reveal, {
+        studioShell,
+        drawerViewport,
+        setBrowserPanel: value => events.push(['panel', value]),
+        setStudioDrawer: value => events.push(['drawer', value]),
+      })()
+      const expected = !studioShell ? [] : drawerViewport ? [['panel', 'studio'], ['drawer', 'result']] : [['panel', 'studio']]
+      assert.deepEqual(events, expected, `studioShell=${studioShell} drawerViewport=${drawerViewport}`)
+    }
+  }
 })

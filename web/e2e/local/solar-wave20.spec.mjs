@@ -1,3 +1,4 @@
+import { requireSolarFlags, installSpendGuard } from './solarProofGuard.mjs'
 import { expect, test } from '@playwright/test'
 import { mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -96,16 +97,11 @@ async function prepareDrawing(page, seeded) {
 
 async function navigateWorkspace(page, drawingId) {
   await page.goto(`/app?surface=solar&drawing=${drawingId}`)
-  // With flags off, still wait up to 60 s for the live checkout control: a pass proves
-  // the app booted on the live stack and reached that control, and nothing about the Solar workspace.
   await expect(page.getByRole('button', { name: 'Take edit lock' })).toBeVisible({ timeout: 60_000 })
   const rail = page.getByTestId('solar-flow-rail')
   if (allThreeFlagsOn) await expect(rail).toBeVisible({ timeout: 60_000 })
   if (!(await rail.count())) {
     expect(allThreeFlagsOn, 'all three Solar workspace flags are on, so the served Solar flow rail must be present').toBe(false)
-    test.info().annotations.push({ type: 'flags', description:
-      'Solar workspace not exercised (the live checkout control was reached): VITE_SOLAR_FLOW_RAIL, VITE_CAD_EDIT and VITE_SOLAR_SETTINGS_FORM are not all enabled' })
-    return false
   }
   await expect(rail).toBeVisible({ timeout: 60_000 })
   return true
@@ -146,7 +142,7 @@ function receipt(slug, context, result, artifacts, assertions, seeded) {
 async function seededWalk(page, viewport) {
   await page.setViewportSize(viewport)
   const context = await prepareDrawing(page, true)
-  if (!(await navigateWorkspace(page, context.drawingId))) return
+  await navigateWorkspace(page, context.drawingId)
   const upload = await chooseLandxml(page)
   const submit = upload.getByRole('button', { name: 'Import terrain', exact: true })
   await expect(upload.getByTestId('solar-landxml-reason')).toHaveText('Take the drawing checkout before importing terrain')
@@ -181,19 +177,27 @@ async function seededWalk(page, viewport) {
 }
 
 test('W20-07a W9 seeded drawing imports LandXML terrain at 1280x800', async ({ page }) => {
+  requireSolarFlags()
+  const assertNoSpend = await installSpendGuard(page)
   test.setTimeout(240_000)
   await seededWalk(page, { width: 1280, height: 800 })
+  assertNoSpend()
 })
 
 test('W20-07a W9 seeded drawing imports LandXML terrain at 1600x1000', async ({ page }) => {
+  requireSolarFlags()
+  const assertNoSpend = await installSpendGuard(page)
   test.setTimeout(240_000)
   await seededWalk(page, { width: 1600, height: 1000 })
+  assertNoSpend()
 })
 
 test('W20-07a W10 unseeded drawing is refused and Studio shows no terrain', async ({ page }) => {
+  requireSolarFlags()
+  const assertNoSpend = await installSpendGuard(page)
   test.setTimeout(240_000)
   const context = await prepareDrawing(page, false)
-  if (!(await navigateWorkspace(page, context.drawingId))) return
+  await navigateWorkspace(page, context.drawingId)
   await takeLock(page)
   const upload = await chooseLandxml(page)
   let refusal = null
@@ -231,4 +235,5 @@ test('W20-07a W10 unseeded drawing is refused and Studio shows no terrain', asyn
     'Studio refuses the import with the client sentence for LANDXML_GRAPH_REQUIRED',
     'no physical head index or terrain summary appears and drawing head and latest remain 1',
   ], false)
+  assertNoSpend()
 })

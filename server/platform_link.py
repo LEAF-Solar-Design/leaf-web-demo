@@ -584,6 +584,103 @@ def submit_canonical_graph(
     return str(job["job_id"])
 
 
+def run_project_read_job(tenant, resolved_context, tool, params, idempotency_key, run_callback):
+    """Execute and persist one admitted canonical read atomically, without a worker queue."""
+    import json
+    import re
+    import deps
+    import solar_project_context as project
+    from routers.jobs import _is_project_read_tool
+    from leaf_platform import entitlements as stored_entitlements
+    from leaf_platform.project_lifecycle import PROJECT_ROLES
+
+    if (not isinstance(resolved_context, project.VerifiedProjectContext)
+            or not isinstance(tool, dict) or not _is_project_read_tool(tool)
+            or not isinstance(params, dict) or not callable(run_callback)):
+        raise ValueError("invalid canonical project read")
+    if not isinstance(idempotency_key, str) or not idempotency_key.strip():
+        raise ValueError("Idempotency-Key is required for project-scoped reads")
+    # Capture JSON input before the callback can mutate an object it received.
+    params = json.loads(json.dumps(params, allow_nan=False))
+    binding = resolved_context.binding
+    if "drawing_id" in params and str(params["drawing_id"]) != str(binding.drawing_id):
+        project.refuse("INVALID_BINDING")
+    org, actor = project._access(tenant, binding.project_id, write=False)
+    if org != binding.organization_id:
+        project.refuse("INVALID_BINDING")
+    denial, stored_org = stored_entitlements.stored_job_entitlement_verdict(org, "extract")
+    if denial is not None:
+        raise CanonicalEntitlementDenied(denial)
+    if stored_org is None:
+        project.refuse("STORE_UNAVAILABLE")
+    jobs = _canonical_jobs_module()
+    public_binding = {
+        "organization_id": str(org), "project_id": str(binding.project_id),
+        "drawing_id": str(binding.drawing_id), "input_version_id": str(binding.input_version_id),
+        "intake_sha256": resolved_context.intake_sha256,
+    }
+    digest = tool.get("catalog_digest") or deps.catalog_tool_digest(tool)
+    if not isinstance(digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+        raise ValueError("a server-issued catalog digest is required")
+    execution = {"schema": jobs.PROJECT_READ_JOB_SCHEMA, **public_binding,
+                 "actor_binding_id": str(actor), "catalog_digest": digest}
+
+    def operation(conn):
+        row, created = jobs.reserve_project_read_job(
+            org, binding.project_id, str(tenant), tool["name"], params, idempotency_key,
+            input_version_id=binding.input_version_id, execution_context=execution, conn=conn)
+        # Lock the real read membership and artifact in this same transaction. No write role,
+        # head requirement or checkout is introduced for a historical read.
+        with conn.cursor() as cur:
+            project.graph_store()._scope(cur, org, binding.project_id, binding.drawing_id)
+            args = {"org": org, "project": binding.project_id, "actor": actor}
+            cur.execute(
+                "SELECT binding_id FROM identity_bindings WHERE platform_tenant_id=%(org)s "
+                "AND binding_id=%(actor)s AND status='active' FOR SHARE", args)
+            if cur.fetchone() is None:
+                project.refuse("PROJECT_FORBIDDEN")
+            cur.execute(
+                "SELECT role FROM project_member_bindings WHERE org_id=%(org)s "
+                "AND project_id=%(project)s AND binding_id=%(actor)s AND status='active' FOR SHARE", args)
+            member = cur.fetchone()
+            if member is None or member["role"] not in PROJECT_ROLES:
+                project.refuse("PROJECT_FORBIDDEN")
+            cur.execute("SELECT tier, account_class FROM orgs WHERE org_id=%(org)s "
+                        "AND status='active' FOR SHARE", args)
+            current_org = cur.fetchone()
+            if (current_org is None or current_org["tier"] != stored_org.tier
+                    or current_org["account_class"] != stored_org.account_class):
+                raise CanonicalEntitlementDenied(
+                    stored_entitlements.entitlement_state_conflict_response("extract"))
+        current = project.graph_store().resolve_version_binding(
+            org, binding.project_id, binding.input_version_id, drawing_id=binding.drawing_id, conn=conn)
+        verified = project._read_intake(current)
+        if (verified.intake_sha256 != resolved_context.intake_sha256
+                or verified.intake_bytes != resolved_context.intake_bytes):
+            project.refuse("INTAKE_DIGEST_MISMATCH")
+        if not created:
+            return row
+        try:
+            result = run_callback()
+            if not isinstance(result, dict) or type(result.get("ok")) is not bool:
+                raise ValueError("invalid read envelope")
+            result = {key: result[key] for key in (
+                "ok", "tool", "version", "result", "overlay", "timing_ms", "cost",
+                "error", "degraded_mode", "execution_provenance") if key in result}
+            # Reject unserializable/mutated output before it can poison the DB transaction.
+            result = json.loads(json.dumps(result, allow_nan=False))
+        except Exception:
+            from envelopes import ErrorCode, err_envelope
+            result = err_envelope(ErrorCode.INTERNAL, "project read execution failed", retryable=False)
+        result["project_context"] = public_binding
+        return jobs.finish_project_read_job(row, result, conn=conn)
+
+    # The tool executes inside this transaction. Never retry the operation callback on a
+    # serialization/deadlock failure: that could silently execute an authored read twice.
+    row = platform_db().run_transaction(operation, max_attempts=1)
+    return _canonical_record(row)
+
+
 def _canonical_record(record: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if record is None:
         return None

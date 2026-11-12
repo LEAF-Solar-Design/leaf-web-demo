@@ -6,8 +6,8 @@
 // and the marketing pages may never reach one at all.
 import './telemetry.js'
 import React from 'react'
-import { useEffect } from 'react'
-import SiteRoot from './site/SiteRoot.jsx'
+import { useEffect, useState } from 'react'
+import { bootstrapServiceAuth } from './auth.js'
 import ErrorBoundary from './ErrorBoundary.jsx'
 import './standard/leaf-standard.css'
 import './styles.css'
@@ -18,19 +18,35 @@ import { canonicalizeDemoEntry } from './site/authBoot.js'
 
 if (typeof window !== 'undefined') canonicalizeDemoEntry()
 
+const siteRootPromise = bootstrapServiceAuth().then(() => import('./site/SiteRoot.jsx'))
+  .then(module => ({ Component: module.default }))
+  .catch(error => ({ error }))
+
 // Next owns the root and development StrictMode. This module is imported
 // exclusively by the ssr:false island, after telemetry has been installed.
 export default function StudioRoot() {
+  const [SiteRoot, setSiteRoot] = useState(null)
+  const [bootError, setBootError] = useState(null)
   useEffect(() => {
+    let mounted = true
+    siteRootPromise.then(result => {
+      if (!mounted) return
+      if (result.error) setBootError(result.error)
+      else setSiteRoot(() => result.Component)
+    })
+    return () => { mounted = false }
+  }, [])
+  useEffect(() => {
+    if (!SiteRoot) return
     installSurfaceConfigProofBridge(window, {
       hostname: window.location.hostname,
       env: import.meta.env,
       clients: { getSession, getSurfaceConfig, submitSurfaceConfig },
     })
-  }, [])
+  }, [SiteRoot])
   return (
     <ErrorBoundary>
-      <SiteRoot />
+      {bootError ? <p role="alert">{bootError.message}</p> : SiteRoot ? <SiteRoot /> : null}
     </ErrorBoundary>
   )
 }

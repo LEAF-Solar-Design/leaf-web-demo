@@ -292,7 +292,11 @@ def test_versioned_capability_and_closed_contract(release, monkeypatch):
     job_pg_store._db()  # Register the existing platform package, no DB connection.
     canonical = importlib.import_module('leaf_platform.campaign_release')
     contract = release[0].release['contract']
-    canonical._contract(copy.deepcopy(contract), 'cad_file')
+    stored = canonical._contract(copy.deepcopy(contract), 'cad_file')
+    assert stored == contract
+    assert stored['requested_workflow'] == FINISH['workflow']
+    assert stored['original_goal'] == 'Finish the larger design'
+    assert 'scope_classification' not in stored
     for profile, mutate in [
         ('web_tool', lambda c: None),
         ('cad_file', lambda c: c['cad_recipe'].update(recipe_version=2)),
@@ -303,6 +307,9 @@ def test_versioned_capability_and_closed_contract(release, monkeypatch):
         ('cad_file', lambda c: c.update(artifact_refs=['other.dxf'])),
         ('cad_file', lambda c: c.update(web_recipe=c['cad_recipe'])),
         ('cad_file', lambda c: c.update(transform_recipe=c['cad_recipe'])),
+        ('cad_file', lambda c: c.update(scope_classification={
+            'version': 1, 'capability': 'existing_artifact_delivery',
+            'requested_workflow_status': 'unverified'})),
     ]:
         invalid = copy.deepcopy(contract)
         mutate(invalid)
