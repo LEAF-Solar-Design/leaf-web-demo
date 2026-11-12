@@ -20,8 +20,9 @@ function validationError(doc) {
     return { detail: error.message, pointer: '/formats' }
   }
 }
-export function WidgetsView({ projectId = null, accountScope = null, ...props }) {
-  return <ProjectWidgetsView key={JSON.stringify([projectId, accountScope])} projectId={projectId} accountScope={accountScope} {...props} />
+export function WidgetsView({ projectId = null, accountScope = null, scopeKey, hidden = false, host = null, requestPublication }) {
+  return <ProjectWidgetsView key={JSON.stringify([projectId, accountScope])} projectId={projectId} accountScope={accountScope}
+    scopeKey={scopeKey} hidden={hidden} host={host} requestPublication={requestPublication} />
 }
 function ProjectWidgetsView({ projectId, accountScope, scopeKey, hidden = false, host = null, requestPublication }) {
   const local = typeof scopeKey === 'string' && scopeKey.trim().length > 0
