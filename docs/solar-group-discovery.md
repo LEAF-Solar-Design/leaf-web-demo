@@ -55,3 +55,20 @@ python -P -m pytest -p no:xonsh -o pythonpath=server server/tests/test_solar_too
 The plugin exclusion avoids an unrelated installed console plugin on Windows.
 Tests use synthetic geometry and canonical store doubles. Live behavior still
 requires a deployed source receipt and a normal project walk.
+
+## Full design export
+
+The existing read-only `solar-string-data` tool accepts `format: "design-json"`
+to download `SolarDesign.json`. It includes the entire validated design graph:
+panel identities and geometry, group matrices, ordered string memberships and
+routes, units, correction metadata and unknown module power. It requires a
+current design with full unique panel coverage and verified sizing evidence.
+Manual evidence remains a fixed-length geometry scenario; the file explicitly
+marks electrical verification as not evaluated.
+
+Omitting `format` retains the legacy `StringData.json` endpoint report. The
+full-design format rejects `string_refs` so it cannot silently export a subset.
+Canonical project reads bind the artifact to the exact project, drawing,
+source version, intake/graph digests and request. Export adds an immutable
+artifact; it neither changes the drawing version nor calls a solver/provider.
+A DXF download retains original CAD source and is not this full-design export.
