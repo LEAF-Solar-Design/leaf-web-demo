@@ -350,6 +350,81 @@ def test_initial_preparation_binds_loader_geometry_models_and_export(semantics):
     assert decoded.document == document and decoded.parameters == inputs
 
 
+def _inspection_fixture():
+    import solar_native_layout_dxf as native
+    document, inputs, _ = layout._prepare_initial_layout(initial_body())
+    scope = {key: uuid4() for key in ('organization_id', 'project_id', 'drawing_id')}
+    raw = layout.materialize_native_layout(scope, None, document, None, parameters=inputs)
+    return native.decode_native_layout(raw)
+
+
+def test_saved_frame_pages_preserve_native_identity_cells_and_model_pose():
+    decoded = _inspection_fixture()
+    observed = []
+    for offset in range(0, len(decoded.frames), layout.FRAME_PAGE_SIZE):
+        page = layout._frame_page(decoded, offset)
+        assert page['total'] == len(decoded.frames) and page['offset'] == offset
+        assert page['page_size'] == layout.FRAME_PAGE_SIZE
+        assert page['drawing_units'] == decoded.document['units']['drawing_units']
+        assert len(json.dumps(page).encode()) < 65536
+        for frame, native in zip(page['frames'], decoded.frames[offset:offset + layout.FRAME_PAGE_SIZE]):
+            logical = next(key for key, value in decoded.handles.items() if value == native['handle'])
+            model = decoded.parameters['generation_models'][decoded.parameters['frame_generations'][logical]]
+            assert frame['handle'] == native['handle']
+            assert (frame['row'], frame['column'], frame['elevation']) == (native['row'], native['col'], native['elevation'])
+            assert frame['vertices'] == [list(point) for point in native['vertices']]
+            assert frame['preset'] == model['name'] and frame['pile_template'] == model['pile_template_name']
+            assert frame['pose'] == {key: model[key] for key in (
+                'tilt_degrees', 'axis_azimuth_deg', 'height_at_low_pose_m', 'height_at_high_pose_m')}
+            observed.append(frame['handle'])
+    assert observed == [frame['handle'] for frame in decoded.frames]
+    assert len(observed) == len(set(observed))
+
+
+@pytest.mark.parametrize('offset', [-1, True, 1.5, '0', None, 10**9])
+def test_saved_frame_page_refuses_invalid_offsets(offset):
+    with pytest.raises(editor.EditorError, match='PROJECT_LAYOUT_REQUEST_INVALID'):
+        layout._frame_page(_inspection_fixture(), offset)
+
+
+@pytest.mark.parametrize('failure', ['missing', 'out_of_range', 'pose'])
+def test_saved_frame_page_refuses_unbound_model_attributes(failure):
+    decoded = _inspection_fixture()
+    logical = next(key for key, value in decoded.handles.items() if value == decoded.frames[0]['handle'])
+    if failure == 'missing':
+        decoded.parameters['frame_generations'].pop(logical)
+    elif failure == 'out_of_range':
+        decoded.parameters['frame_generations'][logical] = len(decoded.parameters['generation_models'])
+    else:
+        decoded.parameters['generation_models'][0]['tilt_degrees'] = None
+    with pytest.raises(editor.EditorError, match='PROJECT_LAYOUT_NATIVE_METADATA_INVALID'):
+        layout._frame_page(decoded, 0)
+
+
+def test_canonical_frame_inspection_preserves_route_scope_and_stale_version_refusal(fresh):
+    lane, project, receipt, base = canonical_start(fresh)
+    parent = receipt['drawing_version']['version_id']
+    route = base + f'/versions/{parent}/solar-layout'
+    assert lane.http.get(route).json()['schema'] == layout.SCHEMA
+    response = lane.http.get(route + '?frame_offset=0')
+    assert response.status_code == 200, response.text
+    page = response.json()
+    assert page['schema'] == layout.FRAME_SCHEMA and page['frames']
+    assert page['parent_version_id'] == parent and page['project_id'] == str(project)
+    assert page['drawing_id'] == receipt['drawing_id']
+    assert lane.http.get(route + '?frame_offset=-1').status_code == 400
+    foreign = route.replace(str(project), str(uuid4()))
+    refused = lane.http.get(foreign + '?frame_offset=0')
+    assert refused.status_code in (403, 404) and 'frames' not in refused.json()
+    raw = lane.http.get(base + f'/versions/{parent}/dxf').content
+    cap = lane.http.post(base + '/checkout').json()['checkout_capability']
+    saved = editor.save_dxf(lane.tenant, project, layout.UUID(receipt['drawing_id']), layout.UUID(parent),
+                            raw, request_id=uuid4(), capability=cap)
+    assert saved['drawing_version']['version_id'] != parent
+    stale = lane.http.get(route + '?frame_offset=0')
+    assert stale.status_code == 409 and 'frames' not in stale.json()
+
+
 def test_initial_existing_project_refuses_before_writer(lane, monkeypatch):
     monkeypatch.setattr(layout, 'materialize_native_layout', lambda *_a, **_k: pytest.fail('unexpected writer'))
     response = lane.http.post(f'/api/projects/{lane.project}/solar-layout', json=initial_body(),
