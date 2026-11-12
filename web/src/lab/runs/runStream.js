@@ -130,7 +130,13 @@ export function openRunStream({ runIds, store = labValueStore, fetchImpl = globa
               if (kind === 'run' && frameId && frameId !== `${value.run_id}:${value.seq}`) throw new Error('Invalid event cursor')
               type = 'message'; data = []; frameId = ''; frameBytes = 0; failures = 0
               if (kind === 'run' && active.has(value.run_id)) {
-                store.apply(value.run_id, value)
+                if (value.kind === 'value' && value.payload?.truncated === true) {
+                  // The bounded SSE producer keeps large values in durable
+                  // events. Recover those bytes before advancing this cursor.
+                  store.addGap(value.run_id, { from: value.seq, to: value.seq, recovered: false })
+                  await snapshot(value.run_id, controller.signal)
+                  immediate = true
+                } else store.apply(value.run_id, value)
                 if (terminalState(store.getRun(value.run_id)?.state) || (!value.block_id && terminalState(value.kind))) {
                   if (store.getRun(value.run_id)) store.setTransport(value.run_id, { status: 'finished' })
                   active.delete(value.run_id)
