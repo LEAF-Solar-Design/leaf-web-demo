@@ -449,10 +449,15 @@ def export_bundle(tenant, doc_id, revision, *, authorize):
                     or summary.get("block_id") != block["id"]
                     or value.get("job_id") != summary["job_id"]
                     or any(value.get(key) != summary.get(key) for key in ("worker_id", "attempt", "rows_sha256", "row_count"))
-                    or value["result_sha256"] != summary["result_sha256"]
-                    or value["result"].get("suite_sha256") != context["suite"]["sha256"]
-                    or len(canonical_bytes(value)) > corpus.MAX_RESULT_BYTES + 8192):
+                    or value["result_sha256"] != summary["result_sha256"]):
                 raise StoreUnavailable("lab_export_lineage_mismatch")
+            # Use the producer's policy-aware identity and size contract. A
+            # compiled run evaluates a derived suite, not the original bytes.
+            try:
+                corpus.validate_result(context, summary["job_id"], summary["worker_id"],
+                                       summary["attempt"], value)
+            except (ValueError, KeyError, TypeError):
+                raise StoreUnavailable("lab_export_lineage_mismatch") from None
             # The producer hashes its sorted JSON result including one newline;
             # the bundle's manifest separately hashes canonical Lab JSON parts.
             raw_result = json.dumps(value["result"], sort_keys=True, separators=(",", ":"), allow_nan=False).encode() + b"\n"
