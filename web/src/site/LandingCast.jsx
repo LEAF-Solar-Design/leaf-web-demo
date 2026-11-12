@@ -11,9 +11,10 @@ import { navigate } from './router.js'
 import { loadDemoSolve } from './intakeCache.js'
 import { submitDemandCapture } from '../api.js'
 import { humanizeError } from '../errorHumanize.js'
+import { isSignedIn } from '../auth.js'
 
 export function enterWorkspace() {
-  navigate('/try')
+  navigate(isSignedIn() ? '/app' : '/try')
 }
 
 export function enterDemo() {
