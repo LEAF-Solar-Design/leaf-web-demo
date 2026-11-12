@@ -30,6 +30,8 @@ cannot be found) this port refuses with a named :class:`SolarEdgeImportError`, a
 match (a group whose shape fits more than one unused grid) refuses unless the caller states the
 group order is the plugin's own selection order (``selection_order="recorded"``), because the
 plugin's first-fit answer then depends on an order the caller may not know.
+The report-only review mode retains unmatched and ambiguous groups instead; it never uses
+recorded order to resolve a tie and draws strings only for unique matches.
 
 The group row angle. For block panels the plugin's angle is the block rotation plus the block
 definition's rectangle rotation; :func:`lattice_row_angle` recovers it from the centroids when
@@ -399,7 +401,7 @@ def _group_bridge_panels(sequences, bridge_seqs, bridge_panels):
 
 
 def run_import(matrices, groups, panels, *, row_angle=0.0, alignment_tolerance,
-               selection_order="unknown"):
+               selection_order="unknown", review=False):
     """S3 and S4 end to end.
 
     ``groups``: the drawing's panel groups in the plugin's selection order, each
@@ -407,6 +409,10 @@ def run_import(matrices, groups, panels, *, row_angle=0.0, alignment_tolerance,
     ``panels``: ``[{"handle", "x", "y"}]``, the drawing's panel centroids.
     Returns ``{"matches", "strings", "bridge_strings", "unassigned"}``; every string is
     ``{"panels", "inverter_id", "string_input_number", "partial", "source"}``.
+    With ``review=True``, every group gets a match row. Unmatched and ambiguous rows
+    have a status, all candidates and null grid indexes; they produce no strings.
+    Review never resolves a tie by recorded order, including competing drawing groups.
+    The default remains the strict plugin-parity path.
     """
     if selection_order not in SELECTION_ORDERS:
         raise SolarEdgeImportError("invalid-selection-order", repr(selection_order))
@@ -438,6 +444,8 @@ def run_import(matrices, groups, panels, *, row_angle=0.0, alignment_tolerance,
     by_original = {}
     strings = []
     grouped = []
+    drawings = []
+    shape_counts = {}
     for gi, group in enumerate(groups):
         members = group.get("panels") if isinstance(group, Mapping) else None
         if not isinstance(members, list) or not members:
@@ -449,11 +457,21 @@ def run_import(matrices, groups, panels, *, row_angle=0.0, alignment_tolerance,
         drawing = drawing_group_matrix(
             [{"handle": h.upper(), "centre": centre[h.upper()]} for h in members],
             row_angle, alignment_tolerance)
-        candidates = [i for i in by_shape.get(shape_signature(drawing), ()) if i not in used]
+        signature = shape_signature(drawing)
+        drawings.append((drawing, signature))
+        shape_counts[signature] = shape_counts.get(signature, 0) + 1
+    for gi, (group, (drawing, signature)) in enumerate(zip(groups, drawings)):
+        candidates = [i for i in by_shape.get(signature, ()) if review or i not in used]
+        if review and (len(candidates) != 1 or shape_counts[signature] > 1):
+            matches.append({"group_index": gi, "block": group.get("block"),
+                            "status": "ambiguous" if candidates else "unmatched",
+                            "grid_index": None, "original_index": None, "sub_grid_id": None,
+                            "candidates": candidates})
+            continue
         if not candidates:
             raise SolarEdgeImportError(
                 "no-structural-match",
-                f"group {gi} ({group.get('block')}, {len(members)} panels) fits no unused PDF grid")
+                f"group {gi} ({group.get('block')}, {len(group['panels'])} panels) fits no unused PDF grid")
         if len(candidates) > 1 and selection_order != "recorded":
             raise SolarEdgeImportError(
                 "ambiguous-structural-match",
@@ -475,10 +493,13 @@ def run_import(matrices, groups, panels, *, row_angle=0.0, alignment_tolerance,
             strings.append(s)
 
     bridge_strings = []
+    unresolved = review and any(m["grid_index"] is None for m in matches)
     for data in bridge_data:
         original = data["original"]
         found = by_original.get(data["original_index"])
         if not found:
+            if unresolved:
+                continue
             raise SolarEdgeImportError(
                 "bridge-grid-unmatched",
                 f"PDF grid {data['original_index'] + 1} has bridge strings but no matched sub-grid")
@@ -510,10 +531,14 @@ def run_import(matrices, groups, panels, *, row_angle=0.0, alignment_tolerance,
             for seq, r, c in members:
                 handle = lookup.get((r, c), "")
                 if not handle:
+                    if unresolved:
+                        break
                     raise SolarEdgeImportError(
                         "bridge-handle-missing",
                         f"PDF grid {data['original_index'] + 1} bridge panel Seq {seq} at ({r}, {c})")
                 handles.append(handle)
+            if len(handles) != len(members):
+                continue
             bridge = {"Sequences": [len(handles)],
                       "Rows": [{"Panels": [{"Code": 1, "Id": h, "Seq": i + 1,
                                             "InverterId": inverter_id,
