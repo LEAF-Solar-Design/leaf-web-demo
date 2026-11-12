@@ -216,10 +216,14 @@ function panelRectangle(panel, width, height) {
     centre[1] + x * width / 2 * sin + y * height / 2 * cos,
   ])
   if (points.some((point) => !point.every(Number.isFinite))) return null
-  return { points, axes: [[cos, sin], [-sin, cos]] }
+  const extent = Math.max(Math.abs(width * cos) + Math.abs(height * sin),
+    Math.abs(width * sin) + Math.abs(height * cos))
+  return { points, axes: [[cos, sin], [-sin, cos]], extent }
 }
 
 function rectanglesWithinGap(a, b, gap) {
+  // Include exact thresholds despite rounding when rotating and projecting edges.
+  const inclusiveGap = gap + 1e-9 * Math.max(gap, a.extent, b.extent)
   // Overlapping or touching rectangles have zero separation. Test both rotations,
   // since angles in one rounded bucket can still differ slightly.
   let separated = false
@@ -227,7 +231,7 @@ function rectanglesWithinGap(a, b, gap) {
     const left = a.points.map(([px, py]) => px * x + py * y)
     const right = b.points.map(([px, py]) => px * x + py * y)
     const distance = Math.max(Math.min(...right) - Math.max(...left), Math.min(...left) - Math.max(...right))
-    if (distance > gap) return false
+    if (distance > inclusiveGap) return false
     if (distance > 0) separated = true
   }
   if (!separated) return true
@@ -239,7 +243,7 @@ function rectanglesWithinGap(a, b, gap) {
         const dx = ex - sx, dy = ey - sy
         const length = dx * dx + dy * dy
         const t = length === 0 ? 0 : Math.max(0, Math.min(1, ((x - sx) * dx + (y - sy) * dy) / length))
-        if (Math.hypot(x - sx - t * dx, y - sy - t * dy) <= gap) return true
+        if (Math.hypot(x - sx - t * dx, y - sy - t * dy) <= inclusiveGap) return true
       }
     }
   }
@@ -255,14 +259,28 @@ function panelIslands(panels, rectangles, gap) {
     }
     return index
   }
-  // Pairwise work is O(n^2), bounded by the existing 4096-panel angle-bucket
-  // limit checked before this call. Oversized buckets remain refused, never split
-  // or truncated to evade that limit. Space is O(n).
-  for (let left = 0; left < panels.length; left += 1) {
-    for (let right = left + 1; right < panels.length; right += 1) {
-      const a = root(left), b = root(right)
-      if (a !== b && rectanglesWithinGap(rectangles[left], rectangles[right], gap)) parents[b] = a
+  // Any connected pair's centres differ by at most extent + gap on either
+  // axis, including the comparison epsilon. Only the nine neighbouring cells
+  // can contain a connection. Space is O(n); work is O(n + nearby pairs).
+  // Dense cells can still be quadratic, bounded by the existing 4096-panel cap.
+  const extent = Math.max(...rectangles.map((rectangle) => rectangle.extent))
+  const cellSize = extent + gap + 1e-9 * Math.max(extent, gap)
+  const cells = new Map()
+  for (let index = 0; index < panels.length; index += 1) {
+    const [x, y] = panels[index].centre.map((value) => Math.floor(value / cellSize))
+    for (let dx = -1; dx <= 1; dx += 1) {
+      for (let dy = -1; dy <= 1; dy += 1) {
+        const neighbours = cells.get(`${x + dx},${y + dy}`)
+        if (!neighbours) continue
+        for (const neighbour of neighbours) {
+          const a = root(index), b = root(neighbour)
+          if (a !== b && rectanglesWithinGap(rectangles[index], rectangles[neighbour], gap)) parents[b] = a
+        }
+      }
     }
+    const key = `${x},${y}`
+    if (!cells.has(key)) cells.set(key, [])
+    cells.get(key).push(index)
   }
   const islands = new Map()
   for (let index = 0; index < panels.length; index += 1) {

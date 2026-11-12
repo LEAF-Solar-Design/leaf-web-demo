@@ -232,6 +232,35 @@ it('rejects invalid gap values, missing dimensions and unreadable geometry throu
     expect(validatePanelGroups(malformed, [], gapNumbers(1))).toEqual({ ok: false, reason: 'group_geometry_invalid' })
   }
 })
+it('includes exact edge and corner gap thresholds at 60 degrees', () => {
+  const radians = Math.PI / 3
+  const cos = Math.cos(radians), sin = Math.sin(radians)
+  // Width 2, height 1: local offsets give an edge gap of 1 and a
+  // corner gap of hypot(0.6, 0.8) = 1, respectively.
+  for (const [x, y] of [[3, 0], [2.6, 1.8]]) {
+    const graph = { panels: [positionedPanel('a', 0, 0, 60),
+      positionedPanel('b', x * cos - y * sin, x * sin + y * cos, 60)] }
+    expect(proposePanelGroups(graph, gapNumbers(1))).toMatchObject({ refused: null, singletons: 0,
+      proposals: [{ panel_refs: ['a', 'b'], count: 2 }] })
+    expect(proposePanelGroups(graph, gapNumbers(0.9999))).toMatchObject({ proposals: [], singletons: 2 })
+  }
+})
+it('partitions 4096 panels into spatial islands in under 500 ms', () => {
+  const graph = { panels: Array.from({ length: 4096 }, (_, index) => {
+    const column = index % 64, row = Math.floor(index / 64)
+    return positionedPanel(index.toString(16).padStart(4, '0'),
+      column * 3 - 96 + (column >= 32 ? 20 : 0), row * 2 - 64)
+  }) }
+  const started = performance.now()
+  const result = proposePanelGroups(graph, gapNumbers(1))
+  const elapsed = performance.now() - started
+  expect(result.refused).toBe(null)
+  expect(result.singletons).toBe(0)
+  expect(result.proposals.map(({ count }) => count)).toEqual([2048, 2048])
+  expect(result.proposals[0].panel_refs).toEqual(graph.panels.filter((_, index) => index % 64 < 32).map(({ id }) => id))
+  expect(result.proposals[1].panel_refs).toEqual(graph.panels.filter((_, index) => index % 64 >= 32).map(({ id }) => id))
+  expect(elapsed).toBeLessThan(500)
+})
 it('retains group limits and ambiguous-handle refusals after gap partitioning', () => {
   const many = { panels: Array.from({ length: 129 }, (_, index) =>
     [positionedPanel(`${index}a`, index * 10, 0), positionedPanel(`${index}b`, index * 10 + 3, 0)]).flat() }
@@ -239,7 +268,7 @@ it('retains group limits and ambiguous-handle refusals after gap partitioning', 
   expect(proposePanelGroups(many, gapNumbers(1)).proposals).toHaveLength(129)
   const large = { panels: Array.from({ length: 4097 }, (_, index) => panel(String(index))) }
   // No centres are present: the existing angle-bucket cap refuses this input
-  // before allocating rectangles or entering the pairwise connectivity pass.
+  // before allocating rectangles or entering the spatial connectivity pass.
   expect(proposePanelGroups(large, gapNumbers(1))).toMatchObject({ refused: 'group_too_large' })
   expect(proposePanelGroups(large, gapNumbers(1)).proposals[0].count).toBe(4097)
   const duplicate = islandGraph()
