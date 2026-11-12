@@ -21,6 +21,7 @@ import lab_layouts  # noqa: E402
 import lab_run_store as run_store  # noqa: E402
 import tenancy  # noqa: E402
 from routers import deployment_identity, lab_activation, lab_artifacts, lab_router, lab_runs, lab_stream, lab_widgets  # noqa: E402
+from routers import integration_browser
 from route_flatten import iter_leaf_routes  # noqa: E402
 from test_auth import _ENV, bearer, mint  # noqa: E402
 
@@ -189,6 +190,14 @@ def test_activation_owner_controls_and_http_errors(client, monkeypatch):
 
 
 def test_route_inventory_is_complete():
+    assert {(method, path)
+            for path, route in iter_leaf_routes(integration_browser.router.routes)
+            for method in route.methods} == {
+        ("GET", "/api/v1/projects/{project_id}/scope"),
+        ("GET", "/api/v1/projects/{project_id}/integrations/{resource:path}"),
+        ("POST", "/api/v1/projects/{project_id}/integrations/{resource:path}"),
+        ("PUT", "/api/v1/projects/{project_id}/integrations/{resource:path}"),
+    }
     # Pin the surface so adding a route requires adding its negative cases.
     assert {(method, path)
             for path, route in iter_leaf_routes(lab_activation.router.routes)
@@ -617,3 +626,21 @@ def test_lab_parent_guards_precede_tenant_and_storage(
     assert MARKER not in response.text
     db, before = owner
     assert _owner_snapshot(db) == before
+
+
+@pytest.mark.parametrize("method,path", [
+    ("GET", "/api/v1/projects/11111111-1111-4111-8111-111111111111/scope"),
+    ("GET", "/api/v1/projects/11111111-1111-4111-8111-111111111111/integrations/elements"),
+    ("POST", "/api/v1/projects/11111111-1111-4111-8111-111111111111/integrations/elements"),
+    ("PUT", "/api/v1/projects/11111111-1111-4111-8111-111111111111/integrations/elements/fixture-view"),
+])
+def test_integration_bridge_refuses_unauthenticated(client, monkeypatch, method, path):
+    def forbidden():
+        pytest.fail("unauthenticated integration bridge reached upstream")
+    monkeypatch.setattr(integration_browser, "_client", forbidden)
+    bridge_app = FastAPI()
+    bridge_app.include_router(integration_browser.router)
+    with TestClient(bridge_app, raise_server_exceptions=False) as http:
+        response = http.request(method, path, headers={},
+                                json={} if method in {"POST", "PUT"} else None)
+    assert response.status_code == 401, response.text
