@@ -29,6 +29,12 @@ import test_solar_solaredge_report as samples
 
 @pytest.fixture
 def lane(monkeypatch):
+    """Historical accepted-record fixture, using the real strict legacy importer.
+
+    Current review behavior is exercised separately by review_lane. Recorded-order
+    legacy records must remain readable without silently accepting new ambiguous
+    review rows.
+    """
     s = tools.memory.__wrapped__(monkeypatch)
     s.set_parent(tools.embedded(samples.small_graph()))
     s.ctx = graphs.resolve_project_graph_context(s.context())
@@ -55,7 +61,18 @@ def lane(monkeypatch):
         s.parses.append(sha256(data).hexdigest())
         return deepcopy(samples.GRIDS)
     monkeypatch.setattr(se.reports, "parse_source", parse)
+    s.current_run_import = se.reports.si.run_import
+    def legacy_import(*args, **kwargs):
+        return s.current_run_import(*args, **{**kwargs, "review": False})
+    monkeypatch.setattr(se.reports.si, "run_import", legacy_import)
     return s
+
+
+@pytest.fixture
+def review_lane(lane, monkeypatch):
+    """Use the actual current producer, including its explicit unresolved rows."""
+    monkeypatch.setattr(se.reports.si, "run_import", lane.current_run_import)
+    return lane
 
 
 def upload(s, data=samples.PDF, **changes):
@@ -108,7 +125,7 @@ def test_source_and_report_exact_producer_and_no_execution(lane):
     assert data == samples.PDF
     assert source_meta["tool_manifest_sha256"] == se.producer_digest(se.sources.SOURCE_TOOL)
     result = report(s, source)
-    assert result["schema"] == se.RESULT_SCHEMA and result["counts"] == samples.C15_COUNTS
+    assert result["schema"] == se.RESULT_SCHEMA and result["counts"] == samples.MATCHED_COUNTS
     meta, stored = se._load_report(s.ctx, result["report"]["artifact_id"])
     assert stored["schema"] == se.REPORT_SCHEMA
     assert stored["source_version_id"] == str(s.ctx.parent_version_id)
@@ -126,6 +143,84 @@ def test_reuse_same_pdf_report_and_quota_without_reparse(lane):
     assert report(lane, again) == built
     assert len(lane.parses) == 1
     assert len([key for key in lane.blobs if "/imports/solaredge/slot-" in key]) == 1
+
+
+@pytest.mark.parametrize("case", ["unmatched", "ambiguous", "competition"])
+def test_unresolved_review_build_reload_and_reuse_refuses_acceptance(review_lane, monkeypatch, case):
+    s = review_lane
+    matrices = [] if case == "unmatched" else deepcopy(samples.GRIDS[:1] if case == "competition" else samples.GRIDS)
+    def parse(data):
+        s.parses.append(sha256(data).hexdigest())
+        return deepcopy(matrices)
+    monkeypatch.setattr(se.reports, "parse_source", parse)
+    before = (s.head, len(s.versions), len(s.calls), deepcopy(s.ctx.graph))
+    result = report(s)
+    meta, stored = se._load_report(s.ctx, result["report"]["artifact_id"])
+    assert meta["tool_manifest_sha256"] == se.producer_digest(se.reports.REPORT_TOOL)
+    assert result["counts"]["matched_frames"] == 0
+    assert len(stored["matches"]) == len(s.ctx.graph["frames"])
+    for row in stored["matches"]:
+        assert row["status"] == ("unmatched" if case == "unmatched" else "ambiguous")
+        assert row["pdf_grid"] is row["pdf_matrix"] is row["pdf_sub_grid"] is None
+        assert row["candidate_count"] == len(row["candidates"]) == len(matrices)
+    assert stored["strings"] == []
+    assert len(stored["unassigned_panel_refs"]) == len(s.ctx.graph["panels"])
+    assert report(s) == result
+    assert len(s.parses) == 1
+    refused(se.tracking.REPORT_INVALID, lambda: se._record(s.ctx, meta, stored))
+    refused(se.tracking.REPORT_INVALID, lambda: se.accept(s.ctx, params(s, result)))
+    refused(se.tracking.REPORT_INVALID, lambda: tools.prepare(s, se.ACCEPT_TOOL, params(s, result), s.ctx))
+    assert (s.head, len(s.versions), len(s.calls), s.ctx.graph) == before
+
+
+@pytest.mark.parametrize("change", ["status", "chosen", "candidate", "count", "missing-frame", "assignment"])
+def test_review_validation_refuses_malformed_unresolved_rows(review_lane, change):
+    s = review_lane
+    result = report(s)
+    meta, stored = se._load_report(s.ctx, result["report"]["artifact_id"])
+    broken = deepcopy(stored)
+    row = broken["matches"][0]
+    if change == "status":
+        row["status"] = "matched"
+    elif change == "chosen":
+        row["pdf_grid"] = 0
+    elif change == "candidate":
+        row["candidates"][0] = True
+    elif change == "count":
+        row["candidate_count"] += 1
+    elif change == "missing-frame":
+        broken["matches"].pop()
+    else:
+        assigned = deepcopy(samples.MATCHED_CORE["strings"][0])
+        broken["strings"] = [assigned]
+        broken["unassigned_panel_refs"] = [ref for ref in stored["unassigned_panel_refs"]
+            if ref not in assigned["panel_refs"]]
+        broken["counts"].update(strings=1, group_strings=1,
+            assigned_panels=len(assigned["panel_refs"]),
+            unassigned_panels=len(broken["unassigned_panel_refs"]))
+    refused(se.tracking.REPORT_INVALID, lambda: se._record(s.ctx, meta, broken, review=True))
+
+
+def test_current_unique_review_still_publishes_tracking_without_entity_changes(review_lane, monkeypatch):
+    s = review_lane
+    panels = [{"handle": "A1", "x": 0, "y": 0}, {"handle": "A2", "x": 10, "y": 0},
+        {"handle": "B1", "x": 100, "y": 0}, {"handle": "B2", "x": 110, "y": 0},
+        {"handle": "B3", "x": 120, "y": 0}]
+    groups = [{"block": "C1", "panels": ["A1", "A2"]}, {"block": "C2", "panels": ["B1", "B2", "B3"]}]
+    s.set_parent(tools.embedded(samples.design_graph(groups, panels, 1.0)))
+    s.ctx = graphs.resolve_project_graph_context(s.context())
+    matrices = [samples.plain_grid([1, 2]), samples.plain_grid([1, 2, 3], inv=2)]
+    monkeypatch.setattr(se.reports, "parse_source", lambda data: deepcopy(matrices))
+    before = deepcopy(s.ctx.graph)
+    result = report(s, selection_order="unknown")
+    assert result["counts"]["matched_frames"] == len(groups)
+    assert result["counts"]["assigned_panels"] == len(panels)
+    _, _, accepted = accept(s, result)
+    for key in ("panels", "frames", "strings", "inverters", "routes", "schedules"):
+        assert accepted.graph[key] == before[key]
+    output = read(s, accepted)["output"]
+    assert output["accepted"] is True
+    assert output["counts"]["assigned_panels"] == len(panels)
 
 
 def test_accept_publication_replay_and_historical_read(lane):
@@ -267,6 +362,34 @@ def test_http_source_report_download_and_read(http):
             "tool": se.READ_TOOL, "catalog_digest": tools.manifest(se.READ_TOOL), "params": {"section": "frames"}})
     assert response.status_code == 200, response.text
     assert response.json()["result"]["output"]["page"]["total"] == 2
+
+
+def test_http_current_review_report_download_is_readable_without_acceptance(http, monkeypatch):
+    s = http.s
+    monkeypatch.setattr(se.reports.si, "run_import", s.current_run_import)
+    before = (s.head, len(s.versions), deepcopy(s.ctx.graph))
+    source = http.client.post(http.prefix, content=samples.PDF, headers={"Content-Type": "application/pdf"})
+    assert source.status_code == 200, source.text
+    request = {"source_artifact_id": source.json()["source"]["artifact_id"],
+        "alignment_tolerance": 1, "selection_order": "recorded"}
+    response = http.client.post(http.prefix + "/report", json=request)
+    assert response.status_code == 200, response.text
+    assert response.headers["cache-control"] == "no-store"
+    ref = response.json()["report"]
+    download = http.client.get(ref["download"])
+    assert download.status_code == 200, download.text
+    assert sha256(download.content).hexdigest() == ref["content_sha256"]
+    stored = json.loads(download.content)
+    assert stored["source"]["content_sha256"] == source.json()["source"]["content_sha256"]
+    assert stored["source_version_id"] == str(s.ctx.parent_version_id)
+    assert all(row["status"] == "ambiguous" and row["pdf_grid"] is None for row in stored["matches"])
+    assert stored["strings"] == []
+    assert http.client.post(http.prefix + "/report", json=request).json() == response.json()
+    refused_flag = http.client.post(http.prefix + "/report", json={**request, "review": True})
+    assert refused_flag.status_code == 400
+    assert refused_flag.json()["error"]["reason_code"] == "REPORT_REQUEST_INVALID"
+    refused(se.tracking.REPORT_INVALID, lambda: se.accept(s.ctx, params(s, response.json())))
+    assert (s.head, len(s.versions), s.ctx.graph) == before
 
 
 @pytest.mark.parametrize("path,content,media,reason", [
