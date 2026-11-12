@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { authHeaders, noteUnauthorized } from '../api.js'
+import { serviceRequestAuthority, rememberServiceResponse } from '../lib/serviceAuthSession.js'
 import { parseScheduleDraftReferencePage } from '../../../vendor/assistant-react/src/actions/workflow-schedule-draft-picker-state'
 import { ConnectionV1, DatasetElementV1, DatasetQueryV1, DatasetReadV1, DatasetFieldV1, IntegrationRefV1,
   ConnectorDefinitionV1, DatasetDefinitionV1, TransformMappingV1, IntegrationWorkflowScheduleDraftV1,
@@ -114,6 +115,25 @@ export const ManualWorkflowHistoryPageV2 = z.strictObject({
     .refine((items) => new Set(items.map((run) => run.run_id.toLowerCase())).size === items.length),
   next_cursor: workflowCursor.nullable(),
 })
+export function manualWorkflowExport(projectId, selected, value) {
+  if (!UUID.test(projectId)) throw invalid()
+  const prior = parse(IntegrationManualWorkflowRunV2, selected)
+  const snapshot = parse(IntegrationManualWorkflowSnapshotV2, value)
+  const run = snapshot.run
+  if (!sameRef(prior.workflow_ref, run.workflow_ref) ||
+      ['run_id', 'submission_digest', 'authority_binding_digest', 'authority_mode', 'created_at'].some((key) => prior[key] !== run[key]) ||
+      run.revision < prior.revision ||
+      (prior.requested_at !== undefined && prior.requested_at !== run.requested_at) ||
+      (prior.state === 'cancel_requested' && !['cancel_requested', 'cancelled'].includes(run.state)) ||
+      (['succeeded', 'cancelled'].includes(prior.state) && prior.state !== run.state) ||
+      (run.revision === prior.revision && JSON.stringify(prior) !== JSON.stringify(run))) throw invalid()
+  // Strict public evidence schemas exclude connection credentials and raw provider
+  // responses. Refuse secret-like saved arguments rather than alter a pinned definition.
+  const sensitive = /^(?:authorization|credentials?|credentialrefs?|password|passwd|(?:client|webhooksigning)?secret|apikey|(?:access|refresh|id)?token)$/i
+  if (snapshot.definition.steps.some((step) => Object.entries(step.arguments).some(([key, value]) =>
+    sensitive.test(key.replace(/_/g, '')) || (typeof value === 'string' && /^Bearer\s+\S+/i.test(value))))) throw invalid()
+  return { schema_version: 1, project_id: projectId, workflow_ref: run.workflow_ref, ...snapshot }
+}
 const scheduleDate = z.string().regex(/^20\d{2}-\d{2}-\d{2}(?![\s\S])/).refine((value) => {
   const date = new Date(`${value}T00:00:00Z`)
   return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value
@@ -346,14 +366,20 @@ export function createIntegrationsClient({ origin = import.meta.env.VITE_INTEGRA
     if (!UUID.test(projectId) || !signal) throw invalid()
     if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
     const encoded = body === undefined ? undefined : boundedIntegrationBody(body, bodyLimit)
+    const authority = serviceRequestAuthority()
+    const service = authority.mode === true
     const auth = authHeaders()
-    if (!/^Bearer \S+(?![\s\S])/.test(auth.Authorization || '')) throw new IntegrationError(401, 'Sign in to view integrations.')
+    if (service ? !authority.identity || auth.Authorization !== `LeafServiceSession ${authority.selector}`
+      : !/^Bearer \S+(?![\s\S])/.test(auth.Authorization || '')) throw new IntegrationError(401, 'Sign in to view integrations.')
     try {
-      const response = await fetchImpl(`${destination}/api/v1/projects/${projectId}${path}`, {
-        method, signal, credentials: 'omit', redirect: 'error', cache: 'no-store',
-        headers: { ...auth, Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}), ...(match !== undefined ? { 'If-Match': String(match) } : {}) },
+      const response = await fetchImpl(`${service ? '' : destination}/api/v1/projects/${projectId}${path}`, {
+        method, signal, credentials: service ? 'same-origin' : 'omit', redirect: 'error', cache: 'no-store',
+        headers: { ...auth, Accept: 'application/json',
+          ...(service ? { 'X-Leaf-Integration-Origin': destination } : {}),
+          ...(body ? { 'Content-Type': 'application/json' } : {}), ...(match !== undefined ? { 'If-Match': String(match) } : {}) },
         ...(body ? { body: encoded } : {}),
       })
+      if (service) rememberServiceResponse(response, authority)
       noteUnauthorized(response, 'integrations', auth.Authorization, { fatal: false })
       if (!response.ok) {
         response.body?.cancel?.().catch(() => {})
