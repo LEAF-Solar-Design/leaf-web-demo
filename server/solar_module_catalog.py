@@ -12,8 +12,9 @@ import requests
 from pydantic import BaseModel, ConfigDict, Field
 
 import leaf_cloud_grants as cloud
+import solar_sizing_client
 
-CATALOG_URL = "https://api.leafdesign.ai/string-length/modules"
+CATALOG_URL = solar_sizing_client.SIZER_BASE_URL + "/string-length/modules"
 MAX_RESPONSE_BYTES = 262144
 QUERY_DETAIL = "q must be 2 to 64 characters with 1 to 6 search terms"
 LIMIT_DETAIL = "limit must be an integer from 1 to 50"
