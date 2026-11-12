@@ -28,11 +28,14 @@ def fixture(tmp_path, monkeypatch):
     (repo / "web/package-lock.json").write_text(json.dumps({"packages": {
         "node_modules/playwright-core": {"version": "1.60.0", "integrity": "sha512-fixture"}}}))
     (repo / "server/requirements.txt").write_text("playwright==1.60.0\npytest\n")
+    for tree in ("web", "harness"):
+        (repo / tree / "package.json").write_text('{"private":true}\n')
     release = tmp_path / "os-release"
     release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
     argv = ["--repo", str(repo), "--cache-dir", str(tmp_path / "cache"),
             "--run", "device:fixture", "--writable", "1", "--day", "20261111",
-            "--node-version", "v22.1.0", "--os-release", str(release),
+            "--node-version", "v22.1.0", "--npm-version", "10.9.0", "--tree", "web",
+            "--os-release", str(release),
             "--pip-cache", str(tmp_path / "pip"), "--npm-cache", str(tmp_path / "npm"),
             "--revision", "a" * 40, "--src", str(tmp_path / "snapshot"),
             "--dest", str(tmp_path / "dest")]
@@ -118,6 +121,126 @@ def test_dl_key_stable_and_sensitive(fixture):
     assert cache.key_inputs(arguments(fixture, day="20261112")) != original
     assert cache.key_inputs(arguments(fixture, node_version="v20.0.0")) != original
     assert cache.key_inputs(arguments(fixture, node_version="v22.9.9")) == original
+
+
+def test_nm_key_stable_and_sensitive(fixture):
+    args = arguments(fixture, kind="nm")
+    original = cache.key_inputs(args)
+    assert cache.key_inputs(args) == original
+    assert set(original) == {"schema", "tree", "lock", "package", "node", "npm", "platform", "arch", "os"}
+    for name in ("package-lock.json", "package.json"):
+        path = Path(args.repo) / "web" / name
+        content = path.read_bytes()
+        path.write_bytes(content + b"x")
+        assert cache.key_inputs(args) != original
+        path.write_bytes(content)
+        path.unlink()
+        with pytest.raises(ValueError):
+            cache.key_inputs(args)
+        path.write_bytes(content)
+        # Identical files still belong to separate tree keys.
+        write(Path(args.repo) / "harness" / name, content)
+    for changes in ({"node_version": "v22.1.1"}, {"npm_version": "10.9.1"}, {"tree": "harness"}):
+        assert cache.key_inputs(arguments(fixture, kind="nm", **changes)) != original
+    args.tree = None
+    with pytest.raises(ValueError):
+        cache.key_inputs(args)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("node_version", "22.1.0"), ("node_version", "v22"), ("node_version", "v22.1.0-extra"),
+    ("npm_version", "v10.9.0"), ("npm_version", "10.9"), ("npm_version", "10.9.0\n"),
+])
+def test_nm_bad_versions_fail_open(fixture, capsys, field, value):
+    assert invoke(fixture, capsys, kind="nm", **{field: value})["result"] == "error"
+    assert not (fixture[0] / "cache").exists()
+
+
+def test_nm_installed_tree_round_trip(fixture, capsys):
+    root = fixture[0] / "repo/web/node_modules"
+    write(root / "tool/bin/run", b"#!/bin/sh\n", executable=True)
+    write(root / "tool/index.js", b"module.exports = 1;")
+    (root / ".bin").mkdir()
+    (root / ".bin/tool").symlink_to("../tool/bin/run")
+    for name in (".cache", ".vite", ".vitest"):
+        write(root / name / "transient")
+    assert invoke(fixture, capsys, "publish", "nm")["result"] == "published"
+    cache.shutil.rmtree(root)
+    result = invoke(fixture, capsys, kind="nm", writable="0")
+    assert result["result"] == "exact" and result["node_modules"] == "seeded"
+    assert (root / "tool/bin/run").read_bytes() == b"#!/bin/sh\n"
+    assert (root / "tool/bin/run").stat().st_mode & 0o111
+    assert (root / "tool/index.js").read_bytes() == b"module.exports = 1;"
+    assert not (root / "tool/index.js").stat().st_mode & 0o111
+    assert os.readlink(root / ".bin/tool") == "../tool/bin/run"
+    for name in (".cache", ".vite", ".vitest"):
+        assert not (root / name).exists()
+    assert invoke(fixture, capsys, kind="nm", writable="0", npm_version="10.9.1")["result"] == "miss"
+
+
+def test_py_key_stable_and_sensitive(fixture, monkeypatch):
+    base = fixture[0] / "base"
+    base.mkdir()
+    (base / "z.dist-info").mkdir()
+    (base / "a.egg-info").write_text("metadata")
+    (base / "unrelated").mkdir()
+    monkeypatch.setattr(cache.sysconfig, "get_paths", lambda: {"purelib": str(base), "platlib": str(base)})
+    args = arguments(fixture, kind="py")
+    original = cache.key_inputs(args)
+    assert cache.key_inputs(args) == original
+    assert original["base"] == ["a.egg-info", "z.dist-info"]
+    assert set(original["files"]) == set(cache.DEPENDENCY_FILES[2:])
+    assert original["executable"] == os.path.realpath(cache.sys.executable)
+    for rel in cache.DEPENDENCY_FILES[2:]:
+        path = Path(args.repo) / rel
+        content = path.read_bytes()
+        path.write_bytes(content + b"x")
+        assert cache.key_inputs(args) != original
+        path.unlink()
+        assert cache.key_inputs(args)["files"][rel] == "absent"
+        path.write_bytes(content)
+    for changes in ({"day": "20261112"}, {"dest": fixture[0] / "other-venv"}):
+        assert cache.key_inputs(arguments(fixture, kind="py", **changes)) != original
+    assert cache.key_inputs(arguments(fixture, "publish", "py", src=args.dest)) == original
+    (base / "new.dist-info").mkdir()
+    assert cache.key_inputs(args) != original
+
+
+@pytest.mark.parametrize("changes", [
+    {"day": ""}, {"day": "2026-11-11"}, {"day": "20261111\n"},
+    {"dest": ""}, {"dest": "relative/venv"},
+])
+def test_py_invalid_inputs_fail_open(fixture, capsys, changes):
+    assert invoke(fixture, capsys, kind="py", **changes)["result"] == "error"
+
+
+def test_py_installed_tree_round_trip(fixture, capsys):
+    root = fixture[0] / "venv"
+    write(root / "pyvenv.cfg")
+    write(root / "lib/python/site-packages/tool.py", b"tool = 1\n")
+    write(root / "lib/python/site-packages/__pycache__/tool.pyc")
+    write(root / "__pycache__/root.pyc")
+    write(root / "bin/pytest", b"#!/venv/bin/python\n", executable=True)
+    for name in ("python", "python3", "python3.12"):
+        (root / "bin" / name).symlink_to("/usr/bin/python3")
+    assert invoke(fixture, capsys, "publish", "py", src=root)["result"] == "published"
+    cache.shutil.rmtree(root)
+    result = invoke(fixture, capsys, kind="py", dest=root, writable="0")
+    assert result["result"] == "exact" and result["venv"] == "seeded"
+    assert (root / "lib/python/site-packages/tool.py").read_bytes() == b"tool = 1\n"
+    assert (root / "bin/pytest").stat().st_mode & 0o111
+    assert {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()} == {
+        "lib/python/site-packages/tool.py", "bin/pytest"}
+    assert not any(p.is_symlink() or p.name == "__pycache__" for p in root.rglob("*"))
+    assert invoke(fixture, capsys, kind="py", dest=root, day="20261112", writable="0")["result"] == "miss"
+
+
+@pytest.mark.parametrize("kind", ["dl", "pw", "as", "nm", "py"])
+def test_per_kind_off_is_scoped(fixture, capsys, kind):
+    write(fixture[0] / "cache" / (".leaf-dep-cache-off-" + kind), b"")
+    assert invoke(fixture, capsys, kind=kind)["result"] == "off"
+    other = "nm" if kind != "nm" else "py"
+    assert invoke(fixture, capsys, kind=other)["result"] == "miss"
 
 
 def test_pw_key_depends_only_on_versions_os_arch(fixture, monkeypatch):
