@@ -104,6 +104,90 @@ def _call(function, *args, **kwargs):
         raise HTTPException(503, detail="lab_store_unavailable") from None
 
 
+def _receipt_table(sql):
+    # Keep the admission identity before calling the run store: a lost response
+    # (or a process exit between admission and its response) must be discoverable.
+    if sql.postgres:
+        if sql.execute("SELECT to_regclass('lab_run_receipts') AS name").fetchone()['name'] is not None:
+            return
+        sql.execute('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', ('lab-run-receipts-schema',))
+    sql.execute('CREATE TABLE IF NOT EXISTS lab_run_receipts ('
+                'tenant_id TEXT NOT NULL, authority TEXT NOT NULL, submission_id TEXT NOT NULL, '
+                'project_id TEXT NOT NULL, doc_id TEXT NOT NULL, graph_revision INTEGER NOT NULL, '
+                'run_id TEXT NOT NULL, PRIMARY KEY (tenant_id, authority, submission_id))')
+    sql.execute('CREATE INDEX IF NOT EXISTS lab_run_receipts_scope_idx '
+                'ON lab_run_receipts (tenant_id,authority,project_id,doc_id,run_id)')
+
+
+def _project_scope(tenant, graph, requested=None):
+    projects = set()
+    for block in graph['blocks']:
+        settings = block.get('settings', {})
+        project = settings.get('project_id') or (settings.get('drawing') or {}).get('project_id')
+        if project:
+            projects.add(project)
+    if len(projects) > 1:
+        raise GraphRefused('lab_run_project_mismatch')
+    project = next(iter(projects), '') if requested is None else requested
+    if not isinstance(project, str) or len(project) > 200 or (projects and projects != {project}):
+        raise GraphRefused('lab_run_project_mismatch')
+    if project:
+        actor = _corpus_actor(tenant)
+        from leaf_platform import project_lifecycle
+        try:
+            project_lifecycle.require_project_role(str(tenant), project, actor, write=False)
+        except (project_lifecycle.LifecycleForbidden, project_lifecycle.LifecycleUnavailable):
+            raise GraphRefused('lab_corpus_project_refused') from None
+    return project
+
+
+def _remember_submission(tenant, body, project):
+    submission = body.get('submission_id')
+    if submission is None:
+        return
+    authority = _actor(tenant)
+    run_id = store.submission_run_id(str(tenant), authority, submission)
+    def operation(sql):
+        _receipt_table(sql)
+        sql.execute('INSERT INTO lab_run_receipts '
+                    '(tenant_id,authority,submission_id,project_id,doc_id,graph_revision,run_id) '
+                    'VALUES (?,?,?,?,?,?,?) ON CONFLICT (tenant_id,authority,submission_id) DO NOTHING',
+                    (str(tenant), authority, submission, project, body['doc_id'], body['graph_revision'], run_id))
+        row = sql.execute('SELECT project_id,doc_id,graph_revision FROM lab_run_receipts '
+                          'WHERE tenant_id=? AND authority=? AND submission_id=?',
+                          (str(tenant), authority, submission)).fetchone()
+        if (row['project_id'], row['doc_id'], row['graph_revision']) != (project, body['doc_id'], body['graph_revision']):
+            raise store.SubmissionConflict('lab_submission_mismatch')
+    store._run(str(tenant), operation, write=True)
+
+
+@router.get('')
+def recent(doc_id: str = Query(..., min_length=1, max_length=200),
+           project_id: str = Query('', max_length=200), tenant=Depends(deps.require_tenant)):
+    _admit(tenant, 'build')
+    def operation():
+        if not getattr(tenant, 'subject', None):
+            raise GraphRefused('lab_run_authority_required')
+        artifact = ledger.get(str(tenant), doc_id)
+        _project_scope(tenant, artifact['graph'], project_id)
+        def select(sql):
+            _receipt_table(sql)
+            return [dict(row) for row in sql.execute(
+                'SELECT r.run_id,r.state,r.graph_revision,r.doc_id,s.project_id,s.submission_id '
+                'FROM lab_run_receipts s JOIN lab_runs r ON r.tenant_id=s.tenant_id AND r.run_id=s.run_id '
+                'WHERE s.tenant_id=? AND s.authority=? AND s.project_id=? AND s.doc_id=? '
+                "AND (r.state IN ('queued','running') OR r.created_at>=?) "
+                "ORDER BY CASE WHEN r.state IN ('queued','running') THEN 0 ELSE 1 END,"
+                'r.created_at DESC,r.run_id DESC LIMIT 20',
+                (str(tenant), _actor(tenant), project_id, doc_id,
+                 (store._now() - store.SUBMISSION_TTL).isoformat())).fetchall()]
+        rows = store._run(str(tenant), select, write=True)
+        for row in rows:
+            _authorize_corpus_run(tenant, store.get(str(tenant), row['run_id']))
+        return {'runs': rows}
+    return _call(operation)
+
+
 def _create(tenant, body):
     if "submission_id" in body and body["submission_id"] is None:
         raise InvalidGraph("invalid_lab_submission_id")
@@ -147,6 +231,9 @@ def _create(tenant, body):
             continue
         if manifest["effect"] != "pure" or (trusted is not None and trusted.effect != "pure"):
             raise GraphRefused("lab_graph_effect_refused")
+    project = (_project_scope(tenant, artifact['graph'], body.get('project_id'))
+               if body.get('submission_id') is not None or 'project_id' in body else '')
+    _remember_submission(tenant, body, project)
     row = store.create(str(tenant), body["doc_id"], uuid.uuid4().hex,
                        body["graph_revision"], artifact["sha256"], OPS_REVISION,
                        graph_digest(corpus_authority or {}), "lab-worker.v1", _source_revision(os.environ) or "unknown",
@@ -159,7 +246,7 @@ def _create(tenant, body):
 @router.post("", status_code=202)
 async def create(request: Request, tenant=Depends(deps.require_tenant)):
     _admit(tenant, "build")
-    body = await _body(request, ("doc_id", "graph_revision"), optional=("submission_id", "reconcile_only"))
+    body = await _body(request, ("doc_id", "graph_revision"), optional=("submission_id", "reconcile_only", "project_id"))
     return await run_in_threadpool(_call, _create, tenant, body)
 
 
