@@ -13,13 +13,18 @@ export default function ProjectSourceCandidateReview({ controller }) {
   const reviewable = !c.unknown && ['staged', 'awaiting_confirmation'].includes(row?.state)
   const disabled = c.busy || c.exportBusy || c.loading || c.materialsLoading
   let exportable = false
-  try { exportable = !native && row?.state === 'published' && !!validateProjectSource(row, c.projectId) } catch { /* Invalid readback cannot be exported. */ }
+  try { exportable = row?.state === 'published' && !!validateProjectSource(row, c.projectId, undefined, c.sourceContext) } catch { /* Invalid readback cannot be exported. */ }
   const downloadReady = exportable && !c.unknown && !c.loading && c.sourceLoaded && c.download
     && c.download.sourceRequestId === row.source_request_id && c.download.version === row.version
     && c.download.receiptDigest === row.receipt_digest && c.download.sourceCommit === row.source_commit
     && c.download.sourceTree === row.source_tree && c.download.projectId === c.projectId
   const frozen = c.unknown || c.candidates.some((item) => ['staged', 'awaiting_confirmation', 'publishing'].includes(item.state))
   const displayedIntent = c.intent && (!row || c.intent.source_request_id === row.source_request_id) ? c.intent : null
+  const preview = native && row && c.previewJob?.source_request_id === row.source_request_id
+    && c.previewJob.source_version === row.version && c.previewJob.receipt_digest === row.receipt_digest
+    && c.previewJob.source_commit === row.source_commit && c.previewJob.source_tree === row.source_tree ? c.previewJob : null
+  let previewable = false
+  try { previewable = native && row?.state === 'published' && !!validateProjectSource(row, c.projectId, undefined, 'native') } catch { /* Require verified source. */ }
   return <div className="clone-dialog-backdrop" role="presentation">
     <section ref={dialog} role="dialog" aria-modal="true" aria-label={title} tabIndex={-1}
       className="clone-dialog" style={{ boxSizing: 'border-box', width: 'min(640px, calc(100vw - 24px))', maxWidth: '100%', maxHeight: 'calc(100dvh - 24px)', display: 'flex', flexDirection: 'column', overflow: 'hidden', overflowWrap: 'anywhere' }}>
@@ -29,7 +34,7 @@ export default function ProjectSourceCandidateReview({ controller }) {
         {native && <><p>Creating iOS source requires one through eight nonempty TXT or JSON project originals, at most 1 MiB each and 4 MiB total.</p>
           <p>Editing saved iOS source can use existing project source and data with no new originals. Review the selection explicitly; edits may select zero through eight new originals within the same limits.</p>
           <p>Only selected text or JSON references are used. Retained movies are unavailable to this source adapter; a transcript is a text reference, not video processing.</p>
-          <p>iOS app build, package, simulator/device runtime and delivery remain pending. Source download is unavailable.</p></>}
+          <p>Build an iOS simulator preview from saved repository source below, or download the reviewed Git source bundle. Device delivery is unavailable.</p></>}
         <label>Original requirements
           <textarea tabIndex={0} aria-label="Original requirements" value={frozen && row ? displayedIntent?.requirements || '' : c.requirements} readOnly={c.busy || frozen}
             onChange={(event) => c.setRequirements(event.target.value)} rows={5} style={{ width: '100%', boxSizing: 'border-box' }} />
@@ -63,17 +68,31 @@ export default function ProjectSourceCandidateReview({ controller }) {
           {row.state === 'published' && !native && <p>App build and private preview are still pending.</p>}
           <p>Candidate version {row.version}</p>
           <p>Candidate digest: {row.receipt_digest}</p>
+          {native && <><p>Source commit: {row.source_commit}</p><p>Source tree: {row.source_tree}</p></>}
           <p>Changed paths</p><ul>{row.changed_paths.map((path) => <li key={path}>{path}</li>)}</ul>
         </div>}
-        {!native && c.exportBusy && <p role="status">Verifying source download…</p>}
+        {native && <section aria-label="Repository iOS preview">
+          {c.previewBusy && <p role="status">Checking repository iOS preview…</p>}
+          {c.previewUnknown && <p role="status">Preview outcome unknown. Reconcile the existing request before another submission.</p>}
+          {c.previewError && <p role="alert">{c.previewError}</p>}
+          {preview && <><p role="status">Repository iOS preview: {preview.status}</p>
+            <p>Preview job: {preview.job_id}</p>
+            {preview.status === 'complete' && <p>Simulator evidence: {preview.receipt.receipt_id} (authenticated worker report)</p>}
+          </>}
+          <button type="button" className="chip-act" onClick={() => c.startPreview(witness)}
+            disabled={disabled || c.previewBusy || c.previewUnknown || c.previewBlocked || !!preview || c.unknown || !c.sourceLoaded || !previewable}>Build iOS source preview</button>
+          <button type="button" className="chip-act" onClick={c.checkPreview}
+            disabled={disabled || c.previewBusy || c.previewBlocked || (!preview && !c.previewUnknown) || !previewable}>Check source preview again</button>
+        </section>}
+        {c.exportBusy && <p role="status">Verifying source download…</p>}
         {downloadReady && <div><p role="status">Source download ready</p>
-          <p>Git source bundle for this saved version. Private source only; app build and private preview are still pending.</p>
+          <p>{native ? 'Private Git source bundle for the reviewed commit and tree.' : 'Git source bundle for this saved version. Private source only; app build and private preview are still pending.'}</p>
           <a href={c.download.url} download={c.download.filename}>Download Git source bundle</a>
           <p>SHA256: {c.download.sha256}</p>
         </div>}
         <div className="clone-dialog-actions" style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-          {!native && <button type="button" className="chip-act" disabled={disabled || c.unknown || !c.sourceLoaded || !exportable}
-            onClick={() => c.prepareDownload(witness)}>Prepare source download</button>}
+          <button type="button" className="chip-act" disabled={disabled || c.unknown || !c.sourceLoaded || !exportable}
+            onClick={() => c.prepareDownload(witness)}>Prepare source download</button>
           <button type="button" className="chip-act" onClick={() => c.stage()} disabled={disabled || c.unknown || !c.sourceLoaded || !c.materialsComplete || !c.selectionReviewed || !!c.selectionProblem || !c.requirements.trim() || frozen}>Stage source</button>
           {c.secretRefusal?.overridable && <button type="button" disabled={disabled || (native && (c.unknown || !c.sourceLoaded || !c.materialsComplete || !c.selectionReviewed || !!c.selectionProblem || frozen))} onClick={() => c.stage({ allowSecretOnce: true })}>Send anyway</button>}
           <button type="button" className="chip-act" disabled={disabled || !reviewable} onClick={() => c.confirm(witness)}>Confirm changes</button>

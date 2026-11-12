@@ -6,13 +6,25 @@ import {
   confirmProjectSource, recoverProjectSource, rejectProjectSource, exportProjectSourceBundle, validateProjectSource,
 } from '../api.js'
 import { isSecretRefused } from '../lib/secretGuardTransport.js'
+import { exportProjectNativeSourceBundle, loadProjectNativePreview, submitProjectSourceNativePreview, validateNativePreview } from './projectPageClient.js'
 
 const LIMIT = 8 * 1024 * 1024
 const pending = (row) => ['staged', 'awaiting_confirmation', 'publishing'].includes(row?.state)
 const freshState = () => ({ open: false, requirements: '', materials: [], selected: [], materialsComplete: false,
   selectionReviewed: false, candidates: [], candidate: null, intent: null, busy: false, loading: false, sourceLoaded: false,
   error: null, secretRefusal: null, unknown: false, materialsLoading: false, unsupportedInputs: [],
-  exportBusy: false, download: null })
+  exportBusy: false, download: null, previewJob: null, previewBusy: false, previewUnknown: false, previewError: null, previewBlocked: false })
+const previewWitness = (row) => ({ source_request_id: row.source_request_id, version: row.version,
+  receipt_digest: row.receipt_digest, source_commit: row.source_commit, source_tree: row.source_tree })
+const samePreviewSource = (source, row) => row && Object.entries(previewWitness(row)).every(([key, value]) => source?.[key] === value)
+const previewExpected = (source) => ({ schema: 'leaf.project-repository-preview-source.v1', source_request_id: source.source_request_id,
+  source_version: source.version, receipt_digest: source.receipt_digest, source_commit: source.source_commit, source_tree: source.source_tree })
+function stopPreview(owner) {
+  if (!owner) return
+  owner.previewAbort?.abort()
+  owner.previewEpoch = (owner.previewEpoch || 0) + 1
+  owner.previewLocked = false
+}
 function discardDownload(owner) {
   if (!owner) return
   owner.exportEpoch = (owner.exportEpoch || 0) + 1
@@ -58,6 +70,7 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
     const previous = live.current
     if (previous && readActiveScope() !== previous.accountScope) {
       previous.abort.abort()
+      stopPreview(previous)
       discardDownload(previous)
       live.current = null
     }
@@ -68,6 +81,7 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
   const live = useRef(null)
   if (live.current?.key !== key) {
     live.current?.abort.abort()
+    stopPreview(live.current)
     discardDownload(live.current)
     live.current = { key, projectId, orgId, accountScope, signedIn, mock, sourceContext,
       abort: new AbortController(), locked: false, sequence: 0, state: freshState() }
@@ -84,7 +98,7 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
   useEffect(() => {
     if (owner.abort.signal.aborted) owner.abort = new AbortController()
     if (!live.current) live.current = owner
-    return () => { owner.abort.abort(); discardDownload(owner); if (live.current === owner) live.current = null }
+    return () => { owner.abort.abort(); stopPreview(owner); discardDownload(owner); if (live.current === owner) live.current = null }
   }, [owner])
   const available = () => {
     if (!['browser', 'native'].includes(owner.sourceContext)) return 'Source context is unavailable.'
@@ -110,26 +124,28 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
     accept(row)
     const candidates = [row, ...owner.state.candidates.filter((item) => item.source_request_id !== requestId)]
     publish({ candidates, candidate: row, unknown: false, error: null, sourceLoaded: true })
+    restorePreview(row)
     return row
   }
   const refresh = async () => {
     if (owner.locked) return
     clearDownload()
+    stopPreview(owner)
     const issue = available()
     if (issue) { publish({ error: issue }); return }
     const sequence = ++owner.sequence
-    publish({ loading: true, error: null, sourceLoaded: false })
+    publish({ loading: true, error: null, sourceLoaded: false, previewBusy: false, previewJob: null, previewUnknown: false, previewError: null })
     try {
       const rows = await listProjectSourceRequests(owner.projectId, options())
       if (!current() || sequence !== owner.sequence) return
       rows.forEach(accept)
       rows.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
-      const previousId = owner.state.intent?.source_request_id || owner.state.candidate?.source_request_id
+      const previousId = owner.state.intent?.source_request_id || owner.state.candidate?.source_request_id || rememberedPreviewRequest()
       const previous = rows.find((row) => row.source_request_id === previousId)
       const candidate = (owner.state.unknown || pending(previous) ? previous : null) || rows.find(pending) || previous || rows[0] || null
       publish({ candidates: rows, candidate, sourceLoaded: true })
       if (owner.state.intent && (owner.state.unknown || !candidate || candidate.source_request_id === owner.state.intent.source_request_id)) await readBack(owner.state.intent.source_request_id)
-      else publish({ unknown: false })
+      else { publish({ unknown: false }); restorePreview(candidate) }
     } catch {
       if (current() && sequence === owner.sequence) publish({ error: 'Source readback is unavailable. Keep the original request and refresh.',
         unknown: !!owner.state.intent, candidate: null })
@@ -262,7 +278,7 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
     }
   }
   const prepareDownload = async (witness) => {
-    if (owner.sourceContext !== 'browser' || owner.exportLocked || owner.locked || !current()) return
+    if (owner.exportLocked || owner.locked || !current()) return
     clearDownload()
     owner.exportLocked = true // Fence duplicate clicks before React renders.
     const epoch = owner.exportEpoch
@@ -279,8 +295,9 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
     try {
       if (available() || !matches() || !witness
         || ['source_request_id', 'version', 'receipt_digest'].some((key) => witness[key] !== row[key])) throw new Error('Refresh and review the saved source before downloading.')
-      validateProjectSource(row, owner.projectId)
-      const result = await exportProjectSourceBundle(owner.projectId, row, options())
+      validateProjectSource(row, owner.projectId, undefined, owner.sourceContext)
+      const exportBundle = owner.sourceContext === 'native' ? exportProjectNativeSourceBundle : exportProjectSourceBundle
+      const result = await exportBundle(owner.projectId, row, options())
       if (!matches()) return
       owner.downloadUrl = URL.createObjectURL(result.blob)
       publish({ download: { ...result, blob: undefined, url: owner.downloadUrl } })
@@ -294,12 +311,105 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
       publish({ exportBusy: false })
     }
   }
+  const previewStorageKey = (row) => `leaf.source-native-preview.v1:${owner.key}:${row.source_request_id}`
+  const previewPointerKey = () => `leaf.source-native-preview.v1:${owner.key}:active`
+  const rememberedPreviewRequest = () => {
+    if (owner.sourceContext !== 'native') return null
+    try {
+      const id = localStorage.getItem(previewPointerKey())
+      return isSourceUuid(id) ? id : null
+    } catch { return null }
+  }
+  const savePreview = (record) => {
+    // Save the retry identity before sending; a reload must never mint a second job.
+    localStorage.setItem(previewStorageKey(record.source), JSON.stringify(record))
+    localStorage.setItem(previewPointerKey(), record.source.source_request_id)
+    owner.previewRecord = record
+  }
+  const observePreview = async () => {
+    const record = owner.previewRecord
+    if (owner.previewLocked || !current() || !owner.state.open || owner.sourceContext !== 'native'
+      || !record || !samePreviewSource(record.source, owner.state.candidate) || owner.state.previewBlocked) return
+    owner.previewLocked = true
+    owner.previewAbort = new AbortController()
+    const epoch = owner.previewEpoch || 0
+    const matches = () => current() && owner.state.open && epoch === (owner.previewEpoch || 0)
+      && samePreviewSource(record.source, owner.state.candidate)
+    publish({ previewBusy: true, previewError: null })
+    try {
+      const opts = { expectedScope: owner.accountScope, signal: owner.previewAbort.signal }
+      const job = record.job
+        ? await loadProjectNativePreview(owner.projectId, record.job.job_id, { ...opts,
+          expected: { ...previewExpected(record.source), repo_key: record.job.repo_key, archive_sha256: record.job.archive_sha256 } })
+        : await submitProjectSourceNativePreview(owner.projectId, record.source, record.key, opts)
+      if (!matches()) return
+      if (record.job && ((['complete', 'failed', 'cancelled'].includes(record.job.status) && job.status !== record.job.status)
+        || (record.job.status === 'running' && job.status === 'queued'))) throw new Error('Stale preview state.')
+      savePreview({ ...record, job })
+      publish({ previewJob: job, previewUnknown: false })
+    } catch {
+      if (matches()) publish({ previewUnknown: true,
+        previewError: 'Preview outcome unknown. Check the existing preview before starting another.' })
+    } finally {
+      if (matches()) { owner.previewLocked = false; publish({ previewBusy: false }) }
+    }
+  }
+  const restorePreview = (row) => {
+    if (owner.sourceContext !== 'native') return
+    stopPreview(owner)
+    owner.previewRecord = null
+    publish({ previewJob: null, previewUnknown: false, previewError: null, previewBusy: false, previewBlocked: false })
+    if (row?.state !== 'published') return
+    try {
+      const raw = localStorage.getItem(previewStorageKey(row))
+      if (!raw) return
+      const record = JSON.parse(raw)
+      if (!samePreviewSource(record?.source, row) || !isSourceUuid(record?.key)) throw new Error()
+      if (record.job) record.job = validateNativePreview(record.job, previewExpected(record.source))
+      owner.previewRecord = record
+      owner.previewUntil = Date.now() + 15 * 60 * 1000
+      // Stored job state is only a hint. Display it after authenticated readback.
+      publish({ previewUnknown: true })
+      void observePreview()
+    } catch {
+      publish({ previewUnknown: true, previewBlocked: true,
+        previewError: 'The saved preview identity is unavailable. Restore its identity before submitting another preview.' })
+    }
+  }
+  const startPreview = async (witness) => {
+    if (owner.sourceContext !== 'native' || !current() || owner.previewLocked || owner.locked || owner.exportLocked
+      || owner.state.loading || !owner.state.sourceLoaded || owner.state.unknown || owner.state.previewUnknown
+      || owner.state.previewBlocked || owner.previewRecord || available()) return
+    const row = owner.state.candidate
+    if (row?.state !== 'published' || !witness
+      || ['source_request_id', 'version', 'receipt_digest'].some((key) => witness[key] !== row[key])) return
+    try {
+      validateProjectSource(row, owner.projectId, undefined, 'native')
+      savePreview({ source: previewWitness(row), key: uuid() })
+      owner.previewUntil = Date.now() + 15 * 60 * 1000
+      publish({ previewUnknown: true })
+      await observePreview()
+    } catch {
+      publish({ previewError: 'A durable preview identity could not be saved. Preview was not submitted.' })
+    }
+  }
   const state = view.owner === owner ? view : owner.state
+  useEffect(() => {
+    if (!state.open || state.previewBusy || state.previewError || state.previewUnknown
+      || !['queued', 'running'].includes(state.previewJob?.status)) return
+    if (Date.now() >= owner.previewUntil) {
+      publish({ previewError: 'Preview observation paused after 15 minutes. Check the existing preview again.' })
+      return
+    }
+    const timer = setTimeout(() => { void observePreview() }, 2000)
+    return () => clearTimeout(timer)
+  }, [owner, state.open, state.candidate, state.previewJob, state.previewBusy, state.previewError, state.previewUnknown])
   const sourceOperation = sourceBaseCommit(state.candidates, projectId, sourceContext) ? 'edit' : 'create'
   return { ...state, isOpen: state.open, projectId, orgId, sourceContext,
     sourceOperation,
     selectionProblem: sourceSelectionProblem(state.materials, state.selected, projectId, orgId, sourceContext, sourceOperation),
-    open, close: () => { clearDownload(); publish({ open: false }) }, refresh, prepareDownload,
+    open, close: () => { clearDownload(); stopPreview(owner); publish({ open: false, previewBusy: false }) }, refresh, prepareDownload,
+    startPreview, checkPreview: () => { owner.previewUntil = Date.now() + 15 * 60 * 1000; void observePreview() },
     refreshMaterials: () => { if (!owner.locked) void loadMaterials() },
     setRequirements: (requirements) => { if (!owner.locked) publish({ requirements }) },
     toggleMaterial: (id) => { if (!owner.locked) publish({ selected: owner.state.selected.includes(id)
@@ -307,8 +417,10 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
     reviewSelection: () => publish({ selectionReviewed: true }),
     selectCandidate: (id) => { if (!owner.locked && !owner.state.loading) {
       clearDownload()
+      stopPreview(owner)
+      owner.previewRecord = null
       const sequence = ++owner.sequence
-      publish({ candidate: null, loading: true, sourceLoaded: false })
+      publish({ candidate: null, loading: true, sourceLoaded: false, previewJob: null, previewBusy: false, previewUnknown: false, previewError: null })
       void readBack(id, sequence).catch(() => {
         if (sequence === owner.sequence) publish({ error: 'Source readback is unavailable.' })
       }).finally(() => { if (sequence === owner.sequence) publish({ loading: false }) })
