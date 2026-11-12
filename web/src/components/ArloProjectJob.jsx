@@ -43,7 +43,7 @@ export default function ArloProjectJob({ project, job }) {
     {error && <p role="alert">{error}</p>}
     {opened && <section aria-label="Saved feeder proposal">
       <button type="button" className="btn ghost" onClick={close}>Close proposal</button>
-      {openedMatches ? <ArloProposalReview envelope={opened.envelope} context={opened.context} /> : <>
+      {openedMatches ? <ArloProposalReview envelope={opened.envelope} context={opened.context} currentProject={{ orgId: project.org_id, projectId: project.project_id }} /> : <>
         <p role="status">Export unavailable: the opened result belongs to a different project or job. Open the current project's proposal.</p>
         <button type="button" className="btn ghost" disabled>Export result</button>
       </>}

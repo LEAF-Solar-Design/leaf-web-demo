@@ -72,6 +72,31 @@ it('exports the canonical reopened result exactly as previewed, including stored
   await waitFor(() => expect(captured.revokeObjectURL).toHaveBeenCalledTimes(2))
 })
 
+it.each(['incomplete', 'cancelled'])('reopens an empty %s result with its diagnostics and an export equal to preview', async status => {
+  const captured = captureDownload()
+  const freshResult = { ...job.result, limitations: ['Native family compatibility unverified.'],
+    solver_result: { status, production_valid: false, proposals: [],
+      limitations: ['No complete candidate was found.'],
+      trace: [{ event: 'solve_stopped', reason: status }] } }
+  openProject.mockResolvedValue({ ...workspace, jobs: [{ ...job, result: freshResult }] })
+  render(<ArloProjectJob project={project} job={job} />)
+  fireEvent.click(screen.getByRole('button', { name: 'Open feeder proposal' }))
+  await screen.findByRole('region', { name: 'Saved feeder proposal' })
+  expect(screen.getByText('Feeder design incomplete')).toBeVisible()
+  expect(screen.getByRole('region', { name: 'Limitations' })).toHaveTextContent('No complete candidate was found.')
+  expect(screen.getByRole('region', { name: 'Limitations' })).toHaveTextContent('Native family compatibility unverified.')
+  expect(screen.getByText('Trace event count: 1')).toBeVisible()
+  expect(JSON.parse(screen.getByLabelText('Trace events JSON').textContent)).toEqual(freshResult.solver_result.trace)
+  fireEvent.click(screen.getByText('Inspect full stored result and export JSON'))
+  const preview = JSON.parse(screen.getByLabelText('Export JSON preview').textContent)
+  expect(preview.envelope).toEqual(freshResult)
+  expect(screen.getByRole('button', { name: 'Export result' })).toBeEnabled()
+  fireEvent.click(screen.getByRole('button', { name: 'Export result' }))
+  expect(await readJson(captured.createObjectURL.mock.calls[0][0])).toEqual(preview)
+  await waitFor(() => expect(captured.revokeObjectURL).toHaveBeenCalledWith('blob:saved-arlo'))
+  expect(saveArloReview).not.toHaveBeenCalled()
+})
+
 it.each(['project', 'organization', 'job', 'input version'])('disables an opened export when the current %s changes', async scope => {
   const captured = captureDownload()
   const { rerender } = render(<ArloProjectJob project={project} job={job} />)
@@ -101,10 +126,10 @@ it('ignores a pending canonical open after switching projects', async () => {
   expect(getArloReviews).not.toHaveBeenCalled()
 })
 
-it('disables export when the canonical job envelope has another project identity', async () => {
+it.each(['project_id', 'organization_id', 'input_version_id'])('disables export when the canonical job envelope has another %s', async key => {
   const captured = captureDownload()
   openProject.mockResolvedValue({ ...workspace, jobs: [{ ...job, result: { ...job.result,
-    solver_input: { ...job.result.solver_input, project_id: '66666666-6666-4666-8666-666666666666' } } }] })
+    solver_input: { ...job.result.solver_input, [key]: '66666666-6666-4666-8666-666666666666' } } }] })
   render(<WorkspaceSummary workspace={workspace} />)
   fireEvent.click(screen.getByRole('button', { name: 'Open feeder proposal' }))
   await screen.findByRole('region', { name: 'Saved feeder proposal' })
