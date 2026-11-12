@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { captureSolarPublication, createSolarProjectMaterializationClient,
-  initialSolarParameters, solarPublicationMatches, solarPublicationReceiptMatches } from './solarProjectMaterializationClient.js'
+  initialSolarParameters, originalSolarParameters, solarPublicationMatches, solarPublicationReceiptMatches } from './solarProjectMaterializationClient.js'
 import { seatSolarProjectPublication } from '../App.jsx'
 import generationIntake from '../../../docs/parity/evidence/ground/generate/intake.json'
 
@@ -25,6 +25,21 @@ const client = fetchImpl => createSolarProjectMaterializationClient({ fetchImpl,
   headers: () => ({ 'Authorization': 'test-only', 'X-Checkout-Capability': 'test-checkout' }) })
 
 describe('canonical project Solar publication client', () => {
+  it.each(['current-native', 'historical-list-reuse'])('captures and sends explicit producer %s without rewriting intake', async semantics => {
+    const original = JSON.stringify({ units: 'm', boundary: [[0, 0], [10, 0], [0, 20]],
+      active_preset: { Name: 'Synthetic', PileTemplateName: 'Synthetic piles' },
+      pile_template: { Name: 'Synthetic piles' } }, null, 2).replaceAll('\n', '\r\n')
+    const parameters = originalSolarParameters(original, 150, semantics)
+    expect(parameters).toEqual({ original_intake: original, grid_long_axis: 150, producer_semantics: semantics })
+    const c = captureSolarPublication(initialScope, initialReadback, id(5), parameters)
+    const fetchImpl = vi.fn().mockResolvedValue(response(receipt(c)))
+    expect(await client(fetchImpl).publish(c)).toMatchObject({ ok: true })
+    expect(JSON.parse(fetchImpl.mock.calls[0][1].body)).toEqual(parameters)
+    expect(solarPublicationMatches(c, captureSolarPublication(initialScope, initialReadback, id(5),
+      { ...parameters, producer_semantics: semantics === 'current-native' ? 'historical-list-reuse' : 'current-native' }))).toBe(false)
+    expect(originalSolarParameters(original, 150, 'unknown')).toBeNull()
+  })
+
   it('reads actual canonical physical source and sends only its three fields', async () => {
     const c = captured(), fetchImpl = vi.fn().mockResolvedValueOnce(response(readback)).mockResolvedValueOnce(response(receipt(c)))
     const api = client(fetchImpl)

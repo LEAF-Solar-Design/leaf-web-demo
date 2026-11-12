@@ -1259,7 +1259,7 @@ describe('canonical project layout publication action', () => {
       preset: generationIntake.active_preset, drawing_units: 'm' })
     expect(f.props.transport.publicationCheckout.acquireCheckout).not.toHaveBeenCalled()
   })
-  it('captures original CRLF intake and terrain setting across publication recovery', async () => {
+  it.each([undefined, 'historical-list-reuse'])('captures original CRLF intake, terrain and producer %s across publication recovery', async (semantics) => {
     const initial = { ...scope, drawing_id: null, input_version_id: null }
     const f = fixture({ drawingId: null, projectScope: initial, checkoutHeld: false })
     f.api.read.mockResolvedValue({ ok: true, value: { ...source, mode: 'initial', drawing_id: null,
@@ -1275,6 +1275,8 @@ describe('canonical project layout publication action', () => {
     render(<SolarWorkspaceTools {...f.props} />)
     fireEvent.change(screen.getByLabelText('Original layout intake (JSON)'), { target: { files: [file] } })
     await screen.findByText(/Meters.*Pile template Supplied/)
+    expect(screen.getByLabelText('Preset loading').value).toBe('current-native')
+    if (semantics) fireEvent.change(screen.getByLabelText('Preset loading'), { target: { value: semantics } })
     fireEvent.change(screen.getByLabelText('Terrain grid cells on longer axis'), { target: { value: '150' } })
     fireEvent.click(screen.getByRole('button', { name: 'Read current layout for publication' }))
     const generate = screen.getByRole('button', { name: 'Generate editable project drawing' })
@@ -1284,7 +1286,8 @@ describe('canonical project layout publication action', () => {
     fireEvent.click(reconcile)
     await waitFor(() => expect(f.api.publish).toHaveBeenCalledTimes(2))
     const [first, retry] = f.api.publish.mock.calls.map(([captured]) => captured)
-    expect(JSON.parse(first.parameters_json)).toEqual({ original_intake: original, grid_long_axis: 150 })
+    expect(JSON.parse(first.parameters_json)).toEqual({ original_intake: original, grid_long_axis: 150,
+      ...(semantics ? { producer_semantics: semantics } : {}) })
     expect(retry).toEqual(first)
     expect(f.props.transport.publicationCheckout.acquireCheckout).not.toHaveBeenCalled()
   })
