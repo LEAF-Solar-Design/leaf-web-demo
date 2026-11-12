@@ -1018,6 +1018,93 @@ printf '%s\\n' "$gate_status"
         self.assertNotIn("AUTOFILL_SOLVER_ROOT", fallback)
         self.assertEqual(script.count("export LEAF_AUTOFILL_SOLVER_ABSENT_OK=1"), 1)
 
+    def test_autofill_solver_device_failure_guard(self):
+        script = CI_PATH.read_text(encoding="utf-8")
+        block, after = script.split("# LEAF_AUTOFILL_SOLVER_BEGIN\n", 1)[1].split(
+            "# LEAF_AUTOFILL_SOLVER_END\n", 1)
+        fatal = ("FATAL: autofill-solver unavailable on this worker "
+                 "(dep-cache seed and S3 fetch both failed); seed the leaf-web-demo "
+                 "dep cache or run on a credentialed worker")
+        self.assertEqual(block.count(fatal), 1)
+        self.assertIn(f'echo "{fatal}" >&2', block)
+        self.assertIn('"${CODEBUILD_BUILD_ID:-}" == device:*', block)
+        self.assertIn('"${LEAF_AUTOFILL_SOLVER_ABSENT_ALLOWED:-}" != 1', block)
+        self.assertIn('autofill_solver_fatal=0\nif fetch_autofill_solver; then', block)
+        fatal_branch = block.split(f'echo "{fatal}" >&2', 1)[1].split('\n  else\n', 1)[0]
+        self.assertIn('autofill_solver_fatal=1', fatal_branch)
+        self.assertNotIn('export LEAF_AUTOFILL_SOLVER_ABSENT_OK', fatal_branch)
+        self.assertIn('autofill-solver: absent allowed by LEAF_AUTOFILL_SOLVER_ABSENT_ALLOWED', block)
+        self.assertIn('export LEAF_AUTOFILL_SOLVER_ABSENT_OK=1', block)
+        guard = 'if [[ "${autofill_solver_fatal:-0}" == 1 ]]; then exit 1; fi\n'
+        self.assertTrue(after.startswith(guard))
+        self.assertLess(script.index(guard), script.index('python scripts/run-all-gates.py'))
+
+    def _run_autofill_solver_outcome(self, build_id, allowed=None, fetch_status=1):
+        script = CI_PATH.read_text(encoding="utf-8")
+        start = script.index('autofill_solver_fatal=0\nif fetch_autofill_solver; then')
+        end = script.index('\n', script.index('# LEAF_AUTOFILL_SOLVER_END\n', start)
+                           + len('# LEAF_AUTOFILL_SOLVER_END\n'))
+        env = {key: value for key, value in os.environ.items()
+               if key not in ('BASH_ENV', 'CODEBUILD_BUILD_ID',
+                              'LEAF_AUTOFILL_SOLVER_ABSENT_ALLOWED',
+                              'LEAF_AUTOFILL_SOLVER_ABSENT_OK')}
+        if build_id is not None:
+            env['CODEBUILD_BUILD_ID'] = build_id
+        if allowed is not None:
+            env['LEAF_AUTOFILL_SOLVER_ABSENT_ALLOWED'] = allowed
+        command = ('set -euo pipefail\n'
+                   'autofill_solver_fatal=1\n'
+                   'fetch_autofill_solver() {\n'
+                   '  autofill_solver_revision=inert-revision\n'
+                   '  autofill_solver_key=inert-seed\n'
+                   f'  return {fetch_status}\n'
+                   '}\n')
+        command += script[start:end] + '\nenv\n'
+        return subprocess.run([BASH, '-c', command], env=env,
+                              capture_output=True, text=True, timeout=30)
+
+    @unittest.skipUnless(BASH, "bash is not on PATH; solver outcome requires bash")
+    def test_autofill_solver_device_without_seed_fails(self):
+        for allowed in (None, '0', 'true'):
+            with self.subTest(allowed=allowed):
+                result = self._run_autofill_solver_outcome('device:worker', allowed)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertEqual(result.stdout, '')
+                self.assertEqual(result.stderr, 'FATAL: autofill-solver unavailable on this worker '
+                                 '(dep-cache seed and S3 fetch both failed); seed the leaf-web-demo '
+                                 'dep cache or run on a credentialed worker\n')
+
+    @unittest.skipUnless(BASH, "bash is not on PATH; solver outcome requires bash")
+    def test_autofill_solver_device_escape_hatch_exports_absent_ok(self):
+        result = self._run_autofill_solver_outcome('device:worker', '1')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('LEAF_AUTOFILL_SOLVER_ABSENT_OK=1', result.stdout.splitlines())
+        self.assertIn('autofill-solver: absent allowed by LEAF_AUTOFILL_SOLVER_ABSENT_ALLOWED',
+                      result.stdout.splitlines())
+        self.assertEqual(result.stderr, '')
+
+    @unittest.skipUnless(BASH, "bash is not on PATH; solver outcome requires bash")
+    def test_autofill_solver_non_device_exports_absent_ok(self):
+        for build_id in (None, '', 'leaf-ci:build', 'github-actions', 'device-worker'):
+            for allowed in (None, '1'):
+                with self.subTest(build_id=build_id, allowed=allowed):
+                    result = self._run_autofill_solver_outcome(build_id, allowed)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn('LEAF_AUTOFILL_SOLVER_ABSENT_OK=1', result.stdout.splitlines())
+                    self.assertNotIn('autofill-solver:', result.stdout)
+                    self.assertEqual(result.stderr, '')
+
+    @unittest.skipUnless(BASH, "bash is not on PATH; solver outcome requires bash")
+    def test_autofill_solver_success_does_not_acknowledge_absence(self):
+        for build_id in ('device:worker', 'leaf-ci:build'):
+            with self.subTest(build_id=build_id):
+                result = self._run_autofill_solver_outcome(build_id, fetch_status=0)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn('AUTOFILL_SOLVER_ROOT=/tmp/autofill-solver', result.stdout.splitlines())
+                self.assertIn('AUTOFILL_SOLVER_REVISION=inert-revision', result.stdout.splitlines())
+                self.assertNotIn('LEAF_AUTOFILL_SOLVER_ABSENT_OK=', result.stdout)
+                self.assertEqual(result.stderr, '')
+
     def test_gate_proof_receipt_guard(self):
         script = CI_PATH.read_text(encoding="utf-8")
         guard = script.split("<<'LEAF_GATE_PROOF_ELIGIBLE'\n", 1)[1].split(

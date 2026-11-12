@@ -797,9 +797,10 @@ echo "--- 6/6 Run unsharded test gate and print scoreboard"
 # Fetch the pinned autofill-solver from its Forge relay snapshot so the solver
 # suites run against the real checkout. Bounded and fail-open: every command
 # runs under timeout (about 80 s worst case), the function is only ever called
-# as an if condition so errexit never aborts the build, and any failure falls
-# back to LEAF_AUTOFILL_SOLVER_ABSENT_OK, the previous behavior. Integrity is
-# git's own: the cloned HEAD must equal the pinned 40-hex revision.
+# as an if condition so errexit never aborts the fetch. Failures fall back to
+# LEAF_AUTOFILL_SOLVER_ABSENT_OK except on device jobs without an explicit
+# allowance. Integrity is git's own: the cloned HEAD must equal the pinned
+# 40-hex revision.
 autofill_solver_fail() {
   echo "autofill-solver: $1 failed; falling back to LEAF_AUTOFILL_SOLVER_ABSENT_OK" >&2
   return 1
@@ -888,13 +889,23 @@ LEAF_AUTOFILL_EXTRACT
   if [[ -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" && "${LEAF_CI_CACHE_WRITABLE:-0}" == 1 ]]; then timeout --kill-after=5 30 python3 -I -B "$LEAF_DEP_CACHE_HELPER" publish --kind as --cache-dir "$LEAF_CI_CACHE_DIR" --writable 1 --run "${CODEBUILD_BUILD_ID:-local}" --revision "$autofill_solver_revision" --src "$work" >&2 || echo "LEAF_DEP_CACHE kind=as action=publish result=error" >&2; fi
   rm -rf "$work"
 }
+autofill_solver_fatal=0
 if fetch_autofill_solver; then
   export AUTOFILL_SOLVER_ROOT=/tmp/autofill-solver AUTOFILL_SOLVER_REVISION="$autofill_solver_revision"
   echo "autofill-solver: pinned $autofill_solver_revision from relay snapshot $autofill_solver_key"
 else
-  export LEAF_AUTOFILL_SOLVER_ABSENT_OK=1
+  if [[ "${CODEBUILD_BUILD_ID:-}" == device:* && "${LEAF_AUTOFILL_SOLVER_ABSENT_ALLOWED:-}" != 1 ]]; then
+    echo "FATAL: autofill-solver unavailable on this worker (dep-cache seed and S3 fetch both failed); seed the leaf-web-demo dep cache or run on a credentialed worker" >&2
+    autofill_solver_fatal=1
+  else
+    if [[ "${CODEBUILD_BUILD_ID:-}" == device:* && "${LEAF_AUTOFILL_SOLVER_ABSENT_ALLOWED:-}" == 1 ]]; then
+      echo "autofill-solver: absent allowed by LEAF_AUTOFILL_SOLVER_ABSENT_ALLOWED"
+    fi
+    export LEAF_AUTOFILL_SOLVER_ABSENT_OK=1
+  fi
 fi
 # LEAF_AUTOFILL_SOLVER_END
+if [[ "${autofill_solver_fatal:-0}" == 1 ]]; then exit 1; fi
 export LEAF_MANAGED_WEB_BROWSER_MODE=trusted-template-container
 mkdir -p /tmp/gate-results
 if [[ "$reporters_ready" == 1 ]]; then
