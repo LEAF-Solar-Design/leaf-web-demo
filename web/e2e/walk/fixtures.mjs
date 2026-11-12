@@ -3949,8 +3949,10 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
     }
     case 'engine-ready': await engineReady(probe, runtime); return
     case 'vertex-index':
-      await page.getByTestId('cad-edit-workbench').getByRole('textbox', { name: 'vertex index', exact: true }).fill(recipe.value)
-      await assertions(page.getByTestId('cad-edit-workbench').getByRole('button', { name: 'Delete vertex', exact: true })).toBeEnabled()
+      await assertions(page.getByTestId('cad-edit-workbench')).toHaveCount(1)
+      await page.getByRole('toolbar', { name: 'Drafting tools', exact: true }).getByRole('group', { name: 'Modify', exact: true })
+        .getByRole('button', { name: 'delete-vertex', exact: true }).click({ timeout: 15_000 })
+      await page.getByLabel('ribbon vertex', { exact: true }).fill(recipe.value)
       return
     case 'select-entity': await selectEntity(probe, runtime, recipe); return
     case 'clear-selection': await page.keyboard.press('Escape'); return
@@ -4413,6 +4415,10 @@ async function captureBefore(probe, runtime) {
 async function activate(probe, runtime, locator) {
   const { page } = runtime
   const recipe = probe.locator
+  if (probe.featureId === 'control:delete-vertex' && probe.state === 'invalid-vertex') {
+    await locator.press('Enter')
+    return
+  }
   if (probe.kind === 'surface' && recipe.role === 'tab') {
     await (await resolveSurfaceControl(page, probe, runtime.evidence)).activate()
     return
@@ -5190,7 +5196,9 @@ export async function runProbe(probe, runtime) {
     if (typeof phoneRailAvailability === 'function') await phoneRailAvailability(probe, runtime)
     const phoneRecipe = runtime.testInfo.project.name === 'phone' && typeof phoneProbeLocator === 'function'
       ? await phoneProbeLocator(page, probe) : null
-    let locator = probe.kind === 'surface' && probe.locator.role === 'tab' && typeof resolveSurfaceControl === 'function'
+    let locator = probe.featureId === 'control:delete-vertex' && probe.state === 'invalid-vertex'
+      ? page.getByLabel('ribbon vertex', { exact: true })
+      : probe.kind === 'surface' && probe.locator.role === 'tab' && typeof resolveSurfaceControl === 'function'
       ? (await resolveSurfaceControl(page, probe)).locator
       : control(page, phoneRecipe || (runtime.testInfo.project.name === 'phone' && probe.locator.phone ? probe.locator.phone : targetRecipe))
     let locatorDescription

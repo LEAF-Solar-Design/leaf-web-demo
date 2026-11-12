@@ -241,7 +241,7 @@ test('C2 certifies all seven engine and disclosure controls with real recipes', 
       assert.equal(entry.expected_effect['no-document'].reason_code, `${entry.id}:unavailable`)
     }
   }
-  assert.equal(entryFor('control:save-version').expected_effect['nothing-edited'].reason, 'edit something first')
+  assert.equal(entryFor('control:save-version').expected_effect['nothing-edited'].reason, 'Make a change first.')
   assert.equal(entryFor('control:save-version').expected_effect['no-target'].reason, 'download-only here: no project target')
   assert.equal(entryFor('control:undo-edit').expected_effect['nothing-to-undo'].reason, 'nothing to undo')
   assert.equal(entryFor('control:redo-edit').expected_effect['nothing-to-redo'].reason, 'nothing to redo')

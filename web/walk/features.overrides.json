@@ -1732,8 +1732,8 @@
         },
         "nothing-edited": {
           "toolbar": "Quick access",
-          "name": "Save version (unavailable: edit something first)",
-          "tooltip": "Save version: edit something first"
+          "name": "Save version (unavailable: Make a change first.)",
+          "tooltip": "Save version: Make a change first."
         },
         "no-target": {
           "toolbar": "Quick access",
@@ -1764,7 +1764,7 @@
         },
         "nothing-edited": {
           "kind": "disabled_with_reason",
-          "reason": "edit something first",
+          "reason": "Make a change first.",
           "reason_code": "control:save-version:unavailable"
         },
         "no-target": {
