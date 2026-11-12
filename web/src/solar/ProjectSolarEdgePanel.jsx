@@ -41,7 +41,7 @@ function groupMatches(bytes, report, binding) {
     if ((status === 'matched' && (!Number.isSafeInteger(match.pdf_grid) || match.pdf_grid < 0 ||
           !match.candidates.includes(match.pdf_grid))) ||
         (status === 'unmatched' && (match.pdf_grid !== null || match.candidates.length !== 0)) ||
-        (status === 'ambiguous' && (match.pdf_grid !== null || match.candidates.length < 2)) ||
+        (status === 'ambiguous' && (match.pdf_grid !== null || match.candidates.length < 1)) ||
         !['matched', 'unmatched', 'ambiguous'].includes(status)) throw new Error('Invalid match status')
     return { ref: match.frame_ref, status, grid: match.pdf_grid, candidates: match.candidates }
   })
