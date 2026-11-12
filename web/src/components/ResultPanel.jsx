@@ -8,6 +8,7 @@ import { modChord } from '../lib/keys.js'
 import { readSingleKeyShortcuts } from '../lib/singleKeyPreference.js'
 import ArloProposalReview from './ArloProposalReview.jsx'
 import SolarReadResult from '../solar/SolarReadResult.jsx'
+import ResultJsonDownload from './ResultJsonDownload.jsx'
 import { isSolarProjectReadResult, isSolarReadResult } from '../solar/solarReadResultModel.js'
 
 // Renders a Result envelope (CONTRACT §3): result data (counts table or
@@ -276,7 +277,10 @@ function ResultBody({ result, density, solarBinding, authorityKey, projectClient
   if (isSolarReadResult(data)) return <SolarReadResult data={data} />
   if (data.solver === 'arlo-design') return <ArloProposalReview key={`${result.job_context?.job_id || 'local'}:${data.result_sha256}`} envelope={data} context={result.job_context} />
   const rowArrays = findRowArrays(data)
-  const rowTables = <RowArrayResults entries={rowArrays} density={density} />
+  const rowTables = <>
+    <RowArrayResults entries={rowArrays} density={density} />
+    {rowArrays.some((entry) => Object.hasOwn(entry, 'rows')) && <ResultJsonDownload result={result} />}
+  </>
   const scalars = Object.fromEntries(Object.entries(data).filter(([, value]) => value === null || typeof value !== 'object'))
   if (Object.hasOwn(data, 'table') && data.table && typeof data.table === 'object') {
     return (
