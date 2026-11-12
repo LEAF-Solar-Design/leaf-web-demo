@@ -140,7 +140,29 @@ describe('ResultPanel row arrays', () => {
     expect(within(south).getByRole('cell', { name: 'Annex roof' })).toBeInTheDocument()
   })
 
-  it('caps wide tables at 50 columns with an omitted-field count while keeping row pagination', () => {
+  it('mounts child tables only for the current parent page while keeping every child reachable', () => {
+    const groups = Array.from({ length: 1000 }, (_, index) => ({
+      name: `Survey ${index}`, layers: [{ name: `Roof ${index}` }],
+    }))
+    const { container } = render(<ResultPanel result={{ ok: true, result: { report: { groups } } }} />)
+    const table = screen.getByRole('table', { name: 'report / groups' })
+    expect(screen.queryByRole('table', { name: 'report / groups / 100 / layers' })).toBeNull()
+    const visited = []
+    for (let page = 0; page < 10; page++) {
+      const tables = Array.from(container.querySelectorAll('table'))
+      expect(tables).toHaveLength(101)
+      expect(table.querySelectorAll('tbody tr')).toHaveLength(100)
+      visited.push(...tables.filter((child) => child !== table).map((child) => child.querySelector('tbody td').textContent))
+      if (page < 9) fireEvent.click(screen.getByRole('button', { name: 'Next report / groups page' }))
+    }
+    expect(visited).toEqual(groups.map((group) => group.layers[0].name))
+    expect(screen.queryByRole('table', { name: 'report / groups / 0 / layers' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Next report / groups page' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Previous report / groups page' }))
+    expect(screen.getByRole('table', { name: 'report / groups / 800 / layers' })).toHaveTextContent('Roof 800')
+  })
+
+  it('caps wide tables at 50 columns with all fields available per row while keeping pagination', () => {
     const layers = Array.from({ length: 105 }, (_, row) => Object.fromEntries([
       ['name', `Layer ${row}`],
       ...Array.from({ length: 55 }, (_, column) => [`field_${column}`, `${row}:${column}`]),
@@ -151,14 +173,45 @@ describe('ResultPanel row arrays', () => {
     const headers = within(table).getAllByRole('columnheader').map((cell) => cell.textContent)
     expect(headers).toEqual(['name', ...Array.from({ length: 49 }, (_, index) => `field ${index}`)])
     expect(within(table).getAllByRole('cell')).toHaveLength(5000)
-    expect(screen.getByText('7 more fields not shown.')).toBeInTheDocument()
+    expect(screen.getByText("7 more fields available in each row's All fields.")).toBeInTheDocument()
+    expect(within(table).queryByText('0:54')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'All fields for layers row 1' }))
+    expect(within(table).getByText('field 54')).toBeInTheDocument()
+    expect(within(table).getByText('0:54')).toBeInTheDocument()
+    expect(within(table).queryByText('1:54')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Hide all fields for layers row 1' }))
+    expect(within(table).queryByText('0:54')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: 'Next layers page' }))
     expect(within(table).getAllByRole('cell')).toHaveLength(250)
-    expect(within(table).getByRole('cell', { name: 'Layer 104' })).toBeInTheDocument()
+    expect(within(table).getByText('Layer 104')).toBeInTheDocument()
     expect(within(table).getAllByRole('columnheader').map((cell) => cell.textContent)).toEqual(headers)
-    expect(screen.getByText('7 more fields not shown.')).toBeInTheDocument()
+    expect(screen.getByText("7 more fields available in each row's All fields.")).toBeInTheDocument()
     expect(screen.getByText('Rows 101–105 of 105')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Next layers page' })).toBeDisabled()
+    expect(within(table).queryByText('Only on the last row')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'All fields for layers row 105' }))
+    expect(within(table).getByText('last field')).toBeInTheDocument()
+    expect(within(table).getByText('Only on the last row')).toBeInTheDocument()
+    expect(within(table).getByText('104:54')).toBeInTheDocument()
+  })
+
+  it('keeps arrays at the discovery depth boundary as paged tables alongside earlier arrays', () => {
+    const layers = Array.from({ length: 123 }, (_, index) => ({ name: `Boundary roof ${index}`, min_x: `${index}.0000 mm` }))
+    let report = { layers }
+    for (let index = 0; index < 18; index++) report = { nested: report }
+    const label = ['report', ...Array(18).fill('nested'), 'layers'].join(' / ')
+    render(<ResultPanel result={{ ok: true, result: { layers: [{ name: 'Shallow roof' }], report } }} />)
+    expect(screen.getByRole('table', { name: 'layers' })).toHaveTextContent('Shallow roof')
+    const table = screen.getByRole('table', { name: label })
+    expect(screen.getAllByRole('table')).toHaveLength(2)
+    expect(table.querySelectorAll('tbody tr')).toHaveLength(100)
+    expect(within(table).getByRole('cell', { name: 'Boundary roof 0' })).toBeInTheDocument()
+    expect(screen.queryByText('Boundary roof 122')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: `Next ${label} page` }))
+    expect(table.querySelectorAll('tbody tr')).toHaveLength(23)
+    expect(within(table).getByRole('cell', { name: 'Boundary roof 122' })).toBeInTheDocument()
+    expect(within(table).getByRole('cell', { name: '122.0000 mm' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: `Next ${label} page` })).toBeDisabled()
   })
 
   it('bounds discovery, flattened fields and JSON cell serialization for very deep results', () => {

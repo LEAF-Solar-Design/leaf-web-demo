@@ -127,24 +127,60 @@ function* rowFields(row, path = []) {
 
 function findRowArrays(data, path = [], ancestors = new Set()) {
   if (data === null || typeof data !== 'object' || ancestors.has(data)) return []
+  // A row array owns discovery of its visible children, after pagination.
+  if (Array.isArray(data) && data.every(isRowObject)) return [{ path, rows: data, ancestors }]
   if (path.length >= MAX_ROW_DEPTH) return [{ path, value: data }]
   const next = new Set(ancestors).add(data)
-  const tables = Array.isArray(data) && data.every(isRowObject) ? [{ path, rows: data }] : []
-  return tables.concat(Object.entries(data).flatMap(([key, value]) => {
+  return Object.entries(data).flatMap(([key, value]) => {
     // These fields have dedicated renderers; file bytes must not become table cells.
     if (path.length === 0 && ['table', 'counts', 'files', 'warnings'].includes(key)) return []
     const fieldPath = [...path, key]
     return findRowArrays(value, fieldPath, next)
-  }))
+  })
 }
 
-function RowArrayTable({ path, rows, density }) {
+function rowFieldValue(row, fieldPath) {
+  return fieldPath.reduce((entry, field) =>
+    entry !== null && typeof entry === 'object' && Object.hasOwn(entry, field) ? entry[field] : undefined, row)
+}
+
+function rowCellText(value) {
+  return Array.isArray(value) && value.every(isRowObject)
+    ? `${value.length} ${value.length === 1 ? 'row' : 'rows'}` : rowValueText(value)
+}
+
+function RowFieldDetails({ row, label }) {
+  const [expanded, setExpanded] = useState(false)
+  return <>
+    <button type="button" className="btn ghost" aria-expanded={expanded}
+      aria-label={`${expanded ? 'Hide all fields' : 'All fields'} for ${label}`}
+      onClick={() => setExpanded(!expanded)}>{expanded ? 'Hide all fields' : 'All fields'}</button>
+    {expanded && <dl aria-label={`All fields for ${label}`}>
+      {Array.from(rowFields(row), (fieldPath) => <div key={JSON.stringify(fieldPath)}>
+        <dt>{fieldPath.map(humanKey).join(' / ')}</dt>
+        <dd>{rowCellText(rowFieldValue(row, fieldPath))}</dd>
+      </div>)}
+    </dl>}
+  </>
+}
+
+function RowArrayResults({ entries, density }) {
+  return entries.map((entry) => Object.hasOwn(entry, 'rows')
+    ? <RowArrayTable key={JSON.stringify(entry.path)} {...entry} density={density} />
+    : <p key={JSON.stringify(entry.path)}>{entry.path.map(humanKey).join(' / ')}: {rowValueText(entry.value)}</p>)
+}
+
+function RowArrayTable({ path, rows, ancestors, density }) {
   const [page, setPage] = useState(0)
   useEffect(() => { setPage(0) }, [rows])
   const label = path.map(humanKey).join(' / ') || 'result'
   const pageSize = 100
   const currentPage = Math.min(page, Math.max(0, Math.ceil(rows.length / pageSize) - 1))
   const start = currentPage * pageSize
+  const visibleRows = rows.slice(start, start + pageSize)
+  const childArrays = path.length < MAX_ROW_DEPTH
+    ? visibleRows.flatMap((row, index) => findRowArrays(row, [...path, String(start + index)], new Set(ancestors).add(rows)))
+    : []
   const columns = new Map()
   const omittedColumns = new Set()
   for (const row of rows) {
@@ -165,14 +201,14 @@ function RowArrayTable({ path, rows, density }) {
             <th key={key} scope="col">{fieldPath.map(humanKey).join(' / ')}</th>
           ))}</tr></thead>
           <tbody>
-            {rows.slice(start, start + pageSize).map((row, index) => (
+            {visibleRows.map((row, index) => (
               <tr key={start + index}>
-                {Array.from(columns, ([key, fieldPath]) => {
-                  const value = fieldPath.reduce((entry, field) =>
-                    entry !== null && typeof entry === 'object' && Object.hasOwn(entry, field) ? entry[field] : undefined, row)
+                {Array.from(columns, ([key, fieldPath], columnIndex) => {
+                  const value = rowFieldValue(row, fieldPath)
                   return <td key={key} className={isNumericCell(value) ? 'num dp-number' : ''}>
-                    {Array.isArray(value) && value.every(isRowObject)
-                      ? `${value.length} ${value.length === 1 ? 'row' : 'rows'}` : rowValueText(value)}
+                    {rowCellText(value)}
+                    {columnIndex === 0 && omittedColumns.size > 0 &&
+                      <RowFieldDetails row={row} label={`${label} row ${start + index + 1}`} />}
                   </td>
                 })}
               </tr>
@@ -180,7 +216,7 @@ function RowArrayTable({ path, rows, density }) {
           </tbody>
         </table>
       </div>
-      {omittedColumns.size > 0 && <p>{omittedColumns.size} more fields not shown.</p>}
+      {omittedColumns.size > 0 && <p>{omittedColumns.size} more fields available in each row's All fields.</p>}
       {rows.length > pageSize && (
         <nav aria-label={`${label} pages`}>
           <span aria-live="polite">Rows {start + 1}–{Math.min(start + pageSize, rows.length)} of {rows.length}</span>
@@ -190,6 +226,7 @@ function RowArrayTable({ path, rows, density }) {
             onClick={() => setPage(currentPage + 1)} aria-label={`Next ${label} page`}>Next</button>
         </nav>
       )}
+      <RowArrayResults entries={childArrays} density={density} />
     </section>
   )
 }
@@ -239,9 +276,7 @@ function ResultBody({ result, density, solarBinding, authorityKey, projectClient
   if (isSolarReadResult(data)) return <SolarReadResult data={data} />
   if (data.solver === 'arlo-design') return <ArloProposalReview key={`${result.job_context?.job_id || 'local'}:${data.result_sha256}`} envelope={data} context={result.job_context} />
   const rowArrays = findRowArrays(data)
-  const rowTables = rowArrays.map((entry) => Object.hasOwn(entry, 'rows')
-    ? <RowArrayTable key={JSON.stringify(entry.path)} path={entry.path} rows={entry.rows} density={density} />
-    : <p key={JSON.stringify(entry.path)}>{entry.path.map(humanKey).join(' / ')}: {rowValueText(entry.value)}</p>)
+  const rowTables = <RowArrayResults entries={rowArrays} density={density} />
   const scalars = Object.fromEntries(Object.entries(data).filter(([, value]) => value === null || typeof value !== 'object'))
   if (Object.hasOwn(data, 'table') && data.table && typeof data.table === 'object') {
     return (
