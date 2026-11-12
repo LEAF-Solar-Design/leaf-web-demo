@@ -119,7 +119,66 @@ def create_groups(graph, params, *, drawing_intake, licensed_matrix=None):
             "plan_sha256": plan_sha256(plan), "cancelled": False}
 
 
-def run(graph, params, *, _creation=None):
+def _discover_groups(graph, settings, source_intake):
+    """Derive memberships from the pinned drawing, never from request handles."""
+    keys = {"BranchMaxOffset", "AlignmentTolerance", "InstallationDesign"}
+    if (type(settings) is not dict or set(settings) != keys
+            or settings["InstallationDesign"] != graph["project"]["installation_design"]
+            or any(type(settings[key]) not in (int, float)
+                   or not math.isfinite(settings[key]) or not 0 < settings[key] <= 1e6
+                   for key in ("BranchMaxOffset", "AlignmentTolerance"))):
+        raise GraphValidationError("INVALID_GROUP_REQUEST")
+    if source_intake is None:
+        raise GraphValidationError("SOURCE_INTAKE_REQUIRED")
+    recognised = kernel.panels_from_intake(source_intake,
+        layer_contains=graph["settings"]["panel_layer_contains"],
+        installation_design=settings["InstallationDesign"])
+    source = {panel["handle"].upper(): panel for panel in recognised}
+    available, by_handle, graph_handles = [], {}, set()
+    for panel in graph["panels"]:
+        handle = panel["provenance"].get("source_handle")
+        key = handle.upper() if type(handle) is str else None
+        if key not in source or key in graph_handles:
+            raise GraphValidationError("AMBIGUOUS_PANEL_HANDLE")
+        graph_handles.add(key)
+        geometry = source[key]
+        if (any(not math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-9)
+                for a, b in zip(geometry["centre"], panel["centre"], strict=True))
+                or kernel.angle_key(geometry["angle"]) != kernel.angle_key(math.radians(panel["angle"]))):
+            raise GraphValidationError("GROUP_GEOMETRY_MISMATCH")
+        if panel["frame_ref"] is not None:
+            continue
+        available.append(geometry)
+        by_handle[key] = panel
+    if graph_handles != set(source):
+        raise GraphValidationError("INVALID_GROUP_COVERAGE")
+    available.sort(key=lambda panel: kernel.handle_sort_key(panel["handle"]))
+    discovered = []
+    # Defer matrix allocation to run(), where the cumulative graph budget applies.
+    for island in kernel.island_partition(available, settings["BranchMaxOffset"]):
+        angles = {}
+        for index in island:
+            panel = available[index]
+            angles.setdefault(kernel.angle_key(panel["angle"]), []).append(panel["handle"])
+        discovered.extend(angles.values())
+    discovered.sort(key=lambda members: kernel.handle_sort_key(members[0]))
+    names = {frame["name"].casefold() for frame in graph["frames"]}
+    groups = []
+    for members in discovered:
+        first = source[members[0].upper()]
+        name = "Roof group " + first["handle"].upper()
+        while name.casefold() in names:
+            name += " new"
+        names.add(name.casefold())
+        groups.append({"name": name,
+            "panel_refs": [by_handle[handle.upper()]["id"] for handle in members],
+            "alignment_tolerance": settings["AlignmentTolerance"],
+            "module_width_along_row": first["column_dim"],
+            "module_height_across_row": first["row_dim"]})
+    return groups
+
+
+def run(graph, params, *, _creation=None, source_intake=None):
     """Commit deterministic frames on an intake-embedded graph.
 
     `_creation` is the canonical project path's private channel (never a request field): when
@@ -132,11 +191,12 @@ def run(graph, params, *, _creation=None):
         group_keys = {"name", "panel_refs", "alignment_tolerance",
                       "module_width_along_row", "module_height_across_row"}
         if (type(params) is not dict
-                or set(params) - {"expected_rev", "groups", "cancel"}
+                or set(params) - {"expected_rev", "groups", "discover", "cancel"}
+                or "discover" in params and "groups" in params
                 or type(params.get("cancel", False)) is not bool):
             raise GraphValidationError("INVALID_GROUP_REQUEST")
         groups = params.get("groups")
-        if not params.get("cancel", False) and (
+        if "discover" not in params and not params.get("cancel", False) and (
                 type(groups) is not list or not 1 <= len(groups) <= 128
                 or any(type(group) is not dict or set(group) != group_keys for group in groups)):
             raise GraphValidationError("INVALID_GROUP_REQUEST")
@@ -144,6 +204,10 @@ def run(graph, params, *, _creation=None):
         if params.get("cancel", False):
             return result
         require_sizing(result)
+        if "discover" in params:
+            groups = _discover_groups(result, params["discover"], source_intake)
+            if not 1 <= len(groups) <= 128:
+                raise GraphValidationError("INVALID_GROUP_REQUEST")
 
         panels = {panel["id"]: panel for panel in result["panels"]}
         names = {frame["name"].casefold() for frame in result["frames"]}
@@ -153,7 +217,7 @@ def run(graph, params, *, _creation=None):
             name, refs = group["name"], group["panel_refs"]
             if (type(name) is not str or not name.strip() or len(name) > 255
                     or "[" in name or name.casefold() in names
-                    or type(refs) is not list or not 2 <= len(refs) <= 4096
+                    or type(refs) is not list or not (1 if "discover" in params else 2) <= len(refs) <= 4096
                     or any(type(ref) is not str for ref in refs)
                     or any(type(group[key]) not in (int, float)
                            or not 0 < group[key] <= 1e6 or not math.isfinite(group[key])

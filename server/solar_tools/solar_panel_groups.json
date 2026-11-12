@@ -20,7 +20,7 @@
   "ledger": [
     "panel-group-create"
   ],
-  "trusted_inputs": [],
+  "trusted_inputs": ["source_intake"],
   "maturity": "production",
   "wave": 1,
   "order": 30,

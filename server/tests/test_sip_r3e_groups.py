@@ -198,6 +198,21 @@ def test_sip_r3e_preparation(monkeypatch):
     assert (params, ctx.intake, w.s.versions, w.s.blobs) == before
 
 
+def test_sip_r3e_discovers_groups_from_canonical_source(monkeypatch):
+    w, ctx = world(monkeypatch)
+    params = {"expected_rev": ctx.graph["rev"], "discover": {
+        "BranchMaxOffset": 1, "AlignmentTolerance": .5, "InstallationDesign": "Roof"}}
+    first = prepare(w, ctx, params)
+    assert prepare(w, ctx, params) == first
+    frames = chain.created(first)["frames"]
+    assert len(frames) == 1
+    assert set(frames[0]["panel_refs"]) == {panel["id"] for panel in ctx.graph["panels"]}
+    assert frames[0]["id"] == derived(ctx, params)
+    saved = commit(w, ctx, TOOL, params)
+    assert saved.graph["frames"] == frames
+    assert all(panel["frame_ref"] == frames[0]["id"] for panel in saved.graph["panels"])
+
+
 def test_sip_r3e_identity_inputs(monkeypatch):
     """R3e-2-03 Every creation input participates; retry authority changes only binding."""
     w, ctx = world(monkeypatch)
