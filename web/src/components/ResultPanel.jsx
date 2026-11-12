@@ -219,7 +219,7 @@ function RowArrayTable({ path, rows, ancestors, density }) {
       {omittedColumns.size > 0 && <p>{omittedColumns.size} more fields available in each row's All fields.</p>}
       {rows.length > pageSize && (
         <nav aria-label={`${label} pages`}>
-          <span aria-live="polite">Rows {start + 1}–{Math.min(start + pageSize, rows.length)} of {rows.length}</span>
+          <span aria-live="polite">Rows {start + 1} to {Math.min(start + pageSize, rows.length)} of {rows.length}</span>
           <button type="button" className="btn ghost" disabled={currentPage === 0}
             onClick={() => setPage(currentPage - 1)} aria-label={`Previous ${label} page`}>Previous</button>
           <button type="button" className="btn ghost" disabled={start + pageSize >= rows.length}
