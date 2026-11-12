@@ -1,9 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 import { DatasetDefinitionV1, DatasetQueryV1, type DatasetFieldV1 } from "../src/integration";
 import {
   DatasetDerivationBoundRequestV1, DatasetDerivationCapabilitiesV1, DatasetDerivationRequestV1,
-  DatasetDerivationResultV1, DerivedDatasetDefinitionV1, ProjectMaterialDatasetDefinitionV1,
+  DatasetDerivationResultV1, DatasetDerivationLineageV1, DerivedDatasetDefinitionV1, ProjectMaterialDatasetDefinitionV1,
 } from "../src/dataset-derivation";
 
 const history = { id: "history", version: 1, digest: "a".repeat(64) };
@@ -59,6 +59,21 @@ function derivedDefinition() {
 }
 
 describe("versioned dataset derivation contracts", () => {
+  it("keeps the final inferred lineage precise and preserves base refinements", () => {
+    expectTypeOf<DerivedDatasetDefinitionV1["lineage"]>().toEqualTypeOf<z.infer<typeof DatasetDerivationLineageV1>>();
+    expectTypeOf<DerivedDatasetDefinitionV1["lineage"]["kind"]>().toEqualTypeOf<"derived">();
+    const valid = derivedDefinition();
+    expect(DerivedDatasetDefinitionV1.safeParse(valid).success).toBe(true);
+    for (const invalid of [
+      { ...valid, key_fields: ["missing"] },
+      { ...valid, fields: valid.fields.map(item => item.id === "aggregate_key" ? { ...item, nullable: true } : item) },
+      { ...valid, fields: [...valid.fields, valid.fields[0]] },
+      { ...valid, time_field: "landed" },
+      { ...valid, lineage: material },
+      { ...valid, lineage: { ...valid.lineage, unexpected: true } },
+    ]) expect(DerivedDatasetDefinitionV1.safeParse(invalid).success).toBe(false);
+  });
+
   it("round trips both bounded operations and the producer's actual material binding", () => {
     for (const request of [groupRequest(), windowRequest()]) expect(DatasetDerivationRequestV1.parse(request)).toEqual(request);
     expect(ProjectMaterialDatasetDefinitionV1.parse(historyDefinition)).toEqual(historyDefinition);

@@ -162,7 +162,11 @@ export const DatasetDerivationLineageV1 = z.strictObject({
   inputRoles(value.plan, value.inputs.map(input => input.alias), ctx);
   outputNames(value.plan, value.computed ?? [], ctx);
 }).describe("Host-produced lineage, not authority or proof of hashes. The host binds current tenant/project, stored references and canonical originals.");
-export const DerivedDatasetDefinitionV1 = DatasetDefinitionV1.safeExtend({ lineage: DatasetDerivationLineageV1 })
+// safeExtend preserves base refinements. Its type-safe replacement first needs
+// an internal bridge because derived lineage is deliberately a new variant.
+// The bridge is never exported; the final schema and inferred type are strict.
+export const DerivedDatasetDefinitionV1 = DatasetDefinitionV1.safeExtend({ lineage: z.any() })
+  .safeExtend({ lineage: DatasetDerivationLineageV1 })
   .superRefine((definition, ctx) => {
     const { plan, computed: calculations = [] } = definition.lineage;
     const names = plan.kind === "group_count" ? [...plan.group_by.map(key => key.as), "window_id"] : plan.anchor_fields;
