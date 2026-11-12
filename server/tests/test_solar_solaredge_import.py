@@ -246,6 +246,48 @@ def test_review_does_not_assign_a_shared_grid_to_the_first_drawing_group():
         assert result["unassigned"] == [p["handle"] for p in panels]
 
 
+def test_review_explicit_associations_resolve_only_selected_groups_and_reset():
+    panels = row_panels("A", 3) + row_panels("B", 3, x0=500.0)
+    groups = [{"block": "GA", "panels": [p["handle"] for p in panels[:3]]},
+              {"block": "GB", "panels": [p["handle"] for p in panels[3:]]}]
+    matrices = [plain_grid([1, 2, 3]), plain_grid([3, 2, 1], inv=9)]
+    original = copy.deepcopy((matrices, groups, panels))
+    def run(choices=None):
+        return si.run_import(matrices, groups, panels, alignment_tolerance=1.0,
+                             review=True, associations=choices)
+    automatic = run()
+    partial = run({"GA": 1})
+    assert [m["grid_index"] for m in partial["matches"]] == [1, None]
+    assert partial["matches"][1]["status"] == "ambiguous"
+    assert {s["inverter_id"] for s in partial["strings"]} == {9}
+    assert partial["unassigned"] == [p["handle"] for p in panels[3:]]
+    resolved = run({"GB": 0, "GA": 1})
+    assert [m["grid_index"] for m in resolved["matches"]] == [1, 0]
+    assert [s["inverter_id"] for s in resolved["strings"]] == [9, 1]
+    assert resolved["unassigned"] == []
+    competition = si.run_import(matrices[:1], groups, panels, alignment_tolerance=1.0,
+        review=True, associations={"GA": 0})
+    assert [m["grid_index"] for m in competition["matches"]] == [0, None]
+    assert competition["matches"][1]["status"] == "ambiguous"
+    assert competition["unassigned"] == [p["handle"] for p in panels[3:]]
+    assert run({}) == automatic
+    assert (matrices, groups, panels) == original
+
+
+@pytest.mark.parametrize("choices", [[], {"GA": True}, {"GA": -1}, {"GA": 2},
+    {"GA": 0.0}, {"missing": 0}, {"GA": 0, "GB": 0}, {"GA": 1}])
+def test_review_refuses_invalid_or_incompatible_associations(choices):
+    panels = row_panels("A", 3) + row_panels("B", 3, x0=500.0)
+    groups = [{"block": "GA", "panels": [p["handle"] for p in panels[:3]]},
+              {"block": "GB", "panels": [p["handle"] for p in panels[3:]]}]
+    before = copy.deepcopy((groups, panels))
+    with pytest.raises(SolarEdgeImportError) as error:
+        si.run_import([plain_grid([1, 2, 3]), plain_grid([1, 2])], groups, panels,
+                      alignment_tolerance=1.0, review=True, associations=choices)
+    assert error.value.code == "invalid-associations"
+    assert (groups, panels) == before
+
+
 def test_missing_match_and_missing_bridge_handle_refuse():
     panels = row_panels("P", 4)
     with pytest.raises(SolarEdgeImportError) as err:

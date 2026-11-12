@@ -93,7 +93,7 @@ def validate_request(request):
             "selection_order": order, "project_id": project}
 
 
-def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_order):
+def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_order, associations=None):
     """Review every frame; unresolved rows retain all candidates and null PDF indexes.
 
     Unique matches keep the existing matched-row format. Unresolved rows also carry
@@ -132,7 +132,7 @@ def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_orde
         row_angle = si.lattice_row_angle([(p["x"], p["y"]) for p in kernel_panels])
         result = si.run_import(matrices, groups, kernel_panels, row_angle=row_angle,
                                alignment_tolerance=alignment_tolerance, selection_order=selection_order,
-                               review=True)
+                               review=True, associations=associations)
     except si.SolarEdgeImportError as exc:
         code = {
             "ambiguous-structural-match": "REPORT_AMBIGUOUS_MATCH",
@@ -143,6 +143,7 @@ def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_orde
             "lattice-angle-unavailable": "REPORT_ROW_ANGLE_UNRESOLVED",
             "lattice-angle-ambiguous": "REPORT_ROW_ANGLE_UNRESOLVED",
             "bound-exceeded": "REPORT_LIMIT_EXCEEDED",
+            "invalid-associations": "REPORT_ASSOCIATIONS_INVALID",
             "duplicate-panel": "REPORT_PANEL_HANDLE_DUPLICATE",
         }.get(exc.code, "REPORT_PDF_UNSUPPORTED")
         raise SolarEdgeReportError(code) from None

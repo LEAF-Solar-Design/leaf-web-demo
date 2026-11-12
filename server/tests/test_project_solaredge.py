@@ -223,6 +223,55 @@ def test_current_unique_review_still_publishes_tracking_without_entity_changes(r
     assert output["counts"]["assigned_panels"] == len(panels)
 
 
+def test_explicit_association_review_reuse_reset_and_canonical_acceptance(review_lane):
+    s = review_lane
+    source = upload(s)
+    before = (s.head, len(s.versions), deepcopy(s.ctx.graph))
+    refs = [frame["id"] for frame in s.ctx.graph["frames"]]
+    automatic = report(s, source, selection_order="unknown")
+    partial = report(s, source, selection_order="unknown", associations={refs[0]: 1})
+    assert partial["counts"]["matched_frames"] == 1
+    refused(se.tracking.REPORT_INVALID, lambda: se.accept(s.ctx, params(s, partial)))
+    choices = {refs[1]: 0, refs[0]: 1}
+    resolved = report(s, source, selection_order="unknown", associations=choices)
+    meta, stored = se._load_report(s.ctx, resolved["report"]["artifact_id"])
+    assert stored["request"]["associations"] == choices
+    assert [row["pdf_grid"] for row in stored["matches"]] == [1, 0]
+    assert [row["pdf_inverter_id"] for row in stored["strings"]] == [2, 1]
+    assert resolved["counts"]["assigned_panels"] == len(s.ctx.graph["panels"])
+    assert report(s, source, selection_order="unknown", associations=dict(reversed(list(choices.items())))) == resolved
+    parses = len(s.parses)
+    assert report(s, source, selection_order="unknown", associations={}) == automatic
+    assert len(s.parses) == parses
+    assert (s.head, len(s.versions), s.ctx.graph) == before
+    # The stored request cannot authorize an association for a different chosen grid.
+    broken = deepcopy(stored)
+    broken["matches"][0]["pdf_grid"] = 0
+    refused(se.tracking.REPORT_INVALID, lambda: se._record(s.ctx, meta, broken))
+    _, _, accepted = accept(s, resolved)
+    output = read(s, accepted)["output"]
+    assert output["accepted"] is True
+    assert output["provenance"]["request"]["associations"] == choices
+    for key in ("panels", "frames", "strings", "inverters", "routes", "schedules"):
+        assert accepted.graph[key] == before[2][key]
+    assert read(s, accepted, section="frames")["output"]["items"] == [
+        {key: row[key] for key in ("frame_ref", "pdf_matrix", "pdf_grid", "pdf_sub_grid")}
+        for row in stored["matches"]]
+
+
+@pytest.mark.parametrize("case", ["list", "bool", "negative", "float", "unknown", "out-of-range", "duplicate"])
+def test_explicit_association_refusal_preserves_source_graph_and_artifacts(review_lane, case):
+    s = review_lane
+    source = upload(s)
+    refs = [frame["id"] for frame in s.ctx.graph["frames"]]
+    choices = {"list": [], "bool": {refs[0]: True}, "negative": {refs[0]: -1},
+        "float": {refs[0]: 0.0}, "unknown": {"not-a-frame": 0},
+        "out-of-range": {refs[0]: 9}, "duplicate": {refs[0]: 0, refs[1]: 0}}[case]
+    before = (s.head, len(s.versions), len(s.calls), deepcopy(s.ctx.graph), deepcopy(s.blobs), len(s.writes))
+    refused("REPORT_ASSOCIATIONS_INVALID", lambda: report(s, source, associations=choices))
+    assert (s.head, len(s.versions), len(s.calls), s.ctx.graph, s.blobs, len(s.writes)) == before
+
+
 def test_accept_publication_replay_and_historical_read(lane):
     s = lane
     result = report(s)
@@ -362,6 +411,33 @@ def test_http_source_report_download_and_read(http):
             "tool": se.READ_TOOL, "catalog_digest": tools.manifest(se.READ_TOOL), "params": {"section": "frames"}})
     assert response.status_code == 200, response.text
     assert response.json()["result"]["output"]["page"]["total"] == 2
+
+
+def test_http_explicit_association_review_reset_and_invalid_choice(http, monkeypatch):
+    s = http.s
+    monkeypatch.setattr(se.reports.si, "run_import", s.current_run_import)
+    source = http.client.post(http.prefix, content=samples.PDF, headers={"Content-Type": "application/pdf"})
+    assert source.status_code == 200
+    request = {"source_artifact_id": source.json()["source"]["artifact_id"],
+        "alignment_tolerance": 1, "selection_order": "unknown"}
+    automatic = http.client.post(http.prefix + "/report", json=request)
+    assert automatic.status_code == 200
+    refs = [frame["id"] for frame in s.ctx.graph["frames"]]
+    choices = {refs[0]: 1, refs[1]: 0}
+    before = (s.head, len(s.versions), deepcopy(s.ctx.graph))
+    corrected = http.client.post(http.prefix + "/report", json={**request, "associations": choices})
+    assert corrected.status_code == 200, corrected.text
+    assert corrected.headers["cache-control"] == "no-store"
+    download = http.client.get(corrected.json()["report"]["download"])
+    assert download.status_code == 200
+    assert download.json()["request"]["associations"] == choices
+    assert sha256(download.content).hexdigest() == corrected.json()["report"]["content_sha256"]
+    assert http.client.post(http.prefix + "/report", json={**request, "associations": {}}).json() == automatic.json()
+    invalid = http.client.post(http.prefix + "/report", json={**request, "associations": {refs[0]: 999}})
+    assert invalid.status_code == 409
+    assert invalid.json()["error"]["reason_code"] == "REPORT_ASSOCIATIONS_INVALID"
+    assert invalid.headers["cache-control"] == "no-store"
+    assert (s.head, len(s.versions), s.ctx.graph) == before
 
 
 def test_http_current_review_report_download_is_readable_without_acceptance(http, monkeypatch):

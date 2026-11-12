@@ -401,7 +401,7 @@ def _group_bridge_panels(sequences, bridge_seqs, bridge_panels):
 
 
 def run_import(matrices, groups, panels, *, row_angle=0.0, alignment_tolerance,
-               selection_order="unknown", review=False):
+               selection_order="unknown", review=False, associations=None):
     """S3 and S4 end to end.
 
     ``groups``: the drawing's panel groups in the plugin's selection order, each
@@ -412,12 +412,21 @@ def run_import(matrices, groups, panels, *, row_angle=0.0, alignment_tolerance,
     With ``review=True``, every group gets a match row. Unmatched and ambiguous rows
     have a status, all candidates and null grid indexes; they produce no strings.
     Review never resolves a tie by recorded order, including competing drawing groups.
+    Explicit review associations may choose a structural candidate once; clearing
+    those choices restores automatic review without modifying any input.
     The default remains the strict plugin-parity path.
     """
     if selection_order not in SELECTION_ORDERS:
         raise SolarEdgeImportError("invalid-selection-order", repr(selection_order))
     if not isinstance(groups, (list, tuple)) or not groups or len(groups) > MAX_GROUPS:
         raise SolarEdgeImportError("malformed-groups", "groups must be a nonempty bounded list")
+    choices = {} if associations is None else associations
+    if (type(choices) is not dict or len(choices) > MAX_GROUPS
+            or any(type(ref) is not str or not 1 <= len(ref) <= 100
+                   or type(index) is not int or index < 0 for ref, index in choices.items())
+            or len(set(choices.values())) != len(choices)
+            or (choices and not review)):
+        raise SolarEdgeImportError("invalid-associations", "explicit choices require a valid review map")
     if not isinstance(panels, (list, tuple)) or len(panels) > MAX_PANELS:
         raise SolarEdgeImportError("malformed-panels", "panels must be a bounded list")
     centre = {}
@@ -460,9 +469,21 @@ def run_import(matrices, groups, panels, *, row_angle=0.0, alignment_tolerance,
         signature = shape_signature(drawing)
         drawings.append((drawing, signature))
         shape_counts[signature] = shape_counts.get(signature, 0) + 1
+    if choices:
+        signatures = {}
+        for group, (_, signature) in zip(groups, drawings):
+            ref = group.get("block")
+            if type(ref) is str and ref in choices:
+                if ref in signatures:
+                    raise SolarEdgeImportError("invalid-associations", "choice names duplicate groups")
+                signatures[ref] = signature
+        for ref, index in choices.items():
+            if ref not in signatures or index not in by_shape.get(signatures[ref], ()):
+                raise SolarEdgeImportError("invalid-associations", "choice is not a structural candidate")
     for gi, (group, (drawing, signature)) in enumerate(zip(groups, drawings)):
         candidates = [i for i in by_shape.get(signature, ()) if review or i not in used]
-        if review and (len(candidates) != 1 or shape_counts[signature] > 1):
+        explicit = choices.get(group.get("block"))
+        if review and explicit is None and (len(candidates) != 1 or shape_counts[signature] > 1):
             matches.append({"group_index": gi, "block": group.get("block"),
                             "status": "ambiguous" if candidates else "unmatched",
                             "grid_index": None, "original_index": None, "sub_grid_id": None,
@@ -472,13 +493,13 @@ def run_import(matrices, groups, panels, *, row_angle=0.0, alignment_tolerance,
             raise SolarEdgeImportError(
                 "no-structural-match",
                 f"group {gi} ({group.get('block')}, {len(group['panels'])} panels) fits no unused PDF grid")
-        if len(candidates) > 1 and selection_order != "recorded":
+        if explicit is None and len(candidates) > 1 and selection_order != "recorded":
             raise SolarEdgeImportError(
                 "ambiguous-structural-match",
                 f"group {gi} ({group.get('block')}) fits PDF grids {candidates}; the plugin takes "
                 "the first in its selection order, so this is reproducible only with "
                 "selection_order='recorded' and the plugin's own order")
-        index = candidates[0]
+        index = candidates[0] if explicit is None else explicit
         merged = merge(drawing, grids[index]["json"])
         drawn = draw_sequences(merged, entity_handles)
         used.add(index)
