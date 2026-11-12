@@ -87,6 +87,79 @@ function GridTable({ table, density }) {
   )
 }
 
+function isRowObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+// Keep the supplied row/field order, including fields first seen on later pages.
+function rowFields(row, path = []) {
+  return Object.entries(row).flatMap(([key, value]) => {
+    const fieldPath = [...path, key]
+    return isRowObject(value) && Object.keys(value).length > 0
+      ? rowFields(value, fieldPath)
+      : [{ path: fieldPath, value }]
+  })
+}
+
+function findRowArrays(data, path = []) {
+  return Object.entries(data).flatMap(([key, value]) => {
+    // These fields have dedicated renderers; file bytes must not become table cells.
+    if (path.length === 0 && ['table', 'counts', 'files', 'warnings'].includes(key)) return []
+    const fieldPath = [...path, key]
+    if (Array.isArray(value)) {
+      return value.every(isRowObject) ? [{ path: fieldPath, rows: value }] : []
+    }
+    return isRowObject(value) ? findRowArrays(value, fieldPath) : []
+  })
+}
+
+function RowArrayTable({ path, rows, density }) {
+  const [page, setPage] = useState(0)
+  useEffect(() => { setPage(0) }, [rows])
+  const label = path.map(humanKey).join(' / ')
+  const pageSize = 100
+  const currentPage = Math.min(page, Math.max(0, Math.ceil(rows.length / pageSize) - 1))
+  const start = currentPage * pageSize
+  const columns = new Map()
+  for (const row of rows) {
+    for (const field of rowFields(row)) columns.set(JSON.stringify(field.path), field.path)
+  }
+  if (rows.length === 0) return <p>{label}: No rows.</p>
+  return (
+    <section aria-label={`${label} rows`}>
+      <div className="table-scroll">
+        <table className="counts grid" data-density={density}>
+          <caption>{label}</caption>
+          <thead><tr>{Array.from(columns, ([key, fieldPath]) => (
+            <th key={key} scope="col">{fieldPath.map(humanKey).join(' / ')}</th>
+          ))}</tr></thead>
+          <tbody>
+            {rows.slice(start, start + pageSize).map((row, index) => (
+              <tr key={start + index}>
+                {Array.from(columns, ([key, fieldPath]) => {
+                  const value = fieldPath.reduce((entry, field) => entry?.[field], row)
+                  return <td key={key} className={isNumericCell(value) ? 'num dp-number' : ''}>
+                    {value == null ? '' : typeof value === 'object' ? JSON.stringify(value) : String(value)}
+                  </td>
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {rows.length > pageSize && (
+        <nav aria-label={`${label} pages`}>
+          <span aria-live="polite">Rows {start + 1}–{Math.min(start + pageSize, rows.length)} of {rows.length}</span>
+          <button type="button" className="btn ghost" disabled={currentPage === 0}
+            onClick={() => setPage(currentPage - 1)} aria-label={`Previous ${label} page`}>Previous</button>
+          <button type="button" className="btn ghost" disabled={start + pageSize >= rows.length}
+            onClick={() => setPage(currentPage + 1)} aria-label={`Next ${label} page`}>Next</button>
+        </nav>
+      )}
+    </section>
+  )
+}
+
 // result.files = [{ name, mime, base64 }]: the tool hands back files (CSV, PDF). The bytes
 // are already in the envelope, so the link is a blob URL built in the browser; nothing is
 // fetched. URLs are revoked when the result changes.
@@ -131,6 +204,10 @@ function ResultBody({ result, density, solarBinding, authorityKey, projectClient
   }
   if (isSolarReadResult(data)) return <SolarReadResult data={data} />
   if (data.solver === 'arlo-design') return <ArloProposalReview key={`${result.job_context?.job_id || 'local'}:${data.result_sha256}`} envelope={data} context={result.job_context} />
+  const rowArrays = findRowArrays(data)
+  const rowTables = rowArrays.map(({ path, rows }) => (
+    <RowArrayTable key={JSON.stringify(path)} path={path} rows={rows} density={density} />
+  ))
   if (data.table && typeof data.table === 'object') {
     const scalars = {}
     for (const [k, v] of Object.entries(data)) {
@@ -140,6 +217,7 @@ function ResultBody({ result, density, solarBinding, authorityKey, projectClient
     return (
       <>
         <div className="table-scroll"><GridTable table={data.table} density={density} /></div>
+        {rowTables}
         {Array.isArray(data.warnings) && data.warnings.length > 0 && (
           <ul className="warnings">{data.warnings.map((w, i) => <li key={i}>{String(w)}</li>)}</ul>
         )}
@@ -153,6 +231,7 @@ function ResultBody({ result, density, solarBinding, authorityKey, projectClient
       <>
         <div className="table-scroll"><CountsTable counts={data.counts} density={density} /></div>
         {'total' in data && <div className="total">Total: <b>{Number(data.total).toLocaleString()}</b></div>}
+        {rowTables}
       </>
     )
   }
@@ -162,8 +241,11 @@ function ResultBody({ result, density, solarBinding, authorityKey, projectClient
     if (v !== null && typeof v === 'object') continue
     scalars[k] = v
   }
-  return Object.keys(scalars).length > 0
-    ? <div className="table-scroll"><KeyValue data={scalars} density={density} /></div>
+  return rowArrays.length > 0 || Object.keys(scalars).length > 0
+    ? <>
+      {rowTables}
+      {Object.keys(scalars).length > 0 && <div className="table-scroll"><KeyValue data={scalars} density={density} /></div>}
+    </>
     : result.overlay || (Array.isArray(data.files) && data.files.length > 0)
       ? null
       : <p className="result-empty">Completed with no output.</p>
