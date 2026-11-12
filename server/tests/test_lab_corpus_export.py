@@ -66,7 +66,7 @@ def exported_run(monkeypatch, tmp_path):
         return {'suite': raw_suite, 'corpus': raw_rows}
     monkeypatch.setattr(corpus, 'read_sources', sources)
 
-    def persist(*, compiled=True, corrupt=None):
+    def persist(*, compiled=True, corrupt=None, submission_id=None):
         current = copy.deepcopy(context)
         if not compiled:
             current.pop('policy')
@@ -89,8 +89,11 @@ def exported_run(monkeypatch, tmp_path):
                  'row_count': 1, 'rows_sha256': report['rows_sha256'],
                  'evaluated_suite_sha256': effective, 'result': report,
                  'result_sha256': hashlib.sha256(corpus._json_bytes(report) + b'\n').hexdigest()}
+        run_authority = dict(authority, schema='leaf.lab-corpus-authority.v1', actor_id=actor)
         run = runs.create(tenant, 'export-policy', 'synthetic-run', 1, artifact['sha256'],
-                          'ops:1', 'b' * 64, 'export-adapter', 'export-build')
+                          'ops:1', graph_digest(run_authority), 'export-adapter', 'export-build',
+                          submission_id=submission_id, authority='export-caller',
+                          corpus_authority=run_authority)
         lease = runs.claim(tenant, run['run_id'], 'export-worker', 60,
                            build_revision='export-build', color='active')
         assert lease
@@ -104,7 +107,7 @@ def exported_run(monkeypatch, tmp_path):
             'payload': {'result': {'data': json.dumps(summary)}}}])
         assert runs.finish(tenant, run['run_id'], 'export-worker', lease['fence'])
         job = {'tenant_id': tenant, 'org_id': tenant, 'project_id': project,
-               'idempotency_key': 'lab:synthetic-run:evaluation:corpus:v1',
+               'idempotency_key': f'lab:{run["run_id"]}:evaluation:corpus:v1',
                'tool': corpus.OPERATION, 'status': 'complete', 'result': {'result': value}}
         monkeypatch.setattr(jobs, 'get_job', lambda job_id: job if job_id == 'synthetic-job' else None)
         return value
@@ -145,3 +148,43 @@ def test_export_authorizes_before_resolving_a_private_job(exported_run, monkeypa
         raise ledger.ExportForbidden()
     with pytest.raises(ledger.ExportForbidden):
         ledger.export_bundle(tenant, 'export-policy', 1, authorize=refused)
+
+
+def test_reconcile_after_parameter_revision_keeps_the_original_policy_run(exported_run):
+    tenant, artifact, policy, persist = exported_run
+    submission = f'v1.{int(runs._now().timestamp() * 1000)}.{uuid.uuid4().hex}'
+    value = persist(submission_id=submission)
+    run_id = runs.submission_run_id(tenant, 'export-caller', submission)
+    original = runs.get(tenant, run_id)
+    authority = runs.corpus_authority(original)
+
+    edited = copy.deepcopy(artifact['graph'])
+    edited['blocks'][0]['settings']['parameters']['min_select_tickets'] = 1
+    revised = ledger.save(tenant, 'export-policy', edited, 1, 'member')
+    newer_policy = corpus.compile_policy(
+        dict(authority, graph_revision=2, graph_sha256=revised['sha256']),
+        'evaluation', edited['blocks'][0]['settings'])
+    assert newer_policy['digest'] != policy['digest']
+
+    recovered = runs.create(
+        tenant, 'export-policy', 'must-not-become-a-new-run', 1, artifact['sha256'],
+        original['ops_revision'], original['input_digest'], original['adapter_revision'],
+        original['build_revision'], submission_id=submission, authority='export-caller',
+        reconcile_only=True, corpus_authority=authority)
+    assert recovered['run_id'] == run_id
+    assert recovered['state'] == 'finished'
+    assert recovered['graph_revision'] == 1
+    assert runs.corpus_authority(recovered) == authority
+
+    with pytest.raises(runs.SubmissionConflict, match='lab_submission_mismatch'):
+        runs.create(
+            tenant, 'export-policy', 'must-not-retry-the-current-revision', 2, revised['sha256'],
+            original['ops_revision'], original['input_digest'], original['adapter_revision'],
+            original['build_revision'], submission_id=submission, authority='export-caller',
+            reconcile_only=True)
+    assert runs._run(tenant, lambda sql: sql.execute(
+        'SELECT COUNT(*) FROM lab_runs WHERE tenant_id=? AND doc_id=?',
+        (tenant, 'export-policy')).fetchone()[0]) == 1
+    bundle = ledger.export_bundle(tenant, 'export-policy', 1, authorize=lambda graph, run: None)
+    assert bundle['parts']['evaluations'][0]['complete_results']['synthetic-job'] == value
+    assert bundle['parts']['graph'] == artifact['graph']
