@@ -45,7 +45,7 @@ it('exports the canonical reopened result exactly as previewed, including stored
   const captured = captureDownload()
   const freshResult = { ...job.result, input_sha256: 'b'.repeat(64), solver_revision: 'saved-revision',
     solver_input: { ...job.result.solver_input, requirements: { support_spacing: 2 } },
-    solver_result: { ...job.result.solver_result, limitations: ['Native host attachment pending.'],
+    solver_result: { ...job.result.solver_result, diagnostics: { limitations: ['Native host attachment pending.'] },
       proposals: [{ ...proposal, source: { source_id: 'saved-source' },
         routes: [{ points: [{ x: 0, y: 0, z: 2 }, { x: 3, y: 0, z: 2 }] }],
         cost_breakdown: [{ kind: 'conduit', cost: 54 }] }],
@@ -67,6 +67,7 @@ it('exports the canonical reopened result exactly as previewed, including stored
   fireEvent.click(screen.getByRole('button', { name: 'Open feeder proposal' }))
   await screen.findByRole('region', { name: 'Saved feeder proposal' })
   expect(screen.getByRole('button', { name: 'Export result' })).toBeEnabled()
+  expect(screen.getByRole('region', { name: 'Limitations' })).toHaveTextContent('Native host attachment pending.')
   fireEvent.click(screen.getByRole('button', { name: 'Export result' }))
   expect(await readJson(captured.createObjectURL.mock.calls[1][0])).toEqual(preview)
   await waitFor(() => expect(captured.revokeObjectURL).toHaveBeenCalledTimes(2))

@@ -74,6 +74,38 @@ function detailedEnvelope() {
 }
 
 describe('ARLO review in the existing workspace result panel', () => {
+  it.each(['initial', 'project'])('shows solver diagnostic limitations in the %s view and retains them in the export preview', async view => {
+    const captured = captureDownload(), stored = envelope()
+    Object.assign(stored.result.solver_result, {
+      contract: 'arlo_design_result_v1', request_hash: 'b'.repeat(64), production_valid: false,
+      diagnostics: { limitations: ['Support host capacity has not been checked.', 'Catalog fitting offsets require verification.'] },
+    })
+    render(view === 'initial' ? panel(stored) : <ArloProposalReview envelope={stored.result} context={context} currentProject={currentProject} />)
+    const limitations = screen.getByRole('region', { name: 'Limitations' })
+    expect(limitations).toHaveTextContent('Solver diagnostics limitations')
+    for (const limitation of stored.result.solver_result.diagnostics.limitations) {
+      expect(limitations).toHaveTextContent(limitation)
+    }
+    expect(limitations).toHaveTextContent('Native boxes and supports')
+    fireEvent.click(screen.getByText('Inspect full stored result and export JSON'))
+    const preview = JSON.parse(screen.getByLabelText('Export JSON preview').textContent)
+    expect(preview.envelope).toEqual(stored.result)
+    const download = screen.getByRole('button', { name: 'Export result' })
+    if (view === 'initial') {
+      expect(download).toBeDisabled()
+      expect(screen.getByText("Open this result from the project's Jobs to export it")).toBeVisible()
+      fireEvent.click(download)
+      expect(captured.createObjectURL).not.toHaveBeenCalled()
+    } else {
+      expect(download).toBeEnabled()
+      fireEvent.click(download)
+      const exported = await readJson(captured.createObjectURL.mock.calls[0][0])
+      expect(exported).toEqual(preview)
+      expect(exported.envelope.solver_result.diagnostics.limitations).toEqual(stored.result.solver_result.diagnostics.limitations)
+      await waitFor(() => expect(captured.revokeObjectURL).toHaveBeenCalledWith('blob:arlo-result'))
+    }
+  })
+
   it('inspects every stored proposal field and downloads exactly the full JSON preview', async () => {
     const captured = captureDownload(), stored = detailedEnvelope()
     render(<ArloProposalReview envelope={stored.result} context={context} currentProject={currentProject} />)

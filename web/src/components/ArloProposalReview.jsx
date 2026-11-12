@@ -142,7 +142,7 @@ export default function ArloProposalReview({ envelope, context, currentProject }
     {result && (!proposal || productionValid === false) && <section aria-label="Limitations">
       <h4>Limitations</h4><p>{productDisclaimer}</p>
       <p>Any additional stored limitations are retained in the complete proposal and stored result below.</p>
-      {[['Envelope', envelope.limitations], ['Result', result.limitations], ['Proposal', proposal?.limitations]].filter(([, value]) => value !== undefined).map(([label, value]) => <div key={label}><h5>{label} limitations</h5><pre>{JSON.stringify(value, null, 2)}</pre></div>)}
+      {[['Envelope', envelope.limitations], ['Result', result.limitations], ['Solver diagnostics', result.diagnostics?.limitations], ['Proposal', proposal?.limitations]].filter(([, value]) => value !== undefined).map(([label, value]) => <div key={label}><h5>{label} limitations</h5><pre>{JSON.stringify(value, null, 2)}</pre></div>)}
     </section>}
     {proposal && <section aria-label="Complete proposal data">
       <h4>Complete proposal data</h4>
