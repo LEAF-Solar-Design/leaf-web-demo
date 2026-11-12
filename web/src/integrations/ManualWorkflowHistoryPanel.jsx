@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import { formatDatasetValue, resolveDisplayPreferences } from '../../../vendor/assistant-react/src/datasets/formatting'
-import { ManualWorkflowHistoryPageV2 } from './client.js'
+import { ManualWorkflowHistoryPageV2, manualWorkflowExport } from './client.js'
+import { ManualWorkflowDefinitionPanel } from './ManualWorkflowDefinitionPanel.jsx'
 
 const timestamp = { id: 'created', label: 'Created', type: { kind: 'instant' }, nullable: false, sensitivity: 'public' }
 
@@ -10,6 +11,8 @@ export function ManualWorkflowHistoryPanel({ client, projectId, signal, guard, o
   const [error, setError] = useState('')
   const [retry, setRetry] = useState('Load')
   const [forbidden, setForbidden] = useState(false)
+  const [reopen, setReopen] = useState(null)
+  const [notice, setNotice] = useState('')
   const binding = useRef(null)
   const feedback = useRef(null)
   useLayoutEffect(() => {
@@ -17,23 +20,24 @@ export function ManualWorkflowHistoryPanel({ client, projectId, signal, guard, o
     binding.current = ctx
     const clear = () => {
       ctx.controller.abort(); ctx.cursors.clear()
-      setPage(null); setPending(false); setError(''); setRetry('Load'); setForbidden(true)
+      setPage(null); setPending(false); setError(''); setRetry('Load'); setForbidden(true); setReopen(null); setNotice('')
     }
-    setPage(null); setPending(false); setError(''); setRetry('Load'); setForbidden(false)
+    setPage(null); setPending(false); setError(''); setRetry('Load'); setForbidden(false); setReopen(null); setNotice('')
     signal.addEventListener('abort', clear, { once: true })
     if (signal.aborted) clear()
     return () => { ctx.controller.abort(); ctx.cursors.clear(); signal.removeEventListener('abort', clear); if (binding.current === ctx) binding.current = null }
   }, [client, projectId, signal])
   useLayoutEffect(() => { if (!pending && (page || error)) feedback.current?.focus() }, [page, error, pending])
 
-  async function read(kind) {
+  async function read(kind, selected) {
     const ctx = binding.current
     if (!ctx || ctx.busy || disabled || ctx.controller.signal.aborted) return
     const after = kind === 'Next' ? page?.next_cursor : undefined
     if (kind === 'Next' && (!after || ctx.cursors.has(after))) return
     const controller = new AbortController()
     if (acquire && !acquire(controller)) return
-    ctx.busy = true; setPending(true); setError(''); setRetry(kind)
+    ctx.busy = true; setPending(true); setError(''); setNotice('')
+    if (kind !== 'Export') setRetry(kind)
     const abort = () => controller.abort()
     ctx.controller.signal.addEventListener('abort', abort, { once: true })
     const current = () => binding.current === ctx && !ctx.controller.signal.aborted
@@ -43,6 +47,27 @@ export function ManualWorkflowHistoryPanel({ client, projectId, signal, guard, o
     try {
       const work = async () => {
         await guarded()
+        if (kind === 'Export') {
+          if (!page?.items.includes(selected)) throw new Error('Unverified selection.')
+          const snapshot = await client.getManualWorkflowRunV2(projectId, selected.run_id, { signal: controller.signal })
+          assertCurrent(); await guarded()
+          const payload = manualWorkflowExport(projectId, selected, snapshot)
+          const definition = await client.getManualWorkflowDefinition(projectId, payload.workflow_ref, { signal: controller.signal })
+          assertCurrent(); await guarded()
+          // Verify the separately resolved pinned definition, including every argument.
+          const pinned = manualWorkflowExport(projectId, selected, { ...snapshot, definition })
+          const normalized = (value) => JSON.stringify({ ...value, steps: value.steps.map((step) => ({ ...step,
+            arguments: Object.entries(step.arguments).sort(([left], [right]) => left.localeCompare(right)) })) })
+          if (normalized(pinned.definition) !== normalized(payload.definition)) throw new Error('Definition mismatch.')
+          const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }))
+          const anchor = document.createElement('a')
+          try {
+            anchor.href = url; anchor.download = `${payload.workflow_ref.id}-v${payload.workflow_ref.version}-${selected.run_id}.json`
+            document.body.appendChild(anchor); anchor.click()
+          } finally { anchor.remove(); URL.revokeObjectURL(url) }
+          setNotice('Workflow definition and run audit evidence exported. No action was executed.')
+          return
+        }
         const result = await client.listManualWorkflowRunsV2(projectId, { signal: controller.signal, limit: 25, after })
         assertCurrent()
         await guarded()
@@ -61,9 +86,10 @@ export function ManualWorkflowHistoryPanel({ client, projectId, signal, guard, o
       if (!current() || (controller.signal.aborted && !expired)) return
       if (failure?.status === 401 || failure?.status === 403) {
         ctx.controller.abort(); ctx.cursors.clear()
-        setPage(null); setPending(false); setError(''); setForbidden(true); onForbidden(); return
+        setPage(null); setPending(false); setError('You are not authorized to access this workflow.'); setForbidden(true); setReopen(null); onForbidden(); return
       }
-      setError('Workflow history is unavailable. The read could not be verified. Retry history; the last verified page is retained.')
+      setError(kind === 'Export' ? 'Export refused. The project, pinned definition and run audit evidence must be authorized, consistent and free of credentials or tokens.' :
+        'Workflow history is unavailable. The read could not be verified. Retry history; the last verified page is retained.')
     } finally {
       clearTimeout(timer); controller.signal.removeEventListener('abort', cancel)
       ctx.controller.signal.removeEventListener('abort', abort)
@@ -85,6 +111,7 @@ export function ManualWorkflowHistoryPanel({ client, projectId, signal, guard, o
       <p role="status" aria-live="polite">{pending ? 'Loading workflow history…' : page ?
         page.items.length ? `${page.items.length} stored run summaries on this page.` : 'No stored runs on this page.' :
           forbidden ? 'Workflow history is unavailable.' : 'Workflow history has not been loaded.'}</p>
+      {notice && <p role="status">{notice}</p>}
       {error && <p role="alert">{error}</p>}
     </div>
     {page && <ol aria-label="Stored workflow runs" style={{ minWidth: 0, paddingInlineStart: '1.5rem' }}>
@@ -97,7 +124,22 @@ export function ManualWorkflowHistoryPanel({ client, projectId, signal, guard, o
             const ctx = binding.current
             if (ctx && !ctx.busy && !disabled && !ctx.controller.signal.aborted) onSelect(run)
           }}>Open run details</button>
+        <button type="button" style={{ minHeight: 44 }} disabled={locked} aria-label={`Open as new version ${run.run_id}`}
+          onClick={() => {
+            const ctx = binding.current
+            if (ctx && !ctx.busy && !disabled && !ctx.controller.signal.aborted) setReopen({ projectId, reference: run.workflow_ref })
+          }}>Open as new version</button>
+        <button type="button" style={{ minHeight: 44 }} disabled={locked} aria-label={`Export ${run.run_id}`}
+          onClick={() => read('Export', run)}>Export</button>
       </li>)}
     </ol>}
+    {reopen && <>
+      <button type="button" onClick={() => setReopen(null)}>Close workflow editor</button>
+      <ManualWorkflowDefinitionPanel key={JSON.stringify(reopen)} client={client} projectId={projectId} signal={signal}
+        guard={guard} onForbidden={() => {
+          binding.current?.controller.abort()
+          setReopen(null); setPage(null); setPending(false); setForbidden(true); setError('You are not authorized to access this workflow.'); onForbidden()
+        }} reopen={reopen} />
+    </>}
   </section>
 }
