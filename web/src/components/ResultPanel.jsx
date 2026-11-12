@@ -91,38 +91,69 @@ function isRowObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
-// Keep the supplied row/field order, including fields first seen on later pages.
-function rowFields(row, path = []) {
-  return Object.entries(row).flatMap(([key, value]) => {
-    const fieldPath = [...path, key]
-    return isRowObject(value) && Object.keys(value).length > 0
-      ? rowFields(value, fieldPath)
-      : [{ path: fieldPath, value }]
-  })
+const MAX_ROW_DEPTH = 20
+const MAX_ROW_COLUMNS = 50
+
+// Copy only own JSON fields before stringifying, so deep/cyclic values stay text.
+function boundedRowValue(value, depth = 0, ancestors = new Set()) {
+  if (value === null || typeof value !== 'object') return value
+  if (depth >= MAX_ROW_DEPTH) return '[Truncated]'
+  if (ancestors.has(value)) return '[Circular]'
+  const next = new Set(ancestors).add(value)
+  return Array.isArray(value)
+    ? value.map((item) => boundedRowValue(item, depth + 1, next))
+    : Object.fromEntries(Object.entries(value).map(([key, item]) => [key, boundedRowValue(item, depth + 1, next)]))
 }
 
-function findRowArrays(data, path = []) {
-  return Object.entries(data).flatMap(([key, value]) => {
+function rowValueText(value) {
+  try {
+    return value == null ? '' : typeof value === 'object' ? JSON.stringify(boundedRowValue(value)) : String(value)
+  } catch {
+    return '[Unreadable value]'
+  }
+}
+
+// Keep the supplied row/field order, including fields first seen on later pages.
+function* rowFields(row, path = []) {
+  for (const [key, value] of Object.entries(row)) {
+    const fieldPath = [...path, key]
+    if (fieldPath.length < MAX_ROW_DEPTH && isRowObject(value) && Object.keys(value).length > 0) {
+      yield* rowFields(value, fieldPath)
+    } else {
+      yield fieldPath
+    }
+  }
+}
+
+function findRowArrays(data, path = [], ancestors = new Set()) {
+  if (data === null || typeof data !== 'object' || ancestors.has(data)) return []
+  if (path.length >= MAX_ROW_DEPTH) return [{ path, value: data }]
+  const next = new Set(ancestors).add(data)
+  const tables = Array.isArray(data) && data.every(isRowObject) ? [{ path, rows: data }] : []
+  return tables.concat(Object.entries(data).flatMap(([key, value]) => {
     // These fields have dedicated renderers; file bytes must not become table cells.
     if (path.length === 0 && ['table', 'counts', 'files', 'warnings'].includes(key)) return []
     const fieldPath = [...path, key]
-    if (Array.isArray(value)) {
-      return value.every(isRowObject) ? [{ path: fieldPath, rows: value }] : []
-    }
-    return isRowObject(value) ? findRowArrays(value, fieldPath) : []
-  })
+    return findRowArrays(value, fieldPath, next)
+  }))
 }
 
 function RowArrayTable({ path, rows, density }) {
   const [page, setPage] = useState(0)
   useEffect(() => { setPage(0) }, [rows])
-  const label = path.map(humanKey).join(' / ')
+  const label = path.map(humanKey).join(' / ') || 'result'
   const pageSize = 100
   const currentPage = Math.min(page, Math.max(0, Math.ceil(rows.length / pageSize) - 1))
   const start = currentPage * pageSize
   const columns = new Map()
+  const omittedColumns = new Set()
   for (const row of rows) {
-    for (const field of rowFields(row)) columns.set(JSON.stringify(field.path), field.path)
+    for (const fieldPath of rowFields(row)) {
+      const key = JSON.stringify(fieldPath)
+      if (columns.has(key)) continue
+      if (columns.size < MAX_ROW_COLUMNS) columns.set(key, fieldPath)
+      else omittedColumns.add(key)
+    }
   }
   if (rows.length === 0) return <p>{label}: No rows.</p>
   return (
@@ -137,9 +168,11 @@ function RowArrayTable({ path, rows, density }) {
             {rows.slice(start, start + pageSize).map((row, index) => (
               <tr key={start + index}>
                 {Array.from(columns, ([key, fieldPath]) => {
-                  const value = fieldPath.reduce((entry, field) => entry?.[field], row)
+                  const value = fieldPath.reduce((entry, field) =>
+                    entry !== null && typeof entry === 'object' && Object.hasOwn(entry, field) ? entry[field] : undefined, row)
                   return <td key={key} className={isNumericCell(value) ? 'num dp-number' : ''}>
-                    {value == null ? '' : typeof value === 'object' ? JSON.stringify(value) : String(value)}
+                    {Array.isArray(value) && value.every(isRowObject)
+                      ? `${value.length} ${value.length === 1 ? 'row' : 'rows'}` : rowValueText(value)}
                   </td>
                 })}
               </tr>
@@ -147,6 +180,7 @@ function RowArrayTable({ path, rows, density }) {
           </tbody>
         </table>
       </div>
+      {omittedColumns.size > 0 && <p>{omittedColumns.size} more fields not shown.</p>}
       {rows.length > pageSize && (
         <nav aria-label={`${label} pages`}>
           <span aria-live="polite">Rows {start + 1}–{Math.min(start + pageSize, rows.length)} of {rows.length}</span>
@@ -205,15 +239,11 @@ function ResultBody({ result, density, solarBinding, authorityKey, projectClient
   if (isSolarReadResult(data)) return <SolarReadResult data={data} />
   if (data.solver === 'arlo-design') return <ArloProposalReview key={`${result.job_context?.job_id || 'local'}:${data.result_sha256}`} envelope={data} context={result.job_context} />
   const rowArrays = findRowArrays(data)
-  const rowTables = rowArrays.map(({ path, rows }) => (
-    <RowArrayTable key={JSON.stringify(path)} path={path} rows={rows} density={density} />
-  ))
-  if (data.table && typeof data.table === 'object') {
-    const scalars = {}
-    for (const [k, v] of Object.entries(data)) {
-      if (v !== null && typeof v === 'object') continue
-      scalars[k] = v
-    }
+  const rowTables = rowArrays.map((entry) => Object.hasOwn(entry, 'rows')
+    ? <RowArrayTable key={JSON.stringify(entry.path)} path={entry.path} rows={entry.rows} density={density} />
+    : <p key={JSON.stringify(entry.path)}>{entry.path.map(humanKey).join(' / ')}: {rowValueText(entry.value)}</p>)
+  const scalars = Object.fromEntries(Object.entries(data).filter(([, value]) => value === null || typeof value !== 'object'))
+  if (Object.hasOwn(data, 'table') && data.table && typeof data.table === 'object') {
     return (
       <>
         <div className="table-scroll"><GridTable table={data.table} density={density} /></div>
@@ -226,20 +256,16 @@ function ResultBody({ result, density, solarBinding, authorityKey, projectClient
       </>
     )
   }
-  if (data.counts && typeof data.counts === 'object') {
+  if (Object.hasOwn(data, 'counts') && data.counts && typeof data.counts === 'object') {
+    const summary = Object.fromEntries(Object.entries(scalars).filter(([key]) => key !== 'total'))
     return (
       <>
         <div className="table-scroll"><CountsTable counts={data.counts} density={density} /></div>
-        {'total' in data && <div className="total">Total: <b>{Number(data.total).toLocaleString()}</b></div>}
+        {Object.hasOwn(data, 'total') && <div className="total">Total: <b>{Number(data.total).toLocaleString()}</b></div>}
         {rowTables}
+        {Object.keys(summary).length > 0 && <div className="table-scroll"><KeyValue data={summary} density={density} /></div>}
       </>
     )
-  }
-  // generic: split scalars from nested
-  const scalars = {}
-  for (const [k, v] of Object.entries(data)) {
-    if (v !== null && typeof v === 'object') continue
-    scalars[k] = v
   }
   return rowArrays.length > 0 || Object.keys(scalars).length > 0
     ? <>
