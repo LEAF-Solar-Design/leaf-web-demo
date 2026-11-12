@@ -53,6 +53,18 @@ const read = { schema_version: 1, dataset_ref: reference, fields,
   rows: [{ key: 'one', values: { day: '2026-10-20', total: 1234 } }], next_cursor: null, status: 'ready',
   freshness: { source_updated_at: null, synced_at: null, fetched_at: '2026-10-20T12:00:00Z' } }
 const metadata = { reference, revision: 1, title: 'Authorized orders', fields, lastAttempt: null, freshness: read.freshness }
+const derivedRef = { id: 'derived-orders', version: 1, digest: 'b'.repeat(64) }
+const derivedFields = [...fields, { id: 'window_id', label: 'Window', type: { kind: 'identifier' }, nullable: false, sensitivity: 'internal' },
+  { id: 'aggregate_key', label: 'Aggregate key', type: { kind: 'identifier' }, nullable: false, sensitivity: 'internal' }]
+const derivedMetadata = { reference: derivedRef, revision: 1, title: 'Derived orders', fields: derivedFields,
+  lastAttempt: { outcome: 'success', row_count: 1 }, freshness: read.freshness,
+  derivation: { kind: 'derived', contract_version: 1, inputs: [{ alias: 'primary', dataset_ref: reference, resource_revision: 1,
+    original_binding: { kind: 'project_material', material_id: otherProject, sha256: 'c'.repeat(64), byte_length: 100 } }],
+    plan: { kind: 'group_count', group_by: [{ field: 'day', as: 'day', bucket: 'value' }], count: { as: 'total', label: 'Total' },
+      windows: [{ id: 'recent', filters: [{ field: 'day', op: 'gte', value: '2026-10-01' }] }, { id: 'all', filters: [] }] },
+    engine_revision: 'fixture-v1', derivation_digest: derivedRef.digest },
+  input_freshness: [{ alias: 'primary', semantic_digest: 'd'.repeat(64), freshness: read.freshness }],
+  diagnostics: { excluded_domain_rows: 3, null_event_time_rows: 0 }, computed_at: '2026-10-20T12:01:00Z' }
 const page = (records) => ({ records, nextCursor: null })
 function response(value, status = 200) {
   return { ok: status === 200, status, headers: { get: (key) => key === 'content-type' ? 'application/json' : null },
@@ -133,6 +145,79 @@ async function observeUncertainAction() {
 beforeEach(() => { surface.frame = undefined; vi.stubGlobal('TextDecoder', TextDecoder); vi.stubGlobal('TextEncoder', TextEncoder) })
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 async function loaded() { await screen.findByRole('option', { name: 'Authorized orders · version 3' }) }
+
+function setupDerivedView() {
+  const harness = setup(), original = harness.fetchImpl.getMockImplementation()
+  const derivedElement = { ...element, id: 'derived-view', title: 'Derived view', dataset_ref: derivedRef,
+    query: { fields: ['day', 'total'], limit: 50, filters: [{ field: 'total', op: 'gte', value: 0 }, { field: 'window_id', op: 'eq', value: 'recent' }] } }
+  harness.fetchImpl.mockImplementation((url, options) => {
+    if (url.includes('/datasets?')) return Promise.resolve(response(page([metadata, derivedMetadata])))
+    if (url.includes('/elements?')) return Promise.resolve(response(page([{ element: derivedElement, revision: 1 }])))
+    if (url.endsWith('/query')) return Promise.resolve(response({ ...read, dataset_ref: derivedRef, fields: derivedFields,
+      rows: read.rows.map(row => ({ ...row, values: { ...row.values, aggregate_key: 'one', window_id: 'recent' } })) }))
+    return original(url, options)
+  })
+  return { ...harness, derivedElement }
+}
+
+it('shows scoped derived evidence and preserves a saved named-window filter, exact ref and unrelated query predicates', async () => {
+  const harness = setupDerivedView(); render(<OpsWorkspaceGround {...harness.props} />); await loaded()
+  fireEvent.click(screen.getByRole('button', { name: 'Derived view · revision 1' }))
+  await screen.findByRole('region', { name: 'Derived dataset evidence' })
+  expect(screen.getAllByText('Unknown')).toHaveLength(2)
+  expect(screen.getByText(/Rows outside the declared scope: 3/)).toBeInTheDocument()
+  fireEvent.click(await screen.findByRole('button', { name: 'Edit current recipe' }))
+  expect(screen.getByLabelText('Named window')).toHaveValue('recent')
+  fireEvent.click(screen.getByRole('button', { name: 'Update view' }))
+  await waitFor(() => expect(harness.fetchImpl.mock.calls.some(([url, options]) => url.endsWith('/elements/derived-view') && options.method === 'PUT')).toBe(true))
+  const [, init] = harness.fetchImpl.mock.calls.find(([url, options]) => url.endsWith('/elements/derived-view') && options.method === 'PUT')
+  expect(JSON.parse(init.body)).toMatchObject({ dataset_ref: derivedRef, query: { limit: 50, filters: harness.derivedElement.query.filters } })
+})
+
+it('All windows removes only the declared window selection and keeps unrelated predicates', async () => {
+  const harness = setupDerivedView(); render(<OpsWorkspaceGround {...harness.props} />); await loaded()
+  fireEvent.click(screen.getByRole('button', { name: 'Derived view · revision 1' })); fireEvent.click(await screen.findByRole('button', { name: 'Edit current recipe' }))
+  fireEvent.change(screen.getByLabelText('Named window'), { target: { value: '' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Update view' }))
+  await waitFor(() => expect(harness.fetchImpl.mock.calls.some(([url, options]) => url.endsWith('/elements/derived-view') && options.method === 'PUT')).toBe(true))
+  const [, init] = harness.fetchImpl.mock.calls.find(([url, options]) => url.endsWith('/elements/derived-view') && options.method === 'PUT')
+  expect(JSON.parse(init.body).query.filters).toEqual([{ field: 'total', op: 'gte', value: 0 }])
+})
+
+it('a declared All-history window stays an explicit saved filter rather than becoming all windows', async () => {
+  const harness = setupDerivedView(); render(<OpsWorkspaceGround {...harness.props} />); await loaded()
+  fireEvent.click(screen.getByRole('button', { name: 'Derived view · revision 1' })); fireEvent.click(await screen.findByRole('button', { name: 'Edit current recipe' }))
+  fireEvent.change(screen.getByLabelText('Named window'), { target: { value: 'all' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Update view' }))
+  await waitFor(() => expect(harness.fetchImpl.mock.calls.some(([url, options]) => url.endsWith('/elements/derived-view') && options.method === 'PUT')).toBe(true))
+  const [, init] = harness.fetchImpl.mock.calls.find(([url, options]) => url.endsWith('/elements/derived-view') && options.method === 'PUT')
+  expect(JSON.parse(init.body).query.filters).toEqual([{ field: 'total', op: 'gte', value: 0 }, { field: 'window_id', op: 'eq', value: 'all' }])
+})
+
+it('a created derived dataset becomes a composition choice without overwriting an existing draft', async () => {
+  const harness = await materialHarness({ rows: [{ day: '2026-10-20', total: 2 }] })
+  const original = harness.fetchImpl.getMockImplementation()
+  harness.fetchImpl.mockImplementation((url, options) => {
+    if (url.includes('/datasets?')) return Promise.resolve(response(page([metadata, harness.resultMetadata])))
+    if (url.endsWith('/dataset-derivations/capabilities')) return Promise.resolve(response({ schema_version: 1, contract: 'dataset-derivation-v1', operations: ['group_count', 'window_count'], max_inputs: 2, max_records_per_input: 100000, max_windows: 4 }))
+    if (url.endsWith('/dataset-derivations')) return Promise.resolve(response({ reference: derivedRef, revision: 1, rowCount: 1, status: 'complete' }))
+    if (url.includes('/datasets/derived-orders/versions/1')) return Promise.resolve(response(derivedMetadata))
+    return original(url, options)
+  })
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded()
+  const composer = within(screen.getByRole('form', { name: 'Compose native view' }))
+  fireEvent.change(composer.getByLabelText('Title'), { target: { value: 'Keep this draft' } })
+  const panel = within(await screen.findByRole('region', { name: 'Create derived dataset' }))
+  await waitFor(() => expect(panel.getByLabelText('Source dataset')).toBeInTheDocument())
+  fireEvent.change(panel.getByLabelText('Source dataset'), { target: { value: JSON.stringify([harness.resultMetadata.reference.id, 1, harness.resultMetadata.reference.digest]) } })
+  fireEvent.change(panel.getByLabelText('Output ID'), { target: { value: derivedRef.id } })
+  fireEvent.change(panel.getByLabelText('Output title'), { target: { value: 'Derived orders' } })
+  fireEvent.change(panel.getByLabelText('Window ID'), { target: { value: 'all' } })
+  fireEvent.click(within(panel.getByRole('group', { name: 'Count distinct identities by' })).getByLabelText('Day'))
+  fireEvent.click(panel.getByRole('button', { name: 'Create derived dataset' }))
+  await waitFor(() => expect(composer.getByRole('option', { name: 'Derived orders · version 1' })).toBeInTheDocument())
+  expect(composer.getByLabelText('Title')).toHaveValue('Keep this draft')
+})
 
 it.each([true, false])('adds measured Studio chrome only when studioShell is %s', async (studioShell) => {
   const { props } = setup()
