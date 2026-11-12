@@ -64,7 +64,7 @@ class Client:
 
     def _request(self, method, target, payload=None, *, signed=True, timeout=15):
         body = b"" if payload is None else json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
-        request_headers = {"Accept": "application/json"}
+        request_headers = {"Accept": "application/json", "User-Agent": f"leaf-device-agent/{__version__}"}
         if payload is not None:
             request_headers["Content-Type"] = "application/json"
         if signed:

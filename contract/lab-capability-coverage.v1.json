@@ -326,6 +326,12 @@
       "host": "production"
     },
     {
+      "source": "studio-tool:solar-takeoff",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
       "source": "studio-tool:solar-physical-shade",
       "status": "readable",
       "adapter_owner": "solar_tools",

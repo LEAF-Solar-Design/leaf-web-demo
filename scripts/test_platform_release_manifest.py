@@ -1354,6 +1354,20 @@ def test_every_current_dockerfile_surface_is_fully_classified():
             "TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256"] == "5" * 64, service
     assert fingerprints["web"]["recipe"]["build_args"]["VITE_API_BASE"] == ""
     assert fingerprints["app"]["migration_fingerprint"] != "not_app"
+    marker = "deploy/platform-source-absent.json"
+    assert fingerprints["app"]["inputs"][marker] == _git(repo, "rev-parse", f"{revision}:{marker}")
+    assert fingerprints["app"]["recipe"]["resolved_base_images"] == bases["app"]
+
+
+@pytest.mark.parametrize("bases", [{}, {"python:3.12-slim": "python:3.12-slim"}])
+def test_app_scratch_source_stage_still_requires_immutable_runtime_base(bases):
+    repo = Path(__file__).resolve().parents[1]
+    revision = _git(repo, "rev-parse", "HEAD")
+    with pytest.raises(ContractError, match="immutable digest"):
+        build_surface_fingerprint(
+            repo, revision, "app", bases, {},
+            buildkit_version="v0.24.0", platform="linux/amd64",
+        )
 
 
 def test_surface_predicate_binds_exact_producer_and_special_web_hash(

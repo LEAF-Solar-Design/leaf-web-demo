@@ -368,6 +368,21 @@ def test_elevation_zone_refusals_are_atomic(graph, name, patch, params, code):
     assert g == before and request == sent
 
 
+@pytest.mark.parametrize("zone_name,code", [
+    (False, "INVALID_ELEVATION_ZONE_REQUEST"),
+    ("Zone 9", "MISSING_ELEVATION_ZONE"),
+], ids=["malformed-zone-name", "missing-zone"])
+def test_elevation_zone_assign_strings_refusal(graph, zone_name, code):
+    g = variant(graph, "Z1")
+    params = {"operation": "assign-strings", "expected_rev": g["rev"],
+              "zone_name": zone_name}
+    before, sent = copy.deepcopy(g), copy.deepcopy(params)
+    with pytest.raises(GraphValidationError) as error:
+        builtin().run(g, params)
+    assert error.value.code == code
+    assert g == before and params == sent
+
+
 def test_elevation_zone_repeat_is_unchanged(graph):
     once = call(variant(graph, "Z1"), "assign-panels", zone_name="Zone 1", reference_panel_ref=P1)["graph"]
     with pytest.raises(GraphValidationError, match="ELEVATION_ZONES_UNCHANGED"):

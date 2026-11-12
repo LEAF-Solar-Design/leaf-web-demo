@@ -50,6 +50,11 @@ _MIGRATION_LEDGER_COLUMNS = {"name", "sha256", "applied_at"}
 # compatibility contract, not a provider choice. Additions stay additive so an
 # older application can continue to read a database prepared by a newer image.
 _REQUIRED_COLUMNS = {
+    "project_checkout_custody": {
+        "delegation_id", "tenant_id", "confirmation_id", "session_id", "subject",
+        "actor_binding_id", "input_binding", "approved_args", "fence", "expires_at",
+        "revoked_at", "created_at",
+    },
     "org_invitations": {
         "id", "org_id", "token_hash", "role", "label", "created_by_binding_id",
         "created_at", "expires_at", "accepted_at", "accepted_binding_id",
@@ -57,6 +62,17 @@ _REQUIRED_COLUMNS = {
     },
     "org_invitation_receipts": {
         "id", "invitation_id", "org_id", "event", "actor_binding_id", "at",
+    },
+    "service_login_challenges": {
+        "id", "nonce_hash", "environment", "origin", "expires_at", "approved_at",
+        "consumed_at", "sealed_token", "subject", "token_expires_at",
+    },
+    "service_browser_sessions": {
+        "binding_id", "secret_hash", "sealed_token", "subject", "environment",
+        "origin", "created_at", "expires_at", "revoked_at",
+    },
+    "lab_layouts": {
+        "tenant_id", "doc_id", "sha256", "layout_text", "byte_count", "updated_at",
     },
     "project_solve_exchanges": {
         "job_id", "org_id", "project_id", "drawing_id", "input_version_id",
@@ -370,6 +386,10 @@ _REQUIRED_COLUMNS = {
         "media_type", "byte_size", "sha256", "width", "height",
         "preview_media_type", "preview_sha256", "created_at",
     },
+    "project_reference_materials": {
+        "material_id", "org_id", "project_id", "actor_binding_id", "name",
+        "media_type", "byte_size", "sha256", "created_at",
+    },
     "project_lifecycle_receipts": {
         "receipt_id", "org_id", "project_id", "action", "actor_binding_id",
         "idempotency_key", "input_digest", "result_json", "created_at",
@@ -475,7 +495,8 @@ _AUTHORITY_REQUIRED_COLUMNS = {
                      "registry_digest", "ops_revision", "input_digest", "adapter_revision",
                      "build_revision", "state", "lease_owner", "lease_fence", "lease_expires_at",
                      "next_seq", "event_count", "created_at", "updated_at", "finished_at",
-                     "claimed_build_revision", "claimed_color", "cancel_requested_at", "cancel_requested_by"},
+                     "claimed_build_revision", "claimed_color", "cancel_requested_at", "cancel_requested_by",
+                     "corpus_authority_json"},
         "lab_run_events": {"tenant_id", "run_id", "seq", "block_id", "kind", "payload", "created_at"},
         "lab_worker_status": {"worker_id", "build_revision", "color", "heartbeat_at", "active_runs", "queued_runs"},
         "lab_worker_control": {"id", "paused", "reason", "updated_by", "updated_at"},
@@ -503,7 +524,7 @@ _AUTHORITY_REQUIRED_COLUMNS = {
             "lease_owner", "lease_expires_at", "heartbeat_at", "provenance_json",
             "terminal_fingerprint", "terminal_conflict_json", "org_id", "project_id",
             "authority_mode", "idempotency_key", "submission_fingerprint", "dwg_version",
-            "aps_workitem_id", "aps_workitem_attempt",
+            "aps_workitem_id", "aps_workitem_attempt", "corpus_cancel_json", "corpus_cleanup_json",
         },
         "async_job_terminal_conflicts": {
             "job_id", "fingerprint", "evidence_json", "received_at",
@@ -1152,6 +1173,26 @@ _REQUIRED_CONSTRAINTS = {
         "project_web_page_revisions", "CHECK", "jsonb_typeof(document) = 'object'"),
     "project_web_page_revisions_digest_check": _catalog_contract(
         "project_web_page_revisions", "CHECK", "digest ~ '^[0-9a-f]{64}$'"),
+    "project_reference_materials_pkey": _catalog_contract(
+        "project_reference_materials", "PRIMARY KEY (material_id)"),
+    "reference_scope_digest": _catalog_contract(
+        "project_reference_materials", "UNIQUE (org_id, project_id, sha256)"),
+    "reference_project_fk": _catalog_contract(
+        "project_reference_materials", "FOREIGN KEY (org_id, project_id)",
+        "REFERENCES projects(org_id, project_id) ON DELETE CASCADE"),
+    "reference_actor_fk": _catalog_contract(
+        "project_reference_materials", "FOREIGN KEY (org_id, actor_binding_id)",
+        "REFERENCES identity_bindings(platform_tenant_id, binding_id)"),
+    "project_reference_materials_name_check": _catalog_contract(
+        "project_reference_materials", "CHECK", "char_length(name) >= 1", "char_length(name) <= 255"),
+    "project_reference_materials_media_type_check": _catalog_contract(
+        "project_reference_materials", "CHECK", "media_type", "'video/quicktime'", "'text/plain'", "'application/json'", "'application/gzip'"),
+    "project_reference_materials_byte_size_check": _catalog_contract(
+        "project_reference_materials", "CHECK", "byte_size >= 1", "byte_size <= 67108864"),
+    "reference_text_size": _catalog_contract(
+        "project_reference_materials", "CHECK", "media_type", "'video/quicktime'", "'application/gzip'", "byte_size <= 8388608"),
+    "project_reference_materials_sha256_check": _catalog_contract(
+        "project_reference_materials", "CHECK", "sha256 ~ '^[0-9a-f]{64}$'"),
     "project_materials_pkey": _catalog_contract(
         "project_materials", "PRIMARY KEY (material_id)"),
     "project_materials_org_id_project_id_sha256_key": _catalog_contract(
@@ -1187,7 +1228,7 @@ _REQUIRED_CONSTRAINTS = {
     "project_lifecycle_receipts_action_check": _catalog_contract(
         "project_lifecycle_receipts", "CHECK", "project_created", "member_invited",
         "member_revoked", "file_put", "file_deleted", "project_cloned",
-        "project_exported", "project_reset", "project_deleted"),
+        "project_exported", "project_reset", "project_deleted", "project_renamed"),
     "project_lifecycle_receipts_idempotency_key_check": _catalog_contract(
         "project_lifecycle_receipts", "CHECK", "char_length(idempotency_key) >= 1",
         "char_length(idempotency_key) <= 200"),
@@ -1236,6 +1277,8 @@ _REQUIRED_INDEXES = {
         "project_member_bindings", "(org_id, project_id, created_at, membership_id)"),
     "idx_project_files_scope": _catalog_contract(
         "project_files", "(org_id, project_id, path)"),
+    "reference_scope_page": _catalog_contract(
+        "project_reference_materials", "(org_id, project_id, material_id)"),
     "project_materials_scope_page": _catalog_contract(
         "project_materials", "(org_id, project_id, material_id)"),
     "idx_project_lifecycle_receipts_scope": _catalog_contract(

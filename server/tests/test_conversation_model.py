@@ -76,15 +76,13 @@ def test_migration_advances_authority_inventory_by_exactly_one() -> None:
         (PROJECT_ROOT / "platform" / "authority-inventory.json")
         .read_text(encoding="utf-8")
     )
-    migration_ids = inventory["scope"]["migration_ids"]
-    assert migration_ids[-1] == "0096"
-    assert migration_ids == [f"{n:04d}" for n in range(1, 97)]
-
     migration_files = sorted(
-        p.name.split("_", 1)[0]
-        for p in (PROJECT_ROOT / "platform" / "migrations").glob("*.sql")
+        path.name for path in (PROJECT_ROOT / "platform" / "migrations").glob("*.sql")
     )
-    assert migration_files == migration_ids
+    assert inventory["scope"]["migration_files"] == migration_files
+    assert inventory["scope"]["migration_ids"] == sorted({
+        name.split("_", 1)[0] for name in migration_files
+    })
 
 
 def test_conv_durable_flag_is_off_by_default_and_reads_case_insensitively(

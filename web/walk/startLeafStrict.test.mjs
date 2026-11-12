@@ -241,6 +241,51 @@ test('--env-allowlist excludes database URLs and ambient variables unless explic
   assert.equal(JSON.parse(inherited.stdout).LEAF_AUTH_LIVE, '1')
 })
 
+test('--test-identity preserves live auth only for explicit local test inputs', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'leaf-launcher-identity-'))
+  try {
+    const jwks = join(root, 'jwks.json')
+    await writeFile(jwks, '{"keys":[]}')
+    const env = { ...process.env, LEAF_AUTH_LIVE: '1', LEAF_RUNTIME_ENV: 'local',
+      LEAF_AUTH0_JWKS_FILE: jwks, LEAF_AUTH0_ISSUER: 'https://test-identity.leaf.invalid/unit/',
+      LEAF_AUTH0_AUDIENCE: 'https://test-identity.leaf.invalid/api' }
+    const names = ['LEAF_AUTH_LIVE', 'LEAF_RUNTIME_ENV', 'LEAF_AUTH0_JWKS_FILE', 'LEAF_AUTH0_ISSUER', 'LEAF_AUTH0_AUDIENCE'].join(',')
+    const args = ['--env-allowlist', names, '--print-child-env']
+    const ordinary = launch(args, env)
+    assert.equal((await finish(ordinary)).code, 0, output(ordinary))
+    assert.equal(JSON.parse(ordinary.stdout).LEAF_AUTH_LIVE, '0')
+    for (const runtime of ['local', 'test']) {
+      const valid = launch(['--test-identity', ...args], { ...env, LEAF_RUNTIME_ENV: runtime })
+      assert.equal((await finish(valid)).code, 0, output(valid))
+      assert.equal(JSON.parse(valid.stdout).LEAF_AUTH_LIVE, '1')
+    }
+    const invalid = [
+      { LEAF_AUTH0_ISSUER: 'https://other.invalid/' }, { LEAF_RUNTIME_ENV: 'staging' },
+      { LEAF_AUTH0_JWKS_FILE: join(root, 'missing.json') }, { LEAF_AUTH_LIVE: '0' },
+      { LEAF_AUTH0_AUDIENCE: '' }, { LEAF_RUNTIME_ENV: 'production' },
+    ]
+    for (const override of invalid) {
+      const run = launch(['--test-identity', ...args], { ...env, ...override })
+      assert.equal((await finish(run)).code, 2, output(run))
+      assert.match(run.stderr, /--test-identity requires/)
+      assert.equal(run.stdout, '')
+      assert.equal(run.stderr.trim().split('\n').length, 1)
+    }
+    const noAllowlist = launch(['--test-identity', '--print-child-env'], env)
+    assert.equal((await finish(noAllowlist)).code, 2, output(noAllowlist))
+    assert.match(noAllowlist.stderr, /--test-identity requires/)
+    const notAllowed = launch(['--test-identity', '--env-allowlist', '', '--print-child-env'], env)
+    assert.equal((await finish(notAllowed)).code, 2, output(notAllowed))
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('--no-canonical-worker refuses an explicit worker tool before launch', async () => {
+  const run = launch(['--no-canonical-worker', '--canonical-worker-tool', 'solar-settings', '--print-child-env'])
+  assert.equal((await finish(run)).code, 2, output(run))
+  assert.match(run.stderr, /--no-canonical-worker conflicts/)
+  assert.equal(run.stdout, '')
+})
+
 test('health probes keep legacy 4xx acceptance but ready-file probes require 2xx and reject timeouts', async () => {
   const server = createHttpServer((request, response) => {
     response.writeHead(Number(request.url.slice(1)))

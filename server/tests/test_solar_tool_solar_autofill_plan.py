@@ -92,6 +92,11 @@ def plan_api(autofill_api, monkeypatch):
     return autofill_api
 
 
+@pytest.fixture(scope="module")
+def plan_p(captured_graph):
+    return plan_builtin.run(copy.deepcopy(captured_graph[0]), P)
+
+
 def post_plan(client, params):
     return client[0].post("/api/run?wait=1", json=body(client, TOOL, params))
 
@@ -231,13 +236,13 @@ def test_autofill_plan_purity(graph):
 
 
 @pytest.mark.parametrize("tolerance", [None, 12, 12.0])
-def test_autofill_plan_tolerance_echo(graph, tolerance):
+def test_autofill_plan_tolerance_echo(graph, plan_p, tolerance):
     params = {"panels_per_string": 14}
     if tolerance is not None:
         params["alignment_tolerance"] = tolerance
     out = plan_builtin.run(graph, params)
     request = out["apply"]["request"]
-    assert out["corrections"] == plan_builtin.run(graph, P)["corrections"]
+    assert out["corrections"] == plan_p["corrections"]
     keys = {"operation", "expected_rev", "corrections"}
     if tolerance is not None:
         keys.add("alignment_tolerance")
@@ -250,8 +255,8 @@ def test_autofill_plan_tolerance_echo(graph, tolerance):
 @pytest.mark.parametrize("setting,params,source", [
     (14, {}, "settings"), (13, {"panels_per_string": 14}, "request"), (0, {}, None),
 ])
-def test_autofill_plan_length_source(graph, setting, params, source):
-    expected = plan_builtin.run(graph, P)["corrections"]
+def test_autofill_plan_length_source(graph, plan_p, setting, params, source):
+    expected = plan_p["corrections"]
     value = copy.deepcopy(graph)
     value["settings"]["panels_in_sequence"] = setting
     if source is None:
@@ -264,9 +269,9 @@ def test_autofill_plan_length_source(graph, setting, params, source):
         assert out["corrections"] == expected
 
 
-def test_autofill_plan_integral_float_length(graph):
+def test_autofill_plan_integral_float_length(graph, plan_p):
     out = plan_builtin.run(graph, dict(P, panels_per_string=14.0))
-    assert out == plan_builtin.run(graph, P)
+    assert out == plan_p
     assert type(out["panels_per_string"]) is int
 
 
@@ -399,10 +404,10 @@ def test_autofill_plan_commit_refusal(a, c):
     assert out["apply"] == dict(NONE, status="refused", reason_code="GROUP_WOULD_BE_EMPTY")
 
 
-def test_autofill_plan_regrid_refusal(graph):
+def test_autofill_plan_regrid_refusal(graph, plan_p):
     out = plan_builtin.run(graph, dict(P, alignment_tolerance=1000000))
     assert out["apply"] == dict(NONE, status="refused", reason_code="REGRID_CELL_COLLISION")
-    assert out["corrections"] == plan_builtin.run(graph, P)["corrections"]
+    assert out["corrections"] == plan_p["corrections"]
 
 
 def test_autofill_plan_no_groups(graph):

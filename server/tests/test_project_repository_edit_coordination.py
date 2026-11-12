@@ -29,6 +29,25 @@ TREE = "3" * 40
 AUTHORITY = contract.RepositoryAuthorityKey(TENANT, ORG, PROJECT, REPO)
 
 
+def test_default_role_resolver_requires_current_named_project_membership(monkeypatch):
+    from leaf_platform import project_lifecycle
+
+    calls = []
+    monkeypatch.setattr(coordination.platform_store, 'active_identity_role', lambda *a: 'owner')
+    def membership(org, project, actor, *, write):
+        calls.append((str(org), str(project), str(actor), write))
+        return 'editor'
+    monkeypatch.setattr(project_lifecycle, 'require_project_role', membership)
+    assert coordination._active_role(ACTOR, AUTHORITY) == 'owner'
+    assert calls == [(ORG, PROJECT, ACTOR, True)]
+    def revoked(*a, **kw):
+        raise project_lifecycle.LifecycleForbidden('revoked')
+    monkeypatch.setattr(project_lifecycle, 'require_project_role', revoked)
+    assert coordination._active_role(ACTOR, AUTHORITY) is None
+    monkeypatch.setattr(coordination.platform_store, 'active_identity_role', lambda *a: 'viewer')
+    assert coordination._active_role(ACTOR, AUTHORITY) is None
+
+
 def _receipt():
     return contract.parse_staged_receipt({
         "contract": contract.STAGED_RECEIPT_CONTRACT, "edit_id": EDIT,

@@ -131,6 +131,19 @@ function solveDraftFixture() {
   return h
 }
 
+it('hosts canonical SolarEdge upload and report without falling back to standalone editors', async () => {
+  const h = fixture('solar-solaredge-accept')
+  h.client.uploadSolarEdgePdf = vi.fn()
+  h.client.reportSolarEdgePdf = vi.fn()
+  h.mount({ openTool: h.row })
+  expect(await screen.findByLabelText('SolarEdge layout PDF')).toBeTruthy()
+  expect(h.client.readContext).toHaveBeenCalledTimes(1)
+  expect(h.steps).toHaveLength(0)
+  expect(h.graphs).toHaveLength(0)
+  expect(h.client.submitRun).not.toHaveBeenCalled()
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
 it('restores typed Solve values after a same-owner scope_stale remount', () => {
   const h = solveDraftFixture()
   h.mount({ openTool: h.row })
@@ -1374,7 +1387,7 @@ describe('Project Solar workspace composition', () => {
   it('R13E-44 composition owns no Viewer or runtime and all new copy uses the frozen maps', () => {
     const source = readFileSync(`${process.cwd()}/src/solar/ProjectSolarWorkspace.jsx`, 'utf8')
     const imports = [...source.matchAll(new RegExp("from ['\"]([^'\"]+)['\"]", 'g'))].map((match) => match[1])
-    expect(imports).toEqual(['react', './solarDrawingBinding.js', './SolarSettingsForm.jsx', './solarSettingsWire.js', './ProjectSolarReadPanel.jsx', './ProjectSolveReview.jsx'])
+    expect(imports).toEqual(['react', './solarDrawingBinding.js', './SolarSettingsForm.jsx', './solarSettingsWire.js', './ProjectSolarReadPanel.jsx', './ProjectSolveReview.jsx', './ProjectSolarEdgePanel.jsx'])
     const reviewSource = readFileSync(`${process.cwd()}/src/solar/ProjectSolveReview.jsx`, 'utf8')
     const reviewImports = [...reviewSource.matchAll(new RegExp("from ['\"]([^'\"]+)['\"]", 'g'))].map((match) => match[1])
     for (const dependency of reviewImports) {

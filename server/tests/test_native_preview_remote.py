@@ -23,6 +23,7 @@ import native_preview_job as native
 import native_preview_remote as remote
 from leaf_platform import api, deps
 from test_project_preview_source import custody  # noqa: F401
+from test_project_preview_source import native_repository  # noqa: F401
 from test_jobs_callbacks_postgres import postgres_authority  # noqa: F401
 
 
@@ -97,6 +98,56 @@ def completion(c, job, identity):
                'cleanup_complete': True, 'allocator_release_confirmed': True}
     return {**identity, 'outcome': 'complete', 'receipt': receipt,
             'screenshot_base64': base64.b64encode(image).decode('ascii')}
+
+
+def test_native_authenticated_existing_route_stores_closed_repository_context(protocol, native_repository, monkeypatch):
+    c = native_repository
+    admitted = []
+    monkeypatch.setattr(jobs, 'job_store_mode', lambda: 'postgres')
+    def insert(*args, **kwargs):
+        context = native.validate_context(kwargs['native_preview'])
+        admitted.append(context)
+        return str(uuid.uuid4())
+    monkeypatch.setattr(jobs, '_submit_job', insert)
+    # Only status persistence is inert; route, authorization, repository witness,
+    # protected exporter, real Git conversion and source custody remain connected.
+    monkeypatch.setattr(remote, 'status', lambda org, project, actor, jid: dict(job_id=jid, status='queued'))
+    result = c.client.post(c.url, json={'source_request_id':c.edit},
+        headers=dict(c.headers(), **{'Idempotency-Key':'native-sdk-one'}))
+    assert result.status_code == 202, result.text
+    descriptor = admitted[0]['source']
+    assert descriptor['source_commit'] == c.commit and descriptor['source_tree'] == c.tree
+    assert descriptor['source_profile'] == native.source.NATIVE_PROFILE and 'revision' not in descriptor
+    assert admitted[0]['worker_binding'] == c.binding and admitted[0]['actor_id'] == c.actor
+
+
+@pytest.mark.parametrize('extra', ['source_profile','source_commit','archive_sha256','url','path'])
+def test_native_route_cannot_accept_caller_source_claims(protocol, native_repository, monkeypatch, extra):
+    c = native_repository
+    monkeypatch.setattr(jobs, 'job_store_mode', lambda:'postgres')
+    monkeypatch.setattr(jobs, '_submit_job', lambda *a,**kw: pytest.fail('unvalidated input admitted'))
+    result = c.client.post(c.url, json={'source_request_id':c.edit,extra:'untrusted'},
+        headers=dict(c.headers(), **{'Idempotency-Key':'native-invalid'}))
+    assert result.status_code == 422 and not c.export_calls
+
+
+def test_native_receipt_binds_actual_sdk_artifact_identity(protocol, native_repository):
+    c = native_repository
+    d = c.prepare_native()
+    context = dict(source=d, worker_binding=c.binding)
+    jid, owner = str(uuid.uuid4()), str(uuid.uuid4())
+    body = completion(c, dict(job_id=jid,descriptor=d),dict(lease_owner=owner,attempt=1))['receipt']
+    bundle = 'private.leaf.project.p'+c.project.replace('-','')
+    body['bundle_id'] = bundle
+    body['build_artifact'] = dict(source=native.source.native_identity(d),bundle_id=bundle,
+        sdk='iphonesimulator',app_tree_sha256='a'*64,file_count=5,xcodegen_exit_code=0,
+        xcode_version='Xcode fixture',xcodegen_version='fixture version',sdk_version='fixture sdk')
+    assert remote.receipt(body,jid,owner,1,context)['build_artifact']['source']['source_tree'] == c.tree
+    body['build_artifact']['source']['source_commit']='f'*40
+    with pytest.raises(ValueError): remote.receipt(body,jid,owner,1,context)
+    body['build_artifact']['source']['source_commit']=c.commit
+    body['bundle_id']='com.example.foreign'
+    with pytest.raises(remote.ProtocolError): remote.receipt(body,jid,owner,1,context)
 
 
 def test_unavailable_before_custody_or_insertion(protocol, monkeypatch):

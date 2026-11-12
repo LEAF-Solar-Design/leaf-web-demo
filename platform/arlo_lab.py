@@ -1,4 +1,4 @@
-"""Immutable normalized model inputs and project-scoped ARLO lab jobs.
+"""Immutable normalized model inputs and project-scoped ARLO jobs.
 
 The committed example is a synthetic model, not a DWG upload or native CAD
 receipt. Its exact request bytes live in arlo_lab_inputs; drawing_versions
@@ -18,6 +18,9 @@ from . import canonical_jobs, project_lifecycle as lifecycle
 from .db import connection, run_transaction
 
 CONTRACT = "arlo_lab_example_v1"
+REFERENCE_CONTRACT = "arlo_project_reference_v1"
+REFERENCE_SOURCE = "project-reference"
+MAX_INPUT_BYTES = 1024 * 1024  # arlo_lab_inputs.request_json storage limit
 _EXAMPLES = {("feeder-lab-v1", "1"): (
     "feeder-lab-v1.json", "088e7cc50a8148dee695c00f1556c2e57660793caafe02b908d810c0ebc51e32")}
 _EXAMPLE_ROOT = Path(__file__).resolve().parent / "examples" / "arlo"
@@ -52,9 +55,9 @@ def load_example(example_id: str, example_version: str) -> dict:
 
 
 def _scope(cur: Any, org_id: uuid.UUID, project_id: uuid.UUID,
-           binding_id: uuid.UUID, *, write: bool) -> None:
-    lifecycle._project_row(cur, org_id, project_id)
-    lifecycle._require_project_role(cur, org_id, project_id, binding_id, write=write)
+           binding_id: uuid.UUID, *, write: bool, lock: bool = True) -> None:
+    lifecycle._project_row(cur, org_id, project_id, lock=lock)
+    lifecycle._require_project_role(cur, org_id, project_id, binding_id, write=write, lock=lock)
     cur.execute(
         "SELECT COALESCE((SELECT authority_mode FROM live_project_authority_modes "
         "WHERE org_id = %(org)s AND project_id = %(project)s), "
@@ -68,26 +71,72 @@ def _input_response(row: dict) -> dict:
     request = json.loads(row["request_json"])
     if digest(request) != row["input_sha256"]:
         raise lifecycle.LifecycleConflict("stored ARLO input digest mismatch")
-    return {"organization_id": str(row["org_id"]), "project_id": str(row["project_id"]),
+    response = {"organization_id": str(row["org_id"]), "project_id": str(row["project_id"]),
             "input_version_id": str(row["input_version_id"]), "example_id": row["example_id"],
             "example_version": row["example_version"], "input_sha256": row["input_sha256"],
             "request": request, "request_canonical_json": canonical_text(request)}
+    if row["example_id"] == REFERENCE_SOURCE:
+        response.pop("example_id")
+        response.pop("example_version")
+        response.update(material_id=row["provenance"]["material_id"],
+                        original_sha256=row["provenance"]["original_sha256"])
+    return response
 
 
 def register_input(org_id: uuid.UUID, project_id: uuid.UUID, binding_id: uuid.UUID, *,
                    example_id: str, example_version: str, idempotency_key: str) -> dict:
     key = lifecycle._validate_idempotency_key(idempotency_key)
     request = load_example(example_id, example_version)
+    source = {"contract": CONTRACT, "example_id": example_id, "example_version": example_version}
+    return _register_input(org_id, project_id, binding_id, key=key, request=request,
+                           example_id=example_id, example_version=example_version,
+                           source=source, source_kind="synthetic_model")
+
+
+def register_reference_input(org_id: uuid.UUID, project_id: uuid.UUID, binding_id: uuid.UUID, *,
+                             material_id: uuid.UUID, idempotency_key: str) -> dict:
+    import project_reference_materials as originals
+    from solver_adapters.arlo_design import _validated_input
+    from . import project_reference_materials as references
+
+    key = lifecycle._validate_idempotency_key(idempotency_key)
+    with connection() as conn, conn.cursor() as cur:
+        _scope(cur, org_id, project_id, binding_id, write=True, lock=False)
+    material = references.get_material(org_id, project_id, binding_id, material_id)
+    if material["media_type"] != "application/json":
+        raise ValueError("ARLO input requires a saved JSON reference")
+    if not 0 < material["byte_size"] <= MAX_INPUT_BYTES:
+        raise ValueError("ARLO input exceeds its size limit")
+    # The protected reader verifies exact length and digest against scoped metadata.
+    raw = originals.read_content(org_id, project_id, material)
+    try:
+        request = json.loads(raw.decode("utf-8-sig"))
+        # Validate with the execution adapter without replacing original identity labels.
+        _validated_input(request, {"org_id": org_id, "project_id": project_id,
+                                   "input_version_id": material_id})
+        if len(canonical_text(request).encode("utf-8")) > MAX_INPUT_BYTES:
+            raise ValueError("normalized ARLO input exceeds its size limit")
+    except (UnicodeError, RecursionError, OverflowError):
+        raise ValueError("invalid ARLO JSON reference") from None
+    source = {"contract": REFERENCE_CONTRACT, "material_id": str(material_id),
+              "original_sha256": material["sha256"]}
+    # Use the existing origin columns for the source discriminator and identifier.
+    return _register_input(org_id, project_id, binding_id, key=key, request=request,
+                           example_id=REFERENCE_SOURCE, example_version=str(material_id),
+                           source=source, source_kind="project_reference")
+
+
+def _register_input(org_id, project_id, binding_id, *, key, request, example_id,
+                    example_version, source, source_kind):
     input_sha = digest(request)
-    fingerprint = digest({"contract": CONTRACT, "example_id": example_id,
-                          "example_version": example_version, "input_sha256": input_sha})
+    fingerprint = digest({**source, "input_sha256": input_sha})
 
     def operation(conn):
         with conn.cursor() as cur:
             # A project row lock serializes registration and project deletion.
             _scope(cur, org_id, project_id, binding_id, write=True)
             cur.execute(
-                "SELECT v.import_fingerprint, i.* FROM drawing_versions v "
+                "SELECT v.import_fingerprint, v.provenance, i.* FROM drawing_versions v "
                 "LEFT JOIN arlo_lab_inputs i ON i.input_version_id = v.version_id "
                 "AND i.org_id = v.org_id AND i.project_id = v.project_id "
                 "WHERE v.org_id = %(org)s AND v.project_id = %(project)s "
@@ -103,10 +152,10 @@ def register_input(org_id: uuid.UUID, project_id: uuid.UUID, binding_id: uuid.UU
                 "INSERT INTO drawing_artifacts (drawing_id, org_id, project_id, name) "
                 "VALUES (%(drawing)s, %(org)s, %(project)s, %(name)s)",
                 {"drawing": drawing_id, "org": org_id, "project": project_id,
-                 "name": f"ARLO synthetic lab input {version_id}"})
-            provenance = {"contract": CONTRACT, "example_id": example_id,
-                          "example_version": example_version, "input_sha256": input_sha,
-                          "actor_binding_id": str(binding_id), "source_kind": "synthetic_model",
+                 "name": (f"ARLO project reference input {version_id}" if source_kind == "project_reference"
+                          else f"ARLO synthetic lab input {version_id}")})
+            provenance = {**source, "input_sha256": input_sha,
+                          "actor_binding_id": str(binding_id), "source_kind": source_kind,
                           "native_verified": False}
             cur.execute(
                 "INSERT INTO drawing_versions (version_id,drawing_id,org_id,project_id,seq,"
@@ -124,7 +173,7 @@ def register_input(org_id: uuid.UUID, project_id: uuid.UUID, binding_id: uuid.UU
                 {"version": version_id, "org": org_id, "project": project_id,
                  "example": example_id, "example_version": example_version,
                  "digest": input_sha, "request": canonical_text(request)})
-            return _input_response(cur.fetchone())
+            return _input_response({**cur.fetchone(), "provenance": provenance})
     return run_transaction(operation, isolation="serializable")
 
 
@@ -136,7 +185,8 @@ def load_registered_request(job_context: dict, submitted_params: dict) -> dict:
     with connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT i.*, v.provenance, v.intake_ref, v.oss_object FROM arlo_lab_inputs i "
+                "SELECT i.*, v.provenance, v.intake_ref, v.oss_object, v.import_fingerprint "
+                "FROM arlo_lab_inputs i "
                 "JOIN drawing_versions v ON v.version_id = i.input_version_id "
                 "AND v.org_id = i.org_id AND v.project_id = i.project_id "
                 "JOIN live_projects p ON p.org_id = i.org_id AND p.project_id = i.project_id "
@@ -147,10 +197,18 @@ def load_registered_request(job_context: dict, submitted_params: dict) -> dict:
     if row is None:
         raise ValueError("registered ARLO model input is unavailable")
     provenance = row["provenance"]
-    if not isinstance(provenance, dict) or provenance.get("contract") != CONTRACT \
+    expected_contract = REFERENCE_CONTRACT if row["example_id"] == REFERENCE_SOURCE else CONTRACT
+    if not isinstance(provenance, dict) or provenance.get("contract") != expected_contract \
             or provenance.get("input_sha256") != row["input_sha256"] \
             or row["intake_ref"] != f"arlo_lab_inputs:{version_id}" or row["oss_object"] is not None:
         raise ValueError("registered ARLO input provenance mismatch")
+    if expected_contract == REFERENCE_CONTRACT:
+        source = {"contract": REFERENCE_CONTRACT, "material_id": row["example_version"],
+                  "original_sha256": provenance.get("original_sha256")}
+        if provenance.get("source_kind") != "project_reference" \
+                or provenance.get("material_id") != source["material_id"] \
+                or digest({**source, "input_sha256": row["input_sha256"]}) != row["import_fingerprint"]:
+            raise ValueError("registered ARLO reference provenance mismatch")
     response = _input_response(row)
     if digest(submitted_params) != row["input_sha256"]:
         raise ValueError("ARLO request differs from its registered immutable input")

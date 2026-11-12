@@ -1,0 +1,833 @@
+{
+  "schema": "leaf.lab-honesty.v1",
+  "codes": [
+    {
+      "code": "not_preregistered",
+      "scope": "day",
+      "withholds_result": true,
+      "sentence": "Not pre-registered. No result shown."
+    },
+    {
+      "code": "simulated_not_evidence",
+      "scope": "day",
+      "withholds_result": true,
+      "sentence": "Simulated. Not evidence."
+    },
+    {
+      "code": "holdout_day_refused",
+      "scope": "day",
+      "withholds_result": true,
+      "sentence": "Holdout day. No result shown."
+    },
+    {
+      "code": "split_day",
+      "scope": "day",
+      "withholds_result": true,
+      "sentence": "Two configurations ran this day. No result shown."
+    },
+    {
+      "code": "unreconciled_day",
+      "scope": "day",
+      "withholds_result": true,
+      "sentence": "Not reconciled with the Exchange yet. No result shown."
+    },
+    {
+      "code": "zero_fee_with_trades",
+      "scope": "day",
+      "withholds_result": true,
+      "sentence": "Costs missing. Result withheld."
+    },
+    {
+      "code": "day_already_spent",
+      "scope": "registration",
+      "withholds_result": true,
+      "sentence": "That UTC day has already started. Claim a later day."
+    },
+    {
+      "code": "trigger_not_measured",
+      "scope": "practice",
+      "withholds_result": false,
+      "sentence": "Triggered: not measured."
+    },
+    {
+      "code": "replay_is_direction",
+      "scope": "replay",
+      "withholds_result": false,
+      "sentence": "Direction only. Never evidence and never a gate."
+    },
+    {
+      "code": "runs_on_bot",
+      "scope": "block",
+      "withholds_result": false,
+      "sentence": "Runs on the bot. Not run here."
+    },
+    {
+      "code": "placeholder_block",
+      "scope": "block",
+      "withholds_result": false,
+      "sentence": "Placeholder: no code. The sample is a template value."
+    },
+    {
+      "code": "latency_not_measured",
+      "scope": "block",
+      "withholds_result": false,
+      "sentence": "Decision time: not measured."
+    },
+    {
+      "code": "browser_only_block",
+      "scope": "block",
+      "withholds_result": false,
+      "sentence": "Runs here as you edit. The Lab server's Run does not accept it yet."
+    }
+  ],
+  "cases": [
+    {
+      "name": "null_day_input",
+      "function": "classify_day",
+      "input": null,
+      "expect": [
+        "bad_input"
+      ]
+    },
+    {
+      "name": "integral_float_fills",
+      "function": "classify_day",
+      "input": {
+        "registered": true,
+        "simulated": false,
+        "holdout": false,
+        "config_digests": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "label": "RECONCILED",
+        "fills": 1.0,
+        "fee_cents": "12.5"
+      },
+      "expect": [
+        "bad_input"
+      ]
+    },
+    {
+      "name": "unsafe_integer_fills",
+      "function": "classify_day",
+      "input": {
+        "registered": true,
+        "simulated": false,
+        "holdout": false,
+        "config_digests": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "label": "RECONCILED",
+        "fills": 9007199254740992,
+        "fee_cents": "12.5"
+      },
+      "expect": [
+        "bad_input"
+      ]
+    },
+    {
+      "name": "registration_missing_first_day",
+      "function": "classify_registration_day",
+      "input": {
+        "today_utc": "2026-11-05"
+      },
+      "expect": [
+        "bad_input"
+      ]
+    },
+    {
+      "name": "not_preregistered_positive",
+      "function": "classify_day",
+      "input": {
+        "registered": false,
+        "simulated": false,
+        "holdout": false,
+        "config_digests": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "label": "RECONCILED",
+        "fills": 3,
+        "fee_cents": "12.5"
+      },
+      "expect": [
+        "not_preregistered"
+      ]
+    },
+    {
+      "name": "not_preregistered_negative",
+      "function": "classify_day",
+      "input": {
+        "registered": true,
+        "simulated": false,
+        "holdout": false,
+        "config_digests": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "label": "RECONCILED",
+        "fills": 3,
+        "fee_cents": "12.5"
+      },
+      "expect": []
+    },
+    {
+      "name": "simulated_not_evidence_positive",
+      "function": "classify_day",
+      "input": {
+        "registered": true,
+        "simulated": true,
+        "holdout": false,
+        "config_digests": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "label": "RECONCILED",
+        "fills": 3,
+        "fee_cents": "12.5"
+      },
+      "expect": [
+        "simulated_not_evidence"
+      ]
+    },
+    {
+      "name": "simulated_not_evidence_negative",
+      "function": "classify_day",
+      "input": {
+        "registered": true,
+        "simulated": false,
+        "holdout": false,
+        "config_digests": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "label": "RECONCILED",
+        "fills": 3,
+        "fee_cents": "12.5"
+      },
+      "expect": []
+    },
+    {
+      "name": "holdout_day_refused_positive",
+      "function": "classify_day",
+      "input": {
+        "registered": true,
+        "simulated": false,
+        "holdout": true,
+        "config_digests": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "label": "RECONCILED",
+        "fills": 3,
+        "fee_cents": "12.5"
+      },
+      "expect": [
+        "holdout_day_refused"
+      ]
+    },
+    {
+      "name": "holdout_day_refused_negative",
+      "function": "classify_day",
+      "input": {
+        "registered": true,
+        "simulated": false,
+        "holdout": false,
+        "config_digests": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "label": "RECONCILED",
+        "fills": 3,
+        "fee_cents": "12.5"
+      },
+      "expect": []
+    },
+    {
+      "name": "split_day_positive",
+      "function": "classify_day",
+      "input": {
+        "registered": true,
+        "simulated": false,
+        "holdout": false,
+        "config_digests": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "label": "RECONCILED",
+        "fills": 3,
+        "fee_cents": "12.5"
+      },
+      "expect": [
+        "split_day"
+      ]
+    },
+    {
+      "name": "split_day_negative",
+      "function": "classify_day",
+      "input": {
+        "registered": true,
+        "simulated": false,
+        "holdout": false,
+        "config_digests": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "label": "RECONCILED",
+        "fills": 3,
+        "fee_cents": "12.5"
+      },
+      "expect": []
+    },
+    {
+      "name": "unreconciled_day_positive",
+      "function": "classify_day",
+      "input": {
+        "registered": true,
+        "simulated": false,
+        "holdout": false,
+        "config_digests": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "label": "UNRECONCILED",
+        "fills": 3,
+        "fee_cents": "12.5"
+      },
+      "expect": [
+        "unreconciled_day"
+      ]
+    },
+    {
+      "name": "unreconciled_day_negative",
+      "function": "classify_day",
+      "input": {
+        "registered": true,
+        "simulated": false,
+        "holdout": false,
+        "config_digests": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "label": "RECONCILED",
+        "fills": 3,
+        "fee_cents": "12.5"
+      },
+      "expect": []
+    },
+    {
+      "name": "zero_fee_with_trades_positive",
+      "function": "classify_day",
+      "input": {
+        "registered": true,
+        "simulated": false,
+        "holdout": false,
+        "config_digests": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "label": "RECONCILED",
+        "fills": 3,
+        "fee_cents": "0"
+      },
+      "expect": [
+        "zero_fee_with_trades"
+      ]
+    },
+    {
+      "name": "zero_fee_with_trades_negative",
+      "function": "classify_day",
+      "input": {
+        "registered": true,
+        "simulated": false,
+        "holdout": false,
+        "config_digests": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "label": "RECONCILED",
+        "fills": 3,
+        "fee_cents": "12.5"
+      },
+      "expect": []
+    },
+    {
+      "name": "registration_spent",
+      "function": "classify_registration_day",
+      "input": {
+        "first_day_utc": "2026-11-05",
+        "today_utc": "2026-11-05"
+      },
+      "expect": [
+        "day_already_spent"
+      ]
+    },
+    {
+      "name": "registration_future",
+      "function": "classify_registration_day",
+      "input": {
+        "first_day_utc": "2026-11-06",
+        "today_utc": "2026-11-05"
+      },
+      "expect": []
+    },
+    {
+      "name": "practice_unknown",
+      "function": "classify_practice_block",
+      "input": {
+        "reached": null
+      },
+      "expect": [
+        "trigger_not_measured"
+      ]
+    },
+    {
+      "name": "practice_measured",
+      "function": "classify_practice_block",
+      "input": {
+        "reached": 0
+      },
+      "expect": []
+    },
+    {
+      "name": "runs_on_bot_positive",
+      "function": "classify_block",
+      "input": {
+        "placement": "bot",
+        "code_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "latency_samples": 1
+      },
+      "expect": [
+        "runs_on_bot"
+      ]
+    },
+    {
+      "name": "runs_on_bot_negative",
+      "function": "classify_block",
+      "input": {
+        "placement": "here",
+        "code_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "latency_samples": 1
+      },
+      "expect": []
+    },
+    {
+      "name": "placeholder_block_positive",
+      "function": "classify_block",
+      "input": {
+        "placement": "here",
+        "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "latency_samples": 1
+      },
+      "expect": [
+        "placeholder_block"
+      ]
+    },
+    {
+      "name": "placeholder_block_negative",
+      "function": "classify_block",
+      "input": {
+        "placement": "here",
+        "code_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "latency_samples": 1
+      },
+      "expect": []
+    },
+    {
+      "name": "latency_not_measured_positive",
+      "function": "classify_block",
+      "input": {
+        "placement": "here",
+        "code_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "latency_samples": 0
+      },
+      "expect": [
+        "latency_not_measured"
+      ]
+    },
+    {
+      "name": "latency_not_measured_negative",
+      "function": "classify_block",
+      "input": {
+        "placement": "here",
+        "code_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "latency_samples": 1
+      },
+      "expect": []
+    },
+    {
+      "name": "browser_only_block_positive",
+      "function": "classify_block",
+      "input": {
+        "placement": "browser",
+        "code_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "latency_samples": 1
+      },
+      "expect": [
+        "browser_only_block"
+      ]
+    },
+    {
+      "name": "browser_only_block_negative",
+      "function": "classify_block",
+      "input": {
+        "placement": "here",
+        "code_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "latency_samples": 1
+      },
+      "expect": []
+    },
+    {
+      "name": "replay",
+      "function": "replay_codes",
+      "input": {},
+      "expect": [
+        "replay_is_direction"
+      ]
+    },
+    {
+      "name": "unknown_day_key",
+      "function": "classify_day",
+      "input": {
+        "registered": true,
+        "simulated": false,
+        "holdout": false,
+        "config_digests": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "label": "RECONCILED",
+        "fills": 3,
+        "fee_cents": "12.5",
+        "extra": true
+      },
+      "expect": [
+        "bad_input"
+      ]
+    },
+    {
+      "name": "invalid_calendar_day",
+      "function": "classify_registration_day",
+      "input": {
+        "first_day_utc": "2026-02-30",
+        "today_utc": "2026-11-05"
+      },
+      "expect": [
+        "bad_input"
+      ]
+    },
+    {
+      "name": "invalid_placement",
+      "function": "classify_block",
+      "input": {
+        "placement": "cloud",
+        "code_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "latency_samples": 1
+      },
+      "expect": [
+        "bad_input"
+      ]
+    },
+    {
+      "name": "missing_costs_with_fills",
+      "function": "classify_day",
+      "input": {
+        "registered": true,
+        "simulated": false,
+        "holdout": false,
+        "config_digests": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "label": "RECONCILED",
+        "fills": 3,
+        "fee_cents": null
+      },
+      "expect": [
+        "zero_fee_with_trades"
+      ]
+    },
+    {
+      "name": "paid_costs_with_fills",
+      "function": "classify_day",
+      "input": {
+        "registered": true,
+        "simulated": false,
+        "holdout": false,
+        "config_digests": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "label": "RECONCILED",
+        "fills": 3,
+        "fee_cents": "12.5"
+      },
+      "expect": []
+    },
+    {
+      "name": "all_day_codes",
+      "function": "classify_day",
+      "input": {
+        "registered": false,
+        "simulated": true,
+        "holdout": true,
+        "config_digests": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "label": "PENDING",
+        "fills": 3,
+        "fee_cents": null
+      },
+      "expect": [
+        "not_preregistered",
+        "simulated_not_evidence",
+        "holdout_day_refused",
+        "split_day",
+        "unreconciled_day",
+        "zero_fee_with_trades"
+      ]
+    },
+    {
+      "name": "combined_bot_codes",
+      "function": "classify_block",
+      "input": {
+        "placement": "bot",
+        "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "latency_samples": 0
+      },
+      "expect": [
+        "runs_on_bot",
+        "placeholder_block",
+        "latency_not_measured"
+      ]
+    },
+    {
+      "name": "combined_browser_codes",
+      "function": "classify_block",
+      "input": {
+        "placement": "browser",
+        "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "latency_samples": 0
+      },
+      "expect": [
+        "placeholder_block",
+        "latency_not_measured",
+        "browser_only_block"
+      ]
+    },
+    {
+      "name": "bool_fills",
+      "function": "classify_day",
+      "input": {
+        "registered": true,
+        "simulated": false,
+        "holdout": false,
+        "config_digests": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "label": "RECONCILED",
+        "fills": true,
+        "fee_cents": "12.5"
+      },
+      "expect": [
+        "bad_input"
+      ]
+    },
+    {
+      "name": "fractional_fills",
+      "function": "classify_day",
+      "input": {
+        "registered": true,
+        "simulated": false,
+        "holdout": false,
+        "config_digests": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "label": "RECONCILED",
+        "fills": 1.5,
+        "fee_cents": "12.5"
+      },
+      "expect": [
+        "bad_input"
+      ]
+    },
+    {
+      "name": "negative_fills",
+      "function": "classify_day",
+      "input": {
+        "registered": true,
+        "simulated": false,
+        "holdout": false,
+        "config_digests": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "label": "RECONCILED",
+        "fills": -1,
+        "fee_cents": "12.5"
+      },
+      "expect": [
+        "bad_input"
+      ]
+    },
+    {
+      "name": "numeric_fee",
+      "function": "classify_day",
+      "input": {
+        "registered": true,
+        "simulated": false,
+        "holdout": false,
+        "config_digests": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "label": "RECONCILED",
+        "fills": 3,
+        "fee_cents": 0
+      },
+      "expect": [
+        "bad_input"
+      ]
+    },
+    {
+      "name": "trailing_zero_fee",
+      "function": "classify_day",
+      "input": {
+        "registered": true,
+        "simulated": false,
+        "holdout": false,
+        "config_digests": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "label": "RECONCILED",
+        "fills": 3,
+        "fee_cents": "12.50"
+      },
+      "expect": [
+        "bad_input"
+      ]
+    },
+    {
+      "name": "negative_zero_fee",
+      "function": "classify_day",
+      "input": {
+        "registered": true,
+        "simulated": false,
+        "holdout": false,
+        "config_digests": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "label": "RECONCILED",
+        "fills": 3,
+        "fee_cents": "-0"
+      },
+      "expect": []
+    },
+    {
+      "name": "fractional_fee",
+      "function": "classify_day",
+      "input": {
+        "registered": true,
+        "simulated": false,
+        "holdout": false,
+        "config_digests": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "label": "RECONCILED",
+        "fills": 3,
+        "fee_cents": "0.0001"
+      },
+      "expect": []
+    },
+    {
+      "name": "no_fills_missing_fee",
+      "function": "classify_day",
+      "input": {
+        "registered": true,
+        "simulated": false,
+        "holdout": false,
+        "config_digests": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "label": "RECONCILED",
+        "fills": 0,
+        "fee_cents": null
+      },
+      "expect": []
+    },
+    {
+      "name": "duplicate_digests",
+      "function": "classify_day",
+      "input": {
+        "registered": true,
+        "simulated": false,
+        "holdout": false,
+        "config_digests": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "label": "RECONCILED",
+        "fills": 3,
+        "fee_cents": "12.5"
+      },
+      "expect": []
+    },
+    {
+      "name": "empty_digests",
+      "function": "classify_day",
+      "input": {
+        "registered": true,
+        "simulated": false,
+        "holdout": false,
+        "config_digests": [],
+        "label": "RECONCILED",
+        "fills": 3,
+        "fee_cents": "12.5"
+      },
+      "expect": []
+    },
+    {
+      "name": "practice_missing",
+      "function": "classify_practice_block",
+      "input": {},
+      "expect": [
+        "trigger_not_measured"
+      ]
+    },
+    {
+      "name": "practice_bool",
+      "function": "classify_practice_block",
+      "input": {
+        "reached": false
+      },
+      "expect": [
+        "bad_input"
+      ]
+    },
+    {
+      "name": "practice_ignores_extra",
+      "function": "classify_practice_block",
+      "input": {
+        "reached": 1,
+        "extra": true
+      },
+      "expect": []
+    },
+    {
+      "name": "leap_day_valid",
+      "function": "classify_registration_day",
+      "input": {
+        "first_day_utc": "2028-02-29",
+        "today_utc": "2028-02-28"
+      },
+      "expect": []
+    },
+    {
+      "name": "century_not_leap",
+      "function": "classify_registration_day",
+      "input": {
+        "first_day_utc": "2100-02-29",
+        "today_utc": "2100-02-28"
+      },
+      "expect": [
+        "bad_input"
+      ]
+    },
+    {
+      "name": "year_zero",
+      "function": "classify_registration_day",
+      "input": {
+        "first_day_utc": "0000-01-01",
+        "today_utc": "2026-11-05"
+      },
+      "expect": [
+        "bad_input"
+      ]
+    }
+  ]
+}

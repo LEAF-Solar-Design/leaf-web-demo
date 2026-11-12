@@ -1,3 +1,4 @@
+import { requireSolarFlags, installSpendGuard } from './solarProofGuard.mjs'
 import { expect, test } from '@playwright/test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -25,11 +26,6 @@ function versionState({ drawing_id, head, latest, versions }) {
   return { drawing_id, head, latest, versions }
 }
 
-function flagsOn(testInfo) {
-  if (process.env.VITE_CAD_EDIT === '1' && process.env.VITE_SOLAR_FLOW_RAIL === '1' && process.env.VITE_SOLAR_SETTINGS_FORM === '1') return true
-  testInfo.annotations.push({ type: 'flag-gate', description: 'Requires VITE_CAD_EDIT=1, VITE_SOLAR_FLOW_RAIL=1 and VITE_SOLAR_SETTINGS_FORM=1.' })
-  return false
-}
 
 async function prepareDrawing(page, seeded, l2 = false) {
   const api = page.request
@@ -212,7 +208,8 @@ function receipt(slug, context, result, artifacts, assertions) {
 
 for (const [row, width, height] of [['R1', 1280, 800], ['R2', 1600, 1000]]) {
   test(`W20-07b ${row} Rooftop intake is reachable and real empty-graph refusals preserve head at ${width}x${height}`, async ({ page }, testInfo) => {
-    if (!flagsOn(testInfo)) return
+    requireSolarFlags()
+    const assertNoSpend = await installSpendGuard(page)
     test.setTimeout(180_000)
     await page.setViewportSize({ width, height })
     const context = await prepareDrawing(page, true)
@@ -266,11 +263,13 @@ for (const [row, width, height] of [['R1', 1280, 800], ['R2', 1600, 1000]]) {
       'real L2-mode and outlines refusals show the exact client sentences and preserve every version entry at head and latest 2',
       'no Run solar-combiners confirmation button exists',
     ])
+    assertNoSpend()
   })
 }
 
 test('W20-07b R3 real empty-L2 intake refreshes the drawing; placement remains unavailable', async ({ page }, testInfo) => {
-  if (!flagsOn(testInfo)) return
+  requireSolarFlags()
+  const assertNoSpend = await installSpendGuard(page)
   test.setTimeout(180_000)
   await page.setViewportSize({ width: 1280, height: 800 })
   const context = await prepareDrawing(page, true, true)
@@ -343,4 +342,5 @@ test('W20-07b R3 real empty-L2 intake refreshes the drawing; placement remains u
     'valid hardware enables Run placement, which reports placement not staged without a confirmation button or solar-combiners POST',
     'the placement request preserves all entries at head and latest 4',
   ])
+  assertNoSpend()
 })

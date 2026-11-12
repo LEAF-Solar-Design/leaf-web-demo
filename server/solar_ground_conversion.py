@@ -341,6 +341,8 @@ def convert_physical_state(view, document, graph, *, provenance, rev):
     units = project.get("units")
     if type(units) is not dict or units.get("meters_per_unit") != mpu:
         raise GroundConversionError("GROUND_CONVERSION_UNITS_MISMATCH")
+    if view.get('kind') == 'canonical_version_intake':
+        return _canonical_frames(view, document, graph, provenance, rev)
     state = document["state"]
     rows = state.get("tracker_rows")
     if type(rows) is not list or not rows:
@@ -424,3 +426,130 @@ def convert_current_ground_state(backend, tenant_id, drawing_id, graph, *, proje
     (solar_physical_head.load_physical_head); its PhysicalHeadError refusals pass through."""
     view, document = ph.load_physical_head(backend, tenant_id, drawing_id, project_id=project_id)
     return convert_physical_state(view, document, graph, provenance=provenance, rev=rev)
+
+
+def _canonical_frames(view, document, graph, provenance, rev):
+    """One compact row group per real module row, with exact source-frame association."""
+    try:
+        params = view['parameters']
+        models, associations = params['generation_models'], params['frame_generations']
+        source_frames = document['state']['frames']
+        handles = [frame['handle'] for frame in source_frames]
+        if (not source_frames or type(models) is not list or type(associations) is not dict
+                or len(set(handles)) != len(handles) or set(handles) != set(associations)):
+            raise _invalid()
+        total = 0
+        for handle in handles:
+            index = associations[handle]
+            if type(index) is not int or not 0 <= index < len(models):
+                raise _invalid()
+            model = models[index]
+            rows, columns = model['rows'], model['columns']
+            if (type(rows) is not int or type(columns) is not int or rows < 1 or columns < 1
+                    or columns > codec.MAX_FRAME_SLOTS):
+                raise _invalid()
+            total += rows * columns
+        if total > codec.MAX_GRAPH_SLOTS:
+            raise GroundConversionError('GROUND_CONVERSION_LIMIT_EXCEEDED')
+        mpu, seed = document['units']['meters_per_unit'], graph['source_hash']
+        number = graph['settings']['panel_group_number']
+        frames = []
+        for source in source_frames:
+            handle = source['handle']
+            model = models[associations[handle]]
+            rows, columns = model['rows'], model['columns']
+            length = _bounded(model['module_length_m'], 0, 100000, low_open=True)
+            width = _bounded(model['module_width_m'], 0, 100000, low_open=True)
+            power = _bounded(model['module_power_wp'], 0, 100000, low_open=True)
+            horizontal = _bounded(model['horizontal_gap_m'], 0, 100000)
+            vertical = _bounded(model['vertical_gap_m'], 0, 100000)
+            if model['orientation'] not in ('Portrait', 'Landscape'):
+                raise _invalid()
+            across, along = (length, width) if model['orientation'] == 'Landscape' else (width, length)
+            pack = model['tracker_pack']
+            segments = [segment for segment in pack['segments'] if segment is not None and segment['count'] > 0]
+            packed = len(segments) > 1 or any(segment['kind'] != 'Modules' for segment in segments)
+            positions, height = [], 0.0
+            if packed:
+                if along != width:
+                    raise _invalid()  # The actual native pack length uses module width.
+                for segment in segments:
+                    count = segment['count']
+                    if type(count) is not int or count < 1 or count > codec.MAX_FRAME_SLOTS:
+                        raise _invalid()
+                    if segment['kind'] == 'Modules':
+                        positions.extend(height + (col + .5) * width for col in range(count))
+                        height += count * width
+                    elif segment['kind'] == 'JointGap':
+                        height += count * _bounded(pack['joint_gap_width_m'], 0, 100000)
+                    elif segment['kind'] == 'Motor':
+                        height += count * (_bounded(pack['motor_gap_width_m'], 0, 100000)
+                                           if pack['is_motor_gap_enabled'] else 0)
+                    else:
+                        raise _invalid()
+                if len(positions) != columns:
+                    raise _invalid()
+            else:
+                positions = [(col + .5) * along + col * vertical for col in range(columns)]
+                height = columns * along + (columns - 1) * vertical
+            full_width = rows * across + (rows - 1) * horizontal
+            vertices = source['vertices']
+            if len(vertices) != 4:
+                raise _invalid()
+            origin = vertices[0]
+            u = [(vertices[1][i] - origin[i]) * mpu / full_width for i in (0, 1)]
+            v = [(vertices[3][i] - origin[i]) * mpu / height for i in (0, 1)]
+            if (not math.isclose(math.hypot(*u), 1, rel_tol=1e-9, abs_tol=1e-9)
+                    or not math.isclose(math.hypot(*v), 1, rel_tol=1e-9, abs_tol=1e-9)
+                    or abs(sum(u[i]*v[i] for i in (0, 1))) > 1e-9
+                    or any(not math.isclose(vertices[2][i], vertices[1][i]+vertices[3][i]-origin[i],
+                                            rel_tol=1e-9, abs_tol=1e-8) for i in (0, 1))):
+                raise _invalid()
+            def point(x, y):
+                return [origin[i] + (u[i]*x + v[i]*y)/mpu for i in (0, 1)]
+            angle = math.atan2(v[1], v[0])
+            model_sha = hashlib.sha256(json.dumps(model, sort_keys=True, separators=(',', ':'),
+                                                 allow_nan=False).encode()).hexdigest()
+            for row in range(rows):
+                left = row * (across + horizontal)
+                centre = point(left + across/2, height/2)
+                centres = [[n*mpu for n in point(left+across/2, y)] for y in positions]
+                association = {'source_frame_handle': handle, 'source_module_row': row,
+                               'source_generation': associations[handle], 'source_preset_sha256': model_sha,
+                               'source_framing_type': model['framing_type']}
+                prov = {**copy.deepcopy(provenance), 'source_handle': handle}
+                outline = [point(left, 0), point(left+across, 0), point(left+across, height), point(left, height)]
+                frame = {'id': deterministic_id('frame', f'{seed}:native-frame:{handle}:row:{row}'),
+                    'kind': 'frame', 'rev': rev, 'provenance': prov,
+                    'extra': {outlines.OUTLINE_KEY: outlines.outline_record(outline), 'physical_frame': association},
+                    'validity': {'state': 'valid', 'reasons': []}, 'name': f'Group {number}',
+                    'insertion_point': [n*mpu for n in centre], 'installation_design': 'Ground',
+                    'panel_refs': [], 'module_rows': 1, 'module_columns': columns, 'module_slots': columns,
+                    'module_power_watts': power, 'module_width_along_row': along,
+                    'module_height_across_row': across, 'electrical_zone_ref': None,
+                    'matrix': [], 'sequences': [], 'panel_assignments': [],
+                    'tracker': {'tracker_model': 'single_axis_tracker', 'axis_start': point(left+across/2, 0),
+                        'axis_end': point(left+across/2, height), 'axis_units': 'drawing', 'module_slots': columns,
+                        'row_index': row, 'length_m': height, 'rail_overhang_m': 0.0,
+                        'cross_axis_width_m': across, 'max_tilt_deg': None,
+                        # Each row group is a logical view, not another native entity.
+                        # The real handle remains explicit in physical_frame and panel provenance.
+                        'source': {'entity_kind': 'polyline', 'handle': None, 'layer': source['layer'],
+                                   'block_name': None, 'source_command': None}}}
+                ids = [deterministic_id('panel', f'{seed}:native-panel:{handle}:{row}:{col}') for col in range(columns)]
+                frame['ground_slots'] = codec.encode_slots(ids, centres, angle,
+                    {'rev': rev, 'provenance': copy.deepcopy(prov), 'validity': {'state': 'valid', 'reasons': []},
+                     'extra': copy.deepcopy(association)})
+                outlines.frame_outline(frame)
+                frames.append(frame)
+                number += 1
+        return {'schema': RESULT_SCHEMA,
+                'source': {'head_index': view['index'], 'state_artifact_id': view['state']['artifact_id'],
+                           'state_content_sha256': view['state']['content_sha256']},
+                'frames': frames, 'settings': {'PanelGroupNumber': number, 'PanelGroupColour': 0},
+                'counts': {'trackers': len(source_frames), 'groups': len(frames), 'slots': total},
+                'overlap': {}}
+    except GroundConversionError:
+        raise
+    except (_INPUT_ERRORS + (GraphValidationError,)):
+        raise _invalid() from None

@@ -1,7 +1,9 @@
 """Shared pure graph parity and server-only admission / resource boundaries."""
 from copy import deepcopy
 from dataclasses import FrozenInstanceError
+import hashlib
 import json
+import hashlib
 import math
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,11 +15,14 @@ from lab_doc_validators import InvalidGraph, TooLarge
 from lab_evaluate import (Budget, GraphRefused, RunBudgetExceeded, RunCancelled,
                           ValueRefused, evaluate_graph, evaluate_operation,
                           export_value, inherited, runtime_value, trusted_registry)
-from lab_ops import MAX_ROWS, UNDEFINED
+from lab_ops import MAX_ROWS, UNDEFINED, has_operator
+from lab_canonical import canonical_json
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures/lab-graph-cases.v1.json").read_text(encoding="utf-8"))
 CASES = FIXTURE["cases"]
 FIELDS = ("data", "mode", "error", "truncated", "host_tainted", "simulated", "stale")
+PLACEMENT_CASES = json.loads((Path(__file__).parent / "fixtures/lab-placement-cases.v1.json").read_text(encoding="utf-8"))["cases"]
+CONFIG_MANIFEST = next(item["manifest"] for item in PLACEMENT_CASES if item["name"] == "settings-digest")
 
 
 def case(name="identity"):
@@ -27,6 +32,66 @@ def case(name="identity"):
 
 def ticks(*values):
     return iter(values).__next__
+
+
+def single_block(manifest, settings):
+    port = next(iter(manifest["outputs"]))
+    return ({"schema": "leaf.lab-graph.v1", "blocks": [{"id": "block", "registry": {
+        "id": manifest["id"], "version": manifest["version"]["semver"],
+        "code_sha256": manifest["version"]["code_sha256"]}, "settings": settings}],
+        "pipes": [], "outputs": {"result": {"node": "block", "port": port}}},
+        {f'{manifest["id"]}@{manifest["version"]["semver"]}': manifest})
+
+
+@pytest.mark.parametrize("k_min", [0, 4, -1, 100])
+def test_config_settings_digest(k_min):
+    settings = {"k_min": k_min}
+    graph, registry = single_block(CONFIG_MANIFEST, settings)
+    before = deepcopy(graph)
+    value = evaluate_graph(graph, registry)["outputs"]["result"]
+    assert value.data == hashlib.sha256(canonical_json(settings).encode("utf-8")).hexdigest()
+    assert value.mode == "scalar" and value.error is None
+    assert graph == before
+
+
+def test_config_digest_inherits_input_metadata(monkeypatch):
+    graph, registry = case("constant-number")
+    registry["constant@1.0.0"]["outputs"]["result"]["nullable"] = False
+    graph["blocks"].append(single_block(CONFIG_MANIFEST, {"k_min": 4})[0]["blocks"][0])
+    registry["kashbot2-config@1.0.0"] = CONFIG_MANIFEST
+    graph["pipes"] = [{"from": {"node": "block-0", "port": "result"}, "to": {"node": "block", "port": "value"}}]
+    graph["outputs"] = {"result": {"node": "block", "port": "config-hash"}}
+    monkeypatch.setattr(evaluator, "evaluate_operation", lambda *args, **kwargs:
+                        runtime_value(7, as_of=10, simulated=True, stale=True, truncated=True))
+    value = evaluate_graph(graph, registry)["outputs"]["result"]
+    assert value.data == hashlib.sha256(b'{"k_min":4}').hexdigest()
+    assert (value.mode, value.as_of, value.simulated, value.stale, value.truncated) == ("scalar", 10, True, True, True)
+
+
+def test_config_digest_keeps_output_validation():
+    manifest = deepcopy(CONFIG_MANIFEST)
+    manifest["outputs"]["config-hash"]["schema"] = {"type": "number"}
+    manifest["sample_output"]["config-hash"] = 0
+    graph, registry = single_block(manifest, {"k_min": 4})
+    value = evaluate_graph(graph, registry)["outputs"]["result"]
+    assert value.data is None and value.error == "output-refused"
+
+
+@pytest.mark.parametrize("manifest", [m for m in trusted_registry().values() if not (m["kind"] == "builtin" and has_operator(m["id"]))], ids=lambda manifest: manifest["id"])
+def test_placeholder_runs_only_on_bot(manifest):
+    settings = {name: manifest["settings_schema"]["properties"][name].get("minimum", 0)
+                for name in manifest["settings_schema"].get("required", [])}
+    graph, registry = single_block(manifest, settings)
+    value = evaluate_graph(graph, registry)["outputs"]["result"]
+    assert value.data is None and value.error == "runs_on_bot"
+
+
+@pytest.mark.parametrize("block_id,kind", [("host-intent", "settings"), ("kashbot2-config", "builtin")])
+def test_other_settings_and_config_builtin_do_not_hash(block_id, kind):
+    manifest = dict(deepcopy(CONFIG_MANIFEST), id=block_id, kind=kind)
+    graph, registry = single_block(manifest, {"k_min": 4})
+    value = evaluate_graph(graph, registry)["outputs"]["result"]
+    assert value.data is None and value.error == "server-execution-refused"
 
 
 @pytest.mark.parametrize("item", CASES, ids=lambda item: item["name"])
@@ -53,6 +118,89 @@ def test_fixture_contract():
     assert FIXTURE["schema"] == "leaf.lab-graph-cases.v1"
     assert len(CASES) >= 25
     assert len({item["name"] for item in CASES}) == len(CASES)
+
+
+def arithmetic_graph(current=1010, open_count=3):
+    """The same pinned topology exercised by canvas.test.jsx; no legacy zero pins."""
+    registry = trusted_registry()
+    specs = [("base", "constant", 1000), ("current", "constant", current),
+             ("open", "constant", open_count), ("scale", "constant", 100),
+             ("change", "subtract", None), ("ratio", "divide", None),
+             ("percent", "multiply", None), ("reconstructed", "add", None)]
+    blocks = [{"id": node, "registry": {"id": kind, "version": "1.0.0",
+               "code_sha256": registry[f"{kind}@1.0.0"]["version"]["code_sha256"]},
+               "settings": {"value": value} if kind == "constant" else {}}
+              for node, kind, value in specs]
+    links = [("current", "change", "value"), ("base", "change", "auxiliary"),
+             ("change", "ratio", "value"), ("base", "ratio", "auxiliary"),
+             ("ratio", "percent", "value"), ("scale", "percent", "auxiliary"),
+             ("base", "reconstructed", "value"), ("change", "reconstructed", "auxiliary")]
+    return {"schema": "leaf.lab-graph.v1", "blocks": blocks,
+            "pipes": [{"from": {"node": node, "port": "result"},
+                       "to": {"node": target, "port": port}} for node, target, port in links],
+            "outputs": {name: {"node": node, "port": "result"} for name, node in (
+                ("total", "current"), ("change", "change"), ("percent", "percent"),
+                ("open", "open"), ("reconstructed", "reconstructed"))}}
+
+
+def test_arithmetic_fixture_contract_and_implementation_provenance():
+    root = Path(__file__).resolve().parents[2]
+    fixture = json.loads((root / "contract/fixtures/lab/blocks.json").read_text(encoding="utf-8"))
+    def digest(value):
+        return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                         ensure_ascii=False).encode("utf-8")).hexdigest()
+    assert len(fixture["manifests"]) == 19
+    assert digest({"source": fixture["source"], "manifests": fixture["manifests"][:14]}) == (
+        "8a0278c47091b2f5c14aa6ba0ae9b462418bb00250c8ee56a1f1f6e8e4153779")
+    local = fixture["local_source"]
+    assert local["normalization"] == "utf8_lf"
+    sources = {path: hashlib.sha256((root / path).read_text(encoding="utf-8").replace(
+        "\r\n", "\n").encode("utf-8")).hexdigest() for path in local["source_sha256"]}
+    assert sources == local["source_sha256"]
+    assert digest(sources) == local["implementation_sha256"]
+    assert local["ids"] == ["constant", "add", "subtract", "multiply", "divide"]
+    for kind in local["ids"]:
+        manifest = trusted_registry()[f"{kind}@1.0.0"]
+        assert manifest["version"]["code_sha256"] == local["implementation_sha256"]
+        assert manifest["effect"] == "pure"
+        assert manifest["lane"] == "processing"
+
+
+@pytest.mark.parametrize("current,open_count,expected", [
+    (1010, 3, {"total": 1010, "change": 10, "percent": 1, "open": 3, "reconstructed": 1010}),
+    (1020, 4, {"total": 1020, "change": 20, "percent": 2, "open": 4, "reconstructed": 1020}),
+])
+def test_arithmetic_pinned_graph(current, open_count, expected):
+    graph = json.loads(json.dumps(arithmetic_graph(current, open_count)))
+    result = evaluate_graph(graph, trusted_registry())
+    assert {name: value.data for name, value in result["outputs"].items()} == expected
+    assert all(value.error is None for value in result["outputs"].values())
+
+
+@pytest.mark.parametrize("kind,inputs", [
+    ("divide", {"value": 1, "auxiliary": 0}),
+    ("add", {"value": "1", "auxiliary": 2}),
+    ("subtract", {"value": 1}),
+    ("multiply", {"value": 1e308, "auxiliary": 1e308}),
+])
+def test_arithmetic_operator_refusals(kind, inputs):
+    result = evaluate_operation(kind, {name: runtime_value(value) for name, value in inputs.items()})
+    assert result.error == "operator-refused"
+    assert result.data is None
+
+
+def test_arithmetic_graph_refusals():
+    graph = arithmetic_graph()
+    graph["pipes"] = [pipe for pipe in graph["pipes"] if not (
+        pipe["to"] == {"node": "ratio", "port": "auxiliary"})]
+    with pytest.raises(GraphRefused, match="lab_graph_input_required"):
+        evaluate_graph(graph, trusted_registry())
+    graph = arithmetic_graph()
+    graph["blocks"][1]["settings"]["value"] = "1020"
+    with pytest.raises(GraphRefused, match="lab_graph_invalid_settings"):
+        evaluate_graph(graph, trusted_registry())
+    with pytest.raises(ValueRefused):
+        runtime_value(math.inf)
 
 
 def test_explicit_no_tool_adapter_keeps_effect_refusal(monkeypatch):

@@ -34,6 +34,7 @@ const KNOWN_ACTIONS = new Set([
   "read_platform_state",
   "run_read_tool",
   "run_write_tool",
+  "run_solve_tool",
   "submit_live_solve",
   "undo_drawing_version",
   "author_tool",
@@ -130,6 +131,7 @@ export class FakeGateClient implements GateClient {
     if (
       action === "run_read_tool" ||
       action === "run_write_tool" ||
+      action === "run_solve_tool" ||
       action === "submit_live_solve" ||
       action === "author_tool" ||
       action === "customize_platform"
@@ -141,7 +143,7 @@ export class FakeGateClient implements GateClient {
       }
       if (action !== "run_read_tool") {
         const rung =
-          action === "submit_live_solve"
+          action === "submit_live_solve" || action === "run_solve_tool"
             ? "R4"
             : action === "author_tool"
               ? "R5"
@@ -188,7 +190,7 @@ export class FakeGateClient implements GateClient {
     ctx: GateCheckContext,
   ): GateCheckResult | null {
     const rung =
-      action === "submit_live_solve" ? "R4" : action === "author_tool" ? "R5" : "R3";
+      action === "submit_live_solve" || action === "run_solve_tool" ? "R4" : action === "author_tool" ? "R5" : "R3";
     const deny = (reason: string): GateCheckResult => ({
       decision: "deny",
       reason,

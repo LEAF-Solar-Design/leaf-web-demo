@@ -553,7 +553,7 @@ def test_settled_producer_recovers_once_preserves_evidence_and_resumes_polling(t
     assert value['local_evidence_sha256'] == r.sha(service.worker.encode(
         {path.name: r.sha(data) for path, data in originals.items()}))
     assert value['worker_sha256'] == r.reviewed_worker_source(value['original_runtime_commit'])
-    assert value['journal_source_sha256'] == r.PRE_EXECUTION_CORRECTED_JOURNAL_SOURCE_SHA256
+    assert value['journal_source_sha256'] == r.PRE_EXECUTION_CONNECTED_JOURNAL_SOURCE_SHA256
     assert value['scope_sha256'] == directory(tmp_path).name
     assert value['cycle'] == failure.parent.name
     assert value['original_runtime_commit'] == json.loads(originals[journal])['runtime_commit']
@@ -1254,7 +1254,7 @@ def test_pre_execution_source_binding_requires_reviewed_git_history():
     assert r.sha(producer) == r.PRE_EXECUTION_WORKER_SHA256
     assert r.journal_source_sha(journal) == r.PRE_EXECUTION_JOURNAL_SOURCE_SHA256
     current = r.read(Path(r.__file__), 262144)
-    assert r.journal_source_sha(current) == r.PRE_EXECUTION_CORRECTED_JOURNAL_SOURCE_SHA256
+    assert r.journal_source_sha(current) == r.PRE_EXECUTION_CONNECTED_JOURNAL_SOURCE_SHA256
 
 
 def test_worker_source_allowlist_contains_only_the_two_reviewed_producers():
@@ -1262,8 +1262,38 @@ def test_worker_source_allowlist_contains_only_the_two_reviewed_producers():
     assert r.REVIEWED_WORKER_SHA256 == {
         'd0fa9e9778490278988382f573555538a2fe204160f8d57da44958858b2cd89d',
         '6ad5eb2b343e3d9f749769805001d74282519d6ce41cdf7996999573fa306197',
+        'acc9c1219ee4246f6b39da6a3c439add24f6573c0e54626eca8b3752b790ee37',
     }
     assert r.sha(Path(service.worker.__file__).read_bytes()) in r.REVIEWED_WORKER_SHA256
+    # Bind the new Journal dependency closure to its exact reviewed producer,
+    # including both original-history and current-source checks.
+    # The relay bundles main/head ancestry, not squash-merged feature commits.
+    # Bind the actual runtime bytes to the same exact reviewed source pins.
+    connected = r.runtime_commit('HEAD')
+    worker = r.runtime_source(connected, 'scripts/native_preview_worker.py')
+    journal = r.runtime_source(connected, 'scripts/native_preview_reconciliation.py')
+    assert r.sha(worker) == r.CONNECTED_WORKER_SHA256
+    assert r.journal_source_sha(journal) == r.PRE_EXECUTION_CONNECTED_JOURNAL_SOURCE_SHA256
+    assert r.pre_execution_source(connected) == r.PRE_EXECUTION_CONNECTED_JOURNAL_SOURCE_SHA256
+    load, read = r.runtime_source, r.read
+    legacy_worker = load('e158ace5709231f9d9f37418d6b2c48d69228647', 'scripts/native_preview_worker.py')
+    assert r.sha(legacy_worker) == '6ad5eb2b343e3d9f749769805001d74282519d6ce41cdf7996999573fa306197'
+    with pytest.MonkeyPatch.context() as patch:
+        for original in (False, True):
+            for target in ('worker', 'journal', 'legacy-worker-with-connected-journal'):
+                def changed(raw, path):
+                    if path.endswith('native_preview_worker.py'):
+                        if target == 'worker':
+                            return raw.replace(b'guard.start()', b'guard.beat()')
+                        if target == 'legacy-worker-with-connected-journal':
+                            return legacy_worker
+                    if target == 'journal' and path.endswith('native_preview_reconciliation.py'):
+                        return raw.replace(b'self.failed = True', b'self.failed = False')
+                    return raw
+                patch.setattr(r, 'runtime_source', lambda revision, path: changed(load(revision, path), path) if original else load(revision, path))
+                patch.setattr(r, 'read', lambda path, limit=r.MAX_LOCAL: read(path, limit) if original else changed(read(path, limit), str(path)))
+                with pytest.raises(service.worker.WorkerError):
+                    r.pre_execution_source(connected)
 
 
 def test_pre_execution_receipt_records_the_actual_corrected_source(tmp_path, monkeypatch):
@@ -1276,7 +1306,7 @@ def test_pre_execution_receipt_records_the_actual_corrected_source(tmp_path, mon
     monkeypatch.setattr(r, 'runtime_source', original)
     proof = r.PreExecutionProof(directory(tmp_path), marker(tmp_path), directory(tmp_path).name)
     proof.commit(SCOPE, service._checkpoint)
-    assert json.loads(receipt.read_bytes())['journal_source_sha256'] == r.PRE_EXECUTION_CORRECTED_JOURNAL_SOURCE_SHA256
+    assert json.loads(receipt.read_bytes())['journal_source_sha256'] == r.PRE_EXECUTION_CONNECTED_JOURNAL_SOURCE_SHA256
 
 
 @pytest.mark.parametrize('which', ['original-worker', 'original-journal', 'current-worker', 'current-journal'])

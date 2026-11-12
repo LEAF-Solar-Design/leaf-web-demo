@@ -147,7 +147,7 @@ describe('Leaf workspace guest front door', () => {
     expect(screen.queryByTestId('app-stub')).toBeNull()
   })
 
-  it('keeps signed-in workspace buttons and the shortcut on the existing /try navigation', async () => {
+  it('opens the full console for signed-in workspace buttons and the shortcut', async () => {
     mocks.signedIn.mockReturnValue(true)
     await mountFrontDoor()
     for (const name of ['Try Branch on the sample rooftop', 'Open workspace', 'Open in workspace']) {
@@ -155,8 +155,18 @@ describe('Leaf workspace guest front door', () => {
     }
     fireEvent.keyDown(document.body, { key: 'T' })
     expect(mocks.assign.mock.calls).toEqual([['/try?demo=1']])
-    expect(mocks.navigate.mock.calls).toEqual([['/try'], ['/try'], ['/try']])
+    expect(mocks.navigate.mock.calls).toEqual([['/app'], ['/app'], ['/app']])
     expect(mocks.replace).not.toHaveBeenCalled()
+  })
+
+  it('checks sign-in at the time a workspace action is invoked', async () => {
+    await mountFrontDoor()
+    mocks.signedIn.mockReturnValue(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Open workspace' }))
+    mocks.signedIn.mockReturnValue(false)
+    fireEvent.keyDown(document.body, { key: 'T' })
+    expect(mocks.navigate.mock.calls).toEqual([['/app'], ['/try']])
+    expect(mocks.assign).not.toHaveBeenCalled()
   })
 
   it('shows honest pricing copy and routes pricing interest to demand capture', async () => {

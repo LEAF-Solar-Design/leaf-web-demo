@@ -144,6 +144,35 @@ def test_portfolio_rejects_foreign_missing_and_mismatched_photos(client, page_pr
         assert client.get(url, headers=auth).json() == {'page': None}
 
 
+def test_designed_portfolio_save_reload_retains_closed_schema(client, page_project):
+    org, project, actor = page_project
+    document = portfolio(commit_photo(org, project, actor))
+    document.update(galleryLayout='grid', appearance={'gap': 16, 'columns': 4},
+                    textStyles={'headline': {'size': 48}},
+                    nav={'homeLabel': 'Portfolio'}, labels={'resumeHeading': 'Resume'})
+    url, auth = f'/api/projects/{project}/page', headers(org, actor)
+    first = client.put(url, json={'expected_revision': 0, 'document': document}, headers=auth)
+    assert first.status_code == 200, first.text
+    assert first.json()['page']['revision'] == 1
+    assert client.get(url, headers=auth).json()['page']['document'] == document
+
+    changed = copy.deepcopy(document)
+    changed['headline'] = 'Same project, another editing style'
+    changed['textStyles']['headline']['size'] = 40
+    second = client.put(url, json={'expected_revision': 1, 'document': changed}, headers=auth)
+    assert second.status_code == 200, second.text
+    assert second.json()['page']['revision'] == 2
+    assert client.get(url, headers=auth).json() == second.json()
+
+    unknown = {**changed, 'script': 'unrecognized field'}
+    invalid_design = copy.deepcopy(changed)
+    invalid_design['textStyles']['headline']['size'] = 97
+    for invalid in (unknown, invalid_design):
+        refused = client.put(url, json={'expected_revision': 2, 'document': invalid}, headers=auth)
+        assert refused.status_code == 422, refused.text
+        assert client.get(url, headers=auth).json() == second.json()
+
+
 @pytest.mark.parametrize('target', ['web', 'ios'])
 def test_portfolio_historical_export_retains_conflict_and_checks_materials(client, page_project, monkeypatch, target):
     import project_material_images as images
@@ -218,3 +247,21 @@ def test_portfolio_export_rechecks_revoked_membership_after_preview_reads(client
     assert response.status_code == 403, response.text
     assert reads == [material['material_id']]
     assert not response.content.startswith(b'PK')
+
+
+def test_coming_soon_action_save_reload_and_export(client, page_project):
+    org, project, actor = page_project
+    url, auth = f'/api/projects/{project}/page', headers(org, actor)
+    document = {**DOCUMENT, 'action': {'label': 'Get updates', 'href': 'https://example.com/updates'}}
+    saved = client.put(url, json={'expected_revision': 0, 'document': document}, headers=auth)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()['page']['revision'] == 1
+    assert saved.json()['page']['document'] == document
+    reloaded = client.get(url, headers=auth)
+    assert reloaded.status_code == 200, reloaded.text
+    assert reloaded.json()['page']['document'] == document
+    exported = client.get(url + '/source?revision=1', headers=auth)
+    assert exported.status_code == 200, exported.text
+    with zipfile.ZipFile(io.BytesIO(exported.content)) as archive:
+        name = next(name for name in archive.namelist() if name == 'page.json' or name.endswith('/page.json'))
+        assert json.loads(archive.read(name)) == document

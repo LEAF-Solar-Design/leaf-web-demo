@@ -171,6 +171,17 @@ class Agent:
         if rows:
             response = self.client.post_results([json.loads(row[1]) for row in rows])
             if response != {"accepted": len(rows)}:
+                if isinstance(response, dict) and type(response.get("accepted")) is int and response["accepted"] < len(rows):
+                    for result_id, body in rows:
+                        response = self.client.post_results([json.loads(body)])
+                        if response == {"accepted": 0}:
+                            LOG.warning("Studio refused a stale result; dropped")
+                        elif response != {"accepted": 1}:
+                            self.client.backoff.wait()
+                            raise ClientError("Invalid result acknowledgement")
+                        self.db.execute("UPDATE results SET pending=0 WHERE id=?", (result_id,))
+                        self.db.commit()
+                    return
                 self.client.backoff.wait()
                 raise ClientError("Invalid result acknowledgement")
             self.db.executemany("UPDATE results SET pending=0 WHERE id=?", [(row[0],) for row in rows])

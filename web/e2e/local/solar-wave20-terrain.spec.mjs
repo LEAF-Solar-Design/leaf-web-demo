@@ -1,3 +1,4 @@
+import { requireSolarFlags, installSpendGuard } from './solarProofGuard.mjs'
 import { expect, test } from '@playwright/test'
 import { mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -96,16 +97,11 @@ async function prepareDrawing(page, seeded) {
 
 async function navigateWorkspace(page, drawingId) {
   await page.goto(`/app?surface=solar&drawing=${drawingId}`)
-  // With flags off, still wait up to 60 s for the live checkout control: a pass proves
-  // the app booted on the live stack and reached that control, and nothing about the Solar workspace.
   await expect(page.getByRole('button', { name: 'Take edit lock' })).toBeVisible({ timeout: 60_000 })
   const rail = page.getByTestId('solar-flow-rail')
   if (allThreeFlagsOn) await expect(rail).toBeVisible({ timeout: 60_000 })
   if (!(await rail.count())) {
     expect(allThreeFlagsOn, 'all three Solar workspace flags are on, so the served Solar flow rail must be present').toBe(false)
-    test.info().annotations.push({ type: 'flags', description:
-      'Solar workspace not exercised (the live checkout control was reached): VITE_SOLAR_FLOW_RAIL, VITE_CAD_EDIT and VITE_SOLAR_SETTINGS_FORM are not all enabled' })
-    return false
   }
   await expect(rail).toBeVisible({ timeout: 60_000 })
   return true
@@ -165,7 +161,7 @@ async function reachable(control) {
 async function terrainWalk(page, viewport) {
   await page.setViewportSize(viewport)
   const context = await prepareDrawing(page, true)
-  if (!(await navigateWorkspace(page, context.drawingId))) return
+  await navigateWorkspace(page, context.drawingId)
   await takeLock(page)
   const upload = await chooseLandxml(page)
   const submit = upload.getByRole('button', { name: 'Import terrain', exact: true })
@@ -231,28 +227,24 @@ async function terrainWalk(page, viewport) {
 }
 
 test('W20-06b W1 terrain preview reads, meshes and keeps its head at 1280x800', async ({ page }) => {
-  if (!allThreeFlagsOn) {
-    test.info().annotations.push({ type: 'flags', description: 'Solar workspace not exercised: VITE_SOLAR_FLOW_RAIL, VITE_CAD_EDIT and VITE_SOLAR_SETTINGS_FORM are not all enabled' })
-    return
-  }
+  requireSolarFlags()
+  const assertNoSpend = await installSpendGuard(page)
   test.setTimeout(300_000)
   await terrainWalk(page, { width: 1280, height: 800 })
+  assertNoSpend()
 })
 
 test('W20-06b W1 terrain preview reads, meshes and keeps its head at 1600x1000', async ({ page }) => {
-  if (!allThreeFlagsOn) {
-    test.info().annotations.push({ type: 'flags', description: 'Solar workspace not exercised: VITE_SOLAR_FLOW_RAIL, VITE_CAD_EDIT and VITE_SOLAR_SETTINGS_FORM are not all enabled' })
-    return
-  }
+  requireSolarFlags()
+  const assertNoSpend = await installSpendGuard(page)
   test.setTimeout(300_000)
   await terrainWalk(page, { width: 1600, height: 1000 })
+  assertNoSpend()
 })
 
 test('W20-06b W2 without the checkout the client disables terrain operations and sends none, reads and refreshes', async ({ page }) => {
-  if (!allThreeFlagsOn) {
-    test.info().annotations.push({ type: 'flags', description: 'Solar workspace not exercised: VITE_SOLAR_FLOW_RAIL, VITE_CAD_EDIT and VITE_SOLAR_SETTINGS_FORM are not all enabled' })
-    return
-  }
+  requireSolarFlags()
+  const assertNoSpend = await installSpendGuard(page)
   test.setTimeout(300_000)
   const operations = []
   page.on('request', (request) => {
@@ -274,7 +266,7 @@ test('W20-06b W2 without the checkout the client disables terrain operations and
   expect(importedTerrain.created).toBe(true)
   const importedHeadIndex = importedTerrain.head.index
   expect(await context.versionsOf()).toMatchObject({ head: 2, latest: 2 })
-  if (!(await navigateWorkspace(page, context.drawingId))) return
+  await navigateWorkspace(page, context.drawingId)
   await expect(page.getByRole('button', { name: 'Take edit lock' })).toBeVisible()
   await page.getByTestId('solar-flow-select').selectOption('ground-physical')
   const workspace = page.locator('section[aria-label="Solar workspace tools"]')
@@ -316,4 +308,5 @@ test('W20-06b W2 without the checkout the client disables terrain operations and
     'Refresh completes a terrain read and retains the artifact and container head',
     'no terrain operation POST is sent and drawing head and latest remain 2',
   ], true)
+  assertNoSpend()
 })

@@ -15,6 +15,7 @@
 
 import type {
   AppRunClient,
+  ProjectDrawingState,
   CapabilityEntry,
   SubmitRunRequest,
   SubmitRunResponse,
@@ -27,9 +28,15 @@ import type {
   IntegrationSaveElementResult,
   IntegrationToolResult,
   ProjectPageProposalInput,
+  PlatformSourceRange,
 } from "../index.js";
-import { INTEGRATION_TOOL_INPUTS } from "../index.js";
+import { CanonicalChangeSetId, INTEGRATION_TOOL_INPUTS, ProjectPhotoAssignmentRequest, PHOTO_ASSIGNMENT_FAILURE, type ProjectPhotoAssignmentInput } from "../index.js";
 import { z } from "zod";
+import { photoRequest, PHOTO_FAILURE, PHOTO_MAX_RESPONSE, type ProjectPhotoInspectionInput } from "../../agent/projectPhotoInspection.js";
+import {
+  DEVICE_TOOL_INPUTS, DEVICE_TOOL_OPERATIONS, DeviceToolResponse, deviceToolError,
+} from "../../agent/deviceTools.js";
+import type { DeviceOperation, DeviceToolName, DeviceToolResult } from "../../agent/deviceTools.js";
 import {
   DatasetReadV1, IntegrationActionCatalogV1, IntegrationElementV1, IntegrationRefV1,
 } from "../../vendor/mushy-author/contracts/integration.js";
@@ -40,6 +47,35 @@ export const ProjectPageProposalRequest = z.strictObject({
   expected_revision: z.number().int().positive().refine(Number.isSafeInteger),
   expected_digest: z.string().regex(/^[0-9a-f]{64}(?![\s\S])/),
 });
+
+/** Mixed app/harness deployments must not turn an ignored range into a whole-file success. */
+function validatePlatformSourceRange(result: Record<string, unknown>, path: string, requested: PlatformSourceRange): void {
+  const invalid = () => { throw new AppRunClientError("Invalid platform source range response.", 502, "invalid_source_range_response"); };
+  if (result.commit !== requested.expectedCommit || result.path !== path ||
+      typeof result.ref !== "string" || !result.ref ||
+      !Number.isSafeInteger(result.size) || Number(result.size) < 0 || Number(result.size) > 4194304 ||
+      typeof result.binary !== "boolean") return invalid();
+  if (result.binary) {
+    if (Object.hasOwn(result, "content")) return invalid();
+    return;
+  }
+  if (typeof result.content !== "string" || Buffer.byteLength(result.content, "utf8") > 32768 ||
+      result.range === null || typeof result.range !== "object" || Array.isArray(result.range)) return invalid();
+  const page = result.range as Record<string, unknown>;
+  const { start_line: start, end_line: end, next_line: next, total_lines: total, eof } = page;
+  if (start !== requested.startLine || !Number.isSafeInteger(end) || !Number.isSafeInteger(total) ||
+      typeof eof !== "boolean") return invalid();
+  if (total === 0) {
+    if (start !== 1 || end !== 0 || next !== null || !eof || result.content !== "") return invalid();
+    return;
+  }
+  if (Number(total) < 1 || Number(end) < Number(start) || Number(end) > Number(total) ||
+      Number(end) - Number(start) + 1 > requested.maxLines ||
+      eof !== (end === total) || (eof ? next !== null : next !== Number(end) + 1)) return invalid();
+  const breaks = result.content.match(/\r\n|[\n\r\v\f\x1c-\x1e\u0085\u2028\u2029]/g)?.length ?? 0;
+  const lines = breaks + (result.content && !/[\n\r\v\f\x1c-\x1e\u0085\u2028\u2029]$/.test(result.content) ? 1 : 0);
+  if (lines !== Number(end) - Number(start) + 1) return invalid();
+}
 
 export type IntegrationTool = keyof typeof INTEGRATION_TOOL_INPUTS;
 type IntegrationInputs = {
@@ -192,6 +228,38 @@ export class AppRunClientError extends Error {
   }
 }
 
+// ChangeSet.updated_at is TEXT (SQLite strftime; PostgreSQL serializes to text).
+// Strip producer-only receipt/result/polling fields, including nested tool source.
+const StageStatusMetadata = z.object({
+  contract: z.literal("leaf.customization-stage-job.v1"),
+  change_set_id: CanonicalChangeSetId,
+  status: z.enum(["queued", "running", "staged", "failed"]),
+  change_kind: z.enum(["create", "revise"]),
+  attempt: z.number().int().nonnegative().refine(Number.isSafeInteger),
+  phase: z.enum(["queued", "authoring", "staged", "failed"]),
+  updated_at: z.string().min(1).max(64).refine(value =>
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(value) &&
+    Number.isFinite(Date.parse(value))),
+  target_tool_name: z.string().min(1).max(64).optional(),
+  error: z.object({
+    reason_code: z.string().min(1).max(200),
+    retryable: z.boolean(),
+    message: z.string().min(1).max(500).optional(),
+  }).optional(),
+});
+
+export function projectAuthorStageStatus(changeSetId: string, value: unknown): Record<string, unknown> {
+  const parsed = StageStatusMetadata.safeParse(value);
+  const fail = () => new AppRunClientError("Author stage status unavailable.", 502);
+  if (!parsed.success || parsed.data.change_set_id !== changeSetId) throw fail();
+  const result = parsed.data;
+  const phases = { queued: "queued", running: "authoring", staged: "staged", failed: "failed" };
+  if (result.phase !== phases[result.status] ||
+      (result.status === "failed") !== (result.error !== undefined) ||
+      /\bbearer\s+\S+|\b(?:api[_ -]?key|password|access[_ -]?token|secret)\s*[:=]\s*\S+|\bsk-[A-Za-z0-9_-]{16,}/i.test(JSON.stringify(result))) throw fail();
+  return result;
+}
+
 export class HttpAppRunClient implements AppRunClient {
   private readonly baseUrl: string;
   private readonly secret: string;
@@ -211,18 +279,143 @@ export class HttpAppRunClient implements AppRunClient {
     };
   }
 
+  async getAuthorStageStatus(tenantId: string, changeSetId: string): Promise<Record<string, unknown>> {
+    const fail = () => new AppRunClientError("Author stage status unavailable.", 502);
+    if (!CanonicalChangeSetId.safeParse(changeSetId).success || !tenantId || !this.secret) throw fail();
+    const controller = new AbortController();
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cancel = () => { controller.abort(); void reader?.cancel().catch(() => {}); };
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => { cancel(); reject(fail()); }, 15_000);
+    });
+    const work = async () => {
+      const response = await this.fetchImpl(
+        `${this.baseUrl}/api/author/stages/${encodeURIComponent(changeSetId)}`,
+        { method: "GET", headers: this.headers(tenantId), redirect: "error", signal: controller.signal },
+      );
+      if (controller.signal.aborted) { void response.body?.cancel().catch(() => {}); throw fail(); }
+      if (response.status !== 200 || response.redirected || !response.body ||
+          !/^application\/json(?:\s*;.*)?$/i.test(response.headers.get("content-type") ?? "")) throw fail();
+      reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      while (true) {
+        const next = await reader.read();
+        if (controller.signal.aborted) throw fail();
+        if (next.done) break;
+        size += next.value.byteLength;
+        if (size > 1024 * 1024) throw fail();
+        chunks.push(next.value);
+      }
+      const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)));
+      const projected = projectAuthorStageStatus(changeSetId, value);
+      if (reflectsSecret(projected, this.secret)) throw fail();
+      return projected;
+    };
+    try { return await Promise.race([work(), deadline]); }
+    catch { throw fail(); }
+    finally {
+      clearTimeout(timer);
+      cancel();
+      try { reader?.releaseLock(); } catch { /* pending read cancelled above */ }
+    }
+  }
+
+  async inspectProjectPhoto(
+    tenantId: string, sessionId: string, input: ProjectPhotoInspectionInput,
+    authority: { sessionId: string; turnId: string },
+  ): Promise<Record<string, unknown>> {
+    const fail = () => new AppRunClientError(PHOTO_FAILURE, 502);
+    let body: string;
+    try {
+      body = JSON.stringify(photoRequest(input));
+      const validId = (value: unknown): value is string => typeof value === "string" &&
+        value.length > 0 && value.length <= 200 && value.trim() === value && !/[\p{C}]/u.test(value);
+      if (!this.secret || !validId(sessionId) || authority?.sessionId !== sessionId || !validId(authority?.turnId) ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(tenantId) ||
+          tenantId === "00000000-0000-0000-0000-000000000000") throw fail();
+    } catch { throw fail(); }
+    const url = `${this.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/materials/inspect`;
+    const controller = new AbortController();
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cancel = () => { controller.abort(); void reader?.cancel().catch(() => {}); };
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => { cancel(); reject(fail()); }, 45_000);
+    });
+    const work = async () => {
+      const response = await this.fetchImpl(url, {
+        method: "POST", redirect: "error", signal: controller.signal,
+        headers: { ...this.headers(tenantId), "x-authority-session-id": authority.sessionId,
+          "x-authority-turn-id": authority.turnId }, body,
+      });
+      if (controller.signal.aborted) { void response.body?.cancel().catch(() => {}); throw fail(); }
+      if (response.body) reader = response.body.getReader();
+      const length = response.headers.get("content-length");
+      if (response.status !== 200 || response.redirected || !reader ||
+          (response.url && new URL(response.url).origin !== new URL(url).origin) ||
+          !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(response.headers.get("content-type") ?? "") ||
+          (length !== null && (!/^[0-9]+$/.test(length) || Number(length) > PHOTO_MAX_RESPONSE))) throw fail();
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      while (true) {
+        const next = await reader.read();
+        if (controller.signal.aborted) throw fail();
+        if (next.done) break;
+        size += next.value.byteLength;
+        if (size > PHOTO_MAX_RESPONSE) throw fail();
+        chunks.push(next.value);
+      }
+      const result: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)));
+      if (!result || typeof result !== "object" || Array.isArray(result) || reflectsSecret(result, this.secret)) throw fail();
+      return result as Record<string, unknown>;
+    };
+    try { return await Promise.race([work(), deadline]); }
+    catch { throw fail(); }
+    finally {
+      clearTimeout(timer); cancel();
+      try { reader?.releaseLock(); } catch { /* pending read cancelled */ }
+    }
+  }
+
   async proposeProjectPage(
     tenantId: string, sessionId: string, input: ProjectPageProposalInput,
     authority: { sessionId: string; turnId: string },
   ): Promise<Record<string, unknown>> {
-    const fail = () => new AppRunClientError("Portfolio proposal request failed.", 502);
     const parsed = ProjectPageProposalRequest.safeParse(input);
+    if (!parsed.success) throw new AppRunClientError("Portfolio proposal request failed.", 502);
+    return this.boundedPageProposal(tenantId, sessionId, parsed.data, authority, "proposals", "Portfolio proposal request failed.");
+  }
+
+  async proposeProjectPhotoAssignments(
+    tenantId: string, sessionId: string, input: ProjectPhotoAssignmentInput,
+    authority: { sessionId: string; turnId: string },
+  ): Promise<Record<string, unknown>> {
+    const parsed = ProjectPhotoAssignmentRequest.safeParse(input);
+    const validAuthorityId = (value: unknown): value is string => typeof value === "string" &&
+      value.length > 0 && value.length <= 200 && value.trim() === value && !/[\p{C}]/u.test(value);
+    if (!parsed.success || !z.string().uuid().safeParse(tenantId).success ||
+        tenantId !== tenantId.toLowerCase() || tenantId === "00000000-0000-0000-0000-000000000000" ||
+        !validAuthorityId(sessionId) || authority?.sessionId !== sessionId || !validAuthorityId(authority?.turnId)) {
+      throw new AppRunClientError(PHOTO_ASSIGNMENT_FAILURE, 502);
+    }
+    return this.boundedPageProposal(tenantId, sessionId, parsed.data, authority, "photo-assignment-proposals", PHOTO_ASSIGNMENT_FAILURE);
+  }
+
+  private async boundedPageProposal(
+    tenantId: string, sessionId: string, input: Record<string, unknown>,
+    authority: { sessionId: string; turnId: string },
+    path: "proposals" | "photo-assignment-proposals", message: string,
+  ): Promise<Record<string, unknown>> {
+    const fail = () => new AppRunClientError(message, 502);
     const validId = (value: unknown): value is string => typeof value === "string" &&
       value.length > 0 && value.length <= 200 && value.trim() === value &&
       !/[\u0000-\u001f\u007f-\u009f]/.test(value);
-    if (!parsed.success || !this.secret || !validId(sessionId) ||
+    if (!this.secret || !validId(sessionId) ||
         authority?.sessionId !== sessionId || !validId(authority?.turnId)) throw fail();
-    const url = `${this.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/page/proposals`;
+    const url = `${this.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/page/${path}`;
+    const body = JSON.stringify(input);
     const controller = new AbortController();
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     const cancel = () => {
@@ -239,7 +432,7 @@ export class HttpAppRunClient implements AppRunClient {
         headers: { ...this.headers(tenantId),
           "x-authority-session-id": authority.sessionId,
           "x-authority-turn-id": authority.turnId },
-        body: JSON.stringify(parsed.data),
+        body,
       });
       if (controller.signal.aborted) {
         void response.body?.cancel().catch(() => {});
@@ -285,6 +478,79 @@ export class HttpAppRunClient implements AppRunClient {
 
   integrationDatasets(tenantId: string, input: IntegrationDatasetsInput, authority: IntegrationAuthority) {
     return this.integrationRequest("integration_datasets", tenantId, input, authority);
+  }
+
+  /** Same total deadline and response cap as integrations; no implicit polling. */
+  async deviceTool(
+    tenantId: string, operation: DeviceOperation, input: Record<string, unknown>,
+    authority: IntegrationAuthority,
+  ): Promise<DeviceToolResult> {
+    const validId = (id: unknown): id is string => typeof id === "string" &&
+      id.length > 0 && id.length <= 200 && id.trim() === id && !/[\u0000-\u001f\u007f-\u009f]/.test(id);
+    if (!this.secret || !validId(authority?.sessionId) || !validId(authority?.turnId)) {
+      return deviceToolError("unavailable");
+    }
+    const tool = (Object.keys(DEVICE_TOOL_OPERATIONS) as DeviceToolName[])
+      .find(name => DEVICE_TOOL_OPERATIONS[name] === operation);
+    const normalized = tool ? DEVICE_TOOL_INPUTS[tool].safeParse(input) : undefined;
+    if (!normalized?.success || !z.string().uuid().safeParse(tenantId).success ||
+        tenantId === "00000000-0000-0000-0000-000000000000" || tenantId !== tenantId.toLowerCase()) {
+      return deviceToolError("invalid_input");
+    }
+    let body: string;
+    try { body = JSON.stringify(normalized.data); }
+    catch { return deviceToolError("invalid_input"); }
+    if (Buffer.byteLength(body, "utf8") > 16 * 1024) return deviceToolError("invalid_input");
+    const controller = new AbortController();
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    const cancel = () => {
+      controller.abort();
+      void reader?.cancel().catch(() => {});
+    };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<DeviceToolResult>(resolve => {
+      timer = setTimeout(() => { cancel(); resolve(deviceToolError("unavailable")); }, 15_000);
+    });
+    try {
+      const work = async (): Promise<DeviceToolResult> => {
+        const response = await this.fetchImpl(`${this.baseUrl}/internal/integrations/devices/${operation}`, {
+          method: "POST", redirect: "error", signal: controller.signal,
+          headers: { ...this.headers(tenantId),
+            "x-authority-session-id": authority.sessionId,
+            "x-authority-turn-id": authority.turnId },
+          body,
+        });
+        if (controller.signal.aborted) {
+          void response.body?.cancel().catch(() => {});
+          return deviceToolError("unavailable");
+        }
+        if (!response.body || response.redirected) return deviceToolError("unavailable");
+        reader = response.body.getReader();
+        const chunks: Uint8Array[] = [];
+        let size = 0;
+        while (true) {
+          const next = await reader.read();
+          if (controller.signal.aborted) return deviceToolError("unavailable");
+          if (next.done) break;
+          size += next.value.byteLength;
+          if (size > 256 * 1024) return deviceToolError("unavailable");
+          chunks.push(next.value);
+        }
+        const raw = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
+        const json: unknown = JSON.parse(raw);
+        if (reflectsSecret(raw, this.secret) || reflectsSecret(json, this.secret)) return deviceToolError("unavailable");
+        const parsed = DeviceToolResponse.safeParse(json);
+        if (!parsed.success || response.ok !== parsed.data.ok) return deviceToolError("unavailable");
+        return parsed.data;
+      };
+      return await Promise.race([work(), deadline]);
+    } catch {
+      return deviceToolError("unavailable");
+    } finally {
+      clearTimeout(timer);
+      cancel();
+      try { reader?.releaseLock(); } catch { /* cancelled pending read */ }
+    }
   }
 
   integrationActionCatalog(tenantId: string, input: IntegrationActionCatalogInput, authority: IntegrationAuthority) {
@@ -446,6 +712,46 @@ export class HttpAppRunClient implements AppRunClient {
     return out;
   }
 
+  forTurn(authority: { tenantId: string; sessionId: string; turnId: string }): AppRunClient {
+    // Copy before any await. A shared singleton never stores mutable turn authority.
+    const { tenantId, sessionId, turnId } = authority;
+    const client = this;
+    const resolve = async (): Promise<ProjectDrawingState | null> => {
+      const value = await client.request(tenantId, "POST", "/internal/integrations/project-drawing-state", {
+        tenant_id: tenantId, session_id: sessionId, turn_id: turnId,
+      });
+      if (Object.keys(value).length === 1 && value.binding === null) return null;
+      const uuid = z.string().uuid();
+      const parsed = z.object({
+        binding: z.strictObject({ schema: z.literal("leaf.project-execution-context.v1"),
+          organization_id: uuid, project_id: uuid, drawing_id: uuid, input_version_id: uuid,
+          intake_sha256: z.string().regex(/^[0-9a-f]{64}$/) }),
+        revision: z.number().int().positive().refine(Number.isSafeInteger),
+        graph_revision: z.number().int().nonnegative().refine(Number.isSafeInteger).nullable(),
+        head_version_id: uuid, is_head: z.boolean(), summary: z.record(z.string(), z.unknown()),
+      }).safeParse(value);
+      if (!parsed.success) throw new AppRunClientError("Project drawing state unavailable.", 502);
+      const state = parsed.data;
+      if (state.is_head !== (state.head_version_id === state.binding.input_version_id)) {
+        throw new AppRunClientError("Project drawing state unavailable.", 502);
+      }
+      return state;
+    };
+    return new Proxy(this, { get(target, key) {
+      if (key === "getProjectDrawingState") return resolve;
+      if (key === "getDrawingState") return async (tenant: string, drawing: string, what: string) => {
+        if (tenant !== tenantId) throw new AppRunClientError("Project drawing tenant mismatch.", 403);
+        const state = await resolve();
+        if (!state) return client.getDrawingState(tenant, drawing, what as "summary" | "versions" | "checkout");
+        if (drawing !== state.binding.drawing_id) throw new AppRunClientError("Project drawing mismatch.", 409);
+        return { ...state.summary, ...state.binding, revision: state.revision,
+          graph_revision: state.graph_revision, head_version_id: state.head_version_id, is_head: state.is_head, view: what };
+      };
+      const value = Reflect.get(target, key);
+      return typeof value === "function" ? value.bind(target) : value;
+    } });
+  }
+
   async getDrawingState(
     tenantId: string,
     drawingId: string,
@@ -549,12 +855,19 @@ export class HttpAppRunClient implements AppRunClient {
     );
   }
 
-  async customizeReadSource(tenantId: string, path: string): Promise<Record<string, unknown>> {
-    return this.request(
+  async customizeReadSource(tenantId: string, path: string, range?: PlatformSourceRange): Promise<Record<string, unknown>> {
+    const query = range
+      ? `&start_line=${encodeURIComponent(String(range.startLine))}` +
+        `&max_lines=${encodeURIComponent(String(range.maxLines))}` +
+        `&expected_commit=${encodeURIComponent(range.expectedCommit)}`
+      : "";
+    const result = await this.request(
       tenantId,
       "GET",
-      `/api/platform/source?path=${encodeURIComponent(path)}`,
+      `/api/platform/source?path=${encodeURIComponent(path)}${query}`,
     );
+    if (range) validatePlatformSourceRange(result, path, range);
+    return result;
   }
 
   async customizeListSource(tenantId: string, dir: string): Promise<Record<string, unknown>> {
@@ -582,6 +895,7 @@ export class HttpAppRunClient implements AppRunClient {
         params: req.params,
         dwg: req.dwg,
         catalog_digest: req.catalogDigest,
+        ...(req.solveContext !== undefined ? { solve_context: req.solveContext } : {}),
         ...(req.drawingVersion !== undefined ? { dwg_version: req.drawingVersion } : {}),
         ...(req.expectedDrawingHead !== undefined
           ? { expected_drawing_head: req.expectedDrawingHead }

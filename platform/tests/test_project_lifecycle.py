@@ -799,3 +799,139 @@ def test_project_factory_replay_backfills_an_orphan_but_never_a_revoked_member(
         f"/api/projects/{project_id}",
         headers=_headers(org.org_id, editor.binding_id, f"delete-{uuid.uuid4()}"),
     ).status_code == 403
+
+
+def _project_state(org_id, project_id):
+    """Everything a rename must leave alone, read straight from the database."""
+    args = {"org_id": org_id, "project_id": project_id}
+    with cursor() as cur:
+        cur.execute(
+            "SELECT project_id, org_id, name, status, created_at FROM projects "
+            "WHERE org_id = %(org_id)s AND project_id = %(project_id)s", args)
+        project = cur.fetchone()
+        cur.execute(
+            "SELECT file_id, path, content_sha256, revision FROM project_files "
+            "WHERE org_id = %(org_id)s AND project_id = %(project_id)s ORDER BY path", args)
+        files = cur.fetchall()
+        cur.execute(
+            "SELECT version_id, drawing_id, seq FROM drawing_versions "
+            "WHERE org_id = %(org_id)s AND project_id = %(project_id)s ORDER BY seq, version_id", args)
+        versions = cur.fetchall()
+        cur.execute(
+            "SELECT drawing_id, name, status FROM drawing_artifacts "
+            "WHERE org_id = %(org_id)s AND project_id = %(project_id)s ORDER BY drawing_id", args)
+        drawings = cur.fetchall()
+        cur.execute(
+            "SELECT action, idempotency_key FROM project_lifecycle_receipts "
+            "WHERE org_id = %(org_id)s AND project_id = %(project_id)s ORDER BY created_at, receipt_id", args)
+        receipts = cur.fetchall()
+    return project, files, versions, drawings, _membership_rows(org_id, project_id), receipts
+
+
+def _rename(client, org_id, binding_id, project_id, name, key):
+    return client.post(
+        f"/api/projects/{project_id}/rename", json={"name": name},
+        headers=_headers(org_id, binding_id, key),
+    )
+
+
+def test_rename_keeps_the_project_and_everything_in_it(client, make_org):
+    org = make_org("Rename tenant")
+    other_org = make_org("Rename other tenant")
+    owner = _binding(org.org_id, f"rename-owner-{uuid.uuid4()}", "owner")
+    reviewer = _binding(org.org_id, f"rename-reviewer-{uuid.uuid4()}", "reviewer")
+    outsider = _binding(other_org.org_id, f"rename-outsider-{uuid.uuid4()}", "owner")
+    created = client.post(
+        "/api/projects/blank", json={"name": "Recreation C01 A1"},
+        headers=_headers(org.org_id, owner.binding_id, "rename-create"),
+    )
+    assert created.status_code == 201, created.text
+    project_id = uuid.UUID(created.json()["project"]["project_id"])
+    taken = client.post(
+        "/api/projects/blank", json={"name": "Already Here"},
+        headers=_headers(org.org_id, owner.binding_id, "rename-create-other"),
+    )
+    assert taken.status_code == 201, taken.text
+    assert client.put(
+        f"/api/projects/{project_id}/files",
+        json={"path": "model/scene.json", "media_type": "application/json", "content": "{}"},
+        headers=_headers(org.org_id, owner.binding_id, "rename-put"),
+    ).status_code in (200, 201)
+    assert client.post(
+        f"/api/projects/{project_id}/members",
+        json={"binding_id": str(reviewer.binding_id), "role": "reviewer"},
+        headers=_headers(org.org_id, owner.binding_id, "rename-invite"),
+    ).status_code in (200, 201)
+    # A canonical drawing and one version, so the rename is checked against real material.
+    drawing = store.create_drawing_artifact(org.org_id, project_id, "panel.dxf")
+    with cursor() as cur:
+        cur.execute(
+            "INSERT INTO drawing_versions (version_id, drawing_id, project_id, org_id, seq, oss_object) "
+            "VALUES (%s, %s, %s, %s, 1, %s)",
+            (uuid.uuid4(), drawing.drawing_id, project_id, org.org_id, "tenants/rename/v1.dwg"),
+        )
+    before = _project_state(org.org_id, project_id)
+
+    # Refusals change nothing: another org, a non-writer, a taken name in any case or spacing.
+    assert _rename(client, other_org.org_id, outsider.binding_id, project_id, "Stolen", "rename-foreign").status_code == 404
+    assert _rename(client, org.org_id, reviewer.binding_id, project_id, "Reviewed", "rename-reviewer").status_code == 403
+    collision = _rename(client, org.org_id, owner.binding_id, project_id, "  already here ", "rename-collision")
+    assert collision.status_code == 409, collision.text
+    assert _rename(client, org.org_id, owner.binding_id, project_id, " ", "rename-blank").status_code == 422
+    assert _rename(client, org.org_id, owner.binding_id, project_id, "x" * 201, "rename-long").status_code == 422
+    assert _project_state(org.org_id, project_id) == before
+
+    renamed = _rename(client, org.org_id, owner.binding_id, project_id, "Recreation C01 A1 (attempt 4)", "rename-ok")
+    assert renamed.status_code == 200, renamed.text
+    body = renamed.json()
+    assert body["project_id"] == str(project_id) and body["status"] == "renamed"
+    assert body["name"] == "Recreation C01 A1 (attempt 4)"
+    assert body["previous_name"] == "Recreation C01 A1"
+    assert body["receipt"]["action"] == "project_renamed" and body["replayed"] is False
+
+    after = _project_state(org.org_id, project_id)
+    assert after[0]["name"] == "Recreation C01 A1 (attempt 4)"
+    assert {k: v for k, v in after[0].items() if k != "name"} == {k: v for k, v in before[0].items() if k != "name"}
+    assert after[1:5] == before[1:5]  # files, versions, drawings, members
+    assert after[5] == before[5] + [{"action": "project_renamed", "idempotency_key": "rename-ok"}]
+
+    replay = _rename(client, org.org_id, owner.binding_id, project_id, "Recreation C01 A1 (attempt 4)", "rename-ok")
+    assert replay.status_code == 200 and replay.json()["replayed"] is True
+    assert replay.json()["receipt"] == body["receipt"]
+    assert _rename(client, org.org_id, owner.binding_id, project_id, "Something else", "rename-ok").status_code == 409
+    assert _project_state(org.org_id, project_id) == after
+
+    # The old name is free again: a new project can take it, and it is a different project.
+    fresh = client.post(
+        "/api/projects", json={"name": "Recreation C01 A1"},
+        headers=_headers(org.org_id, owner.binding_id),
+    )
+    assert fresh.status_code == 200, fresh.text
+    assert fresh.json()["created"] is True
+    assert fresh.json()["project"]["project_id"] != str(project_id)
+
+
+def test_rename_receipt_action_is_admitted_beside_the_nine_existing_ones(make_org):
+    org = make_org("Rename receipt actions")
+    owner = _binding(org.org_id, f"rename-actions-{uuid.uuid4()}", "owner")
+    project = store.create_project(org.org_id, "Receipt actions")
+    actions = ["project_created", "member_invited", "member_revoked", "file_put", "file_deleted",
+               "project_cloned", "project_exported", "project_reset", "project_deleted", "project_renamed"]
+    with cursor() as cur:
+        for action in actions:
+            cur.execute(
+                "INSERT INTO project_lifecycle_receipts (receipt_id, org_id, project_id, action, "
+                "actor_binding_id, idempotency_key, input_digest, result_json) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, '{}'::jsonb)",
+                (uuid.uuid4(), org.org_id, project.project_id, action, owner.binding_id,
+                 f"action-{action}", "a" * 64),
+            )
+    with pytest.raises(Exception) as refused:
+        with cursor() as cur:
+            cur.execute(
+                "INSERT INTO project_lifecycle_receipts (receipt_id, org_id, project_id, action, "
+                "actor_binding_id, idempotency_key, input_digest, result_json) "
+                "VALUES (%s, %s, %s, 'project_teleported', %s, 'action-bad', %s, '{}'::jsonb)",
+                (uuid.uuid4(), org.org_id, project.project_id, owner.binding_id, "a" * 64),
+            )
+    assert "project_lifecycle_receipts_action_check" in str(refused.value)

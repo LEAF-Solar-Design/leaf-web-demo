@@ -63,7 +63,14 @@ const DrawingIdentityContext = createContext(null)
 
 // api.js's own key. Read here, never written: this module observes the
 // principal, it never manages it.
+import { serviceState, serviceScope } from '../lib/serviceAuthSession.js'
+
 const AUTH_TOKEN_KEY = 'leaf.jwt'
+
+function principalScope(readAuthToken) {
+  if (readAuthToken === readStoredAuthToken && serviceState().mode) return serviceScope()
+  return authTenantScope(readAuthToken())
+}
 
 // Written as the plain static member expression (never `import.meta.env?.`),
 // the same shape web/src/cad/engineWorker.js uses: the optional chain defeats
@@ -125,11 +132,11 @@ function seedForMode(inputs, targetMode) {
  * subscription cannot hide.
  */
 function useAuthPrincipalScope(readAuthToken, subscribeAuthChange, resetAll) {
-  const principalRef = useRef(authTenantScope(readAuthToken()))
+  const principalRef = useRef(principalScope(readAuthToken))
   useEffect(() => {
     const sync = () => {
       const previous = principalRef.current
-      const next = authTenantScope(readAuthToken())
+      const next = principalScope(readAuthToken)
       principalRef.current = next
       if (isScopeSwitch(previous, next)) resetAll()
     }

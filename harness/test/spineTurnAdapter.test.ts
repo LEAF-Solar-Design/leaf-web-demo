@@ -65,6 +65,67 @@ async function drain(gen: AsyncIterable<HarnessTurnEvent>): Promise<HarnessTurnE
 const typesOf = (events: HarnessTurnEvent[]): string[] => events.map((e) => e.type);
 
 describe("SpineTurnAdapter — wire vocabulary and gate discipline", () => {
+  it("preserves the private canonical read binding through the real loop and app back-edge", async () => {
+    const { adapter, appRun, gate } = makeAdapter();
+    appRun.drawingHead = Number.NaN;
+    const events = await drain(adapter.runTurn(turnInput({ text: "RUN:count-by-layer" }), {
+      projectExecution: "canonical-read",
+    }));
+
+    expect(appRun.methodLog).not.toContain("getDrawingState");
+    expect(appRun.submitCalls).toHaveLength(1);
+    expect(appRun.submitCalls[0]).toMatchObject({
+      dwg: "rooftop_demo", tool: "count-by-layer",
+      authoritySessionId: "app-session-1", authorityTurnId: "app-turn-1",
+    });
+    expect(appRun.submitCalls[0]).not.toHaveProperty("drawingVersion");
+    const check = gate.checks.find(c => c.action === "run_read_tool");
+    expect(check?.args).not.toHaveProperty("drawing_version");
+    expect(events.find(e => e.type === "tool_result")?.data).toMatchObject({ ok: true });
+  });
+
+  it.each(["absent", "model-packet", "wrong-private-value"] as const)(
+    "%s marker retains legacy current-head reads", async mode => {
+      const { adapter, appRun } = makeAdapter();
+      appRun.drawingHead = 9;
+      const input = turnInput({ text: "RUN:count-by-layer",
+        ...(mode === "model-packet" ? { context_packet: { projectExecution: "canonical-read" } } : {}),
+      });
+      const opts = mode === "wrong-private-value"
+        ? { projectExecution: "untrusted" } as unknown as Parameters<typeof adapter.runTurn>[1]
+        : undefined;
+      await drain(adapter.runTurn(input, opts));
+      expect(appRun.methodLog).toContain("getDrawingState");
+      expect(appRun.submitCalls[0]).toMatchObject({ drawingVersion: 9 });
+    },
+  );
+
+  it("refuses a foreign model drawing before dispatch under the private read marker", async () => {
+    const { adapter, appRun, gate } = makeAdapter();
+    const events = await drain(adapter.runTurn(turnInput({ text: "RUN:count-by-layer DWG:foreign" }), {
+      projectExecution: "canonical-read",
+    }));
+    expect(appRun.methodLog).not.toContain("getDrawingState");
+    expect(appRun.submitCalls).toHaveLength(0);
+    expect(gate.checks.some(c => c.action === "run_read_tool")).toBe(false);
+    expect(events.find(e => e.type === "tool_result")?.data).toMatchObject({ ok: false });
+  });
+
+  it("keeps write head and approval pins when the private read marker is present", async () => {
+    const { adapter, appRun, gate } = makeAdapter();
+    appRun.drawingHead = 7;
+    gate.nextConfirmationId = "project-write-confirmation";
+    const events = await drain(adapter.runTurn(turnInput({ text: "RUN:add-panel" }), {
+      projectExecution: "canonical-read",
+    }));
+    expect(appRun.methodLog).toContain("getDrawingState");
+    expect(appRun.submitCalls).toHaveLength(0);
+    expect(gate.checks.find(c => c.action === "run_write_tool")?.args).toMatchObject({
+      drawing_version: 7, expected_drawing_head: 7,
+    });
+    expect(events.some(e => e.type === "proposed_run")).toBe(true);
+  });
+
   it("read turn: streams wire-only events, gate consulted, dispatch through appRun", async () => {
     const { adapter, appRun, gate } = makeAdapter();
     const events = await drain(adapter.runTurn(turnInput({ text: "STATE:summary" })));

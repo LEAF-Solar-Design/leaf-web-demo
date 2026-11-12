@@ -3,6 +3,8 @@ import { readControlInventory, resolveCensus, censusFailure, controlNameAttribut
 import { PRODUCT_SURFACES } from '../../src/site/productSurfaces.js'
 
 export { resolveCensus } from '../../walk/controlInventory.mjs'
+// The census enumerates hundreds of controls, so DOM snapshots in its failure trace exceed the walk archive cap, while its evidence lives in the walk-evidence attachment.
+export const CENSUS_TRACE = Object.freeze({ mode: 'retain-on-failure', snapshots: false, screenshots: false, sources: false })
 // The studio shell wraps the same rail column in a named region, which is not part of a control's identity.
 export const SHELL_WRAPPER_SCOPES = Object.freeze(['region:"Studio sidebar"'])
 export const INTERACTIVE_SELECTOR = 'button,a[href],area[href],input:not([type="hidden"]),select,textarea,summary,[contenteditable]:not([contenteditable="false"]),[role],[tabindex]'

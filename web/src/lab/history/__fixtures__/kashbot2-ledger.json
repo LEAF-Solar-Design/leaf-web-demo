@@ -1,0 +1,26 @@
+{
+  "_provenance": "synthetic-from-contract",
+  "rows": [
+    {
+      "schema": "leaf.kashbot2-ledger-day.v1", "day_utc": "2026-11-01", "role": "owner",
+      "fills": null, "fee_cents": null, "settled_net_cents": null, "residual_cents": null,
+      "label": "RECONCILED", "honesty_codes": ["not_preregistered"], "withheld": true,
+      "config_digest": null,
+      "slot_ordinal": null, "ledger_schema_version": 1, "received_at": "2026-11-02T00:05:00.000Z"
+    },
+    {
+      "schema": "leaf.kashbot2-ledger-day.v1", "day_utc": "2026-11-02", "role": "probe",
+      "fills": 987, "fee_cents": "0", "settled_net_cents": "987654", "residual_cents": "98765",
+      "label": "RECONCILED", "honesty_codes": ["zero_fee_with_trades"], "withheld": false,
+      "config_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "slot_ordinal": 1, "ledger_schema_version": 1, "received_at": "2026-11-03T00:05:00.000Z"
+    },
+    {
+      "schema": "leaf.kashbot2-ledger-day.v1", "day_utc": "2026-11-03", "role": "owner",
+      "fills": 12, "fee_cents": "7", "settled_net_cents": "61182", "residual_cents": "0.74",
+      "label": "RECONCILED", "honesty_codes": [], "withheld": false,
+      "config_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "slot_ordinal": 1, "ledger_schema_version": 1, "received_at": "2026-11-04T00:05:00.000Z"
+    }
+  ]
+}

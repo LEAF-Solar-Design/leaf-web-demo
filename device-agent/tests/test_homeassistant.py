@@ -8,6 +8,9 @@ import os
 from pathlib import Path
 import pickle
 import plistlib
+import re
+import shlex
+import socket
 import struct
 import subprocess
 import threading
@@ -212,6 +215,8 @@ def ha_server():
                             assert body == {"next_step_id": "light"}
                         else:
                             assert body == {"name": "Living room", "entities": ["light.one", "light.two"], "hide_members": False, "all": False}
+                    elif handler == "hue" and current["step_id"] == "init":
+                        assert set(body) == {"id"} and isinstance(body["id"], str)
                     elif current["step_id"] in {"manual", "user"}:
                         assert body == {"host": "10.0.0.20"}
                     else:
@@ -248,6 +253,7 @@ def local_handler(tmp_path, ha_server, **kwargs):
 
 
 def install_stub(monkeypatch, *, available=None, fail_pip=False, clock=None, brew_version="3.14.8", pip_seconds=10):
+    monkeypatch.setattr(HomeAssistant, "_lan_reachable", lambda self: False)
     available = available if available is not None else {"/opt/homebrew/bin/python3.14": "3.14.8"}
     calls = []
     real_is_file = Path.is_file
@@ -288,6 +294,8 @@ def install_stub(monkeypatch, *, available=None, fail_pip=False, clock=None, bre
             if fail_pip:
                 kwargs["stdout"].write("\n".join(f"pip diagnostic {number:02d}" for number in range(55)).encode())
                 raise subprocess.CalledProcessError(1, argv)
+        if argv[0] == "pgrep":
+            return SimpleNamespace(returncode=1, stdout="")
         return SimpleNamespace(returncode=0, stdout="")
 
     return run, calls
@@ -334,11 +342,118 @@ def test_install_existing_python_plist_and_health_wait(tmp_path, monkeypatch, ha
     assert argv[-1] == ["launchctl", "bootstrap", "gui/501", str(handler._service_path())]
     plist = plistlib.loads(handler._service_path().read_bytes())
     assert plist["Label"] == LABEL
-    assert plist["ProgramArguments"] == [str(handler.root / "venv/bin/hass"), "-c", str(handler.root / "config")]
+    assert plist["ProgramArguments"] == ["/usr/bin/open", "-W", str(handler._app_path())]
     assert plist["RunAtLoad"] and plist["KeepAlive"] and plist["ThrottleInterval"] == 30
     assert plist["StandardOutPath"] == plist["StandardErrorPath"] == str(handler.root / "hass.log")
-    assert (handler.root / "config/configuration.yaml").read_text() == "default_config:\nhttp:\n  server_host: 127.0.0.1\nlogger:\n  default: warning\nrecorder:\n  purge_keep_days: 3\n"
+    assert (handler.root / "config/configuration.yaml").read_text() == "default_config:\nlogger:\n  default: warning\nrecorder:\n  purge_keep_days: 3\n"
     assert set(handler.state()) == {"package", "version", "status", "last_health_at"}
+
+
+def test_install_seeds_loopback_http_storage(tmp_path, monkeypatch, ha_server):
+    runner, calls = install_stub(monkeypatch)
+    handler = HomeAssistant(tmp_path, platform="darwin", user_home=tmp_path / "user", uid=501,
+                            port=ha_server.port)
+    snapshots = []
+
+    def run(argv, **kwargs):
+        if argv[:2] == ["launchctl", "bootstrap"]:
+            snapshots.append(json.loads((handler.root / "config/.storage/http").read_text()))
+        return runner(argv, **kwargs)
+
+    handler.runner = run
+    handler.handle("pkg.install", {"version": PINNED_VERSION})
+    storage = json.loads((handler.root / "config/.storage/http").read_text())
+    assert snapshots == [storage]
+    assert storage["version"] == 2 and storage["minor_version"] == 2 and storage["key"] == "http"
+    assert storage["data"]["stable"]["server_host"] == ["127.0.0.1"]
+    assert storage["data"]["pending"] is None and storage["data"]["yaml_migration_done"] is True
+    assert storage["data"]["stable"]["created_at"].endswith("+00:00")
+    if os.name != "nt":
+        assert (handler.root / "config/.storage").stat().st_mode & 0o777 == 0o700
+
+
+def test_upgrade_repairs_existing_http_storage(tmp_path, monkeypatch, ha_server):
+    runner, calls = install_stub(monkeypatch)
+    handler = HomeAssistant(tmp_path, platform="darwin", user_home=tmp_path / "user", uid=501,
+                            runner=runner, port=ha_server.port)
+    handler._service_path().parent.mkdir(parents=True)
+    handler._service_path().touch()
+    storage = {"version": 2, "minor_version": 2, "key": "http", "extra": "preserved", "data": {
+        "stable": {"server_port": 8123, "cors_allowed_origins": ["https://example.org"]},
+        "pending": {"server_host": ["0.0.0.0"]}, "yaml_migration_done": False, "other": 42}}
+    path = handler.root / "config/.storage/http"
+    write_json(path, storage)
+    ensure = handler._ensure_loopback_bind
+
+    def repair():
+        assert any(argv[:2] == ["launchctl", "bootout"] for argv, _ in calls)
+        assert not any(argv[:2] == ["launchctl", "bootstrap"] for argv, _ in calls)
+        ensure()
+
+    monkeypatch.setattr(handler, "_ensure_loopback_bind", repair)
+    handler.handle("pkg.upgrade", {"version": PINNED_VERSION})
+    storage["data"]["stable"]["server_host"] = ["127.0.0.1"]
+    storage["data"]["pending"] = None
+    storage["data"]["yaml_migration_done"] = True
+    assert json.loads(path.read_text()) == storage
+
+
+@pytest.mark.parametrize("content", ["{", "null", '{"data": {"stable": []}}', '{"data": {}}'])
+def test_malformed_http_storage_refuses_start(tmp_path, monkeypatch, content):
+    runner, calls = install_stub(monkeypatch)
+    handler = HomeAssistant(tmp_path, platform="darwin", user_home=tmp_path / "user", uid=501,
+                            runner=runner)
+    path = handler.root / "config/.storage/http"
+    path.parent.mkdir(parents=True)
+    path.write_text(content)
+    with pytest.raises(InstallError):
+        handler.handle("pkg.install", {"version": PINNED_VERSION})
+    assert path.read_text() == content
+    assert not any(argv[:2] == ["launchctl", "bootstrap"] for argv, _ in calls)
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+@pytest.mark.parametrize("remove_fails", [False, True])
+def test_lan_reachable_stops_and_fails(tmp_path, monkeypatch, ha_server, platform, remove_fails):
+    interpreter = tmp_path / "python3.14"
+    interpreter.touch()
+    stub, calls = install_stub(monkeypatch, available={str(interpreter): "3.14.8"})
+
+    def runner(argv, **kwargs):
+        result = stub(argv, **kwargs)
+        if remove_fails and (argv[:2] == ["launchctl", "bootout"] or argv[:3] == ["systemctl", "--user", "disable"]):
+            raise HAError("Home Assistant service stop failed")
+        return result
+
+    handler = HomeAssistant(tmp_path, platform=platform, user_home=tmp_path / "user", uid=501,
+                            runner=runner, port=ha_server.port)
+    monkeypatch.setattr(handler, "_python", lambda deadline: str(interpreter))
+    monkeypatch.setattr(handler, "_lan_reachable", lambda: True)
+    with pytest.raises(InstallError, match="^Home Assistant is reachable beyond localhost; stopped$"):
+        handler.handle("pkg.install", {"version": PINNED_VERSION})
+    argv = [item[0] for item in calls]
+    if platform == "darwin":
+        stop = -1 if remove_fails else -2
+        assert argv[stop - 1][:2] == ["launchctl", "bootstrap"]
+        assert argv[stop] == ["launchctl", "bootout", "gui/501", str(handler._service_path())]
+        if not remove_fails:
+            assert argv[-1] == ["pgrep", "-f", "^" + re.escape(str(handler._app_path() / "Contents/MacOS/leaf-ha-launcher")) + "$"]
+    else:
+        assert ["systemctl", "--user", "disable", "--now", LABEL + ".service"] in argv
+        if not remove_fails:
+            assert argv[-1] == ["systemctl", "--user", "daemon-reload"]
+    assert handler._service_path().exists() is remove_fails
+    state = json.loads((handler.root / "state.json").read_text())
+    assert state["package"] == "homeassistant" and state["version"] == PINNED_VERSION
+    assert state["status"] == "error"
+    assert state["error"] == "Home Assistant is reachable beyond localhost; stopped"
+
+
+def test_lan_reachable_false_when_refused(tmp_path):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as closed:
+        closed.bind(("0.0.0.0", 0))
+        handler = HomeAssistant(tmp_path, port=closed.getsockname()[1])
+        assert handler._lan_reachable() is False
 
 
 def test_brew_fallback_and_upgrade_order(tmp_path, monkeypatch, ha_server):
@@ -561,15 +676,19 @@ def test_keychain_secret_uses_stdin_and_cache_expires(tmp_path, caplog):
 
     def runner(argv, **kwargs):
         calls.append((argv, kwargs))
-        assert argv[0] == "/usr/bin/security" and argv[argv.index("-s") + 1] == LABEL
-        name = argv[argv.index("-a") + 1]
-        if argv[1] == "add-generic-password":
-            assert argv[-1] == "-w" and kwargs["start_new_session"] is True
-            secret, confirm, empty = kwargs["input"].split("\n")
-            assert secret == confirm and empty == ""
+        assert argv[0] == "/usr/bin/security"
+        if argv[1] == "-i":
+            assert argv == ["/usr/bin/security", "-i"] and kwargs["start_new_session"] is True
+            command, quit_command, empty = kwargs["input"].split("\n")
+            assert quit_command == "quit" and empty == ""
+            args = shlex.split(command)
+            assert args[:4] == ["add-generic-password", "-U", "-s", LABEL]
+            name, secret = args[args.index("-a") + 1], args[args.index("-w") + 1]
             assert secret not in argv and "-A" not in argv
             values[name] = secret
             return SimpleNamespace(returncode=0, stdout="")
+        assert argv[1] == "find-generic-password" and argv[argv.index("-s") + 1] == LABEL
+        name = argv[argv.index("-a") + 1]
         return SimpleNamespace(returncode=0 if name in values else 44, stdout=values.get(name, "") + "\n")
 
     handler = HomeAssistant(tmp_path, platform="darwin", runner=runner, clock=clock)
@@ -585,6 +704,83 @@ def test_keychain_secret_uses_stdin_and_cache_expires(tmp_path, caplog):
     assert handler.auth_headers() == {"Authorization": "Bearer rotated-private-secret"}
     assert len(calls) == reads + 1 and not (handler.root / "credentials.json").exists()
     assert "private" not in caplog.text
+
+
+@pytest.mark.parametrize("options", [
+    [["001788fffe123456", "Hue Bridge"], ["manual", "Manually add"]],
+    [("manual", "Manually add"), ("001788fffe123456", "Hue Bridge")],
+    ["manual", "001788fffe123456"],
+    {"manual": "Manually add", "001788fffe123456": "Hue Bridge"},
+    [{"value": "manual", "label": "Manually add"},
+     {"value": "001788fffe123456", "label": "Hue Bridge"}],
+    [[], ["invalid"], [None, "Invalid"], ["manual", "Manually add"],
+     ["001788fffe123456", "Hue Bridge"]],
+])
+def test_hue_init_choice_parses_select_pairs(options):
+    result = {"data_schema": [{"type": "select", "options": options,
+                               "name": "id", "required": True}]}
+    assert HomeAssistant._hue_init_choice(result) == "001788fffe123456"
+
+
+@pytest.mark.parametrize("options", [
+    {"type": "select", "options": [["001788fffe123456", "Hue Bridge (10.0.0.226)"],
+                                    ["manual", "Manually add"]], "required": True},
+    {"options": {"001788fffe123456": "Hue Bridge (10.0.0.226)", "manual": "Manually add"}},
+    {"in": ["manual", "001788fffe123456"]},
+    {"type": {"in": {"001788fffe123456": "Hue Bridge", "manual": "Manually add"}}},
+    {"options": {"in": [None, {}, "001788fffe123456", "manual"]}},
+])
+def test_hue_init_picks_discovered_bridge(tmp_path, ha_server, options):
+    handler = local_handler(tmp_path, ha_server)
+    init = {"flow_id": "hue-user", "handler": "hue", "type": "form", "step_id": "init",
+            "data_schema": [{"name": "id", **options}]}
+    ha_server.flows["hue"] = [init, ha_server.flows["hue"][1]]
+    result = handler.handle("ha.flow.start", {"handler": "hue", "data": {"host": "10.0.0.20"}})
+    assert result["step_id"] == "link"
+    assert set(result) <= FLOW_KEYS and "data_schema" not in result
+    assert "001788fffe123456" not in json.dumps(result)
+    posts = [(path, data) for method, path, data, headers in ha_server.requests if method == "POST"]
+    assert posts == [(FLOW_PATH, {"handler": "hue", "show_advanced_options": False}),
+                     (FLOW_PATH + "/hue-user", {"id": "001788fffe123456"})]
+
+
+@pytest.mark.parametrize("schema", [
+    [{"name": "id", "options": {"manual": "Manually add"}}],
+    None, {}, [None, {"name": "other", "options": ["ignored"]}],
+    [{"name": "id", "options": 42}],
+])
+def test_hue_init_falls_back_to_manual(tmp_path, ha_server, schema):
+    handler = local_handler(tmp_path, ha_server)
+    init = {"flow_id": "hue-user", "handler": "hue", "type": "form", "step_id": "init",
+            "data_schema": schema}
+    ha_server.flows["hue"].insert(0, init)
+    result = handler.handle("ha.flow.start", {"handler": "hue"})
+    assert result["step_id"] == "manual" and set(result) <= FLOW_KEYS
+    assert ha_server.requests[-1][2] == {"id": "manual"}
+
+
+def test_hue_step_on_init_with_empty_data_chooses_bridge(tmp_path, ha_server):
+    handler = local_handler(tmp_path, ha_server)
+    init = {"flow_id": "hue-user", "handler": "hue", "type": "form", "step_id": "init",
+            "data_schema": [{"name": "id", "options": {"001788fffe123456": "Hue Bridge", "manual": "Manually add"}}]}
+    ha_server.flows["hue"] = [init, ha_server.flows["hue"][1]]
+    ha_server.current["hue-user"] = init
+    ha_server.positions["hue-user"] = 0
+    result = handler.handle("ha.flow.step", {"flow_id": "hue-user", "data": {}})
+    assert result["step_id"] == "link" and set(result) <= FLOW_KEYS
+    assert ha_server.requests[-1][2] == {"id": "001788fffe123456"}
+
+
+def test_hue_init_retries_are_bounded(tmp_path, ha_server):
+    handler = local_handler(tmp_path, ha_server)
+    init = {"flow_id": "hue-user", "handler": "hue", "type": "form", "step_id": "init",
+            "data_schema": [{"name": "id", "in": ["manual"]}]}
+    ha_server.flows["hue"] = [init, init, init]
+    result = handler.handle("ha.flow.start", {"handler": "hue", "data": {}})
+    assert result["step_id"] == "init" and set(result) <= FLOW_KEYS
+    assert [data for method, path, data, headers in ha_server.requests if path == FLOW_PATH + "/hue-user"] == [
+        {"id": "manual"}, {"id": "manual"},
+    ]
 
 
 def test_hue_link_retry_and_success(tmp_path, ha_server):
@@ -609,6 +805,29 @@ def test_wiz_by_host_and_group_light_menu(tmp_path, ha_server):
     assert group == {"flow_id": "group-user", "type": "create_entry", "title": "Living room"}
     posts = [(path, data) for method, path, data, headers in ha_server.requests if method == "POST"]
     assert (FLOW_PATH + "/group-user", {"next_step_id": "light"}) in posts
+
+
+def test_group_flow_accepts_studio_group_type(tmp_path, ha_server):
+    handler = local_handler(tmp_path, ha_server)
+    data = {"group_type": "light", "name": "Living room", "entities": ["light.one", "light.two"]}
+    result = handler.handle("ha.flow.start", {"handler": "group", "data": data})
+    assert result == {"flow_id": "group-user", "type": "create_entry", "title": "Living room"}
+    assert data == {"group_type": "light", "name": "Living room", "entities": ["light.one", "light.two"]}
+
+
+def test_group_flow_rejects_other_group_type(tmp_path, ha_server):
+    handler = local_handler(tmp_path, ha_server)
+    with pytest.raises(HAError, match="^Unsupported group type$"):
+        handler.handle("ha.flow.start", {"handler": "group", "data": {"group_type": "switch"}})
+    assert ha_server.requests == []
+
+
+def test_group_flow_drops_unknown_keys(tmp_path, ha_server):
+    handler = local_handler(tmp_path, ha_server)
+    result = handler.handle("ha.flow.start", {"handler": "group", "data": {
+        "name": "Living room", "entities": ["light.one", "light.two"], "color": "blue",
+    }})
+    assert result == {"flow_id": "group-user", "type": "create_entry", "title": "Living room"}
 
 
 def test_group_start_without_data_and_step(tmp_path, ha_server):
@@ -710,6 +929,8 @@ def test_mac_uninstall_bootout_and_keychain_deletion(tmp_path, returncode):
 
     def runner(argv, **kwargs):
         calls.append(argv)
+        if argv[0] == "pgrep":
+            return SimpleNamespace(returncode=1, stdout="")
         return SimpleNamespace(returncode=returncode)
 
     handler = HomeAssistant(tmp_path, platform="darwin", user_home=tmp_path / "user", uid=501,
@@ -718,8 +939,9 @@ def test_mac_uninstall_bootout_and_keychain_deletion(tmp_path, returncode):
     handler._service_path().touch()
     handler.handle("pkg.uninstall", {"keep_data": False})
     assert calls[0] == ["launchctl", "bootout", "gui/501", str(handler._service_path())]
-    assert [item[-1] for item in calls[1:]] == ["password", "token", "refresh_token"]
-    assert all(item[:2] == ["/usr/bin/security", "delete-generic-password"] for item in calls[1:])
+    assert calls[1] == ["pgrep", "-f", "^" + re.escape(str(handler._app_path() / "Contents/MacOS/leaf-ha-launcher")) + "$"]
+    assert [item[-1] for item in calls[2:]] == ["password", "token", "refresh_token"]
+    assert all(item[:2] == ["/usr/bin/security", "delete-generic-password"] for item in calls[2:])
     assert not handler._service_path().exists()
 
 
