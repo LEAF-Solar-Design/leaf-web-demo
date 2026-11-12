@@ -74,3 +74,121 @@ def test_manual_unknown_power_split_admission(graph, monkeypatch):
     assert value == before
     assert value["frames"][0]["module_power_watts"] == 0
     assert value["settings"]["extra"]["string_sizing"]["records"] == {}
+
+
+def extra_panel_graph(base):
+    value = manual_large_graph(base)
+    frame = value["frames"][0]
+    row = frame["module_rows"]
+    panel = entity("panel", 265, frame_ref=frame["id"], matrix_cell={"row": row, "col": 0},
+        centre=[0.0, -3.0 * row], angle=0.0, assignment={"string_ref": None, "seq": None})
+    value["panels"].append(panel)
+    frame["panel_refs"].append(panel["id"])
+    frame["panel_assignments"].append({"panel_ref": panel["id"], "string_ref": None,
+        "seq": None, "inverter_id": None, "string_input_number": None})
+    frame["matrix"].append([{"code": "panel" if col == 0 else "empty",
+        "panel_ref": panel["id"] if col == 0 else None, "seq": None,
+        "inverter_id": None, "string_input_number": None,
+        "x": 0.0, "y": panel["centre"][1] if col == 0 else 0.0, "angle": 0.0}
+        for col in range(frame["module_columns"])])
+    frame["module_rows"] += 1
+    frame["module_slots"] += frame["module_columns"]
+    value["electrical_zones"][0]["panel_refs"].append(panel["id"])
+    value["settings"]["extra"]["string_sizing"] = sizing.manual_sizing_evidence(value)
+    return validate_graph(value)
+
+
+def synthetic_piece(piece, tenant, child_job, monkeypatch, *, partial):
+    from leaf_cloud_grants import CloudGrant
+
+    request = cloud.PieceStringerRequest.model_validate(piece["request"])
+    final = request.wire_payload()["grid"]
+    path = []
+    for row, cells in enumerate(final["Rows"]):
+        for col, cell in enumerate(cells["Panels"]):
+            if cell["Code"] == 1:
+                path.append([row + 1, col + 1])
+                cell["Seq"] = len(path)
+    data = {"status": "completed", "best_result": {"info": {"distance_total": 0.0}},
+        "final_grid": final, "model_used": "synthetic-offline", "gumbel_scale_used": 0.0,
+        "distance_total": 0.0, "total_valid_solutions": 1}
+    if partial:
+        data["message"] = "synthetic partial beam"
+    else:
+        lengths, counts = request.grid.Sequences
+        sizes = [length for length, count in zip(lengths, counts) for _ in range(count)]
+        info = dict(steps_taken=len(path), sequence_length=sizes, num_panels=len(path),
+            visited_path=path, steps_taken_in_string=0, horizontal_movements=0,
+            vertical_movements=0, invalid_vertical_movements=0, distance_total=0.0,
+            vertical_sequential=0, diagonal_movements=0, allow_one_gap_hops=False,
+            max_gap_hop=0, gap_hop_movements=0, vertical_temp=-1, remaining_string_length=0,
+            sequence_length_index=0, str_length_state_index=0, terminated=True,
+            last_agent_x=path[-1][0], last_agent_y=path[-1][1])
+        data["best_result"] = dict(last_action=0, terminated=True, info=info, beam_idx=0,
+            grid_id=child_job, model_id="synthetic-offline", gumbel_scale=0.0,
+            string_start_split_count=0, model="synthetic-offline")
+        data.update(gumbel_summary={}, first_pass_best_distance=0.0, improvement=None,
+                    second_pass_triggered=False)
+    raw = cloud.canonical_bytes({"status": "completed", "job_id": child_job, "data": data})
+    # Exercise the real receipt producer with a synthetic transport, never a provider.
+    monkeypatch.setattr(cloud, "resolve_grant", lambda ref, owner:
+        CloudGrant(owner, "synthetic-not-a-credential"))
+    monkeypatch.setattr(cloud, "post_stringer", lambda sent, grant: raw)
+    return cloud.piece_proposal({"grant_ref": "synthetic-offline", "request": piece["request"]},
+        tenant, child_job)
+
+
+@pytest.mark.parametrize("all_partial", [False, True])
+def test_manual_unknown_power_native_restitch_and_cut(graph, monkeypatch, all_partial):
+    import solar_solve_results as solve
+    from solar_design_graph import deserialize_graph, serialize_graph
+
+    def no_network(*args, **kwargs):
+        pytest.fail("offline synthetic fixture attempted a network call")
+    monkeypatch.setattr(cloud.requests.sessions.Session, "request", no_network)
+    value = extra_panel_graph(graph)
+    before = deepcopy(value)
+    frame = value["frames"][0]
+    pieces = requests.build_split_requests(value, frame["id"], max_string_length=14,
+        dwgname="synthetic-offline-restitch")
+    assert len(pieces) > 1
+    binding = solve.bind_split_request(value, pieces, expected_rev=value["rev"],
+        frame_ref=frame["id"], tenant_id="synthetic-tenant", job_id="synthetic-parent",
+        split_state={"jogs": 1, "depth": 10})
+    proposals = [synthetic_piece(piece, binding["tenant_id"],
+        solve.piece_job_id(binding["job_id"], index), monkeypatch,
+        partial=all_partial or index > 0) for index, piece in enumerate(pieces)]
+    candidate = solve.complete_split_search(value, binding, proposals)
+    assert candidate["accepted"] is False
+    solved = solve.accept_split_candidate(value, candidate, expected_rev=value["rev"])
+    if all_partial:
+        prefix, carried = [], 6  # Native fallback when no piece reports lengths.
+    else:
+        lengths, counts = cloud.PieceStringerRequest.model_validate(pieces[0]["request"]).grid.Sequences
+        prefix = [length for length, count in zip(lengths, counts) for _ in range(count)]
+        carried = prefix[-1]
+    count, remainder = divmod(265 - sum(prefix), carried)
+    assert remainder > 0  # This synthetic shape exercises the final partial cut.
+    expected_sizes = prefix + [carried] * count + [remainder]
+    assert [string["module_count"] for string in solved["strings"]] == expected_sizes
+    refs = [ref for string in solved["strings"] for ref in string["ordered_panel_refs"]]
+    assert len(refs) == len(set(refs)) == 265
+    assert set(refs) == set(frame["panel_refs"])
+    assert all(1 <= string["module_count"] <= 14 for string in solved["strings"])
+    for string in solved["strings"]:
+        assert string["extra"]["polarity"]["negative_panel_ref"] == string["ordered_panel_refs"][0]
+        assert string["extra"]["polarity"]["positive_panel_ref"] == string["ordered_panel_refs"][-1]
+        points = {panel["id"]: panel["centre"] for panel in solved["panels"]}
+        assert string["route"] == [points[ref] for ref in string["ordered_panel_refs"]]
+    assert solved["frames"][0]["module_power_watts"] == 0
+    assert solved["frames"][0]["extra"]["module_power_status"] == "unknown"
+    assert solved["settings"]["extra"]["string_sizing"]["records"] == {}
+    assert len(solved["frames"][0]["extra"]["solve"]["split"]["pieces"]) == len(pieces)
+    assert not any(solve.coverage(solved).values())
+    assert deserialize_graph(serialize_graph(solved)) == solved
+    assert value == before
+    stale = deepcopy(value)
+    stale["rev"] += 1
+    stale["parent_rev"] = value["rev"]
+    with pytest.raises(solve.GraphValidationError, match="STALE_SOLVE_RESULT"):
+        solve.accept_split_candidate(stale, candidate, expected_rev=stale["rev"])
