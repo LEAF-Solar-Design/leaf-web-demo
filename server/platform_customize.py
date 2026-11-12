@@ -21,6 +21,14 @@ switch and credential, a fresh operator approval naming the exact commit, and
 a twice-executed same-tree guard; it is not on the harness back-edge, so the
 drawer is the only door.
 
+PR provider: ``LEAF_PLATFORM_PR_PROVIDER=forge`` selects the canonical Forge
+API for new PRs. The existing scoped PR and merge token references must belong
+to that provider. Existing records without a provider retain GitHub identity;
+when configuration changes provider, their network review reads report unknown
+rather than forwarding the replacement credential to GitHub. Forge requests
+refuse redirects and noncanonical API origins. This adapter does not activate
+staging configuration, alter credentials, or change receipt producers.
+
 FUNDAMENTAL PATHS (auth, billing, agent spine — see
 ``platform_fundamental_paths.json``) require the out-of-band co-sign before the
 branch may land: an approver presents ``LEAF_CUSTOMIZATION_APPROVAL_SECRET``
@@ -975,6 +983,51 @@ def _github_request(method: str, path: str, *, token: str,
     return status, data
 
 
+
+# Keep historical PR numbers bound to their original provider. Configuration
+# selects the provider only when opening a new PR.
+def _pr_provider(record=None):
+    pr = record.get("pr") if isinstance(record, Mapping) else None
+    provider = (pr.get("provider", "github") if isinstance(pr, Mapping)
+                and pr.get("number") else
+                os.environ.get("LEAF_PLATFORM_PR_PROVIDER", "github").strip())
+    if provider not in {"github", "forge"}:
+        raise ValueError("unsupported PR provider")
+    return provider
+
+
+def _pr_request(method, path, *, token, payload=None, provider="github"):
+    if provider == "github":
+        return _github_request(method, path, token=token, payload=payload)
+    if provider != "forge":
+        raise ValueError("unsupported PR provider")
+    import urllib.error
+    import urllib.request
+    root = os.environ.get("LEAF_PLATFORM_FORGE_API", "").strip() or "https://forge.leafdesign.ai/api/v1"
+    # This credential must never be sent to an arbitrary configured origin.
+    if root.rstrip("/") != "https://forge.leafdesign.ai/api/v1":
+        raise ValueError("invalid Forge API origin")
+    body = json.dumps(payload).encode("utf-8") if payload is not None else None
+    request = urllib.request.Request(root.rstrip("/") + path, data=body,
+        method=method, headers={"Authorization": f"token {token}",
+        "Accept": "application/json", "Content-Type": "application/json",
+        "User-Agent": "leaf-platform-customize"})
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+    try:
+        opener = urllib.request.build_opener(NoRedirect())
+        with opener.open(request, timeout=15) as response:
+            raw, status = response.read(), response.status
+    except urllib.error.HTTPError as exc:
+        raw, status = exc.read(), exc.code
+    try:
+        data = json.loads(raw.decode("utf-8")) if raw else None
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        data = None
+    return status, data
+
+
 def _pr_body(record: Mapping[str, Any]) -> str:
     fundamental = list(record.get("fundamental_paths") or [])
     cosign = record.get("cosign") or {}
@@ -1002,7 +1055,7 @@ def _pr_body(record: Mapping[str, Any]) -> str:
 
 
 def _pr_view(data: Mapping[str, Any], *, slug: str,
-             reused: bool) -> Optional[dict[str, Any]]:
+             reused: bool, provider: str = "github") -> Optional[dict[str, Any]]:
     """Validate the fields we persist — a misconfigured API root must not be
     able to plant junk in the record the drawer renders as a link.
 
@@ -1015,9 +1068,14 @@ def _pr_view(data: Mapping[str, Any], *, slug: str,
     number, url = data.get("number"), data.get("html_url")
     if type(number) is not int or number <= 0:
         return None
-    if url != f"https://github.com/{slug}/pull/{number}":
+    origin, segment = (("https://forge.leafdesign.ai", "pulls") if provider == "forge"
+                       else ("https://github.com", "pull"))
+    if url != f"{origin}/{slug}/{segment}/{number}":
         return None
-    return {"number": number, "url": url, "reused": reused, "at": _now()}
+    view = {"number": number, "url": url, "reused": reused, "at": _now()}
+    if provider == "forge":
+        view["provider"] = provider
+    return view
 
 
 def _pr_settled(pr: Any) -> bool:
@@ -1070,6 +1128,12 @@ def _fetch_review(record: Mapping[str, Any]) -> dict[str, Any]:
         return {"state": "unknown", "error": creds, "checked_at": at}
     slug, token = creds
     try:
+        provider = _pr_provider(record)
+        if provider != _pr_provider():
+            # The configured token belongs to one provider. Historical records
+            # must not send a replacement provider's credential to the old host.
+            return {"state": "unknown", "error": "review_provider_mismatch",
+                    "checked_at": at}
         # Inside the guarded path: a malformed record (pr: null, junk number)
         # must degrade to unknown, never raise out of a status read.
         pr = record.get("pr")
@@ -1077,8 +1141,8 @@ def _fetch_review(record: Mapping[str, Any]) -> dict[str, Any]:
         if type(number) is not int or number <= 0:
             return {"state": "unknown", "error": "review_pr_number_invalid",
                     "checked_at": at}
-        status, data = _github_request(
-            "GET", f"/repos/{slug}/pulls/{number}", token=token)
+        status, data = _pr_request(
+            "GET", f"/repos/{slug}/pulls/{number}", token=token, provider=provider)
         if status != 200 or not isinstance(data, Mapping):
             return {"state": "unknown", "error": f"review_http_{int(status)}",
                     "checked_at": at}
@@ -1101,14 +1165,14 @@ def _fetch_review(record: Mapping[str, Any]) -> dict[str, Any]:
         base_repo_name = str(base_repo.get("full_name") or "")[:200]
         merge_commit = str(data.get("merge_commit_sha") or "") \
             if data.get("merged") is True else ""
-        status2, agg = _github_request(
-            "GET", f"/repos/{slug}/commits/{head}/status", token=token)
+        status2, agg = _pr_request(
+            "GET", f"/repos/{slug}/commits/{head}/status", token=token, provider=provider)
         if status2 != 200 or not isinstance(agg, Mapping):
             return {"state": "unknown", "error": f"review_http_{int(status2)}",
                     "pr_state": pr_state, "head_sha": head, "checked_at": at}
         verdict, description = "none", None
         for item in agg.get("statuses") or []:
-            if isinstance(item, Mapping) and item.get("context") == REVIEW_CONTEXT:
+            if isinstance(item, Mapping) and item.get("context") == ("critic-review" if provider == "forge" else REVIEW_CONTEXT):
                 raw = str(item.get("state") or "")
                 verdict = {"success": "passed", "failure": "failed",
                            "error": "error_verdict",
@@ -1267,9 +1331,23 @@ def merge(*, change_id: str, tenant_id: str, ack_commit_sha: str,
         # GitHub's own same-tree guard: `sha` pins the exact head this
         # approval covers; a head moved between our check and this PUT
         # answers 409 instead of merging different bytes.
-        status, data = _github_request(
-            "PUT", f"/repos/{slug}/pulls/{number}/merge", token=merge_token,
-            payload={"sha": commit_sha, "merge_method": "squash"})
+        provider = _pr_provider(record)
+        status, data = _pr_request(
+            "POST" if provider == "forge" else "PUT",
+            f"/repos/{slug}/pulls/{number}/merge", token=merge_token,
+            provider=provider,
+            payload=({"Do": "squash", "head_commit_id": commit_sha,
+                      "delete_branch_after_merge": False} if provider == "forge"
+                     else {"sha": commit_sha, "merge_method": "squash"}))
+        if provider == "forge" and status in (200, 201):
+            settled = _fetch_review(record)
+            if (settled.get("pr_state") != "merged"
+                    or settled.get("head_sha") != commit_sha
+                    or settled.get("base_ref") != expected_base
+                    or settled.get("base_repo") != slug
+                    or not _SHA_RE.fullmatch(str(settled.get("merge_commit_sha") or ""))):
+                raise ValueError("Forge merge completion unverified")
+            status, data = 200, {"merged": True, "sha": settled["merge_commit_sha"]}
     except Exception as exc:  # noqa: BLE001
         detail = f"{type(exc).__name__}: {exc}".replace(
             merge_token, "[redacted-token]")
@@ -1295,9 +1373,12 @@ def merge(*, change_id: str, tenant_id: str, ack_commit_sha: str,
     branch_deleted = False
     try:
         ref = _assert_branch_only(str(record.get("branch_ref", "")))
-        status2, _ = _github_request(
-            "DELETE", f"/repos/{slug}/git/refs/{ref[len('refs/'):]}",
-            token=merge_token)
+        from urllib.parse import quote
+        delete_path = (f"/repos/{slug}/branches/{quote(ref[len('refs/heads/'):], safe='')}"
+                       if provider == "forge" else
+                       f"/repos/{slug}/git/refs/{ref[len('refs/'):]}")
+        status2, _ = _pr_request("DELETE", delete_path,
+                                 token=merge_token, provider=provider)
         branch_deleted = status2 in (204, 422)  # 422: already gone
     except Exception:  # noqa: BLE001
         pass
@@ -1380,30 +1461,43 @@ def _open_pull_request(record: Mapping[str, Any]) -> dict[str, Any]:
                  f"&head={quote(f'{owner}:{branch}', safe='')}"
                  f"&base={quote(base, safe='')}")
     try:
-        status, data = _github_request("GET", list_path, token=token)
+        provider = _pr_provider()
+        status, data = _pr_request("GET", list_path, token=token, provider=provider)
         if status == 200 and isinstance(data, list):
             for item in data:
                 if isinstance(item, Mapping):
-                    view = _pr_view(item, slug=slug, reused=True)
+                    if provider == "forge" and (
+                            (item.get("head") or {}).get("ref") != branch
+                            or (item.get("head") or {}).get("sha") != record.get("commit_sha")
+                            or (item.get("base") or {}).get("ref") != base
+                            or ((item.get("base") or {}).get("repo") or {}).get("full_name") != slug):
+                        continue
+                    view = _pr_view(item, slug=slug, reused=True, provider=provider)
                     if view:
                         return view
-        status, data = _github_request("POST", f"/repos/{slug}/pulls", token=token, payload={
+        status, data = _pr_request("POST", f"/repos/{slug}/pulls", token=token, provider=provider, payload={
             "title": f"admin-customize: {record.get('title')}",
             "head": branch,
             "base": base,
             "body": _pr_body(record),
         })
         if status == 201 and isinstance(data, Mapping):
-            view = _pr_view(data, slug=slug, reused=False)
+            view = _pr_view(data, slug=slug, reused=False, provider=provider)
             if view:
                 return view
         if status == 422:
-            # a racing lander (or a previous half-failure) already opened it
-            status2, data2 = _github_request("GET", list_path, token=token)
+            # A racing lander may already have opened the exact branch.
+            status2, data2 = _pr_request("GET", list_path, token=token, provider=provider)
             if status2 == 200 and isinstance(data2, list):
                 for item in data2:
                     if isinstance(item, Mapping):
-                        view = _pr_view(item, slug=slug, reused=True)
+                        if provider == "forge" and (
+                                (item.get("head") or {}).get("ref") != branch
+                                or (item.get("head") or {}).get("sha") != record.get("commit_sha")
+                                or (item.get("base") or {}).get("ref") != base
+                                or ((item.get("base") or {}).get("repo") or {}).get("full_name") != slug):
+                            continue
+                        view = _pr_view(item, slug=slug, reused=True, provider=provider)
                         if view:
                             return view
         _LOG.warning("platform_customize: PR open answered %s for change %s",
