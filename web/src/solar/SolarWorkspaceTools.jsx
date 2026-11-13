@@ -196,7 +196,7 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
   let initialParameters = null
   let originalSummary = null
   if (selectedOriginal) {
-    initialParameters = originalSolarParameters(selectedOriginal.text, Number(gridLongAxis))
+    initialParameters = originalSolarParameters(selectedOriginal.text, Number(gridLongAxis), selectedOriginal.producerSemantics)
     if (initialParameters) originalSummary = JSON.parse(selectedOriginal.text.replace(/^\uFEFF/, ''))
   } else {
     try { initialParameters = initialSolarParameters(JSON.parse(initialBoundary), JSON.parse(initialPreset), initialUnits) } catch { /* incomplete input */ }
@@ -781,6 +781,14 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
             <label>Terrain grid cells on longer axis<input type="number" min={2} max={300} step={1}
               value={gridLongAxis} onChange={event => setGridLongAxis(event.target.value)} /></label>
             <p>This layout is terrain-free. The grid setting is recorded for provenance.</p>
+            <label>Preset loading<select value={selectedOriginal.producerSemantics ?? 'current-native'}
+              disabled={publication.phase === 'pending'} onChange={event => {
+                const producerSemantics = event.target.value
+                setOriginalIntake(current => current?.project === initialProject ? { ...current, producerSemantics } : current)
+              }}>
+              <option value="current-native">Current native loading</option>
+              <option value="historical-list-reuse">Historical collection reuse</option>
+            </select></label>
             <button type="button" disabled={publication.phase === 'pending'}
               onClick={() => setOriginalIntake(null)}>Clear original intake</button>
           </> : <>
