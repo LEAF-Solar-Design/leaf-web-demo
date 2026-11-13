@@ -549,6 +549,12 @@ export function versionsAvailable({ projectMode, projectVersion, drawingState })
   return projectMode ? !!projectVersion : !!drawingState
 }
 
+// Empty manifest families enable project conversation fallback; null leaves
+// named-tool admission intact. Unknown surfaces must also clear the prior list.
+export function catalogContextForSurface(surface, previous = {}) {
+  return { ...previous, surfaceFamilyIds: surface?.familyIds ?? null }
+}
+
 export async function seatSolarProjectPublication(controller, receipt, captured, isCurrent) {
   const current = controller.getSnapshot()
   const selected = current.workspace?.drawing_versions?.find(row => row.version_id === current.canonicalVersionId)
@@ -1657,6 +1663,23 @@ export default function App() {
     runnableTools: slashTools,
     capabilityCount: capCount,
   } = catalogState
+  // Initialize before the catalog's passive startup, and follow every manifest
+  // surface change. An empty family list admits project conversation fallback;
+  // null keeps the surface's normal named-tool admission.
+  useLayoutEffect(() => {
+    catalogController.setContext(catalogContextForSurface(
+      PRODUCT_SURFACES.find(surface => surface.id === activeSurface),
+    ))
+  }, [activeSurface, catalogController])
+  const composerProjectRef = useRef({ orgId, openProjectId })
+  useLayoutEffect(() => {
+    const previous = composerProjectRef.current
+    composerProjectRef.current = { orgId, openProjectId }
+    if (previous.orgId !== orgId || previous.openProjectId !== openProjectId) {
+      catalogActions.resetTransient()
+      catalogActions.setPrompt('')
+    }
+  }, [orgId, openProjectId, catalogActions])
   const {
     retryTools,
     // The awaitable catalog refetch. `loadCatalog` regroups families; this is
@@ -2302,9 +2325,15 @@ export default function App() {
     return { isCurrent: stillCurrent, revoke }
   }, [projectSolar.projectClient, projectSolar.ready, projectSolar.isCurrent, projectSolar.scope.binding,
     projectSolar.scope.authorityKey, assistantCheckoutBinding, session.controller, session.generation, agentSessionId])
+  const conversationOrgRef = useRef(orgId)
   useLayoutEffect(() => {
+    if (conversationOrgRef.current !== orgId) {
+      converse.resetCached()
+      clearAgentSession()
+    }
+    conversationOrgRef.current = orgId
     setProjectContext(openProjectId || null, canonicalVersionId || null)
-  }, [openProjectId, canonicalVersionId, setProjectContext])
+  }, [orgId, openProjectId, canonicalVersionId, setProjectContext, clearAgentSession, converse.resetCached])
   const authorAuthorityProvider = useCallback(async (description, { allowSecretOnce = false, projectId } = {}) => {
     // No entitlement pre-check here: entitlements load async, and a stage
     // click can beat them (proven by the e2e). A mint against a tenant that
