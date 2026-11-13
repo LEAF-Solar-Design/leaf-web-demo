@@ -709,13 +709,33 @@ fi
 echo "=== job license-fence ==="
 echo "=== job test-gate ==="
 setup_log_dir="$(mktemp -d)"
+dep_cache_py_venv_path=/tmp/leaf-ci-venv
 (
 set -euo pipefail
 if [[ "${dep_cache_npm_seeded:-0}" == 1 ]]; then export npm_config_prefer_offline=true; fi
 echo "LEAF_T start webdeps $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR/web"
 echo "--- 1/4 Install web dependencies"
-npm ci
+dep_cache_line=""
+if [[ -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" ]]; then
+  dep_cache_line="$(timeout --kill-after=5 120 python -I -B "$LEAF_DEP_CACHE_HELPER" seed --kind nm --tree web \
+    --repo "$CODEBUILD_SRC_DIR" --cache-dir "$LEAF_CI_CACHE_DIR" --writable "${LEAF_CI_CACHE_WRITABLE:-0}" \
+    --run "${CODEBUILD_BUILD_ID:-local}" --node-version "$(node -v)" --npm-version "$(npm -v)")" \
+    || dep_cache_line="LEAF_DEP_CACHE kind=nm action=seed result=error"
+  echo "$dep_cache_line"
+fi
+if [[ "$dep_cache_line" == *" node_modules=seeded"* ]]; then
+  echo "web dependencies restored from cache; npm ci skipped"
+else
+  npm ci
+  if [[ -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" && "${LEAF_CI_CACHE_WRITABLE:-0}" == 1 ]]; then
+    dep_cache_line="$(timeout --kill-after=5 180 python -I -B "$LEAF_DEP_CACHE_HELPER" publish --kind nm --tree web \
+      --repo "$CODEBUILD_SRC_DIR" --cache-dir "$LEAF_CI_CACHE_DIR" --writable 1 \
+      --run "${CODEBUILD_BUILD_ID:-local}" --node-version "$(node -v)" --npm-version "$(npm -v)")" \
+      || dep_cache_line="LEAF_DEP_CACHE kind=nm action=publish result=error"
+    echo "$dep_cache_line"
+  fi
+fi
 echo "LEAF_T end webdeps $(date +%s%3N) rc=0"
 ) > "$setup_log_dir/webdeps.log" 2>&1 &
 webdeps_pid=$!
@@ -723,11 +743,46 @@ webdeps_pid=$!
 set -euo pipefail
 echo "LEAF_T start pydeps $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR"
+dep_cache_python=python
+dep_cache_py_in_use=0
+dep_cache_py_seeded=0
+if [[ -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" ]]; then
+  dep_cache_py_day="$(date -u +%Y%m%d)" || dep_cache_py_day=""
+  dep_cache_line="$(timeout --kill-after=5 120 python -I -B "$LEAF_DEP_CACHE_HELPER" seed --kind py \
+    --repo "$CODEBUILD_SRC_DIR" --cache-dir "$LEAF_CI_CACHE_DIR" --writable "${LEAF_CI_CACHE_WRITABLE:-0}" \
+    --run "${CODEBUILD_BUILD_ID:-local}" --dest "$dep_cache_py_venv_path" --day "$dep_cache_py_day")" \
+    || dep_cache_line="LEAF_DEP_CACHE kind=py action=seed result=error"
+  echo "$dep_cache_line"
+  if [[ "$dep_cache_line" != *" result=off"* && "$dep_cache_line" != *" result=error"* ]]; then
+    if [[ "$dep_cache_line" == *" venv=seeded"* ]]; then
+      if python -m venv --without-pip --system-site-packages "$dep_cache_py_venv_path" \
+        && "$dep_cache_py_venv_path/bin/python" -c 'import sys; sys.exit(sys.prefix == sys.base_prefix)'; then
+        dep_cache_py_in_use=1
+        dep_cache_py_seeded=1
+      else
+        rm -rf "$dep_cache_py_venv_path"
+      fi
+    fi
+    if [[ "$dep_cache_py_in_use" == 0 ]]; then
+      rm -rf "$dep_cache_py_venv_path"
+      if python -m venv --without-pip --system-site-packages "$dep_cache_py_venv_path"; then
+        dep_cache_py_in_use=1
+      else
+        rm -rf "$dep_cache_py_venv_path"
+      fi
+    fi
+  fi
+fi
+if [[ "$dep_cache_py_in_use" == 1 ]]; then
+  dep_cache_python="$dep_cache_py_venv_path/bin/python"
+fi
+if [[ "$dep_cache_py_seeded" == 0 ]]; then
+cd "$CODEBUILD_SRC_DIR"
 echo "--- 1/6 Upgrade pip"
-python -m pip install --upgrade pip
+"$dep_cache_python" -m pip install --upgrade pip
 cd "$CODEBUILD_SRC_DIR"
 echo "--- 2/6 Install Python dependencies"
-python -m pip install \
+"$dep_cache_python" -m pip install \
   -r server/requirements.txt \
   -r server/requirements-auth.txt \
   -r da/requirements.txt \
@@ -735,6 +790,17 @@ python -m pip install \
   -r scripts/requirements-ci.txt \
   -r executor/control_plane/requirements.txt \
   -r executor/runtime/requirements.txt
+  if [[ "$dep_cache_py_in_use" == 1 && -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" && "${LEAF_CI_CACHE_WRITABLE:-0}" == 1 ]]; then
+    dep_cache_line="$(timeout --kill-after=5 180 python -I -B "$LEAF_DEP_CACHE_HELPER" publish --kind py \
+      --repo "$CODEBUILD_SRC_DIR" --cache-dir "$LEAF_CI_CACHE_DIR" --writable 1 \
+      --run "${CODEBUILD_BUILD_ID:-local}" --src "$dep_cache_py_venv_path" --day "$dep_cache_py_day")" \
+      || dep_cache_line="LEAF_DEP_CACHE kind=py action=publish result=error"
+    echo "$dep_cache_line"
+  fi
+fi
+if [[ "$dep_cache_py_in_use" == 1 ]]; then
+  touch "$setup_log_dir/py-venv-ready"
+fi
 echo "LEAF_T end pydeps $(date +%s%3N) rc=0"
 ) > "$setup_log_dir/pydeps.log" 2>&1 &
 pydeps_pid=$!
@@ -744,7 +810,26 @@ if [[ "${dep_cache_npm_seeded:-0}" == 1 ]]; then export npm_config_prefer_offlin
 echo "LEAF_T start harness-deps $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR/harness"
 echo "--- 3/6 Install harness dependencies"
-npm ci
+dep_cache_line=""
+if [[ -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" ]]; then
+  dep_cache_line="$(timeout --kill-after=5 120 python -I -B "$LEAF_DEP_CACHE_HELPER" seed --kind nm --tree harness \
+    --repo "$CODEBUILD_SRC_DIR" --cache-dir "$LEAF_CI_CACHE_DIR" --writable "${LEAF_CI_CACHE_WRITABLE:-0}" \
+    --run "${CODEBUILD_BUILD_ID:-local}" --node-version "$(node -v)" --npm-version "$(npm -v)")" \
+    || dep_cache_line="LEAF_DEP_CACHE kind=nm action=seed result=error"
+  echo "$dep_cache_line"
+fi
+if [[ "$dep_cache_line" == *" node_modules=seeded"* ]]; then
+  echo "harness dependencies restored from cache; npm ci skipped"
+else
+  npm ci
+  if [[ -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" && "${LEAF_CI_CACHE_WRITABLE:-0}" == 1 ]]; then
+    dep_cache_line="$(timeout --kill-after=5 180 python -I -B "$LEAF_DEP_CACHE_HELPER" publish --kind nm --tree harness \
+      --repo "$CODEBUILD_SRC_DIR" --cache-dir "$LEAF_CI_CACHE_DIR" --writable 1 \
+      --run "${CODEBUILD_BUILD_ID:-local}" --node-version "$(node -v)" --npm-version "$(npm -v)")" \
+      || dep_cache_line="LEAF_DEP_CACHE kind=nm action=publish result=error"
+    echo "$dep_cache_line"
+  fi
+fi
 echo "LEAF_T end harness-deps $(date +%s%3N) rc=0"
 ) > "$setup_log_dir/harness-deps.log" 2>&1 &
 harness_deps_pid=$!
@@ -755,6 +840,12 @@ wait "$webdeps_pid" || webdeps_rc=$?
 wait "$pydeps_pid" || pydeps_rc=$?
 wait "$harness_deps_pid" || harness_deps_rc=$?
 cat "$setup_log_dir/webdeps.log" "$setup_log_dir/pydeps.log" "$setup_log_dir/harness-deps.log"
+if (( pydeps_rc == 0 )) && [[ -f "$setup_log_dir/py-venv-ready" ]]; then
+  export VIRTUAL_ENV="$dep_cache_py_venv_path"
+  export PATH="$dep_cache_py_venv_path/bin:$PATH"
+  # Keep this optional event separate from the statically counted core events.
+  echo "LEAF_""EVENT pyenv venv=$dep_cache_py_venv_path"
+fi
 rm -rf "$setup_log_dir"
 setup_rc=0
 for setup_step in webdeps pydeps harness-deps; do
