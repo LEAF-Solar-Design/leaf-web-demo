@@ -151,7 +151,7 @@ function matchReport(overrides = {}) {
     ], ...overrides }))
 }
 
-it('S02 review displays competing groups with one candidate without choosing or accepting it', async () => {
+it.each([1, 19])('S02 review displays competing groups with %i candidates without choosing or accepting', async (candidateCount) => {
   const save = downloads()
   const competitionCounts = { ...counts, frames: 2, matched_frames: 0,
     group_strings: 0, strings: 0, assigned_panels: 0, unassigned_panels: 4 }
@@ -160,7 +160,8 @@ it('S02 review displays competing groups with one candidate without choosing or 
     source: { artifact_id: sourceId, content_sha256: 'f'.repeat(64), byte_length: 100 },
     request: { alignment_tolerance: 0.5, selection_order: 'unknown' }, counts: competitionCounts,
     matches: frameRefs.map((frame_ref) => ({ frame_ref, status: 'ambiguous',
-      pdf_grid: null, pdf_matrix: null, pdf_sub_grid: null, candidates: [0], candidate_count: 1 })),
+      pdf_grid: null, pdf_matrix: null, pdf_sub_grid: null,
+      candidates: Array.from({ length: candidateCount }, (_, i) => i), candidate_count: candidateCount })),
     strings: [], unassigned_panel_refs: [1, 2, 3, 4].map((n) =>
       `leaf:panel:00000000-0000-4000-8000-${String(n).padStart(12, '0')}`) })
   const { props } = setup({ reportBytes: bytes, reportCounts: competitionCounts })
@@ -168,7 +169,8 @@ it('S02 review displays competing groups with one candidate without choosing or 
   fireEvent.click(screen.getByRole('button', { name: 'Inspect group matches' }))
   const table = await screen.findByRole('table', { name: 'SolarEdge group matches' })
   expect(within(table).getAllByText('Ambiguous')).toHaveLength(2)
-  expect(within(table).getAllByText('PDF grid 0')).toHaveLength(2)
+  const candidateText = Array.from({ length: candidateCount }, (_, i) => `PDF grid ${i}`).join(', ')
+  expect(within(table).getAllByText(candidateText)).toHaveLength(2)
   for (const ref of frameRefs) expect(within(table).getByText(ref)).toBeTruthy()
   expect(props.onProjectSubmit).not.toHaveBeenCalled()
   expect(save.createObjectURL).not.toHaveBeenCalled()
@@ -186,10 +188,13 @@ it('S02 review shows matched, unmatched and ambiguous groups from verified repor
   expect(save.createObjectURL).not.toHaveBeenCalled()
 })
 
-it.each(['digest', 'identity', 'malformed'])('S02 review refuses %s failures without showing associations', async (failure) => {
+it.each(['digest', 'identity', 'malformed', 'candidate-limit'])('S02 review refuses %s failures without showing associations', async (failure) => {
   downloads()
   const bytes = failure === 'identity' ? matchReport({ source_version_id: NEXT })
-    : failure === 'malformed' ? matchReport({ matches: [{ frame_ref: 'roof-east', candidates: null }] }) : matchReport()
+    : failure === 'malformed' ? matchReport({ matches: [{ frame_ref: 'roof-east', candidates: null }] })
+      : failure === 'candidate-limit' ? matchReport({ matches: [{ frame_ref: 'roof-east', status: 'ambiguous',
+        pdf_grid: null, candidates: Array.from({ length: 10_001 }, (_, i) => i), candidate_count: 10_001 }] })
+        : matchReport()
   const { props } = setup({ reportBytes: bytes,
     ...(failure === 'digest' ? { downloadResponse: () => new Response(new Uint8Array(bytes.length).fill(32)) } : {}) })
   await upload(); await report()
