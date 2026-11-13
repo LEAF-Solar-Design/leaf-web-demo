@@ -34,6 +34,10 @@ with pytest.MonkeyPatch.context() as _imports:
         "_sip_w1c_pg_admission_helpers", "test_sip_r5_admission.py")
 pg = admission.pg
 chain = pg._chain
+# The chain helpers import server modules (solar_project and its siblings) lazily, at test time, after the context
+# above has restored sys.path. Keep server/ importable, appended last so it never shadows a test module name.
+if str(ROOT / "server") not in sys.path:
+    sys.path.append(str(ROOT / "server"))
 
 from leaf_platform import project_solve_store as exchanges
 
