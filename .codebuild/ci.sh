@@ -1300,6 +1300,8 @@ if [[ "$pr_tier_active" == 1 ]]; then
   gate_tier_args=(--tier-file scripts/ci/pr-tier.json)
 fi
 echo "LEAF_EVENT gate fail_fast=${#gate_fail_fast_args[@]}" >&2
+# The heavy prerequisites build web/ once for the license fence; the web-build suite reuses it by receipt.
+export LEAF_WEB_PREBUILT_RECEIPT="$(mktemp -d /tmp/leaf-webbundle.XXXXXXXX)/receipt.json"
 unset PYTHONSAFEPATH
 # Ensure gate rows reach the log even when the job is killed at its deadline.
 export PYTHONUNBUFFERED=1
