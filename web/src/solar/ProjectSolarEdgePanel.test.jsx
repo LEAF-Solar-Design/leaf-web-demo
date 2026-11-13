@@ -259,6 +259,7 @@ it('S02 keeps verified choices editable after a correction report is refused', a
     json: async () => ({ error: { reason_code: 'REPORT_ASSOCIATIONS_INVALID' } }) })
   fireEvent.click(screen.getByRole('button', { name: 'Build report' }))
   await screen.findByText(/Report failed\./)
+  expect(screen.getByText('Report failed. The PDF choices do not match these groups. Review or clear association choices, then build the report again.')).toBeTruthy()
   expect(screen.getByLabelText('PDF choice for roof-south').value).toBe('1')
   expect(screen.getByRole('button', { name: 'Accept tracking labels' }).disabled).toBe(true)
   fireEvent.click(screen.getByRole('button', { name: 'Clear association choices' }))
