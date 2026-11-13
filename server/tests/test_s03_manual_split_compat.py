@@ -192,3 +192,75 @@ def test_manual_unknown_power_native_restitch_and_cut(graph, monkeypatch, all_pa
     stale["parent_rev"] = value["rev"]
     with pytest.raises(solve.GraphValidationError, match="STALE_SOLVE_RESULT"):
         solve.accept_split_candidate(stale, candidate, expected_rev=stale["rev"])
+
+
+def test_native_membership_correction_refreshes_derived_geometry(graph, monkeypatch):
+    import math
+    import solar_solve_results as solve
+
+    value = extra_panel_graph(graph)
+    frame = value["frames"][0]
+    pieces = requests.build_split_requests(value, frame["id"], max_string_length=14,
+        dwgname="synthetic-correction")
+    binding = solve.bind_split_request(value, pieces, expected_rev=value["rev"],
+        frame_ref=frame["id"], tenant_id="synthetic-tenant", job_id="synthetic-correction",
+        split_state={"jogs": 1, "depth": 10})
+    proposals = [synthetic_piece(piece, binding["tenant_id"],
+        solve.piece_job_id(binding["job_id"], index), monkeypatch, partial=True)
+        for index, piece in enumerate(pieces)]
+    before = solve.accept_split_candidate(value, solve.complete_split_search(value, binding, proposals),
+        expected_rev=value["rev"])
+    saved = deepcopy(before)
+    first, second = before["strings"][:2]
+    updates = [first["ordered_panel_refs"][:-1],
+        first["ordered_panel_refs"][-1:] + second["ordered_panel_refs"]]
+    params = {"expected_rev": before["rev"], "memberships": [
+        {"string_ref": string["id"], "ordered_panel_refs": refs}
+        for string, refs in zip((first, second), updates)]}
+    corrected = solve.correct_graph(before, params)
+    points = {panel["id"]: panel["centre"] for panel in corrected["panels"]}
+    for string in corrected["strings"][:2]:
+        refs = string["ordered_panel_refs"]
+        route = [points[ref] for ref in refs]
+        assert string["route"] == route
+        assert string["length_ft"] == pytest.approx(sum(math.dist(a, b)
+            for a, b in zip(route, route[1:])) / .3048)
+        polarity = string["extra"]["polarity"]
+        assert polarity["negative_panel_ref"] == refs[0]
+        assert polarity["positive_panel_ref"] == refs[-1]
+        assert polarity["source_rev"] == before["rev"]
+        assert "response_sha256" not in polarity
+        assert string["validity"]["state"] == "stale"
+    for old, current in zip(before["strings"][2:], corrected["strings"][2:]):
+        assert current["ordered_panel_refs"] == old["ordered_panel_refs"]
+        assert current["route"] == old["route"]
+        assert current["extra"]["polarity"] == old["extra"]["polarity"]
+    assert before == saved
+    assert corrected["frames"][0]["module_power_watts"] == 0
+    assert not any(solve.coverage(corrected).values())
+    with pytest.raises(solve.GraphValidationError, match="SOLAR_OUTPUT_NOT_CURRENT"):
+        solve.require_current_export(corrected)
+    restore = {"expected_rev": corrected["rev"], "memberships": [
+        {"string_ref": string["id"], "ordered_panel_refs": string["ordered_panel_refs"]}
+        for string in before["strings"][:2]]}
+    restored = solve.correct_graph(corrected, restore)
+    for old, current in zip(before["strings"], restored["strings"]):
+        assert current["ordered_panel_refs"] == old["ordered_panel_refs"]
+        assert current["route"] == old["route"]
+        assert current["length_ft"] == old["length_ft"]
+        assert current["extra"]["polarity"]["negative_panel_ref"] == old["ordered_panel_refs"][0]
+        assert current["extra"]["polarity"]["positive_panel_ref"] == old["ordered_panel_refs"][-1]
+    assert not any(solve.coverage(restored).values())
+
+
+def test_legacy_manual_route_stays_stale_after_correction(graph):
+    import solar_solve_results as solve
+
+    before = deepcopy(graph)
+    string = graph["strings"][0]
+    corrected = solve.correct_graph(graph, {"expected_rev": graph["rev"], "memberships": [
+        {"string_ref": string["id"], "ordered_panel_refs": string["ordered_panel_refs"][::-1]}]})
+    assert corrected["strings"][0]["route"] == string["route"]
+    assert corrected["strings"][0]["length_ft"] == string["length_ft"]
+    assert corrected["strings"][0]["validity"]["state"] == "stale"
+    assert graph == before
