@@ -213,6 +213,22 @@ def test_sip_r3e_discovers_groups_from_canonical_source(monkeypatch):
     assert all(panel["frame_ref"] == frames[0]["id"] for panel in saved.graph["panels"])
 
 
+def test_sip_r3e_portrait_import_can_discover_groups(monkeypatch):
+    intake = source()
+    intake["polylines"] = [
+        {"layer": "Panels", "closed": True, "handle": format(26+i, "X"),
+         "pts": [[100*i, 0], [100*i+38.5, 0], [100*i+38.5, 77], [100*i, 77]]}
+        for i in range(10)]
+    monkeypatch.setitem(globals(), "source", lambda: deepcopy(intake))
+    w, ctx = world(monkeypatch)
+    params = {"expected_rev": ctx.graph["rev"], "discover": {
+        "BranchMaxOffset": 1, "AlignmentTolerance": .5, "InstallationDesign": "Roof"}}
+    saved = commit(w, ctx, TOOL, params)
+    assert all(panel["angle"] == 90.0 for panel in saved.graph["panels"])
+    assert sorted(ref for frame in saved.graph["frames"] for ref in frame["panel_refs"]) == sorted(
+        panel["id"] for panel in ctx.graph["panels"])
+
+
 def test_sip_r3e_identity_inputs(monkeypatch):
     """R3e-2-03 Every creation input participates; retry authority changes only binding."""
     w, ctx = world(monkeypatch)
