@@ -93,6 +93,34 @@ def _accepted(result):
     return 'complete'
 
 
+class CompletionCapture:
+    """Persist the validated completion receipt before its transport can fail."""
+    def __init__(self, http, journal, output, digest):
+        self.http, self.journal = http, journal
+        self.output, self.digest = output, digest
+
+    def request(self, method, suffix, body=None, *args, **kwargs):
+        if method == 'POST' and type(body) is dict and body.get('outcome') == 'complete':
+            recovery.need(set(body) == {'lease_owner', 'attempt', 'outcome', 'receipt', 'screenshot_base64'})
+            events = self.journal.value['events']
+            recovery.need(not self.journal.failed and recovery.validate_events(events) ==
+                          ['claim', 'allocator', 'producer', 'cleanup', 'release'])
+            recovery.need(events[-2]['cleanup_complete'] is True and
+                          events[-1]['allocator_release_confirmed'] is True)
+            recovery.need(recovery.read(self.journal.path) == worker.encode(self.journal.value))
+            claim = events[0]
+            recovery.need(suffix == claim['job_id'] + '/complete' and
+                          type(body['attempt']) is int and body['attempt'] == claim['attempt'])
+            prefix = claim['job_id'] + '-' + str(claim['attempt'])
+            image = recovery.read(self.output / (prefix + '.png'), worker.MAX_PNG)
+            raw = worker.encode(body['receipt'])
+            saved = recovery.completion_receipt(raw, claim, self.digest, image)
+            recovery.need(saved['lease_owner'] == body['lease_owner'] and
+                          saved['allocator_ticket'] == events[1]['ticket'])
+            recovery.immutable(self.output / (prefix + '-completion.json'), raw)
+        return self.http.request(method, suffix, body, *args, **kwargs)
+
+
 def _cycle(scope, session_factory, directory, checkpoint, digest, stop_event):
     entered = False
     armed = False
@@ -124,7 +152,8 @@ def _cycle(scope, session_factory, directory, checkpoint, digest, stop_event):
             if stop_event.is_set():
                 accepted = 'stopped'
             else:
-                accepted = _accepted(worker.run_once(scope.copy(), http, native, output,
+                captured_http = CompletionCapture(http, journal, output, digest)
+                accepted = _accepted(worker.run_once(scope.copy(), captured_http, native, output,
                                                      journal=journal))
                 if journal.failed:
                     accepted = None

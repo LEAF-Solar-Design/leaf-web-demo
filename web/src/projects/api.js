@@ -232,6 +232,28 @@ function mutation(method, body) {
   return opts
 }
 
+export function readProjectArloInput(projectId, inputId, { orgId, signal, expectedScope } = {}) {
+  const project = requireUuid(projectId, 'project')
+  const input = requireUuid(inputId, 'ARLO input version')
+  return request(`/api/projects/${project}/arlo-inputs/${input}`, { orgId, signal, expectedScope, cache: 'no-store' })
+}
+
+export function reviseProjectArloInput(projectId, inputId, patch, { orgId, key, signal, expectedScope } = {}) {
+  const project = requireUuid(projectId, 'project')
+  const input = requireUuid(inputId, 'ARLO input version')
+  const opts = mutation('POST', { patch })
+  if (key) opts.headers['Idempotency-Key'] = key
+  return request(`/api/projects/${project}/arlo-inputs/${input}/revisions`, { ...opts, orgId, signal, expectedScope })
+}
+
+export function restoreProjectArloInput(projectId, inputId, { orgId, key, signal, expectedScope } = {}) {
+  const project = requireUuid(projectId, 'project')
+  const input = requireUuid(inputId, 'ARLO input version')
+  const opts = mutation('POST')
+  if (key) opts.headers['Idempotency-Key'] = key
+  return request(`/api/projects/${project}/arlo-inputs/${input}/restore`, { ...opts, orgId, signal, expectedScope })
+}
+
 // POST /api/projects/blank {name} -> {project:{project_id,name,status,profile},
 // receipt, replayed}. The idempotent blank-browser-entry factory
 // (platform/project_lifecycle.py create_blank_project) and the ONE project

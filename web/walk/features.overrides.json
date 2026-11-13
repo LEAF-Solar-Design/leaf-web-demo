@@ -1732,13 +1732,13 @@
         },
         "nothing-edited": {
           "toolbar": "Quick access",
-          "name": "Save version (unavailable: edit something first)",
-          "tooltip": "Save version: edit something first"
+          "name": "Save version (unavailable: Make a change first.)",
+          "tooltip": "Save version: Make a change first."
         },
         "no-target": {
           "toolbar": "Quick access",
-          "name": "Save version (unavailable: download-only here: no project target)",
-          "tooltip": "Save version: download-only here: no project target"
+          "name": "Download DXF",
+          "tooltip": "Download the drawing to keep your changes"
         },
         "engine-busy": {
           "toolbar": "Quick access",
@@ -1764,13 +1764,12 @@
         },
         "nothing-edited": {
           "kind": "disabled_with_reason",
-          "reason": "edit something first",
+          "reason": "Make a change first.",
           "reason_code": "control:save-version:unavailable"
         },
         "no-target": {
-          "kind": "disabled_with_reason",
-          "reason": "download-only here: no project target",
-          "reason_code": "control:save-version:unavailable"
+          "kind": "submits",
+          "target": "engine-download-dxf"
         },
         "engine-busy": {
           "kind": "disabled_with_reason",

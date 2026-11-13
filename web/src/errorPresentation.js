@@ -6,7 +6,7 @@ export const ERROR_ACTOR_LABELS = {
   service: 'Leaf service',
 }
 
-export function errorPresentation(input, fallback = 'Something went wrong.') {
+export function errorPresentation(input, fallback = 'Something went wrong.', reasonCode = '') {
   if (!input) {
     return { message: fallback, code: '', nextAction: '', actor: '', retryable: false }
   }
@@ -15,9 +15,12 @@ export function errorPresentation(input, fallback = 'Something went wrong.') {
   }
 
   const envelope = input?.body?.error || input?.error || input
+  // Authoring can supply its separate reason_code without changing other callers.
+  const opaqueReasonCode = typeof reasonCode === 'string' && /^[A-Za-z][A-Za-z0-9_-]{0,127}$/.test(reasonCode)
+    ? reasonCode : ''
   return {
     message: envelope?.message || input?.message || fallback,
-    code: envelope?.error_code || envelope?.code || input?.errorCode || '',
+    code: opaqueReasonCode || envelope?.error_code || envelope?.code || input?.errorCode || '',
     nextAction: envelope?.next_action || input?.nextAction || '',
     actor: envelope?.actor || input?.actor || '',
     retryable: Boolean(envelope?.retryable ?? input?.retryable),

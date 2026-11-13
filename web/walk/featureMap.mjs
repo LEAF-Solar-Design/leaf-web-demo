@@ -405,7 +405,10 @@ function validateControls(controls) {
           : context.name !== record.title + ' (unavailable: ' + effect.reason + ')')) {
           throw new Error('featureMap: control disabled evidence mismatch ' + record.id + '/' + state)
         }
-      } else if (context.name !== record.title) {
+      } else if (context.name !== record.title
+          // Since 676a421f the save control renders as Download DXF when there is no save target.
+          && !(record.id === 'control:save-version' && state === 'no-target' && effect.kind === 'submits'
+            && effect.target === 'engine-download-dxf' && context.name === 'Download DXF')) {
         throw new Error('featureMap: control accessible name mismatch ' + record.id + '/' + state)
       }
       const section = /^properties-(drawing|layers|plan|selection)-section$/.test(effect.target)
