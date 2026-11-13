@@ -9,6 +9,42 @@ const summarize = value => {
   try { return (typeof value === 'string' ? value : JSON.stringify(value) ?? 'null').slice(0, 200) }
   catch { return 'Value unavailable' }
 }
+const corpusEvidence = value => {
+  const data = value?.data ?? value
+  if (typeof data !== 'string' || data.length > 1114112) return null
+  try {
+    const evidence = JSON.parse(data)
+    return evidence?.policy?.schema === 'leaf.lab-corpus-policy.v1' &&
+      evidence?.evaluation?.schema === 'leafhft.block-suite-result.v1' ? evidence : null
+  } catch { return null }
+}
+function EvidenceField({ label, value }) {
+  return <div><h5>{label}</h5><pre>{value == null ? 'Unavailable (not evaluated)' : JSON.stringify(value, null, 2)}</pre></div>
+}
+function CorpusEvidence({ evidence }) {
+  const report = evidence.evaluation, confirmation = report.confirm_report
+  return <section aria-label="Corpus evaluation evidence">
+    <h4>Corpus evaluation</h4>
+    <p>Policy digest: {evidence.policy_digest}</p>
+    <p>Policy version: {evidence.policy.version}</p>
+    <p>Parent suite digest: {evidence.policy.parent_suite_sha256}</p>
+    <p>Evaluated suite digest: {evidence.evaluated_suite_sha256}</p>
+    <p>Verdict: {report.verdict}</p>
+    <p>Confirmation verdict: {confirmation?.verdict ?? 'Unavailable (not evaluated)'}</p>
+    <EvidenceField label="Reasons" value={report.reasons} />
+    <EvidenceField label="Policy and graph lineage" value={evidence.policy} />
+    <EvidenceField label="Input identities" value={{ ...evidence.context, row_count: evidence.row_count,
+      rows_sha256: evidence.rows_sha256, result_sha256: evidence.result_sha256,
+      run_id: evidence.run_id, job_id: evidence.job_id, worker_id: evidence.worker_id, attempt: evidence.attempt }} />
+    <EvidenceField label="Selection evidence" value={{ candidates: report.candidates, chosen: report.chosen }} />
+    <EvidenceField label="Confirmation evidence" value={confirmation && {
+      parent: confirmation.parent, child: confirmation.child, splits: confirmation.splits, protocol: confirmation.protocol }} />
+    <EvidenceField label="Calibration" value={confirmation?.calibration} />
+    <EvidenceField label="Uncertainty" value={confirmation?.confirm_comparison} />
+    <EvidenceField label="Confirmation reasons" value={confirmation?.reasons} />
+    <details><summary>Complete evaluation evidence</summary><EvidenceField label="Evaluation report" value={report} /></details>
+  </section>
+}
 const BlockResult = memo(function BlockResult({ store, runId, blockId, now }) {
   const block = useBlockValue(store, runId, blockId)
   if (!block) return null
@@ -18,7 +54,9 @@ const BlockResult = memo(function BlockResult({ store, runId, blockId, now }) {
       const asOf = value?.as_of
       const timestamp = typeof asOf === 'number' ? asOf : Date.parse(asOf)
       const age = asOf != null && Number.isFinite(timestamp) ? Math.max(0, now - timestamp) : null
-      return <div key={port}><p>{port}: {summarize(value)}</p>
+      const evidence = corpusEvidence(value)
+      return <div key={port}>{evidence ? <CorpusEvidence evidence={evidence} /> : <p>{port}: {summarize(value)}</p>}
+        {value?.error && <p>Output error: {summarize(value.error)}</p>}
         <p>Source age: {age == null ? 'unknown' : `${Math.floor(age / 1000)}s`}</p>
         {(value?.stale || age > 60000) && <span>Stale source</span>}
       </div>

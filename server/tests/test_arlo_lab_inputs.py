@@ -461,6 +461,40 @@ def test_registration_replays_exact_immutable_input_and_ignores_org_header(clien
     assert arlo_lab.load_registered_request(context(response), response["request"]) == response["request"]
 
 
+def test_registered_request_accepts_browser_numeric_spelling_and_returns_stored_bytes(store):
+    response = register()
+    submitted = copy.deepcopy(response["request"])
+    assert submitted["budget"]["timeout_seconds"] == 180.0
+    submitted["budget"]["timeout_seconds"] = 180
+    assert arlo_lab.digest(submitted) != response["input_sha256"]
+    loaded = arlo_lab.load_registered_request(context(response), submitted)
+    assert arlo_lab.digest(loaded) == response["input_sha256"]
+    assert type(loaded["budget"]["timeout_seconds"]) is float
+
+
+@pytest.mark.parametrize("value", [180.000001, True, "180", None])
+def test_registered_request_refuses_changed_numeric_value_or_type(store, value):
+    response = register()
+    submitted = copy.deepcopy(response["request"])
+    submitted["budget"]["timeout_seconds"] = value
+    with pytest.raises(ValueError, match="registered immutable input"):
+        arlo_lab.load_registered_request(context(response), submitted)
+
+
+@pytest.mark.parametrize("stored,submitted", [(1, True), (0, False),
+    (9007199254740993, 9007199254740992), (1.000000000000001, 1),
+    (0, float("nan")), (0, float("inf"))])
+def test_registered_request_refuses_boolean_precision_loss_and_nonfinite(store, monkeypatch, stored, submitted):
+    request = copy.deepcopy(arlo_lab.load_example("feeder-lab-v1", "1"))
+    request["seed"] = stored
+    monkeypatch.setattr(arlo_lab, "load_example", lambda *_: request)
+    response = register()
+    params = copy.deepcopy(response["request"])
+    params["seed"] = submitted
+    with pytest.raises(ValueError):
+        arlo_lab.load_registered_request(context(response), params)
+
+
 def test_concurrent_duplicate_registration_returns_one_input(store):
     with ThreadPoolExecutor(max_workers=2) as pool:
         responses = list(pool.map(lambda _: register(), range(2)))

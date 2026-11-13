@@ -3,6 +3,7 @@
 import { DatasetElementV1, DatasetReadV1, type DatasetFieldV1 } from "../../../assistant-contract/src/integration";
 import { LEAF_TOKENS, target } from "../tokens";
 import { DataTableCore, type DataTableColumn } from "./DataTableCore";
+import { ProviderPairTable } from "./ProviderPairTable";
 import { LineChartCore, projectDatasetLine, formatDatasetAxisValue } from "./LineChartCore";
 import { formatDatasetValue, resolveDisplayPreferences, type DisplayPreferences } from "./formatting";
 
@@ -135,8 +136,17 @@ export function DatasetElement({
       },
     };
   });
-  const table = <DataTableCore columns={columns} rows={rows} getRowKey={(row) => row.key}
-    maxRows={12} label={`${element.title} data`} />;
+  const grouping = element.kind === "dataset.table" ? element.props.row_grouping : undefined;
+  if (grouping && [grouping.pair_key_field, grouping.provider_field].some(id =>
+      !["text", "identifier"].includes(fields.get(id)!.type.kind))) return state("invalid");
+  const coverage = read.query_coverage;
+  const complete = Boolean((read.status === "ready" || read.status === "empty") && coverage &&
+    coverage.offset === 0 && coverage.matching_rows === read.rows.length &&
+    read.next_cursor === null && read.rows.length <= limit);
+  const table = grouping ? <ProviderPairTable columns={columns} rows={rows} grouping={grouping}
+    complete={complete} label={`${element.title} data`} />
+    : <DataTableCore columns={columns} rows={rows} getRowKey={(row) => row.key}
+      maxRows={12} label={`${element.title} data`} />;
   const xField = element.kind === "dataset.line" ? fields.get(element.props.x_field)! : null;
   const yField = element.kind === "dataset.line" ? fields.get(element.props.y_field)! : null;
   const chartRows = xField && yField ? projectDatasetLine(rows, xField, yField) : [];

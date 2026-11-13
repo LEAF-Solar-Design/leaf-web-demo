@@ -25,6 +25,16 @@ ARCHIVE = ROOT / 'engine/vendor/leafhft-9b9ced6f.tar.gz'
 INSTALLED = ROOT / 'engine/lab-corpus-installed'
 KERNEL_FILTER = Path('/usr/local/etc/leaf/seccomp-dwg2dxf.bpf')
 MAX_RESULT_BYTES = 1024 * 1024
+MAX_EVIDENCE_BYTES = MAX_RESULT_BYTES + 65536
+POLICY_SCHEMA = 'leaf.lab-corpus-policy.v1'
+# Sparse overrides preserve the selected parent's exact JSON numbers. Only
+# fields implemented by the pinned offline suite are editable.
+PARAMETERS_SCHEMA = {'type': 'object', 'additionalProperties': False, 'properties': {
+    'child_min_k': {'type': 'array', 'minItems': 1, 'maxItems': 16,
+                    'items': {'type': 'integer', 'minimum': 0, 'maximum': 60}},
+    'min_select_tickets': {'type': 'integer', 'minimum': 0, 'maximum': 6000000},
+    'draws': {'type': 'integer', 'minimum': 1, 'maximum': 10000},
+    'seed': {'type': 'integer', 'minimum': 0, 'maximum': 4294967295}}}
 _OWNER = object()
 
 
@@ -34,6 +44,106 @@ class CorpusStopped(ValueError):
 
 def _hash(raw):
     return hashlib.sha256(raw).hexdigest()
+
+
+def _json_bytes(value):
+    return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
+
+
+def _parameters(value):
+    if not isinstance(value, dict) or set(value) - set(PARAMETERS_SCHEMA['properties']):
+        raise ValueError('Invalid corpus policy parameters.')
+    result = {}
+    for name, item in value.items():
+        schema = PARAMETERS_SCHEMA['properties'][name]
+        items = item if name == 'child_min_k' else [item]
+        if name == 'child_min_k':
+            if not isinstance(item, list) or not 1 <= len(item) <= schema['maxItems']:
+                raise ValueError('Invalid corpus policy parameters.')
+            schema = schema['items']
+        for number in items:
+            if (type(number) not in (int, float) or not math.isfinite(number)
+                    or not schema['minimum'] <= number <= schema['maximum'] or int(number) != number):
+                raise ValueError('Invalid corpus policy parameters.')
+        result[name] = [int(number) for number in items] if name == 'child_min_k' else int(item)
+    return result
+
+
+def compile_policy(authority, block_id, settings):
+    """Compile only the admitted, immutable graph revision, never caller settings."""
+    import lab_artifacts as ledger
+    import lab_tool_manifests
+    from lab_canonical import graph_digest
+    from lab_evaluate import admit_graph, canonical_json
+    artifact = ledger.get(authority['tenant_id'], authority['doc_id'], authority['graph_revision'])
+    graph = artifact['graph']
+    if artifact['sha256'] != authority['graph_sha256'] or graph_digest(graph) != authority['graph_sha256']:
+        raise ValueError('Corpus graph lineage mismatch.')
+    manifests = admit_graph(graph, lab_tool_manifests.registry_for(authority['tenant_id']))
+    block = next((block for block in graph['blocks'] if block['id'] == block_id), None)
+    if (block is None or manifests[block_id]['id'] != 'corpus-evaluator'
+            or canonical_json(block['settings']) != canonical_json(settings)
+            or block['settings']['project_id'] != authority['project_id']):
+        raise ValueError('Corpus graph settings mismatch.')
+    policy = {'schema': POLICY_SCHEMA, 'version': 1,
+        'parent_suite_sha256': block['settings']['suite']['sha256'],
+        'lineage': {key: authority[key] for key in ('tenant_id', 'project_id', 'doc_id',
+                                                  'graph_revision', 'graph_sha256')},
+        'block_id': block_id, 'parameters': _parameters(block['settings'].get('parameters', {}))}
+    return dict(policy, digest=_hash(_json_bytes(policy)))
+
+
+def validate_policy(policy):
+    if (type(policy) is not dict or set(policy) != {'schema', 'version', 'parent_suite_sha256',
+            'lineage', 'block_id', 'parameters', 'digest'}
+            or policy['schema'] != POLICY_SCHEMA or type(policy['version']) is not int or policy['version'] != 1):
+        raise ValueError('Invalid compiled corpus policy.')
+    lineage = policy['lineage']
+    if (type(lineage) is not dict or set(lineage) != {'tenant_id', 'project_id', 'doc_id',
+            'graph_revision', 'graph_sha256'} or type(lineage['graph_revision']) is not int
+            or lineage['graph_revision'] < 1 or any(type(lineage[key]) is not str
+                or not 1 <= len(lineage[key]) <= 200 for key in ('tenant_id', 'project_id', 'doc_id'))
+            or type(policy['block_id']) is not str or not 1 <= len(policy['block_id']) <= 64):
+        raise ValueError('Invalid corpus policy lineage.')
+    for digest in (policy['parent_suite_sha256'], lineage['graph_sha256'], policy['digest']):
+        if type(digest) is not str or not re.fullmatch('[0-9a-f]{64}', digest):
+            raise ValueError('Invalid corpus policy digest.')
+    if (_parameters(policy['parameters']) != policy['parameters']
+            or _hash(_json_bytes({key: value for key, value in policy.items() if key != 'digest'})) != policy['digest']):
+        raise ValueError('Corpus policy digest mismatch.')
+    return json.loads(_json_bytes(policy))
+
+
+def compiled_suite(raw, policy):
+    """Materialize the registered suite with sparse edits, preserving its parent policy."""
+    policy = validate_policy(policy)
+    if _hash(raw) != policy['parent_suite_sha256']:
+        raise ValueError('Corpus policy parent mismatch.')
+    suite = json.loads(raw)
+    suite.update(policy['parameters'])
+    ks = suite.get('child_min_k')
+    parent_k = suite.get('parent_policy', {}).get('min_k')
+    if (not isinstance(ks, list) or not ks
+            or any(type(k) is not int or k < 0 for k in ks)
+            or (parent_k is not None and (type(parent_k) is not int or any(k >= parent_k for k in ks)))):
+        raise ValueError('Corpus child policy must be below its parent min_k.')
+    if len(ks) * sum(len(grid) for grid in suite.get('blocks', {}).values()) > 128:
+        raise ValueError('Corpus policy candidate budget exceeded.')
+    return _json_bytes(suite)
+
+
+def submit_policy(context, *, idempotency_key):
+    """Use the existing durable operation and custody checks with the compiled policy attached."""
+    import jobs
+    if (type(idempotency_key) is not str or not 1 <= len(idempotency_key) <= 200
+            or any(ord(c) < 32 or ord(c) == 127 for c in idempotency_key)):
+        raise ValueError('Corpus execution requires an idempotency key.')
+    context = validate_context(context)
+    require_executor()
+    sources = read_sources(context)
+    compiled_suite(sources['suite'], context['policy'])
+    return jobs._submit_job(context['tenant_id'], {}, {}, '', False,
+        context['org_id'], context['project_id'], idempotency_key=idempotency_key, lab_corpus=context)
 
 
 def capability():
@@ -82,7 +192,8 @@ def require_executor():
 def validate_context(value):
     fields = {'schema', 'tenant_id', 'org_id', 'project_id', 'actor_id',
               'capability_sha256', 'corpus', 'suite'}
-    if type(value) is not dict or set(value) != fields or value['schema'] != SCHEMA:
+    if (type(value) is not dict or set(value) not in (fields, fields | {'policy'})
+            or value['schema'] != SCHEMA):
         raise ValueError('Invalid corpus context.')
     for key in ('tenant_id', 'org_id', 'project_id', 'actor_id'):
         if type(value[key]) is not str or str(uuid.UUID(value[key])) != value[key]:
@@ -100,6 +211,11 @@ def validate_context(value):
                 or type(descriptor['byte_size']) is not int
                 or not 0 < descriptor['byte_size'] <= (64 if key == 'corpus' else 8) * 1024 * 1024):
             raise ValueError('Invalid corpus material identity.')
+    if 'policy' in value:
+        policy = validate_policy(value['policy'])
+        if (policy['parent_suite_sha256'] != value['suite']['sha256']
+                or any(policy['lineage'][key] != value[key] for key in ('tenant_id', 'project_id'))):
+            raise ValueError('Corpus policy scope mismatch.')
     return json.loads(json.dumps(value))
 
 
@@ -190,6 +306,10 @@ def run(job_id, worker_id, attempt, context, heartbeat, cancelled, deadline):
         os.chmod(stage, 0o700)
         (stage / 'rows.jsonl.gz').write_bytes(sources.pop('corpus'))
         (stage / 'suite.json').write_bytes(sources.pop('suite'))
+        evaluated_suite_sha256 = context['suite']['sha256']
+        if 'policy' in context:
+            evaluated_suite_sha256 = _hash(compiled_suite((stage / 'suite.json').read_bytes(), context['policy']))
+            (stage / 'policy.json').write_bytes(_json_bytes(context['policy']))
         process = subprocess.Popen(_command(stage), cwd=stage, env={
             'PATH': '/usr/bin:/bin', 'HOME': str(stage), 'TMPDIR': str(stage),
             'OPENBLAS_NUM_THREADS': '1', 'OMP_NUM_THREADS': '1',
@@ -213,13 +333,15 @@ def run(job_id, worker_id, attempt, context, heartbeat, cancelled, deadline):
             result = json.loads(raw)
             count = json.loads((stage / 'count.json').read_bytes())
             if (result.get('schema') != 'leafhft.block-suite-result.v1'
-                    or result.get('suite_sha256') != context['suite']['sha256']
+                    or result.get('suite_sha256') != evaluated_suite_sha256
+                    or ('policy' in context and result.get('policy_digest') != context['policy']['digest'])
                     or type(count) is not int or not 0 < count <= 6_000_000):
                 raise ValueError('Corpus result identity mismatch.')
             read_sources(context)
             guard(heartbeat, cancelled, deadline)
             return {'schema': RESULT_SCHEMA, 'job_id': job_id, 'worker_id': worker_id,
                     'attempt': attempt, 'context': context, 'row_count': count,
+                    'evaluated_suite_sha256': evaluated_suite_sha256,
                     'rows_sha256': result['rows_sha256'], 'result_sha256': _hash(raw),
                     'result': result}
         except Exception as exc:
@@ -231,13 +353,22 @@ def run(job_id, worker_id, attempt, context, heartbeat, cancelled, deadline):
 
 
 def validate_result(context, job_id, worker_id, attempt, result):
+    context = validate_context(context)
+    expected_suite = (context['suite']['sha256'] if 'policy' not in context else
+        _hash(compiled_suite(read_sources(context)['suite'], context['policy'])))
     if (type(result) is not dict or result.get('schema') != RESULT_SCHEMA
-            or result.get('context') != validate_context(context)
+            or result.get('context') != context
             or result.get('job_id') != job_id or result.get('worker_id') != worker_id
             or type(result.get('attempt')) is not int or result['attempt'] != attempt
             or type(result.get('row_count')) is not int or not 0 < result['row_count'] <= 6_000_000
-            or result.get('result', {}).get('suite_sha256') != context['suite']['sha256']
-            or len(json.dumps(result, allow_nan=False).encode()) > MAX_RESULT_BYTES + 8192):
+            or type(result.get('result')) is not dict
+            or result.get('result', {}).get('schema') != 'leafhft.block-suite-result.v1'
+            or not {'candidates', 'chosen', 'confirm_report', 'verdict', 'reasons'} <= set(result['result'])
+            or result['result'].get('suite_sha256') != expected_suite
+            or result.get('evaluated_suite_sha256', expected_suite) != expected_suite
+            or result.get('rows_sha256') != result['result'].get('rows_sha256')
+            or ('policy' in context and result['result'].get('policy_digest') != context['policy']['digest'])
+            or len(json.dumps(result, allow_nan=False).encode()) > MAX_EVIDENCE_BYTES):
         raise ValueError('Corpus terminal identity mismatch.')
 
 
@@ -276,10 +407,25 @@ def _child(package, directory):
                 raise PermissionError('Corpus file access refused.')
 
     sys.addaudithook(audit)
-    # Use the actual pinned CLI, including its parser and suite validation.
-    from scripts.blocks_lab.suite import main
-    code = main(['--suite', str(stage / 'suite.json'), '--rows', str(stage / 'rows.jsonl.gz'),
-                 '--out', str(stage / 'result.json')])
+    # Keep the pinned suite validation and evaluator. The source suite remains
+    # intact; its compiled derivative has a separate identity in the report.
+    from scripts.blocks_lab.suite import main, load_suite, run_suite
+    policy_path = stage / 'policy.json'
+    if policy_path.is_file():
+        from scripts.block_verdict import _read_rows
+        policy = validate_policy(json.loads(policy_path.read_bytes()))
+        raw = compiled_suite((stage / 'suite.json').read_bytes(), policy)
+        suite = load_suite(stage / 'suite.json')
+        suite.clear()
+        suite.update(json.loads(raw))
+        suite.sha256 = _hash(raw)
+        result = run_suite(_read_rows(stage / 'rows.jsonl.gz'), suite)
+        result['policy_digest'] = policy['digest']
+        (stage / 'result.json').write_bytes(_json_bytes(result) + b'\n')
+        code = 0
+    else:
+        code = main(['--suite', str(stage / 'suite.json'), '--rows', str(stage / 'rows.jsonl.gz'),
+                     '--out', str(stage / 'result.json')])
     if code == 0:
         import gzip
         with gzip.open(stage / 'rows.jsonl.gz', 'rb') as rows:

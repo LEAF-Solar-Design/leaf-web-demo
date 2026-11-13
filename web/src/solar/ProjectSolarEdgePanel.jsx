@@ -5,6 +5,7 @@ import { createSolarDrawingBinding, sameSolarDrawingBinding, solarDrawingBinding
 const TOOL = 'solar-solaredge-accept'
 const HEX = /^[0-9a-f]{64}$/
 const DIGEST = /^sha256:[0-9a-f]{64}$/
+const choiceKey = (choices) => JSON.stringify(Object.entries(choices).sort(([a], [b]) => a.localeCompare(b)))
 const identity = (data, binding) => ['organization_id', 'project_id', 'drawing_id', 'input_version_id']
   .every((key) => data?.[key] === binding?.[key])
 
@@ -34,7 +35,10 @@ function groupMatches(bytes, report, binding) {
     if (typeof match?.frame_ref !== 'string' || !match.frame_ref || match.frame_ref.length > 200 ||
         refs.has(match.frame_ref) || !Array.isArray(match.candidates) ||
         match.candidates.length > (match.status === 'ambiguous' ? 10_000 : 16) ||
-        match.candidate_count !== match.candidates.length ||
+        !Number.isSafeInteger(match.candidate_count) || match.candidate_count > 1_000_000 ||
+        (match.status === undefined || match.status === 'matched'
+          ? match.candidate_count < match.candidates.length
+          : match.candidate_count !== match.candidates.length) ||
         match.candidates.some((value) => !Number.isSafeInteger(value) || value < 0) ||
         new Set(match.candidates).size !== match.candidates.length) throw new Error('Invalid group match')
     refs.add(match.frame_ref)
@@ -60,7 +64,8 @@ export default function ProjectSolarEdgePanel({ solarBinding, authorityKey, proj
   const [refresh, setRefresh] = useState(0)
   const [inspection, setInspection] = useState(null)
   const scope = useMemo(() => ({ key, binding, authorityKey, projectClient, catalogDigest, isCurrent, submissionSignal,
-    alive: true, controllers: new Set(), report: null, candidate: null }),
+    alive: true, controllers: new Set(), report: null, candidate: null,
+    choices: {}, appliedChoices: {}, reviewRequest: null }),
   [key, authorityKey, projectClient, catalogDigest, isCurrent, submissionSignal])
   const available = !!binding && typeof authorityKey === 'string' && !!authorityKey.trim() && DIGEST.test(catalogDigest) &&
     ['readContext', 'uploadSolarEdgePdf', 'reportSolarEdgePdf', 'getSnapshot', 'subscribe', 'captureCatalogScope', 'prepareRun', 'catalog']
@@ -109,6 +114,9 @@ export default function ProjectSolarEdgePanel({ solarBinding, authorityKey, proj
     async uploadPdf({ drawingId, projectId, file, signal }) {
       if (!saved || !current() || drawingId !== binding.drawing_id || projectId !== binding.project_id) return { ok: false, code: 'SIP_R7_SCOPE_STALE' }
       scope.report = null
+      scope.choices = {}
+      scope.appliedChoices = {}
+      scope.reviewRequest = null
       setInspection(null)
       const outcome = await projectClient.uploadSolarEdgePdf({ file, signal })
       if (!current() || signal?.aborted) return { ok: false, code: 'SIP_R7_SCOPE_STALE' }
@@ -117,12 +125,29 @@ export default function ProjectSolarEdgePanel({ solarBinding, authorityKey, proj
     },
     async requestReport({ drawingId, projectId, sourceArtifactId, alignmentTolerance, selectionOrder, signal }) {
       if (!saved || !current() || drawingId !== binding.drawing_id || projectId !== binding.project_id) return { ok: false, code: 'SIP_R7_SCOPE_STALE' }
+      const requestKey = JSON.stringify([sourceArtifactId, alignmentTolerance, selectionOrder])
+      const choices = scope.reviewRequest === requestKey ? { ...scope.choices } : {}
+      const previousReport = scope.report, previousInspection = inspection
       scope.report = null
       setInspection(null)
-      const outcome = await projectClient.reportSolarEdgePdf({ sourceArtifactId, alignmentTolerance, selectionOrder, signal })
+      let outcome
+      try {
+        outcome = await projectClient.reportSolarEdgePdf({ sourceArtifactId, alignmentTolerance, selectionOrder,
+          ...(Object.keys(choices).length ? { associations: choices } : {}), signal })
+      } catch { outcome = { ok: false, reason: 'SIP_R7_RESPONSE_INVALID' } }
       if (!current() || signal?.aborted) return { ok: false, code: 'SIP_R7_SCOPE_STALE' }
-      return outcome.ok && identity(outcome.data, binding) && outcome.data.graph_sha256 === saved.graph && outcome.data.source_intake_sha256 === saved.intake
-        ? { ok: true, value: outcome.data } : { ok: false, code: outcome.reason || 'SIP_R7_RESPONSE_INVALID' }
+      if (!outcome.ok || !identity(outcome.data, binding) || outcome.data.graph_sha256 !== saved.graph || outcome.data.source_intake_sha256 !== saved.intake) {
+        scope.report = previousReport
+        setInspection(previousReport ? {
+          ...(previousInspection?.report === previousReport ? previousInspection : {}),
+          scope, report: previousReport, pending: false,
+        } : null)
+        return { ok: false, code: outcome.reason || 'SIP_R7_RESPONSE_INVALID' }
+      }
+      scope.choices = choices
+      scope.appliedChoices = choices
+      scope.reviewRequest = requestKey
+      return { ok: true, value: outcome.data }
     },
   }
   async function downloadReport(report, { signal, inspect = false } = {}) {
@@ -175,13 +200,18 @@ export default function ProjectSolarEdgePanel({ solarBinding, authorityKey, proj
     } finally { scope.inspectionPending = false }
   }
   async function accept(params) {
-    if (!saved?.isHead || !current() || latest.current.busy || typeof newProjectIntentKey !== 'function' ||
+    if (!saved?.isHead || !current() || latest.current.busy || scope.accepting || typeof newProjectIntentKey !== 'function' ||
+        choiceKey(scope.choices) !== choiceKey(scope.appliedChoices) ||
         typeof latest.current.onProjectSubmit !== 'function' || params.expected_rev !== saved.rev ||
         params.report_artifact_id !== scope.report?.report?.artifact_id) return false
     const controller = new AbortController()
     scope.controllers.add(controller)
     const captured = projectClient.captureCatalogScope()
-    const active = () => current() && !controller.signal.aborted && captured() === true
+    const report = scope.report, choices = choiceKey(scope.choices)
+    const active = () => current() && !controller.signal.aborted && captured() === true &&
+      scope.report === report && choiceKey(scope.choices) === choices
+    scope.accepting = true
+    setInspection((previous) => previous ? { ...previous } : previous)
     try {
       const fingerprint = JSON.stringify([params, catalogDigest])
       if (scope.candidate?.fingerprint !== fingerprint) scope.candidate = { fingerprint,
@@ -194,7 +224,11 @@ export default function ProjectSolarEdgePanel({ solarBinding, authorityKey, proj
         signal: controller.signal, isCurrent: active })
       return active() && outcome != null && outcome !== false && outcome.ok !== false
     } catch { return false }
-    finally { scope.controllers.delete(controller) }
+    finally {
+      scope.controllers.delete(controller)
+      scope.accepting = false
+      if (current()) setInspection((previous) => previous ? { ...previous } : previous)
+    }
   }
   return <section aria-label="Project SolarEdge import">
     {saved && !saved.isHead && <p role="status">Open the newest drawing version before accepting tracking labels.</p>}
@@ -203,26 +237,45 @@ export default function ProjectSolarEdgePanel({ solarBinding, authorityKey, proj
         : !saved ? <><p role="status">The saved Solar design could not be read. Create panel groups before matching the PDF.</p>
           <button type="button" onClick={() => setRefresh((value) => value + 1)}>Read design again</button></>
           : <SolarEdgeImportPanel key={key} drawingId={binding.drawing_id} projectId={binding.project_id}
-            drawingVersion={binding.input_version_id} graphRev={saved.rev} client={facade} disabled={busy}
+            drawingVersion={binding.input_version_id} graphRev={saved.rev} client={facade} disabled={busy || scope.accepting}
             onReportReady={(report) => { if (current()) {
               scope.report = report
               setInspection({ scope, report, pending: false })
             } }} onAccept={accept}
             onDownloadReport={downloadReport}
-            acceptDisabledReason={!saved.isHead ? 'Open the newest drawing version before accepting tracking labels.' : null} />}
+            acceptDisabledReason={!saved.isHead ? 'Open the newest drawing version before accepting tracking labels.'
+              : choiceKey(scope.choices) !== choiceKey(scope.appliedChoices) ? 'Build the report to apply or clear your association choices.' : null} />}
     {current() && inspection?.scope === scope && inspection.report === scope.report && <section aria-label="Group match inspection">
       <button type="button" disabled={busy || inspection.pending} onClick={inspectReport}>Inspect group matches</button>
       {inspection.pending && <p role="status">Reading and verifying the report.</p>}
       {inspection.error && <p role="status">Group matches could not be verified. Try inspecting the report again.</p>}
       {inspection.rows && <>
         <p>These are report associations, not electrical design verification. Unmatched and ambiguous groups need correction before acceptance.</p>
+        <p>Choose a PDF candidate, then use Build report to review the correction. Clear choices and build again to restore automatic matching.</p>
+        <button type="button" disabled={busy || scope.accepting || inspection.pending || Object.keys(scope.choices).length === 0}
+          onClick={() => { if (current() && !scope.accepting) { scope.choices = {}; setInspection({ ...inspection }) } }}>Clear association choices</button>
         <table aria-label="SolarEdge group matches"><thead><tr>
-          <th scope="col">Panel group</th><th scope="col">Match status</th><th scope="col">PDF association</th>
+          <th scope="col">Panel group</th><th scope="col">Match status</th><th scope="col">PDF association</th><th scope="col">Correction</th>
         </tr></thead><tbody>{inspection.rows.map((row) => <tr key={row.ref}>
           <th scope="row">{row.ref}</th>
           <td>{row.status === 'matched' ? 'Matched' : row.status === 'unmatched' ? 'Unmatched' : 'Ambiguous'}</td>
           <td>{row.status === 'matched' ? `PDF grid ${row.grid}` : row.candidates.length
             ? row.candidates.map((grid) => `PDF grid ${grid}`).join(', ') : 'No PDF grid matches'}</td>
+          <td><select aria-label={`PDF choice for ${row.ref}`} value={scope.choices[row.ref] ?? ''}
+            disabled={busy || scope.accepting || inspection.pending || row.candidates.length === 0}
+            onChange={(event) => {
+              if (!current() || scope.accepting || scope.report !== inspection.report || latest.current.busy) return
+              const choices = { ...scope.choices }, value = event.target.value
+              if (value === '') delete choices[row.ref]
+              else {
+                const grid = Number(value)
+                if (!row.candidates.includes(grid) || Object.entries(choices).some(([ref, chosen]) => ref !== row.ref && chosen === grid)) return
+                choices[row.ref] = grid
+              }
+              scope.choices = choices
+              setInspection({ ...inspection })
+            }}><option value="">Automatic review</option>{row.candidates.map((grid) =>
+              <option key={grid} value={grid} disabled={Object.entries(scope.choices).some(([ref, chosen]) => ref !== row.ref && chosen === grid)}>Candidate grid {grid}</option>)}</select></td>
         </tr>)}</tbody></table>
       </>}
     </section>}
