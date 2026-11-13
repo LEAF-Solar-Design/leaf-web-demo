@@ -136,6 +136,44 @@ describe('canonical project Solar publication client', () => {
   })
 })
 
+describe('saved canonical frame inspection', () => {
+  const frame = { handle: 'AB1', row: 2, column: 3, elevation: 1.25,
+    vertices: [[0, 0], [4, 0], [4, 8], [0, 8]], preset: 'Synthetic', pile_template: 'Synthetic piles',
+    pose: { tilt_degrees: 12, axis_azimuth_deg: 180, height_at_low_pose_m: 0.8, height_at_high_pose_m: 1.6 } }
+  const page = () => ({ ...readback, schema: 'leaf.project-frame-inspection.v1',
+    drawing_units: 'm', offset: 0, page_size: 25, total: 1, frames: [structuredClone(frame)] })
+
+  it('reads a bounded page from the existing authenticated version route', async () => {
+    const value = page(), fetchImpl = vi.fn().mockResolvedValue(response(value))
+    expect(await client(fetchImpl).inspectFrames(scope)).toEqual({ ok: true, value })
+    const [url, options] = fetchImpl.mock.calls[0]
+    expect(url).toBe('/api/projects/' + id(2) + '/drawings/' + id(3) + '/versions/' + id(4) + '/solar-layout?frame_offset=0')
+    expect(options).toMatchObject({ cache: 'no-store', redirect: 'error',
+      headers: { 'X-Org-Id': id(1), 'X-Project-Id': id(2) } })
+  })
+
+  it.each(['organization_id', 'project_id', 'drawing_id', 'parent_version_id'])('refuses a foreign %s echo', async key => {
+    const value = page(); value[key] = id(99)
+    expect(await client(vi.fn().mockResolvedValue(response(value))).inspectFrames(scope)).toMatchObject({ ok: false })
+  })
+
+  it.each(['pose', 'count', 'duplicate', 'vertices'])('refuses malformed %s before rendering', async failure => {
+    const value = page()
+    if (failure === 'pose') value.frames[0].pose.tilt_degrees = null
+    if (failure === 'count') value.total = 2
+    if (failure === 'duplicate') { value.total = 2; value.frames.push(value.frames[0]) }
+    if (failure === 'vertices') value.frames[0].vertices[0][0] = null
+    expect(await client(vi.fn().mockResolvedValue(response(value))).inspectFrames(scope)).toMatchObject({ ok: false })
+  })
+
+  it('refuses invalid offsets and initial projects without making a request', async () => {
+    const fetchImpl = vi.fn(), api = client(fetchImpl)
+    expect(await api.inspectFrames(scope, { offset: -1 })).toMatchObject({ ok: false })
+    expect(await api.inspectFrames(initialScope)).toMatchObject({ ok: false })
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+})
+
 describe('actual App canonical Solar callback', () => {
   function controller(c, answer) {
     const state = { orgId: c.organization_id, openProjectId: c.project_id, canonicalVersionId: c.input_version_id,
