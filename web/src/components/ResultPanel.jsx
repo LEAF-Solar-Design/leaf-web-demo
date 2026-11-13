@@ -217,7 +217,7 @@ function RowArrayTable({ path, rows, ancestors, density }) {
           </tbody>
         </table>
       </div>
-      {omittedColumns.size > 0 && <p>{omittedColumns.size} more fields available in each row's All fields.</p>}
+      {omittedColumns.size > 0 && <p>{omittedColumns.size} more fields available in each row&apos;s All fields.</p>}
       {rows.length > pageSize && (
         <nav aria-label={`${label} pages`}>
           <span aria-live="polite">Rows {start + 1} to {Math.min(start + pageSize, rows.length)} of {rows.length}</span>
