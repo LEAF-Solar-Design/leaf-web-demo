@@ -54,6 +54,39 @@ function read(status: DatasetReadV1["status"] = "ready"): DatasetReadV1 {
 }
 
 describe("native dataset elements", () => {
+  function renderSource(value: string) {
+    return render(<DatasetElement element={{ ...element, query: { fields: ["source"], limit: 10 },
+      props: { columns: ["source"], row_limit: 10 } }} read={{ ...read(), fields: [
+        { id: "source", label: "Original source", type: { kind: "text" }, nullable: false, sensitivity: "public" },
+      ], rows: [{ key: "source", values: { source: value } }] }} preferences={preferences} />);
+  }
+
+  it.each([
+    "https://github.com/example/project/pull/12",
+    "https://forge.example.test/team/project/pulls/12",
+  ])("renders a supplied HTTPS source as an accessible external link: %s", (url) => {
+    renderSource(url);
+    const link = screen.getByRole("link", { name: url });
+    expect(link.getAttribute("href")).toBe(url);
+    expect(link.getAttribute("target")).toBe("_blank");
+    expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(link.getAttribute("referrerpolicy")).toBe("no-referrer");
+  });
+
+  it.each([
+    "javascript:alert(1)", "data:text/html,<script>alert(1)</script>",
+    "//example.test/pull/12", "http://example.test/pull/12",
+    "https://user:password@example.test/pull/12", "https://example.test/has a space",
+    "https://example.test/\npath", "https://example.test\\@other.test/path",
+    '<a href="https://example.test">source</a>', "https://",
+  ])("keeps unsafe or ambiguous source text inert: %s", (value) => {
+    const result = renderSource(value);
+    expect(screen.queryByRole("link")).toBeNull();
+    expect(within(screen.getByRole("table")).getByText(value, { exact: true,
+      normalizer: (text) => text })).toBeTruthy();
+    expect(result.container.querySelector("script")).toBeNull();
+  });
+
   it("renders semantic headers, formatting and separate freshness labels", () => {
     const result = render(<DatasetElement element={element} read={read()} preferences={preferences} />);
     const table = screen.getByRole("table");

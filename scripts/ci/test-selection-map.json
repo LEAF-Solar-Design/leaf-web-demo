@@ -736,6 +736,7 @@
     "web-author-quota-live-proof",
     "web-build",
     "web-checkout-identity-check",
+    "web-ci-prebuilt-contract",
     "web-collect-staging-auth0-principal-b",
     "web-composer-contract",
     "web-customization-check",

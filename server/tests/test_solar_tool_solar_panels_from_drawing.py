@@ -185,6 +185,17 @@ def test_declaration_pins_the_capability():
     assert len(availability.W1_CAPABILITIES) == 9
 
 
+def test_portrait_outline_keeps_long_axis_orientation(builtin, g1):
+    intake = {"polylines": [{"layer": "Panels", "closed": True, "handle": "A1",
+        "pts": [[0, 0], [1, 0], [1, 2], [0, 2]]}]}
+    before = copy.deepcopy(intake)
+    result = builtin.run(g1, {"expected_rev": g1["rev"]}, source_intake=intake)
+    assert result["panels"][0]["angle"] == 90.0
+    assert result["panels"][0]["centre"] == [.5, 1.0]
+    assert result["panels"][0]["provenance"]["source_handle"] == "A1"
+    assert intake == before
+
+
 @pytest.mark.parametrize("adapter,seedable", [
     ("local-graph-commit", True), (None, False),
     ("cloud-proposal", False), ("local-graph-read", False),
