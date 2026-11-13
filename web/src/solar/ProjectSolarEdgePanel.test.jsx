@@ -324,6 +324,18 @@ it('S02 review shows matched, unmatched and ambiguous groups from verified repor
   expect(save.createObjectURL).not.toHaveBeenCalled()
 })
 
+it('S02 review inspects a bounded matched list with the chosen tail candidate', async () => {
+  downloads()
+  const { props } = setup({ reportBytes: matchReport({ matches: [{ frame_ref: 'roof-east', pdf_grid: 18,
+    candidates: [...Array.from({ length: 15 }, (_, i) => i), 18], candidate_count: 19 }] }) })
+  await upload(); await report()
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect group matches' }))
+  const table = await screen.findByRole('table', { name: 'SolarEdge group matches' })
+  expect(within(table).getByText('PDF grid 18')).toBeTruthy()
+  expect(within(table).getByText('Matched')).toBeTruthy()
+  expect(props.onProjectSubmit).not.toHaveBeenCalled()
+})
+
 it.each(['digest', 'identity', 'malformed', 'candidate-limit'])('S02 review refuses %s failures without showing associations', async (failure) => {
   downloads()
   const bytes = failure === 'identity' ? matchReport({ source_version_id: NEXT })
