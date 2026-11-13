@@ -5,7 +5,7 @@ import { ReadableStream } from 'node:stream/web'
 import { DatasetDerivationPanel, DatasetDerivationEvidence } from './DatasetDerivationPanel.jsx'
 import { createIntegrationsClient } from './client.js'
 
-vi.mock('../api.js', () => ({ authHeaders: () => ({ Authorization: 'Bearer fixture.invalid.signature' }), noteUnauthorized: vi.fn() }))
+vi.mock('../api.js', () => ({ authHeaders: () => ({ Authorization: 'Bearer test' }), noteUnauthorized: vi.fn() }))
 
 const projectId = '11111111-1111-4111-8111-111111111111'
 const reference = { id: 'source', version: 1, digest: 'a'.repeat(64) }
