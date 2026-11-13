@@ -429,13 +429,21 @@ def test_original_dwg_import_refuses_provenance_mismatch_before_conversion(impor
     assert imported.calls == []
 
 
-def test_imported_dxf_keeps_its_original_bytes(imported):
+@pytest.mark.parametrize("source_shape", ["legacy", "canonical_only", "staged_only"])
+def test_imported_dxf_keeps_its_original_bytes(imported, source_shape):
     payload = b'{"layers":[],"polylines":[]}'
     imported.backend.put(imported.source["stored_object"]["ref"], payload)
     imported.source["stored_object"].update(sha256=sha(payload), bytes=len(payload))
     imported.source["upload_content_sha256"] = sha(DXF)
     key = editor.upload_source_key(imported.org, imported.source["drawing_id"], sha(DXF))
     imported.backend.put(key, DXF)
+    if source_shape != "legacy":
+        imported.backend.delete(store.manifest_key(str(imported.org), imported.source["drawing_id"]))
+    if source_shape == "staged_only":
+        imported.backend.delete(key)
+        path = editor.guest_uploads.staged_path(str(imported.org), imported.source["drawing_id"], ".dxf")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(DXF)
     assert read(imported) == (DXF, sha(DXF))
     assert imported.calls == []
 
