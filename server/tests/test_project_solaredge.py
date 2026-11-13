@@ -241,6 +241,23 @@ def test_current_unique_review_still_publishes_tracking_without_entity_changes(r
     assert output["counts"]["assigned_panels"] == len(panels)
 
 
+def test_explicit_tail_candidate_selection_remains_storable_and_accepted(review_lane, monkeypatch):
+    s = review_lane
+    monkeypatch.setattr(se.reports, "parse_source",
+        lambda data: [deepcopy(samples.GRIDS[0]) for _ in range(19)])
+    refs = [frame["id"] for frame in s.ctx.graph["frames"]]
+    choices = {refs[0]: 18, refs[1]: 17}
+    result = report(s, selection_order="unknown", associations=choices)
+    _, stored = se._load_report(s.ctx, result["report"]["artifact_id"])
+    for row in stored["matches"]:
+        assert row["candidate_count"] == 19
+        assert len(row["candidates"]) == len(set(row["candidates"])) == se.tracking.MAX_CANDIDATES
+        assert row["pdf_grid"] == choices[row["frame_ref"]]
+        assert row["pdf_grid"] in row["candidates"]
+    _, _, accepted = accept(s, result)
+    assert read(s, accepted)["output"]["provenance"]["request"]["associations"] == choices
+
+
 def test_explicit_association_review_reuse_reset_and_canonical_acceptance(review_lane):
     s = review_lane
     source = upload(s)

@@ -93,6 +93,16 @@ def validate_request(request):
             "selection_order": order, "project_id": project}
 
 
+def _report_candidates(match):
+    candidates = list(match["candidates"])
+    if "status" in match:
+        return candidates
+    listed = candidates[:MAX_REPORT_CANDIDATES]
+    if match["grid_index"] not in listed:
+        listed[-1] = match["grid_index"]
+    return listed
+
+
 def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_order, associations=None):
     """Review every frame; unresolved rows retain all candidates and null PDF indexes.
 
@@ -151,8 +161,7 @@ def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_orde
         raise SolarEdgeReportError("REPORT_PDF_UNSUPPORTED") from None
     matches = [{"frame_ref": m["block"], "pdf_grid": m["grid_index"],
                 "pdf_matrix": m["original_index"], "pdf_sub_grid": m["sub_grid_id"],
-                "candidates": list(m["candidates"] if "status" in m
-                                   else m["candidates"][:MAX_REPORT_CANDIDATES]),
+                "candidates": _report_candidates(m),
                 "candidate_count": len(m["candidates"]),
                 **({"status": m["status"]} if "status" in m else {})} for m in result["matches"]]
     strings = []
