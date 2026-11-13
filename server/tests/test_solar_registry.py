@@ -32,7 +32,8 @@ PINNED_BASE_DIGESTS = {
     # moved 2026-09-29: solar-settings params gained project_changes (sf-solar-project-readiness)
     "solar-settings": "sha256:a560ec3662e09efb3fefb2d7fa683cdbc55f2630abe633910b0bdd6645528559",
     "solar-size-strings": "sha256:6da06d36dc2c4de475f7fab48654003101d33d776562b76bc704e261d0f1d60e",
-    "solar-panel-groups": "sha256:098e6563d15837eccc55d63f81b45011fa6efc679130b27c8241fef77e47425a",
+    # S03 discovery adds exact grouping properties; captured from full CI at81719653.
+    "solar-panel-groups": "sha256:863f0f8cbd37ab931e9bdddea553923fb96ab4a9436a0540b64ccf329bba5aee",
     "solar-solve-proposal": "sha256:33ca2f21d777762c0e3dd1ad6925599c1d3533aa6341dffa39167fdd5728132d",
     "solar-commit-solve": "sha256:69b70748c4383c2503ed385a63942528a09719a9df69568c1c97524ef00421fa",
     "solar-correct-string": "sha256:7eafd72428523b7d36a0047cb56ab84625c7e42f285376726c4da8334db8a427",
@@ -147,7 +148,10 @@ def _assert_shipped_declarations(registry):
         assert row["schema"] == solar_tools.SCHEMA == "leaf.solar-tool.v1"
         assert row["builtin"] == "builtins/" + row["name"].replace("-", "_") + ".py"
         assert row["family"] == "stringing"
-        assert row["trusted_inputs"] == (["proposal_candidate"] if name == "solar-commit-solve" else [])
+        assert row["trusted_inputs"] == {
+            "solar-commit-solve": ["proposal_candidate"],
+            "solar-panel-groups": ["source_intake"],
+        }.get(name, [])
         assert row["record"] is None
         assert row["wave"] == 1
         assert row["maturity"] == "production"
