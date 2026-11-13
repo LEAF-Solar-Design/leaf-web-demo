@@ -273,8 +273,10 @@ describe('Native source through the real API', () => {
   const transcript = (overrides = {}) => material({ byte_size: 1048576, name: 'Authentic transcript.txt', ...overrides })
   const nativeSetup = (options = {}) => setup({ ...options, props: { sourceContext: 'native', ...options.props } })
 
-  it('creates from the selected transcript and confirms once with exact Native shared-turn hints', async () => {
-    const h = nativeSetup({ materials: [transcript(), material({ material_id: REQUEST, name: 'Teacher.mov', media_type: 'video/quicktime', byte_size: 55000000 })] })
+  it('native_export_single_confirmation creates from the selected transcript and exports the confirmed source', async () => {
+    const { create } = downloadEnvironment()
+    const h = nativeSetup({ materials: [transcript(), material({ material_id: REQUEST, name: 'Teacher.mov', media_type: 'video/quicktime', byte_size: 55000000 })],
+      fetcher: (url) => url.includes('/export?') ? bundleReply({ headers: { 'X-Leaf-Source-Version': '2' } }) : undefined })
     await open(h)
     expect(h.result.current.selected).toEqual([OTHER])
     expect(h.result.current.materials).toHaveLength(2)
@@ -298,7 +300,19 @@ describe('Native source through the real API', () => {
     expect(h.result.current.candidate.state).toBe('published')
     await act(async () => { await h.result.current.confirm(witness); await h.result.current.prepareDownload(h.result.current.candidate) })
     expect(h.startAgentTurn).toHaveBeenCalledTimes(2)
-    expect(h.calls.some((call) => call.url.includes('/export'))).toBe(false)
+    expect(h.calls.filter((call) => call.method === 'POST')).toHaveLength(2)
+    const exports = h.calls.filter((call) => call.url.includes('/export'))
+    expect(exports).toHaveLength(1)
+    const exported = new URL(exports[0].url, 'https://app.example')
+    expect(exported.pathname).toBe(`/api/projects/${PROJECT}/native/source/requests/${body.source_request_id}/export`)
+    expect(Object.fromEntries(exported.searchParams)).toEqual({ source_commit: 'c'.repeat(40), source_tree: 'd'.repeat(40),
+      receipt_digest: 'a'.repeat(64), version: '2' })
+    expect(exports[0]).toMatchObject({ method: 'GET', redirect: 'error', cache: 'no-store' })
+    expect(exports[0].headers.Authorization).toMatch(/^Bearer /)
+    expect(exports[0].headers['X-Org-Id']).toBe(ORG)
+    expect(h.result.current.download).toMatchObject({ sha256: bundleHash,
+      filename: `project-source-${'c'.repeat(40)}.bundle`, url: 'blob:verified-source' })
+    expect(create).toHaveBeenCalledTimes(1)
   })
 
   it.each([['recover', 'publishing', 'published'], ['reject', 'awaiting_confirmation', 'rejected']])('uses the exact Native %s hint and durable readback', async (action, state, finalState) => {
