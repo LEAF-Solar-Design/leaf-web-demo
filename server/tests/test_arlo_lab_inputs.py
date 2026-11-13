@@ -9,6 +9,7 @@ import copy
 from datetime import datetime, timezone
 import json
 import hashlib
+from pathlib import Path
 from threading import RLock
 from types import SimpleNamespace
 import uuid
@@ -604,6 +605,98 @@ def test_status_and_cancel_require_matching_project_and_arlo_tool(client, store)
     url = f"/api/projects/{PROJECT}/arlo-jobs/{job_id}"
     assert client.get(url, headers=headers()).status_code == 200
     assert client.post(url + "/cancel", headers=headers()).status_code == 403
+
+
+def diagnostic_job(store):
+    registered = register()
+    job_id = job(store, "failed")
+    version = uuid.UUID(registered["input_version_id"])
+    store.jobs[job_id].update(input_version_id=version,
+        error={"error_code": "SOLVER_FAILED", "message": "original failure", "retryable": False})
+    return job_id, version
+
+
+def test_input_diagnostics_opt_in_same_scoped_job_and_never_mutates(client, store):
+    job_id, version = diagnostic_job(store)
+    url = f"/api/projects/{PROJECT}/arlo-jobs/{job_id}"
+    assert "input_diagnostics" not in client.get(url, headers=headers()).json()["job"]
+    before = copy.deepcopy((store.inputs, store.versions, store.jobs))
+    store.sql.clear()
+    response = client.get(url, params={"input_diagnostics": "true"}, headers=headers())
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "private, no-store"
+    diagnostic = response.json()["job"]["input_diagnostics"]
+    assert diagnostic["reader_context"] == "api_not_worker"
+    assert diagnostic["reader_module_file_sha256"] == hashlib.sha256(
+        Path(arlo_lab.__file__).read_bytes()).hexdigest()
+    assert diagnostic["registered_input_found"] is True
+    assert all(diagnostic["predicates"].values())
+    assert diagnostic["value_types"]["provenance"] == "dict"
+    assert diagnostic["provenance_value_types"]["input_sha256"] == "str"
+    assert set(diagnostic) == {"reader_context", "reader_module_file_sha256", "registered_input_found",
+                               "predicates", "value_types", "provenance_value_types"}
+    assert (store.inputs, store.versions, store.jobs) == before
+    assert all(sql.startswith("SELECT") for sql in store.sql)
+    assert str(version) not in json.dumps(diagnostic)
+    assert store.versions[version]["intake_ref"] not in json.dumps(diagnostic)
+
+
+@pytest.mark.parametrize("mutation,predicate", [
+    ("contract", "contract_matches"), ("input_sha256", "input_sha256_matches"),
+    ("intake_ref", "intake_ref_matches"), ("oss_object", "oss_object_is_null"),
+    ("provenance", "provenance_is_object")])
+def test_input_diagnostics_identifies_exact_execution_guard_without_executing(client, store, mutation, predicate):
+    job_id, version = diagnostic_job(store)
+    if mutation in ("contract", "input_sha256"):
+        store.versions[version]["provenance"][mutation] = "changed-private-value"
+    else:
+        store.versions[version][mutation] = "changed-private-value"
+    before = copy.deepcopy((store.inputs, store.versions, store.jobs))
+    response = client.get(f"/api/projects/{PROJECT}/arlo-jobs/{job_id}",
+                          params={"input_diagnostics": "true"}, headers=headers())
+    diagnostic = response.json()["job"]["input_diagnostics"]
+    assert diagnostic["predicates"][predicate] is False
+    assert "changed-private-value" not in json.dumps(diagnostic)
+    assert (store.inputs, store.versions, store.jobs) == before
+    with pytest.raises(ValueError, match="registered ARLO input provenance mismatch"):
+        arlo_lab.load_registered_request({"org_id": ORG, "project_id": PROJECT,
+            "input_version_id": version}, {})
+
+
+@pytest.mark.parametrize("case", ["unauthenticated", "nonmember", "foreign_project", "wrong_tool", "missing_job"])
+def test_input_diagnostics_auth_and_scope_refuse_before_input_read(client, store, case):
+    job_id, _ = diagnostic_job(store)
+    project, auth = PROJECT, headers()
+    if case == "unauthenticated": auth.pop("Authorization")
+    elif case == "nonmember": store.role = None
+    elif case == "foreign_project": project = uuid.uuid4()
+    elif case == "wrong_tool": store.jobs[job_id]["tool_name"] = "string-autofill-opt"
+    else: job_id = uuid.uuid4()
+    before = copy.deepcopy((store.inputs, store.versions, store.jobs))
+    store.sql.clear()
+    response = client.get(f"/api/projects/{project}/arlo-jobs/{job_id}",
+                          params={"input_diagnostics": "true"}, headers=auth)
+    assert response.status_code in (401, 403, 404)
+    assert not any(sql.startswith("SELECT i.*") for sql in store.sql)
+    assert (store.inputs, store.versions, store.jobs) == before
+
+
+def test_input_diagnostics_missing_input_reports_unavailable_not_another_version(client, store):
+    job_id, version = diagnostic_job(store)
+    del store.inputs[version]
+    response = client.get(f"/api/projects/{PROJECT}/arlo-jobs/{job_id}",
+                          params={"input_diagnostics": "true"}, headers=headers())
+    diagnostic = response.json()["job"]["input_diagnostics"]
+    assert diagnostic["registered_input_found"] is False
+    assert "predicates" not in diagnostic
+
+
+def test_input_diagnostics_cannot_be_used_with_cancel(store):
+    job_id, _ = diagnostic_job(store)
+    before = copy.deepcopy(store.jobs)
+    with pytest.raises(ValueError, match="read-only"):
+        arlo_lab.job_view(ORG, PROJECT, BINDING, job_id, cancel=True, input_diagnostics=True)
+    assert store.jobs == before
 
 
 def test_run_refuses_nonmember_before_canonical_job_submission(monkeypatch):
