@@ -333,6 +333,8 @@ async function materialHarness(original, pointer = '/rows') {
     resultMetadata.material_context = { schema: 'leaf.project-material-context.v1', source: lineage,
       selection: { records_pointer: pointer }, row_count: rowCount, envelope }
   } else rowCount = original.length
+  resultMetadata.material_lineage = lineage
+  resultMetadata.lastAttempt = { outcome: 'success', row_count: rowCount }
   const originalFetch = harness.fetchImpl.getMockImplementation()
   let imported = false
   harness.fetchImpl.mockImplementation((url, options) => {
@@ -342,6 +344,45 @@ async function materialHarness(original, pointer = '/rows') {
   })
   return { ...harness, material, blob, lineage, resultMetadata, rowCount }
 }
+async function rootArrayEligibilityHarness(envelope = false) {
+  const rows = [{ day: '2026-10-20', total: 2 }]
+  const harness = await materialHarness(envelope ? { rows } : rows, envelope ? '/rows' : '')
+  const original = harness.fetchImpl.getMockImplementation()
+  harness.fetchImpl.mockImplementation((url, options) => {
+    if (url.includes('/datasets?')) return Promise.resolve(response(page([metadata, harness.resultMetadata])))
+    if (url.includes('/datasets/original-records/versions/1')) return Promise.resolve(response(harness.resultMetadata))
+    if (url.endsWith('/dataset-derivations/capabilities')) return Promise.resolve(response({ schema_version: 1, contract: 'dataset-derivation-v1',
+      operations: ['group_count', 'window_count'], max_inputs: 2, max_records_per_input: 100000, max_windows: 4 }))
+    return original(url, options)
+  })
+  return harness
+}
+it.each([false, true])('RootArrayEligibility mounts from actual strict material metadata with optional envelope=%s', async envelope => {
+  const harness = await rootArrayEligibilityHarness(envelope)
+  const detail = await harness.props.client.getDataset(projectId, harness.resultMetadata.reference, { signal: new AbortController().signal })
+  const version = await harness.props.client.getDatasetVersion(projectId, harness.resultMetadata.reference.id, 1, { signal: new AbortController().signal })
+  expect(detail.material_lineage).toEqual(harness.lineage)
+  expect(version).toEqual(detail)
+  if (!envelope) expect(detail).not.toHaveProperty('material_context')
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded()
+  const panel = within(await screen.findByRole('region', { name: 'Create derived dataset' }))
+  await panel.findByLabelText('Source dataset')
+  expect(within(panel.getByLabelText('Source dataset')).getByRole('option', { name: 'Imported original · version 1' })).toBeInTheDocument()
+})
+it('RootArrayEligibility never mounts from untagged connector metadata with optional context', async () => {
+  const harness = await rootArrayEligibilityHarness(true)
+  delete harness.resultMetadata.material_lineage
+  harness.resultMetadata.lastAttempt = null
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded()
+  expect(screen.queryByRole('region', { name: 'Create derived dataset' })).not.toBeInTheDocument()
+})
+it('RootArrayEligibility fails malformed material metadata through the real client before mounting', async () => {
+  const harness = await rootArrayEligibilityHarness(false)
+  harness.resultMetadata.material_lineage.sha256 = 'invalid'
+  render(<OpsWorkspaceGround {...harness.props} />)
+  await screen.findByRole('alert')
+  expect(screen.queryByRole('region', { name: 'Create derived dataset' })).not.toBeInTheDocument()
+})
 const importPosts = (fetchImpl) => fetchImpl.mock.calls.filter(([url, options]) => url.endsWith('/dataset-imports') && options.method === 'POST')
 async function openOriginal() {
   fireEvent.click(screen.getByRole('button', { name: 'List JSON originals' }))

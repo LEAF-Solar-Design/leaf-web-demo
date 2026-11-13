@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState } from 'react'
-import { DatasetDerivationCapabilitiesV1, DatasetDerivationRequestV1, DatasetDerivationResultV1 } from '../../../vendor/assistant-contract/src/dataset-derivation'
+import { DatasetDerivationCapabilitiesV1, DatasetDerivationRequestV1, DatasetDerivationResultV1, ProjectMaterialBindingV1 } from '../../../vendor/assistant-contract/src/dataset-derivation'
 import { humanizeError } from '../errorHumanize.js'
 
 const refKey = (ref) => JSON.stringify([ref.id, ref.version, ref.digest])
@@ -10,6 +10,9 @@ const scalarValue = (field, value) => numeric.includes(field?.type.kind) ? (valu
   : field?.type.kind === 'boolean' ? (value === 'true' ? true : value === 'false' ? false : undefined) : value
 const predicates = (rows, fields) => rows.map(row => row.op === 'is_null' ? { field: row.field, op: row.op }
   : { field: row.field, op: row.op, value: scalarValue(fields.find(field => field.id === row.field), row.value) })
+
+export const isImportedMaterialDataset = dataset => !dataset?.derivation &&
+  ProjectMaterialBindingV1.safeParse(dataset?.material_lineage).success
 
 function FieldSelect({ label, fields, value, onChange, optional = false }) {
   return <label>{label}<select value={value} onChange={event => onChange(event.target.value)} required={!optional}>
@@ -81,7 +84,7 @@ function ScopedDerivation({ client, projectId, signal, datasets, guard, onCreate
   const [lowerInclusive, setLowerInclusive] = useState(false), [upperInclusive, setUpperInclusive] = useState(true)
   const [pairs, setPairs] = useState([]), [domainFields, setDomainFields] = useState({}), [orderField, setOrderField] = useState('')
   const [calculations, setCalculations] = useState([])
-  const eligible = datasets.filter(dataset => !dataset.derivation && dataset.material_context)
+  const eligible = datasets.filter(isImportedMaterialDataset)
   const primary = eligible.find(dataset => refKey(dataset.reference) === primaryKey)
   const events = eligible.find(dataset => refKey(dataset.reference) === eventsKey)
   const domain = eligible.find(dataset => refKey(dataset.reference) === domainKey)

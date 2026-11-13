@@ -1,13 +1,18 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { TextEncoder } from 'node:util'
+import { TextDecoder, TextEncoder } from 'node:util'
+import { ReadableStream } from 'node:stream/web'
 import { DatasetDerivationPanel, DatasetDerivationEvidence } from './DatasetDerivationPanel.jsx'
+import { createIntegrationsClient } from './client.js'
+
+vi.mock('../api.js', () => ({ authHeaders: () => ({ Authorization: 'Bearer fixture.invalid.signature' }), noteUnauthorized: vi.fn() }))
 
 const projectId = '11111111-1111-4111-8111-111111111111'
 const reference = { id: 'source', version: 1, digest: 'a'.repeat(64) }
 const field = (id, kind, nullable = false) => ({ id, label: id, type: { kind }, nullable, sensitivity: 'internal' })
 const fields = [field('identity', 'identifier'), field('repo', 'text'), field('at', 'instant'), field('open_count', 'count'), field('missing', 'text', true)]
-const dataset = { reference, title: 'Imported observations', fields, material_context: { source: { kind: 'project_material' } } }
+const lineage = { kind: 'project_material', material_id: projectId, sha256: 'c'.repeat(64), byte_length: 100 }
+const dataset = { reference, title: 'Imported observations', fields, material_lineage: lineage, material_context: { source: lineage } }
 const capabilities = { schema_version: 1, contract: 'dataset-derivation-v1', operations: ['group_count', 'window_count'], max_inputs: 2, max_records_per_input: 100000, max_windows: 4 }
 const result = { reference: { id: 'counts', version: 1, digest: 'b'.repeat(64) }, revision: 1, rowCount: 2, status: 'complete' }
 function setup() {
@@ -24,7 +29,7 @@ async function fill() {
   change('Output ID', 'counts'); change('Output title', 'Imported counts'); change('Window ID', 'all')
   fireEvent.click(within(screen.getByRole('group', { name: 'Count distinct identities by' })).getByLabelText('identity'))
 }
-beforeEach(() => vi.stubGlobal('TextEncoder', TextEncoder))
+beforeEach(() => { vi.stubGlobal('TextEncoder', TextEncoder); vi.stubGlobal('TextDecoder', TextDecoder) })
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 
 it('loads exact capabilities and creates from explicit source choices, then adopts the returned immutable ref', async () => {
@@ -145,4 +150,48 @@ it('shows per-input unknown clocks, explicit diagnostics and honest coverage rat
   expect(screen.getByText(/Provider history and missing observations may be incomplete/)).toBeInTheDocument()
   expect(screen.getByText(/Rows outside the declared scope: 4/)).toHaveTextContent('missing timestamps: 3')
   expect(screen.getByText(/missing estimates retain a reason/)).toBeInTheDocument()
+})
+
+// Shape from actual producer2436/458a6791; clocks below are explicit test values.
+const rawMaterial = { reference, revision: 1, title: 'Actual-shaped original', fields,
+  material_lineage: lineage, lastAttempt: { outcome: 'success', row_count: 2 },
+  freshness: { fetched_at: '2026-11-12T12:00:00Z', synced_at: '2026-11-12T12:00:00Z', source_updated_at: null } }
+const materialContext = { schema: 'leaf.project-material-context.v1', source: lineage,
+  selection: { records_pointer: '/rows' }, row_count: 2,
+  envelope: { rows: { schema: 'leaf.selected-records-reference.v1', records_pointer: '/rows', row_count: 2 } } }
+function materialListClient(value) {
+  return createIntegrationsClient({ origin: 'https://ops.example', fetchImpl: vi.fn(async () => {
+    const bytes = new TextEncoder().encode(JSON.stringify({ records: [value], nextCursor: null }))
+    return { ok: true, status: 200, headers: { get: name => name === 'content-type' ? 'application/json' : null },
+      body: new ReadableStream({ start(c) { c.enqueue(bytes); c.close() } }) }
+  }) })
+}
+it.each([false, true])('RootArrayEligibility selects strict-client material with optional envelope=%s', async envelope => {
+  const value = { ...rawMaterial, ...(envelope ? { material_context: materialContext } : {}) }
+  const { props } = setup()
+  const listed = await materialListClient(value).listDatasets(projectId, { signal: props.signal })
+  render(<DatasetDerivationPanel {...props} datasets={listed.records} />)
+  await screen.findByLabelText('Source dataset')
+  expect(within(screen.getByLabelText('Source dataset')).getByRole('option', { name: 'Actual-shaped original · version 1' })).toBeInTheDocument()
+  expect(listed.records[0].material_lineage).toEqual(lineage)
+  if (!envelope) expect(listed.records[0]).not.toHaveProperty('material_context')
+})
+
+it('RootArrayEligibility excludes an untagged connector even when optional context is present', async () => {
+  const value = { ...rawMaterial, material_context: materialContext, lastAttempt: null }
+  delete value.material_lineage
+  const { props } = setup()
+  const listed = await materialListClient(value).listDatasets(projectId, { signal: props.signal })
+  render(<DatasetDerivationPanel {...props} datasets={listed.records} />)
+  await screen.findByLabelText('Source dataset')
+  expect(within(screen.getByLabelText('Source dataset')).queryByRole('option', { name: 'Actual-shaped original · version 1' })).not.toBeInTheDocument()
+})
+
+it.each([null, { ...lineage, kind: 'connector' }, { ...lineage, sha256: 'invalid' }])('RootArrayEligibility refuses malformed material tags before they become choices: %j', async material_lineage => {
+  const { props } = setup()
+  await expect(materialListClient({ ...rawMaterial, material_lineage }).listDatasets(projectId, { signal: props.signal })).rejects.toMatchObject({ status: 0 })
+  // Defensive marker check also refuses an injected noncanonical client result.
+  render(<DatasetDerivationPanel {...props} datasets={[{ ...rawMaterial, material_lineage, material_context: materialContext }]} />)
+  await screen.findByLabelText('Source dataset')
+  expect(within(screen.getByLabelText('Source dataset')).queryByRole('option', { name: 'Actual-shaped original · version 1' })).not.toBeInTheDocument()
 })

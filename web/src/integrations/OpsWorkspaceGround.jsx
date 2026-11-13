@@ -7,7 +7,7 @@ import { DatasetElementV1, DatasetQueryV1 } from '../../../vendor/assistant-cont
 import { actionRunMatches, canonicalRecordsPointer, recordsAtOriginal, createIntegrationsClient, UUID } from './client.js'
 import { listProjectReferences, readProjectReferenceOriginal } from '../projects/api.js'
 import { IntegrationSetupPanel } from './IntegrationSetupPanel.jsx'
-import { DatasetDerivationPanel, DatasetDerivationEvidence } from './DatasetDerivationPanel.jsx'
+import { DatasetDerivationPanel, DatasetDerivationEvidence, isImportedMaterialDataset } from './DatasetDerivationPanel.jsx'
 import { ManualWorkflowRunPanel } from './ManualWorkflowRunPanel.jsx'
 import { ManualWorkflowStartPanel } from './ManualWorkflowStartPanel.jsx'
 import { ManualWorkflowDefinitionPanel } from './ManualWorkflowDefinitionPanel.jsx'
@@ -654,7 +654,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
               await guardSetup(signal)
               if (ctx && current(ctx) && !signal.aborted) setState((old) => ({ ...old, datasets: page.records, datasetCursor: page.nextCursor }))
             }} />}
-          {['owner', 'editor'].includes(state.scope.projectRole) && context.current && state.datasets.some(item => item.material_context && !item.derivation) && <DatasetDerivationPanel
+          {['owner', 'editor'].includes(state.scope.projectRole) && context.current && state.datasets.some(isImportedMaterialDataset) && <DatasetDerivationPanel
             key={JSON.stringify(['dataset-derivation', identity.key, context.current.cacheIdentity])}
             contextKey={context.current.cacheIdentity} projectId={projectId} client={client} datasets={state.datasets}
             signal={context.current.controller.signal} guard={guardWorkflow} onCreated={adoptDerivedDataset}
