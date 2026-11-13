@@ -2709,6 +2709,10 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("tests/test_native_preview_worker.py"), 184),
         Suite("scripts-native-preview-service", "scripts tests/test_native_preview_service.py", "pytest",
               SCRIPTS_DIR, _py_pytest("tests/test_native_preview_service.py"), 48),
+        Suite("scripts-native-preview-completion", "scripts tests/test_native_preview_completion.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("tests/test_native_preview_completion.py"), 56),
+        Suite("scripts-native-session-contract", "scripts tests/test_native_preview_session_contract.py", "pytest", SCRIPTS_DIR,
+              _py_pytest("tests/test_native_preview_session_contract.py"), 133),
         Suite("scripts-native-preview-session", "scripts tests/test_native_preview_session.py", "pytest",
               SCRIPTS_DIR, _py_pytest("tests/test_native_preview_session.py"), 61),
         Suite("scripts-native-preview-host", "scripts tests/test_native_preview_host.py", "pytest",
@@ -3664,6 +3668,13 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_project_material_images.py"), 13),
         Suite("server-project-material-inspection", "server tests/test_project_material_inspection.py", "pytest", SERVER,
               _py_pytest("tests/test_project_material_inspection.py"), 134),
+        Suite("server-project-video-materials", "server bounded private video decoder", "pytest", SERVER,
+              _py_pytest("tests/test_project_video_materials.py"), 19),
+        Suite("server-project-video-authoring", "server native video source adapter", "pytest", SERVER,
+              _py_pytest("tests/test_project_video_authoring.py"), 9),
+        Suite("server-project-video-packaging", "server video decoder packaging and conditional real cage", "pytest", SERVER,
+              _py_pytest("tests/test_project_video_packaging.py"), 1,
+              allowed_skip_reasons=(r"No real containment proof: platform=.+, uid=.+, missing_tools=\[.*\]",)),
         Suite("server-project-reference-materials", "server tests/test_project_reference_materials.py", "pytest", SERVER,
               _py_pytest("tests/test_project_reference_materials.py"), 40,
               uses_database=True, db_gated=True, database_skip_reasons=(
@@ -3741,6 +3752,12 @@ def build_suites() -> List[Suite]:
               + ["tests/test_integration_tool_routes.py"], 30),
         Suite("server-integration-element-save", "turn-bound native element saves", "pytest", SERVER,
               _py_pytest("tests/test_integration_element_save.py"), 1),
+        Suite("server-integration-browser", "verified browser dataset bridge", "pytest", SERVER,
+              _py_pytest("tests/test_integration_browser.py"), 51),
+        Suite("server-integration-browser-derivation", "finite browser derivation transport", "pytest", SERVER,
+              _py_pytest("tests/test_integration_browser_derivation.py"), 15),
+        Suite("server-integration-browser-mount", "application browser bridge admission", "pytest", SERVER,
+              _py_pytest("tests/test_integration_browser_mount.py"), 25),
         # This proof owns an EMPTY named disposable database. Never alias the
         # general gate DSN to it. opt_in_env normally accepts boolean flags;
         # a present dedicated DSN selects this suite directly instead.
