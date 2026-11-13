@@ -150,7 +150,8 @@ def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_orde
         raise SolarEdgeReportError("REPORT_PDF_UNSUPPORTED") from None
     matches = [{"frame_ref": m["block"], "pdf_grid": m["grid_index"],
                 "pdf_matrix": m["original_index"], "pdf_sub_grid": m["sub_grid_id"],
-                "candidates": list(m["candidates"]),
+                "candidates": list(m["candidates"] if "status" in m
+                                   else m["candidates"][:MAX_REPORT_CANDIDATES]),
                 "candidate_count": len(m["candidates"]),
                 **({"status": m["status"]} if "status" in m else {})} for m in result["matches"]]
     strings = []

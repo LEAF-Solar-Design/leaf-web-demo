@@ -145,10 +145,12 @@ def test_reuse_same_pdf_report_and_quota_without_reparse(lane):
     assert len([key for key in lane.blobs if "/imports/solaredge/slot-" in key]) == 1
 
 
-@pytest.mark.parametrize("case", ["unmatched", "ambiguous", "competition"])
+@pytest.mark.parametrize("case", ["unmatched", "ambiguous", "competition", "many-candidates"])
 def test_unresolved_review_build_reload_and_reuse_refuses_acceptance(review_lane, monkeypatch, case):
     s = review_lane
     matrices = [] if case == "unmatched" else deepcopy(samples.GRIDS[:1] if case == "competition" else samples.GRIDS)
+    if case == "many-candidates":
+        matrices = [deepcopy(samples.GRIDS[0]) for _ in range(19)]
     def parse(data):
         s.parses.append(sha256(data).hexdigest())
         return deepcopy(matrices)
@@ -173,7 +175,20 @@ def test_unresolved_review_build_reload_and_reuse_refuses_acceptance(review_lane
     assert (s.head, len(s.versions), len(s.calls), s.ctx.graph) == before
 
 
-@pytest.mark.parametrize("change", ["status", "chosen", "candidate", "count", "missing-frame", "assignment"])
+def test_legacy_many_candidates_remains_bounded_and_accepted(lane, monkeypatch):
+    matrices = [deepcopy(samples.GRIDS[0]) for _ in range(19)]
+    monkeypatch.setattr(se.reports, "parse_source", lambda data: deepcopy(matrices))
+    result = report(lane)
+    _, stored = se._load_report(lane.ctx, result["report"]["artifact_id"])
+    for position, row in enumerate(stored["matches"]):
+        assert row["candidate_count"] == len(matrices) - position
+        assert len(row["candidates"]) == se.tracking.MAX_CANDIDATES
+        assert row["pdf_grid"] in row["candidates"]
+    _, _, accepted = accept(lane, result)
+    assert read(lane, accepted)["output"]["accepted"] is True
+
+
+@pytest.mark.parametrize("change", ["status", "chosen", "candidate", "count", "candidate-limit", "missing-frame", "assignment"])
 def test_review_validation_refuses_malformed_unresolved_rows(review_lane, change):
     s = review_lane
     result = report(s)
@@ -188,6 +203,9 @@ def test_review_validation_refuses_malformed_unresolved_rows(review_lane, change
         row["candidates"][0] = True
     elif change == "count":
         row["candidate_count"] += 1
+    elif change == "candidate-limit":
+        row["candidates"] = list(range(se.reports.si.MAX_GRIDS + 1))
+        row["candidate_count"] = len(row["candidates"])
     elif change == "missing-frame":
         broken["matches"].pop()
     else:
