@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { ProjectPhotoInspection, photoRequest, projectPhotoResult, PHOTO_FAILURE } from "../src/agent/projectPhotoInspection.js";
+import { ProjectPhotoInspection, photoRequest, projectPhotoResult, PHOTO_FAILURE, PHOTO_MAX_RESPONSE, type ProjectPhotoInspectionInput } from "../src/agent/projectPhotoInspection.js";
+import { ProjectPhotoClientError } from "../src/ports/impl/appRunClient.js";
 
 const org = "11111111-1111-4111-8111-111111111111";
 const project = "22222222-2222-4222-8222-222222222222";
@@ -46,6 +47,183 @@ describe("closed project photo consumer", () => {
     expect(JSON.parse(a.content).materials.length + JSON.parse(b.content).materials.length).toBe(94);
     const last = await helper.inspect({ ...request(), material_id: id(94) }, async () => ({ ...image(), material_id: id(94) }));
     expect(projectPhotoResult(last).content.filter(block => block.type === "image")).toHaveLength(1);
+  });
+
+  it("automatically pages the catalog and delivers actual pixels for every original", async () => {
+    const helper = new ProjectPhotoInspection(authority);
+    const read = vi.fn(async (body: ProjectPhotoInspectionInput) => body.op === "catalog"
+      ? { ...catalog(), materials: Array.from({ length: body.cursor ? 44 : 50 }, (_, n) => row(n + (body.cursor ? 51 : 1))),
+        next_cursor: body.cursor ? null : id(50), page_count: body.cursor ? 44 : 50 }
+      : { ...image(), material_id: body.material_id });
+    const result = await helper.inspectCatalog({ op: "catalog" }, read);
+    expect(result.isError).toBeUndefined();
+    expect(read.mock.calls.map(([body]) => body)).toEqual([
+      { op: "catalog" }, { op: "catalog", cursor: id(50), expected_revision: 0, expected_digest: null },
+    ]);
+    const all = JSON.parse(result.content);
+    expect(all.materials.map((item: { material_id: string }) => item.material_id)).toEqual(
+      Array.from({ length: 94 }, (_, n) => id(n + 1)));
+    expect(all.next_cursor).toBeNull();
+    const previews = await Promise.all(all.materials.map((item: { material_id: string }) =>
+      helper.inspect({ ...request(), material_id: item.material_id }, read)));
+    for (const inspected of previews) expect(projectPhotoResult(inspected).content.filter(block => block.type === "image")).toHaveLength(1);
+    expect(helper.reconciliation().inspected_ids).toHaveLength(all.materials.length);
+    expect(helper.reconciliation().catalog_complete).toBe(true);
+  });
+
+  it("applies the transport byte bound per page rather than truncating a larger catalog", async () => {
+    const helper = new ProjectPhotoInspection(authority);
+    const rows = Array.from({ length: 2500 }, (_, n) => ({ ...row(n + 1), name: "x".repeat(255) }));
+    const read = vi.fn(async (body: ProjectPhotoInspectionInput) => {
+      const start = body.cursor ? rows.findIndex(row => row.material_id === body.cursor) + 1 : 0;
+      const materials = rows.slice(start, start + 50);
+      const page = { ...catalog(), materials, page_count: materials.length,
+        next_cursor: start + materials.length < rows.length ? materials.at(-1)!.material_id : null };
+      expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThan(PHOTO_MAX_RESPONSE);
+      return page;
+    });
+    const result = await helper.inspectCatalog({ op: "catalog" }, read);
+    expect(result.isError).toBeUndefined();
+    expect(Buffer.byteLength(result.content)).toBeGreaterThan(PHOTO_MAX_RESPONSE);
+    expect(JSON.parse(result.content).materials).toEqual(rows);
+    expect(read).toHaveBeenCalledTimes(rows.length / 50);
+    expect(helper.reconciliation().catalog_complete).toBe(true);
+  });
+
+  it("retries a transient preview only after reacquiring catalog and source witnesses", async () => {
+    const helper = new ProjectPhotoInspection(authority);
+    await helper.inspect({ op: "catalog" }, async () => catalog(true));
+    const calls: unknown[] = [];
+    let previews = 0;
+    const result = await helper.inspect(request(true), async body => {
+      calls.push(body);
+      if (body.op === "catalog") return catalog(true);
+      if (++previews === 1) throw new ProjectPhotoClientError("transport");
+      return image(true);
+    });
+    expect(calls).toEqual([request(true), { op: "catalog", expected_revision: 7, expected_digest: "a".repeat(64) }, request(true)]);
+    expect(projectPhotoResult(result).content.filter(block => block.type === "image")).toHaveLength(1);
+    expect(helper.reconciliation().inspected_ids).toEqual([id(1)]);
+    expect(JSON.stringify(result)).not.toContain("PRIVATE transport detail");
+  });
+
+  it("bounds attempts for a failing photo and continues with other members", async () => {
+    const helper = new ProjectPhotoInspection(authority);
+    const two = { ...catalog(), materials: [row(1), row(2)], page_count: 2 };
+    await helper.inspect({ op: "catalog" }, async () => two);
+    const read = vi.fn(async (body: ProjectPhotoInspectionInput) => {
+      if (body.op === "catalog") return two;
+      if (body.material_id === id(1)) throw new ProjectPhotoClientError("transport");
+      return { ...image(), material_id: id(2) };
+    });
+    expect((await helper.inspect(request(), read)).isError).toBe(true);
+    expect(read.mock.calls.filter(([body]) => body.op === "preview")).toHaveLength(3);
+    expect(read.mock.calls.filter(([body]) => body.op === "catalog")).toHaveLength(2);
+    expect((await helper.inspect(request(), read)).isError).toBe(true);
+    expect(read).toHaveBeenCalledTimes(5);
+    expect((await helper.inspect({ ...request(), material_id: id(2) }, read)).isError).toBeUndefined();
+    expect(helper.reconciliation().unresolved).toEqual([
+      { material_id: id(1), reason: "transport_exhausted" }, { material_id: id(2), reason: "inspected_not_proposed" },
+    ]);
+  });
+
+  it.each(["source", "original", "preview"])("stops retrying when refreshing reveals changed %s witnesses", async kind => {
+    const helper = new ProjectPhotoInspection(authority);
+    const two = { ...catalog(), materials: [row(1), row(2)], page_count: 2 };
+    await helper.inspectCatalog({ op: "catalog" }, async () => two);
+    const read = vi.fn(async (body: ProjectPhotoInspectionInput) => {
+      if (body.op === "preview") throw new ProjectPhotoClientError("transport");
+      return { ...two, ...(kind === "source" ? common(true) : {}), materials: [
+        { ...row(1), ...(kind === "original" ? { sha256: "d".repeat(64) }
+          : kind === "preview" ? { preview_sha256: "d".repeat(64) } : {}) }, row(2),
+      ] };
+    });
+    expect((await helper.inspect(request(), read)).isError).toBe(true);
+    expect(read.mock.calls.map(([body]) => body.op)).toEqual(["preview", "catalog"]);
+    expect(helper.reconciliation().unresolved[0]).toEqual({ material_id: id(1), reason: "source_changed" });
+    expect((await helper.inspect({ ...request(), material_id: id(2) }, async () => ({ ...image(), material_id: id(2) }))).isError).toBeUndefined();
+  });
+
+  it("retries typed transport failures on a catalog continuation without dropping earlier members", async () => {
+    const helper = new ProjectPhotoInspection(authority);
+    let continuations = 0;
+    const read = vi.fn(async (body: ProjectPhotoInspectionInput) => {
+      if (!body.cursor) return { ...catalog(), next_cursor: id(1) };
+      if (++continuations < 3) throw new ProjectPhotoClientError("transport");
+      return { ...catalog(), materials: [row(2)] };
+    });
+    const result = await helper.inspectCatalog({ op: "catalog" }, read);
+    expect(result.isError).toBeUndefined();
+    expect(JSON.parse(result.content).materials.map((row: { material_id: string }) => row.material_id)).toEqual([id(1), id(2)]);
+    expect(read).toHaveBeenCalledTimes(4);
+    expect(helper.reconciliation().catalog_complete).toBe(true);
+  });
+
+  it.each([403, 409, 422, 502, 503])("does not retry opaque failures, even transient-looking statuses (%s)", async status => {
+    const helper = new ProjectPhotoInspection(authority);
+    await helper.inspect({ op: "catalog" }, async () => ({ ...catalog(), materials: [row(1), row(2)], page_count: 2 }));
+    const read = vi.fn(async () => { throw Object.assign(new Error("PRIVATE failure"), { status }); });
+    expect((await helper.inspect(request(), read)).isError).toBe(true);
+    expect(read).toHaveBeenCalledOnce();
+    expect((await helper.inspect({ ...request(), material_id: id(2) }, async () => ({ ...image(), material_id: id(2) }))).isError).toBeUndefined();
+    expect(helper.reconciliation().unresolved[0]).toEqual({ material_id: id(1),
+      reason: status === 403 ? "access_denied" : status === 409 ? "source_changed" : status >= 500 ? "unavailable" : "integrity_failure" });
+  });
+
+  it.each([
+    ["authorization", "access_denied"], ["integrity", "integrity_failure"],
+    ["source_changed", "source_changed"], ["unavailable", "unavailable"],
+  ] as const)("reports typed %s failures without retrying or blocking another photo", async (kind, reason) => {
+    const helper = new ProjectPhotoInspection(authority);
+    await helper.inspectCatalog({ op: "catalog" }, async () => ({ ...catalog(), materials: [row(1), row(2)], page_count: 2 }));
+    const read = vi.fn(async () => { throw new ProjectPhotoClientError(kind); });
+    const result = await helper.inspect(request(), read);
+    expect(result.isError).toBe(true);
+    expect(read).toHaveBeenCalledOnce();
+    expect(projectPhotoResult(result).content).toEqual([{ type: "text", text: JSON.stringify({
+      error: PHOTO_FAILURE, material_id: id(1), reason, reconciliation: helper.reconciliation(),
+    }) }]);
+    expect((await helper.inspect({ ...request(), material_id: id(2) }, async () => ({ ...image(), material_id: id(2) }))).isError).toBeUndefined();
+    expect(helper.reconciliation().unresolved[0]).toEqual({ material_id: id(1), reason });
+  });
+
+  it.each([{ code: "ECONNRESET" }, { name: "AbortError" }])("does not retry an untyped transport-looking exception %s", async properties => {
+    const helper = new ProjectPhotoInspection(authority);
+    await helper.inspectCatalog({ op: "catalog" }, async () => catalog());
+    const read = vi.fn(async () => { throw Object.assign(new Error("PRIVATE"), properties); });
+    expect((await helper.inspect(request(), read)).isError).toBe(true);
+    expect(read).toHaveBeenCalledOnce();
+  });
+
+  it("never retries bad pixels or a changed source discovered while refreshing", async () => {
+    for (const changedSource of [false, true]) {
+      const helper = new ProjectPhotoInspection(authority);
+      await helper.inspect({ op: "catalog" }, async () => catalog(true));
+      const read = vi.fn(async (body: ProjectPhotoInspectionInput) => {
+        if (body.op === "catalog") return { ...catalog(true), source: { ...common(true).source, revision: 8 } };
+        if (changedSource) throw new ProjectPhotoClientError("transport");
+        return { ...image(true), sha256: "d".repeat(64) };
+      });
+      expect((await helper.inspect(request(true), read)).isError).toBe(true);
+      expect(read.mock.calls.filter(([body]) => body.op === "preview")).toHaveLength(1);
+      expect(helper.reconciliation().inspected_ids).toEqual([]);
+    }
+  });
+
+  it("reconciles saved, inspected, proposed and unresolved IDs without using filenames", async () => {
+    const helper = new ProjectPhotoInspection(authority);
+    await helper.inspectCatalog({ op: "catalog" }, async () => ({ ...catalog(true),
+      materials: [row(1, true), row(2), row(3), row(4)], page_count: 4 }));
+    await helper.inspect({ ...request(true), material_id: id(2) }, async () => ({ ...image(true), material_id: id(2), assignments: [] }));
+    await helper.inspect({ ...request(true), material_id: id(3) }, async () => ({ ...image(true), material_id: id(3), assignments: [] }));
+    expect(helper.reconciliation([id(2)])).toEqual({
+      catalog_complete: true, catalogued_ids: [id(1), id(2), id(3), id(4)], inspected_ids: [id(2), id(3)],
+      proposed_ids: [id(2)], saved_ids: [id(1)], unresolved: [
+        { material_id: id(2), reason: "awaiting_explicit_save" },
+        { material_id: id(3), reason: "inspected_not_proposed" },
+        { material_id: id(4), reason: "not_inspected" },
+      ],
+    });
   });
 
   it.each([
@@ -100,7 +278,16 @@ describe("closed project photo consumer", () => {
       if (kind === "extra") value.raw_error = "RAW_BACKEND_MARKER";
       const result = await helper.inspect(request(), async () => value);
       expect(result).toEqual({ content: PHOTO_FAILURE, isError: true });
-      expect(projectPhotoResult(result).content).toEqual([{ type: "text", text: PHOTO_FAILURE }]);
+      const projected = projectPhotoResult(result).content;
+      expect(projected).toHaveLength(1);
+      expect(projected[0]!.type).toBe("text");
+      if (kind === "project" || kind === "turn") {
+        expect(projected).toEqual([{ type: "text", text: PHOTO_FAILURE }]);
+        expect(helper.reconciliation().unresolved).toEqual([{ material_id: id(1), reason: "integrity_failure" }]);
+      } else expect(JSON.parse((projected[0] as { text: string }).text)).toMatchObject({
+        error: PHOTO_FAILURE, material_id: id(1), reason: "integrity_failure",
+      });
+      expect(JSON.stringify(projected)).not.toContain("RAW_BACKEND_MARKER");
     },
   );
 
