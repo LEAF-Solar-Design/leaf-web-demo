@@ -33,7 +33,8 @@ function groupMatches(bytes, report, binding) {
   const refs = new Set()
   return data.matches.map((match) => {
     if (typeof match?.frame_ref !== 'string' || !match.frame_ref || match.frame_ref.length > 200 ||
-        refs.has(match.frame_ref) || !Array.isArray(match.candidates) || match.candidates.length > 16 ||
+        refs.has(match.frame_ref) || !Array.isArray(match.candidates) ||
+        match.candidates.length > (match.status === 'ambiguous' ? 10_000 : 16) ||
         match.candidate_count !== match.candidates.length ||
         match.candidates.some((value) => !Number.isSafeInteger(value) || value < 0) ||
         new Set(match.candidates).size !== match.candidates.length) throw new Error('Invalid group match')
