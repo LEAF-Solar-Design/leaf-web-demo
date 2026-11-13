@@ -7,7 +7,9 @@ const ref = { projectId: 'project1', drawingId: 'drawing1', versionId: 'version1
 const payload = { kind: 'version', ...ref }
 const context = { projectId: ref.projectId, drawingId: ref.drawingId, versions: [{ version_id: ref.versionId, drawing_id: ref.drawingId, seq: ref.seq }] }
 
-// Exercise App's actual drop callback without mounting the drawing renderer.
+// Exercise App's canonical dispatch and legacy preview body separately without
+// mounting the drawing renderer. Project drops now select canonical versions;
+// the async sequence-preview contract remains on the legacy branch.
 const appSource = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
 const appTree = parse(appSource, { sourceType: 'module', plugins: ['jsx'] })
 function transferCallback(node = appTree) {
@@ -54,13 +56,101 @@ function dropHarness(resolveTransfer = resolveVersionTransfer, preview = () => (
   }
   const callback = transferCallback()
   expect(callback).not.toBeNull()
-  const drop = new Function(...Object.keys(bindings), `return (${appSource.slice(callback.start, callback.end)})`)(...Object.values(bindings))
+  const projectBranch = callback.body.body[0]
+  expect(projectBranch).toMatchObject({ type: 'IfStatement', test: { type: 'Identifier', name: 'openProjectId' } })
+  // Keep every legacy preview assertion against its unchanged production body.
+  // The complete callback's canonical/legacy dispatch is exercised below.
+  const legacyCallback = appSource.slice(callback.start, callback.body.start + 1)
+    + appSource.slice(projectBranch.end, callback.end)
+  const drop = new Function(...Object.keys(bindings), `return (${legacyCallback})`)(...Object.values(bindings))
   const back = namedCallback('onBackToHeadTracked')
   const backToHead = new Function(...Object.keys(bindings), 'closeStartForChange', 'onBackToHead',
     `return (${appSource.slice(back.start, back.end)})`)(...Object.values(bindings), () => {}, () => {})
   return { drop, boardTransferScopeRef, onPreviewVersionTracked, setBoardTransferStatus,
     backToHead, retire: () => { request = null } }
 }
+
+function canonicalDropHarness({ projectId = ref.projectId } = {}) {
+  const orgId = 'org1'
+  const state = { orgId, openProjectId: ref.projectId, mock: false, workspace: {
+    project: { org_id: orgId, project_id: ref.projectId },
+    drawing_versions: [{ ...context.versions[0], org_id: orgId, project_id: ref.projectId }],
+  } }
+  const authority = { status: 'active', generation: 1 }
+  const workspaceController = { getSnapshot: vi.fn(() => state) }
+  const session = { generation: 1, controller: { getSnapshot: vi.fn(() => authority) } }
+  const declaration = appTree.program.body.find(node => node.type === 'ExportNamedDeclaration'
+    && node.declaration?.id?.name === 'selectionForProjectDrawingPreview').declaration
+  const selectionForProjectDrawingPreview = new Function('MAX_TRANSFER_CHARS', 'resolveVersionTransfer',
+    `return (${appSource.slice(declaration.start, declaration.end)})`)(MAX_TRANSFER_CHARS, resolveVersionTransfer)
+  const bindings = { openProjectId: projectId, orgId, workspaceController, session, selectionForProjectDrawingPreview,
+    closeStartForChange: vi.fn(), selectCanonicalVersion: vi.fn(), track: vi.fn(), setBoardTransferStatus: vi.fn(),
+    drawingState: { drawing_id: 'legacy-engine-drawing' }, beginBoardTransfer: vi.fn(() => () => true),
+    boardTransferScopeRef: { current: {} }, boardPreviewRunRef: { current: null },
+    workspace: state.workspace, resolveVersionTransfer: vi.fn(resolveVersionTransfer),
+    createPreviewRunner, onPreviewVersionTracked: vi.fn(),
+  }
+  const callback = transferCallback()
+  const drop = new Function(...Object.keys(bindings), `return (${appSource.slice(callback.start, callback.end)})`)(...Object.values(bindings))
+  return { ...bindings, state, authority, drop }
+}
+
+it('C02 project drop selects the exact canonical version without legacy preview', async () => {
+  const h = canonicalDropHarness()
+  await h.drop(encodeVersionRef(ref))
+  expect(h.workspaceController.getSnapshot).toHaveBeenCalledOnce()
+  expect(h.session.controller.getSnapshot).toHaveBeenCalledOnce()
+  expect(h.closeStartForChange).toHaveBeenCalledOnce()
+  expect(h.selectCanonicalVersion).toHaveBeenCalledExactlyOnceWith(ref.versionId)
+  expect(h.track).toHaveBeenCalledExactlyOnceWith('drawing.version_navigated', { action: 'preview' })
+  expect(h.setBoardTransferStatus).toHaveBeenCalledExactlyOnceWith('Project drawing version selected.')
+  expect(h.beginBoardTransfer).not.toHaveBeenCalled()
+  expect(h.resolveVersionTransfer).not.toHaveBeenCalled()
+  expect(h.onPreviewVersionTracked).not.toHaveBeenCalled()
+})
+
+it.each(['org', 'project', 'generation', 'signed-out'])('C02 project drop refuses changed %s authority', async change => {
+  const h = canonicalDropHarness()
+  if (change === 'org') h.state.orgId = 'other-org'
+  if (change === 'project') h.state.openProjectId = 'other-project'
+  if (change === 'generation') h.authority.generation += 1
+  if (change === 'signed-out') h.authority.status = 'required'
+  await h.drop(encodeVersionRef(ref))
+  expect(h.selectCanonicalVersion).not.toHaveBeenCalled()
+  expect(h.closeStartForChange).not.toHaveBeenCalled()
+  expect(h.track).not.toHaveBeenCalled()
+  expect(h.setBoardTransferStatus).not.toHaveBeenCalled()
+  expect(h.beginBoardTransfer).not.toHaveBeenCalled()
+  expect(h.onPreviewVersionTracked).not.toHaveBeenCalled()
+})
+
+it.each(['unknown-version', 'foreign-member', 'wrong-project'])('C02 project drop refuses %s without preview fallback', async change => {
+  const h = canonicalDropHarness()
+  if (change === 'unknown-version') h.state.workspace.drawing_versions = []
+  if (change === 'foreign-member') h.state.workspace.drawing_versions[0].org_id = 'other-org'
+  await h.drop(encodeVersionRef(change === 'wrong-project' ? { ...ref, projectId: 'other-project' } : ref))
+  expect(h.selectCanonicalVersion).not.toHaveBeenCalled()
+  expect(h.closeStartForChange).not.toHaveBeenCalled()
+  expect(h.track).not.toHaveBeenCalled()
+  expect(h.setBoardTransferStatus).toHaveBeenCalledExactlyOnceWith(change === 'wrong-project'
+    ? 'Choose v2 from the current project to preview it.' : 'Refresh the Versions card and choose v2 again.')
+  expect(h.beginBoardTransfer).not.toHaveBeenCalled()
+  expect(h.onPreviewVersionTracked).not.toHaveBeenCalled()
+})
+
+it('C02 a drop outside a project uses the legacy validator without canonical authority reads', async () => {
+  const h = canonicalDropHarness({ projectId: null })
+  await h.drop(encodeVersionRef(ref))
+  expect(h.workspaceController.getSnapshot).not.toHaveBeenCalled()
+  expect(h.session.controller.getSnapshot).not.toHaveBeenCalled()
+  expect(h.beginBoardTransfer).toHaveBeenCalledOnce()
+  expect(h.resolveVersionTransfer).toHaveBeenCalledExactlyOnceWith(encodeVersionRef(ref), {
+    projectId: null, drawingId: 'legacy-engine-drawing', versions: h.workspace.drawing_versions,
+  })
+  expect(h.selectCanonicalVersion).not.toHaveBeenCalled()
+  expect(h.onPreviewVersionTracked).not.toHaveBeenCalled()
+  expect(h.setBoardTransferStatus).toHaveBeenCalledExactlyOnceWith('Choose v2 from the current project to preview it.')
+})
 
 it('retires preview status as soon as Back to head is requested while loading', async () => {
   let complete
