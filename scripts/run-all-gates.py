@@ -3738,6 +3738,12 @@ def build_suites() -> List[Suite]:
               + ["tests/test_integration_tool_routes.py"], 30),
         Suite("server-integration-element-save", "turn-bound native element saves", "pytest", SERVER,
               _py_pytest("tests/test_integration_element_save.py"), 1),
+        Suite("server-integration-browser", "verified browser dataset bridge", "pytest", SERVER,
+              _py_pytest("tests/test_integration_browser.py"), 51),
+        Suite("server-integration-browser-derivation", "finite browser derivation transport", "pytest", SERVER,
+              _py_pytest("tests/test_integration_browser_derivation.py"), 15),
+        Suite("server-integration-browser-mount", "application browser bridge admission", "pytest", SERVER,
+              _py_pytest("tests/test_integration_browser_mount.py"), 25),
         # This proof owns an EMPTY named disposable database. Never alias the
         # general gate DSN to it. opt_in_env normally accepts boolean flags;
         # a present dedicated DSN selects this suite directly instead.
