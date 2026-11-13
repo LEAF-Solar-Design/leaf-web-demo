@@ -83,6 +83,18 @@ _REQUIRED_COLUMNS = {
         "sender_worker", "sender_attempt", "refusal_code", "created_at", "updated_at",
         "grid_id", "send_protocol", "sent_at", "send_principal_sha256",
     },
+    # Migration 0104: per-piece custody rows copy project_solve_exchanges (LIKE ... INCLUDING DEFAULTS) plus the piece key.
+    # Readiness requires them before piece readers activate (schema first, through the canonical delivery rail).
+    "project_solve_piece_exchanges": {
+        "job_id", "org_id", "project_id", "drawing_id", "input_version_id",
+        "parent_intake_sha256", "graph_revision", "graph_sha256", "frame_id", "phase",
+        "grant_ref", "classification", "state", "request_bytes", "request_sha256",
+        "response_bytes", "response_sha256", "solver_endpoint", "solver_version",
+        "candidate_bytes", "candidate_sha256", "proof_bytes", "proof_sha256",
+        "sender_worker", "sender_attempt", "refusal_code", "created_at", "updated_at",
+        "grid_id", "send_protocol", "sent_at", "send_principal_sha256",
+        "piece_index", "source_hash",
+    },
     "demo_sessions": {
         "id", "subject", "tenant_id", "org_id", "created_at", "expires_at",
         "revoked_at", "client_ip_hash",
