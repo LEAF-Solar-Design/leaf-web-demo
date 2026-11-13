@@ -32,7 +32,8 @@ function groupMatches(bytes, report, binding) {
   const refs = new Set()
   return data.matches.map((match) => {
     if (typeof match?.frame_ref !== 'string' || !match.frame_ref || match.frame_ref.length > 200 ||
-        refs.has(match.frame_ref) || !Array.isArray(match.candidates) || match.candidates.length > 16 ||
+        refs.has(match.frame_ref) || !Array.isArray(match.candidates) ||
+        match.candidates.length > (match.status === 'ambiguous' ? 10_000 : 16) ||
         match.candidate_count !== match.candidates.length ||
         match.candidates.some((value) => !Number.isSafeInteger(value) || value < 0) ||
         new Set(match.candidates).size !== match.candidates.length) throw new Error('Invalid group match')
@@ -41,7 +42,7 @@ function groupMatches(bytes, report, binding) {
     if ((status === 'matched' && (!Number.isSafeInteger(match.pdf_grid) || match.pdf_grid < 0 ||
           !match.candidates.includes(match.pdf_grid))) ||
         (status === 'unmatched' && (match.pdf_grid !== null || match.candidates.length !== 0)) ||
-        (status === 'ambiguous' && (match.pdf_grid !== null || match.candidates.length < 2)) ||
+        (status === 'ambiguous' && (match.pdf_grid !== null || match.candidates.length < 1)) ||
         !['matched', 'unmatched', 'ambiguous'].includes(status)) throw new Error('Invalid match status')
     return { ref: match.frame_ref, status, grid: match.pdf_grid, candidates: match.candidates }
   })
