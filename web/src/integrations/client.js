@@ -114,6 +114,25 @@ export const ManualWorkflowHistoryPageV2 = z.strictObject({
     .refine((items) => new Set(items.map((run) => run.run_id.toLowerCase())).size === items.length),
   next_cursor: workflowCursor.nullable(),
 })
+export function manualWorkflowExport(projectId, selected, value) {
+  if (!UUID.test(projectId)) throw invalid()
+  const prior = parse(IntegrationManualWorkflowRunV2, selected)
+  const snapshot = parse(IntegrationManualWorkflowSnapshotV2, value)
+  const run = snapshot.run
+  if (!sameRef(prior.workflow_ref, run.workflow_ref) ||
+      ['run_id', 'submission_digest', 'authority_binding_digest', 'authority_mode', 'created_at'].some((key) => prior[key] !== run[key]) ||
+      run.revision < prior.revision ||
+      (prior.requested_at !== undefined && prior.requested_at !== run.requested_at) ||
+      (prior.state === 'cancel_requested' && !['cancel_requested', 'cancelled'].includes(run.state)) ||
+      (['succeeded', 'cancelled'].includes(prior.state) && prior.state !== run.state) ||
+      (run.revision === prior.revision && JSON.stringify(prior) !== JSON.stringify(run))) throw invalid()
+  // Strict public evidence schemas exclude connection credentials and raw provider
+  // responses. Refuse secret-like saved arguments rather than alter a pinned definition.
+  const sensitive = /^(?:authorization|credentials?|credentialrefs?|password|passwd|(?:client|webhooksigning)?secret|apikey|(?:access|refresh|id)?token)$/i
+  if (snapshot.definition.steps.some((step) => Object.entries(step.arguments).some(([key, value]) =>
+    sensitive.test(key.replace(/_/g, '')) || (typeof value === 'string' && /^Bearer\s+\S+/i.test(value))))) throw invalid()
+  return { schema_version: 1, project_id: projectId, workflow_ref: run.workflow_ref, ...snapshot }
+}
 const scheduleDate = z.string().regex(/^20\d{2}-\d{2}-\d{2}(?![\s\S])/).refine((value) => {
   const date = new Date(`${value}T00:00:00Z`)
   return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value

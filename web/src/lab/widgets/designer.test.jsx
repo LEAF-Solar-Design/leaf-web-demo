@@ -1,6 +1,8 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
+import { webcrypto } from 'node:crypto'
+import { StrictMode } from 'react'
 import WidgetsView from './WidgetsView.jsx'
 import WidgetInspector from './WidgetInspector.jsx'
 import { DESIGNER_DEFAULT_DOC } from './designerDefault.js'
@@ -9,10 +11,21 @@ import { FORMATS, PRESETS } from './widgetCatalog.js'
 import { migrate, validateWidgetDoc } from './widgetDoc.js'
 import { laFitProblem } from './laFit.js'
 import { createEditorState, createWidgetDoc, HANDLES, snap1, snapTargets, supportsPreset, transformElement, useWidgetEditor, widgetEditorReducer as reduce } from './useWidgetEditor.js'
-import { loadGraphOutputs, loadWidget, resolveValues, saveWidget } from './widgetsClient.js'
+import { loadGraphOutputs, loadProjectWidget, loadWidget, projectWidgetId, resolveValues, saveWidget } from './widgetsClient.js'
 import { manifests } from '../canvas/registry.js'
+import LabWorkbench from '../LabWorkbench.jsx'
+import LabGround from '../LabGround.jsx'
+import SurfaceGrounds from '../../site/SurfaceGrounds.jsx'
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers() })
+vi.mock('../views.js', async () => ({ registerLabViews: () => [
+  { id: 'widgets', label: 'Widgets', path: '/app/lab/widgets', component: WidgetsView },
+] }))
+vi.mock('../useLabSurfaceStatus.js', () => ({ useLabSurfaceStatus: () => ({ state: 'on' }) }))
+vi.mock('../../site/groundWindow.js', async (original) => ({
+  ...await original(), useGroundWindow: () => ({ top: 0, left: 0, width: 1000, height: 800 }),
+}))
+
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers(); localStorage.clear() })
 const click = (name) => fireEvent.click(screen.getByRole('button', { name, exact: true }))
 const edit = (label, value) => {
   const input = screen.getByLabelText(label)
@@ -410,11 +423,10 @@ describe('designer interactions', () => {
     edit('Height', '80'); edit('Corners', '10'); edit('Background', 'blur')
     click('Add text'); click('Edit surface'); click('Reset this format')
     expect(screen.getByRole('button', { name: 'Click again to reset' })).toBeInTheDocument()
-    // Reset retains the native content height while authoring supports taller designs.
-    click('Click again to reset'); expect(screen.getByLabelText('Height')).toHaveValue('128')
+    click('Click again to reset'); expect(screen.getByLabelText('Height')).toHaveValue('160')
     expect(screen.getByLabelText('Height')).toHaveAttribute('max', '220')
     edit('Height', '220'); expect(screen.getByLabelText('Height')).toHaveValue('220')
-    expect(screen.getByRole('region', { name: 'Preview' }).querySelectorAll('[data-element-id]')).toHaveLength(DESIGNER_DEFAULT_DOC.formats.la.els.length)
+    expect(screen.getByRole('region', { name: 'Preview' }).querySelectorAll('[data-element-id]')).toHaveLength(0)
     vi.useFakeTimers(); click('Reset this format')
     // Date-based guard also prevents a delayed second click from resetting.
     vi.setSystemTime(Date.now() + 3001); click('Click again to reset')
@@ -559,13 +571,13 @@ describe('SEL-207 critic regressions', () => {
       expect(JSON.parse(screen.getByTestId('binding-state').textContent)).toEqual({ ...before, [key]: value })
     }
   })
-  it('G8 resets each format to its starting layout and ship flag while preserving other formats', () => {
+  it('G8 resets each format to an empty surface while preserving other formats and undo', () => {
     for (const format of Object.keys(FORMATS)) {
       let state = seed(format)
-      state = reduce(state, { type: 'surface', patch: { bg: 'blur', ship: !DESIGNER_DEFAULT_DOC.formats[format].ship } })
+      state = reduce(state, { type: 'surface', patch: { bg: 'blur', ship: false } })
       const before = state.doc
       state = reduce(state, { type: 'reset' })
-      expect(state.doc.formats[format]).toEqual(DESIGNER_DEFAULT_DOC.formats[format])
+      expect(state.doc.formats[format]).toEqual(createWidgetDoc().formats[format])
       for (const other of Object.keys(FORMATS).filter((id) => id !== format)) expect(state.doc.formats[other]).toBe(before.formats[other])
       expect(reduce(state, { type: 'undo' }).doc).toEqual(before)
     }
@@ -577,7 +589,7 @@ describe('SEL-207 critic regressions', () => {
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Local edits'))
     click('Save')
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Saved revision 1'))
-    expect(JSON.parse(fetchImpl.mock.calls[1][1].body)).toEqual({ graph: DESIGNER_DEFAULT_DOC, kind: 'widget', expected_head: null })
+    expect(JSON.parse(fetchImpl.mock.calls[1][1].body)).toEqual({ graph: createWidgetDoc(), kind: 'widget', expected_head: null })
   })
   it('G10 leaves history and redo intact after blocked nudges and no-op inspector commits', () => {
     let state = tinyState()
@@ -622,6 +634,185 @@ describe('SEL-207 critic regressions', () => {
     state = reduce(state, { type: 'edit', patch: { y: 30, h: 60, maxRows: 1 } })
     state = reduce(state, { type: 'add', preset: 'symbols' })
     expect(selected(state)).toMatchObject({ y: 30, h: 60, maxRows: 1 })
+  })
+})
+
+describe('project widget journeys', () => {
+  function store() {
+    const documents = new Map()
+    const fetchImpl = vi.fn(async (url, options) => {
+      const [, id, operation] = url.match(/\/api\/lab\/docs\/([^/]+)\/(head|save)$/) ?? []
+      if (!id) return response({ values: [] })
+      const previous = documents.get(id)
+      if (operation === 'head') return previous ? response(previous) : response({}, 404)
+      const body = JSON.parse(options.body)
+      if (body.expected_head !== (previous?.revision ?? null)) return response({ detail: 'stale_expected_head' }, 409)
+      const next = { graph: body.graph, revision: (previous?.revision ?? 0) + 1, kind: 'widget', sha256: 'digest' }
+      documents.set(id, next)
+      return response(next)
+    })
+    vi.stubGlobal('crypto', webcrypto)
+    vi.stubGlobal('fetch', fetchImpl)
+    return { documents, fetchImpl }
+  }
+  const workbench = (projectId, hidden = false, accountScope = 'author') => <LabWorkbench
+    projectId={projectId} accountScope={accountScope} route={{ view: 'widgets' }} status={{ state: 'on' }} hidden={hidden} />
+  const saved = (revision = 1) => waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(`Saved revision ${revision}`))
+
+  it('passes the selected Studio project and account from SurfaceGrounds through LabGround to persisted widgets', async () => {
+    const { documents } = store()
+    const grounds = SurfaceGrounds({ surface: 'lab', studioShell: true, projectId: 'selected-project', accountScope: 'author' }).props.children
+    const labProps = grounds[2].props
+    expect(labProps.projectId).toBe('selected-project')
+    expect(labProps.accountScope).toBe('author')
+    const previousRoute = window.location.href
+    try {
+      window.history.replaceState(null, '', '/app/lab/widgets')
+      render(<LabGround {...labProps} />)
+      edit('Document ID', 'notes'); click('New'); click('Add text'); edit('Text', 'Studio work'); click('Save')
+      await saved()
+      const id = await projectWidgetId('selected-project', 'notes')
+      expect(documents.get(id).graph.formats.la.els[0].text).toBe('Studio work')
+    } finally { window.history.replaceState(null, '', previousRoute) }
+  })
+
+  it('keeps stable bounded IDs distinct for projects and document names, including ambiguous separators', async () => {
+    vi.stubGlobal('crypto', webcrypto)
+    const pairs = [['one', 'same'], ['two', 'same'], ['one', 'other'], ['a-b', 'c'], ['a', 'b-c'], ['project', 'a'.repeat(128)]]
+    const ids = await Promise.all(pairs.map(([project, name]) => projectWidgetId(project, name)))
+    expect(new Set(ids).size).toBe(pairs.length)
+    for (const id of ids) expect(id).toMatch(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/)
+    expect(await projectWidgetId('one', 'same')).toBe(ids[0])
+    expect(await projectWidgetId(null, 'same')).toBe('same')
+  })
+
+  it('restores each project through Workbench, Browser round trips, reopen and remount, and exports the restored document', async () => {
+    const { documents, fetchImpl } = store()
+    const view = render(workbench('project-a'))
+    edit('Document ID', 'notes'); click('New')
+    expect(screen.getByTestId('widget-surface').querySelectorAll('[data-element-id]')).toHaveLength(0)
+    edit('Height', '180'); click('Add text'); edit('Text', 'Project A')
+    edit('W', '88'); edit('H', '18'); edit('X', '24'); edit('Y', '36'); click('Save')
+    await saved()
+    const aId = await projectWidgetId('project-a', 'notes'), aDoc = documents.get(aId).graph
+    const heads = () => fetchImpl.mock.calls.filter(([url]) => url.endsWith('/head')).length
+    const beforeRoundTrip = heads()
+    view.rerender(workbench('project-a', true))
+    view.rerender(workbench('project-a'))
+    expect(screen.getByLabelText('Text')).toHaveValue('Project A')
+    expect(heads()).toBe(beforeRoundTrip)
+
+    view.rerender(workbench('project-b'))
+    expect(screen.getByLabelText('Document ID')).toHaveValue('')
+    expect(screen.queryByTestId('widget-surface')).not.toBeInTheDocument()
+    edit('Document ID', 'notes'); click('New'); click('Add text'); edit('Text', 'Project B'); click('Save')
+    await saved()
+    const bId = await projectWidgetId('project-b', 'notes')
+    expect(documents.get(bId).graph.formats.la.els[0].text).toBe('Project B')
+    expect(documents.get(aId).graph).toEqual(aDoc)
+
+    view.rerender(workbench('project-a'))
+    await saved()
+    click('Text 1: Project A')
+    expect(screen.getByLabelText('X')).toHaveValue(24)
+    expect(screen.getByLabelText('Y')).toHaveValue(36)
+    expect(screen.getByLabelText('W')).toHaveValue(88)
+    expect(screen.getByLabelText('H')).toHaveValue(18)
+    click('Edit surface'); expect(screen.getByLabelText('Height')).toHaveValue('180')
+    click('Load'); await saved()
+    expect(screen.getByLabelText('Document ID')).toHaveValue('notes')
+    view.unmount()
+    render(<StrictMode>{workbench('project-a')}</StrictMode>)
+    await saved()
+    expect(screen.getByTestId('widget-surface')).toHaveStyle({ aspectRatio: '361 / 180' })
+    expect(within(screen.getByRole('region', { name: 'Preview' })).getByText('Project A')).toBeInTheDocument()
+
+    const createObjectURL = vi.fn(() => 'blob:widget-definition')
+    vi.stubGlobal('URL', class extends URL {
+      static createObjectURL = createObjectURL
+      static revokeObjectURL = vi.fn()
+    })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    click('Download widget definition')
+    const exported = await new Promise((resolve) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(JSON.parse(reader.result))
+      reader.readAsText(createObjectURL.mock.calls[0][0])
+    })
+    expect(exported).toEqual(validateWidgetDoc(aDoc))
+  })
+
+  it.each(['load', 'save'])('ignores a late project A %s after switching to B, including its head and last-opened name', async (operation) => {
+    const { documents, fetchImpl } = store()
+    const aId = await projectWidgetId('project-a', 'notes')
+    const bId = await projectWidgetId('project-b', 'notes')
+    const bDoc = seed().doc
+    bDoc.formats.la.els[0].text = 'Project B'
+    documents.set(bId, { graph: bDoc, revision: 2, kind: 'widget' })
+    let finish
+    const regularFetch = fetchImpl.getMockImplementation()
+    fetchImpl.mockImplementation((url, options) => url.endsWith(`/${aId}/${operation === 'load' ? 'head' : 'save'}`)
+      ? new Promise((resolve) => { finish = resolve }) : regularFetch(url, options))
+    const view = render(<WidgetsView projectId="project-a" />)
+    edit('Document ID', 'notes'); click(operation === 'load' ? 'Load' : 'New')
+    if (operation === 'save') { click('Add text'); edit('Text', 'Project A'); click('Save') }
+    await waitFor(() => expect(finish).toBeTypeOf('function'))
+    view.rerender(<WidgetsView projectId="project-b" />)
+    edit('Document ID', 'notes'); click('Load'); await saved(2)
+    await act(async () => { finish(response({ graph: seed().doc, revision: 7, kind: 'widget' })) })
+    expect(screen.getByRole('status')).toHaveTextContent('Saved revision 2')
+    expect(within(screen.getByRole('region', { name: 'Preview' })).getByText('Project B')).toBeInTheDocument()
+    view.rerender(<WidgetsView projectId="project-a" />)
+    expect(screen.getByLabelText('Document ID')).toHaveValue('')
+    expect(screen.queryByTestId('widget-surface')).not.toBeInTheDocument()
+  })
+
+  it('keeps legacy revisions available only through their associated project and saves with their existing head', async () => {
+    const { documents, fetchImpl } = store()
+    const legacy = seed().doc
+    legacy.formats.la.els[0].text = 'Legacy work'
+    documents.set('notes', { graph: legacy, revision: 4, kind: 'widget' })
+    const view = render(<WidgetsView projectId="project-a" />)
+    edit('Document ID', 'notes'); click('Load'); await saved(4)
+    click('Text 1: Legacy work'); edit('Text', 'Legacy edits'); click('Save'); await saved(5)
+    const legacySave = fetchImpl.mock.calls.find(([url]) => url.endsWith('/notes/save'))
+    expect(JSON.parse(legacySave[1].body).expected_head).toBe(4)
+    view.unmount()
+    const reopened = render(<WidgetsView projectId="project-a" />)
+    await saved(5)
+    expect(within(screen.getByRole('region', { name: 'Preview' })).getByText('Legacy edits')).toBeInTheDocument()
+    reopened.rerender(<WidgetsView projectId="project-b" />)
+    edit('Document ID', 'notes'); click('Load')
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Local edits'))
+    expect(screen.getByTestId('widget-surface').querySelectorAll('[data-element-id]')).toHaveLength(0)
+    click('Add text'); edit('Text', 'New project'); click('Save'); await saved()
+    expect(documents.get('notes').graph.formats.la.els[0].text).toBe('Legacy edits')
+    expect(documents.get(await projectWidgetId('project-b', 'notes')).graph.formats.la.els[0].text).toBe('New project')
+  })
+
+  it.each([403, 409, 503])('preserves a project load failure %s without falling back to a legacy document', async (status) => {
+    vi.stubGlobal('crypto', webcrypto)
+    const fetchImpl = vi.fn(async () => response({ detail: 'refused' }, status))
+    expect(await loadProjectWidget('project-a', 'notes', { fetch: fetchImpl })).toMatchObject({ ok: false, status })
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
+  it('uses the stored project artifact ID for value requests and publication and separates account restore pointers', async () => {
+    const { documents, fetchImpl } = store()
+    const id = await projectWidgetId('project-a', 'notes'), doc = seed().doc
+    doc.formats.la.h = 128
+    doc.formats.la.els[0].binding = { source: 'graph.output', doc_id: 'strategy', output: 'answer', min_renderer: '1.0.0', scale: 'identity', tone: 'auto' }
+    documents.set(id, { graph: doc, revision: 3, kind: 'widget', sha256: 'digest' })
+    const requestPublication = vi.fn(async () => ({ ok: true }))
+    const view = render(<WidgetsView projectId="project-a" accountScope="author" requestPublication={requestPublication} />)
+    edit('Document ID', 'notes'); click('Load'); await saved(3)
+    await waitFor(() => expect(fetchImpl.mock.calls.some(([url]) => url === `/api/lab/widgets/${id}/values`)).toBe(true))
+    click('Request publication')
+    await screen.findByLabelText('Publication request')
+    expect(requestPublication).toHaveBeenCalledWith({ doc, source: { artifact_id: id, revision: 3, digest: 'digest' } })
+    view.rerender(<WidgetsView projectId="project-a" accountScope="other-author" />)
+    expect(screen.getByLabelText('Document ID')).toHaveValue('')
+    expect(screen.queryByTestId('widget-surface')).not.toBeInTheDocument()
   })
 })
 
@@ -677,7 +868,7 @@ describe('widget store client and states', () => {
     expect(fetchImpl.mock.calls[1][0]).toBe(`/api/lab/docs/${id}/head`)
     expect(JSON.parse(fetchImpl.mock.calls[2][1].body).graph).toEqual(doc)
   })
-  it('New saves the migrated default document with all reference layouts and inclusion flags', async () => {
+  it('New saves a truly empty lock-screen document with independent format surfaces', async () => {
     const fetchImpl = vi.fn(async () => response({ revision: 1, sha256: 'default' }))
     vi.stubGlobal('fetch', fetchImpl)
     render(<WidgetsView />); edit('Document ID', 'default-widget'); click('New')
@@ -685,13 +876,10 @@ describe('widget store client and states', () => {
     click('Save')
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Saved revision 1'))
     const doc = JSON.parse(fetchImpl.mock.calls[0][1].body).graph
-    expect(doc).toEqual(DESIGNER_DEFAULT_DOC)
-    expect(Object.fromEntries(Object.entries(doc.formats).map(([id, f]) => [id, f.els.length]))).toEqual({
-      // SEL-403c2 removes the la divider/history footer.
-      la: 4, diExp: 6, diCompact: 2, diMin: 1, standby: 6, lockRect: 3, lockCirc: 1, lockInline: 2,
-      homeS: 5, homeM: 7, homeL: 11, watchStack: 4, watchCorner: 1,
-    })
-    expect(Object.keys(doc.formats).filter((id) => !doc.formats[id].ship)).toEqual(['homeL', 'watchStack', 'watchCorner'])
+    expect(doc).toEqual(createWidgetDoc())
+    expect(doc.formats.la.h).toBe(160)
+    expect(FORMATS[doc.active].w).toBe(361)
+    expect(Object.values(doc.formats).every((surface) => surface.els.length === 0)).toBe(true)
   })
   it('follows binding history and loads outputs only for the current graph document', async () => {
     const initial = seed().doc
@@ -829,14 +1017,14 @@ describe('widget store client and states', () => {
     const fetchImpl = vi.fn().mockResolvedValueOnce(response({ revision: 1, sha256: 'sha' })).mockRejectedValueOnce(new Error('offline'))
     vi.stubGlobal('fetch', fetchImpl)
     render(<WidgetsView />); edit('Document ID', 'widget'); click('New')
-    expect(screen.getByTestId('widget-surface').querySelectorAll('[data-element-id]')).toHaveLength(DESIGNER_DEFAULT_DOC.formats.la.els.length)
+    expect(screen.getByTestId('widget-surface').querySelectorAll('[data-element-id]')).toHaveLength(0)
     click('Add text'); click('Save')
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Saved revision 1'))
     click('Save'); await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('request failed'))
     expect(screen.getByLabelText('Text')).toHaveValue('Your text')
     edit('Binding source', 'graph.output')
     expect(screen.getByRole('status')).toHaveTextContent('Invalid')
-    expect(screen.getByRole('alert')).toHaveTextContent(`/formats/la/els/${DESIGNER_DEFAULT_DOC.formats.la.els.length}`)
+    expect(screen.getByRole('alert')).toHaveTextContent('/formats/la/els/0')
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
   })
   it('shows the selected graph output type in the authenticated binding picker', async () => {
@@ -857,7 +1045,7 @@ describe('widget store client and states', () => {
       return response({ values: [] })
     }))
     render(<WidgetsView />); edit('Document ID', 'sample-widget'); click('New')
-    fireEvent.click(within(screen.getByRole('list', { name: 'Text elements' })).getByRole('button', { name: `${PRESETS[preset].n} ${preset}`, exact: true }))
+    edit('Element preset', preset); click('Add element')
     expect(screen.queryByLabelText('Text')).not.toBeInTheDocument()
     edit('Binding source', 'none'); edit('Text', literal)
     expect(within(screen.getByRole('region', { name: 'Preview' })).getByText(literal)).toBeInTheDocument()
@@ -867,7 +1055,7 @@ describe('widget store client and states', () => {
     expect(within(screen.getByRole('region', { name: 'Preview' })).getByText(literal)).toBeInTheDocument()
     click('Save')
     await waitFor(() => expect(savedDoc).toBeDefined())
-    const element = validateWidgetDoc(savedDoc).formats.la.els.find((item) => item.id === preset)
+    const element = validateWidgetDoc(savedDoc).formats.la.els.find((item) => item.preset === preset)
     expect(element.text).toBe(literal)
     expect(element.binding).toBeUndefined()
   })

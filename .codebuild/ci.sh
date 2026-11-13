@@ -115,7 +115,21 @@ if [[ "${CI_SHARD_MODE:-all}" == all || "$CI_SHARD_INDEX_N" == 0 ]]; then
 echo "LEAF_T start webbundle $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR/web"
 echo "--- 2/4 Build web bundle"
+if [[ -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" ]]; then
+  dep_cache_line="$(timeout --kill-after=5 60 python -I -B "$LEAF_DEP_CACHE_HELPER" seed --kind nx \
+    --repo "$CODEBUILD_SRC_DIR" --cache-dir "$LEAF_CI_CACHE_DIR" --writable "${LEAF_CI_CACHE_WRITABLE:-0}" \
+    --run "${CODEBUILD_BUILD_ID:-local}" --day "$(date -u +%Y%m%d)" --node-version "$(node -v)")" \
+    || dep_cache_line="LEAF_DEP_CACHE kind=nx action=seed result=error"
+  echo "$dep_cache_line"
+fi
 npm run build
+if [[ -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" && "${LEAF_CI_CACHE_WRITABLE:-0}" == 1 ]]; then
+  dep_cache_line="$(timeout --kill-after=5 120 python -I -B "$LEAF_DEP_CACHE_HELPER" publish --kind nx \
+    --repo "$CODEBUILD_SRC_DIR" --cache-dir "$LEAF_CI_CACHE_DIR" --writable 1 \
+    --run "${CODEBUILD_BUILD_ID:-local}" --day "$(date -u +%Y%m%d)" --node-version "$(node -v)")" \
+    || dep_cache_line="LEAF_DEP_CACHE kind=nx action=publish result=error"
+  echo "$dep_cache_line"
+fi
 echo "LEAF_T end webbundle $(date +%s%3N) rc=0"
 echo "LEAF_T start license-fence $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR"
@@ -709,13 +723,33 @@ fi
 echo "=== job license-fence ==="
 echo "=== job test-gate ==="
 setup_log_dir="$(mktemp -d)"
+dep_cache_py_venv_path=/tmp/leaf-ci-venv
 (
 set -euo pipefail
 if [[ "${dep_cache_npm_seeded:-0}" == 1 ]]; then export npm_config_prefer_offline=true; fi
 echo "LEAF_T start webdeps $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR/web"
 echo "--- 1/4 Install web dependencies"
-npm ci
+dep_cache_line=""
+if [[ -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" ]]; then
+  dep_cache_line="$(timeout --kill-after=5 120 python -I -B "$LEAF_DEP_CACHE_HELPER" seed --kind nm --tree web \
+    --repo "$CODEBUILD_SRC_DIR" --cache-dir "$LEAF_CI_CACHE_DIR" --writable "${LEAF_CI_CACHE_WRITABLE:-0}" \
+    --run "${CODEBUILD_BUILD_ID:-local}" --node-version "$(node -v)" --npm-version "$(npm -v)")" \
+    || dep_cache_line="LEAF_DEP_CACHE kind=nm action=seed result=error"
+  echo "$dep_cache_line"
+fi
+if [[ "$dep_cache_line" == *" node_modules=seeded"* ]]; then
+  echo "web dependencies restored from cache; npm ci skipped"
+else
+  npm ci
+  if [[ -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" && "${LEAF_CI_CACHE_WRITABLE:-0}" == 1 ]]; then
+    dep_cache_line="$(timeout --kill-after=5 180 python -I -B "$LEAF_DEP_CACHE_HELPER" publish --kind nm --tree web \
+      --repo "$CODEBUILD_SRC_DIR" --cache-dir "$LEAF_CI_CACHE_DIR" --writable 1 \
+      --run "${CODEBUILD_BUILD_ID:-local}" --node-version "$(node -v)" --npm-version "$(npm -v)")" \
+      || dep_cache_line="LEAF_DEP_CACHE kind=nm action=publish result=error"
+    echo "$dep_cache_line"
+  fi
+fi
 echo "LEAF_T end webdeps $(date +%s%3N) rc=0"
 ) > "$setup_log_dir/webdeps.log" 2>&1 &
 webdeps_pid=$!
@@ -723,11 +757,46 @@ webdeps_pid=$!
 set -euo pipefail
 echo "LEAF_T start pydeps $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR"
+dep_cache_python=python
+dep_cache_py_in_use=0
+dep_cache_py_seeded=0
+if [[ -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" ]]; then
+  dep_cache_py_day="$(date -u +%Y%m%d)" || dep_cache_py_day=""
+  dep_cache_line="$(timeout --kill-after=5 120 python -I -B "$LEAF_DEP_CACHE_HELPER" seed --kind py \
+    --repo "$CODEBUILD_SRC_DIR" --cache-dir "$LEAF_CI_CACHE_DIR" --writable "${LEAF_CI_CACHE_WRITABLE:-0}" \
+    --run "${CODEBUILD_BUILD_ID:-local}" --dest "$dep_cache_py_venv_path" --day "$dep_cache_py_day")" \
+    || dep_cache_line="LEAF_DEP_CACHE kind=py action=seed result=error"
+  echo "$dep_cache_line"
+  if [[ "$dep_cache_line" != *" result=off"* && "$dep_cache_line" != *" result=error"* ]]; then
+    if [[ "$dep_cache_line" == *" venv=seeded"* ]]; then
+      if python -m venv --without-pip --system-site-packages "$dep_cache_py_venv_path" \
+        && "$dep_cache_py_venv_path/bin/python" -c 'import sys; sys.exit(sys.prefix == sys.base_prefix)'; then
+        dep_cache_py_in_use=1
+        dep_cache_py_seeded=1
+      else
+        rm -rf "$dep_cache_py_venv_path"
+      fi
+    fi
+    if [[ "$dep_cache_py_in_use" == 0 ]]; then
+      rm -rf "$dep_cache_py_venv_path"
+      if python -m venv --without-pip --system-site-packages "$dep_cache_py_venv_path"; then
+        dep_cache_py_in_use=1
+      else
+        rm -rf "$dep_cache_py_venv_path"
+      fi
+    fi
+  fi
+fi
+if [[ "$dep_cache_py_in_use" == 1 ]]; then
+  dep_cache_python="$dep_cache_py_venv_path/bin/python"
+fi
+if [[ "$dep_cache_py_seeded" == 0 ]]; then
+cd "$CODEBUILD_SRC_DIR"
 echo "--- 1/6 Upgrade pip"
-python -m pip install --upgrade pip
+"$dep_cache_python" -m pip install --upgrade pip
 cd "$CODEBUILD_SRC_DIR"
 echo "--- 2/6 Install Python dependencies"
-python -m pip install \
+"$dep_cache_python" -m pip install \
   -r server/requirements.txt \
   -r server/requirements-auth.txt \
   -r da/requirements.txt \
@@ -735,6 +804,17 @@ python -m pip install \
   -r scripts/requirements-ci.txt \
   -r executor/control_plane/requirements.txt \
   -r executor/runtime/requirements.txt
+  if [[ "$dep_cache_py_in_use" == 1 && -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" && "${LEAF_CI_CACHE_WRITABLE:-0}" == 1 ]]; then
+    dep_cache_line="$(timeout --kill-after=5 180 python -I -B "$LEAF_DEP_CACHE_HELPER" publish --kind py \
+      --repo "$CODEBUILD_SRC_DIR" --cache-dir "$LEAF_CI_CACHE_DIR" --writable 1 \
+      --run "${CODEBUILD_BUILD_ID:-local}" --src "$dep_cache_py_venv_path" --day "$dep_cache_py_day")" \
+      || dep_cache_line="LEAF_DEP_CACHE kind=py action=publish result=error"
+    echo "$dep_cache_line"
+  fi
+fi
+if [[ "$dep_cache_py_in_use" == 1 ]]; then
+  touch "$setup_log_dir/py-venv-ready"
+fi
 echo "LEAF_T end pydeps $(date +%s%3N) rc=0"
 ) > "$setup_log_dir/pydeps.log" 2>&1 &
 pydeps_pid=$!
@@ -744,7 +824,26 @@ if [[ "${dep_cache_npm_seeded:-0}" == 1 ]]; then export npm_config_prefer_offlin
 echo "LEAF_T start harness-deps $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR/harness"
 echo "--- 3/6 Install harness dependencies"
-npm ci
+dep_cache_line=""
+if [[ -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" ]]; then
+  dep_cache_line="$(timeout --kill-after=5 120 python -I -B "$LEAF_DEP_CACHE_HELPER" seed --kind nm --tree harness \
+    --repo "$CODEBUILD_SRC_DIR" --cache-dir "$LEAF_CI_CACHE_DIR" --writable "${LEAF_CI_CACHE_WRITABLE:-0}" \
+    --run "${CODEBUILD_BUILD_ID:-local}" --node-version "$(node -v)" --npm-version "$(npm -v)")" \
+    || dep_cache_line="LEAF_DEP_CACHE kind=nm action=seed result=error"
+  echo "$dep_cache_line"
+fi
+if [[ "$dep_cache_line" == *" node_modules=seeded"* ]]; then
+  echo "harness dependencies restored from cache; npm ci skipped"
+else
+  npm ci
+  if [[ -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" && "${LEAF_CI_CACHE_WRITABLE:-0}" == 1 ]]; then
+    dep_cache_line="$(timeout --kill-after=5 180 python -I -B "$LEAF_DEP_CACHE_HELPER" publish --kind nm --tree harness \
+      --repo "$CODEBUILD_SRC_DIR" --cache-dir "$LEAF_CI_CACHE_DIR" --writable 1 \
+      --run "${CODEBUILD_BUILD_ID:-local}" --node-version "$(node -v)" --npm-version "$(npm -v)")" \
+      || dep_cache_line="LEAF_DEP_CACHE kind=nm action=publish result=error"
+    echo "$dep_cache_line"
+  fi
+fi
 echo "LEAF_T end harness-deps $(date +%s%3N) rc=0"
 ) > "$setup_log_dir/harness-deps.log" 2>&1 &
 harness_deps_pid=$!
@@ -755,6 +854,12 @@ wait "$webdeps_pid" || webdeps_rc=$?
 wait "$pydeps_pid" || pydeps_rc=$?
 wait "$harness_deps_pid" || harness_deps_rc=$?
 cat "$setup_log_dir/webdeps.log" "$setup_log_dir/pydeps.log" "$setup_log_dir/harness-deps.log"
+if (( pydeps_rc == 0 )) && [[ -f "$setup_log_dir/py-venv-ready" ]]; then
+  export VIRTUAL_ENV="$dep_cache_py_venv_path"
+  export PATH="$dep_cache_py_venv_path/bin:$PATH"
+  # Keep this optional event separate from the statically counted core events.
+  echo "LEAF_""EVENT pyenv venv=$dep_cache_py_venv_path"
+fi
 rm -rf "$setup_log_dir"
 setup_rc=0
 for setup_step in webdeps pydeps harness-deps; do
@@ -797,9 +902,10 @@ echo "--- 6/6 Run unsharded test gate and print scoreboard"
 # Fetch the pinned autofill-solver from its Forge relay snapshot so the solver
 # suites run against the real checkout. Bounded and fail-open: every command
 # runs under timeout (about 80 s worst case), the function is only ever called
-# as an if condition so errexit never aborts the build, and any failure falls
-# back to LEAF_AUTOFILL_SOLVER_ABSENT_OK, the previous behavior. Integrity is
-# git's own: the cloned HEAD must equal the pinned 40-hex revision.
+# as an if condition so errexit never aborts the fetch. Failures fall back to
+# LEAF_AUTOFILL_SOLVER_ABSENT_OK except on device jobs without an explicit
+# allowance. Integrity is git's own: the cloned HEAD must equal the pinned
+# 40-hex revision.
 autofill_solver_fail() {
   echo "autofill-solver: $1 failed; falling back to LEAF_AUTOFILL_SOLVER_ABSENT_OK" >&2
   return 1
@@ -888,13 +994,23 @@ LEAF_AUTOFILL_EXTRACT
   if [[ -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" && "${LEAF_CI_CACHE_WRITABLE:-0}" == 1 ]]; then timeout --kill-after=5 30 python3 -I -B "$LEAF_DEP_CACHE_HELPER" publish --kind as --cache-dir "$LEAF_CI_CACHE_DIR" --writable 1 --run "${CODEBUILD_BUILD_ID:-local}" --revision "$autofill_solver_revision" --src "$work" >&2 || echo "LEAF_DEP_CACHE kind=as action=publish result=error" >&2; fi
   rm -rf "$work"
 }
+autofill_solver_fatal=0
 if fetch_autofill_solver; then
   export AUTOFILL_SOLVER_ROOT=/tmp/autofill-solver AUTOFILL_SOLVER_REVISION="$autofill_solver_revision"
   echo "autofill-solver: pinned $autofill_solver_revision from relay snapshot $autofill_solver_key"
 else
-  export LEAF_AUTOFILL_SOLVER_ABSENT_OK=1
+  if [[ "${CODEBUILD_BUILD_ID:-}" == device:* && "${LEAF_AUTOFILL_SOLVER_ABSENT_ALLOWED:-}" != 1 ]]; then
+    echo "FATAL: autofill-solver unavailable on this worker (dep-cache seed and S3 fetch both failed); seed the leaf-web-demo dep cache or run on a credentialed worker" >&2
+    autofill_solver_fatal=1
+  else
+    if [[ "${CODEBUILD_BUILD_ID:-}" == device:* && "${LEAF_AUTOFILL_SOLVER_ABSENT_ALLOWED:-}" == 1 ]]; then
+      echo "autofill-solver: absent allowed by LEAF_AUTOFILL_SOLVER_ABSENT_ALLOWED"
+    fi
+    export LEAF_AUTOFILL_SOLVER_ABSENT_OK=1
+  fi
 fi
 # LEAF_AUTOFILL_SOLVER_END
+if [[ "${autofill_solver_fatal:-0}" == 1 ]]; then exit 1; fi
 export LEAF_MANAGED_WEB_BROWSER_MODE=trusted-template-container
 mkdir -p /tmp/gate-results
 if [[ "$reporters_ready" == 1 ]]; then
@@ -1198,6 +1314,8 @@ if [[ "$pr_tier_active" == 1 ]]; then
   gate_tier_args=(--tier-file scripts/ci/pr-tier.json)
 fi
 echo "LEAF_EVENT gate fail_fast=${#gate_fail_fast_args[@]}" >&2
+# The heavy prerequisites build web/ once for the license fence; the web-build suite reuses it by receipt.
+export LEAF_WEB_PREBUILT_RECEIPT="$(mktemp -d /tmp/leaf-webbundle.XXXXXXXX)/receipt.json"
 unset PYTHONSAFEPATH
 # Ensure gate rows reach the log even when the job is killed at its deadline.
 export PYTHONUNBUFFERED=1
