@@ -997,6 +997,47 @@ describe('portfolio project document', () => {
 })
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
+describe('page preview contact action', () => {
+  it.each(['https://example.test/contact', 'mailto:contact@example.test'])('allows normal activation of %s', href => {
+    const activation = vi.fn(), onSelectField = vi.fn()
+    const observe = event => {
+      activation(event.type, event.defaultPrevented)
+      // Observe the preview's behavior, then stop jsdom from navigating.
+      event.preventDefault()
+    }
+    render(<div onClick={observe} onAuxClick={observe}>
+      <PagePreview document={{ ...document, action: { label: 'Contact the team', href } }} onSelectField={onSelectField} />
+    </div>)
+    const link = screen.getByRole('link', { name: 'Contact the team' })
+    expect(link).toHaveAttribute('href', href)
+    if (href.startsWith('https:')) {
+      expect(link).toHaveAttribute('target', '_blank')
+      expect(link).toHaveAttribute('rel', 'noopener noreferrer')
+    } else {
+      expect(link).not.toHaveAttribute('target')
+      expect(link).not.toHaveAttribute('rel')
+    }
+    fireEvent.click(link)
+    fireEvent(link, new MouseEvent('auxclick', { bubbles: true, cancelable: true, button: 1 }))
+    expect(activation.mock.calls).toEqual([['click', false], ['auxclick', false]])
+    expect(onSelectField).not.toHaveBeenCalled()
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { label: 'Contact the team' },
+    ...['', 'https://', 'mailto:', 'mailto:no-domain', 'javascript:alert(1)', 'data:text/html,x',
+      'http://example.test', 'ftp://example.test', 'tel:1234567890', '//example.test'].map(href => ({ label: 'Contact the team', href })),
+  ])('renders an invalid or partial action as text: %j', action => {
+    const view = render(<PagePreview document={{ ...document, action: { label: action.label, href: 'https://example.test/contact' } }} />)
+    expect(screen.getByRole('link', { name: action.label })).toBeTruthy()
+    view.rerender(<PagePreview document={{ ...document, action }} />)
+    expect(screen.getByText(action.label)).toBeTruthy()
+    expect(screen.queryByRole('link')).toBeNull()
+    expect(view.container.querySelector('[href], [tabindex], button')).toBeNull()
+  })
+})
+
 describe('project page editor', () => {
   it('authors a contact action and preserves it through the saved page and revision export', async () => {
     const client = await vi.importActual('./projectPageClient.js')
@@ -1021,14 +1062,18 @@ describe('project page editor', () => {
     expect(label.value).toBe('')
     fireEvent.change(label, { target: { value: action.label } })
     expect(button('Save page').disabled).toBe(true)
+    expect(screen.getByText(action.label, { selector: '.project-page__action' })).toBeTruthy()
+    expect(screen.getByRole('alert')).toHaveTextContent('Enter a plain contact label and a valid HTTPS link or mailto address.')
     fireEvent.change(href, { target: { value: 'javascript:void(0)' } })
     expect(screen.queryByRole('link', { name: action.label })).toBeNull()
+    expect(screen.getByText(action.label, { selector: '.project-page__action' })).toBeTruthy()
+    expect(screen.getByRole('alert')).toHaveTextContent('Enter a plain contact label and a valid HTTPS link or mailto address.')
     expect(button('Save page').disabled).toBe(true)
     expect(fetch).toHaveBeenCalledTimes(1)
     fireEvent.change(href, { target: { value: action.href } })
     const link = screen.getByRole('link', { name: action.label })
     expect(link.getAttribute('href')).toBe(action.href)
-    expect(fireEvent.click(link)).toBe(false)
+    expect(link).not.toHaveAttribute('target')
     expect(fetch).toHaveBeenCalledTimes(1)
     fireEvent.click(button('Save page'))
     await waitFor(() => expect(button('Download Next.js source').disabled).toBe(false))

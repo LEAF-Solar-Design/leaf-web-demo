@@ -139,6 +139,73 @@ function downloads() {
   return { createObjectURL, revokeObjectURL, click }
 }
 
+function matchReport(overrides = {}) {
+  return new TextEncoder().encode(JSON.stringify({ schema: 'leaf.solar-project-solaredge-report.v1',
+    organization_id: O, project_id: P, drawing_id: D, source_version_id: V,
+    graph_sha256: 'e'.repeat(64), source_intake_sha256: 'd'.repeat(64),
+    source: { artifact_id: sourceId }, matches: [
+      { frame_ref: 'roof-east', pdf_grid: 0, candidates: [0], candidate_count: 1 },
+      { frame_ref: 'roof-west', pdf_grid: null, candidates: [], candidate_count: 0, status: 'unmatched' },
+      { frame_ref: 'roof-south', pdf_grid: null, candidates: [1, 2], candidate_count: 2, status: 'ambiguous' },
+    ], ...overrides }))
+}
+
+it('S02 review shows matched, unmatched and ambiguous groups from verified report bytes without accepting', async () => {
+  const save = downloads(), { props } = setup({ reportBytes: matchReport() })
+  await upload(); await report()
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect group matches' }))
+  const table = await screen.findByRole('table', { name: 'SolarEdge group matches' })
+  expect(table.textContent).toContain('roof-eastMatchedPDF grid 0')
+  expect(table.textContent).toContain('roof-westUnmatchedNo PDF grid matches')
+  expect(table.textContent).toContain('roof-southAmbiguousPDF grid 1, PDF grid 2')
+  expect(props.onProjectSubmit).not.toHaveBeenCalled()
+  expect(save.createObjectURL).not.toHaveBeenCalled()
+})
+
+it.each(['digest', 'identity', 'malformed'])('S02 review refuses %s failures without showing associations', async (failure) => {
+  downloads()
+  const bytes = failure === 'identity' ? matchReport({ source_version_id: NEXT })
+    : failure === 'malformed' ? matchReport({ matches: [{ frame_ref: 'roof-east', candidates: null }] }) : matchReport()
+  const { props } = setup({ reportBytes: bytes,
+    ...(failure === 'digest' ? { downloadResponse: () => new Response(new Uint8Array(bytes.length).fill(32)) } : {}) })
+  await upload(); await report()
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect group matches' }))
+  await screen.findByText('Group matches could not be verified. Try inspecting the report again.')
+  expect(screen.queryByRole('table', { name: 'SolarEdge group matches' })).toBeNull()
+  expect(props.onProjectSubmit).not.toHaveBeenCalled()
+})
+
+it('S02 review clears old associations when a replacement report starts', async () => {
+  downloads()
+  const { fetchImpl } = setup({ reportBytes: matchReport() })
+  await upload(); await report()
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect group matches' }))
+  await screen.findByRole('table', { name: 'SolarEdge group matches' })
+  const delayed = deferred()
+  fetchImpl.mockImplementationOnce(() => delayed.promise)
+  fireEvent.click(screen.getByRole('button', { name: 'Build report' }))
+  expect(screen.queryByRole('table', { name: 'SolarEdge group matches' })).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Inspect group matches' })).toBeNull()
+  await act(async () => { delayed.resolve(reply(edge(binding, true))); await Promise.resolve() })
+  await screen.findByRole('button', { name: 'Inspect group matches' })
+})
+
+it('S02 review aborts an in-flight inspection when the selected version changes', async () => {
+  downloads()
+  const delayed = deferred()
+  const { props, client, view, fetchImpl } = setup({ reportBytes: matchReport(), downloadResponse: () => delayed.promise })
+  await upload(); await report()
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect group matches' }))
+  await waitFor(() => expect(fetchImpl.mock.calls.some(([url]) => url.includes('/solar-artifacts/'))).toBe(true))
+  const signal = fetchImpl.mock.calls.at(-1)[1].signal
+  const next = { ...binding, input_version_id: NEXT }
+  act(() => { client.setScope(next, 'session-1'); view.rerender(<ProjectSolarEdgePanel {...props} solarBinding={next} />) })
+  expect(signal.aborted).toBe(true)
+  await act(async () => { delayed.resolve(new Response(matchReport())); await Promise.resolve() })
+  expect(screen.queryByRole('table', { name: 'SolarEdge group matches' })).toBeNull()
+  expect(props.onProjectSubmit).not.toHaveBeenCalled()
+})
+
 it('S02export downloads complete canonical report bytes and provenance through the actual project transport', async () => {
   const save = downloads(), { fetchImpl } = setup({ reportBytes })
   await upload(); await report()

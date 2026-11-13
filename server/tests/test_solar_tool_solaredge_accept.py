@@ -33,7 +33,7 @@ from solar_solve_results import upstream_basis
 from test_solar_registry import package, load_package  # noqa: F401
 from test_solar_solaredge_import import MEMBERSHIP_DIGEST, row_panels, two_block_grid
 from test_solar_solaredge_report import (
-    A, GRIDS, PDF, SRC1, SRC14, SMALL_ARTIFACT, SMALL_CONTENT, SMALL_GRAPH_SHA,
+    A, GRIDS, PDF, SRC1, SRC14, SMALL_ARTIFACT, SMALL_GRAPH_SHA,
     C14_ARTIFACT, C14_CONTENT, C14_GRAPH_SHA, app_id, design_graph, intake_graph, small_graph,
     cached_parse, csv_source, sources)  # noqa: F401
 from test_solar_import_sources import pdf
@@ -45,6 +45,8 @@ from test_w1_solve_commit import seed
 SERVER = Path(__file__).resolve().parents[1]
 TOOL = "solar-solaredge-accept"
 TENANT = "fixture-tenant"
+# Strict historical report bytes, before the review fixture acquired unresolved rows.
+SMALL_CONTENT = "f82e2d8ca1688a3a84f7227ed44a0d168c565fb038ee81882497442545b8d334"
 PDF1_SHA = "82285a8f6ebe74ec978fd7dacb2bf52d7d5c20a9cc8945766072c12e1656111f"
 INTAKE_PDF_SHA = "2e8076086b8e494295e5523b3bb94325924b3196d069e62d2f517275d678a1c1"
 SMALL_ACCEPT_GRAPH = "623b624a667c7e48306580678287a182feda198172d45c2105ab4e8d36c7473c"
@@ -82,6 +84,22 @@ SMALL_RECORD = {
 
 
 # ---------------------------------------------------------------- helpers
+
+
+@pytest.fixture(autouse=True)
+def legacy_report_producer(monkeypatch):
+    """Recreate the strict historical reports whose accepted bytes are pinned here.
+
+    Current unresolved review publication and refusal are exercised by
+    test_solar_solaredge_report and test_project_solaredge, without this fixture.
+    Keep the real importer and every historical acceptance assertion intact.
+    """
+    current_import = report.si.run_import
+
+    def historical_import(*args, **kwargs):
+        return current_import(*args, **{**kwargs, "review": False})
+
+    monkeypatch.setattr(report.si, "run_import", historical_import)
 
 
 def params(report_id=SMALL_ARTIFACT, rev=0):
