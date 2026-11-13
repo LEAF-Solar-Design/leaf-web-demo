@@ -82,12 +82,15 @@ def native_repository(custody, tmp_path, monkeypatch):
         classifier_hint=flow._hint('create', c.edit, c.body, source_profile=source.NATIVE_PROFILE))
     events = [dict(seq=1, turn_id=c.tid, type='turn_started', data=started),
               dict(seq=2, turn_id=c.tid, type='browser_source_dispatch', data=marker)]
-    monkeypatch.setattr(flow.session_store, 'get_session', lambda sid: dict(last_seq=2) if sid == c.sid else None)
+    turns, rows = {c.tid: started}, {c.edit: c.row}
+    monkeypatch.setattr(flow.session_store, 'get_session', lambda sid: dict(last_seq=len(events)) if sid == c.sid else None)
     monkeypatch.setattr(flow.session_store, 'events_after', lambda sid, seq, limit: copy.deepcopy(events))
-    monkeypatch.setattr(flow.session_store, 'turn_started_data', lambda sid, tid, org: copy.deepcopy(started) if (sid,tid,org)==(c.sid,c.tid,c.org) else None)
-    monkeypatch.setattr(flow, '_store', lambda: SimpleNamespace(get_edit=lambda *a: copy.deepcopy(c.row) if a == (*c.bound.values(), c.edit) else None))
+    monkeypatch.setattr(flow.session_store, 'turn_started_data', lambda sid, tid, org: copy.deepcopy(turns.get(tid)) if (sid,org)==(c.sid,c.org) else None)
+    monkeypatch.setattr(flow, '_store', lambda: SimpleNamespace(get_edit=lambda *a: copy.deepcopy(rows.get(a[-1])) if a[:-1] == tuple(c.bound.values()) else None))
     monkeypatch.setattr(flow.platform_link, 'platform_store', lambda: SimpleNamespace(resolve_project_repository_authority=lambda *a: copy.deepcopy(c.bound)))
-    monkeypatch.setattr(metadata, 'get_material', lambda *args: copy.deepcopy(c.material) if args == (c.org,c.project,c.actor,c.mid) else None)
+    c.materials = {}
+    monkeypatch.setattr(metadata, 'get_material', lambda *args: copy.deepcopy(
+        c.material if args[-1] == c.mid else c.materials.get(args[-1])) if args[:-1] == (c.org,c.project,c.actor) else None)
     c.backend.put_if_absent_or_verify(originals.object_key(c.org, c.project, digest), c.original)
     def role(org, project, actor, *, write=False):
         if (org,project)!=(c.org,c.project) or actor not in (c.actor,getattr(c,'worker',c.actor)) or not c.active:
@@ -100,8 +103,10 @@ def native_repository(custody, tmp_path, monkeypatch):
     def post(url, *, data, **kwargs):
         assert url.endswith('/internal/project-repository-source/export') and kwargs['stream'] and not kwargs['allow_redirects']
         body = json.loads(data)
-        assert body == dict(c.bound, source_commit=c.commit, source_tree=c.tree)
+        assert {k: body[k] for k in c.bound} == c.bound
         c.export_calls.append(body)
+        if (body['source_commit'], body['source_tree']) != (c.commit, c.tree):
+            return SimpleNamespace(status_code=409, close=lambda: None)
         request_digest = hashlib.sha256(json.dumps(dict(body, contract=export.BUNDLE_CONTRACT), sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         headers = {'Content-Type':'application/octet-stream','Content-Length':str(len(c.bundle)),
             'X-Leaf-Source-Contract':export.BUNDLE_CONTRACT,'X-Leaf-Request-Digest':request_digest,
@@ -111,6 +116,40 @@ def native_repository(custody, tmp_path, monkeypatch):
         return SimpleNamespace(status_code=getattr(c,'export_status',200), headers=headers,
             iter_content=lambda **kw: iter([c.bundle]), close=lambda: None)
     monkeypatch.setattr(export.requests, 'post', post)
+    def publish_edit(material_refs=()):
+        base = c.commit
+        c.edit, c.tid = str(uuid.uuid4()), str(uuid.uuid4())
+        c.body = dict(source_request_id=c.edit, source_operation='edit',
+            requirements='Revise the native view while keeping the input values.',
+            material_refs=list(material_refs), expected_base_commit=base)
+        for name, (_, raw) in c.files.items():
+            p = repository/name
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(raw)
+        git('add', '.')
+        git('-c', 'user.name=Native fixture', '-c', 'user.email=fixture@invalid.test',
+            'commit', '-m', 'fixture native edit')
+        c.commit, c.tree = (git('rev-parse', revision).decode().strip() for revision in ('HEAD', 'HEAD^{tree}'))
+        git('bundle', 'create', str(c.bundle_path), 'refs/heads/main')
+        c.bundle = c.bundle_path.read_bytes()
+        key = flow._request_key(c.body, source.NATIVE_PROFILE, c.sid, c.tid)
+        receipt = dict(raw_receipt, edit_id=c.edit, base_commit=base,
+            staged_head_commit=c.commit, staged_tree=c.tree,
+            instruction_digest=hashlib.sha256(c.body['requirements'].encode()).hexdigest(), idempotency_key=key)
+        c.row = dict(receipt, state='published', version=4, receipt_json=receipt,
+            receipt_digest=staged_receipt_digest(parse_staged_receipt(receipt)),
+            observed_main_commit=c.commit, observed_main_tree=c.tree, observed_private_ref_commit=c.commit,
+            created_at=now, updated_at=now)
+        rows[c.edit] = c.row
+        started = dict(stage_authority=True, text=c.body['requirements'],
+            classifier_hint=flow._hint('edit', c.edit, c.body, source_profile=source.NATIVE_PROFILE))
+        turns[c.tid] = started
+        marker = dict(source_profile=source.NATIVE_PROFILE, action='edit', source_request_id=c.edit,
+            request=c.body, authority=[c.org, c.project, c.actor], payload_digest=hashlib.sha256(flow.canonical(dict(
+                source_profile=source.NATIVE_PROFILE, action='edit', source_request_id=c.edit, payload=c.body))).hexdigest())
+        events.extend([dict(seq=len(events)+1, turn_id=c.tid, type='turn_started', data=started),
+                       dict(seq=len(events)+2, turn_id=c.tid, type='browser_source_dispatch', data=marker)])
+    c.publish_edit = publish_edit
     c.prepare_native = lambda: source.prepare_native_source(c.org,c.project,c.actor,source_request_id=c.edit)
     return c
 
@@ -125,6 +164,107 @@ def test_native_real_bundle_persisted_tree_and_original_bytes(native_repository)
     assert descriptor['source_commit'] == c.commit and descriptor['source_profile'] == source.NATIVE_PROFILE
     assert 'revision' not in descriptor and len(c.export_calls) == 2
     assert not c.exports  # Never substitute the Portfolio source producer.
+
+
+@pytest.mark.parametrize('repeat_refs', [False, True])
+def test_native_edit_binds_current_tree_and_retains_originals(native_repository, repeat_refs):
+    from project_repository_source import SourceConflict
+    c = native_repository
+    created = c.prepare_native()
+    path = 'Sources/ContentView.swift'
+    c.files[path] = ('100644', c.files[path][1].replace(b'Original input', b'Revised input'))
+    c.publish_edit(c.refs if repeat_refs else ())
+    edited = c.prepare_native()
+    raw = source.read_source(c.org, c.project, c.actor, edited)
+    assert edited['source_operation'] == 'edit'
+    assert edited['material_refs'] == created['material_refs']
+    assert (edited['source_commit'], edited['source_tree']) == (c.commit, c.tree)
+    assert edited['source_commit'] != created['source_commit']
+    assert source.verify_native_archive(raw, edited) == c.files
+    with pytest.raises(SourceConflict):
+        source.read_source(c.org, c.project, c.actor, created)
+    assert c.export_calls[-1]['source_commit'] == created['source_commit']
+    c.files[path] = ('100644', c.files[path][1].replace(b'Revised input', b'Another revision'))
+    c.publish_edit()
+    with pytest.raises(SourceConflict):
+        source.read_source(c.org, c.project, c.actor, edited)
+    assert c.export_calls[-1]['source_commit'] == edited['source_commit']
+    assert not c.exports
+
+
+def test_native_edit_combines_new_and_retained_originals(native_repository):
+    import project_reference_materials as originals
+    c = native_repository
+    mid, raw = str(uuid.uuid4()), b'Additional authorized input\n'
+    digest = hashlib.sha256(raw).hexdigest()
+    c.materials[mid] = dict(c.material, material_id=mid, sha256=digest,
+        byte_size=len(raw), media_type='text/plain')
+    c.backend.put_if_absent_or_verify(originals.object_key(c.org, c.project, digest), raw)
+    c.files['Resources/Input/'+mid+'.txt'] = ('100644', raw)
+    c.publish_edit([dict(material_id=mid, sha256=digest)])
+    descriptor = c.prepare_native()
+    assert {ref['material_id'] for ref in descriptor['material_refs']} == {c.mid, mid}
+    archive = source.read_source(c.org, c.project, c.actor, descriptor)
+    assert source.verify_native_archive(archive, descriptor) == c.files
+
+
+@pytest.mark.parametrize('kind', ['foreign-actor', 'foreign-project', 'foreign-repo',
+    'stale-main', 'stale-tree', 'receipt-digest', 'request-claims',
+    'retained-revoked', 'retained-foreign-actor', 'retained-foreign-project',
+    'retained-oversize', 'retained-hash', 'retained-original'])
+def test_native_edit_refuses_untrusted_receipts_and_retained_materials(native_repository, kind):
+    import browser_project_flow as flow
+    import project_reference_materials as originals
+    from project_repository_source import SourceConflict
+    c = native_repository
+    path = 'Sources/ContentView.swift'
+    c.files[path] = ('100644', c.files[path][1].replace(b'Original input', b'Revised input'))
+    c.publish_edit()
+    if kind == 'foreign-actor': c.row['actor_binding_id'] = str(uuid.uuid4())
+    elif kind == 'foreign-project': c.row['project_id'] = str(uuid.uuid4())
+    elif kind == 'foreign-repo': c.row['repo_key'] = str(uuid.uuid4())
+    elif kind == 'stale-main': c.export_status = 409
+    elif kind == 'stale-tree': c.row['observed_main_tree'] = 'f'*40
+    elif kind == 'receipt-digest': c.row['receipt_digest'] = 'f'*64
+    elif kind == 'request-claims': c.body['expected_base_commit'] = c.commit
+    elif kind == 'retained-revoked': c.material = None
+    elif kind == 'retained-foreign-actor': c.material['actor_binding_id'] = str(uuid.uuid4())
+    elif kind == 'retained-foreign-project': c.material['project_id'] = str(uuid.uuid4())
+    elif kind == 'retained-oversize': c.material['byte_size'] = 1048577
+    elif kind == 'retained-hash': c.material['sha256'] = 'f'*64
+    elif kind == 'retained-original':
+        c.backend.put(originals.object_key(c.org, c.project, c.material['sha256']), b'corrupt')
+    with pytest.raises((ValueError, flow.FlowError, SourceConflict, originals.ReferenceStoreUnavailable)):
+        c.prepare_native()
+    assert not any('/repository-source/' in p.as_posix() for p in Path(c.backend.root).rglob('*'))
+
+
+@pytest.mark.parametrize('field', ['source_operation', 'source_version', 'receipt_digest',
+                                  'source_commit', 'source_tree', 'material_refs'])
+def test_native_edit_descriptor_claims_cannot_replace_receipt(native_repository, field):
+    c = native_repository
+    path = 'Sources/ContentView.swift'
+    c.files[path] = ('100644', c.files[path][1].replace(b'Original input', b'Revised input'))
+    c.publish_edit()
+    descriptor = c.prepare_native()
+    forged = copy.deepcopy(descriptor)
+    if field == 'source_operation': forged[field] = 'create'
+    elif field == 'source_version': forged[field] += 1
+    elif field == 'material_refs': forged[field][0]['sha256'] = 'f'*64
+    else: forged[field] = 'f'*len(forged[field])
+    with pytest.raises(ValueError):
+        source.read_source(c.org, c.project, c.actor, forged)
+
+
+def test_native_edit_retained_material_authority_rechecked_on_read(native_repository):
+    c = native_repository
+    path = 'Sources/ContentView.swift'
+    c.files[path] = ('100644', c.files[path][1].replace(b'Original input', b'Revised input'))
+    c.publish_edit()
+    descriptor = c.prepare_native()
+    c.material = None
+    with pytest.raises(ValueError):
+        source.read_source(c.org, c.project, c.actor, descriptor)
 
 
 @pytest.mark.parametrize('kind', ['foreign-actor','unpublished','wrong-profile','stale-tree','oversize','hash','corrupt-bundle','stale-main'])

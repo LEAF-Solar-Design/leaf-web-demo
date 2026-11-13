@@ -7,6 +7,7 @@ import { createSolarCombinerIntakeClient } from './solarCombinerIntakeClient.js'
 import SolarTerrainPanel from './SolarTerrainPanel.jsx'
 import { createSolarTerrainClient } from './solarTerrainClient.js'
 import SolarCivilPanel from './SolarCivilPanel.jsx'
+import SolarFrameInspector from './SolarFrameInspector.jsx'
 import SolarPhysicalReadPanel from './SolarPhysicalReadPanel.jsx'
 import { createSolarCivilClient } from './solarCivilClient.js'
 import SolarTrackerRowsPanel, { TRACKER_ROWS_PANEL_REASONS } from './SolarTrackerRowsPanel.jsx'
@@ -196,7 +197,7 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
   let initialParameters = null
   let originalSummary = null
   if (selectedOriginal) {
-    initialParameters = originalSolarParameters(selectedOriginal.text, Number(gridLongAxis))
+    initialParameters = originalSolarParameters(selectedOriginal.text, Number(gridLongAxis), selectedOriginal.producerSemantics)
     if (initialParameters) originalSummary = JSON.parse(selectedOriginal.text.replace(/^\uFEFF/, ''))
   } else {
     try { initialParameters = initialSolarParameters(JSON.parse(initialBoundary), JSON.parse(initialPreset), initialUnits) } catch { /* incomplete input */ }
@@ -781,6 +782,14 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
             <label>Terrain grid cells on longer axis<input type="number" min={2} max={300} step={1}
               value={gridLongAxis} onChange={event => setGridLongAxis(event.target.value)} /></label>
             <p>This layout is terrain-free. The grid setting is recorded for provenance.</p>
+            <label>Preset loading<select value={selectedOriginal.producerSemantics ?? 'current-native'}
+              disabled={publication.phase === 'pending'} onChange={event => {
+                const producerSemantics = event.target.value
+                setOriginalIntake(current => current?.project === initialProject ? { ...current, producerSemantics } : current)
+              }}>
+              <option value="current-native">Current native loading</option>
+              <option value="historical-list-reuse">Historical collection reuse</option>
+            </select></label>
             <button type="button" disabled={publication.phase === 'pending'}
               onClick={() => setOriginalIntake(null)}>Clear original intake</button>
           </> : <>
@@ -802,6 +811,8 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
             : projectScope?.input_version_id === null ? 'Generate editable project drawing' : 'Publish layout as editable drawing'}</button>
         {!projectScope && <p>Select a canonical project drawing version before publishing.</p>}
         <p role="status">{publication.message}</p>
+        {projectScope?.drawing_id && projectScope?.input_version_id && <SolarFrameInspector
+          scope={projectScope} client={publicationClient} disabled={busy || publication.phase === 'pending'} />}
       </div>}
       {hasCivil && <button type="button" ref={civilTrigger} aria-expanded={openPanel === 'civil'}
         onClick={() => { if (openPanel === 'civil') civilHeading.current?.focus(); else setOpenPanel('civil') }}>Civil operations</button>}

@@ -1,5 +1,5 @@
 import React from 'react'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { createHash, webcrypto } from 'node:crypto'
 import ProjectSolarEdgePanel from './ProjectSolarEdgePanel.jsx'
@@ -33,7 +33,7 @@ function edge(selected, report = false) {
 }
 const clients = []
 afterEach(() => { cleanup(); clients.splice(0).forEach((client) => client.dispose()); vi.restoreAllMocks(); vi.unstubAllGlobals() })
-function setup({ isHead = true, reportBytes, downloadResponse } = {}) {
+function setup({ isHead = true, reportBytes, downloadResponse, reportCounts } = {}) {
   let client
   const fetchImpl = vi.fn(async (url) => {
     const selected = client.getSnapshot().binding
@@ -42,6 +42,7 @@ function setup({ isHead = true, reportBytes, downloadResponse } = {}) {
     if (url.endsWith('/solaredge-pdf')) return reply(edge(selected))
     if (url.endsWith('/report')) {
       const value = edge(selected, true)
+      if (reportCounts) value.counts = reportCounts
       if (reportBytes) Object.assign(value.report, { byte_length: reportBytes.length,
         content_sha256: createHash('sha256').update(reportBytes).digest('hex') })
       return reply(value)
@@ -138,6 +139,101 @@ function downloads() {
   const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
   return { createObjectURL, revokeObjectURL, click }
 }
+
+function matchReport(overrides = {}) {
+  return new TextEncoder().encode(JSON.stringify({ schema: 'leaf.solar-project-solaredge-report.v1',
+    organization_id: O, project_id: P, drawing_id: D, source_version_id: V,
+    graph_sha256: 'e'.repeat(64), source_intake_sha256: 'd'.repeat(64),
+    source: { artifact_id: sourceId }, matches: [
+      { frame_ref: 'roof-east', pdf_grid: 0, candidates: [0], candidate_count: 1 },
+      { frame_ref: 'roof-west', pdf_grid: null, candidates: [], candidate_count: 0, status: 'unmatched' },
+      { frame_ref: 'roof-south', pdf_grid: null, candidates: [1, 2], candidate_count: 2, status: 'ambiguous' },
+    ], ...overrides }))
+}
+
+it.each([1, 19])('S02 review displays competing groups with %i candidates without choosing or accepting', async (candidateCount) => {
+  const save = downloads()
+  const competitionCounts = { ...counts, frames: 2, matched_frames: 0,
+    group_strings: 0, strings: 0, assigned_panels: 0, unassigned_panels: 4 }
+  const frameRefs = [1, 2].map((n) => `leaf:frame:00000000-0000-4000-8000-${String(n).padStart(12, '0')}`)
+  const bytes = matchReport({ graph_project_id: 'design-1', row_angle: 0,
+    source: { artifact_id: sourceId, content_sha256: 'f'.repeat(64), byte_length: 100 },
+    request: { alignment_tolerance: 0.5, selection_order: 'unknown' }, counts: competitionCounts,
+    matches: frameRefs.map((frame_ref) => ({ frame_ref, status: 'ambiguous',
+      pdf_grid: null, pdf_matrix: null, pdf_sub_grid: null,
+      candidates: Array.from({ length: candidateCount }, (_, i) => i), candidate_count: candidateCount })),
+    strings: [], unassigned_panel_refs: [1, 2, 3, 4].map((n) =>
+      `leaf:panel:00000000-0000-4000-8000-${String(n).padStart(12, '0')}`) })
+  const { props } = setup({ reportBytes: bytes, reportCounts: competitionCounts })
+  await upload(); await report()
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect group matches' }))
+  const table = await screen.findByRole('table', { name: 'SolarEdge group matches' })
+  expect(within(table).getAllByText('Ambiguous')).toHaveLength(2)
+  const candidateText = Array.from({ length: candidateCount }, (_, i) => `PDF grid ${i}`).join(', ')
+  expect(within(table).getAllByText(candidateText)).toHaveLength(2)
+  for (const ref of frameRefs) expect(within(table).getByText(ref)).toBeTruthy()
+  expect(props.onProjectSubmit).not.toHaveBeenCalled()
+  expect(save.createObjectURL).not.toHaveBeenCalled()
+})
+
+it('S02 review shows matched, unmatched and ambiguous groups from verified report bytes without accepting', async () => {
+  const save = downloads(), { props } = setup({ reportBytes: matchReport() })
+  await upload(); await report()
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect group matches' }))
+  const table = await screen.findByRole('table', { name: 'SolarEdge group matches' })
+  expect(table.textContent).toContain('roof-eastMatchedPDF grid 0')
+  expect(table.textContent).toContain('roof-westUnmatchedNo PDF grid matches')
+  expect(table.textContent).toContain('roof-southAmbiguousPDF grid 1, PDF grid 2')
+  expect(props.onProjectSubmit).not.toHaveBeenCalled()
+  expect(save.createObjectURL).not.toHaveBeenCalled()
+})
+
+it.each(['digest', 'identity', 'malformed', 'candidate-limit'])('S02 review refuses %s failures without showing associations', async (failure) => {
+  downloads()
+  const bytes = failure === 'identity' ? matchReport({ source_version_id: NEXT })
+    : failure === 'malformed' ? matchReport({ matches: [{ frame_ref: 'roof-east', candidates: null }] })
+      : failure === 'candidate-limit' ? matchReport({ matches: [{ frame_ref: 'roof-east', status: 'ambiguous',
+        pdf_grid: null, candidates: Array.from({ length: 10_001 }, (_, i) => i), candidate_count: 10_001 }] })
+        : matchReport()
+  const { props } = setup({ reportBytes: bytes,
+    ...(failure === 'digest' ? { downloadResponse: () => new Response(new Uint8Array(bytes.length).fill(32)) } : {}) })
+  await upload(); await report()
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect group matches' }))
+  await screen.findByText('Group matches could not be verified. Try inspecting the report again.')
+  expect(screen.queryByRole('table', { name: 'SolarEdge group matches' })).toBeNull()
+  expect(props.onProjectSubmit).not.toHaveBeenCalled()
+})
+
+it('S02 review clears old associations when a replacement report starts', async () => {
+  downloads()
+  const { fetchImpl } = setup({ reportBytes: matchReport() })
+  await upload(); await report()
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect group matches' }))
+  await screen.findByRole('table', { name: 'SolarEdge group matches' })
+  const delayed = deferred()
+  fetchImpl.mockImplementationOnce(() => delayed.promise)
+  fireEvent.click(screen.getByRole('button', { name: 'Build report' }))
+  expect(screen.queryByRole('table', { name: 'SolarEdge group matches' })).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Inspect group matches' })).toBeNull()
+  await act(async () => { delayed.resolve(reply(edge(binding, true))); await Promise.resolve() })
+  await screen.findByRole('button', { name: 'Inspect group matches' })
+})
+
+it('S02 review aborts an in-flight inspection when the selected version changes', async () => {
+  downloads()
+  const delayed = deferred()
+  const { props, client, view, fetchImpl } = setup({ reportBytes: matchReport(), downloadResponse: () => delayed.promise })
+  await upload(); await report()
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect group matches' }))
+  await waitFor(() => expect(fetchImpl.mock.calls.some(([url]) => url.includes('/solar-artifacts/'))).toBe(true))
+  const signal = fetchImpl.mock.calls.at(-1)[1].signal
+  const next = { ...binding, input_version_id: NEXT }
+  act(() => { client.setScope(next, 'session-1'); view.rerender(<ProjectSolarEdgePanel {...props} solarBinding={next} />) })
+  expect(signal.aborted).toBe(true)
+  await act(async () => { delayed.resolve(new Response(matchReport())); await Promise.resolve() })
+  expect(screen.queryByRole('table', { name: 'SolarEdge group matches' })).toBeNull()
+  expect(props.onProjectSubmit).not.toHaveBeenCalled()
+})
 
 it('S02export downloads complete canonical report bytes and provenance through the actual project transport', async () => {
   const save = downloads(), { fetchImpl } = setup({ reportBytes })

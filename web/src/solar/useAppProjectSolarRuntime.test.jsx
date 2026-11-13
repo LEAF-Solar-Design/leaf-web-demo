@@ -1,3 +1,4 @@
+import { scaleTimeout } from '../testTimeScale.js'
 import React from 'react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { act, cleanup, renderHook } from '@testing-library/react'
@@ -986,7 +987,7 @@ it('R13G-21 deadline loss invalidates context and releases the lock before retry
     expect(h.client.submitRun).toHaveBeenCalledOnce()
     h.unmount()
   } finally { cleanup(); vi.useRealTimers() }
-}, 15000)
+}, scaleTimeout(15000))
 
 it('R13G-22 loss before selection clears visible layers after an authority round trip', async () => {
   const h = await setup(), gate = deferred()

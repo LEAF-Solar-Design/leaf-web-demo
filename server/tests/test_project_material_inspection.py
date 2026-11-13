@@ -4,6 +4,7 @@ import copy
 import hashlib
 import io
 import json
+import random
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -175,6 +176,77 @@ def test_real_jpeg_preview_provenance_and_no_saved_page(mounted):
         assert result['source'] == {'project_id': PROJECT, 'revision': 0, 'digest': None}
         assert result['assignment_basis'] == 'no_saved_page'
         assert (result.get('materials', [{}])[0].get('assignments', result.get('assignments'))) == []
+
+
+@pytest.fixture(scope='module', params=['JPEG', 'PNG'])
+def detailed_original(request):
+    image = Image.frombytes('RGB', (2304, 2304), random.Random(0).randbytes(2304 * 2304 * 3))
+    output = io.BytesIO()
+    image.save(output, format=request.param, **({'quality': 95} if request.param == 'JPEG' else {}))
+    original = output.getvalue()
+    assert len(original) <= project_material_images.MAX_BYTES
+    image.thumbnail((2048, 2048), Image.Resampling.LANCZOS)
+    output = io.BytesIO()
+    image.save(output, format='JPEG', quality=85)
+    legacy = output.getvalue()
+    assert len(legacy) > inspection.MAX_IMAGE_BYTES
+    return original, legacy
+
+
+def test_detailed_intake_bounds_preview_and_retains_original(monkeypatch, detailed_original):
+    import write_loop
+    original, _ = detailed_original
+    objects = {}
+
+    class Backend:
+        def put_if_absent_or_verify(self, key, raw):
+            objects[key] = raw
+
+    monkeypatch.setattr(write_loop, 'upload_backend_for_tenant', lambda org: Backend())
+    result = project_material_images.prepare_and_store(ORG, PROJECT, 'Synthetic photo', original)
+    assert result['sha256'] == hashlib.sha256(original).hexdigest()
+    assert objects[project_material_images.object_key(ORG, PROJECT, result['sha256'], 'original')] == original
+    bounded = objects[project_material_images.object_key(ORG, PROJECT, result['preview_sha256'], 'preview')]
+    assert 0 < len(bounded) <= inspection.MAX_IMAGE_BYTES
+    assert hashlib.sha256(bounded).hexdigest() == result['preview_sha256']
+    with Image.open(io.BytesIO(bounded)) as image:
+        image.load()
+        assert image.format == 'JPEG' and max(image.size) <= 2048
+        assert not image.getexif()
+
+
+def test_legacy_preview_derivative_preserves_saved_witnesses(mounted, detailed_original):
+    state = mounted[1]
+    _, legacy = detailed_original
+    state['raw'] = legacy
+    state['rows'][0]['preview_sha256'] = hashlib.sha256(legacy).hexdigest()
+    state['page'] = None
+    before = copy.deepcopy(state['rows'])
+    response = post(mounted, preview(state))
+    assert response.status_code == 200, response.text
+    result = response.json()
+    bounded = base64.b64decode(result['data'], validate=True)
+    assert result['sha256'] == result['preview_sha256'] == result['derived_from_sha256'] == before[0]['preview_sha256']
+    assert result['original_sha256'] == before[0]['sha256']
+    assert result['inspection_sha256'] == hashlib.sha256(bounded).hexdigest() != result['preview_sha256']
+    assert result['byte_size'] == len(bounded) <= inspection.MAX_IMAGE_BYTES
+    assert len(response.content) <= inspection.MAX_RESPONSE_BYTES
+    with Image.open(io.BytesIO(bounded)) as image:
+        image.load()
+        assert image.format == 'JPEG' and max(image.size) <= 2048
+    assert state['rows'] == before and state['raw'] == legacy
+    assert post(mounted).json()['materials'][0]['preview_sha256'] == before[0]['preview_sha256']
+
+
+def test_derivative_rechecks_authority_after_conversion(mounted, monkeypatch):
+    state = mounted[1]
+
+    def revoke(raw):
+        state['revoked'] = True
+        return raw
+
+    monkeypatch.setattr(project_material_images, 'inspection_image', revoke)
+    assert post(mounted, preview(state)).status_code == 403
 
 
 @pytest.mark.parametrize('body', [[], {'op': 'original'}, {'op': 'catalog', 'project_id': PROJECT},

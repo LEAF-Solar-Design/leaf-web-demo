@@ -219,6 +219,7 @@ export default function SurfaceGrounds({
         onLaunch={onLaunch}
       />
       <LazyLabGround active={(studioShell || !boardVisible) && surfaceGround(surface) === 'lab'}
+        projectId={projectId} accountScope={accountScope}
         mock={mock} studioShell={studioShell} occluders={groundOccluders} />
       <LazyOpsGround
         active={(studioShell || !boardVisible) && surfaceGround(surface) === 'integrations'}

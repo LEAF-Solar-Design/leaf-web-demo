@@ -10,6 +10,13 @@ export default function ArloProjectJob({ project, job }) {
   const [error, setError] = useState('')
   const request = useRef(0)
   useEffect(() => () => { request.current += 1 }, [])
+  useEffect(() => {
+    request.current += 1
+    setLoading(false); setError('')
+  }, [project.org_id, project.project_id, job.job_id, job.input_version_id])
+  const openedMatches = opened && opened.context.org_id === project.org_id
+    && opened.context.project_id === project.project_id && opened.context.job_id === job.job_id
+    && opened.context.input_version_id === job.input_version_id
   const show = async () => {
     const attempt = ++request.current
     setLoading(true); setError(''); setOpened(null)
@@ -36,7 +43,10 @@ export default function ArloProjectJob({ project, job }) {
     {error && <p role="alert">{error}</p>}
     {opened && <section aria-label="Saved feeder proposal">
       <button type="button" className="btn ghost" onClick={close}>Close proposal</button>
-      <ArloProposalReview envelope={opened.envelope} context={opened.context} />
+      {openedMatches ? <ArloProposalReview envelope={opened.envelope} context={opened.context} currentProject={{ orgId: project.org_id, projectId: project.project_id }} /> : <>
+        <p role="status">Export unavailable: the opened result belongs to a different project or job. Open the current project's proposal.</p>
+        <button type="button" className="btn ghost" disabled>Export result</button>
+      </>}
     </section>}
   </div>
 }

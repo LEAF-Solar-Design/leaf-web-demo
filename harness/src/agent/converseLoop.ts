@@ -564,7 +564,7 @@ export class ConverseLoop {
       }
       const run = this.ports.runner.run({
         systemPrompt: SPINE_SYSTEM_PROMPT + "\nFor saved portfolio TEXT changes, use propose_project_page with the current project_material_context page revision and digest. It creates a private review proposal only. Use neither drawing overlays nor customize_platform for portfolio text." +
-          "\nFor requested photo inspection use inspect_project_photo: page through catalog using next_cursor and source witnesses, then request previews by stable material ID and preview digest. Only preview image blocks provide actual pixels; never claim unseen images were inspected. Assignments describe the current saved page only. After actual pixel inspection and the source catalog, use propose_project_photo_assignments for requested photo assignments with the current saved page revision/digest and material digest witnesses. Never infer photo content from filenames alone. Review privately; do not autonomously save or publish photos." + DEVICE_TOOL_GUIDANCE,
+          "\nFor requested photo inspection use inspect_project_photo: catalog automatically traverses every page, then request previews for every unassigned original by stable material ID and preview digest. Group preview tool calls in parallel to cover the catalog within the turn budget; the host serializes witness validation. Continue with other photos if one preview fails; transport retries are bounded by the host. Only preview image blocks provide actual pixels; never claim unseen images were inspected. Assignments describe the current saved page only. After actual pixel inspection and the source catalog, use propose_project_photo_assignments for requested photo assignments with the current saved page revision/digest and material digest witnesses. Reconcile every catalog ID against inspected, proposed and saved IDs; report each unresolved photo and its reason, including proposals awaiting explicit save. Never infer photo content from filenames alone. Review privately; do not autonomously save or publish photos." + DEVICE_TOOL_GUIDANCE,
         userMessage,
         ...(resumeSdkSessionId ? { resumeSdkSessionId } : {}),
         ...(resumeSdkSessionId
@@ -725,6 +725,7 @@ export class ConverseLoop {
 
     const photoInspection = new ProjectPhotoInspection({ orgId: tenantId,
       sessionId: instant.authoritySessionId ?? "", turnId: instant.authorityTurnId ?? "" });
+    let proposedPhotoIds: string[] = [];
 
     /** A tool we cannot find in the catalog is treated as a WRITE (never fast-waited). */
     const capabilityOf = async (toolName: string): Promise<"drawing.read" | "drawing.write" | "solve"> => {
@@ -1190,12 +1191,15 @@ export class ConverseLoop {
           const value = await appRun.proposeProjectPhotoAssignments!(tenantId, instant.authoritySessionId!, ProjectPhotoAssignmentRequest.parse(body),
             { sessionId: instant.authoritySessionId!, turnId: instant.authorityTurnId! });
           pageProposalResult = validatePhotoAssignmentProposal(value, instant.pageProposalSource!, body);
+          if (pageProposalResult) proposedPhotoIds = body.operations.map(operation => operation.material_id);
           result = pageProposalResult ? ok(PHOTO_ASSIGNMENT_SUMMARY) : err(PHOTO_ASSIGNMENT_FAILURE);
         } else if (tool === "inspect_project_photo") {
-          result = await photoInspection.inspect(args, body => appRun.inspectProjectPhoto(
+          const read = (body: ReturnType<typeof photoRequest>) => appRun.inspectProjectPhoto(
             tenantId, instant.authoritySessionId!, body,
             { sessionId: instant.authoritySessionId!, turnId: instant.authorityTurnId! },
-          ));
+          );
+          result = args.op === "catalog" ? await photoInspection.inspectCatalog(args, read)
+            : await photoInspection.inspect(args, read);
         } else {
           const executionArgs = tool === "run_capability"
             ? { ...args, ...consult.args }
@@ -1244,6 +1248,8 @@ export class ConverseLoop {
         tool,
         ok: !result.isError,
         summary: resultSummary(tool, result),
+        ...(tool === "inspect_project_photo" || tool === "propose_project_photo_assignments"
+          ? { photo_reconciliation: photoInspection.reconciliation(proposedPhotoIds) } : {}),
         ...(publicationResult ? { result: publicationResult } : {}),
         ...(tool === "run_capability" && !result.isError && authoredViewResult
           ? { result: authoredViewResult } : {}),
