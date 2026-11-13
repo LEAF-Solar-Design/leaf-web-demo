@@ -176,6 +176,142 @@ it.each([1, 19])('S02 review displays competing groups with %i candidates withou
   expect(save.createObjectURL).not.toHaveBeenCalled()
 })
 
+it('S02 correction builds a new immutable report, accepts its identity separately and resets to automatic review', async () => {
+  downloads()
+  const { fetchImpl, props } = setup()
+  const originalFetch = fetchImpl.getMockImplementation(), correctedId = '8'.repeat(64)
+  const automaticBytes = matchReport({ matches: [{ frame_ref: 'roof-east', pdf_grid: null,
+    pdf_matrix: null, pdf_sub_grid: null, candidates: [0, 1], candidate_count: 2, status: 'ambiguous' }] })
+  const correctedBytes = matchReport({ matches: [{ frame_ref: 'roof-east', pdf_grid: 1,
+    pdf_matrix: 1, pdf_sub_grid: -1, candidates: [0, 1], candidate_count: 2 }] })
+  fetchImpl.mockImplementation(async (url, options) => {
+    if (url.endsWith('/report')) {
+      const choices = JSON.parse(options.body).associations
+      const corrected = choices?.['roof-east'] === 1, data = edge(binding, true)
+      const bytes = corrected ? correctedBytes : automaticBytes
+      const id = corrected ? correctedId : reportId
+      data.counts = { ...counts, matched_frames: corrected ? 1 : 0, group_strings: corrected ? 1 : 0,
+        strings: corrected ? 1 : 0, assigned_panels: corrected ? 2 : 0, unassigned_panels: corrected ? 0 : 2 }
+      Object.assign(data.report, { artifact_id: id, download: `/api/projects/${P}/drawings/${D}/solar-artifacts/${id}`,
+        byte_length: bytes.length, content_sha256: createHash('sha256').update(bytes).digest('hex') })
+      return reply(data)
+    }
+    if (url.includes('/solar-artifacts/')) return new Response(url.includes(`/solar-artifacts/${correctedId}?`) ? correctedBytes : automaticBytes)
+    return originalFetch(url, options)
+  })
+  await upload(); await report()
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect group matches' }))
+  const choice = await screen.findByLabelText('PDF choice for roof-east')
+  fireEvent.change(choice, { target: { value: '1' } })
+  expect(screen.getByRole('button', { name: 'Accept tracking labels' }).disabled).toBe(true)
+  expect(props.onProjectSubmit).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Build report' }))
+  await screen.findByRole('button', { name: 'Inspect group matches' })
+  const reportCalls = () => fetchImpl.mock.calls.filter(([url]) => url.endsWith('/report'))
+  expect(JSON.parse(reportCalls().at(-1)[1].body).associations).toEqual({ 'roof-east': 1 })
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect group matches' }))
+  await screen.findByRole('table', { name: 'SolarEdge group matches' })
+  expect(screen.getByLabelText('PDF choice for roof-east').value).toBe('1')
+  expect(screen.getByText('Matched')).toBeTruthy()
+  expect(props.onProjectSubmit).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Accept tracking labels' }))
+  await waitFor(() => expect(props.onProjectSubmit).toHaveBeenCalledTimes(1))
+  expect(props.onProjectSubmit.mock.calls[0][0].params.report_artifact_id).toBe(correctedId)
+  fireEvent.click(screen.getByRole('button', { name: 'Clear association choices' }))
+  expect(screen.getByRole('button', { name: 'Accept tracking labels' }).disabled).toBe(true)
+  fireEvent.click(screen.getByRole('button', { name: 'Build report' }))
+  await screen.findByRole('button', { name: 'Inspect group matches' })
+  expect(JSON.parse(reportCalls().at(-1)[1].body)).not.toHaveProperty('associations')
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect group matches' }))
+  await screen.findByText('Ambiguous')
+  expect(screen.getByLabelText('PDF choice for roof-east').value).toBe('')
+  expect(props.onProjectSubmit).toHaveBeenCalledTimes(1)
+})
+
+it('S02 correction refuses duplicate grid choices and clears choices when report inputs change', async () => {
+  downloads()
+  const bytes = matchReport({ matches: ['roof-east', 'roof-west'].map((frame_ref) => ({ frame_ref,
+    pdf_grid: null, candidates: [0, 1], candidate_count: 2, status: 'ambiguous' })) })
+  const { fetchImpl, props } = setup({ reportBytes: bytes })
+  await upload(); await report()
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect group matches' }))
+  fireEvent.change(await screen.findByLabelText('PDF choice for roof-east'), { target: { value: '0' } })
+  const west = screen.getByLabelText('PDF choice for roof-west')
+  expect(within(west).getByRole('option', { name: 'Candidate grid 0' }).disabled).toBe(true)
+  fireEvent.change(west, { target: { value: '0' } })
+  expect(west.value).toBe('')
+  fireEvent.change(screen.getByLabelText('Alignment tolerance'), { target: { value: '2' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Build report' }))
+  await screen.findByRole('button', { name: 'Inspect group matches' })
+  const body = JSON.parse(fetchImpl.mock.calls.filter(([url]) => url.endsWith('/report')).at(-1)[1].body)
+  expect(body.alignment_tolerance).toBe(2)
+  expect(body).not.toHaveProperty('associations')
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect group matches' }))
+  expect((await screen.findByLabelText('PDF choice for roof-east')).value).toBe('')
+  expect(props.onProjectSubmit).not.toHaveBeenCalled()
+})
+
+it('S02 keeps verified choices editable after a correction report is refused', async () => {
+  downloads()
+  const { fetchImpl, props } = setup({ reportBytes: matchReport() })
+  await upload(); await report()
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect group matches' }))
+  fireEvent.change(await screen.findByLabelText('PDF choice for roof-south'), { target: { value: '1' } })
+  fetchImpl.mockResolvedValueOnce({ ok: false, status: 409,
+    json: async () => ({ error: { reason_code: 'REPORT_ASSOCIATIONS_INVALID' } }) })
+  fireEvent.click(screen.getByRole('button', { name: 'Build report' }))
+  await screen.findByText(/Report failed\./)
+  expect(screen.getByText('Report failed. The PDF choices do not match these groups. Review or clear association choices, then build the report again.')).toBeTruthy()
+  expect(screen.getByLabelText('PDF choice for roof-south').value).toBe('1')
+  expect(screen.getByRole('button', { name: 'Accept tracking labels' }).disabled).toBe(true)
+  fireEvent.click(screen.getByRole('button', { name: 'Clear association choices' }))
+  expect(screen.getByLabelText('PDF choice for roof-south').value).toBe('')
+  fireEvent.click(screen.getByRole('button', { name: 'Build report' }))
+  await screen.findByRole('button', { name: 'Inspect group matches' })
+  const calls = fetchImpl.mock.calls.filter(([url]) => url.endsWith('/report'))
+  expect(calls).toHaveLength(3)
+  expect(JSON.parse(calls.at(-1)[1].body)).not.toHaveProperty('associations')
+  expect(props.onProjectSubmit).not.toHaveBeenCalled()
+})
+
+it('S02 never restores refused correction choices into a different drawing version', async () => {
+  downloads()
+  const { fetchImpl, props, client, view } = setup({ reportBytes: matchReport() })
+  await upload(); await report()
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect group matches' }))
+  fireEvent.change(await screen.findByLabelText('PDF choice for roof-south'), { target: { value: '1' } })
+  const pending = deferred()
+  fetchImpl.mockImplementationOnce(() => pending.promise)
+  fireEvent.click(screen.getByRole('button', { name: 'Build report' }))
+  const signal = fetchImpl.mock.calls.at(-1)[1].signal
+  const next = { ...binding, input_version_id: NEXT }
+  act(() => { client.setScope(next, 'session-1'); view.rerender(<ProjectSolarEdgePanel {...props} solarBinding={next} />) })
+  expect(signal.aborted).toBe(true)
+  await act(async () => { pending.resolve({ ok: false, status: 409,
+    json: async () => ({ error: { reason_code: 'REPORT_ASSOCIATIONS_INVALID' } }) }); await Promise.resolve() })
+  expect(screen.queryByLabelText('PDF choice for roof-south')).toBeNull()
+  expect(screen.queryByRole('region', { name: 'Group match inspection' })).toBeNull()
+  expect(props.onProjectSubmit).not.toHaveBeenCalled()
+})
+
+it('S02 correction controls stay locked while canonical acceptance is in flight', async () => {
+  downloads()
+  const { props } = setup({ reportBytes: matchReport() })
+  const staging = deferred()
+  props.onProjectSubmit.mockReturnValueOnce(staging.promise)
+  await upload(); await report()
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect group matches' }))
+  await screen.findByLabelText('PDF choice for roof-south')
+  fireEvent.click(screen.getByRole('button', { name: 'Accept tracking labels' }))
+  await waitFor(() => expect(props.onProjectSubmit).toHaveBeenCalledTimes(1))
+  const select = screen.getByLabelText('PDF choice for roof-south')
+  expect(select.disabled).toBe(true)
+  fireEvent.change(select, { target: { value: '1' } })
+  expect(select.value).toBe('')
+  await act(async () => { staging.resolve({ ok: true }); await Promise.resolve() })
+  await waitFor(() => expect(screen.getByLabelText('PDF choice for roof-south').disabled).toBe(false))
+})
+
 it('S02 review shows matched, unmatched and ambiguous groups from verified report bytes without accepting', async () => {
   const save = downloads(), { props } = setup({ reportBytes: matchReport() })
   await upload(); await report()
@@ -186,6 +322,18 @@ it('S02 review shows matched, unmatched and ambiguous groups from verified repor
   expect(table.textContent).toContain('roof-southAmbiguousPDF grid 1, PDF grid 2')
   expect(props.onProjectSubmit).not.toHaveBeenCalled()
   expect(save.createObjectURL).not.toHaveBeenCalled()
+})
+
+it('S02 review inspects a bounded matched list with the chosen tail candidate', async () => {
+  downloads()
+  const { props } = setup({ reportBytes: matchReport({ matches: [{ frame_ref: 'roof-east', pdf_grid: 18,
+    candidates: [...Array.from({ length: 15 }, (_, i) => i), 18], candidate_count: 19 }] }) })
+  await upload(); await report()
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect group matches' }))
+  const table = await screen.findByRole('table', { name: 'SolarEdge group matches' })
+  expect(within(table).getByText('PDF grid 18')).toBeTruthy()
+  expect(within(table).getByText('Matched')).toBeTruthy()
+  expect(props.onProjectSubmit).not.toHaveBeenCalled()
 })
 
 it.each(['digest', 'identity', 'malformed', 'candidate-limit'])('S02 review refuses %s failures without showing associations', async (failure) => {

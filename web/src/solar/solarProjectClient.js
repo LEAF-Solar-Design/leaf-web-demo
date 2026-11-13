@@ -519,15 +519,24 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
     }),
     reportSolarEdgePdf: (options = {}) => guarded((scope) => {
       assert(plain(options))
-      const { sourceArtifactId, alignmentTolerance, selectionOrder = 'unknown', signal } = options
+      const { sourceArtifactId, alignmentTolerance, selectionOrder = 'unknown', associations, signal } = options
       assert(edgeHash(sourceArtifactId) &&
         typeof alignmentTolerance === 'number' && Number.isFinite(alignmentTolerance) &&
         alignmentTolerance >= 0.000001 && alignmentTolerance <= 1000000 &&
         ['unknown', 'recorded'].includes(selectionOrder))
+      if (associations !== undefined) {
+        assert(plain(associations) && Object.keys(associations).length <= 10_000 &&
+          Object.entries(associations).every(([ref, grid]) => ref.length > 0 && ref.length <= 100 &&
+            Number.isSafeInteger(grid) && grid >= 0 && grid <= 1000000) &&
+          new Set(Object.values(associations)).size === Object.keys(associations).length)
+      }
+      const body = JSON.stringify({ source_artifact_id: sourceArtifactId,
+          alignment_tolerance: alignmentTolerance, selection_order: selectionOrder,
+          ...(associations === undefined ? {} : { associations }) })
+      assert(new TextEncoder().encode(body).byteLength <= 4096)
       const b = scope.binding
       return request(`/api/projects/${b.project_id}/drawings/${b.drawing_id}/versions/${b.input_version_id}/imports/solaredge-pdf/report`,
-        { scope, signal, method: 'POST', body: JSON.stringify({ source_artifact_id: sourceArtifactId,
-          alignment_tolerance: alignmentTolerance, selection_order: selectionOrder }),
+        { scope, signal, method: 'POST', body,
         validate: (data, selected) => solarEdgeResult(data, selected, true) && data.source_artifact_id === sourceArtifactId })
     }),
     searchSizingModules: (options = {}) => guarded((scope) => {
