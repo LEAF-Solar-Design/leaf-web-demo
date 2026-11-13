@@ -324,6 +324,8 @@ DECLARATIONS = {
     DATA: {"order": 78, "code": "INVALID_STRING_DATA_REQUEST", "facets": ["strings", "frames"],
            "ledger": ["string-data"], "engine_op": "solar_string_data",
            "properties": {"drawing_id": {"type": "string", "maxLength": 128},
+                          "format": {"type": "string", "enum": ["string-data", "design-json"],
+                                     "description": "String Data keeps the endpoint report. Full design JSON exports every current panel, group, ordered string, route and design metadata."},
                           "string_refs": {"type": "array", "minItems": 1, "maxItems": 10000, "uniqueItems": True,
                                           "items": {"type": "string", "minLength": 1, "maxLength": 128}}}},
 }
