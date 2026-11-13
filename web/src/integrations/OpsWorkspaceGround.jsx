@@ -7,6 +7,7 @@ import { DatasetElementV1, DatasetQueryV1 } from '../../../vendor/assistant-cont
 import { actionRunMatches, canonicalRecordsPointer, recordsAtOriginal, createIntegrationsClient, UUID } from './client.js'
 import { listProjectReferences, readProjectReferenceOriginal } from '../projects/api.js'
 import { IntegrationSetupPanel } from './IntegrationSetupPanel.jsx'
+import { DatasetDerivationPanel, DatasetDerivationEvidence, isImportedMaterialDataset } from './DatasetDerivationPanel.jsx'
 import { ManualWorkflowRunPanel } from './ManualWorkflowRunPanel.jsx'
 import { ManualWorkflowStartPanel } from './ManualWorkflowStartPanel.jsx'
 import { ManualWorkflowDefinitionPanel } from './ManualWorkflowDefinitionPanel.jsx'
@@ -25,10 +26,12 @@ const STUDIO_CHROME_OCCLUDERS = Object.freeze(STUDIO_DRAWING_OCCLUDERS.filter(([
   ['header.top', '#drafting-ribbon', '.bar.bar-command-line', 'footer.foot-bar'].includes(selector)))
 
 const empty = () => ({ scope: null, datasets: [], elements: [], datasetCursor: null, elementCursor: null, selected: null, read: null, readIdentity: null, previousRead: false, action: null, historical: false, pending: '', error: '', errorOperation: null, notice: '' })
-const blankForm = () => ({ dataset: '', id: '', title: '', kind: 'table', columns: [], x: '', y: '', editing: null })
+const blankForm = () => ({ dataset: '', id: '', title: '', kind: 'table', columns: [], x: '', y: '', editing: null, window: '', query: null, grouping: false, pairKey: '', providerField: '', firstProvider: '', secondProvider: '' })
 const xKinds = ['date', 'instant', 'number', 'count']
 const yKinds = ['number', 'count', 'money', 'ratio', 'duration']
 const referenceKey = (ref) => JSON.stringify([ref.id, ref.version, ref.digest])
+const namedWindows = (dataset) => dataset?.derivation?.plan.kind === 'group_count' &&
+  dataset.fields.some(field => field.id === 'window_id' && field.type.kind === 'identifier') ? dataset.derivation.plan.windows : []
 export function scopeCacheIdentity(scope, generation) {
   return JSON.stringify([scope.tenantId, scope.projectId, scope.platformUserId, scope.bindingId, scope.projectRole, scope.externalAuthority, scope.externalSubject, generation])
 }
@@ -368,6 +371,17 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       setForm({ ...blankForm(), dataset: referenceKey(reference), columns: dataset.fields.map((field) => field.id) })
     } catch (error) { fail(error, ctx); throw error }
   }
+  async function adoptDerivedDataset(reference, signal) {
+    const ctx = context.current
+    if (!ctx || !current(ctx) || signal.aborted) return
+    const dataset = await client.getDataset(projectId, reference, { signal })
+    await guardWorkflow(signal)
+    if (!current(ctx) || signal.aborted) return
+    setState(old => ({ ...old, datasets: [...old.datasets.filter(item => referenceKey(item.reference) !== referenceKey(reference)), dataset] }))
+    // A completed materialization never overwrites an in-progress view draft.
+    setForm(old => old.dataset || old.id || old.title || old.editing ? old
+      : { ...old, dataset: referenceKey(reference), columns: dataset.fields.map(field => field.id) })
+  }
   async function readView(record, historical, ctx, cursor) {
     const request = ++viewGeneration.current
     const readIdentity = JSON.stringify([ctx.cacheIdentity, record.revision, record.element])
@@ -512,9 +526,26 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       if (fields.some((id) => !dataset.fields.some((field) => field.id === id))) throw new Error('Select authorized fields.')
       if (form.kind === 'line' && (!xKinds.includes(dataset.fields.find((field) => field.id === form.x)?.type.kind) ||
         !yKinds.includes(dataset.fields.find((field) => field.id === form.y)?.type.kind))) throw new Error('Choose compatible line axes.')
+      const grouping = form.kind === 'table' && form.grouping ? {
+        kind: 'provider_pairs', pair_key_field: form.pairKey, provider_field: form.providerField,
+        providers: [form.firstProvider, form.secondProvider],
+      } : undefined
+      if (grouping && [form.pairKey, form.providerField].some(id => !fields.includes(id) ||
+        !['text', 'identifier'].includes(dataset.fields.find(field => field.id === id)?.type.kind))) {
+        throw new Error('Choose visible text or identifier columns for pair and provider fields.')
+      }
+      const windows = namedWindows(dataset)
+      if (form.window && !windows.some(window => window.id === form.window)) throw new Error('Select a declared window.')
+      const query = dataset.derivation ? { ...(form.query || { limit: 100 }), fields } : { fields, limit: 100 }
+      if (windows.length) {
+        const retained = (query.filters || []).filter(filter => !(filter.field === 'window_id' && filter.op === 'eq' && windows.some(window => window.id === filter.value)))
+        query.filters = [...retained, ...(form.window ? [{ field: 'window_id', op: 'eq', value: form.window }] : [])]
+        // Cursors are bound to the previous projection/filter, never a new selection.
+        delete query.cursor
+      }
       const parsed = DatasetElementV1.safeParse({ schema_version: 1, id: form.id, title: form.title.trim(),
-        dataset_ref: dataset.reference, query: { fields, limit: 100 }, kind: `dataset.${form.kind}`,
-        props: form.kind === 'table' ? { columns: fields, row_limit: 100 } : { x_field: form.x, y_field: form.y } })
+        dataset_ref: dataset.reference, query, kind: `dataset.${form.kind}`,
+        props: form.kind === 'table' ? { columns: fields, row_limit: 100, ...(grouping ? { row_grouping: grouping } : {}) } : { x_field: form.x, y_field: form.y } })
       if (!parsed.success) throw new Error('Enter a title, a stable lowercase slug ID, and valid fields.')
       if (!form.editing && state.elements.some((record) => record.element.id === form.id)) throw new Error('Select that saved view and choose Edit current recipe to update it.')
       const saved = await client.saveElement(projectId, parsed.data, { signal: ctx.controller.signal,
@@ -540,8 +571,13 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   function editSelected() {
     const saved = state.selected
     const element = saved.element
+    const dataset = state.datasets.find(item => referenceKey(item.reference) === referenceKey(element.dataset_ref))
+    const windows = namedWindows(dataset)
     setForm({ dataset: referenceKey(element.dataset_ref), id: element.id, title: element.title, kind: element.kind === 'dataset.table' ? 'table' : 'line',
-      columns: element.props.columns || [], x: element.props.x_field || '', y: element.props.y_field || '', editing: saved })
+      columns: element.props.columns || [], x: element.props.x_field || '', y: element.props.y_field || '', editing: saved,
+      grouping: Boolean(element.props.row_grouping), pairKey: element.props.row_grouping?.pair_key_field || '',
+      providerField: element.props.row_grouping?.provider_field || '', firstProvider: element.props.row_grouping?.providers[0] || '',
+      secondProvider: element.props.row_grouping?.providers[1] || '', query: element.query, window: element.query.filters?.find(filter => filter.field === 'window_id' && filter.op === 'eq' && windows.some(window => window.id === filter.value))?.value || '' })
   }
   function loadMore(resource) {
     operation('Loading more…', async (ctx) => {
@@ -628,6 +664,11 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
               await guardSetup(signal)
               if (ctx && current(ctx) && !signal.aborted) setState((old) => ({ ...old, datasets: page.records, datasetCursor: page.nextCursor }))
             }} />}
+          {['owner', 'editor'].includes(state.scope.projectRole) && context.current && state.datasets.some(isImportedMaterialDataset) && <DatasetDerivationPanel
+            key={JSON.stringify(['dataset-derivation', identity.key, context.current.cacheIdentity])}
+            contextKey={context.current.cacheIdentity} projectId={projectId} client={client} datasets={state.datasets}
+            signal={context.current.controller.signal} guard={guardWorkflow} onCreated={adoptDerivedDataset}
+            onForbidden={() => { const ctx = context.current; if (ctx) fail({ status: 403 }, ctx) }} />}
           <section aria-label="Integration datasets"><h2>Datasets</h2>
             {!state.datasets.length && <p>{state.scope.projectRole === 'owner'
               ? 'No datasets are available yet. Use integration setup to connect your data.'
@@ -654,11 +695,24 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
               <label>Title<input required maxLength={120} value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} /></label>
               <label>Stable ID<input required maxLength={128} pattern="[a-z0-9]+((_|-)[a-z0-9]+)*" disabled={Boolean(form.editing)} value={form.id} onChange={(event) => setForm({ ...form, id: event.target.value })} /></label>
               <label>View type<select value={form.kind} onChange={(event) => setForm({ ...form, kind: event.target.value })}><option value="table">Table</option><option value="line">Line</option></select></label>
+              {namedWindows(dataset).length > 0 && <label>Named window<select value={form.window} onChange={event => setForm({ ...form, window: event.target.value })}>
+                <option value="">All windows</option>{namedWindows(dataset).map(window => <option key={window.id} value={window.id}>{window.id}{window.filters.length === 0 ? ' (all admitted history)' : ''}</option>)}
+              </select></label>}
               {form.kind === 'table' ? <fieldset><legend>Table columns</legend>{dataset?.fields.map((field) => <label key={field.id}><input type="checkbox" checked={form.columns.includes(field.id)} onChange={(event) => setForm({ ...form, columns: event.target.checked ? [...form.columns, field.id] : form.columns.filter((id) => id !== field.id) })} />{field.label}</label>)}</fieldset> : <>
                 {['x', 'y'].map((axis) => <label key={axis}>{axis.toUpperCase()} field<select required value={form[axis]} onChange={(event) => setForm({ ...form, [axis]: event.target.value })}>
                   <option value="">Select field</option>{dataset?.fields.filter((field) => (axis === 'x' ? xKinds : yKinds).includes(field.type.kind)).map((field) => <option key={field.id} value={field.id}>{field.label}</option>)}
                 </select></label>)}
               </>}
+              {form.kind === 'table' && <fieldset><legend>Provider pair presentation</legend>
+                <label><input type="checkbox" checked={Boolean(form.grouping)} onChange={event => setForm({ ...form, grouping: event.target.checked })} />Group verified provider pairs</label>
+                {form.grouping && <>
+                  <p>Pair rows only when their exact nonempty key and two provider labels match in a complete result. Other rows stay separate.</p>
+                  {[['pairKey', 'Pair key field'], ['providerField', 'Provider field']].map(([key, label]) => <label key={key}>{label}<select required value={form[key]} onChange={event => setForm({ ...form, [key]: event.target.value })}>
+                    <option value="">Select a visible field</option>{dataset?.fields.filter(field => form.columns.includes(field.id) && ['text', 'identifier'].includes(field.type.kind)).map(field => <option key={field.id} value={field.id}>{field.label}</option>)}
+                  </select></label>)}
+                  {[['firstProvider', 'First provider'], ['secondProvider', 'Second provider']].map(([key, label]) => <label key={key}>{label}<input required maxLength={120} value={form[key]} onChange={event => setForm({ ...form, [key]: event.target.value })} /></label>)}
+                </>}
+              </fieldset>}
               <button type="submit">{form.editing ? 'Update view' : 'Save view'}</button>
               {form.editing && <button type="button" onClick={() => setForm(blankForm())}>Create another view</button>}
             </fieldset>
@@ -672,6 +726,8 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
             </label>)}{preferenceError && <p role="alert">{preferenceError}</p>}
           </fieldset>
           {state.selected && <section aria-label="Selected native view">
+            {state.selected.element.kind !== 'integration.action' && <DatasetDerivationEvidence
+              dataset={state.datasets.find(item => referenceKey(item.reference) === referenceKey(state.selected.element.dataset_ref))} />}
             <p>Recipe revision {state.selected.revision}{state.historical ? ' · Historical recipe' : ''}. {state.selected.element.kind === 'integration.action'
               ? (state.historical ? 'Historical actions are read-only.' : 'Actions execute with current human authority.')
               : 'Views query live data; this is not an immutable evidence snapshot.'}</p>

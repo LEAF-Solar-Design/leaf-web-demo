@@ -1254,6 +1254,34 @@ describe('project page editor', () => {
 })
 
 describe('saved portfolio iOS preview', () => {
+  it('native_saved_transition revokes an in-flight screenshot before publishing accepted saved source', async () => {
+    submitProjectNativePreview.mockResolvedValue(nativeJob('complete'))
+    loadProjectNativePreview.mockResolvedValue(nativeJob('complete'))
+    const observed = []
+    let signal
+    const view = setup({ onPreview: () => {
+      if (signal && saveProjectPage.mock.calls.length) observed.push(signal.aborted)
+    } })
+    await openPortfolio()
+    fireEvent.click(button('Build iOS preview'))
+    await screen.findByText('Ready · Saved revision 7')
+    const late = deferred()
+    downloadProjectNativePreviewScreenshot.mockReturnValueOnce(late.promise)
+    fireEvent.click(button('Check preview again'))
+    await waitFor(() => expect(downloadProjectNativePreviewScreenshot).toHaveBeenCalledTimes(2))
+    signal = downloadProjectNativePreviewScreenshot.mock.lastCall[2].signal
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Saved during screenshot refresh' } })
+    fireEvent.click(button('Save page'))
+    await screen.findByText('Saved')
+    expect(observed).toEqual([true])
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:page-source')
+    expect(screen.queryByRole('img', { name: /iOS simulator/ })).toBeNull()
+    await act(async () => late.resolve(new Blob(['obsolete screenshot'])))
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(1)
+    expect(button('Build iOS preview')).toBeEnabled()
+    view.unmount()
+  })
+
   it('submits the exact revision once, polls serially, and displays the authenticated screenshot', async () => {
     const pending = deferred()
     submitProjectNativePreview.mockReturnValueOnce(pending.promise)

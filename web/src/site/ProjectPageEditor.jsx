@@ -94,6 +94,16 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
       if (session.url) URL.revokeObjectURL(session.url)
     }
   }
+  const acceptSaved = page => {
+    const previous = sourceSnapshot.current.saved
+    if (previous?.revision !== page?.revision || previous?.digest !== page?.digest) {
+      // Retire the old observer before publishing the new saved source.
+      clearNative()
+      setNative(null)
+    }
+    sourceSnapshot.current = { ...sourceSnapshot.current, saved: page }
+    setSaved(page)
+  }
   useEffect(() => {
     clearNative()
     setNative(null)
@@ -194,7 +204,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
     const page = await loadProjectPage(projectId, { signal })
     if (!current()) return
     if (!page) { setNotice('No saved page yet. Choose Create a page to begin.'); return }
-    setSaved(page); replaceDraft(page.document, page)
+    acceptSaved(page); replaceDraft(page.document, page)
     show(page.document)
   })
   const importContent = event => {
@@ -218,8 +228,9 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
     if (!current()) return
     // Retain the exact draft object and its ephemeral selection identities on save.
     const accepted = equalDocument(page.document, snapshot.draft) ? { ...page, document: snapshot.draft } : page
+    acceptSaved(accepted)
     sourceSnapshot.current = { saved: accepted, draft: snapshot.draft }
-    setSaved(accepted); setDraft(snapshot.draft)
+    setDraft(snapshot.draft)
     show(snapshot.draft)
   })
   const download = (target = 'web') => perform('exporting', async (signal, current) => {
@@ -379,6 +390,8 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
     const controller = new AbortController()
     session.controller = controller
     const current = () => live.current && nativeSession.current === session && !controller.signal.aborted
+      && sourceSnapshot.current.saved?.revision === session.revision
+      && sourceSnapshot.current.saved?.digest === session.digest
     const publish = extra => setNative({ revision: session.revision, job: session.job, url: session.url, active: session.active, ...extra })
     const stop = () => {
       clearTimeout(session.timer)

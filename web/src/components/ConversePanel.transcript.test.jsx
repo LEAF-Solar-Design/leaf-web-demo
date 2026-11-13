@@ -50,6 +50,7 @@ const geometry = (el, { scrollHeight, clientHeight, scrollTop }) => {
   Object.defineProperty(el, 'scrollTop', { configurable: true, writable: true, value: scrollTop })
 }
 const scrollTo = (el, scrollTop) => {
+  fireEvent.wheel(el)
   el.scrollTop = scrollTop
   fireEvent.scroll(el)
 }

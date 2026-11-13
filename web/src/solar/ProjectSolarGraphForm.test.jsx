@@ -85,6 +85,78 @@ const location = () => screen.getByRole('textbox', { name: 'Insertion point (x, 
 const feedback = () => screen.getByTestId('project-solar-graph-feedback').textContent
 const arm = async () => waitFor(() => expect(action().disabled).toBe(false))
 
+function discoveryHarness() {
+  const h = harness('solar-panel-groups')
+  h.client.readContext.mockImplementation(() => {
+    const data = context(h.snapshot.binding, h.rev)
+    data.intake.solar_design_graph.project.installation_design = 'Roof'
+    return Promise.resolve({ ok: true, status: 200, data })
+  })
+  return h
+}
+async function chooseDiscovery(h) {
+  const view = render(<ProjectSolarGraphForm {...h.props} />)
+  const mode = await screen.findByLabelText('Membership source')
+  expect(mode.value).toBe('manual')
+  expect(screen.queryByLabelText('Maximum outline offset')).toBeNull()
+  fireEvent.change(mode, { target: { value: 'discover' } })
+  fireEvent.change(screen.getByLabelText('Maximum outline offset'), { target: { value: '0.75' } })
+  fireEvent.change(screen.getByLabelText('Discovery alignment tolerance'), { target: { value: '0.05' } })
+  await arm()
+  return view
+}
+
+it('S02 explicitly discovers through the canonical preview and run rail, with no caller membership', async () => {
+  const h = discoveryHarness()
+  await chooseDiscovery(h)
+  expect(screen.getByText('Installation design: Roof')).toBeTruthy()
+  expect(screen.queryByLabelText('Gap between groups')).toBeNull()
+  const intent = h.client.prepareRun.mock.calls.at(-1)[0]
+  expect(intent.params).toEqual({ drawing_id: binding.drawing_id, expected_rev: 6,
+    discover: { BranchMaxOffset: 0.75, AlignmentTolerance: 0.05, InstallationDesign: 'Roof' } })
+  expect(h.client.catalog).toHaveBeenCalled()
+  fireEvent.click(action())
+  await waitFor(() => expect(h.submit).toHaveBeenCalledTimes(1))
+  expect(h.submit.mock.calls[0][0].params).toEqual(intent.params)
+  expect(h.submit.mock.calls[0][1]).toMatchObject({ binding, authorityKey: 'authority-a', signal: h.parent.signal })
+})
+
+it('S02 invalidates discovery preview when settings change and preserves manual mode on return', async () => {
+  const h = discoveryHarness()
+  await chooseDiscovery(h)
+  fireEvent.change(screen.getByLabelText('Maximum outline offset'), { target: { value: '0' } })
+  expect(action().disabled).toBe(true)
+  await screen.findByText('Use a Roof or Ground project and enter an outline offset and alignment tolerance greater than 0 and at most 1000000.')
+  expect(h.submit).not.toHaveBeenCalled()
+  fireEvent.change(screen.getByLabelText('Membership source'), { target: { value: 'manual' } })
+  expect(screen.getByLabelText('Gap between groups')).toBeTruthy()
+  expect(screen.queryByLabelText('Maximum outline offset')).toBeNull()
+  expect(action().disabled).toBe(true)
+})
+
+it('S02 discards a discovery draft when project version selection changes', async () => {
+  const h = discoveryHarness()
+  const view = await chooseDiscovery(h)
+  act(() => {
+    h.move(nextBinding)
+    view.rerender(<ProjectSolarGraphForm {...h.props} solarBinding={nextBinding} />)
+  })
+  expect(screen.getByLabelText('Membership source').value).toBe('manual')
+  expect(screen.queryByLabelText('Maximum outline offset')).toBeNull()
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
+it('S02 refuses discovery if the project installation design changes during submit recheck', async () => {
+  const h = discoveryHarness()
+  await chooseDiscovery(h)
+  const data = context()
+  data.intake.solar_design_graph.project.installation_design = 'Ground'
+  h.client.readContext.mockResolvedValueOnce({ ok: true, status: 200, data })
+  fireEvent.click(action())
+  await screen.findByText('The proposed panel groups changed. Refresh the preview before continuing.')
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
 it('G17 panel import refusal permits explicit preview recovery', async () => {
   const h = harness('solar-panels-from-drawing')
   const fetchImpl = vi.fn(async () => ({ ok: false, status: 503, json: async () => workerUnavailable }))
