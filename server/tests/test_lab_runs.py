@@ -17,6 +17,8 @@ from test_lab_evaluate import case
 from test_lab_run_store import authority  # noqa: F401 -- PostgreSQL twin
 from test_lab_corpus_executor import private_pg, installed, kernel_filter, lane as producer_lane  # noqa: F401
 
+EVENT_WAIT_S = 30  # hang guard only; every wait below is on a real event, never a timing claim
+
 
 @pytest.fixture
 def rig(authority, monkeypatch):
@@ -284,42 +286,45 @@ def test_corpus_closed_intent_waits_actual_reap_not_generic_terminal(corpus_join
     def held_cleanup(child):
         terminate(child)
         reaped.set()
-        assert acknowledge.wait(5)
+        assert acknowledge.wait(EVENT_WAIT_S)
     monkeypatch.setattr(corpus.subprocess, 'Popen', start)
     monkeypatch.setattr(corpus, '_terminate', held_cleanup)
     trusted = lab_runs.lab_tool_manifests.corpus_capability()[1]
     with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(adapter, 'corpus-evaluator-1', trusted, lane.manifest, {},
-            lane.graph['blocks'][0]['settings'], deadline_s=0.3 if reason == 'deadline' else 30)
-        stop = time.monotonic() + 5
-        while not children and not future.done() and time.monotonic() < stop:
-            time.sleep(0.01)
-        if not children and future.done():
-            future.result()
-            pytest.fail('Corpus adapter returned before child startup.')
-        assert children
-        rows = lane.jobs.list_jobs(str(lane.tenant), 200)
-        job_id = rows[0]['job_id']
-        if reason == 'cancel':
-            store.request_cancel(str(lane.tenant), run_id, 'operator')
-        else:
-            deadline_started[0] = time.monotonic()
-        assert reaped.wait(5)
-        assert lane.jobs.corpus_cleanup(job_id, str(lane.tenant)) is None
-        # A generic reaper terminal is not evidence that staged files have gone.
-        from envelopes import ErrorCode, error_obj
-        current = lane.jobs.get_job(job_id)
-        lane.jobs.complete_callback(job_id, 'failed',
-            error=error_obj(ErrorCode.INTERNAL, 'synthetic generic reaper', False),
-            provenance={'attempt': current['attempt'], 'execution_path': 'local'}, _allow_closed=True)
-        time.sleep(0.3)
-        assert not future.done()
-        acknowledge.set()
-        with pytest.raises(RunBudgetExceeded if reason == 'deadline' else RunCancelled):
-            future.result(timeout=5)
-        receipt = lane.jobs.corpus_cleanup(job_id, str(lane.tenant))
-        assert receipt['reaped'] is True and receipt['cancel']['fence'] == lease['fence']
-        assert children[0].poll() is not None and all(not path.exists() for path in stages)
+        try:
+            future = pool.submit(adapter, 'corpus-evaluator-1', trusted, lane.manifest, {},
+                lane.graph['blocks'][0]['settings'], deadline_s=0.3 if reason == 'deadline' else 30)
+            stop = time.monotonic() + EVENT_WAIT_S
+            while not children and not future.done() and time.monotonic() < stop:
+                time.sleep(0.01)
+            if not children and future.done():
+                future.result()
+                pytest.fail('Corpus adapter returned before child startup.')
+            assert children
+            rows = lane.jobs.list_jobs(str(lane.tenant), 200)
+            job_id = rows[0]['job_id']
+            if reason == 'cancel':
+                store.request_cancel(str(lane.tenant), run_id, 'operator')
+            else:
+                deadline_started[0] = time.monotonic()
+            assert reaped.wait(EVENT_WAIT_S)
+            assert lane.jobs.corpus_cleanup(job_id, str(lane.tenant)) is None
+            # A generic reaper terminal is not evidence that staged files have gone.
+            from envelopes import ErrorCode, error_obj
+            current = lane.jobs.get_job(job_id)
+            lane.jobs.complete_callback(job_id, 'failed',
+                error=error_obj(ErrorCode.INTERNAL, 'synthetic generic reaper', False),
+                provenance={'attempt': current['attempt'], 'execution_path': 'local'}, _allow_closed=True)
+            time.sleep(0.3)
+            assert not future.done()
+            acknowledge.set()
+            with pytest.raises(RunBudgetExceeded if reason == 'deadline' else RunCancelled):
+                future.result(timeout=EVENT_WAIT_S)
+            receipt = lane.jobs.corpus_cleanup(job_id, str(lane.tenant))
+            assert receipt['reaped'] is True and receipt['cancel']['fence'] == lease['fence']
+            assert children[0].poll() is not None and all(not path.exists() for path in stages)
+        finally:
+            acknowledge.set()
 
 
 def test_corpus_stale_lab_owner_does_not_cancel_successor_intent(corpus_join, monkeypatch):
@@ -343,7 +348,7 @@ def test_corpus_stale_lab_owner_does_not_cancel_successor_intent(corpus_join, mo
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(adapter, 'corpus-evaluator-1', trusted, lane.manifest, {},
             lane.graph['blocks'][0]['settings'], deadline_s=30)
-        stop = time.monotonic() + 5
+        stop = time.monotonic() + EVENT_WAIT_S
         while not children and time.monotonic() < stop:
             time.sleep(0.01)
         assert children
@@ -355,7 +360,7 @@ def test_corpus_stale_lab_owner_does_not_cancel_successor_intent(corpus_join, mo
                                 build_revision='corpus-join-proof', color='active')
         assert successor['fence'] > lease['fence']
         with pytest.raises(RunCancelled):
-            future.result(timeout=5)
+            future.result(timeout=EVENT_WAIT_S)
         assert store.cancel_corpus_job(str(lane.tenant), run_id, 'corpus-worker', lease['fence'],
             'corpus-evaluator-1', job_id, deadline=True) is None
         assert children[0].poll() is None
@@ -364,7 +369,7 @@ def test_corpus_stale_lab_owner_does_not_cancel_successor_intent(corpus_join, mo
         tag = store.cancel_corpus_job(str(lane.tenant), run_id, 'successor', successor['fence'],
                                      'corpus-evaluator-1', job_id)
         assert tag['fence'] == successor['fence']
-        stop = time.monotonic() + 5
+        stop = time.monotonic() + EVENT_WAIT_S
         while not lane.jobs.corpus_cleanup(job_id, str(lane.tenant)) and time.monotonic() < stop:
             time.sleep(0.05)
         assert lane.jobs.corpus_cleanup(job_id, str(lane.tenant))['reaped'] is True
