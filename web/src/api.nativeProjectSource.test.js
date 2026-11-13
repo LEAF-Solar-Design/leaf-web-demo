@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { readActiveScope } from './auth/activeScope.js'
 import { listProjectSourceRequests, readProjectSourceRequest, stageProjectSource, confirmProjectSource,
-  recoverProjectSource, rejectProjectSource, exportProjectSourceBundle } from './api.js'
+  recoverProjectSource, rejectProjectSource, exportProjectSourceBundle, isProjectSourcePreGenerationRefusal } from './api.js'
 
 const PROJECT = '11111111-1111-4111-8111-111111111111'
 const REQUEST = '22222222-2222-4222-8222-222222222222'
@@ -27,6 +27,66 @@ beforeEach(() => { localStorage.clear(); signIn() })
 afterEach(() => { vi.unstubAllGlobals(); localStorage.clear() })
 
 describe('Native project source real API transport', () => {
+  const refusal = () => ({ error: { code: 'video_unavailable',
+    message: 'Private video decoding is unavailable. Source generation did not start.' },
+  refusal: { schema: 'leaf.native-source-pre-generation-refusal.v1', project_id: PROJECT, source_request_id: REQUEST,
+    source_profile: 'ios-swiftui-xcodegen-v1', action: 'create', authority_session_id: authority.session_id,
+    authority_turn_id: authority.turn_id, stage: 'before_generation' } })
+
+  it('recognizes only a bounded refusal bound to this exact submitted native create and authority', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(refusal()), {
+      status: 503, headers: { 'Content-Type': 'application/json' } })))
+    const error = await stageProjectSource(PROJECT, body(), options({ materialMetadata: [metadata()] })).catch((value) => value)
+    expect(error.message).toBe(refusal().error.message)
+    expect(isProjectSourcePreGenerationRefusal(error, refusal().refusal)).toBe(true)
+    expect(isProjectSourcePreGenerationRefusal(error, { ...refusal().refusal, authority_turn_id: 'old' })).toBe(false)
+    expect(isProjectSourcePreGenerationRefusal({ ...error }, refusal().refusal)).toBe(false)
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  it.each(['schema', 'project_id', 'source_request_id', 'source_profile', 'action', 'authority_session_id',
+    'authority_turn_id', 'stage', 'extra', 'missing', 'diagnostic', 'code', 'envelope', 'oversize'])('refuses malformed or foreign %s without exposing diagnostics', async (change) => {
+    const value = refusal()
+    if (Object.hasOwn(value.refusal, change)) value.refusal[change] = 'wrong'
+    else if (change === 'extra') value.refusal.private = 'private provider detail'
+    else if (change === 'missing') delete value.refusal.stage
+    else if (change === 'diagnostic') value.error.message = 'private provider detail'
+    else if (change === 'code') value.error.code = 'author_unavailable'
+    else if (change === 'envelope') value.private = 'private provider detail'
+    const raw = change === 'oversize' ? ' '.repeat(4097) + JSON.stringify(value) : JSON.stringify(value)
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(raw, { status: 503, headers: { 'Content-Type': 'application/json' } })))
+    const error = await stageProjectSource(PROJECT, body(), options()).catch((value) => value)
+    expect(isProjectSourcePreGenerationRefusal(error, refusal().refusal)).toBe(false)
+    expect(error.message).toBe('Project source is unavailable. Refresh to review its current state.')
+    expect(error.message).not.toContain('private provider detail')
+  })
+
+  it.each(['edit', 'confirm', 'browser', 'scope', 'status', 'type'])('does not promote a refusal on %s into a pre-generation result', async (change) => {
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      if (change === 'scope') signIn('replacement')
+      return new Response(JSON.stringify(refusal()), { status: change === 'status' ? 422 : 503,
+        headers: { 'Content-Type': change === 'type' ? 'text/plain' : 'application/json' } })
+    }))
+    const request = change === 'edit' ? { ...body(), source_operation: 'edit', expected_base_commit: 'a'.repeat(40) } : body()
+    const error = await (change === 'confirm' ? confirmProjectSource(PROJECT, REQUEST, {
+      receipt_digest: 'a'.repeat(64), expected_version: 1, confirmation_id: MATERIAL }, options())
+      : stageProjectSource(PROJECT, request, options({ sourceContext: change === 'browser' ? 'browser' : 'native' }))).catch((value) => value)
+    expect(isProjectSourcePreGenerationRefusal(error, refusal().refusal)).toBe(false)
+  })
+
+  it('fences a refusal body completed after account replacement', async () => {
+    let finish, entered
+    const reading = new Promise((resolve) => { entered = resolve })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream({
+      start(controller) { finish = () => { controller.enqueue(new TextEncoder().encode(JSON.stringify(refusal()))); controller.close() }; entered() },
+    }), { status: 503, headers: { 'Content-Type': 'application/json' } })))
+    const pending = stageProjectSource(PROJECT, body(), options()).catch((value) => value)
+    await reading
+    signIn('replacement')
+    finish()
+    expect(isProjectSourcePreGenerationRefusal(await pending, refusal().refusal)).toBe(false)
+  })
+
   it('uses only fixed Native list, item and mutation routes with normal auth and unchanged wire bodies', async () => {
     const fetch = vi.fn(async (url, init) => reply(init.method === 'GET' && String(url).endsWith('/requests') ? [row()] : row()))
     vi.stubGlobal('fetch', fetch)

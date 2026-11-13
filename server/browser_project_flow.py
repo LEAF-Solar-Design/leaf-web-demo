@@ -52,6 +52,21 @@ class FlowError(ValueError):
         super().__init__(message)
 
 
+VIDEO_REFUSAL_MESSAGE = 'Private video decoding is unavailable. Source generation did not start.'
+_RECORDED_REFUSAL = object()
+
+
+class VideoUnavailableBeforeGeneration(ValueError):
+    """Local prerequisite refusal, never inferred from a downstream error code."""
+
+
+class PreGenerationRefusal(FlowError):
+    def __init__(self, witness, *, provenance=None):
+        super().__init__(503)
+        self.refusal = witness
+        self.provenance = provenance
+
+
 def _uuid(value):
     if type(value) is not str or str(uuid.UUID(value)) != value or not uuid.UUID(value).int:
         raise ValueError()
@@ -593,6 +608,7 @@ def mutate(tenant, project_id, session_id, turn_id, action, edit_id, body, *, so
                 return result
         raise FlowError(409)
     success = False
+    known_refusal = False
     phase = 'authority_recheck'
     failure_status, failure_code = 503, 'service_unavailable'
     correlation_id = str(uuid.uuid4())
@@ -630,6 +646,18 @@ def mutate(tenant, project_id, session_id, turn_id, action, edit_id, body, *, so
             text='Source ready for review.' if row['state'] == 'awaiting_confirmation' else 'Private source state updated.'))
         success = True
         return result
+    except VideoUnavailableBeforeGeneration:
+        if source_profile != NATIVE_PROFILE or action != 'create':
+            raise FlowError(503) from None
+        recheck()
+        witness = dict(schema='leaf.native-source-pre-generation-refusal.v1', project_id=project_id,
+            source_request_id=edit_id, source_profile=NATIVE_PROFILE, action='create',
+            authority_session_id=session_id, authority_turn_id=turn_id, stage='before_generation')
+        session_store.append_event(session_id, turn_id, 'browser_source_error', dict(
+            source_request_id=edit_id, text=VIDEO_REFUSAL_MESSAGE, refusal=witness))
+        recheck()
+        known_refusal = True
+        raise PreGenerationRefusal(witness, provenance=_RECORDED_REFUSAL) from None
     except authoring.AuthoringError as exc:
         failure_status = exc.status if exc.status in _ERRORS else 503
         # Only canonical internal codes may enter the retained event, never exception text.
@@ -647,7 +675,7 @@ def mutate(tenant, project_id, session_id, turn_id, action, edit_id, body, *, so
         # Fresh subject/turn checks prevent an old completion touching a replacement.
         try:
             recheck()
-            if not success:
+            if not success and not known_refusal:
                 session_store.append_event(session_id, turn_id, 'browser_source_error', dict(
                     source_request_id=edit_id, phase=phase, code=failure_code, status=failure_status,
                     correlation_id=correlation_id,
