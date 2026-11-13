@@ -410,11 +410,13 @@ def w1_graph_readiness(graph):
         try:
             sizing = require_sizing(graph)
             sized = True
-            manual_geometry = sizing["mode"] == "manual-global"
+            manual_geometry = (sizing["mode"] == "manual-global"
+                               and bool(graph["panels"])
+                               and all(panel["frame_ref"] is None for panel in graph["panels"]))
         except (KeyError, ValueError, TypeError):
             pass
     mark(["solar-panel-groups"], sized, "sizing_confirmation_required")
-    # Verified manual length enables explicit geometric discovery. Request preparation
+    # Verified manual length enables discovery only on ungrouped geometry. Request preparation
     # still requires proven power for caller-selected groups and electrical operations.
     if sized and not manual_geometry and not sizing_power_ready(graph):
         mark(["solar-panel-groups"], False, "module_power_required")

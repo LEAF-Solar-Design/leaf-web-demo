@@ -246,6 +246,8 @@ def test_sip_r3e_manual_discovery_preserves_unknown_power(monkeypatch):
     assert len(frames) == 1
     frame = frames[0]
     assert frame["module_power_watts"] == 0
+    assert availability.w1_graph_readiness(saved.graph)[TOOL] == {
+        "input_ready": False, "input_reason": "module_power_required"}
     assert frame["extra"] == {"grouping_basis": "geometry-only",
         "module_power_status": "unknown", "sizing_evidence_mode": "manual-global"}
     assert set(frame["panel_refs"]) == {p["id"] for p in ctx.graph["panels"]}
