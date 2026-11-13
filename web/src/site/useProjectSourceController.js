@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { readActiveScope, subscribeActiveScope } from '../auth/activeScope.js'
 import { listProjectReferences } from '../projects/api.js'
 import {
-  isSourceUuid, listProjectSourceRequests, readProjectSourceRequest, stageProjectSource,
+  isSourceUuid, isProjectSourcePreGenerationRefusal, listProjectSourceRequests, readProjectSourceRequest, stageProjectSource,
   confirmProjectSource, recoverProjectSource, rejectProjectSource, exportProjectSourceBundle, validateProjectSource,
 } from '../api.js'
 import { isSecretRefused } from '../lib/secretGuardTransport.js'
@@ -12,7 +12,7 @@ const LIMIT = 8 * 1024 * 1024
 const pending = (row) => ['staged', 'awaiting_confirmation', 'publishing'].includes(row?.state)
 const freshState = () => ({ open: false, requirements: '', materials: [], selected: [], materialsComplete: false,
   selectionReviewed: false, candidates: [], candidate: null, intent: null, busy: false, loading: false, sourceLoaded: false,
-  error: null, secretRefusal: null, unknown: false, materialsLoading: false, unsupportedInputs: [],
+  error: null, secretRefusal: null, sourceRefusal: null, unknown: false, materialsLoading: false, unsupportedInputs: [],
   exportBusy: false, download: null, previewJob: null, previewBusy: false, previewUnknown: false, previewError: null, previewBlocked: false })
 const previewWitness = (row) => ({ source_request_id: row.source_request_id, version: row.version,
   receipt_digest: row.receipt_digest, source_commit: row.source_commit, source_tree: row.source_tree })
@@ -128,6 +128,7 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
     return row
   }
   const refresh = async () => {
+    if (owner.state.sourceRefusal) return
     if (owner.locked) return
     clearDownload()
     stopPreview(owner)
@@ -192,7 +193,7 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
   const open = (requirements, options = {}) => {
     const unsupportedInputs = Array.isArray(options?.images) ? options.images.map((image) =>
       typeof image?.file?.name === 'string' && image.file.name ? image.file.name : 'Pasted image') : []
-    publish({ open: true, ...(typeof requirements === 'string' && !owner.state.unknown && !owner.state.candidates.some(pending)
+    publish({ open: true, ...(typeof requirements === 'string' && !owner.state.sourceRefusal && !owner.state.unknown && !owner.state.candidates.some(pending)
       ? { requirements, unsupportedInputs } : {}) })
     const issue = available()
     if (issue) { publish({ error: issue }); return true }
@@ -201,10 +202,11 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
     return true
   }
   const mutate = async (action, { allowSecretOnce = false, witness } = {}) => {
+    if (owner.state.sourceRefusal) return
     if (owner.locked || owner.exportLocked || !current()) return
     clearDownload()
     owner.locked = true // Click fencing must precede React's next render.
-    let sent = false, minting = false, requestId
+    let sent = false, minting = false, requestId, refusalExpected = null
     publish({ busy: true, error: null, secretRefusal: null })
     try {
       const issue = available()
@@ -251,6 +253,11 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
       const intent = action === 'stage' ? { ...body, referenceNames: owner.state.selected.map((id) => owner.state.materials.find((row) => row.material_id === id).name) }
         : owner.state.intent || { source_request_id: requestId }
       publish({ intent })
+      if (owner.sourceContext === 'native' && action === 'stage' && body.source_operation === 'create') {
+        refusalExpected = { schema: 'leaf.native-source-pre-generation-refusal.v1', project_id: owner.projectId,
+          source_request_id: requestId, source_profile: 'ios-swiftui-xcodegen-v1', action: 'create',
+          authority_session_id: authority.session_id, authority_turn_id: authority.turn_id, stage: 'before_generation' }
+      }
       sent = true
       const opts = { ...options(), authority, allowSecretOnce,
         ...(action === 'stage' && owner.sourceContext === 'native'
@@ -267,6 +274,10 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
     } catch (error) {
       if (!current()) return
       if (isSecretRefused(error)) publish({ error: error.message, secretRefusal: error.refusal })
+      else if (sent && refusalExpected && isProjectSourcePreGenerationRefusal(error, refusalExpected)) {
+        // A trusted, request-bound refusal is not a candidate or permission to retry.
+        publish({ sourceRefusal: refusalExpected, unknown: false, candidate: null, error: error.message })
+      }
       else if (sent) {
         publish({ unknown: true, candidate: null, error: 'Publication outcome unknown. Refresh the original request; do not stage it again.' })
         try { await readBack(requestId) } catch { /* No repeat POST or editor on an unknown outcome. */ }

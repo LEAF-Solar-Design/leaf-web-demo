@@ -11,6 +11,11 @@ const OTHER = '22222222-2222-4222-8222-222222222222'
 const ORG = '33333333-3333-4333-8333-333333333333'
 const REQUEST = '44444444-4444-4444-8444-444444444444'
 const AUTHORITY = { session_id: 'actual-session', turn_id: 'actual-turn' }
+const videoRefusal = (id, extra = {}) => ({ error: { code: 'video_unavailable',
+  message: 'Private video decoding is unavailable. Source generation did not start.' },
+refusal: { schema: 'leaf.native-source-pre-generation-refusal.v1', project_id: PROJECT, source_request_id: id,
+  source_profile: 'ios-swiftui-xcodegen-v1', action: 'create', authority_session_id: AUTHORITY.session_id,
+  authority_turn_id: AUTHORITY.turn_id, stage: 'before_generation', ...extra } })
 const brief = '  Create an accessible project page.\nKeep my original wording.  '
 const row = (overrides = {}) => ({ schema: 'leaf.browser-project-source.v1', project_id: PROJECT,
   source_request_id: REQUEST, state: 'awaiting_confirmation', version: 1, receipt_digest: 'a'.repeat(64),
@@ -451,6 +456,66 @@ describe('Native source through the real API', () => {
       expect(h.result.current.candidates).toEqual([])
       expect(h.startAgentTurn).not.toHaveBeenCalled()
       expect(h.calls.some((call) => call.method === 'POST')).toBe(false)
+  })
+
+  it('retains an explicit native pre-generation refusal without readback, a candidate, retry or another turn', async () => {
+    const h = nativeSetup({ materials: [transcript()], fetcher: (url, init) => {
+      if (init.method === 'POST') return reply(videoRefusal(JSON.parse(init.body).source_request_id), 503)
+      return undefined
+    } })
+    await open(h)
+    await act(async () => { await h.result.current.stage() })
+    expect(h.result.current.sourceRefusal?.source_request_id).toBe(h.result.current.intent.source_request_id)
+    expect(h.result.current.error).toBe(videoRefusal().error.message)
+    expect(h.result.current.unknown).toBe(false)
+    expect(h.result.current.candidate).toBeNull()
+    expect(h.result.current.candidates).toEqual([])
+    await act(async () => { await h.result.current.stage(); await h.result.current.refresh() })
+    expect(h.startAgentTurn).toHaveBeenCalledOnce()
+    expect(h.calls.filter((call) => call.method === 'POST')).toHaveLength(1)
+    expect(h.calls.filter((call) => call.url.includes('/requests/'))).toHaveLength(0)
+    act(() => { h.result.current.close(); h.result.current.open('A different brief') })
+    expect(h.result.current.intent.requirements).toBe(brief)
+    expect(h.result.current.requirements).toBe(brief)
+    expect(h.result.current.sourceRefusal).not.toBeNull()
+  })
+
+  it.each(['project', 'profile', 'account'])('ignores a late refusal after %s owner replacement', async (change) => {
+    const gate = deferred()
+    let id
+    const h = nativeSetup({ materials: [transcript()], fetcher: (url, init) => {
+      if (init.method === 'POST') { id = JSON.parse(init.body).source_request_id; return gate.promise }
+      return undefined
+    } })
+    await open(h)
+    let action
+    act(() => { action = h.result.current.stage() })
+    await waitFor(() => expect(id).toBeTruthy())
+    if (change === 'account') { signIn('replacement'); notifyActiveScopeChanged() }
+    h.rerender({ ...h.props, ...(change === 'project' ? { projectId: OTHER }
+      : change === 'profile' ? { sourceContext: 'browser' } : {}) })
+    await act(async () => { gate.resolve(reply(videoRefusal(id), 503)); await action })
+    expect(h.result.current.sourceRefusal).toBeNull()
+    expect(h.result.current.candidate).toBeNull()
+    expect(h.startAgentTurn).toHaveBeenCalledOnce()
+    expect(h.calls.filter((call) => call.method === 'POST')).toHaveLength(1)
+  })
+
+  it.each([{}, { authority_turn_id: 'old' }, { project_id: OTHER }, { stage: 'after_generation' }])('keeps ambiguous 503 or a mismatched witness unknown: %j', async (change) => {
+    const h = nativeSetup({ materials: [transcript()], fetcher: (url, init) => {
+      if (init.method === 'POST') return reply(Object.keys(change).length
+        ? videoRefusal(JSON.parse(init.body).source_request_id, change) : {}, 503)
+      if (url.includes('/requests/')) return reply({}, 404)
+      return undefined
+    } })
+    await open(h)
+    await act(async () => { await h.result.current.stage() })
+    expect(h.result.current.sourceRefusal).toBeNull()
+    expect(h.result.current.unknown).toBe(true)
+    await act(async () => { await h.result.current.stage() })
+    expect(h.startAgentTurn).toHaveBeenCalledOnce()
+    expect(h.calls.filter((call) => call.method === 'POST')).toHaveLength(1)
+    expect(h.calls.some((call) => call.url.includes('/requests/'))).toBe(true)
   })
 
   it('reads the original Native ID after an unknown outcome without another model turn', async () => {

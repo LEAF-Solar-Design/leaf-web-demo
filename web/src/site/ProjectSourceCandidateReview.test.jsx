@@ -366,6 +366,38 @@ describe('iOS source review', () => {
     expect(screen.queryByRole('link')).not.toBeInTheDocument()
   })
 
+  it('shows an exact pre-generation refusal without an unknown banner or automatic retry', async () => {
+    let posts = 0
+    vi.stubGlobal('fetch', vi.fn(async (url, init = {}) => {
+      if (String(url).includes('/reference-files')) return response({ materials, next_cursor: null })
+      if (init.method === 'POST') {
+        posts += 1
+        const body = JSON.parse(init.body)
+        return new Response(JSON.stringify({ error: { code: 'video_unavailable',
+          message: 'Private video decoding is unavailable. Source generation did not start.' },
+        refusal: { schema: 'leaf.native-source-pre-generation-refusal.v1', project_id: PROJECT,
+          source_request_id: body.source_request_id, source_profile: 'ios-swiftui-xcodegen-v1', action: 'create',
+          authority_session_id: 'refusal-session', authority_turn_id: 'refusal-turn', stage: 'before_generation' } }),
+        { status: 503, headers: { 'Content-Type': 'application/json' } })
+      }
+      return response([])
+    }))
+    const startAgentTurn = vi.fn(async () => ({ session_id: 'refusal-session', turn_id: 'refusal-turn' }))
+    render(<Host startAgentTurn={startAgentTurn} sourceContext="native" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Build source' }))
+    const stage = screen.getByRole('button', { name: 'Stage source' })
+    await waitFor(() => expect(stage).toBeEnabled())
+    fireEvent.click(stage)
+    await screen.findByText('Private video decoding is unavailable. Source generation did not start.')
+    expect(screen.queryByText(/Publication outcome unknown/)).not.toBeInTheDocument()
+    expect(screen.queryByText('Source ready for review')).not.toBeInTheDocument()
+    expect(stage).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Confirm changes' })).toBeDisabled()
+    expect(screen.getByText('Original request: Create a quiet reading page.')).toBeVisible()
+    expect(posts).toBe(1)
+    expect(startAgentTurn).toHaveBeenCalledOnce()
+  })
+
   it('native_edit_ui disables staging and confirmation after a stale edit has an unknown readback', async () => {
     const fetch = vi.fn(async (url, init = {}) => {
       if (String(url).includes('/reference-files')) return response({ materials, next_cursor: null })
