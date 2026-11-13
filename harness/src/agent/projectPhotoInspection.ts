@@ -85,6 +85,7 @@ const catalog = z.strictObject({
 const preview = z.strictObject({
   ...common, schema: z.literal("leaf.project-material-image.v1"), material_id: uuid,
   original_sha256: digest, preview_sha256: digest, media_type: z.literal("image/jpeg"), sha256: digest,
+  inspection_sha256: digest.optional(), derived_from_sha256: digest.optional(),
   byte_size: z.number().int().positive().max(1024 * 1024),
   data: z.string().min(1).max(1398104), assignments,
 });
@@ -229,10 +230,14 @@ export class ProjectPhotoInspection {
             result.preview_sha256 !== member.preview_sha256 || result.sha256 !== member.preview_sha256 ||
             JSON.stringify(result.assignments) !== JSON.stringify(member.assignments)) throw new Error();
         const bytes = Buffer.from(result.data, "base64");
+        // sha256 remains the immutable stored-preview witness used by saved
+        // assignments. A bounded inspection derivative has a separate digest.
+        if ((result.inspection_sha256 === undefined) !== (result.derived_from_sha256 === undefined) ||
+            (result.derived_from_sha256 !== undefined && result.derived_from_sha256 !== member.preview_sha256)) throw new Error();
         if (bytes.length !== result.byte_size || bytes.toString("base64") !== result.data ||
             bytes.length < 5 || bytes[0] !== 255 || bytes[1] !== 216 || bytes[2] !== 255 ||
             bytes.at(-2) !== 255 || bytes.at(-1) !== 217 ||
-            createHash("sha256").update(bytes).digest("hex") !== member.preview_sha256) throw new Error();
+            createHash("sha256").update(bytes).digest("hex") !== (result.inspection_sha256 ?? member.preview_sha256)) throw new Error();
         const { data, ...publicResult } = result;
         this.inspected.add(result.material_id);
         metadata = JSON.stringify({ ...publicResult, reconciliation: this.reconciliation() });
