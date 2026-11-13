@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { readActiveScope, subscribeActiveScope } from '../auth/activeScope.js'
 import { subscribeBeforeLogout } from '../auth.js'
-import { listProjectReferences, readProjectReferenceOriginal, registerProjectArloInput, uploadProjectReference } from '../projects/api.js'
+import { listProjectReferences, readProjectReferenceOriginal, registerProjectArloInput, readProjectArloInput, reviseProjectArloInput, restoreProjectArloInput, uploadProjectReference } from '../projects/api.js'
 import { humanizeError } from '../errorHumanize.js'
 
 const message = error => humanizeError(error?.message || 'Reference files could not be loaded. Try again.')
@@ -25,6 +25,9 @@ function ReferenceSession({ projectId, orgId, scope, onRunArlo }) {
   const [error, setError] = useState('')
   const [downloading, setDownloading] = useState(null)
   const [arlo, setArlo] = useState(null)
+  const [activeInputs, setActiveInputs] = useState({})
+  const [editor, setEditor] = useState(null)
+  const [constraintError, setConstraintError] = useState('')
   const input = useRef(null)
   const live = useRef(false)
   const running = useRef(false)
@@ -59,6 +62,7 @@ function ReferenceSession({ projectId, orgId, scope, onRunArlo }) {
       urls.current.clear()
       arloKeys.current.clear()
       setArlo(null)
+      setActiveInputs({}); setEditor(null); setConstraintError('')
       setRows([]); setQueue([]); setBusy(false); setLoading(false); setError(''); setDownloading(null)
     }
     const logout = subscribeBeforeLogout(clear)
@@ -118,27 +122,41 @@ function ReferenceSession({ projectId, orgId, scope, onRunArlo }) {
       if (current() && cause?.name !== 'AbortError') setError(message(cause))
     } finally { downloadRunning.current = false; if (current()) setDownloading(null) }
   }
+  const validateArlo = (input, row) => {
+    if (input?.project_id !== projectId || input.organization_id !== orgId
+        || input.material_id !== row.material_id || input.original_sha256 !== row.sha256
+        || input.request?.contract !== 'arlo_design_request_v1') {
+      throw new Error('The ARLO input did not match this project reference.')
+    }
+    return input
+  }
+  const prepareArlo = async row => {
+    const registered = validateArlo(await registerProjectArloInput(projectId, row.material_id, {
+      orgId, key: `arlo-reference-${row.material_id}`, ...options(),
+    }), row)
+    if (!current()) return null
+    const input = validateArlo(await readProjectArloInput(projectId, registered.input_version_id, {
+      orgId, ...options(),
+    }), row)
+    if (!current()) return null
+    setActiveInputs(previous => ({ ...previous, [row.material_id]: input }))
+    return input
+  }
   const runArlo = async row => {
     if (!current() || arloRunning.current || !onRunArlo || !orgId) return
     arloRunning.current = true
     const materialId = row.material_id
     const signal = abort.current.signal
+    setConstraintError('')
     const status = (detail, running = true) => setArlo({ materialId, detail, running })
     status('Preparing ARLO input…')
     try {
-      let key = arloKeys.current.get(materialId)
+      const input = await prepareArlo(row)
+      if (!input || !current() || signal.aborted) return
+      let key = arloKeys.current.get(input.input_version_id)
       if (!key) {
         key = crypto.randomUUID()
-        arloKeys.current.set(materialId, key)
-      }
-      const input = await registerProjectArloInput(projectId, materialId, {
-        orgId, key: `arlo-reference-${materialId}`, ...options(),
-      })
-      if (!current() || signal.aborted) return
-      if (input?.project_id !== projectId || input.organization_id !== orgId
-          || input.material_id !== materialId || input.original_sha256 !== row.sha256
-          || input.request?.contract !== 'arlo_design_request_v1') {
-        throw new Error('The ARLO input did not match this project reference.')
+        arloKeys.current.set(input.input_version_id, key)
       }
       status('Running ARLO…')
       const result = await onRunArlo(input, { scope, signal, idempotencyKey: key })
@@ -149,6 +167,67 @@ function ReferenceSession({ projectId, orgId, scope, onRunArlo }) {
       if (current() && !signal.aborted && cause?.name !== 'AbortError') setArlo({ materialId, error: message(cause) })
     } finally {
       arloRunning.current = false
+    }
+  }
+  const editConstraints = async row => {
+    if (!current() || arloRunning.current) return
+    arloRunning.current = true
+    setConstraintError('')
+    setArlo({ materialId: row.material_id, detail: 'Opening constraints…', running: true })
+    try {
+      const input = await prepareArlo(row)
+      if (!input || !current()) return
+      const fields = {}
+      for (const group of ['requirements', 'budget']) {
+        for (const [name, value] of Object.entries(input.request[group] || {})) {
+          if (typeof value === 'number') fields[`${group}.${name}`] = String(value)
+        }
+      }
+      setEditor({ materialId: row.material_id, inputId: input.input_version_id, fields })
+      setArlo({ materialId: row.material_id, detail: 'Constraints ready to edit.', running: false })
+    } catch (cause) {
+      if (current() && cause?.name !== 'AbortError') setArlo({ materialId: row.material_id, error: message(cause) })
+    } finally { arloRunning.current = false }
+  }
+  const saveConstraints = async (row, restore = false) => {
+    if (!current() || arloRunning.current) return
+    const input = activeInputs[row.material_id]
+    if (!input) return
+    if (!restore && editor?.inputId !== input.input_version_id) {
+      setConstraintError('The active ARLO input changed. Reopen constraints and try again.')
+      setArlo({ materialId: row.material_id, running: false })
+      return
+    }
+    arloRunning.current = true
+    setConstraintError('')
+    setArlo({ materialId: row.material_id, detail: restore ? 'Restoring original…' : 'Saving constraints…', running: true })
+    try {
+      let revised
+      if (restore) {
+        revised = await restoreProjectArloInput(projectId, input.input_version_id, { orgId, ...options() })
+      } else {
+        const patch = {}
+        for (const [path, text] of Object.entries(editor.fields)) {
+          const [group, name] = path.split('.')
+          const value = Number(text)
+          if (!text.trim() || !Number.isFinite(value)) throw new Error('Enter a finite number for every constraint.')
+          if (value !== input.request[group][name]) (patch[group] ||= {})[name] = value
+        }
+        if (!Object.keys(patch).length) { setEditor(null); return }
+        revised = await reviseProjectArloInput(projectId, input.input_version_id, patch, { orgId, ...options() })
+      }
+      if (!current()) return
+      validateArlo(revised, row)
+      setActiveInputs(previous => ({ ...previous, [row.material_id]: revised }))
+      setEditor(null)
+      setArlo({ materialId: row.material_id, detail: restore ? 'Original ARLO input restored.' : 'ARLO revision saved. Run ARLO to use these constraints.', running: false })
+    } catch (cause) {
+      // The transport already filters server detail; preserve numeric validation
+      // messages such as budget.timeout_seconds instead of treating them as network timeouts.
+      if (current() && cause?.name !== 'AbortError') setConstraintError(cause?.status === 422 ? cause.message : message(cause))
+    } finally {
+      arloRunning.current = false
+      if (current()) setArlo(previous => ({ ...previous, running: false }))
     }
   }
   const failed = queue.filter(item => item.state === 'failed').length
@@ -177,6 +256,22 @@ function ReferenceSession({ projectId, orgId, scope, onRunArlo }) {
         <button type="button" disabled={Boolean(arlo?.running)} onClick={() => void runArlo(row)}>
           Run ARLO with {row.name}
         </button>
+        <button type="button" disabled={Boolean(arlo?.running)} onClick={() => void editConstraints(row)}>Edit constraints</button>
+        {activeInputs[row.material_id] && <>
+          <p>Active input: {activeInputs[row.material_id].input_version_id} · SHA-256: {activeInputs[row.material_id].input_sha256}
+            {' '}· Parent: {activeInputs[row.material_id].parent_id || 'Original'} · Original: {activeInputs[row.material_id].original_id || activeInputs[row.material_id].input_version_id}</p>
+          <button type="button" disabled={Boolean(arlo?.running) || !activeInputs[row.material_id].parent_id}
+            onClick={() => void saveConstraints(row, true)}>Restore original</button>
+        </>}
+        {editor?.materialId === row.material_id && <form aria-label="ARLO constraints" onSubmit={event => { event.preventDefault(); void saveConstraints(row) }}>
+          {Object.entries(editor.fields).map(([path, value]) => <label key={path}>{path}
+            <input type="number" step="any" value={value} disabled={Boolean(arlo?.running)}
+              onChange={event => setEditor(previous => ({ ...previous, fields: { ...previous.fields, [path]: event.target.value } }))} />
+          </label>)}
+          <button type="submit" disabled={Boolean(arlo?.running)}>Save revision</button>
+          <button type="button" disabled={Boolean(arlo?.running)} onClick={() => { setEditor(null); setConstraintError('') }}>Cancel editing</button>
+        </form>}
+        {arlo?.materialId === row.material_id && constraintError && <p role="alert">{constraintError}</p>}
         {arlo?.materialId === row.material_id && (arlo.error
           ? <p role="alert">{arlo.error}</p> : <p role="status">{arlo.detail}</p>)}
       </>}

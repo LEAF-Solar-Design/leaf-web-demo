@@ -53,6 +53,18 @@ const read = { schema_version: 1, dataset_ref: reference, fields,
   rows: [{ key: 'one', values: { day: '2026-10-20', total: 1234 } }], next_cursor: null, status: 'ready',
   freshness: { source_updated_at: null, synced_at: null, fetched_at: '2026-10-20T12:00:00Z' } }
 const metadata = { reference, revision: 1, title: 'Authorized orders', fields, lastAttempt: null, freshness: read.freshness }
+const derivedRef = { id: 'derived-orders', version: 1, digest: 'b'.repeat(64) }
+const derivedFields = [...fields, { id: 'window_id', label: 'Window', type: { kind: 'identifier' }, nullable: false, sensitivity: 'internal' },
+  { id: 'aggregate_key', label: 'Aggregate key', type: { kind: 'identifier' }, nullable: false, sensitivity: 'internal' }]
+const derivedMetadata = { reference: derivedRef, revision: 1, title: 'Derived orders', fields: derivedFields,
+  lastAttempt: { outcome: 'success', row_count: 1 }, freshness: read.freshness,
+  derivation: { kind: 'derived', contract_version: 1, inputs: [{ alias: 'primary', dataset_ref: reference, resource_revision: 1,
+    original_binding: { kind: 'project_material', material_id: otherProject, sha256: 'c'.repeat(64), byte_length: 100 } }],
+    plan: { kind: 'group_count', group_by: [{ field: 'day', as: 'day', bucket: 'value' }], count: { as: 'total', label: 'Total' },
+      windows: [{ id: 'recent', filters: [{ field: 'day', op: 'gte', value: '2026-10-01' }] }, { id: 'all', filters: [] }] },
+    engine_revision: 'fixture-v1', derivation_digest: derivedRef.digest },
+  input_freshness: [{ alias: 'primary', semantic_digest: 'd'.repeat(64), freshness: read.freshness }],
+  diagnostics: { excluded_domain_rows: 3, null_event_time_rows: 0 }, computed_at: '2026-10-20T12:01:00Z' }
 const page = (records) => ({ records, nextCursor: null })
 function response(value, status = 200) {
   return { ok: status === 200, status, headers: { get: (key) => key === 'content-type' ? 'application/json' : null },
@@ -133,6 +145,79 @@ async function observeUncertainAction() {
 beforeEach(() => { surface.frame = undefined; vi.stubGlobal('TextDecoder', TextDecoder); vi.stubGlobal('TextEncoder', TextEncoder) })
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 async function loaded() { await screen.findByRole('option', { name: 'Authorized orders · version 3' }) }
+
+function setupDerivedView() {
+  const harness = setup(), original = harness.fetchImpl.getMockImplementation()
+  const derivedElement = { ...element, id: 'derived-view', title: 'Derived view', dataset_ref: derivedRef,
+    query: { fields: ['day', 'total'], limit: 50, filters: [{ field: 'total', op: 'gte', value: 0 }, { field: 'window_id', op: 'eq', value: 'recent' }] } }
+  harness.fetchImpl.mockImplementation((url, options) => {
+    if (url.includes('/datasets?')) return Promise.resolve(response(page([metadata, derivedMetadata])))
+    if (url.includes('/elements?')) return Promise.resolve(response(page([{ element: derivedElement, revision: 1 }])))
+    if (url.endsWith('/query')) return Promise.resolve(response({ ...read, dataset_ref: derivedRef, fields: derivedFields,
+      rows: read.rows.map(row => ({ ...row, values: { ...row.values, aggregate_key: 'one', window_id: 'recent' } })) }))
+    return original(url, options)
+  })
+  return { ...harness, derivedElement }
+}
+
+it('shows scoped derived evidence and preserves a saved named-window filter, exact ref and unrelated query predicates', async () => {
+  const harness = setupDerivedView(); render(<OpsWorkspaceGround {...harness.props} />); await loaded()
+  fireEvent.click(screen.getByRole('button', { name: 'Derived view · revision 1' }))
+  await screen.findByRole('region', { name: 'Derived dataset evidence' })
+  expect(screen.getAllByText('Unknown')).toHaveLength(2)
+  expect(screen.getByText(/Rows outside the declared scope: 3/)).toBeInTheDocument()
+  fireEvent.click(await screen.findByRole('button', { name: 'Edit current recipe' }))
+  expect(screen.getByLabelText('Named window')).toHaveValue('recent')
+  fireEvent.click(screen.getByRole('button', { name: 'Update view' }))
+  await waitFor(() => expect(harness.fetchImpl.mock.calls.some(([url, options]) => url.endsWith('/elements/derived-view') && options.method === 'PUT')).toBe(true))
+  const [, init] = harness.fetchImpl.mock.calls.find(([url, options]) => url.endsWith('/elements/derived-view') && options.method === 'PUT')
+  expect(JSON.parse(init.body)).toMatchObject({ dataset_ref: derivedRef, query: { limit: 50, filters: harness.derivedElement.query.filters } })
+})
+
+it('All windows removes only the declared window selection and keeps unrelated predicates', async () => {
+  const harness = setupDerivedView(); render(<OpsWorkspaceGround {...harness.props} />); await loaded()
+  fireEvent.click(screen.getByRole('button', { name: 'Derived view · revision 1' })); fireEvent.click(await screen.findByRole('button', { name: 'Edit current recipe' }))
+  fireEvent.change(screen.getByLabelText('Named window'), { target: { value: '' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Update view' }))
+  await waitFor(() => expect(harness.fetchImpl.mock.calls.some(([url, options]) => url.endsWith('/elements/derived-view') && options.method === 'PUT')).toBe(true))
+  const [, init] = harness.fetchImpl.mock.calls.find(([url, options]) => url.endsWith('/elements/derived-view') && options.method === 'PUT')
+  expect(JSON.parse(init.body).query.filters).toEqual([{ field: 'total', op: 'gte', value: 0 }])
+})
+
+it('a declared All-history window stays an explicit saved filter rather than becoming all windows', async () => {
+  const harness = setupDerivedView(); render(<OpsWorkspaceGround {...harness.props} />); await loaded()
+  fireEvent.click(screen.getByRole('button', { name: 'Derived view · revision 1' })); fireEvent.click(await screen.findByRole('button', { name: 'Edit current recipe' }))
+  fireEvent.change(screen.getByLabelText('Named window'), { target: { value: 'all' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Update view' }))
+  await waitFor(() => expect(harness.fetchImpl.mock.calls.some(([url, options]) => url.endsWith('/elements/derived-view') && options.method === 'PUT')).toBe(true))
+  const [, init] = harness.fetchImpl.mock.calls.find(([url, options]) => url.endsWith('/elements/derived-view') && options.method === 'PUT')
+  expect(JSON.parse(init.body).query.filters).toEqual([{ field: 'total', op: 'gte', value: 0 }, { field: 'window_id', op: 'eq', value: 'all' }])
+})
+
+it('a created derived dataset becomes a composition choice without overwriting an existing draft', async () => {
+  const harness = await materialHarness({ rows: [{ day: '2026-10-20', total: 2 }] })
+  const original = harness.fetchImpl.getMockImplementation()
+  harness.fetchImpl.mockImplementation((url, options) => {
+    if (url.includes('/datasets?')) return Promise.resolve(response(page([metadata, harness.resultMetadata])))
+    if (url.endsWith('/dataset-derivations/capabilities')) return Promise.resolve(response({ schema_version: 1, contract: 'dataset-derivation-v1', operations: ['group_count', 'window_count'], max_inputs: 2, max_records_per_input: 100000, max_windows: 4 }))
+    if (url.endsWith('/dataset-derivations')) return Promise.resolve(response({ reference: derivedRef, revision: 1, rowCount: 1, status: 'complete' }))
+    if (url.includes('/datasets/derived-orders/versions/1')) return Promise.resolve(response(derivedMetadata))
+    return original(url, options)
+  })
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded()
+  const composer = within(screen.getByRole('form', { name: 'Compose native view' }))
+  fireEvent.change(composer.getByLabelText('Title'), { target: { value: 'Keep this draft' } })
+  const panel = within(await screen.findByRole('region', { name: 'Create derived dataset' }))
+  await waitFor(() => expect(panel.getByLabelText('Source dataset')).toBeInTheDocument())
+  fireEvent.change(panel.getByLabelText('Source dataset'), { target: { value: JSON.stringify([harness.resultMetadata.reference.id, 1, harness.resultMetadata.reference.digest]) } })
+  fireEvent.change(panel.getByLabelText('Output ID'), { target: { value: derivedRef.id } })
+  fireEvent.change(panel.getByLabelText('Output title'), { target: { value: 'Derived orders' } })
+  fireEvent.change(panel.getByLabelText('Window ID'), { target: { value: 'all' } })
+  fireEvent.click(within(panel.getByRole('group', { name: 'Count distinct identities by' })).getByLabelText('Day'))
+  fireEvent.click(panel.getByRole('button', { name: 'Create derived dataset' }))
+  await waitFor(() => expect(composer.getByRole('option', { name: 'Derived orders · version 1' })).toBeInTheDocument())
+  expect(composer.getByLabelText('Title')).toHaveValue('Keep this draft')
+})
 
 it.each([true, false])('adds measured Studio chrome only when studioShell is %s', async (studioShell) => {
   const { props } = setup()
@@ -248,6 +333,8 @@ async function materialHarness(original, pointer = '/rows') {
     resultMetadata.material_context = { schema: 'leaf.project-material-context.v1', source: lineage,
       selection: { records_pointer: pointer }, row_count: rowCount, envelope }
   } else rowCount = original.length
+  resultMetadata.material_lineage = lineage
+  resultMetadata.lastAttempt = { outcome: 'success', row_count: rowCount }
   const originalFetch = harness.fetchImpl.getMockImplementation()
   let imported = false
   harness.fetchImpl.mockImplementation((url, options) => {
@@ -257,6 +344,45 @@ async function materialHarness(original, pointer = '/rows') {
   })
   return { ...harness, material, blob, lineage, resultMetadata, rowCount }
 }
+async function rootArrayEligibilityHarness(envelope = false) {
+  const rows = [{ day: '2026-10-20', total: 2 }]
+  const harness = await materialHarness(envelope ? { rows } : rows, envelope ? '/rows' : '')
+  const original = harness.fetchImpl.getMockImplementation()
+  harness.fetchImpl.mockImplementation((url, options) => {
+    if (url.includes('/datasets?')) return Promise.resolve(response(page([metadata, harness.resultMetadata])))
+    if (url.includes('/datasets/original-records/versions/1')) return Promise.resolve(response(harness.resultMetadata))
+    if (url.endsWith('/dataset-derivations/capabilities')) return Promise.resolve(response({ schema_version: 1, contract: 'dataset-derivation-v1',
+      operations: ['group_count', 'window_count'], max_inputs: 2, max_records_per_input: 100000, max_windows: 4 }))
+    return original(url, options)
+  })
+  return harness
+}
+it.each([false, true])('RootArrayEligibility mounts from actual strict material metadata with optional envelope=%s', async envelope => {
+  const harness = await rootArrayEligibilityHarness(envelope)
+  const detail = await harness.props.client.getDataset(projectId, harness.resultMetadata.reference, { signal: new AbortController().signal })
+  const version = await harness.props.client.getDatasetVersion(projectId, harness.resultMetadata.reference.id, 1, { signal: new AbortController().signal })
+  expect(detail.material_lineage).toEqual(harness.lineage)
+  expect(version).toEqual(detail)
+  if (!envelope) expect(detail).not.toHaveProperty('material_context')
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded()
+  const panel = within(await screen.findByRole('region', { name: 'Create derived dataset' }))
+  await panel.findByLabelText('Source dataset')
+  expect(within(panel.getByLabelText('Source dataset')).getByRole('option', { name: 'Imported original · version 1' })).toBeInTheDocument()
+})
+it('RootArrayEligibility never mounts from untagged connector metadata with optional context', async () => {
+  const harness = await rootArrayEligibilityHarness(true)
+  delete harness.resultMetadata.material_lineage
+  harness.resultMetadata.lastAttempt = null
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded()
+  expect(screen.queryByRole('region', { name: 'Create derived dataset' })).not.toBeInTheDocument()
+})
+it('RootArrayEligibility fails malformed material metadata through the real client before mounting', async () => {
+  const harness = await rootArrayEligibilityHarness(false)
+  harness.resultMetadata.material_lineage.sha256 = 'invalid'
+  render(<OpsWorkspaceGround {...harness.props} />)
+  await screen.findByRole('alert')
+  expect(screen.queryByRole('region', { name: 'Create derived dataset' })).not.toBeInTheDocument()
+})
 const importPosts = (fetchImpl) => fetchImpl.mock.calls.filter(([url, options]) => url.endsWith('/dataset-imports') && options.method === 'POST')
 async function openOriginal() {
   fireEvent.click(screen.getByRole('button', { name: 'List JSON originals' }))
@@ -835,6 +961,290 @@ it('renders real native saved data with shared formatting and keeps display pref
   expect(fetchImpl.mock.calls.filter(([url]) => url.endsWith('/query'))).toHaveLength(1)
   expect(screen.getByText(/Dataset reporting timezone is unchanged/)).toBeInTheDocument()
   expect(fetchImpl.mock.calls.some(([url]) => url.includes('/sync'))).toBe(false)
+})
+it.each(['transport', 'failed', 'unavailable', 'invalid'])('retains the previous same-view result through a %s refresh failure and replaces it on retry', async (failure) => {
+  const { props } = setup()
+  let failRefresh, finishRetry
+  const query = vi.spyOn(props.client, 'queryDataset').mockResolvedValueOnce(read)
+    .mockImplementationOnce(() => new Promise((resolve, reject) => {
+      failRefresh = () => failure === 'transport' ? reject(new Error('Failed to fetch')) : resolve({ ...read, rows: [], status: failure })
+    }))
+    .mockImplementationOnce(() => new Promise((resolve) => { finishRetry = resolve }))
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  const open = screen.getByRole('button', { name: 'Order view · revision 2' })
+  fireEvent.click(open)
+  await screen.findByRole('table', { name: 'Order view data' })
+  await waitFor(() => expect(open).toBeEnabled())
+  fireEvent.click(open)
+  const selected = within(screen.getByRole('region', { name: 'Selected native view' }))
+  expect(selected.getByRole('table', { name: 'Order view data' })).toHaveTextContent('1,234')
+  expect(selected.getByText('Loading dataset…')).toBeInTheDocument()
+  expect(selected.getByText(/Previous result/)).toHaveTextContent('Refreshing view')
+  await waitFor(() => expect(failRefresh).toBeTypeOf('function'))
+  await act(async () => failRefresh())
+  expect(selected.getByRole('alert')).toHaveTextContent(failure === 'transport'
+    ? "Couldn't reach the service. Check the connection and retry." : 'The dataset could not be loaded.')
+  expect(selected.getByRole('table', { name: 'Order view data' })).toHaveTextContent('1,234')
+  expect(selected.getByText(/Previous result/)).toHaveTextContent('last successful result')
+  fireEvent.click(selected.getByRole('button', { name: 'Retry view' }))
+  expect(selected.queryByRole('alert')).toBeNull()
+  expect(selected.getByText('Loading dataset…')).toBeInTheDocument()
+  expect(selected.getByRole('table', { name: 'Order view data' })).toHaveTextContent('1,234')
+  await waitFor(() => expect(finishRetry).toBeTypeOf('function'))
+  await act(async () => finishRetry({ ...read, rows: [{ key: 'new', values: { day: '2026-10-21', total: 5678 } }] }))
+  expect(selected.getByRole('table', { name: 'Order view data' })).toHaveTextContent('5,678')
+  expect(selected.queryByText('1,234')).toBeNull()
+  expect(selected.queryByText(/Previous result/)).toBeNull()
+  expect(selected.queryByText('Loading dataset…')).toBeNull()
+  expect(selected.queryByRole('alert')).toBeNull()
+  expect(query).toHaveBeenCalledTimes(3)
+})
+it.each(['project', 'principal', 'account'])('clears a retained result immediately on a %s change and ignores its late refresh', async (change) => {
+  const { props, sessionController } = setup()
+  let finish
+  const query = vi.spyOn(props.client, 'queryDataset').mockResolvedValueOnce(read)
+    .mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+  const { rerender } = render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  const open = screen.getByRole('button', { name: 'Order view · revision 2' })
+  fireEvent.click(open)
+  await screen.findByRole('table', { name: 'Order view data' })
+  await waitFor(() => expect(open).toBeEnabled())
+  fireEvent.click(open)
+  await waitFor(() => expect(finish).toBeTypeOf('function'))
+  expect(screen.getByText('1,234')).toBeInTheDocument()
+  if (change === 'principal') {
+    vi.spyOn(props.client, 'getScope').mockResolvedValue({ ...scope, platformUserId: otherProject, externalSubject: 'auth0|two' })
+    act(() => sessionController.change({ generation: 2 }))
+  } else rerender(<OpsWorkspaceGround {...props} {...(change === 'project' ? { projectId: otherProject } : { accountScope: 'account-b' })} />)
+  expect(query.mock.calls[1][3].signal.aborted).toBe(true)
+  expect(screen.queryByRole('table', { name: 'Order view data' })).toBeNull()
+  expect(screen.queryByText(/Previous result/)).toBeNull()
+  await act(async () => finish(read))
+  expect(screen.queryByText('1,234')).toBeNull()
+})
+it.each(['projectId', 'externalAuthority'])('clears retained data when the real client rejects changed %s scope', async (field) => {
+  const { props, fetchImpl } = setup()
+  const original = fetchImpl.getMockImplementation()
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  const open = screen.getByRole('button', { name: 'Order view · revision 2' })
+  fireEvent.click(open)
+  await screen.findByRole('table', { name: 'Order view data' })
+  await waitFor(() => expect(open).toBeEnabled())
+  fetchImpl.mockImplementation((url, options) => url.endsWith('/scope')
+    ? Promise.resolve(response({ ...scope, [field]: field === 'projectId' ? otherProject : 'unsupported' }))
+    : original(url, options))
+  fireEvent.click(open)
+  await screen.findByText('You do not have permission to view these integrations.')
+  expect(screen.queryByText('1,234')).toBeNull()
+  expect(screen.queryByText(/Previous result/)).toBeNull()
+  expect(screen.queryByRole('region', { name: 'Selected native view' })).toBeNull()
+  expect(fetchImpl.mock.calls.filter(([url]) => url.endsWith('/query'))).toHaveLength(1)
+})
+it.each(['transport', 'service'])('retains the last result on a real scope %s failure and revalidates on retry', async (failure) => {
+  const { props, fetchImpl } = setup()
+  const original = fetchImpl.getMockImplementation()
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  const open = screen.getByRole('button', { name: 'Order view · revision 2' })
+  fireEvent.click(open)
+  await screen.findByRole('table', { name: 'Order view data' })
+  await waitFor(() => expect(open).toBeEnabled())
+  fetchImpl.mockImplementation((url, options) => url.endsWith('/scope')
+    ? failure === 'transport' ? Promise.reject(new TypeError('Failed to fetch')) : Promise.resolve(response({}, 503))
+    : original(url, options))
+  fireEvent.click(open)
+  const selected = within(screen.getByRole('region', { name: 'Selected native view' }))
+  await selected.findByRole('alert')
+  expect(selected.getByRole('table', { name: 'Order view data' })).toHaveTextContent('1,234')
+  expect(selected.getByText(/Previous result/)).toHaveTextContent('last successful result')
+  expect(fetchImpl.mock.calls.filter(([url]) => url.endsWith('/query'))).toHaveLength(1)
+  fetchImpl.mockImplementation(original)
+  fireEvent.click(selected.getByRole('button', { name: 'Retry view' }))
+  await waitFor(() => expect(selected.queryByText(/Previous result/)).toBeNull())
+  expect(selected.queryByRole('alert')).toBeNull()
+  expect(fetchImpl.mock.calls.filter(([url]) => url.endsWith('/query'))).toHaveLength(2)
+  expect(fetchImpl.mock.calls.filter(([url]) => url.endsWith('/scope'))).toHaveLength(3)
+})
+it.each([1, 2])('retains displayed revision %s while its recipe fetch fails and retries the whole historical read', async (requestedRevision) => {
+  const { props } = setup()
+  const query = vi.spyOn(props.client, 'queryDataset').mockResolvedValue(read)
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  const open = screen.getByRole('button', { name: 'Order view · revision 2' })
+  fireEvent.click(open)
+  await screen.findByRole('table', { name: 'Order view data' })
+  await waitFor(() => expect(open).toBeEnabled())
+  const input = screen.getByLabelText('Earlier recipe revision')
+  const readRevision = screen.getByRole('button', { name: 'Read revision' })
+  fireEvent.change(input, { target: { value: String(requestedRevision) } })
+  if (requestedRevision === 1) {
+    fireEvent.click(readRevision)
+    await screen.findByText(/Recipe revision 1 · Historical recipe/)
+    await waitFor(() => expect(readRevision).toBeEnabled())
+  }
+  let failRecipe, finishRecipe
+  const getRecipe = vi.spyOn(props.client, 'getElement')
+    .mockImplementationOnce(() => new Promise((_resolve, reject) => { failRecipe = reject }))
+    .mockImplementationOnce(() => new Promise((resolve) => { finishRecipe = resolve }))
+  const queriesBeforeRefresh = query.mock.calls.length
+  query.mockResolvedValueOnce({ ...read, rows: [{ key: 'new', values: { day: '2026-10-21', total: 5678 } }] })
+  fireEvent.click(readRevision)
+  const selected = within(screen.getByRole('region', { name: 'Selected native view' }))
+  expect(selected.getByText(/Previous result/)).toHaveTextContent('Refreshing view')
+  expect(selected.getByText('Loading dataset…')).toBeInTheDocument()
+  expect(selected.getByRole('table', { name: 'Order view data' })).toHaveTextContent('1,234')
+  await act(async () => failRecipe(new Error('Failed to fetch')))
+  expect(selected.getByRole('alert')).toHaveTextContent("Couldn't reach the service")
+  expect(selected.getByText(/Previous result/)).toHaveTextContent('last successful result')
+  expect(query).toHaveBeenCalledTimes(queriesBeforeRefresh)
+  fireEvent.change(input, { target: { value: '3' } })
+  fireEvent.click(selected.getByRole('button', { name: 'Retry view' }))
+  expect(selected.queryByRole('alert')).toBeNull()
+  expect(selected.getByText('Loading dataset…')).toBeInTheDocument()
+  expect(selected.getByRole('table', { name: 'Order view data' })).toHaveTextContent('1,234')
+  expect(getRecipe.mock.calls.map(([, , options]) => options.revision)).toEqual([requestedRevision, requestedRevision])
+  await act(async () => finishRecipe({ ...saved, revision: requestedRevision }))
+  expect(selected.getByRole('table', { name: 'Order view data' })).toHaveTextContent('5,678')
+  expect(selected.queryByText(/Previous result/)).toBeNull()
+  expect(selected.queryByRole('alert')).toBeNull()
+  expect(selected.getByText(new RegExp(`Recipe revision ${requestedRevision} · Historical recipe`))).toBeInTheDocument()
+  expect(query).toHaveBeenCalledTimes(queriesBeforeRefresh + 1)
+})
+it('retries the failed dataset page cursor while retaining the previous page until recovery', async () => {
+  const { props, fetchImpl } = setup()
+  const original = fetchImpl.getMockImplementation()
+  const cursor = 'next-data-page'
+  let attempts = 0, finishPage
+  fetchImpl.mockImplementation((url, options) => {
+    if (!url.endsWith('/query')) return original(url, options)
+    attempts += 1
+    if (attempts === 1) return Promise.resolve(response({ ...read, next_cursor: cursor }))
+    if (attempts === 2) return Promise.resolve(response({}, 503))
+    return new Promise((resolve) => { finishPage = resolve })
+  })
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  fireEvent.click(screen.getByRole('button', { name: 'Order view · revision 2' }))
+  const more = await screen.findByRole('button', { name: 'Load more' })
+  await waitFor(() => expect(more).toBeEnabled())
+  fireEvent.click(more)
+  const selected = within(screen.getByRole('region', { name: 'Selected native view' }))
+  await selected.findByRole('alert')
+  expect(selected.getByRole('table', { name: 'Order view data' })).toHaveTextContent('1,234')
+  expect(selected.getByText(/Previous result/)).toHaveTextContent('last successful result')
+  fireEvent.click(selected.getByRole('button', { name: 'Retry view' }))
+  expect(selected.getByText('Loading dataset…')).toBeInTheDocument()
+  expect(selected.getByRole('table', { name: 'Order view data' })).toHaveTextContent('1,234')
+  await waitFor(() => expect(finishPage).toBeTypeOf('function'))
+  expect(fetchImpl.mock.calls.filter(([url]) => url.endsWith('/query')).map(([, options]) => JSON.parse(options.body)))
+    .toEqual([element.query, { ...element.query, cursor }, { ...element.query, cursor }])
+  await act(async () => finishPage(response({ ...read, rows: [{ key: 'two', values: { day: '2026-10-21', total: 5678 } }] })))
+  expect(selected.getByRole('table', { name: 'Order view data' })).toHaveTextContent('5,678')
+  expect(selected.queryByText('1,234')).toBeNull()
+  expect(selected.queryByText(/Previous result/)).toBeNull()
+  expect(selected.queryByRole('alert')).toBeNull()
+  expect(selected.queryByRole('button', { name: 'Load more' })).toBeNull()
+})
+it.each(['datasets', 'elements'])('gives a failed %s list its own global retry after a retained-read failure', async (resource) => {
+  const { props } = setup()
+  const extra = resource === 'datasets'
+    ? { ...metadata, reference: { ...reference, id: 'returns' }, title: 'Authorized returns' }
+    : { element: { ...element, id: 'other-view', title: 'Other view' }, revision: 1 }
+  const list = vi.spyOn(props.client, resource === 'datasets' ? 'listDatasets' : 'listElements')
+    .mockResolvedValueOnce({ records: [resource === 'datasets' ? metadata : saved], nextCursor: 'next-list-page' })
+    .mockRejectedValueOnce(new Error('The list could not be loaded.'))
+    .mockResolvedValueOnce(page([extra]))
+  const query = vi.spyOn(props.client, 'queryDataset').mockResolvedValueOnce(read)
+    .mockRejectedValueOnce(new Error('The view could not be refreshed.'))
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  const open = screen.getByRole('button', { name: 'Order view · revision 2' })
+  fireEvent.click(open)
+  await screen.findByRole('table', { name: 'Order view data' })
+  await waitFor(() => expect(open).toBeEnabled())
+  fireEvent.click(open)
+  const selectedRegion = screen.getByRole('region', { name: 'Selected native view' })
+  const selected = within(selectedRegion)
+  expect(await selected.findByRole('alert')).toHaveTextContent('The view could not be refreshed.')
+  expect(selected.getByRole('button', { name: 'Retry view' })).toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: resource === 'datasets' ? 'Load more datasets' : 'Load more saved views' }))
+  const alert = await screen.findByRole('alert')
+  expect(alert).toHaveTextContent('The list could not be loaded.')
+  expect(selectedRegion).not.toContainElement(alert)
+  expect(selected.queryByRole('alert')).toBeNull()
+  expect(selected.queryByRole('button', { name: 'Retry view' })).toBeNull()
+  expect(selected.getByRole('table', { name: 'Order view data' })).toHaveTextContent('1,234')
+  fireEvent.click(within(alert).getByRole('button', { name: 'Retry integrations' }))
+  expect(resource === 'datasets' ? await screen.findByRole('option', { name: 'Authorized returns · version 3' })
+    : await screen.findByRole('button', { name: 'Other view · revision 1' })).toBeInTheDocument()
+  expect(screen.queryByRole('alert')).toBeNull()
+  expect(list).toHaveBeenCalledTimes(3)
+  expect(list.mock.calls.slice(1).map(([, options]) => options.after)).toEqual(['next-list-page', 'next-list-page'])
+  expect(query).toHaveBeenCalledTimes(2)
+  expect(selected.getByRole('table', { name: 'Order view data' })).toHaveTextContent('1,234')
+})
+it.each(['tenantId', 'projectId', 'platformUserId', 'bindingId', 'projectRole', 'externalAuthority', 'externalSubject'])('clears the last result before querying when fresh %s authority changes', async (field) => {
+  const { props } = setup()
+  const query = vi.spyOn(props.client, 'queryDataset')
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  const open = screen.getByRole('button', { name: 'Order view · revision 2' })
+  fireEvent.click(open)
+  await screen.findByRole('table', { name: 'Order view data' })
+  await waitFor(() => expect(open).toBeEnabled())
+  vi.spyOn(props.client, 'getScope').mockResolvedValue({ ...scope, [field]: field === 'projectRole' ? 'reviewer' : 'different' })
+  fireEvent.click(open)
+  await screen.findByText('You do not have permission to view these integrations.')
+  expect(screen.queryByText('1,234')).toBeNull()
+  expect(screen.queryByRole('region', { name: 'Selected native view' })).toBeNull()
+  expect(query).toHaveBeenCalledOnce()
+})
+it.each([401, 403])('clears retained data when the refreshed query rejects authority with %s', async (status) => {
+  const { props } = setup()
+  vi.spyOn(props.client, 'queryDataset').mockResolvedValueOnce(read)
+    .mockRejectedValueOnce({ status, message: 'Your session is unavailable.' })
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  const open = screen.getByRole('button', { name: 'Order view · revision 2' })
+  fireEvent.click(open)
+  await screen.findByRole('table', { name: 'Order view data' })
+  await waitFor(() => expect(open).toBeEnabled())
+  fireEvent.click(open)
+  await screen.findByRole('alert')
+  expect(screen.queryByText('1,234')).toBeNull()
+  expect(screen.queryByText(/Previous result/)).toBeNull()
+})
+it.each(['record', 'revision', 'recipe'])('clears the last result when selecting a different %s, even if that read fails', async (change) => {
+  const { props } = setup()
+  const other = { element: { ...element, id: 'other-view', title: 'Other view' }, revision: 2 }
+  vi.spyOn(props.client, 'listElements').mockResolvedValue(page([saved, other]))
+  let failRead, finishRecipe
+  vi.spyOn(props.client, 'queryDataset').mockResolvedValueOnce(read)
+    .mockImplementationOnce(() => new Promise((_resolve, reject) => { failRead = reject }))
+  vi.spyOn(props.client, 'getElement').mockImplementation(() => new Promise((resolve) => { finishRecipe = resolve }))
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  const open = screen.getByRole('button', { name: 'Order view · revision 2' })
+  fireEvent.click(open)
+  await screen.findByRole('table', { name: 'Order view data' })
+  await waitFor(() => expect(open).toBeEnabled())
+  if (change === 'record') fireEvent.click(screen.getByRole('button', { name: 'Other view · revision 2' }))
+  else {
+    fireEvent.change(screen.getByLabelText('Earlier recipe revision'), { target: { value: change === 'revision' ? '1' : '2' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Read revision' }))
+    if (change === 'revision') expect(screen.queryByText('1,234')).toBeNull()
+    await act(async () => finishRecipe(change === 'revision' ? { ...saved, revision: 1 }
+      : { ...saved, element: { ...element, query: { ...element.query, limit: 1 } } }))
+  }
+  await waitFor(() => expect(failRead).toBeTypeOf('function'))
+  expect(screen.queryByText('1,234')).toBeNull()
+  expect(screen.queryByText(/Previous result/)).toBeNull()
+  await act(async () => failRead(new Error('Failed to fetch')))
+  expect(screen.getByRole('alert')).toHaveTextContent("Couldn't reach the service")
+  expect(screen.queryByRole('table')).toBeNull()
 })
 it.each(['table', 'line'])('saves strict native %s recipes with exact dataset refs', async (kind) => {
   const { props, fetchImpl } = setup()
@@ -1730,4 +2140,64 @@ it('offers a fixed-copy retry for failed connection reads and admits only the cu
   fireEvent.click(retry)
   await waitFor(() => expect(screen.getByRole('button', { name: 'Send order now' })).toBeEnabled())
   expect(actionPosts(fetchImpl)).toHaveLength(0)
+})
+
+it('PairGroupingComposer persists explicit grouping through save edit and reopen using the strict public client', async () => {
+  const { props, fetchImpl } = setup()
+  const pairFields = [
+    { id: 'pair', label: 'Pair key', type: { kind: 'text' }, nullable: true, sensitivity: 'internal' },
+    { id: 'provider', label: 'Provider', type: { kind: 'text' }, nullable: false, sensitivity: 'internal' }, fields[1],
+  ]
+  let stored
+  const original = fetchImpl.getMockImplementation()
+  fetchImpl.mockImplementation((url, options) => {
+    if (url.includes('/datasets?')) return Promise.resolve(response(page([{ ...metadata, fields: pairFields }])))
+    if (url.endsWith('/elements') && options.method === 'POST' || url.includes('/elements/') && options.method === 'PUT') {
+      stored = { element: JSON.parse(options.body), revision: stored ? stored.revision + 1 : 1 }
+      return Promise.resolve(response(stored))
+    }
+    if (url.includes('/elements?')) return Promise.resolve(response(page(stored ? [stored] : [])))
+    if (url.includes('/elements/paired-view')) return Promise.resolve(response(stored))
+    if (url.endsWith('/query')) return Promise.resolve(response({ ...read, fields: pairFields, query_coverage: { kind: 'complete_materialization', matching_rows: 2, offset: 0 },
+      rows: [{ key: 'a', values: { pair: 'verified', provider: 'Claude', total: 12 } }, { key: 'b', values: { pair: 'verified', provider: 'Codex', total: 15 } }] }))
+    return original(url, options)
+  })
+  const view = render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  // Use the actual option value rather than synthesize the reference-key encoding.
+  const select = screen.getByLabelText('Dataset')
+  fireEvent.change(select, { target: { value: select.options[1].value } })
+  fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Paired view' } })
+  fireEvent.change(screen.getByLabelText('Stable ID'), { target: { value: 'paired-view' } })
+  for (const name of ['Pair key', 'Provider', 'Total']) fireEvent.click(screen.getByRole('checkbox', { name, exact: true }))
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Group verified provider pairs' }))
+  fireEvent.change(screen.getByLabelText('Pair key field'), { target: { value: 'pair' } })
+  fireEvent.change(screen.getByLabelText('Provider field'), { target: { value: 'provider' } })
+  fireEvent.change(screen.getByLabelText('First provider'), { target: { value: 'Claude' } })
+  fireEvent.change(screen.getByLabelText('Second provider'), { target: { value: 'Codex' } })
+  fireEvent.change(screen.getByLabelText('Second provider'), { target: { value: 'Claude' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Save view' }))
+  await screen.findByRole('alert')
+  expect(stored).toBeUndefined()
+  expect(screen.getByLabelText('First provider')).toHaveValue('Claude')
+  fireEvent.change(screen.getByLabelText('Second provider'), { target: { value: 'Codex' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Save view' }))
+  await waitFor(() => expect(stored?.element.props.row_grouping).toEqual({ kind: 'provider_pairs', pair_key_field: 'pair', provider_field: 'provider', providers: ['Claude', 'Codex'] }))
+  await screen.findByRole('button', { name: 'Edit current recipe' })
+  fireEvent.click(screen.getByRole('button', { name: 'Edit current recipe' }))
+  expect(screen.getByRole('checkbox', { name: 'Group verified provider pairs' })).toBeChecked()
+  expect(screen.getByLabelText('First provider')).toHaveValue('Claude')
+  fireEvent.change(screen.getByLabelText('Second provider'), { target: { value: 'Other' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Update view' }))
+  await waitFor(() => expect(stored.revision).toBe(2))
+  view.unmount()
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  fireEvent.click(screen.getByRole('button', { name: /Paired view.*revision 2/ }))
+  fireEvent.click(await screen.findByRole('button', { name: 'Edit current recipe' }))
+  expect(screen.getByLabelText('Second provider')).toHaveValue('Other')
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Group verified provider pairs' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Update view' }))
+  await waitFor(() => expect(stored.revision).toBe(3))
+  expect(stored.element.props).not.toHaveProperty('row_grouping')
 })

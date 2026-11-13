@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+from decimal import Decimal
 from pathlib import Path
 import uuid
 from typing import Any
@@ -75,6 +77,8 @@ def _input_response(row: dict) -> dict:
             "input_version_id": str(row["input_version_id"]), "example_id": row["example_id"],
             "example_version": row["example_version"], "input_sha256": row["input_sha256"],
             "request": request, "request_canonical_json": canonical_text(request)}
+    response.update(parent_id=row["provenance"].get("parent_id"),
+                    original_id=row["provenance"].get("original_id", str(row["input_version_id"])))
     if row["example_id"] == REFERENCE_SOURCE:
         response.pop("example_id")
         response.pop("example_version")
@@ -127,7 +131,7 @@ def register_reference_input(org_id: uuid.UUID, project_id: uuid.UUID, binding_i
 
 
 def _register_input(org_id, project_id, binding_id, *, key, request, example_id,
-                    example_version, source, source_kind):
+                    example_version, source, source_kind, conn=None):
     input_sha = digest(request)
     fingerprint = digest({**source, "input_sha256": input_sha})
 
@@ -174,7 +178,150 @@ def _register_input(org_id, project_id, binding_id, *, key, request, example_id,
                  "example": example_id, "example_version": example_version,
                  "digest": input_sha, "request": canonical_text(request)})
             return _input_response({**cur.fetchone(), "provenance": provenance})
+    return operation(conn) if conn is not None else run_transaction(operation, isolation="serializable")
+
+
+def _registered_row(cur, org_id, project_id, version_id):
+    cur.execute(
+        "SELECT i.*, v.provenance FROM arlo_lab_inputs i "
+        "JOIN drawing_versions v ON v.version_id = i.input_version_id "
+        "AND v.org_id = i.org_id AND v.project_id = i.project_id "
+        "WHERE i.org_id = %(org)s AND i.project_id = %(project)s "
+        "AND i.input_version_id = %(version)s AND v.deleted_at IS NULL",
+        {"org": org_id, "project": project_id, "version": version_id})
+    row = cur.fetchone()
+    if row is None:
+        raise lifecycle.LifecycleUnavailable("ARLO input not found")
+    _input_response(row)  # Verify the immutable bytes before using their lineage.
+    return row
+
+
+def _active_input(cur, org_id, project_id, original_id):
+    # Only this project-file pointer changes; input rows and job receipts never do.
+    path = f"arlo/inputs/{original_id}/active.json"
+    cur.execute(
+        "SELECT content FROM project_files WHERE org_id = %(org)s "
+        "AND project_id = %(project)s AND path = %(path)s",
+        {"org": org_id, "project": project_id, "path": path})
+    row = cur.fetchone()
+    if row is None:
+        return original_id
+    try:
+        return uuid.UUID(json.loads(row["content"])["input_version_id"])
+    except (ValueError, TypeError, KeyError, AttributeError):
+        raise lifecycle.LifecycleConflict("ARLO active input reference is invalid.") from None
+
+
+def read_input(org_id, project_id, binding_id, input_version_id):
+    def operation(conn):
+        with conn.cursor() as cur:
+            _scope(cur, org_id, project_id, binding_id, write=False)
+            base = _input_response(_registered_row(cur, org_id, project_id, input_version_id))
+            original_id = uuid.UUID(base["original_id"])
+            active = _active_input(cur, org_id, project_id, original_id)
+            result = _input_response(_registered_row(cur, org_id, project_id, active))
+            if result["original_id"] != str(original_id):
+                raise lifecycle.LifecycleConflict("ARLO active input lineage mismatch")
+            return result
     return run_transaction(operation, isolation="serializable")
+
+
+def _patch_constraints(request, patch):
+    if not isinstance(patch, dict) or not patch or set(patch) - {"requirements", "budget"}:
+        raise ValueError("Only requirements and budget constraints can be revised.")
+    changed = json.loads(canonical_text(request))
+    for group, fields in patch.items():
+        if not isinstance(fields, dict) or not fields:
+            raise ValueError(f"{group} must contain numeric constraint fields.")
+        for name, value in fields.items():
+            prior = request.get(group, {}).get(name)
+            label = f"{group}.{name}"
+            if isinstance(prior, bool) or not isinstance(prior, (int, float)):
+                raise ValueError(f"{label} is not an editable numeric constraint.")
+            try:
+                finite = not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value)
+            except OverflowError:
+                finite = False
+            if not finite:
+                raise ValueError(f"{label} must be a finite number.")
+            positive = group == "budget" or name in {"diameter_m", "max_support_span_m"}
+            if value < 0 or (positive and value == 0):
+                raise ValueError(f"{label} must be {'greater than zero' if positive else 'nonnegative'}.")
+            if group == "budget" and name != "timeout_seconds" and not float(value).is_integer():
+                raise ValueError(f"{label} must be a whole number.")
+            changed[group][name] = int(value) if group == "budget" and name != "timeout_seconds" else value
+    return changed
+
+
+def revise_input(org_id, project_id, binding_id, input_version_id, *, patch=None,
+                 restore=False, idempotency_key):
+    """Atomically append a constraint revision (or select the root) and move its pointer."""
+    from solver_adapters.arlo_design import _validated_input
+
+    key = lifecycle._validate_idempotency_key(idempotency_key)
+    def operation(conn):
+        with conn.cursor() as cur:
+            _scope(cur, org_id, project_id, binding_id, write=True)
+            fingerprint = digest({"input_version_id": str(input_version_id), "patch": patch, "restore": restore})
+            parent = _registered_row(cur, org_id, project_id, input_version_id)
+            original_id = uuid.UUID(_input_response(parent)["original_id"])
+            original = _registered_row(cur, org_id, project_id, original_id)
+            replay = lifecycle._receipt_replay(cur, org_id, project_id, "file_put", key, fingerprint)
+            if replay is not None:
+                return _input_response(_registered_row(cur, org_id, project_id,
+                                                       uuid.UUID(replay["input_version_id"])))
+            if _active_input(cur, org_id, project_id, original_id) != input_version_id:
+                raise lifecycle.LifecycleConflict("The active ARLO input changed. Reopen constraints and try again.")
+            if restore:
+                result = _input_response(original)
+            else:
+                request = _patch_constraints(json.loads(parent["request_json"]), patch)
+                _validated_input(request, {"org_id": org_id, "project_id": project_id,
+                                           "input_version_id": input_version_id})
+                if len(canonical_text(request).encode("utf-8")) > MAX_INPUT_BYTES:
+                    raise ValueError("Revised ARLO input exceeds its size limit.")
+                if request == json.loads(original["request_json"]):
+                    result = _input_response(original)
+                else:
+                    source = {name: parent["provenance"][name] for name in
+                              ("contract", "material_id", "original_sha256", "example_id", "example_version")
+                              if name in parent["provenance"]}
+                    source.update(parent_id=str(input_version_id), original_id=str(original_id))
+                    result = _register_input(org_id, project_id, binding_id, key=key, request=request,
+                        example_id=parent["example_id"], example_version=parent["example_version"],
+                        source=source, source_kind=parent["provenance"]["source_kind"], conn=conn)
+            content = canonical_text({"input_version_id": result["input_version_id"]})
+            cur.execute(
+                "INSERT INTO project_files (file_id,org_id,project_id,path,media_type,content,"
+                "content_sha256,created_by_binding_id) VALUES (%(file)s,%(org)s,%(project)s,"
+                "%(path)s,'application/json',%(content)s,%(sha)s,%(actor)s) "
+                "ON CONFLICT ON CONSTRAINT project_files_scope_path_unique DO UPDATE SET "
+                "content=EXCLUDED.content, content_sha256=EXCLUDED.content_sha256, "
+                "revision=project_files.revision+1, updated_at=NOW()",
+                {"file": uuid.uuid4(), "org": org_id, "project": project_id,
+                 "path": f"arlo/inputs/{original_id}/active.json", "content": content,
+                 "sha": hashlib.sha256(content.encode()).hexdigest(), "actor": binding_id})
+            lifecycle._write_receipt(cur, org_id, project_id, binding_id, "file_put", key,
+                                     fingerprint, {"input_version_id": result["input_version_id"]})
+            return result
+    return run_transaction(operation, isolation="serializable")
+
+
+def _same_json_value(left: Any, right: Any) -> bool:
+    """Compare JSON values without treating number spelling as request content."""
+    if type(left) in (int, float) and type(right) in (int, float):
+        # Browsers serialize 180.0 as 180. Use exact decimal values, without a
+        # tolerance, and exclude bool (a subclass of int in Python).
+        return Decimal(str(left)) == Decimal(str(right))
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(
+            _same_json_value(value, right[key]) for key, value in left.items())
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _same_json_value(a, b) for a, b in zip(left, right))
+    return left == right
 
 
 def load_registered_request(job_context: dict, submitted_params: dict) -> dict:
@@ -205,13 +352,18 @@ def load_registered_request(job_context: dict, submitted_params: dict) -> dict:
     if expected_contract == REFERENCE_CONTRACT:
         source = {"contract": REFERENCE_CONTRACT, "material_id": row["example_version"],
                   "original_sha256": provenance.get("original_sha256")}
+        if "parent_id" in provenance:
+            source.update(parent_id=provenance["parent_id"], original_id=provenance["original_id"])
         if provenance.get("source_kind") != "project_reference" \
                 or provenance.get("material_id") != source["material_id"] \
                 or digest({**source, "input_sha256": row["input_sha256"]}) != row["import_fingerprint"]:
             raise ValueError("registered ARLO reference provenance mismatch")
     response = _input_response(row)
-    if digest(submitted_params) != row["input_sha256"]:
+    canonical_text(submitted_params)  # Reject non-JSON or non-finite values.
+    if not _same_json_value(submitted_params, response["request"]):
         raise ValueError("ARLO request differs from its registered immutable input")
+    # The hash-verified stored bytes remain authoritative for execution, even
+    # when the browser used an equivalent spelling for a JSON number.
     return response["request"]
 
 

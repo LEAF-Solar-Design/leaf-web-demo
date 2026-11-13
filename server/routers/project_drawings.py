@@ -306,11 +306,13 @@ async def project_initial_solar_layout_route(project_id: UUID, request: Request,
 @router.get("/api/projects/{project_id}/drawings/{drawing_id}/versions/{parent_version_id}/solar-layout")
 def project_solar_layout_source_route(project_id: UUID, drawing_id: UUID, parent_version_id: UUID,
         tenant=Depends(deps.require_active_tenant),
-        x_org_id: Optional[UUID] = Header(default=None), x_project_id: Optional[UUID] = Header(default=None)):
+        x_org_id: Optional[UUID] = Header(default=None), x_project_id: Optional[UUID] = Header(default=None),
+        frame_offset: Optional[int] = None):
     import project_solar_materialization as layout
     def operation():
         _headers(tenant, project_id, x_org_id, x_project_id)
-        return layout.current_layout_source(tenant, project_id, drawing_id, parent_version_id)
+        return layout.current_layout_source(tenant, project_id, drawing_id, parent_version_id,
+                                            frame_offset=frame_offset)
     return _editor_dispatch(operation)
 
 

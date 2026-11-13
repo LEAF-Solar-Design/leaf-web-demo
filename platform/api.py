@@ -98,6 +98,11 @@ class RegisterArloExampleBody(BaseModel):
     example_version: str = Field(min_length=1, max_length=32)
 
 
+class ReviseArloInputBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    patch: Dict[str, Any]
+
+
 class CreateBlankProjectBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -893,6 +898,34 @@ def register_arlo_reference(project_id: uuid.UUID, material_id: uuid.UUID,
         actor.org_id, project_id, actor.binding_id, material_id=material_id,
         idempotency_key=idempotency_key))
     return JSONResponse(result, status_code=201, headers={"Cache-Control": "private, no-store"})
+
+
+@router.get("/projects/{project_id}/arlo-inputs/{input_version_id}")
+def get_arlo_input(project_id: uuid.UUID, input_version_id: uuid.UUID,
+                   actor: _LifecycleActor = Depends(_get_lifecycle_actor)):
+    result = _lifecycle_response(lambda: arlo_lab.read_input(
+        actor.org_id, project_id, actor.binding_id, input_version_id))
+    return JSONResponse(result, headers={"Cache-Control": "private, no-store"})
+
+
+@router.post("/projects/{project_id}/arlo-inputs/{input_version_id}/revisions", status_code=201)
+def revise_arlo_input(project_id: uuid.UUID, input_version_id: uuid.UUID, body: ReviseArloInputBody,
+                      idempotency_key: str = Header(alias="Idempotency-Key"),
+                      actor: _LifecycleActor = Depends(_get_lifecycle_actor)):
+    result = _lifecycle_response(lambda: arlo_lab.revise_input(
+        actor.org_id, project_id, actor.binding_id, input_version_id,
+        patch=body.patch, idempotency_key=idempotency_key))
+    return JSONResponse(result, status_code=201, headers={"Cache-Control": "private, no-store"})
+
+
+@router.post("/projects/{project_id}/arlo-inputs/{input_version_id}/restore")
+def restore_arlo_input(project_id: uuid.UUID, input_version_id: uuid.UUID,
+                       idempotency_key: str = Header(alias="Idempotency-Key"),
+                       actor: _LifecycleActor = Depends(_get_lifecycle_actor)):
+    result = _lifecycle_response(lambda: arlo_lab.revise_input(
+        actor.org_id, project_id, actor.binding_id, input_version_id,
+        restore=True, idempotency_key=idempotency_key))
+    return JSONResponse(result, headers={"Cache-Control": "private, no-store"})
 
 
 @router.get("/projects/{project_id}/arlo-jobs/{job_id}")

@@ -71,17 +71,19 @@ def facts():
                 allocator_release_confirmed=True, screenshot_sha256=hashlib.sha256(png()).hexdigest())
 
 
-@pytest.fixture
-def native_package():
+@pytest.fixture(params=['create', 'edit'])
+def native_package(request):
     """Authored-source-shaped fixture only, not model or SDK execution evidence."""
     data = b'{"complete":"input values"}\n'
     files = {'project.yml':('100644',worker.NATIVE_PROJECT_SPEC.replace('${bundleId}','private.leaf.project.p'+PROJECT.replace('-','')).encode()),
         'Sources/LeafProjectApp.swift':('100644',worker.NATIVE_APP_SOURCE.encode()),
         'Sources/ContentView.swift':('100644',b'import SwiftUI\nstruct ContentView: View { var body: some View { Text("Input") } }\n'),
         'Resources/Input/'+MID+'.json':('100644',data)}
+    if request.param == 'edit':
+        files['Sources/ContentView.swift'] = ('100644', files['Sources/ContentView.swift'][1].replace(b'Input', b'Revised input'))
     d = dict(schema=worker.NATIVE_SCHEMA,target='ios-simulator',source_profile=worker.NATIVE_PROFILE,
         org_id=ORG,project_id=PROJECT,actor_binding_id=ACTOR,repo_key=OWNER,source_request_id=JOB,
-        source_operation='create',source_version=4,receipt_digest='a'*64,source_commit='b'*40,
+        source_operation=request.param,source_version=4,receipt_digest='a'*64,source_commit='b'*40,
         source_tree=worker.native_tree(files),material_refs=[dict(material_id=MID,
             sha256=hashlib.sha256(data).hexdigest(),byte_size=len(data),path='Resources/Input/'+MID+'.json')],
         bundle_sha256='c'*64,archive_sha256='0'*64,byte_size=1)
@@ -103,6 +105,26 @@ def test_native_package_is_complete_tree_and_matches_captured_profile(native_pac
     assert worker.NATIVE_PROJECT_SPEC==re.search(r'"project.yml": `(.*?)`,',profile,re.S).group(1)
 
 
+def test_native_edit_cannot_omit_retained_input_provenance(native_package):
+    import copy
+    import uuid
+    raw, job = copy.deepcopy(native_package)
+    descriptor = job['descriptor']
+    files = worker.verify_native_archive(raw, descriptor)
+    mid, data = str(uuid.uuid4()), b'Another retained original\n'
+    path = 'Resources/Input/'+mid+'.txt'
+    files[path] = ('100644', data)
+    descriptor.update(source_operation='edit', source_tree=worker.native_tree(files))
+    descriptor['material_refs'].append(dict(material_id=mid, sha256=hashlib.sha256(data).hexdigest(),
+        byte_size=len(data), path=path))
+    raw = worker.native_archive(files, descriptor)
+    descriptor.update(archive_sha256=hashlib.sha256(raw).hexdigest(), byte_size=len(raw))
+    assert worker.verify_source(raw, descriptor) == raw
+    descriptor['material_refs'].pop()
+    with pytest.raises(worker.WorkerError, match='source-integrity'):
+        worker.verify_source(raw, descriptor)
+
+
 @pytest.mark.parametrize('kind',['profile','foreign','hash','tree','empty-material','oversize-material','operation','corrupt'])
 def test_native_refusal_precedes_allocator(native_package,monkeypatch,kind):
     import copy
@@ -114,7 +136,7 @@ def test_native_refusal_precedes_allocator(native_package,monkeypatch,kind):
     elif kind=='tree':d['source_tree']='f'*40
     elif kind=='empty-material':d['material_refs']=[]
     elif kind=='oversize-material':d['material_refs'][0]['byte_size']=1048577
-    elif kind=='operation':d['source_operation']='edit'
+    elif kind=='operation':d['source_operation']='rollback'
     else:raw=b'corrupt ZIP'
     monkeypatch.setattr(mac,'canonical_allocator',lambda:pytest.fail('allocator reached'))
     if kind=='foreign':
@@ -123,8 +145,9 @@ def test_native_refusal_precedes_allocator(native_package,monkeypatch,kind):
         with pytest.raises(worker.WorkerError):mac.MacAdapter()(raw,job,types.SimpleNamespace())
 
 
-def test_native_worker_completion_carries_sdk_identity(native_package,tmp_path):
+def test_native_worker_completion_carries_sdk_identity(native_package,tmp_path,monkeypatch):
     raw,job=native_package
+    monkeypatch.setattr(worker, 'producer', lambda: pytest.fail('native source must not re-import Portfolio'))
     http=Transport(native_package)
     bundle='private.leaf.project.p'+PROJECT.replace('-','')
     result_facts=dict(facts(),bundle_id=bundle,build_artifact=dict(source=worker.native_identity(job['descriptor']),
@@ -152,6 +175,7 @@ def test_native_recovery_projection_preserves_source_and_rejects_drift(native_pa
 @pytest.mark.parametrize('fail_install',[False,True,'xcodegen-unavailable'])
 def test_native_driver_generates_fixed_project_builds_and_hashes_copied_app(native_package,tmp_path,capsys,fail_install):
     raw,job=native_package
+    expected_files = worker.verify_native_archive(raw, job['descriptor'])
     owned,derived,internal=tmp_path/'owned',tmp_path/'derived',tmp_path/'internal'
     owned.mkdir()
     commands=[]
@@ -165,6 +189,8 @@ def test_native_driver_generates_fixed_project_builds_and_hashes_copied_app(nati
         if argv[0]=='/Users/evanhaug/xcodegen/xcodegen/bin/xcodegen':
             assert argv==['/Users/evanhaug/xcodegen/xcodegen/bin/xcodegen','generate','--spec','project.yml']
             assert cwd==owned/'source'
+            assert (cwd/'Sources/ContentView.swift').read_bytes() == expected_files['Sources/ContentView.swift'][1]
+            assert (cwd/('Resources/Input/'+MID+'.json')).read_bytes() == expected_files['Resources/Input/'+MID+'.json'][1]
             if fail_install=='xcodegen-unavailable':raise FileNotFoundError('fixed managed XcodeGen unavailable')
         elif argv[0]=='/usr/bin/xcodebuild':
             assert argv[argv.index('-project')+1]=='LeafProject.xcodeproj'
@@ -419,7 +445,8 @@ def test_origin_pinned(origin):
     ('POST', 'claim', {}), ('GET', 'job/source?attempt=1', None),
     ('POST', 'job/heartbeat', {}), ('POST', 'job/complete', {}),
 ])
-def test_http_product_user_agent(method, suffix, body):
+def test_http_product_user_agent(method, suffix, body, monkeypatch):
+    monkeypatch.setattr(worker, 'producer', lambda: pytest.fail('bounded native requests must not import Portfolio'))
     class Response:
         status = 200
         def __enter__(self): return self

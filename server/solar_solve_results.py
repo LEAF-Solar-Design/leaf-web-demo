@@ -97,10 +97,10 @@ def _upstream_basis(graph, tables):
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
 
 
-def _frame_request(graph, frame_ref, request):
+def _frame_request(graph, frame_ref, request, *, request_model=StringerRequest):
     """Bind original (not truncated) cells to application-owned panel ids."""
     try:
-        parsed = StringerRequest.model_validate(request)
+        parsed = request_model.model_validate(request)
         frame = next(f for f in graph["frames"] if f["id"] == frame_ref)
         panels = {p["id"]: p for p in graph["panels"]}
         if (len(parsed.grid.Rows) != frame["module_rows"]
@@ -127,7 +127,7 @@ def _frame_request(graph, frame_ref, request):
 
 
 def bind_request(graph, request, *, expected_rev, frame_ref, tenant_id, job_id,
-                 phase="initial"):
+                 phase="initial", request_model=StringerRequest):
     """Capture before submission, then persist with the authenticated job.
 
     tenant_id and job_id come from the broker, never from caller parameters.
@@ -139,7 +139,7 @@ def bind_request(graph, request, *, expected_rev, frame_ref, tenant_id, job_id,
             or any(type(v) is not str or not 1 <= len(v) <= 256
                    for v in (tenant_id, job_id))):
         raise GraphValidationError("INVALID_SOLVE_BINDING")
-    frame, parsed = _frame_request(graph, frame_ref, request)
+    frame, parsed = _frame_request(graph, frame_ref, request, request_model=request_model)
     if phase == "background" and not frame["extra"].get("solve", {}).get("initial_complete"):
         raise GraphValidationError("INITIAL_SOLVE_REQUIRED")
     return {"source_rev": graph["rev"], "source_hash": graph["source_hash"],

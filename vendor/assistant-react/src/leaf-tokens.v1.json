@@ -154,13 +154,14 @@
       }
     },
     "studio": {
-      "label": "Studio chrome, blue active accent; existing command green remains a separate role",
-      "font": { "sans": "system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif", "mono": "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace", "label": "system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" },
+      "label": "Studio chrome on Leaf standard v1.2 Stage: Inter Tight, accent #28d66f; command shares the accent",
+      "font": { "sans": "'Inter Tight', system-ui, -apple-system, 'Segoe UI', sans-serif", "mono": "'IBM Plex Mono', ui-monospace, 'Cascadia Mono', monospace", "label": "'Inter Tight', system-ui, -apple-system, 'Segoe UI', sans-serif" },
+      "type": { "section_label": { "size_px": 12 } },
       "spacing": { "chrome-gap": "2px", "control-gap": "8px", "panel-padding": "16px", "target-min": "44px" },
       "radius": { "control": "0.5rem", "panel": "0.5rem", "chrome": "3px" },
       "color": {
-        "light": { "bg": "#2a2a2a", "background": "#2a2a2a", "foreground": "#e2e2e2", "surface": "#232323", "border": "#424242", "primary": "#1390cc", "success": "#04b255", "command": "#04b255", "data-series-1": "#2f6f9f", "data-series-2": "#146c43", "data-series-3": "#95590a", "data-series-4": "#6d5bd0", "data-series-5": "#64748b" },
-        "dark": { "bg": "#2a2a2a", "background": "#2a2a2a", "foreground": "#e2e2e2", "surface": "#232323", "border": "#424242", "primary": "#1390cc", "success": "#04b255", "command": "#04b255", "data-series-1": "#5b9bd5", "data-series-2": "#4cc38a", "data-series-3": "#e0a94b", "data-series-4": "#9b87e8", "data-series-5": "#9aa1ac" }
+        "light": { "bg": "#050706", "background": "#050706", "foreground": "#f4f4f5", "surface": "#0e110f", "border": "#262a27", "primary": "#28d66f", "success": "#28d66f", "command": "#28d66f", "data-series-1": "#2f6f9f", "data-series-2": "#146c43", "data-series-3": "#95590a", "data-series-4": "#6d5bd0", "data-series-5": "#64748b" },
+        "dark": { "bg": "#050706", "background": "#050706", "foreground": "#f4f4f5", "surface": "#0e110f", "border": "#262a27", "primary": "#28d66f", "success": "#28d66f", "command": "#28d66f", "data-series-1": "#5b9bd5", "data-series-2": "#4cc38a", "data-series-3": "#e0a94b", "data-series-4": "#9b87e8", "data-series-5": "#9aa1ac" }
       },
       "theme_note": "Studio chrome retains its dark shell in both application themes. Each theme explicitly pins data roles independently of primary and success."
     }

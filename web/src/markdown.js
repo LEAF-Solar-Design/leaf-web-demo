@@ -18,6 +18,27 @@ const FENCE_RE = /^```(\S*)\s*$/
 const HEADING_RE = /^(#{1,6})\s+(.*)$/
 const BULLET_RE = /^[-*]\s+(.*)$/
 const ORDERED_RE = /^(\d+)[.)]\s+(.*)$/
+const TABLE_DELIMITER_RE = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/
+
+function splitTableRow(line) {
+  const row = line.trim().slice(1)
+  const cells = ['']
+  let trailingPipe = false
+  for (let i = 0; i < row.length; i += 1) {
+    trailingPipe = false
+    if (row[i] === '\\' && row[i + 1] === '|') {
+      cells[cells.length - 1] += '|'
+      i += 1
+    } else if (row[i] === '|') {
+      cells.push('')
+      trailingPipe = true
+    } else {
+      cells[cells.length - 1] += row[i]
+    }
+  }
+  if (trailingPipe) cells.pop()
+  return cells.map((cell) => cell.trim())
+}
 
 // Only these schemes may become an href. A model can write any string it likes
 // into a link target, so `javascript:` (and data:, vbscript:, …) must never
@@ -29,6 +50,8 @@ export function parseMarkdown(text) {
   const src = typeof text === 'string' ? text : ''
   if (!src) return []
   const lines = src.replace(/\r\n?/g, '\n').split('\n')
+  const startsTable = (index) => lines[index].trim().startsWith('|') &&
+    index + 1 < lines.length && TABLE_DELIMITER_RE.test(lines[index + 1])
   const blocks = []
   let i = 0
 
@@ -81,12 +104,27 @@ export function parseMarkdown(text) {
       continue
     }
 
+    if (startsTable(i)) {
+      const header = splitTableRow(line).map(parseInline)
+      const rows = []
+      i += 2
+      while (i < lines.length && lines[i].trim().startsWith('|')) {
+        if (rows.length < 200) {
+          const cells = splitTableRow(lines[i])
+          rows.push(Array.from({ length: header.length }, (_, j) => parseInline(cells[j] ?? '')))
+        }
+        i += 1
+      }
+      blocks.push({ type: 'table', header, rows })
+      continue
+    }
+
     // Paragraph: consecutive non-blank lines that start no other block.
     const para = []
     while (i < lines.length) {
       const next = lines[i]
       if (!next.trim() || FENCE_RE.test(next) || HEADING_RE.test(next) ||
-          BULLET_RE.test(next) || ORDERED_RE.test(next)) break
+          BULLET_RE.test(next) || ORDERED_RE.test(next) || startsTable(i)) break
       para.push(next)
       i += 1
     }

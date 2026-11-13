@@ -679,10 +679,11 @@ def ready() -> JSONResponse:
     )
 
 
-from routers import service_browser_auth
+from routers import integration_browser, service_browser_auth
 from service_browser_sessions import ServiceBrowserSessionMiddleware
 
 app.include_router(service_browser_auth.router)
+app.include_router(integration_browser.router)
 app.add_middleware(ServiceBrowserSessionMiddleware)
 
 # Last-added is outermost among the application's own middleware, including

@@ -6,6 +6,7 @@ afterEach(cleanup)
 const project = { project_id: 'p1', name: 'Roof A' }
 const target = { projectId: 'p1', projectName: 'Roof A', fileName: 'site.dwg' }
 const upload = { policy: { enabled: true }, phase: 'idle' }
+const drawingVersion = { version_id: 'v1', drawing_id: 'd1', project_id: 'p1', org_id: 'o1', seq: 2 }
 
 it('B3 row8 renders phase sentences, retry, disabled intake and material lists', () => {
   const retry = vi.fn()
@@ -21,8 +22,9 @@ it('B3 row8 renders phase sentences, retry, disabled intake and material lists',
   expect(screen.getByText('Attaching to Roof A')).toBeTruthy()
   rerender(<ProjectMaterialIntake project={project} upload={upload} intake={{ phase: 'pending', target, beginRefused: 'Wait for the current upload to finish.' }} />)
   expect(screen.getByText('Wait for the current upload to finish.')).toBeTruthy()
-  rerender(<ProjectMaterialIntake project={{ name: 'Roof B' }} upload={upload} intake={{ phase: 'attached', target, drawing: { name: 'site.dwg', version: 2 } }} />)
+  rerender(<ProjectMaterialIntake project={{ name: 'Roof B' }} upload={upload} intake={{ phase: 'attached', target, drawing: drawingVersion }} />)
   expect(screen.getByText('Attached site.dwg as version 2 to Roof A')).toBeTruthy()
+  expect(screen.getByRole('status').textContent).not.toContain('undefined')
   rerender(<ProjectMaterialIntake project={project} upload={upload} intake={{ phase: 'attach-failed', target, error: 'Import unavailable.' }} onRetry={retry} />)
   expect(screen.getByRole('status').textContent).toBe('Import unavailable.')
   fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
@@ -39,6 +41,12 @@ it('B3 row8 renders phase sentences, retry, disabled intake and material lists',
   expect(screen.getByText('Survey')).toBeTruthy()
   expect(screen.getByText('ready')).toBeTruthy()
   expect(screen.getByText(new Date(created).toLocaleDateString())).toBeTruthy()
+})
+
+it.each([undefined, null])('omits the attached version clause when seq is %s', (seq) => {
+  render(<ProjectMaterialIntake project={project} upload={upload} intake={{ phase: 'attached', target, drawing: { ...drawingVersion, seq } }} />)
+  expect(screen.getByRole('status').textContent).toBe('Attached site.dwg to Roof A')
+  expect(screen.getByRole('status').textContent).not.toContain('undefined')
 })
 
 it('B3 row9 forwards the selected file through the upload control', () => {

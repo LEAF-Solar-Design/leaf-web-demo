@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { scaleTimeout } from '../testTimeScale.js'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -53,7 +54,7 @@ const findCanvas = () => waitFor(() => {
   const editor = document.querySelector('[data-canvas-editor]')
   expect(editor).toBeInTheDocument()
   return editor
-}, { timeout: 15000 })
+}, { timeout: scaleTimeout(15000) })
 const fakeEngine = {
   pending: new Set(),
   pendingCount() { return this.pending.size },
@@ -134,7 +135,7 @@ describe('Lab rail selection and tab visibility', () => {
     expect(surfaceContract('lab').toolbar.ribbon).toBe(false)
     expect(surfaceContract('lab').authoring).toBe(true)
     expect(surfaceContract('lab').entitlements).toEqual([])
-  }, 20000)
+  }, scaleTimeout(20000))
 
   it.each([subscribeBeforeLogout, subscribeUnauthorized])('hides immediately on sign-out and rejects an earlier authority probe: %s', async (subscribe) => {
     let resolveOld
@@ -161,7 +162,7 @@ describe('Lab rail selection and tab visibility', () => {
     await act(async () => {})
     expect(screen.getByRole('tab', { name: 'Lab' })).toBeInTheDocument()
     expect(fetchLabStatus).toHaveBeenCalledTimes(3)
-  }, 20000)
+  }, scaleTimeout(20000))
 
   it('invalidates the rail when another tab clears the session', async () => {
     fetchLabStatus.mockResolvedValue({ state: 'on', posture: 'local' })
@@ -191,7 +192,7 @@ it('starts no canvas import while the ground is hidden and imports once on first
   rerender(<LabGround active />)
   expect(container.querySelector('[data-canvas-editor]')).toBe(editor)
   expect(canvasImport).toHaveBeenCalledTimes(1)
-}, 20000)
+}, scaleTimeout(20000))
 
 it('retains the workbench and all views while propagating hidden', async () => {
   fetchLabStatus.mockResolvedValue({ state: 'on', posture: 'local' })
@@ -210,4 +211,4 @@ it('retains the workbench and all views while propagating hidden', async () => {
   expect(container.querySelector('.lab-workbench')).toBe(workbench)
   expect([...container.querySelectorAll('[data-lab-view]')]).toEqual(views)
   expect(fetchLabStatus).toHaveBeenCalledTimes(1)
-}, 20000)
+}, scaleTimeout(20000))

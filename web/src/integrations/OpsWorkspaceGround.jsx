@@ -7,6 +7,7 @@ import { DatasetElementV1, DatasetQueryV1 } from '../../../vendor/assistant-cont
 import { actionRunMatches, canonicalRecordsPointer, recordsAtOriginal, createIntegrationsClient, UUID } from './client.js'
 import { listProjectReferences, readProjectReferenceOriginal } from '../projects/api.js'
 import { IntegrationSetupPanel } from './IntegrationSetupPanel.jsx'
+import { DatasetDerivationPanel, DatasetDerivationEvidence, isImportedMaterialDataset } from './DatasetDerivationPanel.jsx'
 import { ManualWorkflowRunPanel } from './ManualWorkflowRunPanel.jsx'
 import { ManualWorkflowStartPanel } from './ManualWorkflowStartPanel.jsx'
 import { ManualWorkflowDefinitionPanel } from './ManualWorkflowDefinitionPanel.jsx'
@@ -24,11 +25,13 @@ import { humanizeError } from '../errorHumanize.js'
 const STUDIO_CHROME_OCCLUDERS = Object.freeze(STUDIO_DRAWING_OCCLUDERS.filter(([selector]) =>
   ['header.top', '#drafting-ribbon', '.bar.bar-command-line', 'footer.foot-bar'].includes(selector)))
 
-const empty = () => ({ scope: null, datasets: [], elements: [], datasetCursor: null, elementCursor: null, selected: null, read: null, action: null, historical: false, pending: '', error: '', notice: '' })
-const blankForm = () => ({ dataset: '', id: '', title: '', kind: 'table', columns: [], x: '', y: '', editing: null })
+const empty = () => ({ scope: null, datasets: [], elements: [], datasetCursor: null, elementCursor: null, selected: null, read: null, readIdentity: null, previousRead: false, action: null, historical: false, pending: '', error: '', errorOperation: null, notice: '' })
+const blankForm = () => ({ dataset: '', id: '', title: '', kind: 'table', columns: [], x: '', y: '', editing: null, window: '', query: null, grouping: false, pairKey: '', providerField: '', firstProvider: '', secondProvider: '' })
 const xKinds = ['date', 'instant', 'number', 'count']
 const yKinds = ['number', 'count', 'money', 'ratio', 'duration']
 const referenceKey = (ref) => JSON.stringify([ref.id, ref.version, ref.digest])
+const namedWindows = (dataset) => dataset?.derivation?.plan.kind === 'group_count' &&
+  dataset.fields.some(field => field.id === 'window_id' && field.type.kind === 'identifier') ? dataset.derivation.plan.windows : []
 export function scopeCacheIdentity(scope, generation) {
   return JSON.stringify([scope.tenantId, scope.projectId, scope.platformUserId, scope.bindingId, scope.projectRole, scope.externalAuthority, scope.externalSubject, generation])
 }
@@ -265,14 +268,15 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
     return context.current === ctx && !ctx.controller.signal.aborted && generation.current === ctx.generation &&
       (!now || (now.status === 'active' && now.generation === ctx.sessionGeneration))
   }
-  function fail(error, ctx) {
+  function fail(error, ctx, errorOperation = null) {
     if (!current(ctx) || error?.name === 'AbortError') return
     if (error?.status === 403) {
       invalidate()
       setState({ ...empty(), identity, error: 'You do not have permission to view these integrations.' })
       setForm(blankForm())
       setRevision('')
-    } else setState((old) => ({ ...old, pending: '', error: humanizeError(error), retryable: error?.retryable !== false && ![401, 403, 404, 409, 422].includes(error?.status) }))
+    } else setState((old) => ({ ...old, ...(error?.status === 401 ? { read: null, readIdentity: null, previousRead: false } : {}),
+      pending: '', error: humanizeError(error), errorOperation, retryable: error?.retryable !== false && ![401, 403, 404, 409, 422].includes(error?.status) }))
   }
   useLayoutEffect(() => {
     invalidate()
@@ -299,15 +303,15 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
     return invalidate
   }, [identity, retry, client])
 
-  async function operation(label, action, composing = false) {
+  async function operation(label, action, composing = false, owner = 'integrations') {
     const ctx = context.current
     if (!ctx || !current(ctx) || busy.current) return
     busy.current = true
-    setState((old) => ({ ...old, pending: label, error: '', notice: '' }))
+    setState((old) => ({ ...old, pending: label, error: '', errorOperation: null, notice: '' }))
     if (composing) setComposeError('')
     try { await action(ctx) } catch (error) {
       if (composing && current(ctx) && error?.name !== 'AbortError' && ![401, 403].includes(error?.status)) setComposeError(humanizeError(error))
-      else fail(error, ctx)
+      else fail(error, ctx, { owner, retry: () => operation(label, action, composing, owner) })
     }
     finally {
       if (current(ctx)) {
@@ -339,7 +343,16 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   async function guardSchedulePreview(signal) {
     const ctx = context.current
     if (!ctx || !current(ctx) || signal.aborted) throw new DOMException('Aborted', 'AbortError')
-    const scope = await client.getScope(projectId, { signal })
+    let scope
+    try { scope = await client.getScope(projectId, { signal }) }
+    catch (error) {
+      // The client also uses status 0 for scope validation failures, not just transport errors.
+      if (error?.status === 0 && error?.message === 'The integration response or request was invalid.') {
+        fail({ status: 403 }, ctx)
+        throw new DOMException('Aborted', 'AbortError')
+      }
+      throw error
+    }
     if (!current(ctx) || signal.aborted) throw new DOMException('Aborted', 'AbortError')
     if (scope.projectId !== projectId || !['owner', 'editor', 'reviewer', 'read_only'].includes(scope.projectRole) ||
         scopeCacheIdentity(scope, ctx.sessionGeneration) !== ctx.cacheIdentity) {
@@ -358,11 +371,24 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       setForm({ ...blankForm(), dataset: referenceKey(reference), columns: dataset.fields.map((field) => field.id) })
     } catch (error) { fail(error, ctx); throw error }
   }
+  async function adoptDerivedDataset(reference, signal) {
+    const ctx = context.current
+    if (!ctx || !current(ctx) || signal.aborted) return
+    const dataset = await client.getDataset(projectId, reference, { signal })
+    await guardWorkflow(signal)
+    if (!current(ctx) || signal.aborted) return
+    setState(old => ({ ...old, datasets: [...old.datasets.filter(item => referenceKey(item.reference) !== referenceKey(reference)), dataset] }))
+    // A completed materialization never overwrites an in-progress view draft.
+    setForm(old => old.dataset || old.id || old.title || old.editing ? old
+      : { ...old, dataset: referenceKey(reference), columns: dataset.fields.map(field => field.id) })
+  }
   async function readView(record, historical, ctx, cursor) {
     const request = ++viewGeneration.current
+    const readIdentity = JSON.stringify([ctx.cacheIdentity, record.revision, record.element])
+    const retain = state.readIdentity === readIdentity && state.read && ['ready', 'empty', 'partial', 'stale'].includes(state.read.status)
     ctx.action?.controller.abort()
     ctx.action = null
-    setState((old) => ({ ...old, selected: record, historical, read: null, action: null }))
+    setState((old) => ({ ...old, selected: record, historical, read: retain ? old.read : null, readIdentity, previousRead: Boolean(retain), action: null }))
     if (record.element.kind === 'integration.action') {
       if (historical || !['owner', 'editor'].includes(state.scope?.projectRole)) return
       const binding = { record, ctx, request, controller: new AbortController(), grantRevision: null, availability: 'unavailable' }
@@ -371,11 +397,32 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       await refreshAction(binding)
       return
     }
+    if (retain) {
+      await guardSchedulePreview(ctx.controller.signal)
+      if (!current(ctx) || request !== viewGeneration.current) return
+    }
     const read = await client.queryDataset(projectId, record.element.dataset_ref,
       DatasetQueryV1.parse({ ...record.element.query, ...(cursor ? { cursor } : {}) }), { signal: ctx.controller.signal })
     if (!current(ctx) || request !== viewGeneration.current) return
     if (read.status === 'forbidden') { fail({ status: 403 }, ctx); return }
-    setState((old) => ({ ...old, read }))
+    if (retain && ['failed', 'unavailable', 'invalid'].includes(read.status)) throw new Error('The dataset could not be loaded.')
+    setState((old) => ({ ...old, read, previousRead: false, error: '', errorOperation: null }))
+  }
+  function loadView(record, historical, cursor) {
+    operation(cursor ? 'Loading view data…' : 'Loading view…', (ctx) => readView(record, historical, ctx, cursor), false, 'view')
+  }
+  function retryView() {
+    if (state.errorOperation?.owner === 'view') state.errorOperation.retry()
+    else loadView(state.selected, state.historical)
+  }
+  function loadHistoricalRevision(selected, requestedRevision) {
+    operation('Loading historical recipe…', async (ctx) => {
+      setState((old) => ({ ...old, ...(requestedRevision !== selected.revision
+        ? { read: null, readIdentity: null, previousRead: false }
+        : { previousRead: Boolean(old.read && ['ready', 'empty', 'partial', 'stale'].includes(old.read.status)) }) }))
+      const record = await client.getElement(projectId, selected.element.id, { revision: requestedRevision, signal: ctx.controller.signal })
+      if (current(ctx)) { setForm(blankForm()); await readView(record, true, ctx) }
+    }, false, 'view')
   }
   const currentAction = (binding) => current(binding.ctx) && binding.ctx.action === binding &&
     viewGeneration.current === binding.request && !binding.controller.signal.aborted
@@ -467,7 +514,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       setRevision('')
       setForm(blankForm())
       await readView(record, false, ctx)
-    })
+    }, false, 'view')
   }
   function compose(event) {
     event.preventDefault()
@@ -479,9 +526,26 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       if (fields.some((id) => !dataset.fields.some((field) => field.id === id))) throw new Error('Select authorized fields.')
       if (form.kind === 'line' && (!xKinds.includes(dataset.fields.find((field) => field.id === form.x)?.type.kind) ||
         !yKinds.includes(dataset.fields.find((field) => field.id === form.y)?.type.kind))) throw new Error('Choose compatible line axes.')
+      const grouping = form.kind === 'table' && form.grouping ? {
+        kind: 'provider_pairs', pair_key_field: form.pairKey, provider_field: form.providerField,
+        providers: [form.firstProvider, form.secondProvider],
+      } : undefined
+      if (grouping && [form.pairKey, form.providerField].some(id => !fields.includes(id) ||
+        !['text', 'identifier'].includes(dataset.fields.find(field => field.id === id)?.type.kind))) {
+        throw new Error('Choose visible text or identifier columns for pair and provider fields.')
+      }
+      const windows = namedWindows(dataset)
+      if (form.window && !windows.some(window => window.id === form.window)) throw new Error('Select a declared window.')
+      const query = dataset.derivation ? { ...(form.query || { limit: 100 }), fields } : { fields, limit: 100 }
+      if (windows.length) {
+        const retained = (query.filters || []).filter(filter => !(filter.field === 'window_id' && filter.op === 'eq' && windows.some(window => window.id === filter.value)))
+        query.filters = [...retained, ...(form.window ? [{ field: 'window_id', op: 'eq', value: form.window }] : [])]
+        // Cursors are bound to the previous projection/filter, never a new selection.
+        delete query.cursor
+      }
       const parsed = DatasetElementV1.safeParse({ schema_version: 1, id: form.id, title: form.title.trim(),
-        dataset_ref: dataset.reference, query: { fields, limit: 100 }, kind: `dataset.${form.kind}`,
-        props: form.kind === 'table' ? { columns: fields, row_limit: 100 } : { x_field: form.x, y_field: form.y } })
+        dataset_ref: dataset.reference, query, kind: `dataset.${form.kind}`,
+        props: form.kind === 'table' ? { columns: fields, row_limit: 100, ...(grouping ? { row_grouping: grouping } : {}) } : { x_field: form.x, y_field: form.y } })
       if (!parsed.success) throw new Error('Enter a title, a stable lowercase slug ID, and valid fields.')
       if (!form.editing && state.elements.some((record) => record.element.id === form.id)) throw new Error('Select that saved view and choose Edit current recipe to update it.')
       const saved = await client.saveElement(projectId, parsed.data, { signal: ctx.controller.signal,
@@ -507,8 +571,13 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   function editSelected() {
     const saved = state.selected
     const element = saved.element
+    const dataset = state.datasets.find(item => referenceKey(item.reference) === referenceKey(element.dataset_ref))
+    const windows = namedWindows(dataset)
     setForm({ dataset: referenceKey(element.dataset_ref), id: element.id, title: element.title, kind: element.kind === 'dataset.table' ? 'table' : 'line',
-      columns: element.props.columns || [], x: element.props.x_field || '', y: element.props.y_field || '', editing: saved })
+      columns: element.props.columns || [], x: element.props.x_field || '', y: element.props.y_field || '', editing: saved,
+      grouping: Boolean(element.props.row_grouping), pairKey: element.props.row_grouping?.pair_key_field || '',
+      providerField: element.props.row_grouping?.provider_field || '', firstProvider: element.props.row_grouping?.providers[0] || '',
+      secondProvider: element.props.row_grouping?.providers[1] || '', query: element.query, window: element.query.filters?.find(filter => filter.field === 'window_id' && filter.op === 'eq' && windows.some(window => window.id === filter.value))?.value || '' })
   }
   function loadMore(resource) {
     operation('Loading more…', async (ctx) => {
@@ -531,6 +600,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   }
   const dataset = state.datasets.find((item) => referenceKey(item.reference) === form.dataset)
   const pending = Boolean(state.pending)
+  const viewError = state.error && state.read && state.previousRead && state.errorOperation?.owner === 'view'
   const message = mock ? 'Integrations are unavailable in demo mode.' : !signedIn ? 'Sign in to view integrations.' :
     !UUID.test(projectId || '') ? 'Open a project to view integrations.' : status !== 'active' ? 'An active session is required to view integrations.' : null
   return <section ref={boardRef} className="studio-ground-ops" data-ground="ops" hidden={!active && !leaving}
@@ -541,7 +611,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       {message ? <p role="status">{message}</p> : visible && <>
         <OpsHomePanel active={active} />
         <p role="status" aria-live="polite" tabIndex={-1} ref={resultRef}>{state.notice || state.pending}</p>
-        {state.error && <div role="alert"><p>{humanizeError(state.error)}</p>{state.retryable && <button onClick={() => setRetry((value) => value + 1)}>Retry integrations</button>}</div>}
+        {state.error && !viewError && <div role="alert"><p>{humanizeError(state.error)}</p>{state.retryable && <button disabled={pending} onClick={() => state.errorOperation ? state.errorOperation.retry() : setRetry((value) => value + 1)}>Retry integrations</button>}</div>}
         {state.scope && <details className="ops-advanced" open={!hasLinkedDevice}>
           <summary>Workflows and data</summary>
           {['owner', 'editor'].includes(state.scope.projectRole) && context.current && <WorkflowScheduleDraftBrowser
@@ -594,6 +664,11 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
               await guardSetup(signal)
               if (ctx && current(ctx) && !signal.aborted) setState((old) => ({ ...old, datasets: page.records, datasetCursor: page.nextCursor }))
             }} />}
+          {['owner', 'editor'].includes(state.scope.projectRole) && context.current && state.datasets.some(isImportedMaterialDataset) && <DatasetDerivationPanel
+            key={JSON.stringify(['dataset-derivation', identity.key, context.current.cacheIdentity])}
+            contextKey={context.current.cacheIdentity} projectId={projectId} client={client} datasets={state.datasets}
+            signal={context.current.controller.signal} guard={guardWorkflow} onCreated={adoptDerivedDataset}
+            onForbidden={() => { const ctx = context.current; if (ctx) fail({ status: 403 }, ctx) }} />}
           <section aria-label="Integration datasets"><h2>Datasets</h2>
             {!state.datasets.length && <p>{state.scope.projectRole === 'owner'
               ? 'No datasets are available yet. Use integration setup to connect your data.'
@@ -620,11 +695,24 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
               <label>Title<input required maxLength={120} value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} /></label>
               <label>Stable ID<input required maxLength={128} pattern="[a-z0-9]+((_|-)[a-z0-9]+)*" disabled={Boolean(form.editing)} value={form.id} onChange={(event) => setForm({ ...form, id: event.target.value })} /></label>
               <label>View type<select value={form.kind} onChange={(event) => setForm({ ...form, kind: event.target.value })}><option value="table">Table</option><option value="line">Line</option></select></label>
+              {namedWindows(dataset).length > 0 && <label>Named window<select value={form.window} onChange={event => setForm({ ...form, window: event.target.value })}>
+                <option value="">All windows</option>{namedWindows(dataset).map(window => <option key={window.id} value={window.id}>{window.id}{window.filters.length === 0 ? ' (all admitted history)' : ''}</option>)}
+              </select></label>}
               {form.kind === 'table' ? <fieldset><legend>Table columns</legend>{dataset?.fields.map((field) => <label key={field.id}><input type="checkbox" checked={form.columns.includes(field.id)} onChange={(event) => setForm({ ...form, columns: event.target.checked ? [...form.columns, field.id] : form.columns.filter((id) => id !== field.id) })} />{field.label}</label>)}</fieldset> : <>
                 {['x', 'y'].map((axis) => <label key={axis}>{axis.toUpperCase()} field<select required value={form[axis]} onChange={(event) => setForm({ ...form, [axis]: event.target.value })}>
                   <option value="">Select field</option>{dataset?.fields.filter((field) => (axis === 'x' ? xKinds : yKinds).includes(field.type.kind)).map((field) => <option key={field.id} value={field.id}>{field.label}</option>)}
                 </select></label>)}
               </>}
+              {form.kind === 'table' && <fieldset><legend>Provider pair presentation</legend>
+                <label><input type="checkbox" checked={Boolean(form.grouping)} onChange={event => setForm({ ...form, grouping: event.target.checked })} />Group verified provider pairs</label>
+                {form.grouping && <>
+                  <p>Pair rows only when their exact nonempty key and two provider labels match in a complete result. Other rows stay separate.</p>
+                  {[['pairKey', 'Pair key field'], ['providerField', 'Provider field']].map(([key, label]) => <label key={key}>{label}<select required value={form[key]} onChange={event => setForm({ ...form, [key]: event.target.value })}>
+                    <option value="">Select a visible field</option>{dataset?.fields.filter(field => form.columns.includes(field.id) && ['text', 'identifier'].includes(field.type.kind)).map(field => <option key={field.id} value={field.id}>{field.label}</option>)}
+                  </select></label>)}
+                  {[['firstProvider', 'First provider'], ['secondProvider', 'Second provider']].map(([key, label]) => <label key={key}>{label}<input required maxLength={120} value={form[key]} onChange={event => setForm({ ...form, [key]: event.target.value })} /></label>)}
+                </>}
+              </fieldset>}
               <button type="submit">{form.editing ? 'Update view' : 'Save view'}</button>
               {form.editing && <button type="button" onClick={() => setForm(blankForm())}>Create another view</button>}
             </fieldset>
@@ -638,14 +726,13 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
             </label>)}{preferenceError && <p role="alert">{preferenceError}</p>}
           </fieldset>
           {state.selected && <section aria-label="Selected native view">
+            {state.selected.element.kind !== 'integration.action' && <DatasetDerivationEvidence
+              dataset={state.datasets.find(item => referenceKey(item.reference) === referenceKey(state.selected.element.dataset_ref))} />}
             <p>Recipe revision {state.selected.revision}{state.historical ? ' · Historical recipe' : ''}. {state.selected.element.kind === 'integration.action'
               ? (state.historical ? 'Historical actions are read-only.' : 'Actions execute with current human authority.')
               : 'Views query live data; this is not an immutable evidence snapshot.'}</p>
             {state.selected.element.kind !== 'integration.action' && !state.historical && <button disabled={pending || !state.datasets.some((item) => referenceKey(item.reference) === referenceKey(state.selected.element.dataset_ref))} onClick={editSelected}>Edit current recipe</button>}
-            <form onSubmit={(event) => { event.preventDefault(); operation('Loading historical recipe…', async (ctx) => {
-              const record = await client.getElement(projectId, state.selected.element.id, { revision: Number(revision), signal: ctx.controller.signal })
-              if (current(ctx)) { setForm(blankForm()); await readView(record, true, ctx) }
-            }) }}><label>Earlier recipe revision<input type="number" min="1" step="1" required value={revision} onChange={(event) => setRevision(event.target.value)} /></label><button disabled={pending}>Read revision</button></form>
+            <form onSubmit={(event) => { event.preventDefault(); loadHistoricalRevision(state.selected, Number(revision)) }}><label>Earlier recipe revision<input type="number" min="1" step="1" required value={revision} onChange={(event) => setRevision(event.target.value)} /></label><button disabled={pending}>Read revision</button></form>
             {state.selected.element.kind === 'integration.action' ? <>
               {!state.historical && !['owner', 'editor'].includes(state.scope.projectRole) && <p role="status">You do not have permission to perform this action.</p>}
               {state.action && <>
@@ -660,10 +747,12 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
                 {state.action.availability !== 'ready' && <button disabled={pending} onClick={() => refreshAction(state.action.binding)}>Retry action authority</button>}
               </>}
             </> : <>
+            {state.read && state.previousRead && <p role="status">Previous result. {pending ? 'Refreshing view…' : 'The latest read failed; showing the last successful result.'}</p>}
+            {viewError && <div role="alert"><p>{humanizeError(state.error)}</p>{state.retryable && <button disabled={pending} onClick={retryView}>Retry view</button>}</div>}
             {(state.read || pending) && <DatasetElement element={state.selected.element} read={state.read} preferences={preferences} isLoading={pending}
-              onRetry={() => operation('Loading view…', (ctx) => readView(state.selected, state.historical, ctx))}
-              onLoadMore={(cursor) => operation('Loading view data…', (ctx) => readView(state.selected, state.historical, ctx, cursor))} />}
-            {!state.read && !pending && <button onClick={() => operation('Loading view…', (ctx) => readView(state.selected, state.historical, ctx))}>Retry view</button>}
+              onRetry={retryView}
+              onLoadMore={(cursor) => loadView(state.selected, state.historical, cursor)} />}
+            {!state.read && !pending && !viewError && <button onClick={retryView}>Retry view</button>}
             </>}
           </section>}
         </details>}

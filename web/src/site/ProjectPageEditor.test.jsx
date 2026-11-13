@@ -997,6 +997,47 @@ describe('portfolio project document', () => {
 })
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
+describe('page preview contact action', () => {
+  it.each(['https://example.test/contact', 'mailto:contact@example.test'])('allows normal activation of %s', href => {
+    const activation = vi.fn(), onSelectField = vi.fn()
+    const observe = event => {
+      activation(event.type, event.defaultPrevented)
+      // Observe the preview's behavior, then stop jsdom from navigating.
+      event.preventDefault()
+    }
+    render(<div onClick={observe} onAuxClick={observe}>
+      <PagePreview document={{ ...document, action: { label: 'Contact the team', href } }} onSelectField={onSelectField} />
+    </div>)
+    const link = screen.getByRole('link', { name: 'Contact the team' })
+    expect(link).toHaveAttribute('href', href)
+    if (href.startsWith('https:')) {
+      expect(link).toHaveAttribute('target', '_blank')
+      expect(link).toHaveAttribute('rel', 'noopener noreferrer')
+    } else {
+      expect(link).not.toHaveAttribute('target')
+      expect(link).not.toHaveAttribute('rel')
+    }
+    fireEvent.click(link)
+    fireEvent(link, new MouseEvent('auxclick', { bubbles: true, cancelable: true, button: 1 }))
+    expect(activation.mock.calls).toEqual([['click', false], ['auxclick', false]])
+    expect(onSelectField).not.toHaveBeenCalled()
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { label: 'Contact the team' },
+    ...['', 'https://', 'mailto:', 'mailto:no-domain', 'javascript:alert(1)', 'data:text/html,x',
+      'http://example.test', 'ftp://example.test', 'tel:1234567890', '//example.test'].map(href => ({ label: 'Contact the team', href })),
+  ])('renders an invalid or partial action as text: %j', action => {
+    const view = render(<PagePreview document={{ ...document, action: { label: action.label, href: 'https://example.test/contact' } }} />)
+    expect(screen.getByRole('link', { name: action.label })).toBeTruthy()
+    view.rerender(<PagePreview document={{ ...document, action }} />)
+    expect(screen.getByText(action.label)).toBeTruthy()
+    expect(screen.queryByRole('link')).toBeNull()
+    expect(view.container.querySelector('[href], [tabindex], button')).toBeNull()
+  })
+})
+
 describe('project page editor', () => {
   it('authors a contact action and preserves it through the saved page and revision export', async () => {
     const client = await vi.importActual('./projectPageClient.js')
@@ -1021,14 +1062,18 @@ describe('project page editor', () => {
     expect(label.value).toBe('')
     fireEvent.change(label, { target: { value: action.label } })
     expect(button('Save page').disabled).toBe(true)
+    expect(screen.getByText(action.label, { selector: '.project-page__action' })).toBeTruthy()
+    expect(screen.getByRole('alert')).toHaveTextContent('Enter a plain contact label and a valid HTTPS link or mailto address.')
     fireEvent.change(href, { target: { value: 'javascript:void(0)' } })
     expect(screen.queryByRole('link', { name: action.label })).toBeNull()
+    expect(screen.getByText(action.label, { selector: '.project-page__action' })).toBeTruthy()
+    expect(screen.getByRole('alert')).toHaveTextContent('Enter a plain contact label and a valid HTTPS link or mailto address.')
     expect(button('Save page').disabled).toBe(true)
     expect(fetch).toHaveBeenCalledTimes(1)
     fireEvent.change(href, { target: { value: action.href } })
     const link = screen.getByRole('link', { name: action.label })
     expect(link.getAttribute('href')).toBe(action.href)
-    expect(fireEvent.click(link)).toBe(false)
+    expect(link).not.toHaveAttribute('target')
     expect(fetch).toHaveBeenCalledTimes(1)
     fireEvent.click(button('Save page'))
     await waitFor(() => expect(button('Download Next.js source').disabled).toBe(false))
@@ -1209,6 +1254,34 @@ describe('project page editor', () => {
 })
 
 describe('saved portfolio iOS preview', () => {
+  it('native_saved_transition revokes an in-flight screenshot before publishing accepted saved source', async () => {
+    submitProjectNativePreview.mockResolvedValue(nativeJob('complete'))
+    loadProjectNativePreview.mockResolvedValue(nativeJob('complete'))
+    const observed = []
+    let signal
+    const view = setup({ onPreview: () => {
+      if (signal && saveProjectPage.mock.calls.length) observed.push(signal.aborted)
+    } })
+    await openPortfolio()
+    fireEvent.click(button('Build iOS preview'))
+    await screen.findByText('Ready · Saved revision 7')
+    const late = deferred()
+    downloadProjectNativePreviewScreenshot.mockReturnValueOnce(late.promise)
+    fireEvent.click(button('Check preview again'))
+    await waitFor(() => expect(downloadProjectNativePreviewScreenshot).toHaveBeenCalledTimes(2))
+    signal = downloadProjectNativePreviewScreenshot.mock.lastCall[2].signal
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Saved during screenshot refresh' } })
+    fireEvent.click(button('Save page'))
+    await screen.findByText('Saved')
+    expect(observed).toEqual([true])
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:page-source')
+    expect(screen.queryByRole('img', { name: /iOS simulator/ })).toBeNull()
+    await act(async () => late.resolve(new Blob(['obsolete screenshot'])))
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(1)
+    expect(button('Build iOS preview')).toBeEnabled()
+    view.unmount()
+  })
+
   it('submits the exact revision once, polls serially, and displays the authenticated screenshot', async () => {
     const pending = deferred()
     submitProjectNativePreview.mockReturnValueOnce(pending.promise)

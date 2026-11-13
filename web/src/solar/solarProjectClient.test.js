@@ -179,6 +179,28 @@ describe('project Solar transport and lifecycle', () => {
     expect(JSON.parse(init(fetchImpl).body)).toEqual({ source_artifact_id: 'a'.repeat(64), alignment_tolerance: 0.5, selection_order: 'recorded' })
   })
 
+  it('binds explicit SolarEdge choices to the existing report request and permits reset', async () => {
+    const data = edgeData(true), { client, fetchImpl } = setup(data)
+    const options = { sourceArtifactId: 'a'.repeat(64), alignmentTolerance: 0.5 }
+    expect((await client.reportSolarEdgePdf({ ...options, associations: { 'roof-east': 2 } })).ok).toBe(true)
+    expect(JSON.parse(init(fetchImpl).body)).toEqual({ source_artifact_id: options.sourceArtifactId,
+      alignment_tolerance: 0.5, selection_order: 'unknown', associations: { 'roof-east': 2 } })
+    expect((await client.reportSolarEdgePdf({ ...options, associations: {} })).ok).toBe(true)
+    expect(JSON.parse(init(fetchImpl).body).associations).toEqual({})
+    expect(fetchImpl.mock.calls.every(([url]) => url.endsWith('/imports/solaredge-pdf/report'))).toBe(true)
+  })
+
+  it('refuses invalid or oversized explicit SolarEdge choices before transport', async () => {
+    const { client, fetchImpl } = setup()
+    const oversized = Object.fromEntries(Array.from({ length: 80 }, (_, n) => [`frame-${'x'.repeat(65)}-${n}`, n]))
+    for (const associations of [null, [], { east: true }, { east: -1 }, { east: 0.5 },
+      { east: 1000001 }, { east: 0, west: 0 }, { '': 0 }, { ['x'.repeat(101)]: 0 }, oversized]) {
+      expect((await client.reportSolarEdgePdf({ sourceArtifactId: 'a'.repeat(64), alignmentTolerance: 1,
+        associations })).reason).toBe('SIP_R7_REQUEST_INVALID')
+    }
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
   it('refuses malformed or foreign canonical SolarEdge producers', async () => {
     const { client, fetchImpl } = setup()
     for (const data of [edgeData(false, { schema: 'leaf.solar-import-source.v1', source_version: 3 }),
