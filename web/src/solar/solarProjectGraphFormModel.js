@@ -29,6 +29,7 @@ export const PROJECT_SOLAR_GRAPH_REASONS = Object.freeze({
   group_numbers_invalid: 'Enter all three dimensions and tolerances as finite numbers greater than 0 and at most 1000000.',
   group_gap_invalid: 'Enter a gap distance as a finite number greater than 0, or leave it blank to group by angle.',
   group_geometry_invalid: 'Panel positions could not be read. Re-import the panels before grouping by gap.',
+  group_discovery_invalid: 'Use a Roof or Ground project and enter an outline offset and alignment tolerance greater than 0 and at most 1000000.',
   tool_unsupported: 'This tool has no project form in this view.',
   submit_unavailable: 'Project Solar submission is unavailable in this view.',
   run_in_progress: 'A Solar run is in progress. Wait for it to finish.',
@@ -70,6 +71,9 @@ export function projectSolarGraphReason(code, tool) {
   if (code == null) return null
   if (!boundedCode(code)) return PROJECT_SOLAR_GRAPH_REASONS.request_refused
   switch (code.toLowerCase()) {
+    case 'group_discovery_invalid':
+      if (tool !== 'solar-panel-groups') return PROJECT_SOLAR_GRAPH_REASONS.request_refused
+      return PROJECT_SOLAR_GRAPH_REASONS.group_discovery_invalid
     case 'no_panel_groups':
       if (tool !== 'solar-panel-groups') return PROJECT_SOLAR_GRAPH_REASONS.request_refused
       return PROJECT_SOLAR_GRAPH_REASONS.no_panel_groups
@@ -377,7 +381,22 @@ function foldGroupName(name) {
   return name.replace(/[^\u0131]+/gu, (text) => text.toUpperCase().toLowerCase()).replace(/ß/g, 'ss')
 }
 
-export function buildProjectSolarGraphRequest({ tool, binding, state, currentState, insertionPointText, groups,
+function validPanelGroupDiscovery(value) {
+  return value && Object.keys(value).length === 3 && ['Roof', 'Ground'].includes(value.InstallationDesign)
+    && ['BranchMaxOffset', 'AlignmentTolerance'].every((key) => typeof value[key] === 'number'
+      && Number.isFinite(value[key]) && value[key] > 0 && value[key] <= 1e6)
+}
+
+export function validatePanelGroupDiscovery(graph, numbers) {
+  const value = { InstallationDesign: graph?.project?.installation_design }
+  for (const key of ['BranchMaxOffset', 'AlignmentTolerance']) {
+    const raw = numbers?.[key]
+    value[key] = typeof raw === 'string' && DECIMAL.test(raw.trim()) ? Number(raw.trim()) : raw
+  }
+  return validPanelGroupDiscovery(value) ? { ok: true, value } : { ok: false, reason: 'group_discovery_invalid' }
+}
+
+export function buildProjectSolarGraphRequest({ tool, binding, state, currentState, insertionPointText, groups, discover,
   catalogDigest, idempotencyKey }) {
   const fail = (reason) => ({ ok: false, reason })
   try {
@@ -404,9 +423,15 @@ export function buildProjectSolarGraphRequest({ tool, binding, state, currentSta
   }
   const params = { drawing_id: exact.drawing_id, expected_rev: state.rev }
   if (tool === 'solar-panel-groups') {
-    if (!Array.isArray(groups) || !groups.length || groups.length > 128) return fail('request_invalid')
-    params.groups = groups
-  }
+    if (discover !== undefined) {
+      if (groups !== undefined || !validPanelGroupDiscovery(discover)) return fail('request_invalid')
+      params.discover = { BranchMaxOffset: discover.BranchMaxOffset,
+        AlignmentTolerance: discover.AlignmentTolerance, InstallationDesign: discover.InstallationDesign }
+    } else {
+      if (!Array.isArray(groups) || !groups.length || groups.length > 128) return fail('request_invalid')
+      params.groups = groups
+    }
+  } else if (discover !== undefined) return fail('request_invalid')
   if (tool === 'solar-schedule') {
     const parsed = parseProjectSolarInsertionPoint(insertionPointText)
     if (!parsed.ok) return parsed

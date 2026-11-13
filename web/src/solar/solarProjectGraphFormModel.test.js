@@ -7,7 +7,7 @@ import workerUnavailable from './__fixtures__/workerUnavailable.json'
 import { PROJECT_SOLAR_GRAPH_TOOLS, PROJECT_SOLAR_GRAPH_REASONS, projectSolarGraphReason,
   parseProjectSolarInsertionPoint, deriveProjectSolarGraphFormState, buildProjectSolarGraphRequest,
   exactProjectSolarGraphPreview, projectSolarGraphFeedback, panelGroupAngleKey, proposePanelGroups,
-  validatePanelGroups, panelHandleValid } from './solarProjectGraphFormModel.js'
+  validatePanelGroups, validatePanelGroupDiscovery, panelHandleValid } from './solarProjectGraphFormModel.js'
 
 const binding = { kind: 'project', organization_id: '11111111-1111-1111-1111-111111111111',
   project_id: '22222222-2222-2222-2222-222222222222', drawing_id: '33333333-3333-3333-3333-333333333333',
@@ -93,6 +93,36 @@ const panel = (id, angle = 0, changes = {}) => ({ id, angle, frame_ref: null,
 const groupGraph = () => ({ panels: [panel('b'), panel('a'), panel('d', 90), panel('c', 90)], frames: [] })
 const groupNames = [{ key: '0.0', name: ' Group 1 ' }, { key: '90.0', name: 'Group 2' }]
 const groupNumbers = { module_width_along_row: '2', module_height_across_row: '1', alignment_tolerance: '0.01' }
+
+it('S02 builds the explicit discovery contract without sending manual memberships', () => {
+  const checked = validatePanelGroupDiscovery({ project: { installation_design: 'Roof' } },
+    { BranchMaxOffset: '0.75', AlignmentTolerance: '0.05' })
+  expect(checked).toEqual({ ok: true, value: {
+    InstallationDesign: 'Roof', BranchMaxOffset: 0.75, AlignmentTolerance: 0.05 } })
+  const built = build({ tool: 'solar-panel-groups', discover: checked.value })
+  expect(built.ok).toBe(true)
+  expect(built.request.params).toEqual({ drawing_id: binding.drawing_id, expected_rev: 6,
+    discover: { BranchMaxOffset: 0.75, AlignmentTolerance: 0.05, InstallationDesign: 'Roof' } })
+  checked.value.BranchMaxOffset = 9
+  expect(built.request.params.discover.BranchMaxOffset).toBe(0.75)
+})
+
+it.each([0, -1, 1000001, Infinity, NaN, '', 'bad', '0x10', true])('S02 discovery refuses invalid numeric input %s', (value) => {
+  const graph = { project: { installation_design: 'Roof' } }
+  for (const key of ['BranchMaxOffset', 'AlignmentTolerance']) {
+    expect(validatePanelGroupDiscovery(graph, { BranchMaxOffset: 1, AlignmentTolerance: 0.1, [key]: value }))
+      .toEqual({ ok: false, reason: 'group_discovery_invalid' })
+  }
+})
+
+it('S02 discovery requires the pinned project design and cannot be mixed with groups or another tool', () => {
+  const discover = { BranchMaxOffset: 1, AlignmentTolerance: 0.1, InstallationDesign: 'Ground' }
+  expect(validatePanelGroupDiscovery({}, discover)).toEqual({ ok: false, reason: 'group_discovery_invalid' })
+  expect(build({ tool: 'solar-panel-groups', discover, groups: [] })).toEqual({ ok: false, reason: 'request_invalid' })
+  expect(build({ discover })).toEqual({ ok: false, reason: 'request_invalid' })
+  expect(build({ tool: 'solar-panel-groups', discover: { ...discover, panel_refs: ['a'] } }))
+    .toEqual({ ok: false, reason: 'request_invalid' })
+})
 
 it('W1C-26b accepts exactly the specified Python hexadecimal handle syntax', () => {
   for (const handle of ['1A', '1a', ' 1a ', '+1a', '-1a', '0x1A', '0X1a', '0x_1a', '1_a']) {
@@ -456,6 +486,7 @@ it('R13C-14 freezes local and status sentences', () => {
     group_numbers_invalid: 'Enter all three dimensions and tolerances as finite numbers greater than 0 and at most 1000000.',
     group_gap_invalid: 'Enter a gap distance as a finite number greater than 0, or leave it blank to group by angle.',
     group_geometry_invalid: 'Panel positions could not be read. Re-import the panels before grouping by gap.',
+    group_discovery_invalid: 'Use a Roof or Ground project and enter an outline offset and alignment tolerance greater than 0 and at most 1000000.',
     tool_unsupported: 'This tool has no project form in this view.',
     submit_unavailable: 'Project Solar submission is unavailable in this view.',
     run_in_progress: 'A Solar run is in progress. Wait for it to finish.',
@@ -487,7 +518,7 @@ it('R13C-14 freezes local and status sentences', () => {
     expect(sentence.length).toBeGreaterThanOrEqual(12)
     if (['no_panel_groups', 'too_many_groups', 'group_too_large', 'ambiguous_panel_handle',
       'panel_groups_stale', 'group_name_invalid', 'group_name_collision', 'group_numbers_invalid',
-      'group_gap_invalid', 'group_geometry_invalid'].includes(code)) {
+      'group_gap_invalid', 'group_geometry_invalid', 'group_discovery_invalid'].includes(code)) {
       expect(projectSolarGraphReason(code, 'solar-panel-groups')).toBe(sentence)
       expect(projectSolarGraphReason(code, 'solar-feeders')).toBe(expected.request_refused)
       expect(projectSolarGraphReason(code, 'solar-panels-from-drawing')).toBe(expected.request_refused)
