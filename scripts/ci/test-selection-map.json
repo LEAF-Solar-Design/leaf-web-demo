@@ -150,6 +150,8 @@
     "scripts-native-preview-service",
     "scripts-native-preview-completion",
     "scripts-native-session-contract",
+    "scripts-native-command-journal",
+    "scripts-native-command-coordinator",
     "scripts-native-preview-session",
     "scripts-native-preview-host",
     "scripts-native-preview-store",
