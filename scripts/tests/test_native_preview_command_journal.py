@@ -12,7 +12,8 @@ from test_native_preview_session_contract import command, context, wire, IDS
 
 
 def make(tmp_path):
-    return journal.CommandJournal(tmp_path / 'owned', context())
+    root = tmp_path / 'owned'
+    return journal.CommandJournal(root, context(), create=not root.exists())
 
 
 def digest(raw):
@@ -154,7 +155,7 @@ def test_concurrent_distinct_requests_cannot_share_one_sequence(tmp_path):
 
 def test_caller_context_mutation_cannot_extend_lease(tmp_path):
     trusted = context()
-    owner = journal.CommandJournal(tmp_path / 'owned', trusted)
+    owner = journal.CommandJournal(tmp_path / 'owned', trusted, create=True)
     trusted['deadline'] = 200
     with pytest.raises(journal.JournalError):
         owner.prepare(wire(command()), now=130)
@@ -279,3 +280,13 @@ def test_existing_empty_directory_is_not_assumed_a_new_session(tmp_path):
     (tmp_path / 'owned').mkdir()
     with pytest.raises(journal.JournalError):
         make(tmp_path)
+
+
+def test_reopening_lost_session_directory_is_not_implicit_creation(tmp_path):
+    owner = make(tmp_path)
+    owner.prepare(wire(command()), now=100)
+    root = tmp_path / 'owned'
+    (root / 'commands.sqlite').unlink()
+    root.rmdir()
+    with pytest.raises(journal.JournalError):
+        journal.CommandJournal(root, context())

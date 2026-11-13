@@ -1,6 +1,8 @@
 """Dormant per-session command decisions, not an effect or authority producer.
 
 The caller owns an exclusive private directory and authenticated context/results.
+Creation requires explicit create=True for a new session; default reopening
+never turns lost state into a new session.
 SQLite commits pending intent before returning dispatch=True. A crash after that
 commit is uncertain, never permission to dispatch twice. Native execution and
 membership, evidence and inspector-handle verification remain caller-owned.
@@ -48,30 +50,28 @@ def _sha(raw):
 
 class CommandJournal:
     @_safe
-    def __init__(self, directory, context):
+    def __init__(self, directory, context, *, create=False):
         self.context = copy.deepcopy(context)
         # This is the same frozen context contract used by the command parser.
         contract._context(self.context, 0)
         self.binding = _sha(_encode(self.context))
         self.directory = Path(directory)
         _need(self.directory.is_absolute() and not self.directory.is_symlink())
-        created = False
-        try:
+        _need(type(create) is bool)
+        if create:
             self.directory.mkdir(mode=0o700)
-            created = True
-        except FileExistsError:
+        else:
             _need(self.directory.is_dir())
         self.path = self.directory / 'commands.sqlite'
-        with self._transaction(create=created) as connection:
-            connection.execute('CREATE TABLE IF NOT EXISTS session '
+        with self._transaction(create=create) as connection:
+            if create:
+                connection.execute('CREATE TABLE session '
                                '(id INTEGER PRIMARY KEY CHECK(id=1), binding TEXT NOT NULL, '
                                'sequence INTEGER NOT NULL, phase TEXT NOT NULL, teardown TEXT)')
-            connection.execute('CREATE TABLE IF NOT EXISTS commands '
+                connection.execute('CREATE TABLE commands '
                                '(request_id TEXT PRIMARY KEY, digest TEXT NOT NULL, '
                                'sequence INTEGER NOT NULL, operation TEXT NOT NULL, '
                                'status TEXT NOT NULL, evidence TEXT)')
-            if connection.execute('SELECT id FROM session').fetchone() is None:
-                _need(created)
                 connection.execute('INSERT INTO session VALUES (1,?,?,?,NULL)',
                                    (self.binding, self.context['next_sequence'], self.context['state']))
             self._metadata(connection)
