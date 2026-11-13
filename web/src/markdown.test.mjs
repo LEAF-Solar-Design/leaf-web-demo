@@ -144,3 +144,61 @@ describe('link scheme allowlist — obfuscation resistance', () => {
     assert.match(textOf(spans), /<img src=x onerror="alert\(1\)">/)
   })
 })
+
+describe('markdown tables', () => {
+  it('parses the staging light-state reply with inline code in cells', () => {
+    const blocks = parseMarkdown('Done.\n\n| Light | State |\n|---|---|\n| Office (group) `light.office` | on, rgb 0,80,255, 100% |\n| WiZ DAEA0A | on, 100% |\n\nNo other lights.')
+    assert.deepEqual(blocks.map((block) => block.type), ['para', 'table', 'para'])
+    assert.equal(textOf(blocks[0].spans), 'Done.')
+    assert.deepEqual(blocks[1].header.map(textOf), ['Light', 'State'])
+    assert.equal(blocks[1].rows.length, 2)
+    assert.deepEqual(blocks[1].rows[0][0], [
+      { type: 'text', text: 'Office (group) ' },
+      { type: 'code', text: 'light.office' },
+    ])
+    assert.deepEqual(blocks[1].rows.map((row) => row.map(textOf)), [
+      ['Office (group) light.office', 'on, rgb 0,80,255, 100%'],
+      ['WiZ DAEA0A', 'on, 100%'],
+    ])
+    assert.equal(textOf(blocks[2].spans), 'No other lights.')
+  })
+
+  it('pads short rows and truncates long rows to the header width', () => {
+    const [table] = parseMarkdown('| A | B |\n|---|---|\n| short |\n| one | two | extra |')
+    assert.deepEqual(table.rows.map((row) => row.map(textOf)), [['short', ''], ['one', 'two']])
+  })
+
+  it('keeps escaped pipes inside a single cell', () => {
+    const [table] = parseMarkdown('| A | B |\n|---|---|\n| a \\| b | c |')
+    assert.deepEqual(table.rows[0].map(textOf), ['a | b', 'c'])
+  })
+
+  it('keeps a pipe line without a following delimiter in its paragraph', () => {
+    const blocks = parseMarkdown('before\n| not a table\nafter')
+    assert.deepEqual(blocks, [{ type: 'para', spans: [{ type: 'text', text: 'before\n| not a table\nafter' }] }])
+  })
+
+  it('accepts alignment colons and a table immediately after prose', () => {
+    const blocks = parseMarkdown('before\n| A | B |\n|:---|---:|\n| one | two |\nafter')
+    assert.deepEqual(blocks.map((block) => block.type), ['para', 'table', 'para'])
+    assert.deepEqual(blocks[1].header.map(textOf), ['A', 'B'])
+    assert.deepEqual(blocks[1].rows[0].map(textOf), ['one', 'two'])
+    assert.equal(textOf(blocks[2].spans), 'after')
+  })
+
+  it('accepts a single column and delimiter lines without outer pipes', () => {
+    const [table] = parseMarkdown('  | A\n:---:\n  | value')
+    assert.equal(table.type, 'table')
+    assert.deepEqual(table.header.map(textOf), ['A'])
+    assert.deepEqual(table.rows[0].map(textOf), ['value'])
+  })
+
+  it('caps body rows at 200 and drops the remaining table lines', () => {
+    const rows = Array.from({ length: 205 }, (_, i) => `| ${i} |`)
+    const blocks = parseMarkdown(['| A |', '|---|', ...rows, 'after'].join('\n'))
+    assert.deepEqual(blocks.map((block) => block.type), ['table', 'para'])
+    assert.equal(blocks[0].rows.length, 200)
+    assert.equal(textOf(blocks[0].rows[199][0]), '199')
+    assert.equal(textOf(blocks[1].spans), 'after')
+  })
+})
