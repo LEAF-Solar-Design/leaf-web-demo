@@ -18,9 +18,10 @@ export function initialSolarParameters(boundary, preset, drawing_units) {
   } catch { return null }
 }
 
-export function originalSolarParameters(original_intake, grid_long_axis) {
+export function originalSolarParameters(original_intake, grid_long_axis, producer_semantics) {
   if (typeof original_intake !== 'string' || !Number.isInteger(grid_long_axis)
-      || grid_long_axis < 2 || grid_long_axis > 300) return null
+      || grid_long_axis < 2 || grid_long_axis > 300
+      || (producer_semantics !== undefined && !['current-native', 'historical-list-reuse'].includes(producer_semantics))) return null
   try {
     const original = JSON.parse(original_intake.replace(/^\uFEFF/, ''))
     if (Object.keys(original).sort().join(',') !== 'active_preset,boundary,pile_template,units'
@@ -28,6 +29,7 @@ export function originalSolarParameters(original_intake, grid_long_axis) {
         || typeof original.pile_template?.Name !== 'string' || !original.pile_template.Name.trim()
         || original.pile_template.Name !== original.active_preset.PileTemplateName) return null
     const parameters = { original_intake, grid_long_axis }
+    if (producer_semantics !== undefined) parameters.producer_semantics = producer_semantics
     return new TextEncoder().encode(JSON.stringify(parameters)).length <= 2 * 1024 * 1024 ? parameters : null
   } catch { return null }
 }
@@ -35,11 +37,32 @@ export function originalSolarParameters(original_intake, grid_long_axis) {
 function checkedInitialParameters(parameters) {
   if (!parameters) return null
   const keys = Object.keys(parameters).sort().join(',')
-  if (keys === 'grid_long_axis,original_intake') {
-    return originalSolarParameters(parameters.original_intake, parameters.grid_long_axis)
+  if (keys === 'grid_long_axis,original_intake' || keys === 'grid_long_axis,original_intake,producer_semantics') {
+    return originalSolarParameters(parameters.original_intake, parameters.grid_long_axis, parameters.producer_semantics)
   }
   return keys === 'boundary,drawing_units,preset'
     ? initialSolarParameters(parameters.boundary, parameters.preset, parameters.drawing_units) : null
+}
+
+function framePageMatches(value, scope, offset) {
+  const poseFields = ['tilt_degrees', 'axis_azimuth_deg', 'height_at_low_pose_m', 'height_at_high_pose_m']
+  const finite = number => typeof number === 'number' && Number.isFinite(number)
+  return value?.schema === 'leaf.project-frame-inspection.v1'
+    && value.organization_id === scope.organization_id && value.project_id === scope.project_id
+    && value.drawing_id === scope.drawing_id && value.parent_version_id === scope.input_version_id
+    && digest(value.physical_source?.physical_head) && digest(value.physical_source?.physical_content_sha256)
+    && Number.isSafeInteger(value.physical_source?.physical_index) && value.physical_source.physical_index >= 0
+    && typeof value.drawing_units === 'string' && value.drawing_units.length > 0 && value.drawing_units.length <= 32
+    && value.offset === offset && value.page_size === 25 && Number.isSafeInteger(value.total) && value.total >= 0
+    && (offset < value.total || offset === 0 && value.total === 0)
+    && Array.isArray(value.frames) && value.frames.length === Math.min(25, value.total - offset)
+    && new Set(value.frames.map(frame => frame?.handle)).size === value.frames.length
+    && value.frames.every(frame => typeof frame?.handle === 'string' && /^[0-9a-f]{1,16}$/i.test(frame.handle)
+      && Number.isSafeInteger(frame.row) && frame.row >= 0 && Number.isSafeInteger(frame.column) && frame.column >= 0
+      && finite(frame.elevation) && Array.isArray(frame.vertices) && frame.vertices.length === 4
+      && frame.vertices.every(point => Array.isArray(point) && point.length === 2 && point.every(finite))
+      && [frame.preset, frame.pile_template].every(name => name === null || typeof name === 'string' && name.length <= 256)
+      && poseFields.every(key => finite(frame.pose?.[key])))
 }
 
 function readbackMatches(scope, readback) {
@@ -115,7 +138,29 @@ export function createSolarProjectMaterializationClient({ fetchImpl = fetch, api
   const route = scope => scope?.mode === 'initial' || scope?.drawing_id === null
     ? `${apiBase}/api/projects/${scope.project_id}/solar-layout`
     : `${apiBase}/api/projects/${scope.project_id}/drawings/${scope.drawing_id}/versions/${scope.input_version_id}/solar-layout`
-  return { async read(scope) {
+  return { async inspectFrames(scope, { offset = 0, signal } = {}) {
+    const refused = { ok: false, code: 'PROJECT_LAYOUT_FRAME_INSPECTION_UNAVAILABLE' }
+    if (!scope || !['organization_id', 'project_id', 'drawing_id', 'input_version_id'].every(key => uuid(scope[key]))
+      || !Number.isSafeInteger(offset) || offset < 0 || signal?.aborted) return refused
+    const controller = new AbortController()
+    const abort = () => controller.abort()
+    signal?.addEventListener('abort', abort, { once: true })
+    let timer
+    const run = async () => {
+      const base = headers?.(scope) ?? {}, url = route(scope) + '?frame_offset=' + offset
+      const response = await fetchImpl(url, { cache: 'no-store', redirect: 'error', signal: controller.signal,
+        headers: { ...base, 'X-Org-Id': scope.organization_id, 'X-Tenant-Id': scope.organization_id, 'X-Project-Id': scope.project_id } })
+      onResponse?.(response, url, !!(base.Authorization || base.authorization))
+      const text = await boundedText(response)
+      if (!response.ok) return refused
+      const value = JSON.parse(text)
+      return framePageMatches(value, scope, offset) ? { ok: true, value } : refused
+    }
+    try { return await Promise.race([run(), new Promise(resolve => {
+      timer = setTimeout(() => { controller.abort(); resolve(refused) }, timeoutMs)
+    })]) } catch { return refused }
+    finally { clearTimeout(timer); signal?.removeEventListener('abort', abort) }
+  }, async read(scope) {
     if (!scope || !['organization_id', 'project_id'].every(key => uuid(scope[key])))
       return { ok: false, code: 'PROJECT_LAYOUT_SCOPE_INVALID' }
     if (!(scope.drawing_id === null && scope.input_version_id === null)

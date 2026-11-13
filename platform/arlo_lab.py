@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from decimal import Decimal
 from pathlib import Path
 import uuid
 from typing import Any
@@ -306,6 +307,23 @@ def revise_input(org_id, project_id, binding_id, input_version_id, *, patch=None
     return run_transaction(operation, isolation="serializable")
 
 
+def _same_json_value(left: Any, right: Any) -> bool:
+    """Compare JSON values without treating number spelling as request content."""
+    if type(left) in (int, float) and type(right) in (int, float):
+        # Browsers serialize 180.0 as 180. Use exact decimal values, without a
+        # tolerance, and exclude bool (a subclass of int in Python).
+        return Decimal(str(left)) == Decimal(str(right))
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(
+            _same_json_value(value, right[key]) for key, value in left.items())
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _same_json_value(a, b) for a, b in zip(left, right))
+    return left == right
+
+
 def load_registered_request(job_context: dict, submitted_params: dict) -> dict:
     """Bind canonical submission and execution to the exact persisted input."""
     org_id = uuid.UUID(str(job_context["org_id"]))
@@ -341,8 +359,11 @@ def load_registered_request(job_context: dict, submitted_params: dict) -> dict:
                 or digest({**source, "input_sha256": row["input_sha256"]}) != row["import_fingerprint"]:
             raise ValueError("registered ARLO reference provenance mismatch")
     response = _input_response(row)
-    if digest(submitted_params) != row["input_sha256"]:
+    canonical_text(submitted_params)  # Reject non-JSON or non-finite values.
+    if not _same_json_value(submitted_params, response["request"]):
         raise ValueError("ARLO request differs from its registered immutable input")
+    # The hash-verified stored bytes remain authoritative for execution, even
+    # when the browser used an equivalent spelling for a JSON number.
     return response["request"]
 
 

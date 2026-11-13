@@ -1,0 +1,121 @@
+{
+  "fixture_kind": "synthetic canonical saved SolarEdge tracking",
+  "producer_head": "a998525296dc2037cdb701ebb333ca88ba1652e7",
+  "result": {
+    "schema": "leaf.solar-project-read.v1",
+    "adapter": "project-local-graph-read",
+    "organization_id": "00000000-0000-0000-0000-000000000001",
+    "project_id": "00000000-0000-0000-0000-000000000002",
+    "drawing_id": "00000000-0000-0000-0000-000000000003",
+    "input_version_id": "00000000-0000-0000-0000-000000000009",
+    "input_intake_sha256": "8b7b8116dc83e8290a977370163247a91f6e5b34e096237db0e5827aff35c708",
+    "graph_sha256": "9f6548b3867290ce46d3b39482d9e440c7f2c3b2020c6ad237e0209b029dc51e",
+    "tool": "solar-solaredge-tracking-read",
+    "tool_manifest_sha256": "sha256:15acc375017ba1ea73a6ff4c003c6fe0a88fa85e48e4adc78ff71f07fdc8ea9d",
+    "graph_project_id": "leaf:project:00000000-0000-4000-8000-000000000001",
+    "head_version_id": "00000000-0000-0000-0000-00000000000a",
+    "is_head": false,
+    "current_required": false,
+    "request_sha256": "290e0dd36e51968d7f2572c0df654b35cb3619a597a2bff60a44c3b412eeb52c",
+    "output": {
+      "schema": "leaf.solar-project-solaredge-tracking-read.v1",
+      "accepted": true,
+      "labels_only": true,
+      "provenance": {
+        "source": {
+          "artifact_id": "2ad3c9f23b0be6cbab992ff01e81ce1aa11aeb183109073432c24f2498ff7203",
+          "byte_length": 1019229,
+          "content_sha256": "2e8076086b8e494295e5523b3bb94325924b3196d069e62d2f517275d678a1c1"
+        },
+        "report": {
+          "artifact_id": "b35c83c4c601f56c00e535ee11235ebb120dee81164eb8af26f13139a2a7c7ad",
+          "byte_length": 2363,
+          "content_sha256": "8bcf20bd8422cfe19faab4af5c0f33468288bd60f6fab804c2b34c5c52d234c3",
+          "drawing_id": "00000000-0000-0000-0000-000000000003",
+          "graph_project_id": "leaf:project:00000000-0000-4000-8000-000000000001",
+          "graph_sha256": "72a71ff696ea5695388cf83e66120cb3a7442a655e73c0c15b38473b50e304ad",
+          "organization_id": "00000000-0000-0000-0000-000000000001",
+          "project_id": "00000000-0000-0000-0000-000000000002",
+          "source_intake_sha256": "136b41c8268acd82d92282cd8646f688ca6ba82e7d18767b75bb297481f0120b",
+          "source_version_id": "00000000-0000-0000-0000-000000000006"
+        },
+        "request": {
+          "alignment_tolerance": 1.0,
+          "associations": {
+            "leaf:frame:00000000-0000-4000-8000-000000000001": 0,
+            "leaf:frame:00000000-0000-4000-8000-000000000002": 1
+          },
+          "selection_order": "unknown"
+        }
+      },
+      "counts": {
+        "frames": 2,
+        "strings": 3,
+        "group_strings": 2,
+        "bridge_strings": 1,
+        "assigned_panels": 6,
+        "unassigned_panels": 0,
+        "partial_strings": 0,
+        "distinct_labels": 3
+      },
+      "references": {
+        "current": true,
+        "missing_frames": 0,
+        "missing_panels": 0,
+        "moved_panels": 0,
+        "unrecorded_panels": 0
+      },
+      "section": "strings",
+      "page": {
+        "offset": 0,
+        "returned": 3,
+        "total": 3,
+        "next_offset": null
+      },
+      "items": [
+        {
+          "frame_ref": "leaf:frame:00000000-0000-4000-8000-000000000001",
+          "index": 0,
+          "panel_refs": [
+            "leaf:panel:00000000-0000-4000-8000-000000000001",
+            "leaf:panel:00000000-0000-4000-8000-000000000002"
+          ],
+          "partial": false,
+          "pdf_inverter_id": 1,
+          "pdf_matrix": 0,
+          "pdf_string_input": 1,
+          "source": "group"
+        },
+        {
+          "frame_ref": "leaf:frame:00000000-0000-4000-8000-000000000002",
+          "index": 1,
+          "panel_refs": [
+            "leaf:panel:00000000-0000-4000-8000-000000000006"
+          ],
+          "partial": false,
+          "pdf_inverter_id": 3,
+          "pdf_matrix": 0,
+          "pdf_string_input": 2,
+          "source": "group"
+        },
+        {
+          "frame_ref": null,
+          "index": 2,
+          "panel_refs": [
+            "leaf:panel:00000000-0000-4000-8000-000000000003",
+            "leaf:panel:00000000-0000-4000-8000-000000000004",
+            "leaf:panel:00000000-0000-4000-8000-000000000005"
+          ],
+          "partial": false,
+          "pdf_inverter_id": 2,
+          "pdf_matrix": 0,
+          "pdf_string_input": 4,
+          "source": "bridge"
+        }
+      ]
+    },
+    "output_sha256": "c33e27549d2ce3688bbeef7341f040c8564e9efe229a67d50c53ad6281a8f5af",
+    "output_bytes": 2293,
+    "drawing_changed": false
+  }
+}
