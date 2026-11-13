@@ -275,13 +275,27 @@ const derivedMetadata = z.strictObject({
     ctx.addIssue({ code: 'custom', message: 'Derived metadata evidence does not match its lineage.' })
   }
 })
+const materialMetadata = z.strictObject({
+  reference: metadataBase.shape.reference, revision, title: metadataBase.shape.title,
+  fields: metadataBase.shape.fields, material_lineage: materialLineage,
+  material_context: materialContext.optional(),
+  lastAttempt: z.strictObject({ outcome: z.literal('success'), row_count: z.number().int().min(0).max(100000) }),
+  freshness: DatasetReadV1.shape.freshness,
+}).superRefine((value, ctx) => {
+  const context = value.material_context
+  if (context && (context.row_count !== value.lastAttempt.row_count ||
+    ['kind', 'material_id', 'sha256', 'byte_length'].some(key => context.source[key] !== value.material_lineage[key]))) {
+    ctx.addIssue({ code: 'custom', message: 'Material metadata evidence does not match its lineage.' })
+  }
+})
 function metadataVariant(raw) {
-  // Select before parsing: an invalid derived branch cannot fall back to a raw
-  // schema that strips its evidence. Raw connector receipts keep their checks.
+  // Select before parsing: invalid tagged evidence cannot fall back to a raw
+  // schema that strips it. Raw connector receipts keep their checks.
   return z.unknown().transform((value, ctx) => {
     const derived = value && typeof value === 'object' && ['derivation', 'input_freshness', 'diagnostics', 'computed_at']
       .some(key => Object.hasOwn(value, key))
-    const result = (derived ? derivedMetadata : raw).safeParse(value)
+    const material = value && typeof value === 'object' && Object.hasOwn(value, 'material_lineage')
+    const result = (material ? materialMetadata : derived ? derivedMetadata : raw).safeParse(value)
     if (result.success) return result.data
     ctx.addIssue({ code: 'custom', message: 'Dataset metadata is invalid.' })
     return z.NEVER
@@ -689,13 +703,13 @@ export function createIntegrationsClient({ origin = import.meta.env.VITE_INTEGRA
       if (expected !== undefined) parse(revision, expected)
       return setupResponse(datasetMetadata, id, `datasets/${ref.id}/versions/${ref.version}${expected === undefined ? '' : `?revision=${expected}`}`, options,
         (value) => sameRef(value.reference, ref) && (expected === undefined || value.revision === expected) &&
-          (value.derivation !== undefined || !value.lastAttempt || sameRef(value.lastAttempt.dataset_ref, ref)))
+          (value.derivation !== undefined || value.material_lineage !== undefined || !value.lastAttempt || sameRef(value.lastAttempt.dataset_ref, ref)))
     },
     async getDatasetVersion(id, datasetId, version, options) {
       parse(slug, datasetId); parse(revision, version)
       return setupResponse(datasetMetadata, id, `datasets/${datasetId}/versions/${version}`, options,
         (value) => value.reference.id === datasetId && value.reference.version === version &&
-          (value.derivation !== undefined || !value.lastAttempt || sameRef(value.lastAttempt.dataset_ref, value.reference)))
+          (value.derivation !== undefined || value.material_lineage !== undefined || !value.lastAttempt || sameRef(value.lastAttempt.dataset_ref, value.reference)))
     },
     async syncDataset(id, reference, options) {
       const ref = parse(IntegrationRefV1, reference)
