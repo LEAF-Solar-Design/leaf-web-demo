@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import sys
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -450,3 +452,63 @@ def test_default_web_hint_key_and_claim_keep_original_shape(lane):
     assert set(marker) == {'action', 'source_request_id', 'payload_digest'}
     assert marker['payload_digest'] == hashlib.sha256(flow.canonical(dict(
         action='create', source_request_id=EDIT, payload=BODY))).hexdigest()
+
+
+@pytest.mark.parametrize('code', ['material_too_large', 'cancelled', 'author_unavailable'])
+def test_forward_diagnostic_preserves_typed_stage_failure(lane, monkeypatch, code):
+    def fail(*args, **kwargs):
+        error = flow.authoring.AuthoringError(code)
+        error.args = ('fixture-private-exception-text',)
+        raise error
+    monkeypatch.setattr(flow.authoring, 'author', fail)
+    with pytest.raises(flow.FlowError) as caught:
+        execute()
+    event = [item for item in lane.events if item['type'] == 'browser_source_error']
+    assert len(event) == 1
+    data = event[0]['data']
+    assert caught.value.status == flow.authoring._ERRORS[code][0]
+    assert data == dict(source_request_id=EDIT, phase='stage', code=code,
+        status=caught.value.status, correlation_id=data['correlation_id'],
+        text='Source outcome unavailable. Review the saved source state before retrying.')
+    assert str(uuid.UUID(data['correlation_id'])) == data['correlation_id']
+    assert uuid.UUID(data['correlation_id']).version == 4
+    assert 'fixture-private-exception-text' not in json.dumps(event)
+    assert BODY['requirements'] not in json.dumps(event)
+    assert lane.author_calls == 0 and lane.finished == ['turn']
+
+
+def test_forward_diagnostic_readback_uses_canonical_flow_error(lane, monkeypatch):
+    def fail(*args, **kwargs):
+        error = flow.FlowError(409)
+        error.code = 'fixture-private-code'
+        error.args = ('fixture-private-exception-text',)
+        raise error
+    monkeypatch.setattr(flow, 'representation', fail)
+    with pytest.raises(flow.FlowError) as caught:
+        execute()
+    data = [item['data'] for item in lane.events if item['type'] == 'browser_source_error'][0]
+    assert caught.value.status == 409
+    assert (data['phase'], data['code'], data['status']) == ('result_readback', 'source_changed', 409)
+    assert uuid.UUID(data['correlation_id']).version == 4
+    assert 'fixture-private' not in json.dumps(data)
+    assert lane.rows[EDIT]['state'] == 'awaiting_confirmation'
+    assert lane.author_calls == 1 and lane.finished == ['turn']
+
+
+@pytest.mark.parametrize('typed', [False, True])
+def test_forward_diagnostic_unknown_failure_is_generic_and_secret_free(lane, monkeypatch, typed):
+    def fail(*args, **kwargs):
+        error = flow.authoring.AuthoringError('author_unavailable') if typed else RuntimeError()
+        if typed:
+            error.code = 'fixture-private-code'
+        error.args = ('fixture-private-exception-text',)
+        raise error
+    monkeypatch.setattr(flow.authoring, 'author', fail)
+    with pytest.raises(flow.FlowError) as caught:
+        execute()
+    data = [item['data'] for item in lane.events if item['type'] == 'browser_source_error'][0]
+    assert caught.value.status == 503
+    assert (data['phase'], data['code'], data['status']) == ('stage', 'service_unavailable', 503)
+    assert uuid.UUID(data['correlation_id']).version == 4
+    assert 'fixture-private' not in json.dumps(data)
+    assert lane.rows == {} and lane.finished == ['turn']
