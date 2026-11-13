@@ -29,7 +29,7 @@ import { createViewHistory } from './lib/viewHistory.js'
 import SurfaceFrame from './site/SurfaceFrame.jsx'
 import { useToastBus } from './lib/notifications.js'
 import { requestNoticeVersionView, peekNoticeVersionView, takeNoticeVersionView } from './components/JobInbox.jsx'
-import { createPreviewRunner, resolveVersionTransfer } from './lib/boardTransfer.js'
+import { createPreviewRunner, resolveVersionTransfer, MAX_TRANSFER_CHARS } from './lib/boardTransfer.js'
 import NavRail from './site/NavRail.jsx'
 import CockpitTopBand from './site/CockpitTopBand.jsx'
 import DraftingRibbon from './site/DraftingRibbon.jsx'
@@ -388,13 +388,18 @@ function ProjectSolarCheckoutControls({ projectClient, checkout, isCurrent }) {
 
 // Mount the upload controller only on the live material pane. Its policy
 // request must not run when the drawing profiles or offline demo boot.
-function LiveProjectMaterialIntake({ project, artifacts, onAttached, onRunArlo }) {
+function LiveProjectMaterialIntake({ project, artifacts, onAttachmentStarted, onAttached, onRunArlo }) {
   const projectUpload = useDrawingUploadController()
-  const materialIntake = useMaterialIntake({ upload: projectUpload, onAttached })
+  const attachmentRef = useRef(null)
+  const materialIntake = useMaterialIntake({ upload: projectUpload,
+    onAttached: (row) => onAttached(row, attachmentRef.current) })
+  useEffect(() => () => attachmentRef.current?.dispose(), [])
   const startMaterialUpload = (file) => {
     if (!project?.project_id) return
     if (!materialIntake.begin({ projectId: project.project_id, projectName: project.name,
       fileName: file?.name })) return
+    attachmentRef.current?.dispose()
+    attachmentRef.current = onAttachmentStarted()
     return projectUpload.actions.upload(file)
   }
   return <ProjectMaterialIntake project={project} upload={projectUpload}
@@ -403,7 +408,7 @@ function LiveProjectMaterialIntake({ project, artifacts, onAttached, onRunArlo }
     photos={<PhotoMaterialIntake projectId={project?.project_id} />} />
 }
 
-export async function seatProjectDrawingPublication(controller, receipt, isCurrent = () => true) {
+export async function seatProjectDrawingPublication(controller, receipt, isCurrent = () => true, canSelect = () => true) {
   if (!isCurrent()) return false
   const version = receipt?.drawing_version
   const before = controller.getSnapshot()
@@ -412,10 +417,79 @@ export async function seatProjectDrawingPublication(controller, receipt, isCurre
   const after = controller.getSnapshot()
   if (!isCurrent() || after.openProjectId !== version.project_id || after.orgId !== version.org_id
     || after.canonicalVersionId !== before.canonicalVersionId
+    || !canSelect(workspace, after)
     || !workspace?.drawing_versions?.some((row) => row.version_id === version.version_id
       && row.drawing_id === version.drawing_id && row.project_id === version.project_id && row.org_id === version.org_id)) return false
   controller.selectCanonicalVersion(version.version_id)
   return true
+}
+
+// Both snapshots are controller-shaped: selection is captured when the upload begins,
+// state contains the freshly hydrated workspace. Never substitute a head or a sequence.
+export function selectionForAttachedDrawing(attachedRow, state, selection) {
+  const refuse = (reason) => ({ ok: false, reason })
+  if (!selection?.orgId || !selection.openProjectId || state?.mock
+    || state?.orgId !== selection.orgId || state?.openProjectId !== selection.openProjectId) {
+    return refuse('project-changed')
+  }
+  if ((state.canonicalVersionId ?? null) !== (selection.canonicalVersionId ?? null)) return refuse('selection-changed')
+  const workspace = state.workspace
+  if (workspace?.project?.project_id !== state.openProjectId || workspace.project.org_id !== state.orgId
+    || (workspace.org_id != null && workspace.org_id !== state.orgId)) return refuse('workspace-mismatch')
+  if (!attachedRow || !['version_id', 'drawing_id', 'project_id', 'org_id'].every((key) =>
+    typeof attachedRow[key] === 'string' && attachedRow[key].length > 0)
+    || attachedRow.project_id !== state.openProjectId || attachedRow.org_id !== state.orgId
+    || !Number.isSafeInteger(attachedRow.seq) || attachedRow.seq <= 0) return refuse('invalid-reference')
+  if (!workspace.drawing_versions?.some((row) => row.version_id === attachedRow.version_id
+    && row.drawing_id === attachedRow.drawing_id && row.project_id === attachedRow.project_id
+    && row.org_id === attachedRow.org_id && row.seq === attachedRow.seq)) return refuse('stale-version')
+  return { ok: true, versionId: attachedRow.version_id }
+}
+
+export function captureProjectMaterialSelection(controller, sessionController) {
+  const selection = controller.getSnapshot()
+  const scope = readActiveScope()
+  const generation = sessionController.getSnapshot().generation
+  let live = true
+  const unchanged = () => {
+    const next = controller.getSnapshot()
+    return next.orgId === selection.orgId && next.openProjectId === selection.openProjectId
+      && next.canonicalVersionId === selection.canonicalVersionId && !next.mock
+  }
+  // Latch invalidation so switching away and back cannot revive an old upload.
+  const unsubscribe = controller.subscribe(() => { if (!unchanged()) live = false })
+  return {
+    selection,
+    isCurrent: () => live && unchanged() && readActiveScope() === scope
+      && sessionController.getSnapshot().status === 'active'
+      && sessionController.getSnapshot().generation === generation,
+    dispose: () => { live = false; unsubscribe() },
+  }
+}
+
+export async function seatAttachedProjectDrawing(controller, attachedRow, capture) {
+  if (!capture) return false
+  try {
+    return await seatProjectDrawingPublication(controller, { drawing_version: attachedRow }, capture.isCurrent,
+      (workspace, state) => selectionForAttachedDrawing(attachedRow, { ...state, workspace }, capture.selection).ok)
+  } finally { capture.dispose() }
+}
+
+export function selectionForProjectDrawingPreview(raw, state) {
+  const workspace = state?.workspace
+  if (!state?.orgId || !state.openProjectId || state.mock
+    || workspace?.project?.project_id !== state.openProjectId || workspace.project.org_id !== state.orgId
+    || (workspace.org_id != null && workspace.org_id !== state.orgId)) {
+    return { ok: false, reason: 'workspace-mismatch', message: 'Refresh the current project before previewing a version.' }
+  }
+  // Keep the board transfer format and its complete identity checks. Project previews
+  // can select another drawing, so membership determines the drawing, not the legacy canvas.
+  let ref
+  if (typeof raw === 'string' && raw.length <= MAX_TRANSFER_CHARS) {
+    try { ref = JSON.parse(raw) } catch { /* the transfer validator supplies the refusal */ }
+  }
+  return resolveVersionTransfer(raw, { projectId: state.openProjectId, drawingId: ref?.drawingId,
+    versions: workspace.drawing_versions?.filter((row) => row.org_id === state.orgId && row.project_id === state.openProjectId) })
 }
 
 // A confirmed catalog run inside a project goes through the project's own client, which holds the
@@ -473,6 +547,12 @@ export function boardDrawingFacts({ projectMode, shown, standaloneName, selected
 // the standalone drawing's version state says nothing about a project.
 export function versionsAvailable({ projectMode, projectVersion, drawingState }) {
   return projectMode ? !!projectVersion : !!drawingState
+}
+
+// Empty manifest families enable project conversation fallback; null leaves
+// named-tool admission intact. Unknown surfaces must also clear the prior list.
+export function catalogContextForSurface(surface, previous = {}) {
+  return { ...previous, surfaceFamilyIds: surface?.familyIds ?? null }
 }
 
 export async function seatSolarProjectPublication(controller, receipt, captured, isCurrent) {
@@ -1583,6 +1663,23 @@ export default function App() {
     runnableTools: slashTools,
     capabilityCount: capCount,
   } = catalogState
+  // Initialize before the catalog's passive startup, and follow every manifest
+  // surface change. An empty family list admits project conversation fallback;
+  // null keeps the surface's normal named-tool admission.
+  useLayoutEffect(() => {
+    catalogController.setContext(catalogContextForSurface(
+      PRODUCT_SURFACES.find(surface => surface.id === activeSurface),
+    ))
+  }, [activeSurface, catalogController])
+  const composerProjectRef = useRef({ orgId, openProjectId })
+  useLayoutEffect(() => {
+    const previous = composerProjectRef.current
+    composerProjectRef.current = { orgId, openProjectId }
+    if (previous.orgId !== orgId || previous.openProjectId !== openProjectId) {
+      catalogActions.resetTransient()
+      catalogActions.setPrompt('')
+    }
+  }, [orgId, openProjectId, catalogActions])
   const {
     retryTools,
     // The awaitable catalog refetch. `loadCatalog` regroups families; this is
@@ -2228,9 +2325,15 @@ export default function App() {
     return { isCurrent: stillCurrent, revoke }
   }, [projectSolar.projectClient, projectSolar.ready, projectSolar.isCurrent, projectSolar.scope.binding,
     projectSolar.scope.authorityKey, assistantCheckoutBinding, session.controller, session.generation, agentSessionId])
+  const conversationOrgRef = useRef(orgId)
   useLayoutEffect(() => {
+    if (conversationOrgRef.current !== orgId) {
+      converse.resetCached()
+      clearAgentSession()
+    }
+    conversationOrgRef.current = orgId
     setProjectContext(openProjectId || null, canonicalVersionId || null)
-  }, [openProjectId, canonicalVersionId, setProjectContext])
+  }, [orgId, openProjectId, canonicalVersionId, setProjectContext, clearAgentSession, converse.resetCached])
   const authorAuthorityProvider = useCallback(async (description, { allowSecretOnce = false, projectId } = {}) => {
     // No entitlement pre-check here: entitlements load async, and a stage
     // click can beat them (proven by the e2e). A mint against a tenant that
@@ -3088,8 +3191,23 @@ export default function App() {
       return readActiveScope() === scope && current.openProjectId === input.project_id
         && current.workspace?.project?.org_id === input.organization_id
     }
-    if (!signedIn || mock || signal.aborted || !currentProject()) return null
+    const refused = message => ({ ok: false, error: { message } })
+    if (!signedIn || mock || !currentProject()) return refused('The account or project changed. Open the project and choose Run ARLO again.')
+    if (signal.aborted) return refused('The ARLO run was cancelled. Choose Run ARLO again when ready.')
     if (running) return { ok: false, error: { message: 'Wait for the current tool run to finish before starting ARLO.' } }
+
+    let tools
+    try {
+      tools = await getTools(false)
+    } catch {
+      return refused('The ARLO tool catalog could not be loaded. Try Run ARLO again.')
+    }
+    if (signal.aborted) return refused('The ARLO run was cancelled. Choose Run ARLO again when ready.')
+    if (!currentProject()) return refused('The account or project changed. Open the project and choose Run ARLO again.')
+    const arloTool = Array.isArray(tools) ? tools.find(tool => tool.name === 'arlo-design') : null
+    if (typeof arloTool?.catalog_digest !== 'string' || !arloTool.catalog_digest.trim()) {
+      return refused('ARLO is unavailable or its catalog confirmation is missing. Refresh tools and choose Run ARLO again.')
+    }
 
     const envelope = await runJob({
       toolName: 'arlo-design',
@@ -3097,6 +3215,7 @@ export default function App() {
         if (signal.aborted || jobSignal.aborted || !currentProject()) return null
         const output = await runToolAsync('arlo-design', input.request, input.input_version_id, {
           orgId: input.organization_id, projectId: input.project_id, idempotencyKey,
+          catalogDigest: arloTool.catalog_digest,
           signal: jobSignal,
           onSubmit: id => { if (currentProject()) onSubmit(id) },
           onStatus: status => { if (currentProject()) onStatus(status) },
@@ -5615,7 +5734,21 @@ export default function App() {
             actions={boardHostsProject ? {
               transferProjectId: openProjectId || '',
               transferStatus: boardTransferStatus,
-              onTransferVersion: openProjectId && workspace && drawingState?.drawing_id ? async (raw) => {
+              onTransferVersion: workspace && (openProjectId || drawingState?.drawing_id) ? async (raw) => {
+                if (openProjectId) {
+                  const state = workspaceController.getSnapshot()
+                  const currentSession = session.controller.getSnapshot()
+                  if (state.orgId !== orgId || state.openProjectId !== openProjectId
+                    || currentSession.status !== 'active' || currentSession.generation !== session.generation) return
+                  const result = selectionForProjectDrawingPreview(raw, state)
+                  if (result.ok) {
+                    closeStartForChange()
+                    selectCanonicalVersion(result.versionId)
+                    track('drawing.version_navigated', { action: 'preview' })
+                    setBoardTransferStatus('Project drawing version selected.')
+                  } else setBoardTransferStatus(result.message)
+                  return
+                }
                 // A declined drop must not retire the preview already loading.
                 if (boardPreviewRunRef.current?.isPending()) return
                 const current = beginBoardTransfer()
@@ -5680,10 +5813,11 @@ export default function App() {
                   material: mock || !signedIn || !openProjectId
                     ? <ProjectMaterialIntake project={null} mock={mock} artifacts={[]} />
                     : workspace ? <LiveProjectMaterialIntake
-                      key={openProjectId}
+                      key={`${orgId}:${openProjectId}`}
                       project={workspace.project}
                       artifacts={workspace.drawing_artifacts || []}
-                      onAttached={rehydrate}
+                      onAttachmentStarted={() => captureProjectMaterialSelection(workspaceController, session.controller)}
+                      onAttached={(row, capture) => seatAttachedProjectDrawing(workspaceController, row, capture)}
                       onRunArlo={onRunArloReference}
                     /> : <p>Material will be available after the project opens.</p>,
                   catalog: <ul>{railFamilies.map((family) => <li key={family.family_id}>{family.label}</li>)}</ul>,

@@ -1,5 +1,13 @@
 # Lab worker operator guide
 
+## Open the widget designer
+
+With a project open, select the Lab workspace profile and choose Widgets in
+Lab's navigation. Enter a Document ID, then choose New for a blank widget or
+Load for a saved widget. Use Save to retain edits and Download widget definition
+to export them. Widget editing does not require a tool-authoring request or a
+market-provider connection.
+
 ## Program dossier
 
 The selected Leaf Automation program is `studio-engine-lab-20260930`. Its

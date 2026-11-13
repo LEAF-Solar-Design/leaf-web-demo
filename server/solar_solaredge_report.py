@@ -5,8 +5,8 @@ JSON binding includes tenant, project, drawing, head version, graph digest and
 a request digest over source id, source content digest, tolerance and selection
 order. Repeated requests reuse that JSON without parsing. Requests are bounded
 to 4096 bytes, tolerance to 1e-6 through 1e6, frames to 10,000, panels to 200,000
-and displayed match candidates to 16. Parsing runs behind a per-process limit
-of MAX_CONCURRENT_PARSES, in a child process (solar_solaredge_parse_worker.py)
+and match candidates to the importer's bounded grid list. Parsing runs behind a
+per-process limit of MAX_CONCURRENT_PARSES, in a child process (solar_solaredge_parse_worker.py)
 under a fixed wall-time deadline of PARSE_DEADLINE_S: at the deadline the child
 is killed and reaped before the parse slot is released, and the request is
 refused as REPORT_PARSE_TIMEOUT with nothing stored. The report creates no
@@ -94,6 +94,11 @@ def validate_request(request):
 
 
 def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_order):
+    """Review every frame; unresolved rows retain all candidates and null PDF indexes.
+
+    Unique matches keep the existing matched-row format. Unresolved rows also carry
+    an explicit status and cannot pass the acceptance path's strict match validation.
+    """
     if not units_resolved(graph):
         raise SolarEdgeReportError("REPORT_UNITS_UNRESOLVED")
     frames = graph["frames"]
@@ -126,7 +131,8 @@ def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_orde
     try:
         row_angle = si.lattice_row_angle([(p["x"], p["y"]) for p in kernel_panels])
         result = si.run_import(matrices, groups, kernel_panels, row_angle=row_angle,
-                               alignment_tolerance=alignment_tolerance, selection_order=selection_order)
+                               alignment_tolerance=alignment_tolerance, selection_order=selection_order,
+                               review=True)
     except si.SolarEdgeImportError as exc:
         code = {
             "ambiguous-structural-match": "REPORT_AMBIGUOUS_MATCH",
@@ -144,8 +150,10 @@ def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_orde
         raise SolarEdgeReportError("REPORT_PDF_UNSUPPORTED") from None
     matches = [{"frame_ref": m["block"], "pdf_grid": m["grid_index"],
                 "pdf_matrix": m["original_index"], "pdf_sub_grid": m["sub_grid_id"],
-                "candidates": list(m["candidates"][:MAX_REPORT_CANDIDATES]),
-                "candidate_count": len(m["candidates"])} for m in result["matches"]]
+                "candidates": list(m["candidates"] if "status" in m
+                                   else m["candidates"][:MAX_REPORT_CANDIDATES]),
+                "candidate_count": len(m["candidates"]),
+                **({"status": m["status"]} if "status" in m else {})} for m in result["matches"]]
     strings = []
     for s in result["strings"] + result["bridge_strings"]:
         source = s["source"]
@@ -162,7 +170,7 @@ def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_orde
               "pdf_panels": sum(cell["Code"] == 1 for matrix in matrices
                                 for row in matrix["Rows"] for cell in row["Panels"]),
               "matchable_grids": result["matchable_count"], "bridge_grids": result["bridge_grid_count"],
-              "frames": len(frames), "matched_frames": len(matches),
+              "frames": len(frames), "matched_frames": sum(m["pdf_grid"] is not None for m in matches),
               "group_strings": len(result["strings"]), "bridge_strings": len(result["bridge_strings"]),
               "strings": len(strings), "assigned_panels": sum(len(s["panel_refs"]) for s in strings),
               "unassigned_panels": len(unassigned), "partial_strings": sum(s["partial"] for s in strings)}
