@@ -3524,9 +3524,10 @@ def build_suites() -> List[Suite]:
         Suite("web-error-classify-contract",
               "web 413 classifies as too_large with its own panel copy", "script", WEB,
               [_npm(), "run", "check:error-classify"], None),
+        # Slow device CI workers take 13 to 15 min for this file, above the 900 s default.
         Suite("web-version-restore-proof",
               "web /app version restore browser proof", "script", WEB,
-              [_npm(), "run", "proof:version-restore"], None),
+              [_npm(), "run", "proof:version-restore"], None, timeout_s=1800),
         # The daily authoring cap refuses with 429 (CONTRACT-ADDENDUM §17). The
         # only thing standing between that refusal and a red "Couldn't author
         # the tool" is api.js tagging quota_kind=="daily_author"; nothing else
