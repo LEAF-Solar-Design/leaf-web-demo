@@ -7,6 +7,7 @@ import { createSolarCombinerIntakeClient } from './solarCombinerIntakeClient.js'
 import SolarTerrainPanel from './SolarTerrainPanel.jsx'
 import { createSolarTerrainClient } from './solarTerrainClient.js'
 import SolarCivilPanel from './SolarCivilPanel.jsx'
+import SolarFrameInspector from './SolarFrameInspector.jsx'
 import SolarPhysicalReadPanel from './SolarPhysicalReadPanel.jsx'
 import { createSolarCivilClient } from './solarCivilClient.js'
 import SolarTrackerRowsPanel, { TRACKER_ROWS_PANEL_REASONS } from './SolarTrackerRowsPanel.jsx'
@@ -810,6 +811,8 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
             : projectScope?.input_version_id === null ? 'Generate editable project drawing' : 'Publish layout as editable drawing'}</button>
         {!projectScope && <p>Select a canonical project drawing version before publishing.</p>}
         <p role="status">{publication.message}</p>
+        {projectScope?.drawing_id && projectScope?.input_version_id && <SolarFrameInspector
+          scope={projectScope} client={publicationClient} disabled={busy || publication.phase === 'pending'} />}
       </div>}
       {hasCivil && <button type="button" ref={civilTrigger} aria-expanded={openPanel === 'civil'}
         onClick={() => { if (openPanel === 'civil') civilHeading.current?.focus(); else setOpenPanel('civil') }}>Civil operations</button>}
