@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 // Fault injection against the real worker JS, without a compiled engine.
+import { scaleTimeout } from '../testTimeScale.js'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { act, cleanup, renderHook } from '@testing-library/react'
@@ -119,7 +120,7 @@ process.stdout.write(JSON.stringify({ reply, loaded, before, state, ...counters,
 `
 function raw(message = batch(), fault = null, noLoad = false) {
   return JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', SCRIPT, WORKER_PATH, JSON.stringify({ message, fault, noLoad }), DXF], {
-    encoding: 'utf8', timeout: 30_000, maxBuffer: 4 * 1024 * 1024,
+    encoding: 'utf8', timeout: scaleTimeout(30_000), maxBuffer: 4 * 1024 * 1024,
   }))
 }
 class ScriptedWorker {
@@ -184,7 +185,7 @@ it('MS20 envelope-refusals', () => {
   assertRefusal(raw({ type: 'applyEdit', op: 'batch', payload: { steps: [{ op: 'hasOwnProperty', payload: { entityId: '16' } }] } }), 'step_0_hasOwnProperty:unknown_op:hasOwnProperty')
   expect(raw(batch(), null, true).reply).toEqual({ type: 'editApplied', op: 'batch', ok: false, reason: 'no_document_loaded' })
   // Six synchronous worker subprocesses: about 5.2 s alone on this host, past vitest's 5 s default.
-}, 30_000)
+}, scaleTimeout(30_000))
 it('MS21 snapshot-failure', () => {
   const out = raw(batch(), 'snapshot')
   assertRefusal(out, 'batch_snapshot_failed:injected_snapshot')

@@ -1,3 +1,4 @@
+import { scaleTimeout } from './testTimeScale.js'
 import React, { createRef, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, renderHook } from '@testing-library/react'
@@ -418,7 +419,7 @@ it('R13G2A-14 a retained engine document returns after a project closes', () => 
   expect(shown).toContain('legacy.dwg')
   expect(shown.at(-1)).toBe('engine.dxf')
   expect(shown.lastIndexOf('legacy.dwg')).toBeLessThan(shown.lastIndexOf('engine.dxf'))
-}, 30_000)
+}, scaleTimeout(30_000))
 
 it('BSP53 admits the selected canonical editor while rejecting a retained foreign engine scope', () => {
   const target = element('EngineDocumentView')

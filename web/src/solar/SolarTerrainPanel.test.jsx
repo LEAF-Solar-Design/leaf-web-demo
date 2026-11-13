@@ -3,6 +3,7 @@
 // server/solar_ground_terrain_adapter.py document, never captured from a running server. A
 // success fixture is one the real validator accepts: the panel validates every answer it is
 // given, so a fixture it would refuse could not reach the screen as a success.
+import { scaleTimeout } from '../testTimeScale.js'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
@@ -520,7 +521,7 @@ describe('SolarTerrainPanel', () => {
     expect(refusalText()).toBeNull()
     expect(summary().head).toBe('Saved in this drawing')
     expect(failing.runTerrainOperation).not.toHaveBeenCalled()
-  }, 60_000)
+  }, scaleTimeout(60_000))
 
   it('W20-06a P7 an unreadable limit shows its reason before any press, and a disabled panel sends nothing', async () => {
     const client = fakeClient()
