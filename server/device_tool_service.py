@@ -184,6 +184,18 @@ def _summary(command, result):
             brightness = attrs.get("brightness")
             if type(brightness) is int and 0 <= brightness <= 255:
                 light["brightness_pct"] = round(brightness * 100 / 255)
+            members = []
+            if type(attrs.get("entity_id")) is list:
+                for member in attrs["entity_id"]:
+                    if (type(member) is str and re.fullmatch(r"light\.[a-z0-9_]{1,64}", member)
+                            and _text(member) is not None and member not in members):
+                        members.append(member)
+                        if len(members) == 20:
+                            break
+            if members:
+                light["members"] = members
+            if _names_off_limits(entity) or any(_names_off_limits(member) for member in members):
+                light["off_limits"] = True
             lights.append(light)
             if len(lights) == 100:
                 break
