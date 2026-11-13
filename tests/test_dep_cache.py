@@ -2,6 +2,7 @@
 
 import builtins
 import errno
+import hashlib
 import importlib.util
 import json
 import os
@@ -28,6 +29,7 @@ def fixture(tmp_path, monkeypatch):
     (repo / "web/package-lock.json").write_text(json.dumps({"packages": {
         "node_modules/playwright-core": {"version": "1.60.0", "integrity": "sha512-fixture"}}}))
     (repo / "server/requirements.txt").write_text("playwright==1.60.0\npytest\n")
+    (repo / "web/next.config.mjs").write_text("export default {};\n")
     for tree in ("web", "harness"):
         (repo / tree / "package.json").write_text('{"private":true}\n')
     release = tmp_path / "os-release"
@@ -178,6 +180,77 @@ def test_nm_installed_tree_round_trip(fixture, capsys):
     assert invoke(fixture, capsys, kind="nm", writable="0", npm_version="10.9.1")["result"] == "miss"
 
 
+def test_nx_key_stable_and_sensitive(fixture, monkeypatch):
+    args = arguments(fixture, kind="nx")
+    original = cache.key_inputs(args)
+    assert cache.key_inputs(args) == original
+    assert original == {
+        "schema": "leaf.dep-cache.nx.v1",
+        "lock": hashlib.sha256((Path(args.repo) / "web/package-lock.json").read_bytes()).hexdigest(),
+        "config": hashlib.sha256((Path(args.repo) / "web/next.config.mjs").read_bytes()).hexdigest(),
+        "node": "v22.1.0", "platform": cache.sysconfig.get_platform(),
+        "arch": cache.platform.machine(), "day": "20261111",
+    }
+    for rel in ("web/package-lock.json", "web/next.config.mjs"):
+        path = Path(args.repo) / rel
+        content = path.read_bytes()
+        path.write_bytes(content + b"x")
+        assert cache.key_inputs(args) != original
+        path.write_bytes(content)
+    for changes in ({"node_version": "v22.1.1"}, {"day": "20261112"}):
+        assert cache.key_inputs(arguments(fixture, kind="nx", **changes)) != original
+    for module, name in ((cache.sysconfig, "get_platform"), (cache.platform, "machine")):
+        with monkeypatch.context() as context:
+            context.setattr(module, name, lambda: "fixture-other")
+            assert cache.key_inputs(args) != original
+    write(Path(args.repo) / "web/app/page.tsx", b"changed source")
+    Path(args.os_release).unlink()
+    assert cache.key_inputs(args) == original
+
+
+@pytest.mark.parametrize("field,value", [
+    ("day", ""), ("day", "2026-11-11"), ("day", "2026111"), ("day", "20261111\n"),
+    ("node_version", "22.1.0"), ("node_version", "v22"),
+    ("node_version", "v22.1.0-extra"), ("node_version", "v22.1.0\n"),
+])
+def test_nx_invalid_inputs_fail_open(fixture, capsys, field, value):
+    with pytest.raises(ValueError):
+        cache.key_inputs(arguments(fixture, kind="nx", **{field: value}))
+    assert invoke(fixture, capsys, kind="nx", **{field: value})["result"] == "error"
+    assert not (fixture[0] / "cache").exists()
+
+
+@pytest.mark.parametrize("rel", ["web/package-lock.json", "web/next.config.mjs"])
+def test_nx_missing_inputs_fail_open(fixture, capsys, rel):
+    (fixture[0] / "repo" / rel).unlink()
+    with pytest.raises(ValueError):
+        cache.key_inputs(arguments(fixture, kind="nx"))
+    assert invoke(fixture, capsys, kind="nx")["result"] == "error"
+    assert not (fixture[0] / "cache").exists()
+
+
+def test_nx_round_trip_excludes_other_cache_data(fixture, capsys):
+    root = fixture[0] / "repo/web/.next/cache"
+    payloads = {"webpack/client/0.pack": b"webpack client", "webpack/server/index.pack": b"webpack server",
+                "swc/plugins/tool.wasm": b"swc"}
+    for rel, payload in payloads.items():
+        write(root / rel, payload)
+    for rel in ("images/image", "fetch-cache/response", "config.json", "webpack-other/partial"):
+        write(root / rel)
+    assert invoke(fixture, capsys, "publish", "nx")["result"] == "published"
+    entry = entry_for(fixture, "nx")
+    assert cache.ENTRY_RE.fullmatch(entry.name)
+    meta = cache.load_meta(entry, "nx")
+    assert {row[0] for row in meta["files"]} == {"next-cache/" + rel for rel in payloads}
+    cache.shutil.rmtree(root)
+    before = snapshot(entry.parent)
+    result = invoke(fixture, capsys, kind="nx", writable="0")
+    assert result["result"] == "exact" and result["next-cache"] == "seeded"
+    assert {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()} == payloads
+    assert snapshot(entry.parent) == before
+    assert invoke(fixture, capsys, kind="nx", writable="0", day="20261112")["result"] == "miss"
+
+
 def test_py_key_stable_and_sensitive(fixture, monkeypatch):
     base = fixture[0] / "base"
     base.mkdir()
@@ -235,7 +308,7 @@ def test_py_installed_tree_round_trip(fixture, capsys):
     assert invoke(fixture, capsys, kind="py", dest=root, day="20261112", writable="0")["result"] == "miss"
 
 
-@pytest.mark.parametrize("kind", ["dl", "pw", "as", "nm", "py"])
+@pytest.mark.parametrize("kind", ["dl", "pw", "as", "nm", "py", "nx"])
 def test_per_kind_off_is_scoped(fixture, capsys, kind):
     write(fixture[0] / "cache" / (".leaf-dep-cache-off-" + kind), b"")
     assert invoke(fixture, capsys, kind=kind)["result"] == "off"

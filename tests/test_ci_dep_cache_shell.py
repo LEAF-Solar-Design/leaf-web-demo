@@ -44,6 +44,7 @@ def setup(tmp_path, monkeypatch):
     (repo / "web/package-lock.json").write_text(json.dumps({"packages": {
         "node_modules/playwright-core": {"version": "1.60.0", "integrity": "sha512-fixture"}}}))
     (repo / "server/requirements.txt").write_text("playwright==1.60.0\n")
+    (repo / "web/next.config.mjs").write_text("export default {};\n")
     env = {"PATH": os.environ.get("PATH", ""), "HOME": shell_path(home),
            "CODEBUILD_SRC_DIR": shell_path(repo), "FIXTURE_BIN": shell_path(bins),
            "FIXTURE_PIP_CACHE": shell_path(tmp_path / "pip"),
@@ -206,6 +207,47 @@ def test_heavy_entry_seeds_before_install(setup, capsys):
     producers = [line for line in trace if line not in browser]
     assert producers == ["npm run build", "python scripts/check_license_fence.py --self-test",
                          "python scripts/check_license_fence.py ."]
+
+
+@pytest.mark.parametrize("writable,helper_rc,build_rc,missing", [
+    ("0", "0", "0", None), ("1", "0", "0", None),
+    ("1", "3", "0", None), ("1", "0", "7", None),
+    ("1", "0", "0", "LEAF_DEP_CACHE_HELPER"),
+    ("1", "0", "0", "LEAF_CI_CACHE_DIR"),
+])
+def test_webbundle_seeds_before_build_and_publishes_only_when_writable(setup, writable, helper_rc, build_rc, missing):
+    root, _, env = setup
+    env.update(LEAF_CI_CACHE_WRITABLE=writable, FIXTURE_HELPER_RC=helper_rc, FIXTURE_BUILD_RC=build_rc)
+    if missing:
+        env.pop(missing)
+    stub(root / "bin/python", '[[ "$1" == -I && "$2" == -B && "$3" == "$LEAF_DEP_CACHE_HELPER" ]]\n'
+         'shift 3\naction="$1"\nshift\n'
+         '[[ "$*" == "--kind nx --repo $CODEBUILD_SRC_DIR --cache-dir $LEAF_CI_CACHE_DIR '
+         '--writable $LEAF_CI_CACHE_WRITABLE --run $CODEBUILD_BUILD_ID --day 20261111 --node-version v22.1.0" ]]\n'
+         'echo "$action" >> "$FIXTURE_TRACE"\n'
+         'if [[ "$FIXTURE_HELPER_RC" != 0 ]]; then exit "$FIXTURE_HELPER_RC"; fi\n'
+         'echo "LEAF_DEP_CACHE kind=nx action=$action result=miss"\n')
+    stub(root / "bin/npm", '[[ "$*" == "run build" ]]\n'
+         'echo build >> "$FIXTURE_TRACE"\nexit "$FIXTURE_BUILD_RC"\n')
+    stub(root / "bin/timeout", '[[ "$1" == --kill-after=5 ]]\nlimit="$2"\nshift 2\n'
+         'if [[ "$5" == seed ]]; then [[ "$limit" == 60 ]]; else [[ "$limit" == 120 ]]; fi\n'
+         'exec "$@"\n')
+    text = CI.read_text()
+    start = text.index('echo "LEAF_T start webbundle ')
+    end = text.index('echo "LEAF_T start license-fence ', start)
+    result = run(setup, text[start:end])
+    assert result.returncode == int(build_rc), result.stdout + result.stderr
+    expected = ["build"] if missing else ["seed", "build"]
+    if not missing and writable == "1" and build_rc == "0":
+        expected.append("publish")
+    assert (root / "calls").read_text().splitlines() == expected
+    assert "LEAF_T start webbundle " in result.stdout
+    assert ("LEAF_T end webbundle " in result.stdout) == (build_rc == "0")
+    if helper_rc != "0":
+        for action in ("seed", "publish"):
+            assert f"LEAF_DEP_CACHE kind=nx action={action} result=error" in result.stdout
+    if missing:
+        assert "LEAF_DEP_CACHE" not in result.stdout
 
 
 @pytest.fixture
