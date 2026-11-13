@@ -322,7 +322,7 @@ export function validateMaterialImport(value) {
     if (pointer) body.selection = { records_pointer: pointer }
     else delete body.selection
   }
-  boundedIntegrationBody(body, 163840)
+  boundedIntegrationBody(body, 65536)
   return body
 }
 
@@ -686,7 +686,7 @@ export function createIntegrationsClient({ origin = import.meta.env.VITE_INTEGRA
       const body = validateMaterialImport(input)
       return setupResponse(z.strictObject({ reference: IntegrationRefV1, revision,
         rowCount: z.number().int().nonnegative(), status: z.literal('complete') }), id, 'dataset-imports',
-      { signal, method: 'POST', body, bodyLimit: 163840 },
+      { signal, method: 'POST', body, bodyLimit: 65536 },
       (value) => value.reference.id === body.definition.id && value.reference.version === body.definition.version)
     },
     async getDatasetDerivationCapabilities(id, options) {
