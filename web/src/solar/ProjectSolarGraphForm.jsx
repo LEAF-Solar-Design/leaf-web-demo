@@ -43,7 +43,7 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
   const [panelContext, setPanelContext] = useState(null)
   const panelInputs = panelDraft?.scope === scope ? panelDraft : { names: {}, numbers: {} }
   const panelGraph = panelContext?.scope === scope ? panelContext.graph : null
-  const panelProposals = proposePanelGroups(panelGraph)
+  const panelProposals = proposePanelGroups(panelGraph, panelInputs.numbers)
   const panelInputKey = name === 'solar-panel-groups' ? JSON.stringify([panelInputs.names, panelInputs.numbers]) : ''
   function groupInputs(proposals) {
     return proposals.map((proposal, index) => ({ key: proposal.key,
@@ -172,7 +172,7 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
         if (name === 'solar-panel-groups') {
           const graph = outcome.data.intake.solar_design_graph
           setPanelContext({ scope, graph })
-          proposals = proposePanelGroups(graph).proposals
+          proposals = proposePanelGroups(graph, panelInputs.numbers).proposals
           const checked = validatePanelGroups(graph, groupInputs(proposals), panelInputs.numbers)
           if (!checked.ok) { setCurrent({ state, reason: checked.reason }, pending.generation); return }
           groups = checked.value
@@ -181,7 +181,8 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
           insertionPointText, groups, catalogDigest, idempotencyKey: 'candidate-validation' })
         if (!validate.ok) { setCurrent({ state, reason: validate.reason }, pending.generation); return }
         phase = 'prepare'
-        const fingerprint = JSON.stringify([validate.request, state.intakeSha256])
+        const fingerprint = JSON.stringify([validate.request, state.intakeSha256,
+          proposals ? proposalKey(proposals) : null])
         let candidate = scope.candidate
         if (!candidate || candidate.fingerprint !== fingerprint) {
           const built = buildProjectSolarGraphRequest({ tool: name, binding, state, currentState: state,
@@ -267,7 +268,7 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
       let groups
       if (name === 'solar-panel-groups' && currentState.mode === 'edit') {
         const graph = outcome.data.intake.solar_design_graph
-        const proposed = proposePanelGroups(graph)
+        const proposed = proposePanelGroups(graph, panelInputs.numbers)
         const checked = validatePanelGroups(graph, groupInputs(proposed.proposals), panelInputs.numbers)
         const reason = proposalKey(proposed.proposals) !== armed.candidate.proposalKey ? 'panel_groups_stale'
           : !checked.ok ? checked.reason : null
@@ -375,6 +376,16 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
             setPanelDraft({ scope, names: panelInputs.names, numbers: { ...panelInputs.numbers, [key]: event.target.value } })
           }} />
       </label>)}
+      <label>Gap between groups
+        <input type="number" min="0" step="any" value={panelInputs.numbers.gap_distance ?? ''}
+          aria-describedby="panel-group-gap-help"
+          onChange={(event) => {
+            invalidate(true)
+            setPanelDraft({ scope, names: panelInputs.names,
+              numbers: { ...panelInputs.numbers, gap_distance: event.target.value } })
+          }} />
+      </label>
+      <p id="panel-group-gap-help">Drawing units. Enter a positive distance, or leave blank to group by angle.</p>
       <p role="status">{panelProposals.singletons} singleton panels cannot be grouped.</p>
       {panelProposals.invalid_handles > 0 && <p role="status">
         {panelProposals.invalid_handles} panels have a drawing handle that cannot be grouped.

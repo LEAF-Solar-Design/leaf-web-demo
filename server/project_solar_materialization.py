@@ -14,6 +14,7 @@ from solar_solve_results import digest
 project = editor.project
 SCHEMA = 'leaf.project-physical-layout.v1'
 KEY = 'solar_physical_layout'
+PRODUCER_SEMANTICS = ('current-native', 'historical-list-reuse')
 
 
 def initial_parameters(body):
@@ -21,7 +22,9 @@ def initial_parameters(body):
         fail('REQUEST_INVALID', 400)
     if set(body) == {'boundary', 'preset', 'drawing_units'}:
         return deepcopy(body)
-    if (set(body) != {'original_intake', 'grid_long_axis'}
+    if (set(body) not in ({'original_intake', 'grid_long_axis'},
+                          {'original_intake', 'grid_long_axis', 'producer_semantics'})
+            or body.get('producer_semantics', 'current-native') not in PRODUCER_SEMANTICS
             or type(body['original_intake']) is not str
             or type(body['grid_long_axis']) is not int
             or not 2 <= body['grid_long_axis'] <= 300):
@@ -87,9 +90,28 @@ def _initial_receipt(version, request_id, metadata):
             'generation_source': deepcopy(metadata['generation_source'])}
 
 
+def _prepare_initial_layout(body):
+    """Bind generated geometry and its parsed model to the same preset loading rule."""
+    import solar_frames_piles as fp
+    generation, original = _original_generation(body) if 'original_intake' in body else (body, None)
+    semantics = body.get('producer_semantics', 'current-native')
+    current_native = semantics == 'current-native'
+    try:
+        document, inputs = fp.prepare_initial_frames(**generation, current_native=current_native)
+    except (fp.FramesPilesError, state.PhysicalStateError) as exc:
+        raise editor.EditorError(exc.code, 422) from None
+    _generation_provenance(inputs, document, generation['preset'], current_native=current_native)
+    inputs['producer_semantics'] = semantics
+    generation_source = {'parameters_sha256': digest(body), 'producer_semantics': semantics,
+                         'physical_content_sha256': editor._sha(state.encode_document(document))}
+    if original is not None:
+        inputs['original_intake'] = original
+        generation_source['original_intake_sha256'] = original['sha256']
+    return document, inputs, generation_source
+
+
 def publish_initial_layout(tenant, project_id, body, *, request_id):
     """Generate from parameters and publish the first real canonical artifact atomically."""
-    import solar_frames_piles as fp
     body = initial_parameters(body)
     org, actor = project._access(tenant, project_id, write=True)
     if not isinstance(request_id, UUID):
@@ -113,18 +135,8 @@ def publish_initial_layout(tenant, project_id, body, *, request_id):
     _initial_scope(tenant, project_id)
     if project.write_loop.drawing_mutations_refusal() is not None:
         project.refuse('WRITES_DRAINED')
-    generation, original = _original_generation(body) if 'original_intake' in body else (body, None)
-    try:
-        document, inputs = fp.prepare_initial_frames(**generation, current_native=True)
-    except (fp.FramesPilesError, state.PhysicalStateError) as exc:
-        raise editor.EditorError(exc.code, 422) from None
+    document, inputs, generation_source = _prepare_initial_layout(body)
     drawing_id = uuid5(project_id, 'solar-initial:' + str(request_id))
-    _generation_provenance(inputs, document, generation['preset'])
-    generation_source = {'parameters_sha256': digest(body),
-                         'physical_content_sha256': editor._sha(state.encode_document(document))}
-    if original is not None:
-        inputs['original_intake'] = original
-        generation_source['original_intake_sha256'] = original['sha256']
     # No imported source, synthetic base drawing, or canonical row exists here.
     output = materialize_native_layout({'organization_id': org, 'project_id': project_id,
         'actor_binding_id': actor, 'drawing_id': drawing_id}, None, deepcopy(document), None,
@@ -324,10 +336,10 @@ def _canonical_state(context, *, conn=None):
     return head, decoded.document, decoded.parameters
 
 
-def _generation_provenance(inputs, document, preset, *, existing=()):
+def _generation_provenance(inputs, document, preset, *, existing=(), current_native=True):
     """Keep the actual parsed model, including order-sensitive native pack semantics."""
     import solar_frames_piles as fp
-    loaded, _ = fp.load_current_preset(preset)
+    loaded, _ = (fp.load_current_preset if current_native else fp.load_preset)(preset)
     models = inputs.setdefault('generation_models', [])
     associations = inputs.setdefault('frame_generations', {})
     index = len(models)

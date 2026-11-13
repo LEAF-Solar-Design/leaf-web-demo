@@ -14,6 +14,7 @@ export default function HistoryView({ hidden = false, client = labArtifactsClien
   const [after, setAfter] = useState('')
   const [diff, setDiff] = useState(null)
   const [preview, setPreview] = useState(null)
+  const [exportRevision, setExportRevision] = useState('')
   const state = client.state
   const times = [...state.requestTimes].sort((a, b) => a - b)
   const percentile = rank => times.length ? Math.round(times[Math.ceil(times.length * rank) - 1]) : 0
@@ -23,7 +24,7 @@ export default function HistoryView({ hidden = false, client = labArtifactsClien
   useEffect(() => client.subscribe(() => refresh(value => value + 1)), [client])
   useEffect(() => {
     operation.current += 1
-    setBefore(''); setAfter(''); setDiff(null); setPreview(null); setStatus(''); setPending(false)
+    setBefore(''); setAfter(''); setDiff(null); setPreview(null); setExportRevision(''); setStatus(''); setPending(false)
   }, [client, generation])
   useEffect(() => {
     if (hidden) return undefined
@@ -91,6 +92,55 @@ export default function HistoryView({ hidden = false, client = labArtifactsClien
       } finally { if (valid(token)) setPending(false) }
     }}>Compare</button>
     {diff && <LabDiffView {...diff} />}
+    <label>Export revision<select aria-label="Export revision" value={exportRevision || preview || state.head || ''}
+      disabled={busy} onChange={event => setExportRevision(event.target.value)}>
+      <option value="">Choose revision</option>{rows.map(row => <option key={row.v} value={row.v}>r{row.v}</option>)}
+    </select></label>
+    <button type="button" disabled={busy || !(exportRevision || preview || state.head)} onClick={async () => {
+      const revision = Number(exportRevision || preview || state.head)
+      const token = ++operation.current
+      setPending(true)
+      try {
+        const result = await client.exportBundle(docId, revision)
+        if (!valid(token)) return
+        if (!result.ok) { setStatus(`Export failed: ${result.detail}`); return }
+        const urlApi = URL
+        const url = urlApi.createObjectURL(new Blob([JSON.stringify(result.bundle)], { type: 'application/json' }))
+        const link = document.createElement('a')
+        try {
+          link.href = url
+          link.download = `lab-${docId}-r${revision}.json`
+          document.body.appendChild(link)
+          link.click()
+        } finally { link.remove(); setTimeout(() => urlApi.revokeObjectURL(url), 1000) }
+        setStatus(`Exported r${revision}.`)
+      } catch { if (valid(token)) setStatus('Export failed: Could not download the bundle.') }
+      finally { if (valid(token)) setPending(false) }
+    }}>Export</button>
+    <label>Reopen bundle<input type="file" accept="application/json,.json" aria-label="Reopen bundle" disabled={busy}
+      onChange={async event => {
+        const file = event.target.files?.[0]
+        event.target.value = ''
+        if (!file) return
+        const token = ++operation.current
+        const graphOperation = client.beginGraphOperation()
+        setPending(true)
+        try {
+          if (file.size > 64 * 1024 * 1024) throw new Error('Bundle is too large.')
+          const text = typeof file.text === 'function' ? await file.text() : await new Promise((resolve, reject) => {
+            const reader = new FileReader()
+            reader.onload = () => resolve(reader.result)
+            reader.onerror = () => reject(new Error('Could not read the bundle.'))
+            reader.readAsText(file)
+          })
+          if (!valid(token) || !client.isCurrentOperation(graphOperation)) return
+          const result = await client.reopenBundle(text)
+          if (valid(token)) setStatus(result.ok ? `Reopened r${result.revision}.` : `Reopen failed: ${result.detail}`)
+        } catch (error) { if (valid(token)) setStatus(`Reopen failed: ${error.message}`) }
+        finally { if (valid(token)) setPending(false) }
+      }} /></label>
+    {state.openedBundle && <p role="status">Opened bundle {state.openedBundle.parts.identity.doc_id} r{state.openedBundle.parts.identity.revision}
+      {' · '}{state.openedBundle.parts.evaluations.length} stored evaluations. Graph is ready to edit.</p>}
     <button type="button" disabled={busy || state.head == null} onClick={() => run(() => client.publish(docId, state.head), 'Publish')}>Publish r{state.head ?? '?'}</button>
     <p role="status">{status}</p>
     <p>History p50 {percentile(.5)} ms · p99 {percentile(.99)} ms</p>

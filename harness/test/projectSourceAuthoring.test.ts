@@ -9,6 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHarness } from "../src/server.js";
 import { authorProjectSource, PROJECT_SOURCE_SCAFFOLD } from "../src/agent/projectSourceAuthoring.js";
 import { nativeProjectSourceProfile } from "../src/agent/nativeProjectSourceProfile.js";
+import { VideoInspectionError, type VideoInspectionInput, type VideoInspectionResult } from "../src/agent/projectVideoInspection.js";
+import { videoFixture, transcriptId, transcriptBytes } from "./projectVideoFixture.js";
 import { ProjectRepositoryEditCoordinator, type StagedProjectRepositoryEdit } from "../src/agent/projectRepositoryEditCoordinator.js";
 import { TenantRepoProviderImpl, type PgTenantRepoLeaseCoordinator } from "../src/ports/impl/tenantRepoProvider.js";
 import { TenantChangeRepo } from "../src/vendor/mushy-author/ports/impl/tenantChangeRepo.js";
@@ -46,6 +48,7 @@ describe("mounted first source author transaction with real private Git", () => 
   let coordination: ProjectRepositoryEditCoordination;
   let edit: ReturnType<typeof vi.fn<(input: RepoEditInput) => Promise<RepoEditResult>>>;
   let oauth: OAuthGrantProvider;
+  let inspect: ReturnType<typeof vi.fn<(input: VideoInspectionInput) => Promise<VideoInspectionResult>>>;
   let generation: number, confirmed: boolean;
   beforeEach(() => {
     vi.stubEnv("LEAF_AUTHORED_EXECUTION", "1");
@@ -99,10 +102,11 @@ describe("mounted first source author transaction with real private Git", () => 
       writeFileSync(join(input.repoDir, "app/page.tsx"), page);
       return { summary: "private", changedFiles: ["deliberate-lie"] };
     });
+    inspect = vi.fn(async () => { throw new Error("Video inspection not configured by this fixture"); });
     ports = { tenantRepo: provider, oauth, agentRunner: new FakeAgentRunner(), broker: new FakeBrokerApsClient() };
     service = new ProjectRepositoryEditCoordinator({ leases: provider, changeRepo: a => provider.projectChangeRepo(a), coordination });
     server = createHarness(ports, { auth: { enabled: false, secret }, projectRepositoryEdits: service,
-      projectSourceAuthoring: { oauth, editor: { edit } } }).listen(0);
+      projectSourceAuthoring: { oauth, editor: { edit }, videoInspector: { inspect } } }).listen(0);
     url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   });
   afterEach(async () => {
@@ -614,6 +618,72 @@ describe("mounted first source author transaction with real private Git", () => 
     expect(edit).toHaveBeenCalledTimes(1); expect(oauth.acquireGrant).toHaveBeenCalledTimes(1);
     expect(oauth.settleGrant).toHaveBeenCalledWith(authority.tenantId, "lease", { usage: { cost_tokens: 0 }, stop_reason: "error" });
     unchanged();
+  });
+
+  function videoRequest() {
+    const f = videoFixture({ tenant_id: common.tenant_id, organization_id: common.organization_id,
+      project_id: common.project_id, actor_binding_id: actor, edit_id: editId });
+    return { ...body(), source_profile: nativeProfile.id,
+      material: [material(transcriptId + ".txt", transcriptBytes.toString("utf8"))], video: f.video, budget_ms: 240000 };
+  }
+  it("stages protected video observations and transcript before source editing and combines usage", async () => {
+    const request = videoRequest(), f = videoFixture(request.video.manifest);
+    inspect.mockImplementation(async input => {
+      expect(input.video).toEqual(request.video);
+      expect(input.transcripts.get(transcriptId + ".txt")).toEqual(transcriptBytes);
+      return { report: f.report, telemetry: { input_tokens: 3, output_tokens: 4 } };
+    });
+    edit.mockImplementation(async input => {
+      expect(inspect).toHaveBeenCalledOnce();
+      expect(readFileSync(join(input.repoDir, "Resources/Input/" + transcriptId + ".txt"))).toEqual(transcriptBytes);
+      expect(readFileSync(join(input.repoDir, "Resources/Input/video-observations-" + request.video.manifest_sha256 + ".json"))).toEqual(f.report);
+      writeFileSync(join(input.repoDir, "Sources/ContentView.swift"), swift);
+      return { summary: "synthetic", changedFiles: [], telemetry: { input_tokens: 5, output_tokens: 6 } };
+    });
+    expect((await post(request)).status).toBe(200);
+    expect(oauth.settleGrant).toHaveBeenCalledWith(authority.tenantId, "lease",
+      { usage: { cost_tokens: 18 }, stop_reason: "end_turn" });
+    expect(receipt.changed_paths).toContain("Resources/Input/video-observations-" + request.video.manifest_sha256 + ".json");
+    expect(git(bare, ["rev-parse", "main"])).toBe(base);
+  });
+  it.each(["inspection", "missing-observations", "mutated-observations"])(
+    "rejects %s without accepting source and settles inspection usage", async mode => {
+      const request = videoRequest(), f = videoFixture(request.video.manifest);
+      inspect.mockImplementation(async () => {
+        if (mode === "inspection") throw new VideoInspectionError({ input_tokens: 3, output_tokens: 4 });
+        const report = mode === "missing-observations"
+          ? Buffer.from(JSON.stringify({ ...JSON.parse(f.report.toString()), observations: [] })) : f.report;
+        return { report, telemetry: { input_tokens: 3, output_tokens: 4 } };
+      });
+      edit.mockImplementation(async input => {
+        writeFileSync(join(input.repoDir, "Sources/ContentView.swift"), swift);
+        writeFileSync(join(input.repoDir, "Resources/Input/video-observations-" + request.video.manifest_sha256 + ".json"), "changed");
+        return { summary: "synthetic", changedFiles: [] };
+      });
+      expect((await post(request)).status).toBe(409);
+      if (mode !== "mutated-observations") expect(edit).not.toHaveBeenCalled();
+      expect(oauth.settleGrant).toHaveBeenCalledWith(authority.tenantId, "lease",
+        { usage: { cost_tokens: 7 }, stop_reason: "error" });
+      expect(git(bare, ["rev-parse", "main"])).toBe(base);
+    });
+  it("does not start source generation when cancelled during inspection", async () => {
+    const request = videoRequest(), f = videoFixture(request.video.manifest), controller = new AbortController();
+    inspect.mockImplementation(async () => {
+      controller.abort();
+      return { report: f.report, telemetry: { input_tokens: 2, output_tokens: 3 } };
+    });
+    await expect(authorProjectSource(service, { oauth, editor: { edit }, videoInspector: { inspect } },
+      request, authority.tenantId, controller.signal)).rejects.toThrow();
+    expect(edit).not.toHaveBeenCalled();
+    expect(oauth.settleGrant).toHaveBeenCalledWith(authority.tenantId, "lease",
+      { usage: { cost_tokens: 5 }, stop_reason: "error" });
+  });
+  it("rejects a forged video manifest before acquiring a grant", async () => {
+    const request = videoRequest();
+    request.video.manifest_sha256 = "0".repeat(64);
+    expect((await post(request)).status).toBe(409);
+    expect(inspect).not.toHaveBeenCalled(); expect(edit).not.toHaveBeenCalled();
+    expect(oauth.acquireGrant).not.toHaveBeenCalled();
   });
 
   it("stages exact native scaffold, resource bytes and new Swift, then requires explicit publication", async () => {

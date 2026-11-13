@@ -1,5 +1,8 @@
 import { z } from 'zod'
 import { authHeaders, noteUnauthorized } from '../api.js'
+import { serviceRequestAuthority, rememberServiceResponse } from '../lib/serviceAuthSession.js'
+import { DatasetDerivationCapabilitiesV1, DatasetDerivationRequestV1, DatasetDerivationResultV1,
+  DatasetDerivationLineageV1 } from '../../../vendor/assistant-contract/src/dataset-derivation'
 import { parseScheduleDraftReferencePage } from '../../../vendor/assistant-react/src/actions/workflow-schedule-draft-picker-state'
 import { ConnectionV1, DatasetElementV1, DatasetQueryV1, DatasetReadV1, DatasetFieldV1, IntegrationRefV1,
   ConnectorDefinitionV1, DatasetDefinitionV1, TransformMappingV1, IntegrationWorkflowScheduleDraftV1,
@@ -114,6 +117,25 @@ export const ManualWorkflowHistoryPageV2 = z.strictObject({
     .refine((items) => new Set(items.map((run) => run.run_id.toLowerCase())).size === items.length),
   next_cursor: workflowCursor.nullable(),
 })
+export function manualWorkflowExport(projectId, selected, value) {
+  if (!UUID.test(projectId)) throw invalid()
+  const prior = parse(IntegrationManualWorkflowRunV2, selected)
+  const snapshot = parse(IntegrationManualWorkflowSnapshotV2, value)
+  const run = snapshot.run
+  if (!sameRef(prior.workflow_ref, run.workflow_ref) ||
+      ['run_id', 'submission_digest', 'authority_binding_digest', 'authority_mode', 'created_at'].some((key) => prior[key] !== run[key]) ||
+      run.revision < prior.revision ||
+      (prior.requested_at !== undefined && prior.requested_at !== run.requested_at) ||
+      (prior.state === 'cancel_requested' && !['cancel_requested', 'cancelled'].includes(run.state)) ||
+      (['succeeded', 'cancelled'].includes(prior.state) && prior.state !== run.state) ||
+      (run.revision === prior.revision && JSON.stringify(prior) !== JSON.stringify(run))) throw invalid()
+  // Strict public evidence schemas exclude connection credentials and raw provider
+  // responses. Refuse secret-like saved arguments rather than alter a pinned definition.
+  const sensitive = /^(?:authorization|credentials?|credentialrefs?|password|passwd|(?:client|webhooksigning)?secret|apikey|(?:access|refresh|id)?token)$/i
+  if (snapshot.definition.steps.some((step) => Object.entries(step.arguments).some(([key, value]) =>
+    sensitive.test(key.replace(/_/g, '')) || (typeof value === 'string' && /^Bearer\s+\S+/i.test(value))))) throw invalid()
+  return { schema_version: 1, project_id: projectId, workflow_ref: run.workflow_ref, ...snapshot }
+}
 const scheduleDate = z.string().regex(/^20\d{2}-\d{2}-\d{2}(?![\s\S])/).refine((value) => {
   const date = new Date(`${value}T00:00:00Z`)
   return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value
@@ -182,7 +204,7 @@ const materialContext = z.strictObject({ schema: z.literal('leaf.project-materia
       if (marker.records_pointer !== pointer || marker.row_count !== value.row_count) throw invalid()
     } catch { ctx.addIssue({ code: 'custom', message: 'Material context is unavailable or too large.' }) }
   })
-const metadata = z.object({
+const metadataBase = z.object({
   reference: IntegrationRefV1, revision, title: z.string().min(1).max(120),
   fields: z.array(DatasetFieldV1).min(1).max(100).refine((fields) => new Set(fields.map((field) => field.id)).size === fields.length),
   lastAttempt: z.unknown(), freshness: z.unknown(),
@@ -236,7 +258,52 @@ const syncResult = refResult.extend({ receipt: syncReceipt, status: z.enum(['rea
   .refine((value) => sameRef(value.reference, value.receipt.dataset_ref) &&
     (value.receipt.outcome === 'success' ? value.status === (value.receipt.row_count ? 'ready' : 'empty') :
       ['stale', 'unavailable'].includes(value.status)))
-const datasetMetadata = metadata.extend({ lastAttempt: syncReceipt.nullable(), freshness: DatasetReadV1.shape.freshness.nullable() })
+const derivedMetadata = z.strictObject({
+  reference: metadataBase.shape.reference, revision, title: metadataBase.shape.title,
+  fields: metadataBase.shape.fields, derivation: DatasetDerivationLineageV1,
+  input_freshness: z.array(z.strictObject({ alias: z.enum(['primary', 'events', 'domain']),
+    semantic_digest: IntegrationRefV1.shape.digest, freshness: DatasetReadV1.shape.freshness })).min(1).max(2),
+  diagnostics: z.strictObject({ excluded_domain_rows: z.number().int().min(0).max(100000),
+    null_event_time_rows: z.number().int().min(0).max(100000) }),
+  computed_at: instant, freshness: DatasetReadV1.shape.freshness,
+  lastAttempt: z.strictObject({ outcome: z.literal('success'), row_count: z.number().int().min(0).max(100000) }),
+}).superRefine((value, ctx) => {
+  const aliases = value.input_freshness.map(input => input.alias)
+  if (value.reference.digest !== value.derivation.derivation_digest
+    || new Set(aliases).size !== aliases.length || aliases.length !== value.derivation.inputs.length
+    || value.derivation.inputs.some(input => !aliases.includes(input.alias))) {
+    ctx.addIssue({ code: 'custom', message: 'Derived metadata evidence does not match its lineage.' })
+  }
+})
+const materialMetadata = z.strictObject({
+  reference: metadataBase.shape.reference, revision, title: metadataBase.shape.title,
+  fields: metadataBase.shape.fields, material_lineage: materialLineage,
+  material_context: materialContext.optional(),
+  lastAttempt: z.strictObject({ outcome: z.literal('success'), row_count: z.number().int().min(0).max(100000) }),
+  freshness: DatasetReadV1.shape.freshness,
+}).superRefine((value, ctx) => {
+  const context = value.material_context
+  if (context && (context.row_count !== value.lastAttempt.row_count ||
+    ['kind', 'material_id', 'sha256', 'byte_length'].some(key => context.source[key] !== value.material_lineage[key]))) {
+    ctx.addIssue({ code: 'custom', message: 'Material metadata evidence does not match its lineage.' })
+  }
+})
+function metadataVariant(raw) {
+  // Select before parsing: invalid tagged evidence cannot fall back to a raw
+  // schema that strips it. Raw connector receipts keep their checks.
+  return z.unknown().transform((value, ctx) => {
+    const derived = value && typeof value === 'object' && ['derivation', 'input_freshness', 'diagnostics', 'computed_at']
+      .some(key => Object.hasOwn(value, key))
+    const material = value && typeof value === 'object' && Object.hasOwn(value, 'material_lineage')
+    const result = (material ? materialMetadata : derived ? derivedMetadata : raw).safeParse(value)
+    if (result.success) return result.data
+    ctx.addIssue({ code: 'custom', message: 'Dataset metadata is invalid.' })
+    return z.NEVER
+  })
+}
+const metadata = metadataVariant(metadataBase)
+const datasetMetadata = metadataVariant(metadataBase.extend({ lastAttempt: syncReceipt.nullable(),
+  freshness: DatasetReadV1.shape.freshness.nullable() }))
 const registrationSchema = z.strictObject({ definition: DatasetDefinitionV1, mapping: TransformMappingV1 })
   .refine(({ definition, mapping }) => definition.fields.length === mapping.fields.length &&
     definition.fields.every((field) => mapping.fields.some((entry) => entry.field_id === field.id)) &&
@@ -255,7 +322,7 @@ export function validateMaterialImport(value) {
     if (pointer) body.selection = { records_pointer: pointer }
     else delete body.selection
   }
-  boundedIntegrationBody(body, 163840)
+  boundedIntegrationBody(body, 65536)
   return body
 }
 
@@ -346,14 +413,20 @@ export function createIntegrationsClient({ origin = import.meta.env.VITE_INTEGRA
     if (!UUID.test(projectId) || !signal) throw invalid()
     if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
     const encoded = body === undefined ? undefined : boundedIntegrationBody(body, bodyLimit)
+    const authority = serviceRequestAuthority()
+    const service = authority.mode === true
     const auth = authHeaders()
-    if (!/^Bearer \S+(?![\s\S])/.test(auth.Authorization || '')) throw new IntegrationError(401, 'Sign in to view integrations.')
+    if (service ? !authority.identity || auth.Authorization !== `LeafServiceSession ${authority.selector}`
+      : !/^Bearer \S+(?![\s\S])/.test(auth.Authorization || '')) throw new IntegrationError(401, 'Sign in to view integrations.')
     try {
-      const response = await fetchImpl(`${destination}/api/v1/projects/${projectId}${path}`, {
-        method, signal, credentials: 'omit', redirect: 'error', cache: 'no-store',
-        headers: { ...auth, Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}), ...(match !== undefined ? { 'If-Match': String(match) } : {}) },
+      const response = await fetchImpl(`${service ? '' : destination}/api/v1/projects/${projectId}${path}`, {
+        method, signal, credentials: service ? 'same-origin' : 'omit', redirect: 'error', cache: 'no-store',
+        headers: { ...auth, Accept: 'application/json',
+          ...(service ? { 'X-Leaf-Integration-Origin': destination } : {}),
+          ...(body ? { 'Content-Type': 'application/json' } : {}), ...(match !== undefined ? { 'If-Match': String(match) } : {}) },
         ...(body ? { body: encoded } : {}),
       })
+      if (service) rememberServiceResponse(response, authority)
       noteUnauthorized(response, 'integrations', auth.Authorization, { fatal: false })
       if (!response.ok) {
         response.body?.cancel?.().catch(() => {})
@@ -613,21 +686,30 @@ export function createIntegrationsClient({ origin = import.meta.env.VITE_INTEGRA
       const body = validateMaterialImport(input)
       return setupResponse(z.strictObject({ reference: IntegrationRefV1, revision,
         rowCount: z.number().int().nonnegative(), status: z.literal('complete') }), id, 'dataset-imports',
-      { signal, method: 'POST', body, bodyLimit: 163840 },
+      { signal, method: 'POST', body, bodyLimit: 65536 },
       (value) => value.reference.id === body.definition.id && value.reference.version === body.definition.version)
+    },
+    async getDatasetDerivationCapabilities(id, options) {
+      return setupResponse(DatasetDerivationCapabilitiesV1, id, 'dataset-derivations/capabilities', options)
+    },
+    async createDatasetDerivation(id, input, options) {
+      const body = parse(DatasetDerivationRequestV1, input)
+      return setupResponse(DatasetDerivationResultV1, id, 'dataset-derivations',
+        { ...options, method: 'POST', body, bodyLimit: 163840 },
+        value => value.reference.id === body.output.id && value.reference.version === body.output.version)
     },
     async getDataset(id, reference, { revision: expected, ...options } = {}) {
       const ref = parse(IntegrationRefV1, reference)
       if (expected !== undefined) parse(revision, expected)
       return setupResponse(datasetMetadata, id, `datasets/${ref.id}/versions/${ref.version}${expected === undefined ? '' : `?revision=${expected}`}`, options,
         (value) => sameRef(value.reference, ref) && (expected === undefined || value.revision === expected) &&
-          (!value.lastAttempt || sameRef(value.lastAttempt.dataset_ref, ref)))
+          (value.derivation !== undefined || value.material_lineage !== undefined || !value.lastAttempt || sameRef(value.lastAttempt.dataset_ref, ref)))
     },
     async getDatasetVersion(id, datasetId, version, options) {
       parse(slug, datasetId); parse(revision, version)
       return setupResponse(datasetMetadata, id, `datasets/${datasetId}/versions/${version}`, options,
         (value) => value.reference.id === datasetId && value.reference.version === version &&
-          (!value.lastAttempt || sameRef(value.lastAttempt.dataset_ref, value.reference)))
+          (value.derivation !== undefined || value.material_lineage !== undefined || !value.lastAttempt || sameRef(value.lastAttempt.dataset_ref, value.reference)))
     },
     async syncDataset(id, reference, options) {
       const ref = parse(IntegrationRefV1, reference)

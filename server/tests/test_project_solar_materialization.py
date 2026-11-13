@@ -246,7 +246,8 @@ def test_initial_real_storage_metadata_replay_and_normal_history(fresh, monkeypa
     assert lane.http.post(route, json=body, headers={'Idempotency-Key': str(request)}).json() == receipt
 
 
-def test_original_intake_custody_in_canonical_layout_export(fresh):
+@pytest.mark.parametrize('semantics', [None, 'current-native', 'historical-list-reuse'])
+def test_original_intake_custody_in_canonical_layout_export(fresh, semantics):
     import solar_frames_piles as fp
     import solar_native_layout_dxf as native
 
@@ -260,6 +261,8 @@ def test_original_intake_custody_in_canonical_layout_export(fresh):
                 'pile_template': template}
     text = json.dumps(original, indent=2).replace('\n', '\r\n') + '\r\n'
     body = {'original_intake': text, 'grid_long_axis': 150}
+    if semantics is not None:
+        body['producer_semantics'] = semantics
     original_sha = hashlib.sha256(text.encode('utf-8')).hexdigest()
     headers = {'Idempotency-Key': str(uuid4())}
     route = f'/api/projects/{project}/solar-layout'
@@ -267,9 +270,12 @@ def test_original_intake_custody_in_canonical_layout_export(fresh):
     assert first.status_code == 200, first.text
     receipt = first.json()
     assert receipt['generation_source']['original_intake_sha256'] == original_sha
+    assert receipt['generation_source']['producer_semantics'] == (semantics or 'current-native')
     assert lane.http.post(route, json=body, headers=headers).json() == receipt
     for changed in ({**body, 'grid_long_axis': 151}, {**body, 'original_intake': text.replace('\r\n', '\n')}):
         assert lane.http.post(route, json=changed, headers=headers).status_code == 409
+    changed_semantics = 'current-native' if semantics == 'historical-list-reuse' else 'historical-list-reuse'
+    assert lane.http.post(route, json={**body, 'producer_semantics': changed_semantics}, headers=headers).status_code == 409
 
     drawing_id = receipt['drawing_id']
     version_id = receipt['drawing_version']['version_id']
@@ -288,12 +294,60 @@ def test_original_intake_custody_in_canonical_layout_export(fresh):
     assert decoded.document['units'] == {'drawing_units': 'm', 'meters_per_unit': 1.0}
     state = decoded.document['state']
     assert state['grid'] is None and state['piles'] == [] and state['frames']
+    current_native = semantics != 'historical-list-reuse'
+    assert decoded.parameters['producer_semantics'] == (semantics or 'current-native')
+    loaded, _ = (fp.load_current_preset if current_native else fp.load_preset)(preset)
+    from dataclasses import asdict
+    assert decoded.parameters['generation_models'] == [asdict(loaded)]
+    assert decoded.parameters['frame_generations'] == {frame['handle']: 0 for frame in state['frames']}
     changed_generation, _ = layout._original_generation({**body, 'grid_long_axis': 151})
-    comparison, _ = fp.prepare_initial_frames(**changed_generation, current_native=True)
+    comparison, _ = fp.prepare_initial_frames(**changed_generation, current_native=current_native)
     assert comparison == decoded.document
+    other, _ = fp.prepare_initial_frames(**changed_generation, current_native=not current_native)
+    assert other['state']['frames'] != state['frames']
     context = layout.project.resolve_context(lane.tenant, project, layout.UUID(version_id),
                                              drawing_id=layout.UUID(drawing_id))
     assert context.intake[layout.KEY]['request']['original_intake'].encode('utf-8') == text.encode('utf-8')
+
+
+@pytest.mark.parametrize('semantics', [None, True, [], {}, 'unknown'])
+def test_initial_rejects_unknown_producer_semantics(semantics):
+    with pytest.raises(editor.EditorError, match='PROJECT_LAYOUT_REQUEST_INVALID'):
+        layout.initial_parameters({'original_intake': '{}', 'grid_long_axis': 150,
+                                   'producer_semantics': semantics})
+
+
+@pytest.mark.parametrize('semantics', [None, 'current-native', 'historical-list-reuse'])
+def test_initial_preparation_binds_loader_geometry_models_and_export(semantics):
+    from dataclasses import asdict
+    import solar_frames_piles as fp
+    import solar_native_layout_dxf as native
+
+    values = initial_body()
+    preset = {**values['preset'], 'PileTemplateName': 'Synthetic piles'}
+    original = {'units': values['drawing_units'], 'boundary': values['boundary'],
+                'active_preset': preset, 'pile_template': {'Name': 'Synthetic piles'}}
+    raw = json.dumps(original, indent=2).replace('\n', '\r\n') + '\r\n'
+    body = {'original_intake': raw, 'grid_long_axis': 150}
+    if semantics is not None:
+        body['producer_semantics'] = semantics
+    document, inputs, source = layout._prepare_initial_layout(layout.initial_parameters(body))
+    current = semantics != 'historical-list-reuse'
+    expected, _ = fp.prepare_initial_frames(boundary=values['boundary'], preset=preset,
+                                           drawing_units=values['drawing_units'], current_native=current)
+    opposite, _ = fp.prepare_initial_frames(boundary=values['boundary'], preset=preset,
+                                           drawing_units=values['drawing_units'], current_native=not current)
+    assert document == expected
+    assert document['state']['frames'] != opposite['state']['frames']
+    loaded, _ = (fp.load_current_preset if current else fp.load_preset)(preset)
+    assert inputs['generation_models'] == [asdict(loaded)]
+    assert inputs['generation']['preset'] == preset
+    assert inputs['producer_semantics'] == source['producer_semantics'] == (semantics or 'current-native')
+    assert source['original_intake_sha256'] == hashlib.sha256(raw.encode()).hexdigest()
+    scope = {key: uuid4() for key in ('organization_id', 'project_id', 'drawing_id')}
+    exported = layout.materialize_native_layout(scope, None, document, None, parameters=inputs)
+    decoded = native.decode_native_layout(exported)
+    assert decoded.document == document and decoded.parameters == inputs
 
 
 def test_initial_existing_project_refuses_before_writer(lane, monkeypatch):
