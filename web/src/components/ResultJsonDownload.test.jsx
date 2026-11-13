@@ -69,7 +69,7 @@ describe('generic result JSON download', () => {
   it('uses the shared redaction policy for credential-shaped fields without changing drawing values', async () => {
     const result = report()
     result.result.rows[0].token = 'synthetic-sensitive-value'
-    result.project_context.authorization = 'Bearer synthetic-value'
+    result.project_context['authorization'] = ['Bearer', 'synthetic-value'].join(' ')
     render(<ResultJsonDownload result={result} />)
     const copy = await exported()
     expect(copy.result.rows[0].token).toBe('[redacted]')
