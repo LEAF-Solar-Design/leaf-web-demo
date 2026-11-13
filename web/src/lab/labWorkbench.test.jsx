@@ -91,14 +91,30 @@ describe('Lab view registration', () => {
     expect(first.map(({ id }) => id)).toEqual(['graph', 'widgets', 'history', 'runs', 'deploys', 'test-trade'])
     expect(new Set(first.map(({ component }) => component)).size).toBe(6)
     expect(first.find(({ id }) => id === 'widgets').component).toBe(WidgetsView)
-    expect(first.map(({ label }) => label)).toEqual(['strategy', 'market', 'test', 'keeper', 'lane']
-      .map((id) => glossary.terms.find((term) => term.id === id).plain).concat('Test trade'))
+    expect(first.map(({ label }) => label)).toEqual(['strategy', 'widgets', 'test', 'keeper', 'lane']
+      .map((id) => id === 'widgets' ? 'Widgets' : glossary.terms.find((term) => term.id === id).plain).concat('Test trade'))
     expect(Object.isFrozen(first)).toBe(true)
     expect(first.every(Object.isFrozen)).toBe(true)
   })
 })
 
 describe('LabWorkbench', () => {
+  it('opens the widget designer through a named Widgets link without authoring a tool', () => {
+    const originalUrl = window.location.href
+    try {
+      render(<LabWorkbench route={route('graph')} status={on} />)
+      const navigation = screen.getByRole('navigation', { name: 'Lab views' })
+      fireEvent.click(within(navigation).getByRole('link', { name: 'Widgets', exact: true }))
+      expect(window.location.pathname).toBe('/app/lab/widgets')
+      expect(screen.getByRole('region', { name: 'Widget designer', exact: true })).toBeVisible()
+      expect(screen.getByRole('textbox', { name: 'Document ID' })).toBeVisible()
+      expect(screen.getByRole('button', { name: 'New', exact: true })).toBeVisible()
+      expect(within(navigation).getByRole('link', { name: 'Widgets', exact: true })).toHaveAttribute('aria-current', 'page')
+    } finally {
+      window.history.replaceState({}, '', originalUrl)
+    }
+  })
+
   it('redirects standalone sign-in without preloading or opening a popup', () => {
     render(<LabWorkbench status={{ state: 'signed-out' }} />)
     fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))

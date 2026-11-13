@@ -204,6 +204,48 @@ def test_ambiguous_equal_shape_match_refuses_without_the_recorded_order():
     assert [m["candidates"] for m in result["matches"]] == [[0, 1], [1]]
 
 
+@pytest.mark.parametrize("order", ["unknown", "recorded"])
+def test_review_lists_every_group_and_keeps_unresolved_panels_unassigned(order):
+    parts = [row_panels(prefix, n, x0=500.0 * i)
+             for i, (prefix, n) in enumerate((("A", 2), ("B", 3), ("C", 4), ("D", 5)))]
+    panels = [p for part in parts for p in part]
+    groups = [{"block": f"G{i}", "panels": [p["handle"] for p in part]}
+              for i, part in enumerate(parts)]
+    matrices = [plain_grid([1, 2]), plain_grid([1, 2, 3, 4]),
+                plain_grid([4, 3, 2, 1], inv=2), plain_grid([1, 2, 3, 4, 5])]
+    before = copy.deepcopy((matrices, groups, panels))
+    result = si.run_import(matrices, groups, panels, alignment_tolerance=1.0,
+                           selection_order=order, review=True)
+    assert (matrices, groups, panels) == before
+    assert [m["block"] for m in result["matches"]] == [g["block"] for g in groups]
+    assert [m.get("status", "matched") for m in result["matches"]] == [
+        "matched", "unmatched", "ambiguous", "matched"]
+    assert [m["candidates"] for m in result["matches"]] == [[0], [], [1, 2], [3]]
+    assert [m["grid_index"] for m in result["matches"]] == [0, None, None, 3]
+    assert [s["source"]["group_index"] for s in result["strings"]] == [0, 3]
+    assert [s["panels"] for s in result["strings"]] == [
+        ["A01", "A00"], ["D04", "D03", "D02", "D01", "D00"]]
+    assert result["bridge_strings"] == []
+    assert result["unassigned"] == [p["handle"] for part in parts[1:3] for p in part]
+    # Review does not relax the default strict import path.
+    with pytest.raises(SolarEdgeImportError) as err:
+        si.run_import(matrices, groups, panels, alignment_tolerance=1.0, selection_order=order)
+    assert err.value.code == "no-structural-match"
+
+
+def test_review_does_not_assign_a_shared_grid_to_the_first_drawing_group():
+    panels = row_panels("A", 3) + row_panels("B", 3, x0=500.0)
+    groups = [{"block": "GA", "panels": [p["handle"] for p in panels[:3]]},
+              {"block": "GB", "panels": [p["handle"] for p in panels[3:]]}]
+    for ordered in (groups, list(reversed(groups))):
+        result = si.run_import([plain_grid([1, 2, 3])], ordered, panels,
+                               alignment_tolerance=1.0, selection_order="recorded", review=True)
+        assert [m["status"] for m in result["matches"]] == ["ambiguous", "ambiguous"]
+        assert [m["candidates"] for m in result["matches"]] == [[0], [0]]
+        assert result["strings"] == []
+        assert result["unassigned"] == [p["handle"] for p in panels]
+
+
 def test_missing_match_and_missing_bridge_handle_refuse():
     panels = row_panels("P", 4)
     with pytest.raises(SolarEdgeImportError) as err:
