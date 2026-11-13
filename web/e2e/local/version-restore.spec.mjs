@@ -1,7 +1,19 @@
 import { expect as baseExpect, test } from '@playwright/test'
 import { REQUEST, catProofResponse, makeCatProofState } from '../catProofFixture.mjs'
 
-const expect = baseExpect.configure({ timeout: 20_000 })
+// Device CI workers differ about 4x in browser speed (2026-11-12: zachs and the two WSL workers on one
+// laptop fail every fixed 20 s / 60 s deadline here while run-1 and run-2 pass). Budgets are ceilings,
+// not waits: a passing test takes the same time at any scale. LEAF_E2E_TIME_SCALE overrides (1 to 10).
+const TIME_SCALE = (() => {
+  const raw = process.env.LEAF_E2E_TIME_SCALE
+  if (raw === undefined || raw === '') return 3
+  const value = Number(raw)
+  if (!Number.isFinite(value) || value < 1 || value > 10) throw new Error('LEAF_E2E_TIME_SCALE must be a number from 1 to 10')
+  return value
+})()
+const budget = (ms) => Math.round(ms * TIME_SCALE)
+
+const expect = baseExpect.configure({ timeout: budget(20_000) })
 
 // Synthetic fixture diagnostics, emitted only for the two previously failed cases.
 const restoreProofDiagnostics = new WeakMap()
@@ -15,6 +27,8 @@ test.afterEach(async ({ page }, testInfo) => {
   console.log(`RESTORE_DIAGNOSTIC ${body}`)
   await testInfo.attach('restore-fixture-diagnostic', { body, contentType: 'application/json' })
 })
+
+test.beforeEach(async ({}, testInfo) => { testInfo.setTimeout(budget(30_000)) })
 
 // A DRAWING mutation, which is what "read-only preview" is about. Telemetry is
 // a non-GET too, but it carries no drawing write and the surface emits it on
@@ -224,7 +238,7 @@ async function mountVersionSurface(page, {
 }
 
 test('the CAD Approve button is uncovered at rest before clicking', async ({ page }) => {
-  test.setTimeout(60_000)
+  test.setTimeout(budget(60_000))
   await mountVersionSurface(page, {
     beforeApprove: async (approve) => {
       await expect(page.locator('.app[data-studio-shell="cockpit"][data-surface="cad"] .cad-overview')).toBeVisible()
@@ -240,7 +254,7 @@ test('the CAD Approve button is uncovered at rest before clicking', async ({ pag
 })
 
 test('the /app history drawer shows deltas and restores an old version as a new head', async ({ page }) => {
-  test.setTimeout(60_000)
+  test.setTimeout(budget(60_000))
   const observed = await mountVersionSurface(page)
   const history = page.getByRole('dialog', { name: 'Version history' })
   const v1 = history.getByTestId('vh-row-v1')
@@ -283,14 +297,14 @@ async function saveAndRestoreVersion(page, kind) {
     return
   }
 
-  await expect(page.locator('.workspace-card[data-engine-document="cat-panels-v3.dxf"]')).toHaveCount(1, { timeout: 60_000 })
+  await expect(page.locator('.workspace-card[data-engine-document="cat-panels-v3.dxf"]')).toHaveCount(1, { timeout: budget(60_000) })
   if (kind === 'edited') {
     const open = ribbon.locator('[data-tool="import-dxf"]')
     await open.click()
     await page.getByLabel('DXF file', { exact: true }).setInputFiles({
       name: 'history-edit.dxf', mimeType: 'application/dxf', buffer: Buffer.from(SAVE_DXF),
     })
-    await expect(page.locator('.workspace-card[data-engine-document="history-edit.dxf"]')).toHaveCount(1, { timeout: 60_000 })
+    await expect(page.locator('.workspace-card[data-engine-document="history-edit.dxf"]')).toHaveCount(1, { timeout: budget(60_000) })
     await open.click()
   }
 
@@ -304,7 +318,7 @@ async function saveAndRestoreVersion(page, kind) {
   await page.getByLabel('ribbon x2', { exact: true }).fill('10')
   await page.getByLabel('ribbon y2', { exact: true }).fill('10')
   await page.getByTestId('cockpit-prompt-run').click()
-  await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('2', { timeout: 60_000 })
+  await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('2', { timeout: budget(60_000) })
   await page.keyboard.press('Escape')
   await page.getByRole('tab', { name: 'Insert', exact: true }).click()
   await expect(save).toBeEnabled()
@@ -346,17 +360,17 @@ async function saveAndRestoreVersion(page, kind) {
 }
 
 test('saving an edited version makes it head with its kind, then restores the previous version', async ({ page }) => {
-  test.setTimeout(180_000)
+  test.setTimeout(budget(180_000))
   await saveAndRestoreVersion(page, 'edited')
 })
 
 test('saving a plan version makes it head with its kind, then restores the previous version', async ({ page }) => {
-  test.setTimeout(180_000)
+  test.setTimeout(budget(180_000))
   await saveAndRestoreVersion(page, 'plan')
 })
 
 test('an unreadable restored head keeps its warning through history refresh and does not refresh the viewer', async ({ page }) => {
-  test.setTimeout(60_000)
+  test.setTimeout(budget(60_000))
   const observed = await mountVersionSurface(page, { restoredHeadReadable: false })
   const history = page.getByRole('dialog', { name: 'Version history' })
   const v1 = history.getByTestId('vh-row-v1')
@@ -400,7 +414,7 @@ test('an unreadable restored head keeps its warning through history refresh and 
 })
 
 test('an unreadable committed head locks writes before a stalled history refresh and survives a failed repair', async ({ page }) => {
-  test.setTimeout(60_000)
+  test.setTimeout(budget(60_000))
   const observed = await mountVersionSurface(page, {
     restoredHeadReadable: false,
     stallHistoryAfterRestore: true,
@@ -433,7 +447,7 @@ test('an unreadable committed head locks writes before a stalled history refresh
 })
 
 test('a stale post-restore head response cannot clear the write lock', async ({ page }) => {
-  test.setTimeout(60_000)
+  test.setTimeout(budget(60_000))
   const observed = await mountVersionSurface(page, { staleFirstHeadAfterRestore: true })
   const history = page.getByRole('dialog', { name: 'Version history' })
   const v1 = history.getByTestId('vh-row-v1')
@@ -461,7 +475,7 @@ test('a split head response (new head, old geometry) cannot clear the write lock
   // manifest AFTER a restore commits, reporting {intake v3, head 4}. The
   // head field proves nothing about what was seated; the lock must hold
   // until a COHERENT response (version === head) arrives.
-  test.setTimeout(60_000)
+  test.setTimeout(budget(60_000))
   const observed = await mountVersionSurface(page, { splitReadFirstHeadAfterRestore: true })
   const history = page.getByRole('dialog', { name: 'Version history' })
   const v1 = history.getByTestId('vh-row-v1')
@@ -489,7 +503,7 @@ test('an undo that landed after the restore releases the lock instead of wedging
   // after the restore. The response {version 3, head 3, latest 4} is
   // coherent AND post-restore (latest watermark), so the lock must release
   // — a >= head rule would wedge with redo disabled forever.
-  test.setTimeout(60_000)
+  test.setTimeout(budget(60_000))
   const observed = await mountVersionSurface(page, { failFirstRepairRead: true, undoLandedOnSecondRead: true })
   const history = page.getByRole('dialog', { name: 'Version history' })
   const v1 = history.getByTestId('vh-row-v1')
@@ -582,7 +596,7 @@ test('/try requests deltas like /app and still hides recovery controls while its
 // controls during a preview since it shipped; nothing pinned it after PR #409
 // removed the assertion, so it could have regressed silently.
 test('the /app drawer is read-only while previewing an older version and fires no mutating request', async ({ page }) => {
-  test.setTimeout(60_000)
+  test.setTimeout(budget(60_000))
   const observed = await mountVersionSurface(page)
   const history = page.getByRole('dialog', { name: 'Version history' })
 
