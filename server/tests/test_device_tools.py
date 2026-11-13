@@ -216,20 +216,22 @@ def test_light_states_summary_shows_group_members_and_off_limits(tools):
     ]
 
 
-@pytest.mark.parametrize("attributes,expected", [
+@pytest.mark.parametrize("attributes,expected,off_limits", [
     ({"entity_id": [None, 1, True, {}, [], "switch.x", "light.A/../b", "light.",
                     "light.a\n", "light." + "a" * 65, "light.secret", "light." + "a" * 24,
-                    "light.second", "light.first", "light.second"]}, ["light.second", "light.first"]),
-    ({"entity_id": [f"light.bulb_{i}" for i in range(25)]}, [f"light.bulb_{i}" for i in range(20)]),
+                    "light.second", "light.first", "light.second"]}, ["light.second", "light.first"], False),
+    ({"entity_id": [f"light.bulb_{i}" for i in range(25)]}, [f"light.bulb_{i}" for i in range(20)], False),
     ({"entity_id": [f"light.bulb_{i}" for i in range(20)] + ["light.wiz_rgbw_tunable_80ff06"]},
-     [f"light.bulb_{i}" for i in range(20)]),
-    ({"entity_id": "light.wiz_rgbw_tunable_80ff06"}, []),
-    ({"entity_id": []}, []),
-    ({"entity_id": [None, "switch.x", "light.secret"]}, []),
-    ({"entity_id": None}, []),
-    ({}, []),
+     [f"light.bulb_{i}" for i in range(20)], True),
+    ({"entity_id": ["light.wiz_rgbw_tunable_444f8e80ff06"]}, [], True),
+    ({"entity_id": "light.wiz_rgbw_tunable_80ff06"}, [], True),
+    ({"entity_id": "light.first"}, [], False),
+    ({"entity_id": []}, [], False),
+    ({"entity_id": [None, "switch.x", "light.secret"]}, [], False),
+    ({"entity_id": None}, [], False),
+    ({}, [], False),
 ])
-def test_light_states_summary_filters_and_bounds_members(tools, attributes, expected):
+def test_light_states_summary_filters_and_bounds_members(tools, attributes, expected, off_limits):
     device_id = device(tools)
     command_id = call(tools, "light_states", {"device_id": device_id}).json()["result"]["command_id"]
     store.lease_commands(device_id)
@@ -241,6 +243,8 @@ def test_light_states_summary_filters_and_bounds_members(tools, attributes, expe
     light = {"entity_id": "light.office", "name": "light.office"}
     if expected:
         light["members"] = expected
+    if off_limits:
+        light["off_limits"] = True
     assert response.json()["result"]["summary"]["lights"] == [light]
 
 
