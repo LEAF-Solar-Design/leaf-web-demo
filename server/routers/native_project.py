@@ -1,34 +1,24 @@
 """Authenticated, bounded public Native source routes."""
 from __future__ import annotations
 
-import hashlib
 import re
-from copy import deepcopy
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 import native_project_authoring as flow
-import browser_project_flow as project_flow
-import browser_project_source_export as source_export
-import project_repository_source as source
 import deps
 
 router = APIRouter(prefix='/api/projects/{project_id}/native/source')
 _PATH = re.compile(r'^/api/projects/[^/]+/native/source(?:/.*)?$')
 _PRIVATE = {'Cache-Control': 'private, no-store'}
-_LOCAL_REFUSAL = object()
 
 
 async def no_store_responses(request, call_next):
     response = await call_next(request)
     if _PATH.fullmatch(request.url.path):
         if response.status_code >= 400:
-            known = request.scope.get('_native_source_pre_generation_refusal')
-            if (response.status_code == 503 and isinstance(known, tuple) and len(known) == 2
-                    and known[0] is _LOCAL_REFUSAL):
-                return _response(known[1], 503)
             status = response.status_code
             status = 403 if status == 401 else (status if status in flow._ERRORS else 503)
             return _failure(flow.FlowError(status))
@@ -97,93 +87,6 @@ async def get_request(project_id: str, source_request_id: str, tenant=Depends(de
     return await _get(tenant, project_id, source_request_id)
 
 
-def _export_bundle(tenant, project_id, request_id, query_pairs):
-    current = flow.scope(tenant, project_id)
-    principal = (str(tenant), tenant.subject)
-    witnesses = source_export.parse_query(query_pairs)
-    try:
-        project_flow._uuid(request_id)
-    except (ValueError, TypeError, AttributeError):
-        raise flow.FlowError(422) from None
-    authority = deepcopy(project_flow.repository(current))
-    if authority is None:
-        raise flow.FlowError(409)
-
-    def read_candidate():
-        try:
-            return flow.read(tenant, project_id, request_id)
-        except flow.FlowError as exc:
-            if exc.status == 404:
-                raise flow.FlowError(409) from None
-            raise
-
-    row = deepcopy(read_candidate())
-    if (row.get('schema') != 'leaf.native-project-source.v1' or row.get('state') != 'published'
-            or row.get('project_id') != project_id or row.get('source_request_id') != request_id
-            or type(row.get('version')) is not int
-            or any(row.get(key) != value for key, value in witnesses.items())):
-        raise flow.FlowError(409)
-
-    def recheck():
-        if ((str(tenant), tenant.subject) != principal or flow.scope(tenant, project_id) != current
-                or project_flow.repository(current) != authority):
-            raise flow.FlowError(403)
-        if read_candidate() != row:
-            raise flow.FlowError(409)
-        if ((str(tenant), tenant.subject) != principal or flow.scope(tenant, project_id) != current
-                or project_flow.repository(current) != authority):
-            raise flow.FlowError(403)
-
-    recheck()
-    try:
-        result = source.export_project_source_bundle(
-            authority['tenant_id'], authority['organization_id'], authority['project_id'],
-            row['source_commit'], row['source_tree'], max_bytes=source_export.MAX_BUNDLE_BYTES)
-    except source.SourceConflict:
-        raise flow.FlowError(409) from None
-    except source.SourceUnavailable:
-        raise flow.FlowError(503) from None
-    if type(result) is not dict:
-        raise flow.FlowError(503)
-    bundle = result.get('bundle')
-    if (type(bundle) is not bytes or not 1 <= len(bundle) <= source_export.MAX_BUNDLE_BYTES
-            or not bundle.startswith((b'# v2 git bundle\n', b'# v3 git bundle\n'))
-            or type(result.get('size_bytes')) is not int or result['size_bytes'] != len(bundle)
-            or not project_flow._sha(result.get('bundle_sha256'))
-            or hashlib.sha256(bundle).hexdigest() != result['bundle_sha256']
-            or any(result.get(key) != row[key] for key in ('source_commit', 'source_tree'))):
-        raise flow.FlowError(503)
-    recheck()
-    return bundle, {
-        'Content-Disposition': f'attachment; filename="project-source-{row["source_commit"]}.bundle"',
-        'Content-Length': str(len(bundle)),
-        'X-Leaf-Source-Commit': row['source_commit'],
-        'X-Leaf-Source-Tree': row['source_tree'],
-        'X-Leaf-Bundle-Sha256': result['bundle_sha256'],
-        'X-Leaf-Source-Receipt-Digest': row['receipt_digest'],
-        'X-Leaf-Source-Version': str(row['version']),
-        'Cache-Control': 'private, no-store',
-        'X-Content-Type-Options': 'nosniff',
-    }
-
-
-@router.get('/requests/{source_request_id}/export')
-async def export_request(project_id: str, source_request_id: str, request: Request,
-                         tenant=Depends(deps.require_active_tenant)):
-    try:
-        # Customer project membership, never a worker lease, authorizes this read.
-        await run_in_threadpool(flow.scope, tenant, project_id)
-        if len(request.scope.get('query_string', b'')) > 2048:
-            raise flow.FlowError(422)
-        bundle, headers = await run_in_threadpool(_export_bundle, tenant, project_id,
-                                                 source_request_id, request.query_params.multi_items())
-        return Response(bundle, media_type='application/octet-stream', headers=headers)
-    except flow.FlowError as exc:
-        return _failure(exc)
-    except Exception:
-        return _failure(flow.FlowError(503))
-
-
 async def _post(project_id, request, tenant, action, edit_id=None):
     try:
         # Deny revoked/project-foreign callers before reading even one body chunk.
@@ -207,22 +110,6 @@ async def _post(project_id, request, tenant, action, edit_id=None):
     except flow.inspection.InspectionError:
         return _failure(flow.FlowError(403))
     except flow.FlowError as exc:
-        if (isinstance(exc, project_flow.PreGenerationRefusal) and action == 'request'
-                and exc.provenance is project_flow._RECORDED_REFUSAL):
-            expected = dict(schema='leaf.native-source-pre-generation-refusal.v1', project_id=project_id,
-                source_request_id=body['source_request_id'], source_profile=project_flow.NATIVE_PROFILE,
-                action='create', authority_session_id=session_id, authority_turn_id=turn_id, stage='before_generation')
-            # Authority ended with the refusal. Current membership must still hold.
-            try:
-                fresh = await run_in_threadpool(flow.scope, tenant, project_id, write=True)
-            except Exception:
-                return _failure(flow.FlowError(403))
-            if body['source_operation'] == 'create' and exc.refusal == expected and fresh == current:
-                value = dict(error=dict(code='video_unavailable', message=project_flow.VIDEO_REFUSAL_MESSAGE),
-                    refusal=expected)
-                response = _response(value, 503)
-                request.scope['_native_source_pre_generation_refusal'] = (_LOCAL_REFUSAL, value)
-                return response
         return _failure(exc)
     except Exception:
         return _failure(flow.FlowError(503))

@@ -59,43 +59,6 @@ export const config = { apiBase: API_BASE, get mockDefault() { return serviceSta
 const SOURCE_UUID = /^(?!00000000-0000-0000-0000-000000000000$)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const sourceHash = (value, size) => typeof value === 'string' && new RegExp(`^[0-9a-f]{${size}}$`).test(value)
 const sourceUnavailable = () => new Error('Project source is unavailable. Refresh to review its current state.')
-const preGenerationRefusals = new WeakMap()
-const VIDEO_REFUSAL_MESSAGE = 'Private video decoding is unavailable. Source generation did not start.'
-const refusalKeys = ['schema', 'project_id', 'source_request_id', 'source_profile', 'action',
-  'authority_session_id', 'authority_turn_id', 'stage']
-const closedSourceObject = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
-  && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key))
-export function isProjectSourcePreGenerationRefusal(error, expected) {
-  const witness = preGenerationRefusals.get(error)
-  return !!witness && closedSourceObject(expected, refusalKeys)
-    && refusalKeys.every((key) => witness[key] === expected[key])
-}
-async function readVideoRefusal(response, expected) {
-  if (response.status !== 503 || response.headers.get('content-type')?.split(';')[0].trim().toLowerCase() !== 'application/json') return null
-  const reader = response.body?.getReader()
-  if (!reader) return null
-  try {
-    const decoder = new TextDecoder('utf-8', { fatal: true })
-    let raw = '', total = 0
-    for (;;) {
-      const { value, done } = await reader.read()
-      if (done) break
-      total += value.byteLength
-      if (total > 4096) return null
-      raw += decoder.decode(value, { stream: true })
-    }
-    raw += decoder.decode()
-    const value = JSON.parse(raw)
-    if (!closedSourceObject(value, ['error', 'refusal']) || !closedSourceObject(value.error, ['code', 'message'])
-      || value.error.code !== 'video_unavailable' || value.error.message !== VIDEO_REFUSAL_MESSAGE
-      || !closedSourceObject(value.refusal, refusalKeys)
-      || refusalKeys.some((key) => value.refusal[key] !== expected[key])) return null
-    return Object.freeze({ ...value.refusal })
-  } catch { return null } finally {
-    await reader.cancel().catch(() => {})
-    reader.releaseLock()
-  }
-}
 export function isSourceUuid(value) { return typeof value === 'string' && SOURCE_UUID.test(value) }
 function sourceId(value) {
   if (!isSourceUuid(value)) throw sourceUnavailable()
@@ -186,22 +149,10 @@ async function projectSourceRequest(projectId, requestId, action, body, { expect
   const path = `/api/projects/${projectId}/${profile.route}/source/requests${requestId ? `/${requestId}` : ''}${action && action !== 'request' ? `/${action}` : ''}`
   const headers = { ...authHeaders(), ...(body ? { 'Content-Type': 'application/json',
     'X-Authority-Session-Id': authority.session_id, 'X-Authority-Turn-Id': authority.turn_id } : {}) }
-  const refusalExpected = sourceContext === 'native' && action === 'request' && body.source_operation === 'create'
-    ? { schema: 'leaf.native-source-pre-generation-refusal.v1', project_id: projectId,
-      source_request_id: body.source_request_id, source_profile: 'ios-swiftui-xcodegen-v1', action: 'create',
-      authority_session_id: authority.session_id, authority_turn_id: authority.turn_id, stage: 'before_generation' } : null
   const response = await apiFetch(`${API_BASE}${path}`, { method: body ? 'POST' : 'GET', cache: 'no-store',
     redirect: 'error', signal, headers, ...(body ? { body: JSON.stringify(body) } : {}) }, path)
   if (!current()) throw sourceUnavailable()
   if (!response.ok) {
-    const refusal = refusalExpected && await readVideoRefusal(response, refusalExpected)
-    if (!current()) throw sourceUnavailable()
-    if (refusal) {
-      const error = new Error(VIDEO_REFUSAL_MESSAGE)
-      error.status = 503
-      preGenerationRefusals.set(error, refusal)
-      throw error
-    }
     const error = new Error(response.status === 409 ? 'Project source changed or its outcome is unknown. Refresh and review.'
       : response.status === 403 ? 'Project source access denied.' : 'Project source is unavailable. Refresh to review its current state.')
     error.status = response.status

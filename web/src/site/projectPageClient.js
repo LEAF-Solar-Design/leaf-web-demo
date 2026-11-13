@@ -1,8 +1,7 @@
-import { authHeaders, config, getStoredOrgId, noteUnauthorized, validateProjectSource, isMockConversation } from '../api.js'
+import { authHeaders, config, getStoredOrgId, noteUnauthorized } from '../api.js'
 import { getStoredActorBindingId } from '../projects/api.js'
 import { validatePortfolioDocument } from './portfolioDocument.js'
 import { DESIGN_FIELDS, validateNodeDesign } from './pageDesign.js'
-import { readActiveScope } from '../auth/activeScope.js'
 
 const FIELDS = ['alignment', 'description', 'headline', 'label', 'status', 'theme']
 const LIMITS = { label: 120, headline: 240, description: 1200, status: 80 }
@@ -55,11 +54,7 @@ function pagePath(projectId) {
   return `/api/projects/${projectId}/page`
 }
 
-async function request(path, { signal, expectedScope, native = false, proposal = false, ...options } = {}, consume = response => response) {
-  const checkScope = () => {
-    if (expectedScope !== undefined && readActiveScope() !== expectedScope) throw new DOMException('Cancelled', 'AbortError')
-  }
-  checkScope()
+async function request(path, { signal, native = false, proposal = false, ...options } = {}, consume = response => response) {
   const headers = { ...authHeaders(), ...options.headers }
   const org = getStoredOrgId()
   const actor = getStoredActorBindingId()
@@ -71,7 +66,7 @@ async function request(path, { signal, expectedScope, native = false, proposal =
   if (signal?.aborted) cancel()
   signal?.addEventListener('abort', cancel, { once: true })
   const timeout = setTimeout(() => { timedOut = true; cancel() }, proposal ? 60000 : 30000)
-  const wait = promise => proposal || native ? abortable(promise, controller.signal) : promise
+  const wait = promise => proposal ? abortable(promise, controller.signal) : promise
   try {
     let response
     try {
@@ -106,10 +101,7 @@ async function request(path, { signal, expectedScope, native = false, proposal =
       error.status = response.status
       throw error
     }
-    checkScope()
-    const result = await wait(consume(response, controller.signal))
-    checkScope()
-    return result
+    return await wait(consume(response, controller.signal))
   } catch (error) {
     if (native) {
       if (error.name === 'AbortError' && !timedOut) throw error
@@ -329,89 +321,13 @@ function nativePath(projectId, jobId) {
   return `/api/projects/${projectId}/native-previews${jobId === undefined ? '' : `/${jobId}`}`
 }
 
-export async function exportProjectNativeSourceBundle(projectId, candidate, { signal, expectedScope } = {}) {
-  const invalid = () => { throw new Error('Project source download could not be verified. Refresh and review before downloading.') }
-  const row = { ...validateProjectSource(candidate, projectId, undefined, 'native') }
-  if (row.state !== 'published') invalid()
-  const check = () => {
-    if (!expectedScope || readActiveScope() !== expectedScope || signal?.aborted
-      || !authHeaders().Authorization || isMockConversation()) invalid()
-  }
-  check()
-  const query = new URLSearchParams({ source_commit: row.source_commit, source_tree: row.source_tree,
-    receipt_digest: row.receipt_digest, version: String(row.version) })
-  const path = `/api/projects/${projectId}/native/source/requests/${row.source_request_id}/export?${query}`
-  return request(path, { signal, expectedScope, method: 'GET', redirect: 'error' }, async (response, requestSignal) => {
-    check()
-    const cap = 64 * 1024 * 1024
-    const headers = response.headers
-    const filename = `project-source-${row.source_commit}.bundle`
-    const declared = headers.get('Content-Length')
-    const sha256 = headers.get('X-Leaf-Bundle-Sha256')
-    if (headers.get('Content-Type') !== 'application/octet-stream'
-      || headers.get('Content-Disposition') !== `attachment; filename="${filename}"`
-      || !/^[1-9][0-9]{0,7}$/.test(declared || '') || Number(declared) > cap
-      || !validDigest(sha256) || headers.get('X-Leaf-Source-Commit') !== row.source_commit
-      || headers.get('X-Leaf-Source-Tree') !== row.source_tree
-      || headers.get('X-Leaf-Source-Version') !== String(row.version)
-      || headers.get('X-Leaf-Source-Receipt-Digest') !== row.receipt_digest
-      || headers.get('Cache-Control') !== 'private, no-store'
-      || headers.get('X-Content-Type-Options') !== 'nosniff'
-      || !['identity', null].includes(headers.get('Content-Encoding'))) invalid()
-    let bytes
-    if (response.body?.getReader) {
-      const typedArrayBrand = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), Symbol.toStringTag).get
-      bytes = new Uint8Array(Number(declared))
-      const reader = response.body.getReader()
-      let total = 0, complete = false
-      try {
-        while (true) {
-          check()
-          const { done, value } = await abortable(reader.read(), requestSignal)
-          check()
-          if (done) { complete = true; break }
-          if (!ArrayBuffer.isView(value) || typedArrayBrand.call(value) !== 'Uint8Array'
-            || total + value.byteLength > Number(declared)) invalid()
-          bytes.set(value, total)
-          total += value.byteLength
-        }
-        if (total !== Number(declared)) invalid()
-      } finally {
-        if (!complete) { try { void reader.cancel().catch(() => {}) } catch { /* Discard rejected bytes. */ } }
-        reader.releaseLock()
-      }
-    } else bytes = new Uint8Array(await abortable(response.arrayBuffer(), requestSignal))
-    check()
-    if (bytes.byteLength !== Number(declared) || bytes.byteLength > cap || !globalThis.crypto?.subtle) invalid()
-    const signature = new TextDecoder().decode(bytes.subarray(0, 16))
-    if (!signature.startsWith('# v2 git bundle\n') && !signature.startsWith('# v3 git bundle\n')) invalid()
-    const digest = await abortable(globalThis.crypto.subtle.digest('SHA-256', bytes), requestSignal)
-    check()
-    const actual = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
-    if (actual !== sha256) invalid()
-    return { blob: new Blob([bytes], { type: 'application/octet-stream' }), filename, sha256,
-      sourceCommit: row.source_commit, sourceTree: row.source_tree, version: row.version,
-      receiptDigest: row.receipt_digest, sourceRequestId: row.source_request_id, projectId }
-  })
-}
-
 export function validateNativePreview(value, expected = {}) {
-  const repository = value?.schema === 'leaf.project-repository-preview-source.v1'
-  const repositoryIdentity = ['schema', 'source_profile', 'repo_key', 'source_request_id', 'source_version', 'receipt_digest', 'source_commit', 'source_tree', 'archive_sha256']
-  const pageIdentity = ['revision', 'document_sha256', 'archive_sha256']
-  const identityFields = repository ? repositoryIdentity : pageIdentity
   if (!value || typeof value !== 'object' || Array.isArray(value)
     || !validUuid(value.job_id)
-    || (!repository && (!Number.isSafeInteger(value.revision) || value.revision < 1 || !validDigest(value.document_sha256)))
-    || (repository && (value.source_profile !== 'ios-swiftui-xcodegen-v1' || !validUuid(value.repo_key)
-      || !validUuid(value.source_request_id) || !Number.isSafeInteger(value.source_version) || value.source_version < 1
-      || !validDigest(value.receipt_digest) || typeof value.source_commit !== 'string' || value.source_commit.length !== 40 || !/^[0-9a-f]{40}$/.test(value.source_commit)
-      || typeof value.source_tree !== 'string' || value.source_tree.length !== 40 || !/^[0-9a-f]{40}$/.test(value.source_tree)
-      || Object.hasOwn(value, 'revision') || Object.hasOwn(value, 'document_sha256')))
-    || !validDigest(value.archive_sha256)
+    || !Number.isSafeInteger(value.revision) || value.revision < 1
+    || !validDigest(value.document_sha256) || !validDigest(value.archive_sha256)
     || !['queued', 'running', 'complete', 'failed', 'cancelled'].includes(value.status)) nativeInvalid()
-  // Callers may pass the previous job; status and receipt can change on readback.
-  for (const field of new Set(['job_id', ...repositoryIdentity, ...pageIdentity])) {
+  for (const field of ['job_id', 'revision', 'document_sha256', 'archive_sha256']) {
     if (expected[field] !== undefined && value[field] !== expected[field]) nativeInvalid()
   }
   if (value.status === 'complete') {
@@ -420,22 +336,9 @@ export function validateNativePreview(value, expected = {}) {
       || Object.keys(receipt).sort().join(',') !== 'kind,receipt_id,sha256'
       || receipt.kind !== 'simulator' || !validUuid(receipt.receipt_id) || !validDigest(receipt.sha256)) nativeInvalid()
   }
-  return { job_id: value.job_id, status: value.status,
-    ...Object.fromEntries(identityFields.map(field => [field, value[field]])),
+  return { job_id: value.job_id, status: value.status, revision: value.revision,
+    document_sha256: value.document_sha256, archive_sha256: value.archive_sha256,
     ...(value.status === 'complete' ? { receipt: { ...value.receipt }, evidence_basis: value.evidence_basis } : {}) }
-}
-
-export async function submitProjectSourceNativePreview(projectId, source, idempotencyKey, { signal, expectedScope } = {}) {
-  if (!validUuid(source?.source_request_id) || !Number.isSafeInteger(source?.version) || source.version < 1
-    || !validDigest(source?.receipt_digest) || typeof source?.source_commit !== 'string' || source.source_commit.length !== 40 || !/^[0-9a-f]{40}$/.test(source.source_commit)
-    || typeof source?.source_tree !== 'string' || source.source_tree.length !== 40 || !/^[0-9a-f]{40}$/.test(source.source_tree) || typeof idempotencyKey !== 'string'
-    || idempotencyKey.length < 1 || idempotencyKey.length > 200 || /[^\x21-\x7e]/.test(idempotencyKey)) nativeInvalid()
-  const expected = { schema: 'leaf.project-repository-preview-source.v1', source_request_id: source.source_request_id,
-    source_version: source.version, receipt_digest: source.receipt_digest, source_commit: source.source_commit, source_tree: source.source_tree }
-  return request(nativePath(projectId), { native: true, signal, expectedScope, method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
-    body: JSON.stringify({ source_request_id: source.source_request_id }),
-  }, async response => validateNativePreview(await response.json(), expected))
 }
 
 export async function submitProjectNativePreview(projectId, revision, idempotencyKey, { signal } = {}) {
@@ -447,9 +350,9 @@ export async function submitProjectNativePreview(projectId, revision, idempotenc
   }, async response => validateNativePreview(await response.json(), { revision }))
 }
 
-export async function loadProjectNativePreview(projectId, jobId, { signal, expectedScope, expected = {} } = {}) {
-  return request(nativePath(projectId, jobId), { native: true, signal, expectedScope },
-    async response => validateNativePreview(await response.json(), { ...expected, job_id: jobId }))
+export async function loadProjectNativePreview(projectId, jobId, { signal } = {}) {
+  return request(nativePath(projectId, jobId), { native: true, signal },
+    async response => validateNativePreview(await response.json(), { job_id: jobId }))
 }
 
 export async function downloadProjectNativePreviewScreenshot(projectId, jobId, { signal } = {}) {

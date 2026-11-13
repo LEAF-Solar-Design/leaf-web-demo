@@ -52,21 +52,6 @@ class FlowError(ValueError):
         super().__init__(message)
 
 
-VIDEO_REFUSAL_MESSAGE = 'Private video decoding is unavailable. Source generation did not start.'
-_RECORDED_REFUSAL = object()
-
-
-class VideoUnavailableBeforeGeneration(ValueError):
-    """Local prerequisite refusal, never inferred from a downstream error code."""
-
-
-class PreGenerationRefusal(FlowError):
-    def __init__(self, witness, *, provenance=None):
-        super().__init__(503)
-        self.refusal = witness
-        self.provenance = provenance
-
-
 def _uuid(value):
     if type(value) is not str or str(uuid.UUID(value)) != value or not uuid.UUID(value).int:
         raise ValueError()
@@ -608,26 +593,35 @@ def mutate(tenant, project_id, session_id, turn_id, action, edit_id, body, *, so
                 return result
         raise FlowError(409)
     success = False
-    known_refusal = False
+    phase = 'authority_recheck'
+    failure_status, failure_code = 503, 'service_unavailable'
+    correlation_id = str(uuid.uuid4())
     try:
         recheck()
         if action in ('create', 'edit'):
+            phase = 'stage'
             row, bound = _stage(tenant, project_id, current, body, recheck, session_id, turn_id, source_profile=source_profile)
         else:
+            phase = 'result_readback'
             bound = repository(current)
             row = _read(bound, edit_id) if bound else None
             if row is None:
                 raise FlowError(404)
             _membership(row, bound, current, source_profile)
             _receipt(row, bound)
+            phase = 'authority_recheck'
             recheck()
             if action == 'reject':
+                phase = 'reject'
                 row = _store().reject_edit(*(bound[key] for key in AUTHORITY_FIELDS), edit_id,
                     receipt_digest=body['receipt_digest'], expected_version=body['expected_version'],
                     transition_key=('native-reject:' if source_profile == NATIVE_PROFILE else 'browser-reject:') + digest)
             else:
+                phase = 'publish'
                 row = _publish(current, bound, row, body, action, recheck, source_profile=source_profile)
+        phase = 'authority_recheck'
         recheck()
+        phase = 'result_readback'
         if repository(current) != bound:
             raise FlowError(409)
         result = representation(row, bound, source_profile=source_profile)
@@ -636,21 +630,16 @@ def mutate(tenant, project_id, session_id, turn_id, action, edit_id, body, *, so
             text='Source ready for review.' if row['state'] == 'awaiting_confirmation' else 'Private source state updated.'))
         success = True
         return result
-    except VideoUnavailableBeforeGeneration:
-        if source_profile != NATIVE_PROFILE or action != 'create':
-            raise FlowError(503) from None
-        recheck()
-        witness = dict(schema='leaf.native-source-pre-generation-refusal.v1', project_id=project_id,
-            source_request_id=edit_id, source_profile=NATIVE_PROFILE, action='create',
-            authority_session_id=session_id, authority_turn_id=turn_id, stage='before_generation')
-        session_store.append_event(session_id, turn_id, 'browser_source_error', dict(
-            source_request_id=edit_id, text=VIDEO_REFUSAL_MESSAGE, refusal=witness))
-        recheck()
-        known_refusal = True
-        raise PreGenerationRefusal(witness, provenance=_RECORDED_REFUSAL) from None
     except authoring.AuthoringError as exc:
-        raise FlowError(exc.status if exc.status in _ERRORS else 503) from None
-    except FlowError:
+        failure_status = exc.status if exc.status in _ERRORS else 503
+        # Only canonical internal codes may enter the retained event, never exception text.
+        canonical_error = authoring._ERRORS.get(exc.code) if isinstance(exc.code, str) else None
+        if canonical_error is not None and canonical_error[0] == failure_status:
+            failure_code = exc.code
+        raise FlowError(failure_status) from None
+    except FlowError as exc:
+        failure_status = exc.status
+        failure_code = _ERRORS[failure_status][0]
         raise
     except Exception:
         raise FlowError(503) from None
@@ -658,9 +647,11 @@ def mutate(tenant, project_id, session_id, turn_id, action, edit_id, body, *, so
         # Fresh subject/turn checks prevent an old completion touching a replacement.
         try:
             recheck()
-            if not success and not known_refusal:
+            if not success:
                 session_store.append_event(session_id, turn_id, 'browser_source_error', dict(
-                    source_request_id=edit_id, text='Source outcome unavailable. Review the saved source state before retrying.'))
+                    source_request_id=edit_id, phase=phase, code=failure_code, status=failure_status,
+                    correlation_id=correlation_id,
+                    text='Source outcome unavailable. Review the saved source state before retrying.'))
             recheck()
             turn_runner.finish_stage_authority(current[0], session_id, turn_id, subject,
                 stop_reason='browser_source_complete' if success else 'browser_source_unavailable')
