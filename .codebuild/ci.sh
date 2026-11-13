@@ -115,7 +115,21 @@ if [[ "${CI_SHARD_MODE:-all}" == all || "$CI_SHARD_INDEX_N" == 0 ]]; then
 echo "LEAF_T start webbundle $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR/web"
 echo "--- 2/4 Build web bundle"
+if [[ -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" ]]; then
+  dep_cache_line="$(timeout --kill-after=5 60 python -I -B "$LEAF_DEP_CACHE_HELPER" seed --kind nx \
+    --repo "$CODEBUILD_SRC_DIR" --cache-dir "$LEAF_CI_CACHE_DIR" --writable "${LEAF_CI_CACHE_WRITABLE:-0}" \
+    --run "${CODEBUILD_BUILD_ID:-local}" --day "$(date -u +%Y%m%d)" --node-version "$(node -v)")" \
+    || dep_cache_line="LEAF_DEP_CACHE kind=nx action=seed result=error"
+  echo "$dep_cache_line"
+fi
 npm run build
+if [[ -n "${LEAF_DEP_CACHE_HELPER:-}" && -n "${LEAF_CI_CACHE_DIR:-}" && "${LEAF_CI_CACHE_WRITABLE:-0}" == 1 ]]; then
+  dep_cache_line="$(timeout --kill-after=5 120 python -I -B "$LEAF_DEP_CACHE_HELPER" publish --kind nx \
+    --repo "$CODEBUILD_SRC_DIR" --cache-dir "$LEAF_CI_CACHE_DIR" --writable 1 \
+    --run "${CODEBUILD_BUILD_ID:-local}" --day "$(date -u +%Y%m%d)" --node-version "$(node -v)")" \
+    || dep_cache_line="LEAF_DEP_CACHE kind=nx action=publish result=error"
+  echo "$dep_cache_line"
+fi
 echo "LEAF_T end webbundle $(date +%s%3N) rc=0"
 echo "LEAF_T start license-fence $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR"

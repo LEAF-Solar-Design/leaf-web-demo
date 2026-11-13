@@ -26,7 +26,7 @@ DEPENDENCY_FILES = (
     "scripts/requirements-ci.txt", "executor/control_plane/requirements.txt",
     "executor/runtime/requirements.txt",
 )
-ENTRY_RE = re.compile(r"(dl|pw|as|nm|py)-v1-[0-9a-f]{64}\Z")
+ENTRY_RE = re.compile(r"(dl|pw|as|nm|py|nx)-v1-[0-9a-f]{64}\Z")
 
 
 class Corrupt(Exception):
@@ -112,6 +112,18 @@ def key_inputs(args):
         if not re.fullmatch(r"[0-9a-f]{40}", args.revision):
             raise ValueError("invalid revision")
         return {"schema": "leaf.dep-cache.as.v1", "revision": args.revision}
+    if args.kind == "nx":
+        if (not re.fullmatch(r"v\d+\.\d+\.\d+", args.node_version)
+                or not re.fullmatch(r"\d{8}", args.day)):
+            raise ValueError("invalid Next.js node version or day")
+        lock, config = repo / "web/package-lock.json", repo / "web/next.config.mjs"
+        if not lock.is_file() or not config.is_file():
+            raise ValueError("missing Next.js inputs")
+        return {"schema": "leaf.dep-cache.nx.v1",
+                "lock": hashlib.sha256(lock.read_bytes()).hexdigest(),
+                "config": hashlib.sha256(config.read_bytes()).hexdigest(),
+                "node": args.node_version, "platform": sysconfig.get_platform(),
+                "arch": platform.machine(), "day": args.day}
     release = {}
     for line in Path(args.os_release).read_text().splitlines():
         if "=" in line:
@@ -170,6 +182,8 @@ def parts(args):
         return {"node_modules": str(Path(args.repo) / args.tree / "node_modules")}
     if args.kind == "py":
         return {"venv": args.src if args.action == "publish" else args.dest}
+    if args.kind == "nx":
+        return {"next-cache": str(Path(args.repo) / "web/.next/cache")}
     location = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
     if not location:
         location = str(Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "ms-playwright")
@@ -187,6 +201,8 @@ def excluded(part, rel):
         return names[0] in (".links", "__dirlock") or names[-1] == "DEPENDENCIES_VALIDATED"
     if part == "node_modules":
         return names[0] in (".cache", ".vite", ".vitest")
+    if part == "next-cache":
+        return names[0] not in ("webpack", "swc")
     if part == "venv":
         return (rel == "pyvenv.cfg" or "__pycache__" in names
                 or re.fullmatch(r"bin/python(?:3(?:\.\d+)?)?", rel) is not None)
@@ -312,7 +328,7 @@ def load_meta(entry, kind, key=None):
             raise Corrupt("manifest lists")
         names = set()
         allowed = {"dl": {"pip", "npm"}, "pw": {"ms-playwright"}, "as": {"snapshot"},
-                   "nm": {"node_modules"}, "py": {"venv"}}[kind]
+                   "nm": {"node_modules"}, "py": {"venv"}, "nx": {"next-cache"}}[kind]
         for row in files:
             if (not isinstance(row, list) or len(row) != 4 or type(row[1]) is not int or row[1] < 0
                     or not isinstance(row[2], str) or not re.fullmatch(r"[0-9a-f]{64}", row[2])
@@ -479,7 +495,7 @@ def run_id(value):
 def parser():
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("action", choices=("seed", "publish"))
-    result.add_argument("--kind", required=True, choices=("dl", "pw", "as", "nm", "py"))
+    result.add_argument("--kind", required=True, choices=("dl", "pw", "as", "nm", "py", "nx"))
     result.add_argument("--tree", choices=("web", "harness"))
     result.add_argument("--repo", default=".")
     result.add_argument("--cache-dir", default="")
@@ -527,7 +543,7 @@ def main(argv=None):
     except Exception:
         report["result"] = "error"
     if report["result"] in ("corrupt", "error"):
-        for part in ("pip", "npm", "ms-playwright", "snapshot", "node_modules", "venv"):
+        for part in ("pip", "npm", "ms-playwright", "snapshot", "node_modules", "venv", "next-cache"):
             if report.get(part) == "seeded":
                 report.pop(part)
     report["ms"] = int((time.monotonic() - started) * 1000)
