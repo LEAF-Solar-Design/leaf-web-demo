@@ -348,7 +348,7 @@ def _validated_record(context, meta, report, *, review=False):
             _check(ref not in choices)
             _check(match["status"] in ("unmatched", "ambiguous")
                 and all(match[key] is None for key in ("pdf_grid", "pdf_matrix", "pdf_sub_grid")))
-            _check(type(candidates) is list and len(candidates) <= tracking.MAX_CANDIDATES
+            _check(type(candidates) is list and len(candidates) <= reports.si.MAX_GRIDS
                 and all(tracking._int(c, 0, tracking.MAX_INDEX) for c in candidates)
                 and len(set(candidates)) == len(candidates)
                 and type(match["candidate_count"]) is int and match["candidate_count"] == len(candidates))
