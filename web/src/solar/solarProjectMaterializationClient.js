@@ -18,9 +18,10 @@ export function initialSolarParameters(boundary, preset, drawing_units) {
   } catch { return null }
 }
 
-export function originalSolarParameters(original_intake, grid_long_axis) {
+export function originalSolarParameters(original_intake, grid_long_axis, producer_semantics) {
   if (typeof original_intake !== 'string' || !Number.isInteger(grid_long_axis)
-      || grid_long_axis < 2 || grid_long_axis > 300) return null
+      || grid_long_axis < 2 || grid_long_axis > 300
+      || (producer_semantics !== undefined && !['current-native', 'historical-list-reuse'].includes(producer_semantics))) return null
   try {
     const original = JSON.parse(original_intake.replace(/^\uFEFF/, ''))
     if (Object.keys(original).sort().join(',') !== 'active_preset,boundary,pile_template,units'
@@ -28,6 +29,7 @@ export function originalSolarParameters(original_intake, grid_long_axis) {
         || typeof original.pile_template?.Name !== 'string' || !original.pile_template.Name.trim()
         || original.pile_template.Name !== original.active_preset.PileTemplateName) return null
     const parameters = { original_intake, grid_long_axis }
+    if (producer_semantics !== undefined) parameters.producer_semantics = producer_semantics
     return new TextEncoder().encode(JSON.stringify(parameters)).length <= 2 * 1024 * 1024 ? parameters : null
   } catch { return null }
 }
@@ -35,8 +37,8 @@ export function originalSolarParameters(original_intake, grid_long_axis) {
 function checkedInitialParameters(parameters) {
   if (!parameters) return null
   const keys = Object.keys(parameters).sort().join(',')
-  if (keys === 'grid_long_axis,original_intake') {
-    return originalSolarParameters(parameters.original_intake, parameters.grid_long_axis)
+  if (keys === 'grid_long_axis,original_intake' || keys === 'grid_long_axis,original_intake,producer_semantics') {
+    return originalSolarParameters(parameters.original_intake, parameters.grid_long_axis, parameters.producer_semantics)
   }
   return keys === 'boundary,drawing_units,preset'
     ? initialSolarParameters(parameters.boundary, parameters.preset, parameters.drawing_units) : null

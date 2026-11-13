@@ -1,3 +1,4 @@
+import { scaleTimeout } from '../testTimeScale.js'
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { createRef, StrictMode, useCallback, useState } from 'react'
 import { render, cleanup, act, fireEvent } from '@testing-library/react'
@@ -474,7 +475,7 @@ describe('stored Solar graph in real Viewer', () => {
       }
       view.unmount()
     }
-  }, 30000)
+  }, scaleTimeout(30000))
 
   it('A1B2-V15 a version replacement over a retained engine head follows the canvas', () => {
     const head = intakeOf(roof())
