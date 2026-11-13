@@ -1,3 +1,4 @@
+import { scaleTimeout } from '../testTimeScale.js'
 import React from 'react'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -1332,7 +1333,7 @@ it('R13D-27 busy reaches every specialized project editor and clears', async () 
     expect(h.props.onSubmit).not.toHaveBeenCalled()
     cleanup()
   }
-}, 15000)
+}, scaleTimeout(15000))
 
 it('R13D-28 pending status is scoped independently of admission', async () => {
   const h = await r13dRailHarness()
@@ -1505,4 +1506,4 @@ it('R13D-32 busy arriving during context recheck prevents handoff', async () => 
     expect(h.props.readIntake).not.toHaveBeenCalled()
     cleanup()
   }
-}, 10000)
+}, scaleTimeout(10000))

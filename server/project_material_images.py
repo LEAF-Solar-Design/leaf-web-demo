@@ -11,6 +11,7 @@ import tempfile
 import unicodedata
 
 MAX_BYTES = 16 * 1024 * 1024
+MAX_PREVIEW_BYTES = 1024 * 1024
 DECODE_TIMEOUT = 15
 
 
@@ -53,13 +54,25 @@ def decode_image(raw):
             preview = (directory / 'preview.jpg').read_bytes()
             if (set(info) != {'media_type', 'width', 'height'} or info['media_type'] not in {'image/jpeg', 'image/png', 'image/heif'}
                     or any(type(info[k]) is not int or info[k] <= 0 for k in ('width', 'height'))
-                    or info['width'] * info['height'] > 40_000_000 or not 0 < len(preview) <= MAX_BYTES):
+                    or info['width'] * info['height'] > 40_000_000 or not 0 < len(preview) <= MAX_PREVIEW_BYTES):
                 raise InvalidImage('Invalid decoded image.')
             return info, preview
         except subprocess.TimeoutExpired:
             raise InvalidImage('Image decoding exceeded its time limit.') from None
         except (OSError, json.JSONDecodeError, KeyError, TypeError):
             raise InvalidImage('Image could not be decoded.') from None
+
+
+def inspection_image(raw):
+    """Return bounded pixels without rewriting an immutable stored preview."""
+    if not raw.startswith(b'\xff\xd8\xff') or not raw.endswith(b'\xff\xd9'):
+        raise InvalidImage('Photo preview must be a complete JPEG.')
+    if len(raw) <= MAX_PREVIEW_BYTES:
+        return raw
+    info, bounded = decode_image(raw)
+    if info['media_type'] != 'image/jpeg':
+        raise InvalidImage('Photo preview must be a JPEG.')
+    return bounded
 
 
 def object_key(org_id, project_id, digest, variant):

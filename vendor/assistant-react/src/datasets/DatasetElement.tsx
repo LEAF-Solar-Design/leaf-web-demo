@@ -42,6 +42,15 @@ const rootStyle = {
   fontFamily: `var(--leaf-font-sans, ${LEAF_TOKENS.font.sans})`,
 };
 
+function sourceHref(field: DatasetFieldV1, value: unknown): string | null {
+  if (field.type.kind !== "text" || typeof value !== "string" ||
+      !/^https:\/\//i.test(value) || /[\s\\\u0000-\u001f\u007f]/.test(value)) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.hostname && !url.username && !url.password ? value : null;
+  } catch { return null; }
+}
+
 function Freshness({ freshness, preferences }: {
   freshness: DatasetReadV1["freshness"];
   preferences: DisplayPreferences;
@@ -118,7 +127,13 @@ export function DatasetElement({
     const field = fields.get(id)!;
     return {
       key: id, header: field.label, numeric: numericKinds.has(field.type.kind),
-      cell: (row) => formatDatasetValue(field, row.values[id] ?? null, prefs),
+      cell: (row) => {
+        const value = row.values[id] ?? null;
+        const text = formatDatasetValue(field, value, prefs);
+        const href = sourceHref(field, value);
+        return href ? <a href={href} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer"
+          style={{ color: "inherit", textDecoration: "underline", overflowWrap: "anywhere" }}>{text}</a> : text;
+      },
     };
   });
   const grouping = element.kind === "dataset.table" ? element.props.row_grouping : undefined;

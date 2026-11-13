@@ -12,6 +12,7 @@
 // FENCE NOTE: the worker's vendored path is spelled ONLY inside the one
 // literal `new Worker(new URL(...))` shape below; the on-disk path is derived
 // from it through a throwaway Worker double.
+import { scaleTimeout } from '../testTimeScale.js'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
@@ -90,7 +91,7 @@ function realWorkerTransport() {
         let response
         try {
           writeFileSync(inputPath, input, 'utf8')
-          response = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', source, WORKER_PATH, path.join(PKG_DIR, GLUE), inputPath], { encoding: 'utf8', timeout: 90_000, maxBuffer: 16 * 1024 * 1024 }))
+          response = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', source, WORKER_PATH, path.join(PKG_DIR, GLUE), inputPath], { encoding: 'utf8', timeout: scaleTimeout(90_000), maxBuffer: 16 * 1024 * 1024 }))
         } finally {
           rmSync(inputDir, { recursive: true, force: true })
         }
@@ -106,7 +107,7 @@ function realWorkerTransport() {
 }
 
 describe.skipIf(!GLUE)('Create Block on the real engine', () => {
-  it('keeps a session-created line and committed circle handles through block creation and reparse', { timeout: 90_000 }, async () => {
+  it('keeps a session-created line and committed circle handles through block creation and reparse', { timeout: scaleTimeout(90_000) }, async () => {
     const worker = realWorkerTransport()
     const { result } = renderHook(() => useEngineSession({ createWorker: () => worker }))
     const bytes = new TextEncoder().encode('0\nSECTION\n2\nENTITIES\n0\nCIRCLE\n5\n11\n8\n0\n10\n4\n20\n2\n40\n1\n0\nENDSEC\n0\nEOF\n')
@@ -141,12 +142,12 @@ describe.skipIf(!GLUE)('Create Block on the real engine', () => {
       'const projection = doc.editableEntities()',
       'process.stdout.write(JSON.stringify({ entities: projection, blocks: projection.blocks }))',
     ].join('\n')
-    const reopened = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', source, path.join(PKG_DIR, GLUE)], { input: JSON.stringify(worker.bytes), encoding: 'utf8', timeout: 90_000, maxBuffer: 16 * 1024 * 1024 }))
+    const reopened = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', source, path.join(PKG_DIR, GLUE)], { input: JSON.stringify(worker.bytes), encoding: 'utf8', timeout: scaleTimeout(90_000), maxBuffer: 16 * 1024 * 1024 }))
     expect(reopened.blocks.find((b) => b.name === 'B').children.map((e) => e.handle)).toEqual([line.id, '17'])
     expect(reopened.entities).toHaveLength(1)
     expect(reopened.entities[0].type).toBe('INSERT')
   })
-  it('carries native polyline widths to the builder before posting a create', { timeout: 90_000 }, async () => {
+  it('carries native polyline widths to the builder before posting a create', { timeout: scaleTimeout(90_000) }, async () => {
     const worker = realWorkerTransport()
     const { result } = renderHook(() => useEngineSession({ createWorker: () => worker }))
     const bytes = new TextEncoder().encode('0\nSECTION\n2\nENTITIES\n0\nLWPOLYLINE\n5\n10\n8\n0\n90\n2\n70\n0\n43\n2\n10\n0\n20\n0\n40\n3\n41\n4\n10\n5\n20\n0\n0\nENDSEC\n0\nEOF\n')
@@ -158,7 +159,7 @@ describe.skipIf(!GLUE)('Create Block on the real engine', () => {
     expect(result.current.status).toContain('polyline widths must be zero')
     expect(worker.posted).toHaveLength(posted)
   })
-  it('refuses DIMASSOC members using definingHandles from the real worker projection', { timeout: 90_000 }, async () => {
+  it('refuses DIMASSOC members using definingHandles from the real worker projection', { timeout: scaleTimeout(90_000) }, async () => {
     const worker = realWorkerTransport()
     const { result } = renderHook(() => useEngineSession({ createWorker: () => worker }))
     const bytes = new TextEncoder().encode("0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1027\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nLINE\n5\n10\n102\n{ACAD_REACTORS\n330\n30\n102\n}\n8\n0\n10\n12\n20\n23\n11\n17\n21\n23\n0\nDIMENSION\n5\n20\n8\n0\n70\n0\n10\n0\n20\n5\n13\n0\n23\n0\n14\n5\n24\n0\n0\nENDSEC\n0\nSECTION\n2\nOBJECTS\n0\nDIMASSOC\n5\n30\n100\nAcDbDimAssoc\n330\n20\n90\n1\n70\n0\n71\n0\n1\nAcDbOsnapPointRef\n72\n1\n331\n10\n73\n1\n91\n0\n40\n0\n10\n12\n20\n23\n30\n0\n75\n0\n0\nENDSEC\n0\nEOF\n");
@@ -176,7 +177,7 @@ describe.skipIf(!GLUE)('Create Block on the real engine', () => {
     expect(result.current.status).toContain('dimension defining')
     expect(worker.posted).toHaveLength(posted)
   })
-  it('undoes a real create through the store action and restores the original handles and bytes', { timeout: 90_000 }, async () => {
+  it('undoes a real create through the store action and restores the original handles and bytes', { timeout: scaleTimeout(90_000) }, async () => {
     const worker = realWorkerTransport()
     const { result } = renderHook(() => useEngineSession({ createWorker: () => worker }))
     const bytes = new TextEncoder().encode('0\nSECTION\n2\nENTITIES\n0\nLINE\n5\n10\n8\n0\n10\n12\n20\n23\n11\n17\n21\n23\n0\nCIRCLE\n5\n11\n8\n0\n10\n11\n20\n24\n40\n2\n0\nENDSEC\n0\nEOF\n')
@@ -200,7 +201,7 @@ describe.skipIf(!GLUE)('Create Block on the real engine', () => {
     expect(result.current.undoDepth).toBe(0)
     expect(result.current.redoDepth).toBe(1)
   })
-  it('preserves original child coordinates and transforms both children on reinsertion', { timeout: 90_000 }, () => {
+  it('preserves original child coordinates and transforms both children on reinsertion', { timeout: scaleTimeout(90_000) }, () => {
     const source = [
       'import { createRequire } from "node:module"',
       'import { pathToFileURL } from "node:url"',
@@ -214,7 +215,7 @@ describe.skipIf(!GLUE)('Create Block on the real engine', () => {
       'const reinserted = await handleMessage({ type: "applyEdit", op: "createInsert", payload: { name: "B", x: 100, y: 200, rotationDeg: 90, sx: 2, sy: 3, sz: 1, layer: "0" } }, engine)',
       'process.stdout.write(JSON.stringify({ before, made, collision, reinserted }))',
     ].join('\n')
-    const out = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', source, WORKER_PATH, path.join(PKG_DIR, GLUE)], { encoding: 'utf8', timeout: 90_000, maxBuffer: 16 * 1024 * 1024 }))
+    const out = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', source, WORKER_PATH, path.join(PKG_DIR, GLUE)], { encoding: 'utf8', timeout: scaleTimeout(90_000), maxBuffer: 16 * 1024 * 1024 }))
     expect(out.made.ok).toBe(true)
     expect(out.made.entities).toHaveLength(1)
     expect(out.made.entities[0]).toMatchObject({ id: out.made.createdId, type: 'INSERT', name: 'B', ip: [10, 20, 0], layer: '0', scale: [1, 1, 1] })
@@ -425,7 +426,7 @@ async function realSelectionBatch(n) {
 }
 
 describe.skipIf(!GLUE)('the worker batch on the real engine', () => {
-  it('BSP2 writes and reopens a panel layer batch without changing geometry, then undoes the original bytes', { timeout: 90_000 }, async () => {
+  it('BSP2 writes and reopens a panel layer batch without changing geometry, then undoes the original bytes', { timeout: scaleTimeout(90_000) }, async () => {
     const rectangle = (handle, layer, x, y, w, h) => [
       '0', 'LWPOLYLINE', '5', handle, '8', layer, '62', '3', '370', '25', '90', '4', '70', '1',
       '10', x, '20', y, '10', x + w, '20', y, '10', x + w, '20', y + h, '10', x, '20', y + h,
@@ -469,16 +470,16 @@ describe.skipIf(!GLUE)('the worker batch on the real engine', () => {
     expect(result.current.undoDepth).toBe(0)
     expect(Array.from(reopened.result.current.entities)).toEqual(expected)
   })
-  it('CCP02 real five-step batch', { timeout: 90_000 }, async () => {
+  it('CCP02 real five-step batch', { timeout: scaleTimeout(90_000) }, async () => {
     await realSelectionBatch(5)
   })
-  it('CCP02 real 256-step batch', { timeout: 90_000 }, async () => {
+  it('CCP02 real 256-step batch', { timeout: scaleTimeout(90_000) }, async () => {
     await realSelectionBatch(256)
   })
-  it('applies several steps in one turn, refuses atomically, bounds the count, and keeps the document on a refused create', { timeout: 90_000 }, () => {
+  it('applies several steps in one turn, refuses atomically, bounds the count, and keeps the document on a refused create', { timeout: scaleTimeout(90_000) }, () => {
     const raw = execFileSync(process.execPath, ['--input-type=module', '-e', SCRIPT, WORKER_PATH, path.join(PKG_DIR, GLUE), DXF], {
       encoding: 'utf8',
-      timeout: 90_000,
+      timeout: scaleTimeout(90_000),
       maxBuffer: 64 * 1024 * 1024,
     })
     const { ids, out } = JSON.parse(raw)
@@ -755,7 +756,7 @@ const SERVED_MLEADER_DXF = [
 ].join('\n') + '\n'
 
 describe.skipIf(!GLUE)('MLEADER through the rebuilt engine and worker batch', () => {
-  it('retains source segment counts across consecutive worker write and reparse turns', { timeout: 90_000 }, () => {
+  it('retains source segment counts across consecutive worker write and reparse turns', { timeout: scaleTimeout(90_000) }, () => {
     const source = SERVED_MLEADER_DXF.replace('173\n2\n', '173\n3\n')
     const script = [
       'import { createRequire } from "node:module"',
@@ -769,12 +770,12 @@ describe.skipIf(!GLUE)('MLEADER through the rebuilt engine and worker batch', ()
       'process.stdout.write(JSON.stringify(replies.map(r => ({ ok: r.ok, mlstyles: r.mlstyles }))))',
     ].join('\n')
     const replies = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', script, WORKER_PATH, path.join(PKG_DIR, GLUE), source], {
-      encoding: 'utf8', timeout: 90_000, maxBuffer: 8 * 1024 * 1024,
+      encoding: 'utf8', timeout: scaleTimeout(90_000), maxBuffer: 8 * 1024 * 1024,
     }))
     for (const reply of replies) expect(reply.mlstyles).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'TwoSegments', segments: 3 })]))
     for (const reply of replies.slice(1)) expect(reply.ok).toBe(true)
   })
-  it('projects a served leader and the source segment counts of two styles', { timeout: 90_000 }, async () => {
+  it('projects a served leader and the source segment counts of two styles', { timeout: scaleTimeout(90_000) }, async () => {
     const worker = realWorkerTransport()
     const { result } = renderHook(() => useEngineSession({ createWorker: () => worker }))
     await act(async () => { result.current.actions.openBytes(new TextEncoder().encode(SERVED_MLEADER_DXF), 'served-leader.dxf') })
@@ -788,9 +789,9 @@ describe.skipIf(!GLUE)('MLEADER through the rebuilt engine and worker batch', ()
     expect(intake.polylines.filter((p) => p.handle === hexHandle(leader.handle))).toHaveLength(4)
     expect(intake.polylines[0].pts).toEqual([[30, 23, 0], [35, 26, 0]])
   })
-  it('creates and reparses the bounded leader, refuses edits by kind, and erases it', { timeout: 90_000 }, () => {
+  it('creates and reparses the bounded leader, refuses edits by kind, and erases it', { timeout: scaleTimeout(90_000) }, () => {
     const out = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', MLEADER_SCRIPT, WORKER_PATH, path.join(PKG_DIR, GLUE), DXF], {
-      encoding: 'utf8', timeout: 90_000, maxBuffer: 8 * 1024 * 1024,
+      encoding: 'utf8', timeout: scaleTimeout(90_000), maxBuffer: 8 * 1024 * 1024,
     }))
     expect(out.loaded.mlstyles).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'Standard', segments: null })]))
     expect(out.created.ok).toBe(true)
@@ -927,10 +928,10 @@ const BLOCK_SCRIPT = [
 ].join('\n')
 
 describe.skipIf(!GLUE)('W4g-7b-01c blocks through the rebuilt wasm and worker', () => {
-  it('preserves bases, ownership, parent picks, and metadata on load, edits, and batches', { timeout: 90_000 }, () => {
+  it('preserves bases, ownership, parent picks, and metadata on load, edits, and batches', { timeout: scaleTimeout(90_000) }, () => {
     expect(GLUE, 'the planner must rebuild pkg-node before this required row').toBeTruthy()
     const out = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', BLOCK_SCRIPT, WORKER_PATH, path.join(PKG_DIR, GLUE), BLOCK_DXF], {
-      encoding: 'utf8', timeout: 90_000, maxBuffer: 16 * 1024 * 1024,
+      encoding: 'utf8', timeout: scaleTimeout(90_000), maxBuffer: 16 * 1024 * 1024,
     }))
     expect(out.direct.entities).toHaveLength(1)
     const reference = { handle: '1280', type: 'INSERT', kind: 'REFERENCE', name: 'B', layer: '0', editable: false, ip: [10, 20, 0], rotationDeg: 90, scale: [2, 3, 1], columns: 1, rows: 1, columnSpacing: 0, rowSpacing: 0 }

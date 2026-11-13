@@ -824,9 +824,10 @@ describe('author start failures: the panel', () => {
     panel(refused.error, { resumable: true })
     expect(box().getAttribute('role')).toBeNull()
     expect(screen.queryByTestId('author-start-failure')).toBeNull()
-    // 26 characters of the generic lead-in, then exactly what the server said.
+    // Keep the server's sentence and its safe, specific protected-authoring reason.
     expect(box().textContent).toMatch(/^Couldn.t author the tool: Tool authoring requires a verified workspace identity/)
-    expect(box().textContent.slice(26)).toBe(`${IDENTITY} BAD_PARAMSResume authoring${NOTE}`)
+    expect(box().textContent.slice(26)).toBe(`${IDENTITY} tenant_identity_binding_unavailableResume authoring${NOTE}`)
+    expect(box().querySelector('code').textContent).toBe('tenant_identity_binding_unavailable')
     expect(document.body.textContent).not.toContain(SENTENCES.transport)
     cleanup()
 

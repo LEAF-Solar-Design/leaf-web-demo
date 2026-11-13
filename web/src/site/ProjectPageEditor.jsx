@@ -31,8 +31,10 @@ export function PagePreview({ document, onSelectField, projectId, onInlineChange
       <h1 className="project-page__headline" data-element={`${selectionIdentity(document)}:textStyles.headline`} style={design('headline')}>{text('headline')}</h1>
       {(document.description || onInlineChange) && <p className="project-page__description" data-element={`${selectionIdentity(document)}:textStyles.description`} style={design('description')}>{text('description')}</p>}
       {(document.status || onInlineChange) && <p className="project-page__status" data-element={`${selectionIdentity(document)}:textStyles.status`} style={design('status')}>{text('status')}</p>}
-      {isValidPageAction(document.action) && <p className="project-page__action">
-        <a href={document.action.href} onClick={event => event.preventDefault()} onAuxClick={event => event.preventDefault()}>{document.action.label}</a>
+      {typeof document.action?.label === 'string' && document.action.label && <p className="project-page__action">
+        {isValidPageAction(document.action)
+          ? <a href={document.action.href} target={document.action.href.startsWith('https:') ? '_blank' : undefined} rel={document.action.href.startsWith('https:') ? 'noopener noreferrer' : undefined}>{document.action.label}</a>
+          : document.action.label}
       </p>}
     </div>
   </main>

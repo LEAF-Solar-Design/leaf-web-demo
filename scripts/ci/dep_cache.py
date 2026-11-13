@@ -26,7 +26,7 @@ DEPENDENCY_FILES = (
     "scripts/requirements-ci.txt", "executor/control_plane/requirements.txt",
     "executor/runtime/requirements.txt",
 )
-ENTRY_RE = re.compile(r"(dl|pw|as)-v1-[0-9a-f]{64}\Z")
+ENTRY_RE = re.compile(r"(dl|pw|as|nm|py|nx)-v1-[0-9a-f]{64}\Z")
 
 
 class Corrupt(Exception):
@@ -112,6 +112,53 @@ def key_inputs(args):
         if not re.fullmatch(r"[0-9a-f]{40}", args.revision):
             raise ValueError("invalid revision")
         return {"schema": "leaf.dep-cache.as.v1", "revision": args.revision}
+    if args.kind == "nx":
+        if (not re.fullmatch(r"v\d+\.\d+\.\d+", args.node_version)
+                or not re.fullmatch(r"\d{8}", args.day)):
+            raise ValueError("invalid Next.js node version or day")
+        lock, config = repo / "web/package-lock.json", repo / "web/next.config.mjs"
+        if not lock.is_file() or not config.is_file():
+            raise ValueError("missing Next.js inputs")
+        return {"schema": "leaf.dep-cache.nx.v1",
+                "lock": hashlib.sha256(lock.read_bytes()).hexdigest(),
+                "config": hashlib.sha256(config.read_bytes()).hexdigest(),
+                "node": args.node_version, "platform": sysconfig.get_platform(),
+                "arch": platform.machine(), "day": args.day}
+    release = {}
+    for line in Path(args.os_release).read_text().splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            release[key] = value.strip().strip("\"'")
+    os_version = release.get("ID", "") + release.get("VERSION_ID", "")
+    if args.kind == "nm":
+        if (args.tree not in ("web", "harness")
+                or not re.fullmatch(r"v\d+\.\d+\.\d+", args.node_version)
+                or not re.fullmatch(r"\d+\.\d+\.\d+", args.npm_version)):
+            raise ValueError("invalid npm tree or version")
+        lock, package = repo / args.tree / "package-lock.json", repo / args.tree / "package.json"
+        if not lock.is_file() or not package.is_file():
+            raise ValueError("missing npm inputs")
+        return {"schema": "leaf.dep-cache.nm.v1", "tree": args.tree,
+                "lock": hashlib.sha256(lock.read_bytes()).hexdigest(),
+                "package": hashlib.sha256(package.read_bytes()).hexdigest(),
+                "node": args.node_version, "npm": args.npm_version,
+                "platform": sysconfig.get_platform(), "arch": platform.machine(), "os": os_version}
+    if args.kind == "py":
+        prefix = args.src if args.action == "publish" else args.dest
+        if not prefix or not Path(prefix).is_absolute() or not re.fullmatch(r"\d{8}", args.day):
+            raise ValueError("invalid Python prefix or day")
+        files = {}
+        for rel in DEPENDENCY_FILES[2:]:
+            path = repo / rel
+            files[rel] = hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else "absent"
+        paths = sysconfig.get_paths()
+        base = sorted({entry.name for key in ("purelib", "platlib")
+                       for pattern in ("*.dist-info", "*.egg-info")
+                       for entry in Path(paths[key]).glob(pattern)})
+        return {"schema": "leaf.dep-cache.py.v1", "files": files,
+                "python": platform.python_version(), "implementation": sys.implementation.name,
+                "executable": os.path.realpath(sys.executable), "prefix": prefix,
+                "platform": sysconfig.get_platform(), "os": os_version, "day": args.day, "base": base}
     lock = json.loads((repo / "web/package-lock.json").read_text())
     core = lock["packages"]["node_modules/playwright-core"]
     requirement = "absent"
@@ -119,15 +166,10 @@ def key_inputs(args):
     for line in requirements.read_text().splitlines() if requirements.exists() else ():
         if re.fullmatch(r"playwright==[^\s;#]+", line.strip()):
             requirement = line.strip()
-    release = {}
-    for line in Path(args.os_release).read_text().splitlines():
-        if "=" in line:
-            key, value = line.split("=", 1)
-            release[key] = value.strip().strip("\"'")
     return {"schema": "leaf.dep-cache.pw.v1",
             "node_playwright_core": core["version"] + core["integrity"],
             "python_playwright": requirement,
-            "os": release.get("ID", "") + release.get("VERSION_ID", ""),
+            "os": os_version,
             "arch": platform.machine()}
 
 
@@ -136,6 +178,12 @@ def parts(args):
         return {"pip": args.pip_cache, "npm": args.npm_cache}
     if args.kind == "as":
         return {"snapshot": args.src if args.action == "publish" else args.dest}
+    if args.kind == "nm":
+        return {"node_modules": str(Path(args.repo) / args.tree / "node_modules")}
+    if args.kind == "py":
+        return {"venv": args.src if args.action == "publish" else args.dest}
+    if args.kind == "nx":
+        return {"next-cache": str(Path(args.repo) / "web/.next/cache")}
     location = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
     if not location:
         location = str(Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "ms-playwright")
@@ -151,6 +199,13 @@ def excluded(part, rel):
                 or names[:2] == ["_cacache", "tmp"])
     if part == "ms-playwright":
         return names[0] in (".links", "__dirlock") or names[-1] == "DEPENDENCIES_VALIDATED"
+    if part == "node_modules":
+        return names[0] in (".cache", ".vite", ".vitest")
+    if part == "next-cache":
+        return names[0] not in ("webpack", "swc")
+    if part == "venv":
+        return (rel == "pyvenv.cfg" or "__pycache__" in names
+                or re.fullmatch(r"bin/python(?:3(?:\.\d+)?)?", rel) is not None)
     return names[0] not in ("manifest.json", "snapshot.bundle")
 
 
@@ -272,7 +327,8 @@ def load_meta(entry, kind, key=None):
         if not isinstance(files, list) or not isinstance(links, list):
             raise Corrupt("manifest lists")
         names = set()
-        allowed = {"dl": {"pip", "npm"}, "pw": {"ms-playwright"}, "as": {"snapshot"}}[kind]
+        allowed = {"dl": {"pip", "npm"}, "pw": {"ms-playwright"}, "as": {"snapshot"},
+                   "nm": {"node_modules"}, "py": {"venv"}, "nx": {"next-cache"}}[kind]
         for row in files:
             if (not isinstance(row, list) or len(row) != 4 or type(row[1]) is not int or row[1] < 0
                     or not isinstance(row[2], str) or not re.fullmatch(r"[0-9a-f]{64}", row[2])
@@ -439,7 +495,8 @@ def run_id(value):
 def parser():
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("action", choices=("seed", "publish"))
-    result.add_argument("--kind", required=True, choices=("dl", "pw", "as"))
+    result.add_argument("--kind", required=True, choices=("dl", "pw", "as", "nm", "py", "nx"))
+    result.add_argument("--tree", choices=("web", "harness"))
     result.add_argument("--repo", default=".")
     result.add_argument("--cache-dir", default="")
     result.add_argument("--writable", required=True, choices=("0", "1"))
@@ -448,6 +505,7 @@ def parser():
     result.add_argument("--pip-cache", default="")
     result.add_argument("--npm-cache", default="")
     result.add_argument("--node-version", default="")
+    result.add_argument("--npm-version", default="")
     result.add_argument("--os-release", default="/etc/os-release")
     result.add_argument("--revision", default="")
     result.add_argument("--dest", default="")
@@ -464,6 +522,7 @@ def main(argv=None):
         cache = Path(args.cache_dir)
         if (not args.cache_dir or os.environ.get("LEAF_DEP_CACHE_OFF") == "1"
                 or (cache / ".leaf-dep-cache-off").exists()
+                or (cache / f".leaf-dep-cache-off-{args.kind}").exists()
                 or (args.kind == "pw" and os.environ.get("PLAYWRIGHT_BROWSERS_PATH") == "0")):
             report["result"] = "off"
         else:
@@ -484,7 +543,7 @@ def main(argv=None):
     except Exception:
         report["result"] = "error"
     if report["result"] in ("corrupt", "error"):
-        for part in ("pip", "npm", "ms-playwright", "snapshot"):
+        for part in ("pip", "npm", "ms-playwright", "snapshot", "node_modules", "venv", "next-cache"):
             if report.get(part) == "seeded":
                 report.pop(part)
     report["ms"] = int((time.monotonic() - started) * 1000)
