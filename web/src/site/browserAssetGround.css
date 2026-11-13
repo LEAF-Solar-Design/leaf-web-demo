@@ -35,6 +35,11 @@
 .canvas-properties .portfolio-editor :is(input, textarea, select) { width: 100%; min-width: 0; min-height: 44px; box-sizing: border-box; font: inherit; color: var(--leaf-ink, #202020); background: var(--leaf-surface, #fff); }
 .canvas-properties .portfolio-editor label { display: grid; gap: 4px; }
 @media(max-width:899px) {
+  /* Keep page tools and the draft caption outside the short page scroller. */
+  .browser-asset-viewport:has(> .project-page) { display: flex; flex-direction: column; overflow: hidden; }
+  .browser-asset-viewport:has(> .project-page) > .canvas-toolbar { position: relative; flex: 0 0 auto; }
+  .browser-asset-viewport:has(> .project-page) > .project-page { flex: 1 1 0; min-height: 0; overflow: auto; align-items: safe center; }
+  .browser-asset-viewport:has(> .project-page) > .browser-preview-label { position: static; order: 1; flex: 0 0 auto; margin: 0; overflow-wrap: anywhere; }
   .canvas-toolbar { gap: 4px; padding: 4px; }
   .canvas-toolbar > button { flex: 1 1 0; min-width: 44px; padding: 4px; }
   .canvas-toolbar__actions { display: flex; flex-wrap: wrap; flex-basis: 100%; gap: 4px; min-width: 0; }
