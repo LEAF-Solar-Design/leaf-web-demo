@@ -2709,6 +2709,8 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("tests/test_native_preview_worker.py"), 184),
         Suite("scripts-native-preview-service", "scripts tests/test_native_preview_service.py", "pytest",
               SCRIPTS_DIR, _py_pytest("tests/test_native_preview_service.py"), 48),
+        Suite("scripts-native-preview-completion", "scripts tests/test_native_preview_completion.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("tests/test_native_preview_completion.py"), 56),
         Suite("scripts-native-preview-session", "scripts tests/test_native_preview_session.py", "pytest",
               SCRIPTS_DIR, _py_pytest("tests/test_native_preview_session.py"), 61),
         Suite("scripts-native-preview-host", "scripts tests/test_native_preview_host.py", "pytest",
