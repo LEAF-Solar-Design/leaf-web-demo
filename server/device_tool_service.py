@@ -1,6 +1,7 @@
 """Turn-bound device operations with a deliberately narrow result projection."""
 from datetime import datetime, timezone
 import json
+import os
 import re
 from uuid import uuid4
 
@@ -24,6 +25,32 @@ MESSAGES = {"invalid_input": "The request is invalid.", "unauthenticated": "Auth
 WRITES = {"install_package", "ha_step", "light"}
 ENTITY = re.compile(r"(?:light|group)\.[a-z0-9_]{1,64}")
 HA_FLOW_ID = re.compile(r"[0-7][0-9A-HJKMNP-TV-Z]{25}")
+OFF_LIMITS_TOKENS = ("444f8e80ff06", "80ff06", "10.0.0.175")
+
+
+def _names_off_limits(value):
+    tokens = OFF_LIMITS_TOKENS + tuple(
+        token.strip().lower() for token in os.environ.get("LEAF_DEVICE_OFF_LIMITS", "").split(",")
+        if token.strip())
+    pending = [iter((value,))]
+    nodes = 0
+    while pending:
+        try:
+            item = next(pending[-1])
+        except StopIteration:
+            pending.pop()
+            continue
+        nodes += 1
+        if nodes > 2000:
+            return True
+        if isinstance(item, str):
+            if any(token in item.lower() for token in tokens):
+                return True
+        elif isinstance(item, dict):
+            pending.append(child for pair in item.items() for child in pair)
+        elif isinstance(item, (list, tuple)):
+            pending.append(iter(item))
+    return False
 
 
 def failure(code):
@@ -86,12 +113,19 @@ def normalize(operation, value):
             "ha.onboard", "ha.flow.start", "ha.flow.step", "ha.flow.list", "pkg.health"} or type(value["args"]) is not dict):
         raise ReadFailure("invalid_input")
     if operation == "light":
-        if value["action"] not in {"turn_on", "turn_off"} or ENTITY.fullmatch(value["entity_id"]) is None:
+        if value["action"] not in {"turn_on", "turn_off"} or (
+                ENTITY.fullmatch(value["entity_id"]) is None
+                and not (ENTITY.fullmatch(value["entity_id"].lower())
+                         and _names_off_limits(value["entity_id"]))):
             raise ReadFailure("invalid_input")
         if "color" in value and (type(value["color"]) is not str or re.fullmatch(r"#[0-9a-fA-F]{6}", value["color"]) is None):
             raise ReadFailure("invalid_input")
         if "brightness_pct" in value and (type(value["brightness_pct"]) is not int or not 0 <= value["brightness_pct"] <= 100):
             raise ReadFailure("invalid_input")
+    if operation == "light" and _names_off_limits(value["entity_id"]):
+        raise ReadFailure("denied")
+    if operation == "ha_step" and _names_off_limits(value["args"]):
+        raise ReadFailure("denied")
     return value
 
 
