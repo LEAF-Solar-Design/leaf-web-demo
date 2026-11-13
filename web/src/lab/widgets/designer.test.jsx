@@ -728,9 +728,10 @@ describe('project widget journeys', () => {
     expect(within(screen.getByRole('region', { name: 'Preview' })).getByText('Project A')).toBeInTheDocument()
 
     const createObjectURL = vi.fn(() => 'blob:widget-definition')
+    const revokeObjectURL = vi.fn()
     vi.stubGlobal('URL', class extends URL {
       static createObjectURL = createObjectURL
-      static revokeObjectURL = vi.fn()
+      static revokeObjectURL = revokeObjectURL
     })
     vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
     click('Download widget definition')
@@ -740,6 +741,7 @@ describe('project widget journeys', () => {
       reader.readAsText(createObjectURL.mock.calls[0][0])
     })
     expect(exported).toEqual(validateWidgetDoc(aDoc))
+    await waitFor(() => expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith('blob:widget-definition'))
   })
 
   it.each(['load', 'save'])('ignores a late project A %s after switching to B, including its head and last-opened name', async (operation) => {

@@ -1,3 +1,4 @@
+import { scaleTimeout } from '../testTimeScale.js'
 import { describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
@@ -493,7 +494,7 @@ describe('pure Solar string composer', () => {
     expect(stringComboSizes(14, 28)).toEqual([14, 14])
     // 810,000 cells measured at 5.0 to 5.6 s on the workstation, over vitest's 5 s default;
     // the CI runner is slower still, so this row carries its own budget.
-  }, 60_000)
+  }, scaleTimeout(60_000))
   it('SC37 combo bounds, empty counts, sentinel and fresh arrays', () => {
     for (const [target, count] of [[0, 5], [901, 5], [1.5, 5], [true, 5],
       [5, -1], [5, 90001], [5, 1.5]]) {

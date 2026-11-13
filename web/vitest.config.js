@@ -12,6 +12,7 @@
  * specs written for a different runner and fail confusingly.
  */
 import { defineConfig } from 'vitest/config'
+import { scaleTimeout } from './src/testTimeScale.js'
 
 export default defineConfig({
   resolve: { dedupe: ['react', 'react-dom', 'zod', 'recharts'] },
@@ -20,6 +21,9 @@ export default defineConfig({
   // defined" — a failure about the runner, not the component.
   esbuild: { jsx: 'automatic' },
   test: {
+    // LEAF_TEST_TIME_SCALE scales harness ceilings for slower CI workers.
+    testTimeout: scaleTimeout(5_000),
+    hookTimeout: scaleTimeout(10_000),
     environment: 'jsdom',
     globals: false, // explicit imports; a global `expect` hides where it came from
     include: ['src/**/*.test.{js,jsx}'],

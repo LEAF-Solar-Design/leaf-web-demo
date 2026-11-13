@@ -8,8 +8,9 @@ import type { RepoEditor, RepoEditResult } from "../vendor/mushy-author/ports/im
 import type { CampaignSourceService } from "./campaignSourceIntegration.js";
 import { ProjectRepositoryEditError } from "./projectRepositoryEditCoordinator.js";
 import { nativeProjectSourceProfile } from "./nativeProjectSourceProfile.js";
+import { canonicalVideo, validateProjectVideo, validateVideoReport, VideoInspectionError, type ProjectVideoInspector, type VideoInspectionResult } from "./projectVideoInspection.js";
 
-export interface ProjectSourceAuthorDependencies { editor: RepoEditor; oauth: OAuthGrantProvider }
+export interface ProjectSourceAuthorDependencies { editor: RepoEditor; oauth: OAuthGrantProvider; videoInspector?: ProjectVideoInspector }
 export const PROJECT_SOURCE_SCAFFOLD: Readonly<Record<string, string>> = Object.freeze({
   "package.json": JSON.stringify({ private: true, scripts: { build: "next build", dev: "next dev", start: "next start" },
     dependencies: { next: "16.4.3", react: "18.3.1", "react-dom": "18.3.1" },
@@ -91,7 +92,8 @@ export function authorProjectSource(service: CampaignSourceService, deps: Projec
   const ids = ["tenant_id", "organization_id", "project_id", "repo_key", "edit_id", "actor_binding_id"];
   const hasProfile = !!value && Object.prototype.hasOwnProperty.call(value, "source_profile");
   const hasOperation = !!value && Object.prototype.hasOwnProperty.call(value, "source_operation");
-  const body = closed(value, [...ids, "expected_base_commit", "instruction_digest", "idempotency_key", "commit_message", "requirements", "material", ...(hasProfile ? ["source_profile"] : []), ...(hasOperation ? ["source_operation"] : [])]);
+  const hasVideo = !!value && Object.prototype.hasOwnProperty.call(value, "video");
+  const body = closed(value, [...ids, "expected_base_commit", "instruction_digest", "idempotency_key", "commit_message", "requirements", "material", ...(hasProfile ? ["source_profile"] : []), ...(hasOperation ? ["source_operation"] : []), ...(hasVideo ? ["video", "budget_ms"] : [])]);
   for (const key of ids) text(body[key], 36, /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   if (tenantHeader !== body.tenant_id) invalid();
   if (hasProfile && body.source_profile !== "web-next-static-v1" && body.source_profile !== "ios-swiftui-xcodegen-v1") invalid();
@@ -109,6 +111,7 @@ export function authorProjectSource(service: CampaignSourceService, deps: Projec
   if (!Array.isArray(body.material) || (native && !editing && body.material.length < 1) || body.material.length > 8) invalid();
   const fileLimit = native ? 1048576 : 8388608, totalLimit = native ? 4194304 : 8388608;
   const protectedFiles = new Map(Object.entries(profile.scaffold).map(([p, s]) => [p, Buffer.from(s)]));
+  const selectedMaterial = new Map<string, Buffer>();
   let total = 0;
   for (const item of body.material) {
     const file = closed(item, ["path", "key", "sha256", "size_bytes", "product_b64"]);
@@ -123,6 +126,18 @@ export function authorProjectSource(service: CampaignSourceService, deps: Projec
     total += bytes.length;
     if (total > totalLimit) invalid();
     protectedFiles.set(path, bytes);
+    selectedMaterial.set(file.path as string, bytes);
+  }
+  if (hasVideo && (!native || editing || !deps.videoInspector || typeof body.budget_ms !== "number" ||
+      !Number.isSafeInteger(body.budget_ms) || body.budget_ms <= 0 || body.budget_ms > 240000)) invalid();
+  const video = hasVideo ? validateProjectVideo(body.video, {
+    tenant_id: body.tenant_id as string, organization_id: body.organization_id as string,
+    project_id: body.project_id as string, actor_binding_id: body.actor_binding_id as string, edit_id: body.edit_id as string,
+  }, selectedMaterial) : undefined;
+  if (video) {
+    signal = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(body.budget_ms as number)]);
+    protectedFiles.set(profile.materialPrefix + "video-manifest-" + video.manifest.original.material_id + ".json",
+      Buffer.from(canonicalVideo(video.manifest) + "\n"));
   }
   let baseline: Map<string, Buffer>;
   const editable = (path: string) => profile.isEditablePath(path) && !Object.prototype.hasOwnProperty.call(profile.scaffold, path);
@@ -198,9 +213,15 @@ export function authorProjectSource(service: CampaignSourceService, deps: Projec
       }
       if (signal?.aborted) invalid();
       const lease = deps.oauth.acquireGrant && deps.oauth.settleGrant ? await deps.oauth.acquireGrant(body.tenant_id as string) : null;
-      let result: RepoEditResult | undefined, success = false;
+      let result: RepoEditResult | undefined, visualTelemetry: VideoInspectionResult["telemetry"], success = false;
       try {
         const grant = lease?.grant ?? await deps.oauth.getGrant(body.tenant_id as string);
+        if (video) {
+          const inspection = await deps.videoInspector!.inspect({ video, transcripts: selectedMaterial, grant, signal: signal! });
+          visualTelemetry = inspection.telemetry;
+          if (signal?.aborted) invalid();
+          protectedFiles.set(profile.materialPrefix + "video-observations-" + video.manifest_sha256 + ".json", validateVideoReport(inspection.report, video));
+        }
         for (const [path, bytes] of protectedFiles) {
           if (native && editing && baseline.has(path)) continue;
           mkdirSync(dirname(join(dir, path)), { recursive: true });
@@ -211,11 +232,15 @@ export function authorProjectSource(service: CampaignSourceService, deps: Projec
         if (signal?.aborted) invalid();
         evidence(dir);
         success = true;
+      } catch (error) {
+        if (error instanceof VideoInspectionError && error.telemetry) visualTelemetry = error.telemetry;
+        throw error;
       } finally {
         if (lease && deps.oauth.settleGrant) {
           const tokens = (n: number | undefined) => Number.isFinite(n) ? Math.max(0, Math.trunc(n!)) : 0;
           await deps.oauth.settleGrant(body.tenant_id as string, lease.lease_id, {
-            usage: { cost_tokens: tokens(result?.telemetry?.input_tokens) + tokens(result?.telemetry?.output_tokens) },
+            usage: { cost_tokens: tokens(result?.telemetry?.input_tokens) + tokens(result?.telemetry?.output_tokens) +
+              tokens(visualTelemetry?.input_tokens) + tokens(visualTelemetry?.output_tokens) },
             stop_reason: success ? "end_turn" : "error",
           });
         }

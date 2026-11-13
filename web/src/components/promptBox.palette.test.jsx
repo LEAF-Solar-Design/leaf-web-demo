@@ -4,6 +4,7 @@
 // No new modal — Ctrl/Cmd+K still just focuses the ONE bar (untouched here);
 // these tests cover what picking the existing find/act scope chip rows now
 // resolves to.
+import { scaleTimeout } from '../testTimeScale.js'
 import { useState } from 'react'
 import { act, cleanup, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -151,7 +152,7 @@ describe('find scope: consumes GET /api/search', () => {
     const input = container.querySelector('.bar-field')
     fireEvent.change(input, { target: { value: 'panel' } })
     rerender(<div data-testid="host"><PromptBox liveCallsAllowed value="panel" onChange={onChange} onDispatch={noop} projectName="cat-panels" /></div>)
-    await waitFor(() => expect(screen.getByText('panel-cut')).toBeTruthy(), { timeout: 2000 })
+    await waitFor(() => expect(screen.getByText('panel-cut')).toBeTruthy(), { timeout: scaleTimeout(2000) })
     expect(screen.getByText(/cuts panels/)).toBeTruthy()
   })
 })

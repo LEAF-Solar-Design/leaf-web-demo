@@ -8,6 +8,34 @@ const listen = (map, key, listener) => {
   return () => { const set = map.get(key); set?.delete(listener); if (!set?.size) map.delete(key) }
 }
 
+// This contains identities and receipts only; values are always read again
+// through the authorized run endpoints. Scope includes the account and project.
+const receiptKey = scope => `leaf.lab.run-receipts.v1:${scope}`
+export function readRunReceipts(scope) {
+  if (!scope) return []
+  try {
+    const rows = JSON.parse(globalThis.localStorage.getItem(receiptKey(scope)) || '[]')
+    return Array.isArray(rows) ? rows.filter(row => row && /^v1\.[0-9]{13}\.[0-9a-f]{32}$/.test(row.id)
+      && Number.isInteger(row.graphRevision) && row.graphRevision > 0
+      && (row.runId === undefined || typeof row.runId === 'string')) : []
+  } catch { return [] }
+}
+export function rememberRunReceipt(scope, receipt) {
+  if (!scope) return true
+  try {
+    const rows = readRunReceipts(scope).filter(row => row.id !== receipt.id)
+    const next = [...rows, receipt]
+    const retained = new Set(next.filter(row => row.runId).slice(-20))
+    globalThis.localStorage.setItem(receiptKey(scope), JSON.stringify(next.filter(row => !row.runId || retained.has(row))))
+    return true
+  } catch { return false }
+}
+export function forgetRunReceipt(scope, id) {
+  if (!scope) return
+  try { globalThis.localStorage.setItem(receiptKey(scope), JSON.stringify(readRunReceipts(scope).filter(row => row.id !== id))) }
+  catch { /* Storage may be unavailable. */ }
+}
+
 export function createValueStore({ maxEvents = 10000, maxRuns = 20 } = {}) {
   const runs = new Map(), runListeners = new Map(), blockListeners = new Map(), listeners = new Set()
   const streamControls = new Map()
