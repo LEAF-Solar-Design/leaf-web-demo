@@ -194,6 +194,60 @@ def test_light_states_summary_is_filtered_and_bounded(tools):
                                              "rgb": [1, 2, 3], "brightness_pct": 100}
 
 
+def test_light_states_summary_shows_group_members_and_off_limits(tools):
+    device_id = device(tools)
+    command_id = call(tools, "light_states", {"device_id": device_id}).json()["result"]["command_id"]
+    store.lease_commands(device_id)
+    members = ["light.wiz_rgbw_tunable_daea0a", "light.wiz_rgbw_tunable_dc66f0"]
+    off_limits = "light.wiz_rgbw_tunable_80ff06"
+    rows = [
+        {"entity_id": "light.office", "attributes": {"entity_id": members}},
+        {"entity_id": "light.room", "attributes": {"entity_id": [members[0], off_limits]}},
+        {"entity_id": off_limits},
+    ]
+    store.complete_command(device_id, command_id, {"command_id": command_id, "status": "ok",
+        "finished_at": store._now().isoformat(), "data": {"body_json": rows}})
+    response = call(tools, "command_status", {"device_id": device_id, "command_id": command_id})
+    assert response.status_code == 200
+    assert response.json()["result"]["summary"]["lights"] == [
+        {"entity_id": "light.office", "name": "light.office", "members": members},
+        {"entity_id": "light.room", "name": "light.room", "members": [members[0], off_limits], "off_limits": True},
+        {"entity_id": off_limits, "name": off_limits, "off_limits": True},
+    ]
+
+
+@pytest.mark.parametrize("attributes,expected,off_limits", [
+    ({"entity_id": [None, 1, True, {}, [], "switch.x", "light.A/../b", "light.",
+                    "light.a\n", "light." + "a" * 65, "light.secret", "light." + "a" * 24,
+                    "light.second", "light.first", "light.second"]}, ["light.second", "light.first"], False),
+    ({"entity_id": [f"light.bulb_{i}" for i in range(25)]}, [f"light.bulb_{i}" for i in range(20)], False),
+    ({"entity_id": [f"light.bulb_{i}" for i in range(20)] + ["light.wiz_rgbw_tunable_80ff06"]},
+     [f"light.bulb_{i}" for i in range(20)], True),
+    ({"entity_id": ["light.wiz_rgbw_tunable_444f8e80ff06"]}, [], True),
+    ({"entity_id": "light.wiz_rgbw_tunable_80ff06"}, [], True),
+    ({"entity_id": "light.first"}, [], False),
+    ({"entity_id": []}, [], False),
+    ({"entity_id": [None, "switch.x", "light.secret"]}, [], False),
+    ({"entity_id": None}, [], False),
+    ({}, [], False),
+])
+def test_light_states_summary_filters_and_bounds_members(tools, attributes, expected, off_limits):
+    device_id = device(tools)
+    command_id = call(tools, "light_states", {"device_id": device_id}).json()["result"]["command_id"]
+    store.lease_commands(device_id)
+    store.complete_command(device_id, command_id, {"command_id": command_id, "status": "ok",
+        "finished_at": store._now().isoformat(), "data": {"body_json": [
+            {"entity_id": "light.office", "attributes": attributes}]}})
+    response = call(tools, "command_status", {"device_id": device_id, "command_id": command_id})
+    assert response.status_code == 200
+    light = {"entity_id": "light.office", "name": "light.office"}
+    if expected:
+        light["members"] = expected
+    if off_limits:
+        light["off_limits"] = True
+    assert response.json()["result"]["summary"]["lights"] == [light]
+
+
 def test_other_summary_has_only_safe_fields(tools):
     device_id = device(tools)
     command_id = call(tools, "ha_step", {"device_id": device_id, "op": "ha.onboard", "args": {}}).json()["result"]["command_id"]
