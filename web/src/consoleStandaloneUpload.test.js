@@ -381,23 +381,45 @@ describe('console standalone upload', () => {
     const h = harness({}, { openProjectId: 'P', signedIn: true })
     expect(h.ribbon().disabled).toBe(false)
     h.open(); expect(h.controller).toBeNull()
-    const events = [], onAttached = vi.fn()
+    const events = [], onAttached = vi.fn(), capture = { dispose: vi.fn() }
+    const onAttachmentStarted = vi.fn(() => { events.push(['capture']); return capture })
+    const intakeHooks = hooks()
+    let allowBegin = true, attached
     const upload = { actions: { upload: (value) => events.push(['upload', value]) } }
-    const intake = { begin: (value) => { events.push(['begin', value]); return true }, retry: vi.fn() }
+    const intake = { begin: (value) => { events.push(['begin', value]); return allowBegin }, retry: vi.fn() }
     // Adjacent canonical editor exports are separate adapters. Execute only
     // this production intake declaration, keeping its real begin/upload path.
     const declaration = parse(source, { sourceType: 'module', plugins: ['jsx'] }).program.body
       .find((node) => node.type === 'FunctionDeclaration' && node.id.name === 'LiveProjectMaterialIntake')
     const code = compile(source.slice(declaration.start, declaration.end))
-    const live = new Function('React', 'ProjectMaterialIntake', 'PhotoMaterialIntake', 'useDrawingUploadController', 'useMaterialIntake', code + '\nreturn LiveProjectMaterialIntake')(
-      React, 'ProjectMaterialIntake', 'PhotoMaterialIntake', () => upload, (options) => { expect(options).toEqual({ upload, onAttached }); return intake },
-    )({ project: { project_id: 'P', name: 'Project P' }, artifacts: [], onAttached })
+    intakeHooks.begin()
+    const live = new Function('React', 'useRef', 'useEffect', 'ProjectMaterialIntake', 'PhotoMaterialIntake', 'useDrawingUploadController', 'useMaterialIntake', code + '\nreturn LiveProjectMaterialIntake')(
+      React, intakeHooks.useRef, intakeHooks.useLayoutEffect, 'ProjectMaterialIntake', 'PhotoMaterialIntake', () => upload, (options) => {
+        expect(options.upload).toBe(upload)
+        expect(options.onAttached).toEqual(expect.any(Function))
+        attached = options.onAttached
+        return intake
+      },
+    )({ project: { project_id: 'P', name: 'Project P' }, artifacts: [], onAttachmentStarted, onAttached })
+    intakeHooks.commit()
     live.props.onStartUpload(file)
-    expect(events).toEqual([['begin', { projectId: 'P', projectName: 'Project P', fileName: file.name }], ['upload', file]])
+    const beginning = ['begin', { projectId: 'P', projectName: 'Project P', fileName: file.name }]
+    expect(events).toEqual([beginning, ['capture'], ['upload', file]])
+    const row = { version_id: 'V', project_id: 'P' }
+    attached(row)
+    expect(onAttached).toHaveBeenCalledExactlyOnceWith(row, capture)
+    allowBegin = false
+    live.props.onStartUpload(file)
+    expect(events).toEqual([beginning, ['capture'], ['upload', file], beginning])
+    expect(onAttachmentStarted).toHaveBeenCalledOnce()
+    expect(capture.dispose).not.toHaveBeenCalled()
+    intakeHooks.dispose()
+    expect(capture.dispose).toHaveBeenCalledOnce()
     h.render({ signedIn: false }); expect(h.ribbon().disabled).toBe(true)
     expect(h.setFromUpload).not.toHaveBeenCalled()
-    expect(source).toContain('key={openProjectId}')
-    expect(source).toContain('onAttached={rehydrate}')
+    expect(source).toContain('key={`${orgId}:${openProjectId}`}')
+    expect(source).toContain('onAttachmentStarted={() => captureProjectMaterialSelection(workspaceController, session.controller)}')
+    expect(source).toContain('onAttached={(row, capture) => seatAttachedProjectDrawing(workspaceController, row, capture)}')
     h.dispose()
   })
 
