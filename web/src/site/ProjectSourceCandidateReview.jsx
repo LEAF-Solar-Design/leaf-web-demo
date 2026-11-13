@@ -33,7 +33,9 @@ export default function ProjectSourceCandidateReview({ controller }) {
       <div style={{ overflowY: 'auto', minHeight: 0, padding: 12 }}>
         {native && <><p>Creating iOS source requires one through eight nonempty TXT or JSON project originals, at most 1 MiB each and 4 MiB total.</p>
           <p>Editing saved iOS source can use existing project source and data with no new originals. Review the selection explicitly; edits may select zero through eight new originals within the same limits.</p>
-          <p>Only selected text or JSON references are used. Retained movies are unavailable to this source adapter; a transcript is a text reference, not video processing.</p>
+          {c.sourceOperation === 'create'
+            ? <p>You may also select one MOV original (video/quicktime), at most 64 MiB, with a TXT or JSON transcript. Select at most eight originals including the movie. Movies are unchecked until you choose them. Video availability is checked when staging source.</p>
+            : <p>Only selected text or JSON references are used. Retained movies are unavailable for source edits; a transcript is a text reference, not video processing.</p>}
           <p>Build an iOS simulator preview from saved repository source below, or download the reviewed Git source bundle. Device delivery is unavailable.</p></>}
         <label>Original requirements
           <textarea tabIndex={0} aria-label="Original requirements" value={frozen && row ? displayedIntent?.requirements || '' : c.requirements} readOnly={c.busy || frozen}
@@ -45,9 +47,9 @@ export default function ProjectSourceCandidateReview({ controller }) {
         <fieldset disabled={c.busy || c.materialsLoading || frozen} style={{ minWidth: 0 }}><legend>Project originals for the next source request</legend>
           {!c.materialsComplete && <p role="status">Reference list incomplete or unavailable. Staging is unavailable until the list is refreshed.</p>}
           {c.materials.map((material, index) => {
-            const problem = sourceMaterialProblem(material, c.projectId, c.orgId, c.sourceContext)
+            const problem = sourceMaterialProblem(material, c.projectId, c.orgId, c.sourceContext, c.sourceOperation)
             return <div key={index}><label>
-              <input type="checkbox" checked={c.selected.includes(material.material_id)} disabled={!!problem}
+              <input type="checkbox" checked={c.selected.includes(material.material_id)} disabled={!!problem && !c.selected.includes(material.material_id)}
                 onChange={() => c.toggleMaterial(material.material_id)} /> {typeof material.name === 'string' && material.name ? material.name : 'Unavailable reference'}
             </label>{problem && <p>{problem}</p>}</div>
           })}

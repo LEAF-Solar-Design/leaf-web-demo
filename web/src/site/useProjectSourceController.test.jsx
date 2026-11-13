@@ -320,6 +320,62 @@ describe('Native source through the real API', () => {
     expect(create).toHaveBeenCalledTimes(1)
   })
 
+  const movie = (overrides = {}) => material({ material_id: REQUEST, name: 'Original.mov',
+    media_type: 'video/quicktime', byte_size: 64 * 1024 * 1024, sha256: 'f'.repeat(64), ...overrides })
+
+  it('opts into MOV plus transcript and binds the exact selection to one authority and one source POST', async () => {
+    const h = nativeSetup({ materials: [transcript(), movie()] })
+    await open(h)
+    expect(h.result.current.selected).toEqual([OTHER])
+    act(() => h.result.current.toggleMaterial(REQUEST))
+    expect(h.result.current.selectionProblem).toBeNull()
+    await act(async () => { await Promise.all([h.result.current.stage(), h.result.current.stage()]) })
+    const posts = h.calls.filter((call) => call.method === 'POST')
+    expect(posts).toHaveLength(1)
+    const expected = [{ material_id: OTHER, sha256: 'e'.repeat(64) }, { material_id: REQUEST, sha256: 'f'.repeat(64) }]
+    expect(JSON.parse(posts[0].body)).toMatchObject({ source_operation: 'create', material_refs: expected })
+    expect(h.startAgentTurn).toHaveBeenCalledOnce()
+    expect(h.startAgentTurn.mock.calls[0][1]).toMatchObject({ material_refs: expected, source_profile: 'ios-swiftui-xcodegen-v1' })
+    expect(h.result.current.intent.referenceNames).toEqual(['Authentic transcript.txt', 'Original.mov'])
+    expect(h.calls.every((call) => call.url.includes('/reference-files') || call.url.includes('/native/source/requests'))).toBe(true)
+  })
+
+  it.each([
+    ['no transcript', () => [movie()]],
+    ['oversize movie', () => [transcript(), movie({ byte_size: 64 * 1024 * 1024 + 1 })]],
+    ['empty movie', () => [transcript(), movie({ byte_size: 0 })]],
+    ['wrong project', () => [transcript(), movie({ project_id: ORG })]],
+    ['wrong organization', () => [transcript(), movie({ org_id: PROJECT })]],
+    ['invalid hash', () => [transcript(), movie({ sha256: 'invalid' })]],
+    ['two movies', () => [transcript(), movie(), movie({ material_id: PROJECT })]],
+  ])('rejects selected MOV before authority creation: %s', async (_kind, makeRows) => {
+    const materials = makeRows(), h = nativeSetup({ materials })
+    await open(h)
+    for (const item of materials) if (!h.result.current.selected.includes(item.material_id)) act(() => h.result.current.toggleMaterial(item.material_id))
+    await act(async () => { await h.result.current.stage() })
+    expect(h.result.current.selectionProblem).toBeTruthy()
+    expect(h.startAgentTurn).not.toHaveBeenCalled()
+    expect(h.calls.some((call) => call.method === 'POST')).toBe(false)
+  })
+
+  it('revalidates a selected movie after readback changes creation into an edit and allows its removal', async () => {
+    const h = nativeSetup({ materials: [transcript(), movie()] })
+    await open(h)
+    act(() => h.result.current.toggleMaterial(REQUEST))
+    h.setDurable([nativeRow({ state: 'published' })])
+    await act(async () => { await h.result.current.refresh() })
+    expect(h.result.current.sourceOperation).toBe('edit')
+    await act(async () => { await h.result.current.stage() })
+    expect(h.startAgentTurn).not.toHaveBeenCalled()
+    expect(h.calls.some((call) => call.method === 'POST')).toBe(false)
+    act(() => h.result.current.toggleMaterial(REQUEST))
+    expect(h.result.current.selectionProblem).toBeNull()
+    await act(async () => { await h.result.current.stage() })
+    expect(h.startAgentTurn).toHaveBeenCalledOnce()
+    expect(JSON.parse(h.calls.find((call) => call.method === 'POST').body)).toMatchObject({ source_operation: 'edit',
+      expected_base_commit: 'c'.repeat(40), material_refs: [{ material_id: OTHER, sha256: 'e'.repeat(64) }] })
+  })
+
   it.each([['recover', 'publishing', 'published'], ['reject', 'awaiting_confirmation', 'rejected']])('uses the exact Native %s hint and durable readback', async (action, state, finalState) => {
     const h = nativeSetup({ saved: [nativeRow({ state })] })
     await open(h)
