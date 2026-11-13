@@ -3485,6 +3485,8 @@ def build_suites() -> List[Suite]:
               [_npm(), "run", "check:walk-unit"], None),
         Suite("web-elk-rank", "web node --test scripts/elk_rank.test.mjs", "script", WEB,
               ["node", "--test", "scripts/elk_rank.test.mjs"], None),
+        Suite("web-ci-prebuilt-contract", "web node --test scripts/ci-prebuilt.test.mjs", "script", WEB,
+              ["node", "--test", "scripts/ci-prebuilt.test.mjs"], None),
         # Standardization slice 13d. ribbonClusters.js has carried an HONESTY
         # CONTRACT in its file header since W4d ("a greyed control with no
         # reason is the gap ToolsPanel's lock-note closed"), and nothing
@@ -3884,7 +3886,7 @@ def build_suites() -> List[Suite]:
                "playwright.page-service.config.mjs", "--workers=1"], None,
               uses_database=True, db_gated=True, requires_linux=True, timeout_s=600),
         Suite("web-build", "web production build", "script", WEB,
-              [_npm(), "run", "build"], None),
+              [_npm(), "run", "build", "--", "--reuse-ci-prebuilt"], None),
         # --- containerized harness smoke (census #13) — OPT-IN --- #
         # Builds + boots the real compose stack (broker+harness+app, mock agent)
         # and proves the authed app->harness hop, durable grant/tenant volumes,
@@ -5873,6 +5875,7 @@ _WEB_SOURCE_READERS = frozenset({
     "web-app-wiring",
     "web-project-proof-contract",
     "web-elk-rank",
+    "web-ci-prebuilt-contract",
     "web-honesty-ladder",
     "web-tour-anchors",
     "web-composer-contract",

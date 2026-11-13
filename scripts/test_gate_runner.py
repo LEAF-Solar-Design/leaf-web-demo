@@ -5228,7 +5228,7 @@ def test_web_source_readers_are_registered_read_only_pool_suites():
     by_id = {suite.id: suite for suite in g.build_suites()}
     scripts = json.loads((g.WEB / "package.json").read_text(encoding="utf-8"))["scripts"]
     assert isinstance(g._WEB_SOURCE_READERS, frozenset)
-    assert len(g._WEB_SOURCE_READERS) == 24
+    assert len(g._WEB_SOURCE_READERS) == 25
     assert g._WEB_SOURCE_READERS
     assert g._WEB_SOURCE_READERS <= by_id.keys()
     # Vite is a server command; Vitest/startVitest is a separate unit runner.
@@ -6734,6 +6734,29 @@ def test_heavy_prerequisite_failure_preserves_cheap_results_and_cannot_pass(tmp_
     assert raised.value.status == 17
     assert seen == [cheap.id]
     assert raised.value.completed[cheap.id][0].status == "PASS"
+
+
+def test_web_build_suite_reuses_ci_prerequisite_bundle():
+    g = _load_runner()
+    by_id = {suite.id: suite for suite in g.build_suites()}
+    build = by_id["web-build"]
+    assert build.argv[-4:] == ["run", "build", "--", "--reuse-ci-prebuilt"]
+    assert "npm/npx" in g.serial_suite_reason(build)
+    contract = by_id["web-ci-prebuilt-contract"]
+    assert contract.cwd == g.WEB
+    assert contract.argv == ["node", "--test", "scripts/ci-prebuilt.test.mjs"]
+    source = (REPO / ".codebuild/ci.sh").read_text()
+    receipt_line = next(line for line in source.splitlines()
+                        if line.startswith("export LEAF_WEB_PREBUILT_RECEIPT="))
+    gate_line = next(line for line in source.splitlines()
+                     if line.startswith("python scripts/run-all-gates.py --jobs"))
+    assert source.index(receipt_line) < source.index(gate_line)
+    entry = source[source.index('if [[ "${1:-}" == --heavy-prerequisites'):
+                   source.index('# Freeze policy before any candidate installation')]
+    assert receipt_line not in entry
+    wrapper = (g.WEB / "scripts/next-build.mjs").read_text()
+    assert "--reuse-ci-prebuilt" in wrapper
+    assert "LEAF_WEB_PREBUILT_RECEIPT" in wrapper
 
 
 def test_early_feedback_shell_uses_exact_trusted_script_and_one_gate_invocation():
