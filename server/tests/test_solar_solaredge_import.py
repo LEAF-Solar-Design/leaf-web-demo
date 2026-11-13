@@ -168,6 +168,37 @@ def test_bridge_string_handles_come_from_the_matched_sub_grids():
     assert result["unassigned"] == []
 
 
+def test_explicit_review_choices_preserve_bridge_membership_and_defer_partial_bridges():
+    matrices = [two_block_grid()]
+    panels = row_panels("A", 3) + row_panels("B", 3, x0=1000.0)
+    groups = [{"block": "GA", "panels": [p["handle"] for p in panels[:3]]},
+              {"block": "GB", "panels": [p["handle"] for p in panels[3:]]}]
+    original = copy.deepcopy((matrices, groups, panels))
+    def run(choices=None):
+        return si.run_import(matrices, groups, panels, alignment_tolerance=1.0,
+                             review=True, associations=choices)
+    automatic = run()
+    assert automatic["strings"] == automatic["bridge_strings"] == []
+    partial = run({"GA": 0})
+    assert [row["panels"] for row in partial["strings"]] == [["A00", "A01"]]
+    assert partial["bridge_strings"] == []
+    assert partial["unassigned"] == ["A02", "B00", "B01", "B02"]
+    resolved = run({"GA": 0, "GB": 1})
+    assert [row["panels"] for row in resolved["bridge_strings"]] == [["A02", "B00", "B01"]]
+    swapped = run({"GA": 1, "GB": 0})
+    assert [row["panels"] for row in swapped["strings"]] == [["A02"], ["B00", "B01"]]
+    assert [row["panels"] for row in swapped["bridge_strings"]] == [["B02", "A00", "A01"]]
+    for value in (resolved, swapped):
+        bridge = value["bridge_strings"][0]
+        assert (bridge["inverter_id"], bridge["string_input_number"]) == (2, 4)
+        assert bridge["source"] == {"kind": "bridge", "original_index": 0}
+        assigned = [handle for row in value["strings"] + value["bridge_strings"] for handle in row["panels"]]
+        assert len(assigned) == len(set(assigned)) == len(panels)
+        assert value["unassigned"] == []
+    assert run({}) == automatic
+    assert (matrices, groups, panels) == original
+
+
 def test_draw_cuts_by_sequences_skips_missing_entities_and_keeps_a_partial():
     merged = {"Sequences": [2, 3], "Rows": [{"Panels": [
         {"Code": 1, "Id": "a1", "Seq": 1, "InverterId": 5, "StringInputNumber": 2},
@@ -202,6 +233,90 @@ def test_ambiguous_equal_shape_match_refuses_without_the_recorded_order():
                            selection_order="recorded")
     assert [m["grid_index"] for m in result["matches"]] == [0, 1]
     assert [m["candidates"] for m in result["matches"]] == [[0, 1], [1]]
+
+
+@pytest.mark.parametrize("order", ["unknown", "recorded"])
+def test_review_lists_every_group_and_keeps_unresolved_panels_unassigned(order):
+    parts = [row_panels(prefix, n, x0=500.0 * i)
+             for i, (prefix, n) in enumerate((("A", 2), ("B", 3), ("C", 4), ("D", 5)))]
+    panels = [p for part in parts for p in part]
+    groups = [{"block": f"G{i}", "panels": [p["handle"] for p in part]}
+              for i, part in enumerate(parts)]
+    matrices = [plain_grid([1, 2]), plain_grid([1, 2, 3, 4]),
+                plain_grid([4, 3, 2, 1], inv=2), plain_grid([1, 2, 3, 4, 5])]
+    before = copy.deepcopy((matrices, groups, panels))
+    result = si.run_import(matrices, groups, panels, alignment_tolerance=1.0,
+                           selection_order=order, review=True)
+    assert (matrices, groups, panels) == before
+    assert [m["block"] for m in result["matches"]] == [g["block"] for g in groups]
+    assert [m.get("status", "matched") for m in result["matches"]] == [
+        "matched", "unmatched", "ambiguous", "matched"]
+    assert [m["candidates"] for m in result["matches"]] == [[0], [], [1, 2], [3]]
+    assert [m["grid_index"] for m in result["matches"]] == [0, None, None, 3]
+    assert [s["source"]["group_index"] for s in result["strings"]] == [0, 3]
+    assert [s["panels"] for s in result["strings"]] == [
+        ["A01", "A00"], ["D04", "D03", "D02", "D01", "D00"]]
+    assert result["bridge_strings"] == []
+    assert result["unassigned"] == [p["handle"] for part in parts[1:3] for p in part]
+    # Review does not relax the default strict import path.
+    with pytest.raises(SolarEdgeImportError) as err:
+        si.run_import(matrices, groups, panels, alignment_tolerance=1.0, selection_order=order)
+    assert err.value.code == "no-structural-match"
+
+
+def test_review_does_not_assign_a_shared_grid_to_the_first_drawing_group():
+    panels = row_panels("A", 3) + row_panels("B", 3, x0=500.0)
+    groups = [{"block": "GA", "panels": [p["handle"] for p in panels[:3]]},
+              {"block": "GB", "panels": [p["handle"] for p in panels[3:]]}]
+    for ordered in (groups, list(reversed(groups))):
+        result = si.run_import([plain_grid([1, 2, 3])], ordered, panels,
+                               alignment_tolerance=1.0, selection_order="recorded", review=True)
+        assert [m["status"] for m in result["matches"]] == ["ambiguous", "ambiguous"]
+        assert [m["candidates"] for m in result["matches"]] == [[0], [0]]
+        assert result["strings"] == []
+        assert result["unassigned"] == [p["handle"] for p in panels]
+
+
+def test_review_explicit_associations_resolve_only_selected_groups_and_reset():
+    panels = row_panels("A", 3) + row_panels("B", 3, x0=500.0)
+    groups = [{"block": "GA", "panels": [p["handle"] for p in panels[:3]]},
+              {"block": "GB", "panels": [p["handle"] for p in panels[3:]]}]
+    matrices = [plain_grid([1, 2, 3]), plain_grid([3, 2, 1], inv=9)]
+    original = copy.deepcopy((matrices, groups, panels))
+    def run(choices=None):
+        return si.run_import(matrices, groups, panels, alignment_tolerance=1.0,
+                             review=True, associations=choices)
+    automatic = run()
+    partial = run({"GA": 1})
+    assert [m["grid_index"] for m in partial["matches"]] == [1, None]
+    assert partial["matches"][1]["status"] == "ambiguous"
+    assert {s["inverter_id"] for s in partial["strings"]} == {9}
+    assert partial["unassigned"] == [p["handle"] for p in panels[3:]]
+    resolved = run({"GB": 0, "GA": 1})
+    assert [m["grid_index"] for m in resolved["matches"]] == [1, 0]
+    assert [s["inverter_id"] for s in resolved["strings"]] == [9, 1]
+    assert resolved["unassigned"] == []
+    competition = si.run_import(matrices[:1], groups, panels, alignment_tolerance=1.0,
+        review=True, associations={"GA": 0})
+    assert [m["grid_index"] for m in competition["matches"]] == [0, None]
+    assert competition["matches"][1]["status"] == "ambiguous"
+    assert competition["unassigned"] == [p["handle"] for p in panels[3:]]
+    assert run({}) == automatic
+    assert (matrices, groups, panels) == original
+
+
+@pytest.mark.parametrize("choices", [[], {"GA": True}, {"GA": -1}, {"GA": 2},
+    {"GA": 0.0}, {"missing": 0}, {"GA": 0, "GB": 0}, {"GA": 1}])
+def test_review_refuses_invalid_or_incompatible_associations(choices):
+    panels = row_panels("A", 3) + row_panels("B", 3, x0=500.0)
+    groups = [{"block": "GA", "panels": [p["handle"] for p in panels[:3]]},
+              {"block": "GB", "panels": [p["handle"] for p in panels[3:]]}]
+    before = copy.deepcopy((groups, panels))
+    with pytest.raises(SolarEdgeImportError) as error:
+        si.run_import([plain_grid([1, 2, 3]), plain_grid([1, 2])], groups, panels,
+                      alignment_tolerance=1.0, review=True, associations=choices)
+    assert error.value.code == "invalid-associations"
+    assert (groups, panels) == before
 
 
 def test_missing_match_and_missing_bridge_handle_refuse():

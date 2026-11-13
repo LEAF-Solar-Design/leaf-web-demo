@@ -3493,6 +3493,8 @@ def build_suites() -> List[Suite]:
               [_npm(), "run", "check:walk-unit"], None),
         Suite("web-elk-rank", "web node --test scripts/elk_rank.test.mjs", "script", WEB,
               ["node", "--test", "scripts/elk_rank.test.mjs"], None),
+        Suite("web-ci-prebuilt-contract", "web node --test scripts/ci-prebuilt.test.mjs", "script", WEB,
+              ["node", "--test", "scripts/ci-prebuilt.test.mjs"], None),
         # Standardization slice 13d. ribbonClusters.js has carried an HONESTY
         # CONTRACT in its file header since W4d ("a greyed control with no
         # reason is the gap ToolsPanel's lock-note closed"), and nothing
@@ -3532,9 +3534,10 @@ def build_suites() -> List[Suite]:
         Suite("web-error-classify-contract",
               "web 413 classifies as too_large with its own panel copy", "script", WEB,
               [_npm(), "run", "check:error-classify"], None),
+        # Slow device CI workers take 13 to 15 min for this file, above the 900 s default.
         Suite("web-version-restore-proof",
               "web /app version restore browser proof", "script", WEB,
-              [_npm(), "run", "proof:version-restore"], None),
+              [_npm(), "run", "proof:version-restore"], None, timeout_s=1800),
         # The daily authoring cap refuses with 429 (CONTRACT-ADDENDUM §17). The
         # only thing standing between that refusal and a red "Couldn't author
         # the tool" is api.js tagging quota_kind=="daily_author"; nothing else
@@ -3904,7 +3907,7 @@ def build_suites() -> List[Suite]:
                "playwright.page-service.config.mjs", "--workers=1"], None,
               uses_database=True, db_gated=True, requires_linux=True, timeout_s=600),
         Suite("web-build", "web production build", "script", WEB,
-              [_npm(), "run", "build"], None),
+              [_npm(), "run", "build", "--", "--reuse-ci-prebuilt"], None),
         # --- containerized harness smoke (census #13) — OPT-IN --- #
         # Builds + boots the real compose stack (broker+harness+app, mock agent)
         # and proves the authed app->harness hop, durable grant/tenant volumes,
@@ -5893,6 +5896,7 @@ _WEB_SOURCE_READERS = frozenset({
     "web-app-wiring",
     "web-project-proof-contract",
     "web-elk-rank",
+    "web-ci-prebuilt-contract",
     "web-honesty-ladder",
     "web-tour-anchors",
     "web-composer-contract",

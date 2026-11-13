@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { ConverseLoop } from "../src/agent/converseLoop.js";
@@ -82,12 +83,14 @@ function sdkFixture(invoke?: (input: ConverseRunInput["canUseTool"], tools: Moun
 interface ConversationOptions {
   args?: Record<string, unknown>; context?: Record<string, unknown>; noAuthority?: boolean;
   authority?: { sessionId: string; turnId: string }; verdict?: GateCheckResult; plain?: boolean; alias?: string;
+  inspect?: (tool: Mounted) => Promise<void>;
 }
 async function conversation(appRun: AppRunClient, options: ConversationOptions = {}) {
   const replies: unknown[] = [], permissions: unknown[] = [], modelResults: SpineToolResult[] = [];
   const args = options.args ?? request();
   const check = vi.fn<GateClient["check"]>().mockResolvedValue(options.verdict ?? { decision: "allow" });
   const fixture = sdkFixture(async (hook, mounted) => {
+    await options.inspect?.(mounted.find(item => item.name === "inspect_project_photo")!);
     const tool = mounted.find(item => item.name === TOOL)!;
     permissions.push(await hook(options.alias ?? `mcp__spine__${TOOL}`, args));
     // Deliberately bypass SDK validation too: the handler must still fail closed.
@@ -113,6 +116,76 @@ async function conversation(appRun: AppRunClient, options: ConversationOptions =
 }
 
 describe("closed photo assignment caller through SDK, loop and HTTP", () => {
+  it("reports every unresolved catalog member with inspected, proposed and saved IDs on private review", async () => {
+    const bytes = Buffer.from([255, 216, 255, 1, 2, 3, 255, 217]);
+    const hash = createHash("sha256").update(bytes).digest("hex");
+    const args = { ...request(), operations: request().operations.map(op => ({ ...op, preview_sha256: hash })) };
+    const value = producer();
+    for (const gallery of value.proposed_document.categories) {
+      for (const image of gallery.images) image.preview_sha256 = hash;
+    }
+    const saved = [{ gallery_slug: "cakes", gallery_title: "Cakes", index: 0, hero: true, caption: "Cake 99", alt: "A decorated cake 99" }];
+    const rows = [...Array.from({ length: 93 }, (_, n) => n + 1), 99].map(n => ({
+      material_id: mid(n), name: "same-name.jpg", media_type: "image/jpeg", byte_size: 200,
+      sha256: "b".repeat(64), preview_sha256: hash, width: 10, height: 20,
+      created_at: "2026-11-01T12:00:00+00:00", assignments: n === 99 ? saved : [],
+    }));
+    const common = { org_id: TENANT, project_id: PROJECT, session_id: AUTHORITY.sessionId,
+      turn_id: AUTHORITY.turnId, source, assignment_basis: "saved_project_page" };
+    const { client, fetchImpl } = http(value);
+    let recoveredPreviewAttempts = 0;
+    fetchImpl.mockImplementation(async (url, init) => {
+      if (String(url).endsWith("/photo-assignment-proposals")) return jsonResponse(value);
+      const body = JSON.parse(String(init?.body));
+      if (body.op === "catalog") {
+        const materials = body.cursor ? rows.slice(50) : rows.slice(0, 50);
+        return jsonResponse({ ...common, schema: "leaf.project-material-catalog.v1", materials,
+          page_count: materials.length, next_cursor: body.cursor ? null : rows[49]!.material_id });
+      }
+      if (body.material_id === mid(5)) return new Response("PRIVATE access detail", { status: 403 });
+      if (body.material_id === mid(6)) throw Object.assign(new Error("PRIVATE timeout detail"), { code: "ETIMEDOUT" });
+      if (body.material_id === mid(7)) return jsonResponse({ ...common, unexpected: "PRIVATE integrity detail" });
+      if (body.material_id === mid(8) && ++recoveredPreviewAttempts === 1) return new Response(null, { status: 503 });
+      return jsonResponse({ ...common, schema: "leaf.project-material-image.v1", material_id: body.material_id,
+        original_sha256: "b".repeat(64), preview_sha256: hash, sha256: hash, media_type: "image/jpeg",
+        byte_size: bytes.length, data: bytes.toString("base64"), assignments: body.material_id === mid(99) ? saved : [] });
+    });
+    const result = await conversation(client, { args, inspect: async tool => {
+      const response = await tool.handler({ op: "catalog" });
+      const catalog = JSON.parse(response.content[0]!.text!);
+      expect(catalog.materials).toHaveLength(rows.length);
+      for (const row of catalog.materials) {
+        await tool.handler({ op: "preview", material_id: row.material_id, expected_preview_sha256: row.preview_sha256,
+          expected_revision: source.revision, expected_digest: source.digest });
+      }
+    } });
+    const inspectionCalls = fetchImpl.mock.calls.filter(([url]) => String(url).endsWith("/materials/inspect"))
+      .map(([, init]) => JSON.parse(String(init?.body)));
+    expect(inspectionCalls.filter(body => body.op === "preview" && body.material_id === mid(5))).toHaveLength(1);
+    expect(inspectionCalls.filter(body => body.op === "preview" && body.material_id === mid(6))).toHaveLength(3);
+    expect(inspectionCalls.filter(body => body.op === "preview" && body.material_id === mid(7))).toHaveLength(1);
+    expect(inspectionCalls.filter(body => body.op === "preview" && body.material_id === mid(8))).toHaveLength(2);
+    expect(inspectionCalls.filter(body => body.op === "catalog")).toEqual(Array.from({ length: 4 }, (_, attempt) => [
+      { op: "catalog", ...(attempt ? { expected_revision: source.revision, expected_digest: source.digest } : {}) },
+      { op: "catalog", cursor: rows[49]!.material_id, expected_revision: source.revision, expected_digest: source.digest },
+    ]).flat());
+    const proposal = result.emitted.find(event => event.type === "tool_result" && event.data.tool === TOOL)!;
+    expect(proposal.data.ok).toBe(true);
+    expect(proposal.data.result).toEqual(value);
+    expect(proposal.data.photo_reconciliation).toEqual({
+      catalog_complete: true, catalogued_ids: rows.map(row => row.material_id),
+      inspected_ids: rows.filter(row => ![mid(5), mid(6), mid(7)].includes(row.material_id)).map(row => row.material_id),
+      proposed_ids: args.operations.map(op => op.material_id), saved_ids: [mid(99)],
+      unresolved: rows.filter(row => row.material_id !== mid(99)).map(row => ({ material_id: row.material_id,
+        reason: row.material_id === mid(5) ? "access_denied" : row.material_id === mid(6) ? "transport_exhausted"
+          : row.material_id === mid(7) ? "integrity_failure"
+          : args.operations.some(op => op.material_id === row.material_id) ? "awaiting_explicit_save" : "inspected_not_proposed" })),
+    });
+    expect(JSON.stringify(result.events)).not.toContain(bytes.toString("base64"));
+    expect(JSON.stringify(result.events)).not.toContain("PRIVATE");
+    expect(result.replies).toEqual([{ content: [{ type: "text", text: PHOTO_ASSIGNMENT_SUMMARY }] }]);
+  });
+
   it("mounts once and emits the unmodified multi-photo producer payload on the normal durable envelope", async () => {
     const value = producer();
     const { client, fetchImpl } = http(value);

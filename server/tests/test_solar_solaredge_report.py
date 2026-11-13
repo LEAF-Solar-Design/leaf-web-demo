@@ -19,7 +19,7 @@ import solar_panel_group_kernel as kernel
 import solar_solaredge_import as si
 from solar_graph_context import resolve_graph_context
 from solar_sizing_client import digest
-from test_solar_solaredge_import import LENGTHS, MEMBERSHIP_DIGEST, plain_grid, two_block_grid, row_panels
+from test_solar_solaredge_import import LENGTHS, MEMBERSHIP_DIGEST, cell, plain_grid, two_block_grid, row_panels
 from test_solar_import_sources import pdf, graphless
 from test_w1_solve_commit import seed
 from test_w1_local_graph_adapter import held, run as commit
@@ -38,12 +38,11 @@ SRC14 = "4887eecc076fd8206933323059e7c05ad01c3045963935ddc504f3a7b8d89a8a"
 SMALL_GRAPH_SHA = "72a71ff696ea5695388cf83e66120cb3a7442a655e73c0c15b38473b50e304ad"
 C14_GRAPH_SHA = "ed057934bc0b4b1a723cadece08e86e31c3c5e6733e3b4d14c1c2e2a70037342"
 SMALL_ARTIFACT = "9b1ac1ff97a87f33eedb38096a1a654ab0fc3ea10ddaefc52920a7b6d0953dd0"
-SMALL_CONTENT = "f82e2d8ca1688a3a84f7227ed44a0d168c565fb038ee81882497442545b8d334"
 C14_ARTIFACT = "ef9ebf0c14a8a747cc6a0851f3e6e3dd6f86fac2631347983065c3683c549a60"
 C14_CONTENT = "7d76ddbfc97111f159b7f0dca803d9f77a118e96e2a2372d02d1c06be78ba00e"
 C15_COUNTS = {"pdf_matrices": 2, "pdf_panels": 6, "matchable_grids": 2, "bridge_grids": 0,
-              "frames": 2, "matched_frames": 2, "group_strings": 2, "bridge_strings": 0,
-              "strings": 2, "assigned_panels": 6, "unassigned_panels": 0, "partial_strings": 0}
+              "frames": 2, "matched_frames": 0, "group_strings": 0, "bridge_strings": 0,
+              "strings": 0, "assigned_panels": 0, "unassigned_panels": 6, "partial_strings": 0}
 C14_COUNTS = {"pdf_matrices": 14, "pdf_panels": 3526, "matchable_grids": 25, "bridge_grids": 8,
               "frames": 25, "matched_frames": 25, "group_strings": 92, "bridge_strings": 24,
               "strings": 116, "assigned_panels": 3526, "unassigned_panels": 0, "partial_strings": 0}
@@ -133,10 +132,12 @@ def small_graph():
                          {"block": "C2", "panels": [p["handle"] for p in B]}], A + B, 1.0)
 
 
-C15_CORE = {
-    "row_angle": 0.0, "counts": C15_COUNTS,
+MATCHED_COUNTS = {**C15_COUNTS, "matched_frames": 2, "group_strings": 2,
+                  "strings": 2, "assigned_panels": 6, "unassigned_panels": 0}
+MATCHED_CORE = {
+    "row_angle": 0.0, "counts": MATCHED_COUNTS,
     "matches": [{"frame_ref": app_id("frame", 1), "pdf_grid": 0, "pdf_matrix": 0,
-                 "pdf_sub_grid": -1, "candidates": [0, 1], "candidate_count": 2},
+                 "pdf_sub_grid": -1, "candidates": [0], "candidate_count": 1},
                 {"frame_ref": app_id("frame", 2), "pdf_grid": 1, "pdf_matrix": 1,
                  "pdf_sub_grid": -1, "candidates": [1], "candidate_count": 1}],
     "strings": [{"index": 0, "source": "group", "frame_ref": app_id("frame", 1),
@@ -149,12 +150,28 @@ C15_CORE = {
                  "panel_refs": [app_id("panel", 4), app_id("panel", 5), app_id("panel", 6)]}],
     "unassigned_panel_refs": [],
 }
+C15_CORE = {
+    "row_angle": 0.0, "counts": C15_COUNTS,
+    "matches": [{"frame_ref": app_id("frame", i), "pdf_grid": None, "pdf_matrix": None,
+                 "pdf_sub_grid": None, "candidates": [0, 1], "candidate_count": 2,
+                 "status": "ambiguous"} for i in (1, 2)],
+    "strings": [], "unassigned_panel_refs": [app_id("panel", i) for i in range(1, 7)],
+}
+SMALL_REPORT = {
+    "schema": "leaf.solar-solaredge-report.v1", "drawing_id": "solar", "project_id": PROJECT,
+    "source_version": 1, "graph_sha256": SMALL_GRAPH_SHA,
+    "source": {"artifact_id": SRC1, "byte_length": 191,
+               "content_sha256": "82285a8f6ebe74ec978fd7dacb2bf52d7d5c20a9cc8945766072c12e1656111f"},
+    "request": {"alignment_tolerance": 1.0, "selection_order": "recorded"}, **C15_CORE,
+}
+SMALL_BYTES = report.canonical_bytes(SMALL_REPORT)
+SMALL_CONTENT = hashlib.sha256(SMALL_BYTES).hexdigest()
 SMALL_RESULT = {
     "schema": "leaf.solar-solaredge-report-result.v1", "kind": "solaredge-report", "drawing_id": "solar",
     "project_id": PROJECT, "source_version": 1, "graph_sha256": SMALL_GRAPH_SHA,
     "source_artifact_id": SRC1, "counts": C15_COUNTS,
     "report": {"schema": "leaf.solar-artifact-ref.v1", "artifact_id": SMALL_ARTIFACT,
-               "media_type": "application/json", "filename": "solaredge-report.json", "byte_length": 1803,
+               "media_type": "application/json", "filename": "solaredge-report.json", "byte_length": len(SMALL_BYTES),
                "content_sha256": SMALL_CONTENT, "source_version": 1,
                "download": "/api/drawings/solar/artifacts/" + SMALL_ARTIFACT},
 }
@@ -261,6 +278,16 @@ def core(graph=None, matrices=None, order="recorded"):
     return report.report_from_matrices(small_graph() if graph is None else graph,
                                        GRIDS if matrices is None else matrices,
                                        alignment_tolerance=1.0, selection_order=order)
+
+
+def unique_shapes():
+    """Keep the same memberships, but make B vertical so neither match needs an order."""
+    panels = A + [{**p, "x": 500.0, "y": 20.0 - i * 10.0} for i, p in enumerate(B)]
+    groups = [{"block": "C1", "panels": [p["handle"] for p in A]},
+              {"block": "C2", "panels": [p["handle"] for p in B]}]
+    matrices = copy.deepcopy(GRIDS)
+    matrices[1]["Rows"] = [{"Panels": [c]} for c in matrices[1]["Rows"][0]["Panels"]]
+    return design_graph(groups, panels, 1.0), matrices
 
 
 def refusal(code, func, *args, **kwargs):
@@ -380,33 +407,92 @@ def test_solaredge_report_c14_recorded_core(cached_parse):
 
 
 def test_solaredge_report_c15():
-    refusal("REPORT_AMBIGUOUS_MATCH", core, order="unknown")
+    assert core(order="unknown") == C15_CORE
     assert core() == C15_CORE
-    assert digest(core()) == "46e518a72aef6e3b25a29e4fb575d7cda090c8f103bdab367c1bbed5c1e54cdb"
+    assert digest(core()) == digest(C15_CORE)
+
+
+def test_solaredge_report_all_matched():
+    graph, matrices = unique_shapes()
+    assert core(graph, matrices, order="unknown") == MATCHED_CORE
+    assert core(graph, matrices) == MATCHED_CORE
+
+
+@pytest.mark.parametrize("order", ["unknown", "recorded"])
+def test_solaredge_report_mixed_groups_complete_after_unresolved_groups(order):
+    parts = [row_panels(prefix, n, x0=500.0 * i)
+             for i, (prefix, n) in enumerate((("A", 2), ("B", 3), ("C", 4), ("D", 5)))]
+    graph = design_graph([{"block": f"G{i}", "panels": [p["handle"] for p in part]}
+                          for i, part in enumerate(parts)], [p for part in parts for p in part], 1.0)
+    matrices = [plain_grid([1, 2]), plain_grid([1, 2, 3, 4]),
+                plain_grid([4, 3, 2, 1], inv=2), plain_grid([1, 2, 3, 4, 5])]
+    value = core(graph, matrices, order)
+    assert [m.get("status", "matched") for m in value["matches"]] == [
+        "matched", "unmatched", "ambiguous", "matched"]
+    assert [m["candidates"] for m in value["matches"]] == [[0], [], [1, 2], [3]]
+    assert [m["pdf_grid"] for m in value["matches"]] == [0, None, None, 3]
+    assert [s["frame_ref"] for s in value["strings"]] == [app_id("frame", 1), app_id("frame", 4)]
+    assert [s["pdf_matrix"] for s in value["strings"]] == [0, 3]
+    assert value["counts"]["frames"] == 4
+    assert value["counts"]["matched_frames"] == 2
+    assert value["counts"]["assigned_panels"] == 7
+    assert value["unassigned_panel_refs"] == [app_id("panel", i) for i in range(3, 10)]
+
+
+def test_solaredge_report_lists_all_ambiguous_candidates():
+    count = report.MAX_REPORT_CANDIDATES + 3
+    value = core(matrices=[plain_grid([1, 2, 3], inv=i + 1) for i in range(count)])
+    assert len(value["matches"]) == 2
+    for match in value["matches"]:
+        assert match["status"] == "ambiguous"
+        assert match["pdf_grid"] is None
+        assert match["candidates"] == list(range(count))
+        assert match["candidate_count"] == count
+    assert value["strings"] == []
 
 
 def test_solaredge_report_unassigned_order():
-    matrices = copy.deepcopy(GRIDS)
+    graph, matrices = unique_shapes()
     # Keep the occupied PDF cells so the frame matches, but leave two panels
     # without a string sequence. Their refs must follow numeric handle order,
     # rather than the rightmost-first drawing matrix order.
     matrices[0]["Rows"][0]["Panels"][0]["Seq"] = 0
     matrices[0]["Rows"][0]["Panels"][2]["Seq"] = 0
-    value = core(small_graph(), matrices)
+    value = core(graph, matrices)
     assert value["unassigned_panel_refs"] == [app_id("panel", 1), app_id("panel", 3)]
     assert value["counts"]["unassigned_panels"] == 2
     assert value["counts"]["assigned_panels"] == 4
     assert value["strings"][0]["panel_refs"] == [app_id("panel", 2)]
-    assert value["strings"][1] == C15_CORE["strings"][1]
+    assert value["strings"][1] == MATCHED_CORE["strings"][1]
 
 
 def test_solaredge_report_bridge():
-    gb = row_panels("B", 3, x0=1000.0)
+    gb = [{**p, "x": 1000.0, "y": 20.0 - i * 10.0} for i, p in enumerate(B)]
     graph = design_graph([{"block": "GA", "panels": [p["handle"] for p in A]},
                           {"block": "GB", "panels": [p["handle"] for p in gb]}], A + gb, 1.0)
-    value = core(graph, [two_block_grid()])
-    assert digest(value) == "91aa8fb9f5a910ec829414811022327175625a2eaacf06c69cfca08fe6159537"
-    assert value["counts"] == {**C15_COUNTS, "pdf_matrices": 1, "bridge_grids": 1,
+    matrix = two_block_grid()
+    old = matrix["Rows"][0]["Panels"]
+    matrix["Rows"] = [{"Panels": [cell(0) for _ in range(7)]}
+                      for _ in range(3)]
+    matrix["Rows"][2]["Panels"][4:] = old[4:]
+    for r in range(3):
+        matrix["Rows"][r]["Panels"][2] = old[r]
+    matrix["SubGrids"][1]["Cells"] = [[0, 4], [1, 4], [2, 4]]
+    value = core(graph, [matrix])
+    expected = copy.deepcopy(MATCHED_CORE)
+    expected["counts"].update(pdf_matrices=1, bridge_grids=1, bridge_strings=1, strings=3)
+    for i, match in enumerate(expected["matches"]):
+        match.update(pdf_matrix=0, pdf_sub_grid=i)
+    expected["strings"][0].update(panel_handles=["A00", "A01"],
+                                    panel_refs=[app_id("panel", 1), app_id("panel", 2)])
+    expected["strings"][1].update(pdf_matrix=0, pdf_inverter_id=3, pdf_string_input=2,
+                                    panel_handles=["B02"], panel_refs=[app_id("panel", 6)])
+    expected["strings"].append({"index": 2, "source": "bridge", "frame_ref": None,
+        "pdf_matrix": 0, "pdf_inverter_id": 2, "pdf_string_input": 4, "partial": False,
+        "panel_handles": ["A02", "B00", "B01"],
+        "panel_refs": [app_id("panel", 3), app_id("panel", 4), app_id("panel", 5)]})
+    assert digest(value) == digest(expected)
+    assert value["counts"] == {**MATCHED_COUNTS, "pdf_matrices": 1, "bridge_grids": 1,
                                "bridge_strings": 1, "strings": 3}
     assert [m["pdf_sub_grid"] for m in value["matches"]] == [0, 1]
     assert [m["pdf_matrix"] for m in value["matches"]] == [0, 0]
@@ -416,10 +502,20 @@ def test_solaredge_report_bridge():
         "pdf_matrix": 0, "pdf_inverter_id": 2, "pdf_string_input": 4, "partial": False,
         "panel_handles": ["A02", "B00", "B01"],
         "panel_refs": [app_id("panel", 3), app_id("panel", 4), app_id("panel", 5)]}
+    # An unresolved group also leaves its incomplete bridge undrawn, never a partial write.
+    missing = row_panels("C", 4, x0=1000.0)
+    graph = design_graph([{"block": "GA", "panels": [p["handle"] for p in A]},
+                          {"block": "GC", "panels": [p["handle"] for p in missing]}], A + missing, 1.0)
+    value = core(graph, [matrix])
+    assert [m.get("status", "matched") for m in value["matches"]] == ["matched", "unmatched"]
+    assert [m["candidates"] for m in value["matches"]] == [[0], []]
+    assert [s["panel_handles"] for s in value["strings"]] == [["A00", "A01"]]
+    assert value["counts"]["bridge_strings"] == 0
+    assert value["unassigned_panel_refs"] == [app_id("panel", i) for i in range(3, 8)]
 
 
 @pytest.mark.parametrize("case,code", [
-    ("four", "REPORT_NO_MATCH"), ("no-matrices", "REPORT_NO_MATCH"), ("bridge", "REPORT_BRIDGE_UNRESOLVED"),
+    ("four", None), ("no-matrices", None), ("bridge", None),
     ("handle-ZZ", "REPORT_PANEL_HANDLE_INVALID"), ("handle-long", "REPORT_PANEL_HANDLE_INVALID"),
     ("handle-number", "REPORT_PANEL_HANDLE_INVALID"), ("handle-missing", "REPORT_PANEL_HANDLE_INVALID"),
     ("duplicate", "REPORT_PANEL_HANDLE_DUPLICATE"), ("no-frames", "REPORT_FRAMES_REQUIRED"),
@@ -458,7 +554,18 @@ def test_solaredge_report_core_refusals(case, code):
         matrices = [{"Rows": []}]
     elif case == "bad-matrix":
         matrices = [7]
-    refusal(code, core, graph, matrices, order)
+    if code:
+        refusal(code, core, graph, matrices, order)
+    else:
+        value = core(graph, matrices, order)
+        status = "ambiguous" if case == "bridge" else "unmatched"
+        candidates = [0, 1] if case == "bridge" else []
+        assert value["matches"] == [{"frame_ref": f["id"], "pdf_grid": None,
+            "pdf_matrix": None, "pdf_sub_grid": None, "status": status,
+            "candidates": candidates, "candidate_count": len(candidates)} for f in graph["frames"]]
+        assert value["strings"] == []
+        assert value["counts"]["matched_frames"] == value["counts"]["assigned_panels"] == 0
+        assert set(value["unassigned_panel_refs"]) == {p["id"] for p in graph["panels"]}
 
 
 @pytest.mark.parametrize("name,value,code", [("MAX_REPORT_FRAMES", 1, "REPORT_LIMIT_EXCEEDED"),
@@ -493,14 +600,21 @@ def test_solaredge_report_pinned(small, stub):
     before = written(backend)
     value = save(backend, source)
     assert value == SMALL_RESULT
-    assert digest(value) == "71afc006edd3f2dcbb8ed46156d3b2a1ad4ab009427844faeb7c06c60092494f"
+    assert digest(value) == digest(SMALL_RESULT)
     assert written(backend) - before == new_keys(SMALL_ARTIFACT, SMALL_CONTENT)
     meta, content = solar_artifacts.read_artifact(backend, TENANT, "solar", SMALL_ARTIFACT)
     assert len(meta) == 13
-    assert digest(meta) == "f1fad1faa498e6086fb8ebabaa86c765abcb0c735fe1d5dc681f99fde4f91479"
+    assert digest(meta) == digest({
+        "schema": "leaf.solar-artifact.v1", "tenant_id": TENANT, "project_id": PROJECT,
+        "drawing_id": "solar", "source_version": 1, "graph_sha256": SMALL_GRAPH_SHA,
+        "tool": "solar-solaredge-report", "artifact_id": SMALL_ARTIFACT,
+        "request_sha256": "f7954388a17d7c25c363a58ad22b4c698400aa0e9fde0e880ff1c589026de5a8",
+        "media_type": "application/json", "filename": "solaredge-report.json",
+        "byte_length": len(SMALL_BYTES), "content_sha256": SMALL_CONTENT})
     assert meta["tool"] == "solar-solaredge-report"
     assert meta["request_sha256"] == "f7954388a17d7c25c363a58ad22b4c698400aa0e9fde0e880ff1c589026de5a8"
     stored = json.loads(content)
+    assert content == SMALL_BYTES
     assert set(stored) == {"schema", "drawing_id", "project_id", "source_version", "graph_sha256",
                            "source", "request", *C15_CORE}
     assert stored["schema"] == "leaf.solar-solaredge-report.v1"
@@ -526,8 +640,53 @@ def test_solaredge_report_duplicate(small, stub, monkeypatch):
 def test_solaredge_report_ambiguous(small):
     backend, source = small
     before = written(backend)
-    refusal("REPORT_AMBIGUOUS_MATCH", save, backend, source, selection_order="unknown")
-    assert written(backend) == before
+    value = save(backend, source, selection_order="unknown")
+    _, content = solar_artifacts.read_artifact(backend, TENANT, "solar", value["report"]["artifact_id"])
+    stored = json.loads(content)
+    assert {k: stored[k] for k in C15_CORE} == C15_CORE
+    assert written(backend) - before == new_keys(value["report"]["artifact_id"],
+                                               value["report"]["content_sha256"])
+    assert_head(backend, SMALL_GRAPH_SHA)
+
+
+@pytest.mark.parametrize("order", ["unknown", "recorded"])
+@pytest.mark.parametrize("case", ["matched", "unmatched", "ambiguous"])
+def test_solaredge_report_accept_refuses_unresolved_groups(tmp_path, monkeypatch, order, case):
+    import solar_local_graph
+    import solar_solaredge_tracking as tracking
+    from solar_design_graph import GraphValidationError
+
+    graph, matrices = unique_shapes()
+    if case == "unmatched":
+        matrices.pop(0)
+    elif case == "ambiguous":
+        matrices.insert(0, copy.deepcopy(matrices[0]))
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    source = sources.import_solaredge_source(backend, TENANT, "solar", pdf(1))["source"]
+    monkeypatch.setattr(report, "parse_source", lambda content: copy.deepcopy(matrices))
+    value = save(backend, source, selection_order=order)
+    context = resolve_graph_context(backend, TENANT, "solar", "head")
+    params = {"expected_rev": graph["rev"], "report_artifact_id": value["report"]["artifact_id"]}
+    resolved = tracking.resolve_report(backend, TENANT, "solar", context["resolved_version"],
+                                       context["graph_sha256"], params)
+    before = copy.deepcopy(graph)
+    before_keys = set(backend.drawing_object_keys(TENANT, "solar"))
+    apply = solar_local_graph._load_builtin("solar-solaredge-accept").run
+    if case == "matched":
+        assert all(m["candidate_count"] == 1 for m in resolved["report"]["matches"])
+        accepted = apply(graph, params, solaredge_report=resolved)
+        assert len(accepted["extra"][tracking.STORE_KEY]["frames"]) == 2
+        assert len(accepted["extra"][tracking.STORE_KEY]["strings"]) == 2
+    else:
+        assert resolved["report"]["matches"][0]["status"] == case
+        assert resolved["report"]["matches"][1]["candidate_count"] == 1
+        assert value["counts"]["matched_frames"] == 1
+        with pytest.raises(GraphValidationError) as exc:
+            apply(graph, params, solaredge_report=resolved)
+        assert exc.value.code == tracking.REPORT_INVALID
+    assert graph == before
+    assert set(backend.drawing_object_keys(TENANT, "solar")) == before_keys
+    assert_head(backend, digest(graph))
 
 
 @pytest.mark.parametrize("over_http", [False, True])
@@ -590,7 +749,9 @@ def test_solaredge_report_new_revision(small):
         commit(backend, fence=fence)
     value = save(backend, source)
     artifact = "a842dfb7b9b20f69c97af4e50a3644c57525fd65d51d49a6feabb254170fc73c"
-    content = "727ca11fe446d5cd790f7c54d30fca986bb9ef44eb44567aa32dc533d9b2eb83"
+    expected = {**SMALL_REPORT, "source_version": 2,
+                "graph_sha256": "85adc6b3c33ed7e7bb29e97d804029793949b3a3983eb60a0d32d67135548c17"}
+    content = hashlib.sha256(report.canonical_bytes(expected)).hexdigest()
     assert value["source_version"] == 2
     assert value["report"] == {**SMALL_RESULT["report"], "artifact_id": artifact,
         "content_sha256": content, "source_version": 2,
@@ -603,8 +764,19 @@ def test_solaredge_report_new_revision(small):
 def test_solaredge_report_real_parse(tmp_path, monkeypatch):
     backend, source = seed_small(tmp_path, monkeypatch)
     before = written(backend)
-    refusal("REPORT_NO_MATCH", save, backend, source)
-    assert written(backend) == before and len(before) == 3
+    value = save(backend, source)
+    _, content = solar_artifacts.read_artifact(backend, TENANT, "solar", value["report"]["artifact_id"])
+    stored = json.loads(content)
+    assert stored["matches"] == [{"frame_ref": app_id("frame", i), "status": "unmatched",
+        "pdf_grid": None, "pdf_matrix": None, "pdf_sub_grid": None,
+        "candidates": [], "candidate_count": 0} for i in (1, 2)]
+    assert stored["strings"] == []
+    assert stored["unassigned_panel_refs"] == C15_CORE["unassigned_panel_refs"]
+    assert value["counts"] == {**C15_COUNTS, "pdf_matrices": 0, "pdf_panels": 0, "matchable_grids": 0}
+    assert written(backend) - before == new_keys(value["report"]["artifact_id"],
+                                               value["report"]["content_sha256"])
+    assert len(before) == 3
+    assert_head(backend, SMALL_GRAPH_SHA)
 
 
 @pytest.mark.parametrize("case,code", [
@@ -786,11 +958,11 @@ def test_solaredge_report_route_c14(tmp_path, monkeypatch, cached_parse, client)
     ("json", 400, "REPORT_REQUEST_INVALID"), ("utf8", 400, "REPORT_REQUEST_INVALID"),
     ("shape", 400, "REPORT_REQUEST_INVALID"), ("source-id", 400, "REPORT_REQUEST_INVALID"),
     ("source", 404, "IMPORT_SOURCE_NOT_FOUND"), ("project", 409, "REPORT_PROJECT_MISMATCH"),
-    ("ambiguous", 409, "REPORT_AMBIGUOUS_MATCH"), ("drawing-id", 400, "REPORT_DRAWING_ID_INVALID"),
+    ("ambiguous", 200, None), ("drawing-id", 400, "REPORT_DRAWING_ID_INVALID"),
     ("drained", 503, "REPORT_WRITES_DRAINED"), ("busy", 503, "REPORT_BUSY"),
     ("backend", 503, "REPORT_STORE_UNAVAILABLE"), ("drawing", 404, "REPORT_DRAWING_NOT_FOUND"),
     ("graphless", 409, "REPORT_GRAPH_REQUIRED"), ("csv", 409, "IMPORT_SOURCE_KIND_MISMATCH"),
-    ("real", 422, "REPORT_NO_MATCH"),
+    ("real", 200, None),
 ])
 def test_solaredge_report_route_refusals(tmp_path, monkeypatch, client, case, status, code):
     from routers import drawings
@@ -833,9 +1005,26 @@ def test_solaredge_report_route_refusals(tmp_path, monkeypatch, client, case, st
     else:
         response = post(client, payload, media, url)
     assert response.status_code == status, response.text
-    assert response.json()["error"]["reason_code"] == code
-    assert response.json()["error"]["retryable"] is (status == 503)
-    assert written(backend) == before
+    if code:
+        assert response.json()["error"]["reason_code"] == code
+        assert response.json()["error"]["retryable"] is (status == 503)
+        assert written(backend) == before
+    else:
+        value = response.json()
+        assert value["error"] is None
+        downloaded = client.get(value["report"]["download"], headers={"X-Tenant-Id": TENANT})
+        assert downloaded.status_code == 200
+        stored = downloaded.json()
+        assert stored["matches"] == [{"frame_ref": app_id("frame", i), "pdf_grid": None,
+            "pdf_matrix": None, "pdf_sub_grid": None,
+            "status": "ambiguous" if case == "ambiguous" else "unmatched",
+            "candidates": [0, 1] if case == "ambiguous" else [],
+            "candidate_count": 2 if case == "ambiguous" else 0} for i in (1, 2)]
+        assert stored["strings"] == []
+        assert stored["unassigned_panel_refs"] == C15_CORE["unassigned_panel_refs"]
+        assert written(backend) - before == new_keys(value["report"]["artifact_id"],
+                                                   value["report"]["content_sha256"])
+        assert_head(backend, SMALL_GRAPH_SHA)
 
 
 @pytest.mark.parametrize("unavailable", [False, True])

@@ -1,3 +1,4 @@
+import { scaleTimeout } from '../../testTimeScale.js'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { resolve } from 'node:path'
@@ -328,8 +329,8 @@ describe('revision display layouts', () => {
     layouts.set(rows[0].sha256, { schema: 'leaf.lab-layout.v1', positions: { 'adjust-none-1': { x: 51, y: 62 } } })
     await client.restore('strategy', 1, 1)
     render(<GraphView client={client} />)
-    await waitFor(() => expect(screen.getByTestId('adjust-none-1')).toHaveAttribute('data-position', JSON.stringify({ x: 51, y: 62 })), { timeout: 15000 })
-  }, 20000)
+    await waitFor(() => expect(screen.getByTestId('adjust-none-1')).toHaveAttribute('data-position', JSON.stringify({ x: 51, y: 62 })), { timeout: scaleTimeout(15000) })
+  }, scaleTimeout(20000))
 
   it('does not overwrite a move when an earlier stored layout arrives late', async () => {
     const { client, fetchImpl } = layoutLedger(documentOf(1))
@@ -487,7 +488,7 @@ describe('canvas authoring', () => {
     const initial = documentOf(1)
     const onRun = vi.fn()
     render(<GraphView client={artifactsClient} initialDocument={initial} onRun={onRun} />)
-    await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })
+    await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: scaleTimeout(15000) })
     const readiness = within(screen.getByRole('region', { name: 'Graph readiness' }))
     await waitFor(() => expect(readiness.getByRole('status')).toHaveTextContent('Ready'))
     expect(readiness.queryByRole('list')).not.toBeInTheDocument()
@@ -496,7 +497,7 @@ describe('canvas authoring', () => {
     fireEvent.click(run)
     expect(onRun).toHaveBeenCalledTimes(1)
     expect(onRun).toHaveBeenCalledWith(initial)
-  }, 20000)
+  }, scaleTimeout(20000))
 
   it('reports a loaded graph with invalid settings and shows its problems before editing', async () => {
     const required = manifests.find(item => item.id === 'level-fast-index')
@@ -506,13 +507,13 @@ describe('canvas authoring', () => {
     expect(problems).not.toHaveLength(0)
     const onRun = vi.fn()
     render(<GraphView client={artifactsClient} initialDocument={initial} entries={entries} onRun={onRun} />)
-    await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })
+    await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: scaleTimeout(15000) })
     const readiness = within(screen.getByRole('region', { name: 'Graph readiness' }))
     expect(readiness.getByRole('status')).toHaveTextContent('No valid graph')
     expect(readiness.getAllByRole('listitem').map(item => item.textContent)).toEqual(problems)
     expect(readiness.getByRole('button', { name: 'Run graph' })).toBeDisabled()
     expect(onRun).not.toHaveBeenCalled()
-  }, 20000)
+  }, scaleTimeout(20000))
 
   it('adds from the keyboard-accessible palette, focuses slash search and preserves positions until Relayout', async () => {
     const changed = vi.fn()
@@ -724,7 +725,7 @@ describe('canvas authoring', () => {
       inputs: { value: { ...manifest.inputs.value, required: true } } }
     const onRun = vi.fn()
     render(<GraphView client={artifactsClient} initialDocument={addBlock(documentOf(1), required)} entries={entriesOf(manifest, required)} onRun={onRun} />)
-    await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })
+    await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: scaleTimeout(15000) })
     const readiness = within(screen.getByRole('region', { name: 'Graph readiness' }))
     const run = readiness.getByRole('button', { name: 'Run graph' })
     expect(run).toBeDisabled()
@@ -747,7 +748,7 @@ describe('canvas authoring', () => {
     expect(readiness.queryByRole('list')).not.toBeInTheDocument()
     fireEvent.click(run)
     expect(onRun).toHaveBeenCalledTimes(2)
-  }, 20000)
+  }, scaleTimeout(20000))
 
   it('uses only the supplied registry for click, keyboard, slash search and drop', () => {
     const second = manifests.find(item => item.id === 'gates-price-v1')
@@ -802,7 +803,7 @@ describe('canvas authoring', () => {
     expect(runner.run).not.toHaveBeenCalled()
 
     view.rerender(<GraphView client={artifactsClient} />)
-    await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })
+    await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: scaleTimeout(15000) })
     const editor = view.container.querySelector('[data-canvas-editor]')
     const search = within(editor).getByRole('searchbox')
     fireEvent.change(search, { target: { value: 'Market' } })
@@ -816,7 +817,7 @@ describe('canvas authoring', () => {
     expect(editor).toBeVisible()
     expect(runner.run).toHaveBeenCalledTimes(1)
     expect(runner.cancel).not.toHaveBeenCalled()
-  }, 20000)
+  }, scaleTimeout(20000))
 
   it('keeps initial layout stable through prop rerenders and lays out the current draft explicitly', async () => {
     const runner = { run: vi.fn(async () => ({ 'adjust-none-1': { x: 30, y: 30 } })), cancel: vi.fn() }

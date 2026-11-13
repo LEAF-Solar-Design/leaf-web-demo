@@ -16,6 +16,7 @@
  *
  * jsdom has no Worker and no File.arrayBuffer; both are installed per test.
  */
+import { scaleTimeout } from '../testTimeScale.js'
 import { spawn } from 'node:child_process'
 import { existsSync, readdirSync } from 'node:fs'
 import path from 'node:path'
@@ -79,7 +80,7 @@ const GLUE = existsSync(PKG_DIR)
   : null
 const HAS_ENGINE = Boolean(GLUE)
 // Bound for a reply from the real engine child (see openDocument).
-const ENGINE_WAIT_MS = 20_000
+const ENGINE_WAIT_MS = scaleTimeout(20_000)
 
 // One PERSISTENT node child per fake worker (vitest's module runner refuses
 // out-of-root imports, and a child-per-message would lose the worker's held

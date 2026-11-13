@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { captureSolarPublication, createSolarProjectMaterializationClient,
-  initialSolarParameters, solarPublicationMatches, solarPublicationReceiptMatches } from './solarProjectMaterializationClient.js'
+  initialSolarParameters, originalSolarParameters, solarPublicationMatches, solarPublicationReceiptMatches } from './solarProjectMaterializationClient.js'
 import { seatSolarProjectPublication } from '../App.jsx'
 import generationIntake from '../../../docs/parity/evidence/ground/generate/intake.json'
 
@@ -25,6 +25,21 @@ const client = fetchImpl => createSolarProjectMaterializationClient({ fetchImpl,
   headers: () => ({ 'Authorization': 'test-only', 'X-Checkout-Capability': 'test-checkout' }) })
 
 describe('canonical project Solar publication client', () => {
+  it.each(['current-native', 'historical-list-reuse'])('captures and sends explicit producer %s without rewriting intake', async semantics => {
+    const original = JSON.stringify({ units: 'm', boundary: [[0, 0], [10, 0], [0, 20]],
+      active_preset: { Name: 'Synthetic', PileTemplateName: 'Synthetic piles' },
+      pile_template: { Name: 'Synthetic piles' } }, null, 2).replaceAll('\n', '\r\n')
+    const parameters = originalSolarParameters(original, 150, semantics)
+    expect(parameters).toEqual({ original_intake: original, grid_long_axis: 150, producer_semantics: semantics })
+    const c = captureSolarPublication(initialScope, initialReadback, id(5), parameters)
+    const fetchImpl = vi.fn().mockResolvedValue(response(receipt(c)))
+    expect(await client(fetchImpl).publish(c)).toMatchObject({ ok: true })
+    expect(JSON.parse(fetchImpl.mock.calls[0][1].body)).toEqual(parameters)
+    expect(solarPublicationMatches(c, captureSolarPublication(initialScope, initialReadback, id(5),
+      { ...parameters, producer_semantics: semantics === 'current-native' ? 'historical-list-reuse' : 'current-native' }))).toBe(false)
+    expect(originalSolarParameters(original, 150, 'unknown')).toBeNull()
+  })
+
   it('reads actual canonical physical source and sends only its three fields', async () => {
     const c = captured(), fetchImpl = vi.fn().mockResolvedValueOnce(response(readback)).mockResolvedValueOnce(response(receipt(c)))
     const api = client(fetchImpl)
@@ -118,6 +133,44 @@ describe('canonical project Solar publication client', () => {
   it('refuses an initial response without generation provenance', () => {
     const c = captureSolarPublication(initialScope, initialReadback, id(5), originalParameters)
     expect(solarPublicationReceiptMatches({ ...receipt(c), generation_source: null }, c)).toBe(false)
+  })
+})
+
+describe('saved canonical frame inspection', () => {
+  const frame = { handle: 'AB1', row: 2, column: 3, elevation: 1.25,
+    vertices: [[0, 0], [4, 0], [4, 8], [0, 8]], preset: 'Synthetic', pile_template: 'Synthetic piles',
+    pose: { tilt_degrees: 12, axis_azimuth_deg: 180, height_at_low_pose_m: 0.8, height_at_high_pose_m: 1.6 } }
+  const page = () => ({ ...readback, schema: 'leaf.project-frame-inspection.v1',
+    drawing_units: 'm', offset: 0, page_size: 25, total: 1, frames: [structuredClone(frame)] })
+
+  it('reads a bounded page from the existing authenticated version route', async () => {
+    const value = page(), fetchImpl = vi.fn().mockResolvedValue(response(value))
+    expect(await client(fetchImpl).inspectFrames(scope)).toEqual({ ok: true, value })
+    const [url, options] = fetchImpl.mock.calls[0]
+    expect(url).toBe('/api/projects/' + id(2) + '/drawings/' + id(3) + '/versions/' + id(4) + '/solar-layout?frame_offset=0')
+    expect(options).toMatchObject({ cache: 'no-store', redirect: 'error',
+      headers: { 'X-Org-Id': id(1), 'X-Project-Id': id(2) } })
+  })
+
+  it.each(['organization_id', 'project_id', 'drawing_id', 'parent_version_id'])('refuses a foreign %s echo', async key => {
+    const value = page(); value[key] = id(99)
+    expect(await client(vi.fn().mockResolvedValue(response(value))).inspectFrames(scope)).toMatchObject({ ok: false })
+  })
+
+  it.each(['pose', 'count', 'duplicate', 'vertices'])('refuses malformed %s before rendering', async failure => {
+    const value = page()
+    if (failure === 'pose') value.frames[0].pose.tilt_degrees = null
+    if (failure === 'count') value.total = 2
+    if (failure === 'duplicate') { value.total = 2; value.frames.push(value.frames[0]) }
+    if (failure === 'vertices') value.frames[0].vertices[0][0] = null
+    expect(await client(vi.fn().mockResolvedValue(response(value))).inspectFrames(scope)).toMatchObject({ ok: false })
+  })
+
+  it('refuses invalid offsets and initial projects without making a request', async () => {
+    const fetchImpl = vi.fn(), api = client(fetchImpl)
+    expect(await api.inspectFrames(scope, { offset: -1 })).toMatchObject({ ok: false })
+    expect(await api.inspectFrames(initialScope)).toMatchObject({ ok: false })
+    expect(fetchImpl).not.toHaveBeenCalled()
   })
 })
 

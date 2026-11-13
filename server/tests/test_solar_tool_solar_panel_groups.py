@@ -129,13 +129,13 @@ def test_declaration_is_local_graph_commit():
         "invalid_request_code": INVALID, "readiness": {"kind": "w1-chain"},
         "engine": "server-builtin", "interaction": {"mode": "form"},
         "record_store": "write_seed", "record": None, "ledger": ["panel-group-create"],
-        "trusted_inputs": [], "maturity": "production", "wave": 1, "order": 30,
+        "trusted_inputs": ["source_intake"], "maturity": "production", "wave": 1, "order": 30,
         "scenario": "w1-rooftop",
     }
     assert json.loads((SERVER / "solar_tools/solar_panel_groups.json").read_text()) == expected
     assert solar_tools.get(TOOL) == expected
     assert deps.catalog_tool_digest(tool_row()) == (
-        "sha256:098e6563d15837eccc55d63f81b45011fa6efc679130b27c8241fef77e47425a")
+        "sha256:863f0f8cbd37ab931e9bdddea553923fb96ab4a9436a0540b64ccf329bba5aee")
 
 
 @pytest.mark.parametrize("name,order,ledger", [
@@ -440,6 +440,79 @@ def test_run_is_deterministic(u):
     assert first == second
     assert first["frames"][0]["id"] == frame_id(source, [P3, P2, P1])
     assert first["frames"][0]["provenance"]["created_at"] == source["panels"][0]["provenance"]["created_at"]
+
+
+def discovery_source(value):
+    outlines = []
+    for panel in value["panels"]:
+        x, y = panel["centre"]
+        outlines.append({"handle": panel["provenance"]["source_handle"],
+            "layer": value["settings"]["panel_layer_contains"] or "Panels", "closed": True,
+            "pts": [[x-1, y-.5], [x+1, y-.5], [x+1, y+.5], [x-1, y+.5]]})
+    return {"polylines": outlines}
+
+
+def discovery_params(value):
+    return {"expected_rev": value["rev"], "discover": {
+        "BranchMaxOffset": .1, "AlignmentTolerance": .1, "InstallationDesign": "Roof"}}
+
+
+def test_discovery_partitions_islands_and_keeps_singletons(u):
+    value = u(centres=((0, 0), (2.05, 0), (30, 0)))
+    source = discovery_source(value)
+    before = copy.deepcopy((value, source))
+    result = builtin().run(value, discovery_params(value), source_intake=source)
+    assert [set(frame["panel_refs"]) for frame in result["frames"]] == [{P1, P2}, {P3}]
+    assert sorted(ref for frame in result["frames"] for ref in frame["panel_refs"]) == sorted([P1, P2, P3])
+    assert all(panel["frame_ref"] for panel in result["panels"])
+    assert (value, source) == before
+    validate_graph(result)
+    assert result == builtin().run(value, discovery_params(value), source_intake=source)
+
+
+@pytest.mark.parametrize("fault,code", [
+    ("missing-source", "SOURCE_INTAKE_REQUIRED"),
+    ("missing-handle", "AMBIGUOUS_PANEL_HANDLE"),
+    ("moved-source", "GROUP_GEOMETRY_MISMATCH"),
+    ("caller-membership", INVALID),
+    ("wrong-installation", INVALID),
+    ("invalid-offset", INVALID),
+    ("extra-source-panel", "INVALID_GROUP_COVERAGE"),
+])
+def test_discovery_refuses_unbound_or_ambiguous_input(u, fault, code):
+    value = u(centres=((0, 0), (2.05, 0), (30, 0)))
+    source, request = discovery_source(value), discovery_params(value)
+    if fault == "missing-source":
+        source = None
+    elif fault == "missing-handle":
+        source["polylines"].pop()
+    elif fault == "moved-source":
+        for point in source["polylines"][0]["pts"]:
+            point[0] -= .1
+    elif fault == "caller-membership":
+        request["groups"] = params()["groups"]
+    elif fault == "wrong-installation":
+        request["discover"]["InstallationDesign"] = "Ground"
+    elif fault == "extra-source-panel":
+        extra = copy.deepcopy(source["polylines"][-1])
+        extra["handle"] = "FF"
+        source["polylines"].append(extra)
+    else:
+        request["discover"]["BranchMaxOffset"] = True
+    before = copy.deepcopy(value)
+    with pytest.raises(GraphValidationError) as error:
+        builtin().run(value, request, source_intake=source)
+    assert error.value.code == code
+    assert value == before
+
+
+def test_discovery_offset_controls_islands_without_changing_geometry(u):
+    value = u(centres=((0, 0), (2.05, 0), (30, 0)))
+    source, request = discovery_source(value), discovery_params(value)
+    request["discover"]["BranchMaxOffset"] = .01
+    result = builtin().run(value, request, source_intake=source)
+    assert [frame["panel_refs"] for frame in result["frames"]] == [[P1], [P2], [P3]]
+    assert [panel["centre"] for panel in result["panels"]] == [panel["centre"] for panel in value["panels"]]
 
 
 def test_adapter_commit_and_terminal_proof(u, tmp_path, monkeypatch):
