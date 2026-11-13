@@ -3088,8 +3088,23 @@ export default function App() {
       return readActiveScope() === scope && current.openProjectId === input.project_id
         && current.workspace?.project?.org_id === input.organization_id
     }
-    if (!signedIn || mock || signal.aborted || !currentProject()) return null
+    const refused = message => ({ ok: false, error: { message } })
+    if (!signedIn || mock || !currentProject()) return refused('The account or project changed. Open the project and choose Run ARLO again.')
+    if (signal.aborted) return refused('The ARLO run was cancelled. Choose Run ARLO again when ready.')
     if (running) return { ok: false, error: { message: 'Wait for the current tool run to finish before starting ARLO.' } }
+
+    let tools
+    try {
+      tools = await getTools(false)
+    } catch {
+      return refused('The ARLO tool catalog could not be loaded. Try Run ARLO again.')
+    }
+    if (signal.aborted) return refused('The ARLO run was cancelled. Choose Run ARLO again when ready.')
+    if (!currentProject()) return refused('The account or project changed. Open the project and choose Run ARLO again.')
+    const arloTool = Array.isArray(tools) ? tools.find(tool => tool.name === 'arlo-design') : null
+    if (typeof arloTool?.catalog_digest !== 'string' || !arloTool.catalog_digest.trim()) {
+      return refused('ARLO is unavailable or its catalog confirmation is missing. Refresh tools and choose Run ARLO again.')
+    }
 
     const envelope = await runJob({
       toolName: 'arlo-design',
@@ -3097,6 +3112,7 @@ export default function App() {
         if (signal.aborted || jobSignal.aborted || !currentProject()) return null
         const output = await runToolAsync('arlo-design', input.request, input.input_version_id, {
           orgId: input.organization_id, projectId: input.project_id, idempotencyKey,
+          catalogDigest: arloTool.catalog_digest,
           signal: jobSignal,
           onSubmit: id => { if (currentProject()) onSubmit(id) },
           onStatus: status => { if (currentProject()) onStatus(status) },

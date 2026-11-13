@@ -371,3 +371,25 @@ def test_demo_refusal_precedes_cache(proxy, monkeypatch):
     monkeypatch.setattr(route, "resolve_demo_actor", refused)
     assert query(proxy).status_code == 403
     assert len(proxy.calls) == 1
+
+
+@pytest.mark.parametrize("env", [{}, {"LEAF_STRING_SIZER_BASE_URL": ""}])
+def test_sizer_base_url_defaults_to_production(env):
+    assert catalog.solar_sizing_client.sizer_base_url(env) == "https://api.leafdesign.ai"
+
+
+@pytest.mark.parametrize("value", ["https://api.leafdesign.ai", "https://staging-api.leafdesign.ai"])
+def test_sizer_base_url_accepts_allowed_values(value):
+    assert catalog.solar_sizing_client.sizer_base_url({"LEAF_STRING_SIZER_BASE_URL": value}) == value
+
+
+@pytest.mark.parametrize("value", ["https://evil.example", "http://staging-api.leafdesign.ai",
+                                   "https://staging-api.leafdesign.ai/"])
+def test_sizer_base_url_rejects_disallowed_values(value):
+    with pytest.raises(RuntimeError, match="^LEAF_STRING_SIZER_BASE_URL must be one of the allowed String Sizer base URLs$"):
+        catalog.solar_sizing_client.sizer_base_url({"LEAF_STRING_SIZER_BASE_URL": value})
+
+
+def test_sizer_module_defaults_preserve_production_urls():
+    assert catalog.solar_sizing_client.SIZING_URL == "https://api.leafdesign.ai/string-length"
+    assert catalog.CATALOG_URL == "https://api.leafdesign.ai/string-length/modules"
