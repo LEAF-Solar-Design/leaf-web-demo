@@ -183,6 +183,8 @@ export default function useJobController({
   const [progress, setProgress] = useState(null)
   const [elapsedMs, setElapsedMs] = useState(null)
   const [result, setResult] = useState(null)
+  const [attemptFailure, setAttemptFailure] = useState(null)
+  const validResultRef = useRef(null)
   const [error, setError] = useState(null)
   const [localError, setLocalError] = useState(null)
   useEffect(() => { setLocalError(null) }, [readsPaused, resetKey])
@@ -294,7 +296,9 @@ export default function useJobController({
     setJobTool(null)
     setInflight(null)
     setReattaching(false)
+    validResultRef.current = null
     setResult(null)
+    setAttemptFailure(null)
     setError(null)
     resetActivity()
     if (clearPointer) clearInflightJob(null, storageRef.current)
@@ -319,7 +323,12 @@ export default function useJobController({
     sequenceRef.current += 1
     setJobId(jobId)
     setJobTool(toolName || envelope?.tool || 'job')
+    validResultRef.current = envelope?.ok ? {
+      tool: toolName || envelope.tool || 'job',
+      drawingKey: envelope.origin?.drawingKey ?? drawingKeyRef.current,
+    } : null
     setResult(envelope || null)
+    setAttemptFailure(null)
     setError(null)
     setInflight(null)
     setReattaching(false)
@@ -388,12 +397,23 @@ export default function useJobController({
     setStaleResults((current) => current.filter((row) => row.job_id !== jobId))
   }, [])
 
-  const finishEnvelope = useCallback(async (envelope, sequence, toolName, stale = null) => {
+  const finishEnvelope = useCallback(async (envelope, sequence, toolName, stale = null, attempt = null) => {
     if (sequenceRef.current !== sequence) {
       if (stale) recordStale(envelope, { ...stale, toolName })
       return false
     }
-    setResult(envelope)
+    if (!envelope?.ok && attempt?.retained && validResultRef.current === attempt.retained) {
+      // The result card still describes the last success; the error and job rail
+      // describe this attempt, including refusals that resolve as envelopes.
+      setAttemptFailure(envelope || { ok: false })
+      setError(`Latest attempt failed: ${formatLifecycleError(envelope?.error || 'The run did not complete.', callbacksRef.current.formatError)}`)
+    } else {
+      validResultRef.current = envelope?.ok ? {
+        tool: toolName || envelope.tool || 'job',
+        drawingKey: attempt ? attempt.drawingKey : (envelope.origin?.drawingKey ?? drawingKeyRef.current),
+      } : null
+      setResult(envelope)
+    }
     if (envelope?.ok) {
       try {
         callbacksRef.current.onNotice?.({
@@ -429,7 +449,9 @@ export default function useJobController({
     setJobTool(toolName)
     setRunning(true)
     setError(null)
+    validResultRef.current = null
     setResult(null)
+    setAttemptFailure(null)
     setStatus(null)
     setProgress(null)
     setElapsedMs(null)
@@ -499,6 +521,9 @@ export default function useJobController({
       return null
     }
     const capturedDrawingKey = drawingKeyRef.current
+    const previous = validResultRef.current
+    const retained = previous?.tool === (toolName || 'job') && previous.drawingKey === capturedDrawingKey
+      ? previous : null
     const origin = typeof capturedDrawingKey === 'string' && capturedDrawingKey.length > 0
       ? { drawingKey: capturedDrawingKey } : undefined
     const sequence = ++sequenceRef.current
@@ -514,7 +539,11 @@ export default function useJobController({
     setJobTool(toolName || 'job')
     setRunning(true)
     setError(null)
-    setResult(null)
+    setAttemptFailure(null)
+    if (!retained) {
+      validResultRef.current = null
+      setResult(null)
+    }
     setStatus(null)
     setProgress(null)
     setElapsedMs(null)
@@ -565,11 +594,16 @@ export default function useJobController({
       terminal = true
       const envelope = origin && output ? { ...output, origin } : output
       if (!submittedJobId && isUnauthenticatedEnvelope(envelope)) signInExpired()
-      await finishEnvelope(envelope, sequence, toolName, { jobId: submittedJobId, epoch })
+      await finishEnvelope(envelope, sequence, toolName, { jobId: submittedJobId, epoch }, {
+        retained, drawingKey: capturedDrawingKey,
+      })
       return sequenceRef.current === sequence ? envelope : null
     } catch (cause) {
       if (sequenceRef.current === sequence) {
-        setError(formatLifecycleError(cause, callbacksRef.current.formatError))
+        const message = formatLifecycleError(cause, callbacksRef.current.formatError)
+        const keepingResult = retained && validResultRef.current === retained
+        if (keepingResult) setAttemptFailure({ ok: false, error: { message } })
+        setError(keepingResult ? `Latest attempt failed: ${message}` : message)
       }
       if (isUnauthorized(cause)) signInExpired()
       return null
@@ -640,6 +674,15 @@ export default function useJobController({
   useEffect(() => {
     reset()
   }, [mock, reset, resetKey])
+
+  useLayoutEffect(() => {
+    // A drawing key includes its project/version. Retention never crosses it;
+    // in-flight runs still carry their original drawing in the origin receipt.
+    validResultRef.current = null
+    setResult(null)
+    setAttemptFailure(null)
+    setError(null)
+  }, [drawingKey])
 
   // A layout effect runs in the same task as the commit, before any timer or response callback can run
   // against the paused tree.
@@ -798,22 +841,23 @@ export default function useJobController({
 
   const currentJob = useMemo(() => {
     if (!jobTool) return null
+    const jobResult = running ? null : (attemptFailure || result)
     let jobStatus
     if (running) jobStatus = status || 'running'
-    else if (result) jobStatus = result.ok ? 'complete' : 'failed'
+    else if (jobResult) jobStatus = jobResult.ok ? 'complete' : 'failed'
     else return null
     return {
       job_id: currentJobId,
       tool: jobTool,
       status: jobStatus,
       progress: progress || status || 'running',
-      elapsed_ms: elapsedMs != null ? elapsedMs : (result?.timing_ms ?? null),
-      degraded_mode: !!result?.degraded_mode,
-      error: result?.error || null,
-      cost: result?.cost || null,
-      entitlement_required: !!result?.entitlement_required,
+      elapsed_ms: elapsedMs != null ? elapsedMs : (jobResult?.timing_ms ?? null),
+      degraded_mode: !!jobResult?.degraded_mode,
+      error: jobResult?.error || null,
+      cost: jobResult?.cost || null,
+      entitlement_required: !!jobResult?.entitlement_required,
     }
-  }, [currentJobId, elapsedMs, jobTool, progress, result, running, status])
+  }, [attemptFailure, currentJobId, elapsedMs, jobTool, progress, result, running, status])
 
   return {
     jobs: readsPaused ? NO_ROWS : jobs,

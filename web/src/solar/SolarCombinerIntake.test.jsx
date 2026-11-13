@@ -36,7 +36,7 @@ function deferred() {
   return { promise, resolve }
 }
 async function importAndWait() {
-  fireEvent.click(importButton())
+  await act(async () => { fireEvent.click(importButton()) })
   await waitFor(() => expect(importButton().disabled).toBe(false))
 }
 

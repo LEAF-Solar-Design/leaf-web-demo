@@ -1,5 +1,5 @@
 import React from 'react'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import ResultPanel from './ResultPanel.jsx'
@@ -84,6 +84,254 @@ describe('ResultPanel outcome fallbacks', () => {
   })
 })
 
+
+describe('ResultPanel row arrays', () => {
+  it('renders every layer and bound in supplied order alongside the scalar summary', () => {
+    const layers = [
+      { layer: 'West roof', min_x: -1234.56789123, max_x: '2,345.6000 mm', min_y: 0, max_y: 9.87654321, geometry_count: 17 },
+      { layer: 'East roof', min_x: -4, max_x: 5, min_y: -6, max_y: 7, geometry_count: 8 },
+      { layer: 'Annex', min_x: 1, max_x: 2, min_y: 3, max_y: 4, geometry_count: 9 },
+    ]
+    render(<ResultPanel result={{ ok: true, result: { layers, layer_count: layers.length } }} density="comfortable" />)
+    const table = screen.getByRole('table', { name: 'layers' })
+    expect(table).toHaveAttribute('data-density', 'comfortable')
+    expect(within(table).getAllByRole('columnheader').map((cell) => cell.textContent))
+      .toEqual(['layer', 'min x', 'max x', 'min y', 'max y', 'geometry count'])
+    const rows = within(table).getAllByRole('row').slice(1)
+    expect(rows.map((row) => within(row).getAllByRole('cell').map((cell) => cell.textContent)))
+      .toEqual(layers.map((layer) => Object.values(layer).map(String)))
+    const summary = screen.getByRole('rowheader', { name: 'layer count' }).closest('tr')
+    expect(within(summary).getByRole('cell')).toHaveTextContent('3')
+    expect(screen.queryByText('Completed with no output.')).toBeNull()
+  })
+
+  it('shows nested report arrays and nested bounds, including units and formatted values', () => {
+    render(<ResultPanel result={{ ok: true, result: { report: { regions: [
+      { name: 'Upper deck', bounds: { min_x: '-12.3400', max_x: 45.67891234, units: 'mm', origin: [1.25, -2.5] }, area_sqft: '1,200.00' },
+      { name: 'Lower deck', bounds: { min_x: 0, max_x: 3, units: 'mm' }, note: 'Survey pending' },
+    ] } } }} />)
+    const table = screen.getByRole('table', { name: 'report / regions' })
+    expect(within(table).getAllByRole('columnheader').map((cell) => cell.textContent))
+      .toEqual(['name', 'bounds / min x', 'bounds / max x', 'bounds / units', 'bounds / origin', 'area (sqft)', 'note'])
+    const rows = within(table).getAllByRole('row').slice(1)
+    expect(rows.map((row) => within(row).getAllByRole('cell').map((cell) => cell.textContent))).toEqual([
+      ['Upper deck', '-12.3400', '45.67891234', 'mm', '[1.25,-2.5]', '1,200.00', ''],
+      ['Lower deck', '0', '3', 'mm', '', '', 'Survey pending'],
+    ])
+  })
+
+  it('discovers separately labelled layer tables inside outer row arrays', () => {
+    render(<ResultPanel result={{ ok: true, result: { report: { groups: [
+      { name: 'North survey', layers: [
+        { name: 'Upper roof', bounds: { min_x: '-12.3400 mm', max_x: 45.67891234 } },
+        { name: 'Lower roof', bounds: { min_x: 0, max_x: 3 } },
+      ] },
+      { name: 'South survey', layers: [{ name: 'Annex roof', bounds: { min_x: -1, max_x: 2 } }] },
+    ] } } }} />)
+    expect(screen.getAllByRole('table')).toHaveLength(3)
+    const groups = screen.getByRole('table', { name: 'report / groups' })
+    expect(within(groups).getAllByRole('row').slice(1).map((row) => row.textContent))
+      .toEqual(['North survey2 rows', 'South survey1 row'])
+    const north = screen.getByRole('table', { name: 'report / groups / 0 / layers' })
+    expect(within(north).getAllByRole('row').slice(1).map((row) =>
+      within(row).getAllByRole('cell').map((cell) => cell.textContent)))
+      .toEqual([['Upper roof', '-12.3400 mm', '45.67891234'], ['Lower roof', '0', '3']])
+    const south = screen.getByRole('table', { name: 'report / groups / 1 / layers' })
+    expect(within(south).getByRole('cell', { name: 'Annex roof' })).toBeInTheDocument()
+  })
+
+  it('mounts child tables only for the current parent page while keeping every child reachable', () => {
+    const groups = Array.from({ length: 1000 }, (_, index) => ({
+      name: `Survey ${index}`, layers: [{ name: `Roof ${index}` }],
+    }))
+    const { container } = render(<ResultPanel result={{ ok: true, result: { report: { groups } } }} />)
+    const table = screen.getByRole('table', { name: 'report / groups' })
+    expect(screen.queryByRole('table', { name: 'report / groups / 100 / layers' })).toBeNull()
+    const visited = []
+    for (let page = 0; page < 10; page++) {
+      const tables = Array.from(container.querySelectorAll('table'))
+      expect(tables).toHaveLength(101)
+      expect(table.querySelectorAll('tbody tr')).toHaveLength(100)
+      visited.push(...tables.filter((child) => child !== table).map((child) => child.querySelector('tbody td').textContent))
+      if (page < 9) fireEvent.click(screen.getByRole('button', { name: 'Next report / groups page' }))
+    }
+    expect(visited).toEqual(groups.map((group) => group.layers[0].name))
+    expect(screen.queryByRole('table', { name: 'report / groups / 0 / layers' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Next report / groups page' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Previous report / groups page' }))
+    expect(screen.getByRole('table', { name: 'report / groups / 800 / layers' })).toHaveTextContent('Roof 800')
+  })
+
+  it('caps wide tables at 50 columns with all fields available per row while keeping pagination', () => {
+    const layers = Array.from({ length: 105 }, (_, row) => Object.fromEntries([
+      ['name', `Layer ${row}`],
+      ...Array.from({ length: 55 }, (_, column) => [`field_${column}`, `${row}:${column}`]),
+    ]))
+    layers[104].last_field = 'Only on the last row'
+    render(<ResultPanel result={{ ok: true, result: { layers } }} />)
+    const table = screen.getByRole('table', { name: 'layers' })
+    const headers = within(table).getAllByRole('columnheader').map((cell) => cell.textContent)
+    expect(headers).toEqual(['name', ...Array.from({ length: 49 }, (_, index) => `field ${index}`)])
+    expect(within(table).getAllByRole('cell')).toHaveLength(5000)
+    expect(screen.getByText("7 more fields available in each row's All fields.")).toBeInTheDocument()
+    expect(within(table).queryByText('0:54')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'All fields for layers row 1' }))
+    expect(within(table).getByText('field 54')).toBeInTheDocument()
+    expect(within(table).getByText('0:54')).toBeInTheDocument()
+    expect(within(table).queryByText('1:54')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Hide all fields for layers row 1' }))
+    expect(within(table).queryByText('0:54')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Next layers page' }))
+    expect(within(table).getAllByRole('cell')).toHaveLength(250)
+    expect(within(table).getByText('Layer 104')).toBeInTheDocument()
+    expect(within(table).getAllByRole('columnheader').map((cell) => cell.textContent)).toEqual(headers)
+    expect(screen.getByText("7 more fields available in each row's All fields.")).toBeInTheDocument()
+    expect(screen.getByText('Rows 101 to 105 of 105')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Next layers page' })).toBeDisabled()
+    expect(within(table).queryByText('Only on the last row')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'All fields for layers row 105' }))
+    expect(within(table).getByText('last field')).toBeInTheDocument()
+    expect(within(table).getByText('Only on the last row')).toBeInTheDocument()
+    expect(within(table).getByText('104:54')).toBeInTheDocument()
+  })
+
+  it('keeps arrays at the discovery depth boundary as paged tables alongside earlier arrays', () => {
+    const layers = Array.from({ length: 123 }, (_, index) => ({ name: `Boundary roof ${index}`, min_x: `${index}.0000 mm` }))
+    let report = { layers }
+    for (let index = 0; index < 18; index++) report = { nested: report }
+    const label = ['report', ...Array(18).fill('nested'), 'layers'].join(' / ')
+    render(<ResultPanel result={{ ok: true, result: { layers: [{ name: 'Shallow roof' }], report } }} />)
+    expect(screen.getByRole('table', { name: 'layers' })).toHaveTextContent('Shallow roof')
+    const table = screen.getByRole('table', { name: label })
+    expect(screen.getAllByRole('table')).toHaveLength(2)
+    expect(table.querySelectorAll('tbody tr')).toHaveLength(100)
+    expect(within(table).getByRole('cell', { name: 'Boundary roof 0' })).toBeInTheDocument()
+    expect(screen.queryByText('Boundary roof 122')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: `Next ${label} page` }))
+    expect(table.querySelectorAll('tbody tr')).toHaveLength(23)
+    expect(within(table).getByRole('cell', { name: 'Boundary roof 122' })).toBeInTheDocument()
+    expect(within(table).getByRole('cell', { name: '122.0000 mm' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: `Next ${label} page` })).toBeDisabled()
+  })
+
+  it('bounds discovery, flattened fields and JSON cell serialization for very deep results', () => {
+    let deep = { layers: [{ name: 'Beyond display depth' }] }
+    for (let index = 0; index < 12000; index++) deep = { nested: deep }
+    const { container } = render(<ResultPanel result={{ ok: true, result: {
+      report: deep,
+      layers: [{ name: 'Deep bounds', bounds: deep, coordinates: [0, deep] }],
+    } }} />)
+    const table = screen.getByRole('table', { name: 'layers' })
+    expect(within(table).getByRole('cell', { name: 'Deep bounds' })).toBeInTheDocument()
+    expect(within(table).getAllByRole('columnheader').every((cell) => cell.textContent.split(' / ').length <= 20)).toBe(true)
+    expect(table.querySelector('tbody')).toHaveTextContent('[Truncated]')
+    expect(screen.getByText(/^report \/ nested.*\[Truncated\]/)).toBeInTheDocument()
+    expect(container.textContent.length).toBeLessThan(10000)
+    expect(screen.queryByText('Beyond display depth')).toBeNull()
+    expect(screen.queryByText('Completed with no output.')).toBeNull()
+  })
+
+  it('renders cyclic cell values as text without recursive discovery failing', () => {
+    const cycle = { name: 'Cycle point' }
+    cycle.self = cycle
+    render(<ResultPanel result={{ ok: true, result: { layers: [{ name: 'Cyclic bounds', coordinates: [0, cycle] }] } }} />)
+    const table = screen.getByRole('table', { name: 'layers' })
+    expect(within(table).getByRole('cell', { name: 'Cyclic bounds' })).toBeInTheDocument()
+    expect(within(table).getByRole('cell', { name: /\[Circular\]/ })).toHaveTextContent('Cycle point')
+  })
+
+  it('reads only own properties for fields missing on other rows, including constructor paths', () => {
+    const own = JSON.parse('{"name":"Own fields","constructor":{"name":"Reported constructor"},"bounds":{"constructor":{"name":"Reported bound constructor"}},"__proto__":{"name":"Reported prototype"}}')
+    const inherited = Object.assign(Object.create({
+      constructor: { name: 'Inherited constructor' },
+      bounds: { constructor: { name: 'Inherited bounds' } },
+      hidden: 'Inherited field',
+    }), { name: 'Inherited fields' })
+    render(<ResultPanel result={{ ok: true, result: { layers: [own, { name: 'Missing fields' }, inherited] } }} />)
+    const table = screen.getByRole('table', { name: 'layers' })
+    const rows = within(table).getAllByRole('row').slice(1)
+    expect(rows.map((row) => within(row).getAllByRole('cell').map((cell) => cell.textContent))).toEqual([
+      ['Own fields', 'Reported constructor', 'Reported bound constructor', 'Reported prototype'],
+      ['Missing fields', '', '', ''],
+      ['Inherited fields', '', '', ''],
+    ])
+    expect(within(table).queryByRole('columnheader', { name: 'hidden' })).toBeNull()
+  })
+
+  it('keeps scalar summaries alongside both counts and layer rows', () => {
+    render(<ResultPanel result={{ ok: true, result: {
+      counts: { Inspected: 4 }, total: 4, layer_count: 2, status: 'Survey complete',
+      layers: [{ name: 'North roof' }, { name: 'South roof' }],
+    } }} />)
+    expect(screen.getByRole('cell', { name: 'Inspected' })).toBeInTheDocument()
+    expect(screen.getByText('Total:')).toHaveTextContent('Total: 4')
+    expect(screen.queryByRole('rowheader', { name: 'total' })).toBeNull()
+    expect(screen.getByRole('rowheader', { name: 'layer count' }).closest('tr')).toHaveTextContent('2')
+    expect(screen.getByRole('rowheader', { name: 'status' }).closest('tr')).toHaveTextContent('Survey complete')
+    const table = screen.getByRole('table', { name: 'layers' })
+    expect(within(table).getAllByRole('cell').map((cell) => cell.textContent)).toEqual(['North roof', 'South roof'])
+  })
+
+  it('bounds a large array in the DOM while allowing every row to be reached in order', () => {
+    const layers = Array.from({ length: 237 }, (_, index) => ({ name: `Layer ${index}`, min_x: index + 0.123456789 }))
+    layers[236].note = 'Last surveyed layer'
+    const { rerender } = render(<ResultPanel result={{ ok: true, result: { layers } }} />)
+    const table = screen.getByRole('table', { name: 'layers' })
+    const namesOnPage = () => within(table).getAllByRole('row').slice(1)
+      .map((row) => within(row).getAllByRole('cell')[0].textContent)
+    expect(within(table).getByRole('columnheader', { name: 'note' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Previous layers page' })).toBeDisabled()
+    const visited = []
+    for (const count of [100, 100, 37]) {
+      expect(table.querySelectorAll('tbody tr')).toHaveLength(count)
+      visited.push(...namesOnPage())
+      if (visited.length < layers.length) fireEvent.click(screen.getByRole('button', { name: 'Next layers page' }))
+    }
+    expect(visited).toEqual(layers.map((row) => row.name))
+    expect(screen.getByText('Rows 201 to 237 of 237')).toBeInTheDocument()
+    expect(within(table).getByRole('cell', { name: 'Last surveyed layer' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Next layers page' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Previous layers page' }))
+    expect(namesOnPage()).toEqual(layers.slice(100, 200).map((row) => row.name))
+    rerender(<ResultPanel result={{ ok: true, result: { layers: layers.slice(0, 150) } }} />)
+    expect(screen.getByText('Rows 1 to 100 of 150')).toBeInTheDocument()
+    expect(namesOnPage()).toEqual(layers.slice(0, 100).map((row) => row.name))
+  })
+
+  it.each([{}, { layer_count: 0 }])('labels an empty array without claiming no output (%j)', (summary) => {
+    render(<ResultPanel result={{ ok: true, result: { layers: [], ...summary } }} />)
+    expect(screen.getByText('layers: No rows.')).toBeInTheDocument()
+    expect(screen.queryByRole('table', { name: 'layers' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Next layers page' })).toBeNull()
+    expect(screen.queryByText('Completed with no output.')).toBeNull()
+    if ('layer_count' in summary) {
+      expect(screen.getByRole('rowheader', { name: 'layer count' }).closest('tr')).toHaveTextContent('0')
+    }
+  })
+
+  it.each([
+    { counts: { Inspected: 2 }, total: 2 },
+    { table: { columns: ['Inspection'], rows: [['Complete']] }, layer_count: 1 },
+  ])('keeps row arrays visible beside existing specialized tables (%j)', (data) => {
+    render(<ResultPanel result={{ ok: true, result: { ...data, layers: [{ name: 'Measured roof', width_ft: '12.5000' }] } }} />)
+    const table = screen.getByRole('table', { name: 'layers' })
+    expect(within(table).getByRole('cell', { name: 'Measured roof' })).toBeInTheDocument()
+    expect(within(table).getByRole('columnheader', { name: 'width (ft)' })).toBeInTheDocument()
+    expect(screen.getAllByRole('table').length).toBeGreaterThan(1)
+  })
+
+  it('renders row labels, field names and values as text', () => {
+    const markup = '<img src=x onerror="alert(1)">'
+    const { container } = render(<ResultPanel result={{ ok: true, result: {
+      [markup]: [{ name: markup, bounds: { [markup]: '<svg onload="alert(2)">' } }],
+    } }} />)
+    const table = screen.getByRole('table', { name: markup })
+    expect(within(table).getByRole('cell', { name: markup })).toBeInTheDocument()
+    expect(within(table).getByRole('columnheader', { name: `bounds / ${markup}` })).toBeInTheDocument()
+    expect(within(table).getByRole('cell', { name: '<svg onload="alert(2)">' })).toBeInTheDocument()
+    expect(container.querySelector('img, svg, script')).toBeNull()
+  })
+})
 
 describe('ResultPanel actionable error guidance', () => {
   it('shows the next action and responsible actor from the shared envelope', () => {

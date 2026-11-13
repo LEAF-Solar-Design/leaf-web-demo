@@ -30,7 +30,7 @@ function inputFiles() {
     }
   }
   for (const directory of ['web/src', 'web/public', 'web/webpack', 'web/vite-plugins', 'vendor/assistant-contract', 'vendor/assistant-react', 'vendor/acadrust-worker']) walk(directory)
-  for (const filename of ['web/package.json', 'web/package-lock.json', 'web/next.config.mjs', 'web/scripts/next-build.mjs', 'web/scripts/next-runtime.mjs', 'web/scripts/bundle-assets.mjs', 'web/scripts/next-fence-fixtures.mjs']) {
+  for (const filename of ['web/package.json', 'web/package-lock.json', 'web/next.config.mjs', 'web/scripts/next-build.mjs', 'web/scripts/ci-prebuilt.mjs', 'web/scripts/next-runtime.mjs', 'web/scripts/bundle-assets.mjs', 'web/scripts/next-fence-fixtures.mjs']) {
     if (!existsSync(path.join(REPO, filename))) throw new Error(`Missing Next fixture input: ${filename}`)
     files.push(filename)
   }
@@ -79,6 +79,7 @@ async function build(directory, files, variant, source) {
   const env = { ...process.env }
   for (const key of PUBLIC_ENV_KEYS) delete env[key]
   delete env.LEAF_CAD_ENGINE_PKG_DIR
+  delete env.LEAF_WEB_PREBUILT_RECEIPT
   Object.assign(env, {
     NODE_ENV: 'production', NEXT_TELEMETRY_DISABLED: '1', LEAF_ELEMENT_REF_STAMP: '1',
     LEAF_SOURCE_SHA: source, VITE_MOCK: '0', VITE_API_BASE: 'http://leaf-proof.invalid',

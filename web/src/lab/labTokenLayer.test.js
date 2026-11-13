@@ -1,4 +1,5 @@
 // @vitest-environment node
+import { scaleTimeout } from '../testTimeScale.js'
 import { readFileSync, readdirSync } from 'node:fs'
 import { extname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -64,5 +65,5 @@ describe('Lab token cascade layer', () => {
       expect(reference.index).toBeGreaterThanOrEqual(layerOpeningEnd)
     }
     expect(out.code).not.toMatch(/@import\b[^;]*leaf-tokens\.css/i)
-  }, 60_000)
+  }, scaleTimeout(60_000))
 })

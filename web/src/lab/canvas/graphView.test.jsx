@@ -192,6 +192,205 @@ describe('project corpus evaluation flow', () => {
   })
 })
 
+describe('durable run recovery', () => {
+  const token = sub => `e30.${btoa(JSON.stringify({ sub }))}.test`
+  const json = (body, status = 200) => ({ ok: status < 400, status, json: async () => body })
+  const receiptId = () => `v1.${now}.${crypto.randomUUID().replaceAll('-', '')}`
+  let previousToken
+  beforeEach(() => {
+    previousToken = localStorage.getItem('leaf.jwt')
+    localStorage.setItem('leaf.jwt', token('recovery-owner'))
+  })
+  afterEach(() => {
+    cleanup()
+    if (previousToken === null) localStorage.removeItem('leaf.jwt')
+    else localStorage.setItem('leaf.jwt', previousToken)
+    Object.keys(localStorage).filter(key => key.startsWith('leaf.lab.run-receipts.v1:')).forEach(key => localStorage.removeItem(key))
+    labValueStore.getRuns().filter(run => run.id.startsWith('durable-')).forEach(run => labValueStore.upsertRun(run.id, { state: 'finished' }))
+  })
+  function clientFor(docId, graph) {
+    const client = createLabArtifactsClient({ fetchImpl: async url => json(url.endsWith('/head')
+      ? { revision: 9 } : { revision: 9, graph }) })
+    client.setDocId(docId)
+    return client
+  }
+  function finalEvents(value) {
+    return { events: [
+      { seq: 0, kind: 'value', block_id: 'count-1', payload: { result: { data: value } } },
+      { seq: 1, kind: 'finished', payload: {} },
+    ] }
+  }
+
+  it.each(['reload', 'graph restoration'])('reconciles a persisted interrupted identity after %s before another execution', async recovery => {
+    const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
+    const docId = `durable-${recovery.replaceAll(' ', '-')}`, runId = `${docId}-run`
+    let client = clientFor(docId, graph)
+    const posts = []
+    const fetchImpl = vi.fn(async (url, init) => {
+      if (url.includes('/runs?')) return json({ runs: [] })
+      if (init.method === 'POST') {
+        const body = JSON.parse(init.body)
+        posts.push(body)
+        if (posts.length === 1) throw new Error('Response lost after admission')
+        return json({ run_id: runId, state: 'finished' }, 202)
+      }
+      if (url.includes('/events?')) return json(finalEvents(137))
+      return json({ run_id: runId, state: 'finished', graph_revision: 9 })
+    })
+    vi.stubGlobal('fetch', fetchImpl)
+    let view = render(<GraphView client={client} provider={provider} initialDocument={graph} />)
+    const run = await screen.findByRole('button', { name: 'Run saved revision r9' })
+    await waitFor(() => expect(run).toBeEnabled())
+    fireEvent.click(run)
+    await screen.findByText('Run outcome unknown. Retry to recover this submission.')
+    const receiptKey = Object.keys(localStorage).find(key => key.startsWith('leaf.lab.run-receipts.v1:') && key.includes(docId))
+    expect(JSON.parse(localStorage.getItem(receiptKey))).toContainEqual({ id: posts[0].submission_id, graphRevision: 9 })
+    if (recovery === 'reload') {
+      view.unmount()
+      client = clientFor(docId, graph)
+      view = render(<GraphView client={client} provider={provider} initialDocument={graph} />)
+    } else {
+      act(() => { client.setDocId(`${docId}-away`); client.takeGraph(graph) })
+      await waitFor(() => expect(fetchImpl.mock.calls.some(([url]) => url.includes(`doc_id=${docId}-away`))).toBe(true))
+      expect(posts).toHaveLength(1)
+      act(() => { client.setDocId(docId); client.takeGraph(graph) })
+    }
+    await waitFor(() => expect(within(cardNamed('Count')).getByText('137')).toBeVisible())
+    expect(posts).toHaveLength(2)
+    expect(posts[1]).toEqual({ ...posts[0], reconcile_only: true })
+    expect(posts.filter(body => !body.reconcile_only)).toHaveLength(1)
+    expect(JSON.parse(localStorage.getItem(receiptKey))).toContainEqual({ id: posts[0].submission_id,
+      graphRevision: 9, runId, state: 'finished' })
+    expect(fetchImpl.mock.calls.some(([url]) => url.includes('/stream/runs'))).toBe(false)
+    view.unmount()
+  })
+
+  it.each(['account', 'project'])('discovers a finished run without browser receipts and isolates a different %s', async boundary => {
+    const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
+    const docId = `durable-discover-${boundary}`, runId = `${docId}-run`, submission = receiptId()
+    const client = clientFor(docId, graph)
+    let project = 'project-one'
+    const props = () => ({ client, provider, initialDocument: graph, route: { params: { project_id: project } } })
+    const fetchImpl = vi.fn(async (url, init) => {
+      if (url.includes('/runs?')) {
+        const own = init.headers.Authorization === `Bearer ${token('recovery-owner')}` && url.includes('project_id=project-one')
+        return json({ runs: own ? [{ run_id: runId, state: 'finished', graph_revision: 9,
+          doc_id: docId, project_id: project, submission_id: submission }] : [] })
+      }
+      if (url.includes('/events?')) return json(finalEvents(241))
+      return json({ run_id: runId, state: 'finished', graph_revision: 9 })
+    })
+    vi.stubGlobal('fetch', fetchImpl)
+    const view = render(<GraphView {...props()} />)
+    await waitFor(() => expect(within(cardNamed('Count')).getByText('241')).toBeVisible())
+    const beforeSwitch = fetchImpl.mock.calls.length
+    if (boundary === 'account') localStorage.setItem('leaf.jwt', token('different-owner'))
+    else project = 'project-two'
+    view.rerender(<GraphView {...props()} />)
+    await screen.findByRole('button', { name: 'Run saved revision r9' })
+    expect(within(cardNamed('Count')).queryByText('241')).toBeNull()
+    expect(fetchImpl.mock.calls.slice(beforeSwitch).every(([url]) => url.includes('/runs?'))).toBe(true)
+    expect(fetchImpl.mock.calls.some(([, init]) => init.method === 'POST')).toBe(false)
+  })
+
+  it.each(['account', 'project'])('does not reconcile another %s\'s persisted pending identity', async boundary => {
+    const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
+    const client = clientFor(`durable-pending-${boundary}`, graph), posts = []
+    let project = 'project-one'
+    const props = () => ({ client, provider, initialDocument: graph, route: { params: { project_id: project } } })
+    const fetchImpl = vi.fn(async (url, init) => {
+      if (url.includes('/runs?')) return json({ runs: [] })
+      posts.push(JSON.parse(init.body))
+      throw new Error('Submission response lost')
+    })
+    vi.stubGlobal('fetch', fetchImpl)
+    const view = render(<GraphView {...props()} />)
+    const run = await screen.findByRole('button', { name: 'Run saved revision r9' })
+    await waitFor(() => expect(run).toBeEnabled())
+    fireEvent.click(run)
+    await screen.findByText('Run outcome unknown. Retry to recover this submission.')
+    if (boundary === 'account') localStorage.setItem('leaf.jwt', token('different-owner'))
+    else project = 'project-two'
+    view.rerender(<GraphView {...props()} />)
+    await screen.findByRole('button', { name: 'Run saved revision r9' })
+    expect(posts).toHaveLength(1)
+    expect(posts[0].reconcile_only).toBe(false)
+    expect(screen.queryByRole('button', { name: 'Recover previous run' })).toBeNull()
+  })
+
+  it('keeps an absent interrupted identity unresolved across retries instead of submitting a replacement', async () => {
+    const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
+    const client = clientFor('durable-missing', graph), posts = []
+    const fetchImpl = vi.fn(async (url, init) => {
+      if (url.includes('/runs?')) return json({ runs: [] })
+      posts.push(JSON.parse(init.body))
+      if (posts.length === 1) throw new Error('Connection interrupted')
+      return json({ detail: 'lab_submission_missing' }, 409)
+    })
+    vi.stubGlobal('fetch', fetchImpl)
+    render(<GraphView client={client} provider={provider} initialDocument={graph} />)
+    const run = await screen.findByRole('button', { name: 'Run saved revision r9' })
+    await waitFor(() => expect(run).toBeEnabled())
+    fireEvent.click(run)
+    await screen.findByText('Run outcome unknown. Retry to recover this submission.')
+    for (let retry = 0; retry < 2; retry++) {
+      const recover = screen.getByRole('button', { name: 'Recover previous run' })
+      await waitFor(() => expect(recover).toBeEnabled())
+      fireEvent.click(recover)
+      await waitFor(() => expect(posts).toHaveLength(retry + 2))
+      expect(await screen.findByText('Previous submission was not found. Start a new run explicitly.')).toBeVisible()
+    }
+    expect(posts.slice(1)).toEqual([{ ...posts[0], reconcile_only: true }, { ...posts[0], reconcile_only: true }])
+    expect(posts.filter(body => !body.reconcile_only)).toHaveLength(1)
+  })
+
+  it('reconnects an existing pending run on retry without starting another execution', async () => {
+    const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
+    const docId = 'durable-active', runId = `${docId}-run`
+    const client = clientFor(docId, graph)
+    const fetchImpl = vi.fn(async url => {
+      if (url.startsWith(`${config.apiBase}/api/lab/runs?`)) return json({ runs: [{ run_id: runId, state: 'running', graph_revision: 9,
+        doc_id: docId, project_id: '', submission_id: receiptId() }] })
+      return { ok: true, status: 200, body: new ReadableStream({ start(controller) {
+        controller.enqueue(new TextEncoder().encode(`event: run\ndata: ${JSON.stringify({ run_id: runId,
+          seq: 0, kind: 'value', block_id: 'count-1', payload: { result: { data: 193 } } })}\n\n`))
+      } }) }
+    })
+    vi.stubGlobal('fetch', fetchImpl)
+    render(<GraphView client={client} provider={provider} initialDocument={graph} />)
+    await waitFor(() => expect(within(cardNamed('Count')).getByText('193')).toBeVisible())
+    const recover = screen.getByRole('button', { name: 'Recover previous run' })
+    await waitFor(() => expect(recover).toBeEnabled())
+    fireEvent.click(recover)
+    expect(await screen.findByText('Previous run is still running. Its existing execution has been recovered.')).toBeVisible()
+    expect(within(cardNamed('Count')).getByText('193')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Start a new deliberate run' })).toBeEnabled()
+    expect(fetchImpl.mock.calls.some(([, init]) => init.method === 'POST')).toBe(false)
+    expect(fetchImpl.mock.calls.filter(([url]) => url.includes('/stream/runs'))).toHaveLength(1)
+  })
+
+  it.each(['account', 'project'])('discards a late discovery response after the %s changes', async boundary => {
+    const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
+    const docId = `durable-late-${boundary}`, runId = `${docId}-run`
+    const client = clientFor(docId, graph)
+    let project = 'project-one', resolveDiscovery
+    const props = () => ({ client, provider, initialDocument: graph, route: { params: { project_id: project } } })
+    const fetchImpl = vi.fn().mockImplementationOnce(() => new Promise(resolve => { resolveDiscovery = resolve }))
+      .mockResolvedValue(json({ runs: [] }))
+    vi.stubGlobal('fetch', fetchImpl)
+    const view = render(<GraphView {...props()} />)
+    await waitFor(() => expect(resolveDiscovery).toBeTypeOf('function'))
+    if (boundary === 'account') localStorage.setItem('leaf.jwt', token('different-owner'))
+    else project = 'project-two'
+    view.rerender(<GraphView {...props()} />)
+    await screen.findByRole('button', { name: 'Run saved revision r9' })
+    await act(async () => resolveDiscovery(json({ runs: [{ run_id: runId, state: 'finished', graph_revision: 9,
+      doc_id: docId, project_id: 'project-one', submission_id: receiptId() }] })))
+    expect(labValueStore.getRun(runId)).toBeUndefined()
+    expect(fetchImpl.mock.calls.every(([url]) => url.includes('/runs?'))).toBe(true)
+  })
+})
+
 describe('first-click live graph', () => {
   it('keeps graph timing apart from every card, block and pipe measurement', () => {
     const provider = hostProvider()
@@ -541,19 +740,21 @@ describe('first-click live graph', () => {
       json: async () => url.endsWith('/head') ? { revision: 7 } : { revision: 7, graph } })) })
     client.setDocId('account-change')
     let resolveSubmission
-    const fetchImpl = vi.fn(() => new Promise(resolve => { resolveSubmission = resolve }))
+    const fetchImpl = vi.fn((url, init) => init.method === 'GET'
+      ? Promise.resolve({ ok: true, status: 200, json: async () => ({ runs: [] }) })
+      : new Promise(resolve => { resolveSubmission = resolve }))
     vi.stubGlobal('fetch', fetchImpl)
     const view = render(<GraphView client={client} provider={provider} initialDocument={graph} />)
     const run = await screen.findByRole('button', { name: 'Run saved revision r7' })
     await waitFor(() => expect(run).toBeEnabled())
     fireEvent.click(run)
-    await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(resolveSubmission).toBeTypeOf('function'))
     localStorage.setItem('leaf.jwt', token('second-account'))
     view.rerender(<GraphView client={client} provider={provider} initialDocument={graph} />)
     await act(async () => resolveSubmission({ ok: true, status: 202,
       json: async () => ({ run_id: 'must-not-expose', state: 'queued' }) }))
     expect(labValueStore.getRun('must-not-expose')).toBeUndefined()
-    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(fetchImpl.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(1)
     localStorage.removeItem('leaf.jwt')
   })
 

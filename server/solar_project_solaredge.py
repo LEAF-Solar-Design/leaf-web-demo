@@ -250,7 +250,7 @@ def build_report(tenant, project_id, drawing_id, input_version_id, request):
             "request": {key: req[key] for key in ("alignment_tolerance", "selection_order")}, **core}
         prepared = sink.prepare(solar_artifacts.ArtifactOutput(report["counts"],
             reports.REPORT_MEDIA_TYPE, reports.REPORT_FILENAME, canonical_bytes(report)))
-        _record(context, prepared.meta, report)
+        _record(context, prepared.meta, report, review=True)
         _recheck(tenant, context)
         sink.finish(prepared)
         sink.commit()
@@ -279,7 +279,7 @@ def _load_report(context, artifact_id):
         req = _report_request({"source_artifact_id": source_meta["artifact_id"], **report["request"]})
         if meta["request_sha256"] != _request_sha(req, source_meta):
             _fail(tracking.REPORT_CORRUPT)
-        _record(context, meta, report)
+        _record(context, meta, report, review=True)
     except GraphValidationError:
         raise
     except (ValueError, TypeError, KeyError, IndexError, AttributeError, RecursionError):
@@ -287,17 +287,21 @@ def _load_report(context, artifact_id):
     return meta, report
 
 
-def _record(context, meta, report):
-    """Validate canonical provenance and every matching association, without coercion."""
+def _record(context, meta, report, *, review=False):
+    """Validate provenance and rows; only build/load may retain unresolved review rows.
+
+    Acceptance and historical accepted tracking use the strict default. A review
+    record is validation output only and must not be stored as accepted tracking.
+    """
     try:
-        return _validated_record(context, meta, report)
+        return _validated_record(context, meta, report, review=review)
     except GraphValidationError:
         raise
     except (ValueError, TypeError, KeyError, IndexError, AttributeError, RecursionError):
         _fail(tracking.REPORT_INVALID)
 
 
-def _validated_record(context, meta, report):
+def _validated_record(context, meta, report, *, review=False):
     _check(type(report) is dict and set(report) == _REPORT_KEYS and report["schema"] == REPORT_SCHEMA)
     _check(all(report[key] == value for key, value in _identity(context).items()), tracking.REPORT_STALE)
     graph = context.graph
@@ -317,11 +321,26 @@ def _validated_record(context, meta, report):
     _check(len(frame_of) <= tracking.MAX_PANELS)
     matches = report["matches"]
     _check(type(matches) is list and 0 < len(matches) <= len(frames))
-    matched, frame_rows = set(), []
+    if review:
+        _check(len(matches) == len(frames))
+    matched, seen, frame_rows = set(), set(), []
     for match in matches:
-        _check(type(match) is dict and set(match) == tracking._MATCH_KEYS)
+        _check(type(match) is dict)
+        unresolved = review and set(match) == tracking._MATCH_KEYS | {"status"}
+        _check(set(match) == tracking._MATCH_KEYS or unresolved)
         ref, candidates = match["frame_ref"], match["candidates"]
-        _check(tracking._text(ref, 100) and ref in frame_ids and ref not in matched)
+        _check(tracking._text(ref, 100) and ref in frame_ids and ref not in seen)
+        seen.add(ref)
+        if unresolved:
+            _check(match["status"] in ("unmatched", "ambiguous")
+                and all(match[key] is None for key in ("pdf_grid", "pdf_matrix", "pdf_sub_grid")))
+            _check(type(candidates) is list and len(candidates) <= reports.si.MAX_GRIDS
+                and all(tracking._int(c, 0, tracking.MAX_INDEX) for c in candidates)
+                and len(set(candidates)) == len(candidates)
+                and type(match["candidate_count"]) is int and match["candidate_count"] == len(candidates))
+            _check((match["status"] == "unmatched" and not candidates)
+                or (match["status"] == "ambiguous" and bool(candidates)))
+            continue
         _check(tracking._int(match["pdf_grid"], 0, tracking.MAX_INDEX)
             and tracking._int(match["pdf_matrix"], 0, tracking.MAX_INDEX)
             and tracking._int(match["pdf_sub_grid"], -1, tracking.MAX_INDEX))
@@ -353,6 +372,8 @@ def _validated_record(context, meta, report):
             _check(tracking._text(panel_ref, 100) and panel_ref in frame_of and panel_ref not in covered
                 and (kind == "bridge" or frame_of[panel_ref] == ref)
                 and type(handle_of[panel_ref]) is str and handle == handle_of[panel_ref].upper())
+            if review:
+                _check(frame_of[panel_ref] in matched)
             covered.add(panel_ref)
         rows.append({key: deepcopy(row[key]) for key in row if key != "panel_handles"})
     unassigned = report["unassigned_panel_refs"]
@@ -361,7 +382,7 @@ def _validated_record(context, meta, report):
         _check(tracking._text(ref, 100) and ref in frame_of and ref not in covered)
         covered.add(ref)
     _check(len(covered) == len(frame_of))
-    expected_counts = {"frames": len(frames), "matched_frames": len(matches),
+    expected_counts = {"frames": len(frames), "matched_frames": len(matched),
         "strings": len(strings), "assigned_panels": sum(len(row["panel_refs"]) for row in strings),
         "unassigned_panels": len(unassigned), "partial_strings": sum(row["partial"] for row in strings),
         "group_strings": sum(row["source"] == "group" for row in strings),
