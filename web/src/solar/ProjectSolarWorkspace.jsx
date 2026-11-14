@@ -5,6 +5,7 @@ import { canOpenSolarSettingsForm } from './solarSettingsWire.js'
 import ProjectSolarReadPanel, { PROJECT_SOLAR_WORKSPACE_LABELS, projectSolarWorkspaceReason } from './ProjectSolarReadPanel.jsx'
 import ProjectSolveReview, { ProjectSolarSchemaForm } from './ProjectSolveReview.jsx'
 import ProjectSolarEdgePanel from './ProjectSolarEdgePanel.jsx'
+import { ProjectSolarPreparedSolveForm } from './ProjectSolarPreparedSolveForm.jsx'
 
 const STEP_TOOLS = ['solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
   'solar-string-conductors', 'solar-assign-equipment']
@@ -345,7 +346,8 @@ export default function ProjectSolarWorkspace(props) {
   if (host === 'solve') {
     if (selected.name === 'solar-correct-string' || (selected.name === 'solar-solve-proposal' && !proposal)) {
       const kept = view.drafts.get(selected.name)
-      editor = <ProjectSolarSchemaForm key={selected.name} {...shared} tool={editorRow} isCurrent={scope.isCurrent}
+      const Form = selected.name === 'solar-solve-proposal' && editorRow.engine_op === 'solar_solve_proposal' ? ProjectSolarPreparedSolveForm : ProjectSolarSchemaForm
+      editor = <Form key={selected.name} {...shared} tool={editorRow} isCurrent={scope.isCurrent}
         projectOutcome={projectOutcome} submissionSignal={submissionSignal}
         draft={kept && sameOwner(kept, owner) && kept.schemaKey === schemaDeclaration(editorRow) ? kept.draft : undefined}
         onDraftChange={(draft) => {

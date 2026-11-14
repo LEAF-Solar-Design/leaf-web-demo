@@ -1,0 +1,11 @@
+# Project-bound rooftop Solve preparation
+
+Studio18 S03 reached saved original whole-roof grouping, but the Rooftop Solve form required a raw solver request and internal frame identifier. The production cloud-proposal catalog row now opens a saved-group form. It lists group names and panel counts, accepts an existing solver connection reference, and prepares the selected group's request from the server's saved graph immediately before submission.
+
+The existing authenticated context GET accepts `prepare_solve=true` for group choices, or `solve_frame=<id>` for one request. Default responses stay unchanged. Preparation validates the saved graph and digest, requires the current head and uses the existing measured request builder with the saved global length. It performs no write, broker call, grant resolution or credential operation. Existing admission still checks the submitted request against the exact graph/frame/revision. No route, authorization dependency, catalog grant or provider setting was added.
+
+The client checks preparation schema, graph revision/digest, selected frame and project context. A fresh read occurs on Run solve. Scope changes, refused preparation and mismatched metadata cannot submit. Existing unknown-outcome/no-resubmit custody, proposal review and explicit commit remain in place. Correction and generic non-cloud schemas retain their existing forms.
+
+This is one named-group proposal at a time. It does not implement a whole-roof batch, change the existing per-frame sizing ceiling, certify electrical limits, choose a provider identity, or establish LIVE acceptance. A solver reference must be independently verified for the current organization. Missing authority is reported; no reference is guessed or granted by this form.
+
+Source checks: Python context-route and split-request suites, 76 passed. Web prepared-form, existing review/workspace and project-client suites, 176 passed. Added checks cover read-only derivation, corrupt/stale/missing graph inputs, wrong project/drawing headers, stale frame/revision responses, late scope changes, production-row dispatch and no resubmit after an unknown outcome. Existing assertions remain; the composition import inventory adds the new form module.

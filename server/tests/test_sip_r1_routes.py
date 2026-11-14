@@ -76,6 +76,25 @@ def test_sip_r1_context_http_shape(http, memory):
     assert "holder_binding_id" not in response.text
 
 
+def test_context_solve_preparation_is_opt_in_and_scope_checked(http, memory, monkeypatch):
+    import solar_project_solve_preparation as preparation
+    calls = []
+    def prepare(intake, frame_ref, *, is_head):
+        calls.append((intake, frame_ref, is_head))
+        return {"available": True, "frame_ref": frame_ref}
+    monkeypatch.setattr(preparation, "prepare_solve", prepare)
+    assert "solve_preparation" not in http.get(CONTEXT).json()
+    assert calls == []
+    response = http.get(CONTEXT, params={"solve_frame": "frame-1"})
+    assert response.status_code == 200
+    assert response.json()["solve_preparation"] == {"available": True, "frame_ref": "frame-1"}
+    assert calls == [({}, "frame-1", True)]
+    calls.clear()
+    reason(http.get(CONTEXT, params={"prepare_solve": True}, headers={"X-Org-Id": str(O2)}), 404, "CONTEXT_NOT_FOUND")
+    reason(http.get(CONTEXT, params={"solve_frame": "frame-1", "drawing_id": str(D2)}), 404, "CONTEXT_NOT_FOUND")
+    assert calls == [] and memory.mutations == []
+
+
 def test_sip_r1_status_without_checkout(http, memory):
     response = http.get(CHECKOUT)
     assert response.status_code == 200 and response.json()["checkout"] is None
