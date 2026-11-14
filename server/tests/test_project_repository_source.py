@@ -235,3 +235,53 @@ def test_export_does_not_create_missing_repository(export_configured, monkeypatc
     with pytest.raises(source.SourceConflict):
         export()
     assert not export_configured[2]
+
+
+@pytest.mark.parametrize('failure,expected,status', [
+    ('binding', 'initialize_binding', None), ('authority', 'initialize_authority', None),
+    ('http', 'initialize_http', 503), ('transport', 'initialize_transport', None),
+    ('json', 'initialize_response', None), ('response', 'initialize_response', None),
+])
+def test_initializer_retains_only_safe_subphase(configured, monkeypatch, failure, expected, status):
+    import project_author_diagnostics as diagnostics
+    if failure == 'binding':
+        monkeypatch.setattr(source.broker_client, 'harness_headers', lambda: {})
+    elif failure == 'authority':
+        def unavailable(*args): raise RuntimeError('fixture-private-authority')
+        monkeypatch.setattr(source.platform_link, 'platform_store', unavailable)
+    elif failure == 'transport':
+        def unavailable(*args, **kwargs): raise requests.Timeout('fixture-private-endpoint')
+        monkeypatch.setattr(source.requests, 'post', unavailable)
+    else:
+        def post(*args, **kwargs):
+            response = configured[1](*args, **kwargs)
+            if failure == 'http': response.status_code = 503
+            elif failure == 'json':
+                def invalid(**kwargs): raise ValueError('fixture-private-json')
+                response.json = invalid
+            elif failure == 'response': response.json = lambda **kwargs: {'fixture-private': 'value'}
+            return response
+        monkeypatch.setattr(source.requests, 'post', post)
+    token = diagnostics.begin()
+    try:
+        with pytest.raises(source.SourceUnavailable, match='^source is unavailable$'):
+            source.initialize_project_source(ORG, ORG, PROJECT, PROMPT)
+        captured = diagnostics.snapshot()
+        assert captured == dict(author_subphase=expected, **({'author_http_status': status} if status else {}))
+        assert 'fixture-private' not in json.dumps(captured)
+    finally:
+        diagnostics.end(token)
+    assert diagnostics.snapshot() == {}
+
+
+def test_success_and_conflict_do_not_invent_failure_metadata(configured, monkeypatch):
+    import project_author_diagnostics as diagnostics
+    token = diagnostics.begin()
+    try:
+        source.initialize_project_source(ORG, ORG, PROJECT, PROMPT)
+        assert diagnostics.snapshot() == {}
+        monkeypatch.setattr(source.requests, 'post', lambda *a, **k: SimpleNamespace(status_code=409))
+        with pytest.raises(source.SourceConflict): source.initialize_project_source(ORG, ORG, PROJECT, PROMPT)
+        assert diagnostics.snapshot() == {}
+    finally:
+        diagnostics.end(token)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import uuid
@@ -14,6 +15,7 @@ import broker_client
 import browser_project_authoring as authoring
 import deps
 import platform_link
+import project_author_diagnostics as author_diagnostics
 import project_material_inspection as inspection
 import session_store
 import turn_runner
@@ -612,6 +614,7 @@ def mutate(tenant, project_id, session_id, turn_id, action, edit_id, body, *, so
     phase = 'authority_recheck'
     failure_status, failure_code = 503, 'service_unavailable'
     correlation_id = str(uuid.uuid4())
+    diagnostic_token = author_diagnostics.begin()
     try:
         recheck()
         if action in ('create', 'edit'):
@@ -678,10 +681,21 @@ def mutate(tenant, project_id, session_id, turn_id, action, edit_id, body, *, so
             if not success and not known_refusal:
                 session_store.append_event(session_id, turn_id, 'browser_source_error', dict(
                     source_request_id=edit_id, phase=phase, code=failure_code, status=failure_status,
-                    correlation_id=correlation_id,
+                    correlation_id=correlation_id, **author_diagnostics.snapshot(),
                     text='Source outcome unavailable. Review the saved source state before retrying.'))
+                # Fixed metadata only: private exception text and source never enter logs.
+                try:
+                    logging.getLogger(__name__).warning(json.dumps(dict(
+                        event='project_author_failure', project_id=project_id,
+                        source_request_id=edit_id, correlation_id=correlation_id,
+                        phase=phase, code=failure_code, status=failure_status,
+                        **author_diagnostics.snapshot()), sort_keys=True))
+                except Exception:
+                    pass  # Diagnostics must not prevent the existing finish operation.
             recheck()
             turn_runner.finish_stage_authority(current[0], session_id, turn_id, subject,
                 stop_reason='browser_source_complete' if success else 'browser_source_unavailable')
         except Exception:
             pass
+        finally:
+            author_diagnostics.end(diagnostic_token)

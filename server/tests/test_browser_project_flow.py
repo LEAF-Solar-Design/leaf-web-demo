@@ -512,3 +512,79 @@ def test_forward_diagnostic_unknown_failure_is_generic_and_secret_free(lane, mon
     assert uuid.UUID(data['correlation_id']).version == 4
     assert 'fixture-private' not in json.dumps(data)
     assert lane.rows == {} and lane.finished == ['turn']
+
+
+@pytest.mark.parametrize('subphase,status', [('initialize_http', 503), ('initialize_authority', None)])
+def test_subphase_and_correlated_warning_preserve_failure_contract(lane, monkeypatch, caplog, subphase, status):
+    import project_author_diagnostics as diagnostics
+    def fail(*args, **kwargs):
+        diagnostics.record_failure(subphase, http_status=status)
+        error = flow.authoring.AuthoringError('author_unavailable')
+        error.args = ('fixture-private-author-error',)
+        raise error
+    monkeypatch.setattr(flow.authoring, 'author', fail)
+    with pytest.raises(flow.FlowError) as caught: execute()
+    assert caught.value.status == 503
+    data = [event['data'] for event in lane.events if event['type'] == 'browser_source_error'][0]
+    assert data['author_subphase'] == subphase
+    assert data['phase'] == 'stage' and data['code'] == 'author_unavailable' and data['status'] == 503
+    assert data.get('author_http_status') == status
+    records = [record for record in caplog.records if record.name == 'browser_project_flow']
+    assert len(records) == 1
+    logged = json.loads(records[0].getMessage())
+    assert set(logged) == {'event','project_id','source_request_id','correlation_id','phase','code','status','author_subphase'} | ({'author_http_status'} if status else set())
+    assert logged['event'] == 'project_author_failure'
+    assert logged['source_request_id'] == EDIT and logged['project_id'] == PROJECT
+    assert logged['correlation_id'] == data['correlation_id'] and logged['author_subphase'] == subphase
+    assert 'fixture-private' not in json.dumps(data) + records[0].getMessage()
+    assert BODY['requirements'] not in records[0].getMessage()
+    assert lane.finished == ['turn'] and diagnostics.snapshot() == {}
+
+
+def test_diagnostic_context_is_closed_and_nested():
+    import project_author_diagnostics as diagnostics
+    diagnostics.record_failure('author_http', http_status=503)
+    assert diagnostics.snapshot() == {}
+    outer = diagnostics.begin()
+    try:
+        diagnostics.record_failure('initialize_http', http_status=502)
+        diagnostics.record_failure('author_transport')
+        assert diagnostics.snapshot() == dict(author_subphase='initialize_http', author_http_status=502)
+        inner = diagnostics.begin()
+        try:
+            diagnostics.record_failure('fixture-private')
+            assert diagnostics.snapshot() == {}
+            diagnostics.record_failure('author_http', http_status='fixture-private')
+            assert diagnostics.snapshot() == dict(author_subphase='author_http')
+        finally:
+            diagnostics.end(inner)
+        assert diagnostics.snapshot() == dict(author_subphase='initialize_http', author_http_status=502)
+    finally:
+        diagnostics.end(outer)
+    assert diagnostics.snapshot() == {}
+
+
+def test_diagnostic_context_isolated_between_threads_and_copied_contexts():
+    import concurrent.futures
+    import contextvars
+    import project_author_diagnostics as diagnostics
+    barrier = threading.Barrier(2)
+    def isolated(subphase):
+        token = diagnostics.begin()
+        try:
+            diagnostics.record_failure(subphase)
+            barrier.wait(timeout=5)
+            return diagnostics.snapshot()
+        finally:
+            diagnostics.end(token)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(isolated, name) for name in ('author_http','initialize_http')]
+        assert [f.result() for f in futures] == [dict(author_subphase=name) for name in ('author_http','initialize_http')]
+    token = diagnostics.begin()
+    try:
+        child = contextvars.copy_context()
+        child.run(diagnostics.record_failure, 'author_http', http_status=500)
+        assert child.run(diagnostics.snapshot) == dict(author_subphase='author_http', author_http_status=500)
+        assert diagnostics.snapshot() == {}
+    finally:
+        diagnostics.end(token)
