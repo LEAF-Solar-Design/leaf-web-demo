@@ -118,6 +118,67 @@ def call(lane):
     return authoring.author(lane.tenant, PROJECT, lane.request, cancelled=lambda: lane.cancelled)
 
 
+@pytest.mark.parametrize('kind, expected', [
+    ('initialization', 'initialization'), ('missing_url', 'missing_binding'),
+    ('missing_headers', 'missing_binding'), ('http', 'author_http'),
+    ('json', 'author_response'), ('oversize', 'author_response'),
+    ('transport', 'transport'),
+])
+def test_unavailable_author_has_safe_subphase_and_preserves_cleanup(lane, monkeypatch, kind, expected):
+    detail = 'private failure detail must not escape'
+    closed = []
+    if kind == 'initialization':
+        def initialize(*args):
+            raise RuntimeError(detail)
+        monkeypatch.setattr(authoring.source, 'initialize_project_source', initialize)
+    elif kind == 'missing_url':
+        monkeypatch.delenv('LEAF_AUTHOR_HARNESS_URL', raising=False)
+    elif kind == 'missing_headers':
+        monkeypatch.setattr(authoring.broker_client, 'harness_headers', lambda: {})
+    elif kind == 'transport':
+        def post(*args, **kwargs):
+            raise authoring.requests.Timeout(detail)
+        monkeypatch.setattr(authoring.requests, 'post', post)
+    else:
+        original_post = authoring.requests.post
+        def post(*args, **kwargs):
+            response = original_post(*args, **kwargs)
+            response.close = lambda: closed.append(True)
+            if kind == 'json':
+                def invalid_json(**kwargs):
+                    raise ValueError(detail)
+                response.json = invalid_json
+            if kind == 'oversize':
+                response.content = b'x' * (256 * 1024 + 1)
+            return response
+        monkeypatch.setattr(authoring.requests, 'post', post)
+        if kind == 'http':
+            lane.response_status = 502
+    with pytest.raises(authoring.AuthoringError) as caught:
+        if kind == 'oversize':
+            authoring.author(lane.tenant, PROJECT, lane.request, source_profile=authoring.NATIVE_PROFILE)
+        else:
+            call(lane)
+    error = caught.value
+    assert error.code == 'author_unavailable' and error.status == 503
+    assert str(error) == 'Project author service is unavailable.'
+    assert error.author_subphase == expected
+    assert detail not in repr(vars(error))
+    assert closed == ([True] if kind in {'http', 'json', 'oversize'} else [])
+    assert len(lane.posts) == (1 if kind in {'http', 'json', 'oversize'} else 0)
+
+
+@pytest.mark.parametrize('subphase', ['initialization', 'missing_binding', 'author_http',
+                                   'author_response', 'transport', 'unknown', None, 503, []])
+def test_author_subphase_is_closed_and_only_for_unavailable(subphase):
+    error = authoring.AuthoringError('author_unavailable', author_subphase=subphase)
+    allowed = isinstance(subphase, str) and subphase in {
+        'initialization', 'missing_binding', 'author_http', 'author_response', 'transport'}
+    assert error.author_subphase == (subphase if allowed else None)
+    other = authoring.AuthoringError('source_changed', author_subphase=subphase)
+    assert other.status == 409 and other.author_subphase is None
+
+
 @pytest.mark.parametrize('operation', ['create', 'edit'])
 def test_native_edit_consumer_web_helper_only_parity(lane, operation):
     lane.request.update(source_operation=operation, material_refs=[])
