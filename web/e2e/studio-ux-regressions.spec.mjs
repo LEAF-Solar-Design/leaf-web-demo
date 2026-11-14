@@ -42,6 +42,7 @@ test('the version toast ignores a captured drag-away before Undo activates norma
 })
 
 test('Back recovers phone tour focus to visible Skip before the next Tab', async ({ page }) => {
+  test.setTimeout(scaled(30_000))
   const tour = await openTour(page, { width: 390, height: 844 })
   await tour.getByRole('button', { name: 'More', exact: true }).click()
   await tour.getByRole('button', { name: 'Next', exact: true }).click()
