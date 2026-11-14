@@ -588,3 +588,39 @@ def test_diagnostic_context_isolated_between_threads_and_copied_contexts():
         assert diagnostics.snapshot() == {}
     finally:
         diagnostics.end(token)
+
+
+@pytest.mark.parametrize('subphase', ['initialization','missing_binding','author_http','author_response','transport'])
+def test_closed_optional_author_subphase_attribute(lane, monkeypatch, subphase):
+    def fail(*args, **kwargs):
+        error = flow.authoring.AuthoringError('author_unavailable')
+        error.author_subphase = subphase
+        raise error
+    monkeypatch.setattr(flow.authoring, 'author', fail)
+    with pytest.raises(flow.FlowError): execute()
+    data = [event['data'] for event in lane.events if event['type'] == 'browser_source_error'][0]
+    assert data['author_subphase'] == subphase
+    assert data['status'] == 503 and data['code'] == 'author_unavailable'
+
+
+@pytest.mark.parametrize('code,subphase', [('author_unavailable','fixture-private-text'),
+    ('invalid_request','author_http'), ('cancelled','transport')])
+def test_unknown_or_noncanonical_author_subphase_is_not_retained(lane, monkeypatch, code, subphase):
+    def fail(*args, **kwargs):
+        error = flow.authoring.AuthoringError(code); error.author_subphase = subphase; raise error
+    monkeypatch.setattr(flow.authoring, 'author', fail)
+    with pytest.raises(flow.FlowError): execute()
+    data = [event['data'] for event in lane.events if event['type'] == 'browser_source_error'][0]
+    assert 'author_subphase' not in data and 'author_http_status' not in data
+    assert 'fixture-private' not in json.dumps(data)
+
+
+def test_initializer_evidence_precedes_optional_coarse_author_attribution(lane, monkeypatch):
+    import project_author_diagnostics as diagnostics
+    def fail(*args, **kwargs):
+        diagnostics.record_failure('initialize_http', http_status=502)
+        error = flow.authoring.AuthoringError('author_unavailable'); error.author_subphase = 'initialization'; raise error
+    monkeypatch.setattr(flow.authoring, 'author', fail)
+    with pytest.raises(flow.FlowError): execute()
+    data = [event['data'] for event in lane.events if event['type'] == 'browser_source_error'][0]
+    assert data['author_subphase'] == 'initialize_http' and data['author_http_status'] == 502

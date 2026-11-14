@@ -6,7 +6,7 @@ _failure = ContextVar('project_author_failure', default=_INACTIVE)
 _SUBPHASES = frozenset({
     'initialize_binding', 'initialize_authority', 'initialize_http',
     'initialize_transport', 'initialize_response',
-    'author_binding', 'author_http', 'author_transport', 'author_response',
+    'initialization', 'missing_binding', 'author_http', 'author_response', 'transport',
 })
 
 
