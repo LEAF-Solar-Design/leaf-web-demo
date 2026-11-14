@@ -180,7 +180,7 @@ def test_admission_both_entitlement_checks(admitted, monkeypatch):
     assert "private-test-token" not in repr(a.accepted)
 
 
-@pytest.mark.parametrize("field", ["proposals", "proofs", "split_state"])
+@pytest.mark.parametrize("field", ["proposals", "proofs", "split_state", "pieces", "row_indices"])
 def test_split_precedes_schema(admitted, field):
     admitted.params = {field: [{}]}
     result = request(admitted, preview=False)
@@ -207,6 +207,27 @@ def test_solve_context_in_fingerprint(admitted, monkeypatch):
     changed = {**a.solve_context, "phase": "background"}
     result = request(a, solve_context=changed, preview=False)
     assert result["content"]["error"]["reason_code"] == "SIP_R4_IDEMPOTENCY_CONFLICT"
+
+
+def test_split_admission_replays_same_principal_without_reinsertion(admitted, monkeypatch):
+    from test_w1_solve_split import group_graph
+    from solar_solve_request import build_stringer_request
+    a = admitted
+    value, _ = group_graph(a.context.graph, {"group_grid": [
+        [f"generated-{r}-{c}" for c in range(16)] for r in range(16)]})
+    value["settings"]["panels_in_sequence"] = 14
+    value = ready_graph(value)
+    a.s.set_parent(b3.embedded(value))
+    a.params = {"grant_ref": "g1", "request": build_stringer_request(value,
+        value["frames"][0]["id"], max_string_length=14, dwgname="synthetic-frame")}
+    a.solve_context = solve_context(value)
+    assert request(a, preview=False)["status_code"] == 202
+    saved = a.accepted[-1][-1]
+    inserted = len(a.accepted)
+    monkeypatch.setattr(jobs, "get_project_graph_job_by_key", lambda *args, **kwargs:
+        {"job_id": "saved-split", "deleted_at": None, **saved})
+    assert request(a, preview=False)["content"]["job_id"] == "saved-split"
+    assert len(a.accepted) == inserted
 
 
 def test_background_requires_initial(admitted):

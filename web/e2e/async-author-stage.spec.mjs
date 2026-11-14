@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test'
 import { AUTHORED_TOOL, catProofResponse, makeCatProofState } from './catProofFixture.mjs'
+import { scaled } from './timeScale.mjs'
 
 const SURFACES = [
   { name: 'unified surface', path: '/try?proof=1' },
@@ -8,7 +9,7 @@ const SURFACES = [
 
 for (const surface of SURFACES) {
   test(`${surface.name} resumes one exact authored revision after reload`, async ({ page }) => {
-    test.setTimeout(90_000)
+    test.setTimeout(scaled(90_000))
     const proofState = makeCatProofState()
     proofState.authorPublished = true
     const submissions = []
@@ -116,7 +117,7 @@ for (const surface of SURFACES) {
     if (!surface.railButton) await catalogTab.click()
     // Opening Studio reveals the tool rail within the floating panel.
     const customFamily = page.getByRole('button', { name: /Custom authored tools/ })
-    await expect(customFamily).toBeVisible({ timeout: 15_000 })
+    await expect(customFamily).toBeVisible({ timeout: scaled(15_000) })
     if (await customFamily.getAttribute('aria-expanded') === 'false') await customFamily.click()
     const toolCard = page.locator('.tool-card').filter({ hasText: AUTHORED_TOOL.name })
     await toolCard.locator('.tool-head').click()
@@ -125,7 +126,7 @@ for (const surface of SURFACES) {
     await expect(page.getByLabel('Tool to revise')).toHaveValue(AUTHORED_TOOL.name)
     await page.getByLabel('What should the tool do?').fill('repair its generated geometry without creating a duplicate')
     await page.getByRole('button', { name: 'Generate revision' }).click()
-    await expect(page.getByText(/authoring tool source/i)).toBeVisible({ timeout: 10_000 })
+    await expect(page.getByText(/authoring tool source/i)).toBeVisible({ timeout: scaled(10_000) })
     await expect.poll(() => submissions.length).toBe(1)
     const pointerBeforeReload = await page.evaluate(() => JSON.parse(localStorage.getItem('leaf.inflightAuthor.v1')))
     expect(pointerBeforeReload).toMatchObject({
@@ -139,13 +140,13 @@ for (const surface of SURFACES) {
     const readsBeforeReload = pollReads
     await page.reload()
     if (surface.railButton) await page.getByRole('navigation', { name: 'Workspace controls' }).getByRole('button', { name: 'Studio', exact: true }).click()
-    await expect(page.getByLabel('Tool to revise')).toHaveValue(AUTHORED_TOOL.name, { timeout: 15_000 })
+    await expect(page.getByLabel('Tool to revise')).toHaveValue(AUTHORED_TOOL.name, { timeout: scaled(15_000) })
     await expect(page.getByText(/Reconnecting to authoring|Authoring with the agent/)).toBeVisible()
     await expect.poll(() => pollReads).toBeGreaterThan(readsBeforeReload)
     expect(submissions).toHaveLength(1)
 
     mayComplete = true
-    await expect(page.locator('.authored')).toContainText('Repaired the exact existing custom tool.', { timeout: 10_000 })
+    await expect(page.locator('.authored')).toContainText('Repaired the exact existing custom tool.', { timeout: scaled(10_000) })
     expect(submissions).toHaveLength(1)
     expect(submissions[0]).toMatchObject({
       target_tool_name: AUTHORED_TOOL.name,
@@ -157,7 +158,7 @@ for (const surface of SURFACES) {
 
     await page.reload()
     if (surface.railButton) await page.getByRole('navigation', { name: 'Workspace controls' }).getByRole('button', { name: 'Studio', exact: true }).click()
-    await expect(page.locator('.authored')).toContainText('Repaired the exact existing custom tool.', { timeout: 30_000 })
+    await expect(page.locator('.authored')).toContainText('Repaired the exact existing custom tool.', { timeout: scaled(30_000) })
     const terminalPointer = await page.evaluate(() => JSON.parse(localStorage.getItem('leaf.inflightAuthor.v1')))
     expect(terminalPointer).toMatchObject({
       idempotency_key: submissions[0].idempotency_key,
@@ -286,7 +287,7 @@ test('a lost acceptance response recovers the exact revision without resubmittin
   })
 
   await page.goto('/try?proof=1')
-  await expect(page.locator('.authored')).toContainText('Recovered the accepted revision', { timeout: 15_000 })
+  await expect(page.locator('.authored')).toContainText('Recovered the accepted revision', { timeout: scaled(15_000) })
   expect(submissions).toHaveLength(0)
   expect(recoveries).toEqual([{ idempotency_key: saved.idempotency_key }])
   expect(recoverySequence).toEqual(['recover', 'poll'])
@@ -355,7 +356,7 @@ test('a bounded failed poll preserves its identity across reload without staging
   })
 
   await page.goto('/try?proof=1')
-  await expect(page.getByText(/Generated source did not pass validation/)).toBeVisible({ timeout: 15_000 })
+  await expect(page.getByText(/Generated source did not pass validation/)).toBeVisible({ timeout: scaled(15_000) })
   await expect(page.locator('.authored')).toHaveCount(0)
   expect(submissions).toBe(0)
   const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('leaf.inflightAuthor.v1')))
@@ -365,7 +366,7 @@ test('a bounded failed poll preserves its identity across reload without staging
   })
   const pollsBeforeReload = polls
   await page.reload()
-  await expect(page.getByRole('button', { name: 'Check status' })).toBeVisible({ timeout: 15_000 })
+  await expect(page.getByRole('button', { name: 'Check status' })).toBeVisible({ timeout: scaled(15_000) })
   await expect(page.getByText('Authoring failed. Your request is saved for recovery.')).toBeVisible()
   expect(polls).toBe(pollsBeforeReload)
   expect(submissions).toBe(0)
@@ -443,7 +444,7 @@ test('a harness job failure surfaces the server reason instead of eternal pendin
   // The terminal failure reaches the operator as a red failure carrying the
   // server's reason string — not silence, not an eternal authoring spinner,
   // and not the calm "temporarily unavailable" gate.
-  await expect(page.getByText(/Agent SDK auth failure: oauth_org_not_allowed/)).toBeVisible({ timeout: 15_000 })
+  await expect(page.getByText(/Agent SDK auth failure: oauth_org_not_allowed/)).toBeVisible({ timeout: scaled(15_000) })
   await expect(page.getByText(/author the tool/)).toBeVisible()
   await expect(page.getByText(/Authoring service is temporarily unavailable/)).toHaveCount(0)
   await expect(page.getByText(/Authoring with the agent/)).toHaveCount(0)
@@ -494,7 +495,7 @@ test('a cross-origin poll URL is rejected without forwarding account authority',
   await page.getByRole('tab', { name: 'Author' }).click()
   await page.getByLabel('What should the tool do?').fill('make a safe read-only inspection tool')
   await page.getByRole('button', { name: 'Generate tool' }).click()
-  await expect(page.getByText(/invalid status address/)).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByText(/invalid status address/)).toBeVisible({ timeout: scaled(10_000) })
   expect(foreignRequests).toBe(0)
   await expect.poll(() => page.evaluate(() => localStorage.getItem('leaf.inflightAuthor.v1'))).toBeNull()
 })
@@ -533,7 +534,7 @@ for (const invalid of [
       })
     })
     await page.goto('/try?proof=1')
-    await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
+    await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: scaled(15_000) })
     expect(authorRequests).toBe(0)
     await expect.poll(() => page.evaluate(() => localStorage.getItem('leaf.inflightAuthor.v1'))).toBeNull()
   })
@@ -593,7 +594,7 @@ for (const invalid of [
       })
     })
     await page.goto('/try?proof=1')
-    await expect(page.getByText(/invalid status address|did not match the accepted change set/)).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByText(/invalid status address|did not match the accepted change set/)).toBeVisible({ timeout: scaled(15_000) })
     expect(wrongPathReads).toBe(0)
     await expect(page.locator('.authored')).toHaveCount(0)
     await expect.poll(() => page.evaluate(() => localStorage.getItem('leaf.inflightAuthor.v1'))).toBeNull()
@@ -639,7 +640,7 @@ test('the direct stage POST carries turn authority minted from a live session', 
   await page.getByRole('tab', { name: 'Author' }).click()
   await page.getByLabel('What should the tool do?').fill('count panels within 24in of the roof edge')
   await page.getByRole('button', { name: 'Generate tool' }).click()
-  await expect(page.locator('.authored')).toContainText(AUTHORED_TOOL.name, { timeout: 15_000 })
+  await expect(page.locator('.authored')).toContainText(AUTHORED_TOOL.name, { timeout: scaled(15_000) })
 
   expect(stageHeaders).toHaveLength(1)
   // The fixture's POST /api/sessions -> {session_id: 'cat-session'} then

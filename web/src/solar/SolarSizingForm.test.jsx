@@ -1,3 +1,4 @@
+import { scaleTimeout } from '../testTimeScale.js'
 import React from 'react'
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -843,7 +844,7 @@ describe('SolarSizingForm', () => {
         hook.unmount()
       }
     }
-  }, 30000)
+  }, scaleTimeout(30000))
 
   it('R14D-03 test_missing_grant_keeps_cloud_mode', async () => {
     for (const phase of ['preview', 'submission']) {

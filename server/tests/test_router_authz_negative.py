@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,6 +21,7 @@ import lab_layouts  # noqa: E402
 import lab_run_store as run_store  # noqa: E402
 import tenancy  # noqa: E402
 from routers import deployment_identity, lab_activation, lab_artifacts, lab_router, lab_runs, lab_stream, lab_widgets  # noqa: E402
+from routers import integration_browser
 from route_flatten import iter_leaf_routes  # noqa: E402
 from test_auth import _ENV, bearer, mint  # noqa: E402
 
@@ -35,6 +37,7 @@ LAB_CASES = [
     pytest.param("GET", "head", None, 404, id="head"),
     pytest.param("GET", "revisions", None, 404, id="revisions"),
     pytest.param("GET", "revisions/1", None, 404, id="revision"),
+    pytest.param("GET", "revisions/1/export", None, 404, id="export"),
     pytest.param("GET", "diff?before=1&after=2", None, 404, id="diff"),
     pytest.param("POST", "restore", {"revision": 1, "expected_head": 2}, 404,
                  id="restore"),
@@ -45,6 +48,7 @@ RUN_CASES = [
     ("GET", "/private-run", None),
     ("GET", "/private-run/events", None),
     ("POST", "/private-run/cancel", None),
+    pytest.param("GET", f"?doc_id={DOC}", None, id="recent-runs"),
     ("POST", "/worker/pause", {"reason": "maintenance"}),
     ("POST", "/worker/resume", None),
     pytest.param("GET", "/corpus-options", None, id="corpus-options"),
@@ -186,6 +190,14 @@ def test_activation_owner_controls_and_http_errors(client, monkeypatch):
 
 
 def test_route_inventory_is_complete():
+    assert {(method, path)
+            for path, route in iter_leaf_routes(integration_browser.router.routes)
+            for method in route.methods} == {
+        ("GET", "/api/v1/projects/{project_id}/scope"),
+        ("GET", "/api/v1/projects/{project_id}/integrations/{resource:path}"),
+        ("POST", "/api/v1/projects/{project_id}/integrations/{resource:path}"),
+        ("PUT", "/api/v1/projects/{project_id}/integrations/{resource:path}"),
+    }
     # Pin the surface so adding a route requires adding its negative cases.
     assert {(method, path)
             for path, route in iter_leaf_routes(lab_activation.router.routes)
@@ -206,6 +218,7 @@ def test_route_inventory_is_complete():
             for path, route in iter_leaf_routes(lab_runs.router.routes)
             for method in route.methods} == {
         ("POST", "/api/lab/runs"),
+        ("GET", "/api/lab/runs"),
         ("GET", "/api/lab/runs/corpus-options"),
         ("GET", "/api/lab/runs/{run_id}"),
         ("GET", "/api/lab/runs/{run_id}/events"),
@@ -225,6 +238,7 @@ def test_route_inventory_is_complete():
         ("GET", "/api/lab/docs/{doc_id}/head"),
         ("GET", "/api/lab/docs/{doc_id}/revisions"),
         ("GET", "/api/lab/docs/{doc_id}/revisions/{revision}"),
+        ("GET", "/api/lab/docs/{doc_id}/revisions/{revision}/export"),
         ("GET", "/api/lab/docs/{doc_id}/diff"),
         ("POST", "/api/lab/docs/{doc_id}/restore"),
         ("POST", "/api/lab/docs/{doc_id}/publish"),
@@ -301,7 +315,7 @@ def test_runs_admission_precedes_storage(client, monkeypatch, method, suffix, bo
     assert MARKER not in response.text
 
 
-@pytest.mark.parametrize("method,suffix,body", RUN_CASES[:4])
+@pytest.mark.parametrize("method,suffix,body", RUN_CASES[:5])
 def test_runs_foreign_tenant_is_not_found(client, owner, method, suffix, body):
     row = run_store.create("tenant-a", DOC, "private-run", 2, "a" * 64, "lab-ops.v1",
                            "b" * 64, "lab-worker.v1", "abc1234")
@@ -312,6 +326,73 @@ def test_runs_foreign_tenant_is_not_found(client, owner, method, suffix, body):
     assert run_store.get("tenant-a", "private-run") == row
     db, before = owner
     assert _owner_snapshot(db) == before
+
+
+@pytest.mark.parametrize("foreign_tenant,foreign_actor,foreign_project", [
+    pytest.param("tenant-b", "auth0|run-owner", "project-a", id="other-tenant"),
+    pytest.param("tenant-a", "auth0|other-member", "project-a", id="other-account"),
+    pytest.param("tenant-a", "auth0|run-owner", "project-b", id="other-project"),
+])
+def test_recent_runs_isolate_authority_and_recheck_membership(
+    client, monkeypatch, foreign_tenant, foreign_actor, foreign_project,
+):
+    lab_runs.platform_link._ensure_platform_package()
+    from leaf_platform import project_lifecycle
+
+    owner_scope = ("tenant-a", "auth0|run-owner", "project-a")
+    foreign_scope = (foreign_tenant, foreign_actor, foreign_project)
+    memberships = {owner_scope, foreign_scope}
+    active_tenants = {}
+    monkeypatch.setattr(deps, "resolve_active_platform_tenant_authority",
+                        lambda subject: (active_tenants[subject], "hosted_pro"))
+    monkeypatch.setattr(lab_runs.platform_link, "platform_store", lambda: SimpleNamespace(
+        resolve_active_identity_binding=lambda provider, subject: SimpleNamespace(
+            platform_tenant_id=active_tenants[subject], binding_id=subject)))
+
+    def require_role(tenant, project, actor, *, write):
+        assert write is False
+        if (tenant, actor, project) not in memberships:
+            raise project_lifecycle.LifecycleForbidden("not a project member")
+        return "read_only"
+
+    monkeypatch.setattr(project_lifecycle, "require_project_role", require_role)
+    # Empty graphs need no tool catalog; identity, admission, receipts and run
+    # queries still go through the real HTTP path and SQLite stores.
+    monkeypatch.setattr(lab_runs.lab_tool_manifests, "registry_for", lambda tenant: {})
+
+    def headers(tenant, actor):
+        active_tenants[actor] = tenant
+        return {"X-Tenant-Id": tenant, "Authorization": bearer(mint(
+            tenant_id=tenant, extra_claims={"sub": actor}))}
+
+    graph = {"schema": "leaf.lab-graph.v1", "blocks": [], "pipes": [], "outputs": {}}
+    for tenant in {"tenant-a", foreign_tenant}:
+        ledger.save(tenant, DOC, graph, None, "owner")
+    runs = []
+    for tenant, actor, project in (owner_scope, foreign_scope):
+        submission = f"v1.{int(run_store._now().timestamp() * 1000)}.{uuid.uuid4().hex}"
+        response = client.post("/api/lab/runs", headers=headers(tenant, actor), json={
+            "doc_id": DOC, "graph_revision": 1, "project_id": project,
+            "submission_id": submission,
+        })
+        assert response.status_code == 202, response.text
+        runs.append(response.json()["run_id"])
+
+    # Both records are discoverable in their own scope, so an always-empty
+    # response cannot satisfy the isolation checks.
+    for scope, run_id in ((foreign_scope, runs[1]), (owner_scope, runs[0])):
+        tenant, actor, project = scope
+        response = client.get("/api/lab/runs", headers=headers(tenant, actor),
+                              params={"doc_id": DOC, "project_id": project})
+        assert response.status_code == 200, response.text
+        assert [row["run_id"] for row in response.json()["runs"]] == [run_id]
+
+    memberships.remove(owner_scope)
+    response = client.get("/api/lab/runs", headers=headers(*owner_scope[:2]),
+                          params={"doc_id": DOC, "project_id": owner_scope[2]})
+    assert response.status_code == 422, response.text
+    assert response.json() == {"detail": "lab_corpus_project_refused"}
+    assert all(run_id not in response.text for run_id in runs)
 
 
 @pytest.mark.parametrize("mode,status", [
@@ -545,3 +626,21 @@ def test_lab_parent_guards_precede_tenant_and_storage(
     assert MARKER not in response.text
     db, before = owner
     assert _owner_snapshot(db) == before
+
+
+@pytest.mark.parametrize("method,path", [
+    ("GET", "/api/v1/projects/11111111-1111-4111-8111-111111111111/scope"),
+    ("GET", "/api/v1/projects/11111111-1111-4111-8111-111111111111/integrations/elements"),
+    ("POST", "/api/v1/projects/11111111-1111-4111-8111-111111111111/integrations/elements"),
+    ("PUT", "/api/v1/projects/11111111-1111-4111-8111-111111111111/integrations/elements/fixture-view"),
+])
+def test_integration_bridge_refuses_unauthenticated(client, monkeypatch, method, path):
+    def forbidden():
+        pytest.fail("unauthenticated integration bridge reached upstream")
+    monkeypatch.setattr(integration_browser, "_client", forbidden)
+    bridge_app = FastAPI()
+    bridge_app.include_router(integration_browser.router)
+    with TestClient(bridge_app, raise_server_exceptions=False) as http:
+        response = http.request(method, path, headers={},
+                                json={} if method in {"POST", "PUT"} else None)
+    assert response.status_code == 401, response.text

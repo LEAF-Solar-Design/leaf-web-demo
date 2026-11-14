@@ -14,8 +14,8 @@ import { labArtifactsClient } from '../history/labArtifactsClient.js'
 import AfterSavePanel from '../history/AfterSavePanel.jsx'
 import { createAfterSaveClient } from '../history/afterSaveClient.js'
 import { canonicalJSON } from '../contract.js'
-import { labValueStore, terminalState, useBlockValue, useRun, useRunStatus } from '../runs/valueStore.js'
-import { newSubmissionId, openRunStream, submitRun } from '../runs/runStream.js'
+import { forgetRunReceipt, labValueStore, readRunReceipts, rememberRunReceipt, terminalState, useBlockValue, useRun, useRunStatus } from '../runs/valueStore.js'
+import { discoverRuns, newSubmissionId, openRunStream, submitRun } from '../runs/runStream.js'
 import { formatLabRoute } from '../labRoute.js'
 import { readController } from '../changes/controller.js'
 import TestsKeepersRail from '../changes/TestsKeepersRail.jsx'
@@ -317,17 +317,30 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
     return () => { corpusRequest.current += 1 }
   }, [restored.key, hidden])
   const [outcomeUnknown, setOutcomeUnknown] = useState(false)
+  const [recoveredRun, setRecoveredRun] = useState(null)
+  const graphProject = live.draft?.document.blocks.map(block => block.settings?.project_id || block.settings?.drawing?.project_id).find(Boolean) || ''
+  const projectId = route?.params?.project_id || graphProject
+  const activeProject = useRef(projectId)
+  activeProject.current = projectId
   const currentRunScope = () => JSON.stringify([config.apiBase, config.tenant, runAccount() || authHeaders().Authorization || '',
-    client.currentDocId(), client.state.head, logoutGeneration.current])
+    activeProject.current, client.currentDocId(), client.state.head, logoutGeneration.current])
   const account = useRef(runAccount())
   const observedAccount = runAccount()
-  if (observedAccount) account.current = observedAccount
-  const displayScope = JSON.stringify([config.apiBase, config.tenant, account.current, client.currentDocId(), client.state.head, logoutGeneration.current])
+  if (observedAccount && !explicitlySignedOut.current) account.current = observedAccount
+  const receiptScope = account.current ? JSON.stringify([config.apiBase, config.tenant, account.current, projectId, client.currentDocId()]) : null
+  const displayScope = JSON.stringify([config.apiBase, config.tenant, account.current, projectId, client.currentDocId(), client.state.head, logoutGeneration.current])
+  const recoveryKey = JSON.stringify([displayScope, restored.key])
+  const activeRecoveryKey = useRef(recoveryKey)
+  activeRecoveryKey.current = recoveryKey
+  const discovery = useRef(null)
+  const [recoveryReady, setRecoveryReady] = useState(null)
   const scopeIdentity = useRef({ key: displayScope, value: {} })
   if (scopeIdentity.current.key !== displayScope) scopeIdentity.current = { key: displayScope, value: {} }
   useEffect(() => {
-    submissionIntent.current = null
-    setOutcomeUnknown(false)
+    const pending = !onRun && !explicitlySignedOut.current ? readRunReceipts(receiptScope).find(row => !row.runId) : null
+    submissionIntent.current = pending ? { ...pending, scope: currentRunScope(), unknown: true } : null
+    setOutcomeUnknown(Boolean(pending))
+    setRecoveredRun(null)
     setRunMessage('')
     streams.current.forEach(stream => { stream.stop(); stream.unsubscribe() })
     streams.current.clear()
@@ -403,12 +416,92 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
     })
   }, [client, opened])
   const runSnapshot = () => explicitlySignedOut.current ? '' : labValueStore.getRuns().filter(run => run.id !== 'local' && run.doc_id === client.currentDocId()
-    && (run.run_scope === undefined || run.run_scope === scopeIdentity.current.value)
+    && (run.run_scope === scopeIdentity.current.value || (run.run_scope === undefined && !account.current && !projectId))
     && run.graph_revision === client.state.head).map(run => run.id).join(',')
   const matchingRuns = useSyncExternalStore(labValueStore.subscribeRuns, runSnapshot)
   const valueRunId = matchingRuns.split(',')[0] || 'local'
   const activeRunStatus = useRunStatus(labValueStore, valueRunId)
+  const recoveredStatus = useRunStatus(labValueStore, recoveredRun?.runId || '')
+  const recoveringRun = recoveredRun?.key === recoveryKey && recoveredStatus && !terminalState(recoveredStatus.split('/')[0])
   const localTiming = useRun(labValueStore, 'local')?.timing
+  function followRun(runId, state, docId, graphRevision) {
+    labValueStore.upsertRun(runId, { state, graph_revision: graphRevision, doc_id: docId,
+      run_scope: scopeIdentity.current.value })
+    if ([...streams.current].some(stream => stream.runId === runId)) return
+    const stream = openRunStream({ runIds: [runId], store: labValueStore })
+    stream.runId = runId
+    const stop = stream.stop
+    stream.stop = () => { labValueStore.clearStreamControl(runId); stop() }
+    labValueStore.setStreamControl(runId, stream)
+    stream.unsubscribe = labValueStore.subscribeRun(runId, () => {
+      const run = labValueStore.getRun(runId)
+      if (!run || (terminalState(run.state) && ['finished', 'missing'].includes(run.transport.status))) {
+        labValueStore.clearStreamControl(runId)
+        stream.unsubscribe(); streams.current.delete(stream)
+      }
+    })
+    streams.current.add(stream)
+  }
+  async function recoverRuns() {
+    if (!receiptScope) return true
+    if (discovery.current?.key === recoveryKey) return discovery.current.promise
+    const scope = currentRunScope(), docId = client.currentDocId()
+    const current = () => mounted.current && !explicitlySignedOut.current && scope === currentRunScope()
+      && activeRecoveryKey.current === recoveryKey
+    const task = { key: recoveryKey }
+    discovery.current = task
+    task.promise = (async () => {
+      const result = await discoverRuns({ docId, projectId })
+      if (!current()) return false
+      if (!result.ok) {
+        setRunMessage('Previous runs could not be checked. Recover before starting another run.')
+        return false
+      }
+      for (const row of [...result.runs].reverse()) {
+        rememberRunReceipt(receiptScope, { id: row.submission_id, graphRevision: row.graph_revision,
+          runId: row.run_id, state: row.state })
+        followRun(row.run_id, row.state, docId, row.graph_revision)
+        if (!terminalState(row.state)) setRecoveredRun({ key: recoveryKey, runId: row.run_id })
+      }
+      // A request may have been interrupted before the server received it.
+      // Reconcile that exact identity; absence never authorizes a fresh POST.
+      const pending = readRunReceipts(receiptScope).filter(row => !row.runId)
+      const intent = submissionIntent.current
+      if (intent?.unknown && intent.scope === scope && !result.runs.some(row => row.submission_id === intent.id)
+        && !pending.some(row => row.id === intent.id)) pending.push(intent)
+      for (const receipt of pending) {
+        submissionIntent.current = { ...receipt, scope, unknown: true }
+        setOutcomeUnknown(true)
+        const recovered = await submitRun({ docId, projectId, graphRevision: receipt.graphRevision,
+          submissionId: receipt.id, reconcileOnly: true })
+        if (!current()) return false
+        if (!recovered.ok) {
+          setRunMessage(recovered.detail === 'lab_submission_missing'
+            ? 'Previous submission was not found. Start a new run explicitly.'
+            : 'Run outcome unknown. Retry to recover this submission.')
+          return false
+        }
+        rememberRunReceipt(receiptScope, { ...receipt, runId: recovered.runId, state: recovered.state })
+        followRun(recovered.runId, recovered.state, docId, receipt.graphRevision)
+        if (!terminalState(recovered.state)) setRecoveredRun({ key: recoveryKey, runId: recovered.runId })
+      }
+      submissionIntent.current = null
+      setOutcomeUnknown(false)
+      setRunMessage('')
+      setRecoveryReady(recoveryKey)
+      return true
+    })().catch(() => {
+      if (current()) setRunMessage('Previous runs could not be checked. Recover before starting another run.')
+      return false
+    })
+    const ok = await task.promise
+    if (!ok && discovery.current === task) discovery.current = null
+    return ok
+  }
+  useEffect(() => {
+    if (onRun || hidden || !live.ready || !client.state.headLoaded || client.state.head == null || explicitlySignedOut.current) return
+    void recoverRuns()
+  }, [recoveryKey, hidden, live.ready, client.state.headLoaded, onRun])
   async function runSaved() {
     if (explicitlySignedOut.current || submissionPending.current || !client.state.headLoaded || client.state.head == null || !live.ready) return
     submissionPending.current = true
@@ -416,6 +509,19 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
     const { docId, head, document } = latest.current
     const scope = currentRunScope()
     try {
+      if (recoveringRun) {
+        setRunMessage('Previous run is still running. Its existing execution has been recovered.')
+        return
+      }
+      if (receiptScope && recoveryReady !== recoveryKey) {
+        await recoverRuns()
+        return
+      }
+      if (submissionIntent.current?.unknown && receiptScope) {
+        discovery.current = null
+        await recoverRuns()
+        return
+      }
       if (!submissionIntent.current?.unknown && !labValueStore.canAddRun()) { setRunMessage('Too many active runs (20). Wait for one to finish.'); return }
       const saved = await client.revision(docId, head)
       if (!mounted.current) return
@@ -430,9 +536,14 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
       if (!submissionIntent.current?.unknown && !labValueStore.canAddRun()) { setRunMessage('Too many active runs (20). Wait for one to finish.'); return }
       if (scope !== currentRunScope()) return
       let intent = submissionIntent.current
-      if (!intent || intent.scope !== scope) intent = { scope, id: newSubmissionId(), unknown: false }
+      if (!intent || intent.scope !== scope) intent = { scope, id: newSubmissionId(), graphRevision: head, unknown: false }
       submissionIntent.current = intent
-      const result = await submitRun({ docId, graphRevision: head, submissionId: intent.id,
+      if (!rememberRunReceipt(receiptScope, { id: intent.id, graphRevision: head })) {
+        submissionIntent.current = null
+        setRunMessage('Enable browser storage before running so interrupted runs can be recovered.')
+        return
+      }
+      const result = await submitRun({ docId, projectId, graphRevision: head, submissionId: intent.id,
         reconcileOnly: intent.unknown })
       if (!mounted.current || scope !== currentRunScope()) return
       if (!result.ok) {
@@ -442,7 +553,10 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
           setRunMessage('Run outcome unknown. Retry to recover this submission.')
           return
         }
-        if (!intent.unknown) submissionIntent.current = null
+        if (!intent.unknown) {
+          forgetRunReceipt(receiptScope, intent.id)
+          submissionIntent.current = null
+        }
         setRunMessage(result.status === 401 ? 'Sign in again' : result.detail === 'lab_run_queue_full' ? 'Run queue full'
           : result.detail === 'lab_submission_mismatch' ? 'Submission intent changed. Recovery refused.'
           : result.detail === 'lab_submission_missing' ? 'Previous submission was not found. Start a new run explicitly.'
@@ -452,22 +566,8 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
       }
       submissionIntent.current = null
       setOutcomeUnknown(false)
-      labValueStore.upsertRun(result.runId, { state: result.state, graph_revision: head, doc_id: docId,
-        run_scope: scopeIdentity.current.value })
-      if ([...streams.current].some(stream => stream.runId === result.runId)) return
-      const stream = openRunStream({ runIds: [result.runId], store: labValueStore })
-      stream.runId = result.runId
-      const stop = stream.stop
-      stream.stop = () => { labValueStore.clearStreamControl(result.runId); stop() }
-      labValueStore.setStreamControl(result.runId, stream)
-      stream.unsubscribe = labValueStore.subscribeRun(result.runId, () => {
-        const run = labValueStore.getRun(result.runId)
-        if (!run || (terminalState(run.state) && ['finished', 'missing'].includes(run.transport.status))) {
-          labValueStore.clearStreamControl(result.runId)
-          stream.unsubscribe(); streams.current.delete(stream)
-        }
-      })
-      streams.current.add(stream)
+      rememberRunReceipt(receiptScope, { id: intent.id, graphRevision: head, runId: result.runId, state: result.state })
+      followRun(result.runId, result.state, docId, head)
     } catch {
       if (mounted.current && scope === currentRunScope()) {
         if (submissionIntent.current) {
@@ -545,8 +645,11 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
           <button type="button" disabled={!validDocument || (!onRun && (explicitlySignedOut.current || !client.state.headLoaded || client.state.head == null || submitting))}
             aria-describedby={!onRun && client.state.head == null ? saveHintId : undefined}
             onClick={() => { if (validDocument) { if (onRun) onRun(validDocument); else void runSaved() } }}>
-            {outcomeUnknown ? 'Recover previous run' : onRun || client.state.head == null ? 'Run graph' : `Run saved revision r${client.state.head}`}</button>
-          {outcomeUnknown && <button type="button" disabled={submitting} onClick={() => {
+            {outcomeUnknown || recoveringRun || (receiptScope && recoveryReady !== recoveryKey && !onRun && client.state.head != null) ? 'Recover previous run' : onRun || client.state.head == null ? 'Run graph' : `Run saved revision r${client.state.head}`}</button>
+          {(outcomeUnknown || recoveringRun) && <button type="button" disabled={submitting} onClick={() => {
+            if (submissionIntent.current) forgetRunReceipt(receiptScope, submissionIntent.current.id)
+            discovery.current = null
+            setRecoveredRun(null)
             submissionIntent.current = null; setOutcomeUnknown(false); setRunMessage('')
           }}>Start a new deliberate run</button>}
           <a href={formatLabRoute({ view: 'test-trade', params: route?.params ?? {} })}

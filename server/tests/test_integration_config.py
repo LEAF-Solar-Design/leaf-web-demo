@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import integration_config as config
 
 ARN = "arn:aws:kms:us-east-1:807034087062:key/187d5443-18be-4e51-99c5-f9fdbda4cc87"
-ORIGIN = "https://ops-dashboard-seven.vercel.app"
+ORIGIN = "https://ops-staging.leafdesign.ai"
 SOURCE = {"schema": "leaf.studio-integration-config.v1", "enabled": True,
           "apiOrigin": ORIGIN, "kmsKeyArn": ARN}
 ENABLED = "LEAF_INTEGRATION_TURN_GRANTS_ENABLED"

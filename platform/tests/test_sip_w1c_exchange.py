@@ -5,6 +5,7 @@ from hashlib import sha256
 import importlib.util
 import os
 from pathlib import Path
+import sys
 from threading import Barrier, Lock
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -13,15 +14,30 @@ import psycopg
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-_admission_spec = importlib.util.spec_from_file_location(
-    "_sip_w1c_pg_admission_helpers", ROOT / "platform/tests/test_sip_r5_admission.py")
-admission = importlib.util.module_from_spec(_admission_spec)
-_admission_spec.loader.exec_module(admission)
+
+
+def _load_pg_helper(name, filename):
+    spec = importlib.util.spec_from_file_location(name, ROOT / "platform/tests" / filename)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# The admission helper's transitive imports use bare test-module names that
+# also exist under server/tests. Pin both platform dependencies by origin while
+# loading, then restore the cache and search path for subsequent collection.
+with pytest.MonkeyPatch.context() as _imports:
+    _imports.syspath_prepend(str(ROOT / "platform/tests"))
+    for _name in ("test_sip_r3a_graph", "test_sip_r3b_tools"):
+        _imports.setitem(sys.modules, _name, _load_pg_helper(_name, _name + ".py"))
+    admission = _load_pg_helper(
+        "_sip_w1c_pg_admission_helpers", "test_sip_r5_admission.py")
 pg = admission.pg
-_chain_spec = importlib.util.spec_from_file_location(
-    "_sip_w1c_pg_chain_helpers", ROOT / "platform/tests/test_sip_r3b_chain.py")
-chain = importlib.util.module_from_spec(_chain_spec)
-_chain_spec.loader.exec_module(chain)
+chain = pg._chain
+# The chain helpers import server modules (solar_project and its siblings) lazily, at test time, after the context
+# above has restored sys.path. Keep server/ importable, appended last so it never shadows a test module name.
+if str(ROOT / "server") not in sys.path:
+    sys.path.append(str(ROOT / "server"))
 
 from leaf_platform import project_solve_store as exchanges
 
@@ -782,3 +798,195 @@ def test_async_migration_reapplication_preserves_custody(world):
             for statement in pg.db._split_sql_statements(sql):
                 conn.execute(statement)
     assert _read(s) == before
+
+
+def _piece(s, index=0):
+    scope = exchanges.PieceExchangeScope(s.org, s.project, s.drawing, s.job, index,
+        s.context.graph["rev"], pg.local.digest(s.context.graph), s.context.graph["source_hash"])
+    return SimpleNamespace(**{**vars(s), "scope": scope})
+
+
+def _completed_piece(s):
+    with pg.db.connection() as conn:
+        return exchanges.read_completed_piece_exchange(s.scope, conn=conn)
+
+
+def test_piece_custody_is_additive_and_replays_independent_pieces(world):
+    parent = world()
+    legacy = _prepare(parent)
+    pieces = [_piece(parent, index) for index in range(2)]
+    for piece in pieces:
+        before = _prepare(piece)
+        assert _prepare(piece) == before
+        assert before["piece_index"] == piece.scope.piece_index
+        assert before["source_hash"] == piece.scope.source_hash
+        assert exchanges.begin_send(piece.scope, piece.attempt)
+        _capture(piece)
+        _complete(piece)
+        assert exchanges.resume_exchange(piece.scope, piece.attempt).action == "completed"
+        assert _completed_piece(piece)["response_bytes"] == RESPONSE
+    assert _read(parent) == legacy
+    assert exchanges.begin_send(parent.scope, parent.attempt)
+    _capture(parent)
+    _complete(parent)
+    assert _completed(parent)["response_bytes"] == RESPONSE
+    assert all(_completed_piece(piece)["state"] == "completed" for piece in pieces)
+
+
+def test_piece_concurrent_prepare_and_committed_send_have_one_winner(world, monkeypatch):
+    piece = _piece(world())
+    barrier = Barrier(2)
+    pids = []
+    mutex = Lock()
+
+    def transaction(operation, **kwargs):
+        with pg.db.connection() as conn:
+            pid = conn.execute("SELECT pg_backend_pid() AS pid").fetchone()["pid"]
+            conn.commit()
+            with mutex:
+                pids.append(pid)
+            barrier.wait(timeout=10)
+            with conn.transaction():
+                result = operation(conn)
+        return result
+
+    # Independent connections race on both insertion and the committed send
+    # fence. The loser must never gain permission to dispatch.
+    with monkeypatch.context() as patch:
+        patch.setattr(exchanges.db, "run_transaction", transaction)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            prepared = [pool.submit(_prepare, piece) for _ in range(2)]
+            rows = [future.result(timeout=30) for future in prepared]
+        assert rows[0] == rows[1]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            sends = [pool.submit(exchanges.begin_send, piece.scope, piece.attempt) for _ in range(2)]
+            winners = [future.result(timeout=30) for future in sends]
+    assert sorted(winners) == [False, True]
+    assert len(set(pids)) >= 2
+    assert _read(piece)["state"] == "sending"
+    _capture(piece)
+    _complete(piece)
+    assert _completed_piece(piece)["candidate_bytes"] == CANDIDATE
+
+
+def test_piece_replay_reconciles_response_before_retry_and_keeps_sender(world):
+    piece = _piece(world())
+    _respond(piece)
+    sender = piece.attempt
+    before = _read(piece)
+    _reclaim(piece)
+    replay = exchanges.resume_exchange(piece.scope, piece.attempt)
+    assert replay.action == "use_response" and replay.exchange["response_bytes"] == RESPONSE
+    assert replay.exchange["sender_worker"] == sender.worker_id
+    assert not exchanges.begin_send(piece.scope, piece.attempt)
+    with pytest.raises(exchanges.ExchangeLeaseLost):
+        exchanges.capture_response(piece.scope, sender, response_bytes=RESPONSE,
+            response_sha256=sha256(RESPONSE).hexdigest(),
+            solver_endpoint="https://solver.example/solve", solver_version="test-v1")
+    _complete(piece)
+    assert _completed_piece(piece)["response_sha256"] == before["response_sha256"]
+
+
+def test_unknown_piece_is_quarantined_before_any_retry(world):
+    piece = _piece(world())
+    _prepare(piece)
+    assert exchanges.begin_send(piece.scope, piece.attempt)
+    _reclaim(piece)
+    outcome = exchanges.resume_exchange(piece.scope, piece.attempt)
+    assert outcome.action == "outcome_unknown"
+    assert outcome.exchange["response_bytes"] is None
+    assert not exchanges.begin_send(piece.scope, piece.attempt)
+    assert exchanges.resume_exchange(piece.scope, piece.attempt).action == "outcome_unknown"
+    with pytest.raises(exchanges.ExchangeStateError):
+        _completed_piece(piece)
+    with pytest.raises(psycopg.errors.RaiseException, match="terminal state is immutable"):
+        with pg.db.transaction() as conn:
+            conn.execute("UPDATE project_solve_piece_exchanges SET state='prepared' "
+                "WHERE job_id=%s AND piece_index=%s", (piece.job, piece.scope.piece_index))
+
+
+def test_piece_readers_and_writers_isolate_tenant_job_and_source_revision(world):
+    piece = _piece(world())
+    _respond(piece)
+    _complete(piece)
+    before = _completed_piece(piece)
+    for field, value in (("org_id", uuid4()), ("project_id", uuid4()),
+            ("drawing_id", uuid4()), ("job_id", uuid4()), ("piece_index", 1),
+            ("graph_revision", piece.scope.graph_revision + 1),
+            ("graph_sha256", "0" * 64), ("source_hash", "0" * 64)):
+        other = SimpleNamespace(**{**vars(piece), "scope": replace(piece.scope, **{field: value})})
+        for operation in (lambda: _read(other), lambda: _completed_piece(other),
+                lambda: _capture(other), lambda: _complete(other),
+                lambda: exchanges.resume_exchange(other.scope, other.attempt)):
+            with pytest.raises(exchanges.ExchangeNotFound):
+                operation()
+        assert not exchanges.begin_send(other.scope, other.attempt)
+    # A real second tenant cannot discover or mutate this tenant's piece.
+    foreign = _piece(world())
+    foreign.scope = replace(foreign.scope, job_id=piece.job)
+    with pytest.raises(exchanges.ExchangeNotFound):
+        _read(foreign)
+    with pytest.raises(exchanges.ExchangeNotFound):
+        _prepare(foreign)
+    assert _completed_piece(piece) == before
+
+
+def test_piece_request_response_and_identity_are_immutable(world):
+    piece = _piece(world())
+    _respond(piece)
+    before = _read(piece)
+    for assignment, message in (("piece_index=piece_index+1", "piece identity is immutable"),
+            ("source_hash='" + "0" * 64 + "'", "piece identity is immutable"),
+            ("request_bytes='changed'::bytea", "input is immutable"),
+            ("response_bytes='changed'::bytea", "response is immutable")):
+        with pytest.raises(psycopg.errors.RaiseException, match=message):
+            with pg.db.transaction() as conn:
+                conn.execute("UPDATE project_solve_piece_exchanges SET " + assignment +
+                    " WHERE job_id=%s AND piece_index=%s", (piece.job, piece.scope.piece_index))
+        assert _read(piece) == before
+
+
+def test_split_manifest_is_atomic_and_refuses_partial_children(world, monkeypatch):
+    parent = world()
+    prepared = _prepare(parent)
+    piece = _piece(parent)
+    _prepare(piece)
+    values = dict(response_bytes=RESPONSE, response_sha256=sha256(RESPONSE).hexdigest(),
+        solver_endpoint="https://solver.example/solve", solver_version="test-v1",
+        candidate_bytes=CANDIDATE, candidate_sha256=sha256(CANDIDATE).hexdigest(),
+        proof_bytes=PROOF, proof_sha256=sha256(PROOF).hexdigest())
+    with pytest.raises(exchanges.ExchangeStateError):
+        exchanges.complete_split_manifest(parent.scope, parent.attempt, **values)
+    assert _read(parent) == prepared
+    assert exchanges.begin_send(piece.scope, piece.attempt)
+    _capture(piece)
+    _complete(piece)
+
+    def rollback(operation):
+        with pg.db.transaction() as conn:
+            operation(conn)
+            raise RuntimeError("before commit")
+    with monkeypatch.context() as patch:
+        patch.setattr(exchanges.db, "run_transaction", rollback)
+        with pytest.raises(RuntimeError, match="before commit"):
+            exchanges.complete_split_manifest(parent.scope, parent.attempt, **values)
+    assert _read(parent) == prepared
+    completed = exchanges.complete_split_manifest(parent.scope, parent.attempt, **values)
+    assert _completed(parent) == completed
+    assert exchanges.complete_split_manifest(parent.scope, parent.attempt, **values) == completed
+    assert _completed_piece(piece)["response_bytes"] == RESPONSE
+
+
+def test_piece_migration_reapplication_preserves_legacy_and_piece_custody(world):
+    parent = world()
+    _respond(parent)
+    piece = _piece(parent)
+    _respond(piece)
+    _complete(piece)
+    legacy, child = _read(parent), _completed_piece(piece)
+    sql = (ROOT / "platform/migrations/0104_project_solve_piece_exchanges.sql").read_text(encoding="utf-8")
+    for _ in range(2):
+        with pg.db.transaction() as conn:
+            for statement in pg.db._split_sql_statements(sql):
+                conn.execute(statement)
+    assert _read(parent) == legacy and _completed_piece(piece) == child

@@ -1,6 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, readdirSync } from 'node:fs'
+import { readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
 import { runInNewContext } from 'node:vm'
 import { ACTIONS, accessibleName } from '../../src/lib/actionRegistry.js'
@@ -20,6 +22,63 @@ import { jobMonitorLauncherRecipe } from './probes.mjs'
 import { prepareStudioJobMonitor, assertStudioJobMonitor } from './fixtures.mjs'
 import { collectPromptRunDiagnostic } from './fixtures.mjs'
 import { withCensusStudioRail, mergeCensusCaptures, captureClosedAndStudioCensus, assertFirstRunCadProfile } from './fixtures.mjs'
+import { ENGINE_WORKER_MARKER, engineWorkerChunkPath } from './fixtures.mjs'
+
+test('WL72 U1 finds exactly one engine marker in nested JavaScript chunks', t => {
+  const dist = mkdtempSync(join(tmpdir(), 'walk-engine-worker-'))
+  t.after(() => rmSync(dist, { recursive: true, force: true }))
+  const notFound = count => ({ message: `engine worker chunk not found: expected exactly one, found ${count}` })
+  assert.throws(() => engineWorkerChunkPath(dist), notFound(0))
+  const chunks = join(dist, '_next', 'static', 'chunks')
+  mkdirSync(join(chunks, 'nested'), { recursive: true })
+  writeFileSync(join(chunks, 'other.js'), 'unrelated worker')
+  writeFileSync(join(chunks, '7183.abc.js'), 'batch_restore_failed:')
+  writeFileSync(join(chunks, 'ignored.js.map'), ENGINE_WORKER_MARKER)
+  writeFileSync(join(dist, 'outside.js'), ENGINE_WORKER_MARKER)
+  assert.throws(() => engineWorkerChunkPath(dist), notFound(0))
+  writeFileSync(join(chunks, 'nested', '128.abc.js'), `throw new Error('${ENGINE_WORKER_MARKER}')`)
+  assert.equal(engineWorkerChunkPath(dist), '/_next/static/chunks/nested/128.abc.js')
+  writeFileSync(join(chunks, 'second.js'), ENGINE_WORKER_MARKER)
+  assert.throws(() => engineWorkerChunkPath(dist), notFound(2))
+})
+
+test('WL72 U2 serialized geometry observer matches the served chunk and legacy worker URL only', () => {
+  const engineWorkerPath = '/_next/static/chunks/128.abc.js'
+  for (const argument of [{ engineWorkerPath }, undefined]) {
+    const sandbox = { argument, structuredClone, Worker: class {
+      constructor() { this.listeners = [] }
+      addEventListener(type, listener) { assert.equal(type, 'message'); this.listeners.push(listener) }
+      postMessage() {}
+    } }
+    runInNewContext(`(${installGeometryObserver.toString()})(argument)`, sandbox)
+    const other = new sandbox.Worker('/_next/static/chunks/999.def.js')
+    assert.equal(other.listeners.length, 0)
+    const chunk = new sandbox.Worker(`https://walk.example${engineWorkerPath}`)
+    assert.equal(chunk.listeners.length, argument ? 1 : 0)
+    const legacy = new sandbox.Worker('/engine/worker-browser.js')
+    assert.equal(legacy.listeners.length, 1)
+    assert.equal(sandbox.__walkGeometry.geometry, null)
+    const worker = argument ? chunk : legacy
+    const entities = [{ id: '1', type: 'LINE', vertices: [[0, 0], [10, 0]] }]
+    worker.listeners[0]({ data: { type: 'documentLoaded', documentId: 'head.dxf', entities } })
+    assert.deepEqual(sandbox.__walkGeometry.geometry.entities, entities)
+    assert.equal(sandbox.__walkGeometry.geometry.documentId, 'head.dxf')
+  }
+})
+
+test('WL72 U3 engine marker remains present in the vendored worker', () => {
+  assert.equal(ENGINE_WORKER_MARKER, 'engine_bg.wasm')
+  const vendor = new URL('../../../vendor/', import.meta.url)
+  const workerDirs = readdirSync(vendor, { withFileTypes: true })
+    .filter(entry => entry.isDirectory())
+    .filter(entry => {
+      const files = readdirSync(new URL(`${entry.name}/`, vendor))
+      return files.includes('pkg-web') || files.includes('worker-browser.mjs')
+    })
+  assert.equal(workerDirs.length, 1)
+  assert.ok(readFileSync(new URL(`${workerDirs[0].name}/worker-browser.mjs`, vendor), 'utf8')
+    .includes(ENGINE_WORKER_MARKER))
+})
 
 test('WL57 U1 merge preserves closed rows, adds unique Studio features and recomputes census totals', () => {
   const capture = resolved => ({ ok: false, total: 999, resolved,
@@ -6024,7 +6083,11 @@ test('C2 busy recipes reuse worker transport cleanup that releases every queued 
     removeEventListener(_type, callback) { assert.equal(callback, listener); events.push('removed') }
   }
   try {
-    const runtime = { page: { addInitScript: async (install) => install(), evaluate: async (read) => read() }, cleanup: [], evidence: {} }
+    const engineWorkerPath = '/_next/static/chunks/128.abc.js'
+    const runtime = { engineWorkerPath, page: { addInitScript: async (install, argument) => {
+      assert.deepEqual(argument, { engineWorkerPath })
+      install(argument)
+    }, evaluate: async (read) => read() }, cleanup: [], evidence: {} }
     await setupStep({}, runtime, { kind: 'prepare-engine-transport' }, censusAssertions)
     const worker = new globalThis.Worker('/engine/worker-browser.js')
     const delivered = (event) => events.push(event.data)
@@ -6072,6 +6135,37 @@ test('C2 download-only page uses the public demo and restores identity before cl
     assert.equal(runtime.evidence.censusDownloadOnly.cleaned, true)
     assert.deepEqual(events, ['/app?demo=1&surface=cad', 'closed'])
   } finally { globalThis.localStorage = originalStorage }
+})
+
+test('save-version no-target captures a DXF download without a drawing id or API request', async () => {
+  for (const filename of ['walk-v1.dxf', 'walk.txt']) {
+    let requestCalls = 0
+    const events = []
+    const route = '/app?demo=1&surface=cad'
+    const page = {
+      get request() { requestCalls++; throw new Error('Download must not call an API') },
+      getByRole: () => ({ disabled: false }),
+      getByTestId: () => ({ innerText: async () => '5' }),
+      waitForEvent: async (event, options) => {
+        events.push(event)
+        assert.equal(options.timeout, 15_000)
+        return { suggestedFilename: () => filename }
+      },
+    }
+    const runtime = { page, evidence: { censusDownloadOnly: { route }, censusDownload: { route } } }
+    const probe = { locator: { role: 'button', name: 'Download DXF' }, assertion: { target: 'engine-download-dxf' } }
+    const before = await captureCensusEffect(probe, runtime, censusAssertions)
+    assert.deepEqual(events, ['download'])
+    if (filename.endsWith('.dxf')) {
+      await assertCensusEffect(probe, runtime, {}, before, censusAssertions)
+      assert.deepEqual(runtime.evidence.censusDownload, { route, filename })
+    } else {
+      await assert.rejects(assertCensusEffect(probe, runtime, {}, before, censusAssertions), assert.AssertionError)
+      assert.deepEqual(runtime.evidence.censusDownload, { route })
+    }
+    assert.deepEqual(runtime.evidence.censusDownloadOnly, { route })
+    assert.equal(requestCalls, 0)
+  }
 })
 
 test('C2 edit and script oracles require the exact count delta, completion and opposite history step', async () => {
@@ -7480,25 +7574,47 @@ function refusalRuntime() {
   return { runtime, state }
 }
 
-test('WL39b vertex-index setup fills the named input and requires idle Delete vertex', async () => {
+test('WL39b vertex-index setup arms ribbon Delete vertex and fills its input without submitting', async () => {
   const events = []
-  const button = { disabled: false }
-  const runtime = { evidence: {}, page: { getByTestId: (id) => {
-    assert.equal(id, 'cad-edit-workbench')
-    return { getByRole: (role, options) => {
-      assert.equal(options.exact, true)
-      if (role === 'textbox') {
-        assert.equal(options.name, 'vertex index')
-        return { fill: async value => events.push(['fill', value]) }
-      }
-      assert.equal(role, 'button'); assert.equal(options.name, 'Delete vertex')
-      return button
-    } }
-  } } }
+  let inputMissing = false
+  const button = { click: async options => {
+    assert.deepEqual(options, { timeout: 15_000 })
+    events.push(['click', 'delete-vertex'])
+  } }
+  const group = { getByRole: (role, options) => {
+    assert.equal(role, 'button')
+    assert.deepEqual(options, { name: 'delete-vertex', exact: true })
+    return button
+  } }
+  const toolbar = { getByRole: (role, options) => {
+    assert.equal(role, 'group')
+    assert.deepEqual(options, { name: 'Modify', exact: true })
+    return group
+  } }
+  const runtime = { evidence: {}, page: {
+    getByTestId: id => {
+      assert.equal(id, 'cad-edit-workbench')
+      events.push(['count', id])
+      return { countValue: 1 }
+    },
+    getByRole: (role, options) => {
+      assert.equal(role, 'toolbar')
+      assert.deepEqual(options, { name: 'Drafting tools', exact: true })
+      return toolbar
+    },
+    getByLabel: (label, options) => {
+      assert.equal(label, 'ribbon vertex')
+      assert.deepEqual(options, { exact: true })
+      return { fill: async value => {
+        if (inputMissing) throw new Error('ribbon vertex input missing')
+        events.push(['fill', label, value])
+      } }
+    },
+  } }
   await setupStep({}, runtime, { kind: 'vertex-index', value: '-1' }, oracleAssertions)
-  assert.deepEqual(events, [['fill', '-1']])
-  button.disabled = true
-  await assert.rejects(setupStep({}, runtime, { kind: 'vertex-index', value: '-1' }, oracleAssertions))
+  assert.deepEqual(events, [['count', 'cad-edit-workbench'], ['click', 'delete-vertex'], ['fill', 'ribbon vertex', '-1']])
+  inputMissing = true
+  await assert.rejects(setupStep({}, runtime, { kind: 'vertex-index', value: '-1' }, oracleAssertions), /ribbon vertex input missing/)
 })
 
 test('WL39b fake activation uses the real refusal oracle and typed red-hat verdict on both viewports', async () => {
@@ -7514,9 +7630,10 @@ test('WL39b fake activation uses the real refusal oracle and typed red-hat verdi
     const observers = runtime.walkPersonaObservers = createWalkPersonaObservers({ probe, viewport, evidence })
     const before = await captureEngineRefusal(runtime)
     await observers.observe('red-hat', 'before', before)
-    let clicks = 0
-    const locator = { click: async () => {
-      clicks++
+    let submissions = 0
+    const locator = { press: async key => {
+      assert.equal(key, 'Enter')
+      submissions++
       state.status = fault === 'status' ? '' : probe.assertion.refusal
       if (fault === 'geometry') state.geometry.entities[0].layer = 'Changed'
       if (fault === 'selection') state.selection = 'no selection'
@@ -7525,7 +7642,7 @@ test('WL39b fake activation uses the real refusal oracle and typed red-hat verdi
       if (fault === 'versions') state.versions.head++
       if (fault === 'dispatches') state.dispatches.push({ type: 'edit', op: 'deleteVertex' })
     } }
-    await locator.click()
+    await extractedActivate(oracleAssertions)(probe, runtime, locator)
     let originalError
     const assertions = value => ({ ...oracleAssertions(value),
       toEqual: expected => {
@@ -7540,7 +7657,7 @@ test('WL39b fake activation uses the real refusal oracle and typed red-hat verdi
     const check = () => runProbeOracle(probe, runtime, locator, before, assertions)
     if (fault) await assert.rejects(check(), error => error === originalError)
     else await check()
-    assert.equal(clicks, 1)
+    assert.equal(submissions, 1)
     assert.equal(evidence.engineRefusal.observed, state.status)
     const verdict = redHat.evaluate(evidence).status
     assert.equal(verdict, fault === 'status' ? 'unknown' : fault ? 'finding' : 'pass', `${viewport}/${fault}`)

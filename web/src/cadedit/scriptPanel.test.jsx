@@ -2,6 +2,7 @@
 // edit the prompt would, one at a time, waiting for the engine's answer; the
 // first refusal (the store's before any post, or the engine's) stops the
 // script with the line number and the sentence, and the lines before it stay.
+import { scaleTimeout } from '../testTimeScale.js'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -51,7 +52,7 @@ async function openAndLoad(entities) {
     fireEvent.change(screen.getByLabelText('DXF file'), { target: { files: [fileOf()] } })
     await Promise.resolve(); await Promise.resolve()
   })
-  await waitFor(() => expect(workers.length).toBe(1), { timeout: 5000 })
+  await waitFor(() => expect(workers.length).toBe(1), { timeout: scaleTimeout(5000) })
   workers[0].emit({ type: 'documentLoaded', documentId: 'one.dxf', entities, entityCount: entities.length, unsupported: [] })
 }
 const posts = () => workers[0].posted.filter((m) => m.type === 'applyEdit')
@@ -115,11 +116,11 @@ describe('W4g-7a the script runner', () => {
     expect(screen.getByLabelText('ribbon script').disabled).toBe(true)
     expect(runButton().getAttribute('aria-label')).toBe('Run script (unavailable: a script is running)')
     reply('createLine', [H, L2], { createdId: '8' })
-    await waitFor(() => expect(posts()).toHaveLength(2), { timeout: 5000 })
+    await waitFor(() => expect(posts()).toHaveLength(2), { timeout: scaleTimeout(5000) })
     expect(posts()[1]).toEqual({ type: 'applyEdit', op: 'createCircle', payload: { cx: 10, cy: 10, radius: 5, layer: 'Round' } })
     expect(status().textContent).toBe('Running line 3: CIRCLE (2 of 2)...')
     reply('createCircle', [H, L2, C3], { createdId: '9' })
-    await waitFor(() => expect(status().textContent).toBe('Script ran 2 commands.'), { timeout: 5000 })
+    await waitFor(() => expect(status().textContent).toBe('Script ran 2 commands.'), { timeout: scaleTimeout(5000) })
     expect(status().getAttribute('data-phase')).toBe('done')
     expect(screen.getByLabelText('ribbon script').disabled).toBe(false)
     expect(context.session.entityCount).toBe(3)
@@ -133,7 +134,7 @@ describe('W4g-7a the script runner', () => {
     fireEvent.click(runButton())
     expect(posts()).toHaveLength(1)
     reply('createLine', [H, L2], { createdId: '8' })
-    await waitFor(() => expect(status().textContent).toBe('Script stopped at line 2: Circle refused: r must be a number.'), { timeout: 5000 })
+    await waitFor(() => expect(status().textContent).toBe('Script stopped at line 2: Circle refused: r must be a number.'), { timeout: scaleTimeout(5000) })
     expect(posts()).toHaveLength(1)
     expect(status().getAttribute('data-phase')).toBe('stopped')
     expect(context.session.entityCount).toBe(2)
@@ -146,7 +147,7 @@ describe('W4g-7a the script runner', () => {
     fireEvent.click(runButton())
     expect(posts()).toHaveLength(1)
     workers[0].emit({ type: 'editApplied', op: 'createLine', ok: false, reason: 'line_zero_length' })
-    await waitFor(() => expect(status().textContent).toBe('Script stopped at line 1: The line needs two different endpoints. Choose another point and retry.'), { timeout: 5000 })
+    await waitFor(() => expect(status().textContent).toBe('Script stopped at line 1: The line needs two different endpoints. Choose another point and retry.'), { timeout: scaleTimeout(5000) })
     expect(posts()).toHaveLength(1)
   })
 
@@ -170,7 +171,7 @@ describe('W4g-7a the script runner', () => {
     expect(context.session.clipboard).toBeNull()
     setScript('copyclip')
     fireEvent.click(runButton())
-    await waitFor(() => expect(status().textContent).toBe('Script ran 1 command.'), { timeout: 5000 })
+    await waitFor(() => expect(status().textContent).toBe('Script ran 1 command.'), { timeout: scaleTimeout(5000) })
     expect(context.session.clipboard).not.toBeNull()
     act(() => { context.session.actions.select(null) })
     setScript('u')
@@ -202,7 +203,7 @@ describe('W4g-7a the script runner', () => {
     } })
     const leader = { id: '9', handle: '9', type: 'MLEADER', layer: '0', editable: false, vertices: [[30, 23, 0], [35, 26, 0]], text: 'Valve', style: 'Standard' }
     reply('createMleader', [H, L2, leader], { createdId: '9', mlstyles })
-    await waitFor(() => expect(status().textContent).toBe('Script stopped at line 3: Line refused: the two points must differ.'), { timeout: 5000 })
+    await waitFor(() => expect(status().textContent).toBe('Script stopped at line 3: Line refused: the two points must differ.'), { timeout: scaleTimeout(5000) })
     expect(posts()).toHaveLength(2)
     expect(status().getAttribute('data-phase')).toBe('stopped')
     expect(context.session.entityCount).toBe(3)
@@ -220,7 +221,7 @@ describe('W4g-7a the script runner', () => {
     setScript('copyclip\ncopyclip\nline 0,0 1,1')
     fireEvent.click(runButton())
     // Both copies answered without the engine, the line posted at once: no 60 s stall.
-    await waitFor(() => expect(posts()).toHaveLength(1), { timeout: 5000 })
+    await waitFor(() => expect(posts()).toHaveLength(1), { timeout: scaleTimeout(5000) })
     expect(posts()[0].op).toBe('createLine')
     expect(status().textContent).toBe('Running line 3: LINE (3 of 3)...')
     expect(context.session.status).toBe(sentence)
@@ -228,13 +229,13 @@ describe('W4g-7a the script runner', () => {
     const file = new File(['circle 1,1 2\n'], 'a.scr', { type: 'text/plain' })
     file.text = async () => 'circle 1,1 2\n'
     reply('createLine', [H, L2], { createdId: '8' })
-    await waitFor(() => expect(status().getAttribute('data-phase')).toBe('done'), { timeout: 5000 })
+    await waitFor(() => expect(status().getAttribute('data-phase')).toBe('done'), { timeout: scaleTimeout(5000) })
     const input = screen.getByLabelText('Script file')
     await act(async () => { fireEvent.change(input, { target: { files: [file] } }); await Promise.resolve(); await Promise.resolve() })
-    await waitFor(() => expect(screen.getByLabelText('ribbon script').value).toBe('circle 1,1 2\n'), { timeout: 5000 })
+    await waitFor(() => expect(screen.getByLabelText('ribbon script').value).toBe('circle 1,1 2\n'), { timeout: scaleTimeout(5000) })
     setScript('')
     await act(async () => { fireEvent.change(input, { target: { files: [file] } }); await Promise.resolve(); await Promise.resolve() })
-    await waitFor(() => expect(screen.getByLabelText('ribbon script').value).toBe('circle 1,1 2\n'), { timeout: 5000 })
+    await waitFor(() => expect(screen.getByLabelText('ribbon script').value).toBe('circle 1,1 2\n'), { timeout: scaleTimeout(5000) })
   })
 
   it.each([
@@ -269,7 +270,7 @@ describe('W4g-7a the script runner', () => {
     expect(posts()).toHaveLength(1)
     expect(posts()[0]).toEqual({ type: 'applyEdit', op: 'delete', payload: { entityId: '7' } })
     act(() => { vi.advanceTimersByTime(LINE_BUDGET_MS + 10) })
-    await waitFor(() => expect(status().textContent).toBe(`Script stopped at line 1: the engine did not answer within ${LINE_BUDGET_MS / 1000} s.`), { timeout: 5000 })
+    await waitFor(() => expect(status().textContent).toBe(`Script stopped at line 1: the engine did not answer within ${LINE_BUDGET_MS / 1000} s.`), { timeout: scaleTimeout(5000) })
     expect(posts()).toHaveLength(1)
   })
 
@@ -290,7 +291,7 @@ describe('W4g-7a the script runner', () => {
     expect(posts()).toHaveLength(1)
     expect(posts()[0]).toEqual({ type: 'applyEdit', op: 'createInsert', payload: { name: 'Fixture', x: 10, y: 20, rotationDeg: 90, sx: 2, sy: 3, sz: 1, layer: '' } })
     reply('createInsert', [H], { createdId: '20' })
-    await waitFor(() => expect(status().textContent).toBe('Script ran 1 command.'), { timeout: 5000 })
+    await waitFor(() => expect(status().textContent).toBe('Script ran 1 command.'), { timeout: scaleTimeout(5000) })
   })
 
   it('a scripted INSERT never inherits the ribbon\'s own live scale for an omitted operand (record w4g-7b-02c-e F2)', async () => {

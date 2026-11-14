@@ -1,6 +1,7 @@
 """Turn-bound device operations with a deliberately narrow result projection."""
 from datetime import datetime, timezone
 import json
+import os
 import re
 from uuid import uuid4
 
@@ -24,6 +25,32 @@ MESSAGES = {"invalid_input": "The request is invalid.", "unauthenticated": "Auth
 WRITES = {"install_package", "ha_step", "light"}
 ENTITY = re.compile(r"(?:light|group)\.[a-z0-9_]{1,64}")
 HA_FLOW_ID = re.compile(r"[0-7][0-9A-HJKMNP-TV-Z]{25}")
+OFF_LIMITS_TOKENS = ("444f8e80ff06", "80ff06", "10.0.0.175")
+
+
+def _names_off_limits(value):
+    tokens = OFF_LIMITS_TOKENS + tuple(
+        token.strip().lower() for token in os.environ.get("LEAF_DEVICE_OFF_LIMITS", "").split(",")
+        if token.strip())
+    pending = [iter((value,))]
+    nodes = 0
+    while pending:
+        try:
+            item = next(pending[-1])
+        except StopIteration:
+            pending.pop()
+            continue
+        nodes += 1
+        if nodes > 2000:
+            return True
+        if isinstance(item, str):
+            if any(token in item.lower() for token in tokens):
+                return True
+        elif isinstance(item, dict):
+            pending.append(child for pair in item.items() for child in pair)
+        elif isinstance(item, (list, tuple)):
+            pending.append(iter(item))
+    return False
 
 
 def failure(code):
@@ -86,12 +113,19 @@ def normalize(operation, value):
             "ha.onboard", "ha.flow.start", "ha.flow.step", "ha.flow.list", "pkg.health"} or type(value["args"]) is not dict):
         raise ReadFailure("invalid_input")
     if operation == "light":
-        if value["action"] not in {"turn_on", "turn_off"} or ENTITY.fullmatch(value["entity_id"]) is None:
+        if value["action"] not in {"turn_on", "turn_off"} or (
+                ENTITY.fullmatch(value["entity_id"]) is None
+                and not (ENTITY.fullmatch(value["entity_id"].lower())
+                         and _names_off_limits(value["entity_id"]))):
             raise ReadFailure("invalid_input")
         if "color" in value and (type(value["color"]) is not str or re.fullmatch(r"#[0-9a-fA-F]{6}", value["color"]) is None):
             raise ReadFailure("invalid_input")
         if "brightness_pct" in value and (type(value["brightness_pct"]) is not int or not 0 <= value["brightness_pct"] <= 100):
             raise ReadFailure("invalid_input")
+    if operation == "light" and _names_off_limits(value["entity_id"]):
+        raise ReadFailure("denied")
+    if operation == "ha_step" and _names_off_limits(value["args"]):
+        raise ReadFailure("denied")
     return value
 
 
@@ -150,6 +184,18 @@ def _summary(command, result):
             brightness = attrs.get("brightness")
             if type(brightness) is int and 0 <= brightness <= 255:
                 light["brightness_pct"] = round(brightness * 100 / 255)
+            if _names_off_limits(entity) or _names_off_limits(attrs.get("entity_id")):
+                light["off_limits"] = True
+            members = []
+            if type(attrs.get("entity_id")) is list:
+                for member in attrs["entity_id"]:
+                    if (type(member) is str and re.fullmatch(r"light\.[a-z0-9_]{1,64}", member)
+                            and _text(member) is not None and member not in members):
+                        members.append(member)
+                        if len(members) == 20:
+                            break
+            if members:
+                light["members"] = members
             lights.append(light)
             if len(lights) == 100:
                 break
@@ -175,6 +221,37 @@ def _summary(command, result):
                 field["type"] = item["type"]
             if type(item.get("required")) is bool:
                 field["required"] = item["required"]
+            selector = item.get("selector")
+            select = selector.get("select") if type(selector) is dict else None
+            selector_options = select.get("options") if type(select) is dict else None
+            options = []
+            seen = set()
+            for source, entries in (("options", item.get("options")), ("selector", selector_options)):
+                for entry in entries if type(entries) is list else []:
+                    label = None
+                    if type(entry) is str:
+                        value = entry
+                    elif source == "options" and type(entry) in (list, tuple) and len(entry) == 2:
+                        value, label = entry
+                    elif source == "selector" and type(entry) is dict:
+                        value, label = entry.get("value"), entry.get("label")
+                    else:
+                        continue
+                    if _text(value) is None or value in seen:
+                        continue
+                    option = {"value": value}
+                    if _names_off_limits(value) or _names_off_limits(label):
+                        option["off_limits"] = True
+                    if _text(label) is not None:
+                        option["label"] = label
+                    options.append(option)
+                    seen.add(value)
+                    if len(options) == 50:
+                        break
+                if len(options) == 50:
+                    break
+            if options:
+                field["options"] = options
             fields.append(field)
             if len(fields) == 32:
                 break

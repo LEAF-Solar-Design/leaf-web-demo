@@ -1,6 +1,8 @@
 import { authHeaders, config } from '../../api.js'
 import { fetchWithBudget } from '../../fetchBudget.js'
 import { humanizeError } from '../../errorHumanize.js'
+import { canonicalJSON } from '../contract.js'
+import { sha256Hex } from '../runtime/sha256.js'
 
 export const SAVED_REVISION_EVENT = 'leaf.lab.saved-revision'
 export const GRAPH_DOC_KEY = 'leaf.lab.graph-doc.v1'
@@ -15,7 +17,37 @@ function identifier(id) {
   if (!isValidDocId(id)) throw new Error('Enter a valid Document ID.')
 }
 const initial = () => ({ head: null, published: null, revisions: [], lastSaved: null, conflict: null,
-  events: [], saveTimes: [], requestTimes: [], restoredGraph: null, restoredKey: 0, headLoaded: false, headLookupFailed: false })
+  events: [], saveTimes: [], requestTimes: [], restoredGraph: null, restoredKey: 0, headLoaded: false, headLookupFailed: false, openedBundle: null })
+
+const bundleParts = ['evaluations', 'graph', 'identity', 'layout', 'policy_reference']
+const bundleHash = value => sha256Hex(canonicalJSON(value))
+const sameKeys = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
+  && Object.keys(value).sort().join(',') === [...keys].sort().join(',')
+const bundleError = 'Bundle integrity check failed. No graph was opened.'
+export function verifyLabBundle(bundle) {
+  if (!sameKeys(bundle, ['schema', 'parts', 'manifest']) || bundle.schema !== 'leaf.lab-bundle.v1'
+    || !sameKeys(bundle.parts, bundleParts) || !sameKeys(bundle.manifest, ['algorithm', 'parts'])
+    || bundle.manifest.algorithm !== 'sha256' || !sameKeys(bundle.manifest.parts, bundleParts)) throw new Error(bundleError)
+  for (const key of bundleParts) {
+    if (bundle.manifest.parts[key] !== bundleHash(bundle.parts[key])) throw new Error(bundleError)
+  }
+  const { identity, graph, policy_reference: policy, evaluations } = bundle.parts
+  if (!identity || !isValidDocId(identity.doc_id) || typeof identity.tenant_id !== 'string'
+    || !Number.isSafeInteger(identity.revision) || identity.revision < 1 || identity.kind !== 'graph'
+    || graph?.schema !== 'leaf.lab-graph.v1' || !Array.isArray(graph.blocks)
+    || identity.sha256 !== bundleHash(graph) || policy?.graph_sha256 !== identity.sha256
+    || !Array.isArray(policy.blocks) || !Array.isArray(policy.compiled) || !Array.isArray(evaluations)) throw new Error(bundleError)
+  const blocks = graph.blocks.map(block => ({ id: block.id, registry: block.registry, settings_sha256: bundleHash(block.settings) }))
+  if (canonicalJSON(blocks) !== canonicalJSON(policy.blocks)) throw new Error(bundleError)
+  for (const evaluation of evaluations) {
+    const run = evaluation?.run
+    if (!run || run.tenant_id !== identity.tenant_id || run.doc_id !== identity.doc_id
+      || run.graph_revision !== identity.revision || run.graph_sha256 !== identity.sha256
+      || !Array.isArray(evaluation.events) || !evaluation.complete_results) throw new Error(bundleError)
+    if (evaluation.events.some(event => event.tenant_id !== identity.tenant_id || event.run_id !== run.run_id)) throw new Error(bundleError)
+  }
+  return bundle
+}
 
 export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.fetch(...args), now = Date.now, storage = null } = {}) {
   let remembered = null
@@ -39,6 +71,7 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
   const capture = id => ({ id, generation, writeSeq, readSeq })
   const current = token => token.id === docId && token.generation === generation
   const fresh = token => current(token) && token.writeSeq === writeSeq
+  const authority = () => canonicalJSON([config.apiBase, config.tenant, authHeaders()])
   const maximum = (left, right) => right == null ? left : left == null ? right : Math.max(left, right)
   const merge = rows => [...new Map([...state.revisions, ...rows].map(row => [row.revision, row])).values()].sort((a, b) => a.revision - b.revision)
   async function request(id, path, body, resolveConflict = true, token = capture(id), method = body === undefined ? 'GET' : 'POST') {
@@ -56,7 +89,10 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
         return { ...data, ok: true }
       }
       const code = typeof data?.detail === 'string' ? data.detail : data?.detail?.code
-      const detail = response.status === 413
+      const detail = path.endsWith('/export') && [401, 403, 413].includes(response.status)
+        ? response.status === 401 ? 'Sign in again to access this revision.'
+          : response.status === 403 ? 'You no longer have access to this revision.' : 'This revision is too large to export.'
+        : response.status === 413
         ? (code === 'lab_capacity_exceeded' ? MSG_LAB_STORAGE_FULL : MSG_LAB_TOO_LARGE)
         : humanizeError(data?.error?.message || (typeof data?.detail === 'string' ? data.detail : data?.detail?.message))
       if (response.status === 409 && resolveConflict) {
@@ -166,6 +202,49 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
       return result
     },
     revision: (id, n) => request(id, `revisions/${encodeURIComponent(n)}`),
+    async exportBundle(id, revision) {
+      const token = capture(id), scope = authority()
+      const result = await request(id, `revisions/${encodeURIComponent(revision)}/export`, undefined, false, token)
+      if (!result.ok) return result
+      if (!current(token) || scope !== authority()) return { ok: false, detail: 'Document or account changed. Try exporting again.' }
+      try {
+        const { ok: unused, ...bundle } = result
+        verifyLabBundle(bundle)
+        if (bundle.parts.identity.doc_id !== id || bundle.parts.identity.revision !== Number(revision)) throw new Error(bundleError)
+        return { ok: true, bundle }
+      } catch { return { ok: false, detail: bundleError } }
+    },
+    async reopenBundle(text) {
+      const token = this.beginGraphOperation(), scope = authority()
+      let bundle
+      try {
+        if (typeof text !== 'string' || new TextEncoder().encode(text).length > 64 * 1024 * 1024) throw new Error(bundleError)
+        bundle = verifyLabBundle(JSON.parse(text))
+      } catch { return { ok: false, detail: bundleError } }
+      const { identity, graph, layout } = bundle.parts
+      // Digests establish content integrity, not authority. Reauthorize against
+      // the server's pinned revision before putting imported content on canvas.
+      const allowed = await request(identity.doc_id, `revisions/${identity.revision}/export`, undefined, false, token)
+      if (!allowed.ok) return allowed
+      if (!this.isCurrentOperation(token) || scope !== authority()) return { ok: false, detail: 'Document or account changed. Try reopening again.' }
+      const head = await request(identity.doc_id, 'head', undefined, false, token)
+      if (!head.ok) return head
+      if (!this.isCurrentOperation(token) || scope !== authority()) return { ok: false, detail: 'Document or account changed. Try reopening again.' }
+      try {
+        const { ok: unused, ...authorized } = allowed
+        verifyLabBundle(authorized)
+        if (canonicalJSON(authorized.parts.identity) !== canonicalJSON(identity)) throw new Error(bundleError)
+      } catch { return { ok: false, detail: bundleError } }
+      this.setDocId(identity.doc_id)
+      operation += 1
+      writeSeq += 1
+      if (layout) graphLayouts.set(graph, { load: async () => layout })
+      update({ openedBundle: bundle, restoredGraph: graph, restoredKey: state.restoredKey + 1,
+        head: head.revision, published: head.published_revision ?? null, headLoaded: true, headLookupFailed: false,
+        conflict: null, revisions: merge([identity]), lastSaved: { ...identity, graph } })
+      remember(identity.doc_id)
+      return { ok: true, bundle, revision: identity.revision }
+    },
     async diff(id, before, after, { graphs = true } = {}) {
       const token = capture(id)
       const result = await request(id, `diff?before=${encodeURIComponent(before)}&after=${encodeURIComponent(after)}`, undefined, true, token)

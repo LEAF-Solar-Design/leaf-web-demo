@@ -1,3 +1,4 @@
+import { scaleTimeout } from '../testTimeScale.js'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
@@ -91,14 +92,30 @@ describe('Lab view registration', () => {
     expect(first.map(({ id }) => id)).toEqual(['graph', 'widgets', 'history', 'runs', 'deploys', 'test-trade'])
     expect(new Set(first.map(({ component }) => component)).size).toBe(6)
     expect(first.find(({ id }) => id === 'widgets').component).toBe(WidgetsView)
-    expect(first.map(({ label }) => label)).toEqual(['strategy', 'market', 'test', 'keeper', 'lane']
-      .map((id) => glossary.terms.find((term) => term.id === id).plain).concat('Test trade'))
+    expect(first.map(({ label }) => label)).toEqual(['strategy', 'widgets', 'test', 'keeper', 'lane']
+      .map((id) => id === 'widgets' ? 'Widgets' : glossary.terms.find((term) => term.id === id).plain).concat('Test trade'))
     expect(Object.isFrozen(first)).toBe(true)
     expect(first.every(Object.isFrozen)).toBe(true)
   })
 })
 
 describe('LabWorkbench', () => {
+  it('opens the widget designer through a named Widgets link without authoring a tool', () => {
+    const originalUrl = window.location.href
+    try {
+      render(<LabWorkbench route={route('graph')} status={on} />)
+      const navigation = screen.getByRole('navigation', { name: 'Lab views' })
+      fireEvent.click(within(navigation).getByRole('link', { name: 'Widgets', exact: true }))
+      expect(window.location.pathname).toBe('/app/lab/widgets')
+      expect(screen.getByRole('region', { name: 'Widget designer', exact: true })).toBeVisible()
+      expect(screen.getByRole('textbox', { name: 'Document ID' })).toBeVisible()
+      expect(screen.getByRole('button', { name: 'New', exact: true })).toBeVisible()
+      expect(within(navigation).getByRole('link', { name: 'Widgets', exact: true })).toHaveAttribute('aria-current', 'page')
+    } finally {
+      window.history.replaceState({}, '', originalUrl)
+    }
+  })
+
   it('redirects standalone sign-in without preloading or opening a popup', () => {
     render(<LabWorkbench status={{ state: 'signed-out' }} />)
     fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
@@ -186,27 +203,27 @@ describe('LabWorkbench', () => {
 
     rerender(<LabWorkbench route={route('graph')} status={on} />)
     expect(screen.getByRole('status', { name: 'Loading dependency canvas' })).toBeVisible()
-    const editor = await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })
+    const editor = await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: scaleTimeout(15000) })
     expect(canvasImport).toHaveBeenCalledTimes(1)
     rerender(<LabWorkbench route={route('graph')} status={on} hidden />)
     expect(editor).not.toBeVisible()
     rerender(<LabWorkbench route={route('graph')} status={on} />)
     expect(screen.getByRole('region', { name: 'Dependency canvas' })).toBe(editor)
     expect(canvasImport).toHaveBeenCalledTimes(1)
-  }, 20000)
+  }, scaleTimeout(20000))
 
   it('lazily mounts the dependency editor in the graph view', async () => {
     render(<LabWorkbench route={route('graph')} status={on} />)
     expect(screen.getByRole('status', { name: 'Loading dependency canvas' })).toBeVisible()
-    expect(await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })).toBeVisible()
+    expect(await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: scaleTimeout(15000) })).toBeVisible()
     expect(screen.getByRole('region', { name: 'Strategy palette' })).toBeVisible()
     expect(screen.getByRole('region', { name: 'Block inspector' })).toBeVisible()
     expect(within(screen.getByRole('navigation', { name: 'Lab views' })).getAllByRole('link')).toHaveLength(6)
-  }, 20000)
+  }, scaleTimeout(20000))
 
   it('retains every view DOM instance through navigation, dormancy and hiding', async () => {
     const { container, rerender } = render(<LabWorkbench route={route('graph')} status={on} />)
-    await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })
+    await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: scaleTimeout(15000) })
     const panels = [...container.querySelectorAll('[data-lab-view]')]
     expect(panels).toHaveLength(6)
     const editor = container.querySelector('.widgets-view')
@@ -231,7 +248,7 @@ describe('LabWorkbench', () => {
 
   it('replaces the last valid graph with the latest not-ready draft and shows its problems', async () => {
     render(<LabWorkbench route={route('graph')} status={on} />)
-    await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })
+    await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: scaleTimeout(15000) })
     const palette = within(screen.getByRole('region', { name: 'Strategy palette' }))
     const readiness = within(screen.getByRole('region', { name: 'Graph readiness' }))
     fireEvent.click(palette.getAllByRole('button', { name: 'Strategy' })[0])
@@ -271,7 +288,7 @@ describe('LabWorkbench', () => {
     vi.stubGlobal('fetch', fetchImpl)
     const { rerender } = render(<LabWorkbench route={route('graph')} />)
     await waitFor(() => expect(screen.getByRole('navigation', { name: 'Lab views' })).toBeVisible())
-    await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })
+    await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: scaleTimeout(15000) })
     await act(async () => {})
     const requestCount = fetchImpl.mock.calls.length
     expect(requestCount).toBeGreaterThanOrEqual(1)

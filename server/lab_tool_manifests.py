@@ -274,9 +274,12 @@ def corpus_capability():
     manifest['settings_schema'] = {'type': 'object', 'additionalProperties': False,
         'required': ['project_id', 'corpus', 'suite'], 'properties': {
             'project_id': {'type': 'string', 'minLength': 36, 'maxLength': 36},
-            'corpus': reference, 'suite': reference}}
+            'corpus': reference, 'suite': reference,
+            'parameters': corpus.PARAMETERS_SCHEMA}}
     manifest['ui_schema'] = {'labels': {'project_id': 'Project identity',
-                                      'corpus': 'Selected original corpus', 'suite': 'Selected suite'}}
+                                      'corpus': 'Selected original corpus', 'suite': 'Selected suite',
+                                      'parameters': 'Evaluation policy overrides'}}
+    manifest['outputs']['result']['schema']['maxLength'] = corpus.MAX_EVIDENCE_BYTES
     manifest['version']['code_sha256'] = hashlib.sha256(lab_evaluate.canonical_json({
         'manifest': manifest, 'archive_sha256': corpus.ARCHIVE_SHA256,
         'executor_sha256': hashlib.sha256(__import__('pathlib').Path(corpus.__file__).read_bytes()).hexdigest(),

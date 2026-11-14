@@ -88,9 +88,10 @@ def submit_project_graph_job(
     jobs = _jobs()
     if tool_name == solve.TOOL_NAME:
         solve.refuse_split(params, solve_context)
-    existing = platform_link.platform_db().run_transaction(lambda conn:
-        jobs.get_project_graph_job_by_key(org, project_id, idempotency_key, conn=conn))
-    if existing is not None:
+    def replay_existing(conn):
+        existing = jobs.get_project_graph_job_by_key(org, project_id, idempotency_key, conn=conn)
+        if existing is None:
+            return None
         if existing.get("deleted_at") is not None:
             project.refuse("CONTEXT_NOT_FOUND")
         if expected_intake_sha256 is not None and (
@@ -100,7 +101,7 @@ def submit_project_graph_job(
         normalized = graph._parameters(SimpleNamespace(drawing_id=drawing_id), params)
         if tool_name == solve.TOOL_NAME:
             try:
-                normalized = solve.cloud.validate_params(normalized).model_dump()
+                normalized = solve.normalize_params(normalized, full_frame=True).model_dump()
             except solve.cloud.CloudError:
                 pass
         if graph._global_sizing(tool_name, normalized):
@@ -120,6 +121,13 @@ def submit_project_graph_job(
         fingerprint = _submission_fingerprint(org, project_id, drawing_id, input_version_id,
             tenant, actor, tool_name, normalized, tool_manifest_sha256, solve_context, proposal_job_id)
         return jobs._graph_replay(existing, fingerprint)
+
+    # Keep request/principal/source comparison under the existing row lock.
+    # Replays return before admission IO, child reservation or submission. The
+    # store repeats this check in its insertion transaction for concurrent misses.
+    existing = platform_link.platform_db().run_transaction(replay_existing)
+    if existing is not None:
+        return existing
     admission = project.verify_at_admission(tenant, project_id, drawing_id, input_version_id,
                                            checkout_capability=checkout_capability)
     if (expected_intake_sha256 is not None
@@ -186,11 +194,15 @@ def submit_project_graph_job(
             raise project.ProjectContextError("SIP_R4_WORKER_UNAVAILABLE")
         if preview:
             return {"admissible": True, "replay": False}
-        return platform_link.platform_db().run_transaction(lambda conn:
-            jobs.submit_project_graph_job(org, project_id, str(tenant), tool_name, normalized,
+        def submit(conn):
+            existing = replay_existing(conn)
+            if existing is not None:
+                return existing
+            return jobs.submit_project_graph_job(org, project_id, str(tenant), tool_name, normalized,
                 idempotency_key, input_version_id=input_version_id,
                 execution_context=execution_context, submission_fingerprint=fingerprint,
-                pinned_tier=stored_org.tier if stored_org is not None else None, conn=conn))
+                pinned_tier=stored_org.tier if stored_org is not None else None, conn=conn)
+        return platform_link.platform_db().run_transaction(submit)
 
 
 def _job_context(job, conn):
@@ -344,6 +356,10 @@ def _preparation_error(exc):
         error["reason_code"] = reason
     if isinstance(exc, _ColdVoltageFailed):
         error["cold_voltage"] = exc.cold_voltage
+    if hasattr(exc, "solve_progress"):
+        error["solve_progress"] = exc.solve_progress
+        if exc.solve_progress["status"] == "partial":
+            error["message"] = "canonical Solar solve partially completed"
     return error
 
 

@@ -85,6 +85,78 @@ const location = () => screen.getByRole('textbox', { name: 'Insertion point (x, 
 const feedback = () => screen.getByTestId('project-solar-graph-feedback').textContent
 const arm = async () => waitFor(() => expect(action().disabled).toBe(false))
 
+function discoveryHarness() {
+  const h = harness('solar-panel-groups')
+  h.client.readContext.mockImplementation(() => {
+    const data = context(h.snapshot.binding, h.rev)
+    data.intake.solar_design_graph.project.installation_design = 'Roof'
+    return Promise.resolve({ ok: true, status: 200, data })
+  })
+  return h
+}
+async function chooseDiscovery(h) {
+  const view = render(<ProjectSolarGraphForm {...h.props} />)
+  const mode = await screen.findByLabelText('Membership source')
+  expect(mode.value).toBe('manual')
+  expect(screen.queryByLabelText('Maximum outline offset')).toBeNull()
+  fireEvent.change(mode, { target: { value: 'discover' } })
+  fireEvent.change(screen.getByLabelText('Maximum outline offset'), { target: { value: '0.75' } })
+  fireEvent.change(screen.getByLabelText('Discovery alignment tolerance'), { target: { value: '0.05' } })
+  await arm()
+  return view
+}
+
+it('S02 explicitly discovers through the canonical preview and run rail, with no caller membership', async () => {
+  const h = discoveryHarness()
+  await chooseDiscovery(h)
+  expect(screen.getByText('Installation design: Roof')).toBeTruthy()
+  expect(screen.queryByLabelText('Gap between groups')).toBeNull()
+  const intent = h.client.prepareRun.mock.calls.at(-1)[0]
+  expect(intent.params).toEqual({ drawing_id: binding.drawing_id, expected_rev: 6,
+    discover: { BranchMaxOffset: 0.75, AlignmentTolerance: 0.05, InstallationDesign: 'Roof' } })
+  expect(h.client.catalog).toHaveBeenCalled()
+  fireEvent.click(action())
+  await waitFor(() => expect(h.submit).toHaveBeenCalledTimes(1))
+  expect(h.submit.mock.calls[0][0].params).toEqual(intent.params)
+  expect(h.submit.mock.calls[0][1]).toMatchObject({ binding, authorityKey: 'authority-a', signal: h.parent.signal })
+})
+
+it('S02 invalidates discovery preview when settings change and preserves manual mode on return', async () => {
+  const h = discoveryHarness()
+  await chooseDiscovery(h)
+  fireEvent.change(screen.getByLabelText('Maximum outline offset'), { target: { value: '0' } })
+  expect(action().disabled).toBe(true)
+  await screen.findByText('Use a Roof or Ground project and enter an outline offset and alignment tolerance greater than 0 and at most 1000000.')
+  expect(h.submit).not.toHaveBeenCalled()
+  fireEvent.change(screen.getByLabelText('Membership source'), { target: { value: 'manual' } })
+  expect(screen.getByLabelText('Gap between groups')).toBeTruthy()
+  expect(screen.queryByLabelText('Maximum outline offset')).toBeNull()
+  expect(action().disabled).toBe(true)
+})
+
+it('S02 discards a discovery draft when project version selection changes', async () => {
+  const h = discoveryHarness()
+  const view = await chooseDiscovery(h)
+  act(() => {
+    h.move(nextBinding)
+    view.rerender(<ProjectSolarGraphForm {...h.props} solarBinding={nextBinding} />)
+  })
+  expect(screen.getByLabelText('Membership source').value).toBe('manual')
+  expect(screen.queryByLabelText('Maximum outline offset')).toBeNull()
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
+it('S02 refuses discovery if the project installation design changes during submit recheck', async () => {
+  const h = discoveryHarness()
+  await chooseDiscovery(h)
+  const data = context()
+  data.intake.solar_design_graph.project.installation_design = 'Ground'
+  h.client.readContext.mockResolvedValueOnce({ ok: true, status: 200, data })
+  fireEvent.click(action())
+  await screen.findByText('The proposed panel groups changed. Refresh the preview before continuing.')
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
 it('G17 panel import refusal permits explicit preview recovery', async () => {
   const h = harness('solar-panels-from-drawing')
   const fetchImpl = vi.fn(async () => ({ ok: false, status: 503, json: async () => workerUnavailable }))
@@ -293,6 +365,85 @@ function fillGroupNumbers() {
     fireEvent.change(screen.getByRole('spinbutton', { name: label }), { target: { value: '1' } })
   }
 }
+function gapPanelGroupHarness() {
+  const h = panelGroupHarness()
+  h.graph.panels = h.graph.panels.slice(0, 4).map((panel, index) => ({ ...panel, angle: 0,
+    centre: [[0, 0], [3, 0], [20, 0], [23, 0]][index] }))
+  return h
+}
+it('exposes an optional drawing-unit gap and submits the named islands through normal controls', async () => {
+  const h = gapPanelGroupHarness()
+  render(<ProjectSolarGraphForm {...h.props} />)
+  const gap = screen.getByRole('spinbutton', { name: 'Gap between groups' })
+  expect(gap.value).toBe('')
+  expect(gap.required).toBe(false)
+  expect(gap).toHaveAccessibleDescription('Drawing units. Enter a positive distance, or leave blank to group by angle.')
+  fillGroupNumbers()
+  changeGroupNumber('Module width along row', '2')
+  await arm()
+  expect(h.client.catalog.mock.calls.at(-1)[0].intents[0].params.groups.map(({ panel_refs }) => panel_refs))
+    .toEqual([['a', 'b', 'c', 'd']])
+  changeGroupNumber('Gap between groups', '1')
+  expect(action().disabled).toBe(true)
+  await screen.findByRole('textbox', { name: 'Group 2 name' })
+  fireEvent.change(screen.getByRole('textbox', { name: 'Group 1 name' }), { target: { value: 'West' } })
+  fireEvent.change(screen.getByRole('textbox', { name: 'Group 2 name' }), { target: { value: 'East' } })
+  await arm()
+  const intent = h.client.catalog.mock.calls.at(-1)[0].intents[0]
+  expect(intent.params.groups).toEqual([
+    { name: 'West', panel_refs: ['a', 'b'], module_width_along_row: 2,
+      module_height_across_row: 1, alignment_tolerance: 1 },
+    { name: 'East', panel_refs: ['c', 'd'], module_width_along_row: 2,
+      module_height_across_row: 1, alignment_tolerance: 1 },
+  ])
+  await submitAndWait(h)
+  expect(h.submit.mock.calls[0][0]).toBe(intent)
+})
+it('rejects nonpositive gaps, merges islands for a larger gap and restores angle grouping when cleared', async () => {
+  const h = gapPanelGroupHarness()
+  render(<ProjectSolarGraphForm {...h.props} />)
+  fillGroupNumbers()
+  changeGroupNumber('Module width along row', '2')
+  await arm()
+  const previews = h.client.catalog.mock.calls.length
+  for (const value of ['0', '-1']) {
+    changeGroupNumber('Gap between groups', value)
+    expect(action().disabled).toBe(true)
+    await screen.findByText('Enter a gap distance as a finite number greater than 0, or leave it blank to group by angle.')
+    expect(h.client.catalog).toHaveBeenCalledTimes(previews)
+    expect(h.submit).not.toHaveBeenCalled()
+  }
+  changeGroupNumber('Gap between groups', '1')
+  await arm()
+  expect(h.client.catalog.mock.calls.at(-1)[0].intents[0].params.groups.map(({ panel_refs }) => panel_refs))
+    .toEqual([['a', 'b'], ['c', 'd']])
+  changeGroupNumber('Gap between groups', '15')
+  expect(action().disabled).toBe(true)
+  await arm()
+  expect(screen.queryByRole('textbox', { name: 'Group 2 name' })).toBe(null)
+  expect(h.client.catalog.mock.calls.at(-1)[0].intents[0].params.groups.map(({ panel_refs }) => panel_refs))
+    .toEqual([['a', 'b', 'c', 'd']])
+  changeGroupNumber('Gap between groups', '')
+  expect(action().disabled).toBe(true)
+  await arm()
+  const intent = h.client.catalog.mock.calls.at(-1)[0].intents[0]
+  expect(intent.params.groups.map(({ panel_refs }) => panel_refs)).toEqual([['a', 'b', 'c', 'd']])
+  await submitAndWait(h)
+  expect(h.submit.mock.calls[0][0]).toBe(intent)
+})
+it('rechecks gap island membership against the fresh context before submission', async () => {
+  const h = gapPanelGroupHarness()
+  render(<ProjectSolarGraphForm {...h.props} />)
+  fillGroupNumbers()
+  changeGroupNumber('Module width along row', '2')
+  changeGroupNumber('Gap between groups', '1')
+  await arm()
+  h.graph = { ...h.graph, panels: h.graph.panels.map((panel) => panel.id === 'd' ? { ...panel, centre: [30, 0] } : panel) }
+  fireEvent.click(action())
+  await screen.findByText('The proposed panel groups changed. Refresh the preview before continuing.')
+  expect(action().disabled).toBe(true)
+  expect(h.submit).not.toHaveBeenCalled()
+})
 it.each([true, false])('W1C-31 reports the busy state when panel-group submission is unavailable (busy=%s)', (busy) => {
   const h = panelGroupHarness()
   render(<ProjectSolarGraphForm {...h.props} busy={busy} onProjectSubmit={undefined} />)

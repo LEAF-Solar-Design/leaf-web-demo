@@ -95,7 +95,10 @@ the displayed data without mutating the authoritative read or saved query.
 Line charts include a native “View data table” disclosure of those same rows.
 The cores accept `className`/`style` for layout, use `--leaf-*` tokens with
 host CSS-variable and package-token fallbacks, and fit their parent without
-global CSS. Provider strings render as text, never raw HTML.
+global CSS. Provider strings render as text, never raw HTML. Text cells containing
+an absolute HTTPS URL render as keyboard-accessible links in a new tab, retaining
+the supplied URL as the label. Links suppress referrer and opener access. Values
+with credentials, whitespace, backslashes, or other schemes remain inert text.
 
 ## Inert schedule draft form (separate actions entry)
 
