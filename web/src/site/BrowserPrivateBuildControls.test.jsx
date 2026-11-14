@@ -16,6 +16,7 @@ vi.mock('./ProjectBoardGround.jsx',()=>({ProjectBoardGround:()=>null}))
 vi.mock('./WorkspaceEnvironment.jsx',()=>({default:({children})=><>{children}</>}))
 vi.mock('./ProjectPageEditor.jsx',()=>({default:()=>null,PagePreview:()=>null}))
 vi.mock('./CanvasToolbar.jsx',()=>({default:()=>null}))
+vi.mock('./privateChartStateClient.js',()=>({loadChartState:async()=>null,saveChartState:vi.fn()}))
 vi.mock('./PrivateStaticPreview.jsx',()=>({default:({result})=><div data-testid="mounted-private-result">{result.preview.jobId}</div>}))
 const id=n=>`00000000-0000-4000-8000-${String(n).padStart(12,'0')}`
 const controller=()=>({sourceContext:'browser',projectId:id(1),sourceLoaded:true,unknown:false,busy:false,loading:false,close:vi.fn(),candidate:{state:'published',source_request_id:id(2),version:1,receipt_digest:'c'.repeat(64),source_commit:'a'.repeat(40),source_tree:'b'.repeat(40)}})

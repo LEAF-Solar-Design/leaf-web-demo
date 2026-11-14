@@ -1,5 +1,5 @@
 import { subscribePrivateBuildSelection } from './privateBuildSelection.js'
-import PrivateStaticPreview from './PrivateStaticPreview.jsx'
+import SavedPrivateStaticPreview from './SavedPrivateStaticPreview.jsx'
 import { copyChartState } from './privatePreviewState.js'
 import { createContext, useCallback, useEffect, useRef, useState } from 'react'
 import { ProjectBoardGround } from './ProjectBoardGround.jsx'
@@ -237,7 +237,7 @@ export function BrowserAssetGround({ browserActive = false, browserPanel: contro
           setStylePreference({ accountScope: preferenceScope, value })
           onBrowserPanel(value === 'sidebar' ? 'project' : 'none')
         }}><option value="environment">In environment</option><option value="sidebar">Sidebar</option></select></label><button type="button" onClick={() => setSettings(false)}>Close settings</button></section>}
-        {shown?.kind === 'private-next' ? <PrivateStaticPreview projectId={projectId} result={shown.result} isCurrent={privateCurrent} initialState={shown.chartState} onStateChange={chartState => {
+        {shown?.kind === 'private-next' ? <SavedPrivateStaticPreview projectId={projectId} result={shown.result} isCurrent={privateCurrent} initialState={shown.chartState} onStateChange={chartState => {
           if (!privateCurrent()) return
           setAsset(value => value?.scope === currentScope && value.result === shown.result ? { ...value,chartState } : value)
         }} /> : shown?.kind === 'page' ? <>
