@@ -34,6 +34,32 @@ STORE_SCHEMA = "leaf.solar-project-solaredge-import.v1"
 READ_SCHEMA = "leaf.solar-project-solaredge-tracking-read.v1"
 READ_TOOL = "solar-solaredge-tracking-read"
 ACCEPT_TOOL = "solar-solaredge-accept"
+
+
+def tracking_read_catalog_availability(tool, tenant, input_version_id):
+    """Project tracking is a synchronous read, not a worker-backed graph write."""
+    import deps
+    from solar_project_read import _trusted as trusted_read
+
+    read_tool = False
+    try:
+        if tool.get("name") == READ_TOOL:
+            trusted_read(tenant, READ_TOOL, deps.catalog_tool_digest(tool))
+            read_tool = True
+    except (GraphValidationError, ValueError, TypeError, KeyError):
+        pass
+    try:
+        exact_version = input_version_id is not None and bool(UUID(str(input_version_id)))
+    except (ValueError, TypeError, AttributeError):
+        exact_version = False
+    state = policy.project_drawing_tool_availability(tool, tenant, read_tool=read_tool,
+                                                    exact_version=exact_version)
+    # Keep the Solar availability projection. Generic drawing executor markers
+    # do not select the canonical /solar-reads route used by this tool.
+    return {key: value for key, value in state.items()
+            if key not in ("project_read", "project_write")}
+
+
 _IDENTITY = ("organization_id", "project_id", "drawing_id", "source_version_id",
              "source_intake_sha256", "graph_sha256", "graph_project_id")
 _REPORT_KEYS = frozenset(("schema", *_IDENTITY, "source", "request", "row_angle",

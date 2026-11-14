@@ -268,6 +268,12 @@ def _capabilities(x_internal_role, x_ops_secret, tenant, drawing_id, project_id,
                     continue
                 if name not in states:
                     tool = raw_by_name.get(name, {})
+                    if name == "solar-solaredge-tracking-read":
+                        from solar_project_solaredge import tracking_read_catalog_availability
+                        states[name] = tracking_read_catalog_availability(
+                            tool, tenant, input_version_id)
+                        row["availability"] = deepcopy(states[name])
+                        continue
                     state = solar_project_admission.project_catalog_availability(tool, enabled=True)
                     entry = requests.get(name)
                     if entry is not None and state["engine_ready"]:
