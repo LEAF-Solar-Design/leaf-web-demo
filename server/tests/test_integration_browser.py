@@ -146,11 +146,59 @@ def test_write_requires_origin_and_preserves_exact_body_and_revision(context):
     assert sent.content == b'{"title":"fixture"}' and sent.headers["if-match"] == "2"
 
 
-@pytest.mark.parametrize("suffix", ["connections", "connections/fixture/credential", "manual-workflow-runs",
+@pytest.mark.parametrize("suffix", ["connections/fixture/vercel/attempt", "connections/fixture/credential", "manual-workflow-runs",
     "manual-workflow-schedule-drafts", "webhook-registrations", "actions", "datasets/fixture/versions/1/sync"])
 def test_provider_workflow_and_sync_operations_are_not_reachable(context, suffix):
     path = f"/api/v1/projects/{PROJECT}/integrations/{suffix}"
     error(context, context["request"](path=path), 404)
+    assert not context["calls"]
+
+
+@pytest.mark.parametrize("suffix", ["connections", "connections?limit=2&after=fixture",
+    "connections/fixture", "connections/fixture/vercel/preview-permission"])
+def test_supported_connection_lookups_preserve_fixed_destination_and_bearer(context, suffix):
+    payload = {"fixture": "read-only-result"}
+    context["respond"] = lambda _: httpx.Response(200, json=payload)
+    path = f"/api/v1/projects/{PROJECT}/integrations/{suffix}"
+    response = context["request"](path=path)
+    assert response.status_code == 200 and response.json() == payload
+    [sent] = context["calls"]
+    assert str(sent.url) == UPSTREAM + path
+    assert sent.method == "GET" and sent.headers["authorization"] == "Bearer " + TOKEN
+    assert "cookie" not in sent.headers and "x-leaf-integration-origin" not in sent.headers
+    assert "no-store" in response.headers["cache-control"]
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT"])
+@pytest.mark.parametrize("suffix", ["connections", "connections/fixture",
+    "connections/fixture/vercel/preview-permission"])
+def test_readonly_connection_admission_does_not_enable_mutations(context, method, suffix):
+    path = f"/api/v1/projects/{PROJECT}/integrations/{suffix}"
+    error(context, context["request"](method, path), 405)
+    assert not context["calls"]
+
+
+def test_permission_lookup_preserves_upstream_role_denial(context):
+    context["respond"] = lambda _: httpx.Response(403, json={"error": {
+        "code": "WORKSPACE_SCOPE_DENIED", "correlationId": OTHER}})
+    path = f"/api/v1/projects/{PROJECT}/integrations/connections/fixture/vercel/preview-permission"
+    response = context["request"](path=path)
+    error(context, response, 403)
+    assert response.json()["error"]["code"] == "WORKSPACE_SCOPE_DENIED"
+    assert response.json()["error"]["correlationId"] == OTHER
+    assert len(context["calls"]) == 1
+
+
+@pytest.mark.parametrize("suffix,status", [
+    ("connections?limit=101", 400), ("connections?limit=1&limit=2", 400),
+    ("connections?target=https://foreign.example", 400),
+    ("connections/fixture?revision=1", 400),
+    ("connections/fixture/vercel/preview-permission?enabled=true", 400),
+    ("connections/fixture/vercel/preview-permission/enable", 404),
+    ("vercel-preview-runs", 404), ("vercel-preview-runs/fixture/observe", 404)])
+def test_connection_readiness_does_not_expand_query_or_provider_routes(context, suffix, status):
+    path = f"/api/v1/projects/{PROJECT}/integrations/{suffix}"
+    error(context, context["request"](path=path), status)
     assert not context["calls"]
 
 
