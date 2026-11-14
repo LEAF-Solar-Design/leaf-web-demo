@@ -12,6 +12,15 @@ From `web`, with the repository dependencies and Playwright Chromium installed:
 npx playwright test --config playwright.widgets.config.mjs
 ```
 
+The existing native `studio-walk-regressions` gate also discovers
+`web/e2e/regressions/widget-browser.spec.mjs`. That bridge invokes this dedicated
+config and requires six passed cases, with no skips, unexpected results or flakes.
+For the focused bridge replay from `web`:
+
+```sh
+npx playwright test --config playwright.regressions.config.mjs widget-browser.spec.mjs --workers=1
+```
+
 The config builds a dedicated production bundle of the real WidgetsView and its
 client. It owns a loopback preview server on port 5197, refuses an occupied port,
 and lets Playwright close that server and every test browser context. It does not
@@ -36,6 +45,15 @@ a temporary service error supports Save retry. Export remains blocked while the
 server error is unresolved, preserving the existing product policy. Two fixture
 projects using the same document name store separate artifacts and restore the
 right project through the normal editor client.
+
+Two further cases cover revision receipts. A fixture write commits revision 2 but
+omits the acknowledgement's revision. The editor keeps its local text and old
+head, an explicit Save receives the expected conflict, and explicit Reload
+recovers the committed document. A malformed loaded head keeps unsaved text and
+the previous head; the next explicit Save uses that head and succeeds. Actual
+downloaded definitions match the fixture's stored documents after recovery.
+These cases exercise the real browser/client error paths without corrupting a
+live service or changing accepted evidence.
 
 These are real Chromium, production-built editor, pointer, Blob download and
 client requests with a fixture API. The fixture is deliberately not authentication,
