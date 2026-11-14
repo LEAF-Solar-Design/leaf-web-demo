@@ -218,6 +218,9 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   const generation = useRef(0)
   const context = useRef(null)
   const viewGeneration = useRef(0)
+  // Keep only dataset selection intent while a profile hides this Ground.
+  // Results and action authority are always discarded and read again.
+  const rememberedView = useRef(null)
   const busy = useRef(false)
   const snapshot = session?.controller?.getSnapshot?.() || session
   const sessionGeneration = snapshot?.generation
@@ -225,6 +228,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   const eligible = active && signedIn && !mock && UUID.test(projectId || '') && status === 'active'
   // Comparing the render identity prevents a single frame of old-account content.
   const identityKey = JSON.stringify([projectId, accountScope, signedIn, mock, sessionGeneration, status, active, epoch])
+  const resumeOwner = JSON.stringify([projectId, accountScope, signedIn, mock, sessionGeneration, status, epoch])
   const identity = useMemo(() => ({ key: identityKey }), [identityKey, session?.controller])
   const visible = state.identity === identity && eligible
   const leaving = leavingGround === 'integrations'
@@ -271,6 +275,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   function fail(error, ctx, errorOperation = null) {
     if (!current(ctx) || error?.name === 'AbortError') return
     if (error?.status === 403) {
+      rememberedView.current = null
       invalidate()
       setState({ ...empty(), identity, error: 'You do not have permission to view these integrations.' })
       setForm(blankForm())
@@ -279,12 +284,13 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       pending: '', error: humanizeError(error), errorOperation, retryable: error?.retryable !== false && ![401, 403, 404, 409, 422].includes(error?.status) }))
   }
   useLayoutEffect(() => {
+    if (rememberedView.current?.owner !== resumeOwner) rememberedView.current = null
     invalidate()
     setState({ ...empty(), identity, pending: eligible ? 'Loading integrations…' : '' })
     setForm(blankForm())
     setRevision('')
     if (!eligible) return undefined
-    const ctx = { controller: new AbortController(), generation: generation.current, sessionGeneration }
+    const ctx = { controller: new AbortController(), generation: generation.current, sessionGeneration, resumeOwner }
     context.current = ctx
     ;(async () => {
       try {
@@ -298,6 +304,16 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
         if (!current(ctx)) return
         setState({ ...empty(), identity, scope, datasets: datasets.records, elements: elements.records,
           datasetCursor: datasets.nextCursor, elementCursor: elements.nextCursor })
+        const resume = rememberedView.current
+        rememberedView.current = null
+        if (resume?.owner === ctx.resumeOwner && resume.scope === ctx.cacheIdentity) {
+          const saved = elements.records.find(record => record.element.id === resume.id && record.element.kind.startsWith('dataset.'))
+          if (saved) {
+            setState(old => ({ ...old, pending: 'Loading view…' }))
+            await readView(saved, false, ctx)
+            if (current(ctx)) setState(old => ({ ...old, pending: '' }))
+          }
+        }
       } catch (error) { fail(error, ctx) }
     })()
     return invalidate
@@ -383,6 +399,8 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       : { ...old, dataset: referenceKey(reference), columns: dataset.fields.map(field => field.id) })
   }
   async function readView(record, historical, ctx, cursor) {
+    rememberedView.current = !historical && record.element.kind.startsWith('dataset.')
+      ? { owner: ctx.resumeOwner, scope: ctx.cacheIdentity, id: record.element.id } : null
     const request = ++viewGeneration.current
     const readIdentity = JSON.stringify([ctx.cacheIdentity, record.revision, record.element])
     const retain = state.readIdentity === readIdentity && state.read && ['ready', 'empty', 'partial', 'stale'].includes(state.read.status)
