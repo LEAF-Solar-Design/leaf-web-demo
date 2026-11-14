@@ -1451,6 +1451,8 @@ def build_suites() -> List[Suite]:
         Suite("server-lab-run-store", "server tests/test_lab_run_store.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_run_store.py"), 27, uses_database=True,
               database_skip_reasons=(r"platform DB unreachable: .+",)),
+        Suite("server-lab-corpus-export", "server tests/test_lab_corpus_export.py", "pytest", SERVER,
+              _py_pytest("tests/test_lab_corpus_export.py"), 6),
         # 48 collected: 24 SQLite cases and 24 PostgreSQL twins.
         Suite("server-lab-runs", "server tests/test_lab_runs.py", "pytest", SERVER,
               _unprivileged_pytest("tests/test_lab_runs.py"), 24, uses_database=True,
