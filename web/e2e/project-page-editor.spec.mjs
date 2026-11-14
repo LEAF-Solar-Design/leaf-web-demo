@@ -4,6 +4,9 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { expect, test } from '@playwright/test'
 import { catProofResponse, makeCatProofState } from './catProofFixture.mjs'
+import { scaled } from './timeScale.mjs'
+
+test.describe.configure({ mode: 'parallel' })
 
 // Real rendered Studio, fixture-backed page persistence. Export bytes come from
 // the production Python template; this suite does not prove a live API or build.
@@ -148,12 +151,12 @@ async function openProject(page) {
   const projects = sidebar.getByRole('region', { name: 'Workspace projects', exact: true })
   const project = projects.getByRole('button', { name: PROJECT.name, exact: true })
   const selected = page.getByRole('button', { name: `Projects: change project. Project ${PROJECT.name}`, exact: true })
-  await expect(selected.or(project)).toBeVisible({ timeout: 30_000 })
+  await expect(selected.or(project)).toBeVisible({ timeout: scaled(30_000) })
   if (!await selected.isVisible()) {
-    await project.click({ timeout: 30_000 })
+    await project.click({ timeout: scaled(30_000) })
     await page.getByRole('button', { name: 'Project', exact: true }).click()
   }
-  await expect(selected).toBeVisible({ timeout: 30_000 })
+  await expect(selected).toBeVisible({ timeout: scaled(30_000) })
   const editor = sidebar.getByRole('region', { name: 'Page editor', exact: true })
   await expect(editor).toBeVisible()
   return editor
@@ -171,7 +174,7 @@ async function expectInsideViewport(locator, viewport) {
 
 for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['phone', { width: 390, height: 844 }]]) {
   test(`persisted portfolio gallery layout at ${size}`, async ({ page }, testInfo) => {
-    test.setTimeout(120_000)
+    test.setTimeout(scaled(120_000))
     const layoutViewport = { ...viewport, height: size === 'desktop' ? 900 : 844 }
     await page.setViewportSize(layoutViewport)
     const backend = await installBackend(page)
@@ -360,8 +363,8 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
   })
 
   test(`portfolio text proposal review, use and save at ${size}`, async ({ page }, testInfo) => {
-    test.setTimeout(120_000)
-    page.setDefaultTimeout(15_000)
+    test.setTimeout(scaled(120_000))
+    page.setDefaultTimeout(scaled(15_000))
     const proposalViewport = { ...viewport, height: size === 'desktop' ? 900 : 844 }
     await page.setViewportSize(proposalViewport)
     const backend = await installBackend(page)
@@ -446,7 +449,7 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
   })
 
   test(`portfolio visual text selection at ${size}`, async ({ page }, testInfo) => {
-    test.setTimeout(120_000)
+    test.setTimeout(scaled(120_000))
     const selectionViewport = { ...viewport, height: size === 'desktop' ? 900 : 844 }
     await page.setViewportSize(selectionViewport)
     const backend = await installBackend(page)
@@ -526,7 +529,7 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
   })
 
   test(`large portfolio disclosures and reachable Save at ${size}`, async ({ page }, testInfo) => {
-    test.setTimeout(120_000)
+    test.setTimeout(scaled(120_000))
     const editorViewport = { ...viewport, height: size === 'desktop' ? 900 : 844 }
     await page.setViewportSize(editorViewport)
     const backend = await installBackend(page)
@@ -622,7 +625,7 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
   })
 
   test(`native preview journey, ${size}${viewport.width}x${viewport.height}`, async ({ page }, testInfo) => {
-    test.setTimeout(120_000)
+    test.setTimeout(scaled(120_000))
     await page.setViewportSize(viewport)
     const backend = await installBackend(page)
     const document = portfolioImport()
@@ -641,7 +644,7 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
     await build.click()
     await expect(native.getByRole('status').filter({ hasText: 'Queued · Saved revision 7' })).toBeVisible()
     await expect(native.getByRole('status').filter({ hasText: 'Building · Saved revision 7' })).toBeVisible()
-    await expect(native.getByRole('status').filter({ hasText: 'Ready · Saved revision 7' })).toBeVisible({ timeout: 20_000 })
+    await expect(native.getByRole('status').filter({ hasText: 'Ready · Saved revision 7' })).toBeVisible({ timeout: scaled(20_000) })
     const image = native.getByRole('img', { name: 'iOS simulator preview of saved portfolio revision 7', exact: true })
     await image.scrollIntoViewIfNeeded()
     await expect.poll(() => image.evaluate(node => node.complete && node.naturalWidth > 0)).toBe(true)
@@ -679,8 +682,8 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
   })
 
   test(`portfolio import, galleries, resume, private previews and export at ${size}`, async ({ page }, testInfo) => {
-    test.setTimeout(120_000)
-    page.setDefaultTimeout(15_000)
+    test.setTimeout(scaled(120_000))
+    page.setDefaultTimeout(scaled(15_000))
     await page.setViewportSize(viewport)
     const backend = await installBackend(page)
     await page.goto('/app?surface=browser')
@@ -801,7 +804,7 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
   })
 
   test(`project page create, edit, save, reload and source export at ${size}`, async ({ page }, testInfo) => {
-    test.setTimeout(120_000)
+    test.setTimeout(scaled(120_000))
     await page.setViewportSize(viewport)
     const backend = await installBackend(page)
     await page.goto('/app?surface=browser')
