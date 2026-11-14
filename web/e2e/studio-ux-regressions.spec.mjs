@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { scaled } from './timeScale.mjs'
 
 async function openTour(page, viewport) {
   await page.setViewportSize(viewport)
@@ -10,6 +11,7 @@ async function openTour(page, viewport) {
 }
 
 test('the version toast ignores a captured drag-away before Undo activates normally', async ({ page }) => {
+  test.setTimeout(scaled(30_000))
   const tour = await openTour(page, { width: 1280, height: 800 })
   await tour.getByRole('button', { name: 'Skip', exact: true }).click()
 
