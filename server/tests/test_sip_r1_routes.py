@@ -272,3 +272,15 @@ def test_sip_r1_renew_wrong_ascii_proof(http, memory):
 
 def test_sip_r1_release_wrong_ascii_proof(http, memory):
     _reject_checkout_proof(http, memory, method="DELETE", nonascii=False)
+
+
+def test_context_preserves_existing_positional_scope_arguments(memory):
+    import json
+    response = project_drawings.context_route(P1, V2, D1, memory.tenant, O1, P1)
+    assert response.status_code == 200, response.body
+    body = json.loads(response.body)
+    assert body["context"]["organization_id"] == str(O1)
+    assert body["context"]["project_id"] == str(P1)
+    assert body["context"]["drawing_id"] == str(D1)
+    assert "solve_preparation" not in body
+    assert memory.mutations == []

@@ -11,4 +11,7 @@ Verification: registered test_sip_r1_routes.py and test_w1_solve_split.py; Proje
 - [x] Protected context preparation and negative tests
 - [x] Client and prepared Solve form, scoped stale/outcome tests
 - [x] Focused checks and diff review:76Python and176web passed; no assertion removed
-- [ ] Publish commit and PR request; native selected serialized after3497
+- [x] Publish8f02 and open PR3005; exact critic PASS, selected3886 completed RED
+- [x] Reproduce sole selected RED: additive route parameters shifted direct positional tenant/scope; own regression fails404 before correction
+- [x] Preserve original positional API with keyword-only preparation options;356 route/demo actor cases PASS in14.09s
+- [ ] Publish same-branch correction and selected CI

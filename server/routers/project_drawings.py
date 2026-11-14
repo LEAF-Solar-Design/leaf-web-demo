@@ -119,10 +119,10 @@ def _dispatch(operation):
 
 @router.get("/api/projects/{project_id}/drawing-versions/{input_version_id}/context")
 def context_route(project_id: UUID, input_version_id: UUID, drawing_id: Optional[UUID] = None,
-                  prepare_solve: bool = False, solve_frame: Optional[str] = None,
                   tenant=Depends(deps.require_active_tenant),
                   x_org_id: Optional[UUID] = Header(default=None),
-                  x_project_id: Optional[UUID] = Header(default=None)):
+                  x_project_id: Optional[UUID] = Header(default=None), *,
+                  prepare_solve: bool = False, solve_frame: Optional[str] = None):
     def operation():
         _headers(tenant, project_id, x_org_id, x_project_id)
         context = service.resolve_context(tenant, project_id, input_version_id, drawing_id=drawing_id)

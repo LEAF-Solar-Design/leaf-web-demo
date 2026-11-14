@@ -9,3 +9,5 @@ The client checks preparation schema, graph revision/digest, selected frame and 
 This is one named-group proposal at a time. It does not implement a whole-roof batch, change the existing per-frame sizing ceiling, certify electrical limits, choose a provider identity, or establish LIVE acceptance. A solver reference must be independently verified for the current organization. Missing authority is reported; no reference is guessed or granted by this form.
 
 Source checks: Python context-route and split-request suites, 76 passed. Web prepared-form, existing review/workspace and project-client suites, 176 passed. Added checks cover read-only derivation, corrupt/stale/missing graph inputs, wrong project/drawing headers, stale frame/revision responses, late scope changes, production-row dispatch and no resubmit after an unknown outcome. Existing assertions remain; the composition import inventory adds the new form module.
+
+CI correction: preparation query options are keyword-only after the existing context route arguments. Internal direct callers retain the original positional tenant/organization/project binding; HTTP preparation remains opt-in.
