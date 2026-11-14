@@ -523,6 +523,10 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_s02_geometry_only_groups.py"), 12),
         Suite("server-s02-grouped-graph-budget", "server S02 saved graph and request budgets", "pytest", SERVER,
               _py_pytest("tests/test_s02_grouped_graph_budget.py"), 6),
+        Suite("server-s02-report-row-angle", "server S02 bounded imported report rotation", "pytest", SERVER,
+              _py_pytest("tests/test_s02_report_row_angle.py"), 17),
+        Suite("server-s02-partial-tracking", "server S02 explicit partial tracking provenance", "pytest", SERVER,
+              _py_pytest("tests/test_s02_partial_tracking.py"), 17),
         # S16 electrical zones (2026-09-22): the create/assign builtin and the
         # partition the plugin keeps. Hermetic (a graph seeded in the test, no
         # network, no fixture), so the floor is the exact count on every runner:
