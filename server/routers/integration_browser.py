@@ -83,6 +83,12 @@ def _route(request, project_id, resource):
         raise _Failure(400, "WORKSPACE_INVALID_INPUT")
     if resource == "scope":
         methods, query = {"GET"}, set()
+    elif resource == "integrations/connections":
+        methods, query = {"GET"}, {"limit", "after"}
+    elif re.fullmatch(rf"integrations/connections/({_SLUG})(?:/vercel/preview-permission)?", resource):
+        # Lookup only. Canonical upstream still enforces its read/write-role
+        # policy; transport admission neither enables a grant nor starts a run.
+        methods, query = {"GET"}, set()
     elif resource == "integrations/dataset-imports":
         methods, query = {"POST"}, set()
     elif resource == "integrations/dataset-derivations/capabilities":
