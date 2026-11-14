@@ -300,6 +300,49 @@ def test_flow_schema_summary_is_reduced_filtered_and_bounded(tools):
     assert secret not in response.text and "access_token" not in response.text
 
 
+@pytest.mark.parametrize("field,expected", [
+    ({"name": "device", "type": "select", "required": True, "options": [
+        ["6c2990daea0a", "WiZ RGBW Tunable DAEA0A (10.0.0.149)"],
+        ["444f8e80ff06", "WiZ RGBW Tunable 80FF06 (10.0.0.175)"],
+    ]}, {"name": "device", "type": "select", "required": True, "options": [
+        {"value": "6c2990daea0a", "label": "WiZ RGBW Tunable DAEA0A (10.0.0.149)"},
+        {"value": "444f8e80ff06", "label": "WiZ RGBW Tunable 80FF06 (10.0.0.175)", "off_limits": True},
+    ]}),
+    ({"name": "mode", "selector": {"select": {"options": ["a", {"value": "b", "label": "Bee"}]}}},
+     {"name": "mode", "options": [{"value": "a"}, {"value": "b", "label": "Bee"}]}),
+    ({"name": "mode", "options": ["a", "a", [123, "invalid"], ["b", "x" * 24],
+                                    ["c", "See"], ["x" * 24, "invalid"], None,
+                                    ["bad"], {"value": "wrong_source"}],
+      "selector": {"select": {"options": ["b", {"value": "d", "label": "Dee"},
+                                            {"value": 123}, ["wrong_source", "invalid"]]}}},
+     {"name": "mode", "options": [{"value": "a"}, {"value": "b"}, {"value": "c", "label": "See"},
+                                   {"value": "d", "label": "Dee"}]}),
+    ({"name": "mode", "options": [f"choice_{i}" for i in range(60)]},
+     {"name": "mode", "options": [{"value": f"choice_{i}"} for i in range(50)]}),
+    ({"name": "mode", "options": [f"choice_{i}" for i in range(49)],
+      "selector": {"select": {"options": ["choice_0", "last", "extra"]}}},
+     {"name": "mode", "options": [{"value": f"choice_{i}"} for i in range(49)] + [{"value": "last"}]}),
+    ({"name": "device", "options": [["safe", "x" * 129 + " 10.0.0.175"]],
+      "selector": {"select": {"options": [{"value": "other", "label": "x" * 24 + "80ff06"}]}}},
+     {"name": "device", "options": [{"value": "safe", "off_limits": True},
+                                     {"value": "other", "off_limits": True}]}),
+    ({"name": "host", "type": "string"}, {"name": "host", "type": "string"}),
+    ({"name": "mode", "options": [123, ["x" * 24, "invalid"]], "selector": {"select": None}},
+     {"name": "mode"}),
+])
+def test_flow_schema_summary_keeps_safe_options(tools, field, expected):
+    device_id = device(tools)
+    command_id = call(tools, "ha_step", {"device_id": device_id, "op": "ha.flow.start",
+        "args": {"handler": "wiz"}}).json()["result"]["command_id"]
+    store.lease_commands(device_id)
+    store.complete_command(device_id, command_id, {"command_id": command_id, "status": "ok",
+        "finished_at": store._now().isoformat(), "data": {"type": "form", "data_schema": [field]}})
+    response = call(tools, "command_status", {"device_id": device_id, "command_id": command_id})
+    assert response.status_code == 200
+    assert response.json()["result"]["summary"] == {
+        "status": "ok", "type": "form", "data_schema": [expected]}
+
+
 def test_flow_schema_summary_rejects_invalid_field_values():
     summary = service._summary({"op": "ha.flow.start"}, {"data": {"data_schema": [
         {"name": "host", "type": "Bearer fixture", "required": "true", "default": "hidden"},

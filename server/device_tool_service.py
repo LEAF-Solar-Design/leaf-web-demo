@@ -221,6 +221,37 @@ def _summary(command, result):
                 field["type"] = item["type"]
             if type(item.get("required")) is bool:
                 field["required"] = item["required"]
+            selector = item.get("selector")
+            select = selector.get("select") if type(selector) is dict else None
+            selector_options = select.get("options") if type(select) is dict else None
+            options = []
+            seen = set()
+            for source, entries in (("options", item.get("options")), ("selector", selector_options)):
+                for entry in entries if type(entries) is list else []:
+                    label = None
+                    if type(entry) is str:
+                        value = entry
+                    elif source == "options" and type(entry) in (list, tuple) and len(entry) == 2:
+                        value, label = entry
+                    elif source == "selector" and type(entry) is dict:
+                        value, label = entry.get("value"), entry.get("label")
+                    else:
+                        continue
+                    if _text(value) is None or value in seen:
+                        continue
+                    option = {"value": value}
+                    if _names_off_limits(value) or _names_off_limits(label):
+                        option["off_limits"] = True
+                    if _text(label) is not None:
+                        option["label"] = label
+                    options.append(option)
+                    seen.add(value)
+                    if len(options) == 50:
+                        break
+                if len(options) == 50:
+                    break
+            if options:
+                field["options"] = options
             fields.append(field)
             if len(fields) == 32:
                 break
