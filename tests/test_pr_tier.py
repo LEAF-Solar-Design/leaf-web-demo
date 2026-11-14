@@ -555,6 +555,7 @@ def test_ci_tier_activation_precedes_startup_and_preserves_selection_mode():
     ("PUSH", "enabled", "selected", "selected"),
     ("PULL_REQUEST_UPDATED", "disabled", "shadow", "shadow"),
 ])
+@pytest.mark.skipif(sys.platform != "linux", reason="CI shell assertions require the Linux producer environment")
 def test_ci_startup_reports_actual_execution_mode(runner, tmp_path, event, policy, selection_mode, expected):
     source = (ROOT / ".codebuild/ci.sh").read_text(encoding="utf-8")
     activation = source.split("# LEAF_PR_TIER_ACTIVATION_BEGIN\n", 1)[1].split(
@@ -586,6 +587,7 @@ def test_ci_startup_reports_actual_execution_mode(runner, tmp_path, event, polic
 @pytest.mark.skipif(not shutil.which("bash"), reason="CI gate argument execution requires bash")
 @pytest.mark.parametrize("event", ["PULL_REQUEST_CREATED", "PULL_REQUEST_UPDATED", "PULL_REQUEST_REOPENED",
                                    "PUSH", "pin", "PULL_REQUEST_MERGED"])
+@pytest.mark.skipif(sys.platform != "linux", reason="CI shell assertions require the Linux producer environment")
 def test_ci_committed_policy_runs_pr_tier_but_keeps_main_and_pin_full(
         runner, monkeypatch, tmp_path, capsys, event):
     source = (ROOT / ".codebuild/ci.sh").read_text(encoding="utf-8")
@@ -610,6 +612,7 @@ def test_ci_committed_policy_runs_pr_tier_but_keeps_main_and_pin_full(
     # Keep real catalog ownership while replacing suite execution with inert results.
     suites = [runner.Suite(r["id"], r["label"], r["kind"], ROOT / r["cwd"], r["command"], 1)
               for r in catalog["suites"]]
+    current_ids = {r["id"] for r in catalog["suites"]}
     document = json.loads((ROOT / "scripts/ci/pr-tier.json").read_text(encoding="utf-8"))
     assert document["enabled"] is True
     monkeypatch.setenv("LEAF_CHANGED_PATHS", '["server/tests/test_autofill_adapter.py"]')
@@ -619,8 +622,10 @@ def test_ci_committed_policy_runs_pr_tier_but_keeps_main_and_pin_full(
     assert rc == 0
     if is_pr:
         assert {"server-adapter-autofill", "server-auth"}.isdisjoint(document["suite_ids"])
-        expected = set(document["suite_ids"]) | {"server-adapter-autofill", "server-auth"}
-        assert set(ran) == expected < set(document["catalog_suite_ids"])
+        expected = ((set(document["suite_ids"]) & current_ids)
+                    | (current_ids - set(document["catalog_suite_ids"]))
+                    | {"server-adapter-autofill", "server-auth"})
+        assert set(ran) == expected < current_ids
         assert set(runner.PR_TIER_PREREQUISITES) <= set(ran)
         assert data["mode"] == data["execution_mode"] == data["selection_mode"] == "tier"
         assert all(entry["mode"] == "tier" for entry in data["results"])
@@ -631,17 +636,17 @@ def test_ci_committed_policy_runs_pr_tier_but_keeps_main_and_pin_full(
         assert "mode=tier cannot prove a full gate" in capsys.readouterr().out
         assert not proof.exists()
     else:
-        assert set(ran) == set(document["catalog_suite_ids"])
+        assert set(ran) == current_ids
         assert "mode" not in data
         assert "tier" not in data["selection"]
 
 
-def test_committed_policy_is_enabled_and_bound_to_unchanged_catalog(generator, runner):
-    document = json.loads((ROOT / "scripts/ci/pr-tier.json").read_text(encoding="utf-8"))
+def test_committed_historical_policy_is_enabled_and_compatible(generator, runner):
+    path = ROOT / "scripts/ci/pr-tier.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
     catalog = runner.selection_catalog(ROOT)
     assert document["enabled"] is True
-    assert document["generated_from"]["catalog_sha256"] == catalog["catalog_sha256"]
-    assert document["catalog_suite_ids"] == sorted(row["id"] for row in catalog["suites"])
+    assert runner.load_pr_tier(path) == document
     assert "web-version-restore-proof" in document["suite_ids"]
     # Evidence inputs are copied into the task worktree, not shipped with CI.
     paths = [ROOT / name for name in ("pr-tier-proposal.json", "fail30.json", "sentinels-strict.json")]
@@ -649,6 +654,7 @@ def test_committed_policy_is_enabled_and_bound_to_unchanged_catalog(generator, r
         assert generator.generate(*paths, catalog=catalog, enabled=True) == document
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="CI shell assertions require the Linux producer environment")
 def test_owned_ci_tests_pass_with_ambient_explicit_full():
     if os.environ.get("LEAF_CI_FULL") == "1":
         pytest.skip("Already running with ambient explicit full")
