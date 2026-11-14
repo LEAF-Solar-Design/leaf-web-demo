@@ -180,7 +180,7 @@ def test_string_report_data_files(graph, name, params, summary, size, content_sh
         assert (row["startPoint"]["coordinate"], row["endPoint"]["coordinate"]) == ("1.00,2.00", "50.00,-10.00")
 
 
-@pytest.mark.parametrize("name", ["Roof group", "RÃ¸of"])
+@pytest.mark.parametrize("name", ["Roof group", "R\u00f8of"])
 def test_string_report_data_full_file(graph, name):
     g = variant(graph, "G")
     g["frames"][0]["name"] = name
@@ -192,9 +192,9 @@ def test_string_report_data_full_file(graph, name):
     expected = {"groups": [{"handle": F1, "name": name, "strings": [row(S1, P1), row(S2, P3)]}]}
     assert json.loads(out.content) == expected
     assert out.content == builtin(DATA).render(expected).encode("utf-8")
-    if name == "RÃ¸of":
-        assert "RÃ¸of".encode("utf-8") in out.content
-        assert b"\\u00f8" not in out.content
+    if name == "R\u00f8of":
+        assert "R\u00f8of".encode("utf-8") in out.content
+        assert br"\u00f8" not in out.content
 
 
 @pytest.mark.parametrize("name,out,digest_hex", [
