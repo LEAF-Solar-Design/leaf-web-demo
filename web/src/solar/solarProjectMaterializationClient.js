@@ -172,7 +172,12 @@ export function createSolarProjectMaterializationClient({ fetchImpl = fetch, api
         headers: { ...base, 'X-Org-Id': scope.organization_id, 'X-Tenant-Id': scope.organization_id, 'X-Project-Id': scope.project_id } })
       onResponse?.(response, url, !!(base.Authorization || base.authorization))
       const text = await boundedText(response)
-      if (!response.ok) return { ok: false, code: 'PROJECT_LAYOUT_UNAVAILABLE' }
+      if (!response.ok) {
+        let reason
+        try { reason = JSON.parse(text)?.error?.reason_code } catch { /* keep the generic read failure */ }
+        return { ok: false, code: response.status === 409 && reason === 'SIP_R1_STALE_VERSION'
+          ? 'PROJECT_LAYOUT_STALE_VERSION' : 'PROJECT_LAYOUT_UNAVAILABLE' }
+      }
       const value = JSON.parse(text)
       if (!readbackMatches(scope, value))
         return { ok: false, code: 'PROJECT_LAYOUT_RESPONSE_INVALID' }
