@@ -1,12 +1,79 @@
 import { createHash } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { expect, test } from '@playwright/test'
 import { catProofResponse, makeCatProofState } from './catProofFixture.mjs'
 
-// Keep traces for the two fixture journeys with intermittent first Project clicks.
-const traceTest = test.extend({ trace: 'on' })
+// Only these fixture journeys record diagnostics; normal selected CI retains text.
+const projectClickDiagnostics = new WeakMap()
+const traceTest = test.extend({
+  trace: 'on',
+  s03Diagnostics: [async ({ page }, use, testInfo) => {
+    const started = Date.now()
+    const timeline = []
+    const clicks = []
+    const pending = new Map()
+    const safePath = value => {
+      try { return new URL(value).pathname.slice(0, 160) } catch { return '(unavailable)' }
+    }
+    const record = (event, detail = {}) => {
+      const entry = { elapsedMs: Date.now() - started, event, ...detail }
+      if (timeline.length < 200) timeline.push(entry)
+      if (event.startsWith('Project click') && clicks.length < 20) clicks.push(entry)
+    }
+    const onConsole = message => record('console', { type: message.type() })
+    const onRequest = request => {
+      if (pending.size < 100) pending.set(request, Date.now())
+    }
+    const finishRequest = (request, failed) => {
+      const since = pending.get(request)
+      pending.delete(request)
+      const elapsedMs = since == null ? null : Date.now() - since
+      if (failed || elapsedMs >= 1000) record(failed ? 'requestfailed' : 'slow_request', {
+        path: safePath(request.url()), elapsedMs,
+      })
+    }
+    const onFailed = request => finishRequest(request, true)
+    const onFinished = request => finishRequest(request, false)
+    const onNavigation = frame => {
+      if (frame === page.mainFrame()) record('navigation', { path: safePath(frame.url()) })
+    }
+    projectClickDiagnostics.set(page, record)
+    page.on('console', onConsole)
+    page.on('request', onRequest)
+    page.on('requestfailed', onFailed)
+    page.on('requestfinished', onFinished)
+    page.on('framenavigated', onNavigation)
+    try {
+      await use()
+    } finally {
+      projectClickDiagnostics.delete(page)
+      page.off('console', onConsole)
+      page.off('request', onRequest)
+      page.off('requestfailed', onFailed)
+      page.off('requestfinished', onFinished)
+      page.off('framenavigated', onNavigation)
+      if (testInfo.status !== testInfo.expectedStatus) {
+        const report = {
+          title: testInfo.title, status: testInfo.status, expectedStatus: testInfo.expectedStatus,
+          startedAt: new Date(started).toISOString(), finalPath: safePath(page.url()), clicks, timeline,
+          pending: [...pending].slice(0, 20).map(([request, since]) => ({
+            path: safePath(request.url()), elapsedMs: Date.now() - since,
+          })),
+        }
+        const id = createHash('sha256').update(testInfo.testId).digest('hex').slice(0, 16)
+        const directory = process.platform === 'win32' ? testInfo.outputDir : '/tmp/gate-results'
+        try {
+          await mkdir(directory, { recursive: true })
+          await writeFile(`${directory}/s03-${id}-${testInfo.retry}.txt`, JSON.stringify(report, null, 2))
+        } catch {
+          console.log('S03 diagnostics could not be retained')
+        }
+      }
+    }
+  }, { auto: true }],
+})
 
 // Real rendered Studio, fixture-backed page persistence. Export bytes come from
 // the production Python template; this suite does not prove a live API or build.
@@ -146,7 +213,9 @@ async function installBackend(page) {
 }
 
 async function openProject(page) {
+  projectClickDiagnostics.get(page)?.('Project click started')
   await page.getByRole('button', { name: 'Project', exact: true }).click()
+  projectClickDiagnostics.get(page)?.('Project click completed')
   const sidebar = page.getByRole('region', { name: 'Project sidebar', exact: true })
   const projects = sidebar.getByRole('region', { name: 'Workspace projects', exact: true })
   const project = projects.getByRole('button', { name: PROJECT.name, exact: true })
