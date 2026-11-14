@@ -608,6 +608,7 @@ for (const invalid of [
 // both served by the shared cat-proof fixture) and the stage POST must carry
 // the exact ids that mint returned.
 test('the direct stage POST carries turn authority minted from a live session', async ({ page }) => {
+  test.setTimeout(scaled(60_000))
   const proofState = makeCatProofState()
   const stageHeaders = []
   await page.addInitScript(() => localStorage.setItem('leaf.org_id', 'cat-proof-org'))

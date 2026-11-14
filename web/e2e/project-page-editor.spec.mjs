@@ -1,9 +1,82 @@
 import { createHash } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { expect, test } from '@playwright/test'
 import { catProofResponse, makeCatProofState } from './catProofFixture.mjs'
+import { scaled } from './timeScale.mjs'
+
+test.describe.configure({ mode: 'parallel' })
+
+// Only these fixture journeys record diagnostics; normal selected CI retains text.
+const projectClickDiagnostics = new WeakMap()
+const traceTest = test.extend({
+  trace: 'on',
+  s03Diagnostics: [async ({ page }, use, testInfo) => {
+    const started = Date.now()
+    const timeline = []
+    const clicks = []
+    const pending = new Map()
+    const safePath = value => {
+      try { return new URL(value).pathname.slice(0, 160) } catch { return '(unavailable)' }
+    }
+    const record = (event, detail = {}) => {
+      const entry = { elapsedMs: Date.now() - started, event, ...detail }
+      if (timeline.length < 200) timeline.push(entry)
+      if (event.startsWith('Project click') && clicks.length < 20) clicks.push(entry)
+    }
+    const onConsole = message => record('console', { type: message.type() })
+    const onRequest = request => {
+      if (pending.size < 100) pending.set(request, Date.now())
+    }
+    const finishRequest = (request, failed) => {
+      const since = pending.get(request)
+      pending.delete(request)
+      const elapsedMs = since == null ? null : Date.now() - since
+      if (failed || elapsedMs >= 1000) record(failed ? 'requestfailed' : 'slow_request', {
+        path: safePath(request.url()), elapsedMs,
+      })
+    }
+    const onFailed = request => finishRequest(request, true)
+    const onFinished = request => finishRequest(request, false)
+    const onNavigation = frame => {
+      if (frame === page.mainFrame()) record('navigation', { path: safePath(frame.url()) })
+    }
+    projectClickDiagnostics.set(page, record)
+    page.on('console', onConsole)
+    page.on('request', onRequest)
+    page.on('requestfailed', onFailed)
+    page.on('requestfinished', onFinished)
+    page.on('framenavigated', onNavigation)
+    try {
+      await use()
+    } finally {
+      projectClickDiagnostics.delete(page)
+      page.off('console', onConsole)
+      page.off('request', onRequest)
+      page.off('requestfailed', onFailed)
+      page.off('requestfinished', onFinished)
+      page.off('framenavigated', onNavigation)
+      if (testInfo.status !== testInfo.expectedStatus) {
+        const report = {
+          title: testInfo.title, status: testInfo.status, expectedStatus: testInfo.expectedStatus,
+          startedAt: new Date(started).toISOString(), finalPath: safePath(page.url()), clicks, timeline,
+          pending: [...pending].slice(0, 20).map(([request, since]) => ({
+            path: safePath(request.url()), elapsedMs: Date.now() - since,
+          })),
+        }
+        const id = createHash('sha256').update(testInfo.testId).digest('hex').slice(0, 16)
+        const directory = process.platform === 'win32' ? testInfo.outputDir : '/tmp/gate-results'
+        try {
+          await mkdir(directory, { recursive: true })
+          await writeFile(`${directory}/s03-${id}-${testInfo.retry}.txt`, JSON.stringify(report, null, 2))
+        } catch {
+          console.log('S03 diagnostics could not be retained')
+        }
+      }
+    }
+  }, { auto: true }],
+})
 
 // Real rendered Studio, fixture-backed page persistence. Export bytes come from
 // the production Python template; this suite does not prove a live API or build.
@@ -143,17 +216,19 @@ async function installBackend(page) {
 }
 
 async function openProject(page) {
+  projectClickDiagnostics.get(page)?.('Project click started')
   await page.getByRole('button', { name: 'Project', exact: true }).click()
+  projectClickDiagnostics.get(page)?.('Project click completed')
   const sidebar = page.getByRole('region', { name: 'Project sidebar', exact: true })
   const projects = sidebar.getByRole('region', { name: 'Workspace projects', exact: true })
   const project = projects.getByRole('button', { name: PROJECT.name, exact: true })
   const selected = page.getByRole('button', { name: `Projects: change project. Project ${PROJECT.name}`, exact: true })
-  await expect(selected.or(project)).toBeVisible({ timeout: 30_000 })
+  await expect(selected.or(project)).toBeVisible({ timeout: scaled(30_000) })
   if (!await selected.isVisible()) {
-    await project.click({ timeout: 30_000 })
+    await project.click({ timeout: scaled(30_000) })
     await page.getByRole('button', { name: 'Project', exact: true }).click()
   }
-  await expect(selected).toBeVisible({ timeout: 30_000 })
+  await expect(selected).toBeVisible({ timeout: scaled(30_000) })
   const editor = sidebar.getByRole('region', { name: 'Page editor', exact: true })
   await expect(editor).toBeVisible()
   return editor
@@ -171,7 +246,7 @@ async function expectInsideViewport(locator, viewport) {
 
 for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['phone', { width: 390, height: 844 }]]) {
   test(`persisted portfolio gallery layout at ${size}`, async ({ page }, testInfo) => {
-    test.setTimeout(120_000)
+    test.setTimeout(scaled(120_000))
     const layoutViewport = { ...viewport, height: size === 'desktop' ? 900 : 844 }
     await page.setViewportSize(layoutViewport)
     const backend = await installBackend(page)
@@ -359,9 +434,9 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
     }), contentType: 'application/json' })
   })
 
-  test(`portfolio text proposal review, use and save at ${size}`, async ({ page }, testInfo) => {
-    test.setTimeout(120_000)
-    page.setDefaultTimeout(15_000)
+  traceTest(`portfolio text proposal review, use and save at ${size}`, async ({ page }, testInfo) => {
+    test.setTimeout(scaled(120_000))
+    page.setDefaultTimeout(scaled(15_000))
     const proposalViewport = { ...viewport, height: size === 'desktop' ? 900 : 844 }
     await page.setViewportSize(proposalViewport)
     const backend = await installBackend(page)
@@ -446,7 +521,7 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
   })
 
   test(`portfolio visual text selection at ${size}`, async ({ page }, testInfo) => {
-    test.setTimeout(120_000)
+    test.setTimeout(scaled(120_000))
     const selectionViewport = { ...viewport, height: size === 'desktop' ? 900 : 844 }
     await page.setViewportSize(selectionViewport)
     const backend = await installBackend(page)
@@ -526,7 +601,7 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
   })
 
   test(`large portfolio disclosures and reachable Save at ${size}`, async ({ page }, testInfo) => {
-    test.setTimeout(120_000)
+    test.setTimeout(scaled(120_000))
     const editorViewport = { ...viewport, height: size === 'desktop' ? 900 : 844 }
     await page.setViewportSize(editorViewport)
     const backend = await installBackend(page)
@@ -622,7 +697,7 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
   })
 
   test(`native preview journey, ${size}${viewport.width}x${viewport.height}`, async ({ page }, testInfo) => {
-    test.setTimeout(120_000)
+    test.setTimeout(scaled(120_000))
     await page.setViewportSize(viewport)
     const backend = await installBackend(page)
     const document = portfolioImport()
@@ -641,7 +716,7 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
     await build.click()
     await expect(native.getByRole('status').filter({ hasText: 'Queued · Saved revision 7' })).toBeVisible()
     await expect(native.getByRole('status').filter({ hasText: 'Building · Saved revision 7' })).toBeVisible()
-    await expect(native.getByRole('status').filter({ hasText: 'Ready · Saved revision 7' })).toBeVisible({ timeout: 20_000 })
+    await expect(native.getByRole('status').filter({ hasText: 'Ready · Saved revision 7' })).toBeVisible({ timeout: scaled(20_000) })
     const image = native.getByRole('img', { name: 'iOS simulator preview of saved portfolio revision 7', exact: true })
     await image.scrollIntoViewIfNeeded()
     await expect.poll(() => image.evaluate(node => node.complete && node.naturalWidth > 0)).toBe(true)
@@ -678,9 +753,9 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
     expect(backend.foreign).toEqual([])
   })
 
-  test(`portfolio import, galleries, resume, private previews and export at ${size}`, async ({ page }, testInfo) => {
-    test.setTimeout(120_000)
-    page.setDefaultTimeout(15_000)
+  traceTest(`portfolio import, galleries, resume, private previews and export at ${size}`, async ({ page }, testInfo) => {
+    test.setTimeout(scaled(120_000))
+    page.setDefaultTimeout(scaled(15_000))
     await page.setViewportSize(viewport)
     const backend = await installBackend(page)
     await page.goto('/app?surface=browser')
@@ -801,7 +876,7 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
   })
 
   test(`project page create, edit, save, reload and source export at ${size}`, async ({ page }, testInfo) => {
-    test.setTimeout(120_000)
+    test.setTimeout(scaled(120_000))
     await page.setViewportSize(viewport)
     const backend = await installBackend(page)
     await page.goto('/app?surface=browser')

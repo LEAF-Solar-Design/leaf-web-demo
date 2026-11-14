@@ -50,9 +50,13 @@ _ERRORS = {
 
 
 class AuthoringError(ValueError):
-    def __init__(self, code):
+    def __init__(self, code, *, author_subphase=None):
         self.code = code
         self.status, message = _ERRORS[code]
+        self.author_subphase = author_subphase if (
+            code == 'author_unavailable' and type(author_subphase) is str
+            and author_subphase in {'initialization', 'missing_binding', 'author_http',
+                                    'author_response', 'transport'}) else None
         super().__init__(message)
 
 
@@ -263,7 +267,7 @@ def author(tenant, project_id, request, *, cancelled=None, source_profile=WEB_PR
     except source.SourceConflict:
         raise AuthoringError('source_changed') from None
     except Exception:
-        raise AuthoringError('author_unavailable') from None
+        raise AuthoringError('author_unavailable', author_subphase='initialization') from None
     recheck()
     authority = _repo(scope)
     base = initialized.get('source_commit') if isinstance(initialized, dict) else None
@@ -287,7 +291,7 @@ def author(tenant, project_id, request, *, cancelled=None, source_profile=WEB_PR
     url = os.environ.get('LEAF_AUTHOR_HARNESS_URL', '').strip().rstrip('/')
     headers = broker_client.harness_headers()
     if not url or not headers.get('X-Harness-Secret'):
-        raise AuthoringError('author_unavailable')
+        raise AuthoringError('author_unavailable', author_subphase='missing_binding')
     headers = dict(headers, **{'X-Tenant-Id': scope[0], 'Content-Type': 'application/json'})
     recheck()
     if _repo(scope) != authority:
@@ -307,14 +311,15 @@ def author(tenant, project_id, request, *, cancelled=None, source_profile=WEB_PR
         if response.status_code == 409:
             raise AuthoringError('source_changed')
         if response.status_code != 200:
-            raise AuthoringError('author_unavailable')
+            raise AuthoringError('author_unavailable', author_subphase='author_http')
         if source_profile == NATIVE_PROFILE and len(getattr(response, 'content', b'')) > 256 * 1024:
-            raise AuthoringError('author_unavailable')
+            raise AuthoringError('author_unavailable', author_subphase='author_response')
         return _result(response.json(object_pairs_hook=source._closed_pairs), body)
     except (requests.RequestException, ValueError) as exc:
         if isinstance(exc, AuthoringError):
             raise
-        raise AuthoringError('author_unavailable') from None
+        raise AuthoringError('author_unavailable', author_subphase=(
+            'author_response' if response is not None else 'transport')) from None
     finally:
         if response is not None:
             response.close()
