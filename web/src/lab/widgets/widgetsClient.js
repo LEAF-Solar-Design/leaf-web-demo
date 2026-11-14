@@ -65,6 +65,9 @@ export async function loadWidget(docId, options) {
   if (result.status === 404) return { ok: true, doc: null, revision: null, sha256: null }
   if (result.ok && result.kind && result.kind !== 'widget') return { ok: false, status: 409, detail: 'lab_document_kind_fixed' }
   if (result.ok && !result.graph) return { ok: false, status: 502, detail: 'The stored widget document is missing.' }
+  if (result.ok && (!Number.isSafeInteger(result.revision) || result.revision < 1)) {
+    return { ok: false, status: 502, detail: 'The document store returned an invalid stored revision.' }
+  }
   return result.ok ? { ...result, doc: result.graph } : result
 }
 export async function saveWidget(docId, doc, expectedHead, options) {

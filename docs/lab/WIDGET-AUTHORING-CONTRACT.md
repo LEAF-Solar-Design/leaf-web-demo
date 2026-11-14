@@ -46,6 +46,9 @@ head is the optimistic-concurrency token, not a timestamp. A successful save
 must acknowledge a positive safe-integer `revision`. An HTTP 200 object without
 that receipt is a request error and must not advance the local head or report
 the draft saved. Do not invent a revision when a response is incomplete.
+An existing head must also have a positive safe-integer revision before its
+document replaces the local draft. A missing head (404) still creates a blank
+draft; malformed metadata on an existing head must not be treated as missing.
 
 Edits made while a save is pending remain local. A valid acknowledgement advances
 the head of the sent document, while newer local edits keep the editing status.
