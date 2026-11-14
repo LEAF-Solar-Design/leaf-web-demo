@@ -930,9 +930,13 @@ def restore_arlo_input(project_id: uuid.UUID, input_version_id: uuid.UUID,
 
 @router.get("/projects/{project_id}/arlo-jobs/{job_id}")
 def get_arlo_job(project_id: uuid.UUID, job_id: uuid.UUID,
+                 input_diagnostics: bool = False,
                  actor: _LifecycleActor = Depends(_get_lifecycle_actor)):
-    return _lifecycle_response(lambda: arlo_lab.job_view(
-        actor.org_id, project_id, actor.binding_id, job_id))
+    result = _lifecycle_response(lambda: arlo_lab.job_view(
+        actor.org_id, project_id, actor.binding_id, job_id, input_diagnostics=input_diagnostics))
+    if input_diagnostics:
+        return JSONResponse(result, headers={"Cache-Control": "private, no-store"})
+    return result
 
 
 @router.post("/projects/{project_id}/arlo-jobs/{job_id}/cancel")

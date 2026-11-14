@@ -117,7 +117,7 @@ def _verified_bytes(backend, key, digest):
     return raw
 
 
-def _source(context, seen=None):
+def _source(context, seen=None, *, with_import=False):
     """Imported DXF bytes are digest-bound separately from its intake blob."""
     binding, version = context.binding, context.binding.version
     seen = set() if seen is None else seen
@@ -139,7 +139,7 @@ def _source(context, seen=None):
             _fail("PROJECT_EDITOR_SOURCE_INVALID", 409)
         if parent.version.oss_object != version.oss_object:
             _fail("PROJECT_EDITOR_SOURCE_INVALID", 409)
-        return _source(project._read_intake(parent), seen)
+        return _source(project._read_intake(parent), seen, with_import=with_import)
     if not isinstance(source, dict):
         _fail("PROJECT_EDITOR_SOURCE_REQUIRED", 409)
     if proof.get("schema") in ("leaf.project-drawing-publication.v1",
@@ -149,7 +149,8 @@ def _source(context, seen=None):
                 or version.oss_object != project.graph_store().publication_source_key(
                     binding.organization_id, binding.project_id, binding.drawing_id, digest)):
             _fail("PROJECT_EDITOR_SOURCE_INVALID", 409)
-        return version.oss_object, digest, None
+        result = (version.oss_object, digest, None)
+        return (*result, None) if with_import else result
     if proof.get("schema") != "leaf.drawing-import.v1":
         _fail("PROJECT_EDITOR_SOURCE_REQUIRED", 409)
     digest = source.get("upload_content_sha256")
@@ -159,7 +160,52 @@ def _source(context, seen=None):
         _fail("PROJECT_EDITOR_SOURCE_INVALID", 409)
     key = project.graph_store().publication_source_key(
         binding.organization_id, binding.project_id, binding.drawing_id, digest)
-    return key, digest, source["drawing_id"]
+    result = (key, digest, source["drawing_id"])
+    return (*result, source) if with_import else result
+
+
+def _imported_dwg(backend, org_id, source, digest, drawing_id):
+    """Convert only the immutable DWG version named by account-import proof."""
+    import store
+
+    version = source.get("version")
+    stored = source.get("stored_object")
+    if type(version) is not int or version < 1 or not isinstance(stored, dict):
+        _fail("PROJECT_EDITOR_SOURCE_INVALID", 409)
+    try:
+        # Canonical project provenance already pins this exact immutable
+        # version. A legacy manifest/head is neither authority nor a required
+        # dependency for reopening the imported source.
+        key = store.drawing_version_key(str(org_id), source["drawing_id"], version)
+        if key != stored.get("ref"):
+            _fail("PROJECT_EDITOR_SOURCE_INVALID", 409)
+        original = backend.get(key)
+    except EditorError:
+        raise
+    except (KeyError, ValueError):
+        _fail("PROJECT_EDITOR_SOURCE_INVALID", 409)
+    except Exception:
+        _fail("PROJECT_EDITOR_SOURCE_UNAVAILABLE", 503, True)
+    if not isinstance(original, bytes):
+        _fail("PROJECT_EDITOR_SOURCE_INVALID", 409)
+    if not original.startswith(project.write_loop.DWG_MAGIC):
+        return None  # Imported DXF has an intake-JSON version, handled below.
+    if (stored.get("sha256") != digest or _sha(original) != digest
+            or type(stored.get("bytes")) is not int or stored["bytes"] != len(original)):
+        _fail("PROJECT_EDITOR_SOURCE_INVALID", 409)
+    try:
+        resolved, raw, _ = project.write_loop.read_dxf(
+            backend, str(org_id), source["drawing_id"], version, source_binding=stored)
+    except project.write_loop.DxfUnavailable as exc:
+        _fail("PROJECT_EDITOR_SOURCE_UNAVAILABLE", exc.status_code, exc.retryable)
+    except Exception:
+        _fail("PROJECT_EDITOR_SOURCE_UNAVAILABLE", 503, True)
+    if resolved != version:
+        _fail("PROJECT_EDITOR_SOURCE_INVALID", 409)
+    _parse(raw, drawing_id)
+    # Converted bytes have their own digest. Never publish them under the
+    # original DWG digest or alter the canonical import/version.
+    return raw, _sha(raw)
 
 
 def upload_source_key(org_id, drawing_id, digest):
@@ -172,7 +218,7 @@ def upload_source_key(org_id, drawing_id, digest):
 
 def read_dxf(tenant, project_id, drawing_id, version_id):
     context = project.resolve_context(tenant, project_id, version_id, drawing_id=drawing_id)
-    key, digest, staged_drawing = _source(context)
+    key, digest, staged_drawing, imported = _source(context, with_import=True)
     backend = _backend(context.binding.organization_id)
     try:
         exists = backend.exists(key)
@@ -190,8 +236,17 @@ def read_dxf(tenant, project_id, drawing_id, version_id):
                 raw = _verified_bytes(backend, original_key, digest)
             else:
                 path = guest_uploads.staged_path(str(context.binding.organization_id), staged_drawing, ".dxf")
-                with path.open("rb") as stream:
-                    raw = stream.read(MAX_DXF_BYTES + 1)
+                try:
+                    with path.open("rb") as stream:
+                        raw = stream.read(MAX_DXF_BYTES + 1)
+                except FileNotFoundError:
+                    # Canonical DXF imports may have no legacy blob manifest.
+                    # Only an absent original/staged DXF needs DWG recovery.
+                    converted = _imported_dwg(backend, context.binding.organization_id,
+                                              imported, digest, drawing_id)
+                    if converted is None:
+                        _fail("PROJECT_EDITOR_SOURCE_UNAVAILABLE", 503, True)
+                    return converted
         except EditorError:
             raise
         except Exception:

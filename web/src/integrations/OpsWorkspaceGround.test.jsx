@@ -2141,3 +2141,63 @@ it('offers a fixed-copy retry for failed connection reads and admits only the cu
   await waitFor(() => expect(screen.getByRole('button', { name: 'Send order now' })).toBeEnabled())
   expect(actionPosts(fetchImpl)).toHaveLength(0)
 })
+
+it('PairGroupingComposer persists explicit grouping through save edit and reopen using the strict public client', async () => {
+  const { props, fetchImpl } = setup()
+  const pairFields = [
+    { id: 'pair', label: 'Pair key', type: { kind: 'text' }, nullable: true, sensitivity: 'internal' },
+    { id: 'provider', label: 'Provider', type: { kind: 'text' }, nullable: false, sensitivity: 'internal' }, fields[1],
+  ]
+  let stored
+  const original = fetchImpl.getMockImplementation()
+  fetchImpl.mockImplementation((url, options) => {
+    if (url.includes('/datasets?')) return Promise.resolve(response(page([{ ...metadata, fields: pairFields }])))
+    if (url.endsWith('/elements') && options.method === 'POST' || url.includes('/elements/') && options.method === 'PUT') {
+      stored = { element: JSON.parse(options.body), revision: stored ? stored.revision + 1 : 1 }
+      return Promise.resolve(response(stored))
+    }
+    if (url.includes('/elements?')) return Promise.resolve(response(page(stored ? [stored] : [])))
+    if (url.includes('/elements/paired-view')) return Promise.resolve(response(stored))
+    if (url.endsWith('/query')) return Promise.resolve(response({ ...read, fields: pairFields, query_coverage: { kind: 'complete_materialization', matching_rows: 2, offset: 0 },
+      rows: [{ key: 'a', values: { pair: 'verified', provider: 'Claude', total: 12 } }, { key: 'b', values: { pair: 'verified', provider: 'Codex', total: 15 } }] }))
+    return original(url, options)
+  })
+  const view = render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  // Use the actual option value rather than synthesize the reference-key encoding.
+  const select = screen.getByLabelText('Dataset')
+  fireEvent.change(select, { target: { value: select.options[1].value } })
+  fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Paired view' } })
+  fireEvent.change(screen.getByLabelText('Stable ID'), { target: { value: 'paired-view' } })
+  for (const name of ['Pair key', 'Provider', 'Total']) fireEvent.click(screen.getByRole('checkbox', { name, exact: true }))
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Group verified provider pairs' }))
+  fireEvent.change(screen.getByLabelText('Pair key field'), { target: { value: 'pair' } })
+  fireEvent.change(screen.getByLabelText('Provider field'), { target: { value: 'provider' } })
+  fireEvent.change(screen.getByLabelText('First provider'), { target: { value: 'Claude' } })
+  fireEvent.change(screen.getByLabelText('Second provider'), { target: { value: 'Codex' } })
+  fireEvent.change(screen.getByLabelText('Second provider'), { target: { value: 'Claude' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Save view' }))
+  await screen.findByRole('alert')
+  expect(stored).toBeUndefined()
+  expect(screen.getByLabelText('First provider')).toHaveValue('Claude')
+  fireEvent.change(screen.getByLabelText('Second provider'), { target: { value: 'Codex' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Save view' }))
+  await waitFor(() => expect(stored?.element.props.row_grouping).toEqual({ kind: 'provider_pairs', pair_key_field: 'pair', provider_field: 'provider', providers: ['Claude', 'Codex'] }))
+  await screen.findByRole('button', { name: 'Edit current recipe' })
+  fireEvent.click(screen.getByRole('button', { name: 'Edit current recipe' }))
+  expect(screen.getByRole('checkbox', { name: 'Group verified provider pairs' })).toBeChecked()
+  expect(screen.getByLabelText('First provider')).toHaveValue('Claude')
+  fireEvent.change(screen.getByLabelText('Second provider'), { target: { value: 'Other' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Update view' }))
+  await waitFor(() => expect(stored.revision).toBe(2))
+  view.unmount()
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  fireEvent.click(screen.getByRole('button', { name: /Paired view.*revision 2/ }))
+  fireEvent.click(await screen.findByRole('button', { name: 'Edit current recipe' }))
+  expect(screen.getByLabelText('Second provider')).toHaveValue('Other')
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Group verified provider pairs' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Update view' }))
+  await waitFor(() => expect(stored.revision).toBe(3))
+  expect(stored.element.props).not.toHaveProperty('row_grouping')
+})

@@ -25,6 +25,8 @@ from solar_design_graph import GraphValidationError
 from routers import project_drawings as routes
 import test_sip_r3b_tools as tools
 import test_solar_solaredge_report as samples
+import test_sip_r5_routes as catalog_cases
+from test_sip_r5_routes import lane as catalog_lane  # noqa: F401
 
 
 @pytest.fixture
@@ -510,6 +512,53 @@ def test_http_source_report_download_and_read(http):
             "tool": se.READ_TOOL, "catalog_digest": tools.manifest(se.READ_TOOL), "params": {"section": "frames"}})
     assert response.status_code == 200, response.text
     assert response.json()["result"]["output"]["page"]["total"] == 2
+
+
+def tracking_catalog(s, *, version=True):
+    query = {"project_id": str(s.s.project), "drawing_id": str(s.s.drawing)}
+    if version:
+        query["input_version_id"] = str(s.s.parent.version_id)
+    response = s.client.get("/api/capabilities", params=query, headers=catalog_cases.headers(s))
+    return catalog_cases.states(response)
+
+
+def test_tracking_catalog_uses_sync_read_without_worker_or_mutation(catalog_lane, monkeypatch):
+    import entitlements
+    import solar_project_admission as policy
+    granted = entitlements.entitlements_for
+    monkeypatch.setattr(entitlements, "entitlements_for",
+        lambda *args, **kwargs: {**granted(*args, **kwargs), "run_read": True})
+    probes = []
+    monkeypatch.setattr(policy.dependency_health, "canonical_worker_covers",
+        lambda name: probes.append(name) or False)
+    s = catalog_lane
+    before = deepcopy((s.s.blobs, s.s.versions, s.s.fingerprints, s.s.writes, s.records))
+    states = tracking_catalog(s)
+    state = states[se.READ_TOOL]
+    assert state["engine_ready"] is True and state["input_ready"] is True
+    assert "project_read" not in state and "project_write" not in state
+    assert state["runnable"] is True and state["refusal_reasons"] == []
+    assert state["admission_checked"] is False and state["admission"] is None
+    assert se.READ_TOOL not in probes
+    assert states[se.ACCEPT_TOOL]["engine_reason"] == "SIP_R4_WORKER_UNAVAILABLE"
+    assert (s.s.blobs, s.s.versions, s.s.fingerprints, s.s.writes, s.records) == before
+
+
+@pytest.mark.parametrize("case,reason", [
+    ("no-read-entitlement", "entitlement_required"),
+    ("no-version", "project_request_required"),
+    ("changed-manifest", "project_adapter_unavailable"),
+])
+def test_tracking_catalog_preserves_read_boundaries(catalog_lane, monkeypatch, case, reason):
+    import entitlements
+    granted = entitlements.entitlements_for
+    monkeypatch.setattr(entitlements, "entitlements_for", lambda *args, **kwargs:
+        {**granted(*args, **kwargs), "run_read": case != "no-read-entitlement"})
+    if case == "changed-manifest":
+        catalog_lane.tools[se.READ_TOOL]["description"] = "Untrusted replacement"
+    state = tracking_catalog(catalog_lane, version=case != "no-version")[se.READ_TOOL]
+    assert state["runnable"] is False
+    assert state["refusal_reasons"] == [reason]
 
 
 def test_http_explicit_association_review_reset_and_invalid_choice(http, monkeypatch):

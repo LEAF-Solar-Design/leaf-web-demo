@@ -518,6 +518,232 @@ def test_destination_failure_is_error_without_quarantine(fixture, capsys, monkey
     assert not list((fixture[0] / "out").iterdir())
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory permissions are not supported on Windows")
+@pytest.mark.parametrize("version", [(3, 11), (3, 12)])
+def test_remove_tree_permission_callback(tmp_path, monkeypatch, version):
+    root = tmp_path / "tree"
+    path = root / "file"
+    write(path)
+    path.chmod(0o444)
+    root.chmod(0o555)
+    calls = []
+
+    def unlink(name):
+        calls.append(name)
+        assert path.stat().st_mode & 0o200
+        assert root.stat().st_mode & 0o200
+        Path(name).unlink()
+
+    def rmtree(name, **kwargs):
+        error = PermissionError("fixture read-only entry")
+        if version >= (3, 12):
+            kwargs["onexc"](unlink, str(path), error)
+        else:
+            kwargs["onerror"](unlink, str(path), (PermissionError, error, None))
+        Path(name).rmdir()
+
+    monkeypatch.setattr(cache.sys, "version_info", version)
+    monkeypatch.setattr(cache.shutil, "rmtree", rmtree)
+    cache._remove_tree(root)
+    assert calls == [path]
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("version", [(3, 11), (3, 12)])
+@pytest.mark.parametrize("permission_error", [False, True])
+def test_remove_tree_propagates_callback_failure(tmp_path, monkeypatch, version, permission_error):
+    root = tmp_path / "tree"
+    write(root / "file")
+    original = PermissionError("fixture still denied") if permission_error else OSError("fixture I/O error")
+    calls = []
+
+    def fail_remove(name):
+        calls.append(name)
+        raise original
+
+    def rmtree(name, **kwargs):
+        if version >= (3, 12):
+            kwargs["onexc"](fail_remove, str(root), original)
+        else:
+            kwargs["onerror"](fail_remove, str(root), (type(original), original, None))
+
+    monkeypatch.setattr(cache.sys, "version_info", version)
+    monkeypatch.setattr(cache.shutil, "rmtree", rmtree)
+    with pytest.raises(OSError) as error:
+        cache._remove_tree(root)
+
+    assert error.value is original
+    assert calls == ([root] if permission_error else [])
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory permissions are not supported on Windows")
+@pytest.mark.parametrize("directory_mode", [0o555, 0o500, 0])
+def test_remove_tree_removes_readonly_entries(tmp_path, directory_mode):
+    root = tmp_path / "tree"
+    directory = root / "readonly"
+    write(directory / "file")
+    (directory / "file").chmod(0o444)
+    directory.chmod(directory_mode)
+    root.chmod(0o555)
+
+    cache._remove_tree(root)
+
+    assert not root.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory permissions are not supported on Windows")
+def test_remove_tree_retries_unreadable_directory_with_readonly_children(tmp_path, monkeypatch):
+    root = tmp_path / "tree"
+    directory = root / "unreadable"
+    write(directory / "nested/file")
+    (directory / "nested/file").chmod(0o444)
+    (directory / "nested").chmod(0o555)
+    directory.chmod(0)
+    rmtree = cache.shutil.rmtree
+    attempts = []
+
+    def denied_open(name, **kwargs):
+        if not attempts:
+            attempts.append(Path(name))
+            error = PermissionError("fixture unreadable directory")
+            if "onexc" in kwargs:
+                kwargs["onexc"](os.open, str(directory), error)
+            else:
+                kwargs["onerror"](os.open, str(directory), (PermissionError, error, None))
+            Path(name).rmdir()
+        else:
+            # The retried traversal must retain the permission callback.
+            assert "onexc" in kwargs or "onerror" in kwargs
+            rmtree(name, **kwargs)
+
+    monkeypatch.setattr(cache.shutil, "rmtree", denied_open)
+    cache._remove_tree(root)
+
+    assert attempts == [root]
+    assert not root.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory permissions are not supported on Windows")
+def test_remove_tree_retries_failed_scandir(tmp_path, monkeypatch):
+    root = tmp_path / "tree"
+    write(root / "nested/file")
+    (root / "nested/file").chmod(0o444)
+    (root / "nested").chmod(0o555)
+    root.chmod(0o555)
+    scandir = os.scandir
+    attempts = []
+
+    def denied_scan(path):
+        attempts.append(path)
+        if len(attempts) == 1:
+            raise PermissionError("fixture unreadable directory")
+        return scandir(path)
+
+    monkeypatch.setattr(os, "scandir", denied_scan)
+    cache._remove_tree(root)
+
+    assert len(attempts) > 1
+    assert not root.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks and directory permissions are required")
+def test_remove_tree_does_not_follow_symlinks(tmp_path):
+    target = tmp_path / "target"
+    write(target / "file", b"keep")
+    (target / "file").chmod(0o444)
+    target.chmod(0o555)
+    before = snapshot(target)
+    root = tmp_path / "tree"
+    root.mkdir()
+    (root / "link").symlink_to(target, target_is_directory=True)
+    (root / "file-link").symlink_to(target / "file")
+    root.chmod(0o555)
+
+    cache._remove_tree(root)
+
+    assert not root.exists()
+    assert snapshot(target) == before
+    # A tree path that is itself a symlink must also leave its target intact.
+    root.symlink_to(target, target_is_directory=True)
+    cache._remove_tree(root)
+    assert not root.is_symlink()
+    assert snapshot(target) == before
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory permissions are not supported on Windows")
+@pytest.mark.parametrize("error_type", [OSError, cache.Corrupt])
+def test_failed_seed_removes_readonly_temporary(fixture, capsys, monkeypatch, error_type):
+    root = fixture[0] / "repo/web/node_modules"
+    write(root / "package/file")
+    invoke(fixture, capsys, "publish", "nm")
+    cache.shutil.rmtree(root)
+    original = error_type("fixture copy failed")
+
+    def fail_copy(source_root, rel, destination, row, verify):
+        write(destination)
+        destination.chmod(0o444)
+        destination.parent.chmod(0o555)
+        raise original
+
+    monkeypatch.setattr(cache, "copy_file", fail_copy)
+    args = arguments(fixture, kind="nm")
+    with pytest.raises(error_type) as error:
+        cache.seed(args, Path(args.cache_dir), entry_for(fixture, "nm"), cache.key_inputs(args), {})
+
+    assert error.value is original
+    assert not root.exists()
+    assert not list(root.parent.glob("*.leaf-seed-*"))
+
+
+@pytest.mark.parametrize("failure", ["copy", "commit", "none", "handled"])
+def test_seed_cleanup_failure_preserves_active_error(fixture, capsys, monkeypatch, failure):
+    sources(fixture)
+    invoke(fixture, capsys, "publish")
+    args = arguments(fixture, pip_cache=fixture[0] / "out/pip", npm_cache=fixture[0] / "out/npm")
+    original = OSError("fixture seed failed")
+    cleanup = OSError("fixture cleanup failed")
+    rename = os.rename
+
+    def fail_copy(*unused):
+        raise original
+
+    def commit(source, destination):
+        if failure in ("none", "handled"):
+            # Leave staged trees behind after an otherwise successful seed.
+            return
+        if Path(destination).name == "npm":
+            raise original
+        rename(source, destination)
+
+    def fail_cleanup(path):
+        raise cleanup
+
+    if failure == "copy":
+        monkeypatch.setattr(cache, "copy_file", fail_copy)
+    else:
+        monkeypatch.setattr(os, "rename", commit)
+    monkeypatch.setattr(cache, "_remove_tree", fail_cleanup)
+
+    with pytest.raises(OSError) as error:
+        if failure == "handled":
+            try:
+                raise original
+            except OSError:
+                cache.seed(args, Path(args.cache_dir), entry_for(fixture), cache.key_inputs(args), {})
+        else:
+            cache.seed(args, Path(args.cache_dir), entry_for(fixture), cache.key_inputs(args), {})
+
+    assert error.value is (cleanup if failure in ("none", "handled") else original)
+    stderr = capsys.readouterr().err
+    if failure in ("none", "handled"):
+        assert stderr == ""
+    else:
+        assert stderr.splitlines() == [
+            f"dep-cache: cleanup failed for {path}: {cleanup}"
+            for path in ([fixture[0] / "out/pip"] if failure == "commit" else [])
+            + sorted((fixture[0] / "out").glob("*.leaf-seed-*"))]
+
+
 def test_missing_payload_is_corrupt(fixture, capsys):
     sources(fixture)
     invoke(fixture, capsys, "publish")

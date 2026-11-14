@@ -53,6 +53,17 @@ describe('canonical project Solar publication client', () => {
     expect(options.redirect).toBe('error')
   })
 
+  it.each([
+    [409, 'SIP_R1_STALE_VERSION', 'PROJECT_LAYOUT_STALE_VERSION'],
+    [403, 'SIP_R1_STALE_VERSION', 'PROJECT_LAYOUT_UNAVAILABLE'],
+    [409, 'OTHER_FAILURE', 'PROJECT_LAYOUT_UNAVAILABLE'],
+  ])('distinguishes a saved non-head read only for its actual status and reason (%s, %s)', async (status, reason, code) => {
+    const fetchImpl = vi.fn().mockResolvedValue(response({ error: { reason_code: reason } }, status))
+    expect(await client(fetchImpl).read(scope)).toEqual({ ok: false, code })
+    expect(fetchImpl).toHaveBeenCalledOnce()
+    expect(fetchImpl.mock.calls[0][1].method).toBeUndefined()
+  })
+
   it.each(['organization_id', 'project_id', 'drawing_id', 'input_version_id'])(
     'rejects missing canonical %s without a write', async field => {
       const fetchImpl = vi.fn(), invalid = { ...captured(), [field]: null }

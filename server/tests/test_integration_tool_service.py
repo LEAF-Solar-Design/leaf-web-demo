@@ -320,7 +320,7 @@ def test_production_current_resolution_explicitly_includes_action_discovery(cust
     monkeypatch.setattr(service.turn_runner, "turn_max_s", lambda: 300)
     current = service.resolve_current(str(h.tenant), "s", "t", write=True)
     assert current.authority.operations == CURRENT_OPERATIONS
-    assert current.authority.origin == ("https://ops-dashboard-seven.vercel.app" if source_defaults
+    assert current.authority.origin == ("https://ops-staging.leafdesign.ai" if source_defaults
                                         else "https://integration.example")
     assert h.capture().code == "captured"
     assert h.puts[0].authority == current.authority

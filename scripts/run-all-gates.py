@@ -96,6 +96,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -105,8 +106,8 @@ import threading
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass, field, replace
+from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 from typing import List, Optional
 from urllib.parse import quote
@@ -1451,6 +1452,8 @@ def build_suites() -> List[Suite]:
         Suite("server-lab-run-store", "server tests/test_lab_run_store.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_run_store.py"), 27, uses_database=True,
               database_skip_reasons=(r"platform DB unreachable: .+",)),
+        Suite("server-lab-corpus-export", "server tests/test_lab_corpus_export.py", "pytest", SERVER,
+              _py_pytest("tests/test_lab_corpus_export.py"), 6),
         # 48 collected: 24 SQLite cases and 24 PostgreSQL twins.
         Suite("server-lab-runs", "server tests/test_lab_runs.py", "pytest", SERVER,
               _unprivileged_pytest("tests/test_lab_runs.py"), 24, uses_database=True,
@@ -4668,6 +4671,85 @@ def parse_vitest(text: str) -> dict:
             "skipped_files": skipped_files}
 
 
+def parse_file_timings(suite: Suite, text: str) -> list[dict]:
+    """Read reporter rows only; never infer a file's time from suite wall time."""
+    totals: dict[str, float] = {}
+    basis = ""
+    duration_section = False
+    number = r"([0-9]+(?:\.[0-9]+)?)"
+    path_pattern = r"((?:[A-Za-z]:)?[^\s:]+\.(?:py|tsx|ts|jsx|js|mjs|cjs))"
+    for raw in text.splitlines():
+        if len(raw) > 16384:
+            continue
+        line = strip_ansi(raw).strip()
+        if suite.kind == "pytest":
+            if re.fullmatch(r"=+ slowest (?:\d+ )?durations =+", line):
+                duration_section = True
+                continue
+            if line.startswith("="):
+                duration_section = False
+            if not duration_section:
+                continue
+            match = re.fullmatch(number + r"s\s+(?:setup|call|teardown)\s+"
+                                 + path_pattern + r"(?:::[^\r\n]*)?", line)
+            if not match:
+                continue
+            value, path = match.groups()
+            seconds = float(value)
+            basis = "pytest phase duration sum"
+        elif suite.kind == "vitest":
+            match = re.fullmatch(r"[✓✔×✘❯]\s+" + path_pattern
+                                 + r"\s+\(\d+ tests?(?: \| \d+ (?:failed|skipped))*\)\s+"
+                                 + number + r"\s*(ms|s|m)", line)
+            if not match:
+                continue
+            path, value, unit = match.groups()
+            seconds = float(value) * {"ms": 0.001, "s": 1, "m": 60}[unit]
+            basis = "vitest reported file duration"
+        elif suite.kind in ("playwright", "script"):
+            # Some browser suites are script wrappers; the row itself must
+            # still have the list reporter's bounded, numbered result shape.
+            match = re.fullmatch(r"[✓✔✘×x]\s+\d+\s+(?:\[[^\]\r\n]+\]\s+›\s+)?"
+                                 + path_pattern + r":\d+(?::\d+)?\s+›\s+[^\r\n]*?\s+\("
+                                 + number + r"(ms|s|m)\)", line)
+            if not match:
+                continue
+            path, value, unit = match.groups()
+            seconds = float(value) * {"ms": 0.001, "s": 1, "m": 60}[unit]
+            basis = "playwright test duration sum"
+        else:
+            continue
+        # Only a file path reaches the durable sink, never the trailing nodeid
+        # or title. Resolve symlinks as well as '..' before enforcing the root.
+        if not re.fullmatch(r"[A-Za-z0-9_./\\:+@()-]+", path):
+            continue
+        path = path.replace("\\", "/")
+        if PureWindowsPath(path).drive and os.name != "nt":
+            continue
+        try:
+            relative = (suite.cwd / path).resolve().relative_to(REPO.resolve()).as_posix()
+        except (OSError, ValueError, RuntimeError):
+            continue
+        if not math.isfinite(seconds):
+            continue
+        total = seconds if suite.kind == "vitest" else totals.get(relative, 0.0) + seconds
+        if math.isfinite(total):
+            totals[relative] = total
+    return [{"file": path, "seconds": seconds, "basis": basis}
+            for path, seconds in sorted(totals.items())]
+
+
+def emit_file_timings(suite: Suite, text: str, attempt: int) -> None:
+    # Telemetry, including parser or stdout failures, cannot change a verdict.
+    try:
+        for timing in parse_file_timings(suite, text):
+            row = {"schema": "leaf.ci.file-timing.v1", "suite_id": suite.id,
+                   "attempt": attempt, **timing}
+            print("LEAF_FILE_TIMING " + json.dumps(row, separators=(",", ":")), flush=True)
+    except Exception:
+        pass
+
+
 # --------------------------------------------------------------------------- #
 # npm audit: registry-outage-tolerant classification (harness-audit-high)
 # --------------------------------------------------------------------------- #
@@ -5124,6 +5206,14 @@ def _run_suite_attempt(suite: Suite, log_dir: Path, attempt: int = 1,
             "test_report_incomplete_reasons": [f"reporting_injection_failed:{type(exc).__name__}"],
         }
     argv = read_audit_command(suite, argv, trace_env, attempt)
+    if suite.kind == "pytest" and "pytest" in argv:
+        if str(SCRIPTS_DIR / "ci/run_unprivileged_pytest.py") in argv:
+            # The identity launcher has a fixed argv allowlist. Pytest's own
+            # options environment passes through it without loading a plugin.
+            trace_env["PYTEST_ADDOPTS"] = (os.environ.get("PYTEST_ADDOPTS", "")
+                                           + " --durations=0 --durations-min=0")
+        else:
+            argv = argv + ["--durations=0", "--durations-min=0"]
     # Fault-injection drill: LEAF_GATE_FAULT_INJECT="<suite-id>:spawn" points
     # this suite's FIRST attempt at a nonexistent binary, exercising the real
     # spawn-failure path end to end (attempt 2+ runs the real argv, so the
@@ -5201,6 +5291,8 @@ def _run_suite_attempt(suite: Suite, log_dir: Path, attempt: int = 1,
     if capture_output is not None:
         capture_evidence, rc = capture_attempt_evidence(capture_output, rc)
     seconds = time.perf_counter() - t0
+
+    emit_file_timings(suite, out, attempt)
 
     if rc == 75:
         reason = next((line.split("QUEUED:", 1)[1].strip()
@@ -5428,6 +5520,10 @@ def pr_tier_path(value: str) -> str:
 
 def pr_tier_owned_paths(row: dict) -> List[str]:
     """Declared file/directory targets; npm scripts without targets stay unknown."""
+    # This npm script runs one mocked browser spec; its runtime dependency
+    # scope is conservatively widened by select_pr_tier below.
+    if row.get("id") == "web-async-author-stage":
+        return ["web/e2e/async-author-stage.spec.mjs"]
     paths = []
     for arg in row["command"][1:]:
         target = arg.split("::", 1)[0].replace("\\", "/")
@@ -5525,6 +5621,63 @@ def pr_tier_changed_paths() -> List[str]:
     return [p for p in proc.stdout.split("\0") if p]
 
 
+def pr_tier_outside_web_closure(changed) -> bool:
+    """Only clearly scoped non-web paths can justify bounding historical work."""
+    if not isinstance(changed, list) or not changed:
+        return False
+    for path in changed:
+        if (not isinstance(path, str) or not re.fullmatch(r"[A-Za-z0-9_./-]+", path)
+                or any(part in ("", ".", "..") or part.startswith(".")
+                       for part in path.split("/"))):
+            return False
+        parts = path.split("/")
+        if len(parts) > 1 and parts[0] in ("server", "platform", "docs"):
+            continue
+        if len(parts) == 1 and path.lower().endswith(".md"):
+            continue
+        return False
+    return True
+
+
+def pr_tier_web_catchers(suite: Suite, tier: dict) -> Suite:
+    """Resolve normalized fail30 identities exactly; never guess shard ownership."""
+    if (suite.id not in {"web-vitest-1", "web-vitest-2", "web-vitest-3"}
+            or suite.id not in tier["suite_ids"] or suite.kind != "vitest"
+            or suite.cwd != WEB):
+        return suite
+    reasons = tier.get("reasons")
+    reasons = reasons.get(suite.id) if isinstance(reasons, dict) else None
+    if (not isinstance(reasons, list) or not reasons
+            or any(not isinstance(reason, str) or not reason for reason in reasons)):
+        return suite
+    identities = [reason[len("fail30:"):] for reason in reasons if reason.startswith("fail30:")]
+    if not identities:
+        return suite
+    paths = set()
+    try:
+        source = WEB.resolve() / "src"
+        if not source.is_relative_to(REPO.resolve()):
+            return suite
+        for identity in identities:
+            if (not re.fullmatch(r"web/src/(?:[A-Za-z0-9_-][A-Za-z0-9_.-]*/)*"
+                                 r"[A-Za-z0-9_-][A-Za-z0-9_.-]*\.test", identity)
+                    or any(part in (".", "..") for part in identity.split("/"))):
+                return suite
+            matches = [REPO / (identity + suffix) for suffix in (".js", ".jsx")
+                       if (REPO / (identity + suffix)).is_file()]
+            if len(matches) != 1:
+                return suite
+            target = matches[0]
+            if not target.resolve().is_relative_to(source):
+                return suite
+            paths.add(target.relative_to(WEB).as_posix())
+    except (OSError, ValueError, RuntimeError):
+        return suite
+    # Keep worker/shard/exclude flags, floors, skip policy and reporters intact.
+    # The catalog fingerprint was computed from the original declarations.
+    return replace(suite, argv=[*suite.argv, *sorted(paths)])
+
+
 def select_pr_tier(suites: List[Suite], tier: dict) -> List[Suite]:
     ids = {s.id for s in suites}
     selected = set(tier["suite_ids"]) & ids
@@ -5540,19 +5693,25 @@ def select_pr_tier(suites: List[Suite], tier: dict) -> List[Suite]:
             raise ValueError("invalid LEAF_PRIORITY_SUITES")
         selected.update(ids & set(priority))
         for suite in suites:
-            row = {"command": _fingerprint_argv(suite.argv, cwd=suite.cwd),
+            row = {"id": suite.id, "command": _fingerprint_argv(suite.argv, cwd=suite.cwd),
                    "cwd": _fingerprint_cwd(suite.cwd), "kind": suite.kind}
             if ((not pr_tier_owned_paths(row) and row["kind"] != "vitest")
+                    or (suite.id == "web-async-author-stage"
+                        and not pr_tier_outside_web_closure(changed))
                     or any(pr_tier_owns(row, path) for path in changed)):
                 selected.add(suite.id)
         selected = pr_tier_closure(selected, ids, tier.get("prerequisites"))
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         print(f"INFO: mode=tier using all suites ({exc})")
         selected = ids
+        changed = None
     omitted = sorted(ids - selected)
     if omitted:
         print("INFO: mode=tier omitting catalog suites outside tier and changed tests: " + ", ".join(omitted))
-    return [s for s in suites if s.id in selected]
+    selected_suites = [s for s in suites if s.id in selected]
+    if pr_tier_outside_web_closure(changed):
+        selected_suites = [pr_tier_web_catchers(s, tier) for s in selected_suites]
+    return selected_suites
 
 
 # --------------------------------------------------------------------------- #

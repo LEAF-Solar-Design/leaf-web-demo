@@ -11,6 +11,7 @@ import requests
 
 import broker_client
 import platform_link
+import project_author_diagnostics as author_diagnostics
 
 CONTRACT = 'leaf.project-repository-source-initializer.v1'
 BUNDLE_CONTRACT = 'leaf.project-repository-source-bundle.v1'
@@ -132,6 +133,7 @@ def initialize_project_source(tenant_id, organization_id, project_id, seed_docum
     base_url = os.environ.get('LEAF_AUTHOR_HARNESS_URL', '').strip().rstrip('/')
     headers = broker_client.harness_headers()
     if not base_url or not headers.get('X-Harness-Secret'):
+        author_diagnostics.record_failure('initialize_binding')
         raise SourceUnavailable('source is unavailable')
     try:
         store = platform_link.platform_store()
@@ -139,6 +141,7 @@ def initialize_project_source(tenant_id, organization_id, project_id, seed_docum
     except ValueError:
         raise SourceConflict('source authority conflicts') from None
     except Exception:
+        author_diagnostics.record_failure('initialize_authority')
         raise SourceUnavailable('source is unavailable') from None
     if (not isinstance(authority, dict) or set(authority) != _AUTHORITY or
             not all(_uuid(value) for value in authority.values()) or
@@ -159,9 +162,14 @@ def initialize_project_source(tenant_id, organization_id, project_id, seed_docum
         if response.status_code == 409:
             raise SourceConflict('source authority conflicts')
         if response.status_code != 200:
+            author_diagnostics.record_failure('initialize_http', http_status=response.status_code)
             raise SourceUnavailable('source is unavailable')
         result = response.json(object_pairs_hook=_closed_pairs)
-    except (requests.RequestException, ValueError):
+    except requests.RequestException:
+        author_diagnostics.record_failure('initialize_transport')
+        raise SourceUnavailable('source is unavailable') from None
+    except ValueError:
+        author_diagnostics.record_failure('initialize_response')
         raise SourceUnavailable('source is unavailable') from None
     if (not isinstance(result, dict) or set(result) != _RESPONSE or
             result['contract'] != CONTRACT or result['request_digest'] != request_digest or
@@ -171,5 +179,6 @@ def initialize_project_source(tenant_id, organization_id, project_id, seed_docum
             not isinstance(result['writer_lease_generation'], str) or
             re.fullmatch(r'[1-9][0-9]*', result['writer_lease_generation']) is None or
             (not result['replayed'] and result['seed_digest'] != seed_digest)):
+        author_diagnostics.record_failure('initialize_response')
         raise SourceUnavailable('source is unavailable')
     return {key: result[key] for key in ('source_commit', 'source_tree', 'seed_digest', 'replayed')}
