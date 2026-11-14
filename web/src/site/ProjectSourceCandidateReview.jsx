@@ -1,3 +1,4 @@
+import BrowserPrivateBuildControls from './BrowserPrivateBuildControls.jsx'
 import { useLifecycleDialog } from '../projects/CloneDialog.jsx'
 import { sourceMaterialProblem } from './useProjectSourceController.js'
 import { validateProjectSource } from '../api.js'
@@ -67,7 +68,7 @@ export default function ProjectSourceCandidateReview({ controller }) {
         {c.unknown && <p role="status">Publication outcome unknown. Refresh the original request.</p>}
         {c.busy && <p role="status">Preparing source action…</p>}
         {row && <div><p role="status">{row.state === 'published' ? 'Private source saved' : reviewable ? 'Source ready for review' : `Source state: ${row.state}`}</p>
-          {row.state === 'published' && !native && <p>App build and private preview are still pending.</p>}
+          {row.state === 'published' && !native && <BrowserPrivateBuildControls controller={c} />}
           <p>Candidate version {row.version}</p>
           <p>Candidate digest: {row.receipt_digest}</p>
           {native && <><p>Source commit: {row.source_commit}</p><p>Source tree: {row.source_tree}</p></>}
@@ -88,7 +89,7 @@ export default function ProjectSourceCandidateReview({ controller }) {
         </section>}
         {c.exportBusy && <p role="status">Verifying source download…</p>}
         {downloadReady && <div><p role="status">Source download ready</p>
-          <p>{native ? 'Private Git source bundle for the reviewed commit and tree.' : 'Git source bundle for this saved version. Private source only; app build and private preview are still pending.'}</p>
+          <p>{native ? 'Private Git source bundle for the reviewed commit and tree.' : 'Git source bundle for this saved version. Use the private app controls to build or check its preview.'}</p>
           <a href={c.download.url} download={c.download.filename}>Download Git source bundle</a>
           <p>SHA256: {c.download.sha256}</p>
         </div>}

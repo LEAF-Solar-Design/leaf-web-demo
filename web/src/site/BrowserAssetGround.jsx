@@ -1,3 +1,4 @@
+import { subscribePrivateBuildSelection } from './privateBuildSelection.js'
 import PrivateStaticPreview from './PrivateStaticPreview.jsx'
 import { copyChartState } from './privatePreviewState.js'
 import { createContext, useCallback, useEffect, useRef, useState } from 'react'
@@ -211,6 +212,10 @@ export function BrowserAssetGround({ browserActive = false, browserPanel: contro
     onSelect?.('browser')
     return true
   }
+  useEffect(() => subscribePrivateBuildSelection(input => {
+    if (!privateCurrent() || input.accountScope !== readActiveScope() || input.projectId !== projectId) return false
+    return acceptArtifact(input)
+  }), [currentScope]) // Scoped delivery shares this ground's existing lifetime.
   const previewPage = ({ document, name }) => {
     if (!live.current || scope.current !== currentScope || !signedIn || !accountScope || accountScope === 'guest' || !projectId) return
     const opening = shown?.kind !== 'page'
