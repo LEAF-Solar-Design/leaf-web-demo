@@ -40,6 +40,11 @@ function specialResult(report) {
 export default class RegressionReporter {
   constructor() { this.report = { selected: 0, results: [], errors: [], status: 'failed' } }
   printsToStdio() { return true }
+  onStdOut(chunk) {
+    // Evidence only: worker logs never participate in verdict classification.
+    const line = chunk.toString()
+    if (/^LEAF_WIDGET_BROWSER \{[^\r\n]+\}\r?\n$/.test(line)) process.stderr.write(line)
+  }
   onBegin(config, suite) { this.report.selected = suite.allTests().length }
   onTestEnd(test, result) {
     this.report.results.push({

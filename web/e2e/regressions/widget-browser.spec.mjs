@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test'
 import { execFile } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { writeFile } from 'node:fs/promises'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
@@ -27,4 +28,11 @@ test('widget browser journey executes all six fixture regressions without skips'
   }
   expect(report.errors).toEqual([])
   expect(report.stats).toMatchObject({ expected: 6, unexpected: 0, skipped: 0, flaky: 0 })
+  // Green device jobs retain their log, but discard attachment files.
+  console.log('LEAF_WIDGET_BROWSER ' + JSON.stringify({
+    schema: 'leaf.widget-browser.v1',
+    expected: report.stats.expected, unexpected: report.stats.unexpected,
+    skipped: report.stats.skipped, flaky: report.stats.flaky,
+    errors: report.errors.length, report_sha256: createHash('sha256').update(stdout).digest('hex'),
+  }))
 })
