@@ -18,6 +18,12 @@ from test_w1_design_graph import graph
 from test_project_drawing_editor import lane, private_pg, checkout
 
 
+def test_synthetic_layout_replay_over_canonical_save_restore(fresh):
+    # Keep the replay on this existing database-backed selected-CI gate.
+    from test_solar_layout_replay import test_http_mixed_generation_save_reopen_inspect_and_restore
+    test_http_mixed_generation_save_reopen_inspect_and_restore(fresh)
+
+
 def canonical_start(fresh):
     lane, project = fresh
     response = lane.http.post(f'/api/projects/{project}/solar-layout', json=initial_body(),
