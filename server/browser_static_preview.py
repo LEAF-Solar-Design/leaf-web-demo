@@ -39,7 +39,7 @@ def asset(tenant,project_id,request_id,job_id,pairs):
         if ((str(tenant),tenant.subject)!=principal or flow.scope(tenant,project_id)!=current or flow.repository(current)!=authority):raise flow.FlowError(403)
         if flow.read(tenant,project_id,request_id)!=row:raise flow.FlowError(409)
         if flow.scope(tenant,project_id)!=current:raise flow.FlowError(403)
-    payload=dict(authority,job_id=job_id,source_commit=witnesses['source_commit'],source_tree=witnesses['source_tree'],artifact_id=values['artifact_id'],manifest_sha256=values['manifest_sha256'],path=path)
+    payload=dict(authority,source_request_id=request_id,job_id=job_id,**witnesses,artifact_id=values['artifact_id'],manifest_sha256=values['manifest_sha256'],path=path)
     url=os.environ.get('LEAF_AUTHOR_HARNESS_URL','').strip().rstrip('/')
     headers=broker_client.harness_headers()
     if not url or not headers.get('X-Harness-Secret'):raise flow.FlowError(503)

@@ -26,7 +26,7 @@ def fixture(monkeypatch):
  def read(q=None):return preview.asset(tenant,project,request,job,list((query if q is None else q).items()))
  return SimpleNamespace(**locals())
 def test_valid_encoded_asset_and_no_bearer(fixture):
- f=fixture;assert f.read()==f.result;assert f.calls[-1]=='closed';assert 'Authorization' not in f.calls[0]['headers'];assert not f.calls[0]['allow_redirects']
+ f=fixture;assert f.read()==f.result;assert f.calls[-1]=='closed';assert 'Authorization' not in f.calls[0]['headers'];assert not f.calls[0]['allow_redirects'];payload=json.loads(f.calls[0]['data']);assert payload['source_request_id']==f.request;assert payload['version']==1;assert payload['receipt_digest']==f.row['receipt_digest']
 @pytest.mark.parametrize('key,value',[('artifact_id','foreign'),('path','/../x'),('path','/x\\y'),('manifest_sha256','latest')])
 def test_invalid_request_before_dispatch(fixture,key,value):
  f=fixture
