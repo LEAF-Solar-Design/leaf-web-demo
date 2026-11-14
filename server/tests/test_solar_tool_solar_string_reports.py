@@ -540,3 +540,96 @@ def test_string_report_api_refusals(api, tool, params, reason):
     assert len(api[4]) == 1
     assert store.load_manifest(api[1], TENANT, "solar")["head"] == 1
     assert keys(api[1]) == before
+
+
+# Graph-budget transport regressions use synthetic metadata, never private drawings.
+def _graph_budget_fixture(graph):
+    value = copy.deepcopy(graph)
+    value['extra']['transport_budget_probe'] = [[None] * 100000 for _ in range(5)]
+    return value
+
+
+def test_graph_budget_digest_accepts_valid_large_graph(graph):
+    import solar_solve_results as solve
+    import solar_design_graph as model
+    value = _graph_budget_fixture(graph)
+    model.validate_graph(value)
+    assert solve.digest(value) == hashlib.sha256(canonical_bytes(value)).hexdigest()
+    assert model.MAX_NODES == 500000
+    with pytest.raises(GraphValidationError, match='GRAPH_LIMIT_EXCEEDED'):
+        model._bounded_json(value)
+
+
+@pytest.mark.parametrize('shape', ['plain', 'marker-only', 'nested-graph'])
+def test_graph_budget_generic_digest_keeps_default_cap(graph, shape):
+    import solar_solve_results as solve
+    value = {'payload': [[None] * 100000 for _ in range(5)]}
+    if shape == 'marker-only':
+        value['graph_schema_version'] = 1
+    elif shape == 'nested-graph':
+        value = {'payload': _graph_budget_fixture(graph)}
+    with pytest.raises(GraphValidationError, match='GRAPH_LIMIT_EXCEEDED'):
+        solve.digest(value)
+
+
+def test_graph_budget_invalid_large_graph_is_not_admitted(graph):
+    import solar_solve_results as solve
+    value = _graph_budget_fixture(graph)
+    value['project']['id'] = 'not-a-graph-identity'
+    with pytest.raises(GraphValidationError):
+        solve.digest(value)
+
+
+@pytest.mark.parametrize('seed', [True, False])
+def test_companion_budget_preserves_large_graph_and_cad(graph, seed):
+    import solar_solve_results as solve
+    before = _graph_budget_fixture(graph)
+    after = copy.deepcopy(before)
+    after.update(rev=before['rev'] + 1, parent_rev=before['rev'])
+    intake = {'cad': {'units': 'in', 'opaque': ['original', 1, 2.25]}}
+    if not seed:
+        intake.update(solar_design_graph=before,
+            solar_design_graph_sha256=hashlib.sha256(canonical_bytes(before)).hexdigest())
+    saved = copy.deepcopy(intake)
+    result = solve.version_companion(intake, None if seed else before, after)
+    assert result['solar_design_graph'] == after
+    assert result['solar_design_graph_sha256'] == hashlib.sha256(canonical_bytes(after)).hexdigest()
+    assert result['cad'] == intake['cad']
+    assert intake == saved
+    assert solve.digest(result['solar_design_graph']) == result['solar_design_graph_sha256']
+
+
+def test_companion_budget_does_not_raise_generic_envelope_cap(graph):
+    import solar_solve_results as solve
+    after = copy.deepcopy(graph)
+    after.update(rev=1, parent_rev=0)
+    intake = {'cad': [[None] * 100000 for _ in range(5)]}
+    with pytest.raises(GraphValidationError, match='GRAPH_LIMIT_EXCEEDED'):
+        solve.version_companion(intake, None, after)
+
+
+def test_companion_budget_preserves_combined_byte_limit(graph):
+    import solar_solve_results as solve
+    import solar_design_graph as model
+    after = copy.deepcopy(graph)
+    after.update(rev=1, parent_rev=0)
+    after['extra']['padding'] = 'g' * (model.MAX_BYTES // 2)
+    model.validate_graph(after)
+    intake = {'cad': 'c' * (model.MAX_BYTES // 2)}
+    model._bounded_json(intake)
+    with pytest.raises(GraphValidationError, match='GRAPH_LIMIT_EXCEEDED'):
+        solve.version_companion(intake, None, after)
+
+
+def test_companion_budget_preserves_combined_depth_limit(graph):
+    import solar_solve_results as solve
+    import solar_design_graph as model
+    after = copy.deepcopy(graph)
+    after.update(rev=1, parent_rev=0)
+    nested = 0
+    for _ in range(model.MAX_DEPTH - 2):
+        nested = {'next': nested}
+    after['extra']['depth_probe'] = nested
+    model.validate_graph(after)
+    with pytest.raises(GraphValidationError, match='GRAPH_LIMIT_EXCEEDED'):
+        solve.version_companion({'cad': 'preserve'}, None, after)
