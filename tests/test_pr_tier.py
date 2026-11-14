@@ -105,6 +105,44 @@ def test_generator_retains_unknown_new_and_transitive_prerequisites(generator):
     assert result["prerequisites"]["dep-one"] == ["dep-two"]
 
 
+def async_author_row(runner):
+    return next(row for row in runner.selection_catalog(ROOT)["suites"]
+                if row["id"] == "web-async-author-stage")
+
+
+@pytest.mark.parametrize("reason", [None, "proposal", "hard-harm-sentinel", "fail30",
+                                  "prerequisite", "new-catalog-suite"])
+def test_generator_knows_async_browser_owner_and_preserves_other_reasons(generator, runner, reason):
+    documents = inputs()
+    proposal, history, sentinels, catalog = documents
+    owner = async_author_row(runner)
+    sid = owner["id"]
+    catalog["suites"].append(owner)
+    assert runner.pr_tier_owned_paths(owner) == ["web/e2e/async-author-stage.spec.mjs"]
+    if reason == "proposal":
+        proposal["catchers"].append(sid)
+        proposal["suite_ids"].append(sid)
+    elif reason == "hard-harm-sentinel":
+        sentinels.append(sid)
+    elif reason == "fail30":
+        history[generator.REPO_SLUG]["fail_files"]["web/e2e/async-author-stage.spec.mjs"] = 1
+    elif reason == "prerequisite":
+        catalog["suites"][0]["prerequisites"] = [sid]
+    elif reason == "new-catalog-suite":
+        proposal["catalog_suite_ids"] = [r["id"] for r in catalog["suites"] if r["id"] != sid]
+    result = build(generator, documents)
+    if reason is None:
+        assert sid not in result["suite_ids"]
+        assert sid not in result["reasons"]
+    else:
+        expected = "fail30:web/e2e/async-author-stage.spec.mjs" if reason == "fail30" else reason
+        assert result["reasons"][sid] == [expected]
+        assert sid in result["suite_ids"]
+    assert result["reasons"]["unknown"] == ["unknown-ownership"]
+    assert result["reasons"]["web-version-restore-proof"] == ["studio-keep"]
+    assert result["reasons"]["sentinel"] == ["hard-harm-sentinel"]
+
+
 @pytest.mark.parametrize("bad", ["proposal", "fail30", "sentinels", "catalog", "dependency"])
 def test_generator_refuses_malformed_inputs(generator, bad):
     documents = list(inputs())
@@ -292,6 +330,72 @@ def test_unknown_changed_paths_conservatively_runs_everything_in_tier_mode(runne
     assert rc == 0
     assert set(ran) == {s.id for s in stub_suites(runner)}
     assert data["mode"] == "tier"
+
+
+@pytest.fixture
+def async_author_case(runner, monkeypatch):
+    owner = async_author_row(runner)
+    suite = runner.Suite(owner["id"], owner["label"], owner["kind"], ROOT / owner["cwd"],
+                         owner["command"], None)
+    unknown = runner.Suite("unknown", "unknown npm script", "script", runner.WEB,
+                           ["npm", "run", "unknown"], None)
+    suites = [suite, unknown]
+    document = dict(suite_ids=[unknown.id], catalog_suite_ids=[s.id for s in suites],
+                    reasons={unknown.id: ["unknown-ownership"]})
+    monkeypatch.delenv("LEAF_PRIORITY_SUITES", raising=False)
+    return suites, document
+
+
+@pytest.mark.parametrize("changed", [["server/site.py"], ["platform/auth.py"],
+                                    ["docs/ci.md"], ["README.md"],
+                                    ["server/site.py", "docs/ci.md", "CHANGELOG.md"]])
+def test_scoped_non_web_changes_omit_only_async_unknown_inclusion(
+        runner, monkeypatch, async_author_case, changed):
+    suites, document = async_author_case
+    monkeypatch.setenv("LEAF_CHANGED_PATHS", json.dumps(changed))
+    assert runner.select_pr_tier(suites, document) == suites[1:]
+
+
+@pytest.mark.parametrize("changed", [
+    ["web/src/app.js"], ["web/README.md"], ["web/package.json"],
+    ["web/e2e/async-author-stage.spec.mjs"], ["scripts/ci.md"], ["dispatch/worker.py"],
+    [".github/workflows/ci.yml"], [".codebuild/ci.sh"], ["package.json"],
+    ["package-lock.json"], ["pyproject.toml"], ["tsconfig.json"], ["main.py"],
+    ["tests/test_gate.py"], ["unknown/path.md"], ["server/site.py", "web/src/app.js"],
+    ["server/../web/src/app.js"], ["/server/site.py"], ["./server/site.py"],
+    ["server//site.py"], ["server/"], [r"server\site.py"], ["server/.config"],
+    [], [None], [123], "not-json", None,
+])
+def test_async_proof_keeps_web_ci_config_and_uncertain_changes(
+        runner, monkeypatch, async_author_case, changed):
+    suites, document = async_author_case
+    if changed is None:
+        def unavailable():
+            raise ValueError("PR changed paths unavailable")
+        monkeypatch.setattr(runner, "pr_tier_changed_paths", unavailable)
+    else:
+        monkeypatch.setenv("LEAF_CHANGED_PATHS", changed if isinstance(changed, str) else json.dumps(changed))
+    assert runner.select_pr_tier(suites, document) == suites
+
+
+@pytest.mark.parametrize("reason", [None, "proposal", "hard-harm-sentinel", "fail30:web/e2e/async-author-stage.spec.mjs"])
+def test_async_tier_membership_is_never_removed_by_non_web_scope(
+        runner, monkeypatch, async_author_case, reason):
+    suites, document = async_author_case
+    document["suite_ids"].append(suites[0].id)
+    if reason is not None:
+        document["reasons"][suites[0].id] = [reason]
+    monkeypatch.setenv("LEAF_CHANGED_PATHS", '["docs/ci.md"]')
+    assert runner.select_pr_tier(suites, document) == suites
+
+
+def test_full_mode_keeps_async_proof(runner, monkeypatch, tmp_path, async_author_case):
+    suites, _ = async_author_case
+    monkeypatch.setenv("LEAF_CHANGED_PATHS", '["docs/ci.md"]')
+    monkeypatch.setattr(runner, "select_pr_tier", lambda *a: pytest.fail("full mode used tier selection"))
+    rc, ran, data = invoke(runner, monkeypatch, tmp_path, suites=suites)
+    assert rc == 0 and ran == [s.id for s in suites]
+    assert "mode" not in data
 
 
 @pytest.mark.parametrize("changed", [["server/site.py"], ["platform/auth.py"],
@@ -648,6 +752,8 @@ def test_committed_historical_policy_is_enabled_and_compatible(generator, runner
     assert document["enabled"] is True
     assert runner.load_pr_tier(path) == document
     assert "web-version-restore-proof" in document["suite_ids"]
+    assert "web-async-author-stage" not in document["suite_ids"]
+    assert "web-async-author-stage" not in document["reasons"]
     # Evidence inputs are copied into the task worktree, not shipped with CI.
     paths = [ROOT / name for name in ("pr-tier-proposal.json", "fail30.json", "sentinels-strict.json")]
     if all(path.is_file() for path in paths):
