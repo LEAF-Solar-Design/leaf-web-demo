@@ -417,6 +417,16 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
             setPanelDraft({ scope, names: panelInputs.names, numbers: { ...panelInputs.numbers, [key]: event.target.value } })
           }} />
       </label>)}
+      <label>Gap measurement
+        <select value={panelInputs.numbers.gap_measurement ?? 'outlines'} onChange={(event) => {
+          invalidate(true)
+          setPanelDraft({ scope, names: panelInputs.names,
+            numbers: { ...panelInputs.numbers, gap_measurement: event.target.value } })
+        }}>
+          <option value="outlines">Outline separation</option>
+          <option value="centers">Panel center distance</option>
+        </select>
+      </label>
       <label>Gap between groups
         <input type="number" min="0" step="any" value={panelInputs.numbers.gap_distance ?? ''}
           aria-describedby="panel-group-gap-help"
@@ -427,6 +437,9 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
           }} />
       </label>
       <p id="panel-group-gap-help">Drawing units. Enter a positive distance, or leave blank to group by angle.</p>
+      <p>{panelInputs.numbers.gap_measurement === 'centers'
+        ? 'The gap is the maximum center-to-center distance that connects neighboring panels.'
+        : 'The gap is the maximum separation between neighboring panel outlines.'}</p>
       <p role="status">{panelProposals.singletons} singleton panels cannot be grouped.</p>
       {panelProposals.invalid_handles > 0 && <p role="status">
         {panelProposals.invalid_handles} panels have a drawing handle that cannot be grouped.

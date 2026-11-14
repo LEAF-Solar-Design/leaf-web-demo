@@ -371,6 +371,29 @@ function gapPanelGroupHarness() {
     centre: [[0, 0], [3, 0], [20, 0], [23, 0]][index] }))
   return h
 }
+it('requires a fresh preview when gap measurement changes and submits the revised memberships', async () => {
+  const h = gapPanelGroupHarness()
+  h.graph.panels = [0, 5, 10, 18, 23].map((x, index) => ({ id: String(index), angle: 0,
+    frame_ref: null, centre: [x, 0], provenance: { source_handle: `A${index}` } }))
+  render(<ProjectSolarGraphForm {...h.props} />)
+  const measurement = screen.getByRole('combobox', { name: 'Gap measurement' })
+  expect(measurement.value).toBe('outlines')
+  fillGroupNumbers()
+  changeGroupNumber('Module width along row', '4')
+  changeGroupNumber('Gap between groups', '6')
+  await arm()
+  const before = h.client.catalog.mock.calls.at(-1)[0].intents[0]
+  expect(before.params.groups.map(group => group.panel_refs)).toEqual([['0', '1', '2', '3', '4']])
+  fireEvent.change(measurement, { target: { value: 'centers' } })
+  expect(action().disabled).toBe(true)
+  await screen.findByRole('textbox', { name: 'Group 2 name' })
+  await arm()
+  const intent = h.client.catalog.mock.calls.at(-1)[0].intents[0]
+  expect(intent).not.toBe(before)
+  expect(intent.params.groups.map(group => group.panel_refs)).toEqual([['0', '1', '2'], ['3', '4']])
+  await submitAndWait(h)
+  expect(h.submit.mock.calls[0][0]).toBe(intent)
+})
 it('replaces the armed intent when geometry-only grouping changes and submits that choice', async () => {
   const h = gapPanelGroupHarness()
   render(<ProjectSolarGraphForm {...h.props} />)
