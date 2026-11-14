@@ -3718,6 +3718,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_browser_project_authoring.py"), 30),
         Suite("server-browser-project-source-export", "server verified Browser source export", "pytest", SERVER,
               _py_pytest("tests/test_browser_project_source_export.py"), 31),
+        Suite("server-browser-static-preview", "server private Browser static preview", "pytest", SERVER,
+              _py_pytest("tests/test_browser_static_preview.py"), 12),
         Suite("server-project-solaredge", "server tests/test_project_solaredge.py", "pytest", SERVER,
               _py_pytest("tests/test_project_solaredge.py"), 23),
         Suite("server-project-preview-source", "server tests/test_project_preview_source.py", "pytest", SERVER,
