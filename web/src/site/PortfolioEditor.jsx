@@ -94,6 +94,21 @@ function PortfolioView({ document, projectId, scope, onSelectField, onInlineChan
   useEffect(() => {
     if (!selected) return
     const dialog = viewer.current
+    const doc = dialog?.ownerDocument
+    const controls = doc?.querySelector('.environment-strip'), dock = doc?.querySelector('.bar-dock')
+    const fit = () => {
+      if (!dialog) return
+      const strip = controls?.getBoundingClientRect(), bar = dock?.getBoundingClientRect()
+      const top = Math.max(0, strip?.width > 0 && strip?.height > 0 ? strip.bottom : 0)
+      const bottom = Math.min(window.innerHeight, bar?.width > 0 && bar?.height > 0 ? bar.top : window.innerHeight)
+      dialog.style.top = `${top}px`
+      dialog.style.bottom = `${Math.max(0, window.innerHeight - bottom)}px`
+      dialog.style.height = `${Math.max(0, bottom - top)}px`
+    }
+    fit()
+    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(fit) : null
+    for (const node of [controls, dock, doc?.querySelector('header.top')]) if (node) observer?.observe(node)
+    window.addEventListener('resize', fit)
     // The top layer keeps the photo and its close control above floating Studio
     // panels, even when those panels leave no room in the narrow workspace.
     if (dialog && !dialog.open) {
@@ -106,7 +121,10 @@ function PortfolioView({ document, projectId, scope, onSelectField, onInlineChan
       if (event.key === 'Tab') { event.preventDefault(); closeButton.current?.focus() }
     }
     window.addEventListener('keydown', key)
-    return () => { window.removeEventListener('keydown', key); closeDialog(dialog) }
+    return () => {
+      window.removeEventListener('keydown', key); window.removeEventListener('resize', fit)
+      observer?.disconnect(); closeDialog(dialog)
+    }
   }, [selected])
   const category = document.categories.find(item => item.slug === view)
   const navigate = next => { setSelected(null); setView(next) }

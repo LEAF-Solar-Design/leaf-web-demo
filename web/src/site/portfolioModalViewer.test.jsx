@@ -65,3 +65,22 @@ it('releases the browser modal when the project scope changes', () => {
   expect(close).toHaveBeenCalledTimes(1)
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
 })
+
+it('keeps the modal between rendered workspace controls and the command dock after resize', () => {
+  const controls = window.document.createElement('div'), dock = window.document.createElement('div')
+  controls.className = 'environment-strip'; dock.className = 'bar-dock'
+  let dockTop = 700
+  controls.getBoundingClientRect = () => ({ top: 44, bottom: 93, width: 390, height: 49 })
+  dock.getBoundingClientRect = () => ({ top: dockTop, bottom: 768, width: 390, height: 768 - dockTop })
+  window.document.body.append(controls, dock)
+  try {
+    render(<PortfolioPreview document={document} projectId="owned-project" />)
+    openPhoto()
+    const dialog = screen.getByRole('dialog', { name: 'Synthetic portrait' })
+    expect(dialog.style.top).toBe('93px')
+    expect(dialog.style.height).toBe('607px')
+    dockTop = 500
+    fireEvent(window, new Event('resize'))
+    expect(dialog.style.height).toBe('407px')
+  } finally { controls.remove(); dock.remove() }
+})
