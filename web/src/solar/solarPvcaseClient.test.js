@@ -278,8 +278,13 @@ it('PVC16 bounds committed graph reads', async () => {
   const options = (fetchImpl, extra = {}) => ({ drawingId: 'solar', version: 13, transport: intakeTransport(fetchImpl), timeoutMs: 10, ...extra })
   expect((await readCommittedIntake(options(() => new Promise(() => {})))).code).toBe('timeout')
   const cancel = vi.fn(); const releaseLock = vi.fn()
-  expect((await readCommittedIntake(options(async () => streamResponse(() => new Promise(() => {}), 200, null, cancel, releaseLock)))).code).toBe('timeout')
-  expect(cancel).toHaveBeenCalled(); expect(releaseLock).toHaveBeenCalled()
+  // Exercise the reader timer, not a deadline crossed before reader acquisition
+  // when this worker is descheduled. The real 10ms timer still ends the read.
+  const readerClock = vi.spyOn(globalThis.performance, 'now').mockReturnValue(0)
+  try {
+    expect((await readCommittedIntake(options(async () => streamResponse(() => new Promise(() => {}), 200, null, cancel, releaseLock)))).code).toBe('timeout')
+    expect(cancel).toHaveBeenCalled(); expect(releaseLock).toHaveBeenCalled()
+  } finally { readerClock.mockRestore() }
   const controller = new AbortController(); controller.abort()
   expect((await readCommittedIntake(options(vi.fn(), { signal: controller.signal }))).code).toBe('aborted')
   expect((await readCommittedIntake(options(async () => new Response(new Uint8Array([255])), { timeoutMs: 120000 }))).code).toBe('response')
