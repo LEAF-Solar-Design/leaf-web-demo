@@ -313,6 +313,64 @@ describe('iOS source review', () => {
     expect(startAgentTurn).not.toHaveBeenCalled()
   })
 
+  it('offers an unchecked movie for native creation, requires its transcript and sends exact selected hashes once', async () => {
+    const posts = []
+    let durable = null
+    vi.stubGlobal('fetch', vi.fn(async (url, init = {}) => {
+      if (String(url).includes('/reference-files')) return response({ materials, next_cursor: null })
+      if (init.method === 'POST') {
+        posts.push({ url: String(url), ...init })
+        durable = { ...native('awaiting_confirmation'), source_request_id: JSON.parse(init.body).source_request_id }
+        return response(durable)
+      }
+      return response(String(url).endsWith('/requests') ? (durable ? [durable] : []) : durable)
+    }))
+    const startAgentTurn = vi.fn(async () => ({ session_id: 'selection-session', turn_id: 'selection-turn' }))
+    render(<Host startAgentTurn={startAgentTurn} sourceContext="native" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Build source' }))
+    const movie = await screen.findByRole('checkbox', { name: 'Teacher movie.mov' })
+    await waitFor(() => expect(movie).toBeEnabled())
+    expect(movie).not.toBeChecked()
+    expect(screen.getByText(/one MOV original/)).toHaveTextContent('64 MiB')
+    const transcript = screen.getByRole('checkbox', { name: 'Authentic transcript.txt' })
+    fireEvent.click(movie)
+    fireEvent.click(transcript)
+    expect(screen.getByText('Select a TXT or JSON transcript with the MOV original.')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Stage source' })).toBeDisabled()
+    expect(startAgentTurn).not.toHaveBeenCalled()
+    fireEvent.click(transcript)
+    fireEvent.click(screen.getByRole('button', { name: 'Stage source' }))
+    await screen.findByText('Source ready for review')
+    expect(posts).toHaveLength(1)
+    expect(JSON.parse(posts[0].body)).toMatchObject({ source_operation: 'create',
+      material_refs: [{ material_id: REQUEST, sha256: 'f'.repeat(64) }, { material_id: ORG, sha256: 'e'.repeat(64) }] })
+    expect(startAgentTurn).toHaveBeenCalledOnce()
+    expect(screen.getByText('Selected originals: Teacher movie.mov, Authentic transcript.txt')).toBeVisible()
+  })
+
+  it('lets a selected movie be removed after current source readback changes creation to editing', async () => {
+    let published = false
+    vi.stubGlobal('fetch', vi.fn(async (url) => response(String(url).includes('/reference-files')
+      ? { materials, next_cursor: null } : published ? [native()] : [])))
+    const startAgentTurn = vi.fn()
+    render(<Host startAgentTurn={startAgentTurn} sourceContext="native" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Build source' }))
+    const movie = await screen.findByRole('checkbox', { name: 'Teacher movie.mov' })
+    await waitFor(() => expect(movie).toBeEnabled())
+    fireEvent.click(movie)
+    published = true
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh source' }))
+    await screen.findByText('Private source saved')
+    expect(movie).toBeChecked()
+    expect(movie).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Stage source' })).toBeDisabled()
+    fireEvent.click(movie)
+    expect(movie).not.toBeChecked()
+    expect(movie).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Stage source' })).toBeEnabled()
+    expect(startAgentTurn).not.toHaveBeenCalled()
+  })
+
   it('native_edit_ui requires a supported original for create and retains modal keyboard behavior', async () => {
     vi.stubGlobal('fetch', vi.fn(async (url) => response(String(url).includes('/reference-files') ? { materials: [], next_cursor: null } : [])))
     render(<Host startAgentTurn={vi.fn()} sourceContext="native" />)
@@ -387,6 +445,7 @@ describe('iOS source review', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Build source' }))
     const stage = screen.getByRole('button', { name: 'Stage source' })
     await waitFor(() => expect(stage).toBeEnabled())
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Teacher movie.mov' }))
     fireEvent.click(stage)
     await screen.findByText('Private video decoding is unavailable. Source generation did not start.')
     expect(screen.queryByText(/Publication outcome unknown/)).not.toBeInTheDocument()

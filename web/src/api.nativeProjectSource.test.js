@@ -232,6 +232,59 @@ describe('Native project source real API transport', () => {
     expect(fetch).not.toHaveBeenCalled()
   })
 
+  const movie = (overrides = {}) => metadata({ material_id: ORG, name: 'Original.mov',
+    media_type: 'video/quicktime', byte_size: 64 * 1024 * 1024, sha256: 'f'.repeat(64), ...overrides })
+  const refs = (rows) => rows.map(({ material_id, sha256 }) => ({ material_id, sha256 }))
+
+  it('sends selected MOV plus exactly 4 MiB transcripts as unchanged IDs and hashes without downloading originals', async () => {
+    const texts = Array.from({ length: 4 }, (_, index) => metadata({
+      material_id: `55555555-5555-4555-8555-${String(index + 1).padStart(12, '0')}`,
+      media_type: index === 0 ? 'application/json' : 'text/plain' }))
+    const rows = [movie(), ...texts]
+    const fetch = vi.fn(async () => reply(row())); vi.stubGlobal('fetch', fetch)
+    const request = { ...body(), material_refs: refs(rows) }
+    expect(await stageProjectSource(PROJECT, request, options({ materialMetadata: rows }))).toEqual(row())
+    expect(fetch).toHaveBeenCalledOnce()
+    expect(fetch.mock.calls[0][0]).toBe(`/api/projects/${PROJECT}/native/source/requests`)
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual(request)
+  })
+
+  it('accepts exactly eight selected references including one MOV', async () => {
+    const rows = [movie(), ...Array.from({ length: 7 }, (_, index) => metadata({ byte_size: 1,
+      material_id: `55555555-5555-4555-8555-${String(index + 1).padStart(12, '0')}` }))]
+    const fetch = vi.fn(async () => reply(row())); vi.stubGlobal('fetch', fetch)
+    expect(await stageProjectSource(PROJECT, { ...body(), material_refs: refs(rows) }, options({ materialMetadata: rows }))).toEqual(row())
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  it.each([
+    ['no transcript', () => [movie()]],
+    ['two movies', () => [metadata(), movie(), movie({ material_id: PROJECT })]],
+    ['nine references', () => [movie(), ...Array.from({ length: 8 }, (_, index) => metadata({ byte_size: 1,
+      material_id: `55555555-5555-4555-8555-${String(index + 1).padStart(12, '0')}` }))]],
+    ['oversize movie', () => [metadata(), movie({ byte_size: 64 * 1024 * 1024 + 1 })]],
+    ['empty movie', () => [metadata(), movie({ byte_size: 0 })]],
+    ['fractional movie size', () => [metadata(), movie({ byte_size: 1.5 })]],
+    ['empty transcript', () => [metadata({ byte_size: 0 }), movie()]],
+    ['oversize transcript', () => [metadata({ byte_size: 1048577 }), movie()]],
+    ['wrong project', () => [metadata(), movie({ project_id: MATERIAL })]],
+    ['invalid actor', () => [metadata(), movie({ actor_binding_id: 'invalid' })]],
+    ['unsupported media', () => [metadata(), movie({ media_type: 'video/mp4' })]],
+  ])('rejects MOV metadata before transport: %s', async (_kind, makeRows) => {
+    const rows = makeRows(), fetch = vi.fn(); vi.stubGlobal('fetch', fetch)
+    await expect(stageProjectSource(PROJECT, { ...body(), material_refs: refs(rows) },
+      options({ materialMetadata: rows }))).rejects.toThrow()
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it.each(['browser', 'edit'])('keeps MOV unavailable for %s source requests', async (kind) => {
+    const rows = [metadata(), movie()], fetch = vi.fn(); vi.stubGlobal('fetch', fetch)
+    await expect(stageProjectSource(PROJECT, { ...body(), material_refs: refs(rows),
+      ...(kind === 'edit' ? { source_operation: 'edit', expected_base_commit: 'a'.repeat(40) } : {}) },
+    options({ sourceContext: kind === 'browser' ? 'browser' : 'native', materialMetadata: rows }))).rejects.toThrow()
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
   it('rejects supplied aggregate sizes above 4 MiB', async () => {
     const rows = Array.from({ length: 5 }, (_, index) => metadata({ material_id: `55555555-5555-4555-8555-${String(index + 1).padStart(12, '0')}` }))
     const fetch = vi.fn(); vi.stubGlobal('fetch', fetch)

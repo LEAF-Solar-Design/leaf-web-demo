@@ -31,11 +31,15 @@ function discardDownload(owner) {
   if (owner.downloadUrl) URL.revokeObjectURL(owner.downloadUrl)
   owner.downloadUrl = null
 }
-export function sourceMaterialProblem(row, projectId, orgId, sourceContext = 'browser') {
+export function sourceMaterialProblem(row, projectId, orgId, sourceContext = 'browser', operation = 'create') {
   if (!['browser', 'native'].includes(sourceContext)) return 'Source context is unavailable.'
   if (!row || !isSourceUuid(row.material_id) || row.project_id !== projectId || row.org_id !== orgId
     || !isSourceUuid(row.actor_binding_id) || typeof row.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(row.sha256)
     || !Number.isInteger(row.byte_size) || row.byte_size < 0 || typeof row.name !== 'string') return 'Reference metadata is unavailable.'
+  if (row.media_type === 'video/quicktime' && sourceContext === 'native' && operation === 'create') {
+    if (!row.name.trim()) return 'Reference metadata is unavailable.'
+    return row.byte_size < 1 || row.byte_size > 64 * 1024 * 1024 ? 'Choose a nonempty MOV original of at most 64 MiB.' : null
+  }
   if (!['text/plain', 'application/json'].includes(row.media_type)) return 'Retained project material; unavailable for this source adapter.'
   if (sourceContext === 'native' && !row.name.trim()) return 'Reference metadata is unavailable.'
   if (sourceContext === 'native' && (row.byte_size < 1 || row.byte_size > 1048576)) return 'Choose a nonempty TXT or JSON original of at most 1 MiB.'
@@ -47,9 +51,13 @@ export function sourceSelectionProblem(materials, selected, projectId, orgId, so
   if (sourceContext === 'native' && operation !== 'edit' && selected.length === 0) return 'Choose one through eight TXT or JSON originals.'
   if (selected.length > 8) return 'Choose at most eight originals.'
   const rows = selected.map((id) => materials.find((row) => row.material_id === id))
-  if (new Set(selected).size !== selected.length || rows.some((row) => sourceMaterialProblem(row, projectId, orgId, sourceContext))) return 'Review the selected originals; some are unavailable.'
-  if (sourceContext === 'native' && rows.reduce((total, row) => total + row.byte_size, 0) > 4194304) return 'Selected originals must total at most 4 MiB.'
-  if (rows.reduce((total, row) => total + row.byte_size, 0) > LIMIT) return 'Selected originals must total at most 8 MiB.'
+  if (new Set(selected).size !== selected.length || rows.some((row) => sourceMaterialProblem(row, projectId, orgId, sourceContext, operation))) return 'Review the selected originals; some are unavailable.'
+  const movies = rows.filter((row) => row.media_type === 'video/quicktime')
+  if (movies.length > 1) return 'Choose at most one MOV original.'
+  if (movies.length && !rows.some((row) => ['text/plain', 'application/json'].includes(row.media_type))) return 'Select a TXT or JSON transcript with the MOV original.'
+  const textBytes = rows.filter((row) => row.media_type !== 'video/quicktime').reduce((total, row) => total + row.byte_size, 0)
+  if (sourceContext === 'native' && textBytes > 4194304) return 'Selected TXT or JSON originals must total at most 4 MiB.'
+  if (textBytes > LIMIT) return 'Selected originals must total at most 8 MiB.'
   return null
 }
 function sourceBaseCommit(candidates, projectId, sourceContext) {
@@ -170,7 +178,9 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
           ids.add(row.material_id); rows.push(row)
         }
         if (result.next_cursor === null || result.next_cursor === undefined) {
-          const supported = rows.filter((row) => !sourceMaterialProblem(row, owner.projectId, owner.orgId, owner.sourceContext)).map((row) => row.material_id)
+          // Movies require an explicit choice; preserve the existing text-only default.
+          const supported = rows.filter((row) => row.media_type !== 'video/quicktime'
+            && !sourceMaterialProblem(row, owner.projectId, owner.orgId, owner.sourceContext)).map((row) => row.material_id)
           const automatic = sourceSelectionProblem(rows, supported, owner.projectId, owner.orgId, owner.sourceContext) ? [] : supported
           const invalid = rows.some((row) => sourceMaterialProblem(row, owner.projectId, owner.orgId, owner.sourceContext) === 'Reference metadata is unavailable.'
             || (['text/plain', 'application/json'].includes(row.media_type) && sourceMaterialProblem(row, owner.projectId, owner.orgId, owner.sourceContext)))

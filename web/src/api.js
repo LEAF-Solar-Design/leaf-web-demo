@@ -164,6 +164,9 @@ async function projectSourceRequest(projectId, requestId, action, body, { expect
   if (requestId !== null) sourceId(requestId)
   if (action) {
     sourceBody(action, body, sourceContext)
+    if (action === 'request' && Array.isArray(materialMetadata)
+      && materialMetadata.some((row) => row?.media_type === 'video/quicktime')
+      && (sourceContext !== 'native' || body.source_operation !== 'create')) throw sourceUnavailable()
     if (sourceContext === 'native' && action === 'request' && materialMetadata !== undefined) {
       if (!Array.isArray(materialMetadata) || materialMetadata.length !== body.material_refs.length
         || body.material_refs.some((ref) => {
@@ -171,9 +174,14 @@ async function projectSourceRequest(projectId, requestId, action, body, { expect
           const row = rows[0]
           return rows.length !== 1 || row.project_id !== projectId || !isSourceUuid(row.org_id)
             || !isSourceUuid(row.actor_binding_id) || row.sha256 !== ref.sha256 || typeof row.name !== 'string' || !row.name.trim()
-            || !['text/plain', 'application/json'].includes(row.media_type)
-            || !Number.isInteger(row.byte_size) || row.byte_size < 1 || row.byte_size > 1048576
-        }) || materialMetadata.reduce((total, row) => total + row.byte_size, 0) > 4194304) throw sourceUnavailable()
+            || !['text/plain', 'application/json', 'video/quicktime'].includes(row.media_type)
+            || !Number.isInteger(row.byte_size) || row.byte_size < 1
+            || row.byte_size > (row.media_type === 'video/quicktime' ? 64 * 1024 * 1024 : 1048576)
+        }) || materialMetadata.filter((row) => row.media_type === 'video/quicktime').length > 1
+        || (materialMetadata.some((row) => row.media_type === 'video/quicktime')
+          && !materialMetadata.some((row) => ['text/plain', 'application/json'].includes(row.media_type)))
+        || materialMetadata.filter((row) => row.media_type !== 'video/quicktime')
+          .reduce((total, row) => total + row.byte_size, 0) > 4194304) throw sourceUnavailable()
     }
     if (action === 'request') {
       const verdict = guardedText(body.requirements, { allowSecretOnce })
