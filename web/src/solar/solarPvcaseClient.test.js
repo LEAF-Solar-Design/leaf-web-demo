@@ -218,12 +218,16 @@ it('PVC10 observes one job without resubmission', async () => {
   expect(pvcaseReason(refusal.code)).not.toContain('hostile-prose')
 })
 it('PVC11 retains uncertain job identity', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
   const args = { context: context(), source: source(), catalogRow: catalog('convert') }
   for (const mode of ['network', 'timeout', 'aborted']) {
     const controller = new AbortController()
     const fetchImpl = vi.fn().mockResolvedValueOnce(json({ job_id: 'job-1', status: 'submitted' }, 202))
       .mockImplementationOnce(() => { if (mode === 'network') return Promise.reject(new Error('offline')); if (mode === 'aborted') controller.abort(); return new Promise(() => {}) })
-    const result = await make(fetchImpl, { runOptions: { timeoutMs: 15 } }).convert({ ...args, signal: controller.signal })
+    const pending = make(fetchImpl, { runOptions: { timeoutMs: 15 } }).convert({ ...args, signal: controller.signal })
+    await vi.advanceTimersByTimeAsync(0)
+    if (mode === 'timeout') await vi.advanceTimersByTimeAsync(15)
+    const result = await pending
     expect(result.code).toBe(mode); expect(result.jobId).toBe('job-1')
   }
   const fetchImpl = vi.fn(async () => json({ job_id: 'job-1', status: 'complete', result: runEnvelope(receipt()) }))
