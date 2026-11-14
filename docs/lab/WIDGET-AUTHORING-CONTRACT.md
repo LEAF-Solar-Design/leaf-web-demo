@@ -27,7 +27,7 @@ Omit it for internal authoring. Save and Download do not publish anything.
 
 ## Document identity and persistence
 
-Document IDs use 1–128 ASCII letters, digits, underscores, dots and hyphens, with
+Document IDs use 1 to 128 ASCII letters, digits, underscores, dots and hyphens, with
 an alphanumeric first character. The visible name is mapped by `projectWidgetId`
 to a deterministic project-bound artifact ID. Two projects can use the same
 visible name without sharing a newly saved artifact. Treat the returned artifact
