@@ -187,7 +187,7 @@ it('main keeps telemetry first and installs the proof bridge once after render u
   ])
 })
 
-const appSource = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
+const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 
 it('S1-143 refresh failures show the real humanized error and announce each failed retry', () => {
   const start = appSource.indexOf('{refreshFail && (')
@@ -396,7 +396,7 @@ it('R13G2B-01 standalone ribbon and host keep their exact reference and bytes', 
     'solarStringStandalone.main-f139ceba.json': '9a3c849d1a2dfe93e970cc4a97e641d4851ea5c6e65dfc52d7cb3ad61b0f75b8',
     'solarReadResultStandalone.main-a021056e.json': 'e3c8dafa5a78cd21c7ef21f07e3a17dab34fb8ae852b972a6992302ae5ca3ae9',
     'solarSizingConductorStandalone.main-f139ceba.json': '16aa78d0485629b7485619fc88862693ad5d80ff9b6c8742cd23fb3143e8b6de',
-  })) assert.equal(r13Hash(readFileSync(`${process.cwd()}/src/solar/__fixtures__/${name}`)), hash, name)
+  })) assert.equal(r13Hash(readFileSync(new URL(`./solar/__fixtures__/${name}`, import.meta.url))), hash, name)
 })
 
 it('J10-PROJECT-MOUNT routes initial and successor publication through the canonical project host', () => {
@@ -4191,9 +4191,30 @@ describe('J1 Browser composition', () => {
 
   it('J1 row5 the mounted material intake binds the open project before upload', () => {
     const live = mount('LiveProjectMaterialIntake')
-    assert.match(live, /key:\s*openProjectId/)
+    const mounted = r13One(node => node.type === 'JSXOpeningElement' && node.name.name === 'LiveProjectMaterialIntake')
+    const prop = name => mounted.attributes.find(attr => attr.type === 'JSXAttribute' && attr.name.name === name)?.value?.expression
+    const key = (orgId, openProjectId) => r13Evaluate(prop('key'), { orgId, openProjectId })
+    assert.equal(key('org-j1', 'project-j1'), 'org-j1:project-j1')
+    assert.notEqual(key('org-other', 'project-j1'), key('org-j1', 'project-j1'))
+    assert.notEqual(key('org-j1', 'project-other'), key('org-j1', 'project-j1'))
     assert.match(live, /project:\s*workspace.project/)
-    assert.match(live, /onAttached:\s*rehydrate/)
+    const owner = {}
+    const sessionOwner = {}
+    const captured = {}
+    const row = {}
+    const bindings = []
+    const onStart = r13Evaluate(prop('onAttachmentStarted'), {
+      workspaceController: owner, session: { controller: sessionOwner },
+      captureProjectMaterialSelection: (...args) => { bindings.push(['capture', ...args]); return captured },
+    })
+    assert.equal(onStart(), captured)
+    assert.deepEqual(bindings, [['capture', owner, sessionOwner]])
+    const onComplete = r13Evaluate(prop('onAttached'), {
+      workspaceController: owner,
+      seatAttachedProjectDrawing: (...args) => { bindings.push(['seat', ...args]); return 'seated' },
+    })
+    assert.equal(onComplete(row, captured), 'seated')
+    assert.deepEqual(bindings[1], ['seat', owner, row, captured])
     assert.match(live, /artifacts:\s*workspace\.drawing_artifacts \|\| \[\]/)
 
     // Execute only the mounted adapter, with the two IO controllers replaced.
@@ -4213,25 +4234,49 @@ describe('J1 Browser composition', () => {
     const upload = { actions: { upload: (value) => events.push(['upload', value]) } }
     let allowed = true
     const intake = { begin: (target) => { events.push(['begin', target]); return allowed }, retry: () => {} }
-    const onAttached = () => {}
-    const renderAdapter = new Function('React', 'ProjectMaterialIntake', 'PhotoMaterialIntake', 'useDrawingUploadController', 'useMaterialIntake',
+    const captures = []
+    const effects = []
+    const attachmentRef = { current: null }
+    const onAttachmentStarted = () => {
+      const capture = { dispose: () => events.push(['dispose', capture]) }
+      captures.push(capture)
+      events.push(['capture', capture])
+      return capture
+    }
+    const onAttached = (attachedRow, capture) => { events.push(['attached', attachedRow, capture]); return 'attached' }
+    let intakeOptions
+    const renderAdapter = new Function('React', 'ProjectMaterialIntake', 'PhotoMaterialIntake', 'useDrawingUploadController', 'useMaterialIntake', 'useRef', 'useEffect',
       adapter + '\nreturn LiveProjectMaterialIntake')(
       { createElement: (type, props) => ({ type, props }) }, 'ProjectMaterialIntake', 'PhotoMaterialIntake', () => upload,
-      (options) => { assert.equal(options.upload, upload); assert.equal(options.onAttached, onAttached); return intake },
+      (options) => { assert.equal(options.upload, upload); intakeOptions = options; return intake },
+      (initial) => { assert.equal(initial, null); return attachmentRef },
+      (effect, dependencies) => { assert.deepEqual(dependencies, []); effects.push(effect()) },
     )
-    const element = renderAdapter({ project, artifacts, onAttached })
+    const element = renderAdapter({ project, artifacts, onAttachmentStarted, onAttached })
     assert.equal(element.type, 'ProjectMaterialIntake')
     assert.equal(element.props.project, project)
     assert.equal(element.props.upload, upload)
     assert.equal(element.props.intake, intake)
     assert.equal(element.props.artifacts, artifacts)
+    assert.equal(captures.length, 0, 'mounting the keyed pane must not begin an attachment subscription')
     element.props.onStartUpload(file)
-    assert.deepEqual(events, [['begin', { projectId: 'project-j1', projectName: 'J1 roof', fileName: 'roof.dxf' }], ['upload', file]])
+    assert.deepEqual(events, [['begin', { projectId: 'project-j1', projectName: 'J1 roof', fileName: 'roof.dxf' }], ['capture', captures[0]], ['upload', file]])
+    assert.equal(intakeOptions.onAttached(row), 'attached')
+    assert.deepEqual(events.at(-1), ['attached', row, captures[0]])
     events.length = 0
     allowed = false
     element.props.onStartUpload(file)
     assert.equal(events.length, 1)
     assert.equal(events[0][0], 'begin')
+    assert.equal(captures.length, 1, 'a refused intake must not start another subscription')
+    events.length = 0
+    allowed = true
+    element.props.onStartUpload(file)
+    assert.deepEqual(events, [['begin', { projectId: 'project-j1', projectName: 'J1 roof', fileName: 'roof.dxf' }],
+      ['dispose', captures[0]], ['capture', captures[1]], ['upload', file]])
+    assert.equal(effects.length, 1)
+    effects[0]()
+    assert.deepEqual(events.at(-1), ['dispose', captures[1]], 'org/project key changes clean up the current attachment')
   })
 
   it('J1 row6 demo material mounts its sample state without an IO controller', () => {
@@ -6123,7 +6168,7 @@ it('R13G2A-11 standalone arms and captures retain their predecessor bytes', () =
     'solarStringStandalone.main-f139ceba.json': '9a3c849d1a2dfe93e970cc4a97e641d4851ea5c6e65dfc52d7cb3ad61b0f75b8',
     'solarReadResultStandalone.main-a021056e.json': 'e3c8dafa5a78cd21c7ef21f07e3a17dab34fb8ae852b972a6992302ae5ca3ae9',
     'solarSizingConductorStandalone.main-f139ceba.json': '16aa78d0485629b7485619fc88862693ad5d80ff9b6c8742cd23fb3143e8b6de',
-  })) assert.equal(r13Hash(readFileSync(`${process.cwd()}/src/solar/__fixtures__/${name}`)), hash, name)
+  })) assert.equal(r13Hash(readFileSync(new URL(`./solar/__fixtures__/${name}`, import.meta.url))), hash, name)
 })
 
 it('BSP3 Tool rail closes the actual Studio panel on phone and desktop', () => {
@@ -6212,10 +6257,34 @@ it('R13G2A-12 drawing activation retains one Viewer and the existing owners', ()
     useCatalogController: 1, projectSolarDrawingView: 1, useEngineSession: 0,
     createProjectSolarRunController: 0, useProjectRunController: 0,
   })) assert.equal(r13Find(n => n.type === 'CallExpression' && n.callee.name === name).length, count, name)
-  for (const [name, count] of Object.entries({ readContext: 0, readJob: 0, subscribe: 1, observe: 3 }))
+  for (const [name, count] of Object.entries({ readContext: 0, readJob: 0, subscribe: 2, observe: 3 }))
     assert.equal(r13Find(n => n.type === 'CallExpression' && (n.callee.property?.name === name || n.callee.name === name)).length, count, name)
-  const subscription = r13One(n => n.type === 'CallExpression' && n.callee.property?.name === 'subscribe')
+  const app = r13One(n => n.type === 'FunctionDeclaration' && n.id?.name === 'App')
+  const subscription = r13One(n => n.type === 'CallExpression' && n.callee.property?.name === 'subscribe', app)
   assert.equal(r13Text(subscription.callee), 'controller.subscribe')
+  const captureNode = r13One(n => n.type === 'FunctionDeclaration' && n.id?.name === 'captureProjectMaterialSelection')
+  const captureSubscription = r13One(n => n.type === 'CallExpression' && n.callee.property?.name === 'subscribe', captureNode)
+  assert.equal(r13Text(captureSubscription.callee), 'controller.subscribe')
+  // The second call belongs to an upload's invalidation guard, not another mounted Viewer owner.
+  // Execute that production guard to pin its one-subscription lifetime and latched scope fence.
+  let state = { orgId: 'org-wiring', openProjectId: 'project-wiring', canonicalVersionId: null, mock: false }
+  const listeners = []
+  let unsubscribed = 0
+  const controller = {
+    getSnapshot: () => state,
+    subscribe: listener => { listeners.push(listener); return () => { unsubscribed += 1 } },
+  }
+  const captureSelection = r13Evaluate(captureNode, { readActiveScope: () => 'actor-wiring' })
+  const capture = captureSelection(controller, { getSnapshot: () => ({ status: 'active', generation: 1 }) })
+  assert.equal(listeners.length, 1)
+  assert.equal(capture.isCurrent(), true)
+  state = { ...state, orgId: 'org-other' }
+  listeners[0]()
+  state = { ...state, orgId: 'org-wiring' }
+  listeners[0]()
+  assert.equal(capture.isCurrent(), false, 'returning to the same keyed pane must not revive an old upload')
+  capture.dispose()
+  assert.equal(unsubscribed, 1)
   assert.deepEqual(r13Find(n => n.type === 'CallExpression' && n.callee.property?.name === 'observe').map(r13Text), ['ro.observe(h)', 'ro.observe(f)', 'ro.observe(commandDock)'])
   assert.equal(r13Find(n => n.type === 'NewExpression' && n.callee.name === 'ResizeObserver').length, 1)
   assert.equal(r13Find(n => n.type === 'NewExpression' && ['WebGLRenderer', 'Worker', 'MutationObserver'].includes(n.callee.name || n.callee.property?.name)).length, 0)

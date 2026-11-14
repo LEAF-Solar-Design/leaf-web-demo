@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { scaleTimeout } from '../testTimeScale.js'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import DrawingObjectList from './DrawingObjectList.jsx'
@@ -361,7 +362,7 @@ it('keeps all 2,345 rooftop rows and their native controls reachable', () => {
   const last = rows[2344].querySelector('button')
   last.focus(); expect(last).toHaveFocus()
   expect(rows[2344].querySelector('input[type="radio"]').value).toBe('2345')
-}, 30_000)
+}, scaleTimeout(30_000))
 
 it('keeps Objects outside the workbench and repeats messages in one permanent navigation region', () => {
   const clock = animationFrames(), h = mount({ surface: true }), panel = openObjects()

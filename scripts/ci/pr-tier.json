@@ -719,6 +719,7 @@
     "web-author-quota-live-proof",
     "web-build",
     "web-checkout-identity-check",
+    "web-ci-prebuilt-contract",
     "web-collect-staging-auth0-principal-b",
     "web-composer-contract",
     "web-customization-check",
@@ -1027,9 +1028,6 @@
       "proposal",
       "unknown-ownership"
     ],
-    "web-async-author-stage": [
-      "unknown-ownership"
-    ],
     "web-author-quota-gate": [
       "unknown-ownership"
     ],
@@ -1308,7 +1306,6 @@
     "server-w2-string-delete",
     "studio-walk-regressions",
     "web-app-wiring",
-    "web-async-author-stage",
     "web-author-quota-gate",
     "web-author-quota-live-proof",
     "web-build",

@@ -19,13 +19,25 @@ async function request(path, { fetchImpl = globalThis.fetch, body, signal, onUna
 export function newSubmissionId() {
   return `v1.${Date.now()}.${crypto.randomUUID().replaceAll('-', '')}`
 }
-export async function submitRun({ docId, graphRevision, submissionId, reconcileOnly = false, fetchImpl }) {
+export async function submitRun({ docId, graphRevision, submissionId, reconcileOnly = false, projectId = '', fetchImpl }) {
   const result = await request('runs', { fetchImpl, body: { doc_id: docId, graph_revision: graphRevision,
+    ...(projectId ? { project_id: projectId } : {}),
     ...(submissionId === undefined ? {} : { submission_id: submissionId, reconcile_only: reconcileOnly }) } })
   if (result.ok && typeof result.run_id === 'string' && typeof result.state === 'string') {
     return { ok: true, runId: result.run_id, state: result.state }
   }
   return { ...result, ok: false, outcomeUnknown: result.ok || result.status === 0 || result.status >= 500 }
+}
+export async function discoverRuns({ docId, projectId = '', fetchImpl }) {
+  const query = new URLSearchParams({ doc_id: docId, project_id: projectId })
+  const result = await request(`runs?${query}`, { fetchImpl })
+  if (!result.ok || !Array.isArray(result.runs) || result.runs.length > 20) return { ...result, ok: false }
+  if (result.runs.some(row => !row || row.doc_id !== docId || row.project_id !== projectId
+    || !/^v1\.[0-9]{13}\.[0-9a-f]{32}$/.test(row.submission_id)
+    || !Number.isInteger(row.graph_revision) || row.graph_revision < 1
+    || typeof row.run_id !== 'string' || !row.run_id
+    || !['queued', 'running', 'finished', 'failed', 'cancelled'].includes(row.state))) return { ok: false }
+  return result
 }
 export const cancelRun = ({ runId, fetchImpl }) => request(`runs/${encodeURIComponent(runId)}/cancel`, { fetchImpl, body: {} })
 
@@ -118,7 +130,13 @@ export function openRunStream({ runIds, store = labValueStore, fetchImpl = globa
               if (kind === 'run' && frameId && frameId !== `${value.run_id}:${value.seq}`) throw new Error('Invalid event cursor')
               type = 'message'; data = []; frameId = ''; frameBytes = 0; failures = 0
               if (kind === 'run' && active.has(value.run_id)) {
-                store.apply(value.run_id, value)
+                if (value.kind === 'value' && value.payload?.truncated === true) {
+                  // The bounded SSE producer keeps large values in durable
+                  // events. Recover those bytes before advancing this cursor.
+                  store.addGap(value.run_id, { from: value.seq, to: value.seq, recovered: false })
+                  await snapshot(value.run_id, controller.signal)
+                  immediate = true
+                } else store.apply(value.run_id, value)
                 if (terminalState(store.getRun(value.run_id)?.state) || (!value.block_id && terminalState(value.kind))) {
                   if (store.getRun(value.run_id)) store.setTransport(value.run_id, { status: 'finished' })
                   active.delete(value.run_id)

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { readActiveScope } from './auth/activeScope.js'
 import { listProjectSourceRequests, readProjectSourceRequest, stageProjectSource, confirmProjectSource,
-  recoverProjectSource, rejectProjectSource, exportProjectSourceBundle } from './api.js'
+  recoverProjectSource, rejectProjectSource, exportProjectSourceBundle, isProjectSourcePreGenerationRefusal } from './api.js'
 
 const PROJECT = '11111111-1111-4111-8111-111111111111'
 const REQUEST = '22222222-2222-4222-8222-222222222222'
@@ -27,6 +27,66 @@ beforeEach(() => { localStorage.clear(); signIn() })
 afterEach(() => { vi.unstubAllGlobals(); localStorage.clear() })
 
 describe('Native project source real API transport', () => {
+  const refusal = () => ({ error: { code: 'video_unavailable',
+    message: 'Private video decoding is unavailable. Source generation did not start.' },
+  refusal: { schema: 'leaf.native-source-pre-generation-refusal.v1', project_id: PROJECT, source_request_id: REQUEST,
+    source_profile: 'ios-swiftui-xcodegen-v1', action: 'create', authority_session_id: authority.session_id,
+    authority_turn_id: authority.turn_id, stage: 'before_generation' } })
+
+  it('recognizes only a bounded refusal bound to this exact submitted native create and authority', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(refusal()), {
+      status: 503, headers: { 'Content-Type': 'application/json' } })))
+    const error = await stageProjectSource(PROJECT, body(), options({ materialMetadata: [metadata()] })).catch((value) => value)
+    expect(error.message).toBe(refusal().error.message)
+    expect(isProjectSourcePreGenerationRefusal(error, refusal().refusal)).toBe(true)
+    expect(isProjectSourcePreGenerationRefusal(error, { ...refusal().refusal, authority_turn_id: 'old' })).toBe(false)
+    expect(isProjectSourcePreGenerationRefusal({ ...error }, refusal().refusal)).toBe(false)
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  it.each(['schema', 'project_id', 'source_request_id', 'source_profile', 'action', 'authority_session_id',
+    'authority_turn_id', 'stage', 'extra', 'missing', 'diagnostic', 'code', 'envelope', 'oversize'])('refuses malformed or foreign %s without exposing diagnostics', async (change) => {
+    const value = refusal()
+    if (Object.hasOwn(value.refusal, change)) value.refusal[change] = 'wrong'
+    else if (change === 'extra') value.refusal.private = 'private provider detail'
+    else if (change === 'missing') delete value.refusal.stage
+    else if (change === 'diagnostic') value.error.message = 'private provider detail'
+    else if (change === 'code') value.error.code = 'author_unavailable'
+    else if (change === 'envelope') value.private = 'private provider detail'
+    const raw = change === 'oversize' ? ' '.repeat(4097) + JSON.stringify(value) : JSON.stringify(value)
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(raw, { status: 503, headers: { 'Content-Type': 'application/json' } })))
+    const error = await stageProjectSource(PROJECT, body(), options()).catch((value) => value)
+    expect(isProjectSourcePreGenerationRefusal(error, refusal().refusal)).toBe(false)
+    expect(error.message).toBe('Project source is unavailable. Refresh to review its current state.')
+    expect(error.message).not.toContain('private provider detail')
+  })
+
+  it.each(['edit', 'confirm', 'browser', 'scope', 'status', 'type'])('does not promote a refusal on %s into a pre-generation result', async (change) => {
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      if (change === 'scope') signIn('replacement')
+      return new Response(JSON.stringify(refusal()), { status: change === 'status' ? 422 : 503,
+        headers: { 'Content-Type': change === 'type' ? 'text/plain' : 'application/json' } })
+    }))
+    const request = change === 'edit' ? { ...body(), source_operation: 'edit', expected_base_commit: 'a'.repeat(40) } : body()
+    const error = await (change === 'confirm' ? confirmProjectSource(PROJECT, REQUEST, {
+      receipt_digest: 'a'.repeat(64), expected_version: 1, confirmation_id: MATERIAL }, options())
+      : stageProjectSource(PROJECT, request, options({ sourceContext: change === 'browser' ? 'browser' : 'native' }))).catch((value) => value)
+    expect(isProjectSourcePreGenerationRefusal(error, refusal().refusal)).toBe(false)
+  })
+
+  it('fences a refusal body completed after account replacement', async () => {
+    let finish, entered
+    const reading = new Promise((resolve) => { entered = resolve })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream({
+      start(controller) { finish = () => { controller.enqueue(new TextEncoder().encode(JSON.stringify(refusal()))); controller.close() }; entered() },
+    }), { status: 503, headers: { 'Content-Type': 'application/json' } })))
+    const pending = stageProjectSource(PROJECT, body(), options()).catch((value) => value)
+    await reading
+    signIn('replacement')
+    finish()
+    expect(isProjectSourcePreGenerationRefusal(await pending, refusal().refusal)).toBe(false)
+  })
+
   it('uses only fixed Native list, item and mutation routes with normal auth and unchanged wire bodies', async () => {
     const fetch = vi.fn(async (url, init) => reply(init.method === 'GET' && String(url).endsWith('/requests') ? [row()] : row()))
     vi.stubGlobal('fetch', fetch)
@@ -169,6 +229,59 @@ describe('Native project source real API transport', () => {
     { project_id: MATERIAL }, { sha256: 'f'.repeat(64) }, { name: '' }])('checks supplied reference metadata: %j', async (overrides) => {
     const fetch = vi.fn(); vi.stubGlobal('fetch', fetch)
     await expect(stageProjectSource(PROJECT, body(), options({ materialMetadata: [metadata(overrides)] }))).rejects.toThrow()
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  const movie = (overrides = {}) => metadata({ material_id: ORG, name: 'Original.mov',
+    media_type: 'video/quicktime', byte_size: 64 * 1024 * 1024, sha256: 'f'.repeat(64), ...overrides })
+  const refs = (rows) => rows.map(({ material_id, sha256 }) => ({ material_id, sha256 }))
+
+  it('sends selected MOV plus exactly 4 MiB transcripts as unchanged IDs and hashes without downloading originals', async () => {
+    const texts = Array.from({ length: 4 }, (_, index) => metadata({
+      material_id: `55555555-5555-4555-8555-${String(index + 1).padStart(12, '0')}`,
+      media_type: index === 0 ? 'application/json' : 'text/plain' }))
+    const rows = [movie(), ...texts]
+    const fetch = vi.fn(async () => reply(row())); vi.stubGlobal('fetch', fetch)
+    const request = { ...body(), material_refs: refs(rows) }
+    expect(await stageProjectSource(PROJECT, request, options({ materialMetadata: rows }))).toEqual(row())
+    expect(fetch).toHaveBeenCalledOnce()
+    expect(fetch.mock.calls[0][0]).toBe(`/api/projects/${PROJECT}/native/source/requests`)
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual(request)
+  })
+
+  it('accepts exactly eight selected references including one MOV', async () => {
+    const rows = [movie(), ...Array.from({ length: 7 }, (_, index) => metadata({ byte_size: 1,
+      material_id: `55555555-5555-4555-8555-${String(index + 1).padStart(12, '0')}` }))]
+    const fetch = vi.fn(async () => reply(row())); vi.stubGlobal('fetch', fetch)
+    expect(await stageProjectSource(PROJECT, { ...body(), material_refs: refs(rows) }, options({ materialMetadata: rows }))).toEqual(row())
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  it.each([
+    ['no transcript', () => [movie()]],
+    ['two movies', () => [metadata(), movie(), movie({ material_id: PROJECT })]],
+    ['nine references', () => [movie(), ...Array.from({ length: 8 }, (_, index) => metadata({ byte_size: 1,
+      material_id: `55555555-5555-4555-8555-${String(index + 1).padStart(12, '0')}` }))]],
+    ['oversize movie', () => [metadata(), movie({ byte_size: 64 * 1024 * 1024 + 1 })]],
+    ['empty movie', () => [metadata(), movie({ byte_size: 0 })]],
+    ['fractional movie size', () => [metadata(), movie({ byte_size: 1.5 })]],
+    ['empty transcript', () => [metadata({ byte_size: 0 }), movie()]],
+    ['oversize transcript', () => [metadata({ byte_size: 1048577 }), movie()]],
+    ['wrong project', () => [metadata(), movie({ project_id: MATERIAL })]],
+    ['invalid actor', () => [metadata(), movie({ actor_binding_id: 'invalid' })]],
+    ['unsupported media', () => [metadata(), movie({ media_type: 'video/mp4' })]],
+  ])('rejects MOV metadata before transport: %s', async (_kind, makeRows) => {
+    const rows = makeRows(), fetch = vi.fn(); vi.stubGlobal('fetch', fetch)
+    await expect(stageProjectSource(PROJECT, { ...body(), material_refs: refs(rows) },
+      options({ materialMetadata: rows }))).rejects.toThrow()
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it.each(['browser', 'edit'])('keeps MOV unavailable for %s source requests', async (kind) => {
+    const rows = [metadata(), movie()], fetch = vi.fn(); vi.stubGlobal('fetch', fetch)
+    await expect(stageProjectSource(PROJECT, { ...body(), material_refs: refs(rows),
+      ...(kind === 'edit' ? { source_operation: 'edit', expected_base_commit: 'a'.repeat(40) } : {}) },
+    options({ sourceContext: kind === 'browser' ? 'browser' : 'native', materialMetadata: rows }))).rejects.toThrow()
     expect(fetch).not.toHaveBeenCalled()
   })
 

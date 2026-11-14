@@ -105,7 +105,7 @@ import threading
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import List, Optional
@@ -1451,6 +1451,8 @@ def build_suites() -> List[Suite]:
         Suite("server-lab-run-store", "server tests/test_lab_run_store.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_run_store.py"), 27, uses_database=True,
               database_skip_reasons=(r"platform DB unreachable: .+",)),
+        Suite("server-lab-corpus-export", "server tests/test_lab_corpus_export.py", "pytest", SERVER,
+              _py_pytest("tests/test_lab_corpus_export.py"), 6),
         # 48 collected: 24 SQLite cases and 24 PostgreSQL twins.
         Suite("server-lab-runs", "server tests/test_lab_runs.py", "pytest", SERVER,
               _unprivileged_pytest("tests/test_lab_runs.py"), 24, uses_database=True,
@@ -2711,6 +2713,12 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("tests/test_native_preview_service.py"), 48),
         Suite("scripts-native-preview-completion", "scripts tests/test_native_preview_completion.py", "pytest",
               SCRIPTS_DIR, _py_pytest("tests/test_native_preview_completion.py"), 56),
+        Suite("scripts-native-session-contract", "scripts tests/test_native_preview_session_contract.py", "pytest", SCRIPTS_DIR,
+              _py_pytest("tests/test_native_preview_session_contract.py"), 133),
+        Suite("scripts-native-command-journal", "scripts tests/test_native_preview_command_journal.py", "pytest", SCRIPTS_DIR,
+              _py_pytest("tests/test_native_preview_command_journal.py"), 46),
+        Suite("scripts-native-command-coordinator", "scripts tests/test_native_preview_command_coordinator.py", "pytest", SCRIPTS_DIR,
+              _py_pytest("tests/test_native_preview_command_coordinator.py"), 39),
         Suite("scripts-native-preview-session", "scripts tests/test_native_preview_session.py", "pytest",
               SCRIPTS_DIR, _py_pytest("tests/test_native_preview_session.py"), 61),
         Suite("scripts-native-preview-host", "scripts tests/test_native_preview_host.py", "pytest",
@@ -3487,6 +3495,8 @@ def build_suites() -> List[Suite]:
               [_npm(), "run", "check:walk-unit"], None),
         Suite("web-elk-rank", "web node --test scripts/elk_rank.test.mjs", "script", WEB,
               ["node", "--test", "scripts/elk_rank.test.mjs"], None),
+        Suite("web-ci-prebuilt-contract", "web node --test scripts/ci-prebuilt.test.mjs", "script", WEB,
+              ["node", "--test", "scripts/ci-prebuilt.test.mjs"], None),
         # Standardization slice 13d. ribbonClusters.js has carried an HONESTY
         # CONTRACT in its file header since W4d ("a greyed control with no
         # reason is the gap ToolsPanel's lock-note closed"), and nothing
@@ -3526,9 +3536,10 @@ def build_suites() -> List[Suite]:
         Suite("web-error-classify-contract",
               "web 413 classifies as too_large with its own panel copy", "script", WEB,
               [_npm(), "run", "check:error-classify"], None),
+        # Slow device CI workers take 13 to 15 min for this file, above the 900 s default.
         Suite("web-version-restore-proof",
               "web /app version restore browser proof", "script", WEB,
-              [_npm(), "run", "proof:version-restore"], None),
+              [_npm(), "run", "proof:version-restore"], None, timeout_s=1800),
         # The daily authoring cap refuses with 429 (CONTRACT-ADDENDUM §17). The
         # only thing standing between that refusal and a red "Couldn't author
         # the tool" is api.js tagging quota_kind=="daily_author"; nothing else
@@ -3663,6 +3674,13 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_project_material_images.py"), 13),
         Suite("server-project-material-inspection", "server tests/test_project_material_inspection.py", "pytest", SERVER,
               _py_pytest("tests/test_project_material_inspection.py"), 134),
+        Suite("server-project-video-materials", "server bounded private video decoder", "pytest", SERVER,
+              _py_pytest("tests/test_project_video_materials.py"), 19),
+        Suite("server-project-video-authoring", "server native video source adapter", "pytest", SERVER,
+              _py_pytest("tests/test_project_video_authoring.py"), 9),
+        Suite("server-project-video-packaging", "server video decoder packaging and conditional real cage", "pytest", SERVER,
+              _py_pytest("tests/test_project_video_packaging.py"), 1,
+              allowed_skip_reasons=(r"No real containment proof: platform=.+, uid=.+, missing_tools=\[.*\]",)),
         Suite("server-project-reference-materials", "server tests/test_project_reference_materials.py", "pytest", SERVER,
               _py_pytest("tests/test_project_reference_materials.py"), 40,
               uses_database=True, db_gated=True, database_skip_reasons=(
@@ -3740,6 +3758,12 @@ def build_suites() -> List[Suite]:
               + ["tests/test_integration_tool_routes.py"], 30),
         Suite("server-integration-element-save", "turn-bound native element saves", "pytest", SERVER,
               _py_pytest("tests/test_integration_element_save.py"), 1),
+        Suite("server-integration-browser", "verified browser dataset bridge", "pytest", SERVER,
+              _py_pytest("tests/test_integration_browser.py"), 51),
+        Suite("server-integration-browser-derivation", "finite browser derivation transport", "pytest", SERVER,
+              _py_pytest("tests/test_integration_browser_derivation.py"), 15),
+        Suite("server-integration-browser-mount", "application browser bridge admission", "pytest", SERVER,
+              _py_pytest("tests/test_integration_browser_mount.py"), 25),
         # This proof owns an EMPTY named disposable database. Never alias the
         # general gate DSN to it. opt_in_env normally accepts boolean flags;
         # a present dedicated DSN selects this suite directly instead.
@@ -3885,7 +3909,7 @@ def build_suites() -> List[Suite]:
                "playwright.page-service.config.mjs", "--workers=1"], None,
               uses_database=True, db_gated=True, requires_linux=True, timeout_s=600),
         Suite("web-build", "web production build", "script", WEB,
-              [_npm(), "run", "build"], None),
+              [_npm(), "run", "build", "--", "--reuse-ci-prebuilt"], None),
         # --- containerized harness smoke (census #13) — OPT-IN --- #
         # Builds + boots the real compose stack (broker+harness+app, mock agent)
         # and proves the authed app->harness hop, durable grant/tenant volumes,
@@ -5406,6 +5430,10 @@ def pr_tier_path(value: str) -> str:
 
 def pr_tier_owned_paths(row: dict) -> List[str]:
     """Declared file/directory targets; npm scripts without targets stay unknown."""
+    # This npm script runs one mocked browser spec; its runtime dependency
+    # scope is conservatively widened by select_pr_tier below.
+    if row.get("id") == "web-async-author-stage":
+        return ["web/e2e/async-author-stage.spec.mjs"]
     paths = []
     for arg in row["command"][1:]:
         target = arg.split("::", 1)[0].replace("\\", "/")
@@ -5503,6 +5531,63 @@ def pr_tier_changed_paths() -> List[str]:
     return [p for p in proc.stdout.split("\0") if p]
 
 
+def pr_tier_outside_web_closure(changed) -> bool:
+    """Only clearly scoped non-web paths can justify bounding historical work."""
+    if not isinstance(changed, list) or not changed:
+        return False
+    for path in changed:
+        if (not isinstance(path, str) or not re.fullmatch(r"[A-Za-z0-9_./-]+", path)
+                or any(part in ("", ".", "..") or part.startswith(".")
+                       for part in path.split("/"))):
+            return False
+        parts = path.split("/")
+        if len(parts) > 1 and parts[0] in ("server", "platform", "docs"):
+            continue
+        if len(parts) == 1 and path.lower().endswith(".md"):
+            continue
+        return False
+    return True
+
+
+def pr_tier_web_catchers(suite: Suite, tier: dict) -> Suite:
+    """Resolve normalized fail30 identities exactly; never guess shard ownership."""
+    if (suite.id not in {"web-vitest-1", "web-vitest-2", "web-vitest-3"}
+            or suite.id not in tier["suite_ids"] or suite.kind != "vitest"
+            or suite.cwd != WEB):
+        return suite
+    reasons = tier.get("reasons")
+    reasons = reasons.get(suite.id) if isinstance(reasons, dict) else None
+    if (not isinstance(reasons, list) or not reasons
+            or any(not isinstance(reason, str) or not reason for reason in reasons)):
+        return suite
+    identities = [reason[len("fail30:"):] for reason in reasons if reason.startswith("fail30:")]
+    if not identities:
+        return suite
+    paths = set()
+    try:
+        source = WEB.resolve() / "src"
+        if not source.is_relative_to(REPO.resolve()):
+            return suite
+        for identity in identities:
+            if (not re.fullmatch(r"web/src/(?:[A-Za-z0-9_-][A-Za-z0-9_.-]*/)*"
+                                 r"[A-Za-z0-9_-][A-Za-z0-9_.-]*\.test", identity)
+                    or any(part in (".", "..") for part in identity.split("/"))):
+                return suite
+            matches = [REPO / (identity + suffix) for suffix in (".js", ".jsx")
+                       if (REPO / (identity + suffix)).is_file()]
+            if len(matches) != 1:
+                return suite
+            target = matches[0]
+            if not target.resolve().is_relative_to(source):
+                return suite
+            paths.add(target.relative_to(WEB).as_posix())
+    except (OSError, ValueError, RuntimeError):
+        return suite
+    # Keep worker/shard/exclude flags, floors, skip policy and reporters intact.
+    # The catalog fingerprint was computed from the original declarations.
+    return replace(suite, argv=[*suite.argv, *sorted(paths)])
+
+
 def select_pr_tier(suites: List[Suite], tier: dict) -> List[Suite]:
     ids = {s.id for s in suites}
     selected = set(tier["suite_ids"]) & ids
@@ -5518,19 +5603,25 @@ def select_pr_tier(suites: List[Suite], tier: dict) -> List[Suite]:
             raise ValueError("invalid LEAF_PRIORITY_SUITES")
         selected.update(ids & set(priority))
         for suite in suites:
-            row = {"command": _fingerprint_argv(suite.argv, cwd=suite.cwd),
+            row = {"id": suite.id, "command": _fingerprint_argv(suite.argv, cwd=suite.cwd),
                    "cwd": _fingerprint_cwd(suite.cwd), "kind": suite.kind}
             if ((not pr_tier_owned_paths(row) and row["kind"] != "vitest")
+                    or (suite.id == "web-async-author-stage"
+                        and not pr_tier_outside_web_closure(changed))
                     or any(pr_tier_owns(row, path) for path in changed)):
                 selected.add(suite.id)
         selected = pr_tier_closure(selected, ids, tier.get("prerequisites"))
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         print(f"INFO: mode=tier using all suites ({exc})")
         selected = ids
+        changed = None
     omitted = sorted(ids - selected)
     if omitted:
         print("INFO: mode=tier omitting catalog suites outside tier and changed tests: " + ", ".join(omitted))
-    return [s for s in suites if s.id in selected]
+    selected_suites = [s for s in suites if s.id in selected]
+    if pr_tier_outside_web_closure(changed):
+        selected_suites = [pr_tier_web_catchers(s, tier) for s in selected_suites]
+    return selected_suites
 
 
 # --------------------------------------------------------------------------- #
@@ -5874,6 +5965,7 @@ _WEB_SOURCE_READERS = frozenset({
     "web-app-wiring",
     "web-project-proof-contract",
     "web-elk-rank",
+    "web-ci-prebuilt-contract",
     "web-honesty-ladder",
     "web-tour-anchors",
     "web-composer-contract",

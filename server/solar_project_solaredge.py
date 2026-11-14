@@ -34,6 +34,32 @@ STORE_SCHEMA = "leaf.solar-project-solaredge-import.v1"
 READ_SCHEMA = "leaf.solar-project-solaredge-tracking-read.v1"
 READ_TOOL = "solar-solaredge-tracking-read"
 ACCEPT_TOOL = "solar-solaredge-accept"
+
+
+def tracking_read_catalog_availability(tool, tenant, input_version_id):
+    """Project tracking is a synchronous read, not a worker-backed graph write."""
+    import deps
+    from solar_project_read import _trusted as trusted_read
+
+    read_tool = False
+    try:
+        if tool.get("name") == READ_TOOL:
+            trusted_read(tenant, READ_TOOL, deps.catalog_tool_digest(tool))
+            read_tool = True
+    except (GraphValidationError, ValueError, TypeError, KeyError):
+        pass
+    try:
+        exact_version = input_version_id is not None and bool(UUID(str(input_version_id)))
+    except (ValueError, TypeError, AttributeError):
+        exact_version = False
+    state = policy.project_drawing_tool_availability(tool, tenant, read_tool=read_tool,
+                                                    exact_version=exact_version)
+    # Keep the Solar availability projection. Generic drawing executor markers
+    # do not select the canonical /solar-reads route used by this tool.
+    return {key: value for key, value in state.items()
+            if key not in ("project_read", "project_write")}
+
+
 _IDENTITY = ("organization_id", "project_id", "drawing_id", "source_version_id",
              "source_intake_sha256", "graph_sha256", "graph_project_id")
 _REPORT_KEYS = frozenset(("schema", *_IDENTITY, "source", "request", "row_angle",
@@ -196,14 +222,24 @@ def import_source(tenant, project_id, drawing_id, input_version_id, data):
 
 
 def _report_request(request):
-    if (type(request) is not dict or set(request) != {
-            "source_artifact_id", "alignment_tolerance", "selection_order"}):
+    required = {"source_artifact_id", "alignment_tolerance", "selection_order"}
+    if (type(request) is not dict or not required <= set(request)
+            or not set(request) <= required | {"associations"}):
         _fail("REPORT_REQUEST_INVALID")
     try:
-        normalized = reports.validate_request(request)
+        normalized = reports.validate_request({key: request[key] for key in required})
     except reports.SolarEdgeReportError as exc:
         _fail(exc.code)
     normalized.pop("project_id")
+    if "associations" in request:
+        choices = request["associations"]
+        if (type(choices) is not dict or len(choices) > tracking.MAX_FRAMES
+                or any(not tracking._text(ref, 100) or not tracking._int(index, 0, tracking.MAX_INDEX)
+                       for ref, index in choices.items())
+                or len(set(choices.values())) != len(choices)):
+            _fail("REPORT_ASSOCIATIONS_INVALID")
+        if choices:
+            normalized["associations"] = {key: choices[key] for key in sorted(choices)}
     return normalized
 
 
@@ -241,16 +277,17 @@ def build_report(tenant, project_id, drawing_id, input_version_id, request):
             reports._PARSE_SLOTS.release()
         try:
             core = reports.report_from_matrices(context.graph, matrices,
-                alignment_tolerance=req["alignment_tolerance"], selection_order=req["selection_order"])
+                alignment_tolerance=req["alignment_tolerance"], selection_order=req["selection_order"],
+                associations=req.get("associations"))
         except reports.SolarEdgeReportError as error:
             _fail(error.code)
         report = {"schema": REPORT_SCHEMA, **_identity(context),
             "source": {key: source_meta[key] for key in
                        ("artifact_id", "content_sha256", "byte_length")},
-            "request": {key: req[key] for key in ("alignment_tolerance", "selection_order")}, **core}
+            "request": {key: value for key, value in req.items() if key != "source_artifact_id"}, **core}
         prepared = sink.prepare(solar_artifacts.ArtifactOutput(report["counts"],
             reports.REPORT_MEDIA_TYPE, reports.REPORT_FILENAME, canonical_bytes(report)))
-        _record(context, prepared.meta, report)
+        _record(context, prepared.meta, report, review=True)
         _recheck(tenant, context)
         sink.finish(prepared)
         sink.commit()
@@ -279,7 +316,7 @@ def _load_report(context, artifact_id):
         req = _report_request({"source_artifact_id": source_meta["artifact_id"], **report["request"]})
         if meta["request_sha256"] != _request_sha(req, source_meta):
             _fail(tracking.REPORT_CORRUPT)
-        _record(context, meta, report)
+        _record(context, meta, report, review=True)
     except GraphValidationError:
         raise
     except (ValueError, TypeError, KeyError, IndexError, AttributeError, RecursionError):
@@ -287,17 +324,21 @@ def _load_report(context, artifact_id):
     return meta, report
 
 
-def _record(context, meta, report):
-    """Validate canonical provenance and every matching association, without coercion."""
+def _record(context, meta, report, *, review=False):
+    """Validate provenance and rows; only build/load may retain unresolved review rows.
+
+    Acceptance and historical accepted tracking use the strict default. A review
+    record is validation output only and must not be stored as accepted tracking.
+    """
     try:
-        return _validated_record(context, meta, report)
+        return _validated_record(context, meta, report, review=review)
     except GraphValidationError:
         raise
     except (ValueError, TypeError, KeyError, IndexError, AttributeError, RecursionError):
         _fail(tracking.REPORT_INVALID)
 
 
-def _validated_record(context, meta, report):
+def _validated_record(context, meta, report, *, review=False):
     _check(type(report) is dict and set(report) == _REPORT_KEYS and report["schema"] == REPORT_SCHEMA)
     _check(all(report[key] == value for key, value in _identity(context).items()), tracking.REPORT_STALE)
     graph = context.graph
@@ -308,20 +349,38 @@ def _validated_record(context, meta, report):
     _check(type(counts) is dict and set(counts) == tracking._COUNT_KEYS
         and all(tracking._int(value, 0, tracking.MAX_LABEL) for value in counts.values()))
     req = _report_request({"source_artifact_id": report["source"]["artifact_id"], **report["request"]})
-    _check(report["request"] == {key: req[key] for key in ("alignment_tolerance", "selection_order")})
+    _check(report["request"] == {key: value for key, value in req.items() if key != "source_artifact_id"})
+    choices = req.get("associations", {})
     frames = graph["frames"]
     _check(0 < len(frames) <= tracking.MAX_FRAMES)
     frame_ids = {frame["id"] for frame in frames}
+    _check(set(choices) <= frame_ids)
     handle_of = {p["id"]: p["provenance"].get("source_handle") for p in graph["panels"]}
     frame_of = {ref: frame["id"] for frame in frames for ref in frame["panel_refs"]}
     _check(len(frame_of) <= tracking.MAX_PANELS)
     matches = report["matches"]
     _check(type(matches) is list and 0 < len(matches) <= len(frames))
-    matched, frame_rows = set(), []
+    if review:
+        _check(len(matches) == len(frames))
+    matched, seen, frame_rows = set(), set(), []
     for match in matches:
-        _check(type(match) is dict and set(match) == tracking._MATCH_KEYS)
+        _check(type(match) is dict)
+        unresolved = review and set(match) == tracking._MATCH_KEYS | {"status"}
+        _check(set(match) == tracking._MATCH_KEYS or unresolved)
         ref, candidates = match["frame_ref"], match["candidates"]
-        _check(tracking._text(ref, 100) and ref in frame_ids and ref not in matched)
+        _check(tracking._text(ref, 100) and ref in frame_ids and ref not in seen)
+        seen.add(ref)
+        if unresolved:
+            _check(ref not in choices)
+            _check(match["status"] in ("unmatched", "ambiguous")
+                and all(match[key] is None for key in ("pdf_grid", "pdf_matrix", "pdf_sub_grid")))
+            _check(type(candidates) is list and len(candidates) <= reports.si.MAX_GRIDS
+                and all(tracking._int(c, 0, tracking.MAX_INDEX) for c in candidates)
+                and len(set(candidates)) == len(candidates)
+                and type(match["candidate_count"]) is int and match["candidate_count"] == len(candidates))
+            _check((match["status"] == "unmatched" and not candidates)
+                or (match["status"] == "ambiguous" and bool(candidates)))
+            continue
         _check(tracking._int(match["pdf_grid"], 0, tracking.MAX_INDEX)
             and tracking._int(match["pdf_matrix"], 0, tracking.MAX_INDEX)
             and tracking._int(match["pdf_sub_grid"], -1, tracking.MAX_INDEX))
@@ -329,7 +388,9 @@ def _validated_record(context, meta, report):
             and all(tracking._int(c, 0, tracking.MAX_INDEX) for c in candidates)
             and match["pdf_grid"] in candidates
             and tracking._int(match["candidate_count"], len(candidates), tracking.MAX_INDEX))
-        if match["candidate_count"] > 1 and req["selection_order"] != "recorded":
+        if ref in choices:
+            _check(match["pdf_grid"] == choices[ref])
+        if match["candidate_count"] > 1 and req["selection_order"] != "recorded" and ref not in choices:
             _fail(tracking.REPORT_AMBIGUOUS)
         matched.add(ref)
         frame_rows.append({key: match[key] for key in ("frame_ref", "pdf_matrix", "pdf_grid", "pdf_sub_grid")})
@@ -353,6 +414,8 @@ def _validated_record(context, meta, report):
             _check(tracking._text(panel_ref, 100) and panel_ref in frame_of and panel_ref not in covered
                 and (kind == "bridge" or frame_of[panel_ref] == ref)
                 and type(handle_of[panel_ref]) is str and handle == handle_of[panel_ref].upper())
+            if review:
+                _check(frame_of[panel_ref] in matched)
             covered.add(panel_ref)
         rows.append({key: deepcopy(row[key]) for key in row if key != "panel_handles"})
     unassigned = report["unassigned_panel_refs"]
@@ -361,7 +424,7 @@ def _validated_record(context, meta, report):
         _check(tracking._text(ref, 100) and ref in frame_of and ref not in covered)
         covered.add(ref)
     _check(len(covered) == len(frame_of))
-    expected_counts = {"frames": len(frames), "matched_frames": len(matches),
+    expected_counts = {"frames": len(frames), "matched_frames": len(matched),
         "strings": len(strings), "assigned_panels": sum(len(row["panel_refs"]) for row in strings),
         "unassigned_panels": len(unassigned), "partial_strings": sum(row["partial"] for row in strings),
         "group_strings": sum(row["source"] == "group" for row in strings),

@@ -1,5 +1,6 @@
 """Runs HTTP contract on SQLite and PostgreSQL authorities."""
 from datetime import timedelta
+import copy
 import json
 from types import SimpleNamespace
 
@@ -16,6 +17,8 @@ from routers import lab_router, lab_runs
 from test_lab_evaluate import case
 from test_lab_run_store import authority  # noqa: F401 -- PostgreSQL twin
 from test_lab_corpus_executor import private_pg, installed, kernel_filter, lane as producer_lane  # noqa: F401
+
+EVENT_WAIT_S = 30  # hang guard only; every wait below is on a real event, never a timing claim
 
 
 @pytest.fixture
@@ -61,6 +64,71 @@ def test_corpus_manifest_is_normal_compilable_and_drawing_free(monkeypatch):
         'settings': {'project_id': material['material_id'], 'corpus': material, 'suite': material}}],
         'pipes': [], 'outputs': {}}
     assert admit_graph(graph, {'corpus-evaluator@1.0.0': manifest})
+    graph['blocks'][0]['settings']['parameters'] = {'child_min_k': [1], 'min_select_tickets': 0,
+                                                  'draws': 10, 'seed': 7}
+    assert admit_graph(graph, {'corpus-evaluator@1.0.0': manifest})
+    from lab_evaluate import GraphRefused
+    valid = copy.deepcopy(graph)
+    for parameters in ({'draws': 0}, {'draws': True}, {'seed': -1}, {'child_min_k': []},
+                       {'child_min_k': [1] * 17}, {'min_select_tickets': 6000001}, {'unknown': 1}):
+        invalid = copy.deepcopy(valid)
+        invalid['blocks'][0]['settings']['parameters'] = parameters
+        with pytest.raises(GraphRefused, match='lab_graph_invalid_settings'):
+            admit_graph(invalid, {'corpus-evaluator@1.0.0': manifest})
+    invalid = copy.deepcopy(valid)
+    invalid['pipes'] = [{'from': {'node': 'corpus-evaluator-1', 'port': 'result'},
+                         'to': {'node': 'corpus-evaluator-1', 'port': 'missing'}}]
+    with pytest.raises(GraphRefused, match='lab_graph_bad_port'):
+        admit_graph(invalid, {'corpus-evaluator@1.0.0': manifest})
+    assert graph == valid
+
+
+@pytest.mark.parametrize('parent_number', [5, 5.0])
+def test_corpus_policy_compiles_saved_parameters_without_roundtripping_parent_numbers(rig, monkeypatch, parent_number):
+    import hashlib
+    import uuid
+    import lab_corpus_executor as corpus
+    import lab_tool_manifests
+    monkeypatch.setenv('LEAF_LAB_TOOL_NODES', '1')
+    manifest, _ = lab_tool_manifests.corpus_capability()
+    registry = {'corpus-evaluator@1.0.0': manifest}
+    monkeypatch.setattr(lab_tool_manifests, 'registry_for', lambda tenant: registry)
+    suite = {'schema': 'leafhft.block-suite.v1', 'symbol': 'SYNTHETIC',
+        'parent_policy': {'min_k': 2, 'edge_threshold_cents': parent_number},
+        'child_min_k': [1], 'blocks': {'null.identity': [{}]},
+        'min_select_tickets': 100, 'draws': 10, 'seed': 7}
+    raw = json.dumps(suite).encode()
+    material = {'material_id': str(uuid.uuid4()), 'sha256': hashlib.sha256(raw).hexdigest(), 'byte_size': len(raw)}
+    graph = {'schema': 'leaf.lab-graph.v1', 'blocks': [{
+        'id': 'evaluation', 'registry': {'id': manifest['id'], 'version': manifest['version']['semver'],
+                                       'code_sha256': manifest['version']['code_sha256']},
+        'settings': {'project_id': str(uuid.uuid4()), 'corpus': material, 'suite': material,
+                     'parameters': {'min_select_tickets': 0}}}], 'pipes': [], 'outputs': {}}
+    artifact = ledger.save(rig.tenant, 'policy-document', graph, None, 'member')
+    authority = {'tenant_id': rig.tenant, 'project_id': graph['blocks'][0]['settings']['project_id'],
+        'doc_id': 'policy-document', 'graph_revision': 1, 'graph_sha256': artifact['sha256']}
+    policy = corpus.compile_policy(authority, 'evaluation', graph['blocks'][0]['settings'])
+    assert corpus.validate_policy(policy) == policy
+    effective = json.loads(corpus.compiled_suite(raw, policy))
+    assert effective['min_select_tickets'] == 0
+    assert effective['parent_policy'] == suite['parent_policy']
+    assert type(effective['parent_policy']['edge_threshold_cents']) is type(parent_number)
+    assert json.loads(raw) == suite
+    assert policy['parameters'] == {'min_select_tickets': 0}
+    edited = copy.deepcopy(graph)
+    edited['blocks'][0]['settings']['parameters']['min_select_tickets'] = 1
+    revised = ledger.save(rig.tenant, 'policy-document', edited, 1, 'member')
+    next_authority = dict(authority, graph_revision=2, graph_sha256=revised['sha256'])
+    next_policy = corpus.compile_policy(next_authority, 'evaluation', edited['blocks'][0]['settings'])
+    assert policy['digest'] != next_policy['digest']
+    with pytest.raises(ValueError, match='settings mismatch'):
+        corpus.compile_policy(authority, 'evaluation', edited['blocks'][0]['settings'])
+    tampered = copy.deepcopy(policy)
+    tampered['parameters']['min_select_tickets'] = 1
+    with pytest.raises(ValueError, match='digest mismatch'):
+        corpus.validate_policy(tampered)
+    with pytest.raises(ValueError, match='parent mismatch'):
+        corpus.compiled_suite(raw + b' ', policy)
 
 
 @pytest.fixture
@@ -222,6 +290,20 @@ def test_corpus_normal_compiled_run_actual_producer_and_recovery(corpus_join, mo
     assert projected['row_count'] == 6001 and projected['run_id'] == run_id
     assert projected['context']['suite'] == lane.context['suite']
     assert projected['doc_id'] == lane.doc_id and projected['graph_sha256'] == lane.artifact['sha256']
+    policy = projected['policy']
+    assert policy['schema'] == corpus.POLICY_SCHEMA and policy['version'] == 1
+    assert policy['digest'] == projected['policy_digest']
+    assert policy['parent_suite_sha256'] == lane.context['suite']['sha256']
+    assert policy['lineage'] == {key: authority[key] for key in
+        ('tenant_id', 'project_id', 'doc_id', 'graph_revision', 'graph_sha256')}
+    durable = lane.jobs.get_job(projected['job_id'])['result']['result']
+    assert projected['evaluation'] == durable['result']
+    assert projected['reasons'] == durable['result']['reasons']
+    assert projected['evaluation']['candidates']
+    assert projected['evaluation']['chosen'] is None
+    assert projected['evaluation']['confirm_report'] is None
+    assert projected['verdict'] == 'no_candidate'
+    assert len(value.data.encode()) <= corpus.MAX_EVIDENCE_BYTES
     again = evaluate_graph(lane.graph, registry, **options)
     assert json.loads(again['values']['corpus-evaluator-1']['result'].data)['job_id'] == projected['job_id']
     assert len([job for job in lane.jobs.list_jobs(str(lane.tenant), 200)
@@ -231,6 +313,82 @@ def test_corpus_normal_compiled_run_actual_producer_and_recovery(corpus_join, mo
         cur.execute("SELECT data_type FROM information_schema.columns WHERE table_name='lab_runs' "
                     "AND column_name='corpus_authority_json'")
         assert cur.fetchone()['data_type'] == 'jsonb'
+
+
+def test_corpus_graph_edits_drive_real_evaluation_and_keep_prior_evidence(corpus_join):
+    from functools import partial
+    import lab_corpus_executor as corpus
+    import lab_tool_manifests
+    from lab_evaluate import GraphRefused, admit_graph, evaluate_graph, export_value
+    lane = corpus_join
+    registry = lab_tool_manifests.registry_for(str(lane.tenant))
+    run_id, _ = corpus_admit(lane)
+    row, lease, adapter = corpus_adapter(lane, run_id)
+    authority = store.corpus_authority(row)
+    lookup = partial(lab_tool_manifests.trusted_for, str(lane.tenant))
+    first = evaluate_graph(lane.graph, registry, tool_adapter=adapter, trusted_lookup=lookup)
+    first_value = first['values']['corpus-evaluator-1']['result']
+    assert not first_value.error, first_value.error
+    original = json.loads(first_value.data)
+    assert store.append_events(str(lane.tenant), run_id, 'corpus-worker', lease['fence'], [
+        {'kind': 'value', 'block_id': 'corpus-evaluator-1', 'payload': {'result': export_value(first_value)}}])
+
+    edited = copy.deepcopy(lane.graph)
+    edited['blocks'][0]['settings']['parameters'] = {'min_select_tickets': 0}
+    artifact = ledger.save(str(lane.tenant), lane.doc_id, edited, 1, lane.tenant.subject)
+    response = lane.http.post('/api/lab/runs', json={'doc_id': lane.doc_id, 'graph_revision': 2})
+    assert response.status_code == 202, response.text
+    edited_id = response.json()['run_id']
+    _, _, edited_adapter = corpus_adapter(lane, edited_id, owner='edited-worker')
+    evaluated = evaluate_graph(edited, registry, tool_adapter=edited_adapter, trusted_lookup=lookup)
+    value = evaluated['values']['corpus-evaluator-1']['result']
+    assert not value.error, value.error
+    current = json.loads(value.data)
+    assert current['policy_digest'] != original['policy_digest']
+    assert current['policy']['parameters'] == {'min_select_tickets': 0}
+    assert current['policy']['lineage']['graph_revision'] == 2
+    assert current['policy']['lineage']['graph_sha256'] == artifact['sha256']
+    assert current['policy']['parent_suite_sha256'] == original['policy']['parent_suite_sha256']
+    assert current['evaluated_suite_sha256'] != original['evaluated_suite_sha256']
+    assert current['rows_sha256'] == original['rows_sha256']
+    assert original['evaluation']['chosen'] is None
+    assert current['evaluation']['chosen'] is not None
+    confirmation = current['evaluation']['confirm_report']
+    assert current['verdict'] == 'fail' and confirmation['verdict'] == 'insufficient'
+    assert {'select', 'confirm'} <= set(confirmation['child'])
+    assert {'parent', 'child'} == set(confirmation['calibration'])
+    assert 'paired_ci95_c' in confirmation['confirm_comparison']
+    durable = lane.jobs.get_job(current['job_id'])['result']['result']
+    assert current['evaluation'] == durable['result']
+    assert current['context']['policy'] == current['policy']
+    assert len(value.data.encode()) <= corpus.MAX_EVIDENCE_BYTES
+    with pytest.raises(ValueError, match='settings mismatch'):
+        corpus.compile_policy(authority, 'corpus-evaluator-1', edited['blocks'][0]['settings'])
+    bad_policy = copy.deepcopy(current['policy'])
+    bad_policy['parameters']['min_select_tickets'] = 1
+    with pytest.raises(ValueError, match='digest mismatch'):
+        corpus.validate_policy(bad_policy)
+    with pytest.raises(ValueError, match='parent mismatch'):
+        corpus.compiled_suite(b'{}', current['policy'])
+    tampered = copy.deepcopy(durable)
+    tampered['evaluated_suite_sha256'] = original['evaluated_suite_sha256']
+    with pytest.raises(ValueError, match='terminal identity mismatch'):
+        corpus.validate_result(current['context'], current['job_id'], durable['worker_id'], durable['attempt'], tampered)
+
+    for invalid in ('parameter', 'connection'):
+        draft = copy.deepcopy(edited)
+        if invalid == 'parameter':
+            draft['blocks'][0]['settings']['parameters']['draws'] = 0
+        else:
+            draft['pipes'] = [{'from': {'node': 'corpus-evaluator-1', 'port': 'result'},
+                               'to': {'node': 'corpus-evaluator-1', 'port': 'missing'}}]
+        with pytest.raises(GraphRefused):
+            admit_graph(draft, registry)
+    assert ledger.get(str(lane.tenant), lane.doc_id)['graph'] == edited
+    response = lane.http.get(f'/api/lab/runs/{run_id}/events', params={'after_seq': -1})
+    assert response.status_code == 200
+    retained = json.loads(response.json()['events'][0]['payload']['result']['data'])
+    assert retained == original
 
 
 def test_corpus_picker_lists_real_named_project_materials_and_refuses_client_actor(corpus_join):
@@ -284,42 +442,45 @@ def test_corpus_closed_intent_waits_actual_reap_not_generic_terminal(corpus_join
     def held_cleanup(child):
         terminate(child)
         reaped.set()
-        assert acknowledge.wait(5)
+        assert acknowledge.wait(EVENT_WAIT_S)
     monkeypatch.setattr(corpus.subprocess, 'Popen', start)
     monkeypatch.setattr(corpus, '_terminate', held_cleanup)
     trusted = lab_runs.lab_tool_manifests.corpus_capability()[1]
     with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(adapter, 'corpus-evaluator-1', trusted, lane.manifest, {},
-            lane.graph['blocks'][0]['settings'], deadline_s=0.3 if reason == 'deadline' else 30)
-        stop = time.monotonic() + 5
-        while not children and not future.done() and time.monotonic() < stop:
-            time.sleep(0.01)
-        if not children and future.done():
-            future.result()
-            pytest.fail('Corpus adapter returned before child startup.')
-        assert children
-        rows = lane.jobs.list_jobs(str(lane.tenant), 200)
-        job_id = rows[0]['job_id']
-        if reason == 'cancel':
-            store.request_cancel(str(lane.tenant), run_id, 'operator')
-        else:
-            deadline_started[0] = time.monotonic()
-        assert reaped.wait(5)
-        assert lane.jobs.corpus_cleanup(job_id, str(lane.tenant)) is None
-        # A generic reaper terminal is not evidence that staged files have gone.
-        from envelopes import ErrorCode, error_obj
-        current = lane.jobs.get_job(job_id)
-        lane.jobs.complete_callback(job_id, 'failed',
-            error=error_obj(ErrorCode.INTERNAL, 'synthetic generic reaper', False),
-            provenance={'attempt': current['attempt'], 'execution_path': 'local'}, _allow_closed=True)
-        time.sleep(0.3)
-        assert not future.done()
-        acknowledge.set()
-        with pytest.raises(RunBudgetExceeded if reason == 'deadline' else RunCancelled):
-            future.result(timeout=5)
-        receipt = lane.jobs.corpus_cleanup(job_id, str(lane.tenant))
-        assert receipt['reaped'] is True and receipt['cancel']['fence'] == lease['fence']
-        assert children[0].poll() is not None and all(not path.exists() for path in stages)
+        try:
+            future = pool.submit(adapter, 'corpus-evaluator-1', trusted, lane.manifest, {},
+                lane.graph['blocks'][0]['settings'], deadline_s=0.3 if reason == 'deadline' else 30)
+            stop = time.monotonic() + EVENT_WAIT_S
+            while not children and not future.done() and time.monotonic() < stop:
+                time.sleep(0.01)
+            if not children and future.done():
+                future.result()
+                pytest.fail('Corpus adapter returned before child startup.')
+            assert children
+            rows = lane.jobs.list_jobs(str(lane.tenant), 200)
+            job_id = rows[0]['job_id']
+            if reason == 'cancel':
+                store.request_cancel(str(lane.tenant), run_id, 'operator')
+            else:
+                deadline_started[0] = time.monotonic()
+            assert reaped.wait(EVENT_WAIT_S)
+            assert lane.jobs.corpus_cleanup(job_id, str(lane.tenant)) is None
+            # A generic reaper terminal is not evidence that staged files have gone.
+            from envelopes import ErrorCode, error_obj
+            current = lane.jobs.get_job(job_id)
+            lane.jobs.complete_callback(job_id, 'failed',
+                error=error_obj(ErrorCode.INTERNAL, 'synthetic generic reaper', False),
+                provenance={'attempt': current['attempt'], 'execution_path': 'local'}, _allow_closed=True)
+            time.sleep(0.3)
+            assert not future.done()
+            acknowledge.set()
+            with pytest.raises(RunBudgetExceeded if reason == 'deadline' else RunCancelled):
+                future.result(timeout=EVENT_WAIT_S)
+            receipt = lane.jobs.corpus_cleanup(job_id, str(lane.tenant))
+            assert receipt['reaped'] is True and receipt['cancel']['fence'] == lease['fence']
+            assert children[0].poll() is not None and all(not path.exists() for path in stages)
+        finally:
+            acknowledge.set()
 
 
 def test_corpus_stale_lab_owner_does_not_cancel_successor_intent(corpus_join, monkeypatch):
@@ -343,7 +504,7 @@ def test_corpus_stale_lab_owner_does_not_cancel_successor_intent(corpus_join, mo
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(adapter, 'corpus-evaluator-1', trusted, lane.manifest, {},
             lane.graph['blocks'][0]['settings'], deadline_s=30)
-        stop = time.monotonic() + 5
+        stop = time.monotonic() + EVENT_WAIT_S
         while not children and time.monotonic() < stop:
             time.sleep(0.01)
         assert children
@@ -355,7 +516,7 @@ def test_corpus_stale_lab_owner_does_not_cancel_successor_intent(corpus_join, mo
                                 build_revision='corpus-join-proof', color='active')
         assert successor['fence'] > lease['fence']
         with pytest.raises(RunCancelled):
-            future.result(timeout=5)
+            future.result(timeout=EVENT_WAIT_S)
         assert store.cancel_corpus_job(str(lane.tenant), run_id, 'corpus-worker', lease['fence'],
             'corpus-evaluator-1', job_id, deadline=True) is None
         assert children[0].poll() is None
@@ -364,7 +525,7 @@ def test_corpus_stale_lab_owner_does_not_cancel_successor_intent(corpus_join, mo
         tag = store.cancel_corpus_job(str(lane.tenant), run_id, 'successor', successor['fence'],
                                      'corpus-evaluator-1', job_id)
         assert tag['fence'] == successor['fence']
-        stop = time.monotonic() + 5
+        stop = time.monotonic() + EVENT_WAIT_S
         while not lane.jobs.corpus_cleanup(job_id, str(lane.tenant)) and time.monotonic() < stop:
             time.sleep(0.05)
         assert lane.jobs.corpus_cleanup(job_id, str(lane.tenant))['reaped'] is True

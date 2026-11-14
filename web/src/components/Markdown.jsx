@@ -62,6 +62,24 @@ export default function Markdown({ text }) {
         </Tag>
       )
     }
+    if (block.type === 'table') {
+      return (
+        <div key={i} className="converse-md-table-wrap">
+          <table className="converse-md-table">
+            <thead>
+              <tr>{block.header.map((cell, j) => <th key={j}><Spans spans={cell} /></th>)}</tr>
+            </thead>
+            <tbody>
+              {block.rows.map((row, j) => (
+                <tr key={j}>
+                  {row.map((cell, k) => <td key={k}><Spans spans={cell} /></td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )
+    }
     return (
       <p key={i} className="converse-md-p">
         <Spans spans={block.spans} />

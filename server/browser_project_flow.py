@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import uuid
@@ -14,6 +15,7 @@ import broker_client
 import browser_project_authoring as authoring
 import deps
 import platform_link
+import project_author_diagnostics as author_diagnostics
 import project_material_inspection as inspection
 import session_store
 import turn_runner
@@ -50,6 +52,21 @@ class FlowError(ValueError):
         self.status = status
         self.code, message = _ERRORS[status]
         super().__init__(message)
+
+
+VIDEO_REFUSAL_MESSAGE = 'Private video decoding is unavailable. Source generation did not start.'
+_RECORDED_REFUSAL = object()
+
+
+class VideoUnavailableBeforeGeneration(ValueError):
+    """Local prerequisite refusal, never inferred from a downstream error code."""
+
+
+class PreGenerationRefusal(FlowError):
+    def __init__(self, witness, *, provenance=None):
+        super().__init__(503)
+        self.refusal = witness
+        self.provenance = provenance
 
 
 def _uuid(value):
@@ -593,25 +610,38 @@ def mutate(tenant, project_id, session_id, turn_id, action, edit_id, body, *, so
                 return result
         raise FlowError(409)
     success = False
+    known_refusal = False
+    phase = 'authority_recheck'
+    failure_status, failure_code = 503, 'service_unavailable'
+    correlation_id = str(uuid.uuid4())
+    diagnostic_token = author_diagnostics.begin()
+    failure_metadata = {}
     try:
         recheck()
         if action in ('create', 'edit'):
+            phase = 'stage'
             row, bound = _stage(tenant, project_id, current, body, recheck, session_id, turn_id, source_profile=source_profile)
         else:
+            phase = 'result_readback'
             bound = repository(current)
             row = _read(bound, edit_id) if bound else None
             if row is None:
                 raise FlowError(404)
             _membership(row, bound, current, source_profile)
             _receipt(row, bound)
+            phase = 'authority_recheck'
             recheck()
             if action == 'reject':
+                phase = 'reject'
                 row = _store().reject_edit(*(bound[key] for key in AUTHORITY_FIELDS), edit_id,
                     receipt_digest=body['receipt_digest'], expected_version=body['expected_version'],
                     transition_key=('native-reject:' if source_profile == NATIVE_PROFILE else 'browser-reject:') + digest)
             else:
+                phase = 'publish'
                 row = _publish(current, bound, row, body, action, recheck, source_profile=source_profile)
+        phase = 'authority_recheck'
         recheck()
+        phase = 'result_readback'
         if repository(current) != bound:
             raise FlowError(409)
         result = representation(row, bound, source_profile=source_profile)
@@ -620,9 +650,39 @@ def mutate(tenant, project_id, session_id, turn_id, action, edit_id, body, *, so
             text='Source ready for review.' if row['state'] == 'awaiting_confirmation' else 'Private source state updated.'))
         success = True
         return result
+    except VideoUnavailableBeforeGeneration:
+        if source_profile != NATIVE_PROFILE or action != 'create':
+            raise FlowError(503) from None
+        recheck()
+        witness = dict(schema='leaf.native-source-pre-generation-refusal.v1', project_id=project_id,
+            source_request_id=edit_id, source_profile=NATIVE_PROFILE, action='create',
+            authority_session_id=session_id, authority_turn_id=turn_id, stage='before_generation')
+        session_store.append_event(session_id, turn_id, 'browser_source_error', dict(
+            source_request_id=edit_id, text=VIDEO_REFUSAL_MESSAGE, refusal=witness))
+        recheck()
+        known_refusal = True
+        raise PreGenerationRefusal(witness, provenance=_RECORDED_REFUSAL) from None
     except authoring.AuthoringError as exc:
-        raise FlowError(exc.status if exc.status in _ERRORS else 503) from None
-    except FlowError:
+        failure_status = exc.status if exc.status in _ERRORS else 503
+        # Only canonical internal codes may enter the retained event, never exception text.
+        canonical_error = authoring._ERRORS.get(exc.code) if isinstance(exc.code, str) else None
+        if canonical_error is not None and canonical_error[0] == failure_status:
+            failure_code = exc.code
+        if phase == 'stage' and failure_code == 'author_unavailable' and failure_status == 503:
+            # Optional producer attribution is closed, not exception text. Specific
+            # initializer evidence already captured for this request takes priority.
+            try:
+                subphase = getattr(exc, 'author_subphase', None)
+                if type(subphase) is str and subphase in {
+                        'initialization', 'missing_binding', 'author_http', 'author_response', 'transport'}:
+                    author_diagnostics.record_failure(subphase)
+            except Exception:
+                pass  # An unreadable optional attribute must not replace the failure.
+            failure_metadata = author_diagnostics.snapshot()
+        raise FlowError(failure_status) from None
+    except FlowError as exc:
+        failure_status = exc.status
+        failure_code = _ERRORS[failure_status][0]
         raise
     except Exception:
         raise FlowError(503) from None
@@ -630,11 +690,24 @@ def mutate(tenant, project_id, session_id, turn_id, action, edit_id, body, *, so
         # Fresh subject/turn checks prevent an old completion touching a replacement.
         try:
             recheck()
-            if not success:
+            if not success and not known_refusal:
                 session_store.append_event(session_id, turn_id, 'browser_source_error', dict(
-                    source_request_id=edit_id, text='Source outcome unavailable. Review the saved source state before retrying.'))
+                    source_request_id=edit_id, phase=phase, code=failure_code, status=failure_status,
+                    correlation_id=correlation_id, **failure_metadata,
+                    text='Source outcome unavailable. Review the saved source state before retrying.'))
+                # Fixed metadata only: private exception text and source never enter logs.
+                try:
+                    logging.getLogger(__name__).warning(json.dumps(dict(
+                        event='project_author_failure', project_id=project_id,
+                        source_request_id=edit_id, correlation_id=correlation_id,
+                        phase=phase, code=failure_code, status=failure_status,
+                        **failure_metadata), sort_keys=True))
+                except Exception:
+                    pass  # Diagnostics must not prevent the existing finish operation.
             recheck()
             turn_runner.finish_stage_authority(current[0], session_id, turn_id, subject,
                 stop_reason='browser_source_complete' if success else 'browser_source_unavailable')
         except Exception:
             pass
+        finally:
+            author_diagnostics.end(diagnostic_token)

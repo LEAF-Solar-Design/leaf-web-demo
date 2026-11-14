@@ -997,6 +997,47 @@ describe('portfolio project document', () => {
 })
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
+describe('page preview contact action', () => {
+  it.each(['https://example.test/contact', 'mailto:contact@example.test'])('allows normal activation of %s', href => {
+    const activation = vi.fn(), onSelectField = vi.fn()
+    const observe = event => {
+      activation(event.type, event.defaultPrevented)
+      // Observe the preview's behavior, then stop jsdom from navigating.
+      event.preventDefault()
+    }
+    render(<div onClick={observe} onAuxClick={observe}>
+      <PagePreview document={{ ...document, action: { label: 'Contact the team', href } }} onSelectField={onSelectField} />
+    </div>)
+    const link = screen.getByRole('link', { name: 'Contact the team' })
+    expect(link).toHaveAttribute('href', href)
+    if (href.startsWith('https:')) {
+      expect(link).toHaveAttribute('target', '_blank')
+      expect(link).toHaveAttribute('rel', 'noopener noreferrer')
+    } else {
+      expect(link).not.toHaveAttribute('target')
+      expect(link).not.toHaveAttribute('rel')
+    }
+    fireEvent.click(link)
+    fireEvent(link, new MouseEvent('auxclick', { bubbles: true, cancelable: true, button: 1 }))
+    expect(activation.mock.calls).toEqual([['click', false], ['auxclick', false]])
+    expect(onSelectField).not.toHaveBeenCalled()
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { label: 'Contact the team' },
+    ...['', 'https://', 'mailto:', 'mailto:no-domain', 'javascript:alert(1)', 'data:text/html,x',
+      'http://example.test', 'ftp://example.test', 'tel:1234567890', '//example.test'].map(href => ({ label: 'Contact the team', href })),
+  ])('renders an invalid or partial action as text: %j', action => {
+    const view = render(<PagePreview document={{ ...document, action: { label: action.label, href: 'https://example.test/contact' } }} />)
+    expect(screen.getByRole('link', { name: action.label })).toBeTruthy()
+    view.rerender(<PagePreview document={{ ...document, action }} />)
+    expect(screen.getByText(action.label)).toBeTruthy()
+    expect(screen.queryByRole('link')).toBeNull()
+    expect(view.container.querySelector('[href], [tabindex], button')).toBeNull()
+  })
+})
+
 describe('project page editor', () => {
   it('authors a contact action and preserves it through the saved page and revision export', async () => {
     const client = await vi.importActual('./projectPageClient.js')
@@ -1021,14 +1062,18 @@ describe('project page editor', () => {
     expect(label.value).toBe('')
     fireEvent.change(label, { target: { value: action.label } })
     expect(button('Save page').disabled).toBe(true)
+    expect(screen.getByText(action.label, { selector: '.project-page__action' })).toBeTruthy()
+    expect(screen.getByRole('alert')).toHaveTextContent('Enter a plain contact label and a valid HTTPS link or mailto address.')
     fireEvent.change(href, { target: { value: 'javascript:void(0)' } })
     expect(screen.queryByRole('link', { name: action.label })).toBeNull()
+    expect(screen.getByText(action.label, { selector: '.project-page__action' })).toBeTruthy()
+    expect(screen.getByRole('alert')).toHaveTextContent('Enter a plain contact label and a valid HTTPS link or mailto address.')
     expect(button('Save page').disabled).toBe(true)
     expect(fetch).toHaveBeenCalledTimes(1)
     fireEvent.change(href, { target: { value: action.href } })
     const link = screen.getByRole('link', { name: action.label })
     expect(link.getAttribute('href')).toBe(action.href)
-    expect(fireEvent.click(link)).toBe(false)
+    expect(link).not.toHaveAttribute('target')
     expect(fetch).toHaveBeenCalledTimes(1)
     fireEvent.click(button('Save page'))
     await waitFor(() => expect(button('Download Next.js source').disabled).toBe(false))
@@ -1209,6 +1254,34 @@ describe('project page editor', () => {
 })
 
 describe('saved portfolio iOS preview', () => {
+  it('native_saved_transition revokes an in-flight screenshot before publishing accepted saved source', async () => {
+    submitProjectNativePreview.mockResolvedValue(nativeJob('complete'))
+    loadProjectNativePreview.mockResolvedValue(nativeJob('complete'))
+    const observed = []
+    let signal
+    const view = setup({ onPreview: () => {
+      if (signal && saveProjectPage.mock.calls.length) observed.push(signal.aborted)
+    } })
+    await openPortfolio()
+    fireEvent.click(button('Build iOS preview'))
+    await screen.findByText('Ready · Saved revision 7')
+    const late = deferred()
+    downloadProjectNativePreviewScreenshot.mockReturnValueOnce(late.promise)
+    fireEvent.click(button('Check preview again'))
+    await waitFor(() => expect(downloadProjectNativePreviewScreenshot).toHaveBeenCalledTimes(2))
+    signal = downloadProjectNativePreviewScreenshot.mock.lastCall[2].signal
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Saved during screenshot refresh' } })
+    fireEvent.click(button('Save page'))
+    await screen.findByText('Saved')
+    expect(observed).toEqual([true])
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:page-source')
+    expect(screen.queryByRole('img', { name: /iOS simulator/ })).toBeNull()
+    await act(async () => late.resolve(new Blob(['obsolete screenshot'])))
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(1)
+    expect(button('Build iOS preview')).toBeEnabled()
+    view.unmount()
+  })
+
   it('submits the exact revision once, polls serially, and displays the authenticated screenshot', async () => {
     const pending = deferred()
     submitProjectNativePreview.mockReturnValueOnce(pending.promise)
@@ -1392,6 +1465,49 @@ describe('saved portfolio iOS preview', () => {
 })
 
 describe('authenticated page transport', () => {
+  it.each(['running', 'complete', 'failed', 'cancelled'])('accepts page job progress to %s while keeping the previous job identity', async status => {
+    const client = await vi.importActual('./projectPageClient.js')
+    const job = nativeJob(status)
+    expect(client.validateNativePreview(job, nativeJob('queued'))).toEqual(job)
+    expect(client.validateNativePreview(nativeJob('complete'), nativeJob('complete'))).toEqual(nativeJob('complete'))
+    for (const changes of [{ job_id: PROJECT }, { revision: 8 }, { document_sha256: 'd'.repeat(64) }, { archive_sha256: 'd'.repeat(64) }]) {
+      expect(() => client.validateNativePreview({ ...job, ...changes }, nativeJob('queued'))).toThrow('iOS preview')
+    }
+  })
+
+  it('submits and validates repository-native source identity without page revision identity', async () => {
+    const client = await vi.importActual('./projectPageClient.js')
+    const source = { source_request_id: OTHER, version: 3, receipt_digest: 'c'.repeat(64),
+      source_commit: 'd'.repeat(40), source_tree: 'e'.repeat(40) }
+    const job = { job_id: PROJECT, status: 'queued', schema: 'leaf.project-repository-preview-source.v1',
+      source_profile: 'ios-swiftui-xcodegen-v1', repo_key: OTHER, source_request_id: OTHER,
+      source_version: source.version, receipt_digest: source.receipt_digest, source_commit: source.source_commit,
+      source_tree: source.source_tree, archive_sha256: 'f'.repeat(64) }
+    fetch.mockResolvedValueOnce({ ok: true, status: 202, json: async () => job })
+    expect(await client.submitProjectSourceNativePreview(PROJECT, source, 'source-key', { expectedScope: 'account-a' })).toEqual(job)
+    expect(fetch.mock.lastCall[1]).toMatchObject({ method: 'POST', body: JSON.stringify({ source_request_id: OTHER }),
+      headers: { 'Idempotency-Key': 'source-key', Authorization: 'Bearer fixture', 'X-Org-Id': 'org-a', 'X-Actor-Binding-Id': 'binding-a' } })
+    for (const changes of [{ source_request_id: PROJECT }, { source_version: 4 }, { source_commit: 'a'.repeat(40) },
+      { source_tree: 'b'.repeat(40) }, { receipt_digest: 'b'.repeat(64) }, { revision: 7 }, { document_sha256: 'a'.repeat(64) },
+      { repo_key: 'invalid' }, { source_profile: 'other' }, { source_commit: `${'d'.repeat(40)}\n` }]) {
+      fetch.mockResolvedValueOnce({ ok: true, status: 202, json: async () => ({ ...job, ...changes }) })
+      await expect(client.submitProjectSourceNativePreview(PROJECT, source, 'source-key')).rejects.toThrow('iOS preview')
+    }
+    fetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ ...job, source_tree: 'a'.repeat(40) }) })
+    await expect(client.loadProjectNativePreview(PROJECT, PROJECT, { expected: { source_tree: source.source_tree } })).rejects.toThrow('iOS preview')
+    const complete = { ...job, status: 'complete', receipt: { ...nativeJob('complete').receipt }, evidence_basis: 'authenticated-worker-report' }
+    expect(client.validateNativePreview(complete, job)).toEqual(complete)
+    expect(client.validateNativePreview({ ...complete, receipt: { ...complete.receipt } }, complete)).toEqual(complete)
+    for (const changes of [{ repo_key: PROJECT }, { archive_sha256: 'a'.repeat(64) }, { source_tree: 'a'.repeat(40) }]) {
+      expect(() => client.validateNativePreview({ ...complete, ...changes }, job)).toThrow('iOS preview')
+    }
+    expect(() => client.validateNativePreview(nativeJob('running'), job)).toThrow('iOS preview')
+    expect(() => client.validateNativePreview(job, nativeJob('queued'))).toThrow('iOS preview')
+    fetch.mockClear()
+    await expect(client.submitProjectSourceNativePreview(PROJECT, source, 'source-key', { expectedScope: 'account-b' })).rejects.toThrow()
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
   it('uses producer-shaped native jobs and exact authenticated submit, status and screenshot contracts', async () => {
     const client = await vi.importActual('./projectPageClient.js')
     const png = new NativeBlob([Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64')], { type: 'image/png' })

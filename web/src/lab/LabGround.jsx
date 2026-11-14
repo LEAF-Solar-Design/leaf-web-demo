@@ -13,7 +13,7 @@ export function setLabHostBridgeLoader(loader = loadLabHostBridge) {
   hostBridgeLoader = loader
 }
 
-export default function LabGround({ active, mock = false, studioShell = false, occluders = NO_OCCLUDERS }) {
+export default function LabGround({ active, mock = false, studioShell = false, occluders = NO_OCCLUDERS, projectId, accountScope }) {
   const ref = useRef(null)
   const [hostBridge, setHostBridge] = useState(null)
   const route = typeof window === 'undefined' ? null : parseLabRoute(window.location.pathname, window.location.search)
@@ -33,7 +33,7 @@ export default function LabGround({ active, mock = false, studioShell = false, o
     {embedded && active && <style>{'body > :not([data-lab-embed-root]) { display: none !important; }'}</style>}
     <div data-measured={Boolean(win)} style={{ position: 'absolute', overflow: 'auto', pointerEvents: 'auto',
       ...(embedded ? { inset: 0 } : win ? windowStyle(win) : { visibility: 'hidden' }) }}>
-      <LabWorkbench route={route} hidden={!active} status={status} embedded={embedded} createHostBridge={hostBridge?.createLabHostBridge} />
+      <LabWorkbench route={route} hidden={!active} status={status} embedded={embedded} createHostBridge={hostBridge?.createLabHostBridge} projectId={projectId} accountScope={accountScope} />
     </div>
   </section>
   // The frame owns its whole viewport. Portaling also keeps dormant/sign-in
