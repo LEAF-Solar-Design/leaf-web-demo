@@ -51,7 +51,8 @@ def suite(runner, tmp_path, kind="pytest"):
 def test_capture_off_preserves_spawn(runner, monkeypatch, tmp_path, kind):
     item = suite(runner, tmp_path, kind)
     monkeypatch.setenv("LEAF_PROOF_TRACING", "1")
-    expected_command, shell, executable = runner.normalize_spawn_command(item.argv)
+    expected_argv = item.argv + ["--durations=0", "--durations-min=0"] if kind == "pytest" else item.argv
+    expected_command, shell, executable = runner.normalize_spawn_command(expected_argv)
     expected_env = {**runner.clean_env(), **runner.suite_trace_env(item, tmp_path, 1)}
     with mock.patch.object(runner.subprocess, "run", return_value=SimpleNamespace(
             returncode=0, stdout="1 passed", stderr="")) as spawn:
