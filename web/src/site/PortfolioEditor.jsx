@@ -63,7 +63,7 @@ export function PortfolioPreview({ document, projectId, onSelectField, onInlineC
 function PortfolioView({ document, projectId, scope, onSelectField, onInlineChange, onSelectElement, selectedElement }) {
   const [view, setView] = useState('home')
   const [selected, setSelected] = useState(null)
-  const trigger = useRef(null), closeButton = useRef(null), surface = useRef(null)
+  const trigger = useRef(null), closeButton = useRef(null), surface = useRef(null), viewer = useRef(null)
   const navigationSelection = useRef(null)
   useEffect(() => {
     const selection = (onInlineChange || onSelectField) ? selectedElement : null
@@ -83,18 +83,30 @@ function PortfolioView({ document, projectId, scope, onSelectField, onInlineChan
     const target = nodes.find(node => node.dataset.element === selectedElement) || nodes.find(node => node.dataset.element.startsWith(`${selectedElement.split(':')[0]}:`))
     target?.scrollIntoView?.({ block: 'start', behavior: 'smooth' })
   }, [selectedElement, view, document])
-  const close = () => { setSelected(null); trigger.current?.focus() }
+  const closeDialog = dialog => {
+    if (!dialog?.open) return
+    if (typeof dialog.close === 'function') dialog.close()
+    else dialog.removeAttribute('open')
+  }
+  const close = () => { closeDialog(viewer.current); setSelected(null); trigger.current?.focus() }
   const visible = () => Boolean(surface.current && !surface.current.closest('[hidden], [inert], [aria-hidden="true"]'))
   useEscapeOwner('portfolio-image', Boolean(selected), close, { layer: 'sheet', scope: surface, when: visible })
   useEffect(() => {
     if (!selected) return
+    const dialog = viewer.current
+    // The top layer keeps the photo and its close control above floating Studio
+    // panels, even when those panels leave no room in the narrow workspace.
+    if (dialog && !dialog.open) {
+      if (typeof dialog.showModal === 'function') dialog.showModal()
+      else dialog.setAttribute('open', '')
+    }
     closeButton.current?.focus()
     const key = event => {
       if (!visible()) return
       if (event.key === 'Tab') { event.preventDefault(); closeButton.current?.focus() }
     }
     window.addEventListener('keydown', key)
-    return () => window.removeEventListener('keydown', key)
+    return () => { window.removeEventListener('keydown', key); closeDialog(dialog) }
   }, [selected])
   const category = document.categories.find(item => item.slug === view)
   const navigate = next => { setSelected(null); setView(next) }
@@ -134,9 +146,9 @@ function PortfolioView({ document, projectId, scope, onSelectField, onInlineChan
           : <><h1>{rootText('headline', 240)}</h1>{edit({ field: 'headline' }, 'headline')}<p>{rootText('introduction', 2400)}</p>{edit({ field: 'introduction' }, 'introduction')}<div className="portfolio-grid" style={grid()}>{visibleCategories.map(item => <div key={selectionIdentity(item)} data-element={`${selectionIdentity(item)}:layout`} style={layout(item)}><button onClick={() => navigate(item.slug)}>
             {item.images[item.hero] && !item.images[item.hero].display?.hidden ? photo(item.images[item.hero]) : <span>Add photos in the Project panel.</span>}{!onInlineChange && galleryText(item)}
           </button>{onInlineChange && galleryText(item)}{galleryEdits(item)}</div>)}</div></>}
-    {selected && <div className="portfolio-viewer" role="dialog" aria-modal="true" aria-label={selected.alt}>
+    {selected && <dialog ref={viewer} className="portfolio-viewer" aria-modal="true" aria-label={selected.alt} onCancel={event => { event.preventDefault(); close() }}>
       <button ref={closeButton} onClick={close}>{labels.viewerClose || 'Close image'}</button>{photo(selected)}<p style={textStyle(selected.captionStyle)}>{selected.title}</p>
-    </div>}
+    </dialog>}
   </main>
 }
 
