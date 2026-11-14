@@ -18,7 +18,7 @@ export default function ProjectSourceCandidateReview({ controller }) {
     && c.download.sourceRequestId === row.source_request_id && c.download.version === row.version
     && c.download.receiptDigest === row.receipt_digest && c.download.sourceCommit === row.source_commit
     && c.download.sourceTree === row.source_tree && c.download.projectId === c.projectId
-  const frozen = c.unknown || c.candidates.some((item) => ['staged', 'awaiting_confirmation', 'publishing'].includes(item.state))
+  const frozen = !!c.sourceRefusal || c.unknown || c.candidates.some((item) => ['staged', 'awaiting_confirmation', 'publishing'].includes(item.state))
   const displayedIntent = c.intent && (!row || c.intent.source_request_id === row.source_request_id) ? c.intent : null
   const preview = native && row && c.previewJob?.source_request_id === row.source_request_id
     && c.previewJob.source_version === row.version && c.previewJob.receipt_digest === row.receipt_digest

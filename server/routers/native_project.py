@@ -18,12 +18,17 @@ import deps
 router = APIRouter(prefix='/api/projects/{project_id}/native/source')
 _PATH = re.compile(r'^/api/projects/[^/]+/native/source(?:/.*)?$')
 _PRIVATE = {'Cache-Control': 'private, no-store'}
+_LOCAL_REFUSAL = object()
 
 
 async def no_store_responses(request, call_next):
     response = await call_next(request)
     if _PATH.fullmatch(request.url.path):
         if response.status_code >= 400:
+            known = request.scope.get('_native_source_pre_generation_refusal')
+            if (response.status_code == 503 and isinstance(known, tuple) and len(known) == 2
+                    and known[0] is _LOCAL_REFUSAL):
+                return _response(known[1], 503)
             status = response.status_code
             status = 403 if status == 401 else (status if status in flow._ERRORS else 503)
             return _failure(flow.FlowError(status))
@@ -202,6 +207,22 @@ async def _post(project_id, request, tenant, action, edit_id=None):
     except flow.inspection.InspectionError:
         return _failure(flow.FlowError(403))
     except flow.FlowError as exc:
+        if (isinstance(exc, project_flow.PreGenerationRefusal) and action == 'request'
+                and exc.provenance is project_flow._RECORDED_REFUSAL):
+            expected = dict(schema='leaf.native-source-pre-generation-refusal.v1', project_id=project_id,
+                source_request_id=body['source_request_id'], source_profile=project_flow.NATIVE_PROFILE,
+                action='create', authority_session_id=session_id, authority_turn_id=turn_id, stage='before_generation')
+            # Authority ended with the refusal. Current membership must still hold.
+            try:
+                fresh = await run_in_threadpool(flow.scope, tenant, project_id, write=True)
+            except Exception:
+                return _failure(flow.FlowError(403))
+            if body['source_operation'] == 'create' and exc.refusal == expected and fresh == current:
+                value = dict(error=dict(code='video_unavailable', message=project_flow.VIDEO_REFUSAL_MESSAGE),
+                    refusal=expected)
+                response = _response(value, 503)
+                request.scope['_native_source_pre_generation_refusal'] = (_LOCAL_REFUSAL, value)
+                return response
         return _failure(exc)
     except Exception:
         return _failure(flow.FlowError(503))

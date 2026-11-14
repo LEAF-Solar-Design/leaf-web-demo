@@ -122,6 +122,105 @@ def create(lane):
         return client.post(PREFIX, json=lane.body, headers=lane.headers)
 
 
+def test_known_local_pre_generation_refusal_survives_private_middleware_without_generation(connected, monkeypatch):
+    def unavailable(*args, **kwargs):
+        raise flow.VideoUnavailableBeforeGeneration()
+    monkeypatch.setattr(native, '_require_video_prerequisites', unavailable)
+    result = create(connected)
+    expected = dict(schema='leaf.native-source-pre-generation-refusal.v1', project_id=PROJECT,
+        source_request_id=EDIT, source_profile=native.SOURCE_PROFILE, action='create',
+        authority_session_id=SID, authority_turn_id=TID, stage='before_generation')
+    assert result.status_code == 503
+    assert result.json() == dict(error=dict(code='video_unavailable', message=flow.VIDEO_REFUSAL_MESSAGE), refusal=expected)
+    assert result.headers['cache-control'] == 'private, no-store'
+    assert not connected.posts and not connected.initializations and not connected.candidates
+    assert connected.active is None
+    assert len([e for e in connected.events if e['type'] == 'browser_source_dispatch']) == 1
+    assert [e['data']['refusal'] for e in connected.events if e['type'] == 'browser_source_error'] == [expected]
+    # A known refusal records disposition; it does not erase the original claim.
+    connected.headers = connected.begin()
+    assert create(connected).status_code == 409
+    assert not connected.posts and not connected.initializations
+
+
+@pytest.mark.parametrize('change', ['plain503', 'downstream-code', 'wrong-request', 'extra', 'revoked', 'no-disposition'])
+def test_only_current_bound_local_refusal_is_public(connected, monkeypatch, change):
+    if change == 'downstream-code':
+        def downstream(*args, **kwargs):
+            error = authoring.AuthoringError('author_unavailable')
+            error.code = 'video_unavailable'
+            raise error
+        monkeypatch.setattr(authoring, 'author', downstream)
+    elif change == 'plain503':
+        monkeypatch.setattr(native, 'author', lambda *a, **kw: (_ for _ in ()).throw(flow.FlowError(503)))
+    else:
+        def foreign(*args, **kwargs):
+            witness = dict(schema='leaf.native-source-pre-generation-refusal.v1', project_id=PROJECT,
+                source_request_id=EDIT, source_profile=native.SOURCE_PROFILE, action='create',
+                authority_session_id=SID, authority_turn_id=TID, stage='before_generation')
+            if change == 'wrong-request':
+                witness['source_request_id'] = str(uuid.uuid4())
+            elif change == 'extra':
+                witness['diagnostic'] = 'private provider detail'
+            else:
+                connected.revoked = True
+            raise flow.PreGenerationRefusal(witness, provenance=None if change == 'no-disposition' else flow._RECORDED_REFUSAL)
+        monkeypatch.setattr(native, 'author', foreign)
+    result = create(connected)
+    assert result.status_code in (403, 503)
+    assert 'refusal' not in result.json()
+    assert 'private provider detail' not in result.text
+    assert result.headers['cache-control'] == 'private, no-store'
+    assert not connected.posts and not connected.initializations
+
+
+def test_refusal_is_not_returned_when_membership_changes_after_turn_settlement(connected, monkeypatch):
+    monkeypatch.setattr(native, '_require_video_prerequisites', lambda *a, **kw:
+        (_ for _ in ()).throw(flow.VideoUnavailableBeforeGeneration()))
+    def finish(*args, **kwargs):
+        connected.active = None
+        connected.revoked = True
+    monkeypatch.setattr(flow.turn_runner, 'finish_stage_authority', finish)
+    response = create(connected)
+    assert response.status_code == 403
+    assert 'refusal' not in response.json()
+    assert response.headers['cache-control'] == 'private, no-store'
+    assert not connected.posts and not connected.initializations
+
+
+def test_untrusted_error_body_is_scrubbed_even_if_it_looks_like_a_refusal(connected):
+    async def downstream_response(request):
+        return routes.JSONResponse({'refusal': {'stage': 'before_generation'},
+            'error': {'code': 'video_unavailable', 'message': 'private provider detail'}}, status_code=503)
+    request = Request({'type': 'http', 'method': 'POST', 'path': PREFIX, 'headers': []})
+    import asyncio
+    result = asyncio.run(routes.no_store_responses(request, downstream_response))
+    assert 'refusal' not in json.loads(result.body)
+    assert b'private provider detail' not in result.body
+    assert result.headers['cache-control'] == 'private, no-store'
+
+
+@pytest.mark.parametrize('available', [False, True])
+def test_actual_native_prerequisite_check_precedes_author(connected, monkeypatch, available):
+    material = connected.body['material_refs'][0]['material_id']
+    connected.rows[material]['media_type'] = 'video/quicktime'
+    actual_import = native.importlib.import_module
+    monkeypatch.setattr(native.importlib, 'import_module', lambda name, *a, **kw:
+        SimpleNamespace(_available=lambda: available) if name == 'project_video_materials' else actual_import(name, *a, **kw))
+    calls = []
+    monkeypatch.setattr(authoring, 'author', lambda *a, **kw: calls.append('author'))
+    request = dict(connected.body, edit_id=EDIT, idempotency_key='synthetic')
+    request.pop('source_request_id')
+    if available:
+        native.author(connected.tenant, PROJECT, request)
+        assert calls == ['author']
+    else:
+        with pytest.raises(flow.VideoUnavailableBeforeGeneration):
+            native.author(connected.tenant, PROJECT, request)
+        assert not calls
+    assert not connected.posts and not connected.initializations
+
+
 def prepare_native_edit_consumer(lane):
     lane.body.update(source_operation='edit', expected_base_commit=BASE, material_refs=[])
     lane.headers = lane.begin('edit')
