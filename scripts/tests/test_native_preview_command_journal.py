@@ -1,6 +1,8 @@
 """Dormant local journal tests. Effects are inert synthetic callbacks only."""
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 import sys
 
@@ -18,6 +20,49 @@ def make(tmp_path):
 
 def digest(raw):
     return hashlib.sha256(raw).hexdigest()
+
+
+def test_new_journal_has_explicit_schema_version(tmp_path):
+    owner = make(tmp_path)
+    with closing(sqlite3.connect(owner.path)) as connection:
+        assert connection.execute('PRAGMA user_version').fetchone()[0] == 1
+
+
+def test_legacy_schema_preserves_completed_and_pending_without_rewrite(tmp_path):
+    owner = make(tmp_path)
+    raw = wire(command())
+    owner.prepare(raw, now=100)
+    finish(owner, raw)
+    newer = command('screenshot')
+    newer.update(request_id=IDS[7], sequence=4)
+    pending = wire(newer)
+    owner.prepare(pending, now=100)
+    expected = owner.snapshot()
+    with closing(sqlite3.connect(owner.path, isolation_level=None)) as connection:
+        connection.execute('PRAGMA user_version=0')
+    before = owner.path.read_bytes()
+    restarted = make(tmp_path)
+    assert restarted.snapshot() == expected
+    assert restarted.prepare(raw, now=130)['dispatch'] is False
+    assert restarted.prepare(pending, now=130)['dispatch'] is False
+    assert owner.path.read_bytes() == before
+
+
+@pytest.mark.parametrize('version', [-1, 2, 2147483647])
+def test_unknown_schema_refuses_reopen_and_existing_owner_without_mutation(tmp_path, version):
+    owner = make(tmp_path)
+    raw = wire(command())
+    owner.prepare(raw, now=100)
+    with closing(sqlite3.connect(owner.path, isolation_level=None)) as connection:
+        connection.execute(f'PRAGMA user_version={version}')
+    before = owner.path.read_bytes()
+    for action in (lambda: make(tmp_path), owner.snapshot,
+                   lambda: owner.prepare(raw, now=100),
+                   lambda: finish(owner, raw), owner.start_closing):
+        with pytest.raises(journal.JournalError) as caught:
+            action()
+        assert str(caught.value) == 'Native session journal unavailable or conflicting.'
+        assert owner.path.read_bytes() == before
 
 
 def finish(owner, raw, outcome='complete', evidence='d' * 64):

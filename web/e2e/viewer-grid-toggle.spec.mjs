@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test'
 import { catProofResponse, makeCatProofState } from './catProofFixture.mjs'
+import { scaled } from './timeScale.mjs'
 
 // Studio lane L: GRID in the drafting status bar is real. It is owned by the
 // viewer (ViewerGrid in site/DrawingCockpit.jsx), travels the same
@@ -53,17 +54,17 @@ function expectAnchored({ origin, rect, minorPx, majorPx, minor, major }) {
 }
 
 test('the grid toggle shows and hides a camera-anchored grid behind the drawing; snap and polar stay disabled', async ({ page }) => {
-  test.setTimeout(90_000)
+  test.setTimeout(scaled(90_000))
   const pageErrors = []
   page.on('pageerror', (error) => pageErrors.push(error.message))
   await install(page)
   await page.goto('/app')
   await page.getByRole('navigation', { name: 'Workspace controls' }).getByRole('button', { name: 'Studio', exact: true }).click()
-  await expect(page.locator('.studio-ground .viewer-canvas canvas')).toHaveCount(1, { timeout: 30_000 })
+  await expect(page.locator('.studio-ground .viewer-canvas canvas')).toHaveCount(1, { timeout: scaled(30_000) })
 
   const grid = page.locator('[data-toggle="grid"]')
   const layer = page.locator('.studio-ground > [data-testid="viewer-grid"]')
-  await expect(grid).toBeEnabled({ timeout: 30_000 })
+  await expect(grid).toBeEnabled({ timeout: scaled(30_000) })
   await expect(grid).toHaveAttribute('aria-pressed', 'false')
   await expect(grid).toHaveAttribute('aria-label', 'Grid display')
   await expect(grid).toHaveAttribute('title', 'Grid display off. Shows a reference grid behind the drawing.')
@@ -82,7 +83,7 @@ test('the grid toggle shows and hides a camera-anchored grid behind the drawing;
   await expect(grid).toHaveAttribute('title', 'Grid display on. Shows a reference grid behind the drawing.')
   await expect(layer).toHaveCount(1)
   await expect(layer).toBeVisible()
-  await expect(layer).toHaveAttribute('data-grid-step', /^\d/, { timeout: 20_000 })
+  await expect(layer).toHaveAttribute('data-grid-step', /^\d/, { timeout: scaled(20_000) })
 
   const style = await layer.evaluate((element) => {
     const computed = getComputedStyle(element)

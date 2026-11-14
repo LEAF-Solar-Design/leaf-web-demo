@@ -23,7 +23,7 @@
   "record": {
     "name": "solar-string-data",
     "version": "1.0.0",
-    "description": "Write StringData.json: every panel group sorted by name, with the selected strings whose two ends lie in it and their end coordinates.",
+    "description": "Write StringData.json: every panel group sorted by name, with the selected strings whose two ends lie in it and their end coordinates. Choose design-json for the complete current design, including panel memberships, routes and metadata; it does not certify electrical sizing.",
     "kind": "script",
     "family_id": "stringing",
     "engine_op": "solar_string_data",
@@ -34,6 +34,11 @@
         "drawing_id": {
           "type": "string",
           "maxLength": 128
+        },
+        "format": {
+          "type": "string",
+          "enum": ["string-data", "design-json"],
+          "description": "String Data keeps the endpoint report. Full design JSON exports every current panel, group, ordered string, route and design metadata."
         },
         "string_refs": {
           "type": "array",
