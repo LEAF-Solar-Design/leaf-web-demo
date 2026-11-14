@@ -94,7 +94,7 @@ def test_read_audit_flag_injects_pytest_environment_and_plugin(tmp_path, monkeyp
     command, env = captured[0]
     output = tmp_path / "audit" / "audit%2Estub" / "1"
     assert output.is_dir()
-    assert command == suite.argv + ["-p", "read_audit"]
+    assert command == suite.argv + ["-p", "read_audit", "--durations=0", "--durations-min=0"]
     assert env["LEAF_READ_AUDIT_DIR"] == str(output)
     assert env["LEAF_READ_AUDIT_ROOT"] == str(g.REPO)
     assert env["PYTHONPATH"] == str(SCRIPTS / "ci") + os.pathsep + "existing-python-path"
@@ -122,7 +122,9 @@ def test_read_audit_unsupported_suites_run_unchanged(tmp_path, monkeypatch, kind
     for attempt in (1, 2):
         result = g.run_suite(suite, tmp_path, attempt=attempt, reporting_disabled=True)
         assert result.status == "PASS"
-    assert captured == [(argv, expected_env), (argv, expected_env)]
+    timing_argv = argv + (["--durations=0", "--durations-min=0"]
+                          if kind == "pytest" and "pytest" in argv else [])
+    assert captured == [(timing_argv, expected_env), (timing_argv, expected_env)]
     rows = [json.loads(line) for line in (tmp_path / "audit/unaudited.jsonl").read_text().splitlines()]
     assert rows == [{"suite_id": suite.id, "reason": reason}]
     assert not (tmp_path / "audit" / suite.id).exists()
@@ -178,7 +180,7 @@ def test_read_audit_setup_errors_never_fail_a_suite(tmp_path, monkeypatch, block
     expected_env = g.clean_env()
     monkeypatch.setattr(g.subprocess, "run", child)
     assert g.run_suite(suite, tmp_path, reporting_disabled=True).status == "PASS"
-    assert captured == [(suite.argv, expected_env)]
+    assert captured == [(suite.argv + ["--durations=0", "--durations-min=0"], expected_env)]
     if not block_root:
         row = json.loads((directory / "unaudited.jsonl").read_text())
         assert row["suite_id"] == suite.id
@@ -209,6 +211,144 @@ def test_read_audit_real_pytest_records_opened_file(tmp_path, monkeypatch):
     entries = [json.loads(line) for path in (tmp_path / "audit/tiny/1").glob("*.jsonl")
                for line in path.read_text(encoding="utf-8").splitlines()]
     assert {"k": "f", "p": "payload.txt"} in entries
+
+
+@pytest.mark.parametrize("kind,output,expected,basis", [
+    ("vitest", "\x1b[32m ✓ src/widget.test.ts (3 tests | 1 skipped) 1250ms\x1b[0m\n"
+     " ❯ src/other.test.jsx (2 tests | 1 failed) 2.5s\n"
+     " ✓ src/minute.test.mjs (1 test) 1m\n"
+     " Tests  3 passed | 1 failed | 1 skipped (5)\n",
+     {"src/widget.test.ts": 1.25, "src/other.test.jsx": 2.5, "src/minute.test.mjs": 60},
+     "vitest reported file duration"),
+    ("pytest", "================ slowest durations ================\n"
+     "\x1b[33m0.25s setup tests/test_widget.py::test_widget\x1b[0m\n"
+     "1.50s call tests/test_widget.py::private_title.py\n"
+     "0.05s teardown tests/test_widget.py::test_widget\n"
+     "0.00s call tests/test_zero.py::test_zero\n"
+     "================ 2 passed in 9.00s ================\n",
+     {"tests/test_widget.py": 1.8, "tests/test_zero.py": 0}, "pytest phase duration sum"),
+    ("script", "Running 3 tests using 1 worker\n"
+     "  \x1b[32m✓  1 [chromium] › e2e/widget.spec.mjs:12:3 › private title (250ms)\x1b[0m\n"
+     "  ✘  2 [chromium] › e2e/widget.spec.mjs:24:3 › another title (1.5s)\n"
+     "  ✓  3 e2e/other.spec.ts:8 › title (1m)\n"
+     "  2 passed (2.0m)\n",
+     {"e2e/widget.spec.mjs": 1.75, "e2e/other.spec.ts": 60}, "playwright test duration sum"),
+])
+def test_file_timing_real_reporter_rows(tmp_path, monkeypatch, kind, output, expected, basis):
+    g = _load_runner()
+    monkeypatch.setattr(g, "REPO", tmp_path)
+    suite = g.Suite("timed", "timed", kind, tmp_path / "package", [], None)
+    rows = g.parse_file_timings(suite, output)
+    assert {row["file"]: row["seconds"] for row in rows} == pytest.approx(
+        {"package/" + path: value for path, value in expected.items()})
+    assert {row["basis"] for row in rows} == {basis}
+    assert all(set(row) == {"file", "seconds", "basis"} for row in rows)
+
+
+@pytest.mark.parametrize("kind,output", [
+    ("vitest", " ✓ src/real.test.ts > misleading.test.ts (1 test) 50ms\n"
+     "   ✓ title names src/secret.test.ts (1 test) 50ms\n"
+     " ✓ ../../outside.test.ts (1 test) 50ms\n"
+     " ✓ C:\\outside.test.ts (1 test) 50ms\n"
+     " ✓ src/bad\x00.test.ts (1 test) 50ms\n"
+     " ✓ src/bad\x1b]0;secret.test.ts (1 test) 50ms\n"
+     " Test Files  1 passed (1)\n Duration  50ms\n"),
+    ("pytest", "1.00s call tests/test_outside_section.py::test_fake\n"
+     "================ slowest 10 durations ================\n"
+     "0.50s call ../../test_outside.py::test_secret\n"
+     "0.50s call tests/bad\x7f.py::test_secret\n"
+     "0.50s unknown tests/test_unknown.py::test_unknown\n"
+     "================ 1 passed in 0.50s ================\n"
+     "1.00s call tests/test_outside_section.py::test_fake\n"),
+    ("playwright", "  ✓  1 [chromium] › ../../outside.spec.ts:1:2 › title (1s)\n"
+     "  ✓  2 [chromium] › title mentions e2e/secret.spec.ts:1:2 › title (1s)\n"
+     "  1) [chromium] › e2e/failure.spec.ts:1:2 › title (1s)\n"
+     "  ✓  3 [chromium] › e2e/unknown.spec.ts:1:2 › title (4h)\n"
+     "  -  4 [chromium] › e2e/skipped.spec.ts:1:2 › title\n"
+     "  1 passed (3.2s)\n"),
+    ("tsc", "  ✓  1 e2e/fake.spec.ts:1 › title (1s)\n"),
+])
+def test_file_timing_ignores_unsupported_titles_and_escape_paths(tmp_path, monkeypatch, kind, output):
+    g = _load_runner()
+    monkeypatch.setattr(g, "REPO", tmp_path)
+    suite = g.Suite("timed", "timed", kind, tmp_path / "package", [], None)
+    assert g.parse_file_timings(suite, output) == []
+
+
+def test_file_timing_normalizes_paths_from_suite_cwd(tmp_path, monkeypatch):
+    g = _load_runner()
+    monkeypatch.setattr(g, "REPO", tmp_path / "repo")
+    suite = g.Suite("timed", "timed", "pytest", tmp_path, [], None)
+    rows = g.parse_file_timings(suite, "======== slowest durations ========\n"
+                               "0.25s setup repo\\tests\\test_real.py::test_a\n"
+                               "0.75s call repo/tests/test_real.py::test_b[../../secret.py]\n")
+    assert rows == [{"file": "tests/test_real.py", "seconds": 1.0,
+                     "basis": "pytest phase duration sum"}]
+
+
+@pytest.mark.parametrize("rc,summary,status", [(0, "2 passed", "PASS"),
+                                               (1, "1 failed, 1 passed", "FAIL")])
+@pytest.mark.parametrize("corpus_launcher", [False, True])
+def test_file_timing_run_suite_reaches_parent_stdout_without_changing_verdict_or_selection(
+        tmp_path, monkeypatch, capsys, rc, summary, status, corpus_launcher):
+    g = _load_runner()
+    monkeypatch.setattr(g, "REPO", tmp_path)
+    monkeypatch.delenv("LEAF_GATE_FAULT_INJECT", raising=False)
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-k selected")
+    argv = ([sys.executable, "-I", str(g.SCRIPTS_DIR / "ci/run_unprivileged_pytest.py"), "pytest"]
+            if corpus_launcher else [sys.executable, "-m", "pytest"])
+    argv += ["tests/test_real.py::test_selected", "-q"]
+    suite = g.Suite("timed", "timed", "pytest", tmp_path, argv, 2)
+    captured = []
+
+    def child(command, **kwargs):
+        captured.append((command, kwargs))
+        return SimpleNamespace(returncode=rc, stdout=(
+            "======== slowest durations ========\n"
+            "0.25s setup tests/test_real.py::test_selected[private-title]\n"
+            "0.75s call tests/test_real.py::test_selected[private-title]\n"
+            f"======== {summary} in 9.00s ========\n"), stderr="")
+
+    monkeypatch.setattr(g.subprocess, "run", child)
+    monkeypatch.setattr(g, "run_capture_command", child)
+    result = g.run_suite(suite, tmp_path, attempt=3, reporting_disabled=True)
+    assert result.status == status
+    assert result.got == "2"
+    assert result.counts == g.parse_pytest(f"{summary} in 9.00s")
+    assert suite.argv == argv
+    command, options = captured[0]
+    if corpus_launcher:
+        assert command == argv
+        assert options["env"]["PYTEST_ADDOPTS"] == "-k selected --durations=0 --durations-min=0"
+    else:
+        assert command == argv + ["--durations=0", "--durations-min=0"]
+        assert options["env"]["PYTEST_ADDOPTS"] == "-k selected"
+    assert options["cwd"] == str(suite.cwd)
+    assert options["capture_output"] is True
+    lines = capsys.readouterr().out.splitlines()
+    rows = [json.loads(line.removeprefix("LEAF_FILE_TIMING ")) for line in lines
+            if line.startswith("LEAF_FILE_TIMING ")]
+    assert rows == [{"schema": "leaf.ci.file-timing.v1", "suite_id": "timed", "attempt": 3,
+                     "file": "tests/test_real.py", "seconds": 1.0,
+                     "basis": "pytest phase duration sum"}]
+    assert "private-title" not in "\n".join(lines)
+
+
+def test_file_timing_parser_failure_cannot_change_verdict(tmp_path, monkeypatch, capsys):
+    g = _load_runner()
+    suite = g.Suite("timed", "timed", "vitest", tmp_path, ["npx", "vitest", "run"], 1)
+    monkeypatch.delenv("LEAF_GATE_FAULT_INJECT", raising=False)
+    monkeypatch.setattr(g.subprocess, "run", lambda *_a, **_k: SimpleNamespace(
+        returncode=0, stdout="Tests  1 passed (1)\n", stderr=""))
+
+    def broken_parser(*_args):
+        raise ValueError("private failure text")
+
+    monkeypatch.setattr(g, "parse_file_timings", broken_parser)
+    result = g.run_suite(suite, tmp_path, reporting_disabled=True)
+    assert result.status == "PASS"
+    assert result.got == "1"
+    assert "LEAF_FILE_TIMING" not in capsys.readouterr().out
 
 
 def _failed_log_retention_helper():
