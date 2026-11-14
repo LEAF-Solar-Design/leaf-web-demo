@@ -262,7 +262,8 @@ def shape_signature(matrix):
     return tuple(tuple(cell["Code"] for cell in row["Panels"]) for row in matrix["Rows"])
 
 
-def lattice_row_angle(centres, *, spread_tolerance=1e-6):
+def lattice_row_angle(centres, *, spread_tolerance=1e-6, recorded_angle=None,
+                      coordinate_tolerance=0.0):
     """The shared panel angle, reconstructed from the centroid lattice; fails closed.
 
     The plugin's group row angle is the panel's angle (PanelGroup ctor, PanelGroup.cs:25), and
@@ -274,7 +275,16 @@ def lattice_row_angle(centres, *, spread_tolerance=1e-6):
     runs along it or across it; this returns the angle in [-pi/4, pi/4) and the caller picks
     the axis family from the definition's extents. Any spread above the tolerance refuses:
     the panels do not share one orientation and no single angle may be guessed.
+    A separately recorded module angle may instead be verified against every
+    nearest-neighbour vector with the stated coordinate rounding uncertainty.
     """
+    # A caller with independently recorded module rotation can check rounded
+    # centroids against it. This does not relax the default inferred-angle path.
+    if recorded_angle is not None and (
+            type(recorded_angle) not in (int, float) or not math.isfinite(recorded_angle)
+            or type(coordinate_tolerance) not in (int, float)
+            or not math.isfinite(coordinate_tolerance) or not 0 < coordinate_tolerance <= 0.0005):
+        raise SolarEdgeImportError("lattice-angle-unavailable", "invalid recorded angle")
     points = [(float(x), float(y)) for x, y in centres]
     if len(points) < 2 or len(points) > MAX_PANELS:
         raise SolarEdgeImportError("lattice-angle-unavailable", f"{len(points)} panels")
@@ -316,7 +326,16 @@ def lattice_row_angle(centres, *, spread_tolerance=1e-6):
             raise SolarEdgeImportError("lattice-angle-unavailable", "coincident or isolated panels")
         j = best[1]
         angle = math.atan2(points[j][1] - y, points[j][0] - x)
+        if recorded_angle is not None:
+            # Each coordinate can move by one half-quantum; the difference of
+            # two points can move by at most 2*sqrt(2)*tolerance in norm.
+            uncertainty = 2 * math.sqrt(2) * coordinate_tolerance / math.sqrt(best[0])
+            residual = abs((angle - recorded_angle + math.pi / 4) % (math.pi / 2) - math.pi / 4)
+            if uncertainty >= math.sqrt(0.5) or residual > math.asin(uncertainty) + spread_tolerance:
+                raise SolarEdgeImportError("lattice-angle-ambiguous", "centroids disagree with recorded rotation")
         folded.append((angle + math.pi / 4) % (math.pi / 2) - math.pi / 4)
+    if recorded_angle is not None:
+        return (recorded_angle + math.pi / 4) % (math.pi / 2) - math.pi / 4
     folded.sort()
     if folded[-1] - folded[0] > spread_tolerance:
         raise SolarEdgeImportError(

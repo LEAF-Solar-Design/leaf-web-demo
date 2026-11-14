@@ -28,6 +28,7 @@ import solar_solaredge_parse_worker as parse_worker
 import solar_artifacts
 import solar_import_sources
 import solar_solaredge_import as si
+import solar_panel_group_kernel as panel_kernel
 from leaf_cloud_client import canonical_bytes
 from solar_design_graph import GraphValidationError
 from solar_graph_context import resolve_graph_context
@@ -103,6 +104,28 @@ def _report_candidates(match):
     return listed
 
 
+def _recorded_import_angle(frames, panels):
+    """Only the imported-geometry producer path supplies an independent rotation."""
+    if any(frame.get("extra", {}).get("grouping_basis") != "geometry-only"
+           or frame.get("provenance", {}).get("created_by") != "solar-panel-groups"
+           for frame in frames):
+        return None
+    angles = []
+    for panel in panels:
+        angle = panel.get("angle")
+        if (panel.get("provenance", {}).get("created_by") != "solar-panels-from-drawing"
+                or type(angle) not in (int, float) or not math.isfinite(angle)):
+            return None
+        angle = math.radians(angle)
+        if angles:
+            delta = (angle - angles[0] + math.pi / 4) % (math.pi / 2) - math.pi / 4
+            if abs(delta) > 1e-6:
+                return None
+            angle = angles[0] + delta
+        angles.append(angle)
+    return sorted(angles)[len(angles) // 2] if angles else None
+
+
 def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_order, associations=None):
     """Review every frame; unresolved rows retain all candidates and null PDF indexes.
 
@@ -139,7 +162,15 @@ def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_orde
                                   "y": float(panel["centre"][1])})
         groups.append({"block": frame["id"], "panels": handles})
     try:
-        row_angle = si.lattice_row_angle([(p["x"], p["y"]) for p in kernel_panels])
+        centres = [(p["x"], p["y"]) for p in kernel_panels]
+        try:
+            row_angle = si.lattice_row_angle(centres)
+        except si.SolarEdgeImportError as exc:
+            angle = _recorded_import_angle(frames, [panels[ref_of[p["handle"]]] for p in kernel_panels])
+            if exc.code != "lattice-angle-ambiguous" or angle is None:
+                raise
+            row_angle = si.lattice_row_angle(centres, recorded_angle=angle,
+                coordinate_tolerance=panel_kernel.INTAKE_COORD_QUANTUM)
         result = si.run_import(matrices, groups, kernel_panels, row_angle=row_angle,
                                alignment_tolerance=alignment_tolerance, selection_order=selection_order,
                                review=True, associations=associations)
