@@ -19,6 +19,13 @@ def test_tool_payload_node_budget_stays_at_500k():
         design._bounded_json([[None] * 10000 for _ in range(50)])
 
 
+def test_default_request_budget_resolves_current_limit(monkeypatch):
+    monkeypatch.setattr(design, "MAX_NODES", 1)
+    with pytest.raises(design.GraphValidationError, match="GRAPH_LIMIT_EXCEEDED"):
+        design._bounded_json([None])
+    design._bounded_json([None], max_nodes=2)
+
+
 def test_saved_graph_node_budget_is_still_bounded(graph):
     graph["extra"]["oversized"] = [[None] * 10000 for _ in range(100)]
     with pytest.raises(design.GraphValidationError, match="GRAPH_LIMIT_EXCEEDED"):

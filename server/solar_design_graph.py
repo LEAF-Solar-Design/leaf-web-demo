@@ -64,7 +64,9 @@ def new_id(kind: str) -> str:
     return f"leaf:{kind}:{uuid4()}"
 
 
-def _bounded_json(value, *, max_nodes=MAX_NODES):
+def _bounded_json(value, *, max_nodes=None):
+    if max_nodes is None:
+        max_nodes = MAX_NODES
     stack = [(value, 0)]
     nodes = 0
     size = 0
