@@ -11,6 +11,10 @@ vi.mock('../api.js', () => ({ config: { apiBase: 'https://fixture.invalid' }, ge
 vi.mock('../projects/api.js', () => ({ getStoredActorBindingId: () => 'actor-fixture', listProjectPhotos: vi.fn(), readProjectPhotoPreview: vi.fn() }))
 vi.mock('./projectPageClient.js', async original => ({ ...await original(), loadProjectPage: vi.fn(), saveProjectPage: vi.fn(), submitProjectNativePreview: vi.fn() }))
 
+// This persistence test renders 94 photo editors. Match visible button text without
+// recomputing accessible names across every photo control on each transition.
+const button = name => screen.getByText(name, { selector: 'button', exact: true })
+
 const PROJECT = '11111111-1111-4111-8111-111111111111'
 const clone = value => JSON.parse(JSON.stringify(value))
 const document = {
@@ -45,23 +49,23 @@ it('saves a gallery edit, undoes and saves recovery, then reloads all 94 assignm
     return clone(committed)
   })
   render(<Host />)
-  fireEvent.click(screen.getByRole('button', { name: 'Open page' }))
+  fireEvent.click(button('Open page'))
   const field = await screen.findByLabelText('Category description')
   expect(field.value).toBe(document.categories[0].description)
   fireEvent.change(field, { target: { value: 'Changed gallery description' } })
-  fireEvent.click(screen.getByRole('button', { name: 'Save page' }))
+  fireEvent.click(button('Save page'))
   await waitFor(() => expect(screen.getByTestId('saved-revision').textContent).toBe('2'))
   expect(committed.document.categories[0].description).toBe('Changed gallery description')
-  fireEvent.click(screen.getByRole('button', { name: 'Undo recovery' }))
+  fireEvent.click(button('Undo recovery'))
   expect(field.value).toBe(document.categories[0].description)
   expect(committed.document.categories[0].description).toBe('Changed gallery description')
-  fireEvent.click(screen.getByRole('button', { name: 'Save page' }))
+  fireEvent.click(button('Save page'))
   await waitFor(() => expect(screen.getByTestId('saved-revision').textContent).toBe('3'))
   expect(committed.document).toEqual(document)
   fireEvent.change(field, { target: { value: 'Discard this unsaved draft' } })
-  fireEvent.click(screen.getByRole('button', { name: 'Reload saved page' }))
+  fireEvent.click(button('Reload saved page'))
   await waitFor(() => expect(screen.getByLabelText('Category description').value).toBe(document.categories[0].description))
-  expect(screen.getByRole('button', { name: 'Undo recovery' }).disabled).toBe(true)
+  expect(button('Undo recovery').disabled).toBe(true)
   expect(committed.document.categories[0].images).toHaveLength(94)
   expect(committed.document.categories[0].images).toEqual(document.categories[0].images)
   expect(saveProjectPage).toHaveBeenCalledTimes(2)
