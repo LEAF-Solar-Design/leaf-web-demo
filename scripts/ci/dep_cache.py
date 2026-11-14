@@ -45,6 +45,53 @@ def digest(value):
     return hashlib.sha256(canonical(value)).hexdigest()
 
 
+def _remove_tree(path):
+    """Remove read-only seed trees, retrying permission failures once without following symlinks."""
+    retried = set()
+    removed_during_scan = set()
+
+    def retry(function, name, error):
+        name = Path(name)
+        if (isinstance(error, FileNotFoundError) and function is os.rmdir
+                and name in removed_during_scan):
+            # rmtree still removes the directory after its scandir callback.
+            return
+        if not isinstance(error, PermissionError):
+            raise error
+        key = (function, name)
+        if key in retried:
+            raise error
+        retried.add(key)
+        for candidate in (name.parent, name):
+            mode = candidate.lstat().st_mode
+            if not stat.S_ISLNK(mode):
+                writable = stat.S_IWUSR
+                if stat.S_ISDIR(mode):
+                    writable |= stat.S_IRUSR | stat.S_IXUSR
+                candidate.chmod(mode | writable)
+        if function in (os.open, os.scandir):
+            # Retrying an open alone would skip traversal of this directory.
+            remove(name)
+            if function is os.scandir:
+                removed_during_scan.add(name)
+        else:
+            function(name)
+
+    def remove(name):
+        name = Path(name)
+        if name.is_symlink():
+            try:
+                name.unlink()
+            except PermissionError as error:
+                retry(os.unlink, name, error)
+        elif sys.version_info >= (3, 12):
+            shutil.rmtree(name, onexc=retry)
+        else:
+            shutil.rmtree(name, onerror=lambda function, name, info: retry(function, name, info[1]))
+
+    remove(path)
+
+
 def safe_path(value):
     if (not isinstance(value, str) or not value or len(value.encode()) > 4096
             or "\x00" in value or "\\" in value or ":" in value
@@ -390,6 +437,7 @@ def seed(args, cache, entry, inputs, report):
         return
     report["entry"] = entry.name
     staged, committed = [], []
+    seed_complete = False
     try:
         for part, location in parts(args).items():
             if not location:
@@ -424,14 +472,23 @@ def seed(args, cache, entry, inputs, report):
         if args.writable == "1" and report["result"] == "exact":
             os.utime(entry, None)
         report.update(files=meta["file_count"], bytes=meta["total_bytes"])
+        seed_complete = True
     except Exception:
         for destination in committed:
-            shutil.rmtree(destination)
+            try:
+                _remove_tree(destination)
+            except Exception as exc:
+                print(f"dep-cache: cleanup failed for {destination}: {exc}", file=sys.stderr)
         raise
     finally:
         for temporary, _, _ in staged:
-            if temporary.exists():
-                shutil.rmtree(temporary)
+            try:
+                if temporary.exists() or temporary.is_symlink():
+                    _remove_tree(temporary)
+            except Exception as exc:
+                if seed_complete:
+                    raise
+                print(f"dep-cache: cleanup failed for {temporary}: {exc}", file=sys.stderr)
 
 
 def publish(args, cache, entry, inputs, report):
