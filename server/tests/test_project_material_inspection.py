@@ -4,6 +4,7 @@ import copy
 import hashlib
 import io
 import json
+import random
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -175,6 +176,77 @@ def test_real_jpeg_preview_provenance_and_no_saved_page(mounted):
         assert result['source'] == {'project_id': PROJECT, 'revision': 0, 'digest': None}
         assert result['assignment_basis'] == 'no_saved_page'
         assert (result.get('materials', [{}])[0].get('assignments', result.get('assignments'))) == []
+
+
+@pytest.fixture(scope='module', params=['JPEG', 'PNG'])
+def detailed_original(request):
+    image = Image.frombytes('RGB', (2304, 2304), random.Random(0).randbytes(2304 * 2304 * 3))
+    output = io.BytesIO()
+    image.save(output, format=request.param, **({'quality': 95} if request.param == 'JPEG' else {}))
+    original = output.getvalue()
+    assert len(original) <= project_material_images.MAX_BYTES
+    image.thumbnail((2048, 2048), Image.Resampling.LANCZOS)
+    output = io.BytesIO()
+    image.save(output, format='JPEG', quality=85)
+    legacy = output.getvalue()
+    assert len(legacy) > inspection.MAX_IMAGE_BYTES
+    return original, legacy
+
+
+def test_detailed_intake_bounds_preview_and_retains_original(monkeypatch, detailed_original):
+    import write_loop
+    original, _ = detailed_original
+    objects = {}
+
+    class Backend:
+        def put_if_absent_or_verify(self, key, raw):
+            objects[key] = raw
+
+    monkeypatch.setattr(write_loop, 'upload_backend_for_tenant', lambda org: Backend())
+    result = project_material_images.prepare_and_store(ORG, PROJECT, 'Synthetic photo', original)
+    assert result['sha256'] == hashlib.sha256(original).hexdigest()
+    assert objects[project_material_images.object_key(ORG, PROJECT, result['sha256'], 'original')] == original
+    bounded = objects[project_material_images.object_key(ORG, PROJECT, result['preview_sha256'], 'preview')]
+    assert 0 < len(bounded) <= inspection.MAX_IMAGE_BYTES
+    assert hashlib.sha256(bounded).hexdigest() == result['preview_sha256']
+    with Image.open(io.BytesIO(bounded)) as image:
+        image.load()
+        assert image.format == 'JPEG' and max(image.size) <= 2048
+        assert not image.getexif()
+
+
+def test_legacy_preview_derivative_preserves_saved_witnesses(mounted, detailed_original):
+    state = mounted[1]
+    _, legacy = detailed_original
+    state['raw'] = legacy
+    state['rows'][0]['preview_sha256'] = hashlib.sha256(legacy).hexdigest()
+    state['page'] = None
+    before = copy.deepcopy(state['rows'])
+    response = post(mounted, preview(state))
+    assert response.status_code == 200, response.text
+    result = response.json()
+    bounded = base64.b64decode(result['data'], validate=True)
+    assert result['sha256'] == result['preview_sha256'] == result['derived_from_sha256'] == before[0]['preview_sha256']
+    assert result['original_sha256'] == before[0]['sha256']
+    assert result['inspection_sha256'] == hashlib.sha256(bounded).hexdigest() != result['preview_sha256']
+    assert result['byte_size'] == len(bounded) <= inspection.MAX_IMAGE_BYTES
+    assert len(response.content) <= inspection.MAX_RESPONSE_BYTES
+    with Image.open(io.BytesIO(bounded)) as image:
+        image.load()
+        assert image.format == 'JPEG' and max(image.size) <= 2048
+    assert state['rows'] == before and state['raw'] == legacy
+    assert post(mounted).json()['materials'][0]['preview_sha256'] == before[0]['preview_sha256']
+
+
+def test_derivative_rechecks_authority_after_conversion(mounted, monkeypatch):
+    state = mounted[1]
+
+    def revoke(raw):
+        state['revoked'] = True
+        return raw
+
+    monkeypatch.setattr(project_material_images, 'inspection_image', revoke)
+    assert post(mounted, preview(state)).status_code == 403
 
 
 @pytest.mark.parametrize('body', [[], {'op': 'original'}, {'op': 'catalog', 'project_id': PROJECT},
@@ -625,3 +697,89 @@ def test_photo_assignment_response_bound(photo_mounted, monkeypatch):
     import project_photo_assignment_proposal as proposals
     monkeypatch.setattr(proposals, 'MAX_RESPONSE_BYTES', 1)
     assert photo_post(photo_mounted).status_code == 422
+
+
+@pytest.mark.parametrize('target', ['web', 'ios'])
+def test_94_saved_assignments_reload_and_historical_source(monkeypatch, target):
+    # Production save/read/export, with controlled SQL and synthetic preview bytes.
+    # Not a database, UI, model-inspection or LIVE acceptance receipt.
+    import uuid
+    import zipfile
+    platform_link._ensure_platform_package()
+    from leaf_platform import project_lifecycle as lifecycle, project_web_page as pages
+    import project_material_images as images
+    org, project, actor = (str(uuid.uuid4()) for _ in range(3))
+    previews, materials = {}, {}
+    assigned = []
+    for index in range(94):
+        mid = str(uuid.uuid5(uuid.NAMESPACE_URL, f'https://fixture.invalid/b02/{index}'))
+        previews[mid] = f'synthetic preview {index}'.encode()
+        materials[mid] = dict(material_id=mid,
+            sha256=hashlib.sha256(f'synthetic original {index}'.encode()).hexdigest(),
+            preview_sha256=hashlib.sha256(previews[mid]).hexdigest())
+        assigned.append({**materials[mid], 'title': f'Photo {index}', 'alt': f'Synthetic photo {index}'})
+    document = dict(schema='leaf.portfolio.v1', name='Synthetic portfolio', headline='Selected work',
+        introduction='', about='', contact=dict(email='', location=''), resume=[], theme='light',
+        categories=[dict(slug='work', title='Work', description='', hero=0, images=assigned)])
+    revisions, reads = {}, []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def execute(self, sql, args):
+            assert args[:2] == (org, project)
+            if 'FROM project_materials' in sql:
+                self.row = copy.deepcopy(materials.get(args[2]))
+            elif 'SELECT revision,digest,document' in sql:
+                revision = args[2] if len(args) > 2 else None
+                self.row = copy.deepcopy(revisions.get(revision or max(revisions, default=0)))
+            else:
+                assert sql.startswith('INSERT INTO project_web_page_revisions ')
+                assert args[5] == actor
+                revisions[args[2]] = dict(revision=args[2], document=copy.deepcopy(args[3].obj), digest=args[4])
+
+        def fetchone(self):
+            return self.row
+
+    def authorize(*args, write=False):
+        assert args == (org, project, actor)
+        return 'owner'
+
+    def read_content(o, p, row, variant):
+        assert (o, p, variant) == (org, project, 'preview')
+        mid = row['material_id']
+        reads.append(mid)
+        return previews[mid]
+
+    monkeypatch.setattr(pages, 'run_transaction', lambda operation, **kwargs: operation(SimpleNamespace(cursor=Cursor)))
+    monkeypatch.setattr(pages, '_authorize', lambda cur, *args, **kwargs: authorize(*args, **kwargs))
+    monkeypatch.setattr(lifecycle, 'require_project_role', authorize)
+    monkeypatch.setattr(images, 'read_content', read_content)
+    assert pages.read(org, project, actor) is None
+    saved = pages.save(org, project, actor, expected_revision=0, document=document)
+    assert saved['revision'] == 1
+    assert pages.read(org, project, actor) == saved
+    assert pages.save(org, project, actor, expected_revision=0, document=document) == saved
+    changed = copy.deepcopy(document)
+    changed['headline'] = 'Later draft'
+    assert pages.save(org, project, actor, expected_revision=1, document=changed)['revision'] == 2
+    with pytest.raises(lifecycle.LifecycleConflict):
+        pages.save(org, project, actor, expected_revision=0, document=document)
+    exported, raw = pages.export_source(org, project, actor, revision=1, target=target)
+    assert exported == saved
+    assert len(reads) == 94 and set(reads) == set(materials)
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        prefix = 'Portfolio/PortfolioContent/' if target == 'ios' else ''
+        assert json.loads(archive.read(prefix + 'portfolio.json')) == document
+        image_prefix = prefix + 'images/' if target == 'ios' else 'public/images/'
+        archived = {name for name in archive.namelist() if name.startswith(image_prefix)}
+        assert archived == {image_prefix + mid + '.jpg' for mid in materials}
+        for mid, preview in previews.items():
+            assert archive.read(image_prefix + mid + '.jpg') == preview
+        manifest = json.loads(archive.read('source-manifest.json'))
+        assert manifest['revision'] == saved['revision']
+        assert pages.read(org, project, actor, revision=1) == saved

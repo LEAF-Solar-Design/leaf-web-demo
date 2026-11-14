@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 import math
 import os
 import threading
@@ -291,11 +292,10 @@ class ToolNodeAdapter:
         context = corpus.validate_context({'schema': corpus.SCHEMA, 'tenant_id': self.tenant,
             'org_id': self.tenant, 'project_id': authority['project_id'],
             'actor_id': authority['actor_id'], 'corpus': descriptor(settings['corpus']), 'suite': descriptor(settings['suite']),
-            'capability_sha256': corpus.ARCHIVE_SHA256})
+            'capability_sha256': corpus.ARCHIVE_SHA256,
+            'policy': corpus.compile_policy(authority, block_id, settings)})
         key = f'lab:{self.run_id}:{block_id}:corpus:v1'
-        job_id = jobs.submit_lab_corpus(self.tenant, self.tenant, authority['project_id'],
-            authority['actor_id'], context['corpus'], context['suite'],
-            capability_sha256=corpus.ARCHIVE_SHA256, idempotency_key=key)
+        job_id = corpus.submit_policy(context, idempotency_key=key)
         stopping = None
         cleanup_deadline = None
         while True:
@@ -329,12 +329,21 @@ class ToolNodeAdapter:
                     value = row['result']['result']
                     if value['context'] != context:
                         return {'error': 'lab_corpus_lineage_mismatch'}
+                    corpus.validate_result(context, job_id, value['worker_id'], value['attempt'], value)
                     corpus.read_sources(context)
                     projected = {key: value[key] for key in ('job_id', 'worker_id', 'attempt',
                         'row_count', 'rows_sha256', 'result_sha256', 'context')}
                     projected.update(run_id=self.run_id, block_id=block_id,
                         doc_id=authority['doc_id'], graph_revision=authority['graph_revision'],
                         graph_sha256=authority['graph_sha256'], verdict=value['result']['verdict'],
-                        reasons=value['result']['reasons'][:10])
-                    return {'outputs': {'result': canonical_json(projected)}}
+                        reasons=value['result']['reasons'], policy=context['policy'],
+                        policy_digest=context['policy']['digest'],
+                        evaluated_suite_sha256=value['evaluated_suite_sha256'], evaluation=value['result'])
+                    # Evidence is JSON text so graph-value array bounds cannot
+                    # truncate candidates or confirmation tickets. Refuse an
+                    # oversized envelope explicitly instead of cutting fields.
+                    encoded = json.dumps(projected, sort_keys=True, separators=(',', ':'), allow_nan=False)
+                    if len(encoded.encode()) > corpus.MAX_EVIDENCE_BYTES:
+                        return {'error': 'lab_corpus_evidence_too_large'}
+                    return {'outputs': {'result': encoded}}
             self.sleep(0.25)

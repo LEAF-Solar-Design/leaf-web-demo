@@ -36,6 +36,10 @@ class NotFound(LookupError):
     pass
 
 
+class ExportForbidden(PermissionError):
+    pass
+
+
 class StoreUnavailable(RuntimeError):
     pass
 
@@ -355,6 +359,139 @@ def list_revisions(tenant, doc_id, *, limit=100, before=None):
         return [dict(row) for row in rows]
 
     return _run(tenant, operation)
+
+
+def export_bundle(tenant, doc_id, revision, *, authorize):
+    """Export a pinned composition and every stored evaluation, without sources.
+
+    authorize rechecks the live principal's project/material access. It runs
+    before private results are read and again before they leave this boundary.
+    """
+    from datetime import datetime
+    from lab_canonical import canonical_bytes, graph_digest
+    import lab_layouts
+    import lab_run_store as runs
+
+    artifact = get(tenant, doc_id, revision)
+    if artifact["kind"] != "graph":
+        raise InvalidGraph("invalid_lab_document")
+    authorize(artifact["graph"], None)
+
+    def portable(value):
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, dict):
+            return {key: portable(child) for key, child in value.items()}
+        if isinstance(value, list):
+            return [portable(child) for child in value]
+        return value
+
+    def snapshot(sql):
+        result, byte_count = [], 0
+        for row in sql.execute(
+                "SELECT * FROM lab_runs WHERE tenant_id=? AND doc_id=?"
+                " AND graph_revision=? ORDER BY created_at,run_id",
+                (tenant, doc_id, artifact["revision"])).fetchall():
+            run = dict(row)
+            if run["graph_sha256"] != artifact["sha256"]:
+                raise StoreUnavailable("lab_export_lineage_mismatch")
+            authorize(artifact["graph"], run)
+            events = []
+            for event in sql.execute(
+                    "SELECT * FROM lab_run_events WHERE tenant_id=? AND run_id=? ORDER BY seq",
+                    (tenant, run["run_id"])):
+                event = dict(event)
+                if isinstance(event["payload"], str):
+                    event["payload"] = json.loads(event["payload"])
+                byte_count += len(canonical_bytes(portable(event)))
+                if byte_count > MAX_TENANT_BYTES:
+                    raise TooLarge("lab_export_too_large")
+                events.append(event)
+            result.append((run, events))
+        return result, byte_count
+
+    evaluations, policies = [], []
+    snapshots, export_bytes = runs._run(tenant, snapshot)
+    for run, events in snapshots:
+        complete = {}
+        # Corpus value events carry a bounded summary. Resolve its durable job
+        # to retain candidates, reports and policy identities, not just verdicts.
+        for event in events:
+            if event["kind"] != "value":
+                continue
+            block = next((block for block in artifact["graph"]["blocks"]
+                          if block["id"] == event["block_id"]
+                          and block["registry"]["id"] == "corpus-evaluator"), None)
+            if block is None:
+                continue
+            envelope = event["payload"].get("result", {})
+            summary = envelope.get("data") if isinstance(envelope, dict) else None
+            if isinstance(summary, str):
+                summary = json.loads(summary)
+            if not isinstance(summary, dict) or not summary.get("job_id"):
+                continue
+            import jobs
+            import lab_corpus_executor as corpus
+            job = jobs.get_job(summary["job_id"])
+            if (job is None or job["tenant_id"] != tenant
+                    or str(job.get("org_id")) != tenant
+                    or str(job.get("project_id")) != block["settings"]["project_id"]
+                    or job.get("idempotency_key") != f'lab:{run["run_id"]}:{block["id"]}:corpus:v1'
+                    or job.get("tool") != corpus.OPERATION or job.get("status") != "complete"):
+                raise StoreUnavailable("lab_export_result_unavailable")
+            value = job["result"]["result"]
+            context = corpus.validate_context(value["context"])
+            if (context["tenant_id"] != tenant
+                    or context["project_id"] != block["settings"]["project_id"]
+                    or any(context[key] != block["settings"][key] for key in ("corpus", "suite"))
+                    or any(summary.get(key) != run[key] for key in
+                           ("run_id", "doc_id", "graph_revision", "graph_sha256"))
+                    or summary.get("block_id") != block["id"]
+                    or value.get("job_id") != summary["job_id"]
+                    or any(value.get(key) != summary.get(key) for key in ("worker_id", "attempt", "rows_sha256", "row_count"))
+                    or value["result_sha256"] != summary["result_sha256"]
+                    or value["result"].get("suite_sha256") != context["suite"]["sha256"]
+                    or len(canonical_bytes(value)) > corpus.MAX_RESULT_BYTES + 8192):
+                raise StoreUnavailable("lab_export_lineage_mismatch")
+            # The producer hashes its sorted JSON result including one newline;
+            # the bundle's manifest separately hashes canonical Lab JSON parts.
+            raw_result = json.dumps(value["result"], sort_keys=True, separators=(",", ":"), allow_nan=False).encode() + b"\n"
+            if hashlib.sha256(raw_result).hexdigest() != value["result_sha256"]:
+                raise StoreUnavailable("lab_export_result_mismatch")
+            if summary["job_id"] not in complete:
+                export_bytes += len(canonical_bytes(value))
+                if export_bytes > MAX_TENANT_BYTES:
+                    raise TooLarge("lab_export_too_large")
+            complete[summary["job_id"]] = value
+            report = value["result"].get("confirm_report") or {}
+            policies.append({"run_id": run["run_id"], "block_id": block["id"],
+                             "suite": context["suite"],
+                             "parent_policy_digest": report.get("parent_policy_digest"),
+                             "child_policy_digest": report.get("child_policy_digest")})
+        public_run = {key: value for key, value in run.items() if key not in
+                      {"lease_owner", "lease_fence", "corpus_authority_json"}}
+        evaluations.append({"run": public_run, "events": events, "complete_results": complete})
+        authorize(artifact["graph"], run)
+
+    parts = {"identity": {key: artifact[key] for key in
+                          ("tenant_id", "doc_id", "revision", "parent_revision", "sha256", "kind", "author", "created_at")},
+             "graph": artifact["graph"],
+             "layout": lab_layouts.get_layout(tenant, doc_id, artifact["sha256"]),
+             "policy_reference": {"graph_sha256": artifact["sha256"],
+                                  "blocks": [{"id": block["id"], "registry": block["registry"],
+                                              "settings_sha256": graph_digest(block["settings"])}
+                                             for block in artifact["graph"]["blocks"]],
+                                  "compiled": policies},
+             "evaluations": evaluations}
+
+    parts = portable(parts)
+    bundle = {"schema": "leaf.lab-bundle.v1", "parts": parts,
+              "manifest": {"algorithm": "sha256", "parts": {
+                  key: graph_digest(value) for key, value in parts.items()}}}
+    if len(canonical_bytes(bundle)) > MAX_TENANT_BYTES:
+        raise TooLarge("lab_export_too_large")
+    authorize(artifact["graph"], None)
+    return bundle
 
 
 def restore(tenant, doc_id, revision, expected_head, author):

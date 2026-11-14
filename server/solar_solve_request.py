@@ -7,11 +7,20 @@ from __future__ import annotations
 
 from pydantic import ValidationError
 
-from leaf_cloud_client import StringerRequest
+from leaf_cloud_client import PieceMatrixJson, ProposalParams, StringerRequest
 from solar_design_graph import GraphValidationError
 from solar_grid_restitch import escalate, failed_group_indices
 from solar_grid_split import needs_splitting, split_group
 from solar_solve_results import _frame_pieces, _frame_request
+
+
+class FrameStringerRequest(StringerRequest):
+    """Admission-only full frame; only derived, capped pieces leave the server."""
+    grid: PieceMatrixJson
+
+
+class FrameProposalParams(ProposalParams):
+    request: FrameStringerRequest
 
 
 def plugin_sequences(panel_count: int, max_string_length: int) -> list[int]:
@@ -25,8 +34,15 @@ def plugin_sequences(panel_count: int, max_string_length: int) -> list[int]:
     return [base, base - 1, count, 0]
 
 
+def _panel_geometry(panel):
+    # JSONB does not retain signed zero. Build requests with its stable spelling
+    # before admission fingerprints and durable request bytes are captured.
+    return {key: value or 0.0 for key, value in zip(
+        ("X", "Y", "Angle"), (*panel["centre"], panel["angle"]))}
+
+
 def build_stringer_request(graph: dict, frame_ref: str, *,
-                           max_string_length: int, dwgname: str) -> dict:
+                           max_string_length: int, dwgname: str, full_frame: bool = False) -> dict:
     frame = next((frame for frame in graph["frames"] if frame["id"] == frame_ref), None)
     if frame is None:
         raise GraphValidationError("MISSING_FRAME")
@@ -42,19 +58,19 @@ def build_stringer_request(graph: dict, frame_ref: str, *,
                 if ref not in panels:
                     raise GraphValidationError("SOLVE_GRID_MISMATCH")
                 panel = panels[ref]
-                wire.update(Code=1, Id=ref, X=panel["centre"][0],
-                            Y=panel["centre"][1], Angle=panel["angle"])
+                wire.update(Code=1, Id=ref, **_panel_geometry(panel))
                 count += 1
             cells.append(wire)
         rows.append({"Panels": cells})
     request = {"grid": {"Dwgname": dwgname,
                         "Sequences": plugin_sequences(count, max_string_length),
                         "Rows": rows, "Modify": []}}
+    model = FrameStringerRequest if full_frame else StringerRequest
     try:
-        StringerRequest.model_validate(request)
+        model.model_validate(request)
     except ValidationError:
         raise GraphValidationError("SOLVE_REQUEST_INVALID") from None
-    _frame_request(graph, frame_ref, request)
+    _frame_request(graph, frame_ref, request, request_model=model)
     return request
 
 
@@ -111,8 +127,7 @@ def build_split_requests(graph: dict, frame_ref: str, *, max_string_length: int,
                     panel = panels.get(cell["Id"])
                     if panel is None:
                         raise GraphValidationError("SOLVE_GRID_MISMATCH")
-                    wire.update(Code=1, Id=cell["Id"], X=panel["centre"][0],
-                                Y=panel["centre"][1], Angle=panel["angle"])
+                    wire.update(Code=1, Id=cell["Id"], **_panel_geometry(panel))
                 cells.append(wire)
             rows.append({"Panels": cells})
         pieces.append({

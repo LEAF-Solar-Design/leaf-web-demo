@@ -1,3 +1,4 @@
+import { scaleTimeout } from '../testTimeScale.js'
 import React, { useState } from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -134,7 +135,7 @@ describe('connected portfolio thumbnail chooser', () => {
     expect(within(picker).getByRole('button', { name: 'Add Bread.jpg to Selected work' })).toBeDisabled()
     expect(within(target).getByLabelText('Add project photo to Selected work')).toBeDisabled()
     expect(within(target).getByText(/reached its 200 photo limit/)).toBeVisible()
-  }, 15000)
+  }, scaleTimeout(15000))
 
   it('honors a disabled parent fieldset for both selection paths', async () => {
     const change = vi.fn(), view = render(<Studio onChange={change} />)

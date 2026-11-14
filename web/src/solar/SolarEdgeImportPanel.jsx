@@ -140,7 +140,10 @@ export default function SolarEdgeImportPanel({
     active.current = null
     setPending(null)
     if (!result.ok) {
-      setOutcome({ step, drawingId, message: `${step === 'upload' ? 'Upload' : 'Report'} failed. ${solarEdgeReason(result.code)}.` })
+      const reason = step === 'report' && result.code === 'REPORT_ASSOCIATIONS_INVALID'
+        ? 'The PDF choices do not match these groups. Review or clear association choices, then build the report again'
+        : solarEdgeReason(result.code)
+      setOutcome({ step, drawingId, message: `${step === 'upload' ? 'Upload' : 'Report'} failed. ${reason}.` })
       return
     }
     if (step === 'upload') {

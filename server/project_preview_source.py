@@ -207,7 +207,7 @@ def native_descriptor(value, org, project):
     _native_need(type(value) is dict and set(value) == NATIVE_FIELDS)
     d = dict(value)
     _native_need(d['schema'] == NATIVE_SCHEMA and d['target'] == 'ios-simulator'
-        and d['source_profile'] == NATIVE_PROFILE and d['source_operation'] == 'create'
+        and d['source_profile'] == NATIVE_PROFILE and d['source_operation'] in ('create', 'edit')
         and d['org_id'] == org and d['project_id'] == project)
     for key in ('org_id', 'project_id', 'actor_binding_id', 'repo_key', 'source_request_id'):
         _native_need(type(d[key]) is str and str(UUID(d[key])) == d[key] and UUID(d[key]).int != 0)
@@ -287,6 +287,9 @@ def native_files_policy(files, descriptor):
             _native_need(mode == '100644' and len(raw) <= 1048576)
             total += len(raw)
     _native_need(total <= 4194304)
+    if descriptor['source_operation'] == 'edit':
+        _native_need({p for p in files if p.startswith('Resources/Input/')} ==
+                     {ref['path'] for ref in descriptor['material_refs']})
     for ref in descriptor['material_refs']:
         mode, raw = files.get(ref['path'], (None, None))
         _native_need(mode == '100644' and type(raw) is bytes and len(raw) == ref['byte_size']
@@ -338,7 +341,7 @@ def verify_native_archive(raw, descriptor):
     return files
 
 
-def _native_candidate(org, project, actor, request_id, *, verify_originals=False):
+def _native_candidate(org, project, actor, request_id, *, verify_originals=False, retained_refs=None):
     import browser_project_flow as flow
     import project_reference_materials as originals
     from leaf_platform import project_reference_materials as metadata
@@ -355,9 +358,38 @@ def _native_candidate(org, project, actor, request_id, *, verify_originals=False
     markers = [e['data'] for e in events if e['turn_id'] == tid and e['type'] == 'browser_source_dispatch']
     _native_need(len(markers) == 1)
     request = markers[0]['request']
-    _native_need(request['source_operation'] == 'create' and 1 <= len(request['material_refs']) <= 8)
+    operation = request['source_operation']
+    _native_need(operation in ('create', 'edit')
+        and (1 if operation == 'create' else 0) <= len(request['material_refs']) <= 8)
+    identity = dict(schema=NATIVE_SCHEMA, target='ios-simulator', source_profile=NATIVE_PROFILE,
+        org_id=org, project_id=project, actor_binding_id=actor, repo_key=authority['repo_key'],
+        source_request_id=request_id, source_operation=operation, source_version=row['version'],
+        receipt_digest=row['receipt_digest'], source_commit=receipt.staged_head_commit,
+        source_tree=receipt.staged_tree)
+    material_refs = request['material_refs']
+    if operation == 'edit':
+        if retained_refs is None:
+            # Initial capture derives provenance from the exact current-main tree.
+            files = _native_bundle_files(_native_export(identity), identity)
+            retained = {}
+            for path, (_, raw) in sorted(files.items()):
+                if path.startswith('Resources/Input/'):
+                    name = path.removeprefix('Resources/Input/')
+                    mid, suffix = name.rsplit('.', 1)
+                    _native_need(suffix in ('txt', 'json') and _uuid(mid) == mid and mid not in retained)
+                    retained[mid] = dict(material_id=mid, sha256=hashlib.sha256(raw).hexdigest())
+        else:
+            # Rechecks authorize each saved ref again without exporting on every
+            # heartbeat. Archive policy binds the complete input set to the tree;
+            # prepare/read still require the independent current-main exporter.
+            retained = {ref['material_id']: dict(material_id=ref['material_id'], sha256=ref['sha256'])
+                        for ref in retained_refs}
+        for ref in material_refs:
+            _native_need(retained.get(ref['material_id']) == ref)
+        material_refs = list(retained.values())
+    _native_need(1 <= len(material_refs) <= 8)
     refs, total = [], 0
-    for ref in request['material_refs']:
+    for ref in material_refs:
         material = metadata.get_material(org, project, actor, ref['material_id'])
         _native_need(type(material) is dict and material.get('org_id') == org
             and material.get('project_id') == project and material.get('actor_binding_id') == actor
@@ -377,11 +409,7 @@ def _native_candidate(org, project, actor, request_id, *, verify_originals=False
                          path='Resources/Input/'+ref['material_id']+suffix))
     project_lifecycle.require_project_role(org, project, actor, write=True)
     _native_need(flow.repository(current) == authority and flow._read(authority, request_id) == row)
-    return dict(schema=NATIVE_SCHEMA, target='ios-simulator', source_profile=NATIVE_PROFILE,
-        org_id=org, project_id=project, actor_binding_id=actor, repo_key=authority['repo_key'],
-        source_request_id=request_id, source_operation='create', source_version=row['version'],
-        receipt_digest=row['receipt_digest'], source_commit=receipt.staged_head_commit,
-        source_tree=receipt.staged_tree, material_refs=refs)
+    return dict(identity, material_refs=refs)
 
 
 def _native_export(identity):
@@ -457,7 +485,8 @@ def prepare_native_source(org_id, project_id, actor_id, *, source_request_id):
     descriptor.update(archive_sha256=hashlib.sha256(raw).hexdigest(), byte_size=len(raw))
     native_descriptor(descriptor, org, project)
     verify_native_archive(raw, descriptor)
-    _native_need(_native_candidate(org, project, actor, source_request_id) == identity)
+    _native_need(_native_candidate(org, project, actor, source_request_id,
+        retained_refs=identity['material_refs']) == identity)
     import write_loop
     try:
         backend = write_loop.upload_backend_for_tenant(org)
@@ -476,7 +505,8 @@ def prepare_native_source(org_id, project_id, actor_id, *, source_request_id):
 def recheck_native_source(org, project, actor, descriptor):
     descriptor = native_descriptor(descriptor, org, project)
     _native_need(descriptor['actor_binding_id'] == actor)
-    identity = _native_candidate(org, project, actor, descriptor['source_request_id'])
+    identity = _native_candidate(org, project, actor, descriptor['source_request_id'],
+                                 retained_refs=descriptor['material_refs'])
     _native_need(all(descriptor[k] == v for k, v in identity.items()))
     return identity
 

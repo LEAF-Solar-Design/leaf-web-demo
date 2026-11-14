@@ -32,7 +32,7 @@ import type {
 } from "../index.js";
 import { CanonicalChangeSetId, INTEGRATION_TOOL_INPUTS, ProjectPhotoAssignmentRequest, PHOTO_ASSIGNMENT_FAILURE, type ProjectPhotoAssignmentInput } from "../index.js";
 import { z } from "zod";
-import { photoRequest, PHOTO_FAILURE, PHOTO_MAX_RESPONSE, type ProjectPhotoInspectionInput } from "../../agent/projectPhotoInspection.js";
+import { photoRequest, PHOTO_FAILURE, PHOTO_MAX_RESPONSE, type PhotoReadFailureClass, type ProjectPhotoInspectionInput } from "../../agent/projectPhotoInspection.js";
 import {
   DEVICE_TOOL_INPUTS, DEVICE_TOOL_OPERATIONS, DeviceToolResponse, deviceToolError,
 } from "../../agent/deviceTools.js";
@@ -228,6 +228,14 @@ export class AppRunClientError extends Error {
   }
 }
 
+/** Fixed, non-secret classification; retain the existing 502 caller contract. */
+export class ProjectPhotoClientError extends AppRunClientError {
+  constructor(readonly photoFailureClass: PhotoReadFailureClass) {
+    super(PHOTO_FAILURE, 502, `photo_${photoFailureClass}`);
+    this.name = "ProjectPhotoClientError";
+  }
+}
+
 // ChangeSet.updated_at is TEXT (SQLite strftime; PostgreSQL serializes to text).
 // Strip producer-only receipt/result/polling fields, including nested tool source.
 const StageStatusMetadata = z.object({
@@ -326,42 +334,59 @@ export class HttpAppRunClient implements AppRunClient {
     tenantId: string, sessionId: string, input: ProjectPhotoInspectionInput,
     authority: { sessionId: string; turnId: string },
   ): Promise<Record<string, unknown>> {
-    const fail = () => new AppRunClientError(PHOTO_FAILURE, 502);
+    const fail = (kind: PhotoReadFailureClass = "integrity") => new ProjectPhotoClientError(kind);
     let body: string;
-    try {
-      body = JSON.stringify(photoRequest(input));
-      const validId = (value: unknown): value is string => typeof value === "string" &&
-        value.length > 0 && value.length <= 200 && value.trim() === value && !/[\p{C}]/u.test(value);
-      if (!this.secret || !validId(sessionId) || authority?.sessionId !== sessionId || !validId(authority?.turnId) ||
-          !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(tenantId) ||
-          tenantId === "00000000-0000-0000-0000-000000000000") throw fail();
-    } catch { throw fail(); }
+    try { body = JSON.stringify(photoRequest(input)); } catch { throw fail(); }
+    const validId = (value: unknown): value is string => typeof value === "string" &&
+      value.length > 0 && value.length <= 200 && value.trim() === value && !/[\p{C}]/u.test(value);
+    if (!this.secret || !validId(sessionId) || authority?.sessionId !== sessionId || !validId(authority?.turnId) ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(tenantId) ||
+        tenantId === "00000000-0000-0000-0000-000000000000") throw fail("authorization");
     const url = `${this.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/materials/inspect`;
     const controller = new AbortController();
+    const readFailure = (error: unknown) => {
+      const value = error as { code?: string; cause?: { code?: string } } | null;
+      // Fetch also rejects for forbidden redirects, and streams can fail on
+      // corrupt encodings. Retry recognized network failures only.
+      const code = value?.code ?? value?.cause?.code ?? "";
+      const transport = ["ECONNRESET", "ETIMEDOUT", "EAI_AGAIN", "ECONNREFUSED", "ENETUNREACH", "EHOSTUNREACH",
+        "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT", "UND_ERR_SOCKET"].includes(code);
+      return fail(transport || controller.signal.aborted ? "transport" : "integrity");
+    };
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const cancel = () => { controller.abort(); void reader?.cancel().catch(() => {}); };
     const deadline = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => { cancel(); reject(fail()); }, 45_000);
+      timer = setTimeout(() => { cancel(); reject(fail("transport")); }, 45_000);
     });
     const work = async () => {
-      const response = await this.fetchImpl(url, {
-        method: "POST", redirect: "error", signal: controller.signal,
-        headers: { ...this.headers(tenantId), "x-authority-session-id": authority.sessionId,
-          "x-authority-turn-id": authority.turnId }, body,
-      });
-      if (controller.signal.aborted) { void response.body?.cancel().catch(() => {}); throw fail(); }
+      let response: Response;
+      try {
+        response = await this.fetchImpl(url, {
+          method: "POST", redirect: "error", signal: controller.signal,
+          headers: { ...this.headers(tenantId), "x-authority-session-id": authority.sessionId,
+            "x-authority-turn-id": authority.turnId }, body,
+        });
+      } catch (error) {
+        throw readFailure(error);
+      }
+      if (controller.signal.aborted) { void response.body?.cancel().catch(() => {}); throw fail("transport"); }
       if (response.body) reader = response.body.getReader();
       const length = response.headers.get("content-length");
-      if (response.status !== 200 || response.redirected || !reader ||
-          (response.url && new URL(response.url).origin !== new URL(url).origin) ||
+      if (response.redirected || (response.url && new URL(response.url).origin !== new URL(url).origin)) throw fail();
+      if (response.status !== 200) {
+        throw fail(response.status === 401 || response.status === 403 ? "authorization"
+          : response.status === 409 ? "source_changed" : response.status === 404 ? "unavailable"
+          : [408, 429, 503, 504].includes(response.status) ? "transport" : "integrity");
+      }
+      if (!reader ||
           !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(response.headers.get("content-type") ?? "") ||
           (length !== null && (!/^[0-9]+$/.test(length) || Number(length) > PHOTO_MAX_RESPONSE))) throw fail();
       const chunks: Uint8Array[] = [];
       let size = 0;
       while (true) {
-        const next = await reader.read();
-        if (controller.signal.aborted) throw fail();
+        const next = await reader.read().catch(error => { throw readFailure(error); });
+        if (controller.signal.aborted) throw fail("transport");
         if (next.done) break;
         size += next.value.byteLength;
         if (size > PHOTO_MAX_RESPONSE) throw fail();
@@ -372,7 +397,7 @@ export class HttpAppRunClient implements AppRunClient {
       return result as Record<string, unknown>;
     };
     try { return await Promise.race([work(), deadline]); }
-    catch { throw fail(); }
+    catch (error) { throw error instanceof ProjectPhotoClientError ? error : fail(); }
     finally {
       clearTimeout(timer); cancel();
       try { reader?.releaseLock(); } catch { /* pending read cancelled */ }

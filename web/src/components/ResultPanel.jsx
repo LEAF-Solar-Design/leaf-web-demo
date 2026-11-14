@@ -8,6 +8,7 @@ import { modChord } from '../lib/keys.js'
 import { readSingleKeyShortcuts } from '../lib/singleKeyPreference.js'
 import ArloProposalReview from './ArloProposalReview.jsx'
 import SolarReadResult from '../solar/SolarReadResult.jsx'
+import ResultJsonDownload from './ResultJsonDownload.jsx'
 import { isSolarProjectReadResult, isSolarReadResult } from '../solar/solarReadResultModel.js'
 
 // Renders a Result envelope (CONTRACT §3): result data (counts table or
@@ -87,6 +88,150 @@ function GridTable({ table, density }) {
   )
 }
 
+function isRowObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+const MAX_ROW_DEPTH = 20
+const MAX_ROW_COLUMNS = 50
+
+// Copy only own JSON fields before stringifying, so deep/cyclic values stay text.
+function boundedRowValue(value, depth = 0, ancestors = new Set()) {
+  if (value === null || typeof value !== 'object') return value
+  if (depth >= MAX_ROW_DEPTH) return '[Truncated]'
+  if (ancestors.has(value)) return '[Circular]'
+  const next = new Set(ancestors).add(value)
+  return Array.isArray(value)
+    ? value.map((item) => boundedRowValue(item, depth + 1, next))
+    : Object.fromEntries(Object.entries(value).map(([key, item]) => [key, boundedRowValue(item, depth + 1, next)]))
+}
+
+function rowValueText(value) {
+  try {
+    return value == null ? '' : typeof value === 'object' ? JSON.stringify(boundedRowValue(value)) : String(value)
+  } catch {
+    return '[Unreadable value]'
+  }
+}
+
+// Keep the supplied row/field order, including fields first seen on later pages.
+function* rowFields(row, path = []) {
+  for (const [key, value] of Object.entries(row)) {
+    const fieldPath = [...path, key]
+    if (fieldPath.length < MAX_ROW_DEPTH && isRowObject(value) && Object.keys(value).length > 0) {
+      yield* rowFields(value, fieldPath)
+    } else {
+      yield fieldPath
+    }
+  }
+}
+
+function findRowArrays(data, path = [], ancestors = new Set()) {
+  if (data === null || typeof data !== 'object' || ancestors.has(data)) return []
+  // A row array owns discovery of its visible children, after pagination.
+  if (Array.isArray(data) && data.every(isRowObject)) return [{ path, rows: data, ancestors }]
+  if (path.length >= MAX_ROW_DEPTH) return [{ path, value: data }]
+  const next = new Set(ancestors).add(data)
+  return Object.entries(data).flatMap(([key, value]) => {
+    // These fields have dedicated renderers; file bytes must not become table cells.
+    if (path.length === 0 && ['table', 'counts', 'files', 'warnings'].includes(key)) return []
+    const fieldPath = [...path, key]
+    return findRowArrays(value, fieldPath, next)
+  })
+}
+
+function rowFieldValue(row, fieldPath) {
+  return fieldPath.reduce((entry, field) =>
+    entry !== null && typeof entry === 'object' && Object.hasOwn(entry, field) ? entry[field] : undefined, row)
+}
+
+function rowCellText(value) {
+  return Array.isArray(value) && value.every(isRowObject)
+    ? `${value.length} ${value.length === 1 ? 'row' : 'rows'}` : rowValueText(value)
+}
+
+function RowFieldDetails({ row, label }) {
+  const [expanded, setExpanded] = useState(false)
+  return <>
+    <button type="button" className="btn ghost" aria-expanded={expanded}
+      aria-label={`${expanded ? 'Hide all fields' : 'All fields'} for ${label}`}
+      onClick={() => setExpanded(!expanded)}>{expanded ? 'Hide all fields' : 'All fields'}</button>
+    {expanded && <dl aria-label={`All fields for ${label}`}>
+      {Array.from(rowFields(row), (fieldPath) => <div key={JSON.stringify(fieldPath)}>
+        <dt>{fieldPath.map(humanKey).join(' / ')}</dt>
+        <dd>{rowCellText(rowFieldValue(row, fieldPath))}</dd>
+      </div>)}
+    </dl>}
+  </>
+}
+
+function RowArrayResults({ entries, density }) {
+  return entries.map((entry) => Object.hasOwn(entry, 'rows')
+    ? <RowArrayTable key={JSON.stringify(entry.path)} {...entry} density={density} />
+    : <p key={JSON.stringify(entry.path)}>{entry.path.map(humanKey).join(' / ')}: {rowValueText(entry.value)}</p>)
+}
+
+function RowArrayTable({ path, rows, ancestors, density }) {
+  const [page, setPage] = useState(0)
+  useEffect(() => { setPage(0) }, [rows])
+  const label = path.map(humanKey).join(' / ') || 'result'
+  const pageSize = 100
+  const currentPage = Math.min(page, Math.max(0, Math.ceil(rows.length / pageSize) - 1))
+  const start = currentPage * pageSize
+  const visibleRows = rows.slice(start, start + pageSize)
+  const childArrays = path.length < MAX_ROW_DEPTH
+    ? visibleRows.flatMap((row, index) => findRowArrays(row, [...path, String(start + index)], new Set(ancestors).add(rows)))
+    : []
+  const columns = new Map()
+  const omittedColumns = new Set()
+  for (const row of rows) {
+    for (const fieldPath of rowFields(row)) {
+      const key = JSON.stringify(fieldPath)
+      if (columns.has(key)) continue
+      if (columns.size < MAX_ROW_COLUMNS) columns.set(key, fieldPath)
+      else omittedColumns.add(key)
+    }
+  }
+  if (rows.length === 0) return <p>{label}: No rows.</p>
+  return (
+    <section aria-label={`${label} rows`}>
+      <div className="table-scroll">
+        <table className="counts grid" data-density={density}>
+          <caption>{label}</caption>
+          <thead><tr>{Array.from(columns, ([key, fieldPath]) => (
+            <th key={key} scope="col">{fieldPath.map(humanKey).join(' / ')}</th>
+          ))}</tr></thead>
+          <tbody>
+            {visibleRows.map((row, index) => (
+              <tr key={start + index}>
+                {Array.from(columns, ([key, fieldPath], columnIndex) => {
+                  const value = rowFieldValue(row, fieldPath)
+                  return <td key={key} className={isNumericCell(value) ? 'num dp-number' : ''}>
+                    {rowCellText(value)}
+                    {columnIndex === 0 && omittedColumns.size > 0 &&
+                      <RowFieldDetails row={row} label={`${label} row ${start + index + 1}`} />}
+                  </td>
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {omittedColumns.size > 0 && <p>{omittedColumns.size} more fields available in each row&apos;s All fields.</p>}
+      {rows.length > pageSize && (
+        <nav aria-label={`${label} pages`}>
+          <span aria-live="polite">Rows {start + 1} to {Math.min(start + pageSize, rows.length)} of {rows.length}</span>
+          <button type="button" className="btn ghost" disabled={currentPage === 0}
+            onClick={() => setPage(currentPage - 1)} aria-label={`Previous ${label} page`}>Previous</button>
+          <button type="button" className="btn ghost" disabled={start + pageSize >= rows.length}
+            onClick={() => setPage(currentPage + 1)} aria-label={`Next ${label} page`}>Next</button>
+        </nav>
+      )}
+      <RowArrayResults entries={childArrays} density={density} />
+    </section>
+  )
+}
+
 // result.files = [{ name, mime, base64 }]: the tool hands back files (CSV, PDF). The bytes
 // are already in the envelope, so the link is a blob URL built in the browser; nothing is
 // fetched. URLs are revoked when the result changes.
@@ -131,15 +276,17 @@ function ResultBody({ result, density, solarBinding, authorityKey, projectClient
   }
   if (isSolarReadResult(data)) return <SolarReadResult data={data} />
   if (data.solver === 'arlo-design') return <ArloProposalReview key={`${result.job_context?.job_id || 'local'}:${data.result_sha256}`} envelope={data} context={result.job_context} />
-  if (data.table && typeof data.table === 'object') {
-    const scalars = {}
-    for (const [k, v] of Object.entries(data)) {
-      if (v !== null && typeof v === 'object') continue
-      scalars[k] = v
-    }
+  const rowArrays = findRowArrays(data)
+  const rowTables = <>
+    <RowArrayResults entries={rowArrays} density={density} />
+    {rowArrays.some((entry) => Object.hasOwn(entry, 'rows')) && <ResultJsonDownload result={result} />}
+  </>
+  const scalars = Object.fromEntries(Object.entries(data).filter(([, value]) => value === null || typeof value !== 'object'))
+  if (Object.hasOwn(data, 'table') && data.table && typeof data.table === 'object') {
     return (
       <>
         <div className="table-scroll"><GridTable table={data.table} density={density} /></div>
+        {rowTables}
         {Array.isArray(data.warnings) && data.warnings.length > 0 && (
           <ul className="warnings">{data.warnings.map((w, i) => <li key={i}>{String(w)}</li>)}</ul>
         )}
@@ -148,22 +295,22 @@ function ResultBody({ result, density, solarBinding, authorityKey, projectClient
       </>
     )
   }
-  if (data.counts && typeof data.counts === 'object') {
+  if (Object.hasOwn(data, 'counts') && data.counts && typeof data.counts === 'object') {
+    const summary = Object.fromEntries(Object.entries(scalars).filter(([key]) => key !== 'total'))
     return (
       <>
         <div className="table-scroll"><CountsTable counts={data.counts} density={density} /></div>
-        {'total' in data && <div className="total">Total: <b>{Number(data.total).toLocaleString()}</b></div>}
+        {Object.hasOwn(data, 'total') && <div className="total">Total: <b>{Number(data.total).toLocaleString()}</b></div>}
+        {rowTables}
+        {Object.keys(summary).length > 0 && <div className="table-scroll"><KeyValue data={summary} density={density} /></div>}
       </>
     )
   }
-  // generic: split scalars from nested
-  const scalars = {}
-  for (const [k, v] of Object.entries(data)) {
-    if (v !== null && typeof v === 'object') continue
-    scalars[k] = v
-  }
-  return Object.keys(scalars).length > 0
-    ? <div className="table-scroll"><KeyValue data={scalars} density={density} /></div>
+  return rowArrays.length > 0 || Object.keys(scalars).length > 0
+    ? <>
+      {rowTables}
+      {Object.keys(scalars).length > 0 && <div className="table-scroll"><KeyValue data={scalars} density={density} /></div>}
+    </>
     : result.overlay || (Array.isArray(data.files) && data.files.length > 0)
       ? null
       : <p className="result-empty">Completed with no output.</p>

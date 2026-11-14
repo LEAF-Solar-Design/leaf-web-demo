@@ -27,6 +27,9 @@ export const PROJECT_SOLAR_GRAPH_REASONS = Object.freeze({
   group_name_invalid: 'Enter a group name of 1 to 255 characters without [.',
   group_name_collision: 'Group names must be unique, including existing panel groups.',
   group_numbers_invalid: 'Enter all three dimensions and tolerances as finite numbers greater than 0 and at most 1000000.',
+  group_gap_invalid: 'Enter a gap distance as a finite number greater than 0, or leave it blank to group by angle.',
+  group_geometry_invalid: 'Panel positions could not be read. Re-import the panels before grouping by gap.',
+  group_discovery_invalid: 'Use a Roof or Ground project and enter an outline offset and alignment tolerance greater than 0 and at most 1000000.',
   tool_unsupported: 'This tool has no project form in this view.',
   submit_unavailable: 'Project Solar submission is unavailable in this view.',
   run_in_progress: 'A Solar run is in progress. Wait for it to finish.',
@@ -68,6 +71,9 @@ export function projectSolarGraphReason(code, tool) {
   if (code == null) return null
   if (!boundedCode(code)) return PROJECT_SOLAR_GRAPH_REASONS.request_refused
   switch (code.toLowerCase()) {
+    case 'group_discovery_invalid':
+      if (tool !== 'solar-panel-groups') return PROJECT_SOLAR_GRAPH_REASONS.request_refused
+      return PROJECT_SOLAR_GRAPH_REASONS.group_discovery_invalid
     case 'no_panel_groups':
       if (tool !== 'solar-panel-groups') return PROJECT_SOLAR_GRAPH_REASONS.request_refused
       return PROJECT_SOLAR_GRAPH_REASONS.no_panel_groups
@@ -92,6 +98,12 @@ export function projectSolarGraphReason(code, tool) {
     case 'group_numbers_invalid':
       if (tool !== 'solar-panel-groups') return PROJECT_SOLAR_GRAPH_REASONS.request_refused
       return PROJECT_SOLAR_GRAPH_REASONS.group_numbers_invalid
+    case 'group_gap_invalid':
+      if (tool !== 'solar-panel-groups') return PROJECT_SOLAR_GRAPH_REASONS.request_refused
+      return PROJECT_SOLAR_GRAPH_REASONS.group_gap_invalid
+    case 'group_geometry_invalid':
+      if (tool !== 'solar-panel-groups') return PROJECT_SOLAR_GRAPH_REASONS.request_refused
+      return PROJECT_SOLAR_GRAPH_REASONS.group_geometry_invalid
     case 'sip_r7_binding_invalid':
     case 'binding_invalid': return PROJECT_SOLAR_GRAPH_REASONS.binding_invalid
     case 'context_unreadable': return PROJECT_SOLAR_GRAPH_REASONS.context_unreadable
@@ -191,7 +203,101 @@ export function panelHandleValid(handle) {
   return typeof handle === 'string' && /^\s*[+-]?(?:0[xX]_?)?[0-9a-fA-F](?:_?[0-9a-fA-F])*\s*$/.test(handle)
 }
 
-export function proposePanelGroups(graph) {
+function positiveGroupNumber(input, maximum = Infinity) {
+  const value = typeof input === 'number' ? input
+    : typeof input === 'string' && input.trim() ? Number(input) : NaN
+  return Number.isFinite(value) && value > 0 && value <= maximum ? value : null
+}
+
+function panelRectangle(panel, width, height) {
+  const centre = panel.centre
+  if (!Array.isArray(centre) || (centre.length !== 2 && centre.length !== 3)
+      || !centre.every(Number.isFinite)) return null
+  const radians = (panel.angle % 360) * Math.PI / 180
+  const cos = Math.cos(radians), sin = Math.sin(radians)
+  const points = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([x, y]) => [
+    centre[0] + x * width / 2 * cos - y * height / 2 * sin,
+    centre[1] + x * width / 2 * sin + y * height / 2 * cos,
+  ])
+  if (points.some((point) => !point.every(Number.isFinite))) return null
+  const extent = Math.max(Math.abs(width * cos) + Math.abs(height * sin),
+    Math.abs(width * sin) + Math.abs(height * cos))
+  return { points, axes: [[cos, sin], [-sin, cos]], extent }
+}
+
+function rectanglesWithinGap(a, b, gap) {
+  // Include exact thresholds despite rounding when rotating and projecting edges.
+  const inclusiveGap = gap + 1e-9 * Math.max(gap, a.extent, b.extent)
+  // Overlapping or touching rectangles have zero separation. Test both rotations,
+  // since angles in one rounded bucket can still differ slightly.
+  let separated = false
+  for (const [x, y] of [...a.axes, ...b.axes]) {
+    const left = a.points.map(([px, py]) => px * x + py * y)
+    const right = b.points.map(([px, py]) => px * x + py * y)
+    const distance = Math.max(Math.min(...right) - Math.max(...left), Math.min(...left) - Math.max(...right))
+    if (distance > inclusiveGap) return false
+    if (distance > 0) separated = true
+  }
+  if (!separated) return true
+  // For disjoint rectangles the shortest segment joins a vertex to an edge.
+  for (const [vertices, edges] of [[a.points, b.points], [b.points, a.points]]) {
+    for (const [x, y] of vertices) {
+      for (let index = 0; index < 4; index += 1) {
+        const [sx, sy] = edges[index], [ex, ey] = edges[(index + 1) % 4]
+        const dx = ex - sx, dy = ey - sy
+        const length = dx * dx + dy * dy
+        const t = length === 0 ? 0 : Math.max(0, Math.min(1, ((x - sx) * dx + (y - sy) * dy) / length))
+        if (Math.hypot(x - sx - t * dx, y - sy - t * dy) <= inclusiveGap) return true
+      }
+    }
+  }
+  return false
+}
+
+function panelIslands(panels, rectangles, gap) {
+  const parents = panels.map((_, index) => index)
+  const root = (index) => {
+    while (parents[index] !== index) {
+      parents[index] = parents[parents[index]]
+      index = parents[index]
+    }
+    return index
+  }
+  // Any connected pair's centres differ by at most extent + gap on either
+  // axis, including the comparison epsilon. Only the nine neighbouring cells
+  // can contain a connection. Space is O(n); work is O(n + nearby pairs).
+  // Dense cells can still be quadratic, bounded by the existing 4096-panel cap.
+  const extent = Math.max(...rectangles.map((rectangle) => rectangle.extent))
+  const cellSize = extent + gap + 1e-9 * Math.max(extent, gap)
+  const cells = new Map()
+  for (let index = 0; index < panels.length; index += 1) {
+    const [x, y] = panels[index].centre.map((value) => Math.floor(value / cellSize))
+    for (let dx = -1; dx <= 1; dx += 1) {
+      for (let dy = -1; dy <= 1; dy += 1) {
+        const neighbours = cells.get(`${x + dx},${y + dy}`)
+        if (!neighbours) continue
+        for (const neighbour of neighbours) {
+          const a = root(index), b = root(neighbour)
+          if (a !== b && rectanglesWithinGap(rectangles[index], rectangles[neighbour], gap)) parents[b] = a
+        }
+      }
+    }
+    const key = `${x},${y}`
+    if (!cells.has(key)) cells.set(key, [])
+    cells.get(key).push(index)
+  }
+  const islands = new Map()
+  for (let index = 0; index < panels.length; index += 1) {
+    const key = root(index)
+    if (!islands.has(key)) islands.set(key, [])
+    islands.get(key).push(panels[index])
+  }
+  return [...islands.values()]
+}
+
+// Optional form numbers: gap_distance (drawing units), module_width_along_row,
+// module_height_across_row. Graph panels carry centres/angles but no dimensions.
+export function proposePanelGroups(graph, numbers) {
   const buckets = new Map()
   let ungrouped = 0
   let invalid_handles = 0
@@ -204,18 +310,36 @@ export function proposePanelGroups(graph) {
     if (!buckets.has(key)) buckets.set(key, [])
     buckets.get(key).push(panel)
   }
+  const result = (refused) => ({ proposals: [], singletons: 0, ungrouped, invalid_handles, refused })
+  const gapInput = numbers?.gap_distance
+  const hasGap = gapInput != null && !(typeof gapInput === 'string' && !gapInput.trim())
+  const gap = hasGap ? positiveGroupNumber(gapInput) : null
+  if (hasGap && gap === null) return result('group_gap_invalid')
+  const width = hasGap ? positiveGroupNumber(numbers?.module_width_along_row, 1e6) : null
+  const height = hasGap ? positiveGroupNumber(numbers?.module_height_across_row, 1e6) : null
+  if (hasGap && (width === null || height === null)) return result('group_numbers_invalid')
   let singletons = 0
   const proposals = []
   const seenHandles = new Set()
   let ambiguous = false
   for (const [key, panels] of [...buckets].sort(([a], [b]) => Number(a) - Number(b))) {
-    if (panels.length === 1) { singletons += 1; continue }
-    for (const panel of panels) {
-      const handle = panel.provenance.source_handle.toUpperCase()
-      if (seenHandles.has(handle)) ambiguous = true
-      seenHandles.add(handle)
+    let islands = [panels]
+    if (hasGap) panels.sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+    if (hasGap && panels.length <= 4096) {
+      const rectangles = panels.map((panel) => panelRectangle(panel, width, height))
+      if (rectangles.includes(null)) return result('group_geometry_invalid')
+      islands = panelIslands(panels, rectangles, gap)
     }
-    proposals.push({ key, angle_key: key, panel_refs: panels.map((panel) => panel.id).sort(), count: panels.length })
+    for (const island of islands) {
+      if (island.length === 1) { singletons += 1; continue }
+      for (const panel of island) {
+        const handle = panel.provenance.source_handle.toUpperCase()
+        if (seenHandles.has(handle)) ambiguous = true
+        seenHandles.add(handle)
+      }
+      proposals.push({ key: hasGap ? `${key}:${island[0].id}` : key, angle_key: key,
+        panel_refs: island.map((panel) => panel.id).sort(), count: island.length })
+    }
   }
   const refused = proposals.length > 128 ? 'too_many_groups'
     : proposals.some((proposal) => proposal.count > 4096) ? 'group_too_large'
@@ -225,7 +349,7 @@ export function proposePanelGroups(graph) {
 
 export function validatePanelGroups(graph, groups, numbers) {
   const fail = (reason) => ({ ok: false, reason })
-  const { proposals, refused } = proposePanelGroups(graph)
+  const { proposals, refused } = proposePanelGroups(graph, numbers)
   if (refused) return fail(refused)
   if (!proposals.length) return fail('no_panel_groups')
   if (!Array.isArray(groups) || groups.length !== proposals.length
@@ -257,7 +381,22 @@ function foldGroupName(name) {
   return name.replace(/[^\u0131]+/gu, (text) => text.toUpperCase().toLowerCase()).replace(/ß/g, 'ss')
 }
 
-export function buildProjectSolarGraphRequest({ tool, binding, state, currentState, insertionPointText, groups,
+function validPanelGroupDiscovery(value) {
+  return value && Object.keys(value).length === 3 && ['Roof', 'Ground'].includes(value.InstallationDesign)
+    && ['BranchMaxOffset', 'AlignmentTolerance'].every((key) => typeof value[key] === 'number'
+      && Number.isFinite(value[key]) && value[key] > 0 && value[key] <= 1e6)
+}
+
+export function validatePanelGroupDiscovery(graph, numbers) {
+  const value = { InstallationDesign: graph?.project?.installation_design }
+  for (const key of ['BranchMaxOffset', 'AlignmentTolerance']) {
+    const raw = numbers?.[key]
+    value[key] = typeof raw === 'string' && DECIMAL.test(raw.trim()) ? Number(raw.trim()) : raw
+  }
+  return validPanelGroupDiscovery(value) ? { ok: true, value } : { ok: false, reason: 'group_discovery_invalid' }
+}
+
+export function buildProjectSolarGraphRequest({ tool, binding, state, currentState, insertionPointText, groups, discover,
   catalogDigest, idempotencyKey }) {
   const fail = (reason) => ({ ok: false, reason })
   try {
@@ -284,9 +423,15 @@ export function buildProjectSolarGraphRequest({ tool, binding, state, currentSta
   }
   const params = { drawing_id: exact.drawing_id, expected_rev: state.rev }
   if (tool === 'solar-panel-groups') {
-    if (!Array.isArray(groups) || !groups.length || groups.length > 128) return fail('request_invalid')
-    params.groups = groups
-  }
+    if (discover !== undefined) {
+      if (groups !== undefined || !validPanelGroupDiscovery(discover)) return fail('request_invalid')
+      params.discover = { BranchMaxOffset: discover.BranchMaxOffset,
+        AlignmentTolerance: discover.AlignmentTolerance, InstallationDesign: discover.InstallationDesign }
+    } else {
+      if (!Array.isArray(groups) || !groups.length || groups.length > 128) return fail('request_invalid')
+      params.groups = groups
+    }
+  } else if (discover !== undefined) return fail('request_invalid')
   if (tool === 'solar-schedule') {
     const parsed = parseProjectSolarInsertionPoint(insertionPointText)
     if (!parsed.ok) return parsed

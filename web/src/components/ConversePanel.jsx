@@ -596,6 +596,13 @@ export default function ConversePanel({
   // scrolled up to re-read mid-stream is the classic streaming-UI defect
   // (W0 craft #21); the ref tracks proximity from their own scrolls.
   const nearBottomRef = useRef(true)
+  const lastReaderGestureRef = useRef(-Infinity)
+  const onLogReaderGesture = () => { lastReaderGestureRef.current = Date.now() }
+  const onLogKeyDown = (e) => {
+    if (['PageUp', 'PageDown', 'Home', 'End', 'ArrowUp', 'ArrowDown', ' '].includes(e.key)) {
+      onLogReaderGesture()
+    }
+  }
   // Mirrors !nearBottomRef as state so the "Jump to latest" chip renders only
   // while the reader is scrolled away (React bails out on an unchanged value,
   // so a scroll storm re-renders only when the lock actually flips).
@@ -604,8 +611,15 @@ export default function ConversePanel({
     const el = logRef.current
     if (!el) return
     const near = el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX
-    nearBottomRef.current = near
-    setAwayFromLatest(!near)
+    if (near) {
+      nearBottomRef.current = true
+      setAwayFromLatest(false)
+    } else if (Date.now() - lastReaderGestureRef.current < 1000) {
+      nearBottomRef.current = false
+      setAwayFromLatest(true)
+    } else if (nearBottomRef.current) {
+      el.scrollTop = el.scrollHeight
+    }
   }
   const jumpToLatest = () => {
     const el = logRef.current
@@ -644,6 +658,15 @@ export default function ConversePanel({
     observer.observe(el)
     return () => observer.disconnect()
   }, [logEl]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const el = logEl
+    if (!el || typeof MutationObserver === 'undefined') return undefined
+    const observer = new MutationObserver(() => {
+      if (nearBottomRef.current) el.scrollTop = el.scrollHeight
+    })
+    observer.observe(el, { childList: true, subtree: true, characterData: true })
+    return () => observer.disconnect()
+  }, [logEl])
   // The chip's End keycap is live, and only while the chip is shown. It
   // defers to anything nearer that handled the key (the tab strip's roving
   // End) and never steals End from a text field or from outside this panel.
@@ -1385,6 +1408,11 @@ export default function ConversePanel({
         className="converse-log"
         ref={attachLog}
         onScroll={onLogScroll}
+        onWheel={onLogReaderGesture}
+        onTouchStart={onLogReaderGesture}
+        onTouchMove={onLogReaderGesture}
+        onPointerDown={onLogReaderGesture}
+        onKeyDown={onLogKeyDown}
         role="log"
         atomic={false}
         label="Assistant conversation"

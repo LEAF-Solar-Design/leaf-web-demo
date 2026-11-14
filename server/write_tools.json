@@ -136,7 +136,7 @@
     {
       "name": "solar-panel-groups",
       "version": "1.0.0",
-      "description": "Build panel groups with the licensed drawing engine.",
+      "description": "Build selected panel groups or discover whole-drawing groups from source geometry and recorded drawing properties.",
       "kind": "script",
       "family_id": "stringing",
       "engine_op": "solar_panel_groups",
@@ -161,6 +161,16 @@
             "items": {
               "type": "object"
             }
+          },
+          "discover": {
+            "type": "object",
+            "properties": {
+              "BranchMaxOffset": {"type": "number", "exclusiveMinimum": 0, "maximum": 1000000},
+              "AlignmentTolerance": {"type": "number", "exclusiveMinimum": 0, "maximum": 1000000},
+              "InstallationDesign": {"type": "string", "enum": ["Roof", "Ground"]}
+            },
+            "required": ["BranchMaxOffset", "AlignmentTolerance", "InstallationDesign"],
+            "additionalProperties": false
           }
         },
         "required": [

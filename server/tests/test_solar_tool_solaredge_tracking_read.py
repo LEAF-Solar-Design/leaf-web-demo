@@ -32,7 +32,8 @@ from leaf_cloud_client import canonical_bytes
 from solar_design_graph import GraphValidationError
 from solar_sizing_client import digest
 from test_solar_tool_solaredge_accept import (
-    SMALL_ACCEPT_GRAPH, SMALL_RECORD, dispatch, head, manifest, params, seeded)
+    SMALL_ACCEPT_GRAPH, SMALL_RECORD, dispatch, head, manifest, params, seeded,
+    legacy_report_producer)  # noqa: F401
 from test_solar_solaredge_report import (  # noqa: F401
     A, GRIDS, PDF, SRC1, SRC14, C14_ARTIFACT, C14_GRAPH_SHA, SMALL_ARTIFACT, SMALL_GRAPH_SHA,
     app_id, cached_parse, design_graph, intake_graph, small_graph, sources)

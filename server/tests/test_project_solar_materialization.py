@@ -246,7 +246,8 @@ def test_initial_real_storage_metadata_replay_and_normal_history(fresh, monkeypa
     assert lane.http.post(route, json=body, headers={'Idempotency-Key': str(request)}).json() == receipt
 
 
-def test_original_intake_custody_in_canonical_layout_export(fresh):
+@pytest.mark.parametrize('semantics', [None, 'current-native', 'historical-list-reuse'])
+def test_original_intake_custody_in_canonical_layout_export(fresh, semantics):
     import solar_frames_piles as fp
     import solar_native_layout_dxf as native
 
@@ -260,6 +261,8 @@ def test_original_intake_custody_in_canonical_layout_export(fresh):
                 'pile_template': template}
     text = json.dumps(original, indent=2).replace('\n', '\r\n') + '\r\n'
     body = {'original_intake': text, 'grid_long_axis': 150}
+    if semantics is not None:
+        body['producer_semantics'] = semantics
     original_sha = hashlib.sha256(text.encode('utf-8')).hexdigest()
     headers = {'Idempotency-Key': str(uuid4())}
     route = f'/api/projects/{project}/solar-layout'
@@ -267,9 +270,12 @@ def test_original_intake_custody_in_canonical_layout_export(fresh):
     assert first.status_code == 200, first.text
     receipt = first.json()
     assert receipt['generation_source']['original_intake_sha256'] == original_sha
+    assert receipt['generation_source']['producer_semantics'] == (semantics or 'current-native')
     assert lane.http.post(route, json=body, headers=headers).json() == receipt
     for changed in ({**body, 'grid_long_axis': 151}, {**body, 'original_intake': text.replace('\r\n', '\n')}):
         assert lane.http.post(route, json=changed, headers=headers).status_code == 409
+    changed_semantics = 'current-native' if semantics == 'historical-list-reuse' else 'historical-list-reuse'
+    assert lane.http.post(route, json={**body, 'producer_semantics': changed_semantics}, headers=headers).status_code == 409
 
     drawing_id = receipt['drawing_id']
     version_id = receipt['drawing_version']['version_id']
@@ -288,12 +294,135 @@ def test_original_intake_custody_in_canonical_layout_export(fresh):
     assert decoded.document['units'] == {'drawing_units': 'm', 'meters_per_unit': 1.0}
     state = decoded.document['state']
     assert state['grid'] is None and state['piles'] == [] and state['frames']
+    current_native = semantics != 'historical-list-reuse'
+    assert decoded.parameters['producer_semantics'] == (semantics or 'current-native')
+    loaded, _ = (fp.load_current_preset if current_native else fp.load_preset)(preset)
+    from dataclasses import asdict
+    assert decoded.parameters['generation_models'] == [asdict(loaded)]
+    assert decoded.parameters['frame_generations'] == {frame['handle']: 0 for frame in state['frames']}
     changed_generation, _ = layout._original_generation({**body, 'grid_long_axis': 151})
-    comparison, _ = fp.prepare_initial_frames(**changed_generation, current_native=True)
+    comparison, _ = fp.prepare_initial_frames(**changed_generation, current_native=current_native)
     assert comparison == decoded.document
+    other, _ = fp.prepare_initial_frames(**changed_generation, current_native=not current_native)
+    assert other['state']['frames'] != state['frames']
     context = layout.project.resolve_context(lane.tenant, project, layout.UUID(version_id),
                                              drawing_id=layout.UUID(drawing_id))
     assert context.intake[layout.KEY]['request']['original_intake'].encode('utf-8') == text.encode('utf-8')
+
+
+@pytest.mark.parametrize('semantics', [None, True, [], {}, 'unknown'])
+def test_initial_rejects_unknown_producer_semantics(semantics):
+    with pytest.raises(editor.EditorError, match='PROJECT_LAYOUT_REQUEST_INVALID'):
+        layout.initial_parameters({'original_intake': '{}', 'grid_long_axis': 150,
+                                   'producer_semantics': semantics})
+
+
+@pytest.mark.parametrize('semantics', [None, 'current-native', 'historical-list-reuse'])
+def test_initial_preparation_binds_loader_geometry_models_and_export(semantics):
+    from dataclasses import asdict
+    import solar_frames_piles as fp
+    import solar_native_layout_dxf as native
+
+    values = initial_body()
+    preset = {**values['preset'], 'PileTemplateName': 'Synthetic piles'}
+    original = {'units': values['drawing_units'], 'boundary': values['boundary'],
+                'active_preset': preset, 'pile_template': {'Name': 'Synthetic piles'}}
+    raw = json.dumps(original, indent=2).replace('\n', '\r\n') + '\r\n'
+    body = {'original_intake': raw, 'grid_long_axis': 150}
+    if semantics is not None:
+        body['producer_semantics'] = semantics
+    document, inputs, source = layout._prepare_initial_layout(layout.initial_parameters(body))
+    current = semantics != 'historical-list-reuse'
+    expected, _ = fp.prepare_initial_frames(boundary=values['boundary'], preset=preset,
+                                           drawing_units=values['drawing_units'], current_native=current)
+    opposite, _ = fp.prepare_initial_frames(boundary=values['boundary'], preset=preset,
+                                           drawing_units=values['drawing_units'], current_native=not current)
+    assert document == expected
+    assert document['state']['frames'] != opposite['state']['frames']
+    loaded, _ = (fp.load_current_preset if current else fp.load_preset)(preset)
+    assert inputs['generation_models'] == [asdict(loaded)]
+    assert inputs['generation']['preset'] == preset
+    assert inputs['producer_semantics'] == source['producer_semantics'] == (semantics or 'current-native')
+    assert source['original_intake_sha256'] == hashlib.sha256(raw.encode()).hexdigest()
+    scope = {key: uuid4() for key in ('organization_id', 'project_id', 'drawing_id')}
+    exported = layout.materialize_native_layout(scope, None, document, None, parameters=inputs)
+    decoded = native.decode_native_layout(exported)
+    assert decoded.document == document and decoded.parameters == inputs
+
+
+def _inspection_fixture():
+    import solar_native_layout_dxf as native
+    document, inputs, _ = layout._prepare_initial_layout(initial_body())
+    scope = {key: uuid4() for key in ('organization_id', 'project_id', 'drawing_id')}
+    raw = layout.materialize_native_layout(scope, None, document, None, parameters=inputs)
+    return native.decode_native_layout(raw)
+
+
+def test_saved_frame_pages_preserve_native_identity_cells_and_model_pose():
+    decoded = _inspection_fixture()
+    observed = []
+    for offset in range(0, len(decoded.frames), layout.FRAME_PAGE_SIZE):
+        page = layout._frame_page(decoded, offset)
+        assert page['total'] == len(decoded.frames) and page['offset'] == offset
+        assert page['page_size'] == layout.FRAME_PAGE_SIZE
+        assert page['drawing_units'] == decoded.document['units']['drawing_units']
+        assert len(json.dumps(page).encode()) < 65536
+        for frame, native in zip(page['frames'], decoded.frames[offset:offset + layout.FRAME_PAGE_SIZE]):
+            logical = next(key for key, value in decoded.handles.items() if value == native['handle'])
+            model = decoded.parameters['generation_models'][decoded.parameters['frame_generations'][logical]]
+            assert frame['handle'] == native['handle']
+            assert (frame['row'], frame['column'], frame['elevation']) == (native['row'], native['col'], native['elevation'])
+            assert frame['vertices'] == [list(point) for point in native['vertices']]
+            assert frame['preset'] == model['name'] and frame['pile_template'] == model['pile_template_name']
+            assert frame['pose'] == {key: model[key] for key in (
+                'tilt_degrees', 'axis_azimuth_deg', 'height_at_low_pose_m', 'height_at_high_pose_m')}
+            observed.append(frame['handle'])
+    assert observed == [frame['handle'] for frame in decoded.frames]
+    assert len(observed) == len(set(observed))
+
+
+@pytest.mark.parametrize('offset', [-1, True, 1.5, '0', None, 10**9])
+def test_saved_frame_page_refuses_invalid_offsets(offset):
+    with pytest.raises(editor.EditorError, match='PROJECT_LAYOUT_REQUEST_INVALID'):
+        layout._frame_page(_inspection_fixture(), offset)
+
+
+@pytest.mark.parametrize('failure', ['missing', 'out_of_range', 'pose'])
+def test_saved_frame_page_refuses_unbound_model_attributes(failure):
+    decoded = _inspection_fixture()
+    logical = next(key for key, value in decoded.handles.items() if value == decoded.frames[0]['handle'])
+    if failure == 'missing':
+        decoded.parameters['frame_generations'].pop(logical)
+    elif failure == 'out_of_range':
+        decoded.parameters['frame_generations'][logical] = len(decoded.parameters['generation_models'])
+    else:
+        decoded.parameters['generation_models'][0]['tilt_degrees'] = None
+    with pytest.raises(editor.EditorError, match='PROJECT_LAYOUT_NATIVE_METADATA_INVALID'):
+        layout._frame_page(decoded, 0)
+
+
+def test_canonical_frame_inspection_preserves_route_scope_and_stale_version_refusal(fresh):
+    lane, project, receipt, base = canonical_start(fresh)
+    parent = receipt['drawing_version']['version_id']
+    route = base + f'/versions/{parent}/solar-layout'
+    assert lane.http.get(route).json()['schema'] == layout.SCHEMA
+    response = lane.http.get(route + '?frame_offset=0')
+    assert response.status_code == 200, response.text
+    page = response.json()
+    assert page['schema'] == layout.FRAME_SCHEMA and page['frames']
+    assert page['parent_version_id'] == parent and page['project_id'] == str(project)
+    assert page['drawing_id'] == receipt['drawing_id']
+    assert lane.http.get(route + '?frame_offset=-1').status_code == 400
+    foreign = route.replace(str(project), str(uuid4()))
+    refused = lane.http.get(foreign + '?frame_offset=0')
+    assert refused.status_code in (403, 404) and 'frames' not in refused.json()
+    raw = lane.http.get(base + f'/versions/{parent}/dxf').content
+    cap = lane.http.post(base + '/checkout').json()['checkout_capability']
+    saved = editor.save_dxf(lane.tenant, project, layout.UUID(receipt['drawing_id']), layout.UUID(parent),
+                            raw, request_id=uuid4(), capability=cap)
+    assert saved['drawing_version']['version_id'] != parent
+    stale = lane.http.get(route + '?frame_offset=0')
+    assert stale.status_code == 409 and 'frames' not in stale.json()
 
 
 def test_initial_existing_project_refuses_before_writer(lane, monkeypatch):

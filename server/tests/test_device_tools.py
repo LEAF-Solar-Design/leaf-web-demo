@@ -194,6 +194,60 @@ def test_light_states_summary_is_filtered_and_bounded(tools):
                                              "rgb": [1, 2, 3], "brightness_pct": 100}
 
 
+def test_light_states_summary_shows_group_members_and_off_limits(tools):
+    device_id = device(tools)
+    command_id = call(tools, "light_states", {"device_id": device_id}).json()["result"]["command_id"]
+    store.lease_commands(device_id)
+    members = ["light.wiz_rgbw_tunable_daea0a", "light.wiz_rgbw_tunable_dc66f0"]
+    off_limits = "light.wiz_rgbw_tunable_80ff06"
+    rows = [
+        {"entity_id": "light.office", "attributes": {"entity_id": members}},
+        {"entity_id": "light.room", "attributes": {"entity_id": [members[0], off_limits]}},
+        {"entity_id": off_limits},
+    ]
+    store.complete_command(device_id, command_id, {"command_id": command_id, "status": "ok",
+        "finished_at": store._now().isoformat(), "data": {"body_json": rows}})
+    response = call(tools, "command_status", {"device_id": device_id, "command_id": command_id})
+    assert response.status_code == 200
+    assert response.json()["result"]["summary"]["lights"] == [
+        {"entity_id": "light.office", "name": "light.office", "members": members},
+        {"entity_id": "light.room", "name": "light.room", "members": [members[0], off_limits], "off_limits": True},
+        {"entity_id": off_limits, "name": off_limits, "off_limits": True},
+    ]
+
+
+@pytest.mark.parametrize("attributes,expected,off_limits", [
+    ({"entity_id": [None, 1, True, {}, [], "switch.x", "light.A/../b", "light.",
+                    "light.a\n", "light." + "a" * 65, "light.secret", "light." + "a" * 24,
+                    "light.second", "light.first", "light.second"]}, ["light.second", "light.first"], False),
+    ({"entity_id": [f"light.bulb_{i}" for i in range(25)]}, [f"light.bulb_{i}" for i in range(20)], False),
+    ({"entity_id": [f"light.bulb_{i}" for i in range(20)] + ["light.wiz_rgbw_tunable_80ff06"]},
+     [f"light.bulb_{i}" for i in range(20)], True),
+    ({"entity_id": ["light.wiz_rgbw_tunable_444f8e80ff06"]}, [], True),
+    ({"entity_id": "light.wiz_rgbw_tunable_80ff06"}, [], True),
+    ({"entity_id": "light.first"}, [], False),
+    ({"entity_id": []}, [], False),
+    ({"entity_id": [None, "switch.x", "light.secret"]}, [], False),
+    ({"entity_id": None}, [], False),
+    ({}, [], False),
+])
+def test_light_states_summary_filters_and_bounds_members(tools, attributes, expected, off_limits):
+    device_id = device(tools)
+    command_id = call(tools, "light_states", {"device_id": device_id}).json()["result"]["command_id"]
+    store.lease_commands(device_id)
+    store.complete_command(device_id, command_id, {"command_id": command_id, "status": "ok",
+        "finished_at": store._now().isoformat(), "data": {"body_json": [
+            {"entity_id": "light.office", "attributes": attributes}]}})
+    response = call(tools, "command_status", {"device_id": device_id, "command_id": command_id})
+    assert response.status_code == 200
+    light = {"entity_id": "light.office", "name": "light.office"}
+    if expected:
+        light["members"] = expected
+    if off_limits:
+        light["off_limits"] = True
+    assert response.json()["result"]["summary"]["lights"] == [light]
+
+
 def test_other_summary_has_only_safe_fields(tools):
     device_id = device(tools)
     command_id = call(tools, "ha_step", {"device_id": device_id, "op": "ha.onboard", "args": {}}).json()["result"]["command_id"]
@@ -429,3 +483,75 @@ def test_flow_list_summary_is_filtered_and_bounded():
     data = [None, {"flow_id": flow["flow_id"], "handler": []}]
     data += [dict(flow, step_id="a1" * 16, title="hidden") for _ in range(25)]
     assert service._summary({"op": "ha.flow.list"}, {"data": data}) == {"flows": [flow] * 20}
+
+
+@pytest.mark.parametrize("action,entity_id", [
+    ("turn_on", "light.wiz_rgbw_tunable_80ff06"),
+    ("turn_off", "light.wiz_rgbw_tunable_80ff06"),
+    ("turn_on", "light.Living_80FF06"),
+])
+def test_off_limits_light_is_denied(tools, action, entity_id):
+    device_id = device(tools)
+    response = call(tools, "light", {
+        "device_id": device_id, "action": action, "entity_id": entity_id})
+    assert response.status_code == 403
+    assert store.lease_commands(device_id) == []
+
+
+@pytest.mark.parametrize("op,args", [
+    ("ha.flow.step", {"flow_id": "01JC9XQ2V7M3K8T4P6R5S0W1YZ", "data": {"host": "10.0.0.175"}}),
+    ("ha.flow.start", {"handler": "wiz", "data": {"mac": "444F8E80FF06"}}),
+])
+def test_off_limits_ha_flow_is_denied(tools, op, args):
+    device_id = device(tools)
+    response = call(tools, "ha_step", {"device_id": device_id, "op": op, "args": args})
+    assert response.status_code == 403
+    assert store.lease_commands(device_id) == []
+
+
+def test_off_limits_environment_is_read_at_call_time(tools, monkeypatch):
+    device_id = device(tools)
+    monkeypatch.setenv("LEAF_DEVICE_OFF_LIMITS", "light.desk_lamp")
+    response = call(tools, "light", {
+        "device_id": device_id, "action": "turn_on", "entity_id": "light.desk_lamp"})
+    assert response.status_code == 403
+    assert store.lease_commands(device_id) == []
+    response = call(tools, "light", {
+        "device_id": device_id, "action": "turn_on", "entity_id": "light.desk"})
+    assert response.status_code == 200, response.text
+    assert len(store.lease_commands(device_id)) == 1
+
+
+def test_office_light_is_allowed(tools):
+    device_id = device(tools)
+    response = call(tools, "light", {
+        "device_id": device_id, "action": "turn_on", "entity_id": "light.wiz_rgbw_tunable_daea0a"})
+    assert response.status_code == 200, response.text
+    assert len(store.lease_commands(device_id)) == 1
+
+
+@pytest.mark.parametrize("value", [
+    {"nested": [("prefix-80FF06-suffix",)]},
+    {"nested": {"444F8E80FF06": None}},
+    {"10.0.0.175": "allowed"},
+])
+def test_off_limits_scan_checks_nested_strings_and_keys(value):
+    assert service._names_off_limits(value) is True
+
+
+def test_off_limits_scan_environment_tokens_are_normalized(monkeypatch):
+    monkeypatch.setenv("LEAF_DEVICE_OFF_LIMITS", " , LIGHT.DESK_LAMP, , custom-host ")
+    assert service._names_off_limits("light.desk_lamp") is True
+    assert service._names_off_limits({"host": "CUSTOM-HOST"}) is True
+    assert service._names_off_limits("light.desk") is False
+    monkeypatch.setenv("LEAF_DEVICE_OFF_LIMITS", "")
+    assert service._names_off_limits("light.desk_lamp") is False
+
+
+def test_off_limits_scan_fails_closed_above_node_limit(monkeypatch):
+    monkeypatch.delenv("LEAF_DEVICE_OFF_LIMITS", raising=False)
+    assert service._names_off_limits([None] * 1999) is False
+    assert service._names_off_limits([None] * 2000) is True
+    cyclic = []
+    cyclic.append(cyclic)
+    assert service._names_off_limits(cyclic) is True

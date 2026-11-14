@@ -51,6 +51,7 @@ import { PortfolioProposalError, PortfolioProposalService, type PortfolioProposa
 import { CAMPAIGN_SOURCE_BODY_LIMIT, dispatchCampaignSource, type CampaignSourceService } from "./agent/campaignSourceIntegration.js";
 import { ProjectRepositoryEditCoordinator, ProjectRepositoryEditSettlementUnavailable } from "./agent/projectRepositoryEditCoordinator.js";
 import { authorProjectSource, type ProjectSourceAuthorDependencies } from "./agent/projectSourceAuthoring.js";
+import { SdkProjectVideoInspector } from "./agent/projectVideoInspection.js";
 import { SdkRepoEditor } from "./vendor/mushy-author/ports/impl/repoEditRunner.js";
 import { redactTokens } from "./redact.js";
 import { createFileStoreProbe, createReadinessCheck } from "./storeReadiness.js";
@@ -1907,7 +1908,8 @@ export async function startReal(port = 8130): Promise<Server> {
   }) : undefined;
   const server = createHarness(ports, {
     ...(projectRepositoryEdits ? { projectRepositoryEdits,
-      projectSourceAuthoring: { oauth, editor: new SdkRepoEditor({ maxTurns: 24, maxWallTimeMs: 240000 }) } } : {}),
+      projectSourceAuthoring: { oauth, editor: new SdkRepoEditor({ maxTurns: 24, maxWallTimeMs: 240000 }),
+        videoInspector: new SdkProjectVideoInspector() } } : {}),
     portfolioProposals: new PortfolioProposalService({ oauth }),
     readiness,
   }).listen(port);

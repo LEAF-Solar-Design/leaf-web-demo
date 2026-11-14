@@ -94,8 +94,12 @@ def run(graph, params, *, source_intake=None):
             },
             "frame_ref": None, "matrix_cell": None,
             "centre": [sum(p[i] for p in points) / 4 for i in (0, 1)],
-            "angle": math.degrees(math.atan2(points[1][1] - points[0][1],
-                                            points[1][0] - points[0][0])),
+            # Roof grouping uses the recognised module axis. Ground imports
+            # retain their outline angle; the kernel swaps its row/column axis.
+            "angle": math.degrees(selected["angle"]
+                                  if graph["project"]["installation_design"] == "Roof"
+                                  else math.atan2(points[1][1] - points[0][1],
+                                                  points[1][0] - points[0][0])),
             "assignment": {"string_ref": None, "seq": None},
         })
     graph["panels"].extend(panels)
