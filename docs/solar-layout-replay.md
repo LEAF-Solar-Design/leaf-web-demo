@@ -6,10 +6,11 @@ protects the S01 path after acceptance without reopening accepted projects.
 Run the focused replay through the managed test runner:
 
 ```powershell
-python C:/Users/ehaug/.claude/scripts/mini_node.py run --worktree <checkout> --kind pytest -- tests/test_solar_layout_replay.py -q
+python C:/Users/ehaug/.claude/scripts/mini_node.py run --worktree <checkout> --kind pytest -- tests/test_project_solar_materialization.py -q
 ```
 
-The serialization test uses only synthetic parameters. It generates one layout,
+The materialization suite calls two cases from solar_layout_replay.py. The
+serialization case uses only synthetic parameters. It generates one layout,
 adds a second region with a different preset and pose, exports native DXF, and
 reads saved frame pages. It checks that original frames retain their model,
 each new frame uses the second model, and input hash and generation history

@@ -11,7 +11,6 @@ from uuid import uuid4
 import project_solar_materialization as layout
 import solar_frames_piles as frames
 import solar_native_layout_dxf as native
-from test_project_solar_materialization import fresh, lane, private_pg  # noqa: F401
 
 
 def inputs():
@@ -62,7 +61,7 @@ def assert_models(rows, first_count):
                                    'height_at_low_pose_m': low, 'height_at_high_pose_m': high}
 
 
-def test_synthetic_export_reopen_keeps_each_generations_attributes():
+def replay_synthetic_export_reopen_keeps_each_generations_attributes():
     body, second = inputs()
     document, parameters, _ = layout._prepare_initial_layout(layout.initial_parameters(body))
     original_document, original_parameters = deepcopy(document), deepcopy(parameters)
@@ -88,7 +87,7 @@ def test_synthetic_export_reopen_keeps_each_generations_attributes():
     assert original_parameters['generation']['preset']['Name'] == 'Synthetic first'
 
 
-def test_http_mixed_generation_save_reopen_inspect_and_restore(fresh):
+def replay_http_mixed_generation_save_reopen_inspect_and_restore(fresh):
     lane, project = fresh
     body, second = inputs()
     created = lane.http.post(f'/api/projects/{project}/solar-layout', json=body,

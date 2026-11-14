@@ -20,8 +20,13 @@ from test_project_drawing_editor import lane, private_pg, checkout
 
 def test_synthetic_layout_replay_over_canonical_save_restore(fresh):
     # Keep the replay on this existing database-backed selected-CI gate.
-    from test_solar_layout_replay import test_http_mixed_generation_save_reopen_inspect_and_restore
-    test_http_mixed_generation_save_reopen_inspect_and_restore(fresh)
+    from solar_layout_replay import replay_http_mixed_generation_save_reopen_inspect_and_restore
+    replay_http_mixed_generation_save_reopen_inspect_and_restore(fresh)
+
+
+def test_synthetic_layout_export_reopen_keeps_generation_models():
+    from solar_layout_replay import replay_synthetic_export_reopen_keeps_each_generations_attributes
+    replay_synthetic_export_reopen_keeps_each_generations_attributes()
 
 
 def canonical_start(fresh):
