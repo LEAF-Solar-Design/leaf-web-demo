@@ -5,6 +5,9 @@ import { fileURLToPath } from 'node:url'
 import { expect, test } from '@playwright/test'
 import { catProofResponse, makeCatProofState } from './catProofFixture.mjs'
 
+// Keep traces for the two fixture journeys with intermittent first Project clicks.
+const traceTest = test.extend({ trace: 'on' })
+
 // Real rendered Studio, fixture-backed page persistence. Export bytes come from
 // the production Python template; this suite does not prove a live API or build.
 const API_HOST = 'leaf-proof.invalid'
@@ -359,7 +362,7 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
     }), contentType: 'application/json' })
   })
 
-  test(`portfolio text proposal review, use and save at ${size}`, async ({ page }, testInfo) => {
+  traceTest(`portfolio text proposal review, use and save at ${size}`, async ({ page }, testInfo) => {
     test.setTimeout(120_000)
     page.setDefaultTimeout(15_000)
     const proposalViewport = { ...viewport, height: size === 'desktop' ? 900 : 844 }
@@ -678,7 +681,7 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
     expect(backend.foreign).toEqual([])
   })
 
-  test(`portfolio import, galleries, resume, private previews and export at ${size}`, async ({ page }, testInfo) => {
+  traceTest(`portfolio import, galleries, resume, private previews and export at ${size}`, async ({ page }, testInfo) => {
     test.setTimeout(120_000)
     page.setDefaultTimeout(15_000)
     await page.setViewportSize(viewport)
