@@ -1,17 +1,11 @@
 import { expect as baseExpect, test } from '@playwright/test'
 import { REQUEST, catProofResponse, makeCatProofState } from '../catProofFixture.mjs'
+import { scaled } from '../timeScale.mjs'
 
 // Device CI workers differ about 4x in browser speed (2026-11-12: zachs and the two WSL workers on one
 // laptop fail every fixed 20 s / 60 s deadline here while run-1 and run-2 pass). Budgets are ceilings,
 // not waits: a passing test takes the same time at any scale. LEAF_E2E_TIME_SCALE overrides (1 to 10).
-const TIME_SCALE = (() => {
-  const raw = process.env.LEAF_E2E_TIME_SCALE
-  if (raw === undefined || raw === '') return 3
-  const value = Number(raw)
-  if (!Number.isFinite(value) || value < 1 || value > 10) throw new Error('LEAF_E2E_TIME_SCALE must be a number from 1 to 10')
-  return value
-})()
-const budget = (ms) => Math.round(ms * TIME_SCALE)
+const budget = (ms) => Math.round(scaled(ms))
 
 const expect = baseExpect.configure({ timeout: budget(20_000) })
 

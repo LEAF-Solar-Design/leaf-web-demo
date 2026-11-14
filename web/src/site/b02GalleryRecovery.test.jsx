@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
+import { TEST_TIME_SCALE } from '../testTimeScale.js'
 import ProjectPageEditor from './ProjectPageEditor.jsx'
 import { loadProjectPage, saveProjectPage, submitProjectNativePreview } from './projectPageClient.js'
 
@@ -67,4 +68,4 @@ it('saves a gallery edit, undoes and saves recovery, then reloads all 94 assignm
   expect(saveProjectPage).toHaveBeenCalledTimes(2)
   expect(loadProjectPage).toHaveBeenCalledTimes(2)
   expect(submitProjectNativePreview).not.toHaveBeenCalled()
-}, 20_000)
+}, 20_000 * TEST_TIME_SCALE)
