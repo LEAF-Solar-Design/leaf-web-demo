@@ -573,6 +573,37 @@ def accept_split_candidate(graph, candidate, *, expected_rev):
     return finish_mutation(before, result, "solar-commit-solve")
 
 
+def _refresh_corrected_geometry(graph, strings, changed_ids, source_rev):
+    # Only routes produced from panel centres can be reconstructed from membership.
+    # Measured/manual routes remain stale for their own producer to repair.
+    panels = {panel["id"]: panel for panel in graph["panels"]}
+    for ref in changed_ids:
+        string = strings[ref]
+        provenance = string["extra"].get("length_provenance")
+        if (not isinstance(provenance, dict) or provenance.get("source") != "derived"
+                or provenance.get("rule") != "panel-centre-path"):
+            continue
+        refs = string["ordered_panel_refs"]
+        if any(ref not in panels for ref in refs):
+            continue  # Compact slot routes retain their existing producer boundary.
+        points = [copy.deepcopy(panels[ref]["centre"]) for ref in refs]
+        length_m = sum(math.dist(a + [0] * (3 - len(a)), b + [0] * (3 - len(b)))
+                       for a, b in zip(points, points[1:]))
+        string.update(route=points, length_ft=length_m / 0.3048)
+        provenance.update(source_rev=source_rev, writer="solar-correct-string")
+        if not refs:
+            string["extra"].pop("polarity", None)
+            continue
+        old = string["extra"].get("polarity")
+        polarity = copy.deepcopy(old) if isinstance(old, dict) else {}
+        # A manual ordering change is no longer described by the solver response hash.
+        polarity.pop("response_sha256", None)
+        polarity.update(source="derived", rule="ordered-membership-first-negative-last-positive",
+                        negative_panel_ref=refs[0], positive_panel_ref=refs[-1],
+                        source_rev=source_rev)
+        string["extra"]["polarity"] = polarity
+
+
 def correct_graph(graph, params):
     _bounded_json(params)
     if type(params) is not dict or set(params) - {
@@ -608,6 +639,8 @@ def correct_graph(graph, params):
         result["settings"]["extra"].pop("string_sizing", None)
         changed.append(result["settings"]["id"])
     sync_assignments(result)
+    _refresh_corrected_geometry(result, strings,
+        [edit["string_ref"] for edit in memberships], before["rev"])
     invalidate_dependents(before, result, changed)
     return finish_mutation(before, result, "solar-correct-string")
 
