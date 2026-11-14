@@ -357,6 +357,7 @@ it('R13G2A-09 canonical identity changes clear selection and navigation history'
     const input = environment()
     const env = projection({ ...input, projectMode: mode, projectSolarRuntime: { ...input.projectSolarRuntime, contextView },
       projectSolar: { scope: { binding: contextView ? { ...B, input_version_id: contextView.context.input_version_id } : B } } })
+    env.projectDrawingScopeKey = evaluate(decl('projectDrawingScopeKey').init, env)
     env.previousProjectDrawing = evaluate(decl('previousProjectDrawing').init, { useRef })
     evaluate(effect, { ...env, useLayoutEffect, setSelectedHandle: reset, clearViewHistory: history })
   }, { initialProps: { mode: false, contextView: null } })
