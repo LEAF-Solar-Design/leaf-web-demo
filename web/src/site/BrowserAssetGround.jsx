@@ -196,6 +196,7 @@ export function BrowserAssetGround({ browserActive = false, browserPanel: contro
       if (!privateCurrent() || !signedIn || !accountScope || accountScope === 'guest' || !projectId || input.projectId !== projectId || input.result?.schema !== 'leaf.browser-candidate-preview.v1') return false
       let result, chartState
       try { result = JSON.parse(JSON.stringify(input.result)); chartState = input.chartState == null ? undefined : copyChartState(input.chartState) } catch { return false }
+      setEditing(false); setOutline(false); setSettings(false); setSelectedElement(null); setSelectedField(null)
       setAsset({ kind:'private-next',result,name:typeof input.name === 'string' ? input.name : 'Private app',scope:currentScope,chartState })
       onEnterWorkspace?.(); setActivation(value => value + 1); onBrowserPanel('none'); onSelect?.('browser')
       return true
@@ -223,7 +224,7 @@ export function BrowserAssetGround({ browserActive = false, browserPanel: contro
   return <BrowserArtifactContext.Provider value={acceptArtifact}>
     <section className="browser-asset-ground" data-ground="browser-asset" hidden={!browserActive} aria-label="Browser asset">
       <div ref={viewport} className="browser-asset-viewport" data-inspector={editingStyle === 'environment' && editing && outline || undefined}>
-        {pageEditor && <CanvasToolbar editor={pageEditor} editing={editing} onEditing={value => { setEditing(value); if (!value) setOutline(false) }} outline={outline} onOutline={value => { setOutline(value); if (value) setEditing(true) }} settings={settings} onSettings={setSettings} />}
+        {pageEditor && shown?.kind !== 'private-next' && <CanvasToolbar editor={pageEditor} editing={editing} onEditing={value => { setEditing(value); if (!value) setOutline(false) }} outline={outline} onOutline={value => { setOutline(value); if (value) setEditing(true) }} settings={settings} onSettings={setSettings} />}
         {settings && <section className="canvas-settings" aria-label="Settings"><label>Editing style <select value={editingStyle} onChange={event => {
           if (!live.current || scope.current !== currentScope) return
           const value = event.target.value

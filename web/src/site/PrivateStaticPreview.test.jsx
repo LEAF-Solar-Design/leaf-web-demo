@@ -7,7 +7,8 @@ import PrivateStaticPreview from './PrivateStaticPreview.jsx'
 import { BrowserAssetGround, BrowserArtifactContext } from './BrowserAssetGround.jsx'
 const opening = vi.hoisted(() => ({ value:null,accepted:null }))
 vi.mock('./ProjectBoardGround.jsx',()=>({ProjectBoardGround:()=>{const accept=React.useContext(BrowserArtifactContext);return <button onClick={()=>{opening.accepted=accept(opening.value)}}>Open private fixture</button>}}))
-vi.mock('./ProjectPageEditor.jsx',()=>({default:()=>null,PagePreview:()=>null}))
+vi.mock('./ProjectPageEditor.jsx',()=>({default:({onSession})=>{React.useEffect(()=>{onSession({state:{enabled:true,busy:false},session:{change:()=>{}}})},[onSession]);return null},PagePreview:()=>null}))
+vi.mock('./CanvasToolbar.jsx',()=>({default:()=> <div data-testid="legacy-page-toolbar"/>}))
 vi.mock('./WorkspaceEnvironment.jsx',()=>({default:({children})=><>{children}</>}))
 vi.mock('../auth.js',()=>({authConfigured:true,isSignedIn:()=>true,login:()=>{},subscribeBeforeLogout:()=>()=>{},subscribeTokenStored:()=>()=>{}}))
 vi.mock('../lib/composerDraft.js',()=>({composerDraftAccountScope:()=> 'fixture-account'}))
@@ -27,7 +28,7 @@ it('Browser context mounts a private result, preserves it across profile hiding 
  const f=fixture();vi.stubGlobal('fetch',async()=>f.response());opening.value={kind:'private-next',projectId:id(99),result:f.result};
  const props={signedIn:true,accountScope:'fixture-account',projectId:id(3),browserActive:true};const {rerender}=render(<BrowserAssetGround {...props}/>);
  await act(async()=>screen.getByRole('button',{name:'Open private fixture'}).click());expect(opening.accepted).toBe(false);expect(screen.queryByTitle('Private app preview')).toBeNull();
- opening.value={...opening.value,projectId:id(3)};await act(async()=>screen.getByRole('button',{name:'Open private fixture'}).click());const iframe=await screen.findByTitle('Private app preview');expect(opening.accepted).toBe(true);
+ opening.value={...opening.value,projectId:id(3)};await act(async()=>screen.getByRole('button',{name:'Open private fixture'}).click());const iframe=await screen.findByTitle('Private app preview');expect(opening.accepted).toBe(true);expect(screen.queryByTestId('legacy-page-toolbar')).toBeNull();
  rerender(<BrowserAssetGround {...props} profile="ops" browserActive={false}/>);expect(screen.getByTitle('Private app preview')).toBe(iframe);
  rerender(<BrowserAssetGround {...props}/>);expect(screen.getByTitle('Private app preview')).toBe(iframe);
  rerender(<BrowserAssetGround {...props} projectId={id(20)}/>);expect(screen.queryByTitle('Private app preview')).toBeNull();
