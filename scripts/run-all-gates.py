@@ -96,6 +96,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -106,7 +107,7 @@ import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 from typing import List, Optional
 from urllib.parse import quote
@@ -4670,6 +4671,85 @@ def parse_vitest(text: str) -> dict:
             "skipped_files": skipped_files}
 
 
+def parse_file_timings(suite: Suite, text: str) -> list[dict]:
+    """Read reporter rows only; never infer a file's time from suite wall time."""
+    totals: dict[str, float] = {}
+    basis = ""
+    duration_section = False
+    number = r"([0-9]+(?:\.[0-9]+)?)"
+    path_pattern = r"((?:[A-Za-z]:)?[^\s:]+\.(?:py|tsx|ts|jsx|js|mjs|cjs))"
+    for raw in text.splitlines():
+        if len(raw) > 16384:
+            continue
+        line = strip_ansi(raw).strip()
+        if suite.kind == "pytest":
+            if re.fullmatch(r"=+ slowest (?:\d+ )?durations =+", line):
+                duration_section = True
+                continue
+            if line.startswith("="):
+                duration_section = False
+            if not duration_section:
+                continue
+            match = re.fullmatch(number + r"s\s+(?:setup|call|teardown)\s+"
+                                 + path_pattern + r"(?:::[^\r\n]*)?", line)
+            if not match:
+                continue
+            value, path = match.groups()
+            seconds = float(value)
+            basis = "pytest phase duration sum"
+        elif suite.kind == "vitest":
+            match = re.fullmatch(r"[✓✔×✘❯]\s+" + path_pattern
+                                 + r"\s+\(\d+ tests?(?: \| \d+ (?:failed|skipped))*\)\s+"
+                                 + number + r"\s*(ms|s|m)", line)
+            if not match:
+                continue
+            path, value, unit = match.groups()
+            seconds = float(value) * {"ms": 0.001, "s": 1, "m": 60}[unit]
+            basis = "vitest reported file duration"
+        elif suite.kind in ("playwright", "script"):
+            # Some browser suites are script wrappers; the row itself must
+            # still have the list reporter's bounded, numbered result shape.
+            match = re.fullmatch(r"[✓✔✘×x]\s+\d+\s+(?:\[[^\]\r\n]+\]\s+›\s+)?"
+                                 + path_pattern + r":\d+(?::\d+)?\s+›\s+[^\r\n]*?\s+\("
+                                 + number + r"(ms|s|m)\)", line)
+            if not match:
+                continue
+            path, value, unit = match.groups()
+            seconds = float(value) * {"ms": 0.001, "s": 1, "m": 60}[unit]
+            basis = "playwright test duration sum"
+        else:
+            continue
+        # Only a file path reaches the durable sink, never the trailing nodeid
+        # or title. Resolve symlinks as well as '..' before enforcing the root.
+        if not re.fullmatch(r"[A-Za-z0-9_./\\:+@()-]+", path):
+            continue
+        path = path.replace("\\", "/")
+        if PureWindowsPath(path).drive and os.name != "nt":
+            continue
+        try:
+            relative = (suite.cwd / path).resolve().relative_to(REPO.resolve()).as_posix()
+        except (OSError, ValueError, RuntimeError):
+            continue
+        if not math.isfinite(seconds):
+            continue
+        total = seconds if suite.kind == "vitest" else totals.get(relative, 0.0) + seconds
+        if math.isfinite(total):
+            totals[relative] = total
+    return [{"file": path, "seconds": seconds, "basis": basis}
+            for path, seconds in sorted(totals.items())]
+
+
+def emit_file_timings(suite: Suite, text: str, attempt: int) -> None:
+    # Telemetry, including parser or stdout failures, cannot change a verdict.
+    try:
+        for timing in parse_file_timings(suite, text):
+            row = {"schema": "leaf.ci.file-timing.v1", "suite_id": suite.id,
+                   "attempt": attempt, **timing}
+            print("LEAF_FILE_TIMING " + json.dumps(row, separators=(",", ":")), flush=True)
+    except Exception:
+        pass
+
+
 # --------------------------------------------------------------------------- #
 # npm audit: registry-outage-tolerant classification (harness-audit-high)
 # --------------------------------------------------------------------------- #
@@ -5126,6 +5206,14 @@ def _run_suite_attempt(suite: Suite, log_dir: Path, attempt: int = 1,
             "test_report_incomplete_reasons": [f"reporting_injection_failed:{type(exc).__name__}"],
         }
     argv = read_audit_command(suite, argv, trace_env, attempt)
+    if suite.kind == "pytest" and "pytest" in argv:
+        if str(SCRIPTS_DIR / "ci/run_unprivileged_pytest.py") in argv:
+            # The identity launcher has a fixed argv allowlist. Pytest's own
+            # options environment passes through it without loading a plugin.
+            trace_env["PYTEST_ADDOPTS"] = (os.environ.get("PYTEST_ADDOPTS", "")
+                                           + " --durations=0 --durations-min=0")
+        else:
+            argv = argv + ["--durations=0", "--durations-min=0"]
     # Fault-injection drill: LEAF_GATE_FAULT_INJECT="<suite-id>:spawn" points
     # this suite's FIRST attempt at a nonexistent binary, exercising the real
     # spawn-failure path end to end (attempt 2+ runs the real argv, so the
@@ -5203,6 +5291,8 @@ def _run_suite_attempt(suite: Suite, log_dir: Path, attempt: int = 1,
     if capture_output is not None:
         capture_evidence, rc = capture_attempt_evidence(capture_output, rc)
     seconds = time.perf_counter() - t0
+
+    emit_file_timings(suite, out, attempt)
 
     if rc == 75:
         reason = next((line.split("QUEUED:", 1)[1].strip()
