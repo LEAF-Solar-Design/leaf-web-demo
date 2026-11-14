@@ -669,3 +669,16 @@ def test_b03_build_status_missing_or_invalid_auth_cannot_dispatch(monkeypatch, m
     with TestClient(app) as client:
         for headers in ({},{'Authorization':'Bearer invalid'}):
             assert client.request(method,B03_PREVIEW_ASSET.removesuffix('/asset'),headers=headers,json={} if method=='POST' else None).status_code in (401,403)
+
+
+@pytest.mark.parametrize("method", ["GET", "PUT"])
+def test_b03_chart_state_missing_or_invalid_auth_cannot_dispatch(monkeypatch, method):
+    from routers import browser_project
+    import browser_chart_state
+    for name,value in _ENV.items():monkeypatch.setenv(name,value)
+    monkeypatch.setattr(browser_chart_state,'exchange',lambda *a,**kw:pytest.fail('unauthenticated chart state dispatch'))
+    app=FastAPI();app.include_router(browser_project.router)
+    path=B03_PREVIEW_ASSET.removesuffix('/asset')+'/chart-state'
+    with TestClient(app) as client:
+        for headers in ({},{'Authorization':'Bearer invalid'}):
+            assert client.request(method,path,headers=headers,json={} if method=='PUT' else None).status_code in (401,403)
