@@ -68,5 +68,9 @@ export default function PrivateStaticPreview({ projectId, result, isCurrent, ini
   const shown = isCurrent() && display?.held.result === result && display?.held.projectId === projectId ? display : null
   if (shown?.error) return <p role="alert">Private preview is unavailable. Reopen the saved source to try again.</p>
   if (!shown) return <p role="status">Loading private preview...</p>
-  return <iframe ref={frame} title="Private app preview" sandbox={PRIVATE_FRAME_SANDBOX} referrerPolicy="no-referrer" credentialless="" srcDoc={shown.html} style={{ border:0,minWidth:1200,width:'100%',minHeight:500,height:'100%' }} />
+  return <div role="region" aria-label="Private app viewport" style={{ position:'absolute',inset:0,overflow:'auto' }}>
+    <div style={{ position:'relative',minWidth:1200,minHeight:500,width:'100%',height:'100%' }}>
+      <iframe ref={frame} title="Private app preview" sandbox={PRIVATE_FRAME_SANDBOX} referrerPolicy="no-referrer" credentialless="" srcDoc={shown.html} style={{ border:0,minWidth:1200,width:'100%',minHeight:500,height:'100%' }} />
+    </div>
+  </div>
 }
