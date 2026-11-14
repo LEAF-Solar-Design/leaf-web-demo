@@ -617,3 +617,15 @@ def test_b03_private_preview_inventory_requires_active_studio_tenant():
     routes=[route for path,route in iter_leaf_routes(app.routes) if path in B03_PRIVATE_PREVIEW_PATHS]
     assert [route.path for route in routes]==B03_PRIVATE_PREVIEW_PATHS
     assert all(deps.require_active_tenant in [d.call for d in route.dependant.dependencies] for route in routes)
+
+
+B03_PRIVATE_BUILD_PATH = '/api/projects/{project_id}/browser/source/requests/{source_request_id}/preview/{job_id}'
+
+
+def test_b03_private_build_status_inventory_requires_active_studio_tenant():
+    from routers import browser_project
+    app=FastAPI();app.include_router(browser_project.router)
+    routes=[route for path,route in iter_leaf_routes(app.routes) if path==B03_PRIVATE_BUILD_PATH]
+    assert len(routes)==2
+    assert {method for route in routes for method in route.methods}=={'GET','POST'}
+    assert all(deps.require_active_tenant in [d.call for d in route.dependant.dependencies] for route in routes)

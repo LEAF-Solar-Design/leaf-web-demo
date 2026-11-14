@@ -11,6 +11,7 @@ import browser_project_flow as flow
 import browser_project_source_export as source_export
 import deps
 import browser_static_preview as static_preview
+import browser_static_build as static_build
 
 router = APIRouter(prefix='/api/projects/{project_id}/browser/source')
 _PATH = re.compile(r'^/api/projects/[^/]+/browser/source(?:/.*)?$')
@@ -168,3 +169,36 @@ async def preview_asset(project_id: str,source_request_id: str,job_id: str,reque
         return JSONResponse(result,headers={'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff',
             'Content-Security-Policy':"sandbox; default-src 'none'; frame-ancestors 'none'"})
     except flow.FlowError as exc:return _failure(exc)
+
+
+@router.post('/requests/{source_request_id}/preview/{job_id}')
+async def build_preview(project_id: str, source_request_id: str, job_id: str, request: Request,
+                        tenant=Depends(deps.require_active_tenant)):
+    try:
+        # A build is an explicit write. Membership is checked before body read.
+        await run_in_threadpool(flow.scope, tenant, project_id, write=True)
+        witnesses = static_build.parse_body(await _raw(request))
+        result = await run_in_threadpool(static_build.exchange, tenant, project_id, source_request_id,
+                                         job_id, witnesses, submit=True)
+        return JSONResponse(result, headers=_PRIVATE)
+    except flow.FlowError as exc:
+        return _failure(exc)
+    except Exception:
+        return _failure(flow.FlowError(503))
+
+
+@router.get('/requests/{source_request_id}/preview/{job_id}')
+async def check_preview(project_id: str, source_request_id: str, job_id: str, request: Request,
+                        tenant=Depends(deps.require_active_tenant)):
+    try:
+        await run_in_threadpool(flow.scope, tenant, project_id)
+        if len(request.scope.get('query_string', b'')) > 2048:
+            raise flow.FlowError(422)
+        witnesses = source_export.parse_query(request.query_params.multi_items())
+        result = await run_in_threadpool(static_build.exchange, tenant, project_id, source_request_id,
+                                         job_id, witnesses)
+        return JSONResponse(result, headers=_PRIVATE)
+    except flow.FlowError as exc:
+        return _failure(exc)
+    except Exception:
+        return _failure(flow.FlowError(503))
