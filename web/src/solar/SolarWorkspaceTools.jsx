@@ -606,7 +606,7 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
     const file = event.target.files?.[0]
     event.target.value = ''
     if (!file) return
-    const selection = { project: initialProject, name: file.name }
+    const selection = { project: initialProject, name: file.name, producerSemantics: 'historical-list-reuse' }
     setOriginalIntake(selection)
     try {
       if (!file.size || file.size > 2 * 1024 * 1024) throw new Error('invalid size')
@@ -630,11 +630,13 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
       if (!['organization_id', 'project_id', 'drawing_id', 'input_version_id'].every(key => publicationCurrent.current.scope?.[key] === scope[key])) {
         setPublication({ phase: 'idle', message: 'The selected drawing changed. Read its current layout again.' }); return
       }
-      if (result?.ok) setPublicationReadback(result.value)
+      setPublicationReadback(result?.ok ? result.value : null)
       setPublication({ phase: 'idle', message: result?.ok
         ? result.value.writer_available === false ? 'The current layout is ready, but the licensed drawing writer is unavailable.'
           : 'Current layout read. Review it before publishing.'
-        : result?.code === 'PROJECT_LAYOUT_INITIAL_UNAVAILABLE' ? 'Initial project drawing publication is not connected yet.'
+        : result?.code === 'PROJECT_LAYOUT_STALE_VERSION'
+          ? 'This saved version is not the current drawing head. To download it, choose Insert, then Download DXF.'
+          : result?.code === 'PROJECT_LAYOUT_INITIAL_UNAVAILABLE' ? 'Initial project drawing publication is not connected yet.'
           : 'The current layout is unavailable. Read it again before publishing.' })
     } catch {
       if (activeScope.current) setPublication({ phase: 'idle', message: 'The current layout could not be read. Try again.' })
@@ -782,7 +784,7 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
             <label>Terrain grid cells on longer axis<input type="number" min={2} max={300} step={1}
               value={gridLongAxis} onChange={event => setGridLongAxis(event.target.value)} /></label>
             <p>This layout is terrain-free. The grid setting is recorded for provenance.</p>
-            <label>Preset loading<select value={selectedOriginal.producerSemantics ?? 'current-native'}
+            <label>Preset loading<select value={selectedOriginal.producerSemantics ?? 'historical-list-reuse'}
               disabled={publication.phase === 'pending'} onChange={event => {
                 const producerSemantics = event.target.value
                 setOriginalIntake(current => current?.project === initialProject ? { ...current, producerSemantics } : current)
@@ -811,6 +813,9 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
             : projectScope?.input_version_id === null ? 'Generate editable project drawing' : 'Publish layout as editable drawing'}</button>
         {!projectScope && <p>Select a canonical project drawing version before publishing.</p>}
         <p role="status">{publication.message}</p>
+        {projectScope?.drawing_id && projectScope?.input_version_id && <p>
+          To download this saved layout, choose Insert, then Download DXF. Generated layouts include their source-input provenance.
+        </p>}
         {projectScope?.drawing_id && projectScope?.input_version_id && <SolarFrameInspector
           scope={projectScope} client={publicationClient} disabled={busy || publication.phase === 'pending'} />}
       </div>}
