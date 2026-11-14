@@ -456,3 +456,59 @@ def test_imported_dwg_uses_pinned_version_even_after_new_head(imported, tmp_path
     assert store.load_manifest(imported.backend, str(imported.org), imported.source["drawing_id"])["head"] == 2
     assert read(imported) == (DXF, sha(DXF))
     assert imported.calls == [imported.raw]
+
+
+@pytest.mark.parametrize("manifest_state", ["missing", "corrupt", "unreadable"])
+def test_project_import_dwg_reads_pinned_object_without_legacy_manifest(imported, monkeypatch, manifest_state):
+    manifest_key = store.manifest_key(str(imported.org), imported.source["drawing_id"])
+    if manifest_state == "missing":
+        imported.backend.delete(manifest_key)
+    elif manifest_state == "corrupt":
+        imported.backend.put(manifest_key, b'{"head":wrong')
+    original_get, manifest_reads = type(imported.backend).get, []
+
+    def tracked_get(backend, key):
+        if key == manifest_key:
+            manifest_reads.append(key)
+            if manifest_state == "unreadable":
+                raise OSError("legacy manifest transport unavailable")
+        return original_get(backend, key)
+
+    monkeypatch.setattr(type(imported.backend), "get", tracked_get)
+    assert read(imported) == (DXF, sha(DXF))
+    assert read(imported) == (DXF, sha(DXF))
+    assert imported.calls == [imported.raw]
+    assert manifest_reads == []
+    assert imported.backend.get(imported.source["stored_object"]["ref"]) == imported.raw
+
+
+@pytest.mark.parametrize("field", ["ref", "sha256", "bytes"])
+def test_project_import_rechecks_source_binding_before_using_existing_cache(imported, field):
+    assert read(imported) == (DXF, sha(DXF))
+    source = imported.source["stored_object"]
+    source[field] = source[field] + 1 if field == "bytes" else "foreign" if field == "ref" else "0" * 64
+    with pytest.raises(editor.EditorError) as error:
+        read(imported)
+    assert error.value.code == "PROJECT_EDITOR_SOURCE_INVALID"
+    assert imported.calls == [imported.raw]
+
+
+@pytest.mark.parametrize("mismatch", ["tenant", "drawing", "version", "head", "boolean_version", "digest", "bytes", "binding_type"])
+def test_pinned_reader_rejects_foreign_or_invalid_binding_before_cache(imported, mismatch):
+    import write_loop
+
+    assert read(imported) == (DXF, sha(DXF))
+    request = {"tenant_id": str(imported.org), "drawing_id": imported.source["drawing_id"],
+               "version": 1, "source_binding": dict(imported.source["stored_object"])}
+    if mismatch == "tenant": request["tenant_id"] = str(uuid4())
+    elif mismatch == "drawing": request["drawing_id"] = str(uuid4())
+    elif mismatch == "version": request["version"] = 2
+    elif mismatch == "head": request["version"] = "head"
+    elif mismatch == "boolean_version": request["version"] = True
+    elif mismatch == "digest": request["source_binding"]["sha256"] = "0" * 64
+    elif mismatch == "bytes": request["source_binding"]["bytes"] += 1
+    else: request["source_binding"] = []
+    with pytest.raises(write_loop.DxfUnavailable):
+        write_loop.read_dxf(imported.backend, **request)
+    assert imported.calls == [imported.raw]
+    assert imported.backend.get(imported.source["stored_object"]["ref"]) == imported.raw
