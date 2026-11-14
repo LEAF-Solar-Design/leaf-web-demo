@@ -155,7 +155,9 @@ function ProjectMaterialImport({ projectId, client, signal, guard, onImported, o
     run(async (controller) => {
       if (!source || pointer === null || !Array.isArray(recordsAtOriginal(source.original, pointer))) throw new Error('Choose an original and records array.')
       const definition = { schema_version: 1, id, version: Number(version), title, reporting_time_zone: 'UTC', retention_days: 365,
-        fields: fields.map((field) => ({ id: field.id, label: field.label, type: { kind: field.kind }, nullable: field.nullable, sensitivity: 'internal' })),
+        fields: fields.map((field) => ({ id: field.id, label: field.label,
+          type: field.kind === 'ratio' ? { kind: 'ratio', scale: field.ratioScale || 'percent' } : { kind: field.kind },
+          nullable: field.nullable, sensitivity: 'internal' })),
         key_fields: fields.filter((field) => field.key).map((field) => field.id),
         lineage: { kind: 'project_material', material_id: source.material.material_id, sha256: source.material.sha256, byte_length: source.material.byte_size } }
       const mapping = { schema_version: 1, fields: fields.map((field) => ({ field_id: field.id, pointer: field.pointer, conversion: field.conversion })) }
@@ -184,7 +186,10 @@ function ProjectMaterialImport({ projectId, client, signal, guard, onImported, o
         <label>Import dataset version<input required type="number" min="1" value={version} onChange={(event) => setVersion(event.target.value)} /></label>
         {fields.map((field, index) => <fieldset key={index}><legend>Import field {index + 1}</legend>
           {['id', 'label', 'pointer'].map((key) => <label key={key}>{`Field ${index + 1} ${key}`}<input required value={field[key]} onChange={(event) => updateField(index, key, event.target.value)} /></label>)}
-          <label>{`Field ${index + 1} type`}<select value={field.kind} onChange={(event) => updateField(index, 'kind', event.target.value)}>{['text', 'identifier', 'count', 'number', 'boolean', 'date', 'instant'].map((kind) => <option key={kind}>{kind}</option>)}</select></label>
+          <label>{`Field ${index + 1} type`}<select value={field.kind} onChange={(event) => updateField(index, 'kind', event.target.value)}>{['text', 'identifier', 'count', 'number', 'ratio', 'boolean', 'date', 'instant'].map((kind) => <option key={kind}>{kind}</option>)}</select></label>
+          {field.kind === 'ratio' && <label>{`Field ${index + 1} ratio scale`}<select value={field.ratioScale || 'percent'} onChange={(event) => updateField(index, 'ratioScale', event.target.value)}>
+            <option value="percent">Percent (80 means 80%)</option><option value="fraction">Fraction (0.8 means 80%)</option>
+          </select></label>}
           <label>{`Field ${index + 1} conversion`}<select value={field.conversion} onChange={(event) => updateField(index, 'conversion', event.target.value)}>{['identity', 'string_number', 'iso_instant'].map((kind) => <option key={kind}>{kind}</option>)}</select></label>
           <label><input type="checkbox" checked={field.key} onChange={(event) => updateField(index, 'key', event.target.checked)} />{`Field ${index + 1} key`}</label>
           <label><input type="checkbox" checked={field.nullable} onChange={(event) => updateField(index, 'nullable', event.target.checked)} />{`Field ${index + 1} nullable`}</label>

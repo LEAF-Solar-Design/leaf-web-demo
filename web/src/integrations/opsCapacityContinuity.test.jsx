@@ -2,8 +2,11 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { ReadableStream } from 'node:stream/web'
 import { TextDecoder, TextEncoder } from 'node:util'
+import { Blob } from 'node:buffer'
+import { webcrypto } from 'node:crypto'
 import { OpsWorkspaceGround } from './OpsWorkspaceGround.jsx'
 import { createIntegrationsClient } from './client.js'
+import { listProjectReferences, readProjectReferenceOriginal } from '../projects/api.js'
 
 vi.mock('../site/SurfaceFrame.jsx', () => ({ useSurfaceFrame: () => undefined }))
 vi.mock('../api.js', () => ({ authHeaders: () => ({ Authorization: 'Bearer synthetic-only' }), noteUnauthorized: vi.fn() }))
@@ -44,6 +47,7 @@ function response(value) {
 }
 function harness(initial) {
   let stored = initial
+  let imported
   const authority = { subject: 'synthetic-subject', projectId }
   const calls = []
   const fetchImpl = vi.fn(async (raw, options) => {
@@ -55,6 +59,13 @@ function harness(initial) {
       platformUserId: projectId, bindingId: projectId, projectRole: 'owner',
       externalAuthority: 'auth0', externalSubject: authority.subject })
     if (url.pathname.endsWith('/datasets')) return response({ records: [metadata], nextCursor: null })
+    if (url.pathname.endsWith('/dataset-imports')) {
+      imported = JSON.parse(options.body)
+      return response({ reference, revision: 1, rowCount: 6, status: 'complete' })
+    }
+    if (url.pathname.endsWith(`/datasets/${reference.id}/versions/1`)) {
+      return response({ ...metadata, fields: imported?.definition.fields || fields })
+    }
     if (url.pathname.endsWith('/elements') && options.method === 'GET') return response({ records: stored ? [stored] : [], nextCursor: null })
     if (url.pathname.endsWith('/elements') && options.method === 'POST') {
       stored = { element: JSON.parse(options.body), revision: 1 }
@@ -66,7 +77,7 @@ function harness(initial) {
   })
   const snapshot = { status: 'active', generation: 1 }
   const controller = { getSnapshot: () => snapshot, subscribe: () => () => {} }
-  return { calls, authority, snapshot, saved: () => stored, removeSaved: () => { stored = null }, props: { active: true, signedIn: true, projectId,
+  return { calls, authority, snapshot, saved: () => stored, imported: () => imported, removeSaved: () => { stored = null }, props: { active: true, signedIn: true, projectId,
     accountScope: 'synthetic-account', session: { ...snapshot, controller },
     client: createIntegrationsClient({ origin: 'https://fixture.invalid', fetchImpl }) } }
 }
@@ -129,6 +140,48 @@ it('saves, reopens and restores the six-record capacity view after an Ops profil
   expect(h.calls.filter(call => call.method === 'POST' && call.path.endsWith('/elements'))).toHaveLength(1)
   expect(h.calls.every(call => !/connections|actions|preview|providers/.test(call.path))).toBe(true)
   await waitFor(() => expect(screen.queryByText('Loading integrations…')).toBeNull())
+})
+
+it.each(['percent', 'fraction', 'number'])('imports declared capacity type %s through the real original mapper and strict client', async (kind) => {
+  vi.stubGlobal('TextDecoder', TextDecoder)
+  vi.stubGlobal('TextEncoder', TextEncoder)
+  vi.stubGlobal('crypto', webcrypto)
+  const original = records.map(row => Object.fromEntries(ids.map((id, index) => [id, row[index]])))
+  const blob = new Blob([JSON.stringify(original)], { type: 'application/json' })
+  const sha256 = [...new Uint8Array(await webcrypto.subtle.digest('SHA-256', await blob.arrayBuffer()))]
+    .map(byte => byte.toString(16).padStart(2, '0')).join('')
+  const materialId = '22222222-2222-4222-8222-222222222222'
+  vi.mocked(listProjectReferences).mockResolvedValue({ materials: [{ material_id: materialId, project_id: projectId,
+    name: 'synthetic-capacity.json', media_type: 'application/json', byte_size: blob.size, sha256 }], next_cursor: null })
+  vi.mocked(readProjectReferenceOriginal).mockResolvedValue(blob)
+  const h = harness()
+  render(<OpsWorkspaceGround {...h.props} />)
+  await screen.findByRole('option', { name: 'Synthetic capacity · version 1' })
+  fireEvent.click(screen.getByRole('button', { name: 'List JSON originals' }))
+  await screen.findByRole('option', { name: 'synthetic-capacity.json' })
+  fireEvent.change(screen.getByLabelText('Project original'), { target: { value: materialId } })
+  await screen.findByLabelText('Original provenance')
+  fireEvent.change(screen.getByLabelText('Records array'), { target: { value: '' } })
+  fireEvent.change(screen.getByLabelText('Import dataset ID'), { target: { value: reference.id } })
+  fireEvent.change(screen.getByLabelText('Import dataset title'), { target: { value: 'Synthetic capacity' } })
+  const type = screen.getByLabelText('Field 4 type')
+  expect(within(type).getByRole('option', { name: 'ratio', exact: true })).toBeInTheDocument()
+  fireEvent.change(type, { target: { value: 'ratio' } })
+  expect(screen.getByLabelText('Field 4 ratio scale')).toHaveValue('percent')
+  if (kind !== 'percent') fireEvent.change(screen.getByLabelText('Field 4 ratio scale'), { target: { value: 'fraction' } })
+  if (kind === 'number') {
+    fireEvent.change(type, { target: { value: 'number' } })
+    expect(screen.queryByLabelText('Field 4 ratio scale')).toBeNull()
+  }
+  fireEvent.change(screen.getByLabelText('Field 5 type'), { target: { value: 'instant' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Import selected records' }))
+  await screen.findByText('Imported 6 records. Original bytes and source clocks are retained.')
+  const payload = h.imported()
+  expect(payload.definition.fields[3].type).toEqual(kind === 'number' ? { kind: 'number' } : { kind: 'ratio', scale: kind })
+  expect(payload.definition.fields[4].type).toEqual({ kind: 'instant' })
+  expect(payload.definition.lineage).toEqual({ kind: 'project_material', material_id: materialId, sha256, byte_length: blob.size })
+  expect(payload.mapping.fields[3]).toEqual({ field_id: 'remaining_pct', pointer: '/remaining_pct', conversion: 'identity' })
+  expect(h.calls.filter(call => call.path.endsWith('/dataset-imports'))).toHaveLength(1)
 })
 
 const existing = () => ({ revision: 1, element: { schema_version: 1, id: 'capacity-view', title: 'Capacity view',
