@@ -1,3 +1,5 @@
+import PrivateStaticPreview from './PrivateStaticPreview.jsx'
+import { copyChartState } from './privatePreviewState.js'
 import { createContext, useCallback, useEffect, useRef, useState } from 'react'
 import { ProjectBoardGround } from './ProjectBoardGround.jsx'
 import WorkspaceEnvironment from './WorkspaceEnvironment.jsx'
@@ -188,7 +190,17 @@ export function BrowserAssetGround({ browserActive = false, browserPanel: contro
     })
     return () => { pendingView?.controller.abort(); unsubscribe() }
   }, [currentScope]) // callbacks are captured with this editor lifetime
-  const acceptArtifact = ({ html, name }) => {
+  const privateCurrent = useCallback(() => live.current && scope.current === currentScope, [currentScope])
+  const acceptArtifact = input => {
+    if (input?.kind === 'private-next') {
+      if (!privateCurrent() || !signedIn || !accountScope || accountScope === 'guest' || !projectId || input.projectId !== projectId || input.result?.schema !== 'leaf.browser-candidate-preview.v1') return false
+      let result, chartState
+      try { result = JSON.parse(JSON.stringify(input.result)); chartState = input.chartState == null ? undefined : copyChartState(input.chartState) } catch { return false }
+      setAsset({ kind:'private-next',result,name:typeof input.name === 'string' ? input.name : 'Private app',scope:currentScope,chartState })
+      onEnterWorkspace?.(); setActivation(value => value + 1); onBrowserPanel('none'); onSelect?.('browser')
+      return true
+    }
+    const { html, name } = input || {}
     if (!live.current || scope.current !== currentScope || !signedIn || !accountScope || accountScope === 'guest' || !projectId
       || typeof html !== 'string' || typeof name !== 'string' || !/\.html$/i.test(name)) return false
     setAsset({ html, name, scope: currentScope })
@@ -219,7 +231,10 @@ export function BrowserAssetGround({ browserActive = false, browserPanel: contro
           setStylePreference({ accountScope: preferenceScope, value })
           onBrowserPanel(value === 'sidebar' ? 'project' : 'none')
         }}><option value="environment">In environment</option><option value="sidebar">Sidebar</option></select></label><button type="button" onClick={() => setSettings(false)}>Close settings</button></section>}
-        {shown?.kind === 'page' ? <>
+        {shown?.kind === 'private-next' ? <PrivateStaticPreview projectId={projectId} result={shown.result} isCurrent={privateCurrent} initialState={shown.chartState} onStateChange={chartState => {
+          if (!privateCurrent()) return
+          setAsset(value => value?.scope === currentScope && value.result === shown.result ? { ...value,chartState } : value)
+        }} /> : shown?.kind === 'page' ? <>
           <span className="browser-preview-label">Page draft · {shown.name}</span>
           <PagePreview document={shown.document} projectId={projectId} selectedElement={selectedElement} onSelectElement={(value, inspect = false) => { setSelectedElement(value); if (inspect) setOutline(true) }} onInlineChange={editingStyle === 'environment' && editing && pageEditor?.state.enabled && !pageEditor.state.busy ? pageEditor.session.change : undefined} onSelectField={editingStyle === 'sidebar' && editing ? field => {
             setSelectedField({ field, request: Date.now() })

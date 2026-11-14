@@ -1,0 +1,34 @@
+// @vitest-environment jsdom
+import React from 'react'
+import {render,screen,waitFor,cleanup,act} from '@testing-library/react'
+import {afterEach,it,expect,vi} from 'vitest'
+import {createHash,webcrypto} from 'node:crypto'
+import PrivateStaticPreview from './PrivateStaticPreview.jsx'
+import { BrowserAssetGround, BrowserArtifactContext } from './BrowserAssetGround.jsx'
+const opening = vi.hoisted(() => ({ value:null,accepted:null }))
+vi.mock('./ProjectBoardGround.jsx',()=>({ProjectBoardGround:()=>{const accept=React.useContext(BrowserArtifactContext);return <button onClick={()=>{opening.accepted=accept(opening.value)}}>Open private fixture</button>}}))
+vi.mock('./ProjectPageEditor.jsx',()=>({default:()=>null,PagePreview:()=>null}))
+vi.mock('./WorkspaceEnvironment.jsx',()=>({default:({children})=><>{children}</>}))
+vi.mock('../auth.js',()=>({authConfigured:true,isSignedIn:()=>true,login:()=>{},subscribeBeforeLogout:()=>()=>{},subscribeTokenStored:()=>()=>{}}))
+vi.mock('../lib/composerDraft.js',()=>({composerDraftAccountScope:()=> 'fixture-account'}))
+vi.mock('../api.js',()=>({authHeaders:()=>({Authorization:'Bearer synthetic-parent-only'}),getStoredOrgId:()=> 'fixture-org',noteUnauthorized:response=>response}))
+vi.mock('../projects/api.js',()=>({getStoredActorBindingId:()=> 'fixture-actor'}))
+Object.defineProperty(globalThis,'crypto',{value:webcrypto,configurable:true})
+afterEach(()=>{cleanup();vi.unstubAllGlobals()})
+const id=n=>`00000000-0000-4000-8000-${String(n).padStart(12,'0')}`
+const hash=b=>createHash('sha256').update(b).digest('hex')
+function fixture(){const bytes=Buffer.from('<main>private fixture</main>'),manifest={requestDigest:'f'.repeat(64),bundleSha256:'a'.repeat(64),bindingId:id(7),toolchainSha256:'c'.repeat(64),files:[{path:'/index.html',sha256:hash(bytes),sizeBytes:bytes.length,contentType:'text/html'}]};const digest=hash(JSON.stringify([manifest.requestDigest,manifest.bundleSha256,manifest.bindingId,manifest.toolchainSha256,manifest.files.map(f=>[f.path,f.sha256,f.sizeBytes,f.contentType])]));const preview={jobId:id(5),artifactId:id(6),sourceCommit:'d'.repeat(40),sourceTree:'e'.repeat(40),manifestSha256:digest,...manifest,manifest};const result={schema:'leaf.browser-candidate-preview.v1',candidate:{sourceRequestId:id(8),version:1,receiptDigest:'b'.repeat(64),sourceCommit:preview.sourceCommit,sourceTree:preview.sourceTree},preview};const body={schema:'leaf.private-static-asset.v1',job_id:preview.jobId,artifact_id:preview.artifactId,source_commit:preview.sourceCommit,source_tree:preview.sourceTree,manifest_sha256:digest,path:'/index.html',content_type:'text/html',size_bytes:bytes.length,sha256:hash(bytes),body_base64:bytes.toString('base64')};const response=()=>{const data=new TextEncoder().encode(JSON.stringify(body));let read=false;return {ok:true,headers:{get:()=> 'application/json'},body:{getReader:()=>({read:async()=>read?{done:true}:(read=true,{done:false,value:data}),cancel:async()=>{},releaseLock:()=>{}})}}};return {result,body,response}}
+it('mounts an opaque frame from authenticated scoped assets without tokens',async()=>{const f=fixture(),fetch=vi.fn(async()=>f.response());vi.stubGlobal('fetch',fetch);render(<PrivateStaticPreview projectId={id(3)} result={f.result} isCurrent={()=>true}/>);const iframe=await screen.findByTitle('Private app preview');expect(iframe.getAttribute('sandbox')).toBe('allow-scripts');expect(iframe.getAttribute('srcdoc')).not.toContain('synthetic-parent-only');expect(iframe.style.minWidth).toBe('1200px');expect(fetch.mock.calls[0][0]).toContain(`/api/projects/${id(3)}/browser/source/requests/${id(8)}/preview/${id(5)}/asset?`);expect(fetch.mock.calls[0][1].headers.Authorization).toBe('Bearer synthetic-parent-only')})
+it('only accepts typed state from the exact current frame and nonce',async()=>{const f=fixture(),change=vi.fn();vi.stubGlobal('fetch',async()=>f.response());let current=true;render(<PrivateStaticPreview projectId={id(3)} result={f.result} isCurrent={()=>current} onStateChange={change}/>);const iframe=await screen.findByTitle('Private app preview'),nonce=iframe.getAttribute('srcdoc').match(/"nonce":"([^"]+)"/)[1],state={version:1,range:'all',scale:'Log',reference:'2023-01-01',averaging:56,timeAxis:'expanded2026',series:['a'],groups:[]};const data={protocol:'leaf.chart-state.v1',type:'change',nonce,jobId:id(5),artifactId:id(6),state};const send=(source,value)=>act(()=>dispatchEvent(new MessageEvent('message',{source,origin:'null',data:value})));send(window,data);send(iframe.contentWindow,{...data,nonce:'wrong'});send(iframe.contentWindow,{...data,state:{...state,version:2}});expect(change).not.toHaveBeenCalled();send(iframe.contentWindow,data);expect(change).toHaveBeenCalledExactlyOnceWith(state);current=false;send(iframe.contentWindow,data);expect(change).toHaveBeenCalledTimes(1)})
+it('does not mount a stale response after project scope closes',async()=>{const f=fixture();let finish,current=true;vi.stubGlobal('fetch',()=>new Promise(resolve=>{finish=resolve}));render(<PrivateStaticPreview projectId={id(3)} result={f.result} isCurrent={()=>current}/>);await waitFor(()=>expect(finish).toBeTypeOf('function'));current=false;await act(async()=>finish(f.response()));expect(screen.queryByTitle('Private app preview')).toBeNull()})
+it('surfaces an invalid producer response without exposing bytes',async()=>{const f=fixture();f.body.source_tree='0'.repeat(40);vi.stubGlobal('fetch',async()=>f.response());render(<PrivateStaticPreview projectId={id(3)} result={f.result} isCurrent={()=>true}/>);await screen.findByRole('alert');expect(screen.queryByTitle('Private app preview')).toBeNull()})
+
+it('Browser context mounts a private result, preserves it across profile hiding and drops it on project change',async()=>{
+ const f=fixture();vi.stubGlobal('fetch',async()=>f.response());opening.value={kind:'private-next',projectId:id(99),result:f.result};
+ const props={signedIn:true,accountScope:'fixture-account',projectId:id(3),browserActive:true};const {rerender}=render(<BrowserAssetGround {...props}/>);
+ await act(async()=>screen.getByRole('button',{name:'Open private fixture'}).click());expect(opening.accepted).toBe(false);expect(screen.queryByTitle('Private app preview')).toBeNull();
+ opening.value={...opening.value,projectId:id(3)};await act(async()=>screen.getByRole('button',{name:'Open private fixture'}).click());const iframe=await screen.findByTitle('Private app preview');expect(opening.accepted).toBe(true);
+ rerender(<BrowserAssetGround {...props} profile="ops" browserActive={false}/>);expect(screen.getByTitle('Private app preview')).toBe(iframe);
+ rerender(<BrowserAssetGround {...props}/>);expect(screen.getByTitle('Private app preview')).toBe(iframe);
+ rerender(<BrowserAssetGround {...props} projectId={id(20)}/>);expect(screen.queryByTitle('Private app preview')).toBeNull();
+})
