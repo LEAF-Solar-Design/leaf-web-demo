@@ -66,4 +66,33 @@ describe('terminal error transcript recovery', () => {
     ], [{ turnId: 'broken', text: 'hello' }])
     expect(screen.getByRole('textbox', { name: 'Reply to the assistant' }).readOnly).toBe(true)
   })
+
+  it('unlocks replies after a non-retryable error without stop_reason', async () => {
+    await setup([
+      event('turn_started', 'broken'),
+      event('error', 'broken', {
+        error: { error_code: 'internal', message: 'Agent service failed', retryable: false },
+      }),
+    ], [{ turnId: 'broken', text: 'hello' }])
+    expect(screen.getByRole('textbox', { name: 'Reply to the assistant' }).readOnly).toBe(false)
+    expect(screen.queryByRole('button', { name: /^Stop$/ })).toBeNull()
+  })
+
+  it('supersedes an older retryable error when a new turn starts', async () => {
+    await setup([
+      event('turn_started', 'old'),
+      event('error', 'old', { error: { ...error, retryable: true } }),
+      event('turn_started', 'new'),
+      event('turn_complete', 'new', { stop_reason: 'end_turn' }),
+    ], [{ turnId: 'old', text: 'hello' }, { turnId: 'new', text: 'try again' }])
+    expect(screen.getByRole('textbox', { name: 'Reply to the assistant' }).readOnly).toBe(false)
+  })
+
+  it('keeps the latest turn active after a retryable error without stop_reason', async () => {
+    await setup([
+      event('turn_started', 'live'),
+      event('error', 'live', { error: { ...error, retryable: true } }),
+    ], [{ turnId: 'live', text: 'hello' }])
+    expect(screen.getByRole('textbox', { name: 'Reply to the assistant' }).readOnly).toBe(true)
+  })
 })
