@@ -24,6 +24,16 @@ const build = (changes = {}) => {
   return buildProjectSolarGraphRequest({ tool: 'solar-homeruns', binding, state, currentState: state,
     catalogDigest: digest, idempotencyKey: 'graph-intent', ...changes })
 }
+it('requires an explicit typed geometry choice limited to panel grouping', () => {
+  const groups = [{ name: 'Imported', panel_refs: ['a', 'b'] }]
+  const input = { tool: 'solar-panel-groups', groups }
+  expect(build(input).request.params).not.toHaveProperty('geometry_only')
+  expect(build({ ...input, geometryOnly: true }).request.params.geometry_only).toBe(true)
+  for (const geometryOnly of [null, 0, 1, 'true', {}, []]) {
+    expect(build({ ...input, geometryOnly })).toEqual({ ok: false, reason: 'request_invalid' })
+  }
+  expect(build({ geometryOnly: true })).toEqual({ ok: false, reason: 'request_invalid' })
+})
 function row(changes = {}, flags = {}) {
   return { name: 'solar-homeruns', catalog_digest: digest, availability: {
     admission_checked: true, admission: { status_code: 200, error: null }, entitled: true, engine_ready: true,

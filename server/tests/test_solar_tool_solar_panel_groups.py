@@ -135,7 +135,7 @@ def test_declaration_is_local_graph_commit():
     assert json.loads((SERVER / "solar_tools/solar_panel_groups.json").read_text()) == expected
     assert solar_tools.get(TOOL) == expected
     assert deps.catalog_tool_digest(tool_row()) == (
-        "sha256:863f0f8cbd37ab931e9bdddea553923fb96ab4a9436a0540b64ccf329bba5aee")
+        "sha256:47819a8a1afc3d2ac512a309825de985ad9ddeadf4ba8335c7c249b6eabb9e54")
 
 
 @pytest.mark.parametrize("name,order,ledger", [

@@ -21,6 +21,9 @@ SCHEMA_VERSION = 1
 SCHEMA_PATH = Path(__file__).resolve().parents[1] / "contract" / "solar-design-graph.v1.schema.json"
 MAX_BYTES = 16 * 1024 * 1024
 MAX_NODES = 500000
+# Saved graphs include panels and their sparse frame matrices. Keep individual
+# request budgets unchanged while allowing this bounded, validated representation.
+MAX_GRAPH_NODES = 1000000
 MAX_DEPTH = 32
 COLLECTIONS = ("electrical_zones", "frames", "panels", "strings", "inverters", "routes", "schedules")
 TRACKER_AXIS_EPSILON = 1e-9  # LeafTrackersToPanelGroupsCommand.cs:42 (solar_ground_dsteps.TRACKER_EPSILON); a shorter axis is degenerate
@@ -61,14 +64,14 @@ def new_id(kind: str) -> str:
     return f"leaf:{kind}:{uuid4()}"
 
 
-def _bounded_json(value):
+def _bounded_json(value, *, max_nodes=MAX_NODES):
     stack = [(value, 0)]
     nodes = 0
     size = 0
     while stack:
         item, depth = stack.pop()
         nodes += 1
-        if nodes > MAX_NODES or depth > MAX_DEPTH:
+        if nodes > max_nodes or depth > MAX_DEPTH:
             raise GraphValidationError("GRAPH_LIMIT_EXCEEDED")
         if type(item) is dict:
             if len(item) > 100000 or any(type(key) is not str for key in item):
@@ -201,7 +204,7 @@ def validate_graph(graph: dict) -> dict:
     not affect it; the schema is a fixed packaged asset loaded once per process.
     Refusals are never memoized, so every failing input re-runs every check.
     """
-    _bounded_json(graph)
+    _bounded_json(graph, max_nodes=MAX_GRAPH_NODES)
     if type(graph) is not dict:
         raise GraphValidationError("INVALID_GRAPH")
     digest = _graph_content_digest(graph)
