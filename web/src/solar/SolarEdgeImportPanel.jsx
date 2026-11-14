@@ -14,11 +14,13 @@ export const SOLAREDGE_PANEL_REASONS = Object.freeze({
 // The workspace container will mount this panel; it only hands tracking params to its caller.
 export default function SolarEdgeImportPanel({
   drawingId, projectId = null, graphRev, client, onReportReady, onAccept, disabled = false,
-  drawingVersion = undefined, acceptDisabledReason = null, onDownloadReport,
+  drawingVersion = undefined, acceptDisabledReason = null, onDownloadReport, allowMatchedOnly = false,
 }) {
   const [file, setFile] = useState(null)
   const [source, setSource] = useState(null)
   const [report, setReport] = useState(null)
+  const [partialChoice, setPartialChoice] = useState(null)
+  const matchedOnly = allowMatchedOnly && partialChoice?.report === report && partialChoice.enabled === true
   const [tolerance, setTolerance] = useState('')
   const [order, setOrder] = useState('unknown')
   const [pending, setPending] = useState(null)
@@ -35,7 +37,7 @@ export default function SolarEdgeImportPanel({
   const currentDrawing = useRef(drawingId)
   currentDrawing.current = drawingId
   const current = useRef(null)
-  current.current = { drawingId, projectId, drawingVersion, disabled, acceptDisabledReason, graphRev, onAccept, onDownloadReport }
+  current.current = { drawingId, projectId, drawingVersion, disabled, acceptDisabledReason, graphRev, onAccept, onDownloadReport, matchedOnly }
   const lifetime = useRef(null)
   if (!lifetime.current || lifetime.current.drawingId !== drawingId || lifetime.current.projectId !== projectId
     || lifetime.current.drawingVersion !== drawingVersion) lifetime.current = { drawingId, projectId, drawingVersion }
@@ -94,7 +96,7 @@ export default function SolarEdgeImportPanel({
   const reportRef = useRef(report)
   reportRef.current = report
   const parsed = parseTolerance(tolerance)
-  const params = acceptParams(graphRev, reportValue, drawingId)
+  const params = acceptParams(graphRev, reportValue, drawingId, Boolean(matchedOnly))
   const busy = pending !== null || acceptPending || downloadPending
   const acceptReason = reportValue?.drawing_id !== drawingId
     ? 'This report belongs to another drawing. Build a report for this drawing.'
@@ -191,7 +193,7 @@ export default function SolarEdgeImportPanel({
       setOutcome({ step: 'accept', drawingId, message: SOLAREDGE_PANEL_REASONS.staging_pending })
       return
     }
-    const nextParams = acceptParams(captured.graphRev, reportValue, captured.drawingId)
+    const nextParams = acceptParams(captured.graphRev, reportValue, captured.drawingId, Boolean(captured.matchedOnly))
     if (!nextParams || reportRef.current !== report || report?.eligible !== true
       || report?.version !== captured.drawingVersion || report?.projectId !== captured.projectId) return
     if (acceptedReport.current === reportValue) {
@@ -203,13 +205,16 @@ export default function SolarEdgeImportPanel({
     const isCurrent = () => acceptance.current === lock && token.current === lock.generation
       && current.current.drawingId === captured.drawingId && current.current.projectId === captured.projectId
       && current.current.drawingVersion === captured.drawingVersion
+      && current.current.matchedOnly === captured.matchedOnly
     const finish = (accepted) => {
       if (!isCurrent()) return
       if (accepted !== false) acceptedReport.current = reportValue
       acceptance.current = null
       setAcceptPending(false)
       setOutcome({ step: 'accept', drawingId, message: accepted === false
-        ? SOLAREDGE_PANEL_REASONS.not_staged : 'Tracking labels sent for acceptance.' })
+        ? SOLAREDGE_PANEL_REASONS.not_staged : captured.matchedOnly
+          ? 'Matched tracking sent for a partial save. Unresolved groups still need correction.'
+          : 'Tracking labels sent for acceptance.' })
     }
     let result
     try { result = captured.onAccept?.(nextParams) } catch { finish(false); return }
@@ -264,9 +269,17 @@ export default function SolarEdgeImportPanel({
         {!acceptDisabledReason && report?.version !== drawingVersion && <p>{solarEdgeReason('SOLAREDGE_REPORT_STALE')}</p>}
         {!acceptDisabledReason && report?.version === drawingVersion && report?.eligible !== true
           && <p>{solarEdgeReason('SOLAREDGE_REPORT_REQUIRED')}</p>}
+        {allowMatchedOnly && reportValue.counts.matched_frames > 0
+          && reportValue.counts.matched_frames < reportValue.counts.frames && reportValue.counts.strings > 0
+          && <label><input type="checkbox" checked={Boolean(matchedOnly)} disabled={disabled || busy || !!acceptDisabledReason}
+            onChange={(event) => {
+              acceptedReport.current = null
+              setPartialChoice({ report, enabled: event.target.checked })
+            }} />Save matched tracking and keep unresolved groups for correction</label>}
+        {matchedOnly && <p>This saves verified matches only. Unmatched and ambiguous groups remain unresolved. No electrical design is verified.</p>}
         <button ref={acceptButton} type="button" disabled={disabled || busy || !params || !!acceptDisabledReason
           || report?.version !== drawingVersion || report?.eligible !== true}
-          aria-describedby={!params && !acceptDisabledReason ? acceptHint : undefined} onClick={accept}>Accept tracking labels</button>
+          aria-describedby={!params && !acceptDisabledReason ? acceptHint : undefined} onClick={accept}>{matchedOnly ? 'Save matched tracking' : 'Accept tracking labels'}</button>
       </section>}
       <p role="status" aria-live="polite" aria-atomic="true">{outcome?.drawingId === drawingId ? outcome.message : ''}</p>
     </section>

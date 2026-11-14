@@ -15,7 +15,7 @@
   "record": {
     "name": "solar-solaredge-accept",
     "version": "1.0.0",
-    "description": "Accept a SolarEdge report's tracking: record which PDF inverter and string input each panel belongs to, with the source PDF and report it came from. Creates no string, inverter or device and does not run Solve.",
+    "description": "Accept a SolarEdge report's tracking with its PDF and report provenance. Project drawings may explicitly save matched tracking while preserving unresolved correction work as partial. Creates no string, inverter or device and does not run Solve.",
     "kind": "script",
     "family_id": "imports",
     "engine_op": "solar_solaredge_accept",
@@ -25,7 +25,8 @@
       "properties": {
         "drawing_id": {"type": "string", "maxLength": 128},
         "expected_rev": {"type": "integer", "minimum": 0, "maximum": 2147483647},
-        "report_artifact_id": {"type": "string", "minLength": 64, "maxLength": 64}
+        "report_artifact_id": {"type": "string", "minLength": 64, "maxLength": 64},
+        "accept_matched_only": {"type": "boolean"}
       },
       "required": ["expected_rev", "report_artifact_id"],
       "additionalProperties": false

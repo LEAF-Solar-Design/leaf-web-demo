@@ -237,7 +237,7 @@ export default function ProjectSolarEdgePanel({ solarBinding, authorityKey, proj
         : !saved ? <><p role="status">The saved Solar design could not be read. Create panel groups before matching the PDF.</p>
           <button type="button" onClick={() => setRefresh((value) => value + 1)}>Read design again</button></>
           : <SolarEdgeImportPanel key={key} drawingId={binding.drawing_id} projectId={binding.project_id}
-            drawingVersion={binding.input_version_id} graphRev={saved.rev} client={facade} disabled={busy || scope.accepting}
+            drawingVersion={binding.input_version_id} graphRev={saved.rev} client={facade} disabled={busy || scope.accepting} allowMatchedOnly
             onReportReady={(report) => { if (current()) {
               scope.report = report
               setInspection({ scope, report, pending: false })

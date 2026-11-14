@@ -34,12 +34,16 @@ export function reportSummary(value) {
   return COUNT_ROWS.map(([key, label]) => ({ key, label, value: value.counts[key] }))
 }
 
-export function acceptParams(graphRev, reportValue, currentDrawingId) {
+export function acceptParams(graphRev, reportValue, currentDrawingId, matchedOnly = false) {
   const artifactId = reportValue?.report?.artifact_id
-  if (!reportValue || typeof currentDrawingId !== 'string' || currentDrawingId.length === 0
+  if (typeof matchedOnly !== 'boolean' || !reportValue || typeof currentDrawingId !== 'string' || currentDrawingId.length === 0
     || reportValue.drawing_id !== currentDrawingId
     || !Number.isInteger(graphRev) || graphRev < 0 || graphRev > 2147483647
     || typeof artifactId !== 'string' || !/^[0-9a-f]{64}$/.test(artifactId)
     || artifactId.length !== 64) return null
-  return { expected_rev: graphRev, report_artifact_id: artifactId }
+  if (matchedOnly && (!Number.isSafeInteger(reportValue.counts?.matched_frames)
+    || reportValue.counts.matched_frames < 1 || !Number.isSafeInteger(reportValue.counts?.strings)
+    || reportValue.counts.strings < 1)) return null
+  return { expected_rev: graphRev, report_artifact_id: artifactId,
+    ...(matchedOnly ? { accept_matched_only: true } : {}) }
 }

@@ -63,6 +63,25 @@ async function build() {
 }
 
 describe('SolarEdgeImportPanel', () => {
+  it('requires explicit partial intent and resets it when the report is rebuilt', async () => {
+    const { props } = setup({ allowMatchedOnly: true, onAccept: vi.fn(() => true) })
+    await upload(); await build()
+    const choice = screen.getByRole('checkbox', { name: 'Save matched tracking and keep unresolved groups for correction' })
+    expect(choice.checked).toBe(false)
+    fireEvent.click(choice)
+    fireEvent.click(screen.getByRole('button', { name: 'Save matched tracking' }))
+    expect(props.onAccept).toHaveBeenCalledWith({ expected_rev: 12, report_artifact_id: reportId, accept_matched_only: true })
+    expect(screen.getByRole('status').textContent).toContain('partial save')
+    fireEvent.click(buildButton())
+    await waitFor(() => expect(props.client.requestReport).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: /Save matched tracking and keep unresolved/ }).checked).toBe(false))
+    expect(acceptButton()).toBeTruthy()
+  })
+  it('keeps partial saves unavailable in the legacy surface', async () => {
+    setup()
+    await upload(); await build()
+    expect(screen.queryByRole('checkbox', { name: /Save matched tracking/ })).toBeNull()
+  })
   it('explicitly describes the legacy view without an export callback', async () => {
     setup()
     await upload(); await build()
