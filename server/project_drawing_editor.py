@@ -224,10 +224,6 @@ def read_dxf(tenant, project_id, drawing_id, version_id):
     if not exists:
         if staged_drawing is None:
             _fail("PROJECT_EDITOR_SOURCE_UNAVAILABLE", 503, True)
-        converted = _imported_dwg(backend, context.binding.organization_id,
-                                  imported, digest, drawing_id)
-        if converted is not None:
-            return converted
         # The upload producer preserves original DXF bytes independently of
         # its legacy intake-JSON version object. Old uploads may still have
         # only their staged file; backfill it only with an exact digest match.
@@ -237,8 +233,17 @@ def read_dxf(tenant, project_id, drawing_id, version_id):
                 raw = _verified_bytes(backend, original_key, digest)
             else:
                 path = guest_uploads.staged_path(str(context.binding.organization_id), staged_drawing, ".dxf")
-                with path.open("rb") as stream:
-                    raw = stream.read(MAX_DXF_BYTES + 1)
+                try:
+                    with path.open("rb") as stream:
+                        raw = stream.read(MAX_DXF_BYTES + 1)
+                except FileNotFoundError:
+                    # Canonical DXF imports may have no legacy blob manifest.
+                    # Only an absent original/staged DXF needs DWG recovery.
+                    converted = _imported_dwg(backend, context.binding.organization_id,
+                                              imported, digest, drawing_id)
+                    if converted is None:
+                        _fail("PROJECT_EDITOR_SOURCE_UNAVAILABLE", 503, True)
+                    return converted
         except EditorError:
             raise
         except Exception:

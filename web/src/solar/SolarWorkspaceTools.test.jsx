@@ -1178,6 +1178,15 @@ describe('canonical project layout publication action', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Read current layout for publication' }))
     await waitFor(() => expect(screen.getByRole('button', { name: 'Publish layout as editable drawing' }).disabled).toBe(false))
   }
+  it('explains saved-version download and clears earlier publication readiness when the version is no longer head', async () => {
+    const f = fixture()
+    render(<SolarWorkspaceTools {...f.props} />); await read()
+    f.api.read.mockResolvedValue({ ok: false, code: 'PROJECT_LAYOUT_STALE_VERSION' })
+    fireEvent.click(screen.getByRole('button', { name: 'Read current layout for publication' }))
+    await screen.findByText('This saved version is not the current drawing head. To download it, choose Insert, then Download DXF.')
+    expect(screen.getByRole('button', { name: 'Publish layout as editable drawing' }).disabled).toBe(true)
+    expect(f.api.publish).not.toHaveBeenCalled()
+  })
   it('publishes the actual readback with a captured canonical parent and currentness callback', async () => {
     const f = fixture(); render(<SolarWorkspaceTools {...f.props} />)
     await read()
@@ -1259,7 +1268,7 @@ describe('canonical project layout publication action', () => {
       preset: generationIntake.active_preset, drawing_units: 'm' })
     expect(f.props.transport.publicationCheckout.acquireCheckout).not.toHaveBeenCalled()
   })
-  it.each([undefined, 'historical-list-reuse'])('captures original CRLF intake, terrain and producer %s across publication recovery', async (semantics) => {
+  it.each([undefined, 'current-native'])('captures original CRLF intake with original loading by default or explicit producer %s across publication recovery', async (semantics) => {
     const initial = { ...scope, drawing_id: null, input_version_id: null }
     const f = fixture({ drawingId: null, projectScope: initial, checkoutHeld: false })
     f.api.read.mockResolvedValue({ ok: true, value: { ...source, mode: 'initial', drawing_id: null,
@@ -1275,7 +1284,7 @@ describe('canonical project layout publication action', () => {
     render(<SolarWorkspaceTools {...f.props} />)
     fireEvent.change(screen.getByLabelText('Original layout intake (JSON)'), { target: { files: [file] } })
     await screen.findByText(/Meters.*Pile template Supplied/)
-    expect(screen.getByLabelText('Preset loading').value).toBe('current-native')
+    expect(screen.getByLabelText('Preset loading').value).toBe('historical-list-reuse')
     if (semantics) fireEvent.change(screen.getByLabelText('Preset loading'), { target: { value: semantics } })
     fireEvent.change(screen.getByLabelText('Terrain grid cells on longer axis'), { target: { value: '150' } })
     fireEvent.click(screen.getByRole('button', { name: 'Read current layout for publication' }))
@@ -1287,7 +1296,7 @@ describe('canonical project layout publication action', () => {
     await waitFor(() => expect(f.api.publish).toHaveBeenCalledTimes(2))
     const [first, retry] = f.api.publish.mock.calls.map(([captured]) => captured)
     expect(JSON.parse(first.parameters_json)).toEqual({ original_intake: original, grid_long_axis: 150,
-      ...(semantics ? { producer_semantics: semantics } : {}) })
+      producer_semantics: semantics ?? 'historical-list-reuse' })
     expect(retry).toEqual(first)
     expect(f.props.transport.publicationCheckout.acquireCheckout).not.toHaveBeenCalled()
   })
