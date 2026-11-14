@@ -371,6 +371,24 @@ function gapPanelGroupHarness() {
     centre: [[0, 0], [3, 0], [20, 0], [23, 0]][index] }))
   return h
 }
+it('replaces the armed intent when geometry-only grouping changes and submits that choice', async () => {
+  const h = gapPanelGroupHarness()
+  render(<ProjectSolarGraphForm {...h.props} />)
+  const choice = screen.getByRole('checkbox', { name: 'Create geometry groups for imported tracking' })
+  expect(choice.checked).toBe(false)
+  fillGroupNumbers()
+  await arm()
+  const before = h.client.catalog.mock.calls.at(-1)[0].intents[0]
+  expect(before.params).not.toHaveProperty('geometry_only')
+  fireEvent.click(choice)
+  expect(action().disabled).toBe(true)
+  await arm()
+  const intent = h.client.catalog.mock.calls.at(-1)[0].intents[0]
+  expect(intent).not.toBe(before)
+  expect(intent.params.geometry_only).toBe(true)
+  await submitAndWait(h)
+  expect(h.submit.mock.calls[0][0]).toBe(intent)
+})
 it('exposes an optional drawing-unit gap and submits the named islands through normal controls', async () => {
   const h = gapPanelGroupHarness()
   render(<ProjectSolarGraphForm {...h.props} />)

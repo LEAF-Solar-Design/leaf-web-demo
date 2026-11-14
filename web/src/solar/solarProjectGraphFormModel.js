@@ -397,7 +397,7 @@ export function validatePanelGroupDiscovery(graph, numbers) {
 }
 
 export function buildProjectSolarGraphRequest({ tool, binding, state, currentState, insertionPointText, groups, discover,
-  catalogDigest, idempotencyKey }) {
+  catalogDigest, idempotencyKey, geometryOnly = false }) {
   const fail = (reason) => ({ ok: false, reason })
   try {
     state = state == null ? state : { mode: state.mode, reason: state.reason, binding: state.binding,
@@ -408,6 +408,7 @@ export function buildProjectSolarGraphRequest({ tool, binding, state, currentSta
   let exact
   try { exact = createSolarDrawingBinding(binding) } catch { return fail('binding_invalid') }
   if (!PROJECT_SOLAR_GRAPH_TOOLS.includes(tool)) return fail('tool_unsupported')
+  if (typeof geometryOnly !== 'boolean' || geometryOnly && tool !== 'solar-panel-groups') return fail('request_invalid')
   for (const value of [state, currentState]) {
     if (value?.mode === 'refused') return fail(value.reason)
     if (!sameSolarDrawingBinding(exact, value?.binding)) return fail('scope_stale')
@@ -423,6 +424,7 @@ export function buildProjectSolarGraphRequest({ tool, binding, state, currentSta
   }
   const params = { drawing_id: exact.drawing_id, expected_rev: state.rev }
   if (tool === 'solar-panel-groups') {
+    if (geometryOnly) params.geometry_only = true
     if (discover !== undefined) {
       if (groups !== undefined || !validPanelGroupDiscovery(discover)) return fail('request_invalid')
       params.discover = { BranchMaxOffset: discover.BranchMaxOffset,
