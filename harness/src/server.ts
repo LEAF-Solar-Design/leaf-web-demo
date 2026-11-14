@@ -1,5 +1,6 @@
 import {privatePreviewAsset} from "./projectBuild/privatePreviewAsset.js";
 import type {PrivatePreviewReader} from "./projectBuild/privatePreviewAsset.js";
+import type {PrivateBuildLifecycle} from "./projectBuild/privateBuildLifecycle.js";
 /**
  * Harness HTTP server - a thin shell over AuthorLoop. Ports are INJECTED, so the
  * hermetic tests wire fakes and the operator-gated `startReal()` wires the real
@@ -841,6 +842,7 @@ export function createHarness(ports: HarnessPorts, opts?: {
   projectRepositoryEdits?: CampaignSourceService;
   projectSourceAuthoring?: ProjectSourceAuthorDependencies;
   projectStaticPreviews?: PrivatePreviewReader;
+  projectStaticBuilds?: Pick<PrivateBuildLifecycle,"submit"|"observe">;
   portfolioProposals?: Pick<PortfolioProposalService, "propose">;
   standardServicesApproval?: {
     dispatchSecret: string;
@@ -1324,6 +1326,31 @@ export function createHarness(ports: HarnessPorts, opts?: {
           }
           return send(res, 409, { error: { code: "source_conflict", message: "source initialization failed" } });
         }
+      }
+
+      if (method === "POST" && ["/internal/project-static-preview/build", "/internal/project-static-preview/status"].includes(path)) {
+        const denied = harnessAuthDenial(req, { ...auth, enabled: true });
+        if (denied) return send(res, 401, denied);
+        if (!opts?.projectStaticBuilds) return send(res, 503, {error:{code:"preview_unavailable"}});
+        try {
+          const b = await readJsonBody(req, 16 * 1024, true, false, true);
+          const keys = "job_id,organization_id,project_id,receipt_digest,repo_key,source_commit,source_request_id,source_tree,tenant_id,version";
+          if (!isRecord(b) || Object.keys(b).sort().join(",") !== keys) throw new Error();
+          for (const k of ["tenant_id","organization_id","project_id","repo_key","job_id","source_request_id"])
+            if (typeof b[k] !== "string" || !CANONICAL_UUID.test(b[k] as string)) throw new Error();
+          if (authorityHeader(req,"x-tenant-id") !== b.tenant_id ||
+              !Number.isSafeInteger(b.version) || (b.version as number) < 1 ||
+              typeof b.source_commit !== "string" || !SHA40.test(b.source_commit) ||
+              typeof b.source_tree !== "string" || !SHA40.test(b.source_tree) ||
+              typeof b.receipt_digest !== "string" || !/^[0-9a-f]{64}$/.test(b.receipt_digest)) throw new Error();
+          const authority = {tenantId:b.tenant_id as string,organizationId:b.organization_id as string,projectId:b.project_id as string,repoKey:b.repo_key as string};
+          const witness = {jobId:b.job_id as string,sourceRequestId:b.source_request_id as string,version:b.version as number,receiptDigest:b.receipt_digest,sourceCommit:b.source_commit,sourceTree:b.source_tree};
+          if (path.endsWith("/build") && !authoredExecutionEnabled()) return send(res,503,{error:{code:"authored_execution_disabled"}});
+          // A status request only observes the existing identity. Never build.
+          const result = path.endsWith("/build") ? await opts.projectStaticBuilds.submit(authority,witness) : await opts.projectStaticBuilds.observe(authority,witness);
+          res.setHeader("Cache-Control","private, no-store");
+          return send(res,200,result);
+        } catch { return send(res,409,{error:{code:"preview_unavailable"}}); }
       }
 
       if (method === "POST" && path === "/internal/project-static-preview/asset") {
