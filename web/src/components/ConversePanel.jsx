@@ -725,6 +725,12 @@ export default function ConversePanel({
           || type === 'overlay_revoked') continue
       const t = turnOf(env.turn_id)
         if (type === 'turn_started') {
+          for (const earlier of turns) {
+            if (earlier !== t && earlier.started && !earlier.stopReason) {
+              earlier.stopReason = 'superseded'
+              completed.add(earlier.turnId)
+            }
+          }
           t.started = true
           if (typeof data.text === 'string' && data.text.trim()) t.userText = data.text
           t.images = thumbnailImages(data.images)
@@ -786,6 +792,10 @@ export default function ConversePanel({
         else t.feed.push({ kind: 'error', code, message: humanizeError(STOP_NOTES[code] || data.error?.message || 'The assistant could not finish this reply. Try again.') })
         if (typeof data.stop_reason === 'string' && data.stop_reason) {
           if (!t.stopReason) t.stopReason = data.stop_reason
+          completed.add(t.turnId)
+        }
+        if (data.error?.retryable === false) {
+          if (!t.stopReason) t.stopReason = code || 'error'
           completed.add(t.turnId)
         }
       }

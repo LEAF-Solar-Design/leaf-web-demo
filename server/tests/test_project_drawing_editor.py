@@ -324,6 +324,11 @@ def lane(private_pg, monkeypatch, tmp_path):
         source_drawing_id=source, source_version=1, name="rooftop.dxf",
         idempotency_key="initial-" + uuid4().hex, actor_binding_id=actor.binding_id)
     backend = BytesStore()
+    # The manifest above is PG rows, but suites run the legacy store authority;
+    # mirror version 1 so pinned-source reads (store.resolve_version) resolve.
+    import store as drawing_store  # da/store, as project_drawing_editor imports it
+    backend.data[drawing_store.manifest_key(str(org.org_id), source)] = json.dumps(
+        {"head": 1, "latest": 1, "versions": [{"v": 1}]}).encode()
     backend.data[intake_key] = intake
     backend.data[object_key] = intake
     original_key = editor.upload_source_key(org.org_id, source, digest(raw))
