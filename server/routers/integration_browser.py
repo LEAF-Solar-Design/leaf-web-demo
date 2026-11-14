@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from urllib.parse import urlencode
 from uuid import UUID, uuid4
@@ -27,6 +28,8 @@ _UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12
 _SLUG = r"[a-z0-9]+(?:[-_][a-z0-9]+)*"
 _VERSION = r"[1-9][0-9]{0,9}"
 _JSON = re.compile(r'application/json(?:\s*;\s*charset\s*=\s*(?:utf-8|"utf-8"))?\s*\Z', re.I)
+_PROTECTION_ORIGIN = "https://ops-staging.leafdesign.ai"
+_PROTECTION_HEADER = "x-vercel-protection-bypass"
 _ERRORS = {
     "WORKSPACE_AUTH_REQUIRED", "WORKSPACE_TOKEN_REQUIRED", "WORKSPACE_SCOPE_DENIED",
     "WORKSPACE_INVALID_INPUT", "WORKSPACE_CONFIG_REQUIRED", "WORKSPACE_UNAVAILABLE",
@@ -131,7 +134,8 @@ def _authority(request, tenant):
     sessions.local_request(request, cfg, origin_required=request.method != "GET")
     for name in ("authorization", "cookie", "host", "origin", "x-leaf-integration-origin"):
         _one(request, name, required=name in {"authorization", "cookie", "host", "x-leaf-integration-origin"})
-    if any(request.headers.getlist(name) for name in ("x-dispatch-secret", "x-guest-session", "x-demo-session")):
+    if any(request.headers.getlist(name) for name in (
+            "x-dispatch-secret", "x-guest-session", "x-demo-session", _PROTECTION_HEADER)):
         raise _Failure(403, "WORKSPACE_SCOPE_DENIED")
     settings = load_integration_config()
     # This is a non-authoritative build-binding assertion, never a destination.
@@ -196,11 +200,46 @@ def _scope(value, project_id, subject):
             raise _Failure(502, "WORKSPACE_INVALID_RESPONSE")
 
 
+def _read_protection_binding():
+    # ECS injects this server-only task secret at startup. No provider/store
+    # lookup, import-time read, browser input or process-level cache belongs here.
+    return os.environ.get("VERCEL_AUTOMATION_BYPASS_SECRET")
+
+
+def _protection_binding(origin):
+    if origin != _PROTECTION_ORIGIN:
+        return None
+    value = _read_protection_binding()
+    if (not isinstance(value, str) or not 1 <= len(value) <= 4096
+            or any(not 33 <= ord(char) <= 126 for char in value)):
+        raise _Failure(503, "WORKSPACE_CONFIG_REQUIRED")
+    return value
+
+
+def _contains_protection_value(value, binding):
+    # Scan decoded strings (including keys), so JSON escaping cannot turn a
+    # reflected credential into a browser response. The response is byte-bounded.
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, str) and binding in item:
+            return True
+        if isinstance(item, dict):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
+    return False
+
+
 async def _forward(request, project_id, resource, tenant):
     path = _route(request, project_id, resource)
     origin, authorization = _authority(request, tenant)
     body = await _body(request, resource)
     headers = {"Authorization": authorization, "Accept": "application/json", "Accept-Encoding": "identity"}
+    protection = _protection_binding(origin)
+    if protection is not None:
+        headers[_PROTECTION_HEADER] = protection
     if body is not None:
         headers["Content-Type"] = "application/json"
     match = _one(request, "if-match")
@@ -229,6 +268,8 @@ async def _forward(request, project_id, resource, tenant):
                 value = _json(raw)
             except (ValueError, UnicodeError, RecursionError):
                 raise _Failure(502, "WORKSPACE_INVALID_RESPONSE") from None
+            if protection is not None and _contains_protection_value(value, protection):
+                raise _Failure(502, "WORKSPACE_INVALID_RESPONSE")
             if not 200 <= upstream.status_code < 300:
                 detail = value.get("error") if type(value) is dict else None
                 code = detail.get("code") if type(detail) is dict else None

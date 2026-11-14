@@ -28,6 +28,15 @@ SCOPE = {"tenantId": OTHER, "projectId": PROJECT, "platformUserId": OTHER,
          "projectRole": "owner"}
 SCOPE_PATH = f"/api/v1/projects/{PROJECT}/scope"
 ELEMENT_PATH = f"/api/v1/projects/{PROJECT}/integrations/elements"
+PROTECTED_ORIGIN = "https://ops-staging.leafdesign.ai"
+PROTECTION_FIXTURE = "synthetic-protection-binding"  # Inert test text, never a credential.
+
+
+def protected(context, monkeypatch, binding=PROTECTION_FIXTURE):
+    monkeypatch.setattr(bridge, "load_integration_config", lambda: SimpleNamespace(api_origin=PROTECTED_ORIGIN))
+    monkeypatch.setattr(bridge, "_read_protection_binding", lambda: binding)
+    return [(k, PROTECTED_ORIGIN if k.lower() == "x-leaf-integration-origin" else v)
+            for k, v in context["headers"]()]
 
 
 @pytest.fixture
@@ -97,6 +106,109 @@ def test_joint_session_translates_only_into_fixed_upstream(context):
     for name in ("cookie", "x-tenant-id", "x-leaf-integration-origin", "x-forwarded-host"):
         assert name not in sent.headers
     assert "no-store" in response.headers["cache-control"]
+
+
+def test_protected_staging_origin_adds_only_server_binding_and_preserves_bearer(context, monkeypatch, caplog):
+    headers = protected(context, monkeypatch)
+    response = context["request"](headers=headers)
+    assert response.status_code == 200 and response.json() == SCOPE
+    [sent] = context["calls"]
+    assert str(sent.url) == PROTECTED_ORIGIN + SCOPE_PATH
+    assert sent.headers["x-vercel-protection-bypass"] == PROTECTION_FIXTURE
+    assert sent.headers["authorization"] == "Bearer " + TOKEN
+    assert "cookie" not in sent.headers
+    assert PROTECTION_FIXTURE not in response.text
+    assert PROTECTION_FIXTURE not in str(dict(response.headers))
+    assert PROTECTION_FIXTURE not in caplog.text
+
+
+@pytest.mark.parametrize("binding", [None, "", " ", "fixture\nline", "fixture\rline", "\x7f", "x" * 4097])
+def test_missing_or_unsafe_protection_binding_fails_closed(context, monkeypatch, binding):
+    headers = protected(context, monkeypatch, binding)
+    response = context["request"](headers=headers)
+    error(context, response, 503)
+    assert response.json()["error"]["code"] == "WORKSPACE_CONFIG_REQUIRED"
+    assert not context["calls"]
+
+
+@pytest.mark.parametrize("origin", [UPSTREAM, "http://ops-staging.leafdesign.ai",
+    "https://ops-staging.leafdesign.ai:8443", "https://ops-staging.leafdesign.ai.foreign.example",
+    "https://sub.ops-staging.leafdesign.ai", "https://ops-dashboard-seven.vercel.app"])
+def test_other_origins_never_read_or_receive_the_managed_binding(monkeypatch, origin):
+    monkeypatch.setattr(bridge, "_read_protection_binding", lambda: pytest.fail("binding read for wrong origin"))
+    assert bridge._protection_binding(origin) is None
+
+
+def test_ordinary_inert_upstream_keeps_existing_transport_without_secret_read(context, monkeypatch):
+    monkeypatch.setattr(bridge, "_read_protection_binding", lambda: pytest.fail("unrelated secret read"))
+    assert context["request"]().status_code == 200
+    [sent] = context["calls"]
+    assert "x-vercel-protection-bypass" not in sent.headers
+
+
+def test_browser_cannot_supply_a_protection_binding(context, monkeypatch):
+    headers = protected(context, monkeypatch) + [("X-Vercel-Protection-Bypass", "synthetic-caller-forgery")]
+    monkeypatch.setattr(bridge, "_read_protection_binding", lambda: pytest.fail("binding read before input denial"))
+    response = context["request"](headers=headers)
+    error(context, response, 403)
+    assert not context["calls"]
+    assert "synthetic-caller-forgery" not in response.text
+
+
+def test_browser_origin_mismatch_is_denied_before_secret_lookup(context, monkeypatch):
+    protected(context, monkeypatch)
+    monkeypatch.setattr(bridge, "_read_protection_binding", lambda: pytest.fail("binding read before origin denial"))
+    error(context, context["request"](), 503)
+    assert not context["calls"]
+
+
+def test_unverified_session_is_denied_before_secret_lookup(context, monkeypatch):
+    protected(context, monkeypatch)
+    monkeypatch.setattr(bridge, "_read_protection_binding", lambda: pytest.fail("binding read before session authority"))
+    error(context, context["request"](headers=[]), 403)
+    assert not context["calls"]
+
+
+def test_task_injected_name_is_the_only_binding_source_and_is_not_cached(monkeypatch):
+    # Replace the complete mapping with inert data; never inspect the host env.
+    injected = {"VERCEL_AUTOMATION_BYPASS_SECRET": PROTECTION_FIXTURE}
+    monkeypatch.setattr(bridge.os, "environ", injected)
+    assert bridge._protection_binding(PROTECTED_ORIGIN) == PROTECTION_FIXTURE
+    injected["VERCEL_AUTOMATION_BYPASS_SECRET"] = "synthetic-rotated-binding"
+    assert bridge._protection_binding(PROTECTED_ORIGIN) == "synthetic-rotated-binding"
+    injected.clear()
+    with pytest.raises(bridge._Failure) as failed:
+        bridge._protection_binding(PROTECTED_ORIGIN)
+    assert failed.value.status == 503
+
+
+def test_protected_redirect_does_not_forward_binding_to_second_host(context, monkeypatch):
+    headers = protected(context, monkeypatch)
+    context["respond"] = lambda _: httpx.Response(302, headers={"Location": "https://foreign.example"})
+    error(context, context["request"](headers=headers), 502)
+    [sent] = context["calls"]
+    assert sent.url.host == "ops-staging.leafdesign.ai"
+
+
+@pytest.mark.parametrize("status", [200, 403, 503])
+@pytest.mark.parametrize("shape", ["value", "key", "nested"])
+def test_reflected_protection_value_never_reaches_browser(context, monkeypatch, status, shape, caplog):
+    # Quotes/backslash exercise decoded JSON, rather than a raw byte substring.
+    binding = 'synthetic-quoted-"-\\-binding'
+    headers = protected(context, monkeypatch, binding)
+    body = ({"error": {"message": binding}} if shape == "value" else
+            {binding: "value"} if shape == "key" else {"nested": [["prefix-" + binding + "-suffix"]]})
+    context["respond"] = lambda _: httpx.Response(status, json=body)
+    response = context["request"](headers=headers)
+    error(context, response, 502)
+    assert response.json()["error"]["code"] == "WORKSPACE_INVALID_RESPONSE"
+    assert binding not in response.text and binding not in caplog.text
+
+
+def test_protection_binding_does_not_replace_canonical_scope_subject_check(context, monkeypatch):
+    headers = protected(context, monkeypatch)
+    context["respond"] = lambda _: httpx.Response(200, json={**SCOPE, "externalSubject": "other-subject"})
+    error(context, context["request"](headers=headers), 502)
 
 
 @pytest.mark.parametrize("headers", [[], [("Cookie", sessions.SESSION_COOKIE + "=" + SECRET)],
