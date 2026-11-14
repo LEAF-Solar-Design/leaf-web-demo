@@ -5428,6 +5428,10 @@ def pr_tier_path(value: str) -> str:
 
 def pr_tier_owned_paths(row: dict) -> List[str]:
     """Declared file/directory targets; npm scripts without targets stay unknown."""
+    # This npm script runs one mocked browser spec; its runtime dependency
+    # scope is conservatively widened by select_pr_tier below.
+    if row.get("id") == "web-async-author-stage":
+        return ["web/e2e/async-author-stage.spec.mjs"]
     paths = []
     for arg in row["command"][1:]:
         target = arg.split("::", 1)[0].replace("\\", "/")
@@ -5597,9 +5601,11 @@ def select_pr_tier(suites: List[Suite], tier: dict) -> List[Suite]:
             raise ValueError("invalid LEAF_PRIORITY_SUITES")
         selected.update(ids & set(priority))
         for suite in suites:
-            row = {"command": _fingerprint_argv(suite.argv, cwd=suite.cwd),
+            row = {"id": suite.id, "command": _fingerprint_argv(suite.argv, cwd=suite.cwd),
                    "cwd": _fingerprint_cwd(suite.cwd), "kind": suite.kind}
             if ((not pr_tier_owned_paths(row) and row["kind"] != "vitest")
+                    or (suite.id == "web-async-author-stage"
+                        and not pr_tier_outside_web_closure(changed))
                     or any(pr_tier_owns(row, path) for path in changed)):
                 selected.add(suite.id)
         selected = pr_tier_closure(selected, ids, tier.get("prerequisites"))
