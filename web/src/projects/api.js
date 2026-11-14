@@ -192,7 +192,9 @@ export function uploadProjectReference(projectId, file, { signal, expectedScope 
   if (!mediaType || !file?.size || file.size > maximum) {
     throw new Error('Choose an original MOV or gzip JSONL up to 64 MiB, or UTF-8 TXT/JSON up to 8 MiB.')
   }
-  if (file.type && file.type !== 'application/octet-stream' && file.type.split(';')[0].toLowerCase() !== mediaType) {
+  const declaredType = file.type?.split(';')[0].toLowerCase()
+  const gzipAlias = extension === 'jsonl.gz' && declaredType === 'application/x-gzip'
+  if (file.type && file.type !== 'application/octet-stream' && declaredType !== mediaType && !gzipAlias) {
     throw new Error('The file extension and content type must agree (MOV, UTF-8 TXT/JSON or gzip JSONL).')
   }
   return request(`/api/projects/${id}/reference-files?filename=${encodeURIComponent(file.name)}`, {
