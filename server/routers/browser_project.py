@@ -12,6 +12,7 @@ import browser_project_source_export as source_export
 import deps
 import browser_static_preview as static_preview
 import browser_static_build as static_build
+import browser_chart_state as chart_state
 
 router = APIRouter(prefix='/api/projects/{project_id}/browser/source')
 _PATH = re.compile(r'^/api/projects/[^/]+/browser/source(?:/.*)?$')
@@ -198,6 +199,34 @@ async def check_preview(project_id: str, source_request_id: str, job_id: str, re
         result = await run_in_threadpool(static_build.exchange, tenant, project_id, source_request_id,
                                          job_id, witnesses)
         return JSONResponse(result, headers=_PRIVATE)
+    except flow.FlowError as exc:
+        return _failure(exc)
+    except Exception:
+        return _failure(flow.FlowError(503))
+
+
+@router.get('/requests/{source_request_id}/preview/{job_id}/chart-state')
+async def read_chart_state(project_id: str, source_request_id: str, job_id: str, request: Request,
+                           tenant=Depends(deps.require_active_tenant)):
+    try:
+        await run_in_threadpool(flow.scope, tenant, project_id)
+        if len(request.scope.get('query_string', b'')) > 2048:
+            raise flow.FlowError(422)
+        d = chart_state.descriptor(source_request_id, job_id, request.query_params.multi_items())
+        return _response(await run_in_threadpool(chart_state.exchange, tenant, project_id, d))
+    except flow.FlowError as exc:
+        return _failure(exc)
+    except Exception:
+        return _failure(flow.FlowError(503))
+
+
+@router.put('/requests/{source_request_id}/preview/{job_id}/chart-state')
+async def save_chart_state(project_id: str, source_request_id: str, job_id: str, request: Request,
+                           tenant=Depends(deps.require_active_tenant)):
+    try:
+        await run_in_threadpool(flow.scope, tenant, project_id, write=True)
+        body = chart_state.parse_save(source_request_id, job_id, await _raw(request))
+        return _response(await run_in_threadpool(chart_state.exchange, tenant, project_id, body['descriptor'], save=body))
     except flow.FlowError as exc:
         return _failure(exc)
     except Exception:
