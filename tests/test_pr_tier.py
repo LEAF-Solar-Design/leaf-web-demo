@@ -214,7 +214,7 @@ def test_active_check_honors_only_explicit_full(generator, runner, tmp_path, mon
     assert captured.err == ""
 
 
-def invoke(runner, monkeypatch, tmp_path, policy=None, flags=(), jobs=1, suites=None):
+def invoke(runner, monkeypatch, tmp_path, policy=None, flags=(), jobs=1, suites=None, observed=None):
     suites = stub_suites(runner) if suites is None else suites
     monkeypatch.setattr(runner, "build_suites", lambda: suites)
     monkeypatch.setattr(runner, "migrate_gate_database", lambda suites: None)
@@ -223,6 +223,8 @@ def invoke(runner, monkeypatch, tmp_path, policy=None, flags=(), jobs=1, suites=
 
     def fake_run(suite, log_dir, attempt):
         ran.append(suite.id)
+        if observed is not None:
+            observed.append(suite)
         return runner.Result(suite, "PASS", "1", 0.1, counts={"got": 1, "passed": 1})
 
     monkeypatch.setattr(runner, "run_suite_guarded", fake_run)
@@ -290,6 +292,160 @@ def test_unknown_changed_paths_conservatively_runs_everything_in_tier_mode(runne
     assert rc == 0
     assert set(ran) == {s.id for s in stub_suites(runner)}
     assert data["mode"] == "tier"
+
+
+@pytest.mark.parametrize("changed", [["server/site.py"], ["platform/auth.py"],
+                                    ["docs/ci.md", "README.md"]])
+def test_non_web_pr_bounds_all_real_web_shards_without_changing_catalog(
+        runner, monkeypatch, changed):
+    suites = runner.build_suites()
+    fingerprint = runner.catalog_fingerprint(suites)
+    document = json.loads((ROOT / "scripts/ci/pr-tier.json").read_text(encoding="utf-8"))
+    monkeypatch.setenv("LEAF_CHANGED_PATHS", json.dumps(changed))
+    monkeypatch.delenv("LEAF_PRIORITY_SUITES", raising=False)
+    observed = runner.select_pr_tier(suites, document)
+    ran = [s.id for s in observed]
+    assert set(document["suite_ids"]) <= set(ran)
+    assert set(runner.PR_TIER_PREREQUISITES) <= set(ran)
+    originals = {s.id: s for s in suites}
+    bounded = []
+    for suite in observed:
+        original = originals[suite.id]
+        if suite.id in {"web-vitest-1", "web-vitest-2", "web-vitest-3"}:
+            identities = [reason.removeprefix("fail30:") for reason in document["reasons"][suite.id]
+                          if reason.startswith("fail30:")]
+            paths = suite.argv[len(original.argv):]
+            assert len(paths) == len(identities) == 22
+            assert {runner.pr_tier_path("web/" + path) for path in paths} == set(identities)
+            assert all((ROOT / "web" / path).is_file() for path in paths)
+            assert suite.argv[:len(original.argv)] == original.argv
+            assert suite == runner.replace(original, argv=suite.argv)
+            assert suite is not original
+            bounded.append(suite.id)
+        else:
+            assert suite is original
+    assert len(bounded) == 3
+    assert fingerprint == runner.catalog_fingerprint(suites)
+
+
+@pytest.fixture
+def web_catcher_case(runner, monkeypatch, tmp_path):
+    monkeypatch.setattr(runner, "REPO", tmp_path)
+    monkeypatch.setattr(runner, "WEB", tmp_path / "web")
+    source = tmp_path / "web/src"
+    source.mkdir(parents=True)
+    (source / "catcher.test.js").write_text("", encoding="utf-8")
+    suites = [runner.Suite(f"web-vitest-{shard}", "web tests", "vitest", runner.WEB,
+                           ["npm", "run", "test:unit", "--", f"--shard={shard}/3", "--maxWorkers=2"], 1)
+              for shard in range(1, 4)]
+    suites += [runner.Suite("harness-vitest", "harness tests", "vitest", tmp_path / "harness",
+                            ["npm", "test"], 1)]
+    document = dict(schema=runner.PR_TIER_SCHEMA, enabled=True,
+                    suite_ids=[s.id for s in suites], catalog_suite_ids=[s.id for s in suites],
+                    reasons={s.id: ["fail30:web/src/catcher.test", "proposal"] for s in suites})
+    monkeypatch.setenv("LEAF_CHANGED_PATHS", '["server/site.py"]')
+    monkeypatch.delenv("LEAF_PRIORITY_SUITES", raising=False)
+    return suites, document, source
+
+
+@pytest.mark.parametrize("changed", [
+    ["web/src/app.js"], ["web/README.md"], ["scripts/ci.md"], [".github/workflows/ci.yml"],
+    [".codebuild/ci.sh"], ["package.json"], ["package-lock.json"], ["pyproject.toml"],
+    ["vitest.config.js"], ["tsconfig.json", "server/site.py"], ["main.py"],
+    ["tests/test_gate.py"], ["unknown/path.md"], ["server/../web/src/app.js"],
+    ["/server/site.py"], ["./server/site.py"], ["server//site.py"], ["server/"],
+    [r"server\site.py"], ["server/site.py\n"], ["server/.config"], [], [None], [123],
+    "not-json", None,
+])
+def test_web_catchers_keep_full_commands_for_closure_or_unknown_paths(
+        runner, monkeypatch, web_catcher_case, changed):
+    suites, document, _ = web_catcher_case
+    if changed is None:
+        def unavailable():
+            raise ValueError("PR changed paths unavailable")
+        monkeypatch.setattr(runner, "pr_tier_changed_paths", unavailable)
+    else:
+        monkeypatch.setenv("LEAF_CHANGED_PATHS", changed if isinstance(changed, str) else json.dumps(changed))
+    selected = runner.select_pr_tier(suites, document)
+    assert selected == suites
+    assert all(actual is original for actual, original in zip(selected, suites))
+
+
+@pytest.mark.parametrize("bad", ["missing", "mapping", "no-suite", "empty", "string", "number",
+                                 "no-catchers", "empty-catcher", "escape", "absolute", "non-test",
+                                 "extension", "absent", "ambiguous", "mixed", "symlink"])
+def test_invalid_catcher_metadata_keeps_original_web_command(runner, web_catcher_case, bad):
+    suites, document, source = web_catcher_case
+    if bad == "missing":
+        document.pop("reasons")
+    elif bad == "mapping":
+        document["reasons"] = []
+    elif bad == "no-suite":
+        document["reasons"] = {}
+    else:
+        reasons = {
+            "empty": [], "string": "fail30:web/src/catcher.test", "number": [123],
+            "no-catchers": ["proposal"], "empty-catcher": ["fail30:"],
+            "escape": ["fail30:web/src/../catcher.test"],
+            "absolute": ["fail30:/web/src/catcher.test"],
+            "non-test": ["fail30:web/src/catcher"],
+            "extension": ["fail30:web/src/catcher.test.js"],
+            "absent": ["fail30:web/src/missing.test"],
+            "mixed": ["fail30:web/src/catcher.test", "fail30:web/src/missing.test"],
+        }.get(bad, ["fail30:web/src/catcher.test"])
+        for suite in suites:
+            document["reasons"][suite.id] = reasons
+    if bad == "ambiguous":
+        (source / "catcher.test.jsx").write_text("", encoding="utf-8")
+    elif bad == "symlink":
+        outside = source.parents[1] / "outside.test.js"
+        outside.write_text("", encoding="utf-8")
+        (source / "catcher.test.js").unlink()
+        try:
+            (source / "catcher.test.js").symlink_to(outside)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+    selected = runner.select_pr_tier(suites, document)
+    assert selected == suites
+    assert all(actual is original for actual, original in zip(selected, suites))
+
+
+def test_web_catcher_selection_keeps_new_priority_and_prerequisite_suites(
+        runner, monkeypatch, web_catcher_case):
+    suites, document, _ = web_catcher_case
+    extras = [runner.Suite(sid, sid, "pytest", runner.REPO / "server",
+                           [sys.executable, "-m", "pytest", f"tests/test_{sid}.py"], 1)
+              for sid in ("new-suite", "priority", "dependency")]
+    document["catalog_suite_ids"].extend(["priority", "dependency"])
+    document["prerequisites"] = {"web-vitest-1": ["dependency"]}
+    monkeypatch.setenv("LEAF_PRIORITY_SUITES", '["priority"]')
+    selected = runner.select_pr_tier(suites + extras, document)
+    assert [s.id for s in selected] == [s.id for s in suites + extras]
+    assert all(s.argv[-1] == "src/catcher.test.js" for s in selected[:3])
+    assert all(s is original for s, original in zip(selected[3:], (suites + extras)[3:]))
+
+
+def test_full_mode_never_resolves_or_bounds_catchers(runner, monkeypatch, tmp_path, web_catcher_case):
+    suites, _, _ = web_catcher_case
+    monkeypatch.setattr(runner, "pr_tier_web_catchers", lambda *a: pytest.fail("full mode bounded catchers"))
+    observed = []
+    rc, ran, data = invoke(runner, monkeypatch, tmp_path, suites=suites, observed=observed)
+    assert rc == 0 and ran == [s.id for s in suites]
+    assert all(s is original for s, original in zip(observed, suites))
+    assert "mode" not in data
+
+
+def test_bounded_catchers_keep_actual_counts_and_original_catalog_fingerprint(
+        runner, monkeypatch, tmp_path, web_catcher_case):
+    suites, document, _ = web_catcher_case
+    fingerprint = runner.catalog_fingerprint(suites)
+    observed = []
+    rc, ran, data = invoke(runner, monkeypatch, tmp_path, document, suites=suites, observed=observed)
+    assert rc == 0 and ran == [s.id for s in suites]
+    assert all(s.argv[-1] == "src/catcher.test.js" for s in observed[:3])
+    assert data["catalog_fingerprint"] == fingerprint == runner.catalog_fingerprint(suites)
+    assert data["executed_total"] == len(ran)
+    assert all(entry["got"] == "1" and entry["executed"] == 1 for entry in data["results"])
 
 
 def test_pr_diff_uses_base_and_both_rename_paths(runner, monkeypatch):
@@ -399,6 +555,7 @@ def test_ci_tier_activation_precedes_startup_and_preserves_selection_mode():
     ("PUSH", "enabled", "selected", "selected"),
     ("PULL_REQUEST_UPDATED", "disabled", "shadow", "shadow"),
 ])
+@pytest.mark.skipif(sys.platform != "linux", reason="CI shell assertions require the Linux producer environment")
 def test_ci_startup_reports_actual_execution_mode(runner, tmp_path, event, policy, selection_mode, expected):
     source = (ROOT / ".codebuild/ci.sh").read_text(encoding="utf-8")
     activation = source.split("# LEAF_PR_TIER_ACTIVATION_BEGIN\n", 1)[1].split(
@@ -430,6 +587,7 @@ def test_ci_startup_reports_actual_execution_mode(runner, tmp_path, event, polic
 @pytest.mark.skipif(not shutil.which("bash"), reason="CI gate argument execution requires bash")
 @pytest.mark.parametrize("event", ["PULL_REQUEST_CREATED", "PULL_REQUEST_UPDATED", "PULL_REQUEST_REOPENED",
                                    "PUSH", "pin", "PULL_REQUEST_MERGED"])
+@pytest.mark.skipif(sys.platform != "linux", reason="CI shell assertions require the Linux producer environment")
 def test_ci_committed_policy_runs_pr_tier_but_keeps_main_and_pin_full(
         runner, monkeypatch, tmp_path, capsys, event):
     source = (ROOT / ".codebuild/ci.sh").read_text(encoding="utf-8")
@@ -454,6 +612,7 @@ def test_ci_committed_policy_runs_pr_tier_but_keeps_main_and_pin_full(
     # Keep real catalog ownership while replacing suite execution with inert results.
     suites = [runner.Suite(r["id"], r["label"], r["kind"], ROOT / r["cwd"], r["command"], 1)
               for r in catalog["suites"]]
+    current_ids = {r["id"] for r in catalog["suites"]}
     document = json.loads((ROOT / "scripts/ci/pr-tier.json").read_text(encoding="utf-8"))
     assert document["enabled"] is True
     monkeypatch.setenv("LEAF_CHANGED_PATHS", '["server/tests/test_autofill_adapter.py"]')
@@ -463,8 +622,10 @@ def test_ci_committed_policy_runs_pr_tier_but_keeps_main_and_pin_full(
     assert rc == 0
     if is_pr:
         assert {"server-adapter-autofill", "server-auth"}.isdisjoint(document["suite_ids"])
-        expected = set(document["suite_ids"]) | {"server-adapter-autofill", "server-auth"}
-        assert set(ran) == expected < set(document["catalog_suite_ids"])
+        expected = ((set(document["suite_ids"]) & current_ids)
+                    | (current_ids - set(document["catalog_suite_ids"]))
+                    | {"server-adapter-autofill", "server-auth"})
+        assert set(ran) == expected < current_ids
         assert set(runner.PR_TIER_PREREQUISITES) <= set(ran)
         assert data["mode"] == data["execution_mode"] == data["selection_mode"] == "tier"
         assert all(entry["mode"] == "tier" for entry in data["results"])
@@ -475,17 +636,17 @@ def test_ci_committed_policy_runs_pr_tier_but_keeps_main_and_pin_full(
         assert "mode=tier cannot prove a full gate" in capsys.readouterr().out
         assert not proof.exists()
     else:
-        assert set(ran) == set(document["catalog_suite_ids"])
+        assert set(ran) == current_ids
         assert "mode" not in data
         assert "tier" not in data["selection"]
 
 
-def test_committed_policy_is_enabled_and_bound_to_unchanged_catalog(generator, runner):
-    document = json.loads((ROOT / "scripts/ci/pr-tier.json").read_text(encoding="utf-8"))
+def test_committed_historical_policy_is_enabled_and_compatible(generator, runner):
+    path = ROOT / "scripts/ci/pr-tier.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
     catalog = runner.selection_catalog(ROOT)
     assert document["enabled"] is True
-    assert document["generated_from"]["catalog_sha256"] == catalog["catalog_sha256"]
-    assert document["catalog_suite_ids"] == sorted(row["id"] for row in catalog["suites"])
+    assert runner.load_pr_tier(path) == document
     assert "web-version-restore-proof" in document["suite_ids"]
     # Evidence inputs are copied into the task worktree, not shipped with CI.
     paths = [ROOT / name for name in ("pr-tier-proposal.json", "fail30.json", "sentinels-strict.json")]
@@ -493,6 +654,7 @@ def test_committed_policy_is_enabled_and_bound_to_unchanged_catalog(generator, r
         assert generator.generate(*paths, catalog=catalog, enabled=True) == document
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="CI shell assertions require the Linux producer environment")
 def test_owned_ci_tests_pass_with_ambient_explicit_full():
     if os.environ.get("LEAF_CI_FULL") == "1":
         pytest.skip("Already running with ambient explicit full")
