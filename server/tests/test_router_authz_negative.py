@@ -644,3 +644,16 @@ def test_integration_bridge_refuses_unauthenticated(client, monkeypatch, method,
         response = http.request(method, path, headers={},
                                 json={} if method in {"POST", "PUT"} else None)
     assert response.status_code == 401, response.text
+
+
+B03_PREVIEW_ASSET = '/api/projects/00000000-0000-0000-0000-000000000003/browser/source/requests/00000000-0000-0000-0000-000000000004/preview/00000000-0000-0000-0000-000000000005/asset'
+
+def test_b03_preview_missing_or_invalid_auth_cannot_dispatch(monkeypatch):
+    from routers import browser_project
+    import browser_static_preview
+    for name,value in _ENV.items():monkeypatch.setenv(name,value)
+    monkeypatch.setattr(browser_static_preview,'asset',lambda *a:pytest.fail('unauthenticated dispatch'))
+    app=FastAPI();app.include_router(browser_project.router)
+    with TestClient(app) as client:
+        for headers in ({},{'Authorization':'Bearer invalid'}):
+            assert client.get(B03_PREVIEW_ASSET,headers=headers).status_code in (401,403)
