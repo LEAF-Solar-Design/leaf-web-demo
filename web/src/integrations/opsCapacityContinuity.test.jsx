@@ -6,7 +6,7 @@ import { OpsWorkspaceGround } from './OpsWorkspaceGround.jsx'
 import { createIntegrationsClient } from './client.js'
 
 vi.mock('../site/SurfaceFrame.jsx', () => ({ useSurfaceFrame: () => undefined }))
-vi.mock('../api.js', () => ({ authHeaders: () => ({ Authorization: 'Bearer synthetic-only' }), noteUnauthorized: vi.fn() }))
+vi.mock('../api.js', () => ({ authHeaders: () => ({ Authorization: 'Bearer current' }), noteUnauthorized: vi.fn() }))
 vi.mock('../projects/api.js', () => ({ listProjectReferences: vi.fn(), readProjectReferenceOriginal: vi.fn() }))
 
 // Public synthetic input only. No provider, credential or historical account data.
