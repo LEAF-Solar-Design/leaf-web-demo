@@ -324,6 +324,47 @@ def _same_json_value(left: Any, right: Any) -> bool:
     return left == right
 
 
+def _execution_input_row(cur, org_id, project_id, version_id):
+    cur.execute(
+        "SELECT i.*, v.provenance, v.intake_ref, v.oss_object, v.import_fingerprint "
+        "FROM arlo_lab_inputs i "
+        "JOIN drawing_versions v ON v.version_id = i.input_version_id "
+        "AND v.org_id = i.org_id AND v.project_id = i.project_id "
+        "JOIN live_projects p ON p.org_id = i.org_id AND p.project_id = i.project_id "
+        "WHERE i.org_id = %(org)s AND i.project_id = %(project)s "
+        "AND i.input_version_id = %(version)s AND v.deleted_at IS NULL",
+        {"org": org_id, "project": project_id, "version": version_id})
+    return cur.fetchone()
+
+
+def _input_provenance_checks(row, version_id):
+    provenance = row["provenance"]
+    is_object = isinstance(provenance, dict)
+    expected = REFERENCE_CONTRACT if row["example_id"] == REFERENCE_SOURCE else CONTRACT
+    return {"provenance_is_object": is_object,
+            "contract_matches": is_object and provenance.get("contract") == expected,
+            "input_sha256_matches": is_object and provenance.get("input_sha256") == row["input_sha256"],
+            "intake_ref_matches": row["intake_ref"] == f"arlo_lab_inputs:{version_id}",
+            "oss_object_is_null": row["oss_object"] is None}
+
+
+def _input_provenance_diagnostic(cur, org_id, project_id, version_id):
+    # This is an API reader's observation, never an attestation of the worker's
+    # imported module. No raw provenance, request, storage ref or path is exposed.
+    report = {"reader_context": "api_not_worker",
+              "reader_module_file_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
+    row = _execution_input_row(cur, org_id, project_id, version_id)
+    report["registered_input_found"] = row is not None
+    if row is not None:
+        report["predicates"] = _input_provenance_checks(row, version_id)
+        report["value_types"] = {key: type(row[key]).__name__ for key in
+                                 ("example_id", "input_sha256", "provenance", "intake_ref", "oss_object")}
+        provenance = row["provenance"]
+        report["provenance_value_types"] = {key: type(provenance.get(key)).__name__ for key in
+                                            ("contract", "input_sha256")} if isinstance(provenance, dict) else {}
+    return report
+
+
 def load_registered_request(job_context: dict, submitted_params: dict) -> dict:
     """Bind canonical submission and execution to the exact persisted input."""
     org_id = uuid.UUID(str(job_context["org_id"]))
@@ -331,23 +372,12 @@ def load_registered_request(job_context: dict, submitted_params: dict) -> dict:
     version_id = uuid.UUID(str(job_context["input_version_id"]))
     with connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT i.*, v.provenance, v.intake_ref, v.oss_object, v.import_fingerprint "
-                "FROM arlo_lab_inputs i "
-                "JOIN drawing_versions v ON v.version_id = i.input_version_id "
-                "AND v.org_id = i.org_id AND v.project_id = i.project_id "
-                "JOIN live_projects p ON p.org_id = i.org_id AND p.project_id = i.project_id "
-                "WHERE i.org_id = %(org)s AND i.project_id = %(project)s "
-                "AND i.input_version_id = %(version)s AND v.deleted_at IS NULL",
-                {"org": org_id, "project": project_id, "version": version_id})
-            row = cur.fetchone()
+            row = _execution_input_row(cur, org_id, project_id, version_id)
     if row is None:
         raise ValueError("registered ARLO model input is unavailable")
     provenance = row["provenance"]
     expected_contract = REFERENCE_CONTRACT if row["example_id"] == REFERENCE_SOURCE else CONTRACT
-    if not isinstance(provenance, dict) or provenance.get("contract") != expected_contract \
-            or provenance.get("input_sha256") != row["input_sha256"] \
-            or row["intake_ref"] != f"arlo_lab_inputs:{version_id}" or row["oss_object"] is not None:
+    if not all(_input_provenance_checks(row, version_id).values()):
         raise ValueError("registered ARLO input provenance mismatch")
     if expected_contract == REFERENCE_CONTRACT:
         source = {"contract": REFERENCE_CONTRACT, "material_id": row["example_version"],
@@ -368,7 +398,9 @@ def load_registered_request(job_context: dict, submitted_params: dict) -> dict:
 
 
 def job_view(org_id: uuid.UUID, project_id: uuid.UUID, binding_id: uuid.UUID,
-             job_id: uuid.UUID, *, cancel: bool = False) -> dict:
+             job_id: uuid.UUID, *, cancel: bool = False, input_diagnostics: bool = False) -> dict:
+    if cancel and input_diagnostics:
+        raise ValueError("input diagnostics are read-only")
     def operation(conn):
         with conn.cursor() as cur:
             _scope(cur, org_id, project_id, binding_id, write=cancel)
@@ -407,5 +439,8 @@ def job_view(org_id: uuid.UUID, project_id: uuid.UUID, binding_id: uuid.UUID,
                 "solver_result": (canonical_text(result["solver_result"])
                                   if isinstance(result.get("solver_result"), dict) else None),
             }
+            if input_diagnostics:
+                view["input_diagnostics"] = _input_provenance_diagnostic(
+                    cur, org_id, project_id, row["input_version_id"])
             return {"job": view}
     return run_transaction(operation, isolation="serializable")
