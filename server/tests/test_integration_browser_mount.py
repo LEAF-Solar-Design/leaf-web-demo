@@ -8,7 +8,7 @@ import pytest
 import deps
 import service_browser_sessions as sessions
 from route_flatten import iter_leaf_routes
-from test_integration_browser import (BINDING, ELEMENT_PATH, LOCAL, PROJECT, SCOPE,
+from test_integration_browser import (BINDING, ELEMENT_PATH, LOCAL, PROJECT, SCOPE, UPSTREAM,
                                       SCOPE_PATH, SECRET, SUBJECT, TOKEN, context)
 
 
@@ -104,9 +104,28 @@ def test_registered_bridge_checks_current_tenant_subject(mounted, context, monke
     assert not context["calls"]
 
 
-@pytest.mark.parametrize("resource", ["connections", "actions", "manual-workflow-runs"])
+@pytest.mark.parametrize("resource", ["connections/fixture/vercel/attempt", "actions", "manual-workflow-runs"])
 def test_registration_does_not_admit_provider_or_workflow_routes(mounted, context, resource):
     _, send = mounted
     response = send(path=f"/api/v1/projects/{PROJECT}/integrations/{resource}")
     assert response.status_code == 404
+    assert not context["calls"]
+
+
+@pytest.mark.parametrize("resource", ["connections", "connections/fixture",
+    "connections/fixture/vercel/preview-permission"])
+def test_registered_connection_lookups_retain_fixed_authorized_upstream(mounted, context, resource):
+    _, send = mounted
+    path = f"/api/v1/projects/{PROJECT}/integrations/{resource}"
+    response = send(path=path)
+    assert response.status_code == 200
+    [sent] = context["calls"]
+    assert sent.method == "GET" and str(sent.url) == UPSTREAM + path
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT"])
+def test_registered_connection_mutations_remain_denied(mounted, context, method):
+    _, send = mounted
+    response = send(method=method, path=f"/api/v1/projects/{PROJECT}/integrations/connections")
+    assert response.status_code == 405
     assert not context["calls"]
