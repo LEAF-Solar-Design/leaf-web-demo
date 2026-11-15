@@ -74,6 +74,24 @@ function detailedEnvelope() {
 }
 
 describe('ARLO review in the existing workspace result panel', () => {
+  it.each([null, 7, [], {}, { proposal_id: ' ' }, { ...proposal }])('refuses a malformed or duplicate member without losing stored bytes: %j', async member => {
+    const stored = envelope()
+    stored.result.solver_result.proposals = [proposal, member]
+    const original = JSON.stringify(stored.result)
+    render(<ArloProposalReview envelope={stored.result} context={context} currentProject={currentProject} />)
+    expect(screen.getByRole('alert').textContent).toContain('proposal identity is missing or duplicated')
+    expect(screen.getByText('Feeder design incomplete')).toBeTruthy()
+    expect(screen.queryByLabelText('Feeder proposal')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Accept proposal' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Reject proposal' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Export result' }).disabled).toBe(false)
+    const preview = JSON.parse(screen.getByLabelText('Export JSON preview').textContent)
+    expect(preview.envelope).toEqual(stored.result)
+    expect(JSON.stringify(stored.result)).toBe(original)
+    expect(saveArloReview).not.toHaveBeenCalled()
+    await waitFor(() => expect(getArloReviews).toHaveBeenCalled())
+  })
+
   it.each(['initial', 'project'])('shows solver diagnostic limitations in the %s view and retains them in the export preview', async view => {
     const captured = captureDownload(), stored = envelope()
     Object.assign(stored.result.solver_result, {
