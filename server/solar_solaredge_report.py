@@ -28,6 +28,7 @@ import solar_solaredge_parse_worker as parse_worker
 import solar_artifacts
 import solar_import_sources
 import solar_solaredge_import as si
+import solar_panel_group_kernel as panel_kernel
 from leaf_cloud_client import canonical_bytes
 from solar_design_graph import GraphValidationError
 from solar_graph_context import resolve_graph_context
@@ -35,6 +36,9 @@ from solar_sizing_client import digest, units_resolved
 
 REPORT_TOOL = "solar-solaredge-report"
 REPORT_SCHEMA = "leaf.solar-solaredge-report.v1"
+ATOMIC_POLICY = "atomic-v1"
+WHOLE_MATRIX_POLICY = "whole-matrix-v1"
+MATCHING_POLICIES = frozenset({ATOMIC_POLICY, WHOLE_MATRIX_POLICY})
 REQUEST_SCHEMA = "leaf.solar-solaredge-report-request.v1"
 RESULT_SCHEMA = "leaf.solar-solaredge-report-result.v1"
 REPORT_KIND = "solaredge-report"
@@ -103,7 +107,30 @@ def _report_candidates(match):
     return listed
 
 
-def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_order, associations=None):
+def _recorded_import_angle(frames, panels):
+    """Only the imported-geometry producer path supplies an independent rotation."""
+    if any(frame.get("extra", {}).get("grouping_basis") != "geometry-only"
+           or frame.get("provenance", {}).get("created_by") != "solar-panel-groups"
+           for frame in frames):
+        return None
+    angles = []
+    for panel in panels:
+        angle = panel.get("angle")
+        if (panel.get("provenance", {}).get("created_by") != "solar-panels-from-drawing"
+                or type(angle) not in (int, float) or not math.isfinite(angle)):
+            return None
+        angle = math.radians(angle)
+        if angles:
+            delta = (angle - angles[0] + math.pi / 4) % (math.pi / 2) - math.pi / 4
+            if abs(delta) > 1e-6:
+                return None
+            angle = angles[0] + delta
+        angles.append(angle)
+    return sorted(angles)[len(angles) // 2] if angles else None
+
+
+def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_order, associations=None,
+                         matching_policy=ATOMIC_POLICY):
     """Review every frame; unresolved rows retain all candidates and null PDF indexes.
 
     Unique matches keep the existing matched-row format. Unresolved rows also carry
@@ -111,6 +138,8 @@ def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_orde
     """
     if not units_resolved(graph):
         raise SolarEdgeReportError("REPORT_UNITS_UNRESOLVED")
+    if type(matching_policy) is not str or matching_policy not in MATCHING_POLICIES:
+        raise SolarEdgeReportError("REPORT_REQUEST_INVALID")
     frames = graph["frames"]
     if not frames:
         raise SolarEdgeReportError("REPORT_FRAMES_REQUIRED")
@@ -139,10 +168,19 @@ def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_orde
                                   "y": float(panel["centre"][1])})
         groups.append({"block": frame["id"], "panels": handles})
     try:
-        row_angle = si.lattice_row_angle([(p["x"], p["y"]) for p in kernel_panels])
+        centres = [(p["x"], p["y"]) for p in kernel_panels]
+        try:
+            row_angle = si.lattice_row_angle(centres)
+        except si.SolarEdgeImportError as exc:
+            angle = _recorded_import_angle(frames, [panels[ref_of[p["handle"]]] for p in kernel_panels])
+            if exc.code != "lattice-angle-ambiguous" or angle is None:
+                raise
+            row_angle = si.lattice_row_angle(centres, recorded_angle=angle,
+                coordinate_tolerance=panel_kernel.INTAKE_COORD_QUANTUM)
+        whole = {"allow_whole_matrices": True} if matching_policy == WHOLE_MATRIX_POLICY else {}
         result = si.run_import(matrices, groups, kernel_panels, row_angle=row_angle,
                                alignment_tolerance=alignment_tolerance, selection_order=selection_order,
-                               review=True, associations=associations)
+                               review=True, associations=associations, **whole)
     except si.SolarEdgeImportError as exc:
         code = {
             "ambiguous-structural-match": "REPORT_AMBIGUOUS_MATCH",

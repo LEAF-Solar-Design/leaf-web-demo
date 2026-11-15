@@ -746,6 +746,7 @@ const PROJECT_SOLAR_SUPPORTED_TOOLS = new Set([
   'solar-string-conductors', 'solar-assign-equipment', 'solar-panels-from-drawing', 'solar-panel-groups',
   'solar-homeruns', 'solar-schedule', 'solar-feeders', 'solar-string-data',
   'solar-electrical-schedules', 'solar-cable-export',
+  'solar-solaredge-accept', 'solar-solaredge-tracking-read',
 ])
 
 function useEngineViewArmed(projectMode) {

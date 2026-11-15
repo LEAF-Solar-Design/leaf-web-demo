@@ -308,9 +308,10 @@ class TestValidationMemo:
         calls = []
         real = sdg._bounded_json
 
-        def spy(value):
+        def spy(value, *, max_nodes):
+            assert max_nodes == sdg.MAX_GRAPH_NODES
             calls.append(value)
-            return real(value)
+            return real(value, max_nodes=max_nodes)
 
         monkeypatch.setattr(sdg, "_bounded_json", spy)
         validate_graph(graph)

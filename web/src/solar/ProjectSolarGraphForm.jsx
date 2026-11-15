@@ -42,11 +42,13 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
   const [panelDraft, setPanelDraft] = useState(null)
   const [panelContext, setPanelContext] = useState(null)
   const [membership, setMembership] = useState(null)
+  const [geometryMode, setGeometryMode] = useState(null)
+  const geometryOnly = name === 'solar-panel-groups' && geometryMode?.scope === scope && geometryMode.enabled
   const panelMode = membership?.scope === scope ? membership.mode : 'manual'
   const panelInputs = panelDraft?.scope === scope ? panelDraft : { names: {}, numbers: {} }
   const panelGraph = panelContext?.scope === scope ? panelContext.graph : null
   const panelProposals = proposePanelGroups(panelGraph, panelInputs.numbers)
-  const panelInputKey = name === 'solar-panel-groups' ? JSON.stringify([panelMode, panelInputs.names, panelInputs.numbers]) : ''
+  const panelInputKey = name === 'solar-panel-groups' ? JSON.stringify([panelMode, geometryOnly, panelInputs.names, panelInputs.numbers]) : ''
   function groupInputs(proposals) {
     return proposals.map((proposal, index) => ({ key: proposal.key,
       name: panelInputs.names[proposal.key] ?? `Group ${index + 1}` }))
@@ -182,7 +184,7 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
           else groups = checked.value
         }
         const validate = buildProjectSolarGraphRequest({ tool: name, binding, state, currentState: state,
-          insertionPointText, groups, discover, catalogDigest, idempotencyKey: 'candidate-validation' })
+          insertionPointText, groups, discover, geometryOnly: Boolean(geometryOnly), catalogDigest, idempotencyKey: 'candidate-validation' })
         if (!validate.ok) { setCurrent({ state, reason: validate.reason }, pending.generation); return }
         phase = 'prepare'
         const fingerprint = JSON.stringify([validate.request, state.intakeSha256,
@@ -190,7 +192,7 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
         let candidate = scope.candidate
         if (!candidate || candidate.fingerprint !== fingerprint) {
           const built = buildProjectSolarGraphRequest({ tool: name, binding, state, currentState: state,
-            insertionPointText, groups, discover, catalogDigest, idempotencyKey: latest.current.newProjectIntentKey() })
+            insertionPointText, groups, discover, geometryOnly: Boolean(geometryOnly), catalogDigest, idempotencyKey: latest.current.newProjectIntentKey() })
           if (!built.ok) { setCurrent({ state, reason: built.reason }, pending.generation); return }
           candidate = { fingerprint, state, proposalKey: proposals ? proposalKey(proposals) : null,
             intent: projectClient.prepareRun(built.request) }
@@ -290,7 +292,7 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
         else groups = checked.value
       }
       const built = buildProjectSolarGraphRequest({ tool: name, binding, state: armed.candidate.state,
-        currentState, insertionPointText, groups, discover, catalogDigest, idempotencyKey: armed.candidate.intent.idempotencyKey })
+        currentState, insertionPointText, groups, discover, geometryOnly: Boolean(geometryOnly), catalogDigest, idempotencyKey: armed.candidate.intent.idempotencyKey })
       if (!built.ok) {
         scope.armed = null
         setCurrent({ reason: built.reason }, pending.generation)
@@ -364,6 +366,11 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
     {currentView?.state && <p>Graph revision {currentView.state.rev}</p>}
     {name === 'solar-panel-groups' && <fieldset disabled={busy || Boolean(scope.lock) || scope.blocked}>
       <legend>Panel group membership</legend>
+      <label><input type="checkbox" checked={Boolean(geometryOnly)} onChange={(event) => {
+        invalidate(true)
+        setGeometryMode({ scope, enabled: event.target.checked })
+      }} />Create geometry groups for imported tracking</label>
+      {geometryOnly && <p>For roof drawings without electrical assignments. Electrical sizing and module power remain unknown.</p>}
       <label>Membership source<select value={panelMode} onChange={(event) => {
         invalidate(true)
         setMembership({ scope, mode: event.target.value })
@@ -410,6 +417,16 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
             setPanelDraft({ scope, names: panelInputs.names, numbers: { ...panelInputs.numbers, [key]: event.target.value } })
           }} />
       </label>)}
+      <label>Gap measurement
+        <select value={panelInputs.numbers.gap_measurement ?? 'outlines'} onChange={(event) => {
+          invalidate(true)
+          setPanelDraft({ scope, names: panelInputs.names,
+            numbers: { ...panelInputs.numbers, gap_measurement: event.target.value } })
+        }}>
+          <option value="outlines">Outline separation</option>
+          <option value="centers">Panel center distance</option>
+        </select>
+      </label>
       <label>Gap between groups
         <input type="number" min="0" step="any" value={panelInputs.numbers.gap_distance ?? ''}
           aria-describedby="panel-group-gap-help"
@@ -420,6 +437,9 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
           }} />
       </label>
       <p id="panel-group-gap-help">Drawing units. Enter a positive distance, or leave blank to group by angle.</p>
+      <p>{panelInputs.numbers.gap_measurement === 'centers'
+        ? 'The gap is the maximum center-to-center distance that connects neighboring panels.'
+        : 'The gap is the maximum separation between neighboring panel outlines.'}</p>
       <p role="status">{panelProposals.singletons} singleton panels cannot be grouped.</p>
       {panelProposals.invalid_handles > 0 && <p role="status">
         {panelProposals.invalid_handles} panels have a drawing handle that cannot be grouped.

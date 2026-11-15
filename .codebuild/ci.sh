@@ -568,6 +568,77 @@ fields = [
 ]
 print(" ".join(k + "=" + q(v) for k, v in fields))
 ' "${BASH_SOURCE[0]}" "$(case "${LEAF_GATE_JOBS:-auto}" in ''|*[!0-9]*|0*) echo unknown ;; *) echo "$LEAF_GATE_JOBS" ;; esac)")"
+# LEAF_SELECTED_SHARDS_BEGIN
+selected_partition_ready=0
+if [[ "${CI_SHARD_MODE:-all}" == shard && ${#only_args[@]} != 0 && "${LEAF_DIAGNOSTIC_PROFILE:-}" != web-demo-suite ]]; then
+  selected_timings="$selection_dir/selected-suite-seconds.json"
+  selected_plan="$selection_dir/selected-shards.json"
+  selected_plan_ok=0
+  if git --no-replace-objects show "$TRUSTED_SHA:scripts/ci/selected_shards.py" > "$selection_dir/selected_shards.py" \
+      && chmod 400 "$selection_dir/selected_shards.py"; then
+    if git --no-replace-objects show "$TRUSTED_SHA:scripts/ci/selected-suite-seconds.json" > "$selected_timings"; then
+      chmod 400 "$selected_timings"
+    else
+      # A missing snapshot is an empty timing input, never an ambient override.
+      rm -f "$selected_timings"
+      echo 'WARNING: trusted selected timings unavailable; using equal-count partition' >&2
+    fi
+    if python -I -B "$selection_dir/selected_shards.py" plan \
+        --catalog "$selection_dir/runner-catalog.json" --only-args "$selection_dir/only-args.nul" \
+        --timings "$selected_timings" --shard-count "$CI_SHARD_TOTAL_N" --shard-index "$CI_SHARD_INDEX_N" \
+        --output "$selected_plan" \
+      && python -I -B - "$selected_plan" "$CI_SHARD_TOTAL_N" "$CI_SHARD_INDEX_N" > "$selection_dir/selected-shard-count" <<'LEAF_SELECTED_SHARDS_VALIDATE'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as source:
+        plan = json.load(source)
+    count, index = map(int, sys.argv[2:])
+    if plan.get("schema") != "leaf.ci.selected-shards.v1":
+        raise ValueError("invalid selected shard schema")
+    selected, shards, local = (plan[key] for key in ("selected_ids", "shards", "shard_ids"))
+    def ids(value):
+        return isinstance(value, list) and all(isinstance(item, str) and item and "\0" not in item for item in value)
+    if not ids(selected) or not selected or len(set(selected)) != len(selected):
+        raise ValueError("invalid selected IDs")
+    if not isinstance(shards, list) or len(shards) != count or not all(ids(shard) for shard in shards):
+        raise ValueError("invalid shard count or lists")
+    flattened = [item for shard in shards for item in shard]
+    if len(flattened) != len(selected) or set(flattened) != set(selected) or not shards[0]:
+        raise ValueError("incomplete or duplicate partition")
+    if not ids(local) or local != shards[index]:
+        raise ValueError("invalid local shard IDs")
+    if plan.get("shard_count", count) != count or plan.get("shard_index", index) != index:
+        raise ValueError("incorrect shard coordinates")
+    algorithm = plan.get("algorithm")
+    if algorithm not in ("lpt", "equal-count"):
+        raise ValueError("invalid partition algorithm")
+    print(len(local))
+    print("LEAF_SELECTED_SHARDS algorithm={} selected={} local={} index={} total={}".format(
+        algorithm, len(selected), len(local), index, count), file=sys.stderr)
+except (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError) as exc:
+    print("WARNING: selected partition rejected: " + str(exc)[:300], file=sys.stderr)
+    raise SystemExit(2)
+LEAF_SELECTED_SHARDS_VALIDATE
+    then
+      chmod 400 "$selected_plan"
+      selected_plan_ok=1
+      selected_partition_ready=1
+    fi
+  fi
+  if [[ "$selected_plan_ok" != 1 ]]; then
+    echo 'WARNING: selected partition unavailable; conservative fallback runs original complete selection on shard 0 without shard flags' >&2
+    if [[ "$CI_SHARD_INDEX_N" != 0 ]]; then
+      echo 'FATAL: selected partition unavailable on nonzero shard; refusing a missing-slice GREEN' >&2
+      exit 2
+    fi
+  elif [[ "$(<"$selection_dir/selected-shard-count")" == 0 && "$CI_SHARD_INDEX_N" != 0 ]]; then
+    echo "LEAF_SELECTED_SHARDS empty index=$CI_SHARD_INDEX_N; exiting before setup"
+    exit 0
+  fi
+fi
+# LEAF_SELECTED_SHARDS_END
 echo "LEAF_T start setup $(date +%s%3N)"
 
 # Playwright supplies Chromium. The unused Chrome apt index must not prevent
@@ -1235,10 +1306,14 @@ if [[ -n "${dep_cache_publish_pid:-}" ]]; then
   cat "$dep_cache_publish_log" || true
   rm -f "$dep_cache_publish_log" || true
 fi
-if [[ "${CI_SHARD_MODE:-all}" == all || ${#only_args[@]} == 0 || "$CI_SHARD_INDEX_N" == 0 ]]; then
+# LEAF_SELECTED_SHARDS_GATE_BEGIN
+if [[ "${CI_SHARD_MODE:-all}" == all || ${#only_args[@]} == 0 || "$CI_SHARD_INDEX_N" == 0 || "$selected_partition_ready" == 1 ]]; then
 if [[ "${CI_SHARD_MODE:-all}" == shard && ${#only_args[@]} == 0 ]]; then
   only_args+=(--shard-count "$CI_SHARD_TOTAL_N" --shard-index "$CI_SHARD_INDEX_N")
+elif [[ "$selected_partition_ready" == 1 ]]; then
+  only_args+=(--shard-count "$CI_SHARD_TOTAL_N" --shard-index "$CI_SHARD_INDEX_N" --selected-shard-plan "$selected_plan")
 fi
+# LEAF_SELECTED_SHARDS_GATE_END
 # Throwaway PostgreSQL so the db_gated and uses_database suites RUN instead of
 # skipping. The runner hands LEAF_GATE_DATABASE_URL to those suites only, as
 # their DATABASE_URL; an ambient DATABASE_URL would switch unrelated suites into
@@ -1329,8 +1404,15 @@ if [[ "$postgres_status" != 0 && "$gate_status" == 0 ]]; then
   gate_status=1
 fi
 else
-  echo "gate: selected mode runs on shard 0 only"
-  gate_status=0
+  # LEAF_SELECTED_SHARDS_GATE_FALLBACK_BEGIN
+  if [[ "${LEAF_DIAGNOSTIC_PROFILE:-}" == web-demo-suite ]]; then
+    echo "gate: diagnostic selected execution remains on shard 0"
+    gate_status=0
+  else
+    echo "FATAL: selected shard reached gate without a validated partition" >&2
+    gate_status=2
+  fi
+  # LEAF_SELECTED_SHARDS_GATE_FALLBACK_END
 fi
 echo "LEAF_T end gate $(date +%s%3N) rc=$gate_status"
 # Reuse evidence (plan ci-test-selection-20260925 S1): the shard's own result, immutable and advisory.

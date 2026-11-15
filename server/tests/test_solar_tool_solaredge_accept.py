@@ -222,7 +222,8 @@ def test_solaredge_accept_declaration():
             "params": {"type": "object", "properties": {
                 "drawing_id": {"type": "string", "maxLength": 128},
                 "expected_rev": {"type": "integer", "minimum": 0, "maximum": 2147483647},
-                "report_artifact_id": {"type": "string", "minLength": 64, "maxLength": 64}},
+                "report_artifact_id": {"type": "string", "minLength": 64, "maxLength": 64},
+                "accept_matched_only": {"type": "boolean"}},
                 "required": ["expected_rev", "report_artifact_id"], "additionalProperties": False},
             "returns": {"type": "object"}, "capabilities": ["drawing.write"],
             "allow_local_fallback": False},
