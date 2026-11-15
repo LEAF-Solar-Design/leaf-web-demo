@@ -6,6 +6,7 @@ import {
   confirmProjectSource, recoverProjectSource, rejectProjectSource, exportProjectSourceBundle, validateProjectSource,
 } from '../api.js'
 import { isSecretRefused } from '../lib/secretGuardTransport.js'
+import { sourceInitializationMessage } from '../lib/sourceFailureDiagnostic.js'
 import { exportProjectNativeSourceBundle, loadProjectNativePreview, submitProjectSourceNativePreview, validateNativePreview } from './projectPageClient.js'
 
 const LIMIT = 8 * 1024 * 1024
@@ -289,7 +290,8 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
         publish({ sourceRefusal: refusalExpected, unknown: false, candidate: null, error: error.message })
       }
       else if (sent) {
-        publish({ unknown: true, candidate: null, error: 'Publication outcome unknown. Refresh the original request; do not stage it again.' })
+        publish({ unknown: true, candidate: null, error: sourceInitializationMessage(error, requestId)
+          + 'Publication outcome unknown. Refresh the original request; do not stage it again.' })
         try { await readBack(requestId) } catch { /* No repeat POST or editor on an unknown outcome. */ }
       } else publish({ error: minting ? 'Could not start this source action. Wait for the current conversation turn to finish.'
         : error?.message || 'This source action is unavailable.' })
