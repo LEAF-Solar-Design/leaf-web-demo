@@ -1,6 +1,7 @@
 """Sequential stdlib checks of synthetic offline support only."""
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -8,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -15,7 +17,106 @@ import unittest
 SCHEMA = "leaf.xbench.x01.offline-run.v1"
 ROOT = Path(__file__).resolve().parent
 TEXT_LIMIT = 16384
+MAX_CAPTURE_BYTES = 65536
+MAX_DIAGNOSTICS = 64
+MAX_DIAGNOSTIC_BYTES = 16384
+MAX_DEPTH = 8
 CHECKERS = ("check_cases.py", "check_plot_layers.py", "check_unit_equivalence.py")
+VECTORS = ("fill_coverage_cases.json", "module_geometry_cases.json", "tag_overlap_cases.json")
+
+
+def input_hash(path):
+    try:
+        digest = hashlib.sha256()
+        with open(path, "rb") as stream:
+            for chunk in iter(lambda: stream.read(65536), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def capture_child(command, timeout):
+    """Retain at most the capture cap; the reader kills a flooding direct child."""
+    raw = bytearray()
+    failures = []
+    try:
+        child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    except OSError:
+        return None, False, bytes(raw), "CHILD_LAUNCH_ERROR"
+
+    def read_output():
+        try:
+            while True:
+                chunk = os.read(child.stdout.fileno(), 4096)
+                if not chunk:
+                    break
+                remaining = MAX_CAPTURE_BYTES - len(raw)
+                raw.extend(chunk[:remaining])
+                if len(chunk) > remaining:
+                    failures.append("CHILD_OUTPUT_LIMIT")
+                    child.kill()
+                    break
+        except OSError:
+            failures.append("CHILD_OUTPUT_UNREADABLE")
+            if child.poll() is None:
+                child.kill()
+
+    reader = threading.Thread(target=read_output, name="x01-capture")
+    reader.start()
+    timed_out = False
+    try:
+        code = child.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        child.kill()
+        code = child.wait()
+    finally:
+        reader.join()
+        child.stdout.close()
+    failure = failures[0] if failures else "CHILD_TIMEOUT" if timed_out else None
+    return code, timed_out, bytes(raw), failure
+
+
+def structured_diagnostics(raw):
+    """Plain unittest text is valid; JSON-looking output must be safe JSON."""
+    if not raw.lstrip().startswith((b"{", b"[")):
+        return [], None
+    depth, quoted, escaped = 0, False, False
+    for byte in raw:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif byte == 92:
+                escaped = True
+            elif byte == 34:
+                quoted = False
+        elif byte == 34:
+            quoted = True
+        elif byte in (123, 91):
+            depth += 1
+            if depth > MAX_DEPTH:
+                return [], "CHILD_DIAGNOSTIC_LIMIT"
+        elif byte in (125, 93):
+            depth -= 1
+    try:
+        def reject_constant(value):
+            raise ValueError("nonfinite JSON")
+
+        payload = json.loads(raw, parse_constant=reject_constant)
+        # Also reject overflow such as 1e999, including outside diagnostics.
+        json.dumps(payload, allow_nan=False)
+    except (ValueError, TypeError, RecursionError, UnicodeError, OverflowError):
+        return [], "CHILD_OUTPUT_UNREADABLE"
+    if not isinstance(payload, dict):
+        return [], "CHILD_DIAGNOSTICS_INVALID"
+    diagnostics = payload.get("diagnostics", [])
+    if not isinstance(diagnostics, list) or any(not isinstance(item, dict) for item in diagnostics):
+        return [], "CHILD_DIAGNOSTICS_INVALID"
+    if (len(diagnostics) > MAX_DIAGNOSTICS or
+            len(json.dumps(diagnostics, allow_nan=False).encode("utf-8")) > MAX_DIAGNOSTIC_BYTES):
+        return [], "CHILD_DIAGNOSTIC_LIMIT"
+    return diagnostics, None
 
 
 def timeout_seconds(value):
@@ -36,57 +137,56 @@ def aggregate(rows):
     return "FAIL" if "FAIL" in verdicts else "UNREADABLE" if "UNREADABLE" in verdicts else "PASS"
 
 
-def run_checks(commands=None, timeout=30):
+def run_checks(commands=None, timeout=30, provenance_paths=None):
     """Run (checker name, argv) pairs; command injection is an internal test seam."""
     timeout = timeout_seconds(timeout)
     if commands is None:
         commands = [(name, [sys.executable, str(ROOT / name), "--self-test"])
                     for name in CHECKERS]
+    if provenance_paths is None:
+        provenance_paths = [("checker:" + name, ROOT / name) for name in CHECKERS]
+        provenance_paths += [("vector:" + name, ROOT / name) for name in VECTORS]
+    provenance_paths = list(provenance_paths)
+    provenance = [dict(name=name, sha256_before=input_hash(path), sha256_after=None)
+                  for name, path in provenance_paths]
     rows = []
     for name, command in commands:
         started = time.monotonic()
-        code, timed_out, output, failure = None, False, "", None
-        # A file avoids blocking on an unread pipe. Saved raw text is bounded,
-        # including on timeout; structured JSON diagnostics retain their shape.
-        with tempfile.TemporaryFile() as captured:
-            try:
-                child = subprocess.Popen(command, stdout=captured, stderr=subprocess.STDOUT)
-                try:
-                    code = child.wait(timeout=timeout)
-                except subprocess.TimeoutExpired:
-                    timed_out = True
-                    child.kill()
-                    code = child.wait()
-                    failure = "CHILD_TIMEOUT"
-            except OSError:
-                failure = "CHILD_LAUNCH_ERROR"
-            captured.seek(0)
-            raw = captured.read(TEXT_LIMIT + 1)
-            truncated = len(raw) > TEXT_LIMIT
-            output = raw[:TEXT_LIMIT].decode("utf-8", errors="replace")
-            captured.seek(0)
-            try:
-                payload = json.load(captured)
-            except (ValueError, TypeError):
-                payload = None
+        code, timed_out, raw, failure = capture_child(command, timeout)
+        truncated = len(raw) > TEXT_LIMIT
+        output = raw[:TEXT_LIMIT].decode("utf-8", errors="replace")
+        # Replacement characters can encode to more bytes than the input.
+        truncated = truncated or len(output.encode("utf-8")) > TEXT_LIMIT
+        output = output.encode("utf-8")[:TEXT_LIMIT].decode("utf-8", errors="ignore")
+        diagnostics, parse_failure = structured_diagnostics(raw) if not failure else ([], None)
+        failure = failure or parse_failure
         verdict = {0: "PASS", 1: "FAIL", 4: "UNREADABLE"}.get(code, "UNREADABLE")
         if failure:
             verdict = "UNREADABLE"
         elif code not in (0, 1, 4):
             failure = "CHILD_UNEXPECTED_EXIT"
-        diagnostics = []
-        if isinstance(payload, dict) and isinstance(payload.get("diagnostics"), list):
-            diagnostics = [item for item in payload["diagnostics"] if isinstance(item, dict)]
         if failure:
             diagnostics.append(dict(name=failure, checker=name))
+        if (len(diagnostics) > MAX_DIAGNOSTICS or
+                len(json.dumps(diagnostics).encode("utf-8")) > MAX_DIAGNOSTIC_BYTES):
+            verdict = "UNREADABLE"
+            diagnostics = [dict(name="CHILD_DIAGNOSTIC_LIMIT", checker=name)]
         if not diagnostics:
-            diagnostics.append(dict(name="CHILD_OUTPUT", checker=name, text=output,
+            diagnostics.append(dict(name="CHILD_OUTPUT", checker=name, text=output[:2048],
                                     truncated=truncated))
         rows.append(dict(checker=name, verdict=verdict, exit_code=code,
                          timeout=timed_out, duration_seconds=time.monotonic() - started,
                          diagnostics=diagnostics, output=output, output_truncated=truncated))
+    top_diagnostics = []
+    for entry, (_, path) in zip(provenance, provenance_paths):
+        entry["sha256_after"] = input_hash(path)
+        if entry["sha256_before"] is None or entry["sha256_after"] is None:
+            top_diagnostics.append(dict(name="INPUT_UNREADABLE", input=entry["name"]))
+        elif entry["sha256_before"] != entry["sha256_after"]:
+            top_diagnostics.append(dict(name="INPUT_CHANGED", input=entry["name"]))
     return dict(schema=SCHEMA, evidence_kind="synthetic_offline", live_grade=False,
-                verdict=aggregate(rows), checks=rows)
+                verdict="UNREADABLE" if top_diagnostics else aggregate(rows), checks=rows,
+                provenance=provenance, diagnostics=top_diagnostics)
 
 
 def write_atomic(path, result):
@@ -201,6 +301,131 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(json.loads(path.read_text()), result)
             self.assertEqual(list(Path(directory).iterdir()), [path])
 
+    def test_default_provenance(self):
+        result = run_checks([(name, self.stub("pass")) for name in CHECKERS])
+        expected = {"checker:" + name: ROOT / name for name in CHECKERS}
+        expected.update({"vector:" + name: ROOT / name for name in VECTORS})
+        self.assertEqual(len(result["provenance"]), 6)
+        self.assertEqual({entry["name"] for entry in result["provenance"]}, set(expected))
+        for entry in result["provenance"]:
+            digest = hashlib.sha256(expected[entry["name"]].read_bytes()).hexdigest()
+            self.assertEqual(entry["sha256_before"], digest)
+            self.assertEqual(entry["sha256_after"], digest)
+        self.assertEqual(result["diagnostics"], [])
+
+    def test_changed_provenance_overrides_pass_and_fail(self):
+        for exit_code in (0, 1):
+            with self.subTest(exit_code=exit_code), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "source.py"
+                vector = Path(directory) / "vector.json"
+                path.write_text("before", encoding="utf-8")
+                vector.write_text("{}", encoding="utf-8")
+                named = dict(name="CHILD_EVIDENCE", source_ids=["source/1"], vector_ids=["vector/1"])
+                source = ("from pathlib import Path; Path(" + repr(str(path)) + ").write_text('after'); "
+                          "print(" + repr(json.dumps(dict(diagnostics=[named]))) + "); "
+                          "raise SystemExit(" + str(exit_code) + ")")
+                result = run_checks([("stub", self.stub(source)), ("last", self.stub("pass"))],
+                                    provenance_paths=[("checker:source.py", path),
+                                                      ("vector:vector.json", vector)])
+                self.assertEqual(result["verdict"], "UNREADABLE")
+                self.assertEqual(result["diagnostics"], [dict(name="INPUT_CHANGED", input="checker:source.py")])
+                self.assertEqual(result["checks"][0]["verdict"], "FAIL" if exit_code else "PASS")
+                self.assertEqual(result["checks"][0]["diagnostics"], [named])
+                self.assertEqual(len(result["checks"]), 2)
+                self.assertEqual(result["checks"][1]["verdict"], "PASS")
+                self.assertNotEqual(result["provenance"][0]["sha256_before"],
+                                    result["provenance"][0]["sha256_after"])
+
+    def test_deleted_and_missing_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.py"
+            path.write_text("before", encoding="utf-8")
+            source = "from pathlib import Path; Path(" + repr(str(path)) + ").unlink()"
+            result = run_checks([("stub", self.stub(source))],
+                                provenance_paths=[("checker:source.py", path)])
+            self.assertEqual(result["verdict"], "UNREADABLE")
+            self.assertEqual(result["checks"][0]["verdict"], "PASS")
+            self.assertIsNotNone(result["provenance"][0]["sha256_before"])
+            self.assertIsNone(result["provenance"][0]["sha256_after"])
+            self.assertEqual(result["diagnostics"], [dict(name="INPUT_UNREADABLE", input="checker:source.py")])
+            result = run_checks([], provenance_paths=[("checker:source.py", path)])
+            self.assertIsNone(result["provenance"][0]["sha256_before"])
+            self.assertEqual(result["verdict"], "UNREADABLE")
+
+    def test_capture_boundary(self):
+        for size in (MAX_CAPTURE_BYTES, MAX_CAPTURE_BYTES + 1):
+            with self.subTest(size=size):
+                row = self.run_stub("import sys; sys.stdout.write('x' * " + str(size) + ")")["checks"][0]
+                self.assertEqual(row["verdict"], "PASS" if size == MAX_CAPTURE_BYTES else "UNREADABLE")
+                if size > MAX_CAPTURE_BYTES:
+                    self.assertEqual(row["diagnostics"][0]["name"], "CHILD_OUTPUT_LIMIT")
+                self.assertLessEqual(len(row["output"].encode("utf-8")), TEXT_LIMIT)
+
+    def test_flood_is_reaped_without_scratch_files(self):
+        from unittest.mock import patch
+        for source in ("import os\nwhile True: os.write(1, b'x' * 4096)",
+                       "import os; os.write(1, b'x' * 1000000)"):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
+                with patch.object(tempfile, "tempdir", directory):
+                    code, timed_out, raw, failure = capture_child(self.stub(source), 2)
+                self.assertIsInstance(code, int)
+                self.assertFalse(timed_out)
+                self.assertEqual(failure, "CHILD_OUTPUT_LIMIT")
+                self.assertEqual(len(raw), MAX_CAPTURE_BYTES)
+                self.assertEqual(list(Path(directory).iterdir()), [])
+        self.assertFalse(any(thread.name.startswith("x01-capture") for thread in threading.enumerate()))
+
+    def test_diagnostic_limits(self):
+        nested = 0
+        for _ in range(MAX_DEPTH):
+            nested = [nested]
+        payloads = [dict(diagnostics=[dict(name="x")] * 65),
+                    dict(diagnostics=[dict(name="x", text="x" * MAX_DIAGNOSTIC_BYTES)]),
+                    dict(diagnostics=[dict(name="x", nested=nested)])]
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                row = self.run_stub("print(" + repr(json.dumps(payload)) + ")")["checks"][0]
+                self.assertEqual(row["verdict"], "UNREADABLE")
+                self.assertEqual(row["diagnostics"][0]["name"], "CHILD_DIAGNOSTIC_LIMIT")
+        payload = dict(diagnostics=[dict(name="x")] * 64)
+        row = self.run_stub("print(" + repr(json.dumps(payload)) + ")")["checks"][0]
+        self.assertEqual(row["verdict"], "PASS")
+        self.assertEqual(len(row["diagnostics"]), 64)
+
+    def test_diagnostic_byte_boundary(self):
+        overhead = len(json.dumps([dict(name="x", text="")]).encode("utf-8"))
+        for extra in (0, 1):
+            diagnostics = [dict(name="x", text="x" * (MAX_DIAGNOSTIC_BYTES - overhead + extra))]
+            raw = json.dumps(dict(diagnostics=diagnostics)).encode("utf-8")
+            retained, failure = structured_diagnostics(raw)
+            if extra:
+                self.assertEqual(failure, "CHILD_DIAGNOSTIC_LIMIT")
+                self.assertEqual(retained, [])
+            else:
+                self.assertIsNone(failure)
+                self.assertEqual(retained, diagnostics)
+
+    def test_flood_reason_overrides_exit_one(self):
+        from unittest.mock import patch
+        with patch.object(sys.modules[__name__], "capture_child",
+                          return_value=(1, False, b"x" * MAX_CAPTURE_BYTES, "CHILD_OUTPUT_LIMIT")):
+            row = self.run_stub("pass")["checks"][0]
+        self.assertEqual(row["exit_code"], 1)
+        self.assertEqual(row["verdict"], "UNREADABLE")
+        self.assertEqual(row["diagnostics"][0]["name"], "CHILD_OUTPUT_LIMIT")
+
+    def test_unsafe_json_is_safe_report(self):
+        for raw in ('{"diagnostics": [', '{"diagnostics": [{"n": NaN}]}',
+                    '{"padding": Infinity}', '{"padding": 1e999}',
+                    '{"diagnostics": "bad"}', '{"diagnostics": [1]}',
+                    '[' * 2000 + '0' + ']' * 2000):
+            with self.subTest(raw=raw):
+                row = self.run_stub("print(" + repr(raw) + ")")["checks"][0]
+                self.assertEqual(row["verdict"], "UNREADABLE")
+                self.assertIn(row["diagnostics"][0]["name"],
+                              ("CHILD_OUTPUT_UNREADABLE", "CHILD_DIAGNOSTICS_INVALID", "CHILD_DIAGNOSTIC_LIMIT"))
+                json.dumps(row, allow_nan=False)
+
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
@@ -222,9 +447,11 @@ def main(argv=None):
     if args.output:
         try:
             write_atomic(args.output, result)
-        except OSError as error:
-            result["diagnostics"] = [dict(name="OUTPUT_WRITE_ERROR", message=str(error))]
-            result["verdict"] = aggregate(result["checks"] + [dict(verdict="UNREADABLE")])
+        except (OSError, ValueError, TypeError, OverflowError, RecursionError) as error:
+            result.setdefault("diagnostics", []).append(dict(
+                name="OUTPUT_WRITE_ERROR", message=str(error)))
+            if result["verdict"] == "PASS":
+                result["verdict"] = "UNREADABLE"
     print(json.dumps(result, sort_keys=True, allow_nan=False))
     return {"PASS": 0, "FAIL": 1, "UNREADABLE": 4}[result["verdict"]]
 
