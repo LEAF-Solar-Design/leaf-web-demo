@@ -1,5 +1,5 @@
 """X03 normal-route natural-language authoring benchmark, one prompt at a time."""
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from collections import Counter
 import csv
 import hashlib
@@ -102,15 +102,58 @@ class PromptFailure(RuntimeError):
     pass
 
 
+@contextmanager
+def author_authority(transport, row, project, drawing, evidence_dir, *, deadline=None):
+    """Use AuthorPanel's ordinary app-owned active-turn setup, never a grant."""
+    session_id = turn_id = None
+    events = []
+    def request(path, payload):
+        remaining = 60 if deadline is None else deadline - time.monotonic()
+        if remaining <= 0:
+            raise PromptFailure("per-prompt 600 second ceiling reached during author setup")
+        status, body = transport("POST", path, json_body=payload, timeout_s=min(60, remaining))
+        events.append({"path": path, "status": status,
+                       "reason_code": body.get("reason_code") if isinstance(body, dict) else None})
+        if not 200 <= status < 300:
+            raise PromptFailure("normal author context refused: HTTP " + str(status))
+        return body
+    try:
+        session = request("/api/sessions", {"drawing_id": drawing["drawing_id"],
+                                           "project_id": project["project_id"]})
+        session_id = session.get("session_id")
+        if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", session_id):
+            raise PromptFailure("invalid author session identity")
+        started = request(f"/api/sessions/{session_id}/messages", {
+            "text": row["prompt"], "classifier_hint": {"source": "author_panel", "purpose": "stage_authority"},
+            "request_id": str(uuid4()), "project_context": {
+                "project_id": project["project_id"], "input_version_id": drawing["version_id"]}})
+        turn_id = started.get("turn_id")
+        if (not isinstance(turn_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", turn_id)
+                or started.get("status") in ("queued", "completed")):
+            turn_id = None
+            raise PromptFailure("normal author context did not start an active turn")
+        yield {"X-Authority-Session-Id": session_id, "X-Authority-Turn-Id": turn_id}
+    finally:
+        if session_id and turn_id:
+            path = f"/api/sessions/{session_id}/turns/{turn_id}/cancel"
+            try:
+                status, _ = transport("POST", path, json_body={}, timeout_s=30)
+                events.append({"path": path, "status": status, "owned_turn_cleanup": True})
+            except Exception as exc:
+                events.append({"path": path, "cleanup_error": type(exc).__name__})
+        write_json_atomic(evidence_dir / (row["id"] + "-authority.json"), events)
+
+
 def evaluate_prompt(row, *, transport, client, project, drawing, source_sha,
-                    evidence_dir, run_id, clock=time.monotonic, sleep=time.sleep):
+                    evidence_dir, run_id, clock=time.monotonic, sleep=time.sleep,
+                    authority_headers=None, deadline_at=None):
     validate_prompt_id(row.get("id"))
     record = {"id": row["id"], "trade": row["trade"], "drawing": row["drawing"],
               "source_sha": source_sha, "model_id": None, "tool_name": None,
               "version": None, "tool_source_hash": None, "output_hash": None,
               "score": 0, "failing_stage": "author", "author_submitted": False,
               "started_at": utc_now()}
-    deadline = clock() + 600
+    deadline = clock() + 600 if deadline_at is None else deadline_at
     trace = []
 
     def remaining():
@@ -143,7 +186,7 @@ def evaluate_prompt(row, *, transport, client, project, drawing, source_sha,
         record["author_submitted"] = True
         _, staged = call("POST", "/api/author", json_body={
             "description": row["prompt"], "mode": "build", "target_tool_name": target},
-            headers={"Idempotency-Key": target}, timeout_s=remaining())
+            headers={"Idempotency-Key": target, **(authority_headers or {})}, timeout_s=remaining())
         change_id = staged.get("change_set_id") if staged.get("contract") == "leaf.customization-stage-job.v1" else None
         while staged.get("contract") == "leaf.customization-stage-job.v1":
             if (not isinstance(change_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", change_id)
@@ -346,9 +389,13 @@ def run(ctx):
                 drawings[fixture_id] = client.adopt_drawing(projects[trade]["project_id"], uploaded, name)
             write_json_atomic(ctx.out_dir / "projects.json", {"projects": projects, "drawings": drawings})
             for row in rows:
-                record = evaluate_prompt(row, transport=transport, client=client,
-                    project=projects[row["trade"]], drawing=drawings[row["drawing"]],
-                    source_sha=ctx.source_sha, evidence_dir=ctx.out_dir, run_id=run_id)
+                deadline = time.monotonic() + 600
+                with author_authority(transport, row, projects[row["trade"]],
+                                      drawings[row["drawing"]], ctx.out_dir, deadline=deadline) as authority:
+                    record = evaluate_prompt(row, transport=transport, client=client,
+                        project=projects[row["trade"]], drawing=drawings[row["drawing"]],
+                        source_sha=ctx.source_sha, evidence_dir=ctx.out_dir, run_id=run_id,
+                        authority_headers=authority, deadline_at=deadline)
                 records.append(record)
                 write_json_atomic(ctx.out_dir / "records.json", records)
                 print(f"{row['id']} score={record['score']} stage={record['failing_stage']}", flush=True)

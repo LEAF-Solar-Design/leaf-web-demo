@@ -199,6 +199,10 @@ def test_mocked_run_lifecycle_dispatches_sequentially_and_cleans_up(tmp_path, mo
     monkeypatch.setattr(bench.xbench_session, "signed_in", signed_in)
     monkeypatch.setattr(bench.xbench_session, "api", forbidden)
     monkeypatch.setattr(bench, "transport_for", lambda *args: forbidden)
+    @contextmanager
+    def fake_authority(*args, **kwargs):
+        yield {"X-Authority-Session-Id": "owned-session", "X-Authority-Turn-Id": "owned-turn"}
+    monkeypatch.setattr(bench, "author_authority", fake_authority)
     monkeypatch.setattr(bench, "evaluate_prompt", evaluate)
     ctx = SimpleNamespace(manifest=manifest, source_sha=SHA,
                           base="https://synthetic.invalid", out_dir=out)
@@ -450,7 +454,7 @@ def test_malformed_baseline_is_rejected_before_comparison_or_receipt(tmp_path, m
 
 
 def run_prompt(tmp_path, *, fallback=False, model=True, publication="published", value=3, drift=False,
-               catalog_change=None):
+               catalog_change=None, authority_headers=None):
     calls = []
     def transport(method, path, **kw):
         calls.append((method, path, kw))
@@ -480,7 +484,7 @@ def run_prompt(tmp_path, *, fallback=False, model=True, publication="published",
            "prompt": "Count synthetic entities", "oracle": {"value": 3}, "compare": {"mode": "exact"}}
     result = bench.evaluate_prompt(row, transport=transport, client=Client(),
         project={"project_id": "p", "org_id": "o"}, drawing={"version_id": "v"},
-        source_sha=SHA, evidence_dir=tmp_path, run_id="test")
+        source_sha=SHA, evidence_dir=tmp_path, run_id="test", authority_headers=authority_headers)
     return result, calls
 
 
@@ -531,3 +535,37 @@ def test_poll_address_is_bound_to_accepted_change_set(tmp_path, poll):
     assert calls == ["/api/health", "/api/author"]
     assert result["score"] == 0 and result["failing_stage"] == "author"
     assert result["failure"] == "invalid stage polling address"
+
+
+@pytest.mark.parametrize("refuse", [False, True])
+def test_normal_author_uses_server_issued_turn_and_settles_only_owned_authority(tmp_path, refuse):
+    calls = []
+    def transport(method, path, **kw):
+        calls.append((path, kw))
+        if path == "/api/sessions":
+            assert kw["json_body"] == {"drawing_id": "d", "project_id": "p"}
+            return 200, {"session_id": "owned-session"}
+        if path == "/api/sessions/owned-session/messages":
+            assert kw["json_body"]["classifier_hint"] == {"source": "author_panel", "purpose": "stage_authority"}
+            assert kw["json_body"]["project_context"] == {"project_id": "p", "input_version_id": "v"}
+            assert kw["json_body"]["text"] == synthetic_prompt()["prompt"]
+            return (403, {"reason_code": "tenant_role_denied"}) if refuse else (202, {"turn_id": "owned-turn", "status": "running"})
+        assert path == "/api/sessions/owned-session/turns/owned-turn/cancel"
+        return 200, {"cancelled": True}
+    def invoke():
+        with bench.author_authority(transport, synthetic_prompt(), {"project_id": "p"},
+                {"drawing_id": "d", "version_id": "v"}, tmp_path) as authority:
+            assert not refuse, "rejected mint must not reach author submission"
+            result, authored = run_prompt(tmp_path, authority_headers=authority)
+            assert result["score"] == 1
+            headers = next(kw["headers"] for _, path, kw in authored if path == "/api/author")
+            assert headers["X-Authority-Session-Id"] == "owned-session"
+            assert headers["X-Authority-Turn-Id"] == "owned-turn"
+    if refuse:
+        with pytest.raises(bench.PromptFailure, match="HTTP 403"):
+            invoke()
+        assert len(calls) == 2
+    else:
+        invoke()
+        assert len(calls) == 3
+    assert (tmp_path / "X03-01-authority.json").is_file()
