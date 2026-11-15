@@ -17,6 +17,33 @@ from solar_dependencies import affected_entities, membership_changes  # noqa: E4
 import solar_design_graph as sdg  # noqa: E402
 
 
+@pytest.mark.parametrize("dimensions", [2, 3])
+@pytest.mark.parametrize("angle", [0.0, 0.375])
+def test_request_geometry_keeps_elevation_separate_from_angle(graph, dimensions, angle):
+    from solar_solve_request import build_split_requests, build_stringer_request
+
+    value = copy.deepcopy(graph)
+    for panel in value["panels"]:
+        panel["angle"] = angle
+        if dimensions == 3:
+            panel["centre"].append(10.0 + panel["centre"][0] * 0.75)
+    for row in value["frames"][0]["matrix"]:
+        for cell in row:
+            cell["angle"] = angle
+    validate_graph(value)
+    before = copy.deepcopy(value)
+    frame_ref = value["frames"][0]["id"]
+    full = build_stringer_request(value, frame_ref, max_string_length=14, dwgname="Synthetic")
+    pieces = build_split_requests(value, frame_ref, max_string_length=14, dwgname="Synthetic")
+    expected = {panel["id"]: (*panel["centre"][:2], angle) for panel in value["panels"]}
+    for requests in [[full], [piece["request"] for piece in pieces]]:
+        actual = {cell["Id"]: (cell["X"], cell["Y"], cell["Angle"])
+                  for request in requests for row in request["grid"]["Rows"]
+                  for cell in row["Panels"] if cell["Code"] == 1}
+        assert actual == expected
+    assert value == before
+
+
 def app_id(kind, number):
     return f"leaf:{kind}:00000000-0000-4000-8000-{number:012d}"
 
