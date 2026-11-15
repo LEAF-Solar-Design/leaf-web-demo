@@ -236,22 +236,34 @@ function RowArrayTable({ path, rows, ancestors, density }) {
 // are already in the envelope, so the link is a blob URL built in the browser; nothing is
 // fetched. URLs are revoked when the result changes.
 function FileLinks({ files }) {
-  const list = (Array.isArray(files) ? files : []).filter((f) => f && typeof f.base64 === 'string' && f.name)
-  if (list.length === 0) return null
+  const [download, setDownload] = useState(null)
+  useEffect(() => {
+    const urls = []
+    const revoke = URL.revokeObjectURL?.bind(URL)
+    const list = (Array.isArray(files) ? files : []).filter((f) => f && typeof f.base64 === 'string' && f.name)
+    const links = list.map((f) => {
+      try {
+        const bin = atob(f.base64)
+        const bytes = new Uint8Array(bin.length)
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+        const href = URL.createObjectURL(new Blob([bytes], { type: f.mime || 'application/octet-stream' }))
+        urls.push(href)
+        return { name: f.name, href }
+      } catch {
+        return { name: f.name, href: null }
+      }
+    })
+    setDownload({ files, links })
+    return () => urls.forEach((href) => revoke?.(href))
+  }, [files])
+  // Never offer an old report while the new file set is being prepared.
+  if (!download || download.files !== files || download.links.length === 0) return null
   return (
     <div className="files">
-      {list.map((f) => {
-        let href = ''
-        try {
-          const bin = atob(f.base64)
-          const bytes = new Uint8Array(bin.length)
-          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-          href = URL.createObjectURL(new Blob([bytes], { type: f.mime || 'application/octet-stream' }))
-        } catch {
-          return <span key={f.name} className="dim">{f.name} (unreadable)</span>
-        }
+      {download.links.map((f) => {
+        if (!f.href) return <span key={f.name} className="dim">{f.name} (unreadable)</span>
         return (
-          <a key={f.name} className="btn ghost" href={href} download={String(f.name).replace(/[^\w.-]/g, '_')}>
+          <a key={f.name} className="btn ghost" href={f.href} download={String(f.name).replace(/[^\w.-]/g, '_')}>
             Download {f.name}
           </a>
         )
