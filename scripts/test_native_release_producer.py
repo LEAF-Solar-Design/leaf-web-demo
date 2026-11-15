@@ -966,6 +966,10 @@ def test_browser_config_uses_private_worker_port(tmp_path, worker):
     (package / "index.mjs").write_text('export const defineConfig = value => value;')
     config = tmp_path / "playwright.config.mjs"
     config.write_bytes((Path(__file__).resolve().parents[1] / "web/playwright.config.mjs").read_bytes())
+    # The config imports ./scripts/gate-browser-resources.mjs (node builtins only); copy it beside the config.
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts/gate-browser-resources.mjs").write_bytes(
+        (Path(__file__).resolve().parents[1] / "web/scripts/gate-browser-resources.mjs").read_bytes())
     env = dict(os.environ)
     env.pop("LEAF_NATIVE_GATE_WORKER", None)
     if worker is not None:
