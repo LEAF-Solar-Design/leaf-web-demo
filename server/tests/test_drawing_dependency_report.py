@@ -1,5 +1,6 @@
 from drawing_dependency_report import from_pairs
 from dxf_intake import parse_dxf_bytes
+import pytest
 
 
 def test_reports_dependency_dispositions_without_following_paths():
@@ -39,3 +40,33 @@ def test_normal_intake_adds_report_and_keeps_geometry():
 
 def test_empty_dependencies_are_an_explicit_empty_report():
     assert from_pairs([])["dependencies"] == []
+
+
+@pytest.mark.parametrize("path", [r"\\unavailable-host\share\reference.dat",
+                                r"C:\not-present\reference.dat", "../../reference.dat"])
+def test_dependency_paths_are_reported_without_any_filesystem_access(path, monkeypatch):
+    import builtins
+    import io
+    import os
+
+    attempts = []
+
+    def forbidden_open(*args, **kwargs):
+        attempts.append(args)
+        raise AssertionError("Dependency inventory must not open referenced paths")
+
+    pairs = [(0, "BLOCK"), (70, "4"), (1, path),
+             (0, "STYLE"), (3, path), (4, path),
+             (0, "IMAGEDEF"), (1, path),
+             (0, "DGNDEFINITION"), (1, path)]
+    with monkeypatch.context() as guard:
+        guard.setattr(builtins, "open", forbidden_open)
+        guard.setattr(io, "open", forbidden_open)
+        guard.setattr(os, "open", forbidden_open)
+        report = from_pairs(pairs)
+    assert attempts == []
+    assert {(row["kind"], row["name"], row["disposition"])
+            for row in report["dependencies"]} == {
+        ("xref", path, "detached"), ("font", path, "font remapped"),
+        ("shape_font", path, "font remapped"), ("image", path, "image omitted"),
+        ("underlay", path, "underlay omitted")}

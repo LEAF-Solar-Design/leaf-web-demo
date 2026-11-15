@@ -73,3 +73,29 @@ def test_normal_registry_and_trusted_loader_resolve_builtin():
     envelope = tool_loader.run_tool_dynamic(tool, {"inserts": []}, {}, aps_live=False)
     assert envelope["error"] is None
     assert envelope["result"]["selection_required"] is True
+
+
+@pytest.mark.parametrize("ordering", ["reverse", "rotate"])
+def test_input_order_preserves_set_identity_counts_and_highlight_membership(ordering):
+    panel = {"layer": "Design", "closed": True,
+             "pts": [[0, 0], [2, 0], [2, 1], [0, 1]]}
+    intake = {"inserts": [
+        {"layer": "Design", "name": "Panel", "handle": "I1"},
+        {"layer": "Other", "name": "Panel", "handle": "I3"},
+        {"layer": "Design", "name": "Panel", "handle": "I2"}],
+        "polylines": [{**panel, "handle": "P1"},
+                      {**panel, "layer": "Other", "handle": "P3"},
+                      {**panel, "handle": "P2"}]}
+    reordered = {key: (list(reversed(rows)) if ordering == "reverse"
+                       else rows[1:] + rows[:1]) for key, rows in intake.items()}
+    listing, _ = module.run(intake, {})
+    changed_listing, _ = module.run(reordered, {})
+    assert changed_listing["sets"] == listing["sets"]
+    ids = [row["set_id"] for row in listing["sets"] if row["layer"] == "Design"]
+    result, overlay = module.run(intake, {"set_ids": ids})
+    changed_result, changed_overlay = module.run(reordered, {"set_ids": ids})
+    assert result == changed_result
+    assert changed_result["count"] == 4
+    assert set(overlay["highlight_handles"]) == {"I1", "I2", "P1", "P2"}
+    assert set(changed_overlay["highlight_handles"]) == set(overlay["highlight_handles"])
+    assert len(changed_overlay["highlight_handles"]) == 4
