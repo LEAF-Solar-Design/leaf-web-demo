@@ -3,6 +3,7 @@ import { BINDING_FIELDS, FORMATS, PRESETS, RENDERER_VERSION } from './widgetCata
 import { HEIGHT_BOUNDS } from './useWidgetEditor.js'
 import { LA_USABLE_HEIGHT } from './laFit.js'
 import { loadGraphOutputs } from './widgetsClient.js'
+import { MAX_TEXT_LENGTH } from './widgetDoc.js'
 
 const colors = ['auto', 'ink', 'leaf', 'slate', 'loss']
 function Select({ label, value, options, onChange }) {
@@ -76,6 +77,10 @@ export default function WidgetInspector({ doc, selectedId, dispatch, local, onOu
   const format = doc.active, surface = doc.formats[format], W = FORMATS[format].w
   const element = surface.els.find((e) => e.id === selectedId)
   const [resetAt, setResetAt] = useState(null)
+  const [fullTextOpen, setFullTextOpen] = useState(false)
+  const needsFullText = (element?.text?.length ?? 0) > 40 || /[\r\n]/.test(element?.text ?? '')
+  const fullTextMode = fullTextOpen || needsFullText
+  useEffect(() => { setFullTextOpen(false) }, [format, selectedId])
   useEffect(() => { setResetAt(null) }, [format])
   useEffect(() => { if (resetAt === null) return; const timer = setTimeout(() => setResetAt(null), 3000); return () => clearTimeout(timer) }, [resetAt])
   const surfaceEdit = (patch) => dispatch({ type: 'surface', patch })
@@ -108,7 +113,13 @@ export default function WidgetInspector({ doc, selectedId, dispatch, local, onOu
       {element.count !== undefined && <NumberField label="Entries" value={element.count} min={1} max={['history', 'historyList'].includes(element.preset) ? 4 : 10} onChange={(count) => edit({ count: Math.round(count) })} />}
       {element.opacity !== undefined && <NumberField label="Opacity" type="range" value={element.opacity} min={0} max={1} step={0.05} onChange={(opacity) => edit({ opacity })} />}
       {element.tracking !== undefined && <NumberField label="Spacing" value={element.tracking} min={0} max={20} onChange={(tracking) => edit({ tracking })} />}
-      {element.kind === 'text' && (!element.preset || element.preset === 'text' || (element.preset !== 'brand' && !element.binding)) && <label>Text<input value={element.text ?? ''} maxLength={40} onChange={(e) => edit({ text: e.target.value.slice(0, 40) })} /></label>}
+      {element.kind === 'text' && (!element.preset || element.preset === 'text' || (element.preset !== 'brand' && !element.binding)) && <>
+        {fullTextMode
+          ? <label>Full text<textarea value={element.text ?? ''} rows={2} maxLength={MAX_TEXT_LENGTH} onChange={(e) => edit({ text: e.target.value })} /></label>
+          : <label>Text<input value={element.text ?? ''} maxLength={40} onChange={(e) => edit({ text: e.target.value.slice(0, 40) })} /></label>}
+        <button type="button" disabled={fullTextMode && needsFullText} onClick={() => setFullTextOpen(!fullTextMode)}>{fullTextMode ? 'Use short text' : 'Edit full text'}</button>
+        {fullTextMode && needsFullText && <p>Short text supports one line up to 40 characters.</p>}
+      </>}
       {check('Visible', element.visible, (visible) => edit({ visible }))}
       <BindingPicker key={element.id} element={element} edit={edit} local={local} onOutputs={onOutputs} graphOutputs={graphOutputs} />
       <div className="widget-toolbar"><button type="button" disabled={surface.els.length >= 32} onClick={() => dispatch({ type: 'duplicate' })}>Duplicate</button><button type="button" onClick={() => dispatch({ type: 'delete' })}>Remove</button></div>
