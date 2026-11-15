@@ -53,9 +53,9 @@ def independent_counts(manifest):
     return result
 
 
-def first_choice_step(text, fixture, *, selected, source_matches, evidence):
+def first_choice_step(text, fixture, *, selected, source_matches, settled=False, evidence):
     expected = {'module_block': fixture['module_block'], 'module_layer': fixture['module_layer']}
-    if not selected or not source_matches:
+    if not selected or not source_matches or not settled:
         return Step(1, 'UNREADABLE', evidence, 'drawing selection or source not established', expected)
     missing = [key for key, value in expected.items() if value.casefold() not in text.casefold()]
     if missing:
@@ -97,7 +97,19 @@ def open_version(page, project, version):
     profile('solar', show_project=False)
     page.get_by_text('Select a valid project drawing version to use Solar.', exact=True).wait_for(
         state='hidden', timeout=30000)
-    page.wait_for_timeout(1500)
+
+
+def settled_text(page):
+    """An unsettled or unreadable surface cannot establish a product failure."""
+    previous = None
+    for _ in range(5):
+        page.wait_for_load_state('networkidle', timeout=30000)
+        text = page.locator('body').inner_text()
+        if text == previous:
+            return text
+        previous = text
+        page.wait_for_timeout(1000)
+    raise ValueError('workspace text did not settle')
 
 
 def run(ctx):
@@ -129,13 +141,15 @@ def run(ctx):
                 client.wait_upload(drawing, timeout_s=300, poll_s=5)
                 version = client.adopt_drawing(project['project_id'], drawing, 'Discovery fixture')
                 open_version(page, project, version)
-                text = page.locator('body').inner_text()
+                before_source = read_health(ctx.base)
+                text = settled_text(page)
                 (ctx.out_dir / 'workspace.txt').write_text(text, encoding='utf-8')
                 page.screenshot(path=str(ctx.out_dir / 'workspace.png'), full_page=False)
-                matches = read_health(ctx.base) == ctx.source_sha
-                observation.update(selected_version=version['version_id'], source_matches=matches)
+                matches = before_source == read_health(ctx.base) == ctx.source_sha
+                observation.update(selected_version=version['version_id'], source_matches=matches,
+                                   settled_consecutive_reads=2)
                 steps[0] = first_choice_step(text, fixture, selected=True, source_matches=matches,
-                                             evidence=str(evidence))
+                                             settled=True, evidence=str(evidence))
             observation['cleanup']['project'] = 'deleted'
         observation['cleanup']['browser'] = 'closed'
     except Exception as exc:
