@@ -15,7 +15,7 @@ import type {PrivateBuildLifecycle} from "./projectBuild/privateBuildLifecycle.j
  *   POST /author          -> author route (build | one-off). Body {description, mode?}.
  *                            build:   200 { tool, code, preview, telemetry? } (CONTRACT section 4)
  *                            one-off: 200 { tool, code, preview, run, telemetry? }
- *                            `telemetry` (A1) is ADDITIVE + OPTIONAL â€” a provenance chip source:
+ *                            `telemetry` (A1) is ADDITIVE + OPTIONAL — a provenance chip source:
  *                            { turns?, input_tokens?, output_tokens?, total_cost_usd?, models?[] }.
  *                            It is present ONLY when the runner metered the build (the real Agent
  *                            SDK runner); absent-safe, so a non-metering runner keeps the frozen
@@ -24,7 +24,7 @@ import type {PrivateBuildLifecycle} from "./projectBuild/privateBuildLifecycle.j
  *                            {tool, params?, dwg?, aps_live?}. 200 section-3 envelope.
  *                            NEVER constructs the Agent SDK / touches AgentRunner.
  *   POST /turn             -> converse-turn route (sessions wire, leaf-backend-gaps.md
- *                            Â§2.1; ports/converse.ts, FROZEN). Body = ConverseTurnInput.
+ *                            §2.1; ports/converse.ts, FROZEN). Body = ConverseTurnInput.
  *                            200 application/x-ndjson, one HarnessTurnEvent per line,
  *                            always terminated by turn_complete or error. A grant error
  *                            resolved on/before the first event -> non-stream 401
@@ -116,7 +116,7 @@ function tenantOf(req: IncomingMessage): string {
  *  else DEFAULT_TENANT. Lets the app forward the RESOLVED tenant per request.
  *
  *  SECURITY NOTE (F5): the body `tenant_id` is TRUSTED only because a reachable harness
- *  is gated by the shared secret (see harnessAuthDenial) â€” the sole caller that can reach
+ *  is gated by the shared secret (see harnessAuthDenial) — the sole caller that can reach
  *  this code is the AUTHENTICATED app, which forwards the tenant it already resolved from
  *  the platform JWT. This is NOT anonymous self-assertion of identity: without the secret
  *  the request never reaches tenant resolution. Do not expose this harness unauthenticated. */
@@ -273,7 +273,7 @@ function authorAuthorityForRequest(
 }
 
 // --------------------------------------------------------------------------- //
-// F5 caller auth â€” shared-secret gate on the harness HTTP surface.
+// F5 caller auth — shared-secret gate on the harness HTTP surface.
 // --------------------------------------------------------------------------- //
 
 /** Shared-secret gate config. DEFAULT-OFF (enabled=false) keeps the hermetic/local path
@@ -393,7 +393,7 @@ function readJsonBody(
     // whether the client ever reads it: the response carries
     // `connection: close`, node half-closes as soon as it is written, and a
     // peer still uploading gets a broken pipe and reports a network failure
-    // instead of the envelope. That reset is not cosmetic â€” the app maps a
+    // instead of the envelope. That reset is not cosmetic — the app maps a
     // dropped connection to BROKER_UNREACHABLE, so the caller is told the
     // harness is down when it actually answered "your payload is too big".
     //
@@ -426,7 +426,7 @@ function readJsonBody(
     });
     req.on("end", () => {
       // The body has finished arriving, so closing the connection now cannot
-      // break the peer's write side â€” this is the point at which a 413 is
+      // break the peer's write side — this is the point at which a 413 is
       // actually readable by the client that caused it.
       if (refused) return reject(tooLarge());
       const bytes = Buffer.concat(chunks);
@@ -524,7 +524,7 @@ export function publishErrorResponse(
 }
 
 // --------------------------------------------------------------------------- //
-// POST /turn - converse-turn route (sessions wire, leaf-backend-gaps.md Â§2.1).
+// POST /turn - converse-turn route (sessions wire, leaf-backend-gaps.md §2.1).
 // --------------------------------------------------------------------------- //
 
 type ConverseTurnValidation = {
@@ -542,7 +542,7 @@ const MAX_IMAGES_BYTES = 1024 * 1024;
 /**
  * Signatures matched in FULL, and matched the same way the app matches them
  * (server/routers/sessions.py `_image_magic_matches`). Two independent checks
- * are the point â€” the harness does not trust that the app validated â€” but if
+ * are the point — the harness does not trust that the app validated — but if
  * they disagree the app accepts a request the harness then rejects, which the
  * user experiences as an unexplained failure after a successful upload.
  */
@@ -552,8 +552,8 @@ function imageMagicMatches(mediaType: string, bytes: Buffer): boolean {
   }
   if (mediaType === "image/jpeg") {
     // SOI plus the first marker, and that is the whole signature. JPEG has no
-    // fixed tail â€” real encoders emit bytes after EOI and decoders read them
-    // fine â€” so requiring EOI last turns away genuine photos.
+    // fixed tail — real encoders emit bytes after EOI and decoders read them
+    // fine — so requiring EOI last turns away genuine photos.
     return bytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]));
   }
   if (mediaType === "image/gif") {
@@ -595,7 +595,7 @@ function validateImages(value: unknown): { ok: true; images: NonNullable<Convers
 /**
  * Minimal validation of ConverseTurnInput: the four required id fields, and
  * exactly one of (`text` and/or `images`) | `confirm` to drive the turn.
- * Deliberately does not validate deeper into `confirm.proposal` â€” that is the
+ * Deliberately does not validate deeper into `confirm.proposal` — that is the
  * runner's job. `messages`
  * defaults to [] when absent/malformed (the turn engine always sends it, but a
  * missing array here should not be a reason to reject the whole request).
@@ -623,7 +623,7 @@ function validateConverseTurnInput(body: Record<string, unknown>): ConverseTurnV
     images = validated.images;
   }
   // A turn is a user message (text and/or images) OR a confirmation, never both
-  // and never neither â€” the same rule ConverseLoop enforces. Both halves have to
+  // and never neither — the same rule ConverseLoop enforces. Both halves have to
   // be checked HERE, at the boundary, because the adapter acquires a grant and
   // writes the confirmation mirror before the loop ever sees the body: leaving
   // `text + confirm` to the loop turned a boundary 400 into a post-side-effect
@@ -666,7 +666,7 @@ function validateConverseTurnInput(body: Record<string, unknown>): ConverseTurnV
   if (images?.length) input.images = images;
   if (hasConfirm) input.confirm = rawConfirm as ConverseTurnInput["confirm"];
 
-  // Per-session "mount your LLM" fields â€” OPTIONAL and additive. Validated here
+  // Per-session "mount your LLM" fields — OPTIONAL and additive. Validated here
   // as defense in depth (the app already validates); an unknown model or a
   // malformed credential grant is a 400, never a silent pass-through to sdk.query.
   if (body.model !== undefined) {
@@ -690,7 +690,7 @@ function validateConverseTurnInput(body: Record<string, unknown>): ConverseTurnV
 }
 
 /** The plan-first sidecar (x-leaf-approval-policy). Unlike the instant
- * assignment â€” DATA that must be trusted, hence its authentication throw â€”
+ * assignment — DATA that must be trusted, hence its authentication throw —
  * this header can only NARROW: present and equal to "plan_first", the runner
  * empties its per-turn auto-approval; absent, malformed or anything else is
  * today's behavior. Ignoring rather than throwing keeps auth-off local demos
@@ -736,7 +736,7 @@ function instantTurnOptions(req: IncomingMessage, authenticated: boolean): Pick<
  *
  * Ordering is the load-bearing part: the FIRST event is pulled BEFORE
  * `res.writeHead` is called. If the runner rejects synchronously or on that
- * first yield â€” e.g. `GrantRequiredError` (missing per-tenant Claude grant) â€”
+ * first yield — e.g. `GrantRequiredError` (missing per-tenant Claude grant) —
  * the rejection propagates out of this function (it is NOT caught here) so the
  * caller's outer try/catch renders the same non-stream 401 `{grant_required:true}`
  * shape /author uses (server.ts:258-263). The caller therefore never observes a
@@ -748,11 +748,11 @@ function instantTurnOptions(req: IncomingMessage, authenticated: boolean): Pick<
  * invariant that every stream ends with one of those two event types.
  *
  * A client disconnect (`res` 'close' - the response socket, see below) does TWO
- * things, in order: (1) fires the AbortSignal handed to `runTurn` â€” because
+ * things, in order: (1) fires the AbortSignal handed to `runTurn` — because
  * `iterator.return()` alone merely QUEUES behind a pending `next()` per the
  * async-generator spec, so a hung/expensive first SDK call would keep running
  * until it settled on its own; the signal preempts that pull by aborting the
- * runner's underlying work (the SDK's AbortController) immediately â€” and then
+ * runner's underlying work (the SDK's AbortController) immediately — and then
  * (2) calls `iterator.return()` so the generator unwinds through `finally` and
  * no further chunks are written.
  */
@@ -796,7 +796,7 @@ async function streamTurn(
     res.off("close", onClose);
     if (closed) {
       // Our own disconnect-triggered abort surfaced as a rejection (e.g. the SDK's
-      // AbortError). The peer is gone â€” there is no response left to shape.
+      // AbortError). The peer is gone — there is no response left to shape.
       res.end();
       return;
     }
@@ -835,7 +835,7 @@ export interface Harness {
 /**
  * Create the harness. `opts.auth` explicitly pins the F5 caller-auth gate (used by tests
  * to stay hermetic); when omitted the gate resolves per-request from the environment via
- * resolveHarnessAuth() â€” so the live serve path needs no code change, only the env vars.
+ * resolveHarnessAuth() — so the live serve path needs no code change, only the env vars.
  */
 export function createHarness(ports: HarnessPorts, opts?: {
   auth?: HarnessAuthConfig;
@@ -1477,9 +1477,9 @@ export function createHarness(ports: HarnessPorts, opts?: {
         }
       }
 
-      // Per-tenant grant admin (wave 4 + Â§17): PUT/GET/DELETE /grants/{tenantId}. Backs
+      // Per-tenant grant admin (wave 4 + §17): PUT/GET/DELETE /grants/{tenantId}. Backs
       // the app's /api/tenant/claude-grant proxy. Returns ONLY {linked, linked_at, kind}
-      // â€” never the token. PUT body may carry an optional `kind` (else auto-detected).
+      // — never the token. PUT body may carry an optional `kind` (else auto-detected).
       // 501 when no grantAdmin store is wired (the hermetic author tests).
       if (path.startsWith("/grants/")) {
         const grantSuffix = path.slice("/grants/".length);
@@ -1507,7 +1507,7 @@ export function createHarness(ports: HarnessPorts, opts?: {
             const token = typeof gbody.token === "string" ? gbody.token : "";
             if (!token.trim()) return send(res, 400, { error: { message: "token is required" } });
             // Optional explicit kind; when absent/invalid the store AUTO-DETECTS from the
-            // token prefix (Â§17). Only the two valid literals are forwarded.
+            // token prefix (§17). Only the two valid literals are forwarded.
             const rawKind = typeof gbody.kind === "string" ? gbody.kind.trim() : "";
             const kind = rawKind === "oauth" || rawKind === "api_key" ? rawKind : undefined;
             const label = typeof gbody.label === "string" ? gbody.label : undefined;
@@ -1515,7 +1515,7 @@ export function createHarness(ports: HarnessPorts, opts?: {
             const plan = rawPlan === "pro" || rawPlan === "max" ||
               rawPlan === "team" || rawPlan === "enterprise" ? rawPlan : undefined;
             const st = await ports.grantAdmin.put(tenantId, token, kind, label, plan);
-            return send(res, 200, st); // {linked, linked_at, kind} â€” token never echoed
+            return send(res, 200, st); // {linked, linked_at, kind} — token never echoed
           }
           if (method === "PATCH") {
             const gbody = await readJsonBody(req);
@@ -1530,12 +1530,12 @@ export function createHarness(ports: HarnessPorts, opts?: {
             const accountId = requestUrl.searchParams.get("account_id")?.trim() || undefined;
             await ports.grantAdmin.remove(tenantId, accountId);
             // Honest post-remove state (sol-critic F2): the demo tenant's documented
-            // Â§16 env/file fallback can still be active after the per-tenant files are
-            // gone â€” report the store's actual status, never a hardcoded linked:false.
+            // §16 env/file fallback can still be active after the per-tenant files are
+            // gone — report the store's actual status, never a hardcoded linked:false.
             return send(res, 200, await ports.grantAdmin.status(tenantId));
           }
         } catch (e) {
-          // e.g. a malformed/traversal tenant id â€” a client error, never a token leak.
+          // e.g. a malformed/traversal tenant id — a client error, never a token leak.
           return send(res, 400, { error: { message: (e as Error).message } });
         }
         return send(res, 405, { error: { message: `method ${method} not allowed on ${path}` } });
@@ -1669,8 +1669,8 @@ export function createHarness(ports: HarnessPorts, opts?: {
             error: { message: "converse runner not configured", code: "not_implemented" },
           });
         }
-        // Awaited (not `return`ed bare) so a rejection â€” e.g. GrantRequiredError on the
-        // first event â€” is caught by THIS function's own try/catch below, not silently
+        // Awaited (not `return`ed bare) so a rejection — e.g. GrantRequiredError on the
+        // first event — is caught by THIS function's own try/catch below, not silently
         // dropped: async-function `return somePromise` does not route through a local
         // catch, only `await` does.
         await streamTurn(req, res, ports.converseRunner, validated.input,
@@ -1694,7 +1694,7 @@ export function createHarness(ports: HarnessPorts, opts?: {
 
       return send(res, 404, { error: { message: `no route for ${method} ${path}` } });
     } catch (err) {
-      // Diagnostic: full stack to stderr, token-redacted (defense in depth â€” no
+      // Diagnostic: full stack to stderr, token-redacted (defense in depth — no
       // designed path puts a grant in an error message, but a thrown string is
       // arbitrary and this line must never be the leak).
       console.error("[harness] request error:", redactTokens((err as Error).stack ?? String(err)));
@@ -1735,7 +1735,7 @@ export function createHarness(ports: HarnessPorts, opts?: {
       });
       // How long any one peer may hold a socket while sending. This is the
       // bound on an over-cap body being read and discarded, and on a slow
-      // writer generally â€” node's default is 300s, which is a long time to
+      // writer generally — node's default is 300s, which is a long time to
       // occupy a connection for a request already known to be refused. 8 MiB
       // in 120s is 70 KB/s, far below anything a real client does.
       server.requestTimeout = REQUEST_TIMEOUT_MS;
