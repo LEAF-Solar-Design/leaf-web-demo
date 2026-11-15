@@ -192,6 +192,9 @@ def evaluate_prompt(row, *, transport, client, project, drawing, source_sha,
             if (not isinstance(change_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", change_id)
                     or staged.get("change_set_id") != change_id):
                 raise PromptFailure("invalid stage change-set identity")
+            if staged.get("status") == "staged":
+                staged = {**staged.get("result", {}), "receipt": staged.get("receipt", {})}
+                break
             poll = staged.get("poll_url") or "/api/author/stages/" + change_id
             if poll != "/api/author/stages/" + change_id:
                 raise PromptFailure("invalid stage polling address")

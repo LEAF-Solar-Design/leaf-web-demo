@@ -454,13 +454,16 @@ def test_malformed_baseline_is_rejected_before_comparison_or_receipt(tmp_path, m
 
 
 def run_prompt(tmp_path, *, fallback=False, model=True, publication="published", value=3, drift=False,
-               catalog_change=None, authority_headers=None):
+               catalog_change=None, authority_headers=None, staged_envelope=False):
     calls = []
     def transport(method, path, **kw):
         calls.append((method, path, kw))
         if path == "/api/health":
             return 200, {"source_sha": "e" * 40 if drift else SHA}
         if path == "/api/author":
+            if staged_envelope:
+                return 202, {"contract": "leaf.customization-stage-job.v1",
+                    "status": "queued", "change_set_id": "change", "poll_url": "/api/author/stages/change"}
             body = {"tool": {"name": "generated", "version": "1", "source_sha256": "c" * 64}, "receipt": {"state": "staged",
                     "staged_commit": "b" * 40, "change_set_id": "synthetic-change"}}
             if fallback:
@@ -468,6 +471,12 @@ def run_prompt(tmp_path, *, fallback=False, model=True, publication="published",
             if model:
                 body["model_id"] = "synthetic-model"
             return 200, body
+        if path == "/api/author/stages/change":
+            body = staged_tool()
+            body["receipt"]["change_set_id"] = "change"
+            return 200, {"contract": "leaf.customization-stage-job.v1", "status": "staged",
+                "change_set_id": "change", "receipt": body["receipt"],
+                "result": {"tool": body["tool"]}}
         if path == "/api/author/publication-requests":
             return 200, {"status": publication}
         if path == "/api/tools":
@@ -506,6 +515,16 @@ def test_success_uses_normal_author_publication_and_bound_run(tmp_path):
     assert [path for method, path, _ in calls if method == "POST"] == [
         "/api/author", "/api/author/publication-requests", "/api/run"]
     assert next(kw for _, path, kw in calls if path == "/api/run")["json_body"]["dwg"] == "v"
+
+
+def test_real_staged_envelope_finishes_polling_and_reaches_bound_execution(tmp_path):
+    result, calls = run_prompt(tmp_path, staged_envelope=True)
+    assert sum(path == "/api/author/stages/change" for _, path, _ in calls) == 1
+    assert sum(path == "/api/run" for _, path, _ in calls) == 1
+    assert result["output_hash"] == bench.content_hash({"value": 3})
+    # The current producer envelope does not report a model. Do not invent one.
+    assert result["score"] == 0
+    assert result["failing_stage"] == "model_provenance"
 
 
 @pytest.mark.parametrize("conflict", [{"version": "2"}, {"source_sha256": "e" * 64},
