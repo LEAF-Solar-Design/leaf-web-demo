@@ -91,3 +91,43 @@ Generated500- and2000-string fixtures count dictionary reads to bound indexing
 work without timing assertions. They reverse input order, preserve explicit
 missing/foreign/count differences and verify that caller rows remain unchanged.
 All these helpers remain offline and are not connected to the live X05 grader.
+
+`reconcile_offline(evidence)` composes strings, grouping, independent table,
+discrepancy policy, reopen and CSV/view checks. Each stage needs its supplied
+input fields. A missing stage makes the aggregate UNREADABLE even when another
+stage FAILs. Policy deltas come from saved minus oracle values. They cannot be
+overridden with a separate claimed delta map.
+
+`canonical_snapshot(strings, table_rows)` rejects invalid rows before hashing.
+It sorts string IDs and table metrics, normalizes decimal spelling and retains
+each string's optimizer assignment. Input row order does not change its hashes.
+CSV parsing accepts at most five data rows,256 characters per cell and16384
+characters in the input. Excess input is named UNREADABLE. Timestamp checks
+normalize aware instants to UTC, reject unrepresentable boundary offsets and
+require a strict pre-run freeze. Numeric validation uses its own Decimal context.
+
+Run this PowerShell example from the repository root. It uses in-memory data
+only and prints `PASS` then `FAIL`:
+
+```powershell
+@'
+import csv
+import io
+import sys
+sys.path.insert(0, "tools/xbench")
+from benches.x05_reconcile import METRICS, TABLE_COLUMNS, compare_csv_view, compare_table
+oracle = dict.fromkeys(METRICS, 0)
+saved = dict(oracle, panels=1)
+view = [dict(metric=k, studio=0, oracle=0, delta=0, verdict="PASS") for k in METRICS]
+buffer = io.StringIO(newline="")
+writer = csv.DictWriter(buffer, fieldnames=TABLE_COLUMNS)
+writer.writeheader()
+writer.writerows(view)
+print(compare_csv_view(buffer.getvalue(), view)["verdict"])
+print(compare_table(view, saved, oracle)["verdict"])
+'@ | python -P
+```
+
+CSV and view repeat the same zero-panel claim, so they agree. The independent
+saved-design input has one panel, so table integrity fails for its Studio value,
+delta and verdict. Agreement between two exports is not saved-design proof.

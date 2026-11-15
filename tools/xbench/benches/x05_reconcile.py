@@ -5,15 +5,19 @@ This module does not establish the origin or independence of either input.
 """
 
 import csv
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Context, Decimal, InvalidOperation, localcontext
 from io import StringIO
 import re
+from hashlib import sha256
+import json
 
 
 METRICS = ("panels", "optimizers", "inverters", "strings", "kw_dc")
 TABLE_COLUMNS = ("metric", "studio", "oracle", "delta", "verdict")
 _CONTEXT = Context(prec=200)
+MAX_CSV_CHARS = 16384
+MAX_CSV_CELL = 256
 
 
 def _out(verdict, reason, **evidence):
@@ -27,12 +31,13 @@ def _numeric(value, *, count=False, signed=False):
         raw = str(value)
         if len(raw) > 80 or not re.fullmatch(r"-?[0-9]+(?:\.[0-9]+)?", raw):
             return None
-        number = Decimal(raw)
-        if not number.is_finite() or (not signed and number < 0):
-            return None
-        if count and number != number.to_integral_value():
-            return None
-        return number
+        with localcontext(_CONTEXT):
+            number = Decimal(raw)
+            if not number.is_finite() or (not signed and number < 0):
+                return None
+            if count and number != number.to_integral_value():
+                return None
+            return number
     except (InvalidOperation, ValueError):
         return None
 
@@ -105,8 +110,10 @@ def _instant(value):
         return None
     try:
         instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return instant if instant.tzinfo is not None and instant.utcoffset() is not None else None
-    except ValueError:
+        if instant.tzinfo is None or instant.utcoffset() is None:
+            return None
+        return instant.astimezone(timezone.utc)
+    except (ValueError, OverflowError):
         return None
 
 
@@ -158,13 +165,21 @@ def compare_csv_view(csv_text, view_rows):
     """Check normalized CSV/view equality; compare_table checks independent truth."""
     if type(csv_text) is not str:
         return _out("UNREADABLE", "csv_evidence_unreadable")
+    if len(csv_text) > MAX_CSV_CHARS:
+        return _out("UNREADABLE", "csv_input_too_large")
     try:
         reader = csv.reader(StringIO(csv_text.removeprefix("\ufeff"), newline=""), strict=True)
         headers = next(reader)
+        if any(len(cell) > MAX_CSV_CELL for cell in headers):
+            return _out("UNREADABLE", "csv_cell_too_large")
         if len(headers) != len(TABLE_COLUMNS) or set(headers) != set(TABLE_COLUMNS):
             return _out("UNREADABLE", "csv_headers_unreadable")
         rows = []
         for cells in reader:
+            if len(rows) >= len(METRICS):
+                return _out("UNREADABLE", "csv_excess_rows")
+            if any(len(cell) > MAX_CSV_CELL for cell in cells):
+                return _out("UNREADABLE", "csv_cell_too_large")
             if len(cells) != len(headers):
                 return _out("UNREADABLE", "csv_row_unreadable")
             rows.append(dict(zip(headers, cells)))
@@ -178,6 +193,59 @@ def compare_csv_view(csv_text, view_rows):
                   if exported[metric][key] != view[metric][key]]
     return _out("FAIL" if mismatches else "PASS", "csv_view_mismatch" if mismatches
                 else "csv_view_equal", mismatches=mismatches)
+
+
+def canonical_snapshot(strings, table_rows):
+    """Hash validated normalized identities and values, independent of row order."""
+    indexed, error = _index(strings, "snapshot")
+    table = _table(table_rows)
+    if error or table is None:
+        return _out("UNREADABLE", "snapshot_rows_unreadable")
+
+    def digest(value):
+        return sha256(json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode()).hexdigest()
+
+    def number(value):
+        return "0" if value == 0 else format(value.normalize(), "f")
+
+    with localcontext(_CONTEXT):
+        string_rows = [(key, indexed[key]) for key in sorted(indexed)]
+        values = [(metric, *(number(table[metric][key]) for key in ("studio", "oracle", "delta")),
+                   table[metric]["verdict"]) for metric in METRICS]
+        return _out("PASS", "canonical_snapshot", strings_sha256=digest(string_rows),
+                    table_sha256=digest(values))
+
+
+def reconcile_offline(evidence):
+    """Compose all six offline checks; missing evidence takes precedence over FAIL.
+
+    This tests supplied evidence only and is never a live X05 acceptance result.
+    Policy deltas are derived from the independent value maps, not a third claim.
+    """
+    if not isinstance(evidence, dict):
+        return _out("UNREADABLE", "reconciliation_evidence_unreadable", stages={})
+
+    def policy(saved, oracle, fixture, records, started):
+        saved, oracle = _values(saved), _values(oracle)
+        if saved is None or oracle is None:
+            return _out("UNREADABLE", "discrepancy_evidence_unreadable")
+        with localcontext(_CONTEXT):
+            deltas = {metric: saved[metric] - oracle[metric] for metric in METRICS}
+        return check_discrepancies(fixture, deltas, records, started)
+
+    checks = (
+        ("strings", compare_strings, ("oracle_strings", "saved_strings")),
+        ("grouping", compare_recommendations, ("report_grid_count", "recommendations")),
+        ("table", compare_table, ("view_rows", "saved_values", "oracle_values")),
+        ("policy", policy, ("saved_values", "oracle_values", "fixture_id", "discrepancy_records", "run_started_at")),
+        ("reopen", compare_snapshots, ("before", "reopened")),
+        ("csv_view", compare_csv_view, ("csv_text", "view_rows")),
+    )
+    stages = {name: check(*(evidence[key] for key in keys)) if all(key in evidence for key in keys)
+              else _out("UNREADABLE", "stage_evidence_missing") for name, check, keys in checks}
+    verdicts = {result["verdict"] for result in stages.values()}
+    verdict = "UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS"
+    return _out(verdict, "offline_reconciliation", stages=stages)
 
 
 def _index(rows, source):
