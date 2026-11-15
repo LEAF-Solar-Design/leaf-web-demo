@@ -98,7 +98,7 @@ def test_changed_prompt_bytes_fail_before_session_or_author_request(tmp_path, mo
     assert not (tmp_path / "out").exists()
 
 
-@pytest.mark.parametrize("case", ["complete", "upload-failure", "drift", "existing-baseline", "baseline-race", "authority-refusal", "authority-timeout", "nan-output", "inf-output", "negative-inf-output"])
+@pytest.mark.parametrize("case", ["complete", "upload-failure", "drift", "existing-baseline", "baseline-race", "project-cleanup-failure", "authority-refusal", "authority-timeout", "nan-output", "inf-output", "negative-inf-output"])
 def test_mocked_run_lifecycle_dispatches_sequentially_and_cleans_up(tmp_path, monkeypatch, case):
     manifest = prompt_manifest(tmp_path)
     fail_upload = case == "upload-failure"
@@ -144,6 +144,8 @@ def test_mocked_run_lifecycle_dispatches_sequentially_and_cleans_up(tmp_path, mo
 
         def delete_project(self, project_id):
             events.append("delete-" + project_id)
+            if case == "project-cleanup-failure" and project_id == "structural":
+                raise RuntimeError("SECRET SENTINEL cleanup detail")
 
         def upload_drawing(self, name, content):
             nonlocal uploads
@@ -234,6 +236,15 @@ def test_mocked_run_lifecycle_dispatches_sequentially_and_cleans_up(tmp_path, mo
         assert not dispatches
         assert not (out / "records.json").exists()
         assert not Path(manifest["baseline_path"]).exists()
+    elif case == "project-cleanup-failure":
+        steps = bench.run(ctx)
+        assert all(step.verdict == "UNREADABLE" for step in steps)
+        assert len(dispatches) == 50
+        assert len(json.loads((out / "records.json").read_text())) == 50
+        assert json.loads((out / "summary.json").read_text())["complete"] is False
+        assert json.loads((out / "cleanup.json").read_text()) == [{"stage": "owned_resource_cleanup", "failure": "RuntimeError"}]
+        assert "SECRET SENTINEL" not in (out / "cleanup.json").read_text()
+        assert not baseline_path.exists()
     elif case == "baseline-race":
         with pytest.raises(FileExistsError):
             bench.run(ctx)
@@ -399,7 +410,8 @@ def test_cancelled_execution_stops_immediately_with_execution_evidence(tmp_path,
 
 def records():
     return [{"id": f"X03-{i+1:02d}", "trade": trade, "drawing": "synthetic", "source_sha": SHA,
-             "author_submitted": True, "model_id": "synthetic-model", "score": 1,
+             "author_submitted": True, "oracle": {"value": 3}, "compare": {"mode": "exact"},
+             "model_id": "synthetic-model", "score": 1,
              "failing_stage": None, "tool_name": "synthetic-tool", "version": "1",
              "tool_source_hash": "b" * 40, "output_hash": bench.content_hash({"value": 3})}
             for i, trade in enumerate(["solar"] * 30 + ["structural"] * 10 + ["mechanical"] * 10)]
@@ -920,3 +932,123 @@ def test_malformed_provenance_digest_cannot_emit_acceptance(tmp_path, field, val
         bench.grade_records(rows, frozen_rows=records(), baseline=None,
             prompt_sha256="d" * 64, source_sha=SHA, out_dir=tmp_path)
     assert not list(tmp_path.iterdir())
+
+
+def test_hash_matched_wrong_output_is_rejected_against_frozen_oracle(tmp_path):
+    rows = records()
+    wrong = {"value": 4}
+    rows[0]["output_hash"] = bench.content_hash(wrong)
+    bench.write_json_atomic(tmp_path / "X03-01-output.json", wrong)
+    with pytest.raises(ValueError, match="frozen oracle"):
+        bench.grade_records(rows, frozen_rows=records(), baseline=None,
+            prompt_sha256="d" * 64, source_sha=SHA, out_dir=tmp_path)
+    assert not (tmp_path / "summary.json").exists()
+    assert not (tmp_path / "scores.csv").exists()
+
+
+@pytest.mark.parametrize("submitted", ["true", "false", 1, 0, [], {}, [True]])
+def test_submission_evidence_must_be_literal_boolean(tmp_path, submitted):
+    rows = records()
+    rows[0]["author_submitted"] = submitted
+    with pytest.raises(ValueError, match="literal boolean"):
+        bench.grade_records(rows, frozen_rows=records(), baseline=None,
+            prompt_sha256="d" * 64, source_sha=SHA, out_dir=tmp_path)
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("rates,valid", [
+    ((0.61, 0.61, 0.61), False), ((0.5, 0.55, 0.45), False),
+    ((17/30, 0.6, 0.7), True), ((17/30+1e-13, 0.6, 0.7), True),
+])
+def test_baseline_rates_must_represent_realizable_counts(tmp_path, rates, valid):
+    trades = dict(zip(bench.TRADES, rates))
+    baseline = {"schema": "leaf.xbench.x03-scores.v1", "complete": True,
+        "source_sha": SHA, "prompt_sha256": "d" * 64,
+        "overall": sum(trades[t]*n for t,n in bench.TRADES.items())/50, "trades": trades}
+    if valid:
+        bench.validate_baseline(baseline, "d" * 64)
+    else:
+        with pytest.raises(ValueError, match="integer success count"):
+            bench.grade_records([], frozen_rows=records(), baseline=baseline,
+                prompt_sha256="d" * 64, source_sha=SHA, out_dir=tmp_path)
+        assert not list(tmp_path.iterdir())
+
+
+def test_authority_and_execution_share_one_600_second_budget(tmp_path, monkeypatch):
+    clock = FakeClock()
+    monkeypatch.setattr(bench.time, "monotonic", clock)
+    calls = []
+    def transport(method, path, **kwargs):
+        calls.append((path, clock.now, kwargs["timeout_s"]))
+        if path.endswith("/cancel"):
+            return 200, {}
+        assert clock.now < 600
+        assert 0 < kwargs["timeout_s"] <= 600-clock.now
+        if path == "/api/sessions":
+            clock.now = 540
+            return 200, {"session_id": "owned-session"}
+        if path.endswith("/messages"):
+            clock.now = 580
+            return 202, {"turn_id": "owned-turn", "status": "running"}
+        if path == "/api/health":
+            return 200, {"source_sha": SHA}
+        if path == "/api/author":
+            clock.now = 585
+            return 200, staged_tool()
+        if path == "/api/author/publication-requests":
+            return 200, {"status": "published"}
+        if path == "/api/tools":
+            return 200, {"tools": [{"name": "generated", "catalog_digest": "f"*64}]}
+        assert path == "/api/run"
+        clock.now = 600
+        return 200, {"ok": True, "result": {"value": 3}}
+    with bench.author_authority(transport, synthetic_prompt(), {"project_id": "p"},
+            {"drawing_id": "d", "version_id": "v"}, tmp_path, deadline=600) as headers:
+        result = bench.evaluate_prompt(synthetic_prompt(), transport=transport, client=None,
+            project={"project_id": "p", "org_id": "o"}, drawing={"version_id": "v"},
+            source_sha=SHA, evidence_dir=tmp_path, run_id="shared-budget",
+            authority_headers=headers, deadline_at=600, clock=clock, sleep=clock.sleep)
+    assert clock.now == 600 and result["score"] == 0
+    assert "600 second ceiling" in result["failure"]
+    assert sum(path == "/api/health" for path, _, _ in calls) == 1
+    assert next(timeout for path, _, timeout in calls if path == "/api/author") == 20
+    assert next(timeout for path, _, timeout in calls if path == "/api/run") == 15
+
+
+@pytest.mark.parametrize("route,stage", [("/api/author", "author"),
+    ("/api/author/publication-requests", "publication"), ("/api/tools", "publication"),
+    ("/api/run", "execution")])
+@pytest.mark.parametrize("payload", [None, [], "scalar", 42])
+def test_success_payload_must_be_object_before_later_requests(tmp_path, route, stage, payload):
+    after = []
+    def wrapper(original):
+        def transport(method, path, **kwargs):
+            assert not after, "request dispatched after malformed successful payload"
+            if path == route:
+                after.append(path)
+                return 200, payload
+            return original(method, path, **kwargs)
+        return transport
+    result, _ = run_prompt(tmp_path, transport_wrapper=wrapper)
+    assert result["score"] == 0 and result["failing_stage"] == stage
+    assert result["unreadable"] is True and result["error_code"] == "INVALID_RESPONSE_SHAPE"
+
+
+@pytest.mark.parametrize("route,payload,stage", [
+    ("/api/author", {"receipt": []}, "author"),
+    ("/api/author", {"contract": "leaf.customization-stage-job.v1", "change_set_id": "change", "status": "staged", "result": [], "receipt": {}}, "author"),
+    ("/api/author/publication-requests", {"status": "published", "tool": []}, "publication"),
+    ("/api/tools", {"tools": None}, "publication"),
+    ("/api/tools", {"tools": [None]}, "publication"),
+])
+def test_malformed_nested_success_envelope_has_bounded_receipt(tmp_path, route, payload, stage):
+    def wrapper(original):
+        def transport(method, path, **kwargs):
+            if path == route:
+                return 200, payload
+            return original(method, path, **kwargs)
+        return transport
+    result, _ = run_prompt(tmp_path, transport_wrapper=wrapper)
+    assert result["score"] == 0 and result["failing_stage"] == stage
+    assert result["unreadable"] is True and result["error_code"] == "INVALID_RESPONSE_SHAPE"
+    assert (tmp_path / "X03-01.json").exists()

@@ -130,6 +130,8 @@ def author_authority(transport, row, project, drawing, evidence_dir, *, deadline
                        "reason_code": public_code(body.get("reason_code")) if isinstance(body, dict) else None})
         if not 200 <= status < 300:
             raise PromptFailure("normal author context refused: HTTP " + str(status))
+        if not isinstance(body, dict):
+            raise PromptFailure("invalid author context payload")
         return body
     try:
         session = request("/api/sessions", {"drawing_id": drawing["drawing_id"],
@@ -181,6 +183,9 @@ def evaluate_prompt(row, *, transport, client, project, drawing, source_sha,
         status, body = transport(method, path, timeout_s=min(remaining(), timeout), **kwargs)
         # Store route and bounded public error codes; never headers or raw auth responses.
         trace.append({"method": method, "path": path, "status": status})
+        if not isinstance(body, dict):
+            record.update(unreadable=True, error_code="INVALID_RESPONSE_SHAPE")
+            raise PromptFailure("response must be an object")
         if isinstance(body, dict) and body.get("_x03_transport_error"):
             record.update(unreadable=True, error_code=public_code(body.get("reason_code")))
             raise PromptFailure(f"HTTP {status}, code {record['error_code']}")
@@ -210,6 +215,9 @@ def evaluate_prompt(row, *, transport, client, project, drawing, source_sha,
                     or staged.get("change_set_id") != change_id):
                 raise PromptFailure("invalid stage change-set identity")
             if staged.get("status") == "staged":
+                if not isinstance(staged.get("result"), dict) or not isinstance(staged.get("receipt"), dict):
+                    record.update(unreadable=True, error_code="INVALID_RESPONSE_SHAPE")
+                    raise PromptFailure("invalid staged author envelope")
                 staged = {**staged.get("result", {}), "receipt": staged.get("receipt", {})}
                 break
             if staged.get("status") in ("failed", "cancelled"):
@@ -224,11 +232,14 @@ def evaluate_prompt(row, *, transport, client, project, drawing, source_sha,
             _, staged = call("GET", poll)
         record["model_id"] = find_model(staged)
         receipt = staged.get("receipt", {})
+        if not isinstance(receipt, dict):
+            record.update(unreadable=True, error_code="INVALID_RESPONSE_SHAPE")
+            raise PromptFailure("invalid author receipt")
         if change_id is not None and receipt.get("change_set_id") != change_id:
             raise PromptFailure("staged receipt belongs to another change set")
         tool = staged.get("tool")
         preview = str(staged.get("preview", "")).lower()
-        if (not isinstance(tool, dict) or not tool.get("name")
+        if (not isinstance(tool, dict) or not isinstance(tool.get("name"), str) or not tool["name"]
                 or receipt.get("state") != "staged" or not receipt.get("staged_commit")
                 or "template" in str(staged.get("source", "")).lower()
                 or "templated" in preview or "template fallback" in preview):
@@ -242,6 +253,9 @@ def evaluate_prompt(row, *, transport, client, project, drawing, source_sha,
             record["error_code"] = public_code(publication.get("status"))
             raise PromptFailure("normal publication rail did not publish")
         publication_tool = publication.get("tool")
+        if "tool" in publication and not isinstance(publication_tool, (str, dict)):
+            record.update(unreadable=True, error_code="INVALID_RESPONSE_SHAPE")
+            raise PromptFailure("invalid publication tool identity")
         if (("change_set_id" in publication and publication["change_set_id"] != receipt["change_set_id"])
                 or ("tool_name" in publication and publication["tool_name"] != tool["name"])
                 or (isinstance(publication_tool, dict) and any(
@@ -251,6 +265,9 @@ def evaluate_prompt(row, *, transport, client, project, drawing, source_sha,
             record["error_code"] = "PUBLICATION_IDENTITY_MISMATCH"
             raise PromptFailure("publication conflicts with staged identity")
         _, catalog = call("GET", "/api/tools")
+        if not isinstance(catalog.get("tools"), list) or not all(isinstance(item, dict) for item in catalog["tools"]):
+            record.update(unreadable=True, error_code="INVALID_RESPONSE_SHAPE")
+            raise PromptFailure("invalid effective catalog envelope")
         catalog_matches = [item for item in catalog.get("tools", []) if item.get("name") == tool["name"]]
         if len(catalog_matches) > 1:
             record["error_code"] = "DUPLICATE_CATALOG_TOOL"
@@ -354,9 +371,13 @@ def validate_baseline(baseline, prompt_sha256):
     weighted = sum(trades[trade] * count for trade, count in TRADES.items()) / 50
     if not math.isclose(baseline["overall"], weighted, rel_tol=0, abs_tol=1e-12):
         raise ValueError("baseline overall contradicts weighted trade rates")
+    for rate, count in [(baseline["overall"], 50), *[(trades[t], n) for t, n in TRADES.items()]]:
+        if not math.isclose(rate * count, round(rate * count), rel_tol=0, abs_tol=1e-10):
+            raise ValueError("baseline rate cannot represent an integer success count")
 
 
-def grade_records(records, *, baseline, prompt_sha256, source_sha, out_dir, frozen_rows):
+def grade_records(records, *, baseline, prompt_sha256, source_sha, out_dir, frozen_rows, run_unreadable=False):
+    frozen = {row["id"]: row for row in frozen_rows}
     identities = {row["id"]: (row["trade"], row["drawing"]) for row in frozen_rows}
     if len(identities) != 50:
         raise ValueError("frozen prompt identities must contain fifty rows")
@@ -369,6 +390,8 @@ def grade_records(records, *, baseline, prompt_sha256, source_sha, out_dir, froz
             raise ValueError("duplicate prompt record ID")
         seen.add(record["id"])
         score, stage = record.get("score"), record.get("failing_stage")
+        if type(record.get("author_submitted")) is not bool:
+            raise ValueError("author_submitted must be a literal boolean")
         if type(score) is not int or score not in (0, 1):
             raise ValueError("prompt score must be binary")
         if score == 1 and not all(isinstance(record.get(key), str) and record[key] for key in (
@@ -393,7 +416,10 @@ def grade_records(records, *, baseline, prompt_sha256, source_sha, out_dir, froz
                 raise ValueError("credited output artifact is missing or invalid") from None
             if digest != record["output_hash"]:
                 raise ValueError("credited output artifact hash mismatch")
-    complete = (len(records) == 50 and len({r["id"] for r in records}) == 50
+            row = frozen[record["id"]]
+            if not matches(output, row["oracle"], row["compare"]):
+                raise ValueError("credited output contradicts frozen oracle")
+    complete = (not run_unreadable and len(records) == 50 and len({r["id"] for r in records}) == 50
                 and Counter(r["trade"] for r in records) == Counter(TRADES)
                 and all(r.get("author_submitted") and r["source_sha"] == source_sha for r in records)
                 and not any(r.get("unreadable") for r in records)
@@ -446,47 +472,55 @@ def run(ctx):
     records = []
     repo = Path(__file__).resolve().parents[3]
     run_id = uuid4().hex[:10]
-    with xbench_session.signed_in(repo, ctx.source_sha, origin=ctx.base) as (page, info):
-        write_json_atomic(ctx.out_dir / "session.json", info)
-        transport = transport_for(page, ctx.base)
-        client = StudioClient(transport)
-        with ExitStack() as stack:
-            projects = {trade: stack.enter_context(disposable_project(
-                client, f"X03 {trade} {run_id}")) for trade in TRADES}
-            drawings = {}
-            for fixture_id in dict.fromkeys(r["drawing"] for r in rows):
-                fixture = fixtures[fixture_id]
-                trade = next(r["trade"] for r in rows if r["drawing"] == fixture_id)
-                # Anonymous upload names prevent leaking local customer filenames into harness logs.
-                name = fixture_id + Path(fixture["path"]).suffix
-                uploaded = client.upload_drawing(name, Path(fixture["path"]).read_bytes())
-                client.wait_upload(uploaded, timeout_s=600)
-                drawings[fixture_id] = client.adopt_drawing(projects[trade]["project_id"], uploaded, name)
-            write_json_atomic(ctx.out_dir / "projects.json", {"projects": projects, "drawings": drawings})
-            for row in rows:
-                deadline = time.monotonic() + 600
-                try:
-                    with author_authority(transport, row, projects[row["trade"]],
-                                          drawings[row["drawing"]], ctx.out_dir, deadline=deadline) as authority:
-                        record = evaluate_prompt(row, transport=transport, client=client,
-                            project=projects[row["trade"]], drawing=drawings[row["drawing"]],
-                            source_sha=ctx.source_sha, evidence_dir=ctx.out_dir, run_id=run_id,
-                            authority_headers=authority, deadline_at=deadline)
-                except Exception as exc:
-                    record = {"id": row["id"], "trade": row["trade"], "drawing": row["drawing"],
-                              "source_sha": ctx.source_sha, "model_id": None, "tool_name": None,
-                              "version": None, "tool_source_hash": None, "output_hash": None,
-                              "score": 0, "failing_stage": "author", "author_submitted": False,
-                              "unreadable": True, "error_code": "AUTHOR_AUTHORITY_SETUP_FAILED",
-                              "failure": str(exc) if isinstance(exc, PromptFailure) else type(exc).__name__}
-                    write_json_atomic(ctx.out_dir / (row["id"] + ".json"), {"record": record, "routes": []})
-                records.append(record)
-                write_json_atomic(ctx.out_dir / "records.json", records)
-                print(f"{row['id']} score={record['score']} stage={record['failing_stage']}", flush=True)
-                if record.get("unreadable") or record.get("failing_stage") == "source_drift":
-                    break
+    run_errors = []
+    try:
+        with xbench_session.signed_in(repo, ctx.source_sha, origin=ctx.base) as (page, info):
+            write_json_atomic(ctx.out_dir / "session.json", info)
+            transport = transport_for(page, ctx.base)
+            client = StudioClient(transport)
+            with ExitStack() as stack:
+                projects = {trade: stack.enter_context(disposable_project(
+                    client, f"X03 {trade} {run_id}")) for trade in TRADES}
+                drawings = {}
+                for fixture_id in dict.fromkeys(r["drawing"] for r in rows):
+                    fixture = fixtures[fixture_id]
+                    trade = next(r["trade"] for r in rows if r["drawing"] == fixture_id)
+                    # Anonymous upload names prevent leaking local customer filenames into harness logs.
+                    name = fixture_id + Path(fixture["path"]).suffix
+                    uploaded = client.upload_drawing(name, Path(fixture["path"]).read_bytes())
+                    client.wait_upload(uploaded, timeout_s=600)
+                    drawings[fixture_id] = client.adopt_drawing(projects[trade]["project_id"], uploaded, name)
+                write_json_atomic(ctx.out_dir / "projects.json", {"projects": projects, "drawings": drawings})
+                for row in rows:
+                    deadline = time.monotonic() + 600
+                    try:
+                        with author_authority(transport, row, projects[row["trade"]],
+                                              drawings[row["drawing"]], ctx.out_dir, deadline=deadline) as authority:
+                            record = evaluate_prompt(row, transport=transport, client=client,
+                                project=projects[row["trade"]], drawing=drawings[row["drawing"]],
+                                source_sha=ctx.source_sha, evidence_dir=ctx.out_dir, run_id=run_id,
+                                authority_headers=authority, deadline_at=deadline)
+                    except Exception as exc:
+                        record = {"id": row["id"], "trade": row["trade"], "drawing": row["drawing"],
+                                  "source_sha": ctx.source_sha, "model_id": None, "tool_name": None,
+                                  "version": None, "tool_source_hash": None, "output_hash": None,
+                                  "score": 0, "failing_stage": "author", "author_submitted": False,
+                                  "unreadable": True, "error_code": "AUTHOR_AUTHORITY_SETUP_FAILED",
+                                  "failure": str(exc) if isinstance(exc, PromptFailure) else type(exc).__name__}
+                        write_json_atomic(ctx.out_dir / (row["id"] + ".json"), {"record": record, "routes": []})
+                    records.append(record)
+                    write_json_atomic(ctx.out_dir / "records.json", records)
+                    print(f"{row['id']} score={record['score']} stage={record['failing_stage']}", flush=True)
+                    if record.get("unreadable") or record.get("failing_stage") == "source_drift":
+                        break
+    except Exception as exc:
+        if not records:
+            raise
+        run_errors.append({"stage": "owned_resource_cleanup", "failure": type(exc).__name__})
+        write_json_atomic(ctx.out_dir / "cleanup.json", run_errors)
     steps, report = grade_records(records, baseline=baseline, prompt_sha256=prompt_sha,
-                                  source_sha=ctx.source_sha, out_dir=ctx.out_dir, frozen_rows=rows)
+                                  source_sha=ctx.source_sha, out_dir=ctx.out_dir, frozen_rows=rows,
+                                  run_unreadable=bool(run_errors))
     if report["complete"] and baseline is None:
         baseline_path.parent.mkdir(parents=True, exist_ok=True)
         # One immutable baseline; a later run can never silently replace it.
