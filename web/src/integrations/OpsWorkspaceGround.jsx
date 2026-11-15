@@ -147,9 +147,16 @@ function ProjectMaterialImport({ projectId, client, signal, guard, onImported, o
         if (size > 262144) { setPointer(null); setError('Context too large. Original and last valid dataset retained.'); return }
       } catch { setPointer(null); setError('Context unavailable. Original and last valid dataset retained.'); return }
     }
-    const first = rows.find((row) => row && typeof row === 'object' && !Array.isArray(row))
-    setFields(Object.keys(first || {}).filter((key) => /^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(key) &&
-      !['__proto__', 'prototype', 'constructor'].includes(key)).slice(0, 100).map((key, index) => ({
+    const keys = new Set()
+    for (const row of rows) {
+      if (!row || typeof row !== 'object' || Array.isArray(row)) continue
+      for (const key of Object.keys(row)) {
+        if (/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(key) && !['__proto__', 'prototype', 'constructor'].includes(key)) keys.add(key)
+        if (keys.size === 100) break
+      }
+      if (keys.size === 100) break
+    }
+    setFields([...keys].map((key, index) => ({
       id: key, label: key, pointer: `/${key}`, kind: 'text', conversion: 'identity', key: index === 0, nullable: false,
     })))
   }

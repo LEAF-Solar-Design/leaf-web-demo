@@ -395,6 +395,24 @@ function mapOriginal(pointer) {
   fireEvent.change(screen.getByLabelText('Import dataset ID'), { target: { value: 'original-records' } })
   fireEvent.change(screen.getByLabelText('Import dataset title'), { target: { value: 'Imported original' } })
 }
+it.each(['remaining_pct', 'reset_at'])('later-record discovery includes %s absent from the first record', async field => {
+  const harness = await materialHarness([{ account: 'first' }, { account: 'second', [field]: field === 'remaining_pct' ? 0 : '2026-11-02T12:00:00Z' }], '')
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded(); await openOriginal(); mapOriginal('')
+  expect(screen.getByLabelText('Field 1 id').value).toBe('account')
+  expect(screen.getByLabelText('Field 2 id').value).toBe(field)
+  expect(importPosts(harness.fetchImpl)).toHaveLength(0)
+})
+it('later-record discovery preserves first-seen order, exclusions and the100field limit', async () => {
+  const later = JSON.parse('{"constructor":"blocked","prototype":"blocked","__proto__":"blocked","pair_key":"main"}')
+  for (let i = 0; i < 110; i++) later[`extra_${i}`] = i
+  const harness = await materialHarness([null, 7, ['not a record'], { account: 'first' }, later], '')
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded(); await openOriginal(); mapOriginal('')
+  expect(screen.getByLabelText('Field 1 id').value).toBe('account')
+  expect(screen.getByLabelText('Field 2 id').value).toBe('pair_key')
+  expect(screen.getByLabelText('Field 100 id').value).toBe('extra_97')
+  expect(screen.queryByLabelText('Field 101 id')).toBeNull()
+  expect(importPosts(harness.fetchImpl)).toHaveLength(0)
+})
 it.each(['account', 'pair_key', 'remaining_pct', String.raw`acc\u006funt`])('refuses duplicate original JSON member %s before mapping', async key => {
   const field = key.startsWith('acc') ? 'account' : key
   const raw = `[{"${field}":"first","${key}":"second"}]`
