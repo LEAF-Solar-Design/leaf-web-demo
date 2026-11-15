@@ -31,8 +31,10 @@ def _four_corners(entity):
             turn = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0])
             if not math.isfinite(turn) or turn == 0:
                 return False
-        area = sum(points[i][0] * points[(i + 1) % 4][1]
-                   - points[(i + 1) % 4][0] * points[i][1] for i in range(4))
+        origin_x, origin_y = points[0][:2]
+        local = [(p[0] - origin_x, p[1] - origin_y) for p in points]
+        area = sum(local[i][0] * local[(i + 1) % 4][1]
+                   - local[(i + 1) % 4][0] * local[i][1] for i in range(4))
         return math.isfinite(area) and abs(area) > 0
     except (TypeError, ValueError, IndexError):
         return False

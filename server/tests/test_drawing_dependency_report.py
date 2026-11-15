@@ -88,3 +88,21 @@ def test_unicode_records_reorder_stably_deduplicate_by_kind_and_preserve_input()
     assert pairs == before and reordered == reordered_before
     assert [(row["kind"], row["name"]) for row in report["dependencies"]] == [
         ("font", shared), ("image", shared), ("shape_font", shared), ("underlay", "\u53c2\u7167.pdf")]
+
+
+def test_sequential_intakes_have_drawing_local_reports_without_mutating_prior_output():
+    from copy import deepcopy
+
+    def drawing(font, object_record):
+        return (f"0\nSECTION\n2\nTABLES\n0\nSTYLE\n2\nNotes\n3\n{font}\n"
+                f"0\nENDSEC\n0\nSECTION\n2\nOBJECTS\n{object_record}"
+                "0\nENDSEC\n0\nEOF\n").encode()
+
+    first = parse_dxf_bytes(drawing("first.shx", "0\nIMAGEDEF\n5\nA1\n1\nfirst.png\n"))["dependency_report"]
+    preserved = deepcopy(first)
+    empty = parse_dxf_bytes(b"0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n")["dependency_report"]
+    second = parse_dxf_bytes(drawing("second.shx", "0\nPDFDEFINITION\n5\nB1\n1\nsecond.pdf\n"))["dependency_report"]
+    assert first == preserved
+    assert empty["dependencies"] == []
+    assert {row["name"] for row in first["dependencies"]} == {"first.shx", "first.png"}
+    assert {row["name"] for row in second["dependencies"]} == {"second.shx", "second.pdf"}

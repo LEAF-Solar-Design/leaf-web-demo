@@ -112,3 +112,19 @@ it('supports labeled native checkboxes and one keyboard-activated submit', () =>
   keyboardActivate(submit(), 'Enter')
   expect(onSelect).toHaveBeenCalledExactlyOnceWith(['first', 'second'])
 })
+
+it('refreshes labels and counts without changing the explicitly selected IDs', () => {
+  const onSelect = vi.fn()
+  const view = render(<ModuleSetPicker drawingKey="same-drawing" data={data} onSelect={onSelect} />)
+  fireEvent.click(first())
+  const refreshed = { sets: [
+    { ...data.sets[0], layer: 'Updated roof', block: 'Updated panel', count: 14 },
+    { ...data.sets[1], count: 7 },
+  ] }
+  view.rerender(<ModuleSetPicker drawingKey="same-drawing" data={refreshed} onSelect={onSelect} />)
+  expect(screen.queryByRole('checkbox', { name: 'Design / Panel A: 12 candidates' })).toBeNull()
+  expect(screen.getByRole('checkbox', { name: 'Updated roof / Updated panel: 14 candidates' }).checked).toBe(true)
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Alternate / Panel B: 7 candidates' }))
+  fireEvent.click(submit())
+  expect(onSelect).toHaveBeenCalledExactlyOnceWith(['first', 'second'])
+})

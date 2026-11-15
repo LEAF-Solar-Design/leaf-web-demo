@@ -175,3 +175,49 @@ def test_distinct_unidentified_entities_are_not_collapsed_by_missing_handles():
     result, overlay = module.run(intake, {"set_ids": [listing["sets"][0]["set_id"]]})
     assert result["count"] == 2
     assert overlay["highlight_handles"] == []
+
+
+def test_mixed_spaces_exclude_paper_entities_from_all_module_outputs():
+    panel = {"closed": True, "pts": [[0, 0], [2, 0], [2, 1], [0, 1]]}
+    intake = {"inserts": [
+        {"layer": "Model modules", "name": "Panel", "handle": "I0"},
+        {"layer": "Model modules", "name": "Panel", "handle": "I1", "space": "model", "layout": "Model"},
+        {"layer": "Paper modules", "name": "Panel", "handle": "I2", "space": "paper"},
+        {"layer": "Paper modules", "name": "Panel", "handle": "I0", "layout": "Sheet 1"}],
+        "polylines": [
+            {**panel, "layer": "Model outlines", "handle": "P0"},
+            {**panel, "layer": "Model outlines", "handle": "P1", "space": "model", "layout": "Model"},
+            {**panel, "layer": "Paper outlines", "handle": "P2", "space": "paper", "layout": "Model"},
+            {**panel, "layer": "Paper outlines", "handle": "P0", "layout": "Sheet 2"}]}
+    listing, _ = module.run(intake, {})
+    assert {(row["layer"], row["count"]) for row in listing["sets"]} == {
+        ("Model modules", 2), ("Model outlines", 2)}
+    result, overlay = module.run(intake, {"set_ids": [row["set_id"] for row in listing["sets"]]})
+    assert result["count"] == 4
+    assert set(overlay["highlight_handles"]) == {"I0", "I1", "P0", "P1"}
+
+
+@pytest.mark.parametrize("scale, offset, angle", [
+    (1e-6, (0.1, -0.2), 0.4),
+    (1.0, (1e12, -1e12), 0.0),
+    (1e6, (1e10, -1e10), 0.7853981633974483),
+    (0.5, (-13.0, 8.0), 3.141592653589793),
+])
+def test_finite_translation_rotation_and_uniform_scale_preserve_candidates(scale, offset, angle):
+    import math
+
+    shapes = [[[0, 0], [2, 0], [2, 1], [0, 1]],
+              [[0, 0], [3, 0], [2, 2], [0, 1]]]
+    baseline = {"polylines": [{"layer": "Modules", "closed": True,
+                               "pts": points, "handle": f"Q{i}"}
+                              for i, points in enumerate(shapes)]}
+    transformed = {"polylines": [{**entity, "pts": [
+        [offset[0] + scale * (x * math.cos(angle) - y * math.sin(angle)),
+         offset[1] + scale * (x * math.sin(angle) + y * math.cos(angle))]
+        for x, y in entity["pts"]]} for entity in baseline["polylines"]]}
+    expected, _ = module.run(baseline, {})
+    listing, _ = module.run(transformed, {})
+    assert listing["sets"] == expected["sets"]
+    result, overlay = module.run(transformed, {"set_ids": [row["set_id"] for row in listing["sets"]]})
+    assert result["count"] == 2
+    assert set(overlay["highlight_handles"]) == {"Q0", "Q1"}
