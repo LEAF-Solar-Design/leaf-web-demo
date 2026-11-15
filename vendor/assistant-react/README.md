@@ -51,9 +51,8 @@ The names are fixed by the standard and match the Swift side.
 
 Import dataset rendering from the relative `src/datasets` entry, for example
 `import { DatasetElement, resolveDisplayPreferences } from "./vendor/assistant-react/src/datasets"`.
-It is intentionally absent from `src/index.ts`, so conversation consumers do
-not load Recharts. Dataset hosts supply the `recharts` peer (`^3.6.0`); the
-package also declares it for its own tests. Both React 18.3 and 19 are supported,
+It is intentionally absent from `src/index.ts`. The dataset entry is
+self-contained, including its SVG line chart. Both React 18.3 and 19 are supported,
 with no Next.js, Tailwind, host context, or host component requirement.
 
 `DatasetElement` accepts S7's `element`, `read`, `preferences`, optional
@@ -86,7 +85,8 @@ strings in its source rows and formats them using the display preferences.
 Null X stays in the
 equivalent table and is omitted from the plot. `formatDatasetAxisValue` guards
 generated temporal ticks outside the canonical range. Count axes use integer
-ticks. Animations are disabled; the Recharts accessibility layer is enabled.
+ticks. Charts render without animation and support pointer tooltips, arrow-key
+navigation, Home/End, and polite announcements of the active observation.
 
 Tables use semantic headers and stable row keys in a keyboard-focusable
 overflow region. `maxRows` bounds the visible viewport (default 12); all

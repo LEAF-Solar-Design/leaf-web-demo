@@ -32,8 +32,8 @@ PINNED_BASE_DIGESTS = {
     # moved 2026-09-29: solar-settings params gained project_changes (sf-solar-project-readiness)
     "solar-settings": "sha256:a560ec3662e09efb3fefb2d7fa683cdbc55f2630abe633910b0bdd6645528559",
     "solar-size-strings": "sha256:6da06d36dc2c4de475f7fab48654003101d33d776562b76bc704e261d0f1d60e",
-    # S03 discovery adds exact grouping properties; captured from full CI at81719653.
-    "solar-panel-groups": "sha256:863f0f8cbd37ab931e9bdddea553923fb96ab4a9436a0540b64ccf329bba5aee",
+    # S02 #2984 adds geometry_only; canonical store digest at 5300ca2743b071b84337bf525a485cb4a8840ec8.
+    "solar-panel-groups": "sha256:47819a8a1afc3d2ac512a309825de985ad9ddeadf4ba8335c7c249b6eabb9e54",
     "solar-solve-proposal": "sha256:33ca2f21d777762c0e3dd1ad6925599c1d3533aa6341dffa39167fdd5728132d",
     "solar-commit-solve": "sha256:69b70748c4383c2503ed385a63942528a09719a9df69568c1c97524ef00421fa",
     "solar-correct-string": "sha256:7eafd72428523b7d36a0047cb56ab84625c7e42f285376726c4da8334db8a427",
