@@ -412,6 +412,8 @@ def post_stringer(request: StringerRequest, grant: CloudGrant, *, preserve_uncer
                      "Content-Type": "application/json"},
             timeout=(5, 45), allow_redirects=False, stream=True,
         ) as response:
+            if response.status_code == 400:
+                raise CloudError("CLOUD_REQUEST_REJECTED", 400)
             if response.status_code == 401:
                 raise CloudError("cloud_auth_missing", 401)
             if response.status_code == 403:
@@ -459,6 +461,8 @@ def _async_stringer_call(method, url, grant, *, remaining_seconds, request=None,
                     timeout=(min(5, remaining_seconds / 2), min(45, remaining_seconds / 2)),
                     allow_redirects=False, stream=True, **kwargs) as response:
             status = response.status_code
+            if status == 400:
+                raise CloudError("CLOUD_REQUEST_REJECTED", 400)
             if status == 401:
                 raise CloudError("cloud_auth_missing", 401)
             if status == 403:
