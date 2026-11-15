@@ -1,7 +1,10 @@
 """Synthetic X06 grading boundaries, independent of any product response."""
+import base64
+from contextlib import contextmanager
 import hashlib
 import json
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -58,6 +61,23 @@ def test_malformed_schedule_cannot_pass(bad):
         normalize_rows(bad)
 
 
+@pytest.mark.parametrize('bad', [None, 7, True, 'rows', b'rows', {},
+                                [None], [7], ['row'], [[]], [{}],
+                                [{'layer': 'steel_test'}],
+                                [{'layer': 'steel_test', 'count': 2}],
+                                [{'count': 2, 'total_length': 100}],
+                                [{'layer': 'steel_test', 'total_length': 100}]])
+def test_row_shape_errors_are_controlled_value_errors(bad):
+    with pytest.raises(ValueError):
+        normalize_rows(bad)
+
+
+def test_row_shape_accepts_tuple_without_changing_tolerance():
+    assert normalize_rows(tuple(rows())) == normalize_rows(rows())
+    assert compare_rows(rows(length=100.5), rows()) == []
+    assert compare_rows(rows(length=100.5001), rows())
+
+
 def test_zero_length_requires_exact_zero():
     assert compare_rows(rows(length=0), rows(length=0)) == []
     assert compare_rows(rows(length=0.00001), rows(length=0))
@@ -87,6 +107,30 @@ def test_numeric_huge_budget_values_are_unknown():
     assert budget_ok(10**400, 1) is None
     assert budget_ok(-(10**400), 1) is None
     assert budget_ok(1, 10**400) is None
+
+
+@pytest.mark.parametrize('change,expected', [
+    ({'drawing_sha256': 'b' * 64}, 'FAIL'),
+    ({'drawing_sha256': None}, 'UNREADABLE'),
+    ({'length_units': None}, 'UNREADABLE'),
+    ({'length_units': ''}, 'UNREADABLE'),
+    ({'length_units': 'feet'}, 'FAIL'),
+])
+def test_schedule_identity_and_units_precede_rows(monkeypatch, change, expected):
+    evidence = {'drawing_sha256': 'a' * 64, 'length_units': 'inches', 'rows': rows()}
+    evidence.update(change)
+    def forbidden_compare(*args):
+        pytest.fail('Rows compared before drawing identity and units')
+    monkeypatch.setattr(x06, 'compare_rows', forbidden_compare)
+    assert x06.schedule_verdict(evidence, {'sha256': 'a' * 64, 'rows': rows()}) == expected
+
+
+@pytest.mark.parametrize('observed,expected', [(rows(), 'PASS'),
+    (rows(length=100.5), 'PASS'), (rows(length=100.5001), 'FAIL'),
+    (rows(count=3), 'FAIL'), (None, 'UNREADABLE')])
+def test_schedule_valid_synthetic_table(observed, expected):
+    evidence = {'drawing_sha256': 'a' * 64, 'length_units': 'inches', 'rows': observed}
+    assert x06.schedule_verdict(evidence, {'sha256': 'a' * 64, 'rows': rows()}) == expected
 
 
 def test_csv_is_cell_for_cell_not_numeric_tolerance():
@@ -121,6 +165,64 @@ def test_csv_export_size_is_bounded_before_parsing(monkeypatch):
 
 def test_csv_end_of_file_cannot_impersonate_a_missing_table_row():
     assert csv_equals_table(b'', [None]) is False
+
+
+def csv_artifact(content=b'Layer,Count\nsteel_test,2\n'):
+    return {'bytes': len(content), 'mime': 'text/csv',
+            'base64': base64.b64encode(content).decode('ascii')}
+
+
+@pytest.mark.parametrize('change', [
+    {'bytes': None}, {'bytes': True}, {'bytes': -1}, {'bytes': 10**400},
+    {'bytes': 1}, {'bytes': 26}, {'mime': None}, {'mime': 'text/plain'},
+    {'base64': None}, {'base64': '!!!'}, {'base64': 'YQ'},
+    {'base64': 'YQ==\n'}, {'base64': '非ASCII'},
+])
+def test_spreadsheet_corrupt_artifact_is_unreadable(change):
+    artifact = csv_artifact()
+    artifact.update(change)
+    assert x06.spreadsheet_verdict(artifact, [['Layer', 'Count'], ['steel_test', '2']]) == 'UNREADABLE'
+
+
+def test_spreadsheet_valid_artifact_and_exact_cells():
+    artifact = csv_artifact()
+    cells = [['Layer', 'Count'], ['steel_test', '2']]
+    assert x06.spreadsheet_verdict(artifact, cells) == 'PASS'
+    artifact['mime'] = 'text/csv; charset=utf-8'
+    assert x06.spreadsheet_verdict(artifact, cells) == 'PASS'
+    assert x06.spreadsheet_verdict(artifact, [['Layer', 'Count'], ['steel_test', '3']]) == 'FAIL'
+    assert x06.spreadsheet_verdict(artifact, None) == 'UNREADABLE'
+    assert x06.spreadsheet_verdict(None, cells) == 'UNREADABLE'
+    assert x06.spreadsheet_verdict(csv_artifact(b'\xff'), cells) == 'UNREADABLE'
+
+
+@pytest.mark.parametrize('change,expected', [
+    ({'published_tool_id': None}, 'UNREADABLE'),
+    ({'published_tool_id': ''}, 'UNREADABLE'),
+    ({'published_tool_id': 'different-tool'}, 'FAIL'),
+    ({'session_id': None}, 'UNREADABLE'),
+    ({'session_id': 'first-session'}, 'FAIL'),
+    ({'drawing_sha256': None}, 'UNREADABLE'),
+    ({'drawing_sha256': 'a' * 64}, 'FAIL'),
+    ({}, 'PASS'),
+])
+def test_reuse_requires_same_published_tool_new_session_second_fixture(change, expected):
+    first = {'published_tool_id': 'xbench-x06-synthetic', 'session_id': 'first-session'}
+    second = {'published_tool_id': 'xbench-x06-synthetic', 'session_id': 'second-session',
+              'drawing_sha256': 'b' * 64}
+    second.update(change)
+    assert x06.reuse_verdict(first, second, {'id': 'second', 'sha256': 'b' * 64}) == expected
+
+
+def test_reuse_missing_original_or_wrong_fixture_is_unreadable():
+    first = {'published_tool_id': 'xbench-x06-synthetic', 'session_id': 'first-session'}
+    second = {'published_tool_id': 'xbench-x06-synthetic', 'session_id': 'second-session',
+              'drawing_sha256': 'b' * 64}
+    fixture = {'id': 'second', 'sha256': 'b' * 64}
+    assert x06.reuse_verdict(None, second, fixture) == 'UNREADABLE'
+    assert x06.reuse_verdict({}, second, fixture) == 'UNREADABLE'
+    assert x06.reuse_verdict(first, None, fixture) == 'UNREADABLE'
+    assert x06.reuse_verdict(first, second, {'id': 'first', 'sha256': 'b' * 64}) == 'UNREADABLE'
 
 
 def test_solar_source_or_engine_fails_and_missing_provenance_is_unknown():
@@ -220,3 +322,100 @@ def test_author_window_exception_preserves_foreign_replacement(tmp_path):
             path.write_bytes(foreign)
             raise RuntimeError('synthetic failure')
     assert path.read_bytes() == foreign
+
+
+@pytest.mark.parametrize('failure,expected', [
+    ('none', 'FAIL'), ('decode', 'UNREADABLE'), ('screenshot-before', 'UNREADABLE'),
+    ('screenshot-after', 'FAIL'), ('ui-timeout', 'UNREADABLE'),
+    ('proof-timeout', 'FAIL'), ('sign-in', 'UNREADABLE'),
+])
+def test_run_failures_preserve_truthful_steps_and_cleanup(tmp_path, monkeypatch, failure, expected):
+    import xbench_session
+    state = {'closed': False, 'captures': 0}
+    body = {'error': {'error_code': 'BAD_PARAMS'},
+            'reason_code': 'tenant_repository_unavailable'}
+
+    class Locator:
+        def __init__(self, name):
+            self.name = str(name)
+        @property
+        def first(self):
+            return self
+        def is_visible(self):
+            return True
+        def is_enabled(self):
+            return True
+        def click(self):
+            pass
+        def fill(self, value):
+            assert value == x06.REQUEST
+        def get_attribute(self, name):
+            return 'true'
+        def wait_for(self, **kwargs):
+            if failure == 'ui-timeout' and 'What should' in self.name:
+                raise TimeoutError('synthetic UI timeout')
+            if failure == 'proof-timeout' and 'Protected tool' in self.name:
+                raise TimeoutError('synthetic proof timeout')
+        def inner_text(self):
+            return 'Protected tool authoring could not complete'
+
+    class Response:
+        status = 503
+        url = 'https://offline.invalid/api/author/stage'
+        request = SimpleNamespace(method='POST')
+        def json(self):
+            if failure == 'decode':
+                raise ValueError('synthetic response decoding failure')
+            return body
+
+    class Page:
+        def get_by_role(self, role, *, name, **kwargs):
+            return Locator(name)
+        def get_by_label(self, name, **kwargs):
+            return Locator(name)
+        def get_by_text(self, name, **kwargs):
+            return Locator(name)
+        def locator(self, name):
+            return Locator(name)
+        def screenshot(self, **kwargs):
+            state['captures'] += 1
+            if ((failure == 'screenshot-before' and state['captures'] == 1)
+                    or (failure == 'screenshot-after' and state['captures'] == 2)):
+                raise OSError('synthetic screenshot failure')
+        @contextmanager
+        def expect_response(self, predicate, **kwargs):
+            response = Response()
+            assert predicate(response)
+            yield SimpleNamespace(value=response)
+
+    ctx = SimpleNamespace(source_sha='c' * 40, base='https://offline.invalid',
+        out_dir=tmp_path / 'run', options={'oracle': str(tmp_path / 'unused.json')},
+        fixtures=[{'id': 'first', 'path': 'synthetic.dxf', 'sha256': 'a' * 64}])
+
+    @contextmanager
+    def signed_in(*args, **kwargs):
+        try:
+            if failure == 'sign-in':
+                raise RuntimeError('synthetic sign-in failure')
+            yield Page(), {'web_build': ctx.source_sha}
+        finally:
+            state['closed'] = True
+
+    monkeypatch.setattr(xbench_session, 'signed_in', signed_in)
+    monkeypatch.setattr(x06, 'load_oracle', lambda *args: {})
+    steps = x06._run(ctx)
+    assert [step.n for step in steps] == list(range(1, 8))
+    assert steps[1].verdict == expected
+    assert all(step.verdict == 'UNREADABLE' for step in steps if step.n != 2)
+    observed = json.loads((ctx.out_dir / 'author-supply.json').read_text())
+    assert state['closed'] and observed['browser_closed']
+    assert observed['source_sha'] == ctx.source_sha
+    if failure != 'none':
+        assert 'synthetic' in observed['error']
+    if expected == 'FAIL':
+        assert observed['author_response'] == body
+        assert observed['owner'] == 'e3cdcd02'
+        assert 'tenant_repository_unavailable' in observed['blocker']
+    if failure == 'decode':
+        assert observed['author_http_status'] == 503
+        assert 'author_response' not in observed

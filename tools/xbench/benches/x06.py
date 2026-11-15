@@ -3,6 +3,8 @@
 This bounded collector can report a proven authoring failure. It cannot PASS
 until publication, spreadsheet and second-session evidence are collected.
 """
+import base64
+import binascii
 import csv
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -73,8 +75,12 @@ def _nonnegative_number(value):
 
 def normalize_rows(rows):
     """Reject duplicates, nonfinite lengths, fractional counts and empty tables."""
+    if not isinstance(rows, (list, tuple)):
+        raise ValueError('Schedule rows must be a list or tuple')
     normalized = {}
     for row in rows:
+        if not isinstance(row, dict) or not {'layer', 'count', 'total_length'} <= row.keys():
+            raise ValueError('Schedule row must contain layer, count and total_length')
         layer = row['layer']
         count = row['count']
         length = row['total_length']
@@ -104,6 +110,28 @@ def compare_rows(observed, expected):
     return problems
 
 
+def _sha256(value):
+    return isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value) is not None
+
+
+def schedule_verdict(evidence, drawing, *, expected_units='inches'):
+    """Validate collector-normalized table identity and units before its rows."""
+    if (not isinstance(evidence, dict) or not isinstance(drawing, dict)
+            or not _sha256(drawing.get('sha256'))
+            or not isinstance(expected_units, str) or not expected_units.strip()):
+        return 'UNREADABLE'
+    digest, units = evidence.get('drawing_sha256'), evidence.get('length_units')
+    if not _sha256(digest) or not isinstance(units, str) or not units.strip():
+        return 'UNREADABLE'
+    if digest != drawing['sha256'] or units != expected_units:
+        return 'FAIL'
+    try:
+        problems = compare_rows(evidence.get('rows'), drawing.get('rows'))
+    except ValueError:
+        return 'UNREADABLE'
+    return 'FAIL' if problems else 'PASS'
+
+
 def csv_equals_table(content, table_cells):
     """Exact cells; None denotes an unreadable or oversized CSV export."""
     if not isinstance(content, (bytes, bytearray)) or len(content) > MAX_CSV_BYTES:
@@ -121,6 +149,48 @@ def csv_equals_table(content, table_cells):
         return next(reader, end) is end
     except (UnicodeDecodeError, csv.Error):
         return None
+
+
+def spreadsheet_verdict(artifact, table_cells):
+    """Check a normalized CSV download envelope, then its exact display cells."""
+    if (not isinstance(artifact, dict) or not isinstance(table_cells, list)
+            or not table_cells or not all(isinstance(row, list) and row
+                and all(isinstance(cell, str) for cell in row) for row in table_cells)):
+        return 'UNREADABLE'
+    size, mime, encoded = artifact.get('bytes'), artifact.get('mime'), artifact.get('base64')
+    if (type(size) is not int or not 0 <= size <= MAX_CSV_BYTES
+            or not isinstance(mime, str) or mime.split(';', 1)[0].strip().lower() != 'text/csv'
+            or not isinstance(encoded, str) or len(encoded) > 4 * ((size + 2) // 3)):
+        return 'UNREADABLE'
+    try:
+        content = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error):
+        return 'UNREADABLE'
+    if len(content) != size:
+        return 'UNREADABLE'
+    equal = csv_equals_table(content, table_cells)
+    if equal is None:
+        return 'UNREADABLE'
+    return 'PASS' if equal else 'FAIL'
+
+
+def reuse_verdict(first_run, second_run, second_fixture):
+    """Check saved-tool/session binding; second-drawing rows need a separate check."""
+    if (not isinstance(first_run, dict) or not isinstance(second_run, dict)
+            or not isinstance(second_fixture, dict) or second_fixture.get('id') != 'second'
+            or not _sha256(second_fixture.get('sha256'))):
+        return 'UNREADABLE'
+    values = [run.get(key) for run in (first_run, second_run)
+              for key in ('published_tool_id', 'session_id')]
+    if not all(isinstance(value, str) and value.strip() for value in values):
+        return 'UNREADABLE'
+    if not _sha256(second_run.get('drawing_sha256')):
+        return 'UNREADABLE'
+    if (first_run['published_tool_id'] != second_run['published_tool_id']
+            or first_run['session_id'] == second_run['session_id']
+            or second_run['drawing_sha256'] != second_fixture['sha256']):
+        return 'FAIL'
+    return 'PASS'
 
 
 def no_solar_provenance(source, engines):
@@ -250,8 +320,8 @@ def _run(ctx):
                                               and r.request.method == 'POST', timeout=60_000) as staged:
                         page.get_by_role('button', name='Generate tool', exact=True).click()
                     response = staged.value
-                    body = response.json()
                     observed['author_http_status'] = response.status
+                    body = response.json()
                     # The author error envelope contains no auth header or
                     # credential material. Never capture request headers.
                     if isinstance(body, dict) and isinstance(body.get('error'), dict):
@@ -271,7 +341,9 @@ def _run(ctx):
                                    if verdict == 'FAIL' else 'Authoring continuation evidence unavailable')
             observed['owner'] = 'e3cdcd02' if verdict == 'FAIL' else 'X06'
     except Exception as exc:
-        observed['blocker'] = 'Supported staging UI or sign-in unreadable'
+        observed['blocker'] = ('tenant_repository_unavailable prevents protected authoring'
+                               if verdict == 'FAIL' else 'Supported staging UI or sign-in unreadable')
+        observed['owner'] = 'e3cdcd02' if verdict == 'FAIL' else 'X06'
         observed['error'] = redact(str(exc))[:1000]
     finally:
         # signed_in closes its dedicated browser in its own finally, including
