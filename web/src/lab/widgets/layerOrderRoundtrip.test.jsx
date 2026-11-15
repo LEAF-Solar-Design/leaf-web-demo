@@ -21,9 +21,10 @@ it('roundtrips overlapping layer order through history, Save, Reload and the act
     }).mockImplementationOnce(async () => response({ graph: saved, kind: 'widget', revision: 2 }))
   vi.stubGlobal('fetch', fetch)
   const createObjectURL = vi.fn(() => 'blob:layer-proof')
+  const revokeObjectURL = vi.fn()
   vi.stubGlobal('URL', class extends URL {
     static createObjectURL = createObjectURL
-    static revokeObjectURL = vi.fn()
+    static revokeObjectURL = revokeObjectURL
   })
   vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
   const { container } = render(<WidgetsView />)
@@ -57,4 +58,5 @@ it('roundtrips overlapping layer order through history, Save, Reload and the act
   })
   expect(exported).toEqual(saved)
   expect(fetch).toHaveBeenCalledTimes(3)
+  await waitFor(() => expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith('blob:layer-proof'))
 })
