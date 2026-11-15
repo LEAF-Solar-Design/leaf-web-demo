@@ -3726,6 +3726,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_browser_project_flow.py"), 35),
         Suite("server-browser-project-routes", "server public Browser source routes", "pytest", SERVER,
               _py_pytest("tests/test_browser_project_routes.py"), 18),
+        Suite("server-browser-source-error-serializer", "server closed Browser source diagnostics", "pytest", SERVER,
+              _py_pytest("tests/test_browser_source_error_serializer.py"), 6),
         Suite("server-browser-project-authoring", "server tests/test_browser_project_authoring.py", "pytest", SERVER,
               _py_pytest("tests/test_browser_project_authoring.py"), 30),
         Suite("server-browser-project-source-export", "server verified Browser source export", "pytest", SERVER,
@@ -3906,11 +3908,9 @@ def build_suites() -> List[Suite]:
                "e2e/campaign-panel.spec.mjs", "e2e/recovery-controls.spec.mjs",
                "e2e/workspace-create-no-prompt.spec.mjs", "e2e/viewer-grid-toggle.spec.mjs",
                "e2e/studio-ux-regressions.spec.mjs", "e2e/project-page-editor.spec.mjs",
-               # Two browser workers over the six spec files: the suite was the longest in every full
-               # run (256 s on run-1, 296 s in job 14667) and B2 proved per-spec isolation at
-               # --workers=2 on the mini; project-page-editor.spec.mjs bounds the pair until the
-               # editor lane splits it. Every other Playwright suite keeps --workers=1.
-               "--workers=2"], None),
+               # Isolated test contexts use 3 workers on the same CI device;
+               # other suites retain their own worker limits.
+               "--workers=3"], None),
         Suite("web-lifecycle-panel-proof", "web mounted project lifecycle panel browser proof", "script", WEB,
               [_npx(), "--no-install", "playwright", "test", "--config", "playwright.lifecycle.config.mjs",
                "e2e/project-lifecycle-panel.spec.mjs", "--workers=1"], None),

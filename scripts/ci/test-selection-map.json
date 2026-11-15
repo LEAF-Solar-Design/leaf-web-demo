@@ -356,6 +356,7 @@
     "server-native-project-routes",
     "server-browser-project-flow",
     "server-browser-project-routes",
+    "server-browser-source-error-serializer",
     "server-browser-project-authoring",
     "server-browser-project-source-export",
     "server-project-solaredge",

@@ -244,6 +244,10 @@ function FileLinks({ files }) {
     const links = list.map((f) => {
       try {
         const bin = atob(f.base64)
+        if (Object.hasOwn(f, 'bytes')) {
+          if (!Number.isSafeInteger(f.bytes) || f.bytes < 0) return { name: f.name, href: null, error: 'Report file size is invalid.' }
+          if (f.bytes !== bin.length) return { name: f.name, href: null, error: 'Report file size does not match.' }
+        }
         const bytes = new Uint8Array(bin.length)
         for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
         const href = URL.createObjectURL(new Blob([bytes], { type: f.mime || 'application/octet-stream' }))
@@ -261,7 +265,10 @@ function FileLinks({ files }) {
   return (
     <div className="files">
       {download.links.map((f) => {
-        if (!f.href) return <span key={f.name} className="dim">{f.name} (unreadable)</span>
+        if (!f.href) return <span key={f.name} className="dim">
+          <span>{f.name} (unreadable)</span>
+          {f.error && <span role="status"> {f.error} Run the report again.</span>}
+        </span>
         return (
           <a key={f.name} className="btn ghost" href={f.href} download={String(f.name).replace(/[^\w.-]/g, '_')}>
             Download {f.name}

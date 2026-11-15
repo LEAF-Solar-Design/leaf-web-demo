@@ -109,3 +109,18 @@ it('does not call an empty page at the end an empty saved record', async () => {
   expect(within(list()).getByText('No unassigned panel references on this saved page.')).toBeInTheDocument()
   expect(within(list()).queryByRole('table')).toBeNull()
 })
+
+it('keeps an edited numeric offset after a completed saved read and sends the new value', async () => {
+  const h = setup()
+  await read()
+  const offset = screen.getByRole('spinbutton', { name: 'Offset' })
+  fireEvent.change(offset, { target: { value: '1000' } })
+  expect(offset).toHaveValue(1000)
+  expect(screen.queryByRole('region', { name: 'Unassigned panel references' })).toBeNull()
+  const data = result(3)
+  data.output.page = { offset: 1000, returned: 3, total: 1003, next_offset: null }
+  h.next(data)
+  await read()
+  expect(h.client.readSolar.mock.calls.at(-1)[0].params.offset).toBe(1000)
+  expect(within(list()).getByText('Showing 1001 to 1003 of 1003 unassigned panels.')).toBeInTheDocument()
+})
