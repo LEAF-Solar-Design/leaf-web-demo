@@ -71,8 +71,40 @@ order because object roles and INSERT ancestry can be meaningful. Identical
 whole diagnostics use set semantics within each checker or parent scope.
 Durations are not diagnostic or verdict transitions. Comparison PASS can describe
 an observed PASS-to-FAIL transition; it does not adopt a baseline or validate
-source bytes. The new siblings run separately and are not silently discovered
-by the regression entrypoint's fixed snapshot.
+source bytes. The array and oblique tests are explicit entries in the regression
+manifest; benchmark and comparison helper CLIs above remain explicit selections.
+No script is silently discovered for execution.
+
+The fixed test inventory contains 22 explicit `test_*.py` entries, including
+`test_geometry_matching_oracle.py`, `test_fill_tag_numeric_failures.py`,
+`test_case_work_limits.py`, `test_source_read_mutation.py`,
+`test_regression_inventory.py` and `test_report_comparison_algebra.py`.
+The inventory control's default invocation uses scratch directories only. After
+all sibling sources are integrated, audit the real offline directory separately:
+
+```powershell
+python tools/xbench/x01_offline/test_regression_inventory.py
+python tools/xbench/x01_offline/test_report_comparison_algebra.py
+python tools/xbench/x01_offline/test_regression_inventory.py --audit-root tools/xbench/x01_offline
+```
+
+The audit lists local `test_*.py` filenames and extracts literal `TESTS` and
+optional `EXCLUSIONS` from the runner's AST without importing or executing either
+the runner or the tests. Omitted tests, missing declared files, duplicates,
+malformed declarations/entries, missing exclusion reasons and simultaneous
+inclusion/exclusion produce deterministic named diagnostics. Exclusions must be
+explicit filename-to-nonempty-reason mappings; the integrated manifest uses none
+(`EXCLUSIONS = {}`). Inventory does not run suites or measure timing. Its JSON
+uses `leaf.xbench.x01.offline-regression-inventory.v1`,
+`evidence_kind: synthetic_offline` and `live_grade: false`; exit 0 means inventory
+PASS and exit 1 means a named audit failure, not a checker or live verdict.
+The report algebra uses four authored controls, three checker rows, at most four
+diagnostics per scope, three provenance entries and 16 KiB per scratch report.
+It checks identity, deterministic repetition, collection reordering, diagnostic
+addition/removal symmetry, ordered nested payloads and inverse provenance changes,
+including valid observed FAIL/UNREADABLE reports. Input bytes and SHA-256 remain
+unchanged across comparisons; failure messages retain exact replay JSON.
+These are synthetic report controls, not baseline adoption or source custody.
 
 ## Schema separation and artifacts
 
@@ -97,7 +129,7 @@ and no recursive default invocation of the regression entrypoint.
 
 ## Runtime and verification limits
 
-The fixed defaults contain the snapshot's 14 `test_*.py` scripts plus three
+The fixed defaults contain 22 explicitly declared `test_*.py` scripts plus three
 checker self-tests and runner, validator, source-custody and benchmark self-tests.
 Execution is sequential, using absolute `sys.executable` and script argv paths,
 with no shell. Script paths and fixture lookup are independent of the caller's
@@ -129,6 +161,8 @@ plus manifest/invalid-CLI controls that prohibit child capture. It never invokes
 the default regression list. Planner's exact authoritative verification:
 
 ```powershell
+python tools/xbench/x01_offline/test_regression_inventory.py
+python tools/xbench/x01_offline/test_report_comparison_algebra.py
 python tools/xbench/x01_offline/run_regression_suite.py --self-test
 ```
 

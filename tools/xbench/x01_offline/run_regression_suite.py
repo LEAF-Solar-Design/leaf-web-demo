@@ -25,21 +25,30 @@ SCHEMA = "leaf.xbench.x01.offline-regression.v1"
 ROOT = Path(__file__).resolve().parent
 PYTHON = str(Path(sys.executable).resolve())
 TESTS = (
+    "test_array_insert_layers.py",
     "test_atomic_report_failures.py",
     "test_case_file_limits.py",
     "test_case_input_contract.py",
+    "test_case_work_limits.py",
     "test_child_lifecycle.py",
     "test_cli_path_portability.py",
     "test_dxf_mutation_corpus.py",
     "test_fill_grid_oracle.py",
+    "test_fill_tag_numeric_failures.py",
     "test_geometry_invariants.py",
+    "test_geometry_matching_oracle.py",
     "test_geometry_numeric_failures.py",
     "test_layer_resource_limits.py",
+    "test_oblique_tag_oracle.py",
+    "test_regression_inventory.py",
+    "test_report_comparison_algebra.py",
+    "test_source_read_mutation.py",
     "test_synthetic_workflow.py",
     "test_tag_polygon_oracle.py",
     "test_unit_precision_boundaries.py",
     "test_validator_wire_boundaries.py",
 )
+EXCLUSIONS = {}  # Every local test_*.py script is explicitly included.
 SELF_TESTS = (
     "check_cases.py", "check_plot_layers.py", "check_unit_equivalence.py",
     "run_offline_checks.py", "validate_offline_report.py",
@@ -245,7 +254,7 @@ class RegressionTests(unittest.TestCase):
             listed = json.loads(output.getvalue())
             self.assertEqual([row["name"] for row in listed["suites"]], list(SUITES))
             self.assertNotIn(Path(__file__).name, SUITES)
-            self.assertEqual(len(TESTS), 14)
+            self.assertEqual(len(TESTS), 22)
             for row in listed["suites"]:
                 self.assertTrue(Path(row["argv"][0]).is_absolute())
                 self.assertTrue(Path(row["argv"][1]).is_absolute())
