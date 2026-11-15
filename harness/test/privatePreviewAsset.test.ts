@@ -17,6 +17,6 @@ it("internal asset HTTP requires secret and tenant match, returns inert JSON",as
  const call=(headers:Record<string,string>)=>fetch(url,{method:"POST",headers:{"content-type":"application/json",...headers},body:JSON.stringify(payload)});
  expect((await call({})).status).toBe(401);expect((await call({"x-harness-secret":"wrong"})).status).toBe(401);
  expect((await call({"x-harness-secret":"fixture-only-secret","x-tenant-id":id(99)})).status).toBe(409);
- const response=await call({"x-harness-secret":"fixture-only-secret","x-tenant-id":a.tenantId});expect(response.status).toBe(200);expect(response.headers.get("content-type")).toContain("application/json");expect(response.headers.get("cache-control")).toBe("private, no-store");expect((await response.json()).body_base64).toBe(body.toString("base64"));
+ const response=await call({"x-harness-secret":"fixture-only-secret","x-tenant-id":a.tenantId});expect(response.status).toBe(200);expect(response.headers.get("content-type")).toContain("application/json");expect(response.headers.get("cache-control")).toBe("private, no-store");expect(await response.json()).toHaveProperty("body_base64",body.toString("base64"));
  }finally{server.closeAllConnections();await new Promise<void>((resolve,reject)=>server.close(e=>e?reject(e):resolve()));}
 });

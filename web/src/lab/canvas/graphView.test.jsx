@@ -179,6 +179,30 @@ describe('project corpus evaluation flow', () => {
     expect(screen.queryByRole('textbox', { name: /uuid/i })).toBeNull()
   })
 
+  it('distinguishes same-name originals and retains the selected content descriptor', async () => {
+    const data = options(), saved = {}, graph = emptyGraph()
+    const second = { ...material, material_id: 'cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa', sha256: 'f'.repeat(64) }
+    data.materials.push(second)
+    const fetchImpl = vi.fn(async () => ({ ok: true, json: async () => data }))
+    vi.stubGlobal('fetch', fetchImpl)
+    const client = clientFor(graph, saved)
+    render(<GraphView initialDocument={graph} client={client} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Evaluate project corpus' }))
+    await screen.findByRole('option', { name: 'Shared research project' })
+    fireEvent.change(screen.getByLabelText('Project'), { target: { value: project } })
+    const firstLabel = `${material.name} (SHA-256 ${material.sha256.slice(0, 12)}, ID ${material.material_id})`
+    const secondLabel = `${second.name} (SHA-256 ${second.sha256.slice(0, 12)}, ID ${second.material_id})`
+    await screen.findByRole('option', { name: firstLabel })
+    expect(screen.getByRole('option', { name: secondLabel })).toHaveValue(second.material_id)
+    fireEvent.change(screen.getByLabelText('Original corpus'), { target: { value: second.material_id } })
+    fireEvent.change(screen.getByLabelText('Evaluation suite'), { target: { value: suiteId } })
+    expect(screen.getByLabelText('Original corpus')).toHaveDisplayValue(secondLabel)
+    fireEvent.click(screen.getByRole('button', { name: 'Add corpus evaluation' }))
+    await waitFor(() => expect(client.state.restoredGraph.blocks.at(-1).registry.id).toBe('corpus-evaluator'))
+    expect(client.state.restoredGraph.blocks.at(-1).settings.corpus).toEqual({ material_id: second.material_id, sha256: second.sha256, byte_size: second.byte_size })
+    expect(fetchImpl.mock.calls.every(([, init = {}]) => (init.method || 'GET') === 'GET')).toBe(true)
+  })
+
   it('drops pending project material replies on explicit logout', async () => {
     let deliver
     vi.stubGlobal('fetch', vi.fn(() => new Promise(resolve => { deliver = resolve })))

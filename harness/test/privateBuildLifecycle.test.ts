@@ -89,7 +89,7 @@ it("actual internal HTTP authenticates even with global auth disabled and status
   expect((await call("build",headers,{...payload,version:0})).status).toBe(409);expect(f.producer.build).not.toHaveBeenCalled();
   const duplicate=await fetch(url+"build",{method:"POST",headers:{"content-type":"application/json",...headers},body:JSON.stringify(payload).replace('"version":1','"version":1,"version":2')});
   expect(duplicate.status).toBe(409);expect(f.producer.build).not.toHaveBeenCalled();
-  const response=await call("build",headers);expect(response.status).toBe(200);expect(response.headers.get("cache-control")).toBe("private, no-store");expect((await response.json()).status).toBe("building");
-  f.resolve(f.preview);await flush();expect((await (await call("status",headers)).json()).status).toBe("ready");expect(f.producer.build).toHaveBeenCalledTimes(1);
+  const response=await call("build",headers);expect(response.status).toBe(200);expect(response.headers.get("cache-control")).toBe("private, no-store");expect(await response.json()).toHaveProperty("status","building");
+  f.resolve(f.preview);await flush();expect(await (await call("status",headers)).json()).toHaveProperty("status","ready");expect(f.producer.build).toHaveBeenCalledTimes(1);
  }finally{server.closeAllConnections();await new Promise<void>((yes,no)=>server.close(e=>e?no(e):yes()));gate.mockRestore();}
 });
