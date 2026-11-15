@@ -1,0 +1,52 @@
+{
+  "schema": "leaf.next-bundle-measurement.v1",
+  "scope": "L03 PR3066 shared Next baseline correction after a proven preexisting main overrun",
+  "measured_at": "2026-11-15T03:32:08.485978",
+  "platform": "Windows local, Next16.4.3 webpack, same installed dependencies and inherited build configuration",
+  "before_head": "17c9b9844316580eaea526356f227d088f1701f8",
+  "after_head": "79eb6975e2f61ab6db665c40927bf517bc317947",
+  "commands": [
+    "node scripts/next-build.mjs",
+    "node scripts/check_bundle_budget.mjs --measure-next"
+  ],
+  "before": {
+    "framework": "next",
+    "method": "gzip-9 complete emitted JS/CSS",
+    "total": 1917947,
+    "startup": 260053,
+    "lazy_canvas_js": 1519331,
+    "lazy_canvas_css": 7147,
+    "files": 60,
+    "prior_total": 1425475,
+    "prior_ceiling": 1914984
+  },
+  "after": {
+    "framework": "next",
+    "method": "gzip-9 complete emitted JS/CSS",
+    "total": 1918108,
+    "startup": 260054,
+    "lazy_canvas_js": 1519491,
+    "lazy_canvas_css": 7147,
+    "files": 60,
+    "prior_total": 1425475,
+    "prior_ceiling": 1914984
+  },
+  "isolated_delta": 161,
+  "preexisting_parent_overrun": 2963,
+  "native_ci_candidate_total": 1918488,
+  "native_ci_variation_from_local": 380,
+  "previous_next_baseline": {
+    "framework": "next@16.4.3",
+    "method": "gzip-9 of every emitted JS/CSS asset in the enabled static export",
+    "total": 1882216,
+    "startup": 260873,
+    "files": 52,
+    "source_head": "220a8bf928cb1ae91e83c4f1050768584966583e",
+    "measurement_job": "7c8ad755211b49c39da1a8ef0b02a69c",
+    "basis": "Operator confirmed all web surfaces use Next.js on 2026-10-26. Framework migration adds 456741 bytes over the historical Vite baseline. Preserve the existing 32768-byte growth allowance. The full-export cap replaces Rollup-specific stem caps; retain lazy canvas and real worker reachability checks."
+  },
+  "unchanged_allowance_bytes": 32768,
+  "unchanged_guard_sha256": "38566ed65333cdaa22436d98328282b9736c4e549ed23fc90ff5cb74125d77e9",
+  "mini_access": false,
+  "note": "Reset the measured artifact reference after accumulated merged growth; do not increase the allowance, edit assertions or treat startup-only size as the full-export metric."
+}

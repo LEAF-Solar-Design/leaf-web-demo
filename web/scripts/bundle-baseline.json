@@ -348,11 +348,12 @@
   "next": {
     "framework": "next@16.4.3",
     "method": "gzip-9 of every emitted JS/CSS asset in the enabled static export",
-    "total": 1882216,
-    "startup": 260873,
-    "files": 52,
-    "source_head": "220a8bf928cb1ae91e83c4f1050768584966583e",
-    "measurement_job": "7c8ad755211b49c39da1a8ef0b02a69c",
-    "basis": "Operator confirmed all web surfaces use Next.js on 2026-10-26. Framework migration adds 456741 bytes over the historical Vite baseline. Preserve the existing 32768-byte growth allowance. The full-export cap replaces Rollup-specific stem caps; retain lazy canvas and real worker reachability checks."
+    "total": 1918108,
+    "startup": 260054,
+    "files": 60,
+    "source_head": "79eb6975e2f61ab6db665c40927bf517bc317947",
+    "measurement_job": "local-windows-L03-paired-Next-20261115",
+    "basis": "Paired complete Next exports at17c9b984 and79eb6975 show parent already over oldcap, with L03 delta161 gzip bytes. Refresh the measured Next artifact reference; keep the existing32768-byte growth allowance and all lazy-canvas/worker/reachability assertions unchanged. See producer measurement record for source, commands and native/local variation.",
+    "measurement_ref": "bundle-next-L03-measurement.json"
   }
 }
