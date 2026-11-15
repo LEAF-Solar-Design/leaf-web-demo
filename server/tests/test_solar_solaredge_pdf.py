@@ -176,6 +176,67 @@ def test_refuses_oversize_pdf(monkeypatch):
     assert err.value.code == "PDF_TOO_LARGE"
 
 
+def _object_stream(data, count, first):
+    import zlib
+    from pdfminer.psparser import LIT
+    return pdf.PDFStream({"Type": LIT("ObjStm"), "N": count, "First": first,
+                          "Filter": LIT("FlateDecode")}, zlib.compress(data))
+
+
+def _object_document():
+    doc = object.__new__(pdf._BoundedPDFDocument)
+    doc.object_stream_bytes = doc.object_stream_objects = 0
+    return doc
+
+
+def test_object_stream_below_limit_and_exact_index():
+    from pdfminer.psparser import KWD
+    objects, count = _object_document()._get_objects(_object_stream(b"5 0 8 5 null\n42\n", 2, 8))
+    assert count == 2
+    assert objects == [5, 0, 8, 5, KWD(b"null"), 42]
+
+
+def test_object_stream_refuses_count_before_decode(monkeypatch):
+    monkeypatch.setattr(pdf, "MAX_OBJECT_STREAM_OBJECTS", 1)
+    stream = _object_stream(b"not decoded", 2, 0)
+    with pytest.raises(SolarEdgePdfError, match="RESOURCE_LIMIT"):
+        _object_document()._get_objects(stream)
+    assert stream.data is None
+
+
+def test_object_stream_expansion_is_bounded(monkeypatch):
+    import tracemalloc
+    stream = _object_stream(b"5 0 " + b" " * (4 * 1024 * 1024), 1, 4)
+    monkeypatch.setattr(pdf, "MAX_OBJECT_STREAM_BYTES", 65536)
+    tracemalloc.start()
+    try:
+        with pytest.raises(SolarEdgePdfError, match="RESOURCE_LIMIT"):
+            _object_document()._get_objects(stream)
+        assert tracemalloc.get_traced_memory()[1] < 512 * 1024
+    finally:
+        tracemalloc.stop()
+    assert stream.data is None
+
+
+@pytest.mark.parametrize("data,count,first", [
+    (b"5 0 null null\n", 1, 4),
+    (b"5 0 5 5 null\n42\n", 2, 8),
+    (b"5 0 8 0 null\n42\n", 2, 8),
+    (b"5 0 null\n", True, 4),
+])
+def test_object_stream_rejects_false_or_conflicting_indexes(data, count, first):
+    with pytest.raises(SolarEdgePdfError, match="MALFORMED_PDF"):
+        _object_document()._get_objects(_object_stream(data, count, first))
+
+
+def test_object_stream_document_total_is_cumulative(monkeypatch):
+    monkeypatch.setattr(pdf, "MAX_OBJECT_STREAM_OBJECTS", 1)
+    doc = _object_document()
+    assert doc._get_objects(_object_stream(b"5 0 null\n", 1, 4))[1] == 1
+    with pytest.raises(SolarEdgePdfError, match="RESOURCE_LIMIT"):
+        doc._get_objects(_object_stream(b"8 0 null\n", 1, 4))
+
+
 def test_refuses_too_many_operators(monkeypatch):
     monkeypatch.setattr(pdf, "MAX_OPERATORS", 3)
     with pytest.raises(SolarEdgePdfError) as err:

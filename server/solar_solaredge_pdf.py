@@ -32,10 +32,11 @@ import io
 import itertools
 import math
 import os
+import zlib
 from dataclasses import dataclass, field
 
 from pdfminer.pdfdevice import PDFTextDevice
-from pdfminer.pdfdocument import PDFDocument
+from pdfminer.pdfdocument import PDFDocument, PDFStreamParser
 from pdfminer.pdffont import PDFCIDFont, PDFUnicodeNotDefined
 from pdfminer.pdfinterp import PDFContentParser, PDFPageInterpreter, PDFResourceManager
 from pdfminer.pdfpage import PDFPage
@@ -52,6 +53,8 @@ MAX_PATHS = 1_000_000
 MAX_SEGMENTS = 4_000_000
 MAX_LETTERS = 1_000_000
 MAX_FORM_DEPTH = 8
+MAX_OBJECT_STREAM_BYTES = 8 * 1024 * 1024
+MAX_OBJECT_STREAM_OBJECTS = 8192
 
 BLACK = (0.0, 0.0, 0.0)
 
@@ -62,6 +65,79 @@ class SolarEdgePdfError(ValueError):
     def __init__(self, code, detail=""):
         super().__init__(f"{code}: {detail}" if detail else code)
         self.code = code
+
+
+def _bounded_auxiliary_data(stream, limit):
+    """Decode only the proven plain/Flate subset, stopping before expansion exceeds limit."""
+    if stream.data is not None:
+        data = stream.data
+    else:
+        if stream.decipher is not None:
+            raise SolarEdgePdfError("AUXILIARY_FILTER_UNSUPPORTED", "encrypted stream")
+        filters = stream.get_filters()
+        raw = stream.rawdata or b""
+        if not filters:
+            data = raw
+        elif len(filters) == 1 and literal_name(filters[0][0]) in ("FlateDecode", "Fl") and not filters[0][1]:
+            decoder = zlib.decompressobj()
+            data = decoder.decompress(raw, limit + 1)
+            if len(data) > limit or decoder.unconsumed_tail:
+                raise SolarEdgePdfError("RESOURCE_LIMIT", "auxiliary decoded bytes")
+            if not decoder.eof or decoder.unused_data.strip(b"\x00\t\n\x0c\r "):
+                raise SolarEdgePdfError("MALFORMED_PDF", "auxiliary Flate stream")
+        else:
+            raise SolarEdgePdfError("AUXILIARY_FILTER_UNSUPPORTED")
+    if len(data) > limit:
+        raise SolarEdgePdfError("RESOURCE_LIMIT", "auxiliary decoded bytes")
+    stream.data = data
+    stream.rawdata = None
+    return data
+
+
+class _BoundedPDFDocument(PDFDocument):
+    """Bound compressed-object decoding and index cardinality per document."""
+
+    def __init__(self, *args, **kwargs):
+        self.object_stream_bytes = 0
+        self.object_stream_objects = 0
+        super().__init__(*args, **kwargs)
+
+    def _get_objects(self, stream):
+        count, first = stream.get("N"), stream.get("First")
+        if type(count) is not int or count < 1 or type(first) is not int or first < 0:
+            raise SolarEdgePdfError("MALFORMED_PDF", "object stream header")
+        if self.object_stream_objects + count > MAX_OBJECT_STREAM_OBJECTS:
+            raise SolarEdgePdfError("RESOURCE_LIMIT", "object stream object count")
+        data = _bounded_auxiliary_data(stream, MAX_OBJECT_STREAM_BYTES - self.object_stream_bytes)
+        self.object_stream_bytes += len(data)
+        self.object_stream_objects += count
+        if first > len(data):
+            raise SolarEdgePdfError("MALFORMED_PDF", "object stream offset")
+        tokens = data[:first].split(None, count * 2)
+        if len(tokens) != count * 2 or any(len(token) > 12 or not token.isdigit() for token in tokens):
+            raise SolarEdgePdfError("MALFORMED_PDF", "object stream index")
+        header = [int(token) for token in tokens]
+        ids, offsets = header[::2], header[1::2]
+        if len(set(ids)) != count or any(value <= 0 for value in ids) or offsets[0] != 0:
+            raise SolarEdgePdfError("MALFORMED_PDF", "object stream index")
+        ends = offsets[1:] + [len(data) - first]
+        objects = list(header)
+        for start, end in zip(offsets, ends):
+            if start >= end or end > len(data) - first:
+                raise SolarEdgePdfError("MALFORMED_PDF", "object stream object bounds")
+            parser = PDFStreamParser(data[first + start:first + end])
+            parser.set_document(self)
+            try:
+                _, obj = parser.nextobject()
+                try:
+                    parser.nextobject()
+                except PSEOF:
+                    objects.append(obj)
+                else:
+                    raise SolarEdgePdfError("MALFORMED_PDF", "extra object stream object")
+            except PSEOF as exc:
+                raise SolarEdgePdfError("MALFORMED_PDF", "missing object stream object") from exc
+        return objects, count
 
 
 @dataclass
@@ -545,7 +621,7 @@ def extract_primitives(pdf_bytes):
     if not bytes(pdf_bytes[:1024]).lstrip().startswith(b"%PDF-"):
         raise SolarEdgePdfError("NOT_A_PDF")
     try:
-        doc = PDFDocument(PDFParser(io.BytesIO(bytes(pdf_bytes))))
+        doc = _BoundedPDFDocument(PDFParser(io.BytesIO(bytes(pdf_bytes))))
         pages = _count_pages(doc)
         if pages == 0:
             raise SolarEdgePdfError("NO_PAGES")
