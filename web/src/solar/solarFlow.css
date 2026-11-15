@@ -57,6 +57,12 @@
   color: var(--leaf-ink); box-shadow: var(--leaf-shadow-popover);
   display: flex; flex-direction: column; overflow-wrap: anywhere;
 }
+/* Park the closed launcher below the compass at the canvas edge. The open
+   form keeps its existing bounded position and scrollbar. */
+.studio-shell .app[data-surface="solar"] .workspace-card .solar-flow-seat[data-expanded="false"] {
+  left: auto; right: 12px; top: calc(var(--ck-canvas-top-live) + 156px);
+  width: max-content; max-width: min(200px, calc(100vw - var(--ck-pane) - 24px));
+}
 .studio-shell .workspace-card .solar-flow-seat * { min-width: 0; max-width: 100%; box-sizing: border-box; }
 .studio-shell .workspace-card .solar-flow-seat > * { flex: 0 0 auto; }
 .studio-shell .workspace-card .solar-flow-seat :is(.params, .param, .solar-flow-button) { flex-wrap: wrap; }

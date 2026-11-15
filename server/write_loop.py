@@ -642,7 +642,7 @@ def _sidecar_bound(raw: bytes, payload: Dict[str, Any], payload_bytes: bytes,
 
 
 def read_dxf(backend, tenant_id: str, drawing_id: str,
-             version="head") -> Tuple[int, bytes, str]:
+             version="head", *, source_binding=None) -> Tuple[int, bytes, str]:
     """Resolve `version` and return (version_int, dxf_bytes, source), where
     `source` names the leg taken: "edited-sidecar" (a browser-edited version's
     own full-fidelity DXF, bound to the payload), "intake-synth" (the payload
@@ -652,10 +652,25 @@ def read_dxf(backend, tenant_id: str, drawing_id: str,
     an unbound cache is refused rather than served, a conversion failure
     carries the converter's own code. Raises KeyError/ValueError for a
     missing drawing or version (the router's 404) and DxfUnavailable for
-    every other refusal."""
+    every other refusal. A canonical project may supply its immutable source
+    binding (ref/sha256/bytes) with an explicit positive version; that path
+    verifies the scoped version key and bytes without a legacy manifest."""
     import store
-    v, vkey = store.resolve_version(backend, tenant_id, drawing_id, version)
+    if source_binding is None:
+        v, vkey = store.resolve_version(backend, tenant_id, drawing_id, version)
+    else:
+        if type(version) is not int or version < 1 or not isinstance(source_binding, dict):
+            raise DxfUnavailable("BAD_PARAMS", "the pinned drawing source binding is invalid", 422, False)
+        v, vkey = version, store.drawing_version_key(tenant_id, drawing_id, version)
+        digest = source_binding.get("sha256")
+        if (source_binding.get("ref") != vkey or not isinstance(digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+                or type(source_binding.get("bytes")) is not int or source_binding["bytes"] < 1):
+            raise DxfUnavailable("BAD_PARAMS", "the pinned drawing source binding is invalid", 422, False)
     source = backend.get(vkey)
+    if source_binding is not None and (not isinstance(source, bytes)
+            or len(source) != source_binding["bytes"] or hashlib.sha256(source).hexdigest() != digest):
+        raise DxfUnavailable("BAD_PARAMS", "the pinned drawing source bytes do not match their binding", 409, False)
     payload = _json_object_or_none(source)
     if payload is not None:
         skey = edited_source_key(tenant_id, drawing_id, v)

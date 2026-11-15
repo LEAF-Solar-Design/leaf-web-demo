@@ -11,6 +11,7 @@
 // see the same shape the old synchronous /api/run used to return.
 
 import { createRunSubmissionRequest } from './runIntent.js'
+import { readSourceFailureBody, sourceInitializationError } from './lib/sourceFailureDiagnostic.js'
 import { isSolarReasonCode } from './solar/solarSettingsWire.js'
 import { runMock } from './mock/mockEngine.js'
 import { authorMock } from './mock/mockAuthor.js'
@@ -70,31 +71,12 @@ export function isProjectSourcePreGenerationRefusal(error, expected) {
   return !!witness && closedSourceObject(expected, refusalKeys)
     && refusalKeys.every((key) => witness[key] === expected[key])
 }
-async function readVideoRefusal(response, expected) {
-  if (response.status !== 503 || response.headers.get('content-type')?.split(';')[0].trim().toLowerCase() !== 'application/json') return null
-  const reader = response.body?.getReader()
-  if (!reader) return null
-  try {
-    const decoder = new TextDecoder('utf-8', { fatal: true })
-    let raw = '', total = 0
-    for (;;) {
-      const { value, done } = await reader.read()
-      if (done) break
-      total += value.byteLength
-      if (total > 4096) return null
-      raw += decoder.decode(value, { stream: true })
-    }
-    raw += decoder.decode()
-    const value = JSON.parse(raw)
-    if (!closedSourceObject(value, ['error', 'refusal']) || !closedSourceObject(value.error, ['code', 'message'])
-      || value.error.code !== 'video_unavailable' || value.error.message !== VIDEO_REFUSAL_MESSAGE
-      || !closedSourceObject(value.refusal, refusalKeys)
-      || refusalKeys.some((key) => value.refusal[key] !== expected[key])) return null
-    return Object.freeze({ ...value.refusal })
-  } catch { return null } finally {
-    await reader.cancel().catch(() => {})
-    reader.releaseLock()
-  }
+function readVideoRefusal(value, expected) {
+  if (!closedSourceObject(value, ['error', 'refusal']) || !closedSourceObject(value.error, ['code', 'message'])
+    || value.error.code !== 'video_unavailable' || value.error.message !== VIDEO_REFUSAL_MESSAGE
+    || !closedSourceObject(value.refusal, refusalKeys)
+    || refusalKeys.some((key) => value.refusal[key] !== expected[key])) return null
+  return Object.freeze({ ...value.refusal })
 }
 export function isSourceUuid(value) { return typeof value === 'string' && SOURCE_UUID.test(value) }
 function sourceId(value) {
@@ -202,7 +184,8 @@ async function projectSourceRequest(projectId, requestId, action, body, { expect
     redirect: 'error', signal, headers, ...(body ? { body: JSON.stringify(body) } : {}) }, path)
   if (!current()) throw sourceUnavailable()
   if (!response.ok) {
-    const refusal = refusalExpected && await readVideoRefusal(response, refusalExpected)
+    const failureBody = await readSourceFailureBody(response)
+    const refusal = refusalExpected && readVideoRefusal(failureBody, refusalExpected)
     if (!current()) throw sourceUnavailable()
     if (refusal) {
       const error = new Error(VIDEO_REFUSAL_MESSAGE)
@@ -210,6 +193,8 @@ async function projectSourceRequest(projectId, requestId, action, body, { expect
       preGenerationRefusals.set(error, refusal)
       throw error
     }
+    const initialization = action === 'request' && sourceInitializationError(failureBody, body.source_request_id)
+    if (initialization) throw initialization
     const error = new Error(response.status === 409 ? 'Project source changed or its outcome is unknown. Refresh and review.'
       : response.status === 403 ? 'Project source access denied.' : 'Project source is unavailable. Refresh to review its current state.')
     error.status = response.status

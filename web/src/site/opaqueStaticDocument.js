@@ -12,6 +12,15 @@ function encode(bytes) {
 // authority, headers, tokens, network origin or parent API callable by content.
 function bootstrap(registry) {
   const root = 'https://leaf-static.invalid/'
+  const BrowserURL = URL
+  window.URL = class extends BrowserURL {
+    constructor(value, base) {
+      // App Router uses location.pathname/location.href for its initial URL.
+      // srcDoc supplies "srcdoc"/"about:srcdoc", not a resolvable web base.
+      const opaque = String(base) === 'about:srcdoc'
+      super(opaque && value === 'srcdoc' ? '/' : value, opaque ? root : base)
+    }
+  }
   // An opaque srcDoc has no writable same-origin history URL. Keep routing
   // state inside this frame instead of relaxing its browser origin boundary.
   let state = null
@@ -23,6 +32,7 @@ function bootstrap(registry) {
   History.prototype.replaceState = historyState
   History.prototype.pushState = historyState
   const known = new Set(Object.values(registry))
+  const scriptPaths = new Map(Object.entries(registry).map(([path, uri]) => [uri, new URL(path, root).href]))
   const resolve = value => {
     const text = String(value)
     if (known.has(text)) return text
@@ -32,7 +42,14 @@ function bootstrap(registry) {
   }
   for (const [prototype, property] of [[HTMLScriptElement.prototype, 'src'], [HTMLLinkElement.prototype, 'href'], [HTMLImageElement.prototype, 'src'], [HTMLSourceElement.prototype, 'src']]) {
     const descriptor = Object.getOwnPropertyDescriptor(prototype, property)
-    if (descriptor?.set) Object.defineProperty(prototype, property, { ...descriptor, set(value) { descriptor.set.call(this, resolve(value)) } })
+    if (descriptor?.set) Object.defineProperty(prototype, property, { ...descriptor,
+      // Next App Router discovers its asset prefix from currentScript.src.
+      // Keep the logical verified path visible while the actual fetch stays data:.
+      get: prototype === HTMLScriptElement.prototype && descriptor.get ? function () {
+        const actual = descriptor.get.call(this)
+        return scriptPaths.get(actual) || actual
+      } : descriptor.get,
+      set(value) { descriptor.set.call(this, resolve(value)) } })
   }
   const attribute = Element.prototype.setAttribute
   Element.prototype.setAttribute = function (name, value) {

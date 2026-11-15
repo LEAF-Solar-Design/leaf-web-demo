@@ -50,8 +50,37 @@ _ERRORS = {
 class FlowError(ValueError):
     def __init__(self, status):
         self.status = status
+        self.public_diagnostic = {}
         self.code, message = _ERRORS[status]
         super().__init__(message)
+
+
+def _author_failure(status, code, phase, correlation_id, request_id, metadata):
+    error = FlowError(status)
+    if status != 503 or code != 'author_unavailable' or phase != 'stage' or type(metadata) is not dict:
+        return error
+    if (set(metadata) - {'author_subphase', 'author_http_status'}
+            or type(metadata.get('author_subphase')) is not str
+            or metadata.get('author_subphase') not in {
+                'initialize_binding', 'initialize_authority', 'initialize_http',
+                'initialize_transport', 'initialize_response', 'initialization'}):
+        return error
+    try:
+        if (type(request_id) is not str or str(uuid.UUID(request_id)) != request_id
+                or not uuid.UUID(request_id).int or type(correlation_id) is not str
+                or str(uuid.UUID(correlation_id)) != correlation_id
+                or uuid.UUID(correlation_id).version != 4):
+            return error
+    except (ValueError, AttributeError):
+        return error
+    if 'author_http_status' in metadata and (
+            type(metadata['author_http_status']) is not int or not 100 <= metadata['author_http_status'] <= 599):
+        return error
+    error.code = 'author_unavailable'
+    error.args = ('Project source initialization failed. Review the original request before retrying.',)
+    error.public_diagnostic = dict(source_request_id=request_id, correlation_id=correlation_id,
+                                  phase='stage', **metadata)
+    return error
 
 
 VIDEO_REFUSAL_MESSAGE = 'Private video decoding is unavailable. Source generation did not start.'
@@ -679,7 +708,7 @@ def mutate(tenant, project_id, session_id, turn_id, action, edit_id, body, *, so
             except Exception:
                 pass  # An unreadable optional attribute must not replace the failure.
             failure_metadata = author_diagnostics.snapshot()
-        raise FlowError(failure_status) from None
+        raise _author_failure(failure_status, failure_code, phase, correlation_id, edit_id, failure_metadata) from None
     except FlowError as exc:
         failure_status = exc.status
         failure_code = _ERRORS[failure_status][0]

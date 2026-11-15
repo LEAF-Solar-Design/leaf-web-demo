@@ -28,6 +28,20 @@ export interface BrowserCandidatePreview {
 const uuid = (v: unknown): v is string => typeof v === "string" && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(v);
 const sha = (v: unknown, n: number): v is string => typeof v === "string" && new RegExp(`^[0-9a-f]{${n}}$`).test(v);
 const conflict = (): never => { throw new NextBuildError("candidate_conflict"); };
+const publicCodes = new Set([
+  "candidate_conflict", "candidate_unavailable", "job_conflict", "authority_conflict",
+  "isolated_next_binding_unavailable", "private_artifact_binding_unavailable", "source_conflict",
+  "source_unavailable", "source_stale", "producer_conflict", "artifact_conflict", "build_failed",
+  "cleanup_required", "preview_unavailable", "preview_released", "preview_path_invalid", "preview_response_invalid",
+]);
+/** Port failures may contain provider diagnostics. Never propagate their object,
+ * message, cause or extra properties into a caller-visible adapter failure.
+ */
+function publicFailure(error: unknown): NextBuildError {
+  let code = "build_failed";
+  try { if (error instanceof NextBuildError && publicCodes.has(error.code)) code = error.code; } catch { /* Untrusted accessor. */ }
+  return new NextBuildError(code);
+}
 function authorityCopy(a: ProjectRepositoryAuthority): ProjectRepositoryAuthority {
   if (!a || ![a.tenantId, a.organizationId, a.projectId, a.repoKey].every(uuid)) conflict();
   return Object.freeze({ tenantId: a.tenantId, organizationId: a.organizationId, projectId: a.projectId, repoKey: a.repoKey });
@@ -55,7 +69,9 @@ export class BrowserCandidateBuildAdapter {
   }) {}
 
   private async current(a: ProjectRepositoryAuthority, w: BrowserCandidateWitness): Promise<void> {
-    const row = await this.deps.loadCandidate(a, w.sourceRequestId);
+    let row: PublishedBrowserCandidate | null;
+    try { row = await this.deps.loadCandidate(a, w.sourceRequestId); }
+    catch { throw new NextBuildError("candidate_unavailable"); }
     if (!row || row.schema !== "leaf.browser-project-source.v1" || row.state !== "published" ||
         authorityKey(authorityCopy(row.authority)) !== authorityKey(a) || witnessKey(witnessCopy(row)) !== witnessKey(w)) conflict();
   }
@@ -73,7 +89,8 @@ export class BrowserCandidateBuildAdapter {
       if (prior.witness !== identity) throw new NextBuildError("job_conflict");
       return prior.result;
     }
-    const result = Promise.resolve().then(() => this.execute(a, w, jobId));
+    const result = Promise.resolve().then(() => this.execute(a, w, jobId))
+      .catch(error => { throw publicFailure(error); });
     this.jobs.set(key, { witness: identity, result });
     return result;
   }
@@ -86,7 +103,8 @@ export class BrowserCandidateBuildAdapter {
     const preview = this.previewCopy(a, request, value);
     await this.current(a, w);
     const status = this.deps.producer.status(a, jobId);
-    if (status.ready !== true || status.cleanup !== "confirmed") throw new NextBuildError("preview_unavailable");
+    if (!status || Object.keys(status).sort().join(",") !== "cleanup,ready" ||
+        status.ready !== true || status.cleanup !== "confirmed") throw new NextBuildError("preview_unavailable");
     return Object.freeze({ schema: "leaf.browser-candidate-preview.v1", candidate: w, preview });
   }
 

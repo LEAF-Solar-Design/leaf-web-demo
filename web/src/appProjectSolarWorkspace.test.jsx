@@ -334,6 +334,21 @@ it('W1C-26 panel groups opens the project graph form from the enabled ribbon con
   expect(last(h.graphs).projectClient).toBe(h.client)
   noLegacy(h)
 })
+it.each(['solar-solaredge-accept', 'solar-solaredge-tracking-read'])('S02 opens the existing %s project editor without submitting a run', async (name) => {
+  const h = await setup({ names: [name] })
+  expect(tool(h, name).disabled).toBe(false)
+  await h.open(name)
+  expect(h.runtime.openTool).toBe(h.rows[0])
+  expect(h.adapter.projectSolarRefusal).toBeNull()
+  if (name === 'solar-solaredge-accept') {
+    expect(screen.getByRole('region', { name: 'Project SolarEdge import' })).toBeTruthy()
+  } else {
+    expect(screen.getByRole('button', { name: 'Read project output' })).toBeTruthy()
+  }
+  expect(h.client.submitRun).not.toHaveBeenCalled()
+  expect(h.client.readSolar).not.toHaveBeenCalled()
+  noLegacy(h)
+})
 it('R13G2B-10 read tools render canonical output without writing', async () => {
   const h = await setup({ names: ['solar-string-data'] }); await h.open('solar-string-data')
   fireEvent.click(screen.getByRole('button', { name: 'Read project output' }))

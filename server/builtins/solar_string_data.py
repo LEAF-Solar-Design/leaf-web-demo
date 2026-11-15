@@ -17,6 +17,7 @@ import json
 import math
 from pathlib import Path
 
+from leaf_cloud_client import canonical_bytes
 import solar_artifacts
 import solar_rooftop_chain as chain
 from solar_design_graph import GraphValidationError, _bounded_json
@@ -58,11 +59,34 @@ def _point(point, scale):
     return converted
 
 
+def _design_export(graph):
+    from solar_sizing_client import require_sizing
+    from solar_solve_results import digest, require_current_export
+
+    current = require_current_export(graph)
+    if not all(current[key] for key in ("panels", "frames", "strings")):
+        raise GraphValidationError("SOLAR_OUTPUT_NOT_CURRENT")
+    require_sizing(current)
+    summary = {"status": "written", "format": "design-json",
+               "panels": len(current["panels"]), "groups": len(current["frames"]),
+               "strings": len(current["strings"]), "source_hash": current["source_hash"],
+               "graph_sha256": digest(current), "electrical_verification": "not-evaluated"}
+    payload = {"schema": "leaf.solar-design-export.v1",
+               "electrical_verification": "not-evaluated", "graph": current}
+    return solar_artifacts.ArtifactOutput(summary, MEDIA_TYPE, "SolarDesign.json",
+                                         canonical_bytes(payload))
+
+
 def run(graph, params):
     _bounded_json(params)
-    if (type(params) is not dict or not set(params) <= {"string_refs"}
-            or ("string_refs" in params and not _refs(params["string_refs"]))):
+    if (type(params) is not dict or not set(params) <= {"string_refs", "format"}
+            or type(params.get("format", "string-data")) is not str
+            or params.get("format", "string-data") not in ("string-data", "design-json")
+            or ("string_refs" in params and not _refs(params["string_refs"]))
+            or (params.get("format") == "design-json" and "string_refs" in params)):
         raise GraphValidationError("INVALID_STRING_DATA_REQUEST")
+    if params.get("format") == "design-json":
+        return _design_export(graph)
     if not units_resolved(graph):
         raise GraphValidationError("UNRESOLVED_UNITS")
     by_id = {s["id"]: s for s in graph["strings"]}
