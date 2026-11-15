@@ -316,6 +316,7 @@ describe('project Solar read ownership', () => {
       proposal_ready: 'Proposal ready for review.',
       run_outcome_unknown: 'The run outcome is unknown. Check its job before submitting again.',
       run_refused: 'The server refused this Solar request.',
+      solve_preparation_refused: 'This saved drawing could not be prepared for Solve. Refresh it and try again.',
       proposal_unreadable: 'This Solar proposal could not be read.',
       proposal_required: 'Run a solve and review its proposal before committing.',
       proposal_unpublished: 'This proposal has not published a drawing version.',
