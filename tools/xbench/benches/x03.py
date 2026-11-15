@@ -59,9 +59,17 @@ def load_prompts(manifest):
     if len({r["id"] for r in rows}) != 50 or Counter(r["trade"] for r in rows) != Counter(TRADES):
         raise ValueError("invalid prompt IDs or trade split")
     drawings = {f["id"] for f in manifest["fixtures"] if f.get("role") == "drawing"}
+    drawing_trades = {}
     for row in rows:
         if row["drawing"] not in drawings or not row.get("prompt") or not row.get("oracle_method"):
             raise ValueError("unbound prompt")
+        prior_trade = drawing_trades.setdefault(row["drawing"], row["trade"])
+        if prior_trade != row["trade"]:
+            raise ValueError("drawing fixture belongs to multiple trades")
+        try:
+            content_hash(row["oracle"])
+        except (ValueError, TypeError):
+            raise ValueError("frozen oracle must be finite JSON") from None
         compare = row["compare"]
         if compare.get("mode") not in ("exact", "absolute"):
             raise ValueError("invalid comparison mode")
@@ -410,7 +418,7 @@ def grade_records(records, *, baseline, prompt_sha256, source_sha, out_dir, froz
     for record in records:
         if record["score"] == 1:
             try:
-                output = json.loads((out_dir / (record["id"] + "-output.json")).read_text())
+                output = json.loads((out_dir / (record["id"] + "-output.json")).read_text(encoding="utf-8"))
                 digest = content_hash(output)
             except (OSError, ValueError, TypeError):
                 raise ValueError("credited output artifact is missing or invalid") from None

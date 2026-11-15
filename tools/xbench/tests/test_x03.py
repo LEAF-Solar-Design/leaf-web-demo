@@ -1052,3 +1052,188 @@ def test_malformed_nested_success_envelope_has_bounded_receipt(tmp_path, route, 
     assert result["score"] == 0 and result["failing_stage"] == stage
     assert result["unreadable"] is True and result["error_code"] == "INVALID_RESPONSE_SHAPE"
     assert (tmp_path / "X03-01.json").exists()
+
+
+@pytest.mark.parametrize("case", ["complete", "output-write", "receipt-write"])
+def test_fifty_prompt_real_functions_lifecycle_without_network(tmp_path, monkeypatch, case):
+    manifest = prompt_manifest(tmp_path)
+    rows, _ = bench.load_prompts(manifest)
+    out = tmp_path / "out"
+    events, authored = [], []
+    active = None
+    phase = None
+    @contextmanager
+    def signed_in(*args, **kwargs):
+        events.append("sign-in")
+        try:
+            yield object(), {"synthetic": True}
+        finally:
+            events.append("sign-out")
+    class Client:
+        def __init__(self, transport):
+            pass
+        def upload_drawing(self, name, content):
+            assert content == b"synthetic drawing"
+            return name
+        def wait_upload(self, *args, **kwargs):
+            pass
+        def adopt_drawing(self, project_id, uploaded, name):
+            return {"drawing_id": project_id+"-drawing", "version_id": project_id+"-version"}
+    @contextmanager
+    def project(client, name):
+        trade = name.split()[1]
+        events.append("create-"+trade)
+        try:
+            yield {"org_id": "o", "project_id": trade}
+        finally:
+            events.append("delete-"+trade)
+    def transport(method, path, **kw):
+        nonlocal active, phase
+        if path == "/api/sessions":
+            assert active is None
+            prior = json.loads((out/"records.json").read_text()) if authored else []
+            assert len(prior) == len(authored)
+            active = rows[len(authored)]
+            phase = "session"
+            return 200, {"session_id": "session-"+active["id"]}
+        assert active is not None
+        row = active
+        if path.endswith("/messages"):
+            assert kw["json_body"]["text"] == row["prompt"]
+            phase = "authority"
+            return 202, {"turn_id": "turn-"+row["id"], "status": "running"}
+        if path.endswith("/cancel"):
+            assert path == "/api/sessions/session-"+row["id"]+"/turns/turn-"+row["id"]+"/cancel"
+            events.append("cancel-"+row["id"])
+            active = None
+            return 200, {}
+        if path == "/api/health":
+            return 200, {"source_sha": SHA}
+        if path == "/api/author":
+            assert phase == "authority"
+            assert kw["json_body"] == {"description": row["prompt"], "mode": "build"}
+            assert kw["headers"]["X-Authority-Turn-Id"] == "turn-"+row["id"]
+            authored.append(row["id"])
+            events.append("author-"+row["id"])
+            phase = "author"
+            return 200, {"tool": {"name": "generated-"+row["id"]}, "model_id": "synthetic-model",
+                "receipt": {"state": "staged", "staged_commit": "b"*40, "change_set_id": "change-"+row["id"]}}
+        if path == "/api/author/publication-requests":
+            assert phase == "author"
+            phase = "published"
+            assert kw["json_body"]["change_set_id"] == "change-"+row["id"]
+            events.append("publish-"+row["id"])
+            return 200, {"status": "published", "change_set_id": "change-"+row["id"], "tool_name": "generated-"+row["id"]}
+        if path == "/api/tools":
+            assert phase == "published"
+            return 200, {"tools": [{"name": "generated-"+row["id"], "catalog_digest": "f"*64}]}
+        assert path == "/api/run" and phase == "published"
+        assert kw["json_body"]["dwg"] == row["trade"]+"-version"
+        events.append("execute-"+row["id"])
+        phase = "executed"
+        return 200, {"ok": True, "result": row["oracle"]}
+    original_write = bench.write_json_atomic
+    injected = False
+    def write(path, value):
+        nonlocal injected
+        target = "X03-02-output.json" if case == "output-write" else "X03-02.json"
+        if case != "complete" and Path(path).name == target and not injected:
+            injected = True
+            raise OSError("SECRET SENTINEL injected write failure")
+        return original_write(path, value)
+    monkeypatch.setattr(bench, "write_json_atomic", write)
+    monkeypatch.setattr(bench.xbench_session, "signed_in", signed_in)
+    monkeypatch.setattr(bench, "transport_for", lambda *args: transport)
+    monkeypatch.setitem(sys.modules, "xbench_studio", SimpleNamespace(StudioClient=Client, disposable_project=project))
+    steps = bench.run(SimpleNamespace(manifest=manifest, out_dir=out, source_sha=SHA, base="https://synthetic.invalid"))
+    collected = json.loads((out/"records.json").read_text())
+    assert active is None
+    assert events[-4:] == ["delete-mechanical", "delete-structural", "delete-solar", "sign-out"]
+    if case == "complete":
+        assert authored == [r["id"] for r in rows]
+        assert all(step.verdict == "PASS" for step in steps)
+        assert len(collected) == 50 and all(r["score"] == 1 for r in collected)
+        assert json.loads(Path(manifest["baseline_path"]).read_text())["overall"] == 1
+        assert len(list(out.glob("*-authority.json"))) == 50
+        assert len(list(out.glob("*-output.json"))) == 50
+        for row in rows:
+            sequence = ["author-", "publish-", "execute-", "cancel-"]
+            indices = [events.index(prefix+row["id"]) for prefix in sequence]
+            assert indices == sorted(indices)
+    else:
+        assert injected and authored == ["X03-01", "X03-02"]
+        assert len(collected) == 2 and collected[0]["score"] == 1
+        assert collected[1]["score"] == 0 and collected[1]["unreadable"] is True
+        assert all(step.verdict == "UNREADABLE" for step in steps)
+        assert json.loads((out/"summary.json").read_text())["complete"] is False
+        assert not Path(manifest["baseline_path"]).exists()
+        assert "SECRET SENTINEL" not in (out/"records.json").read_text()
+
+
+@pytest.mark.parametrize("text", ["café façade", "太阳 光伏", "Δοκιμή مرحبا"])
+def test_unicode_output_reload_is_explicit_utf8_and_hash_stable(tmp_path, monkeypatch, text):
+    rows = records()
+    frozen = records()
+    value = {"text": text}
+    rows[0]["output_hash"] = bench.content_hash(value)
+    frozen[0]["oracle"] = value
+    persist_outputs(tmp_path)
+    (tmp_path/"X03-01-output.json").write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+    original_read = Path.read_text
+    def read(path, *args, **kwargs):
+        if path.name.endswith("-output.json"):
+            assert kwargs.get("encoding") == "utf-8"
+        return original_read(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "read_text", read)
+    steps, report = bench.grade_records(rows, frozen_rows=frozen, baseline=None,
+        prompt_sha256="d"*64, source_sha=SHA, out_dir=tmp_path)
+    assert report["complete"] and all(step.verdict == "PASS" for step in steps)
+
+
+@pytest.mark.parametrize("invalid", ["multiple-trades", "nan", "inf", "negative-inf"])
+def test_invalid_frozen_oracle_or_adoption_fails_before_session(tmp_path, monkeypatch, invalid):
+    manifest = prompt_manifest(tmp_path)
+    fixture = manifest["fixtures"][0]
+    path = Path(fixture["path"])
+    payload = json.loads(path.read_text())
+    if invalid == "multiple-trades":
+        payload["rows"][30]["drawing"] = "solar"
+    else:
+        value = {"nan": float("nan"), "inf": float("inf"), "negative-inf": -float("inf")}[invalid]
+        payload["rows"][0]["oracle"] = {"nested": [value]}
+    path.write_text(json.dumps(payload))
+    fixture["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid manifest reached sign-in or transport")
+    monkeypatch.setattr(bench.xbench_session, "signed_in", forbidden)
+    monkeypatch.setattr(bench, "transport_for", forbidden)
+    with pytest.raises(ValueError, match="multiple trades|finite JSON"):
+        bench.run(SimpleNamespace(manifest=manifest, out_dir=tmp_path/"out", source_sha=SHA, base="https://synthetic.invalid"))
+    assert not (tmp_path/"out").exists()
+
+
+@pytest.mark.parametrize("counts,expected", [((25,5,5), "PASS"), ((24,5,5), "FAIL"), ((26,4,5), "FAIL"), ((26,5,4), "FAIL")])
+def test_realizable_acceptance_boundary_matrix(tmp_path, counts, expected):
+    rows = records()
+    persist_outputs(tmp_path)
+    for trade, count in zip(bench.TRADES, counts):
+        group = [r for r in rows if r["trade"] == trade]
+        for row in group[count:]:
+            row.update(score=0, failing_stage="comparison")
+    steps, _ = bench.grade_records(rows, frozen_rows=records(), baseline=None,
+        prompt_sha256="d"*64, source_sha=SHA, out_dir=tmp_path)
+    assert steps[-1].verdict == expected
+
+
+@pytest.mark.parametrize("mechanical,regression", [(7,False), (6,True)])
+def test_isolated_trade_regression_ten_vs_twenty_points(tmp_path, mechanical, regression):
+    rows = records()
+    persist_outputs(tmp_path)
+    for row in rows[40+mechanical:]:
+        row.update(score=0, failing_stage="comparison")
+    baseline = {"schema": "leaf.xbench.x03-scores.v1", "complete": True,
+        "source_sha": SHA, "prompt_sha256": "d"*64,
+        "overall": 48/50, "trades": {"solar": 1, "structural": 1, "mechanical": .8}}
+    _, report = bench.grade_records(rows, frozen_rows=records(), baseline=baseline,
+        prompt_sha256="d"*64, source_sha=SHA, out_dir=tmp_path)
+    assert report["REGRESSION"] is regression
