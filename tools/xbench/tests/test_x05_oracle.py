@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from benches.x05_oracle import parse_text, read_pdf
+from benches import x05_oracle as oracle
 
 
 REPORT = """Synthetic engineering report
@@ -185,3 +186,76 @@ def test_read_pdf_failure_is_named_without_fabricated_values():
         result = read_pdf("synthetic-unused.pdf")
     assert ("pdf_extraction_failed", "pdf") in codes(result)
     assert all(value is None for value in result.totals.values())
+
+
+@pytest.mark.parametrize("repeats", [500, 1500])
+def test_repeated_summaries_have_linear_numeric_bookkeeping(monkeypatch, repeats):
+    operations = {"equal": 0, "hash": 0}
+    original = oracle._number
+
+    class CountedDecimal(Decimal):
+        def __eq__(self, other):
+            operations["equal"] += 1
+            return super().__eq__(other)
+
+        def __ne__(self, other):
+            operations["equal"] += 1
+            return super().__ne__(other)
+
+        def __hash__(self):
+            operations["hash"] += 1
+            return super().__hash__()
+
+    def counted(raw, **kwargs):
+        value = original(raw, **kwargs)
+        return CountedDecimal(value) if value is not None else None
+
+    monkeypatch.setattr(oracle, "_number", counted)
+    generated = REPORT + "\n" + "\n".join(
+        "Total Modules:" + " " * (1 + index % 12) + "24" for index in range(repeats))
+    result = parse_text(generated)
+    assert result.status == "readable" and result.totals["modules"] == Decimal(24)
+    assert sum(operations.values()) < repeats * 20
+    assert len(result.provenance["modules"]) <= oracle.MAX_SNIPPETS_PER_FIELD
+    assert all(len(s) <= oracle.MAX_SNIPPET for s in result.provenance["modules"])
+    conflict = parse_text(generated + "\nTotal Panels: 25\nTotal Modules: 24")
+    assert conflict.totals["modules"] is None
+    assert ("contradictory_totals", "modules") in codes(conflict)
+    invalid = parse_text(generated + "\nTotal Modules: NaN\nTotal Modules: 24")
+    assert invalid.totals["modules"] is None
+    assert ("invalid_number", "modules") in codes(invalid)
+
+
+@pytest.mark.parametrize("mode", ["blank-middle", "later-error", "empty"])
+def test_mocked_multi_page_failures_remain_named(mode):
+    visited = []
+
+    def extract(index, text):
+        def read():
+            visited.append(index)
+            if text is RuntimeError:
+                raise RuntimeError("synthetic later-page failure")
+            return text
+        return SimpleNamespace(extract_text=read)
+
+    class Document:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    document = Document()
+    document.pages = ([] if mode == "empty" else
+                      [extract(0, REPORT), extract(1, "" if mode == "blank-middle" else RuntimeError),
+                       extract(2, "Synthetic trailing page")])
+    with patch.dict("sys.modules", {"pdfplumber": SimpleNamespace(open=lambda path: document)}):
+        result = read_pdf("synthetic-unused.pdf")
+    assert result.status == "unreadable"
+    expected = "pdf_extraction_failed" if mode == "later-error" else "empty_pdf_page"
+    assert (expected, "pdf") in codes(result)
+    if mode in ("empty", "later-error"):
+        assert all(value is None for value in result.totals.values())
+        assert result.table_string_count is None and result.table_optimizer_count is None
+    if mode == "later-error":
+        assert visited == [0, 1]

@@ -23,6 +23,56 @@ LIMITS = ("Steps 1-2 cover source import and exact grid correspondence only. "
 REQUIRED = {"id", "drawing_fixture", "report_fixture", "panel_layer_contains",
             "drawing_units", "installation_design", "branch_max_offset",
             "alignment_tolerance", "expected_modules", "expected_grids", "expected_strings"}
+MAX_REASON_CODE = 80
+PRODUCT_REFUSAL_CODES = frozenset({
+    "IMPORT_PDF_INVALID", "IMPORT_PDF_MALFORMED", "IMPORT_PDF_UNSUPPORTED",
+    "REPORT_GRID_UNMATCHED", "REPORT_NO_MATCH", "REPORT_AMBIGUOUS_MATCH",
+    "REPORT_PDF_UNSUPPORTED",
+})
+SAFE_REASON_CODES = PRODUCT_REFUSAL_CODES | frozenset({
+    "CONTEXT_DRIFT", "FIXTURE_UNVERIFIED", "FIXTURE_CHANGED",
+    "FIXTURE_METADATA_UNREADABLE", "PROJECT_METADATA_UNREADABLE",
+    "MANIFEST_UNREADABLE", "SETUP_UNREADABLE", "SOURCE_DRIFT",
+    "SOURCE_WIRE_UNREADABLE", "REPORT_WIRE_UNREADABLE", "JOB_NOT_COMPLETE",
+    "MUTATION_UNREADABLE", "SERVER_REASON_UNRECOGNISED",
+})
+
+
+def _reason_code(value):
+    if value is None:
+        return None
+    if type(value) is str and len(value) <= MAX_REASON_CODE and value in SAFE_REASON_CODES:
+        return value
+    return "SERVER_REASON_UNRECOGNISED"
+
+
+def _fixture_id(value):
+    return (type(value) is str and len(value) <= 128
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value) is not None)
+
+
+def _metadata_problem(manifest, verified):
+    if not isinstance(manifest, dict):
+        return "MANIFEST_UNREADABLE"
+    for fixtures in (manifest.get("fixtures", []), verified):
+        if not isinstance(fixtures, list):
+            return "FIXTURE_METADATA_UNREADABLE"
+        ids = set()
+        for fixture in fixtures:
+            if not isinstance(fixture, dict) or not _fixture_id(fixture.get("id")):
+                return "FIXTURE_METADATA_UNREADABLE"
+            if fixture["id"] in ids:
+                return "FIXTURE_METADATA_UNREADABLE"
+            ids.add(fixture["id"])
+    projects = manifest.get("projects", [])
+    if isinstance(projects, list):
+        for project in projects:
+            if not isinstance(project, dict):
+                return "PROJECT_METADATA_UNREADABLE"
+            for key in ("id", "drawing_fixture", "report_fixture"):
+                if key in project and not _fixture_id(project[key]):
+                    return "PROJECT_METADATA_UNREADABLE"
+    return None
 
 
 def _integer(value, minimum=0):
@@ -150,11 +200,13 @@ def score(projects, results):
 class ObservationError(Exception):
     def __init__(self, status=None, code=None, product=False):
         self.status = status if type(status) is int else None
-        self.code = code if isinstance(code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,79}", code) else None
-        self.product = product
+        self.code = _reason_code(code)
+        self.product = product is True and self.code in PRODUCT_REFUSAL_CODES
 
 
 def _fixture(ctx, identifier):
+    if not _fixture_id(identifier) or _metadata_problem(ctx.manifest, ctx.fixtures):
+        raise ObservationError(code="FIXTURE_METADATA_UNREADABLE")
     fixtures = [f for f in ctx.manifest.get("fixtures", []) if f.get("id") == identifier]
     verified = [f for f in ctx.fixtures if f.get("id") == identifier and f.get("ok") is True]
     if len(fixtures) != 1 or len(verified) != 1:
@@ -217,7 +269,8 @@ def _project(ctx, client, request, project, result):
         def route():
             return f"/api/projects/{project_id}/drawings/{drawing_id}/versions/{version}/imports/solaredge-pdf"
 
-        source = request("POST", route(), data=pdf, headers={"Content-Type": "application/pdf"}, product=True)
+        source = request("POST", route(), data=pdf, headers={"Content-Type": "application/pdf"},
+                         timeout_s=300, product=True)
         if source.get("schema") != "leaf.solar-project-import-source.v1":
             raise ObservationError(code="SOURCE_WIRE_UNREADABLE")
         artifact_id = source["source"]["artifact_id"]
@@ -242,14 +295,16 @@ def _project(ctx, client, request, project, result):
         # Source artifacts bind to their input version. Import again at the
         # current head before generating a report over the populated graph.
         result["phase"] = "report"
-        source = request("POST", route(), data=pdf, headers={"Content-Type": "application/pdf"}, product=True)
+        source = request("POST", route(), data=pdf, headers={"Content-Type": "application/pdf"},
+                         timeout_s=300, product=True)
         if source.get("schema") != "leaf.solar-project-import-source.v1":
             raise ObservationError(code="SOURCE_WIRE_UNREADABLE")
         artifact_id = source["source"]["artifact_id"]
         if not isinstance(artifact_id, str) or not re.fullmatch(r"[0-9a-f]{64}", artifact_id):
             raise ObservationError(code="SOURCE_WIRE_UNREADABLE")
         report = request("POST", route() + "/report", json_body={"source_artifact_id": artifact_id,
-            "alignment_tolerance": project["alignment_tolerance"], "selection_order": "unknown"}, product=True)
+            "alignment_tolerance": project["alignment_tolerance"], "selection_order": "unknown"},
+            timeout_s=300, product=True)
         downloaded = request("GET", report["report"]["download"])
         if not isinstance(downloaded, dict) or downloaded.get("schema") != "leaf.solar-project-solaredge-report.v1":
             raise ObservationError(code="REPORT_WIRE_UNREADABLE")
@@ -267,7 +322,15 @@ def _project(ctx, client, request, project, result):
 
 
 def run(ctx):
-    projects = ctx.manifest.get("projects", [])
+    problem = _metadata_problem(ctx.manifest, ctx.fixtures)
+    projects = ctx.manifest.get("projects", []) if isinstance(ctx.manifest, dict) else []
+    if problem:
+        steps = [Step(n, "UNREADABLE", problem) for n in range(1, 8)]
+        write_json_atomic(Path(ctx.out_dir) / "x05-evidence.json", {
+            "limits": LIMITS, "reason_code": problem, "results": [],
+            "steps": [{"n": s.n, "verdict": s.verdict, "evidence": s.evidence} for s in steps],
+        })
+        return steps
     if isinstance(projects, list):
         projects = list(projects)
         configured = {p.get("drawing_fixture") for p in projects if isinstance(p, dict)}
@@ -308,10 +371,9 @@ def run(ctx):
                 status, payload = transport(method, path, **kwargs)
                 if not 200 <= status < 300:
                     error = payload.get("error", {}) if isinstance(payload, dict) else {}
-                    code = error.get("reason_code", error.get("code"))
+                    code = _reason_code(error.get("reason_code", error.get("code")))
                     proven = (product and status not in (401, 403, 408, 429, 503, 504)
-                              and isinstance(code, str) and code.startswith(("IMPORT_", "REPORT_"))
-                              and not any(s in code for s in ("REQUEST", "STALE", "TIMEOUT", "UNAVAILABLE", "BUSY")))
+                              and code in PRODUCT_REFUSAL_CODES)
                     raise ObservationError(status, code, proven)
                 return payload
 
@@ -327,7 +389,7 @@ def run(ctx):
                     _project(ctx, client, request, project, result)
                 except ObservationError as exc:
                     result["status"] = exc.status
-                    result["reason_code"] = exc.code
+                    result["reason_code"] = _reason_code(exc.code)
                     if exc.product and result.get("setup_verified") and "import_verdict" not in result:
                         result["import_verdict"] = "FAIL"
                     elif exc.product and result.get("phase") == "report":

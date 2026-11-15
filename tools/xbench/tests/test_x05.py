@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from contextlib import contextmanager
+from itertools import permutations, product
 import json
 import sys
 from types import SimpleNamespace
@@ -142,7 +143,7 @@ def test_invalid_selected_candidates_are_unreadable(candidates, count):
     assert score([project], [result])[1].verdict == "UNREADABLE"
 
 
-def live_harness(monkeypatch, *, failure=None, health=None):
+def live_harness(monkeypatch, *, failure=None, health=None, server_code=None):
     """Exact owner-confirmed client signatures, with no browser or disk IO."""
     import xbench_session
 
@@ -269,7 +270,8 @@ def live_harness(monkeypatch, *, failure=None, health=None):
                 raise RuntimeError("synthetic delete failure")
 
     def api(page, method, path, *, origin, json_body=None, data=None, headers=None, timeout_s=60.0):
-        assert origin == ctx.base and timeout_s == 60.0
+        pdf_post = method == "POST" and "/imports/solaredge-pdf" in path
+        assert origin == ctx.base and timeout_s == (300 if pdf_post else 60.0)
         requests.append((method, path, json_body))
         if path == "/api/probe":
             payload = {"ok": True}
@@ -280,7 +282,7 @@ def live_harness(monkeypatch, *, failure=None, health=None):
                 "alignment_tolerance": 0.1, "selection_order": "unknown"}
             if failure == "report-refusal":
                 return 422, {"content-type": "application/json"}, json.dumps({
-                    "error": {"code": "REPORT_GRID_UNMATCHED"}}).encode()
+                    "error": {"code": server_code if server_code is not None else "REPORT_GRID_UNMATCHED"}}).encode()
             payload = {"report": {"download": "/api/report-artifact"}}
         elif path == "/api/report-artifact":
             assert method == "GET"
@@ -290,7 +292,7 @@ def live_harness(monkeypatch, *, failure=None, health=None):
             assert data == b"report" and headers == {"Content-Type": "application/pdf"}
             if failure in ("source-auth", "source-refusal"):
                 return (403 if failure == "source-auth" else 422), {"content-type": "application/json"}, json.dumps({
-                    "error": {"code": "IMPORT_PDF_INVALID"}}).encode()
+                    "error": {"code": server_code if server_code is not None else "IMPORT_PDF_INVALID"}}).encode()
             payload = {"schema": "leaf.solar-project-import-source.v1",
                        "source": {"artifact_id": ("c" if "/v1/" in path else "d") * 64}}
         return 200, {"content-type": "application/json; charset=utf-8"}, json.dumps(payload).encode()
@@ -401,3 +403,79 @@ def test_ground_setup_is_explicitly_unreadable_in_roof_slice(monkeypatch):
     assert not x05._setup(ctx.manifest["projects"][0])
     assert all(step.verdict == "UNREADABLE" for step in x05.run(ctx))
     assert events == [] and requests == []
+
+
+@pytest.mark.parametrize("failure", ["source-refusal", "report-refusal"])
+@pytest.mark.parametrize("injected", [
+    "IMPORT_CANARY_SECRET_DO_NOT_PERSIST",
+    "REPORT_" + "SYNTHETIC_PRIVATE_MARKER_" * 500,
+    "IMPORT_PDF_INVALID\nAuthorization: synthetic-canary",
+    {"token": "synthetic-private-canary"},
+])
+def test_server_codes_are_allowlisted_in_actual_evidence_file(monkeypatch, tmp_path, failure, injected):
+    from xbench_core import write_json_atomic
+
+    ctx, events, requests, receipts = live_harness(
+        monkeypatch, failure=failure, server_code=injected)
+    ctx.out_dir = tmp_path
+    monkeypatch.setattr(x05, "write_json_atomic", write_json_atomic)
+    steps = x05.run(ctx)
+    text = (tmp_path / "x05-evidence.json").read_text(encoding="utf-8")
+    assert all(step.verdict != "FAIL" for step in steps)
+    for marker in ("CANARY_SECRET", "SYNTHETIC_PRIVATE_MARKER", "synthetic-canary", "synthetic-private-canary"):
+        assert marker not in text
+    evidence = json.loads(text)
+    emitted = evidence["results"][0]["reason_code"]
+    assert emitted == "SERVER_REASON_UNRECOGNISED"
+    assert emitted in x05.SAFE_REASON_CODES and len(emitted) <= x05.MAX_REASON_CODE
+
+
+@pytest.mark.parametrize("where", ["manifest", "verified"])
+@pytest.mark.parametrize("record", [None, [], {"id": []}, {"id": {}}, {"id": "../bad"},
+                                     {"id": "x" * 129}, {"id": "bad\x00id"}])
+def test_malformed_fixture_metadata_is_named_and_offline(monkeypatch, where, record):
+    ctx, events, requests, receipts = live_harness(monkeypatch)
+    if where == "manifest":
+        ctx.manifest["fixtures"] = [record]
+    else:
+        ctx.fixtures = [record]
+    steps = x05.run(ctx)
+    assert all(step.verdict == "UNREADABLE" for step in steps)
+    assert all(step.evidence == "FIXTURE_METADATA_UNREADABLE" for step in steps)
+    assert receipts[0]["reason_code"] == "FIXTURE_METADATA_UNREADABLE"
+    assert events == [] and requests == []
+
+
+@pytest.mark.parametrize("value", [[], {}, ["drawing"], "../drawing", "", "d" * 129])
+def test_bad_drawing_reference_never_opens_network(monkeypatch, value):
+    ctx, events, requests, receipts = live_harness(monkeypatch)
+    ctx.manifest["projects"][0]["drawing_fixture"] = value
+    assert all(step.verdict == "UNREADABLE" for step in x05.run(ctx))
+    assert receipts[0]["reason_code"] == "PROJECT_METADATA_UNREADABLE"
+    assert events == [] and requests == []
+
+
+@pytest.mark.parametrize("broken", [None, "missing", "duplicate-grid", "duplicate-frame"])
+def test_project_result_frame_and_match_permutations_preserve_verdicts(broken):
+    first, observed = observation()
+    projects = [first, dict(first, id="other")]
+    results = [observed, deepcopy(observed)]
+    results[1]["id"] = "other"
+    rows = results[1]["report"]["matches"]
+    if broken == "missing":
+        rows.pop()
+    elif broken == "duplicate-grid":
+        rows[1].update(pdf_grid=0, candidates=[0])
+    elif broken == "duplicate-frame":
+        rows[1]["frame_ref"] = rows[0]["frame_ref"]
+    expected = [step.verdict for step in score(projects, results)]
+    assert expected[1] == ("PASS" if broken is None else "FAIL")
+    orders = list(permutations(range(2)))
+    for project_order, result_order, frame_order, match_order in product(orders, repeat=4):
+        changed = deepcopy(results)
+        for result in changed:
+            result["frame_refs"] = [result["frame_refs"][i] for i in frame_order]
+            if len(result["report"]["matches"]) == 2:
+                result["report"]["matches"] = [result["report"]["matches"][i] for i in match_order]
+        steps = score([projects[i] for i in project_order], [changed[i] for i in result_order])
+        assert [step.verdict for step in steps] == expected

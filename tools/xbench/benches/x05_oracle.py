@@ -109,13 +109,17 @@ def _number(raw, *, power=False):
 def _evidence(result, target, seen, name, raw, line, *, power=False):
     result.record(name, line)
     value = _number(raw, power=power)
-    seen.setdefault(name, []).append(value)
+    state = seen.setdefault(name, {"first": None, "invalid": False, "conflict": False})
     if value is None:
+        state["invalid"] = True
         result.issue("invalid_number", name, "Expected a positive count or labeled power.")
-    valid = {item for item in seen[name] if item is not None}
-    if len(valid) > 1:
+    elif state["first"] is None:
+        state["first"] = value
+    elif value != state["first"]:
+        state["conflict"] = True
+    if state["conflict"]:
         result.issue("contradictory_totals", name, "Explicit values disagree.")
-    target[name] = next(iter(valid)) if len(valid) == 1 and None not in seen[name] else None
+    target[name] = state["first"] if not state["invalid"] and not state["conflict"] else None
 
 
 def _parse_bom(text, result):
