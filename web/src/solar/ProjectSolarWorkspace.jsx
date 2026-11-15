@@ -26,6 +26,20 @@ const plain = (value) => value !== null && typeof value === 'object' && Object.g
 const current = (predicate) => {
   try { return typeof predicate === 'function' && predicate() === true } catch { return false }
 }
+
+function FocusTrackedEditor({ bindingKey, toolName, onFocusedUnmount, children }) {
+  const container = useRef(null)
+  useLayoutEffect(() => {
+    const node = container.current
+    return () => {
+      const document = node?.ownerDocument
+      if (document?.hasFocus() && node.contains(document.activeElement)) {
+        onFocusedUnmount({ bindingKey, toolName, document })
+      }
+    }
+  }, [bindingKey, toolName, onFocusedUnmount])
+  return <div ref={container} className="project-solar-workspace-editor">{children}</div>
+}
 // A dense array: only `length` beside the indices, and every index an own data property.
 function denseArray(value) {
   if (!Array.isArray(value) || Reflect.ownKeys(value).length !== value.length + 1) return false
@@ -177,6 +191,9 @@ export default function ProjectSolarWorkspace(props) {
   const presentation = useRef({ row: openTool, retired: false, generation: 0, drafts: new Map() })
   const [, repaint] = useState(0)
   const notifications = useRef([])
+  const focusedRemoval = useRef(null)
+  const recoveryStatus = useRef(null)
+  const recordFocusedRemoval = useRef((removed) => { focusedRemoval.current = removed }).current
   const retainedProposal = useRef(null)
   const [discardedProposal, discardProposal] = useState(null)
   const committed = scopeRef.current
@@ -375,6 +392,17 @@ export default function ProjectSolarWorkspace(props) {
   const inspectionRows = owner.rows.filter((row, index, rows) =>
     (GRAPH_TOOLS.includes(row.name) || READ_TOOLS.includes(row.name) || row.name === 'solar-solaredge-accept') &&
       rows.findIndex((item) => item.name === row.name) === index)
+  useLayoutEffect(() => {
+    const removed = focusedRemoval.current
+    focusedRemoval.current = null
+    if (!removed?.bindingKey || removed.bindingKey !== owner.bindingKey
+        || !['solar-panel-groups', 'solar-solaredge-accept'].includes(removed.toolName)
+        || !['scope_stale', 'client_unavailable'].includes(reason)) return
+    const document = removed.document
+    if (!document.hasFocus() || (document.activeElement && document.activeElement !== document.body)) return
+    recoveryStatus.current?.focus()
+    recoveryStatus.current?.scrollIntoView?.({ block: 'nearest' })
+  })
   return <section className="project-solar-workspace">
     {FlowRail && <FlowRail solarBinding={owner.binding} authorityKey={owner.authorityKey} projectClient={owner.projectClient}
       projectCatalog={owner.reason ? null : owner.projectCatalog} projectRunMemory={projectRunMemory}
@@ -385,10 +413,12 @@ export default function ProjectSolarWorkspace(props) {
       disabled={!opening || busy || hostFor(row, props) === 'host_unavailable'} onClick={() => open(row)}>
       {typeof row.label === 'string' && row.label ? row.label : row.name}
     </button>)}
-    {(reason || busy) && <p role="status">{projectSolarWorkspaceReason(reason || 'busy')}</p>}
-    {editor && <div key={generation} className="project-solar-workspace-editor">
+    {(reason || busy) && <p ref={recoveryStatus} tabIndex={-1} role="status"
+      data-testid="project-solar-workspace-recovery">{projectSolarWorkspaceReason(reason || 'busy')}</p>}
+    {editor && <FocusTrackedEditor key={generation} bindingKey={owner.bindingKey} toolName={selected.name}
+      onFocusedUnmount={recordFocusedRemoval}>
       <fieldset disabled={!!reason || (host !== 'read' && (busy || !canWrite))}>{editor}</fieldset>
       {(host === 'read' || reason || busy || !canWrite) && <button type="button" onClick={() => retire()}>Close</button>}
-    </div>}
+    </FocusTrackedEditor>}
   </section>
 }

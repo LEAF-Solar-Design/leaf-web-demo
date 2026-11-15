@@ -125,6 +125,61 @@ function fixture(name = STEP[0], { code = null, realGraph = false, rows = null }
 }
 const last = (values) => values[values.length - 1]
 
+it('S02 focuses recovery once when an active editor is removed by lost authority', async () => {
+  vi.spyOn(document, 'hasFocus').mockReturnValue(true)
+  const h = fixture('solar-panel-groups')
+  h.mount({ openTool: h.row })
+  screen.getByLabelText('Fixture draft').focus()
+  h.current = false
+  h.update()
+  const recovery = screen.getByText(PROJECT_SOLAR_WORKSPACE_REASONS.scope_stale)
+  await waitFor(() => expect(document.activeElement).toBe(recovery))
+  render(<button>Other workspace control</button>)
+  const other = screen.getByRole('button', { name: 'Other workspace control' })
+  other.focus()
+  h.update()
+  expect(document.activeElement).toBe(other)
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
+it('S02 preserves focus outside the editor when authority expires', () => {
+  vi.spyOn(document, 'hasFocus').mockReturnValue(true)
+  const h = fixture('solar-panel-groups')
+  h.mount({ openTool: h.row })
+  render(<button>Other workspace control</button>)
+  const other = screen.getByRole('button', { name: 'Other workspace control' })
+  other.focus()
+  h.current = false
+  h.update()
+  expect(document.activeElement).toBe(other)
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
+it('S02 leaves other Solar editor focus behavior unchanged', () => {
+  vi.spyOn(document, 'hasFocus').mockReturnValue(true)
+  const h = fixture('solar-string-add')
+  h.mount({ openTool: h.row })
+  screen.getByLabelText('Fixture draft').focus()
+  h.current = false
+  h.update()
+  expect(document.activeElement).not.toBe(screen.getByText(PROJECT_SOLAR_WORKSPACE_REASONS.scope_stale))
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
+it('S02 does not focus a different drawing recovery notice after a context switch', () => {
+  vi.spyOn(document, 'hasFocus').mockReturnValue(true)
+  const h = fixture('solar-panel-groups')
+  h.mount({ openTool: h.row })
+  screen.getByLabelText('Fixture draft').focus()
+  const next = { ...B, drawing_id: '66666666-6666-4666-8666-666666666666' }
+  h.snapshot = { ...h.snapshot, binding: next }
+  h.current = false
+  h.update({ solarBinding: next })
+  const recovery = screen.getByText(PROJECT_SOLAR_WORKSPACE_REASONS.scope_stale)
+  expect(document.activeElement).not.toBe(recovery)
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
 function solveDraftFixture() {
   const h = fixture('solar-solve-proposal')
   h.row.params = { type: 'object', properties: { grant_ref: { type: 'string' } } }
