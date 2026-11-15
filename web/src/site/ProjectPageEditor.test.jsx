@@ -43,6 +43,7 @@ const setup = props => render(<ProjectPageEditor projectId={PROJECT} accountScop
 const openSaved = async () => { fireEvent.click(button('Open page')); await screen.findByDisplayValue('A page') }
 
 beforeEach(() => {
+  vi.stubGlobal('navigator', { locks: { request: async (_name, callback) => callback() } })
   vi.clearAllMocks()
   auth.scope = 'account-a'
   auth.org = 'org-a'; auth.actor = 'binding-a'
@@ -1288,7 +1289,7 @@ describe('saved portfolio iOS preview', () => {
     setup(); await openPortfolio()
     vi.useFakeTimers()
     try {
-      fireEvent.click(button('Build iOS preview')); fireEvent.click(button('Build iOS preview'))
+      await act(async () => { fireEvent.click(button('Build iOS preview')); fireEvent.click(button('Build iOS preview')) })
       expect(submitProjectNativePreview).toHaveBeenCalledTimes(1)
       expect(submitProjectNativePreview).toHaveBeenCalledWith(PROJECT, 7, expect.any(String), { signal: expect.any(AbortSignal) })
       await act(async () => pending.resolve(nativeJob('queued')))
@@ -1404,6 +1405,7 @@ describe('saved portfolio iOS preview', () => {
     submitProjectNativePreview.mockReturnValueOnce(pending.promise)
     const view = setup(); await openPortfolio()
     fireEvent.click(button('Build iOS preview'))
+    await waitFor(() => expect(submitProjectNativePreview).toHaveBeenCalledTimes(1))
     const signal = submitProjectNativePreview.mock.lastCall[3].signal
     if (kind === 'unmount') view.unmount()
     else if (kind === 'logout') act(() => auth.logout())
