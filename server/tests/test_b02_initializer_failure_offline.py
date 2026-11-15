@@ -5,6 +5,7 @@ inert collaborators. This is not a router integration or rendered UI test.
 The public contract test also requires the serializer supplied by B03 PR3024.
 """
 import ast
+import copy
 import hashlib
 import json
 import logging
@@ -28,6 +29,17 @@ def load_nodes(filename, names, namespace):
                     isinstance(target, ast.Name) and target.id in names for target in node.targets)]
     exec(compile(ast.Module(body=selected, type_ignores=[]), filename, 'exec'), namespace)
     return namespace
+
+
+def mutate_error_branch(function):
+    # A nested branch could omit a newly introduced enclosing admission guard.
+    # Refuse that topology instead of silently testing a different entry path.
+    candidates = [node for node in function.body if isinstance(node, ast.Try) and any(
+        isinstance(handler.type, ast.Attribute) and handler.type.attr == 'AuthoringError'
+        for handler in node.handlers)]
+    if len(candidates) != 1:
+        raise ValueError('Fixture requires exactly one top-level AuthoringError handler')
+    return candidates[0]
 
 
 def simulate(failure='http'):
@@ -84,9 +96,7 @@ def simulate(failure='http'):
                 turn_runner=SimpleNamespace(finish_stage_authority=lambda *args, **kwargs: finished.append(args)))
     tree = ast.parse((SERVER / 'browser_project_flow.py').read_text())
     mutate = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'mutate')
-    branch = next(node for node in ast.walk(mutate) if isinstance(node, ast.Try) and any(
-        isinstance(handler.type, ast.Attribute) and handler.type.attr == 'AuthoringError'
-        for handler in node.handlers))
+    branch = mutate_error_branch(mutate)
     wrapper = ast.parse('def run():\n    pass\n').body[0]
     # These flags are initialized by mutate before the extracted branch.
     wrapper.body = [ast.Global(names=['success', 'known_refusal']), branch]
@@ -106,6 +116,18 @@ def simulate(failure='http'):
 
 
 class InitializerFailureOffline(unittest.TestCase):
+    def test_fixture_refuses_nested_or_ambiguous_handler_topology(self):
+        tree = ast.parse((SERVER / 'browser_project_flow.py').read_text())
+        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'mutate')
+        branch = mutate_error_branch(function)
+        nested = copy.deepcopy(function)
+        nested.body = [ast.If(test=ast.Constant(value=True), body=[copy.deepcopy(branch)], orelse=[])]
+        ambiguous = copy.deepcopy(function)
+        ambiguous.body.append(copy.deepcopy(branch))
+        for changed in (nested, ambiguous):
+            with self.assertRaisesRegex(ValueError, 'top-level AuthoringError handler'):
+                mutate_error_branch(changed)
+
     def test_flow_error_retains_closed_diagnostic_before_shared_serializer(self):
         result = simulate()
         self.assertEqual(result.error.public_diagnostic, {
