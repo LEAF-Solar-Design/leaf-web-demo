@@ -82,6 +82,35 @@ it('resumes the largest safe cursor exactly', async () => {
   expect(fetchImpl.mock.calls[0][1].headers['Last-Event-ID']).toBe('r:9007199254740991')
 })
 
+
+it.each(['metadata', 'first-page', 'later-page'])('retains verified evidence on contradictory %s snapshot identity', async failure => {
+  const store = createValueStore()
+  store.apply('r', event(0, 'corpus', { result: 'verified bytes' }))
+  const metadata = { run_id: failure === 'metadata' ? 'other' : 'r', state: 'finished', graph_revision: 1 }
+  const fetchImpl = vi.fn().mockResolvedValueOnce(stream([frame('run', { ...event(1, 'corpus', { truncated: true }), run_id: 'r' })]))
+    .mockResolvedValueOnce(json(metadata))
+  if (failure === 'later-page') fetchImpl.mockResolvedValueOnce(json({ events: Array.from({ length: 500 }, (_, seq) => event(seq, 'corpus', { result: 'staged only' })) }))
+  fetchImpl.mockResolvedValueOnce(json({ events: [{ ...event(failure === 'later-page' ? 500 : 1), run_id: 'other' }] }))
+  const sleep = vi.fn(async (ms, signal) => new Promise(resolve => signal.addEventListener('abort', resolve, { once: true })))
+  open({ runIds: ['r'], store, fetchImpl, sleep })
+  await waitFor(() => expect(sleep).toHaveBeenCalledTimes(1))
+  expect(store.getRun('r').transport).toMatchObject({ status: 'invalid_evidence', evidenceError: 'snapshot_response_invalid' })
+  expect(store.getRun('r').lastSeq).toBe(0)
+  expect(store.getBlock('r', 'corpus').value.result).toBe('verified bytes')
+  expect(fetchImpl.mock.calls.every(([, init]) => !init.method || init.method === 'GET')).toBe(true)
+})
+it('commits values older than the retained snapshot log without losing their block bytes', () => {
+  const store = createValueStore({ maxEvents: 2 }), staged = store.createSnapshotStore()
+  staged.upsertRun('r', { state: 'finished', graph_revision: 1 })
+  staged.apply('r', event(0, 'early', { result: 'early full bytes' }))
+  staged.apply('r', event(1, 'later'))
+  staged.apply('r', event(2, 'later'))
+  expect(staged.getRun('r').events).toHaveLength(2)
+  store.commitSnapshot('r', staged.getRun('r'))
+  expect(store.getBlock('r', 'early').value.result).toBe('early full bytes')
+  expect(store.getRun('r').lastSeq).toBe(2)
+})
+
 afterEach(() => { cleanup(); handles.splice(0).forEach(handle => handle.stop()); localStorage.removeItem('leaf.jwt'); vi.restoreAllMocks() })
 
 it('keeps unknown submission intent for explicit recovery and separates rejection', async () => {

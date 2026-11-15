@@ -69,30 +69,41 @@ export function openRunStream({ runIds, store = labValueStore, fetchImpl = globa
     return terminalState(run?.state) && run.state !== 'missing' && run.transport.status !== 'finished'
   }))
   const active = new Set(runIds.filter(id => !terminalState(store.getRun(id)?.state) || pendingSnapshots.has(id)))
-  // Keep terminal reconciliation resumable until its retained values are read.
-  pendingSnapshots.forEach(id => store.resetSnapshot(id, {}))
+  // Keep terminal reconciliation resumable without discarding verified values.
+  pendingSnapshots.forEach(id => store.beginSnapshot(id))
   const transport = patch => active.forEach(id => store.setTransport(id, patch))
   async function snapshot(id, connectionSignal) {
     pendingSnapshots.add(id)
     const row = await request(`runs/${encodeURIComponent(id)}`, { fetchImpl, signal: connectionSignal, onUnauthorized: rememberUnauthorized, snapshot: true })
     if (stopped || connectionSignal.aborted) return
-    if (row.invalidEvidence || (row.ok && !['queued', 'running', 'finished', 'failed', 'cancelled', 'missing'].includes(row.state))) {
+    if (row.invalidEvidence || (row.ok && row.run_id !== undefined && row.run_id !== id) || (row.ok && !['queued', 'running', 'finished', 'failed', 'cancelled', 'missing'].includes(row.state))) {
       transport({ evidenceError: 'snapshot_response_invalid' })
       throw new SnapshotEvidenceError('Invalid snapshot response')
     }
     if (!row.ok) { if (row.status === 401) { paused = true; transport({ status: 'auth_expired' }) }; throw new Error('Snapshot unavailable') }
-    store.resetSnapshot(id, { state: row.state, graph_revision: row.graph_revision })
+    const staged = store.createSnapshotStore()
+    staged.upsertRun(id, { state: row.state, graph_revision: row.graph_revision })
     let after = -1
     for (;;) {
       const page = await request(`runs/${encodeURIComponent(id)}/events?after_seq=${after}&limit=500`, { fetchImpl, signal: connectionSignal, onUnauthorized: rememberUnauthorized })
       if (stopped || connectionSignal.aborted) return
       if (!page.ok) { if (page.status === 401) { paused = true; transport({ status: 'auth_expired' }) }; throw new Error('Snapshot events unavailable') }
-      for (const event of page.events || []) store.apply(id, event)
-      const next = store.getRun(id)?.lastSeq ?? -1
+      if (!Array.isArray(page.events) || page.events.some(event => !event || (event.run_id !== undefined && event.run_id !== id) || !Number.isSafeInteger(event.seq) || event.seq <= after)) {
+        transport({ evidenceError: 'snapshot_response_invalid' })
+        throw new SnapshotEvidenceError('Invalid snapshot events')
+      }
+      for (const event of page.events) {
+        if (!staged.apply(id, event)) {
+          transport({ evidenceError: 'snapshot_response_invalid' })
+          throw new SnapshotEvidenceError('Invalid snapshot cursor order')
+        }
+      }
+      const next = staged.getRun(id)?.lastSeq ?? -1
       if ((page.events || []).length < 500) break
       if (next <= after) throw new Error('Snapshot cursor did not advance')
       after = next
     }
+    store.commitSnapshot(id, staged.getRun(id))
     store.addGap(id, { recovered: true })
     if (terminalState(store.getRun(id)?.state)) {
       store.setTransport(id, { status: 'finished' }); active.delete(id)
