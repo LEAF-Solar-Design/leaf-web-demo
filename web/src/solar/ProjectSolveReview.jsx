@@ -71,7 +71,8 @@ export function useSubmission(props, tool) {
         if (prepared?.available !== true || prepared.frame_ref !== extras.solveContext?.frame_ref ||
             prepared.graph_revision !== state.rev ||
             prepared.graph_sha256 !== response.data.intake.solar_design_graph_sha256 || !prepared.request) {
-          setFeedback({ state: 'refused', reason: code(prepared?.reason) }); return
+          setFeedback({ state: 'refused', reason: code(prepared?.reason),
+            message: PROJECT_SOLAR_WORKSPACE_REASONS.solve_preparation_refused }); return
         }
         params = { ...params, request: prepared.request }
       }

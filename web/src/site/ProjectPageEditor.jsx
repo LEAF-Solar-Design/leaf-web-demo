@@ -10,6 +10,7 @@ import { emptyPortfolio, importPortfolio } from './portfolioDocument.js'
 import { readActiveScope, subscribeActiveScope } from '../auth/activeScope.js'
 import { cloneDocument, selectionIdentity, singleFieldChange } from './portfolioEdits.js'
 import { appearanceStyle, textStyle } from './pageDesign.js'
+import { nativePreviewSubmissionKey } from '../lib/nativePreviewSubmission.js'
 import ElementInspector, { InlineText } from './ElementInspector.jsx'
 import './projectPageEditor.css'
 
@@ -67,6 +68,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
   const actionRow = useRef(null)
   const editor = useRef(null)
   const nativeSession = useRef(null)
+  const nativePreparation = useRef(false)
   const live = useRef(false)
   const operation = useRef(null)
   const preview = useRef(onPreview)
@@ -304,7 +306,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
         || !incomingProposal.isCurrent()) { finish(false); return }
       // A load started by this request must settle before reviewing its snapshot.
       if (pending.opened && busy === 'loading') return
-      if (busy || operation.current || dirty || validation || error?.conflict || nativeSession.current?.active || native?.active) {
+      if (busy || operation.current || dirty || validation || error?.conflict || (nativeSession.current?.active || nativePreparation.current) || native?.active) {
         finish(false); return
       }
       if (!draft && !saved && !pending.opened) {
@@ -326,7 +328,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
           && typeof provenance.turnId === 'string' && Boolean(provenance.turnId.trim()) && provenance.turnId.length <= 200
           && Number.isSafeInteger(provenance.seq) && provenance.seq > 0
           && sourceSnapshot.current.saved === snapshot.saved && sourceSnapshot.current.draft === snapshot.draft
-          && sourceSnapshot.current.enabled && !sourceSnapshot.current.busy && !operation.current && !nativeSession.current?.active
+          && sourceSnapshot.current.enabled && !sourceSnapshot.current.busy && !operation.current && !(nativeSession.current?.active || nativePreparation.current)
         if (!current()) { finish(false); return }
         let cancelled = false
         void validateProjectPhotoAssignmentProposal(projectId, saved, incomingProposal.result).then(value => {
@@ -364,7 +366,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
     setBusy(null); setProposal(null); setNotice('Proposal generation cancelled.')
   }
   const useProposal = () => {
-    if (!live.current || !proposal || proposalBlocked || operation.current || nativeSession.current?.active || sourceSnapshot.current.saved !== proposal.snapshot.saved
+    if (!live.current || !proposal || proposalBlocked || operation.current || (nativeSession.current?.active || nativePreparation.current) || sourceSnapshot.current.saved !== proposal.snapshot.saved
       || sourceSnapshot.current.draft !== proposal.snapshot.draft || (proposal.snapshot.isCurrent && !proposal.snapshot.isCurrent())) { setProposal(null); return }
     const document = proposal.document
     if (!proposal.photo) portfolioTextChanges(saved.document, document)
@@ -443,14 +445,29 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
     }
     await step(true)
   }
-  const buildNative = () => {
+  const buildNative = async () => {
     if (!enabled || operation.current || busy || dirty || validation || !saved
-      || draft?.schema !== 'leaf.portfolio.v1' || nativeSession.current?.active) return
+      || draft?.schema !== 'leaf.portfolio.v1' || (nativeSession.current?.active || nativePreparation.current)) return
     let session = nativeSession.current
     if (session?.job && !['failed', 'cancelled'].includes(session.job.status)) return
     if (!session || session.job) {
+      let key
+      nativePreparation.current = true
+      try {
+        // Live authentication derives the actor server-side; the dev binding is optional.
+        key = await nativePreviewSubmissionKey(localStorage,
+          [accountScope, getStoredOrgId(), getStoredActorBindingId() || accountScope, projectId, saved.revision, saved.digest], session?.job ? session.key : null)
+        if (!live.current || sourceSnapshot.current.saved !== saved || !sourceSnapshot.current.enabled) return
+      } catch {
+        if (!live.current || sourceSnapshot.current.saved !== saved || !sourceSnapshot.current.enabled) return
+        setNative({ revision: saved.revision, active: false,
+          message: 'The preview submission identity could not be restored or saved. No build was submitted.' })
+        return
+      } finally {
+        nativePreparation.current = false
+      }
       clearNative()
-      session = { revision: saved.revision, digest: saved.digest, key: crypto.randomUUID(), job: null, url: null, active: false }
+      session = { revision: saved.revision, digest: saved.digest, key, job: null, url: null, active: false }
       nativeSession.current = session
     }
     void observeNative(session, true)

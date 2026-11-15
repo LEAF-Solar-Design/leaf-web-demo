@@ -111,6 +111,29 @@ it('commits values older than the retained snapshot log without losing their blo
   expect(store.getRun('r').lastSeq).toBe(2)
 })
 
+
+it('pauses oversized aggregate snapshots before replacing verified evidence', async () => {
+  const store = createValueStore()
+  store.apply('r', event(0, 'corpus', { result: 'verified bytes' }))
+  let page = 0
+  const payload = 'x'.repeat(65536)
+  const fetchImpl = vi.fn().mockImplementation(async url => {
+    if (url.includes('/stream/')) return stream([frame('run', { ...event(1, 'corpus', { truncated: true }), run_id: 'r' })])
+    if (!url.includes('/events?')) return json({ run_id: 'r', state: 'finished', graph_revision: 1 })
+    const start = page++ * 500
+    return json({ events: Array.from({ length: 500 }, (_, i) => event(start + i, 'block' + (start + i), { result: payload })) })
+  })
+  const sleep = vi.fn()
+  open({ runIds: ['r'], store, fetchImpl, sleep })
+  await waitFor(() => expect(store.getRun('r').transport.evidenceError).toBe('snapshot_budget_exceeded'), { timeout: 3000 })
+  expect(store.getRun('r').transport.status).toBe('invalid_evidence')
+  expect(store.getRun('r').lastSeq).toBe(0)
+  expect(store.getBlock('r', 'corpus').value.result).toBe('verified bytes')
+  expect(fetchImpl.mock.calls.length).toBeLessThanOrEqual(5)
+  expect(fetchImpl.mock.calls.every(([, init]) => !init.method || init.method === 'GET')).toBe(true)
+  expect(sleep).not.toHaveBeenCalled()
+})
+
 afterEach(() => { cleanup(); handles.splice(0).forEach(handle => handle.stop()); localStorage.removeItem('leaf.jwt'); vi.restoreAllMocks() })
 
 it('keeps unknown submission intent for explicit recovery and separates rejection', async () => {
