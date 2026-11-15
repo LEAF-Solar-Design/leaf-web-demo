@@ -197,6 +197,8 @@ def _imported_dwg(backend, org_id, source, digest, drawing_id):
         resolved, raw, _ = project.write_loop.read_dxf(
             backend, str(org_id), source["drawing_id"], version, source_binding=stored)
     except project.write_loop.DxfUnavailable as exc:
+        if exc.status_code == 413:
+            _fail("PROJECT_EDITOR_TOO_LARGE", 413)
         _fail("PROJECT_EDITOR_SOURCE_UNAVAILABLE", exc.status_code, exc.retryable)
     except Exception:
         _fail("PROJECT_EDITOR_SOURCE_UNAVAILABLE", 503, True)
