@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { authHeaders, noteUnauthorized } from '../api.js'
 import { serviceRequestAuthority, rememberServiceResponse } from '../lib/serviceAuthSession.js'
+import { createProjectLogRetentionMethods } from './projectLogRetentionClient.js'
 import { DatasetDerivationCapabilitiesV1, DatasetDerivationRequestV1, DatasetDerivationResultV1,
   DatasetDerivationLineageV1 } from '../../../vendor/assistant-contract/src/dataset-derivation'
 import { parseScheduleDraftReferencePage } from '../../../vendor/assistant-react/src/actions/workflow-schedule-draft-picker-state'
@@ -455,6 +456,7 @@ export function createIntegrationsClient({ origin = import.meta.env.VITE_INTEGRA
   }
   return {
     available: Boolean(destination),
+    ...createProjectLogRetentionMethods(request, invalid),
     async listManualWorkflowRunsV2(id, { signal, after, limit = 25 } = {}) {
       if (!Number.isInteger(limit) || limit < 1 || limit > 50 ||
           (after !== undefined && !workflowCursor.safeParse(after).success)) throw invalid()
