@@ -31,11 +31,15 @@ function ScopedRetention({ client, projectId, signal, guard, onForbidden, mode =
   const [run, setRun] = useState(''), [audit, setAudit] = useState(null), [preview, setPreview] = useState(null)
   const [review, setReview] = useState(null), [restoreReview, setRestoreReview] = useState(null)
   const [view, setView] = useState('current'), [page, setPage] = useState(null), [stack, setStack] = useState([undefined]), [pageIndex, setPageIndex] = useState(0)
+  const [history, setHistory] = useState(null), [historyStack, setHistoryStack] = useState([undefined]), [historyIndex, setHistoryIndex] = useState(0)
+  const [historyPending, setHistoryPending] = useState(false), [historyFailed, setHistoryFailed] = useState(false)
+  const historyAvailable = typeof client?.retentionHistory === 'function'
   const dataset = datasets.find(value => refKey(value) === selected)
   const current = ctx => ctx && scope.current === ctx && !ctx.controller.signal.aborted && !signal?.aborted
   const clearReviews = () => { setReview(null); setRestoreReview(null) }
   const clearRun = () => {
     for (const controller of scope.current?.reads.values() ?? []) controller.abort()
+    setHistoryPending(false)
     setRun(''); setAudit(null); setPreview(null); clearReviews(); setPage(null); setStack([undefined]); setPageIndex(0); setExportedAudit(null)
   }
   useLayoutEffect(() => {
@@ -44,7 +48,8 @@ function ScopedRetention({ client, projectId, signal, guard, onForbidden, mode =
     const abort = () => {
       ctx.controller.abort(); for (const controller of ctx.reads.values()) controller.abort()
       setAvailability('forbidden'); setDefinition(null); setExported(null); setDatasets([]); setSelected(''); setPrepared(null); setSchedule(null)
-      clearRun(); setForm(initialForm()); busy.current = false; stop.current = true
+      clearRun(); setHistory(null); setHistoryStack([undefined]); setHistoryIndex(0); setHistoryFailed(false); setHistoryPending(false)
+      setForm(initialForm()); busy.current = false; stop.current = true
     }
     if (!signal || typeof signal.addEventListener !== 'function') { abort(); return undefined }
     signal.addEventListener('abort', abort, { once: true })
@@ -69,6 +74,7 @@ function ScopedRetention({ client, projectId, signal, guard, onForbidden, mode =
     if (rowFailure || page) setPage(null)
     if (cause?.status === 403 || cause?.status === 401 || cause?.code === 'forbidden') {
       setAvailability('forbidden'); setDatasets([]); setDefinition(null); setPrepared(null); setSchedule(null); setExported(null); setForm(initialForm()); clearRun()
+      setHistory(null); setHistoryStack([undefined]); setHistoryIndex(0); setHistoryFailed(false); setHistoryPending(false)
       callbacks.current.onForbidden?.()
     }
     setError(cause?.dispatched ? 'The request may have reached the server. Refresh run before doing anything else. No automatic retry was made.'
@@ -97,7 +103,7 @@ function ScopedRetention({ client, projectId, signal, guard, onForbidden, mode =
     setForm(previous => ({ ...previous, [key]: value })); clearReviews(); setExported(null)
     if (['slug', 'version', 'title', 'batchSize', 'maxBatches'].includes(key)) { setDefinition(null); setSchedule(null); clearRun() }
     if (['table', 'clock', 'id', 'source', 'level', 'timestamp'].includes(key)) { setPrepared(null); setSchedule(null); clearRun() }
-    if (key === 'scheduleSlug' || key === 'scheduleVersion') setSchedule(null)
+    if (key === 'scheduleSlug' || key === 'scheduleVersion') { scope.current?.reads.get('schedule')?.abort(); setSchedule(null) }
     if (key === 'execution') clearRun()
   }
   const input = (key, label, type = 'text') => <label htmlFor={`${prefix}-${key}`}>{label}<input id={`${prefix}-${key}`} type={type}
@@ -112,14 +118,59 @@ function ScopedRetention({ client, projectId, signal, guard, onForbidden, mode =
     await rows(ctx, id, view, undefined, requestSignal)
     setStack([undefined]); setPageIndex(0)
   }
-  function openRun() {
+  function openRun(selectedId) {
     clearRun()
-    const id = form.execution.trim()
+    const id = typeof selectedId === 'string' ? selectedId : form.execution.trim()
+    if (typeof selectedId === 'string') setForm(previous => ({ ...previous, execution: id }))
     read('run', async (ctx, requestSignal) => {
       const value = await invoke(ctx, 'retentionAudit', [id], requestSignal)
       setRun(value.resourceId); setAudit(value)
       await rows(ctx, value.resourceId, view, undefined, requestSignal)
     }, true)
+  }
+  function openSchedule() {
+    clearRun(); setDefinition(null); setPrepared(null); setSchedule(null); setExported(null)
+    setDatasets([]); setDatasetAfter(null); setSelected('')
+    const slug = form.scheduleSlug.trim(), rawVersion = form.scheduleVersion
+    read('schedule', async (ctx, requestSignal) => {
+      const version = number(rawVersion)
+      const found = await invoke(ctx, 'retentionGetSchedule', [slug, version], requestSignal)
+      const stored = found?.schedule
+      const matched = /^retention-definition:([a-z0-9]+(?:-[a-z0-9]+)*):v([1-9][0-9]*)$/.exec(stored?.definition_id ?? '')
+      const definitionVersion = matched ? Number(matched[2]) : 0
+      if (found?.resourceId !== `retention-schedule:${slug}:v${version}` || !Number.isSafeInteger(found.revision) || found.revision < 1 ||
+        stored?.kind !== 'project_log_retention_schedule_v1' || stored.external_activation !== false || stored.daily_utc !== '09:45' ||
+        !matched || !Number.isSafeInteger(definitionVersion) || definitionVersion > 2147483647 ||
+        !Number.isSafeInteger(stored.definition_revision) || stored.definition_revision < 1 ||
+        !/^retention-table:[a-f0-9]{64}$/.test(stored.prepared_table_id)) throw failed()
+      const saved = await invoke(ctx, 'retentionGetDefinition', [matched[1], definitionVersion], requestSignal)
+      if (saved?.resourceId !== stored.definition_id || saved.revision !== stored.definition_revision) throw failed()
+      setDefinition(saved); setPrepared({ tableId: stored.prepared_table_id }); setSchedule(found)
+      setForm(previous => ({ ...previous, slug: matched[1], version: String(definitionVersion), title: saved.definition.title ?? '',
+        batchSize: String(saved.definition.settings?.batchSize ?? 5000), maxBatches: String(saved.definition.settings?.maxBatchesPerClass ?? 200),
+        table: '', clock: '', id: '', source: '', level: '', timestamp: '', execution: '' }))
+      setNotice('Stored internal schedule opened. Original dataset and field mapping are not inferred from its references.')
+    })
+  }
+  function loadHistory(after, index, nextStack) {
+    if (!historyAvailable) return
+    setHistory(null); setHistoryFailed(false); setHistoryPending(true); setHistoryStack(nextStack); setHistoryIndex(index)
+    read('history', async (ctx, requestSignal) => {
+      try {
+        const result = await invoke(ctx, 'retentionHistory', [], requestSignal, { limit: 25, ...(after ? { after } : {}) })
+        if (!result || !Array.isArray(result.items) || result.items.length > 25 ||
+          (result.nextCursor !== null && (typeof result.nextCursor !== 'string' || !result.nextCursor || result.nextCursor.length > 1024)) ||
+          typeof result.asOf !== 'string' || !Number.isFinite(Date.parse(result.asOf)) ||
+          result.items.some(item => !item || !/^retention-execution:[a-f0-9]{64}$/.test(item.resourceId) ||
+            !item.checkpoint || !['admitted', 'dispatched', 'complete'].includes(item.checkpoint.phase) ||
+            typeof item.admittedAt !== 'string' || typeof item.dueAt !== 'string' ||
+            (item.counters !== null && (!item.counters || !Number.isSafeInteger(item.counters.active) || !Number.isSafeInteger(item.counters.input))))) throw failed()
+        setHistory(result)
+      } catch (cause) {
+        if (current(ctx) && !requestSignal.aborted) setHistoryFailed(true)
+        throw cause
+      } finally { if (current(ctx) && !requestSignal.aborted) setHistoryPending(false) }
+    })
   }
   function loadRows(targetView, after, index, nextStack) {
     scope.current?.reads.get('run')?.abort()
@@ -215,7 +266,8 @@ function ScopedRetention({ client, projectId, signal, guard, onForbidden, mode =
       })}>Prepare records</button>{prepared && <p>Prepared table: {prepared.tableId}.</p>}
     </fieldset>
     <fieldset disabled={disabled}><legend>Internal schedule and occurrence</legend><div className="retention-grid">{input('scheduleSlug', 'Schedule slug')}{input('scheduleVersion', 'Schedule version', 'number')}{input('dueDate', 'Occurrence due date', 'date')}</div>
-      <div className="retention-actions"><button type="button" disabled={!definition || !prepared} onClick={() => action(async ctx => {
+      <div className="retention-actions"><button type="button" disabled={typeof client?.retentionGetSchedule !== 'function'} onClick={openSchedule}>Open internal schedule</button>
+      <button type="button" disabled={!definition || !prepared} onClick={() => action(async ctx => {
         setSchedule(await invoke(ctx, 'retentionRegisterSchedule', [{ id: form.scheduleSlug.trim(), version: number(form.scheduleVersion),
           definition: { resourceId: definition.resourceId, revision: definition.revision }, preparedTableId: prepared.tableId }]))
         clearReviews(); setNotice('Internal schedule saved. No timer or external trigger was started.')
@@ -224,6 +276,23 @@ function ScopedRetention({ client, projectId, signal, guard, onForbidden, mode =
           definition: { resourceId: definition.resourceId, revision: definition.revision }, preparedTableId: prepared.tableId, dueAt: `${form.dueDate}T09:45:00.000Z` }])
         clearRun(); setRun(value.resourceId); setAudit(value); setForm(previous => ({ ...previous, execution: value.resourceId })); await rows(ctx, value.resourceId, view)
       })}>Admit internal run</button></div>
+    </fieldset>
+    <fieldset disabled={disabled}><legend>Run history</legend>
+      {!historyAvailable && <p>Run history is unavailable with this client.</p>}
+      <div className="retention-actions"><button type="button" disabled={!historyAvailable} onClick={() => loadHistory(undefined, 0, [undefined])}>Load run history</button>
+        <button type="button" disabled={!historyAvailable || historyPending || historyIndex === 0} onClick={() => loadHistory(historyStack[historyIndex - 1], historyIndex - 1, historyStack)}>Previous history</button>
+        <button type="button" disabled={!historyAvailable || historyPending || !history?.nextCursor} onClick={() => {
+          const next = [...historyStack.slice(0, historyIndex + 1), history.nextCursor]
+          loadHistory(history.nextCursor, historyIndex + 1, next)
+        }}>Next history</button></div>
+      {historyPending && <p role="status">Loading run history…</p>}
+      {historyFailed && <p>Run history could not be read. <button type="button" onClick={() => loadHistory(historyStack[historyIndex], historyIndex, historyStack)}>Retry run history</button></p>}
+      {history && <><p>Run history as of <time dateTime={history.asOf}>{history.asOf}</time>.</p>
+        {history.items.length === 0 ? <p>No internal runs in this page.</p> : <ul>{history.items.map(item => <li key={item.resourceId}>
+          <p>Admitted <time dateTime={item.admittedAt}>{item.admittedAt}</time>. Due <time dateTime={item.dueAt}>{item.dueAt}</time>. State: {item.checkpoint.stop_reason || item.checkpoint.phase}. {item.expired ? 'Parent deadline reached.' : 'Parent deadline not reached.'}</p>
+          {item.counters === null ? <p>Counts are not yet committed.</p> : <p>Active {item.counters.active} of {item.counters.input}. Archived {item.counters.archived}. Deleted build {item.counters.deletedBuild}; other {item.counters.deletedOther}. Restored {item.counters.restored}.</p>}
+          <button type="button" onClick={() => openRun(item.resourceId)}>Open run {item.resourceId}</button>
+        </li>)}</ul>}</>}
     </fieldset>
     <fieldset disabled={disabled}><legend>Open and inspect a run</legend>{input('execution', 'Execution ID')}<div className="retention-actions">
       <button type="button" onClick={openRun}>Open run</button><button type="button" disabled={!run} onClick={() => read('run', (ctx, requestSignal) => refresh(ctx, run, requestSignal), true)}>Refresh run</button>
