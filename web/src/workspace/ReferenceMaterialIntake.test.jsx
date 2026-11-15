@@ -65,6 +65,51 @@ afterEach(() => {
 })
 
 describe('shared project original reference intake', () => {
+  for (const destination of ['unchanged', 'other control', 'page body', 'retired project']) {
+    it(`recovers rejected save focus without stealing focus from ${destination}`, async () => {
+      let reject
+      const pending = new Promise((_, fail) => { reject = fail })
+      listProjectReferences.mockResolvedValue({ materials: [arloMaterial] })
+      registerProjectArloInput.mockResolvedValue(arloInput)
+      reviseProjectArloInput.mockReturnValueOnce(pending)
+      const view = render(<ReferenceMaterialIntake projectId={project} orgId={orgId} onRunArlo={vi.fn()} />)
+      await ready()
+      fireEvent.click(screen.getByRole('button', { name: 'Edit constraints' }))
+      await screen.findByRole('form', { name: 'ARLO constraints' })
+      fireEvent.change(screen.getByLabelText('requirements.diameter_m'), { target: { value: '-1' } })
+      const save = screen.getByRole('button', { name: 'Save revision' })
+      save.focus()
+      fireEvent.click(save)
+      expect(save.disabled).toBe(true)
+      // jsdom does not emulate Chromium's focus loss when a focused control is disabled.
+      document.body.tabIndex = -1
+      document.body.focus()
+      document.body.removeAttribute('tabindex')
+      expect(document.activeElement).toBe(document.body)
+      let expected = save
+      if (destination === 'other control') {
+        expected = screen.getByRole('button', { name: 'Add reference files' })
+        expected.focus()
+      } else if (destination === 'page body') {
+        fireEvent.pointerDown(document.body)
+        expected = document.body
+      } else if (destination === 'retired project') {
+        view.rerender(<ReferenceMaterialIntake projectId={otherProject} orgId={orgId} onRunArlo={vi.fn()} />)
+        expected = document.body
+      }
+      await act(async () => reject(Object.assign(new Error('requirements.diameter_m must be greater than zero.'), { status: 422 })))
+      expect(document.activeElement).toBe(expected)
+      expect(reviseProjectArloInput).toHaveBeenCalledTimes(1)
+      if (destination !== 'retired project') {
+        expect(save.disabled).toBe(false)
+        expect(screen.getByRole('alert').textContent).toContain('must be greater than zero')
+        expect(screen.getByText(/Active input:/).textContent).toContain(arloInput.input_version_id)
+      } else {
+        expect(screen.queryByRole('alert')).toBeNull()
+      }
+    })
+  }
+
   it('edits numeric constraints, saves immutable lineage, and runs the revision with a new run key', async () => {
     const pending = deferred()
     const onRunArlo = vi.fn().mockResolvedValue({ ok: true })
@@ -117,12 +162,19 @@ describe('shared project original reference intake', () => {
     fireEvent.change(diameter, { target: { value: '-1' } })
     fireEvent.click(screen.getByRole('button', { name: 'Save revision' }))
     expect((await screen.findByRole('alert')).textContent).toBe('requirements.diameter_m must be greater than zero.')
+    expect(diameter.getAttribute('aria-invalid')).toBe('true')
+    expect(diameter.getAttribute('aria-describedby')).toBe(screen.getByRole('alert').id)
+    expect(screen.getByLabelText('requirements.clearance_m').getAttribute('aria-invalid')).toBeNull()
     expect(screen.getByLabelText('requirements.diameter_m').value).toBe('-1')
     expect(screen.getByText(/Active input:/).textContent).toContain(arloInput.input_sha256)
     expect(screen.getByRole('button', { name: 'Restore original' }).disabled).toBe(true)
     expect(onRunArlo).toHaveBeenCalledTimes(1)
     expect(restoreProjectArloInput).not.toHaveBeenCalled()
     expect(screen.getByRole('button', { name: 'Save revision' }).disabled).toBe(false)
+    fireEvent.change(diameter, { target: { value: '1' } })
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(diameter.getAttribute('aria-invalid')).toBeNull()
+    expect(diameter.getAttribute('aria-describedby')).toBeNull()
   })
 
   it('reopens the saved active revision and restores the original through an explicit control', async () => {

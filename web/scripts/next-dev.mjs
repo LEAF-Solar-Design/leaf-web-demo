@@ -1,9 +1,9 @@
 import { spawn } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ENGINE_FILES, findEnginePkgDir } from '../vite-plugins/engineVersion.js'
+import { stageEngineAsset } from './gate-browser-resources.mjs'
 
 const require = createRequire(import.meta.url)
 const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -15,10 +15,7 @@ const engineDir = path.join(webRoot, 'public/engine')
 for (const name of ENGINE_FILES) {
   const target = path.join(engineDir, name)
   const source = pkgDir && path.join(pkgDir, name)
-  if (source && existsSync(source)) {
-    mkdirSync(engineDir, { recursive: true })
-    copyFileSync(source, target)
-  } else rmSync(target, { force: true })
+  stageEngineAsset(source, target)
 }
 
 const args = process.argv.slice(2).filter((arg) => arg !== '--strictPort')

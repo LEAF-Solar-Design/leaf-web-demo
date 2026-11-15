@@ -173,8 +173,11 @@ def _imported_dwg(backend, org_id, source, digest, drawing_id):
     if type(version) is not int or version < 1 or not isinstance(stored, dict):
         _fail("PROJECT_EDITOR_SOURCE_INVALID", 409)
     try:
-        resolved, key = store.resolve_version(backend, str(org_id), source["drawing_id"], version)
-        if resolved != version or key != stored.get("ref"):
+        # Canonical project provenance already pins this exact immutable
+        # version. A legacy manifest/head is neither authority nor a required
+        # dependency for reopening the imported source.
+        key = store.drawing_version_key(str(org_id), source["drawing_id"], version)
+        if key != stored.get("ref"):
             _fail("PROJECT_EDITOR_SOURCE_INVALID", 409)
         original = backend.get(key)
     except EditorError:
@@ -192,7 +195,7 @@ def _imported_dwg(backend, org_id, source, digest, drawing_id):
         _fail("PROJECT_EDITOR_SOURCE_INVALID", 409)
     try:
         resolved, raw, _ = project.write_loop.read_dxf(
-            backend, str(org_id), source["drawing_id"], version)
+            backend, str(org_id), source["drawing_id"], version, source_binding=stored)
     except project.write_loop.DxfUnavailable as exc:
         _fail("PROJECT_EDITOR_SOURCE_UNAVAILABLE", exc.status_code, exc.retryable)
     except Exception:

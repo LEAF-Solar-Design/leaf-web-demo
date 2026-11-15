@@ -24,9 +24,9 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('original reference transport', () => {
-  it('uploads and downloads actual complete gzip bytes without changing the original', async () => {
+  it.each(['application/gzip', 'application/x-gzip'])('uploads and downloads actual complete gzip bytes without changing the original (%s)', async type => {
     const compressed = gzipSync(Array.from({ length: 6001 }, (_, row) => JSON.stringify({ row })).join('\n'))
-    const original = new File([compressed], 'BTC.jsonl.gz', { type: 'application/gzip' })
+    const original = new File([compressed], 'BTC.jsonl.gz', { type })
     fetch.mockResolvedValueOnce(jsonResponse({ material: { material_id: material, name: original.name } }))
     await uploadProjectReference(project, original, { expectedScope: auth.scope })
     expect(fetch.mock.calls[0][1].body).toBe(original)
@@ -36,7 +36,7 @@ describe('original reference transport', () => {
     expect(new Uint8Array(await downloaded.arrayBuffer())).toEqual(new Uint8Array(compressed))
   })
 
-  it.each([['rows.gz', 'application/gzip'], ['rows.jsonl.gz', 'application/json']])('refuses gzip suffix or MIME mismatch %s', (name, type) => {
+  it.each([['rows.gz', 'application/gzip'], ['rows.jsonl.gz', 'application/json'], ['rows.gz', 'application/x-gzip'], ['rows.json', 'application/x-gzip']])('refuses gzip suffix or MIME mismatch %s', (name, type) => {
     expect(() => uploadProjectReference(project, file(name, type))).toThrow()
     expect(fetch).not.toHaveBeenCalled()
   })

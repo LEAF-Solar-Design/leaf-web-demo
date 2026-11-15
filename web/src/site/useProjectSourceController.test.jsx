@@ -457,6 +457,33 @@ describe('Native source through the real API', () => {
     expect(h.calls.filter((call) => call.method === 'POST')).toHaveLength(published ? 1 : 0)
   })
 
+  it.each(['browser', 'native'])('shows a request-bound initializer reference but keeps %s unknown without redispatch', async (sourceContext) => {
+    const correlation = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    let requestId
+    const h = setup({ props: { sourceContext }, materials: sourceContext === 'native' ? [transcript()] : [],
+      fetcher: (url, init) => {
+        if (init.method === 'POST') {
+          requestId = JSON.parse(init.body).source_request_id
+          return reply({ error: { code: 'author_unavailable',
+            message: 'Project source initialization failed. Review the original request before retrying.',
+            source_request_id: requestId, correlation_id: correlation, phase: 'stage',
+            author_subphase: 'initialize_http', author_http_status: 503 } }, 503)
+        }
+        if (url.includes('/requests/')) return reply({}, 404)
+        return undefined
+      } })
+    await open(h)
+    await act(async () => { await h.result.current.stage() })
+    expect(h.result.current.error).toContain(`Source initialization failed. Reference: ${correlation}`)
+    expect(h.result.current.error).toContain('Refresh the original request; do not stage it again.')
+    expect(h.result.current.unknown).toBe(true)
+    expect(h.result.current.candidate).toBeNull()
+    await act(async () => { await h.result.current.stage() })
+    expect(h.startAgentTurn).toHaveBeenCalledTimes(1)
+    expect(h.calls.filter((call) => call.method === 'POST')).toHaveLength(1)
+    expect(h.calls.some((call) => call.url.endsWith(`/requests/${requestId}`))).toBe(true)
+  })
+
   it('native_edit_ui preserves the exact stale Native base and originals after 409 with no redispatch', async () => {
     let id
     const h = nativeSetup({ saved: [nativeRow({ state: 'published' })], materials: [transcript()], fetcher: (url, init) => {
