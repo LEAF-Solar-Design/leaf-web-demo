@@ -11,10 +11,52 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { catalogClusters, profileRibbonTabs } from '../lib/ribbonClusters.js'
 import { REASONS, reasonCode } from '../lib/actionRegistry.js'
+import { toolIcon } from '../lib/toolRecord.js'
 
 import DraftingRibbon, { RIBBON_HEIGHT_VAR, RibbonCluster, RibbonTool } from './DraftingRibbon.jsx'
 
 afterEach(cleanup)
+
+describe('decluttered tool groups', () => {
+  it('gives panel, zone, string, inverter and trench tools distinct real glyphs', () => {
+    const tools = ['solar-panel-grid', 'solar-zone', 'solar-string', 'solar-inverter', 'solar-trench'].map((name) => ({
+      id: name, label: name, icon: toolIcon({ name }),
+    }))
+    const { container } = render(<DraftingRibbon clusters={[{ id: 'solar', label: 'Solar', tools }]} />)
+    const glyphs = Array.from(container.querySelectorAll('svg use'), (node) => node.getAttribute('href'))
+    expect(glyphs).toHaveLength(5)
+    expect(new Set(glyphs).size).toBe(5)
+  })
+  it('uses text for an icon absent from the existing sprite', () => {
+    render(<RibbonTool tool={{ id: 'custom', label: 'Inspect the roof', icon: 'not-in-the-sprite' }} />)
+    const button = screen.getByRole('button', { name: 'Inspect the roof' })
+    expect(button.textContent).toBe('Inspect the roof')
+    expect(button.dataset.textOnly).toBe('true')
+    expect(button.querySelector('.ci')).toBeNull()
+  })
+  it('renders an undeclared icon as text and uses each visible glyph once', () => {
+    const { container } = render(<DraftingRibbon clusters={[{ id: 'draw', label: 'Draw', tools: [
+      { id: 'one', label: 'One', icon: 'line' },
+      { id: 'two', label: 'Two', icon: 'line' },
+      { id: 'three', label: 'Three' },
+    ] }]} />)
+    expect(container.querySelectorAll('svg use')).toHaveLength(1)
+    expect(screen.getByRole('button', { name: 'Two' }).querySelector('.ci')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Three' }).textContent).toBe('Three')
+    expect(screen.getByRole('button', { name: 'Three' }).querySelector('.ci')).toBeNull()
+  })
+  it('keeps disabled tools under a closed More disclosure', () => {
+    const { container } = render(<DraftingRibbon clusters={[{ id: 'edit', label: 'Edit', tools: [
+      { id: 'paste', label: 'Paste', disabled: true, reason: 'Clipboard is empty' },
+    ] }]} />)
+    const menu = container.querySelector('.ribbon-disabled-more')
+    expect(menu.open).toBe(false)
+    expect(menu.querySelector('button').disabled).toBe(true)
+    fireEvent.click(menu.querySelector('summary'))
+    expect(menu.open).toBe(true)
+    expect(screen.getByRole('button', { name: 'Paste (unavailable: Clipboard is empty)' })).toBeTruthy()
+  })
+})
 
 const FAMS = [
   {
@@ -81,6 +123,7 @@ describe('DraftingRibbon', () => {
     expect(screen.getByRole('toolbar', { name: 'Drafting tools' }).getAttribute('data-tab')).toBe('solar')
     expect(screen.getByRole('group', { name: 'Stringing' })).toBeTruthy()
     expect(screen.getByRole('group', { name: 'Equipment placement' })).toBeTruthy()
+    document.querySelectorAll('.ribbon-disabled-more').forEach((menu) => { menu.open = true })
     const empty = screen.getByRole('button', { name: 'Stringing (unavailable: No stringing tools in this catalog yet)' })
     expect(empty.disabled).toBe(true)
     expect(empty.title).toBe('No stringing tools in this catalog yet')
@@ -369,6 +412,7 @@ describe('DraftingRibbon', () => {
   it('disables a write tool under the single-writer lock, with the reason readable', () => {
     const onRequestRun = vi.fn()
     render(<DraftingRibbon clusters={catalogClusters(FAMS, { onRequestRun, writeLocked: true })} />)
+    document.querySelectorAll('.ribbon-disabled-more').forEach((menu) => { menu.open = true })
     const write = screen.getByRole('button', { name: /delete-marked-panel \(unavailable/ })
     expect(write.disabled).toBe(true)
     expect(write.title).toMatch(/edit lock/)
@@ -380,6 +424,7 @@ describe('DraftingRibbon', () => {
 
   it('disables a write tool when the plan lacks the entitlement', () => {
     render(<DraftingRibbon clusters={catalogClusters(FAMS, { onRequestRun: () => {}, writeEntitled: false })} />)
+    document.querySelectorAll('.ribbon-disabled-more').forEach((menu) => { menu.open = true })
     const write = screen.getByRole('button', { name: /delete-marked-panel \(unavailable/ })
     expect(write.disabled).toBe(true)
     expect(write.title).toMatch(/plan/)
@@ -387,6 +432,7 @@ describe('DraftingRibbon', () => {
 
   it('disables everything while a run is in flight and exposes that reason', () => {
     render(<DraftingRibbon clusters={catalogClusters(FAMS, { onRequestRun: () => {}, running: true })} />)
+    document.querySelectorAll('.ribbon-disabled-more').forEach((menu) => { menu.open = true })
     const read = screen.getByRole('button', { name: `count-by-layer (unavailable: a run is in flight)` })
     expect(read.disabled).toBe(true)
     expect(read.title).toBe('a run is in flight')
@@ -394,6 +440,7 @@ describe('DraftingRibbon', () => {
 
   it('disables everything during version preview and exposes the read-only reason', () => {
     render(<DraftingRibbon clusters={catalogClusters(FAMS, { onRequestRun: () => {}, previewing: true })} />)
+    document.querySelectorAll('.ribbon-disabled-more').forEach((menu) => { menu.open = true })
     const read = screen.getByRole('button', { name: `count-by-layer (unavailable: viewing a version, read-only)` })
     expect(read.disabled).toBe(true)
     expect(read.title).toBe('viewing a version, read-only')
@@ -424,6 +471,7 @@ describe('DraftingRibbon', () => {
     // The group is a named landmark for assistive tech; the note is visible text.
     expect(screen.getByRole('group', { name: 'Modify' })).toBeTruthy()
     expect(screen.getByText('opens on an imported DXF').className).toBe('ribbon-note')
+    document.querySelectorAll('.ribbon-disabled-more').forEach((menu) => { menu.open = true })
     const move = screen.getByRole('button', { name: 'move (unavailable: opens on an imported DXF)' })
     expect(move.title).toBe('opens on an imported DXF')
   })
