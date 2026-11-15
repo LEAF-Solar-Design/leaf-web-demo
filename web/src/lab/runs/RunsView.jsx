@@ -5,6 +5,7 @@ import { useLabSurfaceStatus } from '../useLabSurfaceStatus.js'
 import { labValueStore, useBlockValue, useRun, useRuns } from './valueStore.js'
 import { cancelRun } from './runStream.js'
 import './corpusEvidence.css'
+import { corpusReportDiagnostics } from './corpusReportDiagnostics.js'
 
 const summarize = value => {
   try { return (typeof value === 'string' ? value : JSON.stringify(value) ?? 'null').slice(0, 200) }
@@ -32,6 +33,7 @@ function CorpusEvidence({ evidence }) {
     <p>Evaluated suite digest: {evidence.evaluated_suite_sha256}</p>
     <p>Verdict: {report.verdict}</p>
     <p>Confirmation verdict: {confirmation?.verdict ?? 'Unavailable (not evaluated)'}</p>
+    {corpusReportDiagnostics(report).map(message => <p key={message} role="status">{message}</p>)}
     <EvidenceField label="Reasons" value={report.reasons} />
     <EvidenceField label="Policy and graph lineage" value={evidence.policy} />
     <EvidenceField label="Input identities" value={{ ...evidence.context, row_count: evidence.row_count,
