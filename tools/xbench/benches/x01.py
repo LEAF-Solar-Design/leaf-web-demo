@@ -154,7 +154,8 @@ def grade_files(client, *, project, fixtures, out_dir=None):
                     raise parse_error(422, body)
                 context = client.drawing_context(pid, version, did)
                 version = context["context"]["head_version_id"]
-                rev = context.get("intake", {}).get("solar_design_graph", {}).get("rev", rev)
+                context = client.drawing_context(pid, version, did)
+                rev = context.get("intake", {}).get("solar_design_graph", {}).get("rev", rev + 1)
 
             seed = {"schema_version": 1,
                     "source_intake_sha256": context["context"]["intake_sha256"],
@@ -190,7 +191,7 @@ def grade_files(client, *, project, fixtures, out_dir=None):
                     note = xbench_session.redact(f"{code}: {message}")
                 row["product_error"] = {"status": exc.status, "code": code, "message": note}
             else:
-                note = f"fixture unavailable: {type(exc).__name__}"
+                note = f"fixture unavailable: {type(exc).__name__}: {xbench_session.redact(str(exc))[:300]}"
             for n in range(2, 6):
                 _mark(row, n, verdict, note)
             _mark(row, 1, "UNREADABLE", note)
