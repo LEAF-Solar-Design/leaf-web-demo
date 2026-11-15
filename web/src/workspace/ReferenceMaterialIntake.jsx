@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { readActiveScope, subscribeActiveScope } from '../auth/activeScope.js'
 import { subscribeBeforeLogout } from '../auth.js'
 import { listProjectReferences, readProjectReferenceOriginal, registerProjectArloInput, readProjectArloInput, reviseProjectArloInput, restoreProjectArloInput, uploadProjectReference } from '../projects/api.js'
@@ -29,6 +29,16 @@ function ReferenceSession({ projectId, orgId, scope, onRunArlo }) {
   const [editor, setEditor] = useState(null)
   const [constraintError, setConstraintError] = useState('')
   const constraintErrorId = useId()
+  const rejectedSaveFocus = useRef(null)
+  useLayoutEffect(() => {
+    if (arlo?.running) return
+    const pending = rejectedSaveFocus.current
+    rejectedSaveFocus.current = null
+    if (constraintError && pending && !pending.moved && pending.button.isConnected
+      && !pending.button.disabled && document.activeElement === document.body) {
+      pending.button.focus()
+    }
+  }, [constraintError, arlo?.running])
   const input = useRef(null)
   const live = useRef(false)
   const running = useRef(false)
@@ -199,6 +209,16 @@ function ReferenceSession({ projectId, orgId, scope, onRunArlo }) {
       setArlo({ materialId: row.material_id, running: false })
       return
     }
+    const button = document.activeElement
+    const focus = !restore && button?.matches('form[aria-label="ARLO constraints"] button[type="submit"]')
+      ? { button, moved: false } : null
+    rejectedSaveFocus.current = focus
+    const moved = event => {
+      if (focus && event.target !== button
+        && (event.type === 'pointerdown' || event.target !== document.body)) focus.moved = true
+    }
+    document.addEventListener('focusin', moved, { signal: abort.current.signal })
+    document.addEventListener('pointerdown', moved, { signal: abort.current.signal })
     arloRunning.current = true
     setConstraintError('')
     setArlo({ materialId: row.material_id, detail: restore ? 'Restoring original…' : 'Saving constraints…', running: true })
@@ -227,6 +247,8 @@ function ReferenceSession({ projectId, orgId, scope, onRunArlo }) {
       // messages such as budget.timeout_seconds instead of treating them as network timeouts.
       if (current() && cause?.name !== 'AbortError') setConstraintError(cause?.status === 422 ? cause.message : message(cause))
     } finally {
+      document.removeEventListener('focusin', moved)
+      document.removeEventListener('pointerdown', moved)
       arloRunning.current = false
       if (current()) setArlo(previous => ({ ...previous, running: false }))
     }
