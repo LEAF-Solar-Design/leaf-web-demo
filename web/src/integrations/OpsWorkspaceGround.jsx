@@ -719,7 +719,9 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
             <ul>{state.elements.map((record) => <li key={record.element.id}><button disabled={pending} onClick={() => chooseSaved(record)}>{record.element.title} · revision {record.revision}</button></li>)}</ul>
             {state.elementCursor && <button disabled={pending} onClick={() => loadMore('elements')}>Load more saved views</button>}
           </section>
-          <form onSubmit={compose} aria-label="Compose native view"><h2>Compose native view</h2>
+          <form onSubmit={compose} onKeyDown={event => {
+            if (event.key === 'Enter' && event.nativeEvent.isComposing) event.preventDefault()
+          }} aria-label="Compose native view"><h2>Compose native view</h2>
             {composeError && <p ref={composeFeedback} tabIndex={-1} role="alert">{composeError} Your draft is retained. Review it and save again.</p>}
             {savedReadback && <div ref={composeFeedback} tabIndex={-1} role="alert">
               <p>Your view was saved, but its data could not be loaded. {savedReadback.error}</p>
