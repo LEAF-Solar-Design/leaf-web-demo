@@ -103,7 +103,7 @@ def test_nested_insert_basepoints_rotations_scales_and_shared_frame():
     assert out[1].dxf.radius == pytest.approx(6)
 
 
-@pytest.mark.parametrize("kind", ["POINT", "ELLIPSE", "SPLINE", "POLYLINE", "HATCH", "SOLID"])
+@pytest.mark.parametrize("kind", ["SPLINE", "POLYLINE", "HATCH", "SOLID"])
 def test_selected_unsupported_geometry_raises(kind):
     doc = drawing()
     doc.modelspace().new_entity(kind, dxfattribs={"layer": "Private Modules"})
@@ -123,7 +123,7 @@ def test_malformed_allowlists(modules, roofs):
         anonymize(drawing(), modules=modules, roofs=roofs)
 
 
-@pytest.mark.parametrize("point", [(float("nan"), 0), (0, float("inf")), (0, 0, 1)])
+@pytest.mark.parametrize("point", [(float("nan"), 0), (0, float("inf")), (0, 0, float("nan"))])
 def test_invalid_coordinates(point):
     doc = drawing()
     doc.modelspace().add_line(point, (1, 1), dxfattribs={"layer": "Private Modules"})
@@ -149,7 +149,7 @@ def test_missing_top_level_layer_is_refused():
 
 
 @pytest.mark.parametrize("attribute,value", [
-    ("elevation", 2), ("extrusion", (0, 1, 0)),
+    ("elevation", float("inf")), ("extrusion", (0, 1, 0)),
     ("thickness", 1), ("const_width", float("inf")),
 ])
 def test_nonplanar_or_nonfinite_polyline_attributes(attribute, value):
@@ -267,7 +267,7 @@ def test_repeated_modules_keep_one_neutral_block_type():
 def test_absolute_block_coordinates_are_not_retained(monkeypatch):
     class FixedRandom:
         def __init__(self):
-            self.values = iter((math.pi/2, 12345, 67890))
+            self.values = iter((math.pi/2, 12345, 67890, 24680))
 
         def uniform(self, *args):
             return next(self.values)
@@ -288,3 +288,119 @@ def test_absolute_block_coordinates_are_not_retained(monkeypatch):
     assert tuple(reference.dxf.insert)[:2] == pytest.approx((-2_000_020+12345, 1_000_010+67890))
     world, = geometry(out)
     assert area(world.get_points("xy")) == pytest.approx(40)
+
+
+
+def test_relative_heights_and_sloping_line_are_preserved():
+    doc = drawing()
+    space = doc.modelspace()
+    for height in (120, 127):
+        space.add_lwpolyline([(0, 0), (2, 0), (2, 1)],
+                            dxfattribs={"layer": "Private Modules", "elevation": height})
+    space.add_line((0, 0, 120), (3, 4, 127), dxfattribs={"layer": "Private Roof"})
+    space.add_point((0, 0, 127), dxfattribs={"layer": "Private Roof"})
+    a, b, line, point = anonymize(doc).modelspace()
+    assert b.dxf.elevation-a.dxf.elevation == pytest.approx(7)
+    assert line.dxf.start.z == pytest.approx(a.dxf.elevation)
+    assert line.dxf.end.z == pytest.approx(b.dxf.elevation)
+    assert (line.dxf.end-line.dxf.start).magnitude == pytest.approx(math.sqrt(74))
+    assert point.dxf.location.z == pytest.approx(b.dxf.elevation)
+
+
+def test_negative_ocs_elevation_uses_world_height():
+    doc = drawing()
+    doc.modelspace().add_lwpolyline([(0, 0), (2, 0)], dxfattribs={
+        "layer": "Private Modules", "elevation": 8, "extrusion": (0, 0, -1)})
+    doc.modelspace().add_point((0, 0, -8), dxfattribs={"layer": "Private Roof"})
+    poly, point = anonymize(doc).modelspace()
+    assert poly.dxf.elevation == pytest.approx(point.dxf.location.z)
+    assert (next(poly.vertices_in_wcs())-point.dxf.location).magnitude == pytest.approx(0, abs=1e-8)
+
+
+def test_nested_insert_z_basepoint_scale_and_privacy(monkeypatch):
+    class FixedRandom:
+        def uniform(self, lower, upper):
+            return math.pi/3 if upper == math.tau else 34567
+    monkeypatch.setattr(anon.secrets, "SystemRandom", FixedRandom)
+    doc = drawing()
+    child = doc.blocks.new("Private elevated child", base_point=(1, 2, 100000))
+    child.add_line((1, 2, 100000), (4, 2, 100002))
+    parent = doc.blocks.new("Private elevated parent", base_point=(2, 0, 10))
+    parent.add_blockref("Private elevated child", (2, 0, 13),
+                        dxfattribs={"zscale": 3})
+    doc.modelspace().add_blockref("Private elevated parent", (5, 6, 20),
+                                 dxfattribs={"layer": "Private Modules", "zscale": 2,
+                                            "column_count": 2, "column_spacing": 17,
+                                            "extrusion": (0, 0, -1)})
+    source = geometry(doc)
+    result = anonymize(doc)
+    output = geometry(result)
+    assert len(output) == len(source) == 2
+    for before, after in zip(source, output):
+        assert (before.dxf.end-before.dxf.start).magnitude == pytest.approx(
+            (after.dxf.end-after.dxf.start).magnitude)
+    assert (output[0].dxf.start-output[1].dxf.start).magnitude == pytest.approx(17)
+    assert output[0].dxf.end.z-output[0].dxf.start.z == pytest.approx(
+        source[0].dxf.end.z-source[0].dxf.start.z)
+    ref, = result.modelspace()
+    line, = result.blocks.get(ref.dxf.name)
+    assert tuple(line.dxf.start) == pytest.approx((0, 0, 0))
+    stream = io.StringIO()
+    result.write(stream)
+    assert "Private" not in stream.getvalue()
+    assert ref.dxf.insert.z != pytest.approx(20)
+
+
+def test_ellipse_arc_shape_height_and_metadata_are_preserved():
+    doc = drawing()
+    ellipse = doc.modelspace().add_ellipse((2, 3, 100), (4, 1, 0), .4, .2, 4.1,
+                                          dxfattribs={"layer": "Private Roof"})
+    doc.appids.new("Private ellipse app")
+    ellipse.set_xdata("Private ellipse app", [(1000, "Private ellipse payload")])
+    doc.modelspace().add_point((2, 3, 107), dxfattribs={"layer": "Private Modules"})
+    result = anonymize(doc)
+    out, point = result.modelspace()
+    assert out.dxftype() == "ELLIPSE"
+    assert out.dxf.major_axis.magnitude == pytest.approx(ellipse.dxf.major_axis.magnitude)
+    assert out.dxf.ratio == pytest.approx(.4)
+    assert (out.dxf.end_param-out.dxf.start_param) % math.tau == pytest.approx(3.9)
+    assert point.dxf.location.z-out.dxf.center.z == pytest.approx(7)
+    assert not out.has_xdata("Private ellipse app")
+    assert (point.dxf.location-out.dxf.center).magnitude == pytest.approx(7)
+    stream = io.StringIO()
+    result.write(stream)
+    assert "Private" not in stream.getvalue()
+
+
+@pytest.mark.parametrize("attribute,value", [
+    ("ratio", float("nan")), ("major_axis", (1, 0, 1)),
+    ("center", (0, 0, float("inf"))), ("end_param", float("nan")),
+])
+def test_invalid_ellipse_geometry_is_refused(attribute, value):
+    doc = drawing()
+    ellipse = doc.modelspace().add_ellipse((0, 0), (2, 0), .5,
+                                          dxfattribs={"layer": "Private Roof"})
+    setattr(ellipse.dxf, attribute, value)
+    with pytest.raises(ValueError):
+        anonymize(doc)
+
+
+
+def test_elevated_reflected_block_preserves_ellipse_and_point_frame():
+    doc = drawing()
+    block = doc.blocks.new("Private curved roof", base_point=(1, 2, 50))
+    block.add_ellipse((3, 4, 53), (5, 0, 0), .3, .1, 4.2)
+    block.add_point((3, 4, 59))
+    doc.modelspace().add_blockref("Private curved roof", (20, 30, 80), dxfattribs={
+        "layer": "Private Roof", "rotation": 35, "xscale": -2, "yscale": 2,
+        "zscale": 3, "extrusion": (0, 0, -1)})
+    source_ellipse, source_point = geometry(doc)
+    ellipse, point = geometry(anonymize(doc))
+    assert ellipse.dxftype() == "ELLIPSE"
+    assert point.dxftype() == "POINT"
+    assert ellipse.dxf.major_axis.magnitude == pytest.approx(source_ellipse.dxf.major_axis.magnitude)
+    assert ellipse.dxf.ratio == pytest.approx(source_ellipse.dxf.ratio)
+    assert (ellipse.dxf.center-point.dxf.location).magnitude == pytest.approx(
+        (source_ellipse.dxf.center-source_point.dxf.location).magnitude)
+    assert point.dxf.location.z-ellipse.dxf.center.z == pytest.approx(
+        source_point.dxf.location.z-source_ellipse.dxf.center.z)
