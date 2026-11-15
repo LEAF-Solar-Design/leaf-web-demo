@@ -42,6 +42,7 @@ def _four_corners(entity):
 
 def run(intake, params):
     groups = {}
+    multiplicities = {}
     for entity_type, key in (("INSERT", "inserts"), ("LWPOLYLINE", "polylines")):
         for index, entity in enumerate(intake.get(key) or []):
             if not _model(entity) or (key == "polylines" and not _four_corners(entity)):
@@ -53,9 +54,15 @@ def run(intake, params):
                 "layer": layer, "block": block, "count": 0, "handles": [], "_keys": set()})
             handle = str(entity.get("handle") or "").strip().upper().removeprefix("0X")
             entity_key = ("handle", handle) if handle else ("row", key, index)
+            dimensions = (entity.get("rows", 1), entity.get("columns", 1)) if key == "inserts" else (1, 1)
+            if any(type(value) is not int or not 1 <= value <= 65535 for value in dimensions):
+                raise ValueError(f"INSERT {handle or index} has invalid array multiplicity; rows and columns must be positive UInt16 integers.")
+            if entity_key in multiplicities and multiplicities[entity_key] != dimensions:
+                raise ValueError(f"INSERT {handle or index} has conflicting array multiplicity; re-import the drawing.")
+            multiplicities[entity_key] = dimensions
             if entity_key not in group["_keys"]:
                 group["_keys"].add(entity_key)
-                group["count"] += 1
+                group["count"] += dimensions[0] * dimensions[1]
                 if handle:
                     group["handles"].append(handle)
     sets = []
@@ -76,6 +83,7 @@ def run(intake, params):
              "selection_required": not selected_sets,
              "selected_sets": [public_set(s) for s in selected_sets],
              "selected_set": public_set(selected) if selected else None,
-             "count": len(set().union(*(s["_keys"] for s in selected_sets))) if selected_sets else None},
+             "count": sum(multiplicities[key][0] * multiplicities[key][1]
+                          for key in set().union(*(s["_keys"] for s in selected_sets))) if selected_sets else None},
             {"highlight_handles": list(dict.fromkeys(h for s in selected_sets for h in s["handles"]))}
             if selected_sets else None)

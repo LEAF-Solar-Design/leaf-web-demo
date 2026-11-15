@@ -19,7 +19,8 @@ it('shows each dependency disposition, font fallback and coverage limit', () => 
 
 it('does not claim no dependencies when the report is absent', () => {
   const view = render(<DrawingDependencyReport />)
-  expect(view.container.textContent).toBe('')
+  expect(screen.getByText('Dependency report unavailable.')).toBeTruthy()
+  expect(screen.queryByText('No dependencies were present in the local intake records.')).toBeNull()
   view.rerender(<DrawingDependencyReport report={{ dependencies: [] }} />)
   expect(screen.getByText('No dependencies were present in the local intake records.')).toBeTruthy()
 })
@@ -77,4 +78,17 @@ it('keeps remapping targets inert instead of navigating or loading resources', (
     opened.mockRestore()
     fetched.mockRestore()
   }
+})
+
+it('reports unsupported dispositions and malformed rows as unknown without claiming coverage', () => {
+  render(<DrawingDependencyReport report={{ dependencies: [
+    { kind: 'xref', name: 'unknown.dwg', disposition: 'teleported' },
+    { kind: 'font', name: 'unknown.shx', disposition: { invalid: true } },
+    null,
+  ] }} />)
+  expect(screen.getAllByText('Unknown disposition')).toHaveLength(3)
+  expect(screen.getByText('Unknown kind')).toBeTruthy()
+  expect(screen.getByText('Unnamed dependency')).toBeTruthy()
+  expect(screen.getByText('Raw dependency coverage is not confirmed.')).toBeTruthy()
+  expect(screen.queryByText('No dependencies were present in the local intake records.')).toBeNull()
 })

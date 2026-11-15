@@ -1,5 +1,5 @@
 import React from 'react'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import ModuleSetPicker from './ModuleSetPicker.jsx'
 
@@ -159,4 +159,24 @@ it('explains unavailable selection and accepts an explicit choice after callback
   fireEvent.click(second())
   fireEvent.click(submit())
   expect(onSelect).toHaveBeenCalledExactlyOnceWith(['second'])
+})
+
+it('isolates two mounted drawings during interleaved checkbox changes and submissions', () => {
+  const onA = vi.fn(), onB = vi.fn()
+  render(<>
+    <div data-testid="picker-a"><ModuleSetPicker drawingKey="A" data={data} onSelect={onA} /></div>
+    <div data-testid="picker-b"><ModuleSetPicker drawingKey="B" data={data} onSelect={onB} /></div>
+  </>)
+  const a = within(screen.getByTestId('picker-a')), b = within(screen.getByTestId('picker-b'))
+  fireEvent.click(a.getAllByRole('checkbox')[0])
+  expect(b.getAllByRole('checkbox').every((box) => !box.checked)).toBe(true)
+  fireEvent.click(b.getAllByRole('checkbox')[1])
+  fireEvent.click(a.getByRole('button'))
+  expect(onA).toHaveBeenCalledExactlyOnceWith(['first'])
+  expect(onB).not.toHaveBeenCalled()
+  fireEvent.click(a.getAllByRole('checkbox')[0])
+  fireEvent.click(b.getByRole('button'))
+  expect(onB).toHaveBeenCalledExactlyOnceWith(['second'])
+  expect(a.getByRole('button').disabled).toBe(true)
+  expect(onA).toHaveBeenCalledTimes(1)
 })
