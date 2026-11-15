@@ -1855,6 +1855,7 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
             ("src/cadedit/cadEditSurface.test.jsx", 16),
             ("src/cad/engineBatchAtomic.test.js", 12),
             ("src/cad/engineBatchAtomic.test.js", 13),
+            ("src/cad/solarLifecycleReplay.test.jsx", 4),
         )
         assert suite.kind == "vitest" and suite.cwd == g.WEB
         assert suite.timeout_s == 900
@@ -3665,6 +3666,8 @@ def test_exact_vitest_file_and_skip_count_allowlist_passes(tmp_path):
     ("src/cad/engineBatchAtomic.test.js", 12, "PASS"),
     ("src/cad/engineBatchAtomic.test.js", 13, "PASS"),
     ("src/cad/engineBatchAtomic.test.js", 14, "FAIL"),
+    ("src/cad/solarLifecycleReplay.test.jsx", 4, "PASS"),
+    ("src/cad/solarLifecycleReplay.test.jsx", 5, "FAIL"),
     ("src/cad/unexpected.test.js", 13, "FAIL"),
 ))
 def test_known_native_vitest_skip_counts_are_exact(tmp_path, path, skipped, status):
@@ -3679,6 +3682,7 @@ def test_known_native_vitest_skip_counts_are_exact(tmp_path, path, skipped, stat
         allowed_vitest_skips=(
             ("src/cad/engineBatchAtomic.test.js", 12),
             ("src/cad/engineBatchAtomic.test.js", 13),
+            ("src/cad/solarLifecycleReplay.test.jsx", 4),
         ),
     )
 
