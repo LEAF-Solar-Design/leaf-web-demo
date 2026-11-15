@@ -12,7 +12,12 @@ function mount(saveTarget = null) {
     posted: [],
     addEventListener(type, callback) { if (type === 'message') listeners.add(callback) },
     removeEventListener(type, callback) { if (type === 'message') listeners.delete(callback) },
-    postMessage(message) { worker.posted.push(message) },
+    postMessage(message) {
+      const cloned = structuredClone(message)
+      // Node's clone creates host-realm arrays; normalize the receiving realm.
+      if (cloned.bytes) cloned.bytes = Uint8Array.from(cloned.bytes)
+      worker.posted.push(cloned)
+    },
     terminate() { listeners.clear() },
     emit(message) { act(() => listeners.forEach(callback => callback({ data: message }))) },
     lastPost() { return worker.posted.at(-1) },

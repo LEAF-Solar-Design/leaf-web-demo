@@ -1573,7 +1573,9 @@ export default function useEngineSession({
     historyRef.current.original = bytes
     snapshotCopiesRef.current.set(bytes, loadBytes)
     pendingLoadRef.current = { documentId: name, drawingUnit: drawingUnitFromBytes(loadBytes), origin: committedLoadRef.current ? 'head' : opts?.starter === true ? 'starter' : 'import' }
-    if (!boundary.post({ type: 'loadDocument', documentId: name, bytes: Uint8Array.from(loadBytes) })) {
+    // Native postMessage clones synchronously. Keep the boundary-facing identity;
+    // the private history copy above is independent of later caller mutation.
+    if (!boundary.post({ type: 'loadDocument', documentId: name, bytes })) {
       patch({
         busy: false,
         errorKind: SESSION_ERROR.TRANSPORT,
