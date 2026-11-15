@@ -218,12 +218,16 @@ it('PVC10 observes one job without resubmission', async () => {
   expect(pvcaseReason(refusal.code)).not.toContain('hostile-prose')
 })
 it('PVC11 retains uncertain job identity', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
   const args = { context: context(), source: source(), catalogRow: catalog('convert') }
   for (const mode of ['network', 'timeout', 'aborted']) {
     const controller = new AbortController()
     const fetchImpl = vi.fn().mockResolvedValueOnce(json({ job_id: 'job-1', status: 'submitted' }, 202))
       .mockImplementationOnce(() => { if (mode === 'network') return Promise.reject(new Error('offline')); if (mode === 'aborted') controller.abort(); return new Promise(() => {}) })
-    const result = await make(fetchImpl, { runOptions: { timeoutMs: 15 } }).convert({ ...args, signal: controller.signal })
+    const pending = make(fetchImpl, { runOptions: { timeoutMs: 15 } }).convert({ ...args, signal: controller.signal })
+    await vi.advanceTimersByTimeAsync(0)
+    if (mode === 'timeout') await vi.advanceTimersByTimeAsync(15)
+    const result = await pending
     expect(result.code).toBe(mode); expect(result.jobId).toBe('job-1')
   }
   const fetchImpl = vi.fn(async () => json({ job_id: 'job-1', status: 'complete', result: runEnvelope(receipt()) }))
@@ -278,8 +282,13 @@ it('PVC16 bounds committed graph reads', async () => {
   const options = (fetchImpl, extra = {}) => ({ drawingId: 'solar', version: 13, transport: intakeTransport(fetchImpl), timeoutMs: 10, ...extra })
   expect((await readCommittedIntake(options(() => new Promise(() => {})))).code).toBe('timeout')
   const cancel = vi.fn(); const releaseLock = vi.fn()
-  expect((await readCommittedIntake(options(async () => streamResponse(() => new Promise(() => {}), 200, null, cancel, releaseLock)))).code).toBe('timeout')
-  expect(cancel).toHaveBeenCalled(); expect(releaseLock).toHaveBeenCalled()
+  // Exercise the reader timer, not a deadline crossed before reader acquisition
+  // when this worker is descheduled. The real 10ms timer still ends the read.
+  const readerClock = vi.spyOn(globalThis.performance, 'now').mockReturnValue(0)
+  try {
+    expect((await readCommittedIntake(options(async () => streamResponse(() => new Promise(() => {}), 200, null, cancel, releaseLock)))).code).toBe('timeout')
+    expect(cancel).toHaveBeenCalled(); expect(releaseLock).toHaveBeenCalled()
+  } finally { readerClock.mockRestore() }
   const controller = new AbortController(); controller.abort()
   expect((await readCommittedIntake(options(vi.fn(), { signal: controller.signal }))).code).toBe('aborted')
   expect((await readCommittedIntake(options(async () => new Response(new Uint8Array([255])), { timeoutMs: 120000 }))).code).toBe('response')

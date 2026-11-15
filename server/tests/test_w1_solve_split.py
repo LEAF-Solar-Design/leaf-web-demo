@@ -27,6 +27,35 @@ from solar_design_graph import (
 from test_w1_design_graph import entity, graph  # noqa: F401
 
 
+def test_project_solve_preparation_is_derived_and_read_only(graph):
+    from solar_project_solve_preparation import prepare_solve
+    intake = {"solar_design_graph": graph, "solar_design_graph_sha256": solve.digest(graph)}
+    before = copy.deepcopy(intake)
+    frame = graph["frames"][0]
+    result = prepare_solve(intake, frame["id"], is_head=True)
+    assert result["available"] is True
+    assert result["frame_ref"] == frame["id"]
+    assert result["graph_revision"] == graph["rev"]
+    assert result["request"] == solve_request.build_stringer_request(
+        graph, frame["id"], max_string_length=graph["settings"]["panels_in_sequence"],
+        dwgname=graph["project"]["name"], full_frame=True)
+    assert result["frames"][0]["panel_count"] == len(frame["panel_refs"])
+    assert "grant_ref" not in result
+    assert intake == before
+
+
+def test_project_solve_preparation_refuses_stale_corrupt_and_missing_frame(graph):
+    from solar_project_solve_preparation import prepare_solve
+    intake = {"solar_design_graph": graph, "solar_design_graph_sha256": solve.digest(graph)}
+    assert prepare_solve(intake, None, is_head=False)["reason"] == "STALE_VERSION"
+    assert prepare_solve({}, None, is_head=True)["reason"] == "GRAPH_REQUIRED"
+    bad = dict(intake, solar_design_graph_sha256="0" * 64)
+    assert prepare_solve(bad, None, is_head=True)["reason"] == "GRAPH_DIGEST_MISMATCH"
+    assert prepare_solve(intake, "missing", is_head=True)["reason"] == "MISSING_FRAME"
+    choices = prepare_solve(intake, None, is_head=True)
+    assert choices["available"] and "request" not in choices
+
+
 FIXTURES = SERVER / "tests/fixtures"
 RECORD = json.loads((FIXTURES / "w1_rooftop_split_groups.json").read_text(encoding="utf-8"))
 GROUPS = RECORD["groups"]

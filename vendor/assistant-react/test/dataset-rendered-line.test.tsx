@@ -1,15 +1,9 @@
 import React from "react";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, expect, it } from "vitest";
 import { cleanup, render, waitFor } from "@testing-library/react";
 import { DatasetElement, resolveDisplayPreferences } from "../src/datasets";
 import type { DatasetElementV1, DatasetReadV1 } from "../../assistant-contract/src/integration";
 
-// Supply layout dimensions only. Actual Recharts renders the SVG marks and ticks.
-vi.mock("recharts", async (original) => {
-  const actual = await original<typeof import("recharts")>();
-  return { ...actual, ResponsiveContainer: ({ children }: { children: React.ReactElement }) =>
-    React.cloneElement(children, { width: 700, height: 300 } as object) };
-});
 afterEach(cleanup);
 
 it("renders isolated observations around nulls and unique calendar ticks", async () => {
@@ -31,16 +25,16 @@ it("renders isolated observations around nulls and unique calendar ticks", async
     freshness: { source_updated_at: null, synced_at: null, fetched_at: "2026-10-20T12:00:00Z" },
   };
   const { container } = render(<DatasetElement element={element} read={read} preferences={resolveDisplayPreferences()} />);
-  await waitFor(() => expect(container.querySelectorAll("circle.recharts-line-dot")).toHaveLength(2));
-  const marks = [...container.querySelectorAll("circle.recharts-line-dot")];
+  await waitFor(() => expect(container.querySelectorAll("circle.leaf-line-dot")).toHaveLength(2));
+  const marks = [...container.querySelectorAll("circle.leaf-line-dot")];
   const positions = marks.map(mark => [Number(mark.getAttribute("cx")), Number(mark.getAttribute("cy"))]);
   expect(positions.flat().every(Number.isFinite)).toBe(true);
   expect(positions[0][0]).toBeLessThan(positions[1][0]);
   expect(positions[0][1]).toBeGreaterThan(positions[1][1]);
-  const curve = container.querySelector(".recharts-line-curve")?.getAttribute("d") ?? "";
+  const curve = container.querySelector(".leaf-line-curve")?.getAttribute("d") ?? "";
   // A gap between two isolated observations must not produce a joining segment.
   expect(curve).not.toMatch(/[LC]/i);
-  const ticks = [...container.querySelectorAll(".recharts-cartesian-axis-tick-value")]
+  const ticks = [...container.querySelectorAll(".leaf-x-tick")]
     .map(tick => tick.textContent).filter(value => value?.includes("2026"));
   expect(ticks).toEqual(["Oct 20, 2026", "Oct 21, 2026", "Oct 22, 2026"]);
   expect(read.rows[1].values.amount).toBeNull();

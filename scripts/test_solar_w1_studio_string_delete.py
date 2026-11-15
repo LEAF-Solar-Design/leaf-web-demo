@@ -89,20 +89,49 @@ def read(folder):
 
 
 @pytest.fixture(scope="module")
-def deleted(tmp_path_factory):
+def recorded_solve():
+    """Reuse one real recorded solve, with isolated results for each delete run."""
+    real_produce = producer.solve.produce
+    file_fields = {"fixture", "intake", "placement", "sizing_response", "replay"}
+    cached_key = None
+    cached_result = None
+
+    def produce(args):
+        nonlocal cached_key, cached_result
+        # Only offline replay is reusable; changed inputs still run real validation.
+        if not args.replay or args.grant_ref or args.tenant or args.record_responses:
+            return real_produce(args)
+        key = (args.fixture.resolve(), tuple(
+            (name, getattr(args, name).read_bytes() if name in file_fields
+             else getattr(args, name)) for name in producer.SOLVE_FIELDS))
+        if cached_result is None:
+            cached_result = real_produce(args)
+            cached_key = key
+        elif key != cached_key:
+            return real_produce(args)
+        # Neither graph mutations nor metadata updates may reach the shared result.
+        return deepcopy(cached_result)
+
+    return produce
+
+
+@pytest.fixture(scope="module")
+def deleted(tmp_path_factory, recorded_solve):
     """Two of the plugin's own circuits deleted from the committed solved drawing."""
     folder = tmp_path_factory.mktemp("studio-string-delete")
     chosen = plugin_neutral_ids()[:2]
-    assert run_offline(arguments(folder, delete=chosen)) == 0
+    with patch.object(producer.solve, "produce", side_effect=recorded_solve):
+        assert run_offline(arguments(folder, delete=chosen)) == 0
     graph, metadata = read(folder)
     return graph, metadata, chosen, folder
 
 
 @pytest.fixture(scope="module")
-def emptied(tmp_path_factory):
+def emptied(tmp_path_factory, recorded_solve):
     """Every circuit selected at once, which the plugin's own selection allows."""
     folder = tmp_path_factory.mktemp("studio-string-delete-all")
-    assert run_offline(arguments(folder, delete=plugin_neutral_ids())) == 0
+    with patch.object(producer.solve, "produce", side_effect=recorded_solve):
+        assert run_offline(arguments(folder, delete=plugin_neutral_ids())) == 0
     return read(folder)
 
 
@@ -243,12 +272,13 @@ def test_a_malformed_string_id_is_refused_before_the_solve_runs(tmp_path, capsys
     assert not (tmp_path / "metadata.json").exists()
 
 
-def test_a_circuit_the_solved_drawing_does_not_hold_is_refused(tmp_path, capsys):
+def test_a_circuit_the_solved_drawing_does_not_hold_is_refused(tmp_path, capsys, recorded_solve):
     # A real panel handle that is NOT a circuit's first panel: the drawing knows the
     # handle, so only the string lookup can refuse it.
     absent = "string:" + plugin_strings()[0][1]
     assert absent not in plugin_neutral_ids()
-    assert run_offline(arguments(tmp_path, delete=(absent,))) == 2
+    with patch.object(producer.solve, "produce", side_effect=recorded_solve):
+        assert run_offline(arguments(tmp_path, delete=(absent,))) == 2
     assert "absent from the solved drawing" in capsys.readouterr().err
     assert not (tmp_path / "graph.json").exists()
     assert not (tmp_path / "metadata.json").exists()

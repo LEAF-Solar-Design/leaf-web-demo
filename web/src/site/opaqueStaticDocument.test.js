@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { it, expect } from 'vitest'
+import { JSDOM } from 'jsdom'
 import { buildOpaqueStaticDocument, PRIVATE_FRAME_SANDBOX } from './opaqueStaticDocument.js'
 const bytes = text => new TextEncoder().encode(text)
 const fixture = html => ({files:[{path:'/index.html',contentType:'text/html',bytes:bytes(html)}]})
@@ -7,3 +8,19 @@ it('requires an opaque sandbox and places denying CSP before scripts',()=>{const
 it('rewrites static chunk references to verified data URLs',()=>{const f=fixture('<script src="/_next/a.js"></script>');f.files.push({path:'/_next/a.js',contentType:'text/javascript',bytes:bytes('window.fixture=1')});const doc=buildOpaqueStaticDocument(f);expect(doc).toContain('src="data:text/javascript;base64,');expect(doc).not.toContain('src="/_next/a.js"')})
 it('refuses remote and missing scripts rather than fetch a fallback',()=>{for(const url of ['https://example.invalid/a.js','/missing.js'])expect(()=>buildOpaqueStaticDocument(fixture(`<script src="${url}"></script>`))).toThrow()})
 it('removes nested documents and author-provided base/refresh policies',()=>{const doc=buildOpaqueStaticDocument(fixture('<base href="https://remote.invalid"><meta http-equiv="refresh" content="0;url=https://remote.invalid"><iframe src="https://remote.invalid"></iframe>'));expect(doc).not.toContain('remote.invalid')})
+it('exposes only logical verified script paths while fetching data URLs',()=>{
+ const f=fixture('<script src="/_next/a.js"></script>');f.files.push({path:'/_next/a.js',contentType:'text/javascript',bytes:bytes('window.fixture=1')})
+ const dom=new JSDOM(buildOpaqueStaticDocument(f),{runScripts:'dangerously'})
+ try{
+  const node=dom.window.document.querySelector('script[src]')
+  expect(node.src).toBe('https://leaf-static.invalid/_next/a.js')
+  expect(node.getAttribute('src')).toMatch(/^data:text\/javascript;base64,/)
+  const dynamic=dom.window.document.createElement('script');dynamic.src='/_next/a.js'
+  expect(dynamic.src).toBe(node.src);expect(dynamic.getAttribute('src')).toBe(node.getAttribute('src'))
+  expect(()=>{dynamic.src='https://remote.invalid/a.js'}).toThrow('private_asset_missing')
+  expect(new dom.window.URL('srcdoc','about:srcdoc').href).toBe('https://leaf-static.invalid/')
+  expect(new dom.window.URL('/_next/a.js','about:srcdoc').href).toBe(node.src)
+  expect(new dom.window.URL('https://remote.invalid/path').href).toBe('https://remote.invalid/path')
+  expect(dom.window.location.href).toBe('about:blank')
+ }finally{dom.window.close()}
+})

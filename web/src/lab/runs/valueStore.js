@@ -128,6 +128,17 @@ export function createValueStore({ maxEvents = 10000, maxRuns = 20 } = {}) {
       Object.keys(run.blocks).forEach(block => notify(blockListeners.get(`${id}/${block}`)))
       publish(id)
     },
+    beginSnapshot(id) { ensure(id); recovering.add(id) },
+    createSnapshotStore: () => createValueStore({ maxEvents, maxRuns: 1 }),
+    commitSnapshot(id, snapshot) {
+      store.resetSnapshot(id, { state: snapshot.state, graph_revision: snapshot.graph_revision })
+      for (const event of snapshot.events) store.apply(id, event)
+      const run = ensure(id)
+      const blocks = new Set([...Object.keys(run.blocks), ...Object.keys(snapshot.blocks)])
+      runs.set(id, { ...run, blocks: snapshot.blocks, lastSeq: snapshot.lastSeq, dropped: run.dropped + snapshot.dropped })
+      blocks.forEach(block => notify(blockListeners.get(`${id}/${block}`)))
+      publish(id)
+    },
     finishSnapshot(id) {
       recovering.delete(id)
       clearTerminalControl(id)
@@ -135,7 +146,7 @@ export function createValueStore({ maxEvents = 10000, maxRuns = 20 } = {}) {
     },
     apply(id, event) {
       const run = ensure(id)
-      if (!Number.isInteger(event.seq) || event.seq <= run.lastSeq) return false
+      if (!Number.isSafeInteger(event.seq) || event.seq <= run.lastSeq) return false
       const block = event.block_id
       const blocks = block ? { ...run.blocks, [block]: { value: event.kind === 'value' ? event.payload : run.blocks[block]?.value,
         seq: event.seq, at: event.at, error: ['failed', 'suspended'].includes(event.kind) ? event.payload?.reason || event.kind : null } } : run.blocks

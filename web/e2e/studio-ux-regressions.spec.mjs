@@ -1,6 +1,9 @@
 import { expect, test } from '@playwright/test'
 import { scaled } from './timeScale.mjs'
 
+test.use({ video: 'off', trace: 'off' })
+test.describe.configure({ mode: 'parallel' })
+
 async function openTour(page, viewport) {
   await page.setViewportSize(viewport)
   await page.goto('/app?demo=tour')

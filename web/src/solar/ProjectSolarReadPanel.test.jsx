@@ -349,7 +349,7 @@ describe('project Solar read ownership', () => {
     expect(projectSolarWorkspaceReason('__proto__')).toBeNull()
     const source = readFileSync(`${process.cwd()}/src/solar/ProjectSolarReadPanel.jsx`, 'utf8')
     const imports = [...source.matchAll(new RegExp('from [\x27\x22]([^\x27\x22]+)', 'g'))].map((match) => match[1])
-    expect(imports).toEqual(['react', '../components/SchemaForm.jsx', './SolarReadResult.jsx', './solarDrawingBinding.js'])
+    expect(imports).toEqual(['react', '../components/SchemaForm.jsx', './SolarReadResult.jsx', './SolarEdgeTrackingReferences.jsx', './solarDrawingBinding.js'])
     for (const forbidden of ['prepareRun(', 'submitRun(', 'setScope(', 'dispose(', 'fetch(', 'App.jsx', 'Viewer']) expect(source).not.toContain(forbidden)
   })
 
