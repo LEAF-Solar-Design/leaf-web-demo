@@ -8,7 +8,7 @@ import { BrowserAssetGround } from './BrowserAssetGround.jsx'
 import { selectPrivateBuild,subscribePrivateBuildSelection } from './privateBuildSelection.js'
 const auth=vi.hoisted(()=>({account:'fixture-account',listeners:new Set()}))
 vi.mock('../auth/activeScope.js',()=>({readActiveScope:()=>auth.account,subscribeActiveScope:listener=>{auth.listeners.add(listener);return()=>auth.listeners.delete(listener)}}))
-vi.mock('../api.js',()=>({authHeaders:()=>({Authorization:'Bearer synthetic-parent-only'}),getStoredOrgId:()=> 'fixture-org',noteUnauthorized:r=>r,isSourceUuid:s=>typeof s==='string'&&/^[0-9a-f-]{36}$/.test(s),validateProjectSource:row=>row}))
+vi.mock('../api.js',()=>({authHeaders:()=>({ Authorization: 'test' }),getStoredOrgId:()=> 'fixture-org',noteUnauthorized:r=>r,isSourceUuid:s=>typeof s==='string'&&/^[0-9a-f-]{36}$/.test(s),validateProjectSource:row=>row}))
 vi.mock('../projects/api.js',()=>({getStoredActorBindingId:()=> 'fixture-actor'}))
 vi.mock('../auth.js',()=>({authConfigured:true,isSignedIn:()=>true,login:()=>{},subscribeBeforeLogout:()=>()=>{},subscribeTokenStored:()=>()=>{}}))
 vi.mock('../lib/composerDraft.js',()=>({composerDraftAccountScope:()=>auth.account}))
@@ -29,7 +29,7 @@ beforeEach(()=>{auth.account='fixture-account';localStorage.clear();Object.defin
 afterEach(()=>{cleanup();vi.restoreAllMocks();vi.unstubAllGlobals()})
 it('saves identity before POST and fences double click, then status uses GET only',async()=>{
  const c=controller();let finish
- const fetch=vi.fn((path,opts)=>{const stored=JSON.parse(localStorage.getItem(Object.keys(localStorage).find(k=>k.startsWith('leaf.browser-private-build.'))));expect(stored.jobId).toBe(job(path));expect(opts.headers.Authorization).toBe('Bearer synthetic-parent-only');return opts.method==='POST'?new Promise(resolve=>{finish=()=>resolve(response(observation(c,path)))}):Promise.resolve(response(observation(c,path)))})
+ const fetch=vi.fn((path,opts)=>{const stored=JSON.parse(localStorage.getItem(Object.keys(localStorage).find(k=>k.startsWith('leaf.browser-private-build.'))));expect(stored.jobId).toBe(job(path));expect(opts.headers.Authorization).toBe('test');return opts.method==='POST'?new Promise(resolve=>{finish=()=>resolve(response(observation(c,path)))}):Promise.resolve(response(observation(c,path)))})
  vi.stubGlobal('fetch',fetch);render(<BrowserPrivateBuildControls controller={c}/>);
  const button=await screen.findByRole('button',{name:'Build private app'});await waitFor(()=>expect(button.disabled).toBe(false))
  act(()=>{button.click();button.click()});await waitFor(()=>expect(fetch).toHaveBeenCalledTimes(1));await act(async()=>finish())
