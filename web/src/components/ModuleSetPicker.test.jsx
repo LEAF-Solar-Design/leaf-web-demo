@@ -12,6 +12,27 @@ const first = () => screen.getByRole('checkbox', { name: 'Design / Panel A: 12 c
 const second = () => screen.getByRole('checkbox', { name: 'Alternate / Panel B: 9 candidates' })
 const submit = () => screen.getByRole('button', { name: 'Count selected set' })
 
+it('hides late completed drawing A counts after switching to drawing B', () => {
+  const onSelect = vi.fn()
+  const completedA = { ...data, selected_sets: [data.sets[0]], count: 12 }
+  const view = render(<ModuleSetPicker drawingKey="A" data={completedA} onSelect={onSelect} />)
+  expect(screen.getByText(/^Counted 12/)).toBeTruthy()
+  fireEvent.click(first())
+  view.rerender(<ModuleSetPicker drawingKey="B" data={data} onSelect={onSelect} />)
+  expect(first().checked).toBe(false)
+  // ResultPanel passes the old origin; App withholds the callback for that origin.
+  view.rerender(<ModuleSetPicker drawingKey="A" data={completedA} />)
+  expect(screen.queryByText(/^Counted /)).toBeNull()
+  expect(screen.queryAllByRole('checkbox')).toHaveLength(0)
+  expect(screen.queryByText(/12 candidates/)).toBeNull()
+  expect(screen.queryByText('No module candidates were found.')).toBeNull()
+  expect(submit().disabled).toBe(true)
+  expect(screen.getByText('Run the module tool on the current drawing to choose a set.')).toBeTruthy()
+  view.rerender(<ModuleSetPicker drawingKey="B" data={data} onSelect={onSelect} />)
+  expect(first().checked).toBe(false)
+  expect(onSelect).not.toHaveBeenCalled()
+})
+
 it.each([null, {}, 'bad', [null], [{ layer: {} }]].map((value) => [value]))('refuses malformed counted summary rows %#', (selected_sets) => {
   render(<ModuleSetPicker data={{ ...data, selected_sets, count: 2 }} onSelect={vi.fn()} />)
   expect(screen.getByText(/Count summary unavailable.*Run the module tool again/)).toBeTruthy()

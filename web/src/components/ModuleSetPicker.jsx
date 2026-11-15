@@ -2,7 +2,10 @@ import { useState } from 'react'
 
 export default function ModuleSetPicker({ data, drawingKey, onSelect, running = false }) {
   const [selection, setSelection] = useState({ drawingKey, choices: [] })
-  const rows = Array.isArray(data?.sets) ? data.sets : []
+  const hasSummary = data?.selected_sets !== undefined && (!Array.isArray(data.selected_sets) || data.selected_sets.length > 0)
+  // App only supplies this callback when the result origin is the current drawing.
+  const staleResult = hasSummary && !onSelect
+  const rows = Array.isArray(data?.sets) && !staleResult ? data.sets : []
   const ids = rows.map((row) => row?.set_id)
   const unavailable = !Array.isArray(data?.sets) || ids.some((id) => typeof id !== 'string' || !id.trim())
     || new Set(ids).size !== ids.length
@@ -13,7 +16,6 @@ export default function ModuleSetPicker({ data, drawingKey, onSelect, running = 
     setSelection({ drawingKey, choices })
   }
   const selected = sets.filter((set) => choices.includes(set.set_id))
-  const hasSummary = data?.selected_sets !== undefined && (!Array.isArray(data.selected_sets) || data.selected_sets.length > 0)
   const validCount = (count) => Number.isSafeInteger(count) && count >= 0
   const validSummary = Array.isArray(data?.selected_sets) && data.selected_sets.length > 0
     && validCount(data.count) && data.selected_sets.every((set) => set !== null && typeof set === 'object'
@@ -37,9 +39,9 @@ export default function ModuleSetPicker({ data, drawingKey, onSelect, running = 
       Count selected set
     </button>
     {unavailable ? <p>Module sets unavailable. Run the module tool again to refresh valid, unique set IDs.</p>
-      : !sets.length && <p>No module candidates were found.</p>}
+      : !staleResult && !sets.length && <p>No module candidates were found.</p>}
     {!onSelect && <p>Run the module tool on the current drawing to choose a set.</p>}
-    {hasSummary && (validSummary ? <p>Counted {data.count} modules on {data.selected_sets.map((set) =>
+    {hasSummary && !staleResult && (validSummary ? <p>Counted {data.count} modules on {data.selected_sets.map((set) =>
       `${set.layer}${set.block ? ` / ${set.block}` : ''}`).join(', ')}.</p>
       : <p>Count summary unavailable. Run the module tool again to refresh the result.</p>)}
   </fieldset>
