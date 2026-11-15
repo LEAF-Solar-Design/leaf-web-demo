@@ -5387,6 +5387,12 @@ def test_web_source_readers_are_registered_read_only_pool_suites():
         if suite.cwd == g.WEB and suite.id not in g._WEB_SOURCE_READERS:
             if suite.id.startswith("web-vitest-"):
                 assert g.conflict_resources(suite) == frozenset({"web-vitest"}), suite.id
+            elif g.isolated_browser_suite(suite):
+                assert g.browser_suite_env(suite) == {"LEAF_GATE_BROWSER_SUITE": suite.id}
+                resources = g.conflict_resources(suite)
+                assert len(resources) == 1, suite.id
+                assert resources <= {"browser-memory-0", "browser-memory-1"}, suite.id
+                assert "web-tree" not in resources, suite.id
             else:
                 assert "web-tree" in g.conflict_resources(suite), suite.id
 
@@ -5401,8 +5407,16 @@ def test_web_writers_browser_proofs_and_nested_runners_keep_web_tree(sid):
     g = _load_runner()
     suite = next(suite for suite in g.build_suites() if suite.id == sid)
     assert sid not in g._WEB_SOURCE_READERS
-    assert "web-tree" in g.conflict_resources(suite)
-    assert g.serial_suite_reason(suite)
+    if g.isolated_browser_suite(suite):
+        assert g.browser_suite_env(suite) == {"LEAF_GATE_BROWSER_SUITE": sid}
+        resources = g.conflict_resources(suite)
+        assert len(resources) == 1
+        assert resources <= {"browser-memory-0", "browser-memory-1"}
+        assert "web-tree" not in resources
+    else:
+        assert "web-tree" in g.conflict_resources(suite)
+        assert g.serial_suite_reason(suite)
+        assert {"browser-memory-0", "browser-memory-1"} <= g.lane_resources(suite)
 
 
 @pytest.mark.parametrize("prelude_slots", [(), (2, 9)])
@@ -6715,7 +6729,11 @@ def test_early_feedback_healthy_catalog_parity_and_dependency_barrier(tmp_path, 
     monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
     argv = ["/trusted/base/ci.sh", "--heavy-prerequisites"]
     def prerequisites(command, **kwargs):
-        assert command == argv and kwargs == {"cwd": g.REPO, "check": False}
+        assert command == argv
+        assert set(kwargs) == {"cwd", "check", "env"}
+        assert kwargs["cwd"] == g.REPO
+        assert kwargs["check"] is False
+        assert kwargs["env"].get("LEAF_CI_WEB_FAMILY_REQUIRED") == "1"
         seen.append("heavy-prerequisites")
         return SimpleNamespace(returncode=0)
     monkeypatch.setattr(g.subprocess, "run", prerequisites)

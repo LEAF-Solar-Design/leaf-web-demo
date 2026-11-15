@@ -27,6 +27,7 @@ def runner(monkeypatch):
     monkeypatch.delenv("LEAF_PRIORITY_SUITES", raising=False)
     monkeypatch.delenv("LEAF_PROCESS_CAPTURE_CONTEXT", raising=False)
     monkeypatch.delenv("LEAF_PROCESS_CAPTURE_OUT", raising=False)
+    monkeypatch.delenv("TRUSTED_SHA", raising=False)
     return module
 
 
