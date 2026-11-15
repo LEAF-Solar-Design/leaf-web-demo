@@ -188,3 +188,70 @@ def test_sdk_fixture_is_a_real_synthetic_red_jpeg():
         assert image.size == (16, 12)
         red, green, blue = image.getpixel((0, 0))
         assert red > 240 and green < 15 and blue < 15
+
+
+@pytest.mark.parametrize('stderr,reason', [
+    (b'bwrap: Creating new namespace failed: Operation not permitted\nPRIVATE-input', 'sandbox_denied'),
+    (b'bwrap: execvp /private/program: No such file or directory', 'exec_unavailable'),
+    (b'prlimit: failed to set a limit: Operation not permitted', 'resource_limit_denied'),
+    (b'ffprobe: PRIVATE-media-data', 'process_failed'),
+    (b'PRIVATE-media-data: bwrap: Operation not permitted', 'process_failed'),
+])
+def test_nonzero_child_retains_only_safe_diagnostic_after_reaping(monkeypatch, tmp_path, stderr, reason):
+    (tmp_path / 'output').mkdir()
+    state = {'reaped': False}
+    child = SimpleNamespace(pid=123456, returncode=1, poll=lambda: 1)
+    def popen(argv, **kwargs):
+        state['argv'] = argv
+        state['stderr'] = kwargs['stderr']
+        kwargs['stderr'].write(stderr)
+        kwargs['stderr'].flush()
+        return child
+    def finish(proc):
+        assert proc is child
+        state['reaped'] = True
+    monkeypatch.setattr(video.subprocess, 'Popen', popen)
+    monkeypatch.setattr(video, '_finish', finish)
+    diagnose = video._process_diagnostic
+    def after_reap(*args):
+        assert state['reaped'] is True
+        return diagnose(*args)
+    monkeypatch.setattr(video, '_process_diagnostic', after_reap)
+    with pytest.raises(video.VideoError, match='^video_incomplete$') as caught:
+        video._run(tmp_path, '/usr/bin/ffprobe', ['/input.mov'], 'probe', time.monotonic() + 10, lambda: None)
+    assert state['reaped'] is True
+    assert caught.value.decoder_diagnostic == dict(operation='probe', returncode=1, reason=reason)
+    assert 'PRIVATE' not in str(caught.value.__dict__)
+    assert '--unshare-all' in state['argv'] and '--as=536870912' in state['argv']
+    assert state['stderr'].closed
+
+
+def test_diagnostic_read_is_bounded_and_happens_after_reap():
+    class Stderr:
+        def seek(self, offset):
+            assert offset == 0
+        def read(self, size):
+            assert size == 8192
+            return b'bwrap: Permission denied PRIVATE'
+    assert video._process_diagnostic('untrusted-name', True, Stderr()) == dict(
+        operation='unknown', returncode=None, reason='sandbox_denied')
+
+
+def test_diagnostic_io_error_does_not_replace_original_failure():
+    class Stderr:
+        def seek(self, offset):
+            raise OSError('PRIVATE path')
+    assert video._process_diagnostic('decode', -9, Stderr()) == dict(
+        operation='decode', returncode=-9, reason='unknown')
+
+
+def test_reap_failure_has_precedence_over_process_diagnostic(monkeypatch, tmp_path):
+    (tmp_path / 'output').mkdir()
+    child = SimpleNamespace(pid=123456, returncode=1, poll=lambda: 1)
+    monkeypatch.setattr(video.subprocess, 'Popen', lambda *args, **kwargs: child)
+    def failed_reap(proc):
+        raise RuntimeError('PRIVATE reap detail')
+    monkeypatch.setattr(video, '_finish', failed_reap)
+    with pytest.raises(video.VideoError, match='^video_cleanup_failed$') as caught:
+        video._run(tmp_path, '/usr/bin/ffprobe', [], 'probe', time.monotonic() + 10, lambda: None)
+    assert caught.value.decoder_diagnostic is None
