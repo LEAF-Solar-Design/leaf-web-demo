@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { createCodeBuildStaticNextExecutor } from "../src/projectBuild/codebuildStaticNextExecutor.js";
+import { createCodeBuildStaticNextExecutor, createStaticNextBundleResolver } from "../src/projectBuild/codebuildStaticNextExecutor.js";
 import type { CodeBuildStaticNextExecutorOptions, StaticNextBuildState } from "../src/projectBuild/codebuildStaticNextExecutor.js";
 import { NEXT_PLAN, NextBuildError, nextRequestDigest } from "../src/projectBuild/genericNextBuild.js";
 import type { NextBuildScope } from "../src/projectBuild/genericNextBuild.js";
@@ -8,6 +8,45 @@ import { ExecutorManagedNextRuntime } from "../src/projectBuild/managedNextRunti
 import type { StaticNextJobInput } from "../src/projectBuild/managedNextRuntime.js";
 
 const id = (n: number) => `00000000-0000-0000-0000-${String(n).padStart(12, "0")}`;
+
+describe("durable static Next bundle resolver", () => {
+  it("returns the persisted hash using only get", async () => {
+    const f = fixture();
+    f.objects.set(`map/${id(1)}.json`, Buffer.from(JSON.stringify({ executionId: id(1), bundleSha256: "a".repeat(64) })));
+    await expect(createStaticNextBundleResolver(f.store)(id(1))).resolves.toBe("a".repeat(64));
+    expect(f.store.get).toHaveBeenCalledExactlyOnceWith(`map/${id(1)}.json`);
+    expect(f.store.putIfAbsent).not.toHaveBeenCalled();
+    expect(f.provider.start).not.toHaveBeenCalled();
+  });
+
+  it.each(["absent", "legacy", "malformed", "wrong id", "bad hash", "uppercase hash", "null", "array"])(
+    "returns null for %s", async variant => {
+      const f = fixture();
+      let record: unknown = { executionId: id(1), bundleSha256: "a".repeat(64) };
+      if (variant === "legacy") record = { executionId: id(1), buildId: "legacy" };
+      if (variant === "wrong id") record = { executionId: id(2), bundleSha256: "a".repeat(64) };
+      if (variant === "bad hash") record = { executionId: id(1), bundleSha256: "a".repeat(63) };
+      if (variant === "uppercase hash") record = { executionId: id(1), bundleSha256: "A".repeat(64) };
+      if (variant === "null") record = null;
+      if (variant === "array") record = [];
+      if (variant !== "absent") f.objects.set(`map/${id(1)}.json`, Buffer.from(
+        variant === "malformed" ? "not json" : JSON.stringify(record)));
+      await expect(createStaticNextBundleResolver(f.store)(id(1))).resolves.toBeNull();
+      expect(f.store.get).toHaveBeenCalledExactlyOnceWith(`map/${id(1)}.json`);
+      expect(f.store.putIfAbsent).not.toHaveBeenCalled();
+      expect(f.provider.start).not.toHaveBeenCalled();
+      expect(f.provider.state).not.toHaveBeenCalled();
+      expect(f.provider.stop).not.toHaveBeenCalled();
+    });
+
+  it.each(["invalid", "a".repeat(64), "../map", ""])("rejects non-UUID %s before reading", async executionId => {
+    const f = fixture();
+    await expect(createStaticNextBundleResolver(f.store)(executionId)).resolves.toBeNull();
+    expect(f.store.get).not.toHaveBeenCalled();
+    expect(f.store.putIfAbsent).not.toHaveBeenCalled();
+  });
+});
+
 const hash = (value: Buffer | string) => createHash("sha256").update(value).digest("hex");
 const scope: NextBuildScope = { tenantId: id(1), organizationId: id(2), projectId: id(3),
   repoKey: id(4), jobId: id(5), sourceCommit: "a".repeat(40), sourceTree: "b".repeat(40) };
@@ -70,7 +109,8 @@ describe("CodeBuild static Next executor over injected ports", () => {
     })));
     expect(f.provider.start).toHaveBeenCalledExactlyOnceWith(value.executionId);
     expect(JSON.parse(f.objects.get(`map/${value.executionId}.json`)!.toString())).toEqual({
-      executionId: value.executionId, buildId: "build-new",
+      executionId: value.executionId, buildId: "build-new", bundleSha256: value.bundleSha256,
+      admittedAt: "1970-01-01T00:00:00.000Z",
     });
     expect(result).toEqual({ protocol: value.protocol, executionId: value.executionId,
       bindingId: value.bindingId, toolchainSha256: value.toolchainSha256,
@@ -91,6 +131,52 @@ describe("CodeBuild static Next executor over injected ports", () => {
     await expect(second.run({ ...value, bundle: changed, bundleSha256: hash(changed) }))
       .rejects.toMatchObject({ code: "job_conflict" });
     expect(f.provider.start).toHaveBeenCalledTimes(1);
+  });
+
+  it("persists the injected admission time and preserves the map on reuse", async () => {
+    const f = fixture();
+    const value = input();
+    const admittedAt = "2026-11-15T13:45:12.345Z";
+    const executor = createCodeBuildStaticNextExecutor({ ...f.options, now: () => Date.parse(admittedAt) });
+    f.receipt(value);
+    await executor.run(value);
+    const key = `map/${value.executionId}.json`;
+    const bytes = Buffer.from(f.objects.get(key)!);
+    expect(JSON.parse(bytes.toString())).toEqual({ executionId: value.executionId,
+      buildId: "build-new", bundleSha256: value.bundleSha256, admittedAt });
+    await createCodeBuildStaticNextExecutor({ ...f.options,
+      now: () => Date.parse(admittedAt) + 1000 }).run(value);
+    expect(f.objects.get(key)).toEqual(bytes);
+    expect(f.store.putIfAbsent.mock.calls.filter(([mapKey]) => mapKey === key)).toHaveLength(1);
+    expect(f.provider.start).toHaveBeenCalledTimes(1);
+  });
+
+  it("reuses a legacy mapping for run and stop", async () => {
+    const f = fixture();
+    f.mapping();
+    f.receipt();
+    await expect(f.executor.run(input())).resolves.toMatchObject({ exitCode: 0 });
+    await expect(f.executor.stop(input())).resolves.toMatchObject({ confirmed: true });
+    expect(f.provider.start).not.toHaveBeenCalled();
+    expect(f.provider.state.mock.calls).toEqual([["build-existing"], ["build-existing"]]);
+  });
+
+  it.each([false, true])("rejects a conflicting bundle hash in a mapping (race=%s)", async race => {
+    const f = fixture();
+    const key = `map/${input().executionId}.json`;
+    const conflicting = Buffer.from(JSON.stringify({ executionId: input().executionId,
+      buildId: "foreign-build", bundleSha256: "f".repeat(64) }));
+    if (race) {
+      const put = f.store.putIfAbsent.getMockImplementation()!;
+      f.store.putIfAbsent.mockImplementation(async (key, bytes) => {
+        if (key.startsWith("map/")) { f.objects.set(key, conflicting); return "exists"; }
+        return put(key, bytes);
+      });
+    } else f.objects.set(key, conflicting);
+    await expect(f.executor.run(input())).rejects.toMatchObject({ code: "job_conflict" });
+    expect(f.provider.state).not.toHaveBeenCalled();
+    if (race) expect(f.provider.stop).toHaveBeenCalledExactlyOnceWith("build-new");
+    else expect(f.provider.start).not.toHaveBeenCalled();
   });
 
   it.each(["executionId", "bundleSha256", "oversize", "empty", "plan", "binding", "scope", "protocol", "toolchain"])(
