@@ -144,9 +144,13 @@ def evaluate_prompt(row, *, transport, client, project, drawing, source_sha,
         _, staged = call("POST", "/api/author", json_body={
             "description": row["prompt"], "mode": "build", "target_tool_name": target},
             headers={"Idempotency-Key": target}, timeout_s=remaining())
+        change_id = staged.get("change_set_id") if staged.get("contract") == "leaf.customization-stage-job.v1" else None
         while staged.get("contract") == "leaf.customization-stage-job.v1":
-            poll = staged.get("poll_url") or "/api/author/stages/" + staged["change_set_id"]
-            if not poll.startswith("/api/author/stages/"):
+            if (not isinstance(change_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", change_id)
+                    or staged.get("change_set_id") != change_id):
+                raise PromptFailure("invalid stage change-set identity")
+            poll = staged.get("poll_url") or "/api/author/stages/" + change_id
+            if poll != "/api/author/stages/" + change_id:
                 raise PromptFailure("invalid stage polling address")
             sleep(min(2, remaining()))
             _, staged = call("GET", poll)
@@ -155,6 +159,8 @@ def evaluate_prompt(row, *, transport, client, project, drawing, source_sha,
                 raise PromptFailure("author stage failed")
         record["model_id"] = find_model(staged)
         receipt = staged.get("receipt", {})
+        if change_id is not None and receipt.get("change_set_id") != change_id:
+            raise PromptFailure("staged receipt belongs to another change set")
         tool = staged.get("tool")
         preview = str(staged.get("preview", "")).lower()
         if (not isinstance(tool, dict) or not tool.get("name")
@@ -170,11 +176,21 @@ def evaluate_prompt(row, *, transport, client, project, drawing, source_sha,
         if publication.get("status") != "published":
             record["error_code"] = publication.get("status")
             raise PromptFailure("normal publication rail did not publish")
-        record["failing_stage"] = "execution"
         _, catalog = call("GET", "/api/tools")
         catalog_row = next((item for item in catalog.get("tools", []) if item.get("name") == tool["name"]), None)
         if not catalog_row or not catalog_row.get("catalog_digest"):
             raise PromptFailure("published tool missing from effective catalog")
+        # Compare identities that the actual producer reports. Per-tool catalog_digest
+        # is a different object from the receipt's whole-catalog digest.
+        conflict = any(key in tool and key in catalog_row and tool[key] != catalog_row[key]
+                       for key in ("version", "source_commit", "source_sha256", "entry", "entrypoint", "code"))
+        conflict |= any(key in catalog_row and catalog_row[key] != receipt.get(receipt_key)
+                        for key, receipt_key in (("catalog_commit", "staged_commit"),
+                                                 ("effective_catalog_digest", "catalog_digest")))
+        if conflict:
+            record["error_code"] = "CATALOG_PROVENANCE_MISMATCH"
+            raise PromptFailure("catalog tool conflicts with staged source")
+        record["failing_stage"] = "execution"
         status, result = call("POST", "/api/run", headers={"X-Org-Id": project["org_id"],
             "X-Project-Id": project["project_id"], "Idempotency-Key": target + "-run"},
             json_body={"tool": tool["name"], "catalog_digest": catalog_row["catalog_digest"],
@@ -244,6 +260,19 @@ def validate_baseline(baseline, prompt_sha256):
 
 
 def grade_records(records, *, baseline, prompt_sha256, source_sha, out_dir):
+    seen = set()
+    for record in records:
+        validate_prompt_id(record.get("id"))
+        if record["id"] in seen:
+            raise ValueError("duplicate prompt record ID")
+        seen.add(record["id"])
+        score, stage = record.get("score"), record.get("failing_stage")
+        if type(score) is not int or score not in (0, 1):
+            raise ValueError("prompt score must be binary")
+        if ((score == 1 and (stage is not None or record.get("unreadable")))
+                or (score == 0 and stage not in {"author", "publication", "execution",
+                    "comparison", "model_provenance", "source_drift"})):
+            raise ValueError("prompt score contradicts its failing stage")
     if baseline is not None:
         validate_baseline(baseline, prompt_sha256)
     complete = (len(records) == 50 and len({r["id"] for r in records}) == 50

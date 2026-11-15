@@ -1,5 +1,6 @@
 import importlib.util
 import copy
+import csv
 from contextlib import contextmanager
 import hashlib
 import json
@@ -97,12 +98,29 @@ def test_changed_prompt_bytes_fail_before_session_or_author_request(tmp_path, mo
     assert not (tmp_path / "out").exists()
 
 
-@pytest.mark.parametrize("fail_upload", [False, True])
-def test_mocked_run_lifecycle_dispatches_sequentially_and_cleans_up(tmp_path, monkeypatch, fail_upload):
+@pytest.mark.parametrize("case", ["complete", "upload-failure", "drift", "existing-baseline", "baseline-race"])
+def test_mocked_run_lifecycle_dispatches_sequentially_and_cleans_up(tmp_path, monkeypatch, case):
     manifest = prompt_manifest(tmp_path)
+    fail_upload = case == "upload-failure"
     out = tmp_path / "out"
     events, dispatches, snapshots = [], [], []
     uploads = 0
+    real_evaluate = bench.evaluate_prompt
+    baseline_path = Path(manifest["baseline_path"])
+    baseline_bytes = None
+    if case == "existing-baseline":
+        baseline_bytes = (json.dumps({"schema": "leaf.xbench.x03-scores.v1", "complete": True,
+            "source_sha": SHA, "prompt_sha256": manifest["fixtures"][0]["sha256"],
+            "overall": 0.6, "trades": {trade: 0.6 for trade in bench.TRADES}}) + "\n ").encode()
+        baseline_path.write_bytes(baseline_bytes)
+    if case == "baseline-race":
+        original_write = bench.write_json_atomic
+        def race_write(path, value):
+            result = original_write(path, value)
+            if Path(path).name == "summary.json":
+                baseline_path.write_bytes(b"competing baseline must survive")
+            return result
+        monkeypatch.setattr(bench, "write_json_atomic", race_write)
 
     def forbidden(*args, **kwargs):
         raise AssertionError("offline lifecycle reached browser or network")
@@ -157,6 +175,23 @@ def test_mocked_run_lifecycle_dispatches_sequentially_and_cleans_up(tmp_path, mo
         assert kwargs["source_sha"] == SHA
         snapshots.append(copy.deepcopy(previous))
         dispatches.append(row["id"])
+        if case == "drift":
+            health_reads = 0
+            def transport(method, path, **kw):
+                nonlocal health_reads
+                if path == "/api/health":
+                    health_reads += 1
+                    return 200, {"source_sha": SHA if health_reads == 1 else "e" * 40}
+                if path == "/api/author":
+                    return 200, staged_tool()
+                if path == "/api/author/publication-requests":
+                    return 200, {"status": "published"}
+                if path == "/api/tools":
+                    return 200, {"tools": [{"name": "generated", "catalog_digest": "f" * 64}]}
+                if path == "/api/run":
+                    return 200, {"result": row["oracle"]}
+                raise AssertionError(path)
+            return real_evaluate(row, **{**kwargs, "transport": transport})
         return {**records()[0], "id": row["id"], "trade": row["trade"], "drawing": row["drawing"]}
 
     monkeypatch.setitem(sys.modules, "xbench_studio", SimpleNamespace(
@@ -173,6 +208,21 @@ def test_mocked_run_lifecycle_dispatches_sequentially_and_cleans_up(tmp_path, mo
         assert not dispatches
         assert not (out / "records.json").exists()
         assert not Path(manifest["baseline_path"]).exists()
+    elif case == "baseline-race":
+        with pytest.raises(FileExistsError):
+            bench.run(ctx)
+        assert len(dispatches) == 50
+        assert baseline_path.read_bytes() == b"competing baseline must survive"
+    elif case == "drift":
+        steps = bench.run(ctx)
+        assert dispatches == ["X03-01"]
+        assert all(step.verdict == "UNREADABLE" for step in steps)
+        evidence = json.loads((out / "X03-01.json").read_text())
+        assert evidence["record"]["score"] == 0
+        assert evidence["record"]["failing_stage"] == "source_drift"
+        assert json.loads((out / "X03-01-output.json").read_text()) == {"value": 3}
+        assert len(json.loads((out / "records.json").read_text())) == 1
+        assert not baseline_path.exists()
     else:
         steps = bench.run(ctx)
         assert all(step.verdict == "PASS" for step in steps)
@@ -180,8 +230,42 @@ def test_mocked_run_lifecycle_dispatches_sequentially_and_cleans_up(tmp_path, mo
         assert [len(snapshot) for snapshot in snapshots] == list(range(50))
         assert len(json.loads((out / "records.json").read_text())) == 50
         assert json.loads(Path(manifest["baseline_path"]).read_text())["complete"] is True
+        if baseline_bytes is not None:
+            assert baseline_path.read_bytes() == baseline_bytes
     assert events == ["session-open", "create-solar", "create-structural", "create-mechanical",
                       "delete-mechanical", "delete-structural", "delete-solar", "session-close"]
+
+
+def test_csv_and_summary_rates_agree_for_mixed_models_and_order(tmp_path):
+    source = records()
+    for i, row in enumerate(source):
+        row["model_id"] = "model-a" if i < 20 else "model-b" if i < 40 else None
+        if i % 4 == 0 or row["model_id"] is None:
+            row.update(score=0, failing_stage="comparison" if row["model_id"] else "model_provenance")
+    reports = []
+    for name, rows in (("forward", source), ("reverse", list(reversed(source)))):
+        out = tmp_path / name
+        out.mkdir()
+        _, report = bench.grade_records(rows, baseline=None, prompt_sha256="d" * 64,
+                                        source_sha=SHA, out_dir=out)
+        summary = json.loads((out / "summary.json").read_text())
+        assert summary == report
+        with (out / "scores.csv").open(newline="") as stream:
+            csv_rows = list(csv.DictReader(stream))
+        def rate(group):
+            return sum(int(row["score"]) for row in group) / len(group) if group else None
+        assert summary["overall"] == rate(csv_rows)
+        for trade in bench.TRADES:
+            assert summary["trades"][trade] == rate([r for r in csv_rows if r["trade"] == trade])
+        for model, values in summary["models"].items():
+            group = [r for r in csv_rows if (r["model_id"] or "unreported") == model]
+            assert values["overall"] == rate(group)
+            for trade in bench.TRADES:
+                assert values["trades"][trade] == rate([r for r in group if r["trade"] == trade])
+        assert summary["models"]["model-a"]["trades"]["mechanical"] is None
+        assert summary["models"]["unreported"]["overall"] == 0
+        reports.append(summary)
+    assert reports[0] == reports[1]
 
 
 @pytest.mark.parametrize("phase", ["author", "execution"])
@@ -266,11 +350,27 @@ def test_cancelled_execution_stops_immediately_with_execution_evidence(tmp_path,
 
 
 def records():
-    return [{"id": str(i), "trade": trade, "drawing": "synthetic", "source_sha": SHA,
+    return [{"id": f"X03-{i+1:02d}", "trade": trade, "drawing": "synthetic", "source_sha": SHA,
              "author_submitted": True, "model_id": "synthetic-model", "score": 1,
              "failing_stage": None, "tool_name": "synthetic-tool", "version": "1",
              "tool_source_hash": "b" * 40, "output_hash": "c" * 64}
             for i, trade in enumerate(["solar"] * 30 + ["structural"] * 10 + ["mechanical"] * 10)]
+
+
+@pytest.mark.parametrize("change", [
+    {"id": "X03-51"}, {"id": "../bad"}, {"id": "X03-02"},
+    {"score": 2}, {"score": -1}, {"score": 0.5}, {"score": True},
+    {"score": 1, "failing_stage": "author"},
+    {"score": 0, "failing_stage": None}, {"score": 0, "failing_stage": ""},
+    {"score": 1, "unreadable": True},
+])
+def test_invalid_records_cannot_emit_acceptance_evidence(tmp_path, change):
+    rows = records()
+    rows[0].update(change)
+    with pytest.raises(ValueError):
+        bench.grade_records(rows, baseline=None, prompt_sha256="d" * 64,
+                            source_sha=SHA, out_dir=tmp_path)
+    assert not list(tmp_path.iterdir())
 
 
 def test_comparison_rejects_extra_keys_boolean_nan_and_obeys_absolute_tolerance():
@@ -349,14 +449,15 @@ def test_malformed_baseline_is_rejected_before_comparison_or_receipt(tmp_path, m
     assert not list(tmp_path.iterdir())
 
 
-def run_prompt(tmp_path, *, fallback=False, model=True, publication="published", value=3, drift=False):
+def run_prompt(tmp_path, *, fallback=False, model=True, publication="published", value=3, drift=False,
+               catalog_change=None):
     calls = []
     def transport(method, path, **kw):
         calls.append((method, path, kw))
         if path == "/api/health":
             return 200, {"source_sha": "e" * 40 if drift else SHA}
         if path == "/api/author":
-            body = {"tool": {"name": "generated"}, "receipt": {"state": "staged",
+            body = {"tool": {"name": "generated", "version": "1", "source_sha256": "c" * 64}, "receipt": {"state": "staged",
                     "staged_commit": "b" * 40, "change_set_id": "synthetic-change"}}
             if fallback:
                 body["preview"] = "templated fallback"
@@ -366,7 +467,8 @@ def run_prompt(tmp_path, *, fallback=False, model=True, publication="published",
         if path == "/api/author/publication-requests":
             return 200, {"status": publication}
         if path == "/api/tools":
-            return 200, {"tools": [{"name": "generated", "catalog_digest": "f" * 64}]}
+            return 200, {"tools": [{"name": "generated", "catalog_digest": "f" * 64,
+                                    "version": "1", "source_sha256": "c" * 64, **(catalog_change or {})}]}
         if path == "/api/run":
             return 200, {"result": {"value": value}}
         raise AssertionError(path)
@@ -400,3 +502,32 @@ def test_success_uses_normal_author_publication_and_bound_run(tmp_path):
     assert [path for method, path, _ in calls if method == "POST"] == [
         "/api/author", "/api/author/publication-requests", "/api/run"]
     assert next(kw for _, path, kw in calls if path == "/api/run")["json_body"]["dwg"] == "v"
+
+
+@pytest.mark.parametrize("conflict", [{"version": "2"}, {"source_sha256": "e" * 64},
+    {"catalog_commit": "e" * 40}, {"effective_catalog_digest": "e" * 64}])
+def test_catalog_conflict_never_executes_or_scores(tmp_path, conflict):
+    result, calls = run_prompt(tmp_path, catalog_change=conflict)
+    assert result["score"] == 0
+    assert result["error_code"] == "CATALOG_PROVENANCE_MISMATCH"
+    assert not any(path == "/api/run" for _, path, _ in calls)
+
+
+@pytest.mark.parametrize("poll", ["/api/author/stages/../other", r"/api/author/stages/\change",
+    "/api/author/stages/change?x=1", "/api/author/stages/change#fragment",
+    "/api/author/stages/foreign", "/api/author/stages/%63hange", "https://foreign.invalid/change"])
+def test_poll_address_is_bound_to_accepted_change_set(tmp_path, poll):
+    calls = []
+    def transport(method, path, **kwargs):
+        calls.append(path)
+        if path == "/api/health":
+            return 200, {"source_sha": SHA}
+        if path == "/api/author":
+            return 202, {"contract": "leaf.customization-stage-job.v1",
+                         "change_set_id": "change", "poll_url": poll}
+        raise AssertionError("invalid poll request escaped validation")
+    result = bench.evaluate_prompt(synthetic_prompt(), transport=transport, client=None,
+        project={}, drawing={}, source_sha=SHA, evidence_dir=tmp_path, run_id="poll")
+    assert calls == ["/api/health", "/api/author"]
+    assert result["score"] == 0 and result["failing_stage"] == "author"
+    assert result["failure"] == "invalid stage polling address"
