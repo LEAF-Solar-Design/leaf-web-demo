@@ -111,6 +111,31 @@ def test_retention_mutation_requires_same_origin(context):
     assert not context["calls"]
 
 
+@pytest.mark.parametrize("query", ["", "?limit=1", "?limit=25&after=YQ", "?after=YWJj"])
+def test_retention_history_finite_read(context, query):
+    context["respond"] = lambda _: httpx.Response(200, json={"items": [], "nextCursor": None})
+    response = context["request"]("GET", RETENTION + "executions" + query)
+    assert response.status_code == 200
+    [sent] = context["calls"]
+    assert str(sent.url) == UPSTREAM + RETENTION + "executions" + query
+    assert sent.headers["authorization"] == "Bearer " + TOKEN
+
+
+@pytest.mark.parametrize("query", ["?limit=26", "?limit=0", "?limit=25&limit=1", "?view=current",
+    "?after=A", "?after=AB", "?after=AAB", "?after=YQ=", "?after=" + "A" * 1025,
+    "?destination=https://foreign.invalid"])
+def test_retention_history_rejects_query_outside_handshake(context, query):
+    error(context, context["request"]("GET", RETENTION + "executions" + query), 400)
+    assert not context["calls"]
+
+
+def test_retention_history_is_read_only_and_bodyless(context):
+    headers = context["headers"]() + [("Content-Type", "application/json"), ("Origin", LOCAL)]
+    error(context, context["request"]("POST", RETENTION + "executions", headers=headers, content=b"{}"), 405)
+    error(context, context["request"]("GET", RETENTION + "executions", content=b"{}"), 413)
+    assert not context["calls"]
+
+
 def protected(context, monkeypatch, binding=PROTECTION_FIXTURE):
     monkeypatch.setattr(bridge, "load_integration_config", lambda: SimpleNamespace(api_origin=PROTECTED_ORIGIN))
     monkeypatch.setattr(bridge, "_read_protection_binding", lambda: binding)
