@@ -57,6 +57,24 @@
       "provenance": { "source": "autofill-solver/solver.py", "entry": "solve_targets" }
     },
     {
+      "name": "count-modules",
+      "version": "1.0.0",
+      "description": "Lists candidate module sets by layer and block. Select a listed set to count its modules.",
+      "kind": "script",
+      "engine_op": "count_modules",
+      "entry": "builtins/count_modules.py",
+      "params": {
+        "type": "object",
+        "properties": {
+          "set_id": {"type": "string", "description": "Set identity from this drawing's module-set listing. Omit to list sets."}
+        },
+        "required": []
+      },
+      "returns": {"type": "object"},
+      "capabilities": ["drawing.read"],
+      "provenance": {"author": "user", "created": "2026-11-15T00:00:00Z"}
+    },
+    {
       "name": "count-by-layer",
       "version": "1.0.0",
       "description": "Counts every model-space entity per layer.",
