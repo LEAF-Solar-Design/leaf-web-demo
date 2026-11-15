@@ -25,6 +25,7 @@ const open = async () => {
   return view
 }
 beforeEach(() => {
+  vi.stubGlobal('navigator', { locks: { request: async (_name, callback) => callback() } })
   localStorage.clear()
   vi.clearAllMocks()
   loadProjectPage.mockResolvedValue({ revision: 16, digest: 'a'.repeat(64), document })
@@ -51,5 +52,5 @@ it('does not submit when the recovery key cannot be durably saved', async () => 
   vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('quota') })
   fireEvent.click(screen.getByRole('button', { name: 'Build iOS preview' }))
   expect(submitProjectNativePreview).not.toHaveBeenCalled()
-  expect(screen.getByText('The preview submission identity could not be restored or saved. No build was submitted.')).toBeTruthy()
+  expect(await screen.findByText('The preview submission identity could not be restored or saved. No build was submitted.')).toBeTruthy()
 })

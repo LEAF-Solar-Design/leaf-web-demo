@@ -9,40 +9,51 @@ const store = () => {
 }
 afterEach(() => vi.unstubAllGlobals())
 
-it('recovers the same key after a new caller loses its in-memory session', () => {
+it('recovers the same key after a new caller loses its in-memory session', async () => {
   vi.stubGlobal('crypto', webcrypto)
+  vi.stubGlobal('navigator', { locks: { request: async (_name, callback) => callback() } })
   const storage = store()
-  const original = nativePreviewSubmissionKey(storage, identity)
-  expect(nativePreviewSubmissionKey(storage, [...identity])).toBe(original)
+  const original = await nativePreviewSubmissionKey(storage, identity)
+  expect(await nativePreviewSubmissionKey(storage, [...identity])).toBe(original)
   expect(storage.rows.size).toBe(1)
   expect([...storage.rows.values()].map(JSON.parse)).toEqual([{ version: 1, key: original }])
 })
 
-it('separates every account, organization, actor, project, revision and document', () => {
+it('separates every account, organization, actor, project, revision and document', async () => {
   vi.stubGlobal('crypto', webcrypto)
-  const storage = store(), keys = [nativePreviewSubmissionKey(storage, identity)]
-  identity.forEach((value, index) => {
+  vi.stubGlobal('navigator', { locks: { request: async (_name, callback) => callback() } })
+  const storage = store(), keys = [await nativePreviewSubmissionKey(storage, identity)]
+  for (const [index, value] of identity.entries()) {
     const changed = [...identity]
     changed[index] = index === 4 ? 17 : index === 5 ? 'b'.repeat(64) : `${value}-other`
-    keys.push(nativePreviewSubmissionKey(storage, changed))
-  })
+    keys.push(await nativePreviewSubmissionKey(storage, changed))
+  }
   expect(new Set(keys).size).toBe(7)
 })
 
-it('rotates only when the caller explicitly requests a terminal-job retry', () => {
+it('rotates only when the caller explicitly requests a terminal-job retry', async () => {
   vi.stubGlobal('crypto', webcrypto)
-  const storage = store(), original = nativePreviewSubmissionKey(storage, identity)
-  const retry = nativePreviewSubmissionKey(storage, identity, true)
+  vi.stubGlobal('navigator', { locks: { request: async (_name, callback) => callback() } })
+  const storage = store(), original = await nativePreviewSubmissionKey(storage, identity)
+  const retry = await nativePreviewSubmissionKey(storage, identity, original)
   expect(retry).not.toBe(original)
-  expect(nativePreviewSubmissionKey(storage, identity)).toBe(retry)
+  expect(await nativePreviewSubmissionKey(storage, identity)).toBe(retry)
+  expect(await nativePreviewSubmissionKey(storage, identity, original)).toBe(retry)
 })
 
-it('refuses missing storage, failed persistence and corrupt saved keys', () => {
+it('refuses missing storage, failed persistence and corrupt saved keys', async () => {
   vi.stubGlobal('crypto', webcrypto)
-  expect(() => nativePreviewSubmissionKey(null, identity)).toThrow()
-  expect(() => nativePreviewSubmissionKey({ getItem: () => null, setItem: () => {} }, identity)).toThrow()
+  vi.stubGlobal('navigator', { locks: { request: async (_name, callback) => callback() } })
+  await expect(nativePreviewSubmissionKey(null, identity)).rejects.toThrow()
+  await expect(nativePreviewSubmissionKey({ getItem: () => null, setItem: () => {} }, identity)).rejects.toThrow()
   for (const value of ['bad json', '{}', JSON.stringify({ version: 1, key: 'foreign' }), 'x'.repeat(129)]) {
-    expect(() => nativePreviewSubmissionKey({ getItem: () => value }, identity)).toThrow()
+    await expect(nativePreviewSubmissionKey({ getItem: () => value }, identity)).rejects.toThrow()
   }
-  expect(() => nativePreviewSubmissionKey(store(), [...identity.slice(0, 5), 'bad digest'])).toThrow()
+  await expect(nativePreviewSubmissionKey(store(), [...identity.slice(0, 5), 'bad digest'])).rejects.toThrow()
+})
+
+it('refuses submission identity creation without browser lock support', async () => {
+  vi.stubGlobal('crypto', webcrypto)
+  vi.stubGlobal('navigator', {})
+  await expect(nativePreviewSubmissionKey(store(), identity)).rejects.toThrow('locking is unavailable')
 })
