@@ -179,6 +179,24 @@ describe('project Solar transport and lifecycle', () => {
     expect(JSON.parse(init(fetchImpl).body)).toEqual({ source_artifact_id: 'a'.repeat(64), alignment_tolerance: 0.5, selection_order: 'recorded' })
   })
 
+  it.each(['atomic-v1', 'whole-matrix-v1'])('preserves SolarEdge matching policy %s in report transport', async (matchingPolicy) => {
+    const { client, fetchImpl } = setup(edgeData(true))
+    expect((await client.reportSolarEdgePdf({ sourceArtifactId: 'a'.repeat(64), alignmentTolerance: 0.5,
+      matchingPolicy, associations: { east: 0 } })).ok).toBe(true)
+    expect(JSON.parse(init(fetchImpl).body)).toEqual({ source_artifact_id: 'a'.repeat(64),
+      alignment_tolerance: 0.5, selection_order: 'unknown', matching_policy: matchingPolicy,
+      associations: { east: 0 } })
+  })
+
+  it('refuses malformed SolarEdge matching policies before transport', async () => {
+    const { client, fetchImpl } = setup()
+    for (const matchingPolicy of [null, false, 1, '', 'unsupported', [], {}]) {
+      expect((await client.reportSolarEdgePdf({ sourceArtifactId: 'a'.repeat(64), alignmentTolerance: 0.5,
+        matchingPolicy })).reason).toBe('SIP_R7_REQUEST_INVALID')
+    }
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
   it('binds explicit SolarEdge choices to the existing report request and permits reset', async () => {
     const data = edgeData(true), { client, fetchImpl } = setup(data)
     const options = { sourceArtifactId: 'a'.repeat(64), alignmentTolerance: 0.5 }

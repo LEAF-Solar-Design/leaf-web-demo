@@ -519,11 +519,12 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
     }),
     reportSolarEdgePdf: (options = {}) => guarded((scope) => {
       assert(plain(options))
-      const { sourceArtifactId, alignmentTolerance, selectionOrder = 'unknown', associations, signal } = options
+      const { sourceArtifactId, alignmentTolerance, selectionOrder = 'unknown', associations, matchingPolicy, signal } = options
       assert(edgeHash(sourceArtifactId) &&
         typeof alignmentTolerance === 'number' && Number.isFinite(alignmentTolerance) &&
         alignmentTolerance >= 0.000001 && alignmentTolerance <= 1000000 &&
         ['unknown', 'recorded'].includes(selectionOrder))
+      assert(matchingPolicy === undefined || ['atomic-v1', 'whole-matrix-v1'].includes(matchingPolicy))
       if (associations !== undefined) {
         assert(plain(associations) && Object.keys(associations).length <= 10_000 &&
           Object.entries(associations).every(([ref, grid]) => ref.length > 0 && ref.length <= 100 &&
@@ -532,6 +533,7 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
       }
       const body = JSON.stringify({ source_artifact_id: sourceArtifactId,
           alignment_tolerance: alignmentTolerance, selection_order: selectionOrder,
+          ...(matchingPolicy === undefined ? {} : { matching_policy: matchingPolicy }),
           ...(associations === undefined ? {} : { associations }) })
       assert(new TextEncoder().encode(body).byteLength <= 4096)
       const b = scope.binding

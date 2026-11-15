@@ -419,8 +419,44 @@ def _group_bridge_panels(sequences, bridge_seqs, bridge_panels):
     return result
 
 
+def _whole_matrix_grids(matrices, grids, drawing_shapes):
+    """Prefer a complete original only when no other group can claim its parts."""
+    groups_by_shape = {}
+    for index, signature in enumerate(drawing_shapes):
+        groups_by_shape.setdefault(signature, []).append(index)
+    atomic_by_original = {}
+    for grid in grids:
+        atomic_by_original.setdefault(grid["original_index"], []).append(shape_signature(grid["json"]))
+    replacements = {}
+    for index, source in enumerate(matrices):
+        if len(source.get("SubGrids") or []) <= 1:
+            continue
+        signature = shape_signature(source)
+        candidates = groups_by_shape.get(signature, ())
+        if len(candidates) != 1:
+            continue
+        atomics = atomic_by_original[index]
+        if signature in atomics:
+            continue  # The existing candidate already covers this shape.
+        owner = candidates[0]
+        competing = False
+        for atomic in atomics:
+            claimants = groups_by_shape.get(atomic, ())
+            if claimants and (len(claimants) != 1 or claimants[0] != owner):
+                competing = True
+                break
+        if not competing:
+            replacements[index] = {"json": copy.deepcopy(source), "original_index": index,
+                                   "sub_grid_id": -1}
+    if not replacements:
+        return grids, set()
+    return ([grid for grid in grids if grid["original_index"] not in replacements]
+            + [replacements[index] for index in sorted(replacements)]), set(replacements)
+
+
 def run_import(matrices, groups, panels, *, row_angle=0.0, alignment_tolerance,
-               selection_order="unknown", review=False, associations=None):
+               selection_order="unknown", review=False, associations=None,
+               allow_whole_matrices=False):
     """S3 and S4 end to end.
 
     ``groups``: the drawing's panel groups in the plugin's selection order, each
@@ -435,6 +471,8 @@ def run_import(matrices, groups, panels, *, row_angle=0.0, alignment_tolerance,
     those choices restores automatic review without modifying any input.
     The default remains the strict plugin-parity path.
     """
+    if type(allow_whole_matrices) is not bool or (allow_whole_matrices and not review):
+        raise SolarEdgeImportError("invalid-matching-policy", "whole matrices require explicit review")
     if selection_order not in SELECTION_ORDERS:
         raise SolarEdgeImportError("invalid-selection-order", repr(selection_order))
     if not isinstance(groups, (list, tuple)) or not groups or len(groups) > MAX_GROUPS:
@@ -488,6 +526,13 @@ def run_import(matrices, groups, panels, *, row_angle=0.0, alignment_tolerance,
         signature = shape_signature(drawing)
         drawings.append((drawing, signature))
         shape_counts[signature] = shape_counts.get(signature, 0) + 1
+    whole_originals = set()
+    if allow_whole_matrices:
+        grids, whole_originals = _whole_matrix_grids(
+            matrices, grids, [signature for _, signature in drawings])
+        by_shape = {}
+        for index, grid in enumerate(grids):
+            by_shape.setdefault(shape_signature(grid["json"]), []).append(index)
     if choices:
         signatures = {}
         for group, (_, signature) in zip(groups, drawings):
@@ -537,6 +582,9 @@ def run_import(matrices, groups, panels, *, row_angle=0.0, alignment_tolerance,
     for data in bridge_data:
         original = data["original"]
         found = by_original.get(data["original_index"])
+        if (data["original_index"] in whole_originals and found
+                and any(match["sub_grid_id"] == -1 for match in found)):
+            continue  # These original sequences were emitted by the complete match.
         if not found:
             if unresolved:
                 continue

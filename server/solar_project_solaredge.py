@@ -224,13 +224,18 @@ def import_source(tenant, project_id, drawing_id, input_version_id, data):
 def _report_request(request):
     required = {"source_artifact_id", "alignment_tolerance", "selection_order"}
     if (type(request) is not dict or not required <= set(request)
-            or not set(request) <= required | {"associations"}):
+            or not set(request) <= required | {"associations", "matching_policy"}):
         _fail("REPORT_REQUEST_INVALID")
     try:
         normalized = reports.validate_request({key: request[key] for key in required})
     except reports.SolarEdgeReportError as exc:
         _fail(exc.code)
     normalized.pop("project_id")
+    if "matching_policy" in request:
+        matching = request["matching_policy"]
+        if type(matching) is not str or matching not in reports.MATCHING_POLICIES:
+            _fail("REPORT_REQUEST_INVALID")
+        normalized["matching_policy"] = matching
     if "associations" in request:
         choices = request["associations"]
         if (type(choices) is not dict or len(choices) > tracking.MAX_FRAMES
@@ -241,6 +246,15 @@ def _report_request(request):
         if choices:
             normalized["associations"] = {key: choices[key] for key in sorted(choices)}
     return normalized
+
+
+def _build_report_request(request):
+    req = _report_request(request)
+    # Old stored requests never acquire a new policy on load. A fresh request
+    # uses the new policy, while old clients' explicit choices keep old indexes.
+    req.setdefault("matching_policy", reports.ATOMIC_POLICY if req.get("associations")
+                   else reports.WHOLE_MATRIX_POLICY)
+    return req
 
 
 def _request_sha(req, source_meta):
@@ -254,7 +268,7 @@ def build_report(tenant, project_id, drawing_id, input_version_id, request):
         return denial
     if write_loop.drawing_mutations_refusal() is not None:
         _fail("REPORT_WRITES_DRAINED")
-    req = _report_request(request)
+    req = _build_report_request(request)
     source_meta, content = _read(context, req["source_artifact_id"], sources.SOURCE_TOOL,
         sources.SOURCE_MEDIA_TYPE, sources.SOURCE_FILENAME)
     if source_meta["request_sha256"] != source_meta["content_sha256"]:
@@ -278,7 +292,8 @@ def build_report(tenant, project_id, drawing_id, input_version_id, request):
         try:
             core = reports.report_from_matrices(context.graph, matrices,
                 alignment_tolerance=req["alignment_tolerance"], selection_order=req["selection_order"],
-                associations=req.get("associations"))
+                associations=req.get("associations"),
+                matching_policy=req.get("matching_policy", reports.ATOMIC_POLICY))
         except reports.SolarEdgeReportError as error:
             _fail(error.code)
         report = {"schema": REPORT_SCHEMA, **_identity(context),
