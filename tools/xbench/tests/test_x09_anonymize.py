@@ -6,6 +6,7 @@ import math
 import pytest
 
 ezdxf = pytest.importorskip("ezdxf")
+from ezdxf.disassemble import recursive_decompose
 
 from benches import x09_anonymize as anon
 
@@ -21,6 +22,10 @@ def drawing():
 def anonymize(doc, **kwargs):
     return anon.anonymize_document(doc, kwargs.get("modules", ["Private Modules"]),
                                   kwargs.get("roofs", ["Private Roof"]))
+
+
+def geometry(doc):
+    return list(recursive_decompose(doc.modelspace()))
 
 
 def distance(a, b):
@@ -87,7 +92,9 @@ def test_nested_insert_basepoints_rotations_scales_and_shared_frame():
         "layer": "Private Modules", "rotation": 90, "xscale": 3, "yscale": 3})
     # Flattened source line: (10,26) -> (-2,26), circle centered (10,26).
     doc.modelspace().add_line((10, 26), (-2, 26), dxfattribs={"layer": "Private Roof"})
-    out = list(anonymize(doc).modelspace())
+    result = anonymize(doc)
+    assert [e.dxftype() for e in result.modelspace()] == ["INSERT", "LINE"]
+    out = geometry(result)
     assert [e.dxftype() for e in out] == ["LINE", "CIRCLE", "LINE"]
     assert distance(out[0].dxf.start, out[0].dxf.end) == pytest.approx(12)
     assert distance(out[0].dxf.start, out[2].dxf.start) == pytest.approx(0, abs=1e-8)
@@ -162,7 +169,11 @@ def test_insert_array_spacing_and_negative_ocs():
         "layer": "Private Modules", "rotation": 90, "xscale": 2,
         "yscale": 2, "column_count": 2, "column_spacing": 7,
         "extrusion": (0, 0, -1)})
-    a, b = anonymize(doc).modelspace()
+    result = anonymize(doc)
+    reference, = result.modelspace()
+    assert reference.dxftype() == "INSERT"
+    assert reference.dxf.column_count == 2
+    a, b = geometry(result)
     assert distance(a.dxf.start, a.dxf.end) == pytest.approx(2)
     assert distance(a.dxf.start, b.dxf.start) == pytest.approx(7)
 
@@ -184,8 +195,10 @@ def test_mirrored_bulge_and_arc_sweep():
     block.add_arc((0, 0), 2, 10, 100)
     doc.modelspace().add_blockref("Private mirror", (0, 0), dxfattribs={
         "layer": "Private Modules", "xscale": -2, "yscale": 2})
-    poly, arc = anonymize(doc).modelspace()
-    assert poly.get_points("xyb")[0][2] == pytest.approx(-.5)
+    poly, arc = geometry(anonymize(doc))
+    # A decomposed mirrored INSERT can express reflection through negative OCS
+    # extrusion instead of a reversed stored bulge. Check world orientation.
+    assert poly.get_points("xyb")[0][2] * poly.dxf.extrusion.z == pytest.approx(-.5)
     assert distance(*poly.get_points("xy")) == pytest.approx(4)
     assert arc.dxf.radius == pytest.approx(4)
     assert (arc.dxf.end_angle-arc.dxf.start_angle) % 360 == pytest.approx(90)
@@ -197,7 +210,7 @@ def test_nonuniform_curves_refused_and_straight_lines_preserved():
     block.add_line((0, 0), (1, 1))
     doc.modelspace().add_blockref("Private scaled", (0, 0), dxfattribs={
         "layer": "Private Modules", "xscale": 2, "yscale": 3})
-    line, = anonymize(doc).modelspace()
+    line, = geometry(anonymize(doc))
     assert distance(line.dxf.start, line.dxf.end) == pytest.approx(math.sqrt(13))
     block.add_circle((0, 0), 1)
     with pytest.raises(ValueError, match="uniform"):
@@ -226,3 +239,52 @@ def test_cli_refuses_paths_without_reading_real_data(monkeypatch):
         anon.main(["--input", "synthetic.dxf", "--output", "other.dxf",
                    "--module-layer", "Private Modules", "--roof-layer", "Private Roof"])
     assert exc.value.code == 2
+
+
+def test_repeated_modules_keep_one_neutral_block_type():
+    doc = drawing()
+    block = doc.blocks.new("Private module")
+    for inset in (0, .1, .2):
+        block.add_lwpolyline([(inset, inset), (2-inset, inset),
+                             (2-inset, 1-inset), (inset, 1-inset)], close=True)
+    for index in range(3):
+        doc.modelspace().add_blockref("Private module", (index*10, 0),
+                                     dxfattribs={"layer": "Private Modules"})
+    out = anonymize(doc)
+    references = list(out.modelspace())
+    assert len(references) == 3
+    assert all(e.dxftype() == "INSERT" for e in references)
+    names = {e.dxf.name for e in references}
+    assert names == {"B000001"}
+    assert len(out.blocks.get("B000001")) == 3
+    assert len(geometry(out)) == 9
+    assert distance(references[0].dxf.insert, references[1].dxf.insert) == pytest.approx(10)
+    text = io.StringIO()
+    out.write(text)
+    assert "Private" not in text.getvalue()
+
+
+def test_absolute_block_coordinates_are_not_retained(monkeypatch):
+    class FixedRandom:
+        def __init__(self):
+            self.values = iter((math.pi/2, 12345, 67890))
+
+        def uniform(self, *args):
+            return next(self.values)
+
+    monkeypatch.setattr(anon.secrets, "SystemRandom", FixedRandom)
+    doc = drawing()
+    block = doc.blocks.new("Private georeferenced module", base_point=(0, 0))
+    block.add_lwpolyline([(1_000_000, 2_000_000), (1_000_010, 2_000_000),
+                         (1_000_010, 2_000_004), (1_000_000, 2_000_004)], close=True)
+    doc.modelspace().add_blockref("Private georeferenced module", (10, 20),
+                                 dxfattribs={"layer": "Private Modules"})
+    out = anonymize(doc)
+    reference, = out.modelspace()
+    rebuilt = out.blocks.get(reference.dxf.name)
+    poly, = rebuilt
+    assert tuple(rebuilt.block.dxf.base_point) == (0, 0, 0)
+    assert max(abs(value) for point in poly.get_points("xy") for value in point) <= 10
+    assert tuple(reference.dxf.insert)[:2] == pytest.approx((-2_000_020+12345, 1_000_010+67890))
+    world, = geometry(out)
+    assert area(world.get_points("xy")) == pytest.approx(40)

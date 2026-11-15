@@ -1,6 +1,8 @@
 """Offline, geometry-only DXF reconstruction. ezdxf is an optional dependency.
 
 No source entity, table, dictionary or header (except INSUNITS) is copied.
+Top-level selected INSERTs retain neutral, rebuilt block types. Block-local
+geometry is anchored to its own geometry, removing absolute source origins.
 Nonuniform INSERT scales are supported for straight geometry; curved geometry
 under a nonsimilarity is refused because these output primitives cannot encode it.
 """
@@ -122,8 +124,9 @@ def anonymize_document(source_doc, module_layers, roof_layers):
     visited = 0
     vertices = 0
     expansions = 0
+    rebuilt = {}
 
-    def emit(entity, role, matrix):
+    def emit(entity, role, matrix, target):
         nonlocal emitted, vertices
         emitted += 1
         if emitted > MAX_ENTITIES:
@@ -134,7 +137,7 @@ def anonymize_document(source_doc, module_layers, roof_layers):
         normal = _plane(entity)
         attrs = {"layer": role}
         if kind == "LINE":
-            space.add_line(_map(matrix, entity.dxf.start), _map(matrix, entity.dxf.end),
+            target.add_line(_map(matrix, entity.dxf.start), _map(matrix, entity.dxf.end),
                            dxfattribs=attrs)
             return
         # These entity types use OCS; negative Z reverses its X axis.
@@ -163,7 +166,7 @@ def anonymize_document(source_doc, module_layers, roof_layers):
                                bulge*(orientation or 1)))
             if len(points) < 2:
                 raise ValueError("polyline needs at least two vertices")
-            space.add_lwpolyline(points, format="xyseb", close=entity.closed, dxfattribs=attrs)
+            target.add_lwpolyline(points, format="xyseb", close=entity.closed, dxfattribs=attrs)
             return
         if kind in ("CIRCLE", "ARC"):
             scale, orientation = _similarity(matrix)
@@ -172,7 +175,7 @@ def anonymize_document(source_doc, module_layers, roof_layers):
             if radius <= 0:
                 raise ValueError("radius must be positive")
             if kind == "CIRCLE":
-                space.add_circle(center, radius, dxfattribs=attrs)
+                target.add_circle(center, radius, dxfattribs=attrs)
             else:
                 def direction(degrees):
                     theta = math.radians(_number(degrees))
@@ -182,12 +185,41 @@ def anonymize_document(source_doc, module_layers, roof_layers):
                 start, end = direction(entity.dxf.start_angle), direction(entity.dxf.end_angle)
                 if orientation < 0:
                     start, end = end, start
-                space.add_arc(center, radius, start, end, dxfattribs=attrs)
+                target.add_arc(center, radius, start, end, dxfattribs=attrs)
             return
         raise ValueError("unsupported selected geometry")
 
-    def walk(entities, matrix, parent_role=None, stack=()):
-        nonlocal visited, expansions
+    def neutral_block(block, key, role, bx, by, stack):
+        cache_key = (key, role)
+        if cache_key in rebuilt:
+            return rebuilt[cache_key]
+        name = f"B{len(rebuilt) + 1:06d}"
+        target = output.blocks.new(name)
+        walk(block, (1, 0, 0, 1, -bx, -by), role, stack+(key,), target=target)
+        if not len(target):
+            raise ValueError("selected block has no allowed geometry")
+        first = next(iter(target))
+        if first.dxftype() == "LINE":
+            anchor = _point(first.dxf.start)
+        elif first.dxftype() == "LWPOLYLINE":
+            anchor = _point(first.get_points("xy")[0])
+        else:
+            anchor = _point(first.dxf.center)
+        curved = False
+        for entity in target:
+            if entity.dxftype() in ("CIRCLE", "ARC"):
+                curved = True
+            elif entity.dxftype() == "LWPOLYLINE":
+                curved = curved or any(start or end or bulge for _, _, start, end, bulge
+                                       in entity.get_points("xyseb"))
+            entity.translate(-anchor[0], -anchor[1], 0)
+        rebuilt[cache_key] = (name, anchor, curved)
+        return rebuilt[cache_key]
+
+    def walk(entities, matrix, parent_role=None, stack=(), *, target=None, preserve_inserts=False):
+        nonlocal visited, expansions, emitted
+        if target is None:
+            target = space
         expansions += 1
         if expansions > MAX_ENTITIES:
             raise ValueError("INSERT expansion limit exceeded")
@@ -213,7 +245,7 @@ def anonymize_document(source_doc, module_layers, roof_layers):
             if role is None:
                 continue
             if kind != "INSERT":
-                emit(entity, role, matrix)
+                emit(entity, role, matrix, target)
                 continue
             normal = _plane(entity)
             name = entity.dxf.name
@@ -238,6 +270,24 @@ def anonymize_document(source_doc, module_layers, roof_layers):
                 raise ValueError("invalid INSERT array size")
             rs = _number(entity.dxf.get("row_spacing", 0))
             cs = _number(entity.dxf.get("column_spacing", 0))
+            if preserve_inserts:
+                neutral, anchor, curved = neutral_block(block, key, role, bx, by, stack)
+                local = (normal*co*sx, si*sx, -normal*si*sy, co*sy,
+                         normal*(ix-co*sx*bx+si*sy*by), iy-si*sx*bx-co*sy*by)
+                composed = _compose(matrix, local)
+                if curved:
+                    _similarity(composed)
+                position = _map(composed, (bx+anchor[0], by+anchor[1]))
+                emitted += rows*columns
+                if emitted > MAX_ENTITIES:
+                    raise ValueError("emitted entity limit exceeded")
+                target.add_blockref(neutral, position, dxfattribs={
+                    "layer": role, "rotation": math.degrees(angle)+normal*math.degrees(theta),
+                    "xscale": normal*sx, "yscale": sy, "zscale": sz,
+                    "row_count": rows, "column_count": columns,
+                    "row_spacing": rs, "column_spacing": normal*cs,
+                })
+                continue
             for row in range(rows):
                 for column in range(columns):
                     # Array spacing rotates with the INSERT but does not scale.
@@ -245,9 +295,9 @@ def anonymize_document(source_doc, module_layers, roof_layers):
                     y = iy+si*column*cs+co*row*rs
                     local = (normal*co*sx, si*sx, -normal*si*sy, co*sy,
                              normal*(x-co*sx*bx+si*sy*by), y-si*sx*bx-co*sy*by)
-                    walk(block, _compose(matrix, local), role, stack+(key,))
+                    walk(block, _compose(matrix, local), role, stack+(key,), target=target)
 
-    walk(source_doc.modelspace(), rigid)
+    walk(source_doc.modelspace(), rigid, preserve_inserts=True)
     return output
 
 
