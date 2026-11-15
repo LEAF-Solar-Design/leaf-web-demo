@@ -10,6 +10,7 @@ import { emptyPortfolio, importPortfolio } from './portfolioDocument.js'
 import { readActiveScope, subscribeActiveScope } from '../auth/activeScope.js'
 import { cloneDocument, selectionIdentity, singleFieldChange } from './portfolioEdits.js'
 import { appearanceStyle, textStyle } from './pageDesign.js'
+import { nativePreviewSubmissionKey } from '../lib/nativePreviewSubmission.js'
 import ElementInspector, { InlineText } from './ElementInspector.jsx'
 import './projectPageEditor.css'
 
@@ -449,8 +450,17 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
     let session = nativeSession.current
     if (session?.job && !['failed', 'cancelled'].includes(session.job.status)) return
     if (!session || session.job) {
+      let key
+      try {
+        key = nativePreviewSubmissionKey(localStorage,
+          [accountScope, getStoredOrgId(), getStoredActorBindingId(), projectId, saved.revision, saved.digest], Boolean(session?.job))
+      } catch {
+        setNative({ revision: saved.revision, active: false,
+          message: 'The preview submission identity could not be restored or saved. No build was submitted.' })
+        return
+      }
       clearNative()
-      session = { revision: saved.revision, digest: saved.digest, key: crypto.randomUUID(), job: null, url: null, active: false }
+      session = { revision: saved.revision, digest: saved.digest, key, job: null, url: null, active: false }
       nativeSession.current = session
     }
     void observeNative(session, true)
