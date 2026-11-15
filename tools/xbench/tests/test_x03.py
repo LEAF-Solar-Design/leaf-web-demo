@@ -193,9 +193,10 @@ def test_mocked_run_lifecycle_dispatches_sequentially_and_cleans_up(tmp_path, mo
                 if path == "/api/tools":
                     return 200, {"tools": [{"name": "generated", "catalog_digest": "f" * 64}]}
                 if path == "/api/run":
-                    return 200, {"result": row["oracle"]}
+                    return 200, {"ok": True, "result": row["oracle"]}
                 raise AssertionError(path)
             return real_evaluate(row, **{**kwargs, "transport": transport})
+        bench.write_json_atomic(out / (row["id"] + "-output.json"), row["oracle"])
         return {**records()[0], "id": row["id"], "trade": row["trade"], "drawing": row["drawing"]}
 
     monkeypatch.setitem(sys.modules, "xbench_studio", SimpleNamespace(
@@ -292,6 +293,7 @@ def test_csv_and_summary_rates_agree_for_mixed_models_and_order(tmp_path):
     for name, rows in (("forward", source), ("reverse", list(reversed(source)))):
         out = tmp_path / name
         out.mkdir()
+        persist_outputs(out)
         _, report = bench.grade_records(rows, frozen_rows=records(), baseline=None, prompt_sha256="d" * 64,
                                         source_sha=SHA, out_dir=out)
         summary = json.loads((out / "summary.json").read_text())
@@ -399,7 +401,7 @@ def records():
     return [{"id": f"X03-{i+1:02d}", "trade": trade, "drawing": "synthetic", "source_sha": SHA,
              "author_submitted": True, "model_id": "synthetic-model", "score": 1,
              "failing_stage": None, "tool_name": "synthetic-tool", "version": "1",
-             "tool_source_hash": "b" * 40, "output_hash": "c" * 64}
+             "tool_source_hash": "b" * 40, "output_hash": bench.content_hash({"value": 3})}
             for i, trade in enumerate(["solar"] * 30 + ["structural"] * 10 + ["mechanical"] * 10)]
 
 
@@ -430,6 +432,7 @@ def test_comparison_rejects_extra_keys_boolean_nan_and_obeys_absolute_tolerance(
 
 
 def test_regression_boundary_and_first_baseline(tmp_path):
+    persist_outputs(tmp_path)
     first = records()
     _, baseline = bench.grade_records(first, frozen_rows=records(), baseline=None, prompt_sha256="d" * 64,
                                       source_sha=SHA, out_dir=tmp_path)
@@ -449,6 +452,7 @@ def test_regression_boundary_and_first_baseline(tmp_path):
 
 
 def test_trade_floor_and_incomplete_run_never_pass(tmp_path):
+    persist_outputs(tmp_path)
     first = records()
     for index in range(40, 46):
         first[index].update(score=0, failing_stage="comparison")
@@ -463,6 +467,7 @@ def test_trade_floor_and_incomplete_run_never_pass(tmp_path):
 
 
 def test_unreadable_evidence_is_not_a_scored_failure_or_baseline(tmp_path):
+    persist_outputs(tmp_path)
     first = records()
     first[0].update(score=0, failing_stage="author", unreadable=True)
     steps, report = bench.grade_records(first, frozen_rows=records(), baseline=None, prompt_sha256="d" * 64,
@@ -525,12 +530,12 @@ def run_prompt(tmp_path, *, fallback=False, model=True, publication="published",
             return 200, {"tools": [{"name": "generated", "catalog_digest": "f" * 64,
                                     "version": "1", "source_sha256": "c" * 64, **(catalog_change or {})}]}
         if path == "/api/run":
-            return 200, {"result": {"value": value}}
+            return 200, {"ok": True, "result": {"value": value}}
         raise AssertionError(path)
     class Client:
         def run(self, *args, **kwargs):
             calls.append(("POST", "/api/run", kwargs))
-            return 200, {"result": {"value": value}}
+            return 200, {"ok": True, "result": {"value": value}}
     row = {"id": "X03-01", "trade": "solar", "drawing": "synthetic",
            "prompt": "Count synthetic entities", "oracle": {"value": 3}, "compare": {"mode": "exact"}}
     if transport_wrapper is not None:
@@ -825,3 +830,93 @@ def test_secret_sentinel_never_enters_prompt_receipt(tmp_path, case):
         assert result["failure"] == "RuntimeError"
     receipt = (tmp_path / "X03-01.json").read_text()
     assert "SECRET SENTINEL" not in receipt and "Authorization" not in receipt
+
+
+def persist_outputs(out):
+    for row in records():
+        bench.write_json_atomic(out / (row["id"] + "-output.json"), {"value": 3})
+
+
+@pytest.mark.parametrize("publication", [
+    {"change_set_id": "foreign"}, {"tool_name": "foreign"}, {"tool": "foreign"},
+    {"tool": {"name": "foreign"}}, {"tool": {"name": "generated", "version": "foreign"}},
+])
+def test_publication_identity_conflicts_stop_before_catalog(tmp_path, publication):
+    def wrapper(original):
+        def transport(method, path, **kwargs):
+            if path == "/api/author/publication-requests":
+                return 200, {"status": "published", **publication}
+            assert path not in ("/api/tools", "/api/run")
+            return original(method, path, **kwargs)
+        return transport
+    result, _ = run_prompt(tmp_path, transport_wrapper=wrapper)
+    assert result["score"] == 0 and result["failing_stage"] == "publication"
+    assert result["error_code"] == "PUBLICATION_IDENTITY_MISMATCH"
+
+
+@pytest.mark.parametrize("status", ["queued", "running", "unknown", None])
+def test_nonterminal_http200_output_never_scores(tmp_path, status):
+    def wrapper(original):
+        def transport(method, path, **kwargs):
+            if path == "/api/run":
+                return 200, {"status": status, "result": {"value": 3}}
+            return original(method, path, **kwargs)
+        return transport
+    result, _ = run_prompt(tmp_path, transport_wrapper=wrapper)
+    assert result["score"] == 0 and result["failing_stage"] == "execution"
+    assert result["output_hash"] is None
+    assert result["error_code"] == "EXECUTION_NOT_TERMINAL_SUCCESS"
+
+
+@pytest.mark.parametrize("status", ["failed", "cancelled", None, "unknown"])
+def test_authority_requires_running_status_and_never_cancels_other_turns(tmp_path, status):
+    paths = []
+    def transport(method, path, **kwargs):
+        paths.append(path)
+        if path == "/api/sessions":
+            return 200, {"session_id": "owned-session"}
+        assert path == "/api/sessions/owned-session/messages"
+        return 202, {"turn_id": "returned-turn", "status": status}
+    with pytest.raises(bench.PromptFailure, match="active turn"):
+        with bench.author_authority(transport, synthetic_prompt(), {"project_id": "p"},
+                                   {"drawing_id": "d", "version_id": "v"}, tmp_path):
+            pytest.fail("invalid status reached author submission")
+    assert len(paths) == 2
+    assert (tmp_path / "X03-01-authority.json").exists()
+
+
+@pytest.mark.parametrize("delta,valid", [(0, True), (1e-13, True), (1e-5, False), (0.1, False)])
+def test_baseline_overall_matches_frozen_weighted_trades(tmp_path, delta, valid):
+    baseline = {"schema": "leaf.xbench.x03-scores.v1", "complete": True,
+        "source_sha": SHA, "prompt_sha256": "d" * 64,
+        "overall": 0.7 + delta, "trades": {"solar": 0.8, "structural": 0.6, "mechanical": 0.5}}
+    if valid:
+        bench.validate_baseline(baseline, "d" * 64)
+    else:
+        with pytest.raises(ValueError, match="weighted trade rates"):
+            bench.grade_records([], frozen_rows=records(), baseline=baseline,
+                prompt_sha256="d" * 64, source_sha=SHA, out_dir=tmp_path)
+        assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("artifact", [None, '{"value":4}', '{"value":NaN}', '{"value":Infinity}', '{broken'])
+def test_credited_output_artifact_must_exist_and_match_finite_digest(tmp_path, artifact):
+    if artifact is not None:
+        (tmp_path / "X03-01-output.json").write_text(artifact)
+    with pytest.raises(ValueError, match="credited output artifact"):
+        bench.grade_records(records(), frozen_rows=records(), baseline=None,
+            prompt_sha256="d" * 64, source_sha=SHA, out_dir=tmp_path)
+    assert not (tmp_path / "summary.json").exists()
+    assert not (tmp_path / "scores.csv").exists()
+    assert not (tmp_path / "baseline.json").exists()
+
+
+@pytest.mark.parametrize("field,value", [("source_sha", "bad"), ("tool_source_hash", "b"*39),
+    ("tool_source_hash", "g"*40), ("output_hash", "c"*63), ("output_hash", "z"*64)])
+def test_malformed_provenance_digest_cannot_emit_acceptance(tmp_path, field, value):
+    rows = records()
+    rows[0][field] = value
+    with pytest.raises(ValueError, match="provenance digest"):
+        bench.grade_records(rows, frozen_rows=records(), baseline=None,
+            prompt_sha256="d" * 64, source_sha=SHA, out_dir=tmp_path)
+    assert not list(tmp_path.iterdir())

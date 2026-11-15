@@ -143,7 +143,7 @@ def author_authority(transport, row, project, drawing, evidence_dir, *, deadline
                 "project_id": project["project_id"], "input_version_id": drawing["version_id"]}})
         turn_id = started.get("turn_id")
         if (not isinstance(turn_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", turn_id)
-                or started.get("status") in ("queued", "completed")):
+                or started.get("status") != "running"):
             turn_id = None
             raise PromptFailure("normal author context did not start an active turn")
         yield {"X-Authority-Session-Id": session_id, "X-Authority-Turn-Id": turn_id}
@@ -241,6 +241,15 @@ def evaluate_prompt(row, *, transport, client, project, drawing, source_sha,
         if publication.get("status") != "published":
             record["error_code"] = public_code(publication.get("status"))
             raise PromptFailure("normal publication rail did not publish")
+        publication_tool = publication.get("tool")
+        if (("change_set_id" in publication and publication["change_set_id"] != receipt["change_set_id"])
+                or ("tool_name" in publication and publication["tool_name"] != tool["name"])
+                or (isinstance(publication_tool, dict) and any(
+                    key in publication_tool and publication_tool[key] != tool[key]
+                    for key in ("name", "version") if key in tool))
+                or (isinstance(publication_tool, str) and publication_tool != tool["name"])):
+            record["error_code"] = "PUBLICATION_IDENTITY_MISMATCH"
+            raise PromptFailure("publication conflicts with staged identity")
         _, catalog = call("GET", "/api/tools")
         catalog_matches = [item for item in catalog.get("tools", []) if item.get("name") == tool["name"]]
         if len(catalog_matches) > 1:
@@ -281,6 +290,10 @@ def evaluate_prompt(row, *, transport, client, project, drawing, source_sha,
             raise PromptFailure("tool execution cancelled")
         if result.get("status") == "failed" or result.get("ok") is False:
             raise PromptFailure("tool execution failed")
+        if (result.get("status") not in (None, "complete")
+                or (result.get("status") is None and result.get("ok") is not True)):
+            record["error_code"] = "EXECUTION_NOT_TERMINAL_SUCCESS"
+            raise PromptFailure("execution did not report terminal success")
         output = result.get("result", result.get("output", result))
         try:
             output_hash = content_hash(output)
@@ -338,6 +351,9 @@ def validate_baseline(baseline, prompt_sha256):
     for rate in (baseline.get("overall"), *trades.values()):
         if type(rate) not in (int, float) or not math.isfinite(rate) or not 0 <= rate <= 1:
             raise ValueError("baseline rates must be finite numbers between zero and one")
+    weighted = sum(trades[trade] * count for trade, count in TRADES.items()) / 50
+    if not math.isclose(baseline["overall"], weighted, rel_tol=0, abs_tol=1e-12):
+        raise ValueError("baseline overall contradicts weighted trade rates")
 
 
 def grade_records(records, *, baseline, prompt_sha256, source_sha, out_dir, frozen_rows):
@@ -358,12 +374,25 @@ def grade_records(records, *, baseline, prompt_sha256, source_sha, out_dir, froz
         if score == 1 and not all(isinstance(record.get(key), str) and record[key] for key in (
                 "tool_name", "version", "tool_source_hash", "output_hash", "model_id")):
             raise ValueError("credited record requires complete tool and model provenance")
+        if score == 1 and not all(re.fullmatch(pattern, record[key]) for key, pattern in (
+                ("source_sha", r"[0-9a-f]{40}"), ("tool_source_hash", r"[0-9a-f]{40}"),
+                ("output_hash", r"[0-9a-f]{64}"))):
+            raise ValueError("credited record has invalid provenance digest")
         if ((score == 1 and (stage is not None or record.get("unreadable")))
                 or (score == 0 and stage not in {"author", "publication", "execution",
                     "comparison", "model_provenance", "source_drift"})):
             raise ValueError("prompt score contradicts its failing stage")
     if baseline is not None:
         validate_baseline(baseline, prompt_sha256)
+    for record in records:
+        if record["score"] == 1:
+            try:
+                output = json.loads((out_dir / (record["id"] + "-output.json")).read_text())
+                digest = content_hash(output)
+            except (OSError, ValueError, TypeError):
+                raise ValueError("credited output artifact is missing or invalid") from None
+            if digest != record["output_hash"]:
+                raise ValueError("credited output artifact hash mismatch")
     complete = (len(records) == 50 and len({r["id"] for r in records}) == 50
                 and Counter(r["trade"] for r in records) == Counter(TRADES)
                 and all(r.get("author_submitted") and r["source_sha"] == source_sha for r in records)
