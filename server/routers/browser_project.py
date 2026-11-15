@@ -17,9 +17,13 @@ _PRIVATE = {'Cache-Control': 'private, no-store'}
 
 
 async def no_store_responses(request, call_next):
+    request.state.browser_source_public_failure = False
     response = await call_next(request)
     if _PATH.fullmatch(request.url.path):
         if response.status_code >= 400:
+            if response.status_code == 503 and request.state.browser_source_public_failure:
+                response.headers['Cache-Control'] = 'private, no-store'
+                return response
             status = response.status_code
             status = 403 if status == 401 else (status if status in flow._ERRORS else 503)
             return _failure(flow.FlowError(status))
@@ -34,8 +38,21 @@ def _response(value, status=200):
     return JSONResponse(value, status_code=status, headers=_PRIVATE)
 
 
-def _failure(exc):
-    return _response({'error': {'code': exc.code, 'message': str(exc)}}, exc.status)
+def _failure(exc, request=None):
+    error = {'code': exc.code, 'message': str(exc)}
+    diagnostic = getattr(exc, 'public_diagnostic', {})
+    if exc.status == 503 and exc.code == 'author_unavailable' and type(diagnostic) is dict:
+        # FlowError owns validation; the HTTP boundary never copies other fields.
+        keys = ('source_request_id', 'correlation_id', 'phase', 'author_subphase', 'author_http_status')
+        if all(key in diagnostic for key in keys[:-1]):
+            error.update({key: diagnostic[key] for key in keys if key in diagnostic})
+            error['message'] = 'Project source initialization failed. Review the original request before retrying.'
+    response = _response({'error': error}, exc.status)
+    if request is not None and 'correlation_id' in error:
+        # Request-local provenance survives BaseHTTPMiddleware's response wrapper.
+        # Never trust a request header to preserve a diagnostic response.
+        request.state.browser_source_public_failure = True
+    return response
 
 
 async def _raw(request):
@@ -128,7 +145,7 @@ async def _post(project_id, request, tenant, action, edit_id=None):
     except flow.inspection.InspectionError:
         return _failure(flow.FlowError(403))
     except flow.FlowError as exc:
-        return _failure(exc)
+        return _failure(exc, request)
     except Exception:
         return _failure(flow.FlowError(503))
 
