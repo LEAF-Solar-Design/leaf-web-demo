@@ -279,7 +279,9 @@ def test_open_workspace_loading_timeout_and_absent_build():
 @pytest.mark.parametrize("failure", [None, "launch", "login", "workspace", "consumer", "close"])
 def test_signed_in_lifecycle(monkeypatch, failure):
     calls = []
-    page = object()
+    page = SimpleNamespace(on=lambda event, callback: callback(SimpleNamespace(
+        url=session.STAGING_ORIGIN + "/api/projects", headers={"authorization": TOKEN}
+    )))
 
     def close():
         calls.append("close")
@@ -329,7 +331,8 @@ def test_signed_in_lifecycle(monkeypatch, failure):
             actual_page, info = result
             assert actual_page is page
             assert info == {"approve_rcs": [0], "approve_attempts": 1, "approve_stderr_tail": "",
-                            "web_build": None, "projects_loading_timeout": False, "source": SOURCE}
+                            "web_build": None, "projects_loading_timeout": False, "source": SOURCE,
+                            "app_header_names": ["authorization"]}
             if failure == "consumer":
                 raise RuntimeError("consumer failed")
 
@@ -343,3 +346,188 @@ def test_signed_in_lifecycle(monkeypatch, failure):
         assert calls[-2] == "close"
     else:
         assert "close" not in calls
+
+
+def test_app_headers_allowlist_and_case():
+    captured = session.AppHeaders()
+    assert not captured.ready()
+    captured.observe(session.STAGING_ORIGIN + "/api/projects", {
+        "Authorization": TOKEN, "X-Tenant-Id": "tenant-secret",
+        "X-ORG-ID": "org-secret", "Cookie": "cookie-secret", "X-Other": "other-secret",
+    })
+    assert captured.ready()
+    assert captured.as_dict() == {
+        "authorization": TOKEN, "x-tenant-id": "tenant-secret", "x-org-id": "org-secret"
+    }
+
+
+@pytest.mark.parametrize("url", [
+    "https://other.example/api/projects",
+    session.STAGING_ORIGIN + ".evil.example/api/projects",
+    session.STAGING_ORIGIN + "/app",
+    session.STAGING_ORIGIN + "/api",
+    session.STAGING_ORIGIN + "/api/auth/agent/login",
+    session.STAGING_ORIGIN + "/api/auth/refresh?next=/api/projects",
+])
+def test_app_headers_ignore_untrusted_or_auth_paths(url):
+    captured = session.AppHeaders()
+    captured.observe(url, {"authorization": TOKEN})
+    assert not captured.ready()
+    assert captured.as_dict() == {}
+
+
+def test_app_headers_require_authorization_in_same_request():
+    captured = session.AppHeaders()
+    url = session.STAGING_ORIGIN + "/api/projects"
+    captured.observe(url, {"x-tenant-id": "ignored"})
+    assert not captured.ready()
+    captured.observe(url, {"authorization": TOKEN, "x-tenant-id": "original"})
+    captured.observe(url, {"x-tenant-id": "ignored"})
+    assert captured.as_dict() == {"authorization": TOKEN, "x-tenant-id": "original"}
+
+
+def test_app_headers_later_observation_replaces_snapshot():
+    captured = session.AppHeaders()
+    url = session.STAGING_ORIGIN + "/api/projects"
+    captured.observe(url, {"authorization": TOKEN, "x-org-id": "old-org"})
+    captured.observe(url, {"authorization": "new-secret", "x-tenant-id": "new-tenant"})
+    assert captured.as_dict() == {"authorization": "new-secret", "x-tenant-id": "new-tenant"}
+
+
+def test_app_headers_custom_origin():
+    captured = session.AppHeaders(origin="https://custom.example")
+    captured.observe(session.STAGING_ORIGIN + "/api/projects", {"authorization": TOKEN})
+    assert not captured.ready()
+    captured.observe("https://custom.example/api/projects", {"authorization": TOKEN})
+    assert captured.ready()
+
+
+def test_app_headers_names_and_repr_never_include_values():
+    captured = session.AppHeaders()
+    captured.observe(session.STAGING_ORIGIN + "/api/projects", {
+        "authorization": TOKEN, "x-tenant-id": "tenant-secret", "x-org-id": "org-secret"
+    })
+    assert captured.names() == ["authorization", "x-org-id", "x-tenant-id"]
+    for value in (TOKEN, "tenant-secret", "org-secret"):
+        assert value not in repr(captured)
+        assert value not in str(captured.names())
+    assert all(name in repr(captured) for name in captured.names())
+
+
+def test_app_headers_as_dict_is_copy():
+    captured = session.AppHeaders()
+    captured.observe(session.STAGING_ORIGIN + "/api/projects", {"authorization": TOKEN})
+    copy = captured.as_dict()
+    copy["authorization"] = "changed"
+    copy["x-tenant-id"] = "added"
+    assert captured.as_dict() == {"authorization": TOKEN}
+
+
+def test_api_merges_captured_headers_with_explicit_overrides():
+    page = api_page()
+    page._xbench_app_headers = session.AppHeaders()
+    page._xbench_app_headers.observe(session.STAGING_ORIGIN + "/api/projects", {
+        "authorization": TOKEN, "x-tenant-id": "tenant-secret"
+    })
+    explicit = {"authorization": "override-secret", "X-Trace": "trace"}
+    session.api(page, "GET", "/api/projects", headers=explicit)
+    assert page.request.calls[0][1]["headers"] == {
+        "authorization": "override-secret", "x-tenant-id": "tenant-secret", "X-Trace": "trace"
+    }
+    assert page._xbench_app_headers.as_dict()["authorization"] == TOKEN
+    assert explicit == {"authorization": "override-secret", "X-Trace": "trace"}
+
+
+@pytest.mark.parametrize("has_attribute", [False, True])
+def test_api_without_captured_headers(has_attribute):
+    page = api_page()
+    if has_attribute:
+        page._xbench_app_headers = None
+    session.api(page, "GET", "/api/projects")
+    assert page.request.calls[0][1]["headers"] == {}
+
+
+@pytest.fixture
+def fake_signed_in(monkeypatch):
+    class CapturePage:
+        def __init__(self):
+            self.callback = None
+            self.waits = []
+            self.reloads = 0
+            self.emit_at = "workspace"
+
+        def on(self, event, callback):
+            assert event == "request"
+            self.callback = callback
+
+        def emit(self):
+            self.callback(SimpleNamespace(url="https://custom.example/api/projects", headers={
+                "Authorization": TOKEN, "X-Tenant-Id": "tenant-secret"
+            }))
+
+        def wait_for_timeout(self, milliseconds):
+            self.waits.append(milliseconds)
+            if self.emit_at == "poll":
+                self.emit()
+
+        def reload(self):
+            self.reloads += 1
+            if self.emit_at == "reload":
+                self.emit()
+
+    page = CapturePage()
+    calls = []
+    browser = SimpleNamespace(
+        new_context=lambda **kw: SimpleNamespace(new_page=lambda: page),
+        close=lambda: calls.append("close"),
+    )
+    playwright = SimpleNamespace(
+        chromium=SimpleNamespace(launch=lambda **kw: browser),
+        stop=lambda: calls.append("stop"),
+    )
+
+    def factory():
+        calls.append("factory")
+        return SimpleNamespace(start=lambda: playwright)
+
+    def workspace(actual_page, **kw):
+        assert actual_page is page
+        assert kw == {"origin": "https://custom.example"}
+        assert page.callback is not None
+        if page.emit_at == "workspace":
+            page.emit()
+        return {"web_build": SOURCE}
+
+    monkeypatch.setattr(session, "login", lambda *args, **kw: {"approve_rcs": [0]})
+    monkeypatch.setattr(session, "open_workspace", workspace)
+    monkeypatch.setattr(session, "CAPTURE_TIMEOUT_S", 1)
+    return page, calls, factory
+
+
+@pytest.mark.parametrize("emit_at", ["workspace", "poll", "reload"])
+def test_signed_in_captures_headers_with_factory(fake_signed_in, emit_at):
+    page, calls, factory = fake_signed_in
+    page.emit_at = emit_at
+    with session.signed_in("repo", SOURCE, origin="https://custom.example",
+                           _playwright_factory=factory) as (actual_page, info):
+        assert actual_page is page
+        assert info == {"approve_rcs": [0], "web_build": SOURCE, "source": SOURCE,
+                        "app_header_names": ["authorization", "x-tenant-id"]}
+        assert TOKEN not in repr(info)
+        assert "tenant-secret" not in repr(info)
+        assert page._xbench_app_headers.as_dict()["authorization"] == TOKEN
+        assert page.reloads == (1 if emit_at == "reload" else 0)
+        assert page.waits == [250] * {"workspace": 0, "poll": 1, "reload": 4}[emit_at]
+    assert calls == ["factory", "close", "stop"]
+
+
+def test_signed_in_headers_not_observed_after_reload(fake_signed_in):
+    page, calls, factory = fake_signed_in
+    page.emit_at = "never"
+    with pytest.raises(session.SessionError, match="^app auth headers not observed$"):
+        with session.signed_in("repo", SOURCE, origin="https://custom.example",
+                               _playwright_factory=factory):
+            pytest.fail("session must not yield without app authorization")
+    assert page.reloads == 1
+    assert page.waits == [250] * 8
+    assert calls == ["factory", "close", "stop"]

@@ -8,6 +8,8 @@ import sys
 
 
 STAGING_ORIGIN = "https://platform-staging.leafdesign.ai"
+CAPTURE_HEADER_NAMES = ("authorization", "x-tenant-id", "x-org-id")
+CAPTURE_TIMEOUT_S = 30
 CHALLENGE_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 APPROVE_TIMEOUT_S = 90
 MAX_APPROVE_ATTEMPTS = 2
@@ -28,6 +30,34 @@ def redact(text) -> str:
 class SessionError(RuntimeError):
     def __init__(self, message):
         super().__init__(redact(message))
+
+
+class AppHeaders:
+    def __init__(self, origin=STAGING_ORIGIN):
+        self._origin = origin
+        self._headers = {}
+
+    def observe(self, url: str, headers: dict):
+        if not url.startswith(self._origin + "/api/"):
+            return
+        if url.startswith(self._origin + "/api/auth/"):
+            return
+        captured = {name.lower(): value for name, value in headers.items()
+                    if name.lower() in CAPTURE_HEADER_NAMES}
+        if "authorization" in captured:
+            self._headers = captured
+
+    def ready(self) -> bool:
+        return "authorization" in self._headers
+
+    def names(self) -> list[str]:
+        return sorted(self._headers)
+
+    def as_dict(self) -> dict:
+        return self._headers.copy()
+
+    def __repr__(self):
+        return f"AppHeaders(names={self.names()!r})"
 
 
 def extract_challenge(html: str) -> str:
@@ -95,10 +125,12 @@ def open_workspace(page, *, origin=STAGING_ORIGIN) -> dict:
 
 @contextmanager
 def signed_in(repo, source, *, origin=STAGING_ORIGIN, viewport=(1440, 900),
-              headless=True, runner=subprocess.run):
-    from playwright.sync_api import sync_playwright
+              headless=True, runner=subprocess.run, _playwright_factory=None):
+    if _playwright_factory is None:
+        from playwright.sync_api import sync_playwright
+        _playwright_factory = sync_playwright
 
-    playwright = sync_playwright().start()
+    playwright = _playwright_factory().start()
     browser = None
     try:
         browser = playwright.chromium.launch(
@@ -109,7 +141,22 @@ def signed_in(repo, source, *, origin=STAGING_ORIGIN, viewport=(1440, 900),
         )
         page = context.new_page()
         info = login(page, repo, source, origin=origin, runner=runner)
+        app_headers = AppHeaders(origin=origin)
+        page._xbench_app_headers = app_headers
+        page.on("request", lambda r: app_headers.observe(r.url, r.headers))
         info.update(open_workspace(page, origin=origin))
+        for attempt in range(2):
+            for _ in range(int(CAPTURE_TIMEOUT_S * 1000 / 250)):
+                if app_headers.ready():
+                    break
+                page.wait_for_timeout(250)
+            if app_headers.ready():
+                break
+            if attempt == 0:
+                page.reload()
+        if not app_headers.ready():
+            raise SessionError("app auth headers not observed")
+        info["app_header_names"] = app_headers.names()
         info["source"] = source
         yield page, info
     finally:
@@ -128,7 +175,9 @@ def api(page, method, path, *, json_body=None, data=None, headers=None,
         raise ValueError(redact("unsupported API method"))
     if json_body is not None and data is not None:
         raise ValueError(redact("json_body and data are mutually exclusive"))
-    request_headers = dict(headers or {})
+    app_headers = getattr(page, "_xbench_app_headers", None)
+    captured = app_headers.as_dict() if app_headers is not None else {}
+    request_headers = {**captured, **(headers or {})}
     if json_body is not None:
         data = json.dumps(json_body)
         request_headers = {k: v for k, v in request_headers.items() if k.lower() != "content-type"}
