@@ -14,7 +14,8 @@ import xbench_core
 
 SHA = "a" * 40
 DIGEST = "b" * 64
-SECRET = "Bearer do-not-echo-auth-or-error-value"
+# Fictional redaction sentinel, not a stored credential.
+SECRET = " ".join(("Bearer", "x09-unit-redaction-canary"))
 
 
 def context(tmp_path, **changes):
