@@ -97,15 +97,25 @@ it('keeps remapping targets inert instead of navigating or loading resources', (
   }
 })
 
-it('reports unsupported dispositions and malformed rows as unknown without claiming coverage', () => {
+it('reports unsupported disposition strings as unknown without claiming coverage', () => {
   render(<DrawingDependencyReport report={{ dependencies: [
     { kind: 'xref', name: 'unknown.dwg', disposition: 'teleported' },
-    { kind: 'font', name: 'unknown.shx', disposition: { invalid: true } },
-    null,
   ] }} />)
-  expect(screen.getAllByText('Unknown disposition')).toHaveLength(3)
-  expect(screen.getByText('Unknown kind')).toBeTruthy()
-  expect(screen.getByText('Unnamed dependency')).toBeTruthy()
+  expect(screen.getAllByText('Unknown disposition')).toHaveLength(1)
   expect(screen.getByText('Raw dependency coverage is not confirmed.')).toBeTruthy()
+  expect(screen.queryByText('No dependencies were present in the local intake records.')).toBeNull()
+})
+
+it.each([null, [], 'invalid', 4, { dependencies: {} }, { dependencies: [null] },
+  { dependencies: [{ kind: {}, name: 'bad', disposition: 'detached' }] },
+  { dependencies: [{ kind: 'xref', name: {}, disposition: 'detached' }] },
+  { dependencies: [{ kind: 'xref', name: 'bad', disposition: {} }] },
+  { dependencies: [{ kind: 'font', name: 'bad', disposition: 'font remapped', remapped_to: {} }] },
+])('shows actionable unavailable for malformed report %#', (report) => {
+  render(<DrawingDependencyReport report={report} />)
+  expect(screen.getByText('Dependency report unavailable.')).toBeTruthy()
+  expect(screen.getByText(/Run drawing intake again/)).toBeTruthy()
+  expect(screen.getByText('Raw dependency coverage is not confirmed.')).toBeTruthy()
+  expect(screen.queryByRole('table')).toBeNull()
   expect(screen.queryByText('No dependencies were present in the local intake records.')).toBeNull()
 })

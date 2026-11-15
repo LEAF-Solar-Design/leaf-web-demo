@@ -31,6 +31,15 @@ def _four_corners(entity):
     if len(points) != 4:
         return False
     try:
+        bulges = entity.get("bulges", [])
+        if not isinstance(bulges, (list, tuple)) or any(not math.isfinite(v) or v != 0 for v in bulges):
+            return False
+        thickness = entity.get("thickness", 0)
+        if not math.isfinite(thickness) or thickness != 0:
+            return False
+        normal = entity.get("normal", [0, 0, 1])
+        if len(normal) != 3 or not all(math.isfinite(v) for v in normal) or not any(normal):
+            return False
         if any(len(p) < 2 or any(not math.isfinite(v) for v in p) for p in points):
             return False
         xyz = [(p[0], p[1], p[2] if len(p) > 2 else 0) for p in points]
@@ -68,6 +77,14 @@ def _four_corners(entity):
 
 
 def run(intake, params):
+    if not isinstance(intake, dict):
+        raise ValueError("Saved intake must be an object; re-import the drawing.")
+    for key in ("inserts", "polylines"):
+        if key in intake and not isinstance(intake[key], list):
+            raise ValueError(f"Saved intake {key} must be an array; re-import the drawing.")
+        for row in intake.get(key, []):
+            if not isinstance(row, dict) or (key == "polylines" and not isinstance(row.get("pts"), list)):
+                raise ValueError(f"Saved intake {key} has an incompatible candidate row; re-import the drawing.")
     groups = {}
     multiplicities = {}
     for entity_type, key in (("INSERT", "inserts"), ("LWPOLYLINE", "polylines")):

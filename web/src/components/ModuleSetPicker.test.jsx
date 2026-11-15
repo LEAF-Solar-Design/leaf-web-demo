@@ -12,6 +12,26 @@ const first = () => screen.getByRole('checkbox', { name: 'Design / Panel A: 12 c
 const second = () => screen.getByRole('checkbox', { name: 'Alternate / Panel B: 9 candidates' })
 const submit = () => screen.getByRole('button', { name: 'Count selected set' })
 
+it('selects prototype-named IDs independently without inherited state', () => {
+  const ids = ['__proto__', 'constructor', 'toString']
+  const onSelect = vi.fn()
+  render(<ModuleSetPicker data={{ sets: ids.map((id) => ({ set_id: id, layer: id, block: 'Panel', count: 1 })) }} onSelect={onSelect} />)
+  const controls = screen.getAllByRole('checkbox')
+  controls.forEach((control) => fireEvent.click(control))
+  fireEvent.click(submit())
+  expect(onSelect).toHaveBeenLastCalledWith(ids)
+  fireEvent.click(controls[1])
+  fireEvent.click(submit())
+  expect(onSelect).toHaveBeenLastCalledWith(['__proto__', 'toString'])
+  fireEvent.click(controls[0])
+  fireEvent.click(submit())
+  expect(onSelect).toHaveBeenLastCalledWith(['toString'])
+  fireEvent.click(controls[2])
+  expect(submit().disabled).toBe(true)
+  fireEvent.click(submit())
+  expect(onSelect).toHaveBeenCalledTimes(3)
+})
+
 it('records one selection without submitting its enclosing form', () => {
   const onSelect = vi.fn()
   const onSubmit = vi.fn((event) => event.preventDefault())

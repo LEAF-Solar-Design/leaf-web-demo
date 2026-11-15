@@ -1,13 +1,17 @@
 const DISPOSITIONS = new Set(['bound', 'detached', 'font remapped', 'image omitted', 'underlay omitted', 'proxy omitted'])
 
 export default function DrawingDependencyReport({ report }) {
-  const available = Array.isArray(report?.dependencies)
+  const available = report !== null && typeof report === 'object' && !Array.isArray(report)
+    && Array.isArray(report.dependencies) && report.dependencies.every((row) => row !== null
+      && typeof row === 'object' && !Array.isArray(row)
+      && ['kind', 'name', 'disposition'].every((key) => typeof row[key] === 'string')
+      && (row.remapped_to === undefined || typeof row.remapped_to === 'string'))
   const dependencies = available ? report.dependencies : []
   return <section aria-label="Drawing intake report">
     <h3>Drawing intake report</h3>
-    <p>{typeof report?.coverage_note === 'string' && report.coverage_note
+    <p>{available && typeof report?.coverage_note === 'string' && report.coverage_note
       ? report.coverage_note : 'Raw dependency coverage is not confirmed.'}</p>
-    {!available ? <p>Dependency report unavailable.</p> : <>
+    {!available ? <><p>Dependency report unavailable.</p><p>Run drawing intake again to refresh the dependency report.</p></> : <>
     {dependencies.length ? <div className="table-scroll"><table>
       <thead><tr><th>Kind</th><th>Dependency</th><th>Disposition</th></tr></thead>
       <tbody>{dependencies.map((row, index) => {
