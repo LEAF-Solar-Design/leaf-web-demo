@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 import tempfile
 from urllib.parse import urlsplit
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 
 EXIT_PASS = 0
@@ -22,6 +22,7 @@ GRADE_SCHEMA = "leaf.xbench.grade.v1"
 MAX_MANIFEST_BYTES = 1_048_576
 MAX_FIXTURES = 200
 HASH_CHUNK = 1_048_576
+HEALTH_USER_AGENT = "Mozilla/5.0 leaf-xbench-grader"
 _VERDICTS = ("PASS", "FAIL", "UNREADABLE")
 
 
@@ -142,7 +143,9 @@ def read_health(base, timeout=10.0, opener=None):
     try:
         url = base.rstrip("/") + "/api/health"
         if opener is None:
-            with urlopen(url, timeout=timeout) as response:
+            request = Request(url, headers={"User-Agent": HEALTH_USER_AGENT,
+                                            "Accept": "application/json"})
+            with urlopen(request, timeout=timeout) as response:
                 raw = response.read(1_048_576)
         else:
             raw = opener(url, timeout)
