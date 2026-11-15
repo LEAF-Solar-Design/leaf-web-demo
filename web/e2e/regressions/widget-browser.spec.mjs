@@ -64,7 +64,7 @@ test('saved literal preview clock stays idle without skips', async ({}, testInfo
 })
 
 // Input journeys run separately from the settled recovery and idle-clock counts.
-test('keyboard and Unicode widget journeys pass without skips', async ({}, testInfo) => {
+test('keyboard, Unicode and text-boundary widget journeys pass without skips', async ({}, testInfo) => {
   test.setTimeout(180000)
   const inputConfig = fileURLToPath(new URL('../../playwright.widget-input.config.mjs', import.meta.url))
   const { stdout, stderr } = await execute(process.execPath, [
@@ -80,7 +80,7 @@ test('keyboard and Unicode widget journeys pass without skips', async ({}, testI
     await testInfo.attach('widget-input-build.log', { path: logPath, contentType: 'text/plain' })
   }
   expect(report.errors).toEqual([])
-  expect(report.stats).toMatchObject({ expected: 2, unexpected: 0, skipped: 0, flaky: 0 })
+  expect(report.stats).toMatchObject({ expected: 3, unexpected: 0, skipped: 0, flaky: 0 })
   console.log('LEAF_WIDGET_BROWSER ' + JSON.stringify({
     schema: 'leaf.widget-input.v1',
     expected: report.stats.expected, unexpected: report.stats.unexpected,
