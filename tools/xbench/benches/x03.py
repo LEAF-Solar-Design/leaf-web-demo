@@ -185,7 +185,7 @@ def evaluate_prompt(row, *, transport, client, project, drawing, source_sha,
         target = f"x03-{run_id}-{row['id'].lower()}"
         record["author_submitted"] = True
         _, staged = call("POST", "/api/author", json_body={
-            "description": row["prompt"], "mode": "build", "target_tool_name": target},
+            "description": row["prompt"], "mode": "build"},
             headers={"Idempotency-Key": target, **(authority_headers or {})}, timeout_s=remaining())
         change_id = staged.get("change_set_id") if staged.get("contract") == "leaf.customization-stage-job.v1" else None
         while staged.get("contract") == "leaf.customization-stage-job.v1":

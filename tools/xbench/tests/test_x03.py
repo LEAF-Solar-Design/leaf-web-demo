@@ -517,6 +517,17 @@ def test_success_uses_normal_author_publication_and_bound_run(tmp_path):
     assert next(kw for _, path, kw in calls if path == "/api/run")["json_body"]["dwg"] == "v"
 
 
+def test_new_tool_authoring_never_requests_revision_of_a_nonexistent_target(tmp_path):
+    result, calls = run_prompt(tmp_path)
+    author = next(kw for _, path, kw in calls if path == "/api/author")
+    # AuthorLoop.stage treats target_tool_name as an existing-tool revision.
+    assert author["json_body"] == {"description": synthetic_prompt()["prompt"], "mode": "build"}
+    assert "target_tool_name" not in author["json_body"]
+    assert author["headers"]["Idempotency-Key"].startswith("x03-")
+    assert result["tool_name"] == "generated"
+    assert result["score"] == 1
+
+
 def test_real_staged_envelope_finishes_polling_and_reaches_bound_execution(tmp_path):
     result, calls = run_prompt(tmp_path, staged_envelope=True)
     assert sum(path == "/api/author/stages/change" for _, path, _ in calls) == 1
