@@ -234,11 +234,18 @@ function Photograph({image,page,onOpen,onRetryFocus}){
   {failed&&<div role="status"><p>The photo could not load. Check your connection and try again.</p><button style={{marginTop:'0.5rem',textDecoration:'underline'}} onClick={retry}>Retry photo</button></div>}</>;
 }
 export default function Gallery({page,category}){
- const [selected,setSelected]=useState(null),trigger=useRef(null),closeButton=useRef(null),dialog=useRef(null);
- const close=()=>{setSelected(null);trigger.current?.focus();};
+ const [selected,setSelected]=useState(null),trigger=useRef(null),closeButton=useRef(null),dialog=useRef(null),restoreBackground=useRef(()=>{});
+ const close=()=>{restoreBackground.current();setSelected(null);trigger.current?.focus();};
  useEffect(()=>{setSelected(null);trigger.current=null;},[category.slug]);
  useEffect(()=>{
-  if(!selected)return;closeButton.current?.focus();
+   if(!selected)return;
+   const background=[];let branch=dialog.current;
+   while(branch&&branch!==document.body){
+    for(const sibling of branch.parentElement.children)if(sibling!==branch){background.push([sibling,Boolean(sibling.inert)]);sibling.inert=true;}
+    branch=branch.parentElement;
+   }
+   const restore=()=>{for(const [node,wasInert]of background)node.inert=wasInert;};
+   restoreBackground.current=restore;closeButton.current?.focus();
   const key=e=>{
    if(e.key==='Escape')close();
    if(e.key==='Tab'){
@@ -246,7 +253,7 @@ export default function Gallery({page,category}){
     if(buttons.length){e.preventDefault();const index=buttons.indexOf(document.activeElement);buttons[index<0?0:(index+(e.shiftKey?-1:1)+buttons.length)%buttons.length].focus();}
    }
   };
-  window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key);
+   window.addEventListener('keydown',key);return()=>{window.removeEventListener('keydown',key);restore();if(restoreBackground.current===restore)restoreBackground.current=()=>{};};
  },[selected]);
  const open=(image,button)=>{trigger.current=button;setSelected(image);};
  return <><div className="portfolio-grid" data-gallery-layout={page.galleryLayout||'grid'} style={galleryStyle(page,category)}>{category.images.filter(i=>!i.display?.hidden).map(image=><figure key={image.material_id} style={photoSpanStyle(image.display,page,category)}><Photograph image={image} page={page} onOpen={open}/></figure>)}</div>{selected&&<div ref={dialog} className="portfolio-viewer" role="dialog" aria-modal="true" aria-label={selected.alt}><button ref={closeButton} onClick={close}>{page.labels?.viewerClose||'Close image'}</button><Photograph key={selected.material_id} image={selected} page={page} onRetryFocus={()=>closeButton.current?.focus()}/><p style={textStyle(selected.captionStyle)}>{selected.title}</p></div>}</>;
