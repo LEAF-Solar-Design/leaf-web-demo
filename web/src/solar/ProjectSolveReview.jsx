@@ -69,7 +69,8 @@ export function useSubmission(props, tool) {
       if (extras.prepareFromGraph) {
         const prepared = response.data.solve_preparation
         if (prepared?.available !== true || prepared.frame_ref !== extras.solveContext?.frame_ref ||
-            prepared.graph_revision !== state.rev || !prepared.request) {
+            prepared.graph_revision !== state.rev ||
+            prepared.graph_sha256 !== response.data.intake.solar_design_graph_sha256 || !prepared.request) {
           setFeedback({ state: 'refused', reason: code(prepared?.reason) }); return
         }
         params = { ...params, request: prepared.request }
