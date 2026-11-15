@@ -111,6 +111,45 @@ it('commits values older than the retained snapshot log without losing their blo
   expect(store.getRun('r').lastSeq).toBe(2)
 })
 
+
+it('pauses oversized aggregate snapshots before replacing verified evidence', async () => {
+  const store = createValueStore()
+  store.apply('r', event(0, 'corpus', { result: 'verified bytes' }))
+  let page = 0
+  const payload = 'x'.repeat(65536)
+  const fetchImpl = vi.fn().mockImplementation(async url => {
+    if (url.includes('/stream/')) return stream([frame('run', { ...event(1, 'corpus', { truncated: true }), run_id: 'r' })])
+    if (!url.includes('/events?')) return json({ run_id: 'r', state: 'finished', graph_revision: 1 })
+    const start = page++ * 500
+    return json({ events: Array.from({ length: 500 }, (_, i) => event(start + i, 'block' + (start + i), { result: payload })) })
+  })
+  const sleep = vi.fn()
+  open({ runIds: ['r'], store, fetchImpl, sleep })
+  await waitFor(() => expect(store.getRun('r').transport.evidenceError).toBe('snapshot_budget_exceeded'), { timeout: 3000 })
+  expect(store.getRun('r').transport.status).toBe('invalid_evidence')
+  expect(store.getRun('r').lastSeq).toBe(0)
+  expect(store.getBlock('r', 'corpus').value.result).toBe('verified bytes')
+  expect(fetchImpl.mock.calls.length).toBeLessThanOrEqual(5)
+  expect(fetchImpl.mock.calls.every(([, init]) => !init.method || init.method === 'GET')).toBe(true)
+  expect(sleep).not.toHaveBeenCalled()
+})
+
+it.each(['metadata', 'events'])('refuses partial snapshot %s responses without replacing verified bytes', async phase => {
+  const store = createValueStore()
+  store.apply('r', event(0, 'corpus', { result: 'verified bytes' }))
+  const fetchImpl = vi.fn().mockResolvedValueOnce(stream([frame('run', { ...event(1, 'corpus', { truncated: true }), run_id: 'r' })]))
+    .mockResolvedValueOnce(json({ run_id: 'r', state: 'finished', graph_revision: 1 }, phase === 'metadata' ? 206 : 200))
+    .mockResolvedValueOnce(json({ events: [{ ...event(1, 'corpus', { result: 'partial bytes' }) }, { seq: 2, kind: 'finished', payload: {} }] }, 206))
+  const sleep = vi.fn(async (ms, signal) => new Promise(resolve => signal.addEventListener('abort', resolve, { once: true })))
+  open({ runIds: ['r'], store, fetchImpl, sleep })
+  await waitFor(() => expect(sleep).toHaveBeenCalledTimes(1))
+  expect(store.getRun('r').transport).toMatchObject({ status: 'invalid_evidence', evidenceError: 'snapshot_response_invalid' })
+  expect(store.getRun('r').lastSeq).toBe(0)
+  expect(store.getBlock('r', 'corpus').value.result).toBe('verified bytes')
+  expect(fetchImpl).toHaveBeenCalledTimes(phase === 'metadata' ? 2 : 3)
+  expect(fetchImpl.mock.calls.every(([, init]) => !init.method || init.method === 'GET')).toBe(true)
+})
+
 afterEach(() => { cleanup(); handles.splice(0).forEach(handle => handle.stop()); localStorage.removeItem('leaf.jwt'); vi.restoreAllMocks() })
 
 it('keeps unknown submission intent for explicit recovery and separates rejection', async () => {

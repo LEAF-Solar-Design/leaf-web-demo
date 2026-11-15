@@ -51,7 +51,8 @@ it('submits only a fresh server-derived frame request without raw request/frame 
 it('refuses a mismatched fresh preparation revision without any submission', async () => {
   const h = fixture(); h.mount(); await h.choose(); h.revision = 7
   fireEvent.click(screen.getByRole('button', { name: 'Run solve' }))
-  await waitFor(() => expect(screen.getByRole('status')).toBeTruthy())
+  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(
+    'This saved drawing could not be prepared for Solve. Refresh it and try again.'))
   expect(h.client.prepareRun).not.toHaveBeenCalled()
   expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
 })
@@ -79,7 +80,8 @@ it('ignores late choices after the captured scope becomes stale', async () => {
 it.each([undefined, null, 'f'.repeat(64)])('refuses a missing or mismatched fresh preparation digest (%s)', async (digest) => {
   const h = fixture(); h.mount(); await h.choose(); h.digest = digest
   fireEvent.click(screen.getByRole('button', { name: 'Run solve' }))
-  await waitFor(() => expect(screen.getByRole('status')).toBeTruthy())
+  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(
+    'This saved drawing could not be prepared for Solve. Refresh it and try again.'))
   expect(h.client.prepareRun).not.toHaveBeenCalled()
   expect(h.props.newProjectIntentKey).not.toHaveBeenCalled()
   expect(h.props.onProjectSubmit).not.toHaveBeenCalled()

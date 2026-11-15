@@ -395,6 +395,40 @@ function mapOriginal(pointer) {
   fireEvent.change(screen.getByLabelText('Import dataset ID'), { target: { value: 'original-records' } })
   fireEvent.change(screen.getByLabelText('Import dataset title'), { target: { value: 'Imported original' } })
 }
+it.each(['remaining_pct', 'reset_at'])('later-record discovery includes %s absent from the first record', async field => {
+  const harness = await materialHarness([{ account: 'first' }, { account: 'second', [field]: field === 'remaining_pct' ? 0 : '2026-11-02T12:00:00Z' }], '')
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded(); await openOriginal(); mapOriginal('')
+  expect(screen.getByLabelText('Field 1 id').value).toBe('account')
+  expect(screen.getByLabelText('Field 2 id').value).toBe(field)
+  expect(importPosts(harness.fetchImpl)).toHaveLength(0)
+})
+it('later-record discovery preserves first-seen order, exclusions and the100field limit', async () => {
+  const later = JSON.parse('{"constructor":"blocked","prototype":"blocked","__proto__":"blocked","pair_key":"main"}')
+  for (let i = 0; i < 110; i++) later[`extra_${i}`] = i
+  const harness = await materialHarness([null, 7, ['not a record'], { account: 'first' }, later], '')
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded(); await openOriginal(); mapOriginal('')
+  expect(screen.getByLabelText('Field 1 id').value).toBe('account')
+  expect(screen.getByLabelText('Field 2 id').value).toBe('pair_key')
+  expect(screen.getByLabelText('Field 100 id').value).toBe('extra_97')
+  expect(screen.queryByLabelText('Field 101 id')).toBeNull()
+  expect(importPosts(harness.fetchImpl)).toHaveLength(0)
+})
+it.each(['account', 'pair_key', 'remaining_pct', String.raw`acc\u006funt`])('refuses duplicate original JSON member %s before mapping', async key => {
+  const field = key.startsWith('acc') ? 'account' : key
+  const raw = `[{"${field}":"first","${key}":"second"}]`
+  const harness = await materialHarness([{ [field]: 'first' }], '')
+  const blob = new Blob([raw], { type: 'application/json' })
+  harness.material.byte_size = blob.size
+  harness.material.sha256 = Array.from(new Uint8Array(await webcrypto.subtle.digest('SHA-256', await blob.arrayBuffer())), byte => byte.toString(16).padStart(2, '0')).join('')
+  readProjectReferenceOriginal.mockResolvedValue(blob)
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded()
+  fireEvent.click(screen.getByRole('button', { name: 'List JSON originals' }))
+  await screen.findByRole('option', { name: '<img src=x onerror=alert(1)>.json' })
+  fireEvent.change(screen.getByLabelText('Project original'), { target: { value: otherProject } })
+  expect(await screen.findByRole('alert')).toHaveTextContent('Duplicate JSON members. Nothing was imported.')
+  expect(screen.queryByLabelText('Records array')).toBeNull()
+  expect(importPosts(harness.fetchImpl)).toHaveLength(0)
+})
 it.each([
   ['/pr_records', 15689, (rows) => ({ schema: 'history', scope: { repos: ['a', 'b'] }, captured_at: '2026-09-01', pr_records: rows })],
   ['/samples', 164, (rows) => ({ samples: rows, limitations: ['snapshot only'], ingested_at: '2026-09-02' })],
@@ -1246,6 +1280,32 @@ it.each(['record', 'revision', 'recipe'])('clears the last result when selecting
   expect(screen.getByRole('alert')).toHaveTextContent("Couldn't reach the service")
   expect(screen.queryByRole('table')).toBeNull()
 })
+it.each(['\u200b\u200c\u200d', '\u2060\ufeff'])('refuses an invisible native view title %j without saving and recovers', async title => {
+  const { props } = setup()
+  const save = vi.spyOn(props.client, 'saveElement')
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded(); fill()
+  fireEvent.change(screen.getByLabelText('Title'), { target: { value: title } })
+  fireEvent.submit(screen.getByRole('form', { name: 'Compose native view' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('Enter a visible view title.')
+  expect(save).not.toHaveBeenCalled()
+  expect(screen.getByLabelText('Title')).toHaveValue(title)
+  expect(screen.getByRole('button', { name: 'Save view' })).toBeEnabled()
+  fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Visible recovered view' } })
+  fireEvent.submit(screen.getByRole('form', { name: 'Compose native view' }))
+  await screen.findByText('Saved Visible recovered view, revision 3.')
+  expect(save).toHaveBeenCalledOnce()
+})
+it.each(['حساب', '容量', '🌻', 'e\u0301'])('keeps a visible Unicode view title %s', async title => {
+  const { props } = setup()
+  const save = vi.spyOn(props.client, 'saveElement')
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded(); fill()
+  fireEvent.change(screen.getByLabelText('Title'), { target: { value: title } })
+  fireEvent.submit(screen.getByRole('form', { name: 'Compose native view' }))
+  await screen.findByText(`Saved ${title}, revision 3.`)
+  expect(save).toHaveBeenCalledOnce()
+})
 it.each(['table', 'line'])('saves strict native %s recipes with exact dataset refs', async (kind) => {
   const { props, fetchImpl } = setup()
   render(<OpsWorkspaceGround {...props} />)
@@ -1260,6 +1320,48 @@ it.each(['table', 'line'])('saves strict native %s recipes with exact dataset re
     props: kind === 'table' ? { columns: ['day', 'total'], row_limit: 100 } : { x_field: 'day', y_field: 'total' } })
   expect(saves[0][1].headers['If-Match']).toBeUndefined()
   expect(screen.getByText('Saved New order view, revision 3.')).toHaveFocus()
+})
+it.each(['title', 'query', 'columns'])('refuses an unverified saved recipe %s before announcing success', async (change) => {
+  const { props } = setup()
+  vi.spyOn(props.client, 'saveElement').mockImplementation(async (_id, recipe) => {
+    const acknowledged = structuredClone(recipe)
+    if (change === 'title') acknowledged.title = 'Unexpected recipe'
+    if (change === 'query') acknowledged.query.limit = 1
+    if (change === 'columns') acknowledged.props.columns = ['day']
+    return { element: acknowledged, revision: 3 }
+  })
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded(); fill()
+  fireEvent.click(screen.getByRole('button', { name: 'Save view' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('saved recipe did not match')
+  expect(screen.queryByText(/^Saved .*, revision \d+\.$/)).toBeNull()
+  expect(screen.getByLabelText('Title')).toHaveValue('New order view')
+  expect(screen.getByRole('button', { name: 'Save view' })).toBeEnabled()
+})
+it('accepts the exact saved recipe with reordered object keys', async () => {
+  const { props } = setup()
+  vi.spyOn(props.client, 'saveElement').mockImplementation(async (_id, recipe) => ({
+    element: Object.fromEntries(Object.entries(recipe).reverse()), revision: 3,
+  }))
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded(); fill()
+  fireEvent.click(screen.getByRole('button', { name: 'Save view' }))
+  await screen.findByText('Saved New order view, revision 3.')
+})
+it.each(['reviewer', 'read_only'])('keeps the native view composer inert for %s while allowing saved reads', async projectRole => {
+  const { props, fetchImpl } = setup()
+  const original = fetchImpl.getMockImplementation()
+  fetchImpl.mockImplementation((url, options) => url.endsWith('/scope')
+    ? Promise.resolve(response({ ...scope, projectRole })) : original(url, options))
+  const save = vi.spyOn(props.client, 'saveElement')
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  expect(screen.getByRole('button', { name: 'Save view' })).toBeDisabled()
+  fireEvent.submit(screen.getByRole('form', { name: 'Compose native view' }))
+  expect(save).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Order view · revision 2' }))
+  await screen.findByRole('table', { name: 'Order view data' })
+  expect(screen.getByRole('button', { name: 'Save view' })).toBeDisabled()
 })
 it('retries only the read after a saved view fails to load, without writing another revision', async () => {
   const { props } = setup()

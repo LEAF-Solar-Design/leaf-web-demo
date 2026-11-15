@@ -16,6 +16,7 @@ async function request(path, { fetchImpl = globalThis.fetch, body, signal, onUna
     let data
     if (snapshot && response.ok) {
       const invalid = () => ({ ok: false, status: response.status, invalidEvidence: true, detail: 'Invalid snapshot response' })
+      if (response.status !== 200) return invalid()
       if (typeof response.headers?.get === 'function') {
         const media = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase()
         if (!/^application\/(?:json|[a-z0-9!#$&^_.+-]+\+json)$/.test(media)) return invalid()
@@ -83,16 +84,28 @@ export function openRunStream({ runIds, store = labValueStore, fetchImpl = globa
     if (!row.ok) { if (row.status === 401) { paused = true; transport({ status: 'auth_expired' }) }; throw new Error('Snapshot unavailable') }
     const staged = store.createSnapshotStore()
     staged.upsertRun(id, { state: row.state, graph_revision: row.graph_revision })
-    let after = -1
+    let after = -1, snapshotBytes = 0, snapshotPages = 0
+    const budgetExceeded = () => {
+      paused = true
+      transport({ status: 'invalid_evidence', evidenceError: 'snapshot_budget_exceeded' })
+      throw new SnapshotEvidenceError('Snapshot budget exceeded')
+    }
     for (;;) {
-      const page = await request(`runs/${encodeURIComponent(id)}/events?after_seq=${after}&limit=500`, { fetchImpl, signal: connectionSignal, onUnauthorized: rememberUnauthorized })
+      if (++snapshotPages > 128) budgetExceeded()
+      const page = await request(`runs/${encodeURIComponent(id)}/events?after_seq=${after}&limit=500`, { fetchImpl, signal: connectionSignal, onUnauthorized: rememberUnauthorized, snapshot: true })
       if (stopped || connectionSignal.aborted) return
+      if (page.invalidEvidence) {
+        transport({ evidenceError: 'snapshot_response_invalid' })
+        throw new SnapshotEvidenceError('Invalid snapshot event response')
+      }
       if (!page.ok) { if (page.status === 401) { paused = true; transport({ status: 'auth_expired' }) }; throw new Error('Snapshot events unavailable') }
       if (!Array.isArray(page.events) || page.events.some(event => !event || (event.run_id !== undefined && event.run_id !== id) || !Number.isSafeInteger(event.seq) || event.seq <= after)) {
         transport({ evidenceError: 'snapshot_response_invalid' })
         throw new SnapshotEvidenceError('Invalid snapshot events')
       }
       for (const event of page.events) {
+        snapshotBytes += new TextEncoder().encode(JSON.stringify(event)).byteLength
+        if (snapshotBytes > 64 * 1024 * 1024) budgetExceeded()
         if (!staged.apply(id, event)) {
           transport({ evidenceError: 'snapshot_response_invalid' })
           throw new SnapshotEvidenceError('Invalid snapshot cursor order')
