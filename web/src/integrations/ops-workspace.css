@@ -28,3 +28,15 @@
 }
 .ops-advanced { margin-block: 16px; padding: 12px; border: 1px solid var(--leaf-border, var(--leaf-line)); border-radius: var(--leaf-radius-control); }
 .ops-advanced > summary { min-height: 44px; align-content: center; font-size: var(--leaf-size-heading); cursor: pointer; }
+@media print {
+  .studio-ground-ops:not([hidden]),
+  .studio-ground-ops:not([hidden]) .ops-workspace {
+    position: static;
+    inset: auto;
+    height: auto;
+    max-height: none;
+    overflow: visible;
+  }
+  .studio-ground-ops section[aria-label^="Pair "],
+  .studio-ground-ops section[aria-label="Unpaired accounts"] { break-inside: avoid; }
+}
