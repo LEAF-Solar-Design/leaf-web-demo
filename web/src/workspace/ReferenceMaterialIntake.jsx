@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useId, useRef, useState, useSyncExternalStore } from 'react'
 import { readActiveScope, subscribeActiveScope } from '../auth/activeScope.js'
 import { subscribeBeforeLogout } from '../auth.js'
 import { listProjectReferences, readProjectReferenceOriginal, registerProjectArloInput, readProjectArloInput, reviseProjectArloInput, restoreProjectArloInput, uploadProjectReference } from '../projects/api.js'
@@ -28,6 +28,7 @@ function ReferenceSession({ projectId, orgId, scope, onRunArlo }) {
   const [activeInputs, setActiveInputs] = useState({})
   const [editor, setEditor] = useState(null)
   const [constraintError, setConstraintError] = useState('')
+  const constraintErrorId = useId()
   const input = useRef(null)
   const live = useRef(false)
   const running = useRef(false)
@@ -266,12 +267,15 @@ function ReferenceSession({ projectId, orgId, scope, onRunArlo }) {
         {editor?.materialId === row.material_id && <form aria-label="ARLO constraints" onSubmit={event => { event.preventDefault(); void saveConstraints(row) }}>
           {Object.entries(editor.fields).map(([path, value]) => <label key={path}>{path}
             <input type="number" step="any" value={value} disabled={Boolean(arlo?.running)}
-              onChange={event => setEditor(previous => ({ ...previous, fields: { ...previous.fields, [path]: event.target.value } }))} />
+              aria-describedby={constraintError ? constraintErrorId : undefined}
+              aria-invalid={constraintError && (constraintError.startsWith(`${path} `)
+                || !value.trim() || !Number.isFinite(Number(value))) ? true : undefined}
+              onChange={event => { setConstraintError(''); setEditor(previous => ({ ...previous, fields: { ...previous.fields, [path]: event.target.value } })) }} />
           </label>)}
           <button type="submit" disabled={Boolean(arlo?.running)}>Save revision</button>
           <button type="button" disabled={Boolean(arlo?.running)} onClick={() => { setEditor(null); setConstraintError('') }}>Cancel editing</button>
         </form>}
-        {arlo?.materialId === row.material_id && constraintError && <p role="alert">{constraintError}</p>}
+        {arlo?.materialId === row.material_id && constraintError && <p id={constraintErrorId} role="alert">{constraintError}</p>}
         {arlo?.materialId === row.material_id && (arlo.error
           ? <p role="alert">{arlo.error}</p> : <p role="status">{arlo.detail}</p>)}
       </>}
