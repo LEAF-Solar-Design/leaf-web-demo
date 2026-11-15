@@ -39,6 +39,7 @@ class CaseResult:
     next_action: str | None = None
     object_named: bool | None = None
     ok_body: bool = False
+    async_refusal: bool = False
     state_before: tuple | None = None
     state_after: tuple | None = None
     note: str = ""
@@ -78,30 +79,46 @@ def run_cases(client, transport, *, project, drawing, sleep=time.sleep, clock=ti
         except Exception:
             return None
 
-    def finish(response):
+    def refresh():
+        nonlocal version, rev
+        version = context()["context"]["head_version_id"]
+        graph = context().get("intake", {}).get("solar_design_graph", {})
+        rev = graph.get("rev", rev)
+
+    def finish(response, *, write=False):
         status, body = response
-        if isinstance(body, dict) and body.get("job_id"):
-            body = client.wait_job(body["job_id"])
+        if status == 202 and isinstance(body, dict) and body.get("job_id"):
+            body = client.wait_job(body["job_id"], timeout_s=600)
             if body.get("status") == "failed":
-                raise parse_error(422, body)
+                error = parse_error(status, body)
+                error.async_refusal = True
+                raise error
         if not 200 <= status < 300:
             raise parse_error(status, body)
+        if write:
+            refresh()
         return status, body
 
     def call(tool, params, *, cap=None):
         return finish(client.run(tool, org_id=project["org_id"], project_id=pid,
                                  version_id=version, params=params, capability=cap,
-                                 idempotency_key=new_idempotency_key("x02")))
+                                 idempotency_key=new_idempotency_key("x02")),
+                      write=tool != "count-by-layer")
 
-    def capture(case, action):
+    def capture(case, action, *, prepare=None):
         result = CaseResult(case, seeded=True, state_before=state())
         try:
+            if prepare is not None:
+                prepare()
+                result.state_before = state()
             result.status, body = action()
-            result.ok_body = isinstance(body, dict) and body.get("ok") is True
+            result.ok_body = isinstance(body, dict) and (body.get("ok") is True or
+                                                       body.get("status") == "complete")
             error = parse_error(result.status, body)
         except StudioError as exc:
             error = exc
             result.status = exc.status
+            result.async_refusal = getattr(exc, "async_refusal", False)
             result.ok_body = isinstance(exc.body, dict) and exc.body.get("ok") is True
         except Exception as exc:
             error = None
@@ -129,13 +146,7 @@ def run_cases(client, transport, *, project, drawing, sleep=time.sleep, clock=ti
         return params
 
     def setup(changes, initialize=None):
-        nonlocal version, rev
-        _, body = call("solar-settings", settings(changes, initialize), cap=capability)
-        output = body.get("result", body)
-        version = output["output_version_id"]
-        rev += 1
-        graph = context().get("intake", {}).get("solar_design_graph", {})
-        rev = graph.get("rev", rev)
+        call("solar-settings", settings(changes, initialize), cap=capability)
 
     def unavailable(cases, exc):
         note = safe(f"setup failed: {type(exc).__name__}: {exc}")
@@ -153,22 +164,19 @@ def run_cases(client, transport, *, project, drawing, sleep=time.sleep, clock=ti
         capture("7", lambda: call("solar-settings", settings({"panels_in_sequence": 10}, seed("unknown")),
                                   cap=capability))
         try:
-            setup({"panels_in_sequence": 10}, seed("in"))
+            setup({"panel_layer_contains": OBJECTS["4b"]}, seed("in"))
         except Exception as exc:
             unavailable(("4a", "4b", "9", "8"), exc)
             return [results[case] for case in CASE_IDS]
-        capture("4a", lambda: call("solar-panels-from-drawing",
-                                   {"drawing_id": did, "expected_rev": rev}, cap=capability))
-        try:
-            setup({"panel_layer_contains": OBJECTS["4b"]})
-        except Exception as exc:
-            unavailable(("4b", "9", "8"), exc)
-            return [results[case] for case in CASE_IDS]
         capture("4b", lambda: call("solar-panels-from-drawing",
                                    {"drawing_id": did, "expected_rev": rev}, cap=capability))
+        capture("4a", lambda: call("solar-panels-from-drawing",
+                                   {"drawing_id": did, "expected_rev": rev}, cap=capability),
+                prepare=lambda: setup({"panel_layer_contains": ""}))
         path = "/api/projects/{}/drawings/{}/versions/{}/imports/solaredge-pdf".format(
             *(quote(str(value), safe="") for value in (pid, did, version)))
-        capture("9", lambda: finish(transport("POST", path, headers={"Content-Type": "application/pdf"}, data=PDF)))
+        capture("9", lambda: finish(transport("POST", path, headers={"Content-Type": "application/pdf"}, data=PDF),
+                                    write=True))
         try:
             client.release(pid, did, capability)
             capability = None
@@ -216,7 +224,7 @@ def score(results):
                 if row.object_named is False:
                     reasons.append("object not named")
             elif n == 2:
-                if row.status is not None and 200 <= row.status < 300:
+                if row.status is not None and 200 <= row.status < 300 and not row.async_refusal:
                     reasons.append(f"2xx status {row.status}")
                 if row.ok_body:
                     reasons.append("ok:true")
