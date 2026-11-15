@@ -203,3 +203,143 @@ describe('O03 standalone retention controls, inert client only', () => {
     expect(h.client.listDatasets.mock.calls[0][1].signal.aborted).toBe(true)
   })
 })
+
+
+describe('stored internal schedule and bounded run navigation', () => {
+  const storedDefinition = { resourceId: 'retention-definition:logs:v3', revision: 1, definition: {
+    kind: 'project_log_retention_definition_v1', external_activation: false, default_mode: 'dry_run',
+    title: 'Stored retention definition', settings: { batchSize: 250, maxBatchesPerClass: 3 } } }
+  const storedSchedule = { resourceId: 'retention-schedule:daily:v2', revision: 1, schedule: {
+    kind: 'project_log_retention_schedule_v1', external_activation: false, daily_utc: '09:45',
+    definition_id: storedDefinition.resourceId, definition_revision: 1, prepared_table_id: table } }
+  const bound = resourceId => ({ resourceId, revision: 1, digest: 'e'.repeat(64) })
+  const historyItem = { resourceId: execution, revision: 1, admittedAt: audit.admittedAt, parentDeadlineAt: audit.parentDeadlineAt,
+    expired: false, dueAt: '2031-01-01T09:45:00.000Z', schedule: bound(storedSchedule.resourceId),
+    definition: bound(storedDefinition.resourceId), prepared: bound(table), checkpoint: { phase: 'admitted', batches: 0 },
+    counters: null, archiveDigest: null }
+  const historyPage = (item = historyItem, nextCursor = null) => ({ items: [item], nextCursor, asOf: '2031-01-01T09:45:02.000Z' })
+  function navigationSetup() {
+    const h = setup()
+    h.client.retentionGetSchedule = vi.fn().mockResolvedValue(storedSchedule)
+    h.client.retentionGetDefinition.mockResolvedValue(storedDefinition)
+    h.client.retentionHistory = vi.fn().mockResolvedValue(historyPage())
+    return h
+  }
+  function enterSchedule() { change('Schedule slug', 'daily'); change('Schedule version', '2'); click('Open internal schedule') }
+  const historyGroup = () => within(screen.getByRole('group', { name: 'Run history' }))
+  function expectNoWrites(h) {
+    for (const method of ['retentionRegisterDefinition', 'retentionPrepare', 'retentionRegisterSchedule', 'retentionAdmit', 'retentionReview',
+      'retentionApply', 'retentionAdmitRestore', 'retentionRestore', 'retentionRecover']) expect(h.client[method]).not.toHaveBeenCalled()
+  }
+  it('opens actual stored schedule and definition bindings without preparing or registering anything', async () => {
+    const h = navigationSetup(); render(<ProjectLogRetentionPanel {...h.props} />); enterSchedule()
+    await screen.findByText(/Stored internal schedule opened/)
+    expect(h.client.retentionGetSchedule).toHaveBeenCalledWith(projectId, 'daily', 2, expect.objectContaining({ signal: expect.any(AbortSignal) }))
+    expect(h.client.retentionGetDefinition).toHaveBeenCalledWith(projectId, 'logs', 3, expect.objectContaining({ signal: expect.any(AbortSignal) }))
+    expect(screen.getByLabelText('Definition slug')).toHaveValue('logs'); expect(screen.getByLabelText('Definition version')).toHaveValue(3)
+    expect(screen.getByLabelText('Definition title')).toHaveValue('Stored retention definition')
+    expect(screen.getByLabelText('Batch size')).toHaveValue(250); expect(screen.getByLabelText('Maximum batches per class')).toHaveValue(3)
+    expect(screen.getByLabelText('Retention clock (UTC milliseconds)')).toHaveValue('')
+    expect(screen.getByLabelText('Record ID field')).toHaveValue(''); expect(screen.getByLabelText('Imported dataset')).toHaveValue('')
+    expect(screen.getByText('Prepared table: ' + table + '.')).toBeInTheDocument(); expectNoWrites(h)
+    change('Occurrence due date', '2031-01-02'); click('Admit internal run'); await idle()
+    expect(h.client.retentionAdmit).toHaveBeenCalledWith(projectId, { schedule: { resourceId: storedSchedule.resourceId, revision: 1 },
+      definition: { resourceId: storedDefinition.resourceId, revision: 1 }, preparedTableId: table, dueAt: '2031-01-02T09:45:00.000Z' }, expect.any(Object))
+  })
+  it('refuses stored definition revision mismatch and leaves prior bindings unavailable', async () => {
+    const h = navigationSetup(); h.client.retentionGetDefinition.mockResolvedValue({ ...storedDefinition, revision: 2 })
+    render(<ProjectLogRetentionPanel {...h.props} />); enterSchedule(); await screen.findByRole('alert')
+    expect(screen.getByRole('button', { name: 'Save internal schedule' })).toBeDisabled()
+    expect(screen.queryByText('Prepared table: ' + table + '.')).not.toBeInTheDocument(); expectNoWrites(h)
+  })
+  it('rechecks authority between stored schedule and definition reads', async () => {
+    const h = navigationSetup(); h.props.guard.mockResolvedValueOnce().mockRejectedValue(Object.assign(new Error('revoked'), { status: 403 }))
+    render(<ProjectLogRetentionPanel {...h.props} />); enterSchedule(); await screen.findByRole('alert')
+    expect(h.client.retentionGetSchedule).toHaveBeenCalledTimes(1); expect(h.client.retentionGetDefinition).not.toHaveBeenCalled()
+    expect(h.props.onForbidden).toHaveBeenCalled(); expectNoWrites(h)
+  })
+  it('retires a schedule read when slug/version changes before its response', async () => {
+    const h = navigationSetup(), held = deferred(); h.client.retentionGetSchedule.mockReturnValue(held.promise)
+    render(<ProjectLogRetentionPanel {...h.props} />); enterSchedule()
+    await waitFor(() => expect(h.client.retentionGetSchedule).toHaveBeenCalledTimes(1)); change('Schedule slug', 'another')
+    expect(h.client.retentionGetSchedule.mock.calls[0][3].signal.aborted).toBe(true)
+    held.resolve(storedSchedule); await Promise.resolve(); await Promise.resolve()
+    expect(h.client.retentionGetDefinition).not.toHaveBeenCalled(); expect(screen.getByLabelText('Schedule slug')).toHaveValue('another')
+    expect(screen.queryByText('Prepared table: ' + table + '.')).not.toBeInTheDocument(); expectNoWrites(h)
+  })
+  it('loads projected actual run history with explicit unknown counts and opens its actual audit without writes', async () => {
+    const h = navigationSetup(); render(<ProjectLogRetentionPanel {...h.props} />); click('Load run history')
+    await historyGroup().findByText('Counts are not yet committed.')
+    expect(h.client.retentionHistory).toHaveBeenCalledWith(projectId, expect.objectContaining({ signal: expect.any(AbortSignal), limit: 25 }))
+    expect(historyGroup().getAllByText(historyItem.admittedAt)).toHaveLength(2)
+    expect(historyGroup().queryByText(/Active 0/)).not.toBeInTheDocument()
+    click('Open run ' + execution); await screen.findByRole('region', { name: 'Actual run audit' })
+    expect(screen.getByLabelText('Execution ID')).toHaveValue(execution)
+    expect(h.client.retentionAudit).toHaveBeenCalledWith(projectId, execution, expect.any(Object)); expectNoWrites(h)
+  })
+  it('pages history by exact cursor stack and shows stored counters only when present', async () => {
+    const h = navigationSetup(), secondId = 'retention-execution:' + '9'.repeat(64)
+    h.client.retentionHistory.mockImplementation(async (_project, options) => options.after
+      ? historyPage({ ...historyItem, resourceId: secondId, counters: audit.counters, archiveDigest: audit.archiveDigest })
+      : historyPage(historyItem, 'history-next'))
+    render(<ProjectLogRetentionPanel {...h.props} />); click('Load run history')
+    await historyGroup().findByText('Counts are not yet committed.'); click('Next history')
+    await historyGroup().findByRole('button', { name: 'Open run ' + secondId })
+    expect(historyGroup().queryByRole('button', { name: 'Open run ' + execution })).not.toBeInTheDocument()
+    expect(h.client.retentionHistory).toHaveBeenLastCalledWith(projectId, expect.objectContaining({ limit: 25, after: 'history-next' }))
+    expect(historyGroup().getByText(/Active 152 of 152/)).toBeInTheDocument(); click('Previous history')
+    await historyGroup().findByRole('button', { name: 'Open run ' + execution })
+    expect(h.client.retentionHistory.mock.calls.at(-1)[1]).not.toHaveProperty('after'); expectNoWrites(h)
+  })
+  it('clears old history on failed next page and retries that exact requested cursor', async () => {
+    const h = navigationSetup()
+    h.client.retentionHistory.mockResolvedValueOnce(historyPage(historyItem, 'history-next')).mockRejectedValueOnce(new Error('unreadable')).mockResolvedValue(historyPage())
+    render(<ProjectLogRetentionPanel {...h.props} />); click('Load run history'); await historyGroup().findByRole('button', { name: 'Open run ' + execution })
+    click('Next history'); await historyGroup().findByRole('button', { name: 'Retry run history' })
+    expect(historyGroup().queryByRole('button', { name: 'Open run ' + execution })).not.toBeInTheDocument()
+    click('Retry run history'); await historyGroup().findByRole('button', { name: 'Open run ' + execution })
+    expect(h.client.retentionHistory).toHaveBeenLastCalledWith(projectId, expect.objectContaining({ after: 'history-next', limit: 25 }))
+  })
+  it('aborts superseded history loads and rejects late readback after context replacement', async () => {
+    const h = navigationSetup(), first = deferred(), second = deferred()
+    h.client.retentionHistory.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
+    const mounted = render(<ProjectLogRetentionPanel {...h.props} />); click('Load run history')
+    await waitFor(() => expect(h.client.retentionHistory).toHaveBeenCalledTimes(1)); click('Load run history')
+    await waitFor(() => expect(h.client.retentionHistory).toHaveBeenCalledTimes(2))
+    expect(h.client.retentionHistory.mock.calls[0][1].signal.aborted).toBe(true)
+    first.resolve(historyPage()); await Promise.resolve()
+    expect(historyGroup().queryByRole('button', { name: 'Open run ' + execution })).not.toBeInTheDocument()
+    mounted.rerender(<ProjectLogRetentionPanel {...h.props} projectId="22222222-2222-4222-8222-222222222222" />)
+    second.resolve(historyPage()); await Promise.resolve()
+    expect(historyGroup().queryByRole('button', { name: 'Open run ' + execution })).not.toBeInTheDocument()
+    expect(h.client.retentionHistory.mock.calls[1][1].signal.aborted).toBe(true)
+  })
+  it('clears private history on parent abort and does not adopt unmounted pending history', async () => {
+    const h = navigationSetup(); const mounted = render(<ProjectLogRetentionPanel {...h.props} />)
+    click('Load run history'); await historyGroup().findByRole('button', { name: 'Open run ' + execution })
+    h.controller.abort(); await screen.findByRole('alert')
+    expect(historyGroup().queryByRole('button', { name: 'Open run ' + execution })).not.toBeInTheDocument()
+    mounted.unmount()
+    const next = navigationSetup(), held = deferred(); next.client.retentionHistory.mockReturnValue(held.promise)
+    const late = render(<ProjectLogRetentionPanel {...next.props} />); click('Load run history')
+    await waitFor(() => expect(next.client.retentionHistory).toHaveBeenCalledTimes(1)); late.unmount()
+    expect(next.client.retentionHistory.mock.calls[0][1].signal.aborted).toBe(true)
+    held.resolve(historyPage()); await Promise.resolve()
+    expect(screen.queryByRole('group', { name: 'Run history' })).not.toBeInTheDocument()
+  })
+  it('leaves older clients usable with history explicitly unavailable', () => {
+    const h = setup(); render(<ProjectLogRetentionPanel {...h.props} />)
+    expect(screen.getByRole('button', { name: 'Load run history' })).toBeDisabled()
+    expect(screen.getByText('Run history is unavailable with this client.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save definition' })).toBeEnabled()
+  })
+  it('rejects malformed projected history and malformed state strings without rendering markup', async () => {
+    const h = navigationSetup(); h.client.retentionHistory.mockResolvedValueOnce({ items: 'not-a-page', nextCursor: null, asOf: audit.admittedAt })
+      .mockResolvedValueOnce(historyPage({ ...historyItem, checkpoint: { phase: '<img src=x>', batches: 0 } }))
+    render(<ProjectLogRetentionPanel {...h.props} />); click('Load run history'); await historyGroup().findByRole('button', { name: 'Retry run history' })
+    click('Retry run history'); await waitFor(() => expect(h.client.retentionHistory).toHaveBeenCalledTimes(2))
+    await historyGroup().findByRole('button', { name: 'Retry run history' })
+    expect(historyGroup().queryByRole('button', { name: 'Open run ' + execution })).not.toBeInTheDocument()
+    expect(document.querySelector('img')).toBeNull(); expectNoWrites(h)
+  })
+})

@@ -2,6 +2,10 @@ import { expect as baseExpect, test } from '@playwright/test'
 import { REQUEST, catProofResponse, makeCatProofState } from '../catProofFixture.mjs'
 import { scaled } from '../timeScale.mjs'
 
+// Each test owns its page/context, routes and fixture state; diagnostics are keyed by page.
+test.describe.configure({ mode: 'parallel' })
+test.use({ video: 'off' })
+
 // Device CI workers differ about 4x in browser speed (2026-11-12: zachs and the two WSL workers on one
 // laptop fail every fixed 20 s / 60 s deadline here while run-1 and run-2 pass). Budgets are ceilings,
 // not waits: a passing test takes the same time at any scale. LEAF_E2E_TIME_SCALE overrides (1 to 10).

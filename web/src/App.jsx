@@ -2486,16 +2486,22 @@ export default function App() {
   const projectDrawingName = projectDrawing.intake?.dwg || projectSolar.scope.binding?.drawing_id || ''
   const visibleLayers = projectMode ? projectSolarRuntime.visibleLayers : standaloneVisibleLayers
   const setVisibleLayers = projectMode ? projectSolarRuntime.setVisibleLayers : setStandaloneVisibleLayers
+  // Context reads can briefly hide the drawing during checkout refresh. Retire
+  // selection for a canonical identity change, not that read's pending state.
+  const projectDrawingScopeKey = projectMode && projectSolar.scope.binding
+    ? 'project:' + [projectSolar.scope.binding.organization_id, projectSolar.scope.binding.project_id,
+      projectSolar.scope.binding.drawing_id, projectSolar.scope.binding.input_version_id].join(':')
+    : null
   const previousProjectDrawing = useRef({ projectMode: false, drawingKey: null })
   useLayoutEffect(() => {
     const previous = previousProjectDrawing.current
     if ((projectMode || previous.projectMode)
-      && (previous.projectMode !== projectMode || previous.drawingKey !== projectDrawing.drawingKey)) {
+      && (previous.projectMode !== projectMode || previous.drawingKey !== projectDrawingScopeKey)) {
       setSelectedHandle(null)
       clearViewHistory()
     }
-    previousProjectDrawing.current = { projectMode, drawingKey: projectDrawing.drawingKey }
-  }, [projectMode, projectDrawing.drawingKey, clearViewHistory])
+    previousProjectDrawing.current = { projectMode, drawingKey: projectDrawingScopeKey }
+  }, [projectMode, projectDrawingScopeKey, clearViewHistory])
   const consoleDrawingKey = `console:${drawingLoad.drawingId}`
   const consoleObjectIndex = useMemo(() => projectMode
     ? projectDrawing.mode === 'ready' ? buildDrawingObjectIndex({

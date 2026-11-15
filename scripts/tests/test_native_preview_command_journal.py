@@ -10,6 +10,7 @@ import pytest
 
 sys.path[:0] = [str(Path(__file__).resolve().parents[1]), str(Path(__file__).resolve().parent)]
 import native_preview_command_journal as journal
+import native_preview_session_contract as contract
 from test_native_preview_session_contract import command, context, wire, IDS
 
 
@@ -61,12 +62,102 @@ def test_unknown_schema_refuses_reopen_and_existing_owner_without_mutation(tmp_p
                    lambda: finish(owner, raw), owner.start_closing):
         with pytest.raises(journal.JournalError) as caught:
             action()
+        assert caught.value.code == 'native_session_journal_unavailable'
         assert str(caught.value) == 'Native session journal unavailable or conflicting.'
         assert owner.path.read_bytes() == before
 
 
 def finish(owner, raw, outcome='complete', evidence='d' * 64):
     return owner.finish(command()['request_id'], digest(raw), outcome, evidence)
+
+
+def assert_refused(action):
+    with pytest.raises(journal.JournalError) as caught:
+        action()
+    assert caught.value.code == 'native_session_journal_unavailable'
+    assert str(caught.value) == 'Native session journal unavailable or conflicting.'
+    assert caught.value.__context__ is None
+
+
+@pytest.mark.parametrize('schema', ['leaf.native-session-command.v999', 1, None])
+def test_command_schema_refusal_has_fixed_code_and_preserves_database(tmp_path, schema):
+    owner = make(tmp_path)
+    value = command()
+    value['schema'] = schema
+    before = owner.path.read_bytes()
+    assert_refused(lambda: owner.prepare(wire(value), now=100))
+    assert owner.path.read_bytes() == before
+    assert owner.snapshot()['commands'] == []
+
+
+@pytest.mark.parametrize('field', sorted(contract.COMMAND_FIELDS))
+def test_missing_command_field_has_fixed_code_without_intent(tmp_path, field):
+    owner = make(tmp_path)
+    value = command()
+    del value[field]
+    before = owner.path.read_bytes()
+    assert_refused(lambda: owner.prepare(wire(value), now=100))
+    assert owner.path.read_bytes() == before
+
+
+@pytest.mark.parametrize('field', sorted(contract.COMMAND_FIELDS))
+def test_wrong_command_field_type_has_fixed_code_without_intent(tmp_path, field):
+    owner = make(tmp_path)
+    value = command()
+    value[field] = True if field == 'sequence' else []
+    before = owner.path.read_bytes()
+    assert_refused(lambda: owner.prepare(wire(value), now=100))
+    assert owner.path.read_bytes() == before
+
+
+@pytest.mark.parametrize('raw', [b' ' * (contract.MAX_COMMAND + 1), b'\xff'])
+def test_oversize_or_invalid_encoding_has_fixed_code_without_intent(tmp_path, raw):
+    owner = make(tmp_path)
+    before = owner.path.read_bytes()
+    assert_refused(lambda: owner.prepare(raw, now=100))
+    assert owner.path.read_bytes() == before
+
+
+def test_oversize_text_has_fixed_code_and_is_not_disclosed(tmp_path):
+    owner = make(tmp_path)
+    value = command('set_text')
+    value['arguments']['value'] = 'private-text-' * (contract.MAX_TEXT // 13 + 1)
+    before = owner.path.read_bytes()
+    assert_refused(lambda: owner.prepare(wire(value), now=100))
+    assert owner.path.read_bytes() == before
+
+
+@pytest.mark.parametrize('field', sorted(contract.CONTEXT_FIELDS))
+def test_missing_context_field_has_fixed_code_before_directory_creation(tmp_path, field):
+    value = context()
+    del value[field]
+    root = tmp_path / 'owned'
+    assert_refused(lambda: journal.CommandJournal(root, value, create=True))
+    assert not root.exists()
+
+
+def test_missing_database_column_has_fixed_code_without_repair(tmp_path):
+    owner = make(tmp_path)
+    with closing(sqlite3.connect(owner.path, isolation_level=None)) as connection:
+        connection.execute('ALTER TABLE commands DROP COLUMN evidence')
+    before = owner.path.read_bytes()
+    assert_refused(lambda: make(tmp_path))
+    assert_refused(owner.snapshot)
+    assert_refused(lambda: owner.prepare(wire(command()), now=100))
+    assert owner.path.read_bytes() == before
+
+
+def test_wrong_database_column_type_has_fixed_code_without_repair(tmp_path):
+    owner = make(tmp_path)
+    with closing(sqlite3.connect(owner.path, isolation_level=None)) as connection:
+        connection.execute('DROP TABLE commands')
+        connection.execute('CREATE TABLE commands (request_id INTEGER PRIMARY KEY, digest TEXT NOT NULL, '
+                           'sequence INTEGER NOT NULL, operation TEXT NOT NULL, '
+                           'status TEXT NOT NULL, evidence TEXT)')
+    before = owner.path.read_bytes()
+    assert_refused(lambda: make(tmp_path))
+    assert_refused(owner.snapshot)
+    assert owner.path.read_bytes() == before
 
 
 def test_pending_survives_restart_without_second_inert_effect(tmp_path):
