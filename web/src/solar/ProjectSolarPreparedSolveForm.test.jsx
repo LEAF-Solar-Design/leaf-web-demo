@@ -10,11 +10,11 @@ const B = { kind: 'project', organization_id: '11111111-1111-4111-8111-111111111
 const FRAME = 'leaf:frame:00000000-0000-4000-8000-000000000001'
 const REQUEST = { grid: { Dwgname: 'Saved roof', Sequences: [2, 1, 1, 0], Rows: [], Modify: [] } }
 function fixture() {
-  const h = { current: true, revision: 6 }
+  const h = { current: true, revision: 6, digest: 'b'.repeat(64) }
   const data = (options) => ({ context: { ...B, head_version_id: B.input_version_id, is_head: true, intake_sha256: 'a'.repeat(64) },
     intake: { solar_design_graph_sha256: 'b'.repeat(64), solar_design_graph: {
       rev: 6, settings: { ...SEED_SETTINGS }, project: { name: 'Saved roof', zip_code: '', latitude: null, longitude: null } } },
-    solve_preparation: { available: true, graph_revision: h.revision,
+    solve_preparation: { available: true, graph_revision: h.revision, graph_sha256: h.digest,
       frames: [{ id: FRAME, name: 'West roof', panel_count: 3 }],
       ...(options.solveFrame ? { frame_ref: FRAME, request: REQUEST } : {}) } })
   h.client = { getSnapshot: () => ({ binding: B, authorityKey: 'epoch' }),
@@ -72,5 +72,15 @@ it('ignores late choices after the captured scope becomes stale', async () => {
   h.mount(); h.current = false
   await act(async () => finish({ ok: true, data: {} }))
   expect(screen.queryByRole('option', { name: /West roof/ })).toBeNull()
+  expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+})
+
+
+it.each([undefined, null, 'f'.repeat(64)])('refuses a missing or mismatched fresh preparation digest (%s)', async (digest) => {
+  const h = fixture(); h.mount(); await h.choose(); h.digest = digest
+  fireEvent.click(screen.getByRole('button', { name: 'Run solve' }))
+  await waitFor(() => expect(screen.getByRole('status')).toBeTruthy())
+  expect(h.client.prepareRun).not.toHaveBeenCalled()
+  expect(h.props.newProjectIntentKey).not.toHaveBeenCalled()
   expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
 })
