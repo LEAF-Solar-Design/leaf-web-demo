@@ -4292,8 +4292,8 @@ def test_shard_cli_rejects_incoherent_flag_combinations(tmp_path):
         ["--shard-count", "8", "--shard-index", "8"],             # out of range
         ["--shard-count", "8", "--shard-index", "-1"],            # out of range
         ["--shard-count", "0", "--shard-index", "0"],             # bad count
-        ["--shard-count", "2", "--shard-index", "0",
-         "--only", "platform-static"],                            # subset shard
+        ["--shard-count", "2", "--shard-index", "1",
+         "--only", "platform-static"],                            # missing plan, nonzero
         ["--verify-shard-results", str(tmp_path),
          "--shard-count", "2"],                                   # mixed modes
         ["--prior-proofs-dir", str(tmp_path)],                    # no fan-in
