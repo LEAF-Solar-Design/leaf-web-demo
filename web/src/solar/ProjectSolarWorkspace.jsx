@@ -219,6 +219,8 @@ export default function ProjectSolarWorkspace(props) {
   }
   if (view.row?.name !== openTool?.name) view = { row: openTool, retired: false, generation: view.generation + 1, drafts: new Map() }
   const currentRow = owner.rows.find((row) => row.name === openTool?.name)
+  const writeAccessDenied = !owner.reason && currentRow?.availability?.entitled === false &&
+    ['solar-panel-groups', 'solar-solaredge-accept'].includes(openTool?.name)
   // Value snapshots survive a stale scope without keeping its editor mounted or authorizing a run.
   const keptDraft = view.drafts.get(currentRow?.name)
   if (keptDraft && (!sameOwner(keptDraft, owner) || keptDraft.schemaKey !== schemaDeclaration(currentRow))) {
@@ -404,6 +406,7 @@ export default function ProjectSolarWorkspace(props) {
     recoveryStatus.current?.scrollIntoView?.({ block: 'nearest' })
   })
   return <section className="project-solar-workspace">
+    {writeAccessDenied && <p role="status">{projectSolarWorkspaceReason('write_access_required')}</p>}
     {FlowRail && <FlowRail solarBinding={owner.binding} authorityKey={owner.authorityKey} projectClient={owner.projectClient}
       projectCatalog={owner.reason ? null : owner.projectCatalog} projectRunMemory={projectRunMemory}
       projectPending={projectPending} busy={busy} openName={editor ? selected.name : null}

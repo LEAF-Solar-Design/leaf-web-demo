@@ -1466,7 +1466,7 @@ describe('Project Solar workspace composition', () => {
       noHost()
       h.view.unmount()
     }
-    expect(Object.keys(PROJECT_SOLAR_WORKSPACE_REASONS)).toHaveLength(24)
+    expect(Object.keys(PROJECT_SOLAR_WORKSPACE_REASONS)).toHaveLength(25)
     expect(projectSolarWorkspaceReason('not_a_reason')).toBeNull()
   })
 
@@ -1498,5 +1498,30 @@ it('production cloud Solve opens the saved-group preparation form', async () => 
   expect(screen.queryByLabelText('Frame')).toBeNull()
   expect(screen.queryByLabelText('Request')).toBeNull()
   await waitFor(() => expect(h.client.readContext).toHaveBeenCalledWith(expect.objectContaining({ prepareSolve: true })))
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
+it.each(['solar-panel-groups', 'solar-solaredge-accept'])('explains revoked write access for %s without submitting', (name) => {
+  const h = fixture(name)
+  h.mount({ openTool: h.row })
+  const guidance = 'You do not have write access for this Solar step. Ask a project owner to review your access before trying again.'
+  expect(screen.queryByText(guidance)).toBeNull()
+  const denied = { ...h.row, availability: { ...h.row.availability, entitled: false, runnable: false,
+    refusal_reasons: ['ENTITLEMENT_REQUIRED'] } }
+  h.rows = [denied]
+  h.update({ projectCatalog: { ...h.catalog, families: [{ capabilities: h.rows }] } })
+  expect(screen.getByText(guidance).getAttribute('role')).toBe('status')
+  expect(h.submit).not.toHaveBeenCalled()
+  const restored = { ...h.row, availability: { ...h.row.availability } }
+  h.update({ projectCatalog: { ...h.catalog, families: [{ capabilities: [restored] }] } })
+  expect(screen.queryByText(guidance)).toBeNull()
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
+it('does not describe denied read permission as lost write access', () => {
+  const h = fixture('solar-string-data')
+  const denied = { ...h.row, availability: { ...h.row.availability, entitled: false, runnable: false } }
+  h.mount({ openTool: h.row, projectCatalog: { ...h.catalog, families: [{ capabilities: [denied] }] } })
+  expect(screen.queryByText(/You do not have write access for this Solar step/)).toBeNull()
   expect(h.submit).not.toHaveBeenCalled()
 })
