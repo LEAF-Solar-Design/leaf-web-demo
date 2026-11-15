@@ -6615,6 +6615,10 @@ export default function App() {
             error={runErr}
             result={shownResult}
             tool={selectedTool}
+            onSelectModuleSet={selectedTool?.name === 'count-modules' &&
+              result?.origin?.drawingKey && result.origin.drawingKey === resultDrawingKey
+              ? (setId) => onRequestCatalogRun(selectedTool, { set_id: setId }, null, 'catalog', { complete: true })
+              : undefined}
             onRetry={onRetry}
             notices={
               /* NR banners dock UNDER the header of the affected pane (the
