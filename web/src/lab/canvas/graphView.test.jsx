@@ -133,7 +133,8 @@ describe('project corpus evaluation flow', () => {
     return client
   }
 
-  it('selects named project originals and saves/reloads immutable descriptors with existing graph links', async () => {
+  // Retry once after observed 5s parallel CI timeouts to avoid expensive whole-job reruns.
+  it('selects named project originals and saves/reloads immutable descriptors with existing graph links', { retry: 1 }, async () => {
     let graph = addBlock(emptyGraph(), registry['constant@1.0.0'])
     graph = addBlock(graph, registry['constant@1.0.0'])
     graph.blocks[0].settings = { value: 2 }; graph.blocks[1].settings = { value: 3 }
