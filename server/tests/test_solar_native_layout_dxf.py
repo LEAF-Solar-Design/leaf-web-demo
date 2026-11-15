@@ -610,3 +610,24 @@ def test_worker_export_refuses_non_pose_changes_without_mutating_parent(source, 
 def test_worker_export_non_native_bytes_bypass_without_rewriting():
     raw = b"0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n"
     assert worker_repair(raw, raw) == raw
+
+
+@pytest.mark.parametrize("literal", ["\\U+0041", "prefix \\U+4e2d suffix", "\\U+D83D\\U+DE00"])
+def test_worker_export_preserves_canonical_dxf_escapes_in_opaque_parameters(source, literal):
+    _, before = source
+    parameters = deepcopy(before.parameters)
+    parameters["opaque_dxf"] = {"literal": literal, "unicode": "café Ω 中 😀"}
+    scope = {key: UUID(value) for key, value in before.scope.items()}
+    parent = native.materialize_native_layout(scope, None, before.document, None, parameters=parameters)
+    assert native.decode_native_layout(parent).parameters["opaque_dxf"]["literal"] == literal
+    expected = deepcopy(before.document)
+    for distance in (2, 4):
+        result = worker_repair(parent, written_bytes(parent, "move"))
+        assert isinstance(result, bytes), result
+        after = native.decode_native_layout(result)
+        expected["state"]["frames"][0]["vertices"] = [
+            (x + distance, y) for x, y in before.document["state"]["frames"][0]["vertices"]]
+        assert after.document == expected
+        assert after.parameters == parameters and after.scope == before.scope
+        assert after.handles == before.handles
+        parent = result

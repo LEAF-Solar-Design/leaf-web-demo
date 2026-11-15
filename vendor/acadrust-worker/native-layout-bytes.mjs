@@ -12,6 +12,28 @@ function binary(bytes) {
 }
 function bytes(text) { return Uint8Array.from(text, c => c.charCodeAt(0)) }
 function asciiJson(value) { return JSON.stringify(value).replace(/[\u007f-\uffff]/g,c=>'\\u'+c.charCodeAt(0).toString(16).padStart(4,'0')) }
+// Match the native producer's DXF value codec before JSON/checksum parsing.
+// Raw copied records stay raw; only newly emitted JSON chunks are encoded.
+function dxfText(value) {
+  let text=value
+  if(/[^\x00-\x7f]/.test(value)){
+    try{text=new TextDecoder('utf-8',{fatal:true}).decode(bytes(value))}
+    catch{ text=value }
+  }
+  text=text.replace(/\\U\+([0-9A-Fa-f]{4})/g,(_,hex)=>String.fromCharCode(parseInt(hex,16)))
+  for(let i=0;i<text.length;i++){
+    const code=text.charCodeAt(i)
+    if(code>=0xd800&&code<=0xdbff){
+      const next=text.charCodeAt(++i)
+      if(!(next>=0xdc00&&next<=0xdfff))fail('text_surrogate')
+    }else if(code>=0xdc00&&code<=0xdfff)fail('text_surrogate')
+  }
+  return text
+}
+function dxfEncodedText(value) {
+  return value.replace(/\\(?=U\+[0-9A-Fa-f]{4})/g,'\\U+005C')
+    .replace(/[^\x00-\x7f]/g,c=>'\\U+'+c.charCodeAt(0).toString(16).toUpperCase().padStart(4,'0'))
+}
 function tree(text) {
   JSON.parse(text)
   let i=0, count=0
@@ -89,7 +111,7 @@ export async function readNativeLayout(input){
   const record=records[0],handle=record.values(5)[0]?.trim().toUpperCase()
   const owners=d.records.filter(r=>r.section==='OBJECTS'&&r.kind==='DICTIONARY'&&r.pairs.some((p,i)=>p.code===3&&p.value===NAMESPACE&&[350,360].includes(r.pairs[i+1]?.code)&&r.pairs[i+1].value.trim().toUpperCase()===handle))
   if(owners.length!==1)fail('namespace_owner')
-  const raw=record.values(1).slice(1).join(''),ast=tree(raw),payload=JSON.parse(raw)
+  const raw=record.values(1).slice(1).map(dxfText).join(''),ast=tree(raw),payload=JSON.parse(raw)
   if(await sha(payload.document)!==payload.document_sha256)fail('document_checksum')
   const params=ast.props.get('parameters');if(!params||await sha(raw.slice(params.start,params.end))!==payload.parameters_sha256)fail('parameters_checksum')
   const doc=JSON.parse(payload.document),docAst=tree(payload.document),frames=doc.state.frames
@@ -104,7 +126,7 @@ export async function repairNativeLayout(parent,written){
   if(!parent)return written
   const d=drawing(written),edits=[],docEdits=[]
   const xrecord=d.handles.get(parent.record.values(5)[0].trim().toUpperCase())
-  if(!xrecord||xrecord.values(1).slice(1).join('')!==parent.raw)fail('metadata_changed')
+  if(!xrecord||xrecord.values(1).slice(1).map(dxfText).join('')!==parent.raw)fail('metadata_changed')
   const frameByHandle=new Map(parent.doc.state.frames.map((frame,i)=>[parent.payload.handle_map[frame.handle].toUpperCase(),{frame,index:i}]))
   for(const row of d.records){if(row.section==='ENTITIES'&&(row.values(8).some(v=>['LEAF-TRACKERS','LEAF-PILING'].includes(v.toUpperCase()))||row.values(1001).some(v=>['LEAFFRAMECELL','LEAFPILING'].includes(v.toUpperCase())))){if(!parent.owned.has(row.values(5)[0]?.trim().toUpperCase()))fail('managed_entity_added')}}
   for(const [handle,old] of parent.owned){
@@ -129,7 +151,7 @@ export async function repairNativeLayout(parent,written){
   }
   const document=replace(parent.payload.document,docEdits),documentNode=parent.ast.props.get('document'),digestNode=parent.ast.props.get('document_sha256')
   const payload=replace(parent.raw,[{...documentNode,text:asciiJson(document)},{...digestNode,text:asciiJson(await sha(document))}])
-  const chunks=[];for(let i=0;i<payload.length;i+=255)chunks.push({code:1,value:payload.slice(i,i+255)})
+  const chunks=[];for(let i=0;i<payload.length;i+=255)chunks.push({code:1,value:dxfEncodedText(payload.slice(i,i+255))})
   const pairs=[...parent.record.pairs.filter(p=>p.code!==1),{code:1,value:SCHEMA},...chunks]
   edits.push({start:xrecord.start,end:xrecord.end,text:pack(pairs)})
   const result=bytes(replace(d.text,edits));if(result.length>16*1024*1024)fail('document_limit');return result
