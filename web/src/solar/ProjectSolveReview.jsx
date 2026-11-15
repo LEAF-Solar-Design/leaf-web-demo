@@ -14,7 +14,7 @@ const solveSchema = { type: 'object', properties: {
 
 // Both forms hand off to the project runtime. A local operation may be cancelled when its
 // editor closes; an accepted job belongs to the captured project scope instead of the editor.
-function useSubmission(props, tool) {
+export function useSubmission(props, tool) {
   const { solarBinding, authorityKey, projectClient, catalogDigest, newProjectIntentKey,
     onProjectSubmit, isCurrent, busy, submissionSignal, projectOutcome } = props
   const live = useRef(props)
@@ -60,13 +60,24 @@ function useSubmission(props, tool) {
     }
     try {
       captured = projectClient.captureCatalogScope()
-      const response = await projectClient.readContext({ signal: controller.signal })
+      const response = await projectClient.readContext({ signal: controller.signal,
+        ...(extras.prepareFromGraph ? { solveFrame: extras.solveContext?.frame_ref } : {}) })
       if (!owner.alive || controller.signal.aborted || live.current.busy || !guard()) return
       const state = deriveProjectSolarGraphFormState({ binding: solarBinding,
         contextView: response?.ok === true ? response.data : null })
       if (state.mode !== 'edit') { setFeedback({ state: 'refused', reason: code(state.reason) }); return }
+      if (extras.prepareFromGraph) {
+        const prepared = response.data.solve_preparation
+        if (prepared?.available !== true || prepared.frame_ref !== extras.solveContext?.frame_ref ||
+            prepared.graph_revision !== state.rev || !prepared.request) {
+          setFeedback({ state: 'refused', reason: code(prepared?.reason) }); return
+        }
+        params = { ...params, request: prepared.request }
+      }
+      const transportExtras = { ...extras }
+      delete transportExtras.prepareFromGraph
       const request = { tool, params: { ...params, drawing_id: solarBinding.drawing_id, expected_rev: state.rev },
-        catalogDigest, idempotencyKey: newProjectIntentKey(), ...extras }
+        catalogDigest, idempotencyKey: newProjectIntentKey(), ...transportExtras }
       if (tool === 'solar-solve-proposal') {
         // Graph revision is a transport binding for a proposal, never a solver parameter.
         delete request.params.expected_rev
@@ -107,7 +118,7 @@ function useSubmission(props, tool) {
     typeof onProjectSubmit !== 'function' || !current(isCurrent) }
 }
 
-function Feedback({ value }) {
+export function Feedback({ value }) {
   if (!value) return null
   const text = value.message ?? (value.state === 'submitted' || value.state === 'pending' ? PROJECT_SOLAR_WORKSPACE_REASONS.run_submitted
     : value.state === 'succeeded' ? PROJECT_SOLAR_WORKSPACE_REASONS.run_published
