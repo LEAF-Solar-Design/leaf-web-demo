@@ -603,6 +603,8 @@ def get_authority_mode(org_id: uuid.UUID, project_id: uuid.UUID) -> str:
 
 
 def _require_postgres_authority(org_id: uuid.UUID, project_id: uuid.UUID) -> None:
+    from .project_lifecycle import require_project_writable
+    require_project_writable(org_id, project_id)
     if get_authority_mode(org_id, project_id) != "postgres_canonical":
         raise RuntimeError("canonical ledger is unavailable while authority is legacy_sqlite")
 
@@ -1218,6 +1220,11 @@ def import_ready_account_upload(
 
     def operation(conn):
         with conn.cursor() as cur:
+            from .project_lifecycle import LifecycleConflict, require_project_writable
+            try:
+                require_project_writable(org_id, project_id, cur=cur)
+            except LifecycleConflict as exc:
+                raise DrawingImportConflict(str(exc)) from None
             # The project row is the serialization point for concurrent imports.
             # Authority is server-owned and cannot be selected by request data.
             cur.execute(
@@ -1458,16 +1465,24 @@ def create_built_tool(org_id: uuid.UUID, project_id: uuid.UUID, name: str,
 # reads — EVERY function below binds `WHERE org_id = %(org_id)s`
 # --------------------------------------------------------------------------- #
 
-def list_projects(org_id: uuid.UUID) -> List[Project]:
+def list_projects(org_id: uuid.UUID, *, archived: bool = False) -> List[Project] | List[Dict[str, Any]]:
     with cursor() as cur:
         cur.execute(
             "SELECT project_id, org_id, name, status, created_at, updated_at, "
-            "deleted_at, purge_requested_at, purge_completed_at "
+            "deleted_at, purge_requested_at, purge_completed_at, archived_at, "
+            "archived_at + INTERVAL '30 days' AS restore_until "
             "FROM projects WHERE org_id = %(org_id)s AND deleted_at IS NULL "
+            "AND status = %(status)s "
             "ORDER BY created_at DESC",
-            {"org_id": org_id},
+            {"org_id": org_id, "status": "archived" if archived else "active"},
         )
-        return [Project.from_row(r) for r in cur.fetchall()]
+        rows = cur.fetchall()
+        if archived:
+            return [dict(Project.from_row(r).to_dict(),
+                         archived_at=r["archived_at"].isoformat() if r["archived_at"] else None,
+                         restore_until=r["restore_until"].isoformat() if r["restore_until"] else None)
+                    for r in rows]
+        return [Project.from_row(r) for r in rows]
 
 
 def get_org(org_id: uuid.UUID) -> Optional[Org]:

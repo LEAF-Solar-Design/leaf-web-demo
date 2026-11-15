@@ -113,8 +113,24 @@ def _dispatch(operation):
             body.update(acquired=False, locked_by=exc.checkout.holder if exc.checkout else None,
                         checkout=service.public_checkout(exc.checkout))
         return JSONResponse(content=body, status_code=status, headers=_NO_STORE)
+    except HTTPException as exc:
+        return JSONResponse(content={"detail": exc.detail}, status_code=exc.status_code,
+                            headers=_NO_STORE)
     except Exception:
         return _dispatch(lambda: service.refuse("INTERNAL"))
+
+
+def _checkout_write_guard(tenant, project_id):
+    # Read authorization resolves the trusted org before the shared archived
+    # check; the checkout service still enforces its own writer/capability gate.
+    org_id, _ = service._access(tenant, project_id, write=False)
+    from leaf_platform import project_lifecycle
+    try:
+        project_lifecycle.require_project_writable(org_id, project_id)
+    except project_lifecycle.LifecycleConflict as exc:
+        raise HTTPException(409, str(exc)) from None
+    except project_lifecycle.LifecycleUnavailable:
+        raise HTTPException(404, "project resource not found") from None
 
 
 @router.get("/api/projects/{project_id}/drawing-versions/{input_version_id}/context")
@@ -163,6 +179,7 @@ def acquire_route(project_id: UUID, drawing_id: UUID, req: Optional[CheckoutRequ
     def operation():
         _headers(tenant, project_id, x_org_id, x_project_id)
         request = req or CheckoutRequest()
+        _checkout_write_guard(tenant, project_id)
         lease, token = service.acquire_project_checkout(tenant, project_id, drawing_id,
             holder=request.holder, ttl_s=request.ttl_s, checkout_capability_token=x_checkout_capability)
         return {**_identity(lease.organization_id, project_id, drawing_id), "acquired": True,
@@ -183,6 +200,7 @@ def release_route(project_id: UUID, drawing_id: UUID, tenant=Depends(deps.requir
                   x_checkout_capability: Optional[str] = Header(default=None)):
     def operation():
         _headers(tenant, project_id, x_org_id, x_project_id)
+        _checkout_write_guard(tenant, project_id)
         released = service.release_project_checkout(tenant, project_id, drawing_id,
             checkout_capability_token=x_checkout_capability)
         return {**_identity(tenant, project_id, drawing_id), "released": released, "checkout": None}
