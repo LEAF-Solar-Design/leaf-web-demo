@@ -59,8 +59,14 @@ def points_metres(points, insunits, explicit=None):
     for point in points:
         if not isinstance(point, (list, tuple)) or len(point) != 2:
             raise UnitError("MALFORMED_POINT", "expected exactly two coordinates")
-        converted.append(tuple(finite(finite(v, "INVALID_COORDINATE") * scale,
-                                      "INVALID_COORDINATE") for v in point))
+        coordinates = []
+        for value in point:
+            coordinate = finite(value, "INVALID_COORDINATE")
+            physical = finite(coordinate * scale, "INVALID_COORDINATE")
+            if coordinate != 0 and physical == 0:
+                raise UnitError("INVALID_COORDINATE", "nonzero coordinate underflowed to zero")
+            coordinates.append(physical)
+        converted.append(tuple(coordinates))
     return tuple(converted)
 
 
