@@ -33,6 +33,24 @@ function setup(data = contextData, status = 200, options = {}) {
 }
 afterEach(() => { for (const client of clients.splice(0)) client.dispose(); vi.useRealTimers() })
 const init = (fetchImpl) => fetchImpl.mock.calls.at(-1)[1]
+
+it('requests opt-in frame preparation and rejects mismatched frame/revision metadata', async () => {
+  const prepared = { ...contextData, intake: { solar_design_graph: { rev: 4 }, solar_design_graph_sha256: 'a'.repeat(64) },
+    solve_preparation: { schema: 'leaf.project-solve-preparation.v1', available: true, graph_revision: 4,
+      graph_sha256: 'a'.repeat(64), frames: [{ id: 'frame-1', name: 'Roof', panel_count: 2 }],
+      frame_ref: 'frame-1', request: { grid: {} } } }
+  const h = setup(prepared)
+  expect((await h.client.readContext({ solveFrame: 'frame-1' })).ok).toBe(true)
+  expect(h.fetchImpl.mock.calls[0][0]).toContain('solve_frame=frame-1')
+  prepared.solve_preparation.frame_ref = 'frame-2'
+  expect((await h.client.readContext({ solveFrame: 'frame-1' })).ok).toBe(false)
+  prepared.solve_preparation.frame_ref = 'frame-1'
+  prepared.solve_preparation.graph_revision = 5
+  expect((await h.client.readContext({ solveFrame: 'frame-1' })).ok).toBe(false)
+  prepared.solve_preparation.graph_revision = 4
+  prepared.context = { ...prepared.context, project_id: J }
+  expect((await h.client.readContext({ solveFrame: 'frame-1' })).ok).toBe(false)
+})
 const url = (fetchImpl) => fetchImpl.mock.calls.at(-1)[0]
 const refusal = (reason) => ({ error: { reason_code: reason, error_code: 'BAD_PARAMS', retryable: false }, detail: { preserved: true } })
 const custody = () => ({ delegated: true, delegation_id: J, fence: lease.fence, expires_at: lease.expires })
@@ -177,6 +195,24 @@ describe('project Solar transport and lifecycle', () => {
     expect((await client.reportSolarEdgePdf({ sourceArtifactId: 'a'.repeat(64), alignmentTolerance: 0.5, selectionOrder: 'recorded' })).ok).toBe(true)
     expect(url(fetchImpl)).toBe(`https://api.test/api/projects/${P}/drawings/${D}/versions/${V}/imports/solaredge-pdf/report`)
     expect(JSON.parse(init(fetchImpl).body)).toEqual({ source_artifact_id: 'a'.repeat(64), alignment_tolerance: 0.5, selection_order: 'recorded' })
+  })
+
+  it.each(['atomic-v1', 'whole-matrix-v1'])('preserves SolarEdge matching policy %s in report transport', async (matchingPolicy) => {
+    const { client, fetchImpl } = setup(edgeData(true))
+    expect((await client.reportSolarEdgePdf({ sourceArtifactId: 'a'.repeat(64), alignmentTolerance: 0.5,
+      matchingPolicy, associations: { east: 0 } })).ok).toBe(true)
+    expect(JSON.parse(init(fetchImpl).body)).toEqual({ source_artifact_id: 'a'.repeat(64),
+      alignment_tolerance: 0.5, selection_order: 'unknown', matching_policy: matchingPolicy,
+      associations: { east: 0 } })
+  })
+
+  it('refuses malformed SolarEdge matching policies before transport', async () => {
+    const { client, fetchImpl } = setup()
+    for (const matchingPolicy of [null, false, 1, '', 'unsupported', [], {}]) {
+      expect((await client.reportSolarEdgePdf({ sourceArtifactId: 'a'.repeat(64), alignmentTolerance: 0.5,
+        matchingPolicy })).reason).toBe('SIP_R7_REQUEST_INVALID')
+    }
+    expect(fetchImpl).not.toHaveBeenCalled()
   })
 
   it('binds explicit SolarEdge choices to the existing report request and permits reset', async () => {

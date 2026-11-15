@@ -3,6 +3,9 @@
 The caller owns an exclusive private directory and authenticated context/results.
 Creation requires explicit create=True for a new session; default reopening
 never turns lost state into a new session.
+New journals use SQLite user_version 1. The original unversioned layout (0)
+remains readable without rewriting it. Unknown versions are refused on every
+transaction; this module never guesses a migration or replaces stored intent.
 SQLite commits pending intent before returning dispatch=True. A crash after that
 commit is uncertain, never permission to dispatch twice. Native execution and
 membership, evidence and inspector-handle verification remain caller-owned.
@@ -16,6 +19,9 @@ from pathlib import Path
 import sqlite3
 
 import native_preview_session_contract as contract
+
+
+SCHEMA_VERSION = 1
 
 
 class JournalError(RuntimeError):
@@ -74,6 +80,7 @@ class CommandJournal:
                                'status TEXT NOT NULL, evidence TEXT)')
                 connection.execute('INSERT INTO session VALUES (1,?,?,?,NULL)',
                                    (self.binding, self.context['next_sequence'], self.context['state']))
+                connection.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
             self._metadata(connection)
 
     @contextmanager
@@ -86,6 +93,8 @@ class CommandJournal:
         try:
             connection.execute('PRAGMA synchronous=FULL')
             connection.execute('BEGIN IMMEDIATE')
+            _need(connection.execute('PRAGMA user_version').fetchone()[0]
+                  in (0, SCHEMA_VERSION))
             yield connection
             self._commit(connection)
         except BaseException:

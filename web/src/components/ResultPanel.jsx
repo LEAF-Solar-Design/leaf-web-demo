@@ -302,6 +302,7 @@ function ResultBody({ result, density, solarBinding, authorityKey, projectClient
         <div className="table-scroll"><CountsTable counts={data.counts} density={density} /></div>
         {Object.hasOwn(data, 'total') && <div className="total">Total: <b>{Number(data.total).toLocaleString()}</b></div>}
         {rowTables}
+        <FileLinks files={data.files} />
         {Object.keys(summary).length > 0 && <div className="table-scroll"><KeyValue data={summary} density={density} /></div>}
       </>
     )
@@ -309,9 +310,12 @@ function ResultBody({ result, density, solarBinding, authorityKey, projectClient
   return rowArrays.length > 0 || Object.keys(scalars).length > 0
     ? <>
       {rowTables}
+      <FileLinks files={data.files} />
       {Object.keys(scalars).length > 0 && <div className="table-scroll"><KeyValue data={scalars} density={density} /></div>}
     </>
-    : result.overlay || (Array.isArray(data.files) && data.files.length > 0)
+    : Array.isArray(data.files) && data.files.length > 0
+      ? <FileLinks files={data.files} />
+      : result.overlay
       ? null
       : <p className="result-empty">Completed with no output.</p>
 }

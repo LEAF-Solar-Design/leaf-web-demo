@@ -82,11 +82,16 @@ def _text(value, bound):
     return type(value) is str and 0 < len(value) <= bound
 
 
-def validate_request(params):
-    """The accept request: exactly expected_rev and a 64 hex report_artifact_id (drawing_id is
-    removed by the adapter before the builtin runs). The revision itself is require_revision's."""
-    if (type(params) is not dict or set(params) != _REQUEST_KEYS
-            or not _hex(params["report_artifact_id"])):
+def validate_request(params, *, allow_matched_only=False):
+    """Revision/report reference, with an explicit project-only matched tracking choice.
+
+    The adapter removes drawing_id. Legacy acceptance never enables matched-only saves.
+    """
+    if (type(params) is not dict or not _REQUEST_KEYS <= set(params)
+            or set(params) - _REQUEST_KEYS - {"accept_matched_only"}
+            or not _hex(params["report_artifact_id"])
+            or type(params.get("accept_matched_only", False)) is not bool
+            or params.get("accept_matched_only", False) and not allow_matched_only):
         raise GraphValidationError(INVALID)
 
 
