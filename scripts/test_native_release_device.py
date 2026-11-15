@@ -244,7 +244,7 @@ def test_web_package_uses_same_packer_and_checks(checkout, tmp_path, bad):
         assert not any("pack-web-dist" in c for c in commands)
 
 
-@pytest.mark.parametrize("field,value", [("state", "failed"), ("mode", "partial"),
+@pytest.mark.parametrize("field,value", [("state", "failed"), ("mode", "partial"), ("mode", ""), ("mode", None),
     ("repository", "untrusted/repo"), ("head_sha", "0" * 40), ("schema", "other"),
     ("run_id", "dv-0000000000000000"), ("run_id", "../file")])
 def test_verdict_binding_refusals(checkout, field, value):
@@ -256,6 +256,13 @@ def test_verdict_binding_refusals(checkout, field, value):
         device.fetch_verdict(RUN, reader=lambda _: b" " * 65537)
     with pytest.raises(ValueError, match="run id"):
         device.fetch_verdict("dv-123", reader=lambda _: pytest.fail("invalid run must not be fetched"))
+
+
+@pytest.mark.parametrize("mode", ["full", "selected"])
+def test_verdict_binds_full_or_selected(checkout, mode):
+    root, runner = checkout
+    raw = verdict(mode=mode)
+    assert device.bind_verdict(raw, RUN, SOURCE, TREE, root=root, runner=runner)["run_id"] == RUN
 
 
 def test_verdict_binds_exact_bytes_and_checkout(checkout):
