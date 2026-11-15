@@ -607,3 +607,13 @@ def test_tools_inherits_admission_refusals(monkeypatch, rail, auth, status):
 
 def test_tools_requires_verified_tenant():
     assert _client(tenant_override=False).get("/api/lab/tools").status_code == 401
+
+
+B03_PRIVATE_PREVIEW_PATHS = ['/api/projects/{project_id}/browser/source/requests/{source_request_id}/preview/{job_id}/asset']
+
+def test_b03_private_preview_inventory_requires_active_studio_tenant():
+    from routers import browser_project
+    app=FastAPI();app.include_router(browser_project.router)
+    routes=[route for path,route in iter_leaf_routes(app.routes) if path in B03_PRIVATE_PREVIEW_PATHS]
+    assert [route.path for route in routes]==B03_PRIVATE_PREVIEW_PATHS
+    assert all(deps.require_active_tenant in [d.call for d in route.dependant.dependencies] for route in routes)

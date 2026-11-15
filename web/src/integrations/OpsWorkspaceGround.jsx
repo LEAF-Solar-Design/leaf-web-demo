@@ -701,8 +701,8 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
             onForbidden={onForbidden} />}
           <section aria-label="Integration datasets"><h2>Datasets</h2>
             {!state.datasets.length && <p>{state.scope.projectRole === 'owner'
-              ? 'No datasets yet. Connect data in integration setup.'
-              : 'No datasets yet. Ask the project owner to connect data.'}</p>}
+              ? 'No datasets are available yet. Use integration setup to connect your data.'
+              : 'No datasets are available yet. Ask the project owner to connect your data.'}</p>}
             <ul>{state.datasets.map((item) => <li key={`${item.reference.id}:${item.reference.version}`}>{item.title} · version {item.reference.version}
               {item.material_context && <pre aria-label={`Material context for ${item.title}`}>{JSON.stringify(item.material_context, null, 2)}</pre>}</li>)}</ul>
             {state.datasetCursor && <button disabled={pending} onClick={() => loadMore('datasets')}>Load more datasets</button>}

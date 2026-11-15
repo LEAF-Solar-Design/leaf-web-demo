@@ -1,6 +1,9 @@
 import { expect, test } from '@playwright/test'
 import { catProofResponse, makeCatProofState } from './catProofFixture.mjs'
 
+test.use({ video: 'off', trace: 'off' })
+test.describe.configure({ mode: 'parallel' })
+
 // Lane C (studio-lanes-20260930): browser proof for the Campaign panel
 // (web/src/campaigns/CampaignPanel.jsx) mounted on the Browser board of an open
 // project. Every scenario counts the exact campaign and project writes it sent,

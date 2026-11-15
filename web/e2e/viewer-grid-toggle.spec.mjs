@@ -2,6 +2,9 @@ import { expect, test } from '@playwright/test'
 import { catProofResponse, makeCatProofState } from './catProofFixture.mjs'
 import { scaled } from './timeScale.mjs'
 
+test.use({ video: 'off', trace: 'off' })
+test.describe.configure({ mode: 'parallel' })
+
 // Studio lane L: GRID in the drafting status bar is real. It is owned by the
 // viewer (ViewerGrid in site/DrawingCockpit.jsx), travels the same
 // cockpit:modes path as ORTHO and OSNAP, and draws one layer in the drawing

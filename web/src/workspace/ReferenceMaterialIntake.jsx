@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { readActiveScope, subscribeActiveScope } from '../auth/activeScope.js'
 import { subscribeBeforeLogout } from '../auth.js'
 import { listProjectReferences, readProjectReferenceOriginal, registerProjectArloInput, readProjectArloInput, reviseProjectArloInput, restoreProjectArloInput, uploadProjectReference } from '../projects/api.js'
@@ -28,6 +28,17 @@ function ReferenceSession({ projectId, orgId, scope, onRunArlo }) {
   const [activeInputs, setActiveInputs] = useState({})
   const [editor, setEditor] = useState(null)
   const [constraintError, setConstraintError] = useState('')
+  const constraintErrorId = useId()
+  const rejectedSaveFocus = useRef(null)
+  useLayoutEffect(() => {
+    if (arlo?.running) return
+    const pending = rejectedSaveFocus.current
+    rejectedSaveFocus.current = null
+    if (constraintError && pending && !pending.moved && pending.button.isConnected
+      && !pending.button.disabled && document.activeElement === document.body) {
+      pending.button.focus()
+    }
+  }, [constraintError, arlo?.running])
   const input = useRef(null)
   const live = useRef(false)
   const running = useRef(false)
@@ -198,6 +209,16 @@ function ReferenceSession({ projectId, orgId, scope, onRunArlo }) {
       setArlo({ materialId: row.material_id, running: false })
       return
     }
+    const button = document.activeElement
+    const focus = !restore && button?.matches('form[aria-label="ARLO constraints"] button[type="submit"]')
+      ? { button, moved: false } : null
+    rejectedSaveFocus.current = focus
+    const moved = event => {
+      if (focus && event.target !== button
+        && (event.type === 'pointerdown' || event.target !== document.body)) focus.moved = true
+    }
+    document.addEventListener('focusin', moved, { signal: abort.current.signal })
+    document.addEventListener('pointerdown', moved, { signal: abort.current.signal })
     arloRunning.current = true
     setConstraintError('')
     setArlo({ materialId: row.material_id, detail: restore ? 'Restoring original…' : 'Saving constraints…', running: true })
@@ -226,6 +247,8 @@ function ReferenceSession({ projectId, orgId, scope, onRunArlo }) {
       // messages such as budget.timeout_seconds instead of treating them as network timeouts.
       if (current() && cause?.name !== 'AbortError') setConstraintError(cause?.status === 422 ? cause.message : message(cause))
     } finally {
+      document.removeEventListener('focusin', moved)
+      document.removeEventListener('pointerdown', moved)
       arloRunning.current = false
       if (current()) setArlo(previous => ({ ...previous, running: false }))
     }
@@ -266,12 +289,15 @@ function ReferenceSession({ projectId, orgId, scope, onRunArlo }) {
         {editor?.materialId === row.material_id && <form aria-label="ARLO constraints" onSubmit={event => { event.preventDefault(); void saveConstraints(row) }}>
           {Object.entries(editor.fields).map(([path, value]) => <label key={path}>{path}
             <input type="number" step="any" value={value} disabled={Boolean(arlo?.running)}
-              onChange={event => setEditor(previous => ({ ...previous, fields: { ...previous.fields, [path]: event.target.value } }))} />
+              aria-describedby={constraintError ? constraintErrorId : undefined}
+              aria-invalid={constraintError && (constraintError.startsWith(`${path} `)
+                || !value.trim() || !Number.isFinite(Number(value))) ? true : undefined}
+              onChange={event => { setConstraintError(''); setEditor(previous => ({ ...previous, fields: { ...previous.fields, [path]: event.target.value } })) }} />
           </label>)}
           <button type="submit" disabled={Boolean(arlo?.running)}>Save revision</button>
           <button type="button" disabled={Boolean(arlo?.running)} onClick={() => { setEditor(null); setConstraintError('') }}>Cancel editing</button>
         </form>}
-        {arlo?.materialId === row.material_id && constraintError && <p role="alert">{constraintError}</p>}
+        {arlo?.materialId === row.material_id && constraintError && <p id={constraintErrorId} role="alert">{constraintError}</p>}
         {arlo?.materialId === row.material_id && (arlo.error
           ? <p role="alert">{arlo.error}</p> : <p role="status">{arlo.detail}</p>)}
       </>}

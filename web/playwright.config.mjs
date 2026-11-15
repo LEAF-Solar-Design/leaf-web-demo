@@ -1,18 +1,18 @@
 import { defineConfig } from '@playwright/test'
+import { gateBrowserResources } from './scripts/gate-browser-resources.mjs'
 
-const worker = process.env.LEAF_NATIVE_GATE_WORKER ?? '0'
-if (!/^[0-7]$/.test(worker)) throw new Error('Invalid native gate worker')
-const port = 5185 + 100 * Number(worker)
+const resources = gateBrowserResources()
+const [port] = resources.ports
 const baseURL = `http://127.0.0.1:${port}`
 
 export default defineConfig({
   testDir: './e2e',
   testIgnore: ['**/project/**'],
   workers: 1,
-  outputDir: '../artifacts/cat-operator-proof/test-results',
+  outputDir: `${resources.reportRoot}/test-results`,
   reporter: [['list'], ['html', {
     open: 'never',
-    outputFolder: '../artifacts/cat-operator-proof/report',
+    outputFolder: `${resources.reportRoot}/report`,
   }]],
   use: {
     baseURL,
@@ -29,6 +29,7 @@ export default defineConfig({
     reuseExistingServer: false,
     timeout: 120_000,
     env: {
+      ...(resources.isolated ? { LEAF_NEXT_DEV_INSTANCE: resources.instances[0] } : {}),
       VITE_MOCK: '0',
       VITE_CAT_PROOF: '1',
       VITE_API_BASE: 'http://leaf-proof.invalid',

@@ -1,0 +1,10 @@
+.lab-corpus-evidence {
+  min-width: 0;
+}
+
+.lab-corpus-evidence pre {
+  min-width: 0;
+  max-width: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
