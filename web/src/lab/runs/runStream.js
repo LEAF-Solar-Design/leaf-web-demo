@@ -174,7 +174,18 @@ export function openRunStream({ runIds, store = labValueStore, fetchImpl = globa
             while (!stopped && !paused && active.size && !immediate) {
               const chunk = await reader.read()
               if (stopped || controller.signal.aborted) break
-              if (chunk.done) { if (pendingCR) await consumeLine(); break }
+              if (chunk.done) {
+                if (pendingCR) await consumeLine()
+                if (lineBytes.length || data.length || frameId || type !== 'message') {
+                  for (const id of active) store.addGap(id, {
+                    from: (store.getRun(id)?.lastSeq ?? -1) + 1,
+                    recovered: false, reason: 'incomplete_stream_frame',
+                  })
+                  transport({ evidenceError: 'incomplete_stream_frame' })
+                  throw new Error('Incomplete stream frame')
+                }
+                break
+              }
               // Delay CR line splitting so a following LF is counted in the
               // same frame, even when the pair straddles chunks.
               for (const byte of chunk.value) {
@@ -189,8 +200,8 @@ export function openRunStream({ runIds, store = labValueStore, fetchImpl = globa
               }
             }
           }
-        } catch {
-          if (!stopped && !paused) transport({ status: 'reconnecting' })
+        } catch (error) {
+          if (!stopped && !paused) transport({ status: error.message === 'Incomplete stream frame' ? 'incomplete_evidence' : 'reconnecting' })
         } finally {
           controller.abort()
           if (reader) { try { await reader.cancel() } catch { /* disconnected */ } reader.releaseLock() }

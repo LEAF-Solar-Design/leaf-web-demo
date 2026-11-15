@@ -17,6 +17,26 @@ function stream(chunks, hold = false) {
   } }) }
 }
 const parked = () => stream([], true)
+
+it.each(['utf8', 'json', 'truncation-marker'])('retains verified evidence and records incomplete %s at EOF', async kind => {
+  const store = createValueStore()
+  store.apply('r', { ...event(0, 'corpus', { result: { data: 'verified bytes' } }), run_id: 'r' })
+  const encode = value => new TextEncoder().encode(value)
+  const bytes = kind === 'utf8' ? encode('event: run\ndata: {"label":"\u20ac').slice(0, -1)
+    : encode(kind === 'json' ? 'event: run\ndata: {"run_id":"r","seq":1,'
+      : 'id: r:1\nevent: run\ndata: {"run_id":"r","seq":1,"kind":"value","payload":{"truncated":true')
+  const sleep = vi.fn(async (ms, signal) => new Promise(resolve => signal.addEventListener('abort', resolve, { once: true })))
+  const fetchImpl = vi.fn().mockResolvedValue(stream([bytes]))
+  open({ runIds: ['r'], store, fetchImpl, sleep })
+  await waitFor(() => expect(sleep).toHaveBeenCalledTimes(1))
+  expect(store.getRun('r').transport).toMatchObject({ status: 'incomplete_evidence', evidenceError: 'incomplete_stream_frame' })
+  expect(store.getRun('r').lastSeq).toBe(0)
+  expect(store.getBlock('r', 'corpus').value.result.data).toBe('verified bytes')
+  expect(store.getRun('r').gaps.at(-1)).toMatchObject({ from: 1, recovered: false, reason: 'incomplete_stream_frame' })
+  expect(fetchImpl).toHaveBeenCalledTimes(1)
+  expect(fetchImpl.mock.calls[0][1].headers['Last-Event-ID']).toBe('r:0')
+  expect(fetchImpl.mock.calls[0][1].method).toBeUndefined()
+})
 afterEach(() => { cleanup(); handles.splice(0).forEach(handle => handle.stop()); localStorage.removeItem('leaf.jwt'); vi.restoreAllMocks() })
 
 it('keeps unknown submission intent for explicit recovery and separates rejection', async () => {

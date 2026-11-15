@@ -26,6 +26,8 @@ import { sentence } from '../honesty.js'
 const displayContexts = new WeakMap()
 
 const wallTime = () => Date.now()
+const corpusOptionLabel = (item, items) => items.filter(other => other.name === item.name && other.media_type === item.media_type).length > 1
+  ? `${item.name} (SHA-256 ${item.sha256.slice(0, 12)}, ID ${item.material_id})` : item.name
 // Display partition only. The server verifies authority on every request.
 function runAccount() {
   try {
@@ -673,10 +675,10 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
             <option key={project.project_id} value={project.project_id}>{project.name}</option>)}</select></label>
           <label>Original corpus<select value={corpusMaterial} onChange={event => setCorpusMaterial(event.target.value)}>
             <option value="">Choose original corpus</option>{(corpusOptions?.materials || []).filter(item => item.media_type === 'application/gzip').map(item =>
-              <option key={item.material_id} value={item.material_id}>{item.name}</option>)}</select></label>
+              <option key={item.material_id} value={item.material_id}>{corpusOptionLabel(item, corpusOptions.materials)}</option>)}</select></label>
           <label>Evaluation suite<select value={corpusSuite} onChange={event => setCorpusSuite(event.target.value)}>
             <option value="">Choose evaluation suite</option>{(corpusOptions?.materials || []).filter(item => item.media_type === 'application/json').map(item =>
-              <option key={item.material_id} value={item.material_id}>{item.name}</option>)}</select></label>
+              <option key={item.material_id} value={item.material_id}>{corpusOptionLabel(item, corpusOptions.materials)}</option>)}</select></label>
           <button type="button" disabled={!live.draft?.document || !corpusProject || !corpusMaterial || !corpusSuite || !corpusOptions?.manifest} onClick={addCorpus}>Add corpus evaluation</button>
           <p>Original files stay in this project. Running evaluates the complete corpus without starting a model or trade.</p>
           {corpusMessage && <p role="status">{corpusMessage}</p>}
