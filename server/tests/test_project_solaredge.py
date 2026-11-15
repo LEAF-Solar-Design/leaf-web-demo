@@ -86,8 +86,10 @@ def upload(s, data=samples.PDF, **changes):
 
 def report(s, source=None, **changes):
     source = source or upload(s)
+    # These fixtures preserve historical strict imports, not the current review default.
     request = {"source_artifact_id": source["source"]["artifact_id"],
-               "alignment_tolerance": 1.0, "selection_order": "recorded"}
+               "alignment_tolerance": 1.0, "selection_order": "recorded",
+               "matching_policy": se.reports.ATOMIC_POLICY}
     request.update(changes)
     return se.build_report(s.tenant, s.project, s.drawing, s.ctx.parent_version_id, request)
 
@@ -499,7 +501,8 @@ def test_http_source_report_download_and_read(http):
     assert source.headers["cache-control"] == "no-store"
     result = http.client.post(http.prefix + "/report", json={
         "source_artifact_id": source.json()["source"]["artifact_id"],
-        "alignment_tolerance": 1, "selection_order": "recorded"})
+        "alignment_tolerance": 1, "selection_order": "recorded",
+        "matching_policy": se.reports.ATOMIC_POLICY})
     assert result.status_code == 200, result.text
     ref = result.json()["report"]
     download = http.client.get(ref["download"])
