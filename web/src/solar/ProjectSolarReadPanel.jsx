@@ -323,7 +323,9 @@ export default function ProjectSolarReadPanel({ tool, solarBinding, authorityKey
           reportedValid.current = valid
           setForm((value) => value.valid === valid ? value : { ...value, valid })
         }} />
-      <p role="status" aria-live="polite">{projectSolarWorkspaceReason(reason)}
+      <p role="status" aria-live="polite">{reason === 'read_refused' && visible.code === 'REPORT_RESOURCE_LIMIT'
+        ? 'This PDF exceeds the inspection limit. Try a smaller report. Your saved tracking is kept.'
+        : projectSolarWorkspaceReason(reason)}
         {reason === 'read_refused' && <> <code>{visible.code}</code></>}
       </p>
       <button ref={readButton} type="submit" disabled={!!owner.reason || visible.phase === 'reading' || busy || !activeForm.valid}>
