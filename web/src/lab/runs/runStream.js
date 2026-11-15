@@ -83,8 +83,14 @@ export function openRunStream({ runIds, store = labValueStore, fetchImpl = globa
     if (!row.ok) { if (row.status === 401) { paused = true; transport({ status: 'auth_expired' }) }; throw new Error('Snapshot unavailable') }
     const staged = store.createSnapshotStore()
     staged.upsertRun(id, { state: row.state, graph_revision: row.graph_revision })
-    let after = -1
+    let after = -1, snapshotBytes = 0, snapshotPages = 0
+    const budgetExceeded = () => {
+      paused = true
+      transport({ status: 'invalid_evidence', evidenceError: 'snapshot_budget_exceeded' })
+      throw new SnapshotEvidenceError('Snapshot budget exceeded')
+    }
     for (;;) {
+      if (++snapshotPages > 128) budgetExceeded()
       const page = await request(`runs/${encodeURIComponent(id)}/events?after_seq=${after}&limit=500`, { fetchImpl, signal: connectionSignal, onUnauthorized: rememberUnauthorized })
       if (stopped || connectionSignal.aborted) return
       if (!page.ok) { if (page.status === 401) { paused = true; transport({ status: 'auth_expired' }) }; throw new Error('Snapshot events unavailable') }
@@ -93,6 +99,8 @@ export function openRunStream({ runIds, store = labValueStore, fetchImpl = globa
         throw new SnapshotEvidenceError('Invalid snapshot events')
       }
       for (const event of page.events) {
+        snapshotBytes += new TextEncoder().encode(JSON.stringify(event)).byteLength
+        if (snapshotBytes > 64 * 1024 * 1024) budgetExceeded()
         if (!staged.apply(id, event)) {
           transport({ evidenceError: 'snapshot_response_invalid' })
           throw new SnapshotEvidenceError('Invalid snapshot cursor order')
