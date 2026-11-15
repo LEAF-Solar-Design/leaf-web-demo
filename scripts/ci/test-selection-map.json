@@ -360,6 +360,7 @@
     "server-b02-initializer-failure",
     "server-browser-project-authoring",
     "server-browser-project-source-export",
+    "server-browser-static-preview",
     "server-project-solaredge",
     "server-project-preview-source",
     "server-glug-adoption",
