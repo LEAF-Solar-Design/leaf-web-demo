@@ -21,6 +21,8 @@ REQUEST = ('Make me a steel takeoff: for every layer whose name mentions steel, 
            'beam or joist, how many line members are on it and their total '
            'length. Give me a table and a spreadsheet.')
 ORACLE_SHA256 = 'b8c569661a6b0a7b4022bdf7ab3d5a924995359d09e773c6d508ca2f69c8b2e0'
+MAX_EXACT_COUNT = (1 << 53) - 1  # Browser table integers must remain exact.
+MAX_CSV_BYTES = 8 * 1024 * 1024
 LIMITS = ('First-failure collector and independent comparison primitives. '
           'Resumes the lane-owned fresh project after normal fixture intake. '
           'Downstream collection remains unbuilt until authoring succeeds. '
@@ -28,6 +30,18 @@ LIMITS = ('First-failure collector and independent comparison primitives. '
 
 
 def load_oracle(path, fixtures):
+    if not isinstance(fixtures, (list, tuple)):
+        raise ValueError('Invalid fixture drawing set')
+    seen = set()
+    for fixture in fixtures:
+        drawing_id = fixture.get('id') if isinstance(fixture, dict) else None
+        if not isinstance(drawing_id, str) or drawing_id not in {'first', 'second'}:
+            raise ValueError('Unknown fixture drawing ID')
+        if drawing_id in seen:
+            raise ValueError('Duplicate fixture drawing ID: ' + drawing_id)
+        seen.add(drawing_id)
+    if seen != {'first', 'second'}:
+        raise ValueError('Missing fixture drawing ID')
     raw = Path(path).read_bytes()
     if hashlib.sha256(raw).hexdigest() != ORACLE_SHA256:
         raise ValueError('Frozen X06 oracle hash differs')
@@ -45,6 +59,18 @@ def load_oracle(path, fixtures):
     return drawings
 
 
+def _nonnegative_number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError('Number must be finite and nonnegative')
+    try:
+        number = float(value)
+    except (ValueError, OverflowError):
+        raise ValueError('Number must be finite and nonnegative') from None
+    if not math.isfinite(number) or number < 0:
+        raise ValueError('Number must be finite and nonnegative')
+    return number
+
+
 def normalize_rows(rows):
     """Reject duplicates, nonfinite lengths, fractional counts and empty tables."""
     normalized = {}
@@ -54,12 +80,9 @@ def normalize_rows(rows):
         length = row['total_length']
         if not isinstance(layer, str) or not layer or layer in normalized:
             raise ValueError('Invalid or duplicate layer')
-        if type(count) is not int or count < 0:
-            raise ValueError('Count must be a nonnegative integer')
-        if (isinstance(length, bool) or not isinstance(length, (int, float))
-                or not math.isfinite(length) or length < 0):
-            raise ValueError('Length must be finite and nonnegative')
-        normalized[layer] = (count, float(length))
+        if type(count) is not int or not 0 <= count <= MAX_EXACT_COUNT:
+            raise ValueError('Count must be an exact nonnegative browser integer')
+        normalized[layer] = (count, _nonnegative_number(length))
     if not normalized:
         raise ValueError('Schedule is empty')
     return normalized
@@ -75,17 +98,29 @@ def compare_rows(observed, expected):
         wanted_count, wanted_length = oracle[layer]
         if count != wanted_count:
             problems.append(layer + ': member count differs')
-        if abs(length - wanted_length) > wanted_length * 0.005:
+        difference = abs(length - wanted_length)
+        if not math.isfinite(difference) or difference > wanted_length * 0.005:
             problems.append(layer + ': total length differs by more than 0.5 percent')
     return problems
 
 
 def csv_equals_table(content, table_cells):
-    """Compare exported display cells exactly, including row and column order."""
-    actual = list(csv.reader(io.StringIO(content.decode('utf-8-sig'))))
-    if not table_cells or not actual:
+    """Exact cells; None denotes an unreadable or oversized CSV export."""
+    if not isinstance(content, (bytes, bytearray)) or len(content) > MAX_CSV_BYTES:
+        return None
+    if not table_cells:
         return False
-    return actual == table_cells
+    try:
+        reader = csv.reader(io.StringIO(content.decode('utf-8-sig'), newline=''), strict=True)
+        end = object()
+        for expected_row in table_cells:
+            if next(reader, end) != expected_row:
+                return False
+        # Read one extra row to reject trailing data without materializing an
+        # arbitrarily long list of rows from an invalid export.
+        return next(reader, end) is end
+    except (UnicodeDecodeError, csv.Error):
+        return None
 
 
 def no_solar_provenance(source, engines):
@@ -99,9 +134,11 @@ def no_solar_provenance(source, engines):
 
 
 def budget_ok(seconds, actions):
-    if (isinstance(seconds, bool) or not isinstance(seconds, (int, float))
-            or not math.isfinite(seconds) or seconds < 0
-            or type(actions) is not int or actions < 0):
+    try:
+        seconds = _nonnegative_number(seconds)
+    except ValueError:
+        return None
+    if type(actions) is not int or not 0 <= actions <= MAX_EXACT_COUNT:
         return None
     return seconds < 1200 and actions < 60
 
@@ -113,7 +150,7 @@ def unreadable_steps(evidence, observed):
 
 def author_verdict(status, body):
     """A named reachable product defect differs from unavailable evidence/auth."""
-    if (status == 503 and isinstance(body, dict)
+    if (type(status) is int and status == 503 and isinstance(body, dict)
             and body.get('reason_code') == 'tenant_repository_unavailable'
             and isinstance(body.get('error'), dict)
             and body['error'].get('error_code') == 'BAD_PARAMS'):
