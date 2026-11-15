@@ -12,6 +12,47 @@ const first = () => screen.getByRole('checkbox', { name: 'Design / Panel A: 12 c
 const second = () => screen.getByRole('checkbox', { name: 'Alternate / Panel B: 9 candidates' })
 const submit = () => screen.getByRole('button', { name: 'Count selected set' })
 
+it.each([null, {}, 'bad', [null], [{ layer: {} }]])('refuses malformed counted summary rows %#', (selected_sets) => {
+  render(<ModuleSetPicker data={{ ...data, selected_sets, count: 2 }} onSelect={vi.fn()} />)
+  expect(screen.getByText(/Count summary unavailable.*Run the module tool again/)).toBeTruthy()
+  expect(screen.queryByText(/^Counted /)).toBeNull()
+})
+
+it.each([NaN, Infinity, -1, 1.5, 9007199254740992, '2', {}])('refuses invalid result count %#', (count) => {
+  render(<ModuleSetPicker data={{ ...data, selected_sets: [data.sets[0]], count }} onSelect={vi.fn()} />)
+  expect(screen.getByText(/Count summary unavailable/)).toBeTruthy()
+  expect(screen.queryByText(/^Counted /)).toBeNull()
+})
+
+it('shows a valid counted summary and clears it on a listing result', () => {
+  const view = render(<ModuleSetPicker data={{ ...data, selected_sets: [data.sets[0]], count: 12 }} onSelect={vi.fn()} />)
+  expect(screen.getByText('Counted 12 modules on Design / Panel A.')).toBeTruthy()
+  view.rerender(<ModuleSetPicker data={{ ...data, selected_sets: [], count: null }} onSelect={vi.fn()} />)
+  expect(screen.queryByText(/^Counted /)).toBeNull()
+  expect(screen.queryByText(/Count summary unavailable/)).toBeNull()
+})
+
+it('uses only the latest callback and requires a fresh choice after StrictMode remount', () => {
+  const oldCallback = vi.fn()
+  const latest = vi.fn()
+  const view = render(<React.StrictMode><ModuleSetPicker data={data} drawingKey="same" onSelect={oldCallback} /></React.StrictMode>)
+  fireEvent.click(second())
+  view.rerender(<React.StrictMode><ModuleSetPicker data={data} drawingKey="same" onSelect={latest} /></React.StrictMode>)
+  fireEvent.click(submit())
+  expect(latest).toHaveBeenCalledExactlyOnceWith(['second'])
+  expect(oldCallback).not.toHaveBeenCalled()
+  view.unmount()
+  render(<React.StrictMode><ModuleSetPicker data={data} drawingKey="same" onSelect={latest} /></React.StrictMode>)
+  expect(second().checked).toBe(false)
+  expect(submit().disabled).toBe(true)
+  fireEvent.click(submit())
+  expect(latest).toHaveBeenCalledTimes(1)
+  fireEvent.click(first())
+  fireEvent.click(submit())
+  expect(latest).toHaveBeenCalledTimes(2)
+  expect(latest).toHaveBeenLastCalledWith(['first'])
+})
+
 it('selects prototype-named IDs independently without inherited state', () => {
   const ids = ['__proto__', 'constructor', 'toString']
   const onSelect = vi.fn()

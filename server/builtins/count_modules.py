@@ -85,6 +85,9 @@ def run(intake, params):
         for row in intake.get(key, []):
             if not isinstance(row, dict) or (key == "polylines" and not isinstance(row.get("pts"), list)):
                 raise ValueError(f"Saved intake {key} has an incompatible candidate row; re-import the drawing.")
+            for field in ("layer", "name", "handle"):
+                if field in row and not isinstance(row[field], str):
+                    raise ValueError(f"Saved intake {key} candidate {field} must be a string; re-import the drawing.")
     groups = {}
     multiplicities = {}
     for entity_type, key in (("INSERT", "inserts"), ("LWPOLYLINE", "polylines")):
@@ -97,6 +100,8 @@ def run(intake, params):
             group = groups.setdefault(identity, {"entity_type": entity_type,
                 "layer": layer, "block": block, "count": 0, "handles": [], "_keys": set()})
             handle = str(entity.get("handle") or "").strip().upper().removeprefix("0X")
+            if handle and all(c in "0123456789ABCDEF" for c in handle):
+                handle = handle.lstrip("0") or "0"
             entity_key = ("handle", handle) if handle else ("row", key, index)
             dimensions = (entity.get("rows", 1), entity.get("columns", 1)) if key == "inserts" else (1, 1)
             if any(type(value) is not int or not 1 <= value <= 65535 for value in dimensions):

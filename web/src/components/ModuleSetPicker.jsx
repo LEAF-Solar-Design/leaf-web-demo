@@ -13,6 +13,12 @@ export default function ModuleSetPicker({ data, drawingKey, onSelect, running = 
     setSelection({ drawingKey, choices })
   }
   const selected = sets.filter((set) => choices.includes(set.set_id))
+  const hasSummary = data?.selected_sets !== undefined && (!Array.isArray(data.selected_sets) || data.selected_sets.length > 0)
+  const validCount = (count) => Number.isSafeInteger(count) && count >= 0
+  const validSummary = Array.isArray(data?.selected_sets) && data.selected_sets.length > 0
+    && validCount(data.count) && data.selected_sets.every((set) => set !== null && typeof set === 'object'
+      && typeof set.set_id === 'string' && typeof set.layer === 'string'
+      && typeof set.block === 'string' && validCount(set.count))
   return <fieldset disabled={unavailable || running || !onSelect}>
     <legend>Module set</legend>
     <p>Choose the intended design set. These candidates come from this drawing.</p>
@@ -33,7 +39,8 @@ export default function ModuleSetPicker({ data, drawingKey, onSelect, running = 
     {unavailable ? <p>Module sets unavailable. Run the module tool again to refresh valid, unique set IDs.</p>
       : !sets.length && <p>No module candidates were found.</p>}
     {!onSelect && <p>Run the module tool on the current drawing to choose a set.</p>}
-    {data?.selected_sets?.length > 0 && <p>Counted {data.count} modules on {data.selected_sets.map((set) =>
-      `${set.layer}${set.block ? ` / ${set.block}` : ''}`).join(', ')}.</p>}
+    {hasSummary && (validSummary ? <p>Counted {data.count} modules on {data.selected_sets.map((set) =>
+      `${set.layer}${set.block ? ` / ${set.block}` : ''}`).join(', ')}.</p>
+      : <p>Count summary unavailable. Run the module tool again to refresh the result.</p>)}
   </fieldset>
 }
