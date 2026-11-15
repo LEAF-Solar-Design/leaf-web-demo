@@ -44,3 +44,15 @@ it('renders every dependency kind and HTML-like names as text with the coverage 
   expect(screen.getAllByRole('row')).toHaveLength(5)
   expect(view.container.querySelector('img, script, svg, b')).toBeNull()
 })
+
+it('keeps the coverage warning on empty reports and removes the old drawing rows', () => {
+  const view = render(<DrawingDependencyReport report={{ coverage_note: 'Drawing A coverage.', dependencies: [
+    { kind: 'image', name: 'old-image.png', disposition: 'image omitted' },
+  ] }} />)
+  expect(screen.getByText('old-image.png')).toBeTruthy()
+  view.rerender(<DrawingDependencyReport report={{ coverage_note: 'Drawing B coverage.', dependencies: [] }} />)
+  expect(screen.getByText('Drawing B coverage.')).toBeTruthy()
+  expect(screen.queryByText('old-image.png')).toBeNull()
+  expect(screen.queryByText('Drawing A coverage.')).toBeNull()
+  expect(screen.getByText('No dependencies were present in the local intake records.')).toBeTruthy()
+})

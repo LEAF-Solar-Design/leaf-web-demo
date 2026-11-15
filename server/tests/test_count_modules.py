@@ -143,3 +143,35 @@ def test_escaped_unicode_set_names_roundtrip_without_identity_collisions():
     result, overlay = module.run(intake, {"set_ids": ids})
     assert result["count"] == 8
     assert set(overlay["highlight_handles"]) == {f"H{i}-{j}" for i in range(4) for j in range(2)}
+
+
+def test_overlapping_sets_count_each_physical_handle_once_without_mutation():
+    from copy import deepcopy
+
+    panel = {"closed": True, "pts": [[0, 0], [2, 0], [2, 1], [0, 1]]}
+    intake = {"inserts": [
+        {"layer": "A", "name": "Panel", "handle": "A"},
+        {"layer": "A", "name": "Panel", "handle": "0xa"},
+        {"layer": "B", "name": "Other panel", "handle": "A"},
+        {"layer": "B", "name": "Other panel", "handle": "B"},
+        {"layer": "Unused", "name": "Panel", "handle": "C"}],
+        "polylines": [{**panel, "layer": "P", "handle": "b"},
+                      {**panel, "layer": "P", "handle": "D"}]}
+    original = deepcopy(intake)
+    listing, _ = module.run(intake, {})
+    selected = [row["set_id"] for row in listing["sets"] if row["layer"] != "Unused"]
+    result, overlay = module.run(intake, {"set_ids": [*selected, selected[0]]})
+    assert result["count"] == 3
+    assert set(overlay["highlight_handles"]) == {"A", "B", "D"}
+    assert len(overlay["highlight_handles"]) == 3
+    assert {row["layer"]: row["count"] for row in result["selected_sets"]} == {"A": 1, "B": 2, "P": 2}
+    assert intake == original
+
+
+def test_distinct_unidentified_entities_are_not_collapsed_by_missing_handles():
+    intake = {"inserts": [{"layer": "A", "name": "Panel"},
+                          {"layer": "A", "name": "Panel"}]}
+    listing, _ = module.run(intake, {})
+    result, overlay = module.run(intake, {"set_ids": [listing["sets"][0]["set_id"]]})
+    assert result["count"] == 2
+    assert overlay["highlight_handles"] == []

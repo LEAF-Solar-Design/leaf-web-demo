@@ -1,20 +1,24 @@
-import { useId, useState } from 'react'
+import { useState } from 'react'
 
-export default function ModuleSetPicker({ data, onSelect, running = false }) {
-  const id = useId()
-  const [choices, setChoices] = useState([])
+export default function ModuleSetPicker({ data, drawingKey, onSelect, running = false }) {
+  const [selection, setSelection] = useState({ drawingKey, choices: [] })
+  if (selection.drawingKey !== drawingKey) setSelection({ drawingKey, choices: [] })
+  const choices = selection.drawingKey === drawingKey ? selection.choices : []
   const sets = Array.isArray(data?.sets) ? data.sets : []
   const selected = sets.filter((set) => choices.includes(set.set_id))
   return <fieldset disabled={running || !onSelect}>
     <legend>Module set</legend>
     <p>Choose the intended design set. These candidates come from this drawing.</p>
-    <label htmlFor={id}>Design set</label>
-    <select id={id} multiple value={selected.map((set) => set.set_id)}
-      onChange={(event) => setChoices(Array.from(event.target.selectedOptions, (option) => option.value))}>
-      {sets.map((set) => <option key={set.set_id} value={set.set_id}>
+    <ul>
+      {sets.map((set) => <li key={set.set_id}><label>
+        <input type="checkbox" checked={choices.includes(set.set_id)}
+          onChange={(event) => {
+            if (!running && onSelect) setSelection({ drawingKey, choices: event.target.checked
+              ? [...choices, set.set_id] : choices.filter((id) => id !== set.set_id) })
+          }} />
         {set.layer}{set.block ? ` / ${set.block}` : ' / closed four-corner shapes'}: {set.count} candidates
-      </option>)}
-    </select>
+      </label></li>)}
+    </ul>
     <button type="button" className="chip-act" disabled={!selected.length || running || !onSelect}
       onClick={() => { if (selected.length && !running && onSelect) onSelect(selected.map((set) => set.set_id)) }}>
       Count selected set

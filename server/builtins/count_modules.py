@@ -41,17 +41,21 @@ def _four_corners(entity):
 def run(intake, params):
     groups = {}
     for entity_type, key in (("INSERT", "inserts"), ("LWPOLYLINE", "polylines")):
-        for entity in intake.get(key) or []:
+        for index, entity in enumerate(intake.get(key) or []):
             if not _model(entity) or (key == "polylines" and not _four_corners(entity)):
                 continue
             layer = entity.get("layer") or "0"
             block = (entity.get("name") or "") if key == "inserts" else ""
             identity = (entity_type, layer, block)
             group = groups.setdefault(identity, {"entity_type": entity_type,
-                "layer": layer, "block": block, "count": 0, "handles": []})
-            group["count"] += 1
-            if entity.get("handle"):
-                group["handles"].append(str(entity["handle"]))
+                "layer": layer, "block": block, "count": 0, "handles": [], "_keys": set()})
+            handle = str(entity.get("handle") or "").strip().upper().removeprefix("0X")
+            entity_key = ("handle", handle) if handle else ("row", key, index)
+            if entity_key not in group["_keys"]:
+                group["_keys"].add(entity_key)
+                group["count"] += 1
+                if handle:
+                    group["handles"].append(handle)
     sets = []
     for identity, group in sorted(groups.items()):
         group["set_id"] = json.dumps(identity, ensure_ascii=True, separators=(",", ":"))
@@ -63,9 +67,13 @@ def run(intake, params):
     if len(selected_sets) != len(selected_ids):
         raise ValueError("Selected module set is absent from this drawing; list the sets again.")
     selected = selected_sets[0] if len(selected_sets) == 1 else None
-    return ({"sets": [{k: v for k, v in s.items() if k != "handles"} for s in sets],
+    def public_set(group):
+        return {k: v for k, v in group.items() if k not in ("handles", "_keys")}
+
+    return ({"sets": [public_set(s) for s in sets],
              "selection_required": not selected_sets,
-             "selected_sets": [{k: v for k, v in s.items() if k != "handles"} for s in selected_sets],
-             "selected_set": {k: v for k, v in selected.items() if k != "handles"} if selected else None,
-             "count": sum(s["count"] for s in selected_sets) if selected_sets else None},
-            {"highlight_handles": [h for s in selected_sets for h in s["handles"]]} if selected_sets else None)
+             "selected_sets": [public_set(s) for s in selected_sets],
+             "selected_set": public_set(selected) if selected else None,
+             "count": len(set().union(*(s["_keys"] for s in selected_sets))) if selected_sets else None},
+            {"highlight_handles": list(dict.fromkeys(h for s in selected_sets for h in s["handles"]))}
+            if selected_sets else None)
