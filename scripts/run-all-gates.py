@@ -3730,6 +3730,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_browser_project_routes.py"), 18),
         Suite("server-browser-source-error-serializer", "server closed Browser source diagnostics", "pytest", SERVER,
               _py_pytest("tests/test_browser_source_error_serializer.py"), 6),
+        Suite("server-b02-initializer-failure", "server B02 initializer diagnostic contract", "pytest", SERVER,
+              _py_pytest("tests/test_b02_initializer_failure_offline.py"), 7),
         Suite("server-browser-project-authoring", "server tests/test_browser_project_authoring.py", "pytest", SERVER,
               _py_pytest("tests/test_browser_project_authoring.py"), 30),
         Suite("server-browser-project-source-export", "server verified Browser source export", "pytest", SERVER,
