@@ -17,6 +17,7 @@ from leaf_cloud_client import (
 )
 from solar_dependencies import affected_entities
 from solar_design_graph import (
+    COLLECTIONS, MAX_GRAPH_NODES, MAX_NODES, SCHEMA_VERSION,
     GraphValidationError, _bounded_json, entities, new_id, validate_graph,
 )
 from solar_grid_restitch import failed_group_indices, ordered_strings, restitch
@@ -33,9 +34,40 @@ SETTINGS_FIELDS = {
 HOMERUN_KINDS = ("start homerun", "end homerun")
 
 
+def _is_design_graph(value):
+    return (type(value) is dict
+            and type(value.get("graph_schema_version")) is int
+            and value["graph_schema_version"] == SCHEMA_VERSION
+            and all(key in value for key in ("project", "settings", *COLLECTIONS)))
+
+
 def digest(value):
-    _bounded_json(value)
+    try:
+        _bounded_json(value)
+    except GraphValidationError as exc:
+        if exc.code != "GRAPH_LIMIT_EXCEEDED" or not _is_design_graph(value):
+            raise
+        # Only a valid full graph may use the validator's larger node budget.
+        # Its byte, depth and collection guards still apply.
+        validate_graph(value)
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
+
+
+def _bounded_companion_json(value):
+    try:
+        _bounded_json(value)
+    except GraphValidationError as exc:
+        if (exc.code != "GRAPH_LIMIT_EXCEEDED" or type(value) is not dict
+                or not _is_design_graph(value.get("solar_design_graph"))):
+            raise
+        validate_graph(value["solar_design_graph"])
+        envelope = dict(value)
+        envelope["solar_design_graph"] = None
+        # The CAD/envelope remains generic JSON, with its unchanged 500k cap.
+        _bounded_json(envelope)
+        # Check combined bytes/depth too; separate valid budgets cannot double
+        # the allowed intake bytes or add an unchecked graph nesting level.
+        _bounded_json(value, max_nodes=MAX_NODES + MAX_GRAPH_NODES)
 
 
 def _slot_tables(graph):
@@ -573,6 +605,37 @@ def accept_split_candidate(graph, candidate, *, expected_rev):
     return finish_mutation(before, result, "solar-commit-solve")
 
 
+def _refresh_corrected_geometry(graph, strings, changed_ids, source_rev):
+    # Only routes produced from panel centres can be reconstructed from membership.
+    # Measured/manual routes remain stale for their own producer to repair.
+    panels = {panel["id"]: panel for panel in graph["panels"]}
+    for ref in changed_ids:
+        string = strings[ref]
+        provenance = string["extra"].get("length_provenance")
+        if (not isinstance(provenance, dict) or provenance.get("source") != "derived"
+                or provenance.get("rule") != "panel-centre-path"):
+            continue
+        refs = string["ordered_panel_refs"]
+        if any(ref not in panels for ref in refs):
+            continue  # Compact slot routes retain their existing producer boundary.
+        points = [copy.deepcopy(panels[ref]["centre"]) for ref in refs]
+        length_m = sum(math.dist(a + [0] * (3 - len(a)), b + [0] * (3 - len(b)))
+                       for a, b in zip(points, points[1:]))
+        string.update(route=points, length_ft=length_m / 0.3048)
+        provenance.update(source_rev=source_rev, writer="solar-correct-string")
+        if not refs:
+            string["extra"].pop("polarity", None)
+            continue
+        old = string["extra"].get("polarity")
+        polarity = copy.deepcopy(old) if isinstance(old, dict) else {}
+        # A manual ordering change is no longer described by the solver response hash.
+        polarity.pop("response_sha256", None)
+        polarity.update(source="derived", rule="ordered-membership-first-negative-last-positive",
+                        negative_panel_ref=refs[0], positive_panel_ref=refs[-1],
+                        source_rev=source_rev)
+        string["extra"]["polarity"] = polarity
+
+
 def correct_graph(graph, params):
     _bounded_json(params)
     if type(params) is not dict or set(params) - {
@@ -608,6 +671,8 @@ def correct_graph(graph, params):
         result["settings"]["extra"].pop("string_sizing", None)
         changed.append(result["settings"]["id"])
     sync_assignments(result)
+    _refresh_corrected_geometry(result, strings,
+        [edit["string_ref"] for edit in memberships], before["rev"])
     invalidate_dependents(before, result, changed)
     return finish_mutation(before, result, "solar-correct-string")
 
@@ -674,7 +739,7 @@ def require_current_export(graph):
 
 def version_companion(intake, before, after):
     """Embed graph and digest in the existing intake, without dropping CAD data."""
-    _bounded_json(intake)
+    _bounded_companion_json(intake)
     if before is None:
         after = validate_graph(after)
         if type(intake) is not dict:
@@ -696,7 +761,7 @@ def version_companion(intake, before, after):
         raise GraphValidationError("STALE_GRAPH_COMPANION")
     result = copy.deepcopy(intake)
     result.update(solar_design_graph=after, solar_design_graph_sha256=digest(after))
-    _bounded_json(result)
+    _bounded_companion_json(result)
     return result
 
 

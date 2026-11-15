@@ -3,6 +3,11 @@
 The caller owns an exclusive private directory and authenticated context/results.
 Creation requires explicit create=True for a new session; default reopening
 never turns lost state into a new session.
+New journals use SQLite user_version 1. The original unversioned layout (0)
+remains readable without rewriting it. Unknown versions are refused on every
+transaction; this module never guesses a migration or replaces stored intent.
+Reopened transactions also check column names and declared types, including
+empty tables. Refusals use one fixed code without disclosing commands or SQL.
 SQLite commits pending intent before returning dispatch=True. A crash after that
 commit is uncertain, never permission to dispatch twice. Native execution and
 membership, evidence and inspector-handle verification remain caller-owned.
@@ -18,7 +23,19 @@ import sqlite3
 import native_preview_session_contract as contract
 
 
+SCHEMA_VERSION = 1
+SCHEMA_COLUMNS = {
+    'session': (('id', 'INTEGER'), ('binding', 'TEXT'), ('sequence', 'INTEGER'),
+                ('phase', 'TEXT'), ('teardown', 'TEXT')),
+    'commands': (('request_id', 'TEXT'), ('digest', 'TEXT'), ('sequence', 'INTEGER'),
+                 ('operation', 'TEXT'), ('status', 'TEXT'), ('evidence', 'TEXT')),
+}
+
+
 class JournalError(RuntimeError):
+    # Stable, input-independent diagnostic for local callers and offline probes.
+    code = 'native_session_journal_unavailable'
+
     def __init__(self):
         super().__init__('Native session journal unavailable or conflicting.')
 
@@ -74,6 +91,7 @@ class CommandJournal:
                                'status TEXT NOT NULL, evidence TEXT)')
                 connection.execute('INSERT INTO session VALUES (1,?,?,?,NULL)',
                                    (self.binding, self.context['next_sequence'], self.context['state']))
+                connection.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
             self._metadata(connection)
 
     @contextmanager
@@ -86,6 +104,14 @@ class CommandJournal:
         try:
             connection.execute('PRAGMA synchronous=FULL')
             connection.execute('BEGIN IMMEDIATE')
+            _need(connection.execute('PRAGMA user_version').fetchone()[0]
+                  in (0, SCHEMA_VERSION))
+            if not create:
+                # Empty tables must not conceal missing or retyped columns.
+                # These names are fixed local constants, never request values.
+                for table, expected in SCHEMA_COLUMNS.items():
+                    columns = connection.execute(f'PRAGMA table_info({table})').fetchall()
+                    _need(tuple((row[1], row[2]) for row in columns) == expected)
             yield connection
             self._commit(connection)
         except BaseException:

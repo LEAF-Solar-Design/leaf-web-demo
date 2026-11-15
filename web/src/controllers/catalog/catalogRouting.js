@@ -1,5 +1,12 @@
 const WRITE_CAPABILITY = 'drawing.write'
 
+export function isPhotoInspectionRequest(prompt) {
+  const text = String(prompt || '').trim()
+  const inspection = /^(?:please\s+)?(?:inspect|classify|categorize|categorise|assign|describe)\b/i.test(text)
+  const assignment = /^(?:please\s+)?propose\s+(?:complete\s+)?(?:photo|image|gallery)\s+assignments?\b/i.test(text)
+  return (inspection || assignment) && /\b(?:photos?|photographs?|images?|galler(?:y|ies))\b/i.test(text)
+}
+
 export function entitlementAllows(entitlements, key) {
   const policy = entitlements && entitlements.entitlements
   if (!policy || typeof policy[key] === 'undefined' || policy[key] === null) return true

@@ -5,6 +5,15 @@ const artifactId = 'b'.repeat(64)
 const report = { drawing_id: 'd1', report: { artifact_id: artifactId } }
 
 describe('SolarEdge import model', () => {
+  it('adds matched-only intent only for an explicit boolean with actual matched tracking', () => {
+    const mixed = { ...report, counts: { matched_frames: 1, strings: 2 } }
+    expect(acceptParams(12, mixed, 'd1', true)).toEqual({ expected_rev: 12,
+      report_artifact_id: artifactId, accept_matched_only: true })
+    expect(acceptParams(12, mixed, 'd1')).toEqual({ expected_rev: 12, report_artifact_id: artifactId })
+    expect(acceptParams(12, report, 'd1', true)).toBeNull()
+    for (const choice of [null, 1, 'true', {}]) expect(acceptParams(12, mixed, 'd1', choice)).toBeNull()
+    expect(acceptParams(12, { ...mixed, counts: { matched_frames: 0, strings: 0 } }, 'd1', true)).toBeNull()
+  })
   it.each(['', '0', '1e-7', '1000001', 'abc', '0x1', ' 1', 'NaN', '1 ', '1\n', 'Infinity', '1_000', '1e999'])
   ('SE8 rejects invalid tolerance %j', (text) => {
     expect(parseTolerance(text).ok).toBe(false)

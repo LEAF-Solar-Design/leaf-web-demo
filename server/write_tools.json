@@ -152,6 +152,9 @@
             "type": "integer",
             "minimum": 0
           },
+          "geometry_only": {
+            "type": "boolean"
+          },
           "cancel": {
             "type": "boolean"
           },
