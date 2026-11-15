@@ -213,6 +213,60 @@ def test_module_insert_geometry(fixture):
     assert grade(fixture)["steps"]["4"] == "PASS"
 
 
+@pytest.mark.parametrize("block_name", ["*U999", "CONVERTED_MODULE"])
+def test_anonymous_module_matches_geometry_on_any_module_layer(fixture, block_name):
+    client = FakeClient()
+    fixture["module_blocks"] = ["*U72"]
+    fixture["module_layers"] = ["Other", "Modules"]
+    client.counts["Other"] = 0
+    client.intake["blocks"][block_name] = client.intake["blocks"].pop("MODULE")
+    client.intake["inserts"][0]["name"] = block_name
+    row = grade(fixture, client)
+    assert row["steps"]["4"] == "PASS"
+    assert block_name in row["evidence"]["4"]
+    assert "*U72" not in row["evidence"]["4"]
+
+
+@pytest.mark.parametrize("invalid", ["layer", "no_layers", "insert", "definition", "empty", "text"])
+def test_anonymous_module_requires_insert_layer_and_geometry(fixture, invalid):
+    client = FakeClient()
+    fixture["module_blocks"] = ["*U72"]
+    if invalid == "layer":
+        client.intake["inserts"][0]["layer"] = "Other"
+    elif invalid == "no_layers":
+        del fixture["module_layers"]
+    elif invalid == "insert":
+        client.intake["inserts"] = []
+    elif invalid == "definition":
+        client.intake["blocks"] = {}
+    else:
+        client.intake["blocks"]["MODULE"]["children"] = (
+            [] if invalid == "empty" else [{"kind": "TEXT", "text": "module"}])
+    assert grade(fixture, client)["steps"]["4"] == "FAIL"
+
+
+def test_anonymous_module_evidence_names_at_most_five_blocks(fixture):
+    client = FakeClient()
+    fixture["module_blocks"] = ["*U72"]
+    block = client.intake["blocks"].pop("MODULE")
+    names = [f"*U{n}" for n in range(100, 107)]
+    client.intake["blocks"] = {name: block for name in names}
+    client.intake["inserts"] = [{"name": name, "layer": "Modules"} for name in names]
+    row = grade(fixture, client)
+    assert row["steps"]["4"] == "PASS"
+    assert row["evidence"]["4"].endswith("matched blocks: " + ", ".join(names[:5]))
+    assert all(name not in row["evidence"]["4"] for name in names[5:])
+
+
+def test_named_module_still_requires_exact_name_with_anonymous_entry(fixture):
+    fixture["module_blocks"] = ["*U72", "EXPECTED_MODULE"]
+    row = grade(fixture)
+    assert row["steps"]["4"] == "FAIL"
+    assert "EXPECTED_MODULE" in row["evidence"]["4"]
+    assert "*U72" not in row["evidence"]["4"]
+    assert "matched blocks: MODULE" in row["evidence"]["4"]
+
+
 def test_empty_block_definition(fixture):
     client = FakeClient()
     client.intake["blocks"]["MODULE"]["children"] = []
@@ -272,8 +326,19 @@ def test_without_layers_is_unreadable(fixture):
 def test_forbidden_tokens_drop_anonymous_short_and_duplicates():
     fixture = {"id": "customer", "module_blocks": ["*U123", "MODULE", "module", "abc"]}
     assert x04.forbidden_tokens(fixture) == ["customer", "MODULE"]
+
+
+def test_explicit_forbidden_tokens_preserve_short_and_anonymous_tokens():
+    fixture = {"id": "customer", "module_blocks": ["MODULE"]}
     fixture["forbidden_tokens"] = ["custom", "*U999", "foo", "CUSTOM"]
-    assert x04.forbidden_tokens(fixture) == ["custom"]
+    assert x04.forbidden_tokens(fixture) == ["custom", "*U999", "foo"]
+    assert fixture["forbidden_tokens"] == ["custom", "*U999", "foo", "CUSTOM"]
+
+
+def test_explicit_empty_forbidden_tokens_do_not_fall_back():
+    assert x04.forbidden_tokens({"id": "customer", "module_blocks": ["MODULE"],
+                                 "forbidden_tokens": []}) == []
+    assert x04.forbidden_tokens({"forbidden_tokens": ["x", "x"]}) == ["x"]
 
 
 class FakeRunner:

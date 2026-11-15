@@ -51,10 +51,12 @@ def step_verdict(per_file):
 
 
 def forbidden_tokens(fixture):
-    candidates = fixture.get("forbidden_tokens", [fixture["id"], *fixture.get("module_blocks", [])])
+    explicit = "forbidden_tokens" in fixture
+    candidates = (fixture["forbidden_tokens"] if explicit else
+                  [fixture["id"], *fixture.get("module_blocks", [])])
     tokens, seen = [], set()
     for token in candidates:
-        if (len(token) >= 4 and not token.upper().startswith("*U")
+        if ((explicit or (len(token) >= 4 and not token.upper().startswith("*U")))
                 and token.lower() not in seen):
             tokens.append(token)
             seen.add(token.lower())
@@ -151,15 +153,26 @@ def grade_files(client, transport, *, project, fixtures, clock=time.monotonic):
         if not row["insert_fixture"]:
             mark(4, "PASS", "not applicable")
         else:
-            names = {insert.get("name") for insert in intake.get("inserts", [])}
+            inserts = intake.get("inserts", [])
+            names = {insert.get("name") for insert in inserts}
             blocks = intake.get("blocks", {})
-            missing = [name for name in fixture["module_blocks"] if not any(
-                child.get("kind") in ("LINE", "LWPOLYLINE", "CIRCLE", "ARC")
-                for child in blocks.get(name, {}).get("children", []))]
-            if not names.intersection(fixture["module_blocks"]):
-                missing = list(fixture["module_blocks"])
-            mark(4, "FAIL" if missing else "PASS", "missing insert or geometry: " + ", ".join(missing)
-                 if missing else "module inserts have block geometry")
+
+            def has_geometry(name):
+                return any(child.get("kind") in ("LINE", "LWPOLYLINE", "CIRCLE", "ARC")
+                           for child in blocks.get(name, {}).get("children", []))
+
+            matched = list(dict.fromkeys(
+                insert["name"] for insert in inserts
+                if insert.get("layer") in fixture.get("module_layers", [])
+                and has_geometry(insert.get("name"))))
+            missing = [name for name in fixture["module_blocks"]
+                       if not (matched if name.startswith("*") else
+                               name in names and has_geometry(name))]
+            evidence = ("missing insert or geometry: " + ", ".join(missing)
+                        if missing else "module inserts have block geometry")
+            if matched and any(name.startswith("*") for name in fixture["module_blocks"]):
+                evidence += "; matched blocks: " + ", ".join(matched[:5])
+            mark(4, "FAIL" if missing else "PASS", evidence)
         layers = list(dict.fromkeys(fixture.get("module_layers", [])))
         if not layers:
             mark(5, "UNREADABLE", "module layers unavailable")
