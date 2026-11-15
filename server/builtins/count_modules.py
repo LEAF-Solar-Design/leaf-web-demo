@@ -24,6 +24,20 @@ def _four_corners(entity):
     try:
         if any(len(p) < 2 or any(not math.isfinite(v) for v in p) for p in points):
             return False
+        xyz = [(p[0], p[1], p[2] if len(p) > 2 else 0) for p in points]
+        local3 = [tuple(p[j] - xyz[0][j] for j in range(3)) for p in xyz]
+        a, b = local3[1:3]
+        normal = (a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0])
+        magnitude = math.hypot(*normal)
+        if not math.isfinite(magnitude) or magnitude == 0:
+            return False
+        scale = max(abs(v) for p in local3 for v in p)
+        # Floating roundoff allowance only, relative to the local extent.
+        distance = math.fsum((local3[3][j] / scale) * (normal[j] / magnitude) for j in range(3))
+        if not math.isfinite(distance) or abs(distance) > 64 * math.ulp(1.0):
+            return False
+        drop = max(range(3), key=lambda j: abs(normal[j]))
+        points = [tuple(p[j] for j in range(3) if j != drop) for p in xyz]
         if len({(p[0], p[1]) for p in points}) != 4:
             return False
         for i in range(4):

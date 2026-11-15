@@ -12,6 +12,29 @@ const first = () => screen.getByRole('checkbox', { name: 'Design / Panel A: 12 c
 const second = () => screen.getByRole('checkbox', { name: 'Alternate / Panel B: 9 candidates' })
 const submit = () => screen.getByRole('button', { name: 'Count selected set' })
 
+it.each([
+  [null],
+  [{ layer: 'Missing ID', count: 1 }],
+  [{ ...data.sets[0], set_id: '' }],
+  [{ ...data.sets[0], set_id: '   ' }],
+  [{ ...data.sets[0], set_id: 3 }],
+  [data.sets[0], { ...data.sets[1], set_id: 'first' }],
+])('refuses malformed candidate listing %# without partial selection', (...rows) => {
+  const onSelect = vi.fn()
+  const view = render(<ModuleSetPicker data={data} onSelect={onSelect} />)
+  fireEvent.click(first())
+  view.rerender(<ModuleSetPicker data={{ sets: rows }} onSelect={onSelect} />)
+  expect(screen.getByText(/Module sets unavailable.*Run the module tool again/)).toBeTruthy()
+  expect(screen.getByRole('group').disabled).toBe(true)
+  expect(screen.queryAllByRole('checkbox')).toHaveLength(0)
+  expect(submit().disabled).toBe(true)
+  fireEvent.click(submit())
+  expect(onSelect).not.toHaveBeenCalled()
+  view.rerender(<ModuleSetPicker data={data} onSelect={onSelect} />)
+  expect(first().checked).toBe(false)
+  expect(submit().disabled).toBe(true)
+})
+
 it('lists competing sets and submits only an explicit pick', () => {
   const onSelect = vi.fn()
   render(<ModuleSetPicker data={data} onSelect={onSelect} />)
