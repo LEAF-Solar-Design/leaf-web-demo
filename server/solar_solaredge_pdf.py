@@ -36,6 +36,7 @@ import zlib
 from dataclasses import dataclass, field
 
 from pdfminer.pdfdevice import PDFTextDevice
+from pdfminer.cmapdb import CMapParser, FileUnicodeMap
 from pdfminer.pdfdocument import PDFDocument, PDFStreamParser
 from pdfminer.pdffont import PDFCIDFont, PDFUnicodeNotDefined
 from pdfminer.pdfinterp import PDFContentParser, PDFPageInterpreter, PDFResourceManager
@@ -55,6 +56,10 @@ MAX_LETTERS = 1_000_000
 MAX_FORM_DEPTH = 8
 MAX_OBJECT_STREAM_BYTES = 8 * 1024 * 1024
 MAX_OBJECT_STREAM_OBJECTS = 8192
+MAX_CMAP_BYTES = 2 * 1024 * 1024
+MAX_CMAP_ENTRIES = 65536
+MAX_CMAP_REPLACEMENT = 256
+MAX_TEXT_CHARACTERS = 1_000_000
 
 BLACK = (0.0, 0.0, 0.0)
 
@@ -206,10 +211,52 @@ def _bezier_extent(p1, p2, p3, p4):
 MAX_FONT_BYTES = 32 * 1024 * 1024
 
 
+class _BoundedUnicodeMap(FileUnicodeMap):
+    def __init__(self, manager):
+        super().__init__()
+        self.manager = manager
+
+    def add_cid2unichr(self, cid, code):
+        # Check the encoded value before FileUnicodeMap allocates its Unicode string.
+        if ((isinstance(code, bytes) and len(code) > MAX_CMAP_REPLACEMENT * 2)
+                or (isinstance(code, PSLiteral) and len(str(code.name)) > MAX_CMAP_REPLACEMENT)):
+            raise SolarEdgePdfError("RESOURCE_LIMIT", "CMap replacement")
+        self.manager.cmap_entries += 1
+        if self.manager.cmap_entries > MAX_CMAP_ENTRIES:
+            raise SolarEdgePdfError("RESOURCE_LIMIT", "CMap entries")
+        super().add_cid2unichr(cid, code)
+        self.manager.cmap_characters += len(self.cid2unichr.get(cid, ""))
+        if self.manager.cmap_characters > MAX_TEXT_CHARACTERS:
+            raise SolarEdgePdfError("RESOURCE_LIMIT", "CMap characters")
+
+
+class _BoundedCMapParser(CMapParser):
+    def do_keyword(self, pos, token):
+        if token is self.KEYWORD_USECMAP:
+            raise SolarEdgePdfError("CMAP_INHERITANCE_UNSUPPORTED")
+        return super().do_keyword(pos, token)
+
+
 class _ResourceManager(PDFResourceManager):
     """Keeps each CID font's descendant dictionary, which pdfminer discards, for its hmtx."""
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.cmap_entries = 0
+        self.cmap_characters = 0
+        self.cmap_bytes = 0
+        self.checked_cmaps = set()
+
     def get_font(self, objid, spec):
+        if isinstance(spec, dict) and spec.get("ToUnicode") is not None:
+            cmap = resolve1(spec["ToUnicode"])
+            if isinstance(cmap, PDFStream) and id(cmap) not in self.checked_cmaps:
+                if cmap.get("UseCMap") is not None:
+                    raise SolarEdgePdfError("CMAP_INHERITANCE_UNSUPPORTED")
+                data = _bounded_auxiliary_data(cmap, MAX_CMAP_BYTES - self.cmap_bytes)
+                self.cmap_bytes += len(data)
+                _BoundedCMapParser(_BoundedUnicodeMap(self), io.BytesIO(data)).run()
+                self.checked_cmaps.add(id(cmap))
         # A Type0 spec recurses here with its descendant, which is the dictionary we keep.
         font = super().get_font(objid, spec)
         if isinstance(font, PDFCIDFont) and not hasattr(font, "leaf_cid_spec"):
@@ -274,6 +321,7 @@ class _PrimitiveDevice(PDFTextDevice):
         self.segments = 0
         self.paint_colors = None  # set by the interpreter before each paint
         self._cid_metrics = {}
+        self.text_characters = 0
 
     def paint_path(self, graphicstate, stroke, fill, evenodd, path):
         paths = self.out.paths
@@ -338,6 +386,9 @@ class _PrimitiveDevice(PDFTextDevice):
             value = font.to_unichr(cid)
         except PDFUnicodeNotDefined:
             value = f"(cid:{cid})"
+        if self.text_characters + len(value) > MAX_TEXT_CHARACTERS:
+            raise SolarEdgePdfError("RESOURCE_LIMIT", "extracted text characters")
+        self.text_characters += len(value)
         a, b, c, d, e, f = matrix
         x = c * rise + e
         y = d * rise + f

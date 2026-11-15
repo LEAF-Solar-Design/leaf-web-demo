@@ -237,6 +237,47 @@ def test_object_stream_document_total_is_cumulative(monkeypatch):
         doc._get_objects(_object_stream(b"8 0 null\n", 1, 4))
 
 
+def test_cmap_replacement_is_checked_before_mapping(monkeypatch):
+    monkeypatch.setattr(pdf, "MAX_CMAP_REPLACEMENT", 2)
+    manager = pdf._ResourceManager()
+    cmap = pdf._BoundedUnicodeMap(manager)
+    cmap.add_cid2unichr(1, "AB".encode("utf-16-be"))
+    assert cmap.cid2unichr == {1: "AB"}
+    with pytest.raises(SolarEdgePdfError, match="RESOURCE_LIMIT"):
+        cmap.add_cid2unichr(2, "ABC".encode("utf-16-be"))
+    assert cmap.cid2unichr == {1: "AB"}
+
+
+def test_cmap_entries_are_cumulative_even_for_repeated_cid(monkeypatch):
+    monkeypatch.setattr(pdf, "MAX_CMAP_ENTRIES", 2)
+    manager = pdf._ResourceManager()
+    one, two = pdf._BoundedUnicodeMap(manager), pdf._BoundedUnicodeMap(manager)
+    one.add_cid2unichr(1, b"\x00A")
+    two.add_cid2unichr(1, b"\x00B")
+    with pytest.raises(SolarEdgePdfError, match="RESOURCE_LIMIT"):
+        two.add_cid2unichr(1, b"\x00C")
+    assert two.cid2unichr == {1: "B"}
+
+
+def test_cmap_inheritance_is_explicitly_unsupported():
+    import io
+    parser = pdf._BoundedCMapParser(pdf._BoundedUnicodeMap(pdf._ResourceManager()),
+                                    io.BytesIO(b"begincmap /Identity-H usecmap endcmap"))
+    with pytest.raises(SolarEdgePdfError, match="CMAP_INHERITANCE_UNSUPPORTED"):
+        parser.run()
+
+
+@pytest.mark.parametrize("text,refused", [(b"ABC", False), (b"ABCD", True)])
+def test_extracted_character_budget_before_append(monkeypatch, text, refused):
+    monkeypatch.setattr(pdf, "MAX_TEXT_CHARACTERS", 3)
+    data = _pdf(b"BT /F1 10 Tf (" + text + b") Tj ET", resources=HELVETICA)
+    if refused:
+        with pytest.raises(SolarEdgePdfError, match="RESOURCE_LIMIT"):
+            pdf.extract_primitives(data)
+    else:
+        assert "".join(item[0] for item in pdf.extract_primitives(data).letters) == "ABC"
+
+
 def test_refuses_too_many_operators(monkeypatch):
     monkeypatch.setattr(pdf, "MAX_OPERATORS", 3)
     with pytest.raises(SolarEdgePdfError) as err:
