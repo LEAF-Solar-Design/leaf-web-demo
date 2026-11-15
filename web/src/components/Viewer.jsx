@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react'
 import { applyCameraCarry, applyViewPose, cameraCarry, cameraCarryKey, cameraPose, captureCameraCarry, nextFitState, pickLineThreshold, resizeCameraAction, safeFitFrustum, safeCenterShift, safeRectCameraAction, unprojectClientToPlane } from './viewerMath.js'
 import { blockDefinitions } from './viewerIntake.js'
 import { drawingOrigin, finiteXY, localPositions } from './viewerLocalFrame.js'
@@ -315,6 +315,10 @@ const Viewer = forwardRef(function Viewer(
   // Set when the browser cannot provide a WebGL context — degrade to a calm
   // message instead of crashing the React tree.
   const [glError, setGlError] = useState(false)
+
+  // OrbitControls removes document listeners via the canvas root. Disconnect before React
+  // detaches that root; keep scene setup and ready callbacks in the existing passive effect.
+  useLayoutEffect(() => () => { stateRef.current?.controls.disconnect?.() }, [])
 
   // --- scene build (re-runs on activeIntake / colorForLayer change) --------
   useEffect(() => {
