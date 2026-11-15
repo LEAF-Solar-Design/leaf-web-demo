@@ -1,11 +1,13 @@
 import { test, expect } from '@playwright/test'
 import { readFile, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 
 test('native text input preserves complete Unicode at the UTF16 limit', async ({ page }, testInfo) => {
   let saved, requests = 0
+  const id = 'widget-' + createHash('sha256').update(JSON.stringify(['regression-a', 'text-boundary'])).digest('hex')
   await page.route('**/api/**', async route => {
     const request = route.request()
-    expect(new URL(request.url()).pathname).toBe('/api/lab/docs/text-boundary/save')
+    expect(new URL(request.url()).pathname).toBe(`/api/lab/docs/${id}/save`)
     requests += 1
     const body = request.postDataJSON()
     expect(body.expected_head).toBeNull()
