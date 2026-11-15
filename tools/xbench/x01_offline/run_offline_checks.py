@@ -352,6 +352,34 @@ def run_checks(commands=None, timeout=30, provenance_paths=None):
                 provenance=provenance, diagnostics=top_diagnostics)
 
 
+def output_preflight(path, root):
+    """Refuse source aliases in a trusted, quiescent directory before execution."""
+    if path is None:
+        return None
+    try:
+        path, root = Path(path), Path(root)
+        canonical = path.resolve()
+        protected = [entry for entry in root.iterdir() if entry.suffix == ".py"]
+        protected += [root / name for name in VECTORS]
+        for source in protected:
+            if canonical == source.resolve():
+                return dict(name="OUTPUT_PROTECTED", path=str(path))
+        try:
+            path.stat()
+        except FileNotFoundError:
+            return None  # A distinct, new report has no existing inode alias.
+        for source in protected:
+            try:
+                source.stat()
+            except FileNotFoundError:
+                continue
+            if path.samefile(source):
+                return dict(name="OUTPUT_PROTECTED", path=str(path))
+    except (OSError, RuntimeError) as error:
+        return dict(name="OUTPUT_PATH_UNREADABLE", message=str(error))
+    return None
+
+
 def write_atomic(path, result):
     path = Path(path)
     temporary = None
@@ -612,6 +640,11 @@ def main(argv=None):
     parser.add_argument("--timeout-seconds", default=30)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
+    diagnostic = output_preflight(args.output, ROOT)
+    if diagnostic:
+        print(json.dumps(dict(schema=SCHEMA, evidence_kind="synthetic_offline", live_grade=False,
+                              verdict="UNREADABLE", checks=[], diagnostics=[diagnostic])))
+        return 4
     try:
         timeout = timeout_seconds(args.timeout_seconds)
     except ValueError as error:

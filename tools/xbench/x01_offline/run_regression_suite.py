@@ -13,11 +13,11 @@ from unittest.mock import patch
 
 try:
     from .run_offline_checks import (capture_child, structured_diagnostics,
-                                     timeout_seconds, write_atomic, TEXT_LIMIT,
+                                     timeout_seconds, write_atomic, output_preflight, TEXT_LIMIT,
                                      MAX_DIAGNOSTICS, MAX_DIAGNOSTIC_BYTES)
 except ImportError:
     from run_offline_checks import (capture_child, structured_diagnostics,
-                                    timeout_seconds, write_atomic, TEXT_LIMIT,
+                                    timeout_seconds, write_atomic, output_preflight, TEXT_LIMIT,
                                     MAX_DIAGNOSTICS, MAX_DIAGNOSTIC_BYTES)
 
 
@@ -32,14 +32,17 @@ TESTS = (
     "test_case_work_limits.py",
     "test_child_lifecycle.py",
     "test_cli_path_portability.py",
+    "test_concurrent_report_writers.py",
     "test_dxf_mutation_corpus.py",
     "test_fill_grid_oracle.py",
     "test_fill_tag_numeric_failures.py",
     "test_geometry_invariants.py",
     "test_geometry_matching_oracle.py",
     "test_geometry_numeric_failures.py",
+    "test_layer_order_invariants.py",
     "test_layer_resource_limits.py",
     "test_oblique_tag_oracle.py",
+    "test_output_path_safety.py",
     "test_regression_inventory.py",
     "test_report_comparison_algebra.py",
     "test_source_read_mutation.py",
@@ -53,6 +56,7 @@ SELF_TESTS = (
     "check_cases.py", "check_plot_layers.py", "check_unit_equivalence.py",
     "run_offline_checks.py", "validate_offline_report.py",
     "verify_report_sources.py", "benchmark_synthetic.py",
+    "benchmark_geometry_matching.py", "inspect_evidence_bundle.py",
 )
 SUITES = TESTS + SELF_TESTS
 DEFAULT_TIMEOUT = 30
@@ -159,6 +163,10 @@ def main(argv=None):
     parser.add_argument("--self-test", action="store_true")
     try:
         args = parser.parse_args(argv)
+        diagnostic = output_preflight(args.output, ROOT)
+        if diagnostic:
+            print(json.dumps(envelope([], [diagnostic]), sort_keys=True, allow_nan=False))
+            return 4
         timeout = timeout_seconds(args.timeout_seconds)
         budget = total_seconds(args.total_budget_seconds)
         names = SUITES if args.suite is None else args.suite
@@ -254,7 +262,7 @@ class RegressionTests(unittest.TestCase):
             listed = json.loads(output.getvalue())
             self.assertEqual([row["name"] for row in listed["suites"]], list(SUITES))
             self.assertNotIn(Path(__file__).name, SUITES)
-            self.assertEqual(len(TESTS), 22)
+            self.assertEqual(len(TESTS), 25)
             for row in listed["suites"]:
                 self.assertTrue(Path(row["argv"][0]).is_absolute())
                 self.assertTrue(Path(row["argv"][1]).is_absolute())
