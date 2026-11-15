@@ -98,7 +98,7 @@ def test_changed_prompt_bytes_fail_before_session_or_author_request(tmp_path, mo
     assert not (tmp_path / "out").exists()
 
 
-@pytest.mark.parametrize("case", ["complete", "upload-failure", "drift", "existing-baseline", "baseline-race"])
+@pytest.mark.parametrize("case", ["complete", "upload-failure", "drift", "existing-baseline", "baseline-race", "authority-refusal", "authority-timeout", "nan-output", "inf-output", "negative-inf-output"])
 def test_mocked_run_lifecycle_dispatches_sequentially_and_cleans_up(tmp_path, monkeypatch, case):
     manifest = prompt_manifest(tmp_path)
     fail_upload = case == "upload-failure"
@@ -175,6 +175,10 @@ def test_mocked_run_lifecycle_dispatches_sequentially_and_cleans_up(tmp_path, mo
         assert kwargs["source_sha"] == SHA
         snapshots.append(copy.deepcopy(previous))
         dispatches.append(row["id"])
+        if case in ("nan-output", "inf-output", "negative-inf-output"):
+            value = {"nan-output": float("nan"), "inf-output": float("inf"), "negative-inf-output": -float("inf")}[case]
+            result, _ = run_prompt(out, value=[{"nested": value}], evaluator=real_evaluate)
+            return {**result, "trade": row["trade"], "drawing": row["drawing"]}
         if case == "drift":
             health_reads = 0
             def transport(method, path, **kw):
@@ -202,7 +206,24 @@ def test_mocked_run_lifecycle_dispatches_sequentially_and_cleans_up(tmp_path, mo
     @contextmanager
     def fake_authority(*args, **kwargs):
         yield {"X-Authority-Session-Id": "owned-session", "X-Authority-Turn-Id": "owned-turn"}
-    monkeypatch.setattr(bench, "author_authority", fake_authority)
+    if case.startswith("authority-"):
+        authority_calls = []
+        def authority_transport(method, path, **kw):
+            authority_calls.append(path)
+            if path == "/api/sessions":
+                if len(dispatches) == 1 and case == "authority-timeout":
+                    raise TimeoutError("synthetic timeout")
+                return 200, {"session_id": "owned-session"}
+            if path.endswith("/messages"):
+                if len(dispatches) == 1:
+                    return 403, {"reason_code": "tenant_role_denied"}
+                return 202, {"turn_id": "owned-turn", "status": "running"}
+            assert path == "/api/sessions/owned-session/turns/owned-turn/cancel"
+            events.append("cancel-owned-turn")
+            return 200, {}
+        monkeypatch.setattr(bench, "transport_for", lambda *args: authority_transport)
+    else:
+        monkeypatch.setattr(bench, "author_authority", fake_authority)
     monkeypatch.setattr(bench, "evaluate_prompt", evaluate)
     ctx = SimpleNamespace(manifest=manifest, source_sha=SHA,
                           base="https://synthetic.invalid", out_dir=out)
@@ -217,6 +238,27 @@ def test_mocked_run_lifecycle_dispatches_sequentially_and_cleans_up(tmp_path, mo
             bench.run(ctx)
         assert len(dispatches) == 50
         assert baseline_path.read_bytes() == b"competing baseline must survive"
+    elif case.startswith("authority-") or case.endswith("-output"):
+        steps = bench.run(ctx)
+        assert dispatches == ["X03-01"]
+        assert all(step.verdict == "UNREADABLE" for step in steps)
+        persisted = json.loads((out / "records.json").read_text())
+        if case.startswith("authority-"):
+            assert [r["id"] for r in persisted] == ["X03-01", "X03-02"]
+            assert persisted[0]["score"] == 1
+            assert persisted[1]["error_code"] == "AUTHOR_AUTHORITY_SETUP_FAILED"
+            assert persisted[1]["author_submitted"] is False
+            assert (out / "X03-02-authority.json").is_file()
+            assert authority_calls.count("/api/sessions/owned-session/turns/owned-turn/cancel") == 1
+            events.remove("cancel-owned-turn")
+        else:
+            assert len(persisted) == 1
+            assert persisted[0]["output_hash"] is None
+            assert persisted[0]["error_code"] == "INVALID_EXECUTION_OUTPUT"
+            assert not (out / "X03-01-output.json").exists()
+        assert persisted[-1]["score"] == 0 and persisted[-1]["unreadable"] is True
+        assert json.loads((out / "summary.json").read_text())["complete"] is False
+        assert not baseline_path.exists()
     elif case == "drift":
         steps = bench.run(ctx)
         assert dispatches == ["X03-01"]
@@ -250,7 +292,7 @@ def test_csv_and_summary_rates_agree_for_mixed_models_and_order(tmp_path):
     for name, rows in (("forward", source), ("reverse", list(reversed(source)))):
         out = tmp_path / name
         out.mkdir()
-        _, report = bench.grade_records(rows, baseline=None, prompt_sha256="d" * 64,
+        _, report = bench.grade_records(rows, frozen_rows=records(), baseline=None, prompt_sha256="d" * 64,
                                         source_sha=SHA, out_dir=out)
         summary = json.loads((out / "summary.json").read_text())
         assert summary == report
@@ -372,7 +414,7 @@ def test_invalid_records_cannot_emit_acceptance_evidence(tmp_path, change):
     rows = records()
     rows[0].update(change)
     with pytest.raises(ValueError):
-        bench.grade_records(rows, baseline=None, prompt_sha256="d" * 64,
+        bench.grade_records(rows, frozen_rows=records(), baseline=None, prompt_sha256="d" * 64,
                             source_sha=SHA, out_dir=tmp_path)
     assert not list(tmp_path.iterdir())
 
@@ -389,20 +431,20 @@ def test_comparison_rejects_extra_keys_boolean_nan_and_obeys_absolute_tolerance(
 
 def test_regression_boundary_and_first_baseline(tmp_path):
     first = records()
-    _, baseline = bench.grade_records(first, baseline=None, prompt_sha256="d" * 64,
+    _, baseline = bench.grade_records(first, frozen_rows=records(), baseline=None, prompt_sha256="d" * 64,
                                       source_sha=SHA, out_dir=tmp_path)
     # Exactly five points overall and ten points in one trade is allowed.
     for index in (0, 1, 2):
         first[index].update(score=0, failing_stage="comparison")
-    _, report = bench.grade_records(first, baseline=baseline, prompt_sha256="d" * 64,
+    _, report = bench.grade_records(first, frozen_rows=records(), baseline=baseline, prompt_sha256="d" * 64,
                                     source_sha=SHA, out_dir=tmp_path)
     assert report["REGRESSION"]  # Three of fifty is six points overall.
     first[2].update(score=1, failing_stage=None)
-    _, report = bench.grade_records(first, baseline=baseline, prompt_sha256="d" * 64,
+    _, report = bench.grade_records(first, frozen_rows=records(), baseline=baseline, prompt_sha256="d" * 64,
                                     source_sha=SHA, out_dir=tmp_path)
     assert not report["REGRESSION"]
     with pytest.raises(ValueError, match="different frozen"):
-        bench.grade_records(first, baseline=baseline, prompt_sha256="e" * 64,
+        bench.grade_records(first, frozen_rows=records(), baseline=baseline, prompt_sha256="e" * 64,
                             source_sha=SHA, out_dir=tmp_path)
 
 
@@ -410,11 +452,11 @@ def test_trade_floor_and_incomplete_run_never_pass(tmp_path):
     first = records()
     for index in range(40, 46):
         first[index].update(score=0, failing_stage="comparison")
-    steps, report = bench.grade_records(first, baseline=None, prompt_sha256="d" * 64,
+    steps, report = bench.grade_records(first, frozen_rows=records(), baseline=None, prompt_sha256="d" * 64,
                                        source_sha=SHA, out_dir=tmp_path)
     assert report["overall"] == 0.88
     assert steps[-1].verdict == "FAIL"
-    steps, report = bench.grade_records(first[:-1], baseline=None, prompt_sha256="d" * 64,
+    steps, report = bench.grade_records(first[:-1], frozen_rows=records(), baseline=None, prompt_sha256="d" * 64,
                                        source_sha=SHA, out_dir=tmp_path)
     assert not report["complete"]
     assert all(step.verdict == "UNREADABLE" for step in steps)
@@ -423,7 +465,7 @@ def test_trade_floor_and_incomplete_run_never_pass(tmp_path):
 def test_unreadable_evidence_is_not_a_scored_failure_or_baseline(tmp_path):
     first = records()
     first[0].update(score=0, failing_stage="author", unreadable=True)
-    steps, report = bench.grade_records(first, baseline=None, prompt_sha256="d" * 64,
+    steps, report = bench.grade_records(first, frozen_rows=records(), baseline=None, prompt_sha256="d" * 64,
                                        source_sha=SHA, out_dir=tmp_path)
     assert not report["complete"]
     assert all(step.verdict == "UNREADABLE" for step in steps)
@@ -448,13 +490,13 @@ def test_malformed_baseline_is_rejected_before_comparison_or_receipt(tmp_path, m
     monkeypatch.setattr(bench, "rates", forbidden)
     monkeypatch.setattr(bench, "write_json_atomic", forbidden)
     with pytest.raises(ValueError, match="baseline"):
-        bench.grade_records(records(), baseline=baseline, prompt_sha256="d" * 64,
+        bench.grade_records(records(), frozen_rows=records(), baseline=baseline, prompt_sha256="d" * 64,
                             source_sha=SHA, out_dir=tmp_path)
     assert not list(tmp_path.iterdir())
 
 
 def run_prompt(tmp_path, *, fallback=False, model=True, publication="published", value=3, drift=False,
-               catalog_change=None, authority_headers=None, staged_envelope=False):
+               catalog_change=None, authority_headers=None, staged_envelope=False, evaluator=None):
     calls = []
     def transport(method, path, **kw):
         calls.append((method, path, kw))
@@ -491,7 +533,7 @@ def run_prompt(tmp_path, *, fallback=False, model=True, publication="published",
             return 200, {"result": {"value": value}}
     row = {"id": "X03-01", "trade": "solar", "drawing": "synthetic",
            "prompt": "Count synthetic entities", "oracle": {"value": 3}, "compare": {"mode": "exact"}}
-    result = bench.evaluate_prompt(row, transport=transport, client=Client(),
+    result = (evaluator or bench.evaluate_prompt)(row, transport=transport, client=Client(),
         project={"project_id": "p", "org_id": "o"}, drawing={"version_id": "v"},
         source_sha=SHA, evidence_dir=tmp_path, run_id="test", authority_headers=authority_headers)
     return result, calls
@@ -599,3 +641,58 @@ def test_normal_author_uses_server_issued_turn_and_settles_only_owned_authority(
         invoke()
         assert len(calls) == 3
     assert (tmp_path / "X03-01-authority.json").is_file()
+
+
+@pytest.mark.parametrize("status", ["failed", "cancelled"])
+def test_initial_terminal_author_envelope_never_polls_or_publishes(tmp_path, status):
+    calls = []
+    def transport(method, path, **kwargs):
+        calls.append(path)
+        if path == "/api/health":
+            return 200, {"source_sha": SHA}
+        assert path == "/api/author"
+        return 202, {"contract": "leaf.customization-stage-job.v1", "change_set_id": "change",
+                     "status": status, "error": {"reason_code": "SYNTHETIC_AUTHOR_TERMINAL"}}
+    result = bench.evaluate_prompt(synthetic_prompt(), transport=transport, client=None,
+        project={}, drawing={}, source_sha=SHA, evidence_dir=tmp_path, run_id="terminal")
+    assert calls == ["/api/health", "/api/author"]
+    assert result["score"] == 0 and result["failing_stage"] == "author"
+    assert result["error_code"] == "SYNTHETIC_AUTHOR_TERMINAL"
+    assert json.loads((tmp_path / "X03-01.json").read_text())["record"] == result
+
+
+@pytest.mark.parametrize("job_id", ["../other", "part/name", r"part\name", "job?x=1",
+    "job#fragment", "/absolute", "", None, 123, ["job"], {"id": "job"}])
+def test_execution_identity_rejected_before_job_poll(tmp_path, job_id):
+    calls = []
+    def transport(method, path, **kwargs):
+        calls.append(path)
+        if path == "/api/health":
+            return 200, {"source_sha": SHA}
+        if path == "/api/author":
+            return 200, staged_tool()
+        if path == "/api/author/publication-requests":
+            return 200, {"status": "published"}
+        if path == "/api/tools":
+            return 200, {"tools": [{"name": "generated", "catalog_digest": "f" * 64}]}
+        assert path == "/api/run", "invalid job identity reached a poll"
+        return 202, {"job_id": job_id, "status": "pending"}
+    result = bench.evaluate_prompt(synthetic_prompt(), transport=transport, client=None,
+        project={"org_id": "o", "project_id": "p"}, drawing={"version_id": "v"},
+        source_sha=SHA, evidence_dir=tmp_path, run_id="job-id")
+    assert not any(path.startswith("/api/jobs/") for path in calls)
+    assert result["score"] == 0 and result["failing_stage"] == "execution"
+    assert result["error_code"] == "INVALID_JOB_ID"
+    assert result["output_hash"] is None
+
+
+@pytest.mark.parametrize("field", ["trade", "drawing"])
+def test_identity_swaps_are_rejected_before_reports(tmp_path, field):
+    original = records()
+    original[30]["drawing"] = "second-synthetic"
+    swapped = copy.deepcopy(original)
+    swapped[0][field], swapped[30][field] = swapped[30][field], swapped[0][field]
+    with pytest.raises(ValueError, match="frozen prompt identity"):
+        bench.grade_records(swapped, baseline=None, prompt_sha256="d" * 64,
+                            source_sha=SHA, out_dir=tmp_path, frozen_rows=original)
+    assert not list(tmp_path.iterdir())

@@ -195,14 +195,16 @@ def evaluate_prompt(row, *, transport, client, project, drawing, source_sha,
             if staged.get("status") == "staged":
                 staged = {**staged.get("result", {}), "receipt": staged.get("receipt", {})}
                 break
+            if staged.get("status") in ("failed", "cancelled"):
+                error = staged.get("error", {})
+                record["error_code"] = (error.get("reason_code") or error.get("error_code")) if isinstance(error, dict) else None
+                record["error_code"] = record["error_code"] or staged.get("reason_code")
+                raise PromptFailure("author stage failed")
             poll = staged.get("poll_url") or "/api/author/stages/" + change_id
             if poll != "/api/author/stages/" + change_id:
                 raise PromptFailure("invalid stage polling address")
             sleep(min(2, remaining()))
             _, staged = call("GET", poll)
-            if staged.get("status") in ("failed", "cancelled"):
-                record["error_code"] = staged.get("error", {}).get("reason_code") if isinstance(staged.get("error"), dict) else None
-                raise PromptFailure("author stage failed")
         record["model_id"] = find_model(staged)
         receipt = staged.get("receipt", {})
         if change_id is not None and receipt.get("change_set_id") != change_id:
@@ -242,7 +244,11 @@ def evaluate_prompt(row, *, transport, client, project, drawing, source_sha,
             json_body={"tool": tool["name"], "catalog_digest": catalog_row["catalog_digest"],
                        "dwg": drawing["version_id"], "params": {}})
         if status == 202:
-            job_path = "/api/jobs/" + result["job_id"]
+            job_id = result.get("job_id")
+            if not isinstance(job_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", job_id):
+                record["error_code"] = "INVALID_JOB_ID"
+                raise PromptFailure("invalid execution job identity")
+            job_path = "/api/jobs/" + job_id
             while result.get("status") not in ("complete", "failed", "cancelled"):
                 sleep(min(2, remaining()))
                 _, result = call("GET", job_path)
@@ -252,7 +258,12 @@ def evaluate_prompt(row, *, transport, client, project, drawing, source_sha,
         if result.get("status") == "failed" or result.get("ok") is False:
             raise PromptFailure("tool execution failed")
         output = result.get("result", result.get("output", result))
-        record["output_hash"] = content_hash(output)
+        try:
+            output_hash = content_hash(output)
+        except (ValueError, TypeError):
+            record.update(unreadable=True, error_code="INVALID_EXECUTION_OUTPUT")
+            raise PromptFailure("execution output is not finite JSON")
+        record["output_hash"] = output_hash
         record["failing_stage"] = "comparison"
         write_json_atomic(evidence_dir / (row["id"] + "-output.json"), output)
         if not matches(output, row["oracle"], row["compare"]):
@@ -305,10 +316,15 @@ def validate_baseline(baseline, prompt_sha256):
             raise ValueError("baseline rates must be finite numbers between zero and one")
 
 
-def grade_records(records, *, baseline, prompt_sha256, source_sha, out_dir):
+def grade_records(records, *, baseline, prompt_sha256, source_sha, out_dir, frozen_rows):
+    identities = {row["id"]: (row["trade"], row["drawing"]) for row in frozen_rows}
+    if len(identities) != 50:
+        raise ValueError("frozen prompt identities must contain fifty rows")
     seen = set()
     for record in records:
         validate_prompt_id(record.get("id"))
+        if identities.get(record["id"]) != (record.get("trade"), record.get("drawing")):
+            raise ValueError("record trade or drawing contradicts frozen prompt identity")
         if record["id"] in seen:
             raise ValueError("duplicate prompt record ID")
         seen.add(record["id"])
@@ -393,19 +409,28 @@ def run(ctx):
             write_json_atomic(ctx.out_dir / "projects.json", {"projects": projects, "drawings": drawings})
             for row in rows:
                 deadline = time.monotonic() + 600
-                with author_authority(transport, row, projects[row["trade"]],
-                                      drawings[row["drawing"]], ctx.out_dir, deadline=deadline) as authority:
-                    record = evaluate_prompt(row, transport=transport, client=client,
-                        project=projects[row["trade"]], drawing=drawings[row["drawing"]],
-                        source_sha=ctx.source_sha, evidence_dir=ctx.out_dir, run_id=run_id,
-                        authority_headers=authority, deadline_at=deadline)
+                try:
+                    with author_authority(transport, row, projects[row["trade"]],
+                                          drawings[row["drawing"]], ctx.out_dir, deadline=deadline) as authority:
+                        record = evaluate_prompt(row, transport=transport, client=client,
+                            project=projects[row["trade"]], drawing=drawings[row["drawing"]],
+                            source_sha=ctx.source_sha, evidence_dir=ctx.out_dir, run_id=run_id,
+                            authority_headers=authority, deadline_at=deadline)
+                except Exception as exc:
+                    record = {"id": row["id"], "trade": row["trade"], "drawing": row["drawing"],
+                              "source_sha": ctx.source_sha, "model_id": None, "tool_name": None,
+                              "version": None, "tool_source_hash": None, "output_hash": None,
+                              "score": 0, "failing_stage": "author", "author_submitted": False,
+                              "unreadable": True, "error_code": "AUTHOR_AUTHORITY_SETUP_FAILED",
+                              "failure": str(exc) if isinstance(exc, PromptFailure) else type(exc).__name__}
+                    write_json_atomic(ctx.out_dir / (row["id"] + ".json"), {"record": record, "routes": []})
                 records.append(record)
                 write_json_atomic(ctx.out_dir / "records.json", records)
                 print(f"{row['id']} score={record['score']} stage={record['failing_stage']}", flush=True)
-                if record.get("failing_stage") == "source_drift":
+                if record.get("unreadable") or record.get("failing_stage") == "source_drift":
                     break
     steps, report = grade_records(records, baseline=baseline, prompt_sha256=prompt_sha,
-                                  source_sha=ctx.source_sha, out_dir=ctx.out_dir)
+                                  source_sha=ctx.source_sha, out_dir=ctx.out_dir, frozen_rows=rows)
     if report["complete"] and baseline is None:
         baseline_path.parent.mkdir(parents=True, exist_ok=True)
         # One immutable baseline; a later run can never silently replace it.
