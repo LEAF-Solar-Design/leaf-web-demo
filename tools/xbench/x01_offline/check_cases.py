@@ -19,6 +19,79 @@ MAX_CASE_FILE_BYTES = 1024 * 1024
 MAX_JSON_DEPTH = 32
 MAX_CASES_PER_SET = 256
 MAX_JSON_INTEGER_DIGITS = 309
+# Counts include both geometry sides, the fill module, and every fill hole.
+# Candidate counts conservatively include all cross-side / unordered pairs.
+MAX_OBJECTS_PER_CASE = 256
+MAX_HOLES_PER_CASE = 512
+MAX_CANDIDATE_PAIRS = 65536
+# Grid work counts cells times (one module visit + all fill/hole visits),
+# summed over the union integration AND every per-fill integration.
+MAX_FILL_GRID_WORK = 2000000
+
+
+class CaseWorkLimitError(ValueError):
+    def __init__(self, case_id, ids, resource, limit, observed):
+        self.diagnostic = dict(name="CASE_WORK_LIMIT", case_id=case_id,
+                               object_ids=list(ids), resource=resource,
+                               limit=limit, observed=observed)
+        super().__init__(str(self.diagnostic))
+
+
+def work_limit(case, ids, resource, observed, limit):
+    if observed > limit:
+        raise CaseWorkLimitError(case.get("id", "<direct>"), ids,
+                                 resource, limit, observed)
+
+
+class FillTagNumericError(ValueError):
+    def __init__(self, ids, field_path):
+        self.diagnostic = dict(name="INVALID_FILL_TAG_ARITHMETIC",
+                               object_ids=list(ids), field_path=field_path)
+        super().__init__(str(self.diagnostic))
+
+
+def numeric(value, ids, field, positive=False):
+    try:
+        valid = math.isfinite(value) and (not positive or value > 0)
+    except (OverflowError, ValueError):
+        valid = False
+    if not valid:
+        raise FillTagNumericError(ids, field)
+    return value
+
+
+def product(a, b, ids, field):
+    value = numeric(a * b, ids, field)
+    if value == 0 and a != 0 and b != 0:
+        raise FillTagNumericError(ids, field)
+    return value
+
+
+def ratio(a, b, ids, field):
+    numeric(b, ids, field + ".denominator", positive=True)
+    value = numeric(a / b, ids, field)
+    if value == 0 and a != 0:
+        raise FillTagNumericError(ids, field)
+    return value
+
+
+def case_limits(case, family):
+    if family == "geometry":
+        count = len(case["original"]) + len(case["export"])
+        pairs = len(case["original"]) * len(case["export"])
+        ids = [o["id"] for side in ("original", "export") for o in case[side]]
+    elif family == "fill":
+        count, pairs = 1 + len(case["fills"]), 0
+        ids = [case["module"]["id"]]
+    else:
+        count = len(case["objects"])
+        pairs = count * (count - 1) // 2
+        ids = [o["id"] for o in case["objects"]]
+    work_limit(case, ids, "objects", count, MAX_OBJECTS_PER_CASE)
+    work_limit(case, ids, "candidate_pairs", pairs, MAX_CANDIDATE_PAIRS)
+    if family == "fill":
+        work_limit(case, ids, "holes", sum(len(f["holes"]) for f in case["fills"]),
+                   MAX_HOLES_PER_CASE)
 
 
 class CaseFileError(ValueError):
@@ -382,6 +455,7 @@ def world_point(obj):
 
 
 def geometry(case):
+    case_limits(case, "geometry")
     original = unique_objects(case["original"])
     export = unique_objects(case["export"])
     require(not (original.keys() & export.keys()), "side IDs must be separate")
@@ -400,6 +474,7 @@ def geometry(case):
             pairs.append([a[0], b[0]])
     used_o = {a for a, b in pairs}
     used_e = {b for a, b in pairs}
+    fixed = set(used_o)
     edges = sorted((distance(a, b), a, b) for a in original for b in export
                    if a not in used_o and b not in used_e
                    and distance(a, b) <= 0.5 + EPS)
@@ -408,6 +483,40 @@ def geometry(case):
             pairs.append([a, b])
             used_o.add(a)
             used_e.add(b)
+    # Preserve the legacy greedy solution unless an augmenting path adds a
+    # match. Unique-handle bindings are deliberately absent from this graph.
+    adjacency = {}
+    for _, a, b in edges:
+        adjacency.setdefault(a, []).append(b)
+    matching = dict(pairs)
+    reverse = {b: a for a, b in pairs}
+    for root in sorted(original.keys() - used_o):
+        queue, parent, seen = [root], {}, {root}
+        free = None
+        for a in queue:
+            for b in adjacency.get(a, []):
+                if b in parent:
+                    continue
+                parent[b] = a
+                if b not in reverse:
+                    free = b
+                    break
+                other = reverse[b]
+                if other not in fixed and other not in seen:
+                    seen.add(other)
+                    queue.append(other)
+            if free is not None:
+                break
+        if free is not None:
+            while True:
+                a = parent[free]
+                old = matching.get(a)
+                matching[a], reverse[free] = free, a
+                if old is None:
+                    break
+                free = old
+    pairs = [[a, b] for a, b in matching.items()]
+    used_o, used_e = set(matching), set(matching.values())
     moved = [[a, b] for a, b in pairs if distance(a, b) > 0.5 + EPS]
     missing = sorted(original.keys() - used_o)
     extra = sorted(export.keys() - used_e)
@@ -422,10 +531,15 @@ def geometry(case):
             "verdict": "FAIL" if diagnostics else "PASS"}
 
 
-def rectangle(rect):
+def rectangle(rect, ids=(), field="rectangle"):
+    for v in rect:
+        numeric(v, ids, field + ".coordinate")
     require(len(rect) == 4 and all(math.isfinite(v) for v in rect),
             "invalid rectangle coordinates")
     require(rect[0] < rect[2] and rect[1] < rect[3], "empty rectangle")
+    width = numeric(rect[2] - rect[0], ids, field + ".width", True)
+    height = numeric(rect[3] - rect[1], ids, field + ".height", True)
+    numeric(product(width, height, ids, field + ".area"), ids, field + ".area", True)
     return rect
 
 
@@ -433,97 +547,156 @@ def contains(rect, x, y):
     return rect[0] < x < rect[2] and rect[1] < y < rect[3]
 
 
-def fill_area(module, fills):
+def fill_grid(module, fills):
+    rects = [module] + [r for f in fills for r in [f["outer"], *f["holes"]]]
+    xs = sorted({r[i] for r in rects for i in (0, 2)})
+    ys = sorted({r[i] for r in rects for i in (1, 3)})
+    work = (len(xs)-1) * (len(ys)-1) * (1 + sum(1 + len(f["holes"]) for f in fills))
+    return xs, ys, work
+
+
+def fill_area(module, fills, ids=(), preflight=True):
     """Integrate disjoint coordinate-grid cells; subtract holes per fill."""
-    rects = [module]
+    module_id = ids[0] if ids else "<module>"
+    if not ids:
+        ids = [f["id"] for f in fills if "id" in f]
+    if preflight:
+        direct = dict(module=dict(id=module_id), fills=fills)
+        case_limits(direct, "fill")
+        work_limit(direct, ids, "fill_grid_work", fill_grid(module, fills)[2], MAX_FILL_GRID_WORK)
+    rectangle(module, ids, "module")
     for fill in fills:
-        outer = rectangle(fill["outer"])
-        rects.append(outer)
+        fill_ids = [fill["id"]] if "id" in fill else list(ids)
+        outer = rectangle(fill["outer"], fill_ids, "outer")
         for hole in fill["holes"]:
-            rectangle(hole)
+            rectangle(hole, fill_ids, "hole")
             require(outer[0] <= hole[0] < hole[2] <= outer[2]
                     and outer[1] <= hole[1] < hole[3] <= outer[3],
                     "hole outside its outer rectangle")
-            rects.append(hole)
-    xs = sorted({r[i] for r in rects for i in (0, 2)})
-    ys = sorted({r[i] for r in rects for i in (1, 3)})
+    xs, ys, _ = fill_grid(module, fills)
     area = 0.0
     for x0, x1 in zip(xs, xs[1:]):
         for y0, y1 in zip(ys, ys[1:]):
-            x, y = (x0 + x1) / 2, (y0 + y1) / 2
-            if contains(module, x, y) and any(
-                    contains(f["outer"], x, y)
-                    and not any(contains(h, x, y) for h in f["holes"])
+            # Every rectangle boundary is a grid edge. Interval containment
+            # avoids overflow and endpoint rounding in floating midpoints.
+            def covers(r):
+                return r[0] <= x0 and x1 <= r[2] and r[1] <= y0 and y1 <= r[3]
+            if covers(module) and any(
+                    covers(f["outer"])
+                    and not any(covers(h) for h in f["holes"])
                     for f in fills):
-                area += (x1 - x0) * (y1 - y0)
+                dx = numeric(x1 - x0, ids, "grid.width", True)
+                dy = numeric(y1 - y0, ids, "grid.height", True)
+                cell = product(dx, dy, ids, "grid.cell_area")
+                area = numeric(area + cell, ids, "grid.area.sum")
     return area
 
 
 def fill_coverage(case):
+    case_limits(case, "fill")
     module = case["module"]
-    rect = rectangle(module["rect"])
     fills = case["fills"]
+    ids = [module["id"]] + [f["id"] for f in fills]
+    work = fill_grid(module["rect"], fills)[2]
+    work += sum(fill_grid(module["rect"], [f])[2] for f in fills)
+    work_limit(case, ids, "fill_grid_work", work, MAX_FILL_GRID_WORK)
+    rect = rectangle(module["rect"], [module["id"]], "module")
     unique_objects([module] + fills)
-    module_area = (rect[2] - rect[0]) * (rect[3] - rect[1])
-    area = fill_area(rect, fills)
-    per_fill = {f["id"]: fill_area(rect, [f]) for f in fills}
-    failed = area / module_area > 0.05 + EPS
+    module_area = product(rect[2] - rect[0], rect[3] - rect[1], ids, "module.area")
+    area = fill_area(rect, fills, ids, preflight=False)
+    per_fill = {f["id"]: fill_area(rect, [f], [module["id"], f["id"]], preflight=False) for f in fills}
+    fraction = ratio(area, module_area, ids, "coverage.fraction")
+    failed = fraction > 0.05 + EPS
     offenders = sorted(key for key, value in per_fill.items() if value > EPS)
     return {"module_area": module_area, "fill_union_area_inside_module": area,
-            "intersection_area": area, "fraction": area / module_area,
+            "intersection_area": area, "fraction": fraction,
             "threshold": 0.05, "per_fill_intersection_areas": per_fill,
             "diagnostics": [diagnostic("FILL_OVERLAP", module["id"], *offenders)]
             if failed else [], "verdict": "FAIL" if failed else "PASS"}
 
 
 def corners(obj):
-    require(obj["width"] > 0 and obj["height"] > 0, "nonpositive box")
-    angle = math.radians(obj["rotation_deg"])
+    ids = [obj["id"]] if "id" in obj else []
+    def n(value, field, positive=False):
+        return numeric(value, ids, "corners." + field, positive)
+    width, height = n(obj["width"], "width", True), n(obj["height"], "height", True)
+    n(product(width, height, ids, "box.area"), "area", True)
+    degrees = n(obj["rotation_deg"], "rotation_deg")
+    angle = product(degrees, math.pi / 180, ids, "corners.radians")
     c, s = math.cos(angle), math.sin(angle)
+    if obj["rotation_deg"] % 90 == 0:
+        c, s = ((1, 0), (0, 1), (-1, 0), (0, -1))[int(obj["rotation_deg"] % 360 // 90)]
     cx, cy = obj["center"]
-    w, h = obj["width"] / 2, obj["height"] / 2
-    return [(cx + c*x - s*y, cy + s*x + c*y)
-            for x, y in [(-w, -h), (w, -h), (w, h), (-w, h)]]
+    n(cx, "center[0]")
+    n(cy, "center[1]")
+    w, h = n(width / 2, "half_width", True), n(height / 2, "half_height", True)
+    result = []
+    for x, y in [(-w, -h), (w, -h), (w, h), (-w, h)]:
+        rx = n(product(c, x, ids, "corners.cos_x") - product(s, y, ids, "corners.sin_y"), "rotate_x")
+        ry = n(product(s, x, ids, "corners.sin_x") + product(c, y, ids, "corners.cos_y"), "rotate_y")
+        result.append((n(cx + rx, "translate_x"), n(cy + ry, "translate_y")))
+    if len(set(result)) != 4 or polygon_area(result, ids) == 0:
+        raise FillTagNumericError(ids, "corners.collapsed")
+    return result
 
 
-def cross(a, b, p):
-    return (b[0]-a[0]) * (p[1]-a[1]) - (b[1]-a[1]) * (p[0]-a[0])
+def cross(a, b, p, ids=(), field="clip.cross"):
+    dx, dy = (numeric(b[i] - a[i], ids, field + ".edge") for i in (0, 1))
+    px, py = (numeric(p[i] - a[i], ids, field + ".delta") for i in (0, 1))
+    return numeric(product(dx, py, ids, field + ".product") -
+                   product(dy, px, ids, field + ".product"), ids, field + ".subtract")
 
 
-def clip_polygon(subject, clip):
+def clip_polygon(subject, clip, ids=()):
     """Sutherland-Hodgman clipping against CCW convex edges."""
     for a, b in zip(clip, clip[1:] + clip[:1]):
         incoming, subject = subject, []
         if not incoming:
             break
         previous = incoming[-1]
-        dp = cross(a, b, previous)
+        dp = cross(a, b, previous, ids)
         for current in incoming:
-            dc = cross(a, b, current)
+            dc = cross(a, b, current, ids)
             # Use geometric half-planes without expanding edges by EPS.
             if (dc >= 0) != (dp >= 0):
-                t = dp / (dp - dc)
-                subject.append((previous[0] + t*(current[0]-previous[0]),
-                                previous[1] + t*(current[1]-previous[1])))
+                denominator = numeric(dp - dc, ids, "clip.denominator")
+                if denominator == 0:
+                    raise FillTagNumericError(ids, "clip.denominator")
+                t = numeric(dp / denominator, ids, "clip.ratio")
+                if t == 0 and dp != 0:
+                    raise FillTagNumericError(ids, "clip.ratio")
+                point = []
+                for i in (0, 1):
+                    delta = numeric(current[i] - previous[i], ids, "clip.delta")
+                    offset = product(t, delta, ids, "clip.product")
+                    point.append(numeric(previous[i] + offset, ids, "clip.add"))
+                subject.append(tuple(point))
             if dc >= 0:
                 subject.append(current)
             previous, dp = current, dc
     return subject
 
 
-def polygon_area(poly):
+def polygon_area(poly, ids=()):
     if len(poly) < 3:
         return 0.0
-    return abs(sum(a[0]*b[1] - a[1]*b[0]
-                   for a, b in zip(poly, poly[1:] + poly[:1]))) / 2
+    # A translated triangle fan avoids subtracting huge absolute-coordinate
+    # products when a small box is far from the origin.
+    total = 0.0
+    for i in range(1, len(poly) - 1):
+        total = numeric(total + cross(poly[0], poly[i], poly[i+1], ids, "polygon.cross"),
+                        ids, "polygon.sum")
+    return product(abs(total), 0.5, ids, "polygon.area")
 
 
 def tag_overlaps(case):
+    case_limits(case, "tag")
     objects = unique_objects(case["objects"])
     diagnostics, pairs = [], []
+    polygons = {}
     for obj in objects.values():
         require(obj["kind"] in ("tag", "module"), "unknown box kind")
-        corners(obj)
+        polygons[obj["id"]] = corners(obj)
         if obj["kind"] == "tag":
             require(isinstance(obj["line_count"], int) and obj["line_count"] > 0,
                     "tag requires positive line_count")
@@ -533,8 +706,10 @@ def tag_overlaps(case):
         a, b = objects[a_id], objects[b_id]
         if a["kind"] == b["kind"] == "module":
             continue
-        area = polygon_area(clip_polygon(corners(a), corners(b)))
-        fraction = area / min(a["width"]*a["height"], b["width"]*b["height"])
+        ids = [a_id, b_id]
+        area = polygon_area(clip_polygon(polygons[a_id], polygons[b_id], ids), ids)
+        smaller = min(product(o["width"], o["height"], [o["id"]], "box.area") for o in (a, b))
+        fraction = ratio(area, smaller, ids, "overlap.fraction")
         pairs.append({"object_ids": [a_id, b_id], "intersection_area": area,
                       "smaller_box_fraction": fraction})
         if a["kind"] == b["kind"] == "tag":
@@ -634,7 +809,7 @@ def main():
             for case in cases:
                 check_case(case, calculate)
         rejection_checks(sets)
-    except (CaseFileError, GeometryNumericError) as error:
+    except (CaseFileError, GeometryNumericError, FillTagNumericError, CaseWorkLimitError) as error:
         print(json.dumps(dict(verdict="UNREADABLE", diagnostics=[error.diagnostic]), sort_keys=True))
         return 4
     except CaseInputError as error:
