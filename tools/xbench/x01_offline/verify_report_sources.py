@@ -4,8 +4,10 @@ The explicit source root is the offline helper directory. Exactly the three
 default checker names and three default vector names below are required; legacy
 or partial provenance cannot establish custody. PASS means current bytes match
 both recorded hashes, not that checker findings are true or live grade. No
-checkers are imported or executed. Sources must remain quiescent during this
-check: pathname resolution is a boundary check, not a hostile-writer sandbox.
+checkers are imported or executed. Two bounded reads check stream metadata,
+pathname identity, and digest agreement. Sources must remain quiescent: this
+detects exercised changes, not every transient restored-byte event or changes
+after the final observation, and is not a hostile-filesystem snapshot sandbox.
 The result's valid field describes report validation; verdict describes custody,
 and observed_verdict preserves the report's own checker aggregate.
 """
@@ -16,6 +18,7 @@ import copy
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -32,12 +35,68 @@ SOURCES = {**{"checker:" + name: name for name in validator.CHECKERS},
 HASH_BUFFER = 65536
 
 
+class SourceUnstableError(OSError):
+    """The source changed during the bounded custody read."""
+
+
+def _source_stamp(stat):
+    return tuple(getattr(stat, field, None) for field in (
+        "st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns"))
+
+
+def _source_binding(stat):
+    # Windows may expose creation time via stat and modification time via
+    # fstat's ctime. Compare ctime only within the same API, never across APIs.
+    return tuple(getattr(stat, field, None) for field in (
+        "st_dev", "st_ino", "st_size", "st_mtime_ns"))
+
+
 def _hash_source(path):
-    digest = hashlib.sha256()
+    """Hash twice against the original identity; never retry or adopt new bytes.
+
+    Each pass reads at most the initial size plus one byte, even if a writer
+    keeps appending. Metadata and the second digest detect persistent changes
+    even to already-read bytes when mtime is restored. An adversary restoring
+    bytes and metadata between observations can evade these finite checks.
+    """
+    def check_path(expected):
+        try:
+            current = _source_stamp(path.stat())
+        except OSError as exc:
+            raise SourceUnstableError("SOURCE_UNSTABLE: " + str(path)) from exc
+        if current != expected:
+            raise SourceUnstableError("SOURCE_UNSTABLE: " + str(path))
+
     with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(HASH_BUFFER), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+        initial = os.fstat(stream.fileno())
+        stamp = _source_stamp(initial)
+        try:
+            initial_path = path.stat()
+        except OSError as exc:
+            raise SourceUnstableError("SOURCE_UNSTABLE: " + str(path)) from exc
+        if _source_binding(initial_path) != _source_binding(initial):
+            raise SourceUnstableError("SOURCE_UNSTABLE: " + str(path))
+        path_stamp = _source_stamp(initial_path)
+        digests = []
+        for pass_number in range(2):
+            if pass_number:
+                stream.seek(0)
+            digest = hashlib.sha256()
+            remaining = initial.st_size
+            while remaining:
+                chunk = stream.read(min(HASH_BUFFER, remaining))
+                if not chunk:
+                    raise SourceUnstableError("SOURCE_UNSTABLE: " + str(path))
+                digest.update(chunk)
+                remaining -= len(chunk)
+            if stream.read(1) or _source_stamp(os.fstat(stream.fileno())) != stamp:
+                raise SourceUnstableError("SOURCE_UNSTABLE: " + str(path))
+            check_path(path_stamp)
+            digests.append(digest.hexdigest())
+            if pass_number and digests[0] != digests[1]:
+                raise SourceUnstableError("SOURCE_UNSTABLE: " + str(path))
+    check_path(path_stamp)
+    return digests[0]
 
 
 def verify_report_sources(report_path, source_root):
@@ -89,6 +148,9 @@ def verify_report_sources(report_path, source_root):
         result["sources"].append(source)
         try:
             source["sha256_current"] = _hash_source(paths[name])
+        except SourceUnstableError:
+            unreadable("SOURCE_UNSTABLE", name)
+            continue
         except (OSError, ValueError, MemoryError):
             unreadable("SOURCE_READ_ERROR", name)
             continue
