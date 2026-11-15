@@ -61,3 +61,33 @@ make the input UNREADABLE. Permuting rows leaves the evidence unchanged.
 Aggregate equality therefore cannot establish either string identity or each
 string's optimizer count. This construction uses synthetic Python dictionaries
 only and needs no staging access, credentials or customer input.
+
+The same focused comparator command also checks these pure input contracts:
+
+- `compare_recommendations(report_grid_count, recommendations)` takes an
+  independent positive integer report count and shown rows with `group_count`.
+  Every shown count must match. An empty shown list passes that condition;
+  missing or invalid counts are UNREADABLE.
+- `compare_table(rows, saved_values, oracle_values)` requires exactly five
+  unique metrics: `panels`, `optimizers`, `inverters`, `strings`, `kw_dc`.
+  Each row has `metric`, `studio`, `oracle`, `delta`, `verdict`. Values must
+  equal the independent maps, delta is saved minus oracle, and verdict is
+  PASS for zero or FAIL for nonzero. Table integrity is separate from policy.
+- `check_discrepancies(fixture_id, deltas, records, run_started_at)` takes all
+  five signed deltas. Every nonzero row needs one matching record with
+  `fixture_id`, `metric`, exact `delta`, nonempty `name` and an aware ISO
+  `frozen_at` strictly before the aware ISO run timestamp. This checker tests
+  supplied policy evidence and cannot create or authenticate an approval.
+- `compare_snapshots(before, reopened)` requires `strings_sha256` and
+  `table_sha256` in both inputs. Synthetic tests hash string assignments and
+  table rows, then detect changes with equal aggregate totals. The comparator
+  checks supplied hashes; it cannot prove their producer or provenance.
+- `compare_csv_view(csv_text, view_rows)` accepts a leading Unicode BOM,
+  quoted cells and reordered columns or rows. It rejects duplicate headers
+  and missing or duplicate metrics, then compares values, deltas and verdicts.
+  Agreement between CSV and view does not establish independent correctness.
+
+Generated500- and2000-string fixtures count dictionary reads to bound indexing
+work without timing assertions. They reverse input order, preserve explicit
+missing/foreign/count differences and verify that caller rows remain unchanged.
+All these helpers remain offline and are not connected to the live X05 grader.
