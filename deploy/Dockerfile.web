@@ -97,6 +97,7 @@ COPY vendor/acadrust-worker/Cargo.toml /vendor/acadrust-worker/Cargo.toml
 # build cannot bundle the worker chunk (it fails closed, as run 33455169029
 # proved) — the shim carries no crate-name strings, so the fence stays clean.
 COPY vendor/acadrust-worker/worker-browser.mjs /vendor/acadrust-worker/worker-browser.mjs
+COPY vendor/acadrust-worker/native-layout-bytes.mjs /vendor/acadrust-worker/native-layout-bytes.mjs
 COPY --from=engine /engine-src/pkg-web /vendor/acadrust-worker/pkg-web
 COPY scripts/stage_cad_engine.mjs /scripts/stage_cad_engine.mjs
 RUN npm run build && \
