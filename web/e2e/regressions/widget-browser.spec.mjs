@@ -62,3 +62,29 @@ test('saved literal preview clock stays idle without skips', async ({}, testInfo
     errors: report.errors.length, report_sha256: createHash('sha256').update(stdout).digest('hex'),
   }))
 })
+
+// Input journeys run separately from the settled recovery and idle-clock counts.
+test('keyboard, Unicode and text-boundary widget journeys pass without skips', async ({}, testInfo) => {
+  test.setTimeout(180000)
+  const inputConfig = fileURLToPath(new URL('../../playwright.widget-input.config.mjs', import.meta.url))
+  const { stdout, stderr } = await execute(process.execPath, [
+    cli, 'test', '--config', inputConfig, '--reporter=json', '--workers=1', '--global-timeout=120000',
+  ], { cwd: web, windowsHide: true, timeout: 160000, maxBuffer: 16 * 1024 * 1024 })
+  const report = JSON.parse(stdout)
+  const reportPath = testInfo.outputPath('widget-input-report.json')
+  await writeFile(reportPath, stdout)
+  await testInfo.attach('widget-input-report.json', { path: reportPath, contentType: 'application/json' })
+  if (stderr) {
+    const logPath = testInfo.outputPath('widget-input-build.log')
+    await writeFile(logPath, stderr)
+    await testInfo.attach('widget-input-build.log', { path: logPath, contentType: 'text/plain' })
+  }
+  expect(report.errors).toEqual([])
+  expect(report.stats).toMatchObject({ expected: 3, unexpected: 0, skipped: 0, flaky: 0 })
+  console.log('LEAF_WIDGET_BROWSER ' + JSON.stringify({
+    schema: 'leaf.widget-input.v1',
+    expected: report.stats.expected, unexpected: report.stats.unexpected,
+    skipped: report.stats.skipped, flaky: report.stats.flaky,
+    errors: report.errors.length, report_sha256: createHash('sha256').update(stdout).digest('hex'),
+  }))
+})

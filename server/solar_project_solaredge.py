@@ -143,7 +143,7 @@ def _ref(meta):
     return ref
 
 
-def _read(context, artifact_id, tool, media_type, filename):
+def _read_metadata(context, artifact_id, tool, media_type, filename):
     if not solar_artifacts._hex(artifact_id):
         _fail("ARTIFACT_ID_INVALID")
     backend = artifacts._backend(context.organization_id)
@@ -162,6 +162,13 @@ def _read(context, artifact_id, tool, media_type, filename):
     if any(meta[key] != value for key, value in _identity(context).items()
            if key != "graph_project_id"):
         _fail(tracking.REPORT_STALE)
+    return backend, meta
+
+
+def _read(context, artifact_id, tool, media_type, filename):
+    backend, meta = _read_metadata(context, artifact_id, tool, media_type, filename)
+    scope = {key: _identity(context)[key] for key in
+             ("organization_id", "project_id", "drawing_id")}
     try:
         content = backend.get(artifacts._key(scope, meta["content_sha256"], blob=True))
     except KeyError:
@@ -262,6 +269,18 @@ def _request_sha(req, source_meta):
         **req, "source_content_sha256": source_meta["content_sha256"]})).hexdigest()
 
 
+def _bounded_source_matrices(content):
+    if not reports._PARSE_SLOTS.acquire(blocking=False):
+        _fail("REPORT_BUSY")
+    try:
+        try:
+            return reports.parse_source(content)
+        except reports.SolarEdgeReportError as error:
+            _fail(error.code)
+    finally:
+        reports._PARSE_SLOTS.release()
+
+
 def build_report(tenant, project_id, drawing_id, input_version_id, request):
     context, denial = _authorized(tenant, project_id, drawing_id, input_version_id, "run_read")
     if denial is not None:
@@ -280,15 +299,7 @@ def build_report(tenant, project_id, drawing_id, input_version_id, request):
     except GraphValidationError as exc:
         if exc.code != "ARTIFACT_NOT_FOUND":
             raise
-        if not reports._PARSE_SLOTS.acquire(blocking=False):
-            _fail("REPORT_BUSY")
-        try:
-            try:
-                matrices = reports.parse_source(content)
-            except reports.SolarEdgeReportError as error:
-                _fail(error.code)
-        finally:
-            reports._PARSE_SLOTS.release()
+        matrices = _bounded_source_matrices(content)
         try:
             core = reports.report_from_matrices(context.graph, matrices,
                 alignment_tolerance=req["alignment_tolerance"], selection_order=req["selection_order"],
@@ -317,6 +328,10 @@ def build_report(tenant, project_id, drawing_id, input_version_id, request):
 def _load_report(context, artifact_id):
     meta, content = _read(context, artifact_id, reports.REPORT_TOOL,
         reports.REPORT_MEDIA_TYPE, reports.REPORT_FILENAME)
+    return meta, _decode_report(context, meta, content)
+
+
+def _decode_report(context, meta, content):
     try:
         report = json.loads(content.decode("utf-8"), object_pairs_hook=project._object_pairs,
             parse_constant=project._nonfinite, parse_float=project._json_float)
@@ -336,7 +351,62 @@ def _load_report(context, artifact_id):
         raise
     except (ValueError, TypeError, KeyError, IndexError, AttributeError, RecursionError):
         _fail(tracking.REPORT_CORRUPT)
-    return meta, report
+    return report
+
+
+def _missing_blob(backend, key):
+    try:
+        backend.get(key)
+    except KeyError:
+        return True
+    except Exception:
+        _fail("ARTIFACT_STORE_UNAVAILABLE")
+    return False
+
+
+def _recover_missing_report(context, record):
+    """Reproduce exact immutable bytes; never repair storage or forgive corruption."""
+    backend, meta = _read_metadata(context, record["report"]["artifact_id"],
+        reports.REPORT_TOOL, reports.REPORT_MEDIA_TYPE, reports.REPORT_FILENAME)
+    _check(all(record["report"][key] == meta[key] for key in
+        ("artifact_id", "content_sha256", "byte_length")), tracking.REPORT_CORRUPT)
+    scope = {key: meta[key] for key in ("organization_id", "project_id", "drawing_id")}
+    blob_key = artifacts._key(scope, meta["content_sha256"], blob=True)
+    # A present bad blob is an integrity failure, not an availability fallback.
+    if not _missing_blob(backend, blob_key):
+        _fail("ARTIFACT_CORRUPT")
+    source_meta, source_bytes = _read(context, record["source"]["artifact_id"],
+        sources.SOURCE_TOOL, sources.SOURCE_MEDIA_TYPE, sources.SOURCE_FILENAME)
+    _check(record["source"] == {key: source_meta[key] for key in
+        ("artifact_id", "content_sha256", "byte_length")}
+        and source_meta["request_sha256"] == source_meta["content_sha256"], tracking.REPORT_CORRUPT)
+    req = _report_request({"source_artifact_id": source_meta["artifact_id"], **record["request"]})
+    _check(meta["request_sha256"] == _request_sha(req, source_meta), tracking.REPORT_CORRUPT)
+    matrices = _bounded_source_matrices(source_bytes)
+    core = reports.report_from_matrices(context.graph, matrices,
+        alignment_tolerance=req["alignment_tolerance"], selection_order=req["selection_order"],
+        associations=req.get("associations"),
+        matching_policy=req.get("matching_policy", reports.ATOMIC_POLICY))
+    report = {"schema": REPORT_SCHEMA, **_identity(context),
+        "source": {key: source_meta[key] for key in ("artifact_id", "content_sha256", "byte_length")},
+        "request": {key: value for key, value in req.items() if key != "source_artifact_id"}, **core}
+    raw = canonical_bytes(report)
+    _check(len(raw) == meta["byte_length"] and sha256(raw).hexdigest() == meta["content_sha256"],
+           tracking.REPORT_CORRUPT)
+    if not _missing_blob(backend, blob_key):
+        _fail("ARTIFACT_CORRUPT")
+    return meta, _decode_report(context, meta, raw)
+
+
+def _load_tracking_report(context, record):
+    try:
+        meta, report = _load_report(context, record["report"]["artifact_id"])
+        return meta, report, False
+    except GraphValidationError as error:
+        if error.code != "ARTIFACT_CORRUPT":
+            raise
+    meta, report = _recover_missing_report(context, record)
+    return meta, report, True
 
 
 def _record(context, meta, report, *, review=False):
@@ -491,7 +561,7 @@ def read_tracking(tenant, context, params):
         source = graphs.resolve_project_graph_context(verified)
         _check((source.organization_id, source.project_id, source.drawing_id)
             == (context.organization_id, context.project_id, context.drawing_id))
-        meta, report = _load_report(source, record["report"]["artifact_id"])
+        meta, report, unavailable = _load_tracking_report(source, record)
         choice = record.get("acceptance")
         matched_only = type(choice) is dict and choice.get("mode") == "matched-only"
         _check(record == _accepted_record(source, meta, report, matched_only))
@@ -510,4 +580,8 @@ def read_tracking(tenant, context, params):
                                 "unresolved_groups": len(choice["unresolved_frame_refs"])}
         if choice["status"] == "partial":
             output["one_liner"] = "Matched tracking is saved. Remaining groups, panels or partial strings need correction. Labels are not electrical verification."
+    if unavailable:
+        message = "Report download is unavailable. The saved report hash was reproduced from its original source."
+        output["report_download"] = {"available": False, "message": message}
+        output["one_liner"] = output.get("one_liner", "Tracking labels are not electrical verification.") + " " + message
     return deepcopy(output)

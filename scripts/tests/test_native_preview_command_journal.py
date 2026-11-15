@@ -139,7 +139,10 @@ def test_missing_context_field_has_fixed_code_before_directory_creation(tmp_path
 def test_missing_database_column_has_fixed_code_without_repair(tmp_path):
     owner = make(tmp_path)
     with closing(sqlite3.connect(owner.path, isolation_level=None)) as connection:
-        connection.execute('ALTER TABLE commands DROP COLUMN evidence')
+        # Build the same empty malformed schema without SQLite 3.35 DROP COLUMN.
+        connection.execute('DROP TABLE commands')
+        connection.execute('CREATE TABLE commands (request_id TEXT PRIMARY KEY, digest TEXT NOT NULL, '
+                           'sequence INTEGER NOT NULL, operation TEXT NOT NULL, status TEXT NOT NULL)')
     before = owner.path.read_bytes()
     assert_refused(lambda: make(tmp_path))
     assert_refused(owner.snapshot)

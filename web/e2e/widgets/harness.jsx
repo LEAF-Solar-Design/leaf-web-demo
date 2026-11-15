@@ -20,7 +20,7 @@ function Harness() {
 const style = document.createElement('style')
 style.textContent = `:root {
   --leaf-ink: #f4f4f5; --leaf-color-foreground: #f4f4f5;
-  --leaf-ground: #09090b; --leaf-line: #52525b;
+  --leaf-ground: #09090b; --leaf-line: #52525b; --leaf-accent: #86efac;
   --leaf-size-dense: 14px; --leaf-radius-card: 8px;
 } body { margin: 0; padding: 16px; background: var(--leaf-ground);
   color: var(--leaf-ink); font: 14px Arial, sans-serif; }

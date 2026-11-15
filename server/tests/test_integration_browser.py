@@ -31,6 +31,85 @@ ELEMENT_PATH = f"/api/v1/projects/{PROJECT}/integrations/elements"
 PROTECTED_ORIGIN = "https://ops-staging.leafdesign.ai"
 PROTECTION_FIXTURE = "synthetic-protection-binding"  # Inert test text, never a credential.
 
+RETENTION = f"/api/v1/projects/{PROJECT}/integrations/retention/"
+EXECUTION = "retention-execution:" + "a" * 64
+RETENTION_ROUTES = [
+    ("POST", "prepare"), ("POST", "definitions"),
+    ("GET", "definitions/logs/versions/1"), ("GET", "definitions/logs/versions/1/export"),
+    ("GET", "definitions/versions/versions/1"),
+    ("POST", "schedules"), ("GET", "schedules/logs/versions/1"),
+    ("POST", "occurrences"), ("GET", f"executions/{EXECUTION}"),
+    ("GET", f"executions/{EXECUTION}/rows?view=archive&limit=25&after=next-page"),
+    *[("POST", f"executions/{EXECUTION}/{action}")
+      for action in ("plan", "review", "apply", "recover", "restore-admissions", "restore")],
+]
+
+
+@pytest.mark.parametrize("method,tail", RETENTION_ROUTES)
+def test_retention_finite_transport_preserves_joint_authority(context, method, tail):
+    context["respond"] = lambda _: httpx.Response(200, json={"ok": True})
+    headers = context["headers"]() + ([("Content-Type", "application/json"), ("Origin", LOCAL)] if method == "POST" else [])
+    response = context["request"](method, RETENTION + tail, headers=headers,
+                                  content=b"{}" if method == "POST" else None)
+    assert response.status_code == 200 and response.json() == {"ok": True}
+    [sent] = context["calls"]
+    assert str(sent.url) == UPSTREAM + RETENTION + tail
+    assert sent.headers["authorization"] == "Bearer " + TOKEN
+    assert "cookie" not in sent.headers
+    assert "x-tenant-id" not in sent.headers
+    if "executions/" in tail:
+        assert EXECUTION in str(sent.url) and "%3A" not in str(sent.url)
+
+
+@pytest.mark.parametrize("method,tail,status", [
+    ("GET", "prepare", 405), ("PUT", "definitions", 405),
+    ("POST", f"executions/{EXECUTION}", 405),
+    ("GET", f"executions/{EXECUTION}/plan", 405),
+    ("GET", "unknown", 404), ("POST", f"executions/{EXECUTION}/execute", 404),
+    ("GET", "executions/retention-execution:" + "A" * 64, 404),
+    ("GET", "executions/retention-execution:" + "a" * 63, 404),
+    ("GET", f"executions/{EXECUTION.replace(':', '%3A')}", 400),
+    ("GET", "definitions/logs/versions/2147483648", 400),
+    ("GET", "definitions/" + "x" * 65 + "/versions/1", 400),
+    ("GET", "definitions/logs/versions/1?view=current", 400),
+    ("GET", f"executions/{EXECUTION}?limit=25", 400),
+    ("GET", f"executions/{EXECUTION}/rows?view=all", 400),
+    ("GET", f"executions/{EXECUTION}/rows?view=current&view=archive", 400),
+    ("GET", f"executions/{EXECUTION}/rows?limit=101", 400),
+    ("GET", f"executions/{EXECUTION}/rows?limit=0", 400),
+    ("GET", f"executions/{EXECUTION}/rows?after=" + "x" * 1025, 400),
+    ("GET", f"executions/{EXECUTION}/rows?destination=https://foreign.invalid", 400),
+])
+def test_retention_rejects_outside_finite_contract_before_upstream(context, method, tail, status):
+    response = context["request"](method, RETENTION + tail,
+        headers=context["headers"]() + [("Content-Type", "application/json"), ("Origin", LOCAL)],
+        content=b"{}" if method != "GET" else None)
+    error(context, response, status)
+    assert not context["calls"]
+
+
+def test_retention_body_cap_and_revocation_before_dispatch(context):
+    headers = context["headers"]() + [("Content-Type", "application/json"), ("Origin", LOCAL)]
+    oversized = json.dumps({"p": "x" * 65529}, separators=(",", ":")).encode()
+    assert len(oversized) == 65537
+    error(context, context["request"]("POST", RETENTION + "prepare", headers=headers, content=oversized), 413)
+    assert not context["calls"]
+    context["respond"] = lambda _: httpx.Response(200, json={"ok": True})
+    exact = json.dumps({"p": "x" * 65528}, separators=(",", ":")).encode()
+    assert len(exact) == 65536
+    assert context["request"]("POST", RETENTION + "prepare", headers=headers, content=exact).status_code == 200
+    context["calls"].clear()
+    context["revoked"] = True
+    error(context, context["request"]("POST", RETENTION + "prepare", headers=headers, content=b"{}"), 401)
+    assert not context["calls"]
+
+
+def test_retention_mutation_requires_same_origin(context):
+    response = context["request"]("POST", RETENTION + "prepare",
+        headers=context["headers"]() + [("Content-Type", "application/json")], content=b"{}")
+    error(context, response, 403)
+    assert not context["calls"]
+
 
 def protected(context, monkeypatch, binding=PROTECTION_FIXTURE):
     monkeypatch.setattr(bridge, "load_integration_config", lambda: SimpleNamespace(api_origin=PROTECTED_ORIGIN))
