@@ -12,6 +12,7 @@ import pytest
 from benches.x05_reconcile import (METRICS, TABLE_COLUMNS, check_discrepancies,
     MAX_CSV_CELL, MAX_CSV_CHARS, canonical_snapshot, reconcile_offline,
     MAX_STRING_EXAMPLES, compare_bound_snapshots, compare_saved_string_totals,
+    MAX_RECOMMENDATION_EXAMPLES, compare_oracle_string_totals,
     compare_csv_view, compare_recommendations, compare_snapshots, compare_strings, compare_table)
 
 
@@ -62,7 +63,8 @@ def test_malformed_rows_are_unreadable_without_exceptions(rows):
 def test_every_grouping_recommendation_must_match_independent_report():
     assert compare_recommendations(16, [{"group_count": 16}] * 3)["verdict"] == "PASS"
     assert compare_recommendations(16, [{"group_count": 16}, {"group_count": 1}]) == {
-        "verdict": "FAIL", "reason": "grouping_count_mismatch", "mismatched_recommendations": [1]}
+        "verdict": "FAIL", "reason": "grouping_count_mismatch", "mismatched_recommendations": [1],
+        "mismatch_count": 1}
     assert compare_recommendations(16, [], no_recommendations_shown=True)["verdict"] == "PASS"
 
 
@@ -468,3 +470,173 @@ def test_large_string_diagnostics_keep_exact_counts_with_capped_deterministic_ex
     assert result["counts"] == {"missing": 0, "foreign": 0, "mismatched": count}
     assert len(result["mismatches"]) == MAX_STRING_EXAMPLES
     assert result == compare_strings(list(reversed(oracle)), list(reversed(changed)))
+
+
+@pytest.mark.parametrize("collection", ["strings", "table_rows"])
+def test_internally_valid_equal_total_snapshots_must_match_saved_evidence(collection):
+    evidence = complete_evidence()
+    substituted = deepcopy(evidence["before_rows"])
+    if collection == "strings":
+        substituted["strings"][0]["optimizers"], substituted["strings"][1]["optimizers"] = 7, 5
+        assert sum(row["optimizers"] for row in substituted["strings"]) == 12
+    else:
+        for row in substituted["table_rows"]:
+            if row["metric"] == "panels":
+                row.update(studio=12, oracle=12)
+            elif row["metric"] == "optimizers":
+                row.update(studio=24, oracle=24)
+    hashes = canonical_snapshot(substituted["strings"], substituted["table_rows"])
+    assert hashes["verdict"] == "PASS"
+    evidence.update(before_rows=deepcopy(substituted), reopened_rows=deepcopy(substituted),
+                    before=dict(hashes), reopened=dict(hashes))
+    assert compare_snapshots(evidence["before"], evidence["reopened"])["verdict"] == "PASS"
+    result = reconcile_offline(evidence)
+    assert result["verdict"] == "FAIL"
+    assert result["stages"]["reopen"]["reason"] == "snapshot_saved_evidence_mismatch"
+    assert all(stage["verdict"] == "PASS" for name, stage in result["stages"].items() if name != "reopen")
+
+
+@pytest.mark.parametrize("metric,expected", [("strings", 3), ("optimizers", 13)])
+def test_oracle_string_totals_cannot_contradict_approved_exported_values(metric, expected):
+    evidence = complete_evidence()
+    evidence["oracle_values"][metric] = expected
+    for row in evidence["view_rows"]:
+        if row["metric"] == metric:
+            row.update(oracle=expected, delta=-1, verdict="FAIL")
+    evidence["discrepancy_records"] = [dict(fixture_id="synthetic", metric=metric, delta=-1,
+        name="synthetic frozen revision", frozen_at="2026-11-15T12:00:00Z")]
+    evidence["csv_text"] = csv_fixture(evidence["view_rows"])
+    rows = dict(strings=deepcopy(ORACLE), table_rows=deepcopy(evidence["view_rows"]))
+    hashes = canonical_snapshot(rows["strings"], rows["table_rows"])
+    evidence.update(before_rows=deepcopy(rows), reopened_rows=deepcopy(rows),
+                    before=dict(hashes), reopened=dict(hashes))
+    result = reconcile_offline(evidence)
+    assert result["verdict"] == "FAIL"
+    strings = result["stages"]["strings"]
+    assert strings["identity"]["verdict"] == strings["totals"]["verdict"] == "PASS"
+    assert strings["oracle_totals"]["reason"] == "oracle_string_totals_mismatch"
+    assert strings["oracle_totals"]["mismatched_metrics"] == [metric]
+    assert all(stage["verdict"] == "PASS" for name, stage in result["stages"].items() if name != "strings")
+    assert compare_oracle_string_totals(None, evidence["oracle_values"])["verdict"] == "UNREADABLE"
+
+
+def test_large_grouping_diagnostics_have_exact_count_and_capped_indices():
+    for count in (500, 2000):
+        rows = [dict(group_count=2 if index % 2 == 0 else 1) for index in range(count)]
+        evidence = compare_recommendations(2, rows)
+        assert evidence["verdict"] == "FAIL"
+        assert evidence["mismatch_count"] == count // 2
+        assert evidence["mismatched_recommendations"] == list(range(1, MAX_RECOMMENDATION_EXAMPLES * 2, 2))
+
+
+@pytest.mark.parametrize("flag", [None, 0, 1, "false", "true", [], {}, [True]])
+def test_nonempty_recommendation_flags_must_be_strict_booleans(flag):
+    assert compare_recommendations(2, [{"group_count": 2}], no_recommendations_shown=flag) == {
+        "verdict": "UNREADABLE", "reason": "recommendation_flag_unreadable"}
+    evidence = complete_evidence()
+    evidence["no_recommendations_shown"] = flag
+    assert reconcile_offline(evidence)["verdict"] == "UNREADABLE"
+
+
+@pytest.mark.parametrize("malformed_first", [False, True])
+def test_concurrent_csv_calls_serialize_and_restore_global_limit_without_sleeps(monkeypatch, malformed_first):
+    from threading import Event, RLock, Thread, current_thread
+    from benches import x05_reconcile as module
+
+    first_entered, second_attempt, second_entered, release_first = (Event() for _ in range(4))
+    original_reader = csv.reader
+    results, errors, started = {}, [], []
+
+    class ObservedLock:
+        lock = RLock()
+
+        def __enter__(self):
+            if current_thread().name == "csv-second":
+                second_attempt.set()
+            self.lock.acquire()
+            if current_thread().name == "csv-second":
+                second_entered.set()
+            return self
+
+        def __exit__(self, *args):
+            self.lock.release()
+
+    def reader(*args, **kwargs):
+        assert csv.field_size_limit() == MAX_CSV_CHARS
+        if current_thread().name == "csv-first":
+            first_entered.set()
+            assert release_first.wait(10), "test coordination did not release first parser"
+        return original_reader(*args, **kwargs)
+
+    _, rows = table_fixture()
+    valid, malformed = csv_fixture(rows), '"unterminated'
+    inputs = (malformed, valid) if malformed_first else (valid, malformed)
+
+    def worker(index):
+        try:
+            results[index] = compare_csv_view(inputs[index], rows)["verdict"]
+        except BaseException as error:
+            errors.append(error)
+
+    monkeypatch.setattr(module, "_CSV_LOCK", ObservedLock())
+    monkeypatch.setattr(csv, "reader", reader)
+    previous = csv.field_size_limit()
+    try:
+        csv.field_size_limit(1)
+        first = Thread(target=worker, args=(0,), name="csv-first")
+        second = Thread(target=worker, args=(1,), name="csv-second")
+        first.start()
+        started.append(first)
+        assert first_entered.wait(10)
+        second.start()
+        started.append(second)
+        assert second_attempt.wait(10)
+        assert not second_entered.is_set()  # First parser still holds the lock.
+        release_first.set()
+        for thread in started:
+            thread.join(10)
+        assert not any(thread.is_alive() for thread in started)
+        assert not errors
+        assert results == ({0: "UNREADABLE", 1: "PASS"} if malformed_first else {0: "PASS", 1: "UNREADABLE"})
+        assert second_entered.is_set() and csv.field_size_limit() == 1
+    finally:
+        release_first.set()
+        for thread in started:
+            thread.join(10)
+        csv.field_size_limit(previous)
+
+
+@pytest.mark.parametrize("case", ["PASS", "FAIL", "UNREADABLE"])
+def test_complete_evidence_permutations_preserve_diagnostics_and_caller_inputs(case):
+    from random import Random
+
+    baseline = complete_evidence()
+    baseline["recommendations"] = [{"group_count": 2 if case == "PASS" else 1}] * 2
+    baseline["discrepancy_records"] = [dict(fixture_id="synthetic", metric=metric, delta=0,
+        name="synthetic zero revision", frozen_at="2026-11-15T12:00:00Z") for metric in ("panels", "strings")]
+    if case == "UNREADABLE":
+        del baseline["reopened_rows"]
+    expected = reconcile_offline(baseline)
+    assert expected["verdict"] == case
+    for seed in range(8):
+        rng = Random(seed)
+        changed = deepcopy(baseline)
+        for key in ("oracle_strings", "saved_strings", "view_rows", "recommendations", "discrepancy_records"):
+            rng.shuffle(changed[key])
+        for key in ("before_rows", "reopened_rows"):
+            if key in changed:
+                rng.shuffle(changed[key]["strings"])
+                rng.shuffle(changed[key]["table_rows"])
+                changed[key] = dict(reversed(list(changed[key].items())))
+        for key in ("saved_values", "oracle_values", "before", "reopened"):
+            items = list(changed[key].items())
+            rng.shuffle(items)
+            changed[key] = dict(items)
+        csv_rows, columns = deepcopy(changed["view_rows"]), list(TABLE_COLUMNS)
+        rng.shuffle(csv_rows)
+        rng.shuffle(columns)
+        changed["csv_text"] = csv_fixture(csv_rows, columns)
+        changed = dict(reversed(list(changed.items())))
+        preserved = deepcopy(changed)
+        assert reconcile_offline(changed) == expected
+        assert changed == preserved

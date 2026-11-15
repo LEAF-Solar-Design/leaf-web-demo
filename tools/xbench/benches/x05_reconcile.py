@@ -22,6 +22,7 @@ _CONTEXT = Context(prec=200)
 MAX_CSV_CHARS = 16384
 MAX_CSV_CELL = 256
 MAX_STRING_EXAMPLES = 20
+MAX_RECOMMENDATION_EXAMPLES = 20
 _CSV_LOCK = RLock()
 
 
@@ -53,19 +54,24 @@ def compare_recommendations(report_grid_count, recommendations, *, no_recommenda
         return _out("UNREADABLE", "report_grid_count_unreadable")
     if not isinstance(recommendations, list):
         return _out("UNREADABLE", "recommendations_unreadable")
+    if type(no_recommendations_shown) is not bool:
+        return _out("UNREADABLE", "recommendation_flag_unreadable")
     if not recommendations and no_recommendations_shown is not True:
         return _out("UNREADABLE", "recommendation_absence_unverified")
     if recommendations and no_recommendations_shown is True:
         return _out("UNREADABLE", "recommendation_presence_conflict")
-    mismatches = []
+    mismatches, mismatch_count = [], 0
     for index, row in enumerate(recommendations):
         count = row.get("group_count") if isinstance(row, dict) else None
         if type(count) is not int or not 1 <= count <= 2**53 - 1:
             return _out("UNREADABLE", "recommendation_count_unreadable")
         if count != report_grid_count:
-            mismatches.append(index)
-    return _out("FAIL" if mismatches else "PASS", "grouping_count_mismatch" if mismatches
-                else "grouping_counts_equal", mismatched_recommendations=mismatches)
+            mismatch_count += 1
+            if len(mismatches) < MAX_RECOMMENDATION_EXAMPLES:
+                mismatches.append(index)
+    return _out("FAIL" if mismatch_count else "PASS", "grouping_count_mismatch" if mismatch_count
+                else "grouping_counts_equal", mismatched_recommendations=mismatches,
+                mismatch_count=mismatch_count)
 
 
 def _table(rows):
@@ -246,7 +252,7 @@ def canonical_snapshot(strings, table_rows):
                     table_sha256=digest(values))
 
 
-def compare_bound_snapshots(before, reopened, before_rows, reopened_rows):
+def compare_bound_snapshots(before, reopened, before_rows, reopened_rows, saved_strings=None, view_rows=None):
     calculated = []
     for rows in (before_rows, reopened_rows):
         if not isinstance(rows, dict) or not {"strings", "table_rows"} <= rows.keys():
@@ -258,23 +264,37 @@ def compare_bound_snapshots(before, reopened, before_rows, reopened_rows):
     supplied = compare_snapshots(before, reopened)
     if supplied["verdict"] == "UNREADABLE":
         return supplied
+    saved = canonical_snapshot(saved_strings, view_rows)
+    if saved["verdict"] != "PASS":
+        return _out("UNREADABLE", "snapshot_saved_evidence_unreadable")
     unbound = [phase for phase, claimed, actual in zip(
         ("before", "reopened"), (before, reopened), calculated)
         if compare_snapshots(claimed, actual)["verdict"] != "PASS"]
     if unbound:
         return _out("FAIL", "snapshot_hash_binding_mismatch", unbound_phases=unbound)
+    binding = compare_snapshots(saved, calculated[0])
+    if binding["verdict"] != "PASS":
+        return _out("FAIL", "snapshot_saved_evidence_mismatch", changed_hashes=binding["changed_hashes"])
     return compare_snapshots(*calculated)
 
 
-def compare_saved_string_totals(saved_rows, saved_values):
-    indexed, error = _index(saved_rows, "saved")
-    values = _values(saved_values)
+def _compare_string_totals(rows, raw_values, source):
+    indexed, error = _index(rows, source)
+    values = _values(raw_values)
     if error or values is None:
-        return _out("UNREADABLE", "saved_string_totals_unreadable")
+        return _out("UNREADABLE", source + "_string_totals_unreadable")
     totals = {"strings": len(indexed), "optimizers": sum(indexed.values())}
     mismatches = [metric for metric in totals if totals[metric] != values[metric]]
-    return _out("FAIL" if mismatches else "PASS", "saved_string_totals_mismatch" if mismatches
-                else "saved_string_totals_equal", mismatched_metrics=mismatches, observed=totals)
+    return _out("FAIL" if mismatches else "PASS", source + "_string_totals_mismatch" if mismatches
+                else source + "_string_totals_equal", mismatched_metrics=mismatches, observed=totals)
+
+
+def compare_saved_string_totals(saved_rows, saved_values):
+    return _compare_string_totals(saved_rows, saved_values, "saved")
+
+
+def compare_oracle_string_totals(oracle_rows, oracle_values):
+    return _compare_string_totals(oracle_rows, oracle_values, "oracle")
 
 
 def reconcile_offline(evidence):
@@ -294,23 +314,26 @@ def reconcile_offline(evidence):
             deltas = {metric: saved[metric] - oracle[metric] for metric in METRICS}
         return check_discrepancies(fixture, deltas, records, started)
 
-    def strings(oracle, saved, values):
+    def strings(oracle, saved, values, oracle_values):
         identity = compare_strings(oracle, saved)
         totals = compare_saved_string_totals(saved, values)
-        verdicts = {identity["verdict"], totals["verdict"]}
+        oracle_totals = compare_oracle_string_totals(oracle, oracle_values)
+        verdicts = {identity["verdict"], totals["verdict"], oracle_totals["verdict"]}
         verdict = "UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS"
-        return _out(verdict, "saved_string_stage", identity=identity, totals=totals)
+        return _out(verdict, "saved_string_stage", identity=identity, totals=totals,
+                    oracle_totals=oracle_totals)
 
     def grouping(count, rows):
         return compare_recommendations(count, rows,
-            no_recommendations_shown=evidence.get("no_recommendations_shown"))
+            no_recommendations_shown=evidence.get("no_recommendations_shown", False))
 
     checks = (
-        ("strings", strings, ("oracle_strings", "saved_strings", "saved_values")),
+        ("strings", strings, ("oracle_strings", "saved_strings", "saved_values", "oracle_values")),
         ("grouping", grouping, ("report_grid_count", "recommendations")),
         ("table", compare_table, ("view_rows", "saved_values", "oracle_values")),
         ("policy", policy, ("saved_values", "oracle_values", "fixture_id", "discrepancy_records", "run_started_at")),
-        ("reopen", compare_bound_snapshots, ("before", "reopened", "before_rows", "reopened_rows")),
+        ("reopen", compare_bound_snapshots, ("before", "reopened", "before_rows", "reopened_rows",
+                                            "saved_strings", "view_rows")),
         ("csv_view", compare_csv_view, ("csv_text", "view_rows")),
     )
     stages = {name: check(*(evidence[key] for key in keys)) if all(key in evidence for key in keys)
