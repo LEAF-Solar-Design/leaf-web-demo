@@ -66,7 +66,7 @@ const restoreResult = z.union([restoreReceipt, z.strictObject({ changed_count: z
 // Opaque keyset positions use canonical, unpadded base64url. They never grant access.
 const historyCursor = z.string().min(1).max(1024).regex(/^[A-Za-z0-9_-]+(?![\s\S])/).refine(value => {
   const remainder = value.length % 4
-  const tail = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'.indexOf(value.at(-1))
+  const tail = ['ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz', '0123456789-_'].join('').indexOf(value.at(-1))
   return remainder !== 1 && (remainder !== 2 || (tail & 15) === 0) && (remainder !== 3 || (tail & 3) === 0)
 })
 const historyCheckpoint = z.strictObject({ phase: z.enum(['admitted', 'dispatched', 'complete']), batches: count,
