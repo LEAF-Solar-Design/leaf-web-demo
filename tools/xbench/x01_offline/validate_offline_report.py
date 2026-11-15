@@ -30,6 +30,7 @@ ROW_REASONS = frozenset((
     "CHILD_TIMEOUT", "CHILD_OUTPUT_LIMIT", "CHILD_DIAGNOSTIC_LIMIT",
     "CHILD_LAUNCH_ERROR", "CHILD_UNEXPECTED_EXIT", "CHILD_OUTPUT_UNREADABLE",
     "CHILD_DIAGNOSTICS_INVALID",
+    "CHILD_CONTAINMENT_ERROR",
 ))
 # The two explicit parsing exceptions are CHILD_OUTPUT_UNREADABLE and
 # CHILD_DIAGNOSTICS_INVALID. Arbitrary diagnostic names do not override exits.
@@ -185,7 +186,8 @@ def validate_report(value):
                 consistent = False
             if code is None:
                 expected = "UNREADABLE"
-                consistent = consistent and "CHILD_LAUNCH_ERROR" in reasons
+                consistent = consistent and bool(reasons & {
+                    "CHILD_LAUNCH_ERROR", "CHILD_CONTAINMENT_ERROR"})
             elif exceptions:
                 expected = "UNREADABLE"
                 if not (timeout or reasons & PARSE_OR_LIMIT_REASONS or
@@ -424,6 +426,13 @@ class ValidatorTests(unittest.TestCase):
         report["checks"][0]["timeout"] = True
         self.assert_invalid(report, "INCONSISTENT_CHILD")
 
+    def test_containment_failure_without_spawn(self):
+        report = self.report("UNREADABLE")
+        report["checks"][0].update(exit_code=None, diagnostics=[dict(name="CHILD_CONTAINMENT_ERROR")])
+        self.assert_valid(report)
+        report["checks"][0]["timeout"] = True
+        self.assert_invalid(report, "INCONSISTENT_CHILD")
+
     def test_types_and_nonfinite(self):
         for field, bad in (("exit_code", True), ("duration_seconds", False),
                            ("duration_seconds", -1), ("duration_seconds", float("nan")),
@@ -503,7 +512,9 @@ class ValidatorTests(unittest.TestCase):
             self.assertEqual(path.read_bytes(), raw)
             self.assertEqual(validate_file(path, max_bytes=10)["verdict"], "UNREADABLE")
             for raw in (b"{bad", b"\xff", b'{"a":NaN}', b'{"a":1e999}',
-                        b'{"a":1,"a":2}', b"[" * 40 + b"0" + b"]" * 40):
+                        b'{"a":1,"a":2}', b'{"diagnostics":[],"diagnostics":[]}',
+                        b'{"diagnostics":[{"name":"a","name":"b"}]}',
+                        b"[" * 40 + b"0" + b"]" * 40):
                 path.write_bytes(raw)
                 self.assertEqual(validate_file(path)["verdict"], "UNREADABLE", raw)
             path.write_bytes(b"[[[0]]]")

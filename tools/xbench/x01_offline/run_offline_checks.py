@@ -1,11 +1,13 @@
 """Sequential stdlib checks of synthetic offline support only."""
 
 import argparse
+import ctypes
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
@@ -36,45 +38,198 @@ def input_hash(path):
         return None
 
 
+class _WindowsJob:
+    """A suspended child cannot spawn before assignment to this private job."""
+
+    def __init__(self):
+        from ctypes import wintypes as w
+
+        class Limits(ctypes.Structure):
+            _fields_ = [("process_time", ctypes.c_int64), ("job_time", ctypes.c_int64),
+                        ("flags", w.DWORD), ("min_ws", ctypes.c_size_t),
+                        ("max_ws", ctypes.c_size_t), ("active", w.DWORD),
+                        ("affinity", ctypes.c_size_t), ("priority", w.DWORD),
+                        ("scheduling", w.DWORD)]
+
+        class IO(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_uint64) for name in
+                        ("read_ops", "write_ops", "other_ops", "read_bytes",
+                         "write_bytes", "other_bytes")]
+
+        class Extended(ctypes.Structure):
+            _fields_ = [("basic", Limits), ("io", IO),
+                        ("process_memory", ctypes.c_size_t), ("job_memory", ctypes.c_size_t),
+                        ("peak_process", ctypes.c_size_t), ("peak_job", ctypes.c_size_t)]
+
+        self.api = ctypes.WinDLL("kernel32", use_last_error=True)
+        for name, args, result in (
+                ("CreateJobObjectW", [ctypes.c_void_p, w.LPCWSTR], w.HANDLE),
+                ("SetInformationJobObject", [w.HANDLE, ctypes.c_int, ctypes.c_void_p, w.DWORD], w.BOOL),
+                ("AssignProcessToJobObject", [w.HANDLE, w.HANDLE], w.BOOL),
+                ("TerminateJobObject", [w.HANDLE, w.UINT], w.BOOL),
+                ("QueryInformationJobObject", [w.HANDLE, ctypes.c_int, ctypes.c_void_p,
+                                               w.DWORD, ctypes.c_void_p], w.BOOL),
+                ("CloseHandle", [w.HANDLE], w.BOOL),
+                ("PeekNamedPipe", [w.HANDLE, ctypes.c_void_p, w.DWORD, ctypes.c_void_p,
+                                   ctypes.POINTER(w.DWORD), ctypes.c_void_p], w.BOOL)):
+            function = getattr(self.api, name)
+            function.argtypes, function.restype = args, result
+        self.handle = self.api.CreateJobObjectW(None, None)
+        if not self.handle:
+            raise OSError("cannot create child job")
+        limits = Extended()
+        limits.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not self.api.SetInformationJobObject(self.handle, 9, ctypes.byref(limits),
+                                                ctypes.sizeof(limits)):
+            self.close()
+            raise OSError("cannot configure child job")
+
+    def start(self, child):
+        if not self.api.AssignProcessToJobObject(self.handle, int(child._handle)):
+            raise OSError("cannot contain suspended child")
+        # Popen closes the primary thread handle. Resume the still-suspended
+        # process only after successful assignment (no parent-exit race).
+        resume = ctypes.WinDLL("ntdll").NtResumeProcess
+        resume.argtypes, resume.restype = [ctypes.c_void_p], ctypes.c_long
+        if resume(int(child._handle)) != 0:
+            raise OSError("cannot resume contained child")
+
+    def read(self, child):
+        import msvcrt
+        available = ctypes.c_ulong()
+        handle = msvcrt.get_osfhandle(child.stdout.fileno())
+        if not self.api.PeekNamedPipe(handle, None, 0, None, ctypes.byref(available), None):
+            if ctypes.get_last_error() == 109:  # ERROR_BROKEN_PIPE
+                return b""
+            raise OSError("cannot inspect child output")
+        return os.read(child.stdout.fileno(), min(4096, available.value)) if available.value else None
+
+    def close(self, deadline=None):
+        if self.handle:
+            self.api.TerminateJobObject(self.handle, 1)
+            # Basic accounting ends with total/active/terminated process counts.
+            class Accounting(ctypes.Structure):
+                _fields_ = [("times", ctypes.c_int64 * 4),
+                            ("page_faults", ctypes.c_uint32), ("total", ctypes.c_uint32),
+                            ("active", ctypes.c_uint32), ("terminated", ctypes.c_uint32)]
+
+            deadline = time.monotonic() + 1 if deadline is None else deadline
+            accounting = Accounting()
+            while time.monotonic() < deadline:
+                if not self.api.QueryInformationJobObject(self.handle, 1, ctypes.byref(accounting),
+                                                          ctypes.sizeof(accounting), None):
+                    break
+                if not accounting.active:
+                    break
+                time.sleep(.005)
+            self.api.CloseHandle(self.handle)
+            self.handle = None
+
+
 def capture_child(command, timeout):
-    """Retain at most the capture cap; the reader kills a flooding direct child."""
+    """Bound execution AND pipe drain; no blocking reader survives this call.
+
+    POSIX keeps the leader waitable until group termination, reserving its PID
+    and preventing group-ID reuse. Linux adopts and reaps orphan descendants;
+    other POSIX systems leave non-child reaping to their system reaper.
+    """
+    deadline = time.monotonic() + timeout
     raw = bytearray()
-    failures = []
+    child, job, subreaper = None, None, None
+    code, timed_out, failure = None, False, None
     try:
-        child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    except OSError:
-        return None, False, bytes(raw), "CHILD_LAUNCH_ERROR"
-
-    def read_output():
         try:
-            while True:
-                chunk = os.read(child.stdout.fileno(), 4096)
-                if not chunk:
-                    break
-                remaining = MAX_CAPTURE_BYTES - len(raw)
-                raw.extend(chunk[:remaining])
-                if len(chunk) > remaining:
-                    failures.append("CHILD_OUTPUT_LIMIT")
-                    child.kill()
-                    break
+            if os.name == "nt":
+                job = _WindowsJob()
+            else:
+                if not all(hasattr(os, name) for name in ("waitid", "WNOWAIT", "P_PID")):
+                    raise OSError("safe child observation unavailable")
+                if sys.platform.startswith("linux"):
+                    libc = ctypes.CDLL(None, use_errno=True)
+                    previous = ctypes.c_int()
+                    if libc.prctl(37, ctypes.byref(previous), 0, 0, 0) != 0:
+                        raise OSError("cannot inspect subreaper")
+                    if libc.prctl(36, 1, 0, 0, 0) != 0:
+                        raise OSError("cannot establish subreaper")
+                    subreaper = (libc, previous.value)
+        except (OSError, AttributeError):
+            return None, False, b"", "CHILD_CONTAINMENT_ERROR"
+        try:
+            child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                     creationflags=0x4 if job else 0,
+                                     start_new_session=job is None)
         except OSError:
-            failures.append("CHILD_OUTPUT_UNREADABLE")
-            if child.poll() is None:
-                child.kill()
-
-    reader = threading.Thread(target=read_output, name="x01-capture")
-    reader.start()
-    timed_out = False
-    try:
-        code = child.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        child.kill()
-        code = child.wait()
+            return None, False, b"", "CHILD_LAUNCH_ERROR"
+        try:
+            if job:
+                job.start(child)
+            else:
+                os.set_blocking(child.stdout.fileno(), False)
+        except (OSError, AttributeError):
+            failure = "CHILD_CONTAINMENT_ERROR"
+        eof = False
+        while failure is None:
+            if time.monotonic() >= deadline:
+                timed_out, failure = True, "CHILD_TIMEOUT"
+                break
+            try:
+                if not eof:
+                    if job:
+                        chunk = job.read(child)
+                    else:
+                        try:
+                            chunk = os.read(child.stdout.fileno(), 4096)
+                        except BlockingIOError:
+                            chunk = None
+                    if chunk == b"":
+                        eof = True
+                    elif chunk:
+                        remaining = MAX_CAPTURE_BYTES - len(raw)
+                        raw.extend(chunk[:remaining])
+                        if len(chunk) > remaining:
+                            failure = "CHILD_OUTPUT_LIMIT"
+                exited = (child.poll() is not None if job else
+                          os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                          is not None)
+                if eof and exited:
+                    break
+            except OSError:
+                failure = "CHILD_OUTPUT_UNREADABLE"
+            if failure is None:
+                time.sleep(min(.005, max(0, deadline - time.monotonic())))
+        # Deadline always takes precedence over a coincident read/limit error.
+        if failure and time.monotonic() >= deadline:
+            timed_out, failure = True, "CHILD_TIMEOUT"
     finally:
-        reader.join()
-        child.stdout.close()
-    failure = failures[0] if failures else "CHILD_TIMEOUT" if timed_out else None
+        cleanup_deadline = time.monotonic() + 1
+        if child is not None:
+            if job:
+                job.close(cleanup_deadline)
+                # Assignment may have failed; that child is still suspended.
+                if child.poll() is None:
+                    child.kill()
+            else:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            try:
+                code = child.wait(timeout=max(0, cleanup_deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                failure = failure or "CHILD_OUTPUT_UNREADABLE"
+            child.stdout.close()
+            if subreaper:
+                while time.monotonic() < cleanup_deadline:
+                    try:
+                        pid, _ = os.waitpid(-child.pid, os.WNOHANG)
+                    except ChildProcessError:
+                        break
+                    if not pid:
+                        time.sleep(.005)
+        if job:
+            job.close()
+        if subreaper:
+            subreaper[0].prctl(36, subreaper[1], 0, 0, 0)
     return code, timed_out, bytes(raw), failure
 
 
@@ -103,7 +258,15 @@ def structured_diagnostics(raw):
         def reject_constant(value):
             raise ValueError("nonfinite JSON")
 
-        payload = json.loads(raw, parse_constant=reject_constant)
+        def unique_object(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate JSON key")
+                result[key] = value
+            return result
+
+        payload = json.loads(raw, parse_constant=reject_constant, object_pairs_hook=unique_object)
         # Also reject overflow such as 1e999, including outside diagnostics.
         json.dumps(payload, allow_nan=False)
     except (ValueError, TypeError, RecursionError, UnicodeError, OverflowError):
@@ -425,6 +588,22 @@ class RunnerTests(unittest.TestCase):
                 self.assertIn(row["diagnostics"][0]["name"],
                               ("CHILD_OUTPUT_UNREADABLE", "CHILD_DIAGNOSTICS_INVALID", "CHILD_DIAGNOSTIC_LIMIT"))
                 json.dumps(row, allow_nan=False)
+
+    def test_duplicate_child_json_keys(self):
+        from validate_offline_report import validate_report
+        for raw in ('{"diagnostics":[],"diagnostics":[{"name":"hidden"}]}',
+                    '{"diagnostics":[{"name":"first","name":"second"}]}',
+                    '{"extra":{"nested":{"x":1,"x":2}},"diagnostics":[]}'):
+            with self.subTest(raw=raw):
+                commands = [(name, self.stub("print(" + repr(raw) + ")")) for name in CHECKERS]
+                result = run_checks(commands)
+                self.assertEqual(result["verdict"], "UNREADABLE")
+                for row in result["checks"]:
+                    self.assertFalse(row["timeout"])
+                    self.assertEqual(row["exit_code"], 0)
+                    self.assertEqual(row["diagnostics"], [dict(
+                        name="CHILD_OUTPUT_UNREADABLE", checker=row["checker"])])
+                self.assertEqual(validate_report(result)["verdict"], "PASS")
 
 
 def main(argv=None):
