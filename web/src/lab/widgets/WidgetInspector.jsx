@@ -115,7 +115,7 @@ export default function WidgetInspector({ doc, selectedId, dispatch, local, onOu
       {element.tracking !== undefined && <NumberField label="Spacing" value={element.tracking} min={0} max={20} onChange={(tracking) => edit({ tracking })} />}
       {element.kind === 'text' && (!element.preset || element.preset === 'text' || (element.preset !== 'brand' && !element.binding)) && <>
         {fullTextMode
-          ? <label>Full text<textarea value={element.text ?? ''} rows={2} maxLength={MAX_TEXT_LENGTH} onChange={(e) => edit({ text: e.target.value })} /></label>
+          ? <label>Full text<textarea aria-label="Full text" value={element.text ?? ''} rows={2} maxLength={MAX_TEXT_LENGTH} onChange={(e) => edit({ text: e.target.value })} /></label>
           : <label>Text<input value={element.text ?? ''} maxLength={40} onChange={(e) => edit({ text: e.target.value.slice(0, 40) })} /></label>}
         <button type="button" disabled={fullTextMode && needsFullText} onClick={() => setFullTextOpen(!fullTextMode)}>{fullTextMode ? 'Use short text' : 'Edit full text'}</button>
         {fullTextMode && needsFullText && <p>Short text supports one line up to 40 characters.</p>}
