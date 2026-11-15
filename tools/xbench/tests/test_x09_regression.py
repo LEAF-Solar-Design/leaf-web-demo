@@ -37,24 +37,48 @@ def test_canonical_hash():
     assert compare_pair(oracle, float("inf"))["verdict"] == "UNREADABLE"
 
 
-def fixtures(n=14, m=10):
-    return ([{"name": str(i), "version": "1", "package_sha256": f"{i:064x}"}
+def fixtures(n=63, m=10):
+    return ([{"name": f"tool-{i:03d}", "version": "1", "catalog_digest": f"sha256:{i:064x}"}
              for i in range(n)], [{"sha256": f"{i:064x}"} for i in range(m)])
 
 
 def test_weekly_capacity_and_order():
     tools, drawings = fixtures()
     week = [plan_pairs(tools, drawings, day) for day in range(7)]
-    assert all(len(day) == 20 for day in week)
-    assert len({json.dumps(pair, sort_keys=True) for day in week for pair in day}) == 140
+    assert all(len(day) == 9 for day in week)
+    assert len({pair["name"] for day in week for pair in day}) == 63
+    assert sum(map(len, week)) == 63
     assert plan_pairs(tools[::-1], drawings[::-1], 2) == week[2]
     with pytest.raises(ValueError, match="weekly"):
         plan_pairs(*fixtures(141, 1), 0)
 
 
+def test_every_tool_visits_every_drawing_over_ten_weeks():
+    tools, drawings = fixtures()
+    visits = {tool["name"]: set() for tool in tools}
+    for day in range(70):
+        for pair in plan_pairs(tools, drawings, day):
+            visits[pair["name"]].add(pair["drawing_sha256"])
+    assert all(seen == {drawing["sha256"] for drawing in drawings} for seen in visits.values())
+    # The full 140-tool weekly capacity still fits 20 pairs on each night.
+    assert all(len(plan_pairs(*fixtures(140, 10), day)) == 20 for day in range(7))
+
+
+def test_catalog_digest_required_and_optional_package_preserved():
+    tools, drawings = fixtures(1, 1)
+    tools[0]["package_digest"] = "b" * 64
+    pair, = plan_pairs(tools, drawings, 0)
+    assert pair["catalog_digest"] == tools[0]["catalog_digest"]
+    assert pair["package_digest"] == "b" * 64
+    tools[0]["catalog_digest"] = "invalid"
+    with pytest.raises(ValueError, match="catalog"):
+        plan_pairs(tools, drawings, 0)
+
+
 def test_small_set_no_duplicate_per_night():
     tools, drawings = fixtures(1, 3)
-    assert len(plan_pairs(tools, drawings, 99)) == 3
+    assert sum(len(plan_pairs(tools, drawings, day)) for day in range(7)) == 1
+    assert plan_pairs(tools, drawings, 0)[0]["drawing_sha256"] != plan_pairs(tools, drawings, 7)[0]["drawing_sha256"]
 
 
 @pytest.mark.parametrize("day,cap", [(-1, 20), (True, 20), (0, 21), (0, 0), (0, True)])

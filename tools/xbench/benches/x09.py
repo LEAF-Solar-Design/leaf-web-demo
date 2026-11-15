@@ -1,7 +1,8 @@
 """Partial X09 catalog binding; no generated-run or pair execution producer.
 
-Optional manifest ``goldens`` is a list of objects containing name, version,
-package_digest, fixture_id, fixture_sha256, oracle (rule/value), and lane_review
+Optional manifest ``goldens`` pins every effective catalog name, version and
+catalog_digest, plus package_digest when a signed envelope exists. It also pins
+fixture_id, fixture_sha256, oracle (rule/value), and lane_review
 (lane, reviewer, receipt_sha256). Fixture references must match both the manifest
 and the harness's verified fixture rows. Metadata alone never proves execution.
 """
@@ -11,7 +12,7 @@ import re
 
 import xbench_core
 import xbench_session
-from benches.x09_regression import compare_pair
+from benches.x09_regression import compare_pair, is_catalog_digest
 
 
 LIMITS = (
@@ -27,7 +28,7 @@ _MISSING = (
     "dedupe producer evidence: repeated-pair execution and deduplication receipts",
     "seeded-break producer evidence: deliberate regression and detection receipt",
 )
-_FIELDS = frozenset(("tools", "name", "version", "package_digest", "tool_manifest_sha256"))
+_FIELDS = frozenset(("tools", "name", "version", "catalog_digest", "package_digest", "tool_manifest_sha256"))
 
 
 def _hex(value, length=64):
@@ -35,6 +36,15 @@ def _hex(value, length=64):
 
 
 def _identity(row):
+    return (type(row) is dict and type(row.get("name")) is str
+            and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,127}", row["name"]) is not None
+            and type(row.get("version")) is str
+            and re.fullmatch(r"[0-9]+(?:\.[0-9]+){0,2}", row["version"]) is not None
+            and (is_catalog_digest(row.get("catalog_digest"))
+                 if "catalog_digest" in row else _hex(row.get("package_digest"))))
+
+
+def _signed_identity(row):
     return (type(row) is dict and type(row.get("name")) is str
             and 3 <= len(row["name"]) <= 64
             and re.fullmatch(r"[a-z][a-z0-9]*(-[a-z0-9]+)*", row["name"]) is not None
@@ -55,13 +65,12 @@ def _catalog(status, body, signed=False):
     seen = set()
     for row in rows:
         if signed:
-            valid = _identity(row)
+            valid = _signed_identity(row)
         else:
-            valid = (type(row) is dict and type(row.get("name")) is str
-                     and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,127}", row["name"]) is not None
-                     and type(row.get("version")) is str
-                     and re.fullmatch(r"[0-9]+(?:\.[0-9]+){0,2}", row["version"]) is not None)
+            valid = _identity(row) and is_catalog_digest(row.get("catalog_digest"))
         if not valid:
+            return None
+        if "catalog_digest" in row and not is_catalog_digest(row["catalog_digest"]):
             return None
         if "package_digest" in row and not _hex(row["package_digest"]):
             return None
@@ -86,7 +95,7 @@ def _summary(status, body, rows):
         "count": len(rows) if rows is not None else None,
         "fields": sorted(set(body) & _FIELDS) if type(body) is dict else [],
         "tools": [dict({key: row[key] for key in
-                        ("name", "version", "package_digest", "tool_manifest_sha256")
+                        ("name", "version", "catalog_digest", "package_digest", "tool_manifest_sha256")
                         if key in row}, fields=sorted(set(row) & _FIELDS))
                   for row in rows] if rows is not None else [],
     }
@@ -102,13 +111,15 @@ def _goldens(ctx, published):
     if type(fixtures) is not list or type(verified) is not list:
         return "missing verified sample fixture identity/hash"
     covered = set()
-    actual = {(r["name"], r["version"], r["package_digest"]) for r in published}
+    actual = {(r["name"], r["version"], r.get("catalog_digest")): r for r in published}
     for golden in goldens:
         if not _identity(golden):
             return "invalid golden published identity"
-        key = (golden["name"], golden["version"], golden["package_digest"])
+        key = (golden["name"], golden["version"], golden.get("catalog_digest"))
         if key not in actual or key in covered:
             return "golden identity does not uniquely cover actual published catalog"
+        if golden.get("package_digest") != actual[key].get("package_digest"):
+            return "golden package digest does not match actual published envelope"
         covered.add(key)
         fid, digest = golden.get("fixture_id"), golden.get("fixture_sha256")
         if (type(fid) is not str or not fid or not _hex(digest)
@@ -129,7 +140,7 @@ def _goldens(ctx, published):
                 or any(type(review.get(k)) is not str or not review[k].strip()
                        for k in ("lane", "reviewer"))):
             return "missing lane review receipt metadata"
-    if covered != actual:
+    if covered != set(actual):
         return "missing golden coverage for actual published identities"
     return None
 
@@ -155,10 +166,22 @@ def evaluate_catalog(ctx, flat_status, flat_body, published_status, published_bo
     if reason is None:
         if flat is None or published is None:
             reason = "catalog status/body/identity unreadable; no product failure inferred"
-        elif not published:
-            reason = "empty signed published catalog; no golden or generated-run binding possible"
+        elif not flat and not published:
+            reason = "empty effective and signed catalogs; no golden or generated-run binding possible"
         else:
-            reason = _goldens(ctx, published)
+            # Effective tools are the primary published set. Signed packages
+            # enrich matching tools, or join as package-pinned additional tools.
+            effective = {(r["name"], r["version"]): dict(r) for r in flat}
+            for package in published:
+                key = (package["name"], package["version"])
+                row = effective.setdefault(key, {"name": key[0], "version": key[1]})
+                if ("package_digest" in row
+                        and row["package_digest"] != package["package_digest"]):
+                    reason = "conflicting package digests in published catalogs"
+                    break
+                row["package_digest"] = package["package_digest"]
+            if reason is None:
+                reason = _goldens(ctx, list(effective.values()))
     source = ctx.source_sha if _hex(ctx.source_sha, 40) else None
     audit = {"source": source, "flat": _summary(flat_status, flat_body, flat),
              "published": _summary(published_status, published_body, published)}

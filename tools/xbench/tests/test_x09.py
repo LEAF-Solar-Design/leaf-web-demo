@@ -28,19 +28,22 @@ def context(tmp_path, **changes):
 
 
 def published(name="sample-tool", **changes):
-    row = {"name": name, "version": "1.0.0", "package_digest": DIGEST}
+    row = {"name": name, "version": "1.0.0", "catalog_digest": "sha256:" + DIGEST,
+           "package_digest": DIGEST}
     row.update(changes)
     return row
 
 
 def flat(count=63):
     return {"tools": [{"name": "tool_" + str(n), "version": "1.0.0",
+                       "catalog_digest": "sha256:" + DIGEST,
                        "tool_manifest_sha256": "sha256:" + DIGEST}
                       for n in range(count)], "error": None, "degraded_mode": False}
 
 
 def evaluate(ctx, signed=None, flat_status=200, flat_body=None, published_status=200):
-    return x09.evaluate_catalog(ctx, flat_status, flat() if flat_body is None else flat_body,
+    default_flat = {"tools": [{k: v for k, v in published().items() if k != "package_digest"}]}
+    return x09.evaluate_catalog(ctx, flat_status, default_flat if flat_body is None else flat_body,
                                 published_status, {"tools": [published()] if signed is None else signed})
 
 
@@ -72,16 +75,40 @@ def golden_context(tmp_path):
     return ctx
 
 
-def test_empty_signed_catalog_is_not_vacuous_pass(tmp_path):
-    rows = evaluate(context(tmp_path), signed=[])
+def test_all_flat_tools_require_goldens_without_signed_packages(tmp_path):
+    rows = evaluate(context(tmp_path), signed=[], flat_body=flat())
     assert_six(rows)
-    assert "empty signed" in rows[0].evidence
+    assert "missing manifest goldens" in rows[0].evidence
+    assert "empty signed" not in rows[0].evidence
     audit = json.loads((tmp_path / "catalog-audit.json").read_text())
     assert audit["source"] == SHA
     assert audit["flat"]["count"] == 63
     assert audit["published"]["count"] == 0
     assert "partial catalog-binding slice" in x09.LIMITS.lower()
     assert "no overall PASS possible" in x09.LIMITS
+
+
+def test_unsigned_effective_catalog_metadata_can_bind(tmp_path):
+    ctx = golden_context(tmp_path)
+    del ctx.manifest["goldens"][0]["package_digest"]
+    rows = evaluate(ctx, signed=[])
+    assert_six(rows)
+    assert "golden metadata bound" in rows[0].evidence
+
+
+def test_effective_catalog_digest_is_required_and_pinned(tmp_path):
+    body = flat(1)
+    del body["tools"][0]["catalog_digest"]
+    assert "identity unreadable" in evaluate(context(tmp_path), flat_body=body)[0].evidence
+    ctx = golden_context(tmp_path)
+    ctx.manifest["goldens"][0]["catalog_digest"] = "sha256:" + "e" * 64
+    assert "actual published" in evaluate(ctx)[0].evidence
+
+
+def test_both_catalogs_empty_remain_unreadable(tmp_path):
+    rows = evaluate(context(tmp_path), signed=[], flat_body={"tools": []})
+    assert_six(rows)
+    assert "empty effective" in rows[0].evidence
 
 
 @pytest.mark.parametrize("changes", [
@@ -145,8 +172,9 @@ def test_audit_allowlist_discards_extra_values_and_fields(tmp_path):
     audit = json.loads(raw)
     assert audit["published"]["tools"] == [{
         "name": "sample-tool", "version": "1.0.0", "package_digest": DIGEST,
+        "catalog_digest": "sha256:" + DIGEST,
         "tool_manifest_sha256": "sha256:" + DIGEST,
-        "fields": ["name", "package_digest", "tool_manifest_sha256", "version"],
+        "fields": ["catalog_digest", "name", "package_digest", "tool_manifest_sha256", "version"],
     }]
 
 
@@ -186,7 +214,7 @@ def test_valid_metadata_never_claims_generated_execution(tmp_path, rule, value):
 
 
 @pytest.mark.parametrize("gap,expected", [
-    ("other-tool", "actual published"), ("wrong-package", "actual published"),
+    ("other-tool", "actual published"), ("wrong-package", "actual published envelope"),
     ("duplicate", "uniquely cover"), ("coverage", "missing golden coverage"),
     ("fixture-id", "verified sample"), ("fixture-hash", "verified sample"),
     ("unverified", "verified sample"), ("observed-hash", "verified sample"),
