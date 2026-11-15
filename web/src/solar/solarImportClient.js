@@ -79,6 +79,7 @@ export const SOLAREDGE_IMPORT_REASONS = Object.freeze({
   REPORT_ROW_ANGLE_UNRESOLVED: 'The panel rows in this drawing have no single row angle to match against',
   REPORT_PDF_UNSUPPORTED: 'This PDF layout is not one the SolarEdge import can read',
   REPORT_LIMIT_EXCEEDED: 'This design is larger than a SolarEdge report can cover',
+  REPORT_RESOURCE_LIMIT: 'This PDF needs more memory or decoding work than the reader allows, so nothing was saved',
   REPORT_BUSY: 'Other PDFs are being read right now, so try again shortly',
   REPORT_PARSE_TIMEOUT: 'Reading this PDF took too long, so nothing was saved and you can try again',
   REPORT_PARSE_UNAVAILABLE: 'The PDF reader could not start, so nothing was saved and you can try again shortly',
