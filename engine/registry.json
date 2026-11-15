@@ -66,7 +66,8 @@
       "params": {
         "type": "object",
         "properties": {
-          "set_id": {"type": "string", "description": "Set identity from this drawing's module-set listing. Omit to list sets."}
+          "set_id": {"type": "string", "description": "Single set identity from this drawing's listing. Omit to list sets."},
+          "set_ids": {"type": "array", "items": {"type": "string"}, "description": "Choose the listed sets that together form the intended design."}
         },
         "required": []
       },

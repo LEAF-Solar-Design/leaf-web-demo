@@ -17,7 +17,7 @@ it('lists competing sets and submits only an explicit pick', () => {
   expect(screen.getByRole('option', { name: 'Design / Panel A: 12 candidates' })).toBeTruthy()
   fireEvent.change(screen.getByLabelText('Design set'), { target: { value: 'second' } })
   fireEvent.click(button)
-  expect(onSelect).toHaveBeenCalledExactlyOnceWith('second')
+  expect(onSelect).toHaveBeenCalledExactlyOnceWith(['second'])
 })
 
 it('cannot submit while a run is active or the drawing binding is stale', () => {
@@ -37,4 +37,14 @@ it('does not reuse a choice absent from a refreshed listing', () => {
   view.rerender(<ModuleSetPicker data={{ sets: [data.sets[1]] }} onSelect={onSelect} />)
   expect(screen.getByRole('button').disabled).toBe(true)
   expect(screen.getByLabelText('Design set').value).toBe('')
+})
+
+it('submits a design spanning two layers as one recorded selection', () => {
+  const onSelect = vi.fn()
+  render(<ModuleSetPicker data={data} onSelect={onSelect} />)
+  const select = screen.getByLabelText('Design set')
+  Array.from(select.options).forEach((option) => { option.selected = true })
+  fireEvent.change(select)
+  fireEvent.click(screen.getByRole('button'))
+  expect(onSelect).toHaveBeenCalledExactlyOnceWith(['first', 'second'])
 })

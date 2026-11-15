@@ -49,12 +49,16 @@ def run(intake, params):
     for identity, group in sorted(groups.items()):
         group["set_id"] = json.dumps(identity, ensure_ascii=True, separators=(",", ":"))
         sets.append(group)
-    selected_id = (params or {}).get("set_id")
-    selected = next((s for s in sets if s["set_id"] == selected_id), None)
-    if selected_id and selected is None:
+    params = params or {}
+    selected_ids = list(dict.fromkeys(params.get("set_ids") or
+        ([params["set_id"]] if params.get("set_id") else [])))
+    selected_sets = [s for s in sets if s["set_id"] in selected_ids]
+    if len(selected_sets) != len(selected_ids):
         raise ValueError("Selected module set is absent from this drawing; list the sets again.")
+    selected = selected_sets[0] if len(selected_sets) == 1 else None
     return ({"sets": [{k: v for k, v in s.items() if k != "handles"} for s in sets],
-             "selection_required": selected is None,
+             "selection_required": not selected_sets,
+             "selected_sets": [{k: v for k, v in s.items() if k != "handles"} for s in selected_sets],
              "selected_set": {k: v for k, v in selected.items() if k != "handles"} if selected else None,
-             "count": selected["count"] if selected else None},
-            {"highlight_handles": selected["handles"]} if selected else None)
+             "count": sum(s["count"] for s in selected_sets) if selected_sets else None},
+            {"highlight_handles": [h for s in selected_sets for h in s["handles"]]} if selected_sets else None)

@@ -6620,7 +6620,7 @@ export default function App() {
             tool={selectedTool}
             onSelectModuleSet={selectedTool?.name === 'count-modules' &&
               result?.origin?.drawingKey && result.origin.drawingKey === resultDrawingKey
-              ? (setId) => onRequestCatalogRun(selectedTool, { set_id: setId }, null, 'catalog', { complete: true })
+              ? (setIds) => onRequestCatalogRun(selectedTool, { set_ids: setIds }, null, 'catalog', { complete: true })
               : undefined}
             onRetry={onRetry}
             notices={

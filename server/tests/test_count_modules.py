@@ -49,6 +49,21 @@ def test_rejects_stale_selection_instead_of_zero_count():
         module.run({}, {"set_id": "stale"})
 
 
+def test_one_selection_can_span_layers_without_counting_a_set_twice():
+    intake = {"inserts": [
+        {"layer": "Roof A", "name": "Panel", "handle": "A"},
+        {"layer": "Roof B", "name": "Panel", "handle": "B"}]}
+    listing, _ = module.run(intake, {})
+    ids = [s["set_id"] for s in listing["sets"]]
+    result, overlay = module.run(intake, {"set_ids": [*ids, ids[0]]})
+    assert result["count"] == 2
+    assert len(result["selected_sets"]) == 2
+    assert not result["selection_required"]
+    assert overlay["highlight_handles"] == ["A", "B"]
+    with pytest.raises(ValueError, match="absent"):
+        module.run(intake, {"set_ids": [ids[0], "stale"]})
+
+
 def test_normal_registry_and_trusted_loader_resolve_builtin():
     import tool_loader
     registry = json.loads((PATH.parents[2] / "engine" / "registry.json").read_text())
