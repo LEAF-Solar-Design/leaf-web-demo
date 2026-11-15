@@ -66,8 +66,9 @@ The same focused comparator command also checks these pure input contracts:
 
 - `compare_recommendations(report_grid_count, recommendations)` takes an
   independent positive integer report count and shown rows with `group_count`.
-  Every shown count must match. An empty shown list passes that condition;
-  missing or invalid counts are UNREADABLE.
+  Every shown count must match. An empty list requires explicit
+  `no_recommendations_shown=True`; missing absence evidence or invalid counts
+  are UNREADABLE. A nonempty list conflicts with an assertion of no shown rows.
 - `compare_table(rows, saved_values, oracle_values)` requires exactly five
   unique metrics: `panels`, `optimizers`, `inverters`, `strings`, `kw_dc`.
   Each row has `metric`, `studio`, `oracle`, `delta`, `verdict`. Values must
@@ -131,3 +132,51 @@ print(compare_table(view, saved, oracle)["verdict"])
 CSV and view repeat the same zero-panel claim, so they agree. The independent
 saved-design input has one panel, so table integrity fails for its Studio value,
 delta and verdict. Agreement between two exports is not saved-design proof.
+
+The composed string stage also checks saved string count and optimizer sum
+against `saved_values`. Reopen evidence includes `before_rows` and
+`reopened_rows`, each containing `strings` and `table_rows`. Claimed hashes must
+equal those rows' canonical hashes; two equal arbitrary hash claims cannot pass.
+String differences report exact `counts` for missing, foreign and mismatched
+IDs, with at most20 deterministic examples in each diagnostic list. The CSV
+helper serializes its own parsers and restores the caller's global field limit
+after success, early refusal and parser errors.
+
+This executable six-stage walkthrough prints `PASS`, `FAIL`, `UNREADABLE`:
+
+```powershell
+@'
+from copy import deepcopy
+import csv
+import io
+import sys
+sys.path.insert(0, "tools/xbench")
+from benches.x05_reconcile import TABLE_COLUMNS, canonical_snapshot, reconcile_offline
+strings = [{"string_id": "A", "optimizers": 5}, {"string_id": "B", "optimizers": 7}]
+values = dict(panels=24, optimizers=12, inverters=1, strings=2, kw_dc="9.6")
+view = [dict(metric=k, studio=v, oracle=v, delta=0, verdict="PASS") for k, v in values.items()]
+buffer = io.StringIO(newline="")
+writer = csv.DictWriter(buffer, fieldnames=TABLE_COLUMNS)
+writer.writeheader()
+writer.writerows(view)
+snapshot_rows = dict(strings=deepcopy(strings), table_rows=deepcopy(view))
+hashes = canonical_snapshot(strings, view)
+evidence = dict(oracle_strings=deepcopy(strings), saved_strings=deepcopy(strings),
+    saved_values=dict(values), oracle_values=dict(values), view_rows=view,
+    report_grid_count=2, recommendations=[], no_recommendations_shown=True,
+    fixture_id="synthetic", discrepancy_records=[], run_started_at="2026-11-15T13:00:00Z",
+    before=dict(hashes), reopened=dict(hashes), before_rows=deepcopy(snapshot_rows),
+    reopened_rows=deepcopy(snapshot_rows), csv_text=buffer.getvalue())
+print(reconcile_offline(evidence)["verdict"])
+evidence["recommendations"] = [{"group_count": 1}]
+del evidence["no_recommendations_shown"]
+print(reconcile_offline(evidence)["verdict"])
+del evidence["reopened_rows"]
+print(reconcile_offline(evidence)["verdict"])
+'@ | python -P
+```
+
+The first run supplies all six stages and their cross-stage bindings. The
+second contains a readable grouping mismatch. The third preserves that FAIL
+inside its grouping stage but makes the aggregate UNREADABLE because reopen
+evidence is missing. All inputs remain local synthetic Python objects.

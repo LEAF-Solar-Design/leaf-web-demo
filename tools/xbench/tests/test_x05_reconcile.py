@@ -11,6 +11,7 @@ import pytest
 
 from benches.x05_reconcile import (METRICS, TABLE_COLUMNS, check_discrepancies,
     MAX_CSV_CELL, MAX_CSV_CHARS, canonical_snapshot, reconcile_offline,
+    MAX_STRING_EXAMPLES, compare_bound_snapshots, compare_saved_string_totals,
     compare_csv_view, compare_recommendations, compare_snapshots, compare_strings, compare_table)
 
 
@@ -62,7 +63,7 @@ def test_every_grouping_recommendation_must_match_independent_report():
     assert compare_recommendations(16, [{"group_count": 16}] * 3)["verdict"] == "PASS"
     assert compare_recommendations(16, [{"group_count": 16}, {"group_count": 1}]) == {
         "verdict": "FAIL", "reason": "grouping_count_mismatch", "mismatched_recommendations": [1]}
-    assert compare_recommendations(16, [])["verdict"] == "PASS"
+    assert compare_recommendations(16, [], no_recommendations_shown=True)["verdict"] == "PASS"
 
 
 @pytest.mark.parametrize("count", [None, True, "16", 0, -1, float("nan"), 10**100])
@@ -247,7 +248,9 @@ def complete_evidence():
                 report_grid_count=2, recommendations=[{"group_count": 2}],
                 view_rows=rows, saved_values=values, oracle_values=dict(values),
                 fixture_id="synthetic", discrepancy_records=[], run_started_at="2026-11-15T13:00:00Z",
-                before=hashes, reopened=dict(hashes), csv_text=csv_fixture(rows))
+                before=hashes, reopened=dict(hashes), csv_text=csv_fixture(rows),
+                before_rows={"strings": deepcopy(ORACLE), "table_rows": deepcopy(rows)},
+                reopened_rows={"strings": deepcopy(ORACLE), "table_rows": deepcopy(rows)})
 
 
 def test_offline_orchestrator_composes_all_checks_with_unreadable_precedence():
@@ -365,3 +368,103 @@ def test_csv_view_agreement_cannot_prove_independent_saved_values():
     saved = dict(values, panels=25)
     assert compare_csv_view(csv_fixture(rows), rows)["verdict"] == "PASS"
     assert compare_table(rows, saved, values)["verdict"] == "FAIL"
+
+
+@pytest.mark.parametrize("metric,value", [("strings", 3), ("optimizers", 13)])
+def test_cross_stage_saved_string_totals_reject_mutually_consistent_export_claims(metric, value):
+    evidence = complete_evidence()
+    evidence["saved_values"][metric] = evidence["oracle_values"][metric] = value
+    for row in evidence["view_rows"]:
+        if row["metric"] == metric:
+            row.update(studio=value, oracle=value)
+    evidence["csv_text"] = csv_fixture(evidence["view_rows"])
+    rows = {"strings": deepcopy(ORACLE), "table_rows": deepcopy(evidence["view_rows"])}
+    evidence.update(before_rows=deepcopy(rows), reopened_rows=deepcopy(rows),
+                    before=canonical_snapshot(ORACLE, rows["table_rows"]),
+                    reopened=canonical_snapshot(ORACLE, rows["table_rows"]))
+    result = reconcile_offline(evidence)
+    assert result["verdict"] == "FAIL"
+    assert all(stage["verdict"] == "PASS" for name, stage in result["stages"].items() if name != "strings")
+    strings = result["stages"]["strings"]
+    assert strings["identity"]["verdict"] == "PASS"
+    assert strings["totals"]["mismatched_metrics"] == [metric]
+
+
+def test_saved_totals_missing_evidence_is_unreadable():
+    assert compare_saved_string_totals(ORACLE, {})["verdict"] == "UNREADABLE"
+    assert compare_saved_string_totals(None, table_fixture()[0])["verdict"] == "UNREADABLE"
+
+
+def test_equal_fabricated_hashes_cannot_hide_changed_canonical_snapshot_rows():
+    evidence = complete_evidence()
+    forged = {"strings_sha256": "a" * 64, "table_sha256": "b" * 64}
+    evidence["before"] = evidence["reopened"] = forged
+    evidence["reopened_rows"]["strings"][0]["optimizers"] = 7
+    evidence["reopened_rows"]["strings"][1]["optimizers"] = 5
+    assert compare_snapshots(forged, forged)["verdict"] == "PASS"
+    result = reconcile_offline(evidence)
+    assert result["verdict"] == "FAIL"
+    assert result["stages"]["reopen"]["reason"] == "snapshot_hash_binding_mismatch"
+    assert result["stages"]["reopen"]["unbound_phases"] == ["before", "reopened"]
+
+
+@pytest.mark.parametrize("bad", [None, {}, {"strings": ORACLE}, {"strings": [], "table_rows": []}])
+def test_bound_snapshots_require_both_valid_row_sets(bad):
+    evidence = complete_evidence()
+    assert compare_bound_snapshots(evidence["before"], evidence["reopened"],
+                                   evidence["before_rows"], bad)["verdict"] == "UNREADABLE"
+
+
+def test_empty_recommendations_require_explicit_absence_evidence():
+    assert compare_recommendations(2, [])["reason"] == "recommendation_absence_unverified"
+    for flag in (None, False, "true", 1):
+        assert compare_recommendations(2, [], no_recommendations_shown=flag)["verdict"] == "UNREADABLE"
+    assert compare_recommendations(2, None, no_recommendations_shown=True)["verdict"] == "UNREADABLE"
+    assert compare_recommendations(2, [{"group_count": 2}], no_recommendations_shown=True)["reason"] == "recommendation_presence_conflict"
+    evidence = complete_evidence()
+    evidence["recommendations"] = []
+    assert reconcile_offline(evidence)["verdict"] == "UNREADABLE"
+    evidence["no_recommendations_shown"] = True
+    assert reconcile_offline(evidence)["verdict"] == "PASS"
+
+
+def test_csv_field_limit_is_isolated_and_restored_on_all_paths(monkeypatch):
+    _, rows = table_fixture()
+    previous = csv.field_size_limit()
+    try:
+        csv.field_size_limit(1)
+        assert compare_csv_view(csv_fixture(rows), rows)["verdict"] == "PASS"
+        assert csv.field_size_limit() == 1
+        samples = [None, "x" * (MAX_CSV_CHARS + 1), '"bad', "bad,headers\n",
+                   csv_fixture(rows + [rows[0]]), csv_fixture(rows[:-1])]
+        for sample in samples:
+            assert compare_csv_view(sample, rows)["verdict"] == "UNREADABLE"
+            assert csv.field_size_limit() == 1
+        changed = deepcopy(rows)
+        changed[0]["studio"] = 25
+        assert compare_csv_view(csv_fixture(changed), rows)["verdict"] == "FAIL"
+        assert csv.field_size_limit() == 1
+
+        def broken_reader(*args, **kwargs):
+            raise csv.Error("synthetic parser failure")
+
+        monkeypatch.setattr(csv, "reader", broken_reader)
+        assert compare_csv_view(csv_fixture(rows), rows)["verdict"] == "UNREADABLE"
+        assert csv.field_size_limit() == 1
+    finally:
+        csv.field_size_limit(previous)
+
+
+def test_large_string_diagnostics_keep_exact_counts_with_capped_deterministic_examples():
+    count = 2000
+    oracle = [dict(string_id=f"A{i}", optimizers=5) for i in range(count)]
+    disjoint = [dict(string_id=f"B{i}", optimizers=5) for i in range(count)]
+    result = compare_strings(oracle, disjoint)
+    assert result["counts"] == {"missing": count, "foreign": count, "mismatched": 0}
+    assert result["missing_ids"] == sorted(row["string_id"] for row in oracle)[:MAX_STRING_EXAMPLES]
+    assert result["foreign_ids"] == sorted(row["string_id"] for row in disjoint)[:MAX_STRING_EXAMPLES]
+    changed = [dict(row, optimizers=6) for row in oracle]
+    result = compare_strings(oracle, changed)
+    assert result["counts"] == {"missing": 0, "foreign": 0, "mismatched": count}
+    assert len(result["mismatches"]) == MAX_STRING_EXAMPLES
+    assert result == compare_strings(list(reversed(oracle)), list(reversed(changed)))

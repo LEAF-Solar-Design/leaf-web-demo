@@ -11,6 +11,9 @@ from io import StringIO
 import re
 from hashlib import sha256
 import json
+from contextlib import contextmanager
+from heapq import nsmallest
+from threading import RLock
 
 
 METRICS = ("panels", "optimizers", "inverters", "strings", "kw_dc")
@@ -18,6 +21,8 @@ TABLE_COLUMNS = ("metric", "studio", "oracle", "delta", "verdict")
 _CONTEXT = Context(prec=200)
 MAX_CSV_CHARS = 16384
 MAX_CSV_CELL = 256
+MAX_STRING_EXAMPLES = 20
+_CSV_LOCK = RLock()
 
 
 def _out(verdict, reason, **evidence):
@@ -42,12 +47,16 @@ def _numeric(value, *, count=False, signed=False):
         return None
 
 
-def compare_recommendations(report_grid_count, recommendations):
+def compare_recommendations(report_grid_count, recommendations, *, no_recommendations_shown=False):
     """Check every supplied shown recommendation against an independent count."""
     if type(report_grid_count) is not int or not 1 <= report_grid_count <= 2**53 - 1:
         return _out("UNREADABLE", "report_grid_count_unreadable")
     if not isinstance(recommendations, list):
         return _out("UNREADABLE", "recommendations_unreadable")
+    if not recommendations and no_recommendations_shown is not True:
+        return _out("UNREADABLE", "recommendation_absence_unverified")
+    if recommendations and no_recommendations_shown is True:
+        return _out("UNREADABLE", "recommendation_presence_conflict")
     mismatches = []
     for index, row in enumerate(recommendations):
         count = row.get("group_count") if isinstance(row, dict) else None
@@ -161,30 +170,51 @@ def compare_snapshots(before, reopened):
                 else "snapshots_equal", changed_hashes=changed)
 
 
+@contextmanager
+def _csv_limit():
+    # Serialize this helper's parsers and restore the caller's process setting
+    # even when parsing raises or a validation path returns early.
+    with _CSV_LOCK:
+        previous = csv.field_size_limit()
+        try:
+            csv.field_size_limit(MAX_CSV_CHARS)
+            yield
+        finally:
+            csv.field_size_limit(previous)
+
+
+def _csv_rows(csv_text):
+    try:
+        with _csv_limit():
+            reader = csv.reader(StringIO(csv_text.removeprefix("\ufeff"), newline=""), strict=True)
+            headers = next(reader)
+            if any(len(cell) > MAX_CSV_CELL for cell in headers):
+                return None, "csv_cell_too_large"
+            if len(headers) != len(TABLE_COLUMNS) or set(headers) != set(TABLE_COLUMNS):
+                return None, "csv_headers_unreadable"
+            rows = []
+            for cells in reader:
+                if len(rows) >= len(METRICS):
+                    return None, "csv_excess_rows"
+                if any(len(cell) > MAX_CSV_CELL for cell in cells):
+                    return None, "csv_cell_too_large"
+                if len(cells) != len(headers):
+                    return None, "csv_row_unreadable"
+                rows.append(dict(zip(headers, cells)))
+    except (csv.Error, StopIteration):
+        return None, "csv_evidence_unreadable"
+    return rows, None
+
+
 def compare_csv_view(csv_text, view_rows):
     """Check normalized CSV/view equality; compare_table checks independent truth."""
     if type(csv_text) is not str:
         return _out("UNREADABLE", "csv_evidence_unreadable")
     if len(csv_text) > MAX_CSV_CHARS:
         return _out("UNREADABLE", "csv_input_too_large")
-    try:
-        reader = csv.reader(StringIO(csv_text.removeprefix("\ufeff"), newline=""), strict=True)
-        headers = next(reader)
-        if any(len(cell) > MAX_CSV_CELL for cell in headers):
-            return _out("UNREADABLE", "csv_cell_too_large")
-        if len(headers) != len(TABLE_COLUMNS) or set(headers) != set(TABLE_COLUMNS):
-            return _out("UNREADABLE", "csv_headers_unreadable")
-        rows = []
-        for cells in reader:
-            if len(rows) >= len(METRICS):
-                return _out("UNREADABLE", "csv_excess_rows")
-            if any(len(cell) > MAX_CSV_CELL for cell in cells):
-                return _out("UNREADABLE", "csv_cell_too_large")
-            if len(cells) != len(headers):
-                return _out("UNREADABLE", "csv_row_unreadable")
-            rows.append(dict(zip(headers, cells)))
-    except (csv.Error, StopIteration):
-        return _out("UNREADABLE", "csv_evidence_unreadable")
+    rows, error = _csv_rows(csv_text)
+    if error:
+        return _out("UNREADABLE", error)
     exported, view = _table(rows), _table(view_rows)
     if exported is None or view is None:
         return _out("UNREADABLE", "csv_view_rows_unreadable")
@@ -216,6 +246,37 @@ def canonical_snapshot(strings, table_rows):
                     table_sha256=digest(values))
 
 
+def compare_bound_snapshots(before, reopened, before_rows, reopened_rows):
+    calculated = []
+    for rows in (before_rows, reopened_rows):
+        if not isinstance(rows, dict) or not {"strings", "table_rows"} <= rows.keys():
+            return _out("UNREADABLE", "snapshot_rows_missing")
+        canonical = canonical_snapshot(rows["strings"], rows["table_rows"])
+        if canonical["verdict"] != "PASS":
+            return canonical
+        calculated.append(canonical)
+    supplied = compare_snapshots(before, reopened)
+    if supplied["verdict"] == "UNREADABLE":
+        return supplied
+    unbound = [phase for phase, claimed, actual in zip(
+        ("before", "reopened"), (before, reopened), calculated)
+        if compare_snapshots(claimed, actual)["verdict"] != "PASS"]
+    if unbound:
+        return _out("FAIL", "snapshot_hash_binding_mismatch", unbound_phases=unbound)
+    return compare_snapshots(*calculated)
+
+
+def compare_saved_string_totals(saved_rows, saved_values):
+    indexed, error = _index(saved_rows, "saved")
+    values = _values(saved_values)
+    if error or values is None:
+        return _out("UNREADABLE", "saved_string_totals_unreadable")
+    totals = {"strings": len(indexed), "optimizers": sum(indexed.values())}
+    mismatches = [metric for metric in totals if totals[metric] != values[metric]]
+    return _out("FAIL" if mismatches else "PASS", "saved_string_totals_mismatch" if mismatches
+                else "saved_string_totals_equal", mismatched_metrics=mismatches, observed=totals)
+
+
 def reconcile_offline(evidence):
     """Compose all six offline checks; missing evidence takes precedence over FAIL.
 
@@ -233,12 +294,23 @@ def reconcile_offline(evidence):
             deltas = {metric: saved[metric] - oracle[metric] for metric in METRICS}
         return check_discrepancies(fixture, deltas, records, started)
 
+    def strings(oracle, saved, values):
+        identity = compare_strings(oracle, saved)
+        totals = compare_saved_string_totals(saved, values)
+        verdicts = {identity["verdict"], totals["verdict"]}
+        verdict = "UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS"
+        return _out(verdict, "saved_string_stage", identity=identity, totals=totals)
+
+    def grouping(count, rows):
+        return compare_recommendations(count, rows,
+            no_recommendations_shown=evidence.get("no_recommendations_shown"))
+
     checks = (
-        ("strings", compare_strings, ("oracle_strings", "saved_strings")),
-        ("grouping", compare_recommendations, ("report_grid_count", "recommendations")),
+        ("strings", strings, ("oracle_strings", "saved_strings", "saved_values")),
+        ("grouping", grouping, ("report_grid_count", "recommendations")),
         ("table", compare_table, ("view_rows", "saved_values", "oracle_values")),
         ("policy", policy, ("saved_values", "oracle_values", "fixture_id", "discrepancy_records", "run_started_at")),
-        ("reopen", compare_snapshots, ("before", "reopened")),
+        ("reopen", compare_bound_snapshots, ("before", "reopened", "before_rows", "reopened_rows")),
         ("csv_view", compare_csv_view, ("csv_text", "view_rows")),
     )
     stages = {name: check(*(evidence[key] for key in keys)) if all(key in evidence for key in keys)
@@ -273,11 +345,14 @@ def compare_strings(oracle_rows, saved_rows):
     saved, error = _index(saved_rows, "saved")
     if error:
         return {"verdict": "UNREADABLE", "reason": error}
-    missing = sorted(oracle.keys() - saved.keys())
-    foreign = sorted(saved.keys() - oracle.keys())
+    missing = oracle.keys() - saved.keys()
+    foreign = saved.keys() - oracle.keys()
+    changed = [key for key in oracle.keys() & saved.keys() if oracle[key] != saved[key]]
     mismatches = [{"string_id": key, "oracle": oracle[key], "saved": saved[key]}
-                  for key in sorted(oracle.keys() & saved.keys()) if oracle[key] != saved[key]]
-    matched = not (missing or foreign or mismatches)
+                  for key in nsmallest(MAX_STRING_EXAMPLES, changed)]
+    matched = not (missing or foreign or changed)
     return {"verdict": "PASS" if matched else "FAIL",
             "reason": "exact_string_identity" if matched else "string_identity_mismatch",
-            "missing_ids": missing, "foreign_ids": foreign, "mismatches": mismatches}
+            "missing_ids": nsmallest(MAX_STRING_EXAMPLES, missing),
+            "foreign_ids": nsmallest(MAX_STRING_EXAMPLES, foreign), "mismatches": mismatches,
+            "counts": {"missing": len(missing), "foreign": len(foreign), "mismatched": len(changed)}}
