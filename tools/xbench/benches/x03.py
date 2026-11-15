@@ -78,10 +78,24 @@ def load_prompts(manifest):
     return rows, fixture["sha256"]
 
 
+def public_code(value):
+    return value if isinstance(value, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,79}", value) else None
+
+
 def transport_for(page, base):
     def request(method, path, **kwargs):
         status, headers, body = xbench_session.api(page, method, path, origin=base, **kwargs)
-        return status, json.loads(body) if "json" in headers.get("content-type", "") else body
+        code = "NON_JSON_RESPONSE"
+        if "json" in headers.get("content-type", "").lower():
+            try:
+                parsed = json.loads(body)
+                if isinstance(parsed, dict):
+                    return status, parsed
+            except (ValueError, TypeError):
+                pass
+            code = "INVALID_JSON_RESPONSE"
+        # A bounded envelope preserves HTTP status without retaining untrusted bytes.
+        return status, {"_x03_transport_error": True, "reason_code": code}
     return request
 
 
@@ -113,7 +127,7 @@ def author_authority(transport, row, project, drawing, evidence_dir, *, deadline
             raise PromptFailure("per-prompt 600 second ceiling reached during author setup")
         status, body = transport("POST", path, json_body=payload, timeout_s=min(60, remaining))
         events.append({"path": path, "status": status,
-                       "reason_code": body.get("reason_code") if isinstance(body, dict) else None})
+                       "reason_code": public_code(body.get("reason_code")) if isinstance(body, dict) else None})
         if not 200 <= status < 300:
             raise PromptFailure("normal author context refused: HTTP " + str(status))
         return body
@@ -167,11 +181,14 @@ def evaluate_prompt(row, *, transport, client, project, drawing, source_sha,
         status, body = transport(method, path, timeout_s=min(remaining(), timeout), **kwargs)
         # Store route and bounded public error codes; never headers or raw auth responses.
         trace.append({"method": method, "path": path, "status": status})
+        if isinstance(body, dict) and body.get("_x03_transport_error"):
+            record.update(unreadable=True, error_code=public_code(body.get("reason_code")))
+            raise PromptFailure(f"HTTP {status}, code {record['error_code']}")
         if not 200 <= status < 300:
             if status == 401 or path == "/api/health":
                 record["unreadable"] = True
             error = body.get("error", {}) if isinstance(body, dict) else {}
-            record["error_code"] = (error.get("reason_code") or error.get("error_code")
+            record["error_code"] = public_code(error.get("reason_code") or error.get("error_code")
                                     or body.get("reason_code")) if isinstance(body, dict) and isinstance(error, dict) else None
             raise PromptFailure(f"HTTP {status}, code {record.get('error_code')}")
         return status, body
@@ -197,8 +214,8 @@ def evaluate_prompt(row, *, transport, client, project, drawing, source_sha,
                 break
             if staged.get("status") in ("failed", "cancelled"):
                 error = staged.get("error", {})
-                record["error_code"] = (error.get("reason_code") or error.get("error_code")) if isinstance(error, dict) else None
-                record["error_code"] = record["error_code"] or staged.get("reason_code")
+                record["error_code"] = public_code(error.get("reason_code") or error.get("error_code")) if isinstance(error, dict) else None
+                record["error_code"] = record["error_code"] or public_code(staged.get("reason_code"))
                 raise PromptFailure("author stage failed")
             poll = staged.get("poll_url") or "/api/author/stages/" + change_id
             if poll != "/api/author/stages/" + change_id:
@@ -222,10 +239,14 @@ def evaluate_prompt(row, *, transport, client, project, drawing, source_sha,
         _, publication = call("POST", "/api/author/publication-requests",
                               json_body={"change_set_id": receipt["change_set_id"]})
         if publication.get("status") != "published":
-            record["error_code"] = publication.get("status")
+            record["error_code"] = public_code(publication.get("status"))
             raise PromptFailure("normal publication rail did not publish")
         _, catalog = call("GET", "/api/tools")
-        catalog_row = next((item for item in catalog.get("tools", []) if item.get("name") == tool["name"]), None)
+        catalog_matches = [item for item in catalog.get("tools", []) if item.get("name") == tool["name"]]
+        if len(catalog_matches) > 1:
+            record["error_code"] = "DUPLICATE_CATALOG_TOOL"
+            raise PromptFailure("effective catalog contains duplicate tool names")
+        catalog_row = catalog_matches[0] if catalog_matches else None
         if not catalog_row or not catalog_row.get("catalog_digest"):
             raise PromptFailure("published tool missing from effective catalog")
         # Compare identities that the actual producer reports. Per-tool catalog_digest
@@ -252,6 +273,9 @@ def evaluate_prompt(row, *, transport, client, project, drawing, source_sha,
             while result.get("status") not in ("complete", "failed", "cancelled"):
                 sleep(min(2, remaining()))
                 _, result = call("GET", job_path)
+                if "job_id" in result and result["job_id"] != job_id:
+                    record["error_code"] = "JOB_IDENTITY_MISMATCH"
+                    raise PromptFailure("execution poll belongs to another job")
         if result.get("status") == "cancelled":
             record["error_code"] = "JOB_CANCELLED"
             raise PromptFailure("tool execution cancelled")
@@ -331,6 +355,9 @@ def grade_records(records, *, baseline, prompt_sha256, source_sha, out_dir, froz
         score, stage = record.get("score"), record.get("failing_stage")
         if type(score) is not int or score not in (0, 1):
             raise ValueError("prompt score must be binary")
+        if score == 1 and not all(isinstance(record.get(key), str) and record[key] for key in (
+                "tool_name", "version", "tool_source_hash", "output_hash", "model_id")):
+            raise ValueError("credited record requires complete tool and model provenance")
         if ((score == 1 and (stage is not None or record.get("unreadable")))
                 or (score == 0 and stage not in {"author", "publication", "execution",
                     "comparison", "model_provenance", "source_drift"})):

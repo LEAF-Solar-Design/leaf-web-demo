@@ -496,7 +496,7 @@ def test_malformed_baseline_is_rejected_before_comparison_or_receipt(tmp_path, m
 
 
 def run_prompt(tmp_path, *, fallback=False, model=True, publication="published", value=3, drift=False,
-               catalog_change=None, authority_headers=None, staged_envelope=False, evaluator=None):
+               catalog_change=None, authority_headers=None, staged_envelope=False, evaluator=None, transport_wrapper=None):
     calls = []
     def transport(method, path, **kw):
         calls.append((method, path, kw))
@@ -533,6 +533,8 @@ def run_prompt(tmp_path, *, fallback=False, model=True, publication="published",
             return 200, {"result": {"value": value}}
     row = {"id": "X03-01", "trade": "solar", "drawing": "synthetic",
            "prompt": "Count synthetic entities", "oracle": {"value": 3}, "compare": {"mode": "exact"}}
+    if transport_wrapper is not None:
+        transport = transport_wrapper(transport)
     result = (evaluator or bench.evaluate_prompt)(row, transport=transport, client=Client(),
         project={"project_id": "p", "org_id": "o"}, drawing={"version_id": "v"},
         source_sha=SHA, evidence_dir=tmp_path, run_id="test", authority_headers=authority_headers)
@@ -696,3 +698,130 @@ def test_identity_swaps_are_rejected_before_reports(tmp_path, field):
         bench.grade_records(swapped, baseline=None, prompt_sha256="d" * 64,
                             source_sha=SHA, out_dir=tmp_path, frozen_rows=original)
     assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("status,content_type,body,code", [
+    (200, "application/json", "{broken SECRET SENTINEL", "INVALID_JSON_RESPONSE"),
+    (429, "application/json", "{broken SECRET SENTINEL", "INVALID_JSON_RESPONSE"),
+    (503, "application/json", "[1,2]", "INVALID_JSON_RESPONSE"),
+    (429, "text/html", "<html>SECRET SENTINEL</html>", "NON_JSON_RESPONSE"),
+    (500, "text/html", "<html>SECRET SENTINEL</html>", "NON_JSON_RESPONSE"),
+    (503, "text/html", "<html>SECRET SENTINEL</html>", "NON_JSON_RESPONSE"),
+])
+def test_transport_invalid_bodies_keep_status_without_raw_bytes(tmp_path, monkeypatch, status, content_type, body, code):
+    def api(page, method, path, **kwargs):
+        if path == "/api/health":
+            return 200, {"content-type": "application/json"}, json.dumps({"source_sha": SHA})
+        assert path == "/api/author"
+        return status, {"content-type": content_type, "Authorization": "SECRET SENTINEL"}, body
+    monkeypatch.setattr(bench.xbench_session, "api", api)
+    result = bench.evaluate_prompt(synthetic_prompt(), transport=bench.transport_for(object(), "https://synthetic.invalid"),
+        client=None, project={}, drawing={}, source_sha=SHA, evidence_dir=tmp_path, run_id="bad-response")
+    assert result["score"] == 0 and result["unreadable"] is True
+    assert result["error_code"] == code
+    receipt = json.loads((tmp_path / "X03-01.json").read_text())
+    assert receipt["routes"][-1]["status"] == status
+    assert "SECRET SENTINEL" not in (tmp_path / "X03-01.json").read_text()
+
+
+@pytest.mark.parametrize("foreign_id", ["foreign", None, 42])
+def test_async_poll_cannot_complete_another_job(tmp_path, foreign_id):
+    polls = []
+    def wrapper(original):
+        def transport(method, path, **kwargs):
+            if path == "/api/run":
+                return 202, {"job_id": "owned", "status": "pending"}
+            if path == "/api/jobs/owned":
+                polls.append(path)
+                return 200, {"job_id": foreign_id, "status": "complete", "result": {"value": 3}}
+            return original(method, path, **kwargs)
+        return transport
+    monkey_sleep = bench.time.sleep
+    try:
+        bench.time.sleep = lambda seconds: None
+        result, _ = run_prompt(tmp_path, transport_wrapper=wrapper)
+    finally:
+        bench.time.sleep = monkey_sleep
+    assert polls == ["/api/jobs/owned"]
+    assert result["score"] == 0 and result["failing_stage"] == "execution"
+    assert result["error_code"] == "JOB_IDENTITY_MISMATCH"
+    assert result["output_hash"] is None
+    assert (tmp_path / "X03-01.json").exists()
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_duplicate_catalog_names_never_execute(tmp_path, reverse):
+    def wrapper(original):
+        def transport(method, path, **kwargs):
+            if path == "/api/tools":
+                rows = [{"name": "generated", "catalog_digest": "f" * 64, "version": version} for version in ("1", "2")]
+                return 200, {"tools": rows[::-1] if reverse else rows}
+            assert path != "/api/run", "duplicate catalog reached execution"
+            return original(method, path, **kwargs)
+        return transport
+    result, _ = run_prompt(tmp_path, transport_wrapper=wrapper)
+    assert result["score"] == 0 and result["failing_stage"] == "publication"
+    assert result["error_code"] == "DUPLICATE_CATALOG_TOOL"
+
+
+@pytest.mark.parametrize("field", ["tool_name", "version", "tool_source_hash", "output_hash", "model_id"])
+@pytest.mark.parametrize("missing", [None, ""])
+def test_credited_record_missing_provenance_cannot_write_reports(tmp_path, field, missing):
+    rows = records()
+    rows[0][field] = missing
+    with pytest.raises(ValueError, match="complete tool and model provenance"):
+        bench.grade_records(rows, frozen_rows=records(), baseline=None, prompt_sha256="d" * 64,
+                            source_sha=SHA, out_dir=tmp_path)
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("cleanup", ["http-failure", "exception"])
+def test_owned_turn_cleanup_failure_keeps_result_and_bounded_diagnostics(tmp_path, cleanup):
+    calls = []
+    def transport(method, path, **kwargs):
+        calls.append(path)
+        if path == "/api/sessions":
+            return 200, {"session_id": "owned-session"}
+        if path.endswith("/messages"):
+            return 202, {"turn_id": "owned-turn", "status": "running"}
+        assert path == "/api/sessions/owned-session/turns/owned-turn/cancel"
+        if cleanup == "exception":
+            raise RuntimeError("SECRET SENTINEL provider message")
+        return 503, {"message": "SECRET SENTINEL provider message"}
+    with bench.author_authority(transport, synthetic_prompt(), {"project_id": "p"},
+                               {"drawing_id": "d", "version_id": "v"}, tmp_path):
+        result, _ = run_prompt(tmp_path)
+    assert result["score"] == 1
+    assert calls.count("/api/sessions/owned-session/turns/owned-turn/cancel") == 1
+    text = (tmp_path / "X03-01-authority.json").read_text()
+    assert "SECRET SENTINEL" not in text
+    last = json.loads(text)[-1]
+    if cleanup == "exception":
+        assert last["cleanup_error"] == "RuntimeError"
+    else:
+        assert last["status"] == 503 and last["owned_turn_cleanup"] is True
+
+
+@pytest.mark.parametrize("case", ["provider-exception", "nested-error", "invalid-code"])
+def test_secret_sentinel_never_enters_prompt_receipt(tmp_path, case):
+    secret = "SECRET SENTINEL bearer sk-test-token"
+    def wrapper(original):
+        def transport(method, path, **kwargs):
+            if path == "/api/author":
+                if case == "provider-exception":
+                    raise RuntimeError(secret)
+                code = {"token": secret} if case == "invalid-code" else "PUBLIC_AUTHOR_FAILURE"
+                return 503, {"error": {"reason_code": code, "message": secret,
+                    "headers": {"Authorization": secret}, "provider": {"token": secret}}, "raw": secret}
+            return original(method, path, **kwargs)
+        return transport
+    result, _ = run_prompt(tmp_path, transport_wrapper=wrapper)
+    assert result["score"] == 0
+    if case == "nested-error":
+        assert result["error_code"] == "PUBLIC_AUTHOR_FAILURE"
+    if case == "invalid-code":
+        assert result["error_code"] is None
+    if case == "provider-exception":
+        assert result["failure"] == "RuntimeError"
+    receipt = (tmp_path / "X03-01.json").read_text()
+    assert "SECRET SENTINEL" not in receipt and "Authorization" not in receipt
