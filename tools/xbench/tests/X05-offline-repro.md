@@ -180,3 +180,54 @@ The first run supplies all six stages and their cross-stage bindings. The
 second contains a readable grouping mismatch. The third preserves that FAIL
 inside its grouping stage but makes the aggregate UNREADABLE because reopen
 evidence is missing. All inputs remain local synthetic Python objects.
+
+`aggregate_fixtures(expected_ids, fixtures)` requires exactly three explicitly
+expected IDs and one bound `{fixture_id, evidence}` record for each. It composes
+the six-stage offline checks, rejects missing/duplicate/foreign IDs and gives
+UNREADABLE precedence. `reconcile_json(text)` first rejects duplicate JSON keys,
+nonfinite constants and malformed JSON. Valid JSON decimals retain exact values.
+Neither API establishes live provenance or changes the live grader.
+
+The next independent PowerShell replay uses a synthetic frozen discrepancy.
+It prints `1 FAIL PASS PASS`, then `1 FAIL FAIL FAIL`. These fields are the raw
+panel delta, row verdict, policy verdict and composed offline verdict:
+
+```powershell
+@'
+from copy import deepcopy
+import csv
+import io
+import sys
+sys.path.insert(0, "tools/xbench")
+from benches.x05_reconcile import TABLE_COLUMNS, canonical_snapshot, reconcile_offline
+strings = [{"string_id": "A", "optimizers": 5}, {"string_id": "B", "optimizers": 7}]
+saved = dict(panels=25, optimizers=12, inverters=1, strings=2, kw_dc="9.6")
+oracle = dict(saved, panels=24)
+rows = [dict(metric=k, studio=v, oracle=oracle[k], delta=1 if k == "panels" else 0,
+    verdict="FAIL" if k == "panels" else "PASS") for k, v in saved.items()]
+buffer = io.StringIO(newline="")
+writer = csv.DictWriter(buffer, fieldnames=TABLE_COLUMNS)
+writer.writeheader()
+writer.writerows(rows)
+hashes = canonical_snapshot(strings, rows)
+snapshot_rows = dict(strings=deepcopy(strings), table_rows=deepcopy(rows))
+record = dict(fixture_id="synthetic", metric="panels", delta=1,
+    name="synthetic panel revision", frozen_at="2026-11-15T12:00:00Z")
+evidence = dict(oracle_strings=deepcopy(strings), saved_strings=deepcopy(strings),
+    saved_values=saved, oracle_values=oracle, view_rows=rows, csv_text=buffer.getvalue(),
+    report_grid_count=2, recommendations=[], no_recommendations_shown=True,
+    fixture_id="synthetic", discrepancy_records=[record], run_started_at="2026-11-15T13:00:00Z",
+    before=dict(hashes), reopened=dict(hashes), before_rows=deepcopy(snapshot_rows),
+    reopened_rows=deepcopy(snapshot_rows))
+for frozen_at in ("2026-11-15T12:00:00Z", "2026-11-15T14:00:00Z"):
+    record["frozen_at"] = frozen_at
+    result = reconcile_offline(evidence)
+    print(rows[0]["delta"], rows[0]["verdict"], result["stages"]["policy"]["verdict"], result["verdict"])
+'@ | python -P
+```
+
+The accepted synthetic policy leaves the truthful nonzero delta and FAIL row
+visible. Its composed offline PASS is not zero-delta proof or product acceptance.
+The late record fails policy and composition. This example approves no real
+fixture discrepancy; none is pre-approved in the live X05 manifest. Stop on an
+unexpected output. The replay creates no files, network calls or retained state.

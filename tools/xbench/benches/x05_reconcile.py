@@ -6,7 +6,7 @@ This module does not establish the origin or independence of either input.
 
 import csv
 from datetime import datetime, timezone
-from decimal import Context, Decimal, InvalidOperation, localcontext
+from decimal import Context, Decimal, DecimalException, InvalidOperation, localcontext
 from io import StringIO
 import re
 from hashlib import sha256
@@ -34,11 +34,21 @@ def _numeric(value, *, count=False, signed=False):
     if type(value) not in (str, int, float, Decimal):
         return None
     try:
-        raw = str(value)
-        if len(raw) > 80 or not re.fullmatch(r"-?[0-9]+(?:\.[0-9]+)?", raw):
-            return None
         with localcontext(_CONTEXT):
-            number = Decimal(raw)
+            if type(value) in (str, int):
+                raw = str(value)
+                if len(raw) > 80 or not re.fullmatch(r"-?[0-9]+(?:\.[0-9]+)?", raw):
+                    return None
+                number = Decimal(raw)
+            else:
+                number = value if type(value) is Decimal else Decimal(str(value))
+                if not number.is_finite():
+                    return None
+                sign, digits, exponent = number.as_tuple()
+                integer_width = 1 if number.is_zero() else max(1, len(digits) + exponent)
+                width = sign + integer_width + (1 - exponent if exponent < 0 else 0)
+                if width > 80:
+                    return None
             if not number.is_finite() or (not signed and number < 0):
                 return None
             if count and number != number.to_integral_value():
@@ -46,6 +56,80 @@ def _numeric(value, *, count=False, signed=False):
             return number
     except (InvalidOperation, ValueError):
         return None
+
+
+class _DuplicateJSONKey(ValueError):
+    pass
+
+
+class _NonfiniteJSON(ValueError):
+    pass
+
+
+def decode_evidence_json(text):
+    """Strict JSON preflight; success is decoding proof only, never live grading."""
+    if type(text) is not str:
+        return _out("UNREADABLE", "json_input_unreadable")
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise _DuplicateJSONKey()
+            result[key] = value
+        return result
+
+    def reject_constant(value):
+        raise _NonfiniteJSON()
+
+    try:
+        with localcontext(_CONTEXT):
+            evidence = json.loads(text, object_pairs_hook=unique_object,
+                                  parse_constant=reject_constant, parse_float=Decimal)
+    except _DuplicateJSONKey:
+        return _out("UNREADABLE", "json_duplicate_key")
+    except _NonfiniteJSON:
+        return _out("UNREADABLE", "json_nonfinite_number")
+    except (ValueError, RecursionError, DecimalException, OverflowError):
+        return _out("UNREADABLE", "json_malformed")
+    if not isinstance(evidence, dict):
+        return _out("UNREADABLE", "json_evidence_unreadable")
+    return _out("PASS", "json_decoded", evidence=evidence)
+
+
+def reconcile_json(text):
+    decoded = decode_evidence_json(text)
+    return reconcile_offline(decoded["evidence"]) if decoded["verdict"] == "PASS" else decoded
+
+
+def aggregate_fixtures(expected_ids, fixtures):
+    """Reconcile exactly three explicitly expected fixture evidence records."""
+    def identifier(value):
+        return type(value) is str and bool(value.strip()) and len(value) <= 128
+
+    if (not isinstance(expected_ids, (list, tuple, set)) or len(expected_ids) != 3
+            or any(not identifier(value) for value in expected_ids)
+            or len(set(expected_ids)) != 3):
+        return _out("UNREADABLE", "expected_fixtures_unreadable")
+    if not isinstance(fixtures, list) or len(fixtures) != 3:
+        return _out("UNREADABLE", "fixture_coverage_unreadable")
+    indexed = {}
+    for fixture in fixtures:
+        if not isinstance(fixture, dict) or not identifier(fixture.get("fixture_id")):
+            return _out("UNREADABLE", "fixture_id_unreadable")
+        key = fixture["fixture_id"]
+        if key in indexed:
+            return _out("UNREADABLE", "duplicate_fixture_id")
+        if key not in expected_ids:
+            return _out("UNREADABLE", "foreign_fixture_id")
+        evidence = fixture.get("evidence")
+        if not isinstance(evidence, dict) or evidence.get("fixture_id") != key:
+            return _out("UNREADABLE", "fixture_identity_unbound")
+        indexed[key] = evidence
+    results = {key: reconcile_offline(indexed[key]) for key in sorted(expected_ids)}
+    verdicts = {result["verdict"] for result in results.values()}
+    verdict = "UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS"
+    return _out(verdict, "offline_fixture_reconciliation", fixtures=results)
 
 
 def compare_recommendations(report_grid_count, recommendations, *, no_recommendations_shown=False):

@@ -13,6 +13,7 @@ from benches.x05_reconcile import (METRICS, TABLE_COLUMNS, check_discrepancies,
     MAX_CSV_CELL, MAX_CSV_CHARS, canonical_snapshot, reconcile_offline,
     MAX_STRING_EXAMPLES, compare_bound_snapshots, compare_saved_string_totals,
     MAX_RECOMMENDATION_EXAMPLES, compare_oracle_string_totals,
+    aggregate_fixtures, decode_evidence_json, reconcile_json,
     compare_csv_view, compare_recommendations, compare_snapshots, compare_strings, compare_table)
 
 
@@ -640,3 +641,146 @@ def test_complete_evidence_permutations_preserve_diagnostics_and_caller_inputs(c
         preserved = deepcopy(changed)
         assert reconcile_offline(changed) == expected
         assert changed == preserved
+
+
+def fixture_records():
+    expected = ["case-a", "case-b", "case-c"]
+    rows = []
+    for key in expected:
+        evidence = complete_evidence()
+        evidence["fixture_id"] = key
+        rows.append(dict(fixture_id=key, evidence=evidence))
+    return expected, rows
+
+
+def test_three_fixture_aggregation_requires_coverage_and_unreadable_precedes_fail():
+    expected, rows = fixture_records()
+    assert aggregate_fixtures(expected, rows)["verdict"] == "PASS"
+    rows[0]["evidence"]["recommendations"][0]["group_count"] = 1
+    assert aggregate_fixtures(expected, rows)["verdict"] == "FAIL"
+    del rows[1]["evidence"]["reopened"]
+    result = aggregate_fixtures(expected, rows)
+    assert result["verdict"] == "UNREADABLE"
+    assert result["fixtures"]["case-a"]["verdict"] == "FAIL"
+    assert result == aggregate_fixtures(list(reversed(expected)), list(reversed(rows)))
+
+
+@pytest.mark.parametrize("mutation", ["missing", "duplicate", "foreign", "unbound", "expected-missing", "expected-duplicate"])
+def test_fixture_aggregator_rejects_missing_duplicate_foreign_and_unbound_ids(mutation):
+    expected, rows = fixture_records()
+    if mutation == "missing":
+        rows.pop()
+    elif mutation == "duplicate":
+        rows[-1] = rows[0]
+    elif mutation == "foreign":
+        rows[-1]["fixture_id"] = "foreign"
+    elif mutation == "unbound":
+        rows[-1]["evidence"]["fixture_id"] = "case-a"
+    elif mutation == "expected-missing":
+        expected = None
+    else:
+        expected[-1] = expected[0]
+    assert aggregate_fixtures(expected, rows)["verdict"] == "UNREADABLE"
+
+
+@pytest.mark.parametrize("text,reason", [
+    ('{"a":1,"a":2}', "json_duplicate_key"),
+    ('{"nested":{"a":1,"a":2}}', "json_duplicate_key"),
+    ('{"number":NaN}', "json_nonfinite_number"),
+    ('{"number":Infinity}', "json_nonfinite_number"),
+    ('{"number":-Infinity}', "json_nonfinite_number"),
+    ('{"missing":', "json_malformed"),
+    ('{} trailing', "json_malformed"),
+    ('[]', "json_evidence_unreadable"),
+    (None, "json_input_unreadable"),
+])
+def test_strict_json_refuses_invalid_evidence_before_reconciliation(monkeypatch, text, reason):
+    from benches import x05_reconcile as module
+
+    def forbidden(evidence):
+        pytest.fail("Invalid JSON must not reach reconciliation")
+
+    monkeypatch.setattr(module, "reconcile_offline", forbidden)
+    assert reconcile_json(text) == {"verdict": "UNREADABLE", "reason": reason}
+
+
+def test_strict_json_valid_evidence_reconciles_and_keeps_exact_decimal():
+    from decimal import Decimal
+
+    assert decode_evidence_json('{"value":0.123456789012345678901}')['evidence']["value"] == Decimal("0.123456789012345678901")
+    assert reconcile_json(json.dumps(complete_evidence()))["verdict"] == "PASS"
+
+
+def test_equivalent_numeric_table_values_have_identical_snapshot_hashes():
+    from decimal import Decimal
+
+    _, baseline = table_fixture()
+    for row in baseline:
+        row.update(studio=4, oracle=4, delta=0)
+    expected = canonical_snapshot(ORACLE, baseline)
+    for equivalent, zero in [(4, 0), (4.0, -0.0), (Decimal("4.000"), Decimal("-0.000")),
+                             ("4.0000", "-0.0000")]:
+        rows = deepcopy(baseline)
+        for row in rows:
+            row.update(studio=equivalent, oracle=equivalent, delta=zero)
+        assert canonical_snapshot(ORACLE, rows) == expected
+    changed = deepcopy(baseline)
+    changed[-1]["studio"] = "4.0001"
+    assert canonical_snapshot(ORACLE, changed)["table_sha256"] != expected["table_sha256"]
+
+
+@pytest.mark.parametrize("width,verdict", [(80, "PASS"), (81, "UNREADABLE")])
+def test_exact_numeric_width_boundaries_across_table_policy_and_snapshot(width, verdict):
+    values, rows = table_fixture()
+    number = "1" + "0" * (width - 1)
+    values["panels"] = number
+    rows[0].update(studio=number, oracle=0, delta=number, verdict="FAIL")
+    oracle = dict(values, panels=0)
+    assert compare_table(rows, values, oracle)["verdict"] == verdict
+    assert canonical_snapshot(ORACLE, rows)["verdict"] == verdict
+    deltas = dict.fromkeys(METRICS, 0)
+    deltas["panels"] = number
+    record = dict(fixture_id="synthetic", metric="panels", delta=number,
+                  name="synthetic numeric boundary", frozen_at="2026-11-15T12:00:00Z")
+    assert check_discrepancies("synthetic", deltas, [record], "2026-11-15T13:00:00Z")["verdict"] == verdict
+
+
+def test_tiny_nonzero_kw_delta_remains_exact_and_never_becomes_zero():
+    from decimal import Decimal
+
+    tiny = "0." + "0" * 77 + "1"  # Exactly80 characters.
+    assert len(tiny) == 80
+    values, rows = table_fixture()
+    values["kw_dc"] = tiny
+    rows[-1].update(studio=tiny, oracle=0, delta=Decimal(tiny), verdict="FAIL")
+    assert compare_table(rows, values, dict(values, kw_dc=0))["verdict"] == "PASS"
+    assert canonical_snapshot(ORACLE, rows)["verdict"] == "PASS"
+    deltas = dict.fromkeys(METRICS, 0)
+    deltas["kw_dc"] = Decimal(tiny)
+    assert check_discrepancies("synthetic", deltas, [], "2026-11-15T13:00:00Z")["verdict"] == "FAIL"
+    record = dict(fixture_id="synthetic", metric="kw_dc", delta=tiny,
+                  name="synthetic tiny delta", frozen_at="2026-11-15T12:00:00Z")
+    assert check_discrepancies("synthetic", deltas, [record], "2026-11-15T13:00:00Z")["verdict"] == "PASS"
+    rows[-1]["delta"] = 0
+    assert compare_table(rows, values, dict(values, kw_dc=0))["verdict"] == "FAIL"
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
+def test_csv_newline_round_trips_and_quoted_embedded_newlines(newline):
+    _, rows = table_fixture()
+    output = StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=TABLE_COLUMNS, lineterminator=newline, quoting=csv.QUOTE_ALL)
+    writer.writeheader()
+    writer.writerows(rows)
+    original = csv.field_size_limit()
+    try:
+        csv.field_size_limit(1)
+        assert compare_csv_view(output.getvalue(), rows)["verdict"] == "PASS"
+        assert csv.field_size_limit() == 1
+        malformed = output.getvalue().replace('"panels"', '"pan' + newline + 'els"', 1)
+        assert compare_csv_view(malformed, rows)["verdict"] == "UNREADABLE"
+        malformed = output.getvalue().replace('"24"', '"2' + newline + '4"', 1)
+        assert compare_csv_view(malformed, rows)["verdict"] == "UNREADABLE"
+        assert csv.field_size_limit() == 1
+    finally:
+        csv.field_size_limit(original)
