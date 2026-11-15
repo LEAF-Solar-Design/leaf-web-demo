@@ -52,12 +52,19 @@ class FakeClient:
         self.context_missing = False
         self.expiry = None
         self.projects_deleted = []
+        self.jobs = {}
+        self.pending = {}
+        self.waits = []
+        self.contexts = []
+        self.events = []
+        self.revisions = {"v0": 0}
 
     def drawing_context(self, project_id, version_id, drawing_id):
         assert (project_id, drawing_id) == ("p", "d")
+        self.contexts.append(version_id)
         return {"context": {} if self.context_missing else
                 {"head_version_id": self.head, "intake_sha256": "digest"},
-                "intake": {"solar_design_graph": {"rev": self.rev}}}
+                "intake": {"solar_design_graph": {"rev": self.revisions.get(version_id, 0)}}}
 
     def checkout(self, project_id, drawing_id, *, ttl_s):
         self.checkouts.append(ttl_s)
@@ -71,6 +78,8 @@ class FakeClient:
     def run(self, tool, **kw):
         self.calls.append((tool, kw))
         params = kw["params"]
+        if tool != "count-by-layer" and kw["version_id"] != self.head:
+            raise StudioError(409, "SIP_R1_STALE_VERSION", "Superseded version")
         if tool == "count-by-layer":
             case = "3"
             assert kw["capability"] is None
@@ -82,31 +91,52 @@ class FakeClient:
             case = "8"
             assert self.timer.clock() >= self.expiry + 4
         else:
-            case = "filter" if "panel_layer_contains" in params["changes"] else "initialize"
+            case = "initialize" if "initialize" in params else "blank"
+        self.events.append(case)
         if case == self.mutate:
             self.head = "unexpected-version"
         response = self.overrides.get(case)
         if isinstance(response, Exception):
             raise response
         if response is not None:
-            return response
-        if case in ("initialize", "filter"):
+            return self.submit(response, case, params, write=tool != "count-by-layer")
+        if case == "initialize":
             assert params["expected_rev"] == self.rev
-            assert kw["version_id"] == self.head
-            self.rev += 1
-            self.head = "v" + str(self.rev)
-            self.filter = case == "filter"
-            return 202, {"job_id": self.head}
+            return self.submit((202, {"job_id": "initialize-job"}), case, params)
+        if case == "blank":
+            raise refusal("4a")
         raise refusal(case)
 
-    def wait_job(self, job_id):
-        return {"status": "complete", "result": {"output_version_id": job_id}}
+    def publish(self, params):
+        self.rev += 1
+        self.head = "v" + str(self.rev)
+        self.revisions[self.head] = self.rev
+        if params and "panel_layer_contains" in params.get("changes", {}):
+            self.filter = bool(params["changes"]["panel_layer_contains"])
+
+    def submit(self, response, case, params=None, *, write=True):
+        status, body = response
+        if status == 202 and body.get("job_id"):
+            self.pending[body["job_id"]] = (write, params)
+        elif 200 <= status < 300 and write:
+            self.publish(params)
+        return response
+
+    def wait_job(self, job_id, *, timeout_s):
+        self.waits.append((job_id, timeout_s))
+        body = self.jobs.get(job_id, {"status": "complete"})
+        write, params = self.pending.pop(job_id)
+        if body["status"] == "complete" and write:
+            self.publish(params)
+        return body
 
     def transport(self, method, path, **kw):
         self.pdf_call = (method, path, kw)
+        self.events.append("9")
+        assert f"/versions/{self.head}/" in path
         response = self.overrides.get("9")
         if response is not None:
-            return response
+            return self.submit(response, "9")
         return 422, {"error": {"reason_code": "IMPORT_PDF_MALFORMED",
                                "message": "Malformed PDF", "next_action": "Upload a valid PDF"}}
 
@@ -207,11 +237,16 @@ def test_initialize_refusal_skips_dependents(rig):
     assert by_case(results, "7").seeded
 
 
-def test_filter_refusal_skips_dependents(rig):
-    rig[0].overrides["filter"] = StudioError(409, "FILTER_REFUSED", "Filter blocked")
+def test_blank_filter_refusal_is_case_4a(rig):
+    rig[0].overrides["blank"] = refusal("4a", reason_code="FILTER_REFUSED")
     results = collect(rig)
-    assert by_case(results, "4a").seeded
-    assert all(not by_case(results, case).seeded for case in ("4b", "9", "8"))
+    row = by_case(results, "4a")
+    assert row.seeded and row.code == "FILTER_REFUSED"
+    assert row.message == "Cannot use panel_layer_contains"
+    assert row.next_action == "Choose a valid value"
+    assert row.state_before == row.state_after == ("v1", "digest")
+    assert all(by_case(results, case).seeded for case in ("4b", "9", "8"))
+    assert "case 4a: FAIL" in x02.score(results)[0].evidence
 
 
 def test_expiry_wait_and_unique_keys(rig):
@@ -228,14 +263,15 @@ def test_published_version_and_revision_used(rig):
     collect(rig)
     calls = rig[0].calls
     panels = [kw for tool, kw in calls if tool == "solar-panels-from-drawing"]
-    assert [(kw["version_id"], kw["params"]["expected_rev"]) for kw in panels] == [("v1", 1), ("v2", 2)]
+    assert [(kw["version_id"], kw["params"]["expected_rev"]) for kw in panels] == [("v1", 1)]
+    assert "v1" in rig[0].contexts
 
 
 def test_pdf_transport_uses_current_version(rig):
     collect(rig)
     method, path, kw = rig[0].pdf_call
     assert method == "POST"
-    assert path == "/api/projects/p/drawings/d/versions/v2/imports/solaredge-pdf"
+    assert path == "/api/projects/p/drawings/d/versions/v1/imports/solaredge-pdf"
     assert kw == {"headers": {"Content-Type": "application/pdf"}, "data": x02.PDF}
 
 
@@ -284,15 +320,119 @@ def test_ok_envelope_even_on_error_fails(rig):
     assert x02.score(collect(rig))[1].verdict == "FAIL"
 
 
-def test_async_failed_job_is_refusal(rig, monkeypatch):
+def test_async_failed_job_is_refusal(rig):
     client = rig[0]
     client.overrides["3"] = (202, {"job_id": "failed-job"})
-    original = client.wait_job
-    monkeypatch.setattr(client, "wait_job", lambda job: {"status": "failed", "error": {
+    client.jobs["failed-job"] = {"status": "failed", "error": {
         "reason_code": "LAYER_NOT_FOUND", "message": "XBENCH_ABSENT_LAYER missing",
-        "next_action": "Choose a layer"}} if job == "failed-job" else original(job))
+        "next_action": "Choose a layer"}}
+    results = collect(rig)
+    row = by_case(results, "3")
+    assert (row.status, row.code, row.async_refusal) == (202, "LAYER_NOT_FOUND", True)
+    assert row.message == "XBENCH_ABSENT_LAYER missing"
+    assert row.next_action == "Choose a layer"
+    assert not row.ok_body and row.state_before == row.state_after
+    assert all("case 3: PASS" in step.evidence for step in x02.score(results)[:3])
+    assert ("failed-job", 600) in client.waits
+
+
+def test_live_case_order_and_no_match_initialization(rig):
+    collect(rig)
+    client = rig[0]
+    assert client.events == ["3", "7", "initialize", "4b", "blank", "9", "8"]
+    initialization = client.calls[2][1]["params"]
+    assert initialization["changes"] == {"panel_layer_contains": "XBENCH_NO_MATCH"}
+    assert initialization["initialize"]["units"]["drawing_units"] == "in"
+    assert all(timeout == 600 for _, timeout in client.waits)
+
+
+@pytest.mark.parametrize("response", [(200, {"ok": True}), (202, {"job_id": "blank-job"})])
+def test_blank_filter_success_imports_on_new_head(rig, response):
+    client = rig[0]
+    client.overrides["blank"] = response
+    results = collect(rig)
+    assert client.events == ["3", "7", "initialize", "4b", "blank", "4a", "9", "8"]
+    row = by_case(results, "4a")
+    assert row.code == "PANEL_LAYER_FILTER_REQUIRED" and not row.async_refusal
+    assert row.state_before == row.state_after == ("v2", "digest")
+    panels = [kw for tool, kw in client.calls if tool == "solar-panels-from-drawing"]
+    assert [(kw["version_id"], kw["params"]["expected_rev"]) for kw in panels] == [("v1", 1), ("v2", 2)]
+    assert "case 4a: PASS (checks satisfied)" in x02.score(results)[2].evidence
+    assert x02.score(results)[2].verdict == "UNREADABLE"
+    assert by_case(results, "9").seeded and by_case(results, "8").seeded
+
+
+def test_blank_filter_refusal_state_change_fails(rig):
+    rig[0].mutate = "blank"
+    results = collect(rig)
+    row = by_case(results, "4a")
+    assert row.code == "PANEL_LAYER_FILTER_REQUIRED"
+    assert row.state_before == ("v1", "digest")
+    assert row.state_after == ("unexpected-version", "digest")
+    assert "case 4a: FAIL (drawing state changed)" in x02.score(results)[2].evidence
+
+
+def test_async_blank_filter_refusal_is_observation(rig):
+    client = rig[0]
+    client.overrides["blank"] = (202, {"job_id": "blank-job"})
+    client.jobs["blank-job"] = {"status": "failed", "error": {
+        "reason_code": "PANEL_LAYER_FILTER_REQUIRED", "message": "panel_layer_contains is blank",
+        "next_action": "Supply a filter"}}
+    results = collect(rig)
+    row = by_case(results, "4a")
+    assert (row.status, row.code, row.async_refusal) == (202, "PANEL_LAYER_FILTER_REQUIRED", True)
+    assert row.message == "panel_layer_contains is blank"
+    assert row.next_action == "Supply a filter"
+    assert row.state_before == row.state_after == ("v1", "digest")
+    assert all("case 4a: PASS" in step.evidence for step in x02.score(results)[:3])
+    assert "4a" not in client.events
+    assert client.events[-2:] == ["9", "8"]
+
+
+@pytest.mark.parametrize("case", ["7", "4b", "9", "8"])
+def test_async_success_refreshes_head_and_revision_without_stale_writes(rig, case):
+    client = rig[0]
+    client.overrides[case] = (202, {"job_id": "success-job"})
+    results = collect(rig)
+    row = by_case(results, case)
+    assert row.seeded and row.status == 202 and row.ok_body and not row.async_refusal
+    assert row.state_before != row.state_after
+    assert f"case {case}: FAIL" in x02.score(results)[1].evidence
+    assert all(by_case(results, name).seeded for name in x02.OBJECTS)
+    assert all(result.code != "SIP_R1_STALE_VERSION" for result in results)
+    assert ("success-job", 600) in client.waits
+    assert client.calls[-1][1]["version_id"] == ("v2" if case != "8" else "v1")
+    assert client.calls[-1][1]["params"]["expected_rev"] == (2 if case != "8" else 1)
+
+
+def test_synchronous_success_also_refreshes_before_next_case(rig):
+    client = rig[0]
+    client.overrides["4b"] = (200, {"ok": True})
+    results = collect(rig)
+    blank = next(kw for _, kw in client.calls if kw["params"].get("changes") == {"panel_layer_contains": ""})
+    assert (blank["version_id"], blank["params"]["expected_rev"]) == ("v2", 2)
+    assert by_case(results, "4b").ok_body
+    assert by_case(results, "8").code == "SIP_R1_CHECKOUT_EXPIRED"
+
+
+def test_async_initialize_refusal_skips_dependents(rig):
+    client = rig[0]
+    client.jobs["initialize-job"] = {"status": "failed", "error": {
+        "reason_code": "INIT_REFUSED", "message": "Initialization blocked"}}
+    results = collect(rig)
+    assert all(not by_case(results, case).seeded and "INIT_REFUSED" in by_case(results, case).note
+               for case in ("4a", "4b", "9", "8"))
+    assert client.head == "v0"
+
+
+def test_async_error_code_fallback(rig):
+    client = rig[0]
+    client.overrides["3"] = (202, {"job_id": "failed-job"})
+    client.jobs["failed-job"] = {"status": "failed", "error": {
+        "error_code": "LAYER_NOT_FOUND", "message": "XBENCH_ABSENT_LAYER missing",
+        "next_action": "Choose a layer"}}
     row = by_case(collect(rig), "3")
-    assert (row.status, row.code) == (422, "LAYER_NOT_FOUND")
+    assert row.code == "LAYER_NOT_FOUND" and row.async_refusal
 
 
 def test_transport_adapter_json_and_bytes(monkeypatch):
@@ -328,11 +468,18 @@ def test_run_writes_safe_cases_and_cleans_up(rig, monkeypatch, tmp_path):
         *args, **kw, sleep=timer.sleep, clock=timer.clock))
     client.overrides["3"] = refusal("3", message="XBENCH_ABSENT_LAYER " + CAP + "900")
     client.overrides["8"] = refusal("8", message="checkout " + CAP + "2")
+    client.overrides["blank"] = (202, {"job_id": "blank-job"})
+    client.jobs["blank-job"] = {"status": "failed", "error": {
+        "reason_code": "PANEL_LAYER_FILTER_REQUIRED",
+        "message": "panel_layer_contains " + CAP + "900", "next_action": "Choose a filter"}}
     steps = x02.run(ctx)
     raw = (tmp_path / "cases.json").read_text()
     assert CAP not in raw
     assert "X-Checkout-Capability" not in raw
-    assert len(json.loads(raw)) == len(x02.CASE_IDS)
+    rows = json.loads(raw)
+    assert len(rows) == len(x02.CASE_IDS)
+    assert all(isinstance(row["async_refusal"], bool) for row in rows)
+    assert next(row for row in rows if row["case"] == "4a")["async_refusal"] is True
     assert len(steps) == 6
     assert client.checkouts == [900, 2]
     assert client.projects_deleted == ["p"]
