@@ -36,7 +36,11 @@ function RoutePreview({ proposal }) {
 
 export default function ArloProposalReview({ envelope, context, currentProject }) {
   const result = envelope?.solver_result
-  const proposals = Array.isArray(result?.proposals) ? result.proposals : []
+  const storedProposals = Array.isArray(result?.proposals) ? result.proposals : []
+  const malformedProposals = storedProposals.some(p => !p || typeof p !== 'object' || Array.isArray(p)
+    || typeof p.proposal_id !== 'string' || !p.proposal_id.trim())
+    || new Set(storedProposals.map(p => p?.proposal_id)).size !== storedProposals.length
+  const proposals = malformedProposals ? [] : storedProposals
   const [selectedId, setSelectedId] = useState(proposals[0]?.proposal_id || '')
   const proposal = proposals.find(p => p.proposal_id === selectedId) || proposals[0]
   const [reviews, setReviews] = useState([])
@@ -129,6 +133,7 @@ export default function ArloProposalReview({ envelope, context, currentProject }
   const productionValid = proposal ? proposal.production_valid : result?.production_valid
   return <div className="arlo-review">
     <p className="dim">Electrical design / Proposal review</p>
+    {malformedProposals && <p role="alert">Stored proposals could not be reviewed because a proposal identity is missing or duplicated. The stored result is preserved in the export. Reopen the result or run the design again.</p>}
     {proposal ? <><h4>Review the complete feeder</h4>
     <label>Feeder proposal <select value={proposal.proposal_id} disabled={saving} onChange={e => { setSelectedId(e.target.value); setSaved(''); setError(''); setNote('') }}>
       {proposals.map((p,i) => <option value={p.proposal_id} key={p.proposal_id}>Proposal {i+1}, {number(p.estimated_installed_cost)} cost units</option>)}
