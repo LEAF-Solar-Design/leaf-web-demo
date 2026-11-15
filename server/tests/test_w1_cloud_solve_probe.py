@@ -786,6 +786,9 @@ def test_x02_async_busy_is_preserved(monkeypatch, x02_request):
 
 
 def test_x02_worker_records_async_rejection_as_definitive(monkeypatch, x02_request):
+    x02_solve.platform_link._ensure_platform_package()
+    from leaf_platform import project_solve_store
+
     exchange = {"state": "prepared", "grid_id": None, "send_protocol": None}
     refusals = []
 
@@ -794,6 +797,7 @@ def test_x02_worker_records_async_rejection_as_definitive(monkeypatch, x02_reque
         return True
 
     def refuse(*args, reason_code):
+        assert reason_code in project_solve_store._REFUSALS
         refusals.append(reason_code)
         exchange.update(state="refused", refusal_code=reason_code)
 

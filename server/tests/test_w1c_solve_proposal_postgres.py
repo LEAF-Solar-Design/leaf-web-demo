@@ -183,7 +183,7 @@ def test_postgres_lost_sender_settles_unknown(world, http, monkeypatch):
     expire(job)
     assert service.run_once(uuid4().hex, tool_name=solve.TOOL_NAME, lease_seconds=120)
     saved = row(job)
-    assert saved["status"] == "failed" and saved["error"]["reason_code"] == "SOLVE_OUTCOME_UNKNOWN"
+    assert saved["status"] == "failed" and saved["error"]["reason_code"] == "solve_outcome_unknown"
     assert saved["output_version_id"] is None and s.calls == ["sent"]
     # Settlement clears the live lease owner. Terminal reads use the finishing
     # worker identity retained in provenance and the stored attempt instead.
