@@ -65,12 +65,25 @@ def request(a, params=None, *, tool_name="solar-settings", **changes):
     return policy().project_tool_admission(**args)
 
 
-def assert_refusal(result, reason, *, status=409, message="Canonical Solar request was refused.",
+def assert_refusal(result, reason, *, status=409, message=None,
                    retryable=False):
+    if message is None:
+        message = "Solar setup was refused." if reason == "INVALID_SEED_REQUEST" else "Canonical Solar request was refused."
+    checkout_messages = {
+        "SIP_R1_CHECKOUT_REQUIRED": "This change needs a drawing checkout. Take the checkout, then retry.",
+        "SIP_R1_CHECKOUT_EXPIRED": "Your drawing checkout expired. Take the checkout again, then retry.",
+    }
+    message = checkout_messages.get(reason, message)
     code = ErrorCode.FORBIDDEN if status == 403 else (
         ErrorCode.INTERNAL if status >= 500 else ErrorCode.BAD_PARAMS)
     body = err_envelope(code, message, retryable)
     body["error"]["reason_code"] = reason
+    if reason in checkout_messages:
+        body["error"]["next_action"] = (
+            "Take the drawing checkout again, then retry." if reason == "SIP_R1_CHECKOUT_EXPIRED"
+            else "Take the drawing checkout, then retry.")
+    elif reason == "INVALID_SEED_REQUEST":
+        body["error"]["next_action"] = "Correct the Solar setup field, then retry."
     assert result == {"status_code": status, "content": body}
 
 
@@ -211,7 +224,8 @@ def test_sip_r5_preview_schema_precedence(monkeypatch):
             (bad_seed, "solar-settings", "INVALID_SEED_REQUEST"),
             (params, "solar-feeders", "INVALID_SEED_REQUEST")):
         before = deepcopy(candidate)
-        assert_refusal(request(a, candidate, tool_name=name), code)
+        message = "Solar setup was refused: initialize is not valid." if candidate is bad_seed else None
+        assert_refusal(request(a, candidate, tool_name=name), code, message=message)
         assert candidate == before
     assert "prepare" not in a.events and "entitlement" not in a.events and not a.accepted
 

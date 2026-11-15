@@ -20,9 +20,12 @@ def seed_entity_id(tenant_id, drawing_id, kind):
         raise GraphValidationError("UNKNOWN_ENTITY_KIND")
     try:
         validate_tenant_id(tenant_id)
+    except ValueError:
+        raise GraphValidationError("INVALID_SEED_REQUEST", "tenant_id") from None
+    try:
         validate_tenant_id(drawing_id, kind="drawing id")
     except ValueError:
-        raise GraphValidationError("INVALID_SEED_REQUEST") from None
+        raise GraphValidationError("INVALID_SEED_REQUEST", "drawing_id") from None
     value = list(hashlib.sha256(
         ("leaf-solar-seed\0" + tenant_id + "\0" + drawing_id + "\0" + kind)
         .encode("utf-8")).hexdigest()[:32])
@@ -36,25 +39,28 @@ def seed_entity_id(tenant_id, drawing_id, kind):
 def seed_units(units):
     if (type(units) is not dict or set(units) != {
             "drawing_units", "wcs_to_ucs", "elevation_datum", "crs"}):
-        raise GraphValidationError("INVALID_SEED_REQUEST")
+        raise GraphValidationError("INVALID_SEED_REQUEST", "units")
     name = units["drawing_units"]
     matrix = units["wcs_to_ucs"]
     datum = units["elevation_datum"]
     crs = units["crs"]
-    if (type(name) is not str or name not in UNIT_SCALE
-            or type(matrix) is not list or len(matrix) != 16
+    if type(name) is not str or name not in UNIT_SCALE:
+        raise GraphValidationError("INVALID_SEED_REQUEST", "units.drawing_units")
+    if (type(matrix) is not list or len(matrix) != 16
             or any(type(v) not in (int, float) or
                    (type(v) is int and v.bit_length() > 64) or
-                   (type(v) is float and not math.isfinite(v)) for v in matrix)
-            or type(datum) is not str or not 1 <= len(datum) <= 4096
-            or not (crs is None or type(crs) is str and len(crs) <= 4096)):
-        raise GraphValidationError("INVALID_SEED_REQUEST")
-    try:
-        datum.encode("utf-8")
-        if isinstance(crs, str):
-            crs.encode("utf-8")
-    except UnicodeError:
-        raise GraphValidationError("INVALID_SEED_REQUEST") from None
+                   (type(v) is float and not math.isfinite(v)) for v in matrix)):
+        raise GraphValidationError("INVALID_SEED_REQUEST", "units.wcs_to_ucs")
+    if type(datum) is not str or not 1 <= len(datum) <= 4096:
+        raise GraphValidationError("INVALID_SEED_REQUEST", "units.elevation_datum")
+    if not (crs is None or type(crs) is str and len(crs) <= 4096):
+        raise GraphValidationError("INVALID_SEED_REQUEST", "units.crs")
+    for field, value in (("elevation_datum", datum), ("crs", crs)):
+        try:
+            if isinstance(value, str):
+                value.encode("utf-8")
+        except UnicodeError:
+            raise GraphValidationError("INVALID_SEED_REQUEST", "units." + field) from None
     return {"drawing_units": name, "meters_per_unit": UNIT_SCALE[name],
             "source": "explicit", "compute_units": "m", "wcs_to_ucs": matrix[:],
             "elevation_datum": datum, "crs": crs,
@@ -62,13 +68,18 @@ def seed_units(units):
 
 
 def validate_seed_request(initialize):
-    if (type(initialize) is not dict
-            or set(initialize) != {"schema_version", "source_intake_sha256", "units"}
-            or type(initialize["schema_version"]) is not int
-            or initialize["schema_version"] != 1
-            or type(initialize["source_intake_sha256"]) is not str
+    if type(initialize) is not dict:
+        raise GraphValidationError("INVALID_SEED_REQUEST", "initialize")
+    for field in ("schema_version", "source_intake_sha256", "units"):
+        if field not in initialize:
+            raise GraphValidationError("INVALID_SEED_REQUEST", field)
+    if set(initialize) != {"schema_version", "source_intake_sha256", "units"}:
+        raise GraphValidationError("INVALID_SEED_REQUEST", "initialize")
+    if type(initialize["schema_version"]) is not int or initialize["schema_version"] != 1:
+        raise GraphValidationError("INVALID_SEED_REQUEST", "schema_version")
+    if (type(initialize["source_intake_sha256"]) is not str
             or not re.fullmatch("[0-9a-f]{64}", initialize["source_intake_sha256"])):
-        raise GraphValidationError("INVALID_SEED_REQUEST")
+        raise GraphValidationError("INVALID_SEED_REQUEST", "source_intake_sha256")
     seed_units(initialize["units"])
     return initialize
 
@@ -76,12 +87,16 @@ def validate_seed_request(initialize):
 def new_empty_graph(*, tenant_id, drawing_id, source_hash, units, created_at):
     try:
         validate_tenant_id(tenant_id)
+    except ValueError:
+        raise GraphValidationError("INVALID_SEED_REQUEST", "tenant_id") from None
+    try:
         validate_tenant_id(drawing_id, kind="drawing id")
     except ValueError:
-        raise GraphValidationError("INVALID_SEED_REQUEST") from None
-    if (not isinstance(source_hash, str) or not re.fullmatch("[0-9a-f]{64}", source_hash)
-            or not isinstance(created_at, str) or not 1 <= len(created_at) <= 4096):
-        raise GraphValidationError("INVALID_SEED_REQUEST")
+        raise GraphValidationError("INVALID_SEED_REQUEST", "drawing_id") from None
+    if not isinstance(source_hash, str) or not re.fullmatch("[0-9a-f]{64}", source_hash):
+        raise GraphValidationError("INVALID_SEED_REQUEST", "source_intake_sha256")
+    if not isinstance(created_at, str) or not 1 <= len(created_at) <= 4096:
+        raise GraphValidationError("INVALID_SEED_REQUEST", "created_at")
     resolved_units = seed_units(units)
 
     def entity(kind, state, reasons):
@@ -124,7 +139,7 @@ def resolve_seed_context(backend, tenant_id, drawing_id, version, *, source_inta
         raise GraphValidationError("INVALID_PARENT_VERSION")
     if (not isinstance(source_intake_sha256, str)
             or not re.fullmatch("[0-9a-f]{64}", source_intake_sha256)):
-        raise GraphValidationError("INVALID_SEED_REQUEST")
+        raise GraphValidationError("INVALID_SEED_REQUEST", "source_intake_sha256")
     try:
         resolved, key, entry = store.resolve_version_entry(backend, tenant_id, drawing_id, version)
         manifest = store.load_manifest(

@@ -685,6 +685,8 @@ def _run_project_read(tool, tenant, headers, req, params, *, persist=False,
     }
     status = 200 if body.get("ok") else DEFAULT_HTTP_STATUS.get(
         (body.get("error") or {}).get("error_code"), 500)
+    if (body.get("error") or {}).get("reason_code") == "LAYER_NOT_FOUND":
+        status = 404
     return JSONResponse(status_code=status, content=body, headers={"Cache-Control": "no-store"})
 
 
@@ -1423,7 +1425,12 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
             return JSONResponse(status_code=200, content=rec["result"])
         env = jobs.failed_envelope_from(rec)
         code = env["error"]["error_code"]
-        return JSONResponse(status_code=DEFAULT_HTTP_STATUS.get(code, 500), content=env)
+        status = DEFAULT_HTTP_STATUS.get(code, 500)
+        if (rec.get("error") or {}).get("reason_code") == "LAYER_NOT_FOUND":
+            status = 404
+            env["error"].update(reason_code="LAYER_NOT_FOUND",
+                next_action="Choose a layer from the drawing's layer list.")
+        return JSONResponse(status_code=status, content=env)
 
     body = deps.tenant_echo(
         with_envelope_fields({"job_id": job_id, "status": "submitted"}), tenant_id
