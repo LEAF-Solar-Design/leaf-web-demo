@@ -324,7 +324,8 @@ def test_write_grade_order_and_fallback(tmp_path):
     ]))
     value = json.loads(path.read_text(encoding="utf-8"))
     assert list(value) == ["schema", "bench", "verdict", "source_sha", "manifest_sha256",
-                           "started_at", "finished_at", "steps", "fixtures", "limits"]
+                           "started_at", "finished_at", "steps", "fixtures", "limits", "options"]
+    assert value["options"] == {}
     assert value["schema"] == core.GRADE_SCHEMA
     assert [step["n"] for step in value["steps"]] == [1, 2]
     assert list(value["steps"][0]) == ["n", "verdict", "evidence", "observed", "expected"]
