@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { spawnSync } from 'node:child_process'
+import { execFile, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { expect, test } from '@playwright/test'
 import { catProofResponse, makeCatProofState } from './catProofFixture.mjs'
@@ -107,7 +107,10 @@ const portfolioImport = () => ({ schema: 'leaf.portfolio.import.v1', name: 'Jess
 
 function sourceArchive(saved, previews = {}, target = 'web') {
   const producer = fileURLToPath(new URL(target === 'ios' ? '../../platform/portfolio_ios_template.py' : '../../platform/web_page_template.py', import.meta.url))
-  const result = spawnSync(process.platform === 'win32' ? 'python' : 'python3', ['-c', [
+  return new Promise((resolve, reject) => {
+    const fail = error => reject(new Error(`Page source fixture producer failed: ${error.message}`))
+    try {
+      const child = execFile(process.platform === 'win32' ? 'python' : 'python3', ['-c', [
     'import base64,importlib.util,json,sys',
     'spec=importlib.util.spec_from_file_location("page_template",sys.argv[1])',
     'module=importlib.util.module_from_spec(spec)',
@@ -116,14 +119,25 @@ function sourceArchive(saved, previews = {}, target = 'web') {
     'saved=payload["saved"]',
     'previews={mid:base64.b64decode(data) for mid,data in payload["previews"].items()}',
     'sys.stdout.buffer.write(module.source_archive(saved["document"],saved["revision"],previews))',
-  ].join(';'), producer], { input: JSON.stringify({ saved, previews }), timeout: 20_000, maxBuffer: 80 * 1024 * 1024 })
-  if (result.error || result.status !== 0) throw new Error(`Page source fixture producer failed: ${result.error?.message || result.stderr.toString()}`)
-  return result.stdout
+      ].join(';'), producer], { encoding: 'buffer', timeout: 20_000, maxBuffer: 80 * 1024 * 1024 }, (error, stdout) => {
+        if (error) fail(error)
+        else resolve(stdout)
+      })
+      child.stdin.on('error', error => {
+        child.kill()
+        fail(error)
+      })
+      child.stdin.end(JSON.stringify({ saved, previews }))
+    } catch (error) {
+      fail(error)
+    }
+  })
 }
 
 async function installBackend(page) {
   const state = makeCatProofState()
   const backend = { calls: [], foreign: [], revisions: [], downloads: [], photoCalls: [], nativeCalls: [], nativeStatuses: [], nativeJob: null }
+  let nativeJobPromise = null
   await page.addInitScript(({ token, org }) => {
     localStorage.setItem('leaf.jwt', token)
     localStorage.setItem('leaf.org_id', org)
@@ -150,8 +164,13 @@ async function installBackend(page) {
         if (!saved || !call.idempotencyKey) reply = { status: 422, body: {} }
         else {
           const previews = Object.fromEntries(PHOTOS.map(photo => [photo.material_id, PREVIEW.toString('base64')]))
-          backend.nativeJob ||= { job_id: NATIVE_JOB, revision: saved.revision, document_sha256: saved.digest,
-            archive_sha256: createHash('sha256').update(sourceArchive(saved, previews, 'ios')).digest('hex') }
+          if (!backend.nativeJob) {
+            nativeJobPromise ||= sourceArchive(saved, previews, 'ios').then(bytes => {
+              backend.nativeJob = { job_id: NATIVE_JOB, revision: saved.revision, document_sha256: saved.digest,
+                archive_sha256: createHash('sha256').update(bytes).digest('hex') }
+            }).finally(() => { nativeJobPromise = null })
+            await nativeJobPromise
+          }
           reply = { status: 202, body: { ...backend.nativeJob, status: 'queued' } }
         }
       } else if (method === 'GET' && url.pathname === `${NATIVE_PATH}/${NATIVE_JOB}` && backend.nativeJob) {
@@ -193,7 +212,7 @@ async function installBackend(page) {
         if (!saved) reply = { status: 404, body: { error: 'revision_not_found' } }
         else {
           const previews = saved.document.schema ? Object.fromEntries(PHOTOS.map(photo => [photo.material_id, PREVIEW.toString('base64')])) : {}
-          const bytes = sourceArchive(saved, previews, query.target)
+          const bytes = await sourceArchive(saved, previews, query.target)
           backend.downloads.push({ revision: saved.revision, target: query.target || 'web', bytes })
           return route.fulfill({ status: 200, headers: CORS, contentType: 'application/zip', body: bytes })
         }
