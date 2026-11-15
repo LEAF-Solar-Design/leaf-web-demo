@@ -6,6 +6,7 @@ import json
 import os
 import time
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -33,6 +34,8 @@ def synthetic(monkeypatch, tmp_path):
         state.paths.append((binary, args))
         recheck()
         out = scratch / 'output'
+        if name == 'sandbox':
+            return
         if name == 'probe':
             (out / 'probe.stdout').write_bytes(json.dumps(state.probe).encode())
             (out / 'probe.stderr').write_bytes(state.stderr)
@@ -65,7 +68,8 @@ def test_exact_pixels_timestamps_full_decode_and_private_cleanup(synthetic):
     assert manifest['original']['sha256'] == synthetic.material['sha256']
     assert manifest['transcripts'][0]['material_id'] == 'text'
     assert not synthetic.scratch.exists()
-    probe, decode = synthetic.paths
+    sandbox, probe, decode = synthetic.paths
+    assert sandbox == ('/usr/bin/ffprobe', ['-version'])
     assert '-count_frames' in probe[1]
     assert '-enable_drefs' in decode[1] and decode[1][decode[1].index('-enable_drefs') + 1] == '0'
     assert decode[1][decode[1].index('-protocol_whitelist') + 1] == 'file'
@@ -288,3 +292,75 @@ def test_diagnostic_preserves_closed_stderr_shape_without_content(raw, state, pr
     assert diagnostic['reason'] == ('unknown' if raw is None else 'process_failed')
     assert set(diagnostic) == {'operation', 'returncode', 'reason', 'stderr_state', 'stderr_prefix'}
     assert 'PRIVATE' not in str(diagnostic)
+
+
+def test_sandbox_self_check_uses_supplied_executable_and_shared_budget(monkeypatch, tmp_path):
+    calls = []
+    recheck = lambda: None
+    monkeypatch.setattr(video, '_run', lambda *args: calls.append(args))
+    video._require_sandbox(tmp_path, 123, recheck)
+    assert calls == [(tmp_path, '/usr/bin/ffprobe', ['-version'], 'sandbox', 123, recheck)]
+    producer = Path(__file__).resolve().parents[2] / 'deploy/Dockerfile.app'
+    assert 'test -x /usr/bin/ffprobe' in producer.read_text(encoding='utf-8')
+
+
+@pytest.mark.parametrize('code,expected', [
+    ('video_incomplete', 'video_unavailable'),
+    ('video_timeout', 'video_timeout'),
+    ('video_cleanup_failed', 'video_cleanup_failed'),
+    ('video_unavailable', 'video_unavailable'),
+])
+def test_sandbox_self_check_preserves_safe_diagnostic_and_failure_precedence(monkeypatch, code, expected):
+    error = video.VideoError(code)
+    error.decoder_diagnostic = dict(operation='sandbox', returncode=1, reason='process_failed',
+                                   stderr_state='nonempty', stderr_prefix='bwrap')
+    def failure(*args):
+        raise error
+    monkeypatch.setattr(video, '_run', failure)
+    with pytest.raises(video.VideoError) as caught:
+        video._require_sandbox(None, 123, lambda: None)
+    assert caught.value.code == expected
+    assert caught.value.decoder_diagnostic is error.decoder_diagnostic
+    if code != 'video_incomplete':
+        assert caught.value is error
+
+
+def test_sandbox_self_check_preserves_authority_failure(monkeypatch):
+    error = PermissionError('revoked')
+    def failure(*args):
+        raise error
+    monkeypatch.setattr(video, '_run', failure)
+    with pytest.raises(PermissionError) as caught:
+        video._require_sandbox(None, 123, lambda: None)
+    assert caught.value is error
+
+
+def test_sandbox_failure_never_starts_media_probe_and_cleans(synthetic, monkeypatch):
+    calls = []
+    def failure(scratch, binary, args, name, deadline, recheck):
+        calls.append((binary, args, name))
+        raise video.VideoError('video_incomplete')
+    monkeypatch.setattr(video, '_run', failure)
+    with pytest.raises(video.VideoError, match='^video_unavailable$'):
+        synthetic.call()
+    assert calls == [('/usr/bin/ffprobe', ['-version'], 'sandbox')]
+    assert not synthetic.scratch.exists()
+
+
+def test_media_probe_failure_after_sandbox_stays_incomplete(synthetic, monkeypatch):
+    names = []
+    def failure(scratch, binary, args, name, deadline, recheck):
+        names.append(name)
+        if name == 'probe':
+            raise video.VideoError('video_incomplete')
+    monkeypatch.setattr(video, '_run', failure)
+    with pytest.raises(video.VideoError, match='^video_incomplete$'):
+        synthetic.call()
+    assert names == ['sandbox', 'probe']
+    assert not synthetic.scratch.exists()
+
+
+def test_sandbox_diagnostic_operation_is_closed():
+    result = video._process_diagnostic('sandbox', 1, io.BytesIO(b'bwrap: PRIVATE'))
+    assert result['operation'] == 'sandbox'
+    assert 'PRIVATE' not in str(result)
