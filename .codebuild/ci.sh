@@ -31,6 +31,13 @@ if [[ "${1:-}" == --heavy-prerequisites ]]; then
     echo "FATAL: ephemeral PostgreSQL did not start; refusing browser and web setup so this build fails before them" >&2
     exit 1
   fi
+  # The runner overwrites this flag for its callback. Zero proves only an
+  # unchanged selected web family; it is not a new full-proof mode. Python,
+  # database and harness setup still run through the normal CI path.
+  if [[ "${LEAF_CI_WEB_FAMILY_REQUIRED:-1}" == 0 ]]; then
+    echo "heavy prerequisites: proven unchanged web family; skipping browser, Next build and web license scan"
+    exit 0
+  fi
 browser_log_dir="$(mktemp -d)"
 # Give the browser and its children a process group for failure cleanup.
 set -m
