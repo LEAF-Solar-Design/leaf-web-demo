@@ -45,3 +45,19 @@ exceptions and empty documents produce named unreadable oracle outcomes.
 These fixtures do not prove real PDF-layout coverage, Ground setup, accepted
 saved strings, report-aware recommendations, reconciliation CSV/UI or reopen
 parity. Real engineering files and their evidence stay outside the repository.
+
+The offline comparator accepts independent lists with `string_id` and positive
+integer `optimizers` fields. It is not connected to live verdicts. Run its suite:
+
+```powershell
+python -P -m pytest tools/xbench/tests/test_x05_reconcile.py -q -p no:cacheprovider -p no:xonsh -o pythonpath=tools/xbench
+```
+
+Its equal-total example uses oracle rows A=5 and B=7, versus saved rows A=6 and
+B=6. Both total12 optimizers. `compare_strings` returns FAIL with
+`string_identity_mismatch` and two mismatches: A oracle5/saved6 and B
+oracle7/saved6. Missing and foreign IDs are listed separately; duplicate IDs
+make the input UNREADABLE. Permuting rows leaves the evidence unchanged.
+Aggregate equality therefore cannot establish either string identity or each
+string's optimizer count. This construction uses synthetic Python dictionaries
+only and needs no staging access, credentials or customer input.
