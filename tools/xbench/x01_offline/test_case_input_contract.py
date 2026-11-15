@@ -49,10 +49,27 @@ class CaseInputContractTests(unittest.TestCase):
         cid = "<top-level>" if case_index is None else data["cases"][case_index].get("id", "<top-level>")
         if not isinstance(cid, str) or not cid:
             cid = "<top-level>"
-        with self.assertRaises(checker.CaseInputError) as caught:
-            checker.load_sets(self.root)
-        self.assertEqual(caught.exception.diagnostic,
-                         dict(name=name, case_id=cid, field_path=field))
+        try:
+            json.dumps(data, allow_nan=False)
+        except ValueError:
+            # Nonfinite JSON is refused before semantic validation. Keep the
+            # field-level contract independently covered for in-memory cases.
+            with self.assertRaises(checker.CaseFileError) as caught:
+                checker.load_sets(self.root)
+            self.assertEqual(caught.exception.diagnostic, dict(
+                name="UNREADABLE_CASE_SET", filename=FILES[family],
+                reason="NONFINITE_JSON_NUMBER"))
+            if case_index is not None:
+                calculate = (checker.geometry, checker.fill_coverage, checker.tag_overlaps)[family]
+                with self.assertRaises(checker.CaseInputError) as caught:
+                    checker.validate_case(data["cases"][case_index], calculate)
+                self.assertEqual(caught.exception.diagnostic,
+                                 dict(name=name, case_id=cid, field_path=field))
+        else:
+            with self.assertRaises(checker.CaseInputError) as caught:
+                checker.load_sets(self.root)
+            self.assertEqual(caught.exception.diagnostic,
+                             dict(name=name, case_id=cid, field_path=field))
         # Restore this family so other-family mutations remain independent.
         (self.root / FILES[family]).write_bytes(self.original[FILES[family]])
 
@@ -268,10 +285,15 @@ class CaseInputContractTests(unittest.TestCase):
             child = subprocess.run([sys.executable, str(ROOT / "check_cases.py"),
                                     "--cases-dir", str(self.root)], cwd=self.root,
                                    capture_output=True, text=True, timeout=10)
-            self.assertEqual(child.returncode, 1)
             self.assertNotIn("Traceback", child.stdout + child.stderr)
-            self.assertEqual(json.loads(child.stdout)["diagnostics"], [dict(
-                name="INVALID_CASE_INPUT", case_id=data["cases"][0]["id"], field_path=field)])
+            if family == 2:
+                self.assertEqual(child.returncode, 4)
+                self.assertEqual(json.loads(child.stdout), dict(verdict="UNREADABLE", diagnostics=[dict(
+                    name="UNREADABLE_CASE_SET", filename=FILES[family], reason="NONFINITE_JSON_NUMBER")]))
+            else:
+                self.assertEqual(child.returncode, 1)
+                self.assertEqual(json.loads(child.stdout), dict(verdict="FAIL", diagnostics=[dict(
+                    name="INVALID_CASE_INPUT", case_id=data["cases"][0]["id"], field_path=field)]))
             (self.root / FILES[family]).write_bytes(self.original[FILES[family]])
 
     def test_cli_bad_json_and_valid_copy(self):
@@ -279,10 +301,10 @@ class CaseInputContractTests(unittest.TestCase):
         path.write_text("{", encoding="utf-8")
         command = [sys.executable, str(ROOT / "check_cases.py"), "--cases-dir", str(self.root)]
         child = subprocess.run(command, capture_output=True, text=True, timeout=10)
-        self.assertEqual(child.returncode, 1)
-        self.assertEqual(json.loads(child.stdout)["diagnostics"], [dict(
-            name="UNREADABLE_CASE_SET", case_id="<top-level>", field_path=FILES[0])])
-        self.assertNotIn("Traceback", child.stderr)
+        self.assertEqual(child.returncode, 4)
+        self.assertEqual(json.loads(child.stdout), dict(verdict="UNREADABLE", diagnostics=[dict(
+            name="UNREADABLE_CASE_SET", filename=FILES[0], reason="MALFORMED_JSON")]))
+        self.assertNotIn("Traceback", child.stdout + child.stderr)
         path.write_bytes(self.original[FILES[0]])
         child = subprocess.run(command, cwd=self.root, capture_output=True, text=True, timeout=10)
         self.assertEqual(child.returncode, 0, child.stdout + child.stderr)

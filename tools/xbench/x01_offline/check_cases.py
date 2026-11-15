@@ -15,6 +15,120 @@ import sys
 
 EPS = 1e-10
 ROOT = Path(__file__).resolve().parent
+MAX_CASE_FILE_BYTES = 1024 * 1024
+MAX_JSON_DEPTH = 32
+MAX_CASES_PER_SET = 256
+MAX_JSON_INTEGER_DIGITS = 309
+
+
+class CaseFileError(ValueError):
+    """Read, syntax and resource failures, distinct from semantic case errors."""
+
+    def __init__(self, filename, reason):
+        self.diagnostic = dict(name="UNREADABLE_CASE_SET", filename=filename,
+                               reason=reason)
+        super().__init__(f"UNREADABLE_CASE_SET: {filename}: {reason}")
+
+
+class GeometryNumericError(ValueError):
+    """An arithmetic intermediate cannot be represented as a finite number."""
+
+    def __init__(self, ids, field_path):
+        self.diagnostic = dict(name="NONFINITE_GEOMETRY", object_ids=list(ids),
+                               field_path=field_path)
+        super().__init__(f"NONFINITE_GEOMETRY: {list(ids)}: {field_path}")
+
+
+def finite_geometry(value, ids, field_path):
+    try:
+        valid = math.isfinite(value)
+    except (OverflowError, ValueError):
+        valid = False
+    if not valid:
+        raise GeometryNumericError(ids, field_path)
+    return value
+
+
+def load_case_file(path):
+    """Bound bytes and lexical container depth before invoking the JSON parser."""
+    filename = path.name
+
+    def fail(reason):
+        raise CaseFileError(filename, reason)
+
+    try:
+        with path.open("rb") as stream:
+            raw = stream.read(MAX_CASE_FILE_BYTES + 1)
+    except OSError:
+        fail("READ_ERROR")
+    except MemoryError:
+        fail("RESOURCE_LIMIT")
+    if len(raw) > MAX_CASE_FILE_BYTES:
+        fail("FILE_TOO_LARGE")
+    try:
+        text = raw.decode("utf-8", errors="strict")
+    except UnicodeError:
+        fail("INVALID_UTF8")
+    if text.startswith("\ufeff"):
+        fail("UTF8_BOM")
+    depth, quoted, escaped = 0, False, False
+    for char in text:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+        elif char in "[{":
+            depth += 1
+            if depth > MAX_JSON_DEPTH:
+                fail("JSON_TOO_DEEP")
+        elif char in "]}":
+            depth -= 1
+
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                fail("DUPLICATE_JSON_KEY")
+            result[key] = value
+        return result
+
+    def floating(token):
+        value = float(token)
+        if not math.isfinite(value):
+            fail("NONFINITE_JSON_NUMBER")
+        return value
+
+    def integer(token):
+        if len(token.lstrip("-")) > MAX_JSON_INTEGER_DIGITS:
+            fail("JSON_INTEGER_TOO_LARGE")
+        value = int(token)
+        try:
+            valid = math.isfinite(value)
+        except OverflowError:
+            valid = False
+        if not valid:
+            fail("JSON_INTEGER_TOO_LARGE")
+        return value
+
+    try:
+        data = json.loads(text, object_pairs_hook=pairs, parse_float=floating,
+                          parse_int=integer,
+                          parse_constant=lambda token: fail("NONFINITE_JSON_NUMBER"))
+    except CaseFileError:
+        raise
+    except (ValueError, UnicodeError):
+        fail("MALFORMED_JSON")
+    except (MemoryError, RecursionError):
+        fail("RESOURCE_LIMIT")
+    if isinstance(data, dict) and isinstance(data.get("cases"), list):
+        if len(data["cases"]) > MAX_CASES_PER_SET:
+            fail("TOO_MANY_CASES")
+    return data
 
 
 class CaseInputError(ValueError):
@@ -241,14 +355,29 @@ def unique_objects(objects):
 
 def world_point(obj):
     x, y = obj["point"]
-    for insert in obj.get("inserts", []):
-        x = (x - insert["base"][0]) * insert["scale"][0]
-        y = (y - insert["base"][1]) * insert["scale"][1]
-        angle = math.radians(insert["rotation_deg"])
+    ids = [obj["id"]]
+    x = finite_geometry(x, ids, "point[0]")
+    y = finite_geometry(y, ids, "point[1]")
+    for index, insert in enumerate(obj.get("inserts", [])):
+        path = f"inserts[{index}]"
+
+        def finite(value, field):
+            return finite_geometry(value, ids, path + "." + field)
+
+        # Check each operation separately: a subsequent tiny scale or insert
+        # must not conceal an overflowing subtraction or rotation sum.
+        x = finite(x - insert["base"][0], "base.subtract[0]")
+        y = finite(y - insert["base"][1], "base.subtract[1]")
+        x = finite(x * insert["scale"][0], "scale[0]")
+        y = finite(y * insert["scale"][1], "scale[1]")
+        angle = finite(math.radians(insert["rotation_deg"]), "rotation_deg.radians")
         c, s = math.cos(angle), math.sin(angle)
-        x, y = c * x - s * y, s * x + c * y
-        x += insert["insertion"][0]
-        y += insert["insertion"][1]
+        cx, sy = finite(c * x, "rotation.cos_x"), finite(s * y, "rotation.sin_y")
+        sx, cy = finite(s * x, "rotation.sin_x"), finite(c * y, "rotation.cos_y")
+        x = finite(cx - sy, "rotation.subtract[0]")
+        y = finite(sx + cy, "rotation.add[1]")
+        x = finite(x + insert["insertion"][0], "insertion[0]")
+        y = finite(y + insert["insertion"][1], "insertion[1]")
     return [x, y]
 
 
@@ -258,7 +387,11 @@ def geometry(case):
     require(not (original.keys() & export.keys()), "side IDs must be separate")
     world = {key: world_point(obj) for side in (original, export)
              for key, obj in side.items()}
-    distance = lambda a, b: math.dist(world[a], world[b])
+    def distance(a, b):
+        # hypot avoids spurious overflow from squaring large finite deltas.
+        dx = finite_geometry(world[a][0] - world[b][0], [a, b], "distance.delta[0]")
+        dy = finite_geometry(world[a][1] - world[b][1], [a, b], "distance.delta[1]")
+        return finite_geometry(math.hypot(dx, dy), [a, b], "distance")
     pairs = []
     for handle in sorted({o["handle"] for o in original.values()}):
         a = [key for key, obj in original.items() if obj["handle"] == handle]
@@ -430,11 +563,7 @@ def load_sets(root=None):
             if not ok:
                 raise CaseInputError("<top-level>", path, name)
 
-        try:
-            with (Path(root) if root is not None else ROOT).joinpath(filename).open(encoding="utf-8") as stream:
-                data = json.load(stream)
-        except (OSError, ValueError) as error:
-            raise CaseInputError("<top-level>", filename, "UNREADABLE_CASE_SET") from error
+        data = load_case_file((Path(root) if root is not None else ROOT).joinpath(filename))
         top(isinstance(data, dict), filename)
         top(data.get("schema") == schema, "schema", "INVALID_SCHEMA")
         units = {geometry: "inch", fill_coverage: {"length": "inch", "area": "square inch"},
@@ -505,6 +634,9 @@ def main():
             for case in cases:
                 check_case(case, calculate)
         rejection_checks(sets)
+    except (CaseFileError, GeometryNumericError) as error:
+        print(json.dumps(dict(verdict="UNREADABLE", diagnostics=[error.diagnostic]), sort_keys=True))
+        return 4
     except CaseInputError as error:
         print(json.dumps(dict(verdict="FAIL", diagnostics=[error.diagnostic]), sort_keys=True))
         return 1
