@@ -33,6 +33,7 @@ class VideoError(ValueError):
     """Only fixed public error codes leave this module."""
     def __init__(self, code='video_unavailable'):
         self.code = code
+        self.decoder_diagnostic = None
         super().__init__(code)
 
 
@@ -74,6 +75,28 @@ def _finish(proc):
         time.sleep(.01)
 
 
+def _process_diagnostic(name, returncode, stderr):
+    """Retain closed failure facts only, after the owned process group is reaped."""
+    reason = 'unknown'
+    try:
+        stderr.seek(0)
+        first_line = stderr.read(8192).split(b'\n', 1)[0].lower()
+        denied = b'operation not permitted' in first_line or b'permission denied' in first_line
+        if first_line.startswith(b'bwrap:') and denied:
+            reason = 'sandbox_denied'
+        elif first_line.startswith(b'bwrap: execvp ') and b'no such file or directory' in first_line:
+            reason = 'exec_unavailable'
+        elif first_line.startswith(b'prlimit:') and denied:
+            reason = 'resource_limit_denied'
+        else:
+            reason = 'process_failed'
+    except OSError:
+        pass
+    return dict(operation=name if name in {'probe', 'decode'} else 'unknown',
+                returncode=returncode if type(returncode) is int and -255 <= returncode <= 255 else None,
+                reason=reason)
+
+
 def _run(scratch, binary, args, name, deadline, recheck):
     output = scratch / 'output'
     argv = [
@@ -88,7 +111,8 @@ def _run(scratch, binary, args, name, deadline, recheck):
         '--', binary, *args,
     ]
     proc = None
-    with (output / (name + '.stdout')).open('xb') as stdout, (output / (name + '.stderr')).open('xb') as stderr:
+    failure = None
+    with (output / (name + '.stdout')).open('xb') as stdout, (output / (name + '.stderr')).open('xb+') as stderr:
         try:
             recheck()
             if time.monotonic() >= deadline:
@@ -103,7 +127,8 @@ def _run(scratch, binary, args, name, deadline, recheck):
                     raise VideoError('video_timeout')
                 time.sleep(.02)
             if proc.returncode:
-                raise VideoError('video_incomplete')
+                failure = VideoError('video_incomplete')
+                raise failure
             recheck()
         except PermissionError:
             raise
@@ -115,6 +140,8 @@ def _run(scratch, binary, args, name, deadline, recheck):
                     _finish(proc)
                 except Exception:
                     raise VideoError('video_cleanup_failed') from None
+                if failure is not None:
+                    failure.decoder_diagnostic = _process_diagnostic(name, proc.returncode, stderr)
 
 
 def _number(value, minimum, maximum):
