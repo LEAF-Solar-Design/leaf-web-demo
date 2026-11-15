@@ -12,7 +12,7 @@ const first = () => screen.getByRole('checkbox', { name: 'Design / Panel A: 12 c
 const second = () => screen.getByRole('checkbox', { name: 'Alternate / Panel B: 9 candidates' })
 const submit = () => screen.getByRole('button', { name: 'Count selected set' })
 
-it.each([null, {}, 'bad', [null], [{ layer: {} }]])('refuses malformed counted summary rows %#', (selected_sets) => {
+it.each([null, {}, 'bad', [null], [{ layer: {} }]].map((value) => [value]))('refuses malformed counted summary rows %#', (selected_sets) => {
   render(<ModuleSetPicker data={{ ...data, selected_sets, count: 2 }} onSelect={vi.fn()} />)
   expect(screen.getByText(/Count summary unavailable.*Run the module tool again/)).toBeTruthy()
   expect(screen.queryByText(/^Counted /)).toBeNull()
