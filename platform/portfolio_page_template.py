@@ -247,6 +247,14 @@ export default function Gallery({page,category}){
    const restore=()=>{for(const [node,wasInert]of background)node.inert=wasInert;};
    restoreBackground.current=restore;closeButton.current?.focus();
   const key=e=>{
+   if((e.key==='ArrowLeft'||e.key==='ArrowRight')&&!e.altKey&&!e.ctrlKey&&!e.metaKey&&!e.shiftKey){
+    e.preventDefault();
+    const images=category.images.filter(image=>!image.display?.hidden);
+    setSelected(current=>{
+     const index=images.findIndex(image=>image.material_id===current?.material_id);
+     return index<0?current:images[Math.max(0,Math.min(images.length-1,index+(e.key==='ArrowRight'?1:-1)))];
+    });
+   }
    if(e.key==='Escape')close();
    if(e.key==='Tab'){
     const buttons=[...(dialog.current?.querySelectorAll('button:not([disabled])')||[])];

@@ -26,6 +26,62 @@ const second = photo('22222222-2222-4222-8222-222222222222', 'Synthetic bread')
 const category = (image, slug = 'cakes') => ({ slug, images: [image] })
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
+describe('exported viewer photo arrow navigation', () => {
+  it('keeps image, caption, bounds and opener focus together through repeated arrows', () => {
+    const third = photo('33333333-3333-4333-8333-333333333333', 'Synthetic pastry')
+    render(<Gallery page={{}} category={{ slug: 'work', images: [first, second, third] }} />)
+    const trigger = screen.getByRole('button', { name: 'View Synthetic cake' })
+    fireEvent.click(trigger)
+    const check = image => {
+      const dialog = screen.getByRole('dialog', { name: image.alt })
+      expect(within(dialog).getByRole('img', { name: image.alt }).getAttribute('src')).toContain(image.material_id)
+      expect(within(dialog).getByText(image.title)).toBeTruthy()
+      expect(document.activeElement).toBe(within(dialog).getByRole('button', { name: 'Close image' }))
+    }
+    fireEvent.keyDown(window, { key: 'ArrowLeft' }); check(first)
+    fireEvent.keyDown(window, { key: 'ArrowRight' }); check(second)
+    for (let i = 0; i < 6; i++) fireEvent.keyDown(window, { key: 'ArrowRight', repeat: true })
+    check(third)
+    fireEvent.keyDown(window, { key: 'ArrowLeft' }); check(second)
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(document.activeElement).toBe(trigger)
+  })
+
+  it('skips hidden photos and leaves modified arrows and single-photo bounds alone', () => {
+    const hidden = { ...second, display: { hidden: true } }
+    const third = photo('33333333-3333-4333-8333-333333333333', 'Synthetic pastry')
+    const view = render(<Gallery page={{}} category={{ slug: 'work', images: [first, hidden, third] }} />)
+    fireEvent.click(screen.getByRole('button', { name: 'View Synthetic cake' }))
+    for (const modifiers of [{ ctrlKey: true }, { metaKey: true }, { altKey: true }, { shiftKey: true }]) {
+      fireEvent.keyDown(window, { key: 'ArrowRight', ...modifiers })
+      expect(screen.getByRole('dialog', { name: first.alt })).toBeTruthy()
+    }
+    fireEvent.keyDown(window, { key: 'ArrowRight' })
+    expect(screen.getByRole('dialog', { name: third.alt })).toBeTruthy()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    view.rerender(<Gallery page={{}} category={category(first, 'single')} />)
+    fireEvent.click(screen.getByRole('button', { name: 'View Synthetic cake' }))
+    for (const key of ['ArrowLeft', 'ArrowRight']) {
+      fireEvent.keyDown(window, { key })
+      expect(screen.getByRole('dialog', { name: first.alt })).toBeTruthy()
+    }
+  })
+
+  it('retires the old image error state when arrows select another photo', () => {
+    render(<Gallery page={{}} category={{ slug: 'work', images: [first, second] }} />)
+    fireEvent.click(screen.getByRole('button', { name: 'View Synthetic cake' }))
+    const old = within(screen.getByRole('dialog')).getByRole('img', { name: first.alt })
+    fireEvent.error(old)
+    expect(within(screen.getByRole('dialog')).getByRole('button', { name: 'Retry photo' })).toBeTruthy()
+    fireEvent.keyDown(window, { key: 'ArrowRight' })
+    fireEvent.error(old)
+    const dialog = screen.getByRole('dialog', { name: second.alt })
+    expect(within(dialog).getByRole('img', { name: second.alt }).getAttribute('src')).toContain(second.material_id)
+    expect(within(dialog).queryByRole('button', { name: 'Retry photo' })).toBeNull()
+  })
+})
+
 describe('exported viewer background exclusion', () => {
   for (const closeBy of ['Close', 'Escape']) it(`restores prior inert values before ${closeBy} returns focus`, () => {
     render(<><nav data-testid="background"><a href="/">Home</a></nav>
