@@ -456,6 +456,8 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
                 entity["dimensionRef"] = True
     if parse_errors:
         out["parseErrors"] = parse_errors
+    from drawing_dependency_report import from_pairs
+    out["dependency_report"] = from_pairs(pairs)
     return out
 
 

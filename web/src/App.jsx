@@ -81,6 +81,7 @@ const WORKSPACE_QUICK_AFTER = Object.freeze([
 ])
 import Legend from './components/Legend.jsx'
 import ResultPanel from './components/ResultPanel.jsx'
+import DrawingDependencyReport from './components/DrawingDependencyReport.jsx'
 import SelectionReadout from './components/SelectionReadout.jsx'
 import PromptBox, { shouldSkipPromptFocus } from './components/PromptBox.jsx'
 import RoutePanel from './components/RoutePanel.jsx'
@@ -6606,6 +6607,8 @@ export default function App() {
         <div className="environment-activity-fallback" ref={setActivityFallback} />
         <PersistentSeat destination={studioShell ? studioActivityHost : activityFallback}>
         <div className="result-block enter" style={{ '--rank': 2 }} ref={resultBlockRef}>
+          <DrawingDependencyReport key={resultDrawingKey}
+            report={(projectMode ? projectDrawing.intake : intake)?.dependency_report} />
           <ResultPanel
             navigation={viewNavigation}
             running={running}
