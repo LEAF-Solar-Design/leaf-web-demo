@@ -92,6 +92,8 @@ def _route(request, project_id, resource):
         retention_slug = r"[a-z0-9]+(?:-[a-z0-9]+)*"
         if tail in {"prepare", "definitions", "schedules", "occurrences"}:
             methods, query = {"POST"}, set()
+        elif tail == "executions":
+            methods, query = {"GET"}, {"limit", "after"}
         elif re.fullmatch(rf"definitions/({retention_slug})/versions/({_VERSION})(?:/export)?", tail):
             methods, query = {"GET"}, set()
         elif re.fullmatch(rf"schedules/({retention_slug})/versions/({_VERSION})", tail):
@@ -147,6 +149,14 @@ def _route(request, project_id, resource):
             raise _Failure(400, "WORKSPACE_INVALID_INPUT")
         if key == "after" and not re.fullmatch(r"[A-Za-z0-9_-]{1,1024}", value):
             raise _Failure(400, "WORKSPACE_INVALID_INPUT")
+        if resource == "integrations/retention/executions":
+            if key == "limit" and int(value) > 25:
+                raise _Failure(400, "WORKSPACE_INVALID_INPUT")
+            if key == "after":
+                remainder = len(value) % 4
+                tail = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".index(value[-1])
+                if remainder == 1 or (remainder == 2 and tail & 15) or (remainder == 3 and tail & 3):
+                    raise _Failure(400, "WORKSPACE_INVALID_INPUT")
     return f"/api/v1/projects/{project_id}/{resource}" + ("?" + urlencode(pairs) if pairs else "")
 
 
