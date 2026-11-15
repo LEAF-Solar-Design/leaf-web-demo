@@ -1,6 +1,7 @@
 """Canonical decoder supply declarations, plus optional real synthetic cage proof."""
 from pathlib import Path
 import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -48,12 +49,17 @@ def test_real_namespace_decoder_with_synthetic_movie_when_runner_supplies_it(tmp
     manifest = dict(material_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', media_type='video/quicktime',
                     sha256=hashlib.sha256(raw).hexdigest(), byte_size=len(raw))
     import time
-    value = video.decode(raw, manifest, identity=dict(
-        tenant_id='11111111-1111-4111-8111-111111111111', organization_id='11111111-1111-4111-8111-111111111111',
-        project_id='33333333-3333-4333-8333-333333333333', actor_binding_id='66666666-6666-4666-8666-666666666666',
-        edit_id='55555555-5555-4555-8555-555555555555'),
-        transcripts=[dict(material_id='99999999-9999-4999-8999-999999999999', sha256=hashlib.sha256(b'x').hexdigest(), size_bytes=1)],
-        recheck=lambda: None, deadline=time.monotonic() + 45)
+    try:
+        value = video.decode(raw, manifest, identity=dict(
+            tenant_id='11111111-1111-4111-8111-111111111111', organization_id='11111111-1111-4111-8111-111111111111',
+            project_id='33333333-3333-4333-8333-333333333333', actor_binding_id='66666666-6666-4666-8666-666666666666',
+            edit_id='55555555-5555-4555-8555-555555555555'),
+            transcripts=[dict(material_id='99999999-9999-4999-8999-999999999999', sha256=hashlib.sha256(b'x').hexdigest(), size_bytes=1)],
+            recheck=lambda: None, deadline=time.monotonic() + 45)
+    except video.VideoError as error:
+        if error.decoder_diagnostic is not None:
+            error.add_note('Contained decoder diagnostic: ' + json.dumps(error.decoder_diagnostic, sort_keys=True))
+        raise
     assert value['manifest']['decoded_frame_count'] == 4
     assert value['manifest']['frames'][0]['timestamp_ms'] == 0
     assert value['manifest']['frames'][-1]['timestamp_ms'] > 0
