@@ -26,6 +26,46 @@ const second = photo('22222222-2222-4222-8222-222222222222', 'Synthetic bread')
 const category = (image, slug = 'cakes') => ({ slug, images: [image] })
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
+describe('exported viewer background exclusion', () => {
+  for (const closeBy of ['Close', 'Escape']) it(`restores prior inert values before ${closeBy} returns focus`, () => {
+    render(<><nav data-testid="background"><a href="/">Home</a></nav>
+      <aside data-testid="already-inert" ref={node => { if (node) node.inert = true }}>Hidden before opening</aside>
+      <Gallery page={{}} category={category(first)} /></>)
+    const background = screen.getByTestId('background')
+    const already = screen.getByTestId('already-inert')
+    const trigger = screen.getByRole('button', { name: 'View Synthetic cake' })
+    fireEvent.click(trigger)
+    expect(background.inert).toBe(true)
+    expect(already.inert).toBe(true)
+    const focus = trigger.focus.bind(trigger)
+    vi.spyOn(trigger, 'focus').mockImplementation(() => {
+      expect(background.inert).not.toBe(true)
+      focus()
+    })
+    if (closeBy === 'Close') fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Close image' }))
+    else fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(background.inert).not.toBe(true)
+    expect(already.inert).toBe(true)
+    expect(document.activeElement).toBe(trigger)
+  })
+
+  it('restores background after category replacement and unmount', () => {
+    const view = image => <><nav data-testid="background">Home</nav><Gallery page={{}} category={category(image, image.material_id)} /></>
+    const mounted = render(view(first))
+    const background = screen.getByTestId('background')
+    fireEvent.click(screen.getByRole('button', { name: 'View Synthetic cake' }))
+    expect(background.inert).toBe(true)
+    mounted.rerender(view(second))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(background.inert).not.toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'View Synthetic bread' }))
+    expect(background.inert).toBe(true)
+    mounted.unmount()
+    expect(background.inert).not.toBe(true)
+  })
+})
+
 describe('actual exported portfolio image failure recovery', () => {
   it('detects an image that failed before hydration attached its error handler', () => {
     vi.spyOn(HTMLImageElement.prototype, 'complete', 'get').mockReturnValue(true)
