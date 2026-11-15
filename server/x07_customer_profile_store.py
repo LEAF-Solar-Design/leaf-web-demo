@@ -104,8 +104,10 @@ class CustomerProfileStore:
             return self._profile(db.execute('SELECT * FROM profile_versions WHERE customer_key=? ORDER BY version DESC LIMIT 1',
                                            (_key(customer_key),)).fetchone())
 
-    def apply_to_project(self, project_key, customer_key):
+    def apply_to_project(self, project_key, customer_key, *, expected_version=None):
         project_key, customer_key = _key(project_key), _key(customer_key)
+        if expected_version is not None and (type(expected_version) is not int or expected_version < 1):
+            raise ValueError('expected version must be a positive integer')
         with self._connection() as db:
             db.execute('BEGIN IMMEDIATE')
             applied = db.execute('SELECT * FROM project_applications WHERE project_key=?', (project_key,)).fetchone()
@@ -116,9 +118,14 @@ class CustomerProfileStore:
                                     (customer_key,)).fetchone()
                 if latest is None:
                     return None
+                if expected_version is not None and latest['version'] != expected_version:
+                    raise ValueError('profile version changed before project pin')
                 db.execute('INSERT INTO project_applications VALUES (?, ?, ?, ?)',
                            (project_key, customer_key, latest['profile_id'], latest['version']))
-            return self._application(db, project_key, customer_key)
+            result = self._application(db, project_key, customer_key)
+            if expected_version is not None and result['version'] != expected_version:
+                raise ValueError('project is pinned to another version')
+            return result
 
     def _application(self, db, project_key, customer_key):
         row = db.execute('''SELECT a.project_key, v.* FROM project_applications a

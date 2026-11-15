@@ -58,6 +58,7 @@
     ".gitignore"
   ],
   "mandatory_suite_ids": [
+    "server-x07-offline",
     "web-stage-source-contracts",
     "web-page-service-smoke",
     "ci-process-capture-core",
