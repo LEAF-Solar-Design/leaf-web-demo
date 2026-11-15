@@ -22,11 +22,18 @@ def _four_corners(entity):
     if len(points) != 4:
         return False
     try:
-        if any(not math.isfinite(float(v)) for p in points for v in p[:2]):
+        if any(len(p) < 2 or any(not math.isfinite(v) for v in p) for p in points):
             return False
-        return abs(sum(points[i][0] * points[(i + 1) % 4][1]
-                       - points[(i + 1) % 4][0] * points[i][1]
-                       for i in range(4))) > 0
+        if len({(p[0], p[1]) for p in points}) != 4:
+            return False
+        for i in range(4):
+            a, b, c = points[i - 1], points[i], points[(i + 1) % 4]
+            turn = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0])
+            if not math.isfinite(turn) or turn == 0:
+                return False
+        area = sum(points[i][0] * points[(i + 1) % 4][1]
+                   - points[(i + 1) % 4][0] * points[i][1] for i in range(4))
+        return math.isfinite(area) and abs(area) > 0
     except (TypeError, ValueError, IndexError):
         return False
 

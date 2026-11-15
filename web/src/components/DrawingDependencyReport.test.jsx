@@ -23,3 +23,24 @@ it('does not claim no dependencies when the report is absent', () => {
   view.rerender(<DrawingDependencyReport report={{ dependencies: [] }} />)
   expect(screen.getByText('No dependencies were present in the local intake records.')).toBeTruthy()
 })
+
+it('renders every dependency kind and HTML-like names as text with the coverage warning', () => {
+  const image = '<img src="missing" onerror="throw 1">'
+  const underlay = '<script>throw 2</script>'
+  const proxy = '<svg onload="throw 3">'
+  const shape = '<b>shape.shx</b>'
+  const warning = 'Local conversion records only; raw metadata completeness is unproven.'
+  const view = render(<DrawingDependencyReport report={{ coverage_note: warning, dependencies: [
+    { kind: 'image', name: image, disposition: 'image omitted' },
+    { kind: 'underlay', name: underlay, disposition: 'underlay omitted' },
+    { kind: 'proxy', name: proxy, disposition: 'proxy omitted' },
+    { kind: 'shape_font', name: shape, disposition: 'font remapped', remapped_to: 'sans-serif' },
+  ] }} />)
+  for (const name of [image, underlay, proxy, shape]) expect(screen.getByText(name)).toBeTruthy()
+  for (const value of ['image omitted', 'underlay omitted', 'proxy omitted', 'font remapped to sans-serif']) {
+    expect(screen.getByText(value)).toBeTruthy()
+  }
+  expect(screen.getByText(warning)).toBeTruthy()
+  expect(screen.getAllByRole('row')).toHaveLength(5)
+  expect(view.container.querySelector('img, script, svg, b')).toBeNull()
+})

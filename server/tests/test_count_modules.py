@@ -99,3 +99,47 @@ def test_input_order_preserves_set_identity_counts_and_highlight_membership(orde
     assert set(overlay["highlight_handles"]) == {"I1", "I2", "P1", "P2"}
     assert set(changed_overlay["highlight_handles"]) == set(overlay["highlight_handles"])
     assert len(changed_overlay["highlight_handles"]) == 4
+
+
+def test_closed_rings_and_reversed_winding_count_but_invalid_corners_do_not():
+    rectangle = [[0, 0, 0], [2, 0, 0], [2, 1, 0], [0, 1, 0]]
+    valid = [rectangle + [rectangle[0]], list(reversed(rectangle))]
+    invalid = [
+        [[0, 0], [1, 0], [2, 0], [3, 0]],
+        [[0, 0], [1, 0], [2, 0], [0, 1]],
+        [[0, 0], [2, 0], [2, 0], [0, 1]],
+    ]
+    for value in (float("nan"), float("inf"), float("-inf")):
+        for axis in range(3):
+            shape = [list(point) for point in rectangle]
+            shape[1][axis] = value
+            invalid.append(shape)
+    intake = {"polylines": [
+        {"layer": "Valid", "closed": True, "pts": points, "handle": f"V{i}"}
+        for i, points in enumerate(valid)] + [
+        {"layer": f"Invalid {i}", "closed": True, "pts": points, "handle": f"X{i}"}
+        for i, points in enumerate(invalid)]}
+    listing, _ = module.run(intake, {})
+    assert [(row["layer"], row["count"]) for row in listing["sets"]] == [("Valid", 2)]
+    result, overlay = module.run(intake, {"set_id": listing["sets"][0]["set_id"]})
+    assert result["count"] == 2
+    assert set(overlay["highlight_handles"]) == {"V0", "V1"}
+
+
+def test_escaped_unicode_set_names_roundtrip_without_identity_collisions():
+    names = [("\u5c4b\u6839", 'Panel "A"'), ('roof,"west"', r"block\part"),
+             ("a,b", "c"), ("a", "b,c")]
+    intake = {"inserts": [{"layer": layer, "name": block, "handle": f"H{i}-{j}"}
+        for i, (layer, block) in enumerate(names) for j in range(2)]}
+    listing, _ = module.run(intake, {})
+    ids = [row["set_id"] for row in listing["sets"]]
+    assert len(ids) == len(set(ids)) == 4
+    for row in listing["sets"]:
+        assert json.loads(row["set_id"]) == ["INSERT", row["layer"], row["block"]]
+        counted, overlay = module.run(intake, {"set_id": row["set_id"]})
+        index = names.index((row["layer"], row["block"]))
+        assert counted["count"] == 2
+        assert set(overlay["highlight_handles"]) == {f"H{index}-0", f"H{index}-1"}
+    result, overlay = module.run(intake, {"set_ids": ids})
+    assert result["count"] == 8
+    assert set(overlay["highlight_handles"]) == {f"H{i}-{j}" for i in range(4) for j in range(2)}

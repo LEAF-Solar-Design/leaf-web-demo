@@ -70,3 +70,21 @@ def test_dependency_paths_are_reported_without_any_filesystem_access(path, monke
         ("xref", path, "detached"), ("font", path, "font remapped"),
         ("shape_font", path, "font remapped"), ("image", path, "image omitted"),
         ("underlay", path, "underlay omitted")}
+
+
+def test_unicode_records_reorder_stably_deduplicate_by_kind_and_preserve_input():
+    from copy import deepcopy
+
+    shared = '\u5c4b\u6839,"shared"\\name'
+    records = [[(0, "STYLE"), (3, shared)], [(0, "IMAGEDEF"), (1, shared)],
+               [(0, "STYLE"), (70, "1"), (3, shared)],
+               [(0, "PDFDEFINITION"), (1, "\u53c2\u7167.pdf")],
+               [(0, "STYLE"), (3, shared)]]
+    pairs = [pair for record in records for pair in record]
+    reordered = [pair for record in reversed(records) for pair in record]
+    before, reordered_before = deepcopy(pairs), deepcopy(reordered)
+    report = from_pairs(pairs)
+    assert report == from_pairs(reordered)
+    assert pairs == before and reordered == reordered_before
+    assert [(row["kind"], row["name"]) for row in report["dependencies"]] == [
+        ("font", shared), ("image", shared), ("shape_font", shared), ("underlay", "\u53c2\u7167.pdf")]
