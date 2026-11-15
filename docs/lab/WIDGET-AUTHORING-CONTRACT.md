@@ -5,6 +5,11 @@ how the same project is presented; it does not create another project or another
 product. This document describes the editor/client contract. It does not grant
 service access, publication, financial-data access or production exposure.
 
+If the browser cannot create or start a definition download, the editor shows
+a local error and keeps the draft and stored revision. Choose Download again
+to retry explicitly. A successful retry clears that download error. The export
+still does not save edits to the project.
+
 ## Host inputs and lifetime
 
 Mount `WidgetsView` from `web/src/lab/widgets/WidgetsView.jsx` with the current
