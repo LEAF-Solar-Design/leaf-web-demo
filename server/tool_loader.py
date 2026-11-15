@@ -1263,6 +1263,14 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
         return err_envelope(ErrorCode.BAD_PARAMS, "params schema: " + "; ".join(perrs),
                             retryable=False, tool=name, version=version, timing_ms=_ms())
 
+    # Instant artifacts with no batch fallback must never resolve onto a
+    # same-named compatibility body in this batch executor.
+    if tool.get("execution_class") == "instant" and tool.get("batch_fallback") is False:
+        return err_envelope(
+            ErrorCode.BAD_PARAMS,
+            "tool requires the instant executor (batch_fallback=false); batch execution is unavailable",
+            retryable=False, tool=name, version=version, timing_ms=_ms())
+
     test_filename = None
     if test_source is not None:
         if aps_live:
