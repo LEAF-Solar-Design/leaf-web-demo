@@ -24,6 +24,7 @@ export const PROJECT_SOLAR_WORKSPACE_REASONS = Object.freeze({
   proposal_ready: 'Proposal ready for review.',
   run_outcome_unknown: 'The run outcome is unknown. Check its job before submitting again.',
   run_refused: 'The server refused this Solar request.',
+  solve_preparation_refused: 'This saved drawing could not be prepared for Solve. Refresh it and try again.',
   proposal_unreadable: 'This Solar proposal could not be read.',
   proposal_required: 'Run a solve and review its proposal before committing.',
   proposal_unpublished: 'This proposal has not published a drawing version.',
@@ -72,6 +73,7 @@ export function projectSolarWorkspaceReason(code) {
     case 'proposal_ready': return PROJECT_SOLAR_WORKSPACE_REASONS.proposal_ready
     case 'run_outcome_unknown': return PROJECT_SOLAR_WORKSPACE_REASONS.run_outcome_unknown
     case 'run_refused': return PROJECT_SOLAR_WORKSPACE_REASONS.run_refused
+    case 'solve_preparation_refused': return PROJECT_SOLAR_WORKSPACE_REASONS.solve_preparation_refused
     case 'proposal_unreadable': return PROJECT_SOLAR_WORKSPACE_REASONS.proposal_unreadable
     case 'proposal_required': return PROJECT_SOLAR_WORKSPACE_REASONS.proposal_required
     case 'proposal_unpublished': return PROJECT_SOLAR_WORKSPACE_REASONS.proposal_unpublished
@@ -321,7 +323,9 @@ export default function ProjectSolarReadPanel({ tool, solarBinding, authorityKey
           reportedValid.current = valid
           setForm((value) => value.valid === valid ? value : { ...value, valid })
         }} />
-      <p role="status" aria-live="polite">{projectSolarWorkspaceReason(reason)}
+      <p role="status" aria-live="polite">{reason === 'read_refused' && visible.code === 'REPORT_RESOURCE_LIMIT'
+        ? 'This PDF exceeds the inspection limit. Try a smaller report. Your saved tracking is kept.'
+        : projectSolarWorkspaceReason(reason)}
         {reason === 'read_refused' && <> <code>{visible.code}</code></>}
       </p>
       <button ref={readButton} type="submit" disabled={!!owner.reason || visible.phase === 'reading' || busy || !activeForm.valid}>

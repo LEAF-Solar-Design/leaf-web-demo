@@ -64,14 +64,17 @@ def test_page_size_equals_golden(fixture_sections, golden):
 
 def _pdf(content, page_extra=b"", resources=b"", mediabox=b"0 0 200 100"):
     """A minimal one-page PDF with a correct xref table."""
+    chunks = content if isinstance(content, list) else [content]
+    contents_ref = (b"[" + b" ".join(f"{i + 4} 0 R".encode() for i in range(len(chunks))) + b"]"
+                    if isinstance(content, list) else b"4 0 R")
     objects = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [" + mediabox + b"] /Contents 4 0 R "
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [" + mediabox + b"] /Contents " + contents_ref + b" "
         b"/Resources << " + resources + b" >> " + page_extra + b">>",
-        b"<< /Length " + str(len(content)).encode() + b" >>\nstream\n" + content
-        + b"\nendstream",
     ]
+    objects.extend(b"<< /Length " + str(len(chunk)).encode() + b" >>\nstream\n" + chunk
+                   + b"\nendstream" for chunk in chunks)
     out = bytearray(b"%PDF-1.4\n")
     offsets = []
     for number, body in enumerate(objects, start=1):
@@ -86,6 +89,25 @@ def _pdf(content, page_extra=b"", resources=b"", mediabox=b"0 0 200 100"):
 
 
 HELVETICA = b"/Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >>"
+
+
+def test_indirect_content_array_matches_single_stream():
+    chunks = [b"1 0 0 RG 10 10 m 20 20 l S\n", b"BT /F1 10 Tf 20 20 Td (1.1) Tj ET\n"]
+    single = pdf.extract_primitives(_pdf(b"".join(chunks), resources=HELVETICA))
+    multiple = pdf.extract_primitives(_pdf(chunks, resources=HELVETICA))
+    assert pdf.primitives_to_golden(multiple) == pdf.primitives_to_golden(single)
+
+
+@pytest.mark.parametrize("remaining", [-1, 0, 1])
+def test_indirect_content_array_total_bound(monkeypatch, remaining):
+    chunks = [b"1 0 0 RG 10 10 m 20 20 l S\n", b"BT /F1 10 Tf 20 20 Td (1.1) Tj ET\n"]
+    monkeypatch.setattr(pdf, "MAX_CONTENT_BYTES", sum(map(len, chunks)) + remaining)
+    if remaining < 0:
+        with pytest.raises(SolarEdgePdfError, match="CONTENT_TOO_LARGE"):
+            pdf.extract_primitives(_pdf(chunks, resources=HELVETICA))
+    else:
+        result = pdf.extract_primitives(_pdf(chunks, resources=HELVETICA))
+        assert "".join(letter[0] for letter in result.letters) == "1.1"
 
 
 def test_feed_a_is_raw_flipped_and_ignores_q_restore():
@@ -152,6 +174,123 @@ def test_refuses_oversize_pdf(monkeypatch):
     with pytest.raises(SolarEdgePdfError) as err:
         pdf.extract_primitives(_pdf(b"1 0 0 RG"))
     assert err.value.code == "PDF_TOO_LARGE"
+
+
+def _object_stream(data, count, first):
+    import zlib
+    from pdfminer.psparser import LIT
+    return pdf.PDFStream({"Type": LIT("ObjStm"), "N": count, "First": first,
+                          "Filter": LIT("FlateDecode")}, zlib.compress(data))
+
+
+def _object_document():
+    doc = object.__new__(pdf._BoundedPDFDocument)
+    doc.object_stream_bytes = doc.object_stream_objects = 0
+    return doc
+
+
+def test_object_stream_below_limit_and_exact_index():
+    from pdfminer.psparser import KWD
+    objects, count = _object_document()._get_objects(_object_stream(b"5 0 8 5 null\n42\n", 2, 8))
+    assert count == 2
+    assert objects == [5, 0, 8, 5, KWD(b"null"), 42]
+
+
+def test_object_stream_refuses_count_before_decode(monkeypatch):
+    monkeypatch.setattr(pdf, "MAX_OBJECT_STREAM_OBJECTS", 1)
+    stream = _object_stream(b"not decoded", 2, 0)
+    with pytest.raises(SolarEdgePdfError, match="RESOURCE_LIMIT"):
+        _object_document()._get_objects(stream)
+    assert stream.data is None
+
+
+def test_object_stream_expansion_is_bounded(monkeypatch):
+    import tracemalloc
+    stream = _object_stream(b"5 0 " + b" " * (4 * 1024 * 1024), 1, 4)
+    monkeypatch.setattr(pdf, "MAX_OBJECT_STREAM_BYTES", 65536)
+    tracemalloc.start()
+    try:
+        with pytest.raises(SolarEdgePdfError, match="RESOURCE_LIMIT"):
+            _object_document()._get_objects(stream)
+        assert tracemalloc.get_traced_memory()[1] < 512 * 1024
+    finally:
+        tracemalloc.stop()
+    assert stream.data is None
+
+
+@pytest.mark.parametrize("data,count,first", [
+    (b"5 0 null null\n", 1, 4),
+    (b"5 0 5 5 null\n42\n", 2, 8),
+    (b"5 0 8 0 null\n42\n", 2, 8),
+    (b"5 0 null\n", True, 4),
+])
+def test_object_stream_rejects_false_or_conflicting_indexes(data, count, first):
+    with pytest.raises(SolarEdgePdfError, match="MALFORMED_PDF"):
+        _object_document()._get_objects(_object_stream(data, count, first))
+
+
+def test_object_stream_document_total_is_cumulative(monkeypatch):
+    monkeypatch.setattr(pdf, "MAX_OBJECT_STREAM_OBJECTS", 1)
+    doc = _object_document()
+    assert doc._get_objects(_object_stream(b"5 0 null\n", 1, 4))[1] == 1
+    with pytest.raises(SolarEdgePdfError, match="RESOURCE_LIMIT"):
+        doc._get_objects(_object_stream(b"8 0 null\n", 1, 4))
+
+
+def test_cmap_replacement_is_checked_before_mapping(monkeypatch):
+    monkeypatch.setattr(pdf, "MAX_CMAP_REPLACEMENT", 2)
+    manager = pdf._ResourceManager()
+    cmap = pdf._BoundedUnicodeMap(manager)
+    cmap.add_cid2unichr(1, "AB".encode("utf-16-be"))
+    assert cmap.cid2unichr == {1: "AB"}
+    with pytest.raises(SolarEdgePdfError, match="RESOURCE_LIMIT"):
+        cmap.add_cid2unichr(2, "ABC".encode("utf-16-be"))
+    assert cmap.cid2unichr == {1: "AB"}
+
+
+def test_cmap_entries_are_cumulative_even_for_repeated_cid(monkeypatch):
+    monkeypatch.setattr(pdf, "MAX_CMAP_ENTRIES", 2)
+    manager = pdf._ResourceManager()
+    one, two = pdf._BoundedUnicodeMap(manager), pdf._BoundedUnicodeMap(manager)
+    one.add_cid2unichr(1, b"\x00A")
+    two.add_cid2unichr(1, b"\x00B")
+    with pytest.raises(SolarEdgePdfError, match="RESOURCE_LIMIT"):
+        two.add_cid2unichr(1, b"\x00C")
+    assert two.cid2unichr == {1: "B"}
+
+
+def test_cmap_inheritance_is_explicitly_unsupported():
+    import io
+    parser = pdf._BoundedCMapParser(pdf._BoundedUnicodeMap(pdf._ResourceManager()),
+                                    io.BytesIO(b"begincmap /Identity-H usecmap endcmap"))
+    with pytest.raises(SolarEdgePdfError, match="CMAP_INHERITANCE_UNSUPPORTED"):
+        parser.run()
+
+
+@pytest.mark.parametrize("text,refused", [(b"ABC", False), (b"ABCD", True)])
+def test_extracted_character_budget_before_append(monkeypatch, text, refused):
+    monkeypatch.setattr(pdf, "MAX_TEXT_CHARACTERS", 3)
+    data = _pdf(b"BT /F1 10 Tf (" + text + b") Tj ET", resources=HELVETICA)
+    if refused:
+        with pytest.raises(SolarEdgePdfError, match="RESOURCE_LIMIT"):
+            pdf.extract_primitives(data)
+    else:
+        assert "".join(item[0] for item in pdf.extract_primitives(data).letters) == "ABC"
+
+
+@pytest.mark.parametrize("unit", [b"1", b"1.0", b"null"])
+def test_page_unit_one_keeps_labels(unit):
+    # pdfminer discards null dictionary values, as an absent optional PDF entry.
+    value = pdf.extract_primitives(_pdf(b"BT /F1 4 Tf (1.1) Tj ET", resources=HELVETICA,
+                                        page_extra=b"/UserUnit " + unit + b" "))
+    assert "".join(item[0] for item in value.letters) == "1.1"
+
+
+@pytest.mark.parametrize("unit", [b"2", b"0", b"-1", b"/NaN", b"9" * 310,
+                                  b"true", b"[1]", b"4 0 R"])
+def test_page_unit_outside_proven_subset_refuses(unit):
+    with pytest.raises(SolarEdgePdfError, match="PAGE_UNIT_UNSUPPORTED"):
+        pdf.extract_primitives(_pdf(b"", page_extra=b"/UserUnit " + unit + b" "))
 
 
 def test_refuses_too_many_operators(monkeypatch):

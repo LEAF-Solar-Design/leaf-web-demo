@@ -408,6 +408,7 @@ _OUTPUT_FAILURES = {
     "REPORT_BUSY": (503, "The PDF parser is busy. Try again shortly."),
     "REPORT_PARSE_TIMEOUT": (503, "The PDF could not be parsed within the time limit."),
     "REPORT_PARSE_UNAVAILABLE": (503, "The PDF parser is unavailable."),
+    "REPORT_RESOURCE_LIMIT": (422, "The PDF exceeds an inspection resource limit."),
     "project_execution_disabled": (409, "Project Solar outputs are not enabled on this server."),
     "SIP_R6_INVALID_REQUEST": (400, "Project Solar read request is invalid."),
     "SIP_R6_REQUEST_TOO_LARGE": (413, "Project Solar read request is too large."),
@@ -447,6 +448,8 @@ def _output_failure(reason):
         "IMPORT_STORE_UNAVAILABLE", "IMPORT_WRITES_DRAINED", "REPORT_WRITES_DRAINED",
         "REPORT_BUSY", "REPORT_PARSE_TIMEOUT", "REPORT_PARSE_UNAVAILABLE")
     body = err_envelope(code, message, retry)
+    if reason == "REPORT_RESOURCE_LIMIT":
+        body["error"]["next_action"] = "Use a smaller report. Your saved tracking is unchanged."
     body["error"]["reason_code"] = reason
     return JSONResponse(content=body, status_code=status, headers=_NO_STORE)
 

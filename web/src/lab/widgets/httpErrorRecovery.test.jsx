@@ -1,0 +1,37 @@
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, expect, it, vi } from 'vitest'
+import WidgetsView from './WidgetsView.jsx'
+
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
+const response = body => ({ ok: true, status: 200, json: async () => body })
+
+it.each([[413, 'HTML'], [429, 'empty'], [500, 'HTML']])('retains draft/head after HTTP %s with an %s body until explicit retry', async (status, body) => {
+  const fetch = vi.fn().mockResolvedValueOnce(response({ revision: 1 }))
+    .mockResolvedValueOnce({ ok: false, status, json: async () => { throw new SyntaxError(body === 'HTML' ? 'Unexpected token < PRIVATE_PROXY_BODY' : 'Unexpected end of JSON input') } })
+    .mockResolvedValueOnce(response({ revision: 2 }))
+  vi.stubGlobal('fetch', fetch)
+  render(<WidgetsView />)
+  fireEvent.change(screen.getByLabelText('Document ID'), { target: { value: `http-error-${status}` } })
+  const click = name => fireEvent.click(screen.getByRole('button', { name, exact: true }))
+  click('New'); click('Add text')
+  await act(async () => click('Save'))
+  expect(screen.getByRole('status')).toHaveTextContent('Saved revision 1.')
+  fireEvent.change(screen.getByLabelText('Text'), { target: { value: 'Keep the local draft' } })
+  await act(async () => click('Save'))
+  expect(screen.getByRole('alert')).toHaveTextContent('The document request failed.')
+  expect(screen.getByRole('alert')).not.toHaveTextContent('PRIVATE_PROXY_BODY')
+  expect(screen.getByRole('alert').textContent.length).toBeLessThan(160)
+  expect(screen.getByRole('status')).toHaveTextContent('Your local edits are kept.')
+  expect(screen.getByLabelText('Text')).toHaveValue('Keep the local draft')
+  expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeEnabled()
+  expect(fetch).toHaveBeenCalledTimes(2)
+  await act(async () => {})
+  expect(fetch).toHaveBeenCalledTimes(2)
+  await act(async () => click('Save'))
+  const saved = JSON.parse(fetch.mock.calls[2][1].body)
+  expect(saved.expected_head).toBe(1)
+  expect(saved.graph.formats.la.els[0].text).toBe('Keep the local draft')
+  expect(screen.getByRole('status')).toHaveTextContent('Saved revision 2.')
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  expect(fetch).toHaveBeenCalledTimes(3)
+})

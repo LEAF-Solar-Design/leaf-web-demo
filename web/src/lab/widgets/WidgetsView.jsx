@@ -140,6 +140,9 @@ function ProjectWidgetsView({ projectId, accountScope, scopeKey, hidden = false,
       link.download = `widget-${loadedId}.json`
       document.body.appendChild(link)
       link.click()
+      setFailure((previous) => previous?.code === 'widget_definition_download' ? null : previous)
+    } catch {
+      setFailure({ code: 'widget_definition_download', detail: 'Unable to download the widget definition. Your edits are kept.' })
     } finally {
       link?.remove()
       if (url) setTimeout(() => URL.revokeObjectURL(url), 0)

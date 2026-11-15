@@ -22,6 +22,7 @@ import { NO_OCCLUDERS, useGroundWindow, windowStyle } from '../site/groundWindow
 import { STUDIO_DRAWING_OCCLUDERS } from '../site/drawingOccluders.js'
 import './ops-workspace.css'
 import { humanizeError } from '../errorHumanize.js'
+import { DuplicateOriginalMember, parseProjectOriginalJson } from './projectOriginalJson.js'
 
 const STUDIO_CHROME_OCCLUDERS = Object.freeze(STUDIO_DRAWING_OCCLUDERS.filter(([selector]) =>
   ['header.top', '#drafting-ribbon', '.bar.bar-command-line', 'footer.foot-bar'].includes(selector)))
@@ -30,6 +31,8 @@ const empty = () => ({ scope: null, datasets: [], elements: [], datasetCursor: n
 const blankForm = () => ({ dataset: '', id: '', title: '', kind: 'table', columns: [], x: '', y: '', editing: null, window: '', query: null, grouping: false, pairKey: '', providerField: '', firstProvider: '', secondProvider: '' })
 const xKinds = ['date', 'instant', 'number', 'count']
 const yKinds = ['number', 'count', 'money', 'ratio', 'duration']
+const recipeKey = value => JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item)
+  ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item)
 const referenceKey = (ref) => JSON.stringify([ref.id, ref.version, ref.digest])
 const namedWindows = (dataset) => dataset?.derivation?.plan.kind === 'group_count' &&
   dataset.fields.some(field => field.id === 'window_id' && field.type.kind === 'identifier') ? dataset.derivation.plan.windows : []
@@ -96,8 +99,8 @@ function ProjectMaterialImport({ projectId, client, signal, guard, onImported, o
       const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (byte) => byte.toString(16).padStart(2, '0')).join('')
       if (digest !== material.sha256) throw new Error('File digest changed. Nothing was imported.')
       let original
-      try { original = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) }
-      catch { throw new Error('Invalid UTF-8 JSON.') }
+      try { original = parseProjectOriginalJson(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) }
+      catch (failure) { if (failure instanceof DuplicateOriginalMember) throw failure; throw new Error('Invalid UTF-8 JSON.') }
       const found = []
       const stack = [{ value: original, path: '', depth: 0 }]
       let arrayListBytes = 2
@@ -144,9 +147,16 @@ function ProjectMaterialImport({ projectId, client, signal, guard, onImported, o
         if (size > 262144) { setPointer(null); setError('Context too large. Original and last valid dataset retained.'); return }
       } catch { setPointer(null); setError('Context unavailable. Original and last valid dataset retained.'); return }
     }
-    const first = rows.find((row) => row && typeof row === 'object' && !Array.isArray(row))
-    setFields(Object.keys(first || {}).filter((key) => /^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(key) &&
-      !['__proto__', 'prototype', 'constructor'].includes(key)).slice(0, 100).map((key, index) => ({
+    const keys = new Set()
+    for (const row of rows) {
+      if (!row || typeof row !== 'object' || Array.isArray(row)) continue
+      for (const key of Object.keys(row)) {
+        if (/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(key) && !['__proto__', 'prototype', 'constructor'].includes(key)) keys.add(key)
+        if (keys.size === 100) break
+      }
+      if (keys.size === 100) break
+    }
+    setFields([...keys].map((key, index) => ({
       id: key, label: key, pointer: `/${key}`, kind: 'text', conversion: 'identity', key: index === 0, nullable: false,
     })))
   }
@@ -217,10 +227,14 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   const [handoff, setHandoff] = useState(null)
   const boardRef = useRef(null)
   const resultRef = useRef(null)
+  const viewFeedback = useRef(null)
   const composeFeedback = useRef(null)
   const [composeError, setComposeError] = useState('')
   const [savedReadback, setSavedReadback] = useState(null)
   useLayoutEffect(() => { if (composeError || savedReadback) composeFeedback.current?.focus() }, [composeError, savedReadback])
+  useLayoutEffect(() => {
+    if (state.error && state.errorOperation?.owner === 'view' && document.activeElement === document.body) viewFeedback.current?.focus()
+  }, [state.error, state.errorOperation])
   const generation = useRef(0)
   const context = useRef(null)
   const viewGeneration = useRef(0)
@@ -542,8 +556,9 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   }
   function compose(event) {
     event.preventDefault()
-    if (savedReadback) return
+    if (savedReadback || !canEdit) return
     operation('Saving view…', async (ctx) => {
+      if (!/[\p{L}\p{N}\p{P}\p{S}]/u.test(form.title)) throw new Error('Enter a visible view title.')
       const dataset = state.datasets.find((item) => referenceKey(item.reference) === form.dataset)
       if (!dataset) throw new Error('Select an authorized dataset.')
       const fields = form.kind === 'table' ? form.columns : [...new Set([form.x, form.y])]
@@ -575,6 +590,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       const saved = await client.saveElement(projectId, parsed.data, { signal: ctx.controller.signal,
         ...(form.editing ? { expectedRevision: form.editing.revision } : {}) })
       if (!current(ctx)) return
+      if (recipeKey(saved.element) !== recipeKey(parsed.data)) throw new Error('The saved recipe did not match your draft. Reload saved views before retrying.')
       setState((old) => ({ ...old, notice: `Saved ${saved.element.title}, revision ${saved.revision}.`,
         elements: [...old.elements.filter((record) => record.element.id !== saved.element.id), saved] }))
       setForm((old) => ({ ...old, editing: saved }))
@@ -637,7 +653,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       {message ? <p role="status">{message}</p> : visible && <>
         <OpsHomePanel active={active} />
         <p role="status" aria-live="polite" tabIndex={-1} ref={resultRef}>{state.notice || state.pending}</p>
-        {state.error && !viewError && <div role="alert"><p>{humanizeError(state.error)}</p>{state.retryable && <button disabled={pending} onClick={() => state.errorOperation ? state.errorOperation.retry() : setRetry((value) => value + 1)}>Retry integrations</button>}</div>}
+        {state.error && !viewError && <div role="alert" ref={viewFeedback} tabIndex={-1}><p>{humanizeError(state.error)}</p>{state.retryable && <button disabled={pending} onClick={() => state.errorOperation ? state.errorOperation.retry() : setRetry((value) => value + 1)}>Retry integrations</button>}</div>}
         {state.scope && <details className="ops-advanced" open={!hasLinkedDevice}>
           <summary>Workflows and data</summary>
           {canEdit && context.current && <WorkflowScheduleDraftBrowser
@@ -712,13 +728,15 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
             <ul>{state.elements.map((record) => <li key={record.element.id}><button disabled={pending} onClick={() => chooseSaved(record)}>{record.element.title} · revision {record.revision}</button></li>)}</ul>
             {state.elementCursor && <button disabled={pending} onClick={() => loadMore('elements')}>Load more saved views</button>}
           </section>
-          <form onSubmit={compose} aria-label="Compose native view"><h2>Compose native view</h2>
+          <form onSubmit={compose} onKeyDown={event => {
+            if (event.key === 'Enter' && event.nativeEvent.isComposing) event.preventDefault()
+          }} aria-label="Compose native view"><h2>Compose native view</h2>
             {composeError && <p ref={composeFeedback} tabIndex={-1} role="alert">{composeError} Your draft is retained. Review it and save again.</p>}
             {savedReadback && <div ref={composeFeedback} tabIndex={-1} role="alert">
               <p>Your view was saved, but its data could not be loaded. {savedReadback.error}</p>
               <button type="button" disabled={pending} onClick={() => operation('Loading saved view…', (ctx) => readSavedView(savedReadback.record, ctx))}>Reload view</button>
             </div>}
-            <fieldset disabled={pending || Boolean(savedReadback)}><legend>{form.editing ? `Update revision ${form.editing.revision}` : 'Create a view'}</legend>
+            <fieldset disabled={pending || Boolean(savedReadback) || !canEdit}><legend>{form.editing ? `Update revision ${form.editing.revision}` : 'Create a view'}</legend>
               <label>Dataset<select required value={form.dataset} onChange={(event) => setForm({ ...blankForm(), dataset: event.target.value })}>
                 <option value="">Select dataset</option>{state.datasets.map((item) => <option key={referenceKey(item.reference)} value={referenceKey(item.reference)}>{item.title} · version {item.reference.version}</option>)}
               </select></label>
@@ -778,7 +796,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
               </>}
             </> : <>
             {state.read && state.previousRead && <p role="status">Previous result. {pending ? 'Refreshing view…' : 'The latest read failed; showing the last successful result.'}</p>}
-            {viewError && <div role="alert"><p>{humanizeError(state.error)}</p>{state.retryable && <button disabled={pending} onClick={retryView}>Retry view</button>}</div>}
+            {viewError && <div role="alert" ref={viewFeedback} tabIndex={-1}><p>{humanizeError(state.error)}</p>{state.retryable && <button disabled={pending} onClick={retryView}>Retry view</button>}</div>}
             {(state.read || pending) && <DatasetElement element={state.selected.element} read={state.read} preferences={preferences} isLoading={pending}
               onRetry={retryView}
               onLoadMore={(cursor) => loadView(state.selected, state.historical, cursor)} />}
