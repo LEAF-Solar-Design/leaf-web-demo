@@ -121,7 +121,8 @@ def _dispatch(operation):
 def context_route(project_id: UUID, input_version_id: UUID, drawing_id: Optional[UUID] = None,
                   tenant=Depends(deps.require_active_tenant),
                   x_org_id: Optional[UUID] = Header(default=None),
-                  x_project_id: Optional[UUID] = Header(default=None)):
+                  x_project_id: Optional[UUID] = Header(default=None), *,
+                  prepare_solve: bool = False, solve_frame: Optional[str] = None):
     def operation():
         _headers(tenant, project_id, x_org_id, x_project_id)
         context = service.resolve_context(tenant, project_id, input_version_id, drawing_id=drawing_id)
@@ -130,7 +131,11 @@ def context_route(project_id: UUID, input_version_id: UUID, drawing_id: Optional
         identity.update(input_version_id=str(binding.input_version_id),
                         head_version_id=str(binding.head_version_id), is_head=binding.is_head,
                         intake_sha256=context.intake_sha256)
-        return {"context": identity, "intake": context.intake}
+        result = {"context": identity, "intake": context.intake}
+        if prepare_solve or solve_frame is not None:
+            from solar_project_solve_preparation import prepare_solve as prepare
+            result["solve_preparation"] = prepare(context.intake, solve_frame, is_head=binding.is_head)
+        return result
     return _dispatch(operation)
 
 
