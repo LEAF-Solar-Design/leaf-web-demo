@@ -57,7 +57,7 @@ describe("opt-in static Next host wiring", () => {
       toolchainSha256: env.LEAF_STATIC_NEXT_TOOLCHAIN_SHA256, isolation: "filesystem-and-network" });
     expect(deps.s3Client.send).not.toHaveBeenCalled();
     expect(deps.codeBuildClient.send).not.toHaveBeenCalled();
-    const executionId = env.LEAF_STATIC_NEXT_BINDING_ID;
+    const executionId = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     deps.s3Client.send.mockResolvedValue({ Body: {
       transformToByteArray: async () => Buffer.from(JSON.stringify({ executionId, bundleSha256: "b".repeat(64) })),
     } });

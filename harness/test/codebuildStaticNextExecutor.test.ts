@@ -12,9 +12,10 @@ const id = (n: number) => `00000000-0000-0000-0000-${String(n).padStart(12, "0")
 describe("durable static Next bundle resolver", () => {
   it("returns the persisted hash using only get", async () => {
     const f = fixture();
-    f.objects.set(`map/${id(1)}.json`, Buffer.from(JSON.stringify({ executionId: id(1), bundleSha256: "a".repeat(64) })));
-    await expect(createStaticNextBundleResolver(f.store)(id(1))).resolves.toBe("a".repeat(64));
-    expect(f.store.get).toHaveBeenCalledExactlyOnceWith(`map/${id(1)}.json`);
+    const executionId = nextRequestDigest(scope);
+    f.objects.set(`map/${executionId}.json`, Buffer.from(JSON.stringify({ executionId, bundleSha256: "a".repeat(64) })));
+    await expect(createStaticNextBundleResolver(f.store)(executionId)).resolves.toBe("a".repeat(64));
+    expect(f.store.get).toHaveBeenCalledExactlyOnceWith(`map/${executionId}.json`);
     expect(f.store.putIfAbsent).not.toHaveBeenCalled();
     expect(f.provider.start).not.toHaveBeenCalled();
   });
@@ -22,24 +23,26 @@ describe("durable static Next bundle resolver", () => {
   it.each(["absent", "legacy", "malformed", "wrong id", "bad hash", "uppercase hash", "null", "array"])(
     "returns null for %s", async variant => {
       const f = fixture();
-      let record: unknown = { executionId: id(1), bundleSha256: "a".repeat(64) };
-      if (variant === "legacy") record = { executionId: id(1), buildId: "legacy" };
-      if (variant === "wrong id") record = { executionId: id(2), bundleSha256: "a".repeat(64) };
-      if (variant === "bad hash") record = { executionId: id(1), bundleSha256: "a".repeat(63) };
-      if (variant === "uppercase hash") record = { executionId: id(1), bundleSha256: "A".repeat(64) };
+      const executionId = nextRequestDigest(scope);
+      let record: unknown = { executionId, bundleSha256: "a".repeat(64) };
+      if (variant === "legacy") record = { executionId, buildId: "legacy" };
+      if (variant === "wrong id") record = { executionId: nextRequestDigest({ ...scope, jobId: id(6) }), bundleSha256: "a".repeat(64) };
+      if (variant === "bad hash") record = { executionId, bundleSha256: "a".repeat(63) };
+      if (variant === "uppercase hash") record = { executionId, bundleSha256: "A".repeat(64) };
       if (variant === "null") record = null;
       if (variant === "array") record = [];
-      if (variant !== "absent") f.objects.set(`map/${id(1)}.json`, Buffer.from(
+      if (variant !== "absent") f.objects.set(`map/${executionId}.json`, Buffer.from(
         variant === "malformed" ? "not json" : JSON.stringify(record)));
-      await expect(createStaticNextBundleResolver(f.store)(id(1))).resolves.toBeNull();
-      expect(f.store.get).toHaveBeenCalledExactlyOnceWith(`map/${id(1)}.json`);
+      await expect(createStaticNextBundleResolver(f.store)(executionId)).resolves.toBeNull();
+      expect(f.store.get).toHaveBeenCalledExactlyOnceWith(`map/${executionId}.json`);
       expect(f.store.putIfAbsent).not.toHaveBeenCalled();
       expect(f.provider.start).not.toHaveBeenCalled();
       expect(f.provider.state).not.toHaveBeenCalled();
       expect(f.provider.stop).not.toHaveBeenCalled();
     });
 
-  it.each(["invalid", "a".repeat(64), "../map", ""])("rejects non-UUID %s before reading", async executionId => {
+  it.each(["invalid", id(1), "a".repeat(63), "a".repeat(65), "A".repeat(64), "g".repeat(64),
+    `${"a".repeat(64)}\n`, "../map", ""])("rejects non-digest %s before reading", async executionId => {
     const f = fixture();
     await expect(createStaticNextBundleResolver(f.store)(executionId)).resolves.toBeNull();
     expect(f.store.get).not.toHaveBeenCalled();

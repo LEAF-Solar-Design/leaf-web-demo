@@ -15,7 +15,7 @@ export interface StaticNextCodeBuildClient {
 }
 
 function validKey(key: string): void {
-  if (!/^(in|out|map)\/[0-9a-f-]{36}\.json$/.test(key) || !key.endsWith(".json")) throw new Error("static_next_key_invalid");
+  if (!/^(in|out|map)\/[0-9a-f]{64}\.json$/.test(key) || !key.endsWith(".json")) throw new Error("static_next_key_invalid");
 }
 function awsError(error: unknown): { name?: string; $metadata?: { httpStatusCode?: number } } {
   return error && typeof error === "object" ? error : {};

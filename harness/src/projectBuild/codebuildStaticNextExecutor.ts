@@ -29,7 +29,7 @@ export interface CodeBuildStaticNextExecutorOptions {
 
 const protocol = "leaf.static-next.v1" as const;
 const uuid = (v: unknown): v is string => typeof v === "string" &&
-  v.length === 36 && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(v);
+  /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(v);
 const sha = (v: unknown, size = 64): v is string => typeof v === "string" &&
   v.length === size && new RegExp(`^[0-9a-f]{${size}}$`).test(v);
 const hash = (v: Buffer | string) => createHash("sha256").update(v).digest("hex");
@@ -59,7 +59,7 @@ function mapping(bytes: Buffer, executionId: string, code: string, bundleSha256?
 /** Resolve durable bundle custody without admitting or changing an execution. */
 export function createStaticNextBundleResolver(store: StaticNextObjectStore) {
   return async function resolveStaticNextBundle(executionId: string): Promise<string | null> {
-    if (!uuid(executionId)) return null;
+    if (!sha(executionId)) return null;
     const bytes = await store.get(`map/${executionId}.json`);
     if (bytes === null) return null;
     try {

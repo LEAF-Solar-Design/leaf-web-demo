@@ -3,7 +3,7 @@ import { BatchGetBuildsCommand, StartBuildCommand, StopBuildCommand } from "@aws
 import { describe, expect, it, vi } from "vitest";
 import { createCodeBuildStaticNextBuildProvider, createS3StaticNextObjectStore } from "../src/projectBuild/staticNextAwsAdapters.js";
 
-const executionId = "00000000-0000-0000-0000-000000000001";
+const executionId = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const key = `map/${executionId}.json`;
 function s3() {
   const send = vi.fn();
@@ -64,7 +64,17 @@ describe("static Next S3 adapter", () => {
     await expect(f.store.putIfAbsent(key, Buffer.from("record"))).rejects.toBe(error);
   });
 
-  it.each(["../map/id.json", `other/${executionId}.json`, `map/${"a".repeat(64)}.json`,
+  it.each(["in", "out", "map"])("accepts digest keys under %s", async prefix => {
+    const f = s3();
+    const digestKey = `${prefix}/${executionId}.json`;
+    f.send.mockResolvedValue({ Body: { transformToByteArray: async () => new Uint8Array() } });
+    await expect(f.store.putIfAbsent(digestKey, Buffer.from("record"))).resolves.toBe("created");
+    await expect(f.store.get(digestKey)).resolves.toEqual(Buffer.alloc(0));
+    expect(f.send).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["../map/id.json", `other/${executionId}.json`, "map/00000000-0000-0000-0000-000000000001.json",
+    `map/${"a".repeat(63)}.json`, `map/${"a".repeat(65)}.json`, `map/${"g".repeat(64)}.json`,
     `in/${executionId.toUpperCase().replace(/1$/, "A")}.json`, `out/${executionId}.json/extra`,
     `map/${executionId}.json\n`])("rejects bad key %s before sending", async badKey => {
       const f = s3();
