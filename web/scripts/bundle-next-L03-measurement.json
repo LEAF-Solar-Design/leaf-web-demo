@@ -48,5 +48,5 @@
   "unchanged_allowance_bytes": 32768,
   "unchanged_guard_sha256": "38566ed65333cdaa22436d98328282b9736c4e549ed23fc90ff5cb74125d77e9",
   "mini_access": false,
-  "note": "Reset the measured artifact reference after accumulated merged growth; do not increase the allowance, edit assertions or treat startup-only size as the full-export metric."
+  "note": "Measurement only. Preserve the existing effective ceiling1914984 and32768 allowance per root d9baa4ba. Parent is already overcap; coordinate one shared byte-reduction fix. Do not reseed or increase the ceiling from this record."
 }
