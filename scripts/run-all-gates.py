@@ -3446,6 +3446,9 @@ def build_suites() -> List[Suite]:
                   # compiled engine. Keep both exact counts while older PRs finish.
                   ("src/cad/engineBatchAtomic.test.js", 12),
                   ("src/cad/engineBatchAtomic.test.js", 13),
+                  # S01 lifecycle replay: four cases require the same optional
+                  # compiled Node WASM package; executed proof retained separately.
+                  ("src/cad/solarLifecycleReplay.test.jsx", 4),
               )) for shard in range(1, 4)),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
