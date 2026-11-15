@@ -93,10 +93,11 @@ def retention_hours() -> float:
 
 
 def max_upload_bytes() -> int:
+    """Shared file and ASGI body limit; allow bounded, larger CAD drawings."""
     try:
-        return int(os.environ.get("LEAF_UPLOAD_MAX_BYTES", str(25 * 1024 * 1024)))
+        return int(os.environ.get("LEAF_UPLOAD_MAX_BYTES", str(64 * 1024 * 1024)))
     except ValueError:
-        return 25 * 1024 * 1024
+        return 64 * 1024 * 1024
 
 
 def uploads_dir() -> Path:

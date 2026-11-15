@@ -960,6 +960,7 @@ def test_solaredge_report_route_c14(tmp_path, monkeypatch, cached_parse, client)
     ("source", 404, "IMPORT_SOURCE_NOT_FOUND"), ("project", 409, "REPORT_PROJECT_MISMATCH"),
     ("ambiguous", 200, None), ("drawing-id", 400, "REPORT_DRAWING_ID_INVALID"),
     ("drained", 503, "REPORT_WRITES_DRAINED"), ("busy", 503, "REPORT_BUSY"),
+    ("resource", 422, "REPORT_RESOURCE_LIMIT"),
     ("backend", 503, "REPORT_STORE_UNAVAILABLE"), ("drawing", 404, "REPORT_DRAWING_NOT_FOUND"),
     ("graphless", 409, "REPORT_GRAPH_REQUIRED"), ("csv", 409, "IMPORT_SOURCE_KIND_MISMATCH"),
     ("real", 200, None),
@@ -989,6 +990,10 @@ def test_solaredge_report_route_refusals(tmp_path, monkeypatch, client, case, st
         monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
     elif case == "busy":
         exhausted(monkeypatch)
+    elif case == "resource":
+        def resource_refused(content):
+            raise report.SolarEdgeReportError("REPORT_RESOURCE_LIMIT")
+        monkeypatch.setattr(report, "parse_source", resource_refused)
     elif case == "backend":
         def unavailable(*args):
             raise RuntimeError("down")

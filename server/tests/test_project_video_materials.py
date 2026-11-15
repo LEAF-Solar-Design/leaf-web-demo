@@ -220,7 +220,11 @@ def test_nonzero_child_retains_only_safe_diagnostic_after_reaping(monkeypatch, t
     with pytest.raises(video.VideoError, match='^video_incomplete$') as caught:
         video._run(tmp_path, '/usr/bin/ffprobe', ['/input.mov'], 'probe', time.monotonic() + 10, lambda: None)
     assert state['reaped'] is True
-    assert caught.value.decoder_diagnostic == dict(operation='probe', returncode=1, reason=reason)
+    assert caught.value.decoder_diagnostic == dict(
+        operation='probe', returncode=1, reason=reason, stderr_state='nonempty',
+        stderr_prefix=('bwrap' if stderr.startswith(b'bwrap:') else
+                       'prlimit' if stderr.startswith(b'prlimit:') else
+                       'ffprobe' if stderr.startswith(b'ffprobe:') else 'other'))
     assert 'PRIVATE' not in str(caught.value.__dict__)
     assert '--unshare-all' in state['argv'] and '--as=536870912' in state['argv']
     assert state['stderr'].closed
@@ -234,7 +238,8 @@ def test_diagnostic_read_is_bounded_and_happens_after_reap():
             assert size == 8192
             return b'bwrap: Permission denied PRIVATE'
     assert video._process_diagnostic('untrusted-name', True, Stderr()) == dict(
-        operation='unknown', returncode=None, reason='sandbox_denied')
+        operation='unknown', returncode=None, reason='sandbox_denied',
+        stderr_state='nonempty', stderr_prefix='bwrap')
 
 
 def test_diagnostic_io_error_does_not_replace_original_failure():
@@ -242,7 +247,8 @@ def test_diagnostic_io_error_does_not_replace_original_failure():
         def seek(self, offset):
             raise OSError('PRIVATE path')
     assert video._process_diagnostic('decode', -9, Stderr()) == dict(
-        operation='decode', returncode=-9, reason='unknown')
+        operation='decode', returncode=-9, reason='unknown',
+        stderr_state='unreadable', stderr_prefix='unknown')
 
 
 def test_reap_failure_has_precedence_over_process_diagnostic(monkeypatch, tmp_path):
@@ -255,3 +261,30 @@ def test_reap_failure_has_precedence_over_process_diagnostic(monkeypatch, tmp_pa
     with pytest.raises(video.VideoError, match='^video_cleanup_failed$') as caught:
         video._run(tmp_path, '/usr/bin/ffprobe', [], 'probe', time.monotonic() + 10, lambda: None)
     assert caught.value.decoder_diagnostic is None
+
+
+@pytest.mark.parametrize('raw,state,prefix', [
+    (b'', 'empty', 'none'),
+    (b'bwrap: unrecognized PRIVATE failure', 'nonempty', 'bwrap'),
+    (b'ffprobe: PRIVATE failure', 'nonempty', 'ffprobe'),
+    (b'PRIVATE-media-data', 'nonempty', 'other'),
+    (b'prlimit: PRIVATE failure', 'nonempty', 'prlimit'),
+    (None, 'unreadable', 'unknown'),
+    (b'\n' + b'PRIVATE' * 2000, 'nonempty', 'other'),
+], ids=['empty', 'bwrap', 'ffprobe', 'other', 'prlimit', 'unreadable', 'blank-first-line'])
+def test_diagnostic_preserves_closed_stderr_shape_without_content(raw, state, prefix):
+    import io
+    class Stderr:
+        def seek(self, offset):
+            assert offset == 0
+            if raw is None:
+                raise OSError('PRIVATE')
+        def read(self, size):
+            assert size == 8192
+            return io.BytesIO(raw).read(size)
+    diagnostic = video._process_diagnostic('probe', 1, Stderr())
+    assert diagnostic['stderr_state'] == state
+    assert diagnostic['stderr_prefix'] == prefix
+    assert diagnostic['reason'] == ('unknown' if raw is None else 'process_failed')
+    assert set(diagnostic) == {'operation', 'returncode', 'reason', 'stderr_state', 'stderr_prefix'}
+    assert 'PRIVATE' not in str(diagnostic)

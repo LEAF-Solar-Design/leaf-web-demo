@@ -265,6 +265,8 @@ def parse_source(content):
         source.close()
     if timed_out:
         raise SolarEdgeReportError("REPORT_PARSE_TIMEOUT")
+    if parse_worker.decode_refusal(child.returncode, out) == parse_worker.RESOURCE_REFUSAL:
+        raise SolarEdgeReportError(parse_worker.RESOURCE_REFUSAL)
     matrices = parse_worker.decode_verdict(child.returncode, out)
     if matrices is None:
         raise SolarEdgeReportError("REPORT_PDF_UNSUPPORTED")
