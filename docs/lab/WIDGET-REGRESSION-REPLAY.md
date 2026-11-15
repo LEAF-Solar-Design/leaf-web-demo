@@ -65,3 +65,13 @@ The isolated fixture defines only the relevant host foreground, ink and ground
 roles; data-series-5 is absent to reproduce the original readable-default seam.
 The fixture project selector is support setup, not the application's project UI.
 No provider, account, drawing, trading, publication or phone state is involved.
+
+## Native green-run evidence
+
+Device CI retains the job log but discards green-run attachment files. The widget
+bridge emits a compact LEAF_WIDGET_BROWSER record after all six child cases pass.
+It contains result counts and the SHA-256 of the exact child JSON report. The
+strict reporter forwards this record to the log without using it as an assertion
+oracle. A digest binds bytes; it does not recover a discarded report. Keep the
+local report and screenshots for full replay. Older native GREEN receipts prove
+the gate passed but do not claim a surviving native child report.
