@@ -20,6 +20,8 @@
 import { expect, test } from '@playwright/test'
 import { catProofResponse, makeCatProofState } from './catProofFixture.mjs'
 
+test.use({ video: 'off', trace: 'off' })
+
 const API = 'http://leaf-proof.invalid/api/**'
 const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*' }
 const SETTLE_MS = 750
