@@ -70,6 +70,19 @@ async function report() {
   fireEvent.click(screen.getByRole('button', { name: 'Build report' }))
   await screen.findByRole('region', { name: 'Report review' })
 }
+it('previews and submits an explicitly chosen partial policy through the bound project rail', async () => {
+  const { props } = setup({ reportCounts: { ...counts, frames: 2, assigned_panels: 1, unassigned_panels: 1 } })
+  await upload(); await report()
+  const choice = screen.getByRole('checkbox', { name: 'Save matched tracking and keep unresolved groups for correction' })
+  expect(choice.checked).toBe(false)
+  fireEvent.click(choice)
+  fireEvent.click(screen.getByRole('button', { name: 'Save matched tracking' }))
+  await waitFor(() => expect(props.onProjectSubmit).toHaveBeenCalledTimes(1))
+  const [intent, options] = props.onProjectSubmit.mock.calls[0]
+  expect(intent).toMatchObject({ binding, authorityKey: 'session-1', tool: row.name,
+    params: { drawing_id: D, expected_rev: 7, report_artifact_id: reportId, accept_matched_only: true } })
+  expect(options.isCurrent()).toBe(true)
+})
 
 it('uploads, matches, previews and hands one canonical acceptance to the existing run rail', async () => {
   const { props, fetchImpl } = setup()
@@ -174,6 +187,41 @@ it.each([1, 19])('S02 review displays competing groups with %i candidates withou
   for (const ref of frameRefs) expect(within(table).getByText(ref)).toBeTruthy()
   expect(props.onProjectSubmit).not.toHaveBeenCalled()
   expect(save.createObjectURL).not.toHaveBeenCalled()
+})
+
+it.each([
+  ['legacy', undefined, 'atomic-v1'],
+  ['whole', 'whole-matrix-v1', 'whole-matrix-v1'],
+])('S02 preserves %s report policy through verified correction and reset', async (_name, policy, expected) => {
+  downloads()
+  const bytes = matchReport({ request: policy ? { matching_policy: policy } : {},
+    matches: [{ frame_ref: 'roof-east', pdf_grid: null, pdf_matrix: null, pdf_sub_grid: null,
+      candidates: [0, 1], candidate_count: 2, status: 'ambiguous' }] })
+  const { fetchImpl } = setup({ reportBytes: bytes, reportCounts: { ...counts, matched_frames: 0,
+    group_strings: 0, strings: 0, assigned_panels: 0, unassigned_panels: 2 } })
+  await upload(); await report()
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect group matches' }))
+  const choice = await screen.findByLabelText('PDF choice for roof-east')
+  fireEvent.change(choice, { target: { value: '1' } })
+  const calls = () => fetchImpl.mock.calls.filter(([url]) => url.endsWith('/report'))
+  fireEvent.click(screen.getByRole('button', { name: 'Build report' }))
+  await waitFor(() => expect(calls()).toHaveLength(2))
+  expect(JSON.parse(calls().at(-1)[1].body)).toMatchObject({ matching_policy: expected,
+    associations: { 'roof-east': 1 } })
+  await screen.findByRole('button', { name: 'Inspect group matches' })
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect group matches' }))
+  await screen.findByLabelText('PDF choice for roof-east')
+  fireEvent.click(screen.getByRole('button', { name: 'Clear association choices' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Build report' }))
+  await waitFor(() => expect(calls()).toHaveLength(3))
+  expect(JSON.parse(calls().at(-1)[1].body).matching_policy).toBe(expected)
+  expect(JSON.parse(calls().at(-1)[1].body)).not.toHaveProperty('associations')
+  await screen.findByRole('button', { name: 'Inspect group matches' })
+  fireEvent.change(screen.getByLabelText('Alignment tolerance'), { target: { value: '0.25' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Build report' }))
+  await waitFor(() => expect(calls()).toHaveLength(4))
+  expect(JSON.parse(calls().at(-1)[1].body)).not.toHaveProperty('matching_policy')
+  expect(JSON.parse(calls().at(-1)[1].body)).not.toHaveProperty('associations')
 })
 
 it('S02 correction builds a new immutable report, accepts its identity separately and resets to automatic review', async () => {

@@ -33,12 +33,15 @@ vi.mock('three/examples/jsm/controls/OrbitControls.js', async () => {
       this.enabled = true
       this.mouseButtons = {}
       this.touches = {}
+      this.keys = vi.fn()
+      dom.getRootNode().addEventListener('keydown', this.keys, true)
       gl.controls.push(this)
     }
     addEventListener() {}
     removeEventListener() {}
     update() {}
-    dispose() {}
+    disconnect() { this.domElement.getRootNode().removeEventListener('keydown', this.keys, true) }
+    dispose() { this.disconnect() }
   }
   return { OrbitControls }
 })
@@ -215,6 +218,7 @@ function disposalSpies(layer) {
 function disposedOnce(spies) { for (const spy of spies) expect(spy).toHaveBeenCalledTimes(1) }
 afterEach(() => {
   cleanup()
+  for (const controls of gl.controls) document.removeEventListener('keydown', controls.keys, true)
   vi.unstubAllGlobals()
   gl.renderers.length = 0
   gl.controls.length = 0
@@ -604,4 +608,14 @@ describe('stored Solar graph in real Viewer', () => {
     expect(solarOverlayCanvasIntake(null, next)).toBe(next)
     expect(solarOverlayCanvasIntake(undefined, undefined)).toBeNull()
   })
+})
+
+it('removes document controls listeners before React detaches the canvas', () => {
+  const view = mountViewer(intakeOf(roof()))
+  const controls = gl.controls.at(-1)
+  fireEvent.keyDown(document, { key: 'Control' })
+  expect(controls.keys).toHaveBeenCalledTimes(1)
+  view.unmount()
+  fireEvent.keyDown(document, { key: 'Control' })
+  expect(controls.keys).toHaveBeenCalledTimes(1)
 })

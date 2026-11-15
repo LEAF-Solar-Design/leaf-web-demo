@@ -284,3 +284,81 @@ def test_corpus_postgres_upgrade_route_and_scope(tmp_path, monkeypatch):
             conn.execute("UPDATE identity_bindings SET status='revoked', revoked_at=NOW() WHERE binding_id=%s", (actor.binding_id,))
         assert client.get(url + '/' + material['material_id'] + '/content', headers=headers).status_code == 403
     db.reset_pool()
+
+
+@pytest.mark.parametrize('parts', [
+    (b'{}\n', b'{}\n'),
+    (b'', b'{"text":"caf\xc3', b'', b'\xa9"}\n', b''),
+    (b'{"x":1}', b'\n', b'{"x":2}\n'),
+])
+def test_original_import_preserves_complete_concatenated_corpus_members(tmp_path, monkeypatch, parts):
+    import store
+    import write_loop
+    backend = store.FilesystemBackend(str(tmp_path))
+    monkeypatch.setattr(write_loop, 'upload_backend_for_tenant', lambda tenant: backend)
+    org, project = uuid.uuid4(), uuid.uuid4()
+    raw = b''.join(gzip.compress(part, mtime=0) for part in parts)
+    # Legacy direct-validation callers keep their strict one-member contract.
+    with pytest.raises(references.InvalidReference):
+        references.validate('rows.jsonl.gz', 'application/gzip', raw)
+    material = references.prepare_and_store(org, project, 'rows.jsonl.gz', 'application/gzip', raw)
+    assert material['sha256'] == hashlib.sha256(raw).hexdigest()
+    assert material['byte_size'] == len(raw)
+    assert references.read_content(org, project, material) == raw
+    assert gzip.decompress(raw) == b''.join(parts)
+    assert references.prepare_and_store(org, project, 'rows.jsonl.gz', 'application/gzip', raw) == material
+
+
+@pytest.mark.parametrize('later', [
+    gzip.compress(b'{}\n')[:-1],
+    gzip.compress(b'{}\n')[:-8] + b'\x00' * 8,
+    b'junk',
+    gzip.compress(b'{"x":NaN}\n'),
+    gzip.compress(b'{"x":Infinity}\n'),
+    gzip.compress(b'{"x":1e999}\n'),
+    gzip.compress(b'{"x":1,"x":2}\n'),
+    gzip.compress(b'[]\n'),
+    gzip.compress(b'\n'),
+])
+def test_corpus_member_import_rejects_later_corruption_and_invalid_rows(later):
+    raw = gzip.compress(b'{}\n', mtime=0) + later
+    with pytest.raises(references.InvalidReference):
+        references.validate('rows.jsonl.gz', 'application/gzip', raw, allow_corpus_members=True)
+
+
+@pytest.mark.parametrize('limit', ['compressed', 'expanded', 'rows', 'line'])
+def test_corpus_member_import_keeps_aggregate_limits(monkeypatch, limit):
+    if limit == 'line':
+        parts = (b'{"x":', b'1}\n')
+        monkeypatch.setattr(references, 'CORPUS_LINE_MAX_BYTES', 6)
+    else:
+        parts = (b'{"x":1}\n', b'{"x":2}\n')
+    raw = b''.join(gzip.compress(part, mtime=0) for part in parts)
+    if limit == 'compressed':
+        monkeypatch.setattr(references, 'CORPUS_MAX_BYTES', len(raw) - 1)
+    elif limit == 'expanded':
+        monkeypatch.setattr(references, 'CORPUS_EXPANDED_MAX_BYTES', len(b''.join(parts)) - 1)
+    elif limit == 'rows':
+        monkeypatch.setattr(references, 'CORPUS_MAX_ROWS', 1)
+    with pytest.raises(references.InvalidReference):
+        references.validate('rows.jsonl.gz', 'application/gzip', raw, allow_corpus_members=True)
+
+
+def test_corpus_member_import_rejects_an_empty_logical_stream():
+    raw = gzip.compress(b'', mtime=0) + gzip.compress(b'', mtime=0)
+    with pytest.raises(references.InvalidReference):
+        references.validate('rows.jsonl.gz', 'application/gzip', raw, allow_corpus_members=True)
+
+
+@pytest.mark.parametrize('first_size', [65535, 65536])
+def test_corpus_member_headers_across_compressed_chunk_boundaries(first_size):
+    empty = gzip.compress(b'', mtime=0)
+    extra_size = first_size - len(empty) - 2
+    first = (empty[:3] + bytes([empty[3] | 4]) + empty[4:10]
+             + struct.pack('<H', extra_size) + bytes(extra_size) + empty[10:])
+    assert len(first) == first_size
+    data = b'{"synthetic":1}\n'
+    raw = first + gzip.compress(data, mtime=0)
+    material = references.validate('rows.jsonl.gz', 'application/gzip', raw, allow_corpus_members=True)
+    assert material['sha256'] == hashlib.sha256(raw).hexdigest()
+    assert gzip.decompress(raw) == data

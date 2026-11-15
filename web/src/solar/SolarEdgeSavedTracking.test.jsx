@@ -22,6 +22,15 @@ function show(result = data) {
     projectClient={projectClient} catalogDigest={data.tool_manifest_sha256} projectCurrent={false} />)
   return { ...view, projectClient }
 }
+it('shows partial tracking as correction work rather than full verification', () => {
+  const result = structuredClone(data)
+  result.output.acceptance = { mode: 'matched-only', status: 'partial', unresolved_groups: 1 }
+  result.output.one_liner = 'Matched tracking is saved. Unresolved groups still need correction. Labels are not electrical verification.'
+  show(result)
+  expect(screen.getByText(result.output.one_liner)).toBeTruthy()
+  expect(screen.getByRole('rowheader', { name: 'Status', exact: true }).closest('tr')).toHaveTextContent('partial')
+  expect(screen.getByRole('rowheader', { name: 'Unresolved groups', exact: true }).closest('tr')).toHaveTextContent('1')
+})
 
 it('shows saved historical choices, complete bridge membership and PDF provenance as labels only', () => {
   expect(data.is_head).toBe(false)

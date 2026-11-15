@@ -369,10 +369,27 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener) },
     readContext: (options = {}) => guarded((scope) => {
       assert(plain(options))
-      const { signal } = options
+      const { signal, prepareSolve = false, solveFrame } = options
+      assert(typeof prepareSolve === 'boolean')
+      assert(solveFrame === undefined || (typeof solveFrame === 'string' && solveFrame.length > 0 && solveFrame.length <= 255))
+      const query = new URLSearchParams({ drawing_id: binding.drawing_id })
+      if (prepareSolve) query.set('prepare_solve', 'true')
+      if (solveFrame !== undefined) query.set('solve_frame', solveFrame)
       return request(
-      `/api/projects/${binding.project_id}/drawing-versions/${binding.input_version_id}/context?drawing_id=${binding.drawing_id}`,
-      { scope, signal, validate: (data, b) => matches(data?.context, b) && UUID.test(data.context.head_version_id) && typeof data.context.is_head === 'boolean' })
+      `/api/projects/${binding.project_id}/drawing-versions/${binding.input_version_id}/context?${query}`,
+      { scope, signal, validate: (data, b) => {
+        if (!matches(data?.context, b) || !UUID.test(data.context.head_version_id) || typeof data.context.is_head !== 'boolean') return false
+        if (!prepareSolve && solveFrame === undefined) return true
+        const prepared = data.solve_preparation, graph = data.intake?.solar_design_graph
+        if (!plain(prepared) || prepared.schema !== 'leaf.project-solve-preparation.v1' || typeof prepared.available !== 'boolean') return false
+        if (!prepared.available) return typeof prepared.reason === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/.test(prepared.reason)
+        return data.context.is_head === true && prepared.graph_revision === graph?.rev &&
+          prepared.graph_sha256 === data.intake?.solar_design_graph_sha256 && Array.isArray(prepared.frames) &&
+          prepared.frames.every((frame) => plain(frame) && typeof frame.id === 'string' && frame.id.length > 0 && frame.id.length <= 255 &&
+            typeof frame.name === 'string' && Number.isSafeInteger(frame.panel_count) && frame.panel_count >= 0) &&
+          (solveFrame === undefined || (prepared.frame_ref === solveFrame &&
+            prepared.frames.some((frame) => frame.id === solveFrame) && plain(prepared.request) && plain(prepared.request.grid)))
+      } })
     }),
     readCheckout: (options = {}) => guarded(async (scope) => {
       assert(plain(options))
@@ -519,11 +536,12 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
     }),
     reportSolarEdgePdf: (options = {}) => guarded((scope) => {
       assert(plain(options))
-      const { sourceArtifactId, alignmentTolerance, selectionOrder = 'unknown', associations, signal } = options
+      const { sourceArtifactId, alignmentTolerance, selectionOrder = 'unknown', associations, matchingPolicy, signal } = options
       assert(edgeHash(sourceArtifactId) &&
         typeof alignmentTolerance === 'number' && Number.isFinite(alignmentTolerance) &&
         alignmentTolerance >= 0.000001 && alignmentTolerance <= 1000000 &&
         ['unknown', 'recorded'].includes(selectionOrder))
+      assert(matchingPolicy === undefined || ['atomic-v1', 'whole-matrix-v1'].includes(matchingPolicy))
       if (associations !== undefined) {
         assert(plain(associations) && Object.keys(associations).length <= 10_000 &&
           Object.entries(associations).every(([ref, grid]) => ref.length > 0 && ref.length <= 100 &&
@@ -532,6 +550,7 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
       }
       const body = JSON.stringify({ source_artifact_id: sourceArtifactId,
           alignment_tolerance: alignmentTolerance, selection_order: selectionOrder,
+          ...(matchingPolicy === undefined ? {} : { matching_policy: matchingPolicy }),
           ...(associations === undefined ? {} : { associations }) })
       assert(new TextEncoder().encode(body).byteLength <= 4096)
       const b = scope.binding

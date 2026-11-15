@@ -47,12 +47,15 @@ def upload_policy(name, content_type):
     return name, media_type, CORPUS_MAX_BYTES if corpus else VIDEO_MAX_BYTES if extension == '.mov' else TEXT_MAX_BYTES
 
 
-def validate_corpus(raw):
-    """Validate one gzip member incrementally, retaining no expanded corpus.
+def validate_corpus(raw, *, allow_members=False):
+    """Validate gzip JSONL incrementally, retaining no expanded corpus.
+
+    Direct validation keeps its one-member default. Original imports opt into
+    standard concatenated members while sharing all logical-stream limits.
 
     Output chunks and unfinished lines have separate bounds. zlib checks the
-    gzip CRC/trailer; eof and unused_data reject truncation, extra members and
-    trailing bytes. The uploaded compressed bytes remain the stored original.
+    gzip CRC/trailer; eof and unused_data detect truncation and trailing bytes
+    for each member. The uploaded compressed bytes remain the stored original.
     """
     expanded = rows = 0
     line = bytearray()
@@ -103,12 +106,16 @@ def validate_corpus(raw):
                     line.extend(fragment)
                     if len(line) > CORPUS_LINE_MAX_BYTES:
                         raise ValueError('line size')
-                if decoder.unused_data:
-                    raise ValueError('trailing data or gzip members')
                 if decoder.eof:
-                    if offset + 65536 < len(raw) or pending:
-                        raise ValueError('trailing data')
-                    break
+                    pending = decoder.unused_data
+                    if pending or offset + 65536 < len(raw):
+                        if not allow_members:
+                            raise ValueError('trailing data or gzip members')
+                        # Each member must finish (including its CRC/trailer).
+                        # Rows, partial lines and expanded bytes span members.
+                        decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                    else:
+                        break
         if not decoder.eof:
             raise ValueError('incomplete gzip')
         if line:
@@ -205,12 +212,12 @@ def validate_mov(raw):
         raise InvalidReference('MOV must contain a video track.')
 
 
-def validate(name, content_type, raw):
+def validate(name, content_type, raw, *, allow_corpus_members=False):
     name, media_type, limit = upload_policy(name, content_type)
     if not 0 < len(raw) <= limit:
         raise InvalidReference('Reference file is empty or exceeds its size limit.')
     if media_type == 'application/gzip':
-        validate_corpus(raw)
+        validate_corpus(raw, allow_members=allow_corpus_members)
     elif media_type == 'video/quicktime':
         validate_mov(raw)
     else:
@@ -242,7 +249,9 @@ def object_key(org_id, project_id, digest):
 
 
 def prepare_and_store(org_id, project_id, name, content_type, raw):
-    prepared = validate(name, content_type, raw)
+    # Original gzip files may contain concatenated producer members. Preserve
+    # every compressed byte; validate the full logical stream before storage.
+    prepared = validate(name, content_type, raw, allow_corpus_members=True)
     import write_loop
     try:
         write_loop.upload_backend_for_tenant(str(org_id)).put_if_absent_or_verify(
