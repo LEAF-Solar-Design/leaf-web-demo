@@ -95,6 +95,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -127,6 +128,11 @@ DA = REPO / "da"
 HARNESS = REPO / "harness"
 WEB = REPO / "web"
 AUTHORED_TOOLS = SERVER / "authored_tools.json"
+
+_vitest_spec = importlib.util.spec_from_file_location(
+    "vitest_related_selection", SCRIPTS_DIR / "ci/vitest_related_selection.py")
+vitest_related_selection = importlib.util.module_from_spec(_vitest_spec)
+_vitest_spec.loader.exec_module(vitest_related_selection)
 
 # Defensive: never let the repo root shadow the stdlib `platform` module inside
 # THIS process. The runner only shells out, so it needs no repo imports.
@@ -207,6 +213,7 @@ class Result:
     queued_exhausted: bool = False
     attempt_seconds: Optional[float] = None
     queued_budget_used: float = 0.0  # preserve the budget across generic retries
+    vitest_selection: dict = field(default_factory=dict)
 
 
 def _py_pytest(target: str) -> List[str]:
@@ -4242,7 +4249,7 @@ def reporting_command(suite: Suite, argv: List[str], trace_env: dict) -> List[st
             trace_env["LEAF_TEST_REPORT_INCOMPLETE_REASON"] = f"reporter_copy_failed:{type(exc).__name__}"
             return argv
         # npm forwards these after '--'; retain Vitest's normal count reporter.
-        extra = [] if "--" in argv else ["--"]
+        extra = [] if "--" in argv or "vitest" in argv else ["--"]
         return argv + extra + ["--reporter=default", "--reporter=" + str(reporter)]
     if "playwright" in argv and "test" in argv:
         # CLI reporters are retained. With a config, append through a wrapper so
@@ -5195,6 +5202,17 @@ def _run_suite_attempt(suite: Suite, log_dir: Path, attempt: int = 1,
 
     t0 = time.perf_counter()
     argv = [os.fsdecode(a) for a in suite.argv]
+    vitest_selection = {}
+    if (suite.id in {"web-vitest-1", "web-vitest-2", "web-vitest-3"}
+            and suite.kind == "vitest" and suite.cwd == WEB):
+        decision = vitest_related_selection.collect(REPO, os.environ)
+        if decision["mode"] == "related":
+            try:
+                argv = vitest_related_selection.related_argv(argv, decision["inputs"])
+            except ValueError:
+                decision.update(mode="full", reason="unsupported_launcher")
+        vitest_selection = {k: v for k, v in decision.items() if k != "inputs"}
+        print("LEAF_VITEST_SELECTION " + json.dumps(vitest_selection, sort_keys=True), flush=True)
     trace_env = {}
     report_failure = {}
     reporting_injected = False
@@ -5264,6 +5282,8 @@ def _run_suite_attempt(suite: Suite, log_dir: Path, attempt: int = 1,
     with open(log_path, "w", encoding="utf-8", errors="replace") as logf:
         logf.write(f"$ (cwd={suite.cwd})\n$ {' '.join(argv)}\n"
                    f"$ attempt {attempt} @ {time.strftime('%Y-%m-%dT%H:%M:%S')}\n\n")
+        if vitest_selection:
+            logf.write("LEAF_VITEST_SELECTION " + json.dumps(vitest_selection, sort_keys=True) + "\n")
         if report_failure:
             logf.write("WARNING: " + report_failure["test_report_incomplete_reasons"][0] + "\n")
         logf.flush()
@@ -5408,11 +5428,20 @@ def _run_suite_attempt(suite: Suite, log_dir: Path, attempt: int = 1,
         # Same zero-coverage and executed-floor rules as pytest suites, through
         # the same helper: vitest's `got` counts skips too, so an all-skipped
         # run used to clear its floor here and report a vacuous PASS.
-        passed, note = coverage_verdict(c, suite.expected, passed, note)
+        related = vitest_selection.get("mode") == "related"
+        empty = (related and passed and c["got"] == 0
+                 and "No test files found, exiting with code 0" in strip_ansi(out)
+                 and not re.search(r"(?i)(unhandled|error|failed)", strip_ansi(out)))
+        if empty:
+            vitest_selection["empty"] = True
+            note = "empty related selection"
+        else:
+            passed, note = coverage_verdict(c, 1 if related else suite.expected, passed, note)
         if not passed and not note:
             note = "suite FAILED"
         return Result(suite, "PASS" if passed else "FAIL", str(c["got"]), seconds,
-                      note=note.strip(), log_path=log_path, counts=c, test_report=report_failure)
+                      note=note.strip(), log_path=log_path, counts=c, test_report=report_failure,
+                      vitest_selection=vitest_selection)
 
     if suite.kind == "script":
         # Optional scripts are skipped before spawn through opt_in_env. Once a
@@ -7124,6 +7153,7 @@ def write_result_json(path: str, *, fingerprint: str, total: int,
             "queued_seconds": round(r.queued_seconds, 1),
             "note": r.note,
             "test_report": r.test_report,
+            **({"vitest_selection": r.vitest_selection} if r.vitest_selection else {}),
         })
     payload = {
         "schema": 1,
@@ -7356,7 +7386,13 @@ def verify_shard_results(results_dir: Path, *,
                     # corrupt `executed: true` would satisfy isinstance and
                     # clear a floor of 1 (sol-critic #436 round 4). Negative
                     # counts are equally meaningless and refused.
-                    if suite.expected is not None:
+                    related = (suite.id in {"web-vitest-1", "web-vitest-2", "web-vitest-3"}
+                               and suite.kind == "vitest" and suite.cwd == WEB
+                               and vitest_related_selection.valid_related_result(
+                                   e.get("vitest_selection"), executed))
+                    if related:
+                        pass  # The graph may legitimately contain zero tests on this shard.
+                    elif suite.expected is not None:
                         if (type(executed) is not int or executed < 0
                                 or executed < suite.expected):
                             problems.append(

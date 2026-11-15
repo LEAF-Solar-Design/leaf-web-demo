@@ -29,6 +29,15 @@ export default defineConfig({
     include: ['src/**/*.test.{js,jsx}'],
     exclude: ['e2e/**', 'node_modules/**', 'dist/**'],
     setupFiles: ['./vitest.setup.js'],
+    // The Python wrapper also enforces these boundaries before graph selection.
+    forceRerunTriggers: [
+      '**/vitest.config.*', '**/vite.config.*', '**/*config*', '**/*setup*',
+      '**/package.json', '**/*lock*', '**/fixtures/**', '**/__fixtures__/**',
+      '**/mocks/**', '**/__mocks__/**', '**/public/**', '**/vendor/**',
+      '**/generated/**', '**/__generated__/**', '**/*generated*', '**/wasm/**',
+      '**/test-utils/**', '**/testing/**', '**/*fixture*', '**/*mock*',
+      '**/testTimeScale.*', '**/*testHarness*', '../contract/**', '../scripts/**',
+    ],
     restoreMocks: true,
   },
 })
