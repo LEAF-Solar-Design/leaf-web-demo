@@ -527,7 +527,7 @@ it.each(['digest', 'size', 'json'])('refuses an original with invalid %s evidenc
 it('refuses complete oversized context without truncating the original or importing', async () => {
   const harness = await materialHarness({ rows: [{ record_id: 'one' }], observations: ['x'.repeat(262144)] })
   render(<OpsWorkspaceGround {...harness.props} />); await loaded(); await openOriginal(); mapOriginal('/rows')
-  await screen.findByText('Complete material context is too large to display. The original and last valid dataset are retained.')
+  await screen.findByText('Context too large. Original and last valid dataset retained.')
   expect(screen.getByRole('button', { name: 'Import selected records' })).toBeDisabled()
   expect(importPosts(harness.fetchImpl)).toHaveLength(0)
   expect(screen.getByRole('option', { name: 'Authorized orders · version 3' })).toBeTruthy()
@@ -1394,7 +1394,7 @@ it('names demo and empty setup honestly without fake provider activity', async (
   const original = fetchImpl.getMockImplementation()
   fetchImpl.mockImplementation((url, options) => url.includes('/datasets?') || url.includes('/elements?') ? Promise.resolve(response(page([]))) : original(url, options))
   rerender(<OpsWorkspaceGround {...props} />)
-  expect(await screen.findByText('No datasets are available yet. Use integration setup to connect your data.')).toBeInTheDocument()
+  expect(await screen.findByText('No datasets yet. Connect data in integration setup.')).toBeInTheDocument()
 })
 it('partitions cache identity by verified tenant, principal, binding, role, project, and session generation', () => {
   const original = scopeCacheIdentity(scope, 1)
@@ -1815,9 +1815,10 @@ const catalogAction = { connection_id: actionElement.connection_id, connection_t
 async function composeWorkflow() {
   fireEvent.click(screen.getByRole('button', { name: 'Open action catalog' }))
   await waitFor(() => expect(screen.getByRole('button', { name: 'Save workflow definition' })).toBeEnabled())
-  fireEvent.change(screen.getByLabelText('Definition title'), { target: { value: 'Order workflow' } })
-  fireEvent.change(screen.getByLabelText('Definition stable ID'), { target: { value: reference.id } })
-  fireEvent.change(screen.getByLabelText('Definition version'), { target: { value: String(reference.version) } })
+  const definition = within(screen.getByRole('region', { name: 'Create manual workflow', exact: true }))
+  fireEvent.change(definition.getByLabelText('Definition title'), { target: { value: 'Order workflow' } })
+  fireEvent.change(definition.getByLabelText('Definition stable ID'), { target: { value: reference.id } })
+  fireEvent.change(definition.getByLabelText('Definition version'), { target: { value: String(reference.version) } })
   fireEvent.change(screen.getByLabelText('Step 1 action'), { target: { value: JSON.stringify([
     catalogAction.connection_id, catalogAction.connector_ref, catalogAction.operation_ref]) } })
 }
