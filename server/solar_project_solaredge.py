@@ -327,8 +327,9 @@ def _load_report(context, artifact_id):
 def _record(context, meta, report, *, review=False):
     """Validate provenance and rows; only build/load may retain unresolved review rows.
 
-    Acceptance and historical accepted tracking use the strict default. A review
-    record is validation output only and must not be stored as accepted tracking.
+    Acceptance and historical accepted tracking use the strict default. A bare
+    review record is not accepted tracking; matched-only saves add explicit policy
+    only after validating real matches and preserving unresolved references.
     """
     try:
         return _validated_record(context, meta, report, review=review)
@@ -436,11 +437,25 @@ def _validated_record(context, meta, report, *, review=False):
         "frames": frame_rows, "strings": rows, "unassigned_panel_refs": list(unassigned)}
 
 
+def _accepted_record(context, meta, report, matched_only=False):
+    if not matched_only:
+        return _record(context, meta, report)
+    record = _record(context, meta, report, review=True)
+    _check(bool(record["frames"]) and bool(record["strings"]), "SOLAREDGE_MATCHED_TRACKING_REQUIRED")
+    unresolved = [row["frame_ref"] for row in report["matches"]
+                  if row.get("status") in ("unmatched", "ambiguous")]
+    partial = bool(unresolved or record["unassigned_panel_refs"] or any(row["partial"] for row in record["strings"]))
+    record["acceptance"] = {"mode": "matched-only", "status": "partial" if partial else "complete",
+                            "unresolved_frame_refs": unresolved}
+    return record
+
+
 def accept(context, params):
-    tracking.validate_request(params)
+    tracking.validate_request(params, allow_matched_only=True)
     result = require_revision(context.graph, params["expected_rev"])
     meta, report = _load_report(context, params["report_artifact_id"])
-    result["extra"][tracking.STORE_KEY] = _record(context, meta, report)
+    result["extra"][tracking.STORE_KEY] = _accepted_record(
+        context, meta, report, params.get("accept_matched_only", False))
     return advance(result, [], ACCEPT_TOOL)
 
 
@@ -462,14 +477,22 @@ def read_tracking(tenant, context, params):
         _check((source.organization_id, source.project_id, source.drawing_id)
             == (context.organization_id, context.project_id, context.drawing_id))
         meta, report = _load_report(source, record["report"]["artifact_id"])
-        _check(record == _record(source, meta, report))
+        choice = record.get("acceptance")
+        matched_only = type(choice) is dict and choice.get("mode") == "matched-only"
+        _check(record == _accepted_record(source, meta, report, matched_only))
     except (GraphValidationError, project.ProjectContextError, ValueError, TypeError,
             KeyError, IndexError, AttributeError):
         _fail("SOLAREDGE_IMPORT_RECORD_INVALID")
     page_items = {"strings": record["strings"], "frames": record["frames"],
                   "unassigned": record["unassigned_panel_refs"]}[section]
     items, page = module._page(page_items, offset)
-    return deepcopy({"schema": READ_SCHEMA, "accepted": True, "labels_only": True,
+    output = {"schema": READ_SCHEMA, "accepted": True, "labels_only": True,
         "provenance": {key: record[key] for key in ("source", "report", "request")},
         "counts": module._counts(record), "references": module._references(context.graph, record),
-        "section": section, "page": page, "items": items})
+        "section": section, "page": page, "items": items}
+    if matched_only:
+        output["acceptance"] = {"mode": "matched-only", "status": choice["status"],
+                                "unresolved_groups": len(choice["unresolved_frame_refs"])}
+        if choice["status"] == "partial":
+            output["one_liner"] = "Matched tracking is saved. Remaining groups, panels or partial strings need correction. Labels are not electrical verification."
+    return deepcopy(output)

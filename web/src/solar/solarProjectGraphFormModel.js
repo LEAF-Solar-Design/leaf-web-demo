@@ -28,6 +28,7 @@ export const PROJECT_SOLAR_GRAPH_REASONS = Object.freeze({
   group_name_collision: 'Group names must be unique, including existing panel groups.',
   group_numbers_invalid: 'Enter all three dimensions and tolerances as finite numbers greater than 0 and at most 1000000.',
   group_gap_invalid: 'Enter a gap distance as a finite number greater than 0, or leave it blank to group by angle.',
+  group_gap_measurement_invalid: 'Choose outline separation or panel center distance for the gap measurement.',
   group_geometry_invalid: 'Panel positions could not be read. Re-import the panels before grouping by gap.',
   group_discovery_invalid: 'Use a Roof or Ground project and enter an outline offset and alignment tolerance greater than 0 and at most 1000000.',
   tool_unsupported: 'This tool has no project form in this view.',
@@ -101,6 +102,9 @@ export function projectSolarGraphReason(code, tool) {
     case 'group_gap_invalid':
       if (tool !== 'solar-panel-groups') return PROJECT_SOLAR_GRAPH_REASONS.request_refused
       return PROJECT_SOLAR_GRAPH_REASONS.group_gap_invalid
+    case 'group_gap_measurement_invalid':
+      if (tool !== 'solar-panel-groups') return PROJECT_SOLAR_GRAPH_REASONS.request_refused
+      return PROJECT_SOLAR_GRAPH_REASONS.group_gap_measurement_invalid
     case 'group_geometry_invalid':
       if (tool !== 'solar-panel-groups') return PROJECT_SOLAR_GRAPH_REASONS.request_refused
       return PROJECT_SOLAR_GRAPH_REASONS.group_geometry_invalid
@@ -254,7 +258,7 @@ function rectanglesWithinGap(a, b, gap) {
   return false
 }
 
-function panelIslands(panels, rectangles, gap) {
+function panelIslands(panels, rectangles, gap, measurement) {
   const parents = panels.map((_, index) => index)
   const root = (index) => {
     while (parents[index] !== index) {
@@ -267,7 +271,7 @@ function panelIslands(panels, rectangles, gap) {
   // axis, including the comparison epsilon. Only the nine neighbouring cells
   // can contain a connection. Space is O(n); work is O(n + nearby pairs).
   // Dense cells can still be quadratic, bounded by the existing 4096-panel cap.
-  const extent = Math.max(...rectangles.map((rectangle) => rectangle.extent))
+  const extent = measurement === 'centers' ? 0 : Math.max(...rectangles.map((rectangle) => rectangle.extent))
   const cellSize = extent + gap + 1e-9 * Math.max(extent, gap)
   const cells = new Map()
   for (let index = 0; index < panels.length; index += 1) {
@@ -278,7 +282,13 @@ function panelIslands(panels, rectangles, gap) {
         if (!neighbours) continue
         for (const neighbour of neighbours) {
           const a = root(index), b = root(neighbour)
-          if (a !== b && rectanglesWithinGap(rectangles[index], rectangles[neighbour], gap)) parents[b] = a
+          if (a !== b) {
+            const connected = measurement === 'centers'
+              ? Math.hypot(panels[index].centre[0] - panels[neighbour].centre[0],
+                panels[index].centre[1] - panels[neighbour].centre[1]) <= gap + 1e-9 * gap
+              : rectanglesWithinGap(rectangles[index], rectangles[neighbour], gap)
+            if (connected) parents[b] = a
+          }
         }
       }
     }
@@ -295,7 +305,8 @@ function panelIslands(panels, rectangles, gap) {
   return [...islands.values()]
 }
 
-// Optional form numbers: gap_distance (drawing units), module_width_along_row,
+// Optional form values: gap_distance (drawing units), gap_measurement (outlines
+// by default, or centers), module_width_along_row,
 // module_height_across_row. Graph panels carry centres/angles but no dimensions.
 export function proposePanelGroups(graph, numbers) {
   const buckets = new Map()
@@ -313,6 +324,8 @@ export function proposePanelGroups(graph, numbers) {
   const result = (refused) => ({ proposals: [], singletons: 0, ungrouped, invalid_handles, refused })
   const gapInput = numbers?.gap_distance
   const hasGap = gapInput != null && !(typeof gapInput === 'string' && !gapInput.trim())
+  const measurement = numbers?.gap_measurement ?? 'outlines'
+  if (hasGap && !['outlines', 'centers'].includes(measurement)) return result('group_gap_measurement_invalid')
   const gap = hasGap ? positiveGroupNumber(gapInput) : null
   if (hasGap && gap === null) return result('group_gap_invalid')
   const width = hasGap ? positiveGroupNumber(numbers?.module_width_along_row, 1e6) : null
@@ -328,7 +341,7 @@ export function proposePanelGroups(graph, numbers) {
     if (hasGap && panels.length <= 4096) {
       const rectangles = panels.map((panel) => panelRectangle(panel, width, height))
       if (rectangles.includes(null)) return result('group_geometry_invalid')
-      islands = panelIslands(panels, rectangles, gap)
+      islands = panelIslands(panels, rectangles, gap, measurement)
     }
     for (const island of islands) {
       if (island.length === 1) { singletons += 1; continue }

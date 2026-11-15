@@ -70,6 +70,19 @@ async function report() {
   fireEvent.click(screen.getByRole('button', { name: 'Build report' }))
   await screen.findByRole('region', { name: 'Report review' })
 }
+it('previews and submits an explicitly chosen partial policy through the bound project rail', async () => {
+  const { props } = setup({ reportCounts: { ...counts, frames: 2, assigned_panels: 1, unassigned_panels: 1 } })
+  await upload(); await report()
+  const choice = screen.getByRole('checkbox', { name: 'Save matched tracking and keep unresolved groups for correction' })
+  expect(choice.checked).toBe(false)
+  fireEvent.click(choice)
+  fireEvent.click(screen.getByRole('button', { name: 'Save matched tracking' }))
+  await waitFor(() => expect(props.onProjectSubmit).toHaveBeenCalledTimes(1))
+  const [intent, options] = props.onProjectSubmit.mock.calls[0]
+  expect(intent).toMatchObject({ binding, authorityKey: 'session-1', tool: row.name,
+    params: { drawing_id: D, expected_rev: 7, report_artifact_id: reportId, accept_matched_only: true } })
+  expect(options.isCurrent()).toBe(true)
+})
 
 it('uploads, matches, previews and hands one canonical acceptance to the existing run rail', async () => {
   const { props, fetchImpl } = setup()
