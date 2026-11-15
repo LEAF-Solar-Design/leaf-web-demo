@@ -3935,9 +3935,9 @@ def build_suites() -> List[Suite]:
                "e2e/campaign-panel.spec.mjs", "e2e/recovery-controls.spec.mjs",
                "e2e/workspace-create-no-prompt.spec.mjs", "e2e/viewer-grid-toggle.spec.mjs",
                "e2e/studio-ux-regressions.spec.mjs", "e2e/project-page-editor.spec.mjs",
-               # Isolated test contexts use 3 workers on the same CI device;
+               # Isolated test contexts use 4 workers on the same CI device;
                # other suites retain their own worker limits.
-               "--workers=3"], None),
+               "--workers=4"], None),
         Suite("web-lifecycle-panel-proof", "web mounted project lifecycle panel browser proof", "script", WEB,
               [_npx(), "--no-install", "playwright", "test", "--config", "playwright.lifecycle.config.mjs",
                "e2e/project-lifecycle-panel.spec.mjs", "--workers=1"], None),
@@ -6265,7 +6265,7 @@ _BROWSER_DIRECT_PROOFS = {
     "web-studio-panels-proof": ["playwright.config.mjs", "e2e/campaign-panel.spec.mjs",
         "e2e/recovery-controls.spec.mjs", "e2e/workspace-create-no-prompt.spec.mjs",
         "e2e/viewer-grid-toggle.spec.mjs", "e2e/studio-ux-regressions.spec.mjs",
-        "e2e/project-page-editor.spec.mjs", "--workers=3"],
+        "e2e/project-page-editor.spec.mjs", "--workers=4"],
     "web-lifecycle-panel-proof": ["playwright.lifecycle.config.mjs",
         "e2e/project-lifecycle-panel.spec.mjs", "--workers=1"],
     "web-ios-ship-surface-proof": ["playwright.ios.config.mjs",
