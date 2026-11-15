@@ -278,6 +278,21 @@ def test_extracted_character_budget_before_append(monkeypatch, text, refused):
         assert "".join(item[0] for item in pdf.extract_primitives(data).letters) == "ABC"
 
 
+@pytest.mark.parametrize("unit", [b"1", b"1.0", b"null"])
+def test_page_unit_one_keeps_labels(unit):
+    # pdfminer discards null dictionary values, as an absent optional PDF entry.
+    value = pdf.extract_primitives(_pdf(b"BT /F1 4 Tf (1.1) Tj ET", resources=HELVETICA,
+                                        page_extra=b"/UserUnit " + unit + b" "))
+    assert "".join(item[0] for item in value.letters) == "1.1"
+
+
+@pytest.mark.parametrize("unit", [b"2", b"0", b"-1", b"/NaN", b"9" * 310,
+                                  b"true", b"[1]", b"4 0 R"])
+def test_page_unit_outside_proven_subset_refuses(unit):
+    with pytest.raises(SolarEdgePdfError, match="PAGE_UNIT_UNSUPPORTED"):
+        pdf.extract_primitives(_pdf(b"", page_extra=b"/UserUnit " + unit + b" "))
+
+
 def test_refuses_too_many_operators(monkeypatch):
     monkeypatch.setattr(pdf, "MAX_OPERATORS", 3)
     with pytest.raises(SolarEdgePdfError) as err:

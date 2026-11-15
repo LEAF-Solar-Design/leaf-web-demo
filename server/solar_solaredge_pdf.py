@@ -679,6 +679,10 @@ def extract_primitives(pdf_bytes):
         if pages > MAX_PAGES:
             raise SolarEdgePdfError("TOO_MANY_PAGES", str(MAX_PAGES))
         page = next(PDFPage.create_pages(doc))
+        # Raw-coordinate parity is proven only for default units. Never silently scale labels.
+        unit = page.attrs.get("UserUnit", 1)
+        if type(unit) not in (int, float) or unit != 1:
+            raise SolarEdgePdfError("PAGE_UNIT_UNSUPPORTED")
         x0, y0, x1, y1 = (_num(v) for v in page.mediabox)
         crop = tuple(_num(v) for v in page.cropbox)
         if (x0, y0) != (0.0, 0.0) or crop != (x0, y0, x1, y1):
