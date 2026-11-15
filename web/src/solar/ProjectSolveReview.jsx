@@ -72,7 +72,7 @@ export function useSubmission(props, tool) {
             prepared.graph_revision !== state.rev ||
             prepared.graph_sha256 !== response.data.intake.solar_design_graph_sha256 || !prepared.request) {
           setFeedback({ state: 'refused', reason: code(prepared?.reason),
-            message: 'This saved drawing could not be prepared for Solve. Refresh it and try again.' }); return
+            message: PROJECT_SOLAR_WORKSPACE_REASONS.solve_preparation_refused }); return
         }
         params = { ...params, request: prepared.request }
       }
