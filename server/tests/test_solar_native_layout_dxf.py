@@ -385,3 +385,89 @@ def test_optional_independent_ezdxf_recovery(generated):
     assert len(drawing.modelspace().query('CIRCLE[layer=="LEAF-PILING"]')) == len(document["state"]["piles"])
     first = drawing.modelspace().query('CIRCLE[layer=="LEAF-PILING"]')[0]
     assert len(first.get_xdata("LEAFPILING")) == 10
+
+
+def insertion_units_header(raw, declarations):
+    """Replace only the test fixture's insertion-unit variables."""
+    data = pairs(raw)
+    start = data.index((2, "HEADER")) + 1
+    end = data.index((0, "ENDSEC"), start)
+    header, index = [], start
+    while index < end:
+        if data[index] == (9, "$INSUNITS"):
+            index += 2
+        else:
+            header.append(data[index])
+            index += 1
+    return emit(data[:start] + header + declarations + data[end:])
+
+
+def synthetic_units_layout(units):
+    preset = {"Name": "Synthetic units", "Rows": 2, "Columns": 3,
+              "ModuleLengthM": 2.0, "ModuleWidthM": 1.0, "ModulePowerWp": 400,
+              "Orientation": "Portrait", "FramingType": "FixedTilt",
+              "HorizontalGapM": 0.1, "VerticalGapM": 0.1,
+              "TiltDegrees": 15.0, "AxisAzimuthDeg": 180.0,
+              "HeightAtLowPoseM": 0.7, "HeightAtHighPoseM": 1.7,
+              "PileTemplateName": "Synthetic piles"}
+    return fp.prepare_initial_frames(boundary=[[0, 0], [20, 0], [20, 40], [0, 40]],
+                                     preset=preset, drawing_units=units)
+
+
+@pytest.mark.parametrize("units,code", [("m", "6"), ("ft", "2")])
+def test_insertion_units_declare_physical_document(units, code):
+    document, parameters = synthetic_units_layout(units)
+    raw = write(document, parameters)
+    header = sections(raw)["HEADER"]
+    index = header.index((9, "$INSUNITS"))
+    assert header[index + 1] == (70, code)
+    assert header.count((9, "$INSUNITS")) == 1
+    assert native.decode_native_layout(raw).document == document
+
+
+@pytest.mark.parametrize("code", [None, "0"])
+def test_insertion_units_legacy_read_and_explicit_rewrite(code):
+    document, parameters = synthetic_units_layout("m")
+    declarations = [] if code is None else [(9, "$INSUNITS"), (70, code)]
+    legacy = insertion_units_header(write(document, parameters), declarations)
+    assert native.decode_native_layout(legacy).document == document
+    rewritten = write(document, parameters, legacy)
+    header = sections(rewritten)["HEADER"]
+    assert header[header.index((9, "$INSUNITS")) + 1] == (70, "6")
+    assert native.decode_native_layout(rewritten).document == document
+
+
+@pytest.mark.parametrize("units,conflicting", [("m", "2"), ("ft", "6")])
+def test_insertion_units_conflict_refuses_without_rescaling(units, conflicting):
+    document, parameters = synthetic_units_layout(units)
+    raw = insertion_units_header(write(document, parameters), [(9, "$INSUNITS"), (70, conflicting)])
+    refuse("UNITS_MISMATCH", native.decode_native_layout, raw)
+    refuse("UNITS_MISMATCH", write, document, parameters, raw)
+
+
+@pytest.mark.parametrize("declarations", [
+    [(9, "$INSUNITS"), (70, "6"), (9, "$INSUNITS"), (70, "6")],
+    [(9, "$INSUNITS"), (40, "6")],
+    [(9, "$INSUNITS"), (70, "6.0")],
+    [(9, "$INSUNITS"), (70, "-1")],
+])
+def test_insertion_units_malformed_or_duplicate_refuses(declarations):
+    document, parameters = synthetic_units_layout("m")
+    raw = insertion_units_header(write(document, parameters), declarations)
+    refuse("UNITS_INVALID", native.decode_native_layout, raw)
+    refuse("UNITS_INVALID", write, document, parameters, raw)
+
+
+def test_insertion_units_preserve_unrelated_raw_header_and_frame_attributes():
+    document, parameters = synthetic_units_layout("m")
+    raw = insertion_units_header(write(document, parameters), [])
+    retained = b"  9\r\n$USERI1\r\n 70\r\n17\r\n"
+    raw = insert(raw, "HEADER", retained)
+    before = native.decode_native_layout(raw)
+    result = write(document, parameters, raw)
+    assert retained in result
+    after = native.decode_native_layout(result)
+    assert after.document == before.document
+    assert after.parameters == before.parameters
+    assert [(r['row'], r['col'], r['vertices'], r['elevation']) for r in after.frames] == [
+        (r['row'], r['col'], r['vertices'], r['elevation']) for r in before.frames]
