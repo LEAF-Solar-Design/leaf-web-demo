@@ -781,6 +781,30 @@ function appSurfaceFromLocation(location, labStatus) {
     ? 'lab' : productSurfaceFromSearch(location.search, labStatus)
 }
 
+export function ShellAccountMenu({ studioShell, children }) {
+  if (!studioShell) return children
+  return <details className="shell-avatar-menu"
+    onKeyDown={(event) => {
+      if (event.key !== 'Escape' || !event.currentTarget.open) return
+      event.preventDefault()
+      event.stopPropagation()
+      event.currentTarget.open = false
+      event.currentTarget.querySelector('summary').focus()
+    }}
+    onBlur={(event) => {
+      if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false
+    }}>
+    <summary title="Account">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true" focusable="false">
+        <circle cx="12" cy="8" r="4" />
+        <path d="M4 21v-2a8 8 0 0 1 16 0v2" />
+      </svg>
+      <span>Account</span>
+    </summary>
+    {children}
+  </details>
+}
+
 export default function App() {
   // W1 (convergence): the console's drawing identity is now owned by
   // DrawingIdentityProvider, seeded from the SAME rule these two module
@@ -5528,8 +5552,7 @@ export default function App() {
         <ProjectWorkspaceControls {...projectLayout} active={!studioShell && projectLayout.active} />
         <div className="spacer" />
         {studioShell && <ShellKpis items={[{ label: 'Version', value: projectMode ? projectSolar.scope.binding?.input_version_id : null }, { label: 'Selection', value: selectedHandle ? 1 : null }]} />}
-        <details className="shell-avatar-menu">
-        <summary aria-label="Account menu" title="Account menu">●</summary>
+        <ShellAccountMenu studioShell={studioShell}>
         <div className="who">
           {/* Header metadata (org · tenant · tier · spend · API base) is demoted
               behind Details -> the DT2 session drawer, per the standard. */}
@@ -5591,7 +5614,7 @@ export default function App() {
           )}
           {!mock && !knownGuest && !signedOut && signedIn && <AddonsPanel mock={mock} orgId={orgId} open={addonsOpen} onToggle={setAddonsOpen} />}
         </div>
-        </details>
+        </ShellAccountMenu>
       </header>
 
       {/* Slice 4a: the rail's DOM moved to site/NavRail.jsx byte-identically.

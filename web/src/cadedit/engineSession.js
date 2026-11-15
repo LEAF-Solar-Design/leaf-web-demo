@@ -1366,7 +1366,6 @@ export default function useEngineSession({
           return
         }
         const entities = projectionEntities(message)
-        const others = (message.unsupported ?? []).length
         const history = historyRef.current
         const reload = history.reload
         if (reload) {

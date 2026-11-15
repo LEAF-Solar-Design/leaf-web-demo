@@ -5,6 +5,7 @@ import { AgentPanel, CheckoutChip, CockpitStatus, DrawingTabLabel, ShellDiagnost
 import DraftingRibbon from './DraftingRibbon.jsx'
 import DrawingNavigationTools, { DrawingObjectsMount } from './DrawingNavigationTools.jsx'
 import { projectSolarOpenStatus } from '../solar/solarProjectAppModel.js'
+import { ShellAccountMenu } from '../App.jsx'
 
 const navigationFixture = vi.hoisted(() => ({
   index: { drawingKey: 'test', records: [], byId: new Map(), byHandle: new Map(), intake: { source: 'engine' } },
@@ -18,6 +19,46 @@ vi.mock('./studioGround.js', async (original) => ({ ...await original(), useStud
 afterEach(cleanup)
 
 describe('quiet Studio shell', () => {
+  it('renders account controls directly outside Studio', () => {
+    const { container } = render(<header><ShellAccountMenu studioShell={false}>
+      <div className="who"><button>Customize</button><button>Details</button><button>Sign out</button><button>Add-ons</button></div>
+    </ShellAccountMenu></header>)
+    expect(container.querySelector('details')).toBeNull()
+    expect(container.querySelector('header > .who')).toBeTruthy()
+    for (const name of ['Customize', 'Details', 'Sign out', 'Add-ons']) {
+      expect(screen.getByRole('button', { name })).toBeTruthy()
+    }
+  })
+  it('names the avatar summary Account with a person glyph', () => {
+    const { container } = render(<ShellAccountMenu studioShell><div className="who"><button>Details</button></div></ShellAccountMenu>)
+    const summary = screen.getByText('Account').closest('summary')
+    expect(summary).toHaveAccessibleName('Account')
+    expect(summary.textContent).toBe('Account')
+    expect(summary.querySelector('svg[aria-hidden="true"]')).toBeTruthy()
+    expect(container.querySelector('details').open).toBe(false)
+  })
+  it('closes the avatar menu on Escape and returns focus to Account', () => {
+    const { container } = render(<ShellAccountMenu studioShell><div className="who"><button>Details</button></div></ShellAccountMenu>)
+    const menu = container.querySelector('details')
+    fireEvent.click(menu.querySelector('summary'))
+    expect(menu.open).toBe(true)
+    const details = screen.getByRole('button', { name: 'Details' })
+    details.focus()
+    fireEvent.keyDown(details, { key: 'Escape' })
+    expect(menu.open).toBe(false)
+    expect(document.activeElement).toBe(menu.querySelector('summary'))
+  })
+  it('keeps the avatar menu open for internal focus and closes it when focus leaves', () => {
+    const { container } = render(<><ShellAccountMenu studioShell><div className="who"><button>Details</button></div></ShellAccountMenu><button>Outside</button></>)
+    const menu = container.querySelector('details')
+    const summary = menu.querySelector('summary')
+    fireEvent.click(summary)
+    summary.focus()
+    screen.getByRole('button', { name: 'Details' }).focus()
+    expect(menu.open).toBe(true)
+    screen.getByRole('button', { name: 'Outside' }).focus()
+    expect(menu.open).toBe(false)
+  })
   it('seats Objects beside Find and Layers in the same initially collapsed rail', () => {
     const { container } = render(<>
       <DrawingObjectsMount><details className="drawing-objects-panel"><summary>Objects</summary><p>Object list</p></details></DrawingObjectsMount>

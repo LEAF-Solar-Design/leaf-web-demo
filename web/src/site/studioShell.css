@@ -848,11 +848,11 @@
 .shell-checkout { position: relative; font-size: 12px; }
 .shell-checkout > summary { display: flex; align-items: center; height: 20px; padding: 0 8px; border: 1px solid var(--border); border-radius: 8px; color: var(--muted); cursor: pointer; list-style: none; }
 .shell-checkout > summary.checked-out::before { content: ''; width: 4px; height: 4px; margin-right: 4px; background: var(--primary); border-radius: 50%; }
-.shell-checkout-menu, .shell-avatar-menu > .who { position: absolute; top: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); box-shadow: var(--shadow-pop); z-index: 100; }
+.shell-checkout-menu, .studio-shell .shell-avatar-menu > .who { position: absolute; top: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); box-shadow: var(--shadow-pop); z-index: 100; }
 .shell-checkout-menu { left: 0; min-width: 200px; }
-.shell-avatar-menu { position: relative; flex: 0 0 auto; }
-.shell-avatar-menu > summary { width: 32px; height: 32px; display: grid; place-items: center; list-style: none; cursor: pointer; border: 1px solid var(--border); border-radius: 50%; background: var(--accent-tint); color: var(--primary); }
-.shell-avatar-menu:not([open]) > .who { display: none !important; }
+.studio-shell .shell-avatar-menu { position: relative; flex: 0 0 auto; }
+.studio-shell .shell-avatar-menu > summary { height: 32px; padding: 0 8px; display: flex; align-items: center; gap: 4px; list-style: none; cursor: pointer; border: 1px solid var(--border); border-radius: 8px; background: var(--accent-tint); color: var(--primary); }
+.studio-shell .shell-avatar-menu:not([open]) > .who { display: none !important; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top .shell-avatar-menu > .who { right: 0; width: 240px; max-width: calc(100vw - 24px); display: flex; align-items: stretch; flex-direction: column; gap: 8px; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top .shell-avatar-menu :is(button, .switch) { height: auto; min-height: 32px; font-size: 12px; text-align: left; }
 .shell-kpis { display: flex; align-items: center; gap: 20px; font-variant-numeric: tabular-nums; }
