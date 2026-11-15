@@ -11,6 +11,7 @@ import { DatasetDerivationPanel, DatasetDerivationEvidence, isImportedMaterialDa
 import { ManualWorkflowRunPanel } from './ManualWorkflowRunPanel.jsx'
 import { ManualWorkflowStartPanel } from './ManualWorkflowStartPanel.jsx'
 import { ManualWorkflowDefinitionPanel } from './ManualWorkflowDefinitionPanel.jsx'
+import { ProjectLogRetentionPanel } from './ProjectLogRetentionPanel.jsx'
 import { ActionDefinitionPanel } from './ActionDefinitionPanel.jsx'
 import { WorkflowSchedulePreviewPanel } from './WorkflowSchedulePreviewPanel.jsx'
 import { WebhookReceiptPanel } from './WebhookReceiptPanel.jsx'
@@ -666,6 +667,10 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
             signal={context.current.controller.signal} guard={guardWorkflow}
             onForbidden={() => { const ctx = context.current; if (ctx) fail({ status: 403 }, ctx) }}
             onAdmitted={(run) => { const ctx = context.current; if (ctx && current(ctx)) setHandoff({ run, generation: ctx.generation }) }} />}
+          {['owner', 'editor'].includes(state.scope.projectRole) && context.current && <ProjectLogRetentionPanel
+            key={JSON.stringify(['retention', identity.key, context.current.cacheIdentity])} client={client} projectId={projectId}
+            signal={context.current.controller.signal} guard={guardWorkflow}
+            onForbidden={() => { const ctx = context.current; if (ctx) fail({ status: 403 }, ctx) }} />}
           {['owner', 'editor'].includes(state.scope.projectRole) && context.current && <ManualWorkflowRunPanel
             key={JSON.stringify(['manual-workflow', identity.key, context.current.cacheIdentity])} client={client} projectId={projectId}
             signal={context.current.controller.signal} guard={guardWorkflow} displayPreferences={preferences}

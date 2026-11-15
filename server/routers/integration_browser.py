@@ -86,6 +86,27 @@ def _route(request, project_id, resource):
         raise _Failure(400, "WORKSPACE_INVALID_INPUT")
     if resource == "scope":
         methods, query = {"GET"}, set()
+    elif resource.startswith("integrations/retention/"):
+        tail = resource.removeprefix("integrations/retention/")
+        execution = r"retention-execution:[a-f0-9]{64}"
+        retention_slug = r"[a-z0-9]+(?:-[a-z0-9]+)*"
+        if tail in {"prepare", "definitions", "schedules", "occurrences"}:
+            methods, query = {"POST"}, set()
+        elif re.fullmatch(rf"definitions/({retention_slug})/versions/({_VERSION})(?:/export)?", tail):
+            methods, query = {"GET"}, set()
+        elif re.fullmatch(rf"schedules/({retention_slug})/versions/({_VERSION})", tail):
+            methods, query = {"GET"}, set()
+        elif re.fullmatch(rf"executions/({execution})(?:/rows)?", tail):
+            methods = {"GET"}
+            query = {"view", "limit", "after"} if tail.endswith("/rows") else set()
+        elif re.fullmatch(rf"executions/({execution})/(?:plan|review|apply|recover|restore-admissions|restore)", tail):
+            methods, query = {"POST"}, set()
+        else:
+            raise _Failure(404, "WORKSPACE_NOT_FOUND")
+        if tail.startswith(("definitions/", "schedules/")):
+            segments = tail.split("/")
+            if len(segments[1]) > 64 or not _positive(segments[3]):
+                raise _Failure(400, "WORKSPACE_INVALID_INPUT")
     elif resource == "integrations/connections":
         methods, query = {"GET"}, {"limit", "after"}
     elif re.fullmatch(rf"integrations/connections/({_SLUG})(?:/vercel/preview-permission)?", resource):
@@ -113,12 +134,15 @@ def _route(request, project_id, resource):
         raise _Failure(405, "WORKSPACE_METHOD_NOT_ALLOWED")
     parts = resource.split("/")
     if any(len(part) > 128 for part in parts) or (
-            "versions" in parts and not _positive(parts[parts.index("versions") + 1])):
+            "versions" in parts and not resource.startswith("integrations/retention/")
+            and not _positive(parts[parts.index("versions") + 1])):
         raise _Failure(400, "WORKSPACE_INVALID_INPUT")
     pairs = list(request.query_params.multi_items())
     if len(pairs) != len(dict(pairs)) or any(key not in query for key, _ in pairs):
         raise _Failure(400, "WORKSPACE_INVALID_INPUT")
     for key, value in pairs:
+        if key == "view" and value not in {"current", "archive"}:
+            raise _Failure(400, "WORKSPACE_INVALID_INPUT")
         if key in {"limit", "revision"} and (not _positive(value) or (key == "limit" and int(value) > 100)):
             raise _Failure(400, "WORKSPACE_INVALID_INPUT")
         if key == "after" and not re.fullmatch(r"[A-Za-z0-9_-]{1,1024}", value):
@@ -163,7 +187,7 @@ def _json(raw):
 
 
 async def _body(request, resource):
-    cap = (65536 if resource == "integrations/dataset-imports" else
+    cap = (65536 if resource == "integrations/dataset-imports" or resource.startswith("integrations/retention/") else
            163840 if resource == "integrations/dataset-derivations" else 262144)
     if request.method == "GET":
         cap = 0
