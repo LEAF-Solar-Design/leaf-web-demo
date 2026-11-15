@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { BrowserCandidateBuildAdapter } from "../src/projectBuild/browserCandidateBuild.js";
 import type { BrowserCandidateBuildRequest, PublishedBrowserCandidate } from "../src/projectBuild/browserCandidateBuild.js";
-import { nextRequestDigest, staticManifestDigest } from "../src/projectBuild/genericNextBuild.js";
+import { NextBuildError, nextRequestDigest, staticManifestDigest } from "../src/projectBuild/genericNextBuild.js";
 import type { GenericNextProducer, NextPreview } from "../src/projectBuild/genericNextBuild.js";
 
 const id = (n: number) => `00000000-0000-0000-0000-${String(n).padStart(12, "0")}`;
@@ -90,7 +90,7 @@ describe("B01 candidate identity adapter (fake producer, no runtime proof)", () 
   });
   it("does not resubmit failed or uncertain producer work", async () => {
     const f = fixture();
-    f.producer.build.mockRejectedValue(new Error("isolated_next_binding_unavailable"));
+    f.producer.build.mockRejectedValue(new NextBuildError("isolated_next_binding_unavailable"));
     await expect(f.adapter.build(authority, request)).rejects.toThrow("isolated_next_binding_unavailable");
     await expect(f.adapter.build(authority, request)).rejects.toThrow("isolated_next_binding_unavailable");
     expect(f.producer.build).toHaveBeenCalledOnce();
@@ -123,4 +123,37 @@ describe("B01 candidate identity adapter (fake producer, no runtime proof)", () 
     expect(result.candidate.version).toBe(witness.version);
     expect(result.preview.manifest.files[0].path).toBe("/index.html");
   });
+  it("classifies candidate read failures without raw private diagnostics", async () => {
+    const f = fixture();
+    f.loadCandidate.mockRejectedValue(new Error("synthetic-private-detail", { cause: { body: "synthetic-private-detail" } }));
+    const error = await f.adapter.build(authority, request).catch(error => error);
+    expect(error).toBeInstanceOf(NextBuildError);
+    expect(error.code).toBe("candidate_unavailable");
+    expect(error.message).toBe("candidate_unavailable");
+    expect(JSON.stringify(error)+error.stack).not.toContain("synthetic-private-detail");
+    expect(f.producer.build).not.toHaveBeenCalled();
+  });
+  it.each([new Error("synthetic-private-detail"), new NextBuildError("synthetic-private-detail")])(
+    "retains a sanitized first producer failure without redispatch", async failure => {
+      const f = fixture(); f.producer.build.mockRejectedValue(failure);
+      const error = await f.adapter.build(authority, request).catch(error => error);
+      expect(error).toBeInstanceOf(NextBuildError);
+      expect(error.code).toBe("build_failed");
+      expect(error.message).toBe("build_failed");
+      expect(JSON.stringify(error)+error.stack).not.toContain("synthetic-private-detail");
+      await expect(f.adapter.build(authority, request)).rejects.toBe(error);
+      expect(f.producer.build).toHaveBeenCalledOnce();
+    });
+  it("preserves known producer classifications but strips extra properties", async () => {
+    const f = fixture(); const failure = new NextBuildError("cleanup_required");
+    Object.assign(failure, { providerBody: "synthetic-private-detail" }); f.producer.build.mockRejectedValue(failure);
+    const error = await f.adapter.build(authority, request).catch(error => error);
+    expect(error.code).toBe("cleanup_required"); expect(error).not.toBe(failure);
+    expect(JSON.stringify(error)+error.stack).not.toContain("synthetic-private-detail");
+  });
+  it.each([null, {}, { ready: true, cleanup: "confirmed", unexpected: "value" }])(
+    "refuses malformed producer status without a ready projection", async status => {
+      const f = fixture(); f.producer.status.mockReturnValue(status as never);
+      await expect(f.adapter.build(authority, request)).rejects.toThrow("preview_unavailable");
+    });
 });

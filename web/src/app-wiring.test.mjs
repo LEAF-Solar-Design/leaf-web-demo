@@ -460,6 +460,7 @@ it('R13G2B-05 workspace props use the existing canonical owners', () => {
     'solar-string-conductors', 'solar-assign-equipment', 'solar-panels-from-drawing', 'solar-panel-groups',
     'solar-homeruns', 'solar-schedule', 'solar-feeders', 'solar-string-data',
     'solar-electrical-schedules', 'solar-cable-export',
+    'solar-solaredge-accept', 'solar-solaredge-tracking-read',
   ])
 })
 

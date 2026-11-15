@@ -2,7 +2,8 @@
 
 The local run commits caller-named membership with kernel matrix placement and
 graph-derived geometry and assignments. The drawing path keeps its broker-supplied
-matrix transaction. Both paths validate sizing before creating groups.
+matrix transaction. Electrical grouping validates sizing; explicitly requested
+geometry-only groups leave electrical sizing unknown on an unassigned graph.
 """
 import copy
 import hashlib
@@ -191,8 +192,9 @@ def run(graph, params, *, _creation=None, source_intake=None):
         group_keys = {"name", "panel_refs", "alignment_tolerance",
                       "module_width_along_row", "module_height_across_row"}
         if (type(params) is not dict
-                or set(params) - {"expected_rev", "groups", "discover", "cancel"}
+                or set(params) - {"expected_rev", "groups", "discover", "cancel", "geometry_only"}
                 or "discover" in params and "groups" in params
+                or type(params.get("geometry_only", False)) is not bool
                 or type(params.get("cancel", False)) is not bool):
             raise GraphValidationError("INVALID_GROUP_REQUEST")
         groups = params.get("groups")
@@ -203,8 +205,14 @@ def run(graph, params, *, _creation=None, source_intake=None):
         result = checked_graph(graph, params.get("expected_rev"))
         if params.get("cancel", False):
             return result
-        sizing = require_sizing(result)
-        geometry_only = "discover" in params and sizing["mode"] == "manual-global"
+        explicit_geometry = params.get("geometry_only", False)
+        if explicit_geometry and result["project"]["installation_design"] != "Roof":
+            raise GraphValidationError("GEOMETRY_GROUPS_REQUIRE_ROOF_DESIGN")
+        if explicit_geometry and any(result[key] for key in (
+                "strings", "inverters", "routes", "schedules", "electrical_zones")):
+            raise GraphValidationError("GEOMETRY_GROUPS_REQUIRE_UNASSIGNED_DESIGN")
+        sizing = None if explicit_geometry else require_sizing(result)
+        geometry_only = explicit_geometry or "discover" in params and sizing["mode"] == "manual-global"
         if "discover" in params:
             groups = _discover_groups(result, params["discover"], source_intake)
             if not 1 <= len(groups) <= 128:
@@ -287,7 +295,7 @@ def run(graph, params, *, _creation=None, source_intake=None):
             if placed_refs != set(refs):
                 raise GraphValidationError("GROUP_MATRIX_COLLISION")
             zone_ref = next((zone for zone, coverage in zones if set(refs) <= coverage), None)
-            if result["settings"]["extra"]["string_sizing"]["mode"] == "zones" and zone_ref is None:
+            if sizing is not None and sizing["mode"] == "zones" and zone_ref is None:
                 raise GraphValidationError("INVALID_ZONE_COVERAGE")
 
             if _creation is None:
@@ -331,7 +339,8 @@ def run(graph, params, *, _creation=None, source_intake=None):
             frame = {
                 "id": frame_id, "kind": "frame", "rev": result["rev"],
                 "extra": ({"grouping_basis": "geometry-only", "module_power_status": "unknown",
-                           "sizing_evidence_mode": "manual-global"} if geometry_only else {}),
+                           "sizing_evidence_mode": "not-requested" if explicit_geometry else "manual-global"}
+                          if geometry_only else {}),
                 "validity": {"state": "valid", "reasons": []},
                 "name": group["name"], "panel_refs": refs[:],
                 "insertion_point": members[0]["centre"][:], "installation_design": "Roof",

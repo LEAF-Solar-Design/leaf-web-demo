@@ -155,7 +155,9 @@ function ProjectMaterialImport({ projectId, client, signal, guard, onImported, o
     run(async (controller) => {
       if (!source || pointer === null || !Array.isArray(recordsAtOriginal(source.original, pointer))) throw new Error('Choose an original and records array.')
       const definition = { schema_version: 1, id, version: Number(version), title, reporting_time_zone: 'UTC', retention_days: 365,
-        fields: fields.map((field) => ({ id: field.id, label: field.label, type: { kind: field.kind }, nullable: field.nullable, sensitivity: 'internal' })),
+        fields: fields.map((field) => ({ id: field.id, label: field.label,
+          type: field.kind === 'ratio' ? { kind: 'ratio', scale: field.ratioScale || 'percent' } : { kind: field.kind },
+          nullable: field.nullable, sensitivity: 'internal' })),
         key_fields: fields.filter((field) => field.key).map((field) => field.id),
         lineage: { kind: 'project_material', material_id: source.material.material_id, sha256: source.material.sha256, byte_length: source.material.byte_size } }
       const mapping = { schema_version: 1, fields: fields.map((field) => ({ field_id: field.id, pointer: field.pointer, conversion: field.conversion })) }
@@ -184,7 +186,10 @@ function ProjectMaterialImport({ projectId, client, signal, guard, onImported, o
         <label>Import dataset version<input required type="number" min="1" value={version} onChange={(event) => setVersion(event.target.value)} /></label>
         {fields.map((field, index) => <fieldset key={index}><legend>Import field {index + 1}</legend>
           {['id', 'label', 'pointer'].map((key) => <label key={key}>{`Field ${index + 1} ${key}`}<input required value={field[key]} onChange={(event) => updateField(index, key, event.target.value)} /></label>)}
-          <label>{`Field ${index + 1} type`}<select value={field.kind} onChange={(event) => updateField(index, 'kind', event.target.value)}>{['text', 'identifier', 'count', 'number', 'boolean', 'date', 'instant'].map((kind) => <option key={kind}>{kind}</option>)}</select></label>
+          <label>{`Field ${index + 1} type`}<select value={field.kind} onChange={(event) => updateField(index, 'kind', event.target.value)}>{['text', 'identifier', 'count', 'number', 'ratio', 'boolean', 'date', 'instant'].map((kind) => <option key={kind}>{kind}</option>)}</select></label>
+          {field.kind === 'ratio' && <label>{`Field ${index + 1} ratio scale`}<select value={field.ratioScale || 'percent'} onChange={(event) => updateField(index, 'ratioScale', event.target.value)}>
+            <option value="percent">Percent (80 means 80%)</option><option value="fraction">Fraction (0.8 means 80%)</option>
+          </select></label>}
           <label>{`Field ${index + 1} conversion`}<select value={field.conversion} onChange={(event) => updateField(index, 'conversion', event.target.value)}>{['identity', 'string_number', 'iso_instant'].map((kind) => <option key={kind}>{kind}</option>)}</select></label>
           <label><input type="checkbox" checked={field.key} onChange={(event) => updateField(index, 'key', event.target.checked)} />{`Field ${index + 1} key`}</label>
           <label><input type="checkbox" checked={field.nullable} onChange={(event) => updateField(index, 'nullable', event.target.checked)} />{`Field ${index + 1} nullable`}</label>
@@ -218,6 +223,9 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   const generation = useRef(0)
   const context = useRef(null)
   const viewGeneration = useRef(0)
+  // Keep only dataset selection intent while a profile hides this Ground.
+  // Results and action authority are always discarded and read again.
+  const rememberedView = useRef(null)
   const busy = useRef(false)
   const snapshot = session?.controller?.getSnapshot?.() || session
   const sessionGeneration = snapshot?.generation
@@ -225,6 +233,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   const eligible = active && signedIn && !mock && UUID.test(projectId || '') && status === 'active'
   // Comparing the render identity prevents a single frame of old-account content.
   const identityKey = JSON.stringify([projectId, accountScope, signedIn, mock, sessionGeneration, status, active, epoch])
+  const resumeOwner = JSON.stringify([projectId, accountScope, signedIn, mock, sessionGeneration, status, epoch])
   const identity = useMemo(() => ({ key: identityKey }), [identityKey, session?.controller])
   const visible = state.identity === identity && eligible
   const leaving = leavingGround === 'integrations'
@@ -271,6 +280,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   function fail(error, ctx, errorOperation = null) {
     if (!current(ctx) || error?.name === 'AbortError') return
     if (error?.status === 403) {
+      rememberedView.current = null
       invalidate()
       setState({ ...empty(), identity, error: 'You do not have permission to view these integrations.' })
       setForm(blankForm())
@@ -279,12 +289,13 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       pending: '', error: humanizeError(error), errorOperation, retryable: error?.retryable !== false && ![401, 403, 404, 409, 422].includes(error?.status) }))
   }
   useLayoutEffect(() => {
+    if (rememberedView.current?.owner !== resumeOwner) rememberedView.current = null
     invalidate()
     setState({ ...empty(), identity, pending: eligible ? 'Loading integrations…' : '' })
     setForm(blankForm())
     setRevision('')
     if (!eligible) return undefined
-    const ctx = { controller: new AbortController(), generation: generation.current, sessionGeneration }
+    const ctx = { controller: new AbortController(), generation: generation.current, sessionGeneration, resumeOwner }
     context.current = ctx
     ;(async () => {
       try {
@@ -298,6 +309,16 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
         if (!current(ctx)) return
         setState({ ...empty(), identity, scope, datasets: datasets.records, elements: elements.records,
           datasetCursor: datasets.nextCursor, elementCursor: elements.nextCursor })
+        const resume = rememberedView.current
+        rememberedView.current = null
+        if (resume?.owner === ctx.resumeOwner && resume.scope === ctx.cacheIdentity) {
+          const saved = elements.records.find(record => record.element.id === resume.id && record.element.kind.startsWith('dataset.'))
+          if (saved) {
+            setState(old => ({ ...old, pending: 'Loading view…' }))
+            await readView(saved, false, ctx)
+            if (current(ctx)) setState(old => ({ ...old, pending: '' }))
+          }
+        }
       } catch (error) { fail(error, ctx) }
     })()
     return invalidate
@@ -383,6 +404,8 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       : { ...old, dataset: referenceKey(reference), columns: dataset.fields.map(field => field.id) })
   }
   async function readView(record, historical, ctx, cursor) {
+    rememberedView.current = !historical && record.element.kind.startsWith('dataset.')
+      ? { owner: ctx.resumeOwner, scope: ctx.cacheIdentity, id: record.element.id } : null
     const request = ++viewGeneration.current
     const readIdentity = JSON.stringify([ctx.cacheIdentity, record.revision, record.element])
     const retain = state.readIdentity === readIdentity && state.read && ['ready', 'empty', 'partial', 'stale'].includes(state.read.status)

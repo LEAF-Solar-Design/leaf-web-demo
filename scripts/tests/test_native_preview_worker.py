@@ -172,9 +172,21 @@ def test_native_recovery_projection_preserves_source_and_rejects_drift(native_pa
         reconciliation.settled_failure_status(worker.encode(dict(job_id=JOB,status='failed',**dict(identity,source_commit='f'*40))),claim)
 
 
+@pytest.mark.parametrize('extra_sources', [0, 246, 996])
 @pytest.mark.parametrize('fail_install',[False,True,'xcodegen-unavailable'])
-def test_native_driver_generates_fixed_project_builds_and_hashes_copied_app(native_package,tmp_path,capsys,fail_install):
+def test_native_driver_generates_fixed_project_builds_and_hashes_copied_app(native_package,tmp_path,capsys,fail_install,extra_sources):
     raw,job=native_package
+    if extra_sources:
+        import copy
+        raw, job = copy.deepcopy(native_package)
+        files = worker.verify_native_archive(raw, job['descriptor'])
+        files.update({f'Sources/Part{i}.swift': ('100644', b'import SwiftUI\n')
+                      for i in range(extra_sources)})
+        job['descriptor']['source_tree'] = worker.native_tree(files)
+        raw = worker.native_archive(files, job['descriptor'])
+        job['descriptor'].update(archive_sha256=hashlib.sha256(raw).hexdigest(), byte_size=len(raw))
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        assert len(archive.infolist()) == 5 + extra_sources
     expected_files = worker.verify_native_archive(raw, job['descriptor'])
     owned,derived,internal=tmp_path/'owned',tmp_path/'derived',tmp_path/'internal'
     owned.mkdir()

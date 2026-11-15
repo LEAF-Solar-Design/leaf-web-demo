@@ -385,7 +385,9 @@ project.mkdir(mode=0o700)
 with zipfile.ZipFile(io.BytesIO(raw)) as z:
     # Windows has already regenerated exactly; repeat extraction fences here.
     infos=z.infolist()
-    assert len(infos)<=250 and sum(i.file_size for i in infos)<=80*1024*1024
+    # Native custody admits 1000 source files plus its generated manifest.
+    entry_limit = 1001 if native else 250
+    assert len(infos)<=entry_limit and sum(i.file_size for i in infos)<=80*1024*1024
     assert len(set(i.filename for i in infos))==len(infos)
     for i in infos:
         path=(project/i.filename).resolve()

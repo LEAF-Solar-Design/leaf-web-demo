@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import SchemaForm, { defaultsOf } from '../components/SchemaForm.jsx'
 import SolarReadResult from './SolarReadResult.jsx'
+import SolarEdgeTrackingReferences from './SolarEdgeTrackingReferences.jsx'
 import { createSolarDrawingBinding, sameSolarDrawingBinding, solarDrawingBindingKey } from './solarDrawingBinding.js'
 
 export const PROJECT_SOLAR_WORKSPACE_REASONS = Object.freeze({
@@ -182,6 +183,8 @@ export default function ProjectSolarReadPanel({ tool, solarBinding, authorityKey
   const mounted = useRef(false)
   const formEpoch = useRef(0)
   const parameterRevision = useRef(0)
+  const readButton = useRef(null)
+  const focusAfterRead = useRef(null)
   // SchemaForm's latest validity report, written in the handler itself: the report can arrive (from its effect) after
   // the render a submit closes over, and a stale valid form must never send the previous values.
   const reportedValid = useRef(true)
@@ -192,6 +195,7 @@ export default function ProjectSolarReadPanel({ tool, solarBinding, authorityKey
     operation.current?.controller.abort()
     operation.current = null
     presentedScope.current = null
+    focusAfterRead.current = null
   }
   const previous = latest.current
   if (!sameOwner(previous, owner)) {
@@ -230,9 +234,12 @@ export default function ProjectSolarReadPanel({ tool, solarBinding, authorityKey
     }
   }, [projectClient])
 
-  const edit = () => {
+  const retireParameters = () => {
     parameterRevision.current += 1
     invalidate()
+  }
+  const edit = () => {
+    retireParameters()
     setState({ phase: 'idle', generation: generation.current })
   }
   const read = async (event) => {
@@ -274,6 +281,7 @@ export default function ProjectSolarReadPanel({ tool, solarBinding, authorityKey
     try {
       capturedScope = admitted.projectClient.captureCatalogScope()
       if (!check()) return
+      focusAfterRead.current = document.activeElement === readButton.current ? token : null
       setState({ phase: 'reading', generation: token })
       const outcome = await admitted.projectClient.readSolar({ tool: admitted.name, params,
         catalogDigest: admitted.digest, current: admitted.name !== 'solar-solaredge-tracking-read', signal: controller.signal })
@@ -299,8 +307,14 @@ export default function ProjectSolarReadPanel({ tool, solarBinding, authorityKey
   const reason = owner.reason || (visible.phase === 'reading' ? 'reading' : busy ? 'busy' :
     !activeForm.valid ? 'parameters_invalid' : visible.phase === 'refused' ? 'read_refused' :
       visible.phase === 'stale' ? 'scope_stale' : visible.phase === 'presented' ? null : 'idle')
+  useLayoutEffect(() => {
+    if (!['presented', 'refused'].includes(visible.phase)) return
+    const restore = focusAfterRead.current === visible.generation
+    focusAfterRead.current = null
+    if (restore && !owner.reason && document.activeElement === document.body) readButton.current?.focus()
+  }, [visible.phase, visible.generation, owner.reason])
   return <section className="project-solar-read-panel">
-    <form onSubmit={read} onInputCapture={edit} onChangeCapture={edit}>
+    <form onSubmit={read} onInputCapture={retireParameters} onChangeCapture={retireParameters}>
       <SchemaForm key={formEpoch.current} schema={owner.editableSchema} values={activeForm.values}
         onChange={(values) => { edit(); setForm((value) => ({ ...value, values })) }}
         onValidityChange={(valid) => {
@@ -310,12 +324,14 @@ export default function ProjectSolarReadPanel({ tool, solarBinding, authorityKey
       <p role="status" aria-live="polite">{projectSolarWorkspaceReason(reason)}
         {reason === 'read_refused' && <> <code>{visible.code}</code></>}
       </p>
-      <button type="submit" disabled={!!owner.reason || visible.phase === 'reading' || busy || !activeForm.valid}>
+      <button ref={readButton} type="submit" disabled={!!owner.reason || visible.phase === 'reading' || busy || !activeForm.valid}>
         {PROJECT_SOLAR_WORKSPACE_LABELS.read_action}
       </button>
     </form>
-    {!owner.reason && visible.phase === 'presented' && <SolarReadResult data={visible.data}
+    {!owner.reason && visible.phase === 'presented' && <><SolarReadResult data={visible.data}
       solarBinding={solarBinding} authorityKey={authorityKey} projectClient={projectClient}
-      catalogDigest={owner.digest} projectCurrent={owner.name !== 'solar-solaredge-tracking-read'} save={save} />}
+      catalogDigest={owner.digest} projectCurrent={owner.name !== 'solar-solaredge-tracking-read'} save={save} />
+      {owner.name === 'solar-solaredge-tracking-read' && <SolarEdgeTrackingReferences
+        data={visible.data} binding={solarBinding} catalogDigest={owner.digest} />}</>}
   </section>
 }
