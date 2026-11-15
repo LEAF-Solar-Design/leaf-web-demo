@@ -550,6 +550,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
     event.preventDefault()
     if (savedReadback || !canEdit) return
     operation('Saving view…', async (ctx) => {
+      if (!/[\p{L}\p{N}\p{P}\p{S}]/u.test(form.title)) throw new Error('Enter a visible view title.')
       const dataset = state.datasets.find((item) => referenceKey(item.reference) === form.dataset)
       if (!dataset) throw new Error('Select an authorized dataset.')
       const fields = form.kind === 'table' ? form.columns : [...new Set([form.x, form.y])]
