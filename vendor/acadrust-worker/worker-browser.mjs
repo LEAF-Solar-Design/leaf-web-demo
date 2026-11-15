@@ -1,3 +1,5 @@
+import { readNativeLayout, repairNativeLayout } from './native-layout-bytes.mjs'
+
 // Card F-3: the BROWSER module worker for the real CAD engine — the
 // worker-side half CadEditSurface talks to through the unmodified
 // EngineBoundary. Speaks exactly the boundary's message vocabulary
@@ -56,6 +58,7 @@ function loadEngine() {
 
 // The single held document. Replaced by loadDocument, dropped by dispose.
 let current = null
+let bindingGeneration = 0
 
 function isByteArray(value) {
   return value instanceof Uint8Array
@@ -363,13 +366,30 @@ function applyOne(doc, op, payload) {
 async function applyEdit(engine, message) {
   const { op, payload } = message
   if (!current) return refused(op, 'no_document_loaded')
-  const doc = current.doc
+  const held = current
+  const doc = held.doc
   let createdHandle = null
   // Every op that makes MORE than one entity (explode's parts, an array's
   // copies, a batch's creates) reports them here, in document order.
   let createdHandles = null
   let rollback = null
   const reasonOf = (error) => error instanceof Error ? error.message : String(error)
+  const restore = (snapshot, reason) => {
+    if (current !== held) return null
+    try {
+      current = { documentId: held.documentId, doc: reparseDocument(engine, snapshot, doc), nativeLayout: held.nativeLayout }
+      return refused(op, reason)
+    } catch (error) {
+      current = null
+      return { type: 'error', message: `batch_restore_failed:${reasonOf(error)}` }
+    }
+  }
+  if (held.nativeLayout && op !== 'batch') {
+    let snapshot
+    try { snapshot = engine.writeDxf(doc) }
+    catch (error) { return refused(op, `native_snapshot_failed:${reasonOf(error)}`) }
+    rollback = reason => restore(snapshot, reason)
+  }
   if (op === 'batch') {
     // W4g-6: one verb, several steps, ONE turn. The steps run in order
     // against the held document, each addressed by handle (so a delete
@@ -382,16 +402,7 @@ async function applyEdit(engine, message) {
     let snapshot
     try { snapshot = engine.writeDxf(doc) }
     catch (error) { return refused(op, `batch_snapshot_failed:${reasonOf(error)}`) }
-    const documentId = current.documentId
-    rollback = (reason) => {
-      try {
-        current = { documentId, doc: reparseDocument(engine, snapshot, doc) }
-        return refused(op, reason)
-      } catch (error) {
-        current = null
-        return { type: 'error', message: `batch_restore_failed:${reasonOf(error)}` }
-      }
-    }
+    rollback = reason => restore(snapshot, reason)
     const made = []
     for (let i = 0; i < steps.length; i += 1) {
       const step = steps[i] && typeof steps[i] === 'object' ? steps[i] : {}
@@ -428,6 +439,17 @@ async function applyEdit(engine, message) {
   catch (error) {
     if (rollback) return rollback(`batch_write_failed:${reasonOf(error)}`)
     throw error
+  }
+  let nativeLayout = held.nativeLayout
+  if (nativeLayout) {
+    try {
+      written = await repairNativeLayout(nativeLayout, written)
+      if (current !== held) return null
+      nativeLayout = await readNativeLayout(written)
+      if (current !== held) return null
+    } catch (error) {
+      return rollback(`native_export_failed:${reasonOf(error)}`)
+    }
   }
   const blockBasePatched = doc.blockBasePatched ?? false
   let reparsed
@@ -474,7 +496,7 @@ async function applyEdit(engine, message) {
       return rollback('batch_projection_failed:created_entity_lost')
     }
   }
-  current = { documentId: current.documentId, doc: reparsed }
+  current = { documentId: held.documentId, doc: reparsed, nativeLayout }
   return reply
 }
 
@@ -501,6 +523,7 @@ export async function handleMessage(raw, engineOverride = null) {
   }
 
   if (raw.type === 'dispose') {
+    bindingGeneration += 1
     current = null
     return null
   }
@@ -525,11 +548,16 @@ export async function handleMessage(raw, engineOverride = null) {
       current = null
       return { type: 'error', message: `document_too_large:${bytes.length}` }
     }
-    let doc
+    const generation = ++bindingGeneration
+    current = null
+    let doc, nativeLayout
     try {
       doc = engine.parseDxf(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes.buffer))
       if (raw.blockBasesUnknown === true) doc.blockBasesUnknown = true
+      nativeLayout = await readNativeLayout(bytes)
+      if (generation !== bindingGeneration) return null
     } catch (error) {
+      if (generation !== bindingGeneration) return null
       current = null
       const reason = error instanceof Error ? error.message : String(error)
       if (reason.startsWith('block names collide case-insensitively: ') || reason.startsWith('block definitions collapsed on load: ')) {
@@ -538,7 +566,7 @@ export async function handleMessage(raw, engineOverride = null) {
       }
       return { type: 'error', message: `parse_failed:${reason}` }
     }
-    current = { documentId, doc }
+    current = { documentId, doc, nativeLayout }
     try {
       return loadedResponse(documentId, doc)
     } catch (error) {
@@ -548,7 +576,11 @@ export async function handleMessage(raw, engineOverride = null) {
   }
 
   if (raw.type === 'applyEdit') {
-    return applyEdit(engine, raw)
+    const held = current
+    if (held?.editPending) return refused(raw.op, 'edit_in_progress')
+    if (held) held.editPending = true
+    try { return await applyEdit(engine, raw) }
+    finally { if (held) held.editPending = false }
   }
 
   return { type: 'error', message: `unhandled_type:${raw.type}` }
