@@ -219,10 +219,14 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   const [handoff, setHandoff] = useState(null)
   const boardRef = useRef(null)
   const resultRef = useRef(null)
+  const viewFeedback = useRef(null)
   const composeFeedback = useRef(null)
   const [composeError, setComposeError] = useState('')
   const [savedReadback, setSavedReadback] = useState(null)
   useLayoutEffect(() => { if (composeError || savedReadback) composeFeedback.current?.focus() }, [composeError, savedReadback])
+  useLayoutEffect(() => {
+    if (state.error && state.errorOperation?.owner === 'view' && document.activeElement === document.body) viewFeedback.current?.focus()
+  }, [state.error, state.errorOperation])
   const generation = useRef(0)
   const context = useRef(null)
   const viewGeneration = useRef(0)
@@ -640,7 +644,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       {message ? <p role="status">{message}</p> : visible && <>
         <OpsHomePanel active={active} />
         <p role="status" aria-live="polite" tabIndex={-1} ref={resultRef}>{state.notice || state.pending}</p>
-        {state.error && !viewError && <div role="alert"><p>{humanizeError(state.error)}</p>{state.retryable && <button disabled={pending} onClick={() => state.errorOperation ? state.errorOperation.retry() : setRetry((value) => value + 1)}>Retry integrations</button>}</div>}
+        {state.error && !viewError && <div role="alert" ref={viewFeedback} tabIndex={-1}><p>{humanizeError(state.error)}</p>{state.retryable && <button disabled={pending} onClick={() => state.errorOperation ? state.errorOperation.retry() : setRetry((value) => value + 1)}>Retry integrations</button>}</div>}
         {state.scope && <details className="ops-advanced" open={!hasLinkedDevice}>
           <summary>Workflows and data</summary>
           {canEdit && context.current && <WorkflowScheduleDraftBrowser
@@ -781,7 +785,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
               </>}
             </> : <>
             {state.read && state.previousRead && <p role="status">Previous result. {pending ? 'Refreshing view…' : 'The latest read failed; showing the last successful result.'}</p>}
-            {viewError && <div role="alert"><p>{humanizeError(state.error)}</p>{state.retryable && <button disabled={pending} onClick={retryView}>Retry view</button>}</div>}
+            {viewError && <div role="alert" ref={viewFeedback} tabIndex={-1}><p>{humanizeError(state.error)}</p>{state.retryable && <button disabled={pending} onClick={retryView}>Retry view</button>}</div>}
             {(state.read || pending) && <DatasetElement element={state.selected.element} read={state.read} preferences={preferences} isLoading={pending}
               onRetry={retryView}
               onLoadMore={(cursor) => loadView(state.selected, state.historical, cursor)} />}
