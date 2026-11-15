@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import ProjectPageEditor from './ProjectPageEditor.jsx'
 import { loadProjectPage, submitProjectNativePreview } from './projectPageClient.js'
+import * as projectIdentity from '../projects/api.js'
 
 vi.mock('../auth.js', () => ({ subscribeBeforeLogout: () => () => {}, subscribeTokenStored: () => () => {} }))
 vi.mock('../auth/activeScope.js', () => ({ readActiveScope: () => 'b02-synthetic', subscribeActiveScope: () => () => {} }))
@@ -33,6 +34,23 @@ beforeEach(() => {
     document_sha256: 'a'.repeat(64), archive_sha256: 'd'.repeat(64) })
 })
 afterEach(() => { cleanup(); vi.restoreAllMocks(); localStorage.clear() })
+
+it('recovers a principal-scoped submission when the optional actor binding is absent', async () => {
+  vi.spyOn(projectIdentity, 'getStoredActorBindingId').mockReturnValue(null)
+  const first = await open()
+  fireEvent.click(screen.getByRole('button', { name: 'Build iOS preview' }))
+  await waitFor(() => expect(submitProjectNativePreview).toHaveBeenCalledTimes(1))
+  const key = submitProjectNativePreview.mock.calls[0][2]
+  expect(submitProjectNativePreview.mock.calls[0].slice(0, 2)).toEqual([PROJECT, 16])
+  expect([...Array(localStorage.length)].map((_, index) => localStorage.key(index))
+    .filter(name => name.startsWith('leaf.portfolio.native-preview.v1:'))).toHaveLength(1)
+  first.unmount()
+  await open()
+  expect(submitProjectNativePreview).toHaveBeenCalledTimes(1)
+  fireEvent.click(screen.getByRole('button', { name: 'Build iOS preview' }))
+  await waitFor(() => expect(submitProjectNativePreview).toHaveBeenCalledTimes(2))
+  expect(submitProjectNativePreview.mock.calls[1][2]).toBe(key)
+})
 
 it('reuses the original submission after the editor unmounts and reopens', async () => {
   const first = await open()

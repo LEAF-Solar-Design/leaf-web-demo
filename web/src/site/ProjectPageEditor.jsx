@@ -454,8 +454,9 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
       let key
       nativePreparation.current = true
       try {
+        // Live authentication derives the actor server-side; the dev binding is optional.
         key = await nativePreviewSubmissionKey(localStorage,
-          [accountScope, getStoredOrgId(), getStoredActorBindingId(), projectId, saved.revision, saved.digest], session?.job ? session.key : null)
+          [accountScope, getStoredOrgId(), getStoredActorBindingId() || accountScope, projectId, saved.revision, saved.digest], session?.job ? session.key : null)
         if (!live.current || sourceSnapshot.current.saved !== saved || !sourceSnapshot.current.enabled) return
       } catch {
         if (!live.current || sourceSnapshot.current.saved !== saved || !sourceSnapshot.current.enabled) return
