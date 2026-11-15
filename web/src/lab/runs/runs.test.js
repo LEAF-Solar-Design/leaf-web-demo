@@ -57,6 +57,31 @@ it.each(['utf8', 'json', 'truncation-marker'])('retains verified evidence and re
   expect(fetchImpl.mock.calls[0][1].headers['Last-Event-ID']).toBe('r:0')
   expect(fetchImpl.mock.calls[0][1].method).toBeUndefined()
 })
+
+it.each(['9007199254740992', '9007199254740993', '18446744073709551615'])('refuses unsafe numeric event cursor %s without replacing evidence', async seq => {
+  const store = createValueStore()
+  store.apply('r', event(0, 'corpus', { result: 'verified bytes' }))
+  const raw = `event: run\nid: r:${seq}\ndata: {"run_id":"r","seq":${seq},"kind":"value","block_id":"corpus","payload":{"result":"unsafe"}}\n\n`
+  const fetchImpl = vi.fn().mockResolvedValue(stream([raw]))
+  const sleep = vi.fn(async (ms, signal) => new Promise(resolve => signal.addEventListener('abort', resolve, { once: true })))
+  open({ runIds: ['r'], store, fetchImpl, sleep })
+  await waitFor(() => expect(sleep).toHaveBeenCalledTimes(1))
+  expect(store.getRun('r').transport).toMatchObject({ status: 'invalid_evidence', evidenceError: 'invalid_event_cursor' })
+  expect(store.getRun('r').lastSeq).toBe(0)
+  expect(store.getBlock('r', 'corpus').value.result).toBe('verified bytes')
+  expect(fetchImpl).toHaveBeenCalledTimes(1)
+  expect(fetchImpl.mock.calls[0][1].method).toBeUndefined()
+  expect(store.apply('r', event(Number(seq)))).toBe(false)
+})
+it('resumes the largest safe cursor exactly', async () => {
+  const store = createValueStore()
+  store.apply('r', event(Number.MAX_SAFE_INTEGER))
+  const fetchImpl = vi.fn().mockResolvedValue(parked())
+  open({ runIds: ['r'], store, fetchImpl })
+  await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1))
+  expect(fetchImpl.mock.calls[0][1].headers['Last-Event-ID']).toBe('r:9007199254740991')
+})
+
 afterEach(() => { cleanup(); handles.splice(0).forEach(handle => handle.stop()); localStorage.removeItem('leaf.jwt'); vi.restoreAllMocks() })
 
 it('keeps unknown submission intent for explicit recovery and separates rejection', async () => {

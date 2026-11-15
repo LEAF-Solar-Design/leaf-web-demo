@@ -135,7 +135,7 @@ export function createValueStore({ maxEvents = 10000, maxRuns = 20 } = {}) {
     },
     apply(id, event) {
       const run = ensure(id)
-      if (!Number.isInteger(event.seq) || event.seq <= run.lastSeq) return false
+      if (!Number.isSafeInteger(event.seq) || event.seq <= run.lastSeq) return false
       const block = event.block_id
       const blocks = block ? { ...run.blocks, [block]: { value: event.kind === 'value' ? event.payload : run.blocks[block]?.value,
         seq: event.seq, at: event.at, error: ['failed', 'suspended'].includes(event.kind) ? event.payload?.reason || event.kind : null } } : run.blocks

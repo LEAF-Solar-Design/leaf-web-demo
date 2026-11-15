@@ -140,6 +140,10 @@ export function openRunStream({ runIds, store = labValueStore, fetchImpl = globa
             const frame = async () => {
               if (!data.length) { type = 'message'; frameId = ''; frameBytes = 0; return }
               const value = JSON.parse(data.join('\n')), kind = type
+              if (kind === 'run' && active.has(value.run_id) && !Number.isSafeInteger(value.seq)) {
+                transport({ evidenceError: 'invalid_event_cursor' })
+                throw new SnapshotEvidenceError('Invalid event cursor')
+              }
               // The data envelope is authoritative; an id must agree with it.
               if (kind === 'run' && frameId && frameId !== `${value.run_id}:${value.seq}`) throw new Error('Invalid event cursor')
               type = 'message'; data = []; frameId = ''; frameBytes = 0; failures = 0
