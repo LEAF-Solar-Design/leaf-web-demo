@@ -17,6 +17,189 @@ EPS = 1e-10
 ROOT = Path(__file__).resolve().parent
 
 
+class CaseInputError(ValueError):
+    """Malformed fixture with stable, machine-readable location."""
+
+    def __init__(self, case_id, field_path, name="INVALID_CASE_INPUT"):
+        self.case_id, self.field_path, self.name = case_id, field_path, name
+        self.diagnostic = dict(name=name, case_id=case_id, field_path=field_path)
+        super().__init__(f"{name}: {case_id}: {field_path}")
+
+
+def validate_case(case, calculate):
+    cid = case.get("id", "<top-level>") if isinstance(case, dict) else "<top-level>"
+    if not isinstance(cid, str) or not cid:
+        cid = "<top-level>"
+
+    def need(ok, path, name="INVALID_CASE_INPUT"):
+        if not ok:
+            raise CaseInputError(cid, path, name)
+
+    def fields(obj, keys, path):
+        need(isinstance(obj, dict), path)
+        for key in keys:
+            need(key in obj, f"{path}.{key}", "MISSING_FIELD")
+
+    def text(value, path):
+        need(isinstance(value, str) and bool(value), path)
+
+    def number(value, path, positive=False):
+        need(type(value) in (int, float), path)
+        try:
+            valid = math.isfinite(value)
+        except OverflowError:
+            valid = False
+        need(valid and (not positive or value > 0), path)
+
+    def array(value, path):
+        need(isinstance(value, list), path)
+
+    def vector(value, path, size=2):
+        array(value, path)
+        need(len(value) == size, path)
+        for i, item in enumerate(value):
+            number(item, f"{path}[{i}]")
+
+    def rect(value, path):
+        vector(value, path, 4)
+        need(value[0] < value[2] and value[1] < value[3], path)
+
+    seen = set()
+
+    def object_id(obj, path):
+        fields(obj, ["id"], path)
+        text(obj["id"], path + ".id")
+        need(obj["id"] not in seen, path + ".id", "DUPLICATE_OBJECT_ID")
+        seen.add(obj["id"])
+
+    fields(case, ["id", "expected"], "case")
+    text(case["id"], "id")
+    if calculate is geometry:
+        fields(case, ["original", "export"], "case")
+        for side in ("original", "export"):
+            array(case[side], side)
+            for i, obj in enumerate(case[side]):
+                path = f"{side}[{i}]"
+                object_id(obj, path)
+                fields(obj, ["handle", "point"], path)
+                text(obj["handle"], path + ".handle")
+                vector(obj["point"], path + ".point")
+                inserts = obj.get("inserts", [])
+                array(inserts, path + ".inserts")
+                for j, insert in enumerate(inserts):
+                    ip = f"{path}.inserts[{j}]"
+                    fields(insert, ["base", "scale", "insertion", "rotation_deg"], ip)
+                    for key in ("base", "scale", "insertion"):
+                        vector(insert[key], ip + "." + key)
+                    need(all(v != 0 for v in insert["scale"]), ip + ".scale")
+                    number(insert["rotation_deg"], ip + ".rotation_deg")
+    elif calculate is fill_coverage:
+        fields(case, ["module", "fills"], "case")
+        object_id(case["module"], "module")
+        fields(case["module"], ["rect"], "module")
+        rect(case["module"]["rect"], "module.rect")
+        array(case["fills"], "fills")
+        for i, fill in enumerate(case["fills"]):
+            path = f"fills[{i}]"
+            object_id(fill, path)
+            fields(fill, ["outer", "holes"], path)
+            rect(fill["outer"], path + ".outer")
+            array(fill["holes"], path + ".holes")
+            for j, hole in enumerate(fill["holes"]):
+                hp = f"{path}.holes[{j}]"
+                rect(hole, hp)
+                outer = fill["outer"]
+                need(outer[0] <= hole[0] < hole[2] <= outer[2]
+                     and outer[1] <= hole[1] < hole[3] <= outer[3], hp)
+    elif calculate is tag_overlaps:
+        fields(case, ["objects"], "case")
+        array(case["objects"], "objects")
+        for i, obj in enumerate(case["objects"]):
+            path = f"objects[{i}]"
+            object_id(obj, path)
+            fields(obj, ["kind", "center", "width", "height", "rotation_deg", "line_count"], path)
+            need(obj["kind"] in ("tag", "module"), path + ".kind")
+            vector(obj["center"], path + ".center")
+            for key in ("width", "height", "rotation_deg"):
+                number(obj[key], path + "." + key, key != "rotation_deg")
+            need(type(obj["line_count"]) is int and
+                 obj["line_count"] >= (1 if obj["kind"] == "tag" else 0), path + ".line_count")
+            if obj["kind"] == "tag":
+                fields(obj, ["paper_text_height_mm"], path)
+            if "paper_text_height_mm" in obj:
+                number(obj["paper_text_height_mm"], path + ".paper_text_height_mm", True)
+
+    def expected_tree(value, path):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                expected_tree(item, path + "." + key)
+        elif isinstance(value, list):
+            for i, item in enumerate(value):
+                expected_tree(item, f"{path}[{i}]")
+        elif type(value) in (int, float):
+            number(value, path)
+        else:
+            need(isinstance(value, str), path)
+
+    def record(value, keys, path):
+        fields(value, keys, path)
+        need(value.keys() == set(keys), path)
+
+    def strings(value, path, size=None):
+        array(value, path)
+        if size is not None:
+            need(len(value) == size, path)
+        for i, item in enumerate(value):
+            text(item, f"{path}[{i}]")
+
+    def mapping(value, path, validate):
+        need(isinstance(value, dict), path)
+        for key, item in value.items():
+            text(key, path)
+            validate(item, path + "." + key)
+
+    expected_tree(case["expected"], "expected")
+    # Validate the authored output schema independently of calculated values.
+    # Variable maps and lists may disagree with the inputs/results: compare()
+    # must report those disagreements as failed expectations, not bad inputs.
+    expected = case["expected"]
+    common = ["diagnostics", "verdict"]
+    if calculate is geometry:
+        record(expected, common + ["world", "pairs", "counts"], "expected")
+        mapping(expected["world"], "expected.world", vector)
+        array(expected["pairs"], "expected.pairs")
+        for i, pair in enumerate(expected["pairs"]):
+            strings(pair, f"expected.pairs[{i}]", 2)
+        counts = ("original", "export", "matched", "moved", "missing", "extra")
+        record(expected["counts"], counts, "expected.counts")
+        for key in counts:
+            number(expected["counts"][key], "expected.counts." + key)
+    elif calculate is fill_coverage:
+        numeric = ("module_area", "fill_union_area_inside_module", "intersection_area",
+                   "fraction", "threshold")
+        record(expected, common + list(numeric) + ["per_fill_intersection_areas"], "expected")
+        for key in numeric:
+            number(expected[key], "expected." + key)
+        mapping(expected["per_fill_intersection_areas"],
+                "expected.per_fill_intersection_areas", number)
+    elif calculate is tag_overlaps:
+        record(expected, common + ["pairs"], "expected")
+        array(expected["pairs"], "expected.pairs")
+        for i, pair in enumerate(expected["pairs"]):
+            path = f"expected.pairs[{i}]"
+            record(pair, ["object_ids", "intersection_area", "smaller_box_fraction"], path)
+            strings(pair["object_ids"], path + ".object_ids", 2)
+            for key in ("intersection_area", "smaller_box_fraction"):
+                number(pair[key], path + "." + key)
+    array(expected["diagnostics"], "expected.diagnostics")
+    for i, item in enumerate(expected["diagnostics"]):
+        path = f"expected.diagnostics[{i}]"
+        record(item, ["name", "object_ids"], path)
+        text(item["name"], path + ".name")
+        strings(item["object_ids"], path + ".object_ids")
+    text(expected["verdict"], "expected.verdict")
+
+
 def require(condition, message):
     if not condition:
         raise AssertionError(message)
@@ -233,23 +416,55 @@ def tag_overlaps(case):
 
 
 def check_case(case, calculate):
+    validate_case(case, calculate)
     compare(calculate(case), case["expected"], case["id"])
 
 
-def load_sets():
+def load_sets(root=None):
     definitions = [("module_geometry_cases.json", "x01.offline.geometry.v1", 8, geometry),
                    ("fill_coverage_cases.json", "x01.offline.fill.v1", 7, fill_coverage),
                    ("tag_overlap_cases.json", "x01.offline.tags.v1", 8, tag_overlaps)]
     sets = []
     for filename, schema, minimum, calculate in definitions:
-        with (ROOT / filename).open(encoding="utf-8") as stream:
-            data = json.load(stream)
-        require(data["schema"] == schema, f"{filename}: wrong schema")
-        require(data["conventions"]["comparison_epsilon"] == EPS,
-                f"{filename}: epsilon differs")
-        require("units" in data, f"{filename}: missing units")
-        require(len(data["cases"]) >= minimum, f"{filename}: too few cases")
-        unique_objects(data["cases"])
+        def top(ok, path, name="INVALID_CASE_INPUT"):
+            if not ok:
+                raise CaseInputError("<top-level>", path, name)
+
+        try:
+            with (Path(root) if root is not None else ROOT).joinpath(filename).open(encoding="utf-8") as stream:
+                data = json.load(stream)
+        except (OSError, ValueError) as error:
+            raise CaseInputError("<top-level>", filename, "UNREADABLE_CASE_SET") from error
+        top(isinstance(data, dict), filename)
+        top(data.get("schema") == schema, "schema", "INVALID_SCHEMA")
+        units = {geometry: "inch", fill_coverage: {"length": "inch", "area": "square inch"},
+                 tag_overlaps: {"length": "paper millimetre", "area": "square paper millimetre"}}
+        top(data.get("units") == units[calculate], "units")
+        conventions = data.get("conventions")
+        top(isinstance(conventions, dict), "conventions")
+        numeric = {"comparison_epsilon": EPS}
+        texts = {geometry: ("point", "transform", "matching", "diagnostics"),
+                 fill_coverage: ("rectangle", "scope", "coverage", "failure"),
+                 tag_overlaps: ("box", "intersection", "failure", "epsilon_policy")}
+        if calculate is geometry:
+            numeric["tolerance_inch"] = 0.5
+        elif calculate is fill_coverage:
+            numeric["threshold"] = 0.05
+        else:
+            numeric.update(overlap_threshold=0.1, minimum_text_height_mm=1.8)
+        for key, value in numeric.items():
+            top(type(conventions.get(key)) in (int, float) and conventions[key] == value,
+                "conventions." + key)
+        for key in texts[calculate]:
+            top(isinstance(conventions.get(key), str) and bool(conventions[key]), "conventions." + key)
+        top(isinstance(data.get("cases"), list), "cases")
+        seen = set()
+        for case in data["cases"]:
+            validate_case(case, calculate)
+            if case["id"] in seen:
+                raise CaseInputError(case["id"], "id", "DUPLICATE_CASE_ID")
+            seen.add(case["id"])
+        top(len(data["cases"]) >= minimum, "cases")
         sets.append((data["cases"], calculate))
     return sets
 
@@ -259,7 +474,7 @@ def rejection_checks(sets):
     def rejects(case, calculate, label):
         try:
             check_case(case, calculate)
-        except AssertionError:
+        except (AssertionError, CaseInputError):
             return
         raise AssertionError(f"negative control accepted: {label}")
 
@@ -281,15 +496,22 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--self-test", action="store_true",
                         help="validate literals and in-memory negative controls (also default)")
-    parser.parse_args()
+    parser.add_argument("--cases-dir", type=Path)
+    args = parser.parse_args()
+    case = {}
     try:
-        sets = load_sets()
+        sets = load_sets(args.cases_dir)
         for cases, calculate in sets:
             for case in cases:
                 check_case(case, calculate)
         rejection_checks(sets)
-    except (AssertionError, ValueError, TypeError, KeyError, OSError) as error:
-        print(f"X01 offline cases: FAIL: {error}", file=sys.stderr)
+    except CaseInputError as error:
+        print(json.dumps(dict(verdict="FAIL", diagnostics=[error.diagnostic]), sort_keys=True))
+        return 1
+    except (AssertionError, ValueError, TypeError, KeyError, OSError, OverflowError) as error:
+        print(json.dumps(dict(verdict="FAIL", diagnostics=[dict(
+            name="CASE_CHECK_FAILED", case_id=case.get("id", "<top-level>"),
+            field_path="expected", message=str(error))]), sort_keys=True))
         return 1
     counts = [len(cases) for cases, _ in sets]
     print(f"X01 offline cases: geometry={counts[0]} fill={counts[1]} "
