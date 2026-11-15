@@ -38,7 +38,7 @@ def _panel_geometry(panel):
     # JSONB does not retain signed zero. Build requests with its stable spelling
     # before admission fingerprints and durable request bytes are captured.
     return {key: value or 0.0 for key, value in zip(
-        ("X", "Y", "Angle"), (*panel["centre"], panel["angle"]))}
+        ("X", "Y", "Angle"), (*panel["centre"][:2], panel["angle"]))}
 
 
 def build_stringer_request(graph: dict, frame_ref: str, *,
