@@ -69,12 +69,20 @@ describe('SolarCombinerIntake', () => {
   it('CI3 displays every client refusal sentence and retains the file and hardware', async () => {
     const { props, file } = setup()
     typeHardware()
+    // Refusal renders update these nodes without replacing them.
+    const importControl = importButton()
+    const placementControl = runButton()
+    const status = screen.getByRole('status')
+    const intakeFile = fileInput()
+    const hardwareInputs = Object.fromEntries(Object.entries(labels).map(([field, label]) => [field, screen.getByLabelText(label)]))
     for (const [code, sentence] of Object.entries(COMBINER_INTAKE_REASONS)) {
       props.client.importCombinerIntake.mockResolvedValueOnce({ ok: false, status: 400, code, retryable: false })
-      await importAndWait()
-      expect(screen.getByRole('status').textContent).toBe(sentence)
-      expectDraft(file)
-      expect(runButton().disabled).toBe(true)
+      await act(async () => { fireEvent.click(importControl) })
+      await waitFor(() => expect(importControl.disabled).toBe(false))
+      expect(status.textContent).toBe(sentence)
+      expect(intakeFile.files[0]).toBe(file)
+      for (const [field, text] of Object.entries(hardware)) expect(hardwareInputs[field].value).toBe(text)
+      expect(placementControl.disabled).toBe(true)
     }
     expect(props.onStored).not.toHaveBeenCalled()
   })
