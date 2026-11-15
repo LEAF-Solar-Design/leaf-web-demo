@@ -3,7 +3,8 @@ import { fetchWithBudget } from '../../fetchBudget.js'
 import { labValueStore, terminalState } from './valueStore.js'
 
 const headersFor = accept => ({ accept, 'X-Tenant-Id': config.tenant, ...authHeaders() })
-async function request(path, { fetchImpl = globalThis.fetch, body, signal, onUnauthorized } = {}) {
+class SnapshotEvidenceError extends Error {}
+async function request(path, { fetchImpl = globalThis.fetch, body, signal, onUnauthorized, snapshot = false } = {}) {
   const headers = { ...headersFor('application/json'), 'content-type': 'application/json' }
   try {
     const response = await fetchWithBudget(fetchImpl, `${config.apiBase}/api/lab/${path}`, {
@@ -12,7 +13,16 @@ async function request(path, { fetchImpl = globalThis.fetch, body, signal, onUna
     })
     noteUnauthorized(response, 'lab-runs', headers.Authorization)
     if (response.status === 401) onUnauthorized?.(headers.Authorization)
-    const data = await response.json().catch(() => ({}))
+    let data
+    if (snapshot && response.ok) {
+      const invalid = () => ({ ok: false, status: response.status, invalidEvidence: true, detail: 'Invalid snapshot response' })
+      if (typeof response.headers?.get === 'function') {
+        const media = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase()
+        if (!/^application\/(?:json|[a-z0-9!#$&^_.+-]+\+json)$/.test(media)) return invalid()
+      }
+      try { data = await response.json() } catch { return invalid() }
+      if (!data || typeof data !== 'object' || Array.isArray(data)) return invalid()
+    } else data = await response.json().catch(() => ({}))
     return response.ok ? { ...data, ok: true } : { ok: false, status: response.status, detail: data.detail }
   } catch { return { ok: false, status: 0, detail: 'Run service unavailable' } }
 }
@@ -64,8 +74,12 @@ export function openRunStream({ runIds, store = labValueStore, fetchImpl = globa
   const transport = patch => active.forEach(id => store.setTransport(id, patch))
   async function snapshot(id, connectionSignal) {
     pendingSnapshots.add(id)
-    const row = await request(`runs/${encodeURIComponent(id)}`, { fetchImpl, signal: connectionSignal, onUnauthorized: rememberUnauthorized })
+    const row = await request(`runs/${encodeURIComponent(id)}`, { fetchImpl, signal: connectionSignal, onUnauthorized: rememberUnauthorized, snapshot: true })
     if (stopped || connectionSignal.aborted) return
+    if (row.invalidEvidence || (row.ok && !['queued', 'running', 'finished', 'failed', 'cancelled', 'missing'].includes(row.state))) {
+      transport({ evidenceError: 'snapshot_response_invalid' })
+      throw new SnapshotEvidenceError('Invalid snapshot response')
+    }
     if (!row.ok) { if (row.status === 401) { paused = true; transport({ status: 'auth_expired' }) }; throw new Error('Snapshot unavailable') }
     store.resetSnapshot(id, { state: row.state, graph_revision: row.graph_revision })
     let after = -1
@@ -201,7 +215,7 @@ export function openRunStream({ runIds, store = labValueStore, fetchImpl = globa
             }
           }
         } catch (error) {
-          if (!stopped && !paused) transport({ status: error.message === 'Incomplete stream frame' ? 'incomplete_evidence' : 'reconnecting' })
+          if (!stopped && !paused) transport({ status: error instanceof SnapshotEvidenceError ? 'invalid_evidence' : error.message === 'Incomplete stream frame' ? 'incomplete_evidence' : 'reconnecting' })
         } finally {
           controller.abort()
           if (reader) { try { await reader.cancel() } catch { /* disconnected */ } reader.releaseLock() }

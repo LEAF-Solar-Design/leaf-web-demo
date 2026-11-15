@@ -18,6 +18,26 @@ function stream(chunks, hold = false) {
 }
 const parked = () => stream([], true)
 
+it.each(['html', 'empty', 'mismatched', 'missing-type', 'empty-object', 'array'])('refuses invalid snapshot metadata %s before replacing verified values', async kind => {
+  const store = createValueStore()
+  store.apply('r', { ...event(0, 'corpus', { result: { data: 'verified bytes' } }), run_id: 'r' })
+  const row = { ok: true, status: 200,
+    headers: { get: () => kind === 'html' ? 'text/html' : kind === 'mismatched' ? 'image/png' : kind === 'missing-type' ? null : 'application/json' },
+    json: async () => {
+      if (['html', 'empty'].includes(kind)) throw new SyntaxError('inert non-JSON response')
+      return kind === 'empty-object' ? {} : kind === 'array' ? [] : { state: 'finished', graph_revision: 1 }
+    } }
+  const fetchImpl = vi.fn().mockResolvedValueOnce(stream([frame('run', { ...event(1, 'corpus', { truncated: true, size: 100000 }), run_id: 'r' })])).mockResolvedValueOnce(row)
+  const sleep = vi.fn(async (ms, signal) => new Promise(resolve => signal.addEventListener('abort', resolve, { once: true })))
+  open({ runIds: ['r'], store, fetchImpl, sleep })
+  await waitFor(() => expect(sleep).toHaveBeenCalledTimes(1))
+  expect(store.getRun('r').transport).toMatchObject({ status: 'invalid_evidence', evidenceError: 'snapshot_response_invalid' })
+  expect(store.getRun('r').lastSeq).toBe(0)
+  expect(store.getBlock('r', 'corpus').value.result.data).toBe('verified bytes')
+  expect(fetchImpl).toHaveBeenCalledTimes(2)
+  expect(fetchImpl.mock.calls.every(([, init]) => init.method === undefined || init.method === 'GET')).toBe(true)
+})
+
 it.each(['utf8', 'json', 'truncation-marker'])('retains verified evidence and records incomplete %s at EOF', async kind => {
   const store = createValueStore()
   store.apply('r', { ...event(0, 'corpus', { result: { data: 'verified bytes' } }), run_id: 'r' })
