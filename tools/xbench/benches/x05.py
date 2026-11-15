@@ -15,6 +15,7 @@ from xbench_core import Step, read_health, write_json_atomic
 
 
 LIMITS = ("Steps 1-2 cover source import and exact grid correspondence only. "
+          "This slice supports the Roof geometry setup only; Ground is ungraded. "
           "Geometry discovery counts must equal independent manifest oracles. "
           "Step 3 report string counts are diagnostic: strings are not accepted "
           "or independently saved. Steps 4-7 are unimplemented. Unknown wire "
@@ -40,7 +41,7 @@ def _setup(project):
             and all(isinstance(project[k], str) and project[k].strip() for k in
                     ("id", "drawing_fixture", "report_fixture", "panel_layer_contains"))
             and project["drawing_units"] in ("m", "mm", "cm", "km", "in", "ft", "yd")
-            and project["installation_design"] in ("Roof", "Ground")
+            and project["installation_design"] == "Roof"
             and all(_positive_number(project[k]) for k in ("branch_max_offset", "alignment_tolerance"))
             and all(_integer(project[k], 1) for k in
                     ("expected_modules", "expected_grids", "expected_strings")))
@@ -187,7 +188,8 @@ def _project(ctx, client, request, project, result):
     def mutate(tool, params):
         status, body = client.run(tool, org_id=org_id, project_id=project_id,
                                   version_id=version, params={"drawing_id": drawing_id, **params},
-                                  capability=capability)
+                                  capability=capability,
+                                  idempotency_key="xbench-x05-" + uuid4().hex)
         if status == 202 and isinstance(body, dict) and isinstance(body.get("job_id"), str):
             terminal = client.wait_job(body["job_id"], timeout_s=300)
             if terminal.get("status") != "complete":
@@ -209,8 +211,7 @@ def _project(ctx, client, request, project, result):
             "units": {"drawing_units": project["drawing_units"],
                       "wcs_to_ucs": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
                       "elevation_datum": "xbench", "crs": None}},
-            "changes": {"panel_layer_contains": project["panel_layer_contains"]},
-            "project_changes": {"installation_design": project["installation_design"]}})
+            "changes": {"panel_layer_contains": project["panel_layer_contains"]}})
         result["setup_verified"] = True
 
         def route():
@@ -267,11 +268,19 @@ def _project(ctx, client, request, project, result):
 
 def run(ctx):
     projects = ctx.manifest.get("projects", [])
+    if isinstance(projects, list):
+        projects = list(projects)
+        configured = {p.get("drawing_fixture") for p in projects if isinstance(p, dict)}
+        for fixture in ctx.manifest.get("fixtures", []):
+            if fixture.get("role") == "drawing" and fixture.get("id") not in configured:
+                projects.append({"id": "unconfigured:" + fixture["id"],
+                                 "drawing_fixture": fixture["id"]})
     results = []
     health_started = False
     try:
-        if (not isinstance(projects, list) or not projects or not all(_setup(p) for p in projects)
-                or len({p["id"] for p in projects}) != len(projects)):
+        identifiers = [p.get("id") for p in projects if isinstance(p, dict)] if isinstance(projects, list) else []
+        ready = {p["id"] for p in projects if _setup(p) and identifiers.count(p["id"]) == 1} if isinstance(projects, list) else set()
+        if not ready:
             raise ObservationError(code="SETUP_UNREADABLE")
         health_started = True
         if read_health(ctx.base) != ctx.source_sha:
@@ -311,7 +320,7 @@ def run(ctx):
             for project in projects if isinstance(projects, list) else []:
                 result = {"id": project.get("id")} if isinstance(project, dict) else {}
                 results.append(result)
-                if not _setup(project):
+                if not _setup(project) or project["id"] not in ready:
                     result["unreadable"] = True
                     continue
                 try:

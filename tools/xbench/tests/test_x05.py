@@ -148,6 +148,7 @@ def live_harness(monkeypatch, *, failure=None, health=None):
 
     project, result = observation()
     events, requests, receipts = [], [], []
+    mutation_keys = set()
     source_sha = "a" * 40
     ctx = SimpleNamespace(manifest={"projects": [project]}, fixtures=[],
                           base="https://synthetic.invalid", source_sha=source_sha,
@@ -227,10 +228,13 @@ def live_harness(monkeypatch, *, failure=None, health=None):
             assert params["drawing_id"] == "adopted-drawing"
             assert params["expected_rev"] == self.stage
             assert capability == "private-capability"
-            assert idempotency_key is None and persist is False and wait is False
+            assert isinstance(idempotency_key, str) and idempotency_key.startswith("xbench-x05-")
+            assert idempotency_key not in mutation_keys
+            mutation_keys.add(idempotency_key)
+            assert persist is False and wait is False
             events.append(tool)
             if tool == "solar-settings":
-                assert params["project_changes"] == {"installation_design": "Roof"}
+                assert "project_changes" not in params
                 assert params["changes"] == {"panel_layer_contains": project["panel_layer_contains"]}
                 assert params["initialize"]["source_intake_sha256"] == "b" * 64
                 assert params["initialize"]["units"]["drawing_units"] == "m"
@@ -369,4 +373,31 @@ def test_missing_setup_does_not_open_browser_or_read_health(monkeypatch, project
     ctx, events, requests, receipts = live_harness(monkeypatch)
     ctx.manifest["projects"] = projects
     assert all(s.verdict == "UNREADABLE" for s in x05.run(ctx))
+    assert events == [] and requests == []
+
+
+def test_unconfigured_drawing_keeps_corpus_coverage_unreadable(monkeypatch):
+    ctx, events, requests, receipts = live_harness(monkeypatch)
+    ctx.manifest["fixtures"] = [{"id": "drawing", "role": "drawing"},
+                                {"id": "held-out", "role": "drawing"}]
+    steps = x05.run(ctx)
+    assert all(step.verdict == "UNREADABLE" for step in steps)
+    assert steps[0].observed == {"projects": 2}
+    assert events.count("create") == 1 and events.count("delete") == 1
+
+
+def test_invalid_sibling_does_not_suppress_configured_drawing(monkeypatch):
+    ctx, events, requests, receipts = live_harness(monkeypatch)
+    ctx.manifest["projects"].append({"id": "missing-setup"})
+    steps = x05.run(ctx)
+    assert all(step.verdict == "UNREADABLE" for step in steps)
+    assert events.count("upload") == 1 and events.count("delete") == 1
+    assert len(receipts[0]["results"]) == 2
+
+
+def test_ground_setup_is_explicitly_unreadable_in_roof_slice(monkeypatch):
+    ctx, events, requests, receipts = live_harness(monkeypatch)
+    ctx.manifest["projects"][0]["installation_design"] = "Ground"
+    assert not x05._setup(ctx.manifest["projects"][0])
+    assert all(step.verdict == "UNREADABLE" for step in x05.run(ctx))
     assert events == [] and requests == []
