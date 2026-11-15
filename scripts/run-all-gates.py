@@ -103,6 +103,7 @@ import shutil
 import subprocess
 import sys
 import threading
+from time import monotonic_ns
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -3239,7 +3240,8 @@ def build_suites() -> List[Suite]:
               # SEL-303b adds the mirror/stage-policy registration contract.
               # PP-3A2 F: 25 dispatch rows; measured 266 + 6 = 272.
               ["test_studio_walk_regression_gate.py", "ci/tests/test_selected_shards.py",
-               "test_selected_gate_shards.py", "../tests/test_ci_selected_shards.py"], 272),
+               "test_selected_gate_shards.py", "../tests/test_ci_selected_shards.py",
+               "ci/tests/test_web_family.py", "ci/tests/test_web_family_integration.py"], 272),
         # Dormant process-capture core: pure Python fixtures, no strace or network.
         Suite("ci-process-capture-core", "scripts ci process capture core", "pytest",
               SCRIPTS_DIR, _py_pytest("ci/tests/test_process_capture_core.py"), 14),
@@ -3728,6 +3730,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_browser_project_routes.py"), 18),
         Suite("server-browser-source-error-serializer", "server closed Browser source diagnostics", "pytest", SERVER,
               _py_pytest("tests/test_browser_source_error_serializer.py"), 6),
+        Suite("server-b02-initializer-failure", "server B02 initializer diagnostic contract", "pytest", SERVER,
+              _py_pytest("tests/test_b02_initializer_failure_offline.py"), 7),
         Suite("server-browser-project-authoring", "server tests/test_browser_project_authoring.py", "pytest", SERVER,
               _py_pytest("tests/test_browser_project_authoring.py"), 30),
         Suite("server-browser-project-source-export", "server verified Browser source export", "pytest", SERVER,
@@ -4015,6 +4019,7 @@ _ENV_DENYLIST = (
     # gate-runner fault injection (see run_suite) must never leak into nested
     # runners or suite children.
     "LEAF_GATE_FAULT_INJECT",
+    "LEAF_GATE_BROWSER_SUITE", "LEAF_CI_WEB_FAMILY_REQUIRED",
     # The gate's own database contract. run_suite injects the DSN as
     # DATABASE_URL into uses_database/db_gated suites only; every other child
     # stays hermetic, and no nested runner inherits the require flag.
@@ -5265,9 +5270,10 @@ def _run_suite_attempt(suite: Suite, log_dir: Path, attempt: int = 1,
         try:
             corpus_launcher = str(SCRIPTS_DIR / "ci/run_unprivileged_pytest.py") in argv
             spawn = run_capture_command if capture_output is not None or corpus_launcher else subprocess.run
-            proc = spawn(
+            proc = run_browser_command(suite, spawn,
                 spawn_command,
-                cwd=str(suite.cwd), env={**clean_env(), **db_env, **trace_env, **service_env},
+                cwd=str(suite.cwd), env={**clean_env(), **db_env, **trace_env, **service_env,
+                                        **browser_suite_env(suite)},
                 capture_output=True, text=True, timeout=timeout_s,
                 shell=use_shell, executable=shell_executable,
                 # text=True without an explicit encoding decodes with the system
@@ -5733,15 +5739,57 @@ def pr_tier_web_catchers(suite: Suite, tier: dict) -> Suite:
     return replace(suite, argv=[*suite.argv, *sorted(paths)])
 
 
+def web_family_rows(suites):
+    return [{"id": s.id, "command": _fingerprint_argv(s.argv, cwd=s.cwd),
+             "cwd": _fingerprint_cwd(s.cwd), "kind": s.kind} for s in suites]
+
+
+def load_web_family_decision():
+    # Lazy path import: a copied trusted runner must support --list without
+    # importing checkout code, or requiring the helper alongside the copy.
+    import importlib.util
+    trusted_sha = os.environ.get("TRUSTED_SHA")
+    if trusted_sha is not None:
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", trusted_sha):
+            raise ValueError("invalid trusted source identity")
+        # The CI loader exports the exact base SHA. A candidate helper must not
+        # rewrite the policy deciding which candidate suites may be omitted.
+        source = subprocess.run(
+            ["git", "--no-replace-objects", "show",
+             trusted_sha + ":scripts/ci/web_family.py"], cwd=REPO,
+            capture_output=True, text=True, check=True, timeout=30).stdout
+        namespace = {"__name__": "_leaf_trusted_web_family"}
+        exec(compile(source, "<trusted-web-family>", "exec"), namespace)
+        return namespace["web_family_decision"]
+    spec = importlib.util.spec_from_file_location(
+        "_leaf_web_family", SCRIPTS_DIR / "ci" / "web_family.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.web_family_decision
+
+
+def selected_web_family_required(suites):
+    # Only select_pr_tier can supply this proof. An ambient skip flag and an
+    # arbitrary --only/full shard with no web rows are not unchanged-family proof.
+    return not (suites and all(getattr(s, "web_family_safe_exclusion", False) for s in suites)
+                and not any(row["cwd"] == "web" or row["id"] in
+                            {"studio-walk-regressions", "web-demo-gate"}
+                            for row in web_family_rows(suites)))
+
+
 def select_pr_tier(suites: List[Suite], tier: dict) -> List[Suite]:
     ids = {s.id for s in suites}
     selected = set(tier["suite_ids"]) & ids
     new = ids - set(tier["catalog_suite_ids"])
+    family_excluded = False
     selected.update(new)
     if new:
         print("INFO: mode=tier including new catalog suites: " + ", ".join(sorted(new)))
     try:
         changed = pr_tier_changed_paths()
+        if (not isinstance(changed, (list, tuple, set, frozenset))
+                or any(not isinstance(path, str) for path in changed)):
+            raise ValueError("unavailable or malformed changed paths")
         priority = os.environ.get("LEAF_PRIORITY_SUITES", "")
         priority = json.loads(priority) if priority.startswith("[") else priority.replace(",", " ").split()
         if not isinstance(priority, list) or any(not isinstance(p, str) for p in priority):
@@ -5756,6 +5804,30 @@ def select_pr_tier(suites: List[Suite], tier: dict) -> List[Suite]:
                     or any(pr_tier_owns(row, path) for path in changed)):
                 selected.add(suite.id)
         selected = pr_tier_closure(selected, ids, tier.get("prerequisites"))
+        try:
+            rows = web_family_rows(suites)
+            family = {row["id"] for row in rows if row["cwd"] == "web"
+                      or row["id"] in {"studio-walk-regressions", "web-demo-gate"}}
+            protected = new | (ids & set(priority)) | (set(PR_TIER_PREREQUISITES) - family)
+            decision, reason = load_web_family_decision()(
+                selected, rows, changed,
+                protected_ids=protected,
+                prerequisites=tier.get("prerequisites"))
+            if not isinstance(decision, set) or not decision <= selected or not isinstance(reason, str):
+                raise ValueError("invalid family decision")
+            removed = selected - decision
+            if ((removed and not reason.startswith("removed proven-unaffected web family IDs:"))
+                    or not removed <= family - protected):
+                raise ValueError("unproven family removal")
+            dependencies = tier.get("prerequisites") or {}
+            if any(not set(dependencies.get(sid, ())) <= decision for sid in decision):
+                raise ValueError("family removal lost a prerequisite")
+            selected = decision
+            family_excluded = (reason.startswith("removed proven-unaffected web family IDs:")
+                               and not selected & family)
+            print("INFO: mode=tier " + reason)
+        except Exception as exc:
+            print(f"INFO: mode=tier retained web family: helper unavailable ({type(exc).__name__})")
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         print(f"INFO: mode=tier using all suites ({exc})")
         selected = ids
@@ -5766,6 +5838,8 @@ def select_pr_tier(suites: List[Suite], tier: dict) -> List[Suite]:
     selected_suites = [s for s in suites if s.id in selected]
     if pr_tier_outside_web_closure(changed):
         selected_suites = [pr_tier_web_catchers(s, tier) for s in selected_suites]
+    for suite in selected_suites:
+        suite.web_family_safe_exclusion = family_excluded
     return selected_suites
 
 
@@ -6124,12 +6198,81 @@ _WEB_SOURCE_READERS = frozenset({
 })
 
 
+# Exact mocked readers admitted by web/scripts/gate-browser-resources.mjs.
+# Bind the resource opt-in and lock relaxation to the same command/config shape.
+_BROWSER_NPM_PROOFS = {
+    "web-version-restore-proof": ("proof:version-restore", "playwright test e2e/local/version-restore.spec.mjs --config playwright.config.mjs --workers=2"),
+    "web-author-quota-gate": ("proof:author-quota-gate", "playwright test e2e/author-quota-gate.spec.mjs --config playwright.config.mjs"),
+    "web-async-author-stage": ("proof:async-author-stage", "playwright test e2e/async-author-stage.spec.mjs --config playwright.config.mjs"),
+}
+_BROWSER_DIRECT_PROOFS = {
+    "web-studio-panels-proof": ["playwright.config.mjs", "e2e/campaign-panel.spec.mjs",
+        "e2e/recovery-controls.spec.mjs", "e2e/workspace-create-no-prompt.spec.mjs",
+        "e2e/viewer-grid-toggle.spec.mjs", "e2e/studio-ux-regressions.spec.mjs",
+        "e2e/project-page-editor.spec.mjs", "--workers=3"],
+    "web-lifecycle-panel-proof": ["playwright.lifecycle.config.mjs",
+        "e2e/project-lifecycle-panel.spec.mjs", "--workers=1"],
+    "web-ios-ship-surface-proof": ["playwright.ios.config.mjs",
+        "e2e/ios-ship-surface.spec.mjs", "--workers=1"],
+}
+
+
+def isolated_browser_suite(suite: Suite) -> bool:
+    if suite.cwd != WEB or suite.kind != "script":
+        return False
+    if suite.id in _BROWSER_DIRECT_PROOFS:
+        expected = [_npx(), "--no-install", "playwright", "test", "--config",
+                    *_BROWSER_DIRECT_PROOFS[suite.id]]
+        return suite.argv == expected
+    if suite.id in _BROWSER_NPM_PROOFS:
+        script, command = _BROWSER_NPM_PROOFS[suite.id]
+        if suite.argv != [_npm(), "run", script]:
+            return False
+        try:
+            return json.loads((WEB / "package.json").read_text(encoding="utf-8"))["scripts"][script] == command
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+    return False
+
+
+def browser_suite_env(suite: Suite) -> dict:
+    return {"LEAF_GATE_BROWSER_SUITE": suite.id} if isolated_browser_suite(suite) else {}
+
+
+def browser_memory_resource(suite: Suite) -> str:
+    # Historical browser peaks reached 3 GiB. Keep unknown/small hosts serial;
+    # two existing conflict lanes may overlap only with at least 6 GiB visible.
+    memory = _effective_mem_bytes()
+    lanes = 2 if memory is not None and memory >= 6 * 2 ** 30 else 1
+    order = ("web-studio-panels-proof", "web-author-quota-gate",
+             "web-version-restore-proof", "web-async-author-stage",
+             "web-lifecycle-panel-proof", "web-ios-ship-surface-proof")
+    return "browser-memory-" + str(order.index(suite.id) % lanes)
+
+
+def run_browser_command(suite: Suite, spawn, *args, **kwargs):
+    if kwargs.get("env", {}).get("LEAF_GATE_BROWSER_SUITE") != suite.id:
+        return spawn(*args, **kwargs)
+    started = monotonic_ns()
+    print(f"GATE_BROWSER_BEGIN id={suite.id} monotonic_ns={started}", flush=True)
+    result = None
+    try:
+        result = spawn(*args, **kwargs)
+        return result
+    finally:
+        ended = monotonic_ns()
+        status = getattr(result, "returncode", "error")
+        print(f"GATE_BROWSER_END id={suite.id} monotonic_ns={ended} exit={status}", flush=True)
+
+
 def serial_suite_reason(suite: Suite) -> str:
     """A nonempty reason assigns a suite to the one shared-state worker."""
     if suite.reset_authored:
         return "resets shared authored_tools.json"
     if suite.db_gated or suite.uses_database:
         return "shared PostgreSQL through DATABASE_URL"
+    if (suite.id in _BROWSER_DIRECT_PROOFS or suite.id in _BROWSER_NPM_PROOFS) and not isolated_browser_suite(suite):
+        return "browser resource declaration drift"
     if suite.id in _WEB_SOURCE_READERS:
         return ""
     executable = str(suite.argv[0]).replace("\\", "/").rsplit("/", 1)[-1].lower()
@@ -6207,8 +6350,8 @@ class HeavyPrerequisitesFailed(Exception):
 def conflict_resources(suite: Suite) -> frozenset[str]:
     """The named locks a suite holds while it runs; empty means it conflicts with nothing.
 
-    Nonempty exactly when serial_suite_reason() is. A conflict no rule
-    recognises falls back to one shared "legacy-serial" lock, so an
+    Admitted isolated browsers drop only their web-tree conflict. A conflict
+    no rule recognises falls back to one shared "legacy-serial" lock, so an
     unclassified conflict stays serialised rather than running free.
     """
     if not serial_suite_reason(suite):
@@ -6233,13 +6376,16 @@ def conflict_resources(suite: Suite) -> frozenset[str]:
     if table_reason == "shared PostgreSQL schema":
         held.add("postgres")
     # web/node_modules, web/dist, vite dev port 5185, ../artifacts/cat-operator-proof.
-    if suite.cwd == WEB:
+    isolated_browser = isolated_browser_suite(suite)
+    if isolated_browser:
+        held.add(browser_memory_resource(suite))
+    if suite.cwd == WEB and not isolated_browser:
         held.add("web-tree")
     # harness/node_modules and harness/dist.
     if suite.cwd == HARNESS:
         held.add("harness-tree")
     # Any other serial reason: one shared lock keeps it serialised.
-    return frozenset(held) if held else frozenset({"legacy-serial"})
+    return frozenset(held) if held or isolated_browser else frozenset({"legacy-serial"})
 
 
 def plan_parallel_phases(suites: List[Suite]) -> tuple[List[Suite], List[Suite]]:
@@ -6308,6 +6454,16 @@ def _run_parallel_suite(suite: Suite, log_dir: Path, retry: int) -> tuple[Result
 _LANE_IDLE_WAIT_S = 1.0  # bounded wait before an idle worker re-checks eligibility
 
 
+def lane_resources(suite: Suite) -> frozenset[str]:
+    held = conflict_resources(suite)
+    # A legacy web writer must exclude both isolated browser reader lanes.
+    # This includes nested builds not classified as prelude writers and future
+    # unknown npm suites. It leaves the diagnostic conflict names compatible.
+    if "web-tree" in held:
+        held = held | frozenset({"browser-memory-0", "browser-memory-1"})
+    return held
+
+
 def run_lanes(suites: List[Suite], log_dir: Path, jobs: int, retry: int,
               fail_fast: bool, completed: dict, state: dict) -> None:
     """Run suites on at most `jobs` workers; suites sharing a resource never overlap.
@@ -6329,7 +6485,7 @@ def run_lanes(suites: List[Suite], log_dir: Path, jobs: int, retry: int,
     """
     if not suites:
         return
-    locks = [conflict_resources(s) for s in suites]
+    locks = [lane_resources(s) for s in suites]
     weight = [suite_weight(s) for s in suites]
     position = {id(s): i for i, s in enumerate(suites)}
     # Pending locked suites per resource in catalog order; only a head may run next.
@@ -6433,7 +6589,7 @@ def run_lanes(suites: List[Suite], log_dir: Path, jobs: int, retry: int,
 
 def run_suites_parallel(suites: List[Suite], log_dir: Path, jobs: int,
                         retry: int, fail_fast: bool, *, early_feedback: bool = False,
-                        before_heavy_command=None) -> tuple[List[Result], dict]:
+                        before_heavy_command=None, web_family_required: bool = True) -> tuple[List[Result], dict]:
     completed = {}
     state = {"stopped_after": None, "stream_results": True}
     early = [s for s in suites if early_feedback and s.id in _EARLY_FEEDBACK_SUITES]
@@ -6455,7 +6611,10 @@ def run_suites_parallel(suites: List[Suite], log_dir: Path, jobs: int,
         if before_heavy_command:
             prerequisite_started = time.perf_counter()
             try:
-                status = subprocess.run(before_heavy_command, cwd=REPO, check=False).returncode
+                status = subprocess.run(
+                    before_heavy_command, cwd=REPO, check=False,
+                    env={**os.environ, "LEAF_CI_WEB_FAMILY_REQUIRED":
+                         "1" if web_family_required else "0"}).returncode
             except OSError as exc:
                 print(f"heavy prerequisites could not start: {type(exc).__name__}", flush=True)
                 status = 127
@@ -7521,7 +7680,9 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
 # At 8 workers pool suite-seconds inflate x1.57 (browser suites x1.8-1.96), so a worker needs ~2 vCPU.
 # Round CPU workers half up: job 12613's 3 CPU / 12 GiB ran serially into the deadline.
 _AUTO_CPUS_PER_WORKER = 2
-# Browser suites peaked near 3 GiB per worker in 2026-09, but every browser web suite holds the web-tree lock, so one browser suite runs at a time; the Vitest shards hold web-vitest and run one at a time beside it.
+# Browser suites peaked near 3 GiB per worker in 2026-09. Isolated browsers
+# additionally hold browser-memory lanes: at most two on >=6 GiB hosts, one
+# otherwise. Other browser suites retain web-tree; Vitest retains web-vitest.
 # 2 GiB per worker lets an 8 CPU / 8 GiB worker run 4 jobs instead of 2 (2026-11-07, unmeasured until the first full run).
 _AUTO_GIB_PER_WORKER = 2
 # Conflict lanes (#1400) and the graph memo (#1402) removed the old floor; on 36 vCPU XLARGE,
@@ -7919,7 +8080,8 @@ def main() -> int:
         results, attempts_by_id = run_suites_parallel(
             suites, log_dir, args.jobs, args.retry, args.fail_fast,
             early_feedback=args.early_feedback,
-            before_heavy_command=args.before_heavy_command)
+            before_heavy_command=args.before_heavy_command,
+            web_family_required=selected_web_family_required(suites))
       for suite in suites if not phased else ():
         print(f"  ... {suite.id:<22} ", end="", flush=True)
         res = run_suite_guarded(suite, log_dir, attempt=1)
