@@ -1,5 +1,11 @@
 import importlib.util
+import copy
+from contextlib import contextmanager
+import hashlib
+import json
 from pathlib import Path
+import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -7,6 +13,256 @@ spec = importlib.util.spec_from_file_location("x03", Path(__file__).parents[1] /
 bench = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bench)
 SHA = "a" * 40
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 0
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        assert seconds >= 0
+        self.now += seconds
+
+
+def staged_tool():
+    return {"tool": {"name": "generated"}, "model_id": "synthetic-model",
+            "receipt": {"state": "staged", "staged_commit": "b" * 40,
+                        "change_set_id": "synthetic-change"}}
+
+
+def synthetic_prompt():
+    return {"id": "X03-01", "trade": "solar", "drawing": "synthetic",
+            "prompt": "Count synthetic entities", "oracle": {"value": 3},
+            "compare": {"mode": "exact"}}
+
+
+def prompt_manifest(tmp_path, *, invalid_id=None):
+    rows = []
+    for i, trade in enumerate(["solar"] * 30 + ["structural"] * 10 + ["mechanical"] * 10):
+        rows.append({**synthetic_prompt(), "id": f"X03-{i+1:02d}", "trade": trade,
+                     "drawing": trade, "oracle_method": {"query": {"operation": "count"}}})
+    if invalid_id is not None:
+        rows[0]["id"] = invalid_id
+    path = tmp_path / "prompts.json"
+    path.write_text(json.dumps({"schema": "leaf.xbench.x03-prompts.v1", "rows": rows}))
+    review = tmp_path / "review.json"
+    review.write_text("{}")
+    fixtures = [{"id": "x03-prompts", "path": str(path), "bytes": path.stat().st_size,
+                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest()},
+                {"id": "review", "path": str(review)}]
+    for trade in bench.TRADES:
+        drawing = tmp_path / (trade + ".dxf")
+        drawing.write_bytes(b"synthetic drawing")
+        fixtures.append({"id": trade, "role": "drawing", "path": str(drawing)})
+    return {"fixtures": fixtures, "oracle_review": {"evidence": str(review),
+            "row_ids": [row["id"] for row in rows[:10]]},
+            "baseline_path": str(tmp_path / "baseline.json")}
+
+
+@pytest.mark.parametrize("invalid_id", ["../escaped", r"..\escaped", "/absolute",
+    "C:/absolute", r"C:\absolute", "sub/name", r"sub\name", "X03-00", "X03-51", ""])
+def test_unsafe_prompt_ids_are_rejected_before_requests_or_evidence(tmp_path, invalid_id):
+    manifest = prompt_manifest(tmp_path, invalid_id=invalid_id)
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    with pytest.raises(ValueError, match="prompt ID"):
+        bench.load_prompts(manifest)
+    row = {**synthetic_prompt(), "id": invalid_id}
+    def forbidden(*args, **kwargs):
+        raise AssertionError("unsafe ID reached transport")
+    with pytest.raises(ValueError, match="prompt ID"):
+        bench.evaluate_prompt(row, transport=forbidden, client=None, project={}, drawing={},
+            source_sha=SHA, evidence_dir=tmp_path, run_id="unsafe")
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+    assert not (tmp_path.parent / "escaped.json").exists()
+
+
+def test_changed_prompt_bytes_fail_before_session_or_author_request(tmp_path, monkeypatch):
+    manifest = prompt_manifest(tmp_path)
+    rows, digest = bench.load_prompts(manifest)
+    assert len(rows) == 50
+    assert digest == manifest["fixtures"][0]["sha256"]
+    path = Path(manifest["fixtures"][0]["path"])
+    path.write_bytes(path.read_bytes() + b" ")  # Still valid JSON, different bytes.
+    def forbidden(*args, **kwargs):
+        raise AssertionError("changed prompts reached browser or transport")
+    monkeypatch.setattr(bench.xbench_session, "signed_in", forbidden)
+    monkeypatch.setattr(bench, "transport_for", forbidden)
+    monkeypatch.setitem(sys.modules, "xbench_studio", SimpleNamespace(
+        StudioClient=forbidden, disposable_project=forbidden))
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        bench.run(SimpleNamespace(manifest=manifest, out_dir=tmp_path / "out"))
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize("fail_upload", [False, True])
+def test_mocked_run_lifecycle_dispatches_sequentially_and_cleans_up(tmp_path, monkeypatch, fail_upload):
+    manifest = prompt_manifest(tmp_path)
+    out = tmp_path / "out"
+    events, dispatches, snapshots = [], [], []
+    uploads = 0
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("offline lifecycle reached browser or network")
+
+    @contextmanager
+    def signed_in(*args, **kwargs):
+        events.append("session-open")
+        try:
+            yield object(), {"source": SHA}
+        finally:
+            events.append("session-close")
+
+    class Client:
+        def __init__(self, transport):
+            pass
+
+        def create_project(self, name):
+            trade = name.split()[1]
+            events.append("create-" + trade)
+            return {"project_id": trade, "org_id": "synthetic-org"}
+
+        def delete_project(self, project_id):
+            events.append("delete-" + project_id)
+
+        def upload_drawing(self, name, content):
+            nonlocal uploads
+            uploads += 1
+            assert content == b"synthetic drawing"
+            if fail_upload and uploads == 2:
+                raise RuntimeError("synthetic upload failure")
+            return name
+
+        def wait_upload(self, *args, **kwargs):
+            pass
+
+        def adopt_drawing(self, project_id, uploaded, name):
+            return {"drawing_id": project_id + "-drawing", "version_id": project_id + "-version"}
+
+    @contextmanager
+    def disposable_project(client, name):
+        project = client.create_project(name)
+        try:
+            yield project
+        finally:
+            client.delete_project(project["project_id"])
+
+    def evaluate(row, **kwargs):
+        previous = json.loads((out / "records.json").read_text()) if dispatches else []
+        assert len(previous) == len(dispatches), "each result must persist before the next dispatch"
+        assert kwargs["project"]["project_id"] == row["trade"]
+        assert kwargs["drawing"]["version_id"] == row["trade"] + "-version"
+        assert kwargs["source_sha"] == SHA
+        snapshots.append(copy.deepcopy(previous))
+        dispatches.append(row["id"])
+        return {**records()[0], "id": row["id"], "trade": row["trade"], "drawing": row["drawing"]}
+
+    monkeypatch.setitem(sys.modules, "xbench_studio", SimpleNamespace(
+        StudioClient=Client, disposable_project=disposable_project))
+    monkeypatch.setattr(bench.xbench_session, "signed_in", signed_in)
+    monkeypatch.setattr(bench.xbench_session, "api", forbidden)
+    monkeypatch.setattr(bench, "transport_for", lambda *args: forbidden)
+    monkeypatch.setattr(bench, "evaluate_prompt", evaluate)
+    ctx = SimpleNamespace(manifest=manifest, source_sha=SHA,
+                          base="https://synthetic.invalid", out_dir=out)
+    if fail_upload:
+        with pytest.raises(RuntimeError, match="synthetic upload failure"):
+            bench.run(ctx)
+        assert not dispatches
+        assert not (out / "records.json").exists()
+        assert not Path(manifest["baseline_path"]).exists()
+    else:
+        steps = bench.run(ctx)
+        assert all(step.verdict == "PASS" for step in steps)
+        assert dispatches == [f"X03-{i:02d}" for i in range(1, 51)]
+        assert [len(snapshot) for snapshot in snapshots] == list(range(50))
+        assert len(json.loads((out / "records.json").read_text())) == 50
+        assert json.loads(Path(manifest["baseline_path"]).read_text())["complete"] is True
+    assert events == ["session-open", "create-solar", "create-structural", "create-mechanical",
+                      "delete-mechanical", "delete-structural", "delete-solar", "session-close"]
+
+
+@pytest.mark.parametrize("phase", ["author", "execution"])
+def test_polling_deadline_stops_requests_at_600_seconds_without_credit(tmp_path, phase):
+    clock = FakeClock()
+    calls = []
+    poll = "/api/author/stages/change" if phase == "author" else "/api/jobs/job"
+
+    def transport(method, path, **kwargs):
+        assert clock.now < 600
+        assert 0 < kwargs["timeout_s"] <= 600 - clock.now
+        calls.append((path, clock.now))
+        if path == "/api/health":
+            return 200, {"source_sha": SHA}
+        if path == "/api/author":
+            if phase == "author":
+                clock.now = 590
+                return 202, {"contract": "leaf.customization-stage-job.v1",
+                             "poll_url": poll, "change_set_id": "change"}
+            return 200, staged_tool()
+        if path == "/api/author/publication-requests":
+            return 200, {"status": "published"}
+        if path == "/api/tools":
+            return 200, {"tools": [{"name": "generated", "catalog_digest": "f" * 64}]}
+        if path == "/api/run":
+            clock.now = 590
+            return 202, {"job_id": "job", "status": "pending"}
+        if path == poll:
+            clock.now += 7
+            return (200, {"contract": "leaf.customization-stage-job.v1",
+                          "poll_url": poll, "change_set_id": "change"}) if phase == "author" else (200, {"status": "pending"})
+        raise AssertionError(path)
+
+    record = bench.evaluate_prompt(synthetic_prompt(), transport=transport, client=None,
+        project={"project_id": "p", "org_id": "o"}, drawing={"version_id": "v"},
+        source_sha=SHA, evidence_dir=tmp_path, run_id="timeout",
+        clock=clock, sleep=clock.sleep)
+    assert clock.now == 600
+    assert sum(path == poll for path, _ in calls) == 1
+    assert all(at < 600 for _, at in calls)
+    assert record["score"] == 0
+    assert record["failing_stage"] == phase
+    assert "600 second ceiling" in record["failure"]
+    assert record["output_hash"] is None
+    evidence = json.loads((tmp_path / "X03-01.json").read_text())
+    assert len(evidence["routes"]) == len(calls)
+
+
+@pytest.mark.parametrize("cancel_on_submit", [True, False])
+def test_cancelled_execution_stops_immediately_with_execution_evidence(tmp_path, cancel_on_submit):
+    clock = FakeClock()
+    polls = []
+
+    def transport(method, path, **kwargs):
+        if path == "/api/health":
+            return 200, {"source_sha": SHA}
+        if path == "/api/author":
+            return 200, staged_tool()
+        if path == "/api/author/publication-requests":
+            return 200, {"status": "published"}
+        if path == "/api/tools":
+            return 200, {"tools": [{"name": "generated", "catalog_digest": "f" * 64}]}
+        if path == "/api/run":
+            return 202, {"job_id": "job", "status": "cancelled" if cancel_on_submit else "pending"}
+        if path == "/api/jobs/job":
+            polls.append(path)
+            assert len(polls) == 1, "no request may follow cancellation"
+            return 200, {"status": "cancelled"}
+        raise AssertionError(path)
+
+    result = bench.evaluate_prompt(synthetic_prompt(), transport=transport, client=None,
+        project={"project_id": "p", "org_id": "o"}, drawing={"version_id": "v"},
+        source_sha=SHA, evidence_dir=tmp_path, run_id="cancel",
+        clock=clock, sleep=clock.sleep)
+    assert len(polls) == (0 if cancel_on_submit else 1)
+    assert result["score"] == 0
+    assert result["failing_stage"] == "execution"
+    assert result["error_code"] == "JOB_CANCELLED"
+    assert result["failure"] == "tool execution cancelled"
+    assert result["output_hash"] is None
+    assert not result.get("unreadable")
 
 
 def records():
@@ -67,6 +323,30 @@ def test_unreadable_evidence_is_not_a_scored_failure_or_baseline(tmp_path):
                                        source_sha=SHA, out_dir=tmp_path)
     assert not report["complete"]
     assert all(step.verdict == "UNREADABLE" for step in steps)
+
+
+@pytest.mark.parametrize("change", [
+    {"schema": "wrong"}, {"complete": False}, {"complete": 1},
+    {"source_sha": "invalid"}, {"overall": None}, {"overall": True},
+    {"overall": -0.1}, {"overall": 1.1}, {"overall": float("nan")},
+    {"overall": float("inf")}, {"trades": {}}, {"trades": []},
+    {"trades": {"solar": 1, "structural": 1}},
+    {"trades": {"solar": 1, "structural": 1, "mechanical": -0.01}},
+    {"trades": {"solar": 1, "structural": 1, "mechanical": float("inf")}},
+])
+def test_malformed_baseline_is_rejected_before_comparison_or_receipt(tmp_path, monkeypatch, change):
+    baseline = {"schema": "leaf.xbench.x03-scores.v1", "complete": True,
+                "source_sha": SHA, "prompt_sha256": "d" * 64, "overall": 1,
+                "trades": {trade: 1 for trade in bench.TRADES}}
+    baseline.update(change)
+    def forbidden(*args, **kwargs):
+        raise AssertionError("invalid baseline reached comparison or receipt")
+    monkeypatch.setattr(bench, "rates", forbidden)
+    monkeypatch.setattr(bench, "write_json_atomic", forbidden)
+    with pytest.raises(ValueError, match="baseline"):
+        bench.grade_records(records(), baseline=baseline, prompt_sha256="d" * 64,
+                            source_sha=SHA, out_dir=tmp_path)
+    assert not list(tmp_path.iterdir())
 
 
 def run_prompt(tmp_path, *, fallback=False, model=True, publication="published", value=3, drift=False):

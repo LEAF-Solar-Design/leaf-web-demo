@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import re
 import time
 from uuid import uuid4
 
@@ -37,12 +38,24 @@ def matches(actual, expected, rule):
     return type(actual) is type(expected) and actual == expected
 
 
+def validate_prompt_id(value):
+    if not isinstance(value, str) or not re.fullmatch(r"X03-(?:0[1-9]|[1-4][0-9]|50)", value):
+        raise ValueError("invalid frozen prompt ID")
+
+
 def load_prompts(manifest):
     fixture = next(f for f in manifest["fixtures"] if f["id"] == "x03-prompts")
-    payload = json.loads(Path(fixture["path"]).read_text(encoding="utf-8-sig"))
+    raw = Path(fixture["path"]).read_bytes()
+    if hashlib.sha256(raw).hexdigest() != fixture.get("sha256"):
+        raise ValueError("frozen prompt SHA-256 mismatch")
+    payload = json.loads(raw.decode("utf-8-sig"))
     rows = payload["rows"]
-    if payload.get("schema") != "leaf.xbench.x03-prompts.v1" or len(rows) != 50:
+    if payload.get("schema") != "leaf.xbench.x03-prompts.v1" or not isinstance(rows, list) or len(rows) != 50:
         raise ValueError("invalid frozen prompt file")
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("invalid frozen prompt row")
+        validate_prompt_id(row.get("id"))
     if len({r["id"] for r in rows}) != 50 or Counter(r["trade"] for r in rows) != Counter(TRADES):
         raise ValueError("invalid prompt IDs or trade split")
     drawings = {f["id"] for f in manifest["fixtures"] if f.get("role") == "drawing"}
@@ -91,6 +104,7 @@ class PromptFailure(RuntimeError):
 
 def evaluate_prompt(row, *, transport, client, project, drawing, source_sha,
                     evidence_dir, run_id, clock=time.monotonic, sleep=time.sleep):
+    validate_prompt_id(row.get("id"))
     record = {"id": row["id"], "trade": row["trade"], "drawing": row["drawing"],
               "source_sha": source_sha, "model_id": None, "tool_name": None,
               "version": None, "tool_source_hash": None, "output_hash": None,
@@ -167,9 +181,12 @@ def evaluate_prompt(row, *, transport, client, project, drawing, source_sha,
                        "dwg": drawing["version_id"], "params": {}})
         if status == 202:
             job_path = "/api/jobs/" + result["job_id"]
-            while result.get("status") not in ("complete", "failed"):
+            while result.get("status") not in ("complete", "failed", "cancelled"):
                 sleep(min(2, remaining()))
                 _, result = call("GET", job_path)
+        if result.get("status") == "cancelled":
+            record["error_code"] = "JOB_CANCELLED"
+            raise PromptFailure("tool execution cancelled")
         if result.get("status") == "failed" or result.get("ok") is False:
             raise PromptFailure("tool execution failed")
         output = result.get("result", result.get("output", result))
@@ -209,7 +226,26 @@ def rates(records):
                 for model in sorted({r.get("model_id") or "unreported" for r in records})}}
 
 
+def validate_baseline(baseline, prompt_sha256):
+    if (not isinstance(baseline, dict)
+            or baseline.get("schema") != "leaf.xbench.x03-scores.v1"
+            or baseline.get("complete") is not True):
+        raise ValueError("baseline must have the complete X03 scores schema")
+    if not isinstance(baseline.get("source_sha"), str) or not re.fullmatch(r"[0-9a-f]{40}", baseline["source_sha"]):
+        raise ValueError("baseline source identity is invalid")
+    if baseline.get("prompt_sha256") != prompt_sha256:
+        raise ValueError("baseline belongs to a different frozen prompt set")
+    trades = baseline.get("trades")
+    if not isinstance(trades, dict) or set(trades) != set(TRADES):
+        raise ValueError("baseline must contain each frozen trade")
+    for rate in (baseline.get("overall"), *trades.values()):
+        if type(rate) not in (int, float) or not math.isfinite(rate) or not 0 <= rate <= 1:
+            raise ValueError("baseline rates must be finite numbers between zero and one")
+
+
 def grade_records(records, *, baseline, prompt_sha256, source_sha, out_dir):
+    if baseline is not None:
+        validate_baseline(baseline, prompt_sha256)
     complete = (len(records) == 50 and len({r["id"] for r in records}) == 50
                 and Counter(r["trade"] for r in records) == Counter(TRADES)
                 and all(r.get("author_submitted") and r["source_sha"] == source_sha for r in records)
@@ -218,8 +254,6 @@ def grade_records(records, *, baseline, prompt_sha256, source_sha, out_dir):
     report = {"schema": "leaf.xbench.x03-scores.v1", "source_sha": source_sha,
               "prompt_sha256": prompt_sha256, "complete": complete, **rates(records),
               "failing_stages": dict(Counter(r["failing_stage"] for r in records if not r["score"]))}
-    if baseline is not None and baseline.get("prompt_sha256") != prompt_sha256:
-        raise ValueError("baseline belongs to a different frozen prompt set")
     report["REGRESSION"] = bool(baseline and complete and (
         baseline["overall"] - report["overall"] > 0.05 + 1e-12 or any(
             baseline["trades"][t] - report["trades"][t] > 0.10 + 1e-12 for t in TRADES)))
@@ -257,9 +291,10 @@ def run(ctx):
     rows, prompt_sha = load_prompts(ctx.manifest)
     ctx.out_dir.mkdir(parents=True, exist_ok=True)
     baseline_path = Path(ctx.manifest["baseline_path"])
-    baseline = json.loads(baseline_path.read_text()) if baseline_path.exists() else None
-    if baseline and baseline.get("prompt_sha256") != prompt_sha:
-        raise ValueError("baseline prompt hash differs")
+    baseline = None
+    if baseline_path.exists():
+        baseline = json.loads(baseline_path.read_text())
+        validate_baseline(baseline, prompt_sha)
     fixtures = {f["id"]: f for f in ctx.manifest["fixtures"] if f.get("role") == "drawing"}
     records = []
     repo = Path(__file__).resolve().parents[3]
