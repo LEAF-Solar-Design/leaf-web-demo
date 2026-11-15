@@ -75,3 +75,21 @@ strict reporter forwards this record to the log without using it as an assertion
 oracle. A digest binds bytes; it does not recover a discarded report. Keep the
 local report and screenshots for full replay. Older native GREEN receipts prove
 the gate passed but do not claim a surviving native child report.
+
+## Saved literal preview clock
+
+The existing native bridge also runs a separate one-case static clock selection:
+`npx playwright test --config playwright.widget-static.config.mjs`. It saves a
+fixture revision first, so the runtime Live widget preview is mounted, then
+observes eleven seconds without edits. No new five-second timer or API request
+may be scheduled. Browser-wide Date.now reads are observations only because the
+automation also reads that clock. Disabling only the literal scheduling guard
+reproduces two recurring schedules; the restored guard produces zero.
+
+The original six recovery cases and their strict count stay intact. The native
+bridge now has two parent tests and seven child cases across two configurations.
+This is an isolated production-built Chromium fixture, not whole-Studio frame
+performance or delivered LIVE proof. The runtime preview's exact white fallback
+is distinct from the designer's foreground fallback. Compact records reach the
+suite stderr; retaining them in the outer native job log remains owned by the
+shared CI capture boundary, so a green gate alone does not claim that retention.
