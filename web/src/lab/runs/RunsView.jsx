@@ -4,6 +4,7 @@ import { fetchWithBudget } from '../../fetchBudget.js'
 import { useLabSurfaceStatus } from '../useLabSurfaceStatus.js'
 import { labValueStore, useBlockValue, useRun, useRuns } from './valueStore.js'
 import { cancelRun } from './runStream.js'
+import './corpusEvidence.css'
 
 const summarize = value => {
   try { return (typeof value === 'string' ? value : JSON.stringify(value) ?? 'null').slice(0, 200) }
@@ -23,7 +24,7 @@ function EvidenceField({ label, value }) {
 }
 function CorpusEvidence({ evidence }) {
   const report = evidence.evaluation, confirmation = report.confirm_report
-  return <section aria-label="Corpus evaluation evidence">
+  return <section className="lab-corpus-evidence" aria-label="Corpus evaluation evidence">
     <h4>Corpus evaluation</h4>
     <p>Policy digest: {evidence.policy_digest}</p>
     <p>Policy version: {evidence.policy.version}</p>
