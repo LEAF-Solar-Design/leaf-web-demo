@@ -231,9 +231,12 @@ export default function ProjectSolarReadPanel({ tool, solarBinding, authorityKey
     }
   }, [projectClient])
 
-  const edit = () => {
+  const retireParameters = () => {
     parameterRevision.current += 1
     invalidate()
+  }
+  const edit = () => {
+    retireParameters()
     setState({ phase: 'idle', generation: generation.current })
   }
   const read = async (event) => {
@@ -301,7 +304,7 @@ export default function ProjectSolarReadPanel({ tool, solarBinding, authorityKey
     !activeForm.valid ? 'parameters_invalid' : visible.phase === 'refused' ? 'read_refused' :
       visible.phase === 'stale' ? 'scope_stale' : visible.phase === 'presented' ? null : 'idle')
   return <section className="project-solar-read-panel">
-    <form onSubmit={read} onInputCapture={edit} onChangeCapture={edit}>
+    <form onSubmit={read} onInputCapture={retireParameters} onChangeCapture={retireParameters}>
       <SchemaForm key={formEpoch.current} schema={owner.editableSchema} values={activeForm.values}
         onChange={(values) => { edit(); setForm((value) => ({ ...value, values })) }}
         onValidityChange={(valid) => {
