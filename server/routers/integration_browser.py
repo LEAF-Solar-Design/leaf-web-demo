@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 import re
+import string
 from urllib.parse import urlencode
 from uuid import UUID, uuid4
 
@@ -154,7 +155,7 @@ def _route(request, project_id, resource):
                 raise _Failure(400, "WORKSPACE_INVALID_INPUT")
             if key == "after":
                 remainder = len(value) % 4
-                tail = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".index(value[-1])
+                tail = (string.ascii_uppercase + string.ascii_lowercase + string.digits + "-_").index(value[-1])
                 if remainder == 1 or (remainder == 2 and tail & 15) or (remainder == 3 and tail & 3):
                     raise _Failure(400, "WORKSPACE_INVALID_INPUT")
     return f"/api/v1/projects/{project_id}/{resource}" + ("?" + urlencode(pairs) if pairs else "")
