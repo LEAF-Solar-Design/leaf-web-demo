@@ -1,0 +1,38 @@
+{
+  "schema": "leaf.arlo-publish-pins.v1",
+  "platform_pinned": {
+    "sha": "91c8bf8ad32fb3f6e6308d56987a0599bd85b819",
+    "snapshot": {
+      "repository": {
+        "id": 46,
+        "full_name": "LEAF-Solar-Design/leaf-web-demo"
+      },
+      "commit": "91c8bf8ad32fb3f6e6308d56987a0599bd85b819",
+      "tree": "ec8578b3f53b3d5b3a45e7d90e176ed310c6d56c",
+      "bucket": "leaf-developer-platform-artifacts-807034087062-us-east-1",
+      "key": "forge-ci-relay/LEAF-Solar-Design/leaf-web-demo/91c8bf8ad32fb3f6e6308d56987a0599bd85b819/ci-a9651d4be3e46bf95ad67fd4d16872273bfa5543.zip",
+      "version_id": "O8hxvp_yObmOIxbiqwJoy8z3AqiQNDpO",
+      "zip_sha256": "a60c6a6af1b51214fea2e3ac077e920063161b3b3135872ba7e8a6fc4b0de9ce",
+      "bundle_sha256": "9d6e249d2a5389fe9c37f0cbeb644bd7721b25f103ff88f089819d8302da41dc"
+    }
+  },
+  "arlo_source": {
+    "sha": "f35a10e864879ac0723fe595fc8dbbe02e09b5f2"
+  },
+  "arlo_recipe": {
+    "sha": "acd89a0a413774147c3aa12607372d0d9e5b209e"
+  },
+  "arlo_snapshot": {
+    "repository": {
+      "id": 58,
+      "full_name": "LEAF-Solar-Design/arlo-3dml"
+    },
+    "commit": "cf14ccabb5ff532ed6f07eccdc678b48b0e84542",
+    "tree": "5b7a1c360d4cf441aac256a38ec361de04682561",
+    "bucket": "leaf-developer-platform-artifacts-807034087062-us-east-1",
+    "key": "forge-ci-relay/LEAF-Solar-Design/arlo-3dml/cf14ccabb5ff532ed6f07eccdc678b48b0e84542/ci-8e0ebf46c0ef46c89fb3a9430766ce78365c9ff6.zip",
+    "version_id": "DidpewV3xt6uMTBhjEdY7qJXjUo8eXj1",
+    "zip_sha256": "d79b100e137371383dfdb2eaf65f944dd1f8b35ef5e03915da8766553fc16043",
+    "bundle_sha256": "c87f84de7e15d98e851365ffd94f019f7499fa9d1012683c76e2955786870ba2"
+  }
+}

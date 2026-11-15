@@ -36,3 +36,29 @@ test('widget browser journey executes all six fixture regressions without skips'
     errors: report.errors.length, report_sha256: createHash('sha256').update(stdout).digest('hex'),
   }))
 })
+
+// Separate child keeps the original six recovery assertions/count unchanged.
+test('saved literal preview clock stays idle without skips', async ({}, testInfo) => {
+  test.setTimeout(180000)
+  const staticConfig = fileURLToPath(new URL('../../playwright.widget-static.config.mjs', import.meta.url))
+  const { stdout, stderr } = await execute(process.execPath, [
+    cli, 'test', '--config', staticConfig, '--reporter=json', '--workers=1', '--global-timeout=120000',
+  ], { cwd: web, windowsHide: true, timeout: 160000, maxBuffer: 16 * 1024 * 1024 })
+  const report = JSON.parse(stdout)
+  const reportPath = testInfo.outputPath('widget-static-clock-report.json')
+  await writeFile(reportPath, stdout)
+  await testInfo.attach('widget-static-clock-report.json', { path: reportPath, contentType: 'application/json' })
+  if (stderr) {
+    const logPath = testInfo.outputPath('widget-static-clock-build.log')
+    await writeFile(logPath, stderr)
+    await testInfo.attach('widget-static-clock-build.log', { path: logPath, contentType: 'text/plain' })
+  }
+  expect(report.errors).toEqual([])
+  expect(report.stats).toMatchObject({ expected: 1, unexpected: 0, skipped: 0, flaky: 0 })
+  console.log('LEAF_WIDGET_BROWSER ' + JSON.stringify({
+    schema: 'leaf.widget-static-clock.v1',
+    expected: report.stats.expected, unexpected: report.stats.unexpected,
+    skipped: report.stats.skipped, flaky: report.stats.flaky,
+    errors: report.errors.length, report_sha256: createHash('sha256').update(stdout).digest('hex'),
+  }))
+})
