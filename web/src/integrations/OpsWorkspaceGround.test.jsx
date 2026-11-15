@@ -395,6 +395,22 @@ function mapOriginal(pointer) {
   fireEvent.change(screen.getByLabelText('Import dataset ID'), { target: { value: 'original-records' } })
   fireEvent.change(screen.getByLabelText('Import dataset title'), { target: { value: 'Imported original' } })
 }
+it.each(['account', 'pair_key', 'remaining_pct', String.raw`acc\u006funt`])('refuses duplicate original JSON member %s before mapping', async key => {
+  const field = key.startsWith('acc') ? 'account' : key
+  const raw = `[{"${field}":"first","${key}":"second"}]`
+  const harness = await materialHarness([{ [field]: 'first' }], '')
+  const blob = new Blob([raw], { type: 'application/json' })
+  harness.material.byte_size = blob.size
+  harness.material.sha256 = Array.from(new Uint8Array(await webcrypto.subtle.digest('SHA-256', await blob.arrayBuffer())), byte => byte.toString(16).padStart(2, '0')).join('')
+  readProjectReferenceOriginal.mockResolvedValue(blob)
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded()
+  fireEvent.click(screen.getByRole('button', { name: 'List JSON originals' }))
+  await screen.findByRole('option', { name: '<img src=x onerror=alert(1)>.json' })
+  fireEvent.change(screen.getByLabelText('Project original'), { target: { value: otherProject } })
+  expect(await screen.findByRole('alert')).toHaveTextContent('Duplicate JSON members. Nothing was imported.')
+  expect(screen.queryByLabelText('Records array')).toBeNull()
+  expect(importPosts(harness.fetchImpl)).toHaveLength(0)
+})
 it.each([
   ['/pr_records', 15689, (rows) => ({ schema: 'history', scope: { repos: ['a', 'b'] }, captured_at: '2026-09-01', pr_records: rows })],
   ['/samples', 164, (rows) => ({ samples: rows, limitations: ['snapshot only'], ingested_at: '2026-09-02' })],

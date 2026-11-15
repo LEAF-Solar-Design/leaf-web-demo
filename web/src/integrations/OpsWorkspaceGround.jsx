@@ -22,6 +22,7 @@ import { NO_OCCLUDERS, useGroundWindow, windowStyle } from '../site/groundWindow
 import { STUDIO_DRAWING_OCCLUDERS } from '../site/drawingOccluders.js'
 import './ops-workspace.css'
 import { humanizeError } from '../errorHumanize.js'
+import { DuplicateOriginalMember, parseProjectOriginalJson } from './projectOriginalJson.js'
 
 const STUDIO_CHROME_OCCLUDERS = Object.freeze(STUDIO_DRAWING_OCCLUDERS.filter(([selector]) =>
   ['header.top', '#drafting-ribbon', '.bar.bar-command-line', 'footer.foot-bar'].includes(selector)))
@@ -98,8 +99,8 @@ function ProjectMaterialImport({ projectId, client, signal, guard, onImported, o
       const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (byte) => byte.toString(16).padStart(2, '0')).join('')
       if (digest !== material.sha256) throw new Error('File digest changed. Nothing was imported.')
       let original
-      try { original = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) }
-      catch { throw new Error('Invalid UTF-8 JSON.') }
+      try { original = parseProjectOriginalJson(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) }
+      catch (failure) { if (failure instanceof DuplicateOriginalMember) throw failure; throw new Error('Invalid UTF-8 JSON.') }
       const found = []
       const stack = [{ value: original, path: '', depth: 0 }]
       let arrayListBytes = 2
