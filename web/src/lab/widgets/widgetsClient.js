@@ -63,12 +63,25 @@ async function request(docId, suffix, { fetch: fetchImpl = globalThis.fetch, tim
 export async function loadWidget(docId, options) {
   const result = await request(docId, 'head', options)
   if (result.status === 404) return { ok: true, doc: null, revision: null, sha256: null }
+  // Older envelopes may omit identity; an explicit producer identity must match the requested artifact.
+  if (result.ok && Object.hasOwn(result, 'doc_id') && result.doc_id !== docId) return { ok: false, status: 502, detail: 'The document store returned a mismatched document identity.' }
   if (result.ok && result.kind && result.kind !== 'widget') return { ok: false, status: 409, detail: 'lab_document_kind_fixed' }
   if (result.ok && !result.graph) return { ok: false, status: 502, detail: 'The stored widget document is missing.' }
+  if (result.ok && (!Number.isSafeInteger(result.revision) || result.revision < 1)) {
+    return { ok: false, status: 502, detail: 'The document store returned an invalid stored revision.' }
+  }
   return result.ok ? { ...result, doc: result.graph } : result
 }
-export function saveWidget(docId, doc, expectedHead, options) {
-  return request(docId, 'save', { ...options, method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ graph: doc, expected_head: expectedHead, kind: 'widget' }) })
+export async function saveWidget(docId, doc, expectedHead, options) {
+  const result = await request(docId, 'save', { ...options, method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ graph: doc, expected_head: expectedHead, kind: 'widget' }) })
+  // Older envelopes may omit identity; an explicit producer identity must match the requested artifact.
+  if (result.ok && Object.hasOwn(result, 'doc_id') && result.doc_id !== docId) return { ok: false, status: 502, detail: 'The document store returned a mismatched document identity.' }
+  // A transport success alone cannot advance the optimistic-concurrency head.
+  // Keep edits and the prior head when the save receipt is incomplete; do not retry.
+  if (result.ok && (!Number.isSafeInteger(result.revision) || result.revision < 1)) {
+    return { ok: false, status: 502, detail: 'The document store returned an invalid save revision.' }
+  }
+  return result
 }
 export function resolveValues(docId, bindings, options) {
   return request(docId, 'values', { ...options, method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bindings }) })

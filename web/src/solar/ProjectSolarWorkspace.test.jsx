@@ -1387,7 +1387,7 @@ describe('Project Solar workspace composition', () => {
   it('R13E-44 composition owns no Viewer or runtime and all new copy uses the frozen maps', () => {
     const source = readFileSync(`${process.cwd()}/src/solar/ProjectSolarWorkspace.jsx`, 'utf8')
     const imports = [...source.matchAll(new RegExp("from ['\"]([^'\"]+)['\"]", 'g'))].map((match) => match[1])
-    expect(imports).toEqual(['react', './solarDrawingBinding.js', './SolarSettingsForm.jsx', './solarSettingsWire.js', './ProjectSolarReadPanel.jsx', './ProjectSolveReview.jsx', './ProjectSolarEdgePanel.jsx'])
+    expect(imports).toEqual(['react', './solarDrawingBinding.js', './SolarSettingsForm.jsx', './solarSettingsWire.js', './ProjectSolarReadPanel.jsx', './ProjectSolveReview.jsx', './ProjectSolarEdgePanel.jsx', './ProjectSolarPreparedSolveForm.jsx'])
     const reviewSource = readFileSync(`${process.cwd()}/src/solar/ProjectSolveReview.jsx`, 'utf8')
     const reviewImports = [...reviewSource.matchAll(new RegExp("from ['\"]([^'\"]+)['\"]", 'g'))].map((match) => match[1])
     for (const dependency of reviewImports) {
@@ -1411,7 +1411,7 @@ describe('Project Solar workspace composition', () => {
       noHost()
       h.view.unmount()
     }
-    expect(Object.keys(PROJECT_SOLAR_WORKSPACE_REASONS)).toHaveLength(23)
+    expect(Object.keys(PROJECT_SOLAR_WORKSPACE_REASONS)).toHaveLength(24)
     expect(projectSolarWorkspaceReason('not_a_reason')).toBeNull()
   })
 
@@ -1420,7 +1420,7 @@ describe('Project Solar workspace composition', () => {
     const maps = { PROJECT_SOLAR_WORKSPACE_REASONS, PROJECT_SOLAR_WORKSPACE_LABELS }
     const references = [...source.matchAll(new RegExp('PROJECT_SOLAR_WORKSPACE_(REASONS|LABELS)\\.(\\w+)', 'g'))]
     for (const map of Object.values(maps)) expect(Object.isFrozen(map)).toBe(true)
-    expect(new Set(references.map((match) => match[0])).size).toBe(25)
+    expect(new Set(references.map((match) => match[0])).size).toBe(26)
     for (const [, kind, key] of references) {
       const map = maps[`PROJECT_SOLAR_WORKSPACE_${kind}`]
       expect(Object.hasOwn(map, key)).toBe(true)
@@ -1432,4 +1432,16 @@ describe('Project Solar workspace composition', () => {
     expect(source).not.toMatch(/aria-label=["'][^"']*[A-Za-z][^"']*["']/)
     expect(source).not.toMatch(/title:\s*['"][^'"]+[A-Za-z][^'"]*['"]|['"][^'"\r\n]*[A-Za-z][^'"\r\n]*\.['"]/)
   })
+})
+
+it('production cloud Solve opens the saved-group preparation form', async () => {
+  const h = fixture('solar-solve-proposal')
+  h.row.engine_op = 'solar_solve_proposal'
+  h.mount({ openTool: h.row })
+  expect(screen.getByLabelText('Panel group')).toBeTruthy()
+  expect(screen.getByLabelText('Solver connection')).toBeTruthy()
+  expect(screen.queryByLabelText('Frame')).toBeNull()
+  expect(screen.queryByLabelText('Request')).toBeNull()
+  await waitFor(() => expect(h.client.readContext).toHaveBeenCalledWith(expect.objectContaining({ prepareSolve: true })))
+  expect(h.submit).not.toHaveBeenCalled()
 })

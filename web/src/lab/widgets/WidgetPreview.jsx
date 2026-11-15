@@ -28,12 +28,15 @@ export function WidgetPreview({ docId, doc, format = doc.active, host = null, cl
   const period = Math.max(5000, Number(intervalMs) || 5000), surface = doc.formats[format]
   const bindingKey = JSON.stringify(surface.els.filter((element) => element.binding?.source === 'graph.output').map((element) => element.binding))
   const graphBindings = useMemo(() => JSON.parse(bindingKey), [bindingKey])
+  const hasHostBindings = surface.els.some((element) => element.binding?.source === 'kashbot.board')
   const [poll, setPoll] = useState({ values: [], failed: false })
   const [clock, setClock] = useState(() => now())
   useEffect(() => {
     let disposed = false, inFlight = false, controller = null, timer = null, lastStarted = -Infinity
     let wasVisible = document.visibilityState === 'visible', resumePending = false
     setPoll({ values: [], failed: false })
+    // Literal-only previews have no freshness clock or values to refresh.
+    if (!graphBindings.length && !hasHostBindings) return
     function schedule() {
       clearTimeout(timer)
       const delay = docId && graphBindings.length ? Math.max(0, lastStarted + period - now()) : period
@@ -86,7 +89,7 @@ export function WidgetPreview({ docId, doc, format = doc.active, host = null, cl
     document.addEventListener('visibilitychange', visibility)
     tick(true)
     return () => { disposed = true; clearTimeout(timer); controller?.abort(); document.removeEventListener('visibilitychange', visibility) }
-  }, [docId, format, graphBindings, client, now, period])
+  }, [docId, format, graphBindings, hasHostBindings, client, now, period])
   let graphIndex = 0
   const elements = surface.els.map((element) => {
     const graph = element.binding?.source === 'graph.output', entry = graph ? poll.values[graphIndex++] : null

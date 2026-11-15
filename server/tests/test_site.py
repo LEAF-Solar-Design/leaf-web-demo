@@ -272,8 +272,18 @@ def test_capabilities_projection_is_stripped(site_env):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["ok"] is True and body["families"]
-    assert "params_schema" not in r.text
-    assert "provenance" not in r.text
+    # The projection must expose no params_schema or provenance FIELD at any depth.
+    # Tool descriptions are prose and may use the word (e.g. "report provenance").
+    def _keys(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                yield key
+                yield from _keys(value)
+        elif isinstance(node, list):
+            for item in node:
+                yield from _keys(item)
+    leaked = {k for k in _keys(body) if k in ("params_schema", "provenance")}
+    assert not leaked, leaked
     for fam in body["families"]:
         assert set(fam.keys()) == {"family_id", "label", "description", "tools"}
         for tool in fam["tools"]:

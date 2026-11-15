@@ -386,7 +386,7 @@ def panel_from_polyline(poly: Mapping[str, Any], installation_design: str = ROOF
 
 
 def panel_outline_from_insert(insert, blocks) -> dict:
-    """Resolve one complete single-rectangle block into a fresh XY outline."""
+    """Resolve a complete block with one unambiguous enclosing panel rectangle."""
     def number(value):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise PanelGroupKernelError("unsupported panel block")
@@ -413,12 +413,64 @@ def panel_outline_from_insert(insert, blocks) -> dict:
         reject()
     definition = blocks.get(name)
     if (not isinstance(definition, Mapping) or definition.get("complete") is not True
-            or type(definition.get("count")) is not int or definition["count"] != 1):
+            or type(definition.get("count")) is not int):
         reject()
     children = definition.get("children")
-    if not isinstance(children, list) or len(children) != 1:
+    if (not isinstance(children, list) or not 1 <= len(children) <= 256
+            or definition["count"] != len(children)):
         reject()
     child = children[0]
+    if len(children) > 1:
+        # Module blocks often include an inset outline and internal linework.
+        # Only a unique largest rectangle enclosing every supported child is a
+        # panel boundary. Unknown geometry or outside marks cannot be ignored.
+        candidates, decoration = [], []
+        for part in children:
+            if not isinstance(part, Mapping):
+                reject()
+            raw_points = part.get("pts")
+            if not isinstance(raw_points, list) or not 2 <= len(raw_points) <= 256:
+                reject()
+            if part.get("kind") == "LWPOLYLINE":
+                if (type(part.get("closed")) is not bool
+                        or vector(part.get("nrm"), 3) != (0, 0, 1)
+                        or number(part.get("elev")) != 0):
+                    reject()
+                points = [vector(point, 2) for point in raw_points]
+                boundary = {"handle": handle, "closed": part["closed"], "pts": points}
+                if len(points) in (4, 5) and panel_from_polyline(boundary) is not None:
+                    corners = points[:4]
+                    area = abs(sum(corners[i][0] * corners[(i + 1) % 4][1]
+                                   - corners[(i + 1) % 4][0] * corners[i][1]
+                                   for i in range(4))) / 2
+                    if not math.isfinite(area) or area == 0:
+                        reject()
+                    candidates.append((area, part, corners))
+            elif part.get("kind") == "LINE" and len(raw_points) == 2:
+                spatial = [vector(point, 3) for point in raw_points]
+                if any(point[2] != 0 for point in spatial):
+                    reject()
+                points = [point[:2] for point in spatial]
+            else:
+                reject()
+            decoration.extend(points)
+        if not candidates:
+            reject()
+        candidates.sort(key=lambda candidate: candidate[0], reverse=True)
+        area, child, corners = candidates[0]
+        if len(candidates) > 1 and math.isclose(area, candidates[1][0], rel_tol=1e-12, abs_tol=_GEOM_TOL):
+            reject()
+        signed_area = sum(corners[i][0] * corners[(i + 1) % 4][1]
+                          - corners[(i + 1) % 4][0] * corners[i][1] for i in range(4))
+        direction = 1 if signed_area > 0 else -1
+        tolerance = 4 * _INTAKE_POINT_ERR + _GEOM_TOL
+        for x, y in decoration:
+            for index in range(4):
+                ax, ay = corners[index]
+                bx, by = corners[(index + 1) % 4]
+                cross = direction * ((bx - ax) * (y - ay) - (by - ay) * (x - ax))
+                if not math.isfinite(cross) or cross < -tolerance * math.hypot(bx - ax, by - ay):
+                    reject()
     if (not isinstance(child, Mapping) or child.get("kind") != "LWPOLYLINE"
             or child.get("closed") is not True):
         reject()
@@ -459,7 +511,7 @@ def panels_from_intake(
 ) -> list[dict]:
     """Every panel the plugin's select-all would take from a Studio intake.
 
-    One panel per rectangular polyline or complete single-rectangle block on
+    One panel per rectangular polyline or complete unambiguous panel block on
     ``layer_contains``; polylines precede INSERTs. Duplicate handles fail closed.
     """
     if not isinstance(intake, Mapping):

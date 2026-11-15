@@ -64,14 +64,17 @@ def test_page_size_equals_golden(fixture_sections, golden):
 
 def _pdf(content, page_extra=b"", resources=b"", mediabox=b"0 0 200 100"):
     """A minimal one-page PDF with a correct xref table."""
+    chunks = content if isinstance(content, list) else [content]
+    contents_ref = (b"[" + b" ".join(f"{i + 4} 0 R".encode() for i in range(len(chunks))) + b"]"
+                    if isinstance(content, list) else b"4 0 R")
     objects = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [" + mediabox + b"] /Contents 4 0 R "
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [" + mediabox + b"] /Contents " + contents_ref + b" "
         b"/Resources << " + resources + b" >> " + page_extra + b">>",
-        b"<< /Length " + str(len(content)).encode() + b" >>\nstream\n" + content
-        + b"\nendstream",
     ]
+    objects.extend(b"<< /Length " + str(len(chunk)).encode() + b" >>\nstream\n" + chunk
+                   + b"\nendstream" for chunk in chunks)
     out = bytearray(b"%PDF-1.4\n")
     offsets = []
     for number, body in enumerate(objects, start=1):
@@ -86,6 +89,25 @@ def _pdf(content, page_extra=b"", resources=b"", mediabox=b"0 0 200 100"):
 
 
 HELVETICA = b"/Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >>"
+
+
+def test_indirect_content_array_matches_single_stream():
+    chunks = [b"1 0 0 RG 10 10 m 20 20 l S\n", b"BT /F1 10 Tf 20 20 Td (1.1) Tj ET\n"]
+    single = pdf.extract_primitives(_pdf(b"".join(chunks), resources=HELVETICA))
+    multiple = pdf.extract_primitives(_pdf(chunks, resources=HELVETICA))
+    assert pdf.primitives_to_golden(multiple) == pdf.primitives_to_golden(single)
+
+
+@pytest.mark.parametrize("remaining", [-1, 0, 1])
+def test_indirect_content_array_total_bound(monkeypatch, remaining):
+    chunks = [b"1 0 0 RG 10 10 m 20 20 l S\n", b"BT /F1 10 Tf 20 20 Td (1.1) Tj ET\n"]
+    monkeypatch.setattr(pdf, "MAX_CONTENT_BYTES", sum(map(len, chunks)) + remaining)
+    if remaining < 0:
+        with pytest.raises(SolarEdgePdfError, match="CONTENT_TOO_LARGE"):
+            pdf.extract_primitives(_pdf(chunks, resources=HELVETICA))
+    else:
+        result = pdf.extract_primitives(_pdf(chunks, resources=HELVETICA))
+        assert "".join(letter[0] for letter in result.letters) == "1.1"
 
 
 def test_feed_a_is_raw_flipped_and_ignores_q_restore():

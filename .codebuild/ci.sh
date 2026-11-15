@@ -31,6 +31,13 @@ if [[ "${1:-}" == --heavy-prerequisites ]]; then
     echo "FATAL: ephemeral PostgreSQL did not start; refusing browser and web setup so this build fails before them" >&2
     exit 1
   fi
+  # The runner overwrites this flag for its callback. Zero proves only an
+  # unchanged selected web family; it is not a new full-proof mode. Python,
+  # database and harness setup still run through the normal CI path.
+  if [[ "${LEAF_CI_WEB_FAMILY_REQUIRED:-1}" == 0 ]]; then
+    echo "heavy prerequisites: proven unchanged web family; skipping browser, Next build and web license scan"
+    exit 0
+  fi
 browser_log_dir="$(mktemp -d)"
 # Give the browser and its children a process group for failure cleanup.
 set -m
@@ -184,6 +191,123 @@ if TRUSTED_SHA="$(git --no-replace-objects rev-parse --verify 'refs/remotes/orig
   if [[ "$trusted_sha_override" != 1 && -n "${LEAF_LOADER_TRUSTED_SHA:-}" ]]; then
     loader_check=checked
   fi
+  # Device jobs have no S3 receipt producer. Prove narrative-only changes here,
+  # before ordinary selection can emit a conflicting full-mode receipt.
+  # This inline classifier reads Git objects only, never candidate helpers.
+  # LEAF_DOCS_ONLY_BEGIN
+  if python -I -B - "$HEAD_SHA" "$TRUSTED_SHA" "$loader_check" <<'LEAF_DOCS_ONLY'
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.parse
+
+
+def git(*args):
+    return subprocess.run(["git", "--no-replace-objects", "--literal-pathspecs", *args], check=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout
+
+
+def narrative(raw):
+    name = raw.decode("utf-8", errors="strict")
+    parts = name.split("/")
+    if (not name or "\\" in name or name.startswith("/") or
+            any(part in ("", ".", "..") for part in parts) or
+            re.match(r"^[A-Za-z]:", name)):
+        return False
+    return ((len(parts) == 1 and name.endswith(".md")) or
+            (len(parts) > 1 and parts[0] == "docs" and
+             name.endswith((".md", ".rst", ".txt"))))
+
+
+def classify():
+    e = os.environ
+    head, trusted, loader = sys.argv[1:]
+    event = e.get("CODEBUILD_WEBHOOK_EVENT", "")
+    ref = e.get("CODEBUILD_WEBHOOK_HEAD_REF", "")
+    base = e.get("CODEBUILD_WEBHOOK_BASE_REF", "")
+    if (e.get("LEAF_CI_FULL") == "1" or
+            not re.fullmatch(r"device:dv-[0-9a-f]{16}", e.get("CODEBUILD_BUILD_ID", "")) or
+            event not in ("PULL_REQUEST_CREATED", "PULL_REQUEST_UPDATED", "PULL_REQUEST_REOPENED") or
+            not re.fullmatch(r"refs/pull/[1-9][0-9]*/head", ref) or
+            not base.startswith("refs/heads/") or
+            not re.fullmatch(r"[0-9a-fA-F]{40}", head) or
+            not re.fullmatch(r"[0-9a-fA-F]{40}", trusted) or
+            (e.get("LEAF_LOADER_TRUSTED_SHA") and e["LEAF_LOADER_TRUSTED_SHA"] != trusted)):
+        return None
+    git("check-ref-format", base)
+    resolved = e.get("CODEBUILD_RESOLVED_SOURCE_VERSION", "")
+    operation = e.get("FORGE_CI_OPERATION", "")
+    if not ((re.fullmatch(r"[0-9a-fA-F]{40}", resolved) and resolved.lower() == head.lower()) or
+            (re.fullmatch(r"ci-[0-9a-fA-F]{40}", operation) and operation[3:].lower() == head.lower())):
+        return None
+    bases = git("merge-base", "--all", trusted, head).splitlines()
+    if len(bases) != 1 or not re.fullmatch(rb"[0-9a-f]{40}", bases[0]):
+        return None
+    ancestor = bases[0].decode("ascii")
+    diff = git("diff", "--name-status", "-z", "--find-renames", "--no-ext-diff",
+               "--no-textconv", ancestor, head, "--")
+    if not diff or not diff.endswith(b"\0"):
+        return None
+    fields = diff[:-1].split(b"\0")
+    count = 0
+    while fields:
+        status = fields.pop(0)
+        if status in (b"A", b"M", b"D"):
+            sides = 1
+        elif re.fullmatch(rb"R(?:100|[1-9]?[0-9])", status):
+            sides = 2
+        else:
+            return None
+        if len(fields) < sides:
+            return None
+        names, fields = fields[:sides], fields[sides:]
+        if not all(narrative(name) for name in names):
+            return None
+        # Verify all existing sides, including deleted objects and old rename
+        # names. Only ordinary non-executable blobs may justify a skip.
+        for revision, name in ((ancestor, names[0]), (head, names[-1])):
+            entry = git("ls-tree", "-z", revision, "--", name.decode("utf-8"))
+            if not entry:
+                if (status == b"M" or status.startswith(b"R") or
+                        (status == b"A" and revision == head) or
+                        (status == b"D" and revision == ancestor)):
+                    return None
+                continue
+            if not entry.endswith(b"\0") or entry.count(b"\0") != 1:
+                return None
+            metadata, actual = entry[:-1].split(b"\t", 1)
+            if actual != name or not re.fullmatch(rb"100644 blob [0-9a-f]{40}", metadata):
+                return None
+        count += 1
+    return count
+
+
+try:
+    count = classify()
+except Exception:
+    # Incomplete metadata, invalid names and any Git error retain normal CI.
+    count = None
+if count is None:
+    raise SystemExit(1)
+detail = dict(schema="leaf.ci.selection.v1", mode="selected", execution_mode="selected",
+              selection_mode="selected", source="docs_only", selection_source="docs_only",
+              reasons=["docs_only"], executed=0, of=0, unit="suites", apply_filter=True,
+              head_sha=sys.argv[1], trusted_sha=sys.argv[2], loader_check=sys.argv[3])
+canonical = json.dumps(detail, sort_keys=True, separators=(",", ":"))
+q = lambda value: urllib.parse.quote(value, safe="/:@._-+")
+print("LEAF_EVENT event={} head_ref={} base_ref={} mode=selected".format(
+    q(os.environ["CODEBUILD_WEBHOOK_EVENT"]), q(os.environ["CODEBUILD_WEBHOOK_HEAD_REF"]),
+    q(os.environ["CODEBUILD_WEBHOOK_BASE_REF"])))
+print("LEAF_SELECTION " + canonical)
+print("LEAF_SELECTION_FINAL " + canonical)
+print("LEAF_DOCS_ONLY result=skip files={}".format(count))
+LEAF_DOCS_ONLY
+  then
+    exit 0
+  fi
+  # LEAF_DOCS_ONLY_END
   if [[ "$trusted_sha_override" != 1 && -n "${LEAF_LOADER_TRUSTED_SHA:-}" && "$TRUSTED_SHA" != "$LEAF_LOADER_TRUSTED_SHA" ]]; then
     loader_check=loader_sha_mismatch
     selection_bootstrap_reason=loader_sha_mismatch
@@ -568,6 +692,77 @@ fields = [
 ]
 print(" ".join(k + "=" + q(v) for k, v in fields))
 ' "${BASH_SOURCE[0]}" "$(case "${LEAF_GATE_JOBS:-auto}" in ''|*[!0-9]*|0*) echo unknown ;; *) echo "$LEAF_GATE_JOBS" ;; esac)")"
+# LEAF_SELECTED_SHARDS_BEGIN
+selected_partition_ready=0
+if [[ "${CI_SHARD_MODE:-all}" == shard && ${#only_args[@]} != 0 && "${LEAF_DIAGNOSTIC_PROFILE:-}" != web-demo-suite ]]; then
+  selected_timings="$selection_dir/selected-suite-seconds.json"
+  selected_plan="$selection_dir/selected-shards.json"
+  selected_plan_ok=0
+  if git --no-replace-objects show "$TRUSTED_SHA:scripts/ci/selected_shards.py" > "$selection_dir/selected_shards.py" \
+      && chmod 400 "$selection_dir/selected_shards.py"; then
+    if git --no-replace-objects show "$TRUSTED_SHA:scripts/ci/selected-suite-seconds.json" > "$selected_timings"; then
+      chmod 400 "$selected_timings"
+    else
+      # A missing snapshot is an empty timing input, never an ambient override.
+      rm -f "$selected_timings"
+      echo 'WARNING: trusted selected timings unavailable; using equal-count partition' >&2
+    fi
+    if python -I -B "$selection_dir/selected_shards.py" plan \
+        --catalog "$selection_dir/runner-catalog.json" --only-args "$selection_dir/only-args.nul" \
+        --timings "$selected_timings" --shard-count "$CI_SHARD_TOTAL_N" --shard-index "$CI_SHARD_INDEX_N" \
+        --output "$selected_plan" \
+      && python -I -B - "$selected_plan" "$CI_SHARD_TOTAL_N" "$CI_SHARD_INDEX_N" > "$selection_dir/selected-shard-count" <<'LEAF_SELECTED_SHARDS_VALIDATE'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as source:
+        plan = json.load(source)
+    count, index = map(int, sys.argv[2:])
+    if plan.get("schema") != "leaf.ci.selected-shards.v1":
+        raise ValueError("invalid selected shard schema")
+    selected, shards, local = (plan[key] for key in ("selected_ids", "shards", "shard_ids"))
+    def ids(value):
+        return isinstance(value, list) and all(isinstance(item, str) and item and "\0" not in item for item in value)
+    if not ids(selected) or not selected or len(set(selected)) != len(selected):
+        raise ValueError("invalid selected IDs")
+    if not isinstance(shards, list) or len(shards) != count or not all(ids(shard) for shard in shards):
+        raise ValueError("invalid shard count or lists")
+    flattened = [item for shard in shards for item in shard]
+    if len(flattened) != len(selected) or set(flattened) != set(selected) or not shards[0]:
+        raise ValueError("incomplete or duplicate partition")
+    if not ids(local) or local != shards[index]:
+        raise ValueError("invalid local shard IDs")
+    if plan.get("shard_count", count) != count or plan.get("shard_index", index) != index:
+        raise ValueError("incorrect shard coordinates")
+    algorithm = plan.get("algorithm")
+    if algorithm not in ("lpt", "equal-count"):
+        raise ValueError("invalid partition algorithm")
+    print(len(local))
+    print("LEAF_SELECTED_SHARDS algorithm={} selected={} local={} index={} total={}".format(
+        algorithm, len(selected), len(local), index, count), file=sys.stderr)
+except (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError) as exc:
+    print("WARNING: selected partition rejected: " + str(exc)[:300], file=sys.stderr)
+    raise SystemExit(2)
+LEAF_SELECTED_SHARDS_VALIDATE
+    then
+      chmod 400 "$selected_plan"
+      selected_plan_ok=1
+      selected_partition_ready=1
+    fi
+  fi
+  if [[ "$selected_plan_ok" != 1 ]]; then
+    echo 'WARNING: selected partition unavailable; conservative fallback runs original complete selection on shard 0 without shard flags' >&2
+    if [[ "$CI_SHARD_INDEX_N" != 0 ]]; then
+      echo 'FATAL: selected partition unavailable on nonzero shard; refusing a missing-slice GREEN' >&2
+      exit 2
+    fi
+  elif [[ "$(<"$selection_dir/selected-shard-count")" == 0 && "$CI_SHARD_INDEX_N" != 0 ]]; then
+    echo "LEAF_SELECTED_SHARDS empty index=$CI_SHARD_INDEX_N; exiting before setup"
+    exit 0
+  fi
+fi
+# LEAF_SELECTED_SHARDS_END
 echo "LEAF_T start setup $(date +%s%3N)"
 
 # Playwright supplies Chromium. The unused Chrome apt index must not prevent
@@ -1235,10 +1430,14 @@ if [[ -n "${dep_cache_publish_pid:-}" ]]; then
   cat "$dep_cache_publish_log" || true
   rm -f "$dep_cache_publish_log" || true
 fi
-if [[ "${CI_SHARD_MODE:-all}" == all || ${#only_args[@]} == 0 || "$CI_SHARD_INDEX_N" == 0 ]]; then
+# LEAF_SELECTED_SHARDS_GATE_BEGIN
+if [[ "${CI_SHARD_MODE:-all}" == all || ${#only_args[@]} == 0 || "$CI_SHARD_INDEX_N" == 0 || "$selected_partition_ready" == 1 ]]; then
 if [[ "${CI_SHARD_MODE:-all}" == shard && ${#only_args[@]} == 0 ]]; then
   only_args+=(--shard-count "$CI_SHARD_TOTAL_N" --shard-index "$CI_SHARD_INDEX_N")
+elif [[ "$selected_partition_ready" == 1 ]]; then
+  only_args+=(--shard-count "$CI_SHARD_TOTAL_N" --shard-index "$CI_SHARD_INDEX_N" --selected-shard-plan "$selected_plan")
 fi
+# LEAF_SELECTED_SHARDS_GATE_END
 # Throwaway PostgreSQL so the db_gated and uses_database suites RUN instead of
 # skipping. The runner hands LEAF_GATE_DATABASE_URL to those suites only, as
 # their DATABASE_URL; an ambient DATABASE_URL would switch unrelated suites into
@@ -1329,8 +1528,15 @@ if [[ "$postgres_status" != 0 && "$gate_status" == 0 ]]; then
   gate_status=1
 fi
 else
-  echo "gate: selected mode runs on shard 0 only"
-  gate_status=0
+  # LEAF_SELECTED_SHARDS_GATE_FALLBACK_BEGIN
+  if [[ "${LEAF_DIAGNOSTIC_PROFILE:-}" == web-demo-suite ]]; then
+    echo "gate: diagnostic selected execution remains on shard 0"
+    gate_status=0
+  else
+    echo "FATAL: selected shard reached gate without a validated partition" >&2
+    gate_status=2
+  fi
+  # LEAF_SELECTED_SHARDS_GATE_FALLBACK_END
 fi
 echo "LEAF_T end gate $(date +%s%3N) rc=$gate_status"
 # Reuse evidence (plan ci-test-selection-20260925 S1): the shard's own result, immutable and advisory.

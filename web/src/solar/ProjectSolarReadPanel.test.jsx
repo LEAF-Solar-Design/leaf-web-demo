@@ -316,6 +316,7 @@ describe('project Solar read ownership', () => {
       proposal_ready: 'Proposal ready for review.',
       run_outcome_unknown: 'The run outcome is unknown. Check its job before submitting again.',
       run_refused: 'The server refused this Solar request.',
+      solve_preparation_refused: 'This saved drawing could not be prepared for Solve. Refresh it and try again.',
       proposal_unreadable: 'This Solar proposal could not be read.',
       proposal_required: 'Run a solve and review its proposal before committing.',
       proposal_unpublished: 'This proposal has not published a drawing version.',
@@ -349,7 +350,7 @@ describe('project Solar read ownership', () => {
     expect(projectSolarWorkspaceReason('__proto__')).toBeNull()
     const source = readFileSync(`${process.cwd()}/src/solar/ProjectSolarReadPanel.jsx`, 'utf8')
     const imports = [...source.matchAll(new RegExp('from [\x27\x22]([^\x27\x22]+)', 'g'))].map((match) => match[1])
-    expect(imports).toEqual(['react', '../components/SchemaForm.jsx', './SolarReadResult.jsx', './solarDrawingBinding.js'])
+    expect(imports).toEqual(['react', '../components/SchemaForm.jsx', './SolarReadResult.jsx', './SolarEdgeTrackingReferences.jsx', './solarDrawingBinding.js'])
     for (const forbidden of ['prepareRun(', 'submitRun(', 'setScope(', 'dispose(', 'fetch(', 'App.jsx', 'Viewer']) expect(source).not.toContain(forbidden)
   })
 

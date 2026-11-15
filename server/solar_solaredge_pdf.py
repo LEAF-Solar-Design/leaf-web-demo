@@ -329,6 +329,7 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
 
     # ---- execution with bounds and strict operands ----
     def execute(self, streams):
+        streams = [resolve1(stream) for stream in streams]
         total = 0
         for stream in streams:
             if not isinstance(stream, PDFStream):
