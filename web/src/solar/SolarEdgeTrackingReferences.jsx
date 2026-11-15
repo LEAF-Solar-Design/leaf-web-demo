@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
 import { deriveProjectReadResultState } from './solarReadResultModel.js'
 
 const PAGE_ROWS = 100
@@ -24,6 +24,14 @@ function verifiedPage(data, binding, catalogDigest) {
 
 export default function SolarEdgeTrackingReferences({ data, binding, catalogDigest }) {
   const [navigation, setNavigation] = useState({ data, index: 0 })
+  const previousButton = useRef(null)
+  const nextButton = useRef(null)
+  const focusAfterNavigation = useRef(null)
+  useLayoutEffect(() => {
+    const target = focusAfterNavigation.current
+    focusAfterNavigation.current = null
+    if (navigation.data === data) target?.current?.focus()
+  }, [navigation, data])
   const page = verifiedPage(data, binding, catalogDigest)
   if (!page) return null
   // A new read result resets immediately, before a prior page index can render.
@@ -37,10 +45,16 @@ export default function SolarEdgeTrackingReferences({ data, binding, catalogDige
       <table className="grid"><thead><tr><th scope="col">Panel reference</th></tr></thead>
         <tbody>{page.items.slice(start, end).map(ref => <tr key={ref}><td>{ref}</td></tr>)}</tbody>
       </table>
-      <button type="button" disabled={index === 0}
-        onClick={() => setNavigation({ data, index: index - 1 })}>Previous references</button>
-      <button type="button" disabled={end === page.items.length}
-        onClick={() => setNavigation({ data, index: index + 1 })}>Next references</button>
+      <button ref={previousButton} type="button" disabled={index === 0}
+        onClick={(event) => {
+          if (index === 1 && document.activeElement === event.currentTarget) focusAfterNavigation.current = nextButton
+          setNavigation({ data, index: index - 1 })
+        }}>Previous references</button>
+      <button ref={nextButton} type="button" disabled={end === page.items.length}
+        onClick={(event) => {
+          if (end + PAGE_ROWS >= page.items.length && document.activeElement === event.currentTarget) focusAfterNavigation.current = previousButton
+          setNavigation({ data, index: index + 1 })
+        }}>Next references</button>
     </>}
     {page.nextOffset !== null && <p>More saved references remain. Set Offset to {page.nextOffset} and choose Read project output.</p>}
   </section>
