@@ -1286,7 +1286,22 @@ export default function useEngineSession({
   // flight so the documentLoaded that answers it is read as a step back or
   // forward, not as a fresh open.
   const historyRef = useRef({ original: null, current: null, undo: [], redo: [], reload: null })
+  // Public byte arrays stay compatible with existing callers. Keep an owned
+  // snapshot so a caller cannot alter the bytes used by a later Undo/Redo.
+  const snapshotCopiesRef = useRef(new WeakMap())
+  const rememberSnapshot = (bytes) => {
+    if (bytes && !snapshotCopiesRef.current.has(bytes)) {
+      snapshotCopiesRef.current.set(bytes, Uint8Array.from(bytes))
+    }
+  }
+  const restoredSnapshot = (bytes) => {
+    const owned = snapshotCopiesRef.current.get(bytes)
+    if (!owned) return bytes
+    if (bytes.byteLength === owned.byteLength && owned.every((value, i) => bytes[i] === value)) return bytes
+    return Uint8Array.from(owned)
+  }
   const clearHistory = () => {
+    snapshotCopiesRef.current = new WeakMap()
     selectionEditRef.current = null
     batchVerbRef.current = null
     batchNoteRef.current = ''
@@ -1359,8 +1374,11 @@ export default function useEngineSession({
           // the snapshot; the selection survives by id where it can; the
           // bytes count as edited unless they ARE the opened file.
           history.reload = null
-          history.current = reload.bytes
-          const edited = reload.bytes !== history.original
+          const restored = restoredSnapshot(reload.bytes)
+          rememberSnapshot(restored)
+          if (reload.original) history.original = restored
+          history.current = restored
+          const edited = restored !== history.original
           setSession((current) => Object.freeze({
             ...current,
             documentLoadIdentity,
@@ -1368,7 +1386,7 @@ export default function useEngineSession({
             entityCount: message.entityCount ?? 0,
             blockBasePatched: message.blockBasePatched ?? false,
             ...withSelection(surviveSelectionIds(current.selectedIds, entities)),
-            savedBytes: edited || current.committedBytes !== null ? reload.bytes : null,
+            savedBytes: edited || current.committedBytes !== null ? restored : null,
             busy: false,
             engineParsed: true,
             geometrySource: GEOMETRY_SOURCE.ENGINE_REPARSE,
@@ -1447,7 +1465,10 @@ export default function useEngineSession({
           trimSnapshots(history.undo)
           history.redo = []
         }
-        if (message.bytes) history.current = message.bytes
+        if (message.bytes) {
+          rememberSnapshot(message.bytes)
+          history.current = message.bytes
+        }
         setSession((current) => Object.freeze({
           ...current,
           busy: false,
@@ -1534,6 +1555,13 @@ export default function useEngineSession({
     // W4g-3b: `{ committed: true }` says these bytes ARE the head (the
     // opener's call), so the entity list this load produces becomes the base
     // a save diffs against. Any other shape (a hand import) keeps no base.
+    let loadBytes
+    try {
+      loadBytes = Uint8Array.from(bytes)
+    } catch {
+      patch({ errorKind: SESSION_ERROR.REFUSED, status: 'Open refused: the drawing bytes are no longer available.' })
+      return null
+    }
     committedLoadRef.current = !!(opts && typeof opts === 'object' && opts.committed === true)
     const projectVersion = opts?.project === true && saveTargetRef.current?.kind === 'project'
       && typeof opts.version === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(opts.version)
@@ -1543,8 +1571,9 @@ export default function useEngineSession({
     // W4f slice F: the opened bytes are the floor of the undo history.
     clearHistory()
     historyRef.current.original = bytes
-    pendingLoadRef.current = { documentId: name, drawingUnit: drawingUnitFromBytes(bytes), origin: committedLoadRef.current ? 'head' : opts?.starter === true ? 'starter' : 'import' }
-    if (!boundary.post({ type: 'loadDocument', documentId: name, bytes })) {
+    snapshotCopiesRef.current.set(bytes, loadBytes)
+    pendingLoadRef.current = { documentId: name, drawingUnit: drawingUnitFromBytes(loadBytes), origin: committedLoadRef.current ? 'head' : opts?.starter === true ? 'starter' : 'import' }
+    if (!boundary.post({ type: 'loadDocument', documentId: name, bytes: Uint8Array.from(loadBytes) })) {
       patch({
         busy: false,
         errorKind: SESSION_ERROR.TRANSPORT,
@@ -1861,7 +1890,7 @@ export default function useEngineSession({
   // head. A 409 (head moved) reads back as a plain instruction to refresh.
   const save = useCallback(async () => {
     const target = saveTargetRef.current
-    const bytes = sessionRef.current.savedBytes
+    const bytes = restoredSnapshot(sessionRef.current.savedBytes)
     // `busy` alone cannot gate this: two clicks in one tick both read the
     // pre-render value. A version write is not an operation to do twice, so
     // the in-flight latch is a ref, set before the first await.
@@ -1915,8 +1944,10 @@ export default function useEngineSession({
       if (target.kind === 'project') {
         if (saveTargetRef.current?.scopeKey !== target.scopeKey || !receipt?.drawing_version?.version_id) return null
         const version = receipt.drawing_version
+        rememberSnapshot(bytes)
+        historyRef.current.current = bytes
         patch({ busy: false, receipt, savedVersion: version.version_id,
-          committedBytes: bytes, committedEntities: sessionRef.current.entities,
+          savedBytes: bytes, committedBytes: bytes, committedEntities: sessionRef.current.entities,
           committedVersion: version.version_id, errorKind: null,
           status: `Saved project drawing version ${version.seq}.` })
         onSavedRef.current?.(receipt)
@@ -1925,10 +1956,13 @@ export default function useEngineSession({
       const nv = receipt?.new_version?.version ?? receipt?.head
       const live = receipt?.live === true
       const readBackPending = live && receipt.new_version_readable === false
+      rememberSnapshot(bytes)
+      historyRef.current.current = bytes
       patch({
         busy: false,
         receipt,
         savedVersion: live && !readBackPending ? null : nv ?? null,
+        savedBytes: bytes,
         committedBytes: bytes,
         committedEntities: live ? null : committedEntities ? sessionRef.current.entities : null,
         committedVersion: live ? (readBackPending ? nv ?? null : null) : nv ?? null,
@@ -1993,9 +2027,11 @@ export default function useEngineSession({
     const snap = from.pop()
     to.push({ bytes: history.current, op: snap.op })
     trimSnapshots(to)
-    history.reload = { kind, op: snap.op, bytes: snap.bytes }
+    const restored = restoredSnapshot(snap.bytes)
+    rememberSnapshot(restored)
+    history.reload = { kind, op: snap.op, bytes: restored, original: snap.bytes === history.original }
     patch({ busy: true, errorKind: null, undoDepth: history.undo.length, redoDepth: history.redo.length })
-    if (!boundary.post({ type: 'loadDocument', documentId: sessionRef.current.documentId, bytes: snap.bytes,
+    if (!boundary.post({ type: 'loadDocument', documentId: sessionRef.current.documentId, bytes: restored,
       blockBasesUnknown: sessionRef.current.entities.blocks?.some((block) => block.baseUnknown === true) ?? false })) {
       // Put the snapshot back: nothing moved.
       history.reload = null
