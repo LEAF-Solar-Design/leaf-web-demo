@@ -166,6 +166,9 @@ def _git(root, runner, *args):
                   capture_output=True, timeout=30).stdout.strip()
 
 
+STAGING_VERDICT_MODES = ("full", "selected")
+
+
 def bind_verdict(raw, run_id, source, tree, *, root=None, runner=subprocess.run):
     _run_id(run_id)
     producer._hex(source, 40, "source")
@@ -173,9 +176,12 @@ def bind_verdict(raw, run_id, source, tree, *, root=None, runner=subprocess.run)
     if not isinstance(raw, bytes) or not raw or len(raw) > VERDICT_LIMIT:
         raise ValueError("device verdict size exceeds bound")
     verdict = json.loads(raw)
-    expected = dict(schema="leaf.forge-ci.device-verdict.v1", state="success", mode="full",
+    expected = dict(schema="leaf.forge-ci.device-verdict.v1", state="success",
                     repository="LEAF-Solar-Design/leaf-web-demo", head_sha=source, run_id=run_id)
-    if not isinstance(verdict, dict) or any(verdict.get(k) != v for k, v in expected.items()):
+    # Staging supply binds a successful selected or full run for the exact source (ed67b30f);
+    # production promotion keeps its own full-only gate.
+    if (not isinstance(verdict, dict) or any(verdict.get(k) != v for k, v in expected.items())
+            or verdict.get("mode") not in STAGING_VERDICT_MODES):
         raise ValueError("device verdict binding differs")
     root = Path(root) if root is not None else Path(__file__).resolve().parents[2]
     if (_git(root, runner, "rev-parse", "HEAD") != source
