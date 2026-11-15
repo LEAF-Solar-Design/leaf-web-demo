@@ -1261,6 +1261,48 @@ it.each(['table', 'line'])('saves strict native %s recipes with exact dataset re
   expect(saves[0][1].headers['If-Match']).toBeUndefined()
   expect(screen.getByText('Saved New order view, revision 3.')).toHaveFocus()
 })
+it.each(['title', 'query', 'columns'])('refuses an unverified saved recipe %s before announcing success', async (change) => {
+  const { props } = setup()
+  vi.spyOn(props.client, 'saveElement').mockImplementation(async (_id, recipe) => {
+    const acknowledged = structuredClone(recipe)
+    if (change === 'title') acknowledged.title = 'Unexpected recipe'
+    if (change === 'query') acknowledged.query.limit = 1
+    if (change === 'columns') acknowledged.props.columns = ['day']
+    return { element: acknowledged, revision: 3 }
+  })
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded(); fill()
+  fireEvent.click(screen.getByRole('button', { name: 'Save view' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('saved recipe did not match')
+  expect(screen.queryByText(/^Saved .*, revision \d+\.$/)).toBeNull()
+  expect(screen.getByLabelText('Title')).toHaveValue('New order view')
+  expect(screen.getByRole('button', { name: 'Save view' })).toBeEnabled()
+})
+it('accepts the exact saved recipe with reordered object keys', async () => {
+  const { props } = setup()
+  vi.spyOn(props.client, 'saveElement').mockImplementation(async (_id, recipe) => ({
+    element: Object.fromEntries(Object.entries(recipe).reverse()), revision: 3,
+  }))
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded(); fill()
+  fireEvent.click(screen.getByRole('button', { name: 'Save view' }))
+  await screen.findByText('Saved New order view, revision 3.')
+})
+it.each(['reviewer', 'read_only'])('keeps the native view composer inert for %s while allowing saved reads', async projectRole => {
+  const { props, fetchImpl } = setup()
+  const original = fetchImpl.getMockImplementation()
+  fetchImpl.mockImplementation((url, options) => url.endsWith('/scope')
+    ? Promise.resolve(response({ ...scope, projectRole })) : original(url, options))
+  const save = vi.spyOn(props.client, 'saveElement')
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  expect(screen.getByRole('button', { name: 'Save view' })).toBeDisabled()
+  fireEvent.submit(screen.getByRole('form', { name: 'Compose native view' }))
+  expect(save).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Order view · revision 2' }))
+  await screen.findByRole('table', { name: 'Order view data' })
+  expect(screen.getByRole('button', { name: 'Save view' })).toBeDisabled()
+})
 it('retries only the read after a saved view fails to load, without writing another revision', async () => {
   const { props } = setup()
   const save = vi.spyOn(props.client, 'saveElement')

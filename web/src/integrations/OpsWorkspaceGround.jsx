@@ -30,6 +30,8 @@ const empty = () => ({ scope: null, datasets: [], elements: [], datasetCursor: n
 const blankForm = () => ({ dataset: '', id: '', title: '', kind: 'table', columns: [], x: '', y: '', editing: null, window: '', query: null, grouping: false, pairKey: '', providerField: '', firstProvider: '', secondProvider: '' })
 const xKinds = ['date', 'instant', 'number', 'count']
 const yKinds = ['number', 'count', 'money', 'ratio', 'duration']
+const recipeKey = value => JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item)
+  ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item)
 const referenceKey = (ref) => JSON.stringify([ref.id, ref.version, ref.digest])
 const namedWindows = (dataset) => dataset?.derivation?.plan.kind === 'group_count' &&
   dataset.fields.some(field => field.id === 'window_id' && field.type.kind === 'identifier') ? dataset.derivation.plan.windows : []
@@ -542,7 +544,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   }
   function compose(event) {
     event.preventDefault()
-    if (savedReadback) return
+    if (savedReadback || !canEdit) return
     operation('Saving view…', async (ctx) => {
       const dataset = state.datasets.find((item) => referenceKey(item.reference) === form.dataset)
       if (!dataset) throw new Error('Select an authorized dataset.')
@@ -575,6 +577,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       const saved = await client.saveElement(projectId, parsed.data, { signal: ctx.controller.signal,
         ...(form.editing ? { expectedRevision: form.editing.revision } : {}) })
       if (!current(ctx)) return
+      if (recipeKey(saved.element) !== recipeKey(parsed.data)) throw new Error('The saved recipe did not match your draft. Reload saved views before retrying.')
       setState((old) => ({ ...old, notice: `Saved ${saved.element.title}, revision ${saved.revision}.`,
         elements: [...old.elements.filter((record) => record.element.id !== saved.element.id), saved] }))
       setForm((old) => ({ ...old, editing: saved }))
@@ -718,7 +721,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
               <p>Your view was saved, but its data could not be loaded. {savedReadback.error}</p>
               <button type="button" disabled={pending} onClick={() => operation('Loading saved view…', (ctx) => readSavedView(savedReadback.record, ctx))}>Reload view</button>
             </div>}
-            <fieldset disabled={pending || Boolean(savedReadback)}><legend>{form.editing ? `Update revision ${form.editing.revision}` : 'Create a view'}</legend>
+            <fieldset disabled={pending || Boolean(savedReadback) || !canEdit}><legend>{form.editing ? `Update revision ${form.editing.revision}` : 'Create a view'}</legend>
               <label>Dataset<select required value={form.dataset} onChange={(event) => setForm({ ...blankForm(), dataset: event.target.value })}>
                 <option value="">Select dataset</option>{state.datasets.map((item) => <option key={referenceKey(item.reference)} value={referenceKey(item.reference)}>{item.title} · version {item.reference.version}</option>)}
               </select></label>
