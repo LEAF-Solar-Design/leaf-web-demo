@@ -5,6 +5,23 @@ import DrawingDependencyReport from './DrawingDependencyReport.jsx'
 
 afterEach(cleanup)
 
+it('preserves frozen snapshots across repeated drawing changes and return', () => {
+  const report = (name) => Object.freeze({ coverage_note: `${name} coverage`,
+    dependencies: Object.freeze([Object.freeze({ kind: 'image', name: `${name}.png`, disposition: 'image omitted' })]) })
+  const a = report('alpha')
+  const b = report('beta')
+  const before = JSON.stringify([a, b])
+  const view = render(<DrawingDependencyReport report={a} />)
+  for (const next of [a, b, b, a, b, a]) {
+    view.rerender(<DrawingDependencyReport report={next} />)
+    const isA = next === a
+    expect(screen.getByText(isA ? 'alpha.png' : 'beta.png')).toBeTruthy()
+    expect(screen.queryByText(isA ? 'beta.png' : 'alpha.png')).toBeNull()
+    expect(screen.getAllByRole('row')).toHaveLength(2)
+    expect(JSON.stringify([a, b])).toBe(before)
+  }
+})
+
 it('shows each dependency disposition, font fallback and coverage limit', () => {
   render(<DrawingDependencyReport report={{ coverage_note: 'Converted records only.', dependencies: [
     { kind: 'font', name: 'notes.shx', disposition: 'font remapped', remapped_to: 'sans-serif' },

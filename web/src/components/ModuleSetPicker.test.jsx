@@ -12,6 +12,22 @@ const first = () => screen.getByRole('checkbox', { name: 'Design / Panel A: 12 c
 const second = () => screen.getByRole('checkbox', { name: 'Alternate / Panel B: 9 candidates' })
 const submit = () => screen.getByRole('button', { name: 'Count selected set' })
 
+it('records one selection without submitting its enclosing form', () => {
+  const onSelect = vi.fn()
+  const onSubmit = vi.fn((event) => event.preventDefault())
+  render(<form onSubmit={onSubmit}>
+    <ModuleSetPicker data={data} onSelect={onSelect} />
+    <button type="submit">Save unrelated form</button>
+  </form>)
+  fireEvent.click(second())
+  fireEvent.click(submit())
+  expect(onSelect).toHaveBeenCalledExactlyOnceWith(['second'])
+  expect(onSubmit).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Save unrelated form' }))
+  expect(onSubmit).toHaveBeenCalledTimes(1)
+  expect(onSelect).toHaveBeenCalledTimes(1)
+})
+
 it.each([
   [null],
   [{ layer: 'Missing ID', count: 1 }],

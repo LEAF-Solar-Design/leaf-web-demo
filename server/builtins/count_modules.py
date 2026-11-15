@@ -8,6 +8,15 @@ from __future__ import annotations
 import json
 import math
 
+MAX_EXACT_COUNT = 2**53 - 1
+
+
+def _module_total(weights):
+    total = sum(weights)
+    if total > MAX_EXACT_COUNT:
+        raise ValueError("Module count exceeds the JavaScript safe integer limit; select fewer sets or split the drawing.")
+    return total
+
 
 def _model(entity):
     return entity.get("space") != "paper" and entity.get("layout", "Model") in ("", "Model")
@@ -40,11 +49,15 @@ def _four_corners(entity):
         points = [tuple(p[j] for j in range(3) if j != drop) for p in xyz]
         if len({(p[0], p[1]) for p in points}) != 4:
             return False
+        turns = []
         for i in range(4):
             a, b, c = points[i - 1], points[i], points[(i + 1) % 4]
             turn = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0])
             if not math.isfinite(turn) or turn == 0:
                 return False
+            turns.append(turn > 0)
+        if len(set(turns)) != 1:
+            return False
         origin_x, origin_y = points[0][:2]
         local = [(p[0] - origin_x, p[1] - origin_y) for p in points]
         area = sum(local[i][0] * local[(i + 1) % 4][1]
@@ -76,7 +89,7 @@ def run(intake, params):
             multiplicities[entity_key] = dimensions
             if entity_key not in group["_keys"]:
                 group["_keys"].add(entity_key)
-                group["count"] += dimensions[0] * dimensions[1]
+                group["count"] = _module_total((group["count"], dimensions[0] * dimensions[1]))
                 if handle:
                     group["handles"].append(handle)
     sets = []
@@ -97,7 +110,7 @@ def run(intake, params):
              "selection_required": not selected_sets,
              "selected_sets": [public_set(s) for s in selected_sets],
              "selected_set": public_set(selected) if selected else None,
-             "count": sum(multiplicities[key][0] * multiplicities[key][1]
+             "count": _module_total(multiplicities[key][0] * multiplicities[key][1]
                           for key in set().union(*(s["_keys"] for s in selected_sets))) if selected_sets else None},
             {"highlight_handles": list(dict.fromkeys(h for s in selected_sets for h in s["handles"]))}
             if selected_sets else None)
