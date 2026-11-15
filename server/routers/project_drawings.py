@@ -131,7 +131,9 @@ def context_route(project_id: UUID, input_version_id: UUID, drawing_id: Optional
         identity.update(input_version_id=str(binding.input_version_id),
                         head_version_id=str(binding.head_version_id), is_head=binding.is_head,
                         intake_sha256=context.intake_sha256)
-        result = {"context": identity, "intake": context.intake}
+        from solar_drawing_roles import discover_roles
+        result = {"context": identity, "intake": context.intake,
+                  "role_discovery": discover_roles(context.intake)}
         if prepare_solve or solve_frame is not None:
             from solar_project_solve_preparation import prepare_solve as prepare
             result["solve_preparation"] = prepare(context.intake, solve_frame, is_head=binding.is_head)

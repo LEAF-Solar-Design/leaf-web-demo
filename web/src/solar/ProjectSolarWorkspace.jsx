@@ -6,6 +6,7 @@ import ProjectSolarReadPanel, { PROJECT_SOLAR_WORKSPACE_LABELS, projectSolarWork
 import ProjectSolveReview, { ProjectSolarSchemaForm } from './ProjectSolveReview.jsx'
 import ProjectSolarEdgePanel from './ProjectSolarEdgePanel.jsx'
 import { ProjectSolarPreparedSolveForm } from './ProjectSolarPreparedSolveForm.jsx'
+import DrawingRoleProposal from './DrawingRoleProposal.jsx'
 
 const STEP_TOOLS = ['solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
   'solar-string-conductors', 'solar-assign-equipment']
@@ -376,6 +377,8 @@ export default function ProjectSolarWorkspace(props) {
     (GRAPH_TOOLS.includes(row.name) || READ_TOOLS.includes(row.name) || row.name === 'solar-solaredge-accept') &&
       rows.findIndex((item) => item.name === row.name) === index)
   return <section className="project-solar-workspace">
+    {!owner.reason && <DrawingRoleProposal projectClient={owner.projectClient} solarBinding={owner.binding}
+      authorityKey={owner.authorityKey} isCurrent={scope.isCurrent} />}
     {FlowRail && <FlowRail solarBinding={owner.binding} authorityKey={owner.authorityKey} projectClient={owner.projectClient}
       projectCatalog={owner.reason ? null : owner.projectCatalog} projectRunMemory={projectRunMemory}
       projectPending={projectPending} busy={busy} openName={editor ? selected.name : null}
