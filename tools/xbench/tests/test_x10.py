@@ -169,7 +169,7 @@ class FixtureTests(unittest.TestCase):
 
         config, bound, _, _ = x10.bindings(self.ctx)
         with patch.object(x10, "_prepare_workspace"), patch.object(x10, "_create_project", create), \
-                patch.object(x10, "_import_primary", side_effect=TimeoutError("Bearer private-provider-body")), \
+                patch.object(x10, "_import_primary", side_effect=TimeoutError("synthetic private-provider-body")), \
                 patch.object(x10, "_ground") as ground:
             observed = x10.observe(object(), self.ctx, config, bound)
         ground.assert_not_called()
