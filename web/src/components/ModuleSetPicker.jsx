@@ -2,9 +2,12 @@ import { useState } from 'react'
 
 export default function ModuleSetPicker({ data, drawingKey, onSelect, running = false }) {
   const [selection, setSelection] = useState({ drawingKey, choices: [] })
-  if (selection.drawingKey !== drawingKey) setSelection({ drawingKey, choices: [] })
-  const choices = selection.drawingKey === drawingKey ? selection.choices : []
   const sets = Array.isArray(data?.sets) ? data.sets : []
+  const available = new Set(sets.map((set) => set.set_id))
+  const choices = selection.drawingKey === drawingKey ? selection.choices.filter((id) => available.has(id)) : []
+  if (selection.drawingKey !== drawingKey || choices.length !== selection.choices.length) {
+    setSelection({ drawingKey, choices })
+  }
   const selected = sets.filter((set) => choices.includes(set.set_id))
   return <fieldset disabled={running || !onSelect}>
     <legend>Module set</legend>

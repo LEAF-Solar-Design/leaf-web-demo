@@ -36,7 +36,7 @@ def _four_corners(entity):
         area = sum(local[i][0] * local[(i + 1) % 4][1]
                    - local[(i + 1) % 4][0] * local[i][1] for i in range(4))
         return math.isfinite(area) and abs(area) > 0
-    except (TypeError, ValueError, IndexError):
+    except (TypeError, ValueError, IndexError, OverflowError):
         return False
 
 

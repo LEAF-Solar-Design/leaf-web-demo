@@ -1,6 +1,6 @@
 import React from 'react'
 import { cleanup, render, screen } from '@testing-library/react'
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import DrawingDependencyReport from './DrawingDependencyReport.jsx'
 
 afterEach(cleanup)
@@ -55,4 +55,26 @@ it('keeps the coverage warning on empty reports and removes the old drawing rows
   expect(screen.queryByText('old-image.png')).toBeNull()
   expect(screen.queryByText('Drawing A coverage.')).toBeNull()
   expect(screen.getByText('No dependencies were present in the local intake records.')).toBeTruthy()
+})
+
+it('keeps remapping targets inert instead of navigating or loading resources', () => {
+  const targets = ['<img src="missing" onerror="throw 1">', 'javascript:alert(1)',
+    'C:\\private\\font.ttf', '\\\\offline-host\\share\\font.shx']
+  const before = window.location.href
+  const opened = vi.spyOn(window, 'open').mockImplementation(() => null)
+  const fetched = vi.spyOn(globalThis, 'fetch').mockResolvedValue({})
+  try {
+    const view = render(<DrawingDependencyReport report={{ coverage_note: 'Conversion coverage only.',
+      dependencies: targets.map((target, index) => ({ kind: 'font', name: `font-${index}.shx`,
+        disposition: 'font remapped', remapped_to: target })) }} />)
+    for (const target of targets) expect(screen.getByText(`font remapped to ${target}`)).toBeTruthy()
+    expect(screen.getByText('Conversion coverage only.')).toBeTruthy()
+    expect(view.container.querySelector('a, img, script, iframe, link, [src], [href]')).toBeNull()
+    expect(opened).not.toHaveBeenCalled()
+    expect(fetched).not.toHaveBeenCalled()
+    expect(window.location.href).toBe(before)
+  } finally {
+    opened.mockRestore()
+    fetched.mockRestore()
+  }
 })
