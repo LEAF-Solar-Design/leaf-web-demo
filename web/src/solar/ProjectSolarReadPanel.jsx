@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import SchemaForm, { defaultsOf } from '../components/SchemaForm.jsx'
 import SolarReadResult from './SolarReadResult.jsx'
+import SolarEdgeTrackingReferences from './SolarEdgeTrackingReferences.jsx'
 import { createSolarDrawingBinding, sameSolarDrawingBinding, solarDrawingBindingKey } from './solarDrawingBinding.js'
 
 export const PROJECT_SOLAR_WORKSPACE_REASONS = Object.freeze({
@@ -314,8 +315,10 @@ export default function ProjectSolarReadPanel({ tool, solarBinding, authorityKey
         {PROJECT_SOLAR_WORKSPACE_LABELS.read_action}
       </button>
     </form>
-    {!owner.reason && visible.phase === 'presented' && <SolarReadResult data={visible.data}
+    {!owner.reason && visible.phase === 'presented' && <><SolarReadResult data={visible.data}
       solarBinding={solarBinding} authorityKey={authorityKey} projectClient={projectClient}
-      catalogDigest={owner.digest} projectCurrent={owner.name !== 'solar-solaredge-tracking-read'} save={save} />}
+      catalogDigest={owner.digest} projectCurrent={owner.name !== 'solar-solaredge-tracking-read'} save={save} />
+      {owner.name === 'solar-solaredge-tracking-read' && <SolarEdgeTrackingReferences
+        data={visible.data} binding={solarBinding} catalogDigest={owner.digest} />}</>}
   </section>
 }
