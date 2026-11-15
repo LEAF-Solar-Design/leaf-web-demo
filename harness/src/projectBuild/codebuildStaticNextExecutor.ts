@@ -54,7 +54,7 @@ function mapping(bytes: Buffer, executionId: string, code: string): string {
   if (value.executionId !== executionId || typeof value.buildId !== "string" || !value.buildId.trim()) fail(code);
   return value.buildId as string;
 }
-function receipt(bytes: Buffer, input: StaticNextJobInput): StaticNextJobResult {
+function receipt(bytes: Buffer, input: StaticNextJobInput, state: StaticNextBuildState): StaticNextJobResult {
   const value = object(bytes, "producer_conflict");
   if (value.protocol !== protocol || value.executionId !== input.executionId ||
       value.bindingId !== input.bindingId || value.toolchainSha256 !== input.toolchainSha256 ||
@@ -64,13 +64,23 @@ function receipt(bytes: Buffer, input: StaticNextJobInput): StaticNextJobResult 
         Buffer.byteLength(value.diagnostic) > 2048))) fail("producer_conflict");
   const files: StaticFile[] = [];
   if (value.exitCode === 0) {
-    if (!Array.isArray(value.files)) fail("producer_conflict");
+    if (state !== "SUCCEEDED" || !Array.isArray(value.files) || value.files.length > 4096) fail("producer_conflict");
+    const paths = new Set<string>();
+    let encodedLength = 0;
     for (const file of value.files as unknown[]) {
       if (!file || typeof file !== "object") fail("producer_conflict");
       const f = file as Record<string, unknown>;
-      if (typeof f.path !== "string" || !f.path.startsWith("/") ||
+      if (typeof f.path !== "string" || f.path.length > 2048 ||
+          !/^\/(?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+$/.test(f.path) ||
           f.path.split("/").some(part => part === "." || part === "..") ||
+          paths.has(f.path) ||
           typeof f.contentType !== "string" || typeof f.body !== "string") fail("producer_conflict");
+      paths.add(f.path as string);
+      encodedLength += (f.body as string).length;
+      if (encodedLength > 4 * Math.ceil(32 * 1024 * 1024 / 3)) fail("producer_conflict");
+    }
+    for (const file of value.files as Record<string, unknown>[]) {
+      const f = file;
       const body = Buffer.from(f.body as string, "base64");
       if (body.toString("base64") !== f.body) fail("producer_conflict");
       files.push({ path: f.path as string, body, contentType: f.contentType as string });
@@ -95,6 +105,9 @@ export function createCodeBuildStaticNextExecutor(options: CodeBuildStaticNextEx
   const { bindingId, toolchainSha256, store, provider } = options;
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? (ms => new Promise<void>(resolve => setTimeout(resolve, ms)));
+  async function stopQuietly(buildId: string): Promise<void> {
+    try { await provider.stop(buildId); } catch { /* Preserve the original failure. */ }
+  }
   async function state(buildId: string): Promise<StaticNextBuildState> {
     const value = await provider.state(buildId);
     if (!terminal(value) && value !== "QUEUED" && value !== "IN_PROGRESS") fail("build_failed");
@@ -130,30 +143,30 @@ export function createCodeBuildStaticNextExecutor(options: CodeBuildStaticNextEx
         else {
           buildId = await provider.start(input.executionId);
           if (typeof buildId !== "string" || !buildId.trim()) fail("build_failed");
-          const mapped = await store.putIfAbsent(mapKey, Buffer.from(JSON.stringify({ executionId: input.executionId, buildId })));
-          if (mapped === "exists") {
-            // Stop our submission even when the winning mapping is corrupt.
-            let winner: string;
-            try {
+          try {
+            const mapped = await store.putIfAbsent(mapKey, Buffer.from(JSON.stringify({ executionId: input.executionId, buildId })));
+            if (mapped === "exists") {
               const stored = await store.get(mapKey);
               if (stored === null) fail("job_conflict");
-              winner = mapping(stored!, input.executionId, "job_conflict");
-            } catch (error) { await provider.stop(buildId); throw error; }
-            if (winner !== buildId) await provider.stop(buildId);
-            buildId = winner;
-          } else if (mapped !== "created") { await provider.stop(buildId); fail("job_conflict"); }
+              const winner = mapping(stored!, input.executionId, "job_conflict");
+              if (winner !== buildId) await provider.stop(buildId);
+              buildId = winner;
+            } else if (mapped !== "created") fail("job_conflict");
+          } catch (error) { await stopQuietly(buildId); throw error; }
         }
-        const deadline = now() + deadlineMs;
-        for (;;) {
-          if (now() >= deadline) { await provider.stop(buildId); fail("build_failed"); }
-          const current = await state(buildId);
-          if (terminal(current)) {
-            const output = await store.get(`out/${input.executionId}.json`);
-            if (output === null) fail("build_failed");
-            return receipt(output!, input);
+        try {
+          const deadline = now() + deadlineMs;
+          for (;;) {
+            if (now() >= deadline) fail("build_failed");
+            const current = await state(buildId);
+            if (terminal(current)) {
+              const output = await store.get(`out/${input.executionId}.json`);
+              if (output === null) fail("build_failed");
+              return receipt(output!, input, current);
+            }
+            await sleep(Math.min(pollMs, Math.max(0, deadline - now())));
           }
-          await sleep(Math.min(pollMs, Math.max(0, deadline - now())));
-        }
+        } catch (error) { await stopQuietly(buildId); throw error; }
       } catch (error) {
         if (error instanceof NextBuildError) throw error;
         return fail("build_failed");

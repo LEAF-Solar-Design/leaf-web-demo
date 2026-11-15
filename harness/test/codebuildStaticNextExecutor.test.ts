@@ -152,6 +152,56 @@ describe("CodeBuild static Next executor over injected ports", () => {
       await expect(f.executor.run(input())).rejects.toMatchObject({ code: "build_failed" });
     });
 
+  it.each(["FAILED", "FAULT", "TIMED_OUT", "STOPPED"] as const)(
+    "rejects a successful receipt when the provider reports %s", async state => {
+      const f = fixture();
+      f.provider.state.mockResolvedValue(state);
+      f.receipt();
+      await expect(f.executor.run(input())).rejects.toEqual(new NextBuildError("producer_conflict"));
+      expect(f.provider.stop).toHaveBeenCalledExactlyOnceWith("build-new");
+    });
+
+  it.each(["count", "encoded size", "relative", "empty segment", "trailing slash", "dot", "parent",
+    "invalid character", "duplicate", "long path"])("rejects receipt files with %s before decoding any body", async variant => {
+      const f = fixture();
+      let files = [...exported];
+      if (variant === "count") files = Array.from({ length: 4097 }, (_, i) => ({ ...exported[0], path: `/file-${i}` }));
+      if (variant === "encoded size") {
+        const body = "A".repeat(4 * Math.ceil(32 * 1024 * 1024 / 3 / 2));
+        files = exported.map(file => ({ ...file, body }));
+      }
+      const paths: Record<string, string> = { relative: "relative.html", "empty segment": "/a//b",
+        "trailing slash": "/a/", dot: "/a/./b", parent: "/a/../b", "invalid character": "/a b",
+        duplicate: exported[0].path, "long path": `/${"a".repeat(2048)}` };
+      if (paths[variant]) files[1] = { ...files[1], path: paths[variant] };
+      f.receipt(input(), { files });
+      const from = vi.spyOn(Buffer, "from");
+      try {
+        await expect(f.executor.run(input())).rejects.toEqual(new NextBuildError("producer_conflict"));
+        expect(from.mock.calls.filter(call => call[1] === "base64")).toHaveLength(0);
+      } finally { from.mockRestore(); }
+    });
+
+  it.each(["state error", "unknown state", "output read", "receipt parse"])(
+    "stops the build after a poll failure: %s", async variant => {
+      const f = fixture();
+      if (variant === "state error") f.provider.state.mockRejectedValue(new Error("private state error"));
+      if (variant === "unknown state") f.provider.state.mockResolvedValue("UNKNOWN" as StaticNextBuildState);
+      if (variant === "output read") {
+        const get = f.store.get.getMockImplementation()!;
+        f.store.get.mockImplementation(async key => {
+          if (key.startsWith("out/")) throw new Error("private store error");
+          return get(key);
+        });
+      }
+      if (variant === "receipt parse") f.objects.set(`out/${input().executionId}.json`, Buffer.from("invalid JSON"));
+      // Cleanup errors must not replace the original failure or leak provider details.
+      f.provider.stop.mockRejectedValue(new Error("private stop error"));
+      await expect(f.executor.run(input())).rejects.toEqual(new NextBuildError(
+        variant === "receipt parse" ? "producer_conflict" : "build_failed"));
+      expect(f.provider.stop).toHaveBeenCalledExactlyOnceWith("build-new");
+    });
+
   it("polls queued and running states before consuming a receipt", async () => {
     const f = fixture();
     f.receipt();
@@ -181,6 +231,33 @@ describe("CodeBuild static Next executor over injected ports", () => {
     expect(f.provider.stop).toHaveBeenCalledExactlyOnceWith("build-new");
     expect(f.provider.state).toHaveBeenCalledExactlyOnceWith("build-winner");
   });
+
+  it.each(["put throws", "get throws", "missing", "malformed", "foreign", "unusable put"])(
+    "stops the started build when persisting its mapping fails: %s", async variant => {
+      const f = fixture();
+      const put = f.store.putIfAbsent.getMockImplementation()!;
+      f.store.putIfAbsent.mockImplementation(async (key, bytes) => {
+        if (!key.startsWith("map/")) return put(key, bytes);
+        if (variant === "put throws") throw new Error("private mapping error");
+        if (variant === "unusable put") return "invalid" as "exists";
+        if (variant === "malformed") f.objects.set(key, Buffer.from("not JSON"));
+        if (variant === "foreign") f.objects.set(key, Buffer.from(JSON.stringify({ executionId: "foreign", buildId: "other" })));
+        return "exists";
+      });
+      const get = f.store.get.getMockImplementation()!;
+      let mapReads = 0;
+      f.store.get.mockImplementation(async key => {
+        if (key.startsWith("map/") && ++mapReads > 1 && variant === "get throws")
+          throw new Error("private mapping read error");
+        return get(key);
+      });
+      f.provider.stop.mockRejectedValue(new Error("private stop error"));
+      await expect(f.executor.run(input())).rejects.toEqual(new NextBuildError(
+        variant === "put throws" || variant === "get throws" ? "build_failed" : "job_conflict"));
+      expect(f.provider.start).toHaveBeenCalledExactlyOnceWith(input().executionId);
+      expect(f.provider.stop).toHaveBeenCalledExactlyOnceWith("build-new");
+      expect(f.provider.state).not.toHaveBeenCalled();
+    });
 
   it("rejects malformed and foreign mappings without starting a build", async () => {
     for (const bytes of ["not json", JSON.stringify({ executionId: "foreign", buildId: "other" }),
