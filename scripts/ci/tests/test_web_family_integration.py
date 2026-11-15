@@ -17,6 +17,41 @@ ROOT = Path(__file__).resolve().parents[3]
 SAFE = ["server/tests/test_catalog_digest_boundary.py"]
 
 
+def test_xbench_has_no_web_family_consumers():
+    audited_roots = {"web", "harness", "dispatch", "vendor", ".codebuild"}
+    count = 0
+    violations = []
+
+    def walk_error(error):
+        pytest.fail(f"X-bench dependency audit could not walk repo: {error}")
+
+    for directory, _, names in os.walk(ROOT, onerror=walk_error):
+        for name in names:
+            path = Path(directory) / name
+            relative = path.relative_to(ROOT)
+            if not (relative.parts[0] in audited_roots
+                    or relative.as_posix() == "scripts/run-all-gates.py"
+                    or name.startswith(("vite.config.", "next.config."))):
+                continue
+            count += 1
+            assert count < 20_000, "X-bench dependency audit hit the 20,000-file cap"
+            if path.stat().st_size > 2_000_000:
+                continue
+            with path.open("rb") as stream:
+                data = stream.read(2_000_001)
+            if len(data) > 2_000_000 or b"\0" in data:
+                continue
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            # The runner registers the independent suite with path segments;
+            # no literal dependency reference is exempted from this audit.
+            if "tools/xbench" in text or "xbench_" in text:
+                violations.append(relative.as_posix())
+    assert not violations, "X-bench gained web family consumers: " + ", ".join(violations)
+
+
 @pytest.fixture
 def runner(monkeypatch):
     spec = importlib.util.spec_from_file_location(
