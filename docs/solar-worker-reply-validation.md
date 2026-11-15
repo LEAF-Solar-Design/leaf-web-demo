@@ -24,7 +24,7 @@ does not add request IDs or make duplicate replies idempotent.
 From `web/`, run:
 
 ```sh
-npx vitest run src/cadedit/solarWorkerReply.test.jsx src/cadedit/engineSession.test.jsx src/cadedit/engineUndo.test.jsx src/cadedit/solarByteOwnership.test.jsx
+npx vitest run src/cadedit/solarWorkerReply.test.jsx src/cadedit/engineSession.test.jsx src/cadedit/engineUndo.test.jsx src/cadedit/solarByteOwnership.test.jsx src/cadedit/pendingPropertyEdit.test.jsx
 ```
 
 The five new ordinary cases use a scripted Worker API transport with the real
@@ -35,6 +35,10 @@ blocked publication, late-reply isolation and clean reopen/edit recovery.
 A matching refusal remains recoverable. Two actions before React renders
 keep the first operation pending without posting a second edit or clearing
 busy. All existing assertions remain.
+
+The explicit-target property fixture completes its first worker operation
+before dispatching its second operation. Its existing two exact payload
+assertions remain, with added checks for the pending and completed busy states.
 
 These invalid shapes are synthetic fault controls. They are not observed
 output from the native engine. Keep real worker/WASM, strict DXF, database,
