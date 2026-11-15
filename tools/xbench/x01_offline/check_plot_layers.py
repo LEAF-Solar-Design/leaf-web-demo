@@ -7,11 +7,13 @@ Usage (from the repository root)::
     python tools/xbench/x01_offline/check_plot_layers.py --self-test
 
 This is not a full DXF reader, a bench grade, or a readiness check. Only ASCII
-code/value records, LAYER tables, ordinary BLOCK/INSERT trees and modelspace
+code/value records, LAYER tables, BLOCK/INSERT trees (including arrays) and modelspace
 ENTITIES are supported. No geometry transforms, viewport overrides, external
 references, attributes, or rendering are evaluated. Unsupported modelspace
 entity types are unreadable. Bounds also apply to expanded occurrences.
 Occurrence paths are arrays of INSERT handles followed by the leaf handle;
+array handles use HANDLE[row=0,col=0] tokens in row-major order. Spacing groups
+44/45 affect geometry only and are not applied by this layer checker.
 inspected_occurrences counts classified module/tag leaves, including repeats.
 """
 
@@ -32,6 +34,7 @@ MAX_BYTES = 1_048_576
 MAX_PAIRS = 50_000
 MAX_RECORDS = 20_000
 MAX_OCCURRENCES = 100_000
+MAX_ARRAY_CELLS = 10_000
 MAX_DEPTH = 64
 GEOMETRY = frozenset({"LINE", "LWPOLYLINE", "POLYLINE", "VERTEX", "POINT",
                       "CIRCLE", "ARC", "ELLIPSE", "SPLINE", "SOLID", "TRACE",
@@ -244,15 +247,34 @@ def check_bytes(data, module_layers=None, tag_layers=None, *, required_roles=())
                 if hidden:
                     reasons += ("entity_hidden",)
                 if kind == "INSERT":
+                    columns = int(field(record, 70, "1"))
+                    rows = int(field(record, 71, "1"))
+                    if columns <= 0 or rows <= 0:
+                        raise Unreadable("invalid_array_count", **context)
+                    # Division guards the product before expansion, including
+                    # enormous integer inputs and arrays of empty blocks.
+                    if columns > MAX_ARRAY_CELLS or rows > MAX_ARRAY_CELLS // columns:
+                        raise Unreadable("array_cell_limit", **context)
+                    is_array = rows > 1 or columns > 1
+                    if is_array:
+                        context["path"] = path + (f"{handle}[row=0,col=0]",)
                     name = field(record, 2, required=True).casefold()
                     if name not in blocks:
                         raise Unreadable("missing_block", block=name, **context)
                     if name in active:
                         raise Unreadable("cyclic_block", block=name, **context)
-                    # Array INSERTs require separate occurrence identifiers; refuse them.
-                    if int(field(record, 70, "1")) != 1 or int(field(record, 71, "1")) != 1:
-                        raise Unreadable("unsupported_array_insert", **context)
-                    walk(blocks[name], effective, occurrence, active + (name,), reasons)
+                    for row in range(rows):
+                        for column in range(columns):
+                            cell_path = (path + (f"{handle}[row={row},col={column}]",)
+                                         if is_array else occurrence)
+                            # The first cell was charged on record entry; each
+                            # additional cell is an INSERT occurrence as well.
+                            if row or column:
+                                visited += 1
+                                if visited > MAX_OCCURRENCES:
+                                    raise Unreadable("occurrence_limit", handle=handle,
+                                                     path=cell_path, layer=effective)
+                            walk(blocks[name], effective, cell_path, active + (name,), reasons)
                 elif role is not None:
                     inspected += 1
                     role_counts[role] += 1
