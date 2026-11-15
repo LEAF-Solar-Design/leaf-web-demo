@@ -524,6 +524,10 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_s02_geometry_only_groups.py"), 12),
         Suite("server-s02-grouped-graph-budget", "server S02 saved graph and request budgets", "pytest", SERVER,
               _py_pytest("tests/test_s02_grouped_graph_budget.py"), 6),
+        Suite("server-s02-report-row-angle", "server S02 bounded imported report rotation", "pytest", SERVER,
+              _py_pytest("tests/test_s02_report_row_angle.py"), 17),
+        Suite("server-s02-partial-tracking", "server S02 explicit partial tracking provenance", "pytest", SERVER,
+              _py_pytest("tests/test_s02_partial_tracking.py"), 17),
         # S16 electrical zones (2026-09-22): the create/assign builtin and the
         # partition the plugin keeps. Hermetic (a graph seeded in the test, no
         # network, no fixture), so the floor is the exact count on every runner:
@@ -3234,7 +3238,8 @@ def build_suites() -> List[Suite]:
               # W1C-3 adds the commit suite registration contract.
               # SEL-303b adds the mirror/stage-policy registration contract.
               # PP-3A2 F: 25 dispatch rows; measured 266 + 6 = 272.
-              ["test_studio_walk_regression_gate.py"], 272),
+              ["test_studio_walk_regression_gate.py", "ci/tests/test_selected_shards.py",
+               "test_selected_gate_shards.py", "../tests/test_ci_selected_shards.py"], 272),
         # Dormant process-capture core: pure Python fixtures, no strace or network.
         Suite("ci-process-capture-core", "scripts ci process capture core", "pytest",
               SCRIPTS_DIR, _py_pytest("ci/tests/test_process_capture_core.py"), 14),
@@ -5506,6 +5511,48 @@ def describe_selection(patterns: List[str]) -> str:
     return f"{flags}  (union of {len(patterns)} substrings)"
 
 
+def selected_shard_suites(suites: List[Suite], plan_path: str,
+                          count: int, index: int) -> List[Suite]:
+    """Validate a trusted plan against the already resolved original union.
+
+    Timing predictions and partition algorithms belong to the standalone
+    trusted helper. Here only the exact coverage and local assignment matter.
+    """
+    with open(plan_path, encoding="utf-8") as source:
+        plan = json.load(source)
+    if not isinstance(plan, dict) or plan.get("schema") != "leaf.ci.selected-shards.v1":
+        raise ValueError("invalid selected shard schema")
+    expected = [suite.id for suite in suites]
+
+    def ids(value):
+        return (isinstance(value, list)
+                and all(isinstance(item, str) and item and "\0" not in item for item in value)
+                and len(set(value)) == len(value))
+
+    selected = plan.get("selected_ids")
+    if not ids(selected) or selected != expected:
+        raise ValueError("selected_ids differ from the original --only union")
+    shards = plan.get("shards")
+    if not isinstance(shards, list) or len(shards) != count or not all(ids(s) for s in shards):
+        raise ValueError("invalid selected shard lists or count")
+    flattened = [sid for shard in shards for sid in shard]
+    if (not shards[0] or len(flattened) != len(expected)
+            or len(set(flattened)) != len(flattened) or set(flattened) != set(expected)):
+        raise ValueError("selected shards must cover the exact union once with nonempty shard 0")
+    for shard in shards:
+        if shard != [sid for sid in expected if sid in set(shard)]:
+            raise ValueError("selected shard IDs are not in catalog order")
+    if not ids(plan.get("shard_ids")) or plan["shard_ids"] != shards[index]:
+        raise ValueError("selected shard_ids differ from shards[index]")
+    for key, coordinate in (("shard_count", count), ("shard_index", index)):
+        if key in plan and (type(plan[key]) is not int or plan[key] != coordinate):
+            raise ValueError("incorrect selected shard coordinates")
+    if plan.get("algorithm") not in ("lpt", "equal-count"):
+        raise ValueError("invalid selected partition algorithm")
+    local = set(shards[index])
+    return [suite for suite in suites if suite.id in local]
+
+
 PR_TIER_SCHEMA = "leaf.ci.pr-tier.v1"
 PR_TIER_PREREQUISITES = ("web-build", "harness-tsc-build", "ci-full-run-manifest-certificates")
 
@@ -6931,10 +6978,10 @@ def write_result_json(path: str, *, fingerprint: str, total: int,
             (r.suite.id in _SERVICE_SMOKE_SUITES and r.status != "PASS") for r in results),
         "wall_seconds": round(wall, 1),
     }
-    if mode == "tier":
-        payload.update(mode="tier", execution_mode="tier", selection_mode="tier")
+    if mode in ("tier", "selected"):
+        payload.update(mode=mode, execution_mode=mode, selection_mode=mode)
         for entry in entries:
-            entry["mode"] = "tier"
+            entry["mode"] = mode
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, indent=1), encoding="utf-8")
@@ -7075,8 +7122,10 @@ def verify_shard_results(results_dir: Path, *,
     if shard_count >= 1:
         expected_partition = partition_suites(suites, shard_count)
         for path, d in parsed:
-            if any(d.get(key) == "tier" for key in ("mode", "execution_mode", "selection_mode")):
-                problems.append(f"{path.name}: mode=tier cannot prove a full gate")
+            if any(d.get(key) in ("tier", "selected") for key in ("mode", "execution_mode", "selection_mode")):
+                mode = next(d[key] for key in ("mode", "execution_mode", "selection_mode")
+                            if d.get(key) in ("tier", "selected"))
+                problems.append(f"{path.name}: mode={mode} cannot prove a full gate")
             i = d.get("shard_index")
             if not isinstance(i, int) or not (0 <= i < shard_count):
                 problems.append(f"{path.name}: shard_index {i!r} outside 0..{shard_count - 1}")
@@ -7628,8 +7677,10 @@ def main() -> int:
                          "this invocation runs, never how any suite runs.")
     ap.add_argument("--shard-index", type=int, default=None, metavar="I",
                     help="0-based shard to run; required when --shard-count > 1. "
-                         "Cannot combine with --only: shards must partition the FULL "
-                         "catalog or the fan-in completeness proof is meaningless.")
+                         "With --only, consumes a trusted selected shard plan.")
+    ap.add_argument("--selected-shard-plan", default=None, metavar="PATH",
+                    help="frozen trusted partition of the original --only union; "
+                         "requires explicit --shard-count and --shard-index")
     ap.add_argument("--result-json", default=None, metavar="PATH",
                     help="write this run's machine-readable outcome (catalog "
                          "fingerprint, per-suite verdicts, executed counts) for "
@@ -7667,6 +7718,17 @@ def main() -> int:
         ap.error("--before-heavy-command requires --early-feedback")
     if args.before_heavy_command == []:
         ap.error("--before-heavy-command requires nonempty argv")
+
+    if args.selected_shard_plan is not None:
+        explicit_count = any(arg == "--shard-count" or arg.startswith("--shard-count=")
+                             for arg in sys.argv[1:])
+        if (not args.only or not all(args.only) or not explicit_count
+                or args.shard_index is None or args.list or args.tier_file is not None
+                or args.verify_shard_results or args.verify_gate_proof or args.expect_tree
+                or args.emit_proof or args.prior_proofs_dir):
+            print("--selected-shard-plan requires nonempty --only and explicit shard "
+                  "coordinates, and cannot combine with list, tier or proof modes")
+            return 2
 
     if args.list:
         try:
@@ -7750,10 +7812,6 @@ def main() -> int:
         if not (0 <= args.shard_index < args.shard_count):
             print(f"--shard-index {args.shard_index} outside 0..{args.shard_count - 1}")
             return 2
-        if args.only:
-            print("--only cannot combine with sharding: shards must partition the "
-                  "full catalog, or a suite could silently run nowhere")
-            return 2
 
     default_logroot = Path("C:/tmp") if Path("C:/tmp").exists() else Path.cwd()
     log_dir = Path(args.log_dir) if args.log_dir else (default_logroot / "leaf-web-demo-gates")
@@ -7801,6 +7859,20 @@ def main() -> int:
                   f"suite. Selection was: {selection}")
             return 2
         selection += f"  -> {len(suites)} of {total} suites"
+        if args.shard_index is not None:
+            try:
+                if args.selected_shard_plan is None:
+                    raise ValueError("no trusted selected shard plan supplied")
+                suites = selected_shard_suites(suites, args.selected_shard_plan,
+                                               args.shard_count, args.shard_index)
+            except (OSError, ValueError, TypeError, KeyError, IndexError) as exc:
+                print(f"WARNING: selected partition unavailable ({exc}); "
+                      "conservative fallback runs original complete selection on shard 0")
+                if args.shard_index != 0:
+                    print("FATAL: refusing a missing-slice GREEN on nonzero selected shard")
+                    return 2
+            selection += (f" --shard-count {args.shard_count} --shard-index {args.shard_index}"
+                          f" -> {len(suites)} local suites")
     elif args.shard_index is not None:
         suites = partition_suites(suites, args.shard_count)[args.shard_index]
         selection = (f"--shard-count {args.shard_count} "
@@ -7914,7 +7986,8 @@ def main() -> int:
             selection=selection, suites=suites, results=results,
             attempts_by_id=attempts_by_id, wall=wall,
             execution_failure=bool(prerequisite_failure),
-            **({"mode": "tier"} if tier is not None else {}))
+            **({"mode": "tier"} if tier is not None else
+               {"mode": "selected"} if only else {}))
 
     # EXIT 0 iff every non-skipped gate passed.
     any_fail = any(r.status == "FAIL" or

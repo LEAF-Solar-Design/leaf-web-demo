@@ -30,8 +30,10 @@ function groupMatches(bytes, report, binding) {
       data.source_intake_sha256 !== report.source_intake_sha256 ||
       data.source?.artifact_id !== report.source_artifact_id || !Array.isArray(data.matches) ||
       data.matches.length > 10_000) throw new Error('Invalid report review')
+  const matchingPolicy = data.request?.matching_policy === undefined ? 'atomic-v1' : data.request.matching_policy
+  if (!['atomic-v1', 'whole-matrix-v1'].includes(matchingPolicy)) throw new Error('Invalid matching policy')
   const refs = new Set()
-  return data.matches.map((match) => {
+  const rows = data.matches.map((match) => {
     if (typeof match?.frame_ref !== 'string' || !match.frame_ref || match.frame_ref.length > 200 ||
         refs.has(match.frame_ref) || !Array.isArray(match.candidates) ||
         match.candidates.length > (match.status === 'ambiguous' ? 10_000 : 16) ||
@@ -50,6 +52,7 @@ function groupMatches(bytes, report, binding) {
         !['matched', 'unmatched', 'ambiguous'].includes(status)) throw new Error('Invalid match status')
     return { ref: match.frame_ref, status, grid: match.pdf_grid, candidates: match.candidates }
   })
+  return { rows, matchingPolicy }
 }
 
 // The ordinary panel keeps its legacy contract. This host binds every operation to
@@ -65,7 +68,7 @@ export default function ProjectSolarEdgePanel({ solarBinding, authorityKey, proj
   const [inspection, setInspection] = useState(null)
   const scope = useMemo(() => ({ key, binding, authorityKey, projectClient, catalogDigest, isCurrent, submissionSignal,
     alive: true, controllers: new Set(), report: null, candidate: null,
-    choices: {}, appliedChoices: {}, reviewRequest: null }),
+    choices: {}, appliedChoices: {}, reviewRequest: null, matchingPolicy: null }),
   [key, authorityKey, projectClient, catalogDigest, isCurrent, submissionSignal])
   const available = !!binding && typeof authorityKey === 'string' && !!authorityKey.trim() && DIGEST.test(catalogDigest) &&
     ['readContext', 'uploadSolarEdgePdf', 'reportSolarEdgePdf', 'getSnapshot', 'subscribe', 'captureCatalogScope', 'prepareRun', 'catalog']
@@ -117,6 +120,7 @@ export default function ProjectSolarEdgePanel({ solarBinding, authorityKey, proj
       scope.choices = {}
       scope.appliedChoices = {}
       scope.reviewRequest = null
+      scope.matchingPolicy = null
       setInspection(null)
       const outcome = await projectClient.uploadSolarEdgePdf({ file, signal })
       if (!current() || signal?.aborted) return { ok: false, code: 'SIP_R7_SCOPE_STALE' }
@@ -127,13 +131,15 @@ export default function ProjectSolarEdgePanel({ solarBinding, authorityKey, proj
       if (!saved || !current() || drawingId !== binding.drawing_id || projectId !== binding.project_id) return { ok: false, code: 'SIP_R7_SCOPE_STALE' }
       const requestKey = JSON.stringify([sourceArtifactId, alignmentTolerance, selectionOrder])
       const choices = scope.reviewRequest === requestKey ? { ...scope.choices } : {}
+      const matchingPolicy = scope.reviewRequest === requestKey ? scope.matchingPolicy : null
       const previousReport = scope.report, previousInspection = inspection
       scope.report = null
       setInspection(null)
       let outcome
       try {
         outcome = await projectClient.reportSolarEdgePdf({ sourceArtifactId, alignmentTolerance, selectionOrder,
-          ...(Object.keys(choices).length ? { associations: choices } : {}), signal })
+          ...(Object.keys(choices).length ? { associations: choices } : {}),
+          ...(matchingPolicy ? { matchingPolicy } : {}), signal })
       } catch { outcome = { ok: false, reason: 'SIP_R7_RESPONSE_INVALID' } }
       if (!current() || signal?.aborted) return { ok: false, code: 'SIP_R7_SCOPE_STALE' }
       if (!outcome.ok || !identity(outcome.data, binding) || outcome.data.graph_sha256 !== saved.graph || outcome.data.source_intake_sha256 !== saved.intake) {
@@ -147,6 +153,7 @@ export default function ProjectSolarEdgePanel({ solarBinding, authorityKey, proj
       scope.choices = choices
       scope.appliedChoices = choices
       scope.reviewRequest = requestKey
+      scope.matchingPolicy = matchingPolicy
       return { ok: true, value: outcome.data }
     },
   }
@@ -172,7 +179,7 @@ export default function ProjectSolarEdgePanel({ solarBinding, authorityKey, proj
       if (!active()) return { ok: false }
       const hash = Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, '0')).join('')
       if (hash !== ref.content_sha256) return { ok: false, code: 'SOLAREDGE_CLIENT_ARTIFACT_MISMATCH' }
-      if (inspect) return { ok: true, rows: groupMatches(bytes, report, binding) }
+      if (inspect) return { ok: true, ...groupMatches(bytes, report, binding) }
       url = URL.createObjectURL(new Blob([bytes], { type: ref.media_type }))
       const link = document.createElement('a')
       link.href = url
@@ -195,8 +202,11 @@ export default function ProjectSolarEdgePanel({ solarBinding, authorityKey, proj
     setInspection({ scope, report, pending: true })
     try {
       const outcome = await downloadReport(report, { inspect: true })
-      if (current() && scope.report === report) setInspection({ scope, report, pending: false,
-        rows: outcome.ok ? outcome.rows : null, error: !outcome.ok })
+      if (current() && scope.report === report) {
+        if (outcome.ok) scope.matchingPolicy = outcome.matchingPolicy
+        setInspection({ scope, report, pending: false,
+          rows: outcome.ok ? outcome.rows : null, error: !outcome.ok })
+      }
     } finally { scope.inspectionPending = false }
   }
   async function accept(params) {
@@ -237,7 +247,7 @@ export default function ProjectSolarEdgePanel({ solarBinding, authorityKey, proj
         : !saved ? <><p role="status">The saved Solar design could not be read. Create panel groups before matching the PDF.</p>
           <button type="button" onClick={() => setRefresh((value) => value + 1)}>Read design again</button></>
           : <SolarEdgeImportPanel key={key} drawingId={binding.drawing_id} projectId={binding.project_id}
-            drawingVersion={binding.input_version_id} graphRev={saved.rev} client={facade} disabled={busy || scope.accepting}
+            drawingVersion={binding.input_version_id} graphRev={saved.rev} client={facade} disabled={busy || scope.accepting} allowMatchedOnly
             onReportReady={(report) => { if (current()) {
               scope.report = report
               setInspection({ scope, report, pending: false })
