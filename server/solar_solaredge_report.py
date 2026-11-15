@@ -36,6 +36,9 @@ from solar_sizing_client import digest, units_resolved
 
 REPORT_TOOL = "solar-solaredge-report"
 REPORT_SCHEMA = "leaf.solar-solaredge-report.v1"
+ATOMIC_POLICY = "atomic-v1"
+WHOLE_MATRIX_POLICY = "whole-matrix-v1"
+MATCHING_POLICIES = frozenset({ATOMIC_POLICY, WHOLE_MATRIX_POLICY})
 REQUEST_SCHEMA = "leaf.solar-solaredge-report-request.v1"
 RESULT_SCHEMA = "leaf.solar-solaredge-report-result.v1"
 REPORT_KIND = "solaredge-report"
@@ -126,7 +129,8 @@ def _recorded_import_angle(frames, panels):
     return sorted(angles)[len(angles) // 2] if angles else None
 
 
-def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_order, associations=None):
+def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_order, associations=None,
+                         matching_policy=ATOMIC_POLICY):
     """Review every frame; unresolved rows retain all candidates and null PDF indexes.
 
     Unique matches keep the existing matched-row format. Unresolved rows also carry
@@ -134,6 +138,8 @@ def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_orde
     """
     if not units_resolved(graph):
         raise SolarEdgeReportError("REPORT_UNITS_UNRESOLVED")
+    if type(matching_policy) is not str or matching_policy not in MATCHING_POLICIES:
+        raise SolarEdgeReportError("REPORT_REQUEST_INVALID")
     frames = graph["frames"]
     if not frames:
         raise SolarEdgeReportError("REPORT_FRAMES_REQUIRED")
@@ -171,9 +177,10 @@ def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_orde
                 raise
             row_angle = si.lattice_row_angle(centres, recorded_angle=angle,
                 coordinate_tolerance=panel_kernel.INTAKE_COORD_QUANTUM)
+        whole = {"allow_whole_matrices": True} if matching_policy == WHOLE_MATRIX_POLICY else {}
         result = si.run_import(matrices, groups, kernel_panels, row_angle=row_angle,
                                alignment_tolerance=alignment_tolerance, selection_order=selection_order,
-                               review=True, associations=associations)
+                               review=True, associations=associations, **whole)
     except si.SolarEdgeImportError as exc:
         code = {
             "ambiguous-structural-match": "REPORT_AMBIGUOUS_MATCH",

@@ -25,21 +25,24 @@ def grid(length):
 
 
 @pytest.fixture
-def mixed(graph, monkeypatch):
+def mixed(graph, monkeypatch, request):
     value = deepcopy(graph)
     for key in ("frames", "panels", "strings", "inverters", "electrical_zones", "routes", "schedules"):
         value[key] = []
     value["settings"].update(global_string_sizing_confirmed=False, panels_in_sequence=0, extra={})
-    for index, x in enumerate((0, 10, 100, 110, 120), 1):
+    whole = getattr(request, "param", None) == "whole"
+    positions = [(1, 0), (0, 0), (1, 1), (0, 1)] if whole else [(x, 0) for x in (0, 10, 100, 110, 120)]
+    for index, (x, y) in enumerate(positions, 1):
         panel = deepcopy(graph["panels"][0])
-        panel.update(id=app_id("panel", index), frame_ref=None, matrix_cell=None, centre=[x, 0],
+        panel.update(id=app_id("panel", index), frame_ref=None, matrix_cell=None, centre=[x, y],
                      assignment={"string_ref": None, "seq": None})
         panel["provenance"]["source_handle"] = f"A{index}"
         value["panels"].append(panel)
+    memberships = (value["panels"],) if whole else (value["panels"][:2], value["panels"][2:])
     groups = [{"name": f"Roof {i}", "panel_refs": [p["id"] for p in members],
                "alignment_tolerance": 0.1, "module_width_along_row": 1,
                "module_height_across_row": 2}
-              for i, members in enumerate((value["panels"][:2], value["panels"][2:]), 1)]
+              for i, members in enumerate(memberships, 1)]
     value = local._load_builtin("solar-panel-groups").run(value,
         {"expected_rev": value["rev"], "groups": groups, "geometry_only": True})
     s = tools.memory.__wrapped__(monkeypatch)
@@ -133,6 +136,91 @@ def test_partial_choice_cannot_save_an_all_unresolved_report(mixed):
     with pytest.raises(GraphValidationError, match="SOLAREDGE_MATCHED_TRACKING_REQUIRED"):
         service.accept(mixed.ctx, params(mixed, result, accept_matched_only=True))
     assert mixed.ctx.graph == before
+
+
+def test_new_report_policy_has_its_own_cache_without_rewriting_legacy_reports(mixed, monkeypatch):
+    s = mixed
+    with monkeypatch.context() as old:
+        old.setattr(service, "_build_report_request", service._report_request)
+        legacy = report(s)
+    _, legacy_value = service._load_report(s.ctx, legacy["report"]["artifact_id"])
+    assert "matching_policy" not in legacy_value["request"]
+    saved = deepcopy(legacy_value)
+    modern = report(s)
+    _, modern_value = service._load_report(s.ctx, modern["report"]["artifact_id"])
+    assert modern_value["request"]["matching_policy"] == "whole-matrix-v1"
+    assert modern["report"]["artifact_id"] != legacy["report"]["artifact_id"]
+    assert service._load_report(s.ctx, legacy["report"]["artifact_id"])[1] == saved
+    assert report(s)["report"] == modern["report"]
+
+
+def test_legacy_accepted_tracking_stays_readable_after_new_policy_production(mixed, monkeypatch):
+    s = mixed
+    with monkeypatch.context() as old:
+        old.setattr(service, "_build_report_request", service._report_request)
+        legacy = report(s)
+    prepared = tools.prepare(s, service.ACCEPT_TOOL, params(s, legacy, accept_matched_only=True), s.ctx)
+    accepted = tools.output(s, tools.publish(s, prepared))
+    before = service.read_tracking(s.tenant, accepted, {})
+    assert "matching_policy" not in before["provenance"]["request"]
+    report(s)
+    assert service.read_tracking(s.tenant, accepted, {}) == before
+
+
+@pytest.mark.parametrize("value", [None, False, 1, "unknown", [], {}])
+def test_invalid_matching_policy_refuses_before_parsing_or_publication(mixed, monkeypatch, value):
+    def unexpected(_):
+        raise AssertionError("invalid policy reached PDF parsing")
+    monkeypatch.setattr(service.reports, "parse_source", unexpected)
+    before = deepcopy(mixed.blobs)
+    with pytest.raises(GraphValidationError, match="REPORT_REQUEST_INVALID"):
+        service.build_report(mixed.tenant, mixed.project, mixed.drawing, mixed.ctx.parent_version_id,
+            {"source_artifact_id": mixed.source_id, "alignment_tolerance": 0.1,
+             "selection_order": "unknown", "matching_policy": value})
+    assert mixed.blobs == before
+
+
+def test_old_browser_associations_keep_atomic_candidate_indexes(mixed):
+    s = mixed
+    result = service.build_report(s.tenant, s.project, s.drawing, s.ctx.parent_version_id,
+        {"source_artifact_id": s.source_id, "alignment_tolerance": 0.1, "selection_order": "unknown",
+         "associations": {s.ctx.graph["frames"][0]["id"]: 0}})
+    _, value = service._load_report(s.ctx, result["report"]["artifact_id"])
+    assert value["request"]["matching_policy"] == "atomic-v1"
+    assert value["matches"][0]["pdf_grid"] == 0
+
+
+def test_saved_tracking_cannot_relabel_the_report_matching_policy(mixed):
+    s = mixed
+    result = report(s)
+    graph = service.accept(s.ctx, params(s, result, accept_matched_only=True))
+    graph["extra"][service.tracking.STORE_KEY]["request"]["matching_policy"] = "atomic-v1"
+    raw = local.canonical_bytes(tools.embedded(graph))
+    context = replace(s.ctx, intake_bytes=raw, intake_sha256=sha256(raw).hexdigest())
+    with pytest.raises(GraphValidationError, match="SOLAREDGE_IMPORT_RECORD_INVALID"):
+        service.read_tracking(s.tenant, context, {})
+
+
+@pytest.mark.parametrize("mixed", ["whole"], indirect=True)
+def test_whole_matrix_publishes_and_reopens_complete_tracking_without_electrical_writes(mixed):
+    from test_s02_report_row_angle import whole_matrix_case
+    s = mixed
+    s.matrices = whole_matrix_case(bridge=True)[0]
+    result = report(s)
+    assert result["counts"]["matched_frames"] == 1
+    assert result["counts"]["assigned_panels"] == 4
+    assert result["counts"]["unassigned_panels"] == 0
+    assert result["counts"]["bridge_strings"] == 0
+    before = deepcopy(s.ctx.graph)
+    prepared = tools.prepare(s, service.ACCEPT_TOOL, params(s, result), s.ctx)
+    accepted = tools.output(s, tools.publish(s, prepared))
+    for key in ("settings", "panels", "frames", "strings", "inverters", "routes", "schedules"):
+        assert accepted.graph[key] == before[key]
+    readback = service.read_tracking(s.tenant, accepted, {})
+    assert readback["accepted"] is True and readback["labels_only"] is True
+    assert readback["provenance"]["request"]["matching_policy"] == "whole-matrix-v1"
+    assert readback["counts"]["assigned_panels"] == 4
+    assert readback["items"][0]["panel_refs"] == [p["id"] for p in before["panels"]]
 
 
 def test_legacy_builtin_does_not_enable_project_partial_policy(mixed):
