@@ -42,7 +42,9 @@ SOURCE_REASONS = frozenset(("INPUT_CHANGED", "INPUT_UNREADABLE"))
 def _result(verdict, diagnostics, observed=None):
     result = dict(schema=SCHEMA, evidence_kind="synthetic_offline",
                   live_grade=False, verdict=verdict, valid=verdict == "PASS",
-                  diagnostics=diagnostics)
+                  diagnostics=[{key: value[:256] if isinstance(value, str) else value
+                                for key, value in item.items()}
+                               for item in diagnostics[:DIAGNOSTIC_LIMIT]])
     if observed in ("PASS", "FAIL", "UNREADABLE"):
         result["observed_verdict"] = observed
     return result
@@ -163,7 +165,8 @@ def validate_report(value):
         if type(timeout) is not bool:
             error("INVALID_TIMEOUT", path + ".timeout", checker)
         duration = row.get("duration_seconds")
-        if (type(duration) not in (int, float) or duration < 0):
+        if (type(duration) not in (int, float) or duration < 0 or
+                (type(duration) is int and duration.bit_length() > 1023)):
             error("INVALID_DURATION", path + ".duration_seconds", checker)
         output = row.get("output")
         if not isinstance(output, str):
@@ -288,6 +291,13 @@ def _finite_float(value):
     return number
 
 
+def _bounded_int(value):
+    # Independent of the host's optional integer-string conversion limit.
+    if len(value.lstrip("-")) > 1024:
+        raise ValueError("JSON integer exceeds limit")
+    return int(value)
+
+
 def _unique_object(pairs):
     result = {}
     for key, value in pairs:
@@ -297,26 +307,33 @@ def _unique_object(pairs):
     return result
 
 
-def validate_file(path, max_bytes=MAX_BYTES, max_depth=MAX_DEPTH):
-    """Read at most the byte cap plus one; never rewrite the source file."""
+def read_validated_report(path, max_bytes=MAX_BYTES, max_depth=MAX_DEPTH):
+    """Return (parsed snapshot, validation); read once, at most the cap plus one."""
     if (type(max_bytes) is not int or max_bytes < 0 or
             type(max_depth) is not int or max_depth < 1):
-        return _result("UNREADABLE", [dict(name="INVALID_LIMIT", path="$")])
+        return None, _result("UNREADABLE", [dict(name="INVALID_LIMIT", path="$")])
     try:
         with Path(path).open("rb") as stream:
             raw = stream.read(min(max_bytes, MAX_BYTES) + 1)
-    except (OSError, ValueError):
-        return _result("UNREADABLE", [dict(name="INPUT_UNREADABLE", path="$")])
+    except (OSError, ValueError, TypeError, MemoryError, OverflowError):
+        return None, _result("UNREADABLE", [dict(name="INPUT_UNREADABLE", path="$")])
     if len(raw) > min(max_bytes, MAX_BYTES):
-        return _result("UNREADABLE", [dict(name="INPUT_BYTE_LIMIT", path="$")])
+        return None, _result("UNREADABLE", [dict(name="INPUT_BYTE_LIMIT", path="$")])
     try:
         text = raw.decode("utf-8")
         _check_depth(text, min(max_depth, MAX_DEPTH))
         value = json.loads(text, parse_constant=_reject_constant, parse_float=_finite_float,
+                           parse_int=_bounded_int,
                            object_pairs_hook=_unique_object)
-    except (UnicodeError, ValueError, RecursionError, OverflowError):
-        return _result("UNREADABLE", [dict(name="INVALID_JSON", path="$")])
-    return validate_report(value)
+        validation = validate_report(value)
+    except (UnicodeError, ValueError, RecursionError, OverflowError, MemoryError):
+        return None, _result("UNREADABLE", [dict(name="INVALID_JSON", path="$")])
+    return value, validation
+
+
+def validate_file(path, max_bytes=MAX_BYTES, max_depth=MAX_DEPTH):
+    """Read at most the byte cap plus one; never rewrite the source file."""
+    return read_validated_report(path, max_bytes, max_depth)[1]
 
 
 def main(argv=None):
