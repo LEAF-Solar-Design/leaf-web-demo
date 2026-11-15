@@ -105,9 +105,12 @@ def run_cases(client, transport, *, project, drawing, sleep=time.sleep, clock=ti
                                  idempotency_key=new_idempotency_key("x02")),
                       write=tool != "count-by-layer")
 
-    def capture(case, action):
+    def capture(case, action, *, prepare=None):
         result = CaseResult(case, seeded=True, state_before=state())
         try:
+            if prepare is not None:
+                prepare()
+                result.state_before = state()
             result.status, body = action()
             result.ok_body = isinstance(body, dict) and (body.get("ok") is True or
                                                        body.get("status") == "complete")
@@ -167,11 +170,9 @@ def run_cases(client, transport, *, project, drawing, sleep=time.sleep, clock=ti
             return [results[case] for case in CASE_IDS]
         capture("4b", lambda: call("solar-panels-from-drawing",
                                    {"drawing_id": did, "expected_rev": rev}, cap=capability))
-        def blank_filter_case():
-            setup({"panel_layer_contains": ""})
-            return call("solar-panels-from-drawing",
-                        {"drawing_id": did, "expected_rev": rev}, cap=capability)
-        capture("4a", blank_filter_case)
+        capture("4a", lambda: call("solar-panels-from-drawing",
+                                   {"drawing_id": did, "expected_rev": rev}, cap=capability),
+                prepare=lambda: setup({"panel_layer_contains": ""}))
         path = "/api/projects/{}/drawings/{}/versions/{}/imports/solaredge-pdf".format(
             *(quote(str(value), safe="") for value in (pid, did, version)))
         capture("9", lambda: finish(transport("POST", path, headers={"Content-Type": "application/pdf"}, data=PDF),

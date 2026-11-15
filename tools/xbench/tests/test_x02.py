@@ -346,19 +346,30 @@ def test_live_case_order_and_no_match_initialization(rig):
     assert all(timeout == 600 for _, timeout in client.waits)
 
 
-def test_blank_filter_success_imports_on_new_head(rig):
+@pytest.mark.parametrize("response", [(200, {"ok": True}), (202, {"job_id": "blank-job"})])
+def test_blank_filter_success_imports_on_new_head(rig, response):
     client = rig[0]
-    client.overrides["blank"] = (202, {"job_id": "blank-job"})
+    client.overrides["blank"] = response
     results = collect(rig)
     assert client.events == ["3", "7", "initialize", "4b", "blank", "4a", "9", "8"]
     row = by_case(results, "4a")
     assert row.code == "PANEL_LAYER_FILTER_REQUIRED" and not row.async_refusal
-    assert row.state_before == ("v1", "digest")
-    assert row.state_after == ("v2", "digest")
+    assert row.state_before == row.state_after == ("v2", "digest")
     panels = [kw for tool, kw in client.calls if tool == "solar-panels-from-drawing"]
     assert [(kw["version_id"], kw["params"]["expected_rev"]) for kw in panels] == [("v1", 1), ("v2", 2)]
-    assert "case 4a: FAIL (drawing state changed)" in x02.score(results)[2].evidence
+    assert "case 4a: PASS (checks satisfied)" in x02.score(results)[2].evidence
+    assert x02.score(results)[2].verdict == "UNREADABLE"
     assert by_case(results, "9").seeded and by_case(results, "8").seeded
+
+
+def test_blank_filter_refusal_state_change_fails(rig):
+    rig[0].mutate = "blank"
+    results = collect(rig)
+    row = by_case(results, "4a")
+    assert row.code == "PANEL_LAYER_FILTER_REQUIRED"
+    assert row.state_before == ("v1", "digest")
+    assert row.state_after == ("unexpected-version", "digest")
+    assert "case 4a: FAIL (drawing state changed)" in x02.score(results)[2].evidence
 
 
 def test_async_blank_filter_refusal_is_observation(rig):
