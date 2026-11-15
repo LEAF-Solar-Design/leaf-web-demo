@@ -168,7 +168,7 @@ def main(argv=None):
     parser.add_argument("--enabled", action="store_true", help="explicitly activate the generated PR tier")
     parser.add_argument("--stdout", action="store_true", help="print the document without writing files")
     parser.add_argument("--active", type=Path, metavar="POLICY",
-                        help="print 1 only for a PR event with a usable, enabled tier policy; otherwise 0")
+                        help="print 1 for a PR or baselined main push with an enabled tier; otherwise 0")
     args = parser.parse_args(argv)
     if args.active is not None:
         # The device worker sets this for a server-issued full run, which must
@@ -178,7 +178,18 @@ def main(argv=None):
             return 0
         is_pr = os.environ.get("CODEBUILD_WEBHOOK_EVENT") in (
             "PULL_REQUEST_CREATED", "PULL_REQUEST_UPDATED", "PULL_REQUEST_REOPENED")
-        print(int(is_pr and load_runner().load_pr_tier(args.active, quiet=True) is not None))
+        is_main = (os.environ.get("CODEBUILD_WEBHOOK_EVENT") == "PUSH"
+                   and os.environ.get("CODEBUILD_WEBHOOK_HEAD_REF") == "refs/heads/main")
+        active = False
+        if is_pr or is_main:
+            runner = load_runner()
+            try:
+                if is_main:
+                    runner.pr_tier_base()
+                active = runner.load_pr_tier(args.active, quiet=True) is not None
+            except (OSError, ValueError, subprocess.SubprocessError):
+                pass
+        print(int(active))
         return 0
     try:
         document = generate(args.proposal, args.fail30, args.sentinels, enabled=args.enabled)

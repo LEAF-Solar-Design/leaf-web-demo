@@ -5719,17 +5719,48 @@ def load_pr_tier(path: str, *, quiet: bool = False):
         return None
 
 
+def pr_tier_base() -> str:
+    """Resolve the diff base; main must have a distinct, judged ancestor."""
+    if os.environ.get("CODEBUILD_WEBHOOK_EVENT") == "PUSH":
+        if os.environ.get("CODEBUILD_WEBHOOK_HEAD_REF") != "refs/heads/main":
+            raise ValueError("tier requires a main push")
+        head = os.environ.get("CODEBUILD_RESOLVED_SOURCE_VERSION", "")
+        base = os.environ.get("LEAF_CI_LAST_JUDGED_SHA", "")
+        if (not re.fullmatch(r"[0-9a-fA-F]{40}", head)
+                or not re.fullmatch(r"[0-9a-fA-F]{40}", base)):
+            raise ValueError("main tier requires exact head and judged baseline")
+
+        def git(*args):
+            proc = subprocess.run(["git", "--no-replace-objects", *args], cwd=REPO,
+                                  capture_output=True, text=True, timeout=30)
+            if proc.returncode:
+                raise ValueError("main tier baseline unavailable or not an ancestor")
+            return proc.stdout.strip()
+
+        actual_head = git("rev-parse", "--verify", "HEAD^{commit}")
+        if actual_head != head.lower():
+            raise ValueError("main tier head mismatch")
+        resolved_base = git("rev-parse", "--verify", base + "^{commit}")
+        if resolved_base != base.lower() or resolved_base == actual_head:
+            raise ValueError("main tier requires a distinct judged commit")
+        git("merge-base", "--is-ancestor", resolved_base, actual_head)
+        return resolved_base
+    base = os.environ.get("TRUSTED_SHA") or os.environ.get("CODEBUILD_WEBHOOK_BASE_REF", "origin/main")
+    if base.startswith("refs/heads/"):
+        base = "refs/remotes/origin/" + base[len("refs/heads/"):]
+    return base
+
+
 def pr_tier_changed_paths() -> List[str]:
-    """Use explicit paths when supplied, otherwise diff the PR against its base."""
-    raw = os.environ.get("LEAF_CHANGED_PATHS")
+    """Diff main from its judged baseline, or a PR from its existing base."""
+    base = pr_tier_base()
+    raw = (None if os.environ.get("CODEBUILD_WEBHOOK_EVENT") == "PUSH"
+           else os.environ.get("LEAF_CHANGED_PATHS"))
     if raw is not None:
         paths = json.loads(raw)
         if not isinstance(paths, list) or any(not isinstance(p, str) or not p for p in paths):
             raise ValueError("LEAF_CHANGED_PATHS must be a JSON list of paths")
         return paths
-    base = os.environ.get("TRUSTED_SHA") or os.environ.get("CODEBUILD_WEBHOOK_BASE_REF", "origin/main")
-    if base.startswith("refs/heads/"):
-        base = "refs/remotes/origin/" + base[len("refs/heads/"):]
     proc = subprocess.run(
         ["git", "--no-replace-objects", "diff", "--no-renames", "--name-only", "-z", base + "...HEAD", "--"],
         cwd=REPO, capture_output=True, text=True, timeout=30)
