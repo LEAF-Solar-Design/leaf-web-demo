@@ -78,9 +78,18 @@ def _finish(proc):
 def _process_diagnostic(name, returncode, stderr):
     """Retain closed failure facts only, after the owned process group is reaped."""
     reason = 'unknown'
+    stderr_state, stderr_prefix = 'unreadable', 'unknown'
     try:
         stderr.seek(0)
-        first_line = stderr.read(8192).split(b'\n', 1)[0].lower()
+        bounded = stderr.read(8192)
+        stderr_state = 'nonempty' if bounded else 'empty'
+        stderr_prefix = 'other' if bounded else 'none'
+        first_line = bounded.split(b'\n', 1)[0].lower()
+        # Observed spelling only, not trusted attribution of the failure.
+        for prefix in ('bwrap', 'prlimit', 'ffprobe', 'ffmpeg'):
+            if first_line.startswith(prefix.encode('ascii') + b':'):
+                stderr_prefix = prefix
+                break
         denied = b'operation not permitted' in first_line or b'permission denied' in first_line
         if first_line.startswith(b'bwrap:') and denied:
             reason = 'sandbox_denied'
@@ -94,7 +103,7 @@ def _process_diagnostic(name, returncode, stderr):
         pass
     return dict(operation=name if name in {'probe', 'decode'} else 'unknown',
                 returncode=returncode if type(returncode) is int and -255 <= returncode <= 255 else None,
-                reason=reason)
+                reason=reason, stderr_state=stderr_state, stderr_prefix=stderr_prefix)
 
 
 def _run(scratch, binary, args, name, deadline, recheck):
