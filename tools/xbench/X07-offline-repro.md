@@ -13,6 +13,7 @@ drawings, environment credentials, provider grants, browser, or Mac host.
 ```powershell
 python -m unittest discover -s server/tests -p 'test_x07_*.py'
 python tools/xbench/x07_role_discovery_perf.py --smoke
+python tools/xbench/x07_synthetic_journey.py
 ```
 
 The browser-free UI check requires the web package dependencies, including
@@ -25,6 +26,14 @@ node tools/xbench/tests/x07_role_confirmation_dom.cjs --deps web/node_modules
 The same component cases are authored in
 `web/src/solar/X07RoleConfirmation.test.jsx` for the normal Vitest rail.
 The direct DOM harness avoids dependency on that rail's setup-file loader.
+It now also checks injected copy choices and customer profile editing, including
+stale-version recovery, customer switches and an older pinned project version.
+
+The synthetic journey composes discovery, inclusive selection, explicit
+customer compatibility and SQLite persistence for two customers and five
+drawings. It emits seven rows of Boolean assertions. `proof_mode` is always
+`synthetic_offline`; these rows are not a staging grader or readiness marker.
+`--database` requires a new file and refuses an existing database.
 
 ## Seven-step mapping
 
@@ -59,3 +68,15 @@ refuse the operation. None of these pure operations changes the input drawing.
 The performance smoke checks 30 and 300 seeded INSERTs. Its elapsed time and
 allocation peak cover discovery only. No browser budget or production latency
 claim follows from those measurements.
+
+Compatibility requires the caller's customer key before looking at role names.
+Missing, foreign or incompatible profiles produce a fresh proposal without an
+applied-profile reference. Anonymous block names require explicit drawing
+aliases, even when their literal names happen to match. Multiple matching
+aliases refuse automatic application. Aliases never identify a customer.
+
+`test_x07_profile_concurrency.py` uses independent connections and barriers,
+without sleeps. `test_x07_profile_storage_failures.py` injects post-write faults,
+uses a 20 ms SQLite busy timeout for its contention fixture, and restores only
+its own disposable corrupt file. It checks rollback, prior-record preservation
+and retry after recovery. No live storage or credentials are involved.
