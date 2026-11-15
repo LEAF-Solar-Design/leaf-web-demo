@@ -143,7 +143,7 @@ def test_invalid_selected_candidates_are_unreadable(candidates, count):
     assert score([project], [result])[1].verdict == "UNREADABLE"
 
 
-def live_harness(monkeypatch, *, failure=None, health=None, server_code=None):
+def live_harness(monkeypatch, *, failure=None, health=None, server_code=None, envelope=None):
     """Exact owner-confirmed client signatures, with no browser or disk IO."""
     import xbench_session
 
@@ -172,6 +172,8 @@ def live_harness(monkeypatch, *, failure=None, health=None, server_code=None):
             yield object(), {"web_build": source_sha}
         finally:
             events.append("close")
+            if failure == "combined":
+                raise RuntimeError("synthetic-private-close-canary")
 
     class Client:
         def __init__(self, transport, /):
@@ -195,6 +197,8 @@ def live_harness(monkeypatch, *, failure=None, health=None, server_code=None):
         def wait_upload(self, drawing_id, timeout_s=300):
             assert drawing_id == "source-drawing" and timeout_s == 300
             events.append("wait-upload")
+            if failure == "upload-envelope":
+                return envelope
             return {"status": "ready"}
 
         def adopt_drawing(self, project_id, source_drawing_id, name, version=1):
@@ -221,6 +225,8 @@ def live_harness(monkeypatch, *, failure=None, health=None, server_code=None):
             events.append("checkout")
             if failure == "checkout":
                 raise RuntimeError("synthetic checkout failure")
+            if failure == "checkout-envelope":
+                return envelope
             return "private-capability", {}
 
         def run(self, tool, /, *, org_id, project_id, version_id, params,
@@ -260,13 +266,13 @@ def live_harness(monkeypatch, *, failure=None, health=None, server_code=None):
         def release(self, project_id, drawing_id, capability):
             assert (project_id, drawing_id, capability) == ("new-project", "adopted-drawing", "private-capability")
             events.append("release")
-            if failure == "cleanup":
+            if failure in ("cleanup", "combined"):
                 raise RuntimeError("synthetic release failure")
 
         def delete_project(self, project_id):
             assert project_id == "new-project"
             events.append("delete")
-            if failure == "cleanup":
+            if failure in ("cleanup", "combined"):
                 raise RuntimeError("synthetic delete failure")
 
     def api(page, method, path, *, origin, json_body=None, data=None, headers=None, timeout_s=60.0):
@@ -280,6 +286,10 @@ def live_harness(monkeypatch, *, failure=None, health=None, server_code=None):
         elif path.endswith("/report"):
             assert method == "POST" and json_body == {"source_artifact_id": "d" * 64,
                 "alignment_tolerance": 0.1, "selection_order": "unknown"}
+            if failure == "combined":
+                raise RuntimeError("synthetic-private-report-canary")
+            if failure == "report-envelope":
+                return 200, {"content-type": "application/json"}, json.dumps(envelope).encode()
             if failure == "report-refusal":
                 return 422, {"content-type": "application/json"}, json.dumps({
                     "error": {"code": server_code if server_code is not None else "REPORT_GRID_UNMATCHED"}}).encode()
@@ -403,6 +413,73 @@ def test_ground_setup_is_explicitly_unreadable_in_roof_slice(monkeypatch):
     assert not x05._setup(ctx.manifest["projects"][0])
     assert all(step.verdict == "UNREADABLE" for step in x05.run(ctx))
     assert events == [] and requests == []
+
+
+@pytest.mark.parametrize("field", ["expected_modules", "expected_grids", "expected_strings",
+                                   "branch_max_offset", "alignment_tolerance"])
+@pytest.mark.parametrize("value", [True, False, float("nan"), float("inf"),
+                                   float("-inf"), -1, 10**400])
+def test_numeric_setup_boundaries_are_unreadable_without_io(monkeypatch, field, value):
+    ctx, events, requests, receipts = live_harness(monkeypatch)
+    ctx.manifest["projects"][0][field] = value
+    steps = x05.run(ctx)
+    assert all(step.verdict == "UNREADABLE" for step in steps)
+    assert "setup_or_session_unreadable" in steps[0].evidence
+    assert events == [] and requests == []
+    assert receipts[0]["results"] == []
+
+
+@pytest.mark.parametrize("stage,code", [("upload", "SOURCE_WIRE_UNREADABLE"),
+                                       ("checkout", "CONTEXT_DRIFT"),
+                                       ("report", "REPORT_WIRE_UNREADABLE")])
+@pytest.mark.parametrize("envelope", [None, [], {"unexpected": "synthetic-canary"}])
+def test_success_status_malformed_envelopes_cleanup(monkeypatch, stage, code, envelope):
+    ctx, events, requests, receipts = live_harness(
+        monkeypatch, failure=stage + "-envelope", envelope=envelope)
+    steps = x05.run(ctx)
+    assert steps[1].verdict == "UNREADABLE"
+    assert receipts[0]["results"][0]["reason_code"] == code
+    assert events.count("delete") == events.count("close") == 1
+    assert events.count("release") == (1 if stage == "report" else 0)
+    assert "synthetic-canary" not in json.dumps(receipts)
+
+
+def test_report_and_all_cleanup_failures_preserve_sanitized_evidence(monkeypatch, tmp_path):
+    from xbench_core import write_json_atomic
+
+    ctx, events, requests, receipts = live_harness(monkeypatch, failure="combined")
+    ctx.out_dir = tmp_path
+    monkeypatch.setattr(x05, "write_json_atomic", write_json_atomic)
+    assert all(step.verdict == "UNREADABLE" for step in x05.run(ctx))
+    assert events[-4:] == ["release", "delete", "close", "health"]
+    text = (tmp_path / "x05-evidence.json").read_text(encoding="utf-8")
+    assert "canary" not in text and "private-capability" not in text
+    observed = json.loads(text)["results"][0]
+    assert observed["reason"] == "session_contract_unreadable"
+    assert observed["cleanup_errors"] == ["CHECKOUT_RELEASE_UNREADABLE", "PROJECT_DELETE_UNREADABLE"]
+
+
+def test_score_indexes_projects_and_results_linearly():
+    class CountedDict(dict):
+        reads = 0
+
+        def get(self, *args):
+            type(self).reads += 1
+            return super().get(*args)
+
+    for count in (100, 400):
+        project, result = observation()
+        projects = [CountedDict(project, id=f"p{i}") for i in range(count)]
+        results = [CountedDict(result, id=f"p{i}") for i in range(count)]
+        CountedDict.reads = 0
+        assert [s.verdict for s in score(projects, results)][:2] == ["PASS", "PASS"]
+        assert CountedDict.reads < 40 * count
+        assert score(projects, results[:-1])[0].verdict == "UNREADABLE"
+        assert score(projects, results + [results[0]])[0].verdict == "UNREADABLE"
+        assert score(projects + [projects[0]], results)[0].verdict == "UNREADABLE"
+        mixed = list(results)
+        mixed[-1] = dict(mixed[-1], import_verdict="FAIL")
+        assert score(projects, mixed)[0].verdict == "FAIL"
 
 
 @pytest.mark.parametrize("failure", ["source-refusal", "report-refusal"])

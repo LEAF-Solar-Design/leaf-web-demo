@@ -16,12 +16,15 @@ values are returned separately and never fill or replace PDF totals.
 """
 
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation, localcontext
+from decimal import Context, Decimal, InvalidOperation, localcontext
 import re
 
 
 MAX_SNIPPET = 200
 MAX_SNIPPETS_PER_FIELD = 5
+# All supported inputs have at most40 digits. Never inherit caller traps,
+# exponent limits or rounding policy for exact unit conversion and totals.
+_CONTEXT = Context(prec=100)
 COUNT_FIELDS = ("modules", "optimizers", "inverters", "strings")
 REQUIRED_FIELDS = (*COUNT_FIELDS, "power_kw")
 _NUMBER = re.compile(r"[0-9]+(?:\.[0-9]+)?\Z")
@@ -99,8 +102,7 @@ def _number(raw, *, power=False):
             return None
         if not power and value != value.to_integral_value():
             return None
-        with localcontext() as context:
-            context.prec = 100
+        with localcontext(_CONTEXT):
             return value / Decimal(1000) if unit and unit.lower() == "w" else value
     except InvalidOperation:
         return None
@@ -141,8 +143,7 @@ def _parse_bom(text, result):
             result.issue("bom_conflict", "modules", "BOM quantity disagrees with PDF.")
             result.totals["modules"] = None
     if quantity is not None and module_power is not None:
-        with localcontext() as context:
-            context.prec = 100
+        with localcontext(_CONTEXT):
             bom_power = quantity * module_power
         if result.totals["power_kw"] is not None and bom_power != result.totals["power_kw"]:
             result.issue("bom_conflict", "power_kw", "BOM power disagrees with PDF.")
@@ -166,6 +167,9 @@ def parse_text(text: str, bom_text: str | None = None) -> OracleResult:
         if re.fullmatch(r"String ID\s*\|\s*Optimizers", line, re.IGNORECASE):
             table_mode = True
             result.record("string_table", original)
+            continue
+        if table_mode and not line:
+            # Page separators and blank lines preserve a recognized table.
             continue
         labeled = re.fullmatch(r"String\s+(\S+)\s*:\s*(.*?)\s+optimizers", line,
                                re.IGNORECASE)
@@ -195,7 +199,7 @@ def parse_text(text: str, bom_text: str | None = None) -> OracleResult:
             continue
         if table_mode and line:
             # A non-pipe row is not silently counted as a valid table row.
-            if re.match(r"\S+\s+\S+", line) and not re.search(r"[:=]", line):
+            if not re.search(r"[:=]", line):
                 result.issue("unrecognized_table_row", "string_table", "Unsupported table row.")
                 table_bad = True
         table_mode = False
@@ -212,8 +216,7 @@ def parse_text(text: str, bom_text: str | None = None) -> OracleResult:
         result.issue("missing_string_table", "string_table", "No recognized string rows.")
     elif not table_bad:
         result.table_string_count = len(result.strings)
-        with localcontext() as context:
-            context.prec = 100
+        with localcontext(_CONTEXT):
             result.table_optimizer_count = sum((row.optimizers for row in result.strings), Decimal(0))
         for name, observed in (("strings", result.table_string_count),
                                ("optimizers", result.table_optimizer_count)):

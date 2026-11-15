@@ -26,6 +26,48 @@ def codes(result):
     return {(issue.code, issue.field) for issue in result.uncertainties}
 
 
+@pytest.mark.parametrize("separator", ["\f", "\n\f\n", "\n\n", "\n\f\nString ID | Optimizers\n\n"])
+def test_supported_table_continuations_preserve_each_count(separator):
+    result = parse_text(REPORT.replace("A-1 | 6\nA-2", "A-1 | 6" + separator + "A-2"))
+    assert result.status == "readable"
+    assert [(row.identifier, row.optimizers) for row in result.strings] == [
+        ("A-1", Decimal(6)), ("A-2", Decimal(6))]
+    assert result.table_optimizer_count == Decimal(12)
+
+
+@pytest.mark.parametrize("tail", ["A-2", "A-2 |", "A-2 | 6 |", "A-2 6"])
+def test_truncated_continuation_is_named_uncertainty(tail):
+    result = parse_text(REPORT.replace("A-2 | 6", "\f\nString ID | Optimizers\n\n" + tail))
+    assert result.status == "unreadable"
+    assert result.table_string_count is None and result.table_optimizer_count is None
+    assert any(issue.field == "string_table" for issue in result.uncertainties)
+
+
+@pytest.mark.parametrize("rounding", ["ROUND_DOWN", "ROUND_UP", "ROUND_FLOOR", "ROUND_CEILING"])
+def test_decimal_context_cannot_change_exact_units_or_bom(rounding):
+    from decimal import getcontext
+
+    with localcontext() as caller:
+        caller.prec = 2
+        caller.Emin, caller.Emax = -1, 1
+        caller.rounding = rounding
+        for signal in caller.traps:
+            caller.traps[signal] = True
+        snapshot = caller.copy()
+        matched = parse_text(REPORT, "Module Quantity: 24\nModule Power: 400 W")
+        assert matched.status == "readable"
+        assert matched.totals["power_kw"] == Decimal("9.6")
+        assert matched.table_optimizer_count == Decimal(12)
+        conflict = parse_text(REPORT, "Module Quantity: 24\nModule Power: 401 W")
+        assert ("bom_conflict", "power_kw") in codes(conflict)
+        assert conflict.totals["power_kw"] is None
+        kw = parse_text(REPORT.replace("9600 W", "9.600 kW"))
+        assert kw.totals["power_kw"] == Decimal("9.600")
+        current = getcontext()
+        assert (current.prec, current.Emin, current.Emax, current.rounding, current.traps, current.flags) == (
+            snapshot.prec, snapshot.Emin, snapshot.Emax, snapshot.rounding, snapshot.traps, snapshot.flags)
+
+
 def test_summary_and_string_table_are_independent_explicit_evidence():
     result = parse_text(REPORT)
     assert result.status == "readable"

@@ -5,6 +5,7 @@ below. A missing or incompatible client is harness evidence, never product FAIL.
 """
 
 import hashlib
+from collections import Counter, defaultdict
 import json
 import math
 from pathlib import Path
@@ -76,7 +77,8 @@ def _metadata_problem(manifest, verified):
 
 
 def _integer(value, minimum=0):
-    return type(value) is int and value >= minimum
+    # Counts cross a JSON transport; reject integers that cannot round-trip exactly.
+    return type(value) is int and minimum <= value <= 2**53 - 1
 
 
 def _positive_number(value):
@@ -162,11 +164,15 @@ def score(projects, results):
     diagnostics = []
     projects = projects if isinstance(projects, list) else []
     results = results if isinstance(results, list) else []
-    ids = [p.get("id") for p in projects if isinstance(p, dict)]
+    ids = Counter(p.get("id") for p in projects
+                  if isinstance(p, dict) and isinstance(p.get("id"), str))
+    indexed = defaultdict(list)
+    for result in results:
+        if isinstance(result, dict) and isinstance(result.get("id"), str):
+            indexed[result["id"]].append(result)
     for project in projects:
-        valid = _setup(project) and ids.count(project.get("id")) == 1
-        found = [r for r in results if isinstance(r, dict)
-                 and isinstance(project, dict) and r.get("id") == project.get("id")]
+        valid = _setup(project) and ids[project["id"]] == 1
+        found = indexed.get(project["id"], []) if valid else []
         result = found[0] if valid and len(found) == 1 else {}
         if (not valid or result.get("unreadable") or not result.get("setup_verified")
                 or result.get("status") in (401, 403)):
@@ -253,11 +259,17 @@ def _project(ctx, client, request, project, result):
     try:
         org_id = created["org_id"]
         uploaded = client.upload_drawing("xbench-input.dwg", drawing)
-        client.wait_upload(uploaded, timeout_s=300)
+        upload_state = client.wait_upload(uploaded, timeout_s=300)
+        if not isinstance(upload_state, dict) or upload_state.get("status") != "ready":
+            raise ObservationError(code="SOURCE_WIRE_UNREADABLE")
         adopted = client.adopt_drawing(project_id, uploaded, "xbench-input", version=1)
         drawing_id, version = adopted["drawing_id"], adopted["version_id"]
         current = context()
-        capability, _ = client.checkout(project_id, drawing_id, ttl_s=900)
+        checkout = client.checkout(project_id, drawing_id, ttl_s=900)
+        if (not isinstance(checkout, tuple) or len(checkout) != 2
+                or not isinstance(checkout[0], str) or not checkout[0]):
+            raise ObservationError(code="CONTEXT_DRIFT")
+        capability, _ = checkout
         current = mutate("solar-settings", {"expected_rev": 0, "initialize": {
             "schema_version": 1, "source_intake_sha256": current["context"]["intake_sha256"],
             "units": {"drawing_units": project["drawing_units"],
@@ -305,6 +317,10 @@ def _project(ctx, client, request, project, result):
         report = request("POST", route() + "/report", json_body={"source_artifact_id": artifact_id,
             "alignment_tolerance": project["alignment_tolerance"], "selection_order": "unknown"},
             timeout_s=300, product=True)
+        if (not isinstance(report, dict) or not isinstance(report.get("report"), dict)
+                or not isinstance(report["report"].get("download"), str)
+                or not report["report"]["download"]):
+            raise ObservationError(code="REPORT_WIRE_UNREADABLE")
         downloaded = request("GET", report["report"]["download"])
         if not isinstance(downloaded, dict) or downloaded.get("schema") != "leaf.solar-project-solaredge-report.v1":
             raise ObservationError(code="REPORT_WIRE_UNREADABLE")
@@ -341,8 +357,8 @@ def run(ctx):
     results = []
     health_started = False
     try:
-        identifiers = [p.get("id") for p in projects if isinstance(p, dict)] if isinstance(projects, list) else []
-        ready = {p["id"] for p in projects if _setup(p) and identifiers.count(p["id"]) == 1} if isinstance(projects, list) else set()
+        identifiers = Counter(p.get("id") for p in projects if isinstance(p, dict)) if isinstance(projects, list) else Counter()
+        ready = {p["id"] for p in projects if _setup(p) and identifiers[p["id"]] == 1} if isinstance(projects, list) else set()
         if not ready:
             raise ObservationError(code="SETUP_UNREADABLE")
         health_started = True
@@ -400,7 +416,8 @@ def run(ctx):
                     result["reason"] = "runtime_contract_unreadable"
     except Exception:
         # Exception strings can include credentials, paths and response bodies.
-        pass
+        for result in results:
+            result.update(unreadable=True, reason="session_contract_unreadable")
     finally:
         if health_started:
             try:
