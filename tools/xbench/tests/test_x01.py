@@ -556,6 +556,39 @@ def test_product_flow_original_and_refreshed_export_and_source_unchanged(fixture
     assert CAP not in json.dumps(row)
 
 
+@pytest.mark.parametrize("missing_head_rev", [False, True])
+def test_product_reads_revision_from_new_head_after_each_write(fixture, missing_head_rev):
+    class VersionedWire(Wire):
+        def __init__(self, content):
+            super().__init__(content)
+            self.context_versions = []
+
+        def transport(self, method, path, **kw):
+            if "/context?" in path:
+                version = path.split("/drawing-versions/")[1].split("/")[0]
+                self.context_versions.append(version)
+                graph = {} if missing_head_rev and version != "v1" else {
+                    "rev": {"v1": 0, "v2": 1, "v3": 2}[version]}
+                return 200, {"context": {"head_version_id": self.head, "intake_sha256": "a" * 64},
+                             "intake": {"solar_design_graph": graph}}
+            if path == "/api/run":
+                body = kw["json_body"]
+                if (body["tool"] == "solar-panels-from-drawing"
+                        and body["params"]["expected_rev"] != self.rev):
+                    return 409, {"error": {"error_code": "STALE_GRAPH_REVISION",
+                                           "message": "expected_rev must match the head revision"}}
+            return super().transport(method, path, **kw)
+
+    wire = VersionedWire(Path(fixture["path"]).read_bytes())
+    _, row = product(fixture, wire=wire)
+    assert row["steps"]["1"] == row["steps"]["2"] == "PASS"
+    assert row["export_version_id"] == "v3"
+    assert wire.context_versions == ["v1", "v1", "v2", "v2", "v3"]
+    writes = [kw["json_body"] for _, path, kw in wire.calls if path == "/api/run"]
+    assert writes[1]["params"]["expected_rev"] == 1
+    assert wire.released
+
+
 def test_product_metres_initialization_and_custom_filter(doc, fixture, tmp_path):
     doc.header["$INSUNITS"] = 6
     data = encoded(doc, tmp_path)
@@ -611,6 +644,26 @@ def test_product_auth_and_transport_are_unreadable(fixture):
         wire.transport_error = not auth
         _, row = product(fixture, wire=wire)
         assert all(row["steps"][str(n)] == "UNREADABLE" for n in range(1, 6))
+
+
+@pytest.mark.parametrize("message,expected", [
+    ("fixture conversion unavailable", "fixture conversion unavailable"),
+    ("conversion failed with " + CAP, "conversion failed with [redacted]"),
+    ("conversion failed " * 30, ("conversion failed " * 30)[:300]),
+])
+def test_product_plain_exception_records_bounded_redacted_message(fixture, monkeypatch, message, expected):
+    wire = Wire(Path(fixture["path"]).read_bytes())
+    client = StudioClient(wire.transport)
+
+    def upload_drawing(*args):
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(client, "upload_drawing", upload_drawing)
+    row = x01.grade_files(client, project=PROJECT, fixtures=[fixture])[fixture["id"]]
+    note = f"fixture unavailable: RuntimeError: {expected}"
+    assert all(row["steps"][str(n)] == "UNREADABLE" for n in range(1, 6))
+    assert all(row["evidence"][str(n)] == note for n in range(2, 6))
+    assert "product_error" not in row and CAP not in json.dumps(row)
 
 
 def test_source_mutation_fails_integrity(fixture):
