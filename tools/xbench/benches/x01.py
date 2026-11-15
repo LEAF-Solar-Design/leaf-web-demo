@@ -184,7 +184,10 @@ def grade_files(client, *, project, fixtures, out_dir=None):
             if isinstance(exc, StudioError):
                 code = exc.reason_code or exc.error_code or "STUDIO_REFUSAL"
                 message = str(exc.message).replace(capability, "[redacted]") if capability else str(exc.message)
-                note = xbench_session.redact(f"{code}: {message}")
+                if isinstance(code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", code):
+                    note = f"{code}: {xbench_session.redact(message)}"
+                else:
+                    note = xbench_session.redact(f"{code}: {message}")
                 row["product_error"] = {"status": exc.status, "code": code, "message": note}
             else:
                 note = f"fixture unavailable: {type(exc).__name__}"

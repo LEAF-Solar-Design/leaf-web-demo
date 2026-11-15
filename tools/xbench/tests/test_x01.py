@@ -579,6 +579,31 @@ def test_product_panels_refusal_fails_steps_two_to_five(fixture, asynchronous):
     assert wire.released
 
 
+@pytest.mark.parametrize("code,expected_code", [
+    ("SIP_R1_INTAKE_UNAVAILABLE", "SIP_R1_INTAKE_UNAVAILABLE"),
+    ("private-token-123456789012345", "[redacted]"),
+])
+def test_product_refusal_preserves_reason_code_and_redacts_message(fixture, code, expected_code):
+    wire = Wire(Path(fixture["path"]).read_bytes())
+    original = wire.transport
+    token = "message-token-123456789012345"
+
+    def transport(method, path, **kw):
+        if path == "/api/run":
+            return 422, {"error": {"reason_code": code,
+                                    "message": "Project Solar admission unavailable. " + token}}
+        return original(method, path, **kw)
+
+    rows = x01.grade_files(StudioClient(transport), project=PROJECT, fixtures=[fixture])
+    row = rows[fixture["id"]]
+    note = f"{expected_code}: Project Solar admission unavailable. [redacted]"
+    assert row["product_error"]["message"] == note
+    assert all(row["evidence"][str(n)] == note for n in range(2, 6))
+    assert all(row["steps"][str(n)] == "FAIL" for n in range(2, 6))
+    assert token not in json.dumps(row)
+    assert wire.released
+
+
 def test_product_auth_and_transport_are_unreadable(fixture):
     for auth in (True, False):
         wire = Wire(Path(fixture["path"]).read_bytes())
