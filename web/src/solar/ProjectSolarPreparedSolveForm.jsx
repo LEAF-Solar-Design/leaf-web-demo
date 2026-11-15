@@ -42,12 +42,12 @@ export function ProjectSolarPreparedSolveForm(props) {
         setConnection(event.target.value); save(event.target.value, frame, phase)
       }} /></label>
       <p>Use an existing connection verified for this project. This form does not create a connection.</p>
-      <label>Panel group<select value={frame} onChange={(event) => {
+      <label>Panel group<select aria-label="Panel group" value={frame} onChange={(event) => {
         setFrame(event.target.value); save(connection, event.target.value, phase)
       }}><option value="">Choose a panel group</option>{frames.map((item) => <option key={item.id} value={item.id}>
         {item.name} ({item.panel_count} panels)
       </option>)}</select></label>
-      <label>Solve stage<select value={phase} onChange={(event) => {
+      <label>Solve stage<select aria-label="Solve stage" value={phase} onChange={(event) => {
         setPhase(event.target.value); save(connection, frame, event.target.value)
       }}><option value="initial">Initial search</option><option value="background">Background search</option></select></label>
       <button type="submit" disabled={!ready}>Run solve</button>
