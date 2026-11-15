@@ -22,7 +22,12 @@ test('keyboard-only editing saves, reopens and downloads the exact widget', asyn
     await expect(target).toBeEnabled()
     for (let steps = 0; steps < 80; steps++) {
       if (await target.evaluate(node => node === document.activeElement)) {
-        await expect(target).toBeFocused(); actions.push(name); return
+        await expect(target).toBeFocused()
+        await expect(target).toBeVisible()
+        await expect(target).toHaveCSS('outline-style', 'solid')
+        await expect(target).toHaveCSS('outline-width', '3px')
+        await expect(target).toHaveCSS('outline-color', 'rgb(134, 239, 172)')
+        actions.push(name); return
       }
       await page.keyboard.press('Tab')
     }
