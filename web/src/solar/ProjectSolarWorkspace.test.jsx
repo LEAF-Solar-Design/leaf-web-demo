@@ -1411,7 +1411,7 @@ describe('Project Solar workspace composition', () => {
       noHost()
       h.view.unmount()
     }
-    expect(Object.keys(PROJECT_SOLAR_WORKSPACE_REASONS)).toHaveLength(23)
+    expect(Object.keys(PROJECT_SOLAR_WORKSPACE_REASONS)).toHaveLength(24)
     expect(projectSolarWorkspaceReason('not_a_reason')).toBeNull()
   })
 
@@ -1420,7 +1420,7 @@ describe('Project Solar workspace composition', () => {
     const maps = { PROJECT_SOLAR_WORKSPACE_REASONS, PROJECT_SOLAR_WORKSPACE_LABELS }
     const references = [...source.matchAll(new RegExp('PROJECT_SOLAR_WORKSPACE_(REASONS|LABELS)\\.(\\w+)', 'g'))]
     for (const map of Object.values(maps)) expect(Object.isFrozen(map)).toBe(true)
-    expect(new Set(references.map((match) => match[0])).size).toBe(25)
+    expect(new Set(references.map((match) => match[0])).size).toBe(26)
     for (const [, kind, key] of references) {
       const map = maps[`PROJECT_SOLAR_WORKSPACE_${kind}`]
       expect(Object.hasOwn(map, key)).toBe(true)
