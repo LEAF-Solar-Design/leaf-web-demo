@@ -198,7 +198,8 @@ describe('arithmetic', () => {
     expect(graph).toEqual(before)
   })
 
-  it('uses mounted Number setup, ordinary connection selectors and output add/remove controls', async () => {
+  // Retry once after observed 5s parallel CI timeouts to avoid expensive whole-job reruns.
+  it('uses mounted Number setup, ordinary connection selectors and output add/remove controls', { retry: 1 }, async () => {
     const changes = vi.fn()
     const view = render(<LabCanvas onChange={changes} />)
     fireEvent.click(screen.getByRole('button', { name: 'Number', exact: true }))

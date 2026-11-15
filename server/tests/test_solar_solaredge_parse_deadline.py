@@ -75,6 +75,31 @@ def slot_free():
     return False
 
 
+def test_resource_refusal_preserves_known_cause_without_trusting_bad_envelopes(monkeypatch):
+    import solar_solaredge_pdf as primitives
+    from test_solar_solaredge_pdf import _pdf, HELVETICA
+    monkeypatch.setattr(primitives, 'MAX_LETTERS', 0)
+    value = worker.verdict_bytes(_pdf(b'BT /F1 4 Tf (1.1) Tj ET', resources=HELVETICA))
+    assert worker.decode_verdict(0, value) is None
+    assert worker.decode_refusal(0, value) == 'REPORT_RESOURCE_LIMIT'
+    assert worker.decode_refusal(1, value) is None
+    for altered in [value[:-1], value[:-1] + b',"extra":1}',
+                    value.replace(b'REPORT_RESOURCE_LIMIT', b'FOREIGN_REASON'),
+                    value[:-1] + b',"refusal":"REPORT_RESOURCE_LIMIT"}']:
+        assert worker.decode_refusal(0, altered) is None
+
+
+def test_resource_refusal_from_actual_child_is_named_and_reaped(monkeypatch, children):
+    from test_solar_solaredge_pdf import _pdf, HELVETICA
+    code = ('import sys;sys.path.insert(0,' + repr(str(SERVER)) + ');'
+            'import solar_solaredge_pdf as p;p.MAX_LETTERS=0;'
+            'import solar_solaredge_parse_worker as w;raise SystemExit(w.main())')
+    monkeypatch.setattr(report, '_worker_argv', lambda: [sys.executable, '-B', '-c', code])
+    with pytest.raises(report.SolarEdgeReportError, match='REPORT_RESOURCE_LIMIT'):
+        report.parse_source(_pdf(b'BT /F1 4 Tf (1.1) Tj ET', resources=HELVETICA))
+    assert children and all(child.poll() is not None for child in children)
+
+
 def use(monkeypatch, argv, deadline=None, slots=None):
     monkeypatch.setattr(report, "_worker_argv", lambda: list(argv))
     if deadline is not None:

@@ -43,6 +43,39 @@ class WebFamilyTests(unittest.TestCase):
                 self.assertRetained([root + "/changed.py"])
                 self.assertRetained([*self.safe, root + "/changed.py"])
 
+    def test_xbench_python_and_markdown_are_independent(self):
+        paths = ["tools/xbench/benches/x01.py", "tools/xbench/README.md",
+                 "tools/xbench/__init__.py"]
+        self.assertEqual(filter_web_family(self.selected, self.rows, paths),
+                         self.nonweb)
+
+    def test_xbench_shared_config_and_unreviewed_paths_retain(self):
+        for path in ("tools/xbench/conftest.py", "tools/xbench/tests/conftest.py",
+                     "tools/xbench/pytest.ini", "tools/xbench/data.json",
+                     "tools/xbench/setup.cfg", "tools/xbench/pyproject.toml",
+                     "tools/xbench/tox.ini", "tools/xbench/package.json",
+                     "tools/xbench/custom.toml", "tools/xbench/custom.cfg",
+                     "tools/xbench/custom.ini", "tools/xbenchy/x.py",
+                     "tools/xbench/.hidden/x.py", "tools/xbench/.hidden.py"):
+            with self.subTest(path=path):
+                self.assertRetained([path])
+        result, reason = web_family_decision(
+            self.selected, self.rows, ["tools/other/x.py"])
+        self.assertEqual(result, self.selected)
+        self.assertIn("dependency path", reason)
+
+    def test_xbench_mixed_web_diff_retains(self):
+        for paths in (["tools/xbench/x.py", "web/src/a.js"],
+                      ["web/src/a.js", "tools/xbench/x.py"]):
+            self.assertRetained(paths)
+
+    def test_xbench_keeps_protected_and_prerequisite_ids(self):
+        self.assertEqual(filter_web_family(
+            self.selected, self.rows, ["tools/xbench/x.py"],
+            protected_ids={"web-unit", "web-demo-gate"},
+            prerequisites={"server-unit": ["bridge"], "bridge": ["web-build"]}),
+            self.nonweb | {"web-unit", "web-demo-gate", "web-build"})
+
     def test_real_external_web_inputs_and_runtime_keep_family(self):
         for path in (
             "server/app.py", "server/runtime/worker.py", "platform/runtime/worker.py",
