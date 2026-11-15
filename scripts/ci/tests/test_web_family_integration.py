@@ -17,24 +17,27 @@ ROOT = Path(__file__).resolve().parents[3]
 SAFE = ["server/tests/test_catalog_digest_boundary.py"]
 
 
-def test_xbench_has_no_web_family_consumers():
+def _audit_files(root, cap):
     audited_roots = {"web", "harness", "dispatch", "vendor", ".codebuild"}
+    excluded_dirs = {"node_modules", ".git", "dist", "build", ".next", "coverage",
+                     "__pycache__", ".venv", "venv", ".turbo", ".cache"}
     count = 0
     violations = []
 
     def walk_error(error):
         pytest.fail(f"X-bench dependency audit could not walk repo: {error}")
 
-    for directory, _, names in os.walk(ROOT, onerror=walk_error):
+    for directory, dirnames, names in os.walk(root, onerror=walk_error):
+        dirnames[:] = [name for name in dirnames if name not in excluded_dirs]
         for name in names:
             path = Path(directory) / name
-            relative = path.relative_to(ROOT)
+            relative = path.relative_to(root)
             if not (relative.parts[0] in audited_roots
                     or relative.as_posix() == "scripts/run-all-gates.py"
                     or name.startswith(("vite.config.", "next.config."))):
                 continue
             count += 1
-            assert count < 20_000, "X-bench dependency audit hit the 20,000-file cap"
+            assert count < cap, f"X-bench dependency audit hit the {cap:,}-file cap"
             if path.stat().st_size > 2_000_000:
                 continue
             with path.open("rb") as stream:
@@ -49,7 +52,25 @@ def test_xbench_has_no_web_family_consumers():
             # no literal dependency reference is exempted from this audit.
             if "tools/xbench" in text or "xbench_" in text:
                 violations.append(relative.as_posix())
+    return count, violations
+
+
+def test_xbench_has_no_web_family_consumers():
+    _, violations = _audit_files(ROOT, 20_000)
     assert not violations, "X-bench gained web family consumers: " + ", ".join(violations)
+
+
+def test_xbench_audit_prunes_installed_dependencies(tmp_path):
+    cap = 3
+    installed = tmp_path / "web" / "node_modules"
+    installed.mkdir(parents=True)
+    for index in range(cap + 1):
+        (installed / f"dependency-{index}.js").write_text("export default 0;", encoding="utf-8")
+    source = tmp_path / "web" / "src" / "a.js"
+    source.parent.mkdir()
+    source.write_text("export default 1;", encoding="utf-8")
+
+    assert _audit_files(tmp_path, cap) == (1, [])
 
 
 @pytest.fixture
