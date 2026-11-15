@@ -123,6 +123,10 @@ function sourceArchive(saved, previews = {}, target = 'web') {
 
 async function installBackend(page) {
   const state = makeCatProofState()
+  // Portfolio journeys need a representative drawing for real profile transitions rather than cat geometry proof.
+  state.base = { ...state.base, polylines: state.base.polylines.slice(0, 1) }
+  state.cat = { ...state.cat, polylines: state.cat.polylines.slice(0, 1) }
+  state.count = 1
   const backend = { calls: [], foreign: [], revisions: [], downloads: [], photoCalls: [], nativeCalls: [], nativeStatuses: [], nativeJob: null }
   await page.addInitScript(({ token, org }) => {
     localStorage.setItem('leaf.jwt', token)

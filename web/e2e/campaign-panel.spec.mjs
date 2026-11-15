@@ -109,6 +109,10 @@ function campaignReply(backend, method, path, body) {
 
 async function installBackend(page) {
   const proofState = makeCatProofState()
+  // Campaign journeys need a representative drawing for real profile transitions rather than cat geometry proof.
+  proofState.base = { ...proofState.base, polylines: proofState.base.polylines.slice(0, 1) }
+  proofState.cat = { ...proofState.cat, polylines: proofState.cat.polylines.slice(0, 1) }
+  proofState.count = 1
   const backend = {
     calls: [],
     foreign: [],
