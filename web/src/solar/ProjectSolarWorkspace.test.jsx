@@ -1387,7 +1387,7 @@ describe('Project Solar workspace composition', () => {
   it('R13E-44 composition owns no Viewer or runtime and all new copy uses the frozen maps', () => {
     const source = readFileSync(`${process.cwd()}/src/solar/ProjectSolarWorkspace.jsx`, 'utf8')
     const imports = [...source.matchAll(new RegExp("from ['\"]([^'\"]+)['\"]", 'g'))].map((match) => match[1])
-    expect(imports).toEqual(['react', './solarDrawingBinding.js', './SolarSettingsForm.jsx', './solarSettingsWire.js', './ProjectSolarReadPanel.jsx', './ProjectSolveReview.jsx', './ProjectSolarEdgePanel.jsx'])
+    expect(imports).toEqual(['react', './solarDrawingBinding.js', './SolarSettingsForm.jsx', './solarSettingsWire.js', './ProjectSolarReadPanel.jsx', './ProjectSolveReview.jsx', './ProjectSolarEdgePanel.jsx', './ProjectSolarPreparedSolveForm.jsx'])
     const reviewSource = readFileSync(`${process.cwd()}/src/solar/ProjectSolveReview.jsx`, 'utf8')
     const reviewImports = [...reviewSource.matchAll(new RegExp("from ['\"]([^'\"]+)['\"]", 'g'))].map((match) => match[1])
     for (const dependency of reviewImports) {
@@ -1432,4 +1432,16 @@ describe('Project Solar workspace composition', () => {
     expect(source).not.toMatch(/aria-label=["'][^"']*[A-Za-z][^"']*["']/)
     expect(source).not.toMatch(/title:\s*['"][^'"]+[A-Za-z][^'"]*['"]|['"][^'"\r\n]*[A-Za-z][^'"\r\n]*\.['"]/)
   })
+})
+
+it('production cloud Solve opens the saved-group preparation form', async () => {
+  const h = fixture('solar-solve-proposal')
+  h.row.engine_op = 'solar_solve_proposal'
+  h.mount({ openTool: h.row })
+  expect(screen.getByLabelText('Panel group')).toBeTruthy()
+  expect(screen.getByLabelText('Solver connection')).toBeTruthy()
+  expect(screen.queryByLabelText('Frame')).toBeNull()
+  expect(screen.queryByLabelText('Request')).toBeNull()
+  await waitFor(() => expect(h.client.readContext).toHaveBeenCalledWith(expect.objectContaining({ prepareSolve: true })))
+  expect(h.submit).not.toHaveBeenCalled()
 })

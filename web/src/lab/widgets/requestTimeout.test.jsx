@@ -1,0 +1,66 @@
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, expect, it, vi } from 'vitest'
+import WidgetsView from './WidgetsView.jsx'
+import { saveWidget } from './widgetsClient.js'
+import { createWidgetDoc } from './useWidgetEditor.js'
+
+const response = (body, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => body })
+const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done }); return { promise, resolve } }
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers() })
+
+it('bounds one stalled save and ignores a late successful acknowledgement without retrying', async () => {
+  vi.useFakeTimers()
+  const late = deferred(), fetch = vi.fn(() => late.promise)
+  const pending = saveWidget('timeout-proof', createWidgetDoc(), 1, { fetch, timeout: 10 })
+  await vi.advanceTimersByTimeAsync(11)
+  const result = await pending
+  expect(result).toMatchObject({ ok: false, status: 0, detail: 'Request timed out.' })
+  expect(fetch).toHaveBeenCalledTimes(1)
+  expect(fetch.mock.calls[0][1].signal.aborted).toBe(true)
+  expect(vi.getTimerCount()).toBe(0)
+  late.resolve(response({ revision: 2 }))
+  await vi.advanceTimersByTimeAsync(1000)
+  expect(await pending).toEqual(result)
+  expect(fetch).toHaveBeenCalledTimes(1)
+  expect(vi.getTimerCount()).toBe(0)
+})
+
+it('keeps the draft and prior head after a timed-out save, then requires explicit conflict recovery', async () => {
+  vi.useFakeTimers()
+  const late = deferred()
+  const fetch = vi.fn().mockResolvedValueOnce(response({ revision: 1 }))
+    .mockImplementationOnce(() => late.promise)
+    .mockResolvedValueOnce(response({ detail: 'changed after committed timeout' }, 409))
+    .mockImplementationOnce(async () => response({ revision: 2, kind: 'widget', graph: JSON.parse(fetch.mock.calls[1][1].body).graph }))
+  vi.stubGlobal('fetch', fetch)
+  render(<WidgetsView />)
+  fireEvent.change(screen.getByLabelText('Document ID'), { target: { value: 'timeout-proof' } })
+  fireEvent.click(screen.getByRole('button', { name: 'New', exact: true }))
+  fireEvent.click(screen.getByRole('button', { name: 'Add text', exact: true }))
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true })))
+  expect(screen.getByRole('status').textContent).toBe('Saved revision 1.')
+  fireEvent.change(screen.getByLabelText('Text'), { target: { value: 'Keep after timeout' } })
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true })))
+  await act(async () => { await vi.advanceTimersByTimeAsync(10001) })
+  expect(screen.getByRole('alert')).toHaveTextContent('Request timed out.')
+  expect(screen.getByLabelText('Text')).toHaveValue('Keep after timeout')
+  expect(fetch).toHaveBeenCalledTimes(2)
+  expect(fetch.mock.calls[1][1].signal.aborted).toBe(true)
+  expect(vi.getTimerCount()).toBe(0)
+  await act(async () => { late.resolve(response({ revision: 2 })); await vi.advanceTimersByTimeAsync(1) })
+  expect(screen.getByRole('alert')).toHaveTextContent('Request timed out.')
+  expect(screen.getByLabelText('Text')).toHaveValue('Keep after timeout')
+  expect(fetch).toHaveBeenCalledTimes(2)
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true })))
+  expect(JSON.parse(fetch.mock.calls[2][1].body).expected_head).toBe(1)
+  expect(screen.getByRole('status')).toHaveTextContent('Conflict:')
+  expect(screen.getByLabelText('Text')).toHaveValue('Keep after timeout')
+  expect(screen.getByRole('button', { name: 'Reload', exact: true })).toBeEnabled()
+  expect(fetch).toHaveBeenCalledTimes(3)
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Reload', exact: true })))
+  expect(screen.getByRole('status')).toHaveTextContent('Saved revision 2.')
+  fireEvent.click(document.querySelector('button[data-layer-id]'))
+  expect(screen.getByLabelText('Text')).toHaveValue('Keep after timeout')
+  expect(fetch).toHaveBeenCalledTimes(4)
+  expect(vi.getTimerCount()).toBe(0)
+})

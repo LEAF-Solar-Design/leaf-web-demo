@@ -238,7 +238,7 @@ def test_pvg_invalid_graph(monkeypatch):
         before = copy.deepcopy(malformed)
         refused("PVG_INVALID_TARGET", lambda: pvg.project_graph(malformed, envelope))
         assert malformed == before
-    monkeypatch.setattr(sdg, "MAX_NODES", 10)
+    monkeypatch.setattr(sdg, "MAX_GRAPH_NODES", 10)
     before = copy.deepcopy(value)
     refused("PVG_INVALID_TARGET", lambda: pvg.solve_graph(value, envelope))
     assert value == before
