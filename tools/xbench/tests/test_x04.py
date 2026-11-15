@@ -150,6 +150,45 @@ def test_upload_failed_is_failure(fixture):
     assert CAP not in json.dumps(row)
 
 
+@pytest.mark.parametrize("method,error", [
+    ("adopt_drawing", TimeoutError("token=" + "secret123" * 5 + " " + "unavailable " * 40)),
+    ("drawing_context", StudioError(503, "SIP_R1_INTAKE_UNAVAILABLE", "intake unavailable")),
+    ("drawing_context", StudioError(503, "SERVICE_UNAVAILABLE", "intake unavailable",
+                                    reason_code="SIP_R1_INTAKE_UNAVAILABLE")),
+])
+def test_adoption_or_intake_failure_stays_unreadable(fixture, monkeypatch, method, error):
+    client = FakeClient()
+    client.upload["dependencies"] = []
+    fixture["deps"] = []
+    original = getattr(client, method)
+    calls = []
+
+    def fail_once(*args, **kw):
+        calls.append((args, kw))
+        if len(calls) == 1:
+            raise error
+        return original(*args, **kw)
+
+    monkeypatch.setattr(client, method, fail_once)
+    other = {**fixture, "id": "customer-02"}
+    rows = x04.grade_files(client, client.transport, project=PROJECT, fixtures=[fixture, other])
+    row = rows[fixture["id"]]
+    assert row["steps"] == {"1": "PASS", **{str(n): "UNREADABLE" for n in range(2, 7)}}
+    prefix = f"adoption or intake unavailable: {type(error).__name__}: "
+    evidence = row["evidence"]["2"]
+    assert evidence.startswith(prefix)
+    assert len(evidence[len(prefix):]) <= 300
+    assert all(row["evidence"][str(n)] == evidence for n in range(2, 7))
+    if isinstance(error, StudioError):
+        assert "SIP_R1_INTAKE_UNAVAILABLE" in evidence
+    else:
+        assert "secret123" not in evidence
+        assert "[redacted]" in evidence
+        assert len(evidence[len(prefix):]) == 300
+    assert row["counts"] == []
+    assert rows[other["id"]]["steps"] == {str(n): "PASS" for n in range(1, 7)}
+
+
 def test_late_ready_fails(fixture):
     timer = FakeClock()
     client = FakeClient()

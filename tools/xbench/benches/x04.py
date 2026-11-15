@@ -128,9 +128,16 @@ def grade_files(client, transport, *, project, fixtures, clock=time.monotonic):
             adoption = client.adopt_drawing(project["project_id"], uploaded["drawing_id"], name=fid)
             intake = client.drawing_context(project["project_id"], adoption["version_id"],
                                             adoption["drawing_id"])["intake"]
-        except Exception:
+        except Exception as exc:
+            message = xbench_session.redact(str(exc))
+            if isinstance(exc, StudioError):
+                code = exc.reason_code or exc.error_code
+                if isinstance(code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", code):
+                    message = f"{code}: {xbench_session.redact(exc.message)}"
+            evidence = f"adoption or intake unavailable: {type(exc).__name__}: {message[:300]}"
             for n in range(2, 7):
-                mark(n, "UNREADABLE", "adoption or intake unavailable")
+                mark(n, "UNREADABLE", evidence)
+            continue
 
         provenance = adoption.get("provenance", {})
         report = find_dependency_report(upload, provenance, intake)
