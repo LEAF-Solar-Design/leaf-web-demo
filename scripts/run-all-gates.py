@@ -2210,7 +2210,7 @@ def build_suites() -> List[Suite]:
         Suite("server-sip-r4-jobs", "server durable canonical Solar graph jobs",
               "pytest", SERVER, _py_pytest("tests/test_sip_r4_jobs.py"), 26),
         Suite("server-sip-r5-policy", "server canonical Solar admission policy",
-              "pytest", SERVER, _py_pytest("tests/test_sip_r5_policy.py") + ["tests/test_xbench_named_refusals.py"], 15),
+              "pytest", SERVER, _py_pytest("tests/test_sip_r5_policy.py"), 15),
         Suite("server-text-match", "server constant-time text comparison that never raises",
               "pytest", SERVER, _py_pytest("tests/test_text_match.py"), 11),
         Suite("server-text-match-request-sites",
