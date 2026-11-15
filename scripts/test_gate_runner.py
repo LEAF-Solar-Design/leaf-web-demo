@@ -54,6 +54,50 @@ def _load_runner():
     return mod
 
 
+def test_extracted_runner_list_needs_no_related_helper(tmp_path):
+    extracted = tmp_path / "run-all-gates.py"
+    shutil.copyfile(SCRIPTS / "run-all-gates.py", extracted)
+    g = _load_runner()
+    assert g.vitest_related_selection is None
+    expected = g.selection_catalog(REPO)
+    proc = subprocess.run(
+        [sys.executable, "-B", str(extracted), "--list", "--catalog-root", str(REPO)],
+        cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == expected
+    assert list(tmp_path.iterdir()) == [extracted]
+
+
+@pytest.mark.parametrize("full_override", [False, True])
+def test_web_vitest_missing_helper_or_full_override_keeps_full_command(
+        tmp_path, monkeypatch, full_override):
+    g = _load_runner()
+    suite = next(s for s in g.build_suites() if s.id == "web-vitest-1")
+    monkeypatch.setenv("LEAF_VITEST_VERIFIED_RELATED", "1")
+    if full_override:
+        monkeypatch.setenv("LEAF_CI_FULL", "1")
+        monkeypatch.setattr(g, "load_vitest_related_selection", lambda: SimpleNamespace(
+            collect=lambda *_a: pytest.fail("full override must bypass collection")))
+    else:
+        monkeypatch.delenv("LEAF_CI_FULL", raising=False)
+        monkeypatch.setattr(g, "SCRIPTS_DIR", tmp_path / "absent")
+        assert g.load_vitest_related_selection() is None
+    captured = []
+
+    def child(argv, **kw):
+        captured.append((argv, kw["env"]))
+        return SimpleNamespace(returncode=0, stdout="Tests  9999 passed (9999)\n", stderr="")
+
+    monkeypatch.setattr(g.subprocess, "run", child)
+    result = g.run_suite(suite, tmp_path, reporting_disabled=True)
+    assert result.status == "PASS"
+    assert captured[0][0] == suite.argv
+    assert captured[0][1]["LEAF_VITEST_VERIFIED_RELATED"] == "0"
+    assert result.vitest_selection["mode"] == "full"
+    assert result.vitest_selection["reason"] == (
+        "full_override" if full_override else "helper_unavailable")
+
+
 @pytest.mark.parametrize("mode,output,rc,status", [
     ("related", "No test files found, exiting with code 0\n", 0, "PASS"),
     ("related", "No test files found, exiting with code 0\nError: collection failed", 0, "FAIL"),
@@ -75,12 +119,14 @@ def test_web_related_execution_empty_errors_and_full_floors(
     decision = {"base": "a" * 40, "mode": mode,
                 "reason": "source_graph_and_readers" if mode == "related" else "global_input",
                 "changed_count": 1, "reader_count": 1, "inputs": ["src/read.js"]}
-    monkeypatch.setattr(g.vitest_related_selection, "collect", lambda *_a: dict(decision))
+    monkeypatch.setattr(g.load_vitest_related_selection(), "collect", lambda *_a: dict(decision))
     monkeypatch.delenv("LEAF_GATE_FAULT_INJECT", raising=False)
+    monkeypatch.delenv("LEAF_CI_FULL", raising=False)
     captured = []
 
     def child(argv, **kw):
         captured.append(argv)
+        assert kw["env"]["LEAF_VITEST_VERIFIED_RELATED"] == ("1" if mode == "related" else "0")
         return SimpleNamespace(returncode=rc, stdout=output, stderr="")
 
     monkeypatch.setattr(g.subprocess, "run", child)
@@ -106,7 +152,7 @@ def test_related_reporting_options_are_vitest_options(tmp_path, monkeypatch):
     monkeypatch.setenv("LEAF_TRUSTED_CI_DIR", str(reporters))
     suite = g.Suite("web-vitest-1", "web", "vitest", tmp_path / "web",
                     ["npm", "run", "test:unit", "--", "--shard=1/3"], 1)
-    argv = g.vitest_related_selection.related_argv(suite.argv, ["src/read.test.js"])
+    argv = g.load_vitest_related_selection().related_argv(suite.argv, ["src/read.test.js"])
     command = g.reporting_command(suite, argv, {"LEAF_TEST_REPORT_DIR": str(tmp_path / "out")})
     assert command[:len(argv)] == argv
     assert "--" not in command
@@ -117,7 +163,7 @@ def test_related_reporting_options_are_vitest_options(tmp_path, monkeypatch):
 def test_stage_source_contracts_never_use_related_selection(tmp_path, monkeypatch):
     g = _load_runner()
     suite = next(s for s in g.build_suites() if s.id == "web-stage-source-contracts")
-    monkeypatch.setattr(g.vitest_related_selection, "collect",
+    monkeypatch.setattr(g.load_vitest_related_selection(), "collect",
                         lambda *_a: pytest.fail("stage contracts must run their fixed tests"))
     monkeypatch.setattr(g.subprocess, "run", lambda argv, **kw:
                         SimpleNamespace(returncode=0, stdout="Tests  1 passed (1)\n", stderr=""))

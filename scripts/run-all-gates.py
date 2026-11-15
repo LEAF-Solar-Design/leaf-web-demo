@@ -129,10 +129,23 @@ HARNESS = REPO / "harness"
 WEB = REPO / "web"
 AUTHORED_TOOLS = SERVER / "authored_tools.json"
 
-_vitest_spec = importlib.util.spec_from_file_location(
-    "vitest_related_selection", SCRIPTS_DIR / "ci/vitest_related_selection.py")
-vitest_related_selection = importlib.util.module_from_spec(_vitest_spec)
-_vitest_spec.loader.exec_module(vitest_related_selection)
+vitest_related_selection = None
+
+
+def load_vitest_related_selection():
+    # Catalog extraction copies only this runner. Listing must not require the
+    # execution helper, and an unavailable helper must retain full coverage.
+    global vitest_related_selection
+    if vitest_related_selection is None:
+        try:
+            spec = importlib.util.spec_from_file_location(
+                "vitest_related_selection", SCRIPTS_DIR / "ci/vitest_related_selection.py")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        except (OSError, ImportError, SyntaxError):
+            return None
+        vitest_related_selection = module
+    return vitest_related_selection
 
 # Defensive: never let the repo root shadow the stdlib `platform` module inside
 # THIS process. The runner only shells out, so it needs no repo imports.
@@ -5205,10 +5218,16 @@ def _run_suite_attempt(suite: Suite, log_dir: Path, attempt: int = 1,
     vitest_selection = {}
     if (suite.id in {"web-vitest-1", "web-vitest-2", "web-vitest-3"}
             and suite.kind == "vitest" and suite.cwd == WEB):
-        decision = vitest_related_selection.collect(REPO, os.environ)
+        policy = load_vitest_related_selection()
+        if os.environ.get("LEAF_CI_FULL") == "1" or policy is None:
+            decision = {"base": None, "mode": "full",
+                        "reason": "full_override" if os.environ.get("LEAF_CI_FULL") == "1"
+                        else "helper_unavailable", "changed_count": 0, "reader_count": 0}
+        else:
+            decision = policy.collect(REPO, os.environ)
         if decision["mode"] == "related":
             try:
-                argv = vitest_related_selection.related_argv(argv, decision["inputs"])
+                argv = policy.related_argv(argv, decision["inputs"])
             except ValueError:
                 decision.update(mode="full", reason="unsupported_launcher")
         vitest_selection = {k: v for k, v in decision.items() if k != "inputs"}
@@ -5241,6 +5260,11 @@ def _run_suite_attempt(suite: Suite, log_dir: Path, attempt: int = 1,
             "test_report_complete": False,
             "test_report_incomplete_reasons": [f"reporting_injection_failed:{type(exc).__name__}"],
         }
+    if vitest_selection:
+        # Set after reporter setup, which may replace trace_env. Clear any
+        # inherited marker on full fallback as well as on the full override.
+        trace_env["LEAF_VITEST_VERIFIED_RELATED"] = (
+            "1" if vitest_selection["mode"] == "related" else "0")
     argv = read_audit_command(suite, argv, trace_env, attempt)
     if suite.kind == "pytest" and "pytest" in argv:
         if str(SCRIPTS_DIR / "ci/run_unprivileged_pytest.py") in argv:
@@ -7388,6 +7412,7 @@ def verify_shard_results(results_dir: Path, *,
                     # counts are equally meaningless and refused.
                     related = (suite.id in {"web-vitest-1", "web-vitest-2", "web-vitest-3"}
                                and suite.kind == "vitest" and suite.cwd == WEB
+                               and load_vitest_related_selection() is not None
                                and vitest_related_selection.valid_related_result(
                                    e.get("vitest_selection"), executed))
                     if related:

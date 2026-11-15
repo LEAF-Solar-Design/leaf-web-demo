@@ -25,6 +25,40 @@ def test_base_required_even_with_changed_paths(tmp_path):
         assert decision["reason"] == "missing_base"
 
 
+def test_full_override_bypasses_git_and_related_selection(tmp_path):
+    def forbidden(*a, **kw):
+        pytest.fail("full override must not invoke git")
+    decision = policy.collect(tmp_path, {"TRUSTED_SHA": BASE, "LEAF_CI_FULL": "1"},
+                              run=forbidden)
+    assert decision["mode"] == "full" and decision["reason"] == "full_override"
+
+
+def test_reader_trigger_paths_remain_inputs_but_setup_is_not_artificial_input():
+    readers = {"web/scripts/next-fence-fixtures.mjs": "import fs from 'node:fs'",
+               "web/src/configReader.js": "require('child_process')",
+               "web/vitest.setup.js": "import fs from 'node:fs'"}
+    sources = {**SOURCES, **readers}
+    decision = policy.select(BASE, ["web/src/view.jsx"], sources)
+    assert decision["mode"] == "related"
+    assert decision["inputs"] == ["scripts/next-fence-fixtures.mjs", "src/configReader.js",
+                                   "src/view.jsx"]
+    assert decision["reader_count"] == 2
+    for path in readers:
+        assert policy.select(BASE, [path], sources)["mode"] == "full"
+
+
+def test_config_only_suppresses_triggers_for_verified_related_execution():
+    config = (Path(__file__).resolve().parents[2] / "web/vitest.config.js").read_text(encoding="utf-8")
+    assert "process.env.LEAF_VITEST_VERIFIED_RELATED === '1'" in config
+    assert "process.env.LEAF_CI_FULL !== '1'" in config
+    assert "process.argv.includes('related')" in config
+    assert "forceRerunTriggers: verifiedRelated ? [] : [" in config
+    assert "setupFiles: ['./vitest.setup.js']" in config
+    for trigger in ("**/*config*", "**/*setup*", "**/*fixture*", "**/public/**",
+                    "**/vendor/**", "**/generated/**", "../contract/**", "../scripts/**"):
+        assert repr(trigger) in config
+
+
 @pytest.mark.parametrize("env,revision,ancestry", [
     ({"TRUSTED_SHA": BASE}, BASE + "...HEAD", "--all"),
     ({"LEAF_VITEST_PR_BASE": BASE, "CODEBUILD_WEBHOOK_EVENT": "PULL_REQUEST_UPDATED"},

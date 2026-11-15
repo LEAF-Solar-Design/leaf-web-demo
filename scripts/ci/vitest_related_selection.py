@@ -6,6 +6,9 @@ import subprocess
 from pathlib import Path, PurePosixPath
 
 SOURCE_SUFFIXES = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"}
+# Vitest adds setupFiles as rerun triggers itself. They execute for every test
+# already, so including them as artificial reader inputs selects the full suite.
+SETUP_FILES = {"web/vitest.setup.js"}
 SHA = re.compile(r"[0-9a-fA-F]{40}")
 # Deliberately lexical, including comments/strings: false positives cost work,
 # false negatives lose source-reading contracts. Module markers cover aliases,
@@ -64,7 +67,8 @@ def select(base, changed, sources, *, error=None):
            or not isinstance(text, str) for p, text in sources.items()):
         decision["reason"] = "inventory_unavailable"
         return decision
-    readers = {p[4:] for p, text in sources.items() if IO_MARKERS.search(text)}
+    readers = {p[4:] for p, text in sources.items()
+               if p not in SETUP_FILES and IO_MARKERS.search(text)}
     decision["reader_count"] = len(readers)
     inputs = set(readers)
     for path in changed:
@@ -92,6 +96,8 @@ def collect(repo, env, *, run=None):
     LEAF_CHANGED_PATHS is intentionally ignored: it proves neither the base nor
     the completeness of a diff. No network, shell, ref guessing or HEAD~1.
     """
+    if env.get("LEAF_CI_FULL") == "1":
+        return select(None, None, None, error="full_override")
     run = subprocess.run if run is None else run
     event = env.get("CODEBUILD_WEBHOOK_EVENT", "")
     ref = env.get("CODEBUILD_WEBHOOK_HEAD_REF", "")
