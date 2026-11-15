@@ -34,6 +34,7 @@ import NavRail from './site/NavRail.jsx'
 import CockpitTopBand from './site/CockpitTopBand.jsx'
 import DraftingRibbon from './site/DraftingRibbon.jsx'
 import PropertiesDock, { drawingExtents, drawingPropertyName } from './site/PropertiesDock.jsx'
+import { drawingHeaderName } from './site/drawingHeaderName.js'
 import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
 import { byId, ladderListener, slashCommandHandlers } from './lib/actionRegistry.js'
 import useEscapeOwner from './lib/useEscapeOwner.js'
@@ -963,6 +964,7 @@ export default function App() {
   const canvasMarqueeRef = useRef(null)
   const registerCanvasMarquee = useCallback((fn) => { canvasMarqueeRef.current = fn }, [])
   const [activeIntake, setActiveIntake] = useState(null)
+  const [engineDocument, setEngineDocument] = useState(null)
   // The Viewer's own intake override (an engine document, a previewed or re-seated version) and the
   // base it sits over, as the Viewer reports them. The Solar overlay binds to what is on the canvas,
   // never to a remembered engine intake: a version replacement leaves that one behind.
@@ -1429,7 +1431,7 @@ export default function App() {
   // The MOUNTED DRAWING's own name — deliberately NOT called a project. It is
   // null when nothing is mounted, so the workspace-project derivation can tell
   // "a drawing is open, no project" apart from "nothing is open at all".
-  const drawingName = shown?.dwg ? shown.dwg.split(/[\\/]/).pop().replace(/\.dwg$/i, '') : null
+  const drawingName = drawingHeaderName(shown, activeIntake, engineDocument)
   // Prose fallback for the "What should Leaf do to <em>…</em>?" headline only.
   const projectName = drawingName || 'your project'
   // Honest identity: tenant id and tier are DISTINCT. tenant defaults to "demo"
@@ -2199,7 +2201,6 @@ export default function App() {
   // would move the server head under them, so it is refused with the reason
   // until the drafter saves or discards.
   const [engineDirty, setEngineDirty] = useState(false)
-  const [engineDocument, setEngineDocument] = useState(null)
   const localCadEngineDocumentRef = useRef(engineDocument?.documentId)
   useLayoutEffect(() => {
     const documentId = engineDocument?.documentId
@@ -2486,16 +2487,22 @@ export default function App() {
   const projectDrawingName = projectDrawing.intake?.dwg || projectSolar.scope.binding?.drawing_id || ''
   const visibleLayers = projectMode ? projectSolarRuntime.visibleLayers : standaloneVisibleLayers
   const setVisibleLayers = projectMode ? projectSolarRuntime.setVisibleLayers : setStandaloneVisibleLayers
+  // Context reads can briefly hide the drawing during checkout refresh. Retire
+  // selection for a canonical identity change, not that read's pending state.
+  const projectDrawingScopeKey = projectMode && projectSolar.scope.binding
+    ? 'project:' + [projectSolar.scope.binding.organization_id, projectSolar.scope.binding.project_id,
+      projectSolar.scope.binding.drawing_id, projectSolar.scope.binding.input_version_id].join(':')
+    : null
   const previousProjectDrawing = useRef({ projectMode: false, drawingKey: null })
   useLayoutEffect(() => {
     const previous = previousProjectDrawing.current
     if ((projectMode || previous.projectMode)
-      && (previous.projectMode !== projectMode || previous.drawingKey !== projectDrawing.drawingKey)) {
+      && (previous.projectMode !== projectMode || previous.drawingKey !== projectDrawingScopeKey)) {
       setSelectedHandle(null)
       clearViewHistory()
     }
-    previousProjectDrawing.current = { projectMode, drawingKey: projectDrawing.drawingKey }
-  }, [projectMode, projectDrawing.drawingKey, clearViewHistory])
+    previousProjectDrawing.current = { projectMode, drawingKey: projectDrawingScopeKey }
+  }, [projectMode, projectDrawingScopeKey, clearViewHistory])
   const consoleDrawingKey = `console:${drawingLoad.drawingId}`
   const consoleObjectIndex = useMemo(() => projectMode
     ? projectDrawing.mode === 'ready' ? buildDrawingObjectIndex({

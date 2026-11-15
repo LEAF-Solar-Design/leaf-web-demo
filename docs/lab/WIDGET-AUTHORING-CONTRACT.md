@@ -88,6 +88,13 @@ proved recipe sets each row to X14, W330, H24 with Y14/46/78/110, leaving room f
 the sample values. Check actual glyph bounds and the screenshot after changing
 text, font, scale or geometry. Increase the box or reduce scale when needed.
 
+The short Text field keeps its one-line, 40-character limit. Choose Edit full
+text for a multiline editor using the document contract's 512 UTF-16-unit limit.
+Long or multiline loaded values open in that editor automatically. Use short
+text becomes available when the value fits the short field. Changing editor
+mode does not change document text or save it. Newlines remain document data;
+the existing SVG clipping and line-layout rules still apply.
+
 Preview paints prefer defined semantic palette roles. If a role is absent, the
 renderer falls back to host foreground, then host ink, then current color. The
 host must provide a readable foreground/background pairing. This does not

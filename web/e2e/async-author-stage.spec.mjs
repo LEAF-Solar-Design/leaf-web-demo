@@ -2,6 +2,9 @@ import { expect, test } from '@playwright/test'
 import { AUTHORED_TOOL, catProofResponse, makeCatProofState } from './catProofFixture.mjs'
 import { scaled } from './timeScale.mjs'
 
+// Save video encoding CPU in this mock-driven spec; inherit failure screenshots and retained traces.
+test.use({ video: 'off' })
+
 const SURFACES = [
   { name: 'unified surface', path: '/try?proof=1' },
   { name: 'console surface', path: '/app?dev=1&proof=1', railButton: true },

@@ -7,11 +7,12 @@ import { catProofResponse, makeCatProofState } from './catProofFixture.mjs'
 import { scaled } from './timeScale.mjs'
 
 test.describe.configure({ mode: 'parallel' })
+test.use({ video: 'off', trace: 'off' })
 
-// Only these fixture journeys record diagnostics; normal selected CI retains text.
+// These fixture journeys retain custom failure diagnostics.
 const projectClickDiagnostics = new WeakMap()
 const traceTest = test.extend({
-  trace: 'on',
+  trace: 'off',
   s03Diagnostics: [async ({ page }, use, testInfo) => {
     const started = Date.now()
     const timeline = []

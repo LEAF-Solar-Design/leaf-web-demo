@@ -53,7 +53,7 @@ describe('O03 finite retention transport through existing request authority', ()
   it('requires trusted request and invalid functions', () => {
     expect(() => createProjectLogRetentionMethods(null, invalid)).toThrow(TypeError)
     expect(() => createProjectLogRetentionMethods(request, null)).toThrow(TypeError)
-    expect(Object.keys(client).sort()).toEqual(cases.map(value => value.name).sort())
+    expect(Object.keys(client).sort()).toEqual([...cases.map(value => value.name), 'retentionHistory'].sort())
   })
   it.each(cases)('$name uses exact fixed route and bounded request', async ({ name, args, path, body, result }) => {
     request.mockResolvedValue(result)
@@ -116,5 +116,90 @@ describe('O03 finite retention transport through existing request authority', ()
   it('preserves transport errors without marking or retrying', async () => {
     const error = Object.assign(new Error('transport unavailable'), { dispatched: 'uncertain' }); request.mockRejectedValue(error)
     await expect(client.retentionRecover(project, id, { signal })).rejects.toBe(error); expect(error.dispatched).toBe('uncertain'); expect(request).toHaveBeenCalledTimes(1)
+  })
+})
+
+const historyItem = { resourceId: id, revision: 1, admittedAt: at, parentDeadlineAt: deadline, expired: false, dueAt: at,
+  schedule: audit.intent.schedule, definition: audit.intent.definition, prepared: audit.intent.prepared,
+  checkpoint: { phase: 'admitted', batches: 0 }, counters: null, archiveDigest: null }
+const history = { items: [historyItem], nextCursor: null, asOf: '2026-11-14T09:46:00.000Z' }
+describe('O03 bounded read-only history transport', () => {
+  it('uses the existing GET authority with default limit and no body', async () => {
+    request.mockResolvedValue(history)
+    expect(await client.retentionHistory(project, { signal })).toEqual(history)
+    expect(request).toHaveBeenCalledExactlyOnceWith(project, '/integrations/retention/executions?limit=25', { signal })
+  })
+  it('forwards a canonical opaque position and explicit limit', async () => {
+    request.mockResolvedValue({ ...history, nextCursor: 'e30' })
+    expect((await client.retentionHistory(project, { signal, limit: 1, after: 'e30' })).nextCursor).toBe('e30')
+    expect(request).toHaveBeenCalledExactlyOnceWith(project, '/integrations/retention/executions?limit=1&after=e30', { signal })
+  })
+  it('accepts the exact empty clock response without inventing totals', async () => {
+    const empty = { ...history, items: [] }; request.mockResolvedValue(empty)
+    expect(await client.retentionHistory(project, { signal })).toEqual(empty)
+  })
+  it('accepts actual stored counters and a dispatched summary without a batch envelope', async () => {
+    const value = { ...history, items: [{ ...historyItem, revision: 4, checkpoint: { phase: 'dispatched', batches: 1, last_batch_id: digest },
+      counters: { input: 10, active: 8, archived: 2, deletedBuild: 1, deletedOther: 1, restored: 0, batchesBuild: 1, batchesOther: 1 }, archiveDigest: digest }] }
+    request.mockResolvedValue(value); expect(await client.retentionHistory(project, { signal })).toEqual(value)
+  })
+  it('accepts strictly descending admission and ID ties', async () => {
+    const value = { ...history, items: [{ ...historyItem, resourceId: authority }, historyItem] }
+    request.mockResolvedValue(value); expect(await client.retentionHistory(project, { signal })).toEqual(value)
+  })
+  it.each([
+    { name: 'zero limit', options: () => ({ signal, limit: 0 }) },
+    { name: 'large limit', options: () => ({ signal, limit: 26 }) },
+    { name: 'fractional limit', options: () => ({ signal, limit: 1.5 }) },
+    { name: 'string limit', options: () => ({ signal, limit: '1' }) },
+    { name: 'unknown scope', options: () => ({ signal, tenantId: project }) },
+    { name: 'empty cursor', options: () => ({ signal, after: '' }) },
+    { name: 'padded cursor', options: () => ({ signal, after: 'e30=' }) },
+    { name: 'noncanonical cursor bits', options: () => ({ signal, after: 'e31' }) },
+    { name: 'impossible cursor length', options: () => ({ signal, after: 'a' }) },
+    { name: 'long cursor', options: () => ({ signal, after: 'a'.repeat(1025) }) },
+    { name: 'missing signal', options: () => ({}) },
+    { name: 'missing context', options: () => undefined },
+    { name: 'fake signal', options: () => ({ signal: { aborted: false } }) },
+    { name: 'aborted signal', options: () => { const controller = new AbortController(); controller.abort(); return { signal: controller.signal } } },
+  ])('rejects $name before dispatch', async ({ options }) => {
+    await expect(client.retentionHistory(project, options())).rejects.toMatchObject({ code: 'INTEGRATION_INVALID_INPUT' }); expect(request).not.toHaveBeenCalled()
+  })
+  it.each([project + '\n', '../other-project', undefined])('rejects invalid history project %s', async value => {
+    await expect(client.retentionHistory(value, { signal })).rejects.toMatchObject({ code: 'INTEGRATION_INVALID_INPUT' }); expect(request).not.toHaveBeenCalled()
+  })
+  it.each([
+    { name: 'raw execution', mutate: value => { value.items[0].execution = { token_hash: digest } } },
+    { name: 'raw state', mutate: value => { value.items[0].state = { active_digests: [] } } },
+    { name: 'chunk manifests', mutate: value => { value.items[0].active_digests = [digest] } },
+    { name: 'raw rows', mutate: value => { value.items[0].rows = [] } },
+    { name: 'token in reference', mutate: value => { value.items[0].schedule.token = digest } },
+    { name: 'batch in summary', mutate: value => { value.items[0].checkpoint.batch = {} } },
+    { name: 'bad deadline', mutate: value => { value.items[0].parentDeadlineAt = '2026-11-14T10:49:00.000Z' } },
+    { name: 'noncanonical UTC', mutate: value => { value.asOf = '2026-11-14T09:46:00Z' } },
+    { name: 'invalid date', mutate: value => { value.asOf = '2026-02-30T09:46:00.000Z' } },
+    { name: 'admission beyond horizon', mutate: value => { value.asOf = '2026-11-14T09:44:00.000Z' } },
+    { name: 'negative count', mutate: value => { value.items[0].checkpoint.batches = -1 } },
+    { name: 'wrong ID namespace', mutate: value => { value.items[0].resourceId = table } },
+    { name: 'counter digest mismatch', mutate: value => { value.items[0].archiveDigest = digest } },
+    { name: 'duplicate item', mutate: value => { value.items.push(value.items[0]) } },
+    { name: 'reversed ties', mutate: value => { value.items.push({ ...value.items[0], resourceId: authority }) } },
+    { name: 'noncanonical next cursor', mutate: value => { value.nextCursor = 'e31' } },
+    { name: 'unknown top field', mutate: value => { value.total = 100 } },
+    { name: 'oversize response', mutate: value => { value.private = 'x'.repeat(65536) } },
+    { name: 'too many items', mutate: value => { value.items = Array.from({ length: 26 }, () => ({ ...historyItem })) } },
+  ])('fails closed on $name with dispatched false', async ({ mutate }) => {
+    const value = JSON.parse(JSON.stringify(history)); mutate(value); request.mockResolvedValue(value)
+    await expect(client.retentionHistory(project, { signal })).rejects.toMatchObject({ code: 'INTEGRATION_INVALID_INPUT', dispatched: false })
+    expect(request).toHaveBeenCalledTimes(1)
+  })
+  it('rejects more returned items than the requested limit', async () => {
+    request.mockResolvedValue({ ...history, items: [{ ...historyItem, resourceId: authority }, historyItem] })
+    await expect(client.retentionHistory(project, { signal, limit: 1 })).rejects.toMatchObject({ dispatched: false })
+  })
+  it('preserves transport errors without retry or dispatch mutation', async () => {
+    const failure = new Error('transport unavailable'); request.mockRejectedValue(failure)
+    await expect(client.retentionHistory(project, { signal })).rejects.toBe(failure)
+    expect(failure).not.toHaveProperty('dispatched'); expect(request).toHaveBeenCalledTimes(1)
   })
 })

@@ -63,6 +63,23 @@ const restoreReceipt = z.strictObject({ invocation_id: digest, target_id: eid, p
   review_id: review, changed_count: count, archive_count: count, archive_digest: digest, completed_at: utc })
   .refine(value => value.revision === value.previous_revision + 1 && value.changed_count <= value.archive_count)
 const restoreResult = z.union([restoreReceipt, z.strictObject({ changed_count: z.literal(0), revision, stop_reason: z.literal('complete') })])
+// Opaque keyset positions use canonical, unpadded base64url. They never grant access.
+const historyCursor = z.string().min(1).max(1024).regex(/^[A-Za-z0-9_-]+(?![\s\S])/).refine(value => {
+  const remainder = value.length % 4
+  const tail = ['ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz', '0123456789-_'].join('').indexOf(value.at(-1))
+  return remainder !== 1 && (remainder !== 2 || (tail & 15) === 0) && (remainder !== 3 || (tail & 3) === 0)
+})
+const historyCheckpoint = z.strictObject({ phase: z.enum(['admitted', 'dispatched', 'complete']), batches: count,
+  stop_reason: z.enum(['complete', 'max_batches', 'deadline', 'conflict', 'paused']).optional(), last_batch_id: digest.optional() })
+const historyItem = z.strictObject({ resourceId: eid, revision, admittedAt: utc, parentDeadlineAt: utc, expired: z.boolean(),
+  dueAt: utc.refine(value => value.endsWith('T09:45:00.000Z')), schedule: boundRef(identity), definition: boundRef(identity), prepared: boundRef(table),
+  checkpoint: historyCheckpoint, counters: audit.shape.counters.nullable(), archiveDigest: digest.nullable() })
+  .refine(value => Date.parse(value.parentDeadlineAt) - Date.parse(value.admittedAt) === 240000 &&
+    (value.counters === null) === (value.archiveDigest === null))
+const historyPage = z.strictObject({ items: z.array(historyItem).max(25), nextCursor: historyCursor.nullable(), asOf: utc })
+  .refine(value => value.items.every((item, index) => item.admittedAt <= value.asOf && (index === 0 ||
+    value.items[index - 1].admittedAt > item.admittedAt || (value.items[index - 1].admittedAt === item.admittedAt &&
+      value.items[index - 1].resourceId > item.resourceId))))
 const safeKeys = new Set(['__proto__', 'prototype', 'constructor'])
 function jsonBytes(value) {
   let nodes = 0
@@ -115,6 +132,14 @@ export function createProjectLogRetentionMethods(request, invalid) {
   const executionPath = value => 'executions/' + parse(eid, value)
   const versionPath = (kind, id, version) => kind + '/' + parse(slug, id) + '/versions/' + parse(revision, version)
   return {
+    async retentionHistory(projectId, context) {
+      if (!context || typeof context !== 'object' || Object.keys(context).some(key => !['signal', 'limit', 'after'].includes(key))) throw invalid()
+      const signal = validateOptions({ signal: context.signal })
+      const value = parse(z.strictObject({ limit: z.number().int().min(1).max(25), after: historyCursor.optional() }),
+        { limit: context.limit === undefined ? 25 : context.limit, ...(context.after === undefined ? {} : { after: context.after }) })
+      const query = new URLSearchParams({ limit: String(value.limit) }); if (value.after !== undefined) query.set('after', value.after)
+      return send(projectId, 'executions?' + query, signal, 'GET', undefined, historyPage, result => result.items.length <= value.limit)
+    },
     async retentionPrepare(projectId, input, context) { const signal = validateOptions(context); const body = parse(prepareInput, input)
       return send(projectId, 'prepare', signal, 'POST', body, z.strictObject({ tableId: table, revision: z.literal(1) })) },
     async retentionRegisterDefinition(projectId, input, context) { const signal = validateOptions(context); const body = parse(definitionInput, input)
