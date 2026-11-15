@@ -362,3 +362,24 @@ def test_corpus_member_headers_across_compressed_chunk_boundaries(first_size):
     material = references.validate('rows.jsonl.gz', 'application/gzip', raw, allow_corpus_members=True)
     assert material['sha256'] == hashlib.sha256(raw).hexdigest()
     assert gzip.decompress(raw) == data
+
+
+@pytest.mark.parametrize('raw', [
+    '{"x":1}\n'.encode('utf-16'),
+    b'{"x":"\xff"}\n',
+    rb'{"x":"\ud800"}' + b'\n',
+    rb'{"x":["\udfff"]}' + b'\n',
+    rb'{"\ud800":1}' + b'\n',
+])
+def test_invalid_unicode_rows_refuse(raw):
+    with pytest.raises(references.InvalidReference):
+        references.validate_corpus(gzip.compress(raw))
+
+@pytest.mark.parametrize('raw', [
+    rb'{"x":"\ud83d\ude00"}' + b'\n',
+    rb'{"x":"\\ud800"}' + b'\n',
+    '{"x":"caf\u00e9"}\n'.encode('utf-8'),
+    b'{"x":1}\n',
+])
+def test_valid_unicode_and_literal_escape_rows_retain_support(raw):
+    references.validate_corpus(gzip.compress(raw))

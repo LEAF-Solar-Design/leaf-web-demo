@@ -39,6 +39,72 @@ def canonical_start(fresh):
     return lane, project, receipt, base
 
 
+def test_native_editor_pose_save_reopens_exact_bytes_and_current_inspection(fresh):
+    import solar_native_layout_dxf as native
+    lane, project, first, base = canonical_start(fresh)
+    parent = first['drawing_version']['version_id']
+    before = lane.http.get(base + f'/versions/{parent}/dxf').content
+    original = native.decode_native_layout(before)
+    document = deepcopy(original.document)
+    document['state']['frames'][0]['vertices'] = [
+        (x + 2, y - 1) for x, y in document['state']['frames'][0]['vertices']]
+    scope = {'organization_id': lane.org, 'project_id': project,
+             'drawing_id': layout.UUID(first['drawing_id'])}
+    raw = native.materialize_native_layout(scope, None, document, None,
+                                           parameters=original.parameters)
+    cap = lane.http.post(base + '/checkout').json()['checkout_capability']
+    headers = {'Content-Type': 'application/dxf', 'Idempotency-Key': str(uuid4()),
+               'X-Checkout-Capability': cap}
+    route = base + f'/versions/{parent}/editor'
+    saved = lane.http.post(route, content=raw, headers=headers)
+    assert saved.status_code == 200, saved.text
+    receipt = saved.json()
+    assert receipt['source_sha256'] == editor._sha(raw)
+    assert receipt['drawing_version']['seq'] == 2
+    child = receipt['drawing_version']['version_id']
+    assert lane.http.get(base + f'/versions/{child}/dxf').content == raw
+    context = layout.project.resolve_context(lane.tenant, project, layout.UUID(child),
+        drawing_id=layout.UUID(first['drawing_id']))
+    assert ps.decode_document(context.intake[layout.KEY]['document'].encode()) == document
+    assert context.intake[layout.KEY]['parameters'] == original.parameters
+    inspected = lane.http.get(base + f'/versions/{child}/solar-layout')
+    assert inspected.status_code == 200, inspected.text
+    assert inspected.json()['physical_source']['physical_head'] == receipt['intake_sha256']
+    # Exact retry stays one publication, including a released checkout.
+    assert lane.http.delete(base + '/checkout', headers={'X-Checkout-Capability': cap}).status_code == 200
+    assert lane.http.post(route, content=raw, headers=headers).json() == receipt
+    from leaf_platform import store
+    assert len(store.list_drawing_versions(lane.org, project)) == 2
+    assert lane.http.get(base + f'/versions/{parent}/dxf').content == before
+
+
+@pytest.mark.parametrize('change', ['scope', 'provenance', 'resize'])
+def test_native_editor_refuses_untrusted_attributes_without_publication(fresh, change):
+    import solar_native_layout_dxf as native
+    from leaf_platform import store
+    lane, project, first, base = canonical_start(fresh)
+    parent = first['drawing_version']['version_id']
+    original = native.decode_native_layout(lane.http.get(base + f'/versions/{parent}/dxf').content)
+    document, parameters = deepcopy(original.document), deepcopy(original.parameters)
+    scope = {'organization_id': lane.org, 'project_id': project,
+             'drawing_id': layout.UUID(first['drawing_id'])}
+    if change == 'scope':
+        scope['organization_id'] = uuid4()
+    elif change == 'provenance':
+        parameters['unexpected_provenance'] = True
+    else:
+        vertices = document['state']['frames'][0]['vertices']
+        document['state']['frames'][0]['vertices'] = [(x * 2, y) for x, y in vertices]
+    raw = native.materialize_native_layout(scope, None, document, None, parameters=parameters)
+    cap = lane.http.post(base + '/checkout').json()['checkout_capability']
+    response = lane.http.post(base + f'/versions/{parent}/editor', content=raw,
+        headers={'Content-Type': 'application/dxf', 'Idempotency-Key': str(uuid4()),
+                 'X-Checkout-Capability': cap})
+    assert response.status_code == 422, response.text
+    assert response.json()['error']['reason_code'] == 'PROJECT_EDITOR_NATIVE_LAYOUT_INVALID'
+    assert len(store.list_drawing_versions(lane.org, project)) == 1
+
+
 def test_canonical_initial_physical_continuity_and_exact_restore(fresh):
     import solar_native_layout_dxf as native
     lane, project, first, base = canonical_start(fresh)
@@ -114,7 +180,11 @@ def test_canonical_continuity_refuses_before_mutation(fresh, failure):
                 values['boundary'] = [[x + 1000, y] for x, y in values['boundary']]
                 document, parameters = fp.prepare_initial_frames(**values)
             raw = native.materialize_native_layout(scope, None, document, None, parameters=parameters)
-        saved = editor.save_dxf(lane.tenant, project, drawing, parent, raw, request_id=uuid4(), capability=cap)
+        # Deliberately seed corrupt server-owned state for the downstream reader
+        # controls. An ordinary native editor save now refuses these bytes.
+        restored = {'_restored_intake': context.intake_bytes} if failure != 'stale_version' else {}
+        saved = editor.save_dxf(lane.tenant, project, drawing, parent, raw,
+            request_id=uuid4(), capability=cap, **restored)
         if failure != 'stale_version':
             parent = layout.UUID(saved['drawing_version']['version_id'])
             expected = 'PROJECT_LAYOUT_NATIVE_SCOPE_MISMATCH' if failure == 'foreign_metadata' else 'PROJECT_LAYOUT_NATIVE_METADATA_INVALID'
@@ -215,14 +285,17 @@ def test_initial_real_storage_metadata_replay_and_normal_history(fresh, monkeypa
     lane, project = fresh
     route, request, calls = f'/api/projects/{project}/solar-layout', uuid4(), []
     body = initial_body()
-    def synthetic_writer(context, head, document, source, *, parameters):
+    real_writer = layout.materialize_native_layout
+    def observed_native_writer(context, head, document, source, *, parameters):
         assert context['project_id'] == project and head is None and source is None
         assert parameters['generation']['boundary'] == body['boundary']
         assert parameters['generation']['preset'] == body['preset']
         assert document['state']['frames']
         calls.append(deepcopy(document))
+        # Keep the storage/replay assertions on actual native producer bytes.
+        lane.raw = real_writer(context, head, document, source, parameters=parameters)
         return lane.raw
-    monkeypatch.setattr(layout, 'materialize_native_layout', synthetic_writer)
+    monkeypatch.setattr(layout, 'materialize_native_layout', observed_native_writer)
     first = lane.http.post(route, json=body, headers={'Idempotency-Key': str(request)})
     assert first.status_code == 200, first.text
     receipt = first.json()
