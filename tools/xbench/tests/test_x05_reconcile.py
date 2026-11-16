@@ -1296,7 +1296,8 @@ def test_provenance_aggregate_subprocess_bytes_deterministic_with_simultaneous_c
 
 
 def inverter_evidence():
-    return dict(inverter_loads=dict(strings={"INV-A":2}, optimizers={"INV-A":12}, panels={"INV-A":24}, kw_dc={"INV-A":"9.6"}),
+    return dict(oracle_panels=[dict(string_id="A", panels=10),dict(string_id="B", panels=14)],
+                oracle_dc_power=[dict(string_id="A", kw_dc="4"),dict(string_id="B", kw_dc="5.6")], inverter_loads=dict(strings={"INV-A":2}, optimizers={"INV-A":12}, panels={"INV-A":24}, kw_dc={"INV-A":"9.6"}),
                 **{field: [dict(inverter_id="INV-A", grid_id="g")]
                  for field in ("saved_inverters", "before_inverters", "reopened_inverters")},
                 **{field: [dict(string_id=key, inverter_id="INV-A") for key in ("A", "B")]
@@ -4323,6 +4324,7 @@ def three_string_envelope():
     for field in ("oracle_assignments", "saved_assignments", "before_assignments", "reopened_assignments"):
         evidence[field].append(dict(string_id="C", inverter_id="INV-A"))
     evidence["inverter_loads"]["strings"]["INV-A"] = 3
+    evidence["oracle_panels"], evidence["oracle_dc_power"] = deepcopy(panels), deepcopy(power)
     return envelope
 
 
@@ -5314,8 +5316,94 @@ def per_string_redistribution_envelope():
 def test_per_string_metric_proof_limit_replay():
     from benches import x05_reconcile as m
     envelope = per_string_redistribution_envelope()
-    assert m._seven_step_envelope(envelope)['verdict'] == 'PASS'
+    assert m._seven_step_envelope(envelope)['verdict'] == 'FAIL'
     panels = [dict(string_id='A',panels=10),dict(string_id='B',panels=14)]
     power = [dict(string_id='A',kw_dc='4'),dict(string_id='B',kw_dc='5.6')]
     assert m.compare_string_panel_counts(panels,envelope['grid']['panel_counts'])['counts']['mismatched'] == 2
     assert m.compare_string_dc_power(power,envelope['grid']['dc_power'])['counts']['mismatched'] == 2
+
+
+def test_composed_independent_string_metrics_swaps_and_missing_oracle():
+    envelope = per_string_redistribution_envelope()
+    result = reconcile_seven_steps_json(json.dumps(envelope))
+    assert result['verdict'] == 'FAIL'
+    for metric in ('panels','kw_dc'):
+        assert result['string_metrics']['metrics'][metric]['comparison']['counts']['mismatched'] == 2
+        assert result['string_metrics']['metrics'][metric]['oracle_consistency']['verdict'] == 'PASS'
+    assert result['inverter_loads']['verdict'] == result['inverter_load_reopen']['verdict'] == 'PASS'
+    envelope['assurance']['evidence']['oracle_panels'] = None
+    missing = reconcile_seven_steps_json(json.dumps(envelope))
+    assert missing['verdict'] == 'UNREADABLE'
+    assert missing['string_metrics']['metrics']['kw_dc'] == result['string_metrics']['metrics']['kw_dc']
+    envelope['assurance']['evidence']['oracle_dc_power'] = None
+    assert reconcile_seven_steps_json(json.dumps(envelope))['string_metrics']['metrics']['kw_dc']['comparison']['verdict'] == 'UNREADABLE'
+
+
+@pytest.mark.parametrize('metric,rows,total', [('panels',[dict(string_id='A',panels=2),dict(string_id='B',panels=3)],5),
+    ('kw_dc',[dict(string_id='A',kw_dc='0.1'),dict(string_id='B',kw_dc='0.2')],'0.3')])
+def test_independent_string_metric_oracle_sum_and_explicit_coverage(metric,rows,total):
+    from benches import x05_reconcile as m
+    original = deepcopy(rows)
+    assert m.compare_string_metric_oracle_total(['A','B'],rows,{metric:total},metric)['verdict'] == 'PASS'
+    assert m.compare_string_metric_oracle_total(['A','B'],rows,{metric:6},metric)['verdict'] == 'FAIL'
+    for ids in (None, [], ['A','A'], ['A'], ['A','C']):
+        assert m.compare_string_metric_oracle_total(ids,rows,{metric:total},metric)['verdict'] == 'UNREADABLE'
+    assert rows == original
+
+
+def test_mutually_matching_per_string_values_cannot_hide_report_contradiction():
+    envelope = seven_step_envelope()
+    envelope['assurance']['evidence']['oracle_panels'][0]['panels'] = 11
+    envelope['grid']['panel_counts'][0]['panels'] = 11
+    result = reconcile_seven_steps_json(json.dumps(envelope))
+    check = result['string_metrics']['metrics']['panels']
+    assert check['comparison']['verdict'] == 'PASS'
+    assert check['oracle_consistency']['verdict'] == 'FAIL' and result['verdict'] == 'FAIL'
+
+
+@pytest.mark.parametrize('metric', ['panels','kw_dc'])
+@pytest.mark.parametrize('bad', [None, {}, 'private-canary', [None], [{}],
+    [dict(string_id='',panels=1,kw_dc='1')], [dict(string_id='x'*129,panels=1,kw_dc='1')],
+    [dict(string_id='A',panels=True,kw_dc=True)], [dict(string_id='A',panels=-1,kw_dc='NaN')]])
+def test_independent_string_metric_schema_sanitized_unchanged(metric,bad):
+    from benches import x05_reconcile as m
+    compare = m.compare_string_panel_counts if metric == 'panels' else m.compare_string_dc_power
+    original = deepcopy(bad)
+    result = compare(bad,[dict(string_id='A',**{metric:1})])
+    assert result['verdict'] == 'UNREADABLE'
+    assert len(serialize_result(result)) < 200 and 'private-canary' not in serialize_result(result) and 'x'*129 not in serialize_result(result)
+    assert bad == original
+    rows = [dict(string_id='A',**{metric:1})]*2
+    assert compare(rows,rows)['verdict'] == 'UNREADABLE'
+
+
+@pytest.mark.parametrize('metric', ['panels','kw_dc'])
+@pytest.mark.parametrize('missing', [False,True])
+def test_independent_string_metric_strict_transport_preserves_exact_diagnostics(metric,missing):
+    from benches import x05_reconcile as m
+    values = [10,14] if metric == 'panels' else ['0.'+'0'*76+'1','0.'+'0'*76+'2']
+    oracle = None if missing else [dict(string_id=k,**{metric:v}) for k,v in zip(['A','B'],values)]
+    saved = [dict(string_id=k,**{metric:v}) for k,v in zip(['A','B'],values[::-1])]
+    compare = m.compare_string_panel_counts if metric == 'panels' else m.compare_string_dc_power
+    original = deepcopy((oracle,saved))
+    decoded = m.decode_evidence_json(json.dumps(dict(oracle=oracle,saved=saved)))
+    assert decoded['verdict'] == 'PASS'
+    assert compare(oracle,saved) == compare(decoded['evidence']['oracle'],decoded['evidence']['saved'])
+    assert (oracle,saved) == original
+
+
+def test_composed_independent_string_dc_tiny_swaps_preserve_context():
+    from decimal import localcontext, Inexact, Rounded
+    envelope = seven_step_envelope()
+    envelope['grid']['dc_power'][0]['kw_dc'] = '4.'+'0'*76+'1'
+    envelope['grid']['dc_power'][1]['kw_dc'] = '5.5'+'9'*76
+    with localcontext() as caller:
+        caller.prec,caller.Emin,caller.Emax = 2,-1,1
+        caller.traps[Inexact] = caller.traps[Rounded] = True
+        flags = dict(caller.flags)
+        result = reconcile_seven_steps_json(json.dumps(envelope))
+        check = result['string_metrics']['metrics']['kw_dc']
+        assert check['comparison']['verdict'] == 'FAIL' and check['comparison']['counts']['mismatched'] == 2
+        assert check['oracle_consistency']['verdict'] == 'PASS'
+        assert result['string_metrics']['metrics']['panels']['comparison']['verdict'] == 'PASS'
+        assert dict(caller.flags) == flags and caller.prec == 2

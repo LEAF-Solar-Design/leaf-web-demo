@@ -1922,3 +1922,37 @@ strings, power FAIL `string_kw_dc_mismatch` with two changed strings. Both strin
 retain their IDs, grid, inverter and aggregate totals. Independent report
 extraction must provide the per-string oracle values and their provenance for
 live acceptance. These new comparators remain standalone in this slice.
+# Independent per-string metric recovery in X05
+
+Seven-step `string_metrics` now includes panel/DC comparisons and independent
+oracle coverage/sum checks. Evidence must supply `oracle_panels` and
+`oracle_dc_power` rows with explicit string IDs and values. The following
+standalone replay preserves each diagnostic while repairing panel and DC swaps.
+
+```powershell
+@'
+import sys
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+panels = [dict(string_id='A',panels=10),dict(string_id='B',panels=14)]
+power = [dict(string_id='A',kw_dc='4'),dict(string_id='B',kw_dc='5.6')]
+saved_panels = [dict(string_id='A',panels=14),dict(string_id='B',panels=10)]
+saved_power = [dict(string_id='A',kw_dc='5.6'),dict(string_id='B',kw_dc='4')]
+for stage in ('swapped', 'missing power oracle', 'panels repaired', 'power repaired'):
+    oracle_power = None if stage in ('missing power oracle', 'panels repaired') else power
+    if stage in ('panels repaired', 'power repaired'): saved_panels = panels
+    if stage == 'power repaired': saved_power = power
+    panel = m.compare_string_panel_counts(panels, saved_panels)
+    dc = m.compare_string_dc_power(oracle_power, saved_power)
+    print(stage, panel['verdict'], panel['reason'], dc['verdict'], dc['reason'])
+assert panel['verdict'] == dc['verdict'] == 'PASS'
+'@ | python -P -
+```
+
+Expected panel/DC verdict pairs are FAIL/FAIL, FAIL/UNREADABLE,
+PASS/UNREADABLE, PASS/PASS. Diagnostics name `string_panels_mismatch`,
+`string_kw_dc_mismatch`, `oracle_rows_unreadable`, then their matching
+`string_panels_equal` and `string_kw_dc_equal` results after repair. Composition
+uses UNREADABLE precedence and retains readable sibling diagnostics. Previous
+proof-limit replays now produce composition FAIL once these independent rows
+are supplied. Oracle origin and independence require actual producer evidence.
