@@ -2467,3 +2467,44 @@ DC accepts decimal/exponent JSON numbers and signed zero, including exact
 nonzero deltas of 1e-77. Textual exponent strings are outside the numeric-string
 schema. These are format and arithmetic checks on synthetic supplied maps,
 not proof of independent extraction, customer drawing coverage or staging.
+
+## Oracle load device-granularity replay
+
+Within Studio X-bench X05, equal grid totals can hide opposite per-device
+errors. This replay uses the existing synthetic conservation helpers. It merges
+explicit device IDs, connection maps and targets without changing grid evidence.
+
+```python
+import sys, runpy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+grid, _ = fixtures['oracle_load_component']('device')
+_, evidence = fixtures['oracle_load_component']('device', broken=True)
+def show(label, grid, evidence):
+    result = m._seven_step_oracle_loads(grid, evidence)
+    checks = result['metrics']['panels']
+    print(label, result['verdict'],
+          checks['grid_comparison']['mismatch_count'],
+          checks['inverter_comparison']['mismatch_count'])
+show('fine', grid, evidence)
+coarse_grid, coarse_evidence = fixtures['coarsen_oracle_load_devices'](grid, evidence)
+show('coarse', coarse_grid, coarse_evidence)
+show('fine preserved', grid, evidence)
+```
+
+Expected output:
+
+```text
+fine FAIL 0 2
+coarse PASS 0 0
+fine preserved FAIL 0 2
+```
+
+Fine device panel targets six and three conflict with explicit connected-string
+loads three and six. Both sum to nine. The merged target nine agrees with the
+merged load, so the coarser oracle loses localization. Grid diagnostics and the
+original fine evidence remain intact. The test independently checks exact
+Fraction sums for strings, optimizers, panels and DC power. A coarse PASS proves
+only consistency at that supplied resolution. It does not repair fine device
+assignments, establish independent report extraction or accept live X05.
