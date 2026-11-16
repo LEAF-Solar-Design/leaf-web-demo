@@ -9,6 +9,8 @@ export const SOLAREDGE_PANEL_REASONS = Object.freeze({
   request_pending: 'A SolarEdge request is in progress, so wait for it to finish.',
   staging_pending: 'Tracking acceptance is being staged, so wait for it to finish.',
   not_staged: 'Tracking labels were not staged for acceptance. Try again.',
+  accept_unauthenticated: 'Tracking labels were not staged. Sign in again before trying to save.',
+  accept_forbidden: 'Tracking labels were not staged. Ask a project owner to review your access before trying again.',
 })
 
 // The workspace container will mount this panel; it only hands tracking params to its caller.
@@ -208,11 +210,17 @@ export default function SolarEdgeImportPanel({
       && current.current.matchedOnly === captured.matchedOnly
     const finish = (accepted) => {
       if (!isCurrent()) return
-      if (accepted !== false) acceptedReport.current = reportValue
+      const typedRefusal = accepted != null && typeof accepted === 'object' && accepted.ok === false
+      const staged = accepted !== false && !typedRefusal
+      if (staged) acceptedReport.current = reportValue
       acceptance.current = null
       setAcceptPending(false)
-      setOutcome({ step: 'accept', drawingId, message: accepted === false
-        ? SOLAREDGE_PANEL_REASONS.not_staged : captured.matchedOnly
+      const refusalMessage = typedRefusal && accepted.code === 'UNAUTHENTICATED'
+        ? SOLAREDGE_PANEL_REASONS.accept_unauthenticated
+        : typedRefusal && accepted.code === 'FORBIDDEN' ? SOLAREDGE_PANEL_REASONS.accept_forbidden
+          : SOLAREDGE_PANEL_REASONS.not_staged
+      setOutcome({ step: 'accept', drawingId, message: !staged
+        ? refusalMessage : captured.matchedOnly
           ? 'Matched tracking sent for a partial save. Unresolved groups still need correction.'
           : 'Tracking labels sent for acceptance.' })
     }
