@@ -133,7 +133,13 @@ def export_evidence(payload):
 def write_json(value, output=None):
     encoded = json.dumps(value, ensure_ascii=True, allow_nan=False, indent=2) + '\n'
     if output is None:
-        sys.stdout.write(encoded)
+        try:
+            sys.stdout.write(encoded)
+            sys.stdout.flush()
+        except (OSError, ValueError):
+            # Retire a failed stream so interpreter shutdown does not flush it again.
+            sys.stdout = None
+            raise
         return
     target = Path(output)
     temporary = None
@@ -160,11 +166,16 @@ def check_output_path(source, output):
 def report_failure(operation, error):
     if isinstance(error, RecursionError):
         error = 'JSON nesting exceeds the supported recursion depth.'
+    message = str(error)
+    message = message[:128] + ('...' if len(message) > 128 else '')
+    escaped = json.dumps(message, ensure_ascii=True)
+    if sys.stderr is None:
+        return 2
     try:
-        print(f'X04 {operation} refused: {error}', file=sys.stderr)
+        print(f'X04 {operation} refused: {escaped}', file=sys.stderr, flush=True)
     except (OSError, ValueError):
         # A closed diagnostic stream still leaves a deterministic failure exit.
-        pass
+        sys.stderr = None
     return 2
 
 
