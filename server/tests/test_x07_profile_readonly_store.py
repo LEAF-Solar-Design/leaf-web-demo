@@ -4,7 +4,7 @@ import sys
 import tempfile
 import unittest
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from x07_customer_profile_store import CustomerProfileStore,ProfileScopeError
+from x07_customer_profile_store import CustomerProfileStore,ProfileScopeError,ProfileSchemaError
 
 
 class ReadonlyStoreTests(unittest.TestCase):
@@ -31,3 +31,18 @@ class ReadonlyStoreTests(unittest.TestCase):
             path=Path(directory)/'missing.sqlite'
             with self.assertRaises(sqlite3.OperationalError):CustomerProfileStore(path,read_only=True)
             self.assertFalse(path.exists())
+
+    def test_readonly_legacy_refuses_without_adoption_then_writable_adopts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'legacy.sqlite';store=CustomerProfileStore(path)
+            profile=store.save_version('a',{'module':{'block':'Panel','layer':'M'}},expected_version=0)
+            pin=store.apply_to_project('old','a',expected_version=1)
+            with store._connection() as db:db.execute('PRAGMA user_version=0')
+            before=path.read_bytes()
+            with self.assertRaisesRegex(ProfileSchemaError,'read-only store requires supported versioned schema'):
+                CustomerProfileStore(path,read_only=True)
+            self.assertEqual(path.read_bytes(),before)
+            adopted=CustomerProfileStore(path)
+            self.assertEqual(adopted.schema_status['decision'],'adopt_legacy')
+            self.assertEqual(adopted.latest('a'),profile)
+            self.assertEqual(adopted.application_record('old','a'),pin)

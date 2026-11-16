@@ -144,7 +144,7 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, onDi
     && Number.isSafeInteger(applicationRecord.version) && applicationRecord.version > 0 ? applicationRecord : null
   return <section aria-label="Customer role profile">
     <h3>Customer role profile</h3><p>Customer: {customerKey}</p>
-    {profile && <><p>Profile id: {profile.profile_id}</p><p>Profile version: {profile.version}</p></>}
+    {profile && <><p>Profile id: {profile.profile_id}</p><p aria-live="polite" aria-atomic="true">Profile version: {profile.version}</p></>}
     {pin && <p>Project is pinned to version {pin.version}.</p>}
     {error && <p id={errorId} role="alert">{error}</p>}{message && <p role="status">{message}</p>}
     {!profile && !busy && <button ref={retryButton} type="button" onClick={() => load(false)}>Retry loading profile</button>}

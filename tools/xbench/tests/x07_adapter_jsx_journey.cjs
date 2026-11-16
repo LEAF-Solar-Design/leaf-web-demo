@@ -118,6 +118,7 @@ try:
         elif op=='confirm': result=adapter.confirm_roles(context,value)
         elif op=='apply': result=adapter.apply_profile(context,value)
         elif op=='editor_load': result=adapter.load_profile(value)
+        elif op=='identity': result={'cwd':str(Path.cwd().resolve()),'database':str(store.path.resolve())}
         elif op=='editor_save': result=adapter.save_profile(value['customer'],value['roles'],expected_version=value['expected_version'])
         elif op=='backup':
             if not receipt_path: raise ValueError('inject both disposable stores')
