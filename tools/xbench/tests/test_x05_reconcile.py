@@ -27,7 +27,7 @@ from benches.x05_reconcile import (METRICS, TABLE_COLUMNS, check_discrepancies,
     reconcile_bound_seven_steps_json, aggregate_bound_seven_steps,
     aggregate_bound_seven_steps_json,
     diff_snapshot_rows,
-    validate_grid_string_ownership,
+    validate_grid_string_ownership, compare_grid_optimizer_totals,
     compare_csv_view, compare_recommendations, compare_snapshots, compare_strings, compare_table)
 
 
@@ -1290,7 +1290,8 @@ def test_provenance_aggregate_subprocess_bytes_deterministic_with_simultaneous_c
 def seven_step_envelope():
     return {"import": dict(normal_user=True, dwg_imported=True, report_imported=True),
             "grid": dict(expected_grid_ids=["g"], saved_group_ids=["p"],
-                         rows=[dict(grid_id="g", matches=["p"], cause=None)], require_all_matched=True),
+                         rows=[dict(grid_id="g", matches=["p"], cause=None)], require_all_matched=True,
+                         string_assignments=[dict(grid_id="g", string_id=row["string_id"]) for row in ORACLE]),
             "assurance": assurance_envelope()}
 
 
@@ -1417,7 +1418,8 @@ def test_seven_step_offline_composer_preserves_every_diagnostic_and_missing_evid
                      stage_identities={key: dict(identity) for key in IDENTITY_STAGES})
     imported = dict(normal_user=True, dwg_imported=True, report_imported=True)
     grids = dict(expected_grid_ids=["g"], saved_group_ids=["p"],
-                 rows=[dict(grid_id="g", matches=["p"], cause=None)], require_all_matched=True)
+                 rows=[dict(grid_id="g", matches=["p"], cause=None)], require_all_matched=True,
+                         string_assignments=[dict(grid_id="g", string_id=row["string_id"]) for row in ORACLE])
     result = reconcile_seven_steps(imported, grids, assurance)
     assert result["verdict"] == "PASS" and set(result["steps"]) == set("1234567")
     assert result["steps"]["3"] == result["assurance"]["checks"]["provenance"]["reconciliation"]["stages"]["strings"]
@@ -3215,3 +3217,126 @@ def test_decimal_sticky_flags_preserved_on_success_and_rejection_paths():
         preserved=dict(caller.flags)
         assert serialize_result(results())==baseline
         assert dict(caller.flags)==preserved
+
+
+@pytest.mark.parametrize("mutation", ["missing", "null", "duplicate", "foreign", "malformed"])
+def test_seven_step_ownership_composition_retains_unrelated_diagnostics(mutation):
+    envelope = seven_step_envelope()
+    baseline = reconcile_seven_steps_json(json.dumps(envelope))
+    assert baseline["ownership"]["verdict"] == "PASS"
+    envelope["assurance"]["evidence"]["recommendations"][0]["group_count"] = 1
+    rows = envelope["grid"]["string_assignments"]
+    if mutation == "missing":
+        del envelope["grid"]["string_assignments"]
+    elif mutation == "null":
+        envelope["grid"]["string_assignments"] = None
+    elif mutation == "duplicate":
+        rows.append(deepcopy(rows[0]))
+    elif mutation == "foreign":
+        rows[0]["grid_id"] = "foreign"
+    else:
+        rows[0] = {}
+    preserved = deepcopy(envelope)
+    result = reconcile_seven_steps_json(json.dumps(envelope))
+    verdict = "FAIL" if mutation in ("duplicate", "foreign") else "UNREADABLE"
+    assert result["verdict"] == result["ownership"]["verdict"] == verdict
+    assert result["steps"]["4"]["verdict"] == "FAIL"
+    for step in ("1", "2", "3", "5", "6", "7"):
+        assert result["steps"][step] == baseline["steps"][step]
+    assert envelope == preserved
+    expected, records = seven_fixture_records()
+    records[0]["envelope"] = envelope
+    envelope["assurance"]["manifest"]["fixture_id"] = expected[0]
+    envelope["assurance"]["evidence"]["fixture_id"] = expected[0]
+    envelope["assurance"]["bindings"] = {
+        key: deepcopy(envelope["assurance"]["manifest"]) for key in PROVENANCE_STAGES}
+    aggregate = aggregate_seven_steps(expected, records)
+    assert aggregate["verdict"] == verdict
+    assert aggregate["fixtures"][expected[1]]["verdict"] == "PASS"
+
+
+def test_per_grid_optimizer_totals_reject_equal_grand_total_swaps():
+    saved = [dict(string_id="A", optimizers=3), dict(string_id="B", optimizers=7)]
+    expected = {"east": 3, "west": 7}
+    correct = [dict(grid_id="east", string_id="A"), dict(grid_id="west", string_id="B")]
+    swapped = [dict(grid_id="west", string_id="A"), dict(grid_id="east", string_id="B")]
+    preserved = deepcopy((saved, expected, correct, swapped))
+    result = compare_grid_optimizer_totals(expected, saved, swapped)
+    assert sum(expected.values()) == sum(row["optimizers"] for row in saved)
+    assert result == dict(verdict="FAIL", reason="grid_optimizer_totals_mismatch", mismatch_count=2,
+        examples=[dict(grid_id="east", oracle=3, saved=7, delta=4),
+                  dict(grid_id="west", oracle=7, saved=3, delta=-4)])
+    assert compare_grid_optimizer_totals(expected, saved, correct)["verdict"] == "PASS"
+    for invalid in (None, {}, {"east": True}, {"east": -1}, {"east": 2**1000}, {None: 3}):
+        assert compare_grid_optimizer_totals(invalid, saved, correct)["verdict"] == "UNREADABLE"
+    assert compare_grid_optimizer_totals(expected, saved, None)["verdict"] == "UNREADABLE"
+    assert compare_grid_optimizer_totals(expected, saved, correct[:1])["verdict"] == "FAIL"
+    assert (saved, expected, correct, swapped) == preserved
+
+
+def test_exhaustive_small_ownership_matches_independent_reference():
+    from itertools import product
+    grids, strings = ["east", "west"], ["A", "B"]
+    choices = [(grid, string) for grid in grids + ["foreign"] for string in strings + ["foreign"]]
+    for length in range(4):
+        for selection in product(choices, repeat=length):
+            rows = [dict(grid_id=grid, string_id=string) for grid, string in selection]
+            occurrences = [string for _, string in selection]
+            counts = dict(missing=sum(string not in occurrences for string in strings),
+                          duplicate=len(occurrences) - len(set(occurrences)),
+                          foreign_string=sum(string not in strings for string in occurrences),
+                          foreign_grid=sum(grid not in grids for grid, _ in selection))
+            observed = validate_grid_string_ownership(grids, strings, rows)
+            assert observed["counts"] == counts
+            assert observed["verdict"] == ("FAIL" if any(counts.values()) else "PASS")
+            # A lawful grid swap needs independent per-grid totals to expose it.
+            saved = [dict(string_id="A", optimizers=2), dict(string_id="B", optimizers=5)]
+            totals = compare_grid_optimizer_totals({"east": 2, "west": 5}, saved, rows)
+            sums = {grid: sum(2 if string == "A" else 5 for owner, string in selection if owner == grid)
+                    for grid in grids}
+            if not any(counts.values()):
+                assert totals["mismatch_count"] == sum(sums[grid] != expected
+                    for grid, expected in (("east", 2), ("west", 5)))
+            else:
+                assert totals["verdict"] == "FAIL"
+
+
+def test_ownership_lookup_work_uses_linear_indexing(monkeypatch):
+    from benches import x05_reconcile as module
+    operations = []
+    class CountedSet(set):
+        def __contains__(self, value):
+            operations.append(1)
+            return super().__contains__(value)
+    monkeypatch.setattr(module, "set", CountedSet, raising=False)
+    for size in (10, 100, 1000):
+        grids = [f"g{i}" for i in range(size)]
+        strings = [f"s{i}" for i in range(size)]
+        rows = [dict(grid_id=grid, string_id=string) for grid, string in zip(grids, strings)]
+        operations.clear()
+        assert module.validate_grid_string_ownership(grids, strings, rows)["verdict"] == "PASS"
+        assert len(operations) == 3 * size
+        operations.clear()
+        saved = [dict(string_id=string, optimizers=1) for string in strings]
+        assert module.compare_grid_optimizer_totals(dict.fromkeys(grids, 1), saved, rows)["verdict"] == "PASS"
+        assert len(operations) == 3 * size
+
+
+def test_ownership_diagnostic_caps_exact_totals_permutations_and_no_mutation():
+    from random import Random
+    grids = [f"g{i:03}" for i in range(60)]
+    strings = [f"s{i:03}" for i in range(60)]
+    rows = [dict(grid_id=grids[i], string_id=strings[i]) for i in range(30)]
+    rows += deepcopy(rows)
+    rows += [dict(grid_id="foreign", string_id=f"x{i:03}") for i in range(60)]
+    baseline = validate_grid_string_ownership(grids, strings, rows)
+    assert baseline["counts"] == dict(missing=30, duplicate=30, foreign_string=60, foreign_grid=60)
+    assert all(len(examples) == MAX_STRING_EXAMPLES for examples in baseline["examples"].values())
+    for seed in range(8):
+        changed = deepcopy((grids, strings, rows))
+        rng = Random(seed)
+        for values in changed:
+            rng.shuffle(values)
+        preserved = deepcopy(changed)
+        assert validate_grid_string_ownership(*changed) == baseline
+        assert changed == preserved
