@@ -466,14 +466,16 @@ def reconcile_seven_steps(import_evidence, grid_evidence, assurance):
     else:
         imported = _out("PASS" if all(import_evidence.values()) else "FAIL", "supplied_import_evidence")
     grid_fields = {"expected_grid_ids", "saved_group_ids", "rows", "require_all_matched"}
-    if type(grid_evidence) is not dict or set(grid_evidence) - {"string_assignments"} != grid_fields:
+    if type(grid_evidence) is not dict or set(grid_evidence) - {"string_assignments", "optimizer_totals"} != grid_fields:
         grids = _out("UNREADABLE", "grid_evidence_unreadable")
     else:
         grids = compare_grid_correspondence(**{key: grid_evidence[key] for key in grid_fields})
     fields = {"evidence", "frozen_manifest", "stage_bindings", "supplied_inputs", "expected_identity", "stage_identities"}
     checked = reconcile_assured(**assurance) if type(assurance) is dict and set(assurance) == fields else _out("UNREADABLE", "assurance_evidence_missing")
     ownership = _seven_step_ownership(grid_evidence, assurance.get("evidence") if type(assurance) is dict else None)
-    return _seven_step_result(imported, grids, checked, ownership)
+    return _seven_step_result(imported, grids, checked, ownership,
+                              _seven_step_grid_totals(grid_evidence, assurance.get("evidence")
+                                  if type(assurance) is dict else None))
 
 
 def _seven_step_ownership(grid_evidence, evidence):
@@ -486,15 +488,27 @@ def _seven_step_ownership(grid_evidence, evidence):
                                           grid_evidence.get("string_assignments"))
 
 
-def _seven_step_result(imported, grids, checked, ownership):
+def _seven_step_grid_totals(grid, evidence):
+    if type(grid) is not dict or type(evidence) is not dict:
+        return _out("UNREADABLE", "grid_optimizer_evidence_unreadable")
+    comparison = compare_grid_optimizer_totals(grid.get("optimizer_totals"), evidence.get("saved_strings"),
+                                               grid.get("string_assignments"))
+    consistency = compare_grid_oracle_totals(grid.get("expected_grid_ids"), grid.get("optimizer_totals"),
+                                             evidence.get("oracle_values"))
+    verdicts = {comparison["verdict"], consistency["verdict"]}
+    return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
+                "supplied_grid_optimizer_evidence", comparison=comparison, oracle_consistency=consistency)
+
+
+def _seven_step_result(imported, grids, checked, ownership, grid_optimizers):
     stages = checked.get("checks", {}).get("provenance", {}).get("reconciliation", {}).get("stages", {})
     absent = _out("UNREADABLE", "stage_evidence_missing")
     steps = {"1": imported, "2": grids, "3": stages.get("strings", absent), "4": stages.get("grouping", absent),
              "5": dict(table=stages.get("table", absent), csv_view=stages.get("csv_view", absent)),
              "6": stages.get("policy", absent), "7": stages.get("reopen", absent)}
-    verdicts = {imported["verdict"], grids["verdict"], checked["verdict"], ownership["verdict"]}
+    verdicts = {imported["verdict"], grids["verdict"], checked["verdict"], ownership["verdict"], grid_optimizers["verdict"]}
     return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
-                "offline_seven_steps", steps=steps, assurance=checked, ownership=ownership)
+                "offline_seven_steps", steps=steps, assurance=checked, ownership=ownership, grid_optimizers=grid_optimizers)
 
 
 def reconcile_seven_steps_json(text):
@@ -511,6 +525,8 @@ def _seven_step_envelope(envelope):
     return _seven_step_result(preliminary["steps"]["1"], preliminary["steps"]["2"],
                               _assurance_envelope(envelope["assurance"]),
                               _seven_step_ownership(envelope["grid"], envelope["assurance"].get("evidence")
+                                  if type(envelope["assurance"]) is dict else None),
+                              _seven_step_grid_totals(envelope["grid"], envelope["assurance"].get("evidence")
                                   if type(envelope["assurance"]) is dict else None))
 
 
@@ -833,11 +849,49 @@ def validate_grid_string_ownership(expected_grid_ids, saved_string_ids, assignme
                 counts=errors, examples={reason: sorted(keys) for reason, keys in sorted(examples.items())})
 
 
+def _valid_grid_totals(values):
+    return (type(values) is dict and bool(values)
+            and all(type(key) is str and bool(key.strip()) and len(key) <= 128
+                    and type(value) is int and 0 <= value <= 2**53 - 1
+                    for key, value in values.items()))
+
+
+def compare_grid_oracle_totals(expected_grid_ids, expected_totals, oracle_values):
+    """Bind independent grid totals to explicit coverage and the report grand total."""
+    if (type(expected_grid_ids) is not list or not expected_grid_ids
+            or any(type(key) is not str or not key.strip() or len(key) > 128 for key in expected_grid_ids)
+            or len(set(expected_grid_ids)) != len(expected_grid_ids)
+            or not _valid_grid_totals(expected_totals) or set(expected_totals) != set(expected_grid_ids)
+            or type(oracle_values) is not dict):
+        return _out("UNREADABLE", "grid_oracle_evidence_unreadable")
+    oracle = _numeric(oracle_values.get("optimizers"), count=True)
+    if oracle is None:
+        return _out("UNREADABLE", "grid_oracle_evidence_unreadable")
+    total = sum(expected_totals.values())
+    return _out("PASS" if total == oracle else "FAIL", "grid_oracle_total_equal" if total == oracle
+                else "grid_oracle_total_mismatch", grid_total=total, oracle_total=oracle)
+
+
+def compare_ownership_snapshots(expected_grid_ids, saved_string_ids, before_rows, reopened_rows):
+    """Compare explicit supplied ownership across save/reopen, including equal-count swaps."""
+    before = validate_grid_string_ownership(expected_grid_ids, saved_string_ids, before_rows)
+    reopened = validate_grid_string_ownership(expected_grid_ids, saved_string_ids, reopened_rows)
+    verdicts = {before["verdict"], reopened["verdict"]}
+    if verdicts != {"PASS"}:
+        return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL",
+                    "ownership_snapshots_invalid", before=before, reopened=reopened)
+    old = {row["string_id"]: row["grid_id"] for row in before_rows}
+    new = {row["string_id"]: row["grid_id"] for row in reopened_rows}
+    changed = [key for key in old if old[key] != new[key]]
+    examples = [dict(string_id=key, before=old[key], reopened=new[key])
+                for key in nsmallest(MAX_STRING_EXAMPLES, changed)]
+    return _out("FAIL" if changed else "PASS", "ownership_changed" if changed else "ownership_equal",
+                changed_count=len(changed), examples=examples)
+
+
 def compare_grid_optimizer_totals(expected_totals, saved_strings, assignments):
     """Compare supplied independent per-grid totals using explicit ownership rows."""
-    if (type(expected_totals) is not dict or not expected_totals
-            or any(type(value) is not int or not 0 <= value <= 2**53 - 1
-                   for value in expected_totals.values())):
+    if not _valid_grid_totals(expected_totals):
         return _out("UNREADABLE", "grid_optimizer_totals_unreadable")
     saved, error = _index(saved_strings, "saved")
     if error:

@@ -656,7 +656,7 @@ Complete seven-step JSON envelope:
 | Field | Required shape | Missing, null or empty behavior |
 |---|---|---|
 | `import` | Exactly `normal_user`, `dwg_imported`, `report_imported`, all bool | Missing outer field rejects envelope; null/empty object yields step1 UNREADABLE; false yields readable FAIL |
-| `grid` | `expected_grid_ids`, `saved_group_ids`, `rows`, `require_all_matched`, plus `string_assignments` for ownership | Missing outer field rejects envelope; null/empty object yields step2 UNREADABLE; empty rows with valid nonempty IDs yields missing-grid FAIL |
+| `grid` | `expected_grid_ids`, `saved_group_ids`, `rows`, `require_all_matched`, plus `string_assignments` and independent `optimizer_totals` | Missing outer field rejects envelope; null/empty object yields step2 UNREADABLE; empty rows with valid nonempty IDs yields missing-grid FAIL |
 | `assurance` | Exactly `evidence`, `manifest`, `bindings`, `inputs_hex`, `identity`, `stage_identities` | Missing outer field rejects envelope; null/empty object yields assurance UNREADABLE and absent downstream steps |
 
 Evidence and assurance schemas are the existing six-stage contracts above.
@@ -1201,3 +1201,47 @@ string. Independently supplied per-grid totals expose this swap. These helpers
 compare supplied evidence and do not authenticate its producer. Equal-count
 strings can swap without changing per-grid totals, so string identity evidence
 remains necessary. Synthetic results do not establish live X05 acceptance.
+
+## Per-grid optimizer composition replay
+
+X05 seven-step input also requires independent `grid.optimizer_totals`, an object
+mapping each expected grid ID to an integer optimizer count. Its keys must cover
+the expected grids exactly, and its sum must equal `oracle_values.optimizers`.
+The `grid_optimizers` result retains both comparisons. Missing totals yield
+UNREADABLE while the existing steps and ownership diagnostics remain available.
+The separate pure `compare_ownership_snapshots` helper detects owner swaps across
+save/reopen even when both strings have equal optimizer counts.
+
+Run from the repository root in PowerShell.
+
+```powershell
+@'
+import sys
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import compare_grid_optimizer_totals, compare_grid_oracle_totals
+owners = [dict(grid_id='east', string_id='A'), dict(grid_id='west', string_id='B')]
+independent = dict(east=3, west=7)
+swapped = [dict(string_id='A', optimizers=7), dict(string_id='B', optimizers=3)]
+correct = [dict(string_id='A', optimizers=3), dict(string_id='B', optimizers=7)]
+for name, oracle, saved in [('swapped', independent, swapped), ('missing', None, swapped), ('corrected', independent, correct)]:
+    result = compare_grid_optimizer_totals(oracle, saved, owners)
+    print(name, sum(row['optimizers'] for row in saved), result['verdict'], result['reason'])
+    if name == 'swapped':
+        assert result['mismatch_count'] == 2
+        assert [row['delta'] for row in result['examples']] == [4, -4]
+consistency = compare_grid_oracle_totals(['east', 'west'], independent, dict(optimizers=10))
+print('report', consistency['verdict'], consistency['reason'])
+'@ | python -P -
+```
+
+Expected output
+
+```text
+swapped 10 FAIL grid_optimizer_totals_mismatch
+missing 10 UNREADABLE grid_optimizer_totals_unreadable
+corrected 10 PASS grid_optimizer_totals_equal
+report PASS grid_oracle_total_equal
+```
+
+These checks rely on explicitly supplied independent grid evidence. They acquire
+no live data and make no claim about the origin of the input.

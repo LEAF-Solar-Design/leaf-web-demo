@@ -28,6 +28,7 @@ from benches.x05_reconcile import (METRICS, TABLE_COLUMNS, check_discrepancies,
     aggregate_bound_seven_steps_json,
     diff_snapshot_rows,
     validate_grid_string_ownership, compare_grid_optimizer_totals,
+    compare_grid_oracle_totals, compare_ownership_snapshots,
     compare_csv_view, compare_recommendations, compare_snapshots, compare_strings, compare_table)
 
 
@@ -1291,7 +1292,8 @@ def seven_step_envelope():
     return {"import": dict(normal_user=True, dwg_imported=True, report_imported=True),
             "grid": dict(expected_grid_ids=["g"], saved_group_ids=["p"],
                          rows=[dict(grid_id="g", matches=["p"], cause=None)], require_all_matched=True,
-                         string_assignments=[dict(grid_id="g", string_id=row["string_id"]) for row in ORACLE]),
+                         string_assignments=[dict(grid_id="g", string_id=row["string_id"]) for row in ORACLE],
+                         optimizer_totals={"g": sum(row["optimizers"] for row in ORACLE)}),
             "assurance": assurance_envelope()}
 
 
@@ -1419,7 +1421,8 @@ def test_seven_step_offline_composer_preserves_every_diagnostic_and_missing_evid
     imported = dict(normal_user=True, dwg_imported=True, report_imported=True)
     grids = dict(expected_grid_ids=["g"], saved_group_ids=["p"],
                  rows=[dict(grid_id="g", matches=["p"], cause=None)], require_all_matched=True,
-                         string_assignments=[dict(grid_id="g", string_id=row["string_id"]) for row in ORACLE])
+                         string_assignments=[dict(grid_id="g", string_id=row["string_id"]) for row in ORACLE],
+                         optimizer_totals={"g": sum(row["optimizers"] for row in ORACLE)})
     result = reconcile_seven_steps(imported, grids, assurance)
     assert result["verdict"] == "PASS" and set(result["steps"]) == set("1234567")
     assert result["steps"]["3"] == result["assurance"]["checks"]["provenance"]["reconciliation"]["stages"]["strings"]
@@ -2674,6 +2677,7 @@ def test_seven_step_aggregate_deterministic_subprocess_mutation_orders(tmp_path)
         grid["expected_grid_ids"].append("g2")
         grid["saved_group_ids"].append("p2")
         grid["rows"].append(dict(grid_id="g2", matches=["p2"], cause=None))
+        grid["optimizer_totals"]["g2"] = 0
     records[0]["envelope"]["import"]["report_imported"] = False
     records[1]["envelope"]["grid"]["rows"][0]["matches"] = ["foreign"]
     records[1]["envelope"]["assurance"]["inputs_hex"]["report"] = b"swapped".hex()
@@ -3340,3 +3344,115 @@ def test_ownership_diagnostic_caps_exact_totals_permutations_and_no_mutation():
         preserved = deepcopy(changed)
         assert validate_grid_string_ownership(*changed) == baseline
         assert changed == preserved
+
+
+def test_seven_step_grid_totals_swaps_missing_evidence_and_diagnostic_retention():
+    envelope = seven_step_envelope()
+    grid = envelope["grid"]
+    grid.update(expected_grid_ids=["east", "west"], saved_group_ids=["p", "q"],
+        rows=[dict(grid_id="east", matches=["p"], cause=None), dict(grid_id="west", matches=["q"], cause=None)],
+        string_assignments=[dict(grid_id="east", string_id="A"), dict(grid_id="west", string_id="B")],
+        optimizer_totals=dict(east=5, west=7))
+    baseline = reconcile_seven_steps_json(json.dumps(envelope))
+    assert baseline["verdict"] == "PASS"
+    grid["string_assignments"][0]["grid_id"] = "west"
+    grid["string_assignments"][1]["grid_id"] = "east"
+    swapped = reconcile_seven_steps_json(json.dumps(envelope))
+    assert swapped["verdict"] == "FAIL" and swapped["steps"] == baseline["steps"]
+    assert swapped["ownership"]["verdict"] == "PASS"
+    assert swapped["grid_optimizers"]["comparison"]["mismatch_count"] == 2
+    assert swapped["grid_optimizers"]["oracle_consistency"]["verdict"] == "PASS"
+    del grid["optimizer_totals"]
+    envelope["import"]["normal_user"] = False
+    result = reconcile_seven_steps_json(json.dumps(envelope))
+    assert result["verdict"] == "UNREADABLE" and result["steps"]["1"]["verdict"] == "FAIL"
+    assert result["grid_optimizers"]["comparison"]["reason"] == "grid_optimizer_totals_unreadable"
+    assert result["steps"]["3"] == baseline["steps"]["3"]
+
+
+def test_grid_oracle_consistency_requires_explicit_coverage_and_exact_sum():
+    assert compare_grid_oracle_totals(["a", "b"], dict(a=5, b=7), dict(optimizers=12))["verdict"] == "PASS"
+    result = compare_grid_oracle_totals(["a", "b"], dict(a=6, b=7), dict(optimizers=12))
+    assert result["verdict"] == "FAIL" and result["grid_total"] == 13
+    for ids, totals, oracle in [([], {}, {}), (["a"], None, {}), (["a"], {}, dict(optimizers=0)),
+            (["a", "a"], dict(a=5), dict(optimizers=5)), (["a", "b"], dict(a=5), dict(optimizers=5)),
+            (["a"], dict(a=5, b=7), dict(optimizers=12)), (["a"], dict(a=5), {}),
+            (["a"], dict(a=5), dict(optimizers=True)), (["a"], dict(a=5), None)]:
+        assert compare_grid_oracle_totals(ids, totals, oracle)["verdict"] == "UNREADABLE"
+    envelope = seven_step_envelope()
+    envelope["grid"]["optimizer_totals"]["g"] += 1
+    result = reconcile_seven_steps_json(json.dumps(envelope))
+    assert result["grid_optimizers"]["oracle_consistency"]["reason"] == "grid_oracle_total_mismatch"
+    assert all(result["steps"][key]["verdict"] == "PASS" for key in ("1", "2", "3", "4", "6", "7"))
+
+
+def test_ownership_save_reopen_detects_equal_count_owner_swaps_and_missing_evidence():
+    grids, strings = ["a", "b"], ["A", "B"]
+    before = [dict(grid_id="a", string_id="A"), dict(grid_id="b", string_id="B")]
+    reopened = [dict(grid_id="b", string_id="A"), dict(grid_id="a", string_id="B")]
+    saved = [dict(string_id=key, optimizers=5) for key in strings]
+    assert compare_grid_optimizer_totals(dict(a=5, b=5), saved, reopened)["verdict"] == "PASS"
+    preserved = deepcopy((before, reopened))
+    changed = compare_ownership_snapshots(grids, strings, before, reopened)
+    assert changed == dict(verdict="FAIL", reason="ownership_changed", changed_count=2,
+        examples=[dict(string_id="A", before="a", reopened="b"), dict(string_id="B", before="b", reopened="a")])
+    assert compare_ownership_snapshots(grids, strings, before, list(reversed(before)))["verdict"] == "PASS"
+    absent = compare_ownership_snapshots(grids, strings, before, None)
+    assert absent["verdict"] == "UNREADABLE" and absent["reopened"]["reason"] == "ownership_evidence_unreadable"
+    assert (before, reopened) == preserved
+
+
+@pytest.mark.parametrize("invalid", [True, False, -1, 1.5, float("nan"), float("inf"), -float("inf"),
+    "5", None, [], {}, 2**1000], ids=["true", "false", "negative", "fraction", "nan", "inf", "minus-inf",
+    "string", "null", "list", "dict", "huge"])
+def test_grid_optimizer_count_schema_is_sanitized_and_preserves_inputs(invalid):
+    totals = dict(a=invalid)
+    original = dict(totals)
+    rows = [dict(string_id="A", optimizers=5)]
+    assignments = [dict(grid_id="a", string_id="A")]
+    result = compare_grid_optimizer_totals(totals, rows, assignments)
+    assert result == dict(verdict="UNREADABLE", reason="grid_optimizer_totals_unreadable")
+    assert serialize_result(result) == '{"reason":"grid_optimizer_totals_unreadable","verdict":"UNREADABLE"}'
+    assert totals["a"] is original["a"]
+    assert compare_grid_oracle_totals(["a"], totals, dict(optimizers=5))["verdict"] == "UNREADABLE"
+
+
+@pytest.mark.parametrize("invalid", [None, [], (), [dict(grid_id="a", optimizers=5)], "secret-bearing-input"])
+def test_grid_optimizer_container_schema_rejects_without_echo(invalid):
+    result = compare_grid_optimizer_totals(invalid, ORACLE, [])
+    assert result == dict(verdict="UNREADABLE", reason="grid_optimizer_totals_unreadable")
+    assert "secret-bearing-input" not in serialize_result(result)
+    assert reconcile_seven_steps_json('{"grid":{"optimizer_totals":{"a":5,"a":7}}}')["reason"] == "json_duplicate_key"
+
+
+def test_grid_optimizer_lookup_work_exact_totals_caps_and_permutations(monkeypatch):
+    from benches import x05_reconcile as module
+    from random import Random
+    lookups = []
+    class CountedDict(dict):
+        def __getitem__(self, key):
+            lookups.append(1)
+            return super().__getitem__(key)
+    original_index = module._index
+    def counted_index(rows, source):
+        indexed, error = original_index(rows, source)
+        return (CountedDict(indexed) if indexed is not None else None), error
+    monkeypatch.setattr(module, "_index", counted_index)
+    for size in (10, 100, 1000):
+        totals = {f"g{i:04}": 2 for i in range(size)}
+        saved = [dict(string_id=f"s{i:04}", optimizers=1) for i in range(size)]
+        rows = [dict(grid_id=f"g{i:04}", string_id=f"s{i:04}") for i in range(size)]
+        lookups.clear()
+        baseline = module.compare_grid_optimizer_totals(totals, saved, rows)
+        assert len(lookups) == size
+        assert baseline["mismatch_count"] == size
+        assert len(baseline["examples"]) == min(size, MAX_STRING_EXAMPLES)
+        assert all(row["saved"] == 1 and row["delta"] == -1 for row in baseline["examples"])
+        preserved = deepcopy((totals, saved, rows))
+        rng = Random(size)
+        rng.shuffle(saved)
+        rng.shuffle(rows)
+        assert module.compare_grid_optimizer_totals(dict(reversed(list(totals.items()))), saved, rows) == baseline
+        assert totals == preserved[0]
+        assert sorted(saved, key=lambda row: row["string_id"]) == preserved[1]
+        assert sorted(rows, key=lambda row: row["string_id"]) == preserved[2]
