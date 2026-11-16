@@ -25,11 +25,219 @@ MAX_STRING_EXAMPLES = 20
 MAX_RECOMMENDATION_EXAMPLES = 20
 MAX_JSON_CHARS = 262144
 MAX_JSON_DEPTH = 32
+MAX_INPUT_BYTES = 16384
+MAX_ENVELOPE_EXAMPLES = 10
+MAX_RESULT_CHARS = 262144
+MAX_RESULT_NODES = 100000
+PROVENANCE_STAGES = ("strings", "grouping", "table", "policy", "reopen", "csv_view")
+IDENTITY_STAGES = ("saved_strings", "table", "csv", "reopened")
 _CSV_LOCK = RLock()
 
 
 def _out(verdict, reason, **evidence):
     return {"verdict": verdict, "reason": reason, **evidence}
+
+
+def _fixture_binding(value):
+    if type(value) is not dict or set(value) != {"fixture_id", "inputs"}:
+        return False
+    identifier, inputs = value["fixture_id"], value["inputs"]
+    return (type(identifier) is str and bool(identifier.strip()) and len(identifier) <= 128
+            and type(inputs) is dict and set(inputs) in ({"dwg", "report"}, {"dwg", "report", "bom"})
+            and all(type(digest) is str and re.fullmatch(r"[0-9a-f]{64}", digest)
+                    for digest in inputs.values()))
+
+
+def validate_fixture_provenance(frozen_manifest, stage_bindings):
+    """Compare supplied bindings only; never infer provenance from product output."""
+    if not _fixture_binding(frozen_manifest):
+        return _out("UNREADABLE", "frozen_manifest_unreadable")
+    if type(stage_bindings) is not dict or set(stage_bindings) != set(PROVENANCE_STAGES):
+        return _out("UNREADABLE", "provenance_stages_unreadable")
+    for stage in PROVENANCE_STAGES:
+        supplied = stage_bindings[stage]
+        if not _fixture_binding(supplied):
+            return _out("UNREADABLE", "stage_binding_unreadable", stage=stage)
+        if supplied != frozen_manifest:
+            return _out("UNREADABLE", "stage_binding_conflict", stage=stage)
+    return _out("PASS", "supplied_provenance_equal", stage_count=len(PROVENANCE_STAGES))
+
+
+def verify_input_bytes(frozen_manifest, supplied_inputs):
+    """Hash caller-supplied bytes only, with no file or network access."""
+    if not _fixture_binding(frozen_manifest):
+        return _out("UNREADABLE", "frozen_manifest_unreadable")
+    expected = frozen_manifest["inputs"]
+    if type(supplied_inputs) is not dict or set(supplied_inputs) != set(expected):
+        return _out("UNREADABLE", "input_bytes_missing")
+    roles = sorted(expected)
+    for role in roles:
+        if type(supplied_inputs[role]) is not bytes:
+            return _out("UNREADABLE", "input_bytes_unreadable", role=role)
+    conflicts = [role for role in roles if sha256(supplied_inputs[role]).hexdigest() != expected[role]]
+    return _out("UNREADABLE" if conflicts else "PASS",
+                "input_digest_conflict" if conflicts else "supplied_input_bytes_equal", roles=conflicts)
+
+
+def validate_saved_design_identity(expected_identity, stage_identities):
+    """Compare explicit project/version claims, never infer identity from totals."""
+    def valid(value):
+        return (type(value) is dict and set(value) == {"project_id", "version_id"}
+                and all(type(item) is str and bool(item.strip()) and len(item) <= 128
+                        for item in value.values()))
+
+    if not valid(expected_identity):
+        return _out("UNREADABLE", "design_identity_unreadable")
+    if type(stage_identities) is not dict or set(stage_identities) != set(IDENTITY_STAGES):
+        return _out("UNREADABLE", "design_identity_stages_unreadable")
+    for stage in IDENTITY_STAGES:
+        if not valid(stage_identities[stage]):
+            return _out("UNREADABLE", "stage_design_identity_unreadable", stage=stage)
+        if stage_identities[stage] != expected_identity:
+            return _out("UNREADABLE", "design_identity_conflict", stage=stage)
+    return _out("PASS", "supplied_design_identity_equal")
+
+
+def reconcile_with_provenance(evidence, frozen_manifest, stage_bindings):
+    """Keep all offline diagnostics while requiring supplied provenance agreement."""
+    provenance = validate_fixture_provenance(frozen_manifest, stage_bindings)
+    if provenance["verdict"] == "PASS":
+        if type(evidence) is not dict or evidence.get("fixture_id") != frozen_manifest["fixture_id"]:
+            provenance = _out("UNREADABLE", "evidence_fixture_identity_conflict")
+    reconciliation = reconcile_offline(evidence)
+    verdict = "UNREADABLE" if provenance["verdict"] == "UNREADABLE" else reconciliation["verdict"]
+    return _out(verdict, "offline_provenance_reconciliation", provenance=provenance,
+                reconciliation=reconciliation)
+
+
+def reconcile_assured(evidence, frozen_manifest, stage_bindings, supplied_inputs,
+                      expected_identity, stage_identities):
+    """Compose supplied assurance checks without discarding any diagnostics."""
+    checks = dict(provenance=reconcile_with_provenance(evidence, frozen_manifest, stage_bindings),
+                  input_bytes=verify_input_bytes(frozen_manifest, supplied_inputs),
+                  design_identity=validate_saved_design_identity(expected_identity, stage_identities))
+    verdicts = {check["verdict"] for check in checks.values()}
+    verdict = "UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS"
+    return _out(verdict, "offline_assurance", checks=checks)
+
+
+def reconcile_provenance_json(text):
+    decoded = decode_evidence_json(text)
+    if decoded["verdict"] != "PASS":
+        return decoded
+    envelope = decoded["evidence"]
+    if set(envelope) != {"evidence", "manifest", "bindings"}:
+        return _out("UNREADABLE", "provenance_envelope_unreadable")
+    return reconcile_with_provenance(envelope["evidence"], envelope["manifest"], envelope["bindings"])
+
+
+def aggregate_provenance(expected_ids, fixtures):
+    """Validate coverage first, then preserve every fixture's provenance result."""
+    coverage = aggregate_fixtures(expected_ids, fixtures)
+    if coverage["reason"] != "offline_fixture_reconciliation":
+        return _aggregate_envelope_diagnostics(coverage, expected_ids, fixtures, assured=False)
+    indexed = {row["fixture_id"]: row for row in fixtures}
+    results = {key: reconcile_with_provenance(indexed[key]["evidence"],
+                 indexed[key].get("manifest"), indexed[key].get("bindings")) for key in sorted(expected_ids)}
+    verdicts = {result["verdict"] for result in results.values()}
+    verdict = "UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS"
+    return _out(verdict, "offline_provenance_fixtures", fixtures=results)
+
+
+def _aggregate_envelope_diagnostics(coverage, expected_ids, fixtures, *, assured, seven=False, bound=False):
+    """Retain readable unique siblings and bounded index-only envelope errors."""
+    if (type(expected_ids) is not list or len(expected_ids) != 3
+            or any(type(key) is not str or not key.strip() or len(key) > 128 for key in expected_ids)
+            or len(set(expected_ids)) != 3 or type(fixtures) is not list):
+        return coverage
+    errors, count, indexed, duplicated, seen = [], 0, {}, set(), set()
+    for index, row in enumerate(fixtures):
+        key = row.get("fixture_id") if type(row) is dict else None
+        reason = None
+        if type(key) is not str or key not in expected_ids:
+            reason = "fixture_envelope_unreadable"
+        elif key in seen:
+            duplicated.add(key)
+            reason = "duplicate_fixture_id"
+        else:
+            seen.add(key)
+            if type(row.get("evidence")) is not dict or row["evidence"].get("fixture_id") != key:
+                reason = "fixture_identity_unbound"
+            else:
+                indexed[key] = row
+        if reason:
+            count += 1
+            if len(errors) < MAX_ENVELOPE_EXAMPLES:
+                errors.append(dict(index=index, reason=reason))
+    results = {}
+    for key in sorted(indexed.keys() - duplicated):
+        row = indexed[key]
+        if seven:
+            results[key] = _bound_seven_step_record(row) if bound else _seven_step_envelope(row.get("envelope"))
+        elif assured:
+            results[key] = _assurance_envelope(row, fixture_record=True)
+        else:
+            results[key] = reconcile_with_provenance(row["evidence"], row.get("manifest"), row.get("bindings"))
+    return {**coverage, "envelope_error_count": count, "envelope_errors": errors, "fixtures": results}
+
+
+def aggregate_assurance(expected_ids, fixtures):
+    coverage = aggregate_fixtures(expected_ids, fixtures)
+    if coverage["reason"] != "offline_fixture_reconciliation":
+        return _aggregate_envelope_diagnostics(coverage, expected_ids, fixtures, assured=True)
+    indexed = {row["fixture_id"]: row for row in fixtures}
+    results = {key: _assurance_envelope(indexed[key], fixture_record=True) for key in sorted(expected_ids)}
+    verdicts = {result["verdict"] for result in results.values()}
+    verdict = "UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS"
+    return _out(verdict, "offline_assurance_fixtures", fixtures=results)
+
+
+def aggregate_assurance_json(text):
+    decoded = decode_evidence_json(text)
+    if decoded["verdict"] != "PASS":
+        return decoded
+    envelope = decoded["evidence"]
+    if set(envelope) != {"expected_ids", "fixtures"}:
+        return _out("UNREADABLE", "assurance_aggregate_envelope_unreadable")
+    return aggregate_assurance(envelope["expected_ids"], envelope["fixtures"])
+
+
+def aggregate_provenance_json(text):
+    decoded = decode_evidence_json(text)
+    if decoded["verdict"] != "PASS":
+        return decoded
+    envelope = decoded["evidence"]
+    if set(envelope) != {"expected_ids", "fixtures"}:
+        return _out("UNREADABLE", "provenance_aggregate_envelope_unreadable")
+    return aggregate_provenance(envelope["expected_ids"], envelope["fixtures"])
+
+
+def reconcile_assurance_json(text):
+    decoded = decode_evidence_json(text)
+    if decoded["verdict"] != "PASS":
+        return decoded
+    return _assurance_envelope(decoded["evidence"])
+
+
+def _assurance_envelope(envelope, *, fixture_record=False):
+    fields = {"evidence", "manifest", "bindings", "inputs_hex", "identity", "stage_identities"}
+    if fixture_record:
+        fields.add("fixture_id")
+    if type(envelope) is not dict or set(envelope) != fields:
+        return _out("UNREADABLE", "assurance_envelope_unreadable")
+    if not _fixture_binding(envelope["manifest"]):
+        return _out("UNREADABLE", "frozen_manifest_unreadable")
+    encoded = envelope["inputs_hex"]
+    if type(encoded) is dict and set(encoded) - set(envelope["manifest"]["inputs"]):
+        return _out("UNREADABLE", "input_hex_roles_unreadable")
+    if (type(encoded) is not dict or any(type(value) is not str or len(value) % 2
+            or re.fullmatch(r"[0-9a-fA-F]*", value) is None for value in encoded.values())):
+        return _out("UNREADABLE", "input_hex_unreadable")
+    if any(len(value) > 2 * MAX_INPUT_BYTES for value in encoded.values()):
+        return _out("UNREADABLE", "input_hex_too_large")
+    supplied = {key: bytes.fromhex(value) for key, value in encoded.items()}
+    return reconcile_assured(envelope["evidence"], envelope["manifest"], envelope["bindings"], supplied,
+                             envelope["identity"], envelope["stage_identities"])
 
 
 def _numeric(value, *, count=False, signed=False):
@@ -158,7 +366,20 @@ def aggregate_fixtures_json(text):
 
 def serialize_result(value):
     """Emit exact JSON numbers, preserving Decimal values without float casts."""
+    used, nodes = 0, 0
+
+    def emit(text):
+        nonlocal used
+        used += len(text)
+        if used > MAX_RESULT_CHARS:
+            raise ValueError("json_result_too_large")
+        return text
+
     def encode(item, depth=0):
+        nonlocal nodes
+        nodes += 1
+        if nodes > MAX_RESULT_NODES:
+            raise ValueError("json_result_too_large")
         if depth > MAX_JSON_DEPTH or (type(item) in (dict, list) and depth >= MAX_JSON_DEPTH):
             raise ValueError("json_result_too_deep")
         if type(item) is Decimal:
@@ -167,43 +388,245 @@ def serialize_result(value):
             raw = str(item)
             # Exponent notation preserves even an integral Decimal's signed
             # zero and exponent when the strict decoder uses parse_float.
-            return raw if any(char in raw for char in ".eE") else raw + "E+0"
+            return emit(raw if any(char in raw for char in ".eE") else raw + "E+0")
         if type(item) in (str, int, float, bool) or item is None:
-            return json.dumps(item, ensure_ascii=True, allow_nan=False)
+            if type(item) is str and len(item) > MAX_RESULT_CHARS:
+                raise ValueError("json_result_too_large")
+            return emit(json.dumps(item, ensure_ascii=True, allow_nan=False))
         if type(item) is list:
+            emit("[]" + "," * max(0, min(len(item), MAX_RESULT_CHARS + 1) - 1))
             return "[" + ",".join(encode(child, depth + 1) for child in item) + "]"
         if type(item) is dict and all(type(key) is str for key in item):
-            return "{" + ",".join(json.dumps(key, ensure_ascii=True) + ":" + encode(item[key], depth + 1)
+            if any(len(key) > MAX_RESULT_CHARS for key in item):
+                raise ValueError("json_result_too_large")
+            emit("{}" + "," * max(0, min(len(item), MAX_RESULT_CHARS + 1) - 1))
+            return "{" + ",".join(emit(json.dumps(key, ensure_ascii=True) + ":") + encode(item[key], depth + 1)
                                    for key in sorted(item)) + "}"
         raise ValueError("json_result_type_unreadable")
 
     return encode(value)
 
 
-def aggregate_fixtures(expected_ids, fixtures):
-    """Reconcile exactly three explicitly expected fixture evidence records."""
+def compare_grid_correspondence(expected_grid_ids, saved_group_ids, rows, *, require_all_matched=False):
+    """Compare explicit independent grid/group identities without geometry inference."""
+    def identities(values):
+        return (type(values) is list and bool(values)
+                and all(type(key) is str and bool(key.strip()) and len(key) <= 128 for key in values)
+                and len(set(values)) == len(values))
+
+    if (not identities(expected_grid_ids) or not identities(saved_group_ids)
+            or type(rows) is not list or type(require_all_matched) is not bool):
+        return _out("UNREADABLE", "grid_evidence_unreadable")
+    expected_set, group_set = set(expected_grid_ids), set(saved_group_ids)
+    indexed, used, error_counts, count = {}, set(), {}, 0
+    def issue(reason):
+        nonlocal count
+        count += 1
+        error_counts[reason] = error_counts.get(reason, 0) + 1
+    for row in rows:
+        if (type(row) is not dict or set(row) != {"grid_id", "matches", "cause"}
+                or type(row["grid_id"]) is not str or not row["grid_id"].strip() or len(row["grid_id"]) > 128
+                or type(row["matches"]) is not list
+                or any(type(key) is not str or not key.strip() or len(key) > 128 for key in row["matches"])):
+            return _out("UNREADABLE", "grid_row_unreadable")
+        key, matches, cause = row["grid_id"], row["matches"], row["cause"]
+        if key not in expected_set:
+            issue("foreign_grid")
+        if key in indexed:
+            issue("duplicate_grid")
+        indexed[key] = row
+        if matches:
+            if len(matches) != 1 or cause is not None:
+                issue("grid_match_cardinality")
+            for group in matches:
+                if group not in group_set:
+                    issue("foreign_group")
+                if group in used:
+                    issue("duplicate_group_match")
+                used.add(group)
+        elif cause not in ("SOLAREDGE_GRID_UNMATCHED", "SOLAREDGE_GRID_AMBIGUOUS"):
+            return _out("UNREADABLE", "grid_cause_unreadable")
+        elif require_all_matched:
+            issue("required_grid_unmatched")
+    for key in expected_set - indexed.keys():
+        issue("missing_grid")
+    errors = []
+    for reason in sorted(error_counts):
+        errors.extend([reason] * min(error_counts[reason], MAX_ENVELOPE_EXAMPLES - len(errors)))
+    return _out("FAIL" if count else "PASS", "grid_correspondence_mismatch" if count else "grid_correspondence_equal",
+                error_count=count, errors=errors)
+
+
+def reconcile_seven_steps(import_evidence, grid_evidence, assurance):
+    """Compose explicit supplied evidence only; never a live bench verdict."""
+    keys = {"normal_user", "dwg_imported", "report_imported"}
+    if type(import_evidence) is not dict or set(import_evidence) != keys or any(
+            type(value) is not bool for value in import_evidence.values()):
+        imported = _out("UNREADABLE", "import_evidence_unreadable")
+    else:
+        imported = _out("PASS" if all(import_evidence.values()) else "FAIL", "supplied_import_evidence")
+    if type(grid_evidence) is not dict or set(grid_evidence) != {"expected_grid_ids", "saved_group_ids", "rows", "require_all_matched"}:
+        grids = _out("UNREADABLE", "grid_evidence_unreadable")
+    else:
+        grids = compare_grid_correspondence(**grid_evidence)
+    fields = {"evidence", "frozen_manifest", "stage_bindings", "supplied_inputs", "expected_identity", "stage_identities"}
+    checked = reconcile_assured(**assurance) if type(assurance) is dict and set(assurance) == fields else _out("UNREADABLE", "assurance_evidence_missing")
+    return _seven_step_result(imported, grids, checked)
+
+
+def _seven_step_result(imported, grids, checked):
+    stages = checked.get("checks", {}).get("provenance", {}).get("reconciliation", {}).get("stages", {})
+    absent = _out("UNREADABLE", "stage_evidence_missing")
+    steps = {"1": imported, "2": grids, "3": stages.get("strings", absent), "4": stages.get("grouping", absent),
+             "5": dict(table=stages.get("table", absent), csv_view=stages.get("csv_view", absent)),
+             "6": stages.get("policy", absent), "7": stages.get("reopen", absent)}
+    verdicts = {imported["verdict"], grids["verdict"], checked["verdict"]}
+    return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
+                "offline_seven_steps", steps=steps, assurance=checked)
+
+
+def reconcile_seven_steps_json(text):
+    decoded = decode_evidence_json(text)
+    if decoded["verdict"] != "PASS":
+        return decoded
+    return _seven_step_envelope(decoded["evidence"])
+
+
+def _seven_step_envelope(envelope):
+    if type(envelope) is not dict or set(envelope) != {"import", "grid", "assurance"}:
+        return _out("UNREADABLE", "seven_step_envelope_unreadable")
+    preliminary = reconcile_seven_steps(envelope["import"], envelope["grid"], None)
+    return _seven_step_result(preliminary["steps"]["1"], preliminary["steps"]["2"],
+                              _assurance_envelope(envelope["assurance"]))
+
+
+def validate_import_grid_provenance(frozen_manifest, import_binding, grid_binding):
+    """Compare supplied identity/digest claims only, without acquiring evidence."""
+    if not _fixture_binding(frozen_manifest):
+        return _out("UNREADABLE", "frozen_manifest_unreadable")
+    for stage, binding in (("import", import_binding), ("grid", grid_binding)):
+        if not _fixture_binding(binding):
+            return _out("UNREADABLE", "import_grid_binding_unreadable", stage=stage)
+        if binding != frozen_manifest:
+            return _out("UNREADABLE", "import_grid_binding_conflict", stage=stage)
+    return _out("PASS", "supplied_import_grid_provenance_equal")
+
+
+def aggregate_seven_steps(expected_ids, fixtures):
+    """Retain seven-step diagnostics for exactly three explicitly bound fixtures."""
+    return _aggregate_seven_step_records(expected_ids, fixtures, bound=False)
+
+
+def _aggregate_seven_step_records(expected_ids, fixtures, *, bound):
+    if type(fixtures) is not list:
+        return _out("UNREADABLE", "fixture_coverage_unreadable")
+    proxies = []
+    for row in fixtures:
+        key = row.get("fixture_id") if type(row) is dict else None
+        envelope = row.get("envelope") if type(row) is dict else None
+        assurance = envelope.get("assurance") if type(envelope) is dict else None
+        evidence = assurance.get("evidence") if type(assurance) is dict else None
+        proxy = dict(row) if type(row) is dict else {}
+        proxy.update(fixture_id=key, evidence=evidence, envelope=envelope)
+        proxies.append(proxy)
+    coverage, _ = _index_fixture_records(expected_ids, proxies)
+    if coverage is not None:
+        return _aggregate_envelope_diagnostics(coverage, expected_ids, proxies, assured=False, seven=True, bound=bound)
+    indexed = {row["fixture_id"]: row for row in fixtures}
+    results = {key: _bound_seven_step_record(indexed[key]) if bound else _seven_step_envelope(indexed[key]["envelope"])
+               for key in sorted(expected_ids)}
+    verdicts = {result["verdict"] for result in results.values()}
+    return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
+                "offline_bound_seven_step_fixtures" if bound else "offline_seven_step_fixtures", fixtures=results)
+
+
+def aggregate_seven_steps_json(text):
+    decoded = decode_evidence_json(text)
+    if decoded["verdict"] != "PASS":
+        return decoded
+    envelope = decoded["evidence"]
+    if set(envelope) != {"expected_ids", "fixtures"}:
+        return _out("UNREADABLE", "seven_step_aggregate_envelope_unreadable")
+    return aggregate_seven_steps(envelope["expected_ids"], envelope["fixtures"])
+
+
+def reconcile_bound_seven_steps(envelope, frozen_manifest, import_binding, grid_binding):
+    provenance = validate_import_grid_provenance(frozen_manifest, import_binding, grid_binding)
+    reconciliation = _seven_step_envelope(envelope)
+    if provenance["verdict"] == "PASS":
+        assurance = envelope.get("assurance") if type(envelope) is dict else None
+        supplied = assurance.get("manifest") if type(assurance) is dict else None
+        if supplied != frozen_manifest:
+            provenance = _out("UNREADABLE", "seven_step_manifest_conflict")
+    verdict = "UNREADABLE" if provenance["verdict"] == "UNREADABLE" else reconciliation["verdict"]
+    return _out(verdict, "offline_bound_seven_steps", provenance=provenance, reconciliation=reconciliation)
+
+
+def reconcile_bound_seven_steps_json(text):
+    decoded = decode_evidence_json(text)
+    if decoded["verdict"] != "PASS":
+        return decoded
+    return _bound_seven_step_envelope(decoded["evidence"])
+
+
+def _bound_seven_step_envelope(envelope):
+    if type(envelope) is not dict or set(envelope) != {"envelope", "manifest", "import_binding", "grid_binding"}:
+        evidence = envelope.get("envelope") if type(envelope) is dict else None
+        return _out("UNREADABLE", "bound_seven_step_envelope_unreadable", reconciliation=_seven_step_envelope(evidence))
+    return reconcile_bound_seven_steps(envelope["envelope"], envelope["manifest"],
+                                      envelope["import_binding"], envelope["grid_binding"])
+
+
+def aggregate_bound_seven_steps(expected_ids, fixtures):
+    return _aggregate_seven_step_records(expected_ids, fixtures, bound=True)
+
+
+def _bound_seven_step_record(row):
+    supplied = {name: row.get(name) for name in ("envelope", "manifest", "import_binding", "grid_binding")}
+    return _bound_seven_step_envelope(supplied)
+
+
+def aggregate_bound_seven_steps_json(text):
+    decoded = decode_evidence_json(text)
+    if decoded["verdict"] != "PASS":
+        return decoded
+    envelope = decoded["evidence"]
+    if set(envelope) != {"expected_ids", "fixtures"}:
+        return _out("UNREADABLE", "bound_seven_step_aggregate_envelope_unreadable")
+    return aggregate_bound_seven_steps(envelope["expected_ids"], envelope["fixtures"])
+
+
+def _index_fixture_records(expected_ids, fixtures):
     def identifier(value):
         return type(value) is str and bool(value.strip()) and len(value) <= 128
 
     if (not isinstance(expected_ids, (list, tuple, set)) or len(expected_ids) != 3
             or any(not identifier(value) for value in expected_ids)
             or len(set(expected_ids)) != 3):
-        return _out("UNREADABLE", "expected_fixtures_unreadable")
+        return _out("UNREADABLE", "expected_fixtures_unreadable"), None
     if not isinstance(fixtures, list) or len(fixtures) != 3:
-        return _out("UNREADABLE", "fixture_coverage_unreadable")
+        return _out("UNREADABLE", "fixture_coverage_unreadable"), None
     indexed = {}
     for fixture in fixtures:
         if not isinstance(fixture, dict) or not identifier(fixture.get("fixture_id")):
-            return _out("UNREADABLE", "fixture_id_unreadable")
+            return _out("UNREADABLE", "fixture_id_unreadable"), None
         key = fixture["fixture_id"]
         if key in indexed:
-            return _out("UNREADABLE", "duplicate_fixture_id")
+            return _out("UNREADABLE", "duplicate_fixture_id"), None
         if key not in expected_ids:
-            return _out("UNREADABLE", "foreign_fixture_id")
+            return _out("UNREADABLE", "foreign_fixture_id"), None
         evidence = fixture.get("evidence")
         if not isinstance(evidence, dict) or evidence.get("fixture_id") != key:
-            return _out("UNREADABLE", "fixture_identity_unbound")
+            return _out("UNREADABLE", "fixture_identity_unbound"), None
         indexed[key] = evidence
+    return None, indexed
+
+
+def aggregate_fixtures(expected_ids, fixtures):
+    """Reconcile exactly three explicitly expected fixture evidence records."""
+    coverage, indexed = _index_fixture_records(expected_ids, fixtures)
+    if coverage is not None:
+        return coverage
     results = {key: reconcile_offline(indexed[key]) for key in sorted(expected_ids)}
     verdicts = {result["verdict"] for result in results.values()}
     verdict = "UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS"
@@ -336,6 +759,28 @@ def compare_snapshots(before, reopened):
     changed = [key for key in fields if before[key] != reopened[key]]
     return _out("FAIL" if changed else "PASS", "snapshot_changed" if changed
                 else "snapshots_equal", changed_hashes=changed)
+
+
+def diff_snapshot_rows(before, reopened):
+    """Localize supplied string/count and table changes with bounded examples."""
+    parsed = []
+    for snapshot in (before, reopened):
+        if type(snapshot) is not dict or set(snapshot) != {"strings", "table_rows"}:
+            return _out("UNREADABLE", "snapshot_diff_rows_unreadable")
+        strings, error = _index(snapshot["strings"], "snapshot")
+        table = _table(snapshot["table_rows"])
+        if error or table is None:
+            return _out("UNREADABLE", "snapshot_diff_rows_unreadable")
+        parsed.append((strings, table))
+    previous, current = parsed[0][0], parsed[1][0]
+    added, removed = current.keys() - previous.keys(), previous.keys() - current.keys()
+    changed = {key for key in previous.keys() & current.keys() if previous[key] != current[key]}
+    examples = [dict(string_id=key, before=previous.get(key), reopened=current.get(key))
+                for key in nsmallest(MAX_STRING_EXAMPLES, added | removed | changed)]
+    metrics = [metric for metric in METRICS if parsed[0][1][metric] != parsed[1][1][metric]]
+    return _out("FAIL" if examples or metrics else "PASS", "snapshot_rows_changed" if examples or metrics
+                else "snapshot_rows_equal", counts=dict(added=len(added), removed=len(removed),
+                changed=len(changed), metrics=len(metrics)), string_examples=examples, metrics=metrics)
 
 
 @contextmanager
@@ -549,22 +994,61 @@ def main(argv=None):
     import sys
 
     parser = argparse.ArgumentParser(description="Offline X05 evidence comparison; no live acceptance.")
-    parser.add_argument("--aggregate", action="store_true", help="read one three-fixture envelope")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--aggregate", action="store_true", help="read one three-fixture envelope")
+    modes.add_argument("--provenance", action="store_true", help="read one supplied-provenance envelope")
+    modes.add_argument("--assurance", action="store_true", help="read one supplied-assurance envelope")
+    modes.add_argument("--provenance-aggregate", action="store_true", help="read three provenance envelopes")
+    modes.add_argument("--assurance-aggregate", action="store_true", help="read three assurance envelopes")
+    modes.add_argument("--seven-step", action="store_true", help="read one supplied seven-step envelope")
+    modes.add_argument("--seven-step-aggregate", action="store_true", help="read three supplied seven-step envelopes")
+    modes.add_argument("--seven-step-bound", action="store_true", help="read one bound seven-step envelope")
+    modes.add_argument("--seven-step-bound-aggregate", action="store_true", help="read three bound seven-step envelopes")
     args = parser.parse_args(argv)
     try:
-        raw = sys.stdin.buffer.read(4 * MAX_JSON_CHARS + 1)
+        chunks, size = [], 0
+        limit = 4 * MAX_JSON_CHARS + 1
+        while size < limit:
+            chunk = sys.stdin.buffer.read(limit - size)
+            if type(chunk) is not bytes or len(chunk) > limit - size:
+                raise ValueError("stdin_read_unreadable")
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        raw = b"".join(chunks)
         if len(raw) > 4 * MAX_JSON_CHARS:
             result = _out("UNREADABLE", "json_input_too_large")
         else:
             text = raw.decode("utf-8", errors="strict")
-            result = aggregate_fixtures_json(text) if args.aggregate else reconcile_json(text)
-        output = serialize_result(result)
+            decode = (aggregate_bound_seven_steps_json if args.seven_step_bound_aggregate else
+                      reconcile_bound_seven_steps_json if args.seven_step_bound else
+                      aggregate_seven_steps_json if args.seven_step_aggregate else
+                      reconcile_seven_steps_json if args.seven_step else
+                      aggregate_assurance_json if args.assurance_aggregate else
+                      reconcile_assurance_json if args.assurance else
+                      aggregate_provenance_json if args.provenance_aggregate else
+                      aggregate_fixtures_json if args.aggregate else
+                      reconcile_provenance_json if args.provenance else reconcile_json)
+            result = decode(text)
+        try:
+            output = serialize_result(result)
+        except ValueError as error:
+            if str(error) != "json_result_too_large":
+                raise
+            result = _out("UNREADABLE", "json_result_too_large")
+            output = serialize_result(result)
     except Exception:
         result = _out("UNREADABLE", "cli_evidence_unreadable")
         output = serialize_result(result)
     try:
-        sys.stdout.write(output + "\n")
-        sys.stdout.flush()
+        binary_output = getattr(sys.stdout, "buffer", None)
+        if binary_output is None:
+            sys.stdout.write(output + "\n")
+            sys.stdout.flush()
+        else:
+            binary_output.write(output.encode("ascii") + b"\n")
+            binary_output.flush()
     except (OSError, UnicodeError):
         # A real pipe may fail only on flush. Redirect this process's stdout
         # descriptor so interpreter shutdown cannot retry the failed pipe.

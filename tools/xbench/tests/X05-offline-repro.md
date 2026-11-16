@@ -285,6 +285,713 @@ UNREADABLE precedence. It does not acquire any missing live evidence. The live
 grader covers only the current partial import/grid slice; steps3 through7 and
 unsupported setup remain UNREADABLE, so offline helper PASS cannot accept X05.
 
+`validate_fixture_provenance(frozen_manifest, stage_bindings)` is a separate pure
+comparison. The frozen manifest has exactly `fixture_id` and `inputs`. Inputs
+contain lowercase64-character SHA-256 strings for `dwg` and `report`, with an
+optional `bom`. Each of `strings`, `grouping`, `table`, `policy`, `reopen` and
+`csv_view` must supply the same complete binding. Missing/malformed evidence or
+conflicting identity/digests returns a named UNREADABLE result. PASS means only
+that these supplied claims agree. The caller must independently establish the
+manifest's frozen origin and hash actual input bytes; this helper does neither
+and is not wired into live grading or used to infer provenance from the product.
+
+`reconcile_with_provenance(evidence, frozen_manifest, stage_bindings)` preserves
+all six checks under `reconciliation`, adds `provenance`, and binds
+`evidence.fixture_id` to the supplied manifest. UNREADABLE takes precedence over
+FAIL. This entry point is separate from the existing JSON CLI.
+`verify_input_bytes(manifest, inputs)` hashes an exact dictionary of supplied
+`bytes` for the manifest roles. Missing/wrong-type bytes or unequal digests are
+UNREADABLE. It opens no file and makes no network request. Matching actual bytes
+still cannot authenticate the supplied manifest's frozen origin.
+
+`validate_saved_design_identity(expected, stages)` separately compares explicit
+`project_id` and `version_id` strings across `saved_strings`, `table`, `csv` and
+`reopened`. Each stage must carry both exact identifiers; equal totals cannot
+replace them. This validates supplied claims, not the producer of those claims.
+
+Executable synthetic provenance replay from the repository root:
+
+```powershell
+@'
+import sys
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import (
+    PROVENANCE_STAGES, validate_fixture_provenance, reconcile_with_provenance)
+manifest = dict(fixture_id='synthetic', inputs=dict(dwg='a'*64, report='b'*64))
+bindings = {stage: deepcopy(manifest) for stage in PROVENANCE_STAGES}
+matching = validate_fixture_provenance(manifest, bindings)
+print(matching['verdict'], matching['reason'])
+swapped = deepcopy(bindings)
+swapped['strings']['inputs']['report'] = 'c'*64
+conflict = validate_fixture_provenance(manifest, swapped)
+print(conflict['verdict'], conflict['reason'], conflict['stage'])
+foreign = reconcile_with_provenance(dict(fixture_id='foreign'), manifest, bindings)
+print(foreign['verdict'], foreign['provenance']['reason'])
+assert matching['verdict'] == 'PASS'
+assert conflict == dict(verdict='UNREADABLE', reason='stage_binding_conflict', stage='strings')
+assert foreign['provenance']['reason'] == 'evidence_fixture_identity_conflict'
+'@ | python -P
+```
+
+Exact stdout:
+
+```text
+PASS supplied_provenance_equal
+UNREADABLE stage_binding_conflict strings
+UNREADABLE evidence_fixture_identity_conflict
+```
+
+The foreign example deliberately omits all six stage inputs; their diagnostics
+remain available under `reconciliation`. This replay creates no files or live
+state. Matching synthetic hash claims prove agreement only, never frozen origin
+or X05 bench acceptance.
+
+`reconcile_assured` retains provenance/reconciliation, input-byte and design
+identity results under `checks`, with UNREADABLE before FAIL before PASS.
+`aggregate_provenance(expected_ids, fixtures)` requires exactly three explicit
+IDs; each record supplies `fixture_id`, `evidence`, `manifest` and `bindings`.
+It retains readable siblings when one fixture's provenance is unreadable.
+`reconcile_provenance_json(text)` requires exactly `evidence`, `manifest` and
+`bindings`, using the existing bounded, duplicate-key-rejecting decoder. These
+are pure entry points, not additional CLI modes or live grading integration.
+
+Executable byte and identity replay from the repository root:
+
+```powershell
+@'
+import sys
+from hashlib import sha256
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import verify_input_bytes, validate_saved_design_identity, IDENTITY_STAGES
+inputs = dict(dwg=b'synthetic drawing', report=b'synthetic report')
+manifest = dict(fixture_id='synthetic', inputs={key: sha256(value).hexdigest() for key, value in inputs.items()})
+identity = dict(project_id='project-a', version_id='version-a')
+stages = {key: dict(identity) for key in IDENTITY_STAGES}
+matching = verify_input_bytes(manifest, inputs)
+same_version = validate_saved_design_identity(identity, stages)
+print(matching['verdict'], same_version['verdict'])
+swapped = dict(inputs, report=b'substituted report')
+changed_bytes = verify_input_bytes(manifest, swapped)
+print(changed_bytes['verdict'], changed_bytes['reason'], ','.join(changed_bytes['roles']))
+# Equal totals cannot establish project/version identity.
+totals_before = dict(panels=24, strings=2)
+totals_after = dict(totals_before)
+mixed = deepcopy(stages)
+mixed['reopened']['version_id'] = 'version-b'
+changed_version = validate_saved_design_identity(identity, mixed)
+assert totals_before == totals_after
+print(changed_version['verdict'], changed_version['reason'], changed_version['stage'])
+assert matching['verdict'] == same_version['verdict'] == 'PASS'
+assert changed_bytes['roles'] == ['report']
+assert changed_version['reason'] == 'design_identity_conflict'
+'@ | python -P
+```
+
+Exact stdout:
+
+```text
+PASS PASS
+UNREADABLE input_digest_conflict report
+UNREADABLE design_identity_conflict reopened
+```
+
+This replay reads no file and makes no network request. The bytes and identities
+are synthetic supplied values. Matching them does not authenticate frozen
+origin, producer custody or live acceptance.
+
+Strict transport additions: `reconcile_assurance_json(text)` accepts exactly
+`evidence`, `manifest`, `bindings`, `inputs_hex`, `identity`, `stage_identities`.
+Each `inputs_hex` value is an even-length hexadecimal string with no whitespace;
+empty bytes are encoded as an empty string. The existing JSON bounds apply.
+`aggregate_provenance_json(text)` accepts exactly `expected_ids` and `fixtures`.
+The CLI now exposes `--provenance` for the existing single-fixture provenance
+envelope. It is mutually exclusive with `--aggregate`, with the same0/1/4 result
+exits and5 output-failure exit. Assurance and provenance aggregation remain pure
+Python entry points, not CLI modes. None provides authenticated origin.
+
+Complete synthetic assurance replay from the repository root (requires pytest,
+because it reuses the checked synthetic fixture builder from the focused tests):
+
+```powershell
+@'
+import sys, runpy, json
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import reconcile_assurance_json
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+envelope = fixtures['assurance_envelope']()
+passing = reconcile_assurance_json(json.dumps(envelope))
+print(passing['verdict'])
+changed = deepcopy(envelope)
+changed['inputs_hex']['report'] = b'substituted'.hex()
+changed['stage_identities']['reopened']['version_id'] = 'foreign'
+changed['evidence']['recommendations'][0]['group_count'] = 1
+failed = reconcile_assurance_json(json.dumps(changed))
+checks = failed['checks']
+print(failed['verdict'], checks['input_bytes']['reason'], checks['design_identity']['reason'])
+grouping = checks['provenance']['reconciliation']['stages']['grouping']
+print(grouping['verdict'], grouping['reason'])
+assert passing['verdict'] == 'PASS'
+assert failed['verdict'] == 'UNREADABLE'
+assert checks['input_bytes']['reason'] == 'input_digest_conflict'
+assert checks['design_identity']['reason'] == 'design_identity_conflict'
+assert grouping['reason'] == 'grouping_count_mismatch'
+'@ | python -P
+```
+
+Exact stdout:
+
+```text
+PASS
+UNREADABLE input_digest_conflict design_identity_conflict
+FAIL grouping_count_mismatch
+```
+
+The replay reads only source code for its synthetic builder, no customer input.
+Helpers make no file or network reads. PASS establishes consistency of supplied
+claims and bytes, never their authenticated origin or live X05 acceptance.
+
+Additional offline CLI modes are `--assurance` for the complete assurance
+envelope and `--provenance-aggregate` for three provenance records. All four
+explicit modes are mutually exclusive. Each emits one sanitized JSON result
+with exit0 PASS,1 FAIL,4 UNREADABLE or5 output failure. Invalid combinations
+exit2 on stderr without a reconciliation result. Differential synthetic tests
+compare direct provenance JSON diagnostics with its CLI output for missing
+fields and readable mismatches.
+
+`aggregate_assurance(expected_ids, fixtures)` and
+`aggregate_assurance_json(text)` compose three complete assurance records.
+Each record adds `fixture_id` to the single-assurance envelope; the JSON outer
+envelope has exactly `expected_ids` and `fixtures`. Coverage errors remain
+UNREADABLE. Malformed aggregate records retain an exact `envelope_error_count`
+and at most10 index/reason examples, never input text. Unique valid siblings
+retain their diagnostics; duplicated IDs are excluded from sibling results.
+Missing records are a coverage error, not counted as malformed supplied records.
+
+Each hex role is limited to16384 decoded bytes (32768 hex characters) before
+any byte allocation. Exact-limit bytes can pass when their supplied manifest
+matches. Excess emits `input_hex_too_large`. JSON size limits also apply. These
+bounds are transport limits for synthetic offline evidence, not live upload
+limits or a claim about real customer files.
+
+`--assurance-aggregate` exposes the existing strict three-fixture assurance JSON
+entry point. All five explicit modes are mutually exclusive, with the same
+0/1/4/5 verdict/output exits and2 for usage errors. Missing BOM is supported when
+manifest roles, supplied bytes and every stage binding all omit it. Asymmetric
+BOM claims remain UNREADABLE. Invalid UTF-8 and read failures return a single
+sanitized `cli_evidence_unreadable` result in every mode.
+
+Executable three-fixture assurance replay (source-only synthetic fixture builder,
+requires pytest):
+
+```powershell
+@'
+import sys, runpy, json
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import aggregate_assurance_json
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+expected, records = fixtures['assurance_records']()
+records[1]['evidence']['recommendations'][0]['group_count'] = 1
+records[2]['inputs_hex']['report'] = b'substituted'.hex()
+result = aggregate_assurance_json(json.dumps(dict(expected_ids=expected, fixtures=records)))
+print(result['verdict'])
+a, b, c = [result['fixtures'][key] for key in expected]
+print(a['verdict'], b['verdict'], c['verdict'])
+print(b['checks']['provenance']['reconciliation']['stages']['grouping']['reason'])
+print(c['checks']['input_bytes']['reason'])
+assert result['verdict'] == 'UNREADABLE'
+assert [a['verdict'], b['verdict'], c['verdict']] == ['PASS', 'FAIL', 'UNREADABLE']
+'@ | python -P
+```
+
+Exact stdout:
+
+```text
+UNREADABLE
+PASS FAIL UNREADABLE
+grouping_count_mismatch
+input_digest_conflict
+```
+
+The readable PASS sibling remains visible beside both failures. All supplied
+bytes are synthetic; no network, customer file or authenticated-origin claim is
+involved. Aggregate precedence does not erase sibling diagnostics or accept X05.
+
+Foreign `inputs_hex` roles now reject as `input_hex_roles_unreadable` before any
+payload is decoded. Aggregate duplicate tracking counts every occurrence of an
+expected fixture ID, including malformed or unbound occurrences. Ambiguous
+fixtures cannot appear as PASS; unaffected unique siblings retain their results.
+
+Executable malformed-envelope recovery (synthetic source-only builder, requires
+pytest; each comparison receives JSON only through stdin):
+
+```powershell
+@'
+import sys, runpy, json, subprocess
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+expected, rows = fixtures['assurance_records']()
+base = dict(expected_ids=expected, fixtures=rows)
+foreign = deepcopy(base)
+foreign['fixtures'][0]['inputs_hex']['foreign'] = 'zz'
+duplicate = deepcopy(base)
+duplicate['fixtures'].insert(0, dict(fixture_id=expected[0], evidence=None))
+command = [sys.executable, '-P', 'tools/xbench/benches/x05_reconcile.py', '--assurance-aggregate']
+for name, envelope, code in [('foreign', foreign, 4), ('duplicate', duplicate, 4), ('corrected', base, 0)]:
+    result = subprocess.run(command, input=json.dumps(envelope).encode(), capture_output=True, timeout=20)
+    assert result.returncode == code and not result.stderr
+    value = json.loads(result.stdout)
+    if name == 'foreign':
+        detail = value['fixtures'][expected[0]]['reason']
+    elif name == 'duplicate':
+        assert expected[0] not in value['fixtures']
+        assert value['fixtures'][expected[1]]['verdict'] == 'PASS'
+        detail = value['reason']
+    else:
+        detail = ','.join(value['fixtures'][key]['verdict'] for key in expected)
+    print(name, result.returncode, value['verdict'], detail)
+'@ | python -P
+```
+
+Exact stdout:
+
+```text
+foreign 4 UNREADABLE input_hex_roles_unreadable
+duplicate 4 UNREADABLE fixture_coverage_unreadable
+corrected 0 PASS PASS,PASS,PASS
+```
+
+No network or customer input is used. The source-only builder creates synthetic
+claims; the successful recovery does not authenticate their origin or accept X05.
+
+`compare_grid_correspondence(expected_grid_ids, saved_group_ids, rows,
+require_all_matched=False)` compares explicit independent IDs. Each row has
+`grid_id`, `matches` and `cause`. A match requires exactly one supplied saved
+group and no cause. An unmatched grid requires `SOLAREDGE_GRID_UNMATCHED` or
+`SOLAREDGE_GRID_AMBIGUOUS`; all-matched mode rejects either. Foreign, duplicate,
+missing or multiply matched identities FAIL; unreadable evidence is UNREADABLE.
+Exact error counts retain at most10 fixed reason examples, without input text.
+This helper establishes no geometry or identity provenance.
+
+`reconcile_seven_steps(import_evidence, grid_evidence, assurance)` composes only
+supplied offline evidence. Import fields `normal_user`, `dwg_imported` and
+`report_imported` must be explicit booleans. Grid evidence supplies all four grid
+helper arguments. Assurance supplies the six keyword arguments of
+`reconcile_assured`. Seven step diagnostics and all assurance checks survive;
+missing evidence gives UNREADABLE precedence. Even a PASS cannot accept X05
+without the real staging acquisition required by the frozen bench contract.
+
+Result serialization permits262144 ASCII JSON characters and100000 visited
+nodes, with the existing32-container depth bound. Oversized expansion raises
+fixed `ValueError('json_result_too_large')` before emission. The CLI returns one
+sanitized UNREADABLE result and exit4 when this budget is exceeded; it never
+truncates exact counts into an apparently successful partial result. Small
+acyclic shared containers remain lossless; compact graphs whose expanded output
+is excessive stop at the same budget.
+
+CLI stdin is collected through bounded short reads until EOF or the byte limit,
+then decoded as strict UTF-8. Split tokens and multibyte sequences are preserved.
+All strict decoders and CLI modes accept legal surrounding JSON whitespace;
+leading BOMs, concatenated documents and trailing non-whitespace reject as
+`json_malformed`. No framing rejection echoes input text.
+
+`reconcile_seven_steps_json(text)` requires exactly `import`, `grid` and
+`assurance`. Assurance uses the existing strict hex-byte envelope. Duplicate
+keys, input size/depth and missing envelope fields use the existing named JSON
+errors. All seven diagnostic steps survive readable FAIL and UNREADABLE states.
+It is a pure Python entry point, not a live grader or CLI mode.
+
+Grid membership uses indexed sets, with generated operation-count tests rather
+than timing thresholds. Capped grid reasons are sorted by fixed reason name;
+their exact total and first10 examples are invariant under supplied row and ID
+order. Exact Unicode identity is preserved, without normalization or trimming.
+
+Executable seven-step replay (synthetic source-only builder, requires pytest):
+
+```powershell
+@'
+import sys, runpy, json
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import reconcile_seven_steps_json
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+envelope = builders['seven_step_envelope']()
+result = reconcile_seven_steps_json(json.dumps(envelope))
+print(result['verdict'])
+unmatched = deepcopy(envelope)
+unmatched['grid']['rows'][0].update(matches=[], cause='SOLAREDGE_GRID_UNMATCHED')
+unmatched['grid']['require_all_matched'] = False
+allowed = reconcile_seven_steps_json(json.dumps(unmatched))
+print(allowed['verdict'], allowed['steps']['2']['reason'], unmatched['grid']['rows'][0]['cause'])
+unmatched['grid']['require_all_matched'] = True
+required = reconcile_seven_steps_json(json.dumps(unmatched))
+print(required['verdict'], required['steps']['2']['errors'][0])
+missing = dict(envelope, **{'import': None})
+uncertain = reconcile_seven_steps_json(json.dumps(missing))
+print(uncertain['verdict'], uncertain['steps']['1']['reason'])
+assert result['verdict'] == allowed['verdict'] == 'PASS'
+assert required['verdict'] == 'FAIL'
+assert uncertain['steps']['2']['verdict'] == 'PASS'
+'@ | python -P
+```
+
+Exact stdout:
+
+```text
+PASS
+PASS grid_correspondence_equal SOLAREDGE_GRID_UNMATCHED
+FAIL required_grid_unmatched
+UNREADABLE import_evidence_unreadable
+```
+
+The allowed unmatched case demonstrates only the helper's named-cause policy.
+Frozen Copenhagen and USML acceptance requires all matched. This replay acquires
+no live evidence and cannot authenticate inputs or accept the X05 bench.
+
+Complete seven-step JSON envelope:
+
+| Field | Required shape | Missing, null or empty behavior |
+|---|---|---|
+| `import` | Exactly `normal_user`, `dwg_imported`, `report_imported`, all bool | Missing outer field rejects envelope; null/empty object yields step1 UNREADABLE; false yields readable FAIL |
+| `grid` | Exactly `expected_grid_ids`, `saved_group_ids`, `rows`, `require_all_matched` | Missing outer field rejects envelope; null/empty object yields step2 UNREADABLE; empty rows with valid nonempty IDs yields missing-grid FAIL |
+| `assurance` | Exactly `evidence`, `manifest`, `bindings`, `inputs_hex`, `identity`, `stage_identities` | Missing outer field rejects envelope; null/empty object yields assurance UNREADABLE and absent downstream steps |
+
+Evidence and assurance schemas are the existing six-stage contracts above.
+Unknown outer keys reject as `seven_step_envelope_unreadable`. The CLI exposes
+`--seven-step` with existing0/1/4/5 result exits, mutually exclusive with all other
+explicit modes. `aggregate_seven_steps(expected_ids, fixtures)` is a pure Python
+entry point: each of three records has `fixture_id` and `envelope`. The record ID
+must equal the supplied assurance evidence ID. Each fixture retains import,
+grid, assurance and downstream diagnostics with UNREADABLE precedence.
+
+`validate_import_grid_provenance(manifest, import_binding, grid_binding)` is a
+separate pure comparison. Each binding uses exactly the manifest's `fixture_id`
+and `inputs` digest map. Malformed claims or substitutions return named
+UNREADABLE with stage `import` or `grid`. This does not hash files, authenticate
+frozen origin or automatically add those claims to the seven-step schema.
+
+Executable typo-field recovery, using synthetic stdin (source builder requires
+pytest):
+
+```powershell
+@'
+import sys, runpy, json, subprocess
+sys.path.insert(0, 'tools/xbench')
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+correct = builders['seven_step_envelope']()
+typo = dict(correct)
+typo['improt'] = typo.pop('import')
+command = [sys.executable, '-P', 'tools/xbench/benches/x05_reconcile.py', '--seven-step']
+for name, envelope, expected in [('typo', typo, 4), ('corrected', correct, 0)]:
+    run = subprocess.run(command, input=json.dumps(envelope).encode(), capture_output=True, timeout=20)
+    assert run.returncode == expected and not run.stderr
+    result = json.loads(run.stdout)
+    print(name, run.returncode, result['verdict'], result['reason'])
+'@ | python -P
+```
+
+Exact stdout:
+
+```text
+typo 4 UNREADABLE seven_step_envelope_unreadable
+corrected 0 PASS offline_seven_steps
+```
+
+The correction changes a field name, not evidence custody. Both objects remain
+synthetic supplied claims and cannot establish live X05 acceptance.
+
+`aggregate_seven_steps_json(text)` requires exactly `expected_ids` and `fixtures`
+and uses the existing bounded strict decoder. Per-fixture records have
+`fixture_id` and `envelope`, as in the pure aggregator. Malformed/duplicate
+fixture records retain bounded index-only diagnostics and readable unique
+siblings. Every occurrence of an ambiguous ID excludes that fixture from PASS.
+
+`reconcile_bound_seven_steps(envelope, manifest, import_binding, grid_binding)`
+combines the existing import/grid provenance comparison with seven-step
+reconciliation. Its `provenance` and `reconciliation` results remain visible,
+with UNREADABLE precedence. The assurance manifest must also equal the supplied
+frozen manifest. Agreement checks supplied claims and cannot authenticate origin.
+The `--seven-step` transport uses the same strict UTF-8, read-error and output
+failure behavior as the existing modes, including exit5 for closed stdout.
+
+Executable three-fixture seven-step replay (synthetic source-only builder,
+requires pytest; the pure comparison reads no file and makes no network request):
+
+```powershell
+@'
+import sys, runpy, json
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import aggregate_seven_steps_json
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+expected, rows = builders['seven_fixture_records']()
+rows[0]['envelope']['import']['dwg_imported'] = False
+rows[1]['envelope']['grid'] = None
+result = aggregate_seven_steps_json(json.dumps(dict(expected_ids=expected, fixtures=rows)))
+print(result['verdict'])
+print(*(result['fixtures'][key]['verdict'] for key in expected))
+print(result['fixtures'][expected[0]]['steps']['1']['reason'])
+print(result['fixtures'][expected[1]]['steps']['2']['reason'])
+assert result['verdict'] == 'UNREADABLE'
+expected, rows = builders['seven_fixture_records']()
+corrected = aggregate_seven_steps_json(json.dumps(dict(expected_ids=expected, fixtures=rows)))
+print(corrected['verdict'], *(corrected['fixtures'][key]['verdict'] for key in expected))
+assert corrected['verdict'] == 'PASS'
+'@ | python -P
+```
+
+Exact stdout:
+
+```text
+UNREADABLE
+FAIL UNREADABLE PASS
+supplied_import_evidence
+grid_evidence_unreadable
+PASS PASS PASS PASS
+```
+
+The correction preserves independent sibling diagnostics and demonstrates the
+aggregate precedence for supplied synthetic evidence. Live acquisition and
+frozen-origin authentication remain required by the X05 acceptance contract.
+
+`--seven-step-aggregate` exposes the existing aggregate JSON helper, with
+0/1/4/5 result/output exits and mutual exclusion with every other mode.
+`reconcile_bound_seven_steps_json(text)` requires exactly `envelope`, `manifest`,
+`import_binding` and `grid_binding`. It uses the existing bounded strict decoder.
+`aggregate_bound_seven_steps(expected_ids, fixtures)` expects three records with
+`fixture_id` and those four fields. Swapped import/grid claims become UNREADABLE
+while each fixture's seven-step diagnostics and readable siblings remain visible.
+
+Output-budget tests inject a controlled synthetic aggregate result into the CLI
+producer. Each fixture fits alone, but their combined serialized result exceeds
+262144 characters. The CLI emits only the fixed `json_result_too_large` result
+and exit4, retaining the original counts in caller-owned data. This exercises
+the emission boundary without claiming a live producer generated that shape.
+
+Executable bound seven-step replay (synthetic source-only builder, requires
+pytest):
+
+```powershell
+@'
+import sys, runpy, json
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import reconcile_bound_seven_steps_json
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+base = builders['bound_seven_envelope']()
+print(reconcile_bound_seven_steps_json(json.dumps(base))['verdict'])
+for stage in ['import', 'grid']:
+    changed = deepcopy(base)
+    changed[stage + '_binding']['inputs']['report'] = 'd'*64
+    result = reconcile_bound_seven_steps_json(json.dumps(changed))
+    print(stage, result['verdict'], result['provenance']['reason'], result['reconciliation']['verdict'])
+changed = deepcopy(base)
+changed['import_binding']['inputs']['report'] = 'd'*64
+changed['envelope']['assurance']['inputs_hex']['report'] = b'swapped'.hex()
+changed['envelope']['import']['normal_user'] = False
+result = reconcile_bound_seven_steps_json(json.dumps(changed))
+print(result['verdict'], result['reconciliation']['assurance']['checks']['input_bytes']['reason'],
+      result['reconciliation']['steps']['1']['verdict'])
+print('corrected', reconcile_bound_seven_steps_json(json.dumps(base))['verdict'])
+'@ | python -P
+```
+
+Exact stdout:
+
+```text
+PASS
+import UNREADABLE import_grid_binding_conflict PASS
+grid UNREADABLE import_grid_binding_conflict PASS
+UNREADABLE input_digest_conflict FAIL
+corrected PASS
+```
+
+The supplied manifest and bindings are synthetic claims. Agreement validates
+their consistency while frozen-origin authentication and live acquisition are
+established by the separate bench acceptance process.
+
+`aggregate_bound_seven_steps_json(text)` accepts exactly `expected_ids` and
+`fixtures` through the existing bounded duplicate-key-rejecting decoder.
+`--seven-step-bound` exposes the strict single bound envelope with0/1/4/5 exits
+and mutual exclusion with every other mode. Invalid UTF-8, read/write/flush
+failures and closed pipes follow the documented sanitized transport behavior.
+Missing bound fields reject the schema while retaining available seven-step
+reconciliation diagnostics. Direct and strict JSON helpers preserve those
+diagnostics across malformed bindings, foreign roles and optional-BOM asymmetry.
+
+Executable bound three-fixture replay (synthetic source-only builder, requires
+pytest):
+
+```powershell
+@'
+import sys, runpy
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import aggregate_bound_seven_steps
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+expected, rows = builders['bound_seven_fixture_records']()
+correct = deepcopy(rows)
+rows[0]['import_binding'] = deepcopy(correct[1]['import_binding'])
+rows[1]['grid_binding'] = deepcopy(correct[0]['grid_binding'])
+result = aggregate_bound_seven_steps(expected, rows)
+print(result['verdict'])
+for key in expected[:2]:
+    fixture = result['fixtures'][key]
+    print(fixture['verdict'], fixture['provenance']['stage'], fixture['reconciliation']['verdict'])
+print('sibling', result['fixtures'][expected[2]]['verdict'])
+fixed = aggregate_bound_seven_steps(expected, correct)
+print('corrected', fixed['verdict'])
+assert result['verdict'] == 'UNREADABLE' and fixed['verdict'] == 'PASS'
+'@ | python -P
+```
+
+Exact stdout:
+
+```text
+UNREADABLE
+UNREADABLE import PASS
+UNREADABLE grid PASS
+sibling PASS
+corrected PASS
+```
+
+The swaps preserve equal totals but change supplied fixture provenance. The
+helper checks those claims against the supplied manifest. The replay establishes
+consistency and rejection behavior, with frozen-origin authentication and live
+acquisition supplied separately by the bench acceptance process.
+
+`--seven-step-bound-aggregate` exposes `aggregate_bound_seven_steps_json` with
+the documented verdict/output exits and mutual exclusion with every other mode.
+The strict outer JSON object has exactly `expected_ids` and `fixtures`.
+Expected IDs contain exactly three unique nonblank strings of at most128
+characters. Each fixture record supplies these fields:
+
+| Field | Meaning |
+|---|---|
+| `fixture_id` | Exact expected identity, also bound to assurance evidence |
+| `envelope` | Complete import/grid/assurance seven-step object |
+| `manifest` | Supplied frozen fixture ID and input digest map |
+| `import_binding` | Supplied import fixture/input binding |
+| `grid_binding` | Supplied grid fixture/input binding |
+
+Valid unique fixtures run seven-step reconciliation once each. Coverage errors
+preserve named uncertainty, ambiguous IDs stay excluded, and readable unique
+siblings keep their bound diagnostics. Exact serializer tests exercise100000
+visited nodes successfully and reject100001 below the independent character
+and depth budgets, preserving caller data.
+
+Executable stdin-only strict-decoder replay (synthetic source-only builder,
+requires pytest):
+
+```powershell
+@'
+import sys, runpy, json, subprocess
+sys.path.insert(0, 'tools/xbench')
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+expected, rows = builders['bound_seven_fixture_records']()
+rows[0]['envelope']['import']['normal_user'] = False
+rows[1]['grid_binding'] = None
+mixed = json.dumps(dict(expected_ids=expected, fixtures=rows))
+expected, rows = builders['bound_seven_fixture_records']()
+correct = json.dumps(dict(expected_ids=expected, fixtures=rows))
+program = ("import sys;sys.path.insert(0,'tools/xbench');from benches.x05_reconcile import "
+           "aggregate_bound_seven_steps_json,serialize_result;"
+           "r=aggregate_bound_seven_steps_json(sys.stdin.read());print(serialize_result(r));"
+           "sys.exit({'PASS':0,'FAIL':1,'UNREADABLE':4}[r['verdict']])")
+cases = [('duplicate', '{"fixtures":[],"fixtures":[]}', 4), ('mixed', mixed, 4), ('corrected', correct, 0)]
+for name, text, expected_exit in cases:
+    run = subprocess.run([sys.executable, '-P', '-c', program], input=text.encode(), capture_output=True, timeout=20)
+    assert run.returncode == expected_exit and not run.stderr
+    result = json.loads(run.stdout)
+    detail = result['reason'] if name == 'duplicate' else ','.join(result['fixtures'][key]['verdict'] for key in expected)
+    print(name, run.returncode, result['verdict'], detail)
+'@ | python -P
+```
+
+Exact stdout:
+
+```text
+duplicate 4 UNREADABLE json_duplicate_key
+mixed 4 UNREADABLE FAIL,UNREADABLE,PASS
+corrected 0 PASS PASS,PASS,PASS
+```
+
+The decoder reads each synthetic envelope only from stdin. The parent process
+loads source fixtures. The supplied claims retain the origin and live-acquisition
+limits stated in the X05 acceptance contract.
+
+`diff_snapshot_rows(before, reopened)` accepts exactly `strings` and `table_rows`
+in each snapshot. It localizes string-ID/optimizer-count changes with exact
+added/removed/changed totals and at most20 sorted examples, plus changed table
+metrics in fixed metric order. It uses supplied rows and preserves caller data.
+It establishes no panel geometry or provenance beyond those row identities.
+
+The discrepancy policy already rejects duplicate records for one fixture and
+metric as `duplicate_discrepancy_record`. New permutation tests cover conflicting
+deltas, names and freeze timestamps while preserving unrelated stage results.
+CLI result JSON is emitted as ASCII bytes through binary stdout when available,
+so output encoding and UTF-8 mode settings preserve identical bytes and exits.
+String-only injected streams retain the testable text-output interface.
+
+Minimal synthetic repairs follow the evidence producer fields:
+
+| Uncertainty | Synthetic field to repair |
+|---|---|
+| `import_evidence_unreadable` | Supply all three explicit boolean import flags |
+| `grid_evidence_unreadable` | Supply expected grid IDs, saved group IDs, rows and all-matched flag |
+| `input_digest_conflict` | Restore supplied bytes to the bytes independently bound by the manifest |
+| `snapshot_rows_missing` | Restore the explicit reopened string and table rows |
+
+Executable before/after repair examples (synthetic source-only builder, requires
+pytest):
+
+```powershell
+@'
+import sys, runpy, json
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import reconcile_seven_steps_json
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+base = builders['seven_step_envelope']()
+fixed = reconcile_seven_steps_json(json.dumps(base))
+for name in ['import', 'grid', 'bytes', 'reopen']:
+    damaged = deepcopy(base)
+    if name in ['import', 'grid']:
+        damaged[name] = None
+    elif name == 'bytes':
+        damaged['assurance']['inputs_hex']['report'] = b'swapped'.hex()
+    else:
+        damaged['assurance']['evidence']['reopened_rows'] = None
+    result = reconcile_seven_steps_json(json.dumps(damaged))
+    if name == 'bytes':
+        reason = result['assurance']['checks']['input_bytes']['reason']
+    else:
+        step = {'import':'1', 'grid':'2', 'reopen':'7'}[name]
+        reason = result['steps'][step]['reason']
+    affected = {'import':{'1'}, 'grid':{'2'}, 'bytes':set(), 'reopen':{'7'}}[name]
+    for step in set('1234567') - affected:
+        assert result['steps'][step] == fixed['steps'][step]
+    repaired = reconcile_seven_steps_json(json.dumps(base))
+    assert result['verdict'] == 'UNREADABLE' and repaired['verdict'] == 'PASS'
+    print(name, result['verdict'], reason, repaired['verdict'])
+'@ | python -P
+```
+
+Exact stdout:
+
+```text
+import UNREADABLE import_evidence_unreadable PASS
+grid UNREADABLE grid_evidence_unreadable PASS
+bytes UNREADABLE input_digest_conflict PASS
+reopen UNREADABLE snapshot_rows_missing PASS
+```
+
+The repair restores the known synthetic source. Real evidence must come from
+the independent producer and preserve manifest custody. The guide grants no
+authority to alter frozen manifests to fit substituted product output.
+
 Canonical snapshot compatibility contract:
 
 - Hash UTF-8 bytes of compact JSON arrays with ASCII escapes and no spaces.
