@@ -2558,3 +2558,46 @@ connection. Per-string optimizer and panel counts require positive integers in
 the current schema. Their zero rows yield named UNREADABLE results before any
 coverage claim can be evaluated. These tests preserve that boundary; they do
 not establish that a zero-count engineering string is a supported live input.
+
+## Paired oracle-load cancellation replay
+
+Within Studio X-bench X05, opposite per-string changes may cancel in one shared
+device while remaining visible across separate devices. The same coarse grid
+is explicit in both cases, so its conserved total does not identify the change.
+
+```python
+import sys, runpy
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+for shared in (True, False):
+    grid, evidence = fixtures['coarsen_oracle_load_grids'](
+        *fixtures['oracle_load_component']('cancel'))
+    if shared:
+        grid, evidence = fixtures['coarsen_oracle_load_devices'](grid, evidence)
+    before = deepcopy(evidence['oracle_dc_power'])
+    evidence['oracle_dc_power'][0]['kw_dc'] = '1.50'
+    evidence['oracle_dc_power'][1]['kw_dc'] = '1.50'
+    result = m._seven_step_oracle_loads(grid, evidence)
+    power = result['metrics']['kw_dc']
+    strings = m.compare_string_dc_power(before, evidence['oracle_dc_power'])
+    print('shared device' if shared else 'distinct devices', result['verdict'],
+          power['grid_comparison']['mismatch_count'],
+          power['inverter_comparison']['mismatch_count'],
+          strings['counts']['mismatched'])
+```
+
+Expected output:
+
+```text
+shared device PASS 0 0 2
+distinct devices FAIL 0 2 2
+```
+
+The explicit changes are +0.25 and -0.25 kW DC. Both totals remain three. With
+one shared grid and device, both aggregate deltas cancel. With separate devices,
+the device deltas remain +0.25 and -0.25. Exact per-string comparison still finds
+two changed values in either case. The PASS is only the supplied aggregate-load
+projection. It does not prove original string identity/value preservation or
+independent oracle acquisition, and does not accept live X05.
