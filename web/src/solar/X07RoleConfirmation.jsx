@@ -7,6 +7,7 @@ const valid = row => row && typeof row.block === 'string' && row.block && typeof
   && (row.design_window ?? row.insertion_bounds).every(Number.isFinite)
   && (row.design_window ?? row.insertion_bounds)[0] <= (row.design_window ?? row.insertion_bounds)[2]
   && (row.design_window ?? row.insertion_bounds)[1] <= (row.design_window ?? row.insertion_bounds)[3]
+const identity = row => JSON.stringify([row.block, row.layer])
 
 // Data and persistence are injected. A resolved callback confirms once; rejection
 // preserves the chosen set for retry. Cancellation supplies an aborted signal.
@@ -14,12 +15,13 @@ export default function X07RoleConfirmation({ proposal, onConfirm, onCancel }) {
   const rows = Array.isArray(proposal?.module?.candidates) ? proposal.module.candidates.filter(valid) : []
   const first = proposal?.module?.first_choice
   const initial = Math.max(0, rows.findIndex(row => row.block === first?.block && row.layer === first?.layer))
-  return <Confirmation key={JSON.stringify([proposal?.id, rows, initial])} rows={rows} initial={initial}
+  return <Confirmation key={JSON.stringify([proposal?.id, [...rows].sort((a,b) => identity(a).localeCompare(identity(b)))])} rows={rows} initial={initial}
     onConfirm={onConfirm} onCancel={onCancel} />
 }
 
 function Confirmation({ rows, initial, onConfirm, onCancel }) {
-  const [selected, select] = useState(initial)
+  const [selected, select] = useState(rows[initial] ? identity(rows[initial]) : null)
+  const selectedRow = rows.find(row => identity(row) === selected)
   const [busy, setBusy] = useState(false)
   const [confirmed, setConfirmed] = useState(false)
   const [cancelled, setCancelled] = useState(false)
@@ -31,16 +33,16 @@ function Confirmation({ rows, initial, onConfirm, onCancel }) {
   }, [])
   const submit = event => {
     event.preventDefault()
-    if (pending.current || confirmed || retired.current || !rows[selected] || typeof onConfirm !== 'function') return
+    if (pending.current || confirmed || retired.current || !selectedRow || typeof onConfirm !== 'function') return
     const controller = new AbortController()
     pending.current = controller
     setBusy(true)
     setError(null)
-    const row = rows[selected]
+    const row = selectedRow
     const selection = { block: row.block, layer: row.layer, count: row.count,
       design_window: [...(row.design_window ?? row.insertion_bounds)] }
     const current = () => mounted.current && !retired.current && pending.current === controller
-    Promise.resolve().then(() => onConfirm(selection, { signal: controller.signal })).then(result => {
+    Promise.resolve().then(() => current() ? onConfirm(selection, { signal: controller.signal }) : undefined).then(result => {
       if (!current()) return
       if (result?.ok === false) throw new Error(typeof result.message === 'string' ? result.message : 'Roles could not be saved.')
       setConfirmed(true)
@@ -64,8 +66,8 @@ function Confirmation({ rows, initial, onConfirm, onCancel }) {
   return <form onSubmit={submit} aria-label="Confirm drawing roles">
     <fieldset disabled={busy}><legend>Module set</legend>
       {rows.length > 1 && <p>Choose the module set for this design.</p>}
-      {rows.map((row, index) => <label key={index}>
-        <input type="radio" name="module-set" checked={selected === index} onChange={() => select(index)} />
+      {rows.map(row => <label key={identity(row)}>
+        <input type="radio" name="module-set" checked={selected === identity(row)} onChange={() => select(identity(row))} />
         {row.block} on {row.layer}, {row.count} inserts
       </label>)}
       {!rows.length && <p>No module set is available.</p>}

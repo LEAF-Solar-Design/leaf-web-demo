@@ -30,12 +30,13 @@ def _key(value):
 
 
 class CustomerProfileStore:
-    def __init__(self, path):
+    def __init__(self, path, *, read_only=False):
         if str(path) == ':memory:':
             raise ValueError('inject a local SQLite file path')
         self.path = Path(path)
+        self.read_only = read_only
         with self._connection() as db:
-            db.execute('BEGIN IMMEDIATE')
+            if not read_only: db.execute('BEGIN IMMEDIATE')
             version = db.execute('PRAGMA user_version').fetchone()[0]
             tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
             if version not in (0, 1):
@@ -56,6 +57,8 @@ class CustomerProfileStore:
             if version == 0 and tables and not shape_ok:
                 raise ProfileSchemaError('unversioned database is not the supported legacy shape')
             decision = 'supported' if version == 1 else ('adopt_legacy' if tables else 'initialize')
+            if read_only and decision != 'supported':
+                raise ProfileSchemaError('read-only store requires supported versioned schema')
             if not tables:
                 self._create_schema(db)
             if version == 0:
@@ -117,7 +120,8 @@ class CustomerProfileStore:
 
     @contextmanager
     def _connection(self):
-        db = sqlite3.connect(self.path, timeout=5)
+        db = (sqlite3.connect(self.path.resolve().as_uri()+'?mode=ro', uri=True, timeout=5)
+              if self.read_only else sqlite3.connect(self.path, timeout=5))
         db.row_factory = sqlite3.Row
         db.execute('PRAGMA foreign_keys=ON')
         try:
@@ -133,10 +137,22 @@ class CustomerProfileStore:
         if type(row['version']) is not int or not 1 <= row['version'] <= MAX_PROFILE_VERSION:
             raise ValueError('profile version must be a positive safe integer')
         result = dict(row)
-        result['roles'] = json.loads(result.pop('roles_json'))
+        encoded = result.pop('roles_json')
+        try:
+            roles = json.loads(encoded, parse_constant=lambda value: (_ for _ in ()).throw(ValueError('nonfinite JSON')))
+            if (not isinstance(encoded, str) or len(encoded.encode('utf-8')) > 131072
+                    or not isinstance(roles, dict) or 'module' not in roles
+                    or set(roles)-{'module','roof','obstruction'}
+                    or any(not isinstance(role, dict) or not isinstance(role.get('layer'),str) or not role['layer']
+                           or ('block' in role and (not isinstance(role['block'],str) or not role['block'])) for role in roles.values())):
+                raise ValueError('invalid role shape')
+        except (TypeError, ValueError, RecursionError) as error:
+            raise ValueError('stored profile roles are invalid') from error
+        result['roles'] = roles
         return result
 
     def save_version(self, customer_key, roles, *, expected_version=None):
+        if self.read_only: raise sqlite3.OperationalError('profile store is read-only')
         customer_key = _key(customer_key)
         if not isinstance(roles, dict):
             raise ValueError('roles must be a JSON object')
@@ -175,6 +191,12 @@ class CustomerProfileStore:
         project_key, customer_key = _key(project_key), _key(customer_key)
         if expected_version is not None and (type(expected_version) is not int or not 1 <= expected_version <= MAX_PROFILE_VERSION):
             raise ValueError('expected version must be a positive safe integer')
+        if self.read_only:
+            result = self.application_record(project_key, customer_key)
+            if result is None: raise sqlite3.OperationalError('profile store is read-only; new pin refused')
+            if expected_version is not None and result['version'] != expected_version:
+                raise ValueError('project is pinned to another version')
+            return result
         with self._connection() as db:
             db.execute('BEGIN IMMEDIATE')
             applied = db.execute('SELECT * FROM project_applications WHERE project_key=?', (project_key,)).fetchone()

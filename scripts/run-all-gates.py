@@ -1144,7 +1144,9 @@ def build_suites() -> List[Suite]:
                   "tests/test_x07_selection_numeric_limits.py", "tests/test_x07_schema_init_races.py",
                   "tests/test_x07_schema_semantic_tampering.py", "tests/test_x07_role_json_size_boundaries.py",
                   "tests/test_x07_profile_sqlite_full.py", "tests/test_x07_profile_backup_restore.py",
-                  "tests/test_x07_scope_key_collisions.py", "tests/test_x07_drawing_revision_replay.py"], 123),
+                  "tests/test_x07_scope_key_collisions.py", "tests/test_x07_drawing_revision_replay.py",
+                  "tests/test_x07_persisted_payload_corruption.py", "tests/test_x07_profile_readonly_store.py",
+                  "tests/test_x07_optional_role_compatibility.py"], 130),
         # W5 Rooftop workflow flow (2026-09-24, contracts G34/G34a/G34b): server/solar_workflow_flow.py,
         # the pure progression engine (every step's CanAdvance and HasDrawingPrerequisites, the L1/L2
         # gates on the host's setting, AdvanceStep, GoBack and NavigateToStep Stale marking over the

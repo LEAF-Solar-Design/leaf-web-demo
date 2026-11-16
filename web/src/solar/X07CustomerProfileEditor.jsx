@@ -18,6 +18,7 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord }) {
   const [busy, setBusy] = useState(false), [error, setError] = useState(null)
   const [stale, setStale] = useState(false), [message, setMessage] = useState(null)
   const form = useRef(null), saveButton = useRef(null), reloadButton = useRef(null), retryButton = useRef(null)
+  const composing = useRef(false)
   const errorId = useId(), focusRole = useRef(null)
   useEffect(() => {
     if (busy) return
@@ -58,6 +59,7 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord }) {
   }, [])
   const save = event => {
     event.preventDefault()
+    if (composing.current || event.nativeEvent?.isComposing) return
     if (!profile || !draft || pending.current || stale) return
     if (!draft.module?.block?.trim() || !draft.module?.layer?.trim()) { setError('Module block and layer are required.'); return }
     if (['roof', 'obstruction'].some(role => draft[role] && !draft[role].layer?.trim())) {
@@ -91,7 +93,10 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord }) {
     {pin && <p>Project is pinned to version {pin.version}.</p>}
     {error && <p id={errorId} role="alert">{error}</p>}{message && <p role="status">{message}</p>}
     {!profile && !busy && <button ref={retryButton} type="button" onClick={() => load(false)}>Retry loading profile</button>}
-    {draft && <form ref={form} onSubmit={save} aria-describedby={error ? errorId : undefined}>
+    {draft && <form ref={form} onSubmit={save} aria-describedby={error ? errorId : undefined}
+      onCompositionStart={() => { composing.current = true }}
+      onCompositionEnd={() => { composing.current = false }}
+      onKeyDown={event => { if (event.key === 'Enter' && (composing.current || event.nativeEvent.isComposing || event.keyCode === 229)) event.preventDefault() }}>
       <fieldset disabled={busy}><legend>Drawing roles</legend>
         {Object.keys(draft).filter(role => ['module', 'roof', 'obstruction'].includes(role)).map(role => {
           const label = role[0].toUpperCase() + role.slice(1)
