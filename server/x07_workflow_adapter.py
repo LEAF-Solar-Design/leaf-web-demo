@@ -6,6 +6,8 @@ before construction. UI callback keys cannot replace the injected identity.
 from copy import deepcopy
 import hashlib
 import json
+from pathlib import Path
+import sqlite3
 from x07_customer_profile_store import _key, ProfileScopeError
 from x07_role_selection import select_modules
 from x07_profile_compatibility import check_compatibility
@@ -15,9 +17,70 @@ class AdapterVersionConflict(ValueError):
     code = 'STALE_VERSION'
 
 
+class IntakeBudgetError(ValueError):
+    code = 'INTAKE_BUDGET_EXCEEDED'
+
+
+class ConfirmationReceiptStore:
+    """Explicitly injected offline journal. Lost successful replies can replay.
+
+    Receipt+profile are separate databases. A crash between profile success and
+    journal commit still requires inspect/apply recovery, not blind confirmation.
+    This is not a live authorization or distributed exactly-once guarantee.
+    """
+    def __init__(self, path):
+        self.path = Path(path)
+        db = sqlite3.connect(self.path)
+        try:
+            with db: db.execute('CREATE TABLE IF NOT EXISTS confirmations (project_key TEXT PRIMARY KEY, customer_key TEXT NOT NULL, digest TEXT NOT NULL, result TEXT NOT NULL)')
+        finally: db.close()
+
+    def run(self, context, digest, produce, validate):
+        db = sqlite3.connect(self.path, timeout=5)
+        try:
+            with db:
+                db.execute('BEGIN IMMEDIATE')
+                row = db.execute('SELECT customer_key,digest,result FROM confirmations WHERE project_key=?',(context['project_key'],)).fetchone()
+                if row:
+                    if row[0] != context['customer_key']: raise ProfileScopeError('receipt belongs to another customer')
+                    if row[1] != digest: raise ValueError('confirmation retry payload changed')
+                    result = json.loads(row[2]);validate(result);return result
+                result = produce()
+                db.execute('INSERT INTO confirmations VALUES (?,?,?,?)',
+                    (context['project_key'],context['customer_key'],digest,json.dumps(result,allow_nan=False)))
+                return result
+        finally: db.close()
+
+
+def _budget(intake, copies, aliases, limits):
+    caps = {'inserts':100000,'aliases':4096,'copies':256,'depth':32,'nodes':1000000,'string_bytes':16*1024*1024}
+    if limits is not None:
+        if not isinstance(limits,dict) or set(limits)-set(caps) or any(type(v) is not int or v<1 for v in limits.values()):
+            raise ValueError('invalid offline intake budgets')
+        caps.update(limits)
+    for name,value in [('inserts',intake.get('inserts',[]) if isinstance(intake,dict) else []),('copies',copies),('aliases',aliases or {})]:
+        if isinstance(value,(dict,list,tuple)) and len(value)>caps[name]:raise IntakeBudgetError(name+' budget exceeded')
+    stack=[(value,0) for value in [intake,copies,aliases]];nodes=0;strings=0
+    while stack:
+        value,depth=stack.pop();nodes+=1
+        if depth>caps['depth'] or nodes>caps['nodes']:raise IntakeBudgetError('structure budget exceeded')
+        if isinstance(value,str):
+            strings+=len(value.encode('utf-8'))
+            if strings>caps['string_bytes']:raise IntakeBudgetError('string budget exceeded')
+        elif isinstance(value,dict):
+            if len(value)*2+nodes+len(stack)>caps['nodes']:raise IntakeBudgetError('structure budget exceeded')
+            stack.extend((child,depth+1) for item in value.items() for child in item)
+        elif isinstance(value,(list,tuple)):
+            if len(value)+nodes+len(stack)>caps['nodes']:raise IntakeBudgetError('structure budget exceeded')
+            stack.extend((child,depth+1) for child in value)
+        elif value is not None and type(value) not in (int,float,bool):raise IntakeBudgetError('unsupported intake value')
+
+
 class WorkflowAdapter:
-    def __init__(self, workflow, *, context, intake, copies, block_aliases=None):
+    def __init__(self, workflow, *, context, intake, copies, block_aliases=None, limits=None, confirmation_receipts=None):
+        _budget(intake,copies,block_aliases,limits)  # before snapshot copying
         self.workflow = workflow
+        self._receipts = confirmation_receipts
         if not isinstance(context, dict) or set(context) != {'customer_key', 'project_key', 'drawing_key'}:
             raise ValueError('inject all three context keys')
         self._context = {key: _key(value) for key, value in context.items()}
@@ -70,9 +133,16 @@ class WorkflowAdapter:
         choice = self._choice(payload)
         # The UI payload represents an explicit module choice. Optional roof or
         # obstruction editing remains a separate injected profile-editor event.
-        return self.workflow.confirm(deepcopy(self._intake), **scope,
-            roles={'module': {'block': choice['block'], 'layer': choice['layer']}},
-            window=choice['design_window'], expected_version=payload.get('expected_version'))
+        def produce():
+            return self.workflow.confirm(deepcopy(self._intake), **scope,
+                roles={'module': {'block': choice['block'], 'layer': choice['layer']}},
+                window=choice['design_window'], expected_version=payload.get('expected_version'))
+        if self._receipts is None: return produce()
+        digest = hashlib.sha256(json.dumps([self._plan_token,payload],sort_keys=True,allow_nan=False,separators=(',',':')).encode()).hexdigest()
+        def validate(result):
+            pin = self.workflow.store.application_record(scope['project_key'],scope['customer_key'])
+            if pin != result.get('applied_profile'):raise ValueError('confirmation receipt no longer matches project pin')
+        return self._receipts.run(scope,digest,produce,validate)
 
     def load_profile(self, customer_key):
         if customer_key != self._context['customer_key']:

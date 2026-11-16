@@ -9,11 +9,37 @@ const valid = (record, customer) => record?.customer_key === customer && typeof 
 const clone = value => JSON.parse(JSON.stringify(value))
 
 export default function X07CustomerProfileEditor(props) {
-  if (typeof props.customerKey !== 'string' || !props.customerKey.trim()) return <p role="alert">Choose a customer to edit its profile.</p>
-  return <Editor key={props.customerKey} {...props} />
+  return <LeaveBoundary {...props} />
 }
 
-function Editor({ customerKey, loadProfile, saveProfile, applicationRecord }) {
+function LeaveBoundary(props) {
+  const key = JSON.stringify([props.customerKey, props.drawingKey])
+  const [held, setHeld] = useState({ key, props }), [message, setMessage] = useState(null)
+  const dirty = useRef(false), attempt = useRef(null), sequence = useRef(0)
+  useEffect(() => {
+    if (held.key === key) return
+    const epoch = ++sequence.current, controller = new AbortController()
+    attempt.current?.abort();attempt.current = controller
+    if (!dirty.current || typeof props.leaveGuard !== 'function') {
+      dirty.current = false;setHeld({ key, props });setMessage(null);return
+    }
+    setMessage('Unsaved profile edits need a leave decision.')
+    Promise.resolve().then(() => props.leaveGuard({ from: { customerKey: held.props.customerKey, drawingKey: held.props.drawingKey },
+      to: { customerKey: props.customerKey, drawingKey: props.drawingKey }, dirty: true, signal: controller.signal }))
+      .then(decision => {
+        if (controller.signal.aborted || sequence.current !== epoch) return
+        if (decision === 'discard') { dirty.current = false;setHeld({ key, props });setMessage(null) }
+        else setMessage('Profile edits kept. Staying on the current drawing.')
+      }).catch(() => { if (!controller.signal.aborted) setMessage('Profile edits kept. Leave decision failed.') })
+    return () => controller.abort()
+  }, [key, props.leaveAttempt])
+  useEffect(() => () => attempt.current?.abort(), [])
+  const active = held.key === key ? props : held.props
+  if (typeof active.customerKey !== 'string' || !active.customerKey.trim()) return <p role="alert">Choose a customer to edit its profile.</p>
+  return <>{message && <p role="status">{message}</p>}<Editor key={held.key} {...active} onDirtyChange={value => { dirty.current = value }} /></>
+}
+
+function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, onDirtyChange }) {
   const [profile, setProfile] = useState(null), [draft, setDraft] = useState(null)
   const [busy, setBusy] = useState(false), [error, setError] = useState(null)
   const [stale, setStale] = useState(false), [message, setMessage] = useState(null)
@@ -48,7 +74,7 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord }) {
         if (!valid(record, customerKey)) throw new Error('invalid scoped record')
         const copy = clone(record.roles)
         if (restoreRetryFocus) focusRole.current = 'module'
-        setProfile(record); if (!keepEdits) setDraft(copy)
+        setProfile(record); if (!keepEdits) { setDraft(copy);onDirtyChange?.(false) }
         setStale(false)
       }).catch(() => { if (current(controller)) setError('The profile could not be loaded for this customer.') })
       .finally(() => { if (current(controller)) { pending.current = null; setBusy(false) } })
@@ -74,7 +100,7 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord }) {
         if (record?.ok === false) throw record
         if (!valid(record, customerKey) || record.profile_id !== profile.profile_id || record.version <= profile.version) throw new Error('invalid saved record')
         const copy = clone(record.roles)
-        setProfile(record); setDraft(copy); setMessage('Profile saved.')
+        setProfile(record); setDraft(copy); setMessage('Profile saved.');onDirtyChange?.(false)
       }).catch(reason => {
         if (!current(controller)) return
         const conflict = ['STALE_VERSION', 'VERSION_CONFLICT'].includes(reason?.code)
@@ -82,9 +108,9 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord }) {
         setError(conflict ? 'The profile changed. Your edits are kept. Reload the version to retry.' : 'The profile could not be saved. Your edits are kept.')
       }).finally(() => { if (current(controller)) { pending.current = null; setBusy(false) } })
   }
-  const edit = (role, field, value) => { setDraft(previous => ({ ...previous, [role]: { ...previous[role], [field]: value } })); setMessage(null) }
-  const addRole = role => { focusRole.current = role; setDraft(previous => ({ ...previous, [role]: { layer: '' } })); setMessage(null); setError(null) }
-  const removeRole = role => { focusRole.current = 'module'; setDraft(previous => { const next = { ...previous }; delete next[role]; return next }); setMessage(null); setError(null) }
+  const edit = (role, field, value) => { onDirtyChange?.(true);setDraft(previous => ({ ...previous, [role]: { ...previous[role], [field]: value } })); setMessage(null) }
+  const addRole = role => { onDirtyChange?.(true);focusRole.current = role; setDraft(previous => ({ ...previous, [role]: { layer: '' } })); setMessage(null); setError(null) }
+  const removeRole = role => { onDirtyChange?.(true);focusRole.current = 'module'; setDraft(previous => { const next = { ...previous }; delete next[role]; return next }); setMessage(null); setError(null) }
   const pin = profile && applicationRecord?.customer_key === customerKey && applicationRecord.profile_id === profile.profile_id
     && Number.isSafeInteger(applicationRecord.version) && applicationRecord.version > 0 ? applicationRecord : null
   return <section aria-label="Customer role profile">

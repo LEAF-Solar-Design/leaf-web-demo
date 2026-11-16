@@ -219,12 +219,16 @@ class CustomerProfileStore:
             return result
 
     def _application(self, db, project_key, customer_key):
-        row = db.execute('''SELECT a.project_key, v.* FROM project_applications a
-            JOIN profile_versions v ON a.customer_key=v.customer_key AND a.version=v.version
-            WHERE a.project_key=?''', (project_key,)).fetchone()
-        if row and row['customer_key'] != customer_key:
+        pin = db.execute('SELECT * FROM project_applications WHERE project_key=?', (project_key,)).fetchone()
+        if pin is None: return None
+        if pin['customer_key'] != customer_key:
             raise ProfileScopeError('project belongs to another customer')
-        return self._profile(row)
+        row = db.execute('SELECT * FROM profile_versions WHERE customer_key=? AND version=?',
+                         (customer_key, pin['version'])).fetchone()
+        owner = db.execute('SELECT profile_id FROM customers WHERE customer_key=?',(customer_key,)).fetchone()
+        if row is None or owner is None or row['profile_id'] != pin['profile_id'] or owner['profile_id'] != pin['profile_id']:
+            raise ValueError('stored project pin is invalid')
+        return self._profile({**dict(row), 'project_key': project_key})
 
     def application_record(self, project_key, customer_key):
         with self._connection() as db:
