@@ -6,7 +6,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from export_x04_offline_evidence import (
     DEFAULT_MAX_INPUT_BYTES, check_output_path, positive_byte_limit,
-    read_json, report_failure, write_json,
+    decode_json, read_json, report_failure, write_json,
 )
 from validate_x04_evidence_packet import SCHEMA, local_id, validate_packet
 from validate_x04_review_report import require
@@ -14,7 +14,36 @@ from validate_x04_review_report import require
 MANIFEST_SCHEMA = 'leaf.x04.evidence-packet-manifest.v1'
 
 
-def assemble_manifest(manifest, directory, output=None, max_input_bytes=DEFAULT_MAX_INPUT_BYTES):
+class InputBudget:
+    """One assembly call's actual byte budget, including every repeated read."""
+    def __init__(self, ceiling):
+        self.ceiling = ceiling
+        self.used = 0
+
+    def read_json(self, path, per_file):
+        if self.used >= self.ceiling:
+            raise ValueError('Aggregate input byte ceiling exhausted before the next source.')
+        chunks = []
+        size = 0
+        with Path(path).open('rb') as stream:
+            while True:
+                # One excess byte distinguishes exact EOF from an oversized input.
+                amount = min(65536, per_file - size + 1, self.ceiling - self.used + 1)
+                chunk = stream.read(amount)
+                if not chunk:
+                    break
+                size += len(chunk)
+                self.used += len(chunk)
+                if size > per_file:
+                    raise ValueError(f'Input exceeds the {per_file}-byte ceiling.')
+                if self.used > self.ceiling:
+                    raise ValueError(f'Aggregate input exceeds the {self.ceiling}-byte ceiling.')
+                chunks.append(chunk)
+        return decode_json(b''.join(chunks))
+
+
+def assemble_manifest(manifest, directory, output=None, max_input_bytes=DEFAULT_MAX_INPUT_BYTES,
+                      read_input=None):
     """Read only explicit files; relative paths are relative to the manifest directory.
 
     The manifest and sources are successive reads, not a simultaneous snapshot.
@@ -46,8 +75,9 @@ def assemble_manifest(manifest, directory, output=None, max_input_bytes=DEFAULT_
             packet[section].append(entry)
             sources.append((source, entry, 'artifact' if section == 'artifacts' else 'report'))
     # All source/output aliases are checked before any artifact or report is opened.
+    reader = read_json if read_input is None else read_input
     for source, entry, field in sources:
-        entry[field] = read_json(source, max_input_bytes)
+        entry[field] = reader(source, max_input_bytes)
     validate_packet(packet)
     return packet
 
@@ -59,12 +89,15 @@ def main(argv=None):
     parser.add_argument('--max-input-bytes', type=positive_byte_limit, default=DEFAULT_MAX_INPUT_BYTES,
                         help='Per-file ceiling for the manifest and each explicit input')
     parser.add_argument('--max-output-bytes', type=positive_byte_limit)
+    parser.add_argument('--max-total-input-bytes', type=positive_byte_limit,
+                        help='Optional actual byte ceiling across manifest and every explicit read')
     args = parser.parse_args(argv)
     try:
         manifest = args.manifest.resolve()
         check_output_path(manifest, args.out)
-        packet = assemble_manifest(read_json(manifest, args.max_input_bytes), manifest.parent,
-                                   args.out, args.max_input_bytes)
+        reader = read_json if args.max_total_input_bytes is None else InputBudget(args.max_total_input_bytes).read_json
+        packet = assemble_manifest(reader(manifest, args.max_input_bytes), manifest.parent,
+                                   args.out, args.max_input_bytes, read_input=reader)
         write_json(packet, args.out, args.max_output_bytes)
     except (OSError, ValueError, TypeError, RecursionError) as error:
         return report_failure('packet assembly', error)

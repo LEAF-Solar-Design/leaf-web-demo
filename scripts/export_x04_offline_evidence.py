@@ -33,7 +33,7 @@ def read_bounded(stream, limit):
         chunks.append(chunk)
 
 
-def read_json(path, max_input_bytes=DEFAULT_MAX_INPUT_BYTES):
+def decode_json(encoded):
     def unique_object(pairs):
         result = {}
         for key, value in pairs:
@@ -50,6 +50,11 @@ def read_json(path, max_input_bytes=DEFAULT_MAX_INPUT_BYTES):
             raise ValueError(f'JSON integer token exceeds {MAX_JSON_INTEGER_DIGITS} digits.')
         return int(value)
 
+    return json.loads(encoded.decode('utf-8-sig'), object_pairs_hook=unique_object,
+                      parse_constant=reject_constant, parse_int=bounded_integer)
+
+
+def read_json(path, max_input_bytes=DEFAULT_MAX_INPUT_BYTES):
     if str(path) == '-':
         stream = getattr(sys.stdin, 'buffer', None)
         if stream is None or getattr(stream, 'closed', False):
@@ -61,8 +66,7 @@ def read_json(path, max_input_bytes=DEFAULT_MAX_INPUT_BYTES):
             raise ValueError(f'Input exceeds the {max_input_bytes}-byte ceiling.')
         with source.open('rb') as stream:
             encoded = read_bounded(stream, max_input_bytes)
-    return json.loads(encoded.decode('utf-8-sig'), object_pairs_hook=unique_object,
-                      parse_constant=reject_constant, parse_int=bounded_integer)
+    return decode_json(encoded)
 
 
 def positive_byte_limit(value):
