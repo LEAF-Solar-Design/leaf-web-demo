@@ -85,7 +85,7 @@ def run(intake, params):
         for row in intake.get(key, []):
             if not isinstance(row, dict) or (key == "polylines" and not isinstance(row.get("pts"), list)):
                 raise ValueError(f"Saved intake {key} has an incompatible candidate row; re-import the drawing.")
-            for field in ("layer", "name", "handle"):
+            for field in ("layer", "name", "handle", "space", "layout"):
                 if field in row and not isinstance(row[field], str):
                     raise ValueError(f"Saved intake {key} candidate {field} must be a string; re-import the drawing.")
     groups = {}

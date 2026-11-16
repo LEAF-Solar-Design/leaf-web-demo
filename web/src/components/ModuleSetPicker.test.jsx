@@ -12,6 +12,66 @@ const first = () => screen.getByRole('checkbox', { name: 'Design / Panel A: 12 c
 const second = () => screen.getByRole('checkbox', { name: 'Alternate / Panel B: 9 candidates' })
 const submit = () => screen.getByRole('button', { name: 'Count selected set' })
 
+it.each(['resolve', 'reject'])('ignores old %s after returning to A with a new request', async (terminal) => {
+  let oldResolve, oldReject, newResolve
+  const old = new Promise((resolve, reject) => { oldResolve = resolve; oldReject = reject })
+  const current = new Promise((resolve) => { newResolve = resolve })
+  const onSelect = vi.fn().mockReturnValueOnce(old).mockReturnValueOnce(current)
+  const view = render(<ModuleSetPicker drawingKey="A" data={data} onSelect={onSelect} />)
+  fireEvent.click(first())
+  fireEvent.click(submit())
+  view.rerender(<ModuleSetPicker drawingKey="B" data={data} onSelect={onSelect} />)
+  view.rerender(<ModuleSetPicker drawingKey="A" data={data} onSelect={onSelect} />)
+  expect(first().checked).toBe(false)
+  fireEvent.click(second())
+  fireEvent.click(submit())
+  await act(async () => {
+    if (terminal === 'resolve') oldResolve()
+    else oldReject(new Error('old private detail'))
+    await old.catch(() => {})
+  })
+  expect(submit().disabled).toBe(true)
+  expect(screen.getByText('Counting modules.')).toBeTruthy()
+  expect(screen.queryByRole('alert')).toBeNull()
+  expect(screen.queryByText(/^Counted /)).toBeNull()
+  expect(second().checked).toBe(true)
+  fireEvent.click(submit())
+  expect(onSelect).toHaveBeenCalledTimes(2)
+  await act(async () => { newResolve(); await current })
+  expect(submit().disabled).toBe(false)
+  expect(onSelect.mock.calls).toEqual([[['first']], [['second']]])
+  view.rerender(<ModuleSetPicker drawingKey="A" data={{ ...data, selected_sets: [data.sets[1]], count: 9 }} onSelect={onSelect} />)
+  expect(screen.getByText('Counted 9 modules on Alternate / Panel B.')).toBeTruthy()
+})
+
+it.each(['getter throws', 'reject first', 'resolve first'])('settles custom thenables once: %s', async (mode) => {
+  const unhandled = vi.fn()
+  window.addEventListener('unhandledrejection', unhandled)
+  const thenable = mode === 'getter throws'
+    ? Object.defineProperty({}, 'then', { get() { throw new Error('private getter') } })
+    : { then(resolve, reject) {
+      if (mode === 'reject first') reject(new Error('private rejection'))
+      resolve(); reject(new Error('late private rejection')); resolve()
+    } }
+  const onSelect = vi.fn().mockReturnValueOnce(thenable).mockReturnValueOnce(Promise.resolve())
+  try {
+    render(<ModuleSetPicker drawingKey="A" data={data} onSelect={onSelect} />)
+    fireEvent.click(first())
+    fireEvent.click(submit())
+    await waitFor(() => expect(submit().disabled).toBe(false))
+    if (mode === 'resolve first') expect(screen.queryByRole('alert')).toBeNull()
+    else expect(screen.getByRole('alert').textContent).toBe('Unable to start module count. Try counting the selected set again.')
+    expect(first().checked).toBe(true)
+    expect(screen.queryByText(/private/)).toBeNull()
+    expect(screen.queryByText(/^Counted /)).toBeNull()
+    fireEvent.click(submit())
+    await waitFor(() => expect(submit().disabled).toBe(false))
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(onSelect).toHaveBeenCalledTimes(2)
+    expect(unhandled).not.toHaveBeenCalled()
+  } finally { window.removeEventListener('unhandledrejection', unhandled) }
+})
+
 it('does not restore a removed pending choice or claim stale success when its promise settles', async () => {
   let settle
   const pending = new Promise((resolve) => { settle = resolve })
