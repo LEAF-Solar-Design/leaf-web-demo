@@ -5856,6 +5856,53 @@ def selected_shard_suites(suites: List[Suite], plan_path: str,
 PR_TIER_SCHEMA = "leaf.ci.pr-tier.v1"
 PR_TIER_PREREQUISITES = ("web-build", "harness-tsc-build", "ci-full-run-manifest-certificates")
 
+# These remain in the generated tier for main and conservative fallback. Only
+# explicit PR events may defer them when every changed path is clearly scoped.
+PR_TIER_DEFERRED_SCOPES = {
+    "web-studio-panels-proof": (
+        ("web/", "vendor/", "contract/"),
+        ("web/package.json", "web/package-lock.json", "web/playwright.config.mjs")),
+    "web-version-restore-proof": (
+        ("web/", "vendor/", "contract/", "server/", "platform/", "harness/"),
+        ("web/package.json", "web/package-lock.json", "web/playwright.config.mjs")),
+    "studio-walk-regressions": (
+        ("web/", "server/", "platform/", "harness/", "vendor/", "engine/",
+         "executor/", "dispatch/", "contract/", "data/", "auth0/", "deploy/",
+         "device-agent/", "da/"), ()),
+    "harness-vitest": (
+        ("harness/", "contract/", "vendor/", "engine/", "executor/", "web/",
+         "server/", "platform/"), ()),
+    "server-lab-runs": (
+        ("server/", "platform/", "contract/", "executor/", "engine/", "data/"), ()),
+}
+PR_TIER_SCOPED_ROOTS = frozenset({
+    "web", "server", "platform", "harness", "vendor", "engine", "executor",
+    "dispatch", "contract", "data", "auth0", "deploy", "device-agent", "da",
+    "docs", "tools", "tests", "plans", "research", "tasks",
+})
+
+
+def pr_tier_deferred_required(rows, changed):
+    """Fail closed on shared or ambiguous paths; direct ownership is additive."""
+    if not changed:
+        return set(PR_TIER_DEFERRED_SCOPES)
+    for path in changed:
+        parts = path.split("/")
+        if (not path or "\\" in path or ":" in path
+                or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in path)
+                or any(not part or part.startswith(".") for part in parts)
+                or len(parts) < 2 or parts[0] not in PR_TIER_SCOPED_ROOTS):
+            return set(PR_TIER_DEFERRED_SCOPES)
+    required = set()
+    for row in rows:
+        if row["id"] not in PR_TIER_DEFERRED_SCOPES:
+            continue
+        prefixes, files = PR_TIER_DEFERRED_SCOPES[row["id"]]
+        if any(path.startswith(prefixes) or path in files or pr_tier_owns(row, path)
+               for path in changed):
+            required.add(row["id"])
+    return required
+
 
 def pr_tier_path(value: str) -> str:
     """Unify historical web test names without conflating server/harness paths."""
@@ -6118,6 +6165,7 @@ def select_pr_tier(suites: List[Suite], tier: dict) -> List[Suite]:
         if not isinstance(priority, list) or any(not isinstance(p, str) for p in priority):
             raise ValueError("invalid LEAF_PRIORITY_SUITES")
         selected.update(ids & set(priority))
+        rows = web_family_rows(suites)
         for suite in suites:
             row = {"id": suite.id, "command": _fingerprint_argv(suite.argv, cwd=suite.cwd),
                    "cwd": _fingerprint_cwd(suite.cwd), "kind": suite.kind}
@@ -6126,12 +6174,24 @@ def select_pr_tier(suites: List[Suite], tier: dict) -> List[Suite]:
                         and not pr_tier_outside_web_closure(changed))
                     or any(pr_tier_owns(row, path) for path in changed)):
                 selected.add(suite.id)
+        event = os.environ.get("CODEBUILD_WEBHOOK_EVENT")
+        deferred = set(PR_TIER_DEFERRED_SCOPES) & ids
+        overlay = event in {"PULL_REQUEST_CREATED", "PULL_REQUEST_UPDATED", "PULL_REQUEST_REOPENED"}
+        main = (event == "PUSH"
+                and os.environ.get("CODEBUILD_WEBHOOK_HEAD_REF") == "refs/heads/main")
+        if overlay:
+            selected.difference_update(deferred)
+            selected.update(pr_tier_deferred_required(rows, changed) & ids)
+            selected.update(new | (ids & set(priority)))
+        elif main:
+            selected.update(deferred)
         selected = pr_tier_closure(selected, ids, tier.get("prerequisites"))
         try:
-            rows = web_family_rows(suites)
             family = {row["id"] for row in rows if row["cwd"] == "web"
                       or row["id"] in {"studio-walk-regressions", "web-demo-gate"}}
             protected = new | (ids & set(priority)) | (set(PR_TIER_PREREQUISITES) - family)
+            if overlay or main:
+                protected.update(selected & deferred)
             decision, reason = load_web_family_decision()(
                 selected, rows, changed,
                 protected_ids=protected,
