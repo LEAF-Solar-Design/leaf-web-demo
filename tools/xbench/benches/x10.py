@@ -230,7 +230,8 @@ def classify(observation, expected=None):
                    "attachment_status", "import_status", "version_selection_status", "project_id",
                    "route_project_id", "active_project_id", "imported_version_id", "source",
                    "web_build", "stage", "exception_type", "fixture_rate_total", "screenshot_sha256")
-    bool_fields = ("fresh_project", "imported_version_selected", "evidence_saved", "diagnostic_saved")
+    bool_fields = ("fresh_project", "imported_version_selected", "evidence_saved", "diagnostic_saved",
+                   "event_callback_failed")
     invalid = not isinstance(observation, Mapping)
     if not invalid:
         invalid = (any(key in observation and not isinstance(observation[key], str) for key in text_fields)
@@ -257,7 +258,8 @@ def classify(observation, expected=None):
         canonical = len(projects) == 1
     except ValueError:
         canonical = False
-    proven = fresh and canonical and observation.get("evidence_saved") is True and not pending
+    proven = (fresh and canonical and observation.get("evidence_saved") is True and not pending
+              and observation.get("event_callback_failed") is not True)
     contradictory = (bool(observation.get("import_rejection"))
                      and observation.get("imported_version_selected") is True)
     if contradictory:
@@ -339,9 +341,14 @@ def _create_project(page, ctx, config, observation):
 
 
 def _valid_png(path):
-    if not 57 <= path.stat().st_size <= MAX_SCREENSHOT_BYTES:
+    initial = path.lstat()
+    if not stat.S_ISREG(initial.st_mode) or not 57 <= initial.st_size <= MAX_SCREENSHOT_BYTES:
         raise ValueError("invalid screenshot size")
-    with path.open("rb") as source:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+                         | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+    with os.fdopen(descriptor, "rb") as source:
+        if _file_fingerprint(os.fstat(source.fileno())) != _file_fingerprint(initial):
+            raise ValueError("screenshot changed before read")
         data = source.read(MAX_SCREENSHOT_BYTES + 1)
     if len(data) > MAX_SCREENSHOT_BYTES:
         raise ValueError("screenshot byte budget exceeded")
@@ -726,14 +733,18 @@ def _project_observer(base, observation):
 
     def response_seen(response):
         nonlocal failed
-        if response.request is not latest or route_id(response.url) != route:
+        if response.request is not latest:
             return
         clear()
-        failed = failed or type(response.status) is not int or response.status != 200
+        failed = (failed or route_id(response.url) != route or type(response.status) is not int
+                  or response.status != 200)
         if failed:
             return
+        data = response.body()
         try:
-            body = response.json()
+            if not isinstance(data, bytes):
+                raise ValueError("invalid project metadata bytes")
+            body = _strict_json_bytes(data)
             project = body["project"]
             identity = _aliased_uuid(project, "project_id", "id")
             if identity != route:
@@ -754,7 +765,7 @@ def _project_observer(base, observation):
                 seen.add(version_id)
                 sequences.add((drawing_id, seq))
                 rows.append(dict(project_id=route, version_id=version_id, drawing_id=drawing_id, seq=seq))
-        except Exception:
+        except (ValueError, TypeError, KeyError, AttributeError, InvalidOperation):
             failed = True
             return
         observation.update(project_binding=identity, project_versions=rows)
@@ -772,7 +783,8 @@ def _project_observer(base, observation):
 
 def _current_project(page, observation):
     project = _uuid(observation.get("project_id"))
-    if observation.get("project_binding") != project or observation.get("fresh_project") is not True:
+    if (observation.get("event_callback_failed") is True or observation.get("project_binding") != project
+            or observation.get("fresh_project") is not True):
         raise ValueError("current project differs from fresh project")
     chip = page.get_by_role("button", name=re.compile(r"^Projects: change project\. Project .+"))
     if not chip.is_visible():
@@ -847,6 +859,7 @@ def observe(page, ctx, config, bound, session_info=None):
     observation = {"fresh_project": False, "imported_version_selected": False, "evidence_saved": False}
     stage = "session provenance"
     listeners = []
+    callback_error = None
     try:
         for key in ("source", "web_build"):
             value = (session_info or {}).get(key)
@@ -869,8 +882,33 @@ def observe(page, ctx, config, bound, session_info=None):
             catalog.failed(request)
             project.failed(request)
 
-        for event, listener in (("request", callback), ("response", response),
-                                ("requestfailed", failed)):
+        def protect(handler, kind):
+            def guarded(event):
+                nonlocal callback_error
+                try:
+                    def check_url(value):
+                        if not isinstance(value, str) or any(ord(char) < 33 for char in value):
+                            raise ValueError("invalid passive event URL")
+                        url = urlsplit(value)
+                        if url.scheme not in ("http", "https") or not url.hostname:
+                            raise ValueError("invalid passive event URL")
+                        _ = url.port
+                    check_url(event.url)
+                    if kind == "request" and not isinstance(event.method, str):
+                        raise ValueError("invalid passive request method")
+                    if kind == "response":
+                        check_url(event.request.url)
+                    handler(event)
+                except Exception as exc:
+                    callback_error = callback_error or exc
+                    observation.update(event_callback_failed=True, catalog_binding=None,
+                                       project_binding=None, project_versions=[])
+                    observation["catalog_epoch"] += 1
+                    observation["project_epoch"] += 1
+            return guarded
+
+        for event, handler in (("request", callback), ("response", response), ("requestfailed", failed)):
+            listener = protect(handler, event)
             page.on(event, listener)
             listeners.append((event, listener))
         stage = "workspace profile"
@@ -896,6 +934,9 @@ def observe(page, ctx, config, bound, session_info=None):
         if cleanup_error is not None:
             _invalidate_evidence(ctx, observation)
             _diagnostic(ctx, observation, "listener cleanup", cleanup_error)
+        if callback_error is not None:
+            _invalidate_evidence(ctx, observation)
+            _diagnostic(ctx, observation, "passive UI event", callback_error)
     return observation
 
 
@@ -904,12 +945,13 @@ def run(ctx):
         config, bound, _expected, total = bindings(ctx)
     except (ValueError, OSError, KeyError, TypeError, UnicodeError, InvalidOperation):
         return classify({"issue": "Missing or invalid fixture bindings/config, oracle or rates; browser not opened."})
+    observation = {}
     try:
         repo = Path(__file__).resolve().parents[3]
         with signed_in(repo, ctx.source_sha, origin=ctx.base) as (page, info):
             observation = observe(page, ctx, config, bound, session_info=info)
     except Exception as exc:
-        observation = {}
+        _invalidate_evidence(ctx, observation)
         _diagnostic(ctx, observation, "authentication/browser session", exc)
     # Fixture arithmetic is retained as provenance only, never a measured outcome.
     observation["fixture_rate_total"] = str(total)

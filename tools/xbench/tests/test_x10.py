@@ -31,6 +31,11 @@ def canonical_project():
     return {key: PROJECT for key in ("project_id", "route_project_id", "active_project_id", "project_binding")}
 
 
+def metadata_response(request, data, status=200, url=None):
+    return SimpleNamespace(request=request, url=request.url if url is None else url, status=status,
+                           body=lambda: json.dumps(data).encode("utf-8"))
+
+
 def tiny_png(width=1, height=1, depth=8, color=2, compression=0, filtering=0,
              interlace=0, raw=b"\x00\x00\x00\x00", compressed=None, palette=None):
     def chunk(kind, data):
@@ -175,8 +180,8 @@ class FixtureTests(unittest.TestCase):
     def complete_project(self, listener, project=PROJECT, sequence=1, versions=None):
         request = SimpleNamespace(method="GET", url=self.ctx.base + "/api/projects/" + project)
         listener(request)
-        response = SimpleNamespace(request=request, url=request.url, status=200,
-            json=lambda: {"project": {"id": project}, "drawing_versions": versions if versions is not None else [
+        response = metadata_response(request, {"project": {"id": project},
+            "drawing_versions": versions if versions is not None else [
                 {"version_id": VERSION, "drawing_id": DRAWING, "seq": sequence}]})
         listener.response(response)
 
@@ -729,10 +734,11 @@ class FixtureTests(unittest.TestCase):
 
     def test_growing_screenshot_read_is_explicitly_bounded_and_unscorable(self):
         page = MagicMock()
-        real_open = Path.open
+        info = {}
         def screenshot(**kwargs):
-            with real_open(Path(kwargs["path"]), "wb") as target:
-                target.write(tiny_png())
+            path = Path(kwargs["path"])
+            path.write_bytes(tiny_png())
+            info["stat"] = path.lstat()
         page.get_by_role.return_value.screenshot.side_effect = screenshot
         source = MagicMock()
         source.read.return_value = b"x" * (x10.MAX_SCREENSHOT_BYTES + 1)
@@ -740,7 +746,9 @@ class FixtureTests(unittest.TestCase):
         manager.__enter__.return_value = source
         observation = dict(**canonical_project(), fresh_project=True, imported_version_selected=True,
                            ground_option="Ground Physical unavailable")
-        with patch.object(Path, "open", return_value=manager), \
+        with patch.object(x10.os, "open", return_value=123), \
+                patch.object(x10.os, "fdopen", return_value=manager), \
+                patch.object(x10.os, "fstat", side_effect=lambda fd: info["stat"]), \
                 patch.object(x10.zlib, "decompressobj") as decoder, self.assertRaises(ValueError):
             x10._save(page, self.ctx, observation)
         source.read.assert_called_once_with(x10.MAX_SCREENSHOT_BYTES + 1)
@@ -1170,9 +1178,8 @@ class FixtureTests(unittest.TestCase):
         listener(first)
         listener(latest)
         def response(request, identity):
-            return SimpleNamespace(request=request, url=request.url, status=200,
-                json=lambda: {"project": {"id": identity, "name": "private-name"},
-                              "drawing_versions": [], "diagnostic": "private-body"})
+            return metadata_response(request, {"project": {"id": identity, "name": "private-name"},
+                                               "drawing_versions": [], "diagnostic": "private-body"})
         listener.response(response(first, OTHER))
         self.assertIsNone(observation["project_binding"])
         listener.response(response(latest, PROJECT))
@@ -1366,8 +1373,8 @@ class FixtureTests(unittest.TestCase):
                     version = {"version_id": VERSION, "drawing_id": DRAWING, "seq": 1}
                     (project if target == "project" else version)["id"] = alias
                     listener(request)
-                    listener.response(SimpleNamespace(request=request, url=request.url, status=200,
-                        json=lambda: {"project": project, "drawing_versions": [version]}))
+                    listener.response(metadata_response(request, {"project": project,
+                                                                  "drawing_versions": [version]}))
                     valid = alias == (PROJECT if target == "project" else VERSION)
                     self.assertEqual(observation["project_binding"], PROJECT if valid else None)
                     self.assertEqual(len(observation["project_versions"]), 1 if valid else 0)
@@ -1453,6 +1460,136 @@ class FixtureTests(unittest.TestCase):
                 self.assertEqual(Fraction(actual), exact)
             totals.append(exact)
         self.assertEqual(totals[-2], totals[-1])
+
+    def test_project_latest_redirect_invalidates_existing_proof(self):
+        for changed in (False, True):
+            observation = self.project_identity()
+            observation.update(imported_version_selected=False, evidence_saved=True,
+                               import_rejection=x10.IMPORT_REFUSALS[0])
+            listener = x10._project_observer(self.ctx.base, observation)
+            request = SimpleNamespace(method="GET", url=self.ctx.base + "/api/projects/" + PROJECT)
+            listener(request)
+            response = metadata_response(request, {"project": {"id": PROJECT}, "drawing_versions": []})
+            listener.response(response)
+            self.assertEqual(x10.classify(observation)[0].verdict, "FAIL")
+            if changed:
+                response.url = self.ctx.base + "/api/projects/" + OTHER
+            listener.response(response)
+            self.assertEqual(x10.classify(observation)[0].verdict, "UNREADABLE" if changed else "FAIL")
+            if changed:
+                response.url = request.url
+                listener.response(response)
+                self.assertIsNone(observation["project_binding"])
+
+    def test_project_metadata_is_bounded_strict_json_before_decode(self):
+        valid = json.dumps({"project": {"id": PROJECT}, "drawing_versions": []}).encode()
+        cases = [(valid, True), (b" " * (x10.MAX_JSON_BYTES + 1), False),
+                 (b"[" * (x10.MAX_JSON_DEPTH + 1) + b"0" + b"]" * (x10.MAX_JSON_DEPTH + 1), False),
+                 (valid[:-1] + b',"project":{}}', False)]
+        for data, accepted in cases:
+            with self.subTest(bytes=len(data), accepted=accepted):
+                observation = {}
+                listener = x10._project_observer(self.ctx.base, observation)
+                request = SimpleNamespace(method="GET", url=self.ctx.base + "/api/projects/" + PROJECT)
+                response = SimpleNamespace(request=request, url=request.url, status=200,
+                                           body=lambda: data, json=MagicMock())
+                listener(request)
+                listener.response(response)
+                response.json.assert_not_called()
+                self.assertEqual(observation["project_binding"] == PROJECT, accepted)
+        for data in (cases[1][0], cases[2][0]):
+            listener(request)
+            response.body = lambda: data
+            with patch.object(x10.json, "loads") as decoder:
+                listener.response(response)
+            decoder.assert_not_called()
+
+    def test_callback_exceptions_invalidate_and_sanitize_diagnostics(self):
+        class RaisingRequest:
+            url = "https://example.test/api/capabilities"
+            @property
+            def method(self):
+                raise RuntimeError("private event diagnostic")
+        class RaisingResponse:
+            url = "https://example.test/api/capabilities"
+            @property
+            def request(self):
+                raise RuntimeError("private event diagnostic")
+        for mode in ("request-url", "request-method", "response-request", "response-body", "failed-url"):
+            with self.subTest(mode=mode):
+                page, surface, _ = self.integration_page(False)
+                def capture(**kwargs):
+                    Path(kwargs["path"]).write_bytes(tiny_png())
+                    handlers = dict(call.args for call in page.on.call_args_list)
+                    if mode == "request-url":
+                        handlers["request"](SimpleNamespace(url="https://[", method="GET"))
+                    elif mode == "request-method":
+                        handlers["request"](RaisingRequest())
+                    elif mode == "response-request":
+                        handlers["response"](RaisingResponse())
+                    elif mode == "failed-url":
+                        handlers["requestfailed"](SimpleNamespace(url=None))
+                    else:
+                        request = SimpleNamespace(method="GET", url=self.ctx.base + "/api/projects/" + PROJECT)
+                        handlers["request"](request)
+                        response = SimpleNamespace(request=request, url=request.url, status=200,
+                            body=MagicMock(side_effect=RuntimeError("private event diagnostic")))
+                        handlers["response"](response)
+                surface.screenshot.side_effect = capture
+                rows = self.run_page(page)
+                self.assertEqual([row.verdict for row in rows], ["UNREADABLE"] * 6)
+                self.assertTrue(rows[0].observed["event_callback_failed"])
+                self.assertFalse(rows[0].observed["evidence_saved"])
+                self.assertEqual(list(self.ctx.out_dir.glob("x10-evidence-*")), [])
+                diagnostic = (self.ctx.out_dir / "x10-ui.json").read_text()
+                self.assertIn("passive UI event", diagnostic)
+                self.assertNotIn("private event diagnostic", diagnostic)
+
+    def test_session_exit_failure_invalidates_only_current_generation(self):
+        old_page, _, _ = self.integration_page(True)
+        self.run_page(old_page)
+        old = list(self.ctx.out_dir.glob("x10-evidence-*"))
+        for refusal in (True, False):
+            page, _, _ = self.integration_page(refusal)
+            closed = []
+            @contextmanager
+            def session(*args, **kwargs):
+                try:
+                    yield page, self.session_info
+                finally:
+                    closed.append(True)
+                    raise RuntimeError("private exit diagnostic")
+            with patch.object(x10, "signed_in", session):
+                rows = x10.run(self.ctx)
+            self.assertEqual(closed, [True])
+            self.assertEqual([row.n for row in rows], list(range(1, 7)))
+            self.assertEqual([row.verdict for row in rows], ["UNREADABLE"] * 6)
+            self.assertEqual(list(self.ctx.out_dir.glob("x10-evidence-*")), old)
+            self.assertTrue(json.loads((old[0] / "x10-ui.json").read_text())["evidence_saved"])
+            diagnostic = (self.ctx.out_dir / "x10-ui.json").read_text()
+            self.assertIn("RuntimeError", diagnostic)
+            self.assertNotIn("private exit diagnostic", diagnostic)
+
+    def test_png_nonregular_and_replaced_descriptor_refuse_before_read(self):
+        path = Path(self.temp.name) / "regular.png"
+        path.write_bytes(tiny_png())
+        initial = path.lstat()
+        for mode in (stat.S_IFLNK, stat.S_IFDIR, stat.S_IFIFO):
+            with patch.object(Path, "lstat", return_value=SimpleNamespace(st_mode=mode)), \
+                    patch.object(x10.os, "open") as opened, self.assertRaises(ValueError):
+                x10._valid_png(path)
+            opened.assert_not_called()
+        source, manager = MagicMock(), MagicMock()
+        manager.__enter__.return_value = source
+        for replaced in (SimpleNamespace(st_mode=stat.S_IFDIR),
+                         SimpleNamespace(st_mode=initial.st_mode, st_dev=initial.st_dev,
+                             st_ino=initial.st_ino + 1, st_size=initial.st_size, st_mtime_ns=initial.st_mtime_ns)):
+            with patch.object(x10.os, "open", return_value=123), \
+                    patch.object(x10.os, "fdopen", return_value=manager), \
+                    patch.object(x10.os, "fstat", return_value=replaced), self.assertRaises(ValueError):
+                x10._valid_png(path)
+            source.read.assert_not_called()
+        self.assertEqual(x10._valid_png(path), tiny_png())
 
 
 if __name__ == "__main__":
