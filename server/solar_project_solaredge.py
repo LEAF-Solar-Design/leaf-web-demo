@@ -4,10 +4,13 @@ The PDF and matching kernels are shared with the legacy drawing route. UUID
 provenance stays in this adapter and never crosses its integer-version contract.
 """
 from copy import deepcopy
+from contextlib import contextmanager
 from hashlib import sha256
 import json
 import math
-from uuid import UUID
+import sys
+from time import monotonic
+from uuid import UUID, uuid4
 
 import entitlements
 import solar_artifacts
@@ -205,25 +208,62 @@ def _reserve(context, content_sha):
     _fail("IMPORT_QUOTA_EXCEEDED")
 
 
-def import_source(tenant, project_id, drawing_id, input_version_id, data):
-    context, denial = _authorized(tenant, project_id, drawing_id, input_version_id, "upload")
-    if denial is not None:
-        return denial
-    if write_loop.drawing_mutations_refusal() is not None:
-        _fail("IMPORT_WRITES_DRAINED")
+_IMPORT_TRACE_STREAM = None  # Optional inert stream seam; resolve live stderr per event.
+
+
+def _emit_import_phase(attempt_id, phase, state, started):
+    # The existing application log driver collects stderr. No request identity,
+    # content, exception prose or new CloudWatch metric is emitted here.
     try:
-        page_count = sources.inspect_solaredge_pdf(data)
-    except sources.ImportSourceError as exc:
-        _fail(exc.code)
-    content_sha = sha256(data).hexdigest()
-    sink = _sink(context, sources.SOURCE_TOOL, content_sha)
-    prepared = sink.prepare(solar_artifacts.ArtifactOutput(
-        {"page_count": page_count}, sources.SOURCE_MEDIA_TYPE, sources.SOURCE_FILENAME, data))
-    _recheck(tenant, context, write=True)
+        event = {"event": "solar_pdf_intake_phase", "schema": "leaf.solar-pdf-intake-phase.v1",
+                 "attempt_id": attempt_id, "phase": phase, "state": state,
+                 "elapsed_ms": max(0, round((monotonic() - started) * 1000))}
+        stream = sys.stderr if _IMPORT_TRACE_STREAM is None else _IMPORT_TRACE_STREAM
+        stream.write(json.dumps(event, separators=(",", ":"), allow_nan=False) + "\n")
+        stream.flush()
+    except Exception:
+        pass  # Observability must not change success, denial or refusal behavior.
+
+
+@contextmanager
+def _import_phase(attempt_id, phase):
+    started = monotonic()
+    _emit_import_phase(attempt_id, phase, "started", started)
+    state = "failed"
+    try:
+        yield
+        state = "completed"
+    finally:
+        _emit_import_phase(attempt_id, phase, state, started)
+
+
+def import_source(tenant, project_id, drawing_id, input_version_id, data):
+    attempt_id = uuid4().hex
+    with _import_phase(attempt_id, "authorization"):
+        context, denial = _authorized(tenant, project_id, drawing_id, input_version_id, "upload")
+        if denial is not None:
+            return denial
+        if write_loop.drawing_mutations_refusal() is not None:
+            _fail("IMPORT_WRITES_DRAINED")
+    with _import_phase(attempt_id, "inspection"):
+        try:
+            page_count = sources.inspect_solaredge_pdf(data)
+        except sources.ImportSourceError as exc:
+            _fail(exc.code)
+    with _import_phase(attempt_id, "artifact_prepare"):
+        content_sha = sha256(data).hexdigest()
+        sink = _sink(context, sources.SOURCE_TOOL, content_sha)
+        prepared = sink.prepare(solar_artifacts.ArtifactOutput(
+            {"page_count": page_count}, sources.SOURCE_MEDIA_TYPE, sources.SOURCE_FILENAME, data))
+    with _import_phase(attempt_id, "authority_recheck"):
+        _recheck(tenant, context, write=True)
     # Conditional reservations survive store failures. Same bytes reuse the slot.
-    _reserve(context, content_sha)
-    sink.finish(prepared)
-    ref = sink.commit()
+    with _import_phase(attempt_id, "slot_reservation"):
+        _reserve(context, content_sha)
+    with _import_phase(attempt_id, "artifact_finish"):
+        sink.finish(prepared)
+    with _import_phase(attempt_id, "artifact_commit"):
+        ref = sink.commit()
     return with_envelope_fields({"schema": SOURCE_SCHEMA, "kind": sources.SOURCE_KIND,
         **_result_scope(context), "page_count": page_count, "source": ref})
 
