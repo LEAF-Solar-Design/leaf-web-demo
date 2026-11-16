@@ -81,27 +81,31 @@ function harness(initial) {
     accountScope: 'synthetic-account', session: { ...snapshot, controller },
     client: createIntegrationsClient({ origin: 'https://fixture.invalid', fetchImpl }) } }
 }
+const pairTableName = 'Capacity view data: provider pairs'
+
 async function expectSixRecords() {
-  const main = await screen.findByRole('region', { name: 'Pair main' })
-  const second = screen.getByRole('region', { name: 'Pair second' })
-  const unpaired = screen.getByRole('region', { name: 'Unpaired accounts' })
-  for (const [region, indices] of [[main, [0, 1]], [second, [2, 3]], [unpaired, [5, 4]]]) {
-    const rows = within(region).getAllByRole('row').slice(1)
-    expect(rows).toHaveLength(2)
-    indices.forEach((index, i) => {
-      const [account, provider, key, pct] = records[index]
-      const cells = within(rows[i]).getAllByRole('cell')
-      expect(cells[0]).toHaveTextContent(account)
-      expect(cells[1]).toHaveTextContent(provider)
-      expect(cells[2].textContent).toBe(key)
-      expect(cells[3].textContent).toBe(`${pct}%`)
-      expect(cells[4].textContent).toBe(`Nov ${index + 2}, 2026, 12:00:00 UTC`)
-    })
-  }
-  expect(main.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-  expect(second.compareDocumentPosition(unpaired) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-  expect(within(unpaired).getByRole('cell', { name: 'Fixture Kimi', exact: true }).closest('tr'))
-    .not.toHaveTextContent('Fixture unpaired Claude')
+  const table = within(await screen.findByRole('table', { name: pairTableName }))
+  const providers = ['Claude', 'Codex', 'Other']
+  const metrics = ['Account', 'Remaining', 'Reset']
+  expect(table.getAllByRole('columnheader').map(cell => cell.textContent)).toEqual([
+    'Pair / account', ...providers.flatMap(provider => metrics.map(metric => `${provider} ${metric}`)),
+  ])
+  const expected = [
+    ['Pair main', [0, 1, null]],
+    ['Pair second', [2, 3, null]],
+    ['Unpaired Kimi', [null, null, 5]],
+    ['Unpaired Claude', [4, null, null]],
+  ]
+  const rows = table.getAllByRole('row').slice(1)
+  expect(rows).toHaveLength(expected.length)
+  expected.forEach(([label, slots], i) => {
+    const row = within(rows[i])
+    expect(row.getAllByRole('cell').map(cell => cell.textContent)).toEqual([
+      label, ...slots.flatMap(index => index === null ? metrics.map(() => 'Unavailable') : [
+        records[index][0], `${records[index][3]}%`, `Nov ${index + 2}, 2026, 12:00:00 UTC`,
+      ]),
+    ])
+  })
 }
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 
@@ -133,7 +137,7 @@ it('saves, reopens and restores the six-record capacity view after an Ops profil
   fireEvent.click(await screen.findByRole('button', { name: 'Capacity view · revision 1' }))
   await expectSixRecords()
   reopened.rerender(<OpsWorkspaceGround {...h.props} active={false} />)
-  expect(screen.queryByRole('region', { name: 'Pair main' })).toBeNull()
+  expect(screen.queryByRole('table', { name: pairTableName })).toBeNull()
   reopened.rerender(<OpsWorkspaceGround {...h.props} active />)
   await expectSixRecords()
   expect(screen.getByText(/Recipe revision 1/)).toBeInTheDocument()
@@ -206,7 +210,7 @@ it.each(['account', 'scope', 'removed', 'session', 'project', 'signout'])('does 
   mounted.rerender(<OpsWorkspaceGround {...h.props} projectId={h.authority.projectId}
     accountScope={change === 'account' ? 'other-account' : h.props.accountScope} active />)
   await screen.findByRole('option', { name: 'Synthetic capacity · version 1' })
-  expect(screen.queryByRole('region', { name: 'Pair main' })).toBeNull()
+  expect(screen.queryByRole('table', { name: pairTableName })).toBeNull()
   expect(h.calls.filter(call => call.path.endsWith('/query'))).toHaveLength(queries)
   // Dataset reads use POST /query. No save, action or other mutation occurred.
   expect(h.calls.filter(call => call.method !== 'GET').map(call => call.path))
