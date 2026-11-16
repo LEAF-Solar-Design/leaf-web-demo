@@ -85,8 +85,18 @@ export function formatDatasetValue(
     return formatter.format(type.scale === "minor" ? value / 10 ** digits : value);
   }
   if (type.kind === "ratio") {
-    return new Intl.NumberFormat(prefs.locale, { style: "percent", maximumFractionDigits: 12 })
-      .format(type.scale === "fraction" ? value : value / 100);
+    if (Number.isInteger(value) && !Number.isSafeInteger(value)) return "Invalid";
+    const percent = new Intl.NumberFormat(prefs.locale, { style: "percent", maximumFractionDigits: 12 });
+    if (type.scale === "fraction") return percent.format(value);
+    // Preserve the original magnitude; division can round even a safe integer.
+    const magnitude = new Intl.NumberFormat(prefs.locale, { maximumFractionDigits: 12 }).format(Math.abs(value));
+    let inserted = false;
+    return percent.formatToParts(value / 100).map(part => {
+      if (!["integer", "group", "decimal", "fraction"].includes(part.type)) return part.value;
+      if (inserted) return "";
+      inserted = true;
+      return magnitude;
+    }).join("");
   }
   const precision = type.kind === "number" ? type.precision : undefined;
   const formatted = new Intl.NumberFormat(prefs.locale, {

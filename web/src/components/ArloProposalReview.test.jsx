@@ -74,6 +74,27 @@ function detailedEnvelope() {
 }
 
 describe('ARLO review in the existing workspace result panel', () => {
+  it.each([
+    { routes: [null] }, { routes: {} }, { routes: [{ points: {} }] },
+    { quantities: [null] }, { quantities: {} }, { quantities: [{ kind: {} }] },
+  ])('refuses unrenderable routes/quantities but keeps raw export: %j', async patch => {
+    const captured = captureDownload(), stored = structuredClone(envelope())
+    Object.assign(stored.result.solver_result.proposals[0], patch)
+    const raw = JSON.stringify(stored.result)
+    render(<ArloProposalReview envelope={stored.result} context={context} currentProject={currentProject} />)
+    expect(screen.getByRole('alert').textContent).toContain('routes or quantities could not be displayed')
+    expect(screen.getByText('Feeder design incomplete')).toBeTruthy()
+    expect(screen.queryByLabelText('Feeder proposal')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Accept proposal' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Reject proposal' })).toBeNull()
+    expect(JSON.parse(screen.getByLabelText('Export JSON preview').textContent).envelope).toEqual(stored.result)
+    fireEvent.click(screen.getByRole('button', { name: 'Export result' }))
+    const downloaded = await readJson(captured.createObjectURL.mock.calls[0][0])
+    expect(downloaded.envelope).toEqual(stored.result)
+    expect(JSON.stringify(stored.result)).toBe(raw)
+    expect(saveArloReview).not.toHaveBeenCalled()
+  })
+
   it.each([null, 7, [], {}, { proposal_id: ' ' }, { ...proposal }])('refuses a malformed or duplicate member without losing stored bytes: %j', async member => {
     const stored = envelope()
     stored.result.solver_result.proposals = [proposal, member]
