@@ -12,7 +12,7 @@ import xbench_session
 from xbench_studio import StudioClient, StudioError, disposable_project
 
 
-LIMITS = "X04 slice 1: competing-set pick (step 6) and the in-browser render check are not built; step 4 is graded from the extracted intake."
+LIMITS = "The in-browser render check is not built; step 4 is graded from the extracted intake. When count-modules not live, step 5 uses count-by-layer (per-file limits in files.json)."
 
 
 def build_multipart(filename, content):
@@ -85,11 +85,145 @@ def _dependency_present(report, dep):
     return visit(report)
 
 
+def _module_catalog(transport):
+    status, body = transport("GET", "/api/tools")
+    if status != 200:
+        raise ValueError("catalog HTTP status")
+    tools = body.get("tools") if isinstance(body, dict) else None
+    if not isinstance(tools, list) or any(
+            not isinstance(tool, dict) or not isinstance(tool.get("name"), str)
+            or not tool["name"].strip() for tool in tools):
+        raise ValueError("catalog tools")
+    matches = [tool for tool in tools if tool["name"] == "count-modules"]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise ValueError("catalog tools.name duplicate count-modules")
+    tool = matches[0]
+    if not isinstance(tool.get("version"), str) or not tool["version"].strip():
+        raise ValueError("catalog version")
+    if not isinstance(tool.get("catalog_digest"), str) or not re.fullmatch(
+            r"(?:sha256:)?[0-9a-fA-F]{64}", tool["catalog_digest"]):
+        raise ValueError("catalog catalog_digest")
+    return {key: tool[key] for key in ("name", "version", "catalog_digest")}
+
+
+def _module_sets(value, field):
+    if not isinstance(value, list):
+        raise ValueError(field)
+    sets = {}
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError(field + " item")
+        for key in ("set_id", "layer", "block", "entity_type"):
+            if not isinstance(item.get(key), str):
+                raise ValueError(field + "." + key)
+        if not item["set_id"].strip() or item["set_id"] in sets:
+            raise ValueError(field + ".set_id")
+        if item["entity_type"] not in ("INSERT", "LWPOLYLINE"):
+            raise ValueError(field + ".entity_type")
+        if type(item.get("count")) is not int or not 0 <= item["count"] <= 2**53 - 1:
+            raise ValueError(field + ".count")
+        sets[item["set_id"]] = {key: item[key] for key in (
+            "set_id", "layer", "block", "entity_type", "count")}
+    return sets
+
+
+def _module_result(transport, project, adoption, tool, selector):
+    # The picker reruns the same tool with set_ids; wait=1 returns its envelope.
+    status, body = transport(
+        "POST", "/api/run?wait=1",
+        headers={"X-Org-Id": project["org_id"], "X-Project-Id": project["project_id"]},
+        json_body={"tool": tool["name"], "catalog_digest": tool["catalog_digest"],
+                   "dwg": adoption["version_id"],
+                   "params": {"drawing_id": adoption["drawing_id"], **selector}})
+    if status in (404, 405, 501) and not selector:
+        raise ValueError("module-set picker not live")
+    if status != 200:
+        raise ValueError("count-modules HTTP status")
+    if not isinstance(body, dict) or body.get("ok") is not True:
+        raise ValueError("count-modules ok")
+    if "error" not in body or body["error"] is not None:
+        raise ValueError("count-modules error")
+    for key in ("tool", "version"):
+        if body.get(key) != tool["name" if key == "tool" else key]:
+            raise ValueError("count-modules " + key)
+    result = body.get("result")
+    if not isinstance(result, dict):
+        raise ValueError("count-modules result")
+    return result
+
+
+def _grade_modules(transport, project, adoption, fixture, tool, row, mark):
+    field = "count-modules candidate response"
+    try:
+        listing = _module_result(transport, project, adoption, tool, {})
+        candidates = _module_sets(listing.get("sets"), "sets")
+        if not candidates:
+            raise ValueError("sets empty")
+        for key, expected in (("selection_required", True), ("selected_sets", []),
+                              ("selected_set", None), ("count", None)):
+            if key not in listing or type(listing[key]) is not type(expected) or listing[key] != expected:
+                raise ValueError("candidate " + key)
+        selector = fixture.get("module_set")
+        if selector is None:
+            mark(5, "UNREADABLE", "no module_set bound in manifest")
+            mark(6, "UNREADABLE" if len(candidates) > 1 else "PASS",
+                 "no module_set bound in manifest" if len(candidates) > 1 else "nothing to pick")
+            return
+        field = "manifest module_set"
+        if not isinstance(selector, dict) or not selector or set(selector) - {"set_id", "set_ids"}:
+            raise ValueError(field)
+        if "set_id" in selector and not isinstance(selector["set_id"], str):
+            raise ValueError("module_set.set_id")
+        if "set_ids" in selector and (not isinstance(selector["set_ids"], list) or any(
+                not isinstance(value, str) or not value.strip() for value in selector["set_ids"])):
+            raise ValueError("module_set.set_ids")
+        ids = selector.get("set_ids") or ([selector["set_id"]] if selector.get("set_id") else [])
+        if not ids or any(value not in candidates for value in ids):
+            raise ValueError("module_set set_id absent from sets")
+        # Match the picker callback even for the schema's singular set_id form.
+        ids = list(dict.fromkeys(ids))
+        field = "count-modules selection response"
+        result = _module_result(transport, project, adoption, tool, {"set_ids": ids})
+        if _module_sets(result.get("sets"), "sets") != candidates:
+            raise ValueError("sets changed during selection")
+        selected = _module_sets(result.get("selected_sets"), "selected_sets")
+        if selected != {key: candidates[key] for key in ids}:
+            raise ValueError("selected_sets do not match module_set")
+        expected_single = next(iter(selected.values())) if len(selected) == 1 else None
+        if "selected_set" not in result:
+            raise ValueError("selected_set")
+        if expected_single is None:
+            if result["selected_set"] is not None:
+                raise ValueError("selected_set")
+        elif _module_sets([result["selected_set"]], "selected_set") != selected:
+            raise ValueError("selected_set")
+        if result.get("selection_required") is not False:
+            raise ValueError("selection_required")
+        count = result.get("count")
+        if type(count) is not int or not 0 <= count <= 2**53 - 1:
+            raise ValueError("count")
+        # Sets can overlap; the total is a union, not necessarily their sum.
+        if not max(item["count"] for item in selected.values()) <= count <= sum(
+                item["count"] for item in selected.values()):
+            raise ValueError("count inconsistent with selected_sets")
+        row["counts"].append(count)
+        row["module_set"] = {"set_ids": ids}
+        mark(6, "PASS", "module_set selected" if len(candidates) > 1 else "nothing to pick")
+        mark(5, "PASS" if count == fixture["modules"] else "FAIL",
+             f"count {count}, oracle {fixture['modules']}")
+    except Exception as exc:
+        reason = str(exc) if isinstance(exc, ValueError) else field + " unavailable"
+        mark(5, "UNREADABLE", reason)
+        mark(6, "UNREADABLE", reason)
+
+
 def grade_files(client, transport, *, project, fixtures, clock=time.monotonic):
     rows = {}
     for fixture in fixtures:
         fid = fixture["id"]
-        row = {"id": fid, "timings": {}, "statuses": {}, "counts": [],
+        row = {"id": fid, "timings": {}, "statuses": {}, "counts": [], "limits": [],
                "steps": {str(n): "UNREADABLE" for n in range(1, 7)},
                "evidence": {str(n): "upload unavailable" for n in range(1, 7)},
                "insert_fixture": fixture.get("module_entity") == "INSERT" and
@@ -154,7 +288,7 @@ def grade_files(client, transport, *, project, fixtures, clock=time.monotonic):
              "original SHA-256 not exposed")
         whole = fixture.get("design_is_whole_layer") is True
         mark(6, "PASS" if whole else "UNREADABLE", "nothing to pick" if whole else
-             "competing-set pick needs the UI, not built")
+             "module-set picker not live")
         if intake is None:
             continue
         if not row["insert_fixture"]:
@@ -180,6 +314,18 @@ def grade_files(client, transport, *, project, fixtures, clock=time.monotonic):
             if matched and any(name.startswith("*") for name in fixture["module_blocks"]):
                 evidence += "; matched blocks: " + ", ".join(matched[:5])
             mark(4, "FAIL" if missing else "PASS", evidence)
+        try:
+            tool = _module_catalog(transport)
+        except Exception as exc:
+            reason = str(exc) if isinstance(exc, ValueError) else "catalog tools unavailable"
+            mark(5, "UNREADABLE", reason)
+            mark(6, "UNREADABLE", reason)
+            continue
+        if tool is not None:
+            row["tool"] = tool
+            _grade_modules(transport, project, adoption, fixture, tool, row, mark)
+            continue
+        row["limits"].append("count-modules not live")
         layers = list(dict.fromkeys(fixture.get("module_layers", [])))
         if not layers:
             mark(5, "UNREADABLE", "module layers unavailable")
