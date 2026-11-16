@@ -1,8 +1,21 @@
 # X04 portable offline evidence
 
-Parent: Studio X-bench X04 raw drawing intake, track 2. This is a portable
-synthetic JSON evidence format, not an implemented export endpoint or a real
-customer drawing artifact.
+Parent: Studio X-bench X04 raw drawing intake, track 2. The offline CLI exports
+and validates portable synthetic JSON evidence using the format below.
+
+Save the worked example as example.json and run from the worktree root.
+
+```powershell
+python scripts/export_x04_offline_evidence.py example.json --out evidence.json
+python scripts/validate_x04_offline_evidence.py evidence.json
+```
+
+Both commands require the documented schema, synthetic marker and exact drawing
+identity. Export recomputes the result through the trusted count tool and
+retains literal observed dependencies. Validation reports forged counts,
+highlights or byte-integrity claims. Invalid input exits2 with diagnostics on
+stderr before writing JSON. The optional output is replaced atomically after
+the complete artifact is encoded. Referenced dependency targets stay unopened.
 
 An artifact carries its synthetic drawing identity and exact input entities,
 the observed dependency report, explicit selected IDs, recomputed count,

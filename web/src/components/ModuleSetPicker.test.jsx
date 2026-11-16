@@ -1,4 +1,5 @@
 import React from 'react'
+import { flushSync } from 'react-dom'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import ModuleSetPicker from './ModuleSetPicker.jsx'
@@ -11,6 +12,59 @@ const data = { sets: [
 const first = () => screen.getByRole('checkbox', { name: 'Design / Panel A: 12 candidates' })
 const second = () => screen.getByRole('checkbox', { name: 'Alternate / Panel B: 9 candidates' })
 const submit = () => screen.getByRole('button', { name: 'Count selected set' })
+
+it.each(['resolve', 'reject'])('keeps choices intact when a callback mutates its arguments then %ss', async (terminal) => {
+  let settle, fail
+  const pending = new Promise((resolve, reject) => { settle = resolve; fail = reject })
+  const onSelect = vi.fn().mockImplementationOnce((ids) => {
+    expect(ids).toEqual(['first', 'second'])
+    ids.splice(0, ids.length, 'foreign')
+    return pending
+  }).mockImplementationOnce((ids) => { expect(ids).toEqual(['first', 'second']) })
+  const snapshot = JSON.stringify(data)
+  render(<ModuleSetPicker drawingKey="argument-mutation" data={data} onSelect={onSelect} />)
+  fireEvent.click(first()); fireEvent.click(second()); fireEvent.click(submit())
+  await act(async () => {
+    if (terminal === 'resolve') settle()
+    else fail(new Error('private mutated callback'))
+    await pending.catch(() => {})
+  })
+  expect(first().checked && second().checked).toBe(true)
+  expect(JSON.stringify(data)).toBe(snapshot)
+  fireEvent.click(submit())
+  expect(onSelect).toHaveBeenCalledTimes(2)
+  expect(submit().disabled).toBe(false)
+})
+
+it.each(['resolve', 'reject'])('ignores reentrant old %s after a synchronous drawing switch', async (terminal) => {
+  let settleA, failA, settleB
+  const old = new Promise((resolve, reject) => { settleA = resolve; failA = reject })
+  const current = new Promise((resolve) => { settleB = resolve })
+  let view
+  const onB = vi.fn().mockReturnValue(current)
+  const onA = vi.fn().mockImplementation(() => {
+    flushSync(() => view.rerender(<ModuleSetPicker drawingKey="B" data={data} onSelect={onB} />))
+    return old
+  })
+  view = render(<ModuleSetPicker drawingKey="A" data={data} onSelect={onA} />)
+  fireEvent.click(first()); fireEvent.click(submit())
+  expect(first().checked).toBe(false)
+  fireEvent.click(second()); fireEvent.click(submit())
+  expect(onB).toHaveBeenCalledExactlyOnceWith(['second'])
+  await act(async () => {
+    if (terminal === 'resolve') settleA()
+    else failA(new Error('private stale reentrant callback'))
+    await old.catch(() => {})
+  })
+  expect(submit().disabled).toBe(true)
+  expect(screen.queryByRole('alert')).toBeNull()
+  expect(screen.queryByText(/^Counted /)).toBeNull()
+  expect(second().checked).toBe(true)
+  await act(async () => { settleB(); await current })
+  expect(submit().disabled).toBe(false)
+  expect(onA).toHaveBeenCalledTimes(1)
+  expect(onB).toHaveBeenCalledTimes(1)
+})
 
 it('invokes one deferred callback for two submit activations in one event turn', async () => {
   let settle
@@ -72,7 +126,7 @@ it('selects, submits and rerenders deeply frozen candidates and recorded results
   expect(screen.getByRole('group').disabled).toBe(false)
   fireEvent.click(first())
   fireEvent.click(second())
-+  fireEvent.click(submit())
+  fireEvent.click(submit())
   expect(onSelect.mock.calls).toEqual([[['first']], [['second']]])
   view.rerender(<ModuleSetPicker drawingKey="frozen" data={next} onSelect={onSelect} />)
   expect(screen.getByText('Counted 9 modules on Alternate / Panel B.')).toBeTruthy()
