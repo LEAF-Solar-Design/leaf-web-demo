@@ -482,6 +482,8 @@ def reconcile_seven_steps(import_evidence, grid_evidence, assurance):
                               _seven_step_grid_totals(grid_evidence, assurance.get("evidence")
                                   if type(assurance) is dict else None),
                               _seven_step_ownership_reopen(grid_evidence, assurance.get("evidence")
+                                  if type(assurance) is dict else None),
+                              _seven_step_grid_snapshot(grid_evidence, assurance.get("evidence")
                                   if type(assurance) is dict else None))
 
 
@@ -517,16 +519,25 @@ def _seven_step_ownership_reopen(grid, evidence):
         grid.get("string_assignments"), grid.get("reopened_string_assignments"))
 
 
-def _seven_step_result(imported, grids, checked, ownership, grid_optimizers, ownership_reopen):
+def _seven_step_grid_snapshot(grid, evidence):
+    if type(grid) is not dict or type(evidence) is not dict:
+        return _out("UNREADABLE", "grid_optimizer_snapshot_evidence_unreadable")
+    before, reopened = evidence.get("before_rows"), evidence.get("reopened_rows")
+    return compare_grid_optimizer_snapshots(grid.get("expected_grid_ids"),
+        before.get("strings") if type(before) is dict else None, grid.get("string_assignments"),
+        reopened.get("strings") if type(reopened) is dict else None, grid.get("reopened_string_assignments"))
+
+
+def _seven_step_result(imported, grids, checked, ownership, grid_optimizers, ownership_reopen, grid_optimizer_reopen):
     stages = checked.get("checks", {}).get("provenance", {}).get("reconciliation", {}).get("stages", {})
     absent = _out("UNREADABLE", "stage_evidence_missing")
     steps = {"1": imported, "2": grids, "3": stages.get("strings", absent), "4": stages.get("grouping", absent),
              "5": dict(table=stages.get("table", absent), csv_view=stages.get("csv_view", absent)),
              "6": stages.get("policy", absent), "7": stages.get("reopen", absent)}
-    verdicts = {imported["verdict"], grids["verdict"], checked["verdict"], ownership["verdict"], grid_optimizers["verdict"], ownership_reopen["verdict"]}
+    verdicts = {imported["verdict"], grids["verdict"], checked["verdict"], ownership["verdict"], grid_optimizers["verdict"], ownership_reopen["verdict"], grid_optimizer_reopen["verdict"]}
     return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
                 "offline_seven_steps", steps=steps, assurance=checked, ownership=ownership, grid_optimizers=grid_optimizers,
-                ownership_reopen=ownership_reopen)
+                ownership_reopen=ownership_reopen, grid_optimizer_reopen=grid_optimizer_reopen)
 
 
 def reconcile_seven_steps_json(text):
@@ -547,6 +558,8 @@ def _seven_step_envelope(envelope):
                               _seven_step_grid_totals(envelope["grid"], envelope["assurance"].get("evidence")
                                   if type(envelope["assurance"]) is dict else None),
                               _seven_step_ownership_reopen(envelope["grid"], envelope["assurance"].get("evidence")
+                                  if type(envelope["assurance"]) is dict else None),
+                              _seven_step_grid_snapshot(envelope["grid"], envelope["assurance"].get("evidence")
                                   if type(envelope["assurance"]) is dict else None))
 
 
@@ -878,18 +891,27 @@ def _valid_grid_totals(values):
 
 def compare_grid_oracle_totals(expected_grid_ids, expected_totals, oracle_values):
     """Bind independent grid totals to explicit coverage and the report grand total."""
+    return _compare_grid_oracle_totals(expected_grid_ids, expected_totals, oracle_values, "optimizers", "grid_oracle")
+
+
+def compare_grid_panel_oracle_totals(expected_grid_ids, expected_totals, oracle_values):
+    """Require explicit grid panel totals to agree with the independent report total."""
+    return _compare_grid_oracle_totals(expected_grid_ids, expected_totals, oracle_values, "panels", "grid_panel_oracle")
+
+
+def _compare_grid_oracle_totals(expected_grid_ids, expected_totals, oracle_values, metric, reason):
     if (type(expected_grid_ids) is not list or not expected_grid_ids
             or any(type(key) is not str or not key.strip() or len(key) > 128 for key in expected_grid_ids)
             or len(set(expected_grid_ids)) != len(expected_grid_ids)
             or not _valid_grid_totals(expected_totals) or set(expected_totals) != set(expected_grid_ids)
             or type(oracle_values) is not dict):
-        return _out("UNREADABLE", "grid_oracle_evidence_unreadable")
-    oracle = _numeric(oracle_values.get("optimizers"), count=True)
+        return _out("UNREADABLE", reason + "_evidence_unreadable")
+    oracle = _numeric(oracle_values.get(metric), count=True)
     if oracle is None:
-        return _out("UNREADABLE", "grid_oracle_evidence_unreadable")
+        return _out("UNREADABLE", reason + "_evidence_unreadable")
     total = sum(expected_totals.values())
-    return _out("PASS" if total == oracle else "FAIL", "grid_oracle_total_equal" if total == oracle
-                else "grid_oracle_total_mismatch", grid_total=total, oracle_total=oracle)
+    return _out("PASS" if total == oracle else "FAIL", reason + "_total_equal" if total == oracle
+                else reason + "_total_mismatch", grid_total=total, oracle_total=oracle)
 
 
 def compare_ownership_snapshots(expected_grid_ids, saved_string_ids, before_rows, reopened_rows):
@@ -956,14 +978,24 @@ def compare_grid_optimizer_snapshots(expected_grid_ids, before_strings, before_r
 
 def compare_grid_optimizer_totals(expected_totals, saved_strings, assignments):
     """Compare supplied independent per-grid totals using explicit ownership rows."""
+    return _compare_grid_totals(expected_totals, saved_strings, assignments, "optimizers", "optimizer")
+
+
+def compare_grid_panel_totals(expected_totals, saved_strings, assignments):
+    """Compare independent grid panel totals with explicit saved per-string panel counts."""
+    return _compare_grid_totals(expected_totals, saved_strings, assignments, "panels", "panel")
+
+
+def _compare_grid_totals(expected_totals, saved_strings, assignments, metric, label):
+    reason = "grid_" + label
     if not _valid_grid_totals(expected_totals):
-        return _out("UNREADABLE", "grid_optimizer_totals_unreadable")
-    saved, error = _index(saved_strings, "saved")
+        return _out("UNREADABLE", reason + "_totals_unreadable")
+    saved, error = _index(saved_strings, "saved", metric=metric)
     if error:
         return _out("UNREADABLE", error)
     ownership = validate_grid_string_ownership(list(expected_totals), list(saved), assignments)
     if ownership["verdict"] != "PASS":
-        return _out(ownership["verdict"], "grid_optimizer_ownership_invalid", ownership=ownership)
+        return _out(ownership["verdict"], reason + "_ownership_invalid", ownership=ownership)
     totals = dict.fromkeys(expected_totals, 0)
     for row in assignments:
         totals[row["grid_id"]] += saved[row["string_id"]]
@@ -971,8 +1003,8 @@ def compare_grid_optimizer_totals(expected_totals, saved_strings, assignments):
     examples = [dict(grid_id=key, oracle=expected_totals[key], saved=totals[key],
                      delta=totals[key] - expected_totals[key])
                 for key in nsmallest(MAX_STRING_EXAMPLES, changed)]
-    return _out("FAIL" if changed else "PASS", "grid_optimizer_totals_mismatch" if changed
-                else "grid_optimizer_totals_equal", mismatch_count=len(changed), examples=examples)
+    return _out("FAIL" if changed else "PASS", reason + "_totals_mismatch" if changed
+                else reason + "_totals_equal", mismatch_count=len(changed), examples=examples)
 
 
 @contextmanager
@@ -1147,14 +1179,14 @@ def reconcile_offline(evidence):
     return _out(verdict, "offline_reconciliation", stages=stages)
 
 
-def _index(rows, source):
+def _index(rows, source, *, metric="optimizers"):
     if not isinstance(rows, list) or not rows:
         return None, source + "_rows_unreadable"
     indexed = {}
     for row in rows:
         if not isinstance(row, dict):
             return None, source + "_row_unreadable"
-        identifier, count = row.get("string_id"), row.get("optimizers")
+        identifier, count = row.get("string_id"), row.get(metric)
         if (type(identifier) is not str or not identifier.strip() or len(identifier) > 128
                 or type(count) is not int or not 1 <= count <= 2**53 - 1):
             return None, source + "_row_unreadable"

@@ -1292,3 +1292,47 @@ Both strings keep six optimizers. Their unchanged counts and per-grid totals do
 not identify the changed reopened owners. The explicit ownership maps supply that
 evidence. This replay compares synthetic supplied evidence and does not establish
 live X05 acceptance or authenticate an input producer.
+
+## Grid optimizer snapshot replay
+
+Seven-step composition includes `grid_optimizer_reopen`, derived from the two
+snapshot string rows and their explicit owners. It contributes to verdict
+precedence and retains the original step diagnostics. Missing snapshot strings
+yield UNREADABLE.
+
+The separate pure `compare_grid_panel_totals` helper accepts independent grid
+panel totals, saved `{string_id, panels}` rows and explicit ownership rows.
+`compare_grid_panel_oracle_totals` checks exact expected-grid coverage and equality
+with `oracle_values.panels`. Panel evidence must supply its own counts.
+
+Run this synthetic optimizer snapshot replay from the repository root.
+
+```powershell
+@'
+import sys
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import compare_grid_optimizer_snapshots
+grids = ['east', 'west']
+owners = [dict(grid_id='east', string_id='A'), dict(grid_id='west', string_id='B')]
+before = [dict(string_id='A', optimizers=5), dict(string_id='B', optimizers=7)]
+redistributed = [dict(string_id='A', optimizers=7), dict(string_id='B', optimizers=5)]
+assert sum(row['optimizers'] for row in before) == sum(row['optimizers'] for row in redistributed) == 12
+for name, reopened in [('redistributed', redistributed), ('missing', None), ('corrected', before)]:
+    result = compare_grid_optimizer_snapshots(grids, before, owners, reopened, owners)
+    print(name, result['verdict'], result['reason'])
+    if name == 'redistributed':
+        assert result['changed_count'] == 2
+        assert [row['delta'] for row in result['examples']] == [2, -2]
+'@ | python -P -
+```
+
+Expected output
+
+```text
+redistributed FAIL grid_optimizer_snapshots_changed
+missing UNREADABLE grid_optimizer_snapshots_invalid
+corrected PASS grid_optimizer_snapshots_equal
+```
+
+This compares supplied synthetic snapshots. Live input acquisition and the
+independence of report evidence require separate receipts.
