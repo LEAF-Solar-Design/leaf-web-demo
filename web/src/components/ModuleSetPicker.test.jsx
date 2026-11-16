@@ -12,6 +12,41 @@ const first = () => screen.getByRole('checkbox', { name: 'Design / Panel A: 12 c
 const second = () => screen.getByRole('checkbox', { name: 'Alternate / Panel B: 9 candidates' })
 const submit = () => screen.getByRole('button', { name: 'Count selected set' })
 
+it('selects, submits and rerenders deeply frozen candidates and recorded results without mutation', () => {
+  const freeze = (value) => {
+    if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+      Object.values(value).forEach(freeze)
+      Object.freeze(value)
+    }
+    return value
+  }
+  const listing = freeze({ sets: data.sets.map((set) => ({ ...set })) })
+  const completed = freeze({ sets: listing.sets, selected_sets: [listing.sets[0]],
+    selected_set: listing.sets[0], count: 12, selection_required: false })
+  const next = freeze({ ...completed, selected_sets: [listing.sets[1]],
+    selected_set: listing.sets[1], count: 9 })
+  const before = JSON.stringify([listing, completed, next])
+  const onSelect = vi.fn()
+  const view = render(<ModuleSetPicker drawingKey="frozen" data={listing} onSelect={onSelect} />)
+  fireEvent.click(first())
+  fireEvent.click(submit())
+  expect(onSelect).toHaveBeenCalledExactlyOnceWith(['first'])
+  view.rerender(<ModuleSetPicker drawingKey="frozen" data={completed} onSelect={onSelect} />)
+  expect(screen.getByText('Counted 12 modules on Design / Panel A.')).toBeTruthy()
+  expect(screen.getByRole('group').disabled).toBe(false)
+  fireEvent.click(first())
+  fireEvent.click(second())
++  fireEvent.click(submit())
+  expect(onSelect.mock.calls).toEqual([[['first']], [['second']]])
+  view.rerender(<ModuleSetPicker drawingKey="frozen" data={next} onSelect={onSelect} />)
+  expect(screen.getByText('Counted 9 modules on Alternate / Panel B.')).toBeTruthy()
+  expect(second().checked).toBe(true)
+  expect(submit().disabled).toBe(false)
+  expect(Object.isFrozen(listing.sets[0])).toBe(true)
+  expect(Object.isFrozen(completed.selected_sets)).toBe(true)
+  expect(JSON.stringify([listing, completed, next])).toBe(before)
+})
+
 it('keeps external running and pending promises as independent submission locks', async () => {
   let settle
   const pending = new Promise((resolve) => { settle = resolve })
