@@ -985,7 +985,48 @@ def validate_grid_inverter_ownership(expected_grid_ids, saved_inverter_ids, assi
     return _validate_grid_ownership(expected_grid_ids, saved_inverter_ids, assignments, "inverter_id", "inverter")
 
 
-def _validate_grid_ownership(expected_grid_ids, saved_ids, assignments, identity_key, label):
+def validate_string_inverter_assignments(inverter_ids, saved_string_ids, assignments):
+    """Require each saved string to name exactly one explicitly existing inverter."""
+    result = _validate_grid_ownership(inverter_ids, saved_string_ids, assignments,
+                                     "string_id", "string", owner_key="inverter_id")
+    reason = {"ownership_evidence_unreadable": "string_inverter_evidence_unreadable",
+              "ownership_row_unreadable": "string_inverter_row_unreadable",
+              "string_ownership_equal": "string_inverter_assignments_equal",
+              "string_ownership_mismatch": "string_inverter_assignments_mismatch"}
+    return dict(result, reason=reason[result["reason"]])
+
+
+def compare_string_inverter_assignments(inverter_ids, saved_string_ids, oracle_assignments, saved_assignments):
+    """Compare explicit independent connections, without inferring them from counts."""
+    oracle = validate_string_inverter_assignments(inverter_ids, saved_string_ids, oracle_assignments)
+    saved = validate_string_inverter_assignments(inverter_ids, saved_string_ids, saved_assignments)
+    verdicts = {oracle["verdict"], saved["verdict"]}
+    if verdicts != {"PASS"}:
+        return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL", "string_inverter_comparison_invalid",
+                    oracle=oracle, saved=saved)
+    old = {row["string_id"]: row["inverter_id"] for row in oracle_assignments}
+    new = {row["string_id"]: row["inverter_id"] for row in saved_assignments}
+    changed = [key for key in old if old[key] != new[key]]
+    return _out("FAIL" if changed else "PASS",
+                "string_inverter_assignments_changed" if changed else "string_inverter_assignments_equal",
+                changed_count=len(changed), examples=[dict(string_id=key, oracle=old[key], saved=new[key])
+                    for key in nsmallest(MAX_STRING_EXAMPLES, changed)])
+
+
+def compare_string_inverter_snapshots(inverter_ids, saved_string_ids, before_assignments, reopened_assignments):
+    """Compare connections for fixed explicit identities across save and reopen."""
+    result = compare_string_inverter_assignments(inverter_ids, saved_string_ids,
+                                                 before_assignments, reopened_assignments)
+    if "oracle" in result:
+        return _out(result["verdict"], "string_inverter_snapshots_invalid",
+                    before=result["oracle"], reopened=result["saved"])
+    return _out(result["verdict"], "string_inverter_snapshots_changed" if result["changed_count"] else
+                "string_inverter_snapshots_equal", changed_count=result["changed_count"],
+                examples=[dict(string_id=row["string_id"], before=row["oracle"], reopened=row["saved"])
+                          for row in result["examples"]])
+
+
+def _validate_grid_ownership(expected_grid_ids, saved_ids, assignments, identity_key, label, *, owner_key="grid_id"):
     prefix = "" if label == "string" else label + "_"
     foreign_key = "foreign_" + label
     def valid_ids(values):
@@ -995,7 +1036,8 @@ def _validate_grid_ownership(expected_grid_ids, saved_ids, assignments, identity
     if not valid_ids(expected_grid_ids) or not valid_ids(saved_ids) or type(assignments) is not list:
         return _out("UNREADABLE", prefix + "ownership_evidence_unreadable")
     expected, saved, seen = set(expected_grid_ids), set(saved_ids), set()
-    errors = {"missing": 0, "duplicate": 0, foreign_key: 0, "foreign_grid": 0}
+    foreign_owner = "foreign_grid" if owner_key == "grid_id" else "foreign_inverter"
+    errors = {"missing": 0, "duplicate": 0, foreign_key: 0, foreign_owner: 0}
     examples = {}
     def issue(reason, key):
         errors[reason] += 1
@@ -1004,14 +1046,14 @@ def _validate_grid_ownership(expected_grid_ids, saved_ids, assignments, identity
         if len(candidates) > MAX_STRING_EXAMPLES:
             candidates.remove(max(candidates))
     for row in assignments:
-        if (type(row) is not dict or set(row) != {"grid_id", identity_key}
+        if (type(row) is not dict or set(row) != {owner_key, identity_key}
                 or any(type(value) is not str or not value.strip() or len(value) > 128 for value in row.values())):
             return _out("UNREADABLE", prefix + "ownership_row_unreadable")
         key = row[identity_key]
         if key not in saved:
             issue(foreign_key, key)
-        if row["grid_id"] not in expected:
-            issue("foreign_grid", key)
+        if row[owner_key] not in expected:
+            issue(foreign_owner, key)
         if key in seen:
             issue("duplicate", key)
         seen.add(key)

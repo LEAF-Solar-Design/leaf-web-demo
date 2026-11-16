@@ -1720,3 +1720,38 @@ The grid swap and substituted device preserve the total of one inverter. Explici
 identity and independent grid evidence expose each mismatch. The inputs in this
 replay are synthetic, with input origin and live X05 acceptance requiring their
 own receipts.
+# String-to-inverter evidence in the X05 parity report
+
+The seven-step report checks inverter identities and grid owners. It does not
+establish which inverter each string connects to. Equal per-inverter counts can
+hide swapped connections. These new standalone helpers require explicit
+`string_id` and `inverter_id` rows, unique existing inverter IDs, and the actual
+saved string ID set. An independent oracle must supply its own assignment rows.
+Save/reopen proof needs both connection snapshots. Missing evidence is
+UNREADABLE. No helper derives a connection from totals or authenticates a source.
+
+Run this synthetic replay from the repository root in PowerShell:
+
+```powershell
+@'
+import json, runpy, sys
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+envelope = fixtures['equal_count_ownership_envelope']()
+before = [dict(string_id='A', inverter_id='I1'), dict(string_id='B', inverter_id='I2')]
+swapped = [dict(string_id='A', inverter_id='I2'), dict(string_id='B', inverter_id='I1')]
+print('existing composition', m.reconcile_seven_steps_json(json.dumps(envelope))['verdict'])
+for name, rows in [('swapped', swapped), ('missing', None), ('corrected', before)]:
+    result = m.compare_string_inverter_snapshots(['I1', 'I2'], ['A', 'B'], before, rows)
+    print(name, result['verdict'], result['reason'])
+assert m.compare_string_inverter_assignments(['I1', 'I2'], ['A', 'B'], before, swapped)['changed_count'] == 2
+'@ | python -P -
+```
+
+Expected: existing composition PASS, swapped FAIL
+`string_inverter_snapshots_changed`, missing UNREADABLE
+`string_inverter_snapshots_invalid`, corrected PASS
+`string_inverter_snapshots_equal`. The supplied connection rows are separate
+evidence, so the existing composition PASS does not settle topology. The replay
+uses no customer data, transport, credentials, staging mutation or live grading.

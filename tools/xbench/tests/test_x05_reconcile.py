@@ -4668,3 +4668,135 @@ def test_generated_inverter_lookup_work_and_capped_error_permutations(monkeypatc
             preserved = deepcopy(changed)
             assert module.validate_grid_inverter_ownership(*changed) == baseline
             assert changed == preserved
+
+
+def test_string_inverter_assignment_validation_and_bounded_diagnostics():
+    from benches import x05_reconcile as m
+    devices, strings = ['I1', 'I2'], ['A', 'B']
+    rows = [dict(string_id='A', inverter_id='I1'), dict(string_id='B', inverter_id='I2')]
+    assert m.validate_string_inverter_assignments(devices, strings, rows)['verdict'] == 'PASS'
+    cases = [(rows[:1], 'missing'), (rows + rows[:1], 'duplicate'),
+             (rows + [dict(string_id='C', inverter_id='I1')], 'foreign_string'),
+             ([dict(string_id='A', inverter_id='X'), rows[1]], 'foreign_inverter')]
+    for values, reason in cases:
+        preserved = deepcopy(values)
+        result = m.validate_string_inverter_assignments(devices, strings, values)
+        assert result['verdict'] == 'FAIL' and result['counts'][reason] == 1
+        assert result == m.validate_string_inverter_assignments(devices[::-1], strings[::-1], values[::-1])
+        assert values == preserved
+    for ids in (None, [], ['I1', 'I1'], [True], ['x'*129]):
+        assert m.validate_string_inverter_assignments(ids, strings, rows)['verdict'] == 'UNREADABLE'
+    for ids in (None, [], ['A', 'A'], [True], ['x'*129]):
+        assert m.validate_string_inverter_assignments(devices, ids, rows)['verdict'] == 'UNREADABLE'
+    for values in (None, {}, [{}], [dict(string_id='A', inverter_id=True)],
+                   [dict(string_id='A', inverter_id='x'*129)], [dict(string_id='A', inverter_id=' ')],
+                   [dict(string_id='A', inverter_id='I1', extra='x')]):
+        assert m.validate_string_inverter_assignments(devices, strings, values)['verdict'] == 'UNREADABLE'
+    excess = [dict(string_id=f'x{i:03}', inverter_id='foreign') for i in range(70)]
+    result = m.validate_string_inverter_assignments(devices, strings, excess)
+    assert result['counts'] == dict(missing=2, duplicate=0, foreign_string=70, foreign_inverter=70)
+    assert all(len(v) <= MAX_STRING_EXAMPLES for v in result['examples'].values())
+    assert result == m.validate_string_inverter_assignments(devices, strings, excess[::-1])
+
+
+def test_string_inverter_reference_swaps_snapshots_and_missing_evidence():
+    from itertools import product
+    from benches import x05_reconcile as m
+    devices, strings = ['I1', 'I2'], ['A', 'B', 'C']
+    for old in product(devices, repeat=3):
+        before = [dict(string_id=k, inverter_id=v) for k, v in zip(strings, old)]
+        for new in product(devices, repeat=3):
+            after = [dict(string_id=k, inverter_id=v) for k, v in zip(strings, new)]
+            preserved = deepcopy((before, after))
+            result = m.compare_string_inverter_assignments(devices, strings, before, after)
+            snapshot = m.compare_string_inverter_snapshots(devices, strings, before, after)
+            count = sum(a != b for a, b in zip(old, new))
+            assert result['changed_count'] == snapshot['changed_count'] == count
+            assert result['verdict'] == snapshot['verdict'] == ('FAIL' if count else 'PASS')
+            assert (before, after) == preserved
+    old = [dict(string_id='A', inverter_id='I1'), dict(string_id='B', inverter_id='I2')]
+    new = [dict(string_id='A', inverter_id='I2'), dict(string_id='B', inverter_id='I1')]
+    assert sorted(r['inverter_id'] for r in old) == sorted(r['inverter_id'] for r in new)
+    assert m.compare_string_inverter_snapshots(devices, strings[:2], old, new)['changed_count'] == 2
+    for left, right in ((None, new), (old, None), (None, None)):
+        assert m.compare_string_inverter_assignments(devices, strings[:2], left, right)['verdict'] == 'UNREADABLE'
+        assert m.compare_string_inverter_snapshots(devices, strings[:2], left, right)['verdict'] == 'UNREADABLE'
+    rows = [dict(string_id=f's{i:03}', inverter_id='I1') for i in range(70)]
+    changed = [dict(r, inverter_id='I2') for r in rows]
+    result = m.compare_string_inverter_snapshots(devices, [r['string_id'] for r in rows], rows, changed)
+    assert result['changed_count'] == 70 and len(result['examples']) == MAX_STRING_EXAMPLES
+    assert result == m.compare_string_inverter_snapshots(devices, [r['string_id'] for r in rows][::-1], rows[::-1], changed[::-1])
+
+
+@pytest.mark.parametrize('mode', ['seven', 'bound'])
+@pytest.mark.parametrize('mutation', ['owner', 'substitute', 'missing'])
+def test_inverter_composed_cli_differential(tmp_path, mode, mutation):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from benches import x05_reconcile as m
+    envelope = equal_count_ownership_envelope()
+    evidence = envelope['assurance']['evidence']
+    if mutation == 'owner':
+        evidence['saved_inverters'][0]['grid_id'] = 'west'
+    elif mutation == 'substitute':
+        evidence['reopened_inverters'][0]['inverter_id'] = 'replacement'
+    else:
+        evidence['reopened_inverters'] = None
+    if mode == 'seven':
+        source = envelope['assurance']
+        assurance = dict(evidence=source['evidence'], frozen_manifest=source['manifest'], stage_bindings=source['bindings'],
+            supplied_inputs={k: bytes.fromhex(v) for k, v in source['inputs_hex'].items()},
+            expected_identity=source['identity'], stage_identities=source['stage_identities'])
+        direct = m.reconcile_seven_steps(envelope['import'], envelope['grid'], assurance)
+        assert json.loads(serialize_result(direct)) == json.loads(serialize_result(m.reconcile_seven_steps_json(json.dumps(envelope))))
+        payload, flag = envelope, '--seven-step'
+    else:
+        expected, records = bound_seven_fixture_records()
+        envelope['assurance']['manifest']['fixture_id'] = expected[0]
+        evidence['fixture_id'] = expected[0]
+        envelope['assurance']['bindings'] = {k: deepcopy(envelope['assurance']['manifest']) for k in PROVENANCE_STAGES}
+        records[0]['envelope'] = envelope
+        direct = m.aggregate_bound_seven_steps(expected, records)
+        assert all(direct['fixtures'][k]['verdict'] == 'PASS' for k in expected[1:])
+        payload, flag = dict(expected_ids=expected, fixtures=records), '--seven-step-bound-aggregate'
+    run = subprocess.run([sys.executable, '-P', str(Path(m.__file__).resolve()), flag],
+        input=serialize_result(payload).encode('ascii'), capture_output=True, cwd=tmp_path, timeout=20,
+        env={'SystemRoot': 'C:\\Windows'})
+    assert run.returncode == (4 if mutation == 'missing' else 1) and not run.stderr
+    assert json.loads(run.stdout) == json.loads(serialize_result(direct))
+
+
+def test_inverter_bound_aggregate_evaluates_only_unique_readable_fixtures(monkeypatch):
+    from benches import x05_reconcile as m
+    expected, records = bound_seven_fixture_records()
+    baseline = m.aggregate_bound_seven_steps(expected, records)
+    names = ('compare_grid_inverter_totals', 'compare_grid_inverter_oracle_totals', 'compare_inverter_snapshots')
+    calls = dict.fromkeys(names, 0)
+    def counted(name, original):
+        def invoke(*args, **kwargs):
+            calls[name] += 1
+            return original(*args, **kwargs)
+        return invoke
+    for name in names:
+        monkeypatch.setattr(m, name, counted(name, getattr(m, name)))
+    assert m.aggregate_bound_seven_steps(expected, records) == baseline
+    assert calls == dict(zip(names, (3, 3, 6)))  # snapshot comparison and saved binding are separate evidence pairs
+    calls.update(dict.fromkeys(names, 0))
+    result = m.aggregate_bound_seven_steps(expected, [dict(fixture_id=expected[0], envelope=None)] + records)
+    assert result['verdict'] == 'UNREADABLE' and expected[0] not in result['fixtures']
+    assert calls == dict(zip(names, (2, 2, 4)))
+    for key in expected[1:]:
+        assert result['fixtures'][key] == baseline['fixtures'][key]
+
+
+def test_string_inverter_composition_proof_limit_replay():
+    from benches import x05_reconcile as m
+    envelope = equal_count_ownership_envelope()
+    before = [dict(string_id='A', inverter_id='I1'), dict(string_id='B', inverter_id='I2')]
+    after = [dict(string_id='A', inverter_id='I2'), dict(string_id='B', inverter_id='I1')]
+    assert m.reconcile_seven_steps_json(json.dumps(envelope))['verdict'] == 'PASS'
+    assert m.compare_string_inverter_assignments(['I1', 'I2'], ['A', 'B'], before, after)['verdict'] == 'FAIL'
+    assert m.compare_string_inverter_snapshots(['I1', 'I2'], ['A', 'B'], before, after)['verdict'] == 'FAIL'
+    assert m.compare_string_inverter_snapshots(['I1', 'I2'], ['A', 'B'], before, None)['verdict'] == 'UNREADABLE'
+    assert m.compare_string_inverter_snapshots(['I1', 'I2'], ['A', 'B'], before, before)['verdict'] == 'PASS'
