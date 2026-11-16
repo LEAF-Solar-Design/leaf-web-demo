@@ -5916,6 +5916,19 @@ def test_web_writers_browser_proofs_and_nested_runners_keep_web_tree(sid):
     g = _load_runner()
     suite = next(suite for suite in g.build_suites() if suite.id == sid)
     assert sid not in g._WEB_SOURCE_READERS
+    if sid == "web-studio-panels-proof":
+        expected = [g._npx(), "--no-install", "playwright", "test", "--config",
+                    "playwright.config.mjs", "e2e/campaign-panel.spec.mjs",
+                    "e2e/recovery-controls.spec.mjs", "e2e/workspace-create-no-prompt.spec.mjs",
+                    "e2e/viewer-grid-toggle.spec.mjs", "e2e/studio-ux-regressions.spec.mjs",
+                    "e2e/project-page-editor.spec.mjs", "--workers=2"]
+        assert suite.argv == expected
+        assert g._BROWSER_DIRECT_PROOFS[sid] == expected[5:]
+        assert g.isolated_browser_suite(suite)
+        drifted = g.replace(suite, argv=[*expected[:-1], "--workers=3"])
+        assert not g.isolated_browser_suite(drifted)
+        assert g.browser_suite_env(drifted) == {}
+        assert g.serial_suite_reason(drifted) == "browser resource declaration drift"
     if g.isolated_browser_suite(suite):
         assert g.browser_suite_env(suite) == {"LEAF_GATE_BROWSER_SUITE": sid}
         resources = g.conflict_resources(suite)
