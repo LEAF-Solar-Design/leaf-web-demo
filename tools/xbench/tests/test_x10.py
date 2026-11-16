@@ -2,9 +2,11 @@
 
 from contextlib import contextmanager, nullcontext
 import hashlib
+import copy
 import decimal
 import gc
 import weakref
+import random
 from fractions import Fraction
 import json
 import re
@@ -13,6 +15,7 @@ from pathlib import Path
 import sys
 import tempfile
 import struct
+import subprocess
 import unittest
 from unittest.mock import MagicMock, patch
 from decimal import Decimal
@@ -644,7 +647,7 @@ class FixtureTests(unittest.TestCase):
                         patch.object(x10, "_open_workflow", workflow):
                     observed = x10.observe(page, self.ctx, config, bound, self.session_info)
                 self.assertEqual(callbacks, {})
-                self.assertEqual(page.on.call_count, 4)
+                self.assertEqual(page.on.call_count, 6)
                 self.assertEqual(page.remove_listener.call_args_list, page.on.call_args_list)
                 self.assertEqual(observed["imported_version_id"], VERSION)
                 self.assertEqual(aggregate(x10.classify(observed)), "FAIL" if mode == "matching" else "UNREADABLE")
@@ -754,11 +757,12 @@ class FixtureTests(unittest.TestCase):
         source.read.return_value = b"x" * (x10.MAX_SCREENSHOT_BYTES + 1)
         manager = MagicMock()
         manager.__enter__.return_value = source
+        source.fileno.return_value = 123
+        real_fstat = x10.os.fstat
         observation = dict(**canonical_project(), fresh_project=True, imported_version_selected=True,
                            ground_option="Ground Physical unavailable")
-        with patch.object(x10.os, "open", return_value=123), patch.object(x10.os, "close"), \
-                patch.object(x10.os, "fdopen", return_value=manager), \
-                patch.object(x10.os, "fstat", side_effect=lambda fd: info["stat"]), \
+        with patch.object(x10, "_binary_input", return_value=manager), \
+                patch.object(x10.os, "fstat", side_effect=lambda fd: info["stat"] if fd == 123 else real_fstat(fd)), \
                 patch.object(x10.zlib, "decompressobj") as decoder, self.assertRaises(ValueError):
             x10._save(page, self.ctx, observation)
         source.read.assert_called_once_with(x10.MAX_SCREENSHOT_BYTES + 1)
@@ -1376,7 +1380,7 @@ class FixtureTests(unittest.TestCase):
                     raise RuntimeError("private cleanup diagnostic")
             page.remove_listener.side_effect = remove
             rows = self.run_page(page)
-            self.assertEqual(attempts, ["request", "response", "requestfailed", "framenavigated"])
+            self.assertEqual(attempts, ["request", "response", "requestfailed", "framenavigated", "close", "crash"])
             self.assertEqual(rows[0].verdict, "UNREADABLE")
             self.assertEqual(list(self.ctx.out_dir.glob("x10-evidence-*")), old)
             self.assertTrue(json.loads((old[0] / "x10-ui.json").read_text())["evidence_saved"])
@@ -2546,6 +2550,496 @@ class FixtureTests(unittest.TestCase):
             for factory_budget in (0, -1, True):
                 with self.assertRaises(ValueError):
                     factory(self.ctx.base, {}, max_requests=factory_budget)
+
+    def test_png_chunk_order_rejects_ambiguous_critical_layouts(self):
+        def chunk(kind, data):
+            return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff)
+        data = tiny_png()
+        header, end = data[:33], chunk(b"IEND", b"")
+        compressed = zlib.compress(b"\x00\x00\x00\x00")
+        first, second = chunk(b"IDAT", compressed[:3]), chunk(b"IDAT", compressed[3:])
+        ancillary = chunk(b"tEXt", b"synthetic\x00value")
+        cases = [(header + first + second + end, True),
+                 (header + ancillary + first + second + end, True),
+                 (header + data[8:33] + first + second + end, False),
+                 (header + first + ancillary + second + end, False),
+                 (header + chunk(b"ABCD", b"") + first + second + end, False),
+                 (header + first + second + chunk(b"PLTE", b"\x00\x00\x00") + end, False)]
+        page = MagicMock()
+        for image, accepted in cases:
+            page.get_by_role.return_value.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(image)
+            observation = dict(**canonical_project(), fresh_project=True)
+            if accepted:
+                x10._save(page, self.ctx, observation)
+            else:
+                with self.assertRaises(ValueError):
+                    x10._save(page, self.ctx, observation)
+                self.assertFalse(observation["evidence_saved"])
+
+    def test_identity_urls_reject_userinfo_fragment_encoding_and_duplicate_keys(self):
+        for factory in (x10._catalog_observer, x10._project_observer):
+            url = self.catalog_request().url if factory is x10._catalog_observer else self.ctx.base + "/api/projects/" + PROJECT
+            invalid = [url.replace("https://", "https://user@"), url + "#fragment",
+                       url.replace("/api/", "/api%2F")]
+            if factory is x10._catalog_observer:
+                invalid += [url + "&%70roject_id=" + PROJECT, url + "&input_version%5fid=" + VERSION]
+            else:
+                invalid += [url + "?project_id=" + PROJECT + "&%70roject_id=" + PROJECT]
+            for bad in invalid:
+                observation = {}
+                listener = factory(self.ctx.base, observation)
+                request = SimpleNamespace(frame=MAIN_FRAME, method="GET", url=bad)
+                listener(request)
+                listener.response(metadata_response(request, {"project": {"id": PROJECT}, "drawing_versions": []}))
+                key = "catalog_binding" if factory is x10._catalog_observer else "project_binding"
+                self.assertIsNone(observation[key])
+
+    def test_seeded_event_differential_reference_for_identity_and_teardown(self):
+        # Reference model uses integer request IDs and status rules, independent
+        # of URL parsing, UUID extraction and observer closures.
+        for seed in (7, 101, 20261115):
+            for kind in ("project", "catalog"):
+                rng = random.Random(seed)
+                events = [("request", 0, 200)]
+                count = 1
+                for _ in range(80):
+                    action = rng.choice(("request", "response", "failure", "navigation"))
+                    if action == "request":
+                        identity = count
+                        count += 1
+                    else:
+                        identity = rng.randrange(count)
+                    events.append((action, identity, rng.choice((200, 204, 206, 500))))
+                events += [("teardown", 0, 200), ("request", count, 200), ("response", count, 200)]
+                page = MagicMock()
+                page.main_frame = MAIN_FRAME
+                actual, handlers = {}, {}
+                project = x10._project_observer(self.ctx.base, actual, MAIN_FRAME)
+                catalog = x10._catalog_observer(self.ctx.base, actual, MAIN_FRAME)
+                callbacks = {"request": lambda event: (project(event), catalog(event)),
+                             "response": lambda event: (project.response(event), catalog.response(event)),
+                             "failure": lambda event: (project.failed(event), catalog.failed(event))}
+                reference = dict(active=True, latest=None, failed=False, bound=None, navigated=False)
+                requests = {}
+                active = True
+                def dispatch(action, event):
+                    nonlocal active
+                    if not active:
+                        return
+                    if action == "teardown":
+                        active = False
+                    elif action == "navigation":
+                        actual.update(event_callback_failed=True, project_binding=None, catalog_binding=None)
+                    else:
+                        callbacks[action](event)
+                for position, (action, identity, status) in enumerate(events):
+                    if action == "request":
+                        url = (self.ctx.base + "/api/projects/" + (PROJECT if identity % 2 == 0 else OTHER)
+                               if kind == "project" else self.catalog_request(project=PROJECT if identity % 2 == 0 else OTHER).url)
+                        event = SimpleNamespace(frame=MAIN_FRAME, method="GET", url=url)
+                        requests[identity] = event
+                    elif action == "response":
+                        request = requests[identity]
+                        event = metadata_response(request, {"project": {"id": PROJECT if identity % 2 == 0 else OTHER},
+                                                            "drawing_versions": []}, status=status)
+                    else:
+                        event = requests.get(identity)
+                    if reference["active"]:
+                        if action == "teardown":
+                            reference["active"] = False
+                        elif action == "navigation":
+                            reference.update(bound=None, navigated=True)
+                        elif action == "request":
+                            reference.update(latest=identity, failed=False, bound=None)
+                        elif identity == reference["latest"]:
+                            if action == "failure" or status != 200:
+                                reference.update(failed=True, bound=None)
+                            elif not reference["failed"]:
+                                reference["bound"] = PROJECT if identity % 2 == 0 else OTHER
+                    dispatch(action, event)
+                    binding = actual.get("project_binding" if kind == "project" else "catalog_binding")
+                    value = binding.get("project_id") if isinstance(binding, dict) else binding
+                    expected = reference["bound"] if not reference["navigated"] else None
+                    current = value if not actual.get("event_callback_failed") else None
+                    self.assertEqual(current, expected, msg=f"seed={seed} kind={kind} event={position} sequence={events[:position+1]}")
+
+    def test_seeded_differential_drives_actual_observe_callbacks(self):
+        # Exercise observe's registered wrappers, including navigation and its
+        # post-teardown guard. The reference stores only integer lifecycle IDs.
+        for seed in (7, 101, 20261115):
+            for kind in ("project", "catalog"):
+                with self.subTest(seed=seed, kind=kind):
+                    page, surface, _ = self.integration_page(False)
+                    captured = {"processed": 0, "mismatches": []}
+                    original_save = x10._save
+                    def save(page, ctx, observation, *args, **kwargs):
+                        captured["observation"] = observation
+                        return original_save(page, ctx, observation, *args, **kwargs)
+                    rng = random.Random(seed)
+                    events = [("request", 0, 200), ("response", 0, 200),
+                              ("request", 1, 200), ("response", 0, 200),
+                              ("failure", 1, 200), ("response", 1, 200)]
+                    count = 2
+                    for _ in range(40):
+                        action = rng.choice(("request", "response", "failure"))
+                        identity = count if action == "request" else rng.randrange(count)
+                        if action == "request":
+                            count += 1
+                        events.append((action, identity, rng.choice((200, 204, 206, 500))))
+                    events.insert(20, ("navigation", 0, 200))
+                    requests = {}
+                    def capture(**kwargs):
+                        Path(kwargs["path"]).write_bytes(tiny_png())
+                        handlers = dict(call.args for call in page.on.call_args_list)
+                        actual = captured["observation"]
+                        reference = dict(latest=None, failed=False, bound=None, navigated=False)
+                        for position, (action, identity, status) in enumerate(events):
+                            if action == "request":
+                                project_id = PROJECT if identity % 2 == 0 else OTHER
+                                url = (self.ctx.base + "/api/projects/" + project_id if kind == "project"
+                                       else self.catalog_request(project=project_id).url)
+                                requests[identity] = SimpleNamespace(frame=MAIN_FRAME, method="GET", url=url)
+                                handlers["request"](requests[identity])
+                                reference.update(latest=identity, failed=False, bound=None)
+                            elif action == "navigation":
+                                MAIN_FRAME.url = "https://foreign.test/away"
+                                handlers["framenavigated"](MAIN_FRAME)
+                                # A return to the original route cannot erase the event.
+                                MAIN_FRAME.url = self.ctx.base + "/app"
+                                handlers["framenavigated"](MAIN_FRAME)
+                                reference.update(bound=None, navigated=True)
+                            else:
+                                request = requests[identity]
+                                if action == "failure":
+                                    handlers["requestfailed"](request)
+                                else:
+                                    handlers["response"](metadata_response(request, {
+                                        "project": {"id": PROJECT if identity % 2 == 0 else OTHER},
+                                        "drawing_versions": []}, status=status))
+                                if identity == reference["latest"]:
+                                    if action == "failure" or status != 200:
+                                        reference.update(failed=True, bound=None)
+                                    elif not reference["failed"]:
+                                        reference["bound"] = PROJECT if identity % 2 == 0 else OTHER
+                            binding = actual.get("project_binding" if kind == "project" else "catalog_binding")
+                            value = binding.get("project_id") if isinstance(binding, dict) else binding
+                            current = None if actual.get("event_callback_failed") else value
+                            expected = None if reference["navigated"] else reference["bound"]
+                            captured["processed"] += 1
+                            if current != expected:
+                                captured["mismatches"].append(
+                                    f"seed={seed} kind={kind} event={position} current={current} expected={expected} sequence={events[:position+1]}")
+                    surface.screenshot.side_effect = capture
+                    try:
+                        with patch.object(x10, "_save", save):
+                            rows = self.run_page(page)
+                        self.assertEqual(captured["processed"], len(events),
+                                         msg=f"seed={seed} kind={kind} incomplete callback replay")
+                        self.assertEqual(captured["mismatches"], [])
+                        self.assertEqual(rows[0].verdict, "UNREADABLE")
+                        actual = captured["observation"]
+                        self.assertFalse(actual["evidence_saved"])
+                        self.assertEqual(page.remove_listener.call_args_list, page.on.call_args_list)
+                        before = json.dumps(actual, sort_keys=True)
+                        handlers = dict(call.args for call in page.on.call_args_list)
+                        # Actual retained callbacks are inert after observe's finally.
+                        for request in requests.values():
+                            handlers["request"](request)
+                            handlers["response"](metadata_response(request, {
+                                "project": {"id": PROJECT}, "drawing_versions": []}))
+                            handlers["requestfailed"](request)
+                        handlers["framenavigated"](MAIN_FRAME)
+                        self.assertEqual(json.dumps(actual, sort_keys=True), before,
+                                         msg=f"seed={seed} kind={kind} teardown")
+                    finally:
+                        MAIN_FRAME.url = self.ctx.base + "/app"
+
+    def test_failed_then_successful_runs_isolate_projects_fixtures_and_listeners(self):
+        first, surface, _ = self.integration_page(False)
+        surface.screenshot.side_effect = OSError("synthetic capture failure")
+        failed = self.run_page(first)[0].observed
+        self.assertFalse(failed["evidence_saved"])
+        self.assertNotIn("evidence_path", failed)
+        self.assertEqual(first.remove_listener.call_args_list, first.on.call_args_list)
+        before_failed = json.dumps(failed, sort_keys=True)
+        old_handlers = dict(call.args for call in first.on.call_args_list)
+        second_case = FixtureTests()
+        second_case.setUp()
+        try:
+            self.assertNotEqual(self.ctx.out_dir, second_case.ctx.out_dir)
+            self.assertTrue(set(row["path"] for row in self.ctx.fixtures).isdisjoint(
+                row["path"] for row in second_case.ctx.fixtures))
+            catalog_request = second_case.catalog_request
+            second_case.catalog_request = lambda **kwargs: catalog_request(project=OTHER, **kwargs)
+            second_case.emit_project = lambda page: FixtureTests.emit_project(second_case, page, OTHER)
+            with patch(__name__ + ".PROJECT", OTHER):
+                second, _, _ = second_case.integration_page(False)
+                result = second_case.run_page(second)[0]
+                self.assertEqual(result.verdict, "FAIL")  # rendered blocker, never bench PASS
+                observed = result.observed
+                self.assertEqual(observed["project_id"], OTHER)
+                self.assertEqual(observed["project_binding"], OTHER)
+                self.assertTrue(observed["evidence_saved"])
+                self.assertTrue((second_case.ctx.out_dir / observed["evidence_path"].split(" / ")[0]).is_file())
+                before_second = json.dumps(observed, sort_keys=True)
+                for handler in old_handlers.values():
+                    handler(SimpleNamespace(parent_frame=None, url="https://foreign.test/late"))
+                self.assertEqual(json.dumps(observed, sort_keys=True), before_second)
+                self.assertEqual(json.dumps(failed, sort_keys=True), before_failed)
+                self.assertEqual(second.remove_listener.call_args_list, second.on.call_args_list)
+                self.assertTrue(all(old is not new for old, new in zip(
+                    old_handlers.values(), dict(call.args for call in second.on.call_args_list).values())))
+        finally:
+            second_case.doCleanups()
+
+    def test_subprocess_hash_seed_determinism_for_verdicts_and_cents(self):
+        script = r'''
+import importlib.util, json, pathlib, socket, sys
+path = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("x10_synthetic_tests", path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+def forbidden(*args, **kwargs):
+    raise AssertionError("network forbidden")
+socket.socket = forbidden
+case = module.ClassificationTests()
+observations = [case.observation(), case.observation(source=""),
+                case.observation(project_binding=module.OTHER),
+                case.observation(screenshot_sha256="")]
+rows = [[[row.n, row.verdict, row.evidence] for row in module.x10.classify(obs)] for obs in observations]
+total = module.x10.rate_total({"items": [{"quantity":"0.1","unit_rate":"0.2"},
+                                       {"quantity":"0.5","unit_rate":"0.1"}]})
+print(json.dumps({"rows":rows,"cents":str(total)}, sort_keys=True))
+'''
+        results = []
+        for seed in ("0", "1", "20261115"):
+            completed = subprocess.run([sys.executable, "-I", "-c", script, str(Path(__file__).resolve())],
+                env={"PYTHONHASHSEED": seed}, capture_output=True, text=True, timeout=30,
+                cwd=Path(__file__).resolve().parents[3])
+            self.assertEqual(completed.returncode, 0, msg=f"seed={seed} {completed.stderr}")
+            value = json.loads(completed.stdout)
+            self.assertEqual(value["cents"], "0.07")
+            self.assertNotIn("PASS", [row[1] for rows in value["rows"] for row in rows])
+            results.append(value)
+        self.assertTrue(all(value == results[0] for value in results[1:]))
+
+    def test_png_transparency_chunks_require_legal_unique_bounded_values(self):
+        def chunk(kind, data):
+            return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff)
+        cases = []
+        for color, raw, transparency in ((0, b"\0\0", b"\0\0"),
+                (2, b"\0\0\0\0", b"\0" * 6), (3, b"\0\0", b"\xff"),
+                (4, b"\0\0\0", b"\0\0"), (6, b"\0\0\0\0\0", b"\0" * 6)):
+            png = tiny_png(color=color, raw=raw, palette=b"\0\0\0" if color == 3 else None)
+            position = png.index(b"IDAT") - 4
+            trns = chunk(b"tRNS", transparency)
+            cases.append((png[:position] + trns + png[position:], color in (0, 2, 3)))
+            cases.append((png[:position] + trns + trns + png[position:], False))
+            if color == 3:
+                cases.append((png[:position] + chunk(b"tRNS", b"\xff\xff") + png[position:], False))
+                cases.append((png[:33] + trns + png[33:], False))
+            if color == 0:
+                cases.append((png[:position] + chunk(b"tRNS", b"\1\0") + png[position:], False))
+        path = Path(self.temp.name) / "transparency.png"
+        for data, accepted in cases:
+            path.write_bytes(data)
+            if accepted:
+                self.assertEqual(x10._valid_png(path), data)
+            else:
+                with self.assertRaises(ValueError):
+                    x10._valid_png(path)
+
+    def test_spaces_and_unicode_paths_preserve_binding_publication_and_cleanup(self):
+        folder = Path(self.temp.name) / "synthetic fixtures \u00e9 \u592a\u967d"
+        folder.mkdir()
+        for row in self.ctx.manifest["fixtures"]:
+            old = Path(row["path"])
+            new = folder / old.name
+            old.rename(new)
+            row["path"] = str(new)
+            proof = next(proof for proof in self.ctx.fixtures if proof["id"] == row["id"])
+            proof["path"] = str(new)
+        self.ctx.out_dir = folder / "evidence \u00e9 \u592a\u967d"
+        self.assertEqual(x10.bindings(self.ctx)[3], Decimal("0.07"))
+        page = MagicMock()
+        page.get_by_role.return_value.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(tiny_png())
+        observation = dict(**canonical_project(), fresh_project=True)
+        x10._save(page, self.ctx, observation)
+        record = self.ctx.out_dir / observation["evidence_path"].split(" / ")[0]
+        self.assertTrue(record.is_file())
+        self.assertEqual(hashlib.sha256(record.read_bytes()).hexdigest(), observation["evidence_record_sha256"])
+        x10._diagnostic(self.ctx, dict(observation), "synthetic", OSError("synthetic"))
+        self.assertTrue((self.ctx.out_dir / "x10-ui.json").is_file())
+        x10._invalidate_evidence(self.ctx, observation)
+        self.assertFalse(record.exists())
+        self.assertFalse(observation["evidence_saved"])
+        self.assertTrue(all(Path(row["path"]).is_file() for row in self.ctx.fixtures))
+
+    def test_page_close_and_crash_invalidate_only_current_evidence(self):
+        for event in ("close", "crash"):
+            for phase in ("capture", "committed"):
+                with self.subTest(event=event, phase=phase):
+                    previous = dict(**canonical_project(), fresh_project=True)
+                    old_page = MagicMock()
+                    old_page.get_by_role.return_value.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(tiny_png())
+                    x10._save(old_page, self.ctx, previous)
+                    old_record = self.ctx.out_dir / previous["evidence_path"].split(" / ")[0]
+                    old_bytes = old_record.read_bytes()
+                    page, surface, _ = self.integration_page(False)
+                    original_save = x10._save
+                    def terminate():
+                        dict(call.args for call in page.on.call_args_list)[event]()
+                    def capture(**kwargs):
+                        Path(kwargs["path"]).write_bytes(tiny_png())
+                        if phase == "capture":
+                            terminate()
+                    def save(*args, **kwargs):
+                        original_save(*args, **kwargs)
+                        if phase == "committed":
+                            terminate()
+                    surface.screenshot.side_effect = capture
+                    with patch.object(x10, "_save", save):
+                        rows = self.run_page(page)
+                    self.assertEqual(rows[0].verdict, "UNREADABLE")
+                    self.assertFalse(rows[0].observed["evidence_saved"])
+                    self.assertNotIn("evidence_path", rows[0].observed)
+                    self.assertEqual(page.remove_listener.call_args_list, page.on.call_args_list)
+                    self.assertEqual(old_record.read_bytes(), old_bytes)
+
+    def test_invalid_budget_configuration_refuses_before_browser_entry(self):
+        invalid = (True, False, 0, -1, float("nan"), float("inf"), -float("inf"), "600", None)
+        for value in invalid:
+            with self.subTest(value=value):
+                self.ctx.manifest["x10"]["observation_budget_seconds"] = value
+                clock = MagicMock(return_value=10.0)
+                with patch.object(x10.time, "monotonic", clock), patch.object(x10, "signed_in") as session:
+                    rows = x10.run(self.ctx)
+                session.assert_not_called()
+                self.assertEqual([row.verdict for row in rows], ["UNREADABLE"] * 6)
+                clock.assert_not_called()
+        self.ctx.manifest["x10"].pop("observation_budget_seconds")
+        for seconds in (1, 0.25):
+            budget = x10._ObservationBudget(seconds, lambda: 10.0)
+            self.assertEqual(budget.milliseconds(), int(seconds * 1000))
+
+    def test_malformed_evidence_records_preserve_unrelated_material(self):
+        cases = (b"[" * 65 + b"0" + b"]" * 65, b'{"invalid":"\xff"}', b" " * (x10.MAX_JSON_BYTES + 1))
+        for malformed in cases:
+            observation = dict(**canonical_project(), fresh_project=True)
+            page = MagicMock()
+            page.get_by_role.return_value.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(tiny_png())
+            x10._save(page, self.ctx, observation)
+            record = self.ctx.out_dir / observation["evidence_path"].split(" / ")[0]
+            peer = record.parent / "unrelated.bin"
+            peer.write_bytes(b"synthetic peer material")
+            record.write_bytes(malformed)
+            with self.assertRaises(ValueError):
+                x10._read_evidence_json(record)
+            x10._invalidate_evidence(self.ctx, observation)
+            self.assertEqual(record.read_bytes(), malformed)
+            self.assertEqual(peer.read_bytes(), b"synthetic peer material")
+            self.assertFalse(observation["evidence_saved"])
+            self.assertEqual([row.verdict for row in x10.classify(observation)], ["UNREADABLE"] * 6)
+
+    def test_png_chunk_count_budget_bounds_empty_chunk_work(self):
+        def chunk(kind, data):
+            return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff)
+        png = tiny_png()
+        position = png.index(b"IDAT") - 4
+        path = Path(self.temp.name) / "chunk-count.png"
+        for kind in (b"IDAT", b"tEXt"):
+            for count, accepted in ((2, True), (x10.MAX_PNG_CHUNKS, False)):
+                image = png[:position] + chunk(kind, b"") * count + png[position:]
+                path.write_bytes(image)
+                if accepted:
+                    self.assertEqual(x10._valid_png(path), image)
+                else:
+                    with self.assertRaisesRegex(ValueError, "chunk budget"):
+                        x10._valid_png(path)
+
+    def test_classify_and_rate_total_leave_nested_inputs_unchanged(self):
+        classifier = ClassificationTests()
+        for observation in (classifier.observation(extra={"nested": [1, {"value": "synthetic"}]}),
+                            classifier.observation(source="", extra={"nested": [1, {"value": "synthetic"}]})):
+            before = copy.deepcopy(observation)
+            rows = x10.classify(observation, expected={"nested": ["synthetic"]})
+            self.assertNotIn("PASS", [row.verdict for row in rows])
+            self.assertEqual(observation, before)
+        for rates, valid in (({"items": [{"quantity": "2", "unit_rate": "0.25", "extra": {"v": [1, 2]}}]}, True),
+                             ({"items": [{"quantity": "2", "unit_rate": "bad", "extra": {"v": [1, 2]}}]}, False)):
+            before = copy.deepcopy(rates)
+            if valid:
+                self.assertEqual(x10.rate_total(rates), Decimal("0.50"))
+            else:
+                with self.assertRaises(ValueError):
+                    x10.rate_total(rates)
+            self.assertEqual(rates, before)
+
+    def test_json_numeric_token_budgets_before_browser_and_metadata_proof(self):
+        invalid = (b"1" * 129, b"1e1001", b"1e-1001", b"1e9999999999999999", b"-0", b"-0.0", b"-0e2")
+        valid = (b"0", b"1" * 128, b"1e1000", b"1e-1000")
+        for role in ("oracle", "rates"):
+            path = Path(next(row["path"] for row in self.ctx.manifest["fixtures"] if row["role"] == role))
+            original = path.read_bytes()
+            for number in invalid + valid:
+                self.replace_fixture(role, original[:-1] + b',"numeric":' + number + b'}')
+                if number in invalid:
+                    self.assert_binding_refusal()
+                else:
+                    self.assertEqual(x10.bindings(self.ctx)[3], Decimal("0.07"))
+            self.replace_fixture(role, original)
+        for number in invalid + valid:
+            observation = {}
+            listener = x10._project_observer(self.ctx.base, observation)
+            request = SimpleNamespace(frame=MAIN_FRAME, method="GET", url=self.ctx.base + "/api/projects/" + PROJECT)
+            data = b'{"project":{"id":"' + PROJECT.encode() + b'"},"drawing_versions":[],"numeric":' + number + b'}'
+            listener(request)
+            listener.response(SimpleNamespace(request=request, url=request.url, status=200, body=lambda: data))
+            self.assertEqual(observation["project_binding"] == PROJECT, number in valid)
+
+    def test_directory_link_junction_and_ancestor_substitution_refuse_mutation(self):
+        page = MagicMock()
+        page.get_by_role.return_value.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(tiny_png())
+        root = self.ctx.out_dir
+        root.mkdir()
+        real_lstat = Path.lstat
+        for kind in ("symlink", "junction"):
+            def lstat(path, *args, **kwargs):
+                info = real_lstat(path, *args, **kwargs)
+                if path == root:
+                    return SimpleNamespace(st_mode=stat.S_IFLNK if kind == "symlink" else info.st_mode,
+                        st_dev=info.st_dev, st_ino=info.st_ino, st_file_attributes=0x400 if kind == "junction" else 0)
+                return info
+            with patch.object(Path, "lstat", lstat), self.assertRaises(ValueError):
+                x10._save(page, self.ctx, dict(**canonical_project(), fresh_project=True))
+        page.get_by_role.assert_not_called()
+        observation = dict(**canonical_project(), fresh_project=True)
+        x10._save(page, self.ctx, observation)
+        owned = root / observation["evidence_path"].split("/")[0]
+        before = {path.name: path.read_bytes() for path in owned.iterdir()}
+        def replacement(path, *args, **kwargs):
+            info = real_lstat(path, *args, **kwargs)
+            if path == root:
+                return SimpleNamespace(st_mode=info.st_mode, st_dev=info.st_dev, st_ino=info.st_ino + 1,
+                                       st_file_attributes=0)
+            return info
+        with patch.object(Path, "lstat", replacement), patch.object(x10.shutil, "rmtree") as removed:
+            x10._invalidate_evidence(self.ctx, observation)
+        removed.assert_not_called()
+        self.assertEqual({path.name: path.read_bytes() for path in owned.iterdir()}, before)
+        changed = [False]
+        def race(path, *args, **kwargs):
+            return replacement(path, *args, **kwargs) if changed[0] else real_lstat(path, *args, **kwargs)
+        def capture(**kwargs):
+            Path(kwargs["path"]).write_bytes(tiny_png())
+            changed[0] = True
+        page.get_by_role.return_value.screenshot.side_effect = capture
+        with patch.object(Path, "lstat", race), patch.object(x10, "_write_evidence_json") as writer, \
+                patch.object(x10, "_commit_generation") as publisher, self.assertRaises(ValueError):
+            x10._save(page, self.ctx, dict(**canonical_project(), fresh_project=True))
+        writer.assert_not_called()
+        publisher.assert_not_called()
+        self.assertEqual({path.name: path.read_bytes() for path in owned.iterdir()}, before)
 
 
 if __name__ == "__main__":
