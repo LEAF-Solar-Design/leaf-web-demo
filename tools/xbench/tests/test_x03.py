@@ -220,7 +220,7 @@ def test_mocked_run_lifecycle_dispatches_sequentially_and_cleans_up(tmp_path, mo
             if path.endswith("/messages"):
                 if len(dispatches) == 1:
                     return 403, {"reason_code": "tenant_role_denied"}
-                return 202, {"turn_id": "owned-turn", "status": "running"}
+                return 202, {"turn_id": "owned-turn", "status": "started"}
             assert path == "/api/sessions/owned-session/turns/owned-turn/cancel"
             events.append("cancel-owned-turn")
             return 200, {}
@@ -640,7 +640,7 @@ def test_normal_author_uses_server_issued_turn_and_settles_only_owned_authority(
             assert kw["json_body"]["classifier_hint"] == {"source": "author_panel", "purpose": "stage_authority"}
             assert kw["json_body"]["project_context"] == {"project_id": "p", "input_version_id": "v"}
             assert kw["json_body"]["text"] == synthetic_prompt()["prompt"]
-            return (403, {"reason_code": "tenant_role_denied"}) if refuse else (202, {"turn_id": "owned-turn", "status": "running"})
+            return (403, {"reason_code": "tenant_role_denied"}) if refuse else (202, {"turn_id": "owned-turn", "status": "started"})
         assert path == "/api/sessions/owned-session/turns/owned-turn/cancel"
         return 200, {"cancelled": True}
     def invoke():
@@ -800,7 +800,7 @@ def test_owned_turn_cleanup_failure_keeps_result_and_bounded_diagnostics(tmp_pat
         if path == "/api/sessions":
             return 200, {"session_id": "owned-session"}
         if path.endswith("/messages"):
-            return 202, {"turn_id": "owned-turn", "status": "running"}
+            return 202, {"turn_id": "owned-turn", "status": "started"}
         assert path == "/api/sessions/owned-session/turns/owned-turn/cancel"
         if cleanup == "exception":
             raise RuntimeError("SECRET SENTINEL provider message")
@@ -881,7 +881,7 @@ def test_nonterminal_http200_output_never_scores(tmp_path, status):
 
 
 @pytest.mark.parametrize("status", ["failed", "cancelled", None, "unknown"])
-def test_authority_requires_running_status_and_never_cancels_other_turns(tmp_path, status):
+def test_authority_requires_producer_started_status_and_never_cancels_other_turns(tmp_path, status):
     paths = []
     def transport(method, path, **kwargs):
         paths.append(path)
@@ -989,7 +989,7 @@ def test_authority_and_execution_share_one_600_second_budget(tmp_path, monkeypat
             return 200, {"session_id": "owned-session"}
         if path.endswith("/messages"):
             clock.now = 580
-            return 202, {"turn_id": "owned-turn", "status": "running"}
+            return 202, {"turn_id": "owned-turn", "status": "started"}
         if path == "/api/health":
             return 200, {"source_sha": SHA}
         if path == "/api/author":
@@ -1101,7 +1101,7 @@ def test_fifty_prompt_real_functions_lifecycle_without_network(tmp_path, monkeyp
         if path.endswith("/messages"):
             assert kw["json_body"]["text"] == row["prompt"]
             phase = "authority"
-            return 202, {"turn_id": "turn-"+row["id"], "status": "running"}
+            return 202, {"turn_id": "turn-"+row["id"], "status": "started"}
         if path.endswith("/cancel"):
             assert path == "/api/sessions/session-"+row["id"]+"/turns/turn-"+row["id"]+"/cancel"
             events.append("cancel-"+row["id"])

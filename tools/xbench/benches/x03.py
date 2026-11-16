@@ -153,7 +153,7 @@ def author_authority(transport, row, project, drawing, evidence_dir, *, deadline
                 "project_id": project["project_id"], "input_version_id": drawing["version_id"]}})
         turn_id = started.get("turn_id")
         if (not isinstance(turn_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", turn_id)
-                or started.get("status") != "running"):
+                or started.get("status") != "started"):
             turn_id = None
             raise PromptFailure("normal author context did not start an active turn")
         yield {"X-Authority-Session-Id": session_id, "X-Authority-Turn-Id": turn_id}
