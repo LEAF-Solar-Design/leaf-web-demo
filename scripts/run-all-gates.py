@@ -3969,9 +3969,9 @@ def build_suites() -> List[Suite]:
                "e2e/campaign-panel.spec.mjs", "e2e/recovery-controls.spec.mjs",
                "e2e/workspace-create-no-prompt.spec.mjs", "e2e/viewer-grid-toggle.spec.mjs",
                "e2e/studio-ux-regressions.spec.mjs", "e2e/project-page-editor.spec.mjs",
-               # Isolated test contexts use 3 workers on the same CI device;
+               # Isolated test contexts use 2 workers on the same CI device;
                # other suites retain their own worker limits.
-               "--workers=3"], None),
+               "--workers=2"], None),
         Suite("web-lifecycle-panel-proof", "web mounted project lifecycle panel browser proof", "script", WEB,
               [_npx(), "--no-install", "playwright", "test", "--config", "playwright.lifecycle.config.mjs",
                "e2e/project-lifecycle-panel.spec.mjs", "--workers=1"], None),
@@ -5885,6 +5885,53 @@ def selected_shard_suites(suites: List[Suite], plan_path: str,
 PR_TIER_SCHEMA = "leaf.ci.pr-tier.v1"
 PR_TIER_PREREQUISITES = ("web-build", "harness-tsc-build", "ci-full-run-manifest-certificates")
 
+# These remain in the generated tier for main and conservative fallback. Only
+# explicit PR events may defer them when every changed path is clearly scoped.
+PR_TIER_DEFERRED_SCOPES = {
+    "web-studio-panels-proof": (
+        ("web/", "vendor/", "contract/"),
+        ("web/package.json", "web/package-lock.json", "web/playwright.config.mjs")),
+    "web-version-restore-proof": (
+        ("web/", "vendor/", "contract/", "server/", "platform/", "harness/"),
+        ("web/package.json", "web/package-lock.json", "web/playwright.config.mjs")),
+    "studio-walk-regressions": (
+        ("web/", "server/", "platform/", "harness/", "vendor/", "engine/",
+         "executor/", "dispatch/", "contract/", "data/", "auth0/", "deploy/",
+         "device-agent/", "da/"), ()),
+    "harness-vitest": (
+        ("harness/", "contract/", "vendor/", "engine/", "executor/", "web/",
+         "server/", "platform/"), ()),
+    "server-lab-runs": (
+        ("server/", "platform/", "contract/", "executor/", "engine/", "data/"), ()),
+}
+PR_TIER_SCOPED_ROOTS = frozenset({
+    "web", "server", "platform", "harness", "vendor", "engine", "executor",
+    "dispatch", "contract", "data", "auth0", "deploy", "device-agent", "da",
+    "docs", "tools", "tests", "plans", "research", "tasks",
+})
+
+
+def pr_tier_deferred_required(rows, changed):
+    """Fail closed on shared or ambiguous paths; direct ownership is additive."""
+    if not changed:
+        return set(PR_TIER_DEFERRED_SCOPES)
+    for path in changed:
+        parts = path.split("/")
+        if (not path or "\\" in path or ":" in path
+                or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in path)
+                or any(not part or part.startswith(".") for part in parts)
+                or len(parts) < 2 or parts[0] not in PR_TIER_SCOPED_ROOTS):
+            return set(PR_TIER_DEFERRED_SCOPES)
+    required = set()
+    for row in rows:
+        if row["id"] not in PR_TIER_DEFERRED_SCOPES:
+            continue
+        prefixes, files = PR_TIER_DEFERRED_SCOPES[row["id"]]
+        if any(path.startswith(prefixes) or path in files or pr_tier_owns(row, path)
+               for path in changed):
+            required.add(row["id"])
+    return required
+
 
 def pr_tier_path(value: str) -> str:
     """Unify historical web test names without conflating server/harness paths."""
@@ -6147,6 +6194,7 @@ def select_pr_tier(suites: List[Suite], tier: dict) -> List[Suite]:
         if not isinstance(priority, list) or any(not isinstance(p, str) for p in priority):
             raise ValueError("invalid LEAF_PRIORITY_SUITES")
         selected.update(ids & set(priority))
+        rows = web_family_rows(suites)
         for suite in suites:
             row = {"id": suite.id, "command": _fingerprint_argv(suite.argv, cwd=suite.cwd),
                    "cwd": _fingerprint_cwd(suite.cwd), "kind": suite.kind}
@@ -6155,12 +6203,26 @@ def select_pr_tier(suites: List[Suite], tier: dict) -> List[Suite]:
                         and not pr_tier_outside_web_closure(changed))
                     or any(pr_tier_owns(row, path) for path in changed)):
                 selected.add(suite.id)
+        event = os.environ.get("CODEBUILD_WEBHOOK_EVENT")
+        deferred = set(PR_TIER_DEFERRED_SCOPES) & ids
+        overlay = event in {"PULL_REQUEST_CREATED", "PULL_REQUEST_UPDATED", "PULL_REQUEST_REOPENED"}
+        main = (event == "PUSH"
+                and os.environ.get("CODEBUILD_WEBHOOK_HEAD_REF") == "refs/heads/main")
+        if overlay:
+            selected.difference_update(deferred)
+            selected.update(pr_tier_deferred_required(rows, changed) & ids)
+            selected.update(new | (ids & set(priority)))
+        elif main:
+            selected.update(deferred)
         selected = pr_tier_closure(selected, ids, tier.get("prerequisites"))
         try:
-            rows = web_family_rows(suites)
             family = {row["id"] for row in rows if row["cwd"] == "web"
                       or row["id"] in {"studio-walk-regressions", "web-demo-gate"}}
             protected = new | (ids & set(priority)) | (set(PR_TIER_PREREQUISITES) - family)
+            # The audited web-family decision can further narrow PR coverage.
+            # Main still runs the deferred suites even for web-independent changes.
+            if main:
+                protected.update(selected & deferred)
             decision, reason = load_web_family_decision()(
                 selected, rows, changed,
                 protected_ids=protected,
@@ -6483,6 +6545,23 @@ def partition_suites(suites: List[Suite], shard_count: int) -> List[List[Suite]]
     return [sorted(b, key=lambda s: index_of[s.id]) for b in bins]
 
 
+def partition_pr_tier_suites(suites: List[Suite], shard_count: int) -> List[List[Suite]]:
+    """Keep LPT membership except for the measured three-shard tier moves."""
+    partitions = partition_suites(suites, shard_count)
+    if shard_count != 3:
+        return partitions
+    placement = {s.id: i for i, shard in enumerate(partitions) for s in shard}
+    for sid, target in {
+        "web-studio-panels-proof": 1,
+        "web-link-service-flow": 2,
+        "web-async-author-stage": 2,
+        "web-author-quota-gate": 2,
+    }.items():
+        if sid in placement:
+            placement[sid] = target
+    return [[s for s in suites if placement[s.id] == i] for i in range(shard_count)]
+
+
 # Source inventory for suites whose conflicts are not expressed by Suite flags
 # or an npm/npx executable. Keep ALL conflicts in ONE group, in catalog order.
 # The server integration fixtures bind :0, not a fixed host port, but the older
@@ -6561,7 +6640,7 @@ _BROWSER_DIRECT_PROOFS = {
     "web-studio-panels-proof": ["playwright.config.mjs", "e2e/campaign-panel.spec.mjs",
         "e2e/recovery-controls.spec.mjs", "e2e/workspace-create-no-prompt.spec.mjs",
         "e2e/viewer-grid-toggle.spec.mjs", "e2e/studio-ux-regressions.spec.mjs",
-        "e2e/project-page-editor.spec.mjs", "--workers=3"],
+        "e2e/project-page-editor.spec.mjs", "--workers=2"],
     "web-lifecycle-panel-proof": ["playwright.lifecycle.config.mjs",
         "e2e/project-lifecycle-panel.spec.mjs", "--workers=1"],
     "web-ios-ship-surface-proof": ["playwright.ios.config.mjs",
@@ -8361,7 +8440,7 @@ def main() -> int:
         suites = select_pr_tier(suites, tier)
         if args.shard_index is not None:
             tier_suites = suites
-            partition = partition_suites(suites, args.shard_count)[args.shard_index]
+            partition = partition_pr_tier_suites(suites, args.shard_count)[args.shard_index]
             try:
                 local_ids = pr_tier_closure({s.id for s in partition}, {s.id for s in tier_suites},
                                            tier.get("prerequisites"))

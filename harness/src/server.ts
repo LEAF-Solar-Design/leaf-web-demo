@@ -1,6 +1,7 @@
 import {privatePreviewAsset} from "./projectBuild/privatePreviewAsset.js";
 import type {PrivatePreviewReader} from "./projectBuild/privatePreviewAsset.js";
 import type {PrivateBuildLifecycle} from "./projectBuild/privateBuildLifecycle.js";
+import type {DurablePrivateNextViews} from "./projectBuild/durablePrivateNextViews.js";
 /**
  * Harness HTTP server - a thin shell over AuthorLoop. Ports are INJECTED, so the
  * hermetic tests wire fakes and the operator-gated `startReal()` wires the real
@@ -843,6 +844,7 @@ export function createHarness(ports: HarnessPorts, opts?: {
   projectSourceAuthoring?: ProjectSourceAuthorDependencies;
   projectStaticPreviews?: PrivatePreviewReader;
   projectStaticBuilds?: Pick<PrivateBuildLifecycle,"submit"|"observe">;
+  projectStaticViews?: Pick<DurablePrivateNextViews,"observe"|"asset">;
   portfolioProposals?: Pick<PortfolioProposalService, "propose">;
   standardServicesApproval?: {
     dispatchSecret: string;
@@ -1331,7 +1333,8 @@ export function createHarness(ports: HarnessPorts, opts?: {
       if (method === "POST" && ["/internal/project-static-preview/build", "/internal/project-static-preview/status"].includes(path)) {
         const denied = harnessAuthDenial(req, { ...auth, enabled: true });
         if (denied) return send(res, 401, denied);
-        if (!opts?.projectStaticBuilds) return send(res, 503, {error:{code:"preview_unavailable"}});
+        const builds=opts?.projectStaticBuilds, views=opts?.projectStaticViews;
+        if (!builds && !(views && path.endsWith("/status"))) return send(res,503,{error:{code:"preview_unavailable"}});
         try {
           const b = await readJsonBody(req, 16 * 1024, true, false, true);
           const keys = "job_id,organization_id,project_id,receipt_digest,repo_key,source_commit,source_request_id,source_tree,tenant_id,version";
@@ -1347,7 +1350,7 @@ export function createHarness(ports: HarnessPorts, opts?: {
           const witness = {jobId:b.job_id as string,sourceRequestId:b.source_request_id as string,version:b.version as number,receiptDigest:b.receipt_digest,sourceCommit:b.source_commit,sourceTree:b.source_tree};
           if (path.endsWith("/build") && !authoredExecutionEnabled()) return send(res,503,{error:{code:"authored_execution_disabled"}});
           // A status request only observes the existing identity. Never build.
-          const result = path.endsWith("/build") ? await opts.projectStaticBuilds.submit(authority,witness) : await opts.projectStaticBuilds.observe(authority,witness);
+          const result = path.endsWith("/build") ? await builds!.submit(authority,witness) : await (views || builds!).observe(authority,witness);
           res.setHeader("Cache-Control","private, no-store");
           return send(res,200,result);
         } catch { return send(res,409,{error:{code:"preview_unavailable"}}); }
@@ -1356,22 +1359,29 @@ export function createHarness(ports: HarnessPorts, opts?: {
       if (method === "POST" && path === "/internal/project-static-preview/asset") {
         const denied = harnessAuthDenial(req, { ...auth, enabled: true });
         if (denied) return send(res, 401, denied);
-        if (!opts?.projectStaticPreviews) return send(res, 503, {error:{code:"preview_unavailable"}});
+        const views=opts?.projectStaticViews, legacy=opts?.projectStaticPreviews;
+        if (!views && !legacy) return send(res,503,{error:{code:"preview_unavailable"}});
         try {
-          const b = await readJsonBody(req, 16 * 1024, true, true);
-          const keys = "artifact_id,job_id,manifest_sha256,organization_id,path,project_id,repo_key,source_commit,source_tree,tenant_id";
+          const b = await readJsonBody(req, 16 * 1024, true, false, true);
+          const keys = "artifact_id,job_id,manifest_sha256,organization_id,path,project_id,receipt_digest,repo_key,source_commit,source_request_id,source_tree,tenant_id,version";
           if (!isRecord(b) || Object.keys(b).sort().join(",") !== keys) throw new Error();
-          for (const k of ["tenant_id","organization_id","project_id","repo_key","job_id"])
+          for (const k of ["tenant_id","organization_id","project_id","repo_key","job_id","source_request_id"])
             if (typeof b[k] !== "string" || !CANONICAL_UUID.test(b[k] as string)) throw new Error();
           if (typeof b.artifact_id !== "string" || !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(b.artifact_id) ||
               authorityHeader(req,"x-tenant-id") !== b.tenant_id ||
+              !Number.isSafeInteger(b.version) || (b.version as number) < 1 ||
+              typeof b.receipt_digest !== "string" || !/^[0-9a-f]{64}$/.test(b.receipt_digest) ||
               typeof b.source_commit !== "string" || !SHA40.test(b.source_commit) ||
               typeof b.source_tree !== "string" || !SHA40.test(b.source_tree) ||
               typeof b.manifest_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(b.manifest_sha256) ||
               typeof b.path !== "string" || b.path.length > 2048) throw new Error();
-          const asset = await privatePreviewAsset(opts.projectStaticPreviews,
-            {tenantId:b.tenant_id as string,organizationId:b.organization_id as string,projectId:b.project_id as string,repoKey:b.repo_key as string},
-            {jobId:b.job_id as string,artifactId:b.artifact_id as string,sourceCommit:b.source_commit,sourceTree:b.source_tree,manifestSha256:b.manifest_sha256,path:b.path});
+          const authority={tenantId:b.tenant_id as string,organizationId:b.organization_id as string,projectId:b.project_id as string,repoKey:b.repo_key as string};
+          const request={jobId:b.job_id as string,sourceRequestId:b.source_request_id as string,version:b.version as number,receiptDigest:b.receipt_digest,sourceCommit:b.source_commit,sourceTree:b.source_tree};
+          const witness={artifactId:b.artifact_id,manifestSha256:b.manifest_sha256,path:b.path};
+          // Once durable views are supplied, an absent receipt must not fall
+          // back to legacy process-local ready state.
+          const asset=views ? await views.asset(authority,request,witness) : await privatePreviewAsset(legacy!,authority,
+            {jobId:request.jobId,sourceCommit:request.sourceCommit,sourceTree:request.sourceTree,...witness});
           res.setHeader("Cache-Control","private, no-store");res.setHeader("X-Content-Type-Options","nosniff");
           return send(res,200,asset);
         } catch { return send(res,409,{error:{code:"preview_unavailable"}}); }

@@ -732,3 +732,166 @@ def test_flag_off_read_timeout_keeps_single_blocking_post(world, monkeypatch):
     assert "Idempotency-Key" not in calls[0]["headers"]
     assert a.store.exchange["send_protocol"] is None
     assert a.store.exchange["state"] == "outcome_unknown"
+
+
+# X02: real staging-only header and durable single-send fault custody.
+def _fault_staging(monkeypatch):
+    import xbench_solver_fault as fault
+    monkeypatch.setattr(fault.runtime_posture, "_deployed_runtime", lambda: True)
+    monkeypatch.setattr(fault.runtime_posture, "_production_runtime", lambda: False)
+    monkeypatch.setattr(fault.deployment_identity, "deployment_identity",
+                        lambda: {"environment": "staging"})
+    return fault
+
+
+@pytest.mark.parametrize("mode", ["upstream-400", "timeout"])
+def test_x02_fault_requires_both_runtime_and_deployment_identity(monkeypatch, mode):
+    fault = _fault_staging(monkeypatch)
+    assert fault.validate(mode) == mode
+    monkeypatch.setattr(fault.runtime_posture, "_production_runtime", lambda: True)
+    with pytest.raises(GraphValidationError, match="XBENCH_SOLVER_FAULT_UNAVAILABLE"):
+        fault.validate(mode)
+    monkeypatch.setattr(fault.runtime_posture, "_production_runtime", lambda: False)
+    monkeypatch.setattr(fault.runtime_posture, "_deployed_runtime", lambda: False)
+    with pytest.raises(GraphValidationError, match="XBENCH_SOLVER_FAULT_UNAVAILABLE"):
+        fault.validate(mode)
+    monkeypatch.setattr(fault.runtime_posture, "_deployed_runtime", lambda: True)
+    monkeypatch.setattr(fault.deployment_identity, "deployment_identity",
+                        lambda: {"environment": "production"})
+    with pytest.raises(GraphValidationError, match="XBENCH_SOLVER_FAULT_UNAVAILABLE"):
+        fault.validate(mode)
+    assert fault.validate(None) is None
+
+
+@pytest.mark.parametrize("mode", [True, "", "TIMEOUT", "upstream-500", {}, []])
+def test_x02_fault_mode_is_closed(monkeypatch, mode):
+    fault = _fault_staging(monkeypatch)
+    with pytest.raises(GraphValidationError, match="XBENCH_SOLVER_FAULT_INVALID"):
+        fault.validate(mode)
+
+
+def test_x02_fault_context_resets_after_exception(monkeypatch):
+    fault = _fault_staging(monkeypatch)
+    assert fault.current_mode() is None
+    with pytest.raises(RuntimeError):
+        with fault.request_mode("timeout"):
+            assert fault.current_mode() == "timeout"
+            with fault.request_mode("upstream-400"):
+                assert fault.current_mode() == "upstream-400"
+            assert fault.current_mode() == "timeout"
+            raise RuntimeError("synthetic scope exit")
+    assert fault.current_mode() is None
+
+
+def test_x02_fault_in_durable_identity_and_replay(admitted, monkeypatch):
+    fault = _fault_staging(monkeypatch)
+    with fault.request_mode("timeout"):
+        assert request(admitted, preview=False)["status_code"] == 202
+    saved = admitted.accepted[-1][-1]
+    assert saved["execution_context"]["xbench_solver_fault"] == "timeout"
+    monkeypatch.setattr(jobs, "get_project_graph_job_by_key", lambda *args, **kwargs:
+        {"job_id": "saved-fault", "deleted_at": None, **saved})
+    count = len(admitted.accepted)
+    with fault.request_mode("timeout"):
+        assert request(admitted, preview=False)["content"]["job_id"] == "saved-fault"
+    assert len(admitted.accepted) == count
+    with fault.request_mode("upstream-400"):
+        conflict = request(admitted, preview=False)
+    assert conflict["content"]["error"]["reason_code"] == "SIP_R4_IDEMPOTENCY_CONFLICT"
+    assert request(admitted, preview=False)["content"]["error"]["reason_code"] == "SIP_R4_IDEMPOTENCY_CONFLICT"
+
+
+@pytest.mark.parametrize("mode,cause,state", [("upstream-400", "CLOUD_REQUEST_REJECTED", "refused"),
+                                              ("timeout", "solve_outcome_unknown", "outcome_unknown")])
+def test_x02_fault_real_adapter_and_reconcile_no_second_send(world, monkeypatch, mode, cause, state):
+    fault = _fault_staging(monkeypatch)
+    a = world
+    a.row["execution_context"]["xbench_solver_fault"] = mode
+    jobs._graph_ids(a.row)  # The real closed durable-context validator admits only the enum.
+    monkeypatch.setattr(solve, "SOLVE_ASYNC_PROTOCOL_ENABLED", True)
+    monkeypatch.setattr(cloud, "post_stringer", _blocking_transport)
+    monkeypatch.setattr(requests, "post", lambda *args, **kwargs:
+                        pytest.fail("fault must not contact a provider"))
+    calls = []
+    real_post = fault.Transport.post
+    def post(self, *args, **kwargs):
+        assert a.store.exchange["state"] == "sending"
+        calls.append(self.mode)
+        return real_post(self, *args, **kwargs)
+    monkeypatch.setattr(fault.Transport, "post", post)
+    before = deepcopy((a.s.versions, a.s.writes))
+    for attempt in [1, 2]:
+        a.row["attempt"] = attempt
+        with pytest.raises(CloudError) as exc:
+            solve.prepare_job(a.row, a.guard)
+        assert exc.value.classification == cause
+        assert service._preparation_error(exc.value)["reason_code"] == cause
+    assert a.store.exchange["state"] == state
+    assert a.store.exchange["classification"] == "synthetic"
+    assert a.store.exchange["send_protocol"] is None
+    assert calls == [mode] and a.store.events.count("begin_send") == 1
+    assert (a.s.versions, a.s.writes) == before and not a.calls
+
+
+def test_x02_stored_fault_cannot_activate_in_production(world, monkeypatch):
+    fault = _fault_staging(monkeypatch)
+    world.row["execution_context"]["xbench_solver_fault"] = "timeout"
+    monkeypatch.setattr(fault.runtime_posture, "_production_runtime", lambda: True)
+    with pytest.raises(GraphValidationError, match="XBENCH_SOLVER_FAULT_UNAVAILABLE"):
+        solve.prepare_job(world.row, world.guard)
+    assert world.store.events == [] and not world.calls
+
+
+@pytest.mark.parametrize("value", [True, "invalid", None])
+def test_x02_durable_fault_context_rejects_invalid_enum(world, value):
+    world.row["execution_context"]["xbench_solver_fault"] = value
+    from leaf_platform.project_graph_store import ProjectContextError
+    with pytest.raises(ProjectContextError, match="SIP_R4_JOB_BINDING_MISMATCH"):
+        jobs._graph_ids(world.row)
+
+
+@pytest.mark.parametrize("auth,mode,status", [(True, "timeout", 202),
+    (False, "timeout", 403), (True, "invalid", 403)])
+def test_x02_header_route_preserves_auth_and_durable_context(case, monkeypatch, auth, mode, status):
+    fault = _fault_staging(monkeypatch)
+    for lane in routes.lane.__wrapped__(monkeypatch):
+        monkeypatch.setattr(deps, "auth_live", lambda: auth)
+        monkeypatch.setattr(cloud, "resolve_grant", lambda ref, tenant: CloudGrant(tenant, "t1"))
+        value = ready_graph(case[0]);lane.s.set_parent(b3.embedded(value))
+        body = {"tool": solve.TOOL_NAME, "dwg": str(lane.s.parent.version_id),
+            "params": {"grant_ref": "g1", "request": case[1]}, "solve_context": solve_context(value),
+            "catalog_digest": deps.catalog_tool_digest(lane.tools[solve.TOOL_NAME])}
+        response = lane.client.post("/api/run", json=body,
+            headers={**routes.headers(lane), fault.HEADER: mode})
+        assert response.status_code == status, response.text
+        if status == 202:
+            assert lane.a.accepted[-1][-1]["execution_context"]["xbench_solver_fault"] == mode
+        else:
+            assert not lane.a.accepted
+        assert fault.current_mode() is None
+
+
+@pytest.mark.parametrize("kind", ["production", "local", "missing_project", "conversation", "wrong_tool", "invalid_identity"])
+def test_x02_fault_header_cannot_escape_scope(case, monkeypatch, kind):
+    fault = _fault_staging(monkeypatch)
+    for lane in routes.lane.__wrapped__(monkeypatch):
+        monkeypatch.setattr(deps, "auth_live", lambda: True)
+        body = {"tool": solve.TOOL_NAME, "dwg": str(lane.s.parent.version_id),
+                "params": {}, "catalog_digest": deps.catalog_tool_digest(lane.tools[solve.TOOL_NAME])}
+        headers = {**routes.headers(lane), fault.HEADER: "timeout"}
+        if kind == "production":
+            monkeypatch.setattr(fault.runtime_posture, "_production_runtime", lambda: True)
+        elif kind == "local":
+            monkeypatch.setattr(fault.runtime_posture, "_deployed_runtime", lambda: False)
+        elif kind == "missing_project":
+            headers = {key: value for key, value in headers.items() if key.lower() != "x-project-id"}
+        elif kind == "conversation":
+            headers.update({"X-Authority-Session-Id": "session", "X-Authority-Turn-Id": "turn"})
+        elif kind == "wrong_tool":
+            body["tool"] = "solar-settings"
+        else:
+            monkeypatch.setattr(fault.deployment_identity, "deployment_identity", lambda:
+                (_ for _ in ()).throw(ValueError("unattested deployment")))
+        response = lane.client.post("/api/run", json=body, headers=headers)
+        assert response.status_code == 403, response.text
+        assert not lane.a.accepted and fault.current_mode() is None

@@ -56,6 +56,63 @@ def assert_no_receipts(cli):
     assert not cli["receipt"].parent.exists()
 
 
+@pytest.mark.parametrize("options", [
+    {},
+    {"mode": "gate", "candidate": SHA, "empty": "", "equals": "a=b"},
+    {"a" + "0_" * 15 + "z": "é" * 256},
+    {"key" + str(n): str(n) for n in range(16)},
+])
+def test_options_reach_bench_and_receipt(cli, options):
+    cli["module"].write_text(
+        "import json\nfrom xbench_core import Step\n"
+        "def run(ctx):\n"
+        "    assert type(ctx.options) is dict\n"
+        "    return [Step(1, 'PASS', json.dumps(ctx.options, ensure_ascii=False))]\n",
+        encoding="utf-8",
+    )
+    args = cli["args"] + [arg for key, value in options.items()
+                          for arg in ("--opt", key + "=" + value)]
+    assert grade.main(args, opener=healthy) == 0
+    value = json.loads(cli["receipt"].read_text(encoding="utf-8"))
+    assert json.loads(value["steps"][0]["evidence"]) == options
+    assert value["options"] == options
+    assert list(value)[-2:] == ["limits", "options"]
+
+
+def test_context_options_default_is_independent(cli):
+    args = ("X01", {}, "http://localhost:8000", cli["receipt"].parent, SHA, [])
+    first = core.BenchContext(*args)
+    second = core.BenchContext(*args)
+    assert first.options == second.options == {}
+    first.options["mode"] = "gate"
+    assert second.options == {}
+
+
+@pytest.mark.parametrize("options", [
+    ["missing_equals"],
+    ["=value"],
+    ["Mode=gate"],
+    ["1mode=gate"],
+    ["bad-key=value"],
+    ["møde=value"],
+    ["mode\n=value"],
+    ["a" * 33 + "=value"],
+    ["mode=" + "x" * 257],
+    ["mode=gate", "mode=other"],
+    ["key" + str(n) + "=value" for n in range(17)],
+] + [["mode=" + char] for char in ("\x00", "\t", "\n", "\r", "\x1f", "\x7f", "\x85", "\x9f")])
+def test_invalid_options(cli, capsys, options):
+    def forbidden(url, timeout):
+        pytest.fail("health called for invalid options")
+
+    args = cli["args"] + [arg for option in options for arg in ("--opt", option)]
+    assert grade.main(args, opener=forbidden) == 5
+    captured = capsys.readouterr()
+    assert len(captured.err.splitlines()) == 1
+    assert captured.out == ""
+    assert_no_receipts(cli)
+
+
 @pytest.mark.parametrize("bad", ["X11", "x01", "unknown"])
 def test_invalid_bench(cli, capsys, bad):
     cli["args"][0] = bad

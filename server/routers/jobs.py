@@ -798,7 +798,8 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
         authority_session_id: Optional[str] = Header(
             default=None, alias="X-Authority-Session-Id"),
         authority_turn_id: Optional[str] = Header(
-            default=None, alias="X-Authority-Turn-Id")):
+            default=None, alias="X-Authority-Turn-Id"),
+        x_xbench_solver_fault: Optional[str] = Header(default=None, alias="X-XBench-Solver-Fault")):
     """Submit a tool run as a durable background job (202), or block with ?wait=1.
 
     OPTIONAL project context: when the caller sends BOTH ``X-Org-Id`` and
@@ -830,6 +831,22 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
 
     session_id = authority_session_id if isinstance(authority_session_id, str) else None
     turn_id = authority_turn_id if isinstance(authority_turn_id, str) else None
+    import xbench_solver_fault
+    fault_mode = x_xbench_solver_fault if isinstance(x_xbench_solver_fault, str) else None
+    if fault_mode is not None:
+        try:
+            xbench_solver_fault.validate(fault_mode)
+            if (not deps.auth_live() or session_id is not None or turn_id is not None
+                    or req.tool != "solar-solve-proposal"
+                    or not isinstance(x_org_id, str) or not isinstance(x_project_id, str)):
+                raise GraphValidationError("XBENCH_SOLVER_FAULT_SCOPE_REQUIRED")
+        except GraphValidationError as exc:
+            body = with_envelope_fields({"ok": False, "error": error_obj(
+                ErrorCode.FORBIDDEN, "The staging solver fault for this solve is unavailable.",
+                retryable=False)})
+            body["error"].update(reason_code=exc.code,
+                                 next_action="Use an authenticated staging project solve.")
+            return JSONResponse(status_code=403, content=body)
     binding = None
     if session_id is not None or turn_id is not None:
         if session_id is None or turn_id is None:
@@ -1026,15 +1043,21 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
     if (solar_project_admission.project_runs_enabled()
             and (isinstance(x_org_id, str) or isinstance(x_project_id, str))
             and tool.get("name") in capability_catalog.SOLAR_CAPABILITIES):
-        response = _project_solar_admission(
-            tool, tenant_id, req, x_org_id, x_project_id, authorization,
-            delegated_checkout if delegated_checkout is not None else x_checkout_capability,
-            idempotency_key=idempotency_key, preview=False,
-            **({"expected_intake_sha256": selected_binding["intake_sha256"]}
-               if delegated_checkout is not None else {}))
+        with xbench_solver_fault.request_mode(fault_mode):
+            response = _project_solar_admission(
+                tool, tenant_id, req, x_org_id, x_project_id, authorization,
+                delegated_checkout if delegated_checkout is not None else x_checkout_capability,
+                idempotency_key=idempotency_key, preview=False,
+                **({"expected_intake_sha256": selected_binding["intake_sha256"]}
+                   if delegated_checkout is not None else {}))
         if wait and response.status_code == 202:
             return _wait_project_solar(response, tenant_id)
         return response
+
+    if fault_mode is not None:
+        return error_response(ErrorCode.FORBIDDEN,
+            "The staging solver fault requires the canonical project solve route.",
+            retryable=False, status_code=403)
 
     # ENTITLEMENT GATE (§17): the tenant's tier must grant the capability this tool needs
     # (run_write for a drawing.write tool, else run_read). Enforced HERE in the execution

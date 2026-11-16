@@ -457,6 +457,8 @@ def _prepare_split(job, context, plan, exchange, scope, lease, guard):
 
 
 def prepare_job(job, guard):
+    import xbench_solver_fault
+    solver_fault = xbench_solver_fault.validate(job["execution_context"].get("xbench_solver_fault"))
     deadline = time.monotonic() + SOLVE_POLL_BUDGET_SECONDS
     from solar_project_jobs import _job_context
     store, db = _store(), platform_link.platform_db()
@@ -464,7 +466,9 @@ def prepare_job(job, guard):
     plan, (scope, lease) = _plan(job, context), _authority(job)
     if SOLVE_CLASSIFICATION not in ("live", "synthetic"):
         raise GraphValidationError("INVALID_SOLVE_CLASSIFICATION")
-    reservation = _reservation(job, context, plan, SOLVE_CLASSIFICATION)
+    if solver_fault is not None and "split_binding" in plan:
+        raise GraphValidationError("XBENCH_SOLVER_FAULT_SPLIT_UNSUPPORTED")
+    reservation = _reservation(job, context, plan, "synthetic" if solver_fault is not None else SOLVE_CLASSIFICATION)
     try:
         exchange = store.get_exchange(scope, lease)
     except store.ExchangeNotFound:
@@ -496,7 +500,7 @@ def prepare_job(job, guard):
             if grant is None:
                 grant = cloud.resolve_grant(reservation["grant_ref"], str(context.organization_id))
             options = {}
-            if resume.action == "send_ready" and SOLVE_ASYNC_PROTOCOL_ENABLED:
+            if resume.action == "send_ready" and SOLVE_ASYNC_PROTOCOL_ENABLED and solver_fault is None:
                 options = {"send_protocol": "async-idempotent-v1",
                            "send_principal_sha256": cloud.grant_principal_sha256(grant)}
                 async_custody = True
@@ -512,7 +516,9 @@ def prepare_job(job, guard):
                 if raw is None:
                     return None
             else:
-                raw = cloud.post_stringer(request, grant, preserve_uncertainty=True)
+                options = ({"_transport": xbench_solver_fault.Transport(solver_fault)}
+                           if solver_fault is not None else {})
+                raw = cloud.post_stringer(request, grant, preserve_uncertainty=True, **options)
         except cloud.CloudError as exc:
             if guard.lost:
                 return None
