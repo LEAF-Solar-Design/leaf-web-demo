@@ -1296,7 +1296,8 @@ def test_provenance_aggregate_subprocess_bytes_deterministic_with_simultaneous_c
 
 
 def inverter_evidence():
-    return dict(oracle_panels=[dict(string_id="A", panels=10),dict(string_id="B", panels=14)],
+    return dict(oracle_inverter_ids=["INV-A"], oracle_inverter_owners=[dict(inverter_id="INV-A",grid_id="g")],
+                oracle_string_owners=[dict(string_id=k,grid_id="g") for k in ("A","B")], oracle_panels=[dict(string_id="A", panels=10),dict(string_id="B", panels=14)],
                 oracle_dc_power=[dict(string_id="A", kw_dc="4"),dict(string_id="B", kw_dc="5.6")], inverter_loads=dict(strings={"INV-A":2}, optimizers={"INV-A":12}, panels={"INV-A":24}, kw_dc={"INV-A":"9.6"}),
                 **{field: [dict(inverter_id="INV-A", grid_id="g")]
                  for field in ("saved_inverters", "before_inverters", "reopened_inverters")},
@@ -3517,6 +3518,9 @@ def align_two_grid_inverters(envelope):
     optimizer_counts = [row["optimizers"] for row in evidence["saved_strings"]]
     evidence["inverter_loads"] = dict(strings={"INV-A":1,"INV-B":1},
         optimizers=dict(zip(("INV-A","INV-B"),optimizer_counts)), panels={"INV-A":10,"INV-B":14}, kw_dc={"INV-A":"4","INV-B":"5.6"})
+    evidence["oracle_inverter_ids"] = ["INV-A","INV-B"]
+    evidence["oracle_inverter_owners"] = [dict(inverter_id="INV-A",grid_id="east"),dict(inverter_id="INV-B",grid_id="west")]
+    evidence["oracle_string_owners"] = [dict(string_id="A",grid_id="east"),dict(string_id="B",grid_id="west")]
 
 
 def equal_count_ownership_envelope():
@@ -4346,6 +4350,7 @@ def three_string_envelope():
     evidence["inverter_loads"]["strings"] = {"INV-A":1,"INV-B":2}
     evidence["inverter_loads"]["optimizers"] = {"INV-A":5,"INV-B":7}
     evidence["oracle_panels"], evidence["oracle_dc_power"] = deepcopy(panels), deepcopy(power)
+    evidence["oracle_string_owners"].append(dict(string_id="C",grid_id="west"))
     return envelope
 
 
@@ -4848,6 +4853,8 @@ def connection_envelope():
     evidence['csv_text'] = csv_fixture(evidence['view_rows'])
     evidence['inverter_loads'] = dict(strings={'INV-A':1, 'INV-B':1}, optimizers={'INV-A':5, 'INV-B':7},
         panels={'INV-A':10, 'INV-B':14}, kw_dc={'INV-A':'4', 'INV-B':'5.6'})
+    evidence["oracle_inverter_ids"] = ["INV-A","INV-B"]
+    evidence["oracle_inverter_owners"] = [dict(inverter_id=k,grid_id="g") for k in ("INV-A","INV-B")]
     return envelope
 
 
@@ -6018,3 +6025,133 @@ def test_bound_aggregate_shared_owner_connection_containers_are_unchanged_and_is
         for stage in ('saved','before','reopened'):
             assert evidence[stage+'_assignments'] is connections
             assert evidence[stage+'_inverters'] is inverters
+
+
+def test_composed_independent_owner_balanced_swaps_and_absent_oracle():
+    envelope = equal_count_ownership_envelope()
+    baseline = reconcile_seven_steps_json(json.dumps(envelope))
+    assert baseline['verdict'] == 'PASS'
+    evidence = envelope['assurance']['evidence']
+    for field in ('string_assignments','before_string_assignments','reopened_string_assignments'):
+        rows = envelope['grid'][field]
+        rows[0]['grid_id'],rows[1]['grid_id'] = 'west','east'
+    for field in ('saved_inverters','before_inverters','reopened_inverters'):
+        evidence[field][0]['grid_id'],evidence[field][1]['grid_id'] = 'west','east'
+    result = reconcile_seven_steps_json(json.dumps(envelope))
+    assert result['cross_topology']['verdict'] == 'PASS'
+    checks = result['independent_owners']['checks']
+    assert checks['strings']['mismatch_count'] == checks['inverters']['mismatch_count'] == 2
+    assert checks['inverter_ids']['verdict'] == 'PASS' and result['verdict'] == 'FAIL'
+    evidence['oracle_string_owners'] = None
+    missing = reconcile_seven_steps_json(json.dumps(envelope))
+    assert missing['verdict'] == 'UNREADABLE'
+    assert missing['independent_owners']['checks']['inverters'] == checks['inverters']
+
+
+def test_composed_independent_ids_reject_substituted_unconnected_inverter():
+    envelope = connection_envelope()
+    evidence = envelope['assurance']['evidence']
+    evidence['oracle_inverter_ids'].append('empty-old')
+    evidence['oracle_inverter_owners'].append(dict(inverter_id='empty-old',grid_id='g'))
+    for field in ('saved_inverters','before_inverters','reopened_inverters'):
+        evidence[field].append(dict(inverter_id='empty-new',grid_id='g'))
+    result = reconcile_seven_steps_json(json.dumps(envelope))
+    check = result['independent_owners']['checks']['inverter_ids']
+    assert check['verdict'] == 'FAIL'
+    assert check['missing_ids'] == ['empty-old'] and check['foreign_ids'] == ['empty-new']
+
+
+@pytest.mark.parametrize('label',['string','inverter'])
+def test_exhaustive_independent_owner_models(label):
+    from itertools import product
+    from benches import x05_reconcile as m
+    compare = m.compare_string_grid_owners if label=='string' else m.compare_inverter_grid_owners
+    key = label+'_id'
+    for old in product(['e','w'],repeat=3):
+        for new in product(['e','w'],repeat=3):
+            oracle = [{key:k,'grid_id':v} for k,v in zip(['A','B','C'],old)]
+            saved = [{key:k,'grid_id':v} for k,v in zip(['A','B','C'],new)]
+            original = deepcopy((oracle,saved))
+            result = compare(['e','w'],['A','B','C'],oracle,saved)
+            count = sum(a!=b for a,b in zip(old,new))
+            assert result['mismatch_count'] == count and result['verdict'] == ('FAIL' if count else 'PASS')
+            assert (oracle,saved) == original
+    candidates = [('A',),('B',),('C',),('A','B'),('A','C'),('B','C'),('A','B','C')]
+    for left in candidates:
+        for right in candidates:
+            result = m.compare_inverter_id_sets(list(left),list(right))
+            assert result['counts'] == dict(missing=len(set(left)-set(right)),foreign=len(set(right)-set(left)))
+
+
+@pytest.mark.parametrize('label',['string','inverter'])
+@pytest.mark.parametrize('side',['oracle','saved'])
+@pytest.mark.parametrize('kind',['none','container','duplicate','missing','foreign','wide'])
+def test_independent_owner_schema_mutations_bounded_sanitized_unchanged(label,side,kind):
+    from benches import x05_reconcile as m
+    compare = m.compare_string_grid_owners if label=='string' else m.compare_inverter_grid_owners
+    key = label+'_id'
+    good = [{key:'A','grid_id':'e'},{key:'B','grid_id':'w'}]
+    bad = deepcopy(good)
+    if kind=='none': bad = None
+    elif kind=='container': bad = 'private-canary'
+    elif kind=='duplicate': bad.append(deepcopy(bad[0]))
+    elif kind=='missing': bad.pop()
+    elif kind=='foreign': bad[0]['grid_id'] = 'foreign'
+    else: bad[0][key] = 'x'*129
+    left,right = (bad,good) if side=='oracle' else (good,bad)
+    original = deepcopy((left,right))
+    result = compare(['e','w'],['A','B'],left,right)
+    assert result['verdict'] != 'PASS'
+    text = serialize_result(result)
+    assert len(text)<2500 and 'private-canary' not in text and 'x'*129 not in text
+    assert (left,right) == original
+
+
+def test_independent_owner_linear_work_caps_and_stable_permutations(monkeypatch):
+    from random import Random
+    from benches import x05_reconcile as m
+    work = []
+    class CountedSet(set):
+        def __contains__(self,key):
+            work.append(1)
+            return super().__contains__(key)
+    monkeypatch.setattr(m,'set',CountedSet,raising=False)
+    for label,compare in [('string',m.compare_string_grid_owners),('inverter',m.compare_inverter_grid_owners)]:
+        key = label+'_id'
+        for size in (10,100,1000):
+            ids = [f'id{i:04}' for i in range(size)]
+            oracle = [{key:k,'grid_id':'east'} for k in ids]
+            saved = [{key:k,'grid_id':'west'} for k in ids]
+            original = deepcopy((oracle,saved))
+            work.clear()
+            baseline = compare(['east','west'],ids,oracle,saved)
+            assert len(work) == 6*size and baseline['mismatch_count'] == size
+            assert len(baseline['examples']) == min(size,MAX_STRING_EXAMPLES)
+            for seed in range(2):
+                left,right = deepcopy((oracle,saved))
+                Random(seed).shuffle(left)
+                Random(seed+1).shuffle(right)
+                assert compare(['west','east'],ids[::-1],left,right) == baseline
+            assert (oracle,saved) == original
+            substituted = [f'new{i:04}' for i in range(size)]
+            sets = m.compare_inverter_id_sets(ids,substituted)
+            assert sets['counts'] == dict(missing=size,foreign=size)
+            assert len(sets['missing_ids']) == len(sets['foreign_ids']) == min(size,MAX_STRING_EXAMPLES)
+            assert sets == m.compare_inverter_id_sets(ids[::-1],substituted[::-1])
+
+
+def test_independent_inverter_id_set_linear_index_builds(monkeypatch):
+    from benches import x05_reconcile as m
+    sizes = []
+    class CountedSet(set):
+        def __init__(self, values=()):
+            sizes.append(len(values))
+            super().__init__(values)
+    monkeypatch.setattr(m,'set',CountedSet,raising=False)
+    for size in (10,100,1000):
+        oracle = [f'old{i:04}' for i in range(size)]
+        saved = [f'new{i:04}' for i in range(size)]
+        sizes.clear()
+        result = m.compare_inverter_id_sets(oracle,saved)
+        assert sum(sizes) == 4*size
+        assert result['counts'] == dict(missing=size,foreign=size)

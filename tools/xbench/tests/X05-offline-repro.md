@@ -2150,3 +2150,42 @@ Expected three PASS results followed by FAIL `string_grid_owners_mismatch` and
 FAIL `inverter_grid_owners_mismatch`, each with two mismatches. Missing oracle
 owner rows are UNREADABLE. Report extraction must supply independently bound
 owner identities and grid mappings for live acceptance.
+# Independent owner recovery in X05
+
+Composition now requires `oracle_string_owners`, `oracle_inverter_owners` and
+`oracle_inverter_ids` in seven-step evidence. Its `independent_owners` result
+retains the three comparisons. This standalone replay repairs balanced owner
+swaps, missing oracle owners and an unconnected-device substitution separately.
+
+```powershell
+@'
+import sys
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+grids, strings = ['east','west'], ['A','B']
+oracle_ids, saved_ids = ['I1','I2','empty-old'], ['I1','I2','empty-new']
+oracle_strings = [dict(string_id='A',grid_id='east'),dict(string_id='B',grid_id='west')]
+oracle_devices = [dict(inverter_id=k,grid_id=v) for k,v in zip(oracle_ids,['east','west','east'])]
+saved_strings = [dict(string_id='A',grid_id='west'),dict(string_id='B',grid_id='east')]
+saved_devices = [dict(inverter_id=k,grid_id=v) for k,v in zip(saved_ids,['west','east','east'])]
+for stage in ('missing owners','string owners restored','string owners repaired','device identity repaired','device owners repaired'):
+    supplied = None if stage == 'missing owners' else oracle_strings
+    if stage == 'string owners repaired': saved_strings = deepcopy(oracle_strings)
+    if stage == 'device identity repaired':
+        saved_ids[-1] = 'empty-old'
+        saved_devices[-1]['inverter_id'] = 'empty-old'
+    if stage == 'device owners repaired': saved_devices = deepcopy(oracle_devices)
+    checks = [m.compare_string_grid_owners(grids,strings,supplied,saved_strings),
+              m.compare_inverter_grid_owners(grids,oracle_ids,oracle_devices,saved_devices),
+              m.compare_inverter_id_sets(oracle_ids,saved_ids)]
+    print(stage,*(check['verdict'] for check in checks))
+    print(*(check['reason'] for check in checks))
+assert all(check['verdict'] == 'PASS' for check in checks)
+'@ | python -P -
+```
+
+Verdict triples progress UNREADABLE/FAIL/FAIL, FAIL/FAIL/FAIL, PASS/FAIL/FAIL,
+PASS/FAIL/PASS and PASS/PASS/PASS. Identity repair leaves balanced device-owner
+swaps visible. Actual report producers must independently bind oracle identities
+and owner maps to the design before live acceptance.
