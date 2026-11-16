@@ -32,7 +32,9 @@ def audit_history(store, *, customer_key):
     issues = {'missing_profile': int(root is None), 'empty_chain': int(root is not None and not versions), 'version_gaps': gaps,
               'invalid_versions': sum(type(row['version']) is not int or not 1 <= row['version'] <= MAX_PROFILE_VERSION for row in versions),
               'foreign_version_profiles': sum(row['profile_id'] != profile_id for row in versions),
-              'dangling_pin_versions': sum(row['version'] not in present for row in pins),
+              'dangling_pin_versions': sum(type(row['version']) is not int
+                                          or not 1 <= row['version'] <= MAX_PROFILE_VERSION
+                                          or row['version'] not in present for row in pins),
               'foreign_pin_profiles': sum(row['profile_id'] != profile_id for row in pins)}
     return {'schema': 'leaf.x07.profile-history-audit.v1', 'customer_key': customer_key,
             'profile_found': root is not None, 'version_count': len(versions), 'pin_count': len(pins),
