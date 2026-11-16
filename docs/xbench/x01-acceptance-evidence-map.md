@@ -75,7 +75,7 @@ source bytes. The array and oblique tests are explicit entries in the regression
 manifest; benchmark and comparison helper CLIs above remain explicit selections.
 No script is silently discovered for execution.
 
-The fixed test inventory contains 22 explicit `test_*.py` entries, including
+The fixed test inventory contains 25 explicit `test_*.py` entries, including
 `test_geometry_matching_oracle.py`, `test_fill_tag_numeric_failures.py`,
 `test_case_work_limits.py`, `test_source_read_mutation.py`,
 `test_regression_inventory.py` and `test_report_comparison_algebra.py`.
@@ -129,8 +129,9 @@ and no recursive default invocation of the regression entrypoint.
 
 ## Runtime and verification limits
 
-The fixed defaults contain 22 explicitly declared `test_*.py` scripts plus three
-checker self-tests and runner, validator, source-custody and benchmark self-tests.
+The fixed defaults contain 25 explicitly declared `test_*.py` scripts plus three
+checker self-tests and runner, validator, source-custody,
+two benchmark self-tests and the evidence-bundle inspector self-test.
 Execution is sequential, using absolute `sys.executable` and script argv paths,
 with no shell. Script paths and fixture lookup are independent of the caller's
 working directory; relative `--output` paths remain relative to that caller.

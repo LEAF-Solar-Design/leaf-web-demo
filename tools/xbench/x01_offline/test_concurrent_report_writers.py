@@ -40,16 +40,6 @@ replace = runner.os.replace
 staged = None
 sharing_refusal = None
 
-def read_complete():
-    report = json.loads(path.read_text(encoding="utf-8"))
-    token = report["token"]
-    allowed = {"old"} | {"%d:%d" % (item, turn)
-                         for item in range(3) for turn in range(rounds)}
-    if token not in allowed or report != dict(
-            token=token, padding=(token + "|") * 4096,
-            evidence_kind="synthetic_offline", live_grade=False):
-        raise AssertionError("incomplete or unexpected report")
-
 def parked_replace(source, destination):
     global staged, sharing_refusal
     staged = Path(source)
@@ -82,12 +72,11 @@ try:
             except PermissionError:
                 if fail or sharing_refusal is None:
                     raise
-                read_complete()
+                # Parent validates the destination after all round outcomes.
                 outcome = dict(status="sharing-refused", diagnostic=sharing_refusal)
             except OSError as error:
                 if not fail or str(error) != "injected before replace":
                     raise
-                read_complete()
                 outcome = dict(status="injected-failure", diagnostic=str(error))
                 (signals / "failure-observed").touch()
             else:
