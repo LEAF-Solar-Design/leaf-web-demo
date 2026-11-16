@@ -26,6 +26,7 @@ from benches.x05_reconcile import (METRICS, TABLE_COLUMNS, check_discrepancies,
     aggregate_seven_steps_json, reconcile_bound_seven_steps,
     reconcile_bound_seven_steps_json, aggregate_bound_seven_steps,
     aggregate_bound_seven_steps_json,
+    diff_snapshot_rows,
     compare_csv_view, compare_recommendations, compare_snapshots, compare_strings, compare_table)
 
 
@@ -2999,3 +3000,120 @@ def test_exact_serializer_node_budget_below_character_and_depth_limits():
             with pytest.raises(ValueError,match="^json_result_too_large$"):
                 serialize_result(value)
         assert value==preserved
+
+
+def test_snapshot_diff_exact_totals_capped_examples_and_permutation_invariance():
+    _,table=table_fixture()
+    before=dict(strings=[dict(string_id=f"S{i:03}",optimizers=5) for i in range(60)],table_rows=table)
+    reopened=deepcopy(before)
+    for row in reopened["strings"][:30]:
+        row["optimizers"]=6
+    reopened["strings"]=reopened["strings"][5:]+[dict(string_id="new",optimizers=5)]
+    reopened["table_rows"][0]["studio"]+=1
+    preserved=deepcopy((before,reopened))
+    result=diff_snapshot_rows(before,reopened)
+    assert result["verdict"]=="FAIL"
+    assert result["counts"]==dict(added=1,removed=5,changed=25,metrics=1)
+    assert len(result["string_examples"])==MAX_STRING_EXAMPLES and result["metrics"]==["panels"]
+    assert result["string_examples"][0]==dict(string_id="S000",before=5,reopened=None)
+    reversed_rows=deepcopy(reopened)
+    reversed_rows["strings"].reverse()
+    reversed_rows["table_rows"].reverse()
+    assert diff_snapshot_rows(before,reversed_rows)==result
+    assert (before,reopened)==preserved
+    assert diff_snapshot_rows(before,before)["verdict"]=="PASS"
+    for invalid in (None,{},dict(strings=[],table_rows=table)):
+        assert diff_snapshot_rows(before,invalid)["reason"]=="snapshot_diff_rows_unreadable"
+
+
+def test_small_grid_exhaustive_independent_reference_verdicts_and_totals():
+    from collections import Counter
+    from itertools import product
+    options=[([],"SOLAREDGE_GRID_UNMATCHED"),([],"SOLAREDGE_GRID_AMBIGUOUS"),([],None),
+             (["p1"],None),(["p2"],None),(["foreign"],None),(["p1","p1"],None),(["p1"],"SOLAREDGE_GRID_UNMATCHED")]
+    choices=[dict(grid_id=key,matches=matches,cause=cause) for key in ("g1","g2","foreign") for matches,cause in options]
+    for first,second in product(choices,repeat=2):
+        rows=[first,second]
+        for require_all in (False,True):
+            result=compare_grid_correspondence(["g1","g2"],["p1","p2"],rows,require_all_matched=require_all)
+            if any(not row["matches"] and row["cause"] is None for row in rows):
+                assert result["verdict"]=="UNREADABLE"
+                continue
+            grid_counts=Counter(row["grid_id"] for row in rows)
+            assignments=[group for row in rows for group in row["matches"]]
+            group_counts=Counter(assignments)
+            total=sum(row["grid_id"] not in ["g1","g2"] for row in rows)
+            total+=sum(count-1 for count in grid_counts.values())
+            total+=sum(key not in grid_counts for key in ("g1","g2"))
+            total+=sum(bool(row["matches"]) and (len(row["matches"])!=1 or row["cause"] is not None) for row in rows)
+            total+=sum(group not in ["p1","p2"] for group in assignments)
+            total+=sum(count-1 for count in group_counts.values())
+            total+=sum(not row["matches"] and require_all for row in rows)
+            assert result["verdict"]==("FAIL" if total else "PASS")
+            assert result["error_count"]==total
+
+
+def test_conflicting_duplicate_discrepancy_records_reject_in_every_order_and_keep_other_stages():
+    evidence=complete_evidence()
+    baseline=reconcile_offline(evidence)
+    record=dict(fixture_id="synthetic",metric="panels",delta=1,name="revision-a",frozen_at="2026-11-15T12:00:00Z")
+    conflicts=[record,dict(record,delta=2,name="revision-b"),dict(record,frozen_at="2026-11-15T12:30:00Z")]
+    for order in permutations(conflicts):
+        changed=deepcopy(evidence)
+        changed["discrepancy_records"]=list(order)
+        preserved=deepcopy(changed)
+        observed=reconcile_offline(changed)
+        assert observed["verdict"]=="UNREADABLE" and observed["stages"]["policy"]["reason"]=="duplicate_discrepancy_record"
+        for stage in baseline["stages"]:
+            if stage!="policy":
+                assert observed["stages"][stage]==baseline["stages"][stage]
+        assert changed==preserved
+
+
+def all_cli_payloads():
+    modes=[None,"--aggregate","--provenance","--assurance","--provenance-aggregate","--assurance-aggregate",
+           "--seven-step","--seven-step-aggregate","--seven-step-bound","--seven-step-bound-aggregate"]
+    return [(mode,framed_payload(mode)) for mode in modes]
+
+
+def test_cli_ascii_bytes_are_independent_of_output_encoding_and_utf8_mode(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from benches import x05_reconcile as module
+    for mode,payload in all_cli_payloads():
+        # Keep supplied identities intact and add a multibyte non-BMP string ID
+        # consistently to all synthetic snapshots so it reaches comparison.
+        def replace(value):
+            if type(value) is str:
+                return value.replace('"A"','"\\ud83d\\ude42"')
+            return value
+        text=replace(json.dumps(payload))
+        outputs=[]
+        for encoding,utf8 in (("ascii","0"),("utf-16","0"),("utf-8","1")):
+            args=[sys.executable,"-P",str(Path(module.__file__).resolve())]+([mode] if mode else [])
+            run=subprocess.run(args,input=text.encode(),capture_output=True,cwd=tmp_path,timeout=20,
+                env={"PYTHONIOENCODING":encoding,"PYTHONUTF8":utf8,"SystemRoot":"C:\\Windows"})
+            assert run.returncode in (0,1,4) and not run.stderr
+            outputs.append((run.returncode,run.stdout))
+        assert len(set(outputs))==1
+
+
+def test_serializer_independent_exact_character_accounting_vectors():
+    from decimal import Decimal
+    vectors=[dict(payload="",items=[0,True,None],quote='"',control="\n",id="\U0001f642"),
+             dict(payload="",decimal=Decimal("1.25"),nested={"a":["\t", "\\"]})]
+    for value in vectors:
+        # Independent literal token lengths: separators and Unicode escapes are
+        # counted by standard json for non-Decimal values; Decimal has known1.25.
+        reference=json.dumps({key:("DECIMAL" if type(item) is Decimal else item) for key,item in value.items()},
+            sort_keys=True,ensure_ascii=True,separators=(",",":"))
+        if "decimal" in value:
+            reference=reference.replace('"DECIMAL"','1.25')
+        padding=MAX_RESULT_CHARS-len(reference)
+        value["payload"]="x"*padding
+        expected=reference.replace('"payload":""','"payload":"'+"x"*padding+'"')
+        assert len(expected)==MAX_RESULT_CHARS and serialize_result(value)==expected
+        value["payload"]+="x"
+        with pytest.raises(ValueError,match="^json_result_too_large$"):
+            serialize_result(value)

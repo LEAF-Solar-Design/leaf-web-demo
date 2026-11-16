@@ -922,6 +922,76 @@ The decoder reads each synthetic envelope only from stdin. The parent process
 loads source fixtures. The supplied claims retain the origin and live-acquisition
 limits stated in the X05 acceptance contract.
 
+`diff_snapshot_rows(before, reopened)` accepts exactly `strings` and `table_rows`
+in each snapshot. It localizes string-ID/optimizer-count changes with exact
+added/removed/changed totals and at most20 sorted examples, plus changed table
+metrics in fixed metric order. It uses supplied rows and preserves caller data.
+It establishes no panel geometry or provenance beyond those row identities.
+
+The discrepancy policy already rejects duplicate records for one fixture and
+metric as `duplicate_discrepancy_record`. New permutation tests cover conflicting
+deltas, names and freeze timestamps while preserving unrelated stage results.
+CLI result JSON is emitted as ASCII bytes through binary stdout when available,
+so output encoding and UTF-8 mode settings preserve identical bytes and exits.
+String-only injected streams retain the testable text-output interface.
+
+Minimal synthetic repairs follow the evidence producer fields:
+
+| Uncertainty | Synthetic field to repair |
+|---|---|
+| `import_evidence_unreadable` | Supply all three explicit boolean import flags |
+| `grid_evidence_unreadable` | Supply expected grid IDs, saved group IDs, rows and all-matched flag |
+| `input_digest_conflict` | Restore supplied bytes to the bytes independently bound by the manifest |
+| `snapshot_rows_missing` | Restore the explicit reopened string and table rows |
+
+Executable before/after repair examples (synthetic source-only builder, requires
+pytest):
+
+```powershell
+@'
+import sys, runpy, json
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import reconcile_seven_steps_json
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+base = builders['seven_step_envelope']()
+fixed = reconcile_seven_steps_json(json.dumps(base))
+for name in ['import', 'grid', 'bytes', 'reopen']:
+    damaged = deepcopy(base)
+    if name in ['import', 'grid']:
+        damaged[name] = None
+    elif name == 'bytes':
+        damaged['assurance']['inputs_hex']['report'] = b'swapped'.hex()
+    else:
+        damaged['assurance']['evidence']['reopened_rows'] = None
+    result = reconcile_seven_steps_json(json.dumps(damaged))
+    if name == 'bytes':
+        reason = result['assurance']['checks']['input_bytes']['reason']
+    else:
+        step = {'import':'1', 'grid':'2', 'reopen':'7'}[name]
+        reason = result['steps'][step]['reason']
+    affected = {'import':{'1'}, 'grid':{'2'}, 'bytes':set(), 'reopen':{'7'}}[name]
+    for step in set('1234567') - affected:
+        assert result['steps'][step] == fixed['steps'][step]
+    repaired = reconcile_seven_steps_json(json.dumps(base))
+    assert result['verdict'] == 'UNREADABLE' and repaired['verdict'] == 'PASS'
+    print(name, result['verdict'], reason, repaired['verdict'])
+'@ | python -P
+```
+
+Exact stdout:
+
+```text
+import UNREADABLE import_evidence_unreadable PASS
+grid UNREADABLE grid_evidence_unreadable PASS
+bytes UNREADABLE input_digest_conflict PASS
+reopen UNREADABLE snapshot_rows_missing PASS
+```
+
+The repair restores the known synthetic source. Real evidence must come from
+the independent producer and preserve manifest custody. The guide grants no
+authority to alter frozen manifests to fit substituted product output.
+
 Canonical snapshot compatibility contract:
 
 - Hash UTF-8 bytes of compact JSON arrays with ASCII escapes and no spaces.

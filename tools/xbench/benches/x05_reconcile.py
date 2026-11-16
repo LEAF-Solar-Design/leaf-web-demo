@@ -761,6 +761,28 @@ def compare_snapshots(before, reopened):
                 else "snapshots_equal", changed_hashes=changed)
 
 
+def diff_snapshot_rows(before, reopened):
+    """Localize supplied string/count and table changes with bounded examples."""
+    parsed = []
+    for snapshot in (before, reopened):
+        if type(snapshot) is not dict or set(snapshot) != {"strings", "table_rows"}:
+            return _out("UNREADABLE", "snapshot_diff_rows_unreadable")
+        strings, error = _index(snapshot["strings"], "snapshot")
+        table = _table(snapshot["table_rows"])
+        if error or table is None:
+            return _out("UNREADABLE", "snapshot_diff_rows_unreadable")
+        parsed.append((strings, table))
+    previous, current = parsed[0][0], parsed[1][0]
+    added, removed = current.keys() - previous.keys(), previous.keys() - current.keys()
+    changed = {key for key in previous.keys() & current.keys() if previous[key] != current[key]}
+    examples = [dict(string_id=key, before=previous.get(key), reopened=current.get(key))
+                for key in nsmallest(MAX_STRING_EXAMPLES, added | removed | changed)]
+    metrics = [metric for metric in METRICS if parsed[0][1][metric] != parsed[1][1][metric]]
+    return _out("FAIL" if examples or metrics else "PASS", "snapshot_rows_changed" if examples or metrics
+                else "snapshot_rows_equal", counts=dict(added=len(added), removed=len(removed),
+                changed=len(changed), metrics=len(metrics)), string_examples=examples, metrics=metrics)
+
+
 @contextmanager
 def _csv_limit():
     # Serialize this helper's parsers and restore the caller's process setting
@@ -1020,8 +1042,13 @@ def main(argv=None):
         result = _out("UNREADABLE", "cli_evidence_unreadable")
         output = serialize_result(result)
     try:
-        sys.stdout.write(output + "\n")
-        sys.stdout.flush()
+        binary_output = getattr(sys.stdout, "buffer", None)
+        if binary_output is None:
+            sys.stdout.write(output + "\n")
+            sys.stdout.flush()
+        else:
+            binary_output.write(output.encode("ascii") + b"\n")
+            binary_output.flush()
     except (OSError, UnicodeError):
         # A real pipe may fail only on flush. Redirect this process's stdout
         # descriptor so interpreter shutdown cannot retry the failed pipe.
