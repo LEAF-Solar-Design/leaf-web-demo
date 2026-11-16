@@ -33,6 +33,7 @@ from benches.x05_reconcile import (METRICS, TABLE_COLUMNS, check_discrepancies,
     compare_grid_panel_totals, compare_grid_panel_oracle_totals,
     compare_panel_string_ids, compare_grid_panel_snapshots, compare_bound_panel_snapshots,
     compare_grid_dc_totals, compare_grid_dc_oracle_totals, compare_grid_dc_snapshots, compare_dc_string_ids,
+    compare_bound_dc_snapshots,
     compare_csv_view, compare_recommendations, compare_snapshots, compare_strings, compare_table)
 
 
@@ -1301,7 +1302,10 @@ def seven_step_envelope():
                          reopened_string_assignments=[dict(grid_id="g", string_id=row["string_id"]) for row in ORACLE],
                          panel_totals={"g": 24}, panel_counts=[dict(string_id="A", panels=10), dict(string_id="B", panels=14)],
                          before_panel_counts=[dict(string_id="A", panels=10), dict(string_id="B", panels=14)],
-                         reopened_panel_counts=[dict(string_id="A", panels=10), dict(string_id="B", panels=14)]),
+                         reopened_panel_counts=[dict(string_id="A", panels=10), dict(string_id="B", panels=14)],
+                         dc_totals={"g": "9.6"}, dc_power=[dict(string_id="A", kw_dc="4"), dict(string_id="B", kw_dc="5.6")],
+                         before_dc_power=[dict(string_id="A", kw_dc="4"), dict(string_id="B", kw_dc="5.6")],
+                         reopened_dc_power=[dict(string_id="A", kw_dc="4"), dict(string_id="B", kw_dc="5.6")]),
             "assurance": assurance_envelope()}
 
 
@@ -1434,7 +1438,10 @@ def test_seven_step_offline_composer_preserves_every_diagnostic_and_missing_evid
                          reopened_string_assignments=[dict(grid_id="g", string_id=row["string_id"]) for row in ORACLE],
                          panel_totals={"g": 24}, panel_counts=[dict(string_id="A", panels=10), dict(string_id="B", panels=14)],
                          before_panel_counts=[dict(string_id="A", panels=10), dict(string_id="B", panels=14)],
-                         reopened_panel_counts=[dict(string_id="A", panels=10), dict(string_id="B", panels=14)])
+                         reopened_panel_counts=[dict(string_id="A", panels=10), dict(string_id="B", panels=14)],
+                         dc_totals={"g": "9.6"}, dc_power=[dict(string_id="A", kw_dc="4"), dict(string_id="B", kw_dc="5.6")],
+                         before_dc_power=[dict(string_id="A", kw_dc="4"), dict(string_id="B", kw_dc="5.6")],
+                         reopened_dc_power=[dict(string_id="A", kw_dc="4"), dict(string_id="B", kw_dc="5.6")])
     result = reconcile_seven_steps(imported, grids, assurance)
     assert result["verdict"] == "PASS" and set(result["steps"]) == set("1234567")
     assert result["steps"]["3"] == result["assurance"]["checks"]["provenance"]["reconciliation"]["stages"]["strings"]
@@ -2691,6 +2698,7 @@ def test_seven_step_aggregate_deterministic_subprocess_mutation_orders(tmp_path)
         grid["rows"].append(dict(grid_id="g2", matches=["p2"], cause=None))
         grid["optimizer_totals"]["g2"] = 0
         grid["panel_totals"]["g2"] = 0
+        grid["dc_totals"]["g2"] = 0
     records[0]["envelope"]["import"]["report_imported"] = False
     records[1]["envelope"]["grid"]["rows"][0]["matches"] = ["foreign"]
     records[1]["envelope"]["assurance"]["inputs_hex"]["report"] = b"swapped".hex()
@@ -3365,7 +3373,7 @@ def test_seven_step_grid_totals_swaps_missing_evidence_and_diagnostic_retention(
     grid.update(expected_grid_ids=["east", "west"], saved_group_ids=["p", "q"],
         rows=[dict(grid_id="east", matches=["p"], cause=None), dict(grid_id="west", matches=["q"], cause=None)],
         string_assignments=[dict(grid_id="east", string_id="A"), dict(grid_id="west", string_id="B")],
-        optimizer_totals=dict(east=5, west=7), panel_totals=dict(east=10, west=14),
+        optimizer_totals=dict(east=5, west=7), panel_totals=dict(east=10, west=14), dc_totals=dict(east="4", west="5.6"),
         reopened_string_assignments=[dict(grid_id="east", string_id="A"), dict(grid_id="west", string_id="B")])
     baseline = reconcile_seven_steps_json(json.dumps(envelope))
     assert baseline["verdict"] == "PASS"
@@ -3484,7 +3492,7 @@ def equal_count_ownership_envelope():
     evidence["before"], evidence["reopened"] = hashes, dict(hashes)
     envelope["grid"].update(expected_grid_ids=["east", "west"], saved_group_ids=["p", "q"],
         rows=[dict(grid_id="east", matches=["p"], cause=None), dict(grid_id="west", matches=["q"], cause=None)],
-        optimizer_totals=dict(east=6, west=6), panel_totals=dict(east=10, west=14),
+        optimizer_totals=dict(east=6, west=6), panel_totals=dict(east=10, west=14), dc_totals=dict(east="4", west="5.6"),
         string_assignments=[dict(grid_id="east", string_id="A"), dict(grid_id="west", string_id="B")],
         reopened_string_assignments=[dict(grid_id="east", string_id="A"), dict(grid_id="west", string_id="B")])
     return envelope
@@ -4036,3 +4044,131 @@ def test_short_decimal_table_and_signed_policy_match_exact_rational_reference():
             if expected:
                 assert check_discrepancies("synthetic", deltas, [dict(record, delta=-delta)],
                     "2026-11-15T13:00:00Z")["verdict"] == "FAIL"
+
+
+def test_composed_dc_totals_swaps_missing_evidence_and_unrelated_diagnostics():
+    envelope = equal_count_ownership_envelope()
+    baseline = reconcile_seven_steps_json(json.dumps(envelope))
+    assert baseline["verdict"] == "PASS" and baseline["grid_dc"]["verdict"] == "PASS"
+    envelope["grid"]["dc_power"][0]["kw_dc"] = "5.6"
+    envelope["grid"]["dc_power"][1]["kw_dc"] = "4"
+    changed = reconcile_seven_steps_json(json.dumps(envelope))
+    assert changed["verdict"] == "FAIL" and changed["grid_dc"]["comparison"]["mismatch_count"] == 2
+    assert changed["grid_dc"]["oracle_consistency"]["verdict"] == "PASS"
+    for field in ("steps", "assurance", "ownership", "grid_optimizers", "ownership_reopen", "grid_optimizer_reopen", "grid_panels", "grid_panel_reopen", "grid_dc_reopen"):
+        assert changed[field] == baseline[field]
+    del envelope["grid"]["dc_power"]
+    envelope["import"]["normal_user"] = False
+    result = reconcile_seven_steps_json(json.dumps(envelope))
+    assert result["verdict"] == "UNREADABLE" and result["steps"]["1"]["verdict"] == "FAIL"
+    assert result["grid_dc"]["string_binding"]["reason"] == "dc_rows_unreadable"
+
+
+def test_composed_dc_snapshots_tiny_equal_total_redistribution_and_bound_ids():
+    from decimal import Decimal
+    envelope = equal_count_ownership_envelope()
+    envelope["grid"]["before_dc_power"] = [dict(string_id="A", kw_dc=Decimal("1e-77")), dict(string_id="B", kw_dc=Decimal("2e-77"))]
+    envelope["grid"]["reopened_dc_power"] = [dict(string_id="A", kw_dc=Decimal("2e-77")), dict(string_id="B", kw_dc=Decimal("1e-77"))]
+    result = reconcile_seven_steps_json(serialize_result(envelope))
+    assert result["verdict"] == "FAIL" and result["grid_dc_reopen"]["comparison"]["changed_count"] == 2
+    assert [row["delta"] for row in result["grid_dc_reopen"]["comparison"]["examples"]] == [Decimal("1e-77"), Decimal("-1e-77")]
+    assert result["steps"]["7"]["verdict"] == "PASS"
+    envelope["grid"]["reopened_dc_power"][0]["string_id"] = "foreign"
+    unbound = reconcile_seven_steps_json(serialize_result(envelope))
+    assert unbound["verdict"] == "UNREADABLE"
+    assert unbound["grid_dc_reopen"]["reopened_binding"]["counts"] == dict(missing=1, foreign=1)
+    del envelope["grid"]["reopened_dc_power"]
+    assert reconcile_seven_steps_json(serialize_result(envelope))["grid_dc_reopen"]["verdict"] == "UNREADABLE"
+
+
+@pytest.mark.parametrize("mutation", ["boolean", "negative", "nan", "infinity", "width", "duplicate", "container"])
+def test_dc_schema_direct_json_composition_and_bound_siblings(mutation):
+    envelope = equal_count_ownership_envelope()
+    values = dict(boolean=True, negative=-1, nan=float("nan"), infinity=float("inf"), width="1"*81)
+    if mutation == "duplicate":
+        envelope["grid"]["dc_power"].append(deepcopy(envelope["grid"]["dc_power"][0]))
+    elif mutation == "container":
+        envelope["grid"]["dc_power"] = "private synthetic value"
+    else:
+        envelope["grid"]["dc_power"][0]["kw_dc"] = values[mutation]
+    source = envelope["assurance"]
+    assurance = dict(evidence=source["evidence"], frozen_manifest=source["manifest"], stage_bindings=source["bindings"],
+        supplied_inputs={key: bytes.fromhex(value) for key, value in source["inputs_hex"].items()},
+        expected_identity=source["identity"], stage_identities=source["stage_identities"])
+    preserved = deepcopy(envelope)
+    direct = reconcile_seven_steps(envelope["import"], envelope["grid"], assurance)
+    transport = deepcopy(envelope)
+    # Valid JSON strings preserve the invalid numeric evidence without corrupting the whole transport.
+    if mutation in ("nan", "infinity"):
+        transport["grid"]["dc_power"][0]["kw_dc"] = "NaN" if mutation == "nan" else "Infinity"
+    decoded = reconcile_seven_steps_json(json.dumps(transport))
+    assert direct["verdict"] == "UNREADABLE"
+    assert json.loads(serialize_result(direct)) == json.loads(serialize_result(decoded))
+    assert "private synthetic value" not in serialize_result(direct)
+    assert envelope == preserved
+    expected, records = bound_seven_fixture_records()
+    transport["assurance"]["manifest"]["fixture_id"] = expected[0]
+    transport["assurance"]["evidence"]["fixture_id"] = expected[0]
+    transport["assurance"]["bindings"] = {key: deepcopy(transport["assurance"]["manifest"]) for key in PROVENANCE_STAGES}
+    records[0]["envelope"] = transport
+    baseline = aggregate_bound_seven_steps(expected, records)
+    result = aggregate_bound_seven_steps_json(json.dumps(dict(expected_ids=expected, fixtures=records)))
+    assert json.loads(serialize_result(baseline)) == json.loads(serialize_result(result))
+    assert result["verdict"] == "UNREADABLE"
+    assert all(result["fixtures"][key]["verdict"] == "PASS" for key in expected[1:])
+
+
+def test_exhaustive_dc_snapshots_match_independent_fraction_grid_sums():
+    from fractions import Fraction
+    from itertools import product
+    states = list(product(("east", "west"), ("east", "west"), ("0.1", "0.2"), ("0.1", "0.2")))
+    for before in states:
+        for reopened in states:
+            supplied, totals = [], []
+            for owner_a, owner_b, power_a, power_b in (before, reopened):
+                supplied.extend(([dict(string_id="A", kw_dc=power_a), dict(string_id="B", kw_dc=power_b)],
+                                 [dict(string_id="A", grid_id=owner_a), dict(string_id="B", grid_id=owner_b)]))
+                totals.append({grid: sum((Fraction(power) for owner, power in ((owner_a, power_a), (owner_b, power_b)) if owner == grid), Fraction(0))
+                               for grid in ("east", "west")})
+            preserved = deepcopy(supplied)
+            result = compare_grid_dc_snapshots(["east", "west"], *supplied)
+            changed = [grid for grid in ("east", "west") if totals[0][grid] != totals[1][grid]]
+            assert result["changed_count"] == len(changed)
+            assert result["verdict"] == ("FAIL" if changed else "PASS")
+            assert [(row["grid_id"], Fraction(row["before"]), Fraction(row["reopened"]), Fraction(row["delta"]))
+                    for row in result["examples"]] == [(grid, totals[0][grid], totals[1][grid], totals[1][grid]-totals[0][grid]) for grid in changed]
+            assert supplied == preserved
+
+
+def test_generated_dc_lookup_work_exact_totals_and_bounded_permuted_diagnostics(monkeypatch):
+    from benches import x05_reconcile as module
+    from decimal import Decimal
+    from random import Random
+    lookups = []
+    class CountedDict(dict):
+        def __getitem__(self, key):
+            lookups.append(1)
+            return super().__getitem__(key)
+    original_index = module._index
+    def counted_index(rows, source, **kwargs):
+        indexed, error = original_index(rows, source, **kwargs)
+        return (CountedDict(indexed) if indexed is not None else None), error
+    monkeypatch.setattr(module, "_index", counted_index)
+    for size in (10, 100, 1000):
+        totals = {f"g{i:04}": "0.2" for i in range(size)}
+        strings = [dict(string_id=f"s{i:04}", kw_dc="0.1") for i in range(size)]
+        owners = [dict(grid_id=f"g{i:04}", string_id=f"s{i:04}") for i in range(size)]
+        lookups.clear()
+        baseline = module.compare_grid_dc_totals(totals, strings, owners)
+        assert len(lookups) == size and baseline["mismatch_count"] == size
+        assert len(baseline["examples"]) == min(size, MAX_STRING_EXAMPLES)
+        assert all(row["delta"] == Decimal("-0.1") for row in baseline["examples"])
+        assert compare_grid_dc_oracle_totals(list(totals), totals, dict(kw_dc=str(Decimal(size)*Decimal("0.2"))))["verdict"] == "PASS"
+        for seed in range(3):
+            changed = deepcopy((strings, owners))
+            rng = Random(seed)
+            for rows in changed:
+                rng.shuffle(rows)
+            preserved = deepcopy(changed)
+            assert module.compare_grid_dc_totals(dict(reversed(list(totals.items()))), *changed) == baseline
+            assert changed == preserved

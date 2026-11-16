@@ -656,7 +656,7 @@ Complete seven-step JSON envelope:
 | Field | Required shape | Missing, null or empty behavior |
 |---|---|---|
 | `import` | Exactly `normal_user`, `dwg_imported`, `report_imported`, all bool | Missing outer field rejects envelope; null/empty object yields step1 UNREADABLE; false yields readable FAIL |
-| `grid` | `expected_grid_ids`, `saved_group_ids`, `rows`, `require_all_matched`, plus `string_assignments`, `reopened_string_assignments` and independent `optimizer_totals`, plus explicit `panel_counts`, `before_panel_counts`, `reopened_panel_counts` and independent `panel_totals` | Missing outer field rejects envelope; null/empty object yields step2 UNREADABLE; empty rows with valid nonempty IDs yields missing-grid FAIL |
+| `grid` | `expected_grid_ids`, `saved_group_ids`, `rows`, `require_all_matched`, plus `string_assignments`, `reopened_string_assignments` and independent `optimizer_totals`, plus explicit `panel_counts`, `before_panel_counts`, `reopened_panel_counts` and independent `panel_totals`, plus explicit `dc_power`, `dc_totals`, `before_dc_power` and `reopened_dc_power` | Missing outer field rejects envelope; null/empty object yields step2 UNREADABLE; empty rows with valid nonempty IDs yields missing-grid FAIL |
 | `assurance` | Exactly `evidence`, `manifest`, `bindings`, `inputs_hex`, `identity`, `stage_identities` | Missing outer field rejects envelope; null/empty object yields assurance UNREADABLE and absent downstream steps |
 
 Evidence and assurance schemas are the existing six-stage contracts above.
@@ -1479,3 +1479,51 @@ The comparison reports the supplied contradiction. It cannot infer that an
 arbitrary value should be divided by 1000. Correct units and independent report
 values must come from explicit evidence. This replay establishes synthetic
 comparator behavior and leaves live X05 acceptance to its staging grader.
+
+## Composed grid DC-power replay
+
+Seven-step input requires explicit `grid.dc_power` rows with `string_id` and
+`kw_dc`, independent `grid.dc_totals` by expected grid ID, and explicit
+`grid.before_dc_power` and `grid.reopened_dc_power` snapshot rows. `grid_dc` retains
+the per-grid comparison, independent report consistency and saved-string ID
+binding. `grid_dc_reopen` binds power IDs to each snapshot's string IDs before
+combining its per-grid save/reopen comparison. Missing evidence yields UNREADABLE
+while unrelated diagnostics remain available.
+
+Run this synthetic PowerShell replay from the repository root.
+
+```powershell
+@'
+import sys, json, runpy
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import reconcile_seven_steps_json
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+correct = builders['equal_count_ownership_envelope']()
+swapped = deepcopy(correct)
+swapped['grid']['dc_power'][0]['kw_dc'] = '5.6'
+swapped['grid']['dc_power'][1]['kw_dc'] = '4'
+contradiction = deepcopy(correct)
+contradiction['grid']['dc_totals']['east'] = '4.1'
+missing = deepcopy(correct)
+del missing['grid']['reopened_dc_power']
+for name, envelope in [('swapped', swapped), ('contradiction', contradiction), ('missing', missing), ('corrected', correct)]:
+    result = reconcile_seven_steps_json(json.dumps(envelope))
+    dc = result['grid_dc']
+    print(name, result['verdict'], dc['comparison']['reason'], dc['oracle_consistency']['reason'], result['grid_dc_reopen']['comparison']['reason'])
+    assert result['steps']['7']['verdict'] == 'PASS'
+'@ | python -P -
+```
+
+Expected output
+
+```text
+swapped FAIL grid_dc_totals_mismatch grid_dc_oracle_total_equal grid_dc_snapshots_equal
+contradiction FAIL grid_dc_totals_mismatch grid_dc_oracle_total_mismatch grid_dc_snapshots_equal
+missing UNREADABLE grid_dc_totals_equal grid_dc_oracle_total_equal grid_dc_snapshots_invalid
+corrected PASS grid_dc_totals_equal grid_dc_oracle_total_equal grid_dc_snapshots_equal
+```
+
+The current-design swap preserves the 9.6 kW DC grand total. All power values and
+units are explicit synthetic inputs. This comparison does not derive wattage
+from panels or authenticate the input producer.
