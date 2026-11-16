@@ -2,6 +2,8 @@
 
 from contextlib import contextmanager, nullcontext
 import hashlib
+import decimal
+from fractions import Fraction
 import json
 import re
 import stat
@@ -25,6 +27,10 @@ OTHER = "00000000-0000-4000-8000-000000000003"
 DRAWING = "00000000-0000-4000-8000-000000000004"
 
 
+def canonical_project():
+    return {key: PROJECT for key in ("project_id", "route_project_id", "active_project_id", "project_binding")}
+
+
 def tiny_png(width=1, height=1, depth=8, color=2, compression=0, filtering=0,
              interlace=0, raw=b"\x00\x00\x00\x00", compressed=None, palette=None):
     def chunk(kind, data):
@@ -43,8 +49,7 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(aggregate(x10.classify(observation)), "UNREADABLE")
 
     def observation(self, **changes):
-        value = dict(fresh_project=True, imported_version_selected=True, evidence_saved=True,
-                     project_id="00000000-0000-4000-8000-000000000001",
+        value = dict(**canonical_project(), fresh_project=True, imported_version_selected=True, evidence_saved=True,
                      ground_option="Ground Mount Physical (preview, unavailable)",
                      attachment_status="Attached [primary drawing] as version 1 to [fresh project]",
                      version_selection_status="Project drawing version selected.")
@@ -182,7 +187,7 @@ class FixtureTests(unittest.TestCase):
         self.complete_project(listener, project)
 
     def project_identity(self, sequence=1):
-        observation = dict(fresh_project=True, project_id=PROJECT)
+        observation = dict(fresh_project=True, **canonical_project())
         self.complete_project(x10._project_observer(self.ctx.base, observation), sequence=sequence)
         return observation
 
@@ -309,7 +314,7 @@ class FixtureTests(unittest.TestCase):
             finally:
                 closed.append(True)
 
-        observed = dict(fresh_project=True, imported_version_selected=True, evidence_saved=True,
+        observed = dict(**canonical_project(), fresh_project=True, imported_version_selected=True, evidence_saved=True,
                         ground_option="Ground Mount Physical (preview, unavailable)")
         with patch.object(x10, "signed_in", session), patch.object(x10, "observe", return_value=observed):
             rows = x10.run(self.ctx)
@@ -437,7 +442,7 @@ class FixtureTests(unittest.TestCase):
 
         def create(page, ctx, config, observation):
             events.append("create")
-            observation.update(fresh_project=True, project_id=PROJECT)
+            observation.update(fresh_project=True, **canonical_project())
 
         def attach(page, ctx, config, bound, observation):
             events.append("select imported version")
@@ -619,7 +624,7 @@ class FixtureTests(unittest.TestCase):
                     return "Ready"
                 rail.inner_text.side_effect = sampled
                 def create(page, ctx, config, observation):
-                    observation.update(fresh_project=True, project_id=PROJECT)
+                    observation.update(fresh_project=True, **canonical_project())
                     self.emit_project(page)
                 with patch.object(x10, "_prepare_workspace"), patch.object(x10, "_create_project", create), \
                         patch.object(x10, "_open_workflow", workflow):
@@ -663,7 +668,7 @@ class FixtureTests(unittest.TestCase):
         listener.failed(first)
         listener.response(SimpleNamespace(request=first, url=first.url, status=503))
         for url in ("https://foreign.test/api/capabilities", self.ctx.base + "/api/capabilities-extra"):
-            listener.response(SimpleNamespace(request=latest, url=url, status=500))
+            listener.response(SimpleNamespace(request=SimpleNamespace(url=url), url=url, status=500))
             listener.failed(SimpleNamespace(url=url))
         self.assertEqual(observation["catalog_epoch"], epoch)
         self.assertEqual(observation["catalog_binding"]["project_id"], PROJECT)
@@ -733,7 +738,7 @@ class FixtureTests(unittest.TestCase):
         source.read.return_value = b"x" * (x10.MAX_SCREENSHOT_BYTES + 1)
         manager = MagicMock()
         manager.__enter__.return_value = source
-        observation = dict(fresh_project=True, imported_version_selected=True,
+        observation = dict(**canonical_project(), fresh_project=True, imported_version_selected=True,
                            ground_option="Ground Physical unavailable")
         with patch.object(Path, "open", return_value=manager), \
                 patch.object(x10.zlib, "decompressobj") as decoder, self.assertRaises(ValueError):
@@ -828,7 +833,7 @@ class FixtureTests(unittest.TestCase):
         failure.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(tiny_png())
         with patch.object(x10, "_prepare_workspace"), \
                 patch.object(x10, "_create_project", side_effect=lambda p, c, cfg, o: (
-                    o.update(fresh_project=True, project_id=PROJECT), self.emit_project(p))), \
+                    o.update(fresh_project=True, **canonical_project()), self.emit_project(p))), \
                 patch.object(x10, "_ground") as ground:
             observed = x10.observe(page, self.ctx, config, bound, self.session_info)
         ground.assert_not_called()
@@ -870,7 +875,7 @@ class FixtureTests(unittest.TestCase):
                                       for key, value in options.items()}):
                 data = tiny_png(**options)
                 surface.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(data)
-                observation = dict(fresh_project=True, imported_version_selected=True,
+                observation = dict(**canonical_project(), fresh_project=True, imported_version_selected=True,
                                    ground_option="Ground Physical unavailable")
                 with self.assertRaises(ValueError):
                     x10._save(page, self.ctx, observation)
@@ -907,7 +912,7 @@ class FixtureTests(unittest.TestCase):
             with self.subTest(options=options):
                 data = tiny_png(**options)
                 page.get_by_role.return_value.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(data)
-                observation = dict(fresh_project=True, imported_version_selected=True,
+                observation = dict(**canonical_project(), fresh_project=True, imported_version_selected=True,
                                    ground_option="Ground Physical unavailable")
                 x10._save(page, self.ctx, observation)
                 self.assertTrue(observation["evidence_saved"])
@@ -950,7 +955,7 @@ class FixtureTests(unittest.TestCase):
         page = MagicMock()
         surface = page.get_by_role.return_value
         surface.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(tiny_png())
-        observation = dict(fresh_project=True, imported_version_selected=True,
+        observation = dict(**canonical_project(), fresh_project=True, imported_version_selected=True,
                            ground_option="Ground Mount Physical (unavailable)")
         x10._save(page, self.ctx, observation)
         old = observation["evidence_path"]
@@ -979,7 +984,7 @@ class FixtureTests(unittest.TestCase):
     def test_screenshot_pin_rejects_replacement_before_and_after_rename(self):
         page = MagicMock()
         page.get_by_role.return_value.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(tiny_png())
-        observation = dict(fresh_project=True, imported_version_selected=True,
+        observation = dict(**canonical_project(), fresh_project=True, imported_version_selected=True,
                            ground_option="Ground Physical unavailable")
         x10._save(page, self.ctx, observation)
         old = list(self.ctx.out_dir.iterdir())
@@ -1189,7 +1194,7 @@ class FixtureTests(unittest.TestCase):
         config, bound, _, _ = x10.bindings(self.ctx)
         for versions in ([], [{"version_id": VERSION, "drawing_id": DRAWING, "seq": 2}]):
             page, preview, _, _, _ = self.import_page("Attached synthetic.dwg as version 1 to Synthetic probe")
-            observation = dict(fresh_project=True, project_id=PROJECT)
+            observation = dict(fresh_project=True, **canonical_project())
             self.complete_project(x10._project_observer(self.ctx.base, observation), versions=versions)
             with self.assertRaises(ValueError):
                 x10._import_primary(page, self.ctx, config, bound, observation)
@@ -1349,6 +1354,105 @@ class FixtureTests(unittest.TestCase):
             diagnostic = (self.ctx.out_dir / "x10-ui.json").read_text()
             self.assertNotIn("private cleanup diagnostic", diagnostic)
             self.assertIn("RuntimeError", diagnostic)
+
+    def test_project_identity_aliases_must_agree(self):
+        for target in ("project", "version"):
+            for alias in (PROJECT if target == "project" else VERSION, OTHER, None, "invalid"):
+                with self.subTest(target=target, alias=alias):
+                    observation = {}
+                    listener = x10._project_observer(self.ctx.base, observation)
+                    request = SimpleNamespace(method="GET", url=self.ctx.base + "/api/projects/" + PROJECT)
+                    project = {"project_id": PROJECT}
+                    version = {"version_id": VERSION, "drawing_id": DRAWING, "seq": 1}
+                    (project if target == "project" else version)["id"] = alias
+                    listener(request)
+                    listener.response(SimpleNamespace(request=request, url=request.url, status=200,
+                        json=lambda: {"project": project, "drawing_versions": [version]}))
+                    valid = alias == (PROJECT if target == "project" else VERSION)
+                    self.assertEqual(observation["project_binding"], PROJECT if valid else None)
+                    self.assertEqual(len(observation["project_versions"]), 1 if valid else 0)
+
+    def test_project_drawing_sequences_are_unambiguous(self):
+        for drawing in (DRAWING, OTHER):
+            observation = {}
+            listener = x10._project_observer(self.ctx.base, observation)
+            versions = [{"version_id": VERSION, "drawing_id": DRAWING, "seq": 1},
+                        {"version_id": OTHER, "drawing_id": drawing, "seq": 1}]
+            self.complete_project(listener, versions=versions)
+            self.assertEqual(observation["project_binding"], None if drawing == DRAWING else PROJECT)
+            self.assertEqual(len(observation["project_versions"]), 0 if drawing == DRAWING else 2)
+
+    def test_rate_total_ignores_and_restores_ambient_decimal_context(self):
+        rates = {"items": [{"quantity": "9" * 30 + "." + "9" * 30,
+                            "unit_rate": "0." + "0" * 29 + "1"}] * 17}
+        exact = sum((Fraction(row["quantity"]) * Fraction(row["unit_rate"])
+                     for row in rates["items"]), Fraction())
+        for rounding in (decimal.ROUND_DOWN, decimal.ROUND_UP):
+            with decimal.localcontext() as caller:
+                caller.prec, caller.Emin, caller.Emax = 2, -2, 2
+                caller.rounding, caller.clamp = rounding, 1
+                for signal in caller.traps:
+                    caller.traps[signal] = True
+                caller.flags[decimal.Inexact] = True
+                before = repr(caller)
+                self.assertEqual(Fraction(x10.rate_total(rates)), exact)
+                self.assertEqual(repr(decimal.getcontext()), before)
+
+    def test_classify_requires_consistent_canonical_project_fields(self):
+        for rejection in (False, True):
+            observation = ClassificationTests().observation()
+            if rejection:
+                observation.update(imported_version_selected=False, import_rejection=x10.IMPORT_REFUSALS[0])
+            for field in canonical_project():
+                for value in (None, "", "invalid", OTHER):
+                    with self.subTest(rejection=rejection, field=field, value=value):
+                        invalid = dict(observation, **{field: value})
+                        self.assertEqual([r.verdict for r in x10.classify(invalid)], ["UNREADABLE"] * 6)
+                missing = dict(observation)
+                missing.pop(field)
+                self.assertEqual([r.verdict for r in x10.classify(missing)], ["UNREADABLE"] * 6)
+            self.assertEqual(x10.classify(observation)[0].verdict, "FAIL")
+
+    def test_catalog_response_identity_must_match_current_request(self):
+        valid = self.catalog_request().url
+        changed = ["https://foreign.test" + valid[len(self.ctx.base):],
+                   valid.replace("/api/capabilities?", "/api/capabilities-extra?"),
+                   valid.split("&input_version_id=")[0],
+                   valid.replace("drawing_id=" + DRAWING, "drawing_id=" + OTHER),
+                   valid.replace("project_id=" + PROJECT, "project_id=" + OTHER),
+                   valid.replace("input_version_id=" + VERSION, "input_version_id=" + OTHER),
+                   valid + "&project_id=" + PROJECT]
+        for url in [valid] + changed:
+            with self.subTest(url=url):
+                observation = {}
+                listener = x10._catalog_observer(self.ctx.base, observation)
+                request = self.catalog_request()
+                self.complete_catalog(listener, request)
+                listener.response(SimpleNamespace(request=request, url=url, status=200))
+                self.assertEqual(observation["catalog_binding"] is not None, url == valid)
+                if url != valid:
+                    listener.response(SimpleNamespace(request=request, url=valid, status=200))
+                    self.assertIsNone(observation["catalog_binding"])
+
+    def test_rate_total_matches_fraction_for_bounds_and_equivalent_lines(self):
+        maximum = "9" * 30 + "." + "9" * 30
+        tiny = "0." + "0" * 29 + "1"
+        cases = [
+            [{"quantity": maximum, "unit_rate": maximum}, {"quantity": tiny, "unit_rate": tiny}],
+            [{"quantity": maximum if i % 2 else tiny, "unit_rate": tiny if i % 2 else maximum}
+             for i in range(10000)],
+            [{"quantity": "2", "unit_rate": maximum}],
+            [{"quantity": "1", "unit_rate": maximum}] * 2,
+        ]
+        totals = []
+        for items in cases:
+            exact = sum((Fraction(row["quantity"]) * Fraction(row["unit_rate"])
+                         for row in items), Fraction())
+            for ordered in (items, list(reversed(items)), items[1:] + items[:1]):
+                actual = x10.rate_total({"items": ordered})
+                self.assertEqual(Fraction(actual), exact)
+            totals.append(exact)
+        self.assertEqual(totals[-2], totals[-1])
 
 
 if __name__ == "__main__":

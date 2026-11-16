@@ -13,7 +13,7 @@ import json
 import os
 import stat
 from collections.abc import Mapping
-from decimal import Decimal, InvalidOperation, localcontext
+from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from pathlib import Path
 import re
 import shutil
@@ -118,8 +118,9 @@ def rate_total(rates):
                 raise ValueError("rates require nonnegative decimal strings")
             pair.append(Decimal(value))
         values.append(pair)
-    with localcontext() as context:
-        context.prec = 128 + len(str(len(values)))
+    context = Context(prec=128 + len(str(len(values))), rounding=ROUND_HALF_EVEN,
+                      Emin=-999999, Emax=999999, capitals=1, clamp=0, flags=[], traps=[])
+    with localcontext(context):
         return sum((quantity * rate for quantity, rate in values), Decimal(0))
 
 
@@ -250,7 +251,13 @@ def classify(observation, expected=None):
                    and re.search(r"\bGround (?:Mount )?Physical\b", label, re.I)
                    and re.search(r"\bunavailable\b", label, re.I))
     pending = "Checking Solar steps" in observation.get("ui_text", "")
-    proven = fresh and observation.get("evidence_saved") is True and not pending
+    try:
+        projects = {_uuid(observation.get(key)) for key in
+                    ("project_id", "route_project_id", "active_project_id", "project_binding")}
+        canonical = len(projects) == 1
+    except ValueError:
+        canonical = False
+    proven = fresh and canonical and observation.get("evidence_saved") is True and not pending
     contradictory = (bool(observation.get("import_rejection"))
                      and observation.get("imported_version_selected") is True)
     if contradictory:
@@ -611,6 +618,15 @@ def _uuid(value):
     return str(UUID(value))
 
 
+def _aliased_uuid(row, primary, alias):
+    if not isinstance(row, dict):
+        raise ValueError("invalid identity row")
+    values = [_uuid(row[key]) for key in (primary, alias) if key in row]
+    if not values or len(set(values)) != 1:
+        raise ValueError("missing or conflicting identity aliases")
+    return values[0]
+
+
 def _catalog_observer(base, observation):
     origin = urlsplit(base)
     observation["catalog_epoch"] = 0
@@ -623,6 +639,21 @@ def _catalog_observer(base, observation):
         url = urlsplit(value)
         return (url.scheme, url.netloc, url.path) == (origin.scheme, origin.netloc, "/api/capabilities")
 
+    def url_binding(value):
+        if not exact_url(value):
+            raise ValueError("catalog response changed endpoint")
+        url = urlsplit(value)
+        if url.fragment:
+            raise ValueError("invalid catalog identity URL")
+        query = parse_qs(url.query, keep_blank_values=True, max_num_fields=20)
+        binding = {}
+        for key in ("drawing_id", "project_id", "input_version_id"):
+            values = query.get(key, [])
+            if len(values) != 1:
+                raise ValueError("missing or ambiguous catalog identity")
+            binding[key] = _uuid(values[0])
+        return binding
+
     def request_seen(request):
         nonlocal latest, pending_binding, failed
         if not exact_url(request.url):
@@ -630,14 +661,7 @@ def _catalog_observer(base, observation):
         try:
             if request.method != "GET":
                 raise ValueError("catalog requires normal GET")
-            url = urlsplit(request.url)
-            query = parse_qs(url.query, keep_blank_values=True, max_num_fields=20)
-            binding = {}
-            for key in ("drawing_id", "project_id", "input_version_id"):
-                values = query.get(key, [])
-                if len(values) != 1:
-                    raise ValueError("missing or ambiguous catalog identity")
-                binding[key] = _uuid(values[0])
+            binding = url_binding(request.url)
         except ValueError:
             # An invalid same-origin catalog binding cannot leave old proof current.
             binding = None
@@ -648,8 +672,12 @@ def _catalog_observer(base, observation):
 
     def response_seen(response):
         nonlocal failed
-        if response.request is not latest or not exact_url(response.url):
+        if response.request is not latest:
             return
+        try:
+            failed = failed or url_binding(response.url) != pending_binding
+        except ValueError:
+            failed = True
         failed = failed or type(response.status) is not int or not 200 <= response.status < 300
         observation["catalog_epoch"] += 1
         observation["catalog_binding"] = None if failed else pending_binding
@@ -707,7 +735,7 @@ def _project_observer(base, observation):
         try:
             body = response.json()
             project = body["project"]
-            identity = _uuid(project.get("project_id") or project.get("id"))
+            identity = _aliased_uuid(project, "project_id", "id")
             if identity != route:
                 raise ValueError("project identity mismatch")
             versions = body.get("drawing_versions", [])
@@ -715,13 +743,16 @@ def _project_observer(base, observation):
                 raise ValueError("invalid project versions")
             rows = []
             seen = set()
+            sequences = set()
             for version in versions:
-                version_id = _uuid(version.get("version_id") or version.get("id"))
+                version_id = _aliased_uuid(version, "version_id", "id")
                 drawing_id = _uuid(version.get("drawing_id"))
                 seq = version.get("seq")
-                if type(seq) is not int or not 1 <= seq <= 999999999 or version_id in seen:
+                if (type(seq) is not int or not 1 <= seq <= 999999999 or version_id in seen
+                        or (drawing_id, seq) in sequences):
                     raise ValueError("invalid project version identity")
                 seen.add(version_id)
+                sequences.add((drawing_id, seq))
                 rows.append(dict(project_id=route, version_id=version_id, drawing_id=drawing_id, seq=seq))
         except Exception:
             failed = True
