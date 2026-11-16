@@ -68,6 +68,10 @@ class _NonfiniteJSON(ValueError):
     pass
 
 
+class _NumericJSON(ValueError):
+    pass
+
+
 def decode_evidence_json(text):
     """Strict JSON preflight; success is decoding proof only, never live grading."""
     if type(text) is not str:
@@ -103,14 +107,33 @@ def decode_evidence_json(text):
     def reject_constant(value):
         raise _NonfiniteJSON()
 
+    def integer_token(raw):
+        if len(raw) > 80:
+            raise _NumericJSON()
+        return int(raw)
+
+    def decimal_token(raw):
+        if len(raw) > 128:
+            raise _NumericJSON()
+        try:
+            number = Decimal(raw)
+        except DecimalException:
+            raise _NumericJSON() from None
+        if _numeric(number, signed=True) is None:
+            raise _NumericJSON()
+        return number
+
     try:
         with localcontext(_CONTEXT):
             evidence = json.loads(text, object_pairs_hook=unique_object,
-                                  parse_constant=reject_constant, parse_float=Decimal)
+                                  parse_constant=reject_constant, parse_float=decimal_token,
+                                  parse_int=integer_token)
     except _DuplicateJSONKey:
         return _out("UNREADABLE", "json_duplicate_key")
     except _NonfiniteJSON:
         return _out("UNREADABLE", "json_nonfinite_number")
+    except _NumericJSON:
+        return _out("UNREADABLE", "json_numeric_unreadable")
     except (ValueError, RecursionError, DecimalException, OverflowError):
         return _out("UNREADABLE", "json_malformed")
     if not isinstance(evidence, dict):
@@ -521,7 +544,7 @@ def compare_strings(oracle_rows, saved_rows):
 
 
 def main(argv=None):
-    """Offline stdin CLI:0 PASS,1 FAIL,4 UNREADABLE; one sanitized JSON line."""
+    """CLI:0 PASS,1 FAIL,4 UNREADABLE,5 output failure without recursive reporting."""
     import argparse
     import sys
 
@@ -539,7 +562,20 @@ def main(argv=None):
     except Exception:
         result = _out("UNREADABLE", "cli_evidence_unreadable")
         output = serialize_result(result)
-    print(output)
+    try:
+        sys.stdout.write(output + "\n")
+        sys.stdout.flush()
+    except (OSError, UnicodeError):
+        # A real pipe may fail only on flush. Redirect this process's stdout
+        # descriptor so interpreter shutdown cannot retry the failed pipe.
+        try:
+            import os
+            descriptor = sys.stdout.fileno()
+            with open(os.devnull, "wb") as sink:
+                os.dup2(sink.fileno(), descriptor)
+        except Exception:
+            pass
+        return 5
     return {"PASS": 0, "FAIL": 1, "UNREADABLE": 4}[result["verdict"]]
 
 

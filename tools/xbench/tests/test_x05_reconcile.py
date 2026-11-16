@@ -1009,3 +1009,157 @@ def test_aggregate_isolates_readable_failure_missing_evidence_and_complete_fixtu
     assert incomplete["csv_view"]["reason"] == incomplete["reopen"]["reason"] == "stage_evidence_missing"
     assert incomplete["table"]["verdict"] == incomplete["strings"]["verdict"] == "PASS"
     assert fixtures == preserved
+
+
+@pytest.mark.parametrize("key", REQUIRED_STAGES)
+def test_required_field_type_substitutions_preserve_unaffected_stages(key):
+    complete = complete_evidence()
+    baseline = reconcile_offline(complete)
+    array_fields = {"oracle_strings", "saved_strings", "view_rows", "recommendations", "discrepancy_records"}
+    map_fields = {"saved_values", "oracle_values", "before", "reopened", "before_rows", "reopened_rows"}
+    bad = [None, 42, {}] if key in array_fields else [None, 42, []] if key in map_fields else [None, False, {}]
+    for value in bad:
+        evidence = deepcopy(complete)
+        evidence[key] = value
+        result = reconcile_offline(evidence)
+        assert result["verdict"] == "UNREADABLE"
+        for name, observed in result["stages"].items():
+            if name in REQUIRED_STAGES[key]:
+                assert observed["verdict"] == "UNREADABLE"
+                assert type(observed["reason"]) is str and observed["reason"] != "stage_evidence_missing"
+            else:
+                assert observed == baseline["stages"][name]
+
+
+@pytest.mark.parametrize("text", [
+    r'{"saved_strings":[],"\u0073aved_strings":[]}',
+    r'{"before_rows":{"strings":[],"\u0073trings":[]}}',
+    r'{"expected_ids":[],"\u0065xpected_ids":[],"fixtures":[]}',
+    r'{"expected_ids":["a","b","c"],"fixtures":[{"evidence":{"fixture_id":"a","\u0066ixture_id":"a"}}]}',
+])
+def test_unicode_escaped_json_key_collisions_are_rejected_in_both_modes(text):
+    for decode in (reconcile_json, aggregate_fixtures_json):
+        assert decode(text) == {"verdict": "UNREADABLE", "reason": "json_duplicate_key"}
+
+
+def test_raw_numeric_tokens_are_bounded_independently_of_caller_decimal_traps():
+    from decimal import localcontext
+
+    tokens = ["1e999999", "1e-999999", "1e999999999999999999999999999", "9" * 81,
+              "9" * 5000, "1e" + "0" * 200 + "1"]
+    for trapped in (False, True):
+        with localcontext() as caller:
+            caller.prec, caller.Emin, caller.Emax = 2, -1, 1
+            for signal in caller.traps:
+                caller.traps[signal] = trapped
+            caller.clear_flags()
+            preserved = (caller.prec, caller.Emin, caller.Emax, dict(caller.traps), dict(caller.flags))
+            for token in tokens:
+                for decode in (reconcile_json, aggregate_fixtures_json):
+                    assert decode('{"number":' + token + '}') == {
+                        "verdict": "UNREADABLE", "reason": "json_numeric_unreadable"}
+            assert decode_evidence_json('{"number":' + "9" * 80 + '}')["verdict"] == "PASS"
+            assert (caller.prec, caller.Emin, caller.Emax, dict(caller.traps), dict(caller.flags)) == preserved
+
+
+@pytest.mark.parametrize("failure", ["broken-write", "encoding-write", "broken-flush"])
+def test_stdout_failure_returns_nonzero_without_recursive_output(monkeypatch, failure):
+    from io import BytesIO
+    from types import SimpleNamespace
+    import sys
+    from benches import x05_reconcile as module
+
+    class FailedOutput:
+        writes = 0
+        flushes = 0
+
+        def write(self, value):
+            self.writes += 1
+            if failure == "encoding-write":
+                raise UnicodeEncodeError("ascii", "synthetic_private_canary", 0, 1, "synthetic")
+            if failure == "broken-write":
+                raise BrokenPipeError("synthetic_private_canary")
+            return len(value)
+
+        def flush(self):
+            self.flushes += 1
+            raise BrokenPipeError("synthetic_private_canary")
+
+    class ForbiddenErrorOutput:
+        def write(self, value):
+            pytest.fail("Output failure must not report to stderr")
+
+    failed = FailedOutput()
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=BytesIO(json.dumps(complete_evidence()).encode())))
+    monkeypatch.setattr(sys, "stdout", failed)
+    monkeypatch.setattr(sys, "stderr", ForbiddenErrorOutput())
+    assert module.main([]) == 5
+    assert failed.writes == 1 and failed.flushes == (1 if failure == "broken-flush" else 0)
+
+
+@pytest.mark.parametrize("case,exit_code", [("PASS", 0), ("FAIL", 1), ("UNREADABLE", 4)])
+def test_aggregate_cli_bytes_are_deterministic_across_hash_seeds(tmp_path, case, exit_code):
+    from pathlib import Path
+    import subprocess
+    import sys
+    from benches import x05_reconcile as module
+
+    expected, fixtures = fixture_records()
+    if case != "PASS":
+        fixtures[0]["evidence"]["recommendations"][0]["group_count"] = 1
+    if case == "UNREADABLE":
+        del fixtures[1]["evidence"]["reopened"]
+    outputs = []
+    for seed in ("0", "1", "73"):
+        for reverse in (False, True):
+            envelope = dict(expected_ids=list(reversed(expected)) if reverse else expected,
+                            fixtures=list(reversed(fixtures)) if reverse else fixtures)
+            result = subprocess.run([sys.executable, "-P", str(Path(module.__file__).resolve()), "--aggregate"],
+                input=json.dumps(envelope).encode(), capture_output=True, cwd=tmp_path, timeout=20,
+                env={"PYTHONHASHSEED": seed, "SystemRoot": "C:\\Windows"})
+            assert result.returncode == exit_code and result.stderr == b""
+            outputs.append(result.stdout)
+    assert len(set(outputs)) == 1
+
+
+@pytest.mark.parametrize("aggregate", [False, True])
+@pytest.mark.parametrize("character", ["x", "\U0001f642"])
+def test_cli_exact_character_and_utf8_byte_boundaries(tmp_path, aggregate, character):
+    from pathlib import Path
+    import subprocess
+    import sys
+    from benches import x05_reconcile as module
+
+    if aggregate:
+        expected, fixtures = fixture_records()
+        payload = dict(expected_ids=expected, fixtures=fixtures)
+        target = fixtures[0]["evidence"]
+    else:
+        payload = target = complete_evidence()
+    target["notes"] = ""
+    base = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    command = [sys.executable, "-P", str(Path(module.__file__).resolve())] + (["--aggregate"] if aggregate else [])
+
+    def run(padding, expected_exit):
+        target["notes"] = padding
+        text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        result = subprocess.run(command, input=text.encode("utf-8"), capture_output=True, cwd=tmp_path, timeout=20)
+        assert result.returncode == expected_exit and result.stderr == b""
+        assert len(result.stdout.splitlines()) == 1
+        decoded = json.loads(result.stdout)
+        if expected_exit:
+            assert decoded == {"verdict": "UNREADABLE", "reason": "json_input_too_large"}
+        else:
+            assert decoded["verdict"] == "PASS"
+        return text
+
+    size = MAX_JSON_CHARS - len(base)
+    assert len(run(character * size, 0)) == MAX_JSON_CHARS
+    assert len(run(character * (size + 1), 4)) == MAX_JSON_CHARS + 1
+    width = len(character.encode("utf-8"))
+    for extra in (0, 1):
+        remaining = 4 * MAX_JSON_CHARS + extra - len(base.encode("utf-8"))
+        padding = character * (remaining // width) + "x" * (remaining % width)
+        # At the raw-byte limit, JSON framing already makes the character
+        # limit stricter; both constraints apply, rather than one overriding it.
+        assert len(run(padding, 4).encode("utf-8")) == 4 * MAX_JSON_CHARS + extra

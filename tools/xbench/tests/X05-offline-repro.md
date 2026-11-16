@@ -249,8 +249,14 @@ python -P tools/xbench/benches/x05_reconcile.py --aggregate
 ```
 
 The CLI reads stdin, emits one JSON line and exits0 for offline PASS,1 for FAIL
-or4 for UNREADABLE. Close stdin after the object. Malformed input emits fixed
-reason codes, never the input or a traceback. No live connection is made.
+or4 for UNREADABLE. An output encoding or broken-pipe failure exits5 without
+retrying output or printing a traceback. Close stdin after the object. Malformed
+input emits fixed reason codes, never the input. No live connection is made.
+Both limits apply to UTF-8 input:262144 characters and1048576 bytes. JSON framing
+can make the character limit reject a payload already at the byte limit.
+Raw integer tokens are bounded to80 characters; decimal tokens to128 characters
+and80-character plain numeric width. Unsupported numeric tokens return
+`json_numeric_unreadable` independently of the caller's Decimal traps.
 
 Canonical snapshot compatibility contract:
 
