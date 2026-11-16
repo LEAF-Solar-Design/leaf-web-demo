@@ -65,6 +65,36 @@ class BytesStore:
         self.data[key] = raw
 
 
+@pytest.mark.parametrize("status,retryable,code,expected_retryable", [
+    (413, True, "PROJECT_EDITOR_TOO_LARGE", False),
+    (503, True, "PROJECT_EDITOR_SOURCE_UNAVAILABLE", True),
+    (503, False, "PROJECT_EDITOR_SOURCE_UNAVAILABLE", False),
+    (404, False, "PROJECT_EDITOR_SOURCE_UNAVAILABLE", False),
+])
+def test_imported_dwg_dxf_unavailable_diagnostic(monkeypatch, status, retryable, code,
+                                               expected_retryable):
+    import store as drawing_store
+
+    org_id, source_drawing_id = uuid4(), str(uuid4())
+    original = b"AC1032 synthetic DWG"
+    key = drawing_store.drawing_version_key(str(org_id), source_drawing_id, 1)
+    stored = {"ref": key, "sha256": digest(original), "bytes": len(original)}
+    source = {"drawing_id": source_drawing_id, "version": 1, "stored_object": stored}
+    backend = BytesStore()
+    backend.data[key] = original
+
+    def unavailable(*args, **kwargs):
+        raise project_context.write_loop.DxfUnavailable(
+            "DXF_UNAVAILABLE", "synthetic conversion refusal", status, retryable)
+
+    monkeypatch.setattr(project_context.write_loop, "read_dxf", unavailable)
+    with pytest.raises(editor.EditorError) as caught:
+        editor._imported_dwg(backend, org_id, source, digest(original), uuid4())
+    assert caught.value.code == code
+    assert caught.value.status == status
+    assert caught.value.retryable is expected_retryable
+
+
 def canonical_ci_pg():
     """Bind the canonical disposable producer's state to this exact server.
 

@@ -81,6 +81,7 @@ const WORKSPACE_QUICK_AFTER = Object.freeze([
 ])
 import Legend from './components/Legend.jsx'
 import ResultPanel from './components/ResultPanel.jsx'
+import DrawingDependencyReport from './components/DrawingDependencyReport.jsx'
 import SelectionReadout from './components/SelectionReadout.jsx'
 import PromptBox, { shouldSkipPromptFocus } from './components/PromptBox.jsx'
 import RoutePanel from './components/RoutePanel.jsx'
@@ -778,6 +779,21 @@ function LocalCadEngineHold({ active }) {
 function appSurfaceFromLocation(location, labStatus) {
   return location.pathname.startsWith('/app/lab') && parseLabRoute(location.pathname, location.search)
     ? 'lab' : productSurfaceFromSearch(location.search, labStatus)
+}
+
+export function RunningJobStrip({ jobId, runProgress, runStatus, toolName, runElapsedMs, onStop }) {
+  return (
+    <div className="strip-running enter" data-job-id={jobId || undefined}>
+      <span className="dot live pulse" aria-hidden="true" />
+      <span className="verb">
+        {(runProgress || runStatus || 'running')}
+        {toolName ? `: ${toolName}` : ''}
+        {runElapsedMs != null ? ` · ${fmtElapsed(runElapsedMs)}` : ''}
+      </span>
+      <span className="key hot">Esc</span>
+      <button type="button" className="chip-act" onClick={onStop}>Stop</button>
+    </div>
+  )
 }
 
 export default function App() {
@@ -6606,6 +6622,8 @@ export default function App() {
         <div className="environment-activity-fallback" ref={setActivityFallback} />
         <PersistentSeat destination={studioShell ? studioActivityHost : activityFallback}>
         <div className="result-block enter" style={{ '--rank': 2 }} ref={resultBlockRef}>
+          <DrawingDependencyReport key={resultDrawingKey}
+            report={(projectMode ? projectDrawing.intake : intake)?.dependency_report} />
           <ResultPanel
             navigation={viewNavigation}
             running={running}
@@ -6615,6 +6633,10 @@ export default function App() {
             error={runErr}
             result={shownResult}
             tool={selectedTool}
+            onSelectModuleSet={selectedTool?.name === 'count-modules' &&
+              result?.origin?.drawingKey && result.origin.drawingKey === resultDrawingKey
+              ? (setIds) => onRequestCatalogRun(selectedTool, { set_ids: setIds }, null, 'catalog', { complete: true })
+              : undefined}
             onRetry={onRetry}
             notices={
               /* NR banners dock UNDER the header of the affected pane (the
@@ -6769,16 +6791,8 @@ export default function App() {
           {/* SB3 state strips ride above the well: running / failed. Decisions
               (the route) attach as resolver rows / decision strips below. */}
           {running && (
-            <div className="strip-running enter">
-              <span className="dot live pulse" aria-hidden="true" />
-              <span className="verb">
-                {(runProgress || runStatus || 'running')}
-                {selectedTool?.name ? `: ${selectedTool.name}` : ''}
-                {runElapsedMs != null ? ` · ${fmtElapsed(runElapsedMs)}` : ''}
-              </span>
-              <span className="key hot">Esc</span>
-              <button type="button" className="chip-act" onClick={onStopRun}>Stop</button>
-            </div>
+            <RunningJobStrip jobId={currentJobId} runProgress={runProgress} runStatus={runStatus}
+              toolName={selectedTool?.name} runElapsedMs={runElapsedMs} onStop={onStopRun} />
           )}
           {(runErr || routeErr) && (
             <div className="strip-failed enter" role="alert">

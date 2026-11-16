@@ -391,10 +391,35 @@ async function openOriginal() {
   await screen.findByLabelText('Original provenance')
 }
 function mapOriginal(pointer) {
-  fireEvent.change(screen.getByLabelText('Records array'), { target: { value: pointer } })
-  fireEvent.change(screen.getByLabelText('Import dataset ID'), { target: { value: 'original-records' } })
-  fireEvent.change(screen.getByLabelText('Import dataset title'), { target: { value: 'Imported original' } })
+  // Captured controls and scoped field queries avoid repeated large-form label scans.
+  const recordsArray = screen.getByLabelText('Records array')
+  const datasetId = screen.getByLabelText('Import dataset ID')
+  const datasetTitle = screen.getByLabelText('Import dataset title')
+  fireEvent.change(recordsArray, { target: { value: pointer } })
+  fireEvent.change(datasetId, { target: { value: 'original-records' } })
+  fireEvent.change(datasetTitle, { target: { value: 'Imported original' } })
 }
+it('maps an original scalar row with an empty pointer without browser validation blocking import', async () => {
+  const harness = await materialHarness({ repos: ['example/first', 'example/second'] }, '/repos')
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded(); await openOriginal(); mapOriginal('/repos')
+  fireEvent.click(screen.getByRole('button', { name: 'Add import field' }))
+  fireEvent.change(screen.getByLabelText('Field 1 id'), { target: { value: 'repo' } })
+  fireEvent.change(screen.getByLabelText('Field 1 label'), { target: { value: 'Repository' } })
+  fireEvent.change(screen.getByLabelText('Field 1 type'), { target: { value: 'identifier' } })
+  fireEvent.click(screen.getByLabelText('Field 1 key'))
+  const pointer = screen.getByLabelText('Field 1 pointer')
+  const form = screen.getByRole('form', { name: 'Map project records' })
+  expect(pointer.value).toBe('')
+  expect(pointer.checkValidity()).toBe(true)
+  expect(form.checkValidity()).toBe(true)
+  fireEvent.click(screen.getByRole('button', { name: 'Import selected records' }))
+  await screen.findByText('Imported 2 records. Original bytes and source clocks are retained.')
+  const body = JSON.parse(importPosts(harness.fetchImpl)[0][1].body)
+  expect(body.selection).toEqual({ records_pointer: '/repos' })
+  expect(body.mapping.fields).toEqual([{ field_id: 'repo', pointer: '', conversion: 'identity' }])
+  expect(body.definition.key_fields).toEqual(['repo'])
+  expect(body.definition.lineage).toEqual(harness.lineage)
+})
 it.each(['remaining_pct', 'reset_at'])('later-record discovery includes %s absent from the first record', async field => {
   const harness = await materialHarness([{ account: 'first' }, { account: 'second', [field]: field === 'remaining_pct' ? 0 : '2026-11-02T12:00:00Z' }], '')
   render(<OpsWorkspaceGround {...harness.props} />); await loaded(); await openOriginal(); mapOriginal('')
@@ -402,15 +427,23 @@ it.each(['remaining_pct', 'reset_at'])('later-record discovery includes %s absen
   expect(screen.getByLabelText('Field 2 id').value).toBe(field)
   expect(importPosts(harness.fetchImpl)).toHaveLength(0)
 })
-it('later-record discovery preserves first-seen order, exclusions and the100field limit', async () => {
+it('later-record discovery preserves first-seen order, exclusions and the 100 field limit', async () => {
+  vi.stubGlobal('open', vi.fn())
   const later = JSON.parse('{"constructor":"blocked","prototype":"blocked","__proto__":"blocked","pair_key":"main"}')
   for (let i = 0; i < 110; i++) later[`extra_${i}`] = i
   const harness = await materialHarness([null, 7, ['not a record'], { account: 'first' }, later], '')
-  render(<OpsWorkspaceGround {...harness.props} />); await loaded(); await openOriginal(); mapOriginal('')
-  expect(screen.getByLabelText('Field 1 id').value).toBe('account')
-  expect(screen.getByLabelText('Field 2 id').value).toBe('pair_key')
-  expect(screen.getByLabelText('Field 100 id').value).toBe('extra_97')
-  expect(screen.queryByLabelText('Field 101 id')).toBeNull()
+  render(<OpsWorkspaceGround {...harness.props} />)
+  await loaded()
+  await openOriginal()
+  mapOriginal('')
+  const fieldId = (index) => within(screen.getByText(`Import field ${index}`, { exact: true, selector: 'legend' }).closest('fieldset')).getByLabelText(`Field ${index} id`).value
+  expect(fieldId(1)).toBe('account')
+  expect(fieldId(2)).toBe('pair_key')
+  expect(fieldId(100)).toBe('extra_97')
+  expect(screen.queryByText('Import field 101', { exact: true, selector: 'legend' })).toBeNull()
+  const ids = screen.getAllByText(/^Import field \d+$/, { selector: 'legend' }).map((legend, index) => within(legend.closest('fieldset')).getByLabelText(`Field ${index + 1} id`).value)
+  expect(ids).toEqual(['account', 'pair_key', ...Array.from({ length: 98 }, (_, index) => `extra_${index}`)])
+  for (const excluded of ['constructor', 'prototype', '__proto__']) expect(ids).not.toContain(excluded)
   expect(importPosts(harness.fetchImpl)).toHaveLength(0)
 })
 it.each(['account', 'pair_key', 'remaining_pct', String.raw`acc\u006funt`])('refuses duplicate original JSON member %s before mapping', async key => {
@@ -1181,6 +1214,23 @@ it('retries the failed dataset page cursor while retaining the previous page unt
   expect(selected.queryByText(/Previous result/)).toBeNull()
   expect(selected.queryByRole('alert')).toBeNull()
   expect(selected.queryByRole('button', { name: 'Load more' })).toBeNull()
+})
+it('bounds saved-view discovery on initial and continuation pages without dropping views', async () => {
+  const { props } = setup()
+  const other = { element: { ...element, id: 'other-view', title: 'Other view' }, revision: 1 }
+  const list = vi.spyOn(props.client, 'listElements').mockImplementation(async (_, options) => {
+    if (options.limit !== 1) throw new Error('The catalog exceeded its validation budget.')
+    return options.after === 'next-view' ? page([other]) : { records: [saved], nextCursor: 'next-view' }
+  })
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  expect(screen.getByRole('button', { name: 'Order view · revision 2' })).toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: 'Load more saved views' }))
+  expect(await screen.findByRole('button', { name: 'Other view · revision 1' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Order view · revision 2' })).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Load more saved views' })).toBeNull()
+  expect(list.mock.calls.map(([, options]) => ({ limit: options.limit, after: options.after })))
+    .toEqual([{ limit: 1, after: undefined }, { limit: 1, after: 'next-view' }])
 })
 it.each(['datasets', 'elements'])('gives a failed %s list its own global retry after a retained-read failure', async (resource) => {
   const { props } = setup()

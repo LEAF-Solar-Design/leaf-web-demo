@@ -92,6 +92,22 @@ class ChangeSet:
 
 
 @dataclass(frozen=True)
+class StageAttemptFailure:
+    tenant_id: str
+    change_set_id: str
+    failed_version: int
+    attempt: int
+    reason_code: Optional[str]
+    reason_message: Optional[str]
+    retryable: bool
+    authority_session_id: Optional[str]
+    authority_turn_id: Optional[str]
+    finished_at: Optional[str]
+    retry_authority_session_id: str
+    retry_authority_turn_id: str
+
+
+@dataclass(frozen=True)
 class EffectiveCatalog:
     tenant_id: str
     change_set_id: str

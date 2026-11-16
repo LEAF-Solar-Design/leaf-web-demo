@@ -12,6 +12,7 @@ so the demo runs before Lane B lands, and it also backs authored tools.
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple
 
@@ -66,10 +67,22 @@ def _bounds(polylines: List[Dict[str, Any]]) -> Tuple[float, float, float, float
 # --------------------------------------------------------------------------- #
 # tool op implementations. Each returns (result_dict, overlay_or_none).
 # --------------------------------------------------------------------------- #
-def op_count_by_layer(intake: Dict[str, Any], params: Dict[str, Any]) -> Tuple[dict, dict | None]:
+def op_count_by_layer(intake: Dict[str, Any], params: Dict[str, Any]) -> Tuple[dict, dict | None] | dict:
     layer = params.get("layer")
     counts = _all_entities_by_layer(intake)
     if layer:
+        layers = intake.get("layers") or []
+        if layer not in counts and not any(
+                layer == (row.get("name") if isinstance(row, dict) else row)
+                for row in layers):
+            from envelopes import ErrorCode, err_envelope
+            name = "".join(c for c in layer if not unicodedata.category(c).startswith("C"))[:200]
+            body = err_envelope(ErrorCode.BAD_PARAMS,
+                f'Layer "{name}" is not in this drawing.', False, tool="count-by-layer",
+                version="1.0.0")
+            body["error"].update(reason_code="LAYER_NOT_FOUND",
+                next_action="Choose a layer from the drawing's layer list.")
+            return body
         counts = {layer: counts.get(layer, 0)}
     return ({"counts": counts, "total": sum(counts.values())}, None)
 
@@ -155,7 +168,7 @@ def resolve_op(engine_op: str) -> str | None:
     return OP_ALIASES.get(engine_op)
 
 
-def run_op(engine_op: str, intake: Dict[str, Any], params: Dict[str, Any]) -> Tuple[dict, dict | None]:
+def run_op(engine_op: str, intake: Dict[str, Any], params: Dict[str, Any]) -> Tuple[dict, dict | None] | dict:
     canonical = resolve_op(engine_op)
     if canonical is None:
         raise KeyError(f"unknown engine_op: {engine_op!r}")

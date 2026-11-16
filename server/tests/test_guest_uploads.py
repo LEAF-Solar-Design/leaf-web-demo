@@ -366,6 +366,36 @@ def test_guest_and_account_upload_id_mints_keep_distinct_syntax():
     assert str(uuid.UUID(account_id)) == account_id
 
 
+def test_upload_cap_defaults_and_override(monkeypatch):
+    monkeypatch.delenv("LEAF_UPLOAD_MAX_BYTES", raising=False)
+    assert guest_uploads.max_upload_bytes() == 64 * 1024 * 1024
+    monkeypatch.setenv("LEAF_UPLOAD_MAX_BYTES", "invalid")
+    assert guest_uploads.max_upload_bytes() == 64 * 1024 * 1024
+    monkeypatch.setenv("LEAF_UPLOAD_MAX_BYTES", "1024")
+    assert guest_uploads.max_upload_bytes() == 1024
+
+
+def test_upload_cap_accepts_large_dwg_unchanged(client, monkeypatch):
+    import hashlib
+
+    monkeypatch.delenv("LEAF_UPLOAD_MAX_BYTES", raising=False)
+    monkeypatch.setattr(guest_uploads, "start_extraction_thread", lambda *_: None)
+    monkeypatch.setattr(uploads_router.dwg_convert, "available", lambda: True)
+    data = b"AC1032" + b"x" * (26 * 1024 * 1024)
+    response = client.post(
+        "/api/drawings/upload",
+        files={"file": ("large.dwg", io.BytesIO(data))},
+        data={"engine": "local"},
+    )
+    assert response.status_code == 202, response.text
+    body = response.json()
+    staged = guest_uploads.staged_path(body["tenant_id"], body["drawing_id"], ".dwg")
+    assert hashlib.sha256(staged.read_bytes()).digest() == hashlib.sha256(data).digest()
+    backend = write_loop.upload_backend_for_tenant(body["tenant_id"])
+    marker = guest_uploads.read_marker(backend, body["tenant_id"], body["drawing_id"])
+    assert marker["content_sha256"] == hashlib.sha256(data).hexdigest()
+
+
 def test_upload_oversize_413(client, monkeypatch):
     monkeypatch.setenv("LEAF_UPLOAD_MAX_BYTES", "64")
     r = _upload(client, data=b"0\nSECTION\n" + b"x" * 100 + b"\nENTITIES\n")

@@ -1,6 +1,6 @@
 """Manifest validation, evidence collection, and atomic grading receipts."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 import tempfile
 from urllib.parse import urlsplit
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 
 EXIT_PASS = 0
@@ -22,6 +22,7 @@ GRADE_SCHEMA = "leaf.xbench.grade.v1"
 MAX_MANIFEST_BYTES = 1_048_576
 MAX_FIXTURES = 200
 HASH_CHUNK = 1_048_576
+HEALTH_USER_AGENT = "Mozilla/5.0 leaf-xbench-grader"
 _VERDICTS = ("PASS", "FAIL", "UNREADABLE")
 
 
@@ -142,7 +143,9 @@ def read_health(base, timeout=10.0, opener=None):
     try:
         url = base.rstrip("/") + "/api/health"
         if opener is None:
-            with urlopen(url, timeout=timeout) as response:
+            request = Request(url, headers={"User-Agent": HEALTH_USER_AGENT,
+                                            "Accept": "application/json"})
+            with urlopen(request, timeout=timeout) as response:
                 raw = response.read(1_048_576)
         else:
             raw = opener(url, timeout)
@@ -202,7 +205,7 @@ def _json_value(value):
 
 
 def write_grade(out_dir, *, bench, verdict, source_sha, manifest_sha256,
-                started_at, finished_at, steps, fixtures, limits=""):
+                started_at, finished_at, steps, fixtures, limits="", options=None):
     if bench not in BENCH_IDS or verdict not in _VERDICTS:
         raise ValueError("invalid bench or verdict")
     if not _hex(source_sha, 40) and not (source_sha is None and verdict == "UNREADABLE"):
@@ -220,6 +223,7 @@ def write_grade(out_dir, *, bench, verdict, source_sha, manifest_sha256,
                   for step in sorted(steps, key=lambda step: step.n)],
         "fixtures": fixtures,
         "limits": limits,
+        "options": {} if options is None else options,
     }
     return write_json_atomic(Path(out_dir) / "grade.json", payload)
 
@@ -245,3 +249,4 @@ class BenchContext:
     out_dir: Path
     source_sha: str
     fixtures: list
+    options: dict = field(default_factory=dict)

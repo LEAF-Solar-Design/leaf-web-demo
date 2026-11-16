@@ -63,7 +63,7 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             "binary DXF is not supported; re-save this drawing as ASCII DXF "
             "or upload the DWG instead")
     try:
-        text = raw.decode("utf-8", errors="replace")
+        text = raw.decode("utf-8-sig", errors="replace")
     except Exception as exc:  # pragma: no cover - decode with replace cannot raise
         raise DxfParseError(f"undecodable DXF: {exc}") from exc
 
@@ -456,6 +456,8 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
                 entity["dimensionRef"] = True
     if parse_errors:
         out["parseErrors"] = parse_errors
+    from drawing_dependency_report import from_pairs
+    out["dependency_report"] = from_pairs(pairs)
     return out
 
 
@@ -594,6 +596,11 @@ def _parse_insert(pairs, i, dropped=None):
     groups, i = _entity_groups(pairs, i)
     normal = _group_point(groups, 210, (0.0, 0.0, 1.0))
     point = _ocs_to_wcs(_group_point(groups), normal)
+    array = {}
+    if any(code in groups for code in (70, 71, 44, 45)):
+        array = {"columns": _int(groups.get(70, "1")), "rows": _int(groups.get(71, "1")),
+                 "column_spacing": _float(groups.get(44, "0")),
+                 "row_spacing": _float(groups.get(45, "0"))}
     # Match the IN parser's existing x/y/z and nrm keys, including WCS position.
     return {"name": groups.get(2, ""), "layer": groups.get(8, "0") or "0",
             "x": round(point[0], 3), "y": round(point[1], 3), "z": round(point[2], 3),
@@ -601,6 +608,7 @@ def _parse_insert(pairs, i, dropped=None):
             "nrm": [round(v, 6) for v in normal],
             "scale": [_float(groups.get(code, "1")) for code in (41, 42, 43)],
             "handle": groups.get(5, ""),
+            **array,
             "_properties": _entity_properties(
                 groups.get(62), groups.get(6), groups.get(370), groups.get(420), dropped)}, i
 

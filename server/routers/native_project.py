@@ -19,6 +19,7 @@ router = APIRouter(prefix='/api/projects/{project_id}/native/source')
 _PATH = re.compile(r'^/api/projects/[^/]+/native/source(?:/.*)?$')
 _PRIVATE = {'Cache-Control': 'private, no-store'}
 _LOCAL_REFUSAL = object()
+_LOCAL_INITIALIZER = object()
 
 
 async def no_store_responses(request, call_next):
@@ -29,6 +30,10 @@ async def no_store_responses(request, call_next):
             if (response.status_code == 503 and isinstance(known, tuple) and len(known) == 2
                     and known[0] is _LOCAL_REFUSAL):
                 return _response(known[1], 503)
+            initializer = request.scope.get('_native_source_initializer_failure')
+            if (response.status_code == 503 and isinstance(initializer, tuple) and len(initializer) == 2
+                    and initializer[0] is _LOCAL_INITIALIZER):
+                return _response(initializer[1], 503)
             status = response.status_code
             status = 403 if status == 401 else (status if status in flow._ERRORS else 503)
             return _failure(flow.FlowError(status))
@@ -43,8 +48,20 @@ def _response(value, status=200):
     return JSONResponse(value, status_code=status, headers=_PRIVATE)
 
 
-def _failure(exc):
-    return _response({'error': {'code': exc.code, 'message': str(exc)}}, exc.status)
+def _failure(exc, request=None):
+    error = {'code': exc.code, 'message': str(exc)}
+    diagnostic = getattr(exc, 'public_diagnostic', {})
+    if exc.status == 503 and exc.code == 'author_unavailable' and type(diagnostic) is dict:
+        # The shared FlowError producer validates values; copy only the public contract.
+        keys = ('source_request_id', 'correlation_id', 'phase', 'author_subphase', 'author_http_status')
+        if all(key in diagnostic for key in keys[:-1]):
+            error.update({key: diagnostic[key] for key in keys if key in diagnostic})
+            error['message'] = 'Project source initialization failed. Review the original request before retrying.'
+    value = {'error': error}
+    response = _response(value, exc.status)
+    if request is not None and 'correlation_id' in error:
+        request.scope['_native_source_initializer_failure'] = (_LOCAL_INITIALIZER, value)
+    return response
 
 
 async def _raw(request):
@@ -223,7 +240,7 @@ async def _post(project_id, request, tenant, action, edit_id=None):
                 response = _response(value, 503)
                 request.scope['_native_source_pre_generation_refusal'] = (_LOCAL_REFUSAL, value)
                 return response
-        return _failure(exc)
+        return _failure(exc, request)
     except Exception:
         return _failure(flow.FlowError(503))
 

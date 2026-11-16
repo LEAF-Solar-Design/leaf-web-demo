@@ -65,6 +65,29 @@ afterEach(() => {
 })
 
 describe('shared project original reference intake', () => {
+  it.each(['beforeinput', 'paste'])('refuses raw comma input through %s before numeric sanitization', async kind => {
+    listProjectReferences.mockResolvedValue({ materials: [arloMaterial] })
+    registerProjectArloInput.mockResolvedValue(arloInput)
+    render(<ReferenceMaterialIntake projectId={project} orgId={orgId} onRunArlo={vi.fn()} />)
+    await ready()
+    fireEvent.click(screen.getByRole('button', { name: 'Edit constraints' }))
+    const field = await screen.findByLabelText('requirements.labor_rate')
+    field.focus()
+    const event = kind === 'paste' ? new Event('paste', { bubbles: true, cancelable: true })
+      : new InputEvent('beforeinput', { bubbles: true, cancelable: true, data: '1,25', inputType: 'insertText' })
+    if (kind === 'paste') Object.defineProperty(event, 'clipboardData', { value: { getData: () => '1,25' } })
+    act(() => field.dispatchEvent(event))
+    expect(event.defaultPrevented).toBe(true)
+    expect(field.value).toBe(String(arloInput.request.requirements.labor_rate))
+    expect(field.getAttribute('aria-invalid')).toBe('true')
+    expect(screen.getByRole('alert').textContent).toContain('uses a period for decimals')
+    expect(document.activeElement).toBe(field)
+    expect(reviseProjectArloInput).not.toHaveBeenCalled()
+    expect(screen.getByText(/Active input:/).textContent).toContain(arloInput.input_version_id)
+    fireEvent.change(field, { target: { value: '1.25' } })
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
   for (const destination of ['unchanged', 'other control', 'page body', 'retired project']) {
     it(`recovers rejected save focus without stealing focus from ${destination}`, async () => {
       let reject

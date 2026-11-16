@@ -303,6 +303,7 @@ describe('project Solar read ownership', () => {
       catalog_unavailable: 'Refresh the Solar tools before reading this output.',
       catalog_refreshing: 'Refreshing the Solar tools. Your inputs are kept.',
       tool_not_admitted: 'This Solar tool is no longer available for this project. Close it to continue.',
+      write_access_required: 'You do not have write access for this Solar step. Ask a project owner to review your access before trying again.',
       params_schema_changed: 'This Solar tool changed. Close and reopen it to use the new inputs.',
       unsupported: 'This tool is not available in the project Solar workspace.',
       host_unavailable: 'This editor is not available in the project Solar workspace.',
