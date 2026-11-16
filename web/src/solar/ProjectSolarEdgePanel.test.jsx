@@ -70,6 +70,25 @@ async function report() {
   fireEvent.click(screen.getByRole('button', { name: 'Build report' }))
   await screen.findByRole('region', { name: 'Report review' })
 }
+
+it.each([
+  [401, 'Tracking labels were not staged. Sign in again before trying to save.'],
+  [403, 'Tracking labels were not staged. Ask a project owner to review your access before trying again.'],
+])('S02 preserves an acceptance refusal with status %s as actionable guidance', async (status, message) => {
+  const { props } = setup({ reportCounts: { ...counts, frames: 2, assigned_panels: 1, unassigned_panels: 1 } })
+  props.onProjectSubmit.mockResolvedValue({ ok: false, status, reason: status === 401 ? 'UNAUTHENTICATED' : 'FORBIDDEN' })
+  await upload(); await report()
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Save matched tracking and keep unresolved groups for correction' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Save matched tracking' }))
+  await screen.findByText(message)
+  expect(props.onProjectSubmit).toHaveBeenCalledTimes(1)
+  expect(screen.queryByText('Matched tracking sent for a partial save. Unresolved groups still need correction.')).toBeNull()
+  expect(screen.getByRole('region', { name: 'Report review' })).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: 'Save matched tracking' }))
+  await waitFor(() => expect(props.onProjectSubmit).toHaveBeenCalledTimes(2))
+  expect(props.newProjectIntentKey).toHaveBeenCalledTimes(1)
+  expect(props.onProjectSubmit.mock.calls[1][0]).toBe(props.onProjectSubmit.mock.calls[0][0])
+})
 it('previews and submits an explicitly chosen partial policy through the bound project rail', async () => {
   const { props } = setup({ reportCounts: { ...counts, frames: 2, assigned_panels: 1, unassigned_panels: 1 } })
   await upload(); await report()

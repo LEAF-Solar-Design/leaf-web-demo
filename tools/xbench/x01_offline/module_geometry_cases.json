@@ -1,0 +1,59 @@
+{
+  "schema": "x01.offline.geometry.v1",
+  "units": "inch",
+  "conventions": {
+    "point": "2D module reference point; every occurrence has a separate stable object ID",
+    "transform": "Apply inserts in listed innermost-to-outermost order: subtract base, component scale, counterclockwise rotation, add insertion",
+    "matching": "First pair handles occurring exactly once on each side, even if moved. For remaining occurrences sort all candidate edges within tolerance by (Euclidean distance, original ID, export ID), greedily consume each endpoint once. Never collapse handles. Occurrence IDs encode explicit block paths.",
+    "tolerance_inch": 0.5,
+    "comparison_epsilon": 1e-10,
+    "diagnostics": "MOVED for paired distance above tolerance; MISSING and EXTRA for unmatched occurrences. PASS only when diagnostics empty."
+  },
+  "cases": [
+    {
+      "id": "duplicate_handles_occurrence_paths",
+      "original": [{"id":"o/block1/module","handle":"D","point":[0,0]}, {"id":"o/block2/module","handle":"D","point":[4,0]}],
+      "export": [{"id":"e/block2/module","handle":"D","point":[4,0]}, {"id":"e/block1/module","handle":"D","point":[0,0]}],
+      "expected": {"world":{"o/block1/module":[0,0],"o/block2/module":[4,0],"e/block1/module":[0,0],"e/block2/module":[4,0]},"pairs":[["o/block1/module","e/block1/module"],["o/block2/module","e/block2/module"]],"counts":{"original":2,"export":2,"matched":2,"moved":0,"missing":0,"extra":0},"diagnostics":[],"verdict":"PASS"}
+    },
+    {
+      "id":"nearest_neighbor_one_to_one",
+      "original":[{"id":"o/a","handle":"D","point":[0,0]},{"id":"o/b","handle":"D","point":[0.4,0]}],
+      "export":[{"id":"e/a","handle":"X","point":[0.1,0]},{"id":"e/b","handle":"X","point":[0.45,0]}],
+      "expected":{"world":{"o/a":[0,0],"o/b":[0.4,0],"e/a":[0.1,0],"e/b":[0.45,0]},"pairs":[["o/a","e/a"],["o/b","e/b"]],"counts":{"original":2,"export":2,"matched":2,"moved":0,"missing":0,"extra":0},"diagnostics":[],"verdict":"PASS"}
+    },
+    {
+      "id":"nested_base_rotation_mirror",
+      "original":[{"id":"o/outer/inner/module","handle":"A","point":[3,4],"inserts":[{"base":[1,2],"scale":[2,1],"rotation_deg":90,"insertion":[10,0]},{"base":[2,1],"scale":[-1,2],"rotation_deg":90,"insertion":[20,30]}]}],
+      "export":[{"id":"e/flat/module","handle":"A","point":[14,24]}],
+      "expected":{"world":{"o/outer/inner/module":[14,24],"e/flat/module":[14,24]},"pairs":[["o/outer/inner/module","e/flat/module"]],"counts":{"original":1,"export":1,"matched":1,"moved":0,"missing":0,"extra":0},"diagnostics":[],"verdict":"PASS"}
+    },
+    {
+      "id":"euclidean_exact_half_inch",
+      "original":[{"id":"o/a","handle":"A","point":[0,0]}],"export":[{"id":"e/a","handle":"A","point":[0.3,0.4]}],
+      "expected":{"world":{"o/a":[0,0],"e/a":[0.3,0.4]},"pairs":[["o/a","e/a"]],"counts":{"original":1,"export":1,"matched":1,"moved":0,"missing":0,"extra":0},"diagnostics":[],"verdict":"PASS"}
+    },
+    {
+      "id":"just_below_half_inch",
+      "original":[{"id":"o/a","handle":"A","point":[0,0]}],"export":[{"id":"e/a","handle":"A","point":[0.499999,0]}],
+      "expected":{"world":{"o/a":[0,0],"e/a":[0.499999,0]},"pairs":[["o/a","e/a"]],"counts":{"original":1,"export":1,"matched":1,"moved":0,"missing":0,"extra":0},"diagnostics":[],"verdict":"PASS"}
+    },
+    {
+      "id":"just_above_half_inch",
+      "original":[{"id":"o/a","handle":"A","point":[0,0]}],"export":[{"id":"e/a","handle":"A","point":[0.500001,0]}],
+      "expected":{"world":{"o/a":[0,0],"e/a":[0.500001,0]},"pairs":[["o/a","e/a"]],"counts":{"original":1,"export":1,"matched":1,"moved":1,"missing":0,"extra":0},"diagnostics":[{"name":"MOVED","object_ids":["o/a","e/a"]}],"verdict":"FAIL"}
+    },
+    {
+      "id":"missing_extra_and_moved",
+      "original":[{"id":"o/moved","handle":"A","point":[0,0]},{"id":"o/missing","handle":"B","point":[10,0]}],
+      "export":[{"id":"e/moved","handle":"A","point":[2,0]},{"id":"e/extra","handle":"C","point":[20,0]}],
+      "expected":{"world":{"o/moved":[0,0],"o/missing":[10,0],"e/moved":[2,0],"e/extra":[20,0]},"pairs":[["o/moved","e/moved"]],"counts":{"original":2,"export":2,"matched":1,"moved":1,"missing":1,"extra":1},"diagnostics":[{"name":"EXTRA","object_ids":["e/extra"]},{"name":"MISSING","object_ids":["o/missing"]},{"name":"MOVED","object_ids":["o/moved","e/moved"]}],"verdict":"FAIL"}
+    },
+    {
+      "id":"equal_distance_id_tie",
+      "original":[{"id":"o/b","handle":"D","point":[0,0]},{"id":"o/a","handle":"D","point":[0,0]}],
+      "export":[{"id":"e/b","handle":"D","point":[0,0]},{"id":"e/a","handle":"D","point":[0,0]}],
+      "expected":{"world":{"o/a":[0,0],"o/b":[0,0],"e/a":[0,0],"e/b":[0,0]},"pairs":[["o/a","e/a"],["o/b","e/b"]],"counts":{"original":2,"export":2,"matched":2,"moved":0,"missing":0,"extra":0},"diagnostics":[],"verdict":"PASS"}
+    }
+  ]
+}
