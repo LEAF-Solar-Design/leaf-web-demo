@@ -2369,3 +2369,142 @@ assert observed == ['FAIL','FAIL','PASS']
 Both report-total checks remain PASS throughout the equal-grand-total swap.
 Derived comparisons repair independently. Actual oracle producers must supply
 independent values, owners and connections with provenance for live acceptance.
+
+## Oracle load conservation replay
+
+Within Studio X-bench X05, these synthetic checks prove arithmetic conservation
+and failure isolation for the supplied oracle maps. They do not prove that an
+independent extractor produced the maps or establish live acceptance. String
+counts scale by copying explicit unique string IDs and their connections. Panel,
+optimizer and power amounts can also scale while IDs stay fixed. Power scaling
+uses exact quarter units and Fraction references, with no panel-derived power.
+
+Run from the repository root:
+
+```python
+import sys, runpy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+component = fixtures['oracle_load_component']
+union = fixtures['union_oracle_load_components']
+envelope = fixtures['equal_count_ownership_envelope']()
+grid, evidence = union(component('left', scale=2), component('right', scale=2))
+grid['expected_grid_ids'].append('empty-grid')
+evidence['oracle_inverter_ids'].append('idle-device')
+for field in ('string_totals', 'optimizer_totals', 'panel_totals', 'dc_totals'):
+    grid[field]['empty-grid'] = 0
+for counts in evidence['inverter_loads'].values():
+    counts['idle-device'] = 0
+envelope['grid'].update(grid)
+envelope['assurance']['evidence'].update(evidence)
+def show(label):
+    result = m.reconcile_seven_steps_json(m.serialize_result(envelope))
+    loads = result['oracle_loads']
+    counts = [loads['metrics']['panels'][target+'_comparison']['mismatch_count']
+              for target in ('grid', 'inverter')]
+    print(label, loads['verdict'], *counts)
+show('conserved')
+envelope['grid']['panel_totals']['empty-grid'] = 1
+envelope['assurance']['evidence']['inverter_loads']['panels']['idle-device'] = 1
+show('phantom')
+```
+
+Expected output is `conserved PASS 0 0`, then `phantom FAIL 1 1`.
+The composed result retains all unrelated stage diagnostics. This replay replaces
+only the oracle-load projection of an existing synthetic envelope; its other
+saved material is intentionally unrelated and does not constitute a full PASS.
+A zero target needs explicit coverage. An omitted target is uncertainty, not zero.
+The disjoint-union tests additionally combine two contradictory components and a
+clean component: every metric retains four grid and four inverter mismatches.
+
+## Oracle load granularity replay
+
+Within Studio X-bench X05, a conserved grand total can hide opposite errors in
+separate grids. Coarsening is an explicit change of the supplied oracle's
+resolution. It cannot repair the finer evidence or establish live parity.
+
+From the repository root:
+
+```python
+import sys, runpy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+grid, evidence = fixtures['oracle_load_component']('fine', broken=True)
+def show(label, grid, evidence):
+    result = m._seven_step_oracle_loads(grid, evidence)
+    checks = result['metrics']['panels']
+    print(label, result['verdict'],
+          checks['grid_comparison']['mismatch_count'],
+          checks['inverter_comparison']['mismatch_count'],
+          checks['grid_report']['verdict'])
+show('fine', grid, evidence)
+coarse_grid, coarse_evidence = fixtures['coarsen_oracle_load_grids'](grid, evidence)
+show('coarse', coarse_grid, coarse_evidence)
+show('fine preserved', grid, evidence)
+```
+
+Expected output:
+
+```text
+fine FAIL 2 2 PASS
+coarse FAIL 0 2 PASS
+fine preserved FAIL 2 2 PASS
+```
+
+The independent Fraction sum preserves total panels at nine. Fine targets are
+six and three against explicit string loads three and six. The merged target
+nine equals the merged load nine, so grid localization is lost. Inverter IDs,
+connections and device diagnostics stay fixed. The original fine inputs remain
+unchanged. The same test covers strings, optimizers and exact DC power.
+
+Transport tests also keep composed diagnostics equal across direct, strict JSON
+and subprocess CLI paths for report-count and DC numeric lexemes. Report counts
+accept integral decimal or exponent numbers. Per-string panel/optimizer counts
+and grid/device count maps require integer tokens; tests retain that boundary.
+DC accepts decimal/exponent JSON numbers and signed zero, including exact
+nonzero deltas of 1e-77. Textual exponent strings are outside the numeric-string
+schema. These are format and arithmetic checks on synthetic supplied maps,
+not proof of independent extraction, customer drawing coverage or staging.
+
+## Oracle load device-granularity replay
+
+Within Studio X-bench X05, equal grid totals can hide opposite per-device
+errors. This replay uses the existing synthetic conservation helpers. It merges
+explicit device IDs, connection maps and targets without changing grid evidence.
+
+```python
+import sys, runpy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+grid, _ = fixtures['oracle_load_component']('device')
+_, evidence = fixtures['oracle_load_component']('device', broken=True)
+def show(label, grid, evidence):
+    result = m._seven_step_oracle_loads(grid, evidence)
+    checks = result['metrics']['panels']
+    print(label, result['verdict'],
+          checks['grid_comparison']['mismatch_count'],
+          checks['inverter_comparison']['mismatch_count'])
+show('fine', grid, evidence)
+coarse_grid, coarse_evidence = fixtures['coarsen_oracle_load_devices'](grid, evidence)
+show('coarse', coarse_grid, coarse_evidence)
+show('fine preserved', grid, evidence)
+```
+
+Expected output:
+
+```text
+fine FAIL 0 2
+coarse PASS 0 0
+fine preserved FAIL 0 2
+```
+
+Fine device panel targets six and three conflict with explicit connected-string
+loads three and six. Both sum to nine. The merged target nine agrees with the
+merged load, so the coarser oracle loses localization. Grid diagnostics and the
+original fine evidence remain intact. The test independently checks exact
+Fraction sums for strings, optimizers, panels and DC power. A coarse PASS proves
+only consistency at that supplied resolution. It does not repair fine device
+assignments, establish independent report extraction or accept live X05.
