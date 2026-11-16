@@ -5365,6 +5365,8 @@ def _jobs_main(g, monkeypatch, capsys, tmp_path, flags):
     monkeypatch.setattr(sys, "argv", [
         "run-all-gates.py", "--log-dir", str(tmp_path), *flags,
     ])
+    # Isolate scoreboard output from inherited memory telemetry.
+    monkeypatch.delenv("LEAF_GATE_MEM", raising=False)
     rc = g.main()
     return rc, capsys.readouterr().out
 
