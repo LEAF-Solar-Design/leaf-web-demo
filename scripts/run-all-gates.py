@@ -1932,7 +1932,11 @@ def build_suites() -> List[Suite]:
                   "tests/test_x04_packet_cross_binding.py",
                   "tests/test_x04_packet_reference_failures.py",
                   "tests/test_x04_packet_replay_chain.py",
-              ], 981),
+                  "tests/test_x04_packet_json_limits.py",
+                  "tests/test_x04_packet_publication_faults.py",
+                  "tests/test_x04_packet_reference_metamorphic.py",
+                  "tests/test_x04_packet_runtime_modes.py",
+              ], 1004),
         Suite("server-dxf-intake-lines-text", "server tests/test_dxf_intake_lines_text.py",
               "pytest", SERVER, _py_pytest("tests/test_dxf_intake_lines_text.py"), 4),
         # W4g engine reach (2026-09-04): the intake -> DXF synthesizer (the
