@@ -555,6 +555,38 @@ def reconcile_bound_seven_steps(envelope, frozen_manifest, import_binding, grid_
     return _out(verdict, "offline_bound_seven_steps", provenance=provenance, reconciliation=reconciliation)
 
 
+def reconcile_bound_seven_steps_json(text):
+    decoded = decode_evidence_json(text)
+    if decoded["verdict"] != "PASS":
+        return decoded
+    return _bound_seven_step_envelope(decoded["evidence"])
+
+
+def _bound_seven_step_envelope(envelope):
+    if type(envelope) is not dict or set(envelope) != {"envelope", "manifest", "import_binding", "grid_binding"}:
+        return _out("UNREADABLE", "bound_seven_step_envelope_unreadable")
+    return reconcile_bound_seven_steps(envelope["envelope"], envelope["manifest"],
+                                      envelope["import_binding"], envelope["grid_binding"])
+
+
+def aggregate_bound_seven_steps(expected_ids, fixtures):
+    baseline = aggregate_seven_steps(expected_ids, fixtures)
+    if "fixtures" not in baseline:
+        return baseline
+    indexed = {row["fixture_id"]: row for row in fixtures
+               if type(row) is dict and type(row.get("fixture_id")) is str}
+    results = {}
+    for key in baseline["fixtures"]:
+        row = indexed[key]
+        supplied = {name: row.get(name) for name in ("envelope", "manifest", "import_binding", "grid_binding")}
+        results[key] = _bound_seven_step_envelope(supplied)
+    if baseline["reason"] != "offline_seven_step_fixtures":
+        return {**baseline, "fixtures": results}
+    verdicts = {result["verdict"] for result in results.values()}
+    return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
+                "offline_bound_seven_step_fixtures", fixtures=results)
+
+
 def aggregate_fixtures(expected_ids, fixtures):
     """Reconcile exactly three explicitly expected fixture evidence records."""
     def identifier(value):
@@ -931,6 +963,7 @@ def main(argv=None):
     modes.add_argument("--provenance-aggregate", action="store_true", help="read three provenance envelopes")
     modes.add_argument("--assurance-aggregate", action="store_true", help="read three assurance envelopes")
     modes.add_argument("--seven-step", action="store_true", help="read one supplied seven-step envelope")
+    modes.add_argument("--seven-step-aggregate", action="store_true", help="read three supplied seven-step envelopes")
     args = parser.parse_args(argv)
     try:
         chunks, size = [], 0
@@ -948,7 +981,8 @@ def main(argv=None):
             result = _out("UNREADABLE", "json_input_too_large")
         else:
             text = raw.decode("utf-8", errors="strict")
-            decode = (reconcile_seven_steps_json if args.seven_step else
+            decode = (aggregate_seven_steps_json if args.seven_step_aggregate else
+                      reconcile_seven_steps_json if args.seven_step else
                       aggregate_assurance_json if args.assurance_aggregate else
                       reconcile_assurance_json if args.assurance else
                       aggregate_provenance_json if args.provenance_aggregate else

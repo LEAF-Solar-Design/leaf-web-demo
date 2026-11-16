@@ -24,6 +24,7 @@ from benches.x05_reconcile import (METRICS, TABLE_COLUMNS, check_discrepancies,
     reconcile_seven_steps_json,
     aggregate_seven_steps, validate_import_grid_provenance,
     aggregate_seven_steps_json, reconcile_bound_seven_steps,
+    reconcile_bound_seven_steps_json, aggregate_bound_seven_steps,
     compare_csv_view, compare_recommendations, compare_snapshots, compare_strings, compare_table)
 
 
@@ -1063,7 +1064,7 @@ def test_new_cli_modes_verdicts_and_sanitized_errors(tmp_path, mode, kind, exit_
 
 
 @pytest.mark.parametrize("left,right", list(combinations(
-    ["--aggregate", "--provenance", "--assurance", "--provenance-aggregate", "--assurance-aggregate", "--seven-step"], 2)))
+    ["--aggregate", "--provenance", "--assurance", "--provenance-aggregate", "--assurance-aggregate", "--seven-step", "--seven-step-aggregate"], 2)))
 def test_cli_modes_are_pairwise_exclusive(tmp_path, left, right):
     import subprocess
     import sys
@@ -2684,3 +2685,107 @@ def test_seven_step_aggregate_deterministic_subprocess_mutation_orders(tmp_path)
             assert json.loads(result.stdout)["fixtures"][expected[2]]["verdict"] == "PASS"
             outputs.append(result.stdout)
     assert len(set(outputs)) == 1
+
+
+@pytest.mark.parametrize("kind,code", [("PASS",0),("FAIL",1),("UNREADABLE",4)])
+def test_seven_step_aggregate_cli_verdicts_and_siblings(tmp_path, kind, code):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from benches import x05_reconcile as module
+    expected, records = seven_fixture_records()
+    if kind != "PASS":
+        records[0]["envelope"]["import"]["normal_user"] = False
+    if kind == "UNREADABLE":
+        records[1]["envelope"]["grid"] = None
+    result = subprocess.run([sys.executable,"-P",str(Path(module.__file__).resolve()),"--seven-step-aggregate"],
+        input=json.dumps(dict(expected_ids=expected,fixtures=records)).encode(),capture_output=True,cwd=tmp_path,timeout=20)
+    assert result.returncode == code and not result.stderr and len(result.stdout.splitlines()) == 1
+    observed = json.loads(result.stdout)
+    assert observed["verdict"] == kind and observed["fixtures"][expected[2]]["verdict"] == "PASS"
+
+
+def bound_seven_envelope():
+    envelope = seven_step_envelope()
+    manifest = deepcopy(envelope["assurance"]["manifest"])
+    return dict(envelope=envelope,manifest=manifest,import_binding=deepcopy(manifest),grid_binding=deepcopy(manifest))
+
+
+def test_strict_bound_seven_step_json_envelope_and_duplicate_rejection():
+    source = bound_seven_envelope()
+    assert reconcile_bound_seven_steps_json(json.dumps(source))["verdict"] == "PASS"
+    for field in source:
+        changed = deepcopy(source)
+        del changed[field]
+        assert reconcile_bound_seven_steps_json(json.dumps(changed))["reason"] == "bound_seven_step_envelope_unreadable"
+    assert reconcile_bound_seven_steps_json('{"envelope":{},"envelope":{}}')["reason"] == "json_duplicate_key"
+    assert reconcile_bound_seven_steps_json(' '*(MAX_JSON_CHARS+1))["reason"] == "json_input_too_large"
+    source["import_binding"]["inputs"]["dwg"] = "d"*64
+    result = reconcile_bound_seven_steps_json(json.dumps(source))
+    assert result["verdict"] == "UNREADABLE" and result["reconciliation"]["verdict"] == "PASS"
+
+
+def test_bound_seven_step_fixture_aggregation_swaps_preserve_siblings():
+    expected, records = seven_fixture_records()
+    for row in records:
+        manifest = deepcopy(row["envelope"]["assurance"]["manifest"])
+        row.update(manifest=manifest,import_binding=deepcopy(manifest),grid_binding=deepcopy(manifest))
+    baseline = aggregate_bound_seven_steps(expected,records)
+    assert baseline["verdict"] == "PASS"
+    for field in ("import_binding","grid_binding"):
+        changed = deepcopy(records)
+        changed[0][field],changed[1][field] = changed[1][field],changed[0][field]
+        preserved = deepcopy(changed)
+        result = aggregate_bound_seven_steps(expected,changed)
+        assert result["verdict"] == "UNREADABLE"
+        assert result["fixtures"][expected[2]] == baseline["fixtures"][expected[2]]
+        for key in expected[:2]:
+            assert result["fixtures"][key]["provenance"]["reason"] == "import_grid_binding_conflict"
+            assert result["fixtures"][key]["reconciliation"]["verdict"] == "PASS"
+        assert changed == preserved
+    duplicate = [dict(fixture_id=expected[0],envelope=None)]+records
+    assert expected[0] not in aggregate_bound_seven_steps(expected,duplicate)["fixtures"]
+
+
+def test_seven_step_aggregate_direct_json_mutation_diagnostics_match():
+    expected, base = seven_fixture_records()
+    corpus = [base,base[:2]]
+    for stage in ("import","grid","assurance"):
+        altered = deepcopy(base)
+        altered[0]["envelope"][stage] = None
+        corpus.append(altered)
+    altered = deepcopy(base)
+    altered[0]["envelope"]["import"]["normal_user"] = False
+    corpus.append(altered)
+    altered = deepcopy(base)
+    del altered[0]["envelope"]["grid"]
+    corpus.append(altered)
+    for records in corpus:
+        preserved = deepcopy(records)
+        direct = aggregate_seven_steps(expected,records)
+        decoded = aggregate_seven_steps_json(json.dumps(dict(expected_ids=expected,fixtures=records)))
+        assert json.loads(serialize_result(direct)) == json.loads(serialize_result(decoded))
+        assert records == preserved
+
+
+def test_aggregate_combined_output_budget_is_sanitized_before_emission(monkeypatch):
+    from io import BytesIO
+    from types import SimpleNamespace
+    import sys
+    from benches import x05_reconcile as module
+    fixtures = {key:dict(verdict="PASS",reason="synthetic",payload="x"*90000,count=123456)
+                for key in ("a","b","c")}
+    for value in fixtures.values():
+        assert len(serialize_result(value)) < MAX_RESULT_CHARS
+    combined = dict(verdict="PASS",reason="offline_seven_step_fixtures",fixtures=fixtures)
+    with pytest.raises(ValueError,match="^json_result_too_large$"):
+        serialize_result(combined)
+    # Controlled result injection exercises the CLI emission boundary.
+    monkeypatch.setattr(module,"aggregate_seven_steps_json",lambda text:combined)
+    output,errors = StringIO(),StringIO()
+    monkeypatch.setattr(sys,"stdin",SimpleNamespace(buffer=BytesIO(b"{}")))
+    monkeypatch.setattr(sys,"stdout",output)
+    monkeypatch.setattr(sys,"stderr",errors)
+    assert module.main(["--seven-step-aggregate"]) == 4 and not errors.getvalue()
+    assert output.getvalue() == '{"reason":"json_result_too_large","verdict":"UNREADABLE"}\n'
+    assert all(value["count"] == 123456 for value in fixtures.values())

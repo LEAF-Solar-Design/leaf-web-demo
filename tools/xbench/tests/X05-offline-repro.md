@@ -756,6 +756,62 @@ The correction preserves independent sibling diagnostics and demonstrates the
 aggregate precedence for supplied synthetic evidence. Live acquisition and
 frozen-origin authentication remain required by the X05 acceptance contract.
 
+`--seven-step-aggregate` exposes the existing aggregate JSON helper, with
+0/1/4/5 result/output exits and mutual exclusion with every other mode.
+`reconcile_bound_seven_steps_json(text)` requires exactly `envelope`, `manifest`,
+`import_binding` and `grid_binding`. It uses the existing bounded strict decoder.
+`aggregate_bound_seven_steps(expected_ids, fixtures)` expects three records with
+`fixture_id` and those four fields. Swapped import/grid claims become UNREADABLE
+while each fixture's seven-step diagnostics and readable siblings remain visible.
+
+Output-budget tests inject a controlled synthetic aggregate result into the CLI
+producer. Each fixture fits alone, but their combined serialized result exceeds
+262144 characters. The CLI emits only the fixed `json_result_too_large` result
+and exit4, retaining the original counts in caller-owned data. This exercises
+the emission boundary without claiming a live producer generated that shape.
+
+Executable bound seven-step replay (synthetic source-only builder, requires
+pytest):
+
+```powershell
+@'
+import sys, runpy, json
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import reconcile_bound_seven_steps_json
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+base = builders['bound_seven_envelope']()
+print(reconcile_bound_seven_steps_json(json.dumps(base))['verdict'])
+for stage in ['import', 'grid']:
+    changed = deepcopy(base)
+    changed[stage + '_binding']['inputs']['report'] = 'd'*64
+    result = reconcile_bound_seven_steps_json(json.dumps(changed))
+    print(stage, result['verdict'], result['provenance']['reason'], result['reconciliation']['verdict'])
+changed = deepcopy(base)
+changed['import_binding']['inputs']['report'] = 'd'*64
+changed['envelope']['assurance']['inputs_hex']['report'] = b'swapped'.hex()
+changed['envelope']['import']['normal_user'] = False
+result = reconcile_bound_seven_steps_json(json.dumps(changed))
+print(result['verdict'], result['reconciliation']['assurance']['checks']['input_bytes']['reason'],
+      result['reconciliation']['steps']['1']['verdict'])
+print('corrected', reconcile_bound_seven_steps_json(json.dumps(base))['verdict'])
+'@ | python -P
+```
+
+Exact stdout:
+
+```text
+PASS
+import UNREADABLE import_grid_binding_conflict PASS
+grid UNREADABLE import_grid_binding_conflict PASS
+UNREADABLE input_digest_conflict FAIL
+corrected PASS
+```
+
+The supplied manifest and bindings are synthetic claims. Agreement validates
+their consistency while frozen-origin authentication and live acquisition are
+established by the separate bench acceptance process.
+
 Canonical snapshot compatibility contract:
 
 - Hash UTF-8 bytes of compact JSON arrays with ASCII escapes and no spaces.
