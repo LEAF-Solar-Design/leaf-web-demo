@@ -1,17 +1,28 @@
 """Synthetic first-blocker coverage; no browser, customer files or network."""
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import json
 from pathlib import Path
 import sys
 import tempfile
+import struct
 import unittest
 from unittest.mock import MagicMock, patch
 from decimal import Decimal
+from types import SimpleNamespace
+import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from benches import x10
 from xbench_core import BenchContext, aggregate
+
+
+def tiny_png():
+    def chunk(kind, data):
+        return (struct.pack(">I", len(data)) + kind + data
+                + struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(b"\x00\x00\x00\x00")) + chunk(b"IEND", b""))
 
 
 class ClassificationTests(unittest.TestCase):
@@ -107,7 +118,8 @@ class FixtureTests(unittest.TestCase):
         self.assertIsInstance(total, Decimal)
 
     def test_bad_binding_or_receipt_prevents_browser(self):
-        for mode in ("config", "missing", "role", "hash", "unverified", "duplicate"):
+        for mode in ("config", "missing", "role", "hash", "unverified", "duplicate",
+                     "manifest-identical", "manifest-conflict", "receipt-identical", "receipt-conflict"):
             with self.subTest(mode=mode):
                 original = json.loads(json.dumps(self.ctx.manifest))
                 receipts = [dict(row) for row in self.ctx.fixtures]
@@ -121,8 +133,14 @@ class FixtureTests(unittest.TestCase):
                     self.ctx.fixtures[0]["sha256"] = "c" * 64
                 elif mode == "unverified":
                     self.ctx.fixtures[0]["ok"] = False
-                else:
+                elif mode == "duplicate":
                     self.ctx.manifest["x10"]["fixtures"]["terrain"] = "synthetic-drawing"
+                else:
+                    rows = self.ctx.manifest["fixtures"] if mode.startswith("manifest") else self.ctx.fixtures
+                    duplicate = dict(rows[0])
+                    if mode.endswith("conflict"):
+                        duplicate["sha256"] = "c" * 64
+                    rows.append(duplicate)
                 with patch.object(x10, "signed_in") as session:
                     self.assertEqual([row.verdict for row in x10.run(self.ctx)], ["UNREADABLE"] * 6)
                     session.assert_not_called()
@@ -207,35 +225,85 @@ class FixtureTests(unittest.TestCase):
         self.assertNotIn("app_header_names", observed)
         self.assertEqual(x10.classify(observed)[0].verdict, "FAIL")
 
-    def test_material_upload_and_board_preview_use_normal_controls(self):
+    def import_page(self, sentence):
         page = MagicMock()
         project, material, preview, attachment, marker, upload = [MagicMock() for _ in range(6)]
         project.get_attribute.return_value = "true"
-        attachment.inner_text.return_value = "Attached synthetic.dwg as version 1 to Synthetic probe"
+        attachment.inner_text.return_value = sentence
         marker.inner_text.return_value = "Project drawing version selected."
         statuses = MagicMock()
-        statuses.filter.side_effect = [attachment, marker]
+        statuses.filter.return_value = marker
+        intake = page.locator.return_value
+        intake.get_by_role.return_value.filter.return_value = attachment
+        intake.get_by_text.return_value.is_visible.return_value = False
 
         def role(kind, **kwargs):
             if kind == "status":
                 return statuses
-            return {"Project": project, "Material": material, "Preview v1 in the drawing": preview}[kwargs["name"]]
+            if kwargs["name"].startswith("Preview v"):
+                return preview
+            return {"Project": project, "Material": material}[kwargs["name"]]
 
         page.get_by_role.side_effect = role
         page.get_by_label.return_value = upload
+        return page, preview, attachment, marker, upload
+
+    def test_material_upload_and_board_preview_use_normal_controls(self):
         config, bound, _, _ = x10.bindings(self.ctx)
-        observation = {}
-        x10._import_primary(page, self.ctx, config, bound, observation)
-        page.get_by_label.assert_called_once_with("Drawing file", exact=True)
-        page.locator.assert_not_called()
-        upload.set_input_files.assert_called_once_with(str(bound["drawing"]), timeout=15_000)
-        attachment.wait_for.assert_called_once_with(state="visible", timeout=180_000)
-        preview.click.assert_called_once()
-        marker.wait_for.assert_called_once()
-        self.assertTrue(observation["imported_version_selected"])
-        self.assertEqual(observation["version_selection_status"], "Project drawing version selected.")
-        self.assertNotIn("synthetic.dwg", observation["attachment_status"])
-        self.assertNotIn("Synthetic probe", observation["attachment_status"])
+        for sequence in (1, 2):
+            with self.subTest(sequence=sequence):
+                page, preview, attachment, marker, upload = self.import_page(
+                    "Attached synthetic.dwg as version " + str(sequence) + " to Synthetic probe")
+                observation = {}
+                x10._import_primary(page, self.ctx, config, bound, observation)
+                page.get_by_label.assert_called_once_with("Drawing file", exact=True)
+                page.get_by_role.assert_any_call("button", name="Preview v" + str(sequence) + " in the drawing", exact=True)
+                upload.set_input_files.assert_called_once_with(str(bound["drawing"]), timeout=15_000)
+                attachment.or_.return_value.first.wait_for.assert_called_once_with(state="visible", timeout=180_000)
+                preview.click.assert_called_once()
+                marker.wait_for.assert_called_once()
+                self.assertTrue(observation["imported_version_selected"])
+                self.assertEqual(observation["selected_sequence"], sequence)
+                self.assertNotIn("synthetic.dwg", observation["attachment_status"])
+                self.assertNotIn("Synthetic probe", observation["attachment_status"])
+
+    def test_malformed_versions_refuse_before_selection(self):
+        config, bound, _, _ = x10.bindings(self.ctx)
+        sentences = ["Attached synthetic.dwg to Synthetic probe"]
+        sentences += ["Attached synthetic.dwg as version " + value + " to Synthetic probe"
+                      for value in ("0", "-1", "+1", "1.2", "1e2", "1junk", "1234567890", "01", "")]
+        for sentence in sentences:
+            with self.subTest(sentence=sentence):
+                page, preview, _, _, _ = self.import_page(sentence)
+                observation = dict(fresh_project=True, evidence_saved=True)
+                with self.assertRaises(ValueError):
+                    x10._import_primary(page, self.ctx, config, bound, observation)
+                preview.click.assert_not_called()
+                self.assertEqual(aggregate(x10.classify(observation)), "UNREADABLE")
+
+    def test_import_rejection_and_timeout_are_distinct(self):
+        config, bound, _, _ = x10.bindings(self.ctx)
+        for hint in ("Choose the drawing again to retry the upload.",
+                     "Retry to attach this drawing to the project."):
+            page, preview, _, _, _ = self.import_page("")
+            intake = page.locator.return_value
+            failure = intake.get_by_text.return_value
+            failure.is_visible.return_value = True
+            failure.inner_text.return_value = hint
+            intake.get_by_role.return_value.first.inner_text.return_value = "Drawing rejected."
+            failure.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(tiny_png())
+            observation = dict(fresh_project=True)
+            self.assertFalse(x10._import_primary(page, self.ctx, config, bound, observation))
+            self.assertEqual(observation["import_rejection"], hint)
+            self.assertEqual(aggregate(x10.classify(observation)), "FAIL")
+            preview.click.assert_not_called()
+        page, preview, attachment, _, _ = self.import_page("Uploading synthetic.dwg")
+        attachment.or_.return_value.first.wait_for.side_effect = TimeoutError
+        observation = dict(fresh_project=True)
+        with self.assertRaises(TimeoutError):
+            x10._import_primary(page, self.ctx, config, bound, observation)
+        self.assertNotIn("import_rejection", observation)
+        self.assertEqual(aggregate(x10.classify(observation)), "UNREADABLE")
 
     def test_screenshot_failure_does_not_leave_scorable_evidence(self):
         def create(page, ctx, config, observation):
@@ -247,6 +315,7 @@ class FixtureTests(unittest.TestCase):
         page = MagicMock()
         picker = page.get_by_role.return_value
         picker.locator.return_value.inner_text.return_value = "Ground Mount Physical (unavailable)"
+        picker.input_value.return_value = "ground-physical"
         picker.locator.return_value.all_text_contents.return_value = ["Ground Mount Physical (unavailable)"]
         picker.inner_text.return_value = "Ground Mount Physical (unavailable)"
         picker.screenshot.side_effect = TimeoutError("private diagnostic")
@@ -260,6 +329,100 @@ class FixtureTests(unittest.TestCase):
         diagnostic = json.loads((self.ctx.out_dir / "x10-ui.json").read_text())
         self.assertEqual(diagnostic["stage"], "rendered Ground Physical evidence")
         self.assertNotIn("private diagnostic", json.dumps(diagnostic))
+
+    def test_creation_requires_post_route_and_open_response_identity(self):
+        identity = "00000000-0000-4000-8000-000000000001"
+        other = "00000000-0000-4000-8000-000000000002"
+        for route_id, active_id in ((identity, identity), (other, identity), (identity, other)):
+            with self.subTest(route_id=route_id, active_id=active_id):
+                page = MagicMock()
+                name = "Synthetic probe-" + "a" * 12
+                creation = SimpleNamespace(status=201, request=SimpleNamespace(method="POST"),
+                    url=self.ctx.base + "/api/projects", json=lambda: {"project": {"id": identity, "name": name}})
+                opened = SimpleNamespace(status=200, request=SimpleNamespace(method="GET"),
+                    url=self.ctx.base + "/api/projects/" + route_id,
+                    json=lambda: {"project": {"id": active_id, "name": name}, "private": "not retained"})
+
+                def expect(predicate, **kwargs):
+                    response = opened if predicate(opened) else creation
+                    self.assertTrue(predicate(response))
+                    manager = MagicMock()
+                    manager.__enter__.return_value.value = response
+                    return manager
+
+                page.expect_response.side_effect = expect
+                observation = {}
+                with patch.object(x10, "uuid4", return_value=SimpleNamespace(hex="a" * 32)):
+                    if route_id == active_id == identity:
+                        x10._create_project(page, self.ctx, {"project_name": "Synthetic probe"}, observation)
+                        self.assertTrue(observation["fresh_project"])
+                    else:
+                        with self.assertRaises(ValueError):
+                            x10._create_project(page, self.ctx, {"project_name": "Synthetic probe"}, observation)
+                        self.assertFalse(observation["fresh_project"])
+                self.assertNotIn("not retained", json.dumps(observation))
+                self.assertNotIn("project_name", observation)
+
+    def test_atomic_evidence_preserves_completed_generations_on_failure(self):
+        page = MagicMock()
+        surface = page.get_by_role.return_value
+        surface.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(tiny_png())
+        observation = dict(fresh_project=True, imported_version_selected=True,
+                           ground_option="Ground Mount Physical (unavailable)")
+        x10._save(page, self.ctx, observation)
+        old = observation["evidence_path"]
+        generations = list(self.ctx.out_dir.iterdir())
+        self.assertEqual(len(generations), 1)
+        saved = json.loads((generations[0] / "x10-ui.json").read_text())
+        self.assertTrue(saved["evidence_saved"])
+        self.assertIn(generations[0].name, x10.classify(observation)[0].evidence)
+        for mode in ("screenshot", "json", "invalid-png"):
+            with self.subTest(mode=mode):
+                observation.update(evidence_saved=True, evidence_path=old)
+                if mode == "screenshot":
+                    surface.screenshot.side_effect = OSError("synthetic")
+                else:
+                    data = tiny_png() if mode == "json" else b"not a PNG"
+                    surface.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(data)
+                failure = patch.object(Path, "write_text", side_effect=OSError("synthetic")) if mode == "json" else nullcontext()
+                with failure:
+                    with self.assertRaises((OSError, ValueError)):
+                        x10._save(page, self.ctx, observation)
+                self.assertFalse(observation["evidence_saved"])
+                self.assertNotIn("evidence_path", observation)
+                self.assertEqual(list(self.ctx.out_dir.iterdir()), generations)
+                self.assertEqual(aggregate(x10.classify(observation)), "UNREADABLE")
+
+    def test_ground_resamples_after_selection_and_catalog_refresh(self):
+        unavailable = "Ground Mount Physical (unavailable)"
+        available = "Ground Mount Physical (preview)"
+        for labels, texts, verdict in (([unavailable, available, available], ["Ready"] * 3, "UNREADABLE"),
+                                      ([unavailable] * 2, ["Ready"] * 2, "FAIL")):
+            page = MagicMock()
+            rail, picker = MagicMock(), MagicMock()
+            events = []
+            picker.select_option.side_effect = lambda *a, **kw: events.append("select")
+            rail.get_by_text.return_value.first.wait_for.side_effect = lambda **kw: events.append("ready")
+            page.get_by_role.side_effect = lambda role, **kw: rail if role == "navigation" else picker
+            picker.input_value.return_value = "ground-physical"
+            picker.locator.return_value.inner_text.side_effect = labels
+            rail.inner_text.side_effect = texts
+            observation = dict(fresh_project=True, imported_version_selected=True)
+            with patch.object(x10, "_save", side_effect=lambda p, c, o: o.update(evidence_saved=True)):
+                x10._ground(page, self.ctx, observation)
+            self.assertEqual(observation["ground_option"], labels[-1])
+            self.assertEqual(aggregate(x10.classify(observation)), verdict)
+            picker.locator.return_value.inner_text.assert_called()
+            self.assertGreaterEqual(rail.get_by_text.return_value.first.wait_for.call_count, 3)
+            self.assertEqual(events[:3], ["ready", "select", "ready"])
+        page = MagicMock()
+        picker = page.get_by_role.return_value
+        picker.input_value.return_value = "ground-physical"
+        picker.locator.return_value.inner_text.return_value = unavailable
+        picker.inner_text.return_value = "Checking Solar steps for the selected project drawing version."
+        with patch.object(x10, "_save") as save, self.assertRaises(ValueError):
+            x10._ground(page, self.ctx, {})
+        save.assert_not_called()
 
     def test_workflow_toggle_only_expands_closed_seat(self):
         for expanded in ("false", "true"):
