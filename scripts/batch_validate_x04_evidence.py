@@ -1,6 +1,9 @@
 """Validate an explicit ordered list of synthetic X04 artifacts offline."""
 import argparse
 from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from export_x04_offline_evidence import (
     DEFAULT_MAX_INPUT_BYTES, check_output_path, positive_byte_limit,

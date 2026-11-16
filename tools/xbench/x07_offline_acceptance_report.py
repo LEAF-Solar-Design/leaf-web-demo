@@ -7,10 +7,31 @@ from pathlib import Path
 import re
 import os
 import tempfile
+import sys
+import stat
+from contextlib import contextmanager
 
 
 class EvidenceError(ValueError):
     pass
+
+
+@contextmanager
+def regular_stream(path, refusal):
+    """Reject special paths before reading and recheck the opened descriptor."""
+    path = Path(path)
+    if not stat.S_ISREG(path.stat().st_mode):
+        raise EvidenceError(refusal)
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NONBLOCK', 0))
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise EvidenceError(refusal)
+        with os.fdopen(descriptor, 'rb') as stream:
+            descriptor = None
+            yield stream
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 REQUIRED_SOURCE_FILES = frozenset({
@@ -72,7 +93,7 @@ class SourceBudget:
         digest = hashlib.sha256()
         file_read = 0
         try:
-            with path.open('rb') as stream:
+            with regular_stream(path, 'NONREGULAR_SOURCE_FILE') as stream:
                 while True:
                     size = min(65536, self.file_bytes - file_read + 1, self.total_bytes - self.used + 1)
                     chunk = stream.read(size)
@@ -127,7 +148,7 @@ def check_json_budget(text, limits):
 
 def read_receipt(path, *, limits=None, snapshots=None):
     try:
-        with Path(path).open('rb') as stream:
+        with regular_stream(path, 'NONREGULAR_RECEIPT') as stream:
             raw = stream.read(262145)
         if len(raw) > 262144:
             raise ValueError()
@@ -278,7 +299,7 @@ def aggregate(journey_path, proof_paths, source_sha, source_root, *, limits=None
             raise EvidenceError('SOURCE_CHANGED_DURING_AGGREGATION')
     for path, expected in snapshots.items():
         try:
-            with path.open('rb') as stream:
+            with regular_stream(path, 'NONREGULAR_RECEIPT') as stream:
                 raw = stream.read(262145)
         except OSError:
             raise EvidenceError('RECEIPT_CHANGED_DURING_AGGREGATION') from None
@@ -353,7 +374,15 @@ def main():
         except OSError:
             code = 2
             encoded = json.dumps(unreadable('REPORT_PUBLICATION_FAILED'), indent=2) + '\n'
-    print(encoded, end='')
+    try:
+        print(encoded, end='')
+        sys.stdout.flush()
+    except OSError:
+        # Redirect the descriptor so interpreter shutdown cannot retry a broken
+        # buffered flush and print an ignored-exception traceback.
+        with open(os.devnull, 'w') as sink:
+            os.dup2(sink.fileno(), sys.stdout.fileno())
+        return 2
     return code
 
 

@@ -1586,7 +1586,7 @@ describe('solar refusal copy', () => {
       const source = readSource(builtin)
       const found = new Set()
       for (const match of source.matchAll(/"input_reason":\s*"([a-z][a-z0-9_]{0,63})"/g)) found.add(match[1])
-      if (source.includes('.lower()')) {
+      if (source.includes('.code.lower()')) {
         if (Object.hasOwn(DYNAMIC_HOOK_CODES, builtin)) {
           for (const code of DYNAMIC_HOOK_CODES[builtin]) found.add(code)
         } else {
@@ -1886,6 +1886,9 @@ describe('solar refusal copy', () => {
     expect(unmapped.codes).toEqual(['solar_future_code'])
     expect(uncovered(unmapped.codes)).toEqual(['solar_future_code'])
     expect(withSource('error.code.lower()').missingDynamic).toEqual(['builtins/solar_probe.py'])
+    const literalHook = withSource('installation.lower(); return {"input_reason": "capability_not_ready"}')
+    expect(literalHook.missingDynamic).toEqual([])
+    expect(literalHook.codes).toEqual(['capability_not_ready'])
     expect(hookCodes([{ readiness: { kind: 'hook' }, builtin: 'server/x.py' }], () => '').badPath)
       .toEqual(['server/x.py'])
     const silent = withSource('return {"input_ready": True}')

@@ -656,7 +656,7 @@ Complete seven-step JSON envelope:
 | Field | Required shape | Missing, null or empty behavior |
 |---|---|---|
 | `import` | Exactly `normal_user`, `dwg_imported`, `report_imported`, all bool | Missing outer field rejects envelope; null/empty object yields step1 UNREADABLE; false yields readable FAIL |
-| `grid` | Exactly `expected_grid_ids`, `saved_group_ids`, `rows`, `require_all_matched` | Missing outer field rejects envelope; null/empty object yields step2 UNREADABLE; empty rows with valid nonempty IDs yields missing-grid FAIL |
+| `grid` | `expected_grid_ids`, `saved_group_ids`, `rows`, `require_all_matched`, plus `string_assignments`, `reopened_string_assignments` and independent `optimizer_totals`, plus explicit `panel_counts`, `before_panel_counts`, `reopened_panel_counts` and independent `panel_totals`, plus explicit `dc_power`, `dc_totals`, `before_dc_power`, `reopened_dc_power` and independent `string_totals` | Missing outer field rejects envelope; null/empty object yields step2 UNREADABLE; empty rows with valid nonempty IDs yields missing-grid FAIL |
 | `assurance` | Exactly `evidence`, `manifest`, `bindings`, `inputs_hex`, `identity`, `stage_identities` | Missing outer field rejects envelope; null/empty object yields assurance UNREADABLE and absent downstream steps |
 
 Evidence and assurance schemas are the existing six-stage contracts above.
@@ -992,6 +992,55 @@ The repair restores the known synthetic source. Real evidence must come from
 the independent producer and preserve manifest custody. The guide grants no
 authority to alter frozen manifests to fit substituted product output.
 
+`validate_grid_string_ownership(expected_grid_ids, saved_string_ids, assignments)`
+requires explicit rows with exactly `grid_id` and `string_id`. Every saved string
+must occur once with an expected grid owner. Missing, duplicate and foreign
+assignments FAIL, with exact category counts and at most20 sorted IDs per category.
+Malformed inputs are UNREADABLE. Equal aggregate totals provide no ownership.
+
+Save/reopen composition now includes `row_diff` for changed rows or hash binding
+failures, with bounded deterministic string/metric diagnostics. Missing or
+malformed snapshots remain UNREADABLE. Signed discrepancy records bind both
+metric and exact signed delta. A positive revision cannot authorize its negative
+or a different metric, including tiny nonzero kW deltas. Decimal caller flags
+remain unchanged on successful and rejected numeric/snapshot/composed paths.
+
+Current offline CLI decision table:
+
+| Mode | Required envelope |
+|---|---|
+| default | Complete six-stage evidence |
+| `--aggregate` | `expected_ids`, `fixtures` with fixture evidence |
+| `--provenance` | `evidence`, `manifest`, `bindings` |
+| `--assurance` | `evidence`, `manifest`, `bindings`, `inputs_hex`, `identity`, `stage_identities` |
+| `--provenance-aggregate` | `expected_ids`, `fixtures` with evidence/manifest/bindings |
+| `--assurance-aggregate` | `expected_ids`, `fixtures` with complete assurance records |
+| `--seven-step` | `import`, `grid`, `assurance` |
+| `--seven-step-aggregate` | `expected_ids`, `fixtures` with seven-step envelopes |
+| `--seven-step-bound` | `envelope`, `manifest`, `import_binding`, `grid_binding` |
+| `--seven-step-bound-aggregate` | `expected_ids`, `fixtures` with bound records |
+
+Each evidence mode emits one ASCII JSON result and exits0 for PASS,1 for FAIL,
+4 for UNREADABLE or5 for output delivery failure. Modes are mutually exclusive.
+`--help` exits0 with usage text. Unknown options or conflicting modes exit2 with
+usage on stderr and no evidence result. For example, from the repository root:
+
+```powershell
+# Usage failure, exit2, no evidence verdict:
+python -P tools/xbench/benches/x05_reconcile.py --unknown-option
+# Malformed evidence, exit4, one fixed JSON result:
+'{' | python -P tools/xbench/benches/x05_reconcile.py --seven-step
+```
+
+The malformed-evidence command emits exactly:
+
+```json
+{"reason":"json_malformed","verdict":"UNREADABLE"}
+```
+
+These commands use synthetic stdin and source code only. They perform no network
+request or customer-file read.
+
 Canonical snapshot compatibility contract:
 
 - Hash UTF-8 bytes of compact JSON arrays with ASCII escapes and no spaces.
@@ -1108,3 +1157,516 @@ This minimal typo replay prints `UNREADABLE stage_evidence_missing`:
 It deliberately supplies a small invalid object, not complete evidence. The
 required-field deletion matrix tests the same omission rule against otherwise
 complete evidence and preserves every unaffected stage's diagnostics.
+## Explicit grid ownership replay
+
+X05's offline seven-step comparator requires `grid.string_assignments`, a list
+of `{grid_id, string_id}` rows. It checks `grid.expected_grid_ids` and the actual
+`assurance.evidence.saved_strings` IDs. Missing ownership evidence yields
+UNREADABLE while all existing step diagnostics remain available. The separate
+`ownership` result contributes to the composed verdict.
+
+Run this synthetic replay from the repository root in PowerShell.
+
+```powershell
+@'
+import sys
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import validate_grid_string_ownership, compare_grid_optimizer_totals
+saved = [dict(string_id='A', optimizers=3), dict(string_id='B', optimizers=7)]
+expected = dict(east=3, west=7)
+correct = [dict(grid_id='east', string_id='A'), dict(grid_id='west', string_id='B')]
+swapped = [dict(grid_id='west', string_id='A'), dict(grid_id='east', string_id='B')]
+for name, rows in [('swapped', swapped), ('duplicate', correct + [correct[0]]), ('corrected', correct)]:
+    ownership = validate_grid_string_ownership(list(expected), ['A', 'B'], rows)
+    totals = compare_grid_optimizer_totals(expected, saved, rows)
+    print(name, ownership['verdict'], totals['verdict'], totals['reason'])
+    if name == 'swapped':
+        assert totals['mismatch_count'] == 2
+        assert [row['delta'] for row in totals['examples']] == [4, -4]
+    if name == 'duplicate':
+        assert ownership['counts']['duplicate'] == 1
+'@ | python -P -
+```
+
+Expected output
+
+```text
+swapped PASS FAIL grid_optimizer_totals_mismatch
+duplicate FAIL FAIL grid_optimizer_ownership_invalid
+corrected PASS PASS grid_optimizer_totals_equal
+```
+
+Both grand totals are 10. Unique ownership establishes one supplied valid grid per
+string. Independently supplied per-grid totals expose this swap. These helpers
+compare supplied evidence and do not authenticate its producer. Equal-count
+strings can swap without changing per-grid totals, so string identity evidence
+remains necessary. Synthetic results do not establish live X05 acceptance.
+
+## Per-grid optimizer composition replay
+
+X05 seven-step input also requires independent `grid.optimizer_totals`, an object
+mapping each expected grid ID to an integer optimizer count. Its keys must cover
+the expected grids exactly, and its sum must equal `oracle_values.optimizers`.
+The `grid_optimizers` result retains both comparisons. Missing totals yield
+UNREADABLE while the existing steps and ownership diagnostics remain available.
+The separate pure `compare_ownership_snapshots` helper detects owner swaps across
+save/reopen even when both strings have equal optimizer counts.
+
+Run from the repository root in PowerShell.
+
+```powershell
+@'
+import sys
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import compare_grid_optimizer_totals, compare_grid_oracle_totals
+owners = [dict(grid_id='east', string_id='A'), dict(grid_id='west', string_id='B')]
+independent = dict(east=3, west=7)
+swapped = [dict(string_id='A', optimizers=7), dict(string_id='B', optimizers=3)]
+correct = [dict(string_id='A', optimizers=3), dict(string_id='B', optimizers=7)]
+for name, oracle, saved in [('swapped', independent, swapped), ('missing', None, swapped), ('corrected', independent, correct)]:
+    result = compare_grid_optimizer_totals(oracle, saved, owners)
+    print(name, sum(row['optimizers'] for row in saved), result['verdict'], result['reason'])
+    if name == 'swapped':
+        assert result['mismatch_count'] == 2
+        assert [row['delta'] for row in result['examples']] == [4, -4]
+consistency = compare_grid_oracle_totals(['east', 'west'], independent, dict(optimizers=10))
+print('report', consistency['verdict'], consistency['reason'])
+'@ | python -P -
+```
+
+Expected output
+
+```text
+swapped 10 FAIL grid_optimizer_totals_mismatch
+missing 10 UNREADABLE grid_optimizer_totals_unreadable
+corrected 10 PASS grid_optimizer_totals_equal
+report PASS grid_oracle_total_equal
+```
+
+These checks rely on explicitly supplied independent grid evidence. They acquire
+no live data and make no claim about the origin of the input.
+
+## Ownership save/reopen composition replay
+
+The seven-step input requires `grid.reopened_string_assignments` in addition to
+the saved `string_assignments`. Each map must cover the string identities in its
+respective `before_rows` or `reopened_rows` snapshot. The `ownership_reopen` result
+contributes to the composed verdict while the existing step diagnostics remain
+available. Missing reopened owners yield UNREADABLE. The pure
+`compare_grid_optimizer_snapshots` helper separately derives per-grid sums from
+each supplied snapshot's strings and owners.
+
+From the repository root, run this synthetic PowerShell replay.
+
+```powershell
+@'
+import sys, json, runpy
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import reconcile_seven_steps_json
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+correct = builders['equal_count_ownership_envelope']()
+swapped = deepcopy(correct)
+for row in swapped['grid']['reopened_string_assignments']:
+    row['grid_id'] = 'west' if row['grid_id'] == 'east' else 'east'
+missing = deepcopy(swapped)
+del missing['grid']['reopened_string_assignments']
+for name, envelope in [('swapped', swapped), ('missing', missing), ('corrected', correct)]:
+    result = reconcile_seven_steps_json(json.dumps(envelope))
+    print(name, result['verdict'], result['ownership_reopen']['reason'], result['steps']['7']['verdict'])
+    assert result['grid_optimizers']['verdict'] == 'PASS'
+    if name == 'swapped':
+        assert result['ownership_reopen']['changed_count'] == 2
+'@ | python -P -
+```
+
+Expected output
+
+```text
+swapped FAIL ownership_changed PASS
+missing UNREADABLE ownership_snapshots_invalid PASS
+corrected PASS ownership_equal PASS
+```
+
+Both strings keep six optimizers. Their unchanged counts and per-grid totals do
+not identify the changed reopened owners. The explicit ownership maps supply that
+evidence. This replay compares synthetic supplied evidence and does not establish
+live X05 acceptance or authenticate an input producer.
+
+## Grid optimizer snapshot replay
+
+Seven-step composition includes `grid_optimizer_reopen`, derived from the two
+snapshot string rows and their explicit owners. It contributes to verdict
+precedence and retains the original step diagnostics. Missing snapshot strings
+yield UNREADABLE.
+
+The separate pure `compare_grid_panel_totals` helper accepts independent grid
+panel totals, saved `{string_id, panels}` rows and explicit ownership rows.
+`compare_grid_panel_oracle_totals` checks exact expected-grid coverage and equality
+with `oracle_values.panels`. Panel evidence must supply its own counts.
+
+Run this synthetic optimizer snapshot replay from the repository root.
+
+```powershell
+@'
+import sys
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import compare_grid_optimizer_snapshots
+grids = ['east', 'west']
+owners = [dict(grid_id='east', string_id='A'), dict(grid_id='west', string_id='B')]
+before = [dict(string_id='A', optimizers=5), dict(string_id='B', optimizers=7)]
+redistributed = [dict(string_id='A', optimizers=7), dict(string_id='B', optimizers=5)]
+assert sum(row['optimizers'] for row in before) == sum(row['optimizers'] for row in redistributed) == 12
+for name, reopened in [('redistributed', redistributed), ('missing', None), ('corrected', before)]:
+    result = compare_grid_optimizer_snapshots(grids, before, owners, reopened, owners)
+    print(name, result['verdict'], result['reason'])
+    if name == 'redistributed':
+        assert result['changed_count'] == 2
+        assert [row['delta'] for row in result['examples']] == [2, -2]
+'@ | python -P -
+```
+
+Expected output
+
+```text
+redistributed FAIL grid_optimizer_snapshots_changed
+missing UNREADABLE grid_optimizer_snapshots_invalid
+corrected PASS grid_optimizer_snapshots_equal
+```
+
+This compares supplied synthetic snapshots. Live input acquisition and the
+independence of report evidence require separate receipts.
+
+## Composed per-grid panel replay
+
+Seven-step input requires `grid.panel_counts`, explicit `{string_id, panels}` rows,
+and independent `grid.panel_totals`, an object keyed by expected grid ID. The
+`grid_panels` result retains the grid comparison, report-total consistency and
+binding to `saved_strings`. Missing, duplicate or foreign panel string IDs yield
+UNREADABLE even when supplied totals agree. Examples remain bounded.
+
+The pure `compare_grid_panel_snapshots` helper also compares each snapshot's
+explicit panel counts and owners. Each snapshot requires its own panel rows.
+
+Run this synthetic PowerShell replay from the repository root.
+
+```powershell
+@'
+import sys, json, runpy
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import reconcile_seven_steps_json
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+correct = builders['equal_count_ownership_envelope']()
+swapped = deepcopy(correct)
+swapped['grid']['panel_counts'][0]['panels'] = 14
+swapped['grid']['panel_counts'][1]['panels'] = 10
+contradiction = deepcopy(correct)
+contradiction['grid']['panel_totals']['east'] = 11
+missing = deepcopy(correct)
+del missing['grid']['panel_counts']
+for name, envelope in [('swapped', swapped), ('contradiction', contradiction), ('missing', missing), ('corrected', correct)]:
+    result = reconcile_seven_steps_json(json.dumps(envelope))
+    panels = result['grid_panels']
+    print(name, result['verdict'], panels['comparison']['reason'], panels['oracle_consistency']['reason'])
+    assert result['steps']['7']['verdict'] == 'PASS'
+'@ | python -P -
+```
+
+Expected output
+
+```text
+swapped FAIL grid_panel_totals_mismatch grid_panel_oracle_total_equal
+contradiction FAIL grid_panel_totals_mismatch grid_panel_oracle_total_mismatch
+missing UNREADABLE saved_rows_unreadable grid_panel_oracle_total_equal
+corrected PASS grid_panel_totals_equal grid_panel_oracle_total_equal
+```
+
+The swap preserves the panel grand total of 24. Independent per-grid counts and
+explicit string IDs establish the supplied comparison. This replay acquires no
+live evidence and does not authenticate its producer.
+
+## Panel save/reopen composition replay
+
+Seven-step input also requires explicit `grid.before_panel_counts` and
+`grid.reopened_panel_counts`. The `grid_panel_reopen` result binds each panel map
+to its respective snapshot string IDs and compares per-grid sums using the
+explicit before/reopened owners. Missing, foreign and duplicate panel IDs yield
+UNREADABLE. Existing step diagnostics remain available.
+
+Run this synthetic PowerShell replay from the repository root.
+
+```powershell
+@'
+import sys, json, runpy
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import reconcile_seven_steps_json
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+correct = builders['equal_count_ownership_envelope']()
+redistributed = deepcopy(correct)
+redistributed['grid']['reopened_panel_counts'][0]['panels'] = 14
+redistributed['grid']['reopened_panel_counts'][1]['panels'] = 10
+missing = deepcopy(redistributed)
+del missing['grid']['reopened_panel_counts']
+for name, envelope in [('redistributed', redistributed), ('missing', missing), ('corrected', correct)]:
+    result = reconcile_seven_steps_json(json.dumps(envelope))
+    snapshot = result['grid_panel_reopen']
+    print(name, result['verdict'], snapshot['comparison']['reason'], result['steps']['7']['verdict'])
+    if name == 'redistributed':
+        assert snapshot['comparison']['changed_count'] == 2
+        assert [row['delta'] for row in snapshot['comparison']['examples']] == [4, -4]
+'@ | python -P -
+```
+
+Expected output
+
+```text
+redistributed FAIL grid_panel_snapshots_changed PASS
+missing UNREADABLE grid_panel_snapshots_invalid PASS
+corrected PASS grid_panel_snapshots_equal PASS
+```
+
+Owners and the grand total of 24 stay equal across this synthetic redistribution.
+Explicit per-grid snapshot sums expose the change. The supplied evidence does
+not establish live X05 acceptance or authenticate an input producer.
+
+## DC-power evidence and units
+
+The pure `compare_grid_dc_totals` helper accepts independent grid totals, explicit
+`{string_id, kw_dc}` rows and owners. `compare_grid_dc_oracle_totals` requires exact
+expected-grid coverage and equality with `oracle_values.kw_dc`.
+`compare_grid_dc_snapshots` compares each supplied snapshot's power and owners.
+`compare_dc_string_ids` binds power rows to actual saved string IDs. These helpers
+use isolated exact-decimal arithmetic and finite nonnegative kW DC values. They
+preserve missing-evidence uncertainty and bounded sorted diagnostic examples.
+
+Panel totals alone cannot supply DC power. A count requires independently supplied
+module wattage, units and applicable equipment evidence before it can support a
+power calculation. These helpers require explicit power values and do not derive
+them from panels. A numeric value does not authenticate its source or its units.
+
+The existing table comparator exposes contradictions between supplied saved,
+report and displayed values. Run this synthetic PowerShell replay from the
+repository root. The independent report and displayed row explicitly use 9.6 kW.
+The mislabeled case supplies 9600 W in a field declared to be kW.
+
+```powershell
+@'
+import sys, runpy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import compare_table
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+values, rows = builders['table_fixture']()
+watts_mislabeled = dict(values, kw_dc='9600')
+missing_report = dict(values)
+del missing_report['kw_dc']
+for name, saved, report in [('mislabeled', watts_mislabeled, values), ('corrected', values, values), ('missing', values, missing_report)]:
+    result = compare_table(rows, saved, report)
+    print(name, result['verdict'], result['reason'])
+'@ | python -P -
+```
+
+Expected output
+
+```text
+mislabeled FAIL table_value_mismatch
+corrected PASS table_values_equal
+missing UNREADABLE table_evidence_unreadable
+```
+
+The comparison reports the supplied contradiction. It cannot infer that an
+arbitrary value should be divided by 1000. Correct units and independent report
+values must come from explicit evidence. This replay establishes synthetic
+comparator behavior and leaves live X05 acceptance to its staging grader.
+
+## Composed grid DC-power replay
+
+Seven-step input requires explicit `grid.dc_power` rows with `string_id` and
+`kw_dc`, independent `grid.dc_totals` by expected grid ID, and explicit
+`grid.before_dc_power` and `grid.reopened_dc_power` snapshot rows. `grid_dc` retains
+the per-grid comparison, independent report consistency and saved-string ID
+binding. `grid_dc_reopen` binds power IDs to each snapshot's string IDs before
+combining its per-grid save/reopen comparison. Missing evidence yields UNREADABLE
+while unrelated diagnostics remain available.
+
+Run this synthetic PowerShell replay from the repository root.
+
+```powershell
+@'
+import sys, json, runpy
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import reconcile_seven_steps_json
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+correct = builders['equal_count_ownership_envelope']()
+swapped = deepcopy(correct)
+swapped['grid']['dc_power'][0]['kw_dc'] = '5.6'
+swapped['grid']['dc_power'][1]['kw_dc'] = '4'
+contradiction = deepcopy(correct)
+contradiction['grid']['dc_totals']['east'] = '4.1'
+missing = deepcopy(correct)
+del missing['grid']['reopened_dc_power']
+for name, envelope in [('swapped', swapped), ('contradiction', contradiction), ('missing', missing), ('corrected', correct)]:
+    result = reconcile_seven_steps_json(json.dumps(envelope))
+    dc = result['grid_dc']
+    print(name, result['verdict'], dc['comparison']['reason'], dc['oracle_consistency']['reason'], result['grid_dc_reopen']['comparison']['reason'])
+    assert result['steps']['7']['verdict'] == 'PASS'
+'@ | python -P -
+```
+
+Expected output
+
+```text
+swapped FAIL grid_dc_totals_mismatch grid_dc_oracle_total_equal grid_dc_snapshots_equal
+contradiction FAIL grid_dc_totals_mismatch grid_dc_oracle_total_mismatch grid_dc_snapshots_equal
+missing UNREADABLE grid_dc_totals_equal grid_dc_oracle_total_equal grid_dc_snapshots_invalid
+corrected PASS grid_dc_totals_equal grid_dc_oracle_total_equal grid_dc_snapshots_equal
+```
+
+The current-design swap preserves the 9.6 kW DC grand total. All power values and
+units are explicit synthetic inputs. This comparison does not derive wattage
+from panels or authenticate the input producer.
+
+## Combined metric recovery replay
+
+Before-snapshot panel and DC values must match the saved per-string values, as
+well as their string IDs. The snapshot diagnostics include `saved_binding` with
+exact mismatch counts and capped sorted examples. This detects substitutions
+within one grid even when grid and grand totals stay equal.
+
+The separate pure `compare_grid_string_totals` helper counts explicit owners
+against independent per-grid string counts. `compare_grid_string_oracle_totals`
+requires exact expected-grid coverage and agreement with `oracle_values.strings`.
+These two helpers remain standalone in this slice.
+
+Run this synthetic recovery replay from the repository root.
+
+```powershell
+@'
+import sys, json, runpy
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import reconcile_seven_steps_json
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+correct = builders['seven_step_envelope']()
+evidence = deepcopy(correct)
+evidence['grid']['optimizer_totals']['g'] = 13
+evidence['grid']['panel_totals']['g'] = 25
+del evidence['grid']['reopened_dc_power']
+for name in ['initial', 'optimizer', 'panel', 'dc']:
+    if name == 'optimizer':
+        evidence['grid']['optimizer_totals']['g'] = 12
+    elif name == 'panel':
+        evidence['grid']['panel_totals']['g'] = 24
+    elif name == 'dc':
+        evidence['grid']['reopened_dc_power'] = deepcopy(correct['grid']['reopened_dc_power'])
+    result = reconcile_seven_steps_json(json.dumps(evidence))
+    print(name, result['verdict'], result['grid_optimizers']['verdict'], result['grid_panels']['verdict'], result['grid_dc_reopen']['verdict'])
+    assert result['steps']['7']['verdict'] == 'PASS'
+'@ | python -P -
+```
+
+Expected output
+
+```text
+initial UNREADABLE FAIL FAIL UNREADABLE
+optimizer UNREADABLE PASS FAIL UNREADABLE
+panel UNREADABLE PASS PASS UNREADABLE
+dc PASS PASS PASS PASS
+```
+
+Each repair preserves the other diagnostics. The final result establishes the
+supplied synthetic comparison. Live X05 acceptance still requires staging evidence.
+
+## Composed grid string-count replay
+
+Seven-step input requires independent `grid.string_totals` for every expected
+grid. The `grid_strings` result compares explicit saved-string ownership counts
+and checks coverage and summed agreement with `oracle_values.strings`. Missing
+counts yield UNREADABLE while unrelated diagnostics remain available.
+
+Run this synthetic PowerShell replay from the repository root.
+
+```powershell
+@'
+import sys, json, runpy
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import reconcile_seven_steps_json
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+correct = builders['three_string_envelope']()
+swapped = deepcopy(correct)
+swapped['grid']['string_totals'] = dict(east=2, west=1)
+contradiction = deepcopy(correct)
+contradiction['grid']['string_totals'] = dict(east=1, west=3)
+missing = deepcopy(correct)
+del missing['grid']['string_totals']
+for name, envelope in [('swapped', swapped), ('contradiction', contradiction), ('missing', missing), ('corrected', correct)]:
+    result = reconcile_seven_steps_json(json.dumps(envelope))
+    counts = result['grid_strings']
+    print(name, result['verdict'], counts['comparison']['reason'], counts['oracle_consistency']['reason'])
+    assert result['steps']['7']['verdict'] == 'PASS'
+'@ | python -P -
+```
+
+Expected output
+
+```text
+swapped FAIL grid_string_totals_mismatch grid_string_oracle_total_equal
+contradiction FAIL grid_string_totals_mismatch grid_string_oracle_total_mismatch
+missing UNREADABLE grid_string_totals_unreadable grid_string_oracle_evidence_unreadable
+corrected PASS grid_string_totals_equal grid_string_oracle_total_equal
+```
+
+The swap preserves the grand total of three strings. The independent grid counts
+and explicit ownership provide separate inputs to the comparison. This replay
+establishes synthetic behavior and does not authenticate input origin or live
+X05 acceptance.
+
+## Inverter identity evidence replay
+
+The pure `validate_grid_inverter_ownership` helper requires explicit unique saved
+inverter IDs, expected grid IDs and `{inverter_id, grid_id}` assignments.
+`compare_grid_inverter_totals` compares these owners with independent grid counts.
+`compare_grid_inverter_oracle_totals` requires exact grid coverage and agreement
+with `oracle_values.inverters`. `compare_inverter_snapshots` compares explicit
+IDs and owners on each side, with bounded added/removed/owner-change diagnostics.
+These inverter helpers remain standalone in this slice.
+
+Run this synthetic existing-table replay from the repository root.
+
+```powershell
+@'
+import sys, runpy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import compare_table, compare_inverter_snapshots
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+values, rows = builders['table_fixture']()
+before_ids = ['INV-A']
+before_owners = [dict(inverter_id='INV-A', grid_id='g')]
+replacement_ids = ['INV-B']
+replacement_owners = [dict(inverter_id='INV-B', grid_id='g')]
+for name, ids, owners in [('substituted', replacement_ids, replacement_owners), ('missing', None, None), ('corrected', before_ids, before_owners)]:
+    table = compare_table(rows, values, dict(values))
+    identity = compare_inverter_snapshots(['g'], before_ids, before_owners, ids, owners)
+    print(name, table['verdict'], identity['verdict'], identity['reason'])
+    if name == 'substituted':
+        assert identity['counts'] == dict(added=1, removed=1, changed=0)
+        assert identity['removed_ids'] == ['INV-A'] and identity['added_ids'] == ['INV-B']
+'@ | python -P -
+```
+
+Expected output
+
+```text
+substituted PASS FAIL inverter_snapshots_changed
+missing PASS UNREADABLE inverter_snapshots_invalid
+corrected PASS PASS inverter_snapshots_equal
+```
+
+The table records one inverter on both sides. Stable device IDs and explicit grid
+owners are separate evidence needed to settle save/reopen preservation. Missing
+identity evidence stays unknown. This replay establishes supplied synthetic
+comparison behavior, with input origin and live X05 acceptance requiring their
+own receipts.
