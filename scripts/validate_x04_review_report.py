@@ -7,7 +7,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from export_x04_offline_evidence import (
     DEFAULT_MAX_INPUT_BYTES, MAX_JSON_CONTAINER_DEPTH, check_output_path,
-    positive_byte_limit, read_json, report_failure, write_json,
+    positive_byte_limit, read_json, report_failure, validate_sha256_pin, write_json,
 )
 
 COMPARISON = 'leaf.x04.offline-comparison.v1'
@@ -128,10 +128,14 @@ def main(argv=None):
     parser.add_argument('--out', type=Path)
     parser.add_argument('--max-input-bytes', type=positive_byte_limit, default=DEFAULT_MAX_INPUT_BYTES)
     parser.add_argument('--max-output-bytes', type=positive_byte_limit)
+    parser.add_argument('--expected-report-sha256', type=validate_sha256_pin,
+                        help='Optional SHA-256 of the exact file or stdin bytes read and decoded')
     args = parser.parse_args(argv)
     try:
         check_output_path(args.input, args.out)
-        result = validate_report(read_json(args.input, args.max_input_bytes))
+        payload = read_json(args.input, args.max_input_bytes) if args.expected_report_sha256 is None else read_json(
+            args.input, args.max_input_bytes, args.expected_report_sha256)
+        result = validate_report(payload)
         write_json(result, args.out, args.max_output_bytes)
     except (OSError, ValueError, TypeError, RecursionError) as error:
         return report_failure('saved report validation', error)
