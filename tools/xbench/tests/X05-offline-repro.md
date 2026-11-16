@@ -285,6 +285,16 @@ UNREADABLE precedence. It does not acquire any missing live evidence. The live
 grader covers only the current partial import/grid slice; steps3 through7 and
 unsupported setup remain UNREADABLE, so offline helper PASS cannot accept X05.
 
+`validate_fixture_provenance(frozen_manifest, stage_bindings)` is a separate pure
+comparison. The frozen manifest has exactly `fixture_id` and `inputs`. Inputs
+contain lowercase64-character SHA-256 strings for `dwg` and `report`, with an
+optional `bom`. Each of `strings`, `grouping`, `table`, `policy`, `reopen` and
+`csv_view` must supply the same complete binding. Missing/malformed evidence or
+conflicting identity/digests returns a named UNREADABLE result. PASS means only
+that these supplied claims agree. The caller must independently establish the
+manifest's frozen origin and hash actual input bytes; this helper does neither
+and is not wired into live grading or used to infer provenance from the product.
+
 Canonical snapshot compatibility contract:
 
 - Hash UTF-8 bytes of compact JSON arrays with ASCII escapes and no spaces.

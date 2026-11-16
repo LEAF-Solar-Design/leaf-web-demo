@@ -25,11 +25,36 @@ MAX_STRING_EXAMPLES = 20
 MAX_RECOMMENDATION_EXAMPLES = 20
 MAX_JSON_CHARS = 262144
 MAX_JSON_DEPTH = 32
+PROVENANCE_STAGES = ("strings", "grouping", "table", "policy", "reopen", "csv_view")
 _CSV_LOCK = RLock()
 
 
 def _out(verdict, reason, **evidence):
     return {"verdict": verdict, "reason": reason, **evidence}
+
+
+def validate_fixture_provenance(frozen_manifest, stage_bindings):
+    """Compare supplied bindings only; never infer provenance from product output."""
+    def binding(value):
+        if type(value) is not dict or set(value) != {"fixture_id", "inputs"}:
+            return False
+        identifier, inputs = value["fixture_id"], value["inputs"]
+        return (type(identifier) is str and bool(identifier.strip()) and len(identifier) <= 128
+                and type(inputs) is dict and set(inputs) in ({"dwg", "report"}, {"dwg", "report", "bom"})
+                and all(type(digest) is str and re.fullmatch(r"[0-9a-f]{64}", digest)
+                        for digest in inputs.values()))
+
+    if not binding(frozen_manifest):
+        return _out("UNREADABLE", "frozen_manifest_unreadable")
+    if type(stage_bindings) is not dict or set(stage_bindings) != set(PROVENANCE_STAGES):
+        return _out("UNREADABLE", "provenance_stages_unreadable")
+    for stage in PROVENANCE_STAGES:
+        supplied = stage_bindings[stage]
+        if not binding(supplied):
+            return _out("UNREADABLE", "stage_binding_unreadable", stage=stage)
+        if supplied != frozen_manifest:
+            return _out("UNREADABLE", "stage_binding_conflict", stage=stage)
+    return _out("PASS", "supplied_provenance_equal", stage_count=len(PROVENANCE_STAGES))
 
 
 def _numeric(value, *, count=False, signed=False):

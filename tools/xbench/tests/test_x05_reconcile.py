@@ -15,6 +15,7 @@ from benches.x05_reconcile import (METRICS, TABLE_COLUMNS, check_discrepancies,
     MAX_RECOMMENDATION_EXAMPLES, compare_oracle_string_totals,
     aggregate_fixtures, decode_evidence_json, reconcile_json,
     aggregate_fixtures_json, MAX_JSON_CHARS, MAX_JSON_DEPTH, serialize_result,
+    PROVENANCE_STAGES, validate_fixture_provenance,
     compare_csv_view, compare_recommendations, compare_snapshots, compare_strings, compare_table)
 
 
@@ -1272,3 +1273,190 @@ def test_escaped_unicode_identity_round_trips_with_ascii_safe_hashes(identifier)
     aggregate = aggregate_fixtures_json(json.dumps(dict(expected_ids=expected_ids, fixtures=fixtures)))
     assert aggregate["verdict"] == "PASS" and identifier in aggregate["fixtures"]
     assert serialize_result(aggregate).isascii()
+
+
+def test_supplied_provenance_requires_frozen_manifest_and_every_stage_binding():
+    frozen = dict(fixture_id="synthetic", inputs=dict(dwg="a" * 64, report="b" * 64, bom="c" * 64))
+    bindings = {stage: deepcopy(frozen) for stage in PROVENANCE_STAGES}
+    preserved = deepcopy((frozen, bindings))
+    assert validate_fixture_provenance(frozen, bindings) == {
+        "verdict": "PASS", "reason": "supplied_provenance_equal", "stage_count": 6}
+    for stage in PROVENANCE_STAGES:
+        for field in ("fixture_id", "inputs"):
+            altered = deepcopy(bindings)
+            del altered[stage][field]
+            assert validate_fixture_provenance(frozen, altered) == {
+                "verdict": "UNREADABLE", "reason": "stage_binding_unreadable", "stage": stage}
+        for key, value in (("fixture_id", "unrelated"), ("inputs", dict(frozen["inputs"], dwg="d" * 64))):
+            altered = deepcopy(bindings)
+            altered[stage][key] = value
+            assert validate_fixture_provenance(frozen, altered) == {
+                "verdict": "UNREADABLE", "reason": "stage_binding_conflict", "stage": stage}
+        altered = deepcopy(bindings)
+        del altered[stage]
+        assert validate_fixture_provenance(frozen, altered)["reason"] == "provenance_stages_unreadable"
+    for invalid in (None, {}, dict(frozen, extra=True), dict(frozen, fixture_id=" "),
+                    dict(frozen, inputs={}), dict(frozen, inputs=dict(dwg="a" * 63, report="b" * 64)),
+                    dict(frozen, inputs=dict(dwg=True, report="b" * 64)),
+                    dict(frozen, inputs=dict(dwg="A" * 64, report="b" * 64))):
+        assert validate_fixture_provenance(invalid, bindings)["reason"] == "frozen_manifest_unreadable"
+    assert (frozen, bindings) == preserved
+    without_bom = dict(frozen, inputs={key: value for key, value in frozen["inputs"].items() if key != "bom"})
+    assert validate_fixture_provenance(without_bom,
+        {stage: deepcopy(without_bom) for stage in PROVENANCE_STAGES})["verdict"] == "PASS"
+
+
+@pytest.mark.parametrize("kind", ["dict", "list", "mixed"])
+@pytest.mark.parametrize("containers", [31, 32, 33])
+def test_serializer_container_depth_boundaries_preserve_inputs(kind, containers):
+    value = "synthetic"
+    for level in range(containers):
+        value = {"nested": value} if kind == "dict" or (kind == "mixed" and level % 2 == 0) else [value]
+    # Strict evidence requires an object root; wrap a list root at the same depth.
+    if type(value) is list:
+        value = {"nested": value[0]}
+    preserved = deepcopy(value)
+    if containers <= MAX_JSON_DEPTH:
+        encoded = serialize_result(value)
+        assert decode_evidence_json(encoded)["evidence"] == value
+    else:
+        with pytest.raises(ValueError, match="^json_result_too_deep$"):
+            serialize_result(value)
+    assert value == preserved
+
+
+def test_concurrent_decimal_contexts_preserve_callers_and_identical_results():
+    from concurrent.futures import ThreadPoolExecutor
+    from decimal import localcontext
+    from threading import Event
+
+    ready, release = [Event(), Event()], Event()
+
+    def run(index):
+        with localcontext() as caller:
+            caller.prec, caller.Emin, caller.Emax = (2, -1, 1) if index == 0 else (37, -999, 999)
+            for signal in caller.traps:
+                caller.traps[signal] = bool(index)
+            caller.clear_flags()
+            context = lambda: (caller.prec, caller.Emin, caller.Emax, dict(caller.traps), dict(caller.flags))
+            preserved = context()
+            ready[index].set()
+            assert release.wait(10)
+            evidence = complete_evidence()
+            result = reconcile_offline(evidence)
+            snapshot = canonical_snapshot(evidence["saved_strings"], evidence["view_rows"])
+            assert context() == preserved
+            return result, snapshot
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(run, index) for index in range(2)]
+        try:
+            assert all(event.wait(10) for event in ready)
+        finally:
+            release.set()
+        results = [future.result(timeout=10) for future in futures]
+    assert results[0] == results[1] and results[0][0]["verdict"] == "PASS"
+
+
+@pytest.mark.parametrize("aggregate", [False, True])
+def test_cli_real_closed_stdout_pipe_exits_five_without_shutdown_traceback(tmp_path, aggregate):
+    from pathlib import Path
+    import subprocess
+    import sys
+    from benches import x05_reconcile as module
+
+    if aggregate:
+        expected, fixtures = fixture_records()
+        evidence = dict(expected_ids=expected, fixtures=fixtures)
+    else:
+        evidence = complete_evidence()
+    child = subprocess.Popen([sys.executable, "-P", str(Path(module.__file__).resolve())]
+        + (["--aggregate"] if aggregate else []), stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=tmp_path)
+    try:
+        # Close the only reader before supplying any input. No timing race or sleep.
+        child.stdout.close()
+        child.stdout = None
+        _, errors = child.communicate(json.dumps(evidence).encode(), timeout=20)
+        assert child.returncode == 5 and errors == b""
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=10)
+        for stream in (child.stdin, child.stdout, child.stderr):
+            if stream is not None:
+                stream.close()
+
+
+@pytest.mark.parametrize("lexeme", ["9.6", "96e-1", "0.96E+1", "960e-2"])
+@pytest.mark.parametrize("zero", ["0", "-0", "0.0", "-0e+0"])
+def test_numeric_json_lexemes_preserve_verdict_and_canonical_hashes(lexeme, zero):
+    evidence = complete_evidence()
+    evidence["saved_values"]["kw_dc"] = evidence["oracle_values"]["kw_dc"] = "LEXEME"
+    evidence["view_rows"][-1].update(studio="LEXEME", oracle="LEXEME", delta="ZERO")
+    text = json.dumps(evidence).replace('"LEXEME"', lexeme).replace('"ZERO"', zero)
+    decoded = decode_evidence_json(text)["evidence"]
+    assert reconcile_json(text)["verdict"] == "PASS"
+    assert canonical_snapshot(decoded["saved_strings"], decoded["view_rows"]) == complete_evidence()["before"]
+    fixtures = []
+    for key in ("a", "b", "c"):
+        current = deepcopy(decoded)
+        current["fixture_id"] = key
+        fixtures.append(dict(fixture_id=key, evidence=current))
+    envelope = serialize_result(dict(expected_ids=["a", "b", "c"], fixtures=fixtures))
+    assert aggregate_fixtures_json(envelope)["verdict"] == "PASS"
+    for tiny in ("1e-78", "0." + "0" * 77 + "1"):
+        # Replace only the kW delta marker, never a prefix of another number.
+        tiny_evidence = deepcopy(evidence)
+        tiny_evidence["view_rows"][-1]["delta"] = "TINY"
+        tiny_text = (json.dumps(tiny_evidence).replace('"LEXEME"', lexeme)
+                     .replace('"TINY"', tiny))
+        tiny_result = reconcile_json(tiny_text)
+        assert tiny_result["verdict"] == "FAIL"
+        assert tiny_result["stages"]["table"]["verdict"] == "FAIL"
+        tiny_decoded = decode_evidence_json(tiny_text)["evidence"]
+        assert tiny_decoded["view_rows"][-1]["delta"] != 0
+        tiny_decoded["fixture_id"] = "a"
+        fixtures[0]["evidence"] = tiny_decoded
+        tiny_aggregate = aggregate_fixtures_json(serialize_result(
+            dict(expected_ids=["a", "b", "c"], fixtures=fixtures)))
+        assert tiny_aggregate["verdict"] == "FAIL"
+        assert tiny_aggregate["fixtures"]["a"]["stages"]["table"]["verdict"] == "FAIL"
+
+
+@pytest.mark.parametrize("kind,affected", [
+    ("string", {"strings", "reopen"}), ("recommendation", {"grouping"}),
+    ("table", {"table", "reopen", "csv_view"}), ("policy", {"table", "policy"}),
+    ("reopen", {"reopen"}), ("csv", {"csv_view"}),
+])
+def test_readable_corruption_failures_survive_composition_and_aggregation(kind, affected):
+    evidence = complete_evidence()
+    baseline = reconcile_offline(evidence)
+    if kind == "string":
+        evidence["saved_strings"][0]["optimizers"] += 1
+    elif kind == "recommendation":
+        evidence["recommendations"][0]["group_count"] += 1
+    elif kind == "table":
+        evidence["view_rows"][0]["studio"] += 1
+    elif kind == "policy":
+        evidence["saved_values"]["panels"] += 1
+    elif kind == "reopen":
+        evidence["reopened_rows"]["strings"][0]["optimizers"] += 1
+    else:
+        altered = deepcopy(evidence["view_rows"])
+        altered[0]["studio"] += 1
+        evidence["csv_text"] = csv_fixture(altered)
+    result = reconcile_offline(evidence)
+    assert result["verdict"] == "FAIL"
+    for stage, observed in result["stages"].items():
+        if stage in affected:
+            assert observed["verdict"] == "FAIL" and type(observed["reason"]) is str
+        else:
+            assert observed == baseline["stages"][stage]
+    expected, fixtures = fixture_records()
+    evidence["fixture_id"] = expected[0]
+    fixtures[0]["evidence"] = evidence
+    aggregate = aggregate_fixtures(expected, fixtures)
+    assert aggregate["verdict"] == "FAIL"
+    assert aggregate["fixtures"][expected[0]] == reconcile_offline(evidence)
+    assert all(aggregate["fixtures"][key]["verdict"] == "PASS" for key in expected[1:])
