@@ -28,28 +28,38 @@ class ConfirmationReceiptStore:
     journal commit still requires inspect/apply recovery, not blind confirmation.
     This is not a live authorization or distributed exactly-once guarantee.
     """
-    def __init__(self, path):
+    def __init__(self, path, *, read_only=False):
         self.path = Path(path)
-        db = sqlite3.connect(self.path)
+        if type(read_only) is not bool:
+            raise ValueError('read_only must be a boolean')
+        self.read_only = read_only
+        db = self._connect()
         try:
             with db:
-                db.execute('BEGIN IMMEDIATE')
+                db.execute('BEGIN' if self.read_only else 'BEGIN IMMEDIATE')
                 version = db.execute('PRAGMA user_version').fetchone()[0]
                 ddl = 'CREATE TABLE confirmations (project_key TEXT PRIMARY KEY, customer_key TEXT NOT NULL, digest TEXT NOT NULL, result TEXT NOT NULL)'
                 objects = db.execute("SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name").fetchall()
                 if version not in (0, 1) or (objects and objects != [('table', 'confirmations', ddl)]):
                     raise ValueError('unsupported confirmation journal schema')
+                if self.read_only and not objects:
+                    raise ValueError('unsupported read-only confirmation journal schema')
                 if not objects:
                     if version: raise ValueError('unsupported confirmation journal schema')
                     db.execute(ddl)
-                if version == 0: db.execute('PRAGMA user_version=1')
+                if version == 0 and not self.read_only: db.execute('PRAGMA user_version=1')
         finally: db.close()
 
+    def _connect(self):
+        if self.read_only:
+            return sqlite3.connect(self.path.resolve().as_uri() + '?mode=ro', uri=True, timeout=5)
+        return sqlite3.connect(self.path, timeout=5)
+
     def run(self, context, digest, produce, validate):
-        db = sqlite3.connect(self.path, timeout=5)
+        db = self._connect()
         try:
             with db:
-                db.execute('BEGIN IMMEDIATE')
+                db.execute('BEGIN' if self.read_only else 'BEGIN IMMEDIATE')
                 row = db.execute('SELECT customer_key,digest,result FROM confirmations WHERE project_key=?',(context['project_key'],)).fetchone()
                 if row:
                     if row[0] != context['customer_key']: raise ProfileScopeError('receipt belongs to another customer')
@@ -67,6 +77,8 @@ class ConfirmationReceiptStore:
                     except (ValueError, TypeError, RecursionError, UnicodeError):
                         raise ValueError('invalid confirmation receipt') from None
                     validate(result);return result
+                if self.read_only:
+                    raise ValueError('confirmation receipt unavailable in read-only journal')
                 result = produce()
                 db.execute('INSERT INTO confirmations VALUES (?,?,?,?)',
                     (context['project_key'],context['customer_key'],digest,json.dumps(result,allow_nan=False)))
@@ -160,6 +172,9 @@ class WorkflowAdapter:
                 roles={'module': {'block': choice['block'], 'layer': choice['layer']}},
                 window=choice['design_window'], expected_version=payload.get('expected_version'))
         if self._receipts is None: return produce()
+        # Request identity ignores object-member order. Explicit label values,
+        # expected version and snapshot token remain part of the saved request.
+        # Keep this encoding stable for existing offline journal receipts.
         digest = hashlib.sha256(json.dumps([self._plan_token,payload],sort_keys=True,allow_nan=False,separators=(',',':')).encode()).hexdigest()
         def validate(result):
             pin = self.workflow.store.application_record(scope['project_key'],scope['customer_key'])

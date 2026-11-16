@@ -3,6 +3,7 @@
 const fs = require('node:fs'), path = require('node:path'), os = require('node:os')
 const Module = require('node:module'), { spawn } = require('node:child_process')
 const { StringDecoder } = require('node:string_decoder')
+const { TextDecoder } = require('node:util')
 const assert = require('node:assert/strict')
 const at = process.argv.indexOf('--deps'), deps = path.resolve(at < 0 ? 'web/node_modules' : process.argv[at + 1])
 const dependency = name => require(path.join(deps, name))
@@ -41,10 +42,18 @@ def unique_pairs(pairs):
         if key in result: raise ValueError('ambiguous duplicate JSON key')
         result[key]=value
     return result
-try: request=json.load(sys.stdin,object_pairs_hook=unique_pairs)
+try: request=json.loads(sys.stdin.buffer.read().decode('utf-8',errors='strict'),object_pairs_hook=unique_pairs)
+except UnicodeDecodeError:
+    print(json.dumps({'ok':False,'error':{'message':'Invalid UTF-8 request.','code':'BRIDGE_UTF8'}}));sys.exit(0)
 except ValueError:
     print(json.dumps({'ok':False,'error':{'message':'Ambiguous duplicate or invalid JSON request.','code':'BRIDGE_DUPLICATE_JSON_KEY'}}));sys.exit(0)
 protocol=request.get('protocol_fault')
+if protocol=='invalid_utf8':
+    fixture=request['fixture']
+    invalid=bytes(fixture['utf8_bytes'])
+    tail=b'' if fixture.get('utf8_truncated') else b'"}}'
+    sys.stdout.buffer.write(b'{"ok":true,"result":{"label":"'+invalid+tail)
+    sys.stdout.buffer.flush();sys.exit(0)
 if protocol and protocol.startswith('duplicate_reply_'):
     key={'duplicate_reply_customer':'customer_key','duplicate_reply_version':'version','duplicate_reply_role':'block'}[protocol]
     body='{"'+key+'":1,"'+key+'":2}'
@@ -159,6 +168,11 @@ function rpc(bound, op, context, value, signal, fault = null, protocolFault = nu
         while (end && [9,10,13,32].includes(bytes[end-1])) end--
         bytes = bytes.subarray(0, Math.max(0, end-fixture.truncate_json_bytes))
       }
+      try { new TextDecoder('utf-8', { fatal: true }).decode(bytes) }
+      catch {
+        const error = new Error('Python JSON worker returned invalid UTF-8.'); error.code = 'BRIDGE_UTF8'
+        protocolStats.push({ bytes: bytes.length, parts: 0, receipts: 0 }); settle(error); return
+      }
       const decoder = new StringDecoder('utf8'), pattern = fixture.chunk_pattern || [Math.max(1, bytes.length)]
       let offset = 0, parts = 0
       while (offset < bytes.length) {
@@ -180,7 +194,17 @@ function rpc(bound, op, context, value, signal, fault = null, protocolFault = nu
       const token = JSON.stringify(fixture.duplicate_request_key) + ':'
       request = request.replace(token, token + 'null,' + token)
     }
-    child.stdin.end(request)
+    let requestBytes = Buffer.from(request, 'utf8')
+    if (fixture.invalid_request_utf8) {
+      const invalid = Buffer.from(fixture.utf8_bytes)
+      if (fixture.utf8_truncated) requestBytes = Buffer.concat([requestBytes, invalid])
+      else {
+        const start = requestBytes.indexOf(Buffer.from('Panel'))
+        if (start < 0) { stop('BRIDGE_FIXTURE', 'Missing fixture label.'); return }
+        requestBytes = Buffer.concat([requestBytes.subarray(0, start), invalid, requestBytes.subarray(start + 5)])
+      }
+    }
+    child.stdin.end(requestBytes)
   })
 }
 function mount(context, overrides = {}) {
