@@ -967,9 +967,17 @@ def _catalog_observer(base, observation, main_frame=None, *, max_requests=MAX_ID
 
     def request_seen(request):
         nonlocal latest, pending_binding, failed, request_count
-        if not _main_request(request, main_frame):
+        captured, epoch = latest, observation["catalog_epoch"]
+        main = _main_request(request, main_frame)
+        if not main:
             return
-        if not exact_url(request.url):
+        url = request.url
+        if latest is not captured or observation["catalog_epoch"] != epoch:
+            return
+        if not exact_url(url):
+            return
+        method = request.method
+        if latest is not captured or observation["catalog_epoch"] != epoch:
             return
         if request_count >= max_requests:
             latest, pending_binding, failed = None, None, True
@@ -978,9 +986,9 @@ def _catalog_observer(base, observation, main_frame=None, *, max_requests=MAX_ID
             return
         request_count += 1
         try:
-            if request.method != "GET":
+            if method != "GET":
                 raise ValueError("catalog requires normal GET")
-            binding = url_binding(request.url)
+            binding = url_binding(url)
         except ValueError:
             # An invalid same-origin catalog binding cannot leave old proof current.
             binding = None
@@ -1046,10 +1054,18 @@ def _project_observer(base, observation, main_frame=None, *, max_requests=MAX_ID
 
     def request_seen(request):
         nonlocal latest, route, failed, scope_route, request_count
-        if not _main_request(request, main_frame):
+        captured, epoch = latest, observation["project_epoch"]
+        main = _main_request(request, main_frame)
+        if not main:
             return
-        identity = route_id(request.url)
+        url = request.url
+        if latest is not captured or observation["project_epoch"] != epoch:
+            return
+        identity = route_id(url)
         if identity is None:
+            return
+        method = request.method
+        if latest is not captured or observation["project_epoch"] != epoch:
             return
         if request_count >= max_requests:
             latest, route, failed = None, None, True
@@ -1058,10 +1074,10 @@ def _project_observer(base, observation, main_frame=None, *, max_requests=MAX_ID
             observation["event_callback_failed"] = True
             return
         request_count += 1
-        if identity != scope_route or request.method != "GET":
+        if identity != scope_route or method != "GET":
             observation["project_scope_epoch"] += 1
         scope_route = identity
-        latest, route, failed = request, identity, request.method != "GET"
+        latest, route, failed = request, identity, method != "GET"
         clear()
 
     def response_seen(response):
@@ -1313,6 +1329,7 @@ def observe(page, ctx, config, bound, session_info=None, *, budget_seconds=600, 
                 if not listening:
                     return
                 try:
+                    request_epochs = observation["catalog_epoch"], observation["project_epoch"]
                     if kind in ("close", "crash"):
                         navigation(main_frame)
                         callback_error = callback_error or RuntimeError("page terminated")
@@ -1332,6 +1349,9 @@ def observe(page, ctx, config, bound, session_info=None, *, budget_seconds=600, 
                         raise ValueError("invalid passive request method")
                     if kind == "response":
                         check_url(event.request.url)
+                    if kind == "request" and request_epochs != (
+                            observation["catalog_epoch"], observation["project_epoch"]):
+                        return
                     handler(event)
                 except Exception as exc:
                     callback_error = callback_error or exc

@@ -2975,6 +2975,89 @@ print(json.dumps({"rows":rows,"cents":str(total)}, sort_keys=True))
                     x10.rate_total(rates)
             self.assertEqual(rates, before)
 
+    def test_request_metadata_reentrancy_preserves_newer_proof(self):
+        for kind, factory in (("project", x10._project_observer), ("catalog", x10._catalog_observer)):
+            for attribute in ("url", "method", "frame"):
+                for action in ("newer", "failure", "control"):
+                    with self.subTest(kind=kind, attribute=attribute, action=action):
+                        observation = {}
+                        listener = factory(self.ctx.base, observation, MAIN_FRAME)
+                        def request(project):
+                            url = (self.ctx.base + "/api/projects/" + project if kind == "project"
+                                   else self.catalog_request(project=project).url)
+                            return SimpleNamespace(frame=MAIN_FRAME, method="GET", url=url)
+                        def complete(value, project):
+                            listener(value)
+                            listener.response(metadata_response(value, {"project": {"id": project},
+                                                                       "drawing_versions": []}))
+                        prior = request(PROJECT)
+                        complete(prior, PROJECT)
+                        fired = [False]
+                        def dispatch():
+                            if fired[0]:
+                                return
+                            fired[0] = True
+                            if action == "newer":
+                                complete(request(OTHER), OTHER)
+                            elif action == "failure":
+                                listener.failed(prior)
+                        class Reentrant:
+                            def __getattribute__(self, name):
+                                if name in ("url", "method", "frame"):
+                                    if name == attribute:
+                                        dispatch()
+                                    return getattr(older, name)
+                                return object.__getattribute__(self, name)
+                        older = request(PROJECT)
+                        event = Reentrant()
+                        listener(event)
+                        key = "project_binding" if kind == "project" else "catalog_binding"
+                        binding = observation[key]
+                        identity = binding.get("project_id") if isinstance(binding, dict) else binding
+                        self.assertEqual(identity, OTHER if action == "newer" else None)
+                        if action != "control":
+                            listener.response(metadata_response(event, {"project": {"id": PROJECT},
+                                                                        "drawing_versions": []}))
+                            binding = observation[key]
+                            identity = binding.get("project_id") if isinstance(binding, dict) else binding
+                            self.assertEqual(identity, OTHER if action == "newer" else None)
+
+    def test_observe_request_preflight_reentrancy_cannot_restore_old_proof(self):
+        for attribute in ("url", "method", "frame"):
+            page, surface, _ = self.integration_page(False)
+            captured, completed = {}, []
+            original_save = x10._save
+            def save(page, ctx, observation, *args, **kwargs):
+                captured["observation"] = observation
+                return original_save(page, ctx, observation, *args, **kwargs)
+            def capture(**kwargs):
+                Path(kwargs["path"]).write_bytes(tiny_png())
+                handlers = dict(call.args for call in page.on.call_args_list)
+                older = self.catalog_request()
+                fired = [False]
+                def dispatch():
+                    if not fired[0]:
+                        fired[0] = True
+                        self.emit_project(page, OTHER)
+                        request = self.catalog_request(project=OTHER)
+                        handlers["request"](request)
+                        handlers["response"](metadata_response(request, {}))
+                class Reentrant:
+                    def __getattribute__(self, name):
+                        if name in ("url", "method", "frame"):
+                            if name == attribute:
+                                dispatch()
+                            return getattr(older, name)
+                        return object.__getattribute__(self, name)
+                handlers["request"](Reentrant())
+                completed.append(captured["observation"].get("catalog_binding"))
+            surface.screenshot.side_effect = capture
+            with patch.object(x10, "_save", save):
+                rows = self.run_page(page)
+            self.assertEqual(len(completed), 1)
+            self.assertEqual(completed[0]["project_id"], OTHER)
+            self.assertEqual(rows[0].verdict, "UNREADABLE")
+
     def test_json_numeric_token_budgets_before_browser_and_metadata_proof(self):
         invalid = (b"1" * 129, b"1e1001", b"1e-1001", b"1e9999999999999999", b"-0", b"-0.0", b"-0e2")
         valid = (b"0", b"1" * 128, b"1e1000", b"1e-1000")
