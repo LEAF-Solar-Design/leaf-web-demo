@@ -5584,6 +5584,8 @@ def _jobs_catalog(g, count=4):
 
 
 def _jobs_main(g, monkeypatch, capsys, tmp_path, flags):
+    # Byte-output drills exclude optional nondeterministic nested memory telemetry.
+    monkeypatch.delenv("LEAF_GATE_MEM", raising=False)
     monkeypatch.setattr(sys, "argv", [
         "run-all-gates.py", "--log-dir", str(tmp_path), *flags,
     ])
