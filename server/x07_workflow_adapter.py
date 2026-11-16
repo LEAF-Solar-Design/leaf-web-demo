@@ -6,6 +6,11 @@ before construction. UI callback keys cannot replace the injected identity.
 from copy import deepcopy
 from x07_customer_profile_store import _key, ProfileScopeError
 from x07_role_selection import select_modules
+from x07_profile_compatibility import check_compatibility
+
+
+class AdapterVersionConflict(ValueError):
+    code = 'STALE_VERSION'
 
 
 class WorkflowAdapter:
@@ -62,6 +67,37 @@ class WorkflowAdapter:
         return self.workflow.confirm(deepcopy(self._intake), **scope,
             roles={'module': {'block': choice['block'], 'layer': choice['layer']}},
             window=choice['design_window'], expected_version=payload.get('expected_version'))
+
+    def load_profile(self, customer_key):
+        if customer_key != self._context['customer_key']:
+            raise ProfileScopeError('editor customer does not match injected scope')
+        # Also refuse an injected project which belongs to another customer.
+        self.workflow.store.application_record(self._context['project_key'], customer_key)
+        return self.workflow.store.latest(customer_key)
+
+    def save_profile(self, customer_key, roles, *, expected_version):
+        latest = self.load_profile(customer_key)
+        if type(expected_version) is not int or expected_version < 0:
+            raise ValueError('editor expected version must be an explicit nonnegative integer')
+        if not isinstance(roles, dict):
+            raise ValueError('editor roles must be an object')
+        candidate = {'customer_key': customer_key, 'profile_id': (latest or {}).get('profile_id', 'unpersisted-editor'),
+                     'version': max(expected_version, 1), 'roles': deepcopy(roles)}
+        # An edit is explicit confirmation of current anonymous literals. Alias
+        # resolution for later drawings remains an injected compatibility input.
+        aliases = deepcopy(self._aliases) or {}
+        for role in roles.values():
+            if isinstance(role, dict) and isinstance(role.get('block'), str) and role['block'].startswith('*'):
+                aliases[role['block']] = role['block']
+        checked = check_compatibility(deepcopy(self._intake), candidate, customer_key=customer_key, block_aliases=aliases)
+        if checked['decision'] != 'apply':
+            raise ValueError('edited roles are incompatible: ' + checked['reason'])
+        try:
+            return self.workflow.store.save_version(customer_key, checked['roles'], expected_version=expected_version)
+        except ValueError as error:
+            if str(error) == 'profile version changed':
+                raise AdapterVersionConflict(str(error)) from error
+            raise
 
     def apply_profile(self, context, payload):
         scope = self._scope(context)
