@@ -117,9 +117,8 @@ class TrackedMouse(_Delegate):
         return result
 
     def down(self, **kwargs):
-        result = self._target.down(**kwargs)
         self.held.add(kwargs.get('button', 'left'))
-        return result
+        return self._target.down(**kwargs)
 
     def up(self, **kwargs):
         result = self._target.up(**kwargs)
@@ -196,7 +195,7 @@ def _optional_button(page, name):
     return False
 
 
-def navigate(page, name, version_id):
+def navigate(page, name, version_id, *, expected_drawing_key):
     page.reload(timeout=60000)
     page.wait_for_load_state('networkidle', timeout=30000)
     _optional_button(page, 'Continue workspace')
@@ -216,21 +215,32 @@ def navigate(page, name, version_id):
     _optional_button(page, 'Return to drawing')
     canvas = page.locator('.viewer-canvas canvas').first
     canvas.wait_for(state='visible', timeout=60000)
-    page.wait_for_function("""() => {
+    page.wait_for_function("""expected => {
         const canvas = document.querySelector('.viewer-canvas canvas');
         const api = canvas?.closest('.viewer-canvas')?.__leafViewerObservation;
+        const canonical = Array.from(document.querySelectorAll('select')).find(select =>
+            Array.from(select.labels || []).some(label =>
+                Array.from(label.childNodes).filter(node => node.nodeType === 3)
+                    .map(node => node.textContent).join('').trim() ===
+                    'Canonical drawing version'));
         return !!api && typeof api.snapshot === 'function' &&
-            typeof api.project === 'function' && !!api.snapshot()?.drawingKey;
-    }""", timeout=30000)
+            typeof api.project === 'function' &&
+            api.snapshot()?.drawingKey === expected.drawingKey &&
+            canonical?.value === expected.versionId &&
+            canvas.getBoundingClientRect().width > 0 &&
+            canvas.getBoundingClientRect().height > 0 &&
+            getComputedStyle(canvas).visibility === 'visible';
+    }""", arg=dict(drawingKey=expected_drawing_key, versionId=version_id), timeout=30000)
     return canvas
 
 
 class LiveRuntime:
-    def __init__(self, stack, page, canvas, oracle, base, *, headed):
+    def __init__(self, stack, page, canvas, oracle, base, *, headed, expected_drawing_key):
         self._stack, self._closed = stack, False
         self.page = TrackedPage(page)
         self.canvas = TrackedCanvas(canvas, self.page)
         self._oracle, self._base, self._headed = oracle, base, headed
+        self._expected_drawing_key = expected_drawing_key
         self.expected_module_handles = [row['handle'] for row in oracle['modules']]
         self.expected_window_handles = list(oracle['window']['expected_handles'])
 
@@ -238,7 +248,10 @@ class LiveRuntime:
         return read_health(self._base, timeout=20)
 
     def geometry_snapshot(self):
-        return self.canvas.evaluate(_OBSERVATION)
+        snapshot = self.canvas.evaluate(_OBSERVATION)
+        if not isinstance(snapshot, dict) or snapshot.get('drawingKey') != self._expected_drawing_key:
+            raise ValueError('Project drawing binding unavailable (UNREADABLE)')
+        return snapshot
 
     def _point(self, wx, wy):
         point = self.canvas.evaluate(_PROJECT, [wx, wy])
@@ -262,16 +275,18 @@ class LiveRuntime:
 
     def single_action(self, index):
         bounds = self._oracle['modules'][index % len(self.expected_module_handles)]['bounds']
-        point = self._point((bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2)
-        return lambda: self.page.mouse.click(*point)
+
+        def click():
+            point = self._point((bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2)
+            return self.page.mouse.click(*point)
+        return click
 
     def window_action(self, index):
         x0, y0, x1, y1 = self._oracle['window']['rect']
-        start, end = self._point(x0, y1), self._point(x1, y0)
-        if start[0] >= end[0] or start[1] >= end[1]:
-            raise ValueError('Containment drag projection unavailable')
-
         def drag():
+            start, end = self._point(x0, y1), self._point(x1, y0)
+            if start[0] >= end[0] or start[1] >= end[1]:
+                raise ValueError('Containment drag projection unavailable')
             self.page.mouse.move(*start)
             try:
                 self.page.mouse.down(button='left')
@@ -355,8 +370,12 @@ def make_live_runtime(ctx):
         drawing = client.upload_drawing('x08.dwg', oracle['fixture_content'])
         client.wait_upload(drawing, timeout_s=300)
         adopted = client.adopt_drawing(project['project_id'], drawing, 'x08', version=1)
-        canvas = navigate(page, name, adopted['version_id'])
-        return LiveRuntime(stack, page, canvas, oracle, STAGING_ORIGIN, headed=True)
+        expected_drawing_key = 'project:' + ':'.join([
+            project['org_id'], project['project_id'], adopted['drawing_id'], adopted['version_id']])
+        canvas = navigate(page, name, adopted['version_id'],
+                          expected_drawing_key=expected_drawing_key)
+        return LiveRuntime(stack, page, canvas, oracle, STAGING_ORIGIN, headed=True,
+                           expected_drawing_key=expected_drawing_key)
     except BaseException as exc:
         try:
             stack.close()

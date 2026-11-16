@@ -10,6 +10,13 @@ import pytest
 from benches import x08_runtime as live
 
 
+ORG_ID = '11111111-1111-4111-8111-111111111111'
+PROJECT_ID = '22222222-2222-4222-8222-222222222222'
+DRAWING_ID = '33333333-3333-4333-8333-333333333333'
+VERSION_ID = '44444444-4444-4444-8444-444444444444'
+PROJECT_KEY = f'project:{ORG_ID}:{PROJECT_ID}:{DRAWING_ID}:{VERSION_ID}'
+
+
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -187,7 +194,8 @@ def runtime():
     page, canvas, stack = Page(), Canvas(), ExitStack()
     oracle = dict(modules=[dict(handle='native-only', bounds=[10, 10, 20, 20])],
                   window=dict(rect=[10, 10, 40, 40], expected_handles=['native-only']))
-    return live.LiveRuntime(stack, page, canvas, oracle, 'synthetic', headed=True), page, canvas
+    return live.LiveRuntime(stack, page, canvas, oracle, 'synthetic', headed=True,
+                            expected_drawing_key='actual-double-snapshot'), page, canvas
 
 
 def test_native_projection_actual_mouse_order_and_snapshot():
@@ -212,8 +220,59 @@ def test_clipped_native_targets_refuse_without_mouse(bounds):
     value, page, _ = runtime()
     value._oracle['modules'][0]['bounds'] = bounds
     with pytest.raises(ValueError):
-        value.single_action(0)
+        value.single_action(0)()
     assert page.mouse.events == []
+
+
+@pytest.mark.parametrize('kind', ['single', 'window'])
+@pytest.mark.parametrize('clipped', [False, True])
+def test_actions_project_latest_layout_at_invocation(kind, clipped):
+    value, page, canvas = runtime()
+    original = canvas.evaluate
+    projections = []
+    offset = 0
+
+    def project(expression, point=None):
+        projections.append(point)
+        result = original(expression, point)
+        result['x'] += offset
+        return result
+
+    canvas.evaluate = project
+    action = value.single_action(0) if kind == 'single' else value.window_action(0)
+    assert projections == [] and page.mouse.events == []
+    offset = (90 if kind == 'single' else 70) if clipped else 5
+    canvas.bounding_box = lambda: dict(x=offset, y=0, width=100, height=100)
+    if clipped:
+        # The window's first endpoint remains visible; the second is clipped.
+        with pytest.raises(ValueError, match='Native target clipped'):
+            action()
+        assert page.mouse.events == []
+    else:
+        action()
+        if kind == 'single':
+            assert projections == [[15, 15]]
+            assert page.mouse.events == [('click', (20, 85), {})]
+        else:
+            assert projections == [[10, 40], [40, 10]]
+            assert page.mouse.events == [('move', (15, 60), {}), ('down', (), {'button': 'left'}),
+                                         ('move', (45, 90), {'steps': 10}),
+                                         ('up', (), {'button': 'left'})]
+
+
+@pytest.mark.parametrize('key', [None, 'old-scene', 'engine:opaque',
+                               PROJECT_KEY.replace(ORG_ID, PROJECT_ID),
+                               PROJECT_KEY.replace(PROJECT_ID, DRAWING_ID),
+                               PROJECT_KEY.replace(DRAWING_ID, VERSION_ID),
+                               PROJECT_KEY.replace(VERSION_ID, ORG_ID)])
+def test_geometry_refuses_late_drawing_transition(key):
+    value, _, canvas = runtime()
+    value._expected_drawing_key = PROJECT_KEY
+    canvas.evaluate = lambda expression: dict(drawingKey=PROJECT_KEY)
+    assert value.geometry_snapshot() == dict(drawingKey=PROJECT_KEY)
+    canvas.evaluate = lambda expression: dict(drawingKey=key)
+    with pytest.raises(ValueError, match='UNREADABLE'):
+        value.geometry_snapshot()
 
 
 def test_tracker_unwrap_dispose_and_failures_are_observed():
@@ -241,10 +300,67 @@ def test_tracker_unwrap_dispose_and_failures_are_observed():
     page.mouse.fail = 'down'
     with pytest.raises(RuntimeError):
         value.page.mouse.down()
-    assert value.frame_cleanup()['mouse_released'] is True
+    assert value.frame_cleanup()['mouse_released'] is False
     page.recorder_absent = False
     assert value.frame_cleanup()['recorder_removed'] is False
     assert page.mouse is original_mouse and page.unrelated.disposed == 0
+
+
+def test_successful_native_down_forwards_and_retains_button():
+    value, page, _ = runtime()
+    result = object()
+    original = page.mouse.down
+
+    def down(**kwargs):
+        assert value.page.mouse.held == {'right'}
+        original(**kwargs)
+        return result
+
+    page.mouse.down = down
+    assert value.page.mouse.down(button='right', click_count=2) is result
+    assert page.mouse.events == [('down', (), {'button': 'right', 'click_count': 2})]
+    assert value.frame_cleanup()['mouse_released'] is False
+
+
+@pytest.mark.parametrize('kwargs', [{}, {'button': 'right'}])
+def test_post_dispatch_down_failure_retains_witness_until_successful_up(kwargs):
+    value, page, _ = runtime()
+    button = kwargs.get('button', 'left')
+    original = page.mouse.down
+    dispatched = set()
+
+    def down(**options):
+        assert value.page.mouse.held == {button}
+        assert value.frame_cleanup()['mouse_released'] is False
+        original(**options)
+        dispatched.add(button)
+        raise RuntimeError('after dispatch')
+
+    page.mouse.down = down
+    with pytest.raises(RuntimeError, match='after dispatch'):
+        value.page.mouse.down(**kwargs)
+    assert dispatched == {button}
+    assert page.mouse.events == [('down', (), kwargs)]
+    assert value.page.mouse.held == {button}
+    assert value.frame_cleanup()['mouse_released'] is False
+    page.mouse.fail = 'up'
+    with pytest.raises(RuntimeError):
+        value.page.mouse.up(**kwargs)
+    assert value.page.mouse.held == {button}
+    assert value.frame_cleanup()['mouse_released'] is False
+    page.mouse.fail = None
+    result = object()
+    original_up = page.mouse.up
+
+    def up(**options):
+        original_up(**options)
+        dispatched.discard(button)
+        return result
+
+    page.mouse.up = up
+    assert value.page.mouse.up(**kwargs) is result
+    assert not dispatched
+    assert value.frame_cleanup()['mouse_released'] is True
 
 
 @pytest.mark.parametrize('kwargs', [{}, {'button': 'right', 'delay': 17, 'click_count': 2}])
@@ -352,7 +468,19 @@ def test_ack_prepares_ui_and_returns_final_control_without_running():
     assert page.mouse.events == []
 
 
-def test_navigate_exact_opener_visible_duplicate_canonical_version_and_observer():
+@pytest.mark.parametrize('observations, ready', [
+    ([(PROJECT_KEY, VERSION_ID)], True),
+    ([('old-scene', VERSION_ID), (PROJECT_KEY, VERSION_ID)], True),
+    ([(PROJECT_KEY, 'old-version'), (PROJECT_KEY, VERSION_ID)], True),
+    ([('old-scene', VERSION_ID)], False),
+    ([('engine:opaque', VERSION_ID)], False),
+    ([(PROJECT_KEY.replace(ORG_ID, PROJECT_ID), VERSION_ID)], False),
+    ([(PROJECT_KEY.replace(PROJECT_ID, DRAWING_ID), VERSION_ID)], False),
+    ([(PROJECT_KEY.replace(DRAWING_ID, VERSION_ID), VERSION_ID)], False),
+    ([(PROJECT_KEY.replace(VERSION_ID, ORG_ID), VERSION_ID)], False),
+    ([(PROJECT_KEY, 'old-version')], False),
+])
+def test_navigate_exact_opener_visible_duplicate_canonical_version_and_observer(observations, ready):
     events = []
     project_name = 'synthetic-unique-project'
 
@@ -382,7 +510,7 @@ def test_navigate_exact_opener_visible_duplicate_canonical_version_and_observer(
             events.append(('wait', self.name, kwargs))
 
         def select_option(self, version, **kwargs):
-            assert version == 'canonical-version' and kwargs == dict(timeout=30000)
+            assert version == VERSION_ID and kwargs == dict(timeout=30000)
             events.append(('version', version))
 
     hidden = Control('hidden-project', visible=False)
@@ -430,20 +558,39 @@ def test_navigate_exact_opener_visible_duplicate_canonical_version_and_observer(
             return canvas
 
         def wait_for_function(self, expression, **kwargs):
-            assert kwargs == dict(timeout=30000)
+            assert kwargs == dict(timeout=30000,
+                                  arg=dict(drawingKey=PROJECT_KEY, versionId=VERSION_ID))
             assert '__leafViewerObservation' in expression
             assert "typeof api.snapshot === 'function'" in expression
             assert "typeof api.project === 'function'" in expression
-            assert 'drawingKey' in expression
+            assert 'api.snapshot()?.drawingKey === expected.drawingKey' in expression
+            assert 'canonical?.value === expected.versionId' in expression
+            assert "'Canonical drawing version'" in expression
+            assert "document.querySelectorAll('select')" in expression
+            assert 'select.labels' in expression and 'label.childNodes' in expression
+            assert 'getBoundingClientRect()' in expression
+            # Model polling the two real values; earlier nonempty keys do not settle.
+            for key, version in observations:
+                if key == kwargs['arg']['drawingKey'] and version == kwargs['arg']['versionId']:
+                    break
+            else:
+                raise TimeoutError('adopted drawing never became ready')
             events.append(('observer',))
 
-    assert live.navigate(NavigationPage(), project_name, 'canonical-version') is canvas
+    if not ready:
+        with pytest.raises(TimeoutError):
+            live.navigate(NavigationPage(), project_name, VERSION_ID,
+                          expected_drawing_key=PROJECT_KEY)
+        assert ('observer',) not in events
+        return
+    assert live.navigate(NavigationPage(), project_name, VERSION_ID,
+                         expected_drawing_key=PROJECT_KEY) is canvas
     assert events == [
         ('reload',), ('settled',), ('click', 'Continue workspace'),
         ('click', 'Projects / Change project'),
         ('wait', 'hidden-project', dict(state='attached', timeout=30000)),
         ('click', 'visible-project'), ('click', 'Continue workspace'),
-        ('click', 'Project'), ('version', 'canonical-version'),
+        ('click', 'Project'), ('version', VERSION_ID),
         ('click', 'Preview v1 in the drawing'), ('click', 'Return to drawing'),
         ('wait', 'canvas', dict(state='visible', timeout=60000)), ('observer',)]
 
@@ -467,7 +614,7 @@ def test_setup_error_and_cancellation_release_project_before_browser(tmp_path, m
     @contextmanager
     def project(client, name):
         try:
-            yield dict(project_id='owned')
+            yield dict(org_id=ORG_ID, project_id=PROJECT_ID)
         finally:
             events.append('project')
 
@@ -544,7 +691,7 @@ def test_successful_factory_uses_supported_transport_and_owns_until_close(tmp_pa
         assert name.startswith('xbench-x08-')
         events.append('project')
         try:
-            yield dict(project_id='owned-project')
+            yield dict(org_id=ORG_ID, project_id=PROJECT_ID)
         finally:
             events.append('project-delete')
 
@@ -562,18 +709,19 @@ def test_successful_factory_uses_supported_transport_and_owns_until_close(tmp_pa
             events.append('ready')
 
         def adopt_drawing(self, project_id, drawing, name, **kwargs):
-            assert (project_id, drawing, name) == ('owned-project', 'uploaded', 'x08')
+            assert (project_id, drawing, name) == (PROJECT_ID, 'uploaded', 'x08')
             assert kwargs == dict(version=1)
             events.append('adopt')
-            return dict(version_id='canonical-version')
+            return dict(drawing_id=DRAWING_ID, version_id=VERSION_ID)
 
     def api(actual_page, method, path, **kwargs):
         assert actual_page is page and method == 'GET' and path == '/api/example'
         assert kwargs == dict(origin=xbench_session.STAGING_ORIGIN, timeout_s=20)
         return 200, {'content-type': 'application/json'}, b'{"ok":true}'
 
-    def navigate(actual_page, name, version):
-        assert actual_page is page and version == 'canonical-version'
+    def navigate(actual_page, name, version, *, expected_drawing_key):
+        assert actual_page is page and version == VERSION_ID
+        assert expected_drawing_key == PROJECT_KEY
         events.append('navigate')
         return canvas
 
@@ -588,6 +736,9 @@ def test_successful_factory_uses_supported_transport_and_owns_until_close(tmp_pa
         source_sha='a' * 40, manifest={}, out_dir=tmp_path))
     assert events == ['session', 'project', 'upload', 'ready', 'adopt', 'navigate']
     assert value.expected_module_handles == ['native']
+    assert value._expected_drawing_key == PROJECT_KEY
+    canvas.evaluate = lambda expression: dict(drawingKey=PROJECT_KEY)
+    assert value.geometry_snapshot() == dict(drawingKey=PROJECT_KEY)
     value.close()
     value.close()
     assert events[-2:] == ['project-delete', 'browser-close']
