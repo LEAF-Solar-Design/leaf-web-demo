@@ -21,6 +21,15 @@ CAP = "private-checkout-capability-123456789"
 MODULE_LAYER = "PRIVATE_MODULE_LAYER"
 TAG_LAYER = "PRIVATE_TAG_LAYER"
 BLOCK = "PRIVATE_PANEL_BLOCK"
+STRINGING = {
+    "tools": [
+        {"name": "solar-panel-groups", "params": {"discover": {
+            "BranchMaxOffset": 1, "AlignmentTolerance": 0.1, "InstallationDesign": "Roof"}}},
+        {"name": "solar-string-add", "params": {"operation": "add-string", "ordered_panel_refs": ["panel-1"]}},
+    ],
+    # This mock catalog entry stands in for the deployment's manifest-named tag tool.
+    "tag_tool": {"name": "xbench-string-tags", "params": {"height": 0.8}},
+}
 
 
 @pytest.fixture
@@ -306,7 +315,7 @@ def test_viewport_scale_and_no_viewport(doc):
 
 
 def test_tag_size_overlap_and_no_text_in_results(doc):
-    viewport(doc)
+    viewport(doc, view_height=1000 / 25.4)
     small = tag(doc, height=0.5)
     other = tag(doc, point=(0.1, 0.1), height=0.8)
     checks = geometry.tag_checks(doc, [TAG_LAYER], geometry.sheet_scale(doc))
@@ -317,7 +326,8 @@ def test_tag_size_overlap_and_no_text_in_results(doc):
 
 
 def test_readable_tags_and_nonoverlap_pass(doc, fixture, tmp_path):
-    viewport(doc)
+    fixture["stringing"] = deepcopy(STRINGING)
+    viewport(doc, view_height=1000 / 25.4)
     tag(doc)
     tag(doc, point=(100, 0))
     row = pair(doc, fixture, tmp_path)
@@ -326,7 +336,8 @@ def test_readable_tags_and_nonoverlap_pass(doc, fixture, tmp_path):
 
 
 def test_small_tag_failure_names_handle_and_layer(doc, fixture, tmp_path):
-    viewport(doc)
+    fixture["stringing"] = deepcopy(STRINGING)
+    viewport(doc, view_height=1000 / 25.4)
     small = tag(doc, height=0.5)
     row = pair(doc, fixture, tmp_path)
     assert row["steps"]["3"] == "FAIL"
@@ -334,10 +345,13 @@ def test_small_tag_failure_names_handle_and_layer(doc, fixture, tmp_path):
 
 
 def test_tag_height_at_limit_and_overlap_at_ten_percent(doc):
+    from ezdxf import bbox
+
     height = 1.8 / 25.4
-    tag(doc, height=height, text="ABCD")
-    tag(doc, height=height, text="ABCD", point=(height * 0.6 * 4 * 0.9, 0))
-    checks = geometry.tag_checks(doc, [TAG_LAYER], 1)
+    first = tag(doc, height=height, text="ABCD")
+    width = bbox.extents([first]).size.x
+    tag(doc, height=height, text="ABCD", point=(width * 0.9, 0))
+    checks = geometry.tag_checks(doc, [TAG_LAYER], 25.4)
     assert checks["too_small"] == checks["overlaps"] == []
 
 
@@ -351,24 +365,105 @@ def test_mtext_checked_without_exposing_content(doc):
 def test_no_tags_is_unreadable_even_without_manifest_tag_layers(doc, fixture, tmp_path):
     viewport(doc)
     fixture.pop("tag_layers")
-    assert pair(doc, fixture, tmp_path)["steps"]["3"] == "UNREADABLE"
+    row = pair(doc, fixture, tmp_path)
+    assert row["steps"]["3"] == "UNREADABLE"
+    assert row["evidence"]["3"] == "no recorded stringing settings in manifest"
 
 
 def test_tags_without_viewport_are_unreadable(doc, fixture, tmp_path):
+    fixture["stringing"] = deepcopy(STRINGING)
     tag(doc)
+    row = pair(doc, fixture, tmp_path)
+    assert row["steps"]["3"] == "UNREADABLE"
+    assert "no paper-space model viewport scale" in row["evidence"]["3"]
+
+
+def test_tags_without_stringing_settings_stay_unreadable(doc, fixture, tmp_path):
+    viewport(doc)
+    tag(doc)
+    row = pair(doc, fixture, tmp_path)
+    assert row["steps"]["3"] == "UNREADABLE"
+    assert row["evidence"]["3"] == "no recorded stringing settings in manifest"
+
+
+def test_configured_stringing_without_exported_tags_fails(doc, fixture, tmp_path):
+    fixture["stringing"] = deepcopy(STRINGING)
+    fixture.pop("tag_layers")
+    row = pair(doc, fixture, tmp_path)
+    assert row["steps"]["3"] == "FAIL"
+    assert row["evidence"]["3"] == "stringing ran but no tags exported"
+
+
+def test_overlapping_tags_fail_naming_both_handles(doc, fixture, tmp_path):
+    fixture.update(stringing=deepcopy(STRINGING), sheet_scale=0.4)
+    first = tag(doc)
+    second = tag(doc, point=(0.1, 0.1))
+    row = pair(doc, fixture, tmp_path)
+    assert row["steps"]["3"] == "FAIL"
+    assert first.dxf.handle in row["evidence"]["3"] and second.dxf.handle in row["evidence"]["3"]
+    assert row["failures"]["3"][0]["fraction"] > 0.1
+
+
+@pytest.mark.parametrize("units", [0, 1, 6])
+@pytest.mark.parametrize("height,expected", [(1.8, "PASS"), (1.7, "FAIL")])
+def test_manifest_scale_is_model_units_per_paper_mm(doc, fixture, tmp_path, units, height, expected):
+    doc.header["$INSUNITS"] = units
+    # The recorded scale takes precedence over this deliberately unsuitable viewport.
+    viewport(doc, height=1, view_height=100000)
+    entity = tag(doc, height=height * 10)
+    fixture.update(insunits=units, sheet_scale=10, stringing=deepcopy(STRINGING))
+    row = pair(doc, fixture, tmp_path)
+    assert row["steps"]["3"] == expected
+    assert row["sheet_scale"] == 10 and row["sheet_scale_source"] == "manifest"
+    if expected == "FAIL":
+        assert row["failures"]["3"][0]["handle"] == entity.dxf.handle
+        assert row["failures"]["3"][0]["paper_mm"] == pytest.approx(height)
+
+
+def test_manifest_scale_works_without_viewport_for_mtext(doc, fixture, tmp_path):
+    fixture.update(sheet_scale=10, stringing=deepcopy(STRINGING))
+    doc.modelspace().add_mtext("PRIVATE\\PSECOND", dxfattribs={"layer": TAG_LAYER, "char_height": 18})
+    row = pair(doc, fixture, tmp_path)
+    assert row["steps"]["3"] == "PASS" and row["tag_count"] == 1
+    assert "PRIVATE\\PSECOND" not in json.dumps(row)
+
+
+@pytest.mark.parametrize("scale", [0, -1, float("inf"), float("nan")])
+def test_invalid_manifest_scale_is_unreadable(doc, fixture, tmp_path, scale):
+    tag(doc)
+    fixture.update(sheet_scale=scale, stringing=deepcopy(STRINGING))
     assert pair(doc, fixture, tmp_path)["steps"]["3"] == "UNREADABLE"
 
 
-def test_metres_tags_use_thousand_mm_per_unit(doc):
+def test_metres_tags_use_viewport_paper_mm_per_model_unit(doc):
     doc.header["$INSUNITS"] = 6
     tag(doc, height=0.018)
-    assert geometry.tag_checks(doc, [TAG_LAYER], 0.1)["too_small"] == []
+    assert geometry.tag_checks(doc, [TAG_LAYER], 100)["too_small"] == []
+
+
+@pytest.mark.parametrize("units", [0, 1, 6])
+@pytest.mark.parametrize("height,expected", [(18, "PASS"), (17, "FAIL")])
+def test_viewport_scale_is_paper_mm_per_model_unit(doc, fixture, tmp_path, units, height, expected):
+    doc.header["$INSUNITS"] = units
+    fixture.update(insunits=units, stringing=deepcopy(STRINGING))
+    viewport(doc)
+    tag(doc, height=height)
+    row = pair(doc, fixture, tmp_path)
+    assert row["steps"]["3"] == expected
+    assert row["sheet_scale_source"] == "viewport"
+
+
+def test_viewport_with_paper_inches_converts_to_mm(doc):
+    viewport(doc)
+    doc.layouts.get("Layout1").dxf.plot_paper_units = 0
+    assert geometry.sheet_scale(doc) == pytest.approx(2.54)
 
 
 @pytest.mark.parametrize("units,tag_height", [(0, 0.8), (1, 0.8), (6, 0.018)])
 def test_all_units_grade_positions_tags_layers_and_fills(doc, fixture, tmp_path, units, tag_height):
+    fixture["stringing"] = deepcopy(STRINGING)
     doc.header["$INSUNITS"] = units
-    viewport(doc)
+    viewport(doc, view_height=1000 / (1000 if units == 6 else 25.4))
     tag(doc, height=tag_height)
     data = encoded(doc, tmp_path)
     fixture.update(insunits=units, bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
@@ -533,10 +628,133 @@ class Wire:
         raise AssertionError((method, path))
 
 
+class StringingWire(Wire):
+    """Manifest-named tools through the same catalog, run, job and DXF routes."""
+
+    def __init__(self, content, export_content, *, asynchronous=True, fail_tool=None,
+                 failure="http", report_layers=True):
+        super().__init__(content)
+        self.export_content = export_content
+        self.asynchronous = asynchronous
+        self.fail_tool, self.failure = fail_tool, failure
+        self.report_layers = report_layers
+        self.names = [tool["name"] for tool in STRINGING["tools"]] + [STRINGING["tag_tool"]["name"]]
+
+    def finish(self, tool):
+        index = self.names.index(tool)
+        self.rev += 1
+        self.head = f"v{index + 4}"
+        if tool == self.fail_tool:
+            error = {"reason_code": "STRINGING_REFUSED", "message": "recorded settings refused " + CAP}
+            if self.failure == "nested":
+                return {"status": "complete", "result": {"ok": False, "error": error}}
+            if self.failure == "refused":
+                return {"status": "complete", "result": {"status": "refused", **error}}
+            return {"status": "failed", "error": error}
+        result = {"tag_layers": [TAG_LAYER]} if self.report_layers and tool == self.names[-1] else {}
+        return {"status": "complete", "result": {"ok": True, "result": result}}
+
+    def transport(self, method, path, **kw):
+        if path == "/api/tools":
+            self.calls.append((method, path, deepcopy(kw)))
+            return 200, {"tools": [{"name": name, "catalog_digest": "digest",
+                                    "params": {"properties": {"drawing_id": {}, "expected_rev": {}}}}
+                                   for name in ["solar-settings", "solar-panels-from-drawing", *self.names]]}
+        if path == "/api/run" and kw["json_body"]["tool"] in self.names:
+            self.calls.append((method, path, deepcopy(kw)))
+            body = kw["json_body"]
+            tool = body["tool"]
+            assert body["params"]["drawing_id"] == "d"
+            assert body["params"]["expected_rev"] == self.rev
+            assert body["dwg"] == self.head
+            assert kw["headers"]["X-Checkout-Capability"] == CAP
+            assert kw["headers"]["Idempotency-Key"]
+            if tool == self.fail_tool and self.failure == "http":
+                return 422, {"error": {"reason_code": "STRINGING_REFUSED",
+                                       "message": "recorded settings refused " + CAP}}
+            if self.asynchronous:
+                return 202, {"job_id": "run-" + tool}
+            return 200, {"run_id": "run-" + tool, **self.finish(tool)}
+        if path.startswith("/api/jobs/run-"):
+            self.calls.append((method, path, deepcopy(kw)))
+            return 200, self.finish(path.removeprefix("/api/jobs/run-"))
+        if path.endswith("/dxf") and not path.endswith("/versions/v1/dxf"):
+            self.calls.append((method, path, deepcopy(kw)))
+            return 200, self.export_content
+        return super().transport(method, path, **kw)
+
+
 def product(fixture, *, wire=None, out_dir=None):
     wire = wire or Wire(Path(fixture["path"]).read_bytes())
     rows = x01.grade_files(StudioClient(wire.transport), project=PROJECT, fixtures=[fixture], out_dir=out_dir)
     return wire, rows[fixture["id"]]
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("report_layers", [False, True])
+def test_product_runs_manifest_tools_in_order_with_evidence(doc, fixture, tmp_path, asynchronous, report_layers):
+    fixture.update(stringing=deepcopy(STRINGING), sheet_scale=0.4)
+    if report_layers:
+        fixture["tag_layers"] = ["UNUSED_MANIFEST_LAYER"]
+    recorded = deepcopy(fixture["stringing"])
+    tag(doc)
+    wire = StringingWire(Path(fixture["path"]).read_bytes(), encoded(doc, tmp_path, "export.dxf"),
+                         asynchronous=asynchronous, report_layers=report_layers)
+    _, row = product(fixture, wire=wire)
+    assert all(row["steps"][str(n)] == "PASS" for n in range(1, 6))
+    assert row["export_version_id"] == "v6"
+    assert fixture["stringing"] == recorded
+    runs = row["stringing_runs"]
+    assert [run["name"] for run in runs] == wire.names
+    for index, run in enumerate(runs):
+        assert run["status"] == "complete" and run["run_id"] == "run-" + run["name"]
+        assert run["params"]["expected_rev"] == index + 2 and run["params"]["drawing_id"] == "d"
+    assert runs[0]["params"]["discover"] == recorded["tools"][0]["params"]["discover"]
+    assert runs[1]["params"]["ordered_panel_refs"] == ["panel-1"]
+    assert runs[2]["params"]["height"] == 0.8
+    writes = [kw["json_body"] for _, path, kw in wire.calls if path == "/api/run"]
+    assert [write["tool"] for write in writes] == ["solar-settings", "solar-panels-from-drawing", *wire.names]
+    assert [write["dwg"] for write in writes] == ["v1", "v2", "v3", "v4", "v5"]
+    assert wire.calls[-2][1] == "/api/projects/p/drawings/d/versions/v6/dxf"
+    assert CAP not in json.dumps(row) and "SECRET-TAG" not in json.dumps(row)
+    assert wire.released
+
+
+@pytest.mark.parametrize("tool", ["solar-panel-groups", "solar-string-add", "xbench-string-tags"])
+@pytest.mark.parametrize("failure", ["http", "async", "nested", "refused"])
+def test_product_stringing_refusal_only_makes_step_three_unreadable(doc, fixture, tmp_path, tool, failure):
+    fixture.update(stringing=deepcopy(STRINGING), sheet_scale=0.4)
+    tag(doc)
+    wire = StringingWire(Path(fixture["path"]).read_bytes(), encoded(doc, tmp_path, "export.dxf"),
+                         fail_tool=tool, failure=failure)
+    _, row = product(fixture, wire=wire)
+    assert all(row["steps"][str(n)] == "PASS" for n in (1, 2, 4, 5))
+    assert row["steps"]["3"] == "UNREADABLE"
+    assert tool in row["evidence"]["3"] and "STRINGING_REFUSED" in row["evidence"]["3"]
+    runs = row["stringing_runs"]
+    assert [run["name"] for run in runs] == wire.names[:wire.names.index(tool) + 1]
+    assert runs[-1]["status"] == ("refused" if failure in ("http", "refused") else "failed")
+    assert runs[-1]["reason_code"] == "STRINGING_REFUSED"
+    assert runs[-1]["run_id"] == (None if failure == "http" else "run-" + tool)
+    assert row["export_version_id"] == wire.head and wire.released
+    assert CAP not in json.dumps(row)
+
+
+def test_product_stringing_without_tags_fails(fixture):
+    fixture["stringing"] = deepcopy(STRINGING)
+    data = Path(fixture["path"]).read_bytes()
+    _, row = product(fixture, wire=StringingWire(data, data))
+    assert row["steps"]["3"] == "FAIL"
+    assert row["evidence"]["3"] == "stringing ran but no tags exported"
+
+
+def test_product_missing_catalog_tool_is_unreadable_and_still_exports(fixture):
+    fixture["stringing"] = {"tools": [], "tag_tool": deepcopy(STRINGING["tag_tool"])}
+    wire, row = product(fixture)
+    assert row["steps"]["3"] == "UNREADABLE"
+    assert "xbench-string-tags" in row["evidence"]["3"] and "TOOL_NOT_IN_CATALOG" in row["evidence"]["3"]
+    assert all(row["steps"][str(n)] == "PASS" for n in (1, 2, 4, 5))
+    assert row["export_version_id"] == "v3" and wire.released
 
 
 def test_product_flow_original_and_refreshed_export_and_source_unchanged(fixture):
@@ -553,6 +771,8 @@ def test_product_flow_original_and_refreshed_export_and_source_unchanged(fixture
     assert writes[0]["params"]["changes"] == {"panel_layer_contains": MODULE_LAYER}
     assert writes[0]["params"]["initialize"]["units"]["drawing_units"] == "in"
     assert writes[1]["dwg"] == "v2" and writes[1]["params"]["expected_rev"] == 1
+    assert row["steps"]["3"] == "UNREADABLE"
+    assert row["evidence"]["3"] == "no recorded stringing settings in manifest"
     assert CAP not in json.dumps(row)
 
 

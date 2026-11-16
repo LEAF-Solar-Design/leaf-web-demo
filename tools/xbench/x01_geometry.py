@@ -131,12 +131,8 @@ def _tag_entities(doc, layers):
     layers = {layer.casefold() for layer in layers}
     for entity in doc.modelspace():
         if entity.dxf.layer.casefold() in layers:
-            if entity.dxftype() in ("TEXT", "MTEXT", "ATTRIB"):
+            if entity.dxftype() in ("TEXT", "MTEXT"):
                 yield entity
-        if entity.dxftype() == "INSERT":
-            for attrib in entity.attribs:
-                if attrib.dxf.layer.casefold() in layers:
-                    yield attrib
 
 
 def entities_on_bad_layers(doc, handles_or_layers):
@@ -241,29 +237,39 @@ def mm_per_unit(doc):
     return 1000.0 if units == 6 else 25.4
 
 
-def tag_checks(doc, tag_layers, sheet_scale):
+def tag_checks(doc, tag_layers, sheet_scale=None, *, model_units_per_paper_mm=None):
+    """Measure tags using recorded model-units/mm or viewport paper-mm/model-unit."""
     _, Polygon, _, STRtree = dependencies()
-    if not math.isfinite(sheet_scale) or sheet_scale <= 0:
-        raise ValueError("sheet scale must be finite and positive")
-    unit_mm = mm_per_unit(doc)
+    from ezdxf import bbox
+
+    if model_units_per_paper_mm is not None:
+        scale = float(model_units_per_paper_mm)
+        if not math.isfinite(scale) or scale <= 0:
+            raise ValueError("sheet scale must be finite and positive")
+        paper_factor = 1.0 / scale
+    else:
+        if sheet_scale is None or not math.isfinite(sheet_scale) or sheet_scale <= 0:
+            raise ValueError("sheet scale must be finite and positive")
+        paper_factor = sheet_scale
     handles, boxes, too_small = [], [], []
     for entity in _tag_entities(doc, tag_layers):
         is_mtext = entity.dxftype() == "MTEXT"
         height = float(entity.dxf.char_height if is_mtext else entity.dxf.height)
-        text = entity.plain_text() if is_mtext else entity.dxf.text
-        paper_mm = height * sheet_scale * unit_mm
+        if not math.isfinite(height) or height <= 0:
+            raise ValueError(f"invalid tag height: {entity.dxf.handle}")
+        paper_mm = height * paper_factor
         if paper_mm < 1.8 - 1e-12:
             too_small.append((entity.dxf.handle, paper_mm))
-        lines = text.splitlines() or [""]
-        width = height * 0.6 * max(map(len, lines))
-        box_height = height * len(lines)
-        x, y = entity.dxf.insert.x, entity.dxf.insert.y
-        angle = math.radians(entity.dxf.get("rotation", 0))
-        cosine, sine = math.cos(angle), math.sin(angle)
-        corners = [(x + px * cosine - py * sine, y + px * sine + py * cosine)
-                   for px, py in ((0, 0), (width, 0), (width, box_height), (0, box_height))]
-        # Compare axis-aligned envelopes, including rotated tags.
-        boxes.append(Polygon(corners).envelope)
+        bounds = bbox.extents([entity], fast=False)
+        if not bounds.has_data:
+            raise ValueError(f"tag has no text bounds: {entity.dxf.handle}")
+        left, bottom = bounds.extmin.x, bounds.extmin.y
+        right, top = bounds.extmax.x, bounds.extmax.y
+        if (not all(math.isfinite(value) for value in (left, bottom, right, top))
+                or right <= left or top <= bottom):
+            raise ValueError(f"invalid tag bounds: {entity.dxf.handle}")
+        # ezdxf accounts for font metrics, alignment, MTEXT wrapping and rotation.
+        boxes.append(Polygon([(left, bottom), (right, bottom), (right, top), (left, top)]))
         handles.append(entity.dxf.handle)
     overlaps = []
     if boxes:
@@ -281,6 +287,7 @@ def tag_checks(doc, tag_layers, sheet_scale):
 
 
 def sheet_scale(doc):
+    """Return paper mm per model unit from the first model viewport."""
     for layout in doc.layouts:
         if layout.name == "Model":
             continue
@@ -290,7 +297,8 @@ def sheet_scale(doc):
             height, view_height = viewport.dxf.height, viewport.dxf.view_height
             if (math.isfinite(height) and math.isfinite(view_height) and
                     height > 0 and view_height > 0):
-                return float(height / view_height)
+                paper_mm = 25.4 if layout.dxf.get("plot_paper_units", 1) == 0 else 1.0
+                return float(height / view_height) * paper_mm
             return None
     return None
 
