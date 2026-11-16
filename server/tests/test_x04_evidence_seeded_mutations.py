@@ -60,3 +60,20 @@ def test_seeded_single_field_mutations_with_valid_controls(seed, tmp_path, capsy
             assert streams.out == streams.err == ''
         assert json.loads(target.read_bytes())['recomputed_result'] == {
             'count': 7, 'highlight_handles': ['A', 'B'], 'original_bytes_integrity': 'unverified'}
+
+
+def test_self_consistent_entity_edits_validate_after_recomputation():
+    from export_x04_offline_evidence import export_evidence
+    from validate_x04_offline_evidence import validate_evidence
+    source = worked_example()
+    before = deepcopy(source)
+    baseline = export_evidence(source)
+    edited = deepcopy(baseline)
+    edited['drawing']['intake']['inserts'][0]['rows'] = 3
+    with pytest.raises(ValueError, match='count claim'):
+        validate_evidence(edited)
+    updated = export_evidence(edited)
+    assert updated['result'] == {'count': 10, 'highlight_handles': ['A', 'B'],
+                                 'original_bytes_integrity': 'unverified'}
+    assert validate_evidence(updated)['recomputed_result'] == updated['result']
+    assert baseline['result']['count'] == 7 and source == before

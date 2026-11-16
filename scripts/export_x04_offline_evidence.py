@@ -51,7 +51,10 @@ def read_json(path, max_input_bytes=DEFAULT_MAX_INPUT_BYTES):
         return int(value)
 
     if str(path) == '-':
-        encoded = read_bounded(sys.stdin.buffer, max_input_bytes)
+        stream = getattr(sys.stdin, 'buffer', None)
+        if stream is None or getattr(stream, 'closed', False):
+            raise ValueError('Stdin requires an open binary input buffer.')
+        encoded = read_bounded(stream, max_input_bytes)
     else:
         source = Path(path)
         if source.stat().st_size > max_input_bytes:
@@ -138,6 +141,16 @@ def export_evidence(payload):
                        'original_bytes_integrity': 'unverified'}}
 
 
+def write_all(stream, encoded, label):
+    offset = 0
+    while offset < len(encoded):
+        chunk = encoded[offset:offset + 65536]
+        written = stream.write(chunk)
+        if type(written) is not int or written <= 0 or written > len(chunk):
+            raise OSError(f'{label} write did not report valid forward progress.')
+        offset += written
+
+
 def write_json(value, output=None, max_output_bytes=None):
     encoder = json.JSONEncoder(ensure_ascii=True, allow_nan=False, indent=2)
     chunks = []
@@ -150,13 +163,7 @@ def write_json(value, output=None, max_output_bytes=None):
     encoded = ''.join(chunks) + '\n'
     if output is None:
         try:
-            offset = 0
-            while offset < len(encoded):
-                chunk = encoded[offset:offset + 65536]
-                written = sys.stdout.write(chunk)
-                if type(written) is not int or written <= 0 or written > len(chunk):
-                    raise OSError('Stdout write did not report valid forward progress.')
-                offset += written
+            write_all(sys.stdout, encoded, 'Stdout')
             sys.stdout.flush()
         except (OSError, ValueError):
             # Retire a failed stream so interpreter shutdown does not flush it again.
@@ -169,12 +176,20 @@ def write_json(value, output=None, max_output_bytes=None):
         with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', newline='\n',
                                          dir=target.parent, prefix='.x04-', delete=False) as stream:
             temporary = Path(stream.name)
-            stream.write(encoded)
+            write_all(stream, encoded, 'Temporary output')
             stream.flush()
         os.replace(temporary, target)
-    finally:
+    except BaseException as error:
         if temporary is not None:
-            temporary.unlink(missing_ok=True)
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                note = (f'Temporary file {temporary.name} remains after cleanup failed '
+                        f'({type(cleanup_error).__name__}).')
+                error.add_note(note)
+                if isinstance(error, KeyboardInterrupt):
+                    report_failure('cleanup', note)
+        raise
 
 
 def check_output_path(source, output):
@@ -187,6 +202,7 @@ def check_output_path(source, output):
 
 
 def report_failure(operation, error):
+    notes = getattr(error, '__notes__', ())
     if isinstance(error, RecursionError):
         error = 'JSON nesting exceeds the supported recursion depth.'
     message = str(error)
@@ -199,6 +215,8 @@ def report_failure(operation, error):
     except (OSError, ValueError):
         # A closed diagnostic stream still leaves a deterministic failure exit.
         sys.stderr = None
+    for note in notes:
+        report_failure('cleanup', note)
     return 2
 
 
