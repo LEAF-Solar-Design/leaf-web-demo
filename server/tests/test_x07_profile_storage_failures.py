@@ -25,6 +25,7 @@ class ProfileStorageFailureTests(unittest.TestCase):
         original = self.store._connection
         class Proxy:
             def __init__(self, db): self.db = db
+            def __getattr__(self, name): return getattr(self.db, name)
             def execute(self, sql, parameters=()):
                 result = self.db.execute(sql, parameters)
                 if sql.startswith(statement):
@@ -42,7 +43,7 @@ class ProfileStorageFailureTests(unittest.TestCase):
 
     def test_version_write_failure_rolls_back_and_retry_keeps_sequence(self):
         with self.failure_after('INSERT INTO profile_versions'):
-            with self.assertRaises(sqlite3.OperationalError):
+            with self.assertRaisesRegex(sqlite3.OperationalError, '^injected failure after write$'):
                 self.store.save_version('a', {'module': {'block': 'Changed', 'layer': 'MODULES'}}, expected_version=1)
         self.assertEqual(self.store.latest('a')['version'], 1)
         self.assertEqual(self.store.application_record('old-project', 'a')['roles'], self.roles)
@@ -50,7 +51,7 @@ class ProfileStorageFailureTests(unittest.TestCase):
 
     def test_failed_first_version_does_not_leave_a_customer_root(self):
         with self.failure_after('INSERT INTO profile_versions'):
-            with self.assertRaises(sqlite3.OperationalError):
+            with self.assertRaisesRegex(sqlite3.OperationalError, '^injected failure after write$'):
                 self.store.save_version('new', self.roles)
         self.assertIsNone(self.store.latest('new'))
         with self.store._connection() as db:
@@ -59,7 +60,7 @@ class ProfileStorageFailureTests(unittest.TestCase):
 
     def test_project_pin_failure_preserves_previous_pin_and_can_retry(self):
         with self.failure_after('INSERT INTO project_applications'):
-            with self.assertRaises(sqlite3.OperationalError):
+            with self.assertRaisesRegex(sqlite3.OperationalError, '^injected failure after write$'):
                 self.store.apply_to_project('new-project', 'a')
         self.assertIsNone(self.store.application_record('new-project', 'a'))
         self.assertEqual(self.store.application_record('old-project', 'a')['version'], 1)

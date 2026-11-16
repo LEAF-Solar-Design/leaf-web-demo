@@ -12,7 +12,12 @@ class ReceiptLockRecovery(unittest.TestCase):
             root = Path(directory)
             current = adapter(root)
             journal = current._receipts
-            journal._connect = lambda: sqlite3.connect(journal.path, timeout=0)
+            connect = journal._connect
+            def no_wait():
+                db = connect()
+                db.execute('PRAGMA busy_timeout=0')
+                return db
+            journal._connect = no_wait
             request = {**COPIES[0], 'expected_version': 0}
             profile_bytes = (root / 'profiles.sqlite').read_bytes()
             with closing(sqlite3.connect(journal.path)) as blocker:

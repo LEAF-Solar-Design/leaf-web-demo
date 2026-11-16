@@ -102,9 +102,15 @@ if protocol and protocol.startswith('duplicate_reply_'):
 if protocol=='eof': sys.exit(0)
 if protocol=='malformed': print('{not JSON'); sys.exit(0)
 if protocol=='nonzero': sys.stderr.write('injected protocol exit'); sys.exit(23)
+if protocol=='stderr_sentinel': sys.stderr.write(request['fixture']['sentinel']);sys.exit(23)
 if protocol=='hung':
     import time
     time.sleep(60)
+if protocol=='descendant':
+    import subprocess,threading
+    descendant=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    print('DESCENDANT:'+str(descendant.pid),flush=True)
+    threading.Event().wait(60);sys.exit(0)
 if protocol=='stdout_large': sys.stdout.write('x'*(2*1024*1024));sys.stdout.flush();sys.exit(0)
 if protocol=='stderr_large': sys.stderr.write('x'*(128*1024));sys.stderr.flush();sys.exit(23)
 try:
@@ -191,6 +197,19 @@ function strictJSON(text) {
   }
   walk(); return value
 }
+function terminateWorker(child) {
+  if (!child.pid) { child.kill(); return Promise.resolve() }
+  if (process.platform !== 'win32') {
+    try { process.kill(-child.pid, 'SIGKILL') } catch { child.kill() }
+    return Promise.resolve()
+  }
+  return new Promise(resolve => {
+    const killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
+    const timer = setTimeout(() => { killer.kill(); child.kill(); resolve() }, 5000)
+    killer.once('error', () => { clearTimeout(timer); child.kill(); resolve() })
+    killer.once('close', code => { clearTimeout(timer); if (code !== 0) child.kill(); resolve() })
+  })
+}
 function rpc(bound, op, context, value, signal, fault = null, protocolFault = null, fixture = {}) {
   calls.push({ op, context, value })
   return new Promise((resolve, reject) => {
@@ -220,13 +239,17 @@ function rpc(bound, op, context, value, signal, fault = null, protocolFault = nu
     const script = protocolFault === 'stdin_epipe'
       ? "import os,sys,threading;os.close(0);print('STDIN_CLOSED',flush=True);threading.Event().wait(60)" : python
     let child
-    try { child = spawn(fixture.interpreter || 'python', ['-X', 'utf8', '-c', script], { cwd: path.resolve(__dirname, '../../..'), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true }) }
+    try { child = spawn(fixture.interpreter || 'python', ['-X', 'utf8', '-c', script], { cwd: path.resolve(__dirname, '../../..'), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32' }) }
     catch { const error = new Error('Python JSON worker could not start.'); error.code = 'BRIDGE_STARTUP'; reject(error); return }
     children.add(child)
     let stdout = '', stderr = '', finished = false, stdoutBytes = 0, stderrBytes = 0, terminalError = null
     const raw = []
     let delivered = false
-    const stop = (code, message) => { if (!terminalError) { terminalError = new Error(message); terminalError.code = code }; child.kill() }
+    let termination = null
+    const stop = (code, message) => {
+      if (!terminalError) { terminalError = new Error(message); terminalError.code = code }
+      if (!termination) termination = terminateWorker(child)
+    }
     const timer = setTimeout(() => stop('BRIDGE_TIMEOUT', 'Python JSON worker timed out.'), fixture.timeout_ms || 15000)
     const abort = () => stop('BRIDGE_CANCELLED', 'Python JSON request cancelled.')
     signal?.addEventListener('abort', abort, { once: true })
@@ -256,8 +279,8 @@ function rpc(bound, op, context, value, signal, fault = null, protocolFault = nu
       fixture.on_stdin_error?.(error.code)
       stop('BRIDGE_STDIN_FAILURE', 'Python JSON worker request could not be delivered.')
     })
-    child.on('close', code => {
-      if (terminalError) { protocolStats.push({ stdout_bytes: stdoutBytes, stderr_bytes: stderrBytes, stored_stdout_bytes: raw.reduce((n,b)=>n+b.length,0), stored_stderr_bytes: Buffer.byteLength(stderr), receipts: 0 }); settle(terminalError); return }
+    child.on('close', async code => {
+      if (terminalError) { await termination; protocolStats.push({ stdout_bytes: stdoutBytes, stderr_bytes: stderrBytes, stored_stdout_bytes: raw.reduce((n,b)=>n+b.length,0), stored_stderr_bytes: Buffer.byteLength(stderr), receipts: 0 }); settle(terminalError); return }
       // Split raw bytes deterministically in the receiver fixture. OS pipe
       // coalescing cannot turn a split-codepoint test into a whole-string test.
       let bytes = Buffer.concat(raw)
@@ -280,7 +303,7 @@ function rpc(bound, op, context, value, signal, fault = null, protocolFault = nu
         stdout += decoder.write(bytes.subarray(offset, offset+length)); offset += length; parts++
       }
       stdout += decoder.end(); protocolStats.push({ bytes: bytes.length, parts, receipts: 0 })
-      if (code !== 0) { const error = new Error('Python JSON worker failed: ' + stderr.slice(0, 500)); error.code = 'BRIDGE_EXIT'; settle(error); return }
+      if (code !== 0) { const error = new Error('Python JSON worker failed.'); error.code = 'BRIDGE_EXIT'; settle(error); return }
       if (!stdout.trim()) { const error = new Error('Python JSON worker returned no JSON.'); error.code = 'BRIDGE_EOF'; settle(error); return }
       try {
         const response = strictJSON(stdout)
@@ -355,7 +378,10 @@ async function dispose() {
     cleanup(); dom.window.close()
     // Workers normally all exit before callback resolution; retire any failed
     // operation before removing only this harness-owned disposable database.
-    await Promise.all([...children].map(child => new Promise(resolve => { child.once('close', resolve); child.kill() })))
+    await Promise.all([...children].map(async child => {
+      const closed = new Promise(resolve => child.once('close', resolve))
+      await terminateWorker(child); await closed
+    }))
     assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir()))
     assert.ok(path.basename(root).startsWith('x07-json-journey-'))
     fs.rmSync(root, { recursive: true, force: true })

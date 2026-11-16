@@ -8,7 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
-from x07_customer_profile_store import _key, ProfileScopeError, CustomerProfileStore
+from x07_customer_profile_store import _key, _check_connection, ProfileScopeError, CustomerProfileStore
 from x07_profile_workflow import ProfileWorkflow
 from x07_role_selection import select_modules
 from x07_profile_compatibility import check_compatibility
@@ -44,6 +44,7 @@ class ConfirmationReceiptStore:
         self.read_only = read_only
         db = self._connect()
         try:
+            _check_connection(db)
             with db:
                 db.execute('BEGIN' if self.read_only else 'BEGIN IMMEDIATE')
                 version = db.execute('PRAGMA user_version').fetchone()[0]
@@ -61,12 +62,22 @@ class ConfirmationReceiptStore:
 
     def _connect(self):
         if self.read_only:
-            return sqlite3.connect(self.path.resolve().as_uri() + '?mode=ro', uri=True, timeout=5)
-        return sqlite3.connect(self.path, timeout=5)
+            db = sqlite3.connect(self.path.resolve().as_uri() + '?mode=ro', uri=True, timeout=5)
+        else:
+            db = sqlite3.connect(self.path, timeout=5)
+        try:
+            db.execute('PRAGMA foreign_keys=ON')
+            db.execute('PRAGMA read_uncommitted=OFF')
+            _check_connection(db)
+            return db
+        except BaseException:
+            db.close()
+            raise
 
     def run(self, context, digest, produce, validate):
         db = self._connect()
         try:
+            _check_connection(db)
             with db:
                 db.execute('BEGIN' if self.read_only else 'BEGIN IMMEDIATE')
                 # Recheck under this transaction's lock. Another connection may
