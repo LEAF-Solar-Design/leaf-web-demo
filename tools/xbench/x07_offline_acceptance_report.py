@@ -82,6 +82,16 @@ def read_receipt(path):
         value = json.loads(raw.decode('utf-8'), object_pairs_hook=unique_members, parse_constant=reject_constant)
         if not isinstance(value, dict):
             raise ValueError()
+        pending = [value]
+        while pending:
+            child = pending.pop()
+            if isinstance(child, str):
+                child.encode('utf-8', errors='strict')
+            elif isinstance(child, dict):
+                pending.extend(child.keys())
+                pending.extend(child.values())
+            elif isinstance(child, list):
+                pending.extend(child)
         return value
     except FileNotFoundError:
         raise EvidenceError('MISSING_RECEIPT') from None
@@ -131,10 +141,12 @@ def verify_files(receipt, source_root, *, state=None):
         if state['budget'].digest(resolved) != expected:
             raise EvidenceError('SOURCE_DIGEST_MISMATCH')
         state['files'][resolved] = expected
+        if state.get('protected') is not None:
+            state['protected'].add(resolved)
 
 
-def aggregate(journey_path, proof_paths, source_sha, source_root, *, limits=None):
-    state = {'budget': SourceBudget(limits), 'files': {}}
+def aggregate(journey_path, proof_paths, source_sha, source_root, *, limits=None, protected_paths=None):
+    state = {'budget': SourceBudget(limits), 'files': {}, 'protected': protected_paths}
     if not isinstance(source_sha, str) or re.fullmatch('[0-9a-f]{40}', source_sha) is None:
         raise EvidenceError('INVALID_SOURCE')
     if not 1 <= len(proof_paths) <= 16:
@@ -182,6 +194,17 @@ def aggregate(journey_path, proof_paths, source_sha, source_root, *, limits=None
         'steps': [results[number] for number in range(1, 8)], 'local_proofs': proofs}
 
 
+def check_output_path(path, protected):
+    try:
+        destination = path.resolve()
+        for source in protected:
+            source = Path(source)
+            if destination == source.resolve() or (path.exists() and source.exists() and path.samefile(source)):
+                raise EvidenceError('OUTPUT_ALIASES_INPUT_OR_SOURCE')
+    except OSError:
+        raise EvidenceError('UNREADABLE_OUTPUT_PATH') from None
+
+
 def atomic_publish(path, encoded):
     temporary = None
     try:
@@ -212,16 +235,21 @@ def main():
     parser.add_argument('--max-source-bytes', type=int, default=64 * 1024 * 1024)
     args = parser.parse_args()
     code = 0
+    protected = {args.journey, *args.proof}
     try:
         result = aggregate(args.journey, args.proof, args.source_sha, args.source_root,
-            limits={'file_bytes': args.max_file_bytes, 'total_bytes': args.max_source_bytes})
+            limits={'file_bytes': args.max_file_bytes, 'total_bytes': args.max_source_bytes}, protected_paths=protected)
     except EvidenceError as error:
         code = 2
         result = unreadable(error)
     encoded = json.dumps(result, indent=2) + '\n'
     if args.out:
         try:
+            check_output_path(args.out, protected)
             atomic_publish(args.out, encoded)
+        except EvidenceError as error:
+            code = 2
+            encoded = json.dumps(unreadable(error), indent=2) + '\n'
         except OSError:
             code = 2
             encoded = json.dumps(unreadable('REPORT_PUBLICATION_FAILED'), indent=2) + '\n'

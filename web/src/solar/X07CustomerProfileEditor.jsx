@@ -43,16 +43,21 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, onDi
   const [profile, setProfile] = useState(null), [draft, setDraft] = useState(null)
   const [busy, setBusy] = useState(false), [error, setError] = useState(null)
   const [stale, setStale] = useState(false), [message, setMessage] = useState(null)
+  const [reconcile, setReconcile] = useState(false)
   const form = useRef(null), saveButton = useRef(null), reloadButton = useRef(null), retryButton = useRef(null)
   const composing = useRef(false)
   const draftRevision = useRef(0)
+  const saving = useRef(false)
   const errorId = useId(), focusRole = useRef(null)
+  const focusedError = useRef(null)
   useEffect(() => {
+    if (!error) focusedError.current = null
     if (busy) return
     if (focusRole.current) {
       form.current?.querySelector(`[data-role-layer="${focusRole.current}"]`)?.focus()
       focusRole.current = null
-    } else if (error) {
+    } else if (error && focusedError.current !== error) {
+      focusedError.current = error
       if (!profile) retryButton.current?.focus()
       else if (stale) reloadButton.current?.focus()
       else {
@@ -77,6 +82,8 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, onDi
         if (restoreRetryFocus) focusRole.current = 'module'
         setProfile(record); if (!keepEdits) { setDraft(copy);onDirtyChange?.(false) }
         setStale(false)
+        if (reconcile) setMessage('Stored profile reloaded.')
+        setReconcile(false)
       }).catch(() => { if (current(controller)) setError('The profile could not be loaded for this customer.') })
       .finally(() => { if (current(controller)) { pending.current = null; setBusy(false) } })
   }
@@ -94,6 +101,7 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, onDi
     }
     const controller = new AbortController(); pending.current = controller
     const submittedRevision = draftRevision.current
+    saving.current = true
     setBusy(true); setError(null); setMessage(null)
     Promise.resolve().then(() => current(controller) ? callbacks.current.saveProfile(customerKey, clone(draft),
       { expected_version: profile.version, signal: controller.signal }) : undefined)
@@ -113,7 +121,20 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, onDi
         const conflict = ['STALE_VERSION', 'VERSION_CONFLICT'].includes(reason?.code)
         setStale(conflict)
         setError(conflict ? 'The profile changed. Your edits are kept. Reload the version to retry.' : 'The profile could not be saved. Your edits are kept.')
-      }).finally(() => { if (current(controller)) { pending.current = null; setBusy(false) } })
+      }).finally(() => { if (current(controller)) { pending.current = null; saving.current = false; setBusy(false) } })
+  }
+  const resetDraft = () => {
+    if (!profile) return
+    draftRevision.current++
+    setDraft(clone(profile.roles)); setError(null); onDirtyChange?.(saving.current)
+    setMessage(saving.current ? 'Draft reset. The pending save may still change the stored profile.' : 'Draft reset to the loaded profile.')
+  }
+  const cancelSave = () => {
+    if (!saving.current || !pending.current) return
+    pending.current.abort(); pending.current = null; saving.current = false
+    draftRevision.current++; setDraft(clone(profile.roles)); onDirtyChange?.(false)
+    setBusy(false); setError(null); setReconcile(true)
+    setMessage('Save cancelled. Stored changes may have completed. Reload the profile to reconcile.')
   }
   const edit = (role, field, value) => { draftRevision.current++; onDirtyChange?.(true);setDraft(previous => ({ ...previous, [role]: { ...previous[role], [field]: value } })); setMessage(null) }
   const addRole = role => { draftRevision.current++; onDirtyChange?.(true);focusRole.current = role; setDraft(previous => ({ ...previous, [role]: { layer: '' } })); setMessage(null); setError(null) }
@@ -126,7 +147,7 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, onDi
     {pin && <p>Project is pinned to version {pin.version}.</p>}
     {error && <p id={errorId} role="alert">{error}</p>}{message && <p role="status">{message}</p>}
     {!profile && !busy && <button ref={retryButton} type="button" onClick={() => load(false)}>Retry loading profile</button>}
-    {draft && <form ref={form} onSubmit={save} aria-describedby={error ? errorId : undefined}
+    {draft && <form ref={form} onSubmit={save} onReset={event => { event.preventDefault(); resetDraft() }} aria-describedby={error ? errorId : undefined}
       onCompositionStart={() => { composing.current = true }}
       onCompositionEnd={() => { composing.current = false }}
       onKeyDown={event => { if (event.key === 'Enter' && (composing.current || event.nativeEvent.isComposing || event.keyCode === 229)) event.preventDefault() }}>
@@ -134,8 +155,8 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, onDi
         {Object.keys(draft).filter(role => ['module', 'roof', 'obstruction'].includes(role)).map(role => {
           const label = role[0].toUpperCase() + role.slice(1)
           return <div key={role}>
-            {(role === 'module' || typeof draft[role].block === 'string') && <label>{label} block<input value={draft[role].block || ''} onChange={event => edit(role, 'block', event.target.value)} /></label>}
-            <label>{label} layer<input data-role-layer={role} aria-describedby={error ? errorId : undefined} value={draft[role].layer || ''} onChange={event => edit(role, 'layer', event.target.value)} /></label>
+            {(role === 'module' || typeof draft[role].block === 'string') && <label htmlFor={`${errorId}-${role}-block`}>{label} block<input id={`${errorId}-${role}-block`} value={draft[role].block || ''} onChange={event => edit(role, 'block', event.target.value)} /></label>}
+            <label htmlFor={`${errorId}-${role}-layer`}>{label} layer<input id={`${errorId}-${role}-layer`} data-role-layer={role} aria-describedby={error ? errorId : undefined} value={draft[role].layer || ''} onChange={event => edit(role, 'layer', event.target.value)} /></label>
             {role !== 'module' && <button type="button" onClick={() => removeRole(role)}>Remove {role} role</button>}
           </div>
         })}
@@ -143,6 +164,9 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, onDi
           <button key={role} type="button" onClick={() => addRole(role)}>Add {role} role</button>)}
       </fieldset>
       <button ref={saveButton} aria-describedby={error ? errorId : undefined} type="submit" disabled={busy || stale || typeof saveProfile !== 'function'}>Save profile</button>
+      <button type="reset">Reset draft</button>
+      {busy && saving.current && <button type="button" onClick={cancelSave}>Cancel save</button>}
+      {reconcile && <button type="button" disabled={busy} onClick={() => load(false)}>Reload stored profile</button>}
       {stale && <button ref={reloadButton} type="button" disabled={busy} onClick={() => load(true)}>Reload version, keep edits</button>}
     </form>}
     {busy && <p role="status">Reading or saving profile.</p>}
