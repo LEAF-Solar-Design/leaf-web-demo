@@ -28,9 +28,9 @@ const Workflow = component('X07ProfileWorkflow')
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'x07-json-journey-'))
 const database = path.join(root, 'profiles.sqlite')
 const python = `
-import json,sys
+import json,sys,sqlite3
 from pathlib import Path
-from contextlib import nullcontext
+from contextlib import nullcontext,closing
 from unittest.mock import patch
 sys.path.insert(0,str(Path.cwd()/'server'))
 from x07_customer_profile_store import CustomerProfileStore
@@ -101,7 +101,10 @@ if protocol=='stdout_large': sys.stdout.write('x'*(2*1024*1024));sys.stdout.flus
 if protocol=='stderr_large': sys.stderr.write('x'*(128*1024));sys.stderr.flush();sys.exit(23)
 try:
     store=CustomerProfileStore(request['database'])
-    adapter=WorkflowAdapter(ProfileWorkflow(store),context=request['bound_context'],intake=request['intake'],copies=request['copies'])
+    receipt_path=request.get('fixture',{}).get('receipt_database')
+    adapter=(WorkflowAdapter.from_paths(profile_path=request['database'],receipt_path=receipt_path,
+        context=request['bound_context'],intake=request['intake'],copies=request['copies']) if receipt_path else
+        WorkflowAdapter(ProfileWorkflow(store),context=request['bound_context'],intake=request['intake'],copies=request['copies']))
     op=request['op']; value=request.get('value'); context=request['context']
     target={'pin':'apply_to_project','save':'save_version'}.get(request.get('fault'))
     with patch.object(store,target,side_effect=OSError('injected offline '+str(request.get('fault'))+' failure')) if target else nullcontext():
@@ -110,6 +113,13 @@ try:
         elif op=='apply': result=adapter.apply_profile(context,value)
         elif op=='editor_load': result=adapter.load_profile(value)
         elif op=='editor_save': result=adapter.save_profile(value['customer'],value['roles'],expected_version=value['expected_version'])
+        elif op=='backup':
+            if not receipt_path: raise ValueError('inject both disposable stores')
+            targets=request['fixture']['backup_paths']
+            for source,destination in [(request['database'],targets['profiles']),(receipt_path,targets['receipts'])]:
+                with closing(sqlite3.connect(source)) as original,closing(sqlite3.connect(destination)) as copied:
+                    original.backup(copied)
+            result={'backed_up':True}
         elif op=='seed_max':
             with store._connection() as db:
                 db.execute('INSERT INTO profile_versions SELECT customer_key,profile_id,?,roles_json,created_at FROM profile_versions WHERE customer_key=? AND version=1',(2**53-1,context['customer_key']))
@@ -174,10 +184,13 @@ function rpc(bound, op, context, value, signal, fault = null, protocolFault = nu
   calls.push({ op, context, value })
   return new Promise((resolve, reject) => {
     if (signal?.aborted) { const error = new Error('Python JSON request cancelled.'); error.code = 'BRIDGE_CANCELLED'; reject(error); return }
-    const child = spawn('python', ['-X', 'utf8', '-c', python], { cwd: path.resolve(__dirname, '../../..'), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+    const script = protocolFault === 'stdin_epipe'
+      ? "import os,sys,threading;os.close(0);print('STDIN_CLOSED',flush=True);threading.Event().wait(60)" : python
+    const child = spawn('python', ['-X', 'utf8', '-c', script], { cwd: path.resolve(__dirname, '../../..'), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
     children.add(child)
     let stdout = '', stderr = '', finished = false, stdoutBytes = 0, stderrBytes = 0, terminalError = null
     const raw = []
+    let requestBytes, delivered = false
     const stop = (code, message) => { if (!terminalError) { terminalError = new Error(message); terminalError.code = code }; child.kill() }
     const timer = setTimeout(() => stop('BRIDGE_TIMEOUT', 'Python JSON worker timed out.'), fixture.timeout_ms || 15000)
     const abort = () => stop('BRIDGE_CANCELLED', 'Python JSON request cancelled.')
@@ -188,6 +201,9 @@ function rpc(bound, op, context, value, signal, fault = null, protocolFault = nu
       if (stdoutBytes > 1024*1024) stop('BRIDGE_STDOUT_LIMIT', 'Python JSON worker output limit exceeded.')
       else raw.push(chunk)
       fixture.on_stdout_chunk?.(chunk)
+      if (protocolFault === 'stdin_epipe' && !delivered && Buffer.concat(raw).includes(Buffer.from('STDIN_CLOSED'))) {
+        delivered = true; child.stdin.end(requestBytes)
+      }
     })
     child.stderr.on('data', chunk => {
       stderrBytes += Buffer.byteLength(chunk)
@@ -200,7 +216,10 @@ function rpc(bound, op, context, value, signal, fault = null, protocolFault = nu
       error ? reject(error) : resolve(result)
     }
     child.on('error', error => settle(error))
-    child.stdin.on('error', error => settle(error))
+    child.stdin.on('error', error => {
+      fixture.on_stdin_error?.(error.code)
+      stop('BRIDGE_STDIN_FAILURE', 'Python JSON worker request could not be delivered.')
+    })
     child.on('close', code => {
       if (terminalError) { protocolStats.push({ stdout_bytes: stdoutBytes, stderr_bytes: stderrBytes, stored_stdout_bytes: raw.reduce((n,b)=>n+b.length,0), stored_stderr_bytes: Buffer.byteLength(stderr), receipts: 0 }); settle(terminalError); return }
       // Split raw bytes deterministically in the receiver fixture. OS pipe
@@ -233,7 +252,7 @@ function rpc(bound, op, context, value, signal, fault = null, protocolFault = nu
         else { protocolStats[protocolStats.length-1].receipts++; settle(null, response.result) }
       } catch (cause) { const error = new Error(cause.code === 'BRIDGE_DUPLICATE_JSON_KEY' ? cause.message : 'Python JSON worker returned malformed JSON.'); error.code = cause.code || 'BRIDGE_MALFORMED_JSON'; settle(error) }
     })
-    let request = JSON.stringify({ database, bound_context: bound, context, op, value,
+    let request = JSON.stringify({ database: fixture.database || database, bound_context: bound, context, op, value,
       intake: fixture.intake || intake, copies: fixture.copy_candidates || copies, fault, protocol_fault: protocolFault, fixture })
     if (fixture.duplicate_request_key) {
       const token = JSON.stringify(fixture.duplicate_request_key) + ':'
@@ -243,7 +262,7 @@ function rpc(bound, op, context, value, signal, fault = null, protocolFault = nu
       request = request.slice(0, -1) + ',"grammar":' + fixture.request_json_value + '}'
     }
     if (fixture.trailing_json) request += ' {}'
-    let requestBytes = Buffer.from(request, 'utf8')
+    requestBytes = Buffer.from(request, 'utf8')
     if (fixture.invalid_request_utf8) {
       const invalid = Buffer.from(fixture.utf8_bytes)
       if (fixture.utf8_truncated) requestBytes = Buffer.concat([requestBytes, invalid])
@@ -253,7 +272,7 @@ function rpc(bound, op, context, value, signal, fault = null, protocolFault = nu
         requestBytes = Buffer.concat([requestBytes.subarray(0, start), invalid, requestBytes.subarray(start + 5)])
       }
     }
-    child.stdin.end(requestBytes)
+    if (protocolFault !== 'stdin_epipe') child.stdin.end(requestBytes)
   })
 }
 function mount(context, overrides = {}) {
@@ -321,8 +340,9 @@ async function dispose() {
     // Workers normally all exit before callback resolution; retire any failed
     // operation before removing only this harness-owned disposable database.
     await Promise.all([...children].map(child => new Promise(resolve => { child.once('close', resolve); child.kill() })))
-    if (fs.existsSync(database)) fs.unlinkSync(database)
-    fs.rmdirSync(root)
+    assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir()))
+    assert.ok(path.basename(root).startsWith('x07-json-journey-'))
+    fs.rmSync(root, { recursive: true, force: true })
 }
 module.exports = { strictJSON, rpc, ctx, copies, intake, mount, screen, fireEvent, waitFor, cleanup, dispose, component, React, render, within, protocolStats,
   resources: () => ({ child_count: children.size, database, root }) }

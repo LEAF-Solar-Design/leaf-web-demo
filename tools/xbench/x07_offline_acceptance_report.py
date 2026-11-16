@@ -208,11 +208,13 @@ def verify_files(receipt, source_root, *, state=None):
             state['protected'].add(resolved)
 
 
-def aggregate(journey_path, proof_paths, source_sha, source_root, *, limits=None, receipt_limits=None, protected_paths=None):
+def aggregate(journey_path, proof_paths, source_sha, source_root, *, limits=None, receipt_limits=None, protected_paths=None, proof_limit=16):
     state = {'budget': SourceBudget(limits), 'files': {}, 'protected': protected_paths}
     if not isinstance(source_sha, str) or re.fullmatch('[0-9a-f]{40}', source_sha) is None:
         raise EvidenceError('INVALID_SOURCE')
-    if not 1 <= len(proof_paths) <= 16:
+    if type(proof_limit) is not int or not 1 <= proof_limit <= 16:
+        raise EvidenceError('INVALID_PROOF_BUDGET')
+    if not 1 <= len(proof_paths) <= proof_limit:
         raise EvidenceError('MISSING_OR_EXCESS_PROOFS')
     journey = read_receipt(journey_path, limits=receipt_limits)
     check_source(journey, source_sha)
@@ -298,13 +300,15 @@ def main():
     parser.add_argument('--max-source-bytes', type=int, default=64 * 1024 * 1024)
     parser.add_argument('--max-json-depth', type=int, default=32)
     parser.add_argument('--max-json-nodes', type=int, default=100000)
+    parser.add_argument('--max-proof-receipts', type=int, default=16)
     args = parser.parse_args()
     code = 0
     protected = {args.journey, *args.proof}
     try:
         result = aggregate(args.journey, args.proof, args.source_sha, args.source_root,
             limits={'file_bytes': args.max_file_bytes, 'total_bytes': args.max_source_bytes},
-            receipt_limits={'depth': args.max_json_depth, 'nodes': args.max_json_nodes}, protected_paths=protected)
+            receipt_limits={'depth': args.max_json_depth, 'nodes': args.max_json_nodes}, protected_paths=protected,
+            proof_limit=args.max_proof_receipts)
     except EvidenceError as error:
         code = 2
         result = unreadable(error)
