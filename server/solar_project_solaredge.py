@@ -565,7 +565,11 @@ def read_tracking(tenant, context, params):
         choice = record.get("acceptance")
         matched_only = type(choice) is dict and choice.get("mode") == "matched-only"
         _check(record == _accepted_record(source, meta, report, matched_only))
-    except (GraphValidationError, project.ProjectContextError, ValueError, TypeError,
+    except GraphValidationError as error:
+        if error.code in ("REPORT_RESOURCE_LIMIT", "REPORT_BUSY", "REPORT_PARSE_TIMEOUT", "REPORT_PARSE_UNAVAILABLE"):
+            raise
+        _fail("SOLAREDGE_IMPORT_RECORD_INVALID")
+    except (project.ProjectContextError, ValueError, TypeError,
             KeyError, IndexError, AttributeError):
         _fail("SOLAREDGE_IMPORT_RECORD_INVALID")
     page_items = {"strings": record["strings"], "frames": record["frames"],

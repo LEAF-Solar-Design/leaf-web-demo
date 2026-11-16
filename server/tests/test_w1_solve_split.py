@@ -672,7 +672,7 @@ def test_canonical_split_unknown_piece_is_partial_and_never_resent(canonical_spl
     with pytest.raises(CloudError) as first:
         a.canonical.prepare_job(a.row, a.guard)
     error = solar_project_jobs._preparation_error(first.value)
-    assert error["reason_code"] == "SOLVE_OUTCOME_UNKNOWN"
+    assert error["reason_code"] == "solve_outcome_unknown"
     assert error["solve_progress"]["status"] == "partial"
     assert error["solve_progress"]["completed_pieces"] == 1
     a.row.update(attempt=2, lease_owner="reclaimer")

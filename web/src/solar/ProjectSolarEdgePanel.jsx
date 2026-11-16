@@ -232,7 +232,11 @@ export default function ProjectSolarEdgePanel({ solarBinding, authorityKey, proj
       if (!active() || latest.current.busy || !admittedPreview(preview, catalogDigest)) return false
       const outcome = await latest.current.onProjectSubmit(intent, { binding, authorityKey,
         signal: controller.signal, isCurrent: active })
-      return active() && outcome != null && outcome !== false && outcome.ok !== false
+      if (!active()) return false
+      if (outcome?.ok === false && (outcome.status === 401 || outcome.status === 403)) {
+        return { ok: false, code: outcome.status === 401 ? 'UNAUTHENTICATED' : 'FORBIDDEN' }
+      }
+      return outcome != null && outcome !== false && outcome.ok !== false
     } catch { return false }
     finally {
       scope.controllers.delete(controller)

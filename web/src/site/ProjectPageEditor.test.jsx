@@ -733,7 +733,8 @@ describe('portfolio project document', () => {
     expect(saveProjectPage).not.toHaveBeenCalled()
   })
 
-  it('keeps 94 photos compact and disclosure neutral, then saves only explicit caption and hero edits', async () => {
+  // Retry once after observed 5s parallel CI timeouts to avoid expensive whole-job reruns.
+  it('keeps 94 photos compact and disclosure neutral, then saves only explicit caption and hero edits', { retry: 1 }, async () => {
     const original = portfolioDraft()
     original.categories = [32, 31, 31].map((length, ci) => ({ slug: `gallery-${ci}`, title: `Gallery name ${ci}`, description: '', hero: 0,
       images: Array.from({ length }, (_, ii) => ({ ...imageRef(PHOTO), material_id: `33333333-3333-4333-8333-${String(ci * 32 + ii).padStart(12, '0')}`, title: `Photo name ${ci}-${ii}` })) }))

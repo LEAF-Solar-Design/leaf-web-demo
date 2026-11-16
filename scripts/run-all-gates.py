@@ -3446,6 +3446,9 @@ def build_suites() -> List[Suite]:
                   # compiled engine. Keep both exact counts while older PRs finish.
                   ("src/cad/engineBatchAtomic.test.js", 12),
                   ("src/cad/engineBatchAtomic.test.js", 13),
+                  # S01 lifecycle replay: four cases require the same optional
+                  # compiled Node WASM package; executed proof retained separately.
+                  ("src/cad/solarLifecycleReplay.test.jsx", 4),
               )) for shard in range(1, 4)),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
@@ -3752,6 +3755,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_browser_source_error_serializer.py"), 6),
         Suite("server-b02-initializer-failure", "server B02 initializer diagnostic contract", "pytest", SERVER,
               _py_pytest("tests/test_b02_initializer_failure_offline.py"), 7),
+        Suite("server-b02-native-initializer-failure", "server B02 Native initializer diagnostic contract", "pytest", SERVER,
+              _py_pytest("tests/test_b02_native_source_failure_offline.py") + ["tests/test_b02_native_initializer_route.py"], 6),
         Suite("server-browser-project-authoring", "server tests/test_browser_project_authoring.py", "pytest", SERVER,
               _py_pytest("tests/test_browser_project_authoring.py"), 30),
         Suite("server-browser-project-source-export", "server verified Browser source export", "pytest", SERVER,
@@ -4174,11 +4179,144 @@ def capture_spawn(suite: Suite, attempt: int, command, trace_env: dict):
              "--spool-quota-bytes", "8589934592", "--", *command], output)
 
 
-def run_capture_command(command, **kwargs):
+_SUITE_MEMORY_RUN = subprocess.run
+
+
+def _suite_memory_helper():
+    # Optional and path-specific: catalog-only copies need no ci package.
+    spec = importlib.util.spec_from_file_location(
+        "leaf_gate_suite_memory", SCRIPTS_DIR / "ci" / "measure_suite_memory.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class _SuiteMemoryObserver:
+    def __init__(self):
+        self.peak = None
+        self.samples = 0
+        self.reason = "process_not_observed"
+        self.caveats = []
+        self.thread = None
+        self.stop = threading.Event()
+        self.sampler = None
+        try:
+            if sys.platform != "linux" or not Path("/proc/self/statm").is_file():
+                self.reason = "unsupported_platform"
+                return
+            helper = _suite_memory_helper()
+            self.caveats = helper.CAVEATS
+            self.sampler_type = helper.TreeSampler
+            self.reason = None
+        except Exception:
+            self.reason = "helper_unavailable"
+
+    def _sample(self):
+        try:
+            rss = self.sampler.sample()
+            # Vanished/inaccessible processes must not become a valid zero peak.
+            if rss > 0:
+                self.peak = max(self.peak or 0, rss)
+                self.samples += 1
+        except Exception:
+            self.reason = "sample_failed"
+
+    def _observe(self):
+        try:
+            self._sample()
+            while not self.stop.wait(0.25):
+                if self.reason:
+                    break
+                self._sample()
+            self._sample()  # Final sample, without polling or reaping the child.
+        except Exception:
+            self.reason = "monitor_failed"
+
+    def start(self, proc):
+        try:
+            self.sampler = self.sampler_type(proc.pid)
+            self.thread = threading.Thread(target=self._observe,
+                                           name="leaf-suite-memory", daemon=True)
+            self.thread.start()
+        except Exception:
+            self.reason = "monitor_start_failed"
+
+    def finish(self):
+        try:
+            self.stop.set()
+            if self.thread is not None and self.thread.ident is not None:
+                self.thread.join(timeout=1.0)
+                if self.thread.is_alive():
+                    self.reason = "monitor_stop_failed"
+            if not self.samples and not self.reason:
+                self.reason = "no_samples"
+        except Exception:
+            self.reason = "monitor_stop_failed"
+
+
+def _run_memory_observed(command, observer, **kwargs):
+    """subprocess.run's lifecycle for the runner's capture_output kwargs (Linux)."""
+    timeout = kwargs.pop("timeout")
+    kwargs.pop("capture_output")
+    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs) as proc:
+        observer.start(proc)
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            # POSIX communicate already attached the partial output to the error.
+            proc.wait()
+            raise
+        except BaseException:
+            proc.kill()
+            raise
+        return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
+
+
+def run_memory_command(suite, attempt, spawn, *args, **kwargs):
+    if os.environ.get("LEAF_GATE_MEM") != "1":
+        return spawn(*args, **kwargs)
+    observer = _SuiteMemoryObserver()
+    exit_code = 127
+    try:
+        if (not observer.reason and spawn is not _SUITE_MEMORY_RUN
+                and spawn is not _SUITE_MEMORY_CAPTURE):
+            observer.reason = "custom_spawn"
+        if observer.reason:
+            result = spawn(*args, **kwargs)
+        elif spawn is _SUITE_MEMORY_CAPTURE:
+            result = spawn(*args, _memory_observer=observer, **kwargs)
+        else:
+            result = _run_memory_observed(*args, observer=observer, **kwargs)
+        exit_code = result.returncode
+        return result
+    except subprocess.TimeoutExpired:
+        exit_code = 124
+        raise
+    finally:
+        observer.finish()
+        record = {
+            "schema": "leaf.ci.suite-memory.v1", "suite": suite.id,
+            "attempt": attempt, "exit_code": exit_code,
+            "sampled_peak_rss_bytes": None if observer.reason else observer.peak,
+            "sample_count": observer.samples, "platform": sys.platform,
+            "measurement_caveats": observer.caveats,
+        }
+        if observer.reason:
+            record["unavailable_reason"] = observer.reason
+        try:
+            print("\nLEAF_SUITE_MEMORY " + json.dumps(record, sort_keys=True), flush=True)
+        except Exception:
+            pass  # A telemetry sink failure cannot affect suite execution.
+
+
+def run_capture_command(command, _memory_observer=None, **kwargs):
     """Let the supervisor forward TERM and finish its receipt before escalation."""
     timeout = kwargs.pop("timeout")
     kwargs.pop("capture_output")
     with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs) as proc:
+        if _memory_observer is not None:
+            _memory_observer.start(proc)
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -4190,6 +4328,9 @@ def run_capture_command(command, **kwargs):
                 stdout, stderr = proc.communicate()
             raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
         return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
+
+
+_SUITE_MEMORY_CAPTURE = run_capture_command
 
 
 def capture_attempt_evidence(output: Path, rc: int) -> tuple[dict, int]:
@@ -4230,7 +4371,8 @@ def reporting_command(suite: Suite, argv: List[str], trace_env: dict) -> List[st
     argv = [os.fsdecode(word) for word in argv]
     trusted = os.environ.get("LEAF_TRUSTED_CI_DIR")
     capturing = process_capture_enabled() and process_capture_eligible(suite)
-    if not trusted and not capturing:
+    panels = suite.id == "web-studio-panels-proof"
+    if not trusted and not capturing and not panels:
         return argv
     directory = Path(trusted) if trusted else SCRIPTS_DIR / "ci"
     output = Path(trace_env["LEAF_TEST_REPORT_DIR"])
@@ -4271,16 +4413,19 @@ def reporting_command(suite: Suite, argv: List[str], trace_env: dict) -> List[st
         # CLI reporters are retained. With a config, append through a wrapper so
         # its HTML reporter and output paths survive as well as console parsing.
         command = list(argv)
-        reporter = str(directory / "playwright-leaf.mjs")
+        additions = ([str(directory / "playwright-leaf.mjs")] if trusted or capturing else [])
+        if panels:
+            additions.append(str((WEB / "e2e/panelsTimingReporter.mjs").resolve()))
         for index, word in enumerate(command):
             if word.startswith("--reporter="):
+                reporters = list(dict.fromkeys(word.split("=", 1)[1].split(",") + additions))
                 command = command[:index] + command[index + 1:]
-                command.append(word + "," + reporter)
+                command.append("--reporter=" + ",".join(reporters))
                 return command
             if word == "--reporter" and index + 1 < len(command):
-                reporters = command[index + 1]
+                reporters = list(dict.fromkeys(command[index + 1].split(",") + additions))
                 command = command[:index] + command[index + 2:]
-                command.append("--reporter=" + reporters + "," + reporter)
+                command.append("--reporter=" + ",".join(reporters))
                 return command
         if "--config" in command:
             index = command.index("--config") + 1
@@ -4301,17 +4446,19 @@ def reporting_command(suite: Suite, argv: List[str], trace_env: dict) -> List[st
                 "  if (name.startsWith('.')) name = rebase(name);\n"
                 "  if (options?.outputFolder) options = {...options, outputFolder: rebase(options.outputFolder)};\n"
                 "  return options ? [name, options] : [name]; });\n"
+                "for (const name of " + json.dumps(additions) + ")\n"
+                "  if (!reporters.some(entry => entry[0] === name)) reporters.push([name]);\n"
                 # Playwright resolves webServer.cwd against the config file, which now lives in the report directory.
                 "const server = item => ({...item, cwd: rebase(item.cwd || '.')});\n"
                 "export default {...paths(config), testDir: rebase(config.testDir || '.'),\n"
                 "  ...(config.projects ? {projects: config.projects.map(paths)} : {}),\n"
                 "  ...(config.webServer ? {webServer: Array.isArray(config.webServer)\n"
                 "    ? config.webServer.map(server) : server(config.webServer)} : {}),\n"
-                "  reporter: [...reporters, [" + json.dumps(reporter) + "]]};\n",
+                "  reporter: reporters};\n",
                 encoding="utf-8")
             command[index] = str(wrapper)
             return command
-        return command + ["--reporter=list," + reporter]
+        return command + ["--reporter=" + ",".join(["list"] + additions)]
     return argv
 
 
@@ -4778,6 +4925,93 @@ def parse_file_timings(suite: Suite, text: str) -> list[dict]:
             totals[relative] = total
     return [{"file": path, "seconds": seconds, "basis": basis}
             for path, seconds in sorted(totals.items())]
+
+
+PW_PHASE_FILES = frozenset("web/e2e/" + name for name in (
+    "campaign-panel.spec.mjs", "recovery-controls.spec.mjs",
+    "workspace-create-no-prompt.spec.mjs", "viewer-grid-toggle.spec.mjs",
+    "studio-ux-regressions.spec.mjs", "project-page-editor.spec.mjs"))
+PW_PHASE_MAX_LINE = 4096
+PW_PHASE_MAX_ROWS = 1000
+PW_PHASE_BASIS = "playwright public test/step durations; gaps unattributed"
+PW_PHASE_IDENTITIES = ("line", "column", "worker_index", "retry", "repeat_index")
+PW_PHASE_DURATIONS = ("duration_ms", "setup_ms", "teardown_ms", "api_ms",
+                      "reported_navigation_api_ms", "unattributed_ms")
+
+
+def parse_pw_phases(suite: Suite, text: str) -> list[dict]:
+    """Only bounded, public result-duration partitions reach durable stdout."""
+    if suite.id != "web-studio-panels-proof":
+        return []
+    rows = []
+    for raw in text.splitlines():
+        if len(raw) > PW_PHASE_MAX_LINE or not raw.startswith("LEAF_PW_PHASE "):
+            continue
+        try:
+            row = json.loads(raw[len("LEAF_PW_PHASE "):])
+            if (not isinstance(row, dict)
+                    or row.get("schema") != "leaf.ci.playwright-phase.v1"
+                    or row.get("file") not in PW_PHASE_FILES
+                    or row.get("basis") != PW_PHASE_BASIS
+                    or row.get("status") not in ("passed", "failed", "timedOut", "skipped", "interrupted", "unknown")
+                    or type(row.get("truncated")) is not bool):
+                continue
+            if any(type(row.get(key)) is not int or row[key] < 0 or not math.isfinite(row[key])
+                   for key in PW_PHASE_IDENTITIES):
+                continue
+            if any(type(row.get(key)) not in (int, float) or row[key] < 0
+                   or not math.isfinite(row[key]) for key in PW_PHASE_DURATIONS):
+                continue
+            if (abs(sum(row[key] for key in ("setup_ms", "teardown_ms", "api_ms", "unattributed_ms"))
+                    - row["duration_ms"]) > 0.005
+                    or row["reported_navigation_api_ms"] > row["api_ms"]):
+                continue
+            optional = {}
+            if "api_lines" in row:
+                lines = row["api_lines"]
+                if not isinstance(lines, list) or len(lines) > 16:
+                    continue
+                sanitized = []
+                seen = set()
+                for item in lines:
+                    if (not isinstance(item, dict)
+                            or type(item.get("line")) is not int
+                            or not 0 < item["line"] <= 9007199254740991
+                            or item["line"] in seen
+                            or type(item.get("api_ms")) not in (int, float)
+                            or not math.isfinite(item["api_ms"])
+                            or not 0 <= item["api_ms"] <= row["api_ms"] + 0.005):
+                        break
+                    seen.add(item["line"])
+                    sanitized.append({"line": item["line"], "api_ms": item["api_ms"]})
+                if len(sanitized) != len(lines):
+                    continue
+                optional["api_lines"] = sanitized
+            if "api_lines_omitted" in row:
+                omitted = row["api_lines_omitted"]
+                if type(omitted) is not int or omitted < 0 or not math.isfinite(omitted):
+                    continue
+                optional["api_lines_omitted"] = omitted
+            sanitized_row = {key: row[key] for key in (
+                "schema", "file", *PW_PHASE_IDENTITIES, "status", *PW_PHASE_DURATIONS,
+                "truncated", "basis")}
+            rows.append({**sanitized_row, **optional})
+            if len(rows) >= PW_PHASE_MAX_ROWS:
+                break
+        except (ValueError, TypeError, OverflowError, RecursionError):
+            continue
+    return rows
+
+
+def emit_pw_phases(suite: Suite, text: str, attempt: int) -> None:
+    try:
+        for timing in parse_pw_phases(suite, text):
+            row = {**timing, "suite_id": suite.id, "attempt": attempt}
+            line = "LEAF_PW_PHASE " + json.dumps(row, separators=(",", ":"))
+            if len(line) <= PW_PHASE_MAX_LINE:
+                print(line, flush=True)
+    except Exception:
+        pass
 
 
 def emit_file_timings(suite: Suite, text: str, attempt: int) -> None:
@@ -5317,7 +5551,8 @@ def _run_suite_attempt(suite: Suite, log_dir: Path, attempt: int = 1,
         try:
             corpus_launcher = str(SCRIPTS_DIR / "ci/run_unprivileged_pytest.py") in argv
             spawn = run_capture_command if capture_output is not None or corpus_launcher else subprocess.run
-            proc = run_browser_command(suite, spawn,
+            proc = run_browser_command(suite,
+                lambda *args, **kwargs: run_memory_command(suite, attempt, spawn, *args, **kwargs),
                 spawn_command,
                 cwd=str(suite.cwd), env={**clean_env(), **db_env, **trace_env, **service_env,
                                         **browser_suite_env(suite)},
@@ -5359,6 +5594,7 @@ def _run_suite_attempt(suite: Suite, log_dir: Path, attempt: int = 1,
     seconds = time.perf_counter() - t0
 
     emit_file_timings(suite, out, attempt)
+    emit_pw_phases(suite, out, attempt)
 
     if rc == 75:
         reason = next((line.split("QUEUED:", 1)[1].strip()
@@ -5719,17 +5955,48 @@ def load_pr_tier(path: str, *, quiet: bool = False):
         return None
 
 
+def pr_tier_base() -> str:
+    """Resolve the diff base; main must have a distinct, judged ancestor."""
+    if os.environ.get("CODEBUILD_WEBHOOK_EVENT") == "PUSH":
+        if os.environ.get("CODEBUILD_WEBHOOK_HEAD_REF") != "refs/heads/main":
+            raise ValueError("tier requires a main push")
+        head = os.environ.get("CODEBUILD_RESOLVED_SOURCE_VERSION", "")
+        base = os.environ.get("LEAF_CI_LAST_JUDGED_SHA", "")
+        if (not re.fullmatch(r"[0-9a-fA-F]{40}", head)
+                or not re.fullmatch(r"[0-9a-fA-F]{40}", base)):
+            raise ValueError("main tier requires exact head and judged baseline")
+
+        def git(*args):
+            proc = subprocess.run(["git", "--no-replace-objects", *args], cwd=REPO,
+                                  capture_output=True, text=True, timeout=30)
+            if proc.returncode:
+                raise ValueError("main tier baseline unavailable or not an ancestor")
+            return proc.stdout.strip()
+
+        actual_head = git("rev-parse", "--verify", "HEAD^{commit}")
+        if actual_head != head.lower():
+            raise ValueError("main tier head mismatch")
+        resolved_base = git("rev-parse", "--verify", base + "^{commit}")
+        if resolved_base != base.lower() or resolved_base == actual_head:
+            raise ValueError("main tier requires a distinct judged commit")
+        git("merge-base", "--is-ancestor", resolved_base, actual_head)
+        return resolved_base
+    base = os.environ.get("TRUSTED_SHA") or os.environ.get("CODEBUILD_WEBHOOK_BASE_REF", "origin/main")
+    if base.startswith("refs/heads/"):
+        base = "refs/remotes/origin/" + base[len("refs/heads/"):]
+    return base
+
+
 def pr_tier_changed_paths() -> List[str]:
-    """Use explicit paths when supplied, otherwise diff the PR against its base."""
-    raw = os.environ.get("LEAF_CHANGED_PATHS")
+    """Diff main from its judged baseline, or a PR from its existing base."""
+    base = pr_tier_base()
+    raw = (None if os.environ.get("CODEBUILD_WEBHOOK_EVENT") == "PUSH"
+           else os.environ.get("LEAF_CHANGED_PATHS"))
     if raw is not None:
         paths = json.loads(raw)
         if not isinstance(paths, list) or any(not isinstance(p, str) or not p for p in paths):
             raise ValueError("LEAF_CHANGED_PATHS must be a JSON list of paths")
         return paths
-    base = os.environ.get("TRUSTED_SHA") or os.environ.get("CODEBUILD_WEBHOOK_BASE_REF", "origin/main")
-    if base.startswith("refs/heads/"):
-        base = "refs/remotes/origin/" + base[len("refs/heads/"):]
     proc = subprocess.run(
         ["git", "--no-replace-objects", "diff", "--no-renames", "--name-only", "-z", base + "...HEAD", "--"],
         cwd=REPO, capture_output=True, text=True, timeout=30)

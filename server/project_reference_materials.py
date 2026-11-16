@@ -86,6 +86,20 @@ def validate_corpus(raw, *, allow_members=False):
                            parse_float=finite_float, object_pairs_hook=unique_object)
         if not isinstance(value, dict):
             raise ValueError('row object required')
+        # Escaped lone surrogates parse as Python strings but have no UTF-8
+        # representation. Literal UTF-8 was checked by decoding above.
+        if br'\u' in data:
+            pending = [value]
+            while pending:
+                item = pending.pop()
+                if isinstance(item, str):
+                    item.encode('utf-8')
+                elif isinstance(item, dict):
+                    pending.extend(item.keys())
+                    pending.extend(item.values())
+                elif isinstance(item, list):
+                    pending.extend(item)
+
         rows += 1
         if rows > CORPUS_MAX_ROWS:
             raise ValueError('row count')
