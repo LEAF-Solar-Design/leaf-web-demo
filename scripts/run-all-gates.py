@@ -1215,7 +1215,11 @@ def build_suites() -> List[Suite]:
                   (Path("..") / "tools" / "xbench" / "tests" / "test_x07_reducer_output_aliases.py").as_posix(),
                   (Path("..") / "tools" / "xbench" / "tests" / "test_x07_reducer_encoding_failures.py").as_posix(),
                   (Path("..") / "tools" / "xbench" / "tests" / "test_x07_version_diff_interrupt.py").as_posix(),
-                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_profile_history_audit.py").as_posix()], 284),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_profile_history_audit.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_wal_snapshot.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_row_limits.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_query_failures.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_order_invariance.py").as_posix()], 290),
         # W5 Rooftop workflow flow (2026-09-24, contracts G34/G34a/G34b): server/solar_workflow_flow.py,
         # the pure progression engine (every step's CanAdvance and HasDrawingPrerequisites, the L1/L2
         # gates on the host's setting, AdvanceStep, GoBack and NavigateToStep Stale marking over the
