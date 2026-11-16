@@ -1829,7 +1829,10 @@ def build_suites() -> List[Suite]:
                   "tests/test_x04_evidence_cleanup_failures.py",
                   "tests/test_x04_evidence_absent_stdin.py",
                   "tests/test_x04_evidence_ascii_locale.py",
-              ], 586),
+                  "tests/test_x04_evidence_compare.py",
+                  "tests/test_x04_evidence_batch.py",
+                  "tests/test_x04_evidence_equivalent_json_spellings.py",
+              ], 619),
         Suite("server-dxf-intake-lines-text", "server tests/test_dxf_intake_lines_text.py",
               "pytest", SERVER, _py_pytest("tests/test_dxf_intake_lines_text.py"), 4),
         # W4g engine reach (2026-09-04): the intake -> DXF synthesizer (the
