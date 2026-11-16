@@ -130,11 +130,17 @@ def main(argv=None):
     parser.add_argument('--max-output-bytes', type=positive_byte_limit)
     parser.add_argument('--expected-report-sha256', type=validate_sha256_pin,
                         help='Optional SHA-256 of the exact file or stdin bytes read and decoded')
+    parser.add_argument('--expected-report-schema', choices=('comparison', 'batch'),
+                        help='Optional expected saved report kind, checked after decoding')
     args = parser.parse_args(argv)
     try:
         check_output_path(args.input, args.out)
         payload = read_json(args.input, args.max_input_bytes) if args.expected_report_sha256 is None else read_json(
             args.input, args.max_input_bytes, args.expected_report_sha256)
+        if args.expected_report_schema is not None:
+            expected = COMPARISON if args.expected_report_schema == 'comparison' else BATCH
+            require(isinstance(payload, dict) and payload.get('schema') == expected,
+                    f'Expected {args.expected_report_schema} saved report schema.')
         result = validate_report(payload)
         write_json(result, args.out, args.max_output_bytes)
     except (OSError, ValueError, TypeError, RecursionError) as error:
