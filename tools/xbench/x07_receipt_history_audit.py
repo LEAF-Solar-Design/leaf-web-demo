@@ -21,12 +21,14 @@ class ReceiptBudgetError(ValueError):
     pass
 
 
-def unique_members(pairs):
-    result={}
-    for key,value in pairs:
-        if key in result:raise ValueError('duplicate receipt member')
-        result[key]=value
-    return result
+class ObjectMembers(list):
+    """Retain every decoded member until its values have been budgeted."""
+
+
+def materialize(value):
+    if isinstance(value,ObjectMembers):return {key:materialize(child) for key,child in value}
+    if isinstance(value,list):return [materialize(child) for child in value]
+    return value
 
 
 def parse_receipt(encoded):
@@ -43,13 +45,18 @@ def parse_receipt(encoded):
             depth+=1
             if depth>MAX_RECEIPT_DEPTH:raise ReceiptBudgetError('receipt depth budget')
         elif char in ']}':depth-=1
-    value=json.loads(encoded,object_pairs_hook=unique_members,parse_constant=lambda _:(_ for _ in ()).throw(ValueError()))
-    pending=[value];nodes=0
+    value=json.loads(encoded,object_pairs_hook=ObjectMembers,parse_constant=lambda _:(_ for _ in ()).throw(ValueError()))
+    pending=[value];nodes=0;duplicate=False
     while pending:
         current=pending.pop();nodes+=1
         if nodes>MAX_RECEIPT_NODES:raise ReceiptBudgetError('receipt node budget')
-        if isinstance(current,dict):pending.extend(current.values())
+        if isinstance(current,ObjectMembers):
+            keys=[key for key,_ in current]
+            duplicate=duplicate or len(keys)!=len(set(keys))
+            pending.extend(child for _,child in current)
         elif isinstance(current,list):pending.extend(current)
+    if duplicate:raise ValueError('duplicate receipt member')
+    value=materialize(value)
     json.dumps(value,sort_keys=True,allow_nan=False)
     return value
 
