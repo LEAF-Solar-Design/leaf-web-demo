@@ -60,6 +60,7 @@ def test_launcher_project_worker_selection(monkeypatch):
         "solar-string-add", "solar-assign-equipment", "solar-string-multi-add",
         "solar-string-conductors", "solar-panel-groups", "solar-correct-string",
         "solar-solve-proposal", "solar-commit-solve", "solar-solaredge-accept",
+        "solar-add-all-inverters",
     ))
     assert _launcher_module().project_worker_tools() == tools
     for tool in sorted(tools):
