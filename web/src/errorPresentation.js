@@ -15,9 +15,11 @@ export function errorPresentation(input, fallback = 'Something went wrong.', rea
   }
 
   const envelope = input?.body?.error || input?.error || input
-  // Authoring can supply its separate reason_code without changing other callers.
-  const opaqueReasonCode = typeof reasonCode === 'string' && /^[A-Za-z][A-Za-z0-9_-]{0,127}$/.test(reasonCode)
-    ? reasonCode : ''
+  // Keep a specific product cause ahead of the envelope's generic error class.
+  // Authoring can still supply its separate reason code explicitly.
+  const opaqueReasonCode = [reasonCode, envelope?.reason_code].find(
+    (value) => typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_-]{0,127}$/.test(value),
+  ) || ''
   return {
     message: envelope?.message || input?.message || fallback,
     code: opaqueReasonCode || envelope?.error_code || envelope?.code || input?.errorCode || '',

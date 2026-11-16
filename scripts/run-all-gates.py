@@ -4987,9 +4987,36 @@ def parse_pw_phases(suite: Suite, text: str) -> list[dict]:
                     - row["duration_ms"]) > 0.005
                     or row["reported_navigation_api_ms"] > row["api_ms"]):
                 continue
-            rows.append({key: row[key] for key in (
+            optional = {}
+            if "api_lines" in row:
+                lines = row["api_lines"]
+                if not isinstance(lines, list) or len(lines) > 16:
+                    continue
+                sanitized = []
+                seen = set()
+                for item in lines:
+                    if (not isinstance(item, dict)
+                            or type(item.get("line")) is not int
+                            or not 0 < item["line"] <= 9007199254740991
+                            or item["line"] in seen
+                            or type(item.get("api_ms")) not in (int, float)
+                            or not math.isfinite(item["api_ms"])
+                            or not 0 <= item["api_ms"] <= row["api_ms"] + 0.005):
+                        break
+                    seen.add(item["line"])
+                    sanitized.append({"line": item["line"], "api_ms": item["api_ms"]})
+                if len(sanitized) != len(lines):
+                    continue
+                optional["api_lines"] = sanitized
+            if "api_lines_omitted" in row:
+                omitted = row["api_lines_omitted"]
+                if type(omitted) is not int or omitted < 0 or not math.isfinite(omitted):
+                    continue
+                optional["api_lines_omitted"] = omitted
+            sanitized_row = {key: row[key] for key in (
                 "schema", "file", *PW_PHASE_IDENTITIES, "status", *PW_PHASE_DURATIONS,
-                "truncated", "basis")})
+                "truncated", "basis")}
+            rows.append({**sanitized_row, **optional})
             if len(rows) >= PW_PHASE_MAX_ROWS:
                 break
         except (ValueError, TypeError, OverflowError, RecursionError):
