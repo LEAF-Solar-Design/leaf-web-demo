@@ -1295,7 +1295,14 @@ def test_provenance_aggregate_subprocess_bytes_deterministic_with_simultaneous_c
     assert len(set(outputs)) == 1
 
 
+def inverter_evidence():
+    return {field: [dict(inverter_id="INV-A", grid_id="g")]
+            for field in ("saved_inverters", "before_inverters", "reopened_inverters")}
+
+
 def seven_step_envelope():
+    assurance = assurance_envelope()
+    assurance["evidence"].update(inverter_evidence())
     return {"import": dict(normal_user=True, dwg_imported=True, report_imported=True),
             "grid": dict(expected_grid_ids=["g"], saved_group_ids=["p"],
                          rows=[dict(grid_id="g", matches=["p"], cause=None)], require_all_matched=True,
@@ -1305,10 +1312,10 @@ def seven_step_envelope():
                          panel_totals={"g": 24}, panel_counts=[dict(string_id="A", panels=10), dict(string_id="B", panels=14)],
                          before_panel_counts=[dict(string_id="A", panels=10), dict(string_id="B", panels=14)],
                          reopened_panel_counts=[dict(string_id="A", panels=10), dict(string_id="B", panels=14)],
-                         string_totals={"g": 2}, dc_totals={"g": "9.6"}, dc_power=[dict(string_id="A", kw_dc="4"), dict(string_id="B", kw_dc="5.6")],
+                         string_totals={"g": 2}, inverter_totals={"g": 1}, dc_totals={"g": "9.6"}, dc_power=[dict(string_id="A", kw_dc="4"), dict(string_id="B", kw_dc="5.6")],
                          before_dc_power=[dict(string_id="A", kw_dc="4"), dict(string_id="B", kw_dc="5.6")],
                          reopened_dc_power=[dict(string_id="A", kw_dc="4"), dict(string_id="B", kw_dc="5.6")]),
-            "assurance": assurance_envelope()}
+            "assurance": assurance}
 
 
 def test_strict_seven_step_json_envelope_limits_and_diagnostics():
@@ -1441,9 +1448,10 @@ def test_seven_step_offline_composer_preserves_every_diagnostic_and_missing_evid
                          panel_totals={"g": 24}, panel_counts=[dict(string_id="A", panels=10), dict(string_id="B", panels=14)],
                          before_panel_counts=[dict(string_id="A", panels=10), dict(string_id="B", panels=14)],
                          reopened_panel_counts=[dict(string_id="A", panels=10), dict(string_id="B", panels=14)],
-                         string_totals={"g": 2}, dc_totals={"g": "9.6"}, dc_power=[dict(string_id="A", kw_dc="4"), dict(string_id="B", kw_dc="5.6")],
+                         string_totals={"g": 2}, inverter_totals={"g": 1}, dc_totals={"g": "9.6"}, dc_power=[dict(string_id="A", kw_dc="4"), dict(string_id="B", kw_dc="5.6")],
                          before_dc_power=[dict(string_id="A", kw_dc="4"), dict(string_id="B", kw_dc="5.6")],
                          reopened_dc_power=[dict(string_id="A", kw_dc="4"), dict(string_id="B", kw_dc="5.6")])
+    assurance["evidence"].update(inverter_evidence())
     result = reconcile_seven_steps(imported, grids, assurance)
     assert result["verdict"] == "PASS" and set(result["steps"]) == set("1234567")
     assert result["steps"]["3"] == result["assurance"]["checks"]["provenance"]["reconciliation"]["stages"]["strings"]
@@ -2702,6 +2710,7 @@ def test_seven_step_aggregate_deterministic_subprocess_mutation_orders(tmp_path)
         grid["panel_totals"]["g2"] = 0
         grid["dc_totals"]["g2"] = 0
         grid["string_totals"]["g2"] = 0
+        grid["inverter_totals"]["g2"] = 0
     records[0]["envelope"]["import"]["report_imported"] = False
     records[1]["envelope"]["grid"]["rows"][0]["matches"] = ["foreign"]
     records[1]["envelope"]["assurance"]["inputs_hex"]["report"] = b"swapped".hex()
@@ -3376,8 +3385,10 @@ def test_seven_step_grid_totals_swaps_missing_evidence_and_diagnostic_retention(
     grid.update(expected_grid_ids=["east", "west"], saved_group_ids=["p", "q"],
         rows=[dict(grid_id="east", matches=["p"], cause=None), dict(grid_id="west", matches=["q"], cause=None)],
         string_assignments=[dict(grid_id="east", string_id="A"), dict(grid_id="west", string_id="B")],
-        optimizer_totals=dict(east=5, west=7), panel_totals=dict(east=10, west=14), dc_totals=dict(east="4", west="5.6"), string_totals=dict(east=1, west=1),
+        optimizer_totals=dict(east=5, west=7), panel_totals=dict(east=10, west=14), dc_totals=dict(east="4", west="5.6"), string_totals=dict(east=1, west=1), inverter_totals=dict(east=1, west=0),
         reopened_string_assignments=[dict(grid_id="east", string_id="A"), dict(grid_id="west", string_id="B")])
+    for field in ("saved_inverters", "before_inverters", "reopened_inverters"):
+        envelope["assurance"]["evidence"][field][0]["grid_id"] = "east"
     baseline = reconcile_seven_steps_json(json.dumps(envelope))
     assert baseline["verdict"] == "PASS"
     grid["string_assignments"][0]["grid_id"] = "west"
@@ -3495,9 +3506,11 @@ def equal_count_ownership_envelope():
     evidence["before"], evidence["reopened"] = hashes, dict(hashes)
     envelope["grid"].update(expected_grid_ids=["east", "west"], saved_group_ids=["p", "q"],
         rows=[dict(grid_id="east", matches=["p"], cause=None), dict(grid_id="west", matches=["q"], cause=None)],
-        optimizer_totals=dict(east=6, west=6), panel_totals=dict(east=10, west=14), dc_totals=dict(east="4", west="5.6"), string_totals=dict(east=1, west=1),
+        optimizer_totals=dict(east=6, west=6), panel_totals=dict(east=10, west=14), dc_totals=dict(east="4", west="5.6"), string_totals=dict(east=1, west=1), inverter_totals=dict(east=1, west=0),
         string_assignments=[dict(grid_id="east", string_id="A"), dict(grid_id="west", string_id="B")],
         reopened_string_assignments=[dict(grid_id="east", string_id="A"), dict(grid_id="west", string_id="B")])
+    for field in ("saved_inverters", "before_inverters", "reopened_inverters"):
+        evidence[field][0]["grid_id"] = "east"
     return envelope
 
 
@@ -4509,3 +4522,149 @@ def test_inverter_integer_reference_table_and_signed_approval_model_preserve_inp
                 assert result["verdict"] == ("PASS" if delta == 0 or approval == delta else "FAIL")
                 assert (deltas, record) == policy_inputs
             assert (saved, oracle, rows) == preserved
+
+
+def test_composed_inverter_grid_counts_swaps_missing_evidence_and_unrelated_diagnostics():
+    envelope = equal_count_ownership_envelope()
+    baseline = reconcile_seven_steps_json(json.dumps(envelope))
+    assert baseline["verdict"] == "PASS"
+    envelope["grid"]["inverter_totals"] = dict(east=0, west=1)
+    changed = reconcile_seven_steps_json(json.dumps(envelope))
+    assert changed["verdict"] == "FAIL" and changed["grid_inverters"]["comparison"]["mismatch_count"] == 2
+    assert changed["grid_inverters"]["oracle_consistency"]["verdict"] == "PASS"
+    for key in baseline.keys() - {"verdict", "grid_inverters"}:
+        assert changed[key] == baseline[key]
+    del envelope["grid"]["inverter_totals"]
+    envelope["import"]["normal_user"] = False
+    missing = reconcile_seven_steps_json(json.dumps(envelope))
+    assert missing["verdict"] == "UNREADABLE" and missing["steps"]["1"]["verdict"] == "FAIL"
+    assert missing["grid_inverters"]["comparison"]["reason"] == "grid_inverter_totals_unreadable"
+
+
+def test_composed_inverter_snapshots_bind_saved_ids_and_owners_and_detect_substitution():
+    for field in ("before_inverters", "reopened_inverters"):
+        envelope = equal_count_ownership_envelope()
+        envelope["assurance"]["evidence"][field][0]["inverter_id"] = "INV-B"
+        result = reconcile_seven_steps_json(json.dumps(envelope))
+        assert result["verdict"] == "FAIL" and result["inverter_reopen"]["verdict"] == "FAIL"
+        assert result["steps"]["7"]["verdict"] == "PASS"
+    envelope = equal_count_ownership_envelope()
+    for field in ("before_inverters", "reopened_inverters"):
+        envelope["assurance"]["evidence"][field][0]["grid_id"] = "west"
+    result = reconcile_seven_steps_json(json.dumps(envelope))
+    assert result["inverter_reopen"]["counts"] == dict(added=0, removed=0, changed=0)
+    assert result["inverter_reopen"]["saved_binding"]["counts"]["changed"] == 1
+    assert result["verdict"] == "FAIL"
+    del envelope["assurance"]["evidence"]["reopened_inverters"]
+    absent = reconcile_seven_steps_json(json.dumps(envelope))
+    assert absent["verdict"] == "UNREADABLE"
+    assert absent["inverter_reopen"]["reopened"]["reason"] == "inverter_ownership_evidence_unreadable"
+
+
+@pytest.mark.parametrize("mutation", ["null_id", "blank_id", "wide_id", "null_owner", "foreign_owner", "boolean", "fraction", "negative", "nan", "duplicate", "container"])
+def test_inverter_schema_pure_direct_json_and_bound_siblings(mutation):
+    envelope = equal_count_ownership_envelope()
+    evidence = envelope["assurance"]["evidence"]
+    row = evidence["saved_inverters"][0]
+    values = dict(null_id=None, blank_id=" ", wide_id="x"*129)
+    if mutation in values:
+        row["inverter_id"] = values[mutation]
+    elif mutation in ("null_owner", "foreign_owner"):
+        row["grid_id"] = None if mutation == "null_owner" else "foreign"
+    elif mutation in ("boolean", "fraction", "negative", "nan"):
+        envelope["grid"]["inverter_totals"]["east"] = dict(boolean=True, fraction=1.5, negative=-1, nan="NaN")[mutation]
+    elif mutation == "duplicate":
+        evidence["saved_inverters"].append(deepcopy(row))
+    else:
+        evidence["saved_inverters"] = {}
+    if mutation in ("null_id", "blank_id", "wide_id", "null_owner", "foreign_owner", "duplicate", "container"):
+        assert validate_grid_inverter_ownership(["east", "west"], ["INV-A"], evidence["saved_inverters"])["verdict"] in ("FAIL", "UNREADABLE")
+    else:
+        assert compare_grid_inverter_totals(envelope["grid"]["inverter_totals"], ["INV-A"], evidence["saved_inverters"])["verdict"] == "UNREADABLE"
+    source = envelope["assurance"]
+    assurance = dict(evidence=source["evidence"], frozen_manifest=source["manifest"], stage_bindings=source["bindings"],
+        supplied_inputs={key: bytes.fromhex(value) for key, value in source["inputs_hex"].items()},
+        expected_identity=source["identity"], stage_identities=source["stage_identities"])
+    preserved = deepcopy(envelope)
+    direct = reconcile_seven_steps(envelope["import"], envelope["grid"], assurance)
+    decoded = reconcile_seven_steps_json(json.dumps(envelope))
+    assert direct["verdict"] == ("FAIL" if mutation == "foreign_owner" else "UNREADABLE")
+    assert json.loads(serialize_result(direct)) == json.loads(serialize_result(decoded))
+    assert envelope == preserved
+    expected, records = bound_seven_fixture_records()
+    envelope["assurance"]["manifest"]["fixture_id"] = expected[0]
+    envelope["assurance"]["evidence"]["fixture_id"] = expected[0]
+    envelope["assurance"]["bindings"] = {key: deepcopy(envelope["assurance"]["manifest"]) for key in PROVENANCE_STAGES}
+    records[0]["envelope"] = envelope
+    aggregate = aggregate_bound_seven_steps_json(json.dumps(dict(expected_ids=expected, fixtures=records)))
+    assert all(aggregate["fixtures"][key]["verdict"] == "PASS" for key in expected[1:])
+
+
+def test_exhaustive_inverter_identity_owner_and_count_reference_models():
+    from itertools import product
+    devices = ["I1", "I2"]
+    choices = [(grid, key) for grid in ("east", "west", "foreign") for key in ("I1", "I2", "foreign")]
+    for size in range(4):
+        for selection in product(choices, repeat=size):
+            rows = [dict(grid_id=grid, inverter_id=key) for grid, key in selection]
+            ids = [key for _, key in selection]
+            counts = dict(missing=sum(key not in ids for key in devices), duplicate=len(ids)-len(set(ids)),
+                foreign_inverter=sum(key not in devices for key in ids), foreign_grid=sum(grid not in ("east", "west") for grid, _ in selection))
+            result = validate_grid_inverter_ownership(["east", "west"], devices, rows)
+            assert result["counts"] == counts
+            assert result["verdict"] == ("FAIL" if any(counts.values()) else "PASS")
+    states = []
+    for ids in (["I1"], ["I2"], ["I1", "I2"]):
+        for owners in product(("east", "west"), repeat=len(ids)):
+            rows = [dict(inverter_id=key, grid_id=grid) for key, grid in zip(ids, owners)]
+            states.append((ids, rows))
+            for east, west in product(range(3), repeat=2):
+                expected = dict(east=east, west=west)
+                result = compare_grid_inverter_totals(expected, ids, rows)
+                observed = {grid: owners.count(grid) for grid in ("east", "west")}
+                assert result["mismatch_count"] == sum(observed[grid] != expected[grid] for grid in expected)
+    for before in states:
+        for reopened in states:
+            preserved = deepcopy((before, reopened))
+            result = compare_inverter_snapshots(["east", "west"], *before, *reopened)
+            old, new = ({row["inverter_id"]: row["grid_id"] for row in state[1]} for state in (before, reopened))
+            expected = dict(added=len(set(new)-set(old)), removed=len(set(old)-set(new)),
+                            changed=sum(old[key] != new[key] for key in set(old)&set(new)))
+            assert result["counts"] == expected and result["verdict"] == ("FAIL" if any(expected.values()) else "PASS")
+            assert (before, reopened) == preserved
+
+
+def test_generated_inverter_lookup_work_and_capped_error_permutations(monkeypatch):
+    from benches import x05_reconcile as module
+    from random import Random
+    operations = []
+    class CountedSet(set):
+        def __contains__(self, key):
+            operations.append(1)
+            return super().__contains__(key)
+    monkeypatch.setattr(module, "set", CountedSet, raising=False)
+    for size in (10, 100, 1000):
+        grids = [f"g{i:04}" for i in range(size)]
+        devices = [f"i{i:04}" for i in range(size)]
+        rows = [dict(grid_id=grid, inverter_id=key) for grid, key in zip(grids, devices)]
+        operations.clear()
+        assert module.validate_grid_inverter_ownership(grids, devices, rows)["verdict"] == "PASS"
+        assert len(operations) == 3*size
+        operations.clear()
+        totals = module.compare_grid_inverter_totals(dict.fromkeys(grids, 2), devices, rows)
+        assert len(operations) == 3*size and totals["mismatch_count"] == size
+        assert len(totals["examples"]) == min(size, MAX_STRING_EXAMPLES)
+        errors = rows + deepcopy(rows) + [dict(grid_id="foreign", inverter_id=f"x{i:04}") for i in range(size)]
+        operations.clear()
+        baseline = module.validate_grid_inverter_ownership(grids, devices, errors)
+        assert len(operations) == 9*size
+        assert baseline["counts"] == dict(missing=0, duplicate=size, foreign_inverter=size, foreign_grid=size)
+        assert all(len(values) == min(size, MAX_STRING_EXAMPLES) for values in baseline["examples"].values())
+        for seed in range(3):
+            changed = deepcopy((grids, devices, errors))
+            rng = Random(seed)
+            for values in changed:
+                rng.shuffle(values)
+            preserved = deepcopy(changed)
+            assert module.validate_grid_inverter_ownership(*changed) == baseline
+            assert changed == preserved

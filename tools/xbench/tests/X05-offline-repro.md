@@ -1632,7 +1632,7 @@ inverter IDs, expected grid IDs and `{inverter_id, grid_id}` assignments.
 `compare_grid_inverter_oracle_totals` requires exact grid coverage and agreement
 with `oracle_values.inverters`. `compare_inverter_snapshots` compares explicit
 IDs and owners on each side, with bounded added/removed/owner-change diagnostics.
-These inverter helpers remain standalone in this slice.
+These helpers supply the seven-step inverter diagnostics.
 
 Run this synthetic existing-table replay from the repository root.
 
@@ -1669,4 +1669,54 @@ The table records one inverter on both sides. Stable device IDs and explicit gri
 owners are separate evidence needed to settle save/reopen preservation. Missing
 identity evidence stays unknown. This replay establishes supplied synthetic
 comparison behavior, with input origin and live X05 acceptance requiring their
+own receipts.
+
+## Composed inverter recovery replay
+
+Seven-step input requires independent `grid.inverter_totals` and explicit
+`assurance.evidence.saved_inverters`, `before_inverters` and `reopened_inverters`
+rows. Each row contains `inverter_id` and `grid_id`. `grid_inverters` retains
+ownership, independent grid counts and report-total consistency. `inverter_reopen`
+compares device IDs and owners across save/reopen and binds the before map to the
+saved map through `saved_binding`. Missing identity evidence yields UNREADABLE.
+
+Run this synthetic PowerShell replay from the repository root.
+
+```powershell
+@'
+import sys, json, runpy
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import reconcile_seven_steps_json
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+correct = builders['equal_count_ownership_envelope']()
+swapped = deepcopy(correct)
+swapped['grid']['inverter_totals'] = dict(east=0, west=1)
+contradiction = deepcopy(correct)
+contradiction['grid']['inverter_totals'] = dict(east=1, west=1)
+substituted = deepcopy(correct)
+substituted['assurance']['evidence']['reopened_inverters'][0]['inverter_id'] = 'INV-B'
+missing = deepcopy(correct)
+del missing['assurance']['evidence']['reopened_inverters']
+for name, envelope in [('swapped', swapped), ('contradiction', contradiction), ('substituted', substituted), ('missing', missing), ('corrected', correct)]:
+    result = reconcile_seven_steps_json(json.dumps(envelope))
+    grid = result['grid_inverters']
+    print(name, result['verdict'], grid['comparison']['reason'], grid['oracle_consistency']['reason'], result['inverter_reopen']['reason'])
+    assert result['steps']['7']['verdict'] == 'PASS'
+'@ | python -P -
+```
+
+Expected output
+
+```text
+swapped FAIL grid_inverter_totals_mismatch grid_inverter_oracle_total_equal inverter_snapshots_equal
+contradiction FAIL grid_inverter_totals_mismatch grid_inverter_oracle_total_mismatch inverter_snapshots_equal
+substituted FAIL grid_inverter_totals_equal grid_inverter_oracle_total_equal inverter_snapshots_changed
+missing UNREADABLE grid_inverter_totals_equal grid_inverter_oracle_total_equal inverter_snapshots_invalid
+corrected PASS grid_inverter_totals_equal grid_inverter_oracle_total_equal inverter_snapshots_equal
+```
+
+The grid swap and substituted device preserve the total of one inverter. Explicit
+identity and independent grid evidence expose each mismatch. The inputs in this
+replay are synthetic, with input origin and live X05 acceptance requiring their
 own receipts.
