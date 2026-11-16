@@ -347,6 +347,60 @@ remain available under `reconciliation`. This replay creates no files or live
 state. Matching synthetic hash claims prove agreement only, never frozen origin
 or X05 bench acceptance.
 
+`reconcile_assured` retains provenance/reconciliation, input-byte and design
+identity results under `checks`, with UNREADABLE before FAIL before PASS.
+`aggregate_provenance(expected_ids, fixtures)` requires exactly three explicit
+IDs; each record supplies `fixture_id`, `evidence`, `manifest` and `bindings`.
+It retains readable siblings when one fixture's provenance is unreadable.
+`reconcile_provenance_json(text)` requires exactly `evidence`, `manifest` and
+`bindings`, using the existing bounded, duplicate-key-rejecting decoder. These
+are pure entry points, not additional CLI modes or live grading integration.
+
+Executable byte and identity replay from the repository root:
+
+```powershell
+@'
+import sys
+from hashlib import sha256
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import verify_input_bytes, validate_saved_design_identity, IDENTITY_STAGES
+inputs = dict(dwg=b'synthetic drawing', report=b'synthetic report')
+manifest = dict(fixture_id='synthetic', inputs={key: sha256(value).hexdigest() for key, value in inputs.items()})
+identity = dict(project_id='project-a', version_id='version-a')
+stages = {key: dict(identity) for key in IDENTITY_STAGES}
+matching = verify_input_bytes(manifest, inputs)
+same_version = validate_saved_design_identity(identity, stages)
+print(matching['verdict'], same_version['verdict'])
+swapped = dict(inputs, report=b'substituted report')
+changed_bytes = verify_input_bytes(manifest, swapped)
+print(changed_bytes['verdict'], changed_bytes['reason'], ','.join(changed_bytes['roles']))
+# Equal totals cannot establish project/version identity.
+totals_before = dict(panels=24, strings=2)
+totals_after = dict(totals_before)
+mixed = deepcopy(stages)
+mixed['reopened']['version_id'] = 'version-b'
+changed_version = validate_saved_design_identity(identity, mixed)
+assert totals_before == totals_after
+print(changed_version['verdict'], changed_version['reason'], changed_version['stage'])
+assert matching['verdict'] == same_version['verdict'] == 'PASS'
+assert changed_bytes['roles'] == ['report']
+assert changed_version['reason'] == 'design_identity_conflict'
+'@ | python -P
+```
+
+Exact stdout:
+
+```text
+PASS PASS
+UNREADABLE input_digest_conflict report
+UNREADABLE design_identity_conflict reopened
+```
+
+This replay reads no file and makes no network request. The bytes and identities
+are synthetic supplied values. Matching them does not authenticate frozen
+origin, producer custody or live acceptance.
+
 Canonical snapshot compatibility contract:
 
 - Hash UTF-8 bytes of compact JSON arrays with ASCII escapes and no spaces.

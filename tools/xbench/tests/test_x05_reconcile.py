@@ -17,6 +17,7 @@ from benches.x05_reconcile import (METRICS, TABLE_COLUMNS, check_discrepancies,
     aggregate_fixtures_json, MAX_JSON_CHARS, MAX_JSON_DEPTH, serialize_result,
     PROVENANCE_STAGES, validate_fixture_provenance,
     IDENTITY_STAGES, validate_saved_design_identity, verify_input_bytes, reconcile_with_provenance,
+    reconcile_assured, aggregate_provenance, reconcile_provenance_json,
     compare_csv_view, compare_recommendations, compare_snapshots, compare_strings, compare_table)
 
 
@@ -1579,3 +1580,117 @@ def test_provenance_schema_mutations_are_fixed_and_sanitized(stage):
     assert validate_fixture_provenance(no_bom, changed)["reason"] == "stage_binding_conflict"
     for top in (None, [], "synthetic_private_canary", dict(bindings, unexpected={} )):
         assert validate_fixture_provenance(frozen, top)["reason"] == "provenance_stages_unreadable"
+
+
+def test_assurance_retains_every_diagnostic_and_unreadable_precedence():
+    manifest, bindings, inputs = provenance_fixture()
+    evidence = complete_evidence()
+    identity = dict(project_id="project", version_id="version")
+    stages = {key: dict(identity) for key in IDENTITY_STAGES}
+    args = (evidence, manifest, bindings, inputs, identity, stages)
+    preserved = deepcopy(args)
+    assert reconcile_assured(*args)["verdict"] == "PASS"
+    assert args == preserved
+    evidence["recommendations"][0]["group_count"] = 1
+    assert reconcile_assured(*args)["verdict"] == "FAIL"
+    stages["csv"]["version_id"] = "foreign"
+    inputs["report"] = b"substituted"
+    bindings["table"]["inputs"]["dwg"] = "d" * 64
+    result = reconcile_assured(*args)
+    assert result["verdict"] == "UNREADABLE"
+    checks = result["checks"]
+    assert checks["provenance"]["reconciliation"]["stages"]["grouping"]["verdict"] == "FAIL"
+    assert checks["input_bytes"]["reason"] == "input_digest_conflict"
+    assert checks["design_identity"]["reason"] == "design_identity_conflict"
+    assert checks["provenance"]["provenance"]["reason"] == "stage_binding_conflict"
+
+
+def provenance_records():
+    expected, fixtures = fixture_records()
+    for row in fixtures:
+        manifest, bindings, _ = provenance_fixture()
+        manifest["fixture_id"] = row["fixture_id"]
+        for binding in bindings.values():
+            binding["fixture_id"] = row["fixture_id"]
+        row.update(manifest=manifest, bindings=bindings)
+    return expected, fixtures
+
+
+def test_provenance_aggregate_rejects_substitution_and_preserves_siblings():
+    expected, fixtures = provenance_records()
+    baseline = aggregate_provenance(expected, fixtures)
+    assert baseline["verdict"] == "PASS"
+    fixtures[0]["manifest"]["fixture_id"] = "foreign"
+    result = aggregate_provenance(expected, fixtures)
+    assert result["verdict"] == "UNREADABLE"
+    assert result["fixtures"][expected[0]]["provenance"]["reason"] == "stage_binding_conflict"
+    for key in expected[1:]:
+        assert result["fixtures"][key] == baseline["fixtures"][key]
+    fixtures[1]["evidence"]["recommendations"][0]["group_count"] = 1
+    assert aggregate_provenance(expected, fixtures)["fixtures"][expected[1]]["verdict"] == "FAIL"
+    for altered in (fixtures[:2], fixtures + [fixtures[0]], [fixtures[0]] * 3):
+        assert aggregate_provenance(expected, altered)["verdict"] == "UNREADABLE"
+    expected, fixtures = provenance_records()
+    fixtures[0]["fixture_id"] = "foreign"
+    assert aggregate_provenance(expected, fixtures)["reason"] == "foreign_fixture_id"
+
+
+def test_strict_provenance_envelope_uses_bounded_decoder():
+    manifest, bindings, _ = provenance_fixture()
+    envelope = dict(evidence=complete_evidence(), manifest=manifest, bindings=bindings)
+    assert reconcile_provenance_json(json.dumps(envelope))["verdict"] == "PASS"
+    for key in envelope:
+        missing = dict(envelope)
+        del missing[key]
+        assert reconcile_provenance_json(json.dumps(missing))["reason"] == "provenance_envelope_unreadable"
+    assert reconcile_provenance_json(json.dumps(dict(envelope, extra=True)))["reason"] == "provenance_envelope_unreadable"
+    for text, reason in [('{"evidence":{},"\\u0065vidence":{}}', "json_duplicate_key"),
+                         ('{"manifest":{"inputs":{"dwg":"a","dwg":"b"}}}', "json_duplicate_key"),
+                         ('x' * (MAX_JSON_CHARS + 1), "json_input_too_large"),
+                         ('{"x":NaN}', "json_nonfinite_number")]:
+        assert reconcile_provenance_json(text) == {"verdict": "UNREADABLE", "reason": reason}
+
+
+@pytest.mark.parametrize("payload,digest", [
+    (b"", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+    (b"a\x00b", "59b271ae1bbcb1d31d41929817f4b16fb439eb4f31520b5ad1d5ce98920a7138"),
+    (b"\xff\xfe\x80", "b632bfa9c60bc17f7fd78dba311fd3f5dfa66cb8c017a4278e2bae28d668844d"),
+])
+def test_input_hash_literal_vectors_and_deterministic_simultaneous_conflicts(payload, digest):
+    # Literal vectors cross-checked outside the helper with standard hashlib.
+    for role in ("dwg", "report", "bom"):
+        manifest, _, inputs = provenance_fixture()
+        inputs[role], manifest["inputs"][role] = payload, digest
+        assert verify_input_bytes(manifest, inputs)["verdict"] == "PASS"
+        altered = {key: value + b"!" for key, value in inputs.items()}
+        preserved = deepcopy((manifest, altered))
+        for order in permutations(altered):
+            assert verify_input_bytes(manifest, {key: altered[key] for key in order}) == {
+                "verdict": "UNREADABLE", "reason": "input_digest_conflict", "roles": ["bom", "dwg", "report"]}
+        assert (manifest, altered) == preserved
+
+
+@pytest.mark.parametrize("stage", IDENTITY_STAGES)
+@pytest.mark.parametrize("field", ["project_id", "version_id"])
+def test_design_identity_exact_boundaries_and_unicode_distinctions(stage, field):
+    for value, valid in [("a" * 128, True), ("a" * 129, False),
+                         ("\U0001f642" * 128, True), ("\U0001f642" * 129, False), (" \t", False)]:
+        expected = dict(project_id="project", version_id="version")
+        expected[field] = value
+        stages = {key: dict(expected) for key in IDENTITY_STAGES}
+        result = validate_saved_design_identity(expected, stages)
+        assert result["verdict"] == ("PASS" if valid else "UNREADABLE")
+        if not valid:
+            assert result["reason"] == "design_identity_unreadable"
+        normal = dict(project_id="project", version_id="version")
+        stages = {key: dict(normal) for key in IDENTITY_STAGES}
+        stages[stage][field] = value
+        assert validate_saved_design_identity(normal, stages)["reason"] == (
+            "design_identity_conflict" if valid else "stage_design_identity_unreadable")
+    for exact, other in [("\u00e9", "e\u0301"), (" value ", "value")]:
+        expected = dict(project_id="project", version_id="version")
+        expected[field] = exact
+        stages = {key: dict(expected) for key in IDENTITY_STAGES}
+        stages[stage][field] = other
+        assert validate_saved_design_identity(expected, stages) == {
+            "verdict": "UNREADABLE", "reason": "design_identity_conflict", "stage": stage}

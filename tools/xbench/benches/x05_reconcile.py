@@ -106,6 +106,40 @@ def reconcile_with_provenance(evidence, frozen_manifest, stage_bindings):
                 reconciliation=reconciliation)
 
 
+def reconcile_assured(evidence, frozen_manifest, stage_bindings, supplied_inputs,
+                      expected_identity, stage_identities):
+    """Compose supplied assurance checks without discarding any diagnostics."""
+    checks = dict(provenance=reconcile_with_provenance(evidence, frozen_manifest, stage_bindings),
+                  input_bytes=verify_input_bytes(frozen_manifest, supplied_inputs),
+                  design_identity=validate_saved_design_identity(expected_identity, stage_identities))
+    verdicts = {check["verdict"] for check in checks.values()}
+    verdict = "UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS"
+    return _out(verdict, "offline_assurance", checks=checks)
+
+
+def reconcile_provenance_json(text):
+    decoded = decode_evidence_json(text)
+    if decoded["verdict"] != "PASS":
+        return decoded
+    envelope = decoded["evidence"]
+    if set(envelope) != {"evidence", "manifest", "bindings"}:
+        return _out("UNREADABLE", "provenance_envelope_unreadable")
+    return reconcile_with_provenance(envelope["evidence"], envelope["manifest"], envelope["bindings"])
+
+
+def aggregate_provenance(expected_ids, fixtures):
+    """Validate coverage first, then preserve every fixture's provenance result."""
+    coverage = aggregate_fixtures(expected_ids, fixtures)
+    if coverage["reason"] != "offline_fixture_reconciliation":
+        return coverage
+    indexed = {row["fixture_id"]: row for row in fixtures}
+    results = {key: reconcile_with_provenance(indexed[key]["evidence"],
+                 indexed[key].get("manifest"), indexed[key].get("bindings")) for key in sorted(expected_ids)}
+    verdicts = {result["verdict"] for result in results.values()}
+    verdict = "UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS"
+    return _out(verdict, "offline_provenance_fixtures", fixtures=results)
+
+
 def _numeric(value, *, count=False, signed=False):
     if type(value) not in (str, int, float, Decimal):
         return None
