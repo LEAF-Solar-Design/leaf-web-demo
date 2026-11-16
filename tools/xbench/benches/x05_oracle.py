@@ -22,6 +22,7 @@ import re
 
 MAX_SNIPPET = 200
 MAX_SNIPPETS_PER_FIELD = 5
+MAX_DIAGNOSTIC_ROWS = 5
 # All supported inputs have at most40 digits. Never inherit caller traps,
 # exponent limits or rounding policy for exact unit conversion and totals.
 _CONTEXT = Context(prec=100)
@@ -68,6 +69,7 @@ class OracleResult:
         ("module_power_kw", "module_quantity")))
     uncertainties: list[Uncertainty] = field(default_factory=list)
     provenance: dict[str, list[str]] = field(default_factory=dict)
+    _issue_keys: set = field(default_factory=set, init=False, repr=False)
 
     @property
     def status(self):
@@ -75,7 +77,8 @@ class OracleResult:
 
     def issue(self, code, name, detail):
         issue = Uncertainty(code, name, detail)
-        if issue not in self.uncertainties:
+        if issue not in self._issue_keys:
+            self._issue_keys.add(issue)
             self.uncertainties.append(issue)
 
     def record(self, name, line):
@@ -196,12 +199,17 @@ def parse_text(text: str, bom_text: str | None = None) -> OracleResult:
                 result.issue("invalid_number", "string_table", "Invalid optimizer count.")
                 table_bad = True
             result.strings.append(StringRow(identifier, value))
+            if table_bad:
+                # Invalid tables have no authoritative row totals. Retain only
+                # a small diagnostic prefix, rather than every malformed row.
+                del result.strings[MAX_DIAGNOSTIC_ROWS:]
             continue
         if table_mode and line:
             # A non-pipe row is not silently counted as a valid table row.
             if not re.search(r"[:=]", line):
                 result.issue("unrecognized_table_row", "string_table", "Unsupported table row.")
                 table_bad = True
+                del result.strings[MAX_DIAGNOSTIC_ROWS:]
         table_mode = False
         match = re.fullmatch(r"([^:=]+?)\s*[:=]\s*(.*?)", line)
         if match:
@@ -242,10 +250,16 @@ def read_pdf(path, bom_text: str | None = None) -> OracleResult:
         return result
     try:
         with pdfplumber.open(path) as document:
-            pages = [page.extract_text() or "" for page in document.pages]
+            pages = [page.extract_text() for page in document.pages]
+            nontext = any(page is not None and not isinstance(page, str) for page in pages)
+            pages = ["" if page is None else page for page in pages]
     except Exception:
         result = parse_text("", bom_text)
         result.issue("pdf_extraction_failed", "pdf", "PDF could not be read.")
+        return result
+    if nontext:
+        result = parse_text("", bom_text)
+        result.issue("pdf_extraction_nontext", "pdf", "Extractor returned non-text page data.")
         return result
     result = parse_text("\n\f\n".join(pages), bom_text)
     if not pages or any(not page.strip() for page in pages):
