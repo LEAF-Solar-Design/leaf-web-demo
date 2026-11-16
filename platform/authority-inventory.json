@@ -105,6 +105,7 @@
       "0102",
       "0103",
       "0104",
+      "0105",
       "0106"
     ],
     "migration_files": [
@@ -212,6 +213,7 @@
       "0102_lab_layouts.sql",
       "0103_project_rename_receipt.sql",
       "0104_project_solve_piece_exchanges.sql",
+      "0105_x02_cloud_request_rejected.sql",
       "0106_customization_stage_attempt_history.sql"
     ],
     "completeness": "partial",

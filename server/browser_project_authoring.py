@@ -15,6 +15,7 @@ import requests
 import broker_client
 import deps
 import platform_link
+import project_author_diagnostics as author_diagnostics
 import project_reference_materials as originals
 import project_video_materials as videos
 import project_repository_source as source
@@ -311,6 +312,7 @@ def author(tenant, project_id, request, *, cancelled=None, source_profile=WEB_PR
         if response.status_code == 409:
             raise AuthoringError('source_changed')
         if response.status_code != 200:
+            author_diagnostics.record_failure('author_http', http_status=response.status_code)
             raise AuthoringError('author_unavailable', author_subphase='author_http')
         if source_profile == NATIVE_PROFILE and len(getattr(response, 'content', b'')) > 256 * 1024:
             raise AuthoringError('author_unavailable', author_subphase='author_response')
