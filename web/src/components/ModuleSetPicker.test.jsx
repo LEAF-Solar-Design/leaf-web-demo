@@ -12,6 +12,62 @@ const first = () => screen.getByRole('checkbox', { name: 'Design / Panel A: 12 c
 const second = () => screen.getByRole('checkbox', { name: 'Alternate / Panel B: 9 candidates' })
 const submit = () => screen.getByRole('button', { name: 'Count selected set' })
 
+it('keeps external running and pending promises as independent submission locks', async () => {
+  let settle
+  const pending = new Promise((resolve) => { settle = resolve })
+  const onSelect = vi.fn().mockReturnValue(pending)
+  const view = render(<ModuleSetPicker data={data} onSelect={onSelect} />)
+  fireEvent.click(first())
+  fireEvent.click(submit())
+  view.rerender(<ModuleSetPicker data={data} onSelect={onSelect} running />)
+  view.rerender(<ModuleSetPicker data={data} onSelect={onSelect} running={false} />)
+  expect(submit().disabled).toBe(true)
+  fireEvent.click(submit())
+  expect(onSelect).toHaveBeenCalledTimes(1)
+  view.rerender(<ModuleSetPicker data={data} onSelect={onSelect} running />)
+  await act(async () => { settle(); await pending })
+  expect(screen.getByRole('group').disabled).toBe(true)
+  expect(submit().disabled).toBe(true)
+  view.rerender(<ModuleSetPicker data={data} onSelect={onSelect} running={false} />)
+  expect(submit().disabled).toBe(false)
+  expect(first().checked).toBe(true)
+  expect(onSelect).toHaveBeenCalledTimes(1)
+})
+
+it.each(['resolve', 'reject'])('keeps other instances pending when one picker %ss', async (terminal) => {
+  let doneA, failA, doneB
+  const aPromise = new Promise((resolve, reject) => { doneA = resolve; failA = reject })
+  const bPromise = new Promise((resolve) => { doneB = resolve })
+  const onA = vi.fn().mockReturnValueOnce(aPromise).mockResolvedValue(undefined)
+  const onB = vi.fn().mockReturnValue(bPromise)
+  render(<>
+    <div data-testid="pending-a"><ModuleSetPicker drawingKey="A" data={data} onSelect={onA} /></div>
+    <div data-testid="pending-b"><ModuleSetPicker drawingKey="B" data={data} onSelect={onB} /></div>
+  </>)
+  const a = within(screen.getByTestId('pending-a')), b = within(screen.getByTestId('pending-b'))
+  fireEvent.click(a.getAllByRole('checkbox')[0])
+  fireEvent.click(b.getAllByRole('checkbox')[1])
+  fireEvent.click(a.getByRole('button'))
+  fireEvent.click(b.getByRole('button'))
+  await act(async () => {
+    if (terminal === 'resolve') doneA()
+    else failA(new Error('private A failure'))
+    await aPromise.catch(() => {})
+  })
+  expect(a.getByRole('button').disabled).toBe(false)
+  expect(Boolean(a.queryByRole('alert'))).toBe(terminal === 'reject')
+  expect(b.queryByRole('alert')).toBeNull()
+  expect(b.getByRole('button').disabled).toBe(true)
+  expect(b.queryByText(/^Counted /)).toBeNull()
+  fireEvent.click(a.getByRole('button'))
+  await waitFor(() => expect(onA).toHaveBeenCalledTimes(2))
+  expect(b.getByRole('button').disabled).toBe(true)
+  expect(onB).toHaveBeenCalledExactlyOnceWith(['second'])
+  await act(async () => { doneB(); await bPromise })
+  expect(b.getByRole('button').disabled).toBe(false)
+  expect(a.queryByRole('alert')).toBeNull()
+})
+
 it.each(['count', 'label'])('keeps a changed pending %s summary unavailable until a fresh result', async (field) => {
   let settle
   const pending = new Promise((resolve) => { settle = resolve })

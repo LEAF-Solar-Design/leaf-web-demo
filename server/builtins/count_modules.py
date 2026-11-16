@@ -23,7 +23,9 @@ def _model(entity):
 
 
 def _four_corners(entity):
-    if not entity.get("closed"):
+    closed = entity.get("closed")
+    # Saved closure accepts booleans and the exact integer flag, never truthiness.
+    if not (closed is True or (type(closed) is int and closed == 1)):
         return False
     points = entity.get("pts") or []
     if len(points) == 5 and points[0] == points[-1]:
