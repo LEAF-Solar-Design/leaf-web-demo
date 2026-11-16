@@ -50,20 +50,21 @@ export function DrawingTabLabel({ name, shortId }) {
 
 // The Studio command-bar seat can wrap its existing PromptBox and transcript
 // here. CAD keeps the original command line seat.
-export function AgentPanel({ children, messages = [], enabled = true }) {
+export function AgentPanel({ children, enabled = true }) {
   const [collapsed, setCollapsed] = useState(false)
   const panelRef = useRef(null)
   const toggleRef = useRef(null)
   const panelId = useId()
+  // Collapsing the host comes after dismissing a proposal or cancelling a
+  // command, so one Escape never hides the proposal's assistant panel.
   useEscapeOwner('studio-agent-panel', enabled && !collapsed, () => {
     setCollapsed(true)
     toggleRef.current?.focus()
-  }, { layer: 'command', scope: panelRef })
+  }, { layer: 'focus', scope: panelRef })
   if (!enabled) return children
   return <aside className="studio-agent-panel" data-collapsed={collapsed ? 'true' : 'false'} aria-label="Drawing assistant">
     <button ref={toggleRef} type="button" className="agent-panel-toggle" aria-expanded={!collapsed} aria-controls={panelId} onClick={() => setCollapsed((value) => !value)}>Ask Leaf</button>
     <div ref={panelRef} id={panelId} hidden={collapsed}>
-      <ol className="agent-message-history" aria-label="Message history" aria-live="polite">{messages.map((message, index) => <li key={message.id || index}>{message.text || message.content}</li>)}</ol>
       {children}
     </div>
   </aside>

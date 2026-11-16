@@ -1,11 +1,41 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { AgentPanel, CheckoutChip, CockpitStatus, DrawingTabLabel, ShellDiagnostics, ShellKpis } from './DrawingCockpit.jsx'
+import React, { useState } from 'react'
+import { readFileSync } from 'node:fs'
+import { parseExpression } from '@babel/parser'
+import { AgentPanel, CheckoutChip, CockpitStatus, DrawingTabLabel, ShellDiagnostics, ShellKpis, StatusToggles } from './DrawingCockpit.jsx'
 import DraftingRibbon from './DraftingRibbon.jsx'
 import DrawingNavigationTools, { DrawingObjectsMount } from './DrawingNavigationTools.jsx'
 import { projectSolarOpenStatus } from '../solar/solarProjectAppModel.js'
 import { ShellAccountMenu } from '../App.jsx'
+import CostTransparencyPanel from '../components/CostTransparencyPanel.jsx'
+import ClaudeAccountPanel from '../components/ClaudeAccountPanel.jsx'
+import RoutePanel from '../components/RoutePanel.jsx'
+import { isCustomerMode } from '../lib/customerMode.js'
+
+// Exercise App's actual JSX expressions with explicit bindings, without
+// mounting its backend/session orchestration.
+const appSource = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
+function appExpression(code, bindings) {
+  const tree = parseExpression(code, { plugins: ['jsx'] })
+  function evaluate(node) {
+    if (node.type === 'JSXText') return node.value
+    if (node.type === 'JSXExpressionContainer') return evaluate(node.expression)
+    if (node.type === 'JSXFragment') return node.children.map(evaluate)
+    if (node.type === 'LogicalExpression' && node.operator === '&&') return evaluate(node.left) && evaluate(node.right)
+    if (node.type === 'ConditionalExpression') return evaluate(node.test) ? evaluate(node.consequent) : evaluate(node.alternate)
+    if (node.type === 'JSXElement') {
+      const opening = node.openingElement
+      const name = code.slice(opening.name.start, opening.name.end)
+      const component = /^[a-z]/.test(name) ? name : new Function(...Object.keys(bindings), `return ${name}`)(...Object.values(bindings))
+      const props = Object.fromEntries(opening.attributes.map(attr => [attr.name.name, attr.value ? evaluate(attr.value) : true]))
+      return React.createElement(component, props, ...node.children.map(evaluate))
+    }
+    return new Function(...Object.keys(bindings), `return (${code.slice(node.start, node.end)})`)(...Object.values(bindings))
+  }
+  return evaluate(tree)
+}
 
 const navigationFixture = vi.hoisted(() => ({
   index: { drawingKey: 'test', records: [], byId: new Map(), byHandle: new Map(), intake: { source: 'engine' } },
@@ -19,6 +49,49 @@ vi.mock('./studioGround.js', async (original) => ({ ...await original(), useStud
 afterEach(cleanup)
 
 describe('quiet Studio shell', () => {
+  it.each([false, true])('keeps cost and Claude panels reachable for customer mode (Studio %s)', (studioShell) => {
+    const bindings = { studioShell, isCustomerMode, session: { session: {} }, tier: 'free',
+      mock: false, knownGuest: true, signedOut: true, grant: null, grantLoading: false,
+      grantBusy: false, grantErr: null, claudeOpen: false, setClaudeOpen: vi.fn(), onLinkClaude: vi.fn(), onUnlinkClaude: vi.fn(),
+      CostTransparencyPanel, ClaudeAccountPanel }
+    const panelsCode = appSource.match(/const accountPanels = ([\s\S]*?)\n  <\/>/)[1] + '\n  </>'
+    bindings.accountPanels = appExpression(panelsCode, bindings)
+    const inline = appSource.split('\n').find(line => line.includes('&& accountPanels}')).trim().slice(1, -1)
+    const menu = appSource.match(/customerPanels=\{([^\n]+)\}>/)[1]
+    const { container } = render(<ShellAccountMenu studioShell={studioShell} customerPanels={appExpression(menu, bindings)}>
+      <div className="who">{appExpression(inline, bindings)}</div>
+    </ShellAccountMenu>)
+    if (studioShell) fireEvent.click(screen.getByText('Account'))
+    expect(container.querySelector('.cost-transparency > button')).toBeTruthy()
+    expect(screen.getByRole('button', { name: /Claude accounts/ })).toBeTruthy()
+    expect(container.querySelectorAll('.claude-acct')).toHaveLength(1)
+    expect(!!container.querySelector('.shell-avatar-menu')).toBe(studioShell)
+    if (!studioShell) expect(container.querySelector('.who > .claude-acct')).toBeTruthy()
+  })
+
+  it('keeps the CAD cockpit working controls mounted for customer mode', () => {
+    const line = appSource.split('\n').find(line => line.includes('<SurfaceFrame.Cockpit'))
+    const expression = line.trim().replace(/^\{([\s\S]*)\}$/, '$1')
+    render(appExpression(expression, { studioShell: true, isCustomerMode, session: { session: {} }, tier: 'free', SurfaceFrame: { Cockpit: StatusToggles } }))
+    expect(screen.getByRole('button', { name: /^Ortho mode/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /^Object snap/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Toggle fullscreen' })).toBeTruthy()
+  })
+
+  it.each(['project', 'cad', 'agent'])('keeps the generic placeholder for Studio profile %s', (profile) => {
+    const expression = appSource.match(/placeholder=\{([^\n]+)\}/)[1]
+    expect(appExpression(expression, { studioShell: true, surfaceSlots: { toolbar: { profile } } })).toBeUndefined()
+    expect(appExpression(expression, { studioShell: true, surfaceSlots: { toolbar: { profile: 'solar' } } })).toBe('String every roof to the coldest-day Voc')
+    expect(appExpression(expression, { studioShell: false, surfaceSlots: { toolbar: { profile: 'solar' } } })).toBeUndefined()
+  })
+
+  it.each([false, true])('limits customer cockpit diagnostic suppression to Studio (%s)', (studioShell) => {
+    const expression = appSource.match(/<CockpitStatus customerMode=\{([^\n]+?)\} ground=/)[1]
+    const customerMode = appExpression(expression, { studioShell, isCustomerMode, session: { session: {} }, tier: 'free' })
+    const { container } = render(<CockpitStatus customerMode={customerMode} ground={null} viewerRef={{ current: null }} shown={{}} />)
+    expect(!!container.querySelector('.cockpit-scale')).toBe(!studioShell)
+    expect(!!container.querySelector('.cockpit-count')).toBe(!studioShell)
+  })
   it('renders account controls directly outside Studio', () => {
     const { container } = render(<header><ShellAccountMenu studioShell={false}>
       <div className="who"><button>Customize</button><button>Details</button><button>Sign out</button><button>Add-ons</button></div>
@@ -84,14 +157,31 @@ describe('quiet Studio shell', () => {
     fireEvent.click(container.querySelector('.drawing-rail-find > summary'))
     expect(screen.getByRole('combobox')).toBeTruthy()
   })
-  it('collapses the agent panel to its pill on Escape and preserves the message history', () => {
-    const { container } = render(<AgentPanel messages={[{ id: 'one', text: 'String every roof' }]}><input aria-label="Ask Leaf" /></AgentPanel>)
+  it('collapses the agent panel to its pill on Escape and preserves its children', () => {
+    const { container } = render(<AgentPanel><p>String every roof</p><input aria-label="Ask Leaf" /></AgentPanel>)
     fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Escape' })
     expect(container.querySelector('.studio-agent-panel').dataset.collapsed).toBe('true')
     expect(screen.getByRole('button', { name: 'Ask Leaf' }).getAttribute('aria-expanded')).toBe('false')
     fireEvent.click(screen.getByRole('button', { name: 'Ask Leaf' }))
     expect(screen.getByText('String every roof')).toBeTruthy()
     expect(container.querySelector('.studio-agent-panel').dataset.collapsed).toBe('false')
+    expect(screen.queryByRole('list', { name: 'Message history' })).toBeNull()
+  })
+  it('dismisses an open proposal on Escape before collapsing the agent panel', () => {
+    const dismiss = vi.fn()
+    const tool = { name: 'solar-string', title: 'String the roof', capabilities: ['drawing.read'], params: { properties: {} } }
+    function WithProposal() {
+      const [route, setRoute] = useState({ lane: 'run', confidence: .99, tool: tool.name, runIntent: { tool: tool.name, params: {} } })
+      return <AgentPanel><input aria-label="Ask Leaf" /><RoutePanel route={route} tools={[tool]} running={false}
+        onConfirmIntent={vi.fn()} onDismiss={() => { dismiss(); setRoute(null) }} /></AgentPanel>
+    }
+    const { container } = render(<WithProposal />)
+    fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Escape' })
+    expect(dismiss).toHaveBeenCalledOnce()
+    expect(container.querySelector('.studio-agent-panel').dataset.collapsed).toBe('false')
+    expect(screen.getByRole('button', { name: 'Ask Leaf' })).toHaveAttribute('aria-expanded', 'true')
+    fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Escape' })
+    expect(container.querySelector('.studio-agent-panel').dataset.collapsed).toBe('true')
   })
   it('shows coordinates and selection while withholding scale and render diagnostics', () => {
     const viewerRef = { current: null }

@@ -781,7 +781,7 @@ function appSurfaceFromLocation(location, labStatus) {
     ? 'lab' : productSurfaceFromSearch(location.search, labStatus)
 }
 
-export function ShellAccountMenu({ studioShell, children }) {
+export function ShellAccountMenu({ studioShell, children, customerPanels = null }) {
   if (!studioShell) return children
   return <details className="shell-avatar-menu"
     onKeyDown={(event) => {
@@ -802,6 +802,7 @@ export function ShellAccountMenu({ studioShell, children }) {
       <span>Account</span>
     </summary>
     {children}
+    {customerPanels}
   </details>
 }
 
@@ -5303,6 +5304,22 @@ export default function App() {
     </EngineSessionProvider>
   ) : node)
 
+  const accountPanels = <>
+    <CostTransparencyPanel mock={mock} readsPaused={knownGuest} />
+    {!mock && <ClaudeAccountPanel
+      mock={mock}
+      signedOut={signedOut}
+      grant={grant}
+      loading={grantLoading}
+      busy={grantBusy}
+      error={grantErr}
+      open={claudeOpen}
+      onToggle={setClaudeOpen}
+      onLink={onLinkClaude}
+      onUnlink={onUnlinkClaude}
+    />}
+  </>
+
   return (
     // Slice 4a: THE SURFACE FRAME (site/SurfaceFrame.jsx). One wrapper both
     // scenes mount, carrying the normalized shell contract; its slots below
@@ -5424,7 +5441,7 @@ export default function App() {
           // Before the ground attaches (and on every non-drafting surface)
           // the prop is false and the well renders its plain form.
           commandLine={!!studioGround && surfaceSlots.commandLine && !(studioShell && surfaceSlots.toolbar.profile !== 'cad')}
-          placeholder={studioShell && surfaceSlots.toolbar.profile !== 'cad' ? 'String every roof to the coldest-day Voc' : undefined}
+          placeholder={studioShell && surfaceSlots.toolbar.profile === 'solar' ? 'String every roof to the coldest-day Voc' : undefined}
           runLabel={studioShell && surfaceSlots.toolbar.profile !== 'cad' ? 'Send' : undefined}
           armedAsk={armedPromptAsk}
           // Slice 8c: connected Link-a-service servers join the @ mounts
@@ -5552,7 +5569,7 @@ export default function App() {
         <ProjectWorkspaceControls {...projectLayout} active={!studioShell && projectLayout.active} />
         <div className="spacer" />
         {studioShell && <ShellKpis items={[{ label: 'Version', value: projectMode ? projectSolar.scope.binding?.input_version_id : null }, { label: 'Selection', value: selectedHandle ? 1 : null }]} />}
-        <ShellAccountMenu studioShell={studioShell}>
+        <ShellAccountMenu studioShell={studioShell} customerPanels={studioShell && isCustomerMode({ ...session.session, tier }) ? accountPanels : null}>
         <div className="who">
           {/* Header metadata (org · tenant · tier · spend · API base) is demoted
               behind Details -> the DT2 session drawer, per the standard. */}
@@ -5597,21 +5614,7 @@ export default function App() {
           )}
           {/* Live-only chrome (Claude-account terminal panel) is hidden in the
               demo — it can't work signed-out. Guarded on !mock. */}
-          {!isCustomerMode({ ...session.session, tier }) && <CostTransparencyPanel mock={mock} readsPaused={knownGuest} />}
-          {!isCustomerMode({ ...session.session, tier }) && !mock && (
-            <ClaudeAccountPanel
-              mock={mock}
-              signedOut={signedOut}
-              grant={grant}
-              loading={grantLoading}
-              busy={grantBusy}
-              error={grantErr}
-              open={claudeOpen}
-              onToggle={setClaudeOpen}
-              onLink={onLinkClaude}
-              onUnlink={onUnlinkClaude}
-            />
-          )}
+          {!(studioShell && isCustomerMode({ ...session.session, tier })) && accountPanels}
           {!mock && !knownGuest && !signedOut && signedIn && <AddonsPanel mock={mock} orgId={orgId} open={addonsOpen} onToggle={setAddonsOpen} />}
         </div>
         </ShellAccountMenu>
@@ -7007,10 +7010,10 @@ export default function App() {
         {/* W4b cockpit: live cursor coordinates, scale, counts, selection
             (studio only; DOM-written at rAF rate, never React state). */}
         {studioGround && groundShowsDrawing(activeSurface) && (
-          <CockpitStatus customerMode={isCustomerMode({ ...session.session, tier })} ground={studioGround} viewerRef={viewerRef} shown={drawingIntake} selectedHandle={selectedHandle} canvasSelector=".viewer-canvas" />
+          <CockpitStatus customerMode={studioShell && isCustomerMode({ ...session.session, tier })} ground={studioGround} viewerRef={viewerRef} shown={drawingIntake} selectedHandle={selectedHandle} canvasSelector=".viewer-canvas" />
         )}
         {/* W4e: ORTHO and OSNAP real through StatusModesBridge; the rest honestly off, plus fullscreen. */}
-        {!isCustomerMode({ ...session.session, tier }) && <SurfaceFrame.Cockpit />}
+        <SurfaceFrame.Cockpit />
         </FootRegion>
       </footer>
 

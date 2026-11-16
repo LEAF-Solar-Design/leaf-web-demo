@@ -17,8 +17,8 @@ export const WRITE_CAPABILITY = 'drawing.write'
 // reason (not in this engine yet), so it is never a valid placement target.
 export const RIBBON_TAB_IDS = Object.freeze(['draw', 'insert', 'annotate', 'view', 'manage'])
 export const PLACEMENT_SIZES = Object.freeze(['large', 'small', 'row'])
-// Undeclared tools are text buttons; size remains the shared ribbon default.
-export const DEFAULT_TOOL_ICON = ''
+// Shared defaults for every tool-record consumer.
+export const DEFAULT_TOOL_ICON = 'toolbox'
 export const DEFAULT_TOOL_SIZE = 'large'
 
 const TABS = new Set(RIBBON_TAB_IDS)
@@ -62,11 +62,15 @@ export function isWriteTool(tool) {
 }
 
 /**
- * The tool's CockpitIcon key, a solar category glyph, or no icon.
- * RibbonTool validates keys against the sprite and renders missing icons as
- * text buttons. Never invent a shared fallback glyph for undeclared tools.
+ * The tool's declared CockpitIcon key, or the shared fallback.
  */
 export function toolIcon(tool) {
+  const icon = tool && tool.icon
+  return typeof icon === 'string' && icon ? icon : DEFAULT_TOOL_ICON
+}
+
+/** Studio-only solar category glyphs; undeclared tools are text buttons. */
+export function studioToolIcon(tool) {
   const icon = tool && tool.icon
   const solar = /solar|panel|zone|string|inverter|trench/i.test(tool?.name || '')
   if (solar) {
@@ -77,7 +81,7 @@ export function toolIcon(tool) {
     if (/inverter/i.test(name)) return 'block-insert'
     if (/trench/i.test(name)) return 'line'
   }
-  return typeof icon === 'string' && icon ? icon : DEFAULT_TOOL_ICON
+  return typeof icon === 'string' && icon ? icon : ''
 }
 
 // Presentation metadata beside the tool schema readers. Never infer a value

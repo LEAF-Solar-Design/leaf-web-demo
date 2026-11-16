@@ -30,12 +30,13 @@
 // run" uses (onRequestRun -> commitCatalogDecision, source 'ribbon'). NEVER
 // dispatchSlash here: that stamps slash provenance into the P2 funnel and
 // silently no-ops on gated writes.
-import { Children, cloneElement, isValidElement, useLayoutEffect, useRef, useState } from 'react'
+import { Children, cloneElement, createContext, isValidElement, useContext, useLayoutEffect, useRef, useState } from 'react'
 
 import { accessibleName, reasonCode } from '../lib/actionRegistry.js'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { formatElementId } from '../lib/elementIdentity.js'
 import { familyMonogram } from '../lib/surfaceRails.js'
+import { DEFAULT_TOOL_ICON, studioToolIcon } from '../lib/toolRecord.js'
 import CockpitIcon, { hasIcon } from './CockpitIcon.jsx'
 
 // The band's measured height, published on the workspace card as a CSS
@@ -43,6 +44,7 @@ import CockpitIcon, { hasIcon } from './CockpitIcon.jsx'
 // ResizeObserver; the one-shot measurement still runs there, so the variable
 // always exists.
 export const RIBBON_HEIGHT_VAR = '--cockpit-ribbon-h'
+const CompactStudioRibbon = createContext(false)
 
 function useBandHeight(ref) {
   useLayoutEffect(() => {
@@ -218,13 +220,21 @@ export function RibbonWidget({ widget }) {
 }
 
 export function RibbonCluster({ id, label, kind = 'group', note = null, extra = null, widgets = [], onLabelClick = null, labelTitle = '', children }) {
+  const compact = useContext(CompactStudioRibbon)
   const seen = new Set()
   const disabled = []
   const visible = Children.toArray(children).flatMap((child) => {
-    if (!isValidElement(child) || child.type !== RibbonTool) return [child]
+    if (!compact || !isValidElement(child) || child.type !== RibbonTool) return [child]
     const tool = child.props.tool
-    if (tool.disabled) { disabled.push(cloneElement(child, { tool: { ...tool, icon: '' } })); return [] }
-    const icon = seen.has(tool.icon) ? '' : tool.icon
+    if (tool.disabled) {
+      disabled.push(<div key={child.key}>
+        {cloneElement(child, { tool: { ...tool, icon: '' } })}
+        {tool.reason && <p className="ribbon-tool-reason">{tool.reason}</p>}
+      </div>)
+      return []
+    }
+    const studioIcon = studioToolIcon({ ...tool, name: tool.name || tool.id, icon: tool.icon === DEFAULT_TOOL_ICON ? '' : tool.icon })
+    const icon = seen.has(studioIcon) ? '' : studioIcon
     if (icon) seen.add(icon)
     return [cloneElement(child, { tool: { ...tool, icon } })]
   })
@@ -288,7 +298,7 @@ export default function DraftingRibbon({ clusters = [], tab = 'draw', children =
   const [drawOpen, setDrawOpen] = useState(false)
   useLayoutEffect(() => {
     setCompact(!!ref.current?.closest('.app[data-studio-shell="cockpit"]:is([data-surface="cad"], [data-surface="solar"])'))
-  }, [])
+  }, [clusters, children, tab])
   useLayoutEffect(() => { setOpen(false) }, [tab])
   useLayoutEffect(() => {
     const ribbon = ref.current
@@ -408,6 +418,7 @@ export default function DraftingRibbon({ clusters = [], tab = 'draw', children =
           if (button && event.currentTarget.contains(button) && !button.disabled) setOpen(false)
         }}
       >
+      <CompactStudioRibbon.Provider value={compact}>
       {children}
       {list.length === 0 && !children && !catalogError && (
         // Honest empty: a sentence, never a fabricated cluster.
@@ -428,6 +439,7 @@ export default function DraftingRibbon({ clusters = [], tab = 'draw', children =
           {(cluster.tools || []).map((tool) => <RibbonTool key={tool.id} tool={tool} />)}
         </RibbonCluster>
       ))}
+      </CompactStudioRibbon.Provider>
       </div>
       <button
         ref={moreRef}
