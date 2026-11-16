@@ -1220,6 +1220,47 @@ def compare_string_inverter_snapshots(inverter_ids, saved_string_ids, before_ass
                           for row in result["examples"]])
 
 
+def compare_string_grid_owners(expected_grid_ids, string_ids, oracle_owners, saved_owners):
+    """Compare independent explicit string grid owners, including balanced swaps."""
+    return _compare_independent_grid_owners(expected_grid_ids, string_ids, oracle_owners, saved_owners, "string")
+
+
+def compare_inverter_grid_owners(expected_grid_ids, inverter_ids, oracle_owners, saved_owners):
+    """Compare independent explicit inverter grid owners, including balanced swaps."""
+    return _compare_independent_grid_owners(expected_grid_ids, inverter_ids, oracle_owners, saved_owners, "inverter")
+
+
+def _compare_independent_grid_owners(grids, identities, oracle_rows, saved_rows, label):
+    key = label + "_id"
+    oracle = _validate_grid_ownership(grids, identities, oracle_rows, key, label)
+    saved = _validate_grid_ownership(grids, identities, saved_rows, key, label)
+    verdicts = {oracle["verdict"], saved["verdict"]}
+    if verdicts != {"PASS"}:
+        return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL", label + "_grid_owner_evidence_invalid",
+                    oracle=oracle, saved=saved)
+    expected = {row[key]: row["grid_id"] for row in oracle_rows}
+    actual = {row[key]: row["grid_id"] for row in saved_rows}
+    changed = [identity for identity in expected if expected[identity] != actual[identity]]
+    return _out("FAIL" if changed else "PASS", label + "_grid_owners_mismatch" if changed else label + "_grid_owners_equal",
+                mismatch_count=len(changed), examples=[{key: identity, "oracle": expected[identity], "saved": actual[identity]}
+                    for identity in nsmallest(MAX_STRING_EXAMPLES, changed)])
+
+
+def compare_inverter_id_sets(oracle_ids, saved_ids):
+    """Compare explicit independent device identities, including unconnected devices."""
+    indexed = []
+    for values in (oracle_ids, saved_ids):
+        if (type(values) is not list or not values or any(type(key) is not str or not key.strip() or len(key) > 128
+                for key in values) or len(set(values)) != len(values)):
+            return _out("UNREADABLE", "inverter_id_evidence_unreadable")
+        indexed.append(set(values))
+    missing, foreign = indexed[0] - indexed[1], indexed[1] - indexed[0]
+    failed = bool(missing or foreign)
+    return _out("FAIL" if failed else "PASS", "inverter_ids_mismatch" if failed else "inverter_ids_equal",
+                counts=dict(missing=len(missing), foreign=len(foreign)),
+                missing_ids=nsmallest(MAX_STRING_EXAMPLES, missing), foreign_ids=nsmallest(MAX_STRING_EXAMPLES, foreign))
+
+
 def validate_cross_topology(expected_grid_ids, saved_string_ids, inverter_ids,
                             string_owners, inverter_owners, assignments):
     """Require every string and its explicitly assigned inverter to share a grid."""

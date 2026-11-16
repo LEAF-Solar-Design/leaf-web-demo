@@ -2112,3 +2112,41 @@ PASS/PASS/FAIL and PASS/PASS/PASS. Violations name `cross_topology_mismatch`,
 missing evidence names `cross_topology_evidence_invalid`, and repaired phases
 name `cross_topology_equal`. Each supplied map needs actual producer provenance
 before live acceptance.
+# Independent owner evidence for X05
+
+Jointly swapping string and inverter grid owners can preserve valid connections
+and balanced grid totals. Independent oracle owner rows establish the expected
+identity-to-grid mapping. The new string and inverter owner comparators remain
+standalone in this slice. Independent inverter ID sets also detect substitutions
+of devices that have no strings connected.
+
+```powershell
+@'
+import sys
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+grids, strings, devices = ['east','west'], ['A','B'], ['I1','I2']
+oracle_strings = [dict(string_id='A',grid_id='east'),dict(string_id='B',grid_id='west')]
+oracle_inverters = [dict(inverter_id='I1',grid_id='east'),dict(inverter_id='I2',grid_id='west')]
+saved_strings = [dict(string_id='A',grid_id='west'),dict(string_id='B',grid_id='east')]
+saved_inverters = [dict(inverter_id='I1',grid_id='west'),dict(inverter_id='I2',grid_id='east')]
+connections = [dict(string_id='A',inverter_id='I1'),dict(string_id='B',inverter_id='I2')]
+checks = [
+    m.validate_cross_topology(grids,strings,devices,saved_strings,saved_inverters,connections),
+    m.compare_grid_string_totals(dict(east=1,west=1),strings,saved_strings),
+    m.compare_grid_inverter_totals(dict(east=1,west=1),devices,saved_inverters),
+]
+for check in checks: print(check['verdict'],check['reason'])
+string_check = m.compare_string_grid_owners(grids,strings,oracle_strings,saved_strings)
+device_check = m.compare_inverter_grid_owners(grids,devices,oracle_inverters,saved_inverters)
+for check in (string_check,device_check):
+    print(check['verdict'],check['reason'],check['mismatch_count'])
+assert all(check['verdict'] == 'PASS' for check in checks)
+assert string_check['mismatch_count'] == device_check['mismatch_count'] == 2
+'@ | python -P -
+```
+
+Expected three PASS results followed by FAIL `string_grid_owners_mismatch` and
+FAIL `inverter_grid_owners_mismatch`, each with two mismatches. Missing oracle
+owner rows are UNREADABLE. Report extraction must supply independently bound
+owner identities and grid mappings for live acceptance.

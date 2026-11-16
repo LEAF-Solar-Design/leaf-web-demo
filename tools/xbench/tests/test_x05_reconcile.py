@@ -5918,3 +5918,103 @@ def test_cross_topology_bijective_relabeling_all_phases(broken):
     changed = m._seven_step_cross_topology(renamed['grid'],renamed['assurance']['evidence'])
     assert changed['checks']['before']['verdict'] == ('PASS' if broken else 'FAIL')
     assert changed['verdict'] == 'FAIL'
+
+
+@pytest.mark.parametrize('label',['string','inverter'])
+def test_independent_grid_owners_balanced_swaps_missing_and_caps(label):
+    from benches import x05_reconcile as m
+    compare = m.compare_string_grid_owners if label == 'string' else m.compare_inverter_grid_owners
+    key = label+'_id'
+    expected = [{key:'A','grid_id':'east'},{key:'B','grid_id':'west'}]
+    saved = [{key:'A','grid_id':'west'},{key:'B','grid_id':'east'}]
+    original = deepcopy((expected,saved))
+    result = compare(['east','west'],['A','B'],expected,saved)
+    assert result['verdict'] == 'FAIL' and result['mismatch_count'] == 2
+    assert result == compare(['west','east'],['B','A'],expected[::-1],saved[::-1])
+    assert compare(['east','west'],['A','B'],expected,expected)['verdict'] == 'PASS'
+    for bad in (None,{},[],[{}],expected+expected[:1],[{key:'x'*129,'grid_id':'east'}]):
+        result = compare(['east','west'],['A','B'],bad,saved)
+        assert result['verdict'] != 'PASS'
+        assert 'x'*129 not in serialize_result(result)
+    assert (expected,saved) == original
+    expected = [{key:f'id{i:03}','grid_id':'east'} for i in range(70)]
+    saved = [dict(row,grid_id='west') for row in expected]
+    ids = [row[key] for row in expected]
+    result = compare(['east','west'],ids,expected,saved)
+    assert result['mismatch_count'] == 70 and len(result['examples']) == MAX_STRING_EXAMPLES
+    assert result == compare(['west','east'],ids[::-1],expected[::-1],saved[::-1])
+
+
+def test_independent_inverter_ids_substituted_unconnected_devices_and_caps():
+    from benches import x05_reconcile as m
+    oracle,saved = ['connected','empty-old'],['connected','empty-new']
+    rows = [dict(string_id='A',inverter_id='connected')]
+    assert m.compare_inverter_string_totals({'connected':1,'empty-new':0},['A'],rows)['verdict'] == 'PASS'
+    original = deepcopy((oracle,saved))
+    result = m.compare_inverter_id_sets(oracle,saved)
+    assert result == dict(verdict='FAIL',reason='inverter_ids_mismatch',counts=dict(missing=1,foreign=1),
+        missing_ids=['empty-old'],foreign_ids=['empty-new'])
+    assert m.compare_inverter_id_sets(oracle,oracle[::-1])['verdict'] == 'PASS'
+    for bad in (None,{},[],[''],[True],['x'*129],['A','A']):
+        assert m.compare_inverter_id_sets(bad,saved)['verdict'] == 'UNREADABLE'
+        assert m.compare_inverter_id_sets(oracle,bad)['verdict'] == 'UNREADABLE'
+    assert (oracle,saved) == original
+    left,right = [f'old{i:03}' for i in range(70)],[f'new{i:03}' for i in range(70)]
+    result = m.compare_inverter_id_sets(left,right)
+    assert result['counts'] == dict(missing=70,foreign=70)
+    assert len(result['missing_ids']) == len(result['foreign_ids']) == MAX_STRING_EXAMPLES
+    assert result == m.compare_inverter_id_sets(left[::-1],right[::-1])
+
+
+def test_cross_topology_disjoint_unions_add_mismatches_and_clean_components_do_not_mask():
+    from itertools import product
+    from benches import x05_reconcile as m
+    def component(prefix,broken):
+        grids,strings,devices = [prefix+'e',prefix+'w'],[prefix+'A',prefix+'B'],[prefix+'I1',prefix+'I2']
+        owners = [dict(string_id=k,grid_id=v) for k,v in zip(strings,grids)]
+        inverters = [dict(inverter_id=k,grid_id=v) for k,v in zip(devices,grids)]
+        rows = [dict(string_id=k,inverter_id=v) for k,v in zip(strings,devices[::-1] if broken else devices)]
+        return grids,strings,devices,owners,inverters,rows
+    for flags in product([False,True],repeat=3):
+        parts = [component(str(index),flag) for index,flag in enumerate(flags)]
+        union = tuple(sum((part[index] for part in parts),[]) for index in range(6))
+        original = deepcopy(union)
+        expected = sum(m.validate_cross_topology(*part)['mismatch_count'] for part in parts)
+        result = m.validate_cross_topology(*union)
+        assert result['mismatch_count'] == expected == 2*sum(flags)
+        assert result['verdict'] == ('FAIL' if expected else 'PASS')
+        clean = component('clean',False)
+        augmented = tuple(union[index]+clean[index] for index in range(6))
+        assert m.validate_cross_topology(*augmented)['mismatch_count'] == expected
+        assert union == original
+
+
+def test_bound_aggregate_shared_owner_connection_containers_are_unchanged_and_isolated():
+    from benches import x05_reconcile as m
+    expected,records = bound_seven_fixture_records()
+    owners = deepcopy(records[0]['envelope']['grid']['string_assignments'])
+    connections = deepcopy(records[0]['envelope']['assurance']['evidence']['saved_assignments'])
+    inverters = deepcopy(records[0]['envelope']['assurance']['evidence']['saved_inverters'])
+    for record in records:
+        grid,evidence = record['envelope']['grid'],record['envelope']['assurance']['evidence']
+        for field in ('string_assignments','before_string_assignments','reopened_string_assignments'):
+            grid[field] = owners
+        for stage in ('saved','before','reopened'):
+            evidence[stage+'_assignments'] = connections
+            evidence[stage+'_inverters'] = inverters
+    baseline = m.aggregate_bound_seven_steps(expected,records)
+    assert baseline['verdict'] == 'PASS'
+    records[0]['envelope']['import']['normal_user'] = False
+    original = deepcopy((records,owners,connections,inverters))
+    result = m.aggregate_bound_seven_steps(expected,records)
+    assert result['fixtures'][expected[0]]['verdict'] == 'FAIL'
+    for key in expected[1:]:
+        assert result['fixtures'][key] == baseline['fixtures'][key]
+    assert (records,owners,connections,inverters) == original
+    for record in records:
+        grid,evidence = record['envelope']['grid'],record['envelope']['assurance']['evidence']
+        for field in ('string_assignments','before_string_assignments','reopened_string_assignments'):
+            assert grid[field] is owners
+        for stage in ('saved','before','reopened'):
+            assert evidence[stage+'_assignments'] is connections
+            assert evidence[stage+'_inverters'] is inverters
