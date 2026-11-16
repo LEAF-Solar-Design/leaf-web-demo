@@ -321,7 +321,14 @@ def classify(observation, expected=None):
     provenance = (isinstance(observation.get("source"), str)
                   and re.fullmatch(r"[0-9a-f]{40}", observation["source"]) is not None
                   and observation.get("web_build") == observation["source"])
-    proven = (fresh and canonical and provenance and observation.get("evidence_saved") is True and not pending
+    evidence_pin = (isinstance(observation.get("evidence_path"), str)
+                    and re.fullmatch(r"(x10-evidence-[0-9a-f]{32})/x10-ui.json / \1/x10-ground.png",
+                                     observation["evidence_path"]) is not None
+                    and type(observation.get("screenshot_bytes")) is int
+                    and 0 < observation["screenshot_bytes"] <= MAX_SCREENSHOT_BYTES
+                    and isinstance(observation.get("screenshot_sha256"), str)
+                    and re.fullmatch(r"[0-9a-f]{64}", observation["screenshot_sha256"]) is not None)
+    proven = (fresh and canonical and provenance and evidence_pin and observation.get("evidence_saved") is True and not pending
               and observation.get("event_callback_failed") is not True)
     contradictory = (bool(observation.get("import_rejection"))
                      and observation.get("imported_version_selected") is True)
@@ -528,9 +535,25 @@ def _write_evidence_json(path, value):
         target.flush()
 
 
+def _read_evidence_json(path):
+    initial = path.lstat()
+    if not stat.S_ISREG(initial.st_mode) or initial.st_size > MAX_JSON_BYTES:
+        raise ValueError("invalid evidence record type or size")
+    with _binary_input(path) as source:
+        if _file_fingerprint(os.fstat(source.fileno())) != _file_fingerprint(initial):
+            raise ValueError("evidence record replaced before read")
+        data = source.read(MAX_JSON_BYTES + 1)
+        if _file_fingerprint(os.fstat(source.fileno())) != _file_fingerprint(initial):
+            raise ValueError("evidence record changed during read")
+    if len(data) > MAX_JSON_BYTES or _file_fingerprint(path.lstat()) != _file_fingerprint(initial):
+        raise ValueError("evidence record changed or exceeded budget")
+    return _strict_json_bytes(data), hashlib.sha256(data).hexdigest()
+
+
 def _save(page, ctx, observation, surface=None, validate=None):
     observation["evidence_saved"] = False
     observation.pop("evidence_path", None)
+    observation.pop("evidence_record_sha256", None)
     fixtures = [Path(row["path"]).resolve() for row in ctx.manifest.get("fixtures", [])]
     root = ctx.out_dir.resolve()
     if root in fixtures:
@@ -567,7 +590,8 @@ def _save(page, ctx, observation, surface=None, validate=None):
         saved = dict(observation, **pin, evidence_saved=True, evidence_path=evidence)
         record = staging / "x10-ui.json"
         _write_evidence_json(record, saved)
-        if json.loads(record.read_text(encoding="utf-8")) != saved:
+        record_value, record_hash = _read_evidence_json(record)
+        if record_value != saved:
             raise ValueError("invalid evidence JSON")
         def check_pin(directory):
             actual = _valid_png(directory / "x10-ground.png")
@@ -586,18 +610,18 @@ def _save(page, ctx, observation, surface=None, validate=None):
             if not staging.exists():
                 try:
                     check_pin(destination)
-                    if json.loads((destination / "x10-ui.json").read_text(encoding="utf-8")) == saved:
+                    if _read_evidence_json(destination / "x10-ui.json") == (saved, record_hash):
                         committed = destination
                 except (OSError, ValueError):
                     pass
             raise
         committed = ctx.out_dir / generation
         check_pin(committed)
-        if json.loads((committed / "x10-ui.json").read_text(encoding="utf-8")) != saved:
+        if _read_evidence_json(committed / "x10-ui.json") != (saved, record_hash):
             raise ValueError("invalid committed evidence JSON")
         if validate is not None:
             validate()
-        observation.update(pin, evidence_saved=True, evidence_path=evidence)
+        observation.update(pin, evidence_saved=True, evidence_path=evidence, evidence_record_sha256=record_hash)
     finally:
         if staging.exists():
             shutil.rmtree(staging)
@@ -613,14 +637,21 @@ def _invalidate_evidence(ctx, observation):
         directory = ctx.out_dir / match.group(1)
         record = directory / "x10-ui.json"
         try:
+            value, digest = _read_evidence_json(record)
+            screenshot = _valid_png(directory / "x10-ground.png")
             if (not directory.is_symlink() and not record.is_symlink()
-                    and json.loads(record.read_text(encoding="utf-8")).get("evidence_path") == pointer):
+                    and digest == observation.get("evidence_record_sha256")
+                    and value.get("evidence_path") == pointer
+                    and value.get("screenshot_bytes") == len(screenshot) == observation.get("screenshot_bytes")
+                    and value.get("screenshot_sha256") == hashlib.sha256(screenshot).hexdigest()
+                    == observation.get("screenshot_sha256")):
                 record.unlink()
                 shutil.rmtree(directory)
         except Exception:
             pass
     observation["evidence_saved"] = False
     observation.pop("evidence_path", None)
+    observation.pop("evidence_record_sha256", None)
 
 
 def _diagnostic(ctx, observation, stage, exc):
@@ -629,6 +660,7 @@ def _diagnostic(ctx, observation, stage, exc):
     observation.update(stage=stage, exception_type=safe_text(type(exc).__name__),
                        issue="UI/infrastructure unreadable at " + stage + ": " + safe_text(type(exc).__name__),
                        evidence_saved=False)
+    temporary = None
     try:
         diagnostic = ctx.out_dir / "x10-ui.json"
         if any(Path(row["path"]).resolve() == diagnostic.resolve()
@@ -636,10 +668,18 @@ def _diagnostic(ctx, observation, stage, exc):
             observation["diagnostic_saved"] = False
             return
         ctx.out_dir.mkdir(parents=True, exist_ok=True)
-        diagnostic.write_text(
-            json.dumps(observation, indent=2) + "\n", encoding="utf-8")
-    except OSError:
+        descriptor, name = tempfile.mkstemp(prefix=".x10-diagnostic-", suffix=".json", dir=ctx.out_dir)
+        os.close(descriptor)
+        temporary = Path(name)
+        _write_evidence_json(temporary, observation)
+        if _read_evidence_json(temporary)[0] != observation:
+            raise ValueError("invalid diagnostic readback")
+        temporary.replace(diagnostic)
+    except (OSError, ValueError, TypeError):
         observation["diagnostic_saved"] = False
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
 
 
 def _continue_workspace(page):
@@ -898,11 +938,15 @@ def _project_observer(base, observation, main_frame=None):
 
     def response_seen(response):
         nonlocal failed
-        if response.request is not latest or not _main_request(response.request, main_frame):
+        captured_request, captured_route, start_epoch = latest, route, observation["project_epoch"]
+        request = response.request
+        if request is not captured_request or not _main_request(request, main_frame):
+            return
+        url, status = response.url, response.status
+        if latest is not captured_request or route != captured_route or observation["project_epoch"] != start_epoch:
             return
         clear()
-        failed = (failed or route_id(response.url) != route or type(response.status) is not int
-                  or response.status != 200)
+        failed = (failed or route_id(url) != route or type(status) is not int or status != 200)
         if failed:
             observation["project_scope_epoch"] += 1
             return
@@ -1044,10 +1088,21 @@ class _ObservationBudget:
     def __init__(self, seconds, clock):
         if type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds <= 0:
             raise ValueError("invalid observation budget")
-        self.clock, self.end = clock, clock() + seconds
+        self.clock, self.last = clock, None
+        self.end = self.sample() + seconds
+        if not math.isfinite(self.end):
+            raise ValueError("invalid observation deadline")
+
+    def sample(self):
+        value = self.clock()
+        if (type(value) not in (int, float) or not math.isfinite(value)
+                or (self.last is not None and value < self.last)):
+            raise ValueError("invalid or backward observation clock")
+        self.last = value
+        return value
 
     def milliseconds(self):
-        remaining = self.end - self.clock()
+        remaining = self.end - self.sample()
         if remaining <= 0:
             raise TimeoutError("overall observation deadline exhausted")
         return max(1, int(remaining * 1000))

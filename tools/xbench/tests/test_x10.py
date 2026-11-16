@@ -29,7 +29,9 @@ DRAWING = "00000000-0000-4000-8000-000000000004"
 
 
 def canonical_project():
-    return dict({key: PROJECT for key in ("project_id", "route_project_id", "active_project_id", "project_binding")}, source="b" * 40, web_build="b" * 40)
+    return dict({key: PROJECT for key in ("project_id", "route_project_id", "active_project_id", "project_binding")}, source="b" * 40, web_build="b" * 40,
+                evidence_path="x10-evidence-" + "a" * 32 + "/x10-ui.json / x10-evidence-" + "a" * 32 + "/x10-ground.png",
+                screenshot_bytes=70, screenshot_sha256="a" * 64)
 
 
 def metadata_response(request, data, status=200, url=None):
@@ -1674,7 +1676,7 @@ class FixtureTests(unittest.TestCase):
     def test_rate_inputs_require_ascii_digits_before_browser(self):
         original = Path(next(row["path"] for row in self.ctx.manifest["fixtures"] if row["role"] == "rates")).read_bytes()
         for key in ("quantity", "unit_rate"):
-            for value in ("Ãƒâ„¢Ã‚Â¡", "ÃƒÂ¯Ã‚Â¼Ã¢â‚¬ËœÃƒÂ¯Ã‚Â¼Ã¢â‚¬â„¢", "1Ãƒâ„¢Ã‚Â¢", "Ãƒâ„¢Ã‚Â¡.2", "1.ÃƒÂ¯Ã‚Â¼Ã¢â‚¬â„¢"):
+            for value in ("ÃƒÆ’Ã¢â€žÂ¢Ãƒâ€šÃ‚Â¡", "ÃƒÆ’Ã‚Â¯Ãƒâ€šÃ‚Â¼ÃƒÂ¢Ã¢â€šÂ¬Ã‹Å“ÃƒÆ’Ã‚Â¯Ãƒâ€šÃ‚Â¼ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢", "1ÃƒÆ’Ã¢â€žÂ¢Ãƒâ€šÃ‚Â¢", "ÃƒÆ’Ã¢â€žÂ¢Ãƒâ€šÃ‚Â¡.2", "1.ÃƒÆ’Ã‚Â¯Ãƒâ€šÃ‚Â¼ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢"):
                 with self.subTest(key=key, value=value):
                     item = {"quantity": "1.25", "unit_rate": "2.00", key: value}
                     with self.assertRaises(ValueError):
@@ -2016,7 +2018,7 @@ class FixtureTests(unittest.TestCase):
                              b'[{"nested":"\\udc00"}]', b'"\\ud800x\\udc00"'):
                 self.replace_fixture(role, prefix + fragment + b'}')
                 self.assert_binding_refusal()
-            for fragment in (b'"\\ud83d\\ude00"', '"cafÃ© ç•Œ"'.encode(), b'{"\\ud83d\\ude00":"ok"}'):
+            for fragment in (b'"\\ud83d\\ude00"', '"cafÃƒÂ© Ã§â€¢Å’"'.encode(), b'{"\\ud83d\\ude00":"ok"}'):
                 self.replace_fixture(role, prefix + fragment + b'}')
                 self.assertEqual(x10.bindings(self.ctx)[3], Decimal("0.07"))
             self.replace_fixture(role, original)
@@ -2136,6 +2138,172 @@ class FixtureTests(unittest.TestCase):
             for _ in range(2):
                 listener.response(response)
                 self.assertIsNone(observation[key])
+
+    def test_project_metadata_accessors_cannot_resurrect_superseded_proof(self):
+        for field in ("request", "url", "status"):
+            for action in ("new-pending", "new-success", "failure"):
+                observation = {}
+                listener = x10._project_observer(self.ctx.base, observation)
+                old = SimpleNamespace(frame=MAIN_FRAME, method="GET", url=self.ctx.base + "/api/projects/" + PROJECT)
+                newer = SimpleNamespace(frame=MAIN_FRAME, method="GET", url=self.ctx.base + "/api/projects/" + OTHER)
+                listener(old)
+                body = MagicMock(return_value=json.dumps({"project": {"id": PROJECT}, "drawing_versions": []}).encode())
+                class Response:
+                    triggered = False
+                    def access(self, name, value):
+                        if name == field and not self.triggered:
+                            self.triggered = True
+                            if action == "failure":
+                                listener.failed(old)
+                            else:
+                                listener(newer)
+                                if action == "new-success":
+                                    listener.response(metadata_response(newer, {"project": {"id": OTHER},
+                                                                                "drawing_versions": []}))
+                        return value
+                    @property
+                    def request(self):
+                        return self.access("request", old)
+                    @property
+                    def url(self):
+                        return self.access("url", old.url)
+                    @property
+                    def status(self):
+                        return self.access("status", 200)
+                response = Response()
+                response.body = body
+                listener.response(response)
+                body.assert_not_called()
+                self.assertEqual(observation["project_binding"], OTHER if action == "new-success" else None)
+
+    def test_observation_clock_refuses_nonfinite_and_backward_samples(self):
+        config, bound, _, _ = x10.bindings(self.ctx)
+        for samples in ([float("nan")], [float("inf")], [-float("inf")], [True],
+                        [10, 9], [10, 10, float("nan")], [10, 11, 10.5]):
+            values = iter(samples)
+            last = [samples[-1]]
+            def clock():
+                last[0] = next(values, last[0])
+                return last[0]
+            observed = x10.observe(MagicMock(), self.ctx, config, bound, self.session_info, clock=clock)
+            self.assertEqual([r.verdict for r in x10.classify(observed)], ["UNREADABLE"] * 6)
+            self.assertEqual(observed["exception_type"], "ValueError")
+        samples = iter([10, 10, 10.25, 10.5])
+        budget = x10._ObservationBudget(1, lambda: next(samples))
+        self.assertEqual([budget.milliseconds() for _ in range(3)], [1000, 750, 500])
+
+    def test_diagnostics_atomically_preserve_previous_record_on_io_failure(self):
+        self.ctx.out_dir.mkdir()
+        target = self.ctx.out_dir / "x10-ui.json"
+        old = b'{"previous":"diagnostic"}\n'
+        real_open = Path.open
+        for fault in ("write", "flush", "replace", "none"):
+            target.write_bytes(old)
+            class Writer:
+                def __init__(self, stream):
+                    self.stream = stream
+                def __enter__(self):
+                    return self
+                def write(self, value):
+                    if fault == "write":
+                        self.stream.write(value[:3])
+                        raise OSError("synthetic write")
+                    self.stream.write(value)
+                def flush(self):
+                    if fault == "flush":
+                        raise OSError("synthetic flush")
+                    self.stream.flush()
+                def __exit__(self, *args):
+                    self.stream.close()
+            def opened(path, *args, **kwargs):
+                stream = real_open(path, *args, **kwargs)
+                return Writer(stream) if args and args[0] == "w" else stream
+            observation = {}
+            with patch.object(Path, "open", opened), \
+                    (patch.object(Path, "replace", side_effect=OSError("synthetic replace")) if fault == "replace" else nullcontext()):
+                x10._diagnostic(self.ctx, observation, "synthetic", ValueError("private"))
+            if fault == "none":
+                self.assertEqual(json.loads(target.read_text())["exception_type"], "ValueError")
+            else:
+                self.assertEqual(target.read_bytes(), old)
+                self.assertFalse(observation["diagnostic_saved"])
+            self.assertEqual(list(self.ctx.out_dir.glob(".x10-diagnostic-*")), [])
+
+    def test_cleanup_preserves_replacement_record_or_screenshot(self):
+        page = MagicMock()
+        page.get_by_role.return_value.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(tiny_png())
+        for replaced in ("record", "screenshot", "unchanged"):
+            observation = dict(**canonical_project(), fresh_project=True)
+            x10._save(page, self.ctx, observation)
+            directory = self.ctx.out_dir / observation["evidence_path"].split("/")[0]
+            if replaced == "record":
+                record = directory / "x10-ui.json"
+                value = json.loads(record.read_text())
+                value["replacement"] = True
+                record.write_text(json.dumps(value), encoding="utf-8")
+            elif replaced == "screenshot":
+                (directory / "x10-ground.png").write_bytes(tiny_png(raw=b"\x00\xff\x00\x00"))
+            before = {path.name: path.read_bytes() for path in directory.iterdir()}
+            x10._invalidate_evidence(self.ctx, observation)
+            self.assertFalse(observation["evidence_saved"])
+            if replaced == "unchanged":
+                self.assertFalse(directory.exists())
+            else:
+                self.assertEqual({path.name: path.read_bytes() for path in directory.iterdir()}, before)
+
+    def test_classification_requires_generation_pointer_and_screenshot_pin(self):
+        original = ClassificationTests().observation()
+        for refusal in (False, True):
+            baseline = dict(original)
+            if refusal:
+                baseline.update(import_rejection=x10.IMPORT_REFUSALS[0], imported_version_selected=False)
+            invalid = {"evidence_path": [None, "", "../escape", "x10-ui.json", original["evidence_path"] + "\n"],
+                       "screenshot_bytes": [None, 0, -1, True, 1.5, x10.MAX_SCREENSHOT_BYTES + 1],
+                       "screenshot_sha256": [None, "", "A" * 64, "a" * 63, "a" * 64 + "\n"]}
+            for key, values in invalid.items():
+                missing = dict(baseline)
+                missing.pop(key)
+                self.assertEqual([r.verdict for r in x10.classify(missing)], ["UNREADABLE"] * 6)
+                for value in values:
+                    self.assertEqual([r.verdict for r in x10.classify(dict(baseline, **{key: value}))], ["UNREADABLE"] * 6)
+            for size in (1, x10.MAX_SCREENSHOT_BYTES):
+                self.assertEqual(x10.classify(dict(baseline, screenshot_bytes=size))[0].verdict, "FAIL")
+
+    def test_evidence_json_readback_is_bounded_regular_and_strict(self):
+        path = Path(self.temp.name) / "record.json"
+        path.write_bytes(b'{"valid":true}')
+        self.assertEqual(x10._read_evidence_json(path)[0], {"valid": True})
+        path.write_bytes(b'{"duplicate":1,"duplicate":2}')
+        with self.assertRaises(ValueError):
+            x10._read_evidence_json(path)
+        for mode in (stat.S_IFLNK, stat.S_IFDIR):
+            with patch.object(Path, "lstat", return_value=SimpleNamespace(st_mode=mode)), \
+                    patch.object(x10.os, "open") as opened, self.assertRaises(ValueError):
+                x10._read_evidence_json(path)
+            opened.assert_not_called()
+        info = path.lstat()
+        stream, manager = MagicMock(), MagicMock()
+        manager.__enter__.return_value = stream
+        stream.read.return_value = b" " * (x10.MAX_JSON_BYTES + 1)
+        with patch.object(x10.os, "open", return_value=123), patch.object(x10.os, "close") as closed, \
+                patch.object(x10.os, "fdopen", return_value=manager), patch.object(x10.os, "fstat", return_value=info), \
+                self.assertRaises(ValueError):
+            x10._read_evidence_json(path)
+        stream.read.assert_called_once_with(x10.MAX_JSON_BYTES + 1)
+        closed.assert_called_once_with(123)
+        page = MagicMock()
+        page.get_by_role.return_value.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(tiny_png())
+        observation = dict(**canonical_project(), fresh_project=True)
+        x10._save(page, self.ctx, observation)
+        old = list(self.ctx.out_dir.iterdir())
+        writer = x10._write_evidence_json
+        def duplicate(path, value):
+            writer(path, value)
+            path.write_bytes(b'{"evidence_saved":true,"evidence_saved":true}')
+        with patch.object(x10, "_write_evidence_json", duplicate), self.assertRaises(ValueError):
+            x10._save(page, self.ctx, observation)
+        self.assertEqual(list(self.ctx.out_dir.iterdir()), old)
+        self.assertFalse(observation["evidence_saved"])
 
 
 if __name__ == "__main__":
