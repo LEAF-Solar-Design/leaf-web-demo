@@ -61,7 +61,8 @@ def unique_object(pairs):
 
 def read_history(path):
     # Reject named pipes/devices before open, then verify the opened descriptor.
-    if not stat.S_ISREG(path.lstat().st_mode):
+    path_metadata = path.lstat()
+    if not stat.S_ISREG(path_metadata.st_mode):
         raise ValueError('history must be a regular file')
     flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_NOFOLLOW', 0)
     descriptor = os.open(path, flags)
@@ -72,6 +73,12 @@ def read_history(path):
         def fingerprint(value):
             return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
         initial = fingerprint(metadata)
+        initial_path = fingerprint(path_metadata)
+        # Windows path and descriptor ctime views can differ while each stays
+        # stable. Compare ctime within its channel, with shared identity,
+        # size and modification time still required across both channels.
+        if initial[:4] != initial_path[:4]:
+            raise ValueError('history changed during read')
         chunks, size = [], 0
         while True:
             chunk = os.read(descriptor, min(65536, MAX_HISTORY_BYTES + 1 - size))
@@ -83,7 +90,7 @@ def read_history(path):
                 raise ValueError('history exceeds byte budget')
         current = path.lstat()
         if (size != metadata.st_size or not stat.S_ISREG(current.st_mode)
-                or fingerprint(os.fstat(descriptor)) != initial or fingerprint(current) != initial):
+                or fingerprint(os.fstat(descriptor)) != initial or fingerprint(current) != initial_path):
             raise ValueError('history changed during read')
     finally:
         os.close(descriptor)
