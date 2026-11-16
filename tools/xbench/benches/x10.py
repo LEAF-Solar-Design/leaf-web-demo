@@ -114,7 +114,7 @@ def rate_total(rates):
         pair = []
         for key in ("quantity", "unit_rate"):
             value = item.get(key)
-            if not isinstance(value, str) or not re.fullmatch(r"\d{1,30}(?:\.\d{1,30})?", value):
+            if not isinstance(value, str) or not re.fullmatch(r"[0-9]{1,30}(?:\.[0-9]{1,30})?", value):
                 raise ValueError("rates require nonnegative decimal strings")
             pair.append(Decimal(value))
         values.append(pair)
@@ -222,6 +222,40 @@ def _file_fingerprint(info):
     if not stat.S_ISREG(info.st_mode):
         raise ValueError("fixture is not a regular file")
     return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+
+
+def _verify_primary_receipt(ctx, config, bound):
+    identity = config["fixtures"]["drawing"]
+    rows = [row for row in ctx.manifest["fixtures"] if row.get("id") == identity]
+    proofs = [row for row in ctx.fixtures if row.get("id") == identity]
+    if len(rows) != 1 or len(proofs) != 1:
+        raise ValueError("missing primary drawing receipt")
+    row, proof = rows[0], proofs[0]
+    path = bound["drawing"]
+    if (row.get("role") != "drawing" or Path(row["path"]) != path or proof.get("ok") is not True
+            or any(row.get(key) != proof.get(key) for key in ("path", "bytes", "sha256"))
+            or type(row.get("bytes")) is not int or row["bytes"] < 0):
+        raise ValueError("invalid primary drawing receipt")
+    initial = _file_fingerprint(path.lstat())
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+                         | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+    digest, size = hashlib.sha256(), 0
+    with os.fdopen(descriptor, "rb") as source:
+        if _file_fingerprint(os.fstat(source.fileno())) != initial:
+            raise ValueError("primary drawing changed before upload")
+        while True:
+            block = source.read(min(1024 * 1024, row["bytes"] - size + 1))
+            if not block:
+                break
+            size += len(block)
+            if size > row["bytes"]:
+                raise ValueError("primary drawing grew before upload")
+            digest.update(block)
+        if _file_fingerprint(os.fstat(source.fileno())) != initial:
+            raise ValueError("primary drawing changed during upload check")
+    if (size != row["bytes"] or digest.hexdigest() != row["sha256"]
+            or _file_fingerprint(path.lstat()) != initial):
+        raise ValueError("primary drawing receipt changed before upload")
 
 
 def classify(observation, expected=None):
@@ -358,6 +392,7 @@ def _valid_png(path):
     compressed = bytearray()
     rows = []
     palette = False
+    palette_entries = 0
     image_ended = False
     while offset + 12 <= len(data):
         length = struct.unpack(">I", data[offset:offset + 4])[0]
@@ -387,8 +422,8 @@ def _valid_png(path):
                 columns = max(0, (width - x + dx - 1) // dx)
                 count = max(0, (height - y + dy - 1) // dy)
                 if columns and count:
-                    rows.append((1 + (columns * channels * depth + 7) // 8, count))
-            expected = sum(length * count for length, count in rows)
+                    rows.append((1 + (columns * channels * depth + 7) // 8, count, columns))
+            expected = sum(length * count for length, count, _ in rows)
             if expected > 64 * 1024 * 1024:
                 raise ValueError("screenshot decoded size exceeds limit")
         elif kind == b"IHDR":
@@ -400,6 +435,7 @@ def _valid_png(path):
             if color == 3 and length // 3 > 2 ** depth:
                 break
             palette = True
+            palette_entries = length // 3
         elif kind == b"IDAT":
             if image_ended or (color == 3 and not palette):
                 break
@@ -418,10 +454,38 @@ def _valid_png(path):
                         or decoder.unused_data or decoder.unconsumed_tail):
                     raise ValueError("invalid screenshot decoded size or stream")
                 position = 0
-                for stride, count in rows:
+                for stride, count, columns in rows:
+                    previous = bytearray(stride - 1) if color == 3 else None
                     for _ in range(count):
-                        if decoded[position] > 4:
+                        filtering = decoded[position]
+                        if filtering > 4:
                             raise ValueError("invalid screenshot row filter")
+                        if color == 3:
+                            current = bytearray(decoded[position + 1:position + stride])
+                            for index in range(len(current)):
+                                left = current[index - 1] if index else 0
+                                above = previous[index]
+                                upper_left = previous[index - 1] if index else 0
+                                if filtering == 1:
+                                    prediction = left
+                                elif filtering == 2:
+                                    prediction = above
+                                elif filtering == 3:
+                                    prediction = (left + above) // 2
+                                elif filtering == 4:
+                                    estimate = left + above - upper_left
+                                    distances = [abs(estimate - value) for value in (left, above, upper_left)]
+                                    prediction = (left, above, upper_left)[distances.index(min(distances))]
+                                else:
+                                    prediction = 0
+                                current[index] = (current[index] + prediction) & 255
+                            mask = (1 << depth) - 1
+                            for column in range(columns):
+                                bit = column * depth
+                                pixel = (current[bit // 8] >> (8 - depth - bit % 8)) & mask
+                                if pixel >= palette_entries:
+                                    raise ValueError("screenshot pixel references absent palette entry")
+                            previous = current
                         position += stride
                 return data
             break
@@ -525,6 +589,17 @@ def _prepare_workspace(page):
 def _import_primary(page, ctx, config, bound, observation):
     observation["imported_version_selected"] = False
     observation.pop("import_rejection", None)
+    _current_project(page, observation)
+    scope_epoch = observation.get("project_scope_epoch")
+    if type(scope_epoch) is not int:
+        raise ValueError("missing project continuity epoch")
+
+    def project_unchanged():
+        current = _current_project(page, observation)
+        if observation.get("project_scope_epoch") != scope_epoch:
+            raise ValueError("project switched during primary import")
+        return current
+
     project = page.get_by_role("button", name="Project", exact=True)
     if project.get_attribute("aria-expanded") != "true":
         project.click(timeout=15_000)
@@ -539,8 +614,11 @@ def _import_primary(page, ctx, config, bound, observation):
         r"^(?:Choose the drawing again to retry the upload\.|Retry to attach this drawing to the project\.)$"))
     if status.is_visible() or failure.is_visible():
         raise ValueError("stale attachment terminal before upload")
+    _verify_primary_receipt(ctx, config, bound)
+    project_unchanged()
     upload.set_input_files(str(bound["drawing"]), timeout=15_000)
     status.or_(failure).first.wait_for(state="visible", timeout=180_000)
+    project_unchanged()
     if failure.is_visible():
         hint = failure.inner_text(timeout=15_000)
         if hint not in ("Choose the drawing again to retry the upload.",
@@ -548,10 +626,10 @@ def _import_primary(page, ctx, config, bound, observation):
             raise ValueError("unrecognized rendered import refusal")
         observation["import_rejection"] = hint
         observation["attachment_status"] = "Primary drawing attachment rejected; retry required."
-        epoch = _current_project(page, observation)
+        epoch = project_unchanged()
 
         def validate():
-            if (_current_project(page, observation) != epoch or not failure.is_visible()
+            if (project_unchanged() != epoch or not failure.is_visible()
                     or failure.inner_text(timeout=15_000) != hint):
                 raise ValueError("project or refusal changed during capture")
 
@@ -583,7 +661,7 @@ def _import_primary(page, ctx, config, bound, observation):
     if not isinstance(element, str) or not element.startswith("version:"):
         raise ValueError("missing preview version identity")
     identity = _uuid(element[len("version:"):])
-    _current_project(page, observation)
+    project_unchanged()
     rows = observation.get("project_versions", [])
     matches = [row for row in rows if row["version_id"] == identity and row["seq"] == sequence]
     if len(matches) != 1:
@@ -597,6 +675,7 @@ def _import_primary(page, ctx, config, bound, observation):
     viewer.wait_for(state="visible", timeout=30_000)
     if viewer.inner_text(timeout=15_000) != identity:
         raise ValueError("selected viewer version mismatch")
+    project_unchanged()
     observation["version_selection_status"] = safe_text(marker.inner_text())
     observation["imported_version_id"] = identity
     observation["imported_drawing_id"] = drawing
@@ -703,8 +782,9 @@ def _catalog_observer(base, observation):
 
 def _project_observer(base, observation):
     origin = urlsplit(base)
-    observation.update(project_epoch=0, project_binding=None, project_versions=[])
+    observation.update(project_epoch=0, project_scope_epoch=0, project_binding=None, project_versions=[])
     latest, route, failed = None, None, False
+    scope_route = None
 
     def route_id(value):
         url = urlsplit(value)
@@ -724,10 +804,13 @@ def _project_observer(base, observation):
         observation.update(project_binding=None, project_versions=[])
 
     def request_seen(request):
-        nonlocal latest, route, failed
+        nonlocal latest, route, failed, scope_route
         identity = route_id(request.url)
         if identity is None:
             return
+        if identity != scope_route or request.method != "GET":
+            observation["project_scope_epoch"] += 1
+        scope_route = identity
         latest, route, failed = request, identity, request.method != "GET"
         clear()
 
@@ -739,8 +822,17 @@ def _project_observer(base, observation):
         failed = (failed or route_id(response.url) != route or type(response.status) is not int
                   or response.status != 200)
         if failed:
+            observation["project_scope_epoch"] += 1
             return
+        captured_request, captured_route, epoch = latest, route, observation["project_epoch"]
+
+        def current():
+            return (latest is captured_request and route == captured_route
+                    and observation["project_epoch"] == epoch and not failed)
+
         data = response.body()
+        if not current():
+            return
         try:
             if not isinstance(data, bytes):
                 raise ValueError("invalid project metadata bytes")
@@ -766,14 +858,18 @@ def _project_observer(base, observation):
                 sequences.add((drawing_id, seq))
                 rows.append(dict(project_id=route, version_id=version_id, drawing_id=drawing_id, seq=seq))
         except (ValueError, TypeError, KeyError, AttributeError, InvalidOperation):
-            failed = True
+            if current():
+                failed = True
+                observation["project_scope_epoch"] += 1
             return
-        observation.update(project_binding=identity, project_versions=rows)
+        if current():
+            observation.update(project_binding=identity, project_versions=rows)
 
     def request_failed(request):
         nonlocal failed
         if request is latest and route_id(request.url) == route:
             failed = True
+            observation["project_scope_epoch"] += 1
             clear()
 
     request_seen.response = response_seen
@@ -797,9 +893,15 @@ def _current_identity(page, observation):
     project = _uuid(observation.get("project_id"))
     version = _uuid(observation.get("imported_version_id"))
     drawing = _uuid(observation.get("imported_drawing_id"))
+    sequence = observation.get("selected_sequence")
     if (not isinstance(binding, dict) or binding.get("project_id") != project
             or binding.get("input_version_id") != version or binding.get("drawing_id") != drawing):
         raise ValueError("current catalog identity differs from imported project/version")
+    rows = observation.get("project_versions", [])
+    if (type(sequence) is not int or len([row for row in rows if row.get("project_id") == project
+            and row.get("version_id") == version and row.get("drawing_id") == drawing
+            and row.get("seq") == sequence]) != 1):
+        raise ValueError("imported drawing/version/sequence is absent from current project metadata")
     viewer = page.locator(".viewer-title code")
     if not viewer.is_visible() or viewer.inner_text(timeout=15_000) != version:
         raise ValueError("current viewer version differs from imported version")

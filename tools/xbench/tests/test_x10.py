@@ -198,7 +198,7 @@ class FixtureTests(unittest.TestCase):
 
     def identity(self, page):
         observation = self.project_identity()
-        observation.update(imported_version_id=VERSION, imported_drawing_id=DRAWING)
+        observation.update(imported_version_id=VERSION, imported_drawing_id=DRAWING, selected_sequence=1)
         listener = x10._catalog_observer(self.ctx.base, observation)
         page.on("request", listener)
         self.complete_catalog(listener)
@@ -451,7 +451,8 @@ class FixtureTests(unittest.TestCase):
 
         def attach(page, ctx, config, bound, observation):
             events.append("select imported version")
-            observation.update(imported_version_selected=True, imported_version_id=VERSION, imported_drawing_id=DRAWING)
+            observation.update(imported_version_selected=True, imported_version_id=VERSION,
+                               imported_drawing_id=DRAWING, selected_sequence=1)
             self.emit_project(page)
             self.emit_catalog(page)
 
@@ -533,7 +534,8 @@ class FixtureTests(unittest.TestCase):
         for sentence in sentences:
             with self.subTest(sentence=sentence):
                 page, preview, _, _, _ = self.import_page(sentence)
-                observation = dict(fresh_project=True, evidence_saved=True)
+                observation = self.project_identity()
+                observation["evidence_saved"] = True
                 with self.assertRaises(ValueError):
                     x10._import_primary(page, self.ctx, config, bound, observation)
                 preview.click.assert_not_called()
@@ -700,7 +702,7 @@ class FixtureTests(unittest.TestCase):
             attachment.is_visible.side_effect = None
             attachment.is_visible.return_value = terminal == "success"
             page.locator.return_value.get_by_text.return_value.is_visible.return_value = terminal == "refusal"
-            observation = dict(fresh_project=True)
+            observation = self.project_identity()
             with self.assertRaises(ValueError):
                 x10._import_primary(page, self.ctx, config, bound, observation)
             upload.set_input_files.assert_not_called()
@@ -787,7 +789,7 @@ class FixtureTests(unittest.TestCase):
             preview.click.assert_not_called()
         page, preview, attachment, _, _ = self.import_page("Uploading synthetic.dwg")
         attachment.or_.return_value.first.wait_for.side_effect = TimeoutError
-        observation = dict(fresh_project=True)
+        observation = self.project_identity()
         with self.assertRaises(TimeoutError):
             x10._import_primary(page, self.ctx, config, bound, observation)
         self.assertNotIn("import_rejection", observation)
@@ -811,7 +813,8 @@ class FixtureTests(unittest.TestCase):
         config, bound, _, _ = x10.bindings(self.ctx)
         def create_identity(page, ctx, config, observation):
             create(page, ctx, config, observation)
-            observation.update(project_id=PROJECT, imported_version_id=VERSION, imported_drawing_id=DRAWING)
+            observation.update(project_id=PROJECT, imported_version_id=VERSION,
+                               imported_drawing_id=DRAWING, selected_sequence=1)
             self.emit_project(page)
             self.emit_catalog(page)
 
@@ -1590,6 +1593,144 @@ class FixtureTests(unittest.TestCase):
                 x10._valid_png(path)
             source.read.assert_not_called()
         self.assertEqual(x10._valid_png(path), tiny_png())
+
+    def test_primary_import_pins_project_scope_through_upload_and_preview(self):
+        for phase in ("upload", "preview"):
+            for mode in ("refresh", "switch", "switch-back"):
+                with self.subTest(phase=phase, mode=mode):
+                    page, surface, _ = self.integration_page(False)
+                    upload = page.get_by_label.return_value
+                    preview = page.get_by_role("button", name="Preview v1 in the drawing", exact=True)
+                    original = upload.set_input_files.side_effect if phase == "upload" else preview.click.side_effect
+                    def transition(*args, **kwargs):
+                        original(*args, **kwargs)
+                        if mode == "refresh":
+                            self.emit_project(page)
+                        else:
+                            self.emit_project(page, OTHER)
+                            if mode == "switch-back":
+                                self.emit_project(page)
+                    if phase == "upload":
+                        upload.set_input_files.side_effect = transition
+                    else:
+                        preview.click.side_effect = transition
+                    rows = self.run_page(page)
+                    self.assertEqual(rows[0].verdict, "FAIL" if mode == "refresh" else "UNREADABLE")
+                    if mode != "refresh":
+                        self.assertFalse(rows[0].observed["imported_version_selected"])
+                        surface.screenshot.assert_not_called()
+
+    def test_current_identity_requires_latest_imported_tuple(self):
+        page = MagicMock()
+        observation, catalog = self.identity(page)
+        for rows in ([], [dict(observation["project_versions"][0], drawing_id=OTHER)],
+                     [dict(observation["project_versions"][0], seq=2)]):
+            changed = dict(observation, project_versions=rows)
+            with self.assertRaises(ValueError):
+                x10._current_identity(page, changed)
+        x10._current_identity(page, observation)
+
+    def test_project_body_reentrancy_cannot_resurrect_superseded_metadata(self):
+        for mode in ("pending", "success", "failed", "unchanged"):
+            observation = dict(fresh_project=True, evidence_saved=True,
+                               imported_version_selected=False, import_rejection=x10.IMPORT_REFUSALS[0],
+                               **canonical_project())
+            listener = x10._project_observer(self.ctx.base, observation)
+            request = SimpleNamespace(method="GET", url=self.ctx.base + "/api/projects/" + PROJECT)
+            newer = SimpleNamespace(method="GET", url=self.ctx.base + "/api/projects/" + OTHER)
+            data = json.dumps({"project": {"id": PROJECT}, "drawing_versions": []}).encode()
+            def body():
+                if mode in ("pending", "success"):
+                    listener(newer)
+                    if mode == "success":
+                        listener.response(metadata_response(newer, {"project": {"id": OTHER},
+                                                                     "drawing_versions": []}))
+                elif mode == "failed":
+                    listener.failed(request)
+                return data
+            listener(request)
+            listener.response(SimpleNamespace(request=request, url=request.url, status=200, body=body))
+            expected = PROJECT if mode == "unchanged" else OTHER if mode == "success" else None
+            self.assertEqual(observation["project_binding"], expected)
+            self.assertEqual(aggregate(x10.classify(observation)), "FAIL" if mode == "unchanged" else "UNREADABLE")
+
+    def test_rate_inputs_require_ascii_digits_before_browser(self):
+        original = Path(next(row["path"] for row in self.ctx.manifest["fixtures"] if row["role"] == "rates")).read_bytes()
+        for key in ("quantity", "unit_rate"):
+            for value in ("١", "１２", "1٢", "١.2", "1.２"):
+                with self.subTest(key=key, value=value):
+                    item = {"quantity": "1.25", "unit_rate": "2.00", key: value}
+                    with self.assertRaises(ValueError):
+                        x10.rate_total({"items": [item]})
+                    self.replace_fixture("rates", json.dumps({"items": [item]}).encode())
+                    self.assert_binding_refusal()
+        self.replace_fixture("rates", original)
+        self.assertEqual(x10.rate_total({"items": [{"quantity": "1.25", "unit_rate": "2.00"}]}), Decimal("2.50"))
+
+    def test_indexed_png_filters_and_adam7_require_existing_palette_entries(self):
+        palette = b"\x00\x00\x00\xff\xff\xff"
+        cases = [
+            ({"width": 2, "depth": 8, "raw": b"\x00\x00\x01"}, b"\x00\x00\x02"),
+            ({"width": 2, "depth": 8, "raw": b"\x01\x01\x00"}, b"\x01\x01\x01"),
+            ({"height": 2, "depth": 8, "raw": b"\x00\x01\x02\x00"}, b"\x00\x01\x02\x01"),
+            ({"width": 2, "height": 2, "depth": 8, "raw": b"\x00\x01\x01\x03\x01\x00"},
+             b"\x00\x01\x01\x03\x01\x01"),
+            ({"width": 2, "height": 2, "depth": 8, "raw": b"\x00\x01\x01\x04\x00\x00"},
+             b"\x00\x01\x01\x04\x01\x00"),
+            ({"depth": 2, "raw": b"\x00\x40"}, b"\x00\x80"),
+            ({"depth": 4, "raw": b"\x00\x10"}, b"\x00\x20"),
+        ]
+        page = MagicMock()
+        surface = page.get_by_role.return_value
+        for options, invalid in cases:
+            for valid in (True, False):
+                with self.subTest(options=options, valid=valid):
+                    data = tiny_png(color=3, palette=palette, **dict(options, raw=options["raw"] if valid else invalid))
+                    surface.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(data)
+                    observation = dict(**canonical_project(), fresh_project=True, imported_version_selected=True,
+                                       ground_option="Ground Physical unavailable")
+                    if valid:
+                        x10._save(page, self.ctx, observation)
+                    else:
+                        with self.assertRaises(ValueError):
+                            x10._save(page, self.ctx, observation)
+                        self.assertFalse(observation["evidence_saved"])
+                        self.assertEqual(aggregate(x10.classify(observation)), "UNREADABLE")
+        path = Path(self.temp.name) / "indexed.png"
+        # Only the first pixel counts; nonzero packed padding is legal.
+        path.write_bytes(tiny_png(color=3, depth=1, palette=palette[:3], raw=b"\x00\x7f"))
+        x10._valid_png(path)
+        for raw in (b"\x00\x80", b"\x01\x00" * 14 + b"\x01\x80"):
+            options = {} if len(raw) == 2 else {"width": 8, "height": 8, "interlace": 1}
+            path.write_bytes(tiny_png(color=3, depth=1, palette=palette[:3], raw=raw, **options))
+            with self.assertRaises(ValueError):
+                x10._valid_png(path)
+        path.write_bytes(tiny_png(color=3, depth=1, palette=palette[:3], width=8, height=8,
+                                 interlace=1, raw=b"\x01\x00" * 15))
+        x10._valid_png(path)
+
+    def test_primary_receipt_is_rechecked_after_bind_before_upload(self):
+        for mode in ("mutation", "replacement", "valid"):
+            with self.subTest(mode=mode):
+                page, surface, _ = self.integration_page(False)
+                original_prepare = x10._prepare_workspace
+                path = Path(next(row["path"] for row in self.ctx.manifest["fixtures"] if row["role"] == "drawing"))
+                original = path.read_bytes()
+                def prepare(page):
+                    original_prepare(page)
+                    if mode == "mutation":
+                        path.write_bytes(original + b" ")
+                    elif mode == "replacement":
+                        replacement = path.with_suffix(".changed")
+                        replacement.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+                        replacement.replace(path)
+                with patch.object(x10, "_prepare_workspace", prepare):
+                    rows = self.run_page(page)
+                self.assertEqual(rows[0].verdict, "FAIL" if mode == "valid" else "UNREADABLE")
+                if mode != "valid":
+                    page.get_by_label.return_value.set_input_files.assert_not_called()
+                    surface.screenshot.assert_not_called()
+                path.write_bytes(original)
 
 
 if __name__ == "__main__":
