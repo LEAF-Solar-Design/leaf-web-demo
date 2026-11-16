@@ -14,6 +14,7 @@ from benches.x05_reconcile import (METRICS, TABLE_COLUMNS, check_discrepancies,
     MAX_STRING_EXAMPLES, compare_bound_snapshots, compare_saved_string_totals,
     MAX_RECOMMENDATION_EXAMPLES, compare_oracle_string_totals,
     aggregate_fixtures, decode_evidence_json, reconcile_json,
+    aggregate_fixtures_json, MAX_JSON_CHARS, MAX_JSON_DEPTH, serialize_result,
     compare_csv_view, compare_recommendations, compare_snapshots, compare_strings, compare_table)
 
 
@@ -784,3 +785,112 @@ def test_csv_newline_round_trips_and_quoted_embedded_newlines(newline):
         assert csv.field_size_limit() == 1
     finally:
         csv.field_size_limit(original)
+
+
+def test_strict_aggregate_json_composes_three_fixtures_and_precedence():
+    expected, fixtures = fixture_records()
+    envelope = dict(expected_ids=expected, fixtures=fixtures)
+    assert aggregate_fixtures_json(json.dumps(envelope))["verdict"] == "PASS"
+    fixtures[0]["evidence"]["recommendations"][0]["group_count"] = 1
+    assert aggregate_fixtures_json(json.dumps(envelope))["verdict"] == "FAIL"
+    del fixtures[1]["evidence"]["reopened"]
+    assert aggregate_fixtures_json(json.dumps(envelope))["verdict"] == "UNREADABLE"
+    assert aggregate_fixtures_json('{"expected_ids":[],"expected_ids":[],"fixtures":[]}')["reason"] == "json_duplicate_key"
+    assert aggregate_fixtures_json('{}')["reason"] == "aggregate_envelope_unreadable"
+
+
+def test_exact_json_length_and_nesting_boundaries_before_reconciliation(monkeypatch):
+    from benches import x05_reconcile as module
+
+    base = json.dumps({"pad": ""}, separators=(",", ":"))
+    supported = base.replace('""', '"' + "x" * (MAX_JSON_CHARS - len(base)) + '"')
+    assert len(supported) == MAX_JSON_CHARS
+    assert decode_evidence_json(supported)["verdict"] == "PASS"
+    nested = '{"pad":' + "[" * (MAX_JSON_DEPTH - 1) + "0" + "]" * (MAX_JSON_DEPTH - 1) + "}"
+    assert decode_evidence_json(nested)["verdict"] == "PASS"
+
+    def forbidden(evidence):
+        pytest.fail("Unsupported JSON must not reach reconciliation")
+
+    monkeypatch.setattr(module, "reconcile_offline", forbidden)
+    assert reconcile_json(supported + " ")["reason"] == "json_input_too_large"
+    assert reconcile_json('{"pad":' + "[" * MAX_JSON_DEPTH + "0" + "]" * MAX_JSON_DEPTH + "}")["reason"] == "json_nesting_too_deep"
+    # Brackets and escaped quotes inside a string do not consume nesting.
+    assert decode_evidence_json(json.dumps({"pad": '[\\\"{}]' * 100}))["verdict"] == "PASS"
+
+
+def test_lossless_result_serializer_round_trips_exact_decimal_and_large_counts():
+    from decimal import Decimal
+
+    evidence = dict(tiny=Decimal("1E-78"), integral=Decimal("12345"),
+                    negative_zero=Decimal("-0"), count=10**70, nested=[Decimal("9.600")])
+    decoded = decode_evidence_json(serialize_result(evidence))["evidence"]
+    assert decoded == evidence
+    for key in ("tiny", "integral", "negative_zero"):
+        assert decoded[key].as_tuple() == evidence[key].as_tuple()
+    assert decoded["nested"][0].as_tuple() == evidence["nested"][0].as_tuple()
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_result_serializer_rejects_nonfinite_output(value):
+    from decimal import Decimal
+
+    with pytest.raises(ValueError):
+        serialize_result({"value": value})
+    with pytest.raises(ValueError):
+        serialize_result({"value": Decimal(str(value))})
+
+
+@pytest.mark.parametrize("case,exit_code", [("PASS", 0), ("FAIL", 1), ("UNREADABLE", 4), ("malformed", 4)])
+def test_offline_stdin_cli_emits_one_sanitized_result(tmp_path, case, exit_code):
+    from pathlib import Path
+    import subprocess
+    import sys
+    from benches import x05_reconcile as module
+
+    evidence = complete_evidence()
+    if case == "FAIL":
+        evidence["recommendations"][0]["group_count"] = 1
+    elif case == "UNREADABLE":
+        del evidence["reopened"]
+    text = '{"synthetic_private_canary":' if case == "malformed" else json.dumps(evidence)
+    result = subprocess.run([sys.executable, "-P", str(Path(module.__file__).resolve())],
+        input=text, text=True, encoding="utf-8", capture_output=True, cwd=tmp_path, timeout=20)
+    assert result.returncode == exit_code
+    assert len(result.stdout.splitlines()) == 1 and result.stderr == ""
+    assert json.loads(result.stdout)["verdict"] == ("UNREADABLE" if case == "malformed" else case)
+    assert "synthetic_private_canary" not in result.stdout
+
+
+def test_offline_aggregate_cli_accepts_one_explicit_envelope(tmp_path):
+    from pathlib import Path
+    import subprocess
+    import sys
+    from benches import x05_reconcile as module
+
+    expected, fixtures = fixture_records()
+    result = subprocess.run([sys.executable, "-P", str(Path(module.__file__).resolve()), "--aggregate"],
+        input=json.dumps(dict(expected_ids=expected, fixtures=fixtures)), text=True, encoding="utf-8",
+        capture_output=True, cwd=tmp_path, timeout=20)
+    assert result.returncode == 0 and result.stderr == ""
+    assert json.loads(result.stdout)["verdict"] == "PASS" and len(result.stdout.splitlines()) == 1
+
+
+def test_canonical_snapshot_literal_compatibility_vectors():
+    # Independent reference bytes, not generated by the production serializer.
+    strings_bytes = rb'[["\u00c5/\u7532",5],["\u03b2",7]]'
+    table_bytes = b'[["panels","24","24","0","PASS"],["optimizers","12","12","0","PASS"],["inverters","1","1","0","PASS"],["strings","2","2","0","PASS"],["kw_dc","9.6","9.6","0","PASS"]]'
+    strings_digest = "711f41979914629b8d9d0a4b9996cd97fb805d667533298f98f5c89c0368e70d"
+    table_digest = "5694f6c3f6fb0736fdb05ddae835185570106f7fe0c57543a4312af71aa27dec"
+    empty_digest = "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    assert sha256(strings_bytes).hexdigest() == strings_digest
+    assert sha256(table_bytes).hexdigest() == table_digest
+    assert sha256(b"[]").hexdigest() == empty_digest
+    _, rows = table_fixture()
+    result = canonical_snapshot([dict(string_id="\u00c5/\u7532", optimizers=5),
+                                 dict(string_id="\u03b2", optimizers=7)], rows)
+    assert result["strings_sha256"] == strings_digest and result["table_sha256"] == table_digest
+    for strings in ([], [dict(string_id="", optimizers=5)]):
+        invalid = canonical_snapshot(strings, rows)
+        assert invalid == {"verdict": "UNREADABLE", "reason": "snapshot_rows_unreadable"}
+        assert empty_digest not in invalid.values()  # Absence never acquires a valid snapshot hash.

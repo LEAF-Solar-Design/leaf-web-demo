@@ -231,3 +231,85 @@ visible. Its composed offline PASS is not zero-delta proof or product acceptance
 The late record fails policy and composition. This example approves no real
 fixture discrepancy; none is pre-approved in the live X05 manifest. Stop on an
 unexpected output. The replay creates no files, network calls or retained state.
+
+The strict JSON envelope entry point is `aggregate_fixtures_json(text)` with
+exact keys `expected_ids` and `fixtures`. Input is bounded to262144 characters
+and32 container levels; quoted brackets do not count as containers.
+`serialize_result` emits finite Decimal values as exact JSON numbers, including
+integral Decimal exponent markers, without float conversion. It is a result
+transport contract, separate from canonical snapshot serialization.
+
+Offline CLI, from the repository root:
+
+```powershell
+# Pipe one complete synthetic evidence object to the single-fixture command:
+python -P tools/xbench/benches/x05_reconcile.py
+# Or pipe one explicit three-fixture envelope:
+python -P tools/xbench/benches/x05_reconcile.py --aggregate
+```
+
+The CLI reads stdin, emits one JSON line and exits0 for offline PASS,1 for FAIL
+or4 for UNREADABLE. Close stdin after the object. Malformed input emits fixed
+reason codes, never the input or a traceback. No live connection is made.
+
+Canonical snapshot compatibility contract:
+
+- Hash UTF-8 bytes of compact JSON arrays with ASCII escapes and no spaces.
+- String rows are `[exact_id, integer_optimizer_count]`, sorted by exact ID.
+  IDs have no Unicode normalization or case folding.
+- Table rows follow `panels`, `optimizers`, `inverters`, `strings`, `kw_dc`.
+  Each row is `[metric, studio_text, oracle_text, delta_text, verdict]`.
+  Numeric text uses normalized plain Decimal spelling; every signed zero is `0`.
+- Literal reference digests are pinned in `test_canonical_snapshot_literal_compatibility_vectors`.
+  Unicode rows use `711f41979914629b8d9d0a4b9996cd97fb805d667533298f98f5c89c0368e70d`;
+  the synthetic five-row table uses `5694f6c3f6fb0736fdb05ddae835185570106f7fe0c57543a4312af71aa27dec`.
+  Empty collections and empty IDs are UNREADABLE and acquire no valid hash.
+  The reference hash of `[]` is pinned only to prevent absence being mistaken
+  for accepted snapshot evidence. Format changes require explicit vector review.
+
+This independent three-fixture replay prints `PASS`, `FAIL`, `UNREADABLE`, then
+`UNREADABLE foreign_fixture_id`:
+
+```powershell
+@'
+from copy import deepcopy
+import csv
+import io
+import sys
+sys.path.insert(0, "tools/xbench")
+from benches.x05_reconcile import TABLE_COLUMNS, aggregate_fixtures_json, canonical_snapshot, serialize_result
+def fixture(identifier):
+    strings = [{"string_id": "A", "optimizers": 5}, {"string_id": "B", "optimizers": 7}]
+    values = dict(panels=24, optimizers=12, inverters=1, strings=2, kw_dc="9.6")
+    rows = [dict(metric=k, studio=v, oracle=v, delta=0, verdict="PASS") for k, v in values.items()]
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=TABLE_COLUMNS)
+    writer.writeheader()
+    writer.writerows(rows)
+    hashes = canonical_snapshot(strings, rows)
+    snapshot_rows = dict(strings=deepcopy(strings), table_rows=deepcopy(rows))
+    evidence = dict(oracle_strings=deepcopy(strings), saved_strings=deepcopy(strings),
+        saved_values=dict(values), oracle_values=dict(values), view_rows=rows, csv_text=buffer.getvalue(),
+        report_grid_count=2, recommendations=[], no_recommendations_shown=True,
+        fixture_id=identifier, discrepancy_records=[], run_started_at="2026-11-15T13:00:00Z",
+        before=dict(hashes), reopened=dict(hashes), before_rows=deepcopy(snapshot_rows),
+        reopened_rows=deepcopy(snapshot_rows))
+    return dict(fixture_id=identifier, evidence=evidence)
+expected = ["case-a", "case-b", "case-c"]
+records = [fixture(identifier) for identifier in expected]
+envelope = dict(expected_ids=expected, fixtures=records)
+print(aggregate_fixtures_json(serialize_result(envelope))["verdict"])
+records[0]["evidence"]["recommendations"] = [{"group_count": 1}]
+records[0]["evidence"]["no_recommendations_shown"] = False
+print(aggregate_fixtures_json(serialize_result(envelope))["verdict"])
+del records[1]["evidence"]["reopened"]
+print(aggregate_fixtures_json(serialize_result(envelope))["verdict"])
+records[2]["fixture_id"] = "foreign"
+result = aggregate_fixtures_json(serialize_result(envelope))
+print(result["verdict"], result["reason"])
+'@ | python -P
+```
+
+The failed grouping remains visible inside the missing-stage aggregate. The
+foreign-ID case rejects coverage before aggregation. Stop on an unexpected
+output. All objects are synthetic and this replay creates no persistent state.

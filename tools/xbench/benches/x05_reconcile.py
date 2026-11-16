@@ -23,6 +23,8 @@ MAX_CSV_CHARS = 16384
 MAX_CSV_CELL = 256
 MAX_STRING_EXAMPLES = 20
 MAX_RECOMMENDATION_EXAMPLES = 20
+MAX_JSON_CHARS = 262144
+MAX_JSON_DEPTH = 32
 _CSV_LOCK = RLock()
 
 
@@ -70,6 +72,25 @@ def decode_evidence_json(text):
     """Strict JSON preflight; success is decoding proof only, never live grading."""
     if type(text) is not str:
         return _out("UNREADABLE", "json_input_unreadable")
+    if len(text) > MAX_JSON_CHARS:
+        return _out("UNREADABLE", "json_input_too_large")
+    depth, quoted, escaped = 0, False, False
+    for char in text:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+        elif char in "{[":
+            depth += 1
+            if depth > MAX_JSON_DEPTH:
+                return _out("UNREADABLE", "json_nesting_too_deep")
+        elif char in "}]":
+            depth -= 1
 
     def unique_object(pairs):
         result = {}
@@ -100,6 +121,40 @@ def decode_evidence_json(text):
 def reconcile_json(text):
     decoded = decode_evidence_json(text)
     return reconcile_offline(decoded["evidence"]) if decoded["verdict"] == "PASS" else decoded
+
+
+def aggregate_fixtures_json(text):
+    decoded = decode_evidence_json(text)
+    if decoded["verdict"] != "PASS":
+        return decoded
+    envelope = decoded["evidence"]
+    if set(envelope) != {"expected_ids", "fixtures"}:
+        return _out("UNREADABLE", "aggregate_envelope_unreadable")
+    return aggregate_fixtures(envelope["expected_ids"], envelope["fixtures"])
+
+
+def serialize_result(value):
+    """Emit exact JSON numbers, preserving Decimal values without float casts."""
+    def encode(item, depth=0):
+        if depth > MAX_JSON_DEPTH or (type(item) in (dict, list) and depth >= MAX_JSON_DEPTH):
+            raise ValueError("json_result_too_deep")
+        if type(item) is Decimal:
+            if not item.is_finite():
+                raise ValueError("json_result_nonfinite")
+            raw = str(item)
+            # Exponent notation preserves even an integral Decimal's signed
+            # zero and exponent when the strict decoder uses parse_float.
+            return raw if any(char in raw for char in ".eE") else raw + "E+0"
+        if type(item) in (str, int, float, bool) or item is None:
+            return json.dumps(item, ensure_ascii=True, allow_nan=False)
+        if type(item) is list:
+            return "[" + ",".join(encode(child, depth + 1) for child in item) + "]"
+        if type(item) is dict and all(type(key) is str for key in item):
+            return "{" + ",".join(json.dumps(key, ensure_ascii=True) + ":" + encode(item[key], depth + 1)
+                                   for key in sorted(item)) + "}"
+        raise ValueError("json_result_type_unreadable")
+
+    return encode(value)
 
 
 def aggregate_fixtures(expected_ids, fixtures):
@@ -463,3 +518,26 @@ def compare_strings(oracle_rows, saved_rows):
             "missing_ids": nsmallest(MAX_STRING_EXAMPLES, missing),
             "foreign_ids": nsmallest(MAX_STRING_EXAMPLES, foreign), "mismatches": mismatches,
             "counts": {"missing": len(missing), "foreign": len(foreign), "mismatched": len(changed)}}
+
+
+def main(argv=None):
+    """Offline stdin CLI:0 PASS,1 FAIL,4 UNREADABLE; one sanitized JSON line."""
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(description="Offline X05 evidence comparison; no live acceptance.")
+    parser.add_argument("--aggregate", action="store_true", help="read one three-fixture envelope")
+    args = parser.parse_args(argv)
+    try:
+        text = sys.stdin.read(MAX_JSON_CHARS + 1)
+        result = aggregate_fixtures_json(text) if args.aggregate else reconcile_json(text)
+        output = serialize_result(result)
+    except Exception:
+        result = _out("UNREADABLE", "cli_evidence_unreadable")
+        output = serialize_result(result)
+    print(output)
+    return {"PASS": 0, "FAIL": 1, "UNREADABLE": 4}[result["verdict"]]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
