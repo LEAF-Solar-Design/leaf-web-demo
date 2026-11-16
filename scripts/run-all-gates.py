@@ -2004,7 +2004,11 @@ def build_suites() -> List[Suite]:
                   "tests/test_x04_assembly_nesting_limits.py",
                   "tests/test_x04_assembly_destination_types.py",
                   "tests/test_x04_assembly_runtime_modes.py",
-              ], 1272),
+                  "tests/test_x04_assembly_concurrent_budgets.py",
+                  "tests/test_x04_assembly_diagnostic_controls.py",
+                  "tests/test_x04_assembly_manifest_metamorphic.py",
+                  "tests/test_x04_assembly_source_role_confusion.py",
+              ], 1296),
         Suite("server-dxf-intake-lines-text", "server tests/test_dxf_intake_lines_text.py",
               "pytest", SERVER, _py_pytest("tests/test_dxf_intake_lines_text.py"), 4),
         # W4g engine reach (2026-09-04): the intake -> DXF synthesizer (the
