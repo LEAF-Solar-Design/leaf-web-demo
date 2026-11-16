@@ -6,7 +6,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from export_x04_offline_evidence import (
     DEFAULT_MAX_INPUT_BYTES, MAX_JSON_CONTAINER_DEPTH, check_output_path, positive_byte_limit,
-    decode_json, read_json, report_failure, write_json,
+    decode_json, read_json, report_failure, validate_sha256_pin, write_json,
 )
 from validate_x04_evidence_packet import SCHEMA, local_id, validate_packet
 from validate_x04_review_report import require
@@ -20,7 +20,7 @@ class InputBudget:
         self.ceiling = ceiling
         self.used = 0
 
-    def read_json(self, path, per_file):
+    def read_json(self, path, per_file, expected_sha256=None):
         if self.used >= self.ceiling:
             raise ValueError('Aggregate input byte ceiling exhausted before the next source.')
         chunks = []
@@ -39,7 +39,7 @@ class InputBudget:
                 if self.used > self.ceiling:
                     raise ValueError(f'Aggregate input exceeds the {self.ceiling}-byte ceiling.')
                 chunks.append(chunk)
-        return decode_json(b''.join(chunks))
+        return decode_json(b''.join(chunks), expected_sha256)
 
 
 def assemble_manifest(manifest, directory, output=None, max_input_bytes=DEFAULT_MAX_INPUT_BYTES,
@@ -72,6 +72,7 @@ def assemble_manifest(manifest, directory, output=None, max_input_bytes=DEFAULT_
             identities.add(identity)
             path = row.get('path')
             require(isinstance(path, str) and bool(path.strip()), 'Manifest path must name a local file.')
+            pin = validate_sha256_pin(row['expected_sha256']) if 'expected_sha256' in row else None
             source = Path(directory) / path
             check_output_path(source, output)
             entry = {'id': identity}
@@ -80,11 +81,11 @@ def assemble_manifest(manifest, directory, output=None, max_input_bytes=DEFAULT_
             elif section == 'batches':
                 entry['artifact_ids'] = row.get('artifact_ids')
             packet[section].append(entry)
-            sources.append((source, entry, 'artifact' if section == 'artifacts' else 'report'))
+            sources.append((source, entry, 'artifact' if section == 'artifacts' else 'report', pin))
     # All source/output aliases are checked before any artifact or report is opened.
     reader = read_json if read_input is None else read_input
-    for source, entry, field in sources:
-        entry[field] = reader(source, max_input_bytes)
+    for source, entry, field, pin in sources:
+        entry[field] = reader(source, max_input_bytes) if pin is None else reader(source, max_input_bytes, pin)
     validate_packet(packet)
     return packet
 
