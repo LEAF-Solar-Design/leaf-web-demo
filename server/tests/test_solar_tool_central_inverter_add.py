@@ -454,3 +454,73 @@ def test_x02_add_all_invalid_outlines_preserve_state(bases, groups):
             "placement_strategy": "deterministic_grid"}, source_intake={"panel_groups": groups})
     assert error.value.code == "INVALID_DRAWING_CONTEXT"
     assert graph == before
+
+
+def test_x02_add_all_uses_existing_rooftop_intake_without_private_group_dump(service, pinned):
+    import json
+    fixture = json.loads((SERVER.parent / "data/rooftop_demo.intake.json").read_text())
+    assert "panel_groups" not in fixture
+    graph = local._load_builtin("solar-settings").run(roof_source.empty_graph(), {
+        "expected_rev": 0, "project_changes": {"zip_code": "44224"},
+        "changes": {"use_l2_collectors": True, "panel_layer_contains": "Panels"}})
+    graph = local._load_builtin("solar-panels-from-drawing").run(
+        graph, {"expected_rev": graph["rev"]}, source_intake=fixture)
+    graph = ge.sized(graph)
+    import math
+    import solar_panel_group_kernel as group_kernel
+    recognised = group_kernel.panels_from_intake(fixture, layer_contains="Panels")
+    source_panels = {item["handle"].upper(): item for item in recognised}
+    memberships = {}
+    for panel in graph["panels"]:
+        key = group_kernel.angle_key(math.radians(panel["angle"]))
+        memberships.setdefault(key, []).append(panel)
+    groups = []
+    for index, members in enumerate(memberships.values()):
+        geometry = source_panels[members[0]["provenance"]["source_handle"].upper()]
+        groups.append({"name": f"X02 fixture group {index + 1}",
+            "panel_refs": [panel["id"] for panel in members], "alignment_tolerance": .5,
+            "module_width_along_row": geometry["column_dim"],
+            "module_height_across_row": geometry["row_dim"]})
+    graph = local._load_builtin("solar-panel-groups").run(
+        graph, {"expected_rev": graph["rev"], "groups": groups})
+    assert all(panel["frame_ref"] is not None for panel in graph["panels"])
+    frame = max(graph["frames"], key=lambda item: len(item["panel_refs"]))
+    graph = pinned.run(graph, {"expected_rev": graph["rev"], "operation": "add-string",
+        "ordered_panel_refs": frame["panel_refs"][:2]})
+    before = copy.deepcopy(graph)
+    tool = local._load_builtin("solar-add-all-inverters")
+    params = {"expected_rev": graph["rev"], "hardware": hardware(),
+              "placement_strategy": "deterministic_grid"}
+    after = tool.run(graph, params, source_intake=fixture)
+    assert graph == before
+    proof = after["extra"]["inverter_placement"]
+    assert proof["outline_source"] == "canonical_graph_frame_bounds"
+    assert proof["engine"] == "deterministic_fallback"
+    assert after["inverters"] and after["rev"] == graph["rev"] + 1
+    assert tool.run(graph, params, source_intake=fixture) == after
+
+
+def test_x02_canonical_frame_outlines_have_exact_bridge_unit_binding(bases):
+    graph = bases["roof"]
+    before = copy.deepcopy(graph)
+    tool = local._load_builtin("solar-add-all-inverters")
+    groups = tool._graph_panel_groups(graph)
+    scale = graph["project"]["units"]["meters_per_unit"]
+    frame = graph["frames"][0]
+    outline = groups[0]["outlines"][0]
+    assert len(outline) == 4
+    angle = frame["provenance"]["row_angle"]
+    import math
+    cosine, sine = math.cos(angle), math.sin(angle)
+    along = [scale * (x * cosine + y * sine) for x, y in outline]
+    across = [scale * (-x * sine + y * cosine) for x, y in outline]
+    members = [p for p in graph["panels"] if p["id"] in frame["panel_refs"]]
+    projected = [p["centre"][0] * cosine + p["centre"][1] * sine for p in members]
+    assert min(along) == pytest.approx(min(projected) - frame["module_width_along_row"] / 2)
+    assert max(along) == pytest.approx(max(projected) + frame["module_width_along_row"] / 2)
+    assert max(across) > min(across)
+    graph["frames"][0]["validity"] = {"state": "stale", "reasons": ["synthetic edit"]}
+    with pytest.raises(GraphValidationError) as error:
+        tool._graph_panel_groups(graph)
+    assert error.value.code == "SOLAR_OUTPUT_NOT_CURRENT"
+    assert error.value.path == before["frames"][0]["id"]

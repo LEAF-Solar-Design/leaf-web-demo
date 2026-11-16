@@ -1,5 +1,6 @@
 """Place central inverters through the X02 explicit deterministic fallback tool."""
 import copy
+import math
 import re
 
 import solar_inverter_devices as devices
@@ -26,6 +27,36 @@ def input_readiness(graph):
     return {"input_ready": True, "input_reason": None}
 
 
+
+def _graph_panel_groups(graph):
+    """Project canonical frame bounds into the same drawing units as the device bridge."""
+    scale = graph["project"]["units"]["meters_per_unit"]
+    panels = {panel["id"]: panel for panel in graph["panels"]}
+    groups = []
+    for frame in graph["frames"]:
+        if frame["validity"]["state"] != "valid" or not frame["panel_refs"]:
+            raise GraphValidationError("SOLAR_OUTPUT_NOT_CURRENT", frame["id"])
+        members = [panels[ref] for ref in frame["panel_refs"]]
+        if any(panel["validity"]["state"] != "valid" for panel in members):
+            raise GraphValidationError("SOLAR_OUTPUT_NOT_CURRENT", frame["id"])
+        angle = frame["provenance"].get("row_angle", math.radians(members[0]["angle"]))
+        if type(angle) not in (int, float) or not math.isfinite(angle):
+            raise GraphValidationError("INVALID_DRAWING_CONTEXT", frame["id"])
+        cosine, sine = math.cos(angle), math.sin(angle)
+        along = [panel["centre"][0] * cosine + panel["centre"][1] * sine for panel in members]
+        across = [-panel["centre"][0] * sine + panel["centre"][1] * cosine for panel in members]
+        half_width = frame["module_width_along_row"] / 2
+        half_height = frame["module_height_across_row"] / 2
+        left, right = min(along) - half_width, max(along) + half_width
+        bottom, top = min(across) - half_height, max(across) + half_height
+        outline = [[(u * cosine - v * sine) / scale, (u * sine + v * cosine) / scale]
+                   for u, v in ((left, bottom), (right, bottom), (right, top), (left, top))]
+        groups.append({"handle": digest({"frame_id": frame["id"]}), "outlines": [outline]})
+    if not groups:
+        raise GraphValidationError("INVALID_DRAWING_CONTEXT", "frames")
+    return groups
+
+
 def run(graph, params, *, source_intake):
     _bounded_json(params)
     if (type(params) is not dict
@@ -42,9 +73,12 @@ def run(graph, params, *, source_intake):
     ready = input_readiness(before)
     if not ready["input_ready"]:
         raise GraphValidationError(ready["input_reason"].upper(), "inverters")
-    if type(source_intake) is not dict or type(source_intake.get("panel_groups")) is not list:
+    if type(source_intake) is not dict:
+        raise GraphValidationError("INVALID_DRAWING_CONTEXT", "source_intake")
+    recorded = "panel_groups" in source_intake
+    groups = copy.deepcopy(source_intake["panel_groups"]) if recorded else _graph_panel_groups(before)
+    if type(groups) is not list:
         raise GraphValidationError("INVALID_DRAWING_CONTEXT", "panel_groups")
-    groups = copy.deepcopy(source_intake["panel_groups"])
     if (not 1 <= len(groups) <= devices.MAX_PANEL_GROUPS
             or any(type(group) is not dict or set(group) != {"handle", "outlines"}
                    or type(group["handle"]) is not str
@@ -81,6 +115,7 @@ def run(graph, params, *, source_intake):
         "engine": "deterministic_fallback", "backend": "local_python",
         "label": "Deterministic fallback", "placement_strategy": STRATEGY,
         "fallback_reason": "Explicit deterministic grid placement",
+        "outline_source": "reviewed_intake" if recorded else "canonical_graph_frame_bounds",
         "tool": TOOL, "source_graph_sha256": digest(before), "request_sha256": digest(params),
         "inverter_refs": [item["id"] for item in result["inverters"]
                           if item["id"] not in previous_inverters]}

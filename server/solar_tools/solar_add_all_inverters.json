@@ -18,7 +18,7 @@
   "record_store": "registry",
   "record": {
     "name": "solar-add-all-inverters",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "description": "Place all central inverters with explicit deterministic grid fallback and retain producing-engine metadata.",
     "kind": "script",
     "family_id": "equipment",
