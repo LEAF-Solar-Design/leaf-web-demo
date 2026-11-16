@@ -1527,3 +1527,54 @@ corrected PASS grid_dc_totals_equal grid_dc_oracle_total_equal grid_dc_snapshots
 The current-design swap preserves the 9.6 kW DC grand total. All power values and
 units are explicit synthetic inputs. This comparison does not derive wattage
 from panels or authenticate the input producer.
+
+## Combined metric recovery replay
+
+Before-snapshot panel and DC values must match the saved per-string values, as
+well as their string IDs. The snapshot diagnostics include `saved_binding` with
+exact mismatch counts and capped sorted examples. This detects substitutions
+within one grid even when grid and grand totals stay equal.
+
+The separate pure `compare_grid_string_totals` helper counts explicit owners
+against independent per-grid string counts. `compare_grid_string_oracle_totals`
+requires exact expected-grid coverage and agreement with `oracle_values.strings`.
+These two helpers remain standalone in this slice.
+
+Run this synthetic recovery replay from the repository root.
+
+```powershell
+@'
+import sys, json, runpy
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import reconcile_seven_steps_json
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+correct = builders['seven_step_envelope']()
+evidence = deepcopy(correct)
+evidence['grid']['optimizer_totals']['g'] = 13
+evidence['grid']['panel_totals']['g'] = 25
+del evidence['grid']['reopened_dc_power']
+for name in ['initial', 'optimizer', 'panel', 'dc']:
+    if name == 'optimizer':
+        evidence['grid']['optimizer_totals']['g'] = 12
+    elif name == 'panel':
+        evidence['grid']['panel_totals']['g'] = 24
+    elif name == 'dc':
+        evidence['grid']['reopened_dc_power'] = deepcopy(correct['grid']['reopened_dc_power'])
+    result = reconcile_seven_steps_json(json.dumps(evidence))
+    print(name, result['verdict'], result['grid_optimizers']['verdict'], result['grid_panels']['verdict'], result['grid_dc_reopen']['verdict'])
+    assert result['steps']['7']['verdict'] == 'PASS'
+'@ | python -P -
+```
+
+Expected output
+
+```text
+initial UNREADABLE FAIL FAIL UNREADABLE
+optimizer UNREADABLE PASS FAIL UNREADABLE
+panel UNREADABLE PASS PASS UNREADABLE
+dc PASS PASS PASS PASS
+```
+
+Each repair preserves the other diagnostics. The final result establishes the
+supplied synthetic comparison. Live X05 acceptance still requires staging evidence.

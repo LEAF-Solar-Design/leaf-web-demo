@@ -554,11 +554,13 @@ def _seven_step_panel_snapshot(grid, evidence):
     if type(grid) is not dict or type(evidence) is not dict:
         return _out("UNREADABLE", "grid_panel_snapshot_evidence_unreadable")
     before, reopened = evidence.get("before_rows"), evidence.get("reopened_rows")
-    return compare_bound_panel_snapshots(grid.get("expected_grid_ids"),
+    snapshot = compare_bound_panel_snapshots(grid.get("expected_grid_ids"),
         before.get("strings") if type(before) is dict else None,
         reopened.get("strings") if type(reopened) is dict else None,
         grid.get("before_panel_counts"), grid.get("string_assignments"),
         grid.get("reopened_panel_counts"), grid.get("reopened_string_assignments"))
+
+    return _with_saved_values(snapshot, compare_before_panel_counts(grid.get("panel_counts"), grid.get("before_panel_counts")))
 
 
 def _seven_step_dc(grid, evidence):
@@ -579,11 +581,13 @@ def _seven_step_dc_snapshot(grid, evidence):
     if type(grid) is not dict or type(evidence) is not dict:
         return _out("UNREADABLE", "grid_dc_snapshot_evidence_unreadable")
     before, reopened = evidence.get("before_rows"), evidence.get("reopened_rows")
-    return compare_bound_dc_snapshots(grid.get("expected_grid_ids"),
+    snapshot = compare_bound_dc_snapshots(grid.get("expected_grid_ids"),
         before.get("strings") if type(before) is dict else None,
         reopened.get("strings") if type(reopened) is dict else None,
         grid.get("before_dc_power"), grid.get("string_assignments"),
         grid.get("reopened_dc_power"), grid.get("reopened_string_assignments"))
+
+    return _with_saved_values(snapshot, compare_before_dc_values(grid.get("dc_power"), grid.get("before_dc_power")))
 
 
 def _seven_step_result(imported, grids, checked, ownership, grid_optimizers, ownership_reopen, grid_optimizer_reopen, grid_panels, grid_panel_reopen, grid_dc, grid_dc_reopen):
@@ -968,6 +972,62 @@ def _grid_dc_totals(values):
             return None
         result[key] = number
     return result
+
+
+def _with_saved_values(snapshot, binding):
+    verdicts = {snapshot["verdict"], binding["verdict"]}
+    return dict(snapshot, saved_binding=binding,
+                verdict="UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS")
+
+
+def compare_before_panel_counts(saved_rows, before_rows):
+    """Require before-snapshot panels to match saved per-string counts exactly."""
+    return _compare_before_values(saved_rows, before_rows, "panels", "panel")
+
+
+def compare_before_dc_values(saved_rows, before_rows):
+    """Bind before-snapshot power to exact saved per-string kW DC values."""
+    with localcontext(_CONTEXT):
+        return _compare_before_values(saved_rows, before_rows, "kw_dc", "dc")
+
+
+def _compare_before_values(saved_rows, before_rows, metric, label):
+    saved, error = _index(saved_rows, "saved_" + label, metric=metric)
+    if error:
+        return _out("UNREADABLE", error)
+    before, error = _index(before_rows, "before_" + label, metric=metric)
+    if error:
+        return _out("UNREADABLE", error)
+    missing, foreign = saved.keys() - before.keys(), before.keys() - saved.keys()
+    changed = [key for key in saved.keys() & before.keys() if saved[key] != before[key]]
+    examples = [dict(string_id=key, saved=saved[key], before=before[key], delta=before[key] - saved[key])
+                for key in nsmallest(MAX_STRING_EXAMPLES, changed)]
+    return _out("UNREADABLE" if missing or foreign else "FAIL" if changed else "PASS",
+                label + "_before_saved_values_mismatch" if missing or foreign or changed else label + "_before_saved_values_equal",
+                counts=dict(missing=len(missing), foreign=len(foreign), mismatched=len(changed)),
+                missing_ids=nsmallest(MAX_STRING_EXAMPLES, missing), foreign_ids=nsmallest(MAX_STRING_EXAMPLES, foreign),
+                examples=examples)
+
+
+def compare_grid_string_totals(expected_totals, saved_string_ids, assignments):
+    """Count explicit saved-string ownership against independent per-grid counts."""
+    if not _valid_grid_totals(expected_totals):
+        return _out("UNREADABLE", "grid_string_totals_unreadable")
+    ownership = validate_grid_string_ownership(list(expected_totals), saved_string_ids, assignments)
+    if ownership["verdict"] != "PASS":
+        return _out(ownership["verdict"], "grid_string_ownership_invalid", ownership=ownership)
+    totals = dict.fromkeys(expected_totals, 0)
+    for row in assignments:
+        totals[row["grid_id"]] += 1
+    changed = [key for key in totals if totals[key] != expected_totals[key]]
+    return _out("FAIL" if changed else "PASS", "grid_string_totals_mismatch" if changed else "grid_string_totals_equal",
+                mismatch_count=len(changed), examples=[dict(grid_id=key, oracle=expected_totals[key], saved=totals[key],
+                    delta=totals[key] - expected_totals[key]) for key in nsmallest(MAX_STRING_EXAMPLES, changed)])
+
+
+def compare_grid_string_oracle_totals(expected_grid_ids, expected_totals, oracle_values):
+    """Require independent grid string counts to cover and sum to report strings."""
+    return _compare_grid_oracle_totals(expected_grid_ids, expected_totals, oracle_values, "strings", "grid_string_oracle")
 
 
 def compare_grid_dc_totals(expected_totals, saved_power, assignments):
