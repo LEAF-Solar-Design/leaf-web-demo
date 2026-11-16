@@ -63,7 +63,7 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             "binary DXF is not supported; re-save this drawing as ASCII DXF "
             "or upload the DWG instead")
     try:
-        text = raw.decode("utf-8", errors="replace")
+        text = raw.decode("utf-8-sig", errors="replace")
     except Exception as exc:  # pragma: no cover - decode with replace cannot raise
         raise DxfParseError(f"undecodable DXF: {exc}") from exc
 

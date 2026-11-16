@@ -1,5 +1,5 @@
 import React from 'react'
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import ModuleSetPicker from './ModuleSetPicker.jsx'
 
@@ -11,6 +11,45 @@ const data = { sets: [
 const first = () => screen.getByRole('checkbox', { name: 'Design / Panel A: 12 candidates' })
 const second = () => screen.getByRole('checkbox', { name: 'Alternate / Panel B: 9 candidates' })
 const submit = () => screen.getByRole('button', { name: 'Count selected set' })
+
+it('catches promise rejection and retries once per activation with choices intact', async () => {
+  const onSelect = vi.fn().mockRejectedValueOnce(new Error('private async detail')).mockResolvedValueOnce(undefined)
+  const unhandled = vi.fn()
+  window.addEventListener('unhandledrejection', unhandled)
+  try {
+    render(<ModuleSetPicker data={data} onSelect={onSelect} />)
+    fireEvent.click(second())
+    fireEvent.click(submit())
+    expect(submit().disabled).toBe(true)
+    await screen.findByRole('alert')
+    expect(second().checked).toBe(true)
+    expect(onSelect).toHaveBeenCalledExactlyOnceWith(['second'])
+    expect(screen.queryByText(/private async detail/)).toBeNull()
+    fireEvent.click(submit())
+    await waitFor(() => expect(submit().disabled).toBe(false))
+    expect(onSelect).toHaveBeenCalledTimes(2)
+    expect(onSelect).toHaveBeenLastCalledWith(['second'])
+    expect(second().checked).toBe(true)
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(unhandled).not.toHaveBeenCalled()
+  } finally {
+    window.removeEventListener('unhandledrejection', unhandled)
+  }
+})
+
+it('does not show a completed summary as the count of newly edited choices', () => {
+  const onSelect = vi.fn()
+  const view = render(<ModuleSetPicker data={{ ...data, selected_sets: [data.sets[0]], count: 12 }} onSelect={onSelect} />)
+  expect(screen.getByText(/^Counted 12/)).toBeTruthy()
+  fireEvent.click(second())
+  expect(screen.queryByText(/^Counted /)).toBeNull()
+  expect(screen.getByText('Choices changed. Count the selected set to update this result.')).toBeTruthy()
+  fireEvent.click(submit())
+  expect(onSelect).toHaveBeenCalledExactlyOnceWith(['second'])
+  expect(screen.queryByText(/^Counted /)).toBeNull()
+  view.rerender(<ModuleSetPicker data={{ ...data, selected_sets: [data.sets[1]], count: 9 }} onSelect={onSelect} />)
+  expect(screen.getByText('Counted 9 modules on Alternate / Panel B.')).toBeTruthy()
+})
 
 it('associates lone-surrogate opaque IDs safely without aliasing a replacement character', () => {
   const ids = ['\ud800', '\udc00', '\ufffd']

@@ -8,6 +8,14 @@ from __future__ import annotations
 
 def from_pairs(pairs):
     dependencies = {}
+    # Full drawings require owning sections. Bare decoded-record fragments keep
+    # their existing API behavior, but ENDSEC/EOF still close their scope.
+    section = None if any(c == 0 and v.upper() == "SECTION" for c, v in pairs) else "__FRAGMENT__"
+    owners = {"BLOCK": {"BLOCKS"}, "STYLE": {"TABLES"},
+              "IMAGEDEF": {"OBJECTS"}, "PDFDEFINITION": {"OBJECTS"},
+              "DWFDEFINITION": {"OBJECTS"}, "DGNDEFINITION": {"OBJECTS"},
+              "ACAD_PROXY_ENTITY": {"ENTITIES", "BLOCKS"}, "PROXY_ENTITY": {"ENTITIES", "BLOCKS"},
+              "ACAD_PROXY_OBJECT": {"OBJECTS"}, "PROXY_OBJECT": {"OBJECTS"}}
 
     def add(kind, name, disposition, **details):
         if name:
@@ -26,6 +34,19 @@ def from_pairs(pairs):
             groups.setdefault(*pairs[end])
             end += 1
         kind = kind.upper()
+        if kind == "EOF":
+            break
+        if kind == "SECTION":
+            section = groups.get(2, "").upper()
+            i = end
+            continue
+        if kind == "ENDSEC":
+            section = None
+            i = end
+            continue
+        if section != "__FRAGMENT__" and section not in owners.get(kind, set()):
+            i = end
+            continue
         if kind == "BLOCK":
             try:
                 external = int(groups.get(70, "0")) & 12
