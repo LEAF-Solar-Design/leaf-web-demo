@@ -465,7 +465,7 @@ def _seven_step_inputs(import_evidence, grid_evidence):
     else:
         imported = _out("PASS" if all(import_evidence.values()) else "FAIL", "supplied_import_evidence")
     grid_fields = {"expected_grid_ids", "saved_group_ids", "rows", "require_all_matched"}
-    if type(grid_evidence) is not dict or set(grid_evidence) - {"string_assignments", "optimizer_totals", "reopened_string_assignments", "panel_totals", "panel_counts", "before_panel_counts", "reopened_panel_counts", "dc_totals", "dc_power", "before_dc_power", "reopened_dc_power"} != grid_fields:
+    if type(grid_evidence) is not dict or set(grid_evidence) - {"string_assignments", "optimizer_totals", "reopened_string_assignments", "panel_totals", "panel_counts", "before_panel_counts", "reopened_panel_counts", "dc_totals", "dc_power", "before_dc_power", "reopened_dc_power", "string_totals"} != grid_fields:
         grids = _out("UNREADABLE", "grid_evidence_unreadable")
     else:
         grids = compare_grid_correspondence(**{key: grid_evidence[key] for key in grid_fields})
@@ -492,6 +492,8 @@ def reconcile_seven_steps(import_evidence, grid_evidence, assurance):
                               _seven_step_dc(grid_evidence, assurance.get("evidence")
                                   if type(assurance) is dict else None),
                               _seven_step_dc_snapshot(grid_evidence, assurance.get("evidence")
+                                  if type(assurance) is dict else None),
+                              _seven_step_strings(grid_evidence, assurance.get("evidence")
                                   if type(assurance) is dict else None))
 
 
@@ -590,17 +592,30 @@ def _seven_step_dc_snapshot(grid, evidence):
     return _with_saved_values(snapshot, compare_before_dc_values(grid.get("dc_power"), grid.get("before_dc_power")))
 
 
-def _seven_step_result(imported, grids, checked, ownership, grid_optimizers, ownership_reopen, grid_optimizer_reopen, grid_panels, grid_panel_reopen, grid_dc, grid_dc_reopen):
+def _seven_step_strings(grid, evidence):
+    if type(grid) is not dict or type(evidence) is not dict:
+        return _out("UNREADABLE", "grid_string_evidence_unreadable")
+    saved, error = _index(evidence.get("saved_strings"), "saved")
+    comparison = (_out("UNREADABLE", error) if error else compare_grid_string_totals(
+        grid.get("string_totals"), list(saved), grid.get("string_assignments")))
+    consistency = compare_grid_string_oracle_totals(grid.get("expected_grid_ids"), grid.get("string_totals"),
+                                                   evidence.get("oracle_values"))
+    verdicts = {comparison["verdict"], consistency["verdict"]}
+    return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
+                "supplied_grid_string_evidence", comparison=comparison, oracle_consistency=consistency)
+
+
+def _seven_step_result(imported, grids, checked, ownership, grid_optimizers, ownership_reopen, grid_optimizer_reopen, grid_panels, grid_panel_reopen, grid_dc, grid_dc_reopen, grid_strings):
     stages = checked.get("checks", {}).get("provenance", {}).get("reconciliation", {}).get("stages", {})
     absent = _out("UNREADABLE", "stage_evidence_missing")
     steps = {"1": imported, "2": grids, "3": stages.get("strings", absent), "4": stages.get("grouping", absent),
              "5": dict(table=stages.get("table", absent), csv_view=stages.get("csv_view", absent)),
              "6": stages.get("policy", absent), "7": stages.get("reopen", absent)}
-    verdicts = {imported["verdict"], grids["verdict"], checked["verdict"], ownership["verdict"], grid_optimizers["verdict"], ownership_reopen["verdict"], grid_optimizer_reopen["verdict"], grid_panels["verdict"], grid_panel_reopen["verdict"], grid_dc["verdict"], grid_dc_reopen["verdict"]}
+    verdicts = {imported["verdict"], grids["verdict"], checked["verdict"], ownership["verdict"], grid_optimizers["verdict"], ownership_reopen["verdict"], grid_optimizer_reopen["verdict"], grid_panels["verdict"], grid_panel_reopen["verdict"], grid_dc["verdict"], grid_dc_reopen["verdict"], grid_strings["verdict"]}
     return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
                 "offline_seven_steps", steps=steps, assurance=checked, ownership=ownership, grid_optimizers=grid_optimizers,
                 ownership_reopen=ownership_reopen, grid_optimizer_reopen=grid_optimizer_reopen, grid_panels=grid_panels,
-                grid_panel_reopen=grid_panel_reopen, grid_dc=grid_dc, grid_dc_reopen=grid_dc_reopen)
+                grid_panel_reopen=grid_panel_reopen, grid_dc=grid_dc, grid_dc_reopen=grid_dc_reopen, grid_strings=grid_strings)
 
 
 def reconcile_seven_steps_json(text):
@@ -631,6 +646,8 @@ def _seven_step_envelope(envelope):
                               _seven_step_dc(envelope["grid"], envelope["assurance"].get("evidence")
                                   if type(envelope["assurance"]) is dict else None),
                               _seven_step_dc_snapshot(envelope["grid"], envelope["assurance"].get("evidence")
+                                  if type(envelope["assurance"]) is dict else None),
+                              _seven_step_strings(envelope["grid"], envelope["assurance"].get("evidence")
                                   if type(envelope["assurance"]) is dict else None))
 
 

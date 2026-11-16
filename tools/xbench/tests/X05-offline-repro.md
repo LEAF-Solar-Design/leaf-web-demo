@@ -656,7 +656,7 @@ Complete seven-step JSON envelope:
 | Field | Required shape | Missing, null or empty behavior |
 |---|---|---|
 | `import` | Exactly `normal_user`, `dwg_imported`, `report_imported`, all bool | Missing outer field rejects envelope; null/empty object yields step1 UNREADABLE; false yields readable FAIL |
-| `grid` | `expected_grid_ids`, `saved_group_ids`, `rows`, `require_all_matched`, plus `string_assignments`, `reopened_string_assignments` and independent `optimizer_totals`, plus explicit `panel_counts`, `before_panel_counts`, `reopened_panel_counts` and independent `panel_totals`, plus explicit `dc_power`, `dc_totals`, `before_dc_power` and `reopened_dc_power` | Missing outer field rejects envelope; null/empty object yields step2 UNREADABLE; empty rows with valid nonempty IDs yields missing-grid FAIL |
+| `grid` | `expected_grid_ids`, `saved_group_ids`, `rows`, `require_all_matched`, plus `string_assignments`, `reopened_string_assignments` and independent `optimizer_totals`, plus explicit `panel_counts`, `before_panel_counts`, `reopened_panel_counts` and independent `panel_totals`, plus explicit `dc_power`, `dc_totals`, `before_dc_power`, `reopened_dc_power` and independent `string_totals` | Missing outer field rejects envelope; null/empty object yields step2 UNREADABLE; empty rows with valid nonempty IDs yields missing-grid FAIL |
 | `assurance` | Exactly `evidence`, `manifest`, `bindings`, `inputs_hex`, `identity`, `stage_identities` | Missing outer field rejects envelope; null/empty object yields assurance UNREADABLE and absent downstream steps |
 
 Evidence and assurance schemas are the existing six-stage contracts above.
@@ -1578,3 +1578,48 @@ dc PASS PASS PASS PASS
 
 Each repair preserves the other diagnostics. The final result establishes the
 supplied synthetic comparison. Live X05 acceptance still requires staging evidence.
+
+## Composed grid string-count replay
+
+Seven-step input requires independent `grid.string_totals` for every expected
+grid. The `grid_strings` result compares explicit saved-string ownership counts
+and checks coverage and summed agreement with `oracle_values.strings`. Missing
+counts yield UNREADABLE while unrelated diagnostics remain available.
+
+Run this synthetic PowerShell replay from the repository root.
+
+```powershell
+@'
+import sys, json, runpy
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import reconcile_seven_steps_json
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+correct = builders['three_string_envelope']()
+swapped = deepcopy(correct)
+swapped['grid']['string_totals'] = dict(east=2, west=1)
+contradiction = deepcopy(correct)
+contradiction['grid']['string_totals'] = dict(east=1, west=3)
+missing = deepcopy(correct)
+del missing['grid']['string_totals']
+for name, envelope in [('swapped', swapped), ('contradiction', contradiction), ('missing', missing), ('corrected', correct)]:
+    result = reconcile_seven_steps_json(json.dumps(envelope))
+    counts = result['grid_strings']
+    print(name, result['verdict'], counts['comparison']['reason'], counts['oracle_consistency']['reason'])
+    assert result['steps']['7']['verdict'] == 'PASS'
+'@ | python -P -
+```
+
+Expected output
+
+```text
+swapped FAIL grid_string_totals_mismatch grid_string_oracle_total_equal
+contradiction FAIL grid_string_totals_mismatch grid_string_oracle_total_mismatch
+missing UNREADABLE grid_string_totals_unreadable grid_string_oracle_evidence_unreadable
+corrected PASS grid_string_totals_equal grid_string_oracle_total_equal
+```
+
+The swap preserves the grand total of three strings. The independent grid counts
+and explicit ownership provide separate inputs to the comparison. This replay
+establishes synthetic behavior and does not authenticate input origin or live
+X05 acceptance.
