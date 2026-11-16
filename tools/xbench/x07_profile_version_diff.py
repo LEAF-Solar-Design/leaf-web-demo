@@ -58,7 +58,7 @@ def main():
     try:
         result = compare_versions(CustomerProfileStore(args.database, read_only=True), customer_key=args.customer,
                                   profile_id=args.profile_id, before_version=args.before, after_version=args.after)
-    except (ValueError, sqlite3.Error):
+    except (OSError, ValueError, sqlite3.Error):
         publish_stdout({'schema': 'leaf.x07.profile-version-diff.v1', 'error': 'SCOPED_VERSIONS_UNAVAILABLE'})
         return 2
     return publish_stdout(result)

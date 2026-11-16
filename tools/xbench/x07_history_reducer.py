@@ -64,6 +64,9 @@ def read_history(path):
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_HISTORY_BYTES:
             raise ValueError('history must be a bounded regular file')
+        def fingerprint(value):
+            return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+        initial = fingerprint(metadata)
         chunks, size = [], 0
         while True:
             chunk = os.read(descriptor, min(65536, MAX_HISTORY_BYTES + 1 - size))
@@ -73,6 +76,10 @@ def read_history(path):
             size += len(chunk)
             if size > MAX_HISTORY_BYTES:
                 raise ValueError('history exceeds byte budget')
+        current = path.lstat()
+        if (size != metadata.st_size or not stat.S_ISREG(current.st_mode)
+                or fingerprint(os.fstat(descriptor)) != initial or fingerprint(current) != initial):
+            raise ValueError('history changed during read')
     finally:
         os.close(descriptor)
     return json.loads(b''.join(chunks).decode('utf-8'), object_pairs_hook=unique_object)
