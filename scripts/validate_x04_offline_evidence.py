@@ -34,12 +34,14 @@ def main(argv=None):
     parser.add_argument('--out', type=Path)
     parser.add_argument('--max-input-bytes', type=positive_byte_limit, default=DEFAULT_MAX_INPUT_BYTES,
                         help='Maximum input bytes, including BOM and whitespace (default: 16777216)')
+    parser.add_argument('--max-output-bytes', type=positive_byte_limit,
+                        help='Optional encoded JSON byte ceiling (default: unlimited)')
     args = parser.parse_args(argv)
     try:
         check_output_path(args.input, args.out)
         payload = read_json(args.input, args.max_input_bytes)
         result = validate_evidence(payload)
-        write_json(result, args.out)
+        write_json(result, args.out, args.max_output_bytes)
     except (OSError, ValueError, TypeError, RecursionError) as error:
         return report_failure('validation', error)
     return 0
