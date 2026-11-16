@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import os
 import tempfile
+import sys
 
 
 class EvidenceError(ValueError):
@@ -353,7 +354,15 @@ def main():
         except OSError:
             code = 2
             encoded = json.dumps(unreadable('REPORT_PUBLICATION_FAILED'), indent=2) + '\n'
-    print(encoded, end='')
+    try:
+        print(encoded, end='')
+        sys.stdout.flush()
+    except OSError:
+        # Redirect the descriptor so interpreter shutdown cannot retry a broken
+        # buffered flush and print an ignored-exception traceback.
+        with open(os.devnull, 'w') as sink:
+            os.dup2(sink.fileno(), sys.stdout.fileno())
+        return 2
     return code
 
 

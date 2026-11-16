@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 
 const valid = row => row && typeof row.block === 'string' && row.block && typeof row.layer === 'string'
   && row.layer && Number.isSafeInteger(row.count) && row.count >= 0
@@ -20,6 +20,7 @@ export default function X07RoleConfirmation({ proposal, onConfirm, onCancel }) {
 }
 
 function Confirmation({ rows, initial, onConfirm, onCancel }) {
+  const radioName = useId()
   const [selected, select] = useState(rows[initial] ? identity(rows[initial]) : null)
   const selectedRow = rows.find(row => identity(row) === selected)
   const [busy, setBusy] = useState(false)
@@ -68,7 +69,7 @@ function Confirmation({ rows, initial, onConfirm, onCancel }) {
     <fieldset disabled={busy}><legend>Module set</legend>
       {rows.length > 1 && <p>Choose the module set for this design.</p>}
       {rows.map(row => <label key={identity(row)}>
-        <input type="radio" name="module-set" checked={selected === identity(row)} onChange={() => select(identity(row))} />
+        <input type="radio" name={radioName} checked={selected === identity(row)} onChange={() => select(identity(row))} />
         {row.block} on {row.layer}, {row.count} inserts
       </label>)}
       {!rows.length && <p>No module set is available.</p>}
