@@ -5,6 +5,29 @@ import DrawingDependencyReport from './DrawingDependencyReport.jsx'
 
 afterEach(cleanup)
 
+it.each([null, { dependencies: [null] }, { dependencies: {} }])('recovers from malformed metadata without retaining stale rows: %j', (bad) => {
+  const valid = { coverage_note: 'Converted records only.', dependencies: [
+    { kind: 'image', name: 'before.png', disposition: 'image omitted' },
+  ] }
+  const snapshot = JSON.stringify([valid, bad])
+  const view = render(<DrawingDependencyReport report={valid} />)
+  const region = screen.getByRole('region', { name: 'Drawing intake report' })
+  expect(screen.getByText('before.png')).toBeTruthy()
+  view.rerender(<DrawingDependencyReport report={bad} />)
+  expect(screen.getByRole('region', { name: 'Drawing intake report' })).toBe(region)
+  expect(screen.queryByText('before.png')).toBeNull()
+  expect(screen.queryByRole('table')).toBeNull()
+  expect(screen.getByText('Dependency report unavailable.')).toBeTruthy()
+  expect(screen.getByRole('note', { name: 'Dependency coverage' }).textContent).toBe('Raw dependency coverage is not confirmed.')
+  const fixed = { ...valid, dependencies: [{ ...valid.dependencies[0], name: 'after.png' }] }
+  view.rerender(<DrawingDependencyReport report={fixed} />)
+  expect(screen.getByRole('region', { name: 'Drawing intake report' })).toBe(region)
+  expect(screen.getByText('after.png')).toBeTruthy()
+  expect(screen.queryByText('before.png')).toBeNull()
+  expect(screen.queryByText('Dependency report unavailable.')).toBeNull()
+  expect(JSON.stringify([valid, bad])).toBe(snapshot)
+})
+
 it.each(['populated', 'empty', 'unavailable'])('exposes semantic coverage and report structure for %s', (state) => {
   const report = state === 'unavailable' ? undefined : { coverage_note: 'Local decoded records only.',
     dependencies: state === 'empty' ? [] : [{ kind: 'image', name: 'synthetic.png', disposition: 'image omitted' }] }

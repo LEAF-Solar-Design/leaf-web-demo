@@ -12,6 +12,48 @@ const first = () => screen.getByRole('checkbox', { name: 'Design / Panel A: 12 c
 const second = () => screen.getByRole('checkbox', { name: 'Alternate / Panel B: 9 candidates' })
 const submit = () => screen.getByRole('button', { name: 'Count selected set' })
 
+it.each(['count', 'label'])('keeps a changed pending %s summary unavailable until a fresh result', async (field) => {
+  let settle
+  const pending = new Promise((resolve) => { settle = resolve })
+  const onSelect = vi.fn().mockReturnValueOnce(pending)
+  const recorded = { ...data, selected_sets: [data.sets[0]], count: 12 }
+  const view = render(<ModuleSetPicker drawingKey="A" data={recorded} onSelect={onSelect} />)
+  fireEvent.click(first())
+  fireEvent.click(submit())
+  const changed = { ...data.sets[0], ...(field === 'count' ? { count: 14 } : { layer: 'New roof' }) }
+  const stale = { ...recorded, sets: [changed, data.sets[1]] }
+  view.rerender(<ModuleSetPicker drawingKey="A" data={stale} onSelect={onSelect} />)
+  expect(submit().disabled).toBe(true)
+  await act(async () => { settle(); await pending })
+  expect(screen.queryByText(/^Counted /)).toBeNull()
+  expect(screen.getByText('Count summary unavailable. Run the module tool again to refresh the result.')).toBeTruthy()
+  expect(screen.getAllByRole('checkbox')[0].checked).toBe(true)
+  view.rerender(<ModuleSetPicker drawingKey="A" data={{ ...stale, selected_sets: [changed], count: changed.count }} onSelect={onSelect} />)
+  expect(screen.getByText(`Counted ${changed.count} modules on ${changed.layer} / Panel A.`)).toBeTruthy()
+  expect(onSelect).toHaveBeenCalledExactlyOnceWith(['first'])
+})
+
+it('uses the replacement callback once with current choices after pending completion', async () => {
+  let reject
+  const pending = new Promise((resolve, fail) => { reject = fail })
+  const oldCallback = vi.fn().mockReturnValue(pending)
+  const replacement = vi.fn().mockResolvedValue(undefined)
+  const view = render(<ModuleSetPicker drawingKey="A" data={data} onSelect={oldCallback} />)
+  fireEvent.click(first())
+  fireEvent.click(submit())
+  view.rerender(<ModuleSetPicker drawingKey="A" data={data} onSelect={replacement} />)
+  fireEvent.click(submit())
+  expect(replacement).not.toHaveBeenCalled()
+  await act(async () => { reject(new Error('private old callback')); await pending.catch(() => {}) })
+  expect(screen.getByRole('alert')).toBeTruthy()
+  fireEvent.click(second())
+  fireEvent.click(submit())
+  await waitFor(() => expect(submit().disabled).toBe(false))
+  expect(oldCallback).toHaveBeenCalledExactlyOnceWith(['first'])
+  expect(replacement).toHaveBeenCalledExactlyOnceWith(['first', 'second'])
+  expect(screen.queryByRole('alert')).toBeNull()
+})
+
 it.each(['resolve', 'reject'])('ignores old %s after returning to A with a new request', async (terminal) => {
   let oldResolve, oldReject, newResolve
   const old = new Promise((resolve, reject) => { oldResolve = resolve; oldReject = reject })

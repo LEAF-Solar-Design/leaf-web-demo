@@ -129,6 +129,7 @@ def run(intake, params):
         return {k: v for k, v in group.items() if k not in ("handles", "_keys")}
 
     return ({"sets": [public_set(s) for s in sets],
+             "original_bytes_integrity": "unverified",
              "selection_required": not selected_sets,
              "selected_sets": [public_set(s) for s in selected_sets],
              "selected_set": public_set(selected) if selected else None,
