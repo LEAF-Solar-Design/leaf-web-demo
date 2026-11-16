@@ -8212,3 +8212,130 @@ def test_grouping_shared_rows_refresh_only_sharing_fixtures_and_preserve_prior()
     preserved=deepcopy(result)
     shared['group_count']=2
     assert m.aggregate_bound_seven_steps(expected,records)==baseline and result==preserved
+
+
+def csv_records_text(records,newline='\n'):
+    output=StringIO(newline='')
+    writer=csv.writer(output,lineterminator=newline,quoting=csv.QUOTE_ALL)
+    writer.writerows(records)
+    return output.getvalue()
+
+
+@pytest.mark.parametrize('record',range(6))
+@pytest.mark.parametrize('broken',['unterminated','after-close'])
+def test_csv_strict_quote_grammar_sanitized_and_field_limit_restored(record,broken):
+    from benches import x05_reconcile as m
+    _,view=table_fixture(); matrix=list(csv.reader(StringIO(csv_fixture(view))))
+    prefix=csv_records_text(matrix[:record])
+    bad='"private-csv-canary' if broken=='unterminated' else '"private-csv-canary"text'
+    text=prefix+','.join([bad]+matrix[record][1:])+'\n'
+    original=csv.field_size_limit()
+    try:
+        csv.field_size_limit(1)
+        result=m.compare_csv_view(text,view)
+        assert result==dict(verdict='UNREADABLE',reason='csv_evidence_unreadable')
+        assert 'private-csv-canary' not in serialize_result(result)
+        assert csv.field_size_limit()==1
+        assert m.compare_csv_view(csv_fixture(view),view)['verdict']=='PASS'
+        assert csv.field_size_limit()==1
+    finally: csv.field_size_limit(original)
+
+
+@pytest.mark.parametrize('record',range(6))
+@pytest.mark.parametrize('mutation',['missing','extra-empty','trailing'])
+def test_csv_exact_record_arity_at_each_header_and_data_position(record,mutation):
+    from benches import x05_reconcile as m
+    _,view=table_fixture(); matrix=list(csv.reader(StringIO(csv_fixture(view))))
+    positions=range(5) if mutation=='missing' else range(6) if mutation=='extra-empty' else [5]
+    for position in positions:
+        changed=deepcopy(matrix)
+        if mutation=='missing': changed[record].pop(position)
+        elif mutation=='extra-empty': changed[record].insert(position,'')
+        if mutation=='trailing':
+            text=''.join(csv_records_text([row]).rstrip('\n')+(',' if index==record else '')+'\n' for index,row in enumerate(changed))
+        else: text=csv_records_text(changed)
+        original=deepcopy(view); result=m.compare_csv_view(text,view)
+        assert result==dict(verdict='UNREADABLE',reason='csv_headers_unreadable' if record==0 else 'csv_row_unreadable')
+        assert view==original
+
+
+@pytest.mark.parametrize('spelling',['decimal','signed-zero','exponent'])
+@pytest.mark.parametrize('tiny',[False,True])
+def test_csv_numeric_lexemes_match_direct_rows_or_named_contract_rejection(spelling,tiny):
+    from fractions import Fraction
+    from benches import x05_reconcile as m
+    _,view=table_fixture(); expected=deepcopy(view)
+    if tiny:
+        row=next(row for row in expected if row['metric']=='kw_dc')
+        value=Fraction(row['studio'])+Fraction(1,10**77)
+        row['studio']=fraction_fixed_text(value); row['delta']=fraction_fixed_text(Fraction(1,10**77)); row['verdict']='FAIL'
+    lexical=deepcopy(expected)
+    for row in lexical:
+        for field in ('studio','oracle','delta'):
+            value=Fraction(row[field]); plain=fraction_fixed_text(value)
+            row[field]=plain+'e0' if spelling=='exponent' else '-0.000' if spelling=='signed-zero' and not value else plain+('.000' if '.' not in plain else '')
+    text=csv_fixture(lexical); result=m.compare_csv_view(text,expected)
+    if spelling=='exponent':
+        assert result==dict(verdict='UNREADABLE',reason='csv_view_rows_unreadable')
+        assert m._table(lexical) is None  # textual exponent strings are unsupported in both paths
+    else:
+        assert result['verdict']=='PASS' and m._table(lexical)==m._table(expected)
+        parsed,error=m._csv_rows(text); assert error is None
+        power=m._table(parsed)['kw_dc']
+        assert Fraction(power['delta'])==(Fraction(1,10**77) if tiny else 0)
+        if tiny:
+            different=m.compare_csv_view(text,view)
+            assert different['verdict']=='FAIL'
+            assert {'metric':'kw_dc','field':'delta'} in different['mismatches']
+            assert Fraction(power['studio'])-Fraction(power['oracle'])==Fraction(1,10**77)
+
+
+@pytest.mark.parametrize('newline',['\n','\r\n'])
+@pytest.mark.parametrize('kind',['embedded-at-limit','extra-record','malformed-last','malformed-overflow'])
+def test_csv_logical_record_boundaries_and_malformed_final_records_restore_limits(newline,kind):
+    from benches import x05_reconcile as m
+    _,view=table_fixture(); matrix=list(csv.reader(StringIO(csv_fixture(view))))
+    if kind=='embedded-at-limit':
+        matrix[-1][-1]='PA'+newline+'SS'
+        text=csv_records_text(matrix,newline)
+    elif kind=='extra-record': text=csv_records_text(matrix+[matrix[-1]],newline)
+    elif kind=='malformed-last': text=csv_records_text(matrix[:-1],newline)+'"unterminated'
+    else: text=csv_records_text(matrix,newline)+'"unterminated'
+    original=csv.field_size_limit()
+    try:
+        csv.field_size_limit(1)
+        rows,error=m._csv_rows(text)
+        if kind=='embedded-at-limit':
+            assert error is None and len(rows)==5
+            assert rows[-1]['verdict']=='PA'+newline+'SS'
+            assert m.compare_csv_view(text,view)['reason']=='csv_view_rows_unreadable'
+        else:
+            assert rows is None
+            assert error==('csv_excess_rows' if kind=='extra-record' else 'csv_evidence_unreadable')
+        assert csv.field_size_limit()==1
+    finally: csv.field_size_limit(original)
+
+
+@pytest.mark.parametrize('size',[20,100,500])
+def test_csv_overflow_stops_after_one_logical_lookahead_without_tail_scan(monkeypatch,size):
+    from benches import x05_reconcile as m
+    original_reader=csv.reader; work=[]
+    class CountedReader:
+        def __init__(self,reader): self.reader=reader
+        def __iter__(self): return self
+        def __next__(self):
+            work.append(1)
+            return next(self.reader)
+    monkeypatch.setattr(m.csv,'reader',lambda *args,**kwargs:CountedReader(original_reader(*args,**kwargs)))
+    _,view=table_fixture()
+    text=','.join(TABLE_COLUMNS)+'\n'+('panels,1,1,0,PASS\n'*size)+'"private-unparsed-tail'
+    assert len(text)<m.MAX_CSV_CHARS
+    previous=csv.field_size_limit()
+    try:
+        csv.field_size_limit(2)
+        result=m.compare_csv_view(text,view)
+        assert result==dict(verdict='UNREADABLE',reason='csv_excess_rows')
+        assert len(work)==1+len(METRICS)+1  # header, five accepted records, one overflow
+        assert 'private-unparsed-tail' not in serialize_result(result)
+        assert csv.field_size_limit()==2
+    finally: csv.field_size_limit(previous)

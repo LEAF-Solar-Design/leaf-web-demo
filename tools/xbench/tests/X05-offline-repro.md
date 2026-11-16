@@ -2884,3 +2884,55 @@ Tests also rotate all 51 offsets of a mixed sequence and count exact linear
 row/count accesses without timing thresholds. Synthetic sequence consistency
 does not prove live UI recommendations or independent report origin, and no
 result accepts live X05.
+
+## CSV structural-repair replay
+
+Within Studio X-bench X05, CSV/view equality and saved-design truth are separate
+checks. Repairing CSV structure must not erase an independent saved-value
+mismatch. The parser already uses strict quote grammar and exact arity; this
+replay and the negative tests preserve those existing boundaries.
+
+```python
+import sys, runpy
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+evidence = fixtures['complete_evidence']()
+evidence['saved_values']['panels'] += 1
+valid = evidence['csv_text']
+records = [list(m.TABLE_COLUMNS)] + [[row[key] for key in m.TABLE_COLUMNS]
+          for row in evidence['view_rows']]
+records[1].append('')
+extra_cell = fixtures['csv_records_text'](records)
+for label, text in [('bad quote', '"synthetic-unclosed'),
+                    ('quote repaired, extra cell', extra_cell),
+                    ('cells repaired', valid)]:
+    evidence['csv_text'] = text
+    result = m.reconcile_offline(evidence)
+    csv_check = result['stages']['csv_view']
+    print(label, result['verdict'], csv_check['verdict'], csv_check['reason'],
+          result['stages']['table']['verdict'])
+```
+
+Expected output:
+
+```text
+bad quote UNREADABLE UNREADABLE csv_evidence_unreadable FAIL
+quote repaired, extra cell UNREADABLE UNREADABLE csv_row_unreadable FAIL
+cells repaired FAIL PASS csv_view_equal FAIL
+```
+
+Unterminated quotes and text after a closing quote produce sanitized UNREADABLE
+results. Missing or surplus header/data cells are rejected, including empty
+surplus cells and trailing delimiters. A quoted newline stays within one logical
+record; an extra record exceeds the five-metric bound. One readable overflow
+record is inspected before the parser stops without consuming the remaining
+tail. Caller field limits are restored on each early return and parse error.
+
+Numeric plain decimal spellings and signed zero are normalized. Exact nonzero
+DC deltas of 1e-77 survive comparison. Textual exponent strings remain outside
+the shared numeric-string grammar in CSV and direct row validation, and are
+named UNREADABLE rather than accepted as equal. These are synthetic supplied
+rows and structural repairs, not proof of live exports, independent saved-design
+acquisition or live X05 acceptance.

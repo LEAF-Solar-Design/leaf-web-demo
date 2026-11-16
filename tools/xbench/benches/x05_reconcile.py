@@ -1775,6 +1775,12 @@ def _csv_limit():
 
 
 def _csv_rows(csv_text):
+    """Read strict quoted logical records with exact header/data arity.
+
+    Accept five metric records and inspect at most one overflow record; never
+    consume the remaining tail after a readable overflow. Restore field limits
+    on malformed quotes, invalid arity and every early return.
+    """
     try:
         with _csv_limit():
             reader = csv.reader(StringIO(csv_text.removeprefix("\ufeff"), newline=""), strict=True)
