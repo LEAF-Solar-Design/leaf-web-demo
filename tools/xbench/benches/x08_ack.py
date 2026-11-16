@@ -5,6 +5,7 @@ Unavailable evidence is not a product failure, and this helper never grades it.
 """
 
 from math import isfinite
+import time
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
@@ -14,7 +15,33 @@ class AckCaptureError(ValueError):
 
 
 def _positive(value):
-    return type(value) in (int, float) and isfinite(value) and value > 0
+    try:
+        return type(value) in (int, float) and isfinite(value) and value > 0
+    except OverflowError:
+        return False
+
+
+def page_origin(url):
+    """Return only the HTTP origin, never credentials, paths or query strings."""
+    try:
+        if not isinstance(url, str):
+            raise ValueError
+        parts = urlsplit(url)
+        if parts.scheme not in ('http', 'https') or not parts.hostname:
+            raise ValueError
+        port = parts.port
+        return (parts.scheme, parts.hostname, port if port is not None else
+                (443 if parts.scheme == 'https' else 80))
+    except ValueError:
+        raise AckCaptureError('Page origin unavailable') from None
+
+
+def run_request_matches(request, url, origin):
+    try:
+        return (request.method == 'POST' and page_origin(url) == origin
+                and urlsplit(url).path == '/api/run')
+    except (ValueError, AttributeError):
+        return False
 
 
 def validate_ack(raw, *, response_status, response_body):
@@ -192,48 +219,88 @@ _CLEANUP = """token => {
 }"""
 
 
-def capture_job_ack(page, control, *, timeout_ms=15000):
+def capture_job_ack(page, control, *, timeout_ms=15000, clock=time.monotonic):
     """Click the supplied final control and collect one actual202 paint interval.
 
     The caller retains ownership of its signed-in browser/context. Action errors
     propagate, while missing or inconsistent measurement evidence refuses capture.
+    One cooperative deadline bounds waits; synchronous Python/body callbacks cannot
+    be preempted. UI queued-strip UUID binding awaits its actual producer.
     """
     if not _positive(timeout_ms):
         raise AckCaptureError('A positive timeout is required')
+    last = None
+
+    def now():
+        nonlocal last
+        value = clock()
+        try:
+            valid = (type(value) in (int, float) and isfinite(value)
+                     and (last is None or value >= last))
+        except OverflowError:
+            valid = False
+        if not valid:
+            raise AckCaptureError('Monotonic finite clock required')
+        last = value
+        return value
+
+    deadline = now() + timeout_ms / 1000
+    if not isfinite(deadline) or not _positive(deadline - last):
+        raise AckCaptureError('Finite deadline required')
+
+    def remaining():
+        value = (deadline - now()) * 1000
+        if not _positive(value):
+            raise AckCaptureError('Acknowledgment deadline exceeded')
+        return value
+
+    origin = page_origin(getattr(page, 'url', None))
     token = str(uuid4())
     failed = True
     try:
+        remaining()
         if not control.evaluate(_INSTALL, token):
             raise AckCaptureError('Another acknowledgment capture is already active')
+        remaining()
         click_failed = False
         try:
             with page.expect_response(
-                    lambda response: response.request.method == 'POST'
-                    and urlsplit(response.url).path == '/api/run',
-                    timeout=timeout_ms) as pending:
+                    lambda response: run_request_matches(response.request, response.url, origin),
+                    timeout=remaining()) as pending:
                 try:
-                    control.click(timeout=timeout_ms)
+                    control.click(timeout=remaining())
                 except Exception:
                     click_failed = True
                     raise
+                remaining()
+            remaining()
             response = pending.value
+            remaining()
         except Exception as exc:
             if click_failed:
                 raise
             raise AckCaptureError('Actual run response unavailable') from exc
+        if not run_request_matches(response.request, response.url, origin):
+            raise AckCaptureError('Actual run response origin unavailable')
         if type(response.status) is not int or response.status != 202:
             raise AckCaptureError('Actual HTTP202 unavailable')
         try:
+            remaining()
             body = response.json()  # Waits for the actual response body.
+            remaining()
         except Exception as exc:
             raise AckCaptureError('Submitted response body unavailable') from exc
         args = {'token': token, 'url': response.url}
         try:
-            page.wait_for_function(_READY, arg=args, timeout=timeout_ms)
+            page.wait_for_function(_READY, arg=args, timeout=remaining())
+            remaining()
         except Exception as exc:
             raise AckCaptureError('Queued paint/resource evidence unavailable') from exc
+        remaining()
         raw = page.evaluate(_SNAPSHOT, args)
+        remaining()
         result = validate_ack(raw, response_status=response.status, response_body=body)
+        remaining()
         failed = False
         return result
     finally:

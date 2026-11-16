@@ -10,19 +10,18 @@ from math import isfinite
 from pathlib import Path
 import re
 import time
-from urllib.parse import urlsplit
 from uuid import uuid4
 
 from xbench_core import Step, write_json_atomic
 from benches.x08_selection import collect_selection, geometry_evidence, validate_selection
-from benches.x08_ack import capture_job_ack, validate_ack
+from benches.x08_ack import capture_job_ack, validate_ack, page_origin, run_request_matches
 from benches.x08_frames import collect_frame_sequence
 from benches.x08_frame_evidence import validate_frame_evidence
 from benches.x08_metrics import score
 
 
 LIMITS = ('Injected or saved samples cannot qualify live evidence. Cooperative deadlines cannot '
-          'preempt arbitrary Python callbacks.')
+          'preempt arbitrary Python callbacks. UI queued-strip UUID binding awaits its producer.')
 
 
 class RuntimeUnavailable(RuntimeError):
@@ -43,7 +42,10 @@ def _require(condition):
 
 
 def _positive(value):
-    return type(value) in (int, float) and isfinite(value) and value > 0
+    try:
+        return type(value) in (int, float) and isfinite(value) and value > 0
+    except OverflowError:
+        return False
 
 
 def _report(sha):
@@ -58,19 +60,19 @@ class _AckObserver:
 
     def __init__(self, page):
         self.page = page
+        self.origin = page_origin(getattr(page, 'url', None))
         self.requests, self.responses, self.installed = [], [], []
 
-    @staticmethod
-    def matches(request):
-        return (request.method == 'POST' and
-                urlsplit(request.url).path == '/api/run')
+    def matches(self, request):
+        return run_request_matches(request, request.url, self.origin)
 
     def request(self, request):
         if self.matches(request):
             self.requests.append(request)
 
     def response(self, response):
-        if self.matches(response.request):
+        if (self.matches(response.request) and
+                run_request_matches(response.request, response.url, self.origin)):
             self.responses.append(response)
 
     def __enter__(self):
@@ -119,6 +121,46 @@ def orchestrate(runtime, *, expected_source_sha, expected_module_handles,
     last_selection_end = -1
     last_ack_paint = -1
     drawing_key = None
+    last_clock = None
+    clock_failed = False
+    budgets_valid = False
+    document = None
+    document_origin = time_origin = None
+
+    def read_clock():
+        nonlocal last_clock, clock_failed
+        if clock_failed:
+            raise RuntimeUnavailable('Clock evidence unavailable')
+        try:
+            value = clock()
+            _require(type(value) in (int, float) and isfinite(value) and
+                     (last_clock is None or value >= last_clock))
+        except BaseException:
+            clock_failed = True
+            raise
+        last_clock = value
+        return value
+
+    def phase_end(start):
+        value = start + phase_timeout_s
+        _require(type(value) in (int, float) and isfinite(value) and value > start)
+        return min(deadline, value)
+
+    def observe_document():
+        if document is None:
+            raise RuntimeUnavailable('Native document observation unavailable')
+        # No URL, handle or page state is retained in the report.
+        try:
+            matches = document.evaluate('(doc) => doc === document')
+            native = runtime.page.evaluate('() => performance.timeOrigin')
+            origin = page_origin(getattr(runtime.page, 'url', None))
+            fact = dict(document_matches=matches is True, time_origin=native
+                        if _positive(native) else None, origin=origin)
+            report['document_observations'].append(fact)
+            _require(matches is True and _positive(native) and
+                     native == time_origin and origin == document_origin)
+        except Exception:
+            raise RuntimeUnavailable('Native document identity unavailable') from None
 
     def error(phase, step, exc):
         report['errors'].append(dict(phase=phase, step=step, type=type(exc).__name__))
@@ -127,7 +169,7 @@ def orchestrate(runtime, *, expected_source_sha, expected_module_handles,
     def teardown_clock():
         nonlocal cancelled
         try:
-            return clock()
+            return read_clock()
         except BaseException as exc:
             error('teardown.clock', list(range(1, 7)), exc)
             if not isinstance(exc, Exception):
@@ -135,32 +177,39 @@ def orchestrate(runtime, *, expected_source_sha, expected_module_handles,
             return None
 
     def remaining():
-        now = clock()
-        _require(type(now) in (int, float) and isfinite(now))
+        now = read_clock()
         left = min(deadline, phase_deadline) - now
+        _require(isfinite(left))
         if left <= 0:
             raise DeadlineExceeded()
         return left
 
     def call(callback, *args, retain=None, **kwargs):
         remaining()
+        observe_document()
+        remaining()
         result = callback(*args, **kwargs)
         if retain is not None:
             retain(deepcopy(result))
+        remaining()
+        observe_document()
         remaining()
         return result
 
     def timeout():
         value = remaining() * 1000
+        _require(_positive(value))
         setter = getattr(runtime.page, 'set_default_timeout', None)
         if callable(setter):
             call(setter, value)
-        return remaining() * 1000
+        value = remaining() * 1000
+        _require(_positive(value))
+        return value
 
     def stage(phase, name, step, operation):
         nonlocal phase_deadline
-        phase_deadline = min(deadline, clock() + phase_timeout_s)
         try:
+            phase_deadline = phase_end(read_clock())
             call(operation)
             return True
         except Exception as exc:
@@ -219,17 +268,27 @@ def orchestrate(runtime, *, expected_source_sha, expected_module_handles,
 
     try:
         _require(_positive(total_timeout_s) and _positive(phase_timeout_s))
-        started = clock()
-        _require(type(started) in (int, float) and isfinite(started))
+        started = read_clock()
         deadline = started + total_timeout_s
-        phase_deadline = min(deadline, started + phase_timeout_s)
-        _require(isfinite(deadline) and isinstance(expected_source_sha, str) and
+        _require(isfinite(deadline) and deadline > started)
+        phase_deadline = phase_end(started)
+        budgets_valid = True
+        _require(isinstance(expected_source_sha, str) and
                  re.fullmatch('[0-9a-f]{40}', expected_source_sha) is not None)
         modules, windows = list(expected_module_handles), list(expected_window_handles)
         _require(bool(modules) and all(isinstance(h, str) and h.strip() for h in modules)
                  and len(set(modules)) == len(modules) and 490 <= len(windows) <= 510
                  and all(isinstance(h, str) and h.strip() for h in windows)
                  and len(set(windows)) == len(windows) and set(windows) <= set(modules))
+        remaining()
+        document_origin = page_origin(getattr(runtime.page, 'url', None))
+        report['document_observations'] = []
+        document = runtime.page.evaluate_handle('() => document')
+        remaining()
+        time_origin = runtime.page.evaluate('() => performance.timeOrigin')
+        _require(_positive(time_origin))
+        observe_document()
+        remaining()
         health('source_before')
 
         def geometry():
@@ -324,8 +383,18 @@ def orchestrate(runtime, *, expected_source_sha, expected_module_handles,
     finally:
         final_started = teardown_clock()
         try:
-            health('source_after', final=True)
-            finished = clock()
+            if budgets_valid and not clock_failed:
+                phase_end(final_started)
+                if document is not None:
+                    observe_document()
+                read_clock()
+                health('source_after', final=True)
+                read_clock()
+                if document is not None:
+                    observe_document()
+            else:
+                raise RuntimeUnavailable('Final health unavailable')
+            finished = read_clock()
             if deadline is not None and (not isfinite(finished) or
                     finished >= deadline or final_started is None or
                     finished - final_started >= phase_timeout_s):
@@ -338,32 +407,49 @@ def orchestrate(runtime, *, expected_source_sha, expected_module_handles,
         finally:
             close_started = teardown_clock()
             try:
-                try:
-                    cleanup = runtime.frame_cleanup()
-                    report['cleanup']['observed'] = deepcopy(cleanup)
-                    if not (isinstance(cleanup, dict) and all(cleanup.get(k) is True for k in
-                            ('recorder_removed', 'element_disposed', 'mouse_released'))):
-                        raise CleanupUnavailable('Owned cleanup unavailable')
-                finally:
-                    runtime.close()
-                    report['cleanup']['closed'] = True
+                cleanup = runtime.frame_cleanup()
+                report['cleanup']['observed'] = deepcopy(cleanup)
+                if not (isinstance(cleanup, dict) and all(cleanup.get(k) is True for k in
+                        ('recorder_removed', 'element_disposed', 'mouse_released'))):
+                    raise CleanupUnavailable('Owned cleanup unavailable')
             except BaseException as exc:
-                report['cleanup'].setdefault('closed', False)
                 error('cleanup', list(range(1, 7)), exc)
                 if not isinstance(exc, Exception):
                     cancelled = cancelled or exc
-            else:
+            if document is not None:
                 try:
-                    finished = clock()
-                    if deadline is not None and (not isfinite(finished) or
-                            finished >= deadline or close_started is None or
-                            finished - close_started >= phase_timeout_s):
-                        raise DeadlineExceeded()
-                except Exception as exc:
-                    error('cleanup.deadline', list(range(1, 7)), exc)
+                    observe_document()
                 except BaseException as exc:
+                    error('cleanup.document', list(range(1, 7)), exc)
+                    if not isinstance(exc, Exception):
+                        cancelled = cancelled or exc
+                try:
+                    # Dispose exactly once, including after failed observations.
+                    document.dispose()
+                    report['cleanup']['document_disposed'] = True
+                except BaseException as exc:
+                    error('cleanup.document', list(range(1, 7)), exc)
+                    if not isinstance(exc, Exception):
+                        cancelled = cancelled or exc
+            try:
+                runtime.close()
+                report['cleanup']['closed'] = True
+            except BaseException as exc:
+                report['cleanup']['closed'] = False
+                error('cleanup', list(range(1, 7)), exc)
+                if not isinstance(exc, Exception):
                     cancelled = cancelled or exc
-                    error('cleanup.deadline', list(range(1, 7)), exc)
+            try:
+                finished = read_clock()
+                if deadline is not None and (not isfinite(finished) or
+                        finished >= deadline or close_started is None or
+                        finished - close_started >= phase_timeout_s):
+                    raise DeadlineExceeded()
+            except Exception as exc:
+                error('cleanup.deadline', list(range(1, 7)), exc)
+            except BaseException as exc:
+                cancelled = cancelled or exc
+                error('cleanup.deadline', list(range(1, 7)), exc)
         warm = report['warm']
         # Completed predecessors remain usable diagnostics after cancellation.
         if warm:

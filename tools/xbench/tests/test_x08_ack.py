@@ -96,11 +96,12 @@ class PendingResponse:
 
 class Page:
     def __init__(self, cleanup_error=False):
+        self.url = 'https://studio.example/project'
         self.cleaned = []
         self.cleanup_error = cleanup_error
 
     def expect_response(self, predicate, *, timeout):
-        assert timeout == 15000
+        assert 0 < timeout <= 15000
         return PendingResponse()
 
     def evaluate(self, script, token):
@@ -133,6 +134,7 @@ def test_unpaintable_queued_timeout_cleans_up_and_preserves_capture_error(cleanu
             pending = PendingResponse()
             pending.value = SimpleNamespace(
                 url='https://studio.example/api/run', status=202,
+                request=SimpleNamespace(method='POST'),
                 json=lambda: {'job_id': JOB, 'status': 'submitted'})
             return pending
 
@@ -196,4 +198,141 @@ def test_capture_uses_actual_post_response_body_before_timing_and_cleans_up():
     result = capture_job_ack(page, control)
     assert result['latency_ms'] == 80
     assert 'private' not in result
+    assert page.cleaned == [control.token]
+
+
+@pytest.mark.parametrize('url', [
+    'https://foreign.example/api/run', 'https://studio.example.evil/api/run',
+    'http://studio.example/api/run', 'https://studio.example:444/api/run',
+    'https://studio.example/api/run/extra',
+])
+def test_capture_rejects_foreign_and_lookalike_response_origins(url):
+    class PredicatePage(Page):
+        def expect_response(self, predicate, *, timeout):
+            request = SimpleNamespace(method='POST')
+            assert predicate(SimpleNamespace(request=request,
+                                             url='https://studio.example:443/api/run'))
+            assert not predicate(SimpleNamespace(request=request, url=url))
+            raise TimeoutError()
+
+    page, control = PredicatePage(), Control()
+    with pytest.raises(AckCaptureError, match='Actual run response unavailable'):
+        capture_job_ack(page, control, clock=lambda: 0)
+    assert page.cleaned == [control.token]
+
+
+@pytest.mark.parametrize('url', [None, '', 'about:blank', 'https://', 'https://host:bad'])
+def test_capture_requires_readable_page_origin(url):
+    page, control = Page(), Control()
+    page.url = url
+    with pytest.raises(AckCaptureError, match='origin'):
+        capture_job_ack(page, control, clock=lambda: 0)
+    assert not page.cleaned
+    assert not hasattr(control, 'token')
+
+
+@pytest.mark.parametrize('origin', ['http://localhost:5173', 'https://staging.example'])
+def test_capture_accepts_actual_staging_origin(origin):
+    class StagingPage(Page):
+        def expect_response(self, predicate, *, timeout):
+            response = SimpleNamespace(url=origin + '/api/run?project=synthetic',
+                                       request=SimpleNamespace(method='POST'), status=202,
+                                       json=lambda: {'job_id': JOB, 'status': 'submitted'})
+            assert predicate(response)
+            pending = PendingResponse()
+            pending.value = response
+            return pending
+
+        def wait_for_function(self, script, *, arg, timeout):
+            pass
+
+        def evaluate(self, script, arg):
+            if isinstance(arg, dict):
+                return evidence()
+            return super().evaluate(script, arg)
+
+    class ClickControl(Control):
+        def click(self, *, timeout):
+            pass
+
+    page, control = StagingPage(), ClickControl()
+    page.url = origin + '/studio'
+    assert capture_job_ack(page, control, clock=lambda: 0)['http_status'] == 202
+    assert page.cleaned == [control.token]
+
+
+@pytest.mark.parametrize('budget', [True, 0, -1, float('nan'), float('inf'), 10 ** 400])
+def test_capture_rejects_invalid_timeout_before_install(budget):
+    control = Control()
+    with pytest.raises(AckCaptureError):
+        capture_job_ack(Page(), control, timeout_ms=budget, clock=lambda: 0)
+    assert not hasattr(control, 'token')
+
+
+@pytest.mark.parametrize('overrun', [None, 'install', 'click', 'response', 'body', 'paint', 'snapshot'])
+def test_one_ack_budget_and_cooperative_overrun_cleanup(overrun):
+    now, waits, sampled = [0.0], [], []
+
+    def advance(stage):
+        now[0] += 20 if overrun == stage else 1
+
+    def body():
+        advance('body')
+        return {'job_id': JOB, 'status': 'submitted'}
+
+    response = SimpleNamespace(url='https://studio.example/api/run',
+                               request=SimpleNamespace(method='POST'), status=202, json=body)
+
+    class BudgetPending(PendingResponse):
+        @property
+        def value(self):
+            advance('response')
+            return response
+
+    class BudgetPage(Page):
+        def expect_response(self, predicate, *, timeout):
+            assert predicate(response)
+            waits.append(('response', timeout))
+            return BudgetPending()
+
+        def wait_for_function(self, script, *, arg, timeout):
+            waits.append(('paint', timeout))
+            advance('paint')
+
+        def evaluate(self, script, arg):
+            if isinstance(arg, dict):
+                sampled.append(True)
+                advance('snapshot')
+                return evidence()
+            return super().evaluate(script, arg)
+
+    class BudgetControl(Control):
+        def evaluate(self, script, token):
+            advance('install')
+            return super().evaluate(script, token)
+
+        def click(self, *, timeout):
+            waits.append(('click', timeout))
+            advance('click')
+
+    page, control = BudgetPage(), BudgetControl()
+    if overrun is None:
+        assert capture_job_ack(page, control, clock=lambda: now[0])['latency_ms'] == 80
+        assert waits == [('response', 14000), ('click', 14000), ('paint', 11000)]
+    else:
+        with pytest.raises(AckCaptureError):
+            capture_job_ack(page, control, clock=lambda: now[0])
+        if overrun != 'snapshot':
+            assert sampled == []
+    assert page.cleaned == [control.token]
+
+
+def test_ack_cancellation_still_cleans_up():
+    class CancelControl(Control):
+        def click(self, *, timeout):
+            raise KeyboardInterrupt()
+
+    page, control = Page(), CancelControl()
+    with pytest.raises(KeyboardInterrupt):
+        capture_job_ack(page, control, clock=lambda: 0)
     assert page.cleaned == [control.token]

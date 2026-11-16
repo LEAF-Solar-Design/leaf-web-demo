@@ -23,10 +23,32 @@ HANDLES = ['module-' + str(index) for index in range(500)]
 
 class Page:
     def __init__(self):
+        self.url = 'https://synthetic.invalid/studio'
+        self.document = object()
+        self.time_origin = 123456.0
+        self.disposals = 0
         self.listeners = {'request': [], 'response': []}
         self.unrelated = lambda event: None
         self.listeners['response'].append(self.unrelated)
         self.timeouts = []
+
+    def evaluate_handle(self, expression):
+        assert expression == '() => document'
+        page, document = self, self.document
+
+        class Handle:
+            def evaluate(self, expression):
+                assert expression == '(doc) => doc === document'
+                return page.document is document
+
+            def dispose(self):
+                page.disposals += 1
+
+        return Handle()
+
+    def evaluate(self, expression):
+        assert expression == '() => performance.timeOrigin'
+        return self.time_origin
 
     def on(self, event, callback):
         self.listeners[event].append(callback)
@@ -137,7 +159,7 @@ class Runtime:
             job = str(UUID(int=1))
         body = dict(status='submitted', job_id=job)
         request = SimpleNamespace(method='POST', url='https://synthetic.invalid/api/run')
-        response = SimpleNamespace(request=request, status=202, json=lambda: body)
+        response = SimpleNamespace(request=request, url=request.url, status=202, json=lambda: body)
         if self.ack_mode != 'missing':
             page.emit('request', request)
         if self.ack_mode == 'unrelated':
@@ -186,6 +208,7 @@ def verdict(report, step):
 def assert_released(runtime):
     assert runtime.closed == 1
     assert runtime.health_calls == 2
+    assert runtime.page.disposals == 1
     assert runtime.page.listeners == {'request': [], 'response': [runtime.page.unrelated]}
     assert runtime.unrelated_resource == {'closed': False}
 
@@ -562,6 +585,214 @@ def test_output_escape_never_writes_or_acquires(tmp_path, monkeypatch):
     assert [r.verdict for r in x08.run(SimpleNamespace(
         source_sha=SHA, out_dir=tmp_path))] == ['UNREADABLE'] * 6
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize('url', [
+    'https://sibling.invalid/api/run', 'https://synthetic.invalid.evil/api/run',
+    'http://synthetic.invalid/api/run', 'https://synthetic.invalid:444/api/run',
+    'https://synthetic.invalid/api/run/extra',
+])
+def test_observer_binds_requests_and_responses_to_page_origin(url):
+    page = Page()
+    good = SimpleNamespace(method='POST', url='https://synthetic.invalid:443/api/run')
+    foreign = SimpleNamespace(method='POST', url=url)
+    response = SimpleNamespace(request=good, url=good.url)
+    with x08._AckObserver(page) as observer:
+        page.emit('request', foreign)
+        page.emit('response', SimpleNamespace(request=foreign, url=url))
+        page.emit('response', SimpleNamespace(request=good, url=url))
+        page.emit('request', SimpleNamespace(method='GET', url=good.url))
+        page.emit('request', good)
+        page.emit('response', response)
+    assert observer.requests == [good]
+    assert observer.responses == [response]
+    assert page.listeners == {'request': [], 'response': [page.unrelated]}
+
+
+@pytest.mark.parametrize('url', [None, '', 'about:blank', 'https://host:bad'])
+def test_missing_page_origin_refuses_before_collection(url):
+    runtime = Runtime()
+    runtime.page.url = url
+    with pytest.raises(ValueError, match='origin'):
+        x08._AckObserver(runtime.page)
+    report = collect(runtime)
+    assert runtime.outputs == []
+    assert [row['verdict'] for row in report['steps']] == ['UNREADABLE'] * 6
+    assert runtime.closed == 1
+
+
+@pytest.mark.parametrize('target', ['action', 'health', 'close'])
+@pytest.mark.parametrize('bad', [-1, True, float('nan'), float('inf')])
+def test_run_wide_clock_guard_retains_predecessors_and_closes(target, bad):
+    runtime = Runtime()
+    if target == 'action':
+        original = runtime.selection
+
+        def changed(*args, **kwargs):
+            row = original(*args, **kwargs)
+            if runtime.serial == 27:  # First warm action, after complete cold evidence.
+                runtime.now = bad
+            return row
+
+        collector = changed
+    else:
+        collector = runtime.selection
+        original = getattr(runtime, 'read_health' if target == 'health' else 'close')
+
+        def changed():
+            result = original()
+            if target == 'close' or runtime.health_calls == 2:
+                runtime.now = bad
+            return result
+
+        setattr(runtime, 'read_health' if target == 'health' else 'close', changed)
+    report = collect(runtime, selection_collector=collector)
+    assert report['cold_run_discarded'] is True
+    assert len(report['cold']['single']) == 20
+    assert all(row['verdict'] == 'UNREADABLE' for row in report['steps'])
+    if target == 'action':
+        assert len(report['warm']['single']) == 1
+        assert report['warm']['valid_single'] == []
+        assert runtime.serial == 27  # A later stage cannot restart the clock budget.
+    assert runtime.closed == runtime.page.disposals == 1
+
+
+@pytest.mark.parametrize('total,phase', [(1e308, 1e307), (1e307, 1e308)])
+def test_finite_deadline_addition_overflow_blocks_all_acquisition(total, phase):
+    runtime = Runtime()
+    runtime.now = 1e308
+    report = collect(runtime, total_timeout_s=total, phase_timeout_s=phase)
+    assert runtime.health_calls == 0
+    assert runtime.outputs == [] and runtime.actions == []
+    assert not runtime.page.timeouts and runtime.page.disposals == 0
+    assert runtime.closed == 1
+    assert report['source_before'] is report['source_after'] is None
+    assert report['errors'][0]['type'] == 'ValueError'
+    assert [row['verdict'] for row in report['steps']] == ['UNREADABLE'] * 6
+
+
+@pytest.mark.parametrize('change', ['document', 'time_origin', 'origin'])
+@pytest.mark.parametrize('target', ['warm', 'final'])
+def test_native_identity_drift_retains_raw_and_refuses_all_steps(change, target):
+    runtime = Runtime()
+
+    def navigate():
+        if change == 'document':
+            runtime.page.document = object()  # Same URL, even same timeOrigin.
+        elif change == 'time_origin':
+            runtime.page.time_origin += 1
+        else:
+            runtime.page.url = 'https://other.invalid/studio'
+
+    if target == 'warm':
+        original = runtime.selection
+
+        def changed(*args, **kwargs):
+            row = original(*args, **kwargs)
+            if runtime.serial == 27:
+                navigate()
+            return row
+
+        collector = changed
+    else:
+        collector = runtime.selection
+        original = runtime.read_health
+
+        def changed():
+            result = original()
+            if runtime.health_calls == 2:
+                navigate()
+            return result
+
+        runtime.read_health = changed
+    report = collect(runtime, selection_collector=collector)
+    assert report['cold_run_discarded'] is True
+    assert len(report['cold']['single']) == 20
+    assert [row['verdict'] for row in report['steps']] == ['UNREADABLE'] * 6
+    if target == 'warm':
+        assert len(report['warm']['single']) == 1
+        assert report['warm']['valid_single'] == []
+    else:
+        assert len(report['samples']['job_ack']) == 10
+    assert runtime.closed == runtime.page.disposals == 1
+    assert 'https://' not in json.dumps(report)
+
+
+@pytest.mark.parametrize('mode', ['unsupported', 'invalid_time', 'dispose', 'navigation_error'])
+def test_document_observation_and_disposal_fail_closed(mode):
+    runtime = Runtime()
+    original = runtime.page.evaluate_handle
+    closed_after_dispose = []
+    close = runtime.close
+
+    def checked_close():
+        closed_after_dispose.append(runtime.page.disposals)
+        close()
+
+    runtime.close = checked_close
+    if mode == 'unsupported':
+        runtime.page.evaluate_handle = None
+    elif mode == 'invalid_time':
+        runtime.page.time_origin = float('nan')
+    else:
+        def handle(expression):
+            result = original(expression)
+            if mode == 'dispose':
+                dispose = result.dispose
+
+                def fail_dispose():
+                    dispose()
+                    raise RuntimeError('secret disposal details')
+
+                result.dispose = fail_dispose
+            else:
+                def fail_evaluate(expression):
+                    raise RuntimeError('secret navigation details')
+
+                result.evaluate = fail_evaluate
+            return result
+
+        runtime.page.evaluate_handle = handle
+    report = collect(runtime)
+    assert [row['verdict'] for row in report['steps']] == ['UNREADABLE'] * 6
+    assert runtime.closed == 1
+    assert closed_after_dispose == [0 if mode == 'unsupported' else 1]
+    assert 'secret' not in json.dumps(report)
+
+
+def test_teardown_cancellation_survives_other_cleanup_failures():
+    runtime = Runtime()
+    original = runtime.frame_cleanup
+    calls = []
+
+    def cleanup():
+        calls.append(True)
+        if len(calls) == 3:  # Two frame helpers precede final cleanup.
+            raise KeyboardInterrupt()
+        return original()
+
+    handle = runtime.page.evaluate_handle
+
+    def document(expression):
+        result = handle(expression)
+        dispose = result.dispose
+
+        def failed_dispose():
+            dispose()
+            raise RuntimeError('secret cleanup detail')
+
+        result.dispose = failed_dispose
+        return result
+
+    runtime.frame_cleanup = cleanup
+    runtime.page.evaluate_handle = document
+    with pytest.raises(KeyboardInterrupt) as caught:
+        collect(runtime)
+    report = caught.value.x08_partial_report
+    assert report['cleanup']['closed'] is True
+    assert all(row['verdict'] == 'UNREADABLE' for row in report['steps'])
+    assert runtime.closed == runtime.page.disposals == 1
+    assert 'secret' not in json.dumps(report)
 
 
 def test_run_uses_factory_handles_and_saves_cancellation(tmp_path, monkeypatch):
