@@ -3,7 +3,114 @@ import argparse
 import copy
 import hashlib
 import json
+import math
+import os
 from pathlib import Path
+import stat
+import sys
+import tempfile
+
+
+MAX_HISTORY_BYTES = 262144
+MAX_JSON_DEPTH = 32
+MAX_JSON_NODES = 10000
+
+
+def validate_json(value, *, max_depth=MAX_JSON_DEPTH, max_nodes=MAX_JSON_NODES):
+    """Count values including root at depth zero; object keys are not nodes."""
+    if (type(max_depth) is not int or not 0 <= max_depth <= MAX_JSON_DEPTH
+            or type(max_nodes) is not int or not 1 <= max_nodes <= MAX_JSON_NODES):
+        raise ValueError('invalid JSON budgets')
+    stack, active, nodes = [(value, 0, False)], set(), 0
+    while stack:
+        item, depth, leaving = stack.pop()
+        if leaving:
+            active.remove(id(item))
+            continue
+        nodes += 1
+        if nodes > max_nodes or depth > max_depth:
+            raise ValueError('history JSON budget exceeded')
+        if type(item) in (list, dict):
+            if id(item) in active:
+                raise ValueError('history JSON cycle')
+            if type(item) is dict and any(type(key) is not str for key in item):
+                raise ValueError('history JSON object keys must be strings')
+            if len(item) > max_nodes - nodes:
+                raise ValueError('history JSON budget exceeded')
+            active.add(id(item))
+            stack.append((item, depth, True))
+            children = item.values() if type(item) is dict else item
+            stack.extend((child, depth + 1, False) for child in children)
+        elif type(item) not in (str, int, float, bool, type(None)) or type(item) is float and not math.isfinite(item):
+            raise ValueError('history must be finite JSON')
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate JSON key')
+        result[key] = value
+    return result
+
+
+def read_history(path):
+    # Reject named pipes/devices before open, then verify the opened descriptor.
+    if not stat.S_ISREG(path.lstat().st_mode):
+        raise ValueError('history must be a regular file')
+    flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_NOFOLLOW', 0)
+    descriptor = os.open(path, flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_HISTORY_BYTES:
+            raise ValueError('history must be a bounded regular file')
+        chunks, size = [], 0
+        while True:
+            chunk = os.read(descriptor, min(65536, MAX_HISTORY_BYTES + 1 - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > MAX_HISTORY_BYTES:
+                raise ValueError('history exceeds byte budget')
+    finally:
+        os.close(descriptor)
+    return json.loads(b''.join(chunks).decode('utf-8'), object_pairs_hook=unique_object)
+
+
+def atomic_publish(path, encoded):
+    descriptor, name = tempfile.mkstemp(prefix='.x07-reducer-', suffix='.tmp', dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, 'w', encoding='utf-8', newline='\n') as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def publish_stdout(encoded):
+    try:
+        print(encoded, end='')
+        sys.stdout.flush()
+        return 0
+    except OSError:
+        with open(os.devnull, 'w') as sink:
+            os.dup2(sink.fileno(), sys.stdout.fileno())
+        return 2
+
+
+def diagnostic(code):
+    publish_stdout(json.dumps({'schema': 'leaf.x07.reducer-diagnostic.v1', 'error': code}) + '\n')
+    return 2
+
+
+class ReducerParser(argparse.ArgumentParser):
+    def error(self, message):
+        diagnostic('INVALID_ARGUMENTS')
+        raise SystemExit(2)
 
 
 class HistoryOracleError(ValueError):
@@ -12,11 +119,12 @@ class HistoryOracleError(ValueError):
         self.diagnostic = {'schema': 'leaf.x07.reducer-diagnostic.v1', 'error': code, 'oracle_calls': calls}
 
 
-def reduce_history(commands, oracle, *, max_calls=128):
+def reduce_history(commands, oracle, *, max_calls=128, max_depth=MAX_JSON_DEPTH, max_nodes=MAX_JSON_NODES):
     if not isinstance(commands, list) or len(commands) > 256:
         raise ValueError('history must be a list of at most256 synthetic commands')
     if type(max_calls) is not int or not 1 <= max_calls <= 4096:
         raise ValueError('oracle call budget must be between1 and4096')
+    validate_json(commands, max_depth=max_depth, max_nodes=max_nodes)
     try:
         encoded = json.dumps(commands, allow_nan=False)
     except (ValueError, TypeError, RecursionError) as error:
@@ -81,32 +189,34 @@ def reduce_history(commands, oracle, *, max_calls=128):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = ReducerParser(description=__doc__)
     parser.add_argument('--history', type=Path)
     parser.add_argument('--out', type=Path)
     parser.add_argument('--max-calls', type=int, default=128)
     args = parser.parse_args()
+    if not 1 <= args.max_calls <= 4096:
+        parser.error('invalid call budget')
     commands = [{'op': 'inspect'}, {'op': 'edit'}, {'op': 'synthetic_failure'}, {'op': 'reopen'}]
     try:
         if args.history:
-            if args.history.stat().st_size > 262144:
-                raise ValueError('history exceeds256KiB')
-            commands = json.loads(args.history.read_text(encoding='utf-8'))
+            commands = read_history(args.history)
         result = reduce_history(commands, lambda rows: 'SYNTHETIC_FAILURE' if any(
             isinstance(row, dict) and row.get('op') == 'synthetic_failure' for row in rows) else None, max_calls=args.max_calls)
     except HistoryOracleError as error:
-        print(json.dumps(error.diagnostic, sort_keys=True))
+        publish_stdout(json.dumps(error.diagnostic, sort_keys=True) + '\n')
         return 2
     except (OSError, ValueError, RecursionError):
-        print(json.dumps({'schema': 'leaf.x07.reducer-diagnostic.v1', 'error': 'INVALID_HISTORY_INPUT'}))
-        return 2
+        return diagnostic('INVALID_HISTORY_INPUT')
     encoded = json.dumps(result, indent=2, allow_nan=False) + '\n'
-    if args.out:
-        if args.history and (args.out.resolve() == args.history.resolve()
-                             or args.out.exists() and args.out.samefile(args.history)):
-            parser.error('output aliases input history')
-        args.out.write_text(encoded, encoding='utf-8')
-    print(encoded, end='')
+    try:
+        if args.out:
+            if args.history and (args.out.resolve() == args.history.resolve()
+                                 or args.out.exists() and args.out.samefile(args.history)):
+                raise ValueError('output aliases input history')
+            atomic_publish(args.out, encoded)
+    except (OSError, ValueError):
+        return diagnostic('OUTPUT_PUBLICATION_FAILED')
+    return publish_stdout(encoded)
 
 
 if __name__ == '__main__':

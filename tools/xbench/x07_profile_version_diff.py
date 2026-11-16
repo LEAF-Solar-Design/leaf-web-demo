@@ -2,6 +2,7 @@
 import argparse
 import copy
 import json
+import os
 from pathlib import Path
 import sqlite3
 import sys
@@ -31,8 +32,19 @@ def compare_versions(store, *, customer_key, profile_id, before_version, after_v
 
 class VersionDiffParser(argparse.ArgumentParser):
     def error(self, message):
-        print(json.dumps({'schema': 'leaf.x07.profile-version-diff.v1', 'error': 'INVALID_ARGUMENTS'}))
+        publish_stdout({'schema': 'leaf.x07.profile-version-diff.v1', 'error': 'INVALID_ARGUMENTS'})
         raise SystemExit(2)
+
+
+def publish_stdout(result):
+    try:
+        print(json.dumps(result, sort_keys=True, indent=2))
+        sys.stdout.flush()
+        return 0
+    except OSError:
+        with open(os.devnull, 'w') as sink:
+            os.dup2(sink.fileno(), sys.stdout.fileno())
+        return 2
 
 
 def main():
@@ -47,10 +59,9 @@ def main():
         result = compare_versions(CustomerProfileStore(args.database, read_only=True), customer_key=args.customer,
                                   profile_id=args.profile_id, before_version=args.before, after_version=args.after)
     except (ValueError, sqlite3.Error):
-        print(json.dumps({'schema': 'leaf.x07.profile-version-diff.v1', 'error': 'SCOPED_VERSIONS_UNAVAILABLE'}))
+        publish_stdout({'schema': 'leaf.x07.profile-version-diff.v1', 'error': 'SCOPED_VERSIONS_UNAVAILABLE'})
         return 2
-    print(json.dumps(result, sort_keys=True, indent=2))
-    return 0
+    return publish_stdout(result)
 
 
 if __name__ == '__main__':
