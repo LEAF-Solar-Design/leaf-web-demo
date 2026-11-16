@@ -44,3 +44,5 @@ These invalid shapes are synthetic fault controls. They are not observed
 output from the native engine. Keep real worker/WASM, strict DXF, database,
 browser and LIVE delivery evidence separate. This change neither proves
 engine rollback nor claims that retaining an old projection would prove it.
+
+The command-chain and drawing-object success fixtures provide nonempty reply bytes and their exact byteLength. This keeps the real worker success shape while preserving every original assertion. The five focused suites pass 165 cases after integrating the atomic-open repair.
