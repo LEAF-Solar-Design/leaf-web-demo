@@ -1225,7 +1225,13 @@ def build_suites() -> List[Suite]:
                   (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_payload_blindness.py").as_posix(),
                   (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_cli_arguments.py").as_posix(),
                   (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_closed_stdout.py").as_posix(),
-                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_workflow_journey.py").as_posix()], 297),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_workflow_journey.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_version_types.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_hashseed.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_schema_failures.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_path_failures.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_backup_restore.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_diff_consistency.py").as_posix()], 304),
         # W5 Rooftop workflow flow (2026-09-24, contracts G34/G34a/G34b): server/solar_workflow_flow.py,
         # the pure progression engine (every step's CanAdvance and HasDrawingPrerequisites, the L1/L2
         # gates on the host's setting, AdvanceStep, GoBack and NavigateToStep Stale marking over the
