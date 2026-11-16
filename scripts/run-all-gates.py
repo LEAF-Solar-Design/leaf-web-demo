@@ -6454,6 +6454,23 @@ def partition_suites(suites: List[Suite], shard_count: int) -> List[List[Suite]]
     return [sorted(b, key=lambda s: index_of[s.id]) for b in bins]
 
 
+def partition_pr_tier_suites(suites: List[Suite], shard_count: int) -> List[List[Suite]]:
+    """Keep LPT membership except for the measured three-shard tier moves."""
+    partitions = partition_suites(suites, shard_count)
+    if shard_count != 3:
+        return partitions
+    placement = {s.id: i for i, shard in enumerate(partitions) for s in shard}
+    for sid, target in {
+        "web-studio-panels-proof": 1,
+        "web-link-service-flow": 2,
+        "web-async-author-stage": 2,
+        "web-author-quota-gate": 2,
+    }.items():
+        if sid in placement:
+            placement[sid] = target
+    return [[s for s in suites if placement[s.id] == i] for i in range(shard_count)]
+
+
 # Source inventory for suites whose conflicts are not expressed by Suite flags
 # or an npm/npx executable. Keep ALL conflicts in ONE group, in catalog order.
 # The server integration fixtures bind :0, not a fixed host port, but the older
@@ -8332,7 +8349,7 @@ def main() -> int:
         suites = select_pr_tier(suites, tier)
         if args.shard_index is not None:
             tier_suites = suites
-            partition = partition_suites(suites, args.shard_count)[args.shard_index]
+            partition = partition_pr_tier_suites(suites, args.shard_count)[args.shard_index]
             try:
                 local_ids = pr_tier_closure({s.id for s in partition}, {s.id for s in tier_suites},
                                            tier.get("prerequisites"))
