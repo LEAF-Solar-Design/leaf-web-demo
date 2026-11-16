@@ -12,6 +12,57 @@ const first = () => screen.getByRole('checkbox', { name: 'Design / Panel A: 12 c
 const second = () => screen.getByRole('checkbox', { name: 'Alternate / Panel B: 9 candidates' })
 const submit = () => screen.getByRole('button', { name: 'Count selected set' })
 
+it.each(['per-set mismatch', 'total exceeds sum'])('refuses inconsistent summary %s', (kind) => {
+  const selected_sets = kind === 'per-set mismatch' ? [{ ...data.sets[0], count: 11 }] : data.sets
+  const count = kind === 'per-set mismatch' ? 11 : 22
+  render(<ModuleSetPicker data={{ ...data, selected_sets, count }} onSelect={vi.fn()} />)
+  expect(screen.getByText(/Count summary unavailable/)).toBeTruthy()
+  expect(screen.queryByText(/^Counted /)).toBeNull()
+})
+
+it('allows a physical-union total smaller than overlapping candidate sums', () => {
+  render(<ModuleSetPicker data={{ ...data, selected_sets: data.sets, count: 12 }} onSelect={vi.fn()} />)
+  expect(screen.getByText('Counted 12 modules on Design / Panel A, Alternate / Panel B.')).toBeTruthy()
+})
+
+it('shows actionable synchronous callback failure and preserves choices for retry', () => {
+  const onSelect = vi.fn().mockImplementationOnce(() => { throw new Error('private internal detail') }).mockImplementationOnce(() => {})
+  render(<ModuleSetPicker data={data} onSelect={onSelect} />)
+  fireEvent.click(second())
+  fireEvent.click(submit())
+  expect(onSelect).toHaveBeenCalledExactlyOnceWith(['second'])
+  expect(second().checked).toBe(true)
+  expect(screen.getByRole('alert').textContent).toBe('Unable to start module count. Try counting the selected set again.')
+  expect(screen.queryByText(/private internal detail/)).toBeNull()
+  fireEvent.click(submit())
+  expect(onSelect).toHaveBeenCalledTimes(2)
+  expect(onSelect).toHaveBeenLastCalledWith(['second'])
+  expect(screen.queryByRole('alert')).toBeNull()
+  expect(second().checked).toBe(true)
+})
+
+it('announces running, unavailable summary and completed status without moving checkbox focus', () => {
+  const onSelect = vi.fn()
+  const view = render(<ModuleSetPicker data={data} onSelect={onSelect} />)
+  const focused = first()
+  focused.focus()
+  fireEvent.click(focused)
+  view.rerender(<ModuleSetPicker data={data} onSelect={onSelect} running />)
+  expect(screen.getByRole('status').getAttribute('aria-live')).toBe('polite')
+  expect(screen.getByRole('status').textContent).toContain('Counting modules.')
+  expect(document.activeElement).toBe(focused)
+  fireEvent.click(submit())
+  expect(onSelect).not.toHaveBeenCalled()
+  view.rerender(<ModuleSetPicker data={{ ...data, selected_sets: [data.sets[0]], count: -1 }} onSelect={onSelect} />)
+  expect(screen.getByRole('status').textContent).toContain('Count summary unavailable')
+  expect(document.activeElement).toBe(focused)
+  view.rerender(<ModuleSetPicker data={{ ...data, selected_sets: [data.sets[0]], count: 12 }} onSelect={onSelect} />)
+  expect(screen.getByRole('status').textContent).toContain('Counted 12 modules')
+  expect(document.activeElement).toBe(focused)
+  fireEvent.click(submit())
+  expect(onSelect).toHaveBeenCalledExactlyOnceWith(['first'])
+})
+
 it('gives identical labels unique input IDs and independent explicit associations', () => {
   const onSelect = vi.fn()
   const sets = [{ ...data.sets[0], set_id: 'same-label-a' }, { ...data.sets[0], set_id: 'same-label-b' }]

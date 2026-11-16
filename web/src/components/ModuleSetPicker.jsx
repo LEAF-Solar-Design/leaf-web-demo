@@ -6,6 +6,8 @@ export default function ModuleSetPicker({ data, drawingKey, onSelect, running = 
   const pickerId = useId()
   const inputId = (id) => `${pickerId}-set-${encodeURIComponent(id)}`
   const [selection, setSelection] = useState({ drawingKey, choices: [] })
+  const [submitError, setSubmitError] = useState(null)
+  if (submitError && submitError.drawingKey !== drawingKey) setSubmitError(null)
   const hasSummary = data?.selected_sets !== undefined && (!Array.isArray(data.selected_sets) || data.selected_sets.length > 0)
   // App only supplies this callback when the result origin is the current drawing.
   const staleResult = hasSummary && !onSelect
@@ -16,6 +18,7 @@ export default function ModuleSetPicker({ data, drawingKey, onSelect, running = 
       || (row.block !== undefined && typeof row.block !== 'string') || !validCount(row.count))
   const sets = unavailable ? [] : rows
   const available = new Set(sets.map((set) => set.set_id))
+  const candidateCounts = new Map(sets.map((set) => [set.set_id, set.count]))
   const choices = selection.drawingKey === drawingKey ? selection.choices.filter((id) => available.has(id)) : []
   if (selection.drawingKey !== drawingKey || choices.length !== selection.choices.length) {
     setSelection({ drawingKey, choices })
@@ -26,7 +29,17 @@ export default function ModuleSetPicker({ data, drawingKey, onSelect, running = 
     && !unavailable && new Set(summaryIds).size === summaryIds.length
     && validCount(data.count) && data.selected_sets.every((set) => set !== null && typeof set === 'object'
       && typeof set.set_id === 'string' && available.has(set.set_id) && typeof set.layer === 'string'
-      && typeof set.block === 'string' && validCount(set.count))
+      && typeof set.block === 'string' && validCount(set.count) && set.count === candidateCounts.get(set.set_id))
+    && data.count <= data.selected_sets.reduce((sum, set) => sum + set.count, 0)
+  const submitSelection = () => {
+    if (unavailable || !selected.length || running || !onSelect) return
+    try {
+      onSelect(selected.map((set) => set.set_id))
+      setSubmitError(null)
+    } catch {
+      setSubmitError({ drawingKey, message: 'Unable to start module count. Try counting the selected set again.' })
+    }
+  }
   return <fieldset disabled={unavailable || running || !onSelect}>
     <legend>Module set</legend>
     <p>Choose the intended design set. These candidates come from this drawing.</p>
@@ -34,21 +47,28 @@ export default function ModuleSetPicker({ data, drawingKey, onSelect, running = 
       {sets.map((set) => <li key={set.set_id}><label htmlFor={inputId(set.set_id)}>
         <input id={inputId(set.set_id)} type="checkbox" checked={choices.includes(set.set_id)}
           onChange={(event) => {
-            if (!running && onSelect) setSelection({ drawingKey, choices: event.target.checked
-              ? [...choices, set.set_id] : choices.filter((id) => id !== set.set_id) })
+            if (!running && onSelect) {
+              setSubmitError(null)
+              setSelection({ drawingKey, choices: event.target.checked
+                ? [...choices, set.set_id] : choices.filter((id) => id !== set.set_id) })
+            }
           }} />
         {set.layer}{set.block ? ` / ${set.block}` : ' / closed four-corner shapes'}: {set.count} candidates
       </label></li>)}
     </ul>
     <button type="button" className="chip-act" disabled={unavailable || !selected.length || running || !onSelect}
-      onClick={() => { if (!unavailable && selected.length && !running && onSelect) onSelect(selected.map((set) => set.set_id)) }}>
+      onClick={submitSelection}>
       Count selected set
     </button>
+    <div role="status" aria-live="polite" aria-atomic="true">
+    {running && <p>Counting modules.</p>}
     {unavailable ? <p>Module sets unavailable. Run the module tool again to refresh valid, unique set IDs.</p>
       : !staleResult && !sets.length && <p>No module candidates were found.</p>}
     {!onSelect && <p>Run the module tool on the current drawing to choose a set.</p>}
-    {hasSummary && !staleResult && (validSummary ? <p>Counted {data.count} modules on {data.selected_sets.map((set) =>
+    {hasSummary && !staleResult && !running && (validSummary ? <p>Counted {data.count} modules on {data.selected_sets.map((set) =>
       `${set.layer}${set.block ? ` / ${set.block}` : ''}`).join(', ')}.</p>
       : <p>Count summary unavailable. Run the module tool again to refresh the result.</p>)}
+    </div>
+    {submitError && submitError.drawingKey === drawingKey && <p role="alert">{submitError.message}</p>}
   </fieldset>
 }
