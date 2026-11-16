@@ -1239,6 +1239,10 @@ def test_optional_bom_presence_requires_complete_agreement(manifest_bom, bytes_b
     preserved = deepcopy(envelope)
     result = reconcile_assurance_json(json.dumps(envelope))
     assert result["verdict"] == ("PASS" if manifest_bom == bytes_bom == binding_bom else "UNREADABLE")
+    if not manifest_bom and bytes_bom:
+        assert result["reason"] == "input_hex_roles_unreadable"
+        assert envelope == preserved
+        return
     checks = result["checks"]
     assert checks["input_bytes"]["reason"] == ("supplied_input_bytes_equal" if manifest_bom == bytes_bom else "input_bytes_missing")
     assert checks["provenance"]["provenance"]["reason"] == ("supplied_provenance_equal" if manifest_bom == binding_bom else "stage_binding_conflict")
@@ -1271,6 +1275,156 @@ def test_provenance_aggregate_subprocess_bytes_deterministic_with_simultaneous_c
                 input=json.dumps(payload).encode(), capture_output=True, cwd=tmp_path, timeout=20,
                 env={"PYTHONHASHSEED": seed, "SystemRoot": "C:\\Windows"})
             assert result.returncode == 4 and not result.stderr
+            outputs.append(result.stdout)
+    assert len(set(outputs)) == 1
+
+
+@pytest.mark.parametrize("assured", [False, True])
+def test_duplicate_identity_never_passes_regardless_of_invalid_record_order(assured):
+    expected, records = assurance_records() if assured else provenance_records()
+    aggregate = aggregate_assurance if assured else aggregate_provenance
+    baseline = aggregate(expected, records)
+    valid = records[0]
+    unbound = deepcopy(valid)
+    unbound["evidence"]["fixture_id"] = "foreign"
+    malformed = dict(fixture_id=expected[0], evidence=None)
+    for ordering in permutations([valid, unbound, malformed]):
+        result = aggregate(expected, list(ordering) + records[1:])
+        assert result["verdict"] == "UNREADABLE"
+        assert expected[0] not in result["fixtures"]
+        for key in expected[1:]:
+            assert result["fixtures"][key] == baseline["fixtures"][key]
+    for bad in (unbound, malformed):
+        for ordering in permutations([valid, bad]):
+            result = aggregate(expected, list(ordering) + records[1:])
+            assert expected[0] not in result["fixtures"]
+
+
+@pytest.mark.parametrize("payload", ["", "zz", "0" * 40000, None, []], ids=["empty", "nonhex", "oversized", "null", "list"])
+def test_foreign_hex_role_rejected_before_any_decoding(payload, monkeypatch):
+    from benches import x05_reconcile as module
+    envelope = assurance_envelope()
+    envelope["inputs_hex"]["synthetic_private_canary"] = payload
+    preserved = deepcopy(envelope)
+    class ForbiddenBytes:
+        @staticmethod
+        def fromhex(value):
+            pytest.fail("Foreign roles must fail before decoding any payload")
+    monkeypatch.setattr(module, "bytes", ForbiddenBytes, raising=False)
+    assert reconcile_assurance_json(json.dumps(envelope)) == {
+        "verdict": "UNREADABLE", "reason": "input_hex_roles_unreadable"}
+    assert envelope == preserved
+
+
+def cli_payload(mode):
+    if mode == "--provenance":
+        manifest, bindings, _ = provenance_fixture()
+        return dict(evidence=complete_evidence(), manifest=manifest, bindings=bindings)
+    if mode == "--assurance":
+        return assurance_envelope()
+    expected, records = assurance_records() if mode == "--assurance-aggregate" else provenance_records()
+    return dict(expected_ids=expected, fixtures=records)
+
+
+@pytest.mark.parametrize("mode,decoder", [
+    ("--provenance", reconcile_provenance_json), ("--assurance", reconcile_assurance_json),
+    ("--provenance-aggregate", aggregate_provenance_json), ("--assurance-aggregate", aggregate_assurance_json)])
+@pytest.mark.parametrize("character", ["x", "\U0001f642"])
+def test_new_mode_character_and_byte_limits_match_direct_decoder(tmp_path, mode, decoder, character):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from benches import x05_reconcile as module
+    payload = cli_payload(mode)
+    evidence = payload["evidence"] if "evidence" in payload else payload["fixtures"][0]["evidence"]
+    evidence["notes"] = ""
+    base = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    def run(padding, expected_exit):
+        evidence["notes"] = padding
+        text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        result = subprocess.run([sys.executable, "-P", str(Path(module.__file__).resolve()), mode],
+            input=text.encode("utf-8"), capture_output=True, cwd=tmp_path, timeout=20)
+        assert result.returncode == expected_exit and not result.stderr
+        assert len(result.stdout.splitlines()) == 1
+        assert json.loads(result.stdout) == json.loads(serialize_result(decoder(text)))
+        return text
+    for extra in (0, 1):
+        text = run(character * (MAX_JSON_CHARS + extra - len(base)), 4 if extra else 0)
+        assert len(text) == MAX_JSON_CHARS + extra
+    width = len(character.encode("utf-8"))
+    for extra in (0, 1):
+        remaining = 4 * MAX_JSON_CHARS + extra - len(base.encode("utf-8"))
+        text = run(character * (remaining // width) + "x" * (remaining % width), 4)
+        assert len(text.encode("utf-8")) == 4 * MAX_JSON_CHARS + extra
+
+
+@pytest.mark.parametrize("mode", ["--provenance", "--assurance", "--provenance-aggregate", "--assurance-aggregate"])
+@pytest.mark.parametrize("failure", ["write", "flush", "pipe"])
+def test_new_modes_output_failures_exit_five_without_tracebacks(tmp_path, monkeypatch, mode, failure):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from io import BytesIO
+    from types import SimpleNamespace
+    from benches import x05_reconcile as module
+    raw = json.dumps(cli_payload(mode)).encode()
+    if failure != "pipe":
+        class BrokenOutput:
+            writes = flushes = 0
+            def write(self, value):
+                self.writes += 1
+                if failure == "write":
+                    raise BrokenPipeError("synthetic_private_canary")
+                return len(value)
+            def flush(self):
+                self.flushes += 1
+                raise BrokenPipeError("synthetic_private_canary")
+        output, errors = BrokenOutput(), StringIO()
+        monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=BytesIO(raw)))
+        monkeypatch.setattr(sys, "stdout", output)
+        monkeypatch.setattr(sys, "stderr", errors)
+        assert module.main([mode]) == 5 and not errors.getvalue()
+        assert output.writes == 1 and output.flushes == (1 if failure == "flush" else 0)
+    else:
+        child = subprocess.Popen([sys.executable, "-P", str(Path(module.__file__).resolve()), mode],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=tmp_path)
+        try:
+            child.stdout.close()
+            child.stdout = None
+            _, errors = child.communicate(raw, timeout=20)
+            assert child.returncode == 5 and not errors
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=10)
+            for stream in (child.stdin, child.stdout, child.stderr):
+                if stream is not None:
+                    stream.close()
+
+
+def test_assurance_aggregate_cli_deterministic_with_simultaneous_conflicts(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from benches import x05_reconcile as module
+    expected, records = assurance_records()
+    records[0]["inputs_hex"]["report"] = b"substituted".hex()
+    records[0]["stage_identities"]["csv"]["version_id"] = "foreign"
+    records[1]["evidence"]["recommendations"][0]["group_count"] = 1
+    outputs = []
+    for seed in ("0", "73"):
+        for reverse in (False, True):
+            changed = deepcopy(records)
+            if reverse:
+                changed.reverse()
+                for row in changed:
+                    row["inputs_hex"] = dict(reversed(list(row["inputs_hex"].items())))
+                    row["stage_identities"] = dict(reversed(list(row["stage_identities"].items())))
+            result = subprocess.run([sys.executable, "-P", str(Path(module.__file__).resolve()), "--assurance-aggregate"],
+                input=json.dumps(dict(expected_ids=expected, fixtures=changed)).encode(), capture_output=True,
+                cwd=tmp_path, timeout=20, env={"PYTHONHASHSEED": seed, "SystemRoot": "C:\\Windows"})
+            assert result.returncode == 4 and not result.stderr
+            assert json.loads(result.stdout)["fixtures"][expected[2]]["verdict"] == "PASS"
             outputs.append(result.stdout)
     assert len(set(outputs)) == 1
 

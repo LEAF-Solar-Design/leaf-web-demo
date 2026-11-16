@@ -148,19 +148,21 @@ def _aggregate_envelope_diagnostics(coverage, expected_ids, fixtures, *, assured
             or any(type(key) is not str or not key.strip() or len(key) > 128 for key in expected_ids)
             or len(set(expected_ids)) != 3 or type(fixtures) is not list):
         return coverage
-    errors, count, indexed, duplicated = [], 0, {}, set()
+    errors, count, indexed, duplicated, seen = [], 0, {}, set(), set()
     for index, row in enumerate(fixtures):
         key = row.get("fixture_id") if type(row) is dict else None
         reason = None
         if type(key) is not str or key not in expected_ids:
             reason = "fixture_envelope_unreadable"
-        elif key in indexed:
+        elif key in seen:
             duplicated.add(key)
             reason = "duplicate_fixture_id"
-        elif type(row.get("evidence")) is not dict or row["evidence"].get("fixture_id") != key:
-            reason = "fixture_identity_unbound"
         else:
-            indexed[key] = row
+            seen.add(key)
+            if type(row.get("evidence")) is not dict or row["evidence"].get("fixture_id") != key:
+                reason = "fixture_identity_unbound"
+            else:
+                indexed[key] = row
         if reason:
             count += 1
             if len(errors) < MAX_ENVELOPE_EXAMPLES:
@@ -219,7 +221,11 @@ def _assurance_envelope(envelope, *, fixture_record=False):
         fields.add("fixture_id")
     if type(envelope) is not dict or set(envelope) != fields:
         return _out("UNREADABLE", "assurance_envelope_unreadable")
+    if not _fixture_binding(envelope["manifest"]):
+        return _out("UNREADABLE", "frozen_manifest_unreadable")
     encoded = envelope["inputs_hex"]
+    if type(encoded) is dict and set(encoded) - set(envelope["manifest"]["inputs"]):
+        return _out("UNREADABLE", "input_hex_roles_unreadable")
     if (type(encoded) is not dict or any(type(value) is not str or len(value) % 2
             or re.fullmatch(r"[0-9a-fA-F]*", value) is None for value in encoded.values())):
         return _out("UNREADABLE", "input_hex_unreadable")

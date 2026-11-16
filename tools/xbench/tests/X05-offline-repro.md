@@ -519,6 +519,54 @@ The readable PASS sibling remains visible beside both failures. All supplied
 bytes are synthetic; no network, customer file or authenticated-origin claim is
 involved. Aggregate precedence does not erase sibling diagnostics or accept X05.
 
+Foreign `inputs_hex` roles now reject as `input_hex_roles_unreadable` before any
+payload is decoded. Aggregate duplicate tracking counts every occurrence of an
+expected fixture ID, including malformed or unbound occurrences. Ambiguous
+fixtures cannot appear as PASS; unaffected unique siblings retain their results.
+
+Executable malformed-envelope recovery (synthetic source-only builder, requires
+pytest; each comparison receives JSON only through stdin):
+
+```powershell
+@'
+import sys, runpy, json, subprocess
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+expected, rows = fixtures['assurance_records']()
+base = dict(expected_ids=expected, fixtures=rows)
+foreign = deepcopy(base)
+foreign['fixtures'][0]['inputs_hex']['foreign'] = 'zz'
+duplicate = deepcopy(base)
+duplicate['fixtures'].insert(0, dict(fixture_id=expected[0], evidence=None))
+command = [sys.executable, '-P', 'tools/xbench/benches/x05_reconcile.py', '--assurance-aggregate']
+for name, envelope, code in [('foreign', foreign, 4), ('duplicate', duplicate, 4), ('corrected', base, 0)]:
+    result = subprocess.run(command, input=json.dumps(envelope).encode(), capture_output=True, timeout=20)
+    assert result.returncode == code and not result.stderr
+    value = json.loads(result.stdout)
+    if name == 'foreign':
+        detail = value['fixtures'][expected[0]]['reason']
+    elif name == 'duplicate':
+        assert expected[0] not in value['fixtures']
+        assert value['fixtures'][expected[1]]['verdict'] == 'PASS'
+        detail = value['reason']
+    else:
+        detail = ','.join(value['fixtures'][key]['verdict'] for key in expected)
+    print(name, result.returncode, value['verdict'], detail)
+'@ | python -P
+```
+
+Exact stdout:
+
+```text
+foreign 4 UNREADABLE input_hex_roles_unreadable
+duplicate 4 UNREADABLE fixture_coverage_unreadable
+corrected 0 PASS PASS,PASS,PASS
+```
+
+No network or customer input is used. The source-only builder creates synthetic
+claims; the successful recovery does not authenticate their origin or accept X05.
+
 Canonical snapshot compatibility contract:
 
 - Hash UTF-8 bytes of compact JSON arrays with ASCII escapes and no spaces.
