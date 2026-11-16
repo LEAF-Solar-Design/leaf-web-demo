@@ -8106,3 +8106,109 @@ def test_grouping_cap_boundary_direct_strict_json_bound_cli_agree(tmp_path,count
     assert parsed['fixtures'][expected[0]]['verdict']=='FAIL'
     assert all(parsed['fixtures'][key]['verdict']=='PASS' for key in expected[1:])
     assert records==original
+
+
+def stable_grouping_weave(left,right,schedule):
+    sources=[left,right]; cursors=[0,0]; origins=[]; rows=[]
+    while any(cursors[source]<len(sources[source]) for source in (0,1)):
+        for source in schedule:
+            index=cursors[source]
+            if index<len(sources[source]):
+                origins.append((source,index)); rows.append(sources[source][index]); cursors[source]+=1
+    return rows,origins
+
+
+@pytest.mark.parametrize('schedule',[(0,1),(0,0,1),(0,1,1,1)])
+@pytest.mark.parametrize('report',[1,2,3])
+def test_grouping_stable_weaves_match_explicit_origin_reference(schedule,report):
+    from benches import x05_reconcile as m
+    counts=([1,2,3]*13,[2,3,1]*9)
+    left,right=([dict(group_count=value) for value in values] for values in counts)
+    original=deepcopy((left,right))
+    rows,origins=stable_grouping_weave(left,right,schedule)
+    assert [index for source,index in origins if source==0]==list(range(len(left)))
+    assert [index for source,index in origins if source==1]==list(range(len(right)))
+    expected=[position for position,(source,index) in enumerate(origins) if counts[source][index]!=report]
+    result=m.compare_recommendations(report,rows)
+    assert result['verdict']=='FAIL'
+    assert result['mismatch_count']==len(expected)==sum(value!=report for values in counts for value in values)
+    assert result['mismatched_recommendations']==expected[:MAX_RECOMMENDATION_EXAMPLES]
+    assert (left,right)==original
+
+
+@pytest.mark.parametrize('report',[1,2,3])
+def test_grouping_reversal_uses_full_reference_positions_beyond_cap(report):
+    from benches import x05_reconcile as m
+    counts=[1,2,3,2]*17; rows=[dict(group_count=value) for value in counts]
+    original=deepcopy(rows); before=m.compare_recommendations(report,rows); preserved=deepcopy(before)
+    full=[index for index,value in enumerate(counts) if value!=report]
+    expected=sorted(len(rows)-1-index for index in full)
+    result=m.compare_recommendations(report,list(reversed(rows)))
+    assert len(full)>MAX_RECOMMENDATION_EXAMPLES
+    assert result['mismatch_count']==before['mismatch_count']==len(full)
+    assert result['mismatched_recommendations']==expected[:MAX_RECOMMENDATION_EXAMPLES]
+    assert result['mismatched_recommendations']!=sorted(len(rows)-1-index for index in before['mismatched_recommendations'])[:MAX_RECOMMENDATION_EXAMPLES]
+    assert before==preserved and rows==original
+
+
+def test_grouping_every_cyclic_offset_remaps_full_positions_and_new_cap():
+    from benches import x05_reconcile as m
+    counts=[1,2,3]*17; rows=[dict(group_count=value) for value in counts]
+    full=[index for index,value in enumerate(counts) if value!=2]
+    original=deepcopy(rows); history=[]; frozen=[]
+    for offset in range(len(rows)):
+        rotated=rows[offset:]+rows[:offset]
+        expected=sorted((index-offset)%len(rows) for index in full)
+        supplied=deepcopy(rotated); result=m.compare_recommendations(2,rotated)
+        assert result['mismatch_count']==len(full)==34
+        assert result['mismatched_recommendations']==expected[:MAX_RECOMMENDATION_EXAMPLES]
+        assert rotated==supplied
+        history.append(result); frozen.append(deepcopy(result))
+    assert history==frozen and rows==original
+    assert len({tuple(result['mismatched_recommendations']) for result in history})>1
+
+
+@pytest.mark.parametrize('size',[10,100,1000])
+@pytest.mark.parametrize('mode',['valid','mismatch','late-invalid'])
+def test_grouping_recommendation_access_is_exactly_linear(size,mode):
+    from benches import x05_reconcile as m
+    work=dict(iterated=0,gets=0)
+    class Row(dict):
+        def get(self,*args):
+            work['gets']+=1
+            return super().get(*args)
+    class Rows(list):
+        def __iter__(self):
+            for row in super().__iter__():
+                work['iterated']+=1
+                yield row
+    values=[2 if mode=='valid' else 1 for _ in range(size)]
+    if mode=='late-invalid': values[-1]=True
+    rows=Rows(Row(group_count=value) for value in values)
+    result=m.compare_recommendations(2,rows)
+    assert work==dict(iterated=size,gets=size)
+    assert result['verdict']==dict(valid='PASS',mismatch='FAIL',**{'late-invalid':'UNREADABLE'})[mode]
+    if mode!='late-invalid': assert result['mismatch_count']==(0 if mode=='valid' else size)
+    assert [dict.get(row,'group_count') for row in list.__iter__(rows)]==values
+
+
+def test_grouping_shared_rows_refresh_only_sharing_fixtures_and_preserve_prior():
+    from benches import x05_reconcile as m
+    expected,records=bound_seven_fixture_records()
+    shared=dict(group_count=2)
+    for record in records[:2]:
+        record['envelope']['assurance']['evidence']['recommendations']=[shared]
+    baseline=m.aggregate_bound_seven_steps(expected,records); frozen=deepcopy(baseline)
+    assert baseline['verdict']=='PASS'
+    shared['group_count']=1
+    supplied=deepcopy(records); result=m.aggregate_bound_seven_steps(expected,records)
+    for key in expected[:2]:
+        grouping=result['fixtures'][key]['reconciliation']['steps']['4']
+        assert grouping['verdict']=='FAIL' and grouping['mismatch_count']==1 and grouping['mismatched_recommendations']==[0]
+        assert result['fixtures'][key]['verdict']=='FAIL'
+    assert result['fixtures'][expected[2]]==baseline['fixtures'][expected[2]]
+    assert records==supplied and baseline==frozen
+    assert all(record['envelope']['assurance']['evidence']['recommendations'][0] is shared for record in records[:2])
+    preserved=deepcopy(result)
+    shared['group_count']=2
+    assert m.aggregate_bound_seven_steps(expected,records)==baseline and result==preserved
