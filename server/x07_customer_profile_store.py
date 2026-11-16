@@ -23,6 +23,12 @@ class ProfileScopeError(ValueError):
     pass
 
 
+def _check_connection(db):
+    if (db.execute('PRAGMA foreign_keys').fetchone()[0] != 1
+            or db.execute('PRAGMA read_uncommitted').fetchone()[0] != 0):
+        raise ProfileSchemaError('unsafe SQLite connection settings')
+
+
 def _key(value):
     if not isinstance(value, str) or not value or value != value.strip() or len(value) > 200:
         raise ValueError('an explicit nonempty key of at most 200 characters is required')
@@ -36,6 +42,7 @@ class CustomerProfileStore:
         self.path = Path(path)
         self.read_only = read_only
         with self._connection() as db:
+            _check_connection(db)
             if not read_only: db.execute('BEGIN IMMEDIATE')
             version = db.execute('PRAGMA user_version').fetchone()[0]
             tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
@@ -122,9 +129,11 @@ class CustomerProfileStore:
     def _connection(self):
         db = (sqlite3.connect(self.path.resolve().as_uri()+'?mode=ro', uri=True, timeout=5)
               if self.read_only else sqlite3.connect(self.path, timeout=5))
-        db.row_factory = sqlite3.Row
-        db.execute('PRAGMA foreign_keys=ON')
         try:
+            db.row_factory = sqlite3.Row
+            db.execute('PRAGMA foreign_keys=ON')
+            db.execute('PRAGMA read_uncommitted=OFF')
+            _check_connection(db)
             with db:
                 yield db
         finally:
@@ -165,6 +174,7 @@ class CustomerProfileStore:
         if expected_version is not None and (type(expected_version) is not int or not 0 <= expected_version <= MAX_PROFILE_VERSION):
             raise ValueError('expected version must be a nonnegative safe integer')
         with self._connection() as db:
+            _check_connection(db)
             db.execute('BEGIN IMMEDIATE')
             latest = db.execute('SELECT * FROM profile_versions WHERE customer_key=? ORDER BY version DESC LIMIT 1',
                                 (customer_key,)).fetchone()
@@ -184,6 +194,7 @@ class CustomerProfileStore:
 
     def latest(self, customer_key):
         with self._connection() as db:
+            _check_connection(db)
             return self._profile(db.execute('SELECT * FROM profile_versions WHERE customer_key=? ORDER BY version DESC LIMIT 1',
                                            (_key(customer_key),)).fetchone())
 
@@ -198,6 +209,7 @@ class CustomerProfileStore:
                 raise ValueError('project is pinned to another version')
             return result
         with self._connection() as db:
+            _check_connection(db)
             db.execute('BEGIN IMMEDIATE')
             applied = db.execute('SELECT * FROM project_applications WHERE project_key=?', (project_key,)).fetchone()
             if applied and applied['customer_key'] != customer_key:
@@ -232,4 +244,5 @@ class CustomerProfileStore:
 
     def application_record(self, project_key, customer_key):
         with self._connection() as db:
+            _check_connection(db)
             return self._application(db, _key(project_key), _key(customer_key))
