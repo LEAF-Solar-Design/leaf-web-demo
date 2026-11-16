@@ -564,7 +564,8 @@ def reconcile_bound_seven_steps_json(text):
 
 def _bound_seven_step_envelope(envelope):
     if type(envelope) is not dict or set(envelope) != {"envelope", "manifest", "import_binding", "grid_binding"}:
-        return _out("UNREADABLE", "bound_seven_step_envelope_unreadable")
+        evidence = envelope.get("envelope") if type(envelope) is dict else None
+        return _out("UNREADABLE", "bound_seven_step_envelope_unreadable", reconciliation=_seven_step_envelope(evidence))
     return reconcile_bound_seven_steps(envelope["envelope"], envelope["manifest"],
                                       envelope["import_binding"], envelope["grid_binding"])
 
@@ -585,6 +586,16 @@ def aggregate_bound_seven_steps(expected_ids, fixtures):
     verdicts = {result["verdict"] for result in results.values()}
     return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
                 "offline_bound_seven_step_fixtures", fixtures=results)
+
+
+def aggregate_bound_seven_steps_json(text):
+    decoded = decode_evidence_json(text)
+    if decoded["verdict"] != "PASS":
+        return decoded
+    envelope = decoded["evidence"]
+    if set(envelope) != {"expected_ids", "fixtures"}:
+        return _out("UNREADABLE", "bound_seven_step_aggregate_envelope_unreadable")
+    return aggregate_bound_seven_steps(envelope["expected_ids"], envelope["fixtures"])
 
 
 def aggregate_fixtures(expected_ids, fixtures):
@@ -964,6 +975,7 @@ def main(argv=None):
     modes.add_argument("--assurance-aggregate", action="store_true", help="read three assurance envelopes")
     modes.add_argument("--seven-step", action="store_true", help="read one supplied seven-step envelope")
     modes.add_argument("--seven-step-aggregate", action="store_true", help="read three supplied seven-step envelopes")
+    modes.add_argument("--seven-step-bound", action="store_true", help="read one bound seven-step envelope")
     args = parser.parse_args(argv)
     try:
         chunks, size = [], 0
@@ -981,7 +993,8 @@ def main(argv=None):
             result = _out("UNREADABLE", "json_input_too_large")
         else:
             text = raw.decode("utf-8", errors="strict")
-            decode = (aggregate_seven_steps_json if args.seven_step_aggregate else
+            decode = (reconcile_bound_seven_steps_json if args.seven_step_bound else
+                      aggregate_seven_steps_json if args.seven_step_aggregate else
                       reconcile_seven_steps_json if args.seven_step else
                       aggregate_assurance_json if args.assurance_aggregate else
                       reconcile_assurance_json if args.assurance else

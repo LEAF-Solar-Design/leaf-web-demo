@@ -25,6 +25,7 @@ from benches.x05_reconcile import (METRICS, TABLE_COLUMNS, check_discrepancies,
     aggregate_seven_steps, validate_import_grid_provenance,
     aggregate_seven_steps_json, reconcile_bound_seven_steps,
     reconcile_bound_seven_steps_json, aggregate_bound_seven_steps,
+    aggregate_bound_seven_steps_json,
     compare_csv_view, compare_recommendations, compare_snapshots, compare_strings, compare_table)
 
 
@@ -1064,7 +1065,7 @@ def test_new_cli_modes_verdicts_and_sanitized_errors(tmp_path, mode, kind, exit_
 
 
 @pytest.mark.parametrize("left,right", list(combinations(
-    ["--aggregate", "--provenance", "--assurance", "--provenance-aggregate", "--assurance-aggregate", "--seven-step", "--seven-step-aggregate"], 2)))
+    ["--aggregate", "--provenance", "--assurance", "--provenance-aggregate", "--assurance-aggregate", "--seven-step", "--seven-step-aggregate", "--seven-step-bound"], 2)))
 def test_cli_modes_are_pairwise_exclusive(tmp_path, left, right):
     import subprocess
     import sys
@@ -1183,7 +1184,7 @@ def test_assurance_aggregate_cli_preserves_readable_siblings(tmp_path, kind, exi
         assert observed["fixtures"][expected[1]]["verdict"] == "FAIL"
 
 
-@pytest.mark.parametrize("mode", ["--provenance", "--assurance", "--provenance-aggregate", "--assurance-aggregate", "--seven-step"])
+@pytest.mark.parametrize("mode", ["--provenance", "--assurance", "--provenance-aggregate", "--assurance-aggregate", "--seven-step", "--seven-step-bound"])
 @pytest.mark.parametrize("raw", [b"\xffsynthetic_private_canary", b"\xf0\x9f\x99"])
 def test_new_modes_invalid_utf8_always_one_sanitized_result(tmp_path, mode, raw):
     import subprocess
@@ -1197,7 +1198,7 @@ def test_new_modes_invalid_utf8_always_one_sanitized_result(tmp_path, mode, raw)
     assert len(result.stdout.splitlines()) == 1
 
 
-@pytest.mark.parametrize("mode", ["--provenance", "--assurance", "--provenance-aggregate", "--assurance-aggregate", "--seven-step"])
+@pytest.mark.parametrize("mode", ["--provenance", "--assurance", "--provenance-aggregate", "--assurance-aggregate", "--seven-step", "--seven-step-bound"])
 def test_new_modes_read_error_is_sanitized(monkeypatch, mode):
     import sys
     from types import SimpleNamespace
@@ -1568,6 +1569,8 @@ def test_foreign_hex_role_rejected_before_any_decoding(payload, monkeypatch):
 
 
 def cli_payload(mode):
+    if mode == "--seven-step-bound":
+        return bound_seven_envelope()
     if mode == "--seven-step":
         return seven_step_envelope()
     if mode == "--provenance":
@@ -1611,7 +1614,7 @@ def test_new_mode_character_and_byte_limits_match_direct_decoder(tmp_path, mode,
         assert len(text.encode("utf-8")) == 4 * MAX_JSON_CHARS + extra
 
 
-@pytest.mark.parametrize("mode", ["--provenance", "--assurance", "--provenance-aggregate", "--assurance-aggregate", "--seven-step"])
+@pytest.mark.parametrize("mode", ["--provenance", "--assurance", "--provenance-aggregate", "--assurance-aggregate", "--seven-step", "--seven-step-bound"])
 @pytest.mark.parametrize("failure", ["write", "flush", "pipe"])
 def test_new_modes_output_failures_exit_five_without_tracebacks(tmp_path, monkeypatch, mode, failure):
     import subprocess
@@ -2789,3 +2792,121 @@ def test_aggregate_combined_output_budget_is_sanitized_before_emission(monkeypat
     assert module.main(["--seven-step-aggregate"]) == 4 and not errors.getvalue()
     assert output.getvalue() == '{"reason":"json_result_too_large","verdict":"UNREADABLE"}\n'
     assert all(value["count"] == 123456 for value in fixtures.values())
+
+
+
+
+
+def bound_seven_fixture_records():
+    expected, records = seven_fixture_records()
+    for row in records:
+        manifest = deepcopy(row["envelope"]["assurance"]["manifest"])
+        row.update(manifest=manifest,import_binding=deepcopy(manifest),grid_binding=deepcopy(manifest))
+    return expected,records
+
+
+def test_strict_bound_seven_aggregate_json_limits_and_readable_siblings():
+    expected,records = bound_seven_fixture_records()
+    payload = dict(expected_ids=expected,fixtures=records)
+    baseline = aggregate_bound_seven_steps_json(json.dumps(payload))
+    assert baseline["verdict"] == "PASS"
+    records[0]["import_binding"] = None
+    observed = aggregate_bound_seven_steps_json(json.dumps(payload))
+    assert observed["verdict"] == "UNREADABLE"
+    for key in expected[1:]:
+        assert observed["fixtures"][key] == baseline["fixtures"][key]
+    for text,reason in [('{}','bound_seven_step_aggregate_envelope_unreadable'),
+                        ('{"fixtures":[],"fixtures":[]}','json_duplicate_key'),
+                        (' '*(MAX_JSON_CHARS+1),'json_input_too_large')]:
+        assert aggregate_bound_seven_steps_json(text)["reason"] == reason
+
+
+@pytest.mark.parametrize("kind,code", [("PASS",0),("FAIL",1),("UNREADABLE",4),("malformed",4)])
+def test_bound_seven_cli_verdicts_and_sanitized_envelopes(tmp_path,kind,code):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from benches import x05_reconcile as module
+    payload = bound_seven_envelope()
+    if kind == "FAIL":
+        payload["envelope"]["import"]["normal_user"] = False
+    if kind == "UNREADABLE":
+        payload["grid_binding"] = None
+    if kind == "malformed":
+        payload = {"synthetic_private_canary":True}
+    run = subprocess.run([sys.executable,"-P",str(Path(module.__file__).resolve()),"--seven-step-bound"],
+        input=json.dumps(payload).encode(),capture_output=True,cwd=tmp_path,timeout=20)
+    assert run.returncode == code and not run.stderr and len(run.stdout.splitlines()) == 1
+    assert b"synthetic_private_canary" not in run.stdout
+    assert json.loads(run.stdout)["verdict"] == ("UNREADABLE" if kind == "malformed" else kind)
+
+
+def test_bound_seven_aggregate_ambiguous_records_never_pass_and_recover():
+    expected,records = bound_seven_fixture_records()
+    baseline = aggregate_bound_seven_steps(expected,records)
+    valid = records[0]
+    malformed = dict(fixture_id=expected[0],envelope=None)
+    foreign = deepcopy(valid)
+    foreign["envelope"]["assurance"]["evidence"]["fixture_id"] = "foreign"
+    for order in permutations([valid,malformed,foreign]):
+        changed = list(order)+records[1:]
+        preserved = deepcopy(changed)
+        result = aggregate_bound_seven_steps_json(json.dumps(dict(expected_ids=expected,fixtures=changed)))
+        assert result["verdict"] == "UNREADABLE" and expected[0] not in result["fixtures"]
+        for key in expected[1:]:
+            assert result["fixtures"][key] == baseline["fixtures"][key]
+        assert changed == preserved
+    assert aggregate_bound_seven_steps(expected,records) == baseline
+
+
+@pytest.mark.parametrize("field",["import_binding","grid_binding"])
+def test_bound_seven_binding_schema_mutations_keep_reconciliation(field):
+    base = bound_seven_envelope()
+    mutations = [None,[],42,{},dict(base[field],inputs=dict(base[field]["inputs"],foreign="a"*64)),
+                 dict(base[field],inputs={key:value for key,value in base[field]["inputs"].items() if key != "bom"})]
+    for mutation in mutations:
+        changed = deepcopy(base)
+        changed[field] = mutation
+        preserved = deepcopy(changed)
+        strict = reconcile_bound_seven_steps_json(json.dumps(changed))
+        direct = reconcile_bound_seven_steps(changed["envelope"],changed["manifest"],changed["import_binding"],changed["grid_binding"])
+        assert strict == direct and strict["verdict"] == "UNREADABLE"
+        assert strict["reconciliation"]["verdict"] == "PASS" and changed == preserved
+    missing = deepcopy(base)
+    del missing[field]
+    observed = reconcile_bound_seven_steps_json(json.dumps(missing))
+    assert observed["reason"] == "bound_seven_step_envelope_unreadable"
+    assert observed["reconciliation"]["verdict"] == "PASS"
+
+
+def test_bound_aggregate_determinism_subprocess_bindings_and_manifests(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from benches import x05_reconcile as module
+    expected,records = bound_seven_fixture_records()
+    records[0]["import_binding"]["inputs"]["dwg"] = "d"*64
+    records[1]["grid_binding"]["inputs"]["report"] = "e"*64
+    records[1]["envelope"]["import"]["report_imported"] = False
+    program = ("import sys;sys.path.insert(0,sys.argv[1]);from benches.x05_reconcile import "
+        "aggregate_bound_seven_steps,decode_evidence_json,serialize_result;"
+        "v=decode_evidence_json(sys.stdin.read())['evidence'];"
+        "r=aggregate_bound_seven_steps(v['expected_ids'],v['fixtures']);print(serialize_result(r));"
+        "sys.exit({'PASS':0,'FAIL':1,'UNREADABLE':4}[r['verdict']])")
+    outputs=[]
+    for seed in ("0","73"):
+        for reverse in (False,True):
+            changed=deepcopy(records)
+            if reverse:
+                changed.reverse()
+                for row in changed:
+                    for field in ("manifest","import_binding","grid_binding"):
+                        row[field]["inputs"]=dict(reversed(list(row[field]["inputs"].items())))
+                        row[field]=dict(reversed(list(row[field].items())))
+            run=subprocess.run([sys.executable,"-P","-c",program,str(Path(module.__file__).resolve().parents[1])],
+                input=json.dumps(dict(expected_ids=list(reversed(expected)) if reverse else expected,fixtures=changed)).encode(),
+                capture_output=True,cwd=tmp_path,timeout=20,env={"PYTHONHASHSEED":seed,"SystemRoot":"C:\\Windows"})
+            assert run.returncode==4 and not run.stderr
+            assert json.loads(run.stdout)["fixtures"][expected[2]]["verdict"]=="PASS"
+            outputs.append(run.stdout)
+    assert len(set(outputs))==1

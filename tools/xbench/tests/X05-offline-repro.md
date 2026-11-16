@@ -812,6 +812,56 @@ The supplied manifest and bindings are synthetic claims. Agreement validates
 their consistency while frozen-origin authentication and live acquisition are
 established by the separate bench acceptance process.
 
+`aggregate_bound_seven_steps_json(text)` accepts exactly `expected_ids` and
+`fixtures` through the existing bounded duplicate-key-rejecting decoder.
+`--seven-step-bound` exposes the strict single bound envelope with0/1/4/5 exits
+and mutual exclusion with every other mode. Invalid UTF-8, read/write/flush
+failures and closed pipes follow the documented sanitized transport behavior.
+Missing bound fields reject the schema while retaining available seven-step
+reconciliation diagnostics. Direct and strict JSON helpers preserve those
+diagnostics across malformed bindings, foreign roles and optional-BOM asymmetry.
+
+Executable bound three-fixture replay (synthetic source-only builder, requires
+pytest):
+
+```powershell
+@'
+import sys, runpy
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import aggregate_bound_seven_steps
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+expected, rows = builders['bound_seven_fixture_records']()
+correct = deepcopy(rows)
+rows[0]['import_binding'] = deepcopy(correct[1]['import_binding'])
+rows[1]['grid_binding'] = deepcopy(correct[0]['grid_binding'])
+result = aggregate_bound_seven_steps(expected, rows)
+print(result['verdict'])
+for key in expected[:2]:
+    fixture = result['fixtures'][key]
+    print(fixture['verdict'], fixture['provenance']['stage'], fixture['reconciliation']['verdict'])
+print('sibling', result['fixtures'][expected[2]]['verdict'])
+fixed = aggregate_bound_seven_steps(expected, correct)
+print('corrected', fixed['verdict'])
+assert result['verdict'] == 'UNREADABLE' and fixed['verdict'] == 'PASS'
+'@ | python -P
+```
+
+Exact stdout:
+
+```text
+UNREADABLE
+UNREADABLE import PASS
+UNREADABLE grid PASS
+sibling PASS
+corrected PASS
+```
+
+The swaps preserve equal totals but change supplied fixture provenance. The
+helper checks those claims against the supplied manifest. The replay establishes
+consistency and rejection behavior, with frozen-origin authentication and live
+acquisition supplied separately by the bench acceptance process.
+
 Canonical snapshot compatibility contract:
 
 - Hash UTF-8 bytes of compact JSON arrays with ASCII escapes and no spaces.
