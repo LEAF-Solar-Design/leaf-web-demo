@@ -1,9 +1,28 @@
 import React from 'react'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, render, screen, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import DrawingDependencyReport from './DrawingDependencyReport.jsx'
 
 afterEach(cleanup)
+
+it.each(['populated', 'empty', 'unavailable'])('exposes semantic coverage and report structure for %s', (state) => {
+  const report = state === 'unavailable' ? undefined : { coverage_note: 'Local decoded records only.',
+    dependencies: state === 'empty' ? [] : [{ kind: 'image', name: 'synthetic.png', disposition: 'image omitted' }] }
+  render(<DrawingDependencyReport report={report} />)
+  const region = screen.getByRole('region', { name: 'Drawing intake report' })
+  const coverage = within(region).getByRole('note', { name: 'Dependency coverage' })
+  expect(coverage.textContent).toBe(state === 'unavailable' ? 'Raw dependency coverage is not confirmed.' : 'Local decoded records only.')
+  if (state === 'populated') {
+    const table = within(region).getByRole('table', { name: 'Drawing dependencies' })
+    const headers = within(table).getAllByRole('columnheader')
+    expect(headers.map((header) => header.textContent)).toEqual(['Kind', 'Dependency', 'Disposition'])
+    headers.forEach((header) => expect(header.getAttribute('scope')).toBe('col'))
+    expect(within(table).getByRole('cell', { name: 'synthetic.png' })).toBeTruthy()
+  } else {
+    expect(within(region).queryByRole('table')).toBeNull()
+    expect(within(region).getByText(state === 'empty' ? 'No dependencies were present in the local intake records.' : 'Dependency report unavailable.')).toBeTruthy()
+  }
+})
 
 it('preserves frozen snapshots across repeated drawing changes and return', () => {
   const report = (name) => Object.freeze({ coverage_note: `${name} coverage`,

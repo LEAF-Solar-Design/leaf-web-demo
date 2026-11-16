@@ -1,5 +1,5 @@
 import React from 'react'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import ModuleSetPicker from './ModuleSetPicker.jsx'
 
@@ -11,6 +11,30 @@ const data = { sets: [
 const first = () => screen.getByRole('checkbox', { name: 'Design / Panel A: 12 candidates' })
 const second = () => screen.getByRole('checkbox', { name: 'Alternate / Panel B: 9 candidates' })
 const submit = () => screen.getByRole('button', { name: 'Count selected set' })
+
+it('does not restore a removed pending choice or claim stale success when its promise settles', async () => {
+  let settle
+  const pending = new Promise((resolve) => { settle = resolve })
+  const onSelect = vi.fn().mockReturnValueOnce(pending).mockResolvedValueOnce(undefined)
+  const completed = { ...data, selected_sets: [data.sets[0]], count: 12 }
+  const view = render(<ModuleSetPicker data={completed} onSelect={onSelect} />)
+  fireEvent.click(first())
+  fireEvent.click(submit())
+  const remaining = { ...completed, sets: [data.sets[1]] }
+  view.rerender(<ModuleSetPicker data={remaining} onSelect={onSelect} />)
+  await act(async () => { settle(); await pending })
+  expect(second().checked).toBe(false)
+  expect(submit().disabled).toBe(true)
+  expect(screen.queryByText(/^Counted /)).toBeNull()
+  expect(onSelect).toHaveBeenCalledExactlyOnceWith(['first'])
+  fireEvent.click(second())
+  fireEvent.click(submit())
+  await waitFor(() => expect(submit().disabled).toBe(false))
+  expect(onSelect).toHaveBeenCalledTimes(2)
+  expect(onSelect).toHaveBeenLastCalledWith(['second'])
+  view.rerender(<ModuleSetPicker data={{ ...remaining, selected_sets: [data.sets[1]], count: 9 }} onSelect={onSelect} />)
+  expect(screen.getByText('Counted 9 modules on Alternate / Panel B.')).toBeTruthy()
+})
 
 it('catches promise rejection and retries once per activation with choices intact', async () => {
   const onSelect = vi.fn().mockRejectedValueOnce(new Error('private async detail')).mockResolvedValueOnce(undefined)
