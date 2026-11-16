@@ -3,6 +3,8 @@
 from contextlib import contextmanager, nullcontext
 import hashlib
 import decimal
+import gc
+import weakref
 from fractions import Fraction
 import json
 import re
@@ -2431,6 +2433,119 @@ class FixtureTests(unittest.TestCase):
             self.assertIn(category.__name__, saved)
             for secret in (drawing, project, "private.invalid"):
                 self.assertNotIn(secret, saved)
+
+    def test_project_204_and_206_invalidate_previous_success_terminally(self):
+        for status in (200, 204, 206):
+            observation = self.project_identity()
+            observation.update(imported_version_selected=False, evidence_saved=True,
+                               import_rejection=x10.IMPORT_REFUSALS[0])
+            listener = x10._project_observer(self.ctx.base, observation)
+            request = SimpleNamespace(frame=MAIN_FRAME, method="GET", url=self.ctx.base + "/api/projects/" + PROJECT)
+            listener(request)
+            response = metadata_response(request, {"project": {"id": PROJECT}, "drawing_versions": []})
+            listener.response(response)
+            self.assertEqual(aggregate(x10.classify(observation)), "FAIL")
+            response.status = status
+            listener.response(response)
+            self.assertEqual(aggregate(x10.classify(observation)), "FAIL" if status == 200 else "UNREADABLE")
+            if status != 200:
+                response.status = 200
+                listener.response(response)
+                self.assertIsNone(observation["project_binding"])
+
+    def test_project_version_sequences_are_strict_positive_integers(self):
+        for sequence in (True, False, 1.0, 1.5, "1", None, 0, -1, 1, 999999999):
+            observation = {}
+            listener = x10._project_observer(self.ctx.base, observation)
+            self.complete_project(listener, versions=[{"version_id": VERSION, "drawing_id": DRAWING, "seq": sequence}])
+            accepted = type(sequence) is int and 1 <= sequence <= 999999999
+            self.assertEqual(observation["project_binding"] == PROJECT, accepted)
+
+    def test_retained_callbacks_cannot_mutate_finalized_observation(self):
+        for refusal in (True, False):
+            page, _, _ = self.integration_page(refusal)
+            rows = self.run_page(page)
+            observed = rows[0].observed
+            before = json.dumps(observed, sort_keys=True)
+            files = {str(path): path.read_bytes() for path in self.ctx.out_dir.rglob("*") if path.is_file()}
+            handlers = dict(call.args for call in page.on.call_args_list)
+            project_request = SimpleNamespace(frame=MAIN_FRAME, method="GET", url=self.ctx.base + "/api/projects/" + OTHER)
+            for request in (project_request, self.catalog_request(project=OTHER)):
+                handlers["request"](request)
+                handlers["response"](metadata_response(request, {"project": {"id": OTHER}, "drawing_versions": []}))
+                handlers["requestfailed"](request)
+            handlers["framenavigated"](MAIN_FRAME)
+            self.assertEqual(json.dumps(observed, sort_keys=True), before)
+            self.assertEqual({str(path): path.read_bytes() for path in self.ctx.out_dir.rglob("*") if path.is_file()}, files)
+
+    def test_png_zlib_tail_refused_but_split_idat_is_valid(self):
+        def chunk(kind, payload):
+            return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", zlib.crc32(kind + payload) & 0xffffffff)
+        compressed = zlib.compress(b"\x00\x00\x00\x00")
+        original = tiny_png()
+        split = (original[:33] + chunk(b"IDAT", compressed[:3]) + chunk(b"IDAT", compressed[3:])
+                 + chunk(b"IEND", b""))
+        page = MagicMock()
+        for data, valid in ((split, True), (tiny_png(compressed=compressed + b"tail"), False),
+                            (tiny_png(compressed=compressed + zlib.compress(b"")), False)):
+            page.get_by_role.return_value.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(data)
+            observation = dict(**canonical_project(), fresh_project=True)
+            if valid:
+                x10._save(page, self.ctx, observation)
+            else:
+                with self.assertRaises(ValueError):
+                    x10._save(page, self.ctx, observation)
+                self.assertFalse(observation["evidence_saved"])
+
+    def test_json_inputs_and_project_metadata_require_strict_utf8(self):
+        for role in ("oracle", "rates"):
+            path = Path(next(row["path"] for row in self.ctx.manifest["fixtures"] if row["role"] == role))
+            original = path.read_bytes()
+            for encoding in ("utf-8-sig", "utf-16", "utf-32"):
+                self.replace_fixture(role, original.decode().encode(encoding))
+                self.assert_binding_refusal()
+            self.replace_fixture(role, original[:-1] + ',"unicode":"café 界"}'.encode())
+            self.assertEqual(x10.bindings(self.ctx)[3], Decimal("0.07"))
+            self.replace_fixture(role, original)
+        data = json.dumps({"project": {"id": PROJECT}, "drawing_versions": [], "unicode": "café 界"}, ensure_ascii=False)
+        for encoding in ("utf-8", "utf-8-sig", "utf-16", "utf-32"):
+            observation = {}
+            listener = x10._project_observer(self.ctx.base, observation)
+            request = SimpleNamespace(frame=MAIN_FRAME, method="GET", url=self.ctx.base + "/api/projects/" + PROJECT)
+            listener(request)
+            listener.response(SimpleNamespace(request=request, url=request.url, status=200,
+                                               body=lambda: data.encode(encoding)))
+            self.assertEqual(observation["project_binding"] == PROJECT, encoding == "utf-8")
+
+    def test_passive_request_retention_and_budget_are_bounded(self):
+        class Request:
+            frame = MAIN_FRAME
+            method = "GET"
+            def __init__(self, url):
+                self.url = url
+        for factory in (x10._catalog_observer, x10._project_observer):
+            observation = {}
+            listener = factory(self.ctx.base, observation, max_requests=8)
+            references = []
+            url = self.catalog_request().url if factory is x10._catalog_observer else self.ctx.base + "/api/projects/" + PROJECT
+            key = "catalog_binding" if factory is x10._catalog_observer else "project_binding"
+            for index in range(1000):
+                request = Request(url)
+                references.append(weakref.ref(request))
+                listener(request)
+                response = metadata_response(request, {"project": {"id": PROJECT}, "drawing_versions": []})
+                listener.response(response)
+                if index < 8:
+                    self.assertIsNotNone(observation[key])
+                else:
+                    self.assertIsNone(observation[key])
+            del response, request
+            gc.collect()
+            self.assertEqual(sum(ref() is not None for ref in references), 0)
+            self.assertTrue(observation["event_callback_failed"])
+            for factory_budget in (0, -1, True):
+                with self.assertRaises(ValueError):
+                    factory(self.ctx.base, {}, max_requests=factory_budget)
 
 
 if __name__ == "__main__":

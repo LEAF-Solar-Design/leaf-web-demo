@@ -38,6 +38,7 @@ MAX_JSON_BYTES = 1048576
 MAX_JSON_DEPTH = 64
 MAX_RATE_ITEMS = 10000
 MAX_SCREENSHOT_BYTES = 16 * 1024 * 1024
+MAX_IDENTITY_REQUESTS = 256
 IMPORT_REFUSALS = ("Choose the drawing again to retry the upload.",
                    "Retry to attach this drawing to the project.")
 DOWNSTREAM = (
@@ -857,13 +858,16 @@ def _main_request(request, main_frame=None):
     return frame is main_frame if main_frame is not None else frame.parent_frame is None
 
 
-def _catalog_observer(base, observation, main_frame=None):
+def _catalog_observer(base, observation, main_frame=None, *, max_requests=MAX_IDENTITY_REQUESTS):
+    if type(max_requests) is not int or max_requests <= 0:
+        raise ValueError("invalid identity request budget")
     origin = urlsplit(base)
     observation["catalog_epoch"] = 0
     observation["catalog_binding"] = None
     latest = None
     pending_binding = None
     failed = False
+    request_count = 0
 
     def exact_url(value):
         url = urlsplit(value)
@@ -885,11 +889,17 @@ def _catalog_observer(base, observation, main_frame=None):
         return binding
 
     def request_seen(request):
-        nonlocal latest, pending_binding, failed
+        nonlocal latest, pending_binding, failed, request_count
         if not _main_request(request, main_frame):
             return
         if not exact_url(request.url):
             return
+        if request_count >= max_requests:
+            latest, pending_binding, failed = None, None, True
+            observation.update(event_callback_failed=True, catalog_binding=None)
+            observation["catalog_epoch"] += 1
+            return
+        request_count += 1
         try:
             if request.method != "GET":
                 raise ValueError("catalog requires normal GET")
@@ -931,11 +941,14 @@ def _catalog_observer(base, observation, main_frame=None):
     return request_seen
 
 
-def _project_observer(base, observation, main_frame=None):
+def _project_observer(base, observation, main_frame=None, *, max_requests=MAX_IDENTITY_REQUESTS):
+    if type(max_requests) is not int or max_requests <= 0:
+        raise ValueError("invalid identity request budget")
     origin = urlsplit(base)
     observation.update(project_epoch=0, project_scope_epoch=0, project_binding=None, project_versions=[])
     latest, route, failed = None, None, False
     scope_route = None
+    request_count = 0
 
     def route_id(value):
         url = urlsplit(value)
@@ -955,12 +968,19 @@ def _project_observer(base, observation, main_frame=None):
         observation.update(project_binding=None, project_versions=[])
 
     def request_seen(request):
-        nonlocal latest, route, failed, scope_route
+        nonlocal latest, route, failed, scope_route, request_count
         if not _main_request(request, main_frame):
             return
         identity = route_id(request.url)
         if identity is None:
             return
+        if request_count >= max_requests:
+            latest, route, failed = None, None, True
+            clear()
+            observation["project_scope_epoch"] += 1
+            observation["event_callback_failed"] = True
+            return
+        request_count += 1
         if identity != scope_route or request.method != "GET":
             observation["project_scope_epoch"] += 1
         scope_route = identity
@@ -1175,6 +1195,7 @@ def observe(page, ctx, config, bound, session_info=None, *, budget_seconds=600, 
     stage = "session provenance"
     listeners = []
     callback_error = None
+    listening = True
     try:
         budget = _ObservationBudget(budget_seconds, clock)
         main_frame = page.main_frame
@@ -1212,6 +1233,8 @@ def observe(page, ctx, config, bound, session_info=None, *, budget_seconds=600, 
         def protect(handler, kind):
             def guarded(event):
                 nonlocal callback_error
+                if not listening:
+                    return
                 try:
                     if kind == "framenavigated":
                         navigation(event)
@@ -1262,6 +1285,7 @@ def observe(page, ctx, config, bound, session_info=None, *, budget_seconds=600, 
         _invalidate_evidence(ctx, observation)
         raise
     finally:
+        listening = False
         cleanup_error = None
         cleanup_cancel = None
         for event, listener in listeners:
