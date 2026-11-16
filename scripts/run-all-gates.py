@@ -1210,7 +1210,12 @@ def build_suites() -> List[Suite]:
                   (Path("..") / "tools" / "xbench" / "tests" / "test_x07_reducer_publish_crash.py").as_posix(),
                   (Path("..") / "tools" / "xbench" / "tests" / "test_x07_version_diff_reconstruction.py").as_posix(),
                   (Path("..") / "tools" / "xbench" / "tests" / "test_x07_version_diff_hashseed.py").as_posix(),
-                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_version_diff_path_failures.py").as_posix()], 276),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_version_diff_path_failures.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_reducer_windows_metadata.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_reducer_output_aliases.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_reducer_encoding_failures.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_version_diff_interrupt.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_profile_history_audit.py").as_posix()], 284),
         # W5 Rooftop workflow flow (2026-09-24, contracts G34/G34a/G34b): server/solar_workflow_flow.py,
         # the pure progression engine (every step's CanAdvance and HasDrawingPrerequisites, the L1/L2
         # gates on the host's setting, AdvanceStep, GoBack and NavigateToStep Stale marking over the

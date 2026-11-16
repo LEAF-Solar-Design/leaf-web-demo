@@ -35,6 +35,9 @@ def validate_json(value, *, max_depth=MAX_JSON_DEPTH, max_nodes=MAX_JSON_NODES):
                 raise ValueError('history JSON cycle')
             if type(item) is dict and any(type(key) is not str for key in item):
                 raise ValueError('history JSON object keys must be strings')
+            if type(item) is dict:
+                for key in item:
+                    key.encode('utf-8')
             if len(item) > max_nodes - nodes:
                 raise ValueError('history JSON budget exceeded')
             active.add(id(item))
@@ -43,6 +46,8 @@ def validate_json(value, *, max_depth=MAX_JSON_DEPTH, max_nodes=MAX_JSON_NODES):
             stack.extend((child, depth + 1, False) for child in children)
         elif type(item) not in (str, int, float, bool, type(None)) or type(item) is float and not math.isfinite(item):
             raise ValueError('history must be finite JSON')
+        elif type(item) is str:
+            item.encode('utf-8')
 
 
 def unique_object(pairs):
@@ -82,7 +87,9 @@ def read_history(path):
             raise ValueError('history changed during read')
     finally:
         os.close(descriptor)
-    return json.loads(b''.join(chunks).decode('utf-8'), object_pairs_hook=unique_object)
+    parsed = json.loads(b''.join(chunks).decode('utf-8'), object_pairs_hook=unique_object)
+    validate_json(parsed)
+    return parsed
 
 
 def atomic_publish(path, encoded):
