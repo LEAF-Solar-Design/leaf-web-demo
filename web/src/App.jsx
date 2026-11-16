@@ -219,7 +219,7 @@ import useSessionController from './controllers/session/useSessionController.js'
 import { consoleAuthRequired, consoleSignedOut, consoleKnownGuest } from './controllers/session/consoleGate.js'
 import useCheckoutController from './controllers/checkout/useCheckoutController.js'
 import { useProjectCheckoutController } from './controllers/useProjectCheckoutController.js'
-import { PROJECT_SOLAR_APP_REASONS, projectSolarAppReason, projectSolarOpenStatus } from './solar/solarProjectAppModel.js'
+import { PROJECT_SOLAR_APP_REASONS, projectSolarAppReason } from './solar/solarProjectAppModel.js'
 import { sameSolarDrawingBinding } from './solar/solarDrawingBinding.js'
 import { useProjectSolarScope } from './solar/useProjectSolarScope.js'
 import { useAppProjectSolarRuntime } from './solar/useAppProjectSolarRuntime.js'
@@ -356,8 +356,8 @@ function ProjectSolarCheckoutControls({ projectClient, checkout, isCurrent }) {
 
   return React.createElement('div',
     { role: 'group', 'aria-label': 'Project checkout', className: 'checkout-controls project-checkout' },
-    projectSolarOpenStatus(checkout.reason) && React.createElement('p', { role: 'status', title: projectSolarOpenStatus(checkout.reason) },
-      projectSolarOpenStatus(checkout.reason)),
+    React.createElement('p', { role: 'status', title: projectSolarAppReason(checkout.reason) },
+      projectSolarAppReason(checkout.reason)),
     React.createElement('button', {
       type: 'button',
       className: 'btn ghost',
@@ -5305,6 +5305,41 @@ export default function App() {
     </EngineSessionProvider>
   ) : node)
 
+  const checkoutControls = !mock && !signedOut && (
+    projectMode ? (
+      projectSolar.ready ? (
+        <ProjectSolarCheckoutControls
+          projectClient={projectSolar.projectClient}
+          checkout={projectSolar.checkout}
+          isCurrent={projectSolar.isCurrent}
+        />
+      ) : (
+        <p role="status">
+          {projectSolarAppReason(projectSolar.scope.reason || 'scope_pending')}
+        </p>
+      )
+    ) : (
+      <CheckoutControls
+        lockedByOther={otherHeldCheckout}
+        staleByOther={lock.staleByOther}
+        legacyByOther={lock.legacyByOther}
+        canTake={lock.canTake}
+        heldByUs={heldByUs}
+        unknown={lock.unknown}
+        readFailed={checkout.readFailed}
+        failure={checkout.failure}
+        busy={checkout.busy}
+        onTake={checkout.actions.take}
+        onRelease={checkout.actions.release}
+        onRetry={checkout.actions.refresh}
+      />
+    )
+  )
+  const studioDrawingTab = studioShell && <DrawingTabLabel
+    name={projectMode ? projectDrawingName : activeDrawingName}
+    shortId={projectMode ? projectSolar.scope.binding?.input_version_id : REQUESTED_DRAWING_ID}
+  />
+
   const accountPanels = <>
     <CostTransparencyPanel mock={mock} readsPaused={knownGuest} />
     {!mock && <ClaudeAccountPanel
@@ -5521,10 +5556,9 @@ export default function App() {
       <header className={`top${studioShell ? ' shell-header-48' : ''}`} data-customer-mode={studioCustomerMode ? 'true' : 'false'}>
         <div className="mark" role="img" aria-label="Leaf Automation"><img className="mark-lockup mark-lockup-light" src="/brand/leaf-automation-horizontal-on-light.svg" alt="" aria-hidden="true" height="20" /><img className="mark-lockup mark-lockup-dark" src="/brand/leaf-automation-horizontal-on-dark.svg" alt="" aria-hidden="true" height="20" /></div>
         {studioShell && <div className="shell-breadcrumb"><span>Projects / </span>
-          <DrawingTabLabel name={projectMode ? projectDrawingName : activeDrawingName} shortId={projectMode ? projectSolar.scope.binding?.input_version_id : REQUESTED_DRAWING_ID} />
+          {studioDrawingTab}
           <CheckoutChip checkedOut={projectMode ? projectSolar.checkout?.ownsCheckout : heldByUs}>
-            {!mock && !signedOut && (projectMode ? projectSolar.ready && <ProjectSolarCheckoutControls projectClient={projectSolar.projectClient} checkout={projectSolar.checkout} isCurrent={projectSolar.isCurrent} /> :
-              <CheckoutControls lockedByOther={otherHeldCheckout} staleByOther={lock.staleByOther} legacyByOther={lock.legacyByOther} canTake={lock.canTake} heldByUs={heldByUs} unknown={lock.unknown} readFailed={checkout.readFailed} failure={checkout.failure} busy={checkout.busy} onTake={checkout.actions.take} onRelease={checkout.actions.release} onRetry={checkout.actions.refresh} />)}
+            {checkoutControls}
           </CheckoutChip>
         </div>}
         {/* W4e: on the studio's drafting surfaces the header IS the
@@ -6284,7 +6318,7 @@ export default function App() {
               <button type="button" className="doc-tab-start" onClick={onOpenStart}>Start</button>
             )}
             <div className="viewer-title">
-              {studioShell ? <DrawingTabLabel name={projectMode ? projectDrawingName : activeDrawingName} shortId={projectMode ? projectSolar.scope.binding?.input_version_id : REQUESTED_DRAWING_ID} /> : projectMode ? <>{projectDrawingName}{' · '}<code>{projectSolar.scope.binding?.input_version_id}</code></> : <>
+              {studioShell ? studioDrawingTab : projectMode ? <>{projectDrawingName}{' · '}<code>{projectSolar.scope.binding?.input_version_id}</code></> : <>
               {/* One loading voice per pane — the pulse-dot line in the viewer
                   announces loading; the title placeholder stays a muted dash. */}
               {activeDrawingName || <span className="dim">—</span>}
@@ -6332,36 +6366,7 @@ export default function App() {
               {!mock && previewing && (
                 <span className="version-note readonly">viewing v{previewing.version} · read-only</span>
               )}
-              {!studioShell && !mock && !signedOut && (
-                projectMode ? (
-                  projectSolar.ready ? (
-                    <ProjectSolarCheckoutControls
-                      projectClient={projectSolar.projectClient}
-                      checkout={projectSolar.checkout}
-                      isCurrent={projectSolar.isCurrent}
-                    />
-                  ) : (
-                    <p role="status">
-                      {projectSolarAppReason(projectSolar.scope.reason || 'scope_pending')}
-                    </p>
-                  )
-                ) : (
-                  <CheckoutControls
-                    lockedByOther={otherHeldCheckout}
-                    staleByOther={lock.staleByOther}
-                    legacyByOther={lock.legacyByOther}
-                    canTake={lock.canTake}
-                    heldByUs={heldByUs}
-                    unknown={lock.unknown}
-                    readFailed={checkout.readFailed}
-                    failure={checkout.failure}
-                    busy={checkout.busy}
-                    onTake={checkout.actions.take}
-                    onRelease={checkout.actions.release}
-                    onRetry={checkout.actions.refresh}
-                  />
-                )
-              )}
+              {!studioShell && checkoutControls}
               {drawingState && (
                 <>
                   <button

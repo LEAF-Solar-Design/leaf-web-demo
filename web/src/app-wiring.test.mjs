@@ -102,7 +102,15 @@ it('Studio hides only the activity region and leaves command and header chrome o
   assert.ok(activity.includes('setStudioActivityHost'))
   assert.ok(activity.includes('<SurfaceFrame.Conversations'))
   assert.ok(activity.includes('<SurfaceFrame.JobRail'))
-  for (const landmark of ['header className="top"', 'className="bar-dock"', 'footer className="foot-bar"']) {
+  const header = elements.find(node => node.openingElement.name.name === 'header'
+    && attribute(node, 'data-customer-mode'))
+  assert.ok(header && header.start > app.start && header.end < app.end)
+  assert.ok(header.end <= rail.start || header.start >= rail.end)
+  const headerClass = attribute(header, 'className').value.expression
+  assert.equal(source.slice(headerClass.start, headerClass.end), "`top${studioShell ? ' shell-header-48' : ''}`")
+  assert.equal(source.slice(attribute(header, 'data-customer-mode').value.expression.start,
+    attribute(header, 'data-customer-mode').value.expression.end), "studioCustomerMode ? 'true' : 'false'")
+  for (const landmark of ['className="bar-dock"', 'footer className="foot-bar"']) {
     assert.ok(source.includes(landmark))
     assert.ok(!activity.includes(landmark))
   }
