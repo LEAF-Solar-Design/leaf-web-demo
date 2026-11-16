@@ -168,7 +168,8 @@ class Runtime:
         if self.ack_mode == 'ambiguous':
             page.emit('response', response)
         raw = dict(pointer_ms=start, response_end_ms=start + 5, paint_ms=start + 20,
-                   resource_matches=1, queued_painted=True, event_durations_ms=[], event_entries=[])
+                   resource_matches=1, queued_painted=True, queued_job_id=job,
+                   event_durations_ms=[], event_entries=[])
         row = validate_ack(raw, response_status=202, response_body=body)
         self.outputs.append((row, deepcopy(row)))
         return row

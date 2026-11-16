@@ -61,6 +61,15 @@ def validate_ack(raw, *, response_status, response_body):
         raise AckCaptureError('A valid job UUID is required') from None
     if not isinstance(raw, dict):
         raise AckCaptureError('Missing capture evidence')
+    queued_job_id = raw.get('queued_job_id')
+    try:
+        if (not isinstance(queued_job_id, str)
+                or str(UUID(queued_job_id)) != queued_job_id
+                or UUID(queued_job_id).int == 0
+                or queued_job_id != job_id):
+            raise ValueError
+    except (ValueError, AttributeError):
+        raise AckCaptureError('Queued strip UUID must match the actual submitted job') from None
     times = [raw.get(key) for key in ('pointer_ms', 'response_end_ms', 'paint_ms')]
     if not all(_positive(value) for value in times):
         raise AckCaptureError('Finite positive pointer, resource and paint timestamps required')
@@ -94,7 +103,8 @@ def validate_ack(raw, *, response_status, response_body):
     if not _positive(latency):
         raise AckCaptureError('A positive latency is required')
     return {'latency_ms': latency, 'http_status': 202, 'rendered': True,
-            'job_id': str(parsed), 'pointer_ms': pointer, 'paint_ms': paint,
+            'job_id': str(parsed), 'queued_job_id': queued_job_id,
+            'pointer_ms': pointer, 'paint_ms': paint,
             'response_end_ms': response_end, 'resource_matches': 1,
             'queued_painted': True, 'event_durations_ms': list(durations),
             'event_entries': sanitized_entries}
@@ -103,9 +113,11 @@ def validate_ack(raw, *, response_status, response_body):
 _INSTALL = """(control, token) => {
     if (window.__xbenchX08Ack) return false;
     const s = {token, pointer_ms: null, paint_ms: null, queued_painted: false,
+               queued_job_id: null,
                events: [], raf: null, task: null, stopped: false};
     const queued = () => Array.from(document.querySelectorAll('.strip-running .verb'))
         .filter(el => /^queued:\\s*\\S/.test(el.textContent.trim()));
+    const jobId = el => el.closest('.strip-running')?.dataset.jobId ?? null;
     const paintable = el => {
         if (document.visibilityState !== 'visible' || !el.isConnected) return false;
         const intersects = Array.from(el.getClientRects()).some(r =>
@@ -123,7 +135,7 @@ _INSTALL = """(control, token) => {
     const pointer = e => {
         if (!e.isTrusted) return;
         if (s.pointer_ms !== null) { s.multiple_pointers = true; return; }
-        for (const el of queued()) baseline.set(el, el.textContent.trim());
+        for (const el of queued()) baseline.set(el, {text: el.textContent.trim(), id: jobId(el)});
         s.pointer_ms = e.timeStamp;
     };
     const events = entries => {
@@ -145,22 +157,23 @@ _INSTALL = """(control, token) => {
     };
     window.__xbenchX08Ack = s;
     control.addEventListener('pointerdown', pointer, true);
-    const unchanged = (el, text) => el.isConnected &&
-        el.textContent.trim() === text && queued().includes(el);
-    const schedule = (el, text) => {
+    const unchanged = (el, text, id) => el.isConnected &&
+        el.textContent.trim() === text && jobId(el) === id && queued().includes(el);
+    const schedule = (el, text, id) => {
         s.raf = requestAnimationFrame(() => {
             s.raf = null;
             if (s.stopped) return;
-            if (!unchanged(el, text)) { scan(); return; }
+            if (!unchanged(el, text, id)) { scan(); return; }
             // Animation progress need not mutate the DOM. Keep checking frames
             // until the queued strip (including its ancestors) can paint.
-            if (!paintable(el)) { schedule(el, text); return; }
+            if (!paintable(el)) { schedule(el, text, id); return; }
             s.task = setTimeout(() => {
                 s.task = null;
                 if (s.stopped) return;
-                if (!unchanged(el, text)) { scan(); return; }
-                if (!paintable(el)) { schedule(el, text); return; }
+                if (!unchanged(el, text, id)) { scan(); return; }
+                if (!paintable(el)) { schedule(el, text, id); return; }
                 s.paint_ms = performance.now();
+                s.queued_job_id = id;
                 s.queued_painted = true;
             }, 0);
         });
@@ -169,16 +182,17 @@ _INSTALL = """(control, token) => {
         if (s.stopped || s.pointer_ms === null || s.paint_ms !== null ||
             s.raf !== null || s.task !== null) return;
         const current = queued();
-        for (const [el, text] of baseline) {
-            if (!current.includes(el) || el.textContent.trim() !== text) baseline.delete(el);
+        for (const [el, prior] of baseline) {
+            if (!current.includes(el) || el.textContent.trim() !== prior.text ||
+                jobId(el) !== prior.id) baseline.delete(el);
         }
-        const el = current.find(el => baseline.get(el) !== el.textContent.trim());
+        const el = current.find(el => !baseline.has(el));
         if (!el) return;
-        schedule(el, el.textContent.trim());
+        schedule(el, el.textContent.trim(), jobId(el));
     };
     s.mo = new MutationObserver(scan);
     s.mo.observe(document.body, {subtree: true, childList: true, characterData: true,
-                                 attributes: true, attributeFilter: ['class']});
+                                 attributes: true, attributeFilter: ['class', 'data-job-id']});
     if (typeof PerformanceObserver !== 'undefined') {
         try {
             s.po = new PerformanceObserver(list => events(list.getEntries()));
@@ -207,6 +221,7 @@ _SNAPSHOT = """({token, url}) => {
     const events = s.events.filter(e => e.startTime <= s.paint_ms);
     return {pointer_ms: s.multiple_pointers ? null : s.pointer_ms,
             paint_ms: s.paint_ms, queued_painted: s.queued_painted,
+            queued_job_id: s.queued_job_id,
             resource_matches: resources.length,
             response_end_ms: r && r.responseStart > 0 ? r.responseEnd : null,
             event_entries: events, event_durations_ms: events.map(e => e.duration)};
@@ -225,7 +240,8 @@ def capture_job_ack(page, control, *, timeout_ms=15000, clock=time.monotonic):
     The caller retains ownership of its signed-in browser/context. Action errors
     propagate, while missing or inconsistent measurement evidence refuses capture.
     One cooperative deadline bounds waits; synchronous Python/body callbacks cannot
-    be preempted. UI queued-strip UUID binding awaits its actual producer.
+    be preempted. The first queued paint is recorded before Python validates its
+    strip UUID against the actual response body.
     """
     if not _positive(timeout_ms):
         raise AckCaptureError('A positive timeout is required')

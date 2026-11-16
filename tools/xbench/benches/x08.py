@@ -21,7 +21,7 @@ from benches.x08_metrics import score
 
 
 LIMITS = ('Injected or saved samples cannot qualify live evidence. Cooperative deadlines cannot '
-          'preempt arbitrary Python callbacks. UI queued-strip UUID binding awaits its producer.')
+          'preempt arbitrary Python callbacks.')
 
 
 class RuntimeUnavailable(RuntimeError):
