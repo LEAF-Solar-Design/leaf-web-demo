@@ -28,14 +28,16 @@ def test_input_io_failure_emits_only_diagnostic(main, failure, tmp_path, monkeyp
     source = tmp_path / 'input.json'
     if failure == 'unreadable':
         source.write_text('{}')
-        original = Path.read_text
+        original = Path.open
         def denied(path, *args, **kwargs):
             if path == source:
                 raise PermissionError('injected unreadable input')
             return original(path, *args, **kwargs)
-        monkeypatch.setattr(Path, 'read_text', denied)
+        monkeypatch.setattr(Path, 'open', denied)
     target = tmp_path / 'result.json'
     assert main([str(source), '--out', str(target)]) == 2
     streams = capsys.readouterr()
     assert streams.out == '' and 'refused' in streams.err
+    if failure == 'unreadable':
+        assert 'injected unreadable input' in streams.err
     assert not target.exists() and not list(tmp_path.glob('.x04-*'))

@@ -56,7 +56,7 @@ function mount({ ribbon = false } = {}) {
   act(() => { context.session.actions.openBytes(new Uint8Array([0]), 'x.dxf') })
   workers[0].emit({ type: 'documentLoaded', documentId: 'x.dxf', entities: ENTITIES, entityCount: ENTITIES.length, unsupported: [] })
   const edits = () => workers[0].posted.filter((message) => message.type === 'applyEdit')
-  return { getContext: () => context, edits }
+  return { getContext: () => context, edits, worker: workers[0] }
 }
 
 describe('applyEdit with an explicit { targetId }', () => {
@@ -68,15 +68,24 @@ describe('applyEdit with an explicit { targetId }', () => {
   })
 
   it('skips the live multi-selection refusal and the empty-selection no-op', () => {
-    const { getContext, edits } = mount()
+    const { getContext, edits, worker } = mount()
     act(() => { getContext().session.actions.selectReplace(['7', '9']) })
     act(() => { getContext().session.actions.applyEdit('setColor', { aci: 'red' }, { targetId: '7' }) })
+    expect(edits()).toHaveLength(1)
+    expect(getContext().session.busy).toBe(true)
+    // Complete the first edit before testing a second explicit target. The
+    // session serializes operations while their worker replies are pending.
+    worker.emit({ type: 'editApplied', op: 'setColor', ok: true,
+      entities: ENTITIES.map(entity => entity.id === '7' ? { ...entity, aci: 1 } : entity),
+      entityCount: ENTITIES.length, bytes: new Uint8Array([1]), byteLength: 1 })
+    expect(getContext().session.busy).toBe(false)
     act(() => { getContext().session.actions.selectClear() })
     act(() => { getContext().session.actions.applyEdit('setLineweight', { lineweight: 'Default' }, { targetId: '9' }) })
     expect(edits()).toEqual([
       { type: 'applyEdit', op: 'setColor', payload: { entityId: '7', aci: 1 } },
       { type: 'applyEdit', op: 'setLineweight', payload: { entityId: '9', lineweight: -3 } },
     ])
+    expect(getContext().session.busy).toBe(true)
   })
 
   it('refuses a target the document does not hold', () => {

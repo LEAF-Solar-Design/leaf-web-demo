@@ -115,7 +115,13 @@ export class EngineBoundary {
       return false
     }
     if (!this._worker) return false
-    this._worker.postMessage(result.message)
+    try {
+      this._worker.postMessage(result.message)
+    } catch {
+      // Keep the boolean transport contract and never retain payload/error text.
+      this._recordDropped('toWorker', 'transport_post_failed')
+      return false
+    }
     return true
   }
 

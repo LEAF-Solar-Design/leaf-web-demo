@@ -15,9 +15,25 @@ import tool_loader
 from drawing_dependency_report import from_pairs
 
 SCHEMA = 'leaf.x04.offline-evidence.v1'
+MAX_JSON_CONTAINER_DEPTH = 256
+MAX_JSON_INTEGER_DIGITS = 4300
+DEFAULT_MAX_INPUT_BYTES = 16 * 1024 * 1024
 
 
-def read_json(path):
+def read_bounded(stream, limit):
+    chunks = []
+    size = 0
+    while True:
+        chunk = stream.read(min(65536, limit - size + 1))
+        if not chunk:
+            return b''.join(chunks)
+        size += len(chunk)
+        if size > limit:
+            raise ValueError(f'Input exceeds the {limit}-byte ceiling.')
+        chunks.append(chunk)
+
+
+def read_json(path, max_input_bytes=DEFAULT_MAX_INPUT_BYTES):
     def unique_object(pairs):
         result = {}
         for key, value in pairs:
@@ -29,15 +45,46 @@ def read_json(path):
     def reject_constant(value):
         raise ValueError(f'Nonfinite JSON number: {value}')
 
-    return json.loads(Path(path).read_text(encoding='utf-8'),
-                      object_pairs_hook=unique_object, parse_constant=reject_constant)
+    def bounded_integer(value):
+        if len(value.lstrip('-')) > MAX_JSON_INTEGER_DIGITS:
+            raise ValueError(f'JSON integer token exceeds {MAX_JSON_INTEGER_DIGITS} digits.')
+        return int(value)
+
+    if str(path) == '-':
+        encoded = read_bounded(sys.stdin.buffer, max_input_bytes)
+    else:
+        source = Path(path)
+        if source.stat().st_size > max_input_bytes:
+            raise ValueError(f'Input exceeds the {max_input_bytes}-byte ceiling.')
+        with source.open('rb') as stream:
+            encoded = read_bounded(stream, max_input_bytes)
+    return json.loads(encoded.decode('utf-8-sig'), object_pairs_hook=unique_object,
+                      parse_constant=reject_constant, parse_int=bounded_integer)
+
+
+def positive_byte_limit(value):
+    try:
+        limit = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError('Byte ceiling must be a positive integer.') from None
+    if limit <= 0:
+        raise argparse.ArgumentTypeError('Byte ceiling must be a positive integer.')
+    return limit
 
 
 def export_evidence(payload):
     if not isinstance(payload, dict) or payload.get('schema') != SCHEMA or payload.get('synthetic') is not True:
         raise ValueError('Require the X04 offline-evidence v1 schema and synthetic=true.')
+    pending = [(payload, 0)]
+    while pending:
+        value, depth = pending.pop()
+        if isinstance(value, (dict, list, tuple)):
+            if depth >= MAX_JSON_CONTAINER_DEPTH:
+                raise ValueError(f'JSON nesting exceeds {MAX_JSON_CONTAINER_DEPTH} container levels.')
+            children = value.values() if isinstance(value, dict) else value
+            pending.extend((child, depth + 1) for child in children)
     # Refuse nonportable extensions before producing an artifact.
-    json.dumps(payload, allow_nan=False)
+    json.dumps(payload, allow_nan=False, ensure_ascii=False).encode('utf-8')
     drawing = payload.get('drawing')
     request = payload.get('request')
     report = payload.get('observed_dependencies')
@@ -68,8 +115,16 @@ def export_evidence(payload):
             raise ValueError('Each observed dependency requires string kind, name and disposition.')
         if 'remapped_to' in row and not isinstance(row['remapped_to'], str):
             raise ValueError('Dependency remapped_to must be a string.')
-    registry = json.loads((X04_ROOT / 'engine/registry.json').read_text(encoding='utf-8'))
-    tool = next(row for row in registry['tools'] if row['name'] == 'count-modules')
+    try:
+        registry = json.loads((X04_ROOT / 'engine/registry.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError) as error:
+        raise ValueError('Tool registry engine/registry.json must be readable valid JSON.') from error
+    if not isinstance(registry, dict) or not isinstance(registry.get('tools'), list):
+        raise ValueError('Tool registry must contain a tools array.')
+    tool = next((row for row in registry['tools']
+                 if isinstance(row, dict) and row.get('name') == 'count-modules'), None)
+    if tool is None:
+        raise ValueError('Tool registry requires a count-modules entry.')
     outcome = tool_loader.run_tool_dynamic(tool, drawing.get('intake'), {'set_ids': ids}, aps_live=False)
     if not outcome['ok']:
         error = outcome.get('error') or {}
@@ -83,10 +138,30 @@ def export_evidence(payload):
                        'original_bytes_integrity': 'unverified'}}
 
 
-def write_json(value, output=None):
-    encoded = json.dumps(value, ensure_ascii=True, allow_nan=False, indent=2) + '\n'
+def write_json(value, output=None, max_output_bytes=None):
+    encoder = json.JSONEncoder(ensure_ascii=True, allow_nan=False, indent=2)
+    chunks = []
+    size = 1  # Reserve the final newline. ASCII characters each occupy one UTF-8 byte.
+    for chunk in encoder.iterencode(value):
+        size += len(chunk)
+        if max_output_bytes is not None and size > max_output_bytes:
+            raise ValueError(f'Encoded output exceeds the {max_output_bytes}-byte ceiling.')
+        chunks.append(chunk)
+    encoded = ''.join(chunks) + '\n'
     if output is None:
-        sys.stdout.write(encoded)
+        try:
+            offset = 0
+            while offset < len(encoded):
+                chunk = encoded[offset:offset + 65536]
+                written = sys.stdout.write(chunk)
+                if type(written) is not int or written <= 0 or written > len(chunk):
+                    raise OSError('Stdout write did not report valid forward progress.')
+                offset += written
+            sys.stdout.flush()
+        except (OSError, ValueError):
+            # Retire a failed stream so interpreter shutdown does not flush it again.
+            sys.stdout = None
+            raise
         return
     target = Path(output)
     temporary = None
@@ -95,24 +170,54 @@ def write_json(value, output=None):
                                          dir=target.parent, prefix='.x04-', delete=False) as stream:
             temporary = Path(stream.name)
             stream.write(encoded)
+            stream.flush()
         os.replace(temporary, target)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
 
 
+def check_output_path(source, output):
+    if output is None or str(source) == '-':
+        return
+    source = Path(source)
+    target = Path(output)
+    if source.resolve() == target.resolve() or (target.exists() and source.samefile(target)):
+        raise ValueError('Input and output must refer to different files.')
+
+
+def report_failure(operation, error):
+    if isinstance(error, RecursionError):
+        error = 'JSON nesting exceeds the supported recursion depth.'
+    message = str(error)
+    message = message[:128] + ('...' if len(message) > 128 else '')
+    escaped = json.dumps(message, ensure_ascii=True)
+    if sys.stderr is None:
+        return 2
+    try:
+        print(f'X04 {operation} refused: {escaped}', file=sys.stderr, flush=True)
+    except (OSError, ValueError):
+        # A closed diagnostic stream still leaves a deterministic failure exit.
+        sys.stderr = None
+    return 2
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('input', type=Path, help='Synthetic saved evidence JSON')
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    parser.add_argument('input', help='Synthetic saved evidence JSON path, or - for stdin')
     parser.add_argument('--out', type=Path)
+    parser.add_argument('--max-input-bytes', type=positive_byte_limit, default=DEFAULT_MAX_INPUT_BYTES,
+                        help='Maximum input bytes, including BOM and whitespace (default: 16777216)')
+    parser.add_argument('--max-output-bytes', type=positive_byte_limit,
+                        help='Optional encoded JSON byte ceiling (default: unlimited)')
     args = parser.parse_args(argv)
     try:
-        payload = read_json(args.input)
+        check_output_path(args.input, args.out)
+        payload = read_json(args.input, args.max_input_bytes)
         artifact = export_evidence(payload)
-        write_json(artifact, args.out)
-    except (OSError, ValueError, TypeError) as error:
-        print(f'X04 export refused: {error}', file=sys.stderr)
-        return 2
+        write_json(artifact, args.out, args.max_output_bytes)
+    except (OSError, ValueError, TypeError, RecursionError) as error:
+        return report_failure('export', error)
     return 0
 
 
