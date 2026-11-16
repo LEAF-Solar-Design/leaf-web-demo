@@ -1,5 +1,7 @@
 // Dormant until explicitly selected as a Playwright CLI reporter.
 // Only public TestCase, TestResult and TestStep properties are read.
+import { posix } from 'node:path'
+
 const TARGET_FILES = new Set([
   'campaign-panel.spec.mjs',
   'recovery-controls.spec.mjs',
@@ -11,6 +13,7 @@ const TARGET_FILES = new Set([
 const STATUSES = new Set(['passed', 'failed', 'timedOut', 'skipped', 'interrupted'])
 const MAX_INTERVALS = 10000
 const MAX_PARENT_DEPTH = 128
+const MAX_API_LINES = 16
 // Keep rounded millisecond arithmetic within safe integer microseconds.
 const MAX_DURATION_MS = Math.floor(Number.MAX_SAFE_INTEGER / 1000)
 
@@ -19,6 +22,17 @@ function targetFile(test) {
   if (typeof file !== 'string') return null
   const basename = file.split(/[\\/]/).pop()
   return TARGET_FILES.has(basename) ? `web/e2e/${basename}` : null
+}
+
+function normalizedFile(file) {
+  return typeof file === 'string' && file.length ? posix.normalize(file.replace(/\\/g, '/')) : null
+}
+
+function sourceLine(test, step) {
+  const line = step?.location?.line
+  return targetFile(test) && normalizedFile(step?.location?.file) !== null
+    && normalizedFile(step.location.file) === normalizedFile(test?.location?.file)
+    && Number.isSafeInteger(line) && line > 0 ? line : null
 }
 
 function safeNumber(value) {
@@ -72,12 +86,17 @@ function timing(state, result) {
     && rawDuration >= 0 ? Math.min(rawDuration, MAX_DURATION_MS) : 0
   const start = timestamp(result?.startTime)
   const groups = { setup: [], teardown: [], api: [], navigation: [] }
+  const lines = new Map()
   if (Number.isFinite(start)) {
     for (const item of state?.intervals || []) {
       const left = Math.max(0, item.start - start)
       const right = Math.min(duration, item.start - start + item.duration)
       if (!Number.isFinite(left) || !Number.isFinite(right) || right <= left) continue
       groups[item.kind].push([left, right])
+      if (item.line !== null && item.kind === 'api') {
+        if (!lines.has(item.line)) lines.set(item.line, [])
+        lines.get(item.line).push([left, right])
+      }
       if (item.navigation) groups.navigation.push([left, right])
     }
   }
@@ -99,6 +118,13 @@ function timing(state, result) {
   const teardownTicks = allocate(teardown)
   const apiTicks = allocate(api)
   const navigationTicks = Math.min(apiTicks, Math.max(0, Math.round(elapsed(navigation) * 1000)))
+  // Inclusive per line: nested calls on different lines overlap, not a partition.
+  // Missing public locations stay unattributed; no source text is retained.
+  const apiLines = [...lines].map(([line, intervals]) => ({
+    line, elapsed: elapsed(subtract(union(intervals), hooks)),
+  })).filter(item => item.elapsed > 0).map(item => ({
+    line: item.line, api_ms: Math.min(apiTicks, Math.round(item.elapsed * 1000)) / 1000,
+  })).sort((a, b) => b.api_ms - a.api_ms || a.line - b.line)
   return {
     duration_ms: durationTicks / 1000,
     setup_ms: setupTicks / 1000,
@@ -106,6 +132,8 @@ function timing(state, result) {
     api_ms: apiTicks / 1000,
     reported_navigation_api_ms: navigationTicks / 1000,
     unattributed_ms: remaining / 1000,
+    api_lines: apiLines.slice(0, MAX_API_LINES),
+    api_lines_omitted: Math.max(0, apiLines.length - MAX_API_LINES),
   }
 }
 
@@ -161,6 +189,7 @@ export default class PanelsTimingReporter {
           || !Number.isFinite(duration) || duration < 0) return
       state.intervals.push({
         kind, start, duration,
+        line: kind === 'api' ? sourceLine(test, step) : null,
         // Public API names only; this is deliberately not all navigation.
         navigation: kind === 'api' && typeof step.title === 'string'
           && /^(?:page|frame)\.(?:goto|reload)(?:\s|\(|$)/.test(step.title),
