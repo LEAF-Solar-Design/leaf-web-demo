@@ -1885,3 +1885,40 @@ stage retains both `inverter_optimizers_totals_mismatch` and
 `inverter_panels_totals_mismatch`. Repairs clear only their own metric. The final
 stage is PASS. Oracle input origin and independence require producer evidence
 from the actual report extraction path before live acceptance.
+# Independent per-string metric evidence for X05
+
+Grid and inverter totals can agree after panel or DC values move between strings
+on the same inverter. Composition compares supplied snapshots and aggregate
+oracles. Independent per-string panel and kW DC rows are needed to detect this
+case. The standalone `compare_string_panel_counts` and `compare_string_dc_power`
+helpers require explicit oracle IDs and values, with bounded sorted diagnostics.
+Missing or malformed rows return UNREADABLE. Explicit identity or value
+differences return FAIL. DC comparison uses isolated exact decimals.
+
+Run this synthetic replay from the repository root:
+
+```powershell
+@'
+import json, runpy, sys
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+envelope = fixtures['per_string_redistribution_envelope']()
+panels = [dict(string_id='A',panels=10),dict(string_id='B',panels=14)]
+power = [dict(string_id='A',kw_dc='4'),dict(string_id='B',kw_dc='5.6')]
+composition = m.reconcile_seven_steps_json(json.dumps(envelope))
+panel = m.compare_string_panel_counts(panels, envelope['grid']['panel_counts'])
+dc = m.compare_string_dc_power(power, envelope['grid']['dc_power'])
+print('composition', composition['verdict'])
+print('panels', panel['verdict'], panel['reason'], panel['counts']['mismatched'])
+print('power', dc['verdict'], dc['reason'], dc['counts']['mismatched'])
+assert composition['verdict'] == 'PASS'
+assert panel['verdict'] == dc['verdict'] == 'FAIL'
+'@ | python -P -
+```
+
+Expected composition PASS, panels FAIL `string_panels_mismatch` with two changed
+strings, power FAIL `string_kw_dc_mismatch` with two changed strings. Both strings
+retain their IDs, grid, inverter and aggregate totals. Independent report
+extraction must provide the per-string oracle values and their provenance for
+live acceptance. These new comparators remain standalone in this slice.

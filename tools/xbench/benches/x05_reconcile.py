@@ -1769,10 +1769,25 @@ def _index(rows, source, *, metric="optimizers"):
 
 def compare_strings(oracle_rows, saved_rows):
     """Return deterministic, explicit per-string differences, never infer IDs."""
-    oracle, error = _index(oracle_rows, "oracle")
+    return _compare_string_metric_rows(oracle_rows, saved_rows, "optimizers")
+
+
+def compare_string_panel_counts(oracle_rows, saved_rows):
+    """Compare explicit independent per-string panel counts, including equal-total swaps."""
+    return _compare_string_metric_rows(oracle_rows, saved_rows, "panels")
+
+
+def compare_string_dc_power(oracle_rows, saved_rows):
+    """Compare explicit independent per-string kW DC using isolated exact decimals."""
+    with localcontext(_CONTEXT):
+        return _compare_string_metric_rows(oracle_rows, saved_rows, "kw_dc")
+
+
+def _compare_string_metric_rows(oracle_rows, saved_rows, metric):
+    oracle, error = _index(oracle_rows, "oracle", metric=metric)
     if error:
         return {"verdict": "UNREADABLE", "reason": error}
-    saved, error = _index(saved_rows, "saved")
+    saved, error = _index(saved_rows, "saved", metric=metric)
     if error:
         return {"verdict": "UNREADABLE", "reason": error}
     missing = oracle.keys() - saved.keys()
@@ -1781,8 +1796,9 @@ def compare_strings(oracle_rows, saved_rows):
     mismatches = [{"string_id": key, "oracle": oracle[key], "saved": saved[key]}
                   for key in nsmallest(MAX_STRING_EXAMPLES, changed)]
     matched = not (missing or foreign or changed)
-    return {"verdict": "PASS" if matched else "FAIL",
-            "reason": "exact_string_identity" if matched else "string_identity_mismatch",
+    reason = ("exact_string_identity" if matched else "string_identity_mismatch") if metric == "optimizers" else (
+        "string_" + metric + ("_equal" if matched else "_mismatch"))
+    return {"verdict": "PASS" if matched else "FAIL", "reason": reason,
             "missing_ids": nsmallest(MAX_STRING_EXAMPLES, missing),
             "foreign_ids": nsmallest(MAX_STRING_EXAMPLES, foreign), "mismatches": mismatches,
             "counts": {"missing": len(missing), "foreign": len(foreign), "mismatched": len(changed)}}

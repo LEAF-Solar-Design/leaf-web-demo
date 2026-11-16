@@ -5171,3 +5171,151 @@ def test_inverter_load_raw_numeric_rejection(metric, bad):
     assert direct['verdict'] == 'UNREADABLE'
     assert direct['inverter_loads']['metrics']['strings' if metric != 'strings' else 'optimizers']['comparison']['verdict'] == 'PASS'
     assert reconcile_seven_steps_json(json.dumps(envelope))['verdict'] == 'UNREADABLE'
+
+
+@pytest.mark.parametrize('metric', ['panels', 'kw_dc'])
+def test_independent_string_metrics_equal_total_swaps_identity_and_schema(metric):
+    from benches import x05_reconcile as m
+    compare = m.compare_string_panel_counts if metric == 'panels' else m.compare_string_dc_power
+    values = [10, 14] if metric == 'panels' else ['0.'+'0'*76+'1', '0.'+'0'*76+'2']
+    oracle = [dict(string_id=k, **{metric:v}) for k,v in zip(['A','B'],values)]
+    saved = [dict(string_id=k, **{metric:v}) for k,v in zip(['A','B'],values[::-1])]
+    preserved = deepcopy((oracle, saved))
+    result = compare(oracle, saved)
+    assert result['verdict'] == 'FAIL' and result['counts']['mismatched'] == 2
+    assert result == compare(oracle[::-1], saved[::-1]) and (oracle, saved) == preserved
+    assert compare(oracle, oracle)['verdict'] == 'PASS'
+    assert compare(oracle, saved[:1])['counts']['missing'] == 1
+    assert compare(oracle, [dict(saved[0], string_id='foreign'), saved[1]])['counts']['foreign'] == 1
+    for rows in (None, [], {}, oracle+oracle[:1], [dict(string_id='', **{metric:1})],
+                 [dict(string_id='x'*129, **{metric:1})], [dict(string_id='A', **{metric:True})],
+                 [dict(string_id='A', **{metric:float('nan')})]):
+        assert compare(rows, saved)['verdict'] == 'UNREADABLE'
+    many = [dict(string_id=f's{i:03}', **{metric:1}) for i in range(60)]
+    changed = [dict(row, **{metric:2}) for row in many]
+    result = compare(many, changed)
+    assert result['counts']['mismatched'] == 60 and len(result['mismatches']) == MAX_STRING_EXAMPLES
+
+
+def test_exhaustive_inverter_snapshot_loads_against_integer_fraction_models():
+    from itertools import product
+    from fractions import Fraction
+    from benches import x05_reconcile as m
+    for owners in product(['INV-A','INV-B'], repeat=2):
+        for values in product([1,2], repeat=2):
+            envelope = connection_envelope()
+            grid, evidence = envelope['grid'], envelope['assurance']['evidence']
+            for stage in ('saved','before','reopened'):
+                connections = [dict(string_id=k,inverter_id=v) for k,v in zip(['A','B'], owners if stage != 'reopened' else owners[::-1])]
+                evidence[stage+'_assignments'] = connections
+                strings = [dict(string_id=k,optimizers=v) for k,v in zip(['A','B'],values)]
+                if stage == 'saved': evidence['saved_strings'] = strings
+                else: evidence[stage+'_rows']['strings'] = strings
+                prefix = '' if stage == 'saved' else stage+'_'
+                grid[prefix+'panel_counts'] = [dict(string_id=k,panels=3*v) for k,v in zip(['A','B'],values)]
+                grid[prefix+'dc_power'] = [dict(string_id=k,kw_dc=f'0.{v}') for k,v in zip(['A','B'],values)]
+            preserved = deepcopy((grid,evidence))
+            result = m._seven_step_inverter_load_reopen(grid,evidence)
+            for metric in ('strings','optimizers','panels','kw_dc'):
+                weights = [1,1] if metric == 'strings' else [3*v for v in values] if metric == 'panels' else [Fraction(v,10) for v in values] if metric == 'kw_dc' else list(values)
+                old = {key:sum(v for owner,v in zip(owners,weights) if owner==key) for key in ('INV-A','INV-B')}
+                new = {key:sum(v for owner,v in zip(owners[::-1],weights) if owner==key) for key in ('INV-A','INV-B')}
+                check = result['metrics'][metric]
+                assert check['saved_binding']['verdict'] == 'PASS'
+                assert check['comparison']['counts']['changed'] == sum(old[k]!=new[k] for k in old)
+                for row in check['comparison']['examples']:
+                    assert Fraction(row['delta']) == new[row['inverter_id']]-old[row['inverter_id']]
+            assert (grid,evidence) == preserved
+
+
+def test_concurrent_composed_inverter_dc_contexts_preserve_callers():
+    from concurrent.futures import ThreadPoolExecutor
+    from decimal import localcontext, Inexact
+    from threading import Event
+    from benches import x05_reconcile as m
+    ready, release = [Event(),Event()], Event()
+    envelope = connection_envelope()
+    envelope['grid']['reopened_dc_power'][0]['kw_dc'] = '4.'+'0'*76+'1'
+    envelope['grid']['reopened_dc_power'][1]['kw_dc'] = '5.5'+'9'*76
+    def run(index):
+        with localcontext() as caller:
+            caller.prec,caller.Emin,caller.Emax = (2,-1,1) if index == 0 else (45,-999,999)
+            for signal in caller.traps: caller.traps[signal] = bool(index)
+            caller.clear_flags()
+            caller.flags[Inexact] = bool(index)
+            snapshot = lambda: (caller.prec,caller.Emin,caller.Emax,dict(caller.traps),dict(caller.flags))
+            preserved = snapshot()
+            ready[index].set()
+            assert release.wait(10)
+            result = m._seven_step_envelope(deepcopy(envelope))
+            assert result['inverter_load_reopen']['metrics']['kw_dc']['comparison']['counts']['changed'] == 2
+            encoded = serialize_result(result)
+            assert snapshot() == preserved
+            return encoded
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(run,i) for i in range(2)]
+        try:
+            assert all(event.wait(10) for event in ready)
+        finally:
+            release.set()
+        assert futures[0].result(timeout=20) == futures[1].result(timeout=20)
+
+
+def test_composed_load_topology_hash_seeds_and_row_permutations(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from random import Random
+    from benches import x05_reconcile as m
+    expected, records = bound_seven_fixture_records()
+    for index, record in enumerate(records):
+        envelope = connection_envelope()
+        source = envelope['assurance']
+        source['manifest']['fixture_id'] = source['evidence']['fixture_id'] = record['fixture_id']
+        source['bindings'] = {k:deepcopy(source['manifest']) for k in PROVENANCE_STAGES}
+        record['envelope'] = envelope
+        evidence = source['evidence']
+        evidence['inverter_loads']['optimizers']['INV-A'] = 6
+        evidence['reopened_assignments'][0]['inverter_id'] = 'INV-B'
+        if index == 2: evidence['inverter_loads']['kw_dc'] = None
+    preserved = deepcopy(records)
+    baseline = json.loads(serialize_result(m.aggregate_bound_seven_steps(expected,records)))
+    outputs = []
+    for seed in ('0','73'):
+        changed = deepcopy(records)
+        Random(int(seed)).shuffle(changed)
+        for record in changed:
+            evidence = record['envelope']['assurance']['evidence']
+            for field in ('saved_assignments','oracle_assignments','before_assignments','reopened_assignments','saved_inverters','before_inverters','reopened_inverters','saved_strings'):
+                Random(int(seed)).shuffle(evidence[field])
+            for metric, values in evidence['inverter_loads'].items():
+                if values is not None: evidence['inverter_loads'][metric] = dict(reversed(list(values.items())))
+            for field in ('panel_counts','before_panel_counts','reopened_panel_counts','dc_power','before_dc_power','reopened_dc_power'):
+                Random(int(seed)).shuffle(record['envelope']['grid'][field])
+        run = subprocess.run([sys.executable,'-P',str(Path(m.__file__).resolve()),'--seven-step-bound-aggregate'],
+            input=serialize_result(dict(expected_ids=expected[::-1],fixtures=changed)).encode('ascii'),
+            capture_output=True,cwd=tmp_path,timeout=20,env={'SystemRoot':'C:\\Windows','PYTHONHASHSEED':seed})
+        assert run.returncode == 4 and not run.stderr
+        assert json.loads(run.stdout) == baseline
+        outputs.append(run.stdout)
+    assert outputs[0] == outputs[1] and records == preserved
+
+
+def per_string_redistribution_envelope():
+    envelope = seven_step_envelope()
+    grid = envelope['grid']
+    for field in ('panel_counts','before_panel_counts','reopened_panel_counts'):
+        grid[field][0]['panels'],grid[field][1]['panels'] = 14,10
+    for field in ('dc_power','before_dc_power','reopened_dc_power'):
+        grid[field][0]['kw_dc'],grid[field][1]['kw_dc'] = '5.6','4'
+    return envelope
+
+
+def test_per_string_metric_proof_limit_replay():
+    from benches import x05_reconcile as m
+    envelope = per_string_redistribution_envelope()
+    assert m._seven_step_envelope(envelope)['verdict'] == 'PASS'
+    panels = [dict(string_id='A',panels=10),dict(string_id='B',panels=14)]
+    power = [dict(string_id='A',kw_dc='4'),dict(string_id='B',kw_dc='5.6')]
+    assert m.compare_string_panel_counts(panels,envelope['grid']['panel_counts'])['counts']['mismatched'] == 2
+    assert m.compare_string_dc_power(power,envelope['grid']['dc_power'])['counts']['mismatched'] == 2
