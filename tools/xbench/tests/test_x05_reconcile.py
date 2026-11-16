@@ -6573,3 +6573,181 @@ def test_oracle_topology_missing_connections_preserves_all_saved_phase_failures(
     assert result['independent_owners']['checks']['oracle_topology']['verdict'] == 'UNREADABLE'
     assert all(check['mismatch_count'] == 2 for check in result['cross_topology']['checks'].values())
     assert envelope == original
+
+
+def test_exhaustive_oracle_loads_against_independent_integer_fraction_sums():
+    from fractions import Fraction
+    from itertools import product
+    from benches import x05_reconcile as m
+    def dc(number):
+        return f'0.{int(number*10)}'
+    for owners in product(['g0','g1'],repeat=2):
+        for connections in product(['i0','i1'],repeat=2):
+            for values in product([1,2],repeat=2):
+                ids = ['A','B']
+                weights = dict(strings=[1,1],optimizers=list(values),panels=[3*v for v in values],kw_dc=[Fraction(v,10) for v in values])
+                grid_totals = {metric:{key:sum(v for owner,v in zip(owners,counts) if owner==key) for key in ['g0','g1']} for metric,counts in weights.items()}
+                device_totals = {metric:{key:sum(v for owner,v in zip(connections,counts) if owner==key) for key in ['i0','i1']} for metric,counts in weights.items()}
+                grid_totals['kw_dc'] = {key:dc(value) for key,value in grid_totals['kw_dc'].items()}
+                device_totals['kw_dc'] = {key:dc(value) for key,value in device_totals['kw_dc'].items()}
+                fields = dict(strings='string_totals',optimizers='optimizer_totals',panels='panel_totals',kw_dc='dc_totals')
+                grid = dict(expected_grid_ids=['g0','g1'],**{fields[metric]:counts for metric,counts in grid_totals.items()})
+                evidence = dict(oracle_strings=[dict(string_id=k,optimizers=v) for k,v in zip(ids,values)],
+                    oracle_panels=[dict(string_id=k,panels=3*v) for k,v in zip(ids,values)],
+                    oracle_dc_power=[dict(string_id=k,kw_dc=dc(Fraction(v,10))) for k,v in zip(ids,values)],
+                    oracle_string_owners=[dict(string_id=k,grid_id=v) for k,v in zip(ids,owners)],
+                    oracle_assignments=[dict(string_id=k,inverter_id=v) for k,v in zip(ids,connections)],
+                    oracle_inverter_ids=['i0','i1'],inverter_loads=device_totals,
+                    oracle_values=dict(strings=2,optimizers=sum(values),panels=3*sum(values),kw_dc=dc(Fraction(sum(values),10))))
+                original = deepcopy((grid,evidence))
+                result = m._seven_step_oracle_loads(grid,evidence)
+                assert result['verdict'] == 'PASS'
+                for metric,field in fields.items():
+                    for target,keys in [('grid',['g0','g1']),('inverter',['i0','i1'])]:
+                        source = grid[field] if target=='grid' else evidence['inverter_loads'][metric]
+                        if source[keys[0]] == source[keys[1]]:
+                            continue
+                        changed_grid,changed_evidence = deepcopy((grid,evidence))
+                        changed = changed_grid[field] if target=='grid' else changed_evidence['inverter_loads'][metric]
+                        changed[keys[0]],changed[keys[1]] = changed[keys[1]],changed[keys[0]]
+                        observed = m._seven_step_oracle_loads(changed_grid,changed_evidence)
+                        check = observed['metrics'][metric]
+                        assert observed['verdict'] == 'FAIL' and check[target+'_comparison']['mismatch_count'] == 2
+                        assert check[target+'_report']['verdict'] == 'PASS'
+                        for row in check[target+'_comparison']['examples']:
+                            assert Fraction(row['delta']) == Fraction(row['saved'])-Fraction(row['oracle'])
+                assert (grid,evidence) == original
+
+
+@pytest.mark.parametrize('field',['oracle_strings','oracle_panels','oracle_dc_power'])
+@pytest.mark.parametrize('kind',['none','container','duplicate','foreign','boolean','negative','nonfinite','wide'])
+def test_oracle_loads_schema_direct_bound_json_sanitized_and_readable_metrics(field,kind):
+    from benches import x05_reconcile as m
+    expected,records = bound_seven_fixture_records()
+    envelope = records[0]['envelope']
+    evidence = envelope['assurance']['evidence']
+    rows = evidence[field]
+    metric = {'oracle_strings':'optimizers','oracle_panels':'panels','oracle_dc_power':'kw_dc'}[field]
+    if kind=='none': evidence[field] = None
+    elif kind=='container': evidence[field] = 'private-canary'
+    elif kind=='duplicate': rows.append(deepcopy(rows[0]))
+    elif kind=='foreign': rows[0]['string_id'] = 'foreign'
+    elif kind=='boolean': rows[0][metric] = True
+    elif kind=='negative': rows[0][metric] = -1
+    elif kind=='nonfinite': rows[0][metric] = 'NaN'
+    else: rows[0]['string_id'] = 'x'*129
+    original = deepcopy(records)
+    direct = m._seven_step_oracle_loads(envelope['grid'],evidence)
+    parsed = m.aggregate_bound_seven_steps_json(serialize_result(dict(expected_ids=expected,fixtures=records)))
+    observed = parsed['fixtures'][expected[0]]['reconciliation']['oracle_loads']
+    assert json.loads(serialize_result(direct)) == json.loads(serialize_result(observed))
+    assert direct['verdict'] != 'PASS'
+    for checks in direct['metrics'].values():
+        assert checks['grid_report']['verdict'] == checks['inverter_report']['verdict'] == 'PASS'
+    assert all(parsed['fixtures'][key]['verdict'] == 'PASS' for key in expected[1:])
+    text = serialize_result(parsed)
+    assert 'private-canary' not in text and 'x'*129 not in text and records == original
+
+
+def test_oracle_loads_linear_index_work_exact_caps_permutations_and_preservation(monkeypatch):
+    from random import Random
+    from benches import x05_reconcile as m
+    work = []
+    class CountedDict(dict):
+        def __getitem__(self,key):
+            work.append(1)
+            return super().__getitem__(key)
+    original_index = m._index
+    def indexed(*args,**kwargs):
+        values,error = original_index(*args,**kwargs)
+        return (CountedDict(values) if values is not None else None),error
+    monkeypatch.setattr(m,'_index',indexed)
+    for size in (10,100,1000):
+        ids = [f's{i:04}' for i in range(size)]
+        grids,devices = [f'g{i:04}' for i in range(size)],[f'i{i:04}' for i in range(size)]
+        totals = {key:2 for key in grids}
+        grid = dict(expected_grid_ids=grids,string_totals=dict(totals),optimizer_totals=dict(totals),panel_totals=dict(totals),dc_totals=dict(totals))
+        evidence = dict(oracle_strings=[dict(string_id=k,optimizers=1) for k in ids],
+            oracle_panels=[dict(string_id=k,panels=1) for k in ids],oracle_dc_power=[dict(string_id=k,kw_dc='1') for k in ids],
+            oracle_string_owners=[dict(string_id=k,grid_id=v) for k,v in zip(ids,grids)],
+            oracle_assignments=[dict(string_id=k,inverter_id=v) for k,v in zip(ids,devices)],oracle_inverter_ids=devices,
+            inverter_loads={metric:{key:2 for key in devices} for metric in ('strings','optimizers','panels','kw_dc')},
+            oracle_values=dict(strings=2*size,optimizers=2*size,panels=2*size,kw_dc=2*size))
+        original = deepcopy((grid,evidence))
+        work.clear()
+        baseline = m._seven_step_oracle_loads(grid,evidence)
+        assert len(work) == 6*size
+        for checks in baseline['metrics'].values():
+            for field in ('grid_comparison','inverter_comparison'):
+                assert checks[field]['mismatch_count'] == size
+                assert len(checks[field]['examples']) == min(size,MAX_STRING_EXAMPLES)
+        for seed in range(2):
+            changed = deepcopy(evidence)
+            for field in ('oracle_strings','oracle_panels','oracle_dc_power','oracle_string_owners','oracle_assignments','oracle_inverter_ids'):
+                Random(seed).shuffle(changed[field])
+            assert m._seven_step_oracle_loads(grid,changed) == baseline
+        assert (grid,evidence) == original
+
+
+def test_concurrent_oracle_loads_exact_dc_contexts_are_isolated():
+    from concurrent.futures import ThreadPoolExecutor
+    from decimal import localcontext,Inexact,Decimal
+    from threading import Event
+    from benches import x05_reconcile as m
+    envelope = equal_count_ownership_envelope()
+    evidence = envelope['assurance']['evidence']
+    evidence['oracle_dc_power'][0]['kw_dc'] = '4.'+'0'*76+'1'
+    evidence['oracle_dc_power'][1]['kw_dc'] = '5.5'+'9'*76
+    ready,release = [Event(),Event()],Event()
+    def run(index):
+        with localcontext() as caller:
+            caller.prec,caller.Emin,caller.Emax = (2,-1,1) if index==0 else (43,-999,999)
+            for signal in caller.traps: caller.traps[signal] = bool(index)
+            caller.clear_flags()
+            caller.flags[Inexact] = bool(index)
+            state = lambda: (caller.prec,caller.Emin,caller.Emax,dict(caller.traps),dict(caller.flags))
+            original = state()
+            ready[index].set()
+            assert release.wait(10)
+            result = m._seven_step_oracle_loads(envelope['grid'],evidence)
+            checks = result['metrics']['kw_dc']
+            for target in ('grid','inverter'):
+                check = checks[target+'_comparison']
+                assert check['mismatch_count'] == 2 and check['examples'][0]['delta'] == Decimal('1e-77')
+            encoded = serialize_result(result)
+            assert state() == original
+            return encoded
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(run,index) for index in range(2)]
+        try: assert all(event.wait(10) for event in ready)
+        finally: release.set()
+        assert futures[0].result(timeout=20) == futures[1].result(timeout=20)
+
+
+def test_oracle_loads_bijective_relabeling_and_single_load_redistribution():
+    from benches import x05_reconcile as m
+    envelope = equal_count_ownership_envelope()
+    baseline = m._seven_step_oracle_loads(envelope['grid'],envelope['assurance']['evidence'])
+    assert baseline['verdict'] == 'PASS'
+    names = {'east':'g-z','west':'g-y','A':'s-z','B':'s-y','INV-A':'i-z','INV-B':'i-y'}
+    def rename(value):
+        if type(value) is str:
+            return names.get(value,value)
+        if type(value) is list:
+            return [rename(item) for item in value]
+        if type(value) is dict:
+            return {names.get(key,key):rename(item) for key,item in value.items()}
+        return value
+    original = deepcopy(envelope)
+    changed = rename(envelope)
+    result = m._seven_step_oracle_loads(changed['grid'],changed['assurance']['evidence'])
+    assert result['verdict'] == 'PASS'
+    for metric in baseline['metrics']:
+        for field in ('grid_comparison','inverter_comparison'):
+            assert result['metrics'][metric][field]['mismatch_count'] == baseline['metrics'][metric][field]['mismatch_count'] == 0
+    rows = changed['assurance']['evidence']['oracle_dc_power']
+    rows[0]['kw_dc'],rows[1]['kw_dc'] = rows[1]['kw_dc'],rows[0]['kw_dc']
+    result = m._seven_step_oracle_loads(changed['grid'],changed['assurance']['evidence'])
+    assert result['verdict'] == 'FAIL'
+    assert result['metrics']['kw_dc']['grid_comparison']['mismatch_count'] == 2
+    assert envelope == original

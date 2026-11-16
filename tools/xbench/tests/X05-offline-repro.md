@@ -2317,3 +2317,55 @@ Oracle connection repair exposes `cross_topology_mismatch` from the contradictor
 oracle owners. Repairing those owners leaves all saved-phase failures visible.
 Each saved snapshot then repairs independently. These consistency checks require
 actual producer provenance and independent report extraction for live acceptance.
+# Oracle load evidence fields in X05
+
+`oracle_loads` derives values only from explicit oracle rows and assignments.
+The supplied grid and inverter totals are independent comparison targets.
+
+| Metric | Oracle per-string values | Grid target | Inverter target |
+| --- | --- | --- | --- |
+| `strings` | One for each explicit `oracle_strings` ID | `grid.string_totals` | `inverter_loads.strings` |
+| `optimizers` | `oracle_strings[].optimizers` | `grid.optimizer_totals` | `inverter_loads.optimizers` |
+| `panels` | `oracle_panels[].panels` | `grid.panel_totals` | `inverter_loads.panels` |
+| `kw_dc` | `oracle_dc_power[].kw_dc` | `grid.dc_totals` | `inverter_loads.kw_dc` |
+
+Grid derivation uses `oracle_string_owners` and `grid.expected_grid_ids`. Device
+derivation uses `oracle_assignments` and `oracle_inverter_ids`. Panel/DC row IDs
+bind to `oracle_strings`. Every target map also checks its coverage and summed
+agreement with `oracle_values[metric]`. Power values are explicit kW DC.
+
+Omitted, null or empty metric-row lists and numeric target maps are UNREADABLE.
+Omitted/null owner or connection rows are UNREADABLE. Empty owner/connection
+lists fail coverage for the nonempty design. Missing report totals make their
+report checks UNREADABLE while derived comparisons remain visible. No count or
+power is inferred from another metric.
+
+```powershell
+@'
+import json, runpy, sys
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+envelope = fixtures['equal_count_ownership_envelope']()
+grid, evidence = envelope['grid'], envelope['assurance']['evidence']
+grid_panels = deepcopy(grid['panel_totals'])
+device_panels = deepcopy(evidence['inverter_loads']['panels'])
+grid['panel_totals'] = dict(east=14,west=10)
+evidence['inverter_loads']['panels'] = {'INV-A':14,'INV-B':10}
+observed = []
+for stage in ('both swapped','grid repaired','device repaired'):
+    if stage == 'grid repaired': grid['panel_totals'] = grid_panels
+    if stage == 'device repaired': evidence['inverter_loads']['panels'] = device_panels
+    result = m.reconcile_seven_steps_json(json.dumps(envelope))
+    check = result['oracle_loads']['metrics']['panels']
+    observed.append(result['verdict'])
+    print(stage,result['verdict'],check['grid_comparison']['verdict'],check['inverter_comparison']['verdict'],
+          check['grid_report']['verdict'],check['inverter_report']['verdict'])
+assert observed == ['FAIL','FAIL','PASS']
+'@ | python -P -
+```
+
+Both report-total checks remain PASS throughout the equal-grand-total swap.
+Derived comparisons repair independently. Actual oracle producers must supply
+independent values, owners and connections with provenance for live acceptance.
