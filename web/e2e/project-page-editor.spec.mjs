@@ -7,7 +7,7 @@ import { catProofResponse, makeCatProofState } from './catProofFixture.mjs'
 import { scaled } from './timeScale.mjs'
 
 test.describe.configure({ mode: 'parallel' })
-test.use({ video: 'off', trace: 'off' })
+test.use({ video: 'off', trace: 'off', reducedMotion: 'reduce' })
 
 // These fixture journeys retain custom failure diagnostics.
 const projectClickDiagnostics = new WeakMap()
