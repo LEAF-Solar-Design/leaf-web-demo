@@ -18,6 +18,7 @@ from benches.x05_reconcile import (METRICS, TABLE_COLUMNS, check_discrepancies,
     PROVENANCE_STAGES, validate_fixture_provenance,
     IDENTITY_STAGES, validate_saved_design_identity, verify_input_bytes, reconcile_with_provenance,
     reconcile_assured, aggregate_provenance, reconcile_provenance_json,
+    reconcile_assurance_json, aggregate_provenance_json,
     compare_csv_view, compare_recommendations, compare_snapshots, compare_strings, compare_table)
 
 
@@ -1694,3 +1695,104 @@ def test_design_identity_exact_boundaries_and_unicode_distinctions(stage, field)
         stages[stage][field] = other
         assert validate_saved_design_identity(expected, stages) == {
             "verdict": "UNREADABLE", "reason": "design_identity_conflict", "stage": stage}
+
+
+def assurance_envelope():
+    manifest, bindings, inputs = provenance_fixture()
+    identity = dict(project_id="project", version_id="version")
+    return dict(evidence=complete_evidence(), manifest=manifest, bindings=bindings,
+                inputs_hex={key: value.hex() for key, value in inputs.items()}, identity=identity,
+                stage_identities={key: dict(identity) for key in IDENTITY_STAGES})
+
+
+def test_strict_assurance_json_hex_and_envelope_boundaries():
+    envelope = assurance_envelope()
+    assert reconcile_assurance_json(json.dumps(envelope))["verdict"] == "PASS"
+    for bad in (None, [], {"dwg": None}, {"dwg": "0"}, {"dwg": "gg"}, {"dwg": "ab cd"}):
+        changed = dict(envelope, inputs_hex=bad)
+        assert reconcile_assurance_json(json.dumps(changed))["reason"] == "input_hex_unreadable"
+    for field in envelope:
+        changed = dict(envelope)
+        del changed[field]
+        assert reconcile_assurance_json(json.dumps(changed))["reason"] == "assurance_envelope_unreadable"
+    for value in ("", "00", "FF"):
+        changed = deepcopy(envelope)
+        changed["inputs_hex"]["dwg"] = value
+        assert reconcile_assurance_json(json.dumps(changed))["checks"]["input_bytes"]["reason"] == "input_digest_conflict"
+    assert reconcile_assurance_json('{"inputs_hex":{},"inputs_hex":{}}')["reason"] == "json_duplicate_key"
+
+
+@pytest.mark.parametrize("kind,exit_code", [("PASS", 0), ("FAIL", 1), ("UNREADABLE", 4), ("malformed", 4)])
+def test_provenance_cli_mode_uses_sanitized_offline_envelope(tmp_path, kind, exit_code):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from benches import x05_reconcile as module
+    manifest, bindings, _ = provenance_fixture()
+    evidence = complete_evidence()
+    if kind == "FAIL":
+        evidence["recommendations"][0]["group_count"] = 1
+    if kind == "UNREADABLE":
+        evidence["fixture_id"] = "foreign"
+    text = json.dumps(dict(evidence=evidence, manifest=manifest, bindings=bindings))
+    if kind == "malformed":
+        text = '{"synthetic_private_canary":true}'
+    result = subprocess.run([sys.executable, "-P", str(Path(module.__file__).resolve()), "--provenance"],
+        input=text.encode(), capture_output=True, cwd=tmp_path, timeout=20)
+    assert result.returncode == exit_code and result.stderr == b""
+    assert len(result.stdout.splitlines()) == 1 and b"synthetic_private_canary" not in result.stdout
+    observed = json.loads(result.stdout)
+    assert observed["verdict"] == ("UNREADABLE" if kind == "malformed" else kind)
+    if kind == "malformed":
+        assert observed["reason"] == "provenance_envelope_unreadable"
+
+
+def test_provenance_aggregate_json_preserves_siblings_and_strict_decoding():
+    expected, fixtures = provenance_records()
+    envelope = dict(expected_ids=expected, fixtures=fixtures)
+    baseline = aggregate_provenance_json(json.dumps(envelope))
+    assert baseline["verdict"] == "PASS"
+    del fixtures[0]["bindings"]
+    result = aggregate_provenance_json(json.dumps(envelope))
+    assert result["verdict"] == "UNREADABLE"
+    for key in expected[1:]:
+        assert result["fixtures"][key] == baseline["fixtures"][key]
+    assert aggregate_provenance_json('{"expected_ids":[],"expected_ids":[]}')["reason"] == "json_duplicate_key"
+    for value in ({}, dict(envelope, extra=True)):
+        assert aggregate_provenance_json(json.dumps(value))["reason"] == "provenance_aggregate_envelope_unreadable"
+
+
+@pytest.mark.parametrize("bytes_bad,version_bad,readable_bad", [
+    (a, b, c) for a in (False, True) for b in (False, True) for c in (False, True)])
+def test_assurance_failure_isolation_keeps_all_diagnostics_and_inputs(bytes_bad, version_bad, readable_bad):
+    envelope = assurance_envelope()
+    if bytes_bad:
+        envelope["inputs_hex"]["report"] = b"substituted".hex()
+    if version_bad:
+        envelope["stage_identities"]["table"]["version_id"] = "foreign"
+    if readable_bad:
+        envelope["evidence"]["recommendations"][0]["group_count"] = 1
+    preserved = deepcopy(envelope)
+    result = reconcile_assurance_json(json.dumps(envelope))
+    assert result["verdict"] == ("UNREADABLE" if bytes_bad or version_bad else "FAIL" if readable_bad else "PASS")
+    checks = result["checks"]
+    assert checks["input_bytes"]["verdict"] == ("UNREADABLE" if bytes_bad else "PASS")
+    assert checks["design_identity"]["verdict"] == ("UNREADABLE" if version_bad else "PASS")
+    assert checks["provenance"]["reconciliation"] == reconcile_offline(envelope["evidence"])
+    assert envelope == preserved
+
+
+@pytest.mark.parametrize("swap", ["manifest", "bindings", "both"])
+def test_equal_total_cross_fixture_manifest_swaps_are_rejected(swap):
+    expected, fixtures = provenance_records()
+    baseline = aggregate_provenance(expected, fixtures)
+    for field in (["manifest", "bindings"] if swap == "both" else [swap]):
+        fixtures[0][field], fixtures[1][field] = fixtures[1][field], fixtures[0][field]
+    preserved = deepcopy(fixtures)
+    result = aggregate_provenance_json(json.dumps(dict(expected_ids=expected, fixtures=fixtures)))
+    assert result["verdict"] == "UNREADABLE"
+    for key in expected[:2]:
+        assert result["fixtures"][key]["verdict"] == "UNREADABLE"
+        assert result["fixtures"][key]["reconciliation"]["verdict"] == "PASS"
+    assert result["fixtures"][expected[2]] == baseline["fixtures"][expected[2]]
+    assert fixtures == preserved

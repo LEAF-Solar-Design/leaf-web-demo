@@ -140,6 +140,32 @@ def aggregate_provenance(expected_ids, fixtures):
     return _out(verdict, "offline_provenance_fixtures", fixtures=results)
 
 
+def aggregate_provenance_json(text):
+    decoded = decode_evidence_json(text)
+    if decoded["verdict"] != "PASS":
+        return decoded
+    envelope = decoded["evidence"]
+    if set(envelope) != {"expected_ids", "fixtures"}:
+        return _out("UNREADABLE", "provenance_aggregate_envelope_unreadable")
+    return aggregate_provenance(envelope["expected_ids"], envelope["fixtures"])
+
+
+def reconcile_assurance_json(text):
+    decoded = decode_evidence_json(text)
+    if decoded["verdict"] != "PASS":
+        return decoded
+    envelope = decoded["evidence"]
+    if set(envelope) != {"evidence", "manifest", "bindings", "inputs_hex", "identity", "stage_identities"}:
+        return _out("UNREADABLE", "assurance_envelope_unreadable")
+    encoded = envelope["inputs_hex"]
+    if (type(encoded) is not dict or any(type(value) is not str or len(value) % 2
+            or re.fullmatch(r"[0-9a-fA-F]*", value) is None for value in encoded.values())):
+        return _out("UNREADABLE", "input_hex_unreadable")
+    supplied = {key: bytes.fromhex(value) for key, value in encoded.items()}
+    return reconcile_assured(envelope["evidence"], envelope["manifest"], envelope["bindings"], supplied,
+                             envelope["identity"], envelope["stage_identities"])
+
+
 def _numeric(value, *, count=False, signed=False):
     if type(value) not in (str, int, float, Decimal):
         return None
@@ -657,7 +683,9 @@ def main(argv=None):
     import sys
 
     parser = argparse.ArgumentParser(description="Offline X05 evidence comparison; no live acceptance.")
-    parser.add_argument("--aggregate", action="store_true", help="read one three-fixture envelope")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--aggregate", action="store_true", help="read one three-fixture envelope")
+    modes.add_argument("--provenance", action="store_true", help="read one supplied-provenance envelope")
     args = parser.parse_args(argv)
     try:
         raw = sys.stdin.buffer.read(4 * MAX_JSON_CHARS + 1)
@@ -665,7 +693,9 @@ def main(argv=None):
             result = _out("UNREADABLE", "json_input_too_large")
         else:
             text = raw.decode("utf-8", errors="strict")
-            result = aggregate_fixtures_json(text) if args.aggregate else reconcile_json(text)
+            decode = (aggregate_fixtures_json if args.aggregate else
+                      reconcile_provenance_json if args.provenance else reconcile_json)
+            result = decode(text)
         output = serialize_result(result)
     except Exception:
         result = _out("UNREADABLE", "cli_evidence_unreadable")

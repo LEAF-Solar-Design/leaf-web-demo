@@ -401,6 +401,58 @@ This replay reads no file and makes no network request. The bytes and identities
 are synthetic supplied values. Matching them does not authenticate frozen
 origin, producer custody or live acceptance.
 
+Strict transport additions: `reconcile_assurance_json(text)` accepts exactly
+`evidence`, `manifest`, `bindings`, `inputs_hex`, `identity`, `stage_identities`.
+Each `inputs_hex` value is an even-length hexadecimal string with no whitespace;
+empty bytes are encoded as an empty string. The existing JSON bounds apply.
+`aggregate_provenance_json(text)` accepts exactly `expected_ids` and `fixtures`.
+The CLI now exposes `--provenance` for the existing single-fixture provenance
+envelope. It is mutually exclusive with `--aggregate`, with the same0/1/4 result
+exits and5 output-failure exit. Assurance and provenance aggregation remain pure
+Python entry points, not CLI modes. None provides authenticated origin.
+
+Complete synthetic assurance replay from the repository root (requires pytest,
+because it reuses the checked synthetic fixture builder from the focused tests):
+
+```powershell
+@'
+import sys, runpy, json
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import reconcile_assurance_json
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+envelope = fixtures['assurance_envelope']()
+passing = reconcile_assurance_json(json.dumps(envelope))
+print(passing['verdict'])
+changed = deepcopy(envelope)
+changed['inputs_hex']['report'] = b'substituted'.hex()
+changed['stage_identities']['reopened']['version_id'] = 'foreign'
+changed['evidence']['recommendations'][0]['group_count'] = 1
+failed = reconcile_assurance_json(json.dumps(changed))
+checks = failed['checks']
+print(failed['verdict'], checks['input_bytes']['reason'], checks['design_identity']['reason'])
+grouping = checks['provenance']['reconciliation']['stages']['grouping']
+print(grouping['verdict'], grouping['reason'])
+assert passing['verdict'] == 'PASS'
+assert failed['verdict'] == 'UNREADABLE'
+assert checks['input_bytes']['reason'] == 'input_digest_conflict'
+assert checks['design_identity']['reason'] == 'design_identity_conflict'
+assert grouping['reason'] == 'grouping_count_mismatch'
+'@ | python -P
+```
+
+Exact stdout:
+
+```text
+PASS
+UNREADABLE input_digest_conflict design_identity_conflict
+FAIL grouping_count_mismatch
+```
+
+The replay reads only source code for its synthetic builder, no customer input.
+Helpers make no file or network reads. PASS establishes consistency of supplied
+claims and bytes, never their authenticated origin or live X05 acceptance.
+
 Canonical snapshot compatibility contract:
 
 - Hash UTF-8 bytes of compact JSON arrays with ASCII escapes and no spaces.
