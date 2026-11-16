@@ -197,8 +197,11 @@ def test_read_audit_unset_preserves_every_catalog_command_and_environment(tmp_pa
     monkeypatch.delenv("LEAF_READSET_DIR", raising=False)
     monkeypatch.setenv("PYTHONPATH", "existing-python-path")
     for suite in g.build_suites():
-        command = g.reporting_command(suite, list(suite.argv),
-                                      g.suite_trace_env(suite, tmp_path, 1))
+        # Panels now always gets a reporting wrapper (covered separately).
+        # This drill isolates the unchanged read-audit command/environment seam.
+        command = (list(suite.argv) if suite.id == "web-studio-panels-proof" else
+                   g.reporting_command(suite, list(suite.argv),
+                                       g.suite_trace_env(suite, tmp_path, 1)))
         trace_env = g.suite_trace_env(suite, tmp_path, 1)
         before = {**g.clean_env(), **trace_env}
         assert suite.read_audit_dir is None
@@ -486,6 +489,225 @@ def test_file_timing_parser_failure_cannot_change_verdict(tmp_path, monkeypatch,
     assert result.status == "PASS"
     assert result.got == "1"
     assert "LEAF_FILE_TIMING" not in capsys.readouterr().out
+
+
+def _public_phase_row(g, **changes):
+    return {"schema": "leaf.ci.playwright-phase.v1",
+            "file": "web/e2e/campaign-panel.spec.mjs", "line": 3, "column": 1,
+            "worker_index": 0, "retry": 0, "repeat_index": 0, "status": "passed",
+            "duration_ms": 100, "setup_ms": 10, "teardown_ms": 20, "api_ms": 40,
+            "reported_navigation_api_ms": 25, "unattributed_ms": 30,
+            "truncated": False, "basis": g.PW_PHASE_BASIS, **changes}
+
+
+def _phase_text(row):
+    return "LEAF_PW_PHASE " + json.dumps(row) + "\n"
+
+
+def test_panels_phase_parser_sanitizes_and_bounds():
+    g = _load_runner()
+    suite = g.Suite("web-studio-panels-proof", "panels", "script", REPO / "web", [], None)
+    row = _public_phase_row(g)
+    secret = {**row, "title": "SECRET_SENTINEL", "error": {"url": "SECRET_SENTINEL"}}
+    assert g.parse_pw_phases(suite, _phase_text(secret)) == [row]
+    for file in g.PW_PHASE_FILES:
+        valid = {**row, "file": file}
+        assert g.parse_pw_phases(suite, _phase_text(valid)) == [valid]
+    for status in ("passed", "failed", "timedOut", "skipped", "interrupted", "unknown"):
+        valid = {**row, "status": status, "truncated": True}
+        assert g.parse_pw_phases(suite, _phase_text(valid)) == [valid]
+    bad = [{"schema": "other"}, {"basis": "other"}, {"status": "SECRET_SENTINEL"},
+           {"file": "web/e2e/../campaign-panel.spec.mjs"}, {"file": []},
+           {"truncated": 1}, {"duration_ms": 100.006},
+           {"reported_navigation_api_ms": 40.001}]
+    for key in g.PW_PHASE_IDENTITIES:
+        bad.extend({key: value} for value in (True, -1, 0.5, float("inf"), "0"))
+    for key in g.PW_PHASE_DURATIONS:
+        bad.extend({key: value} for value in (True, -1, float("nan"), float("inf"), "0"))
+    for changes in bad:
+        assert g.parse_pw_phases(suite, _phase_text({**row, **changes})) == []
+    for key in row:
+        missing = dict(row)
+        del missing[key]
+        assert g.parse_pw_phases(suite, _phase_text(missing)) == []
+    assert g.parse_pw_phases(suite, "LEAF_PW_PHASE {broken}\nLEAF_PW_PHASE []\n") == []
+    nested = "LEAF_PW_PHASE " + "[" * 1500 + "0" + "]" * 1500 + "\n"
+    assert g.parse_pw_phases(suite, nested + _phase_text(row)) == [row]
+    assert g.parse_pw_phases(suite, _phase_text({**row, "extra": "x" * g.PW_PHASE_MAX_LINE})) == []
+    assert len(g.parse_pw_phases(suite, _phase_text(row) * (g.PW_PHASE_MAX_ROWS + 10))) == g.PW_PHASE_MAX_ROWS
+    other = g.Suite("other", "other", "script", suite.cwd, [], None)
+    assert g.parse_pw_phases(other, _phase_text(row)) == []
+    assert g.parse_pw_phases(suite, _phase_text({**row, "duration_ms": 100.004}))
+
+
+@pytest.mark.parametrize("failure", [None, "parser", "stdout"])
+@pytest.mark.parametrize("rc,status", [(0, "PASS"), (1, "FAIL")])
+def test_panels_phase_run_suite_stdout_and_failures(tmp_path, monkeypatch, capsys, failure, rc, status):
+    g = _load_runner()
+    monkeypatch.delenv("LEAF_GATE_FAULT_INJECT", raising=False)
+    suite = g.Suite("web-studio-panels-proof", "panels", "script", tmp_path,
+                    ["npx", "playwright", "test", "--workers=3"], None)
+    row = _public_phase_row(g)
+    monkeypatch.setattr(g.subprocess, "run", lambda *_a, **_k: SimpleNamespace(
+        returncode=rc, stdout=_phase_text({**row, "title": "SECRET_SENTINEL"}) + "1 passed (1s)\n",
+        stderr=""))
+    def broken(*_a, **_k):
+        raise ValueError("SECRET_SENTINEL")
+    if failure == "parser":
+        monkeypatch.setattr(g, "parse_pw_phases", broken)
+    elif failure == "stdout":
+        def print_row(text, **_kwargs):
+            if text.startswith("LEAF_PW_PHASE "):
+                raise OSError("SECRET_SENTINEL")
+        monkeypatch.setattr(g, "print", print_row, raising=False)
+    result = g.run_suite(suite, tmp_path, attempt=2, reporting_disabled=True)
+    assert result.status == status
+    output = capsys.readouterr().out
+    assert "SECRET_SENTINEL" not in output
+    rows = [json.loads(line[len("LEAF_PW_PHASE "):]) for line in output.splitlines()
+            if line.startswith("LEAF_PW_PHASE ")]
+    assert rows == ([{**row, "suite_id": suite.id, "attempt": 2}] if failure is None else [])
+
+
+@pytest.mark.parametrize("trusted", [False, True])
+def test_panels_phase_wrapper_preserves_config_and_other_suites(tmp_path, monkeypatch, trusted):
+    g = _load_runner()
+    monkeypatch.delenv("LEAF_TRUSTED_CI_DIR", raising=False)
+    monkeypatch.setattr(g, "process_capture_enabled", lambda: False)
+    if trusted:
+        monkeypatch.setenv("LEAF_TRUSTED_CI_DIR", str(tmp_path / "trusted"))
+    phase = str((g.WEB / "e2e/panelsTimingReporter.mjs").resolve())
+    config = tmp_path / "fixture.mjs"
+    config.write_text("export default {testDir: './e2e', outputDir: './results', "
+                      "reporter: [['list'], ['html', {outputFolder: './report'}], ["
+                      + json.dumps(phase) + "]], webServer: {command: 'serve'}, "
+                      "projects: [{testDir: './project'}]};", encoding="utf-8")
+    argv = ["npx", "--no-install", "playwright", "test", "--config", config.name,
+            "e2e/campaign-panel.spec.mjs", "--workers=3"]
+    suite = g.Suite("web-studio-panels-proof", "panels", "script", tmp_path, argv, None)
+    command = g.reporting_command(suite, argv, {"LEAF_TEST_REPORT_DIR": str(tmp_path / "out")})
+    assert suite.argv == argv
+    index = argv.index("--config") + 1
+    assert command[:index] == argv[:index] and command[index + 1:] == argv[index + 1:]
+    node = shutil.which("node")
+    assert node is not None, "Node is required for the panels phase drill"
+    script = ("import assert from 'node:assert/strict'; import config from "
+              + json.dumps(Path(command[index]).as_uri()) + ";\n"
+              + "assert.deepEqual(config.reporter.slice(0, 2), [['list'], ['html', {outputFolder: "
+              + json.dumps(str(tmp_path / "report")) + "}]]);\n"
+              + "assert.equal(config.reporter.filter(r => r[0] === " + json.dumps(phase) + ").length, 1);\n"
+              + "assert.equal(config.reporter.length, " + str(4 if trusted else 3) + ");\n"
+              + ("assert.equal(config.reporter[3][0], "
+                 + json.dumps(str(tmp_path / "trusted/playwright-leaf.mjs")) + ");\n" if trusted else "")
+              + "assert.equal(config.webServer.cwd, " + json.dumps(str(tmp_path)) + ");\n"
+              + "assert.equal(config.testDir, " + json.dumps(str(tmp_path / "e2e")) + ");\n"
+              + "assert.equal(config.outputDir, " + json.dumps(str(tmp_path / "results")) + ");\n"
+              + "assert.equal(config.projects[0].testDir, " + json.dumps(str(tmp_path / "project")) + ");\n")
+    proc = subprocess.run([node, "--input-type=module", "-e", script], capture_output=True,
+                          text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    for option in (["--reporter=list," + phase], ["--reporter", "list," + phase]):
+        cli = g.reporting_command(suite, ["npx", "playwright", "test", *option],
+                                  {"LEAF_TEST_REPORT_DIR": str(tmp_path / "cli")})
+        assert cli[-1].split("=", 1)[1].split(",").count(phase) == 1
+    other = g.Suite("other", "other", "script", tmp_path, argv, None)
+    other_command = g.reporting_command(other, argv, {"LEAF_TEST_REPORT_DIR": str(tmp_path / "other")})
+    if trusted:
+        text = Path(other_command[index]).read_text(encoding="utf-8")
+        assert "panelsTimingReporter" not in text
+        assert "playwright-leaf.mjs" in text
+    else:
+        assert other_command == argv
+        assert not (tmp_path / "other").exists()
+
+
+def test_panels_phase_reporter_public_event_drill():
+    node = shutil.which("node")
+    assert node is not None, "Node is required for the panels phase drill"
+    reporter = (REPO / "web/e2e/panelsTimingReporter.mjs").as_uri()
+    script = "import Reporter from " + json.dumps(reporter) + ";\n" + r"""
+import assert from 'node:assert/strict';
+const secret = 'SECRET_SENTINEL';
+let output = '';
+const write = process.stdout.write;
+process.stdout.write = text => { output += text; return true; };
+try {
+  const reporter = new Reporter();
+  const test = {location: {file: '/repo/web/e2e/campaign-panel.spec.mjs', line: 4, column: 2},
+    repeatEachIndex: 1, title: secret};
+  const result = (extra = {}) => ({startTime: new Date(1000), duration: 100,
+    workerIndex: 2, retry: 0, status: 'passed', errors: [secret], ...extra});
+  const a = result(), b = result({retry: 1});
+  reporter.onTestBegin(test, a);
+  reporter.onTestBegin(test, b);
+  const step = (r, start, duration, title = secret, category = 'pw:api', parent) => {
+    const s = {startTime: new Date(start), duration, title, category, parent};
+    reporter.onStepEnd(test, r, s);
+    return s;
+  };
+  const before = {title: 'Before Hooks', category: 'hook', startTime: new Date(990), duration: 30};
+  const nested = {title: 'Before Hooks', category: 'hook', parent: before};
+  step(a, 1000, 90, secret, 'pw:api', nested);
+  reporter.onStepEnd(test, a, nested);
+  reporter.onStepEnd(test, a, before);
+  step(a, 1080, 50, 'After Hooks', 'hook');
+  step(a, 1010, 30, 'page.goto(' + secret + ')');
+  step(a, 1030, 40);
+  step(a, 1060, 30, 'frame.reload ' + secret);
+  step(b, 1000, 10, 'page.goto ' + secret);
+  reporter.onTestEnd(test, a);
+  reporter.onTestEnd(test, a); // Duplicate finish must not emit or recreate state.
+  reporter.onTestBegin(test, a);
+  step(a, 1000, 100);
+  reporter.onTestEnd(test, a);
+  reporter.onTestEnd(test, b);
+  const missing = result({startTime: undefined});
+  reporter.onTestBegin(test, missing);
+  step(missing, 1000, 100);
+  reporter.onTestEnd(test, missing);
+  const invalid = result();
+  reporter.onTestBegin(test, invalid);
+  reporter.onStepEnd(test, invalid, {category: 'pw:api', title: secret, duration: 50});
+  step(invalid, NaN, 100);
+  step(invalid, 1000, NaN);
+  step(invalid, 1000, -1);
+  reporter.onTestEnd(test, invalid);
+  const invalidResult = result({startTime: new Date(NaN), duration: NaN});
+  reporter.onTestEnd(test, invalidResult);
+  const unsupported = {...test, location: {...test.location, file: '/repo/other.spec.mjs'}};
+  const ignored = result();
+  reporter.onTestBegin(unsupported, ignored);
+  step(ignored, 1000, 100);
+  reporter.onTestEnd(unsupported, ignored);
+  const bounded = result();
+  reporter.onTestBegin(test, bounded);
+  for (let i = 0; i < 10001; i++) step(bounded, 1000, 1);
+  reporter.onTestEnd(test, bounded);
+  assert.ok(!output.includes(secret));
+  const rows = output.trim().split('\n').map(line => {
+    assert.ok(line.startsWith('LEAF_PW_PHASE '));
+    return JSON.parse(line.slice('LEAF_PW_PHASE '.length));
+  });
+  assert.equal(rows.length, 6);
+  assert.deepEqual(rows.map(r => [r.setup_ms, r.teardown_ms, r.api_ms,
+    r.reported_navigation_api_ms, r.unattributed_ms]), [
+      [20, 20, 60, 40, 0], [0, 0, 10, 10, 90], [0, 0, 0, 0, 100],
+      [0, 0, 0, 0, 100], [0, 0, 0, 0, 0], [0, 0, 1, 0, 99]]);
+  assert.equal(rows[0].retry, 0);
+  assert.equal(rows[1].retry, 1);
+  assert.equal(rows[0].repeat_index, 1);
+  assert.equal(rows[5].truncated, true);
+  for (const row of rows) {
+    assert.ok(Math.abs(row.duration_ms - row.setup_ms - row.teardown_ms - row.api_ms
+      - row.unattributed_ms) <= 0.005);
+    assert.ok(row.reported_navigation_api_ms <= row.api_ms);
+  }
+} finally { process.stdout.write = write; }
+"""
+    proc = subprocess.run([node, "--input-type=module", "-e", script], capture_output=True,
+                          text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == ""
 
 
 def _failed_log_retention_helper():
