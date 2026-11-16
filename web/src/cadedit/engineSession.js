@@ -294,6 +294,18 @@ export function projectionEntities(message) {
   return next
 }
 
+function validEditSuccess(message) {
+  const bytes = message.bytes
+  if (!ArrayBuffer.isView(bytes) || Object.prototype.toString.call(bytes) !== '[object Uint8Array]'
+      || bytes.byteLength === 0 || bytes.byteLength > MAX_UNDO_BYTES
+      || (message.byteLength !== undefined && message.byteLength !== bytes.byteLength)) return false
+  return Array.isArray(message.entities) && message.entities.every(entity => entity
+    && typeof entity.type === 'string'
+    && (typeof entity.id === 'string' || (typeof entity.id === 'number' && Number.isFinite(entity.id)))
+    && (entity.vertices === undefined || (Array.isArray(entity.vertices) && entity.vertices.every(point =>
+      Array.isArray(point) && point.length >= 2 && point.every(Number.isFinite)))))
+}
+
 const INITIAL_SESSION = Object.freeze({
   documentId: '',
   documentOrigin: null,
@@ -1270,6 +1282,7 @@ export default function useEngineSession({
   // W4g-3b: whether the load in flight is the head (see openBytes).
   const committedLoadRef = useRef(false)
   const pendingLoadRef = useRef(null)
+  const pendingEditRef = useRef(null)
   const replacementOpenRef = useRef(null)
   const fileReadSessionRef = useRef(null)
   const committedVersionRef = useRef(null)
@@ -1303,6 +1316,7 @@ export default function useEngineSession({
     return Uint8Array.from(owned)
   }
   const clearHistory = () => {
+    pendingEditRef.current = null
     snapshotCopiesRef.current = new WeakMap()
     selectionEditRef.current = null
     batchVerbRef.current = null
@@ -1342,6 +1356,13 @@ export default function useEngineSession({
   const onWorkerDiedRef = useRef(onWorkerDied)
   onWorkerDiedRef.current = onWorkerDied
 
+  const postEdit = (boundary, message) => {
+    if (pendingEditRef.current) return false
+    pendingEditRef.current = message.op
+    const posted = boundary.post(message)
+    if (!posted) pendingEditRef.current = null
+    return posted
+  }
   const failOpenRestore = useCallback((opening) => {
     replacementOpenRef.current = null
     clearHistory()
@@ -1476,6 +1497,26 @@ export default function useEngineSession({
         return
       }
       if (message.type === 'editApplied') {
+        if ((pendingEditRef.current && message.op !== pendingEditRef.current) || typeof message.ok !== 'boolean'
+            || (message.ok && !validEditSuccess(message))) {
+          // The worker may already have mutated its document. Keep trusted
+          // bytes for download, but invalidate alignment instead of claiming
+          // rollback or seating an unproved projection/history snapshot.
+          const savedBytes = restoredSnapshot(sessionRef.current.savedBytes)
+          const committedBytes = restoredSnapshot(sessionRef.current.committedBytes)
+          teardown()
+          setSession(current => Object.freeze({
+            ...INITIAL_SESSION,
+            documentId: current.documentId,
+            documentOrigin: current.documentOrigin,
+            savedBytes,
+            committedBytes,
+            errorKind: SESSION_ERROR.TRANSPORT,
+            status: 'The drawing reply could not be verified. Download your last changes or reopen the drawing.',
+          }))
+          return
+        }
+        pendingEditRef.current = null
         const selectionEdit = message.op === 'batch' ? selectionEditRef.current : null
         selectionEditRef.current = null
         // W4g-6: a batch answers as `batch`; the verb that posted it is the
@@ -1787,13 +1828,14 @@ export default function useEngineSession({
       patch({ errorKind: SESSION_ERROR.REFUSED, status: refusal })
       return
     }
+    if (pendingEditRef.current) return
     const boundary = boundaryRef.current
     if (!boundary || !sessionRef.current.engineParsed) {
       patch({ errorKind: SESSION_ERROR.TRANSPORT, status: 'Draw refused: no document is open.' })
       return
     }
     patch({ busy: true, errorKind: null })
-    if (!boundary.post({ type: 'applyEdit', op: WORKER_OP[op] || op, payload })) {
+    if (!postEdit(boundary, { type: 'applyEdit', op: WORKER_OP[op] || op, payload })) {
       patch({
         busy: false,
         errorKind: SESSION_ERROR.TRANSPORT,
@@ -1810,6 +1852,7 @@ export default function useEngineSession({
   // verbs) refuse it with a status and post nothing. Without it, every rung
   // below is exactly the selection-driven ladder it always was.
   const applyEdit = useCallback((op, inputs, options) => {
+    if (pendingEditRef.current) return
     const explicit = options !== null && typeof options === 'object' && options.targetId !== undefined
     if (explicit) {
       if (op === 'group' || op === 'ungroup' || op === 'offset' || op === 'matchprop' || INTERSECT_VERBS[op]) {
@@ -1834,7 +1877,7 @@ export default function useEngineSession({
       batchVerbRef.current = op
       batchNoteRef.current = ''
       patch({ busy: true, errorKind: null })
-      if (!boundaryRef.current.post({ type: 'applyEdit', op: 'batch', payload })) {
+      if (!postEdit(boundaryRef.current, { type: 'applyEdit', op: 'batch', payload })) {
         selectionEditRef.current = null
         batchVerbRef.current = null
         patch({ busy: false, errorKind: SESSION_ERROR.TRANSPORT, status: `Edit refused (${op}): the boundary rejected the message.` })
@@ -1861,7 +1904,7 @@ export default function useEngineSession({
       const boundary = boundaryRef.current
       if (!boundary || !sessionRef.current.engineParsed) return
       patch({ busy: true, errorKind: null })
-      if (!boundary.post({ type: 'applyEdit', op: GROUP_OPS[op], payload })) {
+      if (!postEdit(boundary, { type: 'applyEdit', op: GROUP_OPS[op], payload })) {
         patch({ busy: false, errorKind: SESSION_ERROR.TRANSPORT, status: 'Group operation refused by the boundary.' })
       }
       return
@@ -1941,7 +1984,7 @@ export default function useEngineSession({
       batchNoteRef.current = planned.skipped?.includes('layer')
         ? `; layer not copied: an ${destination.type} keeps its layer in this round` : ''
       patch({ busy: true, errorKind: null })
-      if (!boundary.post({ type: 'applyEdit', op: 'batch', payload: { verb: op, steps: lowered.steps } })) {
+      if (!postEdit(boundary, { type: 'applyEdit', op: 'batch', payload: { verb: op, steps: lowered.steps } })) {
         batchVerbRef.current = null
         batchNoteRef.current = ''
         patch({
@@ -1963,7 +2006,7 @@ export default function useEngineSession({
       return
     }
     patch({ busy: true, errorKind: null })
-    if (!boundary.post({ type: 'applyEdit', op, payload })) {
+    if (!postEdit(boundary, { type: 'applyEdit', op, payload })) {
       patch({
         busy: false,
         errorKind: SESSION_ERROR.TRANSPORT,
@@ -1981,7 +2024,7 @@ export default function useEngineSession({
     // `busy` alone cannot gate this: two clicks in one tick both read the
     // pre-render value. A version write is not an operation to do twice, so
     // the in-flight latch is a ref, set before the first await.
-    if (!bytes || !target || sessionRef.current.busy || savingRef.current) return null
+    if (!bytes || !target || !sessionRef.current.engineParsed || sessionRef.current.busy || savingRef.current) return null
     const { committedEntities, entities } = sessionRef.current
     // W4g-3b: the edit as a plan, when the engine holds the head. A diff the
     // contract cannot carry (a kind change, past the operation bound) sends
