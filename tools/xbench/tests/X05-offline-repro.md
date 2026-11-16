@@ -2753,3 +2753,42 @@ Saved string and device owners still disagree with the changed oracle map, so
 the composed result remains FAIL after aggregate target repair. This synthetic
 migration does not establish which owner map is correct, oracle origin or live
 engineering parity. Those claims require independent acquisition evidence.
+
+## Grouping diagnostic-truncation replay
+
+Within Studio X-bench X05, grouping compares every shown recommendation with
+an independently supplied report grid count. The example cap limits displayed
+indices, not validation or the exact mismatch total.
+
+```python
+import sys
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+rows = [dict(group_count=1) for _ in range(m.MAX_RECOMMENDATION_EXAMPLES+7)]
+def show(label):
+    result = m.compare_recommendations(2, rows)
+    print(label, result['verdict'], result.get('mismatch_count', 'unavailable'),
+          len(result.get('mismatched_recommendations', [])), result['reason'])
+show('readable')
+rows.append(None)
+show('invalid trailing row')
+rows[-1] = dict(group_count=1)
+show('repaired')
+```
+
+Expected output:
+
+```text
+readable FAIL 27 20 grouping_count_mismatch
+invalid trailing row UNREADABLE unavailable 0 recommendation_count_unreadable
+repaired FAIL 28 20 grouping_count_mismatch
+```
+
+The invalid row comes after 27 readable mismatches, beyond the 20-example cap.
+It still forces a named UNREADABLE result. That result does not assert a total
+for the malformed sequence. Repair restores an exact total of 28, with the
+first 20 zero-based mismatch indices. Prepending matching recommendations shifts
+those indices without changing the mismatch total. A separately accepted frozen
+table discrepancy cannot erase a grouping mismatch. These are synthetic supplied
+sequences and report counts, not evidence that the live UI showed them or that
+an independent report extractor produced the count. No result accepts live X05.

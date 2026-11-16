@@ -7920,3 +7920,95 @@ def test_topology_valid_opposite_multi_metric_changes_hide_only_in_marginals():
         assert compare(original_rows[field],evidence[field])['counts']['mismatched']==2
     assert result['steps']['3']['verdict']=='FAIL' and result['string_metrics']['verdict']=='FAIL'
     assert result['verdict']=='FAIL' and envelope==supplied
+
+
+def test_exhaustive_grouping_sequences_against_independent_index_reference():
+    from itertools import product
+    from benches import x05_reconcile as m
+    for size in range(5):
+        for counts in product(range(1,4),repeat=size):
+            for report in range(1,4):
+                rows=[dict(group_count=value) for value in counts]
+                original=deepcopy(rows)
+                expected=[index for index,value in enumerate(counts) if value!=report]
+                result=m.compare_recommendations(report,rows,no_recommendations_shown=not rows)
+                assert result['verdict']==('FAIL' if expected else 'PASS')
+                assert result['mismatch_count']==len(expected)
+                assert result['mismatched_recommendations']==expected[:MAX_RECOMMENDATION_EXAMPLES]
+                assert rows==original
+
+
+@pytest.mark.parametrize('prefix',[0,1,7,31])
+def test_grouping_matching_prefix_translates_capped_indices_only(prefix):
+    from benches import x05_reconcile as m
+    rows=[dict(group_count=1) for _ in range(MAX_RECOMMENDATION_EXAMPLES+7)]
+    original=deepcopy(rows); prior=m.compare_recommendations(2,rows); preserved=deepcopy(prior)
+    translated=[dict(group_count=2) for _ in range(prefix)]+rows
+    supplied=deepcopy(translated); result=m.compare_recommendations(2,translated)
+    assert result['mismatch_count']==prior['mismatch_count']==27
+    assert result['mismatched_recommendations']==[index+prefix for index in prior['mismatched_recommendations']]
+    assert rows==original and translated==supplied and prior==preserved
+
+
+@pytest.mark.parametrize('bad',[None,{},[],True,dict(group_count=True),dict(group_count=0),dict(group_count='private-group-canary'),dict(group_count=2**53)])
+def test_grouping_late_invalid_row_overrides_capped_readable_failures(bad):
+    from benches import x05_reconcile as m
+    rows=[dict(group_count=1) for _ in range(MAX_RECOMMENDATION_EXAMPLES+7)]+[deepcopy(bad)]
+    original=deepcopy(rows); result=m.compare_recommendations(2,rows)
+    assert result==dict(verdict='UNREADABLE',reason='recommendation_count_unreadable')
+    assert 'private-group-canary' not in serialize_result(result) and rows==original
+    rows[-1]=dict(group_count=1)
+    repaired=m.compare_recommendations(2,rows)
+    assert repaired['verdict']=='FAIL' and repaired['mismatch_count']==28
+    assert repaired['mismatched_recommendations']==list(range(MAX_RECOMMENDATION_EXAMPLES))
+    assert result==dict(verdict='UNREADABLE',reason='recommendation_count_unreadable')
+
+
+def test_grouping_report_retargeting_bound_aggregate_preserves_siblings():
+    from benches import x05_reconcile as m
+    expected,records=bound_seven_fixture_records()
+    baseline=m.aggregate_bound_seven_steps(expected,records)
+    counts=[1,2,3]*13
+    evidence=records[0]['envelope']['assurance']['evidence']
+    evidence['recommendations']=[dict(group_count=value) for value in counts]
+    prior=[]; frozen=[]
+    for report in (1,2,3):
+        evidence['report_grid_count']=report
+        supplied=deepcopy(records); result=m.aggregate_bound_seven_steps(expected,records)
+        grouping=result['fixtures'][expected[0]]['reconciliation']['steps']['4']
+        indices=[index for index,value in enumerate(counts) if value!=report]
+        assert grouping['verdict']=='FAIL' and grouping['mismatch_count']==len(indices)==26
+        assert grouping['mismatched_recommendations']==indices[:MAX_RECOMMENDATION_EXAMPLES]
+        assert result['fixtures'][expected[0]]['verdict']=='FAIL'
+        assert all(result['fixtures'][key]==baseline['fixtures'][key] for key in expected[1:])
+        assert records==supplied
+        prior.append(result); frozen.append(deepcopy(result))
+    assert prior==frozen
+
+
+@pytest.mark.parametrize('repair_first',['grouping','table'])
+def test_grouping_failure_and_frozen_table_policy_repair_independently(repair_first):
+    from benches import x05_reconcile as m
+    evidence=complete_evidence()
+    evidence['recommendations']=[dict(group_count=1)]
+    evidence['saved_values']['panels']-=1
+    unaccepted=m.reconcile_offline(evidence)
+    assert unaccepted['stages']['policy']['verdict']=='FAIL'
+    _,record=discrepancy_fixture()
+    evidence['discrepancy_records']=[record]
+    accepted=m.reconcile_offline(evidence); preserved=deepcopy(accepted)
+    assert accepted['stages']['policy']['verdict']=='PASS'
+    assert accepted['stages']['grouping']['verdict']=='FAIL' and accepted['verdict']=='FAIL'
+    if repair_first=='grouping':
+        evidence['recommendations']=[dict(group_count=2)]
+    else:
+        evidence['saved_values']['panels']+=1
+        evidence['discrepancy_records']=[]
+    intermediate=m.reconcile_offline(evidence)
+    assert intermediate['stages']['grouping']['verdict']==('PASS' if repair_first=='grouping' else 'FAIL')
+    assert intermediate['stages']['table']['verdict']==('FAIL' if repair_first=='grouping' else 'PASS')
+    assert intermediate['stages']['policy']['verdict']=='PASS' and intermediate['verdict']=='FAIL'
+    evidence['recommendations']=[dict(group_count=2)]
+    evidence['saved_values']['panels']=evidence['oracle_values']['panels']
+    evidence['discrepancy_records']=[]
+    assert m.reconcile_offline(evidence)['verdict']=='PASS' and accepted==preserved
