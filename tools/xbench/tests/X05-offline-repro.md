@@ -567,6 +567,37 @@ corrected 0 PASS PASS,PASS,PASS
 No network or customer input is used. The source-only builder creates synthetic
 claims; the successful recovery does not authenticate their origin or accept X05.
 
+`compare_grid_correspondence(expected_grid_ids, saved_group_ids, rows,
+require_all_matched=False)` compares explicit independent IDs. Each row has
+`grid_id`, `matches` and `cause`. A match requires exactly one supplied saved
+group and no cause. An unmatched grid requires `SOLAREDGE_GRID_UNMATCHED` or
+`SOLAREDGE_GRID_AMBIGUOUS`; all-matched mode rejects either. Foreign, duplicate,
+missing or multiply matched identities FAIL; unreadable evidence is UNREADABLE.
+Exact error counts retain at most10 fixed reason examples, without input text.
+This helper establishes no geometry or identity provenance.
+
+`reconcile_seven_steps(import_evidence, grid_evidence, assurance)` composes only
+supplied offline evidence. Import fields `normal_user`, `dwg_imported` and
+`report_imported` must be explicit booleans. Grid evidence supplies all four grid
+helper arguments. Assurance supplies the six keyword arguments of
+`reconcile_assured`. Seven step diagnostics and all assurance checks survive;
+missing evidence gives UNREADABLE precedence. Even a PASS cannot accept X05
+without the real staging acquisition required by the frozen bench contract.
+
+Result serialization permits262144 ASCII JSON characters and100000 visited
+nodes, with the existing32-container depth bound. Oversized expansion raises
+fixed `ValueError('json_result_too_large')` before emission. The CLI returns one
+sanitized UNREADABLE result and exit4 when this budget is exceeded; it never
+truncates exact counts into an apparently successful partial result. Small
+acyclic shared containers remain lossless; compact graphs whose expanded output
+is excessive stop at the same budget.
+
+CLI stdin is collected through bounded short reads until EOF or the byte limit,
+then decoded as strict UTF-8. Split tokens and multibyte sequences are preserved.
+All strict decoders and CLI modes accept legal surrounding JSON whitespace;
+leading BOMs, concatenated documents and trailing non-whitespace reject as
+`json_malformed`. No framing rejection echoes input text.
+
 Canonical snapshot compatibility contract:
 
 - Hash UTF-8 bytes of compact JSON arrays with ASCII escapes and no spaces.

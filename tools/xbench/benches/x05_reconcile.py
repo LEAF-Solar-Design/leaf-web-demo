@@ -27,6 +27,8 @@ MAX_JSON_CHARS = 262144
 MAX_JSON_DEPTH = 32
 MAX_INPUT_BYTES = 16384
 MAX_ENVELOPE_EXAMPLES = 10
+MAX_RESULT_CHARS = 262144
+MAX_RESULT_NODES = 100000
 PROVENANCE_STAGES = ("strings", "grouping", "table", "policy", "reopen", "csv_view")
 IDENTITY_STAGES = ("saved_strings", "table", "csv", "reopened")
 _CSV_LOCK = RLock()
@@ -362,7 +364,20 @@ def aggregate_fixtures_json(text):
 
 def serialize_result(value):
     """Emit exact JSON numbers, preserving Decimal values without float casts."""
+    used, nodes = 0, 0
+
+    def emit(text):
+        nonlocal used
+        used += len(text)
+        if used > MAX_RESULT_CHARS:
+            raise ValueError("json_result_too_large")
+        return text
+
     def encode(item, depth=0):
+        nonlocal nodes
+        nodes += 1
+        if nodes > MAX_RESULT_NODES:
+            raise ValueError("json_result_too_large")
         if depth > MAX_JSON_DEPTH or (type(item) in (dict, list) and depth >= MAX_JSON_DEPTH):
             raise ValueError("json_result_too_deep")
         if type(item) is Decimal:
@@ -371,17 +386,93 @@ def serialize_result(value):
             raw = str(item)
             # Exponent notation preserves even an integral Decimal's signed
             # zero and exponent when the strict decoder uses parse_float.
-            return raw if any(char in raw for char in ".eE") else raw + "E+0"
+            return emit(raw if any(char in raw for char in ".eE") else raw + "E+0")
         if type(item) in (str, int, float, bool) or item is None:
-            return json.dumps(item, ensure_ascii=True, allow_nan=False)
+            if type(item) is str and len(item) > MAX_RESULT_CHARS:
+                raise ValueError("json_result_too_large")
+            return emit(json.dumps(item, ensure_ascii=True, allow_nan=False))
         if type(item) is list:
+            emit("[]" + "," * max(0, min(len(item), MAX_RESULT_CHARS + 1) - 1))
             return "[" + ",".join(encode(child, depth + 1) for child in item) + "]"
         if type(item) is dict and all(type(key) is str for key in item):
-            return "{" + ",".join(json.dumps(key, ensure_ascii=True) + ":" + encode(item[key], depth + 1)
+            if any(len(key) > MAX_RESULT_CHARS for key in item):
+                raise ValueError("json_result_too_large")
+            emit("{}" + "," * max(0, min(len(item), MAX_RESULT_CHARS + 1) - 1))
+            return "{" + ",".join(emit(json.dumps(key, ensure_ascii=True) + ":") + encode(item[key], depth + 1)
                                    for key in sorted(item)) + "}"
         raise ValueError("json_result_type_unreadable")
 
     return encode(value)
+
+
+def compare_grid_correspondence(expected_grid_ids, saved_group_ids, rows, *, require_all_matched=False):
+    """Compare explicit independent grid/group identities without geometry inference."""
+    def identities(values):
+        return (type(values) is list and bool(values)
+                and all(type(key) is str and bool(key.strip()) and len(key) <= 128 for key in values)
+                and len(set(values)) == len(values))
+
+    if (not identities(expected_grid_ids) or not identities(saved_group_ids)
+            or type(rows) is not list or type(require_all_matched) is not bool):
+        return _out("UNREADABLE", "grid_evidence_unreadable")
+    indexed, used, errors, count = {}, set(), [], 0
+    def issue(reason):
+        nonlocal count
+        count += 1
+        if len(errors) < MAX_ENVELOPE_EXAMPLES:
+            errors.append(reason)
+    for row in rows:
+        if (type(row) is not dict or set(row) != {"grid_id", "matches", "cause"}
+                or type(row["grid_id"]) is not str or type(row["matches"]) is not list
+                or any(type(key) is not str for key in row["matches"])):
+            return _out("UNREADABLE", "grid_row_unreadable")
+        key, matches, cause = row["grid_id"], row["matches"], row["cause"]
+        if key not in expected_grid_ids:
+            issue("foreign_grid")
+        if key in indexed:
+            issue("duplicate_grid")
+        indexed[key] = row
+        if matches:
+            if len(matches) != 1 or cause is not None:
+                issue("grid_match_cardinality")
+            for group in matches:
+                if group not in saved_group_ids:
+                    issue("foreign_group")
+                if group in used:
+                    issue("duplicate_group_match")
+                used.add(group)
+        elif cause not in ("SOLAREDGE_GRID_UNMATCHED", "SOLAREDGE_GRID_AMBIGUOUS"):
+            return _out("UNREADABLE", "grid_cause_unreadable")
+        elif require_all_matched:
+            issue("required_grid_unmatched")
+    for key in sorted(set(expected_grid_ids) - indexed.keys()):
+        issue("missing_grid")
+    return _out("FAIL" if count else "PASS", "grid_correspondence_mismatch" if count else "grid_correspondence_equal",
+                error_count=count, errors=errors)
+
+
+def reconcile_seven_steps(import_evidence, grid_evidence, assurance):
+    """Compose explicit supplied evidence only; never a live bench verdict."""
+    keys = {"normal_user", "dwg_imported", "report_imported"}
+    if type(import_evidence) is not dict or set(import_evidence) != keys or any(
+            type(value) is not bool for value in import_evidence.values()):
+        imported = _out("UNREADABLE", "import_evidence_unreadable")
+    else:
+        imported = _out("PASS" if all(import_evidence.values()) else "FAIL", "supplied_import_evidence")
+    if type(grid_evidence) is not dict or set(grid_evidence) != {"expected_grid_ids", "saved_group_ids", "rows", "require_all_matched"}:
+        grids = _out("UNREADABLE", "grid_evidence_unreadable")
+    else:
+        grids = compare_grid_correspondence(**grid_evidence)
+    fields = {"evidence", "frozen_manifest", "stage_bindings", "supplied_inputs", "expected_identity", "stage_identities"}
+    checked = reconcile_assured(**assurance) if type(assurance) is dict and set(assurance) == fields else _out("UNREADABLE", "assurance_evidence_missing")
+    stages = checked.get("checks", {}).get("provenance", {}).get("reconciliation", {}).get("stages", {})
+    absent = _out("UNREADABLE", "stage_evidence_missing")
+    steps = {"1": imported, "2": grids, "3": stages.get("strings", absent), "4": stages.get("grouping", absent),
+             "5": dict(table=stages.get("table", absent), csv_view=stages.get("csv_view", absent)),
+             "6": stages.get("policy", absent), "7": stages.get("reopen", absent)}
+    verdicts = {imported["verdict"], grids["verdict"], checked["verdict"]}
+    return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
+                "offline_seven_steps", steps=steps, assurance=checked)
 
 
 def aggregate_fixtures(expected_ids, fixtures):
@@ -761,7 +852,17 @@ def main(argv=None):
     modes.add_argument("--assurance-aggregate", action="store_true", help="read three assurance envelopes")
     args = parser.parse_args(argv)
     try:
-        raw = sys.stdin.buffer.read(4 * MAX_JSON_CHARS + 1)
+        chunks, size = [], 0
+        limit = 4 * MAX_JSON_CHARS + 1
+        while size < limit:
+            chunk = sys.stdin.buffer.read(limit - size)
+            if type(chunk) is not bytes or len(chunk) > limit - size:
+                raise ValueError("stdin_read_unreadable")
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        raw = b"".join(chunks)
         if len(raw) > 4 * MAX_JSON_CHARS:
             result = _out("UNREADABLE", "json_input_too_large")
         else:
@@ -772,7 +873,13 @@ def main(argv=None):
                       aggregate_fixtures_json if args.aggregate else
                       reconcile_provenance_json if args.provenance else reconcile_json)
             result = decode(text)
-        output = serialize_result(result)
+        try:
+            output = serialize_result(result)
+        except ValueError as error:
+            if str(error) != "json_result_too_large":
+                raise
+            result = _out("UNREADABLE", "json_result_too_large")
+            output = serialize_result(result)
     except Exception:
         result = _out("UNREADABLE", "cli_evidence_unreadable")
         output = serialize_result(result)

@@ -20,6 +20,7 @@ from benches.x05_reconcile import (METRICS, TABLE_COLUMNS, check_discrepancies,
     reconcile_assured, aggregate_provenance, reconcile_provenance_json,
     reconcile_assurance_json, aggregate_provenance_json,
     aggregate_assurance, aggregate_assurance_json, MAX_INPUT_BYTES, MAX_ENVELOPE_EXAMPLES,
+    MAX_RESULT_CHARS, compare_grid_correspondence, reconcile_seven_steps,
     compare_csv_view, compare_recommendations, compare_snapshots, compare_strings, compare_table)
 
 
@@ -1277,6 +1278,149 @@ def test_provenance_aggregate_subprocess_bytes_deterministic_with_simultaneous_c
             assert result.returncode == 4 and not result.stderr
             outputs.append(result.stdout)
     assert len(set(outputs)) == 1
+
+
+def test_independent_grid_correspondence_cardinality_causes_and_foreign_matches():
+    expected, groups = ["g1", "g2"], ["p1", "p2"]
+    rows = [dict(grid_id="g1", matches=["p1"], cause=None), dict(grid_id="g2", matches=["p2"], cause=None)]
+    assert compare_grid_correspondence(expected, groups, rows, require_all_matched=True)["verdict"] == "PASS"
+    for changed in (rows + [rows[0]], rows[:1], [dict(rows[0], grid_id="foreign"), rows[1]],
+                    [dict(rows[0], matches=["foreign"]), rows[1]],
+                    [rows[0], dict(rows[1], matches=["p1"])],
+                    [dict(rows[0], matches=["p1", "p2"]), rows[1]]):
+        result = compare_grid_correspondence(expected, groups, changed)
+        assert result["verdict"] == "FAIL" and result["error_count"] > 0
+    for cause in ("SOLAREDGE_GRID_UNMATCHED", "SOLAREDGE_GRID_AMBIGUOUS"):
+        changed = [rows[0], dict(rows[1], matches=[], cause=cause)]
+        assert compare_grid_correspondence(expected, groups, changed)["verdict"] == "PASS"
+        assert compare_grid_correspondence(expected, groups, changed, require_all_matched=True)["verdict"] == "FAIL"
+    assert compare_grid_correspondence(expected, groups, [dict(rows[0], matches=[], cause="private")])["reason"] == "grid_cause_unreadable"
+    for invalid in (None, [], [{"grid_id": None}], [dict(rows[0], matches=None)]):
+        assert compare_grid_correspondence(expected, groups, invalid)["verdict"] == ("FAIL" if invalid == [] else "UNREADABLE")
+
+
+def test_seven_step_offline_composer_preserves_every_diagnostic_and_missing_evidence():
+    manifest, bindings, inputs = provenance_fixture()
+    identity = dict(project_id="p", version_id="v")
+    assurance = dict(evidence=complete_evidence(), frozen_manifest=manifest, stage_bindings=bindings,
+                     supplied_inputs=inputs, expected_identity=identity,
+                     stage_identities={key: dict(identity) for key in IDENTITY_STAGES})
+    imported = dict(normal_user=True, dwg_imported=True, report_imported=True)
+    grids = dict(expected_grid_ids=["g"], saved_group_ids=["p"],
+                 rows=[dict(grid_id="g", matches=["p"], cause=None)], require_all_matched=True)
+    result = reconcile_seven_steps(imported, grids, assurance)
+    assert result["verdict"] == "PASS" and set(result["steps"]) == set("1234567")
+    assert result["steps"]["3"] == result["assurance"]["checks"]["provenance"]["reconciliation"]["stages"]["strings"]
+    assurance["evidence"]["recommendations"][0]["group_count"] = 1
+    result = reconcile_seven_steps(imported, grids, assurance)
+    assert result["verdict"] == "FAIL" and result["steps"]["4"]["verdict"] == "FAIL"
+    result = reconcile_seven_steps(None, grids, assurance)
+    assert result["verdict"] == "UNREADABLE" and result["steps"]["4"]["verdict"] == "FAIL"
+    assert result["steps"]["2"]["verdict"] == "PASS"
+    for args in ((imported, None, assurance), (imported, grids, None)):
+        assert reconcile_seven_steps(*args)["verdict"] == "UNREADABLE"
+
+
+def test_result_output_budget_exact_boundary_and_cli_sanitized_overflow(monkeypatch):
+    from io import BytesIO
+    import sys
+    from types import SimpleNamespace
+    from benches import x05_reconcile as module
+    assert len(serialize_result("x" * (MAX_RESULT_CHARS - 2))) == MAX_RESULT_CHARS
+    with pytest.raises(ValueError, match="^json_result_too_large$"):
+        serialize_result("x" * (MAX_RESULT_CHARS - 1))
+    with pytest.raises(ValueError, match="^json_result_too_large$"):
+        serialize_result({"x" * (MAX_RESULT_CHARS + 1): 1})
+    result = dict(count=123456, examples=["x" * MAX_RESULT_CHARS])
+    preserved = deepcopy(result)
+    with pytest.raises(ValueError, match="^json_result_too_large$"):
+        serialize_result(result)
+    assert result == preserved
+    monkeypatch.setattr(module, "reconcile_json", lambda text: result)
+    output = StringIO()
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=BytesIO(b"{}")))
+    monkeypatch.setattr(sys, "stdout", output)
+    assert module.main([]) == 4
+    assert json.loads(output.getvalue()) == {"verdict": "UNREADABLE", "reason": "json_result_too_large"}
+
+
+def test_shared_acyclic_expansion_stops_at_budget_without_mutating_graph():
+    child = ["synthetic"]
+    small = dict(a=child, b=child)
+    assert json.loads(serialize_result(small)) == small
+    graph = child
+    for _ in range(24):
+        graph = [graph, graph]
+    with pytest.raises(ValueError, match="^json_result_too_large$"):
+        serialize_result(graph)
+    assert graph[0] is graph[1] and child == ["synthetic"]
+
+
+CLI_DECODERS = [(None, reconcile_json), ("--aggregate", aggregate_fixtures_json),
+    ("--provenance", reconcile_provenance_json), ("--assurance", reconcile_assurance_json),
+    ("--provenance-aggregate", aggregate_provenance_json), ("--assurance-aggregate", aggregate_assurance_json)]
+
+
+def framed_payload(mode):
+    if mode is None:
+        return complete_evidence()
+    if mode == "--aggregate":
+        expected, records = fixture_records()
+        return dict(expected_ids=expected, fixtures=records)
+    return cli_payload(mode)
+
+
+@pytest.mark.parametrize("mode,decoder", CLI_DECODERS)
+def test_short_reads_split_utf8_json_tokens_and_failures_safely(monkeypatch, mode, decoder):
+    import sys
+    from types import SimpleNamespace
+    from benches import x05_reconcile as module
+    payload = framed_payload(mode)
+    text = json.dumps(payload, ensure_ascii=False)
+    # Legal surrounding whitespace and multibyte characters in JSON strings.
+    text = text.replace('"synthetic"', '"synthetic\U0001f642"') if mode is None else text
+    raw = text.encode("utf-8")
+    class ShortReads:
+        def __init__(self, fail=False):
+            self.position, self.fail, self.calls = 0, fail, 0
+        def read(self, limit):
+            self.calls += 1
+            if self.fail and self.calls == 2:
+                raise OSError("synthetic_private_canary")
+            chunk = raw[self.position:self.position + min(1 if self.calls < 8 else 17, limit)]
+            self.position += len(chunk)
+            return chunk
+    for fail in (False, True):
+        output, errors, source = StringIO(), StringIO(), ShortReads(fail)
+        monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=source))
+        monkeypatch.setattr(sys, "stdout", output)
+        monkeypatch.setattr(sys, "stderr", errors)
+        exit_code = module.main([mode] if mode else [])
+        expected = {"verdict": "UNREADABLE", "reason": "cli_evidence_unreadable"} if fail else decoder(text)
+        assert json.loads(output.getvalue()) == json.loads(serialize_result(expected))
+        assert exit_code == {"PASS": 0, "FAIL": 1, "UNREADABLE": 4}[expected["verdict"]]
+        assert not errors.getvalue() and source.calls > 1
+
+
+@pytest.mark.parametrize("mode,decoder", CLI_DECODERS)
+@pytest.mark.parametrize("framing", ["whitespace", "bom", "concatenated", "trailing"])
+def test_json_framing_consistent_in_strict_decoders_and_cli(monkeypatch, mode, decoder, framing):
+    from io import BytesIO
+    from types import SimpleNamespace
+    import sys
+    from benches import x05_reconcile as module
+    text = json.dumps(framed_payload(mode))
+    text = {"whitespace": " \r\n\t" + text + " \t\r\n", "bom": "\ufeff" + text,
+            "concatenated": text + "{}", "trailing": text + "private"}[framing]
+    expected = decoder(text)
+    assert expected["verdict"] == ("PASS" if framing == "whitespace" else "UNREADABLE")
+    if framing != "whitespace":
+        assert expected["reason"] == "json_malformed"
+    output = StringIO()
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=BytesIO(text.encode("utf-8"))))
+    monkeypatch.setattr(sys, "stdout", output)
+    assert module.main([mode] if mode else []) == (0 if framing == "whitespace" else 4)
+    assert json.loads(output.getvalue()) == json.loads(serialize_result(expected))
 
 
 @pytest.mark.parametrize("assured", [False, True])
