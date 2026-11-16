@@ -529,8 +529,12 @@ def main(argv=None):
     parser.add_argument("--aggregate", action="store_true", help="read one three-fixture envelope")
     args = parser.parse_args(argv)
     try:
-        text = sys.stdin.read(MAX_JSON_CHARS + 1)
-        result = aggregate_fixtures_json(text) if args.aggregate else reconcile_json(text)
+        raw = sys.stdin.buffer.read(4 * MAX_JSON_CHARS + 1)
+        if len(raw) > 4 * MAX_JSON_CHARS:
+            result = _out("UNREADABLE", "json_input_too_large")
+        else:
+            text = raw.decode("utf-8", errors="strict")
+            result = aggregate_fixtures_json(text) if args.aggregate else reconcile_json(text)
         output = serialize_result(result)
     except Exception:
         result = _out("UNREADABLE", "cli_evidence_unreadable")

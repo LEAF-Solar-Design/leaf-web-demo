@@ -894,3 +894,118 @@ def test_canonical_snapshot_literal_compatibility_vectors():
         invalid = canonical_snapshot(strings, rows)
         assert invalid == {"verdict": "UNREADABLE", "reason": "snapshot_rows_unreadable"}
         assert empty_digest not in invalid.values()  # Absence never acquires a valid snapshot hash.
+
+
+@pytest.mark.parametrize("slashes", range(8))
+def test_json_preflight_handles_escaped_quotes_braces_and_backslash_parity(slashes):
+    value = "\\" * slashes + '"' + "}][{" * 20
+    inner = json.dumps({"value": value})
+    supported = '{"nested":' + "[" * (MAX_JSON_DEPTH - 2) + inner + "]" * (MAX_JSON_DEPTH - 2) + "}"
+    decoded = decode_evidence_json(supported)
+    assert decoded["verdict"] == "PASS"
+    observed = decoded["evidence"]["nested"]
+    for _ in range(MAX_JSON_DEPTH - 2):
+        observed = observed[0]
+    assert observed["value"] == value
+    unsupported = '{"nested":' + "[" * (MAX_JSON_DEPTH - 1) + inner + "]" * (MAX_JSON_DEPTH - 1) + "}"
+    assert decode_evidence_json(unsupported)["reason"] == "json_nesting_too_deep"
+    raw = '{"value":"' + "\\" * slashes + '"}'
+    parity = decode_evidence_json(raw)
+    assert parity["verdict"] == ("PASS" if slashes % 2 == 0 else "UNREADABLE")
+    if slashes % 2:
+        assert parity["reason"] == "json_malformed"
+
+
+@pytest.mark.parametrize("kind", ["list", "dict", "mixed"])
+def test_serializer_cycles_have_bounded_named_errors(kind):
+    if kind == "list":
+        value = []
+        value.append(value)
+    elif kind == "dict":
+        value = {}
+        value["self"] = value
+    else:
+        value = []
+        value.append({"self": value})
+    with pytest.raises(ValueError, match="json_result_too_deep") as error:
+        serialize_result(value)
+    assert len(error.traceback) < MAX_JSON_DEPTH * 4 + 20
+
+
+def test_serializer_repeated_acyclic_children_are_lossless_and_unchanged():
+    from decimal import Decimal
+
+    child = {"count": 10**60, "tiny": Decimal("1E-78"), "nested": ["synthetic"]}
+    value = {"first": child, "second": child}
+    preserved = deepcopy(value)
+    decoded = decode_evidence_json(serialize_result(value))["evidence"]
+    assert decoded["first"] == decoded["second"] == child
+    assert value == preserved and value["first"] is value["second"]
+
+
+@pytest.mark.parametrize("aggregate", [False, True])
+@pytest.mark.parametrize("invalid", [b"\xff", b"\xe2\x82"])
+def test_cli_invalid_utf8_never_echoes_input_or_traceback(tmp_path, aggregate, invalid):
+    from pathlib import Path
+    import subprocess
+    import sys
+    from benches import x05_reconcile as module
+
+    evidence = complete_evidence()
+    evidence["notes"] = "synthetic_private_marker_PLACEHOLDER"
+    if aggregate:
+        expected, fixtures = fixture_records()
+        fixtures[0]["evidence"]["notes"] = evidence["notes"]
+        payload = dict(expected_ids=expected, fixtures=fixtures)
+    else:
+        payload = evidence
+    raw = json.dumps(payload).encode("utf-8").replace(b"PLACEHOLDER", invalid)
+    command = [sys.executable, "-P", str(Path(module.__file__).resolve())]
+    if aggregate:
+        command.append("--aggregate")
+    result = subprocess.run(command, input=raw, capture_output=True, cwd=tmp_path, timeout=20)
+    assert result.returncode == 4 and result.stderr == b""
+    assert len(result.stdout.splitlines()) == 1
+    assert json.loads(result.stdout) == {"verdict": "UNREADABLE", "reason": "cli_evidence_unreadable"}
+    assert b"synthetic_private_marker" not in result.stdout and b"Traceback" not in result.stdout
+
+
+REQUIRED_STAGES = {
+    "oracle_strings": {"strings"}, "saved_strings": {"strings", "reopen"},
+    "saved_values": {"strings", "table", "policy"}, "oracle_values": {"strings", "table", "policy"},
+    "view_rows": {"table", "reopen", "csv_view"}, "csv_text": {"csv_view"},
+    "report_grid_count": {"grouping"}, "recommendations": {"grouping"},
+    "fixture_id": {"policy"}, "discrepancy_records": {"policy"}, "run_started_at": {"policy"},
+    "before": {"reopen"}, "reopened": {"reopen"}, "before_rows": {"reopen"}, "reopened_rows": {"reopen"},
+}
+
+
+@pytest.mark.parametrize("key", REQUIRED_STAGES)
+def test_required_field_deletion_retains_every_unaffected_stage(key):
+    evidence = complete_evidence()
+    assert set(evidence) == set(REQUIRED_STAGES)
+    complete = reconcile_offline(evidence)
+    del evidence[key]
+    result = reconcile_offline(evidence)
+    assert result["verdict"] == "UNREADABLE"
+    for stage, observation in result["stages"].items():
+        if stage in REQUIRED_STAGES[key]:
+            assert observation == {"verdict": "UNREADABLE", "reason": "stage_evidence_missing"}
+        else:
+            assert observation == complete["stages"][stage]
+
+
+def test_aggregate_isolates_readable_failure_missing_evidence_and_complete_fixture():
+    expected, fixtures = fixture_records()
+    fixtures[0]["evidence"]["recommendations"][0]["group_count"] = 1
+    del fixtures[1]["evidence"]["csv_text"]
+    del fixtures[1]["evidence"]["reopened_rows"]
+    preserved = deepcopy(fixtures)
+    result = aggregate_fixtures(expected, fixtures)
+    assert result["verdict"] == "UNREADABLE"
+    assert {key: item["verdict"] for key, item in result["fixtures"].items()} == {
+        "case-a": "FAIL", "case-b": "UNREADABLE", "case-c": "PASS"}
+    incomplete = result["fixtures"]["case-b"]["stages"]
+    assert incomplete["csv_view"]["reason"] == incomplete["reopen"]["reason"] == "stage_evidence_missing"
+    assert incomplete["table"]["verdict"] == incomplete["strings"]["verdict"] == "PASS"
+    assert fixtures == preserved

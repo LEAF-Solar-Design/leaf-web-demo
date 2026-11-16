@@ -313,3 +313,58 @@ print(result["verdict"], result["reason"])
 The failed grouping remains visible inside the missing-stage aggregate. The
 foreign-ID case rejects coverage before aggregation. Stop on an unexpected
 output. All objects are synthetic and this replay creates no persistent state.
+
+Complete single-fixture JSON schema (all rows below are required):
+
+| Field | Consumers | Value |
+|---|---|---|
+| `oracle_strings` | Strings | Nonempty independent `{string_id, optimizers}` rows |
+| `saved_strings` | Strings, reopen | Nonempty saved-design string rows |
+| `oracle_values` | Strings, table, policy | Independent map of all five metrics |
+| `saved_values` | Strings, table, policy | Saved-design map of all five metrics |
+| `view_rows` | Table, CSV/view, reopen | Exactly five unique full table rows |
+| `csv_text` | CSV/view | Bounded CSV text containing those five rows |
+| `report_grid_count` | Grouping | Independent positive integer grid count |
+| `recommendations` | Grouping | Shown rows with positive integer `group_count` |
+| `fixture_id` | Policy, aggregate identity | Nonempty fixture identifier |
+| `discrepancy_records` | Policy | Array of named frozen fixture/metric/delta records |
+| `run_started_at` | Policy | Aware ISO timestamp |
+| `before` | Reopen | Claimed `strings_sha256` and `table_sha256` |
+| `reopened` | Reopen | Claimed reopened hashes with the same keys |
+| `before_rows` | Reopen | `{strings, table_rows}` bound to saved evidence |
+| `reopened_rows` | Reopen | Reopened `{strings, table_rows}` bound to reopened hashes |
+
+The optional `no_recommendations_shown` is a strict boolean. Omission defaults
+to false for a nonempty shown list. An explicitly empty list needs true;
+null, numeric, string and container flags are UNREADABLE. No field is inferred
+from a similarly named field. Omitted required fields produce
+`stage_evidence_missing` for each consuming stage. Explicit null is present but
+invalid, so its consumer returns a named type/evidence error instead. Empty
+string arrays or snapshot objects remain UNREADABLE. Empty discrepancy records
+are valid evidence of no exceptions; policy then FAILs any nonzero delta.
+
+String rows use exact nonempty IDs and positive integer optimizer counts. Metric
+maps require `panels`, `optimizers`, `inverters`, `strings`, `kw_dc`; count values
+are integral and nonnegative. Table rows require `metric`, `studio`, `oracle`,
+`delta`, `verdict`, with PASS for zero and FAIL for nonzero. Discrepancy records
+use `fixture_id`, `metric`, exact signed `delta`, nonempty `name`, and aware
+`frozen_at` strictly before the run. Extra top-level fields do not substitute
+for required ones. The aggregate envelope itself accepts only `expected_ids`
+and `fixtures`, with each fixture record binding its ID to `evidence.fixture_id`.
+
+The CLI decodes stdin bytes as strict UTF-8 before parsing. Invalid bytes or
+truncated multibyte sequences emit one fixed UNREADABLE result and exit4 without
+input text or a traceback. Cyclic result containers fail with the bounded
+`json_result_too_deep` ValueError; repeated acyclic children serialize normally.
+
+This minimal typo replay prints `UNREADABLE stage_evidence_missing`:
+
+```powershell
+@'
+{"saved_strngs":[]}
+'@ | python -P tools/xbench/benches/x05_reconcile.py | python -c "import json,sys; r=json.load(sys.stdin); print(r['verdict'], r['stages']['strings']['reason'])"
+```
+
+It deliberately supplies a small invalid object, not complete evidence. The
+required-field deletion matrix tests the same omission rule against otherwise
+complete evidence and preserves every unaffected stage's diagnostics.
