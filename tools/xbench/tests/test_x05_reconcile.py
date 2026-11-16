@@ -7559,3 +7559,113 @@ def test_oracle_loads_ignore_reopen_mutations_while_composed_failures_survive(mu
     assert result['fixtures'][expected[0]]['verdict']=='FAIL'
     assert all(result['fixtures'][key]==baseline['fixtures'][key] for key in expected[1:])
     assert records==original
+
+
+def oracle_metric_weights(evidence,metric):
+    from fractions import Fraction
+    field=dict(strings='oracle_strings',optimizers='oracle_strings',panels='oracle_panels',kw_dc='oracle_dc_power')[metric]
+    return {row['string_id']:Fraction(1 if metric=='strings' else row[metric]) for row in evidence[field]}
+
+
+@pytest.mark.parametrize('mutation',['connections','owners'])
+def test_oracle_rerouting_and_migration_exact_four_metric_deltas_with_topology(mutation):
+    from fractions import Fraction
+    from benches import x05_reconcile as m
+    envelope=equal_count_ownership_envelope()
+    baseline=m.reconcile_seven_steps_json(serialize_result(envelope))
+    evidence=envelope['assurance']['evidence']
+    if mutation=='connections': evidence['oracle_assignments'][0]['inverter_id']='INV-B'
+    else: evidence['oracle_string_owners'][0]['grid_id']='west'
+    original=deepcopy(envelope)
+    result=m.reconcile_seven_steps_json(serialize_result(envelope))
+    before,after=baseline['oracle_loads'],result['oracle_loads']
+    changed,unchanged=('inverter','grid') if mutation=='connections' else ('grid','inverter')
+    keys=('INV-A','INV-B') if mutation=='connections' else ('east','west')
+    id_key='inverter_id' if mutation=='connections' else 'grid_id'
+    for metric in ('strings','optimizers','panels','kw_dc'):
+        amount=oracle_metric_weights(evidence,metric)['A']
+        check=after['metrics'][metric][changed+'_comparison']
+        assert check['mismatch_count']==2 and check['verdict']=='FAIL'
+        assert {row[id_key]:Fraction(row['delta']) for row in check['examples']}==dict(zip(keys,[-amount,amount]))
+        assert after['metrics'][metric][unchanged+'_comparison']==before['metrics'][metric][unchanged+'_comparison']
+    topology=result['independent_owners']['checks']['oracle_topology']
+    assert topology['verdict']=='FAIL' and topology['mismatch_count']==1
+    assert result['cross_topology']['verdict']=='PASS' and envelope==original
+
+
+@pytest.mark.parametrize('shared_grid',[False,True])
+@pytest.mark.parametrize('shared_device',[False,True])
+@pytest.mark.parametrize('offset_text',['0.25','0.'+'0'*76+'1'])
+def test_affine_oracle_dc_offsets_follow_explicit_membership_counts(shared_grid,shared_device,offset_text):
+    from fractions import Fraction
+    from benches import x05_reconcile as m
+    grid,evidence=union_oracle_load_components(*(oracle_load_component(f'offset{i}') for i in range(3)))
+    if shared_grid: grid,evidence=coarsen_oracle_load_grids(grid,evidence)
+    if shared_device: grid,evidence=coarsen_oracle_load_devices(grid,evidence)
+    baseline=m._seven_step_oracle_loads(grid,evidence)
+    assert baseline['verdict']=='PASS'
+    offset=Fraction(offset_text)
+    for row in evidence['oracle_dc_power']: row['kw_dc']=fraction_fixed_text(Fraction(row['kw_dc'])+offset)
+    original=deepcopy((grid,evidence))
+    result=m._seven_step_oracle_loads(grid,evidence)
+    for target,rows,key in [('grid',evidence['oracle_string_owners'],'grid_id'),('inverter',evidence['oracle_assignments'],'inverter_id')]:
+        members={owner:sum(row[key]==owner for row in rows) for owner in {row[key] for row in rows}}
+        check=result['metrics']['kw_dc'][target+'_comparison']
+        assert check['mismatch_count']==len(members)
+        assert {row[key]:Fraction(row['delta']) for row in check['examples']}=={owner:count*offset for owner,count in members.items()}
+        targets=grid['dc_totals'] if target=='grid' else evidence['inverter_loads']['kw_dc']
+        for owner,count in members.items(): targets[owner]=fraction_fixed_text(Fraction(targets[owner])+count*offset)
+    assert m._seven_step_oracle_loads(grid,evidence)['verdict']=='FAIL'  # report remains independent and stale
+    evidence['oracle_values']['kw_dc']=fraction_fixed_text(Fraction(evidence['oracle_values']['kw_dc'])+len(evidence['oracle_dc_power'])*offset)
+    repaired=m._seven_step_oracle_loads(grid,evidence)
+    assert repaired['verdict']=='PASS'
+    for metric in ('strings','optimizers','panels'): assert repaired['metrics'][metric]==baseline['metrics'][metric]
+    assert original[1]['oracle_dc_power']==evidence['oracle_dc_power']
+
+
+def test_oracle_target_reflection_negates_exact_capped_deltas():
+    from fractions import Fraction
+    from benches import x05_reconcile as m
+    grid,evidence=union_oracle_load_components(*(oracle_load_component(f'reflect{i:02}',True) for i in range(13)))
+    baseline=m._seven_step_oracle_loads(grid,evidence)
+    original=deepcopy((grid,evidence))
+    fields=dict(strings='string_totals',optimizers='optimizer_totals',panels='panel_totals',kw_dc='dc_totals')
+    for metric,field in fields.items():
+        weights=oracle_metric_weights(evidence,metric)
+        for target,rows,key in [(grid[field],evidence['oracle_string_owners'],'grid_id'),(evidence['inverter_loads'][metric],evidence['oracle_assignments'],'inverter_id')]:
+            loads={owner:sum(weights[row['string_id']] for row in rows if row[key]==owner) for owner in target}
+            for owner in target:
+                reflected=2*loads[owner]-Fraction(target[owner])
+                assert reflected>=0
+                target[owner]=fraction_fixed_text(reflected) if metric=='kw_dc' else int(reflected)
+    result=m._seven_step_oracle_loads(grid,evidence)
+    assert result['verdict']==baseline['verdict']=='FAIL'
+    for metric in fields:
+        for target,key in [('grid','grid_id'),('inverter','inverter_id')]:
+            before=baseline['metrics'][metric][target+'_comparison']; after=result['metrics'][metric][target+'_comparison']
+            assert before['mismatch_count']==after['mismatch_count']==26
+            assert len(after['examples'])==MAX_STRING_EXAMPLES
+            assert [row[key] for row in before['examples']]==[row[key] for row in after['examples']]
+            assert [Fraction(row['delta']) for row in after['examples']]==[-Fraction(row['delta']) for row in before['examples']]
+    # The independent original report, oracle rows and ownership are untouched.
+    for field in ('oracle_values','oracle_strings','oracle_panels','oracle_dc_power','oracle_string_owners','oracle_assignments'):
+        assert evidence[field]==original[1][field]
+
+
+def test_mutated_returned_oracle_diagnostics_do_not_alias_inputs_prior_or_fresh_results():
+    from benches import x05_reconcile as m
+    expected,records=bound_seven_fixture_records()
+    records[0]['envelope']['grid']['panel_totals']['g']=25
+    original=deepcopy(records)
+    prior=m.aggregate_bound_seven_steps(expected,records)
+    preserved=deepcopy(prior)
+    current=m.aggregate_bound_seven_steps(expected,records)
+    load=current['fixtures'][expected[0]]['reconciliation']['oracle_loads']
+    load['metrics']['panels']['grid_comparison']['examples'][0]['delta']='mutated-diagnostic'
+    load['metrics']['panels']['grid_comparison']['examples'].append({'grid_id':'new'})
+    load['bindings']['owners']['counts']['missing']=999
+    current['fixtures'][expected[1]]['verdict']='mutated-sibling'
+    assert records==original and prior==preserved
+    fresh=m.aggregate_bound_seven_steps(expected,records)
+    assert fresh==preserved
+    assert current['fixtures'][expected[2]]==prior['fixtures'][expected[2]]
