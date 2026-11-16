@@ -644,6 +644,56 @@ def test_panels_phase_wrapper_preserves_config_and_other_suites(tmp_path, monkey
         assert not (tmp_path / "other").exists()
 
 
+def test_panels_next_strict_mode_suite_and_phase_matrix():
+    node = shutil.which("node")
+    assert node is not None, "Node is required for the panels Next config drill"
+    config = (REPO / "web/next.config.mjs").as_uri()
+    script = "import nextConfig from " + json.dumps(config) + ";\n" + r"""
+import assert from 'node:assert/strict';
+const keys = ['LEAF_READSET_SUITE', 'LEAF_NEXT_DEV_INSTANCE'];
+const saved = keys.map(key => process.env[key]);
+const setEnv = (key, value) => {
+  if (value === undefined) delete process.env[key];
+  else process.env[key] = value;
+};
+try {
+  const panels = 'web-studio-panels-proof';
+  const suites = [undefined, '', panels, 'web-studio-editor-proof',
+    'web-studio-panels', panels + '-extra', 'prefix-' + panels,
+    panels.toUpperCase(), panels + ' ', ' ' + panels];
+  const phases = [undefined, 'phase-development-server', 'phase-production-build',
+    'phase-production-server', 'phase-export', 'phase-export-outdir',
+    'phase-test', 'phase-info', 'phase-development-server-extra'];
+  for (const instance of [undefined, 'panels-proof']) {
+    setEnv('LEAF_NEXT_DEV_INSTANCE', instance);
+    for (const suite of suites) {
+      setEnv('LEAF_READSET_SUITE', suite);
+      for (const phase of phases) {
+        const config = nextConfig(phase);
+        const development = phase === 'phase-development-server';
+        const label = JSON.stringify({suite, phase, instance});
+        assert.equal(config.reactStrictMode, !(development && suite === panels), label);
+        assert.equal(Object.hasOwn(config, 'output'), !development, label);
+        assert.equal(config.output, development ? undefined : 'export', label);
+        assert.equal(Object.hasOwn(config, 'distDir'), development && !!instance, label);
+        assert.equal(config.distDir,
+          development && instance ? `.next-dev-${instance}` : undefined, label);
+        assert.equal(typeof config.rewrites, development ? 'function' : 'undefined', label);
+        assert.deepEqual(config.images, {unoptimized: true}, label);
+        assert.equal(config.poweredByHeader, false, label);
+        assert.equal(typeof config.webpack, 'function', label);
+      }
+    }
+  }
+} finally {
+  keys.forEach((key, index) => setEnv(key, saved[index]));
+}
+"""
+    proc = subprocess.run([node, "--input-type=module", "-e", script], capture_output=True,
+                          text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+
+
 def test_panels_phase_reporter_public_event_drill():
     node = shutil.which("node")
     assert node is not None, "Node is required for the panels phase drill"
