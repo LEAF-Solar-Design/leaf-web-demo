@@ -1799,3 +1799,48 @@ before FAIL with saved binding `string_inverter_assignments_changed`, missing
 reopened UNREADABLE with `string_inverter_snapshots_invalid`, corrected PASS.
 Each swap preserves the per-inverter counts, device identities and grid totals.
 No source independence, customer-data intake or live acceptance is claimed.
+# Per-inverter load evidence for X05 reconciliation
+
+Matching connection identities and grid totals can coexist with report loads
+that differ for each inverter. The standalone load helpers require independent
+per-inverter totals keyed by explicit inverter IDs. String totals count supplied
+connections. Optimizer totals use saved per-string optimizer counts. Panel and
+kW DC totals require their own rows bound to the saved string ID set. The oracle
+consistency helper checks explicit device coverage and each report grand total.
+The DC helper uses exact decimal arithmetic and preserves the caller context.
+
+Run this synthetic replay from the repository root:
+
+```powershell
+@'
+import json, runpy, sys
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+envelope = fixtures['connection_envelope']()
+evidence = envelope['assurance']['evidence']
+owners = evidence['saved_assignments']
+ids = [row['string_id'] for row in evidence['saved_strings']]
+print('composition', m.reconcile_seven_steps_json(json.dumps(envelope))['verdict'])
+checks = [
+    m.compare_inverter_string_totals({'INV-A':2, 'INV-B':0}, ids, owners),
+    m.compare_inverter_optimizer_totals({'INV-A':7, 'INV-B':5}, evidence['saved_strings'], owners),
+    m.compare_inverter_panel_totals({'INV-A':14, 'INV-B':10}, ids, envelope['grid']['panel_counts'], owners),
+    m.compare_inverter_dc_totals({'INV-A':'5.6', 'INV-B':'4'}, ids, envelope['grid']['dc_power'], owners),
+]
+for result in checks:
+    print(result['verdict'], result['reason'], result['mismatch_count'])
+corrected = m.compare_inverter_optimizer_totals({'INV-A':5, 'INV-B':7}, evidence['saved_strings'], owners)
+missing = m.compare_inverter_optimizer_totals(None, evidence['saved_strings'], owners)
+print('corrected', corrected['verdict'], 'missing', missing['verdict'])
+assert all(result['verdict'] == 'FAIL' and result['mismatch_count'] == 2 for result in checks)
+assert corrected['verdict'] == 'PASS' and missing['verdict'] == 'UNREADABLE'
+'@ | python -P -
+```
+
+Expected composition PASS and four per-inverter load FAIL results with two
+mismatches each. Corrected optimizer totals PASS. Absent independent totals are
+UNREADABLE. All independent count and power maps preserve their report grand
+totals in this example. These standalone helpers add per-device comparisons to
+the supplied evidence. Producer provenance and independent report extraction
+remain requirements for live acceptance.

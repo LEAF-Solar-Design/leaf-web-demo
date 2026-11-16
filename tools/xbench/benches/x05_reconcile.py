@@ -1066,6 +1066,66 @@ def compare_string_inverter_snapshots(inverter_ids, saved_string_ids, before_ass
                           for row in result["examples"]])
 
 
+def compare_inverter_string_totals(expected_totals, saved_string_ids, assignments):
+    """Count explicit saved connections against independent inverter string totals."""
+    return _compare_inverter_loads(expected_totals, saved_string_ids, assignments, "strings")
+
+
+def compare_inverter_optimizer_totals(expected_totals, saved_strings, assignments):
+    """Sum explicit per-string optimizer counts through supplied connections."""
+    indexed, error = _index(saved_strings, "saved")
+    if error:
+        return _out("UNREADABLE", error)
+    return _compare_inverter_loads(expected_totals, list(indexed), assignments, "optimizers", saved_strings)
+
+
+def compare_inverter_panel_totals(expected_totals, saved_string_ids, panel_rows, assignments):
+    """Bind explicit panel counts to saved string IDs before summing inverter loads."""
+    return _compare_inverter_loads(expected_totals, saved_string_ids, assignments, "panels", panel_rows)
+
+
+def compare_inverter_dc_totals(expected_totals, saved_string_ids, power_rows, assignments):
+    """Sum explicit kW DC through supplied connections using isolated exact decimals."""
+    with localcontext(_CONTEXT):
+        return _compare_inverter_loads(expected_totals, saved_string_ids, assignments, "kw_dc", power_rows)
+
+
+def _compare_inverter_loads(expected_totals, saved_string_ids, assignments, metric, rows=None):
+    reason = "inverter_" + metric
+    totals = _grid_dc_totals(expected_totals) if metric == "kw_dc" else expected_totals
+    if totals is None or (metric != "kw_dc" and not _valid_grid_totals(totals)):
+        return _out("UNREADABLE", reason + "_totals_unreadable")
+    ownership = validate_string_inverter_assignments(list(totals), saved_string_ids, assignments)
+    if ownership["verdict"] != "PASS":
+        return _out(ownership["verdict"], reason + "_assignments_invalid", ownership=ownership)
+    values = dict.fromkeys(saved_string_ids, 1)
+    if metric != "strings":
+        values, error = _index(rows, "saved_" + metric, metric=metric)
+        if error:
+            return _out("UNREADABLE", error)
+        if set(values) != set(saved_string_ids):
+            return _out("UNREADABLE", reason + "_string_identity_conflict")
+    actual = dict.fromkeys(totals, 0)
+    for row in assignments:
+        actual[row["inverter_id"]] += values[row["string_id"]]
+    changed = [key for key in totals if totals[key] != actual[key]]
+    return _out("FAIL" if changed else "PASS", reason + "_totals_mismatch" if changed else reason + "_totals_equal",
+                mismatch_count=len(changed), examples=[dict(inverter_id=key, oracle=totals[key], saved=actual[key],
+                    delta=actual[key] - totals[key]) for key in nsmallest(MAX_STRING_EXAMPLES, changed)])
+
+
+def compare_inverter_metric_oracle_totals(inverter_ids, expected_totals, oracle_values, metric):
+    """Require independent inverter coverage and exact report agreement for one metric."""
+    if metric not in ("strings", "optimizers", "panels", "kw_dc"):
+        return _out("UNREADABLE", "inverter_metric_unreadable")
+    with localcontext(_CONTEXT):
+        result = _compare_grid_oracle_totals(inverter_ids, expected_totals, oracle_values,
+                                             metric, "inverter_" + metric + "_oracle")
+    if "grid_total" in result:
+        result["inverter_total"] = result.pop("grid_total")
+    return result
+
+
 def _validate_grid_ownership(expected_grid_ids, saved_ids, assignments, identity_key, label, *, owner_key="grid_id"):
     prefix = "" if label == "string" else label + "_"
     foreign_key = "foreign_" + label

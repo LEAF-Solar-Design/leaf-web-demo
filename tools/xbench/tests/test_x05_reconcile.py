@@ -4934,3 +4934,89 @@ def test_assignment_transport_differential_and_siblings(tmp_path, mutation):
         env={'SystemRoot': 'C:\\Windows'})
     assert run.returncode == (4 if mutation == 'missing' else 1) and not run.stderr
     assert json.loads(run.stdout) == json.loads(serialize_result(aggregate))
+
+
+def test_inverter_string_load_swaps_missing_counts_and_identity_errors():
+    from benches import x05_reconcile as m
+    strings = ['A', 'B', 'C']
+    rows = [dict(string_id=k, inverter_id=v) for k, v in zip(strings, ['I1', 'I2', 'I2'])]
+    assert m.compare_inverter_string_totals(dict(I1=1, I2=2), strings, rows)['verdict'] == 'PASS'
+    result = m.compare_inverter_string_totals(dict(I1=2, I2=1), strings, rows)
+    assert result['mismatch_count'] == 2 and result['verdict'] == 'FAIL'
+    assert [r['delta'] for r in result['examples']] == [-1, 1]
+    assert m.compare_inverter_string_totals(None, strings, rows)['verdict'] == 'UNREADABLE'
+    for changed in (rows[:1], rows + rows[:1], rows + [dict(string_id='X', inverter_id='I1')],
+                    [dict(string_id='A', inverter_id='X')] + rows[1:]):
+        assert m.compare_inverter_string_totals(dict(I1=1, I2=2), strings, changed)['verdict'] == 'FAIL'
+
+
+@pytest.mark.parametrize('metric', ['optimizers', 'panels'])
+def test_inverter_count_load_reference_swaps_and_id_binding(metric):
+    from itertools import product
+    from benches import x05_reconcile as m
+    strings = ['A', 'B', 'C']
+    for owners in product(['I1', 'I2'], repeat=3):
+        assignments = [dict(string_id=k, inverter_id=v) for k, v in zip(strings, owners)]
+        for values in product([1, 2], repeat=3):
+            rows = [dict(string_id=k, **{metric:v}) for k, v in zip(strings, values)]
+            expected = {key: sum(v for owner, v in zip(owners, values) if owner == key) for key in ['I1', 'I2']}
+            original = deepcopy((expected, rows, assignments))
+            def check(totals, supplied=rows):
+                if metric == 'optimizers':
+                    return m.compare_inverter_optimizer_totals(totals, supplied, assignments)
+                return m.compare_inverter_panel_totals(totals, strings, supplied, assignments)
+            assert check(expected)['verdict'] == 'PASS'
+            if expected['I1'] != expected['I2']:
+                assert check(dict(I1=expected['I2'], I2=expected['I1']))['mismatch_count'] == 2
+            assert check(None)['verdict'] == 'UNREADABLE'
+            assert (expected, rows, assignments) == original
+    assert m.compare_inverter_panel_totals(dict(I1=1), ['A'], [dict(string_id='B', panels=1)],
+        [dict(string_id='A', inverter_id='I1')])['reason'] == 'inverter_panels_string_identity_conflict'
+
+
+def test_inverter_dc_tiny_load_changes_context_preservation_and_zero():
+    from decimal import Decimal, localcontext, Inexact, Rounded
+    from benches import x05_reconcile as m
+    strings = ['A', 'B']
+    assignments = [dict(string_id='A', inverter_id='I1'), dict(string_id='B', inverter_id='I2')]
+    rows = [dict(string_id='A', kw_dc='0.'+'0'*76+'1'), dict(string_id='B', kw_dc='0.'+'0'*76+'2')]
+    expected = dict(I1=rows[0]['kw_dc'], I2=rows[1]['kw_dc'])
+    original = deepcopy((expected, rows, assignments))
+    with localcontext() as context:
+        context.prec = 3
+        context.traps[Inexact] = context.traps[Rounded] = True
+        flags = dict(context.flags)
+        assert m.compare_inverter_dc_totals(expected, strings, rows, assignments)['verdict'] == 'PASS'
+        result = m.compare_inverter_dc_totals(dict(I1=expected['I2'], I2=expected['I1']), strings, rows, assignments)
+        assert result['verdict'] == 'FAIL' and result['mismatch_count'] == 2
+        assert result['examples'][0]['delta'] == Decimal('-1e-77')
+        assert dict(context.flags) == flags and context.prec == 3
+    assert (expected, rows, assignments) == original
+    assert m.compare_inverter_dc_totals(dict(I1='0'), ['A'], [dict(string_id='A', kw_dc='0')], assignments[:1])['verdict'] == 'PASS'
+    assert m.compare_inverter_dc_totals(None, strings, rows, assignments)['verdict'] == 'UNREADABLE'
+    assert m.compare_inverter_dc_totals(expected, strings, None, assignments)['verdict'] == 'UNREADABLE'
+    assert m.compare_inverter_dc_totals(expected, strings, rows[:1], assignments)['verdict'] == 'UNREADABLE'
+
+
+@pytest.mark.parametrize('metric', ['strings', 'optimizers', 'panels', 'kw_dc'])
+def test_inverter_oracle_coverage_totals_schema_and_contradictions(metric):
+    from benches import x05_reconcile as m
+    totals = dict(I1='0.1', I2='0.2') if metric == 'kw_dc' else dict(I1=1, I2=2)
+    oracle = {metric:'0.3' if metric == 'kw_dc' else 3}
+    assert m.compare_inverter_metric_oracle_totals(['I1', 'I2'], totals, oracle, metric)['verdict'] == 'PASS'
+    assert m.compare_inverter_metric_oracle_totals(['I1', 'I2'], totals, {metric:4}, metric)['verdict'] == 'FAIL'
+    for ids, values in ((['I1', 'I1'], totals), (['I1'], totals), (['I1', 'I2', 'I3'], totals), (['I1', 'I2'], None)):
+        assert m.compare_inverter_metric_oracle_totals(ids, values, oracle, metric)['verdict'] == 'UNREADABLE'
+    for bad in (True, -1, float('nan'), float('inf'), 2**1000, 'x'*129):
+        assert m.compare_inverter_metric_oracle_totals(['I1'], dict(I1=bad), oracle, metric)['verdict'] == 'UNREADABLE'
+    assert m.compare_inverter_metric_oracle_totals(['I1'], dict(I1=1), {}, metric)['verdict'] == 'UNREADABLE'
+
+
+def test_inverter_load_caps_and_permutation_stability():
+    from benches import x05_reconcile as m
+    strings = [f's{i:03}' for i in range(70)]
+    totals = {f'I{i:03}':2 for i in range(70)}
+    rows = [dict(string_id=k, inverter_id=f'I{i:03}') for i,k in enumerate(strings)]
+    result = m.compare_inverter_string_totals(totals, strings, rows)
+    assert result['mismatch_count'] == 70 and len(result['examples']) == MAX_STRING_EXAMPLES
+    assert result == m.compare_inverter_string_totals(dict(reversed(list(totals.items()))), strings[::-1], rows[::-1])
