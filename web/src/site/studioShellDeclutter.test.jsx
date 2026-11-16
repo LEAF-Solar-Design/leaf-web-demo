@@ -13,10 +13,16 @@ import CostTransparencyPanel from '../components/CostTransparencyPanel.jsx'
 import ClaudeAccountPanel from '../components/ClaudeAccountPanel.jsx'
 import RoutePanel from '../components/RoutePanel.jsx'
 import { isCustomerMode } from '../lib/customerMode.js'
+import { ServiceStatus } from '../components/DetailsDrawer.jsx'
 
 // Exercise App's actual JSX expressions with explicit bindings, without
 // mounting its backend/session orchestration.
 const appSource = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
+function customerBindings(studioShell, tier = 'free') {
+  const bindings = { studioShell, isCustomerMode, session: { session: { role: 'user' } }, tier }
+  const definition = appSource.match(/const studioCustomerMode = ([^\r\n]+)/)[1]
+  return { ...bindings, studioCustomerMode: appExpression(definition, bindings) }
+}
 function appExpression(code, bindings) {
   const tree = parseExpression(code, { plugins: ['jsx'] })
   function evaluate(node) {
@@ -49,8 +55,27 @@ vi.mock('./studioGround.js', async (original) => ({ ...await original(), useStud
 afterEach(cleanup)
 
 describe('quiet Studio shell', () => {
+  it('defines customer mode once behind the Studio shell gate', () => {
+    expect(appSource.match(/\bisCustomerMode\s*\(/g)).toHaveLength(1)
+    expect(appSource).toMatch(/const studioCustomerMode = studioShell && isCustomerMode\(\{ \.\.\.session\.session, tier \}\)/)
+  })
+
+  it('keeps service, build, tool and plan details visible for a non-Studio pro user', () => {
+    const bindings = { ...customerBindings(false, 'pro'), ServiceStatus, ShellDiagnostics,
+      mock: false, health: { aps_live: true }, healthError: null, authRequired: false,
+      studioGround: null, capCount: 63, gateTier: 'pro', usage: { today: { usd_est: 0 } }, __BUILD_HASH__: 'test-build' }
+    const service = appSource.split('\n').find(line => line.includes('&& <ServiceStatus ')).trim().slice(1, -1)
+    const build = appSource.split('\n').find(line => line.includes('>Build <span')).trim().slice(1, -1)
+    const diagnostics = appSource.match(/<ShellDiagnostics\b[\s\S]*?\/>/)[0]
+    render(<footer>{appExpression(service, bindings)}{appExpression(diagnostics, bindings)}{appExpression(build, bindings)}</footer>)
+    expect(screen.getByText('Service live')).toBeTruthy()
+    expect(screen.getByText('Build')).toBeTruthy()
+    expect(screen.getByText('test-build')).toBeTruthy()
+    expect(screen.getByText('Tools: 63 available · Plan: pro')).toBeTruthy()
+  })
+
   it.each([false, true])('keeps cost and Claude panels reachable for customer mode (Studio %s)', (studioShell) => {
-    const bindings = { studioShell, isCustomerMode, session: { session: {} }, tier: 'free',
+    const bindings = { ...customerBindings(studioShell),
       mock: false, knownGuest: true, signedOut: true, grant: null, grantLoading: false,
       grantBusy: false, grantErr: null, claudeOpen: false, setClaudeOpen: vi.fn(), onLinkClaude: vi.fn(), onUnlinkClaude: vi.fn(),
       CostTransparencyPanel, ClaudeAccountPanel }
@@ -87,7 +112,7 @@ describe('quiet Studio shell', () => {
 
   it.each([false, true])('limits customer cockpit diagnostic suppression to Studio (%s)', (studioShell) => {
     const expression = appSource.match(/<CockpitStatus customerMode=\{([^\n]+?)\} ground=/)[1]
-    const customerMode = appExpression(expression, { studioShell, isCustomerMode, session: { session: {} }, tier: 'free' })
+    const customerMode = appExpression(expression, customerBindings(studioShell))
     const { container } = render(<CockpitStatus customerMode={customerMode} ground={null} viewerRef={{ current: null }} shown={{}} />)
     expect(!!container.querySelector('.cockpit-scale')).toBe(!studioShell)
     expect(!!container.querySelector('.cockpit-count')).toBe(!studioShell)

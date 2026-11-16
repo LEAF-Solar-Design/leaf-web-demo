@@ -4564,6 +4564,7 @@ export default function App() {
     }
   }, [drafting, surfaceSlots.toolbar.profile])
   const studioShell = !!studioGround && surfaceSlots.chrome.shell === 'cockpit'
+  const studioCustomerMode = studioShell && isCustomerMode({ ...session.session, tier })
   // The rail lives in the Studio sidebar on the studio shell, so opening it opens that panel.
   const openToolRail = useCallback(() => {
     setNavExpanded(true)
@@ -5517,7 +5518,7 @@ export default function App() {
       }}
     >
       <InviteAccept signedIn={signedIn} onAccepted={async ({ org_id }) => { adoptOrgId(org_id); await workspaceController.loadProjects() }} />
-      <header className={`top${studioShell ? ' shell-header-48' : ''}`} data-customer-mode={isCustomerMode({ ...session.session, tier }) ? 'true' : 'false'}>
+      <header className={`top${studioShell ? ' shell-header-48' : ''}`} data-customer-mode={studioCustomerMode ? 'true' : 'false'}>
         <div className="mark" role="img" aria-label="Leaf Automation"><img className="mark-lockup mark-lockup-light" src="/brand/leaf-automation-horizontal-on-light.svg" alt="" aria-hidden="true" height="20" /><img className="mark-lockup mark-lockup-dark" src="/brand/leaf-automation-horizontal-on-dark.svg" alt="" aria-hidden="true" height="20" /></div>
         {studioShell && <div className="shell-breadcrumb"><span>Projects / </span>
           <DrawingTabLabel name={projectMode ? projectDrawingName : activeDrawingName} shortId={projectMode ? projectSolar.scope.binding?.input_version_id : REQUESTED_DRAWING_ID} />
@@ -5569,7 +5570,7 @@ export default function App() {
         <ProjectWorkspaceControls {...projectLayout} active={!studioShell && projectLayout.active} />
         <div className="spacer" />
         {studioShell && <ShellKpis items={[{ label: 'Version', value: projectMode ? projectSolar.scope.binding?.input_version_id : null }, { label: 'Selection', value: selectedHandle ? 1 : null }]} />}
-        <ShellAccountMenu studioShell={studioShell} customerPanels={studioShell && isCustomerMode({ ...session.session, tier }) ? accountPanels : null}>
+        <ShellAccountMenu studioShell={studioShell} customerPanels={studioCustomerMode ? accountPanels : null}>
         <div className="who">
           {/* Header metadata (org · tenant · tier · spend · API base) is demoted
               behind Details -> the DT2 session drawer, per the standard. */}
@@ -5614,7 +5615,7 @@ export default function App() {
           )}
           {/* Live-only chrome (Claude-account terminal panel) is hidden in the
               demo — it can't work signed-out. Guarded on !mock. */}
-          {!(studioShell && isCustomerMode({ ...session.session, tier })) && accountPanels}
+          {!studioCustomerMode && accountPanels}
           {!mock && !knownGuest && !signedOut && signedIn && <AddonsPanel mock={mock} orgId={orgId} open={addonsOpen} onToggle={setAddonsOpen} />}
         </div>
         </ShellAccountMenu>
@@ -6977,9 +6978,9 @@ export default function App() {
         )}
         {/* Real statuses get the 6px dot + tinted sentence-case word; counts and
             spend are muted metadata (green is reserved for genuine states). */}
-        {!isCustomerMode({ ...session.session, tier }) && <ServiceStatus mock={mock} health={health} healthError={healthError} authRequired={authRequired} />}
+        {!studioCustomerMode && <ServiceStatus mock={mock} health={health} healthError={healthError} authRequired={authRequired} />}
         {/* One census per surface: under the studio the footer counts the same surface-scoped families the rail shows. */}
-        <ShellDiagnostics customerMode={isCustomerMode({ ...session.session, tier })}
+        <ShellDiagnostics customerMode={studioCustomerMode}
           toolCount={studioGround ? railFamilies.reduce((n, f) => n + f.capabilities.length, 0) : capCount}
           plan={gateTier} costToday={!mock && usage ? usage.today?.usd_est || 0 : undefined} />
         {mock && !tourOn && tourAvailable.current && studioShell && (
@@ -6998,7 +6999,7 @@ export default function App() {
             Restart guided tour
           </button>
         )}
-        {!isCustomerMode({ ...session.session, tier }) && <span style={{ marginLeft: 'auto' }}>Build <span style={{ fontFamily: 'var(--font-mono)' }}>{__BUILD_HASH__}</span></span>}
+        {!studioCustomerMode && <span style={{ marginLeft: 'auto' }}>Build <span style={{ fontFamily: 'var(--font-mono)' }}>{__BUILD_HASH__}</span></span>}
         </FootRegion>
         {/* The drawing instruments, anchored at the right edge like the
             reference's. They moved BELOW the build hash in the DOM so the
@@ -7010,7 +7011,7 @@ export default function App() {
         {/* W4b cockpit: live cursor coordinates, scale, counts, selection
             (studio only; DOM-written at rAF rate, never React state). */}
         {studioGround && groundShowsDrawing(activeSurface) && (
-          <CockpitStatus customerMode={studioShell && isCustomerMode({ ...session.session, tier })} ground={studioGround} viewerRef={viewerRef} shown={drawingIntake} selectedHandle={selectedHandle} canvasSelector=".viewer-canvas" />
+          <CockpitStatus customerMode={studioCustomerMode} ground={studioGround} viewerRef={viewerRef} shown={drawingIntake} selectedHandle={selectedHandle} canvasSelector=".viewer-canvas" />
         )}
         {/* W4e: ORTHO and OSNAP real through StatusModesBridge; the rest honestly off, plus fullscreen. */}
         <SurfaceFrame.Cockpit />

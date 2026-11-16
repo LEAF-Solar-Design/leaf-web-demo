@@ -132,6 +132,7 @@ export default function RoutePanel({
     try {
       const action = route.runIntent ? onConfirmIntent(route.runIntent, toolObj, params) : toolObj && onPickAlternative(toolObj.name)
       if (action?.then) Promise.resolve(action).finally(() => { setRequested(false); setFinished(true) }).catch(() => {})
+      else setRequested(false)
     } catch (error) { setRequested(false); throw error }
   }
 

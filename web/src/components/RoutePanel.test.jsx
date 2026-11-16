@@ -81,6 +81,7 @@ describe('proposal and run cards', () => {
 
   it('turns a low-confidence confirmed choice into the run card immediately', () => {
     const handlers = callbacks()
+    handlers.onConfirmIntent.mockReturnValue(new Promise(() => {}))
     const { container } = render(<RoutePanel route={{ ...proposal, confidence: .6 }} tools={[proposalTool]} running={false} {...handlers} />)
     fireEvent.click(screen.getByRole('option'))
     expect(screen.getByText('Planning · 0 s')).toBeTruthy()
@@ -101,6 +102,7 @@ describe('proposal and run cards', () => {
   it('shows Planning on the Run render, advances the trail and ticks elapsed seconds', () => {
     vi.useFakeTimers()
     const handlers = callbacks()
+    handlers.onConfirmIntent.mockReturnValue(new Promise(() => {}))
     const { container, rerender } = render(<RoutePanel route={proposal} tools={[proposalTool]} running={false} {...handlers} />)
     fireEvent.click(screen.getByRole('button', { name: 'Run solar-string' }))
     expect(screen.getByText('Planning · 0 s')).toBeTruthy()
@@ -113,6 +115,18 @@ describe('proposal and run cards', () => {
     rerender(<RoutePanel route={proposal} tools={[proposalTool]} running {...handlers} />)
     rerender(<RoutePanel route={proposal} tools={[proposalTool]} running={false} {...handlers} />)
     expect(container.querySelector('[aria-current="step"]').textContent).toBe('Result')
+  })
+
+  it.each([true, false])('clears Planning when a synchronous callback never starts running (intent %s)', (hasIntent) => {
+    const handlers = callbacks()
+    const nextRoute = hasIntent ? proposal : { ...proposal, runIntent: undefined }
+    const { container } = render(<RoutePanel route={nextRoute} tools={[proposalTool]} running={false} {...handlers} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Run solar-string' }))
+    expect(hasIntent ? handlers.onConfirmIntent : handlers.onPickAlternative).toHaveBeenCalledOnce()
+    expect(screen.queryByText(/Planning/)).toBeNull()
+    expect(container.querySelector('.proposal-card.is-running')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Run solar-string' }).disabled).toBe(false)
+    expect(container.querySelector('[aria-current="step"]').textContent).toBe('Proposal')
   })
 })
 
