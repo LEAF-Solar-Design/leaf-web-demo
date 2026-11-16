@@ -1183,7 +1183,10 @@ def build_suites() -> List[Suite]:
                   "tests/test_x07_receipt_schema_authorizer.py",
                   (Path("..") / "tools" / "xbench" / "tests" / "test_x07_report_closed_stdout.py").as_posix(),
                   "tests/test_x07_receipt_backup_pending.py", "tests/test_x07_selection_nested_windows.py",
-                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_report_special_files.py").as_posix()], 225),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_report_special_files.py").as_posix(),
+                  "tests/test_x07_store_generation_swap.py", "tests/test_x07_store_io_errors.py",
+                  "tests/test_x07_embedded_nul_keys.py",
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_history_reducer.py").as_posix()], 232),
         # W5 Rooftop workflow flow (2026-09-24, contracts G34/G34a/G34b): server/solar_workflow_flow.py,
         # the pure progression engine (every step's CanAdvance and HasDrawingPrerequisites, the L1/L2
         # gates on the host's setting, AdvanceStep, GoBack and NavigateToStep Stale marking over the

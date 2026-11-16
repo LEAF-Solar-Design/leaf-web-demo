@@ -102,6 +102,7 @@ if protocol and protocol.startswith('duplicate_reply_'):
 if protocol=='eof': sys.exit(0)
 if protocol=='malformed': print('{not JSON'); sys.exit(0)
 if protocol=='nonzero': sys.stderr.write('injected protocol exit'); sys.exit(23)
+if protocol=='stderr_sentinel': sys.stderr.write(request['fixture']['sentinel']);sys.exit(23)
 if protocol=='hung':
     import time
     time.sleep(60)
@@ -280,7 +281,7 @@ function rpc(bound, op, context, value, signal, fault = null, protocolFault = nu
         stdout += decoder.write(bytes.subarray(offset, offset+length)); offset += length; parts++
       }
       stdout += decoder.end(); protocolStats.push({ bytes: bytes.length, parts, receipts: 0 })
-      if (code !== 0) { const error = new Error('Python JSON worker failed: ' + stderr.slice(0, 500)); error.code = 'BRIDGE_EXIT'; settle(error); return }
+      if (code !== 0) { const error = new Error('Python JSON worker failed.'); error.code = 'BRIDGE_EXIT'; settle(error); return }
       if (!stdout.trim()) { const error = new Error('Python JSON worker returned no JSON.'); error.code = 'BRIDGE_EOF'; settle(error); return }
       try {
         const response = strictJSON(stdout)
