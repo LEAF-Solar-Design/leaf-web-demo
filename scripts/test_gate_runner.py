@@ -538,6 +538,29 @@ def test_panels_phase_parser_sanitizes_and_bounds():
     other = g.Suite("other", "other", "script", suite.cwd, [], None)
     assert g.parse_pw_phases(other, _phase_text(row)) == []
     assert g.parse_pw_phases(suite, _phase_text({**row, "duration_ms": 100.004}))
+    # Line timings are inclusive; their sum may exceed the aggregate API time.
+    with_lines = {**row, "api_lines": [{"line": 7, "api_ms": 40},
+                                      {"line": 8, "api_ms": 30}], "api_lines_omitted": 2}
+    private_lines = {**with_lines, "api_lines": [
+        {**item, "title": "SECRET_SENTINEL", "url": "SECRET_SENTINEL",
+         "location": {"file": "SECRET_SENTINEL"}} for item in with_lines["api_lines"]]}
+    assert g.parse_pw_phases(suite, _phase_text(private_lines)) == [with_lines]
+    for lines in ([], [{"line": i + 1, "api_ms": 0} for i in range(16)],
+                  [{"line": 9007199254740991, "api_ms": 40.004}]):
+        valid = {**row, "api_lines": lines, "api_lines_omitted": 0}
+        assert g.parse_pw_phases(suite, _phase_text(valid)) == [valid]
+    bad_lines = [None, {}, "SECRET_SENTINEL", [None], [[]],
+                 [{"line": 1}], [{"api_ms": 1}],
+                 [{"line": 1, "api_ms": 1}] * 2,
+                 [{"line": i + 1, "api_ms": 1} for i in range(17)]]
+    bad_lines.extend([{"line": value, "api_ms": 1}] for value in
+                     (True, 0, -1, 1.5, "1", float("inf"), 9007199254740992))
+    bad_lines.extend([{"line": 1, "api_ms": value}] for value in
+                     (True, -1, "1", float("nan"), float("inf"), 40.006))
+    for lines in bad_lines:
+        assert g.parse_pw_phases(suite, _phase_text({**with_lines, "api_lines": lines})) == []
+    for omitted in (True, -1, 0.5, "0", None, float("nan"), float("inf"), 10 ** 400):
+        assert g.parse_pw_phases(suite, _phase_text({**with_lines, "api_lines_omitted": omitted})) == []
 
 
 @pytest.mark.parametrize("failure", [None, "parser", "stdout"])
@@ -621,6 +644,56 @@ def test_panels_phase_wrapper_preserves_config_and_other_suites(tmp_path, monkey
         assert not (tmp_path / "other").exists()
 
 
+def test_panels_next_strict_mode_suite_and_phase_matrix():
+    node = shutil.which("node")
+    assert node is not None, "Node is required for the panels Next config drill"
+    config = (REPO / "web/next.config.mjs").as_uri()
+    script = "import nextConfig from " + json.dumps(config) + ";\n" + r"""
+import assert from 'node:assert/strict';
+const keys = ['LEAF_READSET_SUITE', 'LEAF_NEXT_DEV_INSTANCE'];
+const saved = keys.map(key => process.env[key]);
+const setEnv = (key, value) => {
+  if (value === undefined) delete process.env[key];
+  else process.env[key] = value;
+};
+try {
+  const panels = 'web-studio-panels-proof';
+  const suites = [undefined, '', panels, 'web-studio-editor-proof',
+    'web-studio-panels', panels + '-extra', 'prefix-' + panels,
+    panels.toUpperCase(), panels + ' ', ' ' + panels];
+  const phases = [undefined, 'phase-development-server', 'phase-production-build',
+    'phase-production-server', 'phase-export', 'phase-export-outdir',
+    'phase-test', 'phase-info', 'phase-development-server-extra'];
+  for (const instance of [undefined, 'panels-proof']) {
+    setEnv('LEAF_NEXT_DEV_INSTANCE', instance);
+    for (const suite of suites) {
+      setEnv('LEAF_READSET_SUITE', suite);
+      for (const phase of phases) {
+        const config = nextConfig(phase);
+        const development = phase === 'phase-development-server';
+        const label = JSON.stringify({suite, phase, instance});
+        assert.equal(config.reactStrictMode, !(development && suite === panels), label);
+        assert.equal(Object.hasOwn(config, 'output'), !development, label);
+        assert.equal(config.output, development ? undefined : 'export', label);
+        assert.equal(Object.hasOwn(config, 'distDir'), development && !!instance, label);
+        assert.equal(config.distDir,
+          development && instance ? `.next-dev-${instance}` : undefined, label);
+        assert.equal(typeof config.rewrites, development ? 'function' : 'undefined', label);
+        assert.deepEqual(config.images, {unoptimized: true}, label);
+        assert.equal(config.poweredByHeader, false, label);
+        assert.equal(typeof config.webpack, 'function', label);
+      }
+    }
+  }
+} finally {
+  keys.forEach((key, index) => setEnv(key, saved[index]));
+}
+"""
+    proc = subprocess.run([node, "--input-type=module", "-e", script], capture_output=True,
+                          text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+
+
 def test_panels_phase_reporter_public_event_drill():
     node = shutil.which("node")
     assert node is not None, "Node is required for the panels phase drill"
@@ -640,8 +713,8 @@ try {
   const a = result(), b = result({retry: 1});
   reporter.onTestBegin(test, a);
   reporter.onTestBegin(test, b);
-  const step = (r, start, duration, title = secret, category = 'pw:api', parent) => {
-    const s = {startTime: new Date(start), duration, title, category, parent};
+  const step = (r, start, duration, title = secret, category = 'pw:api', parent, location) => {
+    const s = {startTime: new Date(start), duration, title, category, parent, location};
     reporter.onStepEnd(test, r, s);
     return s;
   };
@@ -681,7 +754,8 @@ try {
   reporter.onTestEnd(unsupported, ignored);
   const bounded = result();
   reporter.onTestBegin(test, bounded);
-  for (let i = 0; i < 10001; i++) step(bounded, 1000, 1);
+  for (let i = 0; i < 10001; i++) step(bounded, 1000, 1, secret, 'pw:api', undefined,
+    {file: test.location.file, line: i + 1});
   reporter.onTestEnd(test, bounded);
   assert.ok(!output.includes(secret));
   const rows = output.trim().split('\n').map(line => {
@@ -697,10 +771,78 @@ try {
   assert.equal(rows[1].retry, 1);
   assert.equal(rows[0].repeat_index, 1);
   assert.equal(rows[5].truncated, true);
+  assert.deepEqual(rows[5].api_lines, Array.from({length: 16}, (_, i) => ({line: i + 1, api_ms: 1})));
+  assert.equal(rows[5].api_lines_omitted, 9984);
+  for (const row of rows.slice(0, 5)) {
+    assert.deepEqual(row.api_lines, []); // Absent locations cannot be inferred.
+    assert.equal(row.api_lines_omitted, 0);
+  }
   for (const row of rows) {
     assert.ok(Math.abs(row.duration_ms - row.setup_ms - row.teardown_ms - row.api_ms
       - row.unattributed_ms) <= 0.005);
     assert.ok(row.reported_navigation_api_ms <= row.api_ms);
+    assert.ok(JSON.stringify(row).length + 'LEAF_PW_PHASE '.length < 4096);
+  }
+  output = '';
+  const located = result();
+  const location = line => ({file: test.location.file, line, column: 1, title: secret});
+  const at = (r, start, duration, line, parent) => step(r, start, duration, secret,
+    'pw:api', parent, location(line));
+  reporter.onTestBegin(test, located);
+  at(located, 1000, 90, 50, nested); // Hook descendants never become line timings.
+  reporter.onStepEnd(test, located, before);
+  step(located, 1080, 50, 'After Hooks', 'hook');
+  const outer = at(located, 1010, 60, 10);
+  at(located, 1040, 30, 10); // Same-line overlaps are unioned.
+  at(located, 1030, 40, 20, outer); // Different lines remain inclusive.
+  at(located, 990, 40, 30);
+  at(located, 1070, 200, 40);
+  step(located, 1040, 5, secret, 'pw:api', undefined,
+    {file: String.raw`\repo\web\e2e\sub\..\campaign-panel.spec.mjs`, line: 60});
+  for (const loc of [undefined, {}, {file: test.location.file},
+    {file: '/foreign/web/e2e/campaign-panel.spec.mjs', line: 70},
+    {file: '/repo/web/e2e/recovery-controls.spec.mjs', line: 71},
+    ...[true, 0, -1, 1.5, '1', NaN, Infinity, Number.MAX_SAFE_INTEGER + 1].map(location)]) {
+    step(located, 1040, 5, secret, 'pw:api', undefined, loc);
+  }
+  reporter.onTestEnd(test, located);
+  const ranked = result();
+  reporter.onTestBegin(test, ranked);
+  for (let line = 1; line <= 20; line++) at(ranked, 1000, line, line);
+  at(ranked, 1000, 0, 100);
+  at(ranked, 1100, 10, 101);
+  reporter.onTestEnd(test, ranked);
+  const clipped = result();
+  reporter.onTestBegin(test, clipped);
+  at(clipped, 990, 40, 1);
+  at(clipped, 1080, 50, 2);
+  step(clipped, 1040, 10, secret, 'test.step', undefined, location(3));
+  reporter.onTestEnd(test, clipped);
+  assert.ok(!output.includes(secret));
+  const lineRows = output.trim().split('\n').map(line => {
+    assert.ok(line.length < 4096);
+    return JSON.parse(line.slice('LEAF_PW_PHASE '.length));
+  });
+  assert.equal(lineRows.length, 3);
+  assert.deepEqual(lineRows[0].api_lines, [
+    {line: 10, api_ms: 50}, {line: 20, api_ms: 40},
+    {line: 30, api_ms: 10}, {line: 40, api_ms: 10}, {line: 60, api_ms: 5}]);
+  assert.equal(lineRows[0].api_lines_omitted, 0);
+  assert.deepEqual([lineRows[0].setup_ms, lineRows[0].teardown_ms, lineRows[0].api_ms,
+    lineRows[0].unattributed_ms], [20, 20, 60, 0]);
+  assert.ok(lineRows[0].api_lines.reduce((sum, item) => sum + item.api_ms, 0) > lineRows[0].api_ms);
+  assert.deepEqual(lineRows[1].api_lines,
+    Array.from({length: 16}, (_, i) => ({line: 20 - i, api_ms: 20 - i})));
+  assert.equal(lineRows[1].api_lines_omitted, 4);
+  assert.deepEqual(lineRows[2].api_lines, [{line: 1, api_ms: 30}, {line: 2, api_ms: 20}]);
+  assert.equal(lineRows[2].api_lines_omitted, 0);
+  for (const row of lineRows) {
+    assert.ok(Math.abs(row.duration_ms - row.setup_ms - row.teardown_ms - row.api_ms
+      - row.unattributed_ms) <= 0.005);
+    for (const item of row.api_lines) {
+      assert.deepEqual(Object.keys(item).sort(), ['api_ms', 'line']);
+      assert.ok(item.api_ms >= 0 && item.api_ms <= row.api_ms);
+    }
   }
 } finally { process.stdout.write = write; }
 """
@@ -5774,6 +5916,19 @@ def test_web_writers_browser_proofs_and_nested_runners_keep_web_tree(sid):
     g = _load_runner()
     suite = next(suite for suite in g.build_suites() if suite.id == sid)
     assert sid not in g._WEB_SOURCE_READERS
+    if sid == "web-studio-panels-proof":
+        expected = [g._npx(), "--no-install", "playwright", "test", "--config",
+                    "playwright.config.mjs", "e2e/campaign-panel.spec.mjs",
+                    "e2e/recovery-controls.spec.mjs", "e2e/workspace-create-no-prompt.spec.mjs",
+                    "e2e/viewer-grid-toggle.spec.mjs", "e2e/studio-ux-regressions.spec.mjs",
+                    "e2e/project-page-editor.spec.mjs", "--workers=2"]
+        assert suite.argv == expected
+        assert g._BROWSER_DIRECT_PROOFS[sid] == expected[5:]
+        assert g.isolated_browser_suite(suite)
+        drifted = g.replace(suite, argv=[*expected[:-1], "--workers=3"])
+        assert not g.isolated_browser_suite(drifted)
+        assert g.browser_suite_env(drifted) == {}
+        assert g.serial_suite_reason(drifted) == "browser resource declaration drift"
     if g.isolated_browser_suite(suite):
         assert g.browser_suite_env(suite) == {"LEAF_GATE_BROWSER_SUITE": sid}
         resources = g.conflict_resources(suite)

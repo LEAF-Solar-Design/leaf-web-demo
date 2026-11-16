@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import { runProjectCatalogTool, seatProjectDrawingPublication } from './App.jsx'
+import { cleanup, fireEvent, render } from '@testing-library/react'
+import { RunningJobStrip, runProjectCatalogTool, seatProjectDrawingPublication } from './App.jsx'
 import { createSolarProjectClient } from './solar/solarProjectClient.js'
 
 // The real App project run branch and the real project client, down to the fetch boundary.
@@ -98,6 +99,58 @@ describe('confirmed project catalog runs', () => {
     expect(attach).toHaveBeenCalledWith(J, expect.any(Object))
     expect(envelope.ok).toBe(true)
     lane.client.dispose()
+  })
+
+  it('the running strip exposes the current submitted UUID without changing its controls or text', async () => {
+    const lane = await setup()
+    const onSubmit = vi.fn()
+    const onStatus = vi.fn()
+    const onStop = vi.fn()
+    const attach = vi.fn(async () => ({ ok: true, tool: 'delete-marked-panel' }))
+    const submit = async (jobId) => {
+      lane.respond({ job_id: jobId, status: 'submitted' }, 202)
+      await lane.run('delete-marked-panel', { onSubmit, onStatus, attach, idempotencyKey: `confirm-${jobId}` })
+      return { jobId: onSubmit.mock.calls.at(-1)[0],
+        runProgress: onStatus.mock.calls.at(-1)[0].progress,
+        runStatus: onStatus.mock.calls.at(-1)[0].status,
+        runElapsedMs: onStatus.mock.calls.at(-1)[0].elapsed_ms,
+        toolName: 'delete-marked-panel', onStop }
+    }
+    try {
+      const props = await submit(J)
+      const { container, getByRole, rerender } = render(<RunningJobStrip {...props} />)
+      const strip = container.firstElementChild
+      expect(strip.getAttribute('data-job-id')).toBe(J)
+      expect(strip.className).toBe('strip-running enter')
+      expect(strip.querySelector('.verb').textContent).toBe('queued: delete-marked-panel')
+      expect(strip.querySelector('.dot').className).toBe('dot live pulse')
+      expect(strip.querySelector('.dot').getAttribute('aria-hidden')).toBe('true')
+      expect(strip.querySelector('.key.hot').textContent).toBe('Esc')
+      const stop = getByRole('button', { name: 'Stop' })
+      expect(stop.type).toBe('button')
+      expect(stop.className).toBe('chip-act')
+      fireEvent.click(stop)
+      expect(onStop).toHaveBeenCalledTimes(1)
+
+      const nextJobId = '77777777-7777-4777-8777-777777777777'
+      const nextProps = await submit(nextJobId)
+      rerender(<RunningJobStrip {...nextProps} />)
+      expect(container.firstElementChild).toBe(strip)
+      expect(strip.getAttribute('data-job-id')).toBe(nextJobId)
+      expect(container.querySelector(`[data-job-id="${J}"]`)).toBeNull()
+      for (const jobId of [null, undefined, '']) {
+        rerender(<RunningJobStrip {...props} jobId={jobId} />)
+        expect(strip.hasAttribute('data-job-id')).toBe(false)
+        expect(strip.querySelector('.verb').textContent).toBe('queued: delete-marked-panel')
+      }
+      rerender(<RunningJobStrip {...props} runProgress="" runElapsedMs={4200} />)
+      expect(strip.querySelector('.verb').textContent).toBe('submitted: delete-marked-panel · 4.2s')
+      rerender(<RunningJobStrip onStop={onStop} />)
+      expect(strip.querySelector('.verb').textContent).toBe('running')
+    } finally {
+      cleanup()
+      lane.client.dispose()
+    }
   })
 
   it('a written version is selected only after the workspace lists it', async () => {

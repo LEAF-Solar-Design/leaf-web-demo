@@ -2,6 +2,7 @@
 
 from dataclasses import FrozenInstanceError
 import hashlib
+from io import BytesIO
 import json
 from pathlib import Path
 import re
@@ -271,12 +272,30 @@ def test_health_default_reader_is_bounded(monkeypatch):
             return json.dumps({"source_sha": SHA}).encode()
 
     def fake_urlopen(url, timeout):
-        calls.append((url, timeout))
+        calls.append((url.full_url, timeout))
         return Response()
 
     monkeypatch.setattr(core, "urlopen", fake_urlopen)
     assert core.read_health("https://example.test") == SHA
     assert calls == [("https://example.test/api/health", 10.0)]
+
+
+def test_health_default_request_headers_and_timeout(monkeypatch):
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        calls.append((request, timeout))
+        return BytesIO(json.dumps({"source_sha": SHA}).encode())
+
+    monkeypatch.setattr(core, "urlopen", fake_urlopen)
+    assert core.read_health("https://example.test/", timeout=2.5) == SHA
+    assert len(calls) == 1
+    request, timeout = calls[0]
+    assert isinstance(request, core.Request)
+    assert request.full_url == "https://example.test/api/health"
+    assert request.get_header("User-agent") == "Mozilla/5.0 leaf-xbench-grader"
+    assert request.get_header("Accept") == "application/json"
+    assert timeout == 2.5
 
 
 @pytest.mark.parametrize("base", ["https://example.test", "https://example.test/",
@@ -305,7 +324,8 @@ def test_write_grade_order_and_fallback(tmp_path):
     ]))
     value = json.loads(path.read_text(encoding="utf-8"))
     assert list(value) == ["schema", "bench", "verdict", "source_sha", "manifest_sha256",
-                           "started_at", "finished_at", "steps", "fixtures", "limits"]
+                           "started_at", "finished_at", "steps", "fixtures", "limits", "options"]
+    assert value["options"] == {}
     assert value["schema"] == core.GRADE_SCHEMA
     assert [step["n"] for step in value["steps"]] == [1, 2]
     assert list(value["steps"][0]) == ["n", "verdict", "evidence", "observed", "expected"]

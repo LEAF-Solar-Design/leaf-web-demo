@@ -15,6 +15,12 @@ Use `--no-readiness` to suppress the readiness marker. `--benches-dir DIR` selec
 a different directory of bench modules. The default readiness directory is
 `D:/agents/production-lanes-2026-11-10/XBENCH/driver/readiness`.
 
+Pass bench-specific options with repeatable `--opt KEY=VALUE`, for example
+`--opt mode=gate --opt candidate=0123456789abcdef0123456789abcdef01234567`.
+Keys must match `^[a-z][a-z0-9_]{0,31}$` and be unique. Values may be empty or
+contain up to 256 characters, with no control characters. At most 16 options
+are allowed. Invalid options exit 5 with one stderr line and write no receipts.
+
 Exit codes are 0 for PASS, 1 for FAIL, 4 for UNREADABLE, and 5 for usage or
 configuration errors. A failing step takes precedence over an unreadable step.
 An empty step list is UNREADABLE. Invalid inputs and absent bench modules produce
@@ -22,8 +28,9 @@ no receipts. Fixture or health failures produce an UNREADABLE receipt.
 
 `grade.json` contains these fields in order: `schema`, `bench`, `verdict`,
 `source_sha`, `manifest_sha256`, `started_at`, `finished_at`, `steps`, `fixtures`,
-and `limits`. Its schema is `leaf.xbench.grade.v1`. Steps are sorted by `n` and
-contain `n`, `verdict`, `evidence`, `observed`, and `expected`. Evidence is limited
+`limits`, and `options`. Options are an object of string keys and values, empty
+when none were supplied. Its schema is `leaf.xbench.grade.v1`. Steps are sorted
+by `n` and contain `n`, `verdict`, `evidence`, `observed`, and `expected`. Evidence is limited
 to 2000 characters. Non-JSON observations and expectations become truncated
 representations. Fixture rows include expected identity, size, hash, verification
 status, a reason, and observed size and hash. Size mismatches skip hashing.
@@ -68,8 +75,10 @@ def run(ctx):
 ```
 
 `run(ctx) -> list[Step]` receives a `BenchContext` with `bench`, `manifest`,
-`base`, `out_dir`, `source_sha`, and verified `fixtures`. Use unique positive step
-numbers and verdicts PASS, FAIL, or UNREADABLE. Optional `LIMITS` must be a string.
+`base`, `out_dir`, `source_sha`, verified `fixtures`, and `options`. `ctx.options`
+is a plain dict of string keys and values from `--opt`, empty by default.
+Use unique positive step numbers and verdicts PASS, FAIL, or UNREADABLE.
+Optional `LIMITS` must be a string.
 Module loading errors, exceptions, invalid results, and duplicate step numbers
 produce an UNREADABLE receipt. PASS writes `<bench>.json` readiness with the source
 SHA, receipt path, UTC timestamp, and verdict READINESS_PASS unless suppressed.

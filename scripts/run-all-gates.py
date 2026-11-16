@@ -3940,9 +3940,9 @@ def build_suites() -> List[Suite]:
                "e2e/campaign-panel.spec.mjs", "e2e/recovery-controls.spec.mjs",
                "e2e/workspace-create-no-prompt.spec.mjs", "e2e/viewer-grid-toggle.spec.mjs",
                "e2e/studio-ux-regressions.spec.mjs", "e2e/project-page-editor.spec.mjs",
-               # Isolated test contexts use 3 workers on the same CI device;
+               # Isolated test contexts use 2 workers on the same CI device;
                # other suites retain their own worker limits.
-               "--workers=3"], None),
+               "--workers=2"], None),
         Suite("web-lifecycle-panel-proof", "web mounted project lifecycle panel browser proof", "script", WEB,
               [_npx(), "--no-install", "playwright", "test", "--config", "playwright.lifecycle.config.mjs",
                "e2e/project-lifecycle-panel.spec.mjs", "--workers=1"], None),
@@ -4966,9 +4966,36 @@ def parse_pw_phases(suite: Suite, text: str) -> list[dict]:
                     - row["duration_ms"]) > 0.005
                     or row["reported_navigation_api_ms"] > row["api_ms"]):
                 continue
-            rows.append({key: row[key] for key in (
+            optional = {}
+            if "api_lines" in row:
+                lines = row["api_lines"]
+                if not isinstance(lines, list) or len(lines) > 16:
+                    continue
+                sanitized = []
+                seen = set()
+                for item in lines:
+                    if (not isinstance(item, dict)
+                            or type(item.get("line")) is not int
+                            or not 0 < item["line"] <= 9007199254740991
+                            or item["line"] in seen
+                            or type(item.get("api_ms")) not in (int, float)
+                            or not math.isfinite(item["api_ms"])
+                            or not 0 <= item["api_ms"] <= row["api_ms"] + 0.005):
+                        break
+                    seen.add(item["line"])
+                    sanitized.append({"line": item["line"], "api_ms": item["api_ms"]})
+                if len(sanitized) != len(lines):
+                    continue
+                optional["api_lines"] = sanitized
+            if "api_lines_omitted" in row:
+                omitted = row["api_lines_omitted"]
+                if type(omitted) is not int or omitted < 0 or not math.isfinite(omitted):
+                    continue
+                optional["api_lines_omitted"] = omitted
+            sanitized_row = {key: row[key] for key in (
                 "schema", "file", *PW_PHASE_IDENTITIES, "status", *PW_PHASE_DURATIONS,
-                "truncated", "basis")})
+                "truncated", "basis")}
+            rows.append({**sanitized_row, **optional})
             if len(rows) >= PW_PHASE_MAX_ROWS:
                 break
         except (ValueError, TypeError, OverflowError, RecursionError):
@@ -6505,7 +6532,7 @@ _BROWSER_DIRECT_PROOFS = {
     "web-studio-panels-proof": ["playwright.config.mjs", "e2e/campaign-panel.spec.mjs",
         "e2e/recovery-controls.spec.mjs", "e2e/workspace-create-no-prompt.spec.mjs",
         "e2e/viewer-grid-toggle.spec.mjs", "e2e/studio-ux-regressions.spec.mjs",
-        "e2e/project-page-editor.spec.mjs", "--workers=3"],
+        "e2e/project-page-editor.spec.mjs", "--workers=2"],
     "web-lifecycle-panel-proof": ["playwright.lifecycle.config.mjs",
         "e2e/project-lifecycle-panel.spec.mjs", "--workers=1"],
     "web-ios-ship-surface-proof": ["playwright.ios.config.mjs",

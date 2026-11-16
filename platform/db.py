@@ -940,7 +940,8 @@ _REQUIRED_CONSTRAINTS = {
         "candidate_bytes IS NOT NULL", "proof_bytes IS NOT NULL", "response_bytes IS NOT NULL",
         "sender_worker IS NOT NULL", "refusal_code IS NULL", "refusal_code IS NOT NULL",
         "'SOLVE_OUTCOME_UNKNOWN'", "'cloud_request_invalid'", "'cloud_auth_missing'",
-        "'cloud_tenant_unauthorized'", "'cloud_upstream_failure'", "'cloud_response_invalid'"),
+        "'cloud_tenant_unauthorized'", "'cloud_upstream_failure'", "'cloud_response_invalid'",
+        "'CLOUD_REQUEST_REJECTED'"),
     "demo_sessions_pkey": _catalog_contract(
         "demo_sessions", "PRIMARY KEY (id)"),
     "demo_sessions_subject_key": _catalog_contract(
