@@ -472,7 +472,8 @@ def test_final_callbacks_respect_deadlines_and_close_still_occurs(callback):
     assert_released(runtime)
 
 
-def test_default_run_unbuilt_even_with_saved_or_injected_manifest(tmp_path):
+def test_default_run_refuses_saved_or_injected_manifest(tmp_path, monkeypatch):
+    monkeypatch.setattr(x08, 'report_destination', lambda ctx: tmp_path / 'samples.json')
     runtime = Runtime()
     ctx = SimpleNamespace(out_dir=tmp_path, source_sha=SHA,
                           manifest={'samples': 'saved.json', 'runtime': runtime})
@@ -481,7 +482,8 @@ def test_default_run_unbuilt_even_with_saved_or_injected_manifest(tmp_path):
     report = json.loads((tmp_path / 'samples.json').read_text())
     assert report['qualified_live_grade'] is False
     assert report['source_sha'] == SHA
-    assert 'supported live runtime/native binding not yet installed' in report['limitation']
+    assert 'saved samples cannot qualify' in report['limitation']
+    assert report['errors'][0]['phase'] == 'adapter'
     assert list(tmp_path.iterdir()) == [tmp_path / 'samples.json']
     assert runtime.closed == 0 and runtime.health_calls == 0
 
@@ -492,6 +494,7 @@ def test_shared_grade_standalone_loader_keeps_default_run_unreadable(tmp_path, m
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, 'xbench_bench_x08', module)
     spec.loader.exec_module(module)
+    monkeypatch.setattr(module, 'report_destination', lambda ctx: tmp_path / 'samples.json')
 
     ctx = BenchContext('X08', {}, 'https://synthetic.invalid', tmp_path, SHA, [])
     steps = module.run(ctx)
@@ -502,6 +505,100 @@ def test_shared_grade_standalone_loader_keeps_default_run_unreadable(tmp_path, m
     assert report['schema'] == 'leaf.xbench.x08.collection.v1'
     assert report['source_sha'] == SHA
     assert report['qualified_live_grade'] is False
-    assert 'supported live runtime/native binding not yet installed' in report['limitation']
+    assert 'saved samples cannot qualify' in report['limitation']
     assert [row['verdict'] for row in report['steps']] == ['UNREADABLE'] * 6
     assert list(tmp_path.iterdir()) == [tmp_path / 'samples.json']
+
+
+def test_readable_geometry_failure_skips_timings_keeps_reference():
+    runtime = Runtime()
+    original = runtime.geometry_snapshot
+
+    def incomplete():
+        snapshot = original()
+        snapshot['handles'].pop()
+        return snapshot
+
+    runtime.geometry_snapshot = incomplete
+    report = collect(runtime, stop_on_geometry_failure=True)
+    assert [r['verdict'] for r in report['steps']] == [
+        'FAIL', 'UNREADABLE', 'UNREADABLE', 'UNREADABLE', 'UNREADABLE', 'PASS']
+    assert report['blocker'] == 'X08_MODULE_GEOMETRY_INCOMPLETE'
+    assert runtime.actions == [] and runtime.outputs == []
+    assert_released(runtime)
+
+
+def test_geometry_failure_source_drift_overrides_product_failure():
+    runtime = Runtime()
+    runtime.geometry_snapshot = lambda: dict(
+        drawingKey='synthetic', handles=[], omitted=dict(blocks=0, activeIntake=0))
+    runtime.after = 'b' * 40
+    report = collect(runtime, stop_on_geometry_failure=True)
+    assert [r['verdict'] for r in report['steps']] == ['UNREADABLE'] * 6
+    assert_released(runtime)
+
+
+def test_setup_error_six_steps_only_type_and_no_readiness(tmp_path, monkeypatch):
+    monkeypatch.setattr(x08, 'report_destination', lambda ctx: tmp_path / 'samples.json')
+
+    def unavailable(ctx):
+        raise ValueError('private fixture path and credential text')
+
+    monkeypatch.setattr(x08, 'live_runtime', unavailable)
+    ctx = SimpleNamespace(out_dir=tmp_path, source_sha=SHA)
+    assert [r.verdict for r in x08.run(ctx)] == ['UNREADABLE'] * 6
+    saved = json.loads((tmp_path / 'samples.json').read_text())
+    assert saved['errors'] == [dict(phase='adapter', step=list(range(1, 7)), type='ValueError')]
+    assert saved['source_sha'] == SHA and 'private fixture' not in json.dumps(saved)
+    assert list(tmp_path.iterdir()) == [tmp_path / 'samples.json']
+
+
+def test_output_escape_never_writes_or_acquires(tmp_path, monkeypatch):
+    def refuse(ctx):
+        raise ValueError('outside root')
+
+    monkeypatch.setattr(x08, 'report_destination', refuse)
+    monkeypatch.setattr(x08, 'live_runtime', lambda ctx: pytest.fail('must not acquire'))
+    assert [r.verdict for r in x08.run(SimpleNamespace(
+        source_sha=SHA, out_dir=tmp_path))] == ['UNREADABLE'] * 6
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_run_uses_factory_handles_and_saves_cancellation(tmp_path, monkeypatch):
+    monkeypatch.setattr(x08, 'report_destination', lambda ctx: tmp_path / 'samples.json')
+    runtime = Runtime()
+    runtime.expected_module_handles = HANDLES
+    runtime.expected_window_handles = HANDLES
+    monkeypatch.setattr(x08, 'live_runtime', lambda ctx: runtime)
+    original = x08.orchestrate
+
+    def collect_supported(value, **kwargs):
+        assert kwargs['expected_module_handles'] is HANDLES
+        assert kwargs['expected_window_handles'] is HANDLES
+        assert kwargs['stop_on_geometry_failure'] is True
+        return original(value, clock=value.clock, selection_collector=value.selection,
+                        ack_collector=value.ack, frame_collector=value.frames, **kwargs)
+
+    monkeypatch.setattr(x08, 'orchestrate', collect_supported)
+    ctx = SimpleNamespace(out_dir=tmp_path, source_sha=SHA, manifest={})
+    assert [r.verdict for r in x08.run(ctx)] == ['PASS'] * 6
+    saved = json.loads((tmp_path / 'samples.json').read_text())
+    assert saved['acquisition'] == 'supported_live_runtime'
+    assert saved['qualified_live_grade'] is False
+    assert_released(runtime)
+
+    runtime = Runtime()
+    runtime.expected_module_handles = HANDLES
+    runtime.expected_window_handles = HANDLES
+
+    def cancel():
+        raise KeyboardInterrupt('private text')
+
+    runtime.geometry_snapshot = cancel
+    with pytest.raises(KeyboardInterrupt):
+        x08.run(ctx)
+    saved = json.loads((tmp_path / 'samples.json').read_text())
+    assert 'private text' not in json.dumps(saved)
+    assert saved['cleanup']['closed'] is True
+    assert [r['verdict'] for r in saved['steps']] == ['UNREADABLE'] * 6
+    assert_released(runtime)

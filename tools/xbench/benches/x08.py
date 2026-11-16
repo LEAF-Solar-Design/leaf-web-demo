@@ -21,13 +21,12 @@ from benches.x08_frame_evidence import validate_frame_evidence
 from benches.x08_metrics import score
 
 
-LIMITS = ('supported live runtime/native binding not yet installed; injected or '
-          'saved samples cannot qualify live evidence. Cooperative deadlines cannot '
+LIMITS = ('Injected or saved samples cannot qualify live evidence. Cooperative deadlines cannot '
           'preempt arbitrary Python callbacks.')
 
 
 class RuntimeUnavailable(RuntimeError):
-    """The supported live adapter is deliberately not bound."""
+    """The supported live adapter could not acquire evidence."""
 
 
 class DeadlineExceeded(RuntimeError):
@@ -104,7 +103,8 @@ class _AckObserver:
 def orchestrate(runtime, *, expected_source_sha, expected_module_handles,
                 expected_window_handles, clock=time.monotonic, total_timeout_s=240,
                 phase_timeout_s=30, selection_collector=collect_selection,
-                ack_collector=capture_job_ack, frame_collector=collect_frame_sequence):
+                ack_collector=capture_job_ack, frame_collector=collect_frame_sequence,
+                stop_on_geometry_failure=False):
     """Collect cold then warm evidence; always release only runtime-owned resources.
 
     Cancellation is re-raised with ``x08_partial_report`` after final health and
@@ -244,7 +244,11 @@ def orchestrate(runtime, *, expected_source_sha, expected_module_handles,
         geometry_ok = stage('setup', 'geometry', 1, geometry)
         stage('setup', 'reference', 6, lambda: call(
             runtime.reference, retain=lambda value: report['samples'].update(reference=value)))
-        for phase in ('cold', 'warm'):
+        geometry_failed = (geometry_ok and
+                           score(report['samples'], len(modules))[0].verdict == 'FAIL')
+        if stop_on_geometry_failure and geometry_failed:
+            report['blocker'] = 'X08_MODULE_GEOMETRY_INCOMPLETE'
+        for phase in (() if stop_on_geometry_failure and geometry_failed else ('cold', 'warm')):
             raw = report[phase]
             raw.update(single=[], window=[], ack=[], frame=None, frame_cleanup=None,
                        frame_window=[], valid_single=[], valid_window=[], valid_ack=[])
@@ -334,10 +338,17 @@ def orchestrate(runtime, *, expected_source_sha, expected_module_handles,
         finally:
             close_started = teardown_clock()
             try:
-                runtime.close()
-                report['cleanup']['closed'] = True
+                try:
+                    cleanup = runtime.frame_cleanup()
+                    report['cleanup']['observed'] = deepcopy(cleanup)
+                    if not (isinstance(cleanup, dict) and all(cleanup.get(k) is True for k in
+                            ('recorder_removed', 'element_disposed', 'mouse_released'))):
+                        raise CleanupUnavailable('Owned cleanup unavailable')
+                finally:
+                    runtime.close()
+                    report['cleanup']['closed'] = True
             except BaseException as exc:
-                report['cleanup']['closed'] = False
+                report['cleanup'].setdefault('closed', False)
                 error('cleanup', list(range(1, 7)), exc)
                 if not isinstance(exc, Exception):
                     cancelled = cancelled or exc
@@ -374,20 +385,59 @@ def orchestrate(runtime, *, expected_source_sha, expected_module_handles,
 
 def live_runtime(ctx):
     """No manifest sample path, callable or injected runtime is admitted here."""
-    raise RuntimeUnavailable('supported live runtime/native binding not yet installed')
+    from benches.x08_runtime import make_live_runtime
+    return make_live_runtime(ctx)
+
+
+def report_destination(ctx):
+    from benches.x08_runtime import permitted_path
+    return permitted_path(Path(ctx.out_dir) / 'samples.json')
 
 
 def run(ctx):
-    """Shared entrypoint stays UNREADABLE until a supported adapter is built."""
+    """Acquire supported live evidence and atomically save all six frozen steps."""
     report = _report(ctx.source_sha)
+    try:
+        destination = report_destination(ctx)
+    except Exception:
+        # An invalid output path cannot be used even for an error receipt.
+        return score({}, 0)
+    cancelled = None
+    runtime = None
+    try:
+        runtime = live_runtime(ctx)
+        report = orchestrate(
+            runtime, expected_source_sha=ctx.source_sha,
+            expected_module_handles=runtime.expected_module_handles,
+            expected_window_handles=runtime.expected_window_handles,
+            stop_on_geometry_failure=True)
+        report['acquisition'] = 'supported_live_runtime'
+    except Exception as exc:
+        report['errors'].append(dict(phase='adapter', step=list(range(1, 7)),
+                                     type=type(exc).__name__))
+        report['steps'] = [asdict(row) for row in score({}, 0)]
+    except BaseException as exc:
+        cancelled = exc
+        report = getattr(exc, 'x08_partial_report', report)
+        report['steps'] = report.get('steps', [asdict(row) for row in score({}, 0)])
+        report['errors'].append(dict(phase='cancelled', step=list(range(1, 7)),
+                                     type=type(exc).__name__))
+    finally:
+        # Orchestration closes its runtime; acquisition failure closes its own stack.
+        # This also covers a protocol failure before orchestration was entered.
+        if runtime is not None and not report['cleanup'].get('closed'):
+            try:
+                runtime.close()
+            except BaseException as exc:
+                report['errors'].append(dict(phase='cleanup', step=list(range(1, 7)),
+                                             type=type(exc).__name__))
+                report['steps'] = [asdict(row) for row in score({}, 0)]
+                if not isinstance(exc, Exception):
+                    cancelled = cancelled or exc
     report['source_sha'] = ctx.source_sha
     report['limitation'] = LIMITS
-    try:
-        live_runtime(ctx)
-    except RuntimeUnavailable:
-        report['errors'].append(dict(phase='adapter', step=list(range(1, 7)),
-                                     type='RuntimeUnavailable'))
-    report['steps'] = [asdict(row) for row in score({}, 0)]
-    destination = Path(ctx.out_dir) / 'samples.json'
     write_json_atomic(destination, report)
+    if cancelled is not None:
+        cancelled.x08_partial_report = report
+        raise cancelled
     return [Step(**row) for row in report['steps']]
