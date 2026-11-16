@@ -73,13 +73,52 @@ class SourceBudget:
         return digest.hexdigest()
 
 
-def read_receipt(path):
+def check_json_budget(text, limits):
+    limits = limits or {}
+    if (set(limits) - {'depth', 'nodes'} or any(type(value) is not int or value < 0 for value in limits.values())
+            or limits.get('depth', 32) > 128 or limits.get('nodes', 100000) > 1000000):
+        raise EvidenceError('INVALID_JSON_BUDGET')
+    maximum_depth = limits.get('depth', 32)
+    maximum_nodes = limits.get('nodes', 100000)
+    depth = nodes = 0
+    quoted = escaped = primitive = False
+    for char in text:
+        if quoted:
+            if escaped: escaped = False
+            elif char == '\\': escaped = True
+            elif char == '"': quoted = False
+            continue
+        if char.isspace() or char in ',:':
+            primitive = False
+            continue
+        if char in '}]':
+            depth -= 1
+            primitive = False
+            continue
+        if char in '{[':
+            depth += 1
+            nodes += 1
+            primitive = False
+        elif char == '"':
+            quoted = True
+            primitive = False
+            nodes += 1
+        elif not primitive:
+            nodes += 1
+            primitive = True
+        if depth > maximum_depth or nodes > maximum_nodes:
+            raise EvidenceError('JSON_STRUCTURE_BUDGET_EXCEEDED')
+
+
+def read_receipt(path, *, limits=None):
     try:
         with Path(path).open('rb') as stream:
             raw = stream.read(262145)
         if len(raw) > 262144:
             raise ValueError()
-        value = json.loads(raw.decode('utf-8'), object_pairs_hook=unique_members, parse_constant=reject_constant)
+        text = raw.decode('utf-8')
+        check_json_budget(text, limits)
+        value = json.loads(text, object_pairs_hook=unique_members, parse_constant=reject_constant)
         if not isinstance(value, dict):
             raise ValueError()
         pending = [value]
@@ -145,13 +184,13 @@ def verify_files(receipt, source_root, *, state=None):
             state['protected'].add(resolved)
 
 
-def aggregate(journey_path, proof_paths, source_sha, source_root, *, limits=None, protected_paths=None):
+def aggregate(journey_path, proof_paths, source_sha, source_root, *, limits=None, receipt_limits=None, protected_paths=None):
     state = {'budget': SourceBudget(limits), 'files': {}, 'protected': protected_paths}
     if not isinstance(source_sha, str) or re.fullmatch('[0-9a-f]{40}', source_sha) is None:
         raise EvidenceError('INVALID_SOURCE')
     if not 1 <= len(proof_paths) <= 16:
         raise EvidenceError('MISSING_OR_EXCESS_PROOFS')
-    journey = read_receipt(journey_path)
+    journey = read_receipt(journey_path, limits=receipt_limits)
     check_source(journey, source_sha)
     verify_files(journey, source_root, state=state)
     if (journey.get('schema') != 'leaf.x07.synthetic-journey.v1'
@@ -176,7 +215,7 @@ def aggregate(journey_path, proof_paths, source_sha, source_root, *, limits=None
             'assertions': len(assertions)}
     proofs = []
     for path in proof_paths:
-        proof = read_receipt(path)
+        proof = read_receipt(path, limits=receipt_limits)
         check_source(proof, source_sha)
         verify_files(proof, source_root, state=state)
         files = proof.get('files')
@@ -233,12 +272,15 @@ def main():
     parser.add_argument('--out', type=Path)
     parser.add_argument('--max-file-bytes', type=int, default=8 * 1024 * 1024)
     parser.add_argument('--max-source-bytes', type=int, default=64 * 1024 * 1024)
+    parser.add_argument('--max-json-depth', type=int, default=32)
+    parser.add_argument('--max-json-nodes', type=int, default=100000)
     args = parser.parse_args()
     code = 0
     protected = {args.journey, *args.proof}
     try:
         result = aggregate(args.journey, args.proof, args.source_sha, args.source_root,
-            limits={'file_bytes': args.max_file_bytes, 'total_bytes': args.max_source_bytes}, protected_paths=protected)
+            limits={'file_bytes': args.max_file_bytes, 'total_bytes': args.max_source_bytes},
+            receipt_limits={'depth': args.max_json_depth, 'nodes': args.max_json_nodes}, protected_paths=protected)
     except EvidenceError as error:
         code = 2
         result = unreadable(error)

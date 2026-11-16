@@ -1160,7 +1160,9 @@ def build_suites() -> List[Suite]:
                   "../tools/xbench/tests/test_x07_report_step_identity.py",
                   "tests/test_x07_report_cli_integrity.py", "tests/test_x07_report_output_aliases.py",
                   "tests/test_x07_selection_reflection_oracle.py", "tests/test_x07_store_vacuum_retention.py",
-                  "../tools/xbench/tests/test_x07_report_encoding_failures.py"], 171),
+                  "../tools/xbench/tests/test_x07_report_encoding_failures.py",
+                  "tests/test_x07_report_json_budgets.py", "tests/test_x07_backup_active_transaction.py",
+                  "tests/test_x07_selection_scale_oracle.py", "../tools/xbench/tests/test_x07_report_concurrent_publish.py"], 177),
         # W5 Rooftop workflow flow (2026-09-24, contracts G34/G34a/G34b): server/solar_workflow_flow.py,
         # the pure progression engine (every step's CanAdvance and HasDrawingPrerequisites, the L1/L2
         # gates on the host's setting, AdvanceStep, GoBack and NavigateToStep Stale marking over the
