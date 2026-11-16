@@ -739,6 +739,12 @@ _AUTHORITY_REQUIRED_COLUMNS = {
         },
     },
     "customization": {
+        "customization_stage_attempt_history": {
+            "tenant_id", "change_set_id", "failed_version", "attempt",
+            "reason_code", "reason_message", "retryable",
+            "authority_session_id", "authority_turn_id", "finished_at",
+            "retry_authority_session_id", "retry_authority_turn_id",
+        },
         "customization_change_sets": {
             "change_set_id", "tenant_id", "idempotency_key", "state", "version",
             "base_commit", "staged_commit", "catalog_digest",
@@ -1834,6 +1840,12 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
             "AND completed_at IS NULL AND uncertain_at IS NOT NULL"),
     },
     "customization": {
+        "customization_stage_attempt_history_pkey": _catalog_contract(
+            "customization_stage_attempt_history",
+            "PRIMARY KEY (tenant_id, change_set_id, failed_version, attempt)"),
+        "customization_stage_attempt_history_change_set_id_fkey": _catalog_contract(
+            "customization_stage_attempt_history", "FOREIGN KEY (change_set_id)",
+            "REFERENCES customization_change_sets(change_set_id)"),
         "customization_change_sets_pkey": _catalog_contract(
             "customization_change_sets", "PRIMARY KEY (change_set_id)"),
         "customization_change_sets_tenant_id_idempotency_key_key": _catalog_contract(
