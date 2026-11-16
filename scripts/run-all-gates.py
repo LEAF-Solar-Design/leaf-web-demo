@@ -1259,7 +1259,13 @@ def build_suites() -> List[Suite]:
                   (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_shadow_tables.py").as_posix(),
                   (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_hashseed.py").as_posix(),
                   (Path("..") / "tools" / "xbench" / "tests" / "test_x07_impact_row_boundaries.py").as_posix(),
-                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_impact_receipt_audit_perf.py").as_posix()], 339),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_impact_receipt_audit_perf.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_connection_policy.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_row_boundaries.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_closed_stdout.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_cli_arguments.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_no_write_authorizer.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_encoding.py").as_posix()], 347),
         # W5 Rooftop workflow flow (2026-09-24, contracts G34/G34a/G34b): server/solar_workflow_flow.py,
         # the pure progression engine (every step's CanAdvance and HasDrawingPrerequisites, the L1/L2
         # gates on the host's setting, AdvanceStep, GoBack and NavigateToStep Stale marking over the

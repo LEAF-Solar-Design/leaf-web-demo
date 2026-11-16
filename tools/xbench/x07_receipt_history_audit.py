@@ -57,7 +57,7 @@ def parse_receipt(encoded):
         elif isinstance(current,list):pending.extend(current)
     if duplicate:raise ValueError('duplicate receipt member')
     value=materialize(value)
-    json.dumps(value,sort_keys=True,allow_nan=False)
+    json.dumps(value,sort_keys=True,allow_nan=False,ensure_ascii=False).encode('utf-8')
     return value
 
 
@@ -97,8 +97,14 @@ def audit_receipts(store, journal, *, customer_key):
     return {'schema':'leaf.x07.receipt-history-audit.v1','customer_key':customer_key,'receipt_count':len(rows),'healthy':not any(issues.values()),'issues':issues}
 
 
+class ReceiptAuditParser(argparse.ArgumentParser):
+    def error(self, message):
+        publish_stdout({'schema': 'leaf.x07.receipt-history-audit.v1', 'error': 'INVALID_ARGUMENTS'})
+        raise SystemExit(2)
+
+
 def main():
-    parser=argparse.ArgumentParser(description=__doc__)
+    parser=ReceiptAuditParser(description=__doc__)
     parser.add_argument('--database',type=Path,required=True); parser.add_argument('--journal',type=Path,required=True); parser.add_argument('--customer',required=True)
     args=parser.parse_args()
     try:
