@@ -598,6 +598,59 @@ All strict decoders and CLI modes accept legal surrounding JSON whitespace;
 leading BOMs, concatenated documents and trailing non-whitespace reject as
 `json_malformed`. No framing rejection echoes input text.
 
+`reconcile_seven_steps_json(text)` requires exactly `import`, `grid` and
+`assurance`. Assurance uses the existing strict hex-byte envelope. Duplicate
+keys, input size/depth and missing envelope fields use the existing named JSON
+errors. All seven diagnostic steps survive readable FAIL and UNREADABLE states.
+It is a pure Python entry point, not a live grader or CLI mode.
+
+Grid membership uses indexed sets, with generated operation-count tests rather
+than timing thresholds. Capped grid reasons are sorted by fixed reason name;
+their exact total and first10 examples are invariant under supplied row and ID
+order. Exact Unicode identity is preserved, without normalization or trimming.
+
+Executable seven-step replay (synthetic source-only builder, requires pytest):
+
+```powershell
+@'
+import sys, runpy, json
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import reconcile_seven_steps_json
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+envelope = builders['seven_step_envelope']()
+result = reconcile_seven_steps_json(json.dumps(envelope))
+print(result['verdict'])
+unmatched = deepcopy(envelope)
+unmatched['grid']['rows'][0].update(matches=[], cause='SOLAREDGE_GRID_UNMATCHED')
+unmatched['grid']['require_all_matched'] = False
+allowed = reconcile_seven_steps_json(json.dumps(unmatched))
+print(allowed['verdict'], allowed['steps']['2']['reason'], unmatched['grid']['rows'][0]['cause'])
+unmatched['grid']['require_all_matched'] = True
+required = reconcile_seven_steps_json(json.dumps(unmatched))
+print(required['verdict'], required['steps']['2']['errors'][0])
+missing = dict(envelope, **{'import': None})
+uncertain = reconcile_seven_steps_json(json.dumps(missing))
+print(uncertain['verdict'], uncertain['steps']['1']['reason'])
+assert result['verdict'] == allowed['verdict'] == 'PASS'
+assert required['verdict'] == 'FAIL'
+assert uncertain['steps']['2']['verdict'] == 'PASS'
+'@ | python -P
+```
+
+Exact stdout:
+
+```text
+PASS
+PASS grid_correspondence_equal SOLAREDGE_GRID_UNMATCHED
+FAIL required_grid_unmatched
+UNREADABLE import_evidence_unreadable
+```
+
+The allowed unmatched case demonstrates only the helper's named-cause policy.
+Frozen Copenhagen and USML acceptance requires all matched. This replay acquires
+no live evidence and cannot authenticate inputs or accept the X05 bench.
+
 Canonical snapshot compatibility contract:
 
 - Hash UTF-8 bytes of compact JSON arrays with ASCII escapes and no spaces.

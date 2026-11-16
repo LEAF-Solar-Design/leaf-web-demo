@@ -21,6 +21,7 @@ from benches.x05_reconcile import (METRICS, TABLE_COLUMNS, check_discrepancies,
     reconcile_assurance_json, aggregate_provenance_json,
     aggregate_assurance, aggregate_assurance_json, MAX_INPUT_BYTES, MAX_ENVELOPE_EXAMPLES,
     MAX_RESULT_CHARS, compare_grid_correspondence, reconcile_seven_steps,
+    reconcile_seven_steps_json,
     compare_csv_view, compare_recommendations, compare_snapshots, compare_strings, compare_table)
 
 
@@ -1278,6 +1279,109 @@ def test_provenance_aggregate_subprocess_bytes_deterministic_with_simultaneous_c
             assert result.returncode == 4 and not result.stderr
             outputs.append(result.stdout)
     assert len(set(outputs)) == 1
+
+
+def seven_step_envelope():
+    return {"import": dict(normal_user=True, dwg_imported=True, report_imported=True),
+            "grid": dict(expected_grid_ids=["g"], saved_group_ids=["p"],
+                         rows=[dict(grid_id="g", matches=["p"], cause=None)], require_all_matched=True),
+            "assurance": assurance_envelope()}
+
+
+def test_strict_seven_step_json_envelope_limits_and_diagnostics():
+    envelope = seven_step_envelope()
+    assert reconcile_seven_steps_json(json.dumps(envelope))["verdict"] == "PASS"
+    for key in envelope:
+        changed = deepcopy(envelope)
+        del changed[key]
+        assert reconcile_seven_steps_json(json.dumps(changed))["reason"] == "seven_step_envelope_unreadable"
+    assert reconcile_seven_steps_json('{"import":{},"\\u0069mport":{}}')["reason"] == "json_duplicate_key"
+    assert reconcile_seven_steps_json(" " * (MAX_JSON_CHARS + 1))["reason"] == "json_input_too_large"
+    envelope["assurance"]["evidence"]["recommendations"][0]["group_count"] = 1
+    envelope["import"] = None
+    observed = reconcile_seven_steps_json(json.dumps(envelope))
+    assert observed["verdict"] == "UNREADABLE"
+    assert observed["steps"]["4"]["verdict"] == "FAIL" and observed["steps"]["2"]["verdict"] == "PASS"
+
+
+def test_grid_index_lookup_work_is_linear_without_timing_thresholds(monkeypatch):
+    from benches import x05_reconcile as module
+    builtin_set = set
+    class CountedSet(builtin_set):
+        lookups = 0
+        def __contains__(self, key):
+            type(self).lookups += 1
+            return super().__contains__(key)
+    monkeypatch.setattr(module, "set", CountedSet, raising=False)
+    totals = []
+    for size in (1000, 2000):
+        expected = ["g" + str(index) for index in range(size)]
+        groups = ["p" + str(index) for index in range(size)]
+        rows = [dict(grid_id=key, matches=[groups[index]], cause=None) for index, key in enumerate(expected)]
+        CountedSet.lookups = 0
+        assert compare_grid_correspondence(expected, groups, rows)["verdict"] == "PASS"
+        totals.append(CountedSet.lookups)
+    assert totals[0] > 0 and totals[1] == 2 * totals[0] and totals[1] <= 6 * 2000
+
+
+def test_grid_error_examples_are_deterministic_beyond_cap_across_permutations():
+    expected = ["g1", "g2", "missing"]
+    groups = ["p1", "p2"]
+    rows = [dict(grid_id="g1", matches=["p1", "foreign"], cause=None),
+            dict(grid_id="g1", matches=["p1"], cause=None),
+            dict(grid_id="g2", matches=[], cause="SOLAREDGE_GRID_UNMATCHED"),
+            dict(grid_id="foreign", matches=["p1", "foreign"], cause=None)] * 4
+    baseline = compare_grid_correspondence(expected, groups, rows, require_all_matched=True)
+    assert baseline["verdict"] == "FAIL" and baseline["error_count"] > 10 and len(baseline["errors"]) == 10
+    preserved = deepcopy(rows)
+    for ids in permutations(expected):
+        for reverse in (False, True):
+            changed = list(reversed(rows)) if reverse else rows[3:] + rows[:3]
+            assert compare_grid_correspondence(list(ids), list(reversed(groups)), changed, require_all_matched=True) == baseline
+    assert rows == preserved
+
+
+@pytest.mark.parametrize("field", ["normal_user", "dwg_imported", "report_imported"])
+def test_seven_step_import_flag_mutations_preserve_other_steps(field):
+    envelope = seven_step_envelope()
+    baseline = reconcile_seven_steps_json(json.dumps(envelope))
+    for value in (False, None, 0, "true", [], {}):
+        changed = deepcopy(envelope)
+        changed["import"][field] = value
+        observed = reconcile_seven_steps_json(json.dumps(changed))
+        assert observed["verdict"] == ("FAIL" if value is False else "UNREADABLE")
+        assert observed["steps"]["1"]["verdict"] == observed["verdict"]
+        for step in "234567":
+            assert observed["steps"][step] == baseline["steps"][step]
+        assert observed["assurance"] == baseline["assurance"]
+    for altered in ({key: value for key, value in envelope["import"].items() if key != field},
+                    dict(envelope["import"], extra=True)):
+        changed = dict(envelope, **{"import": altered})
+        assert reconcile_seven_steps_json(json.dumps(changed))["steps"]["1"]["reason"] == "import_evidence_unreadable"
+
+
+@pytest.mark.parametrize("identifier,valid", [("a" * 128, True), ("a" * 129, False),
+    ("\U0001f642" * 128, True), ("\U0001f642" * 129, False), (" \t", False)],
+    ids=["limit", "excess", "multibyte-limit", "multibyte-excess", "blank"])
+def test_grid_identity_boundaries_and_inputs(identifier, valid):
+    expected, groups = [identifier], [identifier]
+    rows = [dict(grid_id=identifier, matches=[identifier], cause=None)]
+    preserved = deepcopy((expected, groups, rows))
+    result = compare_grid_correspondence(expected, groups, rows)
+    assert result["verdict"] == ("PASS" if valid else "UNREADABLE")
+    assert (expected, groups, rows) == preserved
+    if not valid:
+        for row in (dict(grid_id=identifier, matches=["p"], cause=None),
+                    dict(grid_id="g", matches=[identifier], cause=None)):
+            assert compare_grid_correspondence(["g"], ["p"], [row])["reason"] == "grid_row_unreadable"
+
+
+def test_grid_exact_unicode_identity_and_repeated_assignments():
+    result = compare_grid_correspondence(["\u00e9"], ["p"], [dict(grid_id="e\u0301", matches=["p"], cause=None)])
+    assert result["verdict"] == "FAIL" and result["error_count"] == 2
+    rows = [dict(grid_id="g1", matches=["p"], cause=None), dict(grid_id="g2", matches=["p"], cause=None)]
+    result = compare_grid_correspondence(["g1", "g2"], ["p"], rows)
+    assert result["errors"] == ["duplicate_group_match"]
 
 
 def test_independent_grid_correspondence_cardinality_causes_and_foreign_matches():

@@ -415,19 +415,20 @@ def compare_grid_correspondence(expected_grid_ids, saved_group_ids, rows, *, req
     if (not identities(expected_grid_ids) or not identities(saved_group_ids)
             or type(rows) is not list or type(require_all_matched) is not bool):
         return _out("UNREADABLE", "grid_evidence_unreadable")
-    indexed, used, errors, count = {}, set(), [], 0
+    expected_set, group_set = set(expected_grid_ids), set(saved_group_ids)
+    indexed, used, error_counts, count = {}, set(), {}, 0
     def issue(reason):
         nonlocal count
         count += 1
-        if len(errors) < MAX_ENVELOPE_EXAMPLES:
-            errors.append(reason)
+        error_counts[reason] = error_counts.get(reason, 0) + 1
     for row in rows:
         if (type(row) is not dict or set(row) != {"grid_id", "matches", "cause"}
-                or type(row["grid_id"]) is not str or type(row["matches"]) is not list
-                or any(type(key) is not str for key in row["matches"])):
+                or type(row["grid_id"]) is not str or not row["grid_id"].strip() or len(row["grid_id"]) > 128
+                or type(row["matches"]) is not list
+                or any(type(key) is not str or not key.strip() or len(key) > 128 for key in row["matches"])):
             return _out("UNREADABLE", "grid_row_unreadable")
         key, matches, cause = row["grid_id"], row["matches"], row["cause"]
-        if key not in expected_grid_ids:
+        if key not in expected_set:
             issue("foreign_grid")
         if key in indexed:
             issue("duplicate_grid")
@@ -436,7 +437,7 @@ def compare_grid_correspondence(expected_grid_ids, saved_group_ids, rows, *, req
             if len(matches) != 1 or cause is not None:
                 issue("grid_match_cardinality")
             for group in matches:
-                if group not in saved_group_ids:
+                if group not in group_set:
                     issue("foreign_group")
                 if group in used:
                     issue("duplicate_group_match")
@@ -445,8 +446,11 @@ def compare_grid_correspondence(expected_grid_ids, saved_group_ids, rows, *, req
             return _out("UNREADABLE", "grid_cause_unreadable")
         elif require_all_matched:
             issue("required_grid_unmatched")
-    for key in sorted(set(expected_grid_ids) - indexed.keys()):
+    for key in expected_set - indexed.keys():
         issue("missing_grid")
+    errors = []
+    for reason in sorted(error_counts):
+        errors.extend([reason] * min(error_counts[reason], MAX_ENVELOPE_EXAMPLES - len(errors)))
     return _out("FAIL" if count else "PASS", "grid_correspondence_mismatch" if count else "grid_correspondence_equal",
                 error_count=count, errors=errors)
 
@@ -465,6 +469,10 @@ def reconcile_seven_steps(import_evidence, grid_evidence, assurance):
         grids = compare_grid_correspondence(**grid_evidence)
     fields = {"evidence", "frozen_manifest", "stage_bindings", "supplied_inputs", "expected_identity", "stage_identities"}
     checked = reconcile_assured(**assurance) if type(assurance) is dict and set(assurance) == fields else _out("UNREADABLE", "assurance_evidence_missing")
+    return _seven_step_result(imported, grids, checked)
+
+
+def _seven_step_result(imported, grids, checked):
     stages = checked.get("checks", {}).get("provenance", {}).get("reconciliation", {}).get("stages", {})
     absent = _out("UNREADABLE", "stage_evidence_missing")
     steps = {"1": imported, "2": grids, "3": stages.get("strings", absent), "4": stages.get("grouping", absent),
@@ -473,6 +481,18 @@ def reconcile_seven_steps(import_evidence, grid_evidence, assurance):
     verdicts = {imported["verdict"], grids["verdict"], checked["verdict"]}
     return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
                 "offline_seven_steps", steps=steps, assurance=checked)
+
+
+def reconcile_seven_steps_json(text):
+    decoded = decode_evidence_json(text)
+    if decoded["verdict"] != "PASS":
+        return decoded
+    envelope = decoded["evidence"]
+    if set(envelope) != {"import", "grid", "assurance"}:
+        return _out("UNREADABLE", "seven_step_envelope_unreadable")
+    preliminary = reconcile_seven_steps(envelope["import"], envelope["grid"], None)
+    return _seven_step_result(preliminary["steps"]["1"], preliminary["steps"]["2"],
+                              _assurance_envelope(envelope["assurance"]))
 
 
 def aggregate_fixtures(expected_ids, fixtures):
