@@ -1430,3 +1430,52 @@ corrected PASS grid_panel_snapshots_equal PASS
 Owners and the grand total of 24 stay equal across this synthetic redistribution.
 Explicit per-grid snapshot sums expose the change. The supplied evidence does
 not establish live X05 acceptance or authenticate an input producer.
+
+## DC-power evidence and units
+
+The pure `compare_grid_dc_totals` helper accepts independent grid totals, explicit
+`{string_id, kw_dc}` rows and owners. `compare_grid_dc_oracle_totals` requires exact
+expected-grid coverage and equality with `oracle_values.kw_dc`.
+`compare_grid_dc_snapshots` compares each supplied snapshot's power and owners.
+`compare_dc_string_ids` binds power rows to actual saved string IDs. These helpers
+use isolated exact-decimal arithmetic and finite nonnegative kW DC values. They
+preserve missing-evidence uncertainty and bounded sorted diagnostic examples.
+
+Panel totals alone cannot supply DC power. A count requires independently supplied
+module wattage, units and applicable equipment evidence before it can support a
+power calculation. These helpers require explicit power values and do not derive
+them from panels. A numeric value does not authenticate its source or its units.
+
+The existing table comparator exposes contradictions between supplied saved,
+report and displayed values. Run this synthetic PowerShell replay from the
+repository root. The independent report and displayed row explicitly use 9.6 kW.
+The mislabeled case supplies 9600 W in a field declared to be kW.
+
+```powershell
+@'
+import sys, runpy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import compare_table
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+values, rows = builders['table_fixture']()
+watts_mislabeled = dict(values, kw_dc='9600')
+missing_report = dict(values)
+del missing_report['kw_dc']
+for name, saved, report in [('mislabeled', watts_mislabeled, values), ('corrected', values, values), ('missing', values, missing_report)]:
+    result = compare_table(rows, saved, report)
+    print(name, result['verdict'], result['reason'])
+'@ | python -P -
+```
+
+Expected output
+
+```text
+mislabeled FAIL table_value_mismatch
+corrected PASS table_values_equal
+missing UNREADABLE table_evidence_unreadable
+```
+
+The comparison reports the supplied contradiction. It cannot infer that an
+arbitrary value should be divided by 1000. Correct units and independent report
+values must come from explicit evidence. This replay establishes synthetic
+comparator behavior and leaves live X05 acceptance to its staging grader.

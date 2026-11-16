@@ -32,6 +32,7 @@ from benches.x05_reconcile import (METRICS, TABLE_COLUMNS, check_discrepancies,
     compare_bound_ownership_snapshots, compare_grid_optimizer_snapshots,
     compare_grid_panel_totals, compare_grid_panel_oracle_totals,
     compare_panel_string_ids, compare_grid_panel_snapshots, compare_bound_panel_snapshots,
+    compare_grid_dc_totals, compare_grid_dc_oracle_totals, compare_grid_dc_snapshots, compare_dc_string_ids,
     compare_csv_view, compare_recommendations, compare_snapshots, compare_strings, compare_table)
 
 
@@ -3929,3 +3930,109 @@ def test_panel_snapshot_direct_json_and_bound_aggregate_diagnostics_match():
             assert json.loads(serialize_result(result)) == json.loads(serialize_result(decoded))
             assert all(result["fixtures"][key]["verdict"] == "PASS" for key in expected[1:])
             assert records == preserved_records
+
+
+def test_exact_grid_dc_totals_swaps_zero_and_missing_power_without_panel_inference():
+    from decimal import Decimal, localcontext
+    owners = [dict(grid_id="east", string_id="A"), dict(grid_id="west", string_id="B")]
+    rows = [dict(string_id="A", kw_dc="0.1"), dict(string_id="B", kw_dc="0.2")]
+    totals = dict(east="0.1", west="0.2")
+    preserved = deepcopy((rows, totals, owners))
+    assert compare_grid_dc_totals(totals, rows, owners)["verdict"] == "PASS"
+    swapped = [dict(string_id="A", kw_dc="0.2"), dict(string_id="B", kw_dc="0.1")]
+    result = compare_grid_dc_totals(totals, swapped, owners)
+    assert result == dict(verdict="FAIL", reason="grid_dc_totals_mismatch", mismatch_count=2,
+        examples=[dict(grid_id="east", oracle=Decimal("0.1"), saved=Decimal("0.2"), delta=Decimal("0.1")),
+                  dict(grid_id="west", oracle=Decimal("0.2"), saved=Decimal("0.1"), delta=Decimal("-0.1"))])
+    for malformed in (None, [], [dict(string_id="A", panels=10)], [dict(string_id="A", kw_dc=True)],
+                      [dict(string_id="A", kw_dc=float("nan"))], [dict(string_id="A", kw_dc=-1)]):
+        assert compare_grid_dc_totals(totals, malformed, owners)["verdict"] == "UNREADABLE"
+    assert compare_grid_dc_totals(dict(east=0, west=0), [dict(string_id="A", kw_dc=0), dict(string_id="B", kw_dc=0)], owners)["verdict"] == "PASS"
+    with localcontext() as ctx:
+        ctx.prec = 2
+        ctx.clear_flags()
+        flags = dict(ctx.flags)
+        exact = compare_grid_dc_totals(dict(g="0.3"), rows,
+            [dict(grid_id="g", string_id="A"), dict(grid_id="g", string_id="B")])
+        assert exact["verdict"] == "PASS" and dict(ctx.flags) == flags
+    assert (rows, totals, owners) == preserved
+
+
+def test_grid_dc_oracle_coverage_and_exact_decimal_total():
+    from decimal import Decimal
+    assert compare_grid_dc_oracle_totals(["east", "west"], dict(east="0.1", west="0.2"), dict(kw_dc="0.3"))["verdict"] == "PASS"
+    result = compare_grid_dc_oracle_totals(["east", "west"], dict(east="0.1", west="0.2"), dict(kw_dc="0.31"))
+    assert result["verdict"] == "FAIL" and result["grid_total"] == Decimal("0.3")
+    for grids, totals, values in [([], {}, {}), (["g"], None, {}), (["g"], {}, {}),
+            (["g", "g"], dict(g="0.1"), dict(kw_dc="0.1")), (["g", "h"], dict(g="0.1"), dict(kw_dc="0.1")),
+            (["g"], dict(g="0.1", h="0.2"), dict(kw_dc="0.3")), (["g"], dict(g="0.1"), {}),
+            (["g"], dict(g=True), dict(kw_dc="0.1")), (["g"], dict(g="0.1"), dict(kw_dc=float("inf")))]:
+        assert compare_grid_dc_oracle_totals(grids, totals, values)["verdict"] == "UNREADABLE"
+
+
+def test_grid_dc_snapshots_detect_tiny_redistributions_and_absent_evidence_exactly():
+    from decimal import Decimal, localcontext
+    owners = [dict(grid_id="east", string_id="A"), dict(grid_id="west", string_id="B")]
+    before = [dict(string_id="A", kw_dc=Decimal("1e-77")), dict(string_id="B", kw_dc=Decimal("2e-77"))]
+    reopened = [dict(string_id="A", kw_dc=Decimal("2e-77")), dict(string_id="B", kw_dc=Decimal("1e-77"))]
+    preserved = deepcopy((before, reopened, owners))
+    with localcontext() as ctx:
+        ctx.prec = 2
+        ctx.clear_flags()
+        flags = dict(ctx.flags)
+        result = compare_grid_dc_snapshots(["east", "west"], before, owners, reopened, owners)
+        assert result["verdict"] == "FAIL" and result["changed_count"] == 2
+        assert [row["delta"] for row in result["examples"]] == [Decimal("1e-77"), Decimal("-1e-77")]
+        assert dict(ctx.flags) == flags
+    missing = compare_grid_dc_snapshots(["east", "west"], before, owners, None, owners)
+    assert missing["verdict"] == "UNREADABLE" and missing["checks"]["reopened"]["reason"] == "grid_dc_snapshot_strings_unreadable"
+    assert compare_grid_dc_snapshots(["east", "west"], before, owners, before, owners)["verdict"] == "PASS"
+    assert (before, reopened, owners) == preserved
+
+
+def test_dc_string_ids_require_exact_saved_coverage_even_for_equal_power_totals():
+    correct = [dict(string_id="A", kw_dc="0.1"), dict(string_id="B", kw_dc="0.2")]
+    assert compare_dc_string_ids(ORACLE, correct)["verdict"] == "PASS"
+    foreign = [dict(string_id="X", kw_dc="0.1"), correct[1]]
+    assert compare_grid_dc_totals(dict(g="0.3"), foreign,
+        [dict(grid_id="g", string_id="X"), dict(grid_id="g", string_id="B")])["verdict"] == "PASS"
+    for rows in (foreign, correct[:1], correct + [correct[0]], None):
+        preserved = deepcopy(rows)
+        result = compare_dc_string_ids(ORACLE, rows)
+        assert result["verdict"] == "UNREADABLE" and rows == preserved
+    assert compare_dc_string_ids(ORACLE, foreign)["counts"] == dict(missing=1, foreign=1)
+    assert compare_dc_string_ids(ORACLE, correct + [correct[0]])["reason"] == "dc_duplicate_id"
+    large = [dict(string_id=f"x{i:03}", kw_dc="0.1") for i in range(60)]
+    result = compare_dc_string_ids(ORACLE, large)
+    assert result["counts"] == dict(missing=2, foreign=60) and len(result["foreign_ids"]) == MAX_STRING_EXAMPLES
+
+
+def test_short_decimal_table_and_signed_policy_match_exact_rational_reference():
+    from decimal import Decimal, localcontext
+    from fractions import Fraction
+    values = ("0", "0.1", "0.2", "0.03", "1.25", "9.6")
+    for saved_power in values:
+        for oracle_power in values:
+            expected = Fraction(saved_power) - Fraction(oracle_power)
+            with localcontext() as ctx:
+                ctx.prec = 200
+                delta = Decimal(expected.numerator) / Decimal(expected.denominator)
+            assert Fraction(delta) == expected
+            saved, rows = table_fixture()
+            oracle = dict(saved, kw_dc=oracle_power)
+            saved["kw_dc"] = saved_power
+            row = next(row for row in rows if row["metric"] == "kw_dc")
+            row.update(studio=saved_power, oracle=oracle_power, delta=delta, verdict="PASS" if not expected else "FAIL")
+            assert compare_table(rows, saved, oracle)["verdict"] == "PASS"
+            if expected:
+                wrong = deepcopy(rows)
+                next(row for row in wrong if row["metric"] == "kw_dc")["delta"] = -delta
+                assert compare_table(wrong, saved, oracle)["verdict"] == "FAIL"
+            deltas = dict.fromkeys(METRICS, 0)
+            deltas["kw_dc"] = delta
+            record = dict(fixture_id="synthetic", metric="kw_dc", delta=delta,
+                          name="explicit power revision", frozen_at="2026-11-15T12:00:00Z")
+            assert check_discrepancies("synthetic", deltas, [record], "2026-11-15T13:00:00Z")["verdict"] == "PASS"
+            if expected:
+                assert check_discrepancies("synthetic", deltas, [dict(record, delta=-delta)],
+                    "2026-11-15T13:00:00Z")["verdict"] == "FAIL"

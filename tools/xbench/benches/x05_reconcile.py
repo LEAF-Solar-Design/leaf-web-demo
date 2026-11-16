@@ -923,6 +923,44 @@ def _valid_grid_totals(values):
                     for key, value in values.items()))
 
 
+def _grid_dc_totals(values):
+    if type(values) is not dict or not values:
+        return None
+    result = {}
+    for key, value in values.items():
+        if type(key) is not str or not key.strip() or len(key) > 128:
+            return None
+        number = _numeric(value)
+        if number is None:
+            return None
+        result[key] = number
+    return result
+
+
+def compare_grid_dc_totals(expected_totals, saved_power, assignments):
+    """Compare explicitly supplied per-string kW DC with independent grid totals."""
+    with localcontext(_CONTEXT):
+        return _compare_grid_totals(expected_totals, saved_power, assignments, "kw_dc", "dc")
+
+
+def compare_grid_dc_oracle_totals(expected_grid_ids, expected_totals, oracle_values):
+    """Require exact coverage and summed agreement with independent report kW DC."""
+    with localcontext(_CONTEXT):
+        return _compare_grid_oracle_totals(expected_grid_ids, expected_totals, oracle_values, "kw_dc", "grid_dc_oracle")
+
+
+def compare_grid_dc_snapshots(expected_grid_ids, before_power, before_owners, reopened_power, reopened_owners):
+    """Compare explicit kW DC and owners across supplied snapshots with exact sums."""
+    with localcontext(_CONTEXT):
+        return _compare_grid_snapshots(expected_grid_ids, before_power, before_owners, reopened_power,
+                                       reopened_owners, "kw_dc", "grid_dc", "grid_dc_snapshot_strings_unreadable")
+
+
+def compare_dc_string_ids(saved_strings, power_rows):
+    """Bind explicit power-row IDs to the supplied saved design string identities."""
+    return _compare_string_metric_ids(saved_strings, power_rows, "kw_dc", "dc")
+
+
 def compare_grid_oracle_totals(expected_grid_ids, expected_totals, oracle_values):
     """Bind independent grid totals to explicit coverage and the report grand total."""
     return _compare_grid_oracle_totals(expected_grid_ids, expected_totals, oracle_values, "optimizers", "grid_oracle")
@@ -934,13 +972,18 @@ def compare_grid_panel_oracle_totals(expected_grid_ids, expected_totals, oracle_
 
 
 def _compare_grid_oracle_totals(expected_grid_ids, expected_totals, oracle_values, metric, reason):
+    if metric == "kw_dc":
+        expected_totals = _grid_dc_totals(expected_totals)
+        valid = expected_totals is not None
+    else:
+        valid = _valid_grid_totals(expected_totals)
     if (type(expected_grid_ids) is not list or not expected_grid_ids
             or any(type(key) is not str or not key.strip() or len(key) > 128 for key in expected_grid_ids)
             or len(set(expected_grid_ids)) != len(expected_grid_ids)
-            or not _valid_grid_totals(expected_totals) or set(expected_totals) != set(expected_grid_ids)
+            or not valid or set(expected_totals) != set(expected_grid_ids)
             or type(oracle_values) is not dict):
         return _out("UNREADABLE", reason + "_evidence_unreadable")
-    oracle = _numeric(oracle_values.get(metric), count=True)
+    oracle = _numeric(oracle_values.get(metric), count=metric != "kw_dc")
     if oracle is None:
         return _out("UNREADABLE", reason + "_evidence_unreadable")
     total = sum(expected_totals.values())
@@ -1029,15 +1072,19 @@ def compare_grid_optimizer_totals(expected_totals, saved_strings, assignments):
 
 def compare_panel_string_ids(saved_strings, panel_counts):
     """Bind independently supplied panel rows to the actual saved string identities."""
+    return _compare_string_metric_ids(saved_strings, panel_counts, "panels", "panel")
+
+
+def _compare_string_metric_ids(saved_strings, rows, metric, label):
     saved, error = _index(saved_strings, "saved")
     if error:
         return _out("UNREADABLE", error)
-    panels, error = _index(panel_counts, "panel", metric="panels")
+    panels, error = _index(rows, label, metric=metric)
     if error:
         return _out("UNREADABLE", error)
     missing, foreign = saved.keys() - panels.keys(), panels.keys() - saved.keys()
     return _out("UNREADABLE" if missing or foreign else "PASS",
-                "panel_string_ids_unbound" if missing or foreign else "panel_string_ids_equal",
+                label + "_string_ids_unbound" if missing or foreign else label + "_string_ids_equal",
                 counts=dict(missing=len(missing), foreign=len(foreign)),
                 missing_ids=nsmallest(MAX_STRING_EXAMPLES, missing),
                 foreign_ids=nsmallest(MAX_STRING_EXAMPLES, foreign))
@@ -1063,7 +1110,12 @@ def compare_grid_panel_totals(expected_totals, saved_strings, assignments):
 
 def _compare_grid_totals(expected_totals, saved_strings, assignments, metric, label):
     reason = "grid_" + label
-    if not _valid_grid_totals(expected_totals):
+    if metric == "kw_dc":
+        expected_totals = _grid_dc_totals(expected_totals)
+        valid = expected_totals is not None
+    else:
+        valid = _valid_grid_totals(expected_totals)
+    if not valid:
         return _out("UNREADABLE", reason + "_totals_unreadable")
     saved, error = _index(saved_strings, "saved", metric=metric)
     if error:
@@ -1262,8 +1314,13 @@ def _index(rows, source, *, metric="optimizers"):
         if not isinstance(row, dict):
             return None, source + "_row_unreadable"
         identifier, count = row.get("string_id"), row.get(metric)
-        if (type(identifier) is not str or not identifier.strip() or len(identifier) > 128
-                or type(count) is not int or not 1 <= count <= 2**53 - 1):
+        if type(identifier) is not str or not identifier.strip() or len(identifier) > 128:
+            return None, source + "_row_unreadable"
+        if metric == "kw_dc":
+            count = _numeric(count)
+            if count is None:
+                return None, source + "_row_unreadable"
+        elif type(count) is not int or not 1 <= count <= 2**53 - 1:
             return None, source + "_row_unreadable"
         if identifier in indexed:
             return None, source + "_duplicate_id"
