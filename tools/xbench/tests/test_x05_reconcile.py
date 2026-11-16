@@ -8012,3 +8012,97 @@ def test_grouping_failure_and_frozen_table_policy_repair_independently(repair_fi
     evidence['saved_values']['panels']=evidence['oracle_values']['panels']
     evidence['discrepancy_records']=[]
     assert m.reconcile_offline(evidence)['verdict']=='PASS' and accepted==preserved
+
+
+@pytest.mark.parametrize('report',[1,2,3])
+@pytest.mark.parametrize('left,right',[([2]*4,[2,1,2]),([1,2,3]*12,[3,2,1]*11),([],[1,2,1])])
+def test_grouping_concatenation_adds_totals_offsets_indices_and_caps(report,left,right):
+    from benches import x05_reconcile as m
+    rows_left=[dict(group_count=value) for value in left]; rows_right=[dict(group_count=value) for value in right]
+    original=deepcopy((rows_left,rows_right))
+    first=m.compare_recommendations(report,rows_left,no_recommendations_shown=not rows_left)
+    second=m.compare_recommendations(report,rows_right,no_recommendations_shown=not rows_right)
+    left_bad=[i for i,value in enumerate(left) if value!=report]
+    right_bad=[len(left)+i for i,value in enumerate(right) if value!=report]
+    expected=left_bad+right_bad
+    prior=deepcopy((first,second)); result=m.compare_recommendations(report,rows_left+rows_right)
+    assert result['mismatch_count']==first['mismatch_count']+second['mismatch_count']==len(expected)
+    assert result['mismatched_recommendations']==expected[:MAX_RECOMMENDATION_EXAMPLES]
+    assert result['verdict']==('FAIL' if expected else 'PASS')
+    assert (rows_left,rows_right)==original and (first,second)==prior
+
+
+@pytest.mark.parametrize('removed',[(0,),(1,),(36,37,38,39,40),(38,39,40,41),(0,1,48,49)])
+def test_grouping_deletion_compacts_independent_surviving_indices(removed):
+    from benches import x05_reconcile as m
+    counts=[1,2]*25; rows=[dict(group_count=value) for value in counts]
+    original=deepcopy(rows); before=m.compare_recommendations(2,rows); preserved=deepcopy(before)
+    kept=[(index,row) for index,row in enumerate(rows) if index not in removed]
+    compact=[row for _,row in kept]
+    expected=[old_index-sum(deleted<old_index for deleted in removed) for old_index,row in kept if row['group_count']!=2]
+    result=m.compare_recommendations(2,compact)
+    assert result['mismatch_count']==25-sum(counts[index]!=2 for index in removed)==len(expected)
+    assert result['mismatched_recommendations']==expected[:MAX_RECOMMENDATION_EXAMPLES]
+    assert result['verdict']=='FAIL' and before==preserved and rows==original
+
+
+@pytest.mark.parametrize('length',[8,24])
+@pytest.mark.parametrize('bump',[0,1,2])
+def test_grouping_unequal_run_replication_matches_expanded_reference(length,bump):
+    from benches import x05_reconcile as m
+    counts=([1,2,3,2]*6)[:length]
+    factors=[1+(index%3)+bump for index in range(length)]
+    rows=[dict(group_count=value) for value in counts]; original=deepcopy((rows,factors))
+    expected=[]; offset=0
+    for value,factor in zip(counts,factors):
+        if value!=2: expected.extend(range(offset,offset+factor))
+        offset+=factor
+    expanded=[dict(row) for row,factor in zip(rows,factors) for _ in range(factor)]
+    supplied=deepcopy(expanded); result=m.compare_recommendations(2,expanded)
+    assert result['mismatch_count']==len(expected)
+    assert result['mismatched_recommendations']==expected[:MAX_RECOMMENDATION_EXAMPLES]
+    assert len(result['mismatched_recommendations'])==min(len(expected),MAX_RECOMMENDATION_EXAMPLES)
+    assert (rows,factors)==original and expanded==supplied
+
+
+@pytest.mark.parametrize('report',[1,2,3])
+def test_grouping_bijective_count_renaming_keeps_bound_diagnostics(report):
+    from benches import x05_reconcile as m
+    expected,records=bound_seven_fixture_records()
+    evidence=records[0]['envelope']['assurance']['evidence']
+    evidence['report_grid_count']=report
+    evidence['recommendations']=[dict(group_count=value) for value in [1,2,3]*13]
+    baseline=m.aggregate_bound_seven_steps(expected,records); preserved=deepcopy(baseline)
+    rename={1:11,2:37,3:5}
+    evidence['report_grid_count']=rename[report]
+    for row in evidence['recommendations']: row['group_count']=rename[row['group_count']]
+    supplied=deepcopy(records); result=m.aggregate_bound_seven_steps(expected,records)
+    first,second=baseline['fixtures'][expected[0]],result['fixtures'][expected[0]]
+    assert second['reconciliation']['steps']['4']==first['reconciliation']['steps']['4']
+    assert second['verdict']==first['verdict']=='FAIL'
+    assert all(result['fixtures'][key]==baseline['fixtures'][key] for key in expected[1:])
+    assert records==supplied and baseline==preserved
+
+
+@pytest.mark.parametrize('count',[19,20,21])
+def test_grouping_cap_boundary_direct_strict_json_bound_cli_agree(tmp_path,count):
+    import subprocess,sys
+    from pathlib import Path
+    from benches import x05_reconcile as m
+    expected,records=bound_seven_fixture_records()
+    evidence=records[0]['envelope']['assurance']['evidence']
+    evidence['report_grid_count']=2
+    evidence['recommendations']=[dict(group_count=value) for value in [1,2]*count]
+    original=deepcopy(records)
+    direct=m.compare_recommendations(2,evidence['recommendations'])
+    strict=m.reconcile_seven_steps_json(serialize_result(records[0]['envelope']))['steps']['4']
+    assert strict==direct
+    assert direct['mismatch_count']==count
+    assert direct['mismatched_recommendations']==list(range(0,2*count,2))[:MAX_RECOMMENDATION_EXAMPLES]
+    run=subprocess.run([sys.executable,'-P',str(Path(m.__file__).resolve()),'--seven-step-bound-aggregate'],input=serialize_result(dict(expected_ids=expected,fixtures=records)).encode(),capture_output=True,cwd=tmp_path,timeout=20,env={'SystemRoot':'C:\\Windows'})
+    assert run.returncode==1 and not run.stderr
+    parsed=json.loads(run.stdout)
+    assert parsed['fixtures'][expected[0]]['reconciliation']['steps']['4']==direct
+    assert parsed['fixtures'][expected[0]]['verdict']=='FAIL'
+    assert all(parsed['fixtures'][key]['verdict']=='PASS' for key in expected[1:])
+    assert records==original
