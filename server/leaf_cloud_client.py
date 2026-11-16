@@ -402,11 +402,12 @@ def _known_prewrite_failure(exc):
     return False
 
 
-def post_stringer(request: StringerRequest, grant: CloudGrant, *, preserve_uncertainty=False) -> bytes:
+def post_stringer(request: StringerRequest, grant: CloudGrant, *, preserve_uncertainty=False,
+                  _transport=None) -> bytes:
     """Broker and custodied worker transport; no redirects or response logging."""
     try:
         deadline = time.monotonic() + 50
-        with requests.post(
+        with (_transport or requests).post(
             SOLVER_URL, data=canonical_bytes(request.wire_payload()),
             headers={"Authorization": "Bearer " + grant.access_token,
                      "Content-Type": "application/json"},
