@@ -1755,3 +1755,47 @@ Expected: existing composition PASS, swapped FAIL
 `string_inverter_snapshots_equal`. The supplied connection rows are separate
 evidence, so the existing composition PASS does not settle topology. The replay
 uses no customer data, transport, credentials, staging mutation or live grading.
+# Composed assignment recovery for the X05 parity report
+
+The seven-step composition now requires `oracle_assignments` and
+`saved_assignments`, plus `before_assignments` and `reopened_assignments`.
+Each row names `string_id` and `inverter_id`. Snapshot validation uses each
+snapshot's own string and inverter IDs. The before connections must also equal
+the saved connections. The earlier standalone replay describes the previous
+composition boundary; explicit connection evidence now contributes to its verdict.
+Input origin and oracle independence still require separate producer evidence.
+
+Run this synthetic replay from the repository root:
+
+```powershell
+@'
+import json, runpy, sys
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+for name in ('swapped', 'unrelated before', 'missing reopened', 'corrected'):
+    envelope = fixtures['connection_envelope']()
+    evidence = envelope['assurance']['evidence']
+    if name == 'swapped':
+        fields = ('saved_assignments', 'before_assignments', 'reopened_assignments')
+    elif name == 'unrelated before':
+        fields = ('before_assignments', 'reopened_assignments')
+    else:
+        fields = ()
+    for field in fields:
+        evidence[field][0]['inverter_id'], evidence[field][1]['inverter_id'] = 'INV-B', 'INV-A'
+    if name == 'missing reopened':
+        evidence['reopened_assignments'] = None
+    result = m.reconcile_seven_steps_json(json.dumps(envelope))
+    print(name, result['verdict'], result['assignments']['reason'],
+          result['assignment_reopen']['saved_binding']['reason'],
+          result['assignment_reopen']['comparison']['reason'])
+    assert result['steps']['7']['verdict'] == 'PASS'
+'@ | python -P -
+```
+
+Expected: swapped FAIL with `string_inverter_assignments_changed`, unrelated
+before FAIL with saved binding `string_inverter_assignments_changed`, missing
+reopened UNREADABLE with `string_inverter_snapshots_invalid`, corrected PASS.
+Each swap preserves the per-inverter counts, device identities and grid totals.
+No source independence, customer-data intake or live acceptance is claimed.

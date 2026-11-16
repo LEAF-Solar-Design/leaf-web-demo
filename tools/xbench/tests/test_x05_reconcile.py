@@ -1296,8 +1296,10 @@ def test_provenance_aggregate_subprocess_bytes_deterministic_with_simultaneous_c
 
 
 def inverter_evidence():
-    return {field: [dict(inverter_id="INV-A", grid_id="g")]
-            for field in ("saved_inverters", "before_inverters", "reopened_inverters")}
+    return dict({field: [dict(inverter_id="INV-A", grid_id="g")]
+                 for field in ("saved_inverters", "before_inverters", "reopened_inverters")},
+                **{field: [dict(string_id=key, inverter_id="INV-A") for key in ("A", "B")]
+                   for field in ("oracle_assignments", "saved_assignments", "before_assignments", "reopened_assignments")})
 
 
 def seven_step_envelope():
@@ -4317,6 +4319,8 @@ def three_string_envelope():
     evidence["before"] = canonical_snapshot(strings, evidence["view_rows"])
     evidence["reopened"] = dict(evidence["before"])
     evidence["csv_text"] = csv_fixture(evidence["view_rows"])
+    for field in ("oracle_assignments", "saved_assignments", "before_assignments", "reopened_assignments"):
+        evidence[field].append(dict(string_id="C", inverter_id="INV-A"))
     return envelope
 
 
@@ -4800,3 +4804,133 @@ def test_string_inverter_composition_proof_limit_replay():
     assert m.compare_string_inverter_snapshots(['I1', 'I2'], ['A', 'B'], before, after)['verdict'] == 'FAIL'
     assert m.compare_string_inverter_snapshots(['I1', 'I2'], ['A', 'B'], before, None)['verdict'] == 'UNREADABLE'
     assert m.compare_string_inverter_snapshots(['I1', 'I2'], ['A', 'B'], before, before)['verdict'] == 'PASS'
+
+
+def connection_envelope():
+    envelope = seven_step_envelope()
+    evidence = envelope['assurance']['evidence']
+    envelope['grid']['inverter_totals']['g'] = 2
+    for field in ('saved_inverters', 'before_inverters', 'reopened_inverters'):
+        evidence[field].append(dict(inverter_id='INV-B', grid_id='g'))
+    for field in ('oracle_assignments', 'saved_assignments', 'before_assignments', 'reopened_assignments'):
+        evidence[field][1]['inverter_id'] = 'INV-B'
+    for field in ('saved_values', 'oracle_values'):
+        evidence[field]['inverters'] = 2
+    for rows in (evidence['view_rows'], evidence['before_rows']['table_rows'], evidence['reopened_rows']['table_rows']):
+        next(row for row in rows if row['metric'] == 'inverters').update(studio=2, oracle=2)
+    evidence['before'] = canonical_snapshot(evidence['before_rows']['strings'], evidence['before_rows']['table_rows'])
+    evidence['reopened'] = canonical_snapshot(evidence['reopened_rows']['strings'], evidence['reopened_rows']['table_rows'])
+    evidence['csv_text'] = csv_fixture(evidence['view_rows'])
+    return envelope
+
+
+def test_composed_assignment_swaps_bindings_and_absence():
+    envelope = connection_envelope()
+    baseline = reconcile_seven_steps_json(json.dumps(envelope))
+    assert baseline['verdict'] == 'PASS'
+    evidence = envelope['assurance']['evidence']
+    for field in ('saved_assignments', 'before_assignments', 'reopened_assignments'):
+        evidence[field][0]['inverter_id'], evidence[field][1]['inverter_id'] = 'INV-B', 'INV-A'
+    preserved = deepcopy(envelope)
+    swapped = reconcile_seven_steps_json(json.dumps(envelope))
+    assert swapped['verdict'] == 'FAIL' and swapped['assignments']['changed_count'] == 2
+    assert swapped['assignment_reopen']['verdict'] == 'PASS'
+    for key in baseline.keys() - {'verdict', 'assignments'}:
+        assert swapped[key] == baseline[key]
+    assert envelope == preserved
+    evidence['saved_assignments'] = deepcopy(evidence['oracle_assignments'])
+    unrelated = reconcile_seven_steps_json(json.dumps(envelope))
+    assert unrelated['assignment_reopen']['saved_binding']['changed_count'] == 2
+    evidence['oracle_assignments'] = None
+    missing = reconcile_seven_steps_json(json.dumps(envelope))
+    assert missing['verdict'] == 'UNREADABLE' and missing['assignment_reopen']['verdict'] == 'FAIL'
+    evidence['reopened_assignments'] = None
+    assert reconcile_seven_steps_json(json.dumps(envelope))['assignment_reopen']['verdict'] == 'UNREADABLE'
+
+
+@pytest.mark.parametrize('stage', ['before', 'reopened'])
+def test_assignment_snapshot_requires_own_endpoint_id_sets(stage):
+    envelope = connection_envelope()
+    evidence = envelope['assurance']['evidence']
+    evidence[stage + '_inverters'][0]['inverter_id'] = 'substitute'
+    result = reconcile_seven_steps_json(json.dumps(envelope))
+    assert result['assignment_reopen']['states'][stage]['counts']['foreign_inverter'] == 1
+    evidence[stage + '_rows']['strings'][0]['string_id'] = 'foreign'
+    assert reconcile_seven_steps_json(json.dumps(envelope))['assignment_reopen']['states'][stage]['counts']['missing'] == 1
+
+
+@pytest.mark.parametrize('rows', [None, {}, 'private-canary', [None], [{}],
+    [dict(string_id='', inverter_id='I')], [dict(string_id='A', inverter_id='x'*129)],
+    [dict(string_id='x'*129, inverter_id='I')], [dict(string_id='A', inverter_id=' ')],
+    [dict(string_id=True, inverter_id='I')]])
+def test_assignment_schema_named_bounded_sanitized_and_unchanged(rows):
+    from benches import x05_reconcile as m
+    preserved = deepcopy(rows)
+    results = [m.validate_string_inverter_assignments(['I'], ['A'], rows),
+        m.compare_string_inverter_assignments(['I'], ['A'], rows, rows),
+        m.compare_string_inverter_snapshots(['I'], ['A'], rows, rows)]
+    for result in results:
+        assert result['verdict'] == 'UNREADABLE'
+        text = serialize_result(result)
+        assert len(text) < 1000 and 'private-canary' not in text and 'x'*129 not in text
+    assert rows == preserved
+
+
+def test_generated_assignment_lookup_work_and_caps(monkeypatch):
+    from benches import x05_reconcile as m
+    from random import Random
+    operations = []
+    class CountedSet(set):
+        def __contains__(self, key):
+            operations.append(1)
+            return super().__contains__(key)
+    monkeypatch.setattr(m, 'set', CountedSet, raising=False)
+    for size in (10, 100, 1000):
+        ids = [f'I{i:04}' for i in range(size)]
+        strings = [f's{i:04}' for i in range(size)]
+        rows = [dict(string_id=k, inverter_id=ids[i]) for i, k in enumerate(strings)]
+        operations.clear()
+        assert m.validate_string_inverter_assignments(ids, strings, rows)['verdict'] == 'PASS'
+        assert len(operations) == 3*size
+        errors = rows + rows + [dict(string_id=f'x{i:04}', inverter_id='foreign') for i in range(size)]
+        baseline = m.validate_string_inverter_assignments(ids, strings, errors)
+        assert baseline['counts'] == dict(missing=0, duplicate=size, foreign_string=size, foreign_inverter=size)
+        assert all(len(v) == min(size, MAX_STRING_EXAMPLES) for v in baseline['examples'].values())
+        for seed in range(3):
+            changed = deepcopy(errors)
+            Random(seed).shuffle(changed)
+            assert m.validate_string_inverter_assignments(ids[::-1], strings[::-1], changed) == baseline
+
+
+@pytest.mark.parametrize('mutation', ['swap', 'before', 'missing'])
+def test_assignment_transport_differential_and_siblings(tmp_path, mutation):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from benches import x05_reconcile as m
+    envelope = connection_envelope()
+    evidence = envelope['assurance']['evidence']
+    if mutation == 'missing':
+        evidence['reopened_assignments'] = None
+    else:
+        fields = ('saved_assignments',) if mutation == 'swap' else ('before_assignments', 'reopened_assignments')
+        for field in fields:
+            evidence[field][0]['inverter_id'], evidence[field][1]['inverter_id'] = 'INV-B', 'INV-A'
+    source = envelope['assurance']
+    assurance = dict(evidence=evidence, frozen_manifest=source['manifest'], stage_bindings=source['bindings'],
+        supplied_inputs={k: bytes.fromhex(v) for k, v in source['inputs_hex'].items()},
+        expected_identity=source['identity'], stage_identities=source['stage_identities'])
+    direct = m.reconcile_seven_steps(envelope['import'], envelope['grid'], assurance)
+    assert json.loads(serialize_result(direct)) == json.loads(serialize_result(m.reconcile_seven_steps_json(json.dumps(envelope))))
+    expected, records = bound_seven_fixture_records()
+    source['manifest']['fixture_id'] = evidence['fixture_id'] = expected[0]
+    source['bindings'] = {k: deepcopy(source['manifest']) for k in PROVENANCE_STAGES}
+    records[0]['envelope'] = envelope
+    aggregate = m.aggregate_bound_seven_steps(expected, records)
+    assert all(aggregate['fixtures'][k]['verdict'] == 'PASS' for k in expected[1:])
+    payload = dict(expected_ids=expected, fixtures=records)
+    run = subprocess.run([sys.executable, '-P', str(Path(m.__file__).resolve()), '--seven-step-bound-aggregate'],
+        input=serialize_result(payload).encode('ascii'), capture_output=True, cwd=tmp_path, timeout=20,
+        env={'SystemRoot': 'C:\\Windows'})
+    assert run.returncode == (4 if mutation == 'missing' else 1) and not run.stderr
+    assert json.loads(run.stdout) == json.loads(serialize_result(aggregate))
