@@ -14,16 +14,26 @@ def require_database_file(path):
         raise ValueError('regular database file required')
 
 
+def begin_audit(db):
+    if db.in_transaction:
+        raise ValueError('caller transaction must remain caller owned')
+    if db.row_factory is not sqlite3.Row:
+        raise ValueError('named SQLite rows required')
+    _check_connection(db)
+    if any(row[1] not in ('main', 'temp') for row in db.execute('PRAGMA database_list')):
+        raise ValueError('attached databases are unsupported')
+    if db.execute("SELECT name FROM sqlite_temp_master WHERE name IN ('customers','profile_versions','project_applications')").fetchone():
+        raise ValueError('temporary profile shadows are unsupported')
+    db.execute('BEGIN')
+
+
 def audit_history(store, *, customer_key):
     customer_key = _key(customer_key)
     if store.read_only is not True:
         raise ValueError('explicit read-only store required')
     require_database_file(store.path)
     with store._connection() as db:
-        if db.row_factory is not sqlite3.Row:
-            raise ValueError('named SQLite rows required')
-        _check_connection(db)
-        db.execute('BEGIN')
+        begin_audit(db)
         root = db.execute('SELECT profile_id FROM customers WHERE customer_key=?', (customer_key,)).fetchone()
         versions = db.execute('SELECT version,profile_id FROM profile_versions WHERE customer_key=? ORDER BY version LIMIT ?',
                               (customer_key, MAX_AUDIT_ROWS + 1)).fetchall()

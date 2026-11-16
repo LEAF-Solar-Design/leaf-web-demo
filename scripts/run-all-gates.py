@@ -1237,7 +1237,12 @@ def build_suites() -> List[Suite]:
                   (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_special_files.py").as_posix(),
                   (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_scope_key_identity.py").as_posix(),
                   (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_gap_output_budget.py").as_posix(),
-                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_no_write_authorizer.py").as_posix()], 312),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_no_write_authorizer.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_profile_change_impact.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_history_audit.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_outer_transaction.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_shadow_tables.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_measurements.py").as_posix()], 319),
         # W5 Rooftop workflow flow (2026-09-24, contracts G34/G34a/G34b): server/solar_workflow_flow.py,
         # the pure progression engine (every step's CanAdvance and HasDrawingPrerequisites, the L1/L2
         # gates on the host's setting, AdvanceStep, GoBack and NavigateToStep Stale marking over the
