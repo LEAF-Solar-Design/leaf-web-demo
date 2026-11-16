@@ -1203,6 +1203,23 @@ it('retries the failed dataset page cursor while retaining the previous page unt
   expect(selected.queryByRole('alert')).toBeNull()
   expect(selected.queryByRole('button', { name: 'Load more' })).toBeNull()
 })
+it('bounds saved-view discovery on initial and continuation pages without dropping views', async () => {
+  const { props } = setup()
+  const other = { element: { ...element, id: 'other-view', title: 'Other view' }, revision: 1 }
+  const list = vi.spyOn(props.client, 'listElements').mockImplementation(async (_, options) => {
+    if (options.limit !== 1) throw new Error('The catalog exceeded its validation budget.')
+    return options.after === 'next-view' ? page([other]) : { records: [saved], nextCursor: 'next-view' }
+  })
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  expect(screen.getByRole('button', { name: 'Order view · revision 2' })).toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: 'Load more saved views' }))
+  expect(await screen.findByRole('button', { name: 'Other view · revision 1' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Order view · revision 2' })).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Load more saved views' })).toBeNull()
+  expect(list.mock.calls.map(([, options]) => ({ limit: options.limit, after: options.after })))
+    .toEqual([{ limit: 1, after: undefined }, { limit: 1, after: 'next-view' }])
+})
 it.each(['datasets', 'elements'])('gives a failed %s list its own global retry after a retained-read failure', async (resource) => {
   const { props } = setup()
   const extra = resource === 'datasets'

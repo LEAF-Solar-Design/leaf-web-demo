@@ -319,7 +319,9 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
         ctx.cacheIdentity = scopeCacheIdentity(scope, sessionGeneration)
         const [datasets, elements] = await Promise.all([
           client.listDatasets(projectId, { signal: ctx.controller.signal }),
-          client.listElements(projectId, { signal: ctx.controller.signal }),
+          // Each saved view is validated against its source during discovery.
+          // Keep that work within one request; remaining views use the cursor below.
+          client.listElements(projectId, { signal: ctx.controller.signal, limit: 1 }),
         ])
         if (!current(ctx)) return
         setState({ ...empty(), identity, scope, datasets: datasets.records, elements: elements.records,
@@ -623,7 +625,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
     operation('Loading more…', async (ctx) => {
       const isDataset = resource === 'datasets'
       const page = await client[isDataset ? 'listDatasets' : 'listElements'](projectId, { signal: ctx.controller.signal,
-        after: isDataset ? state.datasetCursor : state.elementCursor })
+        after: isDataset ? state.datasetCursor : state.elementCursor, ...(!isDataset ? { limit: 1 } : {}) })
       if (current(ctx)) setState((old) => {
         let records = [...old[resource], ...page.records]
         if (!isDataset) {
