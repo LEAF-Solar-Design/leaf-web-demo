@@ -61,7 +61,10 @@ def unique_pairs(pairs):
         result[key]=value
     return result
 try:
-    raw=sys.stdin.buffer.read().decode('utf-8',errors='strict')
+    wire=sys.stdin.buffer.read(1024*1024+1)
+    if len(wire)>1024*1024:
+        print(json.dumps({'ok':False,'error':{'message':'Request byte limit exceeded.','code':'BRIDGE_REQUEST_LIMIT'}}));sys.exit(0)
+    raw=wire.decode('utf-8',errors='strict')
     check_depth(raw)
     request=json.loads(raw,object_pairs_hook=unique_pairs,parse_constant=reject_constant)
 except UnicodeDecodeError:
@@ -192,6 +195,28 @@ function rpc(bound, op, context, value, signal, fault = null, protocolFault = nu
   calls.push({ op, context, value })
   return new Promise((resolve, reject) => {
     if (signal?.aborted) { const error = new Error('Python JSON request cancelled.'); error.code = 'BRIDGE_CANCELLED'; reject(error); return }
+    let requestBytes
+    let request = JSON.stringify({ database: fixture.database || database, bound_context: bound, context, op, value,
+      intake: fixture.intake || intake, copies: fixture.copy_candidates || copies, fault, protocol_fault: protocolFault, fixture })
+    if (fixture.duplicate_request_key) {
+      const token = JSON.stringify(fixture.duplicate_request_key) + ':'
+      request = request.replace(token, token + 'null,' + token)
+    }
+    if (fixture.request_json_value !== undefined) {
+      request = request.slice(0, -1) + ',"grammar":' + fixture.request_json_value + '}'
+    }
+    if (fixture.trailing_json) request += ' {}'
+    requestBytes = Buffer.from(request, 'utf8')
+    if (fixture.invalid_request_utf8) {
+      const invalid = Buffer.from(fixture.utf8_bytes)
+      if (fixture.utf8_truncated) requestBytes = Buffer.concat([requestBytes, invalid])
+      else {
+        const start = requestBytes.indexOf(Buffer.from('Panel'))
+        if (start < 0) { const error = new Error('Missing fixture label.'); error.code = 'BRIDGE_FIXTURE'; reject(error); return }
+        requestBytes = Buffer.concat([requestBytes.subarray(0, start), invalid, requestBytes.subarray(start + 5)])
+      }
+    }
+    if (requestBytes.length > 1024*1024) { const error = new Error('Request byte limit exceeded.'); error.code = 'BRIDGE_REQUEST_LIMIT'; reject(error); return }
     const script = protocolFault === 'stdin_epipe'
       ? "import os,sys,threading;os.close(0);print('STDIN_CLOSED',flush=True);threading.Event().wait(60)" : python
     let child
@@ -200,7 +225,7 @@ function rpc(bound, op, context, value, signal, fault = null, protocolFault = nu
     children.add(child)
     let stdout = '', stderr = '', finished = false, stdoutBytes = 0, stderrBytes = 0, terminalError = null
     const raw = []
-    let requestBytes, delivered = false
+    let delivered = false
     const stop = (code, message) => { if (!terminalError) { terminalError = new Error(message); terminalError.code = code }; child.kill() }
     const timer = setTimeout(() => stop('BRIDGE_TIMEOUT', 'Python JSON worker timed out.'), fixture.timeout_ms || 15000)
     const abort = () => stop('BRIDGE_CANCELLED', 'Python JSON request cancelled.')
@@ -263,26 +288,6 @@ function rpc(bound, op, context, value, signal, fault = null, protocolFault = nu
         else { protocolStats[protocolStats.length-1].receipts++; settle(null, response.result) }
       } catch (cause) { const error = new Error(cause.code === 'BRIDGE_DUPLICATE_JSON_KEY' ? cause.message : 'Python JSON worker returned malformed JSON.'); error.code = cause.code || 'BRIDGE_MALFORMED_JSON'; settle(error) }
     })
-    let request = JSON.stringify({ database: fixture.database || database, bound_context: bound, context, op, value,
-      intake: fixture.intake || intake, copies: fixture.copy_candidates || copies, fault, protocol_fault: protocolFault, fixture })
-    if (fixture.duplicate_request_key) {
-      const token = JSON.stringify(fixture.duplicate_request_key) + ':'
-      request = request.replace(token, token + 'null,' + token)
-    }
-    if (fixture.request_json_value !== undefined) {
-      request = request.slice(0, -1) + ',"grammar":' + fixture.request_json_value + '}'
-    }
-    if (fixture.trailing_json) request += ' {}'
-    requestBytes = Buffer.from(request, 'utf8')
-    if (fixture.invalid_request_utf8) {
-      const invalid = Buffer.from(fixture.utf8_bytes)
-      if (fixture.utf8_truncated) requestBytes = Buffer.concat([requestBytes, invalid])
-      else {
-        const start = requestBytes.indexOf(Buffer.from('Panel'))
-        if (start < 0) { stop('BRIDGE_FIXTURE', 'Missing fixture label.'); return }
-        requestBytes = Buffer.concat([requestBytes.subarray(0, start), invalid, requestBytes.subarray(start + 5)])
-      }
-    }
     if (protocolFault !== 'stdin_epipe') child.stdin.end(requestBytes)
   })
 }
@@ -355,6 +360,6 @@ async function dispose() {
     assert.ok(path.basename(root).startsWith('x07-json-journey-'))
     fs.rmSync(root, { recursive: true, force: true })
 }
-module.exports = { strictJSON, rpc, ctx, copies, intake, mount, screen, fireEvent, waitFor, cleanup, dispose, component, React, render, within, protocolStats,
+module.exports = { python, strictJSON, rpc, ctx, copies, intake, mount, screen, fireEvent, waitFor, cleanup, dispose, component, React, render, within, protocolStats,
   resources: () => ({ child_count: children.size, database, root }) }
 if (require.main === module) main().catch(error => { console.error(error); process.exitCode = 1 })
