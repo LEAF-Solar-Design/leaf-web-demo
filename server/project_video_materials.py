@@ -101,7 +101,7 @@ def _process_diagnostic(name, returncode, stderr):
             reason = 'process_failed'
     except OSError:
         pass
-    return dict(operation=name if name in {'probe', 'decode'} else 'unknown',
+    return dict(operation=name if name in {'sandbox', 'probe', 'decode'} else 'unknown',
                 returncode=returncode if type(returncode) is int and -255 <= returncode <= 255 else None,
                 reason=reason, stderr_state=stderr_state, stderr_prefix=stderr_prefix)
 
@@ -151,6 +151,18 @@ def _run(scratch, binary, args, name, deadline, recheck):
                     raise VideoError('video_cleanup_failed') from None
                 if failure is not None:
                     failure.decoder_diagnostic = _process_diagnostic(name, proc.returncode, stderr)
+
+
+def _require_sandbox(scratch, deadline, recheck):
+    """Check the identical cage with an image-supplied fixed no-media command."""
+    try:
+        _run(scratch, TOOLS[2], ['-version'], 'sandbox', deadline, recheck)
+    except VideoError as exc:
+        if exc.code != 'video_incomplete':
+            raise
+        failure = VideoError('video_unavailable')
+        failure.decoder_diagnostic = exc.decoder_diagnostic
+        raise failure from None
 
 
 def _number(value, minimum, maximum):
@@ -239,6 +251,7 @@ def decode(raw, material, *, identity, transcripts, recheck, deadline):
             handle.write(raw)
         inputs = ['-protocol_whitelist', 'file', '-enable_drefs', '0',
                   '-use_absolute_path', '0', '-f', 'mov']
+        _require_sandbox(scratch, deadline, recheck)
         _run(scratch, TOOLS[2], [
             '-v', 'error', '-threads', '1', '-err_detect', 'explode', *inputs,
             '-select_streams', 'v:0', '-count_frames',
