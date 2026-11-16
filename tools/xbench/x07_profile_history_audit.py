@@ -2,16 +2,27 @@
 import argparse
 from pathlib import Path
 import sqlite3
+import stat
 from x07_profile_version_diff import CustomerProfileStore, MAX_PROFILE_VERSION, _key, publish_stdout
+from x07_customer_profile_store import _check_connection
 
 MAX_AUDIT_ROWS = 10000
+
+
+def require_database_file(path):
+    if not stat.S_ISREG(Path(path).lstat().st_mode):
+        raise ValueError('regular database file required')
 
 
 def audit_history(store, *, customer_key):
     customer_key = _key(customer_key)
     if store.read_only is not True:
         raise ValueError('explicit read-only store required')
+    require_database_file(store.path)
     with store._connection() as db:
+        if db.row_factory is not sqlite3.Row:
+            raise ValueError('named SQLite rows required')
+        _check_connection(db)
         db.execute('BEGIN')
         root = db.execute('SELECT profile_id FROM customers WHERE customer_key=?', (customer_key,)).fetchone()
         versions = db.execute('SELECT version,profile_id FROM profile_versions WHERE customer_key=? ORDER BY version LIMIT ?',
@@ -53,6 +64,7 @@ def main():
     parser.add_argument('--customer', required=True)
     args = parser.parse_args()
     try:
+        require_database_file(args.database)
         result = audit_history(CustomerProfileStore(args.database, read_only=True), customer_key=args.customer)
     except (OSError, ValueError, sqlite3.Error):
         publish_stdout({'schema': 'leaf.x07.profile-history-audit.v1', 'error': 'AUDIT_UNAVAILABLE'})
