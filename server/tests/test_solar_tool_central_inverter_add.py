@@ -378,3 +378,79 @@ def test_central_inverter_add_refusal_copy_scan(builtin, bases, monkeypatch):
     with monkeypatch.context() as patch:
         patch.setattr(builtin.bridge, "MAX_DEVICES", len(bases["ground"]["inverters"]))
         assert builtin.input_readiness(bases["ground"])["input_reason"] == "capability_not_ready"
+
+
+def test_x02_add_all_explicit_fallback_graph(bases):
+    graph = bases["roof"]
+    before = copy.deepcopy(graph)
+    tool = local._load_builtin("solar-add-all-inverters")
+    params = {"expected_rev": graph["rev"], "hardware": hardware(),
+              "placement_strategy": "deterministic_grid"}
+    intake = {"panel_groups": [{"handle": "A5", "outlines": [
+        [[0, 0], [20, 0], [20, 20], [0, 20]]]}]}
+    after = tool.run(graph, params, source_intake=intake)
+    assert graph == before
+    assert after["rev"] == graph["rev"] + 1
+    assert after["inverters"]
+    proof = after["extra"]["inverter_placement"]
+    assert proof["engine"] == "deterministic_fallback"
+    assert proof["label"] == "Deterministic fallback"
+    assert proof["source_graph_sha256"] == digest(before)
+    assert proof["request_sha256"] == digest(params)
+    assert tool.run(graph, params, source_intake=intake) == after
+    assert validate_graph(copy.deepcopy(after)) == after
+
+
+def test_x02_add_all_requires_explicit_strategy_and_preserves_input(bases):
+    graph = bases["roof"]
+    before = copy.deepcopy(graph)
+    tool = local._load_builtin("solar-add-all-inverters")
+    with pytest.raises(GraphValidationError) as error:
+        tool.run(graph, {"expected_rev": graph["rev"], "hardware": hardware()}, source_intake={})
+    assert error.value.code == "INVALID_INVERTER_PLACEMENT_REQUEST"
+    assert graph == before
+
+
+def test_x02_add_all_canonical_preparation_carries_producing_attempt(bases, monkeypatch):
+    import json
+    import hashlib
+    import deps
+    import solar_project_graph as adapter
+    from test_sip_r3a_graph import Memory, NOW
+    memory = Memory()
+    graph = bases["roof"]
+    intake = {"solar_design_graph": graph, "solar_design_graph_sha256": digest(graph),
+              "panel_groups": [{"handle": "A5", "outlines": [
+                  [[0, 0], [20, 0], [20, 20], [0, 20]]]}]}
+    raw = canonical_bytes(intake)
+    context = adapter.ProjectGraphContext(memory.org, memory.project, memory.drawing,
+        memory.parent.version_id, raw, hashlib.sha256(raw).hexdigest(), NOW.isoformat())
+    monkeypatch.setattr(adapter, "require_project_sizing", lambda *args, **kwargs: None)
+    params = {"expected_rev": graph["rev"], "hardware": hardware(),
+              "placement_strategy": "deterministic_grid"}
+    prepared = adapter.prepare_project_graph_commit(context, "solar-add-all-inverters", params,
+        checkout=memory.lease, job_id=memory.job, attempt=2,
+        tool_manifest_sha256=deps.catalog_tool_digest(solar_tools.trusted_record("solar-add-all-inverters")))
+    receipt = json.loads(prepared.receipt_bytes)
+    assert receipt["engine"] == "deterministic_fallback"
+    assert receipt["engine_label"] == "Deterministic fallback"
+    assert receipt["producing_attempt"] == {"job_id": str(memory.job), "attempt": 2}
+    assert receipt["graph_sha256"] == digest(json.loads(prepared.output_intake_bytes)["solar_design_graph"])
+    assert intake["solar_design_graph"] == graph
+
+
+@pytest.mark.parametrize("groups", [
+    [{"handle": "A5", "outlines": [[]]}],
+    [{"handle": "A5", "outlines": [[[0, 0], [1, 1]]]}],
+    [{"handle": "A5", "outlines": [[[0, 0], [1, 0], [1, 1]]]},
+     {"handle": "0a5", "outlines": [[[0, 0], [1, 0], [1, 1]]]}],
+])
+def test_x02_add_all_invalid_outlines_preserve_state(bases, groups):
+    graph = bases["roof"]
+    before = copy.deepcopy(graph)
+    tool = local._load_builtin("solar-add-all-inverters")
+    with pytest.raises(GraphValidationError) as error:
+        tool.run(graph, {"expected_rev": graph["rev"], "hardware": hardware(),
+            "placement_strategy": "deterministic_grid"}, source_intake={"panel_groups": groups})
+    assert error.value.code == "INVALID_DRAWING_CONTEXT"
+    assert graph == before
