@@ -7263,3 +7263,154 @@ def test_oracle_load_all_metric_saturation_bound_cli_is_stable(tmp_path):
         assert all(parsed['fixtures'][key]['verdict']=='PASS' for key in expected[1:])
         outputs.append(run.stdout)
     assert outputs[0]==outputs[1] and records==original
+
+
+@pytest.mark.parametrize('metric,field,increment',[('panels','oracle_panels',1),('kw_dc','oracle_dc_power','0.25')])
+def test_oracle_load_single_string_influence_fraction_and_bound_siblings(metric,field,increment):
+    from fractions import Fraction
+    from benches import x05_reconcile as m
+    expected,records=bound_seven_fixture_records()
+    baseline=m.aggregate_bound_seven_steps(expected,records)
+    envelope=records[0]['envelope']; evidence=envelope['assurance']['evidence']
+    row=evidence[field][0]
+    delta=Fraction(increment)
+    row[metric]=row[metric]+increment if metric=='panels' else '4.25'
+    original=deepcopy(records)
+    result=m.aggregate_bound_seven_steps(expected,records)
+    before=baseline['fixtures'][expected[0]]['reconciliation']['oracle_loads']
+    after=result['fixtures'][expected[0]]['reconciliation']['oracle_loads']
+    owners={r['string_id']:r['grid_id'] for r in evidence['oracle_string_owners']}
+    connections={r['string_id']:r['inverter_id'] for r in evidence['oracle_assignments']}
+    for target,identifier,key in [('grid',owners[row['string_id']],'grid_id'),('inverter',connections[row['string_id']],'inverter_id')]:
+        check=after['metrics'][metric][target+'_comparison']
+        assert check['mismatch_count']==1 and check['examples'][0][key]==identifier
+        assert Fraction(check['examples'][0]['delta'])==delta
+        assert Fraction(check['examples'][0]['saved'])-Fraction(check['examples'][0]['oracle'])==delta
+    for other in ('strings','optimizers','panels','kw_dc'):
+        if other!=metric: assert after['metrics'][other]==before['metrics'][other]
+    assert all(result['fixtures'][key]==baseline['fixtures'][key] for key in expected[1:])
+    assert records==original
+
+
+@pytest.mark.parametrize('stale',[False,True])
+def test_oracle_load_inverter_refinement_exact_targets_and_stale_evidence(stale):
+    from fractions import Fraction
+    from benches import x05_reconcile as m
+    grid,evidence=coarsen_oracle_load_devices(*oracle_load_component('refine'))
+    baseline=m._seven_step_oracle_loads(grid,evidence)
+    evidence['oracle_inverter_ids'].append('new-device')
+    evidence['oracle_assignments'][1]['inverter_id']='new-device'
+    if not stale:
+        fields=dict(optimizers='oracle_strings',panels='oracle_panels',kw_dc='oracle_dc_power')
+        for metric in ('strings','optimizers','panels','kw_dc'):
+            weights={row['string_id']:Fraction(1 if metric=='strings' else row[metric]) for row in evidence['oracle_strings' if metric=='strings' else fields[metric]]}
+            totals={device:sum(weights[row['string_id']] for row in evidence['oracle_assignments'] if row['inverter_id']==device) for device in evidence['oracle_inverter_ids']}
+            evidence['inverter_loads'][metric]={key:(f'{value.numerator*(100//value.denominator)//100}.{value.numerator*(100//value.denominator)%100:02d}' if metric=='kw_dc' else int(value)) for key,value in totals.items()}
+    original=deepcopy((grid,evidence))
+    result=m._seven_step_oracle_loads(grid,evidence)
+    assert result['verdict']==('UNREADABLE' if stale else 'PASS')
+    for metric,checks in result['metrics'].items():
+        assert checks['grid_comparison']==baseline['metrics'][metric]['grid_comparison']
+        assert checks['grid_report']==baseline['metrics'][metric]['grid_report']
+        assert checks['inverter_comparison']['verdict']==('FAIL' if stale else 'PASS')
+        if stale: assert checks['inverter_report']['verdict']=='UNREADABLE'
+    assert (grid,evidence)==original
+
+
+@pytest.mark.parametrize('metric,field',[('optimizers','oracle_strings'),('panels','oracle_panels')])
+def test_oracle_zero_count_row_schema_is_named_unreadable(metric,field):
+    from benches import x05_reconcile as m
+    grid,evidence=oracle_load_component('zero-row')
+    evidence[field][0][metric]=0
+    baseline=m._seven_step_oracle_loads(grid,evidence)
+    assert baseline['verdict']=='UNREADABLE'
+    assert baseline['metrics'][metric]['grid_comparison']['reason'].endswith('unreadable')
+    for missing in ('oracle_string_owners','oracle_assignments'):
+        changed=deepcopy(evidence); changed.pop(missing)
+        result=m._seven_step_oracle_loads(grid,changed)
+        assert result['verdict']=='UNREADABLE'
+
+
+def test_oracle_zero_dc_still_needs_explicit_ownership_and_connection():
+    from benches import x05_reconcile as m
+    grid,evidence=oracle_load_component('zero-dc')
+    evidence['oracle_dc_power'][0]['kw_dc']='0'
+    grid['dc_totals']['zero-dcg0']='0'
+    evidence['inverter_loads']['kw_dc']['zero-dci0']='0'
+    evidence['oracle_values']['kw_dc']='1.75'
+    assert m._seven_step_oracle_loads(grid,evidence)['verdict']=='PASS'
+    for missing,binding in [('oracle_string_owners','owners'),('oracle_assignments','connections')]:
+        changed=deepcopy(evidence); changed.pop(missing)
+        result=m._seven_step_oracle_loads(grid,changed)
+        assert result['verdict']=='UNREADABLE' and result['bindings'][binding]['verdict']=='UNREADABLE'
+        assert changed['oracle_values']==evidence['oracle_values']
+
+
+def test_oracle_load_evidence_completion_subsets_orders_preserve_readable_failure():
+    from itertools import combinations,permutations
+    from benches import x05_reconcile as m
+    fields=('oracle_panels','oracle_dc_power','oracle_string_owners','oracle_assignments')
+    grid,complete=oracle_load_component('complete')
+    grid['optimizer_totals']['completeg0'],grid['optimizer_totals']['completeg1']=2,1
+    original=deepcopy((grid,complete))
+    for size in range(1,5):
+        for missing in combinations(fields,size):
+            for order in permutations(missing):
+                evidence=deepcopy(complete)
+                for field in missing: evidence.pop(field)
+                for field in order:
+                    result=m._seven_step_oracle_loads(grid,evidence)
+                    assert result['verdict']=='UNREADABLE'
+                    if 'oracle_string_owners' in evidence:
+                        assert result['metrics']['optimizers']['grid_comparison']['mismatch_count']==2
+                    if 'oracle_assignments' in evidence:
+                        assert result['metrics']['optimizers']['inverter_comparison']['verdict']=='PASS'
+                    evidence[field]=deepcopy(complete[field])
+                result=m._seven_step_oracle_loads(grid,evidence)
+                assert result['verdict']=='FAIL' and result['metrics']['optimizers']['grid_comparison']['mismatch_count']==2
+                repaired=deepcopy(grid); repaired['optimizer_totals']=dict(completeg0=1,completeg1=2)
+                assert m._seven_step_oracle_loads(repaired,evidence)['verdict']=='PASS'
+    assert (grid,complete)==original
+
+
+def test_oracle_load_panel_optimizer_exchange_preserves_other_metrics():
+    from benches import x05_reconcile as m
+    grid,evidence=oracle_load_component('exchange')
+    grid['panel_totals']['exchangeg0'],grid['panel_totals']['exchangeg1']=6,3
+    baseline=m._seven_step_oracle_loads(grid,evidence)
+    changed_grid,changed=deepcopy((grid,evidence))
+    changed['oracle_strings']=[dict(string_id=row['string_id'],optimizers=row['panels']) for row in evidence['oracle_panels']]
+    changed['oracle_panels']=[dict(string_id=row['string_id'],panels=row['optimizers']) for row in evidence['oracle_strings']]
+    changed_grid['optimizer_totals'],changed_grid['panel_totals']=deepcopy(grid['panel_totals']),deepcopy(grid['optimizer_totals'])
+    changed['inverter_loads']['optimizers'],changed['inverter_loads']['panels']=deepcopy(evidence['inverter_loads']['panels']),deepcopy(evidence['inverter_loads']['optimizers'])
+    changed['oracle_values']['optimizers'],changed['oracle_values']['panels']=evidence['oracle_values']['panels'],evidence['oracle_values']['optimizers']
+    result=m._seven_step_oracle_loads(changed_grid,changed)
+    for metric in ('strings','kw_dc'): assert result['metrics'][metric]==baseline['metrics'][metric]
+    for old,new in [('panels','optimizers'),('optimizers','panels')]:
+        for target in ('grid','inverter'):
+            before,after=baseline['metrics'][old][target+'_comparison'],result['metrics'][new][target+'_comparison']
+            assert before['verdict']==after['verdict'] and before['mismatch_count']==after['mismatch_count']
+            assert before['examples']==after['examples']
+            assert baseline['metrics'][old][target+'_report']['verdict']==result['metrics'][new][target+'_report']['verdict']
+
+
+@pytest.mark.parametrize('missing',['oracle_string_owners','oracle_assignments'])
+def test_all_zero_oracle_rows_remain_unreadable_after_omission_without_sum_change(missing):
+    from fractions import Fraction
+    from benches import x05_reconcile as m
+    grid,evidence=oracle_load_component('all-zero')
+    for field,metric in [('oracle_strings','optimizers'),('oracle_panels','panels'),('oracle_dc_power','kw_dc')]:
+        for row in evidence[field]: row[metric]=0
+        evidence['oracle_values'][metric]=0
+        for key in evidence['inverter_loads'][metric]: evidence['inverter_loads'][metric][key]=0
+    for field in ('optimizer_totals','panel_totals','dc_totals'):
+        for key in grid[field]: grid[field][key]=0
+    assert m._seven_step_oracle_loads(grid,evidence)['verdict']=='UNREADABLE'
+    evidence[missing].pop(0)
+    result=m._seven_step_oracle_loads(grid,evidence)
+    assert result['verdict']=='UNREADABLE'
+    assert sum(Fraction(row['panels']) for row in evidence['oracle_panels'])==0
+    assert sum(Fraction(row['kw_dc']) for row in evidence['oracle_dc_power'])==0
+    # Zero panel/optimizer rows already violate the positive-count schema;
+    # the separate zero-DC case isolates valid-row ownership uncertainty.
+    assert result['metrics']['optimizers']['grid_comparison']['verdict']=='UNREADABLE'
