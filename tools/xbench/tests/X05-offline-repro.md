@@ -2936,3 +2936,49 @@ the shared numeric-string grammar in CSV and direct row validation, and are
 named UNREADABLE rather than accepted as equal. These are synthetic supplied
 rows and structural repairs, not proof of live exports, independent saved-design
 acquisition or live X05 acceptance.
+
+## CSV column-binding replay
+
+Within Studio X-bench X05, headers bind each decoded cell to a named field.
+Reordering headers with their cells preserves CSV/view equality. Reordering only
+cells changes bindings and must not hide an independent saved-design mismatch.
+
+```python
+import sys, runpy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+evidence = fixtures['complete_evidence']()
+evidence['saved_values']['panels'] += 1
+columns = ('metric', 'delta', 'oracle', 'studio', 'verdict')
+paired = fixtures['csv_fixture'](evidence['view_rows'], columns)
+wrong = fixtures['csv_records_text']([m.TABLE_COLUMNS] +
+        [[row[key] for key in columns] for row in evidence['view_rows']])
+for label, text in [('paired headers and cells', paired), ('cells only', wrong)]:
+    evidence['csv_text'] = text
+    result = m.reconcile_offline(evidence)
+    check = result['stages']['csv_view']
+    if label == 'cells only':
+        assert check['mismatches'] == [dict(metric=metric, field=field)
+            for metric in m.METRICS for field in ('studio', 'delta')]
+    print(label, result['verdict'], check['verdict'], check['reason'],
+          len(check['mismatches']), result['stages']['table']['verdict'])
+```
+
+Expected output:
+
+```text
+paired headers and cells FAIL PASS csv_view_equal 0 FAIL
+cells only FAIL FAIL csv_view_mismatch 10 FAIL
+```
+
+The wrong export swaps studio and delta cells under unchanged headers, producing
+two named field mismatches in each of five metrics. The independent saved panel
+value remains wrong in both cases. Tests enumerate all 120 column permutations
+with distinct numeric fields so equal values cannot conceal wrong bindings.
+They also verify minimal/all quote equivalence, strict verdict tokens, and decoded
+cell budgets for doubled quotes and non-BMP characters. A decoded payload exactly
+at the structural cell budget can still fail metric/header semantics; that is
+separate from an excess decoded length. Parser field limits are restored.
+Synthetic binding consistency does not prove live exports or saved-design truth,
+and no result accepts live X05.

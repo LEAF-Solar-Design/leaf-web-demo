@@ -8339,3 +8339,112 @@ def test_csv_overflow_stops_after_one_logical_lookahead_without_tail_scan(monkey
         assert 'private-unparsed-tail' not in serialize_result(result)
         assert csv.field_size_limit()==2
     finally: csv.field_size_limit(previous)
+
+
+def distinct_csv_binding_rows():
+    _,rows=table_fixture()
+    values=dict(panels=(25,24,1),optimizers=(13,12,1),inverters=(3,1,2),strings=(5,2,3),kw_dc=('9.6','8.5','1.1'))
+    for row in rows:
+        row['studio'],row['oracle'],row['delta']=values[row['metric']]
+        row['verdict']='FAIL'
+    return rows
+
+
+def test_all_csv_column_permutations_preserve_paired_bindings_detect_cells_only():
+    from itertools import permutations
+    from benches import x05_reconcile as m
+    rows=distinct_csv_binding_rows(); original=deepcopy(rows); outcomes=dict(PASS=0,FAIL=0,UNREADABLE=0)
+    baseline=m.compare_csv_view(csv_fixture(rows),rows)
+    assert baseline['verdict']=='PASS'
+    for columns in permutations(TABLE_COLUMNS):
+        assert m.compare_csv_view(csv_fixture(rows,columns),rows)==baseline
+        text=csv_records_text([TABLE_COLUMNS]+[[row[key] for key in columns] for row in rows])
+        result=m.compare_csv_view(text,rows)
+        if columns==TABLE_COLUMNS: expected='PASS'
+        elif columns[0]=='metric' and columns[-1]=='verdict': expected='FAIL'
+        else: expected='UNREADABLE'
+        assert result['verdict']==expected
+        outcomes[expected]+=1
+    assert outcomes==dict(PASS=1,FAIL=5,UNREADABLE=114) and rows==original
+
+
+@pytest.mark.parametrize('mismatch',[False,True])
+def test_csv_minimal_and_all_quoting_agree_direct_and_bound(mismatch):
+    from benches import x05_reconcile as m
+    expected,records=bound_seven_fixture_records(); evidence=records[0]['envelope']['assurance']['evidence']
+    exported=deepcopy(evidence['view_rows'])
+    if mismatch: evidence['view_rows'][0]['studio']+=1
+    results=[]
+    for quoting in (csv.QUOTE_MINIMAL,csv.QUOTE_ALL):
+        output=StringIO(newline=''); writer=csv.writer(output,quoting=quoting,lineterminator='\r\n')
+        writer.writerow(TABLE_COLUMNS); writer.writerows([row[key] for key in TABLE_COLUMNS] for row in exported)
+        evidence['csv_text']=output.getvalue(); supplied=deepcopy(records)
+        direct=m.compare_csv_view(evidence['csv_text'],evidence['view_rows'])
+        aggregate=m.aggregate_bound_seven_steps(expected,records)
+        assert aggregate['fixtures'][expected[0]]['reconciliation']['steps']['5']['csv_view']==direct
+        assert direct['verdict']==('FAIL' if mismatch else 'PASS')
+        assert all(aggregate['fixtures'][key]['verdict']=='PASS' for key in expected[1:])
+        assert records==supplied
+        results.append(aggregate)
+    assert results[0]==results[1]
+
+
+@pytest.mark.parametrize('index',range(5))
+@pytest.mark.parametrize('token',['pass','fail','private-verdict-canary','',0])
+def test_csv_verdict_tokens_are_strict_sanitized_and_recover(index,token):
+    from benches import x05_reconcile as m
+    _,view=table_fixture(); exported=deepcopy(view)
+    exported[index]['verdict']=token; original=deepcopy(exported)
+    result=m.compare_csv_view(csv_fixture(exported),view)
+    assert result==dict(verdict='UNREADABLE',reason='csv_view_rows_unreadable')
+    assert 'private-verdict-canary' not in serialize_result(result) and exported==original
+    exported[index]['verdict']=view[index]['verdict']
+    assert m.compare_csv_view(csv_fixture(exported),view)['verdict']=='PASS'
+
+
+@pytest.mark.parametrize('header',[False,True])
+@pytest.mark.parametrize('character',['"',chr(0x1F642)])
+@pytest.mark.parametrize('excess',[False,True])
+def test_csv_decoded_field_budget_handles_escaping_and_non_bmp_with_restoration(header,character,excess):
+    from benches import x05_reconcile as m
+    _,view=table_fixture(); matrix=list(csv.reader(StringIO(csv_fixture(view))))
+    payload=character*(m.MAX_CSV_CELL+int(excess))
+    matrix[0 if header else 1][0]=payload
+    text=csv_records_text(matrix)
+    if character=='"': assert len(text)>2*len(payload)
+    previous=csv.field_size_limit()
+    try:
+        csv.field_size_limit(3)
+        rows,error=m._csv_rows(text)
+        if excess: assert rows is None and error=='csv_cell_too_large'
+        elif header: assert rows is None and error=='csv_headers_unreadable'
+        else:
+            assert error is None and len(rows[0]['metric'])==m.MAX_CSV_CELL and rows[0]['metric']==payload
+        assert csv.field_size_limit()==3
+        result=m.compare_csv_view(text,view)
+        assert result['verdict']=='UNREADABLE' and payload not in serialize_result(result)
+        assert csv.field_size_limit()==3
+    finally: csv.field_size_limit(previous)
+
+
+@pytest.mark.parametrize('order',[('csv','table'),('table','csv')])
+def test_bound_csv_structure_and_independent_table_faults_repair_separately(order):
+    from benches import x05_reconcile as m
+    expected,records=bound_seven_fixture_records(); source=records[0]['envelope']['assurance']['evidence']
+    baseline=m.aggregate_bound_seven_steps(expected,records)
+    valid_csv=source['csv_text']; saved_panels=source['saved_values']['panels']
+    source['csv_text']='"private-broken-export'; source['saved_values']['panels']+=1
+    remaining={'csv','table'}; history=[]; frozen=[]
+    for repair in order+(None,):
+        supplied=deepcopy(records); result=m.aggregate_bound_seven_steps(expected,records)
+        fixture=result['fixtures'][expected[0]]; step=fixture['reconciliation']['steps']['5']
+        assert step['csv_view']['verdict']==('UNREADABLE' if 'csv' in remaining else 'PASS')
+        assert step['table']['verdict']==('FAIL' if 'table' in remaining else 'PASS')
+        assert fixture['verdict']==('UNREADABLE' if 'csv' in remaining else 'FAIL' if 'table' in remaining else 'PASS')
+        assert all(result['fixtures'][key]==baseline['fixtures'][key] for key in expected[1:])
+        assert 'private-broken-export' not in serialize_result(result) and records==supplied
+        history.append(result); frozen.append(deepcopy(result))
+        if repair=='csv': source['csv_text']=valid_csv
+        elif repair=='table': source['saved_values']['panels']=saved_panels
+        if repair is not None: remaining.remove(repair)
+    assert history==frozen and history[-1]==baseline
