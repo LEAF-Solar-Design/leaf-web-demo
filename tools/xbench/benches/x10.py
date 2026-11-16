@@ -8,6 +8,7 @@ with decimal-string quantity/unit_rate fields. Neither is product evidence.
 Customer manifests and fixture contents must remain outside git.
 """
 
+import hashlib
 import json
 from decimal import Decimal, InvalidOperation, localcontext
 from pathlib import Path
@@ -94,6 +95,14 @@ def bindings(ctx):
                 or any(proof.get(key) != row.get(key) for key in ("path", "bytes", "sha256"))):
             raise ValueError("missing, wrong-role or unverified fixture binding: " + role)
         bound[role] = Path(row["path"])
+        digest = hashlib.sha256()
+        size = 0
+        with bound[role].open("rb") as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                size += len(block)
+                digest.update(block)
+        if size != row.get("bytes") or digest.hexdigest() != row.get("sha256"):
+            raise ValueError("fixture content changed: " + role)
     for key in ("import_controls", "workflow_controls"):
         controls = config.get(key, [])
         if (not isinstance(controls, list) or len(controls) > 8
@@ -115,7 +124,12 @@ def classify(observation, expected=None):
                    and re.search(r"\bunavailable\b", label, re.I))
     pending = "Checking Solar steps" in observation.get("ui_text", "")
     proven = fresh and observation.get("evidence_saved") is True and not pending
-    if proven and observation.get("imported_version_selected") is True and unavailable:
+    contradictory = (bool(observation.get("import_rejection"))
+                     and observation.get("imported_version_selected") is True)
+    if contradictory:
+        verdict = "UNREADABLE"
+        reason = "Contradictory import rejection and selected drawing version evidence."
+    elif proven and observation.get("imported_version_selected") is True and unavailable:
         verdict = "FAIL"
         reason = ("Fresh canonical project with imported drawing version selected renders "
                   "Ground Physical unavailable; acceptance is conjunctive.")
@@ -197,22 +211,77 @@ def _valid_png(path):
     if data[:8] != b"\x89PNG\r\n\x1a\n":
         raise ValueError("invalid screenshot signature")
     offset, first, image = 8, True, False
+    compressed = bytearray()
+    rows = []
+    palette = False
+    image_ended = False
     while offset + 12 <= len(data):
         length = struct.unpack(">I", data[offset:offset + 4])[0]
         kind = data[offset + 4:offset + 8]
         end = offset + 12 + length
-        if end > len(data):
+        if (end > len(data) or re.fullmatch(rb"[A-Za-z]{4}", kind) is None
+                or kind[2] & 32):
             break
         payload = data[offset + 8:end - 4]
         if zlib.crc32(kind + payload) & 0xffffffff != struct.unpack(">I", data[end - 4:end])[0]:
             break
-        if first and (kind != b"IHDR" or length != 13 or not all(struct.unpack(">II", payload[:8]))):
+        if first:
+            if kind != b"IHDR" or length != 13:
+                break
+            width, height, depth, color, compression, filtering, interlace = struct.unpack(">IIBBBBB", payload)
+            depths = {0: (1, 2, 4, 8, 16), 2: (8, 16), 3: (1, 2, 4, 8),
+                      4: (8, 16), 6: (8, 16)}
+            if (not 0 < width <= 0x7fffffff or not 0 < height <= 0x7fffffff
+                    or depth not in depths.get(color, ()) or compression != 0
+                    or filtering != 0 or interlace not in (0, 1)):
+                break
+            channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[color]
+            passes = ((0, 0, 1, 1),) if not interlace else (
+                (0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4),
+                (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2))
+            for x, y, dx, dy in passes:
+                columns = max(0, (width - x + dx - 1) // dx)
+                count = max(0, (height - y + dy - 1) // dy)
+                if columns and count:
+                    rows.append((1 + (columns * channels * depth + 7) // 8, count))
+            expected = sum(length * count for length, count in rows)
+            if expected > 64 * 1024 * 1024:
+                raise ValueError("screenshot decoded size exceeds limit")
+        elif kind == b"IHDR":
             break
         first = False
-        image = image or kind == b"IDAT"
+        if kind == b"PLTE":
+            if palette or image or color in (0, 4) or not length or length % 3 or length > 768:
+                break
+            if color == 3 and length // 3 > 2 ** depth:
+                break
+            palette = True
+        elif kind == b"IDAT":
+            if image_ended or (color == 3 and not palette):
+                break
+            image = True
+            compressed.extend(payload)
+        elif image:
+            image_ended = True
         if kind == b"IEND":
             if length == 0 and end == len(data) and image:
+                try:
+                    decoder = zlib.decompressobj()
+                    decoded = decoder.decompress(compressed, min(expected + 1, 64 * 1024 * 1024))
+                except zlib.error as exc:
+                    raise ValueError("invalid screenshot compressed data") from exc
+                if (len(decoded) != expected or not decoder.eof
+                        or decoder.unused_data or decoder.unconsumed_tail):
+                    raise ValueError("invalid screenshot decoded size or stream")
+                position = 0
+                for stride, count in rows:
+                    for _ in range(count):
+                        if decoded[position] > 4:
+                            raise ValueError("invalid screenshot row filter")
+                        position += stride
                 return
+            break
+        if kind not in (b"IHDR", b"PLTE", b"IDAT") and not kind[0] & 32:
             break
         offset = end
     raise ValueError("invalid screenshot structure")
@@ -286,8 +355,12 @@ def _import_primary(page, ctx, config, bound, observation):
         r"^(?:Choose the drawing again to retry the upload\.|Retry to attach this drawing to the project\.)$"))
     status.or_(failure).first.wait_for(state="visible", timeout=180_000)
     if failure.is_visible():
-        observation["import_rejection"] = safe_text(failure.inner_text(timeout=15_000))
-        observation["attachment_status"] = safe_text(intake.get_by_role("status").first.inner_text(timeout=15_000))
+        hint = failure.inner_text(timeout=15_000)
+        if hint not in ("Choose the drawing again to retry the upload.",
+                        "Retry to attach this drawing to the project."):
+            raise ValueError("unrecognized rendered import refusal")
+        observation["import_rejection"] = hint
+        observation["attachment_status"] = "Primary drawing attachment rejected; retry required."
         # Capture only the explicit rendered hint, excluding Diagnostic details.
         _save(page, ctx, observation, surface=failure)
         return False
@@ -358,12 +431,15 @@ def _ground(page, ctx, observation):
 
 def observe(page, ctx, config, bound, session_info=None):
     observation = {"fresh_project": False, "imported_version_selected": False, "evidence_saved": False}
-    for key in ("source", "web_build"):
-        value = (session_info or {}).get(key)
-        if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value):
-            observation[key] = value
-    stage = "workspace profile"
+    stage = "session provenance"
     try:
+        for key in ("source", "web_build"):
+            value = (session_info or {}).get(key)
+            if (not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}", value)
+                    or value != ctx.source_sha):
+                raise ValueError("invalid session provenance")
+        observation.update({key: session_info[key] for key in ("source", "web_build")})
+        stage = "workspace profile"
         _prepare_workspace(page)
         stage = "fresh project creation"
         _create_project(page, ctx, config, observation)
@@ -382,7 +458,7 @@ def observe(page, ctx, config, bound, session_info=None):
 def run(ctx):
     try:
         config, bound, _expected, total = bindings(ctx)
-    except (ValueError, OSError, KeyError, TypeError, InvalidOperation):
+    except (ValueError, OSError, KeyError, TypeError, UnicodeError, InvalidOperation):
         return classify({"issue": "Missing or invalid fixture bindings/config, oracle or rates; browser not opened."})
     try:
         repo = Path(__file__).resolve().parents[3]
