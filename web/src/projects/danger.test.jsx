@@ -17,21 +17,24 @@ function openReset() {
 }
 
 function openDelete() {
-  fireEvent.click(screen.getByRole('button', { name: /^delete$/i }))
+  fireEvent.click(screen.getByRole('button', { name: /^delete permanently$/i }))
 }
 
-describe('acceptance: delete requires typed confirmation naming the project', () => {
+describe('acceptance: archived project deletion requires typed confirmation naming the project', () => {
   it('keeps the delete confirm button disabled until the exact project name is typed', () => {
     const onDelete = vi.fn()
-    render(<DangerZone projectName="Solar Canopy A" onReset={vi.fn()} onDelete={onDelete} />)
+    render(<DangerZone projectStatus="archived" projectName="Solar Canopy A" onReset={vi.fn()} onDelete={onDelete} />)
 
     openDelete()
-    const confirmButtons = screen.getAllByRole('button', { name: /^delete$/i })
+    const confirmButtons = screen.getAllByRole('button', { name: /^delete permanently$/i })
     const confirmButton = confirmButtons[confirmButtons.length - 1]
     expect(confirmButton).toBeDisabled()
 
     const input = screen.getByLabelText(/type the project name to confirm delete/i)
     fireEvent.change(input, { target: { value: 'wrong name' } })
+    expect(confirmButton).toBeDisabled()
+
+    fireEvent.change(input, { target: { value: ' Solar Canopy A ' } })
     expect(confirmButton).toBeDisabled()
 
     fireEvent.change(input, { target: { value: 'Solar Canopy A' } })
@@ -42,12 +45,12 @@ describe('acceptance: delete requires typed confirmation naming the project', ()
 
   it('never calls onDelete from a typed name that only partially matches', () => {
     const onDelete = vi.fn()
-    render(<DangerZone projectName="Solar Canopy A" onReset={vi.fn()} onDelete={onDelete} />)
+    render(<DangerZone projectStatus="archived" projectName="Solar Canopy A" onReset={vi.fn()} onDelete={onDelete} />)
 
     openDelete()
     const input = screen.getByLabelText(/type the project name to confirm delete/i)
     fireEvent.change(input, { target: { value: 'Solar Canopy' } })
-    const confirmButtons = screen.getAllByRole('button', { name: /^delete$/i })
+    const confirmButtons = screen.getAllByRole('button', { name: /^delete permanently$/i })
     fireEvent.click(confirmButtons[confirmButtons.length - 1])
 
     expect(onDelete).not.toHaveBeenCalled()
@@ -58,21 +61,22 @@ describe('acceptance: delete requires typed confirmation naming the project', ()
       status: 'deleted',
       receipt: { receipt_id: 'rcpt-del-1', action: 'project_deleted' },
     })
-    render(<DangerZone projectName="Solar Canopy A" onReset={vi.fn()} onDelete={onDelete} />)
+    render(<DangerZone projectStatus="archived" projectName="Solar Canopy A" onReset={vi.fn()} onDelete={onDelete} />)
 
     openDelete()
     const input = screen.getByLabelText(/type the project name to confirm delete/i)
     fireEvent.change(input, { target: { value: 'Solar Canopy A' } })
-    const confirmButtons = screen.getAllByRole('button', { name: /^delete$/i })
+    const confirmButtons = screen.getAllByRole('button', { name: /^delete permanently$/i })
     fireEvent.click(confirmButtons[confirmButtons.length - 1])
 
     await waitFor(() => expect(onDelete).toHaveBeenCalledTimes(1))
+    expect(onDelete).toHaveBeenCalledWith('Solar Canopy A')
   })
 })
 
 describe('acceptance: reset is distinct from delete', () => {
   it('renders reset and delete as independent confirm flows with their own typed input', () => {
-    render(<DangerZone projectName="Solar Canopy A" onReset={vi.fn()} onDelete={vi.fn()} />)
+    render(<DangerZone projectStatus="archived" projectName="Solar Canopy A" onReset={vi.fn()} onDelete={vi.fn()} />)
 
     openReset()
     openDelete()
@@ -82,7 +86,7 @@ describe('acceptance: reset is distinct from delete', () => {
   })
 
   it('typing the confirmation name into the reset flow does not enable delete, and vice versa', () => {
-    render(<DangerZone projectName="Solar Canopy A" onReset={vi.fn()} onDelete={vi.fn()} />)
+    render(<DangerZone projectStatus="archived" projectName="Solar Canopy A" onReset={vi.fn()} onDelete={vi.fn()} />)
 
     openReset()
     openDelete()
@@ -90,7 +94,7 @@ describe('acceptance: reset is distinct from delete', () => {
     const resetInput = screen.getByLabelText(/type the project name to confirm reset/i)
     fireEvent.change(resetInput, { target: { value: 'Solar Canopy A' } })
 
-    const deleteConfirmButtons = screen.getAllByRole('button', { name: /^delete$/i })
+    const deleteConfirmButtons = screen.getAllByRole('button', { name: /^delete permanently$/i })
     const deleteConfirmButton = deleteConfirmButtons[deleteConfirmButtons.length - 1]
     expect(deleteConfirmButton).toBeDisabled()
 
@@ -101,7 +105,7 @@ describe('acceptance: reset is distinct from delete', () => {
   it('confirming reset never calls onDelete, and confirming delete never calls onReset', async () => {
     const onReset = vi.fn().mockResolvedValue({ status: 'reset', receipt: { receipt_id: 'rcpt-r-1' } })
     const onDelete = vi.fn().mockResolvedValue({ status: 'deleted', receipt: { receipt_id: 'rcpt-d-1' } })
-    render(<DangerZone projectName="Solar Canopy A" onReset={onReset} onDelete={onDelete} />)
+    render(<DangerZone projectStatus="archived" projectName="Solar Canopy A" onReset={onReset} onDelete={onDelete} />)
 
     openReset()
     fireEvent.change(screen.getByLabelText(/type the project name to confirm reset/i), {
@@ -115,7 +119,7 @@ describe('acceptance: reset is distinct from delete', () => {
   })
 
   it('canceling one action leaves the other action untouched', () => {
-    render(<DangerZone projectName="Solar Canopy A" onReset={vi.fn()} onDelete={vi.fn()} />)
+    render(<DangerZone projectStatus="archived" projectName="Solar Canopy A" onReset={vi.fn()} onDelete={vi.fn()} />)
 
     openReset()
     openDelete()
@@ -143,7 +147,7 @@ describe('acceptance: both reset and delete show the server receipt', () => {
       deleted_file_count: 3,
       receipt: { receipt_id: 'rcpt-reset-999', action: 'project_reset' },
     })
-    render(<DangerZone projectName="Solar Canopy A" onReset={onReset} onDelete={vi.fn()} />)
+    render(<DangerZone projectStatus="archived" projectName="Solar Canopy A" onReset={onReset} onDelete={vi.fn()} />)
 
     openReset()
     fireEvent.change(screen.getByLabelText(/type the project name to confirm reset/i), {
@@ -160,27 +164,27 @@ describe('acceptance: both reset and delete show the server receipt', () => {
       status: 'deleted',
       receipt: { receipt_id: 'rcpt-delete-777', action: 'project_deleted' },
     })
-    render(<DangerZone projectName="Solar Canopy A" onReset={vi.fn()} onDelete={onDelete} />)
+    render(<DangerZone projectStatus="archived" projectName="Solar Canopy A" onReset={vi.fn()} onDelete={onDelete} />)
 
     openDelete()
     fireEvent.change(screen.getByLabelText(/type the project name to confirm delete/i), {
       target: { value: 'Solar Canopy A' },
     })
-    const deleteConfirmButtons = screen.getAllByRole('button', { name: /^delete$/i })
+    const deleteConfirmButtons = screen.getAllByRole('button', { name: /^delete permanently$/i })
     fireEvent.click(deleteConfirmButtons[deleteConfirmButtons.length - 1])
 
     await waitFor(() => expect(screen.getByText('rcpt-delete-777')).toBeTruthy())
   })
 
-  it('surfaces a retry-worthy error and no receipt when the server call fails', async () => {
+  it('surfaces the server error and no receipt when permanent deletion fails', async () => {
     const onDelete = vi.fn().mockRejectedValue({ message: 'Workspace is locked.' })
-    render(<DangerZone projectName="Solar Canopy A" onReset={vi.fn()} onDelete={onDelete} />)
+    render(<DangerZone projectStatus="archived" projectName="Solar Canopy A" onReset={vi.fn()} onDelete={onDelete} />)
 
     openDelete()
     fireEvent.change(screen.getByLabelText(/type the project name to confirm delete/i), {
       target: { value: 'Solar Canopy A' },
     })
-    const deleteConfirmButtons = screen.getAllByRole('button', { name: /^delete$/i })
+    const deleteConfirmButtons = screen.getAllByRole('button', { name: /^delete permanently$/i })
     fireEvent.click(deleteConfirmButtons[deleteConfirmButtons.length - 1])
 
     await waitFor(() => expect(screen.getByText(/workspace is locked/i)).toBeTruthy())
@@ -190,22 +194,22 @@ describe('acceptance: both reset and delete show the server receipt', () => {
 
 describe('acceptance: undo affordance surfaces exactly what the server contract offers', () => {
   it('says the action cannot be undone, before confirm, when no undo prop is supplied (the real reset/delete API is terminal)', () => {
-    render(<DangerZone projectName="Solar Canopy A" onReset={vi.fn()} onDelete={vi.fn()} />)
+    render(<DangerZone projectStatus="archived" projectName="Solar Canopy A" onReset={vi.fn()} onDelete={vi.fn()} />)
 
     openReset()
     openDelete()
 
     const resetSection = screen.getByLabelText(/reset project/i)
-    const deleteSection = screen.getByLabelText(/delete project/i)
+    const deleteSection = screen.getByLabelText(/delete permanently/i)
     expect(within(resetSection).getByText(/can.t be undone/i)).toBeTruthy()
     expect(within(deleteSection).getByText(/can.t be undone/i)).toBeTruthy()
   })
 
   it('shows the terminal notice before the typed confirmation input, never after', () => {
-    render(<DangerZone projectName="Solar Canopy A" onReset={vi.fn()} onDelete={vi.fn()} />)
+    render(<DangerZone projectStatus="archived" projectName="Solar Canopy A" onReset={vi.fn()} onDelete={vi.fn()} />)
     openDelete()
 
-    const deleteSection = screen.getByLabelText(/delete project/i)
+    const deleteSection = screen.getByLabelText(/delete permanently/i)
     const notice = within(deleteSection).getByText(/can.t be undone/i)
     const input = within(deleteSection).getByLabelText(/type the project name to confirm delete/i)
     // DOM order encodes reading/tab order: the notice node must precede the input node.
@@ -213,7 +217,7 @@ describe('acceptance: undo affordance surfaces exactly what the server contract 
   })
 
   it('never renders a fake "Undo" button when the API is terminal', () => {
-    render(<DangerZone projectName="Solar Canopy A" onReset={vi.fn()} onDelete={vi.fn()} />)
+    render(<DangerZone projectStatus="archived" projectName="Solar Canopy A" onReset={vi.fn()} onDelete={vi.fn()} />)
     openReset()
     openDelete()
 
@@ -223,6 +227,7 @@ describe('acceptance: undo affordance surfaces exactly what the server contract 
   it('renders the server-supplied undo description instead of the terminal notice when the caller says undo is real', () => {
     render(
       <DangerZone
+        projectStatus="archived"
         projectName="Solar Canopy A"
         resetUndo={{ description: 'You can restore these files from the last checkpoint within 24 hours.' }}
         onReset={vi.fn()}
@@ -239,6 +244,7 @@ describe('acceptance: undo affordance surfaces exactly what the server contract 
   it('renders each action\'s own undo state independently — reset undoable does not make delete undoable', () => {
     render(
       <DangerZone
+        projectStatus="archived"
         projectName="Solar Canopy A"
         resetUndo={{ description: 'Files can be restored within 24 hours.' }}
         onReset={vi.fn()}
@@ -250,7 +256,7 @@ describe('acceptance: undo affordance surfaces exactly what the server contract 
     openDelete()
 
     const resetSection = screen.getByLabelText(/reset project/i)
-    const deleteSection = screen.getByLabelText(/delete project/i)
+    const deleteSection = screen.getByLabelText(/delete permanently/i)
     expect(within(resetSection).getByText(/restored within 24 hours/i)).toBeTruthy()
     expect(within(deleteSection).getByText(/can.t be undone/i)).toBeTruthy()
   })
@@ -260,5 +266,53 @@ describe('rendering guard', () => {
   it('renders nothing without a confirmed project name', () => {
     const { container } = render(<DangerZone projectName={null} onReset={vi.fn()} onDelete={vi.fn()} />)
     expect(container).toBeEmptyDOMElement()
+  })
+})
+
+describe('archive and restore', () => {
+  it('archives an active project with one confirm click and no typed name', async () => {
+    const onArchive = vi.fn().mockResolvedValue({ receipt: { receipt_id: 'archive-receipt' } })
+    const onDelete = vi.fn()
+    render(<DangerZone projectName="Roof" onArchive={onArchive} onDelete={onDelete} />)
+    expect(screen.getByText(/hidden from lists and read-only/i)).toBeTruthy()
+    expect(screen.getByText(/restorable for 30 days/i)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /delete/i })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Archive project' }))
+    expect(screen.queryByRole('textbox')).toBeNull()
+    expect(onArchive).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Archive project' }))
+    await screen.findByText('archive-receipt')
+    expect(onArchive).toHaveBeenCalledTimes(1)
+    expect(onDelete).not.toHaveBeenCalled()
+  })
+
+  it('shows server archive dates and restores without a typed name', async () => {
+    const onRestore = vi.fn().mockResolvedValue({ receipt: { receipt_id: 'restore-receipt' } })
+    render(<DangerZone projectName="Roof" projectStatus="archived"
+      archivedAt="2026-10-01T00:00:00Z" restoreUntil="2026-10-31T00:00:00Z" onRestore={onRestore} />)
+    expect(screen.getByText('Archived on 2026-10-01T00:00:00Z · restorable until 2026-10-31T00:00:00Z')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Delete permanently' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Restore' }))
+    await screen.findByText('restore-receipt')
+    expect(onRestore).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    ['archive', 409, 'A checkout or job is active.'],
+    ['restore', 409, 'The restore window has expired.'],
+    ['delete', 422, 'The project name does not match.'],
+  ])('shows the %s server message for %s without retrying', async (kind, status, detail) => {
+    const operation = vi.fn().mockRejectedValue({ status, body: { detail } })
+    render(<DangerZone projectName="Roof" projectStatus={kind === 'archive' ? 'active' : 'archived'}
+      onArchive={operation} onRestore={operation} onDelete={operation} />)
+    const label = { archive: 'Archive project', restore: 'Restore', delete: 'Delete permanently' }[kind]
+    fireEvent.click(screen.getByRole('button', { name: label }))
+    if (kind === 'delete') {
+      fireEvent.change(screen.getByLabelText(/type the project name to confirm delete/i), { target: { value: 'Roof' } })
+    }
+    if (kind !== 'restore') fireEvent.click(screen.getByRole('button', { name: label }))
+    await screen.findByText(detail)
+    expect(operation).toHaveBeenCalledTimes(1)
+    expect(screen.queryByText(/^Receipt:/)).toBeNull()
   })
 })
