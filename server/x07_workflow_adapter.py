@@ -8,7 +8,8 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
-from x07_customer_profile_store import _key, ProfileScopeError
+from x07_customer_profile_store import _key, ProfileScopeError, CustomerProfileStore
+from x07_profile_workflow import ProfileWorkflow
 from x07_role_selection import select_modules
 from x07_profile_compatibility import check_compatibility
 
@@ -19,6 +20,13 @@ class AdapterVersionConflict(ValueError):
 
 class IntakeBudgetError(ValueError):
     code = 'INTAKE_BUDGET_EXCEEDED'
+
+
+def _distinct_store_paths(profile_path, receipt_path):
+    profile = Path(profile_path).resolve()
+    receipt = Path(receipt_path).resolve()
+    if profile == receipt or (profile.exists() and receipt.exists() and profile.samefile(receipt)):
+        raise ValueError('profile and receipt paths must be distinct files')
 
 
 class ConfirmationReceiptStore:
@@ -111,7 +119,18 @@ def _budget(intake, copies, aliases, limits):
 
 
 class WorkflowAdapter:
+    @classmethod
+    def from_paths(cls, *, profile_path, receipt_path, context, intake, copies, block_aliases=None, limits=None):
+        """Validate both caller-supplied paths before either schema is opened."""
+        _distinct_store_paths(profile_path, receipt_path)
+        store = CustomerProfileStore(profile_path)
+        receipts = ConfirmationReceiptStore(receipt_path)
+        return cls(ProfileWorkflow(store), context=context, intake=intake, copies=copies,
+            block_aliases=block_aliases, limits=limits, confirmation_receipts=receipts)
+
     def __init__(self, workflow, *, context, intake, copies, block_aliases=None, limits=None, confirmation_receipts=None):
+        if confirmation_receipts is not None:
+            _distinct_store_paths(workflow.store.path, confirmation_receipts.path)
         _budget(intake,copies,block_aliases,limits)  # before snapshot copying
         self.workflow = workflow
         self._receipts = confirmation_receipts
