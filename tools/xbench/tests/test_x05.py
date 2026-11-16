@@ -109,6 +109,40 @@ def test_unknown_report_format_is_unreadable():
     assert score([project], [result])[1].verdict == "UNREADABLE"
 
 
+@pytest.mark.parametrize("field", ["counts", "matches", "frame_refs", "candidates"])
+@pytest.mark.parametrize("value", [None, {}, "synthetic", 1, True, [[]], [None], [{"bad": []}]])
+def test_nested_grid_container_mutations_are_named_and_offline(field, value):
+    project, result = observation()
+    if field == "frame_refs":
+        result[field] = value
+    elif field == "candidates":
+        result["report"]["matches"][0][field] = value
+    else:
+        result["report"][field] = value
+    steps = score([project], [result])
+    assert steps[1].verdict == "UNREADABLE"
+    assert "unreadable" in steps[1].evidence
+
+
+@pytest.mark.parametrize("value", [False, [], {}, float("nan"), float("inf"), -1, 10**100])
+def test_nested_report_numeric_fields_reject_unknown_shapes(value):
+    project, result = observation()
+    for key in result["report"]["counts"]:
+        changed = deepcopy(result)
+        changed["report"]["counts"][key] = value
+        assert score([project], [changed])[1].verdict == "UNREADABLE"
+    for key in ("pdf_grid", "pdf_matrix", "candidate_count"):
+        changed = deepcopy(result)
+        changed["report"]["matches"][0][key] = value
+        assert score([project], [changed])[1].verdict == "UNREADABLE"
+
+
+def test_grid_score_rejects_non_object_observation():
+    project, _ = observation()
+    for value in (None, [], "unknown"):
+        assert x05._grid_score(project, value) == ("UNREADABLE", "report_wire_unreadable")
+
+
 def test_inverse_coverage_rejects_foreign_frame_and_grid():
     project, result = observation()
     result["report"]["matches"][1].update(frame_ref="foreign-frame", pdf_grid=8, candidates=[8])
