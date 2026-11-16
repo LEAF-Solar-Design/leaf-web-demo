@@ -20,7 +20,7 @@
 import { expect, test } from '@playwright/test'
 import { catProofResponse, makeCatProofState } from './catProofFixture.mjs'
 
-test.use({ video: 'off', trace: 'off' })
+test.use({ video: 'off', trace: 'off', reducedMotion: 'reduce' })
 test.describe.configure({ mode: 'parallel' })
 
 const API = 'http://leaf-proof.invalid/api/**'

@@ -253,7 +253,7 @@ def read_sources(context):
                 or material['media_type'] != media_type):
             raise ValueError('Corpus material custody mismatch.')
         raw = originals.read_content(context['org_id'], context['project_id'], material)
-        originals.validate(material['name'], media_type, raw)
+        originals.validate(material['name'], media_type, raw, allow_corpus_members=True)
         result[key] = raw
     return result
 
