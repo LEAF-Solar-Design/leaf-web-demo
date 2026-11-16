@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
+import hashlib
 import json
 import os
 from pathlib import Path
 import sys
 import tempfile
+import re
 
 X04_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(X04_ROOT / 'server'))
@@ -33,7 +35,17 @@ def read_bounded(stream, limit):
         chunks.append(chunk)
 
 
-def decode_json(encoded):
+def validate_sha256_pin(value):
+    if not isinstance(value, str) or re.fullmatch(r'[0-9a-fA-F]{64}', value, re.ASCII) is None:
+        raise ValueError('expected_sha256 must contain exactly 64 hexadecimal characters.')
+    return value.lower()
+
+
+def decode_json(encoded, expected_sha256=None):
+    if expected_sha256 is not None:
+        expected = validate_sha256_pin(expected_sha256)
+        if hashlib.sha256(encoded).hexdigest() != expected:
+            raise ValueError('Explicit source bytes do not match expected_sha256.')
     def unique_object(pairs):
         result = {}
         for key, value in pairs:
@@ -54,7 +66,7 @@ def decode_json(encoded):
                       parse_constant=reject_constant, parse_int=bounded_integer)
 
 
-def read_json(path, max_input_bytes=DEFAULT_MAX_INPUT_BYTES):
+def read_json(path, max_input_bytes=DEFAULT_MAX_INPUT_BYTES, expected_sha256=None):
     if str(path) == '-':
         stream = getattr(sys.stdin, 'buffer', None)
         if stream is None or getattr(stream, 'closed', False):
@@ -66,7 +78,7 @@ def read_json(path, max_input_bytes=DEFAULT_MAX_INPUT_BYTES):
             raise ValueError(f'Input exceeds the {max_input_bytes}-byte ceiling.')
         with source.open('rb') as stream:
             encoded = read_bounded(stream, max_input_bytes)
-    return decode_json(encoded)
+    return decode_json(encoded, expected_sha256)
 
 
 def positive_byte_limit(value):
