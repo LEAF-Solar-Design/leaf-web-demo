@@ -52,6 +52,7 @@ payloads in a diagnostic.
 | `BRIDGE_TIMEOUT`, `BRIDGE_STDOUT_LIMIT`, `BRIDGE_STDERR_LIMIT` | Stop and await the owned worker. Retain draft; inspect before retrying a write. | `x07_bridge_resource_limits.cjs` |
 | `BRIDGE_CANCELLED` | Cancellation is explicit, but may follow a commit. Retire replies; reconcile stored state before writing again. | `x07_bridge_abort_boundaries.cjs`, `x07_editor_pending_reset_dom.cjs` |
 | `BRIDGE_STDIN_FAILURE` | One delivery failure, owned child closed. The EPIPE fixture proves no producer call; other outcomes need readback. | `x07_bridge_stdin_epipe.cjs` |
+| `BRIDGE_STARTUP` | The local interpreter could not start. No producer ran; retain the draft, correct the interpreter and retry explicitly. Invalid executable loader exits can instead return `BRIDGE_EXIT`. | `x07_bridge_spawn_failure.cjs` |
 | `BRIDGE_UTF8`, `BRIDGE_DUPLICATE_JSON_KEY`, `BRIDGE_MALFORMED_JSON`, `BRIDGE_JSON_DEPTH` | Receipt/request invalid. No successful callback. Preserve draft and inspect if a write could have run. | `x07_bridge_json_grammar.cjs`, `x07_bridge_duplicate_json_keys.cjs`, `x07_bridge_extra_frames.cjs` |
 | `BRIDGE_FIXTURE` | Invalid synthetic fixture setup. Correct the check; do not interpret it as a product rollback. | `x07_adapter_jsx_journey.cjs` |
 
@@ -70,6 +71,7 @@ complete output. An output alias refuses before replacement.
 | `UNREADABLE_SOURCE_ROOT`, `MISSING_FILE_DIGESTS`, `INCOMPLETE_SOURCE_INVENTORY`, `MALFORMED_FILE_DIGEST`, `MISSING_SOURCE_FILE`, `UNREADABLE_SOURCE_FILE` | Supply the complete measured source inventory at the explicit root. |
 | `SOURCE_PATH_ESCAPE`, `SOURCE_PATH_NOT_CANONICAL`, `AMBIGUOUS_SOURCE_IDENTITY` | Use one canonical in-root path per physical file in each receipt. Do not resolve by silently choosing an alias. |
 | `SOURCE_DIGEST_MISMATCH`, `SOURCE_CHANGED_DURING_AGGREGATION` | Freeze matching bytes and link targets, then generate fresh evidence. Preserve the refused receipts. |
+| `RECEIPT_CHANGED_DURING_AGGREGATION` | Journey or proof bytes changed between their read and the final consistency pass. Freeze a complete receipt set and rerun; no mixed synthetic success. |
 | `INVALID_SOURCE_BUDGET`, `SOURCE_READ_BUDGET_EXCEEDED` | Correct the bounded source set or explicit budget. No partial synthetic success. |
 | `MALFORMED_JOURNEY`, `MALFORMED_STEPS`, `MALFORMED_ASSERTIONS`, `MISSING_OR_UNKNOWN_ASSERTIONS`, `INCONSISTENT_STEP`, `MALFORMED_PROOF` | Repair the synthetic producer/fixture and execute it again. Do not patch historical evidence. |
 | `OUTPUT_ALIASES_INPUT_OR_SOURCE`, `UNREADABLE_OUTPUT_PATH`, `REPORT_PUBLICATION_FAILED` | Choose an independent writable output and retry publication. Preserve inputs and any prior complete output on failed replacement. |

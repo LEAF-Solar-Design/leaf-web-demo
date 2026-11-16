@@ -93,6 +93,7 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, onDi
   }, [])
   const save = event => {
     event.preventDefault()
+    event.stopPropagation()
     if (composing.current || event.nativeEvent?.isComposing) return
     if (!profile || !draft || pending.current || stale) return
     if (!draft.module?.block?.trim() || !draft.module?.layer?.trim()) { setError('Module block and layer are required.'); return }
@@ -147,7 +148,7 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, onDi
     {pin && <p>Project is pinned to version {pin.version}.</p>}
     {error && <p id={errorId} role="alert">{error}</p>}{message && <p role="status">{message}</p>}
     {!profile && !busy && <button ref={retryButton} type="button" onClick={() => load(false)}>Retry loading profile</button>}
-    {draft && <form ref={form} onSubmit={save} onReset={event => { event.preventDefault(); resetDraft() }} aria-describedby={error ? errorId : undefined}
+    {draft && <form ref={form} onSubmit={save} onReset={event => { event.preventDefault(); event.stopPropagation(); resetDraft() }} aria-describedby={error ? errorId : undefined}
       onCompositionStart={() => { composing.current = true }}
       onCompositionEnd={() => { composing.current = false }}
       onKeyDown={event => { if (event.key === 'Enter' && (composing.current || event.nativeEvent.isComposing || event.keyCode === 229)) event.preventDefault() }}>

@@ -192,7 +192,9 @@ function rpc(bound, op, context, value, signal, fault = null, protocolFault = nu
     if (signal?.aborted) { const error = new Error('Python JSON request cancelled.'); error.code = 'BRIDGE_CANCELLED'; reject(error); return }
     const script = protocolFault === 'stdin_epipe'
       ? "import os,sys,threading;os.close(0);print('STDIN_CLOSED',flush=True);threading.Event().wait(60)" : python
-    const child = spawn('python', ['-X', 'utf8', '-c', script], { cwd: path.resolve(__dirname, '../../..'), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+    let child
+    try { child = spawn(fixture.interpreter || 'python', ['-X', 'utf8', '-c', script], { cwd: path.resolve(__dirname, '../../..'), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true }) }
+    catch { const error = new Error('Python JSON worker could not start.'); error.code = 'BRIDGE_STARTUP'; reject(error); return }
     children.add(child)
     let stdout = '', stderr = '', finished = false, stdoutBytes = 0, stderrBytes = 0, terminalError = null
     const raw = []
@@ -222,7 +224,7 @@ function rpc(bound, op, context, value, signal, fault = null, protocolFault = nu
       finished = true; clearTimeout(timer); signal?.removeEventListener('abort', abort); children.delete(child)
       error ? reject(error) : resolve(result)
     }
-    child.on('error', error => settle(error))
+    child.on('error', () => stop('BRIDGE_STARTUP', 'Python JSON worker could not start.'))
     child.stdin.on('error', error => {
       fixture.on_stdin_error?.(error.code)
       stop('BRIDGE_STDIN_FAILURE', 'Python JSON worker request could not be delivered.')
