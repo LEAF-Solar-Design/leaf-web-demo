@@ -5,7 +5,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from export_x04_offline_evidence import (
-    DEFAULT_MAX_INPUT_BYTES, check_output_path, positive_byte_limit,
+    DEFAULT_MAX_INPUT_BYTES, MAX_JSON_CONTAINER_DEPTH, check_output_path, positive_byte_limit,
     decode_json, read_json, report_failure, write_json,
 )
 from validate_x04_evidence_packet import SCHEMA, local_id, validate_packet
@@ -51,6 +51,13 @@ def assemble_manifest(manifest, directory, output=None, max_input_bytes=DEFAULT_
     """
     require(isinstance(manifest, dict) and manifest.get('schema') == MANIFEST_SCHEMA,
             'Require the X04 evidence-packet-manifest v1 schema.')
+    pending = [(manifest, 0)]
+    while pending:
+        value, depth = pending.pop()
+        if isinstance(value, (dict, list)):
+            require(depth < MAX_JSON_CONTAINER_DEPTH, 'JSON nesting exceeds the supported limit.')
+            children = value.values() if isinstance(value, dict) else value
+            pending.extend((child, depth + 1) for child in children)
     packet = {'schema': SCHEMA}
     sources = []
     identities = set()
