@@ -10,6 +10,14 @@ class EvidenceError(ValueError):
     pass
 
 
+REQUIRED_SOURCE_FILES = frozenset({
+    'tools/xbench/x07_synthetic_journey.py',
+    'tools/xbench/x07_offline_acceptance_report.py',
+    'server/solar_drawing_roles.py', 'server/x07_customer_profile_store.py',
+    'server/x07_profile_compatibility.py', 'server/x07_role_selection.py',
+})
+
+
 def read_receipt(path):
     try:
         with Path(path).open('rb') as stream:
@@ -44,6 +52,8 @@ def verify_files(receipt, source_root):
     files = receipt.get('files')
     if not isinstance(files, dict) or not files:
         raise EvidenceError('MISSING_FILE_DIGESTS')
+    if not REQUIRED_SOURCE_FILES.issubset(files):
+        raise EvidenceError('INCOMPLETE_SOURCE_INVENTORY')
     for name, expected in files.items():
         if not isinstance(name, str) or not isinstance(expected, str) or re.fullmatch('[0-9a-f]{64}', expected) is None:
             raise EvidenceError('MALFORMED_FILE_DIGEST')

@@ -14,7 +14,7 @@ from x07_profile_compatibility import check_compatibility
 from x07_role_selection import select_modules
 
 
-SOURCE_FILES = ['tools/xbench/x07_synthetic_journey.py', 'server/solar_drawing_roles.py',
+SOURCE_FILES = ['tools/xbench/x07_synthetic_journey.py', 'tools/xbench/x07_offline_acceptance_report.py', 'server/solar_drawing_roles.py',
                 'server/x07_customer_profile_store.py', 'server/x07_profile_compatibility.py',
                 'server/x07_role_selection.py']
 

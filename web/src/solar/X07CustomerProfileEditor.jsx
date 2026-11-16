@@ -45,6 +45,7 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, onDi
   const [stale, setStale] = useState(false), [message, setMessage] = useState(null)
   const form = useRef(null), saveButton = useRef(null), reloadButton = useRef(null), retryButton = useRef(null)
   const composing = useRef(false)
+  const draftRevision = useRef(0)
   const errorId = useId(), focusRole = useRef(null)
   useEffect(() => {
     if (busy) return
@@ -92,6 +93,7 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, onDi
       setError('Each added role needs a layer.'); return
     }
     const controller = new AbortController(); pending.current = controller
+    const submittedRevision = draftRevision.current
     setBusy(true); setError(null); setMessage(null)
     Promise.resolve().then(() => current(controller) ? callbacks.current.saveProfile(customerKey, clone(draft),
       { expected_version: profile.version, signal: controller.signal }) : undefined)
@@ -100,7 +102,12 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, onDi
         if (record?.ok === false) throw record
         if (!valid(record, customerKey) || record.profile_id !== profile.profile_id || record.version <= profile.version) throw new Error('invalid saved record')
         const copy = clone(record.roles)
-        setProfile(record); setDraft(copy); setMessage('Profile saved.');onDirtyChange?.(false)
+        setProfile(record)
+        if (draftRevision.current === submittedRevision) {
+          setDraft(copy); setMessage('Profile saved.'); onDirtyChange?.(false)
+        } else {
+          setMessage('Profile saved. Newer edits are unsaved.'); onDirtyChange?.(true)
+        }
       }).catch(reason => {
         if (!current(controller)) return
         const conflict = ['STALE_VERSION', 'VERSION_CONFLICT'].includes(reason?.code)
@@ -108,9 +115,9 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, onDi
         setError(conflict ? 'The profile changed. Your edits are kept. Reload the version to retry.' : 'The profile could not be saved. Your edits are kept.')
       }).finally(() => { if (current(controller)) { pending.current = null; setBusy(false) } })
   }
-  const edit = (role, field, value) => { onDirtyChange?.(true);setDraft(previous => ({ ...previous, [role]: { ...previous[role], [field]: value } })); setMessage(null) }
-  const addRole = role => { onDirtyChange?.(true);focusRole.current = role; setDraft(previous => ({ ...previous, [role]: { layer: '' } })); setMessage(null); setError(null) }
-  const removeRole = role => { onDirtyChange?.(true);focusRole.current = 'module'; setDraft(previous => { const next = { ...previous }; delete next[role]; return next }); setMessage(null); setError(null) }
+  const edit = (role, field, value) => { draftRevision.current++; onDirtyChange?.(true);setDraft(previous => ({ ...previous, [role]: { ...previous[role], [field]: value } })); setMessage(null) }
+  const addRole = role => { draftRevision.current++; onDirtyChange?.(true);focusRole.current = role; setDraft(previous => ({ ...previous, [role]: { layer: '' } })); setMessage(null); setError(null) }
+  const removeRole = role => { draftRevision.current++; onDirtyChange?.(true);focusRole.current = 'module'; setDraft(previous => { const next = { ...previous }; delete next[role]; return next }); setMessage(null); setError(null) }
   const pin = profile && applicationRecord?.customer_key === customerKey && applicationRecord.profile_id === profile.profile_id
     && Number.isSafeInteger(applicationRecord.version) && applicationRecord.version > 0 ? applicationRecord : null
   return <section aria-label="Customer role profile">
@@ -123,7 +130,7 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, onDi
       onCompositionStart={() => { composing.current = true }}
       onCompositionEnd={() => { composing.current = false }}
       onKeyDown={event => { if (event.key === 'Enter' && (composing.current || event.nativeEvent.isComposing || event.keyCode === 229)) event.preventDefault() }}>
-      <fieldset disabled={busy}><legend>Drawing roles</legend>
+      <fieldset><legend>Drawing roles</legend>
         {Object.keys(draft).filter(role => ['module', 'roof', 'obstruction'].includes(role)).map(role => {
           const label = role[0].toUpperCase() + role.slice(1)
           return <div key={role}>
