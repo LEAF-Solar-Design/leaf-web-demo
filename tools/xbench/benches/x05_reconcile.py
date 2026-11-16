@@ -487,12 +487,48 @@ def reconcile_seven_steps_json(text):
     decoded = decode_evidence_json(text)
     if decoded["verdict"] != "PASS":
         return decoded
-    envelope = decoded["evidence"]
-    if set(envelope) != {"import", "grid", "assurance"}:
+    return _seven_step_envelope(decoded["evidence"])
+
+
+def _seven_step_envelope(envelope):
+    if type(envelope) is not dict or set(envelope) != {"import", "grid", "assurance"}:
         return _out("UNREADABLE", "seven_step_envelope_unreadable")
     preliminary = reconcile_seven_steps(envelope["import"], envelope["grid"], None)
     return _seven_step_result(preliminary["steps"]["1"], preliminary["steps"]["2"],
                               _assurance_envelope(envelope["assurance"]))
+
+
+def validate_import_grid_provenance(frozen_manifest, import_binding, grid_binding):
+    """Compare supplied identity/digest claims only, without acquiring evidence."""
+    if not _fixture_binding(frozen_manifest):
+        return _out("UNREADABLE", "frozen_manifest_unreadable")
+    for stage, binding in (("import", import_binding), ("grid", grid_binding)):
+        if not _fixture_binding(binding):
+            return _out("UNREADABLE", "import_grid_binding_unreadable", stage=stage)
+        if binding != frozen_manifest:
+            return _out("UNREADABLE", "import_grid_binding_conflict", stage=stage)
+    return _out("PASS", "supplied_import_grid_provenance_equal")
+
+
+def aggregate_seven_steps(expected_ids, fixtures):
+    """Retain seven-step diagnostics for exactly three explicitly bound fixtures."""
+    if type(fixtures) is not list:
+        return _out("UNREADABLE", "fixture_coverage_unreadable")
+    proxies = []
+    for row in fixtures:
+        key = row.get("fixture_id") if type(row) is dict else None
+        envelope = row.get("envelope") if type(row) is dict else None
+        assurance = envelope.get("assurance") if type(envelope) is dict else None
+        evidence = assurance.get("evidence") if type(assurance) is dict else None
+        proxies.append(dict(fixture_id=key, evidence=evidence))
+    coverage = aggregate_fixtures(expected_ids, proxies)
+    if coverage["reason"] != "offline_fixture_reconciliation":
+        return coverage
+    indexed = {row["fixture_id"]: row for row in fixtures}
+    results = {key: _seven_step_envelope(indexed[key]["envelope"]) for key in sorted(expected_ids)}
+    verdicts = {result["verdict"] for result in results.values()}
+    return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
+                "offline_seven_step_fixtures", fixtures=results)
 
 
 def aggregate_fixtures(expected_ids, fixtures):
@@ -870,6 +906,7 @@ def main(argv=None):
     modes.add_argument("--assurance", action="store_true", help="read one supplied-assurance envelope")
     modes.add_argument("--provenance-aggregate", action="store_true", help="read three provenance envelopes")
     modes.add_argument("--assurance-aggregate", action="store_true", help="read three assurance envelopes")
+    modes.add_argument("--seven-step", action="store_true", help="read one supplied seven-step envelope")
     args = parser.parse_args(argv)
     try:
         chunks, size = [], 0
@@ -887,7 +924,8 @@ def main(argv=None):
             result = _out("UNREADABLE", "json_input_too_large")
         else:
             text = raw.decode("utf-8", errors="strict")
-            decode = (aggregate_assurance_json if args.assurance_aggregate else
+            decode = (reconcile_seven_steps_json if args.seven_step else
+                      aggregate_assurance_json if args.assurance_aggregate else
                       reconcile_assurance_json if args.assurance else
                       aggregate_provenance_json if args.provenance_aggregate else
                       aggregate_fixtures_json if args.aggregate else

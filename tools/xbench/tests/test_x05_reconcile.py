@@ -22,6 +22,7 @@ from benches.x05_reconcile import (METRICS, TABLE_COLUMNS, check_discrepancies,
     aggregate_assurance, aggregate_assurance_json, MAX_INPUT_BYTES, MAX_ENVELOPE_EXAMPLES,
     MAX_RESULT_CHARS, compare_grid_correspondence, reconcile_seven_steps,
     reconcile_seven_steps_json,
+    aggregate_seven_steps, validate_import_grid_provenance,
     compare_csv_view, compare_recommendations, compare_snapshots, compare_strings, compare_table)
 
 
@@ -1061,7 +1062,7 @@ def test_new_cli_modes_verdicts_and_sanitized_errors(tmp_path, mode, kind, exit_
 
 
 @pytest.mark.parametrize("left,right", list(combinations(
-    ["--aggregate", "--provenance", "--assurance", "--provenance-aggregate", "--assurance-aggregate"], 2)))
+    ["--aggregate", "--provenance", "--assurance", "--provenance-aggregate", "--assurance-aggregate", "--seven-step"], 2)))
 def test_cli_modes_are_pairwise_exclusive(tmp_path, left, right):
     import subprocess
     import sys
@@ -2458,3 +2459,121 @@ def test_equal_total_cross_fixture_manifest_swaps_are_rejected(swap):
         assert result["fixtures"][key]["reconciliation"]["verdict"] == "PASS"
     assert result["fixtures"][expected[2]] == baseline["fixtures"][expected[2]]
     assert fixtures == preserved
+
+
+@pytest.mark.parametrize("kind,exit_code", [("PASS", 0), ("FAIL", 1), ("UNREADABLE", 4), ("typo", 4)])
+def test_seven_step_cli_verdicts_and_sanitized_errors(tmp_path, kind, exit_code):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from benches import x05_reconcile as module
+    envelope = seven_step_envelope()
+    if kind == "FAIL":
+        envelope["import"]["dwg_imported"] = False
+    if kind == "UNREADABLE":
+        envelope["import"] = None
+    if kind == "typo":
+        envelope["synthetic_private_canary"] = envelope.pop("import")
+    result = subprocess.run([sys.executable, "-P", str(Path(module.__file__).resolve()), "--seven-step"],
+        input=json.dumps(envelope).encode(), capture_output=True, cwd=tmp_path, timeout=20)
+    assert result.returncode == exit_code and not result.stderr
+    assert len(result.stdout.splitlines()) == 1 and b"synthetic_private_canary" not in result.stdout
+    observed = json.loads(result.stdout)
+    assert observed["verdict"] == ("UNREADABLE" if kind == "typo" else kind)
+    if kind == "typo":
+        assert observed["reason"] == "seven_step_envelope_unreadable"
+
+
+def seven_fixture_records():
+    expected = ["case-a", "case-b", "case-c"]
+    records = []
+    for key in expected:
+        envelope = seven_step_envelope()
+        assurance = envelope["assurance"]
+        assurance["evidence"]["fixture_id"] = assurance["manifest"]["fixture_id"] = key
+        for binding in assurance["bindings"].values():
+            binding["fixture_id"] = key
+        records.append(dict(fixture_id=key, envelope=envelope))
+    return expected, records
+
+
+def test_three_fixture_seven_steps_preserves_every_sibling_and_coverage():
+    expected, records = seven_fixture_records()
+    baseline = aggregate_seven_steps(expected, records)
+    assert baseline["verdict"] == "PASS"
+    records[0]["envelope"]["import"]["normal_user"] = False
+    records[1]["envelope"]["grid"] = None
+    result = aggregate_seven_steps(expected, records)
+    assert result["verdict"] == "UNREADABLE"
+    assert [result["fixtures"][key]["verdict"] for key in expected] == ["FAIL", "UNREADABLE", "PASS"]
+    assert result["fixtures"][expected[2]] == baseline["fixtures"][expected[2]]
+    assert result["fixtures"][expected[1]]["assurance"]["verdict"] == "PASS"
+    for altered in (records[:2], [records[0]] * 3, None):
+        assert aggregate_seven_steps(expected, altered)["verdict"] == "UNREADABLE"
+    records[0]["fixture_id"] = "foreign"
+    assert aggregate_seven_steps(expected, records)["reason"] == "foreign_fixture_id"
+
+
+def test_import_grid_provenance_rejects_swapped_claims_without_mutation():
+    frozen, _, _ = provenance_fixture()
+    imported, grid = deepcopy(frozen), deepcopy(frozen)
+    assert validate_import_grid_provenance(frozen, imported, grid)["verdict"] == "PASS"
+    for stage in ("import", "grid"):
+        for field in ("fixture_id", "inputs"):
+            altered = deepcopy(frozen)
+            altered[field] = "foreign" if field == "fixture_id" else dict(frozen["inputs"], report="d" * 64)
+            preserved = deepcopy(altered)
+            result = validate_import_grid_provenance(frozen, altered if stage == "import" else imported,
+                                                     altered if stage == "grid" else grid)
+            assert result == {"verdict": "UNREADABLE", "reason": "import_grid_binding_conflict", "stage": stage}
+            assert altered == preserved
+        for malformed in (None, {}, dict(frozen, inputs={})):
+            result = validate_import_grid_provenance(frozen, malformed if stage == "import" else imported,
+                                                     malformed if stage == "grid" else grid)
+            assert result["reason"] == "import_grid_binding_unreadable" and result["stage"] == stage
+    assert validate_import_grid_provenance({}, imported, grid)["reason"] == "frozen_manifest_unreadable"
+
+
+@pytest.mark.parametrize("bad_import,bad_grid,bad_assurance", [
+    (a,b,c) for a in (False,True) for b in (False,True) for c in (False,True)])
+def test_seven_step_cross_stage_failures_preserve_diagnostics(bad_import, bad_grid, bad_assurance):
+    envelope = seven_step_envelope()
+    if bad_import:
+        envelope["import"]["report_imported"] = False
+    if bad_grid:
+        envelope["grid"]["rows"][0]["matches"] = ["foreign"]
+    if bad_assurance:
+        envelope["assurance"]["inputs_hex"]["report"] = b"substituted".hex()
+    preserved = deepcopy(envelope)
+    result = reconcile_seven_steps_json(json.dumps(envelope))
+    assert result["verdict"] == ("UNREADABLE" if bad_assurance else "FAIL" if bad_import or bad_grid else "PASS")
+    assert result["steps"]["1"]["verdict"] == ("FAIL" if bad_import else "PASS")
+    assert result["steps"]["2"]["verdict"] == ("FAIL" if bad_grid else "PASS")
+    assert result["assurance"]["verdict"] == ("UNREADABLE" if bad_assurance else "PASS")
+    assert envelope == preserved
+
+
+def test_seven_step_direct_json_differential_mutation_corpus():
+    base = seven_step_envelope()
+    corpus = [base]
+    for value in (None, {}, dict(base["import"], normal_user=False), dict(base["import"], normal_user=1)):
+        corpus.append(dict(deepcopy(base), **{"import": value}))
+    for value in (None, {}, dict(base["grid"], rows=[])):
+        corpus.append(dict(deepcopy(base), grid=value))
+    for field in ("normal_user", "dwg_imported", "report_imported"):
+        altered = deepcopy(base)
+        del altered["import"][field]
+        corpus.append(altered)
+    altered = deepcopy(base)
+    altered["assurance"]["evidence"]["recommendations"][0]["group_count"] = 1
+    corpus.append(altered)
+    for envelope in corpus:
+        source = envelope["assurance"]
+        assurance = dict(evidence=source["evidence"], frozen_manifest=source["manifest"], stage_bindings=source["bindings"],
+            supplied_inputs={key: bytes.fromhex(value) for key,value in source["inputs_hex"].items()},
+            expected_identity=source["identity"], stage_identities=source["stage_identities"])
+        preserved = deepcopy(envelope)
+        direct = reconcile_seven_steps(envelope["import"], envelope["grid"], assurance)
+        strict = reconcile_seven_steps_json(json.dumps(envelope))
+        assert json.loads(serialize_result(direct)) == json.loads(serialize_result(strict))
+        assert strict == reconcile_seven_steps_json(json.dumps(envelope)) and envelope == preserved

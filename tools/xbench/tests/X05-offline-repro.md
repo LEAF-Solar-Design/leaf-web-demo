@@ -651,6 +651,58 @@ The allowed unmatched case demonstrates only the helper's named-cause policy.
 Frozen Copenhagen and USML acceptance requires all matched. This replay acquires
 no live evidence and cannot authenticate inputs or accept the X05 bench.
 
+Complete seven-step JSON envelope:
+
+| Field | Required shape | Missing, null or empty behavior |
+|---|---|---|
+| `import` | Exactly `normal_user`, `dwg_imported`, `report_imported`, all bool | Missing outer field rejects envelope; null/empty object yields step1 UNREADABLE; false yields readable FAIL |
+| `grid` | Exactly `expected_grid_ids`, `saved_group_ids`, `rows`, `require_all_matched` | Missing outer field rejects envelope; null/empty object yields step2 UNREADABLE; empty rows with valid nonempty IDs yields missing-grid FAIL |
+| `assurance` | Exactly `evidence`, `manifest`, `bindings`, `inputs_hex`, `identity`, `stage_identities` | Missing outer field rejects envelope; null/empty object yields assurance UNREADABLE and absent downstream steps |
+
+Evidence and assurance schemas are the existing six-stage contracts above.
+Unknown outer keys reject as `seven_step_envelope_unreadable`. The CLI exposes
+`--seven-step` with existing0/1/4/5 result exits, mutually exclusive with all other
+explicit modes. `aggregate_seven_steps(expected_ids, fixtures)` is a pure Python
+entry point: each of three records has `fixture_id` and `envelope`. The record ID
+must equal the supplied assurance evidence ID. Each fixture retains import,
+grid, assurance and downstream diagnostics with UNREADABLE precedence.
+
+`validate_import_grid_provenance(manifest, import_binding, grid_binding)` is a
+separate pure comparison. Each binding uses exactly the manifest's `fixture_id`
+and `inputs` digest map. Malformed claims or substitutions return named
+UNREADABLE with stage `import` or `grid`. This does not hash files, authenticate
+frozen origin or automatically add those claims to the seven-step schema.
+
+Executable typo-field recovery, using synthetic stdin (source builder requires
+pytest):
+
+```powershell
+@'
+import sys, runpy, json, subprocess
+sys.path.insert(0, 'tools/xbench')
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+correct = builders['seven_step_envelope']()
+typo = dict(correct)
+typo['improt'] = typo.pop('import')
+command = [sys.executable, '-P', 'tools/xbench/benches/x05_reconcile.py', '--seven-step']
+for name, envelope, expected in [('typo', typo, 4), ('corrected', correct, 0)]:
+    run = subprocess.run(command, input=json.dumps(envelope).encode(), capture_output=True, timeout=20)
+    assert run.returncode == expected and not run.stderr
+    result = json.loads(run.stdout)
+    print(name, run.returncode, result['verdict'], result['reason'])
+'@ | python -P
+```
+
+Exact stdout:
+
+```text
+typo 4 UNREADABLE seven_step_envelope_unreadable
+corrected 0 PASS offline_seven_steps
+```
+
+The correction changes a field name, not evidence custody. Both objects remain
+synthetic supplied claims and cannot establish live X05 acceptance.
+
 Canonical snapshot compatibility contract:
 
 - Hash UTF-8 bytes of compact JSON arrays with ASCII escapes and no spaces.
