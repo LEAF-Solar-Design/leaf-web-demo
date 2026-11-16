@@ -2,6 +2,9 @@ from pathlib import Path
 import importlib.util
 import copy
 import json
+import subprocess
+import sys
+import tempfile
 import unittest
 
 spec = importlib.util.spec_from_file_location('history_reducer', Path(__file__).resolve().parents[1] / 'x07_history_reducer.py')
@@ -50,3 +53,17 @@ class HistoryReducer(unittest.TestCase):
         for signature in [{}, '', 'x' * 201]:
             with self.subTest(signature=repr(signature)[:20]), self.assertRaises(ValueError):
                 reducer.reduce_history([], lambda rows: signature)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'PRIVATE_HISTORY_SENTINEL.json'
+            for payload in [None, b'{PRIVATE_HISTORY_SENTINEL', b'\xff', b'[]' + b' ' * 262144, b'{}']:
+                if payload is not None:
+                    path.write_bytes(payload)
+                with self.subTest(payload=None if payload is None else len(payload)):
+                    process = subprocess.run([sys.executable, reducer.__file__, '--history', str(path)],
+                                             capture_output=True, text=True, timeout=15)
+                    self.assertEqual(process.returncode, 2)
+                    self.assertEqual(process.stderr, '')
+                    self.assertLess(len(process.stdout), 200)
+                    self.assertEqual(json.loads(process.stdout), {'schema': 'leaf.x07.reducer-diagnostic.v1', 'error': 'INVALID_HISTORY_INPUT'})
+                    self.assertNotIn('PRIVATE_HISTORY_SENTINEL', process.stdout)
+                    self.assertEqual(path.read_bytes() if path.exists() else None, payload)

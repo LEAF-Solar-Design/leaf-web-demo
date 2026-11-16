@@ -87,16 +87,19 @@ def main():
     parser.add_argument('--max-calls', type=int, default=128)
     args = parser.parse_args()
     commands = [{'op': 'inspect'}, {'op': 'edit'}, {'op': 'synthetic_failure'}, {'op': 'reopen'}]
-    if args.history:
-        if args.history.stat().st_size > 262144:
-            parser.error('history exceeds256KiB')
-        commands = json.loads(args.history.read_text(encoding='utf-8'))
     try:
+        if args.history:
+            if args.history.stat().st_size > 262144:
+                raise ValueError('history exceeds256KiB')
+            commands = json.loads(args.history.read_text(encoding='utf-8'))
         result = reduce_history(commands, lambda rows: 'SYNTHETIC_FAILURE' if any(
             isinstance(row, dict) and row.get('op') == 'synthetic_failure' for row in rows) else None, max_calls=args.max_calls)
     except HistoryOracleError as error:
         print(json.dumps(error.diagnostic, sort_keys=True))
-        raise SystemExit(2)
+        return 2
+    except (OSError, ValueError, RecursionError):
+        print(json.dumps({'schema': 'leaf.x07.reducer-diagnostic.v1', 'error': 'INVALID_HISTORY_INPUT'}))
+        return 2
     encoded = json.dumps(result, indent=2, allow_nan=False) + '\n'
     if args.out:
         if args.history and (args.out.resolve() == args.history.resolve()
@@ -107,4 +110,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())
