@@ -1793,7 +1793,11 @@ def build_suites() -> List[Suite]:
                   "tests/test_x04_polyline_closed_flags.py",
                   "tests/test_x04_polygon_affine_invariance.py",
                   "tests/test_x04_dependency_duplicate_conflicts.py",
-              ], 285),
+                  "tests/test_x04_untrusted_derived_counts.py",
+                  "tests/test_x04_bigfont_dependencies.py",
+                  "tests/test_x04_overlay_replay_consistency.py",
+                  "tests/test_x04_intake_truncation_recovery.py",
+              ], 300),
         Suite("server-dxf-intake-lines-text", "server tests/test_dxf_intake_lines_text.py",
               "pytest", SERVER, _py_pytest("tests/test_dxf_intake_lines_text.py"), 4),
         # W4g engine reach (2026-09-04): the intake -> DXF synthesizer (the
