@@ -4451,6 +4451,34 @@ def test_partition_keeps_catalog_order_within_a_shard():
         assert indexes == sorted(indexes)
 
 
+def test_pr_tier_three_shard_memory_rebalance():
+    g = _load_runner()
+    suites = g.build_suites()
+    moves = {
+        "web-studio-panels-proof": 1,
+        "web-link-service-flow": 2,
+        "web-async-author-stage": 2,
+        "web-author-quota-gate": 2,
+    }
+    assert set(moves) <= {s.id for s in suites}
+    # Exercise the real catalog and selections that omit some or all moved IDs.
+    for selection in (suites,
+                      [s for s in suites if s.id != "web-studio-panels-proof"],
+                      [s for s in suites if s.id not in moves]):
+        ordinary = g.partition_suites(selection, 3)
+        partitions = g.partition_pr_tier_suites(selection, 3)
+        placement = {s.id: i for i, shard in enumerate(partitions) for s in shard}
+        baseline = {s.id: i for i, shard in enumerate(ordinary) for s in shard}
+        assert placement == {sid: moves.get(sid, i) for sid, i in baseline.items()}
+        union = [s.id for shard in partitions for s in shard]
+        assert Counter(union) == Counter(s.id for s in selection)
+        for i, shard in enumerate(partitions):
+            assert shard == [s for s in selection if placement[s.id] == i]
+        for count in (1, 2, 4, 8):
+            assert g.partition_pr_tier_suites(selection, count) == \
+                   g.partition_suites(selection, count)
+
+
 def test_partition_separates_all_three_web_vitest_suites():
     g = _load_runner()
     suites = g.build_suites()
