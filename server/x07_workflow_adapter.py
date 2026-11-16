@@ -36,6 +36,7 @@ class ConfirmationReceiptStore:
     journal commit still requires inspect/apply recovery, not blind confirmation.
     This is not a live authorization or distributed exactly-once guarantee.
     """
+    _DDL = 'CREATE TABLE confirmations (project_key TEXT PRIMARY KEY, customer_key TEXT NOT NULL, digest TEXT NOT NULL, result TEXT NOT NULL)'
     def __init__(self, path, *, read_only=False):
         self.path = Path(path)
         if type(read_only) is not bool:
@@ -46,7 +47,7 @@ class ConfirmationReceiptStore:
             with db:
                 db.execute('BEGIN' if self.read_only else 'BEGIN IMMEDIATE')
                 version = db.execute('PRAGMA user_version').fetchone()[0]
-                ddl = 'CREATE TABLE confirmations (project_key TEXT PRIMARY KEY, customer_key TEXT NOT NULL, digest TEXT NOT NULL, result TEXT NOT NULL)'
+                ddl = self._DDL
                 objects = db.execute("SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name").fetchall()
                 if version not in (0, 1) or (objects and objects != [('table', 'confirmations', ddl)]):
                     raise ValueError('unsupported confirmation journal schema')
@@ -68,6 +69,12 @@ class ConfirmationReceiptStore:
         try:
             with db:
                 db.execute('BEGIN' if self.read_only else 'BEGIN IMMEDIATE')
+                # Recheck under this transaction's lock. Another connection may
+                # have changed the schema after this store was constructed.
+                objects = db.execute("SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name").fetchall()
+                version = db.execute('PRAGMA user_version').fetchone()[0]
+                if version not in (0, 1) or objects != [('table', 'confirmations', self._DDL)]:
+                    raise ValueError('unsupported confirmation journal schema')
                 row = db.execute('SELECT customer_key,digest,result FROM confirmations WHERE project_key=?',(context['project_key'],)).fetchone()
                 if row:
                     if row[0] != context['customer_key']: raise ProfileScopeError('receipt belongs to another customer')

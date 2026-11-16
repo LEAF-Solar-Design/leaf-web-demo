@@ -74,6 +74,11 @@ except ValueError:
     print(json.dumps({'ok':False,'error':{'message':'Invalid JSON request.','code':'BRIDGE_MALFORMED_JSON'}}));sys.exit(0)
 protocol=request.get('protocol_fault')
 if protocol=='json_grammar': print(request['fixture']['reply_json']);sys.exit(0)
+if protocol in ('reply_then_nonzero','reply_then_terminate'):
+    print(request['fixture']['reply_json'],flush=True)
+    if protocol=='reply_then_nonzero': sys.exit(23)
+    import threading
+    threading.Event().wait(60);sys.exit(0)
 if protocol=='partial_utf8':
     import threading
     reply='{"ok":true,"result":{"label":"雪"}}'.encode('utf-8')
@@ -128,6 +133,7 @@ try:
     fixture=request.get('fixture',{})
     if op=='editor_load' and 'receipt_version' in fixture:
         result['version']=fixture['receipt_version'] # malformed-producer fixture, no write
+    if protocol=='lost_save_reply': sys.exit(0) # actual write settled; no receipt delivered
     print(json.dumps({'ok':True,'result':result},ensure_ascii=False))
 except Exception as error:
     print(json.dumps({'ok':False,'error':{'type':type(error).__name__,'message':str(error),'code':getattr(error,'code',None)}}))
@@ -201,6 +207,7 @@ function rpc(bound, op, context, value, signal, fault = null, protocolFault = nu
       if (stdoutBytes > 1024*1024) stop('BRIDGE_STDOUT_LIMIT', 'Python JSON worker output limit exceeded.')
       else raw.push(chunk)
       fixture.on_stdout_chunk?.(chunk)
+      if (protocolFault === 'reply_then_terminate' && Buffer.concat(raw).includes(Buffer.from('\n'))) child.kill()
       if (protocolFault === 'stdin_epipe' && !delivered && Buffer.concat(raw).includes(Buffer.from('STDIN_CLOSED'))) {
         delivered = true; child.stdin.end(requestBytes)
       }

@@ -201,6 +201,11 @@ def verify_files(receipt, source_root, *, state=None):
         if identity in identities:
             raise EvidenceError('AMBIGUOUS_SOURCE_IDENTITY')
         identities.add(identity)
+        key = (root / path, root)
+        bindings = state.setdefault('bindings', {})
+        if key in bindings and bindings[key] != resolved:
+            raise EvidenceError('SOURCE_CHANGED_DURING_AGGREGATION')
+        bindings[key] = resolved
         if state['budget'].digest(resolved) != expected:
             raise EvidenceError('SOURCE_DIGEST_MISMATCH')
         state['files'][resolved] = expected
@@ -253,6 +258,16 @@ def aggregate(journey_path, proof_paths, source_sha, source_root, *, limits=None
         proofs.append({'receipt': Path(path).name, 'source_sha': source_sha, 'file_digests': len(files)})
     for path, expected in state['files'].items():
         if state['budget'].digest(path) != expected:
+            raise EvidenceError('SOURCE_CHANGED_DURING_AGGREGATION')
+    for (name, root), expected in state.get('bindings', {}).items():
+        try:
+            actual = name.resolve(strict=True)
+            actual.relative_to(root)
+        except ValueError:
+            raise EvidenceError('SOURCE_PATH_ESCAPE') from None
+        except (OSError, RuntimeError):
+            raise EvidenceError('UNREADABLE_SOURCE_FILE') from None
+        if actual != expected:
             raise EvidenceError('SOURCE_CHANGED_DURING_AGGREGATION')
     return {'schema': 'leaf.x07.offline-acceptance-report.v1', 'proof_mode': 'synthetic_offline',
         'source_sha': source_sha, 'source_dirty': journey.get('source_dirty'),
