@@ -99,12 +99,16 @@ def main(argv=None):
     parser.add_argument('--max-output-bytes', type=positive_byte_limit)
     parser.add_argument('--max-total-input-bytes', type=positive_byte_limit,
                         help='Optional actual byte ceiling across manifest and every explicit read')
+    parser.add_argument('--expected-manifest-sha256', type=validate_sha256_pin,
+                        help='Optional SHA-256 of the exact manifest bytes read and decoded')
     args = parser.parse_args(argv)
     try:
         manifest = args.manifest.resolve()
         check_output_path(manifest, args.out)
         reader = read_json if args.max_total_input_bytes is None else InputBudget(args.max_total_input_bytes).read_json
-        packet = assemble_manifest(reader(manifest, args.max_input_bytes), manifest.parent,
+        payload = reader(manifest, args.max_input_bytes) if args.expected_manifest_sha256 is None else reader(
+            manifest, args.max_input_bytes, args.expected_manifest_sha256)
+        packet = assemble_manifest(payload, manifest.parent,
                                    args.out, args.max_input_bytes, read_input=reader)
         write_json(packet, args.out, args.max_output_bytes)
     except (OSError, ValueError, TypeError, RecursionError) as error:
