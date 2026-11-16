@@ -1,0 +1,248 @@
+"""X06 independent steel takeoff comparisons and first-failure UI grader.
+
+This bounded collector can report a proven authoring failure. It cannot PASS
+until publication, spreadsheet and second-session evidence are collected.
+"""
+import csv
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+import hashlib
+import io
+import json
+import math
+import os
+from pathlib import Path
+import re
+from uuid import uuid4
+
+from xbench_core import Step, write_json_atomic
+
+REQUEST = ('Make me a steel takeoff: for every layer whose name mentions steel, '
+           'beam or joist, how many line members are on it and their total '
+           'length. Give me a table and a spreadsheet.')
+ORACLE_SHA256 = 'b8c569661a6b0a7b4022bdf7ab3d5a924995359d09e773c6d508ca2f69c8b2e0'
+LIMITS = ('First-failure collector and independent comparison primitives. '
+          'Resumes the lane-owned fresh project after normal fixture intake. '
+          'Downstream collection remains unbuilt until authoring succeeds. '
+          'No missing or unobserved acceptance step passes.')
+
+
+def load_oracle(path, fixtures):
+    raw = Path(path).read_bytes()
+    if hashlib.sha256(raw).hexdigest() != ORACLE_SHA256:
+        raise ValueError('Frozen X06 oracle hash differs')
+    oracle = json.loads(raw)
+    if oracle.get('schema') != 'leaf.xbench.x06-oracle.v1':
+        raise ValueError('Invalid X06 oracle schema')
+    drawings = oracle['drawings']
+    if set(drawings) != {'first', 'second'}:
+        raise ValueError('Both frozen drawings are required')
+    for fixture in fixtures:
+        expected = drawings[fixture['id']]
+        if expected['sha256'] != fixture['sha256']:
+            raise ValueError('Oracle drawing differs from manifest')
+        normalize_rows(expected['rows'])
+    return drawings
+
+
+def normalize_rows(rows):
+    """Reject duplicates, nonfinite lengths, fractional counts and empty tables."""
+    normalized = {}
+    for row in rows:
+        layer = row['layer']
+        count = row['count']
+        length = row['total_length']
+        if not isinstance(layer, str) or not layer or layer in normalized:
+            raise ValueError('Invalid or duplicate layer')
+        if type(count) is not int or count < 0:
+            raise ValueError('Count must be a nonnegative integer')
+        if (isinstance(length, bool) or not isinstance(length, (int, float))
+                or not math.isfinite(length) or length < 0):
+            raise ValueError('Length must be finite and nonnegative')
+        normalized[layer] = (count, float(length))
+    if not normalized:
+        raise ValueError('Schedule is empty')
+    return normalized
+
+
+def compare_rows(observed, expected):
+    actual, oracle = normalize_rows(observed), normalize_rows(expected)
+    problems = []
+    if set(actual) != set(oracle):
+        problems.append('Layer set differs')
+    for layer in sorted(set(actual) & set(oracle)):
+        count, length = actual[layer]
+        wanted_count, wanted_length = oracle[layer]
+        if count != wanted_count:
+            problems.append(layer + ': member count differs')
+        if abs(length - wanted_length) > wanted_length * 0.005:
+            problems.append(layer + ': total length differs by more than 0.5 percent')
+    return problems
+
+
+def csv_equals_table(content, table_cells):
+    """Compare exported display cells exactly, including row and column order."""
+    actual = list(csv.reader(io.StringIO(content.decode('utf-8-sig'))))
+    if not table_cells or not actual:
+        return False
+    return actual == table_cells
+
+
+def no_solar_provenance(source, engines):
+    """Missing provenance cannot prove absence of a solar execution path."""
+    if not isinstance(source, str) or not source.strip():
+        return None
+    if not isinstance(engines, list) or not engines or not all(
+            isinstance(item, str) and item.strip() for item in engines):
+        return None
+    return re.search(r'solar', source + '\n' + '\n'.join(engines), re.I) is None
+
+
+def budget_ok(seconds, actions):
+    if (isinstance(seconds, bool) or not isinstance(seconds, (int, float))
+            or not math.isfinite(seconds) or seconds < 0
+            or type(actions) is not int or actions < 0):
+        return None
+    return seconds < 1200 and actions < 60
+
+
+def unreadable_steps(evidence, observed):
+    return [Step(n, 'UNREADABLE', evidence, observed=observed,
+                 expected='Frozen X06 acceptance step ' + str(n)) for n in range(1, 8)]
+
+
+def author_verdict(status, body):
+    """A named reachable product defect differs from unavailable evidence/auth."""
+    if (status == 503 and isinstance(body, dict)
+            and body.get('reason_code') == 'tenant_repository_unavailable'
+            and isinstance(body.get('error'), dict)
+            and body['error'].get('error_code') == 'BAD_PARAMS'):
+        return 'FAIL'
+    return 'UNREADABLE'
+
+
+@contextmanager
+def author_window(path):
+    """Serialize the shared staging tenant with the coordinator's atomic rail."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    value = json.dumps({'bench': 'X06', 'instance': uuid4().hex,
+                        'expires_at': (datetime.now(timezone.utc) + timedelta(minutes=45)).isoformat()})
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    try:
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
+            stream.write(value)
+        yield
+    finally:
+        if path.is_file() and path.read_text(encoding='utf-8') == value:
+            path.unlink()
+
+
+def run(ctx):
+    path = Path('D:/agents/production-lanes-2026-11-10/XBENCH/driver/author-window.lock')
+    try:
+        with author_window(path):
+            return _run(ctx)
+    except FileExistsError:
+        return unreadable_steps(str(path), 'Shared author window is owned; no new author request issued')
+
+
+def _run(ctx):
+    """Collect only observed normal UI facts, never bypass a provider grant."""
+    from xbench_session import signed_in, redact
+
+    # The manifest pins absolute fixture paths. The oracle is beside its actual
+    # fixture manifest, not in the source repository or the product response.
+    fixture_manifest_dir = Path('D:/agent-data/leaf-research/studio-xbench-2026-11/manifests')
+    options = getattr(ctx, 'options', {})
+    oracle_path = Path(options.get('oracle', fixture_manifest_dir / 'X06.oracle.json'))
+    load_oracle(oracle_path, ctx.fixtures)
+    ctx.out_dir.mkdir(parents=True, exist_ok=True)
+    evidence = ctx.out_dir / 'author-supply.json'
+    observed = {'source_sha': ctx.source_sha, 'author_request': REQUEST,
+                'scope': 'first authoring failure; unobserved steps unreadable',
+                'browser_closed': False}
+    verdict = 'UNREADABLE'
+    repo = Path(__file__).resolve().parents[3]
+    try:
+        with signed_in(repo, ctx.source_sha, origin=ctx.base) as (page, info):
+            observed['web_build'] = info.get('web_build')
+            welcome = page.get_by_role('button', name='Continue workspace', exact=True)
+            if welcome.is_visible():
+                welcome.click()
+            # Continue only the lane-owned project. Never create, delete or
+            # change another project's material to manufacture a fixture.
+            page.get_by_role('button', name=re.compile(r'^Projects: change project')).click()
+            page.get_by_role('menuitem', name=re.compile(r'^XBench X06(?:\s|$)')).first.click()
+            chooser = page.get_by_role('button', name='Open project or material', exact=True)
+            if chooser.is_visible():
+                chooser.click()
+            else:
+                page.get_by_role('button', name='Project', exact=True).click()
+            page.get_by_role('button', name='Material', exact=True).click()
+            first = next(f for f in ctx.fixtures if f['id'] == 'first')
+            filename = Path(first['path']).name
+            page.get_by_text(filename, exact=True).first.wait_for(state='visible', timeout=30_000)
+            preview = page.get_by_role('button', name='Preview v1 in the drawing', exact=True)
+            preview.wait_for(state='visible', timeout=30_000)
+            preview.click()
+            # The normal version preview mounts the imported drawing. Record
+            # its visible identity before opening authoring.
+            page.get_by_text(filename, exact=True).first.wait_for(state='visible', timeout=30_000)
+            page.screenshot(path=str(ctx.out_dir / 'imported-version.png'), full_page=True)
+            observed['project_name'] = 'XBench X06'
+            observed['fixture_sha256'] = first['sha256']
+            # Open the normal Studio tools surface. No API author submission,
+            # init script, internal state mutation, grant or credential read.
+            studio = page.get_by_role('button', name='Studio', exact=True)
+            if studio.is_visible():
+                studio.click()
+            author = page.get_by_role('button', name=re.compile(r'^Author a tool'))
+            author.wait_for(state='visible', timeout=30_000)
+            if author.get_attribute('aria-expanded') != 'true':
+                author.click()
+            field = page.get_by_label('What should the tool do?', exact=True)
+            field.wait_for(state='visible', timeout=30_000)
+            if field.is_visible():
+                field.fill(REQUEST)
+                observed['request_entered_in_normal_author_ui'] = True
+                observed['generate_enabled'] = page.get_by_role(
+                    'button', name='Generate tool', exact=True).is_enabled()
+                if observed['generate_enabled']:
+                    with page.expect_response(lambda r: '/api/author/stage' in r.url
+                                              and r.request.method == 'POST', timeout=60_000) as staged:
+                        page.get_by_role('button', name='Generate tool', exact=True).click()
+                    response = staged.value
+                    body = response.json()
+                    observed['author_http_status'] = response.status
+                    # The author error envelope contains no auth header or
+                    # credential material. Never capture request headers.
+                    if isinstance(body, dict) and isinstance(body.get('error'), dict):
+                        observed['author_response'] = json.loads(redact(json.dumps(body)))
+                    verdict = author_verdict(response.status, body)
+                    if verdict == 'FAIL':
+                        page.get_by_text(re.compile('Protected tool authoring could not complete')).wait_for(
+                            state='visible', timeout=30_000)
+            else:
+                observed['request_entered_in_normal_author_ui'] = False
+            text = redact(page.locator('body').inner_text())
+            observed['linked_account_hint'] = (False if 'not linked' in text.lower()
+                                                else None)
+            (ctx.out_dir / 'author-supply.txt').write_text(text, encoding='utf-8')
+            page.screenshot(path=str(ctx.out_dir / 'author-supply.png'), full_page=True)
+            observed['blocker'] = ('tenant_repository_unavailable prevents protected authoring'
+                                   if verdict == 'FAIL' else 'Authoring continuation evidence unavailable')
+            observed['owner'] = 'e3cdcd02' if verdict == 'FAIL' else 'X06'
+    except Exception as exc:
+        observed['blocker'] = 'Supported staging UI or sign-in unreadable'
+        observed['error'] = redact(str(exc))[:1000]
+    finally:
+        # signed_in closes its dedicated browser in its own finally, including
+        # failures entering the context. No user or peer browser is touched.
+        observed['browser_closed'] = True
+        write_json_atomic(evidence, observed)
+    steps = unreadable_steps(str(evidence), observed)
+    if verdict == 'FAIL':
+        steps[1] = Step(2, 'FAIL', str(evidence), observed=observed,
+                        expected='Studio stages, reviews, publishes and runs the requested tool')
+    return steps
