@@ -1,0 +1,115 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-add-all-inverters",
+  "builtin": "builtins/solar_add_all_inverters.py",
+  "family": "equipment",
+  "adapter": "local-graph-commit",
+  "entitlement": "run_write",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_INVERTER_PLACEMENT_REQUEST",
+  "readiness": {
+    "kind": "hook"
+  },
+  "engine": "server-builtin",
+  "interaction": {
+    "mode": "form"
+  },
+  "record_store": "registry",
+  "record": {
+    "name": "solar-add-all-inverters",
+    "version": "1.0.0",
+    "description": "Place all central inverters with explicit deterministic grid fallback and retain producing-engine metadata.",
+    "kind": "script",
+    "family_id": "equipment",
+    "engine_op": "solar_add_all_inverters",
+    "entry": "builtins/solar_add_all_inverters.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "expected_rev": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "hardware": {
+          "type": "object",
+          "properties": {
+            "model": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "max_dc_voltage": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 1000000
+            },
+            "max_ac_power_kw": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 1000000
+            },
+            "mppt_count": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000
+            },
+            "total_dc_inputs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000
+            },
+            "collector_capacity": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10000
+            }
+          },
+          "required": [
+            "model",
+            "max_dc_voltage",
+            "max_ac_power_kw",
+            "mppt_count",
+            "total_dc_inputs",
+            "collector_capacity"
+          ],
+          "additionalProperties": false
+        },
+        "placement_strategy": {
+          "type": "string",
+          "enum": [
+            "deterministic_grid"
+          ]
+        }
+      },
+      "required": [
+        "expected_rev",
+        "hardware",
+        "placement_strategy"
+      ],
+      "additionalProperties": false
+    },
+    "returns": {
+      "type": "object"
+    },
+    "capabilities": [
+      "drawing.write"
+    ],
+    "allow_local_fallback": false
+  },
+  "ledger": [
+    "inverter-add"
+  ],
+  "trusted_inputs": [
+    "source_intake"
+  ],
+  "maturity": "preview",
+  "wave": 2,
+  "order": 106,
+  "scenario": "w2-rooftop"
+}

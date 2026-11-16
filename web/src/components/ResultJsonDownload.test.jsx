@@ -96,3 +96,32 @@ describe('generic result JSON download', () => {
     expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith('blob:first')
   })
 })
+
+
+describe('X02 deterministic placement result', () => {
+  const placement = () => ({
+    ok: true, tool: 'solar-add-all-inverters', job_id: 'synthetic-job',
+    result: { graph_commit: {
+      tool: 'solar-add-all-inverters', engine: 'deterministic_fallback',
+      engine_label: 'Deterministic fallback', engine_backend: 'local_python',
+      producing_attempt: { job_id: 'synthetic-job', attempt: 1 },
+      graph_sha256: 'a'.repeat(64), request_sha256: 'b'.repeat(64),
+    } },
+  })
+
+  it('shows the producing engine and exports the same selected run metadata', async () => {
+    const result = placement()
+    render(<ResultPanel result={result} />)
+    expect(screen.getByText('Deterministic fallback')).toBeVisible()
+    expect(screen.getByRole('link', { name: 'Download result JSON' })).toBeVisible()
+    expect((await exported()).result.graph_commit).toEqual(result.result.graph_commit)
+  })
+
+  it('rejects provenance from a different job', () => {
+    const result = placement()
+    result.result.graph_commit.producing_attempt.job_id = 'other-job'
+    render(<ResultPanel result={result} />)
+    expect(screen.queryByText('Deterministic fallback')).toBeNull()
+    expect(screen.queryByRole('link', { name: 'Download result JSON' })).toBeNull()
+  })
+})
