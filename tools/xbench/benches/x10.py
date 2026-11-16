@@ -20,6 +20,9 @@ import re
 import shutil
 import struct
 import tempfile
+import time
+import math
+import ctypes
 from uuid import UUID, uuid4
 from urllib.parse import parse_qs, urlsplit
 import zlib
@@ -35,6 +38,7 @@ MAX_JSON_BYTES = 1048576
 MAX_JSON_DEPTH = 64
 MAX_RATE_ITEMS = 10000
 MAX_SCREENSHOT_BYTES = 16 * 1024 * 1024
+MAX_IDENTITY_REQUESTS = 256
 IMPORT_REFUSALS = ("Choose the drawing again to retry the upload.",
                    "Retry to attach this drawing to the project.")
 DOWNSTREAM = (
@@ -99,7 +103,20 @@ def _strict_json_bytes(data):
     def constant(value):
         raise ValueError("nonfinite JSON constant")
 
-    return json.loads(text, object_pairs_hook=pairs, parse_constant=constant, parse_float=Decimal)
+    value = json.loads(text, object_pairs_hook=pairs, parse_constant=constant, parse_float=Decimal)
+    def unicode_strings(item):
+        if isinstance(item, str):
+            if any(0xd800 <= ord(char) <= 0xdfff for char in item):
+                raise ValueError("unpaired JSON surrogate")
+        elif isinstance(item, dict):
+            for key, child in item.items():
+                unicode_strings(key)
+                unicode_strings(child)
+        elif isinstance(item, list):
+            for child in item:
+                unicode_strings(child)
+    unicode_strings(value)
+    return value
 
 
 def rate_total(rates):
@@ -303,7 +320,17 @@ def classify(observation, expected=None):
         canonical = len(projects) == 1
     except ValueError:
         canonical = False
-    proven = (fresh and canonical and observation.get("evidence_saved") is True and not pending
+    provenance = (isinstance(observation.get("source"), str)
+                  and re.fullmatch(r"[0-9a-f]{40}", observation["source"]) is not None
+                  and observation.get("web_build") == observation["source"])
+    evidence_pin = (isinstance(observation.get("evidence_path"), str)
+                    and re.fullmatch(r"(x10-evidence-[0-9a-f]{32})/x10-ui.json / \1/x10-ground.png",
+                                     observation["evidence_path"]) is not None
+                    and type(observation.get("screenshot_bytes")) is int
+                    and 0 < observation["screenshot_bytes"] <= MAX_SCREENSHOT_BYTES
+                    and isinstance(observation.get("screenshot_sha256"), str)
+                    and re.fullmatch(r"[0-9a-f]{64}", observation["screenshot_sha256"]) is not None)
+    proven = (fresh and canonical and provenance and evidence_pin and observation.get("evidence_saved") is True and not pending
               and observation.get("event_callback_failed") is not True)
     contradictory = (bool(observation.get("import_rejection"))
                      and observation.get("imported_version_selected") is True)
@@ -510,9 +537,39 @@ def _write_evidence_json(path, value):
         target.flush()
 
 
+def _read_evidence_json(path):
+    initial = path.lstat()
+    if not stat.S_ISREG(initial.st_mode) or initial.st_size > MAX_JSON_BYTES:
+        raise ValueError("invalid evidence record type or size")
+    with _binary_input(path) as source:
+        if _file_fingerprint(os.fstat(source.fileno())) != _file_fingerprint(initial):
+            raise ValueError("evidence record replaced before read")
+        data = source.read(MAX_JSON_BYTES + 1)
+        if _file_fingerprint(os.fstat(source.fileno())) != _file_fingerprint(initial):
+            raise ValueError("evidence record changed during read")
+    if len(data) > MAX_JSON_BYTES or _file_fingerprint(path.lstat()) != _file_fingerprint(initial):
+        raise ValueError("evidence record changed or exceeded budget")
+    return _strict_json_bytes(data), hashlib.sha256(data).hexdigest()
+
+
+def _commit_generation(staging, destination):
+    """Atomic directory publication that never replaces an existing owner."""
+    if os.name == "nt":
+        return staging.rename(destination)  # Windows directory rename refuses existing targets.
+    library = ctypes.CDLL(None, use_errno=True)
+    rename = getattr(library, "renameat2", None)
+    if rename is None:
+        raise OSError("atomic no-replace rename is unavailable")
+    if rename(-100, os.fsencode(staging), -100, os.fsencode(destination), 1) != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code))
+    return destination
+
+
 def _save(page, ctx, observation, surface=None, validate=None):
     observation["evidence_saved"] = False
     observation.pop("evidence_path", None)
+    observation.pop("evidence_record_sha256", None)
     fixtures = [Path(row["path"]).resolve() for row in ctx.manifest.get("fixtures", [])]
     root = ctx.out_dir.resolve()
     if root in fixtures:
@@ -536,6 +593,7 @@ def _save(page, ctx, observation, surface=None, validate=None):
         raise ValueError("evidence destinations are not fresh and distinct")
     evidence = generation + "/x10-ui.json / " + generation + "/x10-ground.png"
     committed = None
+    failure = None
     try:
         if surface is None:
             surface = page.get_by_role("navigation", name="Solar design steps")
@@ -549,7 +607,8 @@ def _save(page, ctx, observation, surface=None, validate=None):
         saved = dict(observation, **pin, evidence_saved=True, evidence_path=evidence)
         record = staging / "x10-ui.json"
         _write_evidence_json(record, saved)
-        if json.loads(record.read_text(encoding="utf-8")) != saved:
+        record_value, record_hash = _read_evidence_json(record)
+        if record_value != saved:
             raise ValueError("invalid evidence JSON")
         def check_pin(directory):
             actual = _valid_png(directory / "x10-ground.png")
@@ -561,30 +620,45 @@ def _save(page, ctx, observation, surface=None, validate=None):
         if validate is not None:
             validate()
         try:
-            staging.rename(destination)
-        except Exception:
+            _commit_generation(staging, destination)
+        except BaseException:
             # A reported failure may follow the atomic move. Claim cleanup only
             # when the moved set still matches this attempt's exact record/pin.
             if not staging.exists():
                 try:
                     check_pin(destination)
-                    if json.loads((destination / "x10-ui.json").read_text(encoding="utf-8")) == saved:
+                    if _read_evidence_json(destination / "x10-ui.json") == (saved, record_hash):
                         committed = destination
                 except (OSError, ValueError):
                     pass
             raise
         committed = ctx.out_dir / generation
         check_pin(committed)
-        if json.loads((committed / "x10-ui.json").read_text(encoding="utf-8")) != saved:
+        if _read_evidence_json(committed / "x10-ui.json") != (saved, record_hash):
             raise ValueError("invalid committed evidence JSON")
         if validate is not None:
             validate()
-        observation.update(pin, evidence_saved=True, evidence_path=evidence)
+        observation.update(pin, evidence_saved=True, evidence_path=evidence, evidence_record_sha256=record_hash)
+    except BaseException as exc:
+        failure = exc
+        raise
     finally:
-        if staging.exists():
-            shutil.rmtree(staging)
-        if committed is not None and observation["evidence_saved"] is not True:
-            shutil.rmtree(committed)
+        cleanup = []
+        for directory in (staging, committed if observation["evidence_saved"] is not True else None):
+            if directory is not None and directory.exists():
+                # A failed set must not retain a scorable JSON record even if
+                # removing its remaining directory fails.
+                try:
+                    (directory / "x10-ui.json").unlink(missing_ok=True)
+                    shutil.rmtree(directory)
+                except OSError as exc:
+                    cleanup.append(type(exc).__name__)
+        if cleanup:
+            observation.update(evidence_saved=False, evidence_cleanup_errors=cleanup)
+            observation.pop("evidence_path", None)
+            observation.pop("evidence_record_sha256", None)
+            if failure is None:
+                raise OSError("evidence cleanup failed")
 
 
 def _invalidate_evidence(ctx, observation):
@@ -595,14 +669,21 @@ def _invalidate_evidence(ctx, observation):
         directory = ctx.out_dir / match.group(1)
         record = directory / "x10-ui.json"
         try:
+            value, digest = _read_evidence_json(record)
+            screenshot = _valid_png(directory / "x10-ground.png")
             if (not directory.is_symlink() and not record.is_symlink()
-                    and json.loads(record.read_text(encoding="utf-8")).get("evidence_path") == pointer):
+                    and digest == observation.get("evidence_record_sha256")
+                    and value.get("evidence_path") == pointer
+                    and value.get("screenshot_bytes") == len(screenshot) == observation.get("screenshot_bytes")
+                    and value.get("screenshot_sha256") == hashlib.sha256(screenshot).hexdigest()
+                    == observation.get("screenshot_sha256")):
                 record.unlink()
                 shutil.rmtree(directory)
         except Exception:
             pass
     observation["evidence_saved"] = False
     observation.pop("evidence_path", None)
+    observation.pop("evidence_record_sha256", None)
 
 
 def _diagnostic(ctx, observation, stage, exc):
@@ -611,6 +692,7 @@ def _diagnostic(ctx, observation, stage, exc):
     observation.update(stage=stage, exception_type=safe_text(type(exc).__name__),
                        issue="UI/infrastructure unreadable at " + stage + ": " + safe_text(type(exc).__name__),
                        evidence_saved=False)
+    temporary = None
     try:
         diagnostic = ctx.out_dir / "x10-ui.json"
         if any(Path(row["path"]).resolve() == diagnostic.resolve()
@@ -618,10 +700,18 @@ def _diagnostic(ctx, observation, stage, exc):
             observation["diagnostic_saved"] = False
             return
         ctx.out_dir.mkdir(parents=True, exist_ok=True)
-        diagnostic.write_text(
-            json.dumps(observation, indent=2) + "\n", encoding="utf-8")
-    except OSError:
+        descriptor, name = tempfile.mkstemp(prefix=".x10-diagnostic-", suffix=".json", dir=ctx.out_dir)
+        os.close(descriptor)
+        temporary = Path(name)
+        _write_evidence_json(temporary, observation)
+        if _read_evidence_json(temporary)[0] != observation:
+            raise ValueError("invalid diagnostic readback")
+        temporary.replace(diagnostic)
+    except (OSError, ValueError, TypeError):
         observation["diagnostic_saved"] = False
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
 
 
 def _continue_workspace(page):
@@ -763,13 +853,21 @@ def _aliased_uuid(row, primary, alias):
     return values[0]
 
 
-def _catalog_observer(base, observation):
+def _main_request(request, main_frame=None):
+    frame = request.frame
+    return frame is main_frame if main_frame is not None else frame.parent_frame is None
+
+
+def _catalog_observer(base, observation, main_frame=None, *, max_requests=MAX_IDENTITY_REQUESTS):
+    if type(max_requests) is not int or max_requests <= 0:
+        raise ValueError("invalid identity request budget")
     origin = urlsplit(base)
     observation["catalog_epoch"] = 0
     observation["catalog_binding"] = None
     latest = None
     pending_binding = None
     failed = False
+    request_count = 0
 
     def exact_url(value):
         url = urlsplit(value)
@@ -791,9 +889,17 @@ def _catalog_observer(base, observation):
         return binding
 
     def request_seen(request):
-        nonlocal latest, pending_binding, failed
+        nonlocal latest, pending_binding, failed, request_count
+        if not _main_request(request, main_frame):
+            return
         if not exact_url(request.url):
             return
+        if request_count >= max_requests:
+            latest, pending_binding, failed = None, None, True
+            observation.update(event_callback_failed=True, catalog_binding=None)
+            observation["catalog_epoch"] += 1
+            return
+        request_count += 1
         try:
             if request.method != "GET":
                 raise ValueError("catalog requires normal GET")
@@ -808,19 +914,24 @@ def _catalog_observer(base, observation):
 
     def response_seen(response):
         nonlocal failed
-        if response.request is not latest:
+        captured, epoch = latest, observation["catalog_epoch"]
+        request = response.request
+        if request is not captured or not _main_request(request, main_frame):
             return
         try:
-            failed = failed or url_binding(response.url) != pending_binding
+            invalid = url_binding(response.url) != pending_binding
         except ValueError:
-            failed = True
-        failed = failed or type(response.status) is not int or not 200 <= response.status < 300
+            invalid = True
+        status = response.status
+        if latest is not captured or observation["catalog_epoch"] != epoch:
+            return
+        failed = failed or invalid or type(status) is not int or status != 200
         observation["catalog_epoch"] += 1
         observation["catalog_binding"] = None if failed else pending_binding
 
     def request_failed(request):
         nonlocal failed
-        if request is latest and exact_url(request.url):
+        if request is latest and _main_request(request, main_frame) and exact_url(request.url):
             failed = True
             observation["catalog_epoch"] += 1
             observation["catalog_binding"] = None
@@ -830,11 +941,14 @@ def _catalog_observer(base, observation):
     return request_seen
 
 
-def _project_observer(base, observation):
+def _project_observer(base, observation, main_frame=None, *, max_requests=MAX_IDENTITY_REQUESTS):
+    if type(max_requests) is not int or max_requests <= 0:
+        raise ValueError("invalid identity request budget")
     origin = urlsplit(base)
     observation.update(project_epoch=0, project_scope_epoch=0, project_binding=None, project_versions=[])
     latest, route, failed = None, None, False
     scope_route = None
+    request_count = 0
 
     def route_id(value):
         url = urlsplit(value)
@@ -854,10 +968,19 @@ def _project_observer(base, observation):
         observation.update(project_binding=None, project_versions=[])
 
     def request_seen(request):
-        nonlocal latest, route, failed, scope_route
+        nonlocal latest, route, failed, scope_route, request_count
+        if not _main_request(request, main_frame):
+            return
         identity = route_id(request.url)
         if identity is None:
             return
+        if request_count >= max_requests:
+            latest, route, failed = None, None, True
+            clear()
+            observation["project_scope_epoch"] += 1
+            observation["event_callback_failed"] = True
+            return
+        request_count += 1
         if identity != scope_route or request.method != "GET":
             observation["project_scope_epoch"] += 1
         scope_route = identity
@@ -866,11 +989,15 @@ def _project_observer(base, observation):
 
     def response_seen(response):
         nonlocal failed
-        if response.request is not latest:
+        captured_request, captured_route, start_epoch = latest, route, observation["project_epoch"]
+        request = response.request
+        if request is not captured_request or not _main_request(request, main_frame):
+            return
+        url, status = response.url, response.status
+        if latest is not captured_request or route != captured_route or observation["project_epoch"] != start_epoch:
             return
         clear()
-        failed = (failed or route_id(response.url) != route or type(response.status) is not int
-                  or response.status != 200)
+        failed = (failed or route_id(url) != route or type(status) is not int or status != 200)
         if failed:
             observation["project_scope_epoch"] += 1
             return
@@ -917,7 +1044,7 @@ def _project_observer(base, observation):
 
     def request_failed(request):
         nonlocal failed
-        if request is latest and route_id(request.url) == route:
+        if request is latest and _main_request(request, main_frame) and route_id(request.url) == route:
             failed = True
             observation["project_scope_epoch"] += 1
             clear()
@@ -1007,20 +1134,80 @@ def _ground(page, ctx, observation):
     _save(page, ctx, observation, validate=validate)
 
 
-def observe(page, ctx, config, bound, session_info=None):
+class _ObservationBudget:
+    """Share one deadline across nested locator calls and successive UI waits."""
+    def __init__(self, seconds, clock):
+        if type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds <= 0:
+            raise ValueError("invalid observation budget")
+        self.clock, self.last = clock, None
+        self.end = self.sample() + seconds
+        if not math.isfinite(self.end):
+            raise ValueError("invalid observation deadline")
+
+    def sample(self):
+        value = self.clock()
+        if (type(value) not in (int, float) or not math.isfinite(value)
+                or (self.last is not None and value < self.last)):
+            raise ValueError("invalid or backward observation clock")
+        self.last = value
+        return value
+
+    def milliseconds(self):
+        remaining = self.end - self.sample()
+        if remaining <= 0:
+            raise TimeoutError("overall observation deadline exhausted")
+        return max(1, int(remaining * 1000))
+
+
+class _BudgetedUI:
+    _chains = {"locator", "get_by_role", "get_by_label", "get_by_text", "filter", "or_", "and_", "nth"}
+    _timed = {"click", "fill", "wait_for", "wait_for_function", "wait_for_load_state", "expect_response",
+              "select_option", "set_input_files", "inner_text", "get_attribute", "input_value",
+              "screenshot", "element_handle", "goto", "reload", "go_back", "go_forward"}
+
+    def __init__(self, target, budget):
+        self.target, self.budget = target, budget
+
+    def __getattr__(self, name):
+        # Cleanup must remain available after the budget expires.
+        if name in ("on", "remove_listener"):
+            return getattr(self.target, name)
+        self.budget.milliseconds()
+        value = getattr(self.target, name)
+        if name in ("first", "last"):
+            return _BudgetedUI(value, self.budget)
+        if not callable(value):
+            return value
+        def call(*args, **kwargs):
+            remaining = self.budget.milliseconds()
+            args = tuple(arg.target if isinstance(arg, _BudgetedUI) else arg for arg in args)
+            if name in self._timed:
+                requested = kwargs.get("timeout")
+                kwargs["timeout"] = remaining if requested is None or requested == 0 else min(requested, remaining)
+            result = value(*args, **kwargs)
+            self.budget.milliseconds()
+            return _BudgetedUI(result, self.budget) if name in self._chains else result
+        return call
+
+
+def observe(page, ctx, config, bound, session_info=None, *, budget_seconds=600, clock=time.monotonic):
     observation = {"fresh_project": False, "imported_version_selected": False, "evidence_saved": False}
     stage = "session provenance"
     listeners = []
     callback_error = None
+    listening = True
     try:
+        budget = _ObservationBudget(budget_seconds, clock)
+        main_frame = page.main_frame
+        page = _BudgetedUI(page, budget)
         for key in ("source", "web_build"):
             value = (session_info or {}).get(key)
             if (not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}", value)
                     or value != ctx.source_sha):
                 raise ValueError("invalid session provenance")
         observation.update({key: session_info[key] for key in ("source", "web_build")})
-        catalog = _catalog_observer(ctx.base, observation)
-        project = _project_observer(ctx.base, observation)
+        catalog = _catalog_observer(ctx.base, observation, main_frame)
+        project = _project_observer(ctx.base, observation, main_frame)
 
         def callback(request):
             catalog(request)
@@ -1034,10 +1221,24 @@ def observe(page, ctx, config, bound, session_info=None):
             catalog.failed(request)
             project.failed(request)
 
+        def navigation(frame):
+            if frame is main_frame:
+                observation.update(event_callback_failed=True, catalog_binding=None,
+                                   project_binding=None, project_versions=[])
+                observation["catalog_epoch"] += 1
+                observation["project_epoch"] += 1
+                observation["project_scope_epoch"] += 1
+                _invalidate_evidence(ctx, observation)
+
         def protect(handler, kind):
             def guarded(event):
                 nonlocal callback_error
+                if not listening:
+                    return
                 try:
+                    if kind == "framenavigated":
+                        navigation(event)
+                        return
                     def check_url(value):
                         if not isinstance(value, str) or any(ord(char) < 33 for char in value):
                             raise ValueError("invalid passive event URL")
@@ -1059,36 +1260,50 @@ def observe(page, ctx, config, bound, session_info=None):
                     observation["project_epoch"] += 1
             return guarded
 
-        for event, handler in (("request", callback), ("response", response), ("requestfailed", failed)):
+        for event, handler in (("request", callback), ("response", response), ("requestfailed", failed),
+                               ("framenavigated", navigation)):
             listener = protect(handler, event)
-            page.on(event, listener)
             listeners.append((event, listener))
+            page.on(event, listener)
         stage = "workspace profile"
         _prepare_workspace(page)
         stage = "fresh project creation"
         _create_project(page, ctx, config, observation)
         stage = "primary drawing attachment and version selection"
         if _import_primary(page, ctx, config, bound, observation) is False:
+            budget.milliseconds()
             return observation
         stage = "selected drawing workflow navigation"
         _open_workflow(page, config)
         stage = "rendered Ground Physical evidence"
         _ground(page, ctx, observation)
+        budget.milliseconds()
     except Exception as exc:
+        _invalidate_evidence(ctx, observation)
         _diagnostic(ctx, observation, stage, exc)
+    except (KeyboardInterrupt, SystemExit):
+        _invalidate_evidence(ctx, observation)
+        raise
     finally:
+        listening = False
         cleanup_error = None
+        cleanup_cancel = None
         for event, listener in listeners:
             try:
                 page.remove_listener(event, listener)
             except Exception as exc:
                 cleanup_error = cleanup_error or exc
+            except (KeyboardInterrupt, SystemExit) as exc:
+                cleanup_cancel = cleanup_cancel or exc
         if cleanup_error is not None:
             _invalidate_evidence(ctx, observation)
             _diagnostic(ctx, observation, "listener cleanup", cleanup_error)
         if callback_error is not None:
             _invalidate_evidence(ctx, observation)
             _diagnostic(ctx, observation, "passive UI event", callback_error)
+        if cleanup_cancel is not None:
+            _invalidate_evidence(ctx, observation)
+            raise cleanup_cancel
     return observation
 
 
@@ -1105,6 +1320,9 @@ def run(ctx):
     except Exception as exc:
         _invalidate_evidence(ctx, observation)
         _diagnostic(ctx, observation, "authentication/browser session", exc)
+    except (KeyboardInterrupt, SystemExit):
+        _invalidate_evidence(ctx, observation)
+        raise
     # Fixture arithmetic is retained as provenance only, never a measured outcome.
     observation["fixture_rate_total"] = str(total)
     return classify(observation, expected=_expected)
