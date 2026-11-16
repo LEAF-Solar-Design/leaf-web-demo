@@ -3458,6 +3458,9 @@ def build_suites() -> List[Suite]:
                   # compiled engine. Keep both exact counts while older PRs finish.
                   ("src/cad/engineBatchAtomic.test.js", 12),
                   ("src/cad/engineBatchAtomic.test.js", 13),
+                  # S01 lifecycle replay: four cases require the same optional
+                  # compiled Node WASM package; executed proof retained separately.
+                  ("src/cad/solarLifecycleReplay.test.jsx", 4),
               )) for shard in range(1, 4)),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
@@ -4380,7 +4383,8 @@ def reporting_command(suite: Suite, argv: List[str], trace_env: dict) -> List[st
     argv = [os.fsdecode(word) for word in argv]
     trusted = os.environ.get("LEAF_TRUSTED_CI_DIR")
     capturing = process_capture_enabled() and process_capture_eligible(suite)
-    if not trusted and not capturing:
+    panels = suite.id == "web-studio-panels-proof"
+    if not trusted and not capturing and not panels:
         return argv
     directory = Path(trusted) if trusted else SCRIPTS_DIR / "ci"
     output = Path(trace_env["LEAF_TEST_REPORT_DIR"])
@@ -4421,16 +4425,19 @@ def reporting_command(suite: Suite, argv: List[str], trace_env: dict) -> List[st
         # CLI reporters are retained. With a config, append through a wrapper so
         # its HTML reporter and output paths survive as well as console parsing.
         command = list(argv)
-        reporter = str(directory / "playwright-leaf.mjs")
+        additions = ([str(directory / "playwright-leaf.mjs")] if trusted or capturing else [])
+        if panels:
+            additions.append(str((WEB / "e2e/panelsTimingReporter.mjs").resolve()))
         for index, word in enumerate(command):
             if word.startswith("--reporter="):
+                reporters = list(dict.fromkeys(word.split("=", 1)[1].split(",") + additions))
                 command = command[:index] + command[index + 1:]
-                command.append(word + "," + reporter)
+                command.append("--reporter=" + ",".join(reporters))
                 return command
             if word == "--reporter" and index + 1 < len(command):
-                reporters = command[index + 1]
+                reporters = list(dict.fromkeys(command[index + 1].split(",") + additions))
                 command = command[:index] + command[index + 2:]
-                command.append("--reporter=" + reporters + "," + reporter)
+                command.append("--reporter=" + ",".join(reporters))
                 return command
         if "--config" in command:
             index = command.index("--config") + 1
@@ -4451,17 +4458,19 @@ def reporting_command(suite: Suite, argv: List[str], trace_env: dict) -> List[st
                 "  if (name.startsWith('.')) name = rebase(name);\n"
                 "  if (options?.outputFolder) options = {...options, outputFolder: rebase(options.outputFolder)};\n"
                 "  return options ? [name, options] : [name]; });\n"
+                "for (const name of " + json.dumps(additions) + ")\n"
+                "  if (!reporters.some(entry => entry[0] === name)) reporters.push([name]);\n"
                 # Playwright resolves webServer.cwd against the config file, which now lives in the report directory.
                 "const server = item => ({...item, cwd: rebase(item.cwd || '.')});\n"
                 "export default {...paths(config), testDir: rebase(config.testDir || '.'),\n"
                 "  ...(config.projects ? {projects: config.projects.map(paths)} : {}),\n"
                 "  ...(config.webServer ? {webServer: Array.isArray(config.webServer)\n"
                 "    ? config.webServer.map(server) : server(config.webServer)} : {}),\n"
-                "  reporter: [...reporters, [" + json.dumps(reporter) + "]]};\n",
+                "  reporter: reporters};\n",
                 encoding="utf-8")
             command[index] = str(wrapper)
             return command
-        return command + ["--reporter=list," + reporter]
+        return command + ["--reporter=" + ",".join(["list"] + additions)]
     return argv
 
 
@@ -4928,6 +4937,66 @@ def parse_file_timings(suite: Suite, text: str) -> list[dict]:
             totals[relative] = total
     return [{"file": path, "seconds": seconds, "basis": basis}
             for path, seconds in sorted(totals.items())]
+
+
+PW_PHASE_FILES = frozenset("web/e2e/" + name for name in (
+    "campaign-panel.spec.mjs", "recovery-controls.spec.mjs",
+    "workspace-create-no-prompt.spec.mjs", "viewer-grid-toggle.spec.mjs",
+    "studio-ux-regressions.spec.mjs", "project-page-editor.spec.mjs"))
+PW_PHASE_MAX_LINE = 4096
+PW_PHASE_MAX_ROWS = 1000
+PW_PHASE_BASIS = "playwright public test/step durations; gaps unattributed"
+PW_PHASE_IDENTITIES = ("line", "column", "worker_index", "retry", "repeat_index")
+PW_PHASE_DURATIONS = ("duration_ms", "setup_ms", "teardown_ms", "api_ms",
+                      "reported_navigation_api_ms", "unattributed_ms")
+
+
+def parse_pw_phases(suite: Suite, text: str) -> list[dict]:
+    """Only bounded, public result-duration partitions reach durable stdout."""
+    if suite.id != "web-studio-panels-proof":
+        return []
+    rows = []
+    for raw in text.splitlines():
+        if len(raw) > PW_PHASE_MAX_LINE or not raw.startswith("LEAF_PW_PHASE "):
+            continue
+        try:
+            row = json.loads(raw[len("LEAF_PW_PHASE "):])
+            if (not isinstance(row, dict)
+                    or row.get("schema") != "leaf.ci.playwright-phase.v1"
+                    or row.get("file") not in PW_PHASE_FILES
+                    or row.get("basis") != PW_PHASE_BASIS
+                    or row.get("status") not in ("passed", "failed", "timedOut", "skipped", "interrupted", "unknown")
+                    or type(row.get("truncated")) is not bool):
+                continue
+            if any(type(row.get(key)) is not int or row[key] < 0 or not math.isfinite(row[key])
+                   for key in PW_PHASE_IDENTITIES):
+                continue
+            if any(type(row.get(key)) not in (int, float) or row[key] < 0
+                   or not math.isfinite(row[key]) for key in PW_PHASE_DURATIONS):
+                continue
+            if (abs(sum(row[key] for key in ("setup_ms", "teardown_ms", "api_ms", "unattributed_ms"))
+                    - row["duration_ms"]) > 0.005
+                    or row["reported_navigation_api_ms"] > row["api_ms"]):
+                continue
+            rows.append({key: row[key] for key in (
+                "schema", "file", *PW_PHASE_IDENTITIES, "status", *PW_PHASE_DURATIONS,
+                "truncated", "basis")})
+            if len(rows) >= PW_PHASE_MAX_ROWS:
+                break
+        except (ValueError, TypeError, OverflowError, RecursionError):
+            continue
+    return rows
+
+
+def emit_pw_phases(suite: Suite, text: str, attempt: int) -> None:
+    try:
+        for timing in parse_pw_phases(suite, text):
+            row = {**timing, "suite_id": suite.id, "attempt": attempt}
+            line = "LEAF_PW_PHASE " + json.dumps(row, separators=(",", ":"))
+            if len(line) <= PW_PHASE_MAX_LINE:
+                print(line, flush=True)
+    except Exception:
+        pass
 
 
 def emit_file_timings(suite: Suite, text: str, attempt: int) -> None:
@@ -5510,6 +5579,7 @@ def _run_suite_attempt(suite: Suite, log_dir: Path, attempt: int = 1,
     seconds = time.perf_counter() - t0
 
     emit_file_timings(suite, out, attempt)
+    emit_pw_phases(suite, out, attempt)
 
     if rc == 75:
         reason = next((line.split("QUEUED:", 1)[1].strip()
