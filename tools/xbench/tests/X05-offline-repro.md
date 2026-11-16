@@ -656,7 +656,7 @@ Complete seven-step JSON envelope:
 | Field | Required shape | Missing, null or empty behavior |
 |---|---|---|
 | `import` | Exactly `normal_user`, `dwg_imported`, `report_imported`, all bool | Missing outer field rejects envelope; null/empty object yields step1 UNREADABLE; false yields readable FAIL |
-| `grid` | `expected_grid_ids`, `saved_group_ids`, `rows`, `require_all_matched`, plus `string_assignments`, `reopened_string_assignments` and independent `optimizer_totals`, plus explicit `panel_counts` and independent `panel_totals` | Missing outer field rejects envelope; null/empty object yields step2 UNREADABLE; empty rows with valid nonempty IDs yields missing-grid FAIL |
+| `grid` | `expected_grid_ids`, `saved_group_ids`, `rows`, `require_all_matched`, plus `string_assignments`, `reopened_string_assignments` and independent `optimizer_totals`, plus explicit `panel_counts`, `before_panel_counts`, `reopened_panel_counts` and independent `panel_totals` | Missing outer field rejects envelope; null/empty object yields step2 UNREADABLE; empty rows with valid nonempty IDs yields missing-grid FAIL |
 | `assurance` | Exactly `evidence`, `manifest`, `bindings`, `inputs_hex`, `identity`, `stage_identities` | Missing outer field rejects envelope; null/empty object yields assurance UNREADABLE and absent downstream steps |
 
 Evidence and assurance schemas are the existing six-stage contracts above.
@@ -1385,3 +1385,48 @@ corrected PASS grid_panel_totals_equal grid_panel_oracle_total_equal
 The swap preserves the panel grand total of 24. Independent per-grid counts and
 explicit string IDs establish the supplied comparison. This replay acquires no
 live evidence and does not authenticate its producer.
+
+## Panel save/reopen composition replay
+
+Seven-step input also requires explicit `grid.before_panel_counts` and
+`grid.reopened_panel_counts`. The `grid_panel_reopen` result binds each panel map
+to its respective snapshot string IDs and compares per-grid sums using the
+explicit before/reopened owners. Missing, foreign and duplicate panel IDs yield
+UNREADABLE. Existing step diagnostics remain available.
+
+Run this synthetic PowerShell replay from the repository root.
+
+```powershell
+@'
+import sys, json, runpy
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import reconcile_seven_steps_json
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+correct = builders['equal_count_ownership_envelope']()
+redistributed = deepcopy(correct)
+redistributed['grid']['reopened_panel_counts'][0]['panels'] = 14
+redistributed['grid']['reopened_panel_counts'][1]['panels'] = 10
+missing = deepcopy(redistributed)
+del missing['grid']['reopened_panel_counts']
+for name, envelope in [('redistributed', redistributed), ('missing', missing), ('corrected', correct)]:
+    result = reconcile_seven_steps_json(json.dumps(envelope))
+    snapshot = result['grid_panel_reopen']
+    print(name, result['verdict'], snapshot['comparison']['reason'], result['steps']['7']['verdict'])
+    if name == 'redistributed':
+        assert snapshot['comparison']['changed_count'] == 2
+        assert [row['delta'] for row in snapshot['comparison']['examples']] == [4, -4]
+'@ | python -P -
+```
+
+Expected output
+
+```text
+redistributed FAIL grid_panel_snapshots_changed PASS
+missing UNREADABLE grid_panel_snapshots_invalid PASS
+corrected PASS grid_panel_snapshots_equal PASS
+```
+
+Owners and the grand total of 24 stay equal across this synthetic redistribution.
+Explicit per-grid snapshot sums expose the change. The supplied evidence does
+not establish live X05 acceptance or authenticate an input producer.

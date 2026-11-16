@@ -465,7 +465,7 @@ def _seven_step_inputs(import_evidence, grid_evidence):
     else:
         imported = _out("PASS" if all(import_evidence.values()) else "FAIL", "supplied_import_evidence")
     grid_fields = {"expected_grid_ids", "saved_group_ids", "rows", "require_all_matched"}
-    if type(grid_evidence) is not dict or set(grid_evidence) - {"string_assignments", "optimizer_totals", "reopened_string_assignments", "panel_totals", "panel_counts"} != grid_fields:
+    if type(grid_evidence) is not dict or set(grid_evidence) - {"string_assignments", "optimizer_totals", "reopened_string_assignments", "panel_totals", "panel_counts", "before_panel_counts", "reopened_panel_counts"} != grid_fields:
         grids = _out("UNREADABLE", "grid_evidence_unreadable")
     else:
         grids = compare_grid_correspondence(**{key: grid_evidence[key] for key in grid_fields})
@@ -486,6 +486,8 @@ def reconcile_seven_steps(import_evidence, grid_evidence, assurance):
                               _seven_step_grid_snapshot(grid_evidence, assurance.get("evidence")
                                   if type(assurance) is dict else None),
                               _seven_step_panels(grid_evidence, assurance.get("evidence")
+                                  if type(assurance) is dict else None),
+                              _seven_step_panel_snapshot(grid_evidence, assurance.get("evidence")
                                   if type(assurance) is dict else None))
 
 
@@ -544,16 +546,28 @@ def _seven_step_panels(grid, evidence):
                 string_binding=binding)
 
 
-def _seven_step_result(imported, grids, checked, ownership, grid_optimizers, ownership_reopen, grid_optimizer_reopen, grid_panels):
+def _seven_step_panel_snapshot(grid, evidence):
+    if type(grid) is not dict or type(evidence) is not dict:
+        return _out("UNREADABLE", "grid_panel_snapshot_evidence_unreadable")
+    before, reopened = evidence.get("before_rows"), evidence.get("reopened_rows")
+    return compare_bound_panel_snapshots(grid.get("expected_grid_ids"),
+        before.get("strings") if type(before) is dict else None,
+        reopened.get("strings") if type(reopened) is dict else None,
+        grid.get("before_panel_counts"), grid.get("string_assignments"),
+        grid.get("reopened_panel_counts"), grid.get("reopened_string_assignments"))
+
+
+def _seven_step_result(imported, grids, checked, ownership, grid_optimizers, ownership_reopen, grid_optimizer_reopen, grid_panels, grid_panel_reopen):
     stages = checked.get("checks", {}).get("provenance", {}).get("reconciliation", {}).get("stages", {})
     absent = _out("UNREADABLE", "stage_evidence_missing")
     steps = {"1": imported, "2": grids, "3": stages.get("strings", absent), "4": stages.get("grouping", absent),
              "5": dict(table=stages.get("table", absent), csv_view=stages.get("csv_view", absent)),
              "6": stages.get("policy", absent), "7": stages.get("reopen", absent)}
-    verdicts = {imported["verdict"], grids["verdict"], checked["verdict"], ownership["verdict"], grid_optimizers["verdict"], ownership_reopen["verdict"], grid_optimizer_reopen["verdict"], grid_panels["verdict"]}
+    verdicts = {imported["verdict"], grids["verdict"], checked["verdict"], ownership["verdict"], grid_optimizers["verdict"], ownership_reopen["verdict"], grid_optimizer_reopen["verdict"], grid_panels["verdict"], grid_panel_reopen["verdict"]}
     return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
                 "offline_seven_steps", steps=steps, assurance=checked, ownership=ownership, grid_optimizers=grid_optimizers,
-                ownership_reopen=ownership_reopen, grid_optimizer_reopen=grid_optimizer_reopen, grid_panels=grid_panels)
+                ownership_reopen=ownership_reopen, grid_optimizer_reopen=grid_optimizer_reopen, grid_panels=grid_panels,
+                grid_panel_reopen=grid_panel_reopen)
 
 
 def reconcile_seven_steps_json(text):
@@ -578,6 +592,8 @@ def _seven_step_envelope(envelope):
                               _seven_step_grid_snapshot(envelope["grid"], envelope["assurance"].get("evidence")
                                   if type(envelope["assurance"]) is dict else None),
                               _seven_step_panels(envelope["grid"], envelope["assurance"].get("evidence")
+                                  if type(envelope["assurance"]) is dict else None),
+                              _seven_step_panel_snapshot(envelope["grid"], envelope["assurance"].get("evidence")
                                   if type(envelope["assurance"]) is dict else None))
 
 
@@ -1025,6 +1041,19 @@ def compare_panel_string_ids(saved_strings, panel_counts):
                 counts=dict(missing=len(missing), foreign=len(foreign)),
                 missing_ids=nsmallest(MAX_STRING_EXAMPLES, missing),
                 foreign_ids=nsmallest(MAX_STRING_EXAMPLES, foreign))
+
+
+def compare_bound_panel_snapshots(expected_grid_ids, before_strings, reopened_strings,
+                                  before_panels, before_owners, reopened_panels, reopened_owners):
+    """Require each explicit snapshot panel map to cover its actual string identities."""
+    before = compare_panel_string_ids(before_strings, before_panels)
+    reopened = compare_panel_string_ids(reopened_strings, reopened_panels)
+    comparison = compare_grid_panel_snapshots(expected_grid_ids, before_panels, before_owners,
+                                              reopened_panels, reopened_owners)
+    verdicts = {before["verdict"], reopened["verdict"], comparison["verdict"]}
+    return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
+                "supplied_grid_panel_snapshot_evidence", before_binding=before, reopened_binding=reopened,
+                comparison=comparison)
 
 
 def compare_grid_panel_totals(expected_totals, saved_strings, assignments):

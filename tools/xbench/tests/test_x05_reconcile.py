@@ -31,7 +31,7 @@ from benches.x05_reconcile import (METRICS, TABLE_COLUMNS, check_discrepancies,
     compare_grid_oracle_totals, compare_ownership_snapshots,
     compare_bound_ownership_snapshots, compare_grid_optimizer_snapshots,
     compare_grid_panel_totals, compare_grid_panel_oracle_totals,
-    compare_panel_string_ids, compare_grid_panel_snapshots,
+    compare_panel_string_ids, compare_grid_panel_snapshots, compare_bound_panel_snapshots,
     compare_csv_view, compare_recommendations, compare_snapshots, compare_strings, compare_table)
 
 
@@ -1298,7 +1298,9 @@ def seven_step_envelope():
                          string_assignments=[dict(grid_id="g", string_id=row["string_id"]) for row in ORACLE],
                          optimizer_totals={"g": sum(row["optimizers"] for row in ORACLE)},
                          reopened_string_assignments=[dict(grid_id="g", string_id=row["string_id"]) for row in ORACLE],
-                         panel_totals={"g": 24}, panel_counts=[dict(string_id="A", panels=10), dict(string_id="B", panels=14)]),
+                         panel_totals={"g": 24}, panel_counts=[dict(string_id="A", panels=10), dict(string_id="B", panels=14)],
+                         before_panel_counts=[dict(string_id="A", panels=10), dict(string_id="B", panels=14)],
+                         reopened_panel_counts=[dict(string_id="A", panels=10), dict(string_id="B", panels=14)]),
             "assurance": assurance_envelope()}
 
 
@@ -1429,7 +1431,9 @@ def test_seven_step_offline_composer_preserves_every_diagnostic_and_missing_evid
                          string_assignments=[dict(grid_id="g", string_id=row["string_id"]) for row in ORACLE],
                          optimizer_totals={"g": sum(row["optimizers"] for row in ORACLE)},
                          reopened_string_assignments=[dict(grid_id="g", string_id=row["string_id"]) for row in ORACLE],
-                         panel_totals={"g": 24}, panel_counts=[dict(string_id="A", panels=10), dict(string_id="B", panels=14)])
+                         panel_totals={"g": 24}, panel_counts=[dict(string_id="A", panels=10), dict(string_id="B", panels=14)],
+                         before_panel_counts=[dict(string_id="A", panels=10), dict(string_id="B", panels=14)],
+                         reopened_panel_counts=[dict(string_id="A", panels=10), dict(string_id="B", panels=14)])
     result = reconcile_seven_steps(imported, grids, assurance)
     assert result["verdict"] == "PASS" and set(result["steps"]) == set("1234567")
     assert result["steps"]["3"] == result["assurance"]["checks"]["provenance"]["reconciliation"]["stages"]["strings"]
@@ -3809,3 +3813,119 @@ def test_generated_panel_lookup_work_caps_permutations_and_preserved_inputs(monk
             preserved = deepcopy(changed)
             assert module.compare_grid_panel_totals(dict(reversed(list(totals.items()))), *changed) == result
             assert changed == preserved
+
+
+def test_composed_panel_snapshot_redistribution_absence_and_diagnostic_retention():
+    envelope = equal_count_ownership_envelope()
+    baseline = reconcile_seven_steps_json(json.dumps(envelope))
+    assert baseline["verdict"] == "PASS"
+    envelope["grid"]["reopened_panel_counts"][0]["panels"] = 14
+    envelope["grid"]["reopened_panel_counts"][1]["panels"] = 10
+    changed = reconcile_seven_steps_json(json.dumps(envelope))
+    assert changed["verdict"] == "FAIL"
+    assert changed["grid_panel_reopen"]["comparison"]["changed_count"] == 2
+    for key in ("steps", "assurance", "ownership", "grid_optimizers", "ownership_reopen", "grid_optimizer_reopen", "grid_panels"):
+        assert changed[key] == baseline[key]
+    del envelope["grid"]["reopened_panel_counts"]
+    envelope["import"]["normal_user"] = False
+    missing = reconcile_seven_steps_json(json.dumps(envelope))
+    assert missing["verdict"] == "UNREADABLE" and missing["steps"]["1"]["verdict"] == "FAIL"
+    assert missing["grid_panel_reopen"]["reopened_binding"]["reason"] == "panel_rows_unreadable"
+    assert missing["steps"]["7"] == baseline["steps"]["7"]
+
+
+@pytest.mark.parametrize("stage", ["before", "reopened"])
+@pytest.mark.parametrize("mutation", ["missing", "foreign", "duplicate"])
+def test_snapshot_panel_ids_bind_despite_equal_total_rows(stage, mutation):
+    strings = deepcopy(ORACLE)
+    panels = [dict(string_id="A", panels=10), dict(string_id="B", panels=14)]
+    owners = [dict(grid_id="g", string_id="A"), dict(grid_id="g", string_id="B")]
+    changed = ([dict(string_id="A", panels=24)] if mutation == "missing" else
+               [dict(string_id="X", panels=10), panels[1]] if mutation == "foreign" else
+               [dict(string_id="A", panels=5), dict(string_id="A", panels=5), panels[1]])
+    assert sum(row["panels"] for row in changed) == 24
+    changed_owners = [dict(grid_id="g", string_id=row["string_id"]) for row in changed]
+    before, reopened = (changed, panels) if stage == "before" else (panels, changed)
+    before_owners, reopened_owners = (changed_owners, owners) if stage == "before" else (owners, changed_owners)
+    preserved = deepcopy((strings, before, reopened, before_owners, reopened_owners))
+    result = compare_bound_panel_snapshots(["g"], strings, strings, before, before_owners, reopened, reopened_owners)
+    assert result["verdict"] == "UNREADABLE"
+    binding = result[stage + "_binding"]
+    assert binding["reason"] == ("panel_duplicate_id" if mutation == "duplicate" else "panel_string_ids_unbound")
+    assert len(serialize_result(result)) < 2500
+    assert (strings, before, reopened, before_owners, reopened_owners) == preserved
+
+
+def test_exhaustive_panel_snapshot_reference_counts_and_nonmutation():
+    from itertools import product
+    states = list(product(("east", "west"), ("east", "west"), (1, 2), (1, 2)))
+    for before in states:
+        for reopened in states:
+            supplied, expected = [], []
+            for owner_a, owner_b, panels_a, panels_b in (before, reopened):
+                supplied.extend(([dict(string_id="A", panels=panels_a), dict(string_id="B", panels=panels_b)],
+                                 [dict(string_id="A", grid_id=owner_a), dict(string_id="B", grid_id=owner_b)]))
+                expected.append({grid: sum(count for owner, count in ((owner_a, panels_a), (owner_b, panels_b)) if owner == grid)
+                                 for grid in ("east", "west")})
+            preserved = deepcopy(supplied)
+            result = compare_grid_panel_snapshots(["east", "west"], *supplied)
+            changed = [grid for grid in ("east", "west") if expected[0][grid] != expected[1][grid]]
+            assert result["changed_count"] == len(changed)
+            assert result["verdict"] == ("FAIL" if changed else "PASS")
+            assert result["examples"] == [dict(grid_id=grid, before=expected[0][grid], reopened=expected[1][grid],
+                                               delta=expected[1][grid] - expected[0][grid]) for grid in changed]
+            assert supplied == preserved
+
+
+def test_panel_snapshot_diagnostics_cap_exact_totals_and_permutation_stability():
+    from random import Random
+    grids = [f"g{i:03}" for i in range(70)]
+    before = [dict(string_id=f"s{i:03}", panels=2) for i in range(70)]
+    reopened = [dict(string_id=f"s{i:03}", panels=3) for i in range(70)]
+    owners = [dict(grid_id=grids[i], string_id=f"s{i:03}") for i in range(70)]
+    baseline = compare_grid_panel_snapshots(grids, before, owners, reopened, owners)
+    assert baseline["changed_count"] == 70 and len(baseline["examples"]) == MAX_STRING_EXAMPLES
+    assert [row["grid_id"] for row in baseline["examples"]] == grids[:MAX_STRING_EXAMPLES]
+    for seed in range(8):
+        values = deepcopy((grids, before, owners, reopened, owners))
+        rng = Random(seed)
+        for rows in values:
+            rng.shuffle(rows)
+        preserved = deepcopy(values)
+        assert compare_grid_panel_snapshots(*values) == baseline
+        assert values == preserved
+
+
+def test_panel_snapshot_direct_json_and_bound_aggregate_diagnostics_match():
+    for field in ("before_panel_counts", "reopened_panel_counts"):
+        for mutation in ("redistribution", "missing", "foreign", "duplicate"):
+            envelope = equal_count_ownership_envelope()
+            rows = envelope["grid"][field]
+            if mutation == "redistribution":
+                rows[0]["panels"], rows[1]["panels"] = 14, 10
+            elif mutation == "missing":
+                del envelope["grid"][field]
+            elif mutation == "foreign":
+                rows[0]["string_id"] = "foreign"
+            else:
+                rows.append(deepcopy(rows[0]))
+            source = envelope["assurance"]
+            assurance = dict(evidence=source["evidence"], frozen_manifest=source["manifest"], stage_bindings=source["bindings"],
+                supplied_inputs={key: bytes.fromhex(value) for key, value in source["inputs_hex"].items()},
+                expected_identity=source["identity"], stage_identities=source["stage_identities"])
+            preserved = deepcopy(envelope)
+            direct = reconcile_seven_steps(envelope["import"], envelope["grid"], assurance)
+            strict = reconcile_seven_steps_json(json.dumps(envelope))
+            assert json.loads(serialize_result(direct)) == json.loads(serialize_result(strict))
+            assert envelope == preserved
+            expected, records = bound_seven_fixture_records()
+            envelope["assurance"]["manifest"]["fixture_id"] = expected[0]
+            envelope["assurance"]["evidence"]["fixture_id"] = expected[0]
+            envelope["assurance"]["bindings"] = {key: deepcopy(envelope["assurance"]["manifest"]) for key in PROVENANCE_STAGES}
+            records[0]["envelope"] = envelope
+            preserved_records = deepcopy(records)
+            result = aggregate_bound_seven_steps(expected, records)
+            decoded = aggregate_bound_seven_steps_json(json.dumps(dict(expected_ids=expected, fixtures=records)))
+            assert json.loads(serialize_result(result)) == json.loads(serialize_result(decoded))
+            assert all(result["fixtures"][key]["verdict"] == "PASS" for key in expected[1:])
+            assert records == preserved_records
