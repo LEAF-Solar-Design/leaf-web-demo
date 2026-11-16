@@ -28,6 +28,8 @@ const database = path.join(root, 'profiles.sqlite')
 const python = `
 import json,sys
 from pathlib import Path
+from contextlib import nullcontext
+from unittest.mock import patch
 sys.path.insert(0,str(Path.cwd()/'server'))
 from x07_customer_profile_store import CustomerProfileStore
 from x07_profile_workflow import ProfileWorkflow
@@ -37,12 +39,14 @@ try:
     store=CustomerProfileStore(request['database'])
     adapter=WorkflowAdapter(ProfileWorkflow(store),context=request['bound_context'],intake=request['intake'],copies=request['copies'])
     op=request['op']; value=request.get('value'); context=request['context']
-    if op=='load': result=adapter.load_workflow(context)
-    elif op=='confirm': result=adapter.confirm_roles(context,value)
-    elif op=='apply': result=adapter.apply_profile(context,value)
-    elif op=='editor_load': result=adapter.load_profile(value)
-    elif op=='editor_save': result=adapter.save_profile(value['customer'],value['roles'],expected_version=value['expected_version'])
-    else: raise ValueError('unknown offline operation')
+    target={'pin':'apply_to_project','save':'save_version'}.get(request.get('fault'))
+    with patch.object(store,target,side_effect=OSError('injected offline '+str(request.get('fault'))+' failure')) if target else nullcontext():
+        if op=='load': result=adapter.load_workflow(context)
+        elif op=='confirm': result=adapter.confirm_roles(context,value)
+        elif op=='apply': result=adapter.apply_profile(context,value)
+        elif op=='editor_load': result=adapter.load_profile(value)
+        elif op=='editor_save': result=adapter.save_profile(value['customer'],value['roles'],expected_version=value['expected_version'])
+        else: raise ValueError('unknown offline operation')
     print(json.dumps({'ok':True,'result':result},ensure_ascii=False))
 except Exception as error:
     print(json.dumps({'ok':False,'error':{'type':type(error).__name__,'message':str(error),'code':getattr(error,'code',None)}}))
@@ -51,7 +55,7 @@ const intake = { inserts: [0, 1, 2, 10, 11, 12].map(x => ({ name: 'Panel', layer
 const copies = [0, 10].map(x => ({ block: 'Panel', layer: 'MODULES', design_window: [x, 0, x + 2, 0], oracle_count: 3 }))
 const ctx = (project, drawing = project + ':v1') => ({ customer_key: 'synthetic-a', project_key: project, drawing_key: drawing })
 const calls = [], children = new Set()
-function rpc(bound, op, context, value, signal) {
+function rpc(bound, op, context, value, signal, fault = null) {
   calls.push({ op, context, value })
   return new Promise((resolve, reject) => {
     if (signal?.aborted) { reject(new Error('retired')); return }
@@ -78,10 +82,10 @@ function rpc(bound, op, context, value, signal) {
         else settle(null, response.result)
       } catch (error) { settle(error) }
     })
-    child.stdin.end(JSON.stringify({ database, bound_context: bound, context, op, value, intake, copies }))
+    child.stdin.end(JSON.stringify({ database, bound_context: bound, context, op, value, intake, copies, fault }))
   })
 }
-function mount(context) {
+function mount(context, overrides = {}) {
   return render(React.createElement(Workflow, { customerKey: context.customer_key,
     projectKey: context.project_key, drawingKey: context.drawing_key,
     loadWorkflow: (scope, opts) => rpc(context, 'load', scope, null, opts.signal),
@@ -89,7 +93,7 @@ function mount(context) {
     applyProfile: (scope, value, opts) => rpc(context, 'apply', scope, value, opts.signal),
     loadProfile: (customer, opts) => rpc(context, 'editor_load', context, customer, opts.signal),
     saveProfile: (customer, roles, opts) => rpc(context, 'editor_save', context,
-      { customer, roles, expected_version: opts.expected_version }, opts.signal) }))
+      { customer, roles, expected_version: opts.expected_version }, opts.signal), ...overrides }))
 }
 async function applied() {
   await screen.findByText('Drawing profile applied.', {}, { timeout: 15000 })
@@ -139,13 +143,15 @@ async function main() {
     assert.equal(pin.application_record.version, 1)
     assert.equal(calls.filter(row => row.op === 'confirm').length, 1)
     console.log('PASS: actual JSX callbacks through Python JSON adapter, one confirmation, copy reuse, editor version2 and old pinned reopen1')
-  } finally {
+  } finally { await dispose() }
+}
+async function dispose() {
     cleanup(); dom.window.close()
     // Workers normally all exit before callback resolution; retire any failed
     // operation before removing only this harness-owned disposable database.
     await Promise.all([...children].map(child => new Promise(resolve => { child.once('close', resolve); child.kill() })))
     if (fs.existsSync(database)) fs.unlinkSync(database)
     fs.rmdirSync(root)
-  }
 }
-main().catch(error => { console.error(error); process.exitCode = 1 })
+module.exports = { rpc, ctx, copies, mount, screen, fireEvent, waitFor, cleanup, dispose }
+if (require.main === module) main().catch(error => { console.error(error); process.exitCode = 1 })

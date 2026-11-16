@@ -12,6 +12,10 @@ import sqlite3
 from uuid import uuid4
 
 
+class ProfileSchemaError(ValueError):
+    pass
+
+
 class ProfileScopeError(ValueError):
     pass
 
@@ -28,7 +32,36 @@ class CustomerProfileStore:
             raise ValueError('inject a local SQLite file path')
         self.path = Path(path)
         with self._connection() as db:
-            db.executescript('''
+            db.execute('BEGIN IMMEDIATE')
+            version = db.execute('PRAGMA user_version').fetchone()[0]
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
+            if version not in (0, 1):
+                raise ProfileSchemaError('unsupported profile schema version: ' + str(version))
+            expected = {'customers': ['customer_key', 'profile_id'],
+                        'profile_versions': ['customer_key', 'profile_id', 'version', 'roles_json', 'created_at'],
+                        'project_applications': ['project_key', 'customer_key', 'profile_id', 'version']}
+            triggers = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
+            required = {'versions_no_update', 'versions_no_delete', 'applications_no_update', 'applications_no_delete'}
+            shape_ok = tables == set(expected) and required <= triggers
+            if shape_ok:
+                shape_ok = all([row[1] for row in db.execute('PRAGMA table_info(' + name + ')')] == fields
+                               for name, fields in expected.items())
+            if version == 1 and not shape_ok:
+                raise ProfileSchemaError('supported version has incompatible schema shape')
+            if version == 0 and tables and not shape_ok:
+                raise ProfileSchemaError('unversioned database is not the supported legacy shape')
+            decision = 'supported' if version == 1 else ('adopt_legacy' if tables else 'initialize')
+            if not tables:
+                self._create_schema(db)
+            if version == 0:
+                db.execute('PRAGMA user_version=1')
+            self.schema_status = {'previous_version': version, 'version': 1, 'decision': decision}
+
+    @staticmethod
+    def _create_schema(db):
+        # Execute complete statements individually inside the caller's transaction.
+        # executescript would implicitly commit before DDL and break rollback.
+        sql = '''
               CREATE TABLE IF NOT EXISTS customers (
                 customer_key TEXT PRIMARY KEY, profile_id TEXT NOT NULL UNIQUE,
                 UNIQUE(customer_key, profile_id));
@@ -50,7 +83,15 @@ class CustomerProfileStore:
                 BEGIN SELECT RAISE(ABORT, 'project applications are pinned'); END;
               CREATE TRIGGER IF NOT EXISTS applications_no_delete BEFORE DELETE ON project_applications
                 BEGIN SELECT RAISE(ABORT, 'project applications are pinned'); END;
-            ''')
+                    '''
+        statement = ''
+        for line in sql.splitlines(True):
+            statement += line
+            if sqlite3.complete_statement(statement):
+                db.execute(statement)
+                statement = ''
+        if statement.strip():
+            raise ProfileSchemaError('incomplete initialization SQL')
 
     @contextmanager
     def _connection(self):

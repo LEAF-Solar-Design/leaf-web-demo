@@ -4,6 +4,9 @@ Bounds are inclusive on all four edges, with no implicit tolerance. A zero-area
 window is valid. Block/layer names match case-insensitively, like CAD symbols.
 Each matching INSERT record counts once; block extents, rotation, scale and Z
 do not affect origin membership. Invalid matching coordinates refuse the count.
+Repeated nonempty handles among matching records refuse the operation (CAD
+handles compare case-insensitively). Coincident distinct or unidentified records
+remain separate INSERTs; coordinates alone never establish duplicate identity.
 """
 import math
 
@@ -28,7 +31,7 @@ def select_modules(intake, *, block, layer, window):
         raise SelectionError('window bounds are reversed')
     if not isinstance(intake, dict) or not isinstance(intake.get('inserts'), list):
         raise SelectionError('intake must contain an INSERT list')
-    indices, handles = [], []
+    indices, handles, seen = [], [], set()
     for index, row in enumerate(intake['inserts']):
         if not isinstance(row, dict):
             raise SelectionError('INSERT record must be an object')
@@ -36,6 +39,12 @@ def select_modules(intake, *, block, layer, window):
             raise SelectionError('INSERT names must be strings')
         if row['name'].casefold() != block.casefold() or row['layer'].casefold() != layer.casefold():
             continue
+        handle = row.get('handle')
+        if isinstance(handle, str) and handle:
+            identity = handle.casefold()
+            if identity in seen:
+                raise SelectionError('duplicate matching INSERT handle')
+            seen.add(identity)
         x, y = row.get('x'), row.get('y')
         if not _finite(x) or not _finite(y):
             raise SelectionError('matching INSERT origin is not finite')
