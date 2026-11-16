@@ -1945,7 +1945,11 @@ def build_suites() -> List[Suite]:
                   "tests/test_x04_packet_dependency_only_binding.py",
                   "tests/test_x04_packet_failed_batch_binding.py",
                   "tests/test_x04_packet_output_independence.py",
-              ], 1084),
+                  "tests/test_x04_packet_assembly.py",
+                  "tests/test_x04_packet_multiple_drawings.py",
+                  "tests/test_x04_packet_comparison_chain.py",
+                  "tests/test_x04_packet_equal_payload_ids.py",
+              ], 1109),
         Suite("server-dxf-intake-lines-text", "server tests/test_dxf_intake_lines_text.py",
               "pytest", SERVER, _py_pytest("tests/test_dxf_intake_lines_text.py"), 4),
         # W4g engine reach (2026-09-04): the intake -> DXF synthesizer (the
