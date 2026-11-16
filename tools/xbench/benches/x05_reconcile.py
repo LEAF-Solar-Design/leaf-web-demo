@@ -465,7 +465,7 @@ def _seven_step_inputs(import_evidence, grid_evidence):
     else:
         imported = _out("PASS" if all(import_evidence.values()) else "FAIL", "supplied_import_evidence")
     grid_fields = {"expected_grid_ids", "saved_group_ids", "rows", "require_all_matched"}
-    if type(grid_evidence) is not dict or set(grid_evidence) - {"string_assignments", "optimizer_totals", "reopened_string_assignments", "panel_totals", "panel_counts", "before_panel_counts", "reopened_panel_counts", "dc_totals", "dc_power", "before_dc_power", "reopened_dc_power", "string_totals", "inverter_totals"} != grid_fields:
+    if type(grid_evidence) is not dict or set(grid_evidence) - {"before_string_assignments", "string_assignments", "optimizer_totals", "reopened_string_assignments", "panel_totals", "panel_counts", "before_panel_counts", "reopened_panel_counts", "dc_totals", "dc_power", "before_dc_power", "reopened_dc_power", "string_totals", "inverter_totals"} != grid_fields:
         grids = _out("UNREADABLE", "grid_evidence_unreadable")
     else:
         grids = compare_grid_correspondence(**{key: grid_evidence[key] for key in grid_fields})
@@ -503,7 +503,8 @@ def reconcile_seven_steps(import_evidence, grid_evidence, assurance):
                               _seven_step_assignment_snapshot(assurance.get("evidence") if type(assurance) is dict else None),
                               _seven_step_inverter_loads(grid_evidence, assurance.get("evidence") if type(assurance) is dict else None),
                               _seven_step_inverter_load_reopen(grid_evidence, assurance.get("evidence") if type(assurance) is dict else None),
-                              _seven_step_string_metrics(grid_evidence, assurance.get("evidence") if type(assurance) is dict else None))
+                              _seven_step_string_metrics(grid_evidence, assurance.get("evidence") if type(assurance) is dict else None),
+                              _seven_step_cross_topology(grid_evidence, assurance.get("evidence") if type(assurance) is dict else None))
 
 
 def _seven_step_ownership(grid_evidence, evidence):
@@ -812,20 +813,34 @@ def _seven_step_string_metrics(grid, evidence):
                 "supplied_independent_string_metrics", metrics=checks)
 
 
-def _seven_step_result(imported, grids, checked, ownership, grid_optimizers, ownership_reopen, grid_optimizer_reopen, grid_panels, grid_panel_reopen, grid_dc, grid_dc_reopen, grid_strings, grid_inverters, inverter_reopen, assignments, assignment_reopen, inverter_loads, inverter_load_reopen, string_metrics):
+def _seven_step_cross_topology(grid, evidence):
+    if type(grid) is not dict or type(evidence) is not dict:
+        return _out("UNREADABLE", "cross_topology_evidence_unreadable")
+    checks = {}
+    for stage in ("saved", "before", "reopened"):
+        strings, inverters = _assignment_ids(evidence, stage)
+        field = "string_assignments" if stage == "saved" else stage + "_string_assignments"
+        checks[stage] = validate_cross_topology(grid.get("expected_grid_ids"), strings, inverters,
+            grid.get(field), evidence.get(stage + "_inverters"), evidence.get(stage + "_assignments"))
+    verdicts = {check["verdict"] for check in checks.values()}
+    return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
+                "supplied_cross_topology", checks=checks)
+
+
+def _seven_step_result(imported, grids, checked, ownership, grid_optimizers, ownership_reopen, grid_optimizer_reopen, grid_panels, grid_panel_reopen, grid_dc, grid_dc_reopen, grid_strings, grid_inverters, inverter_reopen, assignments, assignment_reopen, inverter_loads, inverter_load_reopen, string_metrics, cross_topology):
     stages = checked.get("checks", {}).get("provenance", {}).get("reconciliation", {}).get("stages", {})
     absent = _out("UNREADABLE", "stage_evidence_missing")
     steps = {"1": imported, "2": grids, "3": stages.get("strings", absent), "4": stages.get("grouping", absent),
              "5": dict(table=stages.get("table", absent), csv_view=stages.get("csv_view", absent)),
              "6": stages.get("policy", absent), "7": stages.get("reopen", absent)}
-    verdicts = {imported["verdict"], grids["verdict"], checked["verdict"], ownership["verdict"], grid_optimizers["verdict"], ownership_reopen["verdict"], grid_optimizer_reopen["verdict"], grid_panels["verdict"], grid_panel_reopen["verdict"], grid_dc["verdict"], grid_dc_reopen["verdict"], grid_strings["verdict"], grid_inverters["verdict"], inverter_reopen["verdict"], assignments["verdict"], assignment_reopen["verdict"], inverter_loads["verdict"], inverter_load_reopen["verdict"], string_metrics["verdict"]}
+    verdicts = {imported["verdict"], grids["verdict"], checked["verdict"], ownership["verdict"], grid_optimizers["verdict"], ownership_reopen["verdict"], grid_optimizer_reopen["verdict"], grid_panels["verdict"], grid_panel_reopen["verdict"], grid_dc["verdict"], grid_dc_reopen["verdict"], grid_strings["verdict"], grid_inverters["verdict"], inverter_reopen["verdict"], assignments["verdict"], assignment_reopen["verdict"], inverter_loads["verdict"], inverter_load_reopen["verdict"], string_metrics["verdict"], cross_topology["verdict"]}
     return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
                 "offline_seven_steps", steps=steps, assurance=checked, ownership=ownership, grid_optimizers=grid_optimizers,
                 ownership_reopen=ownership_reopen, grid_optimizer_reopen=grid_optimizer_reopen, grid_panels=grid_panels,
                 grid_panel_reopen=grid_panel_reopen, grid_dc=grid_dc, grid_dc_reopen=grid_dc_reopen, grid_strings=grid_strings,
                 grid_inverters=grid_inverters, inverter_reopen=inverter_reopen,
                 assignments=assignments, assignment_reopen=assignment_reopen,
-                inverter_loads=inverter_loads, inverter_load_reopen=inverter_load_reopen, string_metrics=string_metrics)
+                inverter_loads=inverter_loads, inverter_load_reopen=inverter_load_reopen, string_metrics=string_metrics, cross_topology=cross_topology)
 
 
 def reconcile_seven_steps_json(text):
@@ -867,7 +882,8 @@ def _seven_step_envelope(envelope):
                               _seven_step_assignment_snapshot(envelope["assurance"].get("evidence") if type(envelope["assurance"]) is dict else None),
                               _seven_step_inverter_loads(envelope["grid"], envelope["assurance"].get("evidence") if type(envelope["assurance"]) is dict else None),
                               _seven_step_inverter_load_reopen(envelope["grid"], envelope["assurance"].get("evidence") if type(envelope["assurance"]) is dict else None),
-                              _seven_step_string_metrics(envelope["grid"], envelope["assurance"].get("evidence") if type(envelope["assurance"]) is dict else None))
+                              _seven_step_string_metrics(envelope["grid"], envelope["assurance"].get("evidence") if type(envelope["assurance"]) is dict else None),
+                              _seven_step_cross_topology(envelope["grid"], envelope["assurance"].get("evidence") if type(envelope["assurance"]) is dict else None))
 
 
 def validate_import_grid_provenance(frozen_manifest, import_binding, grid_binding):

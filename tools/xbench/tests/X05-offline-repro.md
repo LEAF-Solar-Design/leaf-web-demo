@@ -2040,3 +2040,36 @@ Expected seven PASS results and FAIL `cross_topology_mismatch` with two changed
 strings. Missing owner evidence is UNREADABLE. Valid but missing or foreign
 assignments fail their explicit coverage checks. Independent producer evidence
 must bind these identities to the actual saved design for live acceptance.
+# Cross-topology recovery for X05
+
+Seven-step composition now validates saved, before and reopened topology using
+each snapshot's string IDs, inverter IDs, grid owners and connections. Grid
+evidence must explicitly supply `before_string_assignments` as well as saved
+`string_assignments` and `reopened_string_assignments`. The standalone recovery
+below combines missing owner evidence with balanced cross-grid connections.
+
+```powershell
+@'
+import sys
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+grids, strings, devices = ['east','west'], ['A','B'], ['I1','I2']
+owners = [dict(string_id='A',grid_id='east'),dict(string_id='B',grid_id='west')]
+inverters = [dict(inverter_id='I1',grid_id='east'),dict(inverter_id='I2',grid_id='west')]
+crossed = [dict(string_id='A',inverter_id='I2'),dict(string_id='B',inverter_id='I1')]
+correct = [dict(string_id='A',inverter_id='I1'),dict(string_id='B',inverter_id='I2')]
+observed = []
+for name, supplied_owners, connections in [('missing owners',None,crossed),
+        ('owners repaired',inverters,crossed),('connections repaired',inverters,correct)]:
+    result = m.validate_cross_topology(grids,strings,devices,owners,supplied_owners,connections)
+    observed.append(result['verdict'])
+    print(name,result['verdict'],result['reason'],result.get('mismatch_count'))
+assert observed == ['UNREADABLE','FAIL','PASS']
+'@ | python -P -
+```
+
+Expected reasons are `cross_topology_evidence_invalid`,
+`cross_topology_mismatch` with two mismatches, and `cross_topology_equal` with
+zero mismatches. Repairing owner evidence leaves the connection violation
+visible. Independent producer records must bind every supplied identity and
+owner map to its actual design snapshot before live acceptance.
