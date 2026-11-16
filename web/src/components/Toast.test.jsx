@@ -389,6 +389,25 @@ function toastComposition(marks) {
   }
 }
 
+it('headlines the result outcome and keeps the full notification in a tooltip', () => {
+  render(<Toast toast={{ id: 1, text: 'string-panels complete', result: { result: {
+    stats: { string_count: 32 }, electrical: { pass: true }, module: { max_system_voltage: 1000 },
+  } } }} onDone={vi.fn()} />)
+  const headline = screen.getByText('32 strings · 0 over 1000 V')
+  expect(headline).toHaveAttribute('title', '32 strings · 0 over 1000 V')
+  expect(headline).toHaveStyle({ textOverflow: 'ellipsis', whiteSpace: 'nowrap' })
+  expect(screen.getByRole('status')).toHaveStyle({ minWidth: '240px' })
+  expect(screen.queryByText('string-panels complete')).toBeNull()
+})
+
+it('uses a human title without summary data and humanizes legacy completion slugs', () => {
+  const { rerender } = render(<Toast toast={{ id: 1, text: 'string-panels complete', tool: { name: 'string-panels', title: 'String panels' } }} onDone={vi.fn()} />)
+  expect(screen.getByText('String panels')).toBeInTheDocument()
+  rerender(<Toast toast={{ id: 2, text: 'string-panels complete' }} onDone={vi.fn()} />)
+  expect(screen.getByText('String panels')).toBeInTheDocument()
+  expect(screen.queryByText('string-panels complete')).toBeNull()
+})
+
 it('KEYS-D31 toast F6 yields native composition', () => {
   toastComposition({ isComposing: true, keyCode: 0 })
 })

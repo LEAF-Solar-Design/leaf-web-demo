@@ -650,3 +650,176 @@ def test_staging_live():
         failure = True
     if failure:
         pytest.fail("required staging job evidence unavailable or invalid", pytrace=False)
+
+
+# X02: named cloud causes and reconcile-first uncertainty.
+"""Offline cause mapping for X02 solver rejection and uncertain outcomes."""
+from types import SimpleNamespace
+from uuid import UUID
+
+import pytest
+import requests
+
+import leaf_cloud_client as cloud
+import solar_project_jobs as x02_jobs
+import solar_project_solve as x02_solve
+from leaf_cloud_grants import CloudError, CloudGrant
+
+
+_X02_KEY = "00000000-0000-0000-0000-000000000001"
+
+
+@pytest.fixture
+def x02_request():
+    return cloud.StringerRequest.model_validate({"grid": {
+        "Dwgname": "synthetic", "Sequences": [[1, 0], [1, 0]], "Modify": [],
+        "Rows": [{"Panels": [{"Code": 1, "Id": "panel-1", "Seq": 0,
+            "InverterId": -1, "StringInputNumber": 0,
+            "X": 0.0, "Y": 0.0, "Angle": 0.0}]}]}})
+
+
+class _X02UnreadBody:
+    def __init__(self, status):
+        self.status_code = status
+        self.headers = {"Retry-After": "7"}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def iter_content(self, *args):
+        raise AssertionError("upstream body must not be iterated")
+
+    @property
+    def text(self):
+        raise AssertionError("upstream body must not be reflected")
+
+    @property
+    def content(self):
+        raise AssertionError("upstream body must not be read")
+
+
+@pytest.mark.parametrize("async_submit", [False, True])
+def test_x02_http400_is_named_rejection_without_body(monkeypatch, x02_request, async_submit):
+    monkeypatch.setattr(cloud.requests, "post", lambda *a, **kw: _X02UnreadBody(400))
+    grant = CloudGrant("synthetic-tenant", "synthetic-token")
+    with pytest.raises(CloudError) as caught:
+        if async_submit:
+            cloud.submit_stringer_async(x02_request, grant, _X02_KEY)
+        else:
+            cloud.post_stringer(x02_request, grant, preserve_uncertainty=True)
+    assert caught.value.classification == "CLOUD_REQUEST_REJECTED"
+    assert caught.value.status == 400
+    assert str(caught.value) == "CLOUD_REQUEST_REJECTED"
+
+
+def test_x02_rejection_job_error_is_actionable_and_bounded():
+    # A resumed refusal carries 502; the boundary derives the known upstream 400.
+    error = x02_jobs._preparation_error(CloudError("CLOUD_REQUEST_REJECTED", 502))
+    assert error == {
+        "error_code": "GRAPH_JOB_FAILED", "reason_code": "CLOUD_REQUEST_REJECTED",
+        "upstream_status": 400, "retryable": False,
+        "message": "The solar solve request was rejected by the solver.",
+        "next_action": "Review the solve inputs before submitting again."}
+    assert len(error["message"] + error["next_action"]) < 200
+
+
+def test_x02_unknown_outcome_requires_reconciliation():
+    error = x02_jobs._preparation_error(CloudError("solve_outcome_unknown", 502))
+    assert error == {
+        "error_code": "GRAPH_JOB_FAILED", "reason_code": "solve_outcome_unknown",
+        "retryable": False, "message": "The solar solve outcome is unknown.",
+        "next_action": "Reconcile its existing job before retrying."}
+    assert len(error["message"] + error["next_action"]) < 200
+
+
+def test_x02_unrelated_classification_keeps_generic_handling():
+    assert x02_jobs._preparation_error(CloudError("unrelated_future_classification", 400)) == {
+        "error_code": "GRAPH_JOB_FAILED", "reason_code": "CLOUD_UPSTREAM_FAILURE",
+        "message": "canonical Solar graph preparation failed", "retryable": False}
+
+
+def test_x02_async_timeout_preserves_same_key_contract(monkeypatch, x02_request):
+    sends = []
+
+    def timeout(*args, **kwargs):
+        sends.append(kwargs)
+        raise requests.ReadTimeout("synthetic timeout")
+
+    monkeypatch.setattr(cloud.requests, "post", timeout)
+    grant = CloudGrant("synthetic-tenant", "synthetic-token")
+    for _ in range(2):
+        assert cloud.submit_stringer_async(x02_request, grant, _X02_KEY,
+                                          remaining_seconds=20) == ("retryable", 5.0)
+    assert [send["headers"]["Idempotency-Key"] for send in sends] == [_X02_KEY, _X02_KEY]
+    assert all(send["headers"]["Prefer"] == "respond-async" for send in sends)
+    assert sends[0]["data"] == sends[1]["data"]
+
+
+def test_x02_sync_connection_uncertainty_is_preserved(monkeypatch, x02_request):
+    def disconnected(*args, **kwargs):
+        raise requests.ConnectionError("synthetic connection reset after write")
+
+    monkeypatch.setattr(cloud.requests, "post", disconnected)
+    with pytest.raises(CloudError) as caught:
+        cloud.post_stringer(x02_request, CloudGrant("synthetic-tenant", "synthetic-token"),
+                            preserve_uncertainty=True)
+    assert (caught.value.classification, caught.value.status) == ("solve_outcome_unknown", 502)
+
+
+@pytest.mark.parametrize("status,classification,error_status", [
+    (401, "cloud_auth_missing", 401), (403, "cloud_tenant_unauthorized", 403),
+    (409, "cloud_request_invalid", 400)])
+def test_x02_async_existing_refusals_are_preserved(monkeypatch, x02_request, status,
+                                               classification, error_status):
+    monkeypatch.setattr(cloud.requests, "post", lambda *a, **kw: _X02UnreadBody(status))
+    with pytest.raises(CloudError) as caught:
+        cloud.submit_stringer_async(x02_request, CloudGrant("tenant", "token"), _X02_KEY)
+    assert (caught.value.classification, caught.value.status) == (classification, error_status)
+
+
+def test_x02_async_busy_is_preserved(monkeypatch, x02_request):
+    monkeypatch.setattr(cloud.requests, "post", lambda *a, **kw: _X02UnreadBody(503))
+    assert cloud.submit_stringer_async(x02_request, CloudGrant("tenant", "token"), _X02_KEY) == ("busy", 7.0)
+
+
+def test_x02_worker_records_async_rejection_as_definitive(monkeypatch, x02_request):
+    x02_solve.platform_link._ensure_platform_package()
+    from leaf_platform import project_solve_store
+
+    exchange = {"state": "prepared", "grid_id": None, "send_protocol": None}
+    refusals = []
+
+    def begin_send(*args, **options):
+        exchange.update(options, state="sending")
+        return True
+
+    def refuse(*args, reason_code):
+        assert reason_code in project_solve_store._REFUSALS
+        refusals.append(reason_code)
+        exchange.update(state="refused", refusal_code=reason_code)
+
+    store = SimpleNamespace(
+        get_exchange=lambda *a: exchange,
+        resume_exchange=lambda *a, **kw: SimpleNamespace(action="send_ready", exchange=exchange),
+        begin_send=begin_send, refuse_exchange=refuse)
+    db = SimpleNamespace(run_transaction=lambda fn: fn(None))
+    monkeypatch.setattr(x02_solve, "_store", lambda: store)
+    monkeypatch.setattr(x02_solve.platform_link, "platform_db", lambda: db)
+    monkeypatch.setattr(x02_jobs, "_job_context", lambda *a: SimpleNamespace(organization_id="tenant"))
+    monkeypatch.setattr(x02_solve, "_plan", lambda *a: {"binding": {"request": x02_request.model_dump()}})
+    monkeypatch.setattr(x02_solve, "_authority", lambda *a: (SimpleNamespace(job_id=UUID(_X02_KEY)), object()))
+    monkeypatch.setattr(x02_solve, "_reservation", lambda *a: {"grant_ref": "synthetic"})
+    exchange["grant_ref"] = "synthetic"
+    monkeypatch.setattr(x02_solve, "SOLVE_CLASSIFICATION", "synthetic")
+    monkeypatch.setattr(x02_solve, "SOLVE_ASYNC_PROTOCOL_ENABLED", True)
+    monkeypatch.setattr(cloud, "resolve_grant", lambda *a: CloudGrant("tenant", "token"))
+    monkeypatch.setattr(cloud, "grant_principal_sha256", lambda *a: "a" * 64)
+    monkeypatch.setattr(cloud.requests, "post", lambda *a, **kw: _X02UnreadBody(400))
+    with pytest.raises(CloudError) as caught:
+        x02_solve.prepare_job({}, SimpleNamespace(lost=False))
+    assert caught.value.classification == "CLOUD_REQUEST_REJECTED"
+    assert refusals == ["CLOUD_REQUEST_REJECTED"]
+    assert exchange["state"] == "refused"

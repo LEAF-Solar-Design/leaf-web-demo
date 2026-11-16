@@ -4,6 +4,7 @@ import { fetchLabTools } from './toolNodes.js'
 import { addBlock, pipeId, validateGraph } from './graphDoc.js'
 import { authHeaders, config } from '../../api.js'
 import { subscribeBeforeLogout, subscribeTokenStored } from '../../auth.js'
+import { serviceScope, serviceState } from '../../lib/serviceAuthSession.js'
 import { fetchWithBudget } from '../../fetchBudget.js'
 import { createHostProvider } from '../host/hostProvider.js'
 import { evidenceFor } from '../code/hostEvidence.js'
@@ -30,6 +31,7 @@ const corpusOptionLabel = (item, items) => items.filter(other => other.name === 
   ? `${item.name} (SHA-256 ${item.sha256.slice(0, 12)}, ID ${item.material_id})` : item.name
 // Display partition only. The server verifies authority on every request.
 function runAccount() {
+  if (serviceState().mode) return serviceScope()
   try {
     const token = authHeaders().Authorization?.split(' ')[1]
     const payload = token?.split('.')[1]

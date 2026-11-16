@@ -1,5 +1,6 @@
 """Verified read recovery uses actual synthetic PDF bytes, never a replacement hash."""
 from copy import deepcopy
+import json
 from hashlib import sha256
 import pytest
 import solar_project_solaredge as service
@@ -106,3 +107,28 @@ def test_normal_read_output_does_not_gain_recovery_state(accepted):
     output=read(s,ctx)
     assert 'report_download' not in output
     assert sha256(body).hexdigest()==meta['content_sha256']
+
+
+@pytest.mark.parametrize('code', ['REPORT_RESOURCE_LIMIT', 'REPORT_BUSY',
+                                  'REPORT_PARSE_TIMEOUT', 'REPORT_PARSE_UNAVAILABLE'])
+def test_missing_report_preserves_parser_cause_and_saved_state(accepted, monkeypatch, code):
+    s,ctx,meta,body,scope=accepted
+    key=service.artifacts._key(scope,meta['content_sha256'],blob=True)
+    monkeypatch.delitem(s.blobs,key)
+    before=deepcopy(ctx.intake);head=s.head;versions=set(s.versions);writes=len(s.writes)
+    def refused(*args,**kwargs):raise service.reports.SolarEdgeReportError(code)
+    with monkeypatch.context() as fault:
+        fault.setattr(service.reports,'parse_source',refused)
+        with pytest.raises(GraphValidationError) as error:read(s,ctx)
+        assert error.value.code==code
+        from routers import project_drawings as routes
+        response=routes._output_dispatch(lambda:read(s,ctx))
+        value=json.loads(response.body)
+        assert response.status_code==(422 if code=='REPORT_RESOURCE_LIMIT' else 503)
+        assert value['error']['reason_code']==code
+        assert value['error']['retryable'] is (code!='REPORT_RESOURCE_LIMIT')
+        if code=='REPORT_RESOURCE_LIMIT':assert 'smaller report' in value['error']['next_action']
+        assert 'no-store' in response.headers['cache-control']
+    retry=read(s,ctx)
+    assert retry['accepted'] and retry['report_download']['available'] is False
+    assert ctx.intake==before and s.head==head and set(s.versions)==versions and len(s.writes)==writes

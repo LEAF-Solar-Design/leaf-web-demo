@@ -2186,15 +2186,44 @@ const recoveryString = (value) => typeof value === 'string' && value.trim().leng
 // One lookup only. The controller owns admission waits and decides whether a
 // validated absence permits submission of the saved request.
 export async function recoverAuthorStage(idempotencyKey, { signal, changeSetId = null, targetToolName = null } = {}) {
-  if (signal?.aborted) throw signal.reason || new DOMException('Aborted', 'AbortError')
   if (!recoveryString(idempotencyKey) || idempotencyKey.length > 200) throw authorRecoveryError()
+  return readAuthorStageRecovery({ idempotency_key: idempotencyKey }, { signal, changeSetId, targetToolName })
+}
+
+export async function recoverAuthorStageById(changeSetId, { signal } = {}) {
+  if (typeof changeSetId !== 'string'
+    || !/^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$/.test(changeSetId)) throw authorRecoveryError()
+  const recovered = await readAuthorStageRecovery({ change_set_id: changeSetId }, { signal, changeSetId })
+  if (recovered.job?.status === 'staged') {
+    const result = authorStageResult(recovered.job)
+    if (result?.receipt?.change_set_id !== changeSetId || !recoveryString(result?.tool?.name)) throw authorRecoveryError()
+    return { ...recovered, result }
+  }
+  return recovered
+}
+
+export async function retryAuthorStage(job, authority, { signal } = {}) {
+  if (job?.status !== 'failed' || job?.error?.retryable !== true
+    || !Number.isInteger(job.version) || job.version < 0
+    || !Number.isInteger(job.attempt) || job.attempt < 0
+    || !recoveryString(authority?.sessionId) || !recoveryString(authority?.turnId)
+    || !/^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$/.test(job.change_set_id || '')) throw authorRecoveryError()
+  return readAuthorStageRecovery({ change_set_id: job.change_set_id, retry: true,
+    expected_version: job.version, expected_attempt: job.attempt }, {
+    signal, changeSetId: job.change_set_id, authority,
+  })
+}
+
+async function readAuthorStageRecovery(request, { signal, changeSetId = null, targetToolName = null, authority = null } = {}) {
+  if (signal?.aborted) throw signal.reason || new DOMException('Aborted', 'AbortError')
   let status
   try {
     const path = '/api/author/stage/recover'
     const res = await apiFetch(`${API_BASE}${path}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
-      body: JSON.stringify({ idempotency_key: idempotencyKey }),
+      headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders(),
+        ...(authority ? { 'X-Authority-Session-Id': authority.sessionId, 'X-Authority-Turn-Id': authority.turnId } : {}) },
+      body: JSON.stringify(request),
       signal,
     }, path)
     status = res.status

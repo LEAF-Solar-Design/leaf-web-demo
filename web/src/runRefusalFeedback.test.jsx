@@ -123,7 +123,10 @@ it('wires a Stop button to the same interrupt as Escape and announces failures d
   const stop = find(n => n.type === 'JSXElement' && n.openingElement.name.name === 'button'
     && n.children.some(child => child.type === 'JSXText' && child.value.trim() === 'Stop'))
   expect(stop).not.toBeNull()
-  expect(stop.openingElement.attributes.find(a => a.name?.name === 'onClick').value.expression.name).toBe('onStopRun')
+  expect(stop.openingElement.attributes.find(a => a.name?.name === 'onClick').value.expression.name).toBe('onStop')
+  const runningStrip = find(n => n.type === 'JSXOpeningElement' && n.name.name === 'RunningJobStrip')
+  expect(runningStrip).not.toBeNull()
+  expect(runningStrip.attributes.find(a => a.name?.name === 'onStop').value.expression.name).toBe('onStopRun')
   expect(source).toContain('onInterruptRun: onStopRun')
   const failure = find(n => n.type === 'JSXOpeningElement' && n.attributes.some(a => a.name?.name === 'className' && a.value?.value === 'strip-failed enter'))
   expect(failure.attributes.find(a => a.name?.name === 'role')?.value.value).toBe('alert')
