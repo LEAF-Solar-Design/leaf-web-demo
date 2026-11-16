@@ -184,50 +184,68 @@ def module_footprints(doc, layers, blocks):
 
 
 def _fill_polygon(entity):
-    _, Polygon, _, _ = dependencies()
+    _, Polygon, unary_union, _ = dependencies()
     from ezdxf.path import from_hatch
+    from shapely import make_valid
 
     if entity.dxftype() != "HATCH":
         # make_path handles DXF's swapped third/fourth SOLID vertices and OCS.
         return _polyline_polygon(entity)
     result = Polygon()
+    analysable = False
     for path in from_hatch(entity):
         vertices = list(path.flattening(distance=0.0001))
         if len(vertices) < 3:
-            raise ValueError("invalid hatch boundary")
+            continue
         polygon = Polygon([(point.x, point.y) for point in vertices])
         if not polygon.is_valid:
-            raise ValueError("invalid hatch boundary")
+            pending, parts = [make_valid(polygon)], []
+            while pending:
+                part = pending.pop()
+                if part.geom_type == "Polygon":
+                    parts.append(part)
+                elif part.geom_type in ("MultiPolygon", "GeometryCollection"):
+                    pending.extend(part.geoms)
+            polygon = unary_union(parts)
+        if polygon.is_empty:
+            continue
+        analysable = True
         # Nested hatch boundaries alternate filled regions and islands.
         result = result.symmetric_difference(polygon)
-    return result
+    return result if analysable else None
 
 
 def fill_cover(doc, footprints):
+    """Return covering fills and handles whose fill geometry cannot be analysed."""
     _, _, _, STRtree = dependencies()
-    if not footprints:
-        return []
     polygons = [polygon for _, polygon in footprints]
-    tree = STRtree(polygons)
+    tree = STRtree(polygons) if polygons else None
     msp = doc.modelspace()
     order = (msp.entities_in_redraw_order() if list(msp.get_redraw_order()) else iter(msp))
     entities = list(order)
     rank = {entity.dxf.handle: i for i, entity in enumerate(entities)}
-    failures = []
+    failures, unanalysable_handles = [], []
     for entity in entities:
         if entity.dxftype() not in ("HATCH", "SOLID", "TRACE"):
             continue
-        fill = _fill_polygon(entity)
-        if fill.is_empty:
-            continue
-        for index in tree.query(fill):
-            handle, polygon = footprints[int(index)]
-            if rank[entity.dxf.handle] <= rank[handle] or polygon.area <= 0:
+        try:
+            fill = _fill_polygon(entity)
+            if fill is None:
+                unanalysable_handles.append(entity.dxf.handle)
                 continue
-            fraction = polygon.intersection(fill).area / polygon.area
-            if fraction > 0.05 + 1e-12:
-                failures.append((handle, entity.dxf.handle, fraction))
-    return failures
+            covering = []
+            for index in tree.query(fill) if tree is not None else ():
+                handle, polygon = footprints[int(index)]
+                if rank[entity.dxf.handle] <= rank[handle] or polygon.area <= 0:
+                    continue
+                fraction = polygon.intersection(fill).area / polygon.area
+                if fraction > 0.05 + 1e-12:
+                    covering.append((handle, entity.dxf.handle, fraction))
+            failures.extend(covering)
+        except Exception:
+            unanalysable_handles.append(entity.dxf.handle)
+            continue
+    return failures, unanalysable_handles
 
 
 def mm_per_unit(doc):

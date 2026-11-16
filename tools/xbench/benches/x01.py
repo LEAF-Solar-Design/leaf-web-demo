@@ -115,10 +115,17 @@ def grade_pair(fixture, original_bytes, export_bytes, *, row=None):
         _mark(row, 4, "UNREADABLE", f"layer analysis unavailable: {type(exc).__name__}")
     try:
         footprints = geometry.module_footprints(exported, layers, blocks)
+        covering, unanalysable = geometry.fill_cover(exported, footprints)
         failures = [_item(exported, handle, reason="fill covers more than 5%",
                           fill=_item(exported, fill), fraction=fraction)
-                    for handle, fill, fraction in geometry.fill_cover(exported, footprints)]
-        _mark(row, 5, "FAIL" if failures else "PASS", f"covering fills {failures}", failures)
+                    for handle, fill, fraction in covering]
+        verdict = "FAIL" if failures else "PASS"
+        evidence = f"covering fills {failures}"
+        if unanalysable:
+            evidence += f"; unanalysable fills {len(unanalysable)}; handles {unanalysable[:10]}"
+            if not failures and len(unanalysable) == len(exported.modelspace().query("HATCH SOLID TRACE")):
+                verdict = "UNREADABLE"
+        _mark(row, 5, verdict, evidence, failures)
     except Exception as exc:
         _mark(row, 5, "UNREADABLE", f"fill analysis unavailable: {type(exc).__name__}")
     return row

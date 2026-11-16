@@ -270,21 +270,23 @@ def test_hatch_after_module_thirty_percent_fails(doc, fixture, tmp_path):
 def test_hatch_before_module_does_not_cover(doc):
     hatch(doc)
     panel(doc)
-    assert geometry.fill_cover(doc, geometry.module_footprints(doc, [MODULE_LAYER], [])) == []
+    assert geometry.fill_cover(doc, geometry.module_footprints(doc, [MODULE_LAYER], [])) == ([], [])
 
 
 def test_sortentstable_can_move_fill_below_module(doc):
     module = panel(doc)
     fill = hatch(doc)
     doc.modelspace().set_redraw_order({module.dxf.handle: "20", fill.dxf.handle: "10"})
-    assert geometry.fill_cover(doc, geometry.module_footprints(doc, [MODULE_LAYER], [])) == []
+    assert geometry.fill_cover(doc, geometry.module_footprints(doc, [MODULE_LAYER], [])) == ([], [])
 
 
 def test_sortentstable_zero_moves_fill_above_module(doc):
     fill = hatch(doc)
     module = panel(doc)
     doc.modelspace().set_redraw_order({module.dxf.handle: "10", fill.dxf.handle: "0"})
-    [(handle, fill_handle, fraction)] = geometry.fill_cover(doc, geometry.module_footprints(doc, [MODULE_LAYER], []))
+    failures, unanalysable = geometry.fill_cover(doc, geometry.module_footprints(doc, [MODULE_LAYER], []))
+    [(handle, fill_handle, fraction)] = failures
+    assert unanalysable == []
     assert (handle, fill_handle) == (module.dxf.handle, fill.dxf.handle)
     assert fraction == pytest.approx(0.3)
 
@@ -294,7 +296,76 @@ def test_hatch_hole_is_not_coverage(doc):
     fill = doc.modelspace().add_hatch()
     fill.paths.add_polyline_path([(-10, -10), (30, -10), (30, 40), (-10, 40)])
     fill.paths.add_polyline_path([(-1, -1), (11, -1), (11, 21), (-1, 21)], flags=0)
-    assert geometry.fill_cover(doc, geometry.module_footprints(doc, [MODULE_LAYER], [])) == []
+    assert geometry.fill_cover(doc, geometry.module_footprints(doc, [MODULE_LAYER], [])) == ([], [])
+
+
+def test_bow_tie_hatch_is_repaired_and_covers_module(doc, fixture, tmp_path):
+    fill = doc.modelspace().add_hatch()
+    fill.paths.add_polyline_path([(0, 0), (10, 20), (0, 20), (10, 0)], is_closed=True)
+    failures, unanalysable = geometry.fill_cover(doc, geometry.module_footprints(doc, [MODULE_LAYER], []))
+    assert unanalysable == []
+    assert failures == [(next(iter(doc.modelspace())).dxf.handle, fill.dxf.handle, pytest.approx(0.5))]
+    assert pair(doc, fixture, tmp_path)["steps"]["5"] == "FAIL"
+
+
+@pytest.mark.parametrize("closed", [False, True])
+def test_degenerate_hatch_boundary_is_skipped_beside_real_boundary(doc, closed):
+    panel(doc)
+    fill = hatch(doc)
+    fill.paths.add_polyline_path([(0, 0), (1, 0)], is_closed=closed, flags=0)
+    failures, unanalysable = geometry.fill_cover(doc, geometry.module_footprints(doc, [MODULE_LAYER], []))
+    assert unanalysable == []
+    assert failures[0][1:] == (fill.dxf.handle, pytest.approx(0.3))
+
+
+@pytest.mark.parametrize("width,verdict", [(None, "UNREADABLE"), (0.5, "PASS"), (3, "FAIL")])
+def test_degenerate_hatch_does_not_hide_analysable_fills(doc, fixture, tmp_path, width, verdict):
+    bad = doc.modelspace().add_hatch()
+    bad.paths.add_polyline_path([(0, 0), (1, 0)], is_closed=True)
+    if width is not None:
+        good = hatch(doc, width=width)
+    failures, unanalysable = geometry.fill_cover(doc, geometry.module_footprints(doc, [MODULE_LAYER], []))
+    assert unanalysable == [bad.dxf.handle]
+    assert bool(failures) == (verdict == "FAIL")
+    row = pair(doc, fixture, tmp_path)
+    assert row["steps"]["5"] == verdict
+    assert "unanalysable fills 1" in row["evidence"]["5"]
+    assert bad.dxf.handle in row["evidence"]["5"]
+    if verdict == "FAIL":
+        assert row["failures"]["5"][0]["fill"]["handle"] == good.dxf.handle
+
+
+def test_unanalysable_fill_is_reported_without_modules(doc):
+    bad = doc.modelspace().add_hatch()
+    bad.paths.add_polyline_path([(0, 0), (1, 0)], is_closed=True)
+    assert geometry.fill_cover(doc, []) == ([], [bad.dxf.handle])
+
+
+def test_single_fill_exception_does_not_abort_other_fills(doc, monkeypatch):
+    module = panel(doc)
+    bad, good = hatch(doc), hatch(doc)
+    original = geometry._fill_polygon
+
+    def fill_polygon(entity):
+        if entity is bad:
+            raise ValueError("unreadable fill")
+        return original(entity)
+
+    monkeypatch.setattr(geometry, "_fill_polygon", fill_polygon)
+    failures, unanalysable = geometry.fill_cover(doc, geometry.module_footprints(doc, [MODULE_LAYER], []))
+    assert unanalysable == [bad.dxf.handle]
+    assert failures == [(module.dxf.handle, good.dxf.handle, pytest.approx(0.3))]
+
+
+def test_unanalysable_fill_evidence_limits_handles(doc, fixture, tmp_path):
+    handles = []
+    for _ in range(12):
+        bad = doc.modelspace().add_hatch()
+        bad.paths.add_polyline_path([(0, 0), (1, 0)], is_closed=True)
+        handles.append(bad.dxf.handle)
+    row = pair(doc, fixture, tmp_path)
+    assert row["steps"]["5"] == "UNREADABLE"
+    assert row["evidence"]["5"] == f"covering fills []; unanalysable fills 12; handles {handles[:10]}"
 
 
 @pytest.mark.parametrize("kind", ["SOLID", "TRACE"])
@@ -303,9 +374,11 @@ def test_quad_fill_and_five_percent_threshold(doc, kind):
     add = doc.modelspace().add_solid if kind == "SOLID" else doc.modelspace().add_trace
     # DXF SOLID/TRACE order is lower-left, lower-right, upper-left, upper-right.
     add([(0, 0), (0.5, 0), (0, 20), (0.5, 20)])
-    assert geometry.fill_cover(doc, geometry.module_footprints(doc, [MODULE_LAYER], [])) == []
+    assert geometry.fill_cover(doc, geometry.module_footprints(doc, [MODULE_LAYER], [])) == ([], [])
     add([(0, 0), (3, 0), (0, 20), (3, 20)])
-    assert geometry.fill_cover(doc, geometry.module_footprints(doc, [MODULE_LAYER], []))[0][2] == pytest.approx(0.3)
+    failures, unanalysable = geometry.fill_cover(doc, geometry.module_footprints(doc, [MODULE_LAYER], []))
+    assert unanalysable == []
+    assert failures[0][2] == pytest.approx(0.3)
 
 
 def test_viewport_scale_and_no_viewport(doc):
