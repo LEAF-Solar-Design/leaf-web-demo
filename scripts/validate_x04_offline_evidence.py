@@ -1,9 +1,9 @@
 """Validate synthetic X04 result claims by recomputing entity-derived evidence."""
 import argparse
-import json
 from pathlib import Path
 import sys
-from export_x04_offline_evidence import export_evidence, write_json
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from export_x04_offline_evidence import export_evidence, read_json, write_json
 
 
 def validate_evidence(payload):
@@ -31,7 +31,7 @@ def main(argv=None):
     parser.add_argument('--out', type=Path)
     args = parser.parse_args(argv)
     try:
-        payload = json.loads(args.input.read_text(encoding='utf-8'))
+        payload = read_json(args.input)
         result = validate_evidence(payload)
         write_json(result, args.out)
     except (OSError, ValueError, TypeError) as error:

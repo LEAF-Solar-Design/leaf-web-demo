@@ -33,31 +33,88 @@ Worked example with one six-module INSERT parent and one planar quad:
   "drawing": {
     "id": "synthetic-east-v1",
     "intake": {
-      "inserts": [{"layer":"East","name":"Panel","handle":"A","rows":2,"columns":3}],
-      "polylines": [{"layer":"East","handle":"B","closed":true,"pts":[[0,0],[2,0],[2,1],[0,1]]}]
-    }
+      "inserts": [
+        {
+          "layer": "East",
+          "name": "Panel",
+          "handle": "A",
+          "rows": 2,
+          "columns": 3
+        }
+      ],
+      "polylines": [
+        {
+          "layer": "East",
+          "handle": "B",
+          "closed": true,
+          "pts": [
+            [
+              0,
+              0
+            ],
+            [
+              2,
+              0
+            ],
+            [
+              2,
+              1
+            ],
+            [
+              0,
+              1
+            ]
+          ]
+        }
+      ]
+    },
+    "dependency_pairs": [
+      [
+        0,
+        "STYLE"
+      ],
+      [
+        3,
+        "notes.shx"
+      ]
+    ]
   },
   "observed_dependencies": {
     "scope": "local_dxf_records",
-    "dependencies": [{"kind":"font","name":"notes.shx","disposition":"font remapped","remapped_to":"sans-serif"}],
+    "dependencies": [
+      {
+        "kind": "font",
+        "name": "notes.shx",
+        "disposition": "font remapped",
+        "remapped_to": "sans-serif"
+      }
+    ],
     "external_files_opened": false,
-    "coverage_note": "Synthetic observed STYLE record; independent raw inventory is absent."
+    "coverage_note": "Lists dependency records preserved in the local DXF conversion; raw DWG metadata coverage requires an independent inventory.",
+    "schema": "leaf.drawing-dependencies.v1"
   },
   "request": {
     "drawing_id": "synthetic-east-v1",
-    "set_ids": ["[\"INSERT\",\"East\",\"Panel\"]","[\"LWPOLYLINE\",\"East\",\"\"]"]
+    "set_ids": [
+      "[\"INSERT\",\"East\",\"Panel\"]",
+      "[\"LWPOLYLINE\",\"East\",\"\"]"
+    ]
   },
   "result": {
     "count": 7,
-    "highlight_handles": ["A","B"],
+    "highlight_handles": [
+      "A",
+      "B"
+    ],
     "original_bytes_integrity": "unverified"
   }
 }
 ```
 
-The font row represents the separate observed synthetic STYLE input, not a
-dependency inferred from the two entity records. Retain those decoded pairs
-alongside the artifact when replaying the report itself.
+The font row is recomputed from drawing.dependency_pairs embedded in the artifact.
+Both CLIs require decoded records and reject contradictory dependency rows or coverage.
+Changing all embedded inputs consistently creates a new synthetic claim.
+An artifact provides consistency evidence without authenticating its source.
 
 Validation checklist:
 

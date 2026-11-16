@@ -12,8 +12,25 @@ import tempfile
 X04_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(X04_ROOT / 'server'))
 import tool_loader
+from drawing_dependency_report import from_pairs
 
 SCHEMA = 'leaf.x04.offline-evidence.v1'
+
+
+def read_json(path):
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f'Duplicate JSON key: {key}')
+            result[key] = value
+        return result
+
+    def reject_constant(value):
+        raise ValueError(f'Nonfinite JSON number: {value}')
+
+    return json.loads(Path(path).read_text(encoding='utf-8'),
+                      object_pairs_hook=unique_object, parse_constant=reject_constant)
 
 
 def export_evidence(payload):
@@ -35,6 +52,13 @@ def export_evidence(payload):
         raise ValueError('Observed dependencies require local_dxf_records scope and external_files_opened=false.')
     if not isinstance(report.get('coverage_note'), str) or not report['coverage_note'].strip():
         raise ValueError('Observed dependencies require a coverage note.')
+    pairs = drawing.get('dependency_pairs')
+    if not isinstance(pairs, list) or any(
+            not isinstance(pair, list) or len(pair) != 2 or type(pair[0]) is not int
+            or not isinstance(pair[1], str) for pair in pairs):
+        raise ValueError('drawing.dependency_pairs must contain decoded integer-code/string-value pairs.')
+    if report != from_pairs(pairs):
+        raise ValueError('Observed dependency rows and coverage must match embedded decoded records.')
     rows = report.get('dependencies')
     if not isinstance(rows, list):
         raise ValueError('Observed dependencies must be an array.')
@@ -83,7 +107,7 @@ def main(argv=None):
     parser.add_argument('--out', type=Path)
     args = parser.parse_args(argv)
     try:
-        payload = json.loads(args.input.read_text(encoding='utf-8'))
+        payload = read_json(args.input)
         artifact = export_evidence(payload)
         write_json(artifact, args.out)
     except (OSError, ValueError, TypeError) as error:
