@@ -7053,11 +7053,14 @@ def test_oracle_load_namespaces_and_distinct_unicode_direct_bound_json(broken):
     source['bindings'] = {key:deepcopy(source['manifest']) for key in PROVENANCE_STAGES}
     records[0]['envelope'] = envelope
     evidence = envelope['assurance']['evidence']
+    for phase,hash_key in [('before_rows','before'),('reopened_rows','reopened')]:
+        evidence[hash_key] = canonical_snapshot(evidence[phase]['strings'],evidence[phase]['table_rows'])
     if broken: envelope['grid']['panel_totals']['\u00e9'],envelope['grid']['panel_totals']['e\u0301'] = 14,10
     original = deepcopy(records)
     direct = m._seven_step_oracle_loads(envelope['grid'],evidence)
     result = m.aggregate_bound_seven_steps_json(serialize_result(dict(expected_ids=expected,fixtures=records)))
     assert json.loads(serialize_result(direct))==json.loads(serialize_result(result['fixtures'][expected[0]]['reconciliation']['oracle_loads']))
+    assert result['fixtures'][expected[0]]['verdict']==('FAIL' if broken else 'PASS')
     assert direct['verdict']==('FAIL' if broken else 'PASS')
     assert direct['metrics']['panels']['grid_comparison']['mismatch_count']==(2 if broken else 0)
     assert all(result['fixtures'][key]['verdict']=='PASS' for key in expected[1:])
