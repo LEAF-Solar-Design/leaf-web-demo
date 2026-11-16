@@ -45,7 +45,11 @@ def parse_receipt(encoded):
             depth+=1
             if depth>MAX_RECEIPT_DEPTH:raise ReceiptBudgetError('receipt depth budget')
         elif char in ']}':depth-=1
-    value=json.loads(encoded,object_pairs_hook=ObjectMembers,parse_constant=lambda _:(_ for _ in ()).throw(ValueError()))
+    # Preserve integer signed zero as a float so typed identity/count checks do
+    # not silently turn an unsupported numeric token into an ordinary zero.
+    value=json.loads(encoded,object_pairs_hook=ObjectMembers,
+                     parse_int=lambda token: -0.0 if token=='-0' else int(token),
+                     parse_constant=lambda _:(_ for _ in ()).throw(ValueError()))
     pending=[value];nodes=0;duplicate=False
     while pending:
         current=pending.pop();nodes+=1
@@ -79,9 +83,12 @@ def audit_receipts(store, journal, *, customer_key):
         for project, encoded in rows:
             try:
                 value=parse_receipt(encoded)
+                selection=value.get('selection') if isinstance(value,dict) else None
+                count=selection.get('count') if isinstance(selection,dict) else None
                 if (not isinstance(value,dict) or value.get('schema')!='leaf.x07.profile-workflow.v1' or value.get('state')!='applied'
                     or value.get('customer_key')!=customer_key or value.get('project_key')!=project
-                    or not isinstance(value.get('applied_profile'),dict)): raise ValueError()
+                    or not isinstance(value.get('applied_profile'),dict)
+                    or type(count) is not int or not 0<=count<=9007199254740991): raise ValueError()
             except ReceiptBudgetError:
                 raise
             except (ValueError,TypeError,RecursionError,UnicodeError):
