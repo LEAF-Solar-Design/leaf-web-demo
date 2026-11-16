@@ -14,6 +14,7 @@ import os
 import stat
 from collections.abc import Mapping
 from contextlib import contextmanager
+from copy import deepcopy
 from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from pathlib import Path
 import re
@@ -375,7 +376,7 @@ def classify(observation, expected=None):
                   + safe_text(observation.get("issue", "Available option alone is insufficient.")))
     evidence = observation.get("evidence_path", "x10-ui.json / x10-ground.png when saved.")
     rows = [Step(1, verdict, reason + " Evidence: " + evidence,
-                 observed=observation, expected=expected)]
+                 observed=deepcopy(observation), expected=deepcopy(expected))]
     rows.extend(Step(n, "UNREADABLE", "Prerequisite: completed step 1 and " + subject
                      + "; downstream product observation unimplemented in this slice.")
                 for n, subject in enumerate(DOWNSTREAM, 2))

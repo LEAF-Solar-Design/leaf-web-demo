@@ -57,6 +57,35 @@ def tiny_png(width=1, height=1, depth=8, color=2, compression=0, filtering=0,
 
 
 class ClassificationTests(unittest.TestCase):
+    def test_finalized_outputs_are_isolated_from_nested_input_and_step_mutation(self):
+        for valid in (True, False):
+            with self.subTest(valid=valid):
+                observation = self.observation(extra={"nested": [{"quantity": "7"}]})
+                if not valid:
+                    observation["source"] = ""
+                expected = {"bom": {"quantities": [7]}, "rates": [{"unit_rate": "0.25"}]}
+                original_observation = copy.deepcopy(observation)
+                original_expected = copy.deepcopy(expected)
+                first = x10.classify(observation, expected)
+                second = x10.classify(observation, expected)
+                verdicts = [row.verdict for row in first]
+                evidence = [row.evidence for row in first]
+                observation["extra"]["nested"][0]["quantity"] = "changed"
+                observation["project_id"] = OTHER
+                expected["bom"]["quantities"].append(999)
+                expected["rates"][0]["unit_rate"] = "changed"
+                self.assertEqual(first[0].observed, original_observation)
+                self.assertEqual(first[0].expected, original_expected)
+                self.assertEqual([row.verdict for row in first], verdicts)
+                self.assertEqual([row.evidence for row in first], evidence)
+                first[0].observed["extra"]["nested"][0]["quantity"] = "step mutation"
+                first[0].expected["rates"][0]["unit_rate"] = "step mutation"
+                self.assertEqual(second[0].observed, original_observation)
+                self.assertEqual(second[0].expected, original_expected)
+                self.assertEqual(observation["extra"]["nested"][0]["quantity"], "changed")
+                self.assertEqual(expected["rates"][0]["unit_rate"], "changed")
+                self.assertNotIn("PASS", verdicts)
+
     def test_pending_catalog_is_never_a_product_failure(self):
         observation = self.observation(ui_text="Checking Solar steps for the selected project drawing version.")
         self.assertEqual(aggregate(x10.classify(observation)), "UNREADABLE")
