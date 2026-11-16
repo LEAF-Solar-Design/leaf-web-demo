@@ -2486,7 +2486,8 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_author_stage_status.py"), 41),
         Suite("server-customization-stage-recovery",
               "server customization stage recovery", "pytest",
-              SERVER, _py_pytest("tests/test_customization_stage_recovery.py"), 27),
+              SERVER, _py_pytest("tests/test_customization_stage_recovery.py")
+              + ["tests/test_c02_same_job_recovery.py"], 55),
         Suite("server-platform-release-policy", "server platform release policy", "pytest",
               SERVER, _py_pytest("tests/test_platform_release_policy.py"), 14),
         # --- operator control plane (cwd=server): each file its OWN process --- #
