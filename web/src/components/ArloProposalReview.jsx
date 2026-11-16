@@ -60,6 +60,17 @@ export default function ArloProposalReview({ envelope, context, currentProject }
   const [exportError, setExportError] = useState('')
   const alive = useRef(false)
   const attempts = useRef(new Map())
+  const pendingExports = useRef(new Map())
+  useEffect(() => {
+    const pending = pendingExports.current
+    return () => {
+      for (const [timer, url] of pending) {
+        clearTimeout(timer)
+        URL.revokeObjectURL(url)
+      }
+      pending.clear()
+    }
+  }, [])
   const bound = ['org_id','project_id','job_id','input_version_id'].every(k => uuid.test(context?.[k] || ''))
     && ['organization_id','project_id','input_version_id'].every((k, i) => envelope?.solver_input?.[k] === context?.[['org_id','project_id','input_version_id'][i]])
   // Retained job context cannot establish which project the caller currently has open.
@@ -88,7 +99,13 @@ export default function ArloProposalReview({ envelope, context, currentProject }
       setExportError(`Result export failed. ${humanizeError(cause)}`)
     } finally {
       link?.remove()
-      if (url) setTimeout(() => URL.revokeObjectURL(url), 0)
+      if (url) {
+        const timer = setTimeout(() => {
+          pendingExports.current.delete(timer)
+          URL.revokeObjectURL(url)
+        }, 0)
+        pendingExports.current.set(timer, url)
+      }
     }
   }
   const exportControl = <>
