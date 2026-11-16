@@ -74,4 +74,17 @@ describe("dataset formatting", () => {
     expect(format({ kind: "number", precision: 2, unit: "kWh" }, 1.234)).toBe("1.23 kWh");
     expect(format({ kind: "duration", unit: "minutes" }, 90)).toBe("90 minutes");
   });
+
+  it.each(["percent", "fraction"] as const)("refuses unsafe integer ratios with %s scale", (scale) => {
+    for (const value of [JSON.parse("9007199254740993"), -9007199254740992]) {
+      expect(format({ kind: "ratio", scale }, value)).toBe("Invalid");
+    }
+  });
+
+  it("preserves safe integer percentages without division rounding", () => {
+    expect(format({ kind: "ratio", scale: "percent" }, Number.MAX_SAFE_INTEGER)).toBe("9,007,199,254,740,991%");
+    expect(format({ kind: "ratio", scale: "percent" }, -Number.MAX_SAFE_INTEGER)).toBe("-9,007,199,254,740,991%");
+    expect(formatDatasetValue(field({ kind: "ratio", scale: "percent" }), Number.MAX_SAFE_INTEGER,
+      resolveDisplayPreferences({ locale: "de-DE" }))).toBe("9.007.199.254.740.991\u00a0%");
+  });
 });
