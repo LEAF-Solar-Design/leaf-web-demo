@@ -5,6 +5,7 @@ Studio X-bench X04's offline packet validator can compare exact file or stdin by
 From the repository root in PowerShell, create a fresh synthetic one-module artifact and assembly manifest. The script prints the source directory so the later deletion stays explicit and bounded.
 
 ```powershell
+$validator = (Resolve-Path -LiteralPath './scripts/validate_x04_evidence_packet.py').Path
 $demo = 'D:/agent-data/leaf-research/x04-synthetic-packet-handoff'
 @'
 import hashlib, json, sys
@@ -36,9 +37,13 @@ Keep `$fixedPacketPin` separately. Remove only the two named synthetic inputs, t
 ```powershell
 Remove-Item -LiteralPath "$demo/sources/artifact.json"
 Remove-Item -LiteralPath "$demo/sources/manifest.json"
-$validator = 'D:/agent-wt/xbench-x04-evidence-cli/scripts/validate_x04_evidence_packet.py'
-python $validator "$demo/packet.json" --expected-packet-sha256 $fixedPacketPin --out "$demo/summary.json"
-if ($LASTEXITCODE -ne 0) { throw 'Expected source-free pinned validation exit 0' }
+Push-Location -LiteralPath $demo
+try {
+    python $validator "$demo/packet.json" --expected-packet-sha256 $fixedPacketPin --out "$demo/summary.json"
+    if ($LASTEXITCODE -ne 0) { throw 'Expected source-free pinned validation exit 0' }
+} finally {
+    Pop-Location
+}
 ```
 
 Expected summary: one artifact count 1, highlight A and integrity `unverified`. The validator does not reopen the deleted manifest or artifact. File/stdin digest matching includes BOM and whitespace. To use stdin without PowerShell text re-encoding, feed the packet's raw bytes through a Python binary pipe rather than `Get-Content`.
