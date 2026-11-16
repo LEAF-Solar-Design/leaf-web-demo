@@ -12,6 +12,31 @@ const first = () => screen.getByRole('checkbox', { name: 'Design / Panel A: 12 c
 const second = () => screen.getByRole('checkbox', { name: 'Alternate / Panel B: 9 candidates' })
 const submit = () => screen.getByRole('button', { name: 'Count selected set' })
 
+it('associates lone-surrogate opaque IDs safely without aliasing a replacement character', () => {
+  const ids = ['\ud800', '\udc00', '\ufffd']
+  const onSelect = vi.fn()
+  const view = render(<ModuleSetPicker data={{ sets: ids.map((set_id) => ({ ...data.sets[0], set_id })) }} onSelect={onSelect} />)
+  const inputs = screen.getAllByRole('checkbox')
+  const labels = [...view.container.querySelectorAll('label')]
+  expect(new Set(inputs.map((input) => input.id)).size).toBe(3)
+  labels.forEach((label, index) => expect(label.control).toBe(inputs[index]))
+  fireEvent.click(labels[0])
+  fireEvent.click(labels[1])
+  expect(inputs[2].checked).toBe(false)
+  fireEvent.click(submit())
+  expect(onSelect).toHaveBeenCalledExactlyOnceWith(ids.slice(0, 2))
+})
+
+it.each(['below largest', 'layer mismatch', 'block mismatch'])('rejects impossible or mislabeled summary %s', (kind) => {
+  const selected_sets = data.sets.map((set) => ({ ...set }))
+  if (kind === 'layer mismatch') selected_sets[0].layer = 'Misleading layer'
+  if (kind === 'block mismatch') selected_sets[0].block = 'Misleading block'
+  const count = kind === 'below largest' ? 11 : 12
+  render(<ModuleSetPicker data={{ ...data, selected_sets, count }} onSelect={vi.fn()} />)
+  expect(screen.getByText(/Count summary unavailable/)).toBeTruthy()
+  expect(screen.queryByText(/^Counted /)).toBeNull()
+})
+
 it.each(['per-set mismatch', 'total exceeds sum'])('refuses inconsistent summary %s', (kind) => {
   const selected_sets = kind === 'per-set mismatch' ? [{ ...data.sets[0], count: 11 }] : data.sets
   const count = kind === 'per-set mismatch' ? 11 : 22

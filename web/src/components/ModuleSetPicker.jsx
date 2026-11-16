@@ -4,7 +4,9 @@ const validCount = (count) => Number.isSafeInteger(count) && count >= 0
 
 export default function ModuleSetPicker({ data, drawingKey, onSelect, running = false }) {
   const pickerId = useId()
-  const inputId = (id) => `${pickerId}-set-${encodeURIComponent(id)}`
+  // Fixed-width UTF-16 units preserve opaque IDs, including lone surrogates.
+  const inputId = (id) => `${pickerId}-set-${id.split('').map((unit) =>
+    unit.charCodeAt(0).toString(16).padStart(4, '0')).join('')}`
   const [selection, setSelection] = useState({ drawingKey, choices: [] })
   const [submitError, setSubmitError] = useState(null)
   if (submitError && submitError.drawingKey !== drawingKey) setSubmitError(null)
@@ -18,7 +20,7 @@ export default function ModuleSetPicker({ data, drawingKey, onSelect, running = 
       || (row.block !== undefined && typeof row.block !== 'string') || !validCount(row.count))
   const sets = unavailable ? [] : rows
   const available = new Set(sets.map((set) => set.set_id))
-  const candidateCounts = new Map(sets.map((set) => [set.set_id, set.count]))
+  const candidateById = new Map(sets.map((set) => [set.set_id, set]))
   const choices = selection.drawingKey === drawingKey ? selection.choices.filter((id) => available.has(id)) : []
   if (selection.drawingKey !== drawingKey || choices.length !== selection.choices.length) {
     setSelection({ drawingKey, choices })
@@ -29,7 +31,10 @@ export default function ModuleSetPicker({ data, drawingKey, onSelect, running = 
     && !unavailable && new Set(summaryIds).size === summaryIds.length
     && validCount(data.count) && data.selected_sets.every((set) => set !== null && typeof set === 'object'
       && typeof set.set_id === 'string' && available.has(set.set_id) && typeof set.layer === 'string'
-      && typeof set.block === 'string' && validCount(set.count) && set.count === candidateCounts.get(set.set_id))
+      && typeof set.block === 'string' && validCount(set.count)
+      && set.count === candidateById.get(set.set_id).count && set.count <= data.count
+      && set.layer === candidateById.get(set.set_id).layer
+      && set.block === (candidateById.get(set.set_id).block || ''))
     && data.count <= data.selected_sets.reduce((sum, set) => sum + set.count, 0)
   const submitSelection = () => {
     if (unavailable || !selected.length || running || !onSelect) return
