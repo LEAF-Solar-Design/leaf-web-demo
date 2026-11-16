@@ -23,6 +23,14 @@ const terminalRecord = fromBrokerJob({
 })
 
 describe('JobRail failed-job retry', () => {
+  it('ellipsizes long titles and exposes the full title on hover', () => {
+    const title = 'String every panel across the entire north and south roof areas'
+    const { container } = render(<JobRail mock jobs={[]} builds={[{ ...terminalRecord, title }]} />)
+    const name = container.querySelector('.rail-tool')
+    expect(name).toHaveAttribute('title', title)
+    expect(name).toHaveStyle({ textOverflow: 'ellipsis', whiteSpace: 'nowrap', overflow: 'hidden' })
+    expect(container.querySelector('aside.rail')).toHaveStyle({ minWidth: '240px' })
+  })
   const failedJob = { ...doneJob, job_id: 'job-failed', status: 'failed' }
 
   it('shows Retry only on failed jobs and calls the handler once per click with that job', () => {

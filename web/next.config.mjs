@@ -14,7 +14,8 @@ export default function nextConfig(phase) {
     ...(development ? {} : { output: 'export' }),
     // Independent flag proofs must not share Next's compiler cache or dev lock.
     ...(devInstance ? { distDir: `.next-dev-${devInstance}` } : {}),
-    reactStrictMode: true,
+    // Panels functional proofs use production-like single mount; other runs retain dev replay.
+    reactStrictMode: !(development && process.env.LEAF_READSET_SUITE === 'web-studio-panels-proof'),
     images: { unoptimized: true },
     poweredByHeader: false,
     webpack(config, { dev, webpack }) {

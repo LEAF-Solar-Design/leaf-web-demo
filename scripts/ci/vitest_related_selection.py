@@ -104,7 +104,14 @@ def collect(repo, env, *, run=None):
     is_main = ref in {"refs/heads/main", "main"} or event == "PUSH"
     is_pr = (event.startswith("PULL_REQUEST") or ref.startswith("refs/pull/")
              or (not is_main and bool(env.get("TRUSTED_SHA") or env.get("LEAF_VITEST_PR_BASE"))))
-    base = (env.get("TRUSTED_SHA") or env.get("LEAF_VITEST_PR_BASE")) if is_pr else env.get("LEAF_VITEST_LAST_GREEN_MAIN")
+    # A supplied invalid producer input must not silently select a legacy base.
+    if is_pr:
+        base = (env["LEAF_CI_BASE_SHA"] if "LEAF_CI_BASE_SHA" in env else
+                env.get("TRUSTED_SHA") or env.get("LEAF_VITEST_PR_BASE"))
+    else:
+        base = next((env[key] for key in ("LEAF_CI_LAST_JUDGED_SHA",
+                                         "LEAF_VITEST_LAST_GREEN_MAIN", "LEAF_CI_BASE_SHA")
+                     if key in env), None)
     if not base or not SHA.fullmatch(base):
         return select(None, None, None)
     changed = None
@@ -124,6 +131,12 @@ def collect(repo, env, *, run=None):
             if len(merges) != 1 or not SHA.fullmatch(merges[0]):
                 raise ValueError("ambiguous merge base")
         else:
+            head = git("rev-parse", "--verify", "HEAD^{commit}").strip()
+            if not SHA.fullmatch(head):
+                raise ValueError("HEAD is not a commit")
+            if base.lower() == head.lower():
+                # Main intake may use its own head; that does not prove last green.
+                return select(base, None, None, error="main_base_is_head")
             git("merge-base", "--is-ancestor", base, "HEAD")
         raw = git("diff", "--name-only", "-z", "--no-renames", base + ("...HEAD" if is_pr else "..HEAD"), "--")
         if raw and not raw.endswith("\0"):

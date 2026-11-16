@@ -579,6 +579,10 @@ def _graph_ids(row):
         # Keep the original closed context for every ordinary graph tool.
         if row.get("tool_name") == "solar-solve-proposal":
             context_keys.add("solve_binding")
+            if isinstance(context, dict) and "xbench_solver_fault" in context:
+                if type(context["xbench_solver_fault"]) is not str or context["xbench_solver_fault"] not in {"upstream-400", "timeout"}:
+                    _graph_binding_error()
+                context_keys.add("xbench_solver_fault")
         if row.get("tool_name") == "solar-commit-solve":
             context_keys.add("trusted_proposal")
         if (row["kind"] != "run" or type(context) is not dict

@@ -15,7 +15,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Callable, Iterator, Optional
 from uuid import uuid4
 
 from customization_audit import audit_payload, event_from_row
@@ -31,6 +31,7 @@ from customization_models import (
     ChangeSetConflictError,
     ChangeSetNotFoundError,
     ChangeState,
+    StageAttemptFailure,
     EffectiveCatalog,
     IdempotencyReplayError,
     InvalidTransitionError,
@@ -117,6 +118,22 @@ CREATE TABLE IF NOT EXISTS customization_audit_events (
 
 CREATE INDEX IF NOT EXISTS customization_recovery_idx
   ON customization_change_sets (state, tenant_id);
+
+CREATE TABLE IF NOT EXISTS customization_stage_attempt_history (
+  tenant_id TEXT NOT NULL,
+  change_set_id TEXT NOT NULL REFERENCES customization_change_sets(change_set_id),
+  failed_version INTEGER NOT NULL,
+  attempt INTEGER NOT NULL,
+  reason_code TEXT,
+  reason_message TEXT,
+  retryable INTEGER NOT NULL CHECK (retryable IN (0, 1)),
+  authority_session_id TEXT,
+  authority_turn_id TEXT,
+  finished_at TEXT,
+  retry_authority_session_id TEXT NOT NULL,
+  retry_authority_turn_id TEXT NOT NULL,
+  PRIMARY KEY (tenant_id, change_set_id, failed_version, attempt)
+);
 
 CREATE TABLE IF NOT EXISTS customization_confirmations (
   confirmation_id TEXT PRIMARY KEY,
@@ -597,6 +614,72 @@ class SQLiteCustomizationStore(CustomizationRepository):
             return self._find_change_set(
                 conn, candidate["tenant_id"], candidate["change_set_id"]
             )
+
+    def stage_failure_history(self, *, tenant_id: str, change_set_id: str) -> list[StageAttemptFailure]:
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM customization_stage_attempt_history "
+                "WHERE tenant_id = ? AND change_set_id = ? ORDER BY failed_version, attempt",
+                (tenant_id, change_set_id),
+            ).fetchall()
+            return [StageAttemptFailure(**{**dict(row), "retryable": bool(row["retryable"])}) for row in rows]
+
+    def retry_stage(
+        self, *, tenant_id: str, change_set_id: str, author_subject: str,
+        expected_version: int, expected_attempt: int,
+        authority_session_id: str, authority_turn_id: str,
+        admit: Callable[[], None],
+    ) -> ChangeSet:
+        """One explicit retry, serialized by the existing store write fence.
+
+        This is deliberately separate from the generic terminal-state transition.
+        Admission runs only for the winning retry while the same fence is held.
+        """
+        with self._transaction() as conn:
+            row = self._find_change_set(conn, tenant_id, change_set_id)
+            if row.author_subject != author_subject:
+                raise ChangeSetNotFoundError("request not found")
+            prior = conn.execute(
+                "SELECT * FROM customization_stage_attempt_history "
+                "WHERE tenant_id = ? AND change_set_id = ? AND failed_version = ? AND attempt = ?",
+                (tenant_id, change_set_id, expected_version, expected_attempt),
+            ).fetchone()
+            if prior is not None and row.state is ChangeState.STAGING:
+                return row
+            if (row.state is not ChangeState.FAILED or not row.stage_error_retryable
+                    or row.version != expected_version or row.stage_attempt != expected_attempt
+                    or row.staged_commit or row.catalog_digest or not row.request_description
+                    or row.stage_lease_owner):
+                raise ChangeSetConflictError("request is not available for this retry")
+            if (row.authority_session_id, row.authority_turn_id) == (authority_session_id, authority_turn_id):
+                raise ChangeSetConflictError("retry requires fresh turn authority")
+            admit()
+            conn.execute(
+                "INSERT INTO customization_stage_attempt_history "
+                "(tenant_id, change_set_id, failed_version, attempt, reason_code, reason_message, "
+                "retryable, authority_session_id, authority_turn_id, finished_at, "
+                "retry_authority_session_id, retry_authority_turn_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (tenant_id, change_set_id, row.version, row.stage_attempt, row.stage_error_code,
+                 row.stage_error_message, row.stage_error_retryable, row.authority_session_id,
+                 row.authority_turn_id, row.stage_finished_at, authority_session_id, authority_turn_id),
+            )
+            updated = conn.execute(
+                "UPDATE customization_change_sets SET state = ?, version = version + 1, "
+                "authority_session_id = ?, authority_turn_id = ?, stage_phase = 'queued', "
+                "stage_next_attempt_at = 0, stage_error_code = NULL, stage_error_message = NULL, "
+                "stage_error_retryable = ?, stage_finished_at = NULL, "
+                "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "WHERE tenant_id = ? AND change_set_id = ? AND state = ? AND version = ? AND stage_attempt = ?",
+                (ChangeState.STAGING.value, authority_session_id, authority_turn_id, False,
+                 tenant_id, change_set_id, ChangeState.FAILED.value, expected_version, expected_attempt),
+            )
+            if updated.rowcount != 1:
+                raise ChangeSetConflictError("request changed during retry")
+            result = self._find_change_set(conn, tenant_id, change_set_id)
+            self._append_audit(conn, result, ChangeState.FAILED, ChangeState.STAGING,
+                               f"stage-retry:{change_set_id}:{expected_version}:{expected_attempt}")
+            return result
 
     def heartbeat_stage(
         self, *, tenant_id: str, change_set_id: str, owner: str,

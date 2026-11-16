@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createProjectSolarRunController, PROJECT_SOLAR_RUN_BUDGET_MS } from './createProjectSolarRunController.js'
 import { createSolarDrawingBinding, sameSolarDrawingBinding } from './solarDrawingBinding.js'
 import { projectSolarAppReason } from './solarProjectAppModel.js'
-import { PROJECT_SOLAR_RUN_REASONS } from './solarProjectCompletion.js'
+import { PROJECT_SOLAR_RUN_REASONS, readProjectSolarCompletion } from './solarProjectCompletion.js'
 import { projectSolarDrawingView } from './solarProjectDrawingModel.js'
 import { recordProjectSolarFlowRun } from './solarFlowModel.js'
 import { humanizeError } from '../errorHumanize.js'
@@ -43,7 +43,7 @@ export function useAppProjectSolarRuntime(props) {
   const inputs = { ...props, workspaceController }
   const latest = useRef(inputs)
   const machine = useRef({ alive: false, epoch: 0, seen: null, owner: null, run: null,
-    transition: null, request: null })
+    transition: null, request: null, recovery: null })
   const [state, setState] = useState(empty)
   const [revision, refresh] = useState(0)
   const m = machine.current
@@ -58,6 +58,7 @@ export function useAppProjectSolarRuntime(props) {
     if (t) { t.retired = true; settle(t, false); m.transition = null }
     m.request?.abort()
     m.owner?.abort.abort()
+    m.recovery = null
     m.run = null
   }
   function observe() {
@@ -297,7 +298,7 @@ export function useAppProjectSolarRuntime(props) {
   async function onProjectSubmit(prepared, options) {
     const owner = m.owner, live = latest.current
     if (!entryCurrent() || !live.hostEnabled || !ownerCurrent(owner)) return refusal('SIP_R7_SCOPE_STALE')
-    if (m.run || live.externalBusy || (m.transition && m.transition.phase !== 'done')) return refusal('SIP_R13B_RUN_IN_PROGRESS')
+    if (m.run || m.recovery?.pending || live.externalBusy || (m.transition && m.transition.phase !== 'done')) return refusal('SIP_R13B_RUN_IN_PROGRESS')
     if (live.writeBlockedReason || !contextCurrent()) {
       publish(() => ownerCurrent(owner), { notice: projectSolarAppReason(live.writeBlockedReason || 'scope_pending') })
       return refusal('SIP_R7_REQUEST_INVALID')
@@ -375,7 +376,52 @@ export function useAppProjectSolarRuntime(props) {
     if (!entryCurrent() || !live.hostEnabled || live.externalBusy || m.run ||
         !ownerCurrent(owner) || !catalogRows(live).includes(row)) return false
     publish(() => entryCurrent() && ownerCurrent(owner), { openTool: row, toolOwner: a.scope })
+    if (['solar-solve-proposal', 'solar-commit-solve'].includes(row.name) &&
+        !state.projectOutcome && !m.recovery?.pending) void recoverProposal(owner)
     return true
+  }
+  async function recoverProposal(owner) {
+    // The workspace index only discovers a job ID. The scoped client and normal
+    // completion decoder must independently validate its full stored result.
+    const workspace = latest.current.workspaceController.getSnapshot().workspace
+    if ((workspace?.project?.project_id || workspace?.project?.id) !== binding.project_id ||
+        !Array.isArray(workspace.jobs)) return
+    const jobs = workspace.jobs.filter(job => job?.org_id === binding.organization_id &&
+      job.project_id === binding.project_id && job.input_version_id === binding.input_version_id &&
+      ['solar-solve-proposal', 'solar-commit-solve'].includes(job.tool_name))
+      .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))
+    const job = jobs[0]
+    // Never resurrect a candidate behind a newer solve/commit, or guess between
+    // ambiguous timestamps. A newer failure or in-flight job also supersedes it.
+    if (!job || job.tool_name !== 'solar-solve-proposal' ||
+        !['succeeded', 'complete'].includes(job.status) || job.output_version_id != null ||
+        !Number.isFinite(Date.parse(job.created_at)) ||
+        (jobs[1] && !(Date.parse(job.created_at) > Date.parse(jobs[1].created_at)))) return
+    const recovery = { pending: true }
+    m.recovery = recovery
+    const valid = () => m.recovery === recovery && ownerCurrent(owner) && !m.run
+    publish(valid, { busy: true, notice: null })
+    try {
+      const response = await owner.a.projectClient.readJob(job.job_id,
+        { tool: 'solar-solve-proposal', signal: owner.abort.signal })
+      if (!valid()) return
+      const outcome = response?.ok === true ? readProjectSolarCompletion({
+        job: response.data?.job || response.data, jobId: job.job_id,
+        binding: owner.a.scope.binding, tool: 'solar-solve-proposal',
+      }) : null
+      if (outcome?.state !== 'proposal') {
+        publish(valid, { notice: PROJECT_SOLAR_RUN_REASONS.unreadable_output })
+        return
+      }
+      const meta = { binding: owner.a.scope.binding, authorityKey: owner.a.scope.authorityKey,
+        tool: 'solar-solve-proposal', signal: owner.abort.signal, isCurrent: valid }
+      publish(valid, { projectOutcome: { outcome, meta }, projectPending: null })
+    } catch {
+      publish(valid, { notice: PROJECT_SOLAR_RUN_REASONS.unreadable_output })
+    } finally {
+      recovery.pending = false
+      publish(valid, { busy: false })
+    }
   }
   function onClose() { publish(entryCurrent, { openTool: null, toolOwner: null }) }
   function setVisibleLayers(value) {

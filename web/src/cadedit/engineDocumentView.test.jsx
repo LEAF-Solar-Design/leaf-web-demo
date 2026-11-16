@@ -144,6 +144,8 @@ describe.each([true, false])('EngineDocumentView reverse selection (callback ena
     if (withCallback) rerender({ ...props, selectedHandle: '2A' })
     act(() => { sessionActions.openBytes(new Uint8Array([48]), 'malformed.dxf') })
     workers[0].emit({ type: 'error', message: 'DXF parse failed' })
+    // The drawing hides only after its trusted-byte restoration also fails.
+    workers[0].emit({ type: 'error', message: 'Trusted drawing restore failed' })
     expect(screen.getByTestId('engine-selection').textContent).toBe('')
     expect(callback.mock.calls).toEqual(withCallback ? [['2A'], [null]] : [])
     if (withCallback) rerender({ ...props, selectedHandle: null })
@@ -164,6 +166,8 @@ describe.each([true, false])('EngineDocumentView reverse selection (callback ena
     const select = vi.spyOn(sessionActions, 'select')
     act(() => { sessionActions.openBytes(new Uint8Array([48]), 'malformed.dxf') })
     workers[0].emit({ type: 'error', message: 'DXF parse failed' })
+    // The drawing hides only after its trusted-byte restoration also fails.
+    workers[0].emit({ type: 'error', message: 'Trusted drawing restore failed' })
     expect(screen.getByTestId('engine-selection').textContent).toBe('')
     expect(callback.mock.calls).toEqual(withCallback ? [[null]] : [])
     if (withCallback) rerender({ ...props, selectedHandle: null })
@@ -173,11 +177,31 @@ describe.each([true, false])('EngineDocumentView reverse selection (callback ena
     expect(select).not.toHaveBeenCalled()
   })
 
+  it('keeps selection through successful trusted restoration and clears it for the next document', async () => {
+    const { rerender, callback, props } = setup()
+    await openAndLoad(entities)
+    act(() => { sessionActions.select('42') })
+    expect(callback.mock.calls).toEqual(withCallback ? [['2A']] : [])
+    if (withCallback) rerender({ ...props, selectedHandle: '2A' })
+    act(() => { sessionActions.openBytes(new Uint8Array([48]), 'malformed.dxf') })
+    workers[0].emit({ type: 'error', message: 'DXF parse failed' })
+    expect(workers[0].posted.at(-1)).toMatchObject({ type: 'loadDocument', documentId: 'one.dxf' })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('42')
+    workers[0].emit({ type: 'documentLoaded', documentId: 'one.dxf', entities, entityCount: entities.length, unsupported: [] })
+    expect(screen.getByTestId('engine-selection').textContent).toBe('42')
+    expect(callback.mock.calls).toEqual(withCallback ? [['2A']] : [])
+    await openAndLoad([entities[1]], 'two.dxf')
+    expect(selectedIds).toEqual([])
+    expect(callback.mock.calls).toEqual(withCallback ? [['2A'], [null]] : [])
+  })
+
   it('does not call back when a document hides without a held selection', async () => {
     const { callback } = setup()
     await openAndLoad(entities)
     act(() => { sessionActions.openBytes(new Uint8Array([48]), 'malformed.dxf') })
     workers[0].emit({ type: 'error', message: 'DXF parse failed' })
+    // The drawing hides only after its trusted-byte restoration also fails.
+    workers[0].emit({ type: 'error', message: 'Trusted drawing restore failed' })
     expect(screen.getByTestId('engine-selection').textContent).toBe('')
     expect(callback).not.toHaveBeenCalled()
   })

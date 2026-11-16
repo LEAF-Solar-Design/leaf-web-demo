@@ -629,3 +629,15 @@ def test_b03_private_build_status_inventory_requires_active_studio_tenant():
     assert len(routes)==2
     assert {method for route in routes for method in route.methods}=={'GET','POST'}
     assert all(deps.require_active_tenant in [d.call for d in route.dependant.dependencies] for route in routes)
+
+
+B03_PRIVATE_CHART_STATE_PATH = B03_PRIVATE_BUILD_PATH + '/chart-state'
+
+
+def test_b03_chart_state_inventory_requires_active_studio_tenant():
+    from routers import browser_project
+    app=FastAPI();app.include_router(browser_project.router)
+    routes=[route for path,route in iter_leaf_routes(app.routes) if path==B03_PRIVATE_CHART_STATE_PATH]
+    assert len(routes)==2
+    assert {method for route in routes for method in route.methods}=={'GET','PUT'}
+    assert all(deps.require_active_tenant in [d.call for d in route.dependant.dependencies] for route in routes)

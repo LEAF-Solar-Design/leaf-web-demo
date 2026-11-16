@@ -1746,6 +1746,78 @@ def build_suites() -> List[Suite]:
         # capabilities, dependency-free.
         Suite("server-appbundle-activity-spec", "server tests/test_appbundle_activity_spec.py",
               "pytest", SERVER, _py_pytest("tests/test_appbundle_activity_spec.py"), 7),
+        # X04 generic module counting and dependency replay, synthetic and offline.
+        Suite("server-x04-intake-selection", "server X04 module and dependency replay", "pytest", SERVER,
+              _py_pytest("tests/test_count_modules.py") + [
+                  "tests/test_drawing_dependency_report.py",
+                  "tests/test_x04_candidate_metadata_types.py",
+                  "tests/test_x04_count_differential.py",
+                  "tests/test_x04_count_json_roundtrip.py",
+                  "tests/test_x04_count_precision_boundary.py",
+                  "tests/test_x04_cross_kind_handle_conflicts.py",
+                  "tests/test_x04_dependency_control_characters.py",
+                  "tests/test_x04_dependency_flag_contract.py",
+                  "tests/test_x04_dependency_network_isolation.py",
+                  "tests/test_x04_dependency_record_boundaries.py",
+                  "tests/test_x04_dependency_replay_schema.py",
+                  "tests/test_x04_dependency_section_boundaries.py",
+                  "tests/test_x04_dependency_unicode_identity.py",
+                  "tests/test_x04_empty_drawing_replay.py",
+                  "tests/test_x04_handle_hex_identity.py",
+                  "tests/test_x04_handleless_identity.py",
+                  "tests/test_x04_hashseed_determinism.py",
+                  "tests/test_x04_intake_selection_e2e.py",
+                  "tests/test_x04_irrelevant_record_invariance.py",
+                  "tests/test_x04_minsert_arrays.py",
+                  "tests/test_x04_module_selection_failures.py",
+                  "tests/test_x04_optimized_validation.py",
+                  "tests/test_x04_original_byte_encodings.py",
+                  "tests/test_x04_original_bytes_replay.py",
+                  "tests/test_x04_parallel_replay.py",
+                  "tests/test_x04_polygon_numeric_limits.py",
+                  "tests/test_x04_polygon_planarity.py",
+                  "tests/test_x04_polygon_topology.py",
+                  "tests/test_x04_polygon_vertex_cycles.py",
+                  "tests/test_x04_polyline_curve_fields.py",
+                  "tests/test_x04_replay_extension_fields.py",
+                  "tests/test_x04_replay_schema_failures.py",
+                  "tests/test_x04_saved_byte_integrity.py",
+                  "tests/test_x04_saved_intake_replay.py",
+                  "tests/test_x04_selection_argument_contract.py",
+                  "tests/test_x04_selection_drawing_isolation.py",
+                  "tests/test_x04_selection_envelope_consistency.py",
+                  "tests/test_x04_selection_failure_recovery.py",
+                  "tests/test_x04_selector_type_failures.py",
+                  "tests/test_x04_set_identity_collisions.py",
+                  "tests/test_x04_space_layout_types.py",
+                  "tests/test_x04_polyline_closed_flags.py",
+                  "tests/test_x04_polygon_affine_invariance.py",
+                  "tests/test_x04_dependency_duplicate_conflicts.py",
+                  "tests/test_x04_untrusted_derived_counts.py",
+                  "tests/test_x04_bigfont_dependencies.py",
+                  "tests/test_x04_overlay_replay_consistency.py",
+                  "tests/test_x04_intake_truncation_recovery.py",
+                  "tests/test_x04_export_atomic_failures.py",
+                  "tests/test_x04_evidence_cli_json_boundaries.py",
+                  "tests/test_x04_evidence_claim_tampering.py",
+                  "tests/test_x04_evidence_cli_streams.py",
+                  "tests/test_x04_evidence_path_aliases.py",
+                  "tests/test_x04_evidence_concurrent_writers.py",
+                  "tests/test_x04_evidence_extension_policy.py",
+                  "tests/test_x04_evidence_broken_pipe.py",
+                  "tests/test_x04_evidence_nesting_limits.py",
+                  "tests/test_x04_evidence_scalar_type_confusion.py",
+                  "tests/test_x04_evidence_encoding_boundaries.py",
+                  "tests/test_x04_evidence_destination_types.py",
+                  "tests/test_x04_evidence_stdin_pipeline.py",
+                  "tests/test_x04_evidence_integer_token_limits.py",
+                  "tests/test_x04_evidence_input_budget.py",
+                  "tests/test_x04_evidence_cli_argument_contract.py",
+                  "tests/test_x04_evidence_short_reads.py",
+                  "tests/test_x04_evidence_stdout_flush.py",
+                  "tests/test_x04_evidence_diagnostic_injection.py",
+                  "tests/test_x04_evidence_export_fixed_point.py",
+              ], 482),
         Suite("server-dxf-intake-lines-text", "server tests/test_dxf_intake_lines_text.py",
               "pytest", SERVER, _py_pytest("tests/test_dxf_intake_lines_text.py"), 4),
         # W4g engine reach (2026-09-04): the intake -> DXF synthesizer (the
@@ -2486,7 +2558,8 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_author_stage_status.py"), 41),
         Suite("server-customization-stage-recovery",
               "server customization stage recovery", "pytest",
-              SERVER, _py_pytest("tests/test_customization_stage_recovery.py"), 27),
+              SERVER, _py_pytest("tests/test_customization_stage_recovery.py")
+              + ["tests/test_c02_same_job_recovery.py"], 55),
         Suite("server-platform-release-policy", "server platform release policy", "pytest",
               SERVER, _py_pytest("tests/test_platform_release_policy.py"), 14),
         # --- operator control plane (cwd=server): each file its OWN process --- #
@@ -3446,6 +3519,9 @@ def build_suites() -> List[Suite]:
                   # compiled engine. Keep both exact counts while older PRs finish.
                   ("src/cad/engineBatchAtomic.test.js", 12),
                   ("src/cad/engineBatchAtomic.test.js", 13),
+                  # S01 lifecycle replay: four cases require the same optional
+                  # compiled Node WASM package; executed proof retained separately.
+                  ("src/cad/solarLifecycleReplay.test.jsx", 4),
               )) for shard in range(1, 4)),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
@@ -3937,9 +4013,9 @@ def build_suites() -> List[Suite]:
                "e2e/campaign-panel.spec.mjs", "e2e/recovery-controls.spec.mjs",
                "e2e/workspace-create-no-prompt.spec.mjs", "e2e/viewer-grid-toggle.spec.mjs",
                "e2e/studio-ux-regressions.spec.mjs", "e2e/project-page-editor.spec.mjs",
-               # Isolated test contexts use 3 workers on the same CI device;
+               # Isolated test contexts use 2 workers on the same CI device;
                # other suites retain their own worker limits.
-               "--workers=3"], None),
+               "--workers=2"], None),
         Suite("web-lifecycle-panel-proof", "web mounted project lifecycle panel browser proof", "script", WEB,
               [_npx(), "--no-install", "playwright", "test", "--config", "playwright.lifecycle.config.mjs",
                "e2e/project-lifecycle-panel.spec.mjs", "--workers=1"], None),
@@ -4368,7 +4444,8 @@ def reporting_command(suite: Suite, argv: List[str], trace_env: dict) -> List[st
     argv = [os.fsdecode(word) for word in argv]
     trusted = os.environ.get("LEAF_TRUSTED_CI_DIR")
     capturing = process_capture_enabled() and process_capture_eligible(suite)
-    if not trusted and not capturing:
+    panels = suite.id == "web-studio-panels-proof"
+    if not trusted and not capturing and not panels:
         return argv
     directory = Path(trusted) if trusted else SCRIPTS_DIR / "ci"
     output = Path(trace_env["LEAF_TEST_REPORT_DIR"])
@@ -4409,16 +4486,19 @@ def reporting_command(suite: Suite, argv: List[str], trace_env: dict) -> List[st
         # CLI reporters are retained. With a config, append through a wrapper so
         # its HTML reporter and output paths survive as well as console parsing.
         command = list(argv)
-        reporter = str(directory / "playwright-leaf.mjs")
+        additions = ([str(directory / "playwright-leaf.mjs")] if trusted or capturing else [])
+        if panels:
+            additions.append(str((WEB / "e2e/panelsTimingReporter.mjs").resolve()))
         for index, word in enumerate(command):
             if word.startswith("--reporter="):
+                reporters = list(dict.fromkeys(word.split("=", 1)[1].split(",") + additions))
                 command = command[:index] + command[index + 1:]
-                command.append(word + "," + reporter)
+                command.append("--reporter=" + ",".join(reporters))
                 return command
             if word == "--reporter" and index + 1 < len(command):
-                reporters = command[index + 1]
+                reporters = list(dict.fromkeys(command[index + 1].split(",") + additions))
                 command = command[:index] + command[index + 2:]
-                command.append("--reporter=" + reporters + "," + reporter)
+                command.append("--reporter=" + ",".join(reporters))
                 return command
         if "--config" in command:
             index = command.index("--config") + 1
@@ -4439,17 +4519,19 @@ def reporting_command(suite: Suite, argv: List[str], trace_env: dict) -> List[st
                 "  if (name.startsWith('.')) name = rebase(name);\n"
                 "  if (options?.outputFolder) options = {...options, outputFolder: rebase(options.outputFolder)};\n"
                 "  return options ? [name, options] : [name]; });\n"
+                "for (const name of " + json.dumps(additions) + ")\n"
+                "  if (!reporters.some(entry => entry[0] === name)) reporters.push([name]);\n"
                 # Playwright resolves webServer.cwd against the config file, which now lives in the report directory.
                 "const server = item => ({...item, cwd: rebase(item.cwd || '.')});\n"
                 "export default {...paths(config), testDir: rebase(config.testDir || '.'),\n"
                 "  ...(config.projects ? {projects: config.projects.map(paths)} : {}),\n"
                 "  ...(config.webServer ? {webServer: Array.isArray(config.webServer)\n"
                 "    ? config.webServer.map(server) : server(config.webServer)} : {}),\n"
-                "  reporter: [...reporters, [" + json.dumps(reporter) + "]]};\n",
+                "  reporter: reporters};\n",
                 encoding="utf-8")
             command[index] = str(wrapper)
             return command
-        return command + ["--reporter=list," + reporter]
+        return command + ["--reporter=" + ",".join(["list"] + additions)]
     return argv
 
 
@@ -4916,6 +4998,93 @@ def parse_file_timings(suite: Suite, text: str) -> list[dict]:
             totals[relative] = total
     return [{"file": path, "seconds": seconds, "basis": basis}
             for path, seconds in sorted(totals.items())]
+
+
+PW_PHASE_FILES = frozenset("web/e2e/" + name for name in (
+    "campaign-panel.spec.mjs", "recovery-controls.spec.mjs",
+    "workspace-create-no-prompt.spec.mjs", "viewer-grid-toggle.spec.mjs",
+    "studio-ux-regressions.spec.mjs", "project-page-editor.spec.mjs"))
+PW_PHASE_MAX_LINE = 4096
+PW_PHASE_MAX_ROWS = 1000
+PW_PHASE_BASIS = "playwright public test/step durations; gaps unattributed"
+PW_PHASE_IDENTITIES = ("line", "column", "worker_index", "retry", "repeat_index")
+PW_PHASE_DURATIONS = ("duration_ms", "setup_ms", "teardown_ms", "api_ms",
+                      "reported_navigation_api_ms", "unattributed_ms")
+
+
+def parse_pw_phases(suite: Suite, text: str) -> list[dict]:
+    """Only bounded, public result-duration partitions reach durable stdout."""
+    if suite.id != "web-studio-panels-proof":
+        return []
+    rows = []
+    for raw in text.splitlines():
+        if len(raw) > PW_PHASE_MAX_LINE or not raw.startswith("LEAF_PW_PHASE "):
+            continue
+        try:
+            row = json.loads(raw[len("LEAF_PW_PHASE "):])
+            if (not isinstance(row, dict)
+                    or row.get("schema") != "leaf.ci.playwright-phase.v1"
+                    or row.get("file") not in PW_PHASE_FILES
+                    or row.get("basis") != PW_PHASE_BASIS
+                    or row.get("status") not in ("passed", "failed", "timedOut", "skipped", "interrupted", "unknown")
+                    or type(row.get("truncated")) is not bool):
+                continue
+            if any(type(row.get(key)) is not int or row[key] < 0 or not math.isfinite(row[key])
+                   for key in PW_PHASE_IDENTITIES):
+                continue
+            if any(type(row.get(key)) not in (int, float) or row[key] < 0
+                   or not math.isfinite(row[key]) for key in PW_PHASE_DURATIONS):
+                continue
+            if (abs(sum(row[key] for key in ("setup_ms", "teardown_ms", "api_ms", "unattributed_ms"))
+                    - row["duration_ms"]) > 0.005
+                    or row["reported_navigation_api_ms"] > row["api_ms"]):
+                continue
+            optional = {}
+            if "api_lines" in row:
+                lines = row["api_lines"]
+                if not isinstance(lines, list) or len(lines) > 16:
+                    continue
+                sanitized = []
+                seen = set()
+                for item in lines:
+                    if (not isinstance(item, dict)
+                            or type(item.get("line")) is not int
+                            or not 0 < item["line"] <= 9007199254740991
+                            or item["line"] in seen
+                            or type(item.get("api_ms")) not in (int, float)
+                            or not math.isfinite(item["api_ms"])
+                            or not 0 <= item["api_ms"] <= row["api_ms"] + 0.005):
+                        break
+                    seen.add(item["line"])
+                    sanitized.append({"line": item["line"], "api_ms": item["api_ms"]})
+                if len(sanitized) != len(lines):
+                    continue
+                optional["api_lines"] = sanitized
+            if "api_lines_omitted" in row:
+                omitted = row["api_lines_omitted"]
+                if type(omitted) is not int or omitted < 0 or not math.isfinite(omitted):
+                    continue
+                optional["api_lines_omitted"] = omitted
+            sanitized_row = {key: row[key] for key in (
+                "schema", "file", *PW_PHASE_IDENTITIES, "status", *PW_PHASE_DURATIONS,
+                "truncated", "basis")}
+            rows.append({**sanitized_row, **optional})
+            if len(rows) >= PW_PHASE_MAX_ROWS:
+                break
+        except (ValueError, TypeError, OverflowError, RecursionError):
+            continue
+    return rows
+
+
+def emit_pw_phases(suite: Suite, text: str, attempt: int) -> None:
+    try:
+        for timing in parse_pw_phases(suite, text):
+            row = {**timing, "suite_id": suite.id, "attempt": attempt}
+            line = "LEAF_PW_PHASE " + json.dumps(row, separators=(",", ":"))
+            if len(line) <= PW_PHASE_MAX_LINE:
+                print(line, flush=True)
+    except Exception:
+        pass
 
 
 def emit_file_timings(suite: Suite, text: str, attempt: int) -> None:
@@ -5498,6 +5667,7 @@ def _run_suite_attempt(suite: Suite, log_dir: Path, attempt: int = 1,
     seconds = time.perf_counter() - t0
 
     emit_file_timings(suite, out, attempt)
+    emit_pw_phases(suite, out, attempt)
 
     if rc == 75:
         reason = next((line.split("QUEUED:", 1)[1].strip()
@@ -5758,6 +5928,53 @@ def selected_shard_suites(suites: List[Suite], plan_path: str,
 
 PR_TIER_SCHEMA = "leaf.ci.pr-tier.v1"
 PR_TIER_PREREQUISITES = ("web-build", "harness-tsc-build", "ci-full-run-manifest-certificates")
+
+# These remain in the generated tier for main and conservative fallback. Only
+# explicit PR events may defer them when every changed path is clearly scoped.
+PR_TIER_DEFERRED_SCOPES = {
+    "web-studio-panels-proof": (
+        ("web/", "vendor/", "contract/"),
+        ("web/package.json", "web/package-lock.json", "web/playwright.config.mjs")),
+    "web-version-restore-proof": (
+        ("web/", "vendor/", "contract/", "server/", "platform/", "harness/"),
+        ("web/package.json", "web/package-lock.json", "web/playwright.config.mjs")),
+    "studio-walk-regressions": (
+        ("web/", "server/", "platform/", "harness/", "vendor/", "engine/",
+         "executor/", "dispatch/", "contract/", "data/", "auth0/", "deploy/",
+         "device-agent/", "da/"), ()),
+    "harness-vitest": (
+        ("harness/", "contract/", "vendor/", "engine/", "executor/", "web/",
+         "server/", "platform/"), ()),
+    "server-lab-runs": (
+        ("server/", "platform/", "contract/", "executor/", "engine/", "data/"), ()),
+}
+PR_TIER_SCOPED_ROOTS = frozenset({
+    "web", "server", "platform", "harness", "vendor", "engine", "executor",
+    "dispatch", "contract", "data", "auth0", "deploy", "device-agent", "da",
+    "docs", "tools", "tests", "plans", "research", "tasks",
+})
+
+
+def pr_tier_deferred_required(rows, changed):
+    """Fail closed on shared or ambiguous paths; direct ownership is additive."""
+    if not changed:
+        return set(PR_TIER_DEFERRED_SCOPES)
+    for path in changed:
+        parts = path.split("/")
+        if (not path or "\\" in path or ":" in path
+                or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in path)
+                or any(not part or part.startswith(".") for part in parts)
+                or len(parts) < 2 or parts[0] not in PR_TIER_SCOPED_ROOTS):
+            return set(PR_TIER_DEFERRED_SCOPES)
+    required = set()
+    for row in rows:
+        if row["id"] not in PR_TIER_DEFERRED_SCOPES:
+            continue
+        prefixes, files = PR_TIER_DEFERRED_SCOPES[row["id"]]
+        if any(path.startswith(prefixes) or path in files or pr_tier_owns(row, path)
+               for path in changed):
+            required.add(row["id"])
+    return required
 
 
 def pr_tier_path(value: str) -> str:
@@ -6021,6 +6238,7 @@ def select_pr_tier(suites: List[Suite], tier: dict) -> List[Suite]:
         if not isinstance(priority, list) or any(not isinstance(p, str) for p in priority):
             raise ValueError("invalid LEAF_PRIORITY_SUITES")
         selected.update(ids & set(priority))
+        rows = web_family_rows(suites)
         for suite in suites:
             row = {"id": suite.id, "command": _fingerprint_argv(suite.argv, cwd=suite.cwd),
                    "cwd": _fingerprint_cwd(suite.cwd), "kind": suite.kind}
@@ -6029,12 +6247,26 @@ def select_pr_tier(suites: List[Suite], tier: dict) -> List[Suite]:
                         and not pr_tier_outside_web_closure(changed))
                     or any(pr_tier_owns(row, path) for path in changed)):
                 selected.add(suite.id)
+        event = os.environ.get("CODEBUILD_WEBHOOK_EVENT")
+        deferred = set(PR_TIER_DEFERRED_SCOPES) & ids
+        overlay = event in {"PULL_REQUEST_CREATED", "PULL_REQUEST_UPDATED", "PULL_REQUEST_REOPENED"}
+        main = (event == "PUSH"
+                and os.environ.get("CODEBUILD_WEBHOOK_HEAD_REF") == "refs/heads/main")
+        if overlay:
+            selected.difference_update(deferred)
+            selected.update(pr_tier_deferred_required(rows, changed) & ids)
+            selected.update(new | (ids & set(priority)))
+        elif main:
+            selected.update(deferred)
         selected = pr_tier_closure(selected, ids, tier.get("prerequisites"))
         try:
-            rows = web_family_rows(suites)
             family = {row["id"] for row in rows if row["cwd"] == "web"
                       or row["id"] in {"studio-walk-regressions", "web-demo-gate"}}
             protected = new | (ids & set(priority)) | (set(PR_TIER_PREREQUISITES) - family)
+            # The audited web-family decision can further narrow PR coverage.
+            # Main still runs the deferred suites even for web-independent changes.
+            if main:
+                protected.update(selected & deferred)
             decision, reason = load_web_family_decision()(
                 selected, rows, changed,
                 protected_ids=protected,
@@ -6357,6 +6589,23 @@ def partition_suites(suites: List[Suite], shard_count: int) -> List[List[Suite]]
     return [sorted(b, key=lambda s: index_of[s.id]) for b in bins]
 
 
+def partition_pr_tier_suites(suites: List[Suite], shard_count: int) -> List[List[Suite]]:
+    """Keep LPT membership except for the measured three-shard tier moves."""
+    partitions = partition_suites(suites, shard_count)
+    if shard_count != 3:
+        return partitions
+    placement = {s.id: i for i, shard in enumerate(partitions) for s in shard}
+    for sid, target in {
+        "web-studio-panels-proof": 1,
+        "web-link-service-flow": 2,
+        "web-async-author-stage": 2,
+        "web-author-quota-gate": 2,
+    }.items():
+        if sid in placement:
+            placement[sid] = target
+    return [[s for s in suites if placement[s.id] == i] for i in range(shard_count)]
+
+
 # Source inventory for suites whose conflicts are not expressed by Suite flags
 # or an npm/npx executable. Keep ALL conflicts in ONE group, in catalog order.
 # The server integration fixtures bind :0, not a fixed host port, but the older
@@ -6435,7 +6684,7 @@ _BROWSER_DIRECT_PROOFS = {
     "web-studio-panels-proof": ["playwright.config.mjs", "e2e/campaign-panel.spec.mjs",
         "e2e/recovery-controls.spec.mjs", "e2e/workspace-create-no-prompt.spec.mjs",
         "e2e/viewer-grid-toggle.spec.mjs", "e2e/studio-ux-regressions.spec.mjs",
-        "e2e/project-page-editor.spec.mjs", "--workers=3"],
+        "e2e/project-page-editor.spec.mjs", "--workers=2"],
     "web-lifecycle-panel-proof": ["playwright.lifecycle.config.mjs",
         "e2e/project-lifecycle-panel.spec.mjs", "--workers=1"],
     "web-ios-ship-surface-proof": ["playwright.ios.config.mjs",
@@ -8235,7 +8484,7 @@ def main() -> int:
         suites = select_pr_tier(suites, tier)
         if args.shard_index is not None:
             tier_suites = suites
-            partition = partition_suites(suites, args.shard_count)[args.shard_index]
+            partition = partition_pr_tier_suites(suites, args.shard_count)[args.shard_index]
             try:
                 local_ids = pr_tier_closure({s.id for s in partition}, {s.id for s in tier_suites},
                                            tier.get("prerequisites"))
