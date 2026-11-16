@@ -2026,7 +2026,11 @@ def build_suites() -> List[Suite]:
                   "tests/test_x04_assembly_hash_cancellation.py",
                   "tests/test_x04_assembly_misplaced_pins.py",
                   "tests/test_x04_pinned_assembly_portability.py",
-              ], 1398),
+                  "tests/test_x04_assembly_required_pins.py",
+                  "tests/test_x04_assembly_manifest_pin_isolation.py",
+                  "tests/test_x04_assembly_manifest_redirect_pins.py",
+                  "tests/test_x04_manifest_pin_runtime_matrix.py",
+              ], 1413),
         Suite("server-dxf-intake-lines-text", "server tests/test_dxf_intake_lines_text.py",
               "pytest", SERVER, _py_pytest("tests/test_dxf_intake_lines_text.py"), 4),
         # W4g engine reach (2026-09-04): the intake -> DXF synthesizer (the
