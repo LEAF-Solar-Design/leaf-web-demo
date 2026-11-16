@@ -20,6 +20,8 @@ import re
 import shutil
 import struct
 import tempfile
+import time
+import math
 from uuid import UUID, uuid4
 from urllib.parse import parse_qs, urlsplit
 import zlib
@@ -99,7 +101,20 @@ def _strict_json_bytes(data):
     def constant(value):
         raise ValueError("nonfinite JSON constant")
 
-    return json.loads(text, object_pairs_hook=pairs, parse_constant=constant, parse_float=Decimal)
+    value = json.loads(text, object_pairs_hook=pairs, parse_constant=constant, parse_float=Decimal)
+    def unicode_strings(item):
+        if isinstance(item, str):
+            if any(0xd800 <= ord(char) <= 0xdfff for char in item):
+                raise ValueError("unpaired JSON surrogate")
+        elif isinstance(item, dict):
+            for key, child in item.items():
+                unicode_strings(key)
+                unicode_strings(child)
+        elif isinstance(item, list):
+            for child in item:
+                unicode_strings(child)
+    unicode_strings(value)
+    return value
 
 
 def rate_total(rates):
@@ -303,7 +318,10 @@ def classify(observation, expected=None):
         canonical = len(projects) == 1
     except ValueError:
         canonical = False
-    proven = (fresh and canonical and observation.get("evidence_saved") is True and not pending
+    provenance = (isinstance(observation.get("source"), str)
+                  and re.fullmatch(r"[0-9a-f]{40}", observation["source"]) is not None
+                  and observation.get("web_build") == observation["source"])
+    proven = (fresh and canonical and provenance and observation.get("evidence_saved") is True and not pending
               and observation.get("event_callback_failed") is not True)
     contradictory = (bool(observation.get("import_rejection"))
                      and observation.get("imported_version_selected") is True)
@@ -1007,12 +1025,59 @@ def _ground(page, ctx, observation):
     _save(page, ctx, observation, validate=validate)
 
 
-def observe(page, ctx, config, bound, session_info=None):
+class _ObservationBudget:
+    """Share one deadline across nested locator calls and successive UI waits."""
+    def __init__(self, seconds, clock):
+        if type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds <= 0:
+            raise ValueError("invalid observation budget")
+        self.clock, self.end = clock, clock() + seconds
+
+    def milliseconds(self):
+        remaining = self.end - self.clock()
+        if remaining <= 0:
+            raise TimeoutError("overall observation deadline exhausted")
+        return max(1, int(remaining * 1000))
+
+
+class _BudgetedUI:
+    _chains = {"locator", "get_by_role", "get_by_label", "get_by_text", "filter", "or_", "and_", "nth"}
+    _timed = {"click", "fill", "wait_for", "wait_for_function", "wait_for_load_state", "expect_response",
+              "select_option", "set_input_files", "inner_text", "get_attribute", "input_value",
+              "screenshot", "element_handle"}
+
+    def __init__(self, target, budget):
+        self.target, self.budget = target, budget
+
+    def __getattr__(self, name):
+        # Cleanup must remain available after the budget expires.
+        if name in ("on", "remove_listener"):
+            return getattr(self.target, name)
+        self.budget.milliseconds()
+        value = getattr(self.target, name)
+        if name in ("first", "last"):
+            return _BudgetedUI(value, self.budget)
+        if not callable(value):
+            return value
+        def call(*args, **kwargs):
+            remaining = self.budget.milliseconds()
+            args = tuple(arg.target if isinstance(arg, _BudgetedUI) else arg for arg in args)
+            if name in self._timed:
+                requested = kwargs.get("timeout")
+                kwargs["timeout"] = remaining if requested is None or requested == 0 else min(requested, remaining)
+            result = value(*args, **kwargs)
+            self.budget.milliseconds()
+            return _BudgetedUI(result, self.budget) if name in self._chains else result
+        return call
+
+
+def observe(page, ctx, config, bound, session_info=None, *, budget_seconds=600, clock=time.monotonic):
     observation = {"fresh_project": False, "imported_version_selected": False, "evidence_saved": False}
     stage = "session provenance"
     listeners = []
     callback_error = None
     try:
+        budget = _ObservationBudget(budget_seconds, clock)
+        page = _BudgetedUI(page, budget)
         for key in ("source", "web_build"):
             value = (session_info or {}).get(key)
             if (not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}", value)
@@ -1061,8 +1126,8 @@ def observe(page, ctx, config, bound, session_info=None):
 
         for event, handler in (("request", callback), ("response", response), ("requestfailed", failed)):
             listener = protect(handler, event)
-            page.on(event, listener)
             listeners.append((event, listener))
+            page.on(event, listener)
         stage = "workspace profile"
         _prepare_workspace(page)
         stage = "fresh project creation"
@@ -1074,7 +1139,9 @@ def observe(page, ctx, config, bound, session_info=None):
         _open_workflow(page, config)
         stage = "rendered Ground Physical evidence"
         _ground(page, ctx, observation)
+        budget.milliseconds()
     except Exception as exc:
+        _invalidate_evidence(ctx, observation)
         _diagnostic(ctx, observation, stage, exc)
     finally:
         cleanup_error = None

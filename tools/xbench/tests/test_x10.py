@@ -28,7 +28,7 @@ DRAWING = "00000000-0000-4000-8000-000000000004"
 
 
 def canonical_project():
-    return {key: PROJECT for key in ("project_id", "route_project_id", "active_project_id", "project_binding")}
+    return dict({key: PROJECT for key in ("project_id", "route_project_id", "active_project_id", "project_binding")}, source="b" * 40, web_build="b" * 40)
 
 
 def metadata_response(request, data, status=200, url=None):
@@ -609,7 +609,7 @@ class FixtureTests(unittest.TestCase):
                 rail.screenshot.side_effect = capture
 
                 def workflow(page, config):
-                    page.get_by_role.side_effect = lambda role, **kw: rail if role == "navigation" else picker
+                    page.target.get_by_role.side_effect = lambda role, **kw: rail if role == "navigation" else picker
 
                 def selected(*args, **kwargs):
                     if mode == "project-switch":
@@ -1657,7 +1657,7 @@ class FixtureTests(unittest.TestCase):
     def test_rate_inputs_require_ascii_digits_before_browser(self):
         original = Path(next(row["path"] for row in self.ctx.manifest["fixtures"] if row["role"] == "rates")).read_bytes()
         for key in ("quantity", "unit_rate"):
-            for value in ("Ù¡", "ï¼‘ï¼’", "1Ù¢", "Ù¡.2", "1.ï¼’"):
+            for value in ("Ã™Â¡", "Ã¯Â¼â€˜Ã¯Â¼â€™", "1Ã™Â¢", "Ã™Â¡.2", "1.Ã¯Â¼â€™"):
                 with self.subTest(key=key, value=value):
                     item = {"quantity": "1.25", "unit_rate": "2.00", key: value}
                     with self.assertRaises(ValueError):
@@ -1915,6 +1915,88 @@ class FixtureTests(unittest.TestCase):
                 if operation == "png" and fault != "none":
                     self.assertFalse(observation["evidence_saved"])
                     self.assertEqual(list(self.ctx.out_dir.glob("x10-evidence-*")), old)
+
+    def test_classification_requires_matching_valid_source_and_build(self):
+        for refusal in (False, True):
+            original = ClassificationTests().observation()
+            if refusal:
+                original.update(imported_version_selected=False, import_rejection=x10.IMPORT_REFUSALS[0])
+            for key in ("source", "web_build"):
+                for value in (None, "", "B" * 40, "b" * 39, "b" * 40 + "\n", "c" * 40, 42):
+                    with self.subTest(refusal=refusal, key=key, value=value):
+                        self.assertEqual([r.verdict for r in x10.classify(dict(original, **{key: value}))],
+                                         ["UNREADABLE"] * 6)
+                missing = dict(original)
+                missing.pop(key)
+                self.assertEqual([r.verdict for r in x10.classify(missing)], ["UNREADABLE"] * 6)
+            self.assertEqual(x10.classify(original)[0].verdict, "FAIL")
+
+    def test_partial_listener_registration_is_always_cleaned_up(self):
+        config, bound, _, _ = x10.bindings(self.ctx)
+        for fail_at in range(3):
+            page = MagicMock()
+            installed, removed = [], []
+            def register(event, callback):
+                installed.append((event, callback))
+                if len(installed) - 1 == fail_at:
+                    raise RuntimeError("private registration diagnostic")
+            page.on.side_effect = register
+            page.remove_listener.side_effect = lambda event, callback: removed.append((event, callback))
+            with patch.object(x10, "_prepare_workspace") as prepare:
+                observed = x10.observe(page, self.ctx, config, bound, self.session_info)
+            prepare.assert_not_called()
+            self.assertEqual(removed, installed)
+            self.assertEqual([r.verdict for r in x10.classify(observed)], ["UNREADABLE"] * 6)
+            self.assertNotIn("private registration diagnostic", (self.ctx.out_dir / "x10-ui.json").read_text())
+
+    def test_overall_deadline_clamps_successive_ui_waits_with_virtual_clock(self):
+        class Clock:
+            now = 0.0
+            def __call__(self):
+                return self.now
+        config, bound, _, _ = x10.bindings(self.ctx)
+        for exhausted in (False, True):
+            clock = Clock()
+            page = MagicMock()
+            waits = []
+            def wait(*args, **kwargs):
+                waits.append(kwargs["timeout"])
+                clock.now += 0.6
+            page.wait_for_function.side_effect = wait
+            def prepare(page):
+                page.wait_for_function("synthetic", timeout=30000)
+                page.get_by_role("button", name="Synthetic").is_visible()
+            def create(page, ctx, config, observation):
+                page.wait_for_function("synthetic", timeout=30000)
+                observation.update(fresh_project=True, **canonical_project())
+            with patch.object(x10, "_prepare_workspace", prepare), patch.object(x10, "_create_project", create), \
+                    patch.object(x10, "_import_primary", return_value=False) as attach:
+                observed = x10.observe(page, self.ctx, config, bound, self.session_info,
+                                       budget_seconds=1 if exhausted else 2, clock=clock)
+            self.assertEqual(waits, [1000, 400] if exhausted else [2000, 1400])
+            self.assertEqual([r.verdict for r in x10.classify(observed)], ["UNREADABLE"] * 6)
+            if exhausted:
+                attach.assert_not_called()
+                self.assertEqual(observed["exception_type"], "TimeoutError")
+            self.assertEqual(page.remove_listener.call_args_list, page.on.call_args_list)
+        for seconds in (0, -1, float("inf"), float("nan"), True):
+            observed = x10.observe(MagicMock(), self.ctx, config, bound, self.session_info,
+                                   budget_seconds=seconds, clock=Clock())
+            self.assertEqual(aggregate(x10.classify(observed)), "UNREADABLE")
+
+    def test_strict_json_rejects_lone_surrogates_and_keeps_valid_unicode(self):
+        for role in ("oracle", "rates"):
+            path = Path(next(row["path"] for row in self.ctx.manifest["fixtures"] if row["role"] == role))
+            original = path.read_bytes()
+            prefix = original[:-1] + b',"extra":'
+            for fragment in (b'"\\ud800"', b'"\\udfff"', b'{"\\ud800":1}',
+                             b'[{"nested":"\\udc00"}]', b'"\\ud800x\\udc00"'):
+                self.replace_fixture(role, prefix + fragment + b'}')
+                self.assert_binding_refusal()
+            for fragment in (b'"\\ud83d\\ude00"', '"café 界"'.encode(), b'{"\\ud83d\\ude00":"ok"}'):
+                self.replace_fixture(role, prefix + fragment + b'}')
+                self.assertEqual(x10.bindings(self.ctx)[3], Decimal("0.07"))
+            self.replace_fixture(role, original)
 
 
 if __name__ == "__main__":
