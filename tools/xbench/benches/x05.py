@@ -100,6 +100,9 @@ def _setup(project):
 
 
 def _grid_score(project, result):
+    """Validate nested wire containers before comparing any associations."""
+    if not isinstance(result, dict):
+        return "UNREADABLE", "report_wire_unreadable"
     if (not _integer(result.get("panel_count"), 1)
             or not _integer(result.get("frame_count"), 1)
             or result["panel_count"] != project["expected_modules"]
