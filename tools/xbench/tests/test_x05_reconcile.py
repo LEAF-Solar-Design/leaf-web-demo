@@ -27,6 +27,7 @@ from benches.x05_reconcile import (METRICS, TABLE_COLUMNS, check_discrepancies,
     reconcile_bound_seven_steps_json, aggregate_bound_seven_steps,
     aggregate_bound_seven_steps_json,
     diff_snapshot_rows,
+    validate_grid_string_ownership,
     compare_csv_view, compare_recommendations, compare_snapshots, compare_strings, compare_table)
 
 
@@ -3117,3 +3118,100 @@ def test_serializer_independent_exact_character_accounting_vectors():
         value["payload"]+="x"
         with pytest.raises(ValueError,match="^json_result_too_large$"):
             serialize_result(value)
+
+
+def test_explicit_grid_string_ownership_rejects_missing_duplicate_and_foreign_assignments():
+    grids,strings=["g1","g2"],["A","B"]
+    rows=[dict(grid_id="g1",string_id="A"),dict(grid_id="g2",string_id="B")]
+    assert validate_grid_string_ownership(grids,strings,rows)["verdict"]=="PASS"
+    cases=[rows[:1],rows+[rows[0]],rows+[dict(grid_id="g1",string_id="foreign")],
+           [dict(grid_id="foreign",string_id="A"),rows[1]]]
+    for changed in cases:
+        preserved=deepcopy(changed)
+        result=validate_grid_string_ownership(grids,strings,changed)
+        assert result["verdict"]=="FAIL" and any(result["counts"].values())
+        assert changed==preserved
+        assert validate_grid_string_ownership(list(reversed(grids)),list(reversed(strings)),list(reversed(changed)))==result
+    for invalid in (None,[{}],[dict(grid_id="g1",string_id=None)]):
+        assert validate_grid_string_ownership(grids,strings,invalid)["verdict"]=="UNREADABLE"
+    large=[dict(grid_id="g1",string_id=f"S{i:03}") for i in range(100)]
+    result=validate_grid_string_ownership(grids,strings,large)
+    assert result["counts"]["foreign_string"]==100 and result["counts"]["missing"]==2
+    assert len(result["examples"]["foreign_string"])==MAX_STRING_EXAMPLES
+
+
+def test_reopen_composition_includes_deterministic_localized_row_changes():
+    evidence=complete_evidence()
+    evidence["reopened_rows"]["strings"][0]["optimizers"]=7
+    evidence["reopened_rows"]["strings"][1]["optimizers"]=5
+    evidence["reopened_rows"]["table_rows"][0]["studio"]+=1
+    result=reconcile_offline(evidence)["stages"]["reopen"]
+    assert result["verdict"]=="FAIL" and result["row_diff"]["counts"]==dict(added=0,removed=0,changed=2,metrics=1)
+    expected=deepcopy(result)
+    evidence["reopened_rows"]["strings"].reverse()
+    evidence["reopened_rows"]["table_rows"].reverse()
+    assert reconcile_offline(evidence)["stages"]["reopen"]==expected
+    for absent in (None,{},dict(strings=[],table_rows=[])):
+        evidence["reopened_rows"]=absent
+        assert reconcile_offline(evidence)["stages"]["reopen"]["verdict"]=="UNREADABLE"
+
+
+def test_small_string_comparison_exhaustive_independent_reference():
+    from itertools import product
+    from collections import Counter
+    oracle=[dict(string_id="A",optimizers=1),dict(string_id="B",optimizers=2)]
+    choices=[dict(string_id=key,optimizers=count) for key in ("A","B","foreign") for count in (1,2,3)]
+    for length in (0,1,2,3):
+        for sequence in product(choices,repeat=length):
+            rows=list(sequence)
+            observed=compare_strings(oracle,rows)
+            counts=Counter(row["string_id"] for row in rows)
+            if not rows or any(count>1 for count in counts.values()):
+                assert observed["verdict"]=="UNREADABLE"
+                continue
+            saved={row["string_id"]:row["optimizers"] for row in rows}
+            missing=len({"A","B"}-saved.keys())
+            foreign=len(saved.keys()-{"A","B"})
+            mismatched=sum(saved[key]!=value for key,value in (("A",1),("B",2)) if key in saved)
+            assert observed["counts"]==dict(missing=missing,foreign=foreign,mismatched=mismatched)
+            assert observed["verdict"]==("FAIL" if missing or foreign or mismatched else "PASS")
+
+
+def test_signed_discrepancy_delta_and_metric_binding_including_tiny_values():
+    from decimal import Decimal
+    # Both signs fit the80-character plain numeric width bound.
+    for metric,positive in (("panels",Decimal(1)),("kw_dc",Decimal("1e-77"))):
+        deltas={key:0 for key in METRICS}
+        deltas[metric]=positive
+        record=dict(fixture_id="synthetic",metric=metric,delta=positive,name="signed revision",frozen_at="2026-11-15T12:00:00Z")
+        assert check_discrepancies("synthetic",deltas,[record],"2026-11-15T13:00:00Z")["verdict"]=="PASS"
+        deltas[metric]=-positive
+        assert check_discrepancies("synthetic",deltas,[record],"2026-11-15T13:00:00Z")["rejected_metrics"]==[metric]
+        other="optimizers" if metric=="panels" else "panels"
+        deltas={key:0 for key in METRICS}
+        deltas[other]=positive if metric=="panels" else 1
+        assert check_discrepancies("synthetic",deltas,[record],"2026-11-15T13:00:00Z")["rejected_metrics"]==[other]
+    evidence=complete_evidence()
+    evidence["saved_values"]["panels"]=25
+    evidence["discrepancy_records"]=[dict(fixture_id="synthetic",metric="panels",delta=1,name="revision",frozen_at="2026-11-15T12:00:00Z")]
+    assert reconcile_offline(evidence)["stages"]["policy"]["verdict"]=="PASS"
+    evidence["saved_values"],evidence["oracle_values"]=evidence["oracle_values"],evidence["saved_values"]
+    assert reconcile_offline(evidence)["stages"]["policy"]["verdict"]=="FAIL"
+
+
+def test_decimal_sticky_flags_preserved_on_success_and_rejection_paths():
+    from decimal import localcontext
+    from benches import x05_reconcile as module
+    values,table=table_fixture()
+    def results():
+        return [module._numeric("1.25"),module._numeric("invalid"),
+                canonical_snapshot(ORACLE,table),canonical_snapshot([],table),
+                reconcile_offline(complete_evidence()),reconcile_offline({}),
+                compare_table(table,values,values),compare_table(table,{},values)]
+    baseline=serialize_result(results())
+    with localcontext() as caller:
+        for signal in caller.flags:
+            caller.flags[signal]=True
+        preserved=dict(caller.flags)
+        assert serialize_result(results())==baseline
+        assert dict(caller.flags)==preserved
