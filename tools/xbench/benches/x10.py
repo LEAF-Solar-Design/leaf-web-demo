@@ -62,6 +62,12 @@ def _strict_json(path):
         data = source.read(MAX_JSON_BYTES + 1)
     if len(data) > MAX_JSON_BYTES:
         raise ValueError("JSON byte budget exceeded")
+    return _strict_json_bytes(data)
+
+
+def _strict_json_bytes(data):
+    if len(data) > MAX_JSON_BYTES:
+        raise ValueError("JSON byte budget exceeded")
     text = data.decode("utf-8")
     depth, quoted, escaped = 0, False, False
     for char in text:
@@ -154,7 +160,7 @@ def bindings(ctx):
 
     fixtures = unique_rows(ctx.manifest.get("fixtures"), manifest=True)
     verified = unique_rows(ctx.fixtures)
-    bound = {}
+    bound, json_bytes, fingerprints = {}, {}, {}
     for role, identity in mapping.items():
         row = fixtures.get(identity)
         proof = verified.get(identity)
@@ -162,14 +168,18 @@ def bindings(ctx):
                 or any(proof.get(key) != row.get(key) for key in ("path", "bytes", "sha256"))):
             raise ValueError("missing, wrong-role or unverified fixture binding: " + role)
         bound[role] = Path(row["path"])
+        if role in ("oracle", "rates") and row["bytes"] > MAX_JSON_BYTES:
+            raise ValueError("JSON byte budget exceeded")
         digest = hashlib.sha256()
         size = 0
+        data = bytearray() if role in ("oracle", "rates") else None
         if not stat.S_ISREG(bound[role].lstat().st_mode):
             raise ValueError("fixture is not a regular file: " + role)
         descriptor = os.open(bound[role], os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
                              | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
         with os.fdopen(descriptor, "rb") as source:
-            if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+            opened = os.fstat(source.fileno())
+            if not stat.S_ISREG(opened.st_mode):
                 raise ValueError("opened fixture is not a regular file: " + role)
             while True:
                 block = source.read(min(1024 * 1024, row["bytes"] - size + 1))
@@ -178,19 +188,39 @@ def bindings(ctx):
                 size += len(block)
                 if size > row["bytes"]:
                     raise ValueError("fixture grew beyond declared size: " + role)
+                if data is not None:
+                    if size > MAX_JSON_BYTES:
+                        raise ValueError("JSON byte budget exceeded")
+                    data.extend(block)
                 digest.update(block)
+            fingerprints[role] = _file_fingerprint(os.fstat(source.fileno()))
+            if fingerprints[role] != _file_fingerprint(opened):
+                raise ValueError("fixture changed during verified read: " + role)
         if size != row.get("bytes") or digest.hexdigest() != row.get("sha256"):
             raise ValueError("fixture content changed: " + role)
+        if data is not None:
+            json_bytes[role] = bytes(data)
     for key in ("import_controls", "workflow_controls"):
         controls = config.get(key, [])
         if (not isinstance(controls, list) or len(controls) > 8
                 or any(not isinstance(label, str) or not label.strip() or len(label) > 100 for label in controls)):
             raise ValueError("invalid x10 UI control path")
-    oracle = _strict_json(bound["oracle"])
+    oracle = _strict_json_bytes(json_bytes["oracle"])
     if not isinstance(oracle, dict) or not isinstance(oracle.get("expected"), dict) or not oracle["expected"]:
         raise ValueError("oracle.expected must be a nonempty object")
-    total = rate_total(_strict_json(bound["rates"]))
+    total = rate_total(_strict_json_bytes(json_bytes["rates"]))
+    # Verified parsed bytes, plus an observable replacement guard; not an atomic
+    # filesystem snapshot. Never reopen a path to obtain parsing input.
+    for role, path in bound.items():
+        if _file_fingerprint(path.lstat()) != fingerprints[role]:
+            raise ValueError("fixture identity changed: " + role)
     return config, bound, oracle["expected"], total
+
+
+def _file_fingerprint(info):
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError("fixture is not a regular file")
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
 
 
 def classify(observation, expected=None):
@@ -398,6 +428,8 @@ def _save(page, ctx, observation, surface=None, validate=None):
     try:
         if surface is None:
             surface = page.get_by_role("navigation", name="Solar design steps")
+        if validate is not None:
+            validate()
         surface.screenshot(path=str(staging / "x10-ground.png"), timeout=15_000)
         if validate is not None:
             validate()
@@ -415,6 +447,8 @@ def _save(page, ctx, observation, surface=None, validate=None):
                 raise ValueError("screenshot changed during evidence commit")
 
         check_pin(staging)
+        if validate is not None:
+            validate()
         staging.rename(ctx.out_dir / generation)
         committed = ctx.out_dir / generation
         check_pin(committed)
@@ -428,6 +462,24 @@ def _save(page, ctx, observation, surface=None, validate=None):
             shutil.rmtree(staging)
         if committed is not None and observation["evidence_saved"] is not True:
             shutil.rmtree(committed)
+
+
+def _invalidate_evidence(ctx, observation):
+    # Only the current observation's exact generation pointer may be removed.
+    pointer = observation.get("evidence_path", "")
+    match = re.fullmatch(r"(x10-evidence-[0-9a-f]{32})/x10-ui.json / \1/x10-ground.png", pointer)
+    if match is not None:
+        directory = ctx.out_dir / match.group(1)
+        record = directory / "x10-ui.json"
+        try:
+            if (not directory.is_symlink() and not record.is_symlink()
+                    and json.loads(record.read_text(encoding="utf-8")).get("evidence_path") == pointer):
+                record.unlink()
+                shutil.rmtree(directory)
+        except Exception:
+            pass
+    observation["evidence_saved"] = False
+    observation.pop("evidence_path", None)
 
 
 def _diagnostic(ctx, observation, stage, exc):
@@ -482,8 +534,15 @@ def _import_primary(page, ctx, config, bound, observation):
             raise ValueError("unrecognized rendered import refusal")
         observation["import_rejection"] = hint
         observation["attachment_status"] = "Primary drawing attachment rejected; retry required."
+        epoch = _current_project(page, observation)
+
+        def validate():
+            if (_current_project(page, observation) != epoch or not failure.is_visible()
+                    or failure.inner_text(timeout=15_000) != hint):
+                raise ValueError("project or refusal changed during capture")
+
         # Capture only the explicit rendered hint, excluding Diagnostic details.
-        _save(page, ctx, observation, surface=failure)
+        _save(page, ctx, observation, surface=failure, validate=validate)
         return False
     if not status.is_visible():
         raise ValueError("attachment terminal not visible after upload")
@@ -510,6 +569,12 @@ def _import_primary(page, ctx, config, bound, observation):
     if not isinstance(element, str) or not element.startswith("version:"):
         raise ValueError("missing preview version identity")
     identity = _uuid(element[len("version:"):])
+    _current_project(page, observation)
+    rows = observation.get("project_versions", [])
+    matches = [row for row in rows if row["version_id"] == identity and row["seq"] == sequence]
+    if len(matches) != 1:
+        raise ValueError("preview is not bound to current project drawing metadata")
+    drawing = matches[0]["drawing_id"]
     preview.click(timeout=30_000)
     marker.wait_for(state="visible", timeout=30_000)
     if not marker.is_visible() or marker.inner_text() != "Project drawing version selected.":
@@ -520,6 +585,7 @@ def _import_primary(page, ctx, config, bound, observation):
         raise ValueError("selected viewer version mismatch")
     observation["version_selection_status"] = safe_text(marker.inner_text())
     observation["imported_version_id"] = identity
+    observation["imported_drawing_id"] = drawing
     observation["imported_version_selected"] = True
     observation["selected_sequence"] = sequence
     return True
@@ -562,6 +628,8 @@ def _catalog_observer(base, observation):
         if not exact_url(request.url):
             return
         try:
+            if request.method != "GET":
+                raise ValueError("catalog requires normal GET")
             url = urlsplit(request.url)
             query = parse_qs(url.query, keep_blank_values=True, max_num_fields=20)
             binding = {}
@@ -598,17 +666,101 @@ def _catalog_observer(base, observation):
     return request_seen
 
 
+def _project_observer(base, observation):
+    origin = urlsplit(base)
+    observation.update(project_epoch=0, project_binding=None, project_versions=[])
+    latest, route, failed = None, None, False
+
+    def route_id(value):
+        url = urlsplit(value)
+        if ((url.scheme, url.netloc) != (origin.scheme, origin.netloc)
+                or url.query or url.fragment):
+            return None
+        match = re.fullmatch(r"/api/projects/([0-9a-fA-F-]{36})", url.path)
+        if match is None:
+            return None
+        try:
+            return _uuid(match.group(1))
+        except ValueError:
+            return None
+
+    def clear():
+        observation["project_epoch"] += 1
+        observation.update(project_binding=None, project_versions=[])
+
+    def request_seen(request):
+        nonlocal latest, route, failed
+        identity = route_id(request.url)
+        if identity is None:
+            return
+        latest, route, failed = request, identity, request.method != "GET"
+        clear()
+
+    def response_seen(response):
+        nonlocal failed
+        if response.request is not latest or route_id(response.url) != route:
+            return
+        clear()
+        failed = failed or type(response.status) is not int or response.status != 200
+        if failed:
+            return
+        try:
+            body = response.json()
+            project = body["project"]
+            identity = _uuid(project.get("project_id") or project.get("id"))
+            if identity != route:
+                raise ValueError("project identity mismatch")
+            versions = body.get("drawing_versions", [])
+            if not isinstance(versions, list) or len(versions) > 10000:
+                raise ValueError("invalid project versions")
+            rows = []
+            seen = set()
+            for version in versions:
+                version_id = _uuid(version.get("version_id") or version.get("id"))
+                drawing_id = _uuid(version.get("drawing_id"))
+                seq = version.get("seq")
+                if type(seq) is not int or not 1 <= seq <= 999999999 or version_id in seen:
+                    raise ValueError("invalid project version identity")
+                seen.add(version_id)
+                rows.append(dict(project_id=route, version_id=version_id, drawing_id=drawing_id, seq=seq))
+        except Exception:
+            failed = True
+            return
+        observation.update(project_binding=identity, project_versions=rows)
+
+    def request_failed(request):
+        nonlocal failed
+        if request is latest and route_id(request.url) == route:
+            failed = True
+            clear()
+
+    request_seen.response = response_seen
+    request_seen.failed = request_failed
+    return request_seen
+
+
+def _current_project(page, observation):
+    project = _uuid(observation.get("project_id"))
+    if observation.get("project_binding") != project or observation.get("fresh_project") is not True:
+        raise ValueError("current project differs from fresh project")
+    chip = page.get_by_role("button", name=re.compile(r"^Projects: change project\. Project .+"))
+    if not chip.is_visible():
+        raise ValueError("canonical project chip is not visible")
+    return observation["project_epoch"]
+
+
 def _current_identity(page, observation):
     binding = observation.get("catalog_binding")
     project = _uuid(observation.get("project_id"))
     version = _uuid(observation.get("imported_version_id"))
+    drawing = _uuid(observation.get("imported_drawing_id"))
     if (not isinstance(binding, dict) or binding.get("project_id") != project
-            or binding.get("input_version_id") != version):
+            or binding.get("input_version_id") != version or binding.get("drawing_id") != drawing):
         raise ValueError("current catalog identity differs from imported project/version")
     viewer = page.locator(".viewer-title code")
     if not viewer.is_visible() or viewer.inner_text(timeout=15_000) != version:
         raise ValueError("current viewer version differs from imported version")
-    return observation.get("catalog_epoch")
+    return observation.get("catalog_epoch"), _current_project(page, observation)
 
 
 def _ground(page, ctx, observation):
@@ -671,9 +823,23 @@ def observe(page, ctx, config, bound, session_info=None):
                     or value != ctx.source_sha):
                 raise ValueError("invalid session provenance")
         observation.update({key: session_info[key] for key in ("source", "web_build")})
-        callback = _catalog_observer(ctx.base, observation)
-        for event, listener in (("request", callback), ("response", callback.response),
-                                ("requestfailed", callback.failed)):
+        catalog = _catalog_observer(ctx.base, observation)
+        project = _project_observer(ctx.base, observation)
+
+        def callback(request):
+            catalog(request)
+            project(request)
+
+        def response(response):
+            catalog.response(response)
+            project.response(response)
+
+        def failed(request):
+            catalog.failed(request)
+            project.failed(request)
+
+        for event, listener in (("request", callback), ("response", response),
+                                ("requestfailed", failed)):
             page.on(event, listener)
             listeners.append((event, listener))
         stage = "workspace profile"
@@ -690,8 +856,15 @@ def observe(page, ctx, config, bound, session_info=None):
     except Exception as exc:
         _diagnostic(ctx, observation, stage, exc)
     finally:
+        cleanup_error = None
         for event, listener in listeners:
-            page.remove_listener(event, listener)
+            try:
+                page.remove_listener(event, listener)
+            except Exception as exc:
+                cleanup_error = cleanup_error or exc
+        if cleanup_error is not None:
+            _invalidate_evidence(ctx, observation)
+            _diagnostic(ctx, observation, "listener cleanup", cleanup_error)
     return observation
 
 
