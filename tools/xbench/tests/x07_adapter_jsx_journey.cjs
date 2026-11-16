@@ -36,18 +36,44 @@ sys.path.insert(0,str(Path.cwd()/'server'))
 from x07_customer_profile_store import CustomerProfileStore
 from x07_profile_workflow import ProfileWorkflow
 from x07_workflow_adapter import WorkflowAdapter
+class DuplicateKeyError(ValueError): pass
+
+def reject_constant(value):
+    raise ValueError('invalid JSON constant')
+
+def check_depth(raw):
+    depth=0;quoted=False;escaped=False
+    for char in raw:
+        if quoted:
+            if escaped: escaped=False
+            elif char=='\\\\': escaped=True
+            elif char=='"': quoted=False
+        elif char=='"': quoted=True
+        elif char in '{[':
+            depth+=1
+            if depth>32: raise OverflowError('JSON nesting limit')
+        elif char in '}]': depth-=1
+
 def unique_pairs(pairs):
     result={}
     for key,value in pairs:
-        if key in result: raise ValueError('ambiguous duplicate JSON key')
+        if key in result: raise DuplicateKeyError('ambiguous duplicate JSON key')
         result[key]=value
     return result
-try: request=json.loads(sys.stdin.buffer.read().decode('utf-8',errors='strict'),object_pairs_hook=unique_pairs)
+try:
+    raw=sys.stdin.buffer.read().decode('utf-8',errors='strict')
+    check_depth(raw)
+    request=json.loads(raw,object_pairs_hook=unique_pairs,parse_constant=reject_constant)
 except UnicodeDecodeError:
     print(json.dumps({'ok':False,'error':{'message':'Invalid UTF-8 request.','code':'BRIDGE_UTF8'}}));sys.exit(0)
-except ValueError:
+except DuplicateKeyError:
     print(json.dumps({'ok':False,'error':{'message':'Ambiguous duplicate or invalid JSON request.','code':'BRIDGE_DUPLICATE_JSON_KEY'}}));sys.exit(0)
+except (OverflowError,RecursionError):
+    print(json.dumps({'ok':False,'error':{'message':'JSON nesting limit exceeded.','code':'BRIDGE_JSON_DEPTH'}}));sys.exit(0)
+except ValueError:
+    print(json.dumps({'ok':False,'error':{'message':'Invalid JSON request.','code':'BRIDGE_MALFORMED_JSON'}}));sys.exit(0)
 protocol=request.get('protocol_fault')
+if protocol=='json_grammar': print(request['fixture']['reply_json']);sys.exit(0)
 if protocol=='invalid_utf8':
     fixture=request['fixture']
     invalid=bytes(fixture['utf8_bytes'])
@@ -99,6 +125,17 @@ const protocolStats = []
 // JSON.parse validates grammar first. This second bounded walk retains member
 // names that JSON.parse would otherwise overwrite, including escaped aliases.
 function strictJSON(text) {
+  let depth = 0, quoted = false, escaped = false
+  for (const char of text) {
+    if (quoted) {
+      if (escaped) escaped = false
+      else if (char === '\\') escaped = true
+      else if (char === '"') quoted = false
+    } else if (char === '"') quoted = true
+    else if (char === '{' || char === '[') {
+      if (++depth > 32) { const error = new Error('JSON nesting limit exceeded.'); error.code = 'BRIDGE_JSON_DEPTH'; throw error }
+    } else if (char === '}' || char === ']') depth--
+  }
   const value = JSON.parse(text); let index = 0
   const whitespace = () => { while (/\s/.test(text[index] || '') && index < text.length) index++ }
   const string = () => {
@@ -194,6 +231,10 @@ function rpc(bound, op, context, value, signal, fault = null, protocolFault = nu
       const token = JSON.stringify(fixture.duplicate_request_key) + ':'
       request = request.replace(token, token + 'null,' + token)
     }
+    if (fixture.request_json_value !== undefined) {
+      request = request.slice(0, -1) + ',"grammar":' + fixture.request_json_value + '}'
+    }
+    if (fixture.trailing_json) request += ' {}'
     let requestBytes = Buffer.from(request, 'utf8')
     if (fixture.invalid_request_utf8) {
       const invalid = Buffer.from(fixture.utf8_bytes)

@@ -1,6 +1,8 @@
 """Five synthetic drawings through X07's isolated Python primitives, never LIVE."""
 import argparse
 import json
+import hashlib
+import subprocess
 from pathlib import Path
 import sys
 import tempfile
@@ -12,7 +14,21 @@ from x07_profile_compatibility import check_compatibility
 from x07_role_selection import select_modules
 
 
+SOURCE_FILES = ['tools/xbench/x07_synthetic_journey.py', 'server/solar_drawing_roles.py',
+                'server/x07_customer_profile_store.py', 'server/x07_profile_compatibility.py',
+                'server/x07_role_selection.py']
+
+
+def source_snapshot(root):
+    commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True, timeout=20).strip()
+    dirty = bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=root, timeout=20).strip())
+    files = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in SOURCE_FILES}
+    return {'source_sha': commit, 'source_dirty': dirty, 'files': files}
+
+
 def run(database):
+    root = Path(__file__).resolve().parents[2]
+    source = source_snapshot(root)
     if Path(database).exists():
         raise ValueError('synthetic journey requires a new database')
     store = CustomerProfileStore(database)
@@ -75,7 +91,9 @@ def run(database):
     checked(7, new_version=edited['version'] == 2, stable_profile_id=edited['profile_id'] == profile_a['profile_id'],
             old_project_retains_version=old['version'] == 1 and old['roles'] == profile_a['roles'],
             new_project_pins_latest=new['version'] == 2)
-    return {'schema': 'leaf.x07.synthetic-journey.v1', 'proof_mode': 'synthetic_offline',
+    if source_snapshot(root) != source:
+        raise ValueError('source changed during synthetic journey')
+    return {'schema': 'leaf.x07.synthetic-journey.v1', 'proof_mode': 'synthetic_offline', **source,
             'drawings': 5, 'customers': 2, 'steps': steps,
             'limits': ['No live routes, authentication, UI interactions, real drawings or staging readiness checked.',
                        'Anonymous aliases and design-copy windows are explicit injected inputs.']}
