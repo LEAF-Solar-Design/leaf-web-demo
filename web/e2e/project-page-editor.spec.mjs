@@ -12,7 +12,6 @@ test.use({ video: 'off', trace: 'off', reducedMotion: 'reduce' })
 // These fixture journeys retain custom failure diagnostics.
 const projectClickDiagnostics = new WeakMap()
 const traceTest = test.extend({
-  trace: 'off',
   s03Diagnostics: [async ({ page }, use, testInfo) => {
     const started = Date.now()
     const timeline = []
