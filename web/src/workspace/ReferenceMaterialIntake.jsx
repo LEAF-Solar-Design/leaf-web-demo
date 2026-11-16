@@ -29,6 +29,26 @@ function ReferenceSession({ projectId, orgId, scope, onRunArlo }) {
   const [editor, setEditor] = useState(null)
   const [constraintError, setConstraintError] = useState('')
   const constraintErrorId = useId()
+  const constraintForm = useRef(null)
+  useEffect(() => {
+    const form = constraintForm.current
+    if (!form) return
+    // Native beforeinput runs before type=number can silently discard a comma.
+    const rejectComma = event => {
+      const path = event.target.dataset?.constraintPath
+      const text = event.type === 'paste' ? event.clipboardData?.getData('text') : event.data
+      if (path && typeof text === 'string' && text.includes(',')) {
+        event.preventDefault()
+        setConstraintError(`${path} uses a period for decimals. Commas are not accepted; enter the value again.`)
+      }
+    }
+    form.addEventListener('beforeinput', rejectComma)
+    form.addEventListener('paste', rejectComma)
+    return () => {
+      form.removeEventListener('beforeinput', rejectComma)
+      form.removeEventListener('paste', rejectComma)
+    }
+  }, [editor?.materialId, editor?.inputId])
   const rejectedSaveFocus = useRef(null)
   useLayoutEffect(() => {
     if (arlo?.running) return
@@ -286,9 +306,9 @@ function ReferenceSession({ projectId, orgId, scope, onRunArlo }) {
           <button type="button" disabled={Boolean(arlo?.running) || !activeInputs[row.material_id].parent_id}
             onClick={() => void saveConstraints(row, true)}>Restore original</button>
         </>}
-        {editor?.materialId === row.material_id && <form aria-label="ARLO constraints" onSubmit={event => { event.preventDefault(); void saveConstraints(row) }}>
+        {editor?.materialId === row.material_id && <form ref={constraintForm} aria-label="ARLO constraints" onSubmit={event => { event.preventDefault(); void saveConstraints(row) }}>
           {Object.entries(editor.fields).map(([path, value]) => <label key={path}>{path}
-            <input type="number" step="any" value={value} disabled={Boolean(arlo?.running)}
+            <input type="number" step="any" data-constraint-path={path} value={value} disabled={Boolean(arlo?.running)}
               aria-describedby={constraintError ? constraintErrorId : undefined}
               aria-invalid={constraintError && (constraintError.startsWith(`${path} `)
                 || !value.trim() || !Number.isFinite(Number(value))) ? true : undefined}

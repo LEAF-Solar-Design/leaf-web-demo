@@ -11,6 +11,7 @@ _spec = importlib.util.spec_from_file_location(
 policy = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(policy)
 BASE = "a" * 40
+HEAD = "b" * 40
 SOURCES = {"web/src/view.jsx": "export const View = () => null",
            "web/src/plain.js": "export const plain = 1"}
 
@@ -66,6 +67,16 @@ def test_config_only_suppresses_triggers_for_verified_related_execution():
     ({"LEAF_VITEST_LAST_GREEN_MAIN": BASE}, BASE + "..HEAD", "--is-ancestor"),
     ({"TRUSTED_SHA": "b" * 40, "LEAF_VITEST_LAST_GREEN_MAIN": BASE,
       "CODEBUILD_WEBHOOK_HEAD_REF": "refs/heads/main"}, BASE + "..HEAD", "--is-ancestor"),
+    ({"LEAF_CI_BASE_SHA": BASE, "TRUSTED_SHA": HEAD,
+      "LEAF_VITEST_PR_BASE": HEAD, "CODEBUILD_WEBHOOK_EVENT": "PULL_REQUEST_UPDATED"},
+     BASE + "...HEAD", "--all"),
+    ({"LEAF_CI_LAST_JUDGED_SHA": BASE, "LEAF_VITEST_LAST_GREEN_MAIN": HEAD,
+      "LEAF_CI_BASE_SHA": HEAD, "CODEBUILD_WEBHOOK_EVENT": "PUSH",
+      "CODEBUILD_WEBHOOK_HEAD_REF": "refs/heads/main"}, BASE + "..HEAD", "--is-ancestor"),
+    ({"LEAF_VITEST_LAST_GREEN_MAIN": BASE, "LEAF_CI_BASE_SHA": HEAD,
+      "CODEBUILD_WEBHOOK_EVENT": "PUSH"}, BASE + "..HEAD", "--is-ancestor"),
+    ({"LEAF_CI_BASE_SHA": BASE, "CODEBUILD_WEBHOOK_EVENT": "PUSH",
+      "CODEBUILD_WEBHOOK_HEAD_REF": "refs/heads/main"}, BASE + "..HEAD", "--is-ancestor"),
 ])
 def test_explicit_comparison_and_inventory(tmp_path, env, revision, ancestry):
     target = tmp_path / "web/src/view.jsx"
@@ -78,7 +89,7 @@ def test_explicit_comparison_and_inventory(tmp_path, env, revision, ancestry):
         assert kwargs["timeout"] == 30 and kwargs["cwd"] == tmp_path
         assert "shell" not in kwargs
         if "rev-parse" in argv:
-            out = BASE + "\n"
+            out = (HEAD if "HEAD^{commit}" in argv else BASE) + "\n"
         elif "merge-base" in argv:
             out = "c" * 40 + "\n" if "--all" in argv else ""
         elif "diff" in argv:
@@ -90,11 +101,72 @@ def test_explicit_comparison_and_inventory(tmp_path, env, revision, ancestry):
 
     decision = policy.collect(tmp_path, env, run=git)
     assert decision["mode"] == "related"
+    assert decision["base"] == BASE
     assert decision["inputs"] == ["src/view.jsx"]
     assert any(ancestry in call for call in calls)
     diff = next(call for call in calls if "diff" in call)
     assert revision in diff and "-z" in diff and "--no-renames" in diff
     assert "--changed" not in diff
+
+
+@pytest.mark.parametrize("invalid", ["", "origin/main", "a" * 39, "g" * 40])
+@pytest.mark.parametrize("env,key", [
+    ({"CODEBUILD_WEBHOOK_EVENT": "PULL_REQUEST_UPDATED", "TRUSTED_SHA": BASE,
+      "LEAF_VITEST_PR_BASE": BASE}, "LEAF_CI_BASE_SHA"),
+    ({"CODEBUILD_WEBHOOK_EVENT": "PUSH", "LEAF_VITEST_LAST_GREEN_MAIN": BASE,
+      "LEAF_CI_BASE_SHA": BASE}, "LEAF_CI_LAST_JUDGED_SHA"),
+    ({"CODEBUILD_WEBHOOK_EVENT": "PUSH", "LEAF_CI_BASE_SHA": BASE},
+     "LEAF_VITEST_LAST_GREEN_MAIN"),
+    ({"CODEBUILD_WEBHOOK_EVENT": "PUSH"}, "LEAF_CI_BASE_SHA"),
+])
+def test_invalid_preferred_base_does_not_select_lower_priority(tmp_path, invalid, env, key):
+    def forbidden(*a, **kw):
+        pytest.fail("invalid preferred base must not invoke git")
+    decision = policy.collect(tmp_path, {**env, key: invalid}, run=forbidden)
+    assert decision["mode"] == "full" and decision["reason"] == "missing_base"
+
+
+@pytest.mark.parametrize("key", ["LEAF_CI_BASE_SHA", "LEAF_CI_LAST_JUDGED_SHA",
+                                 "LEAF_VITEST_LAST_GREEN_MAIN"])
+def test_main_self_base_falls_back_before_diff(tmp_path, key):
+    def git(argv, **kw):
+        assert "rev-parse" in argv
+        return SimpleNamespace(returncode=0, stdout=HEAD.upper() + "\n")
+    decision = policy.collect(tmp_path, {"CODEBUILD_WEBHOOK_EVENT": "PUSH", key: HEAD}, run=git)
+    assert decision["mode"] == "full" and decision["reason"] == "main_base_is_head"
+
+
+@pytest.mark.parametrize("event,key", [
+    ("PULL_REQUEST_UPDATED", "LEAF_CI_BASE_SHA"),
+    ("PUSH", "LEAF_CI_LAST_JUDGED_SHA"),
+    ("PUSH", "LEAF_CI_BASE_SHA"),
+])
+def test_unresolvable_preferred_base_falls_back(tmp_path, event, key):
+    def git(argv, **kw):
+        assert "rev-parse" in argv and BASE + "^{commit}" in argv
+        return SimpleNamespace(returncode=1, stdout="")
+    env = {"CODEBUILD_WEBHOOK_EVENT": event, key: BASE, "TRUSTED_SHA": HEAD}
+    if key == "LEAF_CI_LAST_JUDGED_SHA":
+        env["LEAF_VITEST_LAST_GREEN_MAIN"] = HEAD
+        env["LEAF_CI_BASE_SHA"] = HEAD
+    decision = policy.collect(tmp_path, env, run=git)
+    assert decision["mode"] == "full"
+    assert decision["reason"] == "comparison_or_inventory_unavailable"
+
+
+@pytest.mark.parametrize("failure", ["head", "ancestor"])
+def test_main_requires_resolved_head_and_ancestor(tmp_path, failure):
+    def git(argv, **kw):
+        if "rev-parse" in argv:
+            out = ("invalid" if failure == "head" else HEAD) if "HEAD^{commit}" in argv else BASE
+            return SimpleNamespace(returncode=0, stdout=out)
+        assert "merge-base" in argv and "--is-ancestor" in argv
+        assert failure == "ancestor"
+        return SimpleNamespace(returncode=1, stdout="")
+    decision = policy.collect(tmp_path, {"CODEBUILD_WEBHOOK_EVENT": "PUSH",
+                                        "LEAF_CI_LAST_JUDGED_SHA": BASE}, run=git)
+    assert decision["mode"] == "full"
+    assert decision["reason"] == "comparison_or_inventory_unavailable"
 
 
 @pytest.mark.parametrize("failure", ["rev-parse", "merge-base", "diff", "ls-files", "timeout", "ambiguous"])
@@ -123,7 +195,7 @@ def test_unavailable_git_inputs_fall_back(tmp_path, failure):
 def test_local_diff_deleted_and_unsafe_paths(tmp_path, path, reason):
     def git(argv, **kw):
         if "rev-parse" in argv:
-            out = BASE
+            out = HEAD if "HEAD^{commit}" in argv else BASE
         elif "merge-base" in argv:
             out = ""
         else:
