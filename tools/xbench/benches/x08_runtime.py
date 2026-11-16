@@ -11,6 +11,7 @@ import re
 import socket
 import subprocess
 import time
+from types import MappingProxyType
 from uuid import uuid4
 
 from benches.x08_oracle import _modules, choose_window
@@ -235,12 +236,15 @@ def navigate(page, name, version_id, *, expected_drawing_key):
 
 
 class LiveRuntime:
-    def __init__(self, stack, page, canvas, oracle, base, *, headed, expected_drawing_key):
+    def __init__(self, stack, page, canvas, oracle, base, *, headed, expected_drawing_key,
+                 expected_run_binding=None, clock=time.monotonic):
         self._stack, self._closed = stack, False
         self.page = TrackedPage(page)
         self.canvas = TrackedCanvas(canvas, self.page)
         self._oracle, self._base, self._headed = oracle, base, headed
         self._expected_drawing_key = expected_drawing_key
+        self.expected_run_binding = MappingProxyType(dict(expected_run_binding or {}))
+        self._clock = clock
         self.expected_module_handles = [row['handle'] for row in oracle['modules']]
         self.expected_window_handles = list(oracle['window']['expected_handles'])
 
@@ -295,22 +299,61 @@ class LiveRuntime:
                 self.page.mouse.up(button='left')
         return drag
 
-    def ack_control(self, index):
-        self.page.wait_for_function("""() => !Array.from(
+    def ack_control(self, index, *, preparation_timeout_s=20):
+        """Prepare without submitting; one cooperative budget covers all UI work."""
+        if (type(preparation_timeout_s) not in (int, float) or
+                not isfinite(preparation_timeout_s) or preparation_timeout_s <= 0):
+            raise ValueError('Invalid preparation budget')
+        previous = None
+        deadline = None
+
+        def remaining():
+            nonlocal previous
+            value = self._clock()
+            if (type(value) not in (int, float) or not isfinite(value) or
+                    (previous is not None and value < previous)):
+                raise ValueError('Invalid preparation clock')
+            previous = value
+            if deadline is None:
+                return value
+            left = deadline - value
+            if not isfinite(left) or left <= 0:
+                raise TimeoutError('Preparation deadline')
+            return left * 1000
+
+        initial = remaining()
+        deadline = initial + preparation_timeout_s
+        if not isfinite(deadline) or deadline <= initial:
+            raise ValueError('Invalid preparation deadline')
+
+        def call(callback, *args, timed=False, **kwargs):
+            left = remaining()
+            if timed:
+                kwargs['timeout'] = left
+            result = callback(*args, **kwargs)
+            remaining()
+            return result
+
+        call(self.page.wait_for_function, """() => !Array.from(
             document.querySelectorAll('.strip-running .verb')).some(
-            el => /queued|running/i.test(el.textContent))""", timeout=20000)
-        self.page.get_by_test_id('command-bar').fill('/count-by-layer', timeout=20000)
-        commands = self.page.get_by_role('listbox', name='Tool commands', exact=True)
-        commands.wait_for(state='visible', timeout=20000)
-        commands.get_by_role('option').filter(
-            has_text=re.compile(r'(^|\s)/count-by-layer(?:\s|$)')).first.click(timeout=20000)
-        control = self.page.get_by_role('button', name='Run count-by-layer', exact=True)
-        control.wait_for(state='visible', timeout=20000)
-        deadline = time.monotonic() + 20
-        while not control.is_enabled():
-            if time.monotonic() >= deadline:
-                raise ValueError('Run control unavailable')
-            self.page.wait_for_timeout(100)
+            el => /queued|running/i.test(el.textContent))""", timed=True)
+        bar = call(self.page.get_by_test_id, 'command-bar')
+        call(bar.fill, '/count-by-layer', timed=True)
+        commands = call(self.page.get_by_role, 'listbox', name='Tool commands', exact=True)
+        call(commands.wait_for, state='visible', timed=True)
+        options = call(commands.get_by_role, 'option')
+        filtered = call(options.filter,
+                        has_text=re.compile(r'(^|\s)/count-by-layer(?:\s|$)'))
+        option = call(lambda: filtered.first)
+        call(option.click, timed=True)
+        control = call(self.page.get_by_role, 'button', name='Run count-by-layer', exact=True)
+        call(control.wait_for, state='visible', timed=True)
+        while not (call(control.is_visible, timed=True) and call(control.is_enabled, timed=True)):
+            before = remaining()
+            call(self.page.wait_for_timeout, min(100, before))
+            if remaining() >= before:
+                raise TimeoutError('Preparation clock stalled')
+        remaining()
         return control
 
     def frame_cleanup(self):
@@ -375,7 +418,10 @@ def make_live_runtime(ctx):
         canvas = navigate(page, name, adopted['version_id'],
                           expected_drawing_key=expected_drawing_key)
         return LiveRuntime(stack, page, canvas, oracle, STAGING_ORIGIN, headed=True,
-                           expected_drawing_key=expected_drawing_key)
+                           expected_drawing_key=expected_drawing_key,
+                           expected_run_binding=dict(org_id=project['org_id'],
+                               project_id=project['project_id'], drawing_id=adopted['drawing_id'],
+                               version_id=adopted['version_id'], tool='count-by-layer'))
     except BaseException as exc:
         try:
             stack.close()

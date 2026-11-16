@@ -257,6 +257,21 @@ def orchestrate(runtime, *, expected_source_sha, expected_module_handles,
         response = observer.responses[0]
         _require(response.request is observer.requests[0] and
                  all(response is not previous for previous in responses))
+        # The expected scope comes only from acquisition, never from traffic.
+        binding = getattr(runtime, 'expected_run_binding', None)
+        _require(binding is not None and all(
+            isinstance(binding.get(key), str) and binding[key].strip()
+            for key in ('org_id', 'project_id', 'drawing_id', 'version_id', 'tool')))
+        _require(binding['tool'] == 'count-by-layer')
+        request = observer.requests[0]
+        payload = call(lambda: request.post_data_json)
+        _require(isinstance(payload, dict) and payload.get('tool') == binding['tool'] and
+                 payload.get('dwg') == binding['version_id'] and
+                 isinstance(payload.get('params'), dict) and
+                 payload['params'].get('drawing_id') == binding['drawing_id'])
+        # Read only these nonsecret scope headers; never enumerate headers.
+        _require(call(request.header_value, 'x-org-id') == binding['org_id'] and
+                 call(request.header_value, 'x-project-id') == binding['project_id'])
         body = call(response.json)
         checked = validate_ack(row, response_status=response.status, response_body=body)
         _require(all(row.get(key) == value for key, value in checked.items()) and
@@ -344,6 +359,9 @@ def orchestrate(runtime, *, expected_source_sha, expected_module_handles,
                                     duration_ms=10000,
                                     retain=lambda value: raw.update(frame=value))
                 except BaseException as exc:
+                    partial = getattr(exc, 'x08_frame_snapshot', None)
+                    if isinstance(partial, dict):
+                        raw['frame'] = deepcopy(partial)
                     failure = exc
                 finally:
                     # Observe cleanup even when the helper failed or ran out of time.

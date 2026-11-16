@@ -446,7 +446,10 @@ def test_ack_prepares_ui_and_returns_final_control_without_running():
         def click(self, **kwargs):
             events.append(('pick',))
 
-        def is_enabled(self):
+        def is_enabled(self, **kwargs):
+            return True
+
+        def is_visible(self, **kwargs):
             return True
 
     bar, commands, option, final = Control(), Control(), Control(), Control()
@@ -737,9 +740,103 @@ def test_successful_factory_uses_supported_transport_and_owns_until_close(tmp_pa
     assert events == ['session', 'project', 'upload', 'ready', 'adopt', 'navigate']
     assert value.expected_module_handles == ['native']
     assert value._expected_drawing_key == PROJECT_KEY
+    assert dict(value.expected_run_binding) == dict(org_id=ORG_ID, project_id=PROJECT_ID,
+        drawing_id=DRAWING_ID, version_id=VERSION_ID, tool='count-by-layer')
+    with pytest.raises(TypeError):
+        value.expected_run_binding['project_id'] = 'foreign'
     canvas.evaluate = lambda expression: dict(drawingKey=PROJECT_KEY)
     assert value.geometry_snapshot() == dict(drawingKey=PROJECT_KEY)
     value.close()
     value.close()
     assert events[-2:] == ['project-delete', 'browser-close']
     assert page.unrelated.disposed == 0
+
+
+@pytest.mark.parametrize('mode', ['cumulative', 'ready', 'disabled', 'hidden', 'late', 'stalled'])
+def test_ack_preparation_uses_one_budget_and_returns_only_ready_control(mode):
+    value, page, _ = runtime()
+    native = [0.0]
+    value._clock = lambda: native[0]
+    waits, clicks = [], []
+    cost = 8 if mode == 'cumulative' else 2
+
+    def consume(timeout):
+        assert 0 < timeout <= 20000
+        waits.append(timeout)
+        native[0] += min(cost, timeout / 1000)
+        if timeout / 1000 <= cost:
+            raise TimeoutError('synthetic preparation timeout')
+
+    class Control:
+        @property
+        def first(self):
+            return self
+
+        def fill(self, text, *, timeout):
+            assert text == '/count-by-layer'
+            consume(timeout)
+
+        def wait_for(self, *, state, timeout):
+            assert state == 'visible'
+            consume(timeout)
+
+        def get_by_role(self, role):
+            assert role == 'option'
+            return self
+
+        def filter(self, **kwargs):
+            return self
+
+        def click(self, *, timeout):
+            clicks.append('pick-command')
+            consume(timeout)
+
+        def is_visible(self, *, timeout):
+            assert timeout <= (20 - native[0]) * 1000
+            return mode != 'hidden'
+
+        def is_enabled(self, *, timeout):
+            assert timeout <= (20 - native[0]) * 1000
+            if mode == 'late':
+                native[0] = 20
+                return True
+            return mode not in ('disabled', 'stalled')
+
+    control = Control()
+    page.wait_for_function = lambda expression, *, timeout: consume(timeout)
+    page.get_by_test_id = lambda name: control
+    page.get_by_role = lambda *args, **kwargs: control
+    page.wait_for_timeout = lambda delay: native.__setitem__(
+        0, native[0] + (0 if mode == 'stalled' else delay / 1000))
+    if mode == 'ready':
+        assert value.ack_control(0) is control
+        assert native[0] == 10
+    else:
+        with pytest.raises(TimeoutError):
+            value.ack_control(0)
+        assert native[0] <= 20
+    if mode == 'cumulative':
+        assert waits == [20000, 12000, 4000]
+        assert clicks == []
+    else:
+        assert clicks == ['pick-command']
+    assert page.mouse.events == []  # No Run click, hence no submitted jobs.
+
+
+@pytest.mark.parametrize('bad', [-1, True, float('nan'), float('inf'), 20])
+def test_ack_preparation_clock_failure_refuses_before_next_ui_callback(bad):
+    value, page, _ = runtime()
+    native = [0]
+    value._clock = lambda: native[0]
+    calls = []
+
+    def settled(expression, *, timeout):
+        calls.append(timeout)
+        native[0] = bad
+
+    page.wait_for_function = settled
+    page.get_by_test_id = lambda name: pytest.fail('expired preparation continued')
+    with pytest.raises(TimeoutError if bad == 20 else ValueError):
+        value.ack_control(0)
+    assert calls == [20000]
+    assert page.mouse.events == []

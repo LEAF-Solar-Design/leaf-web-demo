@@ -19,6 +19,9 @@ from xbench_core import BenchContext, Step
 
 SHA = 'a' * 40
 HANDLES = ['module-' + str(index) for index in range(500)]
+BINDING = dict(org_id='synthetic-org', project_id='synthetic-project',
+               drawing_id='synthetic-drawing', version_id='synthetic-version',
+               tool='count-by-layer')
 
 
 class Page:
@@ -78,6 +81,8 @@ class Runtime:
         self.frame_mutation = lambda raw: None
         self.ack_mode = None
         self.cleanup = dict(recorder_removed=True, element_disposed=True, mouse_released=True)
+        self.expected_run_binding = dict(BINDING)
+        self.request_mutation = lambda payload, headers: None
 
     def clock(self):
         return self.now
@@ -158,7 +163,17 @@ class Runtime:
         if self.ack_mode == 'job-reuse':
             job = str(UUID(int=1))
         body = dict(status='submitted', job_id=job)
-        request = SimpleNamespace(method='POST', url='https://synthetic.invalid/api/run')
+        payload = dict(tool=BINDING['tool'], dwg=BINDING['version_id'],
+                       params=dict(drawing_id=BINDING['drawing_id']))
+        headers = {'x-org-id': BINDING['org_id'], 'x-project-id': BINDING['project_id']}
+        self.request_mutation(payload, headers)
+
+        def header_value(name):
+            assert name in ('x-org-id', 'x-project-id')
+            return headers.get(name)
+
+        request = SimpleNamespace(method='POST', url='https://synthetic.invalid/api/run',
+                                  post_data_json=payload, header_value=header_value)
         response = SimpleNamespace(request=request, url=request.url, status=202, json=lambda: body)
         if self.ack_mode != 'missing':
             page.emit('request', request)
@@ -234,6 +249,72 @@ def test_full_synthetic_cold_warm_collection_and_no_mutation():
     assert set(r['job_id'] for r in report['cold']['ack']).isdisjoint(
         r['job_id'] for r in report['samples']['job_ack'])
     assert all(original == saved for original, saved in runtime.outputs)
+    assert_released(runtime)
+
+
+@pytest.mark.parametrize('fault', ['org', 'project', 'version', 'drawing', 'tool',
+                                  'params', 'payload', 'missing-header', 'missing-binding',
+                                  'missing-body-metadata', 'missing-header-reader'])
+def test_ack_rejects_foreign_or_missing_adopted_request_binding(fault):
+    runtime = Runtime()
+
+    def mutate(payload, headers):
+        if fault in ('org', 'project'):
+            headers['x-' + fault + '-id'] = 'FOREIGN-PRIVATE-ID'
+        elif fault == 'version':
+            payload['dwg'] = 'STALE-PRIVATE-ID'
+        elif fault == 'drawing':
+            payload['params']['drawing_id'] = 'FOREIGN-PRIVATE-ID'
+        elif fault == 'tool':
+            payload['tool'] = 'other-tool'
+        elif fault == 'params':
+            payload['params'] = {}
+        elif fault == 'payload':
+            payload.clear()
+        elif fault == 'missing-header':
+            headers.clear()
+
+    runtime.request_mutation = mutate
+    original_emit = runtime.page.emit
+
+    def emit(event, request):
+        if event == 'request':
+            if fault == 'missing-body-metadata':
+                del request.post_data_json
+            elif fault == 'missing-header-reader':
+                del request.header_value
+        original_emit(event, request)
+
+    runtime.page.emit = emit
+    if fault == 'missing-binding':
+        del runtime.expected_run_binding
+    report = collect(runtime)
+    assert verdict(report, 4) == 'UNREADABLE'
+    assert report['samples']['job_ack'] == []
+    assert len(report['warm']['ack']) == 1  # Preserve raw, even a fresh painted UUID.
+    assert len(report['warm']['valid_single']) == 20
+    assert 'PRIVATE-ID' not in json.dumps(report)
+    assert_released(runtime)
+
+
+def test_cancelled_frame_partial_report_keeps_type_only_raw_snapshot():
+    runtime = Runtime()
+    original = runtime.frames
+
+    def cancel(*args, **kwargs):
+        snapshot = original(*args, **kwargs)
+        snapshot['complete'] = False
+        snapshot['error'] = 'KeyboardInterrupt'
+        exc = KeyboardInterrupt('SECRET-SENTINEL')
+        exc.x08_frame_snapshot = snapshot
+        raise exc
+
+    with pytest.raises(KeyboardInterrupt) as caught:
+        collect(runtime, frame_collector=cancel)
+    report = caught.value.x08_partial_report
+    assert report['cold']['frame']['error'] == 'KeyboardInterrupt'
+    assert report['cold']['frame']['frame_deltas_ms'] == [16] * 600
+    assert 'SECRET-SENTINEL' not in json.dumps(report)
     assert_released(runtime)
 
 
