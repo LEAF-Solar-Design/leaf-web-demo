@@ -722,13 +722,13 @@ class FixtureTests(unittest.TestCase):
         source.read.side_effect = lambda count: b"x" * count
         manager = MagicMock()
         manager.__enter__.return_value = source
-        with patch.object(x10.os, "open", return_value=123), \
+        with patch.object(x10.os, "open", return_value=123), patch.object(x10.os, "close"), \
                 patch.object(x10.os, "fdopen", return_value=manager), \
                 patch.object(x10.os, "fstat", return_value=SimpleNamespace(st_mode=stat.S_IFREG)):
             self.assert_binding_refusal()
         source.read.assert_called_once_with(declared + 1)
         source.read.reset_mock()
-        with patch.object(x10.os, "open", return_value=123), \
+        with patch.object(x10.os, "open", return_value=123), patch.object(x10.os, "close"), \
                 patch.object(x10.os, "fdopen", return_value=manager), \
                 patch.object(x10.os, "fstat", return_value=SimpleNamespace(st_mode=stat.S_IFIFO)):
             self.assert_binding_refusal()
@@ -748,7 +748,7 @@ class FixtureTests(unittest.TestCase):
         manager.__enter__.return_value = source
         observation = dict(**canonical_project(), fresh_project=True, imported_version_selected=True,
                            ground_option="Ground Physical unavailable")
-        with patch.object(x10.os, "open", return_value=123), \
+        with patch.object(x10.os, "open", return_value=123), patch.object(x10.os, "close"), \
                 patch.object(x10.os, "fdopen", return_value=manager), \
                 patch.object(x10.os, "fstat", side_effect=lambda fd: info["stat"]), \
                 patch.object(x10.zlib, "decompressobj") as decoder, self.assertRaises(ValueError):
@@ -983,7 +983,7 @@ class FixtureTests(unittest.TestCase):
                 else:
                     data = tiny_png() if mode == "json" else b"not a PNG"
                     surface.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(data)
-                failure = patch.object(Path, "write_text", side_effect=OSError("synthetic")) if mode == "json" else nullcontext()
+                failure = patch.object(x10, "_write_evidence_json", side_effect=OSError("synthetic")) if mode == "json" else nullcontext()
                 with failure:
                     with self.assertRaises((OSError, ValueError)):
                         x10._save(page, self.ctx, observation)
@@ -1002,19 +1002,19 @@ class FixtureTests(unittest.TestCase):
         saved = json.loads((old[0] / "x10-ui.json").read_text())
         self.assertEqual(saved["screenshot_bytes"], len(tiny_png()))
         self.assertEqual(saved["screenshot_sha256"], hashlib.sha256(tiny_png()).hexdigest())
-        write_text, rename = Path.write_text, Path.rename
+        write_json, rename = x10._write_evidence_json, Path.rename
         for phase in ("json-write", "rename"):
             for data in (tiny_png(raw=b"\x00\xff\x00\x00"), b"tampered bytes"):
                 with self.subTest(phase=phase, data=data):
                     def written(path, *args, **kwargs):
-                        result = write_text(path, *args, **kwargs)
+                        result = write_json(path, *args, **kwargs)
                         (path.parent / "x10-ground.png").write_bytes(data)
                         return result
                     def renamed(path, target):
                         result = rename(path, target)
                         (Path(target) / "x10-ground.png").write_bytes(data)
                         return result
-                    failure = (patch.object(Path, "write_text", written) if phase == "json-write"
+                    failure = (patch.object(x10, "_write_evidence_json", written) if phase == "json-write"
                                else patch.object(Path, "rename", renamed))
                     with failure, self.assertRaises(ValueError):
                         x10._save(page, self.ctx, observation)
@@ -1587,7 +1587,7 @@ class FixtureTests(unittest.TestCase):
         for replaced in (SimpleNamespace(st_mode=stat.S_IFDIR),
                          SimpleNamespace(st_mode=initial.st_mode, st_dev=initial.st_dev,
                              st_ino=initial.st_ino + 1, st_size=initial.st_size, st_mtime_ns=initial.st_mtime_ns)):
-            with patch.object(x10.os, "open", return_value=123), \
+            with patch.object(x10.os, "open", return_value=123), patch.object(x10.os, "close"), \
                     patch.object(x10.os, "fdopen", return_value=manager), \
                     patch.object(x10.os, "fstat", return_value=replaced), self.assertRaises(ValueError):
                 x10._valid_png(path)
@@ -1657,7 +1657,7 @@ class FixtureTests(unittest.TestCase):
     def test_rate_inputs_require_ascii_digits_before_browser(self):
         original = Path(next(row["path"] for row in self.ctx.manifest["fixtures"] if row["role"] == "rates")).read_bytes()
         for key in ("quantity", "unit_rate"):
-            for value in ("١", "１２", "1٢", "١.2", "1.２"):
+            for value in ("Ù¡", "ï¼‘ï¼’", "1Ù¢", "Ù¡.2", "1.ï¼’"):
                 with self.subTest(key=key, value=value):
                     item = {"quantity": "1.25", "unit_rate": "2.00", key: value}
                     with self.assertRaises(ValueError):
@@ -1731,6 +1731,190 @@ class FixtureTests(unittest.TestCase):
                     page.get_by_label.return_value.set_input_files.assert_not_called()
                     surface.screenshot.assert_not_called()
                 path.write_bytes(original)
+
+    def test_required_roles_are_unique_before_browser_entry(self):
+        self.assertEqual(x10.bindings(self.ctx)[3], Decimal("0.07"))
+        for role in x10.ROLES:
+            row = next(row for row in self.ctx.manifest["fixtures"] if row["role"] == role)
+            extra = dict(row, id="second-" + role)
+            self.ctx.manifest["fixtures"].append(extra)
+            self.ctx.fixtures.append(dict(extra, ok=True))
+            with self.subTest(role=role):
+                self.assert_binding_refusal()
+            self.ctx.manifest["fixtures"].pop()
+            self.ctx.fixtures.pop()
+        self.assertEqual(x10.bindings(self.ctx)[3], Decimal("0.07"))
+
+    def test_project_metadata_requires_get_and_wrong_methods_clear_proof(self):
+        for method in ("GET", "POST", "HEAD"):
+            observation = self.project_identity()
+            listener = x10._project_observer(self.ctx.base, observation)
+            self.complete_project(listener)
+            request = SimpleNamespace(method=method, url=self.ctx.base + "/api/projects/" + PROJECT)
+            listener(request)
+            self.assertIsNone(observation["project_binding"])
+            response = metadata_response(request, {"project": {"id": PROJECT}, "drawing_versions": []})
+            listener.response(response)
+            self.assertEqual(observation["project_binding"], PROJECT if method == "GET" else None)
+
+    def test_passive_identity_proof_cannot_come_from_cross_origin_urls(self):
+        for factory, request in ((x10._catalog_observer, self.catalog_request()),
+                                 (x10._project_observer, SimpleNamespace(method="GET",
+                                     url=self.ctx.base + "/api/projects/" + PROJECT))):
+            for origin in ("https://foreign.test", "http://example.test", "https://example.test:8444"):
+                with self.subTest(factory=factory.__name__, origin=origin):
+                    observation = {}
+                    listener = factory(self.ctx.base, observation)
+                    foreign = SimpleNamespace(method="GET", url=origin + request.url[len(self.ctx.base):])
+                    listener(foreign)
+                    listener.response(metadata_response(foreign, {"project": {"id": PROJECT}, "drawing_versions": []}))
+                    key = "catalog_binding" if factory is x10._catalog_observer else "project_binding"
+                    self.assertIsNone(observation[key])
+                    listener(request)
+                    listener.response(metadata_response(request, {"project": {"id": PROJECT}, "drawing_versions": []}))
+                    self.assertIsNotNone(observation[key])
+                    listener.response(metadata_response(request, {"project": {"id": PROJECT}}, url=foreign.url))
+                    self.assertIsNone(observation[key])
+
+    def test_evidence_destination_aliases_preserve_fixture_bytes(self):
+        root = self.ctx.out_dir
+        original_rows = [dict(row) for row in self.ctx.manifest["fixtures"]]
+        page = MagicMock()
+        fixture = Path(original_rows[0]["path"])
+        original = fixture.read_bytes()
+        self.ctx.out_dir = fixture
+        observation = dict(**canonical_project(), fresh_project=True)
+        with self.assertRaises(ValueError):
+            x10._save(page, self.ctx, observation)
+        self.assertEqual(fixture.read_bytes(), original)
+        self.ctx.out_dir = root
+        root.mkdir()
+        for name in ("x10-ground.png", "x10-ui.json"):
+            stage = root / (".x10-staging-alias-" + name)
+            stage.mkdir()
+            material = stage / name
+            material.write_bytes(original)
+            self.ctx.manifest["fixtures"][0]["path"] = str(material)
+            with patch.object(x10.tempfile, "mkdtemp", return_value=str(stage)), self.assertRaises(ValueError):
+                x10._save(page, self.ctx, observation)
+            self.assertEqual(material.read_bytes(), original)
+        self.ctx.manifest["fixtures"] = [dict(row) for row in original_rows]
+        stage = root / ".x10-staging-hardlink"
+        stage.mkdir()
+        png, record = stage / "x10-ground.png", stage / "x10-ui.json"
+        png.write_bytes(original)
+        record.hardlink_to(png)
+        with patch.object(x10.tempfile, "mkdtemp", return_value=str(stage)), self.assertRaises(ValueError):
+            x10._save(page, self.ctx, observation)
+        self.assertEqual(png.read_bytes(), original)
+        self.assertEqual(record.read_bytes(), original)
+        diagnostic = root / "x10-ui.json"
+        diagnostic.write_bytes(original)
+        self.ctx.manifest["fixtures"][0]["path"] = str(diagnostic)
+        x10._diagnostic(self.ctx, observation, "synthetic", OSError())
+        self.assertEqual(diagnostic.read_bytes(), original)
+        page.get_by_role.assert_not_called()
+        self.assertFalse(observation["evidence_saved"])
+
+    def test_evidence_flush_close_and_atomic_rename_faults_preserve_old_generations(self):
+        page = MagicMock()
+        page.get_by_role.return_value.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(tiny_png())
+        observation = dict(**canonical_project(), fresh_project=True, imported_version_selected=True,
+                           ground_option="Ground Physical unavailable")
+        x10._save(page, self.ctx, observation)
+        old = list(self.ctx.out_dir.iterdir())
+        real_open, real_rename = Path.open, Path.rename
+        for phase in ("flush", "close", "rename", "rename-after"):
+            class Writer:
+                def __init__(self, stream):
+                    self.stream = stream
+                def __enter__(self):
+                    return self
+                def write(self, value):
+                    return self.stream.write(value)
+                def flush(self):
+                    if phase == "flush":
+                        raise OSError("synthetic flush")
+                    self.stream.flush()
+                def __exit__(self, *args):
+                    self.stream.close()
+                    if phase == "close":
+                        raise OSError("synthetic close")
+            def open_file(path, *args, **kwargs):
+                stream = real_open(path, *args, **kwargs)
+                return Writer(stream) if path.name == "x10-ui.json" and args and args[0] == "w" else stream
+            def rename(path, target):
+                if phase == "rename-after":
+                    real_rename(path, target)
+                raise OSError("synthetic replace")
+            with self.subTest(phase=phase), patch.object(Path, "open", open_file), \
+                    (patch.object(Path, "rename", rename) if phase.startswith("rename") else nullcontext()), \
+                    self.assertRaises(OSError):
+                x10._save(page, self.ctx, observation)
+            self.assertEqual(list(self.ctx.out_dir.iterdir()), old)
+            self.assertFalse(observation["evidence_saved"])
+            self.assertNotIn("evidence_path", observation)
+            self.assertEqual(aggregate(x10.classify(observation)), "UNREADABLE")
+
+    def test_binary_descriptors_close_once_on_success_refusal_and_read_errors(self):
+        real_open, real_fdopen, real_close = x10.os.open, x10.os.fdopen, x10.os.close
+        original = Path(next(row["path"] for row in self.ctx.manifest["fixtures"] if row["role"] == "oracle")).read_bytes()
+        for operation in ("fixtures", "png"):
+            for fault in ("none", "parse", "read", "factory"):
+                self.replace_fixture("oracle", b"invalid JSON" if operation == "fixtures" and fault == "parse" else original)
+                events, streams = [], []
+                def opened(*args, **kwargs):
+                    fd = real_open(*args, **kwargs)
+                    events.append(("open", fd))
+                    return fd
+                def closed(fd):
+                    events.append(("close", fd))
+                    real_close(fd)
+                class Stream:
+                    def __init__(self, stream):
+                        self.stream, self.closes = stream, 0
+                    def __enter__(self):
+                        return self
+                    def fileno(self):
+                        return self.stream.fileno()
+                    def read(self, count):
+                        if fault == "read":
+                            raise OSError("synthetic read")
+                        return self.stream.read(count)
+                    def __exit__(self, *args):
+                        self.closes += 1
+                        self.stream.close()
+                def fdopened(*args, **kwargs):
+                    self.assertIs(kwargs["closefd"], False)
+                    if fault == "factory":
+                        raise OSError("synthetic factory")
+                    stream = Stream(real_fdopen(*args, **kwargs))
+                    streams.append(stream)
+                    return stream
+                page = MagicMock()
+                data = tiny_png(compressed=b"bad zlib") if fault == "parse" else tiny_png()
+                page.get_by_role.return_value.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(data)
+                observation = dict(**canonical_project(), fresh_project=True)
+                old = list(self.ctx.out_dir.glob("x10-evidence-*"))
+                def execute():
+                    return x10.bindings(self.ctx) if operation == "fixtures" else x10._save(page, self.ctx, observation)
+                with self.subTest(operation=operation, fault=fault), patch.object(x10.os, "open", opened), \
+                        patch.object(x10.os, "fdopen", fdopened), patch.object(x10.os, "close", closed):
+                    if fault == "none":
+                        execute()
+                    else:
+                        with self.assertRaises((OSError, ValueError)):
+                            execute()
+                self.assertTrue(events)
+                self.assertEqual(len(events) % 2, 0)
+                for index in range(0, len(events), 2):
+                    self.assertEqual(events[index + 1], ("close", events[index][1]))
+                    with self.assertRaises(OSError):
+                        x10.os.fstat(events[index][1])
+                self.assertTrue(all(stream.closes == 1 and stream.stream.closed for stream in streams))
+                if operation == "png" and fault != "none":
+                    self.assertFalse(observation["evidence_saved"])
+                    self.assertEqual(list(self.ctx.out_dir.glob("x10-evidence-*")), old)
 
 
 if __name__ == "__main__":

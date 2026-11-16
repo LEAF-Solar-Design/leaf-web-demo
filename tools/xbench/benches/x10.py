@@ -13,6 +13,7 @@ import json
 import os
 import stat
 from collections.abc import Mapping
+from contextlib import contextmanager
 from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from pathlib import Path
 import re
@@ -161,6 +162,9 @@ def bindings(ctx):
 
     fixtures = unique_rows(ctx.manifest.get("fixtures"), manifest=True)
     verified = unique_rows(ctx.fixtures)
+    for role in ROLES:
+        if sum(row["role"] == role for row in fixtures.values()) != 1:
+            raise ValueError("missing or ambiguous fixture role: " + role)
     bound, json_bytes, fingerprints = {}, {}, {}
     for role, identity in mapping.items():
         row = fixtures.get(identity)
@@ -176,9 +180,7 @@ def bindings(ctx):
         data = bytearray() if role in ("oracle", "rates") else None
         if not stat.S_ISREG(bound[role].lstat().st_mode):
             raise ValueError("fixture is not a regular file: " + role)
-        descriptor = os.open(bound[role], os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
-                             | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
-        with os.fdopen(descriptor, "rb") as source:
+        with _binary_input(bound[role]) as source:
             opened = os.fstat(source.fileno())
             if not stat.S_ISREG(opened.st_mode):
                 raise ValueError("opened fixture is not a regular file: " + role)
@@ -224,6 +226,17 @@ def _file_fingerprint(info):
     return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
 
 
+@contextmanager
+def _binary_input(path):
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+                         | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+    try:
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            yield source
+    finally:
+        os.close(descriptor)
+
+
 def _verify_primary_receipt(ctx, config, bound):
     identity = config["fixtures"]["drawing"]
     rows = [row for row in ctx.manifest["fixtures"] if row.get("id") == identity]
@@ -237,10 +250,8 @@ def _verify_primary_receipt(ctx, config, bound):
             or type(row.get("bytes")) is not int or row["bytes"] < 0):
         raise ValueError("invalid primary drawing receipt")
     initial = _file_fingerprint(path.lstat())
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
-                         | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
     digest, size = hashlib.sha256(), 0
-    with os.fdopen(descriptor, "rb") as source:
+    with _binary_input(path) as source:
         if _file_fingerprint(os.fstat(source.fileno())) != initial:
             raise ValueError("primary drawing changed before upload")
         while True:
@@ -378,9 +389,7 @@ def _valid_png(path):
     initial = path.lstat()
     if not stat.S_ISREG(initial.st_mode) or not 57 <= initial.st_size <= MAX_SCREENSHOT_BYTES:
         raise ValueError("invalid screenshot size")
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
-                         | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
-    with os.fdopen(descriptor, "rb") as source:
+    with _binary_input(path) as source:
         if _file_fingerprint(os.fstat(source.fileno())) != _file_fingerprint(initial):
             raise ValueError("screenshot changed before read")
         data = source.read(MAX_SCREENSHOT_BYTES + 1)
@@ -495,12 +504,36 @@ def _valid_png(path):
     raise ValueError("invalid screenshot structure")
 
 
+def _write_evidence_json(path, value):
+    with path.open("w", encoding="utf-8", newline="\n") as target:
+        target.write(json.dumps(value, indent=2) + "\n")
+        target.flush()
+
+
 def _save(page, ctx, observation, surface=None, validate=None):
     observation["evidence_saved"] = False
     observation.pop("evidence_path", None)
+    fixtures = [Path(row["path"]).resolve() for row in ctx.manifest.get("fixtures", [])]
+    root = ctx.out_dir.resolve()
+    if root in fixtures:
+        raise ValueError("evidence directory collides with a fixture")
+    generation = "x10-evidence-" + uuid4().hex
+    destination = ctx.out_dir / generation
+    final = destination.resolve()
+    if destination.exists() or any(path == final or final in path.parents for path in fixtures):
+        raise ValueError("evidence generation collides with existing material")
     ctx.out_dir.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".x10-staging-", dir=ctx.out_dir))
-    generation = "x10-evidence-" + uuid4().hex
+    stage = staging.resolve()
+    targets = [staging / "x10-ground.png", staging / "x10-ui.json",
+               destination / "x10-ground.png", destination / "x10-ui.json"]
+    resolved = [path.resolve() for path in targets]
+    if (staging.is_symlink() or stage.parent != root or not staging.name.startswith(".x10-staging-")
+            or any(path == stage or stage in path.parents for path in fixtures)
+            or len(set(resolved)) != len(resolved) or any(path in fixtures for path in resolved)
+            or any(path.exists() or path.is_symlink() for path in targets)):
+        # No writes and no ownership claim on a supplied/aliased directory.
+        raise ValueError("evidence destinations are not fresh and distinct")
     evidence = generation + "/x10-ui.json / " + generation + "/x10-ground.png"
     committed = None
     try:
@@ -515,7 +548,7 @@ def _save(page, ctx, observation, surface=None, validate=None):
         pin = {"screenshot_bytes": len(data), "screenshot_sha256": hashlib.sha256(data).hexdigest()}
         saved = dict(observation, **pin, evidence_saved=True, evidence_path=evidence)
         record = staging / "x10-ui.json"
-        record.write_text(json.dumps(saved, indent=2) + "\n", encoding="utf-8")
+        _write_evidence_json(record, saved)
         if json.loads(record.read_text(encoding="utf-8")) != saved:
             raise ValueError("invalid evidence JSON")
         def check_pin(directory):
@@ -527,7 +560,19 @@ def _save(page, ctx, observation, surface=None, validate=None):
         check_pin(staging)
         if validate is not None:
             validate()
-        staging.rename(ctx.out_dir / generation)
+        try:
+            staging.rename(destination)
+        except Exception:
+            # A reported failure may follow the atomic move. Claim cleanup only
+            # when the moved set still matches this attempt's exact record/pin.
+            if not staging.exists():
+                try:
+                    check_pin(destination)
+                    if json.loads((destination / "x10-ui.json").read_text(encoding="utf-8")) == saved:
+                        committed = destination
+                except (OSError, ValueError):
+                    pass
+            raise
         committed = ctx.out_dir / generation
         check_pin(committed)
         if json.loads((committed / "x10-ui.json").read_text(encoding="utf-8")) != saved:
@@ -567,8 +612,13 @@ def _diagnostic(ctx, observation, stage, exc):
                        issue="UI/infrastructure unreadable at " + stage + ": " + safe_text(type(exc).__name__),
                        evidence_saved=False)
     try:
+        diagnostic = ctx.out_dir / "x10-ui.json"
+        if any(Path(row["path"]).resolve() == diagnostic.resolve()
+               for row in ctx.manifest.get("fixtures", [])):
+            observation["diagnostic_saved"] = False
+            return
         ctx.out_dir.mkdir(parents=True, exist_ok=True)
-        (ctx.out_dir / "x10-ui.json").write_text(
+        diagnostic.write_text(
             json.dumps(observation, indent=2) + "\n", encoding="utf-8")
     except OSError:
         observation["diagnostic_saved"] = False
