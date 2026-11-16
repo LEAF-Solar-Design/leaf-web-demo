@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useDrawingObjects } from '../site/DrawingObjectsContext.jsx'
 import './resultObjectLinks.css'
+import ModuleSetPicker from './ModuleSetPicker.jsx'
 import './resultParity.css'
 import { humanKey } from '../labels.js'
 import { errorActorLabel, errorPresentation } from '../errorPresentation.js'
@@ -496,7 +497,7 @@ export function versionLabel(version) {
   return `drawing version${seq === null ? '' : ` ${seq}`}${id === null ? '' : ` (${id})`}`
 }
 
-export default function ResultPanel({ running, error, result, tool, onRetry, notices, navigation, density,
+export default function ResultPanel({ running, error, result, tool, onRetry, notices, navigation, density, onSelectModuleSet,
   solarBinding, authorityKey, projectClient, catalogDigest, projectCurrent, save, stale = false }) {
   const [announcement, setAnnouncement] = useState('')
   const announcementFrame = useRef(null)
@@ -572,6 +573,8 @@ export default function ResultPanel({ running, error, result, tool, onRetry, not
             )}
           </div>
 
+          {result.ok && result.tool === 'count-modules' && <ModuleSetPicker key={result.job_id || JSON.stringify(result.result?.sets)}
+            data={result.result} drawingKey={result.origin?.drawingKey} running={running} onSelect={onSelectModuleSet} />}
           {result.ok && <ResultBody result={result} density={tableDensity} solarBinding={solarBinding} authorityKey={authorityKey}
             projectClient={projectClient} catalogDigest={catalogDigest} projectCurrent={projectCurrent} save={save} navigation={navigation} stale={stale} />}
           {result.error && <ErrorLine err={result.error} onRetry={onRetry} retry={!isEnt && isRetryable(result.error)} quota={calm} toolName={result.tool} />}
