@@ -781,7 +781,12 @@ def _aliased_uuid(row, primary, alias):
     return values[0]
 
 
-def _catalog_observer(base, observation):
+def _main_request(request, main_frame=None):
+    frame = request.frame
+    return frame is main_frame if main_frame is not None else frame.parent_frame is None
+
+
+def _catalog_observer(base, observation, main_frame=None):
     origin = urlsplit(base)
     observation["catalog_epoch"] = 0
     observation["catalog_binding"] = None
@@ -810,6 +815,8 @@ def _catalog_observer(base, observation):
 
     def request_seen(request):
         nonlocal latest, pending_binding, failed
+        if not _main_request(request, main_frame):
+            return
         if not exact_url(request.url):
             return
         try:
@@ -826,19 +833,24 @@ def _catalog_observer(base, observation):
 
     def response_seen(response):
         nonlocal failed
-        if response.request is not latest:
+        captured, epoch = latest, observation["catalog_epoch"]
+        request = response.request
+        if request is not captured or not _main_request(request, main_frame):
             return
         try:
-            failed = failed or url_binding(response.url) != pending_binding
+            invalid = url_binding(response.url) != pending_binding
         except ValueError:
-            failed = True
-        failed = failed or type(response.status) is not int or not 200 <= response.status < 300
+            invalid = True
+        status = response.status
+        if latest is not captured or observation["catalog_epoch"] != epoch:
+            return
+        failed = failed or invalid or type(status) is not int or not 200 <= status < 300
         observation["catalog_epoch"] += 1
         observation["catalog_binding"] = None if failed else pending_binding
 
     def request_failed(request):
         nonlocal failed
-        if request is latest and exact_url(request.url):
+        if request is latest and _main_request(request, main_frame) and exact_url(request.url):
             failed = True
             observation["catalog_epoch"] += 1
             observation["catalog_binding"] = None
@@ -848,7 +860,7 @@ def _catalog_observer(base, observation):
     return request_seen
 
 
-def _project_observer(base, observation):
+def _project_observer(base, observation, main_frame=None):
     origin = urlsplit(base)
     observation.update(project_epoch=0, project_scope_epoch=0, project_binding=None, project_versions=[])
     latest, route, failed = None, None, False
@@ -873,6 +885,8 @@ def _project_observer(base, observation):
 
     def request_seen(request):
         nonlocal latest, route, failed, scope_route
+        if not _main_request(request, main_frame):
+            return
         identity = route_id(request.url)
         if identity is None:
             return
@@ -884,7 +898,7 @@ def _project_observer(base, observation):
 
     def response_seen(response):
         nonlocal failed
-        if response.request is not latest:
+        if response.request is not latest or not _main_request(response.request, main_frame):
             return
         clear()
         failed = (failed or route_id(response.url) != route or type(response.status) is not int
@@ -935,7 +949,7 @@ def _project_observer(base, observation):
 
     def request_failed(request):
         nonlocal failed
-        if request is latest and route_id(request.url) == route:
+        if request is latest and _main_request(request, main_frame) and route_id(request.url) == route:
             failed = True
             observation["project_scope_epoch"] += 1
             clear()
@@ -1077,6 +1091,7 @@ def observe(page, ctx, config, bound, session_info=None, *, budget_seconds=600, 
     callback_error = None
     try:
         budget = _ObservationBudget(budget_seconds, clock)
+        main_frame = page.main_frame
         page = _BudgetedUI(page, budget)
         for key in ("source", "web_build"):
             value = (session_info or {}).get(key)
@@ -1084,8 +1099,8 @@ def observe(page, ctx, config, bound, session_info=None, *, budget_seconds=600, 
                     or value != ctx.source_sha):
                 raise ValueError("invalid session provenance")
         observation.update({key: session_info[key] for key in ("source", "web_build")})
-        catalog = _catalog_observer(ctx.base, observation)
-        project = _project_observer(ctx.base, observation)
+        catalog = _catalog_observer(ctx.base, observation, main_frame)
+        project = _project_observer(ctx.base, observation, main_frame)
 
         def callback(request):
             catalog(request)
@@ -1099,10 +1114,22 @@ def observe(page, ctx, config, bound, session_info=None, *, budget_seconds=600, 
             catalog.failed(request)
             project.failed(request)
 
+        def navigation(frame):
+            if frame is main_frame:
+                observation.update(event_callback_failed=True, catalog_binding=None,
+                                   project_binding=None, project_versions=[])
+                observation["catalog_epoch"] += 1
+                observation["project_epoch"] += 1
+                observation["project_scope_epoch"] += 1
+                _invalidate_evidence(ctx, observation)
+
         def protect(handler, kind):
             def guarded(event):
                 nonlocal callback_error
                 try:
+                    if kind == "framenavigated":
+                        navigation(event)
+                        return
                     def check_url(value):
                         if not isinstance(value, str) or any(ord(char) < 33 for char in value):
                             raise ValueError("invalid passive event URL")
@@ -1124,7 +1151,8 @@ def observe(page, ctx, config, bound, session_info=None, *, budget_seconds=600, 
                     observation["project_epoch"] += 1
             return guarded
 
-        for event, handler in (("request", callback), ("response", response), ("requestfailed", failed)):
+        for event, handler in (("request", callback), ("response", response), ("requestfailed", failed),
+                               ("framenavigated", navigation)):
             listener = protect(handler, event)
             listeners.append((event, listener))
             page.on(event, listener)
@@ -1134,6 +1162,7 @@ def observe(page, ctx, config, bound, session_info=None, *, budget_seconds=600, 
         _create_project(page, ctx, config, observation)
         stage = "primary drawing attachment and version selection"
         if _import_primary(page, ctx, config, bound, observation) is False:
+            budget.milliseconds()
             return observation
         stage = "selected drawing workflow navigation"
         _open_workflow(page, config)

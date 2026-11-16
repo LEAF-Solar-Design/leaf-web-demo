@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from benches import x10
 from xbench_core import BenchContext, aggregate
 
+MAIN_FRAME = SimpleNamespace(parent_frame=None, url="https://example.test/app")
 PROJECT = "00000000-0000-4000-8000-000000000001"
 VERSION = "00000000-0000-4000-8000-000000000002"
 OTHER = "00000000-0000-4000-8000-000000000003"
@@ -174,11 +175,11 @@ class FixtureTests(unittest.TestCase):
         proof.update(bytes=row["bytes"], sha256=row["sha256"])
 
     def catalog_request(self, project=PROJECT, version=VERSION, origin=None, drawing=DRAWING, method="GET"):
-        return SimpleNamespace(method=method, url=(origin or self.ctx.base) + "/api/capabilities?drawing_id="
+        return SimpleNamespace(frame=MAIN_FRAME, method=method, url=(origin or self.ctx.base) + "/api/capabilities?drawing_id="
                                + drawing + "&project_id=" + project + "&input_version_id=" + version)
 
     def complete_project(self, listener, project=PROJECT, sequence=1, versions=None):
-        request = SimpleNamespace(method="GET", url=self.ctx.base + "/api/projects/" + project)
+        request = SimpleNamespace(frame=MAIN_FRAME, method="GET", url=self.ctx.base + "/api/projects/" + project)
         listener(request)
         response = metadata_response(request, {"project": {"id": project},
             "drawing_versions": versions if versions is not None else [
@@ -466,6 +467,7 @@ class FixtureTests(unittest.TestCase):
 
         config, bound, _, _ = x10.bindings(self.ctx)
         page = MagicMock()
+        page.main_frame = MAIN_FRAME
         page.locator.return_value.is_visible.return_value = True
         page.locator.return_value.inner_text.return_value = VERSION
         with patch.object(x10, "_prepare_workspace", side_effect=lambda page: events.append("profile")), \
@@ -480,6 +482,7 @@ class FixtureTests(unittest.TestCase):
 
     def import_page(self, sentence):
         page = MagicMock()
+        page.main_frame = MAIN_FRAME
         project, material, preview, attachment, marker, upload = [MagicMock() for _ in range(6)]
         project.get_attribute.return_value = "true"
         attachment.inner_text.return_value = sentence
@@ -637,7 +640,7 @@ class FixtureTests(unittest.TestCase):
                         patch.object(x10, "_open_workflow", workflow):
                     observed = x10.observe(page, self.ctx, config, bound, self.session_info)
                 self.assertEqual(callbacks, {})
-                self.assertEqual(page.on.call_count, 3)
+                self.assertEqual(page.on.call_count, 4)
                 self.assertEqual(page.remove_listener.call_args_list, page.on.call_args_list)
                 self.assertEqual(observed["imported_version_id"], VERSION)
                 self.assertEqual(aggregate(x10.classify(observed)), "FAIL" if mode == "matching" else "UNREADABLE")
@@ -651,11 +654,11 @@ class FixtureTests(unittest.TestCase):
         self.complete_catalog(listener)
         epoch = observation["catalog_epoch"]
         listener(self.catalog_request(project=OTHER, origin="https://foreign.test"))
-        listener(SimpleNamespace(url=self.ctx.base + "/api/capabilities-extra?project_id=" + OTHER))
+        listener(SimpleNamespace(frame=MAIN_FRAME, url=self.ctx.base + "/api/capabilities-extra?project_id=" + OTHER))
         self.assertEqual(observation["catalog_binding"]["project_id"], PROJECT)
         self.assertEqual(observation["catalog_epoch"], epoch)
         for query in ("&project_id=" + OTHER, "&input_version_id=invalid"):
-            listener(SimpleNamespace(method="GET", url=self.catalog_request().url + query))
+            listener(SimpleNamespace(frame=MAIN_FRAME, method="GET", url=self.catalog_request().url + query))
             self.assertIsNone(observation["catalog_binding"])
             self.complete_catalog(listener)
         self.assertGreater(observation["catalog_epoch"], epoch)
@@ -736,6 +739,7 @@ class FixtureTests(unittest.TestCase):
 
     def test_growing_screenshot_read_is_explicitly_bounded_and_unscorable(self):
         page = MagicMock()
+        page.main_frame = MAIN_FRAME
         info = {}
         def screenshot(**kwargs):
             path = Path(kwargs["path"])
@@ -803,6 +807,7 @@ class FixtureTests(unittest.TestCase):
             observation["imported_version_selected"] = True
 
         page = MagicMock()
+        page.main_frame = MAIN_FRAME
         identity, listener = self.identity(page)
         picker = page.get_by_role.return_value
         picker.locator.return_value.inner_text.return_value = "Ground Mount Physical (unavailable)"
@@ -880,6 +885,7 @@ class FixtureTests(unittest.TestCase):
             {"interlace": 1, "width": 8, "height": 8, "raw": b"\x00" * (25 * 8)},
         ]
         page = MagicMock()
+        page.main_frame = MAIN_FRAME
         surface = page.get_by_role.return_value
         for options in invalid:
             with self.subTest(options={key: value if not isinstance(value, bytes) else len(value)
@@ -897,6 +903,7 @@ class FixtureTests(unittest.TestCase):
 
     def test_png_decoded_limit_is_checked_before_decompression(self):
         page = MagicMock()
+        page.main_frame = MAIN_FRAME
         page.get_by_role.return_value.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(
             tiny_png(width=10000, height=10000))
         with patch.object(x10.zlib, "decompressobj") as decoder, self.assertRaises(ValueError):
@@ -919,6 +926,7 @@ class FixtureTests(unittest.TestCase):
                                                    (13, 2), (13, 4), (25, 4)))},
         ]
         page = MagicMock()
+        page.main_frame = MAIN_FRAME
         for options in valid:
             with self.subTest(options=options):
                 data = tiny_png(**options)
@@ -935,10 +943,11 @@ class FixtureTests(unittest.TestCase):
         for route_id, active_id in ((identity, identity), (other, identity), (identity, other)):
             with self.subTest(route_id=route_id, active_id=active_id):
                 page = MagicMock()
+                page.main_frame = MAIN_FRAME
                 name = "Synthetic probe-" + "a" * 12
-                creation = SimpleNamespace(status=201, request=SimpleNamespace(method="POST"),
+                creation = SimpleNamespace(status=201, request=SimpleNamespace(frame=MAIN_FRAME, method="POST"),
                     url=self.ctx.base + "/api/projects", json=lambda: {"project": {"id": identity, "name": name}})
-                opened = SimpleNamespace(status=200, request=SimpleNamespace(method="GET"),
+                opened = SimpleNamespace(status=200, request=SimpleNamespace(frame=MAIN_FRAME, method="GET"),
                     url=self.ctx.base + "/api/projects/" + route_id,
                     json=lambda: {"project": {"id": active_id, "name": name}, "private": "not retained"})
 
@@ -964,6 +973,7 @@ class FixtureTests(unittest.TestCase):
 
     def test_atomic_evidence_preserves_completed_generations_on_failure(self):
         page = MagicMock()
+        page.main_frame = MAIN_FRAME
         surface = page.get_by_role.return_value
         surface.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(tiny_png())
         observation = dict(**canonical_project(), fresh_project=True, imported_version_selected=True,
@@ -994,6 +1004,7 @@ class FixtureTests(unittest.TestCase):
 
     def test_screenshot_pin_rejects_replacement_before_and_after_rename(self):
         page = MagicMock()
+        page.main_frame = MAIN_FRAME
         page.get_by_role.return_value.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(tiny_png())
         observation = dict(**canonical_project(), fresh_project=True, imported_version_selected=True,
                            ground_option="Ground Physical unavailable")
@@ -1029,6 +1040,7 @@ class FixtureTests(unittest.TestCase):
         for labels, texts, verdict in (([unavailable, available, available], ["Ready"] * 3, "UNREADABLE"),
                                       ([unavailable] * 2, ["Ready"] * 2, "FAIL")):
             page = MagicMock()
+            page.main_frame = MAIN_FRAME
             rail, picker = MagicMock(), MagicMock()
             events = []
             picker.select_option.side_effect = lambda *a, **kw: events.append("select")
@@ -1047,6 +1059,7 @@ class FixtureTests(unittest.TestCase):
             self.assertGreaterEqual(rail.get_by_text.return_value.first.wait_for.call_count, 3)
             self.assertEqual(events[:3], ["ready", "select", "ready"])
         page = MagicMock()
+        page.main_frame = MAIN_FRAME
         picker = page.get_by_role.return_value
         picker.input_value.return_value = "ground-physical"
         picker.locator.return_value.inner_text.return_value = unavailable
@@ -1057,6 +1070,7 @@ class FixtureTests(unittest.TestCase):
 
     def test_capture_revalidates_ui_and_identity_and_rolls_back_only_new_generation(self):
         page = MagicMock()
+        page.main_frame = MAIN_FRAME
         rail, picker = MagicMock(), MagicMock()
         page.get_by_role.side_effect = lambda role, **kw: rail if role == "navigation" else picker
         observation, listener = self.identity(page)
@@ -1111,6 +1125,7 @@ class FixtureTests(unittest.TestCase):
         for expanded in ("false", "true"):
             with self.subTest(expanded=expanded):
                 page = MagicMock()
+                page.main_frame = MAIN_FRAME
                 button = page.get_by_role.return_value
                 button.is_visible.return_value = False
                 toggle = MagicMock()
@@ -1176,8 +1191,8 @@ class FixtureTests(unittest.TestCase):
         listener = x10._project_observer(self.ctx.base, observation)
         self.complete_project(listener)
         initial_epoch = observation["project_epoch"]
-        first = SimpleNamespace(method="GET", url=self.ctx.base + "/api/projects/" + OTHER)
-        latest = SimpleNamespace(method="GET", url=self.ctx.base + "/api/projects/" + PROJECT)
+        first = SimpleNamespace(frame=MAIN_FRAME, method="GET", url=self.ctx.base + "/api/projects/" + OTHER)
+        latest = SimpleNamespace(frame=MAIN_FRAME, method="GET", url=self.ctx.base + "/api/projects/" + PROJECT)
         listener(first)
         listener(latest)
         def response(request, identity):
@@ -1210,6 +1225,7 @@ class FixtureTests(unittest.TestCase):
                 x10._import_primary(page, self.ctx, config, bound, observation)
             preview.click.assert_not_called()
         page = MagicMock()
+        page.main_frame = MAIN_FRAME
         observation, listener = self.identity(page)
         self.complete_catalog(listener, self.catalog_request(drawing=OTHER))
         with self.assertRaises(ValueError):
@@ -1245,10 +1261,10 @@ class FixtureTests(unittest.TestCase):
             return original_role(kind, **kwargs)
 
         page.get_by_role.side_effect = role
-        created = SimpleNamespace(status=201, request=SimpleNamespace(method="POST"),
+        created = SimpleNamespace(status=201, request=SimpleNamespace(frame=MAIN_FRAME, method="POST"),
             url=self.ctx.base + "/api/projects", json=lambda: {"project": {
                 "id": PROJECT, "name": field.fill.call_args.args[0]}})
-        opened = SimpleNamespace(status=200, request=SimpleNamespace(method="GET"),
+        opened = SimpleNamespace(status=200, request=SimpleNamespace(frame=MAIN_FRAME, method="GET"),
             url=self.ctx.base + "/api/projects/" + PROJECT,
             json=lambda: {"project": {"id": PROJECT}, "drawing_versions": []})
         def expect(predicate, **kwargs):
@@ -1356,7 +1372,7 @@ class FixtureTests(unittest.TestCase):
                     raise RuntimeError("private cleanup diagnostic")
             page.remove_listener.side_effect = remove
             rows = self.run_page(page)
-            self.assertEqual(attempts, ["request", "response", "requestfailed"])
+            self.assertEqual(attempts, ["request", "response", "requestfailed", "framenavigated"])
             self.assertEqual(rows[0].verdict, "UNREADABLE")
             self.assertEqual(list(self.ctx.out_dir.glob("x10-evidence-*")), old)
             self.assertTrue(json.loads((old[0] / "x10-ui.json").read_text())["evidence_saved"])
@@ -1371,7 +1387,7 @@ class FixtureTests(unittest.TestCase):
                 with self.subTest(target=target, alias=alias):
                     observation = {}
                     listener = x10._project_observer(self.ctx.base, observation)
-                    request = SimpleNamespace(method="GET", url=self.ctx.base + "/api/projects/" + PROJECT)
+                    request = SimpleNamespace(frame=MAIN_FRAME, method="GET", url=self.ctx.base + "/api/projects/" + PROJECT)
                     project = {"project_id": PROJECT}
                     version = {"version_id": VERSION, "drawing_id": DRAWING, "seq": 1}
                     (project if target == "project" else version)["id"] = alias
@@ -1470,7 +1486,7 @@ class FixtureTests(unittest.TestCase):
             observation.update(imported_version_selected=False, evidence_saved=True,
                                import_rejection=x10.IMPORT_REFUSALS[0])
             listener = x10._project_observer(self.ctx.base, observation)
-            request = SimpleNamespace(method="GET", url=self.ctx.base + "/api/projects/" + PROJECT)
+            request = SimpleNamespace(frame=MAIN_FRAME, method="GET", url=self.ctx.base + "/api/projects/" + PROJECT)
             listener(request)
             response = metadata_response(request, {"project": {"id": PROJECT}, "drawing_versions": []})
             listener.response(response)
@@ -1493,7 +1509,7 @@ class FixtureTests(unittest.TestCase):
             with self.subTest(bytes=len(data), accepted=accepted):
                 observation = {}
                 listener = x10._project_observer(self.ctx.base, observation)
-                request = SimpleNamespace(method="GET", url=self.ctx.base + "/api/projects/" + PROJECT)
+                request = SimpleNamespace(frame=MAIN_FRAME, method="GET", url=self.ctx.base + "/api/projects/" + PROJECT)
                 response = SimpleNamespace(request=request, url=request.url, status=200,
                                            body=lambda: data, json=MagicMock())
                 listener(request)
@@ -1533,7 +1549,7 @@ class FixtureTests(unittest.TestCase):
                     elif mode == "failed-url":
                         handlers["requestfailed"](SimpleNamespace(url=None))
                     else:
-                        request = SimpleNamespace(method="GET", url=self.ctx.base + "/api/projects/" + PROJECT)
+                        request = SimpleNamespace(frame=MAIN_FRAME, method="GET", url=self.ctx.base + "/api/projects/" + PROJECT)
                         handlers["request"](request)
                         response = SimpleNamespace(request=request, url=request.url, status=200,
                             body=MagicMock(side_effect=RuntimeError("private event diagnostic")))
@@ -1622,6 +1638,7 @@ class FixtureTests(unittest.TestCase):
 
     def test_current_identity_requires_latest_imported_tuple(self):
         page = MagicMock()
+        page.main_frame = MAIN_FRAME
         observation, catalog = self.identity(page)
         for rows in ([], [dict(observation["project_versions"][0], drawing_id=OTHER)],
                      [dict(observation["project_versions"][0], seq=2)]):
@@ -1636,8 +1653,8 @@ class FixtureTests(unittest.TestCase):
                                imported_version_selected=False, import_rejection=x10.IMPORT_REFUSALS[0],
                                **canonical_project())
             listener = x10._project_observer(self.ctx.base, observation)
-            request = SimpleNamespace(method="GET", url=self.ctx.base + "/api/projects/" + PROJECT)
-            newer = SimpleNamespace(method="GET", url=self.ctx.base + "/api/projects/" + OTHER)
+            request = SimpleNamespace(frame=MAIN_FRAME, method="GET", url=self.ctx.base + "/api/projects/" + PROJECT)
+            newer = SimpleNamespace(frame=MAIN_FRAME, method="GET", url=self.ctx.base + "/api/projects/" + OTHER)
             data = json.dumps({"project": {"id": PROJECT}, "drawing_versions": []}).encode()
             def body():
                 if mode in ("pending", "success"):
@@ -1657,7 +1674,7 @@ class FixtureTests(unittest.TestCase):
     def test_rate_inputs_require_ascii_digits_before_browser(self):
         original = Path(next(row["path"] for row in self.ctx.manifest["fixtures"] if row["role"] == "rates")).read_bytes()
         for key in ("quantity", "unit_rate"):
-            for value in ("Ã™Â¡", "Ã¯Â¼â€˜Ã¯Â¼â€™", "1Ã™Â¢", "Ã™Â¡.2", "1.Ã¯Â¼â€™"):
+            for value in ("Ãƒâ„¢Ã‚Â¡", "ÃƒÂ¯Ã‚Â¼Ã¢â‚¬ËœÃƒÂ¯Ã‚Â¼Ã¢â‚¬â„¢", "1Ãƒâ„¢Ã‚Â¢", "Ãƒâ„¢Ã‚Â¡.2", "1.ÃƒÂ¯Ã‚Â¼Ã¢â‚¬â„¢"):
                 with self.subTest(key=key, value=value):
                     item = {"quantity": "1.25", "unit_rate": "2.00", key: value}
                     with self.assertRaises(ValueError):
@@ -1681,6 +1698,7 @@ class FixtureTests(unittest.TestCase):
             ({"depth": 4, "raw": b"\x00\x10"}, b"\x00\x20"),
         ]
         page = MagicMock()
+        page.main_frame = MAIN_FRAME
         surface = page.get_by_role.return_value
         for options, invalid in cases:
             for valid in (True, False):
@@ -1750,7 +1768,7 @@ class FixtureTests(unittest.TestCase):
             observation = self.project_identity()
             listener = x10._project_observer(self.ctx.base, observation)
             self.complete_project(listener)
-            request = SimpleNamespace(method=method, url=self.ctx.base + "/api/projects/" + PROJECT)
+            request = SimpleNamespace(frame=MAIN_FRAME, method=method, url=self.ctx.base + "/api/projects/" + PROJECT)
             listener(request)
             self.assertIsNone(observation["project_binding"])
             response = metadata_response(request, {"project": {"id": PROJECT}, "drawing_versions": []})
@@ -1759,13 +1777,13 @@ class FixtureTests(unittest.TestCase):
 
     def test_passive_identity_proof_cannot_come_from_cross_origin_urls(self):
         for factory, request in ((x10._catalog_observer, self.catalog_request()),
-                                 (x10._project_observer, SimpleNamespace(method="GET",
+                                 (x10._project_observer, SimpleNamespace(frame=MAIN_FRAME, method="GET",
                                      url=self.ctx.base + "/api/projects/" + PROJECT))):
             for origin in ("https://foreign.test", "http://example.test", "https://example.test:8444"):
                 with self.subTest(factory=factory.__name__, origin=origin):
                     observation = {}
                     listener = factory(self.ctx.base, observation)
-                    foreign = SimpleNamespace(method="GET", url=origin + request.url[len(self.ctx.base):])
+                    foreign = SimpleNamespace(frame=MAIN_FRAME, method="GET", url=origin + request.url[len(self.ctx.base):])
                     listener(foreign)
                     listener.response(metadata_response(foreign, {"project": {"id": PROJECT}, "drawing_versions": []}))
                     key = "catalog_binding" if factory is x10._catalog_observer else "project_binding"
@@ -1780,6 +1798,7 @@ class FixtureTests(unittest.TestCase):
         root = self.ctx.out_dir
         original_rows = [dict(row) for row in self.ctx.manifest["fixtures"]]
         page = MagicMock()
+        page.main_frame = MAIN_FRAME
         fixture = Path(original_rows[0]["path"])
         original = fixture.read_bytes()
         self.ctx.out_dir = fixture
@@ -1818,6 +1837,7 @@ class FixtureTests(unittest.TestCase):
 
     def test_evidence_flush_close_and_atomic_rename_faults_preserve_old_generations(self):
         page = MagicMock()
+        page.main_frame = MAIN_FRAME
         page.get_by_role.return_value.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(tiny_png())
         observation = dict(**canonical_project(), fresh_project=True, imported_version_selected=True,
                            ground_option="Ground Physical unavailable")
@@ -1892,6 +1912,7 @@ class FixtureTests(unittest.TestCase):
                     streams.append(stream)
                     return stream
                 page = MagicMock()
+                page.main_frame = MAIN_FRAME
                 data = tiny_png(compressed=b"bad zlib") if fault == "parse" else tiny_png()
                 page.get_by_role.return_value.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(data)
                 observation = dict(**canonical_project(), fresh_project=True)
@@ -1935,6 +1956,7 @@ class FixtureTests(unittest.TestCase):
         config, bound, _, _ = x10.bindings(self.ctx)
         for fail_at in range(3):
             page = MagicMock()
+            page.main_frame = MAIN_FRAME
             installed, removed = [], []
             def register(event, callback):
                 installed.append((event, callback))
@@ -1958,6 +1980,7 @@ class FixtureTests(unittest.TestCase):
         for exhausted in (False, True):
             clock = Clock()
             page = MagicMock()
+            page.main_frame = MAIN_FRAME
             waits = []
             def wait(*args, **kwargs):
                 waits.append(kwargs["timeout"])
@@ -1993,10 +2016,126 @@ class FixtureTests(unittest.TestCase):
                              b'[{"nested":"\\udc00"}]', b'"\\ud800x\\udc00"'):
                 self.replace_fixture(role, prefix + fragment + b'}')
                 self.assert_binding_refusal()
-            for fragment in (b'"\\ud83d\\ude00"', '"café 界"'.encode(), b'{"\\ud83d\\ude00":"ok"}'):
+            for fragment in (b'"\\ud83d\\ude00"', '"cafÃ© ç•Œ"'.encode(), b'{"\\ud83d\\ude00":"ok"}'):
                 self.replace_fixture(role, prefix + fragment + b'}')
                 self.assertEqual(x10.bindings(self.ctx)[3], Decimal("0.07"))
             self.replace_fixture(role, original)
+
+    def test_catalog_reentrant_metadata_access_never_commits_superseded_proof(self):
+        for field in ("request", "url", "status"):
+            for event in ("new-pending", "new-success", "failure"):
+                with self.subTest(field=field, event=event):
+                    observation = {}
+                    listener = x10._catalog_observer(self.ctx.base, observation)
+                    old, newer = self.catalog_request(), self.catalog_request(project=OTHER)
+                    listener(old)
+                    class Response:
+                        triggered = False
+                        def access(self, name, value):
+                            if name == field and not self.triggered:
+                                self.triggered = True
+                                if event == "failure":
+                                    listener.failed(old)
+                                else:
+                                    listener(newer)
+                                    if event == "new-success":
+                                        listener.response(SimpleNamespace(request=newer, url=newer.url, status=200))
+                            return value
+                        @property
+                        def request(self):
+                            return self.access("request", old)
+                        @property
+                        def url(self):
+                            return self.access("url", old.url)
+                        @property
+                        def status(self):
+                            return self.access("status", 200)
+                    listener.response(Response())
+                    binding = observation["catalog_binding"]
+                    self.assertEqual(binding["project_id"] if binding else None,
+                                     OTHER if event == "new-success" else None)
+
+    def test_identity_observers_accept_only_main_frame_requests(self):
+        child = SimpleNamespace(parent_frame=MAIN_FRAME)
+        for factory in (x10._catalog_observer, x10._project_observer):
+            observation = {}
+            listener = factory(self.ctx.base, observation, MAIN_FRAME)
+            for frame in (child, MAIN_FRAME):
+                request = self.catalog_request() if factory is x10._catalog_observer else SimpleNamespace(
+                    method="GET", url=self.ctx.base + "/api/projects/" + PROJECT)
+                request.frame = frame
+                listener(request)
+                listener.response(metadata_response(request, {"project": {"id": PROJECT}, "drawing_versions": []}))
+                key = "catalog_binding" if factory is x10._catalog_observer else "project_binding"
+                self.assertEqual(observation[key] is not None, frame is MAIN_FRAME)
+            epoch = observation["catalog_epoch" if factory is x10._catalog_observer else "project_epoch"]
+            request.frame = child
+            listener.failed(request)
+            self.assertEqual(observation["catalog_epoch" if factory is x10._catalog_observer else "project_epoch"], epoch)
+
+    def test_main_frame_navigation_and_switch_back_invalidate_evidence(self):
+        for mode in ("child", "away", "switch-back"):
+            page, surface, _ = self.integration_page(False)
+            def capture(**kwargs):
+                Path(kwargs["path"]).write_bytes(tiny_png())
+                navigation = dict(call.args for call in page.on.call_args_list)["framenavigated"]
+                if mode == "child":
+                    navigation(SimpleNamespace(parent_frame=MAIN_FRAME, url="https://foreign.test"))
+                else:
+                    MAIN_FRAME.url = "https://foreign.test/away"
+                    navigation(MAIN_FRAME)
+                    if mode == "switch-back":
+                        MAIN_FRAME.url = self.ctx.base + "/app"
+                        navigation(MAIN_FRAME)
+                        self.emit_project(page)
+                        self.emit_catalog(page)
+            surface.screenshot.side_effect = capture
+            rows = self.run_page(page)
+            self.assertEqual(rows[0].verdict, "FAIL" if mode == "child" else "UNREADABLE")
+            self.assertEqual(page.remove_listener.call_args_list, page.on.call_args_list)
+            if mode != "child":
+                self.assertFalse(rows[0].observed["evidence_saved"])
+            MAIN_FRAME.url = self.ctx.base + "/app"
+
+    def test_refusal_early_return_respects_overall_deadline(self):
+        config, bound, _, _ = x10.bindings(self.ctx)
+        for elapsed in (0.999, 1.0, 1.001):
+            now = [0.0]
+            page = MagicMock()
+            page.main_frame = MAIN_FRAME
+            def refusal(page, ctx, config, bound, observation):
+                observation.update(**canonical_project(), fresh_project=True, imported_version_selected=False,
+                                   import_rejection=x10.IMPORT_REFUSALS[0])
+                x10._save(page, ctx, observation)
+                now[0] = elapsed
+                return False
+            page.get_by_role.return_value.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(tiny_png())
+            old = list(self.ctx.out_dir.glob("x10-evidence-*"))
+            with patch.object(x10, "_prepare_workspace"), patch.object(x10, "_create_project"), \
+                    patch.object(x10, "_import_primary", refusal):
+                observed = x10.observe(page, self.ctx, config, bound, self.session_info,
+                                       budget_seconds=1, clock=lambda: now[0])
+            self.assertEqual(aggregate(x10.classify(observed)), "FAIL" if elapsed < 1 else "UNREADABLE")
+            if elapsed >= 1:
+                self.assertEqual(list(self.ctx.out_dir.glob("x10-evidence-*")), old)
+                self.assertEqual(observed["exception_type"], "TimeoutError")
+
+    def test_observer_duplicate_responses_cannot_revive_failed_lifecycle(self):
+        for factory in (x10._catalog_observer, x10._project_observer):
+            observation = {}
+            listener = factory(self.ctx.base, observation)
+            request = self.catalog_request() if factory is x10._catalog_observer else SimpleNamespace(
+                frame=MAIN_FRAME, method="GET", url=self.ctx.base + "/api/projects/" + PROJECT)
+            response = metadata_response(request, {"project": {"id": PROJECT}, "drawing_versions": []})
+            listener(request)
+            listener.response(response)
+            listener.response(response)
+            key = "catalog_binding" if factory is x10._catalog_observer else "project_binding"
+            self.assertIsNotNone(observation[key])
+            listener.failed(request)
+            for _ in range(2):
+                listener.response(response)
+                self.assertIsNone(observation[key])
 
 
 if __name__ == "__main__":
