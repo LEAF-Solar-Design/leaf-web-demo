@@ -35,7 +35,7 @@ def main(argv=None):
         payload = read_json(args.input)
         result = validate_evidence(payload)
         write_json(result, args.out)
-    except (OSError, ValueError, TypeError) as error:
+    except (OSError, ValueError, TypeError, RecursionError) as error:
         return report_failure('validation', error)
     return 0
 

@@ -15,6 +15,7 @@ import tool_loader
 from drawing_dependency_report import from_pairs
 
 SCHEMA = 'leaf.x04.offline-evidence.v1'
+MAX_JSON_CONTAINER_DEPTH = 256
 
 
 def read_json(path):
@@ -29,15 +30,23 @@ def read_json(path):
     def reject_constant(value):
         raise ValueError(f'Nonfinite JSON number: {value}')
 
-    return json.loads(Path(path).read_text(encoding='utf-8'),
+    return json.loads(Path(path).read_text(encoding='utf-8-sig'),
                       object_pairs_hook=unique_object, parse_constant=reject_constant)
 
 
 def export_evidence(payload):
     if not isinstance(payload, dict) or payload.get('schema') != SCHEMA or payload.get('synthetic') is not True:
         raise ValueError('Require the X04 offline-evidence v1 schema and synthetic=true.')
+    pending = [(payload, 0)]
+    while pending:
+        value, depth = pending.pop()
+        if isinstance(value, (dict, list, tuple)):
+            if depth >= MAX_JSON_CONTAINER_DEPTH:
+                raise ValueError(f'JSON nesting exceeds {MAX_JSON_CONTAINER_DEPTH} container levels.')
+            children = value.values() if isinstance(value, dict) else value
+            pending.extend((child, depth + 1) for child in children)
     # Refuse nonportable extensions before producing an artifact.
-    json.dumps(payload, allow_nan=False)
+    json.dumps(payload, allow_nan=False, ensure_ascii=False).encode('utf-8')
     drawing = payload.get('drawing')
     request = payload.get('request')
     report = payload.get('observed_dependencies')
@@ -111,6 +120,8 @@ def check_output_path(source, output):
 
 
 def report_failure(operation, error):
+    if isinstance(error, RecursionError):
+        error = 'JSON nesting exceeds the supported recursion depth.'
     try:
         print(f'X04 {operation} refused: {error}', file=sys.stderr)
     except (OSError, ValueError):
@@ -129,7 +140,7 @@ def main(argv=None):
         payload = read_json(args.input)
         artifact = export_evidence(payload)
         write_json(artifact, args.out)
-    except (OSError, ValueError, TypeError) as error:
+    except (OSError, ValueError, TypeError, RecursionError) as error:
         return report_failure('export', error)
     return 0
 
