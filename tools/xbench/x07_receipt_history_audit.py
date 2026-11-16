@@ -21,6 +21,14 @@ class ReceiptBudgetError(ValueError):
     pass
 
 
+def unique_members(pairs):
+    result={}
+    for key,value in pairs:
+        if key in result:raise ValueError('duplicate receipt member')
+        result[key]=value
+    return result
+
+
 def parse_receipt(encoded):
     if not isinstance(encoded,str):raise ValueError('receipt must be text')
     if len(encoded.encode('utf-8'))>MAX_RECEIPT_BYTES:raise ReceiptBudgetError('receipt byte budget')
@@ -35,7 +43,7 @@ def parse_receipt(encoded):
             depth+=1
             if depth>MAX_RECEIPT_DEPTH:raise ReceiptBudgetError('receipt depth budget')
         elif char in ']}':depth-=1
-    value=json.loads(encoded,parse_constant=lambda _:(_ for _ in ()).throw(ValueError()))
+    value=json.loads(encoded,object_pairs_hook=unique_members,parse_constant=lambda _:(_ for _ in ()).throw(ValueError()))
     pending=[value];nodes=0
     while pending:
         current=pending.pop();nodes+=1
