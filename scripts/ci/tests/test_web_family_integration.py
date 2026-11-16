@@ -84,6 +84,8 @@ def runner(monkeypatch):
     monkeypatch.delenv("LEAF_PROCESS_CAPTURE_CONTEXT", raising=False)
     monkeypatch.delenv("LEAF_PROCESS_CAPTURE_OUT", raising=False)
     monkeypatch.delenv("TRUSTED_SHA", raising=False)
+    monkeypatch.delenv("CODEBUILD_WEBHOOK_EVENT", raising=False)
+    monkeypatch.delenv("CODEBUILD_WEBHOOK_HEAD_REF", raising=False)
     return module
 
 
@@ -112,6 +114,15 @@ def test_web_family_real_catalog_safe_backend_drops_entire_family(runner, monkey
     # the proof across every local subset of the proven selection.
     for shard in g.partition_suites(selected, 3):
         assert not g.selected_web_family_required(shard)
+
+
+def test_web_family_safe_backend_still_skips_web_on_pr(runner, monkeypatch):
+    monkeypatch.setenv("CODEBUILD_WEBHOOK_EVENT", "PULL_REQUEST_UPDATED")
+    monkeypatch.setattr(runner, "pr_tier_changed_paths", lambda: SAFE)
+    catalog = runner.build_suites()
+    selected = runner.select_pr_tier(catalog, tier_for(catalog))
+    assert not {s.id for s in selected} & family_ids(runner, catalog)
+    assert not runner.selected_web_family_required(selected)
 
 
 @pytest.mark.parametrize("paths", [

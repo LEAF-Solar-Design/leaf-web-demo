@@ -505,6 +505,150 @@ def test_full_mode_keeps_async_proof(runner, monkeypatch, tmp_path, async_author
     assert "mode" not in data
 
 
+DEFERRED_SUITES = {
+    "web-studio-panels-proof", "web-version-restore-proof", "studio-walk-regressions",
+    "harness-vitest", "server-lab-runs",
+}
+
+
+@pytest.fixture
+def deferred_case(runner, monkeypatch):
+    suites = runner.build_suites()
+    document = json.loads((ROOT / "scripts/ci/pr-tier.json").read_text(encoding="utf-8"))
+    monkeypatch.setenv("CODEBUILD_WEBHOOK_EVENT", "PULL_REQUEST_UPDATED")
+    monkeypatch.delenv("TRUSTED_SHA", raising=False)
+    monkeypatch.delenv("LEAF_PRIORITY_SUITES", raising=False)
+    return suites, document
+
+
+@pytest.mark.parametrize("event", [
+    "PULL_REQUEST_CREATED", "PULL_REQUEST_UPDATED", "PULL_REQUEST_REOPENED",
+])
+def test_unrelated_pr_defers_only_five_suites(runner, monkeypatch, deferred_case, event):
+    suites, document = deferred_case
+    monkeypatch.setenv("LEAF_CHANGED_PATHS", '["docs/ci.md", "tools/xbench/README.md"]')
+    monkeypatch.delenv("CODEBUILD_WEBHOOK_EVENT")
+    baseline = runner.select_pr_tier(suites, document)
+    monkeypatch.setenv("CODEBUILD_WEBHOOK_EVENT", event)
+    selected = runner.select_pr_tier(suites, document)
+    assert DEFERRED_SUITES <= {s.id for s in baseline}
+    assert not DEFERRED_SUITES & {s.id for s in selected}
+    assert selected == [s for s in baseline if s.id not in DEFERRED_SUITES]
+    assert set(runner.PR_TIER_PREREQUISITES) <= {s.id for s in selected}
+
+
+@pytest.mark.parametrize("sid,path", [
+    ("web-studio-panels-proof", "web/e2e/campaign-panel.spec.mjs"),
+    ("web-studio-panels-proof", "web/src/campaigns/CampaignPanel.jsx"),
+    ("web-studio-panels-proof", "web/next.config.js"),
+    ("web-version-restore-proof", "web/e2e/local/version-restore.spec.mjs"),
+    ("web-version-restore-proof", "web/fixtures/version.json"),
+    ("web-version-restore-proof", "platform/migrations/0084_lab_runs.sql"),
+    ("studio-walk-regressions", "web/e2e/regressions/runGate.mjs"),
+    ("studio-walk-regressions", "dispatch/worker.py"),
+    ("harness-vitest", "harness/test/operatorLoop.test.ts"),
+    ("harness-vitest", "platform/migrations/0084_lab_runs.sql"),
+    ("server-lab-runs", "server/tests/test_lab_runs.py"),
+    ("server-lab-runs", "platform/migrations/0084_lab_runs.sql"),
+])
+def test_related_pr_keeps_deferred_suite(runner, monkeypatch, deferred_case, sid, path):
+    suites, document = deferred_case
+    monkeypatch.setenv("LEAF_CHANGED_PATHS", json.dumps(["docs/ci.md", path]))
+    selected = runner.select_pr_tier(suites, document)
+    assert sid in {s.id for s in selected}
+    original = next(s for s in suites if s.id == sid)
+    assert next(s for s in selected if s.id == sid) is original
+
+
+def test_mixed_pr_paths_retain_only_affected_deferred_suites(runner, monkeypatch, deferred_case):
+    suites, document = deferred_case
+    monkeypatch.setenv("LEAF_CHANGED_PATHS", '["docs/ci.md", "platform/migrations/0084_lab_runs.sql"]')
+    selected = {s.id for s in runner.select_pr_tier(suites, document)}
+    assert selected & DEFERRED_SUITES == DEFERRED_SUITES - {"web-studio-panels-proof"}
+
+
+@pytest.mark.parametrize("changed", [
+    [], None, "not-json", [None], [123], [""],
+    ["scripts/ci/build_pr_tier.py"], [".codebuild/ci.sh"], [".github/workflows/ci.yml"],
+    ["README.md"], ["unknown/file.py"], ["docs/.config/file"],
+    ["docs/../ci.md"], ["docs/./ci.md"], ["docs//ci.md"], ["docs/"],
+    ["/docs/ci.md"], [r"docs\ci.md"], ["docs/C:ci.md"],
+    ["docs/ci.md\n"], ["docs/ci\x00.md"], ["docs/ci\x7f.md"],
+    ["docs/ ci.md"], ["docs/ci file.md"], ["docs/ci.md", "scripts/shared.py"],
+])
+def test_uncertain_or_shared_pr_keeps_all_deferred_suites(
+        runner, monkeypatch, deferred_case, changed):
+    suites, document = deferred_case
+    if changed is None:
+        def unavailable():
+            raise ValueError("PR changed paths unavailable")
+        monkeypatch.setattr(runner, "pr_tier_changed_paths", unavailable)
+    else:
+        monkeypatch.setenv("LEAF_CHANGED_PATHS", changed if isinstance(changed, str) else json.dumps(changed))
+    assert DEFERRED_SUITES <= {s.id for s in runner.select_pr_tier(suites, document)}
+
+
+def test_mixed_pr_paths_keep_only_related_deferred_suites(runner, monkeypatch, deferred_case):
+    suites, document = deferred_case
+    monkeypatch.setenv("LEAF_CHANGED_PATHS", json.dumps([
+        "docs/ci.md", "platform/migrations/0084_lab_runs.sql", "tools/xbench/README.md",
+    ]))
+    selected = {s.id for s in runner.select_pr_tier(suites, document)}
+    assert selected & DEFERRED_SUITES == DEFERRED_SUITES - {"web-studio-panels-proof"}
+
+
+@pytest.mark.parametrize("event", ["PULL_REQUEST_MERGED", "PULL_REQUEST_CLOSED", "BUILD", ""])
+def test_other_contexts_preserve_existing_family_selection(runner, monkeypatch, deferred_case, event):
+    suites, document = deferred_case
+    monkeypatch.setenv("LEAF_CHANGED_PATHS", '["docs/adn-purchase-walkthrough.md"]')
+    monkeypatch.delenv("CODEBUILD_WEBHOOK_EVENT")
+    baseline = runner.select_pr_tier(suites, document)
+    monkeypatch.setenv("CODEBUILD_WEBHOOK_EVENT", event)
+    assert runner.select_pr_tier(suites, document) == baseline
+
+
+def test_main_push_keeps_five_even_on_safe_web_family_path(runner, monkeypatch, deferred_case):
+    suites, document = deferred_case
+    monkeypatch.setenv("CODEBUILD_WEBHOOK_EVENT", "PUSH")
+    monkeypatch.setenv("CODEBUILD_WEBHOOK_HEAD_REF", "refs/heads/main")
+    monkeypatch.setattr(runner, "pr_tier_changed_paths", lambda: ["docs/adn-purchase-walkthrough.md"])
+    assert DEFERRED_SUITES <= {s.id for s in runner.select_pr_tier(suites, document)}
+
+
+@pytest.mark.parametrize("sid", sorted(DEFERRED_SUITES))
+def test_pr_priority_keeps_deferred_suite_on_safe_web_family_path(
+        runner, monkeypatch, deferred_case, sid):
+    suites, document = deferred_case
+    monkeypatch.setenv("LEAF_CHANGED_PATHS", '["docs/adn-purchase-walkthrough.md"]')
+    monkeypatch.setenv("LEAF_PRIORITY_SUITES", json.dumps([sid]))
+    assert {s.id for s in runner.select_pr_tier(suites, document)} & DEFERRED_SUITES == {sid}
+
+
+def test_pr_dependency_readds_deferred_suite_before_family_pruning(runner, monkeypatch, deferred_case):
+    suites, document = deferred_case
+    document["prerequisites"] = {"harness-tsc-build": ["web-version-restore-proof"],
+                                 "web-version-restore-proof": ["web-studio-panels-proof"]}
+    monkeypatch.setenv("LEAF_CHANGED_PATHS", '["docs/adn-purchase-walkthrough.md"]')
+    selected = {s.id for s in runner.select_pr_tier(suites, document)}
+    assert {"harness-tsc-build", "web-version-restore-proof", "web-studio-panels-proof"} <= selected
+
+
+def test_new_deferred_suite_is_preserved_on_pr(runner, monkeypatch, deferred_case):
+    suites, document = deferred_case
+    document["catalog_suite_ids"].remove("web-studio-panels-proof")
+    monkeypatch.setenv("LEAF_CHANGED_PATHS", '["docs/adn-purchase-walkthrough.md"]')
+    assert "web-studio-panels-proof" in {s.id for s in runner.select_pr_tier(suites, document)}
+
+
+def test_deferred_scope_adds_real_direct_ownership(runner, monkeypatch, deferred_case):
+    suites, document = deferred_case
+    scopes = dict(runner.PR_TIER_DEFERRED_SCOPES)
+    scopes["web-studio-panels-proof"] = ((), ())
+    monkeypatch.setattr(runner, "PR_TIER_DEFERRED_SCOPES", scopes)
+    monkeypatch.setenv("LEAF_CHANGED_PATHS", '["web/e2e/campaign-panel.spec.mjs"]')
+    assert "web-studio-panels-proof" in {s.id for s in runner.select_pr_tier(suites, document)}
+
+
 @pytest.mark.parametrize("changed", [["server/site.py"], ["platform/auth.py"],
                                     ["docs/ci.md", "README.md"]])
 def test_non_web_pr_bounds_all_real_web_shards_without_changing_catalog(
