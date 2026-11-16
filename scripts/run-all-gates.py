@@ -1178,7 +1178,8 @@ def build_suites() -> List[Suite]:
                   (Path("..") / "tools" / "xbench" / "tests" / "test_x07_source_inventory_closure.py").as_posix(),
                   (Path("..") / "tools" / "xbench" / "tests" / "test_x07_report_failure_truth_table.py").as_posix(),
                   "tests/test_x07_discovery_selection_agreement.py", "tests/test_x07_store_outer_transaction.py",
-                  "tests/test_x07_receipt_commit_authorizer.py"], 212),
+                  "tests/test_x07_receipt_commit_authorizer.py", "tests/test_x07_model_based_histories.py",
+                  "tests/test_x07_sqlite_length_limits.py"], 217),
         # W5 Rooftop workflow flow (2026-09-24, contracts G34/G34a/G34b): server/solar_workflow_flow.py,
         # the pure progression engine (every step's CanAdvance and HasDrawingPrerequisites, the L1/L2
         # gates on the host's setting, AdvanceStep, GoBack and NavigateToStep Stale marking over the
