@@ -1,6 +1,7 @@
 """X02 grading and live orchestration contracts, without product I/O."""
 
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
 import json
@@ -10,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from benches import x02
-from xbench_studio import StudioError
+from xbench_studio import StudioClient, StudioError
 
 
 PROJECT = {"project_id": "p", "org_id": "o"}
@@ -74,6 +75,9 @@ class FakeClient:
 
     def release(self, project_id, drawing_id, capability):
         self.releases.append(capability)
+
+    def tools(self):
+        return []
 
     def run(self, tool, **kw):
         self.calls.append((tool, kw))
@@ -483,3 +487,209 @@ def test_run_writes_safe_cases_and_cleans_up(rig, monkeypatch, tmp_path):
     assert len(steps) == 6
     assert client.checkouts == [900, 2]
     assert client.projects_deleted == ["p"]
+
+
+class EngineHTTP:
+    """Product-route double: every mutation publishes a new drawing version."""
+
+    def __init__(self):
+        self.timer = FakeTime()
+        self.catalog = [{"name": name, "version": "1.0.1", "catalog_digest": "sha256:" + "a" * 64}
+                        for name in (x02.INVERTER_TOOL, "count-by-layer", "solar-settings",
+                                     "solar-panels-from-drawing", "solar-size-strings",
+                                     "solar-panel-groups", "solar-string-add")]
+        self.graph = {"rev": 0, "panels": [], "frames": []}
+        self.head = "v0"
+        self.filter = ""
+        self.checkouts = 0
+        self.calls = []
+        self.jobs = {}
+        self.commit_changes = {}
+        self.commit_missing = []
+        self.refuse = None
+        self.acceptance = None
+        self.job_changes = {}
+        self.commit = None
+
+    def __call__(self, method, path, **kw):
+        if path == "/api/tools":
+            assert method == "GET"
+            return 200, {"tools": deepcopy(self.catalog)}
+        if "/context?" in path:
+            return 200, {"context": {"head_version_id": self.head, "intake_sha256": "digest"},
+                "intake": {"solar_design_graph": deepcopy(self.graph), "polylines": [
+                    {"handle": handle, "pts": [[0, 0], [77, 0], [77, 38.469], [0, 38.469]]}
+                    for handle in ("A", "B", "C", "D")]}}
+        if path.endswith("/checkout"):
+            if method == "DELETE":
+                return 200, {}
+            self.checkouts += 1
+            return 200, {"checkout_capability": CAP + str(self.checkouts),
+                         "checkout": {"expires": self.timer.clock() + kw["json_body"]["ttl_s"]}}
+        if "/imports/solaredge-pdf" in path:
+            return 422, {"error": {"reason_code": "IMPORT_PDF_MALFORMED"}}
+        if path.startswith("/api/jobs/"):
+            return 200, self.jobs[path.rsplit("/", 1)[1]]
+        assert (method, path) == ("POST", "/api/run")
+        body = kw["json_body"]
+        tool, params = body["tool"], body["params"]
+        self.calls.append(deepcopy(body))
+        assert body["dwg"] == self.head
+        assert body["catalog_digest"] == next(t["catalog_digest"] for t in self.catalog if t["name"] == tool)
+        if tool == "count-by-layer":
+            return 422, {"error": {"reason_code": "LAYER_NOT_FOUND"}}
+        assert params["drawing_id"] == "d" and params["expected_rev"] == self.graph["rev"]
+        if params.get("initialize", {}).get("units", {}).get("drawing_units") == "unknown":
+            return 422, {"error": {"reason_code": "INVALID_SEED_REQUEST"}}
+        if tool == "solar-settings" and self.checkouts == 2:
+            return 409, {"error": {"reason_code": "SIP_R1_CHECKOUT_EXPIRED"}}
+        if tool == "solar-settings" and params.get("changes", {}).get("panel_layer_contains") == "":
+            return 422, {"error": {"reason_code": "PANEL_LAYER_FILTER_REQUIRED"}}
+        if tool == "solar-panels-from-drawing" and self.filter != "Panels":
+            return 422, {"error": {"reason_code": "NO_PANELS_RECOGNISED"}}
+        if tool == x02.INVERTER_TOOL and self.refuse:
+            if self.refuse == "async":
+                self.jobs["engine-job"] = {"status": "failed", "error": {
+                    "reason_code": "UNASSIGNED_STRINGS_REQUIRED"}}
+                return 202, {"job_id": "engine-job"}
+            return 422, {"error": {"reason_code": self.refuse}}
+        if tool == x02.INVERTER_TOOL and self.acceptance is not None:
+            return self.acceptance
+        parent = self.head
+        self.graph["rev"] += 1
+        self.head = "v" + str(self.graph["rev"])
+        if tool == "solar-settings":
+            self.filter = params["changes"].get("panel_layer_contains", self.filter)
+        elif tool == "solar-panels-from-drawing":
+            self.graph["panels"] = [{"id": "panel-" + handle, "angle": angle,
+                "provenance": {"source_handle": handle}} for handle, angle in
+                (("A", 0), ("B", 0), ("C", 90), ("D", 90))]
+        elif tool == "solar-panel-groups":
+            assert "discover" not in params
+            assert {ref for group in params["groups"] for ref in group["panel_refs"]} == {
+                panel["id"] for panel in self.graph["panels"]}
+            assert all(group["module_width_along_row"] == 77 and
+                       group["module_height_across_row"] == 38.469 for group in params["groups"])
+            self.graph["frames"] = deepcopy(params["groups"])
+        elif tool == "solar-string-add":
+            assert params["operation"] == "add-string" and len(params["ordered_panel_refs"]) == 2
+        elif tool == x02.INVERTER_TOOL:
+            self.commit = {"engine": "deterministic_fallback", "engine_backend": "local_python",
+                "engine_label": "Deterministic fallback", "placement_strategy": "deterministic_grid",
+                "producing_attempt": {"job_id": "engine-job", "attempt": 2},
+                "request_sha256": "b" * 64, "graph_sha256": "c" * 64,
+                "parent_version_id": parent, "output_version_id": self.head}
+            self.commit.update(self.commit_changes)
+            for field in self.commit_missing:
+                self.commit.pop(field)
+            self.jobs["engine-job"] = {"status": "complete", "result": {"graph_commit": self.commit},
+                                       **self.job_changes}
+            return 202, {"job_id": "engine-job"}
+        return 200, {"ok": True}
+
+
+@pytest.fixture
+def engine_http():
+    return EngineHTTP()
+
+
+def collect_engine(http):
+    client = StudioClient(http, clock=http.timer.clock, sleep=http.timer.sleep)
+    return x02.run_cases(client, http, project=PROJECT, drawing=DRAWING, source_sha="source-sha",
+                         sleep=http.timer.sleep, clock=http.timer.clock)
+
+
+def test_engine_provenance_contract_passes(engine_http):
+    results = collect_engine(engine_http)
+    row = by_case(results, "10")
+    step = x02.score(results)[3]
+    assert row.seeded and step.verdict == "PASS"
+    assert row.provenance["tool_version"] == "1.0.1"
+    assert row.provenance["catalog_digest"] == "sha256:" + "a" * 64
+    assert row.provenance["job_id"] == "engine-job"
+    assert all(row.provenance[field] == value for field, value in engine_http.commit.items())
+    assert all(field in step.evidence for field in engine_http.commit)
+    placement = next(call for call in engine_http.calls if call["tool"] == x02.INVERTER_TOOL)
+    assert placement["params"]["placement_strategy"] == "deterministic_grid"
+    assert placement["params"]["hardware"] == {"model": "Central 100", "max_dc_voltage": 1500,
+        "max_ac_power_kw": 100, "mppt_count": 1, "total_dc_inputs": 1, "collector_capacity": 4}
+
+
+@pytest.mark.parametrize("field,value", [("engine", "cloud"), ("engine_label", "Cloud engine"),
+                                        ("engine_backend", "cloud"), ("placement_strategy", "cloud")])
+def test_engine_mislabel_fails(engine_http, field, value):
+    engine_http.commit_changes[field] = value
+    step = x02.score(collect_engine(engine_http))[3]
+    assert step.verdict == "FAIL" and field in step.evidence
+
+
+@pytest.mark.parametrize("field", ["engine", "engine_backend", "engine_label"])
+def test_missing_engine_field_fails(engine_http, field):
+    engine_http.commit_missing.append(field)
+    step = x02.score(collect_engine(engine_http))[3]
+    assert step.verdict == "FAIL" and field in step.evidence
+
+
+def test_engine_tool_absent_is_unreadable(engine_http):
+    engine_http.catalog = [tool for tool in engine_http.catalog if tool["name"] != x02.INVERTER_TOOL]
+    step = x02.score(collect_engine(engine_http))[3]
+    assert step.verdict == "UNREADABLE"
+    assert "solar-add-all-inverters not live on source-sha" in step.evidence
+    assert not any(call["params"].get("changes", {}).get("use_l2_collectors") for call in engine_http.calls)
+
+
+@pytest.mark.parametrize("reason", ["GROUP_GEOMETRY_MISMATCH", "async"])
+def test_engine_refusal_is_unreadable(engine_http, reason):
+    engine_http.refuse = reason
+    step = x02.score(collect_engine(engine_http))[3]
+    assert step.verdict == "UNREADABLE"
+    assert ("UNASSIGNED_STRINGS_REQUIRED" if reason == "async" else reason) in step.evidence
+
+
+@pytest.mark.parametrize("field,value", [("engine", 123), ("engine_label", []),
+    ("producing_attempt", {}), ("producing_attempt", {"job_id": "engine-job", "attempt": True}),
+    ("request_sha256", "bad-hash"), ("graph_sha256", None), ("parent_version_id", None),
+    ("output_version_id", "")])
+def test_malformed_engine_provenance_is_unreadable(engine_http, field, value):
+    engine_http.commit_changes[field] = value
+    step = x02.score(collect_engine(engine_http))[3]
+    assert step.verdict == "UNREADABLE" and field in step.evidence
+
+
+@pytest.mark.parametrize("changes,field", [({"result": []}, "result"),
+    ({"result": {"graph_commit": []}}, "result.graph_commit")])
+def test_malformed_engine_job_is_unreadable(engine_http, changes, field):
+    engine_http.job_changes = changes
+    step = x02.score(collect_engine(engine_http))[3]
+    assert step.verdict == "UNREADABLE" and field in step.evidence
+
+
+@pytest.mark.parametrize("acceptance", [(202, {}), (202, {"job_id": 7}), (200, {"ok": True})])
+def test_malformed_engine_acceptance_is_unreadable(engine_http, acceptance):
+    engine_http.acceptance = acceptance
+    step = x02.score(collect_engine(engine_http))[3]
+    assert step.verdict == "UNREADABLE" and "job_id" in step.evidence
+
+
+@pytest.mark.parametrize("field,value", [
+    ("producing_attempt", {"job_id": "another-job", "attempt": 2}),
+    ("parent_version_id", "another-parent"), ("output_version_id", "another-output")])
+def test_engine_identity_mismatch_fails(engine_http, field, value):
+    engine_http.commit_changes[field] = value
+    step = x02.score(collect_engine(engine_http))[3]
+    assert step.verdict == "FAIL" and field in step.evidence
+
+
+@pytest.mark.parametrize("field", ["version", "catalog_digest"])
+def test_malformed_engine_catalog_is_unreadable(engine_http, field):
+    engine_http.catalog[0][field] = None
+    step = x02.score(collect_engine(engine_http))[3]
+    assert step.verdict == "UNREADABLE" and f"tool.{field}" in step.evidence
+
+
+def test_engine_evidence_projects_only_safe_fields(engine_http):
+    engine_http.commit_changes = {"grant_ref": "private-grant", "access_token": "private-auth",
+                                  "checkout_capability": CAP}
+    results = collect_engine(engine_http)
+    raw = json.dumps([x02.asdict(row) for row in results]) + x02.score(results)[3].evidence
+    assert all(secret not in raw for secret in (CAP, "private-grant", "private-auth"))
