@@ -40,7 +40,14 @@ export default function ArloProposalReview({ envelope, context, currentProject }
   const malformedProposals = storedProposals.some(p => !p || typeof p !== 'object' || Array.isArray(p)
     || typeof p.proposal_id !== 'string' || !p.proposal_id.trim())
     || new Set(storedProposals.map(p => p?.proposal_id)).size !== storedProposals.length
-  const proposals = malformedProposals ? [] : storedProposals
+  const object = value => value && typeof value === 'object' && !Array.isArray(value)
+  const list = value => value == null || Array.isArray(value)
+  const malformedDetails = !malformedProposals && storedProposals.some(p =>
+    !list(p.routes) || (p.routes || []).some(route => !object(route) || !list(route.points))
+    || !list(p.quantities) || (p.quantities || []).some(row => !object(row)
+      || (row.kind != null && typeof row.kind !== 'string')
+      || (row.unit != null && typeof row.unit !== 'string')))
+  const proposals = malformedProposals || malformedDetails ? [] : storedProposals
   const [selectedId, setSelectedId] = useState(proposals[0]?.proposal_id || '')
   const proposal = proposals.find(p => p.proposal_id === selectedId) || proposals[0]
   const [reviews, setReviews] = useState([])
@@ -53,6 +60,17 @@ export default function ArloProposalReview({ envelope, context, currentProject }
   const [exportError, setExportError] = useState('')
   const alive = useRef(false)
   const attempts = useRef(new Map())
+  const pendingExports = useRef(new Map())
+  useEffect(() => {
+    const pending = pendingExports.current
+    return () => {
+      for (const [timer, url] of pending) {
+        clearTimeout(timer)
+        URL.revokeObjectURL(url)
+      }
+      pending.clear()
+    }
+  }, [])
   const bound = ['org_id','project_id','job_id','input_version_id'].every(k => uuid.test(context?.[k] || ''))
     && ['organization_id','project_id','input_version_id'].every((k, i) => envelope?.solver_input?.[k] === context?.[['org_id','project_id','input_version_id'][i]])
   // Retained job context cannot establish which project the caller currently has open.
@@ -81,7 +99,13 @@ export default function ArloProposalReview({ envelope, context, currentProject }
       setExportError(`Result export failed. ${humanizeError(cause)}`)
     } finally {
       link?.remove()
-      if (url) setTimeout(() => URL.revokeObjectURL(url), 0)
+      if (url) {
+        const timer = setTimeout(() => {
+          pendingExports.current.delete(timer)
+          URL.revokeObjectURL(url)
+        }, 0)
+        pendingExports.current.set(timer, url)
+      }
     }
   }
   const exportControl = <>
@@ -134,6 +158,7 @@ export default function ArloProposalReview({ envelope, context, currentProject }
   return <div className="arlo-review">
     <p className="dim">Electrical design / Proposal review</p>
     {malformedProposals && <p role="alert">Stored proposals could not be reviewed because a proposal identity is missing or duplicated. The stored result is preserved in the export. Reopen the result or run the design again.</p>}
+    {malformedDetails && <p role="alert">Stored proposal routes or quantities could not be displayed. The stored result is preserved in the export. Reopen the result or run the design again.</p>}
     {proposal ? <><h4>Review the complete feeder</h4>
     <label>Feeder proposal <select value={proposal.proposal_id} disabled={saving} onChange={e => { setSelectedId(e.target.value); setSaved(''); setError(''); setNote('') }}>
       {proposals.map((p,i) => <option value={p.proposal_id} key={p.proposal_id}>Proposal {i+1}, {number(p.estimated_installed_cost)} cost units</option>)}

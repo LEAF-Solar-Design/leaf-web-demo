@@ -21,7 +21,7 @@ _HASH_RE = re.compile(r"[0-9a-f]{64}")
 _GRANT_RE = re.compile(r"[a-zA-Z0-9_-]{1,64}")
 _REFUSALS = frozenset({
     "cloud_request_invalid", "cloud_auth_missing", "cloud_tenant_unauthorized",
-    "cloud_upstream_failure", "cloud_response_invalid",
+    "cloud_upstream_failure", "cloud_response_invalid", "CLOUD_REQUEST_REJECTED",
 })
 _TERMINAL = frozenset({"completed", "refused", "outcome_unknown"})
 

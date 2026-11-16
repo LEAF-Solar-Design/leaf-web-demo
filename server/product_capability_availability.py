@@ -424,8 +424,27 @@ def w1_graph_readiness(graph):
         # builtins/solar_panel_groups.py makes Roof frames only; validate_graph refuses them on a
         # Ground project (INSTALLATION_DESIGN_MISMATCH), so readiness must never advertise the run.
         mark(["solar-panel-groups"], False, "roof_installation_required")
+    # Manual Roof length is drawing-bound geometry evidence, not a weather/electrical
+    # calculation. An otherwise valid project without a ZIP can use that confirmed
+    # length for stringing, including a seed with no project metadata entered.
+    # Keep `sized` unchanged for the electrical chain below.
+    manual_roof_sized = False
+    if (not settings_ready and graph["settings"]["validity"]["state"] == "valid"
+            and graph["project"]["installation_design"] == "Roof"):
+        from solar_project import project_validity
+        missing_zip = {"state": "unknown", "reasons": ["project_zip_required"]}
+        actual = project_validity(graph["project"])
+        metadata_only = (graph["project"]["validity"] == missing_zip and actual == missing_zip)
+        seed_metadata_only = (graph["project"]["validity"] == {
+            "state": "unknown", "reasons": ["seed_defaults"]} and actual == {
+            "state": "unknown", "reasons": ["project_name_required", "project_zip_required"]})
+        if metadata_only or seed_metadata_only:
+            try:
+                manual_roof_sized = require_sizing(graph)["mode"] == "manual-global"
+            except (KeyError, ValueError, TypeError):
+                pass
     templates = [frame["ground_slots"]["panel"] for frame in graph["frames"] if "ground_slots" in frame]
-    grouped = sized and not templates and bool(graph["frames"]) and bool(graph["panels"]) and all(
+    grouped = (sized or manual_roof_sized) and not templates and bool(graph["frames"]) and bool(graph["panels"]) and all(
         item["validity"]["state"] == "valid"
         for item in graph["frames"] + graph["panels"] + graph["electrical_zones"]
     ) and all(panel["frame_ref"] is not None for panel in graph["panels"])
