@@ -936,14 +936,25 @@ def diff_snapshot_rows(before, reopened):
 
 def validate_grid_string_ownership(expected_grid_ids, saved_string_ids, assignments):
     """Require every supplied saved string ID to have one explicit expected owner."""
+    return _validate_grid_ownership(expected_grid_ids, saved_string_ids, assignments, "string_id", "string")
+
+
+def validate_grid_inverter_ownership(expected_grid_ids, saved_inverter_ids, assignments):
+    """Require unique explicit inverter IDs to have exactly one expected grid owner."""
+    return _validate_grid_ownership(expected_grid_ids, saved_inverter_ids, assignments, "inverter_id", "inverter")
+
+
+def _validate_grid_ownership(expected_grid_ids, saved_ids, assignments, identity_key, label):
+    prefix = "" if label == "string" else label + "_"
+    foreign_key = "foreign_" + label
     def valid_ids(values):
         return (type(values) is list and bool(values)
                 and all(type(key) is str and bool(key.strip()) and len(key) <= 128 for key in values)
                 and len(set(values)) == len(values))
-    if not valid_ids(expected_grid_ids) or not valid_ids(saved_string_ids) or type(assignments) is not list:
-        return _out("UNREADABLE", "ownership_evidence_unreadable")
-    expected, saved, seen = set(expected_grid_ids), set(saved_string_ids), set()
-    errors = dict(missing=0, duplicate=0, foreign_string=0, foreign_grid=0)
+    if not valid_ids(expected_grid_ids) or not valid_ids(saved_ids) or type(assignments) is not list:
+        return _out("UNREADABLE", prefix + "ownership_evidence_unreadable")
+    expected, saved, seen = set(expected_grid_ids), set(saved_ids), set()
+    errors = {"missing": 0, "duplicate": 0, foreign_key: 0, "foreign_grid": 0}
     examples = {}
     def issue(reason, key):
         errors[reason] += 1
@@ -952,12 +963,12 @@ def validate_grid_string_ownership(expected_grid_ids, saved_string_ids, assignme
         if len(candidates) > MAX_STRING_EXAMPLES:
             candidates.remove(max(candidates))
     for row in assignments:
-        if (type(row) is not dict or set(row) != {"grid_id", "string_id"}
+        if (type(row) is not dict or set(row) != {"grid_id", identity_key}
                 or any(type(value) is not str or not value.strip() or len(value) > 128 for value in row.values())):
-            return _out("UNREADABLE", "ownership_row_unreadable")
-        key = row["string_id"]
+            return _out("UNREADABLE", prefix + "ownership_row_unreadable")
+        key = row[identity_key]
         if key not in saved:
-            issue("foreign_string", key)
+            issue(foreign_key, key)
         if row["grid_id"] not in expected:
             issue("foreign_grid", key)
         if key in seen:
@@ -966,7 +977,7 @@ def validate_grid_string_ownership(expected_grid_ids, saved_string_ids, assignme
     for key in saved - seen:
         issue("missing", key)
     failed = any(errors.values())
-    return _out("FAIL" if failed else "PASS", "string_ownership_mismatch" if failed else "string_ownership_equal",
+    return _out("FAIL" if failed else "PASS", label + "_ownership_mismatch" if failed else label + "_ownership_equal",
                 counts=errors, examples={reason: sorted(keys) for reason, keys in sorted(examples.items())})
 
 
@@ -1028,16 +1039,26 @@ def _compare_before_values(saved_rows, before_rows, metric, label):
 
 def compare_grid_string_totals(expected_totals, saved_string_ids, assignments):
     """Count explicit saved-string ownership against independent per-grid counts."""
+    return _compare_grid_identity_totals(expected_totals, saved_string_ids, assignments, "string")
+
+
+def compare_grid_inverter_totals(expected_totals, saved_inverter_ids, assignments):
+    """Count explicit saved inverter owners against independent per-grid counts."""
+    return _compare_grid_identity_totals(expected_totals, saved_inverter_ids, assignments, "inverter")
+
+
+def _compare_grid_identity_totals(expected_totals, saved_ids, assignments, label):
+    reason = "grid_" + label
     if not _valid_grid_totals(expected_totals):
-        return _out("UNREADABLE", "grid_string_totals_unreadable")
-    ownership = validate_grid_string_ownership(list(expected_totals), saved_string_ids, assignments)
+        return _out("UNREADABLE", reason + "_totals_unreadable")
+    ownership = _validate_grid_ownership(list(expected_totals), saved_ids, assignments, label + "_id", label)
     if ownership["verdict"] != "PASS":
-        return _out(ownership["verdict"], "grid_string_ownership_invalid", ownership=ownership)
+        return _out(ownership["verdict"], reason + "_ownership_invalid", ownership=ownership)
     totals = dict.fromkeys(expected_totals, 0)
     for row in assignments:
         totals[row["grid_id"]] += 1
     changed = [key for key in totals if totals[key] != expected_totals[key]]
-    return _out("FAIL" if changed else "PASS", "grid_string_totals_mismatch" if changed else "grid_string_totals_equal",
+    return _out("FAIL" if changed else "PASS", reason + "_totals_mismatch" if changed else reason + "_totals_equal",
                 mismatch_count=len(changed), examples=[dict(grid_id=key, oracle=expected_totals[key], saved=totals[key],
                     delta=totals[key] - expected_totals[key]) for key in nsmallest(MAX_STRING_EXAMPLES, changed)])
 
@@ -1045,6 +1066,31 @@ def compare_grid_string_totals(expected_totals, saved_string_ids, assignments):
 def compare_grid_string_oracle_totals(expected_grid_ids, expected_totals, oracle_values):
     """Require independent grid string counts to cover and sum to report strings."""
     return _compare_grid_oracle_totals(expected_grid_ids, expected_totals, oracle_values, "strings", "grid_string_oracle")
+
+
+def compare_grid_inverter_oracle_totals(expected_grid_ids, expected_totals, oracle_values):
+    """Require exact grid coverage and independent report inverter-count agreement."""
+    return _compare_grid_oracle_totals(expected_grid_ids, expected_totals, oracle_values, "inverters", "grid_inverter_oracle")
+
+
+def compare_inverter_snapshots(expected_grid_ids, before_ids, before_owners, reopened_ids, reopened_owners):
+    """Compare explicit inverter identities and owners, independent of aggregate totals."""
+    before = validate_grid_inverter_ownership(expected_grid_ids, before_ids, before_owners)
+    reopened = validate_grid_inverter_ownership(expected_grid_ids, reopened_ids, reopened_owners)
+    verdicts = {before["verdict"], reopened["verdict"]}
+    if verdicts != {"PASS"}:
+        return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL", "inverter_snapshots_invalid",
+                    before=before, reopened=reopened)
+    old = {row["inverter_id"]: row["grid_id"] for row in before_owners}
+    new = {row["inverter_id"]: row["grid_id"] for row in reopened_owners}
+    added, removed = new.keys() - old.keys(), old.keys() - new.keys()
+    changed = [key for key in old.keys() & new.keys() if old[key] != new[key]]
+    failed = bool(added or removed or changed)
+    return _out("FAIL" if failed else "PASS", "inverter_snapshots_changed" if failed else "inverter_snapshots_equal",
+                counts=dict(added=len(added), removed=len(removed), changed=len(changed)),
+                added_ids=nsmallest(MAX_STRING_EXAMPLES, added), removed_ids=nsmallest(MAX_STRING_EXAMPLES, removed),
+                owner_changes=[dict(inverter_id=key, before=old[key], reopened=new[key])
+                               for key in nsmallest(MAX_STRING_EXAMPLES, changed)])
 
 
 def compare_grid_dc_totals(expected_totals, saved_power, assignments):

@@ -1623,3 +1623,50 @@ The swap preserves the grand total of three strings. The independent grid counts
 and explicit ownership provide separate inputs to the comparison. This replay
 establishes synthetic behavior and does not authenticate input origin or live
 X05 acceptance.
+
+## Inverter identity evidence replay
+
+The pure `validate_grid_inverter_ownership` helper requires explicit unique saved
+inverter IDs, expected grid IDs and `{inverter_id, grid_id}` assignments.
+`compare_grid_inverter_totals` compares these owners with independent grid counts.
+`compare_grid_inverter_oracle_totals` requires exact grid coverage and agreement
+with `oracle_values.inverters`. `compare_inverter_snapshots` compares explicit
+IDs and owners on each side, with bounded added/removed/owner-change diagnostics.
+These inverter helpers remain standalone in this slice.
+
+Run this synthetic existing-table replay from the repository root.
+
+```powershell
+@'
+import sys, runpy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import compare_table, compare_inverter_snapshots
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+values, rows = builders['table_fixture']()
+before_ids = ['INV-A']
+before_owners = [dict(inverter_id='INV-A', grid_id='g')]
+replacement_ids = ['INV-B']
+replacement_owners = [dict(inverter_id='INV-B', grid_id='g')]
+for name, ids, owners in [('substituted', replacement_ids, replacement_owners), ('missing', None, None), ('corrected', before_ids, before_owners)]:
+    table = compare_table(rows, values, dict(values))
+    identity = compare_inverter_snapshots(['g'], before_ids, before_owners, ids, owners)
+    print(name, table['verdict'], identity['verdict'], identity['reason'])
+    if name == 'substituted':
+        assert identity['counts'] == dict(added=1, removed=1, changed=0)
+        assert identity['removed_ids'] == ['INV-A'] and identity['added_ids'] == ['INV-B']
+'@ | python -P -
+```
+
+Expected output
+
+```text
+substituted PASS FAIL inverter_snapshots_changed
+missing PASS UNREADABLE inverter_snapshots_invalid
+corrected PASS PASS inverter_snapshots_equal
+```
+
+The table records one inverter on both sides. Stable device IDs and explicit grid
+owners are separate evidence needed to settle save/reopen preservation. Missing
+identity evidence stays unknown. This replay establishes supplied synthetic
+comparison behavior, with input origin and live X05 acceptance requiring their
+own receipts.

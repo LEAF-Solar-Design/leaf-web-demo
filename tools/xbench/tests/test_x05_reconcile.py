@@ -35,6 +35,7 @@ from benches.x05_reconcile import (METRICS, TABLE_COLUMNS, check_discrepancies,
     compare_grid_dc_totals, compare_grid_dc_oracle_totals, compare_grid_dc_snapshots, compare_dc_string_ids,
     compare_bound_dc_snapshots, compare_before_panel_counts, compare_before_dc_values,
     compare_grid_string_totals, compare_grid_string_oracle_totals,
+    validate_grid_inverter_ownership, compare_grid_inverter_totals, compare_grid_inverter_oracle_totals, compare_inverter_snapshots,
     compare_csv_view, compare_recommendations, compare_snapshots, compare_strings, compare_table)
 
 
@@ -4424,3 +4425,87 @@ def test_composed_grid_string_cli_direct_json_and_bound_siblings(tmp_path, mode,
         env={"SystemRoot":"C:\\Windows"})
     assert run.returncode == 1 and not run.stderr
     assert json.loads(run.stdout) == json.loads(serialize_result(direct))
+
+
+def test_explicit_inverter_ownership_rejects_missing_duplicate_and_foreign_assignments():
+    grids, devices = ["east", "west"], ["I1", "I2"]
+    rows = [dict(grid_id="east", inverter_id="I1"), dict(grid_id="west", inverter_id="I2")]
+    assert validate_grid_inverter_ownership(grids, devices, rows)["verdict"] == "PASS"
+    cases = [(rows[:1], "missing"), (rows + [rows[0]], "duplicate"),
+             (rows + [dict(grid_id="east", inverter_id="foreign")], "foreign_inverter"),
+             ([dict(grid_id="foreign", inverter_id="I1"), rows[1]], "foreign_grid")]
+    for changed, reason in cases:
+        preserved = deepcopy(changed)
+        result = validate_grid_inverter_ownership(grids, devices, changed)
+        assert result["verdict"] == "FAIL" and result["counts"][reason] == 1
+        assert validate_grid_inverter_ownership(list(reversed(grids)), list(reversed(devices)), list(reversed(changed))) == result
+        assert changed == preserved
+    for ids, assignments in [(None, rows), (["I1", "I1"], rows), (devices, None), (devices, [{}])]:
+        assert validate_grid_inverter_ownership(grids, ids, assignments)["verdict"] == "UNREADABLE"
+    excess = [dict(grid_id="east", inverter_id=f"x{i:03}") for i in range(60)]
+    result = validate_grid_inverter_ownership(grids, devices, excess)
+    assert result["counts"]["foreign_inverter"] == 60 and len(result["examples"]["foreign_inverter"]) == MAX_STRING_EXAMPLES
+
+
+def test_grid_inverter_counts_reject_equal_grand_total_grid_swaps():
+    devices = ["I1", "I2", "I3"]
+    rows = [dict(grid_id="east", inverter_id="I1"), dict(grid_id="west", inverter_id="I2"), dict(grid_id="west", inverter_id="I3")]
+    independent = dict(east=1, west=2)
+    assert compare_grid_inverter_totals(independent, devices, rows)["verdict"] == "PASS"
+    changed = deepcopy(rows)
+    changed[0]["grid_id"], changed[1]["grid_id"], changed[2]["grid_id"] = "west", "east", "east"
+    preserved = deepcopy(changed)
+    result = compare_grid_inverter_totals(independent, devices, changed)
+    assert result == dict(verdict="FAIL", reason="grid_inverter_totals_mismatch", mismatch_count=2,
+        examples=[dict(grid_id="east", oracle=1, saved=2, delta=1), dict(grid_id="west", oracle=2, saved=1, delta=-1)])
+    assert compare_grid_inverter_totals(None, devices, rows)["verdict"] == "UNREADABLE"
+    assert changed == preserved
+
+
+def test_grid_inverter_oracle_requires_coverage_and_exact_independent_sum():
+    assert compare_grid_inverter_oracle_totals(["east", "west"], dict(east=1, west=2), dict(inverters=3))["verdict"] == "PASS"
+    assert compare_grid_inverter_oracle_totals(["east", "west"], dict(east=1, west=2), dict(inverters=4))["verdict"] == "FAIL"
+    for grids, totals, oracle in [(["g", "g"], dict(g=1), dict(inverters=1)), (["g"], None, {}),
+            (["g"], [dict(grid_id="g", inverters=1), dict(grid_id="g", inverters=1)], dict(inverters=2)),
+            (["east", "west"], dict(east=1), dict(inverters=1)), (["g"], dict(g=1), {}),
+            (["g"], dict(g=True), dict(inverters=1))]:
+        assert compare_grid_inverter_oracle_totals(grids, totals, oracle)["verdict"] == "UNREADABLE"
+
+
+def test_inverter_snapshots_detect_substituted_ids_owner_swaps_and_absence():
+    grids, devices = ["east", "west"], ["I1", "I2"]
+    rows = [dict(grid_id="east", inverter_id="I1"), dict(grid_id="west", inverter_id="I2")]
+    substitution = [rows[0], dict(grid_id="west", inverter_id="I3")]
+    result = compare_inverter_snapshots(grids, devices, rows, ["I1", "I3"], substitution)
+    assert result["verdict"] == "FAIL" and result["counts"] == dict(added=1, removed=1, changed=0)
+    assert result["added_ids"] == ["I3"] and result["removed_ids"] == ["I2"]
+    changed = [dict(grid_id="west", inverter_id="I1"), dict(grid_id="east", inverter_id="I2")]
+    assert compare_inverter_snapshots(grids, devices, rows, devices, changed)["counts"] == dict(added=0, removed=0, changed=2)
+    missing = compare_inverter_snapshots(grids, devices, rows, None, None)
+    assert missing["verdict"] == "UNREADABLE" and missing["reopened"]["reason"] == "inverter_ownership_evidence_unreadable"
+    preserved = deepcopy((devices, rows))
+    assert compare_inverter_snapshots(grids, devices, rows, list(reversed(devices)), list(reversed(rows)))["verdict"] == "PASS"
+    assert (devices, rows) == preserved
+
+
+def test_inverter_integer_reference_table_and_signed_approval_model_preserve_inputs():
+    for saved_count in range(5):
+        for oracle_count in range(5):
+            delta = saved_count - oracle_count
+            saved, rows = table_fixture()
+            oracle = dict(saved, inverters=oracle_count)
+            saved["inverters"] = saved_count
+            next(row for row in rows if row["metric"] == "inverters").update(
+                studio=saved_count, oracle=oracle_count, delta=delta, verdict="PASS" if delta == 0 else "FAIL")
+            preserved = deepcopy((saved, oracle, rows))
+            assert compare_table(rows, saved, oracle)["verdict"] == "PASS"
+            for approval in range(-4, 5):
+                deltas = dict.fromkeys(METRICS, 0)
+                deltas["inverters"] = delta
+                record = dict(fixture_id="synthetic", metric="inverters", delta=approval,
+                              name="explicit inverter revision", frozen_at="2026-11-15T12:00:00Z")
+                policy_inputs = deepcopy((deltas, record))
+                result = check_discrepancies("synthetic", deltas, [record], "2026-11-15T13:00:00Z")
+                assert result["verdict"] == ("PASS" if delta == 0 or approval == delta else "FAIL")
+                assert (deltas, record) == policy_inputs
+            assert (saved, oracle, rows) == preserved
