@@ -187,6 +187,62 @@ describe('ARLO review in the existing workspace result panel', () => {
     expect(saveArloReview).not.toHaveBeenCalled()
   })
 
+  it.each([1, 3])('disposes all pending URLs and timers on unmount after %i exports', async count => {
+    vi.useFakeTimers()
+    try {
+      const captured = captureDownload()
+      const urls = Array.from({ length: count }, (_, index) => `blob:arlo-result-${index}`)
+      for (const url of urls) captured.createObjectURL.mockReturnValueOnce(url)
+      const { unmount } = render(<ArloProposalReview envelope={envelope().result} context={context} currentProject={currentProject} />)
+      await act(async () => {})
+      const download = screen.getByRole('button', { name: 'Export result' })
+      expect(download).toBeEnabled()
+      for (let index = 0; index < count; index++) fireEvent.click(download)
+      expect(captured.createObjectURL).toHaveBeenCalledTimes(count)
+      expect(captured.revokeObjectURL).not.toHaveBeenCalled()
+      expect(vi.getTimerCount()).toBe(count)
+      expect(document.querySelector('a[download]')).toBeNull()
+
+      unmount()
+      expect(vi.getTimerCount()).toBe(0)
+      expect(captured.revokeObjectURL.mock.calls).toEqual(urls.map(url => [url]))
+      act(() => vi.runOnlyPendingTimers())
+      expect(captured.revokeObjectURL.mock.calls).toEqual(urls.map(url => [url]))
+    } finally {
+      cleanup()
+      vi.useRealTimers()
+    }
+  })
+
+  it('revokes completed exports while mounted without revoking them again on unmount', async () => {
+    vi.useFakeTimers()
+    try {
+      const captured = captureDownload()
+      const urls = ['blob:arlo-result-first', 'blob:arlo-result-second']
+      for (const url of urls) captured.createObjectURL.mockReturnValueOnce(url)
+      const { unmount } = render(<ArloProposalReview envelope={envelope().result} context={context} currentProject={currentProject} />)
+      await act(async () => {})
+      const download = screen.getByRole('button', { name: 'Export result' })
+      expect(download).toBeEnabled()
+      fireEvent.click(download)
+      fireEvent.click(download)
+      expect(captured.createObjectURL).toHaveBeenCalledTimes(2)
+      expect(captured.revokeObjectURL).not.toHaveBeenCalled()
+      expect(vi.getTimerCount()).toBe(2)
+
+      act(() => vi.runOnlyPendingTimers())
+      expect(captured.revokeObjectURL.mock.calls).toEqual(urls.map(url => [url]))
+      expect(vi.getTimerCount()).toBe(0)
+      unmount()
+      act(() => vi.runOnlyPendingTimers())
+      expect(captured.revokeObjectURL.mock.calls).toEqual(urls.map(url => [url]))
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      cleanup()
+      vi.useRealTimers()
+    }
+  })
+
   it('disables export with a visible reason when the stored result is absent', () => {
     const captured = captureDownload()
     render(<ArloProposalReview context={context} />)
