@@ -2227,3 +2227,49 @@ The initial triple is FAIL/UNREADABLE/FAIL. String repair leaves the device
 failures visible. Identity repair leaves owner evidence UNREADABLE. Restoring
 swapped device owners yields FAIL until their mappings are repaired. Oracle
 identities and owners require independent producer provenance for live acceptance.
+# Independent owner envelope fields in X05
+
+The seven-step `assurance.evidence` object supplies explicit oracle and saved
+identity maps. Consumers retain their own named diagnostics.
+
+| Field | Row shape or value | Consumer |
+| --- | --- | --- |
+| `oracle_strings` | `string_id`, `optimizers` rows | Oracle string IDs and independent string checks |
+| `saved_strings` | `string_id`, `optimizers` rows | Saved string IDs and independent string checks |
+| `oracle_string_owners` | `string_id`, `grid_id` rows | Independent string owners and oracle topology |
+| `grid.string_assignments` | `string_id`, `grid_id` rows | Saved string owners and saved topology |
+| `oracle_inverter_ids` | Unique nonempty ID list | Independent device IDs and oracle topology |
+| `oracle_inverter_owners` | `inverter_id`, `grid_id` rows | Independent device owners and oracle topology |
+| `saved_inverters` | `inverter_id`, `grid_id` rows | Saved device IDs, owners and topology |
+| `oracle_assignments` | `string_id`, `inverter_id` rows | Independent connections and oracle topology |
+| `saved_assignments` | `string_id`, `inverter_id` rows | Saved connections and topology |
+
+`grid.string_assignments` belongs to the envelope's separate `grid` object.
+Omitted or null owner/connection rows are UNREADABLE. An empty owner/connection
+list is readable but fails coverage for this nonempty design. Omitted, null or
+empty device ID lists and oracle string rows are UNREADABLE. Duplicate identity
+lists are UNREADABLE. Duplicate owner rows fail explicit assignment coverage.
+
+```powershell
+@'
+import json, runpy, sys
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+envelope = fixtures['equal_count_ownership_envelope']()
+evidence = envelope['assurance']['evidence']
+evidence['oracle_string_owner'] = evidence.pop('oracle_string_owners')
+broken = m.reconcile_seven_steps_json(json.dumps(envelope))
+check = broken['independent_owners']['checks']['strings']
+print('field typo',broken['verdict'],check['reason'])
+assert broken['verdict'] == 'UNREADABLE'
+evidence['oracle_string_owners'] = evidence.pop('oracle_string_owner')
+fixed = m.reconcile_seven_steps_json(json.dumps(envelope))
+print('field repaired',fixed['verdict'],fixed['independent_owners']['checks']['oracle_topology']['reason'])
+assert fixed['verdict'] == 'PASS'
+'@ | python -P -
+```
+
+Expected field-typo result UNREADABLE `string_grid_owner_evidence_invalid`, then
+PASS with `cross_topology_equal`. Oracle topology checks only internal supplied
+consistency. Independent producer provenance remains required for live acceptance.

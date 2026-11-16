@@ -834,7 +834,11 @@ def _seven_step_independent_owners(grid, evidence):
     strings, saved_devices = _assignment_ids(evidence, "saved")
     oracle_devices = evidence.get("oracle_inverter_ids")
     grids = grid.get("expected_grid_ids")
-    checks = dict(strings=compare_string_grid_owners(grids, strings, evidence.get("oracle_string_owners"),
+    oracle_strings, error = _index(evidence.get("oracle_strings"), "oracle")
+    oracle_topology = validate_cross_topology(grids, None if error else list(oracle_strings), oracle_devices,
+        evidence.get("oracle_string_owners"), evidence.get("oracle_inverter_owners"), evidence.get("oracle_assignments"))
+    checks = dict(oracle_topology=oracle_topology,
+                  strings=compare_string_grid_owners(grids, strings, evidence.get("oracle_string_owners"),
                                                     grid.get("string_assignments")),
                   inverters=compare_inverter_grid_owners(grids, oracle_devices, evidence.get("oracle_inverter_owners"),
                                                         evidence.get("saved_inverters")),
