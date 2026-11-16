@@ -257,6 +257,33 @@ can make the character limit reject a payload already at the byte limit.
 Raw integer tokens are bounded to80 characters; decimal tokens to128 characters
 and80-character plain numeric width. Unsupported numeric tokens return
 `json_numeric_unreadable` independently of the caller's Decimal traps.
+`--help` exits0 with usage on stdout and no comparison. Unknown options exit2
+with usage on stderr and no comparison. Both paths ignore synthetic stdin;
+they emit no reconciliation JSON. A stdin read error exits4 with the fixed
+`cli_evidence_unreadable` result. Escaped Unicode IDs retain exact identity,
+including lone surrogate code units; result JSON and snapshot bytes use ASCII
+escapes. Neither whitespace trimming nor Unicode normalization changes IDs.
+
+### Frozen acceptance coverage
+
+Parent: Studio X-bench X05 engineering-set reconciliation. A helper PASS proves
+only the supplied synthetic evidence agrees. Bench acceptance requires all
+seven frozen steps on all three real fixtures at one staging source.
+
+| Frozen step | Existing helper or live slice | Synthetic proof limit | Evidence still needed for live grading |
+|---|---|---|---|
+| 1. Normal-user DWG and report import | `x05.py` project lifecycle and PDF transport | Mocked transport proves request/cleanup behavior | Readable project-scoped PDF completion after S02 diagnostics are live; supported Ground settings |
+| 2. Every report grid matched once or named unmatched | `x05.py` nested grid-report checks | Schema/count/identity validation cannot prove producer geometry | Actual reports for all three fixtures, independent missing grid binding, and required all-matched Copenhagen/USML results |
+| 3. Every string and optimizer count equals oracle | `compare_strings`, saved/oracle total cross-checks | Supplied IDs/counts agree; origin is not established | Independent complete PDF string tables and actual saved/drawn Studio string reads |
+| 4. Every shown grouping recommendation respects grid count | `compare_recommendations` | Supplied shown counts agree; explicit empty evidence is required | Capture every recommendation actually shown and independent report grid counts |
+| 5. Five-row CSV and view bind to saved design and oracle | `compare_table`, `compare_csv_view` | Synthetic saved values, table and CSV agree | Product table/export, independent saved design reads and complete BOM/report values, including missing DC power |
+| 6. Zero deltas or prior frozen named discrepancies | `check_discrepancies`, composed policy stage | Timestamped supplied records match supplied deltas | Real row deltas and manifest frozen before run; none is pre-approved today |
+| 7. Save/reopen preserves strings and table | `canonical_snapshot`, `compare_bound_snapshots` | Supplied snapshots hash equally and bind to supplied before rows | Actual save/reopen reads for imported strings and product table at the same project/version |
+
+`aggregate_fixtures` requires an explicit three-fixture set and preserves
+UNREADABLE precedence. It does not acquire any missing live evidence. The live
+grader covers only the current partial import/grid slice; steps3 through7 and
+unsupported setup remain UNREADABLE, so offline helper PASS cannot accept X05.
 
 Canonical snapshot compatibility contract:
 

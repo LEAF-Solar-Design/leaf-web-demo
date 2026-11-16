@@ -1163,3 +1163,112 @@ def test_cli_exact_character_and_utf8_byte_boundaries(tmp_path, aggregate, chara
         # At the raw-byte limit, JSON framing already makes the character
         # limit stricter; both constraints apply, rather than one overriding it.
         assert len(run(padding, 4).encode("utf-8")) == 4 * MAX_JSON_CHARS + extra
+
+
+@pytest.mark.parametrize("identifier,valid", [
+    ("a" * 128, True), ("a" * 129, False),
+    ("\U0001f642" * 128, True), ("\U0001f642" * 129, False), (" \t\n", False),
+])
+def test_fixture_and_string_identifier_boundaries(identifier, valid):
+    rows = [{"string_id": identifier, "optimizers": 1}]
+    strings = compare_strings(rows, rows)
+    expected, fixtures = fixture_records()
+    expected[0] = fixtures[0]["fixture_id"] = fixtures[0]["evidence"]["fixture_id"] = identifier
+    aggregate = aggregate_fixtures(expected, fixtures)
+    assert strings["verdict"] == aggregate["verdict"] == ("PASS" if valid else "UNREADABLE")
+    if valid:
+        assert identifier in aggregate["fixtures"]
+    else:
+        assert strings["reason"] == "oracle_row_unreadable"
+        assert aggregate["reason"] == "expected_fixtures_unreadable"
+
+
+@pytest.mark.parametrize("left,right", [(" A ", "A"), ("\u00e9", "e\u0301")])
+def test_identifiers_preserve_spaces_and_unicode_identity(left, right):
+    rows = lambda value: [{"string_id": value, "optimizers": 1}]
+    result = compare_strings(rows(left), rows(right))
+    assert result["verdict"] == "FAIL"
+    assert result["missing_ids"] == [left] and result["foreign_ids"] == [right]
+    expected, fixtures = fixture_records()
+    expected[0] = left
+    fixtures[0]["fixture_id"] = fixtures[0]["evidence"]["fixture_id"] = right
+    assert aggregate_fixtures(expected, fixtures)["reason"] == "foreign_fixture_id"
+
+
+@pytest.mark.parametrize("depth", [0, 1, 6])
+def test_unsupported_serialization_types_have_fixed_errors_without_object_text(depth):
+    class PrivateObject:
+        def __repr__(self):
+            pytest.fail("Serializer must not inspect injected object text")
+
+    for unsupported in (("synthetic_private_canary",), {"synthetic_private_canary"},
+                        b"synthetic_private_canary", PrivateObject(), {1: "synthetic_private_canary"}):
+        value = unsupported
+        for _ in range(depth):
+            value = {"nested": [value]}
+        with pytest.raises(ValueError) as error:
+            serialize_result(value)
+        assert str(error.value) == "json_result_type_unreadable"
+
+
+@pytest.mark.parametrize("aggregate", [False, True])
+def test_cli_stdin_read_error_emits_one_sanitized_result(monkeypatch, aggregate):
+    from types import SimpleNamespace
+    import sys
+    from benches import x05_reconcile as module
+
+    class FailedInput:
+        def read(self, size):
+            assert size == 4 * MAX_JSON_CHARS + 1
+            raise OSError("synthetic_private_canary")
+
+    output, errors = StringIO(), StringIO()
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=FailedInput()))
+    monkeypatch.setattr(sys, "stdout", output)
+    monkeypatch.setattr(sys, "stderr", errors)
+    assert module.main(["--aggregate"] if aggregate else []) == 4
+    assert output.getvalue() == '{"reason":"cli_evidence_unreadable","verdict":"UNREADABLE"}\n'
+    assert errors.getvalue() == ""
+
+
+@pytest.mark.parametrize("aggregate", [False, True])
+@pytest.mark.parametrize("option,exit_code", [("--help", 0), ("--unknown-option", 2)])
+def test_cli_usage_produces_no_reconciliation_result(tmp_path, aggregate, option, exit_code):
+    from pathlib import Path
+    import subprocess
+    import sys
+    from benches import x05_reconcile as module
+
+    command = [sys.executable, "-P", str(Path(module.__file__).resolve())]
+    result = subprocess.run(command + (["--aggregate"] if aggregate else []) + [option],
+        input=b"synthetic_private_canary", capture_output=True, cwd=tmp_path, timeout=20)
+    assert result.returncode == exit_code
+    if option == "--help":
+        assert b"Offline X05 evidence comparison" in result.stdout and result.stderr == b""
+    else:
+        assert result.stdout == b"" and b"unrecognized arguments" in result.stderr
+    assert b'"verdict"' not in result.stdout + result.stderr
+    assert b"synthetic_private_canary" not in result.stdout + result.stderr
+    assert b"Traceback" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("identifier", ["\U0001f642", "\ud800", "\udfff"])
+def test_escaped_unicode_identity_round_trips_with_ascii_safe_hashes(identifier):
+    _, table = table_fixture()
+    rows = [{"string_id": identifier, "optimizers": 1}]
+    text = json.dumps({"strings": rows}, ensure_ascii=True)
+    decoded = decode_evidence_json(text)
+    assert decoded["verdict"] == "PASS" and decoded["evidence"]["strings"] == rows
+    snapshot = canonical_snapshot(rows, table)
+    assert snapshot["verdict"] == "PASS"
+    expected = json.dumps([[identifier, 1]], ensure_ascii=True, separators=(",", ":")).encode("ascii")
+    assert snapshot["strings_sha256"] == sha256(expected).hexdigest()
+    result = compare_strings(rows, [{"string_id": "other", "optimizers": 1}])
+    serialized = serialize_result(result)
+    assert serialized.isascii() and json.loads(serialized)["missing_ids"] == [identifier]
+    assert serialize_result(decode_evidence_json(serialized)["evidence"]) == serialized
+    expected_ids, fixtures = fixture_records()
+    expected_ids[0] = fixtures[0]["fixture_id"] = fixtures[0]["evidence"]["fixture_id"] = identifier
+    aggregate = aggregate_fixtures_json(json.dumps(dict(expected_ids=expected_ids, fixtures=fixtures)))
+    assert aggregate["verdict"] == "PASS" and identifier in aggregate["fixtures"]
+    assert serialize_result(aggregate).isascii()
