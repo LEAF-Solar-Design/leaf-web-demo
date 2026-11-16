@@ -1,6 +1,8 @@
 """Fake-clock checks for scheduling and honest X08 collection diagnostics."""
 
 import pytest
+import json
+from uuid import UUID
 
 from benches.x08_frames import collect_frame_sequence
 
@@ -16,6 +18,10 @@ class Canvas:
 
     def element_handle(self):
         return self
+
+    def evaluate(self, expression):
+        assert 'getComputedStyle' in expression
+        return True
 
     def dispose(self):
         self.disposed = True
@@ -53,16 +59,28 @@ class Page:
         self.waits = []
         self.cleaned = False
         self.visible = True
+        self.viewport_size = dict(width=1920, height=1080)
+        self.recorder = None
+        self.owned_recorder = None
 
     def evaluate(self, script, arg=None):
-        if arg is not None:
+        if arg is not None and 'canvas' in arg:
+            if self.recorder is not None:
+                raise RuntimeError('private recorder occupied')
             assert arg['canvas'] is not None
             assert arg['duration_ms'] == 10000
+            assert UUID(arg['token']).version == 4
             self.start = self.clock
+            self.recorder = dict(token=arg['token'], installed=self.start)
+            self.owned_recorder = self.recorder
             return self.start
         if script == '() => performance.now()':
             return self.clock
         assert 'recorder.stop()' in script
+        if (arg['installed'] is not True or self.recorder is None or
+                self.recorder is not self.owned_recorder or self.recorder['token'] != arg['token']):
+            return None
+        self.recorder = None
         self.cleaned = True
         # Model the browser's independent deadline, even during blocking I/O.
         finish = min(self.clock, self.start + 10000)
@@ -97,7 +115,7 @@ def test_frozen_sequence_schedule_geometry_and_raw_evidence():
     assert [c[2] for c in commands if c[0] == 'up'] == ['right'] * 4
     assert [c[3] for c in commands if c[0] == 'wheel'] == [-120] * 10 + [120] * 10
     moves = [c for c in commands if c[0] == 'move']
-    assert len(moves) == 9
+    assert len(moves) == 28
     assert all(10 < c[2] < 810 and 20 < c[3] < 620 for c in moves)
     assert all(c[4] == 8 for c in moves if c[4] is not None)
     assert result['frame_deltas_ms'] is page.frames
@@ -119,7 +137,7 @@ def test_overrun_does_not_count_late_wheel_or_run_later_actions():
     assert result['actions'][-1]['within_recording'] is False
     assert len([c for c in page.mouse.commands if c[0] == 'wheel']) == 1
     assert result['frame_deltas_ms'] == [16.2, 40.7, 8.1]
-    assert page.waits[-1] == 0
+    assert all(delay > 0 for delay in page.waits)
     assert page.cleaned and canvas.disposed
 
 
@@ -133,7 +151,7 @@ def test_action_failure_returns_incomplete_and_cleans_up(failure):
 
     result = collect_frame_sequence(page, canvas, select)
     assert result['complete'] is False
-    assert result['error'].startswith('RuntimeError:')
+    assert result['error'] == 'RuntimeError'
     assert result['actions'][-1]['success'] is False
     assert result['actions'][-1]['within_recording'] is False
     assert result['sequence']['pan_drags'] == (0 if failure == 'pan' else 4)
@@ -174,3 +192,184 @@ def test_invalid_canvas_rejected(box):
     canvas.box = box
     with pytest.raises(ValueError, match='bounding box'):
         collect_frame_sequence(None, canvas, lambda: None)
+
+
+def test_private_action_error_is_type_only_in_serialized_snapshot():
+    page, canvas = Page(), Canvas()
+
+    def select():
+        raise RuntimeError('SECRET-SENTINEL private path and credentials')
+
+    result = collect_frame_sequence(page, canvas, select)
+    assert result['error'] == 'RuntimeError'
+    assert 'SECRET-SENTINEL' not in json.dumps(result)
+    assert result['frame_deltas_ms'] == page.frames
+    assert page.cleaned and canvas.disposed
+
+
+def test_moving_resized_canvas_is_retargeted_for_every_pan_and_wheel():
+    page, canvas = Page(), Canvas()
+    boxes = []
+
+    def bounds():
+        index = len(boxes)
+        box = dict(x=10 + index, y=20 + index, width=800 - index, height=600 - index)
+        boxes.append(box)
+        return box
+
+    canvas.bounding_box = bounds
+    result = collect_frame_sequence(page, canvas, lambda: None)
+    assert result['complete']
+    assert len(boxes) == 25  # Initial validation plus each of the 24 native actions.
+    centers = [c for c in page.mouse.commands if c[0] == 'move' and c[4] is None]
+    assert [(c[2], c[3]) for c in centers] == [
+        (b['x'] + b['width'] / 2, b['y'] + b['height'] / 2) for b in boxes[1:]]
+
+
+@pytest.mark.parametrize('fault', ['clipped', 'viewport', 'hidden', 'missing-evidence'])
+def test_late_invalid_native_target_never_dispatches_or_counts(fault):
+    page, canvas = Page(), Canvas()
+    original_wait = page.wait_for_timeout
+
+    def wait(delay):
+        original_wait(delay)
+        if page.clock - page.start >= 3450:
+            if fault == 'clipped':
+                canvas.box = dict(x=1900, y=20, width=800, height=600)
+            elif fault == 'viewport':
+                page.viewport_size = dict(width=float('nan'), height=1080)
+            elif fault == 'hidden':
+                canvas.evaluate = lambda expression: False
+            else:
+                canvas.evaluate = None
+
+    page.wait_for_timeout = wait
+    result = collect_frame_sequence(page, canvas, lambda: pytest.fail('late selection'))
+    assert not result['complete']
+    assert result['sequence']['zoom_in_steps'] == 1
+    assert not result['actions'][-1]['success']
+    assert len([c for c in page.mouse.commands if c[0] == 'wheel']) == 1
+    assert page.cleaned and canvas.disposed
+
+
+@pytest.mark.parametrize('fault', ['backwards', 'nan', 'infinity', 'bool', 'stall'])
+def test_browser_clock_failure_preserves_raw_snapshot_and_cleanup(fault):
+    page, canvas = Page(), Canvas()
+    original_wait = page.wait_for_timeout
+    original_evaluate = page.evaluate
+    bad = {'backwards': 122, 'nan': float('nan'), 'infinity': float('inf'), 'bool': True}
+    waited = []
+
+    def wait(delay):
+        waited.append(delay)
+        if fault != 'stall':
+            original_wait(delay)
+
+    def evaluate(script, arg=None):
+        if waited and script == '() => performance.now()' and fault != 'stall':
+            return bad[fault]
+        return original_evaluate(script, arg)
+
+    page.wait_for_timeout, page.evaluate = wait, evaluate
+    result = collect_frame_sequence(page, canvas, lambda: None)
+    assert not result['complete']
+    assert result['error'] == ('TimeoutError' if fault == 'stall' else 'ValueError')
+    assert result['frame_deltas_ms'] == page.frames
+    assert len(waited) <= 2
+    assert page.cleaned and canvas.disposed
+
+
+@pytest.mark.parametrize('bad', [-1, True, float('nan'), float('inf'), 16, 0])
+def test_independent_clock_failure_blocks_late_operation(bad):
+    page, canvas = Page(), Canvas()
+    native = [0]
+    original = page.wait_for_timeout
+
+    def wait(delay):
+        original(delay)
+        native[0] = bad
+
+    page.wait_for_timeout = wait
+    result = collect_frame_sequence(page, canvas, lambda: None, clock=lambda: native[0])
+    assert not result['complete']
+    assert result['error'] == ('TimeoutError' if bad in (0, 16) else 'ValueError')
+    assert result['sequence']['pan_drags'] == 1
+    assert result['frame_deltas_ms'] == page.frames
+    assert page.cleaned and canvas.disposed
+
+
+@pytest.mark.parametrize('mode', ['preexisting', 'foreign', 'copied-token', 'missing'])
+def test_foreign_recorder_never_stopped_replaced_or_returned(mode):
+    page, canvas = Page(), Canvas()
+    foreign = dict(token='foreign', installed=123)
+    if mode == 'preexisting':
+        page.recorder = foreign
+
+    def replace():
+        nonlocal foreign
+        if mode == 'copied-token':
+            foreign = dict(page.recorder)
+        elif mode == 'missing':
+            foreign = None
+        page.recorder = foreign
+
+    result = collect_frame_sequence(page, canvas, replace)
+    assert not result['complete'] and result['error'] == 'RuntimeError'
+    assert page.recorder is foreign
+    assert result['frame_deltas_ms'] == []
+    assert not page.cleaned and canvas.disposed
+
+
+@pytest.mark.parametrize('exception', [KeyboardInterrupt, SystemExit])
+def test_cancellation_retains_type_only_partial_snapshot_and_releases(exception):
+    page, canvas = Page(), Canvas()
+
+    def cancel():
+        raise exception('SECRET-SENTINEL')
+
+    with pytest.raises(exception) as caught:
+        collect_frame_sequence(page, canvas, cancel)
+    raw = caught.value.x08_frame_snapshot
+    assert raw['error'] == exception.__name__
+    assert not raw['complete']
+    assert raw['frame_deltas_ms'] == page.frames
+    assert 'SECRET-SENTINEL' not in json.dumps(raw)
+    assert page.cleaned and canvas.disposed
+
+
+def test_cancellation_survives_cleanup_failure_and_disposal_is_attempted():
+    page, canvas = Page(), Canvas()
+    original = page.evaluate
+
+    def evaluate(script, arg=None):
+        if arg is not None and 'installed' in arg:
+            raise RuntimeError('SECRET-SENTINEL cleanup')
+        return original(script, arg)
+
+    def cancel():
+        raise KeyboardInterrupt('SECRET-SENTINEL action')
+
+    page.evaluate = evaluate
+    with pytest.raises(KeyboardInterrupt) as caught:
+        collect_frame_sequence(page, canvas, cancel)
+    assert caught.value.x08_frame_snapshot['error'] == 'KeyboardInterrupt'
+    assert canvas.disposed
+    assert 'SECRET-SENTINEL' not in json.dumps(caught.value.x08_frame_snapshot)
+
+
+def test_failed_install_reply_still_cleans_only_its_owned_recorder():
+    page, canvas = Page(), Canvas()
+    original = page.evaluate
+
+    def evaluate(script, arg=None):
+        result = original(script, arg)
+        if arg is not None and 'canvas' in arg:
+            raise RuntimeError('SECRET-SENTINEL after installation')
+        return result
+
+    page.evaluate = evaluate
+    result = collect_frame_sequence(page, canvas, lambda: None)
+    assert result['error'] == 'RuntimeError' and not result['complete']
+    assert result['frame_deltas_ms'] == page.frames
+    assert page.cleaned and page.recorder is None and canvas.disposed
+    assert 'SECRET-SENTINEL' not in json.dumps(result)
