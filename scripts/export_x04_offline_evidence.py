@@ -16,9 +16,24 @@ from drawing_dependency_report import from_pairs
 
 SCHEMA = 'leaf.x04.offline-evidence.v1'
 MAX_JSON_CONTAINER_DEPTH = 256
+MAX_JSON_INTEGER_DIGITS = 4300
+DEFAULT_MAX_INPUT_BYTES = 16 * 1024 * 1024
 
 
-def read_json(path):
+def read_bounded(stream, limit):
+    chunks = []
+    size = 0
+    while True:
+        chunk = stream.read(min(65536, limit - size + 1))
+        if not chunk:
+            return b''.join(chunks)
+        size += len(chunk)
+        if size > limit:
+            raise ValueError(f'Input exceeds the {limit}-byte ceiling.')
+        chunks.append(chunk)
+
+
+def read_json(path, max_input_bytes=DEFAULT_MAX_INPUT_BYTES):
     def unique_object(pairs):
         result = {}
         for key, value in pairs:
@@ -30,8 +45,31 @@ def read_json(path):
     def reject_constant(value):
         raise ValueError(f'Nonfinite JSON number: {value}')
 
-    return json.loads(Path(path).read_text(encoding='utf-8-sig'),
-                      object_pairs_hook=unique_object, parse_constant=reject_constant)
+    def bounded_integer(value):
+        if len(value.lstrip('-')) > MAX_JSON_INTEGER_DIGITS:
+            raise ValueError(f'JSON integer token exceeds {MAX_JSON_INTEGER_DIGITS} digits.')
+        return int(value)
+
+    if str(path) == '-':
+        encoded = read_bounded(sys.stdin.buffer, max_input_bytes)
+    else:
+        source = Path(path)
+        if source.stat().st_size > max_input_bytes:
+            raise ValueError(f'Input exceeds the {max_input_bytes}-byte ceiling.')
+        with source.open('rb') as stream:
+            encoded = read_bounded(stream, max_input_bytes)
+    return json.loads(encoded.decode('utf-8-sig'), object_pairs_hook=unique_object,
+                      parse_constant=reject_constant, parse_int=bounded_integer)
+
+
+def positive_byte_limit(value):
+    try:
+        limit = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError('Input byte ceiling must be a positive integer.') from None
+    if limit <= 0:
+        raise argparse.ArgumentTypeError('Input byte ceiling must be a positive integer.')
+    return limit
 
 
 def export_evidence(payload):
@@ -111,7 +149,7 @@ def write_json(value, output=None):
 
 
 def check_output_path(source, output):
-    if output is None:
+    if output is None or str(source) == '-':
         return
     source = Path(source)
     target = Path(output)
@@ -131,13 +169,15 @@ def report_failure(operation, error):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('input', type=Path, help='Synthetic saved evidence JSON')
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    parser.add_argument('input', help='Synthetic saved evidence JSON path, or - for stdin')
     parser.add_argument('--out', type=Path)
+    parser.add_argument('--max-input-bytes', type=positive_byte_limit, default=DEFAULT_MAX_INPUT_BYTES,
+                        help='Maximum input bytes, including BOM and whitespace (default: 16777216)')
     args = parser.parse_args(argv)
     try:
         check_output_path(args.input, args.out)
-        payload = read_json(args.input)
+        payload = read_json(args.input, args.max_input_bytes)
         artifact = export_evidence(payload)
         write_json(artifact, args.out)
     except (OSError, ValueError, TypeError, RecursionError) as error:
