@@ -114,6 +114,15 @@ describe("static Next CodeBuild adapter", () => {
       expect(f.send.mock.calls[0][0].input).toEqual({ ids: ["project:build"] });
     });
 
+  it.each([{}, { buildStatus: "IN_PROGRESS", currentPhase: "SUBMITTED" },
+    { buildStatus: "IN_PROGRESS", currentPhase: "QUEUED" },
+    { buildStatus: "IN_PROGRESS", currentPhase: "PROVISIONING" }])(
+    "maps a build awaiting execution to QUEUED: %j", async build => {
+      const f = fixture();
+      f.send.mockResolvedValue({ builds: [{ id: "project:build", ...build }] });
+      await expect(f.provider.state("project:build")).resolves.toBe("QUEUED");
+    });
+
   it.each([{}, { builds: [] }, { builds: [{ id: "other", buildStatus: "SUCCEEDED" }] }])(
     "returns FAULT for a missing build: %j", async response => {
       const f = fixture();

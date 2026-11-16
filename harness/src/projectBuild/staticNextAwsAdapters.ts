@@ -70,7 +70,11 @@ export function createCodeBuildStaticNextBuildProvider(options: {
     },
     async state(buildId) {
       const response = await client.send(new BatchGetBuildsCommand({ ids: [buildId] }));
-      const status = response.builds?.find(build => build.id === buildId)?.buildStatus;
+      const build = response.builds?.find(build => build.id === buildId);
+      const status: string | undefined = build?.buildStatus;
+      if (build && (status === undefined || ["SUBMITTED", "QUEUED", "PROVISIONING"].includes(build.currentPhase ?? ""))) {
+        return "QUEUED";
+      }
       switch (status) {
         case "QUEUED": case "IN_PROGRESS": case "SUCCEEDED": case "FAILED":
         case "FAULT": case "TIMED_OUT": case "STOPPED":
