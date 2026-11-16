@@ -131,12 +131,8 @@ def _tag_entities(doc, layers):
     layers = {layer.casefold() for layer in layers}
     for entity in doc.modelspace():
         if entity.dxf.layer.casefold() in layers:
-            if entity.dxftype() in ("TEXT", "MTEXT", "ATTRIB"):
+            if entity.dxftype() in ("TEXT", "MTEXT"):
                 yield entity
-        if entity.dxftype() == "INSERT":
-            for attrib in entity.attribs:
-                if attrib.dxf.layer.casefold() in layers:
-                    yield attrib
 
 
 def entities_on_bad_layers(doc, handles_or_layers):
@@ -188,50 +184,68 @@ def module_footprints(doc, layers, blocks):
 
 
 def _fill_polygon(entity):
-    _, Polygon, _, _ = dependencies()
+    _, Polygon, unary_union, _ = dependencies()
     from ezdxf.path import from_hatch
+    from shapely import make_valid
 
     if entity.dxftype() != "HATCH":
         # make_path handles DXF's swapped third/fourth SOLID vertices and OCS.
         return _polyline_polygon(entity)
     result = Polygon()
+    analysable = False
     for path in from_hatch(entity):
         vertices = list(path.flattening(distance=0.0001))
         if len(vertices) < 3:
-            raise ValueError("invalid hatch boundary")
+            continue
         polygon = Polygon([(point.x, point.y) for point in vertices])
         if not polygon.is_valid:
-            raise ValueError("invalid hatch boundary")
+            pending, parts = [make_valid(polygon)], []
+            while pending:
+                part = pending.pop()
+                if part.geom_type == "Polygon":
+                    parts.append(part)
+                elif part.geom_type in ("MultiPolygon", "GeometryCollection"):
+                    pending.extend(part.geoms)
+            polygon = unary_union(parts)
+        if polygon.is_empty:
+            continue
+        analysable = True
         # Nested hatch boundaries alternate filled regions and islands.
         result = result.symmetric_difference(polygon)
-    return result
+    return result if analysable else None
 
 
 def fill_cover(doc, footprints):
+    """Return covering fills and handles whose fill geometry cannot be analysed."""
     _, _, _, STRtree = dependencies()
-    if not footprints:
-        return []
     polygons = [polygon for _, polygon in footprints]
-    tree = STRtree(polygons)
+    tree = STRtree(polygons) if polygons else None
     msp = doc.modelspace()
     order = (msp.entities_in_redraw_order() if list(msp.get_redraw_order()) else iter(msp))
     entities = list(order)
     rank = {entity.dxf.handle: i for i, entity in enumerate(entities)}
-    failures = []
+    failures, unanalysable_handles = [], []
     for entity in entities:
         if entity.dxftype() not in ("HATCH", "SOLID", "TRACE"):
             continue
-        fill = _fill_polygon(entity)
-        if fill.is_empty:
-            continue
-        for index in tree.query(fill):
-            handle, polygon = footprints[int(index)]
-            if rank[entity.dxf.handle] <= rank[handle] or polygon.area <= 0:
+        try:
+            fill = _fill_polygon(entity)
+            if fill is None:
+                unanalysable_handles.append(entity.dxf.handle)
                 continue
-            fraction = polygon.intersection(fill).area / polygon.area
-            if fraction > 0.05 + 1e-12:
-                failures.append((handle, entity.dxf.handle, fraction))
-    return failures
+            covering = []
+            for index in tree.query(fill) if tree is not None else ():
+                handle, polygon = footprints[int(index)]
+                if rank[entity.dxf.handle] <= rank[handle] or polygon.area <= 0:
+                    continue
+                fraction = polygon.intersection(fill).area / polygon.area
+                if fraction > 0.05 + 1e-12:
+                    covering.append((handle, entity.dxf.handle, fraction))
+            failures.extend(covering)
+        except Exception:
+            unanalysable_handles.append(entity.dxf.handle)
+            continue
+    return failures, unanalysable_handles
 
 
 def mm_per_unit(doc):
@@ -241,29 +255,39 @@ def mm_per_unit(doc):
     return 1000.0 if units == 6 else 25.4
 
 
-def tag_checks(doc, tag_layers, sheet_scale):
+def tag_checks(doc, tag_layers, sheet_scale=None, *, model_units_per_paper_mm=None):
+    """Measure tags using recorded model-units/mm or viewport paper-mm/model-unit."""
     _, Polygon, _, STRtree = dependencies()
-    if not math.isfinite(sheet_scale) or sheet_scale <= 0:
-        raise ValueError("sheet scale must be finite and positive")
-    unit_mm = mm_per_unit(doc)
+    from ezdxf import bbox
+
+    if model_units_per_paper_mm is not None:
+        scale = float(model_units_per_paper_mm)
+        if not math.isfinite(scale) or scale <= 0:
+            raise ValueError("sheet scale must be finite and positive")
+        paper_factor = 1.0 / scale
+    else:
+        if sheet_scale is None or not math.isfinite(sheet_scale) or sheet_scale <= 0:
+            raise ValueError("sheet scale must be finite and positive")
+        paper_factor = sheet_scale
     handles, boxes, too_small = [], [], []
     for entity in _tag_entities(doc, tag_layers):
         is_mtext = entity.dxftype() == "MTEXT"
         height = float(entity.dxf.char_height if is_mtext else entity.dxf.height)
-        text = entity.plain_text() if is_mtext else entity.dxf.text
-        paper_mm = height * sheet_scale * unit_mm
+        if not math.isfinite(height) or height <= 0:
+            raise ValueError(f"invalid tag height: {entity.dxf.handle}")
+        paper_mm = height * paper_factor
         if paper_mm < 1.8 - 1e-12:
             too_small.append((entity.dxf.handle, paper_mm))
-        lines = text.splitlines() or [""]
-        width = height * 0.6 * max(map(len, lines))
-        box_height = height * len(lines)
-        x, y = entity.dxf.insert.x, entity.dxf.insert.y
-        angle = math.radians(entity.dxf.get("rotation", 0))
-        cosine, sine = math.cos(angle), math.sin(angle)
-        corners = [(x + px * cosine - py * sine, y + px * sine + py * cosine)
-                   for px, py in ((0, 0), (width, 0), (width, box_height), (0, box_height))]
-        # Compare axis-aligned envelopes, including rotated tags.
-        boxes.append(Polygon(corners).envelope)
+        bounds = bbox.extents([entity], fast=False)
+        if not bounds.has_data:
+            raise ValueError(f"tag has no text bounds: {entity.dxf.handle}")
+        left, bottom = bounds.extmin.x, bounds.extmin.y
+        right, top = bounds.extmax.x, bounds.extmax.y
+        if (not all(math.isfinite(value) for value in (left, bottom, right, top))
+                or right <= left or top <= bottom):
+            raise ValueError(f"invalid tag bounds: {entity.dxf.handle}")
+        # ezdxf accounts for font metrics, alignment, MTEXT wrapping and rotation.
+        boxes.append(Polygon([(left, bottom), (right, bottom), (right, top), (left, top)]))
         handles.append(entity.dxf.handle)
     overlaps = []
     if boxes:
@@ -281,6 +305,7 @@ def tag_checks(doc, tag_layers, sheet_scale):
 
 
 def sheet_scale(doc):
+    """Return paper mm per model unit from the first model viewport."""
     for layout in doc.layouts:
         if layout.name == "Model":
             continue
@@ -290,7 +315,8 @@ def sheet_scale(doc):
             height, view_height = viewport.dxf.height, viewport.dxf.view_height
             if (math.isfinite(height) and math.isfinite(view_height) and
                     height > 0 and view_height > 0):
-                return float(height / view_height)
+                paper_mm = 25.4 if layout.dxf.get("plot_paper_units", 1) == 0 else 1.0
+                return float(height / view_height) * paper_mm
             return None
     return None
 

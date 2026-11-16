@@ -20,7 +20,7 @@ from typing import Any, Dict, Literal
 
 from fastapi import APIRouter, Depends, Header
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, StrictStr
+from pydantic import BaseModel, Field, StrictBool, StrictInt, StrictStr
 
 import author_quota
 import catalog
@@ -88,7 +88,11 @@ class StageRequest(AuthorRequest):
 
 
 class StageRecoveryRequest(BaseModel):
-    idempotency_key: StrictStr = Field(..., min_length=1, max_length=200)
+    idempotency_key: StrictStr | None = Field(default=None, min_length=1, max_length=200)
+    change_set_id: StrictStr | None = Field(default=None, min_length=36, max_length=36)
+    retry: StrictBool = False
+    expected_version: StrictInt | None = Field(default=None, ge=0)
+    expected_attempt: StrictInt | None = Field(default=None, ge=0)
 
     class Config:
         extra = "forbid"
@@ -919,19 +923,41 @@ def stage(
 
 @router.post("/api/author/stage/recover")
 def recover_stage(
-    req: StageRecoveryRequest, tenant=Depends(deps.require_tenant)
+    req: StageRecoveryRequest, tenant=Depends(deps.require_tenant),
+    authority_session_id: str | None = Header(default=None, alias="X-Authority-Session-Id"),
+    authority_turn_id: str | None = Header(default=None, alias="X-Authority-Turn-Id"),
 ) -> Dict[str, Any]:
     denied = _customization_gate(5, tenant)
     if denied is not None:
         return denied
-    if not req.idempotency_key.strip():
+    if (bool(req.idempotency_key) == bool(req.change_set_id)
+            or (req.idempotency_key is not None and not req.idempotency_key.strip())
+            or (req.change_set_id is not None and not re.fullmatch(
+                r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", req.change_set_id))):
         return _customization_error(
             CustomizationServiceError("invalid_recovery_request", 422)
         )
+    if ((req.retry and (req.change_set_id is None or req.expected_version is None or req.expected_attempt is None))
+            or (not req.retry and (req.expected_version is not None or req.expected_attempt is not None))):
+        return _customization_error(CustomizationServiceError("invalid_recovery_request", 422))
     try:
-        outcome = CustomizationService.configured().recover_stage(
-            tenant=tenant, idempotency_key=req.idempotency_key
-        )
+        service = CustomizationService.configured()
+        if req.retry:
+            outcome = service.retry_author_stage(
+                tenant=tenant, change_set_id=req.change_set_id,
+                expected_version=req.expected_version, expected_attempt=req.expected_attempt,
+                authority_session_id=authority_session_id, authority_turn_id=authority_turn_id,
+            )
+        else:
+            outcome = service.recover_stage(
+                tenant=tenant, **({"change_set_id": req.change_set_id}
+                                if req.change_set_id is not None
+                                else {"idempotency_key": req.idempotency_key})
+            )
+    except author_quota.AuthorQuotaExceeded as exc:
+        return _quota_exceeded_response(str(tenant), exc)
+    except author_quota.AuthorQuotaStoreError as exc:
+        return _quota_store_error(exc)
     except ToolRecordFieldError as exc:
         return _record_fields_error(exc)
     except (CustomizationServiceError, AuthorityError) as exc:

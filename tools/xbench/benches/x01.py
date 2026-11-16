@@ -1,5 +1,6 @@
-"""X01 slice 1: grade Studio's converted original against its first solar export."""
+"""Grade Studio's converted original against its manifest-driven solar export."""
 
+from copy import deepcopy
 import hashlib
 from pathlib import Path
 import re
@@ -11,7 +12,7 @@ import xbench_session
 from xbench_studio import StudioClient, StudioError, disposable_project, new_idempotency_key, parse_error
 
 
-LIMITS = "X01 slice 1: original and export both come from Studio's own DWG conversion (version 1 vs head after panels import); stringing and tags are not driven yet, so step 3 is UNREADABLE until they are; the plot is an ezdxf render, not an AutoCAD plot."
+LIMITS = "X01: original and export both come from Studio's own DWG conversion (version 1 vs head after manifest-driven tools); step 3 requires recorded stringing settings; the plot is an ezdxf render, not an AutoCAD plot."
 
 
 def _row(fixture):
@@ -44,6 +45,10 @@ def grade_pair(fixture, original_bytes, export_bytes, *, row=None):
     except Exception as exc:
         for n in range(2, 6):
             _mark(row, n, "UNREADABLE", f"DXF analysis unavailable: {type(exc).__name__}")
+        if row.get("stringing_error"):
+            _mark(row, 3, "UNREADABLE", row["stringing_error"])
+        elif fixture.get("stringing") is None:
+            _mark(row, 3, "UNREADABLE", "no recorded stringing settings in manifest")
         return row
     row["observed_insunits"] = geometry.insunits(exported)
     row["original_insunits"] = geometry.insunits(original)
@@ -69,16 +74,23 @@ def grade_pair(fixture, original_bytes, export_bytes, *, row=None):
     except Exception as exc:
         _mark(row, 2, "UNREADABLE", f"module positions unavailable: {type(exc).__name__}")
     try:
-        tag_layers = fixture.get("tag_layers", [])
+        tag_layers = row.get("tag_layers", fixture.get("tag_layers", []))
         tags = list(geometry._tag_entities(exported, tag_layers))
-        scale = geometry.sheet_scale(exported)
+        recorded_scale = fixture.get("sheet_scale")
+        scale = recorded_scale if recorded_scale is not None else geometry.sheet_scale(exported)
         row["tag_count"], row["sheet_scale"] = len(tags), scale
-        if not tags:
-            _mark(row, 3, "UNREADABLE", "no text tags on manifest tag layers; stringing/tags not driven in slice 1")
+        row["sheet_scale_source"] = "manifest" if recorded_scale is not None else "viewport"
+        if fixture.get("stringing") is None:
+            _mark(row, 3, "UNREADABLE", "no recorded stringing settings in manifest")
+        elif row.get("stringing_error"):
+            _mark(row, 3, "UNREADABLE", row["stringing_error"])
+        elif not tags:
+            _mark(row, 3, "FAIL", "stringing ran but no tags exported")
         elif scale is None:
             _mark(row, 3, "UNREADABLE", "tags present, but no paper-space model viewport scale")
         else:
-            checks = geometry.tag_checks(exported, tag_layers, scale)
+            checks = geometry.tag_checks(exported, tag_layers, scale,
+                                         model_units_per_paper_mm=recorded_scale)
             failures = [_item(exported, handle, reason="tag below 1.8 mm", paper_mm=height)
                         for handle, height in checks["too_small"]]
             failures.extend(_item(exported, handle, reason="tag overlap exceeds 10%",
@@ -87,12 +99,15 @@ def grade_pair(fixture, original_bytes, export_bytes, *, row=None):
             _mark(row, 3, "FAIL" if failures else "PASS",
                   f"tags {checks['count']}; scale {scale}; failures {failures}", failures)
     except Exception as exc:
-        _mark(row, 3, "UNREADABLE", f"tag analysis unavailable: {type(exc).__name__}")
+        note = ("no recorded stringing settings in manifest" if fixture.get("stringing") is None else
+                row.get("stringing_error") or f"tag analysis unavailable: {type(exc).__name__}")
+        _mark(row, 3, "UNREADABLE", note)
     try:
         if points is None:
             raise ValueError("module selection unavailable")
         handles = [handle for handle, _, _ in points]
-        handles.extend(entity.dxf.handle for entity in geometry._tag_entities(exported, fixture.get("tag_layers", [])))
+        handles.extend(entity.dxf.handle for entity in geometry._tag_entities(
+            exported, row.get("tag_layers", fixture.get("tag_layers", []))))
         failures = [{"handle": handle, "layer": layer, "reason": reason}
                     for handle, layer, reason in geometry.entities_on_bad_layers(exported, handles)]
         _mark(row, 4, "FAIL" if failures else "PASS", f"bad layers {failures}", failures)
@@ -100,10 +115,17 @@ def grade_pair(fixture, original_bytes, export_bytes, *, row=None):
         _mark(row, 4, "UNREADABLE", f"layer analysis unavailable: {type(exc).__name__}")
     try:
         footprints = geometry.module_footprints(exported, layers, blocks)
+        covering, unanalysable = geometry.fill_cover(exported, footprints)
         failures = [_item(exported, handle, reason="fill covers more than 5%",
                           fill=_item(exported, fill), fraction=fraction)
-                    for handle, fill, fraction in geometry.fill_cover(exported, footprints)]
-        _mark(row, 5, "FAIL" if failures else "PASS", f"covering fills {failures}", failures)
+                    for handle, fill, fraction in covering]
+        verdict = "FAIL" if failures else "PASS"
+        evidence = f"covering fills {failures}"
+        if unanalysable:
+            evidence += f"; unanalysable fills {len(unanalysable)}; handles {unanalysable[:10]}"
+            if not failures and len(unanalysable) == len(exported.modelspace().query("HATCH SOLID TRACE")):
+                verdict = "UNREADABLE"
+        _mark(row, 5, verdict, evidence, failures)
     except Exception as exc:
         _mark(row, 5, "UNREADABLE", f"fill analysis unavailable: {type(exc).__name__}")
     return row
@@ -113,6 +135,29 @@ def _product_refusal(exc):
     return (isinstance(exc, StudioError) and 400 <= exc.status < 500
             and exc.status not in (401, 403, 408, 429)
             and exc.error_code != "AUTH_DENIED")
+
+
+def _tool_result(body):
+    """Unwrap the job record and normal result envelope, checking both for refusal."""
+    if not isinstance(body, dict):
+        raise StudioError(502, "INVALID_TOOL_RESPONSE", "Expected a tool result object")
+    while True:
+        state = body.get("status")
+        if (state in ("failed", "refused", "cancelled", "canceled") or body.get("ok") is False
+                or body.get("error")):
+            error = parse_error(422, body)
+            error.reason_code = error.reason_code or body.get("reason_code")
+            if not (error.reason_code or error.error_code):
+                error = StudioError(422, body.get("error_code") or "TOOL_FAILED",
+                                    body.get("message", "Tool did not complete"),
+                                    reason_code=body.get("reason_code"), body=body)
+            error.result_status = state if state in ("failed", "refused", "cancelled", "canceled") else "failed"
+            raise error
+        if state in ("submitted", "queued", "running", "pending"):
+            raise StudioError(502, "TOOL_NOT_SETTLED", "Tool did not return a terminal result")
+        if not isinstance(body.get("result"), dict):
+            return body
+        body = body["result"]
 
 
 def grade_files(client, *, project, fixtures, out_dir=None):
@@ -138,24 +183,33 @@ def grade_files(client, *, project, fixtures, out_dir=None):
             context = client.drawing_context(pid, version, did)
             rev = context.get("intake", {}).get("solar_design_graph", {}).get("rev", 0)
 
-            def call(tool, params):
+            def refresh():
                 nonlocal version, rev, context
+                context = client.drawing_context(pid, version, did)
+                version = context["context"]["head_version_id"]
+                context = client.drawing_context(pid, version, did)
+                rev = context.get("intake", {}).get("solar_design_graph", {}).get("rev", rev + 1)
+
+            def call(tool, params, *, receipt=None):
                 status, body = client.run(tool, org_id=project["org_id"], project_id=pid,
                                           version_id=version, params=params, capability=capability,
                                           idempotency_key=new_idempotency_key("x01"))
+                if receipt is not None:
+                    receipt["http_status"] = status
+                    if isinstance(body, dict):
+                        receipt["run_id"] = body.get("run_id") or body.get("job_id")
                 if not 200 <= status < 300:
                     raise parse_error(status, body)
                 if status == 202:
                     if not isinstance(body, dict) or not body.get("job_id"):
                         raise StudioError(502, "INVALID_JOB_RESPONSE", "Write accepted without a job ID")
                     body = client.wait_job(body["job_id"], timeout_s=600)
-                if isinstance(body, dict) and (body.get("status") == "failed" or body.get("ok") is False
-                                               or isinstance(body.get("error"), dict)):
-                    raise parse_error(422, body)
-                context = client.drawing_context(pid, version, did)
-                version = context["context"]["head_version_id"]
-                context = client.drawing_context(pid, version, did)
-                rev = context.get("intake", {}).get("solar_design_graph", {}).get("rev", rev + 1)
+                if receipt is not None and isinstance(body, dict):
+                    receipt["status"] = body.get("status", "complete")
+                    receipt["run_id"] = receipt["run_id"] or body.get("run_id") or body.get("job_id")
+                result = _tool_result(body)
+                refresh()
+                return result
 
             seed = {"schema_version": 1,
                     "source_intake_sha256": context["context"]["intake_sha256"],
@@ -167,6 +221,52 @@ def grade_files(client, *, project, fixtures, out_dir=None):
                                         "panel_layer_contains", fixture["module_layers"][0])},
                                     "initialize": seed})
             call("solar-panels-from-drawing", {"drawing_id": did, "expected_rev": rev})
+            if fixture.get("stringing") is not None:
+                row["stringing_runs"] = []
+                receipt = None
+                try:
+                    settings = fixture["stringing"]
+                    tools = [*settings.get("tools", []), settings["tag_tool"]]
+                    for index, tool in enumerate(tools):
+                        params = deepcopy(tool.get("params", {}))
+                        receipt = {"name": tool["name"], "params": params,
+                                   "run_id": None, "status": "not_started"}
+                        row["stringing_runs"].append(receipt)
+                        # Bind session-specific fields only when the catalog accepts them.
+                        catalog = next((entry for entry in client.tools() if entry.get("name") == tool["name"]), {})
+                        properties = catalog.get("params", {}).get("properties", {})
+                        for key, value in (("drawing_id", did), ("expected_rev", rev)):
+                            if key in properties or key in params:
+                                params[key] = value
+                        result = call(tool["name"], params, receipt=receipt)
+                        if index == len(tools) - 1:
+                            reported = result.get("tag_layers")
+                            if reported is None:
+                                reported = result.get("tag_layer", result.get("layers", result.get("layer")))
+                            if isinstance(reported, str):
+                                reported = [reported]
+                            if isinstance(reported, list) and all(isinstance(layer, str) for layer in reported):
+                                row["tag_layers"] = reported
+                except Exception as exc:
+                    name = receipt["name"] if receipt else "stringing configuration"
+                    error_body = exc.body if isinstance(exc, StudioError) and isinstance(exc.body, dict) else {}
+                    code = (exc.reason_code or error_body.get("reason_code") or exc.error_code or "TOOL_FAILED"
+                            if isinstance(exc, StudioError) else type(exc).__name__)
+                    message = str(exc.message) if isinstance(exc, StudioError) else str(exc)
+                    message = xbench_session.redact(message.replace(capability, "[redacted]"))
+                    safe_code = (code if isinstance(code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{1,63}", code)
+                                 else xbench_session.redact(str(code)))
+                    row["stringing_error"] = f"{name}: {safe_code}: {message[:300]}"
+                    if receipt is not None:
+                        outcome = getattr(exc, "result_status", "refused" if isinstance(exc, StudioError)
+                                          and 400 <= exc.status < 500 else "failed")
+                        receipt.update(status=outcome, reason_code=safe_code, message=message[:300])
+                        if isinstance(exc, StudioError):
+                            receipt["http_status"] = exc.status
+                            if isinstance(exc.body, dict):
+                                receipt["run_id"] = receipt["run_id"] or exc.body.get("run_id") or exc.body.get("job_id")
+                    # A refused run may still have published a drawing version.
+                    refresh()
             row["export_version_id"] = version
             exported = client.dxf_bytes(pid, did, version)
             grade_pair(fixture, original, exported, row=row)
