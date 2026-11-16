@@ -2,6 +2,7 @@
 import argparse
 import json
 import hashlib
+import math
 from pathlib import Path
 import re
 import os
@@ -42,6 +43,20 @@ def unique_members(pairs):
 
 def reject_constant(value):
     raise EvidenceError('NONFINITE_RECEIPT_VALUE')
+
+
+def receipt_integer(token):
+    # Explicit local bound, independent of the interpreter's configurable limit.
+    if len(token.lstrip('-')) > 4096:
+        raise EvidenceError('RECEIPT_INTEGER_BUDGET_EXCEEDED')
+    return int(token)
+
+
+def receipt_float(token):
+    value = float(token)
+    if not math.isfinite(value):
+        raise EvidenceError('NONFINITE_RECEIPT_VALUE')
+    return value
 
 
 class SourceBudget:
@@ -118,7 +133,8 @@ def read_receipt(path, *, limits=None):
             raise ValueError()
         text = raw.decode('utf-8')
         check_json_budget(text, limits)
-        value = json.loads(text, object_pairs_hook=unique_members, parse_constant=reject_constant)
+        value = json.loads(text, object_pairs_hook=unique_members, parse_constant=reject_constant,
+                           parse_int=receipt_integer, parse_float=receipt_float)
         if not isinstance(value, dict):
             raise ValueError()
         pending = [value]
