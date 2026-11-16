@@ -4,6 +4,8 @@ import json
 import hashlib
 from pathlib import Path
 import re
+import os
+import tempfile
 
 
 class EvidenceError(ValueError):
@@ -18,18 +20,73 @@ REQUIRED_SOURCE_FILES = frozenset({
 })
 
 
+REQUIRED_ASSERTIONS = {
+    1: ('fresh_proposal', 'correct_first_choice', 'confirmation_model_count'),
+    2: ('competing_sets', 'counts_match_oracles', 'one_copy_count'),
+    3: ('customer_scopes_differ', 'profile_ids_differ', 'initial_versions'),
+    4: ('both_counts_match', 'no_profile_edits'),
+    5: ('own_profile', 'alias_explicit', 'single_copy_count'),
+    6: ('both_incompatible_drawings_fresh', 'no_applied_foreign_profile', 'explicit_scope_refused', 'no_wrong_application'),
+    7: ('new_version', 'stable_profile_id', 'old_project_retains_version', 'new_project_pins_latest'),
+}
+
+
+def unique_members(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise EvidenceError('DUPLICATE_RECEIPT_KEY')
+        result[key] = value
+    return result
+
+
+def reject_constant(value):
+    raise EvidenceError('NONFINITE_RECEIPT_VALUE')
+
+
+class SourceBudget:
+    def __init__(self, limits=None):
+        limits = limits or {}
+        if set(limits) - {'file_bytes', 'total_bytes'} or any(type(value) is not int or value < 0 for value in limits.values()):
+            raise EvidenceError('INVALID_SOURCE_BUDGET')
+        self.file_bytes = limits.get('file_bytes', 8 * 1024 * 1024)
+        self.total_bytes = limits.get('total_bytes', 64 * 1024 * 1024)
+        self.used = 0
+
+    def digest(self, path):
+        digest = hashlib.sha256()
+        file_read = 0
+        try:
+            with path.open('rb') as stream:
+                while True:
+                    size = min(65536, self.file_bytes - file_read + 1, self.total_bytes - self.used + 1)
+                    chunk = stream.read(size)
+                    if not chunk:
+                        break
+                    file_read += len(chunk)
+                    self.used += len(chunk)
+                    if file_read > self.file_bytes or self.used > self.total_bytes:
+                        raise EvidenceError('SOURCE_READ_BUDGET_EXCEEDED')
+                    digest.update(chunk)
+        except OSError:
+            raise EvidenceError('UNREADABLE_SOURCE_FILE') from None
+        return digest.hexdigest()
+
+
 def read_receipt(path):
     try:
         with Path(path).open('rb') as stream:
             raw = stream.read(262145)
         if len(raw) > 262144:
             raise ValueError()
-        value = json.loads(raw.decode('utf-8'))
+        value = json.loads(raw.decode('utf-8'), object_pairs_hook=unique_members, parse_constant=reject_constant)
         if not isinstance(value, dict):
             raise ValueError()
         return value
     except FileNotFoundError:
         raise EvidenceError('MISSING_RECEIPT') from None
+    except EvidenceError:
+        raise
     except (ValueError, UnicodeError, OSError, RecursionError):
         raise EvidenceError('MALFORMED_RECEIPT') from None
 
@@ -42,7 +99,9 @@ def check_source(receipt, expected):
         raise EvidenceError('SOURCE_MISMATCH')
 
 
-def verify_files(receipt, source_root):
+def verify_files(receipt, source_root, *, state=None):
+    if state is None:
+        state = {'budget': SourceBudget(), 'files': {}}
     try:
         root = Path(source_root).resolve(strict=True)
     except (OSError, RuntimeError):
@@ -69,25 +128,20 @@ def verify_files(receipt, source_root):
             raise EvidenceError('SOURCE_PATH_ESCAPE') from None
         except (OSError, RuntimeError):
             raise EvidenceError('UNREADABLE_SOURCE_FILE') from None
-        try:
-            digest = hashlib.sha256()
-            with resolved.open('rb') as stream:
-                for chunk in iter(lambda: stream.read(65536), b''):
-                    digest.update(chunk)
-        except OSError:
-            raise EvidenceError('UNREADABLE_SOURCE_FILE') from None
-        if digest.hexdigest() != expected:
+        if state['budget'].digest(resolved) != expected:
             raise EvidenceError('SOURCE_DIGEST_MISMATCH')
+        state['files'][resolved] = expected
 
 
-def aggregate(journey_path, proof_paths, source_sha, source_root):
+def aggregate(journey_path, proof_paths, source_sha, source_root, *, limits=None):
+    state = {'budget': SourceBudget(limits), 'files': {}}
     if not isinstance(source_sha, str) or re.fullmatch('[0-9a-f]{40}', source_sha) is None:
         raise EvidenceError('INVALID_SOURCE')
     if not 1 <= len(proof_paths) <= 16:
         raise EvidenceError('MISSING_OR_EXCESS_PROOFS')
     journey = read_receipt(journey_path)
     check_source(journey, source_sha)
-    verify_files(journey, source_root)
+    verify_files(journey, source_root, state=state)
     if (journey.get('schema') != 'leaf.x07.synthetic-journey.v1'
             or journey.get('proof_mode') != 'synthetic_offline' or type(journey.get('source_dirty')) is not bool):
         raise EvidenceError('MALFORMED_JOURNEY')
@@ -101,6 +155,8 @@ def aggregate(journey_path, proof_paths, source_sha, source_root):
         assertions = step.get('assertions')
         if not isinstance(assertions, dict) or not assertions or any(type(value) is not bool for value in assertions.values()):
             raise EvidenceError('MALFORMED_ASSERTIONS')
+        if set(assertions) != set(REQUIRED_ASSERTIONS[step['n']]):
+            raise EvidenceError('MISSING_OR_UNKNOWN_ASSERTIONS')
         passed = all(assertions.values())
         if type(step.get('passed')) is not bool or step['passed'] != passed:
             raise EvidenceError('INCONSISTENT_STEP')
@@ -110,7 +166,7 @@ def aggregate(journey_path, proof_paths, source_sha, source_root):
     for path in proof_paths:
         proof = read_receipt(path)
         check_source(proof, source_sha)
-        verify_files(proof, source_root)
+        verify_files(proof, source_root, state=state)
         files = proof.get('files')
         if proof.get('schema') != 'leaf.x07.offline-proof.v1' or not isinstance(files, dict) or not files:
             raise EvidenceError('MALFORMED_PROOF')
@@ -118,9 +174,31 @@ def aggregate(journey_path, proof_paths, source_sha, source_root):
                for name, digest in files.items()):
             raise EvidenceError('MALFORMED_PROOF')
         proofs.append({'receipt': Path(path).name, 'source_sha': source_sha, 'file_digests': len(files)})
+    for path, expected in state['files'].items():
+        if state['budget'].digest(path) != expected:
+            raise EvidenceError('SOURCE_CHANGED_DURING_AGGREGATION')
     return {'schema': 'leaf.x07.offline-acceptance-report.v1', 'proof_mode': 'synthetic_offline',
         'source_sha': source_sha, 'source_dirty': journey.get('source_dirty'),
         'steps': [results[number] for number in range(1, 8)], 'local_proofs': proofs}
+
+
+def atomic_publish(path, encoded):
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='wb', dir=path.parent, prefix='.' + path.name + '.x07-', delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(encoded.encode('utf-8'))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def unreadable(error):
+    return {'schema': 'leaf.x07.offline-acceptance-report.v1', 'proof_mode': 'synthetic_offline',
+        'error': str(error), 'steps': [{'n': number, 'state': 'UNREADABLE'} for number in range(1, 8)]}
 
 
 def main():
@@ -130,17 +208,23 @@ def main():
     parser.add_argument('--journey', type=Path, required=True)
     parser.add_argument('--proof', type=Path, action='append', required=True)
     parser.add_argument('--out', type=Path)
+    parser.add_argument('--max-file-bytes', type=int, default=8 * 1024 * 1024)
+    parser.add_argument('--max-source-bytes', type=int, default=64 * 1024 * 1024)
     args = parser.parse_args()
     code = 0
     try:
-        result = aggregate(args.journey, args.proof, args.source_sha, args.source_root)
+        result = aggregate(args.journey, args.proof, args.source_sha, args.source_root,
+            limits={'file_bytes': args.max_file_bytes, 'total_bytes': args.max_source_bytes})
     except EvidenceError as error:
         code = 2
-        result = {'schema': 'leaf.x07.offline-acceptance-report.v1', 'proof_mode': 'synthetic_offline',
-            'error': str(error), 'steps': [{'n': number, 'state': 'UNREADABLE'} for number in range(1, 8)]}
+        result = unreadable(error)
     encoded = json.dumps(result, indent=2) + '\n'
     if args.out:
-        args.out.write_text(encoded, encoding='utf-8')
+        try:
+            atomic_publish(args.out, encoded)
+        except OSError:
+            code = 2
+            encoded = json.dumps(unreadable('REPORT_PUBLICATION_FAILED'), indent=2) + '\n'
     print(encoded, end='')
     return code
 

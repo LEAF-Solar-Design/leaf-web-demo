@@ -23,7 +23,7 @@ class ReportStepIdentity(unittest.TestCase):
                 if fault == 'duplicate': journey['steps'][6]['n'] = 1
                 elif fault == 'contradiction': journey['steps'][0]['passed'] = False
                 elif fault == 'passed_string': journey['steps'][0]['passed'] = 'true'
-                elif fault == 'assertion_string': journey['steps'][0]['assertions']['independent_count'] = 'false'
+                elif fault == 'assertion_string': journey['steps'][0]['assertions']['fresh_proposal'] = 'false'
                 else: journey['steps'][0]['n'] = True
                 paths[0].write_text(json.dumps(journey), encoding='utf-8')
                 output = StringIO()

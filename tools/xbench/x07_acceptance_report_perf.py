@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 import time
 import tracemalloc
-from x07_offline_acceptance_report import REQUIRED_SOURCE_FILES, aggregate, verify_files
+from x07_offline_acceptance_report import REQUIRED_SOURCE_FILES, REQUIRED_ASSERTIONS, aggregate, verify_files
 
 
 def measure(bytes_per_file, proof_count, iterations):
@@ -25,7 +25,7 @@ def measure(bytes_per_file, proof_count, iterations):
         source = 'a' * 40
         journey = {'schema': 'leaf.x07.synthetic-journey.v1', 'proof_mode': 'synthetic_offline',
             'source_sha': source, 'source_dirty': False, 'files': files,
-            'steps': [{'n': number, 'passed': True, 'assertions': {'fixture_oracle': True}} for number in range(1, 8)]}
+            'steps': [{'n': number, 'passed': True, 'assertions': {name: True for name in REQUIRED_ASSERTIONS[number]}} for number in range(1, 8)]}
         journey_path = root / 'journey.json'
         journey_path.write_text(json.dumps(journey), encoding='utf-8')
         proofs = []

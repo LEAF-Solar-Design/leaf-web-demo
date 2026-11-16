@@ -1157,7 +1157,8 @@ def build_suites() -> List[Suite]:
                   "tests/test_x07_store_path_aliasing.py", "tests/test_x07_offline_acceptance_report.py",
                   "tests/test_x07_source_receipts.py", "tests/test_x07_receipt_scope_namespace.py",
                   "tests/test_x07_receipt_lock_recovery.py", "tests/test_x07_wal_checkpoint_interruption.py",
-                  "../tools/xbench/tests/test_x07_report_step_identity.py"], 160),
+                  "../tools/xbench/tests/test_x07_report_step_identity.py",
+                  "tests/test_x07_report_cli_integrity.py"], 166),
         # W5 Rooftop workflow flow (2026-09-24, contracts G34/G34a/G34b): server/solar_workflow_flow.py,
         # the pure progression engine (every step's CanAdvance and HasDrawingPrerequisites, the L1/L2
         # gates on the host's setting, AdvanceStep, GoBack and NavigateToStep Stale marking over the

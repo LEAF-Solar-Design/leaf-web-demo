@@ -24,7 +24,7 @@ class OfflineAcceptanceReport(unittest.TestCase):
             files[name] = hashlib.sha256(path.read_bytes()).hexdigest()
         journey = {'schema': 'leaf.x07.synthetic-journey.v1', 'proof_mode': 'synthetic_offline', 'source_sha': SOURCE,
             'source_dirty': False, 'files': files,
-            'steps': [{'n': number, 'passed': True, 'assertions': {'independent_count': True}} for number in range(1, 8)]}
+            'steps': [{'n': number, 'passed': True, 'assertions': {name: True for name in report.REQUIRED_ASSERTIONS[number]}} for number in range(1, 8)]}
         proof = {'schema': 'leaf.x07.offline-proof.v1', 'local_source': SOURCE, 'files': dict(files)}
         paths = [root / 'journey.json', root / 'proof.json']
         for path, value in zip(paths, [journey, proof]):
@@ -61,7 +61,8 @@ class OfflineAcceptanceReport(unittest.TestCase):
     def test_failed_assertion_stays_a_synthetic_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             paths, journey, _ = self.fixtures(Path(directory))
-            journey['steps'][3].update(passed=False, assertions={'independent_count': False})
+            journey['steps'][3]['passed'] = False
+            journey['steps'][3]['assertions']['both_counts_match'] = False
             paths[0].write_text(json.dumps(journey), encoding='utf-8')
             result = report.aggregate(paths[0], [paths[1]], SOURCE, Path(directory))
             self.assertEqual(result['steps'][3]['state'], 'SYNTHETIC_FAIL')
