@@ -7414,3 +7414,148 @@ def test_all_zero_oracle_rows_remain_unreadable_after_omission_without_sum_chang
     # Zero panel/optimizer rows already violate the positive-count schema;
     # the separate zero-DC case isolates valid-row ownership uncertainty.
     assert result['metrics']['optimizers']['grid_comparison']['verdict']=='UNREADABLE'
+
+
+def fraction_fixed_text(value):
+    from fractions import Fraction
+    value=Fraction(value)
+    places=0
+    while 10**places % value.denominator: places+=1
+    units=abs(value.numerator)*(10**places//value.denominator)
+    sign='-' if value<0 else ''
+    if not places: return sign+str(units)
+    whole,fraction=divmod(units,10**places)
+    return f'{sign}{whole}.{fraction:0{places}d}'
+
+
+@pytest.mark.parametrize('shared_grid',[False,True])
+@pytest.mark.parametrize('shared_device',[False,True])
+@pytest.mark.parametrize('metric,field,opposite',[('panels','oracle_panels',False),('panels','oracle_panels',True),('kw_dc','oracle_dc_power',False),('kw_dc','oracle_dc_power',True)])
+def test_paired_oracle_perturbations_match_fraction_owner_sums(shared_grid,shared_device,metric,field,opposite):
+    from fractions import Fraction
+    from benches import x05_reconcile as m
+    grid,evidence=oracle_load_component('pair')
+    if shared_grid: grid,evidence=coarsen_oracle_load_grids(grid,evidence)
+    if shared_device: grid,evidence=coarsen_oracle_load_devices(grid,evidence)
+    baseline=m._seven_step_oracle_loads(grid,evidence)
+    assert baseline['verdict']=='PASS'
+    amount=Fraction(1,4) if metric=='kw_dc' else Fraction(1)
+    changes=[amount,-amount if opposite else amount]
+    for row,change in zip(evidence[field],changes):
+        value=Fraction(row[metric])+change
+        row[metric]=fraction_fixed_text(value) if metric=='kw_dc' else int(value)
+    original=deepcopy((grid,evidence))
+    result=m._seven_step_oracle_loads(grid,evidence)
+    for target,owners,id_key in [('grid',evidence['oracle_string_owners'],'grid_id'),('inverter',evidence['oracle_assignments'],'inverter_id')]:
+        predicted={}
+        for owner,change in zip(owners,changes): predicted[owner[id_key]]=predicted.get(owner[id_key],Fraction(0))+change
+        predicted={key:value for key,value in predicted.items() if value}
+        check=result['metrics'][metric][target+'_comparison']
+        assert check['mismatch_count']==len(predicted)
+        assert {row[id_key]:Fraction(row['delta']) for row in check['examples']}==predicted
+        assert check['verdict']==('FAIL' if predicted else 'PASS')
+    for other in ('strings','optimizers','panels','kw_dc'):
+        if other!=metric: assert result['metrics'][other]==baseline['metrics'][other]
+    assert (grid,evidence)==original
+
+
+def test_disconnected_oracle_component_removal_exposes_exact_capped_examples():
+    from fractions import Fraction
+    from benches import x05_reconcile as m
+    parts=[oracle_load_component(f'remove{i:02}',True) for i in range(13)]
+    grid,evidence=union_oracle_load_components(*parts)
+    baseline=m._seven_step_oracle_loads(grid,evidence)
+    removed_grid,removed=parts[0]
+    grids=set(removed_grid['expected_grid_ids']); devices=set(removed['oracle_inverter_ids'])
+    strings={row['string_id'] for row in removed['oracle_strings']}
+    grid['expected_grid_ids']=[key for key in grid['expected_grid_ids'] if key not in grids]
+    for field in ('string_totals','optimizer_totals','panel_totals','dc_totals'):
+        grid[field]={key:value for key,value in grid[field].items() if key not in grids}
+    evidence['oracle_inverter_ids']=[key for key in evidence['oracle_inverter_ids'] if key not in devices]
+    for field in ('oracle_strings','oracle_panels','oracle_dc_power','oracle_string_owners','oracle_assignments'):
+        evidence[field]=[row for row in evidence[field] if row['string_id'] not in strings]
+    for metric,totals in evidence['inverter_loads'].items():
+        evidence['inverter_loads'][metric]={key:value for key,value in totals.items() if key not in devices}
+        value=Fraction(evidence['oracle_values'][metric])-Fraction(removed['oracle_values'][metric])
+        evidence['oracle_values'][metric]=fraction_fixed_text(value) if metric=='kw_dc' else int(value)
+    original=deepcopy((grid,evidence))
+    result=m._seven_step_oracle_loads(grid,evidence)
+    assert result==m._seven_step_oracle_loads(*union_oracle_load_components(*parts[1:]))
+    for metric,checks in result['metrics'].items():
+        for target,id_key in [('grid','grid_id'),('inverter','inverter_id')]:
+            before=baseline['metrics'][metric][target+'_comparison']; after=checks[target+'_comparison']
+            assert before['mismatch_count']==26 and after['mismatch_count']==24
+            assert len(after['examples'])==MAX_STRING_EXAMPLES
+            assert [row[id_key] for row in after['examples']]==[f'remove{i:02}{"g" if target=="grid" else "i"}{j}' for i in range(1,11) for j in (0,1)]
+            assert Fraction(after['examples'][-1]['delta'])==Fraction(after['examples'][-1]['saved'])-Fraction(after['examples'][-1]['oracle'])
+    assert (grid,evidence)==original
+
+
+@pytest.mark.parametrize('broken',[False,True])
+def test_joint_oracle_grid_device_coarsening_commutes_exactly(broken):
+    from benches import x05_reconcile as m
+    grid,evidence=oracle_load_component('joint',broken)
+    original=deepcopy((grid,evidence))
+    first=coarsen_oracle_load_devices(*coarsen_oracle_load_grids(grid,evidence))
+    second=coarsen_oracle_load_grids(*coarsen_oracle_load_devices(grid,evidence))
+    assert first==second
+    assert m._seven_step_oracle_loads(*first)==m._seven_step_oracle_loads(*second)
+    assert m._seven_step_oracle_loads(*first)['verdict']=='PASS'
+    assert (grid,evidence)==original
+
+
+@pytest.mark.parametrize('width',[78,79,80])
+@pytest.mark.parametrize('tiny_places',[1,76,77])
+def test_oracle_dc_accumulation_width_edges_never_round_to_pass(width,tiny_places):
+    from fractions import Fraction
+    from benches import x05_reconcile as m
+    grid,evidence=coarsen_oracle_load_devices(*coarsen_oracle_load_grids(*oracle_load_component('wide')))
+    major='9'*width; tiny='0.'+'0'*(tiny_places-1)+'1'
+    evidence['oracle_dc_power'][0]['kw_dc']=major
+    evidence['oracle_dc_power'][1]['kw_dc']=tiny
+    grid['dc_totals']={'coarse':major}
+    evidence['inverter_loads']['kw_dc']={'coarse-device':major}
+    evidence['oracle_values']['kw_dc']=major
+    exact=Fraction(major)+Fraction(tiny)
+    result=m._seven_step_oracle_loads(grid,evidence)
+    checks=result['metrics']['kw_dc']
+    for target in ('grid','inverter'):
+        check=checks[target+'_comparison']
+        assert check['verdict']=='FAIL' and check['mismatch_count']==1
+        row=check['examples'][0]
+        assert Fraction(row['saved'])==exact and Fraction(row['delta'])==Fraction(tiny)
+        assert Fraction(row['saved'])-Fraction(row['oracle'])==Fraction(tiny)
+    supplied=fraction_fixed_text(exact)
+    grid['dc_totals']['coarse']=supplied
+    evidence['inverter_loads']['kw_dc']['coarse-device']=supplied
+    result=m._seven_step_oracle_loads(grid,evidence)
+    for target in ('grid','inverter'):
+        check=result['metrics']['kw_dc'][target+'_comparison']
+        assert check['verdict']==('UNREADABLE' if len(supplied)>80 else 'PASS')
+        if len(supplied)>80: assert 'unreadable' in check['reason']
+
+
+@pytest.mark.parametrize('mutation',['power','connections','both'])
+def test_oracle_loads_ignore_reopen_mutations_while_composed_failures_survive(mutation):
+    from benches import x05_reconcile as m
+    expected,records=bound_seven_fixture_records()
+    envelope=connection_envelope(); source=envelope['assurance']
+    source['manifest']['fixture_id']=source['evidence']['fixture_id']=expected[0]
+    source['bindings']={key:deepcopy(source['manifest']) for key in PROVENANCE_STAGES}
+    records[0]['envelope']=envelope
+    baseline=m.aggregate_bound_seven_steps(expected,records)
+    assert baseline['verdict']=='PASS'
+    evidence=source['evidence']
+    if mutation in ('power','both'):
+        rows=envelope['grid']['reopened_dc_power']; rows[0]['kw_dc'],rows[1]['kw_dc']=rows[1]['kw_dc'],rows[0]['kw_dc']
+    if mutation in ('connections','both'):
+        rows=evidence['reopened_assignments']; rows[0]['inverter_id'],rows[1]['inverter_id']=rows[1]['inverter_id'],rows[0]['inverter_id']
+    original=deepcopy(records)
+    result=m.aggregate_bound_seven_steps(expected,records)
+    before=baseline['fixtures'][expected[0]]['reconciliation']; after=result['fixtures'][expected[0]]['reconciliation']
+    assert after['oracle_loads']==before['oracle_loads']
+    if mutation in ('power','both'): assert after['string_metrics']['verdict']=='FAIL'
+    if mutation in ('connections','both'): assert after['assignment_reopen']['verdict']=='FAIL'
+    assert result['fixtures'][expected[0]]['verdict']=='FAIL'
+    assert all(result['fixtures'][key]==baseline['fixtures'][key] for key in expected[1:])
+    assert records==original
