@@ -35,8 +35,21 @@ sys.path.insert(0,str(Path.cwd()/'server'))
 from x07_customer_profile_store import CustomerProfileStore
 from x07_profile_workflow import ProfileWorkflow
 from x07_workflow_adapter import WorkflowAdapter
-request=json.load(sys.stdin)
+def unique_pairs(pairs):
+    result={}
+    for key,value in pairs:
+        if key in result: raise ValueError('ambiguous duplicate JSON key')
+        result[key]=value
+    return result
+try: request=json.load(sys.stdin,object_pairs_hook=unique_pairs)
+except ValueError:
+    print(json.dumps({'ok':False,'error':{'message':'Ambiguous duplicate or invalid JSON request.','code':'BRIDGE_DUPLICATE_JSON_KEY'}}));sys.exit(0)
 protocol=request.get('protocol_fault')
+if protocol and protocol.startswith('duplicate_reply_'):
+    key={'duplicate_reply_customer':'customer_key','duplicate_reply_version':'version','duplicate_reply_role':'block'}[protocol]
+    body='{"'+key+'":1,"'+key+'":2}'
+    if key=='block': body='{"roles":{"module":'+body+'}}'
+    print('{"ok":true,"result":'+body+'}');sys.exit(0)
 if protocol=='eof': sys.exit(0)
 if protocol=='malformed': print('{not JSON'); sys.exit(0)
 if protocol=='nonzero': sys.stderr.write('injected protocol exit'); sys.exit(23)
@@ -74,6 +87,37 @@ const copies = [0, 10].map(x => ({ block: 'Panel', layer: 'MODULES', design_wind
 const ctx = (project, drawing = project + ':v1') => ({ customer_key: 'synthetic-a', project_key: project, drawing_key: drawing })
 const calls = [], children = new Set()
 const protocolStats = []
+// JSON.parse validates grammar first. This second bounded walk retains member
+// names that JSON.parse would otherwise overwrite, including escaped aliases.
+function strictJSON(text) {
+  const value = JSON.parse(text); let index = 0
+  const whitespace = () => { while (/\s/.test(text[index] || '') && index < text.length) index++ }
+  const string = () => {
+    const start = index++
+    while (index < text.length) { const char = text[index++]; if (char === '\\') index++; else if (char === '"') break }
+    return JSON.parse(text.slice(start, index))
+  }
+  const walk = () => {
+    whitespace()
+    if (text[index] === '{') {
+      index++; whitespace(); const names = new Set()
+      while (text[index] !== '}') {
+        const key = string()
+        if (names.has(key)) { const error = new Error('Ambiguous duplicate JSON key.'); error.code = 'BRIDGE_DUPLICATE_JSON_KEY'; throw error }
+        names.add(key); whitespace(); index++; walk(); whitespace()
+        if (text[index] !== ',') break
+        index++; whitespace()
+      }
+      index++
+    } else if (text[index] === '[') {
+      index++; whitespace()
+      while (text[index] !== ']') { walk(); whitespace(); if (text[index] !== ',') break; index++ }
+      index++
+    } else if (text[index] === '"') string()
+    else { while (index < text.length && !/[\s,}\]]/.test(text[index])) index++ }
+  }
+  walk(); return value
+}
 function rpc(bound, op, context, value, signal, fault = null, protocolFault = null, fixture = {}) {
   calls.push({ op, context, value })
   return new Promise((resolve, reject) => {
@@ -126,12 +170,17 @@ function rpc(bound, op, context, value, signal, fault = null, protocolFault = nu
       if (code !== 0) { const error = new Error('Python JSON worker failed: ' + stderr.slice(0, 500)); error.code = 'BRIDGE_EXIT'; settle(error); return }
       if (!stdout.trim()) { const error = new Error('Python JSON worker returned no JSON.'); error.code = 'BRIDGE_EOF'; settle(error); return }
       try {
-        const response = JSON.parse(stdout)
+        const response = strictJSON(stdout)
         if (!response.ok) { const error = new Error(response.error.message); error.code = response.error.code; settle(error) }
         else { protocolStats[protocolStats.length-1].receipts++; settle(null, response.result) }
-      } catch { const error = new Error('Python JSON worker returned malformed JSON.'); error.code = 'BRIDGE_MALFORMED_JSON'; settle(error) }
+      } catch (cause) { const error = new Error(cause.code === 'BRIDGE_DUPLICATE_JSON_KEY' ? cause.message : 'Python JSON worker returned malformed JSON.'); error.code = cause.code || 'BRIDGE_MALFORMED_JSON'; settle(error) }
     })
-    child.stdin.end(JSON.stringify({ database, bound_context: bound, context, op, value, intake, copies, fault, protocol_fault: protocolFault, fixture }))
+    let request = JSON.stringify({ database, bound_context: bound, context, op, value, intake, copies, fault, protocol_fault: protocolFault, fixture })
+    if (fixture.duplicate_request_key) {
+      const token = JSON.stringify(fixture.duplicate_request_key) + ':'
+      request = request.replace(token, token + 'null,' + token)
+    }
+    child.stdin.end(request)
   })
 }
 function mount(context, overrides = {}) {
@@ -202,6 +251,6 @@ async function dispose() {
     if (fs.existsSync(database)) fs.unlinkSync(database)
     fs.rmdirSync(root)
 }
-module.exports = { rpc, ctx, copies, intake, mount, screen, fireEvent, waitFor, cleanup, dispose, component, React, render, within, protocolStats,
+module.exports = { strictJSON, rpc, ctx, copies, intake, mount, screen, fireEvent, waitFor, cleanup, dispose, component, React, render, within, protocolStats,
   resources: () => ({ child_count: children.size, database, root }) }
 if (require.main === module) main().catch(error => { console.error(error); process.exitCode = 1 })

@@ -32,7 +32,17 @@ class ConfirmationReceiptStore:
         self.path = Path(path)
         db = sqlite3.connect(self.path)
         try:
-            with db: db.execute('CREATE TABLE IF NOT EXISTS confirmations (project_key TEXT PRIMARY KEY, customer_key TEXT NOT NULL, digest TEXT NOT NULL, result TEXT NOT NULL)')
+            with db:
+                db.execute('BEGIN IMMEDIATE')
+                version = db.execute('PRAGMA user_version').fetchone()[0]
+                ddl = 'CREATE TABLE confirmations (project_key TEXT PRIMARY KEY, customer_key TEXT NOT NULL, digest TEXT NOT NULL, result TEXT NOT NULL)'
+                objects = db.execute("SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name").fetchall()
+                if version not in (0, 1) or (objects and objects != [('table', 'confirmations', ddl)]):
+                    raise ValueError('unsupported confirmation journal schema')
+                if not objects:
+                    if version: raise ValueError('unsupported confirmation journal schema')
+                    db.execute(ddl)
+                if version == 0: db.execute('PRAGMA user_version=1')
         finally: db.close()
 
     def run(self, context, digest, produce, validate):
@@ -44,7 +54,19 @@ class ConfirmationReceiptStore:
                 if row:
                     if row[0] != context['customer_key']: raise ProfileScopeError('receipt belongs to another customer')
                     if row[1] != digest: raise ValueError('confirmation retry payload changed')
-                    result = json.loads(row[2]);validate(result);return result
+                    try:
+                        if not isinstance(row[2], str) or len(row[2].encode('utf-8')) > 262144:
+                            raise ValueError()
+                        result = json.loads(row[2], parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+                        if (not isinstance(result, dict) or result.get('schema') != 'leaf.x07.profile-workflow.v1'
+                                or result.get('state') != 'applied'
+                                or any(result.get(key) != value for key,value in context.items())
+                                or not isinstance(result.get('applied_profile'), dict)
+                                or result['applied_profile'].get('customer_key') != context['customer_key']):
+                            raise ValueError()
+                    except (ValueError, TypeError, RecursionError, UnicodeError):
+                        raise ValueError('invalid confirmation receipt') from None
+                    validate(result);return result
                 result = produce()
                 db.execute('INSERT INTO confirmations VALUES (?,?,?,?)',
                     (context['project_key'],context['customer_key'],digest,json.dumps(result,allow_nan=False)))
