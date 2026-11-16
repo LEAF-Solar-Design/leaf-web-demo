@@ -16,6 +16,7 @@ from benches.x05_reconcile import (METRICS, TABLE_COLUMNS, check_discrepancies,
     aggregate_fixtures, decode_evidence_json, reconcile_json,
     aggregate_fixtures_json, MAX_JSON_CHARS, MAX_JSON_DEPTH, serialize_result,
     PROVENANCE_STAGES, validate_fixture_provenance,
+    IDENTITY_STAGES, validate_saved_design_identity, verify_input_bytes, reconcile_with_provenance,
     compare_csv_view, compare_recommendations, compare_snapshots, compare_strings, compare_table)
 
 
@@ -1460,3 +1461,121 @@ def test_readable_corruption_failures_survive_composition_and_aggregation(kind, 
     assert aggregate["verdict"] == "FAIL"
     assert aggregate["fixtures"][expected[0]] == reconcile_offline(evidence)
     assert all(aggregate["fixtures"][key]["verdict"] == "PASS" for key in expected[1:])
+
+
+def provenance_fixture():
+    inputs = dict(dwg=b"synthetic drawing", report=b"synthetic report", bom=b"synthetic BOM")
+    frozen = dict(fixture_id="synthetic", inputs={key: sha256(value).hexdigest() for key, value in inputs.items()})
+    return frozen, {stage: deepcopy(frozen) for stage in PROVENANCE_STAGES}, inputs
+
+
+def test_provenance_composition_keeps_all_diagnostics_and_unreadable_precedence():
+    frozen, bindings, _ = provenance_fixture()
+    evidence = complete_evidence()
+    baseline = reconcile_offline(evidence)
+    result = reconcile_with_provenance(evidence, frozen, bindings)
+    assert result["verdict"] == "PASS" and result["reconciliation"] == baseline
+    evidence["recommendations"][0]["group_count"] = 1
+    failed = reconcile_offline(evidence)
+    assert reconcile_with_provenance(evidence, frozen, bindings)["verdict"] == "FAIL"
+    bindings["strings"]["inputs"]["report"] = "d" * 64
+    result = reconcile_with_provenance(evidence, frozen, bindings)
+    assert result["verdict"] == "UNREADABLE" and result["reconciliation"] == failed
+    _, bindings, _ = provenance_fixture()
+    evidence["fixture_id"] = "foreign"
+    result = reconcile_with_provenance(evidence, frozen, bindings)
+    assert result["provenance"]["reason"] == "evidence_fixture_identity_conflict"
+    assert result["reconciliation"] == reconcile_offline(evidence)
+    for missing in (None, {}, {"fixture_id": "synthetic"}):
+        result = reconcile_with_provenance(missing, frozen, bindings)
+        assert result["verdict"] == "UNREADABLE"
+        assert result["reconciliation"] == reconcile_offline(missing)
+
+
+@pytest.mark.parametrize("bom", [False, True])
+def test_input_byte_hashes_detect_one_byte_substitutions_and_uncertainty(bom):
+    frozen, _, inputs = provenance_fixture()
+    if not bom:
+        del frozen["inputs"]["bom"]
+        del inputs["bom"]
+    preserved = deepcopy((frozen, inputs))
+    assert verify_input_bytes(frozen, inputs)["verdict"] == "PASS"
+    for role in inputs:
+        swapped = dict(inputs)
+        swapped[role] = bytes([inputs[role][0] ^ 1]) + inputs[role][1:]
+        assert verify_input_bytes(frozen, swapped) == {
+            "verdict": "UNREADABLE", "reason": "input_digest_conflict", "roles": [role]}
+        for wrong in (None, "synthetic_private_canary", bytearray(inputs[role]), 42):
+            swapped[role] = wrong
+            assert verify_input_bytes(frozen, swapped) == {
+                "verdict": "UNREADABLE", "reason": "input_bytes_unreadable", "role": role}
+        missing = dict(inputs)
+        del missing[role]
+        assert verify_input_bytes(frozen, missing)["reason"] == "input_bytes_missing"
+    for bad in (None, [], {}, dict(inputs, extra=b"synthetic")):
+        assert verify_input_bytes(frozen, bad)["verdict"] == "UNREADABLE"
+    assert verify_input_bytes({}, inputs)["reason"] == "frozen_manifest_unreadable"
+    assert (frozen, inputs) == preserved
+
+
+def test_saved_design_identity_rejects_mixed_projects_and_versions_even_with_equal_totals():
+    expected = dict(project_id="project-a", version_id="version-a")
+    stages = {stage: dict(expected) for stage in IDENTITY_STAGES}
+    preserved = deepcopy((expected, stages))
+    assert validate_saved_design_identity(expected, stages)["verdict"] == "PASS"
+    assert reconcile_offline(complete_evidence())["verdict"] == "PASS"
+    for stage in IDENTITY_STAGES:
+        for key in expected:
+            changed = deepcopy(stages)
+            changed[stage][key] = "foreign"
+            assert validate_saved_design_identity(expected, changed) == {
+                "verdict": "UNREADABLE", "reason": "design_identity_conflict", "stage": stage}
+            for wrong in (None, " ", True, [], "x" * 129):
+                changed[stage][key] = wrong
+                assert validate_saved_design_identity(expected, changed)["reason"] == "stage_design_identity_unreadable"
+        missing = deepcopy(stages)
+        del missing[stage]
+        assert validate_saved_design_identity(expected, missing)["reason"] == "design_identity_stages_unreadable"
+    for bad in (None, {}, dict(expected, extra=True)):
+        assert validate_saved_design_identity(bad, stages)["reason"] == "design_identity_unreadable"
+    assert (expected, stages) == preserved
+
+
+def test_provenance_conflicts_have_order_independent_named_diagnostics():
+    frozen, bindings, _ = provenance_fixture()
+    for stage in ("strings", "table", "reopen"):
+        bindings[stage]["inputs"]["report"] = "d" * 64
+    preserved = deepcopy((frozen, bindings))
+    expected = {"verdict": "UNREADABLE", "reason": "stage_binding_conflict", "stage": "strings"}
+    for roles in permutations(frozen["inputs"]):
+        manifest = dict(frozen, inputs={key: frozen["inputs"][key] for key in roles})
+        for stage_order in permutations(PROVENANCE_STAGES):
+            assert validate_fixture_provenance(manifest, {key: bindings[key] for key in stage_order}) == expected
+    assert (frozen, bindings) == preserved
+
+
+@pytest.mark.parametrize("stage", PROVENANCE_STAGES)
+def test_provenance_schema_mutations_are_fixed_and_sanitized(stage):
+    frozen, bindings, _ = provenance_fixture()
+    for bad_container in (None, [], "synthetic_private_canary", 42):
+        changed = deepcopy(bindings)
+        changed[stage] = bad_container
+        assert validate_fixture_provenance(frozen, changed) == {
+            "verdict": "UNREADABLE", "reason": "stage_binding_unreadable", "stage": stage}
+    for bad in ([], None, dict(frozen["inputs"], unexpected="a" * 64),
+                dict(frozen["inputs"], report="synthetic_private_canary"),
+                dict(frozen["inputs"], report="z" * 64)):
+        changed = deepcopy(bindings)
+        changed[stage]["inputs"] = bad
+        observed = validate_fixture_provenance(frozen, changed)
+        assert observed == {"verdict": "UNREADABLE", "reason": "stage_binding_unreadable", "stage": stage}
+        assert "synthetic_private_canary" not in serialize_result(observed)
+    changed = deepcopy(bindings)
+    del changed[stage]["inputs"]["bom"]
+    assert validate_fixture_provenance(frozen, changed)["reason"] == "stage_binding_conflict"
+    no_bom = dict(frozen, inputs={key: value for key, value in frozen["inputs"].items() if key != "bom"})
+    changed = {name: deepcopy(no_bom) for name in PROVENANCE_STAGES}
+    changed[stage]["inputs"]["bom"] = "c" * 64
+    assert validate_fixture_provenance(no_bom, changed)["reason"] == "stage_binding_conflict"
+    for top in (None, [], "synthetic_private_canary", dict(bindings, unexpected={} )):
+        assert validate_fixture_provenance(frozen, top)["reason"] == "provenance_stages_unreadable"

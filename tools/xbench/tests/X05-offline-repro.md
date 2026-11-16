@@ -295,6 +295,58 @@ that these supplied claims agree. The caller must independently establish the
 manifest's frozen origin and hash actual input bytes; this helper does neither
 and is not wired into live grading or used to infer provenance from the product.
 
+`reconcile_with_provenance(evidence, frozen_manifest, stage_bindings)` preserves
+all six checks under `reconciliation`, adds `provenance`, and binds
+`evidence.fixture_id` to the supplied manifest. UNREADABLE takes precedence over
+FAIL. This entry point is separate from the existing JSON CLI.
+`verify_input_bytes(manifest, inputs)` hashes an exact dictionary of supplied
+`bytes` for the manifest roles. Missing/wrong-type bytes or unequal digests are
+UNREADABLE. It opens no file and makes no network request. Matching actual bytes
+still cannot authenticate the supplied manifest's frozen origin.
+
+`validate_saved_design_identity(expected, stages)` separately compares explicit
+`project_id` and `version_id` strings across `saved_strings`, `table`, `csv` and
+`reopened`. Each stage must carry both exact identifiers; equal totals cannot
+replace them. This validates supplied claims, not the producer of those claims.
+
+Executable synthetic provenance replay from the repository root:
+
+```powershell
+@'
+import sys
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import (
+    PROVENANCE_STAGES, validate_fixture_provenance, reconcile_with_provenance)
+manifest = dict(fixture_id='synthetic', inputs=dict(dwg='a'*64, report='b'*64))
+bindings = {stage: deepcopy(manifest) for stage in PROVENANCE_STAGES}
+matching = validate_fixture_provenance(manifest, bindings)
+print(matching['verdict'], matching['reason'])
+swapped = deepcopy(bindings)
+swapped['strings']['inputs']['report'] = 'c'*64
+conflict = validate_fixture_provenance(manifest, swapped)
+print(conflict['verdict'], conflict['reason'], conflict['stage'])
+foreign = reconcile_with_provenance(dict(fixture_id='foreign'), manifest, bindings)
+print(foreign['verdict'], foreign['provenance']['reason'])
+assert matching['verdict'] == 'PASS'
+assert conflict == dict(verdict='UNREADABLE', reason='stage_binding_conflict', stage='strings')
+assert foreign['provenance']['reason'] == 'evidence_fixture_identity_conflict'
+'@ | python -P
+```
+
+Exact stdout:
+
+```text
+PASS supplied_provenance_equal
+UNREADABLE stage_binding_conflict strings
+UNREADABLE evidence_fixture_identity_conflict
+```
+
+The foreign example deliberately omits all six stage inputs; their diagnostics
+remain available under `reconciliation`. This replay creates no files or live
+state. Matching synthetic hash claims prove agreement only, never frozen origin
+or X05 bench acceptance.
+
 Canonical snapshot compatibility contract:
 
 - Hash UTF-8 bytes of compact JSON arrays with ASCII escapes and no spaces.

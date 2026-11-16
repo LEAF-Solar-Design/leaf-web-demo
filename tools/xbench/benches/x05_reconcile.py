@@ -26,6 +26,7 @@ MAX_RECOMMENDATION_EXAMPLES = 20
 MAX_JSON_CHARS = 262144
 MAX_JSON_DEPTH = 32
 PROVENANCE_STAGES = ("strings", "grouping", "table", "policy", "reopen", "csv_view")
+IDENTITY_STAGES = ("saved_strings", "table", "csv", "reopened")
 _CSV_LOCK = RLock()
 
 
@@ -33,28 +34,76 @@ def _out(verdict, reason, **evidence):
     return {"verdict": verdict, "reason": reason, **evidence}
 
 
+def _fixture_binding(value):
+    if type(value) is not dict or set(value) != {"fixture_id", "inputs"}:
+        return False
+    identifier, inputs = value["fixture_id"], value["inputs"]
+    return (type(identifier) is str and bool(identifier.strip()) and len(identifier) <= 128
+            and type(inputs) is dict and set(inputs) in ({"dwg", "report"}, {"dwg", "report", "bom"})
+            and all(type(digest) is str and re.fullmatch(r"[0-9a-f]{64}", digest)
+                    for digest in inputs.values()))
+
+
 def validate_fixture_provenance(frozen_manifest, stage_bindings):
     """Compare supplied bindings only; never infer provenance from product output."""
-    def binding(value):
-        if type(value) is not dict or set(value) != {"fixture_id", "inputs"}:
-            return False
-        identifier, inputs = value["fixture_id"], value["inputs"]
-        return (type(identifier) is str and bool(identifier.strip()) and len(identifier) <= 128
-                and type(inputs) is dict and set(inputs) in ({"dwg", "report"}, {"dwg", "report", "bom"})
-                and all(type(digest) is str and re.fullmatch(r"[0-9a-f]{64}", digest)
-                        for digest in inputs.values()))
-
-    if not binding(frozen_manifest):
+    if not _fixture_binding(frozen_manifest):
         return _out("UNREADABLE", "frozen_manifest_unreadable")
     if type(stage_bindings) is not dict or set(stage_bindings) != set(PROVENANCE_STAGES):
         return _out("UNREADABLE", "provenance_stages_unreadable")
     for stage in PROVENANCE_STAGES:
         supplied = stage_bindings[stage]
-        if not binding(supplied):
+        if not _fixture_binding(supplied):
             return _out("UNREADABLE", "stage_binding_unreadable", stage=stage)
         if supplied != frozen_manifest:
             return _out("UNREADABLE", "stage_binding_conflict", stage=stage)
     return _out("PASS", "supplied_provenance_equal", stage_count=len(PROVENANCE_STAGES))
+
+
+def verify_input_bytes(frozen_manifest, supplied_inputs):
+    """Hash caller-supplied bytes only, with no file or network access."""
+    if not _fixture_binding(frozen_manifest):
+        return _out("UNREADABLE", "frozen_manifest_unreadable")
+    expected = frozen_manifest["inputs"]
+    if type(supplied_inputs) is not dict or set(supplied_inputs) != set(expected):
+        return _out("UNREADABLE", "input_bytes_missing")
+    roles = sorted(expected)
+    for role in roles:
+        if type(supplied_inputs[role]) is not bytes:
+            return _out("UNREADABLE", "input_bytes_unreadable", role=role)
+    conflicts = [role for role in roles if sha256(supplied_inputs[role]).hexdigest() != expected[role]]
+    return _out("UNREADABLE" if conflicts else "PASS",
+                "input_digest_conflict" if conflicts else "supplied_input_bytes_equal", roles=conflicts)
+
+
+def validate_saved_design_identity(expected_identity, stage_identities):
+    """Compare explicit project/version claims, never infer identity from totals."""
+    def valid(value):
+        return (type(value) is dict and set(value) == {"project_id", "version_id"}
+                and all(type(item) is str and bool(item.strip()) and len(item) <= 128
+                        for item in value.values()))
+
+    if not valid(expected_identity):
+        return _out("UNREADABLE", "design_identity_unreadable")
+    if type(stage_identities) is not dict or set(stage_identities) != set(IDENTITY_STAGES):
+        return _out("UNREADABLE", "design_identity_stages_unreadable")
+    for stage in IDENTITY_STAGES:
+        if not valid(stage_identities[stage]):
+            return _out("UNREADABLE", "stage_design_identity_unreadable", stage=stage)
+        if stage_identities[stage] != expected_identity:
+            return _out("UNREADABLE", "design_identity_conflict", stage=stage)
+    return _out("PASS", "supplied_design_identity_equal")
+
+
+def reconcile_with_provenance(evidence, frozen_manifest, stage_bindings):
+    """Keep all offline diagnostics while requiring supplied provenance agreement."""
+    provenance = validate_fixture_provenance(frozen_manifest, stage_bindings)
+    if provenance["verdict"] == "PASS":
+        if type(evidence) is not dict or evidence.get("fixture_id") != frozen_manifest["fixture_id"]:
+            provenance = _out("UNREADABLE", "evidence_fixture_identity_conflict")
+    reconciliation = reconcile_offline(evidence)
+    verdict = "UNREADABLE" if provenance["verdict"] == "UNREADABLE" else reconciliation["verdict"]
+    return _out(verdict, "offline_provenance_reconciliation", provenance=provenance,
+                reconciliation=reconciliation)
 
 
 def _numeric(value, *, count=False, signed=False):
