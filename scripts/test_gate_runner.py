@@ -5459,23 +5459,25 @@ def _wellformed_reused_from():
     }
 
 
-def test_verify_gate_proof_accepts_a_wellformed_reused_proof(tmp_path, capsys):
+@pytest.mark.parametrize("allow_device", [False, True])
+def test_verify_gate_proof_accepts_a_wellformed_reused_proof(tmp_path, capsys, allow_device):
     g, out, tree, data = _emitted_proof_for_mode_tests(tmp_path)
     data.update(mode="reused", reused_from=_wellformed_reused_from())
     out.write_text(json.dumps(data), encoding="utf-8")
 
-    assert g.verify_gate_proof(out, tree) == 0
+    assert g.verify_gate_proof(out, tree, allow_device_verdict=allow_device) == 0
     assert "VERIFIED mode: reused from 3 CI builds" in capsys.readouterr().out
 
 
-def test_verify_gate_proof_keeps_mode_run_and_absent_unchanged(tmp_path, capsys):
+@pytest.mark.parametrize("allow_device", [False, True])
+def test_verify_gate_proof_keeps_mode_run_and_absent_unchanged(tmp_path, capsys, allow_device):
     g, out, tree, data = _emitted_proof_for_mode_tests(tmp_path)
     for explicit_mode in (False, True):
         if explicit_mode:
             data["mode"] = "run"
         out.write_text(json.dumps(data), encoding="utf-8")
 
-        assert g.verify_gate_proof(out, tree) == 0
+        assert g.verify_gate_proof(out, tree, allow_device_verdict=allow_device) == 0
         output = capsys.readouterr().out
         assert "VERIFIED: gate proof binds tree" in output
         assert "VERIFIED mode: run" in output
@@ -5539,6 +5541,122 @@ def test_reused_from_problem_never_raises(reused_from):
     assert isinstance(problem, str) and problem
 
 
+def _device_verdict_gate_proof():
+    return {
+        "schema": 2, "kind": "leaf-gate-proof", "tree": "b" * 40,
+        "mode": "device-verdict", "coverage": "selected",
+        "device_verdict": {
+            "bucket": "device-verdicts", "version_id": "version-1", "sha256": "c" * 64,
+            "key": "forge-ci-relay/device-verdicts/v1/LEAF-Solar-Design/leaf-web-demo/"
+                   + "a" * 40 + "/dv-0123456789abcdef.json",
+            "repository": "LEAF-Solar-Design/leaf-web-demo", "head_sha": "a" * 40,
+            "run_id": "dv-0123456789abcdef", "verdict_schema": "leaf.forge-ci.device-verdict.v1",
+            "mode": "selected", "state": "success", "shard_total": 2,
+            "shards": [{"shard": i, "run_id": f"dv-{i:016x}", "state": "success"}
+                       for i in range(2)],
+        },
+    }
+
+
+@pytest.mark.parametrize("allowed", [False, True])
+def test_device_verdict_gate_proof_cli_requires_allow_device(tmp_path, monkeypatch, capsys, allowed):
+    g = _load_runner()
+    data = _device_verdict_gate_proof()
+    proof = tmp_path / "gate-proof.json"
+    proof.write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["run-all-gates.py", "--verify-gate-proof", str(proof),
+                                    "--expect-tree", data["tree"]]
+                        + (["--allow-device-verdict"] if allowed else []))
+    # Device proofs must never depend on or imply the suite catalog's results.
+    monkeypatch.setattr(g, "build_suites", lambda: pytest.fail("device proof consulted catalog"))
+    assert g.main() == (0 if allowed else 1)
+    output = capsys.readouterr().out
+    if allowed:
+        assert output == "VERIFIED mode: device-verdict coverage=selected\n"
+    else:
+        assert output == "NOT VERIFIED: unknown proof mode 'device-verdict'; only run and reused are accepted\n"
+
+
+@pytest.mark.parametrize("path,value,reason", [
+    (("schema",), 2.0, "schema"),
+    (("kind",), "other", "schema-2"),
+    (("tree",), "c" * 40, "bound to tree"),
+    (("tree",), 42, "40-hex tree"),
+    (("coverage",), "full", "coverage"),
+    (("device_verdict",), [], "object"),
+    (("device_verdict", "extra"), "unknown", "extra"),
+    (("extra",), "unknown", "extra"),
+    (("audit_suites",), [], "audit_suites"),
+    (("total_suites",), 1, "total_suites"),
+    (("results",), [], "results"),
+    (("suites",), [], "suites"),
+    (("reused_from",), {}, "reused_from"),
+    (("device_verdict", "bucket"), "", "bucket"),
+    (("device_verdict", "version_id"), None, "version_id"),
+    (("device_verdict", "sha256"), "z" * 64, "sha256"),
+    (("device_verdict", "key"), "wrong/path", "key"),
+    (("device_verdict", "repository"), "other/repo", "repository"),
+    (("device_verdict", "head_sha"), "d" * 40, "head_sha"),
+    (("device_verdict", "run_id"), "dv-ffffffffffffffff", "run_id"),
+    (("device_verdict", "verdict_schema"), "other", "verdict_schema"),
+    (("device_verdict", "mode"), "full", "mode"),
+    (("device_verdict", "state"), "failure", "state"),
+    (("device_verdict", "shard_total"), 3, "shard_total"),
+    (("device_verdict", "shard_total"), 0, "shard_total"),
+    (("device_verdict", "shard_total"), True, "shard_total"),
+    (("device_verdict", "shard_total"), 2.0, "shard_total"),
+    (("device_verdict", "shards"), [], "shard_total"),
+    (("device_verdict", "shards"), {}, "shards"),
+    (("device_verdict", "shards", 1), None, "entry"),
+    (("device_verdict", "shards", 1, "shard"), 0, "indices"),
+    (("device_verdict", "shards", 1, "shard"), 2, "indices"),
+    (("device_verdict", "shards", 1, "shard"), True, "indices"),
+    (("device_verdict", "shards", 1, "state"), "failure", "success"),
+    (("device_verdict", "shards", 1, "run_id"), "bad", "run_id"),
+    (("device_verdict", "shards", 1, "extra"), True, "entry"),
+])
+def test_device_verdict_gate_proof_refuses_mutations(tmp_path, capsys, path, value, reason):
+    g = _load_runner()
+    data = _device_verdict_gate_proof()
+    target = data
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    proof = tmp_path / "gate-proof.json"
+    proof.write_text(json.dumps(data), encoding="utf-8")
+    assert g.verify_gate_proof(proof, "b" * 40, allow_device_verdict=True) == 1
+    output = capsys.readouterr().out
+    assert output.startswith("NOT VERIFIED: ") and reason in output
+
+
+@pytest.mark.parametrize("section,key", [
+    *[((), key) for key in _device_verdict_gate_proof()],
+    *[(("device_verdict",), key) for key in _device_verdict_gate_proof()["device_verdict"]],
+    *[(("device_verdict", "shards", 0), key) for key in ("shard", "run_id", "state")],
+])
+def test_device_verdict_gate_proof_refuses_missing_fields(tmp_path, capsys, section, key):
+    g = _load_runner()
+    data = _device_verdict_gate_proof()
+    target = data
+    for part in section:
+        target = target[part]
+    del target[key]
+    proof = tmp_path / "gate-proof.json"
+    proof.write_text(json.dumps(data), encoding="utf-8")
+    assert g.verify_gate_proof(proof, "b" * 40, allow_device_verdict=True) == 1
+    assert capsys.readouterr().out.startswith("NOT VERIFIED: ")
+
+
+def test_device_verdict_gate_proof_refuses_missing_shard(tmp_path, capsys):
+    g = _load_runner()
+    data = _device_verdict_gate_proof()
+    data["device_verdict"]["shards"].pop()
+    proof = tmp_path / "gate-proof.json"
+    proof.write_text(json.dumps(data), encoding="utf-8")
+    assert g.verify_gate_proof(proof, data["tree"], allow_device_verdict=True) == 1
+    assert "shard_total" in capsys.readouterr().out
+
+
 def test_proof_cli_rejects_incoherent_flag_combinations(tmp_path):
     """Same silence class as the shard CLI guards: each of these would
     otherwise answer a different question than the one typed. All must exit 2
@@ -5546,6 +5664,7 @@ def test_proof_cli_rejects_incoherent_flag_combinations(tmp_path):
     proof = tmp_path / "gate-proof.json"
     proof.write_text("{}", encoding="utf-8")
     cases = (
+        ["--allow-device-verdict"],
         ["--verify-gate-proof", str(proof)],                      # no tree
         ["--expect-tree", "0" * 40],                              # no proof
         ["--emit-proof", str(tmp_path / "out.json")],             # no fan-in

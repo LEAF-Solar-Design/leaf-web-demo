@@ -7586,11 +7586,68 @@ def reused_from_problem(reused_from) -> str:
     return ""
 
 
-def verify_gate_proof(proof_path: Path, expect_tree: str) -> int:
+def device_verdict_problem(data: dict) -> str:
+    """Validate the staging-only selected proof without inventing suite results."""
+    fields = {"schema", "kind", "tree", "mode", "coverage", "device_verdict"}
+    if set(data) != fields:
+        return f"device proof fields differ: missing {sorted(fields - set(data))}, unexpected {sorted(set(data) - fields)}"
+    if type(data["schema"]) is not int:
+        return "schema must be integer 2"
+    if data["coverage"] != "selected":
+        return "coverage must be selected"
+    verdict = data["device_verdict"]
+    fields = {"bucket", "key", "version_id", "sha256", "repository", "head_sha",
+              "run_id", "verdict_schema", "mode", "state", "shard_total", "shards"}
+    if not isinstance(verdict, dict):
+        return "device_verdict must be an object"
+    if set(verdict) != fields:
+        return f"device_verdict fields differ: missing {sorted(fields - set(verdict))}, unexpected {sorted(set(verdict) - fields)}"
+    for key in fields - {"shard_total", "shards"}:
+        if not isinstance(verdict[key], str) or not verdict[key].strip():
+            return f"device_verdict.{key} must be a non-empty string"
+    for key, expected in (("repository", "LEAF-Solar-Design/leaf-web-demo"),
+                          ("verdict_schema", "leaf.forge-ci.device-verdict.v1"),
+                          ("mode", "selected"), ("state", "success")):
+        if verdict[key] != expected:
+            return f"device_verdict.{key} must be {expected}"
+    match = re.fullmatch(
+        r"forge-ci-relay/device-verdicts/v1/LEAF-Solar-Design/leaf-web-demo/([0-9a-f]{40})/(dv-[0-9a-f]{16})\.json",
+        verdict["key"])
+    if not match:
+        return "device_verdict.key has invalid format"
+    if verdict["head_sha"] != match[1]:
+        return "device_verdict.head_sha differs from key"
+    if verdict["run_id"] != match[2]:
+        return "device_verdict.run_id differs from key"
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", verdict["sha256"]):
+        return "device_verdict.sha256 must be 64 hex characters"
+    total = verdict["shard_total"]
+    if type(total) is not int or total < 1:
+        return "device_verdict.shard_total must be an integer >= 1"
+    shards = verdict["shards"]
+    if not isinstance(shards, list) or len(shards) != total:
+        return "device_verdict.shards must be a list matching shard_total"
+    seen = set()
+    for shard in shards:
+        if not isinstance(shard, dict) or set(shard) != {"shard", "run_id", "state"}:
+            return "device_verdict.shards entry must have exactly shard, run_id, state"
+        index = shard["shard"]
+        if type(index) is not int or not 0 <= index < total or index in seen:
+            return "device_verdict.shards indices must be exactly 0..shard_total-1, each once"
+        seen.add(index)
+        if not isinstance(shard["run_id"], str) or not re.fullmatch(r"dv-[0-9a-f]{16}", shard["run_id"]):
+            return "device_verdict.shards run_id must be dv-hex16"
+        if shard["state"] != "success":
+            return "device_verdict.shards state must be success"
+    return ""
+
+
+def verify_gate_proof(proof_path: Path, expect_tree: str, *, allow_device_verdict: bool = False) -> int:
     """Exit code for --verify-gate-proof: 0 only when the document is a
-    schema-2 tree-bound gate proof whose tree equals `expect_tree`, whose
-    catalog fingerprint equals the one THIS checkout derives, AND whose
-    audit_suites carries no UNAVAILABLE status. Runs nothing.
+    schema-2 tree-bound gate proof whose tree equals `expect_tree`. Run and
+    reused proofs must match THIS checkout's catalog fingerprint and carry
+    passing audit_suites. Device-verdict proofs require explicit caller
+    opt-in and selected device evidence instead of suite results. Runs nothing.
 
     The UNAVAILABLE check is requirement (1) of the round-1 blocker-2 fix: a
     registry outage must never become a reusable green skip. It runs here,
@@ -7631,6 +7688,16 @@ def verify_gate_proof(proof_path: Path, expect_tree: str) -> int:
     if tree != expect:
         print(f"NOT VERIFIED: proof is bound to tree {tree}, expected {expect}")
         return 1
+    if data.get("mode") == "device-verdict":
+        if not allow_device_verdict:
+            print("NOT VERIFIED: unknown proof mode 'device-verdict'; only run and reused are accepted")
+            return 1
+        problem = device_verdict_problem(data)
+        if problem:
+            print(f"NOT VERIFIED: {problem}")
+            return 1
+        print("VERIFIED mode: device-verdict coverage=selected")
+        return 0
     suites = build_suites()
     if duplicate_suite_ids(suites):
         print("NOT VERIFIED: catalog has duplicate suite ids; fix "
@@ -8477,7 +8544,12 @@ def main() -> int:
     ap.add_argument("--expect-tree", default=None, metavar="TREEHEX",
                     help="the 40-hex git tree id --verify-gate-proof must find in "
                          "the proof document.")
+    ap.add_argument("--allow-device-verdict", action="store_true",
+                    help="allow a staging selected device-verdict proof in proof-check mode")
     args = ap.parse_args()
+
+    if args.allow_device_verdict and not args.verify_gate_proof:
+        ap.error("--allow-device-verdict requires --verify-gate-proof")
 
     if args.before_heavy_command is not None and not args.early_feedback:
         ap.error("--before-heavy-command requires --early-feedback")
@@ -8530,7 +8602,8 @@ def main() -> int:
             print("--verify-gate-proof is a proof-check mode and takes no other "
                   "mode or run flags")
             return 2
-        return verify_gate_proof(Path(args.verify_gate_proof), args.expect_tree)
+        return verify_gate_proof(Path(args.verify_gate_proof), args.expect_tree,
+                                 allow_device_verdict=args.allow_device_verdict)
 
     if args.emit_proof and not args.verify_shard_results:
         print("--emit-proof requires --verify-shard-results: the proof is the "

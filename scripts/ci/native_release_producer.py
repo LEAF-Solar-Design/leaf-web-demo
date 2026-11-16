@@ -876,7 +876,8 @@ def produce_release(root: Path, output: Path, request: dict, env: dict, codebuil
     work = Path(tempfile.mkdtemp(prefix="leaf-native-release-"))
     proof_path = work / "gate-proof.json"
     proof_path.write_bytes(proof)
-    subprocess.run([sys.executable, "scripts/run-all-gates.py", "--verify-gate-proof", str(proof_path), "--expect-tree", tree],
+    subprocess.run([sys.executable, "scripts/run-all-gates.py", "--verify-gate-proof", str(proof_path), "--expect-tree", tree]
+                   + (["--allow-device-verdict"] if env.get("LEAF_GATE_ALLOW_DEVICE_VERDICT") == "staging" else []),
                    cwd=root, check=True, timeout=120)
     if "selection" in request:
         contract.fixed_native_lane(gate_request, "gate")
@@ -1116,7 +1117,9 @@ def produce_forge(env: dict, codebuild, s3, *, admit_only=False):
             proof_path = work / "gate-proof.json"
             proof_path.write_bytes(proof)
             subprocess.run([sys.executable, "scripts/run-all-gates.py", "--verify-gate-proof",
-                            str(proof_path), "--expect-tree", tree], cwd=root, check=True, timeout=120)
+                            str(proof_path), "--expect-tree", tree]
+                           + (["--allow-device-verdict"] if env.get("LEAF_GATE_ALLOW_DEVICE_VERDICT") == "staging" else []),
+                           cwd=root, check=True, timeout=120)
             revision = request["solver_snapshot"]["commit"]
             pins = json.loads((root / "deploy/autofill-solver-sources.json").read_text())
             if not isinstance(pins, dict) or set(pins) != {revision}:
