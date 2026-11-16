@@ -26,7 +26,9 @@ The packet keeps the caller's full parsed input plus its ID maps and `checked` r
 
 Artifact validation temporarily serializes its input, copies drawing/dependency data and builds a count result (`scripts/export_x04_offline_evidence.py:90,136-141`). Packet and saved-report checks also serialize their inputs. These overlapping transient allocations are not a fixed memory multiplier. CLI output serialization retains chunks and a joined output string (`scripts/export_x04_offline_evidence.py:154-163`), adding O(encoded output size). The byte ceilings are not exact RAM limits.
 
-## Bounded optimization proposal, not implemented
+## Bounded optimization proposal at the inspected base
+
+At the base named above this was a proposal, not an implementation. A later worktree change may implement it; the historical call counts and observations above still describe that base.
 
 Extract a pure comparison builder that accepts two already validated results plus their embedded selection/dependency data. Keep the existing public comparison function validating its operands. Let the packet call the builder with its call-local `checked` map. Successful packet calls would then fall from A + 2C to A, while every artifact, including unused ones, still validates once. Repeated batch behavior need not change.
 

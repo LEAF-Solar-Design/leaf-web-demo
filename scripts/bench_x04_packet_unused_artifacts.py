@@ -45,7 +45,7 @@ def main():
             checker.validate_evidence, comparison.validate_evidence = original, other
             elapsed = time.perf_counter() - started
             _, peak = tracemalloc.get_traced_memory(); tracemalloc.stop()
-        assert calls == unused + 3
+        assert calls == unused + 1
         assert payload == before and len(checked['validated_artifacts']) == unused + 1
         assert checked['comparisons'][0]['report']['count']['delta'] == 0
         assert checked['batches'][0]['report']['results'][0]['recomputed_result']['count'] == 1

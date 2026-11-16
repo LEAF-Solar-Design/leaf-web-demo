@@ -54,7 +54,7 @@ def main():
                     elapsed = time.perf_counter() - started
                     _, peak = tracemalloc.get_traced_memory()
                     tracemalloc.stop()
-                assert calls == size + 2
+                assert calls == size
                 assert value == before and result['valid']
                 assert len(result['validated_artifacts']) == size
                 assert result['batches'][0]['artifact_ids'] == refs
