@@ -6190,7 +6190,9 @@ def select_pr_tier(suites: List[Suite], tier: dict) -> List[Suite]:
             family = {row["id"] for row in rows if row["cwd"] == "web"
                       or row["id"] in {"studio-walk-regressions", "web-demo-gate"}}
             protected = new | (ids & set(priority)) | (set(PR_TIER_PREREQUISITES) - family)
-            if overlay or main:
+            # The audited web-family decision can further narrow PR coverage.
+            # Main still runs the deferred suites even for web-independent changes.
+            if main:
                 protected.update(selected & deferred)
             decision, reason = load_web_family_decision()(
                 selected, rows, changed,
