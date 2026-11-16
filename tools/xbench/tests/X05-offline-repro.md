@@ -2601,3 +2601,104 @@ the device deltas remain +0.25 and -0.25. Exact per-string comparison still find
 two changed values in either case. The PASS is only the supplied aggregate-load
 projection. It does not prove original string identity/value preservation or
 independent oracle acquisition, and does not accept live X05.
+
+## Oracle rerouting replay
+
+Within Studio X-bench X05, moving a connection changes device loads while grid
+ownership stays fixed. Repairing device targets alone does not repair a
+cross-grid connection. The supplied topology and load checks stay distinct.
+
+```python
+import sys, runpy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+envelope = fixtures['equal_count_ownership_envelope']()
+grid, evidence = envelope['grid'], envelope['assurance']['evidence']
+evidence['oracle_assignments'][0]['inverter_id'] = 'INV-B'
+def show(label):
+    loads = m._seven_step_oracle_loads(grid, evidence)
+    topology = m.validate_cross_topology(grid['expected_grid_ids'],
+        [row['string_id'] for row in evidence['oracle_strings']],
+        evidence['oracle_inverter_ids'], evidence['oracle_string_owners'],
+        evidence['oracle_inverter_owners'], evidence['oracle_assignments'])
+    checks = loads['metrics']['strings']
+    print(label, loads['verdict'], checks['grid_comparison']['mismatch_count'],
+          checks['inverter_comparison']['mismatch_count'],
+          topology['verdict'], topology['mismatch_count'])
+show('rerouted')
+for metric in ('strings', 'optimizers', 'panels', 'kw_dc'):
+    evidence['inverter_loads'][metric] = {'INV-A': 0, 'INV-B': evidence['oracle_values'][metric]}
+show('device targets repaired')
+evidence['oracle_string_owners'][0]['grid_id'] = 'west'
+show('topology repaired')
+for metric, field in dict(strings='string_totals', optimizers='optimizer_totals',
+                         panels='panel_totals', kw_dc='dc_totals').items():
+    grid[field] = {'east': 0, 'west': evidence['oracle_values'][metric]}
+show('grid targets repaired')
+```
+
+Expected output:
+
+```text
+rerouted FAIL 0 2 FAIL 1
+device targets repaired PASS 0 0 FAIL 1
+topology repaired FAIL 2 0 PASS 0
+grid targets repaired PASS 0 0 PASS 0
+```
+
+String A moves loads of one string, six optimizers, ten panels and 4 kW DC
+from INV-A to INV-B. Moving its grid owner later shifts those same amounts from
+east to west. The repairs are synthetic input changes, not proof of independent
+engineering evidence. The replay shows only oracle load and oracle topology
+projections. Other saved-design comparisons in a full envelope still require
+their own independent evidence and can fail. No line accepts live X05.
+
+## Alternating oracle rectangle replay
+
+Within Studio X-bench X05, four compensating per-string changes can be invisible
+to both grid and device sums. This is an algebra counterexample with negative
+topology, not a valid-design fixture or a full seven-step PASS.
+
+```python
+import sys, runpy
+from copy import deepcopy
+from fractions import Fraction
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+grid, evidence = fixtures['alternating_rectangle_material']()
+before = deepcopy(evidence['oracle_dc_power'])
+for row, sign in zip(evidence['oracle_dc_power'], [1, -1, -1, 1]):
+    row['kw_dc'] = fixtures['fraction_fixed_text'](Fraction(row['kw_dc']) + sign*Fraction(1, 4))
+loads = m._seven_step_oracle_loads(grid, evidence)
+strings = m.compare_string_dc_power(before, evidence['oracle_dc_power'])
+topology = m.validate_cross_topology(grid['expected_grid_ids'],
+    [row['string_id'] for row in evidence['oracle_strings']],
+    evidence['oracle_inverter_ids'], evidence['oracle_string_owners'],
+    [dict(inverter_id='i0', grid_id='g0'), dict(inverter_id='i1', grid_id='g1')],
+    evidence['oracle_assignments'])
+checks = loads['metrics']['kw_dc']
+print('marginals', loads['verdict'], checks['grid_comparison']['mismatch_count'],
+      checks['inverter_comparison']['mismatch_count'])
+print('strings', strings['verdict'], strings['counts']['mismatched'])
+print('topology', topology['verdict'], topology['mismatch_count'])
+print('deltas', ','.join(fixtures['fraction_fixed_text'](Fraction(row['saved'])-
+      Fraction(row['oracle'])) for row in strings['mismatches']))
+```
+
+Expected output:
+
+```text
+marginals PASS 0 0
+strings FAIL 4
+topology FAIL 2
+deltas 0.25,-0.25,-0.25,0.25
+```
+
+Each grid and device receives one positive and one negative change, so every
+marginal is conserved. Exact independent per-string comparison retains four
+changes. The explicit device owners also expose two cross-grid connections;
+that negative topology is retained and cannot be hidden by the aggregate PASS.
+A synthetic consistency check cannot establish oracle origin or independence.
+It does not accept customer engineering data or live X05.
