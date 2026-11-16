@@ -2508,3 +2508,53 @@ original fine evidence remain intact. The test independently checks exact
 Fraction sums for strings, optimizers, panels and DC power. A coarse PASS proves
 only consistency at that supplied resolution. It does not repair fine device
 assignments, establish independent report extraction or accept live X05.
+
+## Sparse oracle-load influence replay
+
+Within Studio X-bench X05, one changed string value must affect only its explicit
+owner grid and connected device. Targets and the independent report total are
+separate inputs. This replay repairs each supplied target without inferring it
+from panels or silently replacing report evidence.
+
+```python
+import sys, runpy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+grid, evidence = fixtures['oracle_load_component']('sparse')
+evidence['oracle_dc_power'][0]['kw_dc'] = '1.50'
+def show(label):
+    result = m._seven_step_oracle_loads(grid, evidence)
+    checks = result['metrics']['kw_dc']
+    print(label, result['verdict'],
+          checks['grid_comparison']['mismatch_count'],
+          checks['inverter_comparison']['mismatch_count'],
+          checks['grid_report']['verdict'], checks['inverter_report']['verdict'])
+show('changed string')
+grid['dc_totals']['sparseg0'] = '1.50'
+show('grid repaired')
+evidence['inverter_loads']['kw_dc']['sparsei0'] = '1.50'
+show('device repaired')
+evidence['oracle_values']['kw_dc'] = '3.25'
+show('report repaired')
+```
+
+Expected output:
+
+```text
+changed string FAIL 1 1 PASS PASS
+grid repaired FAIL 0 1 FAIL PASS
+device repaired FAIL 0 0 FAIL FAIL
+report repaired PASS 0 0 PASS PASS
+```
+
+The exact initial delta is 0.25 kW DC on grid sparseg0 and device sparsei0.
+Other metrics remain equal. Changing a target does not repair report consistency;
+the report total needs its own independent correction. The synthetic repair is
+arithmetic proof, not permission to manufacture independent report evidence.
+
+Zero DC is a supported value and still requires explicit ownership and a
+connection. Per-string optimizer and panel counts require positive integers in
+the current schema. Their zero rows yield named UNREADABLE results before any
+coverage claim can be evaluated. These tests preserve that boundary; they do
+not establish that a zero-count engineering string is a supported live input.
