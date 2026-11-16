@@ -1,6 +1,7 @@
 """X04 product-route grading with scripted I/O only."""
 
 from contextlib import contextmanager
+from copy import deepcopy
 import json
 from pathlib import Path
 import subprocess
@@ -40,10 +41,18 @@ class FakeClient:
                                              "children": [{"kind": "LINE", "layer": "0",
                                                            "pts": [[0, 0, 0], [1, 1, 0]]}]}}}
         self.counts = {"Modules": 12}
+        self.catalog = {"tools": []}
+        self.module_responses = []
         self.calls = []
         self.deleted = []
 
     def transport(self, method, path, **kw):
+        if (method, path) == ("GET", "/api/tools"):
+            self.calls.append((method, path, kw))
+            return 200, self.catalog
+        if (method, path) == ("POST", "/api/run?wait=1"):
+            self.calls.append((method, path, kw))
+            return self.module_responses.pop(0)
         assert (method, path) == ("POST", "/api/drawings/upload")
         self.calls.append((method, path, kw))
         return self.upload_status, {"drawing_id": "uploaded", "checkout_capability": CAP}
@@ -360,6 +369,211 @@ def test_non_whole_layer_needs_ui_unless_count_equal(fixture):
 def test_without_layers_is_unreadable(fixture):
     del fixture["module_layers"]
     assert grade(fixture)["steps"]["5"] == "UNREADABLE"
+
+
+# Wire shapes from the product's test_count_modules and
+# test_x04_selection_envelope_consistency: listing and explicit selection are
+# both count-modules results, not a separate module-set endpoint.
+MODULE_TOOL = {"name": "count-modules", "version": "1.0.0", "catalog_digest": "d" * 64}
+DESIGN_SET = {"set_id": '["INSERT","Modules","MODULE"]', "entity_type": "INSERT",
+              "layer": "Modules", "block": "MODULE", "count": 12}
+OTHER_SET = {"set_id": '["INSERT","Alternate","Panel B"]', "entity_type": "INSERT",
+             "layer": "Alternate", "block": "Panel B", "count": 24}
+
+
+def module_client(fixture, *, multi=False, count=12):
+    client = FakeClient()
+    client.catalog = {"tools": [deepcopy(MODULE_TOOL)]}
+    fixture["module_set"] = {"set_id": DESIGN_SET["set_id"]}
+    sets = [DESIGN_SET, OTHER_SET] if multi else [DESIGN_SET]
+    listing = {"sets": sets, "selection_required": True, "selected_sets": [],
+               "selected_set": None, "count": None, "original_bytes_integrity": "unverified"}
+    selected = {**listing, "selection_required": False, "selected_sets": [DESIGN_SET],
+                "selected_set": DESIGN_SET, "count": count}
+    for result in (listing, selected):
+        client.module_responses.append((200, deepcopy({
+            "ok": True, "tool": "count-modules", "version": "1.0.0", "error": None,
+            "result": result, "overlay": None})))
+    return client
+
+
+def module_calls(client):
+    return [call[2] for call in client.calls if call[:2] == ("POST", "/api/run?wait=1")]
+
+
+@pytest.mark.parametrize("selector", ["set_id", "set_ids"])
+def test_count_modules_live_uses_manifest_selection_and_records_catalog(fixture, selector):
+    client = module_client(fixture)
+    fixture["module_set"] = {selector: DESIGN_SET["set_id"] if selector == "set_id"
+                             else [DESIGN_SET["set_id"]]}
+    del fixture["module_layers"]
+    row = grade(fixture, client)
+    assert row["steps"]["5"] == row["steps"]["6"] == "PASS"
+    assert row["counts"] == [12]
+    assert row["tool"] == MODULE_TOOL and row["limits"] == []
+    calls = module_calls(client)
+    assert calls[0]["json_body"] == {
+        "tool": "count-modules", "catalog_digest": MODULE_TOOL["catalog_digest"], "dwg": "v",
+        "params": {"drawing_id": "d"}}
+    assert calls[1]["json_body"] == {
+        **calls[0]["json_body"], "params": {"drawing_id": "d", "set_ids": [DESIGN_SET["set_id"]]}}
+    assert all(call["headers"] == {"X-Org-Id": "o", "X-Project-Id": "p"} for call in calls)
+    assert not any(call[0] == "count-by-layer" for call in client.calls)
+
+
+def test_count_modules_mismatch_fails_even_for_competing_sets(fixture):
+    client = module_client(fixture, multi=True)
+    fixture["design_is_whole_layer"] = False
+    fixture["modules"] = 11
+    row = grade(fixture, client)
+    assert row["steps"]["5"] == "FAIL"
+    assert row["evidence"]["5"] == "count 12, oracle 11"
+    assert row["steps"]["6"] == "PASS"
+
+
+def test_count_modules_absent_preserves_layer_fallback_and_notes_limit(fixture):
+    client = FakeClient()
+    client.catalog["tools"] = [{"name": "count-by-layer"}]
+    row = grade(fixture, client)
+    assert row["steps"]["5"] == "PASS"
+    assert row["counts"] == [12]
+    assert row["limits"] == ["count-modules not live"]
+    assert any(call[0] == "count-by-layer" for call in client.calls)
+
+
+def test_competing_module_set_selected_through_picker_api(fixture):
+    client = module_client(fixture, multi=True)
+    fixture["design_is_whole_layer"] = False
+    client.counts["Modules"] = 36
+    row = grade(fixture, client)
+    assert row["steps"]["5"] == row["steps"]["6"] == "PASS"
+    assert row["evidence"]["6"] == "module_set selected"
+    assert module_calls(client)[1]["json_body"]["params"]["set_ids"] == [DESIGN_SET["set_id"]]
+
+
+def test_manifest_can_select_overlapping_sets_without_summing_them(fixture):
+    client = module_client(fixture, multi=True)
+    fixture["modules"] = 24
+    ids = [OTHER_SET["set_id"], DESIGN_SET["set_id"]]
+    # The product schema gives nonempty set_ids precedence over set_id and
+    # deduplicates choices. Its count is the physical union of selected sets.
+    fixture["module_set"] = {"set_id": "ignored", "set_ids": [*ids, ids[0]]}
+    result = client.module_responses[1][1]["result"]
+    result.update(selected_sets=deepcopy([DESIGN_SET, OTHER_SET]), selected_set=None, count=24)
+    row = grade(fixture, client)
+    assert row["steps"]["5"] == row["steps"]["6"] == "PASS"
+    assert row["counts"] == [24] and row["module_set"] == {"set_ids": ids}
+    assert module_calls(client)[1]["json_body"]["params"]["set_ids"] == ids
+
+
+def test_competing_sets_without_manifest_binding_are_unreadable(fixture):
+    client = module_client(fixture, multi=True)
+    del fixture["module_set"]
+    row = grade(fixture, client)
+    assert row["steps"]["5"] == row["steps"]["6"] == "UNREADABLE"
+    assert row["evidence"]["6"] == "no module_set bound in manifest"
+    assert len(module_calls(client)) == 1
+
+
+@pytest.mark.parametrize("catalog_live", [False, True])
+def test_candidate_api_absent_is_unreadable(fixture, catalog_live):
+    client = module_client(fixture, multi=True)
+    fixture["design_is_whole_layer"] = False
+    if catalog_live:
+        client.module_responses[0] = (404, {"detail": "Not Found"})
+    else:
+        client.catalog = {"tools": []}
+    row = grade(fixture, client)
+    assert row["steps"]["6"] == "UNREADABLE"
+    assert row["evidence"]["6"] == "module-set picker not live"
+    assert len(module_calls(client)) == int(catalog_live)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("sets", None), ("sets", {}), ("sets", []), ("sets", [None]),
+    ("sets", [{**DESIGN_SET, "set_id": ""}]),
+    ("sets", [DESIGN_SET, DESIGN_SET]),
+    ("sets", [{**DESIGN_SET, "count": True}]),
+    ("sets", [{**DESIGN_SET, "layer": None}]),
+    ("sets", [{**DESIGN_SET, "entity_type": "TEXT"}]),
+    ("selection_required", False), ("selection_required", 1),
+    ("selected_sets", [DESIGN_SET]), ("selected_set", DESIGN_SET), ("count", 12),
+])
+def test_malformed_candidates_fail_closed_naming_field(fixture, field, value):
+    client = module_client(fixture, multi=True)
+    client.module_responses[0][1]["result"][field] = value
+    row = grade(fixture, client)
+    assert row["steps"]["5"] == row["steps"]["6"] == "UNREADABLE"
+    assert field in row["evidence"]["6"]
+    assert len(module_calls(client)) == 1
+    assert row["counts"] == []
+
+
+@pytest.mark.parametrize("field,value", [
+    ("count", None), ("count", True), ("count", -1), ("count", 12.0),
+    ("count", 2**53), ("count", 11),
+    ("sets", [OTHER_SET]), ("selected_sets", []), ("selected_sets", [OTHER_SET]),
+    ("selected_sets", [{**DESIGN_SET, "count": 11}]),
+    ("selected_set", None), ("selection_required", True),
+])
+def test_malformed_selected_count_cannot_pass(fixture, field, value):
+    client = module_client(fixture, multi=True)
+    client.module_responses[1][1]["result"][field] = value
+    row = grade(fixture, client)
+    assert row["steps"]["5"] == row["steps"]["6"] == "UNREADABLE"
+    assert field in row["evidence"]["5"]
+    assert row["counts"] == []
+
+
+@pytest.mark.parametrize("field,value", [("ok", False), ("error", {"message": CAP}),
+                                         ("tool", "count-by-layer"), ("version", "2.0.0"),
+                                         ("result", None)])
+def test_malformed_module_envelope_is_unreadable(fixture, field, value):
+    client = module_client(fixture)
+    client.module_responses[0][1][field] = value
+    row = grade(fixture, client)
+    assert row["steps"]["5"] == row["steps"]["6"] == "UNREADABLE"
+    assert field in row["evidence"]["5"]
+    assert CAP not in json.dumps(row)
+
+
+@pytest.mark.parametrize("status", [202, 403, 500])
+def test_module_listing_http_errors_do_not_fall_back_or_pass(fixture, status):
+    client = module_client(fixture)
+    client.module_responses[0] = (status, {"job_id": "pending", "message": CAP})
+    row = grade(fixture, client)
+    assert row["steps"]["5"] == row["steps"]["6"] == "UNREADABLE"
+    assert "HTTP status" in row["evidence"]["5"]
+    assert row["counts"] == [] and row["limits"] == []
+    assert CAP not in json.dumps(row)
+
+
+@pytest.mark.parametrize("selector", ["opaque-id", {}, {"set_id": "stale"},
+                                      {"set_ids": []}, {"set_ids": "wrong"},
+                                      {"set_ids": [True]}, {"layer": "Modules"}])
+def test_invalid_manifest_module_selector_is_unreadable(fixture, selector):
+    client = module_client(fixture, multi=True)
+    fixture["module_set"] = selector
+    row = grade(fixture, client)
+    assert row["steps"]["5"] == row["steps"]["6"] == "UNREADABLE"
+    assert "module_set" in row["evidence"]["5"]
+    assert len(module_calls(client)) == 1
+
+
+@pytest.mark.parametrize("catalog,field", [
+    ({}, "tools"), ({"tools": None}, "tools"), ({"tools": [None]}, "tools"),
+    ({"tools": [MODULE_TOOL, MODULE_TOOL]}, "name"),
+    ({"tools": [{**MODULE_TOOL, "version": None}]}, "version"),
+    ({"tools": [{**MODULE_TOOL, "catalog_digest": ""}]}, "catalog_digest"),
+])
+def test_malformed_catalog_does_not_fall_back(fixture, catalog, field):
+    client = module_client(fixture)
+    client.catalog = catalog
+    row = grade(fixture, client)
+    assert row["steps"]["5"] == "UNREADABLE"
+    assert field in row["evidence"]["5"]
+    assert row["counts"] == [] and row["limits"] == []
+    assert not module_calls(client)
 
 
 def test_forbidden_tokens_drop_anonymous_short_and_duplicates():
