@@ -22,6 +22,7 @@ import struct
 import tempfile
 import time
 import math
+import ctypes
 from uuid import UUID, uuid4
 from urllib.parse import parse_qs, urlsplit
 import zlib
@@ -550,6 +551,20 @@ def _read_evidence_json(path):
     return _strict_json_bytes(data), hashlib.sha256(data).hexdigest()
 
 
+def _commit_generation(staging, destination):
+    """Atomic directory publication that never replaces an existing owner."""
+    if os.name == "nt":
+        return staging.rename(destination)  # Windows directory rename refuses existing targets.
+    library = ctypes.CDLL(None, use_errno=True)
+    rename = getattr(library, "renameat2", None)
+    if rename is None:
+        raise OSError("atomic no-replace rename is unavailable")
+    if rename(-100, os.fsencode(staging), -100, os.fsencode(destination), 1) != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code))
+    return destination
+
+
 def _save(page, ctx, observation, surface=None, validate=None):
     observation["evidence_saved"] = False
     observation.pop("evidence_path", None)
@@ -577,6 +592,7 @@ def _save(page, ctx, observation, surface=None, validate=None):
         raise ValueError("evidence destinations are not fresh and distinct")
     evidence = generation + "/x10-ui.json / " + generation + "/x10-ground.png"
     committed = None
+    failure = None
     try:
         if surface is None:
             surface = page.get_by_role("navigation", name="Solar design steps")
@@ -603,8 +619,8 @@ def _save(page, ctx, observation, surface=None, validate=None):
         if validate is not None:
             validate()
         try:
-            staging.rename(destination)
-        except Exception:
+            _commit_generation(staging, destination)
+        except BaseException:
             # A reported failure may follow the atomic move. Claim cleanup only
             # when the moved set still matches this attempt's exact record/pin.
             if not staging.exists():
@@ -622,11 +638,26 @@ def _save(page, ctx, observation, surface=None, validate=None):
         if validate is not None:
             validate()
         observation.update(pin, evidence_saved=True, evidence_path=evidence, evidence_record_sha256=record_hash)
+    except BaseException as exc:
+        failure = exc
+        raise
     finally:
-        if staging.exists():
-            shutil.rmtree(staging)
-        if committed is not None and observation["evidence_saved"] is not True:
-            shutil.rmtree(committed)
+        cleanup = []
+        for directory in (staging, committed if observation["evidence_saved"] is not True else None):
+            if directory is not None and directory.exists():
+                # A failed set must not retain a scorable JSON record even if
+                # removing its remaining directory fails.
+                try:
+                    (directory / "x10-ui.json").unlink(missing_ok=True)
+                    shutil.rmtree(directory)
+                except OSError as exc:
+                    cleanup.append(type(exc).__name__)
+        if cleanup:
+            observation.update(evidence_saved=False, evidence_cleanup_errors=cleanup)
+            observation.pop("evidence_path", None)
+            observation.pop("evidence_record_sha256", None)
+            if failure is None:
+                raise OSError("evidence cleanup failed")
 
 
 def _invalidate_evidence(ctx, observation):
@@ -884,7 +915,7 @@ def _catalog_observer(base, observation, main_frame=None):
         status = response.status
         if latest is not captured or observation["catalog_epoch"] != epoch:
             return
-        failed = failed or invalid or type(status) is not int or not 200 <= status < 300
+        failed = failed or invalid or type(status) is not int or status != 200
         observation["catalog_epoch"] += 1
         observation["catalog_binding"] = None if failed else pending_binding
 
@@ -1112,7 +1143,7 @@ class _BudgetedUI:
     _chains = {"locator", "get_by_role", "get_by_label", "get_by_text", "filter", "or_", "and_", "nth"}
     _timed = {"click", "fill", "wait_for", "wait_for_function", "wait_for_load_state", "expect_response",
               "select_option", "set_input_files", "inner_text", "get_attribute", "input_value",
-              "screenshot", "element_handle"}
+              "screenshot", "element_handle", "goto", "reload", "go_back", "go_forward"}
 
     def __init__(self, target, budget):
         self.target, self.budget = target, budget
@@ -1227,19 +1258,28 @@ def observe(page, ctx, config, bound, session_info=None, *, budget_seconds=600, 
     except Exception as exc:
         _invalidate_evidence(ctx, observation)
         _diagnostic(ctx, observation, stage, exc)
+    except (KeyboardInterrupt, SystemExit):
+        _invalidate_evidence(ctx, observation)
+        raise
     finally:
         cleanup_error = None
+        cleanup_cancel = None
         for event, listener in listeners:
             try:
                 page.remove_listener(event, listener)
             except Exception as exc:
                 cleanup_error = cleanup_error or exc
+            except (KeyboardInterrupt, SystemExit) as exc:
+                cleanup_cancel = cleanup_cancel or exc
         if cleanup_error is not None:
             _invalidate_evidence(ctx, observation)
             _diagnostic(ctx, observation, "listener cleanup", cleanup_error)
         if callback_error is not None:
             _invalidate_evidence(ctx, observation)
             _diagnostic(ctx, observation, "passive UI event", callback_error)
+        if cleanup_cancel is not None:
+            _invalidate_evidence(ctx, observation)
+            raise cleanup_cancel
     return observation
 
 
@@ -1256,6 +1296,9 @@ def run(ctx):
     except Exception as exc:
         _invalidate_evidence(ctx, observation)
         _diagnostic(ctx, observation, "authentication/browser session", exc)
+    except (KeyboardInterrupt, SystemExit):
+        _invalidate_evidence(ctx, observation)
+        raise
     # Fixture arithmetic is retained as provenance only, never a measured outcome.
     observation["fixture_rate_total"] = str(total)
     return classify(observation, expected=_expected)

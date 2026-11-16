@@ -674,7 +674,7 @@ class FixtureTests(unittest.TestCase):
         listener(latest)
         listener.response(SimpleNamespace(request=first, url=first.url, status=200))
         self.assertIsNone(observation["catalog_binding"])
-        listener.response(SimpleNamespace(request=latest, url=latest.url, status=204))
+        listener.response(SimpleNamespace(request=latest, url=latest.url, status=200))
         self.assertEqual(observation["catalog_binding"]["project_id"], PROJECT)
         epoch = observation["catalog_epoch"]
         listener.failed(first)
@@ -1015,7 +1015,7 @@ class FixtureTests(unittest.TestCase):
         saved = json.loads((old[0] / "x10-ui.json").read_text())
         self.assertEqual(saved["screenshot_bytes"], len(tiny_png()))
         self.assertEqual(saved["screenshot_sha256"], hashlib.sha256(tiny_png()).hexdigest())
-        write_json, rename = x10._write_evidence_json, Path.rename
+        write_json, rename = x10._write_evidence_json, x10._commit_generation
         for phase in ("json-write", "rename"):
             for data in (tiny_png(raw=b"\x00\xff\x00\x00"), b"tampered bytes"):
                 with self.subTest(phase=phase, data=data):
@@ -1028,7 +1028,7 @@ class FixtureTests(unittest.TestCase):
                         (Path(target) / "x10-ground.png").write_bytes(data)
                         return result
                     failure = (patch.object(x10, "_write_evidence_json", written) if phase == "json-write"
-                               else patch.object(Path, "rename", renamed))
+                               else patch.object(x10, "_commit_generation", renamed))
                     with failure, self.assertRaises(ValueError):
                         x10._save(page, self.ctx, observation)
                     self.assertFalse(observation["evidence_saved"])
@@ -1084,7 +1084,7 @@ class FixtureTests(unittest.TestCase):
         x10._ground(page, self.ctx, observation)
         old = list(self.ctx.out_dir.iterdir())
         self.assertEqual(aggregate(x10.classify(observation)), "FAIL")
-        original_rename = Path.rename
+        original_rename = x10._commit_generation
         for phase in ("screenshot", "rename"):
             for mode in ("project", "version", "switch-back", "flow", "label", "pending"):
                 with self.subTest(phase=phase, mode=mode):
@@ -1115,7 +1115,7 @@ class FixtureTests(unittest.TestCase):
                         mutate()
                         return result
                     rail.screenshot.side_effect = capture
-                    with (patch.object(Path, "rename", rename) if phase == "rename" else nullcontext()), \
+                    with (patch.object(x10, "_commit_generation", rename) if phase == "rename" else nullcontext()), \
                             self.assertRaises(ValueError):
                         x10._ground(page, self.ctx, observation)
                     self.assertFalse(observation["evidence_saved"])
@@ -1330,7 +1330,7 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual([row.verdict for row in rows], ["UNREADABLE"] * 6)
 
     def test_refusal_project_switches_and_close_during_capture_never_score(self):
-        original_rename = Path.rename
+        original_rename = x10._commit_generation
         for phase in ("screenshot", "rename"):
             for mode in ("switch", "switch-back", "closed"):
                 with self.subTest(phase=phase, mode=mode):
@@ -1351,7 +1351,7 @@ class FixtureTests(unittest.TestCase):
                         mutate()
                         return result
                     surface.screenshot.side_effect = capture
-                    with patch.object(Path, "rename", rename) if phase == "rename" else nullcontext():
+                    with patch.object(x10, "_commit_generation", rename) if phase == "rename" else nullcontext():
                         rows = self.run_page(page)
                     self.assertEqual(rows[0].verdict, "UNREADABLE")
                     self.assertEqual(list(self.ctx.out_dir.glob("x10-evidence-*")), [])
@@ -1676,7 +1676,7 @@ class FixtureTests(unittest.TestCase):
     def test_rate_inputs_require_ascii_digits_before_browser(self):
         original = Path(next(row["path"] for row in self.ctx.manifest["fixtures"] if row["role"] == "rates")).read_bytes()
         for key in ("quantity", "unit_rate"):
-            for value in ("ÃƒÆ’Ã¢â€žÂ¢Ãƒâ€šÃ‚Â¡", "ÃƒÆ’Ã‚Â¯Ãƒâ€šÃ‚Â¼ÃƒÂ¢Ã¢â€šÂ¬Ã‹Å“ÃƒÆ’Ã‚Â¯Ãƒâ€šÃ‚Â¼ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢", "1ÃƒÆ’Ã¢â€žÂ¢Ãƒâ€šÃ‚Â¢", "ÃƒÆ’Ã¢â€žÂ¢Ãƒâ€šÃ‚Â¡.2", "1.ÃƒÆ’Ã‚Â¯Ãƒâ€šÃ‚Â¼ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢"):
+            for value in ("ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡", "ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¯ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¼ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¹Ã…â€œÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¯ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¼ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢", "1ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢", "ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡.2", "1.ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¯ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¼ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢"):
                 with self.subTest(key=key, value=value):
                     item = {"quantity": "1.25", "unit_rate": "2.00", key: value}
                     with self.assertRaises(ValueError):
@@ -1845,7 +1845,7 @@ class FixtureTests(unittest.TestCase):
                            ground_option="Ground Physical unavailable")
         x10._save(page, self.ctx, observation)
         old = list(self.ctx.out_dir.iterdir())
-        real_open, real_rename = Path.open, Path.rename
+        real_open, real_rename = Path.open, x10._commit_generation
         for phase in ("flush", "close", "rename", "rename-after"):
             class Writer:
                 def __init__(self, stream):
@@ -1870,7 +1870,7 @@ class FixtureTests(unittest.TestCase):
                     real_rename(path, target)
                 raise OSError("synthetic replace")
             with self.subTest(phase=phase), patch.object(Path, "open", open_file), \
-                    (patch.object(Path, "rename", rename) if phase.startswith("rename") else nullcontext()), \
+                    (patch.object(x10, "_commit_generation", rename) if phase.startswith("rename") else nullcontext()), \
                     self.assertRaises(OSError):
                 x10._save(page, self.ctx, observation)
             self.assertEqual(list(self.ctx.out_dir.iterdir()), old)
@@ -2018,7 +2018,7 @@ class FixtureTests(unittest.TestCase):
                              b'[{"nested":"\\udc00"}]', b'"\\ud800x\\udc00"'):
                 self.replace_fixture(role, prefix + fragment + b'}')
                 self.assert_binding_refusal()
-            for fragment in (b'"\\ud83d\\ude00"', '"cafÃƒÂ© Ã§â€¢Å’"'.encode(), b'{"\\ud83d\\ude00":"ok"}'):
+            for fragment in (b'"\\ud83d\\ude00"', '"cafÃƒÆ’Ã‚Â© ÃƒÂ§Ã¢â‚¬Â¢Ã…â€™"'.encode(), b'{"\\ud83d\\ude00":"ok"}'):
                 self.replace_fixture(role, prefix + fragment + b'}')
                 self.assertEqual(x10.bindings(self.ctx)[3], Decimal("0.07"))
             self.replace_fixture(role, original)
@@ -2304,6 +2304,133 @@ class FixtureTests(unittest.TestCase):
             x10._save(page, self.ctx, observation)
         self.assertEqual(list(self.ctx.out_dir.iterdir()), old)
         self.assertFalse(observation["evidence_saved"])
+
+    def test_only_complete_200_catalog_responses_can_supply_proof(self):
+        for status in (200, 204, 206):
+            observation = self.project_identity()
+            observation.update(imported_version_id=VERSION, imported_drawing_id=DRAWING,
+                               selected_sequence=1, imported_version_selected=True, evidence_saved=True,
+                               ground_option="Ground Physical unavailable")
+            listener = x10._catalog_observer(self.ctx.base, observation)
+            request = self.catalog_request()
+            self.complete_catalog(listener, request, status=status)
+            page = MagicMock()
+            page.locator.return_value.is_visible.return_value = True
+            page.locator.return_value.inner_text.return_value = VERSION
+            if status == 200:
+                x10._current_identity(page, observation)
+            else:
+                with self.assertRaises(ValueError):
+                    x10._current_identity(page, observation)
+                observation["evidence_saved"] = False
+                self.assertEqual(aggregate(x10.classify(observation)), "UNREADABLE")
+                listener.response(SimpleNamespace(request=request, url=request.url, status=200))
+                self.assertIsNone(observation["catalog_binding"])
+
+    def test_navigation_actions_share_deadline_without_real_waits(self):
+        for method in ("goto", "reload", "go_back", "go_forward"):
+            now = [0.0]
+            page = MagicMock()
+            observed_timeouts = []
+            def action(*args, **kwargs):
+                observed_timeouts.append(kwargs["timeout"])
+                now[0] += 0.6
+            getattr(page, method).side_effect = action
+            proxy = x10._BudgetedUI(page, x10._ObservationBudget(1, lambda: now[0]))
+            getattr(proxy, method)(timeout=30000)
+            with self.assertRaises(TimeoutError):
+                getattr(proxy, method)(timeout=30000)
+            self.assertEqual(observed_timeouts, [1000, 400])
+
+    def test_cancellation_cleans_observe_and_session_exit_before_propagating(self):
+        old_page, _, _ = self.integration_page(True)
+        self.run_page(old_page)
+        old = list(self.ctx.out_dir.glob("x10-evidence-*"))
+        for cancel in (KeyboardInterrupt, SystemExit):
+            for phase in ("observe", "session-exit"):
+                page, _, _ = self.integration_page(True)
+                closed = []
+                @contextmanager
+                def session(*args, **kwargs):
+                    try:
+                        yield page, self.session_info
+                    finally:
+                        closed.append(True)
+                        if phase == "session-exit":
+                            raise cancel("synthetic cancel")
+                if phase == "observe":
+                    remove = page.remove_listener
+                    original_remove = remove.side_effect
+                    def removal(*args):
+                        if original_remove:
+                            original_remove(*args)
+                        if args[0] == "request":
+                            raise cancel("synthetic cancel")
+                    # Raise after a successful observe save, during the return
+                    # boundary, while requiring all removals to be attempted.
+                    page.remove_listener.side_effect = removal
+                with patch.object(x10, "signed_in", session), self.assertRaises(cancel):
+                    x10.run(self.ctx)
+                self.assertEqual(closed, [True])
+                self.assertEqual(page.remove_listener.call_args_list, page.on.call_args_list)
+                self.assertEqual(list(self.ctx.out_dir.glob("x10-evidence-*")), old)
+
+    def test_failed_evidence_cleanup_retains_original_error_and_cannot_score(self):
+        page = MagicMock()
+        page.get_by_role.return_value.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(tiny_png())
+        baseline = dict(**canonical_project(), fresh_project=True)
+        x10._save(page, self.ctx, baseline)
+        old = self.ctx.out_dir / baseline["evidence_path"].split("/")[0]
+        original_readback = x10._read_evidence_json
+        for phase in ("staging", "committed"):
+            observation = dict(**canonical_project(), fresh_project=True)
+            def readback(path):
+                if (phase == "staging" and path.parent.name.startswith(".x10-staging-")) or (
+                        phase == "committed" and path.parent.name.startswith("x10-evidence-")):
+                    raise ValueError("original synthetic readback failure")
+                return original_readback(path)
+            with patch.object(x10, "_read_evidence_json", readback), \
+                    patch.object(x10.shutil, "rmtree", side_effect=OSError("secondary cleanup failure")), \
+                    self.assertRaisesRegex(ValueError, "original synthetic readback failure"):
+                x10._save(page, self.ctx, observation)
+            self.assertFalse(observation["evidence_saved"])
+            self.assertEqual(observation["evidence_cleanup_errors"], ["OSError"])
+            self.assertEqual(aggregate(x10.classify(observation)), "UNREADABLE")
+            self.assertTrue((old / "x10-ui.json").exists())
+            for partial in self.ctx.out_dir.iterdir():
+                if partial != old:
+                    self.assertFalse((partial / "x10-ui.json").exists())
+
+    def test_concurrent_destination_owner_survives_losing_attempt(self):
+        page = MagicMock()
+        page.get_by_role.return_value.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(tiny_png())
+        original_commit = x10._commit_generation
+        peer = []
+        def collision(staging, destination):
+            destination.mkdir()
+            (destination / "peer-material").write_bytes(b"peer-owned")
+            peer.append(destination)
+            return original_commit(staging, destination)
+        observation = dict(**canonical_project(), fresh_project=True)
+        with patch.object(x10, "_commit_generation", collision), self.assertRaises(OSError):
+            x10._save(page, self.ctx, observation)
+        self.assertEqual((peer[0] / "peer-material").read_bytes(), b"peer-owned")
+        self.assertEqual(list(peer[0].iterdir()), [peer[0] / "peer-material"])
+        self.assertEqual(list(self.ctx.out_dir.iterdir()), peer)
+        self.assertFalse(observation["evidence_saved"])
+        self.assertEqual(aggregate(x10.classify(observation)), "UNREADABLE")
+
+    def test_diagnostic_exception_labels_are_never_persisted(self):
+        drawing, project = "PRIVATE_CUSTOMER_DRAWING.dwg", "PRIVATE_CUSTOMER_PROJECT"
+        for category in (ValueError, RuntimeError, OSError):
+            observation = {}
+            x10._diagnostic(self.ctx, observation, "primary drawing attachment", category(
+                drawing + " in " + project + " https://private.invalid"))
+            saved = (self.ctx.out_dir / "x10-ui.json").read_text()
+            self.assertIn("primary drawing attachment", saved)
+            self.assertIn(category.__name__, saved)
+            for secret in (drawing, project, "private.invalid"):
+                self.assertNotIn(secret, saved)
 
 
 if __name__ == "__main__":
