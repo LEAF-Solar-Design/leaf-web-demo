@@ -16,7 +16,10 @@ class SelectionError(ValueError):
 
 
 def _finite(value):
-    return type(value) in (int, float) and math.isfinite(value)
+    try:
+        return type(value) in (int, float) and math.isfinite(value)
+    except OverflowError:
+        return False  # unsafe conversion of an unbounded integer to CAD double
 
 
 def select_modules(intake, *, block, layer, window):

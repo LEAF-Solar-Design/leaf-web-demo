@@ -35,6 +35,10 @@ from x07_customer_profile_store import CustomerProfileStore
 from x07_profile_workflow import ProfileWorkflow
 from x07_workflow_adapter import WorkflowAdapter
 request=json.load(sys.stdin)
+protocol=request.get('protocol_fault')
+if protocol=='eof': sys.exit(0)
+if protocol=='malformed': print('{not JSON'); sys.exit(0)
+if protocol=='nonzero': sys.stderr.write('injected protocol exit'); sys.exit(23)
 try:
     store=CustomerProfileStore(request['database'])
     adapter=WorkflowAdapter(ProfileWorkflow(store),context=request['bound_context'],intake=request['intake'],copies=request['copies'])
@@ -55,7 +59,7 @@ const intake = { inserts: [0, 1, 2, 10, 11, 12].map(x => ({ name: 'Panel', layer
 const copies = [0, 10].map(x => ({ block: 'Panel', layer: 'MODULES', design_window: [x, 0, x + 2, 0], oracle_count: 3 }))
 const ctx = (project, drawing = project + ':v1') => ({ customer_key: 'synthetic-a', project_key: project, drawing_key: drawing })
 const calls = [], children = new Set()
-function rpc(bound, op, context, value, signal, fault = null) {
+function rpc(bound, op, context, value, signal, fault = null, protocolFault = null) {
   calls.push({ op, context, value })
   return new Promise((resolve, reject) => {
     if (signal?.aborted) { reject(new Error('retired')); return }
@@ -75,14 +79,15 @@ function rpc(bound, op, context, value, signal, fault = null) {
     child.on('error', error => settle(error))
     child.stdin.on('error', error => settle(error))
     child.on('close', code => {
-      if (code !== 0) { settle(new Error('Python JSON worker failed: ' + stderr.slice(0, 500))); return }
+      if (code !== 0) { const error = new Error('Python JSON worker failed: ' + stderr.slice(0, 500)); error.code = 'BRIDGE_EXIT'; settle(error); return }
+      if (!stdout.trim()) { const error = new Error('Python JSON worker returned no JSON.'); error.code = 'BRIDGE_EOF'; settle(error); return }
       try {
         const response = JSON.parse(stdout)
         if (!response.ok) { const error = new Error(response.error.message); error.code = response.error.code; settle(error) }
         else settle(null, response.result)
-      } catch (error) { settle(error) }
+      } catch { const error = new Error('Python JSON worker returned malformed JSON.'); error.code = 'BRIDGE_MALFORMED_JSON'; settle(error) }
     })
-    child.stdin.end(JSON.stringify({ database, bound_context: bound, context, op, value, intake, copies, fault }))
+    child.stdin.end(JSON.stringify({ database, bound_context: bound, context, op, value, intake, copies, fault, protocol_fault: protocolFault }))
   })
 }
 function mount(context, overrides = {}) {
@@ -153,5 +158,6 @@ async function dispose() {
     if (fs.existsSync(database)) fs.unlinkSync(database)
     fs.rmdirSync(root)
 }
-module.exports = { rpc, ctx, copies, mount, screen, fireEvent, waitFor, cleanup, dispose }
+module.exports = { rpc, ctx, copies, mount, screen, fireEvent, waitFor, cleanup, dispose,
+  resources: () => ({ child_count: children.size, database, root }) }
 if (require.main === module) main().catch(error => { console.error(error); process.exitCode = 1 })

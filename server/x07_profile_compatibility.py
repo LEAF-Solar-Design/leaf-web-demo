@@ -5,7 +5,12 @@ requires an injected alias. No customer identity is inferred from drawing data.
 """
 import copy
 import math
+import unicodedata
 from solar_drawing_roles import discover_roles
+
+
+def _label(value):
+    return unicodedata.normalize('NFC', value).casefold()
 
 
 def check_compatibility(intake, profile, *, customer_key, block_aliases=None, propose=discover_roles):
@@ -42,6 +47,7 @@ def check_compatibility(intake, profile, *, customer_key, block_aliases=None, pr
         if isinstance(row, dict) and isinstance(row.get('layer'), str):
             layers.add(row['layer'])
     aliases = {}
+    alias_spellings = {}
     if block_aliases is not None:
         if not isinstance(block_aliases, dict):
             return fresh('INVALID_ALIAS_MAP')
@@ -50,6 +56,10 @@ def check_compatibility(intake, profile, *, customer_key, block_aliases=None, pr
             if (not isinstance(source, str) or not source or not isinstance(targets, (list, tuple))
                     or not targets or not all(isinstance(target, str) and target for target in targets)):
                 return fresh('INVALID_ALIAS_MAP')
+            normalized = _label(source)
+            if normalized in alias_spellings and alias_spellings[normalized] != source:
+                return fresh('AMBIGUOUS_ALIAS_MAP')
+            alias_spellings[normalized] = source
             aliases.setdefault(source.casefold(), set()).update(target.casefold() for target in targets)
     resolved = {}
     for role, wanted in roles.items():
@@ -59,6 +69,9 @@ def check_compatibility(intake, profile, *, customer_key, block_aliases=None, pr
         layer = wanted['layer'].casefold()
         block = wanted.get('block')
         if block is None:
+            near = {value for value in layers if _label(value) == _label(wanted['layer'])}
+            if len(near) > 1:
+                return fresh('AMBIGUOUS_ROLE_LABEL')
             matches = sorted(value for value in layers if value.casefold() == layer)
             if not matches:
                 return fresh('ROLE_NOT_FOUND')
@@ -72,6 +85,15 @@ def check_compatibility(intake, profile, *, customer_key, block_aliases=None, pr
                 return fresh('ANONYMOUS_ALIAS_REQUIRED')
         else:
             targets = {block.casefold()}
+        # Normalization is only an ambiguity detector, never an implicit alias.
+        # Do not combine distinct raw labels which collapse under NFC/casefold.
+        normalized_targets = {_label(target) for target in targets}
+        spellings = {}
+        for name, value in pairs:
+            if _label(name) in normalized_targets and _label(value) == _label(wanted['layer']):
+                spellings.setdefault((_label(name), _label(value)), set()).add((name, value))
+        if any(len(values) > 1 for values in spellings.values()):
+            return fresh('AMBIGUOUS_ROLE_LABEL')
         matches = sorted({(name, value) for name, value in pairs
                           if name.casefold() in targets and value.casefold() == layer})
         logical = {(name.casefold(), value.casefold()) for name, value in matches}
