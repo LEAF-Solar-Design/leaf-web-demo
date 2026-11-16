@@ -48,7 +48,7 @@ function scenario(test) {
 }
 
 describe('shared Lab conformance and canonical fixtures', () => {
-  it.each(cases.cases)('$name', test => {
+  const runConformanceCase = test => {
     const value = scenario(test); const registry = clone(trusted); const before = clone(value);
     if (test.registry_input) registry['level-fast-index@1.0.0'].inputs.value = test.registry_input;
     const run = () => {
@@ -61,7 +61,15 @@ describe('shared Lab conformance and canonical fixtures', () => {
       expect(run).toThrow();
       if (test.target === 'embed') expect(value.state).toEqual(before.state);
     }
-  });
+  };
+  for (const test of cases.cases) {
+    if (test.name === 'bounds-200-400') {
+      // Retry once after observed 5s parallel CI timeouts to avoid expensive whole-job reruns.
+      it.each([test])('$name', { retry: 1 }, runConformanceCase);
+    } else {
+      it.each([test])('$name', runConformanceCase);
+    }
+  }
   it.each(ports.cases)('pins: $name', test => expect(compatible(test.output, test.input)).toBe(test.expected));
   it.each(vectors.vectors)('canonical: $name', vector => {
     const canonical = canonicalJSON(vector.input);

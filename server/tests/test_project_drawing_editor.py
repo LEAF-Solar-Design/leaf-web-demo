@@ -65,6 +65,36 @@ class BytesStore:
         self.data[key] = raw
 
 
+@pytest.mark.parametrize("status,retryable,code,expected_retryable", [
+    (413, True, "PROJECT_EDITOR_TOO_LARGE", False),
+    (503, True, "PROJECT_EDITOR_SOURCE_UNAVAILABLE", True),
+    (503, False, "PROJECT_EDITOR_SOURCE_UNAVAILABLE", False),
+    (404, False, "PROJECT_EDITOR_SOURCE_UNAVAILABLE", False),
+])
+def test_imported_dwg_dxf_unavailable_diagnostic(monkeypatch, status, retryable, code,
+                                               expected_retryable):
+    import store as drawing_store
+
+    org_id, source_drawing_id = uuid4(), str(uuid4())
+    original = b"AC1032 synthetic DWG"
+    key = drawing_store.drawing_version_key(str(org_id), source_drawing_id, 1)
+    stored = {"ref": key, "sha256": digest(original), "bytes": len(original)}
+    source = {"drawing_id": source_drawing_id, "version": 1, "stored_object": stored}
+    backend = BytesStore()
+    backend.data[key] = original
+
+    def unavailable(*args, **kwargs):
+        raise project_context.write_loop.DxfUnavailable(
+            "DXF_UNAVAILABLE", "synthetic conversion refusal", status, retryable)
+
+    monkeypatch.setattr(project_context.write_loop, "read_dxf", unavailable)
+    with pytest.raises(editor.EditorError) as caught:
+        editor._imported_dwg(backend, org_id, source, digest(original), uuid4())
+    assert caught.value.code == code
+    assert caught.value.status == status
+    assert caught.value.retryable is expected_retryable
+
+
 def canonical_ci_pg():
     """Bind the canonical disposable producer's state to this exact server.
 
@@ -532,3 +562,158 @@ def test_enriched_parent_preserves_metadata_invalidates_geometry_and_restores_ex
     assert restored_context.intake_bytes == payload
     assert restored_context.intake["solar_design_graph"] == graph
     assert lane.http.get(lane.base + f"/versions/{restored_id}/dxf").content == lane.raw
+
+
+# Native edited-save admission unit controls, independent of PostgreSQL.
+from copy import deepcopy
+import math
+import project_solar_materialization as layout
+import solar_native_layout_dxf as native
+from solar_layout_replay import inputs
+from solar_native_edit_intake import NativeEditError, reconcile_native_intake
+
+
+@pytest.fixture
+def source():
+    body, _ = inputs()
+    document, parameters, _ = layout._prepare_initial_layout(layout.initial_parameters(body))
+    scope = {key: UUID(int=index + 1) for index, key in enumerate(
+        ("organization_id", "project_id", "drawing_id"))}
+    raw = native.materialize_native_layout(scope, None, document, None, parameters=parameters)
+    decoded = native.decode_native_layout(raw)
+    metadata = {"schema": layout.SCHEMA,
+                "document": native.ps.encode_document(decoded.document).decode(),
+                "parameters": decoded.parameters, "request": {"preserved": True}}
+    context = SimpleNamespace(binding=SimpleNamespace(**scope), intake={layout.KEY: metadata})
+    return context, scope, raw, decoded
+
+
+def reconcile(source, document=None, parameters=None, scope=None):
+    context, original_scope, _, before = source
+    document = deepcopy(before.document) if document is None else document
+    parameters = deepcopy(before.parameters) if parameters is None else parameters
+    raw = native.materialize_native_layout(scope or original_scope, None, document, None,
+                                          parameters=parameters)
+    digest = hashlib.sha256(raw).hexdigest()
+    result = reconcile_native_intake(context, raw, b'{"parsed_geometry":true}',
+        metadata_key=layout.KEY, trusted_document=before.document,
+        trusted_parameters=before.parameters)
+    assert hashlib.sha256(raw).hexdigest() == digest
+    return json.loads(result), raw
+
+
+@pytest.mark.parametrize("pose", ["unchanged", "move", "rotate"])
+def test_preserves_native_attributes_and_updates_only_verified_pose(source, pose):
+    before = source[3]
+    document = deepcopy(before.document)
+    vertices = document["state"]["frames"][0]["vertices"]
+    if pose == "move":
+        vertices = [(x + 1, y - 2) for x, y in vertices]
+    elif pose == "rotate":
+        angle = math.radians(30)
+        vertices = [(x * math.cos(angle) - y * math.sin(angle),
+                     x * math.sin(angle) + y * math.cos(angle)) for x, y in vertices]
+    document["state"]["frames"][0]["vertices"] = vertices
+    result, raw = reconcile(source, document=document)
+    metadata = result[layout.KEY]
+    assert metadata["parameters"] == before.parameters
+    assert metadata["request"] == {"preserved": True}
+    assert metadata["document"] == native.ps.encode_document(
+        native.decode_native_layout(raw).document).decode()
+    assert result["parsed_geometry"] is True
+    assert source[0].intake[layout.KEY]["document"] == native.ps.encode_document(before.document).decode()
+
+
+@pytest.mark.parametrize("change", ["provenance", "generation", "scope", "units",
+                                     "row", "membership", "resize", "reflection"])
+def test_refuses_changes_outside_rigid_frame_pose(source, change):
+    document, parameters = deepcopy(source[3].document), deepcopy(source[3].parameters)
+    scope = None
+    if change == "provenance":
+        parameters["original_intake"]["sha256"] = "0" * 64
+    elif change == "generation":
+        parameters["frame_generations"][next(iter(parameters["frame_generations"]))] = 99
+    elif change == "scope":
+        scope = dict(source[1], organization_id=UUID(int=99))
+    elif change == "units":
+        document["units"] = {"drawing_units": "ft", "meters_per_unit": 0.3048}
+    elif change == "row":
+        document["state"]["frames"][0]["row"] += 1
+    elif change == "membership":
+        document["state"]["frames"].pop()
+    elif change == "resize":
+        points = document["state"]["frames"][0]["vertices"]
+        document["state"]["frames"][0]["vertices"] = [(x * 2, y) for x, y in points]
+    else:
+        points = document["state"]["frames"][0]["vertices"]
+        document["state"]["frames"][0]["vertices"] = [(-x, y) for x, y in points]
+    with pytest.raises(NativeEditError):
+        reconcile(source, document=document, parameters=parameters, scope=scope)
+
+
+def test_stale_native_geometry_is_not_silently_repaired(source):
+    context, _, raw, before = source
+    drawing = native._Drawing(raw)
+    frame = next(record for record in drawing.records["ENTITIES"]
+                 if record.one(0) == "LWPOLYLINE")
+    pairs = [(pair.code, "1" if pair.code == 10 else pair.value) for pair in frame.pairs]
+    changed = (b"".join(pair.raw for pair in drawing.pairs[:frame.start]) + native._pack(pairs)
+               + b"".join(pair.raw for pair in drawing.pairs[frame.end:]))
+    with pytest.raises(NativeEditError):
+        reconcile_native_intake(context, changed, b"{}", metadata_key=layout.KEY,
+            trusted_document=before.document, trusted_parameters=before.parameters)
+
+
+def test_invalid_native_bytes_refuse_before_intake_reconciliation(source):
+    with pytest.raises(NativeEditError):
+        reconcile_native_intake(source[0], b"invalid", b"{}", metadata_key=layout.KEY,
+            trusted_document=source[3].document, trusted_parameters=source[3].parameters)
+
+
+@pytest.mark.parametrize("mode", ["valid-native", "invalid-native", "trusted-restore"])
+def test_generic_save_reconciles_before_publication_without_rewriting_bytes(source, monkeypatch, mode):
+    import project_drawing_editor as editor
+
+    class PublicationReached(Exception):
+        pass
+
+    context, scope, original, before = source
+    document = deepcopy(before.document)
+    document["state"]["frames"][0]["vertices"] = [
+        (x + 1, y) for x, y in document["state"]["frames"][0]["vertices"]]
+    raw = native.materialize_native_layout(scope, None, document, None, parameters=before.parameters)
+    if mode == "invalid-native":
+        raw = b"unverifiable native edit"
+    captured = []
+    monkeypatch.setattr(editor.project, "_access", lambda *a, **kw: (scope["organization_id"], UUID(int=9)))
+    monkeypatch.setattr(editor.project, "resolve_context", lambda *a, **kw: context)
+    monkeypatch.setattr(editor, "_parse", lambda *a: b"{}")
+    monkeypatch.setattr(editor, "_edited_intake", lambda *a: b'{"parsed_geometry":true}')
+
+    def canonical(*args, **kwargs):
+        assert mode != "trusted-restore"
+        return {}, before.document, before.parameters
+
+    monkeypatch.setattr(layout, "_canonical_state", canonical)
+    monkeypatch.setattr(editor, "_sha", lambda data: captured.append(data) or hashlib.sha256(data).hexdigest())
+
+    def publication():
+        raise PublicationReached()
+
+    monkeypatch.setattr(editor.project, "graph_store", publication)
+    restored = b'{"server_owned_restore":true}' if mode == "trusted-restore" else None
+    expected = editor.EditorError if mode == "invalid-native" else PublicationReached
+    with pytest.raises(expected) as caught:
+        editor.save_dxf(object(), scope["project_id"], scope["drawing_id"], UUID(int=8), raw,
+            request_id=UUID(int=10), capability="synthetic", _restored_intake=restored)
+    if mode == "invalid-native":
+        assert caught.value.code == "PROJECT_EDITOR_NATIVE_LAYOUT_INVALID"
+        assert captured == []
+    else:
+        assert captured[0] is raw
+        if restored is not None:
+            assert captured[1] == restored
+        else:
+            metadata = json.loads(captured[1])[layout.KEY]
+            assert metadata["document"] == native.ps.encode_document(document).decode()
+            assert metadata["parameters"] == before.parameters

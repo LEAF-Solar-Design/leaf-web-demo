@@ -70,7 +70,16 @@ Preferences resolve per field from user, workspace, then en-US/UTC/24h.
 Date-only values keep their reporting day; instants use the viewer's timezone.
 Money respects declared scale and currency fraction digits without FX, and
 ratios respect their explicit scale, including negative and over-100% values.
+Unsafe integer ratios display `Invalid`. Percent-scale values retain their
+original numeric magnitude, including safe integer digits near the precision limit.
 For pure formatting without chart imports, use `src/datasets/formatting`.
+
+Table text and identifier cells show hidden bidirectional embedding, override and
+isolate controls as Unicode escapes with a separate "Hidden direction marks" label.
+This keeps an account identifier from silently reversing on screen and distinguishes
+it from a literal backslash-u string. Ordinary Arabic and Hebrew text remains unchanged.
+The supplied rows, keys, mappings and pure formatter output are not rewritten.
+This cell treatment does not claim to sanitize chart labels or other host text.
 
 Hosts may also wrap `LineChartCore` or `DataTableCore` in their own cards.
 The chart retains categorical X by default and supports axis, formatter,

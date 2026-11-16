@@ -74,6 +74,7 @@ beforeEach(() => {
 })
 afterEach(() => {
   cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals()
+  vi.useRealTimers()
   gl.renderers.length = 0; gl.observers.length = 0; gl.frames.clear()
 })
 function frame() {
@@ -118,10 +119,11 @@ function renderedPixel(object, index) {
     .applyMatrix4(modelView).applyMatrix4(projection)
   return { x: 11 + (v.x + 1) * gl.width / 2, y: 17 + (1 - v.y) * gl.height / 2 }
 }
-function pointer(canvas, type, point) {
-  const event = new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, clientX: point.x, clientY: point.y })
-  Object.defineProperties(event, { pointerId: { value: 1 }, pointerType: { value: 'mouse' } })
+function pointer(canvas, type, point, options = {}) {
+  const event = new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, clientX: point.x, clientY: point.y, ...options })
+  Object.defineProperties(event, { pointerId: { value: options.pointerId ?? 1 }, pointerType: { value: 'mouse' } })
   fireEvent(canvas, event)
+  return event
 }
 function click(view, point) {
   const canvas = view.container.querySelector('canvas')
@@ -133,6 +135,147 @@ function marquee(view, a, b) {
 }
 
 describe('Viewer local XY origin', () => {
+  it('observes attributed built buffers separately from glyphs, with defensive visible snapshots', () => {
+    const data = drawing(O, 'engine')
+    data.polylines[0].sourceHandle = 'SOURCE'
+    data.truncated = 3
+    const intake = freeze(data), before = JSON.stringify(intake)
+    const view = mount(intake)
+    const api = view.container.firstChild.__leafViewerObservation
+    expect(Object.keys(api)).toEqual(['snapshot', 'project'])
+    expect(api.snapshot()).toBeNull()
+    frame()
+    const snapshot = api.snapshot()
+    expect(snapshot.drawingKey).toBe('engine:D')
+    expect(snapshot.omitted).toEqual({ blocks: 0, activeIntake: 3 })
+    expect(snapshot.handles).toEqual(expect.arrayContaining([
+      { handle: 'SOURCE', geometryTriangles: 2, geometrySegments: 4, markerCount: 0 },
+      { handle: 'B', geometryTriangles: 0, geometrySegments: 1, markerCount: 0 },
+      { handle: 'I', geometryTriangles: 0, geometrySegments: 0, markerCount: 1 },
+      { handle: 'F', geometryTriangles: 2, geometrySegments: 4, markerCount: 0 },
+    ]))
+    expect(snapshot.handles.some(row => row.handle === 'A')).toBe(false)
+    expect(api.project(O, -O)).toEqual(view.ref.current.project(O, -O))
+    snapshot.handles[0].geometryTriangles = 999
+    snapshot.omitted.blocks = 999
+    expect(api.snapshot().handles.some(row => row.geometryTriangles === 999)).toBe(false)
+    view.update({ visibleLayers: { Panels: false, Blocks: false } })
+    expect(api.snapshot().handles.find(row => row.handle === 'SOURCE').geometryTriangles).toBe(0)
+    expect(api.snapshot().handles.find(row => row.handle === 'I').markerCount).toBe(0)
+    const face = objects(object => object.userData.kind === 'face')[0]
+    face.material.opacity = 0
+    expect(api.snapshot().handles.find(row => row.handle === 'F').geometryTriangles).toBe(0)
+    expect(JSON.stringify(intake)).toBe(before)
+  })
+
+  it('retains actual block expansion source attribution alongside an incomplete reference marker', () => {
+    const intake = freeze({ polylines: [], faces3d: [],
+      inserts: [{ handle: 'REFERENCE', name: 'part', layer: 'Blocks', pt: [10, 20, 0] }],
+      blocks: { part: { base: [0, 0, 0], complete: false,
+        children: [{ kind: 'LINE', pts: [[0, 0, 0], [1, 0, 0]] }] } } })
+    const before = JSON.stringify(intake), view = mount(intake)
+    frame()
+    const snapshot = view.container.firstChild.__leafViewerObservation.snapshot()
+    expect(snapshot.handles).toEqual([
+      { handle: 'REFERENCE', geometryTriangles: 0, geometrySegments: 1, markerCount: 1 },
+    ])
+    expect(JSON.stringify(intake)).toBe(before)
+  })
+
+  it('records selection only after props commit, render, and a following task, reporting actual highlights', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const select = vi.fn(), view = mount(drawing(), { onSelectEntity: select })
+    const api = view.container.firstChild.__leafViewerObservation
+    frame()
+    const point = api.project(O + 0.005, -O + 0.005)
+    const canvas = view.container.querySelector('canvas')
+    const down = pointer(canvas, 'pointerdown', point)
+    gl.now += 2
+    pointer(canvas, 'pointerup', point)
+    expect(select).toHaveBeenLastCalledWith('A', { additive: false })
+    frame(); act(() => vi.runOnlyPendingTimers())
+    expect(api.snapshot().selections).toEqual([])
+    gl.now += 2
+    view.update({ selectedHandle: 'A' })
+    expect(api.snapshot().selections).toEqual([])
+    gl.now += 2
+    frame()
+    expect(api.snapshot().selections).toEqual([])
+    gl.now += 2
+    act(() => vi.runOnlyPendingTimers())
+    const record = api.snapshot().selections[0]
+    expect(record).toMatchObject({ serial: 1, kind: 'click', start_ms: 1000,
+      event_timestamp: down.timeStamp, trusted: false, pointerId: 1, handler_finished_ms: 1002,
+      highlight_committed_ms: 1004, render_ms: 1006, after_frame_ms: 1008,
+      requested_handles: ['A'], selected_handles: ['A'], highlight_geometry_count: 6 })
+    record.selected_handles.push('FAKE')
+    expect(api.snapshot().selections[0].selected_handles).toEqual(['A'])
+    const b = api.project(O + 0.03, -O + 0.005)
+    pointer(canvas, 'pointerdown', b, { shiftKey: true })
+    pointer(canvas, 'pointerup', b, { shiftKey: true })
+    act(() => view.ref.current.setHighlight(['0xB']))
+    frame(); act(() => vi.runOnlyPendingTimers())
+    expect(api.snapshot().selections[1]).toMatchObject({ additive: true, requested_handles: ['B'], selected_handles: ['A', 'B'] })
+  })
+
+  it('invalidates canceled and overlapping input, hidden publications, and queued work on scene replacement', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const view = mount(drawing(), { onSelectEntity: vi.fn() })
+    const mountEl = view.container.firstChild, api = mountEl.__leafViewerObservation
+    frame()
+    const canvas = view.container.querySelector('canvas'), point = api.project(O + 0.005, -O + 0.005)
+    click(view, point)
+    view.update({ selectedHandle: 'A' }); frame()
+    pointer(canvas, 'pointerdown', point)
+    pointer(canvas, 'pointercancel', point)
+    act(() => vi.runOnlyPendingTimers())
+    expect(api.snapshot().selections).toEqual([])
+    view.update({ selectedHandle: null })
+    click(view, point)
+    view.update({ selectedHandle: 'A' }); frame()
+    pointer(canvas, 'pointerdown', point, { pointerId: 2 })
+    act(() => vi.runOnlyPendingTimers())
+    expect(api.snapshot().selections).toEqual([])
+    pointer(canvas, 'pointercancel', point, { pointerId: 2 })
+    view.update({ selectedHandle: null })
+    click(view, point)
+    view.update({ selectedHandle: 'A' }); frame()
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')
+    act(() => vi.runOnlyPendingTimers())
+    visibility.mockReturnValue('visible')
+    frame(); act(() => vi.runOnlyPendingTimers())
+    expect(api.snapshot().selections).toEqual([])
+    view.update({ selectedHandle: null })
+    click(view, point)
+    view.update({ selectedHandle: 'A' }); frame()
+    view.update({ intake: drawing(-O), drawingKey: 'replacement' })
+    act(() => vi.runOnlyPendingTimers())
+    expect(api.snapshot()).toBeNull()
+    expect(api.project(O, -O)).toBeNull()
+    frame()
+    expect(mountEl.__leafViewerObservation.snapshot()).toMatchObject({ drawingKey: 'replacement', selections: [] })
+    view.unmount()
+    expect(mountEl.__leafViewerObservation).toBeUndefined()
+  })
+
+  it('observes marquee commits and empty selection without positive highlight proof', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const selected = vi.fn(), view = mount(drawing(), { marqueeGate: () => true, onMarqueeSelect: selected })
+    const api = view.container.firstChild.__leafViewerObservation
+    frame()
+    marquee(view, api.project(O - 0.002, -O + 0.012), api.project(O + 0.012, -O - 0.002))
+    expect(selected.mock.calls.at(-1)[0]).toEqual(['A'])
+    frame(); act(() => vi.runOnlyPendingTimers())
+    expect(api.snapshot().selections).toEqual([])
+    act(() => view.ref.current.setHighlight(['0xA']))
+    frame(); act(() => vi.runOnlyPendingTimers())
+    expect(api.snapshot().selections[0]).toMatchObject({ kind: 'marquee', selected_handles: ['A'], highlight_geometry_count: 6 })
+    marquee(view, api.project(O + 0.1, -O + 0.12), api.project(O + 0.12, -O + 0.1))
+    act(() => view.ref.current.setHighlight([]))
+    frame(); act(() => vi.runOnlyPendingTimers())
+    expect(api.snapshot().selections[1]).toMatchObject({ requested_handles: [], selected_handles: [], highlight_geometry_count: 0 })
+  })
+
   it('keeps 0.01-unit detail in actual buffers and rendered pixels through pan, zoom and resize', () => {
     const intake = freeze(drawing()), before = JSON.stringify(intake)
     const view = mount(intake)

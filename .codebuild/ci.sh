@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export LEAF_GATE_MEM=1
 LEAF_CI_SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"
 # BEGIN SHARD ENV
 CI_SHARD_TOTAL_N=1

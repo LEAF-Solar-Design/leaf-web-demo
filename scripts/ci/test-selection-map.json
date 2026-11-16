@@ -358,6 +358,7 @@
     "server-browser-project-routes",
     "server-browser-source-error-serializer",
     "server-b02-initializer-failure",
+    "server-b02-native-initializer-failure",
     "server-browser-project-authoring",
     "server-browser-project-source-export",
     "server-browser-static-preview",
