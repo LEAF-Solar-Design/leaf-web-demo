@@ -5407,3 +5407,117 @@ def test_composed_independent_string_dc_tiny_swaps_preserve_context():
         assert check['oracle_consistency']['verdict'] == 'PASS'
         assert result['string_metrics']['metrics']['panels']['comparison']['verdict'] == 'PASS'
         assert dict(caller.flags) == flags and caller.prec == 2
+
+
+@pytest.mark.parametrize('metric,field', [('panels','panel_counts'),('kw_dc','dc_power')])
+def test_composed_per_string_snapshot_swaps_hidden_by_inverter_totals(metric,field):
+    from decimal import localcontext, Inexact, Rounded
+    envelope = seven_step_envelope()
+    rows = envelope['grid']['reopened_'+field]
+    if metric == 'panels':
+        rows[0][metric],rows[1][metric] = rows[1][metric],rows[0][metric]
+    else:
+        rows[0][metric],rows[1][metric] = '4.'+'0'*76+'1','5.5'+'9'*76
+    with localcontext() as caller:
+        caller.prec = 2
+        caller.traps[Inexact] = caller.traps[Rounded] = True
+        flags = dict(caller.flags)
+        result = reconcile_seven_steps_json(json.dumps(envelope))
+        check = result['string_metrics']['metrics'][metric]['snapshots']
+        assert check['comparison']['counts']['mismatched'] == 2
+        assert check['saved_binding']['verdict'] == 'PASS'
+        assert result['inverter_load_reopen']['verdict'] == 'PASS'
+        assert dict(caller.flags) == flags and caller.prec == 2
+    envelope['grid']['before_'+field] = deepcopy(rows)
+    result = reconcile_seven_steps_json(json.dumps(envelope))
+    check = result['string_metrics']['metrics'][metric]['snapshots']
+    assert check['comparison']['verdict'] == 'PASS' and check['saved_binding']['counts']['mismatched'] == 2
+    envelope['grid']['reopened_'+field] = None
+    assert reconcile_seven_steps_json(json.dumps(envelope))['string_metrics']['metrics'][metric]['snapshots']['verdict'] == 'UNREADABLE'
+
+
+@pytest.mark.parametrize('metric', ['panels','kw_dc'])
+def test_exhaustive_independent_per_string_metric_reference(metric):
+    from itertools import product
+    from fractions import Fraction
+    from benches import x05_reconcile as m
+    compare = m.compare_string_panel_counts if metric == 'panels' else m.compare_string_dc_power
+    for old in product([1,2,3],repeat=2):
+        for new in product([1,2,3],repeat=2):
+            oracle = [dict(string_id=k,**{metric:v if metric=='panels' else f'0.{v}'}) for k,v in zip(['A','B'],old)]
+            saved = [dict(string_id=k,**{metric:v if metric=='panels' else f'0.{v}'}) for k,v in zip(['A','B'],new)]
+            original = deepcopy((oracle,saved))
+            result = compare(oracle,saved)
+            changed = [i for i in range(2) if old[i] != new[i]]
+            assert result['counts'] == dict(missing=0,foreign=0,mismatched=len(changed))
+            assert result['verdict'] == ('FAIL' if changed else 'PASS')
+            for row in result['mismatches']:
+                index = ['A','B'].index(row['string_id'])
+                scale = 1 if metric == 'panels' else 10
+                assert Fraction(row['saved'])-Fraction(row['oracle']) == Fraction(new[index]-old[index],scale)
+            assert (oracle,saved) == original
+
+
+@pytest.mark.parametrize('mode',['seven','bound'])
+@pytest.mark.parametrize('mutation',['swaps','missing','sum'])
+def test_composed_string_metrics_cli_differential(tmp_path,mode,mutation):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from benches import x05_reconcile as m
+    envelope = per_string_redistribution_envelope() if mutation == 'swaps' else seven_step_envelope()
+    evidence = envelope['assurance']['evidence']
+    if mutation == 'missing': evidence['oracle_dc_power'] = None
+    if mutation == 'sum':
+        evidence['oracle_panels'][0]['panels'] = envelope['grid']['panel_counts'][0]['panels'] = 11
+    source = envelope['assurance']
+    assurance = dict(evidence=evidence, frozen_manifest=source['manifest'], stage_bindings=source['bindings'],
+        supplied_inputs={k:bytes.fromhex(v) for k,v in source['inputs_hex'].items()},
+        expected_identity=source['identity'], stage_identities=source['stage_identities'])
+    direct = m.reconcile_seven_steps(envelope['import'],envelope['grid'],assurance)
+    assert json.loads(serialize_result(direct)) == json.loads(serialize_result(reconcile_seven_steps_json(json.dumps(envelope))))
+    if mode == 'seven':
+        payload,flag = envelope,'--seven-step'
+    else:
+        expected,records = bound_seven_fixture_records()
+        source['manifest']['fixture_id'] = evidence['fixture_id'] = expected[0]
+        source['bindings'] = {k:deepcopy(source['manifest']) for k in PROVENANCE_STAGES}
+        records[0]['envelope'] = envelope
+        direct = m.aggregate_bound_seven_steps(expected,records)
+        assert all(direct['fixtures'][k]['verdict'] == 'PASS' for k in expected[1:])
+        payload,flag = dict(expected_ids=expected,fixtures=records),'--seven-step-bound-aggregate'
+    run = subprocess.run([sys.executable,'-P',str(Path(m.__file__).resolve()),flag],
+        input=serialize_result(payload).encode('ascii'),capture_output=True,cwd=tmp_path,timeout=20,
+        env={'SystemRoot':'C:\\Windows'})
+    assert run.returncode == (4 if mutation=='missing' else 1) and not run.stderr
+    assert json.loads(run.stdout) == json.loads(serialize_result(direct))
+
+
+def test_string_metric_index_work_cap_permutation_and_preservation(monkeypatch):
+    from random import Random
+    from benches import x05_reconcile as m
+    operations = []
+    class CountedDict(dict):
+        def __getitem__(self,key):
+            operations.append(1)
+            return super().__getitem__(key)
+    original_index = m._index
+    def indexed(*args,**kwargs):
+        values,error = original_index(*args,**kwargs)
+        return (CountedDict(values) if values is not None else None),error
+    monkeypatch.setattr(m,'_index',indexed)
+    for metric,compare in [('panels',m.compare_string_panel_counts),('kw_dc',m.compare_string_dc_power)]:
+        for size in (10,100,1000):
+            oracle = [dict(string_id=f's{i:04}',**{metric:1}) for i in range(size)]
+            saved = [dict(row,**{metric:2}) for row in oracle]
+            preserved = deepcopy((oracle,saved))
+            operations.clear()
+            baseline = compare(oracle,saved)
+            assert len(operations) == 2*size+2*min(size,MAX_STRING_EXAMPLES)
+            assert baseline['counts']['mismatched'] == size and len(baseline['mismatches']) == min(size,MAX_STRING_EXAMPLES)
+            for seed in range(2):
+                left,right = deepcopy((oracle,saved))
+                Random(seed).shuffle(left)
+                Random(seed+1).shuffle(right)
+                assert compare(left,right) == baseline
+            assert (oracle,saved) == preserved

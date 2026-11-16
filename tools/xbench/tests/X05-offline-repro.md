@@ -1956,3 +1956,45 @@ PASS/UNREADABLE, PASS/PASS. Diagnostics name `string_panels_mismatch`,
 uses UNREADABLE precedence and retains readable sibling diagnostics. Previous
 proof-limit replays now produce composition FAIL once these independent rows
 are supplied. Oracle origin and independence require actual producer evidence.
+# Composed string metric recovery for X05
+
+The seven-step `string_metrics` result includes explicit panel/DC snapshot
+comparisons, snapshot string-ID bindings and before-to-saved value bindings.
+This replay exercises independent oracle failures and incremental repair through
+the composer. It uses only synthetic rows.
+
+```powershell
+@'
+import json, runpy, sys
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+envelope = fixtures['per_string_redistribution_envelope']()
+grid, evidence = envelope['grid'], envelope['assurance']['evidence']
+power = deepcopy(evidence['oracle_dc_power'])
+evidence['oracle_dc_power'] = None
+observed = []
+for stage in ('missing power oracle', 'panels repaired', 'power oracle restored',
+              'power repaired', 'contradictory report sum', 'sum repaired'):
+    if stage == 'panels repaired':
+        for field in ('panel_counts','before_panel_counts','reopened_panel_counts'):
+            grid[field] = deepcopy(evidence['oracle_panels'])
+    if stage == 'power oracle restored': evidence['oracle_dc_power'] = power
+    if stage == 'power repaired':
+        for field in ('dc_power','before_dc_power','reopened_dc_power'):
+            grid[field] = deepcopy(power)
+    if stage == 'contradictory report sum': evidence['oracle_panels'][0]['panels'] = 11
+    if stage == 'sum repaired': evidence['oracle_panels'][0]['panels'] = 10
+    result = m.reconcile_seven_steps_json(json.dumps(envelope))
+    checks = result['string_metrics']['metrics']
+    observed.append(result['verdict'])
+    print(stage, result['verdict'], checks['panels']['comparison']['reason'],
+          checks['kw_dc']['comparison']['reason'], checks['panels']['oracle_consistency']['reason'])
+assert observed == ['UNREADABLE','UNREADABLE','FAIL','PASS','FAIL','PASS']
+'@ | python -P -
+```
+
+Each repair preserves the other metric's diagnostic. Oracle sum contradictions
+produce `string_panels_oracle_total_mismatch`. Independent per-string report
+rows still require producer provenance for live acceptance.

@@ -778,6 +778,22 @@ def compare_string_metric_oracle_total(saved_string_ids, oracle_rows, oracle_val
     return result
 
 
+def _string_metric_snapshots(grid, evidence, metric, field, compare):
+    """Bind and compare explicit per-string metric values across save and reopen."""
+    bind = compare_panel_string_ids if metric == "panels" else compare_dc_string_ids
+    bindings = {}
+    for stage in ("before", "reopened"):
+        snapshot = evidence.get(stage + "_rows")
+        strings = snapshot.get("strings") if type(snapshot) is dict else None
+        bindings[stage] = bind(strings, grid.get(stage + "_" + field))
+    saved_binding = compare(grid.get(field), grid.get("before_" + field))
+    comparison = compare(grid.get("before_" + field), grid.get("reopened_" + field))
+    verdicts = {check["verdict"] for check in bindings.values()} | {saved_binding["verdict"], comparison["verdict"]}
+    return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
+                "supplied_string_" + metric + "_snapshots", bindings=bindings,
+                saved_binding=saved_binding, comparison=comparison)
+
+
 def _seven_step_string_metrics(grid, evidence):
     if type(grid) is not dict or type(evidence) is not dict:
         return _out("UNREADABLE", "string_metric_evidence_unreadable")
@@ -789,7 +805,8 @@ def _seven_step_string_metrics(grid, evidence):
             ("kw_dc", "dc_power", "oracle_dc_power", compare_string_dc_power)):
         oracle = evidence.get(oracle_field)
         checks[metric] = dict(comparison=compare(oracle, grid.get(field)),
-            oracle_consistency=compare_string_metric_oracle_total(ids, oracle, evidence.get("oracle_values"), metric))
+            oracle_consistency=compare_string_metric_oracle_total(ids, oracle, evidence.get("oracle_values"), metric),
+            snapshots=_string_metric_snapshots(grid, evidence, metric, field, compare))
     verdicts = {value["verdict"] for check in checks.values() for value in check.values()}
     return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
                 "supplied_independent_string_metrics", metrics=checks)
