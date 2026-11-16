@@ -178,21 +178,29 @@ def verify_files(receipt, source_root, *, state=None):
         raise EvidenceError('MISSING_FILE_DIGESTS')
     if not REQUIRED_SOURCE_FILES.issubset(files):
         raise EvidenceError('INCOMPLETE_SOURCE_INVENTORY')
+    identities = set()
     for name, expected in files.items():
         if not isinstance(name, str) or not isinstance(expected, str) or re.fullmatch('[0-9a-f]{64}', expected) is None:
             raise EvidenceError('MALFORMED_FILE_DIGEST')
         path = Path(name)
         if path.is_absolute() or '..' in path.parts:
             raise EvidenceError('SOURCE_PATH_ESCAPE')
+        if '\\' in name or path.as_posix() != name:
+            raise EvidenceError('SOURCE_PATH_NOT_CANONICAL')
         try:
             resolved = (root / path).resolve(strict=True)
             resolved.relative_to(root)
+            stat = resolved.stat()
         except FileNotFoundError:
             raise EvidenceError('MISSING_SOURCE_FILE') from None
         except ValueError:
             raise EvidenceError('SOURCE_PATH_ESCAPE') from None
         except (OSError, RuntimeError):
             raise EvidenceError('UNREADABLE_SOURCE_FILE') from None
+        identity = (stat.st_dev, stat.st_ino)
+        if identity in identities:
+            raise EvidenceError('AMBIGUOUS_SOURCE_IDENTITY')
+        identities.add(identity)
         if state['budget'].digest(resolved) != expected:
             raise EvidenceError('SOURCE_DIGEST_MISMATCH')
         state['files'][resolved] = expected

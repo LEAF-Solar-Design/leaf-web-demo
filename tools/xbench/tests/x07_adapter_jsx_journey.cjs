@@ -74,6 +74,12 @@ except ValueError:
     print(json.dumps({'ok':False,'error':{'message':'Invalid JSON request.','code':'BRIDGE_MALFORMED_JSON'}}));sys.exit(0)
 protocol=request.get('protocol_fault')
 if protocol=='json_grammar': print(request['fixture']['reply_json']);sys.exit(0)
+if protocol=='partial_utf8':
+    import threading
+    reply='{"ok":true,"result":{"label":"雪"}}'.encode('utf-8')
+    boundary=reply.index('雪'.encode('utf-8'))+1
+    sys.stdout.buffer.write(reply[:boundary]);sys.stdout.buffer.flush()
+    threading.Event().wait(60);sys.exit(0)
 if protocol=='invalid_utf8':
     fixture=request['fixture']
     invalid=bytes(fixture['utf8_bytes'])
@@ -167,20 +173,21 @@ function strictJSON(text) {
 function rpc(bound, op, context, value, signal, fault = null, protocolFault = null, fixture = {}) {
   calls.push({ op, context, value })
   return new Promise((resolve, reject) => {
-    if (signal?.aborted) { reject(new Error('retired')); return }
+    if (signal?.aborted) { const error = new Error('Python JSON request cancelled.'); error.code = 'BRIDGE_CANCELLED'; reject(error); return }
     const child = spawn('python', ['-X', 'utf8', '-c', python], { cwd: path.resolve(__dirname, '../../..'), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
     children.add(child)
     let stdout = '', stderr = '', finished = false, stdoutBytes = 0, stderrBytes = 0, terminalError = null
     const raw = []
     const stop = (code, message) => { if (!terminalError) { terminalError = new Error(message); terminalError.code = code }; child.kill() }
     const timer = setTimeout(() => stop('BRIDGE_TIMEOUT', 'Python JSON worker timed out.'), fixture.timeout_ms || 15000)
-    const abort = () => child.kill()
+    const abort = () => stop('BRIDGE_CANCELLED', 'Python JSON request cancelled.')
     signal?.addEventListener('abort', abort, { once: true })
     child.stderr.setEncoding('utf8')
     child.stdout.on('data', chunk => {
       stdoutBytes += chunk.length
       if (stdoutBytes > 1024*1024) stop('BRIDGE_STDOUT_LIMIT', 'Python JSON worker output limit exceeded.')
       else raw.push(chunk)
+      fixture.on_stdout_chunk?.(chunk)
     })
     child.stderr.on('data', chunk => {
       stderrBytes += Buffer.byteLength(chunk)
@@ -226,7 +233,8 @@ function rpc(bound, op, context, value, signal, fault = null, protocolFault = nu
         else { protocolStats[protocolStats.length-1].receipts++; settle(null, response.result) }
       } catch (cause) { const error = new Error(cause.code === 'BRIDGE_DUPLICATE_JSON_KEY' ? cause.message : 'Python JSON worker returned malformed JSON.'); error.code = cause.code || 'BRIDGE_MALFORMED_JSON'; settle(error) }
     })
-    let request = JSON.stringify({ database, bound_context: bound, context, op, value, intake, copies, fault, protocol_fault: protocolFault, fixture })
+    let request = JSON.stringify({ database, bound_context: bound, context, op, value,
+      intake: fixture.intake || intake, copies: fixture.copy_candidates || copies, fault, protocol_fault: protocolFault, fixture })
     if (fixture.duplicate_request_key) {
       const token = JSON.stringify(fixture.duplicate_request_key) + ':'
       request = request.replace(token, token + 'null,' + token)

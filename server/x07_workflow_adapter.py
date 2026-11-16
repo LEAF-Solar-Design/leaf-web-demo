@@ -198,6 +198,16 @@ class WorkflowAdapter:
         def validate(result):
             pin = self.workflow.store.application_record(scope['project_key'],scope['customer_key'])
             if pin != result.get('applied_profile'):raise ValueError('confirmation receipt no longer matches project pin')
+            selection = select_modules(self._intake, block=choice['block'], layer=choice['layer'],
+                                       window=choice['design_window'])
+            expected = self.workflow._result(scope, pin, pin['roles'], selection)
+            # Compare the complete producer shape with independently read pinned
+            # roles and recounted geometry. JSON preserves bool/int distinctions.
+            try:
+                matches = json.dumps(result, sort_keys=True, allow_nan=False) == json.dumps(expected, sort_keys=True, allow_nan=False)
+            except (ValueError, TypeError):
+                matches = False
+            if not matches: raise ValueError('confirmation receipt payload is inconsistent')
         return self._receipts.run(scope,digest,produce,validate)
 
     def load_profile(self, customer_key):
