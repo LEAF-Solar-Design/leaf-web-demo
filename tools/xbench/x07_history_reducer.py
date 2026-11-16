@@ -1,8 +1,15 @@
 """Reduce synthetic X07 command histories through an injected offline oracle."""
 import argparse
 import copy
+import hashlib
 import json
 from pathlib import Path
+
+
+class HistoryOracleError(ValueError):
+    def __init__(self, code, calls):
+        super().__init__(code)
+        self.diagnostic = {'schema': 'leaf.x07.reducer-diagnostic.v1', 'error': code, 'oracle_calls': calls}
 
 
 def reduce_history(commands, oracle, *, max_calls=128):
@@ -18,13 +25,21 @@ def reduce_history(commands, oracle, *, max_calls=128):
         raise ValueError('history exceeds256KiB')
     current = json.loads(encoded)
     calls = 0
+    observed = {}
 
     def evaluate(candidate):
         nonlocal calls
         calls += 1
-        signature = oracle(copy.deepcopy(candidate))
+        key = hashlib.sha256(json.dumps(candidate, sort_keys=True, separators=(',', ':')).encode()).digest()
+        try:
+            signature = oracle(copy.deepcopy(candidate))
+        except Exception:
+            raise HistoryOracleError('ORACLE_EXCEPTION', calls) from None
         if signature is not None and (not isinstance(signature, str) or not signature or len(signature) > 200):
-            raise ValueError('oracle must return None or a bounded failure signature')
+            raise HistoryOracleError('INVALID_ORACLE_SIGNATURE', calls)
+        if key in observed and observed[key] != signature:
+            raise HistoryOracleError('ORACLE_SIGNATURE_CHANGED', calls)
+        observed[key] = signature
         return signature
 
     signature = evaluate(current)
@@ -54,6 +69,11 @@ def reduce_history(commands, oracle, *, max_calls=128):
             granularity = min(len(current), granularity * 2)
     if signature is not None and not current:
         complete = True
+    if complete:
+        if calls == max_calls:
+            complete = False
+        elif evaluate(current) != signature:
+            raise HistoryOracleError('ORACLE_SIGNATURE_CHANGED', calls)
     return {'schema': 'leaf.x07.synthetic-history-replay.v1', 'proof_mode': 'synthetic_offline',
             'signature': signature, 'commands': current, 'original_count': len(commands),
             'oracle_calls': calls, 'complete': complete,
@@ -71,8 +91,12 @@ def main():
         if args.history.stat().st_size > 262144:
             parser.error('history exceeds256KiB')
         commands = json.loads(args.history.read_text(encoding='utf-8'))
-    result = reduce_history(commands, lambda rows: 'SYNTHETIC_FAILURE' if any(
-        isinstance(row, dict) and row.get('op') == 'synthetic_failure' for row in rows) else None, max_calls=args.max_calls)
+    try:
+        result = reduce_history(commands, lambda rows: 'SYNTHETIC_FAILURE' if any(
+            isinstance(row, dict) and row.get('op') == 'synthetic_failure' for row in rows) else None, max_calls=args.max_calls)
+    except HistoryOracleError as error:
+        print(json.dumps(error.diagnostic, sort_keys=True))
+        raise SystemExit(2)
     encoded = json.dumps(result, indent=2, allow_nan=False) + '\n'
     if args.out:
         if args.history and (args.out.resolve() == args.history.resolve()

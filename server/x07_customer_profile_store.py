@@ -24,6 +24,8 @@ class ProfileScopeError(ValueError):
 
 
 def _check_connection(db):
+    if db.row_factory not in (None, sqlite3.Row) or db.text_factory is not str:
+        raise ProfileSchemaError('unsupported SQLite row or text factory')
     if (db.execute('PRAGMA foreign_keys').fetchone()[0] != 1
             or db.execute('PRAGMA read_uncommitted').fetchone()[0] != 0):
         raise ProfileSchemaError('unsafe SQLite connection settings')

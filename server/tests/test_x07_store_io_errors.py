@@ -22,6 +22,10 @@ def io_error():
 class WriteFault:
     def __init__(self, db, table, phase):
         self.db, self.table, self.phase = db, table, phase
+    @property
+    def row_factory(self): return self.db.row_factory
+    @property
+    def text_factory(self): return self.db.text_factory
     def execute(self, statement, *args):
         target = statement.startswith('INSERT INTO ' + self.table)
         if target and self.phase == 'before': raise io_error()

@@ -1188,7 +1188,11 @@ def build_suites() -> List[Suite]:
                   "tests/test_x07_embedded_nul_keys.py",
                   (Path("..") / "tools" / "xbench" / "tests" / "test_x07_history_reducer.py").as_posix(),
                   "tests/test_x07_store_foreign_key_modes.py", "tests/test_x07_schema_column_limits.py",
-                  "tests/test_x07_sqlite_read_uncommitted.py"], 235),
+                  "tests/test_x07_sqlite_read_uncommitted.py", "tests/test_x07_connection_row_factories.py",
+                  "tests/test_x07_sqlite_variable_limits.py",
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_profile_version_diff.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_reducer_oracle_failures.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_reducer_minimality.py").as_posix()], 244),
         # W5 Rooftop workflow flow (2026-09-24, contracts G34/G34a/G34b): server/solar_workflow_flow.py,
         # the pure progression engine (every step's CanAdvance and HasDrawingPrerequisites, the L1/L2
         # gates on the host's setting, AdvanceStep, GoBack and NavigateToStep Stale marking over the
