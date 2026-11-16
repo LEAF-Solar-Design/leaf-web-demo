@@ -40,6 +40,11 @@ protocol=request.get('protocol_fault')
 if protocol=='eof': sys.exit(0)
 if protocol=='malformed': print('{not JSON'); sys.exit(0)
 if protocol=='nonzero': sys.stderr.write('injected protocol exit'); sys.exit(23)
+if protocol=='hung':
+    import time
+    time.sleep(60)
+if protocol=='stdout_large': sys.stdout.write('x'*(2*1024*1024));sys.stdout.flush();sys.exit(0)
+if protocol=='stderr_large': sys.stderr.write('x'*(128*1024));sys.stderr.flush();sys.exit(23)
 try:
     store=CustomerProfileStore(request['database'])
     adapter=WorkflowAdapter(ProfileWorkflow(store),context=request['bound_context'],intake=request['intake'],copies=request['copies'])
@@ -75,13 +80,23 @@ function rpc(bound, op, context, value, signal, fault = null, protocolFault = nu
     if (signal?.aborted) { reject(new Error('retired')); return }
     const child = spawn('python', ['-X', 'utf8', '-c', python], { cwd: path.resolve(__dirname, '../../..'), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
     children.add(child)
-    let stdout = '', stderr = '', finished = false
+    let stdout = '', stderr = '', finished = false, stdoutBytes = 0, stderrBytes = 0, terminalError = null
     const raw = []
-    const timer = setTimeout(() => { child.kill(); }, 15000)
+    const stop = (code, message) => { if (!terminalError) { terminalError = new Error(message); terminalError.code = code }; child.kill() }
+    const timer = setTimeout(() => stop('BRIDGE_TIMEOUT', 'Python JSON worker timed out.'), fixture.timeout_ms || 15000)
     const abort = () => child.kill()
     signal?.addEventListener('abort', abort, { once: true })
     child.stderr.setEncoding('utf8')
-    child.stdout.on('data', chunk => raw.push(chunk)); child.stderr.on('data', chunk => { stderr += chunk })
+    child.stdout.on('data', chunk => {
+      stdoutBytes += chunk.length
+      if (stdoutBytes > 1024*1024) stop('BRIDGE_STDOUT_LIMIT', 'Python JSON worker output limit exceeded.')
+      else raw.push(chunk)
+    })
+    child.stderr.on('data', chunk => {
+      stderrBytes += Buffer.byteLength(chunk)
+      if (stderrBytes > 64*1024) stop('BRIDGE_STDERR_LIMIT', 'Python JSON worker diagnostic limit exceeded.')
+      else stderr += chunk
+    })
     const settle = (error, result) => {
       if (finished) return
       finished = true; clearTimeout(timer); signal?.removeEventListener('abort', abort); children.delete(child)
@@ -90,6 +105,7 @@ function rpc(bound, op, context, value, signal, fault = null, protocolFault = nu
     child.on('error', error => settle(error))
     child.stdin.on('error', error => settle(error))
     child.on('close', code => {
+      if (terminalError) { protocolStats.push({ stdout_bytes: stdoutBytes, stderr_bytes: stderrBytes, stored_stdout_bytes: raw.reduce((n,b)=>n+b.length,0), stored_stderr_bytes: Buffer.byteLength(stderr), receipts: 0 }); settle(terminalError); return }
       // Split raw bytes deterministically in the receiver fixture. OS pipe
       // coalescing cannot turn a split-codepoint test into a whole-string test.
       let bytes = Buffer.concat(raw)

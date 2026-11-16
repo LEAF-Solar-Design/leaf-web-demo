@@ -75,12 +75,14 @@ function Workflow({ customerKey, projectKey, drawingKey, loadWorkflow, confirmRo
     const matching = plan?.copies?.filter(row => row.block?.toLowerCase() === selection.block.toLowerCase()
       && row.layer?.toLowerCase() === selection.layer.toLowerCase()) ?? []
     if (matching.length > 1) { setChoice(selection); return Promise.resolve() }
-    return operation('confirmRoles', { ...selection, expected_version: plan.expected_version,
+    return operation('confirmRoles', { ...selection, plan_token: plan.plan_token, expected_version: plan.expected_version,
       ...(matching.length === 1 ? { design_window: matching[0].design_window } : {}) })
   }
   const pick = selection => operation(choice ? 'confirmRoles' : 'applyProfile', {
-    ...selection, ...(choice ? { expected_version: plan.expected_version } : {}) })
-  if (cancelled) return <p role="status">Profile workflow cancelled.</p>
+    ...selection, plan_token: plan.plan_token, ...(choice ? { expected_version: plan.expected_version } : {}) })
+  const cancelledStatus = useRef(null)
+  useEffect(() => { if (cancelled) cancelledStatus.current?.focus() }, [cancelled])
+  if (cancelled) return <p ref={cancelledStatus} tabIndex={-1} role="status">Profile workflow cancelled.</p>
   if (result) return <section aria-label="Applied drawing profile"><p role="status">Drawing profile applied.</p>
     <p>Applied version: {result.applied_profile.version}</p>
     {typeof loadProfile === 'function' && typeof saveProfile === 'function' && <X07CustomerProfileEditor

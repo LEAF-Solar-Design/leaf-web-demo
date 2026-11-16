@@ -4,6 +4,8 @@ This is not authorization or a route. The future host must authorize the context
 before construction. UI callback keys cannot replace the injected identity.
 """
 from copy import deepcopy
+import hashlib
+import json
 from x07_customer_profile_store import _key, ProfileScopeError
 from x07_role_selection import select_modules
 from x07_profile_compatibility import check_compatibility
@@ -29,6 +31,8 @@ class WorkflowAdapter:
             selected = select_modules(self._intake, block=row.get('block'), layer=row.get('layer'), window=row.get('design_window'))
             if selected['count'] != row['oracle_count']:
                 raise ValueError('copy count disagrees with independent oracle')
+        self._plan_token = hashlib.sha256(json.dumps([self._context, self._intake, self._copies, self._aliases],
+            sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode()).hexdigest()
 
     def _scope(self, context):
         if context != self._context:
@@ -40,12 +44,14 @@ class WorkflowAdapter:
             raise ValueError('explicit copy choice is required')
         if any(key in payload and payload[key] != value for key, value in self._context.items()):
             raise ProfileScopeError('choice cannot replace injected scope')
+        if 'plan_token' in payload and payload['plan_token'] != self._plan_token:
+            raise ValueError('drawing snapshot changed; reload workflow')
         for row in self._copies:
             if (isinstance(payload.get('block'), str) and isinstance(payload.get('layer'), str)
                     and payload['block'].casefold() == row['block'].casefold()
                     and payload['layer'].casefold() == row['layer'].casefold()
                     and payload.get('design_window') == row['design_window']):
-                return deepcopy(row)
+                return {key: deepcopy(value) for key, value in row.items() if key != 'plan_token'}
         raise ValueError('choice must match an injected copy candidate')
 
     def load_workflow(self, context):
@@ -57,7 +63,7 @@ class WorkflowAdapter:
             role = compatible['roles']['module']
             rows = [row for row in rows if row['block'].casefold() == role['block'].casefold()
                     and row['layer'].casefold() == role['layer'].casefold()]
-        return {**plan, 'copies': deepcopy(rows)}
+        return {**plan, 'plan_token': self._plan_token, 'copies': deepcopy(rows)}
 
     def confirm_roles(self, context, payload):
         scope = self._scope(context)
