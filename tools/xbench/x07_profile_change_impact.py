@@ -1,9 +1,14 @@
 """Offline read-only role preview. Pins remain on their immutable versions."""
 import argparse
 import copy
+import json
 from pathlib import Path
 import sqlite3
 from x07_profile_history_audit import CustomerProfileStore, MAX_AUDIT_ROWS, MAX_PROFILE_VERSION, _key, begin_audit, require_database_file, publish_stdout
+
+
+def same_role(left, right):
+    return json.dumps(left,sort_keys=True,allow_nan=False)==json.dumps(right,sort_keys=True,allow_nan=False)
 
 
 def preview_change(store, *, customer_key, profile_id, before_version, after_version):
@@ -27,13 +32,13 @@ def preview_change(store, *, customer_key, profile_id, before_version, after_ver
             version = pin['version']
             if type(version) is not int or version not in versions or pin['profile_id'] != profile_id: raise ValueError('inconsistent pin')
             roles = versions[version]
-            different = sorted(k for k in roles.keys() | after.keys() if roles.get(k) != after.get(k))
+            different = sorted(k for k in roles.keys() | after.keys() if not same_role(roles.get(k),after.get(k)))
             if different: retaining.append({'project_key':pin['project_key'],'version':version,'different_roles':different})
     return {'schema':'leaf.x07.profile-change-impact.v1','customer_key':customer_key,'profile_id':profile_id,
             'before_version':before_version,'after_version':after_version,
             'added':{k:copy.deepcopy(after[k]) for k in sorted(after.keys()-before.keys())},
             'removed':{k:copy.deepcopy(before[k]) for k in sorted(before.keys()-after.keys())},
-            'changed':{k:{'before':copy.deepcopy(before[k]),'after':copy.deepcopy(after[k])} for k in sorted(before.keys()&after.keys()) if before[k]!=after[k]},
+            'changed':{k:{'before':copy.deepcopy(before[k]),'after':copy.deepcopy(after[k])} for k in sorted(before.keys()&after.keys()) if not same_role(before[k],after[k])},
             'retaining_different_roles':retaining}
 
 

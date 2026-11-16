@@ -12,6 +12,40 @@ from x07_profile_history_audit import CustomerProfileStore, MAX_AUDIT_ROWS, _key
 from x07_workflow_adapter import ConfirmationReceiptStore, _check_connection, _distinct_store_paths
 
 
+MAX_RECEIPT_BYTES=262144
+MAX_RECEIPT_DEPTH=32  # root container has depth one
+MAX_RECEIPT_NODES=10000  # containers and values, excluding member keys
+
+
+class ReceiptBudgetError(ValueError):
+    pass
+
+
+def parse_receipt(encoded):
+    if not isinstance(encoded,str):raise ValueError('receipt must be text')
+    if len(encoded.encode('utf-8'))>MAX_RECEIPT_BYTES:raise ReceiptBudgetError('receipt byte budget')
+    depth=0;quoted=False;escaped=False
+    for char in encoded:
+        if quoted:
+            if escaped:escaped=False
+            elif char=='\\':escaped=True
+            elif char=='"':quoted=False
+        elif char=='"':quoted=True
+        elif char in '[{':
+            depth+=1
+            if depth>MAX_RECEIPT_DEPTH:raise ReceiptBudgetError('receipt depth budget')
+        elif char in ']}':depth-=1
+    value=json.loads(encoded,parse_constant=lambda _:(_ for _ in ()).throw(ValueError()))
+    pending=[value];nodes=0
+    while pending:
+        current=pending.pop();nodes+=1
+        if nodes>MAX_RECEIPT_NODES:raise ReceiptBudgetError('receipt node budget')
+        if isinstance(current,dict):pending.extend(current.values())
+        elif isinstance(current,list):pending.extend(current)
+    json.dumps(value,sort_keys=True,allow_nan=False)
+    return value
+
+
 def audit_receipts(store, journal, *, customer_key):
     customer_key = _key(customer_key)
     if store.read_only is not True or journal.read_only is not True: raise ValueError('read-only stores required')
@@ -26,14 +60,12 @@ def audit_receipts(store, journal, *, customer_key):
         if len(rows)>MAX_AUDIT_ROWS: raise ValueError('row budget exceeded')
         for project, encoded in rows:
             try:
-                if not isinstance(encoded,str) or len(encoded.encode('utf-8'))>262144: raise ValueError()
-                value=json.loads(encoded,parse_constant=lambda _:(_ for _ in ()).throw(ValueError()))
-                # Overflowing exponent lexemes also become nonfinite floats.
-                # Validate inside the per-receipt handler before comparisons.
-                json.dumps(value,sort_keys=True,allow_nan=False)
+                value=parse_receipt(encoded)
                 if (not isinstance(value,dict) or value.get('schema')!='leaf.x07.profile-workflow.v1' or value.get('state')!='applied'
                     or value.get('customer_key')!=customer_key or value.get('project_key')!=project
                     or not isinstance(value.get('applied_profile'),dict)): raise ValueError()
+            except ReceiptBudgetError:
+                raise
             except (ValueError,TypeError,RecursionError,UnicodeError):
                 issues['invalid_receipts']+=1; continue
             try: pin=store._application(db,project,customer_key)
