@@ -12,7 +12,11 @@ import json
 from decimal import Decimal, InvalidOperation, localcontext
 from pathlib import Path
 import re
+import shutil
+import struct
+import tempfile
 from uuid import UUID, uuid4
+import zlib
 
 from xbench_core import Step
 from xbench_session import redact, signed_in
@@ -71,8 +75,17 @@ def bindings(ctx):
         raise ValueError("x10.fixtures must bind drawing, comparison_drawing, bom, terrain, rates, oracle")
     if not all(isinstance(value, str) for value in mapping.values()) or len(set(mapping.values())) != len(ROLES):
         raise ValueError("fixture bindings must have distinct manifest IDs")
-    fixtures = {row["id"]: row for row in ctx.manifest["fixtures"]}
-    verified = {row["id"]: row for row in ctx.fixtures}
+    def unique_rows(rows):
+        result = {}
+        for row in rows:
+            identity = row["id"]
+            if identity in result:
+                raise ValueError("duplicate fixture ID")
+            result[identity] = row
+        return result
+
+    fixtures = unique_rows(ctx.manifest["fixtures"])
+    verified = unique_rows(ctx.fixtures)
     bound = {}
     for role, identity in mapping.items():
         row = fixtures.get(identity)
@@ -116,7 +129,8 @@ def classify(observation, expected=None):
         reason = ("No confirmed rendered product blocker. Remaining: " + remaining
                   + "bind terrain and verify every step-1 acceptance clause. "
                   + safe_text(observation.get("issue", "Available option alone is insufficient.")))
-    rows = [Step(1, verdict, reason + " Evidence: x10-ui.json / x10-ground.png when saved.",
+    evidence = observation.get("evidence_path", "x10-ui.json / x10-ground.png when saved.")
+    rows = [Step(1, verdict, reason + " Evidence: " + evidence,
                  observed=observation, expected=expected)]
     rows.extend(Step(n, "UNREADABLE", "Prerequisite: completed step 1 and " + subject
                      + "; downstream product observation unimplemented in this slice.")
@@ -131,6 +145,7 @@ def _click_controls(page, labels):
 
 
 def _create_project(page, ctx, config, observation):
+    observation["fresh_project"] = False
     name = config["project_name"].strip() + "-" + uuid4().hex[:12]
     field = page.get_by_role("textbox", name="Project name", exact=True)
     if not field.is_visible():
@@ -142,9 +157,16 @@ def _create_project(page, ctx, config, observation):
         return (response.request.method == "POST"
                 and response.url == ctx.base.rstrip("/") + "/api/projects")
 
-    with page.expect_response(created, timeout=30_000) as pending:
-        field.locator("xpath=ancestor::form").get_by_role(
-            "button", name="Create project", exact=True).click(timeout=15_000)
+    prefix = ctx.base.rstrip("/") + "/api/projects/"
+
+    def opened(response):
+        return (response.request.method == "GET" and response.url.startswith(prefix)
+                and re.fullmatch(r"[0-9a-fA-F-]{36}", response.url[len(prefix):]) is not None)
+
+    with page.expect_response(opened, timeout=30_000) as active:
+        with page.expect_response(created, timeout=30_000) as pending:
+            field.locator("xpath=ancestor::form").get_by_role(
+                "button", name="Create project", exact=True).click(timeout=15_000)
     response = pending.value
     observation["creation_status"] = response.status
     if response.status not in (200, 201):
@@ -154,24 +176,74 @@ def _create_project(page, ctx, config, observation):
     identity = str(UUID(project.get("project_id") or project.get("id")))
     if project.get("name") != name:
         raise ValueError("project creation identity mismatch")
+    opened_response = active.value
+    observation["open_status"] = opened_response.status
+    route_id = str(UUID(opened_response.url[len(prefix):]))
+    opened_project = opened_response.json().get("project", {}) if opened_response.status == 200 else {}
+    active_id = str(UUID(opened_project.get("project_id") or opened_project.get("id")))
+    observation.update(project_id=identity, route_project_id=route_id, active_project_id=active_id)
+    if route_id != identity or active_id != identity:
+        raise ValueError("active project identity mismatch")
     chip = page.get_by_role("button", name="Projects: change project. Project " + name, exact=True)
     chip.wait_for(state="visible", timeout=30_000)
-    # Confirm the UI actually opened this response identity, without reading bodies.
     page.wait_for_load_state("networkidle", timeout=30_000)
-    observation.update(fresh_project=True, project_id=identity, project_name=safe_text(name))
+    observation["fresh_project"] = True
 
 
-def _save(page, ctx, observation):
+def _valid_png(path):
+    if not 57 <= path.stat().st_size <= 16 * 1024 * 1024:
+        raise ValueError("invalid screenshot size")
+    data = path.read_bytes()
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("invalid screenshot signature")
+    offset, first, image = 8, True, False
+    while offset + 12 <= len(data):
+        length = struct.unpack(">I", data[offset:offset + 4])[0]
+        kind = data[offset + 4:offset + 8]
+        end = offset + 12 + length
+        if end > len(data):
+            break
+        payload = data[offset + 8:end - 4]
+        if zlib.crc32(kind + payload) & 0xffffffff != struct.unpack(">I", data[end - 4:end])[0]:
+            break
+        if first and (kind != b"IHDR" or length != 13 or not all(struct.unpack(">II", payload[:8]))):
+            break
+        first = False
+        image = image or kind == b"IDAT"
+        if kind == b"IEND":
+            if length == 0 and end == len(data) and image:
+                return
+            break
+        offset = end
+    raise ValueError("invalid screenshot structure")
+
+
+def _save(page, ctx, observation, surface=None):
+    observation["evidence_saved"] = False
+    observation.pop("evidence_path", None)
     ctx.out_dir.mkdir(parents=True, exist_ok=True)
-    page.get_by_role("navigation", name="Solar design steps").screenshot(
-        path=str(ctx.out_dir / "x10-ground.png"), timeout=15_000)
-    saved = dict(observation, evidence_saved=True)
-    (ctx.out_dir / "x10-ui.json").write_text(
-        json.dumps(saved, indent=2) + "\n", encoding="utf-8")
-    observation["evidence_saved"] = True
+    staging = Path(tempfile.mkdtemp(prefix=".x10-staging-", dir=ctx.out_dir))
+    generation = "x10-evidence-" + uuid4().hex
+    evidence = generation + "/x10-ui.json / " + generation + "/x10-ground.png"
+    try:
+        if surface is None:
+            surface = page.get_by_role("navigation", name="Solar design steps")
+        surface.screenshot(path=str(staging / "x10-ground.png"), timeout=15_000)
+        _valid_png(staging / "x10-ground.png")
+        saved = dict(observation, evidence_saved=True, evidence_path=evidence)
+        record = staging / "x10-ui.json"
+        record.write_text(json.dumps(saved, indent=2) + "\n", encoding="utf-8")
+        if json.loads(record.read_text(encoding="utf-8")) != saved:
+            raise ValueError("invalid evidence JSON")
+        staging.rename(ctx.out_dir / generation)
+        observation.update(evidence_saved=True, evidence_path=evidence)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
 
 
 def _diagnostic(ctx, observation, stage, exc):
+    observation.pop("evidence_path", None)
     # Exception messages can contain URLs, provider bodies or fixture paths.
     observation.update(stage=stage, exception_type=safe_text(type(exc).__name__),
                        issue="UI/infrastructure unreadable at " + stage + ": " + safe_text(type(exc).__name__),
@@ -197,6 +269,8 @@ def _prepare_workspace(page):
 
 
 def _import_primary(page, ctx, config, bound, observation):
+    observation["imported_version_selected"] = False
+    observation.pop("import_rejection", None)
     project = page.get_by_role("button", name="Project", exact=True)
     if project.get_attribute("aria-expanded") != "true":
         project.click(timeout=15_000)
@@ -206,25 +280,39 @@ def _import_primary(page, ctx, config, bound, observation):
     upload.wait_for(state="attached", timeout=30_000)
     page.wait_for_function("input => !input.disabled", arg=upload.element_handle(), timeout=30_000)
     upload.set_input_files(str(bound["drawing"]), timeout=15_000)
-    status = page.get_by_role("status").filter(has_text=re.compile(r"^Attached "))
-    status.wait_for(state="visible", timeout=180_000)
+    intake = page.locator('[data-pane="material-intake"]')
+    status = intake.get_by_role("status").filter(has_text=re.compile(r"^Attached "))
+    failure = intake.get_by_text(re.compile(
+        r"^(?:Choose the drawing again to retry the upload\.|Retry to attach this drawing to the project\.)$"))
+    status.or_(failure).first.wait_for(state="visible", timeout=180_000)
+    if failure.is_visible():
+        observation["import_rejection"] = safe_text(failure.inner_text(timeout=15_000))
+        observation["attachment_status"] = safe_text(intake.get_by_role("status").first.inner_text(timeout=15_000))
+        # Capture only the explicit rendered hint, excluding Diagnostic details.
+        _save(page, ctx, observation, surface=failure)
+        return False
     # Keep the rendered attachment sentence, replacing customer names and paths.
     sentence = status.inner_text(timeout=15_000)
-    version = re.search(r"\bas version (\d{1,9})\b", sentence)
+    version = re.fullmatch(r"Attached .+ as version ([1-9][0-9]{0,8}) to .+", sentence)
+    if version is None:
+        raise ValueError("invalid rendered attachment version")
     observation["attachment_status"] = ("Attached [primary drawing]"
-        + (" as version " + version.group(1) if version else "") + " to [fresh project]")
+        + " as version " + version.group(1) + " to [fresh project]")
     observation["import_status"] = "Attached primary bound drawing through material UI"
     # The board preview selects canonical project mode; Close workspace would
     # instead discard the project binding and must never be used here.
     project = page.get_by_role("button", name="Project", exact=True)
     if project.get_attribute("aria-expanded") != "true":
         project.click(timeout=15_000)
-    page.get_by_role("button", name="Preview v1 in the drawing", exact=True).click(timeout=30_000)
+    sequence = int(version.group(1))
+    page.get_by_role("button", name="Preview v" + str(sequence) + " in the drawing", exact=True).click(timeout=30_000)
     marker = page.get_by_role("status").filter(
         has_text=re.compile(r"^Project drawing version selected\.$"))
     marker.wait_for(state="visible", timeout=30_000)
     observation["version_selection_status"] = safe_text(marker.inner_text())
     observation["imported_version_selected"] = True
+    observation["selected_sequence"] = sequence
+    return True
 
 
 def _open_workflow(page, config):
@@ -247,12 +335,24 @@ def _ground(page, ctx, observation):
         state="hidden", timeout=60_000)
     picker = page.get_by_role("combobox", name="Solar flow", exact=True)
     picker.wait_for(state="visible", timeout=15_000)
-    option = picker.locator('option[value="ground-physical"]')
-    label = option.inner_text(timeout=15_000)
     picker.select_option("ground-physical", timeout=15_000)
-    observation["ground_option"] = safe_text(label)
-    observation["selected_labels"] = [safe_text(text) for text in picker.locator("option:checked").all_text_contents()]
-    observation["ui_text"] = safe_text(page.get_by_role("navigation", name="Solar design steps").inner_text())
+    previous = None
+    for _ in range(3):
+        rail.get_by_text("Checking Solar steps for the selected project drawing version.", exact=True).first.wait_for(
+            state="hidden", timeout=60_000)
+        selected = picker.locator("option:checked")
+        sample = (picker.input_value(timeout=15_000), selected.inner_text(timeout=15_000),
+                  rail.inner_text(timeout=15_000))
+        if sample[0] != "ground-physical" or "Checking Solar steps" in sample[2]:
+            raise ValueError("ground catalog not ready")
+        if sample == previous:
+            observation["ground_option"] = safe_text(sample[1])
+            observation["selected_labels"] = [safe_text(sample[1])]
+            observation["ui_text"] = safe_text(sample[2])
+            break
+        previous = sample
+    else:
+        raise ValueError("ground catalog changed during observation")
     _save(page, ctx, observation)
 
 
@@ -268,7 +368,8 @@ def observe(page, ctx, config, bound, session_info=None):
         stage = "fresh project creation"
         _create_project(page, ctx, config, observation)
         stage = "primary drawing attachment and version selection"
-        _import_primary(page, ctx, config, bound, observation)
+        if _import_primary(page, ctx, config, bound, observation) is False:
+            return observation
         stage = "selected drawing workflow navigation"
         _open_workflow(page, config)
         stage = "rendered Ground Physical evidence"
