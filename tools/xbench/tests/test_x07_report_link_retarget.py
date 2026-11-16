@@ -5,8 +5,7 @@ import json
 import tempfile
 import unittest
 from unittest.mock import patch
-import test_x07_offline_acceptance_report as fixtures
-import test_x07_report_cli_integrity as cli
+from ._x07_report_fixtures import fixtures, cli
 
 
 class ReportLinkRetarget(unittest.TestCase):
