@@ -2189,3 +2189,41 @@ Verdict triples progress UNREADABLE/FAIL/FAIL, FAIL/FAIL/FAIL, PASS/FAIL/FAIL,
 PASS/FAIL/PASS and PASS/PASS/PASS. Identity repair leaves balanced device-owner
 swaps visible. Actual report producers must independently bind oracle identities
 and owner maps to the design before live acceptance.
+# Composed independent owner recovery for X05
+
+This replay combines balanced oracle-owner swaps, missing device-owner rows and
+a substituted oracle device ID. Each repair passes through seven-step
+composition and leaves the other independent-owner diagnostics visible.
+
+```powershell
+@'
+import json, runpy, sys
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+envelope = fixtures['independent_owner_conflict_envelope']('owners')
+evidence = envelope['assurance']['evidence']
+evidence['oracle_inverter_owners'] = None
+evidence['oracle_inverter_ids'][1] = 'replacement'
+observed = []
+for stage in ('initial','string owners repaired','device IDs repaired','device owners restored','device owners repaired'):
+    if stage == 'string owners repaired':
+        evidence['oracle_string_owners'] = deepcopy(envelope['grid']['string_assignments'])
+    if stage == 'device IDs repaired': evidence['oracle_inverter_ids'][1] = 'INV-B'
+    if stage == 'device owners restored':
+        evidence['oracle_inverter_owners'] = [dict(inverter_id='INV-A',grid_id='west'),dict(inverter_id='INV-B',grid_id='east')]
+    if stage == 'device owners repaired': evidence['oracle_inverter_owners'] = deepcopy(evidence['saved_inverters'])
+    result = m.reconcile_seven_steps_json(json.dumps(envelope))
+    checks = result['independent_owners']['checks']
+    observed.append(result['verdict'])
+    print(stage,result['verdict'],*(checks[key]['verdict'] for key in ('strings','inverters','inverter_ids')))
+    print(*(checks[key]['reason'] for key in ('strings','inverters','inverter_ids')))
+assert observed == ['UNREADABLE','UNREADABLE','UNREADABLE','FAIL','PASS']
+'@ | python -P -
+```
+
+The initial triple is FAIL/UNREADABLE/FAIL. String repair leaves the device
+failures visible. Identity repair leaves owner evidence UNREADABLE. Restoring
+swapped device owners yields FAIL until their mappings are repaired. Oracle
+identities and owners require independent producer provenance for live acceptance.

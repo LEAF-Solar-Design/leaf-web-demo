@@ -6155,3 +6155,143 @@ def test_independent_inverter_id_set_linear_index_builds(monkeypatch):
         result = m.compare_inverter_id_sets(oracle,saved)
         assert sum(sizes) == 4*size
         assert result['counts'] == dict(missing=size,foreign=size)
+
+
+def independent_owner_conflict_envelope(kind):
+    envelope = equal_count_ownership_envelope()
+    evidence = envelope['assurance']['evidence']
+    if kind == 'owners':
+        for field in ('oracle_string_owners','oracle_inverter_owners'):
+            evidence[field][0]['grid_id'],evidence[field][1]['grid_id'] = 'west','east'
+    elif kind == 'ids':
+        evidence['oracle_inverter_ids'][1] = 'replacement'
+        evidence['oracle_inverter_owners'][1]['inverter_id'] = 'replacement'
+    else:
+        evidence['oracle_inverter_owners'] = None
+    return envelope
+
+
+@pytest.mark.parametrize('kind',['owners','ids','missing'])
+def test_composed_independent_owner_transport_differential(tmp_path,kind):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from benches import x05_reconcile as m
+    envelope = independent_owner_conflict_envelope(kind)
+    source = envelope['assurance']
+    assurance = dict(evidence=source['evidence'],frozen_manifest=source['manifest'],stage_bindings=source['bindings'],
+        supplied_inputs={k:bytes.fromhex(v) for k,v in source['inputs_hex'].items()},
+        expected_identity=source['identity'],stage_identities=source['stage_identities'])
+    direct = m.reconcile_seven_steps(envelope['import'],envelope['grid'],assurance)
+    assert json.loads(serialize_result(direct)) == json.loads(serialize_result(reconcile_seven_steps_json(json.dumps(envelope))))
+    expected,records = bound_seven_fixture_records()
+    source['manifest']['fixture_id'] = source['evidence']['fixture_id'] = expected[0]
+    source['bindings'] = {k:deepcopy(source['manifest']) for k in PROVENANCE_STAGES}
+    records[0]['envelope'] = envelope
+    aggregate = m.aggregate_bound_seven_steps(expected,records)
+    assert all(aggregate['fixtures'][key]['verdict'] == 'PASS' for key in expected[1:])
+    run = subprocess.run([sys.executable,'-P',str(Path(m.__file__).resolve()),'--seven-step-bound-aggregate'],
+        input=serialize_result(dict(expected_ids=expected,fixtures=records)).encode('ascii'),
+        capture_output=True,cwd=tmp_path,timeout=20,env={'SystemRoot':'C:\\Windows'})
+    assert run.returncode == (4 if kind == 'missing' else 1) and not run.stderr
+    assert json.loads(run.stdout) == json.loads(serialize_result(aggregate))
+
+
+def test_independent_owners_all_fixture_hash_seeds_and_permutations(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from random import Random
+    from benches import x05_reconcile as m
+    expected,records = bound_seven_fixture_records()
+    for record,kind in zip(records,['owners','ids','missing']):
+        envelope = independent_owner_conflict_envelope(kind)
+        source = envelope['assurance']
+        source['manifest']['fixture_id'] = source['evidence']['fixture_id'] = record['fixture_id']
+        source['bindings'] = {k:deepcopy(source['manifest']) for k in PROVENANCE_STAGES}
+        record['envelope'] = envelope
+    original = deepcopy(records)
+    baseline = json.loads(serialize_result(m.aggregate_bound_seven_steps(expected,records)))
+    outputs = []
+    for seed in ('0','73'):
+        changed = deepcopy(records)
+        Random(int(seed)).shuffle(changed)
+        for record in changed:
+            grid,evidence = record['envelope']['grid'],record['envelope']['assurance']['evidence']
+            for field in ('string_assignments','before_string_assignments','reopened_string_assignments'):
+                Random(int(seed)).shuffle(grid[field])
+            for field in ('oracle_string_owners','oracle_inverter_owners','oracle_inverter_ids','saved_inverters'):
+                if evidence[field] is not None:
+                    Random(int(seed)).shuffle(evidence[field])
+        run = subprocess.run([sys.executable,'-P',str(Path(m.__file__).resolve()),'--seven-step-bound-aggregate'],
+            input=serialize_result(dict(expected_ids=expected[::-1],fixtures=changed)).encode('ascii'),
+            capture_output=True,cwd=tmp_path,timeout=20,env={'SystemRoot':'C:\\Windows','PYTHONHASHSEED':seed})
+        assert run.returncode == 4 and not run.stderr and json.loads(run.stdout) == baseline
+        outputs.append(run.stdout)
+    assert outputs[0] == outputs[1] and records == original
+
+
+def test_independent_owner_comparators_once_per_unique_fixture(monkeypatch):
+    from collections import Counter
+    from benches import x05_reconcile as m
+    expected,records = bound_seven_fixture_records()
+    baseline = m.aggregate_bound_seven_steps(expected,records)
+    names = ('compare_string_grid_owners','compare_inverter_grid_owners','compare_inverter_id_sets')
+    calls = Counter()
+    def counted(name,original):
+        def run(*args):
+            calls[name] += 1
+            return original(*args)
+        return run
+    for name in names:
+        monkeypatch.setattr(m,name,counted(name,getattr(m,name)))
+    assert m.aggregate_bound_seven_steps(expected,records) == baseline
+    assert calls == dict.fromkeys(names,3)
+    calls.clear()
+    result = m.aggregate_bound_seven_steps(expected,[dict(fixture_id=expected[0],envelope=None)]+records)
+    assert calls == dict.fromkeys(names,2) and expected[0] not in result['fixtures']
+    for key in expected[1:]:
+        assert result['fixtures'][key] == baseline['fixtures'][key]
+
+
+def test_composed_independent_owner_simultaneous_failure_isolation():
+    from benches import x05_reconcile as m
+    envelope = independent_owner_conflict_envelope('owners')
+    evidence = envelope['assurance']['evidence']
+    evidence['oracle_inverter_owners'] = None
+    evidence['oracle_inverter_ids'][1] = 'replacement'
+    original = deepcopy(envelope)
+    result = m._seven_step_envelope(envelope)
+    checks = result['independent_owners']['checks']
+    assert result['verdict'] == 'UNREADABLE'
+    assert checks['strings']['verdict'] == 'FAIL' and checks['strings']['mismatch_count'] == 2
+    assert checks['inverters']['verdict'] == 'UNREADABLE'
+    assert checks['inverter_ids']['counts'] == dict(missing=1,foreign=1)
+    assert result['cross_topology']['verdict'] == 'PASS' and envelope == original
+
+
+@pytest.mark.parametrize('broken',[False,True])
+def test_independent_owner_bijective_relabeling_preserves_counts(broken):
+    from benches import x05_reconcile as m
+    envelope = independent_owner_conflict_envelope('owners') if broken else equal_count_ownership_envelope()
+    baseline = m._seven_step_independent_owners(envelope['grid'],envelope['assurance']['evidence'])
+    names = {'east':'grid-z','west':'grid-y','A':'string-z','B':'string-y','INV-A':'device-z','INV-B':'device-y'}
+    def rename(value):
+        if type(value) is str:
+            return names.get(value,value)
+        if type(value) is list:
+            return [rename(item) for item in value]
+        if type(value) is dict:
+            return {names.get(key,key):rename(item) for key,item in value.items()}
+        return value
+    original = deepcopy(envelope)
+    renamed = rename(envelope)
+    result = m._seven_step_independent_owners(renamed['grid'],renamed['assurance']['evidence'])
+    assert result['verdict'] == baseline['verdict'] == ('FAIL' if broken else 'PASS')
+    for label in ('strings','inverters'):
+        assert result['checks'][label]['mismatch_count'] == baseline['checks'][label]['mismatch_count']
+    rows = renamed['assurance']['evidence']['oracle_string_owners']
+    rows[0]['grid_id'] = 'grid-z' if rows[0]['grid_id']=='grid-y' else 'grid-y'
+    changed = m._seven_step_independent_owners(renamed['grid'],renamed['assurance']['evidence'])
+    assert changed['checks']['strings']['verdict'] == changed['verdict'] == 'FAIL'
+    assert envelope == original
