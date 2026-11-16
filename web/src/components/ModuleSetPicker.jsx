@@ -11,6 +11,7 @@ export default function ModuleSetPicker({ data, drawingKey, onSelect, running = 
   const [submitError, setSubmitError] = useState(null)
   const [pendingRequest, setPendingRequest] = useState(null)
   const submitEpoch = useRef(0)
+  const activeRequest = useRef(null)
   const latestDrawing = useRef(drawingKey)
   latestDrawing.current = drawingKey
   useEffect(() => () => { submitEpoch.current += 1 }, [])
@@ -32,6 +33,7 @@ export default function ModuleSetPicker({ data, drawingKey, onSelect, running = 
     const drawingChanged = selection.drawingKey !== drawingKey
     if (drawingChanged) {
       submitEpoch.current += 1
+      activeRequest.current = null
       if (pendingRequest) setPendingRequest(null)
     }
     setSelection({ drawingKey, choices, edited: !drawingChanged && selection.edited })
@@ -39,10 +41,11 @@ export default function ModuleSetPicker({ data, drawingKey, onSelect, running = 
   const choiceIds = new Set(choices)
   const selected = sets.filter((set) => choiceIds.has(set.set_id))
   const summaryIds = Array.isArray(data?.selected_sets) ? data.selected_sets.map((set) => set?.set_id) : []
+  const summaryIdSet = new Set(summaryIds)
   const summaryMatchesChoices = !selection.edited || (summaryIds.length === choices.length
     && summaryIds.every((id) => choiceIds.has(id)))
   const validSummary = Array.isArray(data?.selected_sets) && data.selected_sets.length > 0
-    && !unavailable && new Set(summaryIds).size === summaryIds.length
+    && !unavailable && summaryIdSet.size === summaryIds.length
     && validCount(data.count) && data.selected_sets.every((set) => set !== null && typeof set === 'object'
       && typeof set.set_id === 'string' && available.has(set.set_id) && typeof set.layer === 'string'
       && typeof set.block === 'string' && validCount(set.count)
@@ -51,10 +54,13 @@ export default function ModuleSetPicker({ data, drawingKey, onSelect, running = 
       && set.block === (candidateById.get(set.set_id).block || ''))
     && data.count <= data.selected_sets.reduce((sum, set) => sum + set.count, 0)
   const submitSelection = () => {
-    if (unavailable || !selected.length || running || submitting || !onSelect) return
+    if (unavailable || !selected.length || running || submitting || !onSelect
+      || (activeRequest.current && activeRequest.current.drawingKey === drawingKey)) return
     const epoch = ++submitEpoch.current
+    activeRequest.current = { drawingKey, epoch }
     const finish = (failed = false) => {
       if (submitEpoch.current !== epoch || latestDrawing.current !== drawingKey) return
+      activeRequest.current = null
       setPendingRequest(null)
       setSubmitError(failed ? { drawingKey, message: 'Unable to start module count. Try counting the selected set again.' } : null)
     }
@@ -93,7 +99,7 @@ export default function ModuleSetPicker({ data, drawingKey, onSelect, running = 
     {unavailable ? <p>Module sets unavailable. Run the module tool again to refresh valid, unique set IDs.</p>
       : !staleResult && !sets.length && <p>No module candidates were found.</p>}
     {!onSelect && <p>Run the module tool on the current drawing to choose a set.</p>}
-    {hasSummary && !staleResult && !running && !submitting && (validSummary ? summaryMatchesChoices ? <p>Counted {data.count} modules on {data.selected_sets.map((set) =>
+    {hasSummary && !staleResult && !running && !submitting && (validSummary ? summaryMatchesChoices ? <p>Counted {data.count} modules on {sets.filter((set) => summaryIdSet.has(set.set_id)).map((set) =>
       `${set.layer}${set.block ? ` / ${set.block}` : ''}`).join(', ')}.</p>
       : <p>Choices changed. Count the selected set to update this result.</p>
       : <p>Count summary unavailable. Run the module tool again to refresh the result.</p>)}

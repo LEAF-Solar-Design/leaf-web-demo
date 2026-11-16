@@ -5,6 +5,27 @@ import DrawingDependencyReport from './DrawingDependencyReport.jsx'
 
 afterEach(cleanup)
 
+it('isolates exact mixed-direction reference names from disposition and coverage labels', () => {
+  const names = ['roof-גג.dwg', 'سطح-west.png', '\u202eabc\u202c.shx', 'a\u2067גג\u2069-b.pdf']
+  const report = { coverage_note: 'Observed records only.', dependencies: names.map((name) =>
+    ({ kind: 'image', name, disposition: 'image omitted' })) }
+  const before = JSON.stringify(report)
+  const view = render(<DrawingDependencyReport report={report} />)
+  const rows = screen.getAllByRole('row').slice(1)
+  rows.forEach((row, index) => {
+    const cells = within(row).getAllByRole('cell')
+    expect(cells[1].textContent).toBe(names[index])
+    const isolate = cells[1].querySelector('bdi')
+    expect(isolate?.textContent).toBe(names[index])
+    expect(isolate?.getAttribute('dir')).toBe('auto')
+    expect(cells[2].textContent).toBe('image omitted')
+    expect(isolate.contains(cells[2])).toBe(false)
+  })
+  expect(screen.getByRole('note', { name: 'Dependency coverage' }).textContent).toBe('Observed records only.')
+  expect(view.container.querySelector('a, img, iframe')).toBeNull()
+  expect(JSON.stringify(report)).toBe(before)
+})
+
 it.each([null, { dependencies: [null] }, { dependencies: {} }])('recovers from malformed metadata without retaining stale rows: %j', (bad) => {
   const valid = { coverage_note: 'Converted records only.', dependencies: [
     { kind: 'image', name: 'before.png', disposition: 'image omitted' },

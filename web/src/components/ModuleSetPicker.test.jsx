@@ -12,6 +12,42 @@ const first = () => screen.getByRole('checkbox', { name: 'Design / Panel A: 12 c
 const second = () => screen.getByRole('checkbox', { name: 'Alternate / Panel B: 9 candidates' })
 const submit = () => screen.getByRole('button', { name: 'Count selected set' })
 
+it('invokes one deferred callback for two submit activations in one event turn', async () => {
+  let settle
+  const pending = new Promise((resolve) => { settle = resolve })
+  const onSelect = vi.fn().mockReturnValue(pending)
+  render(<ModuleSetPicker drawingKey="double-turn" data={data} onSelect={onSelect} />)
+  fireEvent.click(first())
+  const button = submit()
+  act(() => {
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+  })
+  expect(onSelect).toHaveBeenCalledExactlyOnceWith(['first'])
+  expect(first().checked).toBe(true)
+  expect(submit().disabled).toBe(true)
+  await act(async () => { settle(); await pending })
+  expect(submit().disabled).toBe(false)
+  expect(first().checked).toBe(true)
+})
+
+it('renders equivalent recorded memberships consistently regardless of summary order', () => {
+  const onSelect = vi.fn()
+  const view = render(<ModuleSetPicker drawingKey="ordered" data={data} onSelect={onSelect} />)
+  fireEvent.click(first())
+  fireEvent.click(second())
+  fireEvent.click(submit())
+  const forward = { ...data, selected_sets: data.sets, count: 21 }
+  view.rerender(<ModuleSetPicker drawingKey="ordered" data={forward} onSelect={onSelect} />)
+  const text = screen.getByText(/^Counted 21 modules/).textContent
+  view.rerender(<ModuleSetPicker drawingKey="ordered" data={{ ...forward, selected_sets: [...data.sets].reverse() }} onSelect={onSelect} />)
+  expect(screen.getByText(/^Counted 21 modules/).textContent).toBe(text)
+  view.rerender(<ModuleSetPicker drawingKey="ordered" data={{ ...forward, selected_sets: [data.sets[0]], count: 12 }} onSelect={onSelect} />)
+  expect(screen.queryByText(/^Counted /)).toBeNull()
+  expect(screen.getByText('Choices changed. Count the selected set to update this result.')).toBeTruthy()
+  expect(onSelect).toHaveBeenCalledExactlyOnceWith(['first', 'second'])
+})
+
 it('selects, submits and rerenders deeply frozen candidates and recorded results without mutation', () => {
   const freeze = (value) => {
     if (value && typeof value === 'object' && !Object.isFrozen(value)) {

@@ -21,7 +21,7 @@ export default function DrawingDependencyReport({ report }) {
           ? row.disposition : 'Unknown disposition'
         const target = disposition === 'font remapped' && typeof row?.remapped_to === 'string' ? row.remapped_to : ''
         return <tr key={`${kind}:${name}:${index}`}>
-          <td>{kind}</td><td>{name}</td>
+          <td>{kind}</td><td><bdi dir="auto">{name}</bdi></td>
           <td>{disposition}{target ? ` to ${target}` : ''}</td>
         </tr>
       })}</tbody>
