@@ -783,6 +783,42 @@ def diff_snapshot_rows(before, reopened):
                 changed=len(changed), metrics=len(metrics)), string_examples=examples, metrics=metrics)
 
 
+def validate_grid_string_ownership(expected_grid_ids, saved_string_ids, assignments):
+    """Require every supplied saved string ID to have one explicit expected owner."""
+    def valid_ids(values):
+        return (type(values) is list and bool(values)
+                and all(type(key) is str and bool(key.strip()) and len(key) <= 128 for key in values)
+                and len(set(values)) == len(values))
+    if not valid_ids(expected_grid_ids) or not valid_ids(saved_string_ids) or type(assignments) is not list:
+        return _out("UNREADABLE", "ownership_evidence_unreadable")
+    expected, saved, seen = set(expected_grid_ids), set(saved_string_ids), set()
+    errors = dict(missing=0, duplicate=0, foreign_string=0, foreign_grid=0)
+    examples = {}
+    def issue(reason, key):
+        errors[reason] += 1
+        candidates = examples.setdefault(reason, set())
+        candidates.add(key)
+        if len(candidates) > MAX_STRING_EXAMPLES:
+            candidates.remove(max(candidates))
+    for row in assignments:
+        if (type(row) is not dict or set(row) != {"grid_id", "string_id"}
+                or any(type(value) is not str or not value.strip() or len(value) > 128 for value in row.values())):
+            return _out("UNREADABLE", "ownership_row_unreadable")
+        key = row["string_id"]
+        if key not in saved:
+            issue("foreign_string", key)
+        if row["grid_id"] not in expected:
+            issue("foreign_grid", key)
+        if key in seen:
+            issue("duplicate", key)
+        seen.add(key)
+    for key in saved - seen:
+        issue("missing", key)
+    failed = any(errors.values())
+    return _out("FAIL" if failed else "PASS", "string_ownership_mismatch" if failed else "string_ownership_equal",
+                counts=errors, examples={reason: sorted(keys) for reason, keys in sorted(examples.items())})
+
+
 @contextmanager
 def _csv_limit():
     # Serialize this helper's parsers and restore the caller's process setting
@@ -878,11 +914,16 @@ def compare_bound_snapshots(before, reopened, before_rows, reopened_rows, saved_
         ("before", "reopened"), (before, reopened), calculated)
         if compare_snapshots(claimed, actual)["verdict"] != "PASS"]
     if unbound:
-        return _out("FAIL", "snapshot_hash_binding_mismatch", unbound_phases=unbound)
+        return _out("FAIL", "snapshot_hash_binding_mismatch", unbound_phases=unbound,
+                    row_diff=diff_snapshot_rows(before_rows, reopened_rows))
     binding = compare_snapshots(saved, calculated[0])
     if binding["verdict"] != "PASS":
-        return _out("FAIL", "snapshot_saved_evidence_mismatch", changed_hashes=binding["changed_hashes"])
-    return compare_snapshots(*calculated)
+        return _out("FAIL", "snapshot_saved_evidence_mismatch", changed_hashes=binding["changed_hashes"],
+                    row_diff=diff_snapshot_rows(dict(strings=saved_strings, table_rows=view_rows), before_rows))
+    result = compare_snapshots(*calculated)
+    if result["verdict"] == "FAIL":
+        result["row_diff"] = diff_snapshot_rows(before_rows, reopened_rows)
+    return result
 
 
 def _compare_string_totals(rows, raw_values, source):

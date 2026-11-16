@@ -992,6 +992,55 @@ The repair restores the known synthetic source. Real evidence must come from
 the independent producer and preserve manifest custody. The guide grants no
 authority to alter frozen manifests to fit substituted product output.
 
+`validate_grid_string_ownership(expected_grid_ids, saved_string_ids, assignments)`
+requires explicit rows with exactly `grid_id` and `string_id`. Every saved string
+must occur once with an expected grid owner. Missing, duplicate and foreign
+assignments FAIL, with exact category counts and at most20 sorted IDs per category.
+Malformed inputs are UNREADABLE. Equal aggregate totals provide no ownership.
+
+Save/reopen composition now includes `row_diff` for changed rows or hash binding
+failures, with bounded deterministic string/metric diagnostics. Missing or
+malformed snapshots remain UNREADABLE. Signed discrepancy records bind both
+metric and exact signed delta. A positive revision cannot authorize its negative
+or a different metric, including tiny nonzero kW deltas. Decimal caller flags
+remain unchanged on successful and rejected numeric/snapshot/composed paths.
+
+Current offline CLI decision table:
+
+| Mode | Required envelope |
+|---|---|
+| default | Complete six-stage evidence |
+| `--aggregate` | `expected_ids`, `fixtures` with fixture evidence |
+| `--provenance` | `evidence`, `manifest`, `bindings` |
+| `--assurance` | `evidence`, `manifest`, `bindings`, `inputs_hex`, `identity`, `stage_identities` |
+| `--provenance-aggregate` | `expected_ids`, `fixtures` with evidence/manifest/bindings |
+| `--assurance-aggregate` | `expected_ids`, `fixtures` with complete assurance records |
+| `--seven-step` | `import`, `grid`, `assurance` |
+| `--seven-step-aggregate` | `expected_ids`, `fixtures` with seven-step envelopes |
+| `--seven-step-bound` | `envelope`, `manifest`, `import_binding`, `grid_binding` |
+| `--seven-step-bound-aggregate` | `expected_ids`, `fixtures` with bound records |
+
+Each evidence mode emits one ASCII JSON result and exits0 for PASS,1 for FAIL,
+4 for UNREADABLE or5 for output delivery failure. Modes are mutually exclusive.
+`--help` exits0 with usage text. Unknown options or conflicting modes exit2 with
+usage on stderr and no evidence result. For example, from the repository root:
+
+```powershell
+# Usage failure, exit2, no evidence verdict:
+python -P tools/xbench/benches/x05_reconcile.py --unknown-option
+# Malformed evidence, exit4, one fixed JSON result:
+'{' | python -P tools/xbench/benches/x05_reconcile.py --seven-step
+```
+
+The malformed-evidence command emits exactly:
+
+```json
+{"reason":"json_malformed","verdict":"UNREADABLE"}
+```
+
+These commands use synthetic stdin and source code only. They perform no network
+request or customer-file read.
+
 Canonical snapshot compatibility contract:
 
 - Hash UTF-8 bytes of compact JSON arrays with ASCII escapes and no spaces.
