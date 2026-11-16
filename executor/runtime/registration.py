@@ -294,7 +294,8 @@ class HostRegistrar:
             self._recover()
         else:
             with self._lock:
-                self._available = True
+                if not self._closed:
+                    self._available = True
 
     def _run(self) -> None:
         while not self._wait(self.config.heartbeat_interval_seconds):

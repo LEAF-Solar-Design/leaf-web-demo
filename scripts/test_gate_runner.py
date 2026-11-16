@@ -197,8 +197,11 @@ def test_read_audit_unset_preserves_every_catalog_command_and_environment(tmp_pa
     monkeypatch.delenv("LEAF_READSET_DIR", raising=False)
     monkeypatch.setenv("PYTHONPATH", "existing-python-path")
     for suite in g.build_suites():
-        command = g.reporting_command(suite, list(suite.argv),
-                                      g.suite_trace_env(suite, tmp_path, 1))
+        # Panels now always gets a reporting wrapper (covered separately).
+        # This drill isolates the unchanged read-audit command/environment seam.
+        command = (list(suite.argv) if suite.id == "web-studio-panels-proof" else
+                   g.reporting_command(suite, list(suite.argv),
+                                       g.suite_trace_env(suite, tmp_path, 1)))
         trace_env = g.suite_trace_env(suite, tmp_path, 1)
         before = {**g.clean_env(), **trace_env}
         assert suite.read_audit_dir is None
@@ -486,6 +489,367 @@ def test_file_timing_parser_failure_cannot_change_verdict(tmp_path, monkeypatch,
     assert result.status == "PASS"
     assert result.got == "1"
     assert "LEAF_FILE_TIMING" not in capsys.readouterr().out
+
+
+def _public_phase_row(g, **changes):
+    return {"schema": "leaf.ci.playwright-phase.v1",
+            "file": "web/e2e/campaign-panel.spec.mjs", "line": 3, "column": 1,
+            "worker_index": 0, "retry": 0, "repeat_index": 0, "status": "passed",
+            "duration_ms": 100, "setup_ms": 10, "teardown_ms": 20, "api_ms": 40,
+            "reported_navigation_api_ms": 25, "unattributed_ms": 30,
+            "truncated": False, "basis": g.PW_PHASE_BASIS, **changes}
+
+
+def _phase_text(row):
+    return "LEAF_PW_PHASE " + json.dumps(row) + "\n"
+
+
+def test_panels_phase_parser_sanitizes_and_bounds():
+    g = _load_runner()
+    suite = g.Suite("web-studio-panels-proof", "panels", "script", REPO / "web", [], None)
+    row = _public_phase_row(g)
+    secret = {**row, "title": "SECRET_SENTINEL", "error": {"url": "SECRET_SENTINEL"}}
+    assert g.parse_pw_phases(suite, _phase_text(secret)) == [row]
+    for file in g.PW_PHASE_FILES:
+        valid = {**row, "file": file}
+        assert g.parse_pw_phases(suite, _phase_text(valid)) == [valid]
+    for status in ("passed", "failed", "timedOut", "skipped", "interrupted", "unknown"):
+        valid = {**row, "status": status, "truncated": True}
+        assert g.parse_pw_phases(suite, _phase_text(valid)) == [valid]
+    bad = [{"schema": "other"}, {"basis": "other"}, {"status": "SECRET_SENTINEL"},
+           {"file": "web/e2e/../campaign-panel.spec.mjs"}, {"file": []},
+           {"truncated": 1}, {"duration_ms": 100.006},
+           {"reported_navigation_api_ms": 40.001}]
+    for key in g.PW_PHASE_IDENTITIES:
+        bad.extend({key: value} for value in (True, -1, 0.5, float("inf"), "0"))
+    for key in g.PW_PHASE_DURATIONS:
+        bad.extend({key: value} for value in (True, -1, float("nan"), float("inf"), "0"))
+    for changes in bad:
+        assert g.parse_pw_phases(suite, _phase_text({**row, **changes})) == []
+    for key in row:
+        missing = dict(row)
+        del missing[key]
+        assert g.parse_pw_phases(suite, _phase_text(missing)) == []
+    assert g.parse_pw_phases(suite, "LEAF_PW_PHASE {broken}\nLEAF_PW_PHASE []\n") == []
+    nested = "LEAF_PW_PHASE " + "[" * 1500 + "0" + "]" * 1500 + "\n"
+    assert g.parse_pw_phases(suite, nested + _phase_text(row)) == [row]
+    assert g.parse_pw_phases(suite, _phase_text({**row, "extra": "x" * g.PW_PHASE_MAX_LINE})) == []
+    assert len(g.parse_pw_phases(suite, _phase_text(row) * (g.PW_PHASE_MAX_ROWS + 10))) == g.PW_PHASE_MAX_ROWS
+    other = g.Suite("other", "other", "script", suite.cwd, [], None)
+    assert g.parse_pw_phases(other, _phase_text(row)) == []
+    assert g.parse_pw_phases(suite, _phase_text({**row, "duration_ms": 100.004}))
+    # Line timings are inclusive; their sum may exceed the aggregate API time.
+    with_lines = {**row, "api_lines": [{"line": 7, "api_ms": 40},
+                                      {"line": 8, "api_ms": 30}], "api_lines_omitted": 2}
+    private_lines = {**with_lines, "api_lines": [
+        {**item, "title": "SECRET_SENTINEL", "url": "SECRET_SENTINEL",
+         "location": {"file": "SECRET_SENTINEL"}} for item in with_lines["api_lines"]]}
+    assert g.parse_pw_phases(suite, _phase_text(private_lines)) == [with_lines]
+    for lines in ([], [{"line": i + 1, "api_ms": 0} for i in range(16)],
+                  [{"line": 9007199254740991, "api_ms": 40.004}]):
+        valid = {**row, "api_lines": lines, "api_lines_omitted": 0}
+        assert g.parse_pw_phases(suite, _phase_text(valid)) == [valid]
+    bad_lines = [None, {}, "SECRET_SENTINEL", [None], [[]],
+                 [{"line": 1}], [{"api_ms": 1}],
+                 [{"line": 1, "api_ms": 1}] * 2,
+                 [{"line": i + 1, "api_ms": 1} for i in range(17)]]
+    bad_lines.extend([{"line": value, "api_ms": 1}] for value in
+                     (True, 0, -1, 1.5, "1", float("inf"), 9007199254740992))
+    bad_lines.extend([{"line": 1, "api_ms": value}] for value in
+                     (True, -1, "1", float("nan"), float("inf"), 40.006))
+    for lines in bad_lines:
+        assert g.parse_pw_phases(suite, _phase_text({**with_lines, "api_lines": lines})) == []
+    for omitted in (True, -1, 0.5, "0", None, float("nan"), float("inf"), 10 ** 400):
+        assert g.parse_pw_phases(suite, _phase_text({**with_lines, "api_lines_omitted": omitted})) == []
+
+
+@pytest.mark.parametrize("failure", [None, "parser", "stdout"])
+@pytest.mark.parametrize("rc,status", [(0, "PASS"), (1, "FAIL")])
+def test_panels_phase_run_suite_stdout_and_failures(tmp_path, monkeypatch, capsys, failure, rc, status):
+    g = _load_runner()
+    monkeypatch.delenv("LEAF_GATE_FAULT_INJECT", raising=False)
+    suite = g.Suite("web-studio-panels-proof", "panels", "script", tmp_path,
+                    ["npx", "playwright", "test", "--workers=3"], None)
+    row = _public_phase_row(g)
+    monkeypatch.setattr(g.subprocess, "run", lambda *_a, **_k: SimpleNamespace(
+        returncode=rc, stdout=_phase_text({**row, "title": "SECRET_SENTINEL"}) + "1 passed (1s)\n",
+        stderr=""))
+    def broken(*_a, **_k):
+        raise ValueError("SECRET_SENTINEL")
+    if failure == "parser":
+        monkeypatch.setattr(g, "parse_pw_phases", broken)
+    elif failure == "stdout":
+        def print_row(text, **_kwargs):
+            if text.startswith("LEAF_PW_PHASE "):
+                raise OSError("SECRET_SENTINEL")
+        monkeypatch.setattr(g, "print", print_row, raising=False)
+    result = g.run_suite(suite, tmp_path, attempt=2, reporting_disabled=True)
+    assert result.status == status
+    output = capsys.readouterr().out
+    assert "SECRET_SENTINEL" not in output
+    rows = [json.loads(line[len("LEAF_PW_PHASE "):]) for line in output.splitlines()
+            if line.startswith("LEAF_PW_PHASE ")]
+    assert rows == ([{**row, "suite_id": suite.id, "attempt": 2}] if failure is None else [])
+
+
+@pytest.mark.parametrize("trusted", [False, True])
+def test_panels_phase_wrapper_preserves_config_and_other_suites(tmp_path, monkeypatch, trusted):
+    g = _load_runner()
+    monkeypatch.delenv("LEAF_TRUSTED_CI_DIR", raising=False)
+    monkeypatch.setattr(g, "process_capture_enabled", lambda: False)
+    if trusted:
+        monkeypatch.setenv("LEAF_TRUSTED_CI_DIR", str(tmp_path / "trusted"))
+    phase = str((g.WEB / "e2e/panelsTimingReporter.mjs").resolve())
+    config = tmp_path / "fixture.mjs"
+    config.write_text("export default {testDir: './e2e', outputDir: './results', "
+                      "reporter: [['list'], ['html', {outputFolder: './report'}], ["
+                      + json.dumps(phase) + "]], webServer: {command: 'serve'}, "
+                      "projects: [{testDir: './project'}]};", encoding="utf-8")
+    argv = ["npx", "--no-install", "playwright", "test", "--config", config.name,
+            "e2e/campaign-panel.spec.mjs", "--workers=3"]
+    suite = g.Suite("web-studio-panels-proof", "panels", "script", tmp_path, argv, None)
+    command = g.reporting_command(suite, argv, {"LEAF_TEST_REPORT_DIR": str(tmp_path / "out")})
+    assert suite.argv == argv
+    index = argv.index("--config") + 1
+    assert command[:index] == argv[:index] and command[index + 1:] == argv[index + 1:]
+    node = shutil.which("node")
+    assert node is not None, "Node is required for the panels phase drill"
+    script = ("import assert from 'node:assert/strict'; import config from "
+              + json.dumps(Path(command[index]).as_uri()) + ";\n"
+              + "assert.deepEqual(config.reporter.slice(0, 2), [['list'], ['html', {outputFolder: "
+              + json.dumps(str(tmp_path / "report")) + "}]]);\n"
+              + "assert.equal(config.reporter.filter(r => r[0] === " + json.dumps(phase) + ").length, 1);\n"
+              + "assert.equal(config.reporter.length, " + str(4 if trusted else 3) + ");\n"
+              + ("assert.equal(config.reporter[3][0], "
+                 + json.dumps(str(tmp_path / "trusted/playwright-leaf.mjs")) + ");\n" if trusted else "")
+              + "assert.equal(config.webServer.cwd, " + json.dumps(str(tmp_path)) + ");\n"
+              + "assert.equal(config.testDir, " + json.dumps(str(tmp_path / "e2e")) + ");\n"
+              + "assert.equal(config.outputDir, " + json.dumps(str(tmp_path / "results")) + ");\n"
+              + "assert.equal(config.projects[0].testDir, " + json.dumps(str(tmp_path / "project")) + ");\n")
+    proc = subprocess.run([node, "--input-type=module", "-e", script], capture_output=True,
+                          text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    for option in (["--reporter=list," + phase], ["--reporter", "list," + phase]):
+        cli = g.reporting_command(suite, ["npx", "playwright", "test", *option],
+                                  {"LEAF_TEST_REPORT_DIR": str(tmp_path / "cli")})
+        assert cli[-1].split("=", 1)[1].split(",").count(phase) == 1
+    other = g.Suite("other", "other", "script", tmp_path, argv, None)
+    other_command = g.reporting_command(other, argv, {"LEAF_TEST_REPORT_DIR": str(tmp_path / "other")})
+    if trusted:
+        text = Path(other_command[index]).read_text(encoding="utf-8")
+        assert "panelsTimingReporter" not in text
+        assert "playwright-leaf.mjs" in text
+    else:
+        assert other_command == argv
+        assert not (tmp_path / "other").exists()
+
+
+def test_panels_next_strict_mode_suite_and_phase_matrix():
+    node = shutil.which("node")
+    assert node is not None, "Node is required for the panels Next config drill"
+    config = (REPO / "web/next.config.mjs").as_uri()
+    script = "import nextConfig from " + json.dumps(config) + ";\n" + r"""
+import assert from 'node:assert/strict';
+const keys = ['LEAF_READSET_SUITE', 'LEAF_NEXT_DEV_INSTANCE'];
+const saved = keys.map(key => process.env[key]);
+const setEnv = (key, value) => {
+  if (value === undefined) delete process.env[key];
+  else process.env[key] = value;
+};
+try {
+  const panels = 'web-studio-panels-proof';
+  const suites = [undefined, '', panels, 'web-studio-editor-proof',
+    'web-studio-panels', panels + '-extra', 'prefix-' + panels,
+    panels.toUpperCase(), panels + ' ', ' ' + panels];
+  const phases = [undefined, 'phase-development-server', 'phase-production-build',
+    'phase-production-server', 'phase-export', 'phase-export-outdir',
+    'phase-test', 'phase-info', 'phase-development-server-extra'];
+  for (const instance of [undefined, 'panels-proof']) {
+    setEnv('LEAF_NEXT_DEV_INSTANCE', instance);
+    for (const suite of suites) {
+      setEnv('LEAF_READSET_SUITE', suite);
+      for (const phase of phases) {
+        const config = nextConfig(phase);
+        const development = phase === 'phase-development-server';
+        const label = JSON.stringify({suite, phase, instance});
+        assert.equal(config.reactStrictMode, !(development && suite === panels), label);
+        assert.equal(Object.hasOwn(config, 'output'), !development, label);
+        assert.equal(config.output, development ? undefined : 'export', label);
+        assert.equal(Object.hasOwn(config, 'distDir'), development && !!instance, label);
+        assert.equal(config.distDir,
+          development && instance ? `.next-dev-${instance}` : undefined, label);
+        assert.equal(typeof config.rewrites, development ? 'function' : 'undefined', label);
+        assert.deepEqual(config.images, {unoptimized: true}, label);
+        assert.equal(config.poweredByHeader, false, label);
+        assert.equal(typeof config.webpack, 'function', label);
+      }
+    }
+  }
+} finally {
+  keys.forEach((key, index) => setEnv(key, saved[index]));
+}
+"""
+    proc = subprocess.run([node, "--input-type=module", "-e", script], capture_output=True,
+                          text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_panels_phase_reporter_public_event_drill():
+    node = shutil.which("node")
+    assert node is not None, "Node is required for the panels phase drill"
+    reporter = (REPO / "web/e2e/panelsTimingReporter.mjs").as_uri()
+    script = "import Reporter from " + json.dumps(reporter) + ";\n" + r"""
+import assert from 'node:assert/strict';
+const secret = 'SECRET_SENTINEL';
+let output = '';
+const write = process.stdout.write;
+process.stdout.write = text => { output += text; return true; };
+try {
+  const reporter = new Reporter();
+  const test = {location: {file: '/repo/web/e2e/campaign-panel.spec.mjs', line: 4, column: 2},
+    repeatEachIndex: 1, title: secret};
+  const result = (extra = {}) => ({startTime: new Date(1000), duration: 100,
+    workerIndex: 2, retry: 0, status: 'passed', errors: [secret], ...extra});
+  const a = result(), b = result({retry: 1});
+  reporter.onTestBegin(test, a);
+  reporter.onTestBegin(test, b);
+  const step = (r, start, duration, title = secret, category = 'pw:api', parent, location) => {
+    const s = {startTime: new Date(start), duration, title, category, parent, location};
+    reporter.onStepEnd(test, r, s);
+    return s;
+  };
+  const before = {title: 'Before Hooks', category: 'hook', startTime: new Date(990), duration: 30};
+  const nested = {title: 'Before Hooks', category: 'hook', parent: before};
+  step(a, 1000, 90, secret, 'pw:api', nested);
+  reporter.onStepEnd(test, a, nested);
+  reporter.onStepEnd(test, a, before);
+  step(a, 1080, 50, 'After Hooks', 'hook');
+  step(a, 1010, 30, 'page.goto(' + secret + ')');
+  step(a, 1030, 40);
+  step(a, 1060, 30, 'frame.reload ' + secret);
+  step(b, 1000, 10, 'page.goto ' + secret);
+  reporter.onTestEnd(test, a);
+  reporter.onTestEnd(test, a); // Duplicate finish must not emit or recreate state.
+  reporter.onTestBegin(test, a);
+  step(a, 1000, 100);
+  reporter.onTestEnd(test, a);
+  reporter.onTestEnd(test, b);
+  const missing = result({startTime: undefined});
+  reporter.onTestBegin(test, missing);
+  step(missing, 1000, 100);
+  reporter.onTestEnd(test, missing);
+  const invalid = result();
+  reporter.onTestBegin(test, invalid);
+  reporter.onStepEnd(test, invalid, {category: 'pw:api', title: secret, duration: 50});
+  step(invalid, NaN, 100);
+  step(invalid, 1000, NaN);
+  step(invalid, 1000, -1);
+  reporter.onTestEnd(test, invalid);
+  const invalidResult = result({startTime: new Date(NaN), duration: NaN});
+  reporter.onTestEnd(test, invalidResult);
+  const unsupported = {...test, location: {...test.location, file: '/repo/other.spec.mjs'}};
+  const ignored = result();
+  reporter.onTestBegin(unsupported, ignored);
+  step(ignored, 1000, 100);
+  reporter.onTestEnd(unsupported, ignored);
+  const bounded = result();
+  reporter.onTestBegin(test, bounded);
+  for (let i = 0; i < 10001; i++) step(bounded, 1000, 1, secret, 'pw:api', undefined,
+    {file: test.location.file, line: i + 1});
+  reporter.onTestEnd(test, bounded);
+  assert.ok(!output.includes(secret));
+  const rows = output.trim().split('\n').map(line => {
+    assert.ok(line.startsWith('LEAF_PW_PHASE '));
+    return JSON.parse(line.slice('LEAF_PW_PHASE '.length));
+  });
+  assert.equal(rows.length, 6);
+  assert.deepEqual(rows.map(r => [r.setup_ms, r.teardown_ms, r.api_ms,
+    r.reported_navigation_api_ms, r.unattributed_ms]), [
+      [20, 20, 60, 40, 0], [0, 0, 10, 10, 90], [0, 0, 0, 0, 100],
+      [0, 0, 0, 0, 100], [0, 0, 0, 0, 0], [0, 0, 1, 0, 99]]);
+  assert.equal(rows[0].retry, 0);
+  assert.equal(rows[1].retry, 1);
+  assert.equal(rows[0].repeat_index, 1);
+  assert.equal(rows[5].truncated, true);
+  assert.deepEqual(rows[5].api_lines, Array.from({length: 16}, (_, i) => ({line: i + 1, api_ms: 1})));
+  assert.equal(rows[5].api_lines_omitted, 9984);
+  for (const row of rows.slice(0, 5)) {
+    assert.deepEqual(row.api_lines, []); // Absent locations cannot be inferred.
+    assert.equal(row.api_lines_omitted, 0);
+  }
+  for (const row of rows) {
+    assert.ok(Math.abs(row.duration_ms - row.setup_ms - row.teardown_ms - row.api_ms
+      - row.unattributed_ms) <= 0.005);
+    assert.ok(row.reported_navigation_api_ms <= row.api_ms);
+    assert.ok(JSON.stringify(row).length + 'LEAF_PW_PHASE '.length < 4096);
+  }
+  output = '';
+  const located = result();
+  const location = line => ({file: test.location.file, line, column: 1, title: secret});
+  const at = (r, start, duration, line, parent) => step(r, start, duration, secret,
+    'pw:api', parent, location(line));
+  reporter.onTestBegin(test, located);
+  at(located, 1000, 90, 50, nested); // Hook descendants never become line timings.
+  reporter.onStepEnd(test, located, before);
+  step(located, 1080, 50, 'After Hooks', 'hook');
+  const outer = at(located, 1010, 60, 10);
+  at(located, 1040, 30, 10); // Same-line overlaps are unioned.
+  at(located, 1030, 40, 20, outer); // Different lines remain inclusive.
+  at(located, 990, 40, 30);
+  at(located, 1070, 200, 40);
+  step(located, 1040, 5, secret, 'pw:api', undefined,
+    {file: String.raw`\repo\web\e2e\sub\..\campaign-panel.spec.mjs`, line: 60});
+  for (const loc of [undefined, {}, {file: test.location.file},
+    {file: '/foreign/web/e2e/campaign-panel.spec.mjs', line: 70},
+    {file: '/repo/web/e2e/recovery-controls.spec.mjs', line: 71},
+    ...[true, 0, -1, 1.5, '1', NaN, Infinity, Number.MAX_SAFE_INTEGER + 1].map(location)]) {
+    step(located, 1040, 5, secret, 'pw:api', undefined, loc);
+  }
+  reporter.onTestEnd(test, located);
+  const ranked = result();
+  reporter.onTestBegin(test, ranked);
+  for (let line = 1; line <= 20; line++) at(ranked, 1000, line, line);
+  at(ranked, 1000, 0, 100);
+  at(ranked, 1100, 10, 101);
+  reporter.onTestEnd(test, ranked);
+  const clipped = result();
+  reporter.onTestBegin(test, clipped);
+  at(clipped, 990, 40, 1);
+  at(clipped, 1080, 50, 2);
+  step(clipped, 1040, 10, secret, 'test.step', undefined, location(3));
+  reporter.onTestEnd(test, clipped);
+  assert.ok(!output.includes(secret));
+  const lineRows = output.trim().split('\n').map(line => {
+    assert.ok(line.length < 4096);
+    return JSON.parse(line.slice('LEAF_PW_PHASE '.length));
+  });
+  assert.equal(lineRows.length, 3);
+  assert.deepEqual(lineRows[0].api_lines, [
+    {line: 10, api_ms: 50}, {line: 20, api_ms: 40},
+    {line: 30, api_ms: 10}, {line: 40, api_ms: 10}, {line: 60, api_ms: 5}]);
+  assert.equal(lineRows[0].api_lines_omitted, 0);
+  assert.deepEqual([lineRows[0].setup_ms, lineRows[0].teardown_ms, lineRows[0].api_ms,
+    lineRows[0].unattributed_ms], [20, 20, 60, 0]);
+  assert.ok(lineRows[0].api_lines.reduce((sum, item) => sum + item.api_ms, 0) > lineRows[0].api_ms);
+  assert.deepEqual(lineRows[1].api_lines,
+    Array.from({length: 16}, (_, i) => ({line: 20 - i, api_ms: 20 - i})));
+  assert.equal(lineRows[1].api_lines_omitted, 4);
+  assert.deepEqual(lineRows[2].api_lines, [{line: 1, api_ms: 30}, {line: 2, api_ms: 20}]);
+  assert.equal(lineRows[2].api_lines_omitted, 0);
+  for (const row of lineRows) {
+    assert.ok(Math.abs(row.duration_ms - row.setup_ms - row.teardown_ms - row.api_ms
+      - row.unattributed_ms) <= 0.005);
+    for (const item of row.api_lines) {
+      assert.deepEqual(Object.keys(item).sort(), ['api_ms', 'line']);
+      assert.ok(item.api_ms >= 0 && item.api_ms <= row.api_ms);
+    }
+  }
+} finally { process.stdout.write = write; }
+"""
+    proc = subprocess.run([node, "--input-type=module", "-e", script], capture_output=True,
+                          text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == ""
 
 
 def _failed_log_retention_helper():
@@ -1855,6 +2219,7 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
             ("src/cadedit/cadEditSurface.test.jsx", 16),
             ("src/cad/engineBatchAtomic.test.js", 12),
             ("src/cad/engineBatchAtomic.test.js", 13),
+            ("src/cad/solarLifecycleReplay.test.jsx", 4),
         )
         assert suite.kind == "vitest" and suite.cwd == g.WEB
         assert suite.timeout_s == 900
@@ -3665,6 +4030,8 @@ def test_exact_vitest_file_and_skip_count_allowlist_passes(tmp_path):
     ("src/cad/engineBatchAtomic.test.js", 12, "PASS"),
     ("src/cad/engineBatchAtomic.test.js", 13, "PASS"),
     ("src/cad/engineBatchAtomic.test.js", 14, "FAIL"),
+    ("src/cad/solarLifecycleReplay.test.jsx", 4, "PASS"),
+    ("src/cad/solarLifecycleReplay.test.jsx", 5, "FAIL"),
     ("src/cad/unexpected.test.js", 13, "FAIL"),
 ))
 def test_known_native_vitest_skip_counts_are_exact(tmp_path, path, skipped, status):
@@ -3679,6 +4046,7 @@ def test_known_native_vitest_skip_counts_are_exact(tmp_path, path, skipped, stat
         allowed_vitest_skips=(
             ("src/cad/engineBatchAtomic.test.js", 12),
             ("src/cad/engineBatchAtomic.test.js", 13),
+            ("src/cad/solarLifecycleReplay.test.jsx", 4),
         ),
     )
 
@@ -5358,13 +5726,60 @@ def _jobs_catalog(g, count=4):
 
 
 def _jobs_main(g, monkeypatch, capsys, tmp_path, flags):
+    # Byte-output drills exclude optional nondeterministic nested memory telemetry.
+    monkeypatch.delenv("LEAF_GATE_MEM", raising=False)
     monkeypatch.setattr(sys, "argv", [
         "run-all-gates.py", "--log-dir", str(tmp_path), *flags,
     ])
+    # Isolate scoreboard output from inherited memory telemetry.
+    monkeypatch.delenv("LEAF_GATE_MEM", raising=False)
     rc = g.main()
     return rc, capsys.readouterr().out
 
 
+def _without_suite_memory_emissions(stdout):
+    # Consume both newlines printed by the emitter so interrupted progress
+    # fragments rejoin; splitlines would leave an extra newline behind.
+    return re.sub(r"\nLEAF_SUITE_MEMORY [^\r\n]*\n", "", stdout)
+
+
+@pytest.fixture
+def _jobs_memory_telemetry(monkeypatch):
+    monkeypatch.setenv("LEAF_GATE_MEM", "1")
+
+
+def test_jobs_stdout_ignores_only_memory_emission_order_and_placement():
+    first = '\nLEAF_SUITE_MEMORY {"suite": "pool-0", "sample_count": 1}\n'
+    second = '\nLEAF_SUITE_MEMORY {"suite": "pool-1", "sample_count": 2}\n'
+    ordinary = "header\n  ... pool suite 0 PASS\n\nscoreboard\n"
+    serial = "header\n  ... pool suite 0" + first + " PASS\n" + second + "\nscoreboard\n"
+    reordered = "header\n  ... pool suite 0" + second + " PASS\n" + first + "\nscoreboard\n"
+    parallel = ("header\n" + second + "GATE_RESULT id=pool-1 status=PASS\n"
+                + first + "GATE_RESULT id=pool-0 status=PASS\n"
+                + "  ... pool suite 0 PASS\n\nscoreboard\n")
+    assert serial != reordered
+    assert _without_suite_memory_emissions(serial) == ordinary
+    assert _without_suite_memory_emissions(reordered) == ordinary
+    parallel = _without_suite_memory_emissions(parallel)
+    assert (parallel.split("GATE_RESULT", 1)[0]
+            + parallel[parallel.index("  ... "):]) == ordinary
+
+
+@pytest.mark.parametrize("changed", [
+    "ordinary changed\n\nlast\n",
+    "ordinary\nlast\n",
+    "ordinary\n\nlast",
+    'ordinary LEAF_SUITE_MEMORY {"suite": "pool-0"}\n\nlast\n',
+])
+def test_jobs_stdout_memory_filter_preserves_other_output_differences(changed):
+    ordinary = "ordinary\n\nlast\n"
+    emission = '\nLEAF_SUITE_MEMORY {"suite": "pool-0"}\n'
+    assert _without_suite_memory_emissions(ordinary + emission) == ordinary
+    assert _without_suite_memory_emissions(changed + emission) == changed
+    assert _without_suite_memory_emissions(changed + emission) != ordinary
+
+
+@pytest.mark.usefixtures("_jobs_memory_telemetry")
 def test_jobs_one_is_byte_identical_to_default_without_starting_threads(
         tmp_path, monkeypatch, capsys):
     g = _load_runner()
@@ -5381,12 +5796,16 @@ def test_jobs_one_is_byte_identical_to_default_without_starting_threads(
     default = _jobs_main(g, monkeypatch, capsys, tmp_path, ["--retry", "0"])
     explicit = _jobs_main(g, monkeypatch, capsys, tmp_path,
                           ["--retry", "0", "--jobs", "1"])
-    assert default == explicit
+    assert "\nLEAF_SUITE_MEMORY " in default[1]
+    assert "\nLEAF_SUITE_MEMORY " in explicit[1]
+    assert (default[0], _without_suite_memory_emissions(default[1])) == (
+        explicit[0], _without_suite_memory_emissions(explicit[1]))
     assert default[0] == 0
     assert "GATE SCOREBOARD" in default[1]
     assert "executed-count drift" in default[1]
 
 
+@pytest.mark.usefixtures("_jobs_memory_telemetry")
 def test_jobs_four_keeps_the_same_scoreboard_and_catalog_order(
         tmp_path, monkeypatch, capsys):
     g = _load_runner()
@@ -5399,9 +5818,13 @@ def test_jobs_four_keeps_the_same_scoreboard_and_catalog_order(
     parallel = _jobs_main(g, monkeypatch, capsys, tmp_path,
                           ["--retry", "0", "--jobs", "4"])
     assert parallel[0] == serial[0]
+    assert "\nLEAF_SUITE_MEMORY " in serial[1]
+    assert "\nLEAF_SUITE_MEMORY " in parallel[1]
+    serial_stdout = _without_suite_memory_emissions(serial[1])
+    parallel_stdout = _without_suite_memory_emissions(parallel[1])
     # Ordinary phased runs add completion blocks before the unchanged final rows.
-    assert (parallel[1].split("GATE_RESULT", 1)[0]
-            + parallel[1][parallel[1].index("  ... "):]) == serial[1]
+    assert (parallel_stdout.split("GATE_RESULT", 1)[0]
+            + parallel_stdout[parallel_stdout.index("  ... "):]) == serial_stdout
     assert parallel[0] == 0
     rows = [line for line in parallel[1].splitlines() if line.startswith("pool suite")]
     assert len(rows) == len(suites)
@@ -5739,6 +6162,7 @@ def test_lane_priority_runs_a_long_resource_chain_ahead_of_a_short_pool_suite(
     assert state["stopped_after"] is None
 
 
+@pytest.mark.usefixtures("_jobs_memory_telemetry")
 def test_jobs_red_and_spawn_retry_keep_the_verdict_rows_and_flaked_callout(
         tmp_path, monkeypatch, capsys):
     import json
@@ -5759,9 +6183,13 @@ def test_jobs_red_and_spawn_retry_keep_the_verdict_rows_and_flaked_callout(
     serial_json = json.loads(result_file.read_text(encoding="utf-8"))
     parallel = _jobs_main(g, monkeypatch, capsys, tmp_path, [*flags, "--jobs", "4"])
     assert parallel[0] == serial[0]
+    assert "\nLEAF_SUITE_MEMORY " in serial[1]
+    assert "\nLEAF_SUITE_MEMORY " in parallel[1]
+    serial_stdout = _without_suite_memory_emissions(serial[1])
+    parallel_stdout = _without_suite_memory_emissions(parallel[1])
     # Ordinary phased runs add completion blocks before the unchanged final rows.
-    assert (parallel[1].split("GATE_RESULT", 1)[0]
-            + parallel[1][parallel[1].index("  ... "):]) == serial[1]
+    assert (parallel_stdout.split("GATE_RESULT", 1)[0]
+            + parallel_stdout[parallel_stdout.index("  ... "):]) == serial_stdout
     assert parallel[0] == 1
     data = json.loads(result_file.read_text(encoding="utf-8"))
     assert data == serial_json

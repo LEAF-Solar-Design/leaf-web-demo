@@ -10,7 +10,7 @@ from solar_design_graph import GraphValidationError, _bounded_json
 from solar_sizing_client import advance, checked_graph
 
 TOOL = "solar-panels-from-drawing"
-MAX_PANELS = 5000
+MAX_PANELS = 10_000
 
 
 def input_readiness(graph):

@@ -19,6 +19,27 @@ const element: DatasetElementV1 = {
   props: { columns: ["day", "revenue"], row_limit: 10 },
 };
 const lineElement = { ...element, kind: "dataset.line", props: { x_field: "day", y_field: "revenue" } };
+it.each(["text", "identifier"] as const)("shows hidden direction controls explicitly in %s cells without changing input identity", kind => {
+  const raw = "حساب \u202eABC123\u202c";
+  const literal = "حساب \\u202EABC123\\u202C";
+  const input = { ...read(), fields: [
+    { id: "account", label: "Account", type: { kind }, nullable: false, sensitivity: "public" as const },
+  ], rows: [
+    { key: "raw", values: { account: raw } },
+    { key: "literal", values: { account: literal } },
+    { key: "ordinary", values: { account: "חשבון XYZ456" } },
+  ] };
+  const before = JSON.stringify(input);
+  const view = { ...element, query: { fields: ["account"], limit: 10 }, props: { columns: ["account"], row_limit: 10 } };
+  render(<DatasetElement element={view} read={input} preferences={preferences} />);
+  const marked = screen.getByRole("cell", { name: /Hidden direction marks/ });
+  expect(within(marked).getByText(literal)).toBeInTheDocument();
+  expect(marked.textContent).not.toMatch(/[\u202a-\u202e\u2066-\u2069]/);
+  const plain = screen.getByRole("cell", { name: literal, exact: true });
+  expect(within(plain).queryByText("Hidden direction marks")).toBeNull();
+  expect(screen.getByRole("cell", { name: "חשבון XYZ456", exact: true })).toBeInTheDocument();
+  expect(JSON.stringify(input)).toBe(before);
+});
 function read(status: DatasetReadV1["status"] = "ready"): DatasetReadV1 {
   return {
     schema_version: 1, dataset_ref: ref, status,
