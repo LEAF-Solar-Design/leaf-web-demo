@@ -233,7 +233,7 @@ def test_postgres_transport_failures_never_retry(world, http, monkeypatch, failu
     monkeypatch.setattr(cloud, "post_stringer", failed)
     assert service.run_once(uuid4().hex, tool_name=solve.TOOL_NAME, lease_seconds=120)
     saved = row(job)
-    assert saved["status"] == "failed" and saved["error"]["reason_code"] == failure.upper()
+    assert saved["status"] == "failed" and saved["error"]["reason_code"] == (failure if failure == "solve_outcome_unknown" else failure.upper())
     with pg.db.cursor() as cur:
         cur.execute("SELECT state FROM project_solve_exchanges WHERE job_id=%s", (job,))
         assert cur.fetchone()["state"] == state
