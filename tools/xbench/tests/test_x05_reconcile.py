@@ -29,6 +29,7 @@ from benches.x05_reconcile import (METRICS, TABLE_COLUMNS, check_discrepancies,
     diff_snapshot_rows,
     validate_grid_string_ownership, compare_grid_optimizer_totals,
     compare_grid_oracle_totals, compare_ownership_snapshots,
+    compare_bound_ownership_snapshots, compare_grid_optimizer_snapshots,
     compare_csv_view, compare_recommendations, compare_snapshots, compare_strings, compare_table)
 
 
@@ -1293,7 +1294,8 @@ def seven_step_envelope():
             "grid": dict(expected_grid_ids=["g"], saved_group_ids=["p"],
                          rows=[dict(grid_id="g", matches=["p"], cause=None)], require_all_matched=True,
                          string_assignments=[dict(grid_id="g", string_id=row["string_id"]) for row in ORACLE],
-                         optimizer_totals={"g": sum(row["optimizers"] for row in ORACLE)}),
+                         optimizer_totals={"g": sum(row["optimizers"] for row in ORACLE)},
+                         reopened_string_assignments=[dict(grid_id="g", string_id=row["string_id"]) for row in ORACLE]),
             "assurance": assurance_envelope()}
 
 
@@ -1422,7 +1424,8 @@ def test_seven_step_offline_composer_preserves_every_diagnostic_and_missing_evid
     grids = dict(expected_grid_ids=["g"], saved_group_ids=["p"],
                  rows=[dict(grid_id="g", matches=["p"], cause=None)], require_all_matched=True,
                          string_assignments=[dict(grid_id="g", string_id=row["string_id"]) for row in ORACLE],
-                         optimizer_totals={"g": sum(row["optimizers"] for row in ORACLE)})
+                         optimizer_totals={"g": sum(row["optimizers"] for row in ORACLE)},
+                         reopened_string_assignments=[dict(grid_id="g", string_id=row["string_id"]) for row in ORACLE])
     result = reconcile_seven_steps(imported, grids, assurance)
     assert result["verdict"] == "PASS" and set(result["steps"]) == set("1234567")
     assert result["steps"]["3"] == result["assurance"]["checks"]["provenance"]["reconciliation"]["stages"]["strings"]
@@ -3352,7 +3355,8 @@ def test_seven_step_grid_totals_swaps_missing_evidence_and_diagnostic_retention(
     grid.update(expected_grid_ids=["east", "west"], saved_group_ids=["p", "q"],
         rows=[dict(grid_id="east", matches=["p"], cause=None), dict(grid_id="west", matches=["q"], cause=None)],
         string_assignments=[dict(grid_id="east", string_id="A"), dict(grid_id="west", string_id="B")],
-        optimizer_totals=dict(east=5, west=7))
+        optimizer_totals=dict(east=5, west=7),
+        reopened_string_assignments=[dict(grid_id="east", string_id="A"), dict(grid_id="west", string_id="B")])
     baseline = reconcile_seven_steps_json(json.dumps(envelope))
     assert baseline["verdict"] == "PASS"
     grid["string_assignments"][0]["grid_id"] = "west"
@@ -3456,3 +3460,131 @@ def test_grid_optimizer_lookup_work_exact_totals_caps_and_permutations(monkeypat
         assert totals == preserved[0]
         assert sorted(saved, key=lambda row: row["string_id"]) == preserved[1]
         assert sorted(rows, key=lambda row: row["string_id"]) == preserved[2]
+
+
+def equal_count_ownership_envelope():
+    envelope = seven_step_envelope()
+    evidence = envelope["assurance"]["evidence"]
+    for field in ("oracle_strings", "saved_strings"):
+        for row in evidence[field]:
+            row["optimizers"] = 6
+    for field in ("before_rows", "reopened_rows"):
+        evidence[field]["strings"] = deepcopy(evidence["saved_strings"])
+    hashes = canonical_snapshot(evidence["saved_strings"], evidence["view_rows"])
+    evidence["before"], evidence["reopened"] = hashes, dict(hashes)
+    envelope["grid"].update(expected_grid_ids=["east", "west"], saved_group_ids=["p", "q"],
+        rows=[dict(grid_id="east", matches=["p"], cause=None), dict(grid_id="west", matches=["q"], cause=None)],
+        optimizer_totals=dict(east=6, west=6),
+        string_assignments=[dict(grid_id="east", string_id="A"), dict(grid_id="west", string_id="B")],
+        reopened_string_assignments=[dict(grid_id="east", string_id="A"), dict(grid_id="west", string_id="B")])
+    return envelope
+
+
+def test_composed_ownership_reopen_equal_count_swap_absence_and_unrelated_diagnostics():
+    envelope = equal_count_ownership_envelope()
+    baseline = reconcile_seven_steps_json(json.dumps(envelope))
+    assert baseline["verdict"] == "PASS"
+    rows = envelope["grid"]["reopened_string_assignments"]
+    rows[0]["grid_id"], rows[1]["grid_id"] = "west", "east"
+    changed = reconcile_seven_steps_json(json.dumps(envelope))
+    assert changed["verdict"] == "FAIL" and changed["ownership_reopen"]["reason"] == "ownership_changed"
+    assert changed["ownership_reopen"]["changed_count"] == 2
+    for field in ("steps", "assurance", "ownership", "grid_optimizers"):
+        assert changed[field] == baseline[field]
+    del envelope["grid"]["reopened_string_assignments"]
+    envelope["import"]["dwg_imported"] = False
+    missing = reconcile_seven_steps_json(json.dumps(envelope))
+    assert missing["verdict"] == "UNREADABLE" and missing["steps"]["1"]["verdict"] == "FAIL"
+    assert missing["ownership_reopen"]["reopened"]["reason"] == "ownership_evidence_unreadable"
+    assert missing["steps"]["7"] == baseline["steps"]["7"]
+
+
+@pytest.mark.parametrize("stage", ["before", "reopened", "both"])
+def test_ownership_snapshots_bind_each_map_to_snapshot_string_ids(stage):
+    strings = deepcopy(ORACLE)
+    unrelated = [dict(string_id="X", optimizers=5), dict(string_id="Y", optimizers=7)]
+    owners = [dict(grid_id="g", string_id="A"), dict(grid_id="g", string_id="B")]
+    before = unrelated if stage in ("before", "both") else strings
+    reopened = unrelated if stage in ("reopened", "both") else strings
+    preserved = deepcopy((before, reopened, owners))
+    result = compare_bound_ownership_snapshots(["g"], before, reopened, owners, owners)
+    assert result["verdict"] == "UNREADABLE"
+    assert result["reason"] == ("ownership_snapshot_binding_conflict" if stage == "both"
+                                 else "ownership_snapshot_identity_conflict")
+    assert (before, reopened, owners) == preserved
+    assert compare_bound_ownership_snapshots(["g"], None, strings, owners, owners)["reason"] == "ownership_snapshot_strings_unreadable"
+
+
+def test_grid_optimizer_snapshots_detect_redistribution_with_equal_grand_totals():
+    before = [dict(string_id="A", optimizers=5), dict(string_id="B", optimizers=7)]
+    reopened = [dict(string_id="A", optimizers=7), dict(string_id="B", optimizers=5)]
+    owners = [dict(grid_id="east", string_id="A"), dict(grid_id="west", string_id="B")]
+    preserved = deepcopy((before, reopened, owners))
+    changed = compare_grid_optimizer_snapshots(["east", "west"], before, owners, reopened, owners)
+    assert changed == dict(verdict="FAIL", reason="grid_optimizer_snapshots_changed", changed_count=2,
+        examples=[dict(grid_id="east", before=5, reopened=7, delta=2),
+                  dict(grid_id="west", before=7, reopened=5, delta=-2)])
+    assert compare_grid_optimizer_snapshots(["east", "west"], before, owners, before, list(reversed(owners)))["verdict"] == "PASS"
+    assert compare_grid_optimizer_snapshots(["east", "west"], None, owners, reopened, None)["verdict"] == "UNREADABLE"
+    assert (before, reopened, owners) == preserved
+
+
+def test_ownership_grid_and_reopen_direct_json_differential_and_bound_siblings():
+    base = equal_count_ownership_envelope()
+    for mutation in ("none", "ownership", "totals", "reopen", "missing", "binding"):
+        envelope = deepcopy(base)
+        grid = envelope["grid"]
+        if mutation == "ownership":
+            grid["string_assignments"].append(deepcopy(grid["string_assignments"][0]))
+        elif mutation == "totals":
+            grid["optimizer_totals"]["east"] = 5
+        elif mutation == "reopen":
+            for row in grid["reopened_string_assignments"]:
+                row["grid_id"] = "west" if row["grid_id"] == "east" else "east"
+        elif mutation == "missing":
+            del grid["reopened_string_assignments"]
+        elif mutation == "binding":
+            envelope["assurance"]["evidence"]["reopened_rows"]["strings"][0]["string_id"] = "foreign"
+        source = envelope["assurance"]
+        assurance = dict(evidence=source["evidence"], frozen_manifest=source["manifest"], stage_bindings=source["bindings"],
+            supplied_inputs={key: bytes.fromhex(value) for key, value in source["inputs_hex"].items()},
+            expected_identity=source["identity"], stage_identities=source["stage_identities"])
+        preserved = deepcopy(envelope)
+        direct = reconcile_seven_steps(envelope["import"], grid, assurance)
+        strict = reconcile_seven_steps_json(json.dumps(envelope))
+        assert json.loads(serialize_result(direct)) == json.loads(serialize_result(strict))
+        assert envelope == preserved
+        expected, records = bound_seven_fixture_records()
+        envelope["assurance"]["manifest"]["fixture_id"] = expected[0]
+        envelope["assurance"]["evidence"]["fixture_id"] = expected[0]
+        envelope["assurance"]["bindings"] = {key: deepcopy(envelope["assurance"]["manifest"]) for key in PROVENANCE_STAGES}
+        records[0]["envelope"] = envelope
+        aggregate = aggregate_bound_seven_steps(expected, records)
+        decoded = aggregate_bound_seven_steps_json(json.dumps(dict(expected_ids=expected, fixtures=records)))
+        assert json.loads(serialize_result(aggregate)) == json.loads(serialize_result(decoded))
+        assert all(aggregate["fixtures"][key]["verdict"] == "PASS" for key in expected[1:])
+
+
+def test_bound_seven_step_ownership_and_grid_helpers_run_once_per_unique_fixture(monkeypatch):
+    from benches import x05_reconcile as module
+    expected, records = bound_seven_fixture_records()
+    baseline = aggregate_bound_seven_steps(expected, records)
+    names = ("_seven_step_ownership", "_seven_step_grid_totals", "_seven_step_ownership_reopen",
+             "compare_grid_optimizer_totals", "compare_bound_ownership_snapshots")
+    calls = dict.fromkeys(names, 0)
+    def counted(name, original):
+        def invoke(*args, **kwargs):
+            calls[name] += 1
+            return original(*args, **kwargs)
+        return invoke
+    for name in names:
+        monkeypatch.setattr(module, name, counted(name, getattr(module, name)))
+    assert aggregate_bound_seven_steps(expected, records) == baseline
+    assert calls == dict.fromkeys(names, 3)
+    calls.update(dict.fromkeys(names, 0))
+    ambiguous = [dict(fixture_id=expected[0], envelope=None)] + records
+    result = aggregate_bound_seven_steps(expected, ambiguous)
+    assert result["verdict"] == "UNREADABLE" and expected[0] not in result["fixtures"]
+    assert calls == dict.fromkeys(names, 2)
+    for key in expected[1:]:
+        assert result["fixtures"][key] == baseline["fixtures"][key]

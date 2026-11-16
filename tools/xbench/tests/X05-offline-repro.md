@@ -656,7 +656,7 @@ Complete seven-step JSON envelope:
 | Field | Required shape | Missing, null or empty behavior |
 |---|---|---|
 | `import` | Exactly `normal_user`, `dwg_imported`, `report_imported`, all bool | Missing outer field rejects envelope; null/empty object yields step1 UNREADABLE; false yields readable FAIL |
-| `grid` | `expected_grid_ids`, `saved_group_ids`, `rows`, `require_all_matched`, plus `string_assignments` and independent `optimizer_totals` | Missing outer field rejects envelope; null/empty object yields step2 UNREADABLE; empty rows with valid nonempty IDs yields missing-grid FAIL |
+| `grid` | `expected_grid_ids`, `saved_group_ids`, `rows`, `require_all_matched`, plus `string_assignments`, `reopened_string_assignments` and independent `optimizer_totals` | Missing outer field rejects envelope; null/empty object yields step2 UNREADABLE; empty rows with valid nonempty IDs yields missing-grid FAIL |
 | `assurance` | Exactly `evidence`, `manifest`, `bindings`, `inputs_hex`, `identity`, `stage_identities` | Missing outer field rejects envelope; null/empty object yields assurance UNREADABLE and absent downstream steps |
 
 Evidence and assurance schemas are the existing six-stage contracts above.
@@ -1245,3 +1245,50 @@ report PASS grid_oracle_total_equal
 
 These checks rely on explicitly supplied independent grid evidence. They acquire
 no live data and make no claim about the origin of the input.
+
+## Ownership save/reopen composition replay
+
+The seven-step input requires `grid.reopened_string_assignments` in addition to
+the saved `string_assignments`. Each map must cover the string identities in its
+respective `before_rows` or `reopened_rows` snapshot. The `ownership_reopen` result
+contributes to the composed verdict while the existing step diagnostics remain
+available. Missing reopened owners yield UNREADABLE. The pure
+`compare_grid_optimizer_snapshots` helper separately derives per-grid sums from
+each supplied snapshot's strings and owners.
+
+From the repository root, run this synthetic PowerShell replay.
+
+```powershell
+@'
+import sys, json, runpy
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import reconcile_seven_steps_json
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+correct = builders['equal_count_ownership_envelope']()
+swapped = deepcopy(correct)
+for row in swapped['grid']['reopened_string_assignments']:
+    row['grid_id'] = 'west' if row['grid_id'] == 'east' else 'east'
+missing = deepcopy(swapped)
+del missing['grid']['reopened_string_assignments']
+for name, envelope in [('swapped', swapped), ('missing', missing), ('corrected', correct)]:
+    result = reconcile_seven_steps_json(json.dumps(envelope))
+    print(name, result['verdict'], result['ownership_reopen']['reason'], result['steps']['7']['verdict'])
+    assert result['grid_optimizers']['verdict'] == 'PASS'
+    if name == 'swapped':
+        assert result['ownership_reopen']['changed_count'] == 2
+'@ | python -P -
+```
+
+Expected output
+
+```text
+swapped FAIL ownership_changed PASS
+missing UNREADABLE ownership_snapshots_invalid PASS
+corrected PASS ownership_equal PASS
+```
+
+Both strings keep six optimizers. Their unchanged counts and per-grid totals do
+not identify the changed reopened owners. The explicit ownership maps supply that
+evidence. This replay compares synthetic supplied evidence and does not establish
+live X05 acceptance or authenticate an input producer.
