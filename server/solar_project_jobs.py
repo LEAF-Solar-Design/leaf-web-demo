@@ -342,9 +342,11 @@ def _preparation_error(exc):
     if isinstance(exc, cloud.CloudError):
         allowed = {"cloud_request_invalid", "cloud_auth_missing", "cloud_tenant_unauthorized",
                    "cloud_upstream_failure", "cloud_response_invalid", "sizing_outcome_unknown",
-                   "solve_outcome_unknown"}
+                   "solve_outcome_unknown", "CLOUD_REQUEST_REJECTED"}
         reason = (exc.classification if exc.classification in allowed
                   else "cloud_upstream_failure").upper()
+        if exc.classification == "solve_outcome_unknown":
+            reason = "solve_outcome_unknown"
     if isinstance(reason, str) and reason.startswith("SIP_R14_EXCHANGE_"):
         reason = "SIP_R14_EVIDENCE_REJECTED"
     retryable = isinstance(exc, _TRANSPORT_FAILURES) or reason in {
@@ -360,6 +362,13 @@ def _preparation_error(exc):
         error["solve_progress"] = exc.solve_progress
         if exc.solve_progress["status"] == "partial":
             error["message"] = "canonical Solar solve partially completed"
+    if reason == "CLOUD_REQUEST_REJECTED":
+        error.update(message="The solar solve request was rejected by the solver.",
+                     next_action="Review the solve inputs before submitting again.",
+                     upstream_status=400, retryable=False)
+    elif reason == "solve_outcome_unknown":
+        error.update(message="The solar solve outcome is unknown.",
+                     next_action="Reconcile its existing job before retrying.", retryable=False)
     return error
 
 
