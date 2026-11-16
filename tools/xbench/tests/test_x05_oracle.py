@@ -1,6 +1,7 @@
 """Synthetic label contracts only; these do not certify real PDF layouts."""
 
 from decimal import Decimal, localcontext
+from itertools import permutations
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -24,6 +25,72 @@ A-2 | 6
 
 def codes(result):
     return {(issue.code, issue.field) for issue in result.uncertainties}
+
+
+@pytest.mark.parametrize("payload", [b"synthetic bytes", ["synthetic"], {"text": "synthetic"}, [], {}])
+def test_nontext_pdf_extraction_closes_context_and_has_no_totals(monkeypatch, payload):
+    import sys
+
+    events = []
+
+    class Document:
+        pages = [SimpleNamespace(extract_text=lambda: REPORT),
+                 SimpleNamespace(extract_text=lambda: payload)]
+
+        def __enter__(self):
+            events.append("open")
+            return self
+
+        def __exit__(self, *args):
+            events.append("close")
+
+    monkeypatch.setitem(sys.modules, "pdfplumber", SimpleNamespace(open=lambda path: Document()))
+    result = read_pdf("synthetic.pdf")
+    assert result.status == "unreadable"
+    assert ("pdf_extraction_nontext", "pdf") in codes(result)
+    assert all(value is None for value in result.totals.values())
+    assert result.strings == [] and events == ["open", "close"]
+
+
+def test_conflicting_aliases_and_bom_values_are_order_independent():
+    aliases = ["Total Modules: 24", "Panel Count: 25", "Modules: 24"]
+    base = REPORT.replace("Total Modules: 24\n", "")
+    for ordered in permutations(aliases):
+        result = parse_text("\n".join(ordered) + "\n" + base)
+        assert result.status == "unreadable" and result.totals["modules"] is None
+        assert ("contradictory_totals", "modules") in codes(result)
+    for labels in (["Module Quantity: 24", "Module Quantity: 25", "Module Quantity: 24"],
+                   ["Module Power: 400 W", "Module Power: 401 W", "Module Power: 0.4 kW"]):
+        field = "module_quantity" if "Quantity" in labels[0] else "module_power_kw"
+        other = "Module Power: 400 W" if field == "module_quantity" else "Module Quantity: 24"
+        for ordered in permutations(labels):
+            result = parse_text(REPORT, "\n".join([*ordered, other]))
+            assert result.status == "unreadable" and result.bom[field] is None
+            assert ("contradictory_totals", field) in codes(result)
+
+
+def test_large_invalid_tables_have_linear_diagnostics_and_bounded_output(monkeypatch):
+    calls = 0
+    original = oracle._number
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(oracle, "_number", counted)
+    for count in (500, 2000):
+        calls = 0
+        text = REPORT.split("A-1 | 6")[0] + "\n".join(f"bad-{i} | invalid" for i in range(count))
+        result = parse_text(text)
+        assert result.status == "unreadable"
+        assert ("invalid_number", "string_table") in codes(result)
+        assert result.table_string_count is None and result.table_optimizer_count is None
+        assert len(result.strings) <= oracle.MAX_DIAGNOSTIC_ROWS
+        assert len(result.uncertainties) <= 3
+        assert calls <= count + 10
+        assert len(result.provenance["string_table"]) <= oracle.MAX_SNIPPETS_PER_FIELD
+        assert all(len(snippet) <= oracle.MAX_SNIPPET for snippet in result.provenance["string_table"])
 
 
 @pytest.mark.parametrize("separator", ["\f", "\n\f\n", "\n\n", "\n\f\nString ID | Optimizers\n\n"])

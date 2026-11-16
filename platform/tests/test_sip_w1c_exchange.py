@@ -565,6 +565,26 @@ def test_refusal_from_prepared_sending_and_responded(world):
         assert _read(s) == refused
 
 
+@pytest.mark.parametrize("piece", [False, True], ids=["whole", "piece"])
+def test_cloud_request_rejected_is_durable_and_duplicate(world, piece):
+    s = world()
+    if piece:
+        s = _piece(s)
+    _prepare(s)
+    assert exchanges.begin_send(s.scope, s.attempt)
+    before = _read(s)
+    reason = "CLOUD_REQUEST_REJECTED"
+    assert exchanges.refuse_exchange(s.scope, s.attempt, reason_code=reason) == "refused"
+    refused = _read(s)
+    assert refused == {**before, "state": "refused", "refusal_code": reason,
+                       "updated_at": refused["updated_at"]}
+    assert exchanges.refuse_exchange(s.scope, s.attempt, reason_code=reason) == "duplicate"
+    replay = exchanges.resume_exchange(s.scope, s.attempt)
+    assert replay.action == "refused" and replay.exchange == refused
+    assert not exchanges.begin_send(s.scope, s.attempt)
+    assert _read(s) == refused
+
+
 def test_only_sender_can_refuse_sending_after_reclaim(world):
     s = world()
     _prepare(s)

@@ -517,6 +517,7 @@ def prepare_job(job, guard):
             if guard.lost:
                 return None
             if async_custody and exc.classification not in {
+                    "CLOUD_REQUEST_REJECTED",
                     "cloud_upstream_failure", "cloud_request_invalid",
                     "cloud_response_invalid", "cloud_tenant_unauthorized"}:
                 raise
