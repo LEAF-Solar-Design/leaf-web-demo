@@ -125,12 +125,18 @@ def check_json_budget(text, limits):
             raise EvidenceError('JSON_STRUCTURE_BUDGET_EXCEEDED')
 
 
-def read_receipt(path, *, limits=None):
+def read_receipt(path, *, limits=None, snapshots=None):
     try:
         with Path(path).open('rb') as stream:
             raw = stream.read(262145)
         if len(raw) > 262144:
             raise ValueError()
+        if snapshots is not None:
+            name = Path(path).absolute()
+            digest = hashlib.sha256(raw).hexdigest()
+            if name in snapshots and snapshots[name] != digest:
+                raise EvidenceError('RECEIPT_CHANGED_DURING_AGGREGATION')
+            snapshots[name] = digest
         text = raw.decode('utf-8')
         check_json_budget(text, limits)
         value = json.loads(text, object_pairs_hook=unique_members, parse_constant=reject_constant,
@@ -221,7 +227,8 @@ def aggregate(journey_path, proof_paths, source_sha, source_root, *, limits=None
         raise EvidenceError('INVALID_PROOF_BUDGET')
     if not 1 <= len(proof_paths) <= proof_limit:
         raise EvidenceError('MISSING_OR_EXCESS_PROOFS')
-    journey = read_receipt(journey_path, limits=receipt_limits)
+    snapshots = {}
+    journey = read_receipt(journey_path, limits=receipt_limits, snapshots=snapshots)
     check_source(journey, source_sha)
     verify_files(journey, source_root, state=state)
     if (journey.get('schema') != 'leaf.x07.synthetic-journey.v1'
@@ -246,7 +253,7 @@ def aggregate(journey_path, proof_paths, source_sha, source_root, *, limits=None
             'assertions': len(assertions)}
     proofs = []
     for path in proof_paths:
-        proof = read_receipt(path, limits=receipt_limits)
+        proof = read_receipt(path, limits=receipt_limits, snapshots=snapshots)
         check_source(proof, source_sha)
         verify_files(proof, source_root, state=state)
         files = proof.get('files')
@@ -269,6 +276,14 @@ def aggregate(journey_path, proof_paths, source_sha, source_root, *, limits=None
             raise EvidenceError('UNREADABLE_SOURCE_FILE') from None
         if actual != expected:
             raise EvidenceError('SOURCE_CHANGED_DURING_AGGREGATION')
+    for path, expected in snapshots.items():
+        try:
+            with path.open('rb') as stream:
+                raw = stream.read(262145)
+        except OSError:
+            raise EvidenceError('RECEIPT_CHANGED_DURING_AGGREGATION') from None
+        if len(raw) > 262144 or hashlib.sha256(raw).hexdigest() != expected:
+            raise EvidenceError('RECEIPT_CHANGED_DURING_AGGREGATION')
     return {'schema': 'leaf.x07.offline-acceptance-report.v1', 'proof_mode': 'synthetic_offline',
         'source_sha': source_sha, 'source_dirty': journey.get('source_dirty'),
         'steps': [results[number] for number in range(1, 8)], 'local_proofs': proofs}

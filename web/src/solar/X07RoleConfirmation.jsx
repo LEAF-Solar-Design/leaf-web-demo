@@ -33,6 +33,7 @@ function Confirmation({ rows, initial, onConfirm, onCancel }) {
   }, [])
   const submit = event => {
     event.preventDefault()
+    event.stopPropagation()
     if (pending.current || confirmed || retired.current || !selectedRow || typeof onConfirm !== 'function') return
     const controller = new AbortController()
     pending.current = controller
