@@ -67,9 +67,9 @@ def identities(g):
     return [(entity["id"], entity["provenance"]["created_at"]) for entity in design.entities(g)]
 
 
-# BSP23 adds tracking acceptance; sixteen supported writes, four creation tools.
+# X02 adds deterministic inverter placement; four creation tools remain.
 def test_sip_r3d_membership(memory):
-    assert adapter.SUPPORTED_TOOLS == TOOLS and len(TOOLS) == 18
+    assert adapter.SUPPORTED_TOOLS == TOOLS and len(TOOLS) == 19
     assert adapter.CREATION_TOOLS == {
         "solar-string-add", "solar-assign-equipment", "solar-string-multi-add", "solar-panel-groups"}
     assert TOOL not in adapter.CREATION_TOOLS
