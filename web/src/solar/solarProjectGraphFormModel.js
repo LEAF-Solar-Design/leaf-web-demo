@@ -11,6 +11,7 @@ export const PROJECT_SOLAR_GRAPH_REASONS = Object.freeze({
   context_unreadable: 'This project drawing version could not be read. Reload it and try again.',
   graph_unreadable: 'The Solar design stored with this drawing could not be read.',
   graphless: 'Start a Solar design in settings before using this tool.',
+  panel_groups_setup_required: 'Start a Solar design in Settings, then run Panel import. Return here and choose Use proposed memberships to enter Gap between groups.',
   not_current_head: 'Open the newest drawing version before using this tool.',
   version_digest_unavailable: 'This drawing version has no recorded content digest. Reload it before continuing.',
   scope_stale: 'The drawing or session changed. Refresh before continuing.',
@@ -112,7 +113,12 @@ export function projectSolarGraphReason(code, tool) {
     case 'binding_invalid': return PROJECT_SOLAR_GRAPH_REASONS.binding_invalid
     case 'context_unreadable': return PROJECT_SOLAR_GRAPH_REASONS.context_unreadable
     case 'graph_unreadable': return PROJECT_SOLAR_GRAPH_REASONS.graph_unreadable
-    case 'graphless': return PROJECT_SOLAR_GRAPH_REASONS.graphless
+    case 'panel_groups_setup_required':
+      if (tool === 'solar-panel-groups') return PROJECT_SOLAR_GRAPH_REASONS.panel_groups_setup_required
+      return PROJECT_SOLAR_GRAPH_REASONS.request_refused
+    case 'graphless':
+      if (tool === 'solar-panel-groups') return PROJECT_SOLAR_GRAPH_REASONS.panel_groups_setup_required
+      return PROJECT_SOLAR_GRAPH_REASONS.graphless
     case 'not_current_head': return PROJECT_SOLAR_GRAPH_REASONS.not_current_head
     case 'version_digest_unavailable': return PROJECT_SOLAR_GRAPH_REASONS.version_digest_unavailable
     case 'sip_r7_scope_stale':
