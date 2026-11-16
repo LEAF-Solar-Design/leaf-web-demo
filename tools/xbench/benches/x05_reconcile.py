@@ -752,6 +752,7 @@ def main(argv=None):
     modes.add_argument("--provenance", action="store_true", help="read one supplied-provenance envelope")
     modes.add_argument("--assurance", action="store_true", help="read one supplied-assurance envelope")
     modes.add_argument("--provenance-aggregate", action="store_true", help="read three provenance envelopes")
+    modes.add_argument("--assurance-aggregate", action="store_true", help="read three assurance envelopes")
     args = parser.parse_args(argv)
     try:
         raw = sys.stdin.buffer.read(4 * MAX_JSON_CHARS + 1)
@@ -759,7 +760,8 @@ def main(argv=None):
             result = _out("UNREADABLE", "json_input_too_large")
         else:
             text = raw.decode("utf-8", errors="strict")
-            decode = (reconcile_assurance_json if args.assurance else
+            decode = (aggregate_assurance_json if args.assurance_aggregate else
+                      reconcile_assurance_json if args.assurance else
                       aggregate_provenance_json if args.provenance_aggregate else
                       aggregate_fixtures_json if args.aggregate else
                       reconcile_provenance_json if args.provenance else reconcile_json)

@@ -476,6 +476,49 @@ matches. Excess emits `input_hex_too_large`. JSON size limits also apply. These
 bounds are transport limits for synthetic offline evidence, not live upload
 limits or a claim about real customer files.
 
+`--assurance-aggregate` exposes the existing strict three-fixture assurance JSON
+entry point. All five explicit modes are mutually exclusive, with the same
+0/1/4/5 verdict/output exits and2 for usage errors. Missing BOM is supported when
+manifest roles, supplied bytes and every stage binding all omit it. Asymmetric
+BOM claims remain UNREADABLE. Invalid UTF-8 and read failures return a single
+sanitized `cli_evidence_unreadable` result in every mode.
+
+Executable three-fixture assurance replay (source-only synthetic fixture builder,
+requires pytest):
+
+```powershell
+@'
+import sys, runpy, json
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import aggregate_assurance_json
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+expected, records = fixtures['assurance_records']()
+records[1]['evidence']['recommendations'][0]['group_count'] = 1
+records[2]['inputs_hex']['report'] = b'substituted'.hex()
+result = aggregate_assurance_json(json.dumps(dict(expected_ids=expected, fixtures=records)))
+print(result['verdict'])
+a, b, c = [result['fixtures'][key] for key in expected]
+print(a['verdict'], b['verdict'], c['verdict'])
+print(b['checks']['provenance']['reconciliation']['stages']['grouping']['reason'])
+print(c['checks']['input_bytes']['reason'])
+assert result['verdict'] == 'UNREADABLE'
+assert [a['verdict'], b['verdict'], c['verdict']] == ['PASS', 'FAIL', 'UNREADABLE']
+'@ | python -P
+```
+
+Exact stdout:
+
+```text
+UNREADABLE
+PASS FAIL UNREADABLE
+grouping_count_mismatch
+input_digest_conflict
+```
+
+The readable PASS sibling remains visible beside both failures. All supplied
+bytes are synthetic; no network, customer file or authenticated-origin claim is
+involved. Aggregate precedence does not erase sibling diagnostics or accept X05.
+
 Canonical snapshot compatibility contract:
 
 - Hash UTF-8 bytes of compact JSON arrays with ASCII escapes and no spaces.

@@ -1059,7 +1059,7 @@ def test_new_cli_modes_verdicts_and_sanitized_errors(tmp_path, mode, kind, exit_
 
 
 @pytest.mark.parametrize("left,right", list(combinations(
-    ["--aggregate", "--provenance", "--assurance", "--provenance-aggregate"], 2)))
+    ["--aggregate", "--provenance", "--assurance", "--provenance-aggregate", "--assurance-aggregate"], 2)))
 def test_cli_modes_are_pairwise_exclusive(tmp_path, left, right):
     import subprocess
     import sys
@@ -1154,6 +1154,125 @@ def test_provenance_cli_matches_direct_json_generated_mutation_corpus(tmp_path):
             input=text.encode(), capture_output=True, cwd=tmp_path, timeout=20)
         assert completed.returncode == {"PASS": 0, "FAIL": 1, "UNREADABLE": 4}[direct["verdict"]]
         assert completed.stderr == b"" and json.loads(completed.stdout) == json.loads(serialize_result(direct))
+
+
+@pytest.mark.parametrize("kind,exit_code", [("PASS", 0), ("FAIL", 1), ("UNREADABLE", 4)])
+def test_assurance_aggregate_cli_preserves_readable_siblings(tmp_path, kind, exit_code):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from benches import x05_reconcile as module
+    expected, records = assurance_records()
+    if kind != "PASS":
+        records[1]["evidence"]["recommendations"][0]["group_count"] = 1
+    if kind == "UNREADABLE":
+        records[2]["inputs_hex"]["report"] = b"substitution".hex()
+    result = subprocess.run([sys.executable, "-P", str(Path(module.__file__).resolve()), "--assurance-aggregate"],
+        input=json.dumps(dict(expected_ids=expected, fixtures=records)).encode(),
+        capture_output=True, cwd=tmp_path, timeout=20)
+    assert result.returncode == exit_code and not result.stderr
+    observed = json.loads(result.stdout)
+    assert observed["verdict"] == kind
+    assert observed["fixtures"][expected[0]]["verdict"] == "PASS"
+    if kind != "PASS":
+        assert observed["fixtures"][expected[1]]["verdict"] == "FAIL"
+
+
+@pytest.mark.parametrize("mode", ["--provenance", "--assurance", "--provenance-aggregate", "--assurance-aggregate"])
+@pytest.mark.parametrize("raw", [b"\xffsynthetic_private_canary", b"\xf0\x9f\x99"])
+def test_new_modes_invalid_utf8_always_one_sanitized_result(tmp_path, mode, raw):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from benches import x05_reconcile as module
+    result = subprocess.run([sys.executable, "-P", str(Path(module.__file__).resolve()), mode],
+        input=raw, capture_output=True, cwd=tmp_path, timeout=20)
+    assert result.returncode == 4 and not result.stderr
+    assert json.loads(result.stdout) == {"verdict": "UNREADABLE", "reason": "cli_evidence_unreadable"}
+    assert len(result.stdout.splitlines()) == 1
+
+
+@pytest.mark.parametrize("mode", ["--provenance", "--assurance", "--provenance-aggregate", "--assurance-aggregate"])
+def test_new_modes_read_error_is_sanitized(monkeypatch, mode):
+    import sys
+    from types import SimpleNamespace
+    from benches import x05_reconcile as module
+    class BrokenInput:
+        def read(self, limit):
+            raise OSError("synthetic_private_canary")
+    output, errors = StringIO(), StringIO()
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=BrokenInput()))
+    monkeypatch.setattr(sys, "stdout", output)
+    monkeypatch.setattr(sys, "stderr", errors)
+    assert module.main([mode]) == 4 and not errors.getvalue()
+    assert json.loads(output.getvalue()) == {"verdict": "UNREADABLE", "reason": "cli_evidence_unreadable"}
+    assert len(output.getvalue().splitlines()) == 1
+
+
+@pytest.mark.parametrize("kind", ["clean", "bytes", "identity", "grouping", "all"])
+def test_assurance_aggregate_direct_and_json_diagnostics_equal(kind):
+    expected, records = assurance_records()
+    if kind in ("bytes", "all"):
+        records[0]["inputs_hex"]["dwg"] = b"substituted".hex()
+    if kind in ("identity", "all"):
+        records[1]["stage_identities"]["csv"]["version_id"] = "foreign"
+    if kind in ("grouping", "all"):
+        records[2]["evidence"]["recommendations"][0]["group_count"] = 1
+    preserved = deepcopy((expected, records))
+    direct = aggregate_assurance(expected, records)
+    decoded = aggregate_assurance_json(json.dumps(dict(expected_ids=expected, fixtures=records)))
+    assert json.loads(serialize_result(direct)) == json.loads(serialize_result(decoded))
+    assert (expected, records) == preserved
+
+
+@pytest.mark.parametrize("manifest_bom,bytes_bom,binding_bom", [
+    (a, b, c) for a in (False, True) for b in (False, True) for c in (False, True)])
+def test_optional_bom_presence_requires_complete_agreement(manifest_bom, bytes_bom, binding_bom):
+    envelope = assurance_envelope()
+    if not manifest_bom:
+        del envelope["manifest"]["inputs"]["bom"]
+    if not bytes_bom:
+        del envelope["inputs_hex"]["bom"]
+    if not binding_bom:
+        for binding in envelope["bindings"].values():
+            del binding["inputs"]["bom"]
+    preserved = deepcopy(envelope)
+    result = reconcile_assurance_json(json.dumps(envelope))
+    assert result["verdict"] == ("PASS" if manifest_bom == bytes_bom == binding_bom else "UNREADABLE")
+    checks = result["checks"]
+    assert checks["input_bytes"]["reason"] == ("supplied_input_bytes_equal" if manifest_bom == bytes_bom else "input_bytes_missing")
+    assert checks["provenance"]["provenance"]["reason"] == ("supplied_provenance_equal" if manifest_bom == binding_bom else "stage_binding_conflict")
+    assert checks["provenance"]["reconciliation"]["verdict"] == "PASS"
+    assert envelope == preserved
+
+
+def test_provenance_aggregate_subprocess_bytes_deterministic_with_simultaneous_conflicts(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from benches import x05_reconcile as module
+    expected, records = provenance_records()
+    records[0]["bindings"]["strings"]["inputs"]["report"] = "d" * 64
+    records[0]["bindings"]["table"]["inputs"]["dwg"] = "e" * 64
+    records[1]["evidence"]["recommendations"][0]["group_count"] = 1
+    outputs = []
+    for seed in ("0", "73"):
+        for reverse in (False, True):
+            changed = deepcopy(records)
+            if reverse:
+                changed.reverse()
+                for row in changed:
+                    row["manifest"]["inputs"] = dict(reversed(list(row["manifest"]["inputs"].items())))
+                    row["bindings"] = dict(reversed(list(row["bindings"].items())))
+                    for binding in row["bindings"].values():
+                        binding["inputs"] = dict(reversed(list(binding["inputs"].items())))
+            payload = dict(expected_ids=list(reversed(expected)) if reverse else expected, fixtures=changed)
+            result = subprocess.run([sys.executable, "-P", str(Path(module.__file__).resolve()), "--provenance-aggregate"],
+                input=json.dumps(payload).encode(), capture_output=True, cwd=tmp_path, timeout=20,
+                env={"PYTHONHASHSEED": seed, "SystemRoot": "C:\\Windows"})
+            assert result.returncode == 4 and not result.stderr
+            outputs.append(result.stdout)
+    assert len(set(outputs)) == 1
 
 
 @pytest.mark.parametrize("key", REQUIRED_STAGES)
