@@ -2558,3 +2558,237 @@ connection. Per-string optimizer and panel counts require positive integers in
 the current schema. Their zero rows yield named UNREADABLE results before any
 coverage claim can be evaluated. These tests preserve that boundary; they do
 not establish that a zero-count engineering string is a supported live input.
+
+## Paired oracle-load cancellation replay
+
+Within Studio X-bench X05, opposite per-string changes may cancel in one shared
+device while remaining visible across separate devices. The same coarse grid
+is explicit in both cases, so its conserved total does not identify the change.
+
+```python
+import sys, runpy
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+for shared in (True, False):
+    grid, evidence = fixtures['coarsen_oracle_load_grids'](
+        *fixtures['oracle_load_component']('cancel'))
+    if shared:
+        grid, evidence = fixtures['coarsen_oracle_load_devices'](grid, evidence)
+    before = deepcopy(evidence['oracle_dc_power'])
+    evidence['oracle_dc_power'][0]['kw_dc'] = '1.50'
+    evidence['oracle_dc_power'][1]['kw_dc'] = '1.50'
+    result = m._seven_step_oracle_loads(grid, evidence)
+    power = result['metrics']['kw_dc']
+    strings = m.compare_string_dc_power(before, evidence['oracle_dc_power'])
+    print('shared device' if shared else 'distinct devices', result['verdict'],
+          power['grid_comparison']['mismatch_count'],
+          power['inverter_comparison']['mismatch_count'],
+          strings['counts']['mismatched'])
+```
+
+Expected output:
+
+```text
+shared device PASS 0 0 2
+distinct devices FAIL 0 2 2
+```
+
+The explicit changes are +0.25 and -0.25 kW DC. Both totals remain three. With
+one shared grid and device, both aggregate deltas cancel. With separate devices,
+the device deltas remain +0.25 and -0.25. Exact per-string comparison still finds
+two changed values in either case. The PASS is only the supplied aggregate-load
+projection. It does not prove original string identity/value preservation or
+independent oracle acquisition, and does not accept live X05.
+
+## Oracle rerouting replay
+
+Within Studio X-bench X05, moving a connection changes device loads while grid
+ownership stays fixed. Repairing device targets alone does not repair a
+cross-grid connection. The supplied topology and load checks stay distinct.
+
+```python
+import sys, runpy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+envelope = fixtures['equal_count_ownership_envelope']()
+grid, evidence = envelope['grid'], envelope['assurance']['evidence']
+evidence['oracle_assignments'][0]['inverter_id'] = 'INV-B'
+def show(label):
+    loads = m._seven_step_oracle_loads(grid, evidence)
+    topology = m.validate_cross_topology(grid['expected_grid_ids'],
+        [row['string_id'] for row in evidence['oracle_strings']],
+        evidence['oracle_inverter_ids'], evidence['oracle_string_owners'],
+        evidence['oracle_inverter_owners'], evidence['oracle_assignments'])
+    checks = loads['metrics']['strings']
+    print(label, loads['verdict'], checks['grid_comparison']['mismatch_count'],
+          checks['inverter_comparison']['mismatch_count'],
+          topology['verdict'], topology['mismatch_count'])
+show('rerouted')
+for metric in ('strings', 'optimizers', 'panels', 'kw_dc'):
+    evidence['inverter_loads'][metric] = {'INV-A': 0, 'INV-B': evidence['oracle_values'][metric]}
+show('device targets repaired')
+evidence['oracle_string_owners'][0]['grid_id'] = 'west'
+show('topology repaired')
+for metric, field in dict(strings='string_totals', optimizers='optimizer_totals',
+                         panels='panel_totals', kw_dc='dc_totals').items():
+    grid[field] = {'east': 0, 'west': evidence['oracle_values'][metric]}
+show('grid targets repaired')
+```
+
+Expected output:
+
+```text
+rerouted FAIL 0 2 FAIL 1
+device targets repaired PASS 0 0 FAIL 1
+topology repaired FAIL 2 0 PASS 0
+grid targets repaired PASS 0 0 PASS 0
+```
+
+String A moves loads of one string, six optimizers, ten panels and 4 kW DC
+from INV-A to INV-B. Moving its grid owner later shifts those same amounts from
+east to west. The repairs are synthetic input changes, not proof of independent
+engineering evidence. The replay shows only oracle load and oracle topology
+projections. Other saved-design comparisons in a full envelope still require
+their own independent evidence and can fail. No line accepts live X05.
+
+## Alternating oracle rectangle replay
+
+Within Studio X-bench X05, four compensating per-string changes can be invisible
+to both grid and device sums. This is an algebra counterexample with negative
+topology, not a valid-design fixture or a full seven-step PASS.
+
+```python
+import sys, runpy
+from copy import deepcopy
+from fractions import Fraction
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+grid, evidence = fixtures['alternating_rectangle_material']()
+before = deepcopy(evidence['oracle_dc_power'])
+for row, sign in zip(evidence['oracle_dc_power'], [1, -1, -1, 1]):
+    row['kw_dc'] = fixtures['fraction_fixed_text'](Fraction(row['kw_dc']) + sign*Fraction(1, 4))
+loads = m._seven_step_oracle_loads(grid, evidence)
+strings = m.compare_string_dc_power(before, evidence['oracle_dc_power'])
+topology = m.validate_cross_topology(grid['expected_grid_ids'],
+    [row['string_id'] for row in evidence['oracle_strings']],
+    evidence['oracle_inverter_ids'], evidence['oracle_string_owners'],
+    [dict(inverter_id='i0', grid_id='g0'), dict(inverter_id='i1', grid_id='g1')],
+    evidence['oracle_assignments'])
+checks = loads['metrics']['kw_dc']
+print('marginals', loads['verdict'], checks['grid_comparison']['mismatch_count'],
+      checks['inverter_comparison']['mismatch_count'])
+print('strings', strings['verdict'], strings['counts']['mismatched'])
+print('topology', topology['verdict'], topology['mismatch_count'])
+print('deltas', ','.join(fixtures['fraction_fixed_text'](Fraction(row['saved'])-
+      Fraction(row['oracle'])) for row in strings['mismatches']))
+```
+
+Expected output:
+
+```text
+marginals PASS 0 0
+strings FAIL 4
+topology FAIL 2
+deltas 0.25,-0.25,-0.25,0.25
+```
+
+Each grid and device receives one positive and one negative change, so every
+marginal is conserved. Exact independent per-string comparison retains four
+changes. The explicit device owners also expose two cross-grid connections;
+that negative topology is retained and cannot be hidden by the aggregate PASS.
+A synthetic consistency check cannot establish oracle origin or independence.
+It does not accept customer engineering data or live X05.
+
+## Whole-device oracle grid migration replay
+
+Within Studio X-bench X05, moving a device and all its strings together can keep
+oracle topology valid while changing grid totals. Repairs to aggregate targets
+do not repair disagreements with the independently supplied saved owners.
+
+```python
+import sys, runpy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+envelope = fixtures['equal_count_ownership_envelope']()
+grid, evidence = envelope['grid'], envelope['assurance']['evidence']
+moving = {row['string_id'] for row in evidence['oracle_assignments']
+          if row['inverter_id'] == 'INV-A'}
+for row in evidence['oracle_string_owners']:
+    if row['string_id'] in moving:
+        row['grid_id'] = 'west'
+for row in evidence['oracle_inverter_owners']:
+    if row['inverter_id'] == 'INV-A':
+        row['grid_id'] = 'west'
+def show(label):
+    result = m.reconcile_seven_steps_json(m.serialize_result(envelope))
+    owners = result['independent_owners']['checks']
+    loads = result['oracle_loads']
+    print(label, result['verdict'], loads['verdict'],
+          loads['metrics']['strings']['grid_comparison']['mismatch_count'],
+          owners['oracle_topology']['verdict'], owners['strings']['mismatch_count'],
+          owners['inverters']['mismatch_count'])
+show('migrated')
+for metric, field in dict(strings='string_totals', optimizers='optimizer_totals',
+                         panels='panel_totals', kw_dc='dc_totals').items():
+    grid[field] = {'east': 0, 'west': evidence['oracle_values'][metric]}
+show('grid targets repaired')
+```
+
+Expected output:
+
+```text
+migrated FAIL FAIL 2 PASS 1 1
+grid targets repaired FAIL PASS 0 PASS 1 1
+```
+
+The grid deltas are east minus one string, six optimizers, ten panels and 4 kW
+DC, with the same positive amounts on west. Device loads stay unchanged because
+connections and per-string values are unchanged. Oracle topology stays PASS.
+Saved string and device owners still disagree with the changed oracle map, so
+the composed result remains FAIL after aggregate target repair. This synthetic
+migration does not establish which owner map is correct, oracle origin or live
+engineering parity. Those claims require independent acquisition evidence.
+
+## Grouping diagnostic-truncation replay
+
+Within Studio X-bench X05, grouping compares every shown recommendation with
+an independently supplied report grid count. The example cap limits displayed
+indices, not validation or the exact mismatch total.
+
+```python
+import sys
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+rows = [dict(group_count=1) for _ in range(m.MAX_RECOMMENDATION_EXAMPLES+7)]
+def show(label):
+    result = m.compare_recommendations(2, rows)
+    print(label, result['verdict'], result.get('mismatch_count', 'unavailable'),
+          len(result.get('mismatched_recommendations', [])), result['reason'])
+show('readable')
+rows.append(None)
+show('invalid trailing row')
+rows[-1] = dict(group_count=1)
+show('repaired')
+```
+
+Expected output:
+
+```text
+readable FAIL 27 20 grouping_count_mismatch
+invalid trailing row UNREADABLE unavailable 0 recommendation_count_unreadable
+repaired FAIL 28 20 grouping_count_mismatch
+```
+
+The invalid row comes after 27 readable mismatches, beyond the 20-example cap.
+It still forces a named UNREADABLE result. That result does not assert a total
+for the malformed sequence. Repair restores an exact total of 28, with the
+first 20 zero-based mismatch indices. Prepending matching recommendations shifts
+those indices without changing the mismatch total. A separately accepted frozen
+table discrepancy cannot erase a grouping mismatch. These are synthetic supplied
+sequences and report counts, not evidence that the live UI showed them or that
+an independent report extractor produced the count. No result accepts live X05.

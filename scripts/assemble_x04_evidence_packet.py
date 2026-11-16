@@ -43,7 +43,7 @@ class InputBudget:
 
 
 def assemble_manifest(manifest, directory, output=None, max_input_bytes=DEFAULT_MAX_INPUT_BYTES,
-                      read_input=None):
+                      read_input=None, require_source_pins=False):
     """Read only explicit files; relative paths are relative to the manifest directory.
 
     The manifest and sources are successive reads, not a simultaneous snapshot.
@@ -72,6 +72,8 @@ def assemble_manifest(manifest, directory, output=None, max_input_bytes=DEFAULT_
             identities.add(identity)
             path = row.get('path')
             require(isinstance(path, str) and bool(path.strip()), 'Manifest path must name a local file.')
+            require(not require_source_pins or 'expected_sha256' in row,
+                    'Every explicit source row requires expected_sha256 in strict mode.')
             pin = validate_sha256_pin(row['expected_sha256']) if 'expected_sha256' in row else None
             source = Path(directory) / path
             check_output_path(source, output)
@@ -101,6 +103,8 @@ def main(argv=None):
                         help='Optional actual byte ceiling across manifest and every explicit read')
     parser.add_argument('--expected-manifest-sha256', type=validate_sha256_pin,
                         help='Optional SHA-256 of the exact manifest bytes read and decoded')
+    parser.add_argument('--require-source-pins', action='store_true',
+                        help='Require expected_sha256 on every explicit source row before payload reads')
     args = parser.parse_args(argv)
     try:
         manifest = args.manifest.resolve()
@@ -109,7 +113,8 @@ def main(argv=None):
         payload = reader(manifest, args.max_input_bytes) if args.expected_manifest_sha256 is None else reader(
             manifest, args.max_input_bytes, args.expected_manifest_sha256)
         packet = assemble_manifest(payload, manifest.parent,
-                                   args.out, args.max_input_bytes, read_input=reader)
+                                   args.out, args.max_input_bytes, read_input=reader,
+                                   require_source_pins=args.require_source_pins)
         write_json(packet, args.out, args.max_output_bytes)
     except (OSError, ValueError, TypeError, RecursionError) as error:
         return report_failure('packet assembly', error)
