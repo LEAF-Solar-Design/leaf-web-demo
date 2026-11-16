@@ -1844,3 +1844,44 @@ UNREADABLE. All independent count and power maps preserve their report grand
 totals in this example. These standalone helpers add per-device comparisons to
 the supplied evidence. Producer provenance and independent report extraction
 remain requirements for live acceptance.
+# Composed inverter load recovery for X05 reconciliation
+
+Seven-step evidence now requires `inverter_loads` with `strings`, `optimizers`,
+`panels` and `kw_dc` maps keyed by inverter ID. Each map must cover the explicit
+saved inverter set and sum to its independent report metric. Save/reopen loads
+come from each snapshot's own connection assignments and per-string counts or
+power rows. Before loads also bind to saved values. The report retains each
+metric's comparison and oracle consistency result when another metric fails.
+
+Run this synthetic replay from the repository root:
+
+```powershell
+@'
+import json, runpy, sys
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+envelope = fixtures['connection_envelope']()
+loads = envelope['assurance']['evidence']['inverter_loads']
+correct = {metric:dict(values) for metric,values in loads.items()}
+for metric in ('optimizers', 'panels'):
+    loads[metric]['INV-A'], loads[metric]['INV-B'] = loads[metric]['INV-B'], loads[metric]['INV-A']
+loads['kw_dc'] = None
+for stage in ('initial', 'optimizer repaired', 'panel repaired', 'power repaired'):
+    if stage == 'optimizer repaired': loads['optimizers'] = correct['optimizers']
+    if stage == 'panel repaired': loads['panels'] = correct['panels']
+    if stage == 'power repaired': loads['kw_dc'] = correct['kw_dc']
+    result = m.reconcile_seven_steps_json(json.dumps(envelope))
+    checks = result['inverter_loads']['metrics']
+    print(stage, result['verdict'], *(checks[metric]['comparison']['reason']
+          for metric in ('optimizers', 'panels', 'kw_dc')))
+    assert result['steps']['7']['verdict'] == 'PASS'
+assert result['verdict'] == 'PASS'
+'@ | python -P -
+```
+
+The first three stages are UNREADABLE while power evidence is absent. The first
+stage retains both `inverter_optimizers_totals_mismatch` and
+`inverter_panels_totals_mismatch`. Repairs clear only their own metric. The final
+stage is PASS. Oracle input origin and independence require producer evidence
+from the actual report extraction path before live acceptance.

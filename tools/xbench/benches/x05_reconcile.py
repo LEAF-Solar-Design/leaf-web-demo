@@ -500,7 +500,9 @@ def reconcile_seven_steps(import_evidence, grid_evidence, assurance):
                               _seven_step_inverter_snapshot(grid_evidence, assurance.get("evidence")
                                   if type(assurance) is dict else None),
                               _seven_step_assignments(assurance.get("evidence") if type(assurance) is dict else None),
-                              _seven_step_assignment_snapshot(assurance.get("evidence") if type(assurance) is dict else None))
+                              _seven_step_assignment_snapshot(assurance.get("evidence") if type(assurance) is dict else None),
+                              _seven_step_inverter_loads(grid_evidence, assurance.get("evidence") if type(assurance) is dict else None),
+                              _seven_step_inverter_load_reopen(grid_evidence, assurance.get("evidence") if type(assurance) is dict else None))
 
 
 def _seven_step_ownership(grid_evidence, evidence):
@@ -678,19 +680,102 @@ def _seven_step_assignment_snapshot(evidence):
         "supplied_assignment_snapshots", states=states, saved_binding=binding, comparison=comparison)
 
 
-def _seven_step_result(imported, grids, checked, ownership, grid_optimizers, ownership_reopen, grid_optimizer_reopen, grid_panels, grid_panel_reopen, grid_dc, grid_dc_reopen, grid_strings, grid_inverters, inverter_reopen, assignments, assignment_reopen):
+def _seven_step_inverter_loads(grid, evidence):
+    if type(grid) is not dict or type(evidence) is not dict:
+        return _out("UNREADABLE", "inverter_load_evidence_unreadable")
+    supplied = evidence.get("inverter_loads")
+    loads = supplied if type(supplied) is dict else {}
+    strings, inverters = _assignment_ids(evidence, "saved")
+    owners = evidence.get("saved_assignments")
+    comparisons = {
+        "strings": compare_inverter_string_totals(loads.get("strings"), strings, owners),
+        "optimizers": compare_inverter_optimizer_totals(loads.get("optimizers"), evidence.get("saved_strings"), owners),
+        "panels": compare_inverter_panel_totals(loads.get("panels"), strings, grid.get("panel_counts"), owners),
+        "kw_dc": compare_inverter_dc_totals(loads.get("kw_dc"), strings, grid.get("dc_power"), owners)}
+    checks = {metric: dict(comparison=value, oracle_consistency=compare_inverter_metric_oracle_totals(
+        inverters, loads.get(metric), evidence.get("oracle_values"), metric)) for metric, value in comparisons.items()}
+    verdicts = {value["verdict"] for check in checks.values() for value in check.values()}
+    if type(supplied) is not dict or set(supplied) != set(comparisons):
+        verdicts.add("UNREADABLE")
+    return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
+                "supplied_inverter_loads", metrics=checks)
+
+
+def _inverter_snapshot_loads(grid, evidence, stage, metric):
+    strings, inverters = _assignment_ids(evidence, stage)
+    owners = evidence.get(stage + "_assignments")
+    ownership = validate_string_inverter_assignments(inverters, strings, owners)
+    if ownership["verdict"] != "PASS":
+        return None, ownership
+    if metric == "strings":
+        values = dict.fromkeys(strings, 1)
+    else:
+        if metric == "optimizers":
+            rows = evidence.get("saved_strings") if stage == "saved" else evidence.get(stage + "_rows", {})
+            rows = rows.get("strings") if stage != "saved" and type(rows) is dict else rows
+        else:
+            field = "panel_counts" if metric == "panels" else "dc_power"
+            rows = grid.get((stage + "_" if stage != "saved" else "") + field)
+        values, error = _index(rows, stage + "_" + metric, metric=metric)
+        if error:
+            return None, _out("UNREADABLE", error)
+        if set(values) != set(strings):
+            return None, _out("UNREADABLE", "inverter_snapshot_string_identity_conflict")
+    totals = dict.fromkeys(inverters, 0)
+    for row in owners:
+        totals[row["inverter_id"]] += values[row["string_id"]]
+    return totals, _out("PASS", "inverter_snapshot_loads_readable")
+
+
+def _compare_inverter_load_maps(before, after):
+    added, removed = after.keys() - before.keys(), before.keys() - after.keys()
+    changed = [key for key in before.keys() & after.keys() if before[key] != after[key]]
+    failed = bool(added or removed or changed)
+    return _out("FAIL" if failed else "PASS", "inverter_loads_changed" if failed else "inverter_loads_equal",
+        counts=dict(added=len(added), removed=len(removed), changed=len(changed)),
+        added_ids=nsmallest(MAX_STRING_EXAMPLES, added), removed_ids=nsmallest(MAX_STRING_EXAMPLES, removed),
+        examples=[dict(inverter_id=key, before=before[key], reopened=after[key], delta=after[key]-before[key])
+                  for key in nsmallest(MAX_STRING_EXAMPLES, changed)])
+
+
+def _seven_step_inverter_load_reopen(grid, evidence):
+    if type(grid) is not dict or type(evidence) is not dict:
+        return _out("UNREADABLE", "inverter_load_snapshot_evidence_unreadable")
+    checks = {}
+    with localcontext(_CONTEXT):
+        for metric in ("strings", "optimizers", "panels", "kw_dc"):
+            states, totals = {}, {}
+            for stage in ("saved", "before", "reopened"):
+                totals[stage], states[stage] = _inverter_snapshot_loads(grid, evidence, stage, metric)
+            binding = (_compare_inverter_load_maps(totals["saved"], totals["before"])
+                       if totals["saved"] is not None and totals["before"] is not None
+                       else _out("UNREADABLE" if "UNREADABLE" in {states["saved"]["verdict"], states["before"]["verdict"]}
+                                 else "FAIL", "inverter_load_binding_invalid"))
+            comparison = (_compare_inverter_load_maps(totals["before"], totals["reopened"])
+                          if totals["before"] is not None and totals["reopened"] is not None
+                          else _out("UNREADABLE" if "UNREADABLE" in {states["before"]["verdict"], states["reopened"]["verdict"]}
+                                    else "FAIL", "inverter_load_reopen_invalid"))
+            checks[metric] = dict(states=states, saved_binding=binding, comparison=comparison)
+    verdicts = {value["verdict"] for check in checks.values()
+                for value in list(check["states"].values()) + [check["saved_binding"], check["comparison"]]}
+    return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
+                "supplied_inverter_load_snapshots", metrics=checks)
+
+
+def _seven_step_result(imported, grids, checked, ownership, grid_optimizers, ownership_reopen, grid_optimizer_reopen, grid_panels, grid_panel_reopen, grid_dc, grid_dc_reopen, grid_strings, grid_inverters, inverter_reopen, assignments, assignment_reopen, inverter_loads, inverter_load_reopen):
     stages = checked.get("checks", {}).get("provenance", {}).get("reconciliation", {}).get("stages", {})
     absent = _out("UNREADABLE", "stage_evidence_missing")
     steps = {"1": imported, "2": grids, "3": stages.get("strings", absent), "4": stages.get("grouping", absent),
              "5": dict(table=stages.get("table", absent), csv_view=stages.get("csv_view", absent)),
              "6": stages.get("policy", absent), "7": stages.get("reopen", absent)}
-    verdicts = {imported["verdict"], grids["verdict"], checked["verdict"], ownership["verdict"], grid_optimizers["verdict"], ownership_reopen["verdict"], grid_optimizer_reopen["verdict"], grid_panels["verdict"], grid_panel_reopen["verdict"], grid_dc["verdict"], grid_dc_reopen["verdict"], grid_strings["verdict"], grid_inverters["verdict"], inverter_reopen["verdict"], assignments["verdict"], assignment_reopen["verdict"]}
+    verdicts = {imported["verdict"], grids["verdict"], checked["verdict"], ownership["verdict"], grid_optimizers["verdict"], ownership_reopen["verdict"], grid_optimizer_reopen["verdict"], grid_panels["verdict"], grid_panel_reopen["verdict"], grid_dc["verdict"], grid_dc_reopen["verdict"], grid_strings["verdict"], grid_inverters["verdict"], inverter_reopen["verdict"], assignments["verdict"], assignment_reopen["verdict"], inverter_loads["verdict"], inverter_load_reopen["verdict"]}
     return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
                 "offline_seven_steps", steps=steps, assurance=checked, ownership=ownership, grid_optimizers=grid_optimizers,
                 ownership_reopen=ownership_reopen, grid_optimizer_reopen=grid_optimizer_reopen, grid_panels=grid_panels,
                 grid_panel_reopen=grid_panel_reopen, grid_dc=grid_dc, grid_dc_reopen=grid_dc_reopen, grid_strings=grid_strings,
                 grid_inverters=grid_inverters, inverter_reopen=inverter_reopen,
-                assignments=assignments, assignment_reopen=assignment_reopen)
+                assignments=assignments, assignment_reopen=assignment_reopen,
+                inverter_loads=inverter_loads, inverter_load_reopen=inverter_load_reopen)
 
 
 def reconcile_seven_steps_json(text):
@@ -729,7 +814,9 @@ def _seven_step_envelope(envelope):
                               _seven_step_inverter_snapshot(envelope["grid"], envelope["assurance"].get("evidence")
                                   if type(envelope["assurance"]) is dict else None),
                               _seven_step_assignments(envelope["assurance"].get("evidence") if type(envelope["assurance"]) is dict else None),
-                              _seven_step_assignment_snapshot(envelope["assurance"].get("evidence") if type(envelope["assurance"]) is dict else None))
+                              _seven_step_assignment_snapshot(envelope["assurance"].get("evidence") if type(envelope["assurance"]) is dict else None),
+                              _seven_step_inverter_loads(envelope["grid"], envelope["assurance"].get("evidence") if type(envelope["assurance"]) is dict else None),
+                              _seven_step_inverter_load_reopen(envelope["grid"], envelope["assurance"].get("evidence") if type(envelope["assurance"]) is dict else None))
 
 
 def validate_import_grid_provenance(frozen_manifest, import_binding, grid_binding):
