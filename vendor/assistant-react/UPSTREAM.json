@@ -3,7 +3,7 @@
   "upstream": "LEAF-Solar-Design/mushy-code",
   "package": "assistant-react",
   "path": "packages/assistant-react",
-  "commit": "5b794f3791d5d50a872905fa1e339d4b5600013e",
+  "commit": "2cd51758cba309e49dbf80bdd0cc8e5d66a75a48",
   "tree_sha256": "45fec3673ac0abf5bbbd106d51dc1b094bc81a407699d86be4903292c6df62d8",
   "files": {
     "README.md": "7c1a2fd83b3a404d7d4d8938a40d0f80aec4e70e9617084ec31072f31df64dfd",
@@ -65,18 +65,18 @@
     "src/datasets/DatasetElement.tsx": {
       "sha256": "d1acf24b040ba60f46418afe3d29c8b155b9bca18185c175ef2210d3b4e17f96",
       "reason": "Preserve reviewed consumer HTTPS source-link behavior/assertions/instructions alongside canonical O01 display183",
-      "upstream_commit": "5b794f3791d5d50a872905fa1e339d4b5600013e"
+      "upstream_commit": "2cd51758cba309e49dbf80bdd0cc8e5d66a75a48"
     },
     "test/datasets.test.tsx": {
       "sha256": "a9377bbc32eca3ebd79e40bf804b92b2a3abdc878f7eb520a071fa99bf0a3c15",
       "reason": "Preserve reviewed consumer HTTPS source-link behavior/assertions/instructions alongside canonical O01 display183",
-      "upstream_commit": "5b794f3791d5d50a872905fa1e339d4b5600013e"
+      "upstream_commit": "2cd51758cba309e49dbf80bdd0cc8e5d66a75a48"
     },
     "README.md": {
       "sha256": "c7f2d6158e06be646eb4a106bd0891422a739e44dd1a27d3b8e874c0e0d2fd0c",
       "reason": "Preserve reviewed consumer HTTPS source-link behavior/assertions/instructions alongside canonical O01 display183",
-      "upstream_commit": "5b794f3791d5d50a872905fa1e339d4b5600013e"
+      "upstream_commit": "2cd51758cba309e49dbf80bdd0cc8e5d66a75a48"
     }
   },
-  "adoption_scope": "assistant-react only; preserve separately pinned assistant-contract and three consumer source-link overlays; canonical paired-row candidate awaits merge identity settlement"
+  "adoption_scope": "assistant-react only; canonical paired-row PR184 merged; preserve separately pinned assistant-contract and three consumer source-link overlays"
 }
