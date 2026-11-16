@@ -1998,3 +1998,45 @@ assert observed == ['UNREADABLE','UNREADABLE','FAIL','PASS','FAIL','PASS']
 Each repair preserves the other metric's diagnostic. Oracle sum contradictions
 produce `string_panels_oracle_total_mismatch`. Independent per-string report
 rows still require producer provenance for live acceptance.
+# Cross-topology evidence for X05
+
+Balanced cross-grid connections can preserve every device and string count.
+Explicit string grid owners, inverter grid owners and string-to-inverter
+connections are needed to establish that both endpoints share a grid. The new
+standalone `validate_cross_topology` helper checks this equality after validating
+all three maps. The existing composer retains its earlier topology boundaries
+until this helper is integrated.
+
+```powershell
+@'
+import sys
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+grids, strings, devices = ['east','west'], ['A','B'], ['I1','I2']
+owners = [dict(string_id='A',grid_id='east'),dict(string_id='B',grid_id='west')]
+inverters = [dict(inverter_id='I1',grid_id='east'),dict(inverter_id='I2',grid_id='west')]
+crossed = [dict(string_id='A',inverter_id='I2'),dict(string_id='B',inverter_id='I1')]
+optimizers = [dict(string_id=k,optimizers=6) for k in strings]
+panels = [dict(string_id=k,panels=12) for k in strings]
+power = [dict(string_id=k,kw_dc='4.8') for k in strings]
+checks = [
+    m.validate_grid_string_ownership(grids,strings,owners),
+    m.validate_grid_inverter_ownership(grids,devices,inverters),
+    m.validate_string_inverter_assignments(devices,strings,crossed),
+    m.compare_inverter_string_totals(dict(I1=1,I2=1),strings,crossed),
+    m.compare_inverter_optimizer_totals(dict(I1=6,I2=6),optimizers,crossed),
+    m.compare_inverter_panel_totals(dict(I1=12,I2=12),strings,panels,crossed),
+    m.compare_inverter_dc_totals(dict(I1='4.8',I2='4.8'),strings,power,crossed),
+]
+for check in checks: print(check['verdict'],check['reason'])
+topology = m.validate_cross_topology(grids,strings,devices,owners,inverters,crossed)
+print(topology['verdict'],topology['reason'],topology['mismatch_count'])
+assert all(check['verdict'] == 'PASS' for check in checks)
+assert topology['verdict'] == 'FAIL' and topology['mismatch_count'] == 2
+'@ | python -P -
+```
+
+Expected seven PASS results and FAIL `cross_topology_mismatch` with two changed
+strings. Missing owner evidence is UNREADABLE. Valid but missing or foreign
+assignments fail their explicit coverage checks. Independent producer evidence
+must bind these identities to the actual saved design for live acceptance.

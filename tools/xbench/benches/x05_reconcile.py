@@ -1204,6 +1204,26 @@ def compare_string_inverter_snapshots(inverter_ids, saved_string_ids, before_ass
                           for row in result["examples"]])
 
 
+def validate_cross_topology(expected_grid_ids, saved_string_ids, inverter_ids,
+                            string_owners, inverter_owners, assignments):
+    """Require every string and its explicitly assigned inverter to share a grid."""
+    checks = dict(strings=validate_grid_string_ownership(expected_grid_ids, saved_string_ids, string_owners),
+                  inverters=validate_grid_inverter_ownership(expected_grid_ids, inverter_ids, inverter_owners),
+                  assignments=validate_string_inverter_assignments(inverter_ids, saved_string_ids, assignments))
+    verdicts = {check["verdict"] for check in checks.values()}
+    if verdicts != {"PASS"}:
+        return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL", "cross_topology_evidence_invalid",
+                    checks=checks)
+    strings = {row["string_id"]: row["grid_id"] for row in string_owners}
+    inverters = {row["inverter_id"]: row["grid_id"] for row in inverter_owners}
+    connections = {row["string_id"]: row["inverter_id"] for row in assignments}
+    changed = [key for key in strings if strings[key] != inverters[connections[key]]]
+    return _out("FAIL" if changed else "PASS", "cross_topology_mismatch" if changed else "cross_topology_equal",
+                mismatch_count=len(changed), examples=[dict(string_id=key, inverter_id=connections[key],
+                    string_grid=strings[key], inverter_grid=inverters[connections[key]])
+                    for key in nsmallest(MAX_STRING_EXAMPLES, changed)])
+
+
 def compare_inverter_string_totals(expected_totals, saved_string_ids, assignments):
     """Count explicit saved connections against independent inverter string totals."""
     return _compare_inverter_loads(expected_totals, saved_string_ids, assignments, "strings")

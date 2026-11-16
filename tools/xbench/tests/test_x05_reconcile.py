@@ -5521,3 +5521,136 @@ def test_string_metric_index_work_cap_permutation_and_preservation(monkeypatch):
                 Random(seed+1).shuffle(right)
                 assert compare(left,right) == baseline
             assert (oracle,saved) == preserved
+
+
+def test_cross_topology_balanced_connections_missing_owners_and_bounded_examples():
+    from benches import x05_reconcile as m
+    grids,strings,devices = ['east','west'],['A','B'],['I1','I2']
+    string_owners = [dict(string_id='A',grid_id='east'),dict(string_id='B',grid_id='west')]
+    inverter_owners = [dict(inverter_id='I1',grid_id='east'),dict(inverter_id='I2',grid_id='west')]
+    crossed = [dict(string_id='A',inverter_id='I2'),dict(string_id='B',inverter_id='I1')]
+    inputs = (grids,strings,devices,string_owners,inverter_owners,crossed)
+    preserved = deepcopy(inputs)
+    result = m.validate_cross_topology(*inputs)
+    assert result['verdict'] == 'FAIL' and result['mismatch_count'] == 2
+    assert result == m.validate_cross_topology(*(list(reversed(v)) for v in inputs))
+    assert inputs == preserved
+    correct = [dict(string_id='A',inverter_id='I1'),dict(string_id='B',inverter_id='I2')]
+    assert m.validate_cross_topology(grids,strings,devices,string_owners,inverter_owners,correct)['verdict'] == 'PASS'
+    for position in (0,1,2,3,4,5):
+        changed = list(inputs)
+        changed[position] = None
+        assert m.validate_cross_topology(*changed)['verdict'] == 'UNREADABLE'
+    assert m.validate_cross_topology(grids,strings,devices,string_owners[:1],inverter_owners,crossed)['verdict'] == 'FAIL'
+    many = [f's{i:03}' for i in range(70)]
+    owners = [dict(string_id=k,grid_id='east') for k in many]
+    connections = [dict(string_id=k,inverter_id='I2') for k in many]
+    capped = m.validate_cross_topology(grids,many,devices,owners,inverter_owners,connections)
+    assert capped['mismatch_count'] == 70 and len(capped['examples']) == MAX_STRING_EXAMPLES
+    assert capped == m.validate_cross_topology(grids,many[::-1],devices,owners[::-1],inverter_owners,connections[::-1])
+
+
+@pytest.mark.parametrize('field', ['before_panel_counts','reopened_panel_counts','before_dc_power','reopened_dc_power'])
+@pytest.mark.parametrize('bad', [None, {}, 'private-canary', [None], [{}],
+    [dict(string_id='',panels=1,kw_dc='1')], [dict(string_id='x'*129,panels=1,kw_dc='1')],
+    [dict(string_id='A',panels=True,kw_dc=True)], [dict(string_id='A',panels=-1,kw_dc='NaN')],
+    [dict(string_id='A',panels=1,kw_dc='1')]*2])
+def test_per_string_snapshot_schema_mutations_preserve_siblings_and_inputs(field,bad):
+    from benches import x05_reconcile as m
+    envelope = seven_step_envelope()
+    envelope['grid'][field] = bad
+    preserved = deepcopy(envelope)
+    result = m._seven_step_envelope(envelope)
+    metric = 'panels' if 'panel' in field else 'kw_dc'
+    sibling = 'kw_dc' if metric == 'panels' else 'panels'
+    assert result['string_metrics']['metrics'][metric]['snapshots']['verdict'] == 'UNREADABLE'
+    assert result['string_metrics']['metrics'][sibling]['snapshots']['verdict'] == 'PASS'
+    assert 'private-canary' not in serialize_result(result) and 'x'*129 not in serialize_result(result)
+    assert envelope == preserved
+
+
+def test_concurrent_per_string_snapshot_decimal_contexts_preserved():
+    from concurrent.futures import ThreadPoolExecutor
+    from decimal import localcontext, Inexact
+    from threading import Event
+    from benches import x05_reconcile as m
+    ready,release = [Event(),Event()],Event()
+    envelope = seven_step_envelope()
+    envelope['grid']['reopened_dc_power'][0]['kw_dc'] = '4.'+'0'*76+'1'
+    envelope['grid']['reopened_dc_power'][1]['kw_dc'] = '5.5'+'9'*76
+    def run(index):
+        with localcontext() as caller:
+            caller.prec,caller.Emin,caller.Emax = (2,-1,1) if index == 0 else (39,-999,999)
+            for signal in caller.traps: caller.traps[signal] = bool(index)
+            caller.clear_flags()
+            caller.flags[Inexact] = bool(index)
+            state = lambda: (caller.prec,caller.Emin,caller.Emax,dict(caller.traps),dict(caller.flags))
+            preserved = state()
+            ready[index].set()
+            assert release.wait(10)
+            result = m._seven_step_envelope(deepcopy(envelope))
+            assert result['string_metrics']['metrics']['kw_dc']['snapshots']['comparison']['counts']['mismatched'] == 2
+            text = serialize_result(result)
+            assert state() == preserved
+            return text
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(run,i) for i in range(2)]
+        try: assert all(event.wait(10) for event in ready)
+        finally: release.set()
+        assert futures[0].result(timeout=20) == futures[1].result(timeout=20)
+
+
+def test_string_snapshot_hash_seeds_and_all_phase_row_permutations(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from random import Random
+    from benches import x05_reconcile as m
+    expected,records = bound_seven_fixture_records()
+    for index,record in enumerate(records):
+        grid = record['envelope']['grid']
+        evidence = record['envelope']['assurance']['evidence']
+        grid['reopened_panel_counts'][0]['panels'],grid['reopened_panel_counts'][1]['panels'] = 14,10
+        grid['reopened_dc_power'][0]['kw_dc'],grid['reopened_dc_power'][1]['kw_dc'] = '5.6','4'
+        if index == 2: evidence['oracle_dc_power'] = None
+    preserved = deepcopy(records)
+    baseline = json.loads(serialize_result(m.aggregate_bound_seven_steps(expected,records)))
+    outputs = []
+    for seed in ('0','73'):
+        changed = deepcopy(records)
+        Random(int(seed)).shuffle(changed)
+        for record in changed:
+            envelope = record['envelope']
+            for field in ('panel_counts','before_panel_counts','reopened_panel_counts','dc_power','before_dc_power','reopened_dc_power'):
+                Random(int(seed)).shuffle(envelope['grid'][field])
+            for field in ('oracle_panels','oracle_dc_power'):
+                rows = envelope['assurance']['evidence'][field]
+                if rows is not None: Random(int(seed)).shuffle(rows)
+        run = subprocess.run([sys.executable,'-P',str(Path(m.__file__).resolve()),'--seven-step-bound-aggregate'],
+            input=serialize_result(dict(expected_ids=expected[::-1],fixtures=changed)).encode('ascii'),
+            capture_output=True,cwd=tmp_path,timeout=20,env={'SystemRoot':'C:\\Windows','PYTHONHASHSEED':seed})
+        assert run.returncode == 4 and not run.stderr and json.loads(run.stdout) == baseline
+        outputs.append(run.stdout)
+    assert outputs[0] == outputs[1] and records == preserved
+
+
+def test_string_metric_comparison_pairs_once_per_unique_fixture(monkeypatch):
+    from collections import Counter
+    from benches import x05_reconcile as m
+    expected,records = bound_seven_fixture_records()
+    baseline = m.aggregate_bound_seven_steps(expected,records)
+    calls = Counter()
+    def counted(name,original):
+        def run(left,right):
+            calls[(name,id(left),id(right))] += 1
+            return original(left,right)
+        return run
+    for name in ('compare_string_panel_counts','compare_string_dc_power'):
+        monkeypatch.setattr(m,name,counted(name,getattr(m,name)))
+    assert m.aggregate_bound_seven_steps(expected,records) == baseline
+    assert len(calls) == 18 and set(calls.values()) == {1}
+    calls.clear()
+    result = m.aggregate_bound_seven_steps(expected,[dict(fixture_id=expected[0],envelope=None)]+records)
+    assert len(calls) == 12 and set(calls.values()) == {1}
+    assert expected[0] not in result['fixtures']
+    for key in expected[1:]: assert result['fixtures'][key] == baseline['fixtures'][key]
