@@ -453,6 +453,29 @@ The replay reads only source code for its synthetic builder, no customer input.
 Helpers make no file or network reads. PASS establishes consistency of supplied
 claims and bytes, never their authenticated origin or live X05 acceptance.
 
+Additional offline CLI modes are `--assurance` for the complete assurance
+envelope and `--provenance-aggregate` for three provenance records. All four
+explicit modes are mutually exclusive. Each emits one sanitized JSON result
+with exit0 PASS,1 FAIL,4 UNREADABLE or5 output failure. Invalid combinations
+exit2 on stderr without a reconciliation result. Differential synthetic tests
+compare direct provenance JSON diagnostics with its CLI output for missing
+fields and readable mismatches.
+
+`aggregate_assurance(expected_ids, fixtures)` and
+`aggregate_assurance_json(text)` compose three complete assurance records.
+Each record adds `fixture_id` to the single-assurance envelope; the JSON outer
+envelope has exactly `expected_ids` and `fixtures`. Coverage errors remain
+UNREADABLE. Malformed aggregate records retain an exact `envelope_error_count`
+and at most10 index/reason examples, never input text. Unique valid siblings
+retain their diagnostics; duplicated IDs are excluded from sibling results.
+Missing records are a coverage error, not counted as malformed supplied records.
+
+Each hex role is limited to16384 decoded bytes (32768 hex characters) before
+any byte allocation. Exact-limit bytes can pass when their supplied manifest
+matches. Excess emits `input_hex_too_large`. JSON size limits also apply. These
+bounds are transport limits for synthetic offline evidence, not live upload
+limits or a claim about real customer files.
+
 Canonical snapshot compatibility contract:
 
 - Hash UTF-8 bytes of compact JSON arrays with ASCII escapes and no spaces.

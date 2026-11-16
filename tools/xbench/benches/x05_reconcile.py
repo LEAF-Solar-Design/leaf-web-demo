@@ -25,6 +25,8 @@ MAX_STRING_EXAMPLES = 20
 MAX_RECOMMENDATION_EXAMPLES = 20
 MAX_JSON_CHARS = 262144
 MAX_JSON_DEPTH = 32
+MAX_INPUT_BYTES = 16384
+MAX_ENVELOPE_EXAMPLES = 10
 PROVENANCE_STAGES = ("strings", "grouping", "table", "policy", "reopen", "csv_view")
 IDENTITY_STAGES = ("saved_strings", "table", "csv", "reopened")
 _CSV_LOCK = RLock()
@@ -131,13 +133,67 @@ def aggregate_provenance(expected_ids, fixtures):
     """Validate coverage first, then preserve every fixture's provenance result."""
     coverage = aggregate_fixtures(expected_ids, fixtures)
     if coverage["reason"] != "offline_fixture_reconciliation":
-        return coverage
+        return _aggregate_envelope_diagnostics(coverage, expected_ids, fixtures, assured=False)
     indexed = {row["fixture_id"]: row for row in fixtures}
     results = {key: reconcile_with_provenance(indexed[key]["evidence"],
                  indexed[key].get("manifest"), indexed[key].get("bindings")) for key in sorted(expected_ids)}
     verdicts = {result["verdict"] for result in results.values()}
     verdict = "UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS"
     return _out(verdict, "offline_provenance_fixtures", fixtures=results)
+
+
+def _aggregate_envelope_diagnostics(coverage, expected_ids, fixtures, *, assured):
+    """Retain readable unique siblings and bounded index-only envelope errors."""
+    if (type(expected_ids) is not list or len(expected_ids) != 3
+            or any(type(key) is not str or not key.strip() or len(key) > 128 for key in expected_ids)
+            or len(set(expected_ids)) != 3 or type(fixtures) is not list):
+        return coverage
+    errors, count, indexed, duplicated = [], 0, {}, set()
+    for index, row in enumerate(fixtures):
+        key = row.get("fixture_id") if type(row) is dict else None
+        reason = None
+        if type(key) is not str or key not in expected_ids:
+            reason = "fixture_envelope_unreadable"
+        elif key in indexed:
+            duplicated.add(key)
+            reason = "duplicate_fixture_id"
+        elif type(row.get("evidence")) is not dict or row["evidence"].get("fixture_id") != key:
+            reason = "fixture_identity_unbound"
+        else:
+            indexed[key] = row
+        if reason:
+            count += 1
+            if len(errors) < MAX_ENVELOPE_EXAMPLES:
+                errors.append(dict(index=index, reason=reason))
+    results = {}
+    for key in sorted(indexed.keys() - duplicated):
+        row = indexed[key]
+        if assured:
+            results[key] = _assurance_envelope(row, fixture_record=True)
+        else:
+            results[key] = reconcile_with_provenance(row["evidence"], row.get("manifest"), row.get("bindings"))
+    return {**coverage, "envelope_error_count": count, "envelope_errors": errors, "fixtures": results}
+
+
+def aggregate_assurance(expected_ids, fixtures):
+    coverage = aggregate_fixtures(expected_ids, fixtures)
+    if coverage["reason"] != "offline_fixture_reconciliation":
+        return _aggregate_envelope_diagnostics(coverage, expected_ids, fixtures, assured=True)
+    indexed = {row["fixture_id"]: row for row in fixtures}
+    results = {key: _assurance_envelope(indexed[key], fixture_record=True) for key in sorted(expected_ids)}
+    verdicts = {result["verdict"] for result in results.values()}
+    verdict = "UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS"
+    return _out(verdict, "offline_assurance_fixtures", fixtures=results)
+
+
+def aggregate_assurance_json(text):
+    decoded = decode_evidence_json(text)
+    if decoded["verdict"] != "PASS":
+        return decoded
+    envelope = decoded["evidence"]
+    if set(envelope) != {"expected_ids", "fixtures"}:
+        return _out("UNREADABLE", "assurance_aggregate_envelope_unreadable")
+    return aggregate_assurance(envelope["expected_ids"], envelope["fixtures"])
 
 
 def aggregate_provenance_json(text):
@@ -154,13 +210,21 @@ def reconcile_assurance_json(text):
     decoded = decode_evidence_json(text)
     if decoded["verdict"] != "PASS":
         return decoded
-    envelope = decoded["evidence"]
-    if set(envelope) != {"evidence", "manifest", "bindings", "inputs_hex", "identity", "stage_identities"}:
+    return _assurance_envelope(decoded["evidence"])
+
+
+def _assurance_envelope(envelope, *, fixture_record=False):
+    fields = {"evidence", "manifest", "bindings", "inputs_hex", "identity", "stage_identities"}
+    if fixture_record:
+        fields.add("fixture_id")
+    if type(envelope) is not dict or set(envelope) != fields:
         return _out("UNREADABLE", "assurance_envelope_unreadable")
     encoded = envelope["inputs_hex"]
     if (type(encoded) is not dict or any(type(value) is not str or len(value) % 2
             or re.fullmatch(r"[0-9a-fA-F]*", value) is None for value in encoded.values())):
         return _out("UNREADABLE", "input_hex_unreadable")
+    if any(len(value) > 2 * MAX_INPUT_BYTES for value in encoded.values()):
+        return _out("UNREADABLE", "input_hex_too_large")
     supplied = {key: bytes.fromhex(value) for key, value in encoded.items()}
     return reconcile_assured(envelope["evidence"], envelope["manifest"], envelope["bindings"], supplied,
                              envelope["identity"], envelope["stage_identities"])
@@ -686,6 +750,8 @@ def main(argv=None):
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--aggregate", action="store_true", help="read one three-fixture envelope")
     modes.add_argument("--provenance", action="store_true", help="read one supplied-provenance envelope")
+    modes.add_argument("--assurance", action="store_true", help="read one supplied-assurance envelope")
+    modes.add_argument("--provenance-aggregate", action="store_true", help="read three provenance envelopes")
     args = parser.parse_args(argv)
     try:
         raw = sys.stdin.buffer.read(4 * MAX_JSON_CHARS + 1)
@@ -693,7 +759,9 @@ def main(argv=None):
             result = _out("UNREADABLE", "json_input_too_large")
         else:
             text = raw.decode("utf-8", errors="strict")
-            decode = (aggregate_fixtures_json if args.aggregate else
+            decode = (reconcile_assurance_json if args.assurance else
+                      aggregate_provenance_json if args.provenance_aggregate else
+                      aggregate_fixtures_json if args.aggregate else
                       reconcile_provenance_json if args.provenance else reconcile_json)
             result = decode(text)
         output = serialize_result(result)

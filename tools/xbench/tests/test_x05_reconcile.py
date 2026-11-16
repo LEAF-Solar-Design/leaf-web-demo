@@ -1,6 +1,6 @@
 """Synthetic evidence for X05's offline comparator, no transport or real input."""
 
-from itertools import permutations
+from itertools import combinations, permutations
 from copy import deepcopy
 import csv
 from hashlib import sha256
@@ -19,6 +19,7 @@ from benches.x05_reconcile import (METRICS, TABLE_COLUMNS, check_discrepancies,
     IDENTITY_STAGES, validate_saved_design_identity, verify_input_bytes, reconcile_with_provenance,
     reconcile_assured, aggregate_provenance, reconcile_provenance_json,
     reconcile_assurance_json, aggregate_provenance_json,
+    aggregate_assurance, aggregate_assurance_json, MAX_INPUT_BYTES, MAX_ENVELOPE_EXAMPLES,
     compare_csv_view, compare_recommendations, compare_snapshots, compare_strings, compare_table)
 
 
@@ -1013,6 +1014,146 @@ def test_aggregate_isolates_readable_failure_missing_evidence_and_complete_fixtu
     assert incomplete["csv_view"]["reason"] == incomplete["reopen"]["reason"] == "stage_evidence_missing"
     assert incomplete["table"]["verdict"] == incomplete["strings"]["verdict"] == "PASS"
     assert fixtures == preserved
+
+
+def assurance_records():
+    expected = ["case-a", "case-b", "case-c"]
+    records = []
+    for key in expected:
+        envelope = assurance_envelope()
+        envelope["evidence"]["fixture_id"] = envelope["manifest"]["fixture_id"] = key
+        for binding in envelope["bindings"].values():
+            binding["fixture_id"] = key
+        records.append(dict(envelope, fixture_id=key))
+    return expected, records
+
+
+@pytest.mark.parametrize("mode", ["--assurance", "--provenance-aggregate"])
+@pytest.mark.parametrize("kind,exit_code", [("PASS", 0), ("FAIL", 1), ("UNREADABLE", 4), ("malformed", 4)])
+def test_new_cli_modes_verdicts_and_sanitized_errors(tmp_path, mode, kind, exit_code):
+    from pathlib import Path
+    import subprocess
+    import sys
+    from benches import x05_reconcile as module
+    if mode == "--assurance":
+        payload = assurance_envelope()
+        target = payload["evidence"]
+    else:
+        expected, records = provenance_records()
+        payload = dict(expected_ids=expected, fixtures=records)
+        target = records[0]["evidence"]
+    if kind == "FAIL":
+        target["recommendations"][0]["group_count"] = 1
+    elif kind == "UNREADABLE":
+        del target["saved_strings"]
+    elif kind == "malformed":
+        payload = {"synthetic_private_canary": True}
+    completed = subprocess.run([sys.executable, "-P", str(Path(module.__file__).resolve()), mode],
+        input=json.dumps(payload).encode(), capture_output=True, cwd=tmp_path, timeout=20)
+    assert completed.returncode == exit_code and completed.stderr == b""
+    assert len(completed.stdout.splitlines()) == 1 and b"synthetic_private_canary" not in completed.stdout
+    observed = json.loads(completed.stdout)
+    assert observed["verdict"] == ("UNREADABLE" if kind == "malformed" else kind)
+    if mode == "--provenance-aggregate" and kind == "UNREADABLE":
+        assert observed["fixtures"]["case-b"]["verdict"] == observed["fixtures"]["case-c"]["verdict"] == "PASS"
+
+
+@pytest.mark.parametrize("left,right", list(combinations(
+    ["--aggregate", "--provenance", "--assurance", "--provenance-aggregate"], 2)))
+def test_cli_modes_are_pairwise_exclusive(tmp_path, left, right):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from benches import x05_reconcile as module
+    completed = subprocess.run([sys.executable, "-P", str(Path(module.__file__).resolve()), left, right],
+        input=b"synthetic", capture_output=True, cwd=tmp_path, timeout=20)
+    assert completed.returncode == 2 and completed.stdout == b""
+    assert b"not allowed with argument" in completed.stderr and b"Traceback" not in completed.stderr
+
+
+def test_assurance_aggregate_strict_coverage_and_sibling_preservation():
+    expected, records = assurance_records()
+    payload = dict(expected_ids=expected, fixtures=records)
+    baseline = aggregate_assurance_json(json.dumps(payload))
+    assert baseline["verdict"] == "PASS"
+    records[0]["inputs_hex"]["report"] = b"substitution".hex()
+    records[1]["evidence"]["recommendations"][0]["group_count"] = 1
+    observed = aggregate_assurance(expected, records)
+    assert observed["verdict"] == "UNREADABLE"
+    assert [observed["fixtures"][key]["verdict"] for key in expected] == ["UNREADABLE", "FAIL", "PASS"]
+    assert observed["fixtures"][expected[2]] == baseline["fixtures"][expected[2]]
+    for changed in (records[:2], [records[0]] * 3):
+        assert aggregate_assurance(expected, changed)["verdict"] == "UNREADABLE"
+    records[0]["fixture_id"] = "foreign"
+    assert aggregate_assurance(expected, records)["reason"] == "foreign_fixture_id"
+    assert aggregate_assurance_json('{}')["reason"] == "assurance_aggregate_envelope_unreadable"
+    assert aggregate_assurance_json('{"fixtures":[],"fixtures":[]}')["reason"] == "json_duplicate_key"
+
+
+@pytest.mark.parametrize("role", ["dwg", "report", "bom"])
+def test_hex_exact_limit_rejects_excess_before_allocation(role, monkeypatch):
+    from benches import x05_reconcile as module
+    envelope = assurance_envelope()
+    payload = b"x" * MAX_INPUT_BYTES
+    envelope["inputs_hex"][role] = payload.hex()
+    envelope["manifest"]["inputs"][role] = sha256(payload).hexdigest()
+    for binding in envelope["bindings"].values():
+        binding["inputs"][role] = sha256(payload).hexdigest()
+    assert reconcile_assurance_json(json.dumps(envelope))["verdict"] == "PASS"
+    envelope["inputs_hex"][role] += "00"
+    preserved = deepcopy(envelope)
+    class ForbiddenBytes:
+        @staticmethod
+        def fromhex(value):
+            pytest.fail("Oversized input must reject before allocating any bytes")
+    monkeypatch.setattr(module, "bytes", ForbiddenBytes, raising=False)
+    assert reconcile_assurance_json(json.dumps(envelope)) == {
+        "verdict": "UNREADABLE", "reason": "input_hex_too_large"}
+    assert envelope == preserved
+
+
+@pytest.mark.parametrize("assured", [False, True])
+def test_large_malformed_fixture_diagnostics_are_exact_bounded_and_keep_siblings(assured):
+    expected, records = assurance_records() if assured else provenance_records()
+    aggregate = aggregate_assurance if assured else aggregate_provenance
+    baseline = aggregate(expected, records)
+    records += [{"fixture_id": "synthetic_private_canary"}] * 1000 + [None] * 1000
+    preserved = deepcopy(records)
+    first = aggregate(expected, records)
+    assert first["verdict"] == "UNREADABLE" and first["envelope_error_count"] == 2000
+    assert len(first["envelope_errors"]) == MAX_ENVELOPE_EXAMPLES
+    assert [item["index"] for item in first["envelope_errors"]] == list(range(3, 3 + MAX_ENVELOPE_EXAMPLES))
+    assert first["fixtures"] == baseline["fixtures"]
+    assert "synthetic_private_canary" not in serialize_result(first)
+    assert first == aggregate(expected, records) and records == preserved
+
+
+def test_provenance_cli_matches_direct_json_generated_mutation_corpus(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from benches import x05_reconcile as module
+    manifest, bindings, _ = provenance_fixture()
+    base = dict(evidence=complete_evidence(), manifest=manifest, bindings=bindings)
+    corpus = [base]
+    for field in base:
+        altered = deepcopy(base)
+        del altered[field]
+        corpus.append(altered)
+    for field in complete_evidence():
+        altered = deepcopy(base)
+        del altered["evidence"][field]
+        corpus.append(altered)
+    altered = deepcopy(base)
+    altered["evidence"]["recommendations"][0]["group_count"] = 1
+    corpus.append(altered)
+    for payload in corpus:
+        text = json.dumps(payload)
+        direct = reconcile_provenance_json(text)
+        completed = subprocess.run([sys.executable, "-P", str(Path(module.__file__).resolve()), "--provenance"],
+            input=text.encode(), capture_output=True, cwd=tmp_path, timeout=20)
+        assert completed.returncode == {"PASS": 0, "FAIL": 1, "UNREADABLE": 4}[direct["verdict"]]
+        assert completed.stderr == b"" and json.loads(completed.stdout) == json.loads(serialize_result(direct))
 
 
 @pytest.mark.parametrize("key", REQUIRED_STAGES)
