@@ -862,6 +862,66 @@ helper checks those claims against the supplied manifest. The replay establishes
 consistency and rejection behavior, with frozen-origin authentication and live
 acquisition supplied separately by the bench acceptance process.
 
+`--seven-step-bound-aggregate` exposes `aggregate_bound_seven_steps_json` with
+the documented verdict/output exits and mutual exclusion with every other mode.
+The strict outer JSON object has exactly `expected_ids` and `fixtures`.
+Expected IDs contain exactly three unique nonblank strings of at most128
+characters. Each fixture record supplies these fields:
+
+| Field | Meaning |
+|---|---|
+| `fixture_id` | Exact expected identity, also bound to assurance evidence |
+| `envelope` | Complete import/grid/assurance seven-step object |
+| `manifest` | Supplied frozen fixture ID and input digest map |
+| `import_binding` | Supplied import fixture/input binding |
+| `grid_binding` | Supplied grid fixture/input binding |
+
+Valid unique fixtures run seven-step reconciliation once each. Coverage errors
+preserve named uncertainty, ambiguous IDs stay excluded, and readable unique
+siblings keep their bound diagnostics. Exact serializer tests exercise100000
+visited nodes successfully and reject100001 below the independent character
+and depth budgets, preserving caller data.
+
+Executable stdin-only strict-decoder replay (synthetic source-only builder,
+requires pytest):
+
+```powershell
+@'
+import sys, runpy, json, subprocess
+sys.path.insert(0, 'tools/xbench')
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+expected, rows = builders['bound_seven_fixture_records']()
+rows[0]['envelope']['import']['normal_user'] = False
+rows[1]['grid_binding'] = None
+mixed = json.dumps(dict(expected_ids=expected, fixtures=rows))
+expected, rows = builders['bound_seven_fixture_records']()
+correct = json.dumps(dict(expected_ids=expected, fixtures=rows))
+program = ("import sys;sys.path.insert(0,'tools/xbench');from benches.x05_reconcile import "
+           "aggregate_bound_seven_steps_json,serialize_result;"
+           "r=aggregate_bound_seven_steps_json(sys.stdin.read());print(serialize_result(r));"
+           "sys.exit({'PASS':0,'FAIL':1,'UNREADABLE':4}[r['verdict']])")
+cases = [('duplicate', '{"fixtures":[],"fixtures":[]}', 4), ('mixed', mixed, 4), ('corrected', correct, 0)]
+for name, text, expected_exit in cases:
+    run = subprocess.run([sys.executable, '-P', '-c', program], input=text.encode(), capture_output=True, timeout=20)
+    assert run.returncode == expected_exit and not run.stderr
+    result = json.loads(run.stdout)
+    detail = result['reason'] if name == 'duplicate' else ','.join(result['fixtures'][key]['verdict'] for key in expected)
+    print(name, run.returncode, result['verdict'], detail)
+'@ | python -P
+```
+
+Exact stdout:
+
+```text
+duplicate 4 UNREADABLE json_duplicate_key
+mixed 4 UNREADABLE FAIL,UNREADABLE,PASS
+corrected 0 PASS PASS,PASS,PASS
+```
+
+The decoder reads each synthetic envelope only from stdin. The parent process
+loads source fixtures. The supplied claims retain the origin and live-acquisition
+limits stated in the X05 acceptance contract.
+
 Canonical snapshot compatibility contract:
 
 - Hash UTF-8 bytes of compact JSON arrays with ASCII escapes and no spaces.

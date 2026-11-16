@@ -144,7 +144,7 @@ def aggregate_provenance(expected_ids, fixtures):
     return _out(verdict, "offline_provenance_fixtures", fixtures=results)
 
 
-def _aggregate_envelope_diagnostics(coverage, expected_ids, fixtures, *, assured, seven=False):
+def _aggregate_envelope_diagnostics(coverage, expected_ids, fixtures, *, assured, seven=False, bound=False):
     """Retain readable unique siblings and bounded index-only envelope errors."""
     if (type(expected_ids) is not list or len(expected_ids) != 3
             or any(type(key) is not str or not key.strip() or len(key) > 128 for key in expected_ids)
@@ -173,7 +173,7 @@ def _aggregate_envelope_diagnostics(coverage, expected_ids, fixtures, *, assured
     for key in sorted(indexed.keys() - duplicated):
         row = indexed[key]
         if seven:
-            results[key] = _seven_step_envelope(row.get("envelope"))
+            results[key] = _bound_seven_step_record(row) if bound else _seven_step_envelope(row.get("envelope"))
         elif assured:
             results[key] = _assurance_envelope(row, fixture_record=True)
         else:
@@ -514,6 +514,10 @@ def validate_import_grid_provenance(frozen_manifest, import_binding, grid_bindin
 
 def aggregate_seven_steps(expected_ids, fixtures):
     """Retain seven-step diagnostics for exactly three explicitly bound fixtures."""
+    return _aggregate_seven_step_records(expected_ids, fixtures, bound=False)
+
+
+def _aggregate_seven_step_records(expected_ids, fixtures, *, bound):
     if type(fixtures) is not list:
         return _out("UNREADABLE", "fixture_coverage_unreadable")
     proxies = []
@@ -522,15 +526,18 @@ def aggregate_seven_steps(expected_ids, fixtures):
         envelope = row.get("envelope") if type(row) is dict else None
         assurance = envelope.get("assurance") if type(envelope) is dict else None
         evidence = assurance.get("evidence") if type(assurance) is dict else None
-        proxies.append(dict(fixture_id=key, evidence=evidence, envelope=envelope))
-    coverage = aggregate_fixtures(expected_ids, proxies)
-    if coverage["reason"] != "offline_fixture_reconciliation":
-        return _aggregate_envelope_diagnostics(coverage, expected_ids, proxies, assured=False, seven=True)
+        proxy = dict(row) if type(row) is dict else {}
+        proxy.update(fixture_id=key, evidence=evidence, envelope=envelope)
+        proxies.append(proxy)
+    coverage, _ = _index_fixture_records(expected_ids, proxies)
+    if coverage is not None:
+        return _aggregate_envelope_diagnostics(coverage, expected_ids, proxies, assured=False, seven=True, bound=bound)
     indexed = {row["fixture_id"]: row for row in fixtures}
-    results = {key: _seven_step_envelope(indexed[key]["envelope"]) for key in sorted(expected_ids)}
+    results = {key: _bound_seven_step_record(indexed[key]) if bound else _seven_step_envelope(indexed[key]["envelope"])
+               for key in sorted(expected_ids)}
     verdicts = {result["verdict"] for result in results.values()}
     return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
-                "offline_seven_step_fixtures", fixtures=results)
+                "offline_bound_seven_step_fixtures" if bound else "offline_seven_step_fixtures", fixtures=results)
 
 
 def aggregate_seven_steps_json(text):
@@ -571,21 +578,12 @@ def _bound_seven_step_envelope(envelope):
 
 
 def aggregate_bound_seven_steps(expected_ids, fixtures):
-    baseline = aggregate_seven_steps(expected_ids, fixtures)
-    if "fixtures" not in baseline:
-        return baseline
-    indexed = {row["fixture_id"]: row for row in fixtures
-               if type(row) is dict and type(row.get("fixture_id")) is str}
-    results = {}
-    for key in baseline["fixtures"]:
-        row = indexed[key]
-        supplied = {name: row.get(name) for name in ("envelope", "manifest", "import_binding", "grid_binding")}
-        results[key] = _bound_seven_step_envelope(supplied)
-    if baseline["reason"] != "offline_seven_step_fixtures":
-        return {**baseline, "fixtures": results}
-    verdicts = {result["verdict"] for result in results.values()}
-    return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
-                "offline_bound_seven_step_fixtures", fixtures=results)
+    return _aggregate_seven_step_records(expected_ids, fixtures, bound=True)
+
+
+def _bound_seven_step_record(row):
+    supplied = {name: row.get(name) for name in ("envelope", "manifest", "import_binding", "grid_binding")}
+    return _bound_seven_step_envelope(supplied)
 
 
 def aggregate_bound_seven_steps_json(text):
@@ -598,30 +596,37 @@ def aggregate_bound_seven_steps_json(text):
     return aggregate_bound_seven_steps(envelope["expected_ids"], envelope["fixtures"])
 
 
-def aggregate_fixtures(expected_ids, fixtures):
-    """Reconcile exactly three explicitly expected fixture evidence records."""
+def _index_fixture_records(expected_ids, fixtures):
     def identifier(value):
         return type(value) is str and bool(value.strip()) and len(value) <= 128
 
     if (not isinstance(expected_ids, (list, tuple, set)) or len(expected_ids) != 3
             or any(not identifier(value) for value in expected_ids)
             or len(set(expected_ids)) != 3):
-        return _out("UNREADABLE", "expected_fixtures_unreadable")
+        return _out("UNREADABLE", "expected_fixtures_unreadable"), None
     if not isinstance(fixtures, list) or len(fixtures) != 3:
-        return _out("UNREADABLE", "fixture_coverage_unreadable")
+        return _out("UNREADABLE", "fixture_coverage_unreadable"), None
     indexed = {}
     for fixture in fixtures:
         if not isinstance(fixture, dict) or not identifier(fixture.get("fixture_id")):
-            return _out("UNREADABLE", "fixture_id_unreadable")
+            return _out("UNREADABLE", "fixture_id_unreadable"), None
         key = fixture["fixture_id"]
         if key in indexed:
-            return _out("UNREADABLE", "duplicate_fixture_id")
+            return _out("UNREADABLE", "duplicate_fixture_id"), None
         if key not in expected_ids:
-            return _out("UNREADABLE", "foreign_fixture_id")
+            return _out("UNREADABLE", "foreign_fixture_id"), None
         evidence = fixture.get("evidence")
         if not isinstance(evidence, dict) or evidence.get("fixture_id") != key:
-            return _out("UNREADABLE", "fixture_identity_unbound")
+            return _out("UNREADABLE", "fixture_identity_unbound"), None
         indexed[key] = evidence
+    return None, indexed
+
+
+def aggregate_fixtures(expected_ids, fixtures):
+    """Reconcile exactly three explicitly expected fixture evidence records."""
+    coverage, indexed = _index_fixture_records(expected_ids, fixtures)
+    if coverage is not None:
+        return coverage
     results = {key: reconcile_offline(indexed[key]) for key in sorted(expected_ids)}
     verdicts = {result["verdict"] for result in results.values()}
     verdict = "UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS"
@@ -976,6 +981,7 @@ def main(argv=None):
     modes.add_argument("--seven-step", action="store_true", help="read one supplied seven-step envelope")
     modes.add_argument("--seven-step-aggregate", action="store_true", help="read three supplied seven-step envelopes")
     modes.add_argument("--seven-step-bound", action="store_true", help="read one bound seven-step envelope")
+    modes.add_argument("--seven-step-bound-aggregate", action="store_true", help="read three bound seven-step envelopes")
     args = parser.parse_args(argv)
     try:
         chunks, size = [], 0
@@ -993,7 +999,8 @@ def main(argv=None):
             result = _out("UNREADABLE", "json_input_too_large")
         else:
             text = raw.decode("utf-8", errors="strict")
-            decode = (reconcile_bound_seven_steps_json if args.seven_step_bound else
+            decode = (aggregate_bound_seven_steps_json if args.seven_step_bound_aggregate else
+                      reconcile_bound_seven_steps_json if args.seven_step_bound else
                       aggregate_seven_steps_json if args.seven_step_aggregate else
                       reconcile_seven_steps_json if args.seven_step else
                       aggregate_assurance_json if args.assurance_aggregate else

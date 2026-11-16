@@ -1065,7 +1065,7 @@ def test_new_cli_modes_verdicts_and_sanitized_errors(tmp_path, mode, kind, exit_
 
 
 @pytest.mark.parametrize("left,right", list(combinations(
-    ["--aggregate", "--provenance", "--assurance", "--provenance-aggregate", "--assurance-aggregate", "--seven-step", "--seven-step-aggregate", "--seven-step-bound"], 2)))
+    ["--aggregate", "--provenance", "--assurance", "--provenance-aggregate", "--assurance-aggregate", "--seven-step", "--seven-step-aggregate", "--seven-step-bound", "--seven-step-bound-aggregate"], 2)))
 def test_cli_modes_are_pairwise_exclusive(tmp_path, left, right):
     import subprocess
     import sys
@@ -1569,6 +1569,9 @@ def test_foreign_hex_role_rejected_before_any_decoding(payload, monkeypatch):
 
 
 def cli_payload(mode):
+    if mode in ("--seven-step-aggregate", "--seven-step-bound-aggregate"):
+        expected, records = bound_seven_fixture_records() if mode == "--seven-step-bound-aggregate" else seven_fixture_records()
+        return dict(expected_ids=expected, fixtures=records)
     if mode == "--seven-step-bound":
         return bound_seven_envelope()
     if mode == "--seven-step":
@@ -1584,7 +1587,9 @@ def cli_payload(mode):
 
 @pytest.mark.parametrize("mode,decoder", [
     ("--provenance", reconcile_provenance_json), ("--assurance", reconcile_assurance_json),
-    ("--provenance-aggregate", aggregate_provenance_json), ("--assurance-aggregate", aggregate_assurance_json)])
+    ("--provenance-aggregate", aggregate_provenance_json), ("--assurance-aggregate", aggregate_assurance_json),
+    ("--seven-step-aggregate", aggregate_seven_steps_json), ("--seven-step-bound", reconcile_bound_seven_steps_json),
+    ("--seven-step-bound-aggregate", aggregate_bound_seven_steps_json)])
 @pytest.mark.parametrize("character", ["x", "\U0001f642"])
 def test_new_mode_character_and_byte_limits_match_direct_decoder(tmp_path, mode, decoder, character):
     import subprocess
@@ -1592,7 +1597,12 @@ def test_new_mode_character_and_byte_limits_match_direct_decoder(tmp_path, mode,
     from pathlib import Path
     from benches import x05_reconcile as module
     payload = cli_payload(mode)
-    evidence = payload["evidence"] if "evidence" in payload else payload["fixtures"][0]["evidence"]
+    target = payload["fixtures"][0] if "fixtures" in payload else payload
+    if "envelope" in target:
+        target = target["envelope"]
+    if "assurance" in target:
+        target = target["assurance"]
+    evidence = target["evidence"]
     evidence["notes"] = ""
     base = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     def run(padding, expected_exit):
@@ -2910,3 +2920,82 @@ def test_bound_aggregate_determinism_subprocess_bindings_and_manifests(tmp_path)
             assert json.loads(run.stdout)["fixtures"][expected[2]]["verdict"]=="PASS"
             outputs.append(run.stdout)
     assert len(set(outputs))==1
+
+
+@pytest.mark.parametrize("kind,code",[("PASS",0),("FAIL",1),("UNREADABLE",4)])
+def test_bound_aggregate_cli_verdicts_and_siblings(tmp_path,kind,code):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from benches import x05_reconcile as module
+    expected,records=bound_seven_fixture_records()
+    if kind != "PASS":
+        records[0]["envelope"]["import"]["normal_user"]=False
+    if kind == "UNREADABLE":
+        records[1]["import_binding"]=None
+    run=subprocess.run([sys.executable,"-P",str(Path(module.__file__).resolve()),"--seven-step-bound-aggregate"],
+        input=json.dumps(dict(expected_ids=expected,fixtures=records)).encode(),capture_output=True,cwd=tmp_path,timeout=20)
+    assert run.returncode==code and not run.stderr
+    result=json.loads(run.stdout)
+    assert result["verdict"]==kind and result["fixtures"][expected[2]]["verdict"]=="PASS"
+
+
+def test_bound_aggregate_direct_json_mutation_differential_corpus():
+    expected,base=bound_seven_fixture_records()
+    corpus=[base,base[:2]]
+    for field in ("envelope","manifest","import_binding","grid_binding"):
+        for value in (None,{}):
+            changed=deepcopy(base)
+            changed[0][field]=value
+            corpus.append(changed)
+    for records in corpus:
+        preserved=deepcopy(records)
+        direct=aggregate_bound_seven_steps(expected,records)
+        strict=aggregate_bound_seven_steps_json(json.dumps(dict(expected_ids=expected,fixtures=records)))
+        assert json.loads(serialize_result(direct))==json.loads(serialize_result(strict))
+        assert records==preserved
+
+
+def test_bound_aggregation_reconciles_only_once_per_readable_unique_fixture(monkeypatch):
+    from benches import x05_reconcile as module
+    expected,records=bound_seven_fixture_records()
+    baseline=aggregate_bound_seven_steps(expected,records)
+    seven,offline=module._seven_step_envelope,module.reconcile_offline
+    calls=dict(seven=0,offline=0)
+    def checked_seven(value):
+        calls["seven"]+=1
+        return seven(value)
+    def checked_offline(value):
+        calls["offline"]+=1
+        return offline(value)
+    monkeypatch.setattr(module,"_seven_step_envelope",checked_seven)
+    monkeypatch.setattr(module,"reconcile_offline",checked_offline)
+    assert aggregate_bound_seven_steps(expected,records)==baseline
+    assert calls==dict(seven=3,offline=3)
+    calls.update(seven=0,offline=0)
+    observed=aggregate_bound_seven_steps(expected,records[:2])
+    assert observed["verdict"]=="UNREADABLE" and calls==dict(seven=2,offline=2)
+    for key in expected[:2]:
+        assert observed["fixtures"][key]==baseline["fixtures"][key]
+    calls.update(seven=0,offline=0)
+    ambiguous=[dict(fixture_id=expected[0],envelope=None)]+records
+    observed=aggregate_bound_seven_steps(expected,ambiguous)
+    assert calls==dict(seven=2,offline=2) and expected[0] not in observed["fixtures"]
+    for key in expected[1:]:
+        assert observed["fixtures"][key]==baseline["fixtures"][key]
+
+
+def test_exact_serializer_node_budget_below_character_and_depth_limits():
+    from benches.x05_reconcile import MAX_RESULT_NODES
+    for leaves,valid in ((MAX_RESULT_NODES-1,True),(MAX_RESULT_NODES,False)):
+        value=[0]*leaves
+        preserved=list(value)
+        # One root list plus each scalar gives exactly100000 or100001 visits.
+        assert 2*leaves+1 < MAX_RESULT_CHARS
+        if valid:
+            encoded=serialize_result(value)
+            assert json.loads(encoded)==value
+        else:
+            with pytest.raises(ValueError,match="^json_result_too_large$"):
+                serialize_result(value)
+        assert value==preserved
