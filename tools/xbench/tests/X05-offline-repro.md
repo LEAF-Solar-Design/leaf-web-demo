@@ -656,7 +656,7 @@ Complete seven-step JSON envelope:
 | Field | Required shape | Missing, null or empty behavior |
 |---|---|---|
 | `import` | Exactly `normal_user`, `dwg_imported`, `report_imported`, all bool | Missing outer field rejects envelope; null/empty object yields step1 UNREADABLE; false yields readable FAIL |
-| `grid` | Exactly `expected_grid_ids`, `saved_group_ids`, `rows`, `require_all_matched` | Missing outer field rejects envelope; null/empty object yields step2 UNREADABLE; empty rows with valid nonempty IDs yields missing-grid FAIL |
+| `grid` | `expected_grid_ids`, `saved_group_ids`, `rows`, `require_all_matched`, plus `string_assignments` for ownership | Missing outer field rejects envelope; null/empty object yields step2 UNREADABLE; empty rows with valid nonempty IDs yields missing-grid FAIL |
 | `assurance` | Exactly `evidence`, `manifest`, `bindings`, `inputs_hex`, `identity`, `stage_identities` | Missing outer field rejects envelope; null/empty object yields assurance UNREADABLE and absent downstream steps |
 
 Evidence and assurance schemas are the existing six-stage contracts above.
@@ -1157,3 +1157,47 @@ This minimal typo replay prints `UNREADABLE stage_evidence_missing`:
 It deliberately supplies a small invalid object, not complete evidence. The
 required-field deletion matrix tests the same omission rule against otherwise
 complete evidence and preserves every unaffected stage's diagnostics.
+## Explicit grid ownership replay
+
+X05's offline seven-step comparator requires `grid.string_assignments`, a list
+of `{grid_id, string_id}` rows. It checks `grid.expected_grid_ids` and the actual
+`assurance.evidence.saved_strings` IDs. Missing ownership evidence yields
+UNREADABLE while all existing step diagnostics remain available. The separate
+`ownership` result contributes to the composed verdict.
+
+Run this synthetic replay from the repository root in PowerShell.
+
+```powershell
+@'
+import sys
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import validate_grid_string_ownership, compare_grid_optimizer_totals
+saved = [dict(string_id='A', optimizers=3), dict(string_id='B', optimizers=7)]
+expected = dict(east=3, west=7)
+correct = [dict(grid_id='east', string_id='A'), dict(grid_id='west', string_id='B')]
+swapped = [dict(grid_id='west', string_id='A'), dict(grid_id='east', string_id='B')]
+for name, rows in [('swapped', swapped), ('duplicate', correct + [correct[0]]), ('corrected', correct)]:
+    ownership = validate_grid_string_ownership(list(expected), ['A', 'B'], rows)
+    totals = compare_grid_optimizer_totals(expected, saved, rows)
+    print(name, ownership['verdict'], totals['verdict'], totals['reason'])
+    if name == 'swapped':
+        assert totals['mismatch_count'] == 2
+        assert [row['delta'] for row in totals['examples']] == [4, -4]
+    if name == 'duplicate':
+        assert ownership['counts']['duplicate'] == 1
+'@ | python -P -
+```
+
+Expected output
+
+```text
+swapped PASS FAIL grid_optimizer_totals_mismatch
+duplicate FAIL FAIL grid_optimizer_ownership_invalid
+corrected PASS PASS grid_optimizer_totals_equal
+```
+
+Both grand totals are 10. Unique ownership establishes one supplied valid grid per
+string. Independently supplied per-grid totals expose this swap. These helpers
+compare supplied evidence and do not authenticate its producer. Equal-count
+strings can swap without changing per-grid totals, so string identity evidence
+remains necessary. Synthetic results do not establish live X05 acceptance.
