@@ -28,6 +28,12 @@ def validate_evidence(payload):
             'drawing_id': trusted['drawing']['id'], 'recomputed_result': trusted['result']}
 
 
+def expected_drawing_id(value):
+    if not value.strip():
+        raise argparse.ArgumentTypeError('Expected drawing ID must not be blank.')
+    return value
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument('input', help='Synthetic evidence JSON path, or - for stdin')
@@ -36,10 +42,16 @@ def main(argv=None):
                         help='Maximum input bytes, including BOM and whitespace (default: 16777216)')
     parser.add_argument('--max-output-bytes', type=positive_byte_limit,
                         help='Optional encoded JSON byte ceiling (default: unlimited)')
+    parser.add_argument('--expected-drawing-id', type=expected_drawing_id,
+                        help='Optional exact drawing.id label required before recomputation')
     args = parser.parse_args(argv)
     try:
         check_output_path(args.input, args.out)
         payload = read_json(args.input, args.max_input_bytes)
+        if args.expected_drawing_id is not None:
+            drawing = payload.get('drawing') if isinstance(payload, dict) else None
+            if not isinstance(drawing, dict) or drawing.get('id') != args.expected_drawing_id:
+                raise ValueError('Expected drawing ID does not match drawing.id exactly.')
         result = validate_evidence(payload)
         write_json(result, args.out, args.max_output_bytes)
     except (OSError, ValueError, TypeError, RecursionError) as error:
