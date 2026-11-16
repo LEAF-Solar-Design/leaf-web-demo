@@ -5737,6 +5737,35 @@ def _jobs_main(g, monkeypatch, capsys, tmp_path, flags):
     return rc, capsys.readouterr().out
 
 
+def test_jobs_stdout_is_independent_of_memory_completion_order(
+        tmp_path, monkeypatch, capsys):
+    records = (
+        'LEAF_SUITE_MEMORY {"suite_id": "pool-0", "peak_rss_bytes": 1024}',
+        'LEAF_SUITE_MEMORY {"suite_id": "pool-1", "peak_rss_bytes": 2048}',
+    )
+    calls = []
+
+    def main():
+        jobs = sys.argv[sys.argv.index("--jobs") + 1]
+        order = records if jobs == "1" else records[::-1]
+        calls.append((jobs, order))
+        if os.environ.get("LEAF_GATE_MEM") == "1":
+            for record in order:
+                print(record)
+        print("ordinary gate output")
+        return 7
+
+    g = SimpleNamespace(main=main)
+    monkeypatch.setenv("LEAF_GATE_MEM", "1")
+    serial = _jobs_main(g, monkeypatch, capsys, tmp_path, ["--jobs", "1"])
+    monkeypatch.setenv("LEAF_GATE_MEM", "1")
+    parallel = _jobs_main(g, monkeypatch, capsys, tmp_path, ["--jobs", "4"])
+
+    assert calls == [("1", records), ("4", records[::-1])]
+    assert serial == (7, "ordinary gate output\n")
+    assert parallel == (7, "ordinary gate output\n")
+
+
 def test_jobs_one_is_byte_identical_to_default_without_starting_threads(
         tmp_path, monkeypatch, capsys):
     g = _load_runner()
