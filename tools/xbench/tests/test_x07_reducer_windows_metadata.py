@@ -27,6 +27,9 @@ class ReducerWindowsMetadata(unittest.TestCase):
             stable = SimpleNamespace(**baseline)
             with patch.object(Path, 'lstat', side_effect=[stable, stable]), patch.object(reducer.os, 'fstat', side_effect=[stable, stable]):
                 self.assertEqual(reducer.read_history(path), json.loads(payload))
+            path_view = SimpleNamespace(**{**baseline, 'st_ctime_ns': 150})
+            with patch.object(Path, 'lstat', side_effect=[path_view, path_view]), patch.object(reducer.os, 'fstat', side_effect=[stable, stable]):
+                self.assertEqual(reducer.read_history(path), json.loads(payload))
             for source in ('descriptor', 'path'):
                 for field in FIELDS:
                     changed = SimpleNamespace(**{**baseline, field: baseline[field] + 1})
@@ -64,5 +67,9 @@ class ReducerWindowsMetadata(unittest.TestCase):
                     else:
                         self.assertEqual(result, json.loads(payload))
                         self.assertEqual(len(events), 4)
-                        self.assertTrue(all(value == events[0][1] for _, value in events))
+                        path_values = [value for channel, value in events if channel == 'path']
+                        descriptor_values = [value for channel, value in events if channel == 'descriptor']
+                        self.assertEqual(path_values[0], path_values[1])
+                        self.assertEqual(descriptor_values[0], descriptor_values[1])
+                        self.assertEqual(path_values[0][:4], descriptor_values[0][:4])
                 self.assertEqual(path.read_bytes(), payload)
