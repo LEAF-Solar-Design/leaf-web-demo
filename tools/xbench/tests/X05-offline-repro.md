@@ -2792,3 +2792,50 @@ those indices without changing the mismatch total. A separately accepted frozen
 table discrepancy cannot erase a grouping mismatch. These are synthetic supplied
 sequences and report counts, not evidence that the live UI showed them or that
 an independent report extractor produced the count. No result accepts live X05.
+
+## Grouping sequence-composition replay
+
+Within Studio X-bench X05, grouping diagnostics keep exact totals while capping
+example indices. Concatenation offsets the right sequence's indices; deletion
+compacts each surviving original position independently.
+
+```python
+import sys
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+left = [1, 2]*14
+right = [3, 2]*13
+counts = left + right
+rows = [dict(group_count=value) for value in counts]
+expected = ([i for i, value in enumerate(left) if value != 2] +
+            [len(left)+i for i, value in enumerate(right) if value != 2])
+joined = m.compare_recommendations(2, rows)
+assert joined['mismatch_count'] == len(expected)
+assert joined['mismatched_recommendations'] == expected[:m.MAX_RECOMMENDATION_EXAMPLES]
+print('joined', joined['mismatch_count'], len(joined['mismatched_recommendations']),
+      joined['mismatched_recommendations'][-3:])
+removed = {1, 2, 38}
+kept = [(i, row) for i, row in enumerate(rows) if i not in removed]
+expected = [i-sum(deleted < i for deleted in removed)
+            for i, row in kept if row['group_count'] != 2]
+compacted = m.compare_recommendations(2, [row for _, row in kept])
+assert compacted['mismatch_count'] == len(expected)
+assert compacted['mismatched_recommendations'] == expected[:m.MAX_RECOMMENDATION_EXAMPLES]
+print('compacted', compacted['mismatch_count'], len(compacted['mismatched_recommendations']),
+      compacted['mismatched_recommendations'][-3:])
+```
+
+Expected output:
+
+```text
+joined 27 20 [34, 36, 38]
+compacted 25 20 [34, 37, 39]
+```
+
+Deletion removes one matching and two mismatching rows. The surviving total is
+25, while only the first 20 remapped zero-based indices are emitted. The
+independent model checks the entire exact total before applying the example
+cap. Tests also compare direct, strict JSON and bound-aggregate CLI grouping
+results at 19, 20 and 21 interleaved mismatches with clean sibling fixtures.
+These synthetic sequences do not prove what the live UI showed, which report
+count is correct, or independent report acquisition. No result accepts live X05.
