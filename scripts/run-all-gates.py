@@ -6524,7 +6524,7 @@ _WEB_SOURCE_READERS = frozenset({
 # Exact mocked readers admitted by web/scripts/gate-browser-resources.mjs.
 # Bind the resource opt-in and lock relaxation to the same command/config shape.
 _BROWSER_NPM_PROOFS = {
-    "web-version-restore-proof": ("proof:version-restore", "playwright test e2e/local/version-restore.spec.mjs --config playwright.config.mjs --workers=2"),
+    "web-version-restore-proof": ("proof:version-restore", "playwright test e2e/local/version-restore.spec.mjs --config playwright.config.mjs --workers=1"),
     "web-author-quota-gate": ("proof:author-quota-gate", "playwright test e2e/author-quota-gate.spec.mjs --config playwright.config.mjs"),
     "web-async-author-stage": ("proof:async-author-stage", "playwright test e2e/async-author-stage.spec.mjs --config playwright.config.mjs"),
 }
