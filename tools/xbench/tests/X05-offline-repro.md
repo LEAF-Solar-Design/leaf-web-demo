@@ -2273,3 +2273,47 @@ assert fixed['verdict'] == 'PASS'
 Expected field-typo result UNREADABLE `string_grid_owner_evidence_invalid`, then
 PASS with `cross_topology_equal`. Oracle topology checks only internal supplied
 consistency. Independent producer provenance remains required for live acceptance.
+# Oracle topology recovery with saved-phase failures in X05
+
+The composer now also retains `oracle_loads`, deriving grid and inverter loads
+from explicit oracle values and owners/connections. Each metric retains derived
+comparisons and report-total checks. This replay repairs missing oracle
+connections and contradictory oracle owners before repairing saved snapshots.
+
+```powershell
+@'
+import json, runpy, sys
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+envelope = fixtures['equal_count_ownership_envelope']()
+grid, evidence = envelope['grid'], envelope['assurance']['evidence']
+correct = deepcopy(evidence['oracle_assignments'])
+evidence['oracle_assignments'] = None
+rows = evidence['oracle_string_owners']
+rows[0]['grid_id'],rows[1]['grid_id'] = 'west','east'
+for phase in ('saved','before','reopened'):
+    rows = evidence[phase+'_assignments']
+    rows[0]['inverter_id'],rows[1]['inverter_id'] = 'INV-B','INV-A'
+observed = []
+for stage in ('initial','oracle connections restored','oracle owners repaired',
+              'saved repaired','before repaired','reopened repaired'):
+    if stage == 'oracle connections restored': evidence['oracle_assignments'] = deepcopy(correct)
+    if stage == 'oracle owners repaired': evidence['oracle_string_owners'] = deepcopy(grid['string_assignments'])
+    for phase in ('saved','before','reopened'):
+        if stage == phase+' repaired': evidence[phase+'_assignments'] = deepcopy(correct)
+    result = m.reconcile_seven_steps_json(json.dumps(envelope))
+    oracle = result['independent_owners']['checks']['oracle_topology']
+    phases = result['cross_topology']['checks']
+    observed.append(result['verdict'])
+    print(stage,result['verdict'],oracle['verdict'],oracle['reason'],
+          *(phases[key]['verdict'] for key in ('saved','before','reopened')))
+assert observed == ['UNREADABLE','FAIL','FAIL','FAIL','FAIL','PASS']
+'@ | python -P -
+```
+
+Oracle connection repair exposes `cross_topology_mismatch` from the contradictory
+oracle owners. Repairing those owners leaves all saved-phase failures visible.
+Each saved snapshot then repairs independently. These consistency checks require
+actual producer provenance and independent report extraction for live acceptance.

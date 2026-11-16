@@ -505,7 +505,8 @@ def reconcile_seven_steps(import_evidence, grid_evidence, assurance):
                               _seven_step_inverter_load_reopen(grid_evidence, assurance.get("evidence") if type(assurance) is dict else None),
                               _seven_step_string_metrics(grid_evidence, assurance.get("evidence") if type(assurance) is dict else None),
                               _seven_step_cross_topology(grid_evidence, assurance.get("evidence") if type(assurance) is dict else None),
-                              _seven_step_independent_owners(grid_evidence, assurance.get("evidence") if type(assurance) is dict else None))
+                              _seven_step_independent_owners(grid_evidence, assurance.get("evidence") if type(assurance) is dict else None),
+                              _seven_step_oracle_loads(grid_evidence, assurance.get("evidence") if type(assurance) is dict else None))
 
 
 def _seven_step_ownership(grid_evidence, evidence):
@@ -848,20 +849,56 @@ def _seven_step_independent_owners(grid, evidence):
                 "supplied_independent_owners", checks=checks)
 
 
-def _seven_step_result(imported, grids, checked, ownership, grid_optimizers, ownership_reopen, grid_optimizer_reopen, grid_panels, grid_panel_reopen, grid_dc, grid_dc_reopen, grid_strings, grid_inverters, inverter_reopen, assignments, assignment_reopen, inverter_loads, inverter_load_reopen, string_metrics, cross_topology, independent_owners):
+def _seven_step_oracle_loads(grid, evidence):
+    if type(grid) is not dict or type(evidence) is not dict:
+        return _out("UNREADABLE", "oracle_load_evidence_unreadable")
+    strings = evidence.get("oracle_strings")
+    indexed, error = _index(strings, "oracle")
+    ids = None if error else list(indexed)
+    panels, power = evidence.get("oracle_panels"), evidence.get("oracle_dc_power")
+    owners, connections = evidence.get("oracle_string_owners"), evidence.get("oracle_assignments")
+    supplied = evidence.get("inverter_loads")
+    loads = supplied if type(supplied) is dict else {}
+    grids, devices, report = grid.get("expected_grid_ids"), evidence.get("oracle_inverter_ids"), evidence.get("oracle_values")
+    bindings = dict(owners=validate_grid_string_ownership(grids, ids, owners),
+        connections=validate_string_inverter_assignments(devices, ids, connections),
+        panels=compare_panel_string_ids(strings, panels), kw_dc=compare_dc_string_ids(strings, power))
+    with localcontext(_CONTEXT):
+        grid_checks = {
+            "strings": compare_grid_string_totals(grid.get("string_totals"), ids, owners),
+            "optimizers": compare_grid_optimizer_totals(grid.get("optimizer_totals"), strings, owners),
+            "panels": compare_grid_panel_totals(grid.get("panel_totals"), panels, owners),
+            "kw_dc": compare_grid_dc_totals(grid.get("dc_totals"), power, owners)}
+        inverter_checks = {
+            "strings": compare_inverter_string_totals(loads.get("strings"), ids, connections),
+            "optimizers": compare_inverter_optimizer_totals(loads.get("optimizers"), strings, connections),
+            "panels": compare_inverter_panel_totals(loads.get("panels"), ids, panels, connections),
+            "kw_dc": compare_inverter_dc_totals(loads.get("kw_dc"), ids, power, connections)}
+        fields = dict(strings="string_totals", optimizers="optimizer_totals", panels="panel_totals", kw_dc="dc_totals")
+        metrics = {metric: dict(grid_comparison=grid_checks[metric], inverter_comparison=inverter_checks[metric],
+            grid_report=_compare_grid_oracle_totals(grids, grid.get(fields[metric]), report, metric, "oracle_grid_" + metric),
+            inverter_report=compare_inverter_metric_oracle_totals(devices, loads.get(metric), report, metric))
+            for metric in fields}
+    verdicts = {check["verdict"] for check in bindings.values()} | {
+        check["verdict"] for checks in metrics.values() for check in checks.values()}
+    return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
+                "supplied_oracle_load_consistency", bindings=bindings, metrics=metrics)
+
+
+def _seven_step_result(imported, grids, checked, ownership, grid_optimizers, ownership_reopen, grid_optimizer_reopen, grid_panels, grid_panel_reopen, grid_dc, grid_dc_reopen, grid_strings, grid_inverters, inverter_reopen, assignments, assignment_reopen, inverter_loads, inverter_load_reopen, string_metrics, cross_topology, independent_owners, oracle_loads):
     stages = checked.get("checks", {}).get("provenance", {}).get("reconciliation", {}).get("stages", {})
     absent = _out("UNREADABLE", "stage_evidence_missing")
     steps = {"1": imported, "2": grids, "3": stages.get("strings", absent), "4": stages.get("grouping", absent),
              "5": dict(table=stages.get("table", absent), csv_view=stages.get("csv_view", absent)),
              "6": stages.get("policy", absent), "7": stages.get("reopen", absent)}
-    verdicts = {imported["verdict"], grids["verdict"], checked["verdict"], ownership["verdict"], grid_optimizers["verdict"], ownership_reopen["verdict"], grid_optimizer_reopen["verdict"], grid_panels["verdict"], grid_panel_reopen["verdict"], grid_dc["verdict"], grid_dc_reopen["verdict"], grid_strings["verdict"], grid_inverters["verdict"], inverter_reopen["verdict"], assignments["verdict"], assignment_reopen["verdict"], inverter_loads["verdict"], inverter_load_reopen["verdict"], string_metrics["verdict"], cross_topology["verdict"], independent_owners["verdict"]}
+    verdicts = {imported["verdict"], grids["verdict"], checked["verdict"], ownership["verdict"], grid_optimizers["verdict"], ownership_reopen["verdict"], grid_optimizer_reopen["verdict"], grid_panels["verdict"], grid_panel_reopen["verdict"], grid_dc["verdict"], grid_dc_reopen["verdict"], grid_strings["verdict"], grid_inverters["verdict"], inverter_reopen["verdict"], assignments["verdict"], assignment_reopen["verdict"], inverter_loads["verdict"], inverter_load_reopen["verdict"], string_metrics["verdict"], cross_topology["verdict"], independent_owners["verdict"], oracle_loads["verdict"]}
     return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
                 "offline_seven_steps", steps=steps, assurance=checked, ownership=ownership, grid_optimizers=grid_optimizers,
                 ownership_reopen=ownership_reopen, grid_optimizer_reopen=grid_optimizer_reopen, grid_panels=grid_panels,
                 grid_panel_reopen=grid_panel_reopen, grid_dc=grid_dc, grid_dc_reopen=grid_dc_reopen, grid_strings=grid_strings,
                 grid_inverters=grid_inverters, inverter_reopen=inverter_reopen,
                 assignments=assignments, assignment_reopen=assignment_reopen,
-                inverter_loads=inverter_loads, inverter_load_reopen=inverter_load_reopen, string_metrics=string_metrics, cross_topology=cross_topology, independent_owners=independent_owners)
+                inverter_loads=inverter_loads, inverter_load_reopen=inverter_load_reopen, string_metrics=string_metrics, cross_topology=cross_topology, independent_owners=independent_owners, oracle_loads=oracle_loads)
 
 
 def reconcile_seven_steps_json(text):
@@ -905,7 +942,8 @@ def _seven_step_envelope(envelope):
                               _seven_step_inverter_load_reopen(envelope["grid"], envelope["assurance"].get("evidence") if type(envelope["assurance"]) is dict else None),
                               _seven_step_string_metrics(envelope["grid"], envelope["assurance"].get("evidence") if type(envelope["assurance"]) is dict else None),
                               _seven_step_cross_topology(envelope["grid"], envelope["assurance"].get("evidence") if type(envelope["assurance"]) is dict else None),
-                              _seven_step_independent_owners(envelope["grid"], envelope["assurance"].get("evidence") if type(envelope["assurance"]) is dict else None))
+                              _seven_step_independent_owners(envelope["grid"], envelope["assurance"].get("evidence") if type(envelope["assurance"]) is dict else None),
+                              _seven_step_oracle_loads(envelope["grid"], envelope["assurance"].get("evidence") if type(envelope["assurance"]) is dict else None))
 
 
 def validate_import_grid_provenance(frozen_manifest, import_binding, grid_binding):

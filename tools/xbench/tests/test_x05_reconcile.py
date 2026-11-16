@@ -3642,12 +3642,12 @@ def test_bound_seven_step_ownership_and_grid_helpers_run_once_per_unique_fixture
     for name in names:
         monkeypatch.setattr(module, name, counted(name, getattr(module, name)))
     assert aggregate_bound_seven_steps(expected, records) == baseline
-    assert calls == dict.fromkeys(names, 3)
+    assert calls == dict(dict.fromkeys(names, 3), compare_grid_optimizer_totals=6)  # saved and oracle pairs
     calls.update(dict.fromkeys(names, 0))
     ambiguous = [dict(fixture_id=expected[0], envelope=None)] + records
     result = aggregate_bound_seven_steps(expected, ambiguous)
     assert result["verdict"] == "UNREADABLE" and expected[0] not in result["fixtures"]
-    assert calls == dict.fromkeys(names, 2)
+    assert calls == dict(dict.fromkeys(names, 2), compare_grid_optimizer_totals=4)
     for key in expected[1:]:
         assert result["fixtures"][key] == baseline["fixtures"][key]
 
@@ -4362,8 +4362,9 @@ def test_composed_grid_string_totals_swaps_missing_counts_and_preserved_diagnost
     swapped = reconcile_seven_steps_json(json.dumps(envelope))
     assert swapped["verdict"] == "FAIL" and swapped["grid_strings"]["comparison"]["mismatch_count"] == 2
     assert swapped["grid_strings"]["oracle_consistency"]["verdict"] == "PASS"
-    for key in baseline.keys() - {"verdict", "grid_strings"}:
+    for key in baseline.keys() - {"verdict", "grid_strings", "oracle_loads"}:
         assert swapped[key] == baseline[key]
+    assert swapped["oracle_loads"]["metrics"]["strings"]["grid_comparison"]["mismatch_count"] == 2
     del envelope["grid"]["string_totals"]
     envelope["import"]["normal_user"] = False
     missing = reconcile_seven_steps_json(json.dumps(envelope))
@@ -5066,8 +5067,9 @@ def test_composed_inverter_loads_swap_missing_and_unrelated_diagnostics():
     assert result['verdict'] == 'FAIL'
     assert result['inverter_loads']['metrics']['optimizers']['comparison']['mismatch_count'] == 2
     assert result['inverter_loads']['metrics']['optimizers']['oracle_consistency']['verdict'] == 'PASS'
-    for key in baseline.keys() - {'verdict', 'inverter_loads'}:
+    for key in baseline.keys() - {'verdict', 'inverter_loads', 'oracle_loads'}:
         assert result[key] == baseline[key]
+    assert result['oracle_loads']['metrics']['optimizers']['inverter_comparison']['mismatch_count'] == 2
     del loads['kw_dc']
     missing = reconcile_seven_steps_json(json.dumps(envelope))
     assert missing['verdict'] == 'UNREADABLE'
@@ -6193,8 +6195,13 @@ def test_composed_independent_owner_transport_differential(tmp_path,kind):
     run = subprocess.run([sys.executable,'-P',str(Path(m.__file__).resolve()),'--seven-step-bound-aggregate'],
         input=serialize_result(dict(expected_ids=expected,fixtures=records)).encode('ascii'),
         capture_output=True,cwd=tmp_path,timeout=20,env={'SystemRoot':'C:\\Windows'})
-    assert run.returncode == (4 if kind == 'missing' else 1) and not run.stderr
+    assert run.returncode == (4 if kind in ('missing','ids') else 1) and not run.stderr
     assert json.loads(run.stdout) == json.loads(serialize_result(aggregate))
+
+    if kind == 'ids':
+        check = aggregate['fixtures'][expected[0]]['reconciliation']
+        assert check['independent_owners']['checks']['inverter_ids']['verdict'] == 'FAIL'
+        assert check['oracle_loads']['metrics']['optimizers']['inverter_report']['verdict'] == 'UNREADABLE'
 
 
 def test_independent_owners_all_fixture_hash_seeds_and_permutations(tmp_path):
@@ -6440,3 +6447,129 @@ def test_disjoint_inverter_identity_sets_add_missing_foreign_counts():
         assert result['counts'] == dict(missing=sum(flags),foreign=sum(flags))
         assert m.compare_inverter_id_sets(oracle+['clean'],saved+['clean'])['counts'] == result['counts']
         assert (oracle,saved) == original
+
+
+def test_oracle_grid_load_consistency_rejects_equal_total_contradictions():
+    from benches import x05_reconcile as m
+    envelope = equal_count_ownership_envelope()
+    grid,evidence = envelope['grid'],envelope['assurance']['evidence']
+    assert m._seven_step_oracle_loads(grid,evidence)['verdict'] == 'PASS'
+    grid['string_totals'] = dict(east=2,west=0)
+    evidence['oracle_strings'][0]['optimizers'],evidence['oracle_strings'][1]['optimizers'] = 7,5
+    evidence['oracle_panels'][0]['panels'],evidence['oracle_panels'][1]['panels'] = 14,10
+    evidence['oracle_dc_power'][0]['kw_dc'],evidence['oracle_dc_power'][1]['kw_dc'] = '5.6','4'
+    original = deepcopy((grid,evidence))
+    result = m._seven_step_oracle_loads(grid,evidence)
+    assert result['verdict'] == 'FAIL'
+    for metric in ('strings','optimizers','panels','kw_dc'):
+        check = result['metrics'][metric]
+        assert check['grid_comparison']['mismatch_count'] == 2
+        assert check['grid_report']['verdict'] == 'PASS'
+    assert (grid,evidence) == original
+
+
+def test_oracle_inverter_load_consistency_exact_dc_and_missing_values():
+    from decimal import localcontext,Inexact,Rounded,Decimal
+    from benches import x05_reconcile as m
+    envelope = connection_envelope()
+    grid,evidence = envelope['grid'],envelope['assurance']['evidence']
+    evidence['inverter_loads']['strings'] = {'INV-A':2,'INV-B':0}
+    evidence['inverter_loads']['optimizers'] = {'INV-A':7,'INV-B':5}
+    evidence['inverter_loads']['panels'] = {'INV-A':14,'INV-B':10}
+    evidence['oracle_dc_power'][0]['kw_dc'] = '4.'+'0'*76+'1'
+    evidence['oracle_dc_power'][1]['kw_dc'] = '5.5'+'9'*76
+    with localcontext() as caller:
+        caller.prec = 2
+        caller.traps[Inexact] = caller.traps[Rounded] = True
+        flags = dict(caller.flags)
+        result = m._seven_step_oracle_loads(grid,evidence)
+        assert result['verdict'] == 'FAIL'
+        for metric in ('strings','optimizers','panels','kw_dc'):
+            check = result['metrics'][metric]
+            assert check['inverter_comparison']['mismatch_count'] == 2
+            assert check['inverter_report']['verdict'] == 'PASS'
+        assert result['metrics']['kw_dc']['inverter_comparison']['examples'][0]['delta'] == Decimal('1e-77')
+        assert result['metrics']['kw_dc']['grid_comparison']['verdict'] == 'PASS'
+        assert dict(caller.flags) == flags and caller.prec == 2
+    evidence['oracle_dc_power'] = None
+    missing = m._seven_step_oracle_loads(grid,evidence)
+    assert missing['verdict'] == 'UNREADABLE'
+    assert missing['metrics']['panels'] == result['metrics']['panels']
+
+
+def test_oracle_topology_composed_transport_differential_with_saved_pass(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from benches import x05_reconcile as m
+    envelope = equal_count_ownership_envelope()
+    source = envelope['assurance']
+    rows = source['evidence']['oracle_assignments']
+    rows[0]['inverter_id'],rows[1]['inverter_id'] = 'INV-B','INV-A'
+    assurance = dict(evidence=source['evidence'],frozen_manifest=source['manifest'],stage_bindings=source['bindings'],
+        supplied_inputs={k:bytes.fromhex(v) for k,v in source['inputs_hex'].items()},
+        expected_identity=source['identity'],stage_identities=source['stage_identities'])
+    direct = m.reconcile_seven_steps(envelope['import'],envelope['grid'],assurance)
+    assert direct['cross_topology']['verdict'] == 'PASS'
+    assert direct['independent_owners']['checks']['oracle_topology']['mismatch_count'] == 2
+    assert json.loads(serialize_result(direct)) == json.loads(serialize_result(reconcile_seven_steps_json(json.dumps(envelope))))
+    expected,records = bound_seven_fixture_records()
+    source['manifest']['fixture_id'] = source['evidence']['fixture_id'] = expected[0]
+    source['bindings'] = {k:deepcopy(source['manifest']) for k in PROVENANCE_STAGES}
+    records[0]['envelope'] = envelope
+    aggregate = m.aggregate_bound_seven_steps(expected,records)
+    assert all(aggregate['fixtures'][key]['verdict'] == 'PASS' for key in expected[1:])
+    run = subprocess.run([sys.executable,'-P',str(Path(m.__file__).resolve()),'--seven-step-bound-aggregate'],
+        input=serialize_result(dict(expected_ids=expected,fixtures=records)).encode('ascii'),
+        capture_output=True,cwd=tmp_path,timeout=20,env={'SystemRoot':'C:\\Windows'})
+    assert run.returncode == 1 and not run.stderr
+    assert json.loads(run.stdout) == json.loads(serialize_result(aggregate))
+
+
+def test_oracle_topology_hash_seeds_all_oracle_map_permutations(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from random import Random
+    from benches import x05_reconcile as m
+    expected,records = bound_seven_fixture_records()
+    for record in records:
+        envelope = equal_count_ownership_envelope()
+        source = envelope['assurance']
+        source['manifest']['fixture_id'] = source['evidence']['fixture_id'] = record['fixture_id']
+        source['bindings'] = {k:deepcopy(source['manifest']) for k in PROVENANCE_STAGES}
+        rows = source['evidence']['oracle_assignments']
+        rows[0]['inverter_id'],rows[1]['inverter_id'] = 'INV-B','INV-A'
+        record['envelope'] = envelope
+    original = deepcopy(records)
+    baseline = json.loads(serialize_result(m.aggregate_bound_seven_steps(expected,records)))
+    outputs = []
+    for seed in ('0','73'):
+        changed = deepcopy(records)
+        Random(int(seed)).shuffle(changed)
+        for record in changed:
+            evidence = record['envelope']['assurance']['evidence']
+            for field in ('oracle_assignments','oracle_string_owners','oracle_inverter_owners','oracle_inverter_ids','oracle_strings'):
+                Random(int(seed)).shuffle(evidence[field])
+        run = subprocess.run([sys.executable,'-P',str(Path(m.__file__).resolve()),'--seven-step-bound-aggregate'],
+            input=serialize_result(dict(expected_ids=expected[::-1],fixtures=changed)).encode('ascii'),
+            capture_output=True,cwd=tmp_path,timeout=20,env={'SystemRoot':'C:\\Windows','PYTHONHASHSEED':seed})
+        assert run.returncode == 1 and not run.stderr and json.loads(run.stdout) == baseline
+        outputs.append(run.stdout)
+    assert outputs[0] == outputs[1] and records == original
+
+
+def test_oracle_topology_missing_connections_preserves_all_saved_phase_failures():
+    from benches import x05_reconcile as m
+    envelope = equal_count_ownership_envelope()
+    evidence = envelope['assurance']['evidence']
+    evidence['oracle_assignments'] = None
+    for stage in ('saved','before','reopened'):
+        rows = evidence[stage+'_assignments']
+        rows[0]['inverter_id'],rows[1]['inverter_id'] = 'INV-B','INV-A'
+    original = deepcopy(envelope)
+    result = m._seven_step_envelope(envelope)
+    assert result['verdict'] == 'UNREADABLE'
+    assert result['independent_owners']['checks']['oracle_topology']['verdict'] == 'UNREADABLE'
+    assert all(check['mismatch_count'] == 2 for check in result['cross_topology']['checks'].values())
+    assert envelope == original
