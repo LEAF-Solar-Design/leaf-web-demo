@@ -1,5 +1,6 @@
 import { useMemo } from 'react'
 import { solarGraphOverlay } from './solarGraphOverlay.js'
+import { stringResultOverlay, scopeOutline, totalChipText } from './stringResultOverlay.js'
 
 export const SOLAR_OVERLAY_REASONS = Object.freeze({
   invalid_graph: 'Solar design lines are hidden because the saved design geometry could not be read.',
@@ -140,11 +141,42 @@ export function useSolarGraphOverlay(input) {
       }
     }
   }
-  const projection = useMemo(() => {
+  const graphProjection = useMemo(() => {
     if (!enabled || graph === UNREAD_SHOWN) return { polylines: [], refusal: null }
     if (graph === UNREADABLE) return { polylines: [], refusal: 'invalid_graph' }
     return solarGraphOverlay(graph, { metersPerUnit })
   }, [graph, metersPerUnit, enabled])
   if (graph === UNREAD_SHOWN) return none('drawing_mismatch')
-  return decide(input, readProjection(projection), read)
+  // Optional result/request inputs use the same scene admission fences as the
+  // saved graph. App must pass the result belonging to that shown drawing.
+  const result = enabled ? read(input, 'result') : null
+  const request = enabled ? read(input, 'request') : null
+  const state = enabled ? read(input, 'state') : null
+  let projection = graphProjection
+  let primitives = null
+  let outline = null
+  if (enabled && (result != null || request != null) && !graphProjection.refusal) {
+    const shown = read(input, 'shown')
+    let panels = []
+    let resultScale
+    try {
+      const layer = result?.result?.module?.panel_layer ?? request?.params?.panel_layer ?? 'Panels'
+      panels = (shown?.polylines ?? []).filter(panel => panel.layer === layer)
+      resultScale = request?.params?.meters_per_unit ?? metersPerUnit ?? 0.0254
+    } catch { return none('invalid_graph') }
+    primitives = stringResultOverlay(result, { panels, metersPerUnit: resultScale })
+    outline = scopeOutline(request, state) ?? scopeOutline(result, state)
+    const polylines = [...graphProjection.polylines, ...primitives.polylines, ...primitives.panelFills,
+      ...(outline ? [outline] : [])]
+    const pointCount = polylines.reduce((sum, line) => sum + line.pts.length, 0)
+    projection = { polylines, refusal: primitives.refusal ??
+      (polylines.length > 4096 || pointCount > 100000 ? 'overlay_limit' : null) }
+  }
+  const decision = decide(input, readProjection(projection), read)
+  if (decision.solarOverlay && primitives) {
+    decision.solarOverlay.panelFills = primitives.panelFills
+    decision.solarOverlay.scopeOutline = outline
+    decision.solarOverlay.totalChipText = totalChipText(result)
+  }
+  return decision
 }
