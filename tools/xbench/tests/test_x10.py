@@ -3,6 +3,7 @@
 from contextlib import contextmanager, nullcontext
 import hashlib
 import json
+import stat
 from pathlib import Path
 import sys
 import tempfile
@@ -83,7 +84,7 @@ class ClassificationTests(unittest.TestCase):
 
     def test_explicit_import_rejection_requires_fresh_project_and_evidence(self):
         observation = self.observation(ground_option="", imported_version_selected=False,
-                                       import_rejection="Drawing extraction failed.")
+                                       import_rejection=x10.IMPORT_REFUSALS[0])
         self.assertEqual(x10.classify(observation)[0].verdict, "FAIL")
         observation["fresh_project"] = False
         self.assertEqual(x10.classify(observation)[0].verdict, "UNREADABLE")
@@ -103,6 +104,29 @@ class ClassificationTests(unittest.TestCase):
         self.assertIn("Ground Mount Physical (unavailable)", text)
         for forbidden in ("abc123", "https://", "<pre>", "secret=value"):
             self.assertNotIn(forbidden, text)
+
+    def test_wrong_typed_observations_and_unrecognized_refusals_are_unreadable(self):
+        for value in (None, [], 4, "observation", object()):
+            self.assertEqual([r.verdict for r in x10.classify(value)], ["UNREADABLE"] * 6)
+        for field in ("ui_text", "ground_option", "issue", "evidence_path", "attachment_status",
+                      "version_selection_status", "import_status", "import_rejection"):
+            for value in (None, [], {}, 4, True):
+                with self.subTest(field=field, value=value):
+                    rows = x10.classify(self.observation(**{field: value}))
+                    self.assertEqual([r.verdict for r in rows], ["UNREADABLE"] * 6)
+        for field in ("fresh_project", "evidence_saved", "imported_version_selected"):
+            for value in (None, [], 1, "true"):
+                self.assertEqual([r.verdict for r in x10.classify(self.observation(**{field: value}))],
+                                 ["UNREADABLE"] * 6)
+        for hint in ("Rejected", "Drawing extraction failed.", "arbitrary sentence", 42, []):
+            rows = x10.classify(self.observation(import_rejection=hint, imported_version_selected=False))
+            self.assertEqual([r.verdict for r in rows], ["UNREADABLE"] * 6)
+        for hint in x10.IMPORT_REFUSALS:
+            observation = self.observation(import_rejection=hint, imported_version_selected=False)
+            self.assertEqual(x10.classify(observation)[0].verdict, "FAIL")
+            for field in ("fresh_project", "evidence_saved"):
+                self.assertEqual(aggregate(x10.classify(dict(observation, **{field: False}))), "UNREADABLE")
+        self.assertEqual(x10.classify(self.observation(import_rejection=""))[0].verdict, "FAIL")
 
 
 class FixtureTests(unittest.TestCase):
@@ -146,10 +170,21 @@ class FixtureTests(unittest.TestCase):
         observation = dict(project_id=PROJECT, imported_version_id=VERSION)
         listener = x10._catalog_observer(self.ctx.base, observation)
         page.on("request", listener)
-        listener(self.catalog_request())
+        self.complete_catalog(listener)
         page.locator.return_value.is_visible.return_value = True
         page.locator.return_value.inner_text.return_value = VERSION
         return observation, listener
+
+    def complete_catalog(self, listener, request=None, status=200):
+        request = request or self.catalog_request()
+        listener(request)
+        listener.response(SimpleNamespace(request=request, url=request.url, status=status))
+
+    def emit_catalog(self, page):
+        listeners = dict(call.args for call in page.on.call_args_list)
+        request = self.catalog_request()
+        listeners["request"](request)
+        listeners["response"](SimpleNamespace(request=request, url=request.url, status=200))
 
     def test_post_verification_mutations_do_not_open_browser(self):
         for row in self.ctx.manifest["fixtures"]:
@@ -386,7 +421,7 @@ class FixtureTests(unittest.TestCase):
         def attach(page, ctx, config, bound, observation):
             events.append("select imported version")
             observation.update(imported_version_selected=True, imported_version_id=VERSION)
-            page.on.call_args.args[1](self.catalog_request())
+            self.emit_catalog(page)
 
         def ground(page, ctx, observation):
             events.append("ground")
@@ -415,6 +450,7 @@ class FixtureTests(unittest.TestCase):
         project, material, preview, attachment, marker, upload = [MagicMock() for _ in range(6)]
         project.get_attribute.return_value = "true"
         attachment.inner_text.return_value = sentence
+        attachment.is_visible.side_effect = lambda: upload.set_input_files.called
         marker.inner_text.return_value = "Project drawing version selected."
         marker.is_visible.side_effect = [False, True]
         preview.locator.return_value.get_attribute.return_value = "version:" + VERSION
@@ -492,7 +528,9 @@ class FixtureTests(unittest.TestCase):
 
     def test_catalog_listener_binds_real_preview_and_rejects_switches(self):
         config, bound, _, _ = x10.bindings(self.ctx)
-        for mode in ("matching", "project-switch", "version-switch", "switch-back", "viewer-switch", "missing"):
+        for mode in ("matching", "project-switch", "version-switch", "switch-back", "viewer-switch", "missing",
+                     "capture-project", "capture-version", "capture-switch-back", "capture-flow",
+                     "capture-label", "capture-pending", "capture-failed", "capture-request"):
             with self.subTest(mode=mode):
                 page, preview, _, _, _ = self.import_page(
                     "Attached synthetic.dwg as version 1 to Synthetic probe")
@@ -503,13 +541,36 @@ class FixtureTests(unittest.TestCase):
                 viewer.is_visible.return_value = True
                 viewer.inner_text.return_value = VERSION
                 def emit(project=PROJECT, version=VERSION):
-                    callbacks["request"](self.catalog_request(project, version))
+                    request = self.catalog_request(project, version)
+                    callbacks["request"](request)
+                    callbacks["response"](SimpleNamespace(request=request, url=request.url, status=200))
                 preview.click.side_effect = lambda **kw: emit() if mode != "missing" else None
                 rail, picker = MagicMock(), MagicMock()
                 picker.input_value.return_value = "ground-physical"
                 picker.locator.return_value.inner_text.return_value = "Ground Physical unavailable"
                 rail.inner_text.return_value = "Ready"
-                rail.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(tiny_png())
+                def capture(**kwargs):
+                    Path(kwargs["path"]).write_bytes(tiny_png())
+                    if mode == "capture-project":
+                        emit(project=OTHER)
+                    elif mode == "capture-version":
+                        emit(version=OTHER)
+                    elif mode == "capture-switch-back":
+                        emit(project=OTHER)
+                        emit()
+                    elif mode == "capture-flow":
+                        picker.input_value.return_value = "rooftop"
+                    elif mode == "capture-label":
+                        picker.locator.return_value.inner_text.return_value = "Ground Physical available"
+                    elif mode == "capture-pending":
+                        rail.inner_text.side_effect = None
+                        rail.inner_text.return_value = "Checking Solar steps for the selected project drawing version."
+                    elif mode in ("capture-failed", "capture-request"):
+                        request = self.catalog_request()
+                        callbacks["request"](request)
+                        if mode == "capture-failed":
+                            callbacks["requestfailed"](request)
+                rail.screenshot.side_effect = capture
 
                 def workflow(page, config):
                     page.get_by_role.side_effect = lambda role, **kw: rail if role == "navigation" else picker
@@ -537,8 +598,8 @@ class FixtureTests(unittest.TestCase):
                         patch.object(x10, "_open_workflow", workflow):
                     observed = x10.observe(page, self.ctx, config, bound, self.session_info)
                 self.assertEqual(callbacks, {})
-                page.on.assert_called_once()
-                page.remove_listener.assert_called_once_with("request", page.on.call_args.args[1])
+                self.assertEqual(page.on.call_count, 3)
+                self.assertEqual(page.remove_listener.call_args_list, page.on.call_args_list)
                 self.assertEqual(observed["imported_version_id"], VERSION)
                 self.assertEqual(aggregate(x10.classify(observed)), "FAIL" if mode == "matching" else "UNREADABLE")
                 self.assertEqual(observed["evidence_saved"], mode == "matching")
@@ -548,7 +609,7 @@ class FixtureTests(unittest.TestCase):
     def test_catalog_listener_ignores_foreign_requests_and_invalidates_bad_identity(self):
         observation = {}
         listener = x10._catalog_observer(self.ctx.base, observation)
-        listener(self.catalog_request())
+        self.complete_catalog(listener)
         epoch = observation["catalog_epoch"]
         listener(self.catalog_request(project=OTHER, origin="https://foreign.test"))
         listener(SimpleNamespace(url=self.ctx.base + "/api/capabilities-extra?project_id=" + OTHER))
@@ -557,17 +618,115 @@ class FixtureTests(unittest.TestCase):
         for query in ("&project_id=" + OTHER, "&input_version_id=invalid"):
             listener(SimpleNamespace(url=self.catalog_request().url + query))
             self.assertIsNone(observation["catalog_binding"])
-            listener(self.catalog_request())
+            self.complete_catalog(listener)
         self.assertGreater(observation["catalog_epoch"], epoch)
+
+    def test_catalog_transport_requires_latest_matching_success(self):
+        observation = {}
+        listener = x10._catalog_observer(self.ctx.base, observation)
+        first, latest = self.catalog_request(), self.catalog_request()
+        listener(first)
+        self.assertIsNone(observation["catalog_binding"])
+        listener(latest)
+        listener.response(SimpleNamespace(request=first, url=first.url, status=200))
+        self.assertIsNone(observation["catalog_binding"])
+        listener.response(SimpleNamespace(request=latest, url=latest.url, status=204))
+        self.assertEqual(observation["catalog_binding"]["project_id"], PROJECT)
+        epoch = observation["catalog_epoch"]
+        listener.failed(first)
+        listener.response(SimpleNamespace(request=first, url=first.url, status=503))
+        for url in ("https://foreign.test/api/capabilities", self.ctx.base + "/api/capabilities-extra"):
+            listener.response(SimpleNamespace(request=latest, url=url, status=500))
+            listener.failed(SimpleNamespace(url=url))
+        self.assertEqual(observation["catalog_epoch"], epoch)
+        self.assertEqual(observation["catalog_binding"]["project_id"], PROJECT)
+        for mode in ("non-2xx", "failed", "failure-before-response"):
+            with self.subTest(mode=mode):
+                request = self.catalog_request()
+                self.complete_catalog(listener, request)
+                epoch = observation["catalog_epoch"]
+                if mode == "non-2xx":
+                    listener.response(SimpleNamespace(request=request, url=request.url, status=500))
+                else:
+                    listener.failed(request)
+                    if mode == "failure-before-response":
+                        listener.response(SimpleNamespace(request=request, url=request.url, status=200))
+                self.assertIsNone(observation["catalog_binding"])
+                self.assertGreater(observation["catalog_epoch"], epoch)
+        self.assertNotIn("https://", json.dumps(observation))
+
+    def test_stale_attachment_terminals_refuse_before_new_upload(self):
+        config, bound, _, _ = x10.bindings(self.ctx)
+        for terminal in ("success", "refusal"):
+            page, preview, attachment, _, upload = self.import_page(
+                "Attached old.dwg as version 1 to Old project")
+            attachment.is_visible.side_effect = None
+            attachment.is_visible.return_value = terminal == "success"
+            page.locator.return_value.get_by_text.return_value.is_visible.return_value = terminal == "refusal"
+            observation = dict(fresh_project=True)
+            with self.assertRaises(ValueError):
+                x10._import_primary(page, self.ctx, config, bound, observation)
+            upload.set_input_files.assert_not_called()
+            preview.click.assert_not_called()
+            self.assertEqual([r.verdict for r in x10.classify(observation)], ["UNREADABLE"] * 6)
+
+    def test_fixture_nonregular_types_are_rejected_before_open(self):
+        for mode in (stat.S_IFLNK, stat.S_IFIFO, stat.S_IFDIR, stat.S_IFCHR, stat.S_IFBLK):
+            with self.subTest(mode=mode), patch.object(Path, "lstat", return_value=SimpleNamespace(st_mode=mode)), \
+                    patch.object(x10.os, "open") as opened:
+                self.assert_binding_refusal()
+                opened.assert_not_called()
+
+    def test_fixture_growing_stream_is_bounded_by_declared_size(self):
+        declared = self.ctx.manifest["fixtures"][0]["bytes"]
+        source = MagicMock()
+        source.read.side_effect = lambda count: b"x" * count
+        manager = MagicMock()
+        manager.__enter__.return_value = source
+        with patch.object(x10.os, "open", return_value=123), \
+                patch.object(x10.os, "fdopen", return_value=manager), \
+                patch.object(x10.os, "fstat", return_value=SimpleNamespace(st_mode=stat.S_IFREG)):
+            self.assert_binding_refusal()
+        source.read.assert_called_once_with(declared + 1)
+        source.read.reset_mock()
+        with patch.object(x10.os, "open", return_value=123), \
+                patch.object(x10.os, "fdopen", return_value=manager), \
+                patch.object(x10.os, "fstat", return_value=SimpleNamespace(st_mode=stat.S_IFIFO)):
+            self.assert_binding_refusal()
+        source.read.assert_not_called()
+
+    def test_growing_screenshot_read_is_explicitly_bounded_and_unscorable(self):
+        page = MagicMock()
+        real_open = Path.open
+        def screenshot(**kwargs):
+            with real_open(Path(kwargs["path"]), "wb") as target:
+                target.write(tiny_png())
+        page.get_by_role.return_value.screenshot.side_effect = screenshot
+        source = MagicMock()
+        source.read.return_value = b"x" * (x10.MAX_SCREENSHOT_BYTES + 1)
+        manager = MagicMock()
+        manager.__enter__.return_value = source
+        observation = dict(fresh_project=True, imported_version_selected=True,
+                           ground_option="Ground Physical unavailable")
+        with patch.object(Path, "open", return_value=manager), \
+                patch.object(x10.zlib, "decompressobj") as decoder, self.assertRaises(ValueError):
+            x10._save(page, self.ctx, observation)
+        source.read.assert_called_once_with(x10.MAX_SCREENSHOT_BYTES + 1)
+        decoder.assert_not_called()
+        self.assertFalse(observation["evidence_saved"])
+        self.assertEqual(list(self.ctx.out_dir.iterdir()), [])
+        self.assertEqual([r.verdict for r in x10.classify(observation)], ["UNREADABLE"] * 6)
 
     def test_import_rejection_and_timeout_are_distinct(self):
         config, bound, _, _ = x10.bindings(self.ctx)
         for hint in ("Choose the drawing again to retry the upload.",
                      "Retry to attach this drawing to the project."):
-            page, preview, _, _, _ = self.import_page("")
+            page, preview, attachment, _, upload = self.import_page("")
+            attachment.is_visible.side_effect = None
+            attachment.is_visible.return_value = False
             intake = page.locator.return_value
             failure = intake.get_by_text.return_value
-            failure.is_visible.return_value = True
+            failure.is_visible.side_effect = lambda: upload.set_input_files.called
             failure.inner_text.return_value = hint
             secrets = (bound["drawing"].name, str(bound["drawing"]),
                        config["project_name"] + "-customer-project-sentinel")
@@ -613,7 +772,7 @@ class FixtureTests(unittest.TestCase):
         def create_identity(page, ctx, config, observation):
             create(page, ctx, config, observation)
             observation.update(project_id=PROJECT, imported_version_id=VERSION)
-            page.on.call_args.args[1](self.catalog_request())
+            self.emit_catalog(page)
 
         with patch.object(x10, "_prepare_workspace"), patch.object(x10, "_create_project", create_identity), \
                 patch.object(x10, "_import_primary", attach), patch.object(x10, "_open_workflow"):
@@ -628,10 +787,12 @@ class FixtureTests(unittest.TestCase):
     def test_observed_refusal_excludes_customer_status_and_diagnostics(self):
         config, bound, _, _ = x10.bindings(self.ctx)
         hint = "Choose the drawing again to retry the upload."
-        page, preview, _, _, _ = self.import_page("")
+        page, preview, attachment, _, upload = self.import_page("")
+        attachment.is_visible.side_effect = None
+        attachment.is_visible.return_value = False
         intake = page.locator.return_value
         failure = intake.get_by_text.return_value
-        failure.is_visible.return_value = True
+        failure.is_visible.side_effect = lambda: upload.set_input_files.called
         failure.inner_text.return_value = hint
         customer = config["project_name"] + "-actual-creation-name"
         intake.get_by_role.return_value.first.inner_text.return_value = (
@@ -829,11 +990,11 @@ class FixtureTests(unittest.TestCase):
             rail.get_by_text.return_value.first.wait_for.side_effect = lambda **kw: events.append("ready")
             page.get_by_role.side_effect = lambda role, **kw: rail if role == "navigation" else picker
             picker.input_value.return_value = "ground-physical"
-            picker.locator.return_value.inner_text.side_effect = labels
-            rail.inner_text.side_effect = texts
+            picker.locator.return_value.inner_text.side_effect = lambda **kw: labels.pop(0) if len(labels) > 1 else labels[0]
+            rail.inner_text.side_effect = lambda **kw: texts.pop(0) if len(texts) > 1 else texts[0]
             observation, listener = self.identity(page)
             observation.update(fresh_project=True, imported_version_selected=True)
-            with patch.object(x10, "_save", side_effect=lambda p, c, o: o.update(evidence_saved=True)):
+            with patch.object(x10, "_save", side_effect=lambda p, c, o, **kw: o.update(evidence_saved=True)):
                 x10._ground(page, self.ctx, observation)
             self.assertEqual(observation["ground_option"], labels[-1])
             self.assertEqual(aggregate(x10.classify(observation)), verdict)
@@ -848,6 +1009,58 @@ class FixtureTests(unittest.TestCase):
         with patch.object(x10, "_save") as save, self.assertRaises(ValueError):
             x10._ground(page, self.ctx, {})
         save.assert_not_called()
+
+    def test_capture_revalidates_ui_and_identity_and_rolls_back_only_new_generation(self):
+        page = MagicMock()
+        rail, picker = MagicMock(), MagicMock()
+        page.get_by_role.side_effect = lambda role, **kw: rail if role == "navigation" else picker
+        observation, listener = self.identity(page)
+        observation.update(fresh_project=True, imported_version_selected=True)
+        rail.screenshot.side_effect = lambda **kw: Path(kw["path"]).write_bytes(tiny_png())
+        picker.input_value.return_value = "ground-physical"
+        picker.locator.return_value.inner_text.return_value = "Ground Physical unavailable"
+        rail.inner_text.return_value = "Ready"
+        x10._ground(page, self.ctx, observation)
+        old = list(self.ctx.out_dir.iterdir())
+        self.assertEqual(aggregate(x10.classify(observation)), "FAIL")
+        original_rename = Path.rename
+        for phase in ("screenshot", "rename"):
+            for mode in ("project", "version", "switch-back", "flow", "label", "pending"):
+                with self.subTest(phase=phase, mode=mode):
+                    picker.input_value.return_value = "ground-physical"
+                    picker.locator.return_value.inner_text.return_value = "Ground Physical unavailable"
+                    rail.inner_text.return_value = "Ready"
+                    self.complete_catalog(listener)
+                    def mutate():
+                        if mode == "project":
+                            self.complete_catalog(listener, self.catalog_request(project=OTHER))
+                        elif mode == "version":
+                            self.complete_catalog(listener, self.catalog_request(version=OTHER))
+                        elif mode == "switch-back":
+                            self.complete_catalog(listener, self.catalog_request(project=OTHER))
+                            self.complete_catalog(listener)
+                        elif mode == "flow":
+                            picker.input_value.return_value = "rooftop"
+                        elif mode == "label":
+                            picker.locator.return_value.inner_text.return_value = "Ground Physical available"
+                        else:
+                            rail.inner_text.return_value = "Checking Solar steps for the selected project drawing version."
+                    def capture(**kwargs):
+                        Path(kwargs["path"]).write_bytes(tiny_png())
+                        if phase == "screenshot":
+                            mutate()
+                    def rename(path, target):
+                        result = original_rename(path, target)
+                        mutate()
+                        return result
+                    rail.screenshot.side_effect = capture
+                    with (patch.object(Path, "rename", rename) if phase == "rename" else nullcontext()), \
+                            self.assertRaises(ValueError):
+                        x10._ground(page, self.ctx, observation)
+                    self.assertFalse(observation["evidence_saved"])
+                    self.assertNotIn("evidence_path", observation)
+                    self.assertEqual(list(self.ctx.out_dir.iterdir()), old)
+                    self.assertEqual([r.verdict for r in x10.classify(observation)], ["UNREADABLE"] * 6)
 
     def test_workflow_toggle_only_expands_closed_seat(self):
         for expanded in ("false", "true"):

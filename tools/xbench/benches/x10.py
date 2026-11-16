@@ -10,6 +10,9 @@ Customer manifests and fixture contents must remain outside git.
 
 import hashlib
 import json
+import os
+import stat
+from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation, localcontext
 from pathlib import Path
 import re
@@ -30,6 +33,9 @@ ROLES = ("drawing", "comparison_drawing", "bom", "terrain", "rates", "oracle")
 MAX_JSON_BYTES = 1048576
 MAX_JSON_DEPTH = 64
 MAX_RATE_ITEMS = 10000
+MAX_SCREENSHOT_BYTES = 16 * 1024 * 1024
+IMPORT_REFUSALS = ("Choose the drawing again to retry the upload.",
+                   "Retry to attach this drawing to the project.")
 DOWNSTREAM = (
     "cut/fill quantities against terrain and oracle",
     "BOM reconciliation plus comparison drawing changes",
@@ -158,9 +164,20 @@ def bindings(ctx):
         bound[role] = Path(row["path"])
         digest = hashlib.sha256()
         size = 0
-        with bound[role].open("rb") as source:
-            for block in iter(lambda: source.read(1024 * 1024), b""):
+        if not stat.S_ISREG(bound[role].lstat().st_mode):
+            raise ValueError("fixture is not a regular file: " + role)
+        descriptor = os.open(bound[role], os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+                             | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+        with os.fdopen(descriptor, "rb") as source:
+            if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                raise ValueError("opened fixture is not a regular file: " + role)
+            while True:
+                block = source.read(min(1024 * 1024, row["bytes"] - size + 1))
+                if not block:
+                    break
                 size += len(block)
+                if size > row["bytes"]:
+                    raise ValueError("fixture grew beyond declared size: " + role)
                 digest.update(block)
         if size != row.get("bytes") or digest.hexdigest() != row.get("sha256"):
             raise ValueError("fixture content changed: " + role)
@@ -178,6 +195,25 @@ def bindings(ctx):
 
 def classify(observation, expected=None):
     """Only an explicit rendered blocker in a confirmed new project can FAIL."""
+    text_fields = ("ui_text", "ground_option", "issue", "evidence_path", "import_rejection",
+                   "attachment_status", "import_status", "version_selection_status", "project_id",
+                   "route_project_id", "active_project_id", "imported_version_id", "source",
+                   "web_build", "stage", "exception_type", "fixture_rate_total", "screenshot_sha256")
+    bool_fields = ("fresh_project", "imported_version_selected", "evidence_saved", "diagnostic_saved")
+    invalid = not isinstance(observation, Mapping)
+    if not invalid:
+        invalid = (any(key in observation and not isinstance(observation[key], str) for key in text_fields)
+                   or any(key in observation and type(observation[key]) is not bool for key in bool_fields)
+                   or ("selected_labels" in observation and (
+                       not isinstance(observation["selected_labels"], list)
+                       or any(not isinstance(label, str) for label in observation["selected_labels"]))))
+    if invalid:
+        return [Step(n, "UNREADABLE", "Invalid observation field types; no scorable evidence.")
+                for n in range(1, 7)]
+    rejection = observation.get("import_rejection", "")
+    if rejection and rejection not in IMPORT_REFUSALS:
+        return [Step(n, "UNREADABLE", "Unrecognized import refusal; no scorable evidence.")
+                for n in range(1, 7)]
     fresh = observation.get("fresh_project") is True
     label = observation.get("ground_option", "")
     unavailable = (isinstance(label, str)
@@ -266,9 +302,12 @@ def _create_project(page, ctx, config, observation):
 
 
 def _valid_png(path):
-    if not 57 <= path.stat().st_size <= 16 * 1024 * 1024:
+    if not 57 <= path.stat().st_size <= MAX_SCREENSHOT_BYTES:
         raise ValueError("invalid screenshot size")
-    data = path.read_bytes()
+    with path.open("rb") as source:
+        data = source.read(MAX_SCREENSHOT_BYTES + 1)
+    if len(data) > MAX_SCREENSHOT_BYTES:
+        raise ValueError("screenshot byte budget exceeded")
     if data[:8] != b"\x89PNG\r\n\x1a\n":
         raise ValueError("invalid screenshot signature")
     offset, first, image = 8, True, False
@@ -348,7 +387,7 @@ def _valid_png(path):
     raise ValueError("invalid screenshot structure")
 
 
-def _save(page, ctx, observation, surface=None):
+def _save(page, ctx, observation, surface=None, validate=None):
     observation["evidence_saved"] = False
     observation.pop("evidence_path", None)
     ctx.out_dir.mkdir(parents=True, exist_ok=True)
@@ -360,6 +399,8 @@ def _save(page, ctx, observation, surface=None):
         if surface is None:
             surface = page.get_by_role("navigation", name="Solar design steps")
         surface.screenshot(path=str(staging / "x10-ground.png"), timeout=15_000)
+        if validate is not None:
+            validate()
         data = _valid_png(staging / "x10-ground.png")
         pin = {"screenshot_bytes": len(data), "screenshot_sha256": hashlib.sha256(data).hexdigest()}
         saved = dict(observation, **pin, evidence_saved=True, evidence_path=evidence)
@@ -379,6 +420,8 @@ def _save(page, ctx, observation, surface=None):
         check_pin(committed)
         if json.loads((committed / "x10-ui.json").read_text(encoding="utf-8")) != saved:
             raise ValueError("invalid committed evidence JSON")
+        if validate is not None:
+            validate()
         observation.update(pin, evidence_saved=True, evidence_path=evidence)
     finally:
         if staging.exists():
@@ -424,11 +467,13 @@ def _import_primary(page, ctx, config, bound, observation):
     upload = page.get_by_label("Drawing file", exact=True)
     upload.wait_for(state="attached", timeout=30_000)
     page.wait_for_function("input => !input.disabled", arg=upload.element_handle(), timeout=30_000)
-    upload.set_input_files(str(bound["drawing"]), timeout=15_000)
     intake = page.locator('[data-pane="material-intake"]')
     status = intake.get_by_role("status").filter(has_text=re.compile(r"^Attached "))
     failure = intake.get_by_text(re.compile(
         r"^(?:Choose the drawing again to retry the upload\.|Retry to attach this drawing to the project\.)$"))
+    if status.is_visible() or failure.is_visible():
+        raise ValueError("stale attachment terminal before upload")
+    upload.set_input_files(str(bound["drawing"]), timeout=15_000)
     status.or_(failure).first.wait_for(state="visible", timeout=180_000)
     if failure.is_visible():
         hint = failure.inner_text(timeout=15_000)
@@ -440,6 +485,8 @@ def _import_primary(page, ctx, config, bound, observation):
         # Capture only the explicit rendered hint, excluding Diagnostic details.
         _save(page, ctx, observation, surface=failure)
         return False
+    if not status.is_visible():
+        raise ValueError("attachment terminal not visible after upload")
     # Keep the rendered attachment sentence, replacing customer names and paths.
     sentence = status.inner_text(timeout=15_000)
     version = re.fullmatch(r"Attached .+ as version ([1-9][0-9]{0,8}) to .+", sentence)
@@ -501,12 +548,21 @@ def _uuid(value):
 def _catalog_observer(base, observation):
     origin = urlsplit(base)
     observation["catalog_epoch"] = 0
+    observation["catalog_binding"] = None
+    latest = None
+    pending_binding = None
+    failed = False
+
+    def exact_url(value):
+        url = urlsplit(value)
+        return (url.scheme, url.netloc, url.path) == (origin.scheme, origin.netloc, "/api/capabilities")
 
     def request_seen(request):
+        nonlocal latest, pending_binding, failed
+        if not exact_url(request.url):
+            return
         try:
             url = urlsplit(request.url)
-            if (url.scheme, url.netloc, url.path) != (origin.scheme, origin.netloc, "/api/capabilities"):
-                return
             query = parse_qs(url.query, keep_blank_values=True, max_num_fields=20)
             binding = {}
             for key in ("drawing_id", "project_id", "input_version_id"):
@@ -517,10 +573,28 @@ def _catalog_observer(base, observation):
         except ValueError:
             # An invalid same-origin catalog binding cannot leave old proof current.
             binding = None
-        if observation.get("catalog_binding") != binding:
-            observation["catalog_epoch"] += 1
-        observation["catalog_binding"] = binding
+        latest, pending_binding = request, binding
+        failed = False
+        observation["catalog_epoch"] += 1
+        observation["catalog_binding"] = None
 
+    def response_seen(response):
+        nonlocal failed
+        if response.request is not latest or not exact_url(response.url):
+            return
+        failed = failed or type(response.status) is not int or not 200 <= response.status < 300
+        observation["catalog_epoch"] += 1
+        observation["catalog_binding"] = None if failed else pending_binding
+
+    def request_failed(request):
+        nonlocal failed
+        if request is latest and exact_url(request.url):
+            failed = True
+            observation["catalog_epoch"] += 1
+            observation["catalog_binding"] = None
+
+    request_seen.response = response_seen
+    request_seen.failed = request_failed
     return request_seen
 
 
@@ -570,13 +644,26 @@ def _ground(page, ctx, observation):
         raise ValueError("ground catalog changed during observation")
     if _current_identity(page, observation) != epoch:
         raise ValueError("canonical identity changed before capture")
-    _save(page, ctx, observation)
+
+    def validate():
+        if _current_identity(page, observation) != epoch:
+            raise ValueError("canonical identity changed during capture")
+        current = (picker.input_value(timeout=15_000),
+                   picker.locator("option:checked").inner_text(timeout=15_000),
+                   rail.inner_text(timeout=15_000))
+        if (current != sample or current[0] != "ground-physical"
+                or "Checking Solar steps" in current[2]
+                or _current_identity(page, observation) != epoch):
+            raise ValueError("ground catalog changed during capture")
+
+    validate()
+    _save(page, ctx, observation, validate=validate)
 
 
 def observe(page, ctx, config, bound, session_info=None):
     observation = {"fresh_project": False, "imported_version_selected": False, "evidence_saved": False}
     stage = "session provenance"
-    listener = None
+    listeners = []
     try:
         for key in ("source", "web_build"):
             value = (session_info or {}).get(key)
@@ -585,8 +672,10 @@ def observe(page, ctx, config, bound, session_info=None):
                 raise ValueError("invalid session provenance")
         observation.update({key: session_info[key] for key in ("source", "web_build")})
         callback = _catalog_observer(ctx.base, observation)
-        page.on("request", callback)
-        listener = callback
+        for event, listener in (("request", callback), ("response", callback.response),
+                                ("requestfailed", callback.failed)):
+            page.on(event, listener)
+            listeners.append((event, listener))
         stage = "workspace profile"
         _prepare_workspace(page)
         stage = "fresh project creation"
@@ -601,8 +690,8 @@ def observe(page, ctx, config, bound, session_info=None):
     except Exception as exc:
         _diagnostic(ctx, observation, stage, exc)
     finally:
-        if listener is not None:
-            page.remove_listener("request", listener)
+        for event, listener in listeners:
+            page.remove_listener(event, listener)
     return observation
 
 
