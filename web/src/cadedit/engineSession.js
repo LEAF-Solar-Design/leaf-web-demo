@@ -1368,6 +1368,11 @@ export default function useEngineSession({
       // A message from a superseded session (a switch raced the worker's
       // reply) must never seat state over the current document.
       if (generation !== generationRef.current) return
+      if (message.type === 'documentLoaded' && message.documentId === pendingLoadRef.current?.documentId) {
+        selectionEditRef.current = null
+        batchVerbRef.current = null
+        batchNoteRef.current = ''
+      }
       const opening = replacementOpenRef.current
       if (opening) {
         const loaded = message.type === 'documentLoaded'
@@ -1626,7 +1631,7 @@ export default function useEngineSession({
     const projectVersion = opts?.project === true && saveTargetRef.current?.kind === 'project'
       && typeof opts.version === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(opts.version)
     committedVersionRef.current = committedLoadRef.current && (projectVersion || Number.isInteger(opts.version) && opts.version > 0) ? opts.version : null
-    patch({ busy: true, ...(replacementOpenRef.current ? {} : { documentId: name }), documentOrigin: null,
+    patch({ busy: true, documentId: name, documentOrigin: null,
       errorKind: null, status: `Opening ${name}...` })
     const boundary = ensureBoundary()
     // W4f slice F: the opened bytes are the floor of the undo history.
