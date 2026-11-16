@@ -1,10 +1,10 @@
 """Offline synthetic audit query-plan measurements. No customer input data."""
-import argparse
 from contextlib import closing
 from pathlib import Path
 import sqlite3
 import tempfile
 from x07_profile_history_audit import CustomerProfileStore, audit_history, begin_audit, publish_stdout
+from x07_profile_version_diff import JsonArgumentParser
 
 
 def fixture(path, foreign_count):
@@ -46,7 +46,7 @@ def measure_plans(directory, *, smoke=False):
 
 
 def main():
-    parser=argparse.ArgumentParser(description=__doc__)
+    parser=JsonArgumentParser(result_schema='leaf.x07.audit-query-plan.v1', description=__doc__)
     parser.add_argument('--directory',type=Path,required=True); parser.add_argument('--smoke',action='store_true')
     args=parser.parse_args()
     try: result=measure_plans(args.directory,smoke=args.smoke)

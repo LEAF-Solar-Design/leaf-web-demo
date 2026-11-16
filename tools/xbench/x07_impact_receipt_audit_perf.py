@@ -1,5 +1,4 @@
 """Bounded disposable benchmark for X07 scoped impact and receipt audits."""
-import argparse
 from contextlib import closing
 from copy import deepcopy
 import json
@@ -11,6 +10,7 @@ import tracemalloc
 from x07_profile_change_impact import CustomerProfileStore, preview_change
 from x07_receipt_history_audit import ConfirmationReceiptStore, audit_receipts, publish_stdout
 from x07_profile_workflow import ProfileWorkflow
+from x07_profile_version_diff import JsonArgumentParser
 
 
 def receipt_result(pin):
@@ -107,7 +107,7 @@ def benchmark(directory, *, smoke=False):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = JsonArgumentParser(result_schema='leaf.x07.impact-receipt-audit-perf.v1', description=__doc__)
     parser.add_argument('--directory', type=Path, required=True)
     parser.add_argument('--smoke', action='store_true')
     arguments = parser.parse_args()

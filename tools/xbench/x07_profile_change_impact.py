@@ -1,10 +1,10 @@
 """Offline read-only role preview. Pins remain on their immutable versions."""
-import argparse
 import copy
 import json
 from pathlib import Path
 import sqlite3
 from x07_profile_history_audit import CustomerProfileStore, MAX_AUDIT_ROWS, MAX_PROFILE_VERSION, _key, begin_audit, require_database_file, publish_stdout
+from x07_profile_version_diff import JsonArgumentParser
 
 
 def same_role(left, right):
@@ -43,7 +43,7 @@ def preview_change(store, *, customer_key, profile_id, before_version, after_ver
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = JsonArgumentParser(result_schema='leaf.x07.profile-change-impact.v1', description=__doc__)
     parser.add_argument('--database',type=Path,required=True)
     parser.add_argument('--customer',required=True); parser.add_argument('--profile-id',required=True)
     parser.add_argument('--before',type=int,required=True); parser.add_argument('--after',type=int,required=True)
