@@ -29,8 +29,14 @@ def compare_versions(store, *, customer_key, profile_id, before_version, after_v
                         for role in sorted(before.keys() & after.keys()) if before[role] != after[role]}}
 
 
+class VersionDiffParser(argparse.ArgumentParser):
+    def error(self, message):
+        print(json.dumps({'schema': 'leaf.x07.profile-version-diff.v1', 'error': 'INVALID_ARGUMENTS'}))
+        raise SystemExit(2)
+
+
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = VersionDiffParser(description=__doc__)
     parser.add_argument('--database', type=Path, required=True)
     parser.add_argument('--customer', required=True)
     parser.add_argument('--profile-id', required=True)
