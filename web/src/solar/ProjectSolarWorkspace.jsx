@@ -6,6 +6,7 @@ import ProjectSolarReadPanel, { PROJECT_SOLAR_WORKSPACE_LABELS, projectSolarWork
 import ProjectSolveReview, { ProjectSolarSchemaForm } from './ProjectSolveReview.jsx'
 import ProjectSolarEdgePanel from './ProjectSolarEdgePanel.jsx'
 import { ProjectSolarPreparedSolveForm } from './ProjectSolarPreparedSolveForm.jsx'
+import DrawingRoleProposal from './DrawingRoleProposal.jsx'
 
 const STEP_TOOLS = ['solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
   'solar-string-conductors', 'solar-assign-equipment']
@@ -406,6 +407,8 @@ export default function ProjectSolarWorkspace(props) {
     recoveryStatus.current?.scrollIntoView?.({ block: 'nearest' })
   })
   return <section className="project-solar-workspace">
+    {!owner.reason && <DrawingRoleProposal projectClient={owner.projectClient} solarBinding={owner.binding}
+      authorityKey={owner.authorityKey} isCurrent={scope.isCurrent} />}
     {writeAccessDenied && <p role="status">{projectSolarWorkspaceReason('write_access_required')}</p>}
     {FlowRail && <FlowRail solarBinding={owner.binding} authorityKey={owner.authorityKey} projectClient={owner.projectClient}
       projectCatalog={owner.reason ? null : owner.projectCatalog} projectRunMemory={projectRunMemory}

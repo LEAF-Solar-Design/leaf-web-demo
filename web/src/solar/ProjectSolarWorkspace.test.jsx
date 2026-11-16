@@ -8,6 +8,11 @@ import ProjectSolarGraphForm from './ProjectSolarGraphForm.jsx'
 import { PROJECT_SOLAR_WORKSPACE_LABELS, PROJECT_SOLAR_WORKSPACE_REASONS, projectSolarWorkspaceReason } from './ProjectSolarReadPanel.jsx'
 import { SEED_SETTINGS } from './solarSettingsModel.js'
 
+// Discovery reads and status rendering have dedicated component tests.
+vi.mock('./DrawingRoleProposal.jsx', () => ({
+  default: () => <section data-testid="drawing-role-proposal" />,
+}))
+
 afterEach(cleanup)
 afterEach(() => vi.restoreAllMocks())
 
@@ -733,6 +738,7 @@ describe('Project Solar workspace composition', () => {
   it('R13E-31 sizing dispatches to the manual-global R9 project host', () => {
     const h = fixture('solar-size-strings')
     h.mount()
+    expect(screen.getByTestId('drawing-role-proposal')).toBeInTheDocument()
     h.open()
     stepContract(h)
     expect(h.props.onOpenTool).toHaveBeenCalledWith(h.row)
@@ -1442,7 +1448,7 @@ describe('Project Solar workspace composition', () => {
   it('R13E-44 composition owns no Viewer or runtime and all new copy uses the frozen maps', () => {
     const source = readFileSync(`${process.cwd()}/src/solar/ProjectSolarWorkspace.jsx`, 'utf8')
     const imports = [...source.matchAll(new RegExp("from ['\"]([^'\"]+)['\"]", 'g'))].map((match) => match[1])
-    expect(imports).toEqual(['react', './solarDrawingBinding.js', './SolarSettingsForm.jsx', './solarSettingsWire.js', './ProjectSolarReadPanel.jsx', './ProjectSolveReview.jsx', './ProjectSolarEdgePanel.jsx', './ProjectSolarPreparedSolveForm.jsx'])
+    expect(imports).toEqual(['react', './solarDrawingBinding.js', './SolarSettingsForm.jsx', './solarSettingsWire.js', './ProjectSolarReadPanel.jsx', './ProjectSolveReview.jsx', './ProjectSolarEdgePanel.jsx', './ProjectSolarPreparedSolveForm.jsx', './DrawingRoleProposal.jsx'])
     const reviewSource = readFileSync(`${process.cwd()}/src/solar/ProjectSolveReview.jsx`, 'utf8')
     const reviewImports = [...reviewSource.matchAll(new RegExp("from ['\"]([^'\"]+)['\"]", 'g'))].map((match) => match[1])
     for (const dependency of reviewImports) {

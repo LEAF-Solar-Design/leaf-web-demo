@@ -58,6 +58,7 @@
     ".gitignore"
   ],
   "mandatory_suite_ids": [
+    "server-x07-offline",
     "web-stage-source-contracts",
     "web-page-service-smoke",
     "ci-process-capture-core",
@@ -838,7 +839,9 @@
   ],
   "unresolved_mandatory": [],
   "mandatory_justification": "L4 web-demo mandatory table expanded against build_suites; every other declaration remains mandatory because no traced classification has been admitted. Workflow, web build and license checks also remain unconditional in ci.sh.",
-  "always_select_suite_ids": [],
+  "always_select_suite_ids": [
+    "server-x07-offline"
+  ],
   "suites": {
     "server-lab-placement": {
       "mappable": false,
