@@ -64,6 +64,81 @@ beforeEach(() => {
 })
 afterEach(cleanup)
 
+const savedProposal = (changes = {}) => job({ tool_name: 'solar-solve-proposal', output_version_id: null,
+  result: { schema: 'leaf.solar-solve-proposal.v1', candidate_sha256: 'a'.repeat(64), frame_id: 'frame-1',
+    phase: 'initial', candidate_summary: [{ panel_count: 14, endpoints: ['panel-a', 'panel-n'] }],
+    request_sha256: 'b'.repeat(64), response_sha256: 'c'.repeat(64),
+    execution_provenance: { schema: 'leaf.solar-solve-proposal.v1' } }, ...changes })
+const savedJobIndex = (changes = {}) => ({ job_id: J, tool_name: 'solar-solve-proposal',
+  org_id: O, project_id: P, input_version_id: V, status: 'succeeded', output_version_id: null,
+  created_at: '2026-11-15T01:00:00Z', ...changes })
+
+it('S03 reopens a durable proposal for commit after a cold runtime mount without another solve', async () => {
+  const h = await setup({ toolName: 'solar-commit-solve' })
+  h.client.readJob.mockResolvedValue(response(savedProposal()))
+  h.ws.change({ workspace: { ...workspace(), jobs: [savedJobIndex()] } })
+  await act(async () => { expect(h.result.current.onOpenTool(h.tool)).toBe(true); await drain() })
+  expect(h.client.readJob).toHaveBeenCalledExactlyOnceWith(J, expect.objectContaining({ tool: 'solar-solve-proposal' }))
+  expect(h.result.current.projectOutcome?.outcome).toMatchObject({ state: 'proposal', jobId: J, frameId: 'frame-1' })
+  expect(h.result.current.projectOutcome.meta.isCurrent()).toBe(true)
+  expect(h.result.current.projectOutcome.meta.binding).toEqual(B)
+  expect(h.result.current.projectOutcome.meta.authorityKey).toBe('session-1')
+  expect(h.client.submitRun).not.toHaveBeenCalled()
+  expect(h.ws.selectCanonicalVersion).not.toHaveBeenCalled()
+  // Recovery is review-only. A separate normal user commit still submits once.
+  const commit = { ...h.prepared, proposalJobId: J }
+  h.client.readJob.mockReturnValue(deferred().promise)
+  await act(async () => {
+    expect(await h.result.current.onProjectSubmit(commit, h.options)).toEqual(accepted)
+    await drain()
+  })
+  expect(h.client.submitRun).toHaveBeenCalledExactlyOnceWith(commit, expect.anything())
+  h.unmount()
+})
+
+it('S03 refuses a foreign or publishing durable proposal instead of restoring it', async () => {
+  for (const changes of [{ project_id: X }, { input_version_id: X }, { output_version_id: W },
+    { execution_context: { schema: 'leaf.solar-project-graph-job.v1', drawing_id: X } }]) {
+    const h = await setup({ toolName: 'solar-commit-solve' })
+    h.client.readJob.mockResolvedValue(response(savedProposal(changes)))
+    h.ws.change({ workspace: { ...workspace(), jobs: [savedJobIndex()] } })
+    await act(async () => { h.result.current.onOpenTool(h.tool); await drain() })
+    expect(h.client.readJob).toHaveBeenCalledOnce()
+    expect(h.result.current.projectOutcome).toBeNull()
+    expect(h.client.submitRun).not.toHaveBeenCalled()
+    h.unmount()
+  }
+})
+
+it('S03 suppresses late durable proposal recovery after the drawing changes', async () => {
+  const h = await setup({ toolName: 'solar-commit-solve' }), gate = deferred()
+  h.client.readJob.mockReturnValue(gate.promise)
+  h.ws.change({ workspace: { ...workspace(), jobs: [savedJobIndex()] } })
+  await act(async () => { h.result.current.onOpenTool(h.tool); await drain() })
+  expect(h.client.readJob).toHaveBeenCalledOnce()
+  await h.install(X)
+  await act(async () => { gate.resolve(response(savedProposal())); await drain() })
+  expect(h.result.current.projectOutcome).toBeNull()
+  expect(h.client.submitRun).not.toHaveBeenCalled()
+  h.unmount()
+})
+
+it('S03 does not resurrect an older proposal behind a newer solve or commit', async () => {
+  for (const newer of [savedJobIndex({ job_id: X, status: 'running' }),
+    savedJobIndex({ job_id: X, status: 'failed' }),
+    savedJobIndex({ job_id: X, tool_name: 'solar-commit-solve', output_version_id: W })]) {
+    const h = await setup({ toolName: 'solar-commit-solve' })
+    h.client.readJob.mockResolvedValue(response(savedProposal()))
+    h.ws.change({ workspace: { ...workspace(), jobs: [savedJobIndex(),
+      { ...newer, created_at: '2026-11-15T02:00:00Z' }] } })
+    await act(async () => { h.result.current.onOpenTool(h.tool); await drain() })
+    expect(h.result.current.projectOutcome).toBeNull()
+    expect(h.client.readJob).not.toHaveBeenCalled()
+    expect(h.client.submitRun).not.toHaveBeenCalled()
+    h.unmount()
+  }
+})
+
 it('G17 runtime worker refusal clears pending and run lock', async () => {
   vi.useFakeTimers()
   const gate = deferred()
