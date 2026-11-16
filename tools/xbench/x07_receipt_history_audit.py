@@ -67,9 +67,12 @@ def audit_receipts(store, journal, *, customer_key):
     require_database_file(store.path); require_database_file(journal.path)
     _distinct_store_paths(store.path,journal.path)
     issues = {'invalid_receipts':0,'missing_references':0,'inconsistent_references':0}
-    with store._connection() as db, closing(journal._connect()) as receipts:
+    receipt_connection = journal._connect()
+    if receipt_connection.in_transaction:
+        # An injected active transaction remains owned by its caller.
+        raise ValueError('caller transaction unsupported')
+    with closing(receipt_connection) as receipts, store._connection() as db:
         begin_audit(db); _check_connection(receipts)
-        if receipts.in_transaction: raise ValueError('caller transaction unsupported')
         receipts.execute('BEGIN')
         rows = receipts.execute('SELECT project_key,result FROM main.confirmations WHERE customer_key=? ORDER BY project_key LIMIT ?', (customer_key,MAX_AUDIT_ROWS+1)).fetchall()
         if len(rows)>MAX_AUDIT_ROWS: raise ValueError('row budget exceeded')

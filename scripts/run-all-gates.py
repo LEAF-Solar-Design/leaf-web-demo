@@ -1253,7 +1253,13 @@ def build_suites() -> List[Suite]:
                   (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_cross_store_snapshot.py").as_posix(),
                   (Path("..") / "tools" / "xbench" / "tests" / "test_x07_impact_foreign_noninterference.py").as_posix(),
                   (Path("..") / "tools" / "xbench" / "tests" / "test_x07_impact_query_interrupt.py").as_posix(),
-                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_composed_histories.py").as_posix()], 331),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_composed_histories.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_lock_recovery.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_outer_transactions.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_shadow_tables.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_hashseed.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_impact_row_boundaries.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_impact_receipt_audit_perf.py").as_posix()], 339),
         # W5 Rooftop workflow flow (2026-09-24, contracts G34/G34a/G34b): server/solar_workflow_flow.py,
         # the pure progression engine (every step's CanAdvance and HasDrawingPrerequisites, the L1/L2
         # gates on the host's setting, AdvanceStep, GoBack and NavigateToStep Stale marking over the
