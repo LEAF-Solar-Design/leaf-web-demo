@@ -35,7 +35,7 @@ from unittest.mock import patch
 sys.path.insert(0,str(Path.cwd()/'server'))
 from x07_customer_profile_store import CustomerProfileStore
 from x07_profile_workflow import ProfileWorkflow
-from x07_workflow_adapter import WorkflowAdapter
+from x07_workflow_adapter import WorkflowAdapter,ConfirmationReceiptStore
 class DuplicateKeyError(ValueError): pass
 
 def reject_constant(value):
@@ -105,9 +105,10 @@ if protocol=='hung':
 if protocol=='stdout_large': sys.stdout.write('x'*(2*1024*1024));sys.stdout.flush();sys.exit(0)
 if protocol=='stderr_large': sys.stderr.write('x'*(128*1024));sys.stderr.flush();sys.exit(23)
 try:
-    store=CustomerProfileStore(request['database'])
-    receipt_path=request.get('fixture',{}).get('receipt_database')
-    adapter=(WorkflowAdapter.from_paths(profile_path=request['database'],receipt_path=receipt_path,
+    fixture=request.get('fixture',{})
+    store=CustomerProfileStore(request['database'],read_only=fixture.get('read_only',False))
+    receipt_path=fixture.get('receipt_database')
+    adapter=(WorkflowAdapter(ProfileWorkflow(store),confirmation_receipts=ConfirmationReceiptStore(receipt_path,read_only=fixture.get('read_only',False)),
         context=request['bound_context'],intake=request['intake'],copies=request['copies']) if receipt_path else
         WorkflowAdapter(ProfileWorkflow(store),context=request['bound_context'],intake=request['intake'],copies=request['copies']))
     op=request['op']; value=request.get('value'); context=request['context']
