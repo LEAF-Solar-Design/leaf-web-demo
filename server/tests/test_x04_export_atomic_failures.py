@@ -15,12 +15,12 @@ def test_export_failure_preserves_existing_output(failure, tmp_path, monkeypatch
     previous = b'previous complete evidence\x00\xff'
     output.write_bytes(previous)
     if failure == 'serialization':
-        original = exporter.json.dumps
-        def fail_encoding(value, **kwargs):
-            if 'indent' in kwargs:
+        original = exporter.json.JSONEncoder.iterencode
+        def fail_encoding(encoder, value, *args, **kwargs):
+            if encoder.indent == 2:
                 raise ValueError('injected serialization failure')
-            return original(value, **kwargs)
-        monkeypatch.setattr(exporter.json, 'dumps', fail_encoding)
+            return original(encoder, value, *args, **kwargs)
+        monkeypatch.setattr(exporter.json.JSONEncoder, 'iterencode', fail_encoding)
     elif failure == 'temporary-write':
         original = exporter.tempfile.NamedTemporaryFile
         @contextmanager

@@ -115,8 +115,16 @@ def export_evidence(payload):
             raise ValueError('Each observed dependency requires string kind, name and disposition.')
         if 'remapped_to' in row and not isinstance(row['remapped_to'], str):
             raise ValueError('Dependency remapped_to must be a string.')
-    registry = json.loads((X04_ROOT / 'engine/registry.json').read_text(encoding='utf-8'))
-    tool = next(row for row in registry['tools'] if row['name'] == 'count-modules')
+    try:
+        registry = json.loads((X04_ROOT / 'engine/registry.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError) as error:
+        raise ValueError('Tool registry engine/registry.json must be readable valid JSON.') from error
+    if not isinstance(registry, dict) or not isinstance(registry.get('tools'), list):
+        raise ValueError('Tool registry must contain a tools array.')
+    tool = next((row for row in registry['tools']
+                 if isinstance(row, dict) and row.get('name') == 'count-modules'), None)
+    if tool is None:
+        raise ValueError('Tool registry requires a count-modules entry.')
     outcome = tool_loader.run_tool_dynamic(tool, drawing.get('intake'), {'set_ids': ids}, aps_live=False)
     if not outcome['ok']:
         error = outcome.get('error') or {}
@@ -131,10 +139,15 @@ def export_evidence(payload):
 
 
 def write_json(value, output=None, max_output_bytes=None):
-    encoded = json.dumps(value, ensure_ascii=True, allow_nan=False, indent=2) + '\n'
-    # ASCII escaping makes each encoded character exactly one UTF-8 byte.
-    if max_output_bytes is not None and len(encoded) > max_output_bytes:
-        raise ValueError(f'Encoded output exceeds the {max_output_bytes}-byte ceiling.')
+    encoder = json.JSONEncoder(ensure_ascii=True, allow_nan=False, indent=2)
+    chunks = []
+    size = 1  # Reserve the final newline. ASCII characters each occupy one UTF-8 byte.
+    for chunk in encoder.iterencode(value):
+        size += len(chunk)
+        if max_output_bytes is not None and size > max_output_bytes:
+            raise ValueError(f'Encoded output exceeds the {max_output_bytes}-byte ceiling.')
+        chunks.append(chunk)
+    encoded = ''.join(chunks) + '\n'
     if output is None:
         try:
             offset = 0
@@ -157,6 +170,7 @@ def write_json(value, output=None, max_output_bytes=None):
                                          dir=target.parent, prefix='.x04-', delete=False) as stream:
             temporary = Path(stream.name)
             stream.write(encoded)
+            stream.flush()
         os.replace(temporary, target)
     finally:
         if temporary is not None:
