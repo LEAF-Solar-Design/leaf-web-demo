@@ -2702,3 +2702,54 @@ changes. The explicit device owners also expose two cross-grid connections;
 that negative topology is retained and cannot be hidden by the aggregate PASS.
 A synthetic consistency check cannot establish oracle origin or independence.
 It does not accept customer engineering data or live X05.
+
+## Whole-device oracle grid migration replay
+
+Within Studio X-bench X05, moving a device and all its strings together can keep
+oracle topology valid while changing grid totals. Repairs to aggregate targets
+do not repair disagreements with the independently supplied saved owners.
+
+```python
+import sys, runpy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+envelope = fixtures['equal_count_ownership_envelope']()
+grid, evidence = envelope['grid'], envelope['assurance']['evidence']
+moving = {row['string_id'] for row in evidence['oracle_assignments']
+          if row['inverter_id'] == 'INV-A'}
+for row in evidence['oracle_string_owners']:
+    if row['string_id'] in moving:
+        row['grid_id'] = 'west'
+for row in evidence['oracle_inverter_owners']:
+    if row['inverter_id'] == 'INV-A':
+        row['grid_id'] = 'west'
+def show(label):
+    result = m.reconcile_seven_steps_json(m.serialize_result(envelope))
+    owners = result['independent_owners']['checks']
+    loads = result['oracle_loads']
+    print(label, result['verdict'], loads['verdict'],
+          loads['metrics']['strings']['grid_comparison']['mismatch_count'],
+          owners['oracle_topology']['verdict'], owners['strings']['mismatch_count'],
+          owners['inverters']['mismatch_count'])
+show('migrated')
+for metric, field in dict(strings='string_totals', optimizers='optimizer_totals',
+                         panels='panel_totals', kw_dc='dc_totals').items():
+    grid[field] = {'east': 0, 'west': evidence['oracle_values'][metric]}
+show('grid targets repaired')
+```
+
+Expected output:
+
+```text
+migrated FAIL FAIL 2 PASS 1 1
+grid targets repaired FAIL PASS 0 PASS 1 1
+```
+
+The grid deltas are east minus one string, six optimizers, ten panels and 4 kW
+DC, with the same positive amounts on west. Device loads stay unchanged because
+connections and per-string values are unchanged. Oracle topology stays PASS.
+Saved string and device owners still disagree with the changed oracle map, so
+the composed result remains FAIL after aggregate target repair. This synthetic
+migration does not establish which owner map is correct, oracle origin or live
+engineering parity. Those claims require independent acquisition evidence.
