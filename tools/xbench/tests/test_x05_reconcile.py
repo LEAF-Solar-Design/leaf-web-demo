@@ -5780,3 +5780,141 @@ def test_cross_topology_linear_membership_work_caps_and_permutations(monkeypatch
             for sequence in changed: Random(seed).shuffle(sequence)
             assert m.validate_cross_topology(*changed) == baseline
         assert values == preserved
+
+
+def cross_topology_phase_envelope(phase, missing=False):
+    envelope = equal_count_ownership_envelope()
+    if missing:
+        field = 'string_assignments' if phase == 'saved' else phase+'_string_assignments'
+        envelope['grid'][field] = None
+    else:
+        rows = envelope['assurance']['evidence'][phase+'_assignments']
+        rows[0]['inverter_id'],rows[1]['inverter_id'] = 'INV-B','INV-A'
+    return envelope
+
+
+@pytest.mark.parametrize('phase',['saved','before','reopened'])
+@pytest.mark.parametrize('missing',[False,True])
+def test_composed_cross_topology_transport_differential(tmp_path,phase,missing):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from benches import x05_reconcile as m
+    envelope = cross_topology_phase_envelope(phase,missing)
+    source = envelope['assurance']
+    assurance = dict(evidence=source['evidence'],frozen_manifest=source['manifest'],stage_bindings=source['bindings'],
+        supplied_inputs={k:bytes.fromhex(v) for k,v in source['inputs_hex'].items()},
+        expected_identity=source['identity'],stage_identities=source['stage_identities'])
+    direct = m.reconcile_seven_steps(envelope['import'],envelope['grid'],assurance)
+    assert json.loads(serialize_result(direct)) == json.loads(serialize_result(reconcile_seven_steps_json(json.dumps(envelope))))
+    expected,records = bound_seven_fixture_records()
+    source['manifest']['fixture_id'] = source['evidence']['fixture_id'] = expected[0]
+    source['bindings'] = {k:deepcopy(source['manifest']) for k in PROVENANCE_STAGES}
+    records[0]['envelope'] = envelope
+    aggregate = m.aggregate_bound_seven_steps(expected,records)
+    assert all(aggregate['fixtures'][k]['verdict'] == 'PASS' for k in expected[1:])
+    original = deepcopy(records)
+    run = subprocess.run([sys.executable,'-P',str(Path(m.__file__).resolve()),'--seven-step-bound-aggregate'],
+        input=serialize_result(dict(expected_ids=expected,fixtures=records)).encode('ascii'),
+        capture_output=True,cwd=tmp_path,timeout=20,env={'SystemRoot':'C:\\Windows'})
+    assert run.returncode == (4 if missing else 1) and not run.stderr
+    assert json.loads(run.stdout) == json.loads(serialize_result(aggregate)) and records == original
+
+
+def test_composed_cross_topology_hash_seed_phase_permutations(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from random import Random
+    from benches import x05_reconcile as m
+    expected,records = bound_seven_fixture_records()
+    for index,record in enumerate(records):
+        envelope = cross_topology_phase_envelope(('saved','before','reopened')[index])
+        source = envelope['assurance']
+        source['manifest']['fixture_id'] = source['evidence']['fixture_id'] = record['fixture_id']
+        source['bindings'] = {k:deepcopy(source['manifest']) for k in PROVENANCE_STAGES}
+        record['envelope'] = envelope
+    baseline = json.loads(serialize_result(m.aggregate_bound_seven_steps(expected,records)))
+    original = deepcopy(records)
+    outputs = []
+    for seed in ('0','73'):
+        changed = deepcopy(records)
+        Random(int(seed)).shuffle(changed)
+        for record in changed:
+            grid,evidence = record['envelope']['grid'],record['envelope']['assurance']['evidence']
+            for field in ('string_assignments','before_string_assignments','reopened_string_assignments'):
+                Random(int(seed)).shuffle(grid[field])
+            for stage in ('saved','before','reopened'):
+                for suffix in ('_inverters','_assignments'):
+                    Random(int(seed)).shuffle(evidence[stage+suffix])
+        run = subprocess.run([sys.executable,'-P',str(Path(m.__file__).resolve()),'--seven-step-bound-aggregate'],
+            input=serialize_result(dict(expected_ids=expected[::-1],fixtures=changed)).encode('ascii'),
+            capture_output=True,cwd=tmp_path,timeout=20,env={'SystemRoot':'C:\\Windows','PYTHONHASHSEED':seed})
+        assert run.returncode == 1 and not run.stderr and json.loads(run.stdout) == baseline
+        outputs.append(run.stdout)
+    assert outputs[0] == outputs[1] and records == original
+
+
+def test_cross_topology_once_per_phase_unique_fixture(monkeypatch):
+    from collections import Counter
+    from benches import x05_reconcile as m
+    expected,records = bound_seven_fixture_records()
+    baseline = m.aggregate_bound_seven_steps(expected,records)
+    original = m.validate_cross_topology
+    calls = Counter()
+    def counted(*args):
+        calls[(id(args[3]),id(args[4]),id(args[5]))] += 1
+        return original(*args)
+    monkeypatch.setattr(m,'validate_cross_topology',counted)
+    assert m.aggregate_bound_seven_steps(expected,records) == baseline
+    assert len(calls) == 9 and set(calls.values()) == {1}
+    calls.clear()
+    result = m.aggregate_bound_seven_steps(expected,[dict(fixture_id=expected[0],envelope=None)]+records)
+    assert len(calls) == 6 and set(calls.values()) == {1} and expected[0] not in result['fixtures']
+    for key in expected[1:]:
+        assert result['fixtures'][key] == baseline['fixtures'][key]
+
+
+def test_cross_topology_failure_isolation_all_phases_and_unchanged_inputs():
+    from benches import x05_reconcile as m
+    envelope = cross_topology_phase_envelope('saved')
+    rows = envelope['assurance']['evidence']['reopened_assignments']
+    rows[0]['inverter_id'],rows[1]['inverter_id'] = 'INV-B','INV-A'
+    envelope['grid']['before_string_assignments'] = None
+    original = deepcopy(envelope)
+    result = m._seven_step_envelope(envelope)
+    checks = result['cross_topology']['checks']
+    assert result['verdict'] == 'UNREADABLE'
+    assert checks['saved']['mismatch_count'] == checks['reopened']['mismatch_count'] == 2
+    assert checks['before']['verdict'] == 'UNREADABLE'
+    assert result['string_metrics']['verdict'] == 'PASS' and envelope == original
+
+
+@pytest.mark.parametrize('broken',[False,True])
+def test_cross_topology_bijective_relabeling_all_phases(broken):
+    from benches import x05_reconcile as m
+    envelope = equal_count_ownership_envelope()
+    if broken:
+        for stage in ('saved','before','reopened'):
+            envelope['assurance']['evidence'][stage+'_assignments'][0]['inverter_id'] = 'INV-B'
+    baseline = m._seven_step_cross_topology(envelope['grid'],envelope['assurance']['evidence'])
+    names = {'east':'grid-two','west':'grid-one','A':'string-z','B':'string-y','INV-A':'device-nine','INV-B':'device-eight'}
+    def rename(value):
+        if type(value) is str:
+            return names.get(value,value)
+        if type(value) is list:
+            return [rename(item) for item in value]
+        if type(value) is dict:
+            return {names.get(key,key):rename(item) for key,item in value.items()}
+        return value
+    original = deepcopy(envelope)
+    renamed = rename(envelope)
+    result = m._seven_step_cross_topology(renamed['grid'],renamed['assurance']['evidence'])
+    assert result['verdict'] == baseline['verdict'] == ('FAIL' if broken else 'PASS')
+    for stage in ('saved','before','reopened'):
+        assert result['checks'][stage]['mismatch_count'] == baseline['checks'][stage]['mismatch_count'] == int(broken)
+    assert envelope == original
+    renamed['grid']['before_string_assignments'][0]['grid_id'] = 'grid-one'
+    changed = m._seven_step_cross_topology(renamed['grid'],renamed['assurance']['evidence'])
+    assert changed['checks']['before']['verdict'] == ('PASS' if broken else 'FAIL')
+    assert changed['verdict'] == 'FAIL'

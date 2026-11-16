@@ -2073,3 +2073,42 @@ Expected reasons are `cross_topology_evidence_invalid`,
 zero mismatches. Repairing owner evidence leaves the connection violation
 visible. Independent producer records must bind every supplied identity and
 owner map to its actual design snapshot before live acceptance.
+# Composed cross-topology recovery in X05
+
+This synthetic replay keeps every saved, before and reopened phase diagnostic
+visible while repairing independent cross-grid violations and missing owners.
+
+```powershell
+@'
+import json, runpy, sys
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+envelope = fixtures['equal_count_ownership_envelope']()
+grid, evidence = envelope['grid'], envelope['assurance']['evidence']
+correct = deepcopy(evidence['saved_assignments'])
+before_owners = deepcopy(grid['before_string_assignments'])
+for stage in ('saved','reopened'):
+    rows = evidence[stage+'_assignments']
+    rows[0]['inverter_id'],rows[1]['inverter_id'] = 'INV-B','INV-A'
+grid['before_string_assignments'] = None
+observed = []
+for stage in ('initial','saved repaired','before owners repaired','reopened repaired'):
+    if stage == 'saved repaired': evidence['saved_assignments'] = deepcopy(correct)
+    if stage == 'before owners repaired': grid['before_string_assignments'] = before_owners
+    if stage == 'reopened repaired': evidence['reopened_assignments'] = deepcopy(correct)
+    result = m.reconcile_seven_steps_json(json.dumps(envelope))
+    checks = result['cross_topology']['checks']
+    observed.append(result['verdict'])
+    print(stage,result['verdict'],*(checks[key]['verdict'] for key in ('saved','before','reopened')))
+    print(*(checks[key]['reason'] for key in ('saved','before','reopened')))
+assert observed == ['UNREADABLE','UNREADABLE','FAIL','PASS']
+'@ | python -P -
+```
+
+Phase verdicts progress from FAIL/UNREADABLE/FAIL to PASS/UNREADABLE/FAIL,
+PASS/PASS/FAIL and PASS/PASS/PASS. Violations name `cross_topology_mismatch`,
+missing evidence names `cross_topology_evidence_invalid`, and repaired phases
+name `cross_topology_equal`. Each supplied map needs actual producer provenance
+before live acceptance.
