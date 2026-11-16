@@ -7669,3 +7669,145 @@ def test_mutated_returned_oracle_diagnostics_do_not_alias_inputs_prior_or_fresh_
     fresh=m.aggregate_bound_seven_steps(expected,records)
     assert fresh==preserved
     assert current['fixtures'][expected[2]]==prior['fixtures'][expected[2]]
+
+
+def explicit_oracle_load_material(ids,grids,devices,powers):
+    from fractions import Fraction
+    grid=dict(expected_grid_ids=sorted(set(grids)))
+    evidence=dict(oracle_strings=[dict(string_id=key,optimizers=i+1) for i,key in enumerate(ids)],
+        oracle_panels=[dict(string_id=key,panels=2*(i+1)) for i,key in enumerate(ids)],
+        oracle_dc_power=[dict(string_id=key,kw_dc=value) for key,value in zip(ids,powers)],
+        oracle_string_owners=[dict(string_id=key,grid_id=owner) for key,owner in zip(ids,grids)],
+        oracle_assignments=[dict(string_id=key,inverter_id=owner) for key,owner in zip(ids,devices)],
+        oracle_inverter_ids=sorted(set(devices)),inverter_loads={},oracle_values={})
+    fields=dict(strings='string_totals',optimizers='optimizer_totals',panels='panel_totals',kw_dc='dc_totals')
+    for metric,field in fields.items():
+        weights=oracle_metric_weights(evidence,metric)
+        for targets,owners in [(grid,grids),(evidence['inverter_loads'],devices)]:
+            totals={owner:sum(weights[key] for key,actual in zip(ids,owners) if actual==owner) for owner in set(owners)}
+            targets[field if targets is grid else metric]={key:fraction_fixed_text(value) if metric=='kw_dc' else int(value) for key,value in totals.items()}
+        total=sum(weights.values(),Fraction(0))
+        evidence['oracle_values'][metric]=fraction_fixed_text(total) if metric=='kw_dc' else int(total)
+    return grid,evidence
+
+
+def three_device_oracle_material():
+    return explicit_oracle_load_material(['s0','s1','s2'],['g']*3,['i0','i1','i2'],['1.25','2.50','3.75'])
+
+
+def test_reversible_three_device_oracle_routing_loop_restores_diagnostics():
+    from fractions import Fraction
+    from benches import x05_reconcile as m
+    grid,evidence=three_device_oracle_material()
+    original=deepcopy((grid,evidence)); baseline=m._seven_step_oracle_loads(grid,evidence)
+    prior=[]; snapshots=[]
+    for device in ('i1','i2','i0'):
+        evidence['oracle_assignments'][0]['inverter_id']=device
+        supplied=deepcopy((grid,evidence)); result=m._seven_step_oracle_loads(grid,evidence)
+        for metric,checks in result['metrics'].items():
+            amount=oracle_metric_weights(evidence,metric)['s0']
+            expected={} if device=='i0' else {'i0':-amount,device:amount}
+            check=checks['inverter_comparison']
+            assert check['mismatch_count']==len(expected)
+            assert {row['inverter_id']:Fraction(row['delta']) for row in check['examples']}==expected
+            assert checks['grid_comparison']==baseline['metrics'][metric]['grid_comparison']
+        assert (grid,evidence)==supplied
+        prior.append(result); snapshots.append(deepcopy(result))
+    assert prior[-1]==baseline and (grid,evidence)==original and prior==snapshots
+
+
+def alternating_rectangle_material():
+    # Negative topology fixture for marginal algebra, not a valid design PASS.
+    return explicit_oracle_load_material(['s00','s01','s10','s11'],['g0','g0','g1','g1'],['i0','i1','i0','i1'],['1','2','3','4'])
+
+
+@pytest.mark.parametrize('amount',['0.25','0.'+'0'*76+'1'])
+def test_alternating_oracle_rectangle_cancels_marginals_not_string_values(amount):
+    from fractions import Fraction
+    from benches import x05_reconcile as m
+    grid,evidence=alternating_rectangle_material()
+    before=deepcopy(evidence['oracle_dc_power']); baseline=m._seven_step_oracle_loads(grid,evidence)
+    for row,sign in zip(evidence['oracle_dc_power'],[1,-1,-1,1]):
+        row['kw_dc']=fraction_fixed_text(Fraction(row['kw_dc'])+sign*Fraction(amount))
+    original=deepcopy((grid,evidence)); result=m._seven_step_oracle_loads(grid,evidence)
+    assert result==baseline and result['verdict']=='PASS'
+    strings=m.compare_string_dc_power(before,evidence['oracle_dc_power'])
+    assert strings['verdict']=='FAIL' and strings['counts']['mismatched']==4
+    assert [Fraction(row['saved'])-Fraction(row['oracle']) for row in strings['mismatches']]==[Fraction(amount)*sign for sign in [1,-1,-1,1]]
+    topology=m.validate_cross_topology(grid['expected_grid_ids'],[row['string_id'] for row in evidence['oracle_strings']],evidence['oracle_inverter_ids'],evidence['oracle_string_owners'],[dict(inverter_id='i0',grid_id='g0'),dict(inverter_id='i1',grid_id='g1')],evidence['oracle_assignments'])
+    assert topology['verdict']=='FAIL' and topology['mismatch_count']==2
+    assert (grid,evidence)==original
+
+
+def test_bound_oracle_error_cap_crossings_exact_examples_and_prior_output_preserved():
+    from benches import x05_reconcile as m
+    expected,records=bound_seven_fixture_records()
+    grid,evidence=union_oracle_load_components(*(oracle_load_component(f'cap{i:02}') for i in range(11)))
+    records[0]['envelope']['grid'].update(grid)
+    records[0]['envelope']['assurance']['evidence'].update(evidence)
+    owners=sorted(grid['panel_totals']); devices=sorted(evidence['inverter_loads']['panels'])
+    actual=deepcopy((grid['panel_totals'],evidence['inverter_loads']['panels']))
+    history=[]; frozen=[]
+    for count in (21,20,19,20,21):
+        # Repaired low IDs reveal the next example when crossing the cap.
+        indices=list(range(22-count,22))
+        targets=records[0]['envelope']['grid']['panel_totals']
+        device_targets=records[0]['envelope']['assurance']['evidence']['inverter_loads']['panels']
+        targets.update({key:actual[0][key]+int(i in indices) for i,key in enumerate(owners)})
+        device_targets.update({key:actual[1][key]+int(i in indices) for i,key in enumerate(devices)})
+        supplied=deepcopy(records); result=m.aggregate_bound_seven_steps(expected,records)
+        # This projection intentionally has unrelated saved material; never claim fixture PASS.
+        assert result['fixtures'][expected[0]]['verdict']=='UNREADABLE'
+        checks=result['fixtures'][expected[0]]['reconciliation']['oracle_loads']['metrics']['panels']
+        for target,key,ids in [('grid','grid_id',owners),('inverter','inverter_id',devices)]:
+            check=checks[target+'_comparison']
+            assert check['mismatch_count']==count
+            assert [row[key] for row in check['examples']]==[ids[i] for i in indices][:MAX_STRING_EXAMPLES]
+            assert len(check['examples'])==min(count,MAX_STRING_EXAMPLES)
+        assert all(result['fixtures'][key]['verdict']=='PASS' for key in expected[1:])
+        assert records==supplied
+        history.append(result); frozen.append(deepcopy(result))
+    assert history==frozen and history[0]==history[-1]
+
+
+def test_heterogeneous_oracle_dc_superposition_is_exact_and_order_independent():
+    from fractions import Fraction
+    from itertools import permutations
+    from benches import x05_reconcile as m
+    grid,evidence=explicit_oracle_load_material(['s0','s1','s2'],['g0','g0','g1'],['i0','i1','i0'],['1.25','2.50','3.75'])
+    changes=[Fraction(1,4),Fraction(-1,2),Fraction(3,4)]
+    original=deepcopy((grid,evidence)); simultaneous=deepcopy(evidence)
+    for row,delta in zip(simultaneous['oracle_dc_power'],changes): row['kw_dc']=fraction_fixed_text(Fraction(row['kw_dc'])+delta)
+    reference=m._seven_step_oracle_loads(grid,simultaneous)
+    for order in permutations(range(3)):
+        sequential=deepcopy(evidence)
+        for index in order:
+            row=sequential['oracle_dc_power'][index]; row['kw_dc']=fraction_fixed_text(Fraction(row['kw_dc'])+changes[index])
+        result=m._seven_step_oracle_loads(grid,sequential)
+        assert result==reference
+        for target,owners,key in [('grid',['g0','g0','g1'],'grid_id'),('inverter',['i0','i1','i0'],'inverter_id')]:
+            predicted={owner:sum(delta for actual,delta in zip(owners,changes) if actual==owner) for owner in set(owners)}
+            check=result['metrics']['kw_dc'][target+'_comparison']
+            assert check['mismatch_count']==len([v for v in predicted.values() if v])
+            assert {row[key]:Fraction(row['delta']) for row in check['examples']}==predicted
+    assert (grid,evidence)==original
+
+
+def test_closed_unequal_string_device_rotation_and_inverse():
+    from fractions import Fraction
+    from benches import x05_reconcile as m
+    grid,evidence=three_device_oracle_material(); original=deepcopy((grid,evidence))
+    baseline=m._seven_step_oracle_loads(grid,evidence)
+    before=deepcopy(evidence['oracle_assignments'])
+    for row,device in zip(evidence['oracle_assignments'],['i1','i2','i0']): row['inverter_id']=device
+    result=m._seven_step_oracle_loads(grid,evidence); preserved=deepcopy(result)
+    assert result['metrics']['strings']==baseline['metrics']['strings']
+    for metric in ('optimizers','panels','kw_dc'):
+        weights=oracle_metric_weights(evidence,metric)
+        predicted={f'i{i}':weights[f's{(i-1)%3}']-weights[f's{i}'] for i in range(3)}
+        check=result['metrics'][metric]['inverter_comparison']
+        assert check['mismatch_count']==3
+        assert {row['inverter_id']:Fraction(row['delta']) for row in check['examples']}==predicted
+        assert result['metrics'][metric]['grid_comparison']==baseline['metrics'][metric]['grid_comparison']
+    evidence['oracle_assignments']=before
+    assert m._seven_step_oracle_loads(grid,evidence)==baseline and result==preserved and (grid,evidence)==original
