@@ -101,18 +101,36 @@ def write_json(value, output=None):
             temporary.unlink(missing_ok=True)
 
 
+def check_output_path(source, output):
+    if output is None:
+        return
+    source = Path(source)
+    target = Path(output)
+    if source.resolve() == target.resolve() or (target.exists() and source.samefile(target)):
+        raise ValueError('Input and output must refer to different files.')
+
+
+def report_failure(operation, error):
+    try:
+        print(f'X04 {operation} refused: {error}', file=sys.stderr)
+    except (OSError, ValueError):
+        # A closed diagnostic stream still leaves a deterministic failure exit.
+        pass
+    return 2
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('input', type=Path, help='Synthetic saved evidence JSON')
     parser.add_argument('--out', type=Path)
     args = parser.parse_args(argv)
     try:
+        check_output_path(args.input, args.out)
         payload = read_json(args.input)
         artifact = export_evidence(payload)
         write_json(artifact, args.out)
     except (OSError, ValueError, TypeError) as error:
-        print(f'X04 export refused: {error}', file=sys.stderr)
-        return 2
+        return report_failure('export', error)
     return 0
 
 
