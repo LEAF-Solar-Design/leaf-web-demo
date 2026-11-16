@@ -3,6 +3,7 @@ from pathlib import Path
 import copy
 import json
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -18,7 +19,7 @@ class ReceiptHistoryAudit(unittest.TestCase):
             store=audit.CustomerProfileStore(path); journal=audit.ConfirmationReceiptStore(journal_path)
             pins={}
             for customer in ['a','b']:
-                saved=store.save_version(customer,{'module':{'block':'PRIVATE_'+customer,'layer':'M'}},expected_version=0)
+                saved=store.save_version(customer,{'module':{'block':'PRIVATE_'+customer,'layer':'M','x':1}},expected_version=0)
                 project='old-'+customer; pin=store.apply_to_project(project,customer); pins[customer]=pin
                 context={'customer_key':customer,'project_key':project,'drawing_key':'drawing-'+customer}
                 result=ProfileWorkflow._result(context,pin,saved['roles'],{'count':1})
@@ -28,6 +29,31 @@ class ReceiptHistoryAudit(unittest.TestCase):
             clean=audit.audit_receipts(read,receipts,customer_key='a')
             self.assertEqual(clean,{'schema':'leaf.x07.receipt-history-audit.v1','customer_key':'a','receipt_count':1,'healthy':True,'issues':{'invalid_receipts':0,'missing_references':0,'inconsistent_references':0}})
             self.assertEqual((path.read_bytes(),journal_path.read_bytes()),before)
+            with closing(sqlite3.connect(journal_path)) as db:
+                original_encoded=db.execute('SELECT result FROM confirmations WHERE project_key=?',('old-a',)).fetchone()[0]
+            for kind in ['boolean','overflow']:
+                with self.subTest(kind=kind):
+                    changed=json.loads(original_encoded)
+                    if kind=='boolean': changed['resolved_roles']['module']['x']=True
+                    else: changed['applied_profile']['overflow']=1.0
+                    encoded=json.dumps(changed)
+                    if kind=='overflow': encoded=encoded.replace('"overflow": 1.0','"overflow": 1e999')
+                    with closing(sqlite3.connect(journal_path)) as db,db:
+                        db.execute('UPDATE confirmations SET result=? WHERE project_key=?',(encoded,'old-a'))
+                    snapshot=(path.read_bytes(),journal_path.read_bytes())
+                    try:
+                        result=audit.audit_receipts(read,receipts,customer_key='a')
+                        self.assertFalse(result['healthy'])
+                        self.assertEqual(result['issues'],{'invalid_receipts':int(kind=='overflow'),'missing_references':0,'inconsistent_references':int(kind=='boolean')})
+                        child=subprocess.run([sys.executable,audit.__file__,'--database',str(path),'--journal',str(journal_path),'--customer','a'],capture_output=True,text=True,timeout=10)
+                        self.assertEqual(child.returncode,1,child.stderr); self.assertEqual(child.stderr,'')
+                        self.assertEqual(json.loads(child.stdout),result)
+                        self.assertNotIn('PRIVATE',child.stdout)
+                        self.assertEqual((path.read_bytes(),journal_path.read_bytes()),snapshot)
+                        self.assertEqual(read.application_record('old-a','a'),pins['a'])
+                    finally:
+                        with closing(sqlite3.connect(journal_path)) as db,db:
+                            db.execute('UPDATE confirmations SET result=? WHERE project_key=?',(original_encoded,'old-a'))
             with closing(sqlite3.connect(journal_path)) as db,db:
                 original=json.loads(db.execute('SELECT result FROM confirmations WHERE project_key=?',('old-a',)).fetchone()[0])
                 tampered=copy.deepcopy(original); tampered['resolved_roles']['module']['block']='PRIVATE_CHANGED'

@@ -28,6 +28,9 @@ def audit_receipts(store, journal, *, customer_key):
             try:
                 if not isinstance(encoded,str) or len(encoded.encode('utf-8'))>262144: raise ValueError()
                 value=json.loads(encoded,parse_constant=lambda _:(_ for _ in ()).throw(ValueError()))
+                # Overflowing exponent lexemes also become nonfinite floats.
+                # Validate inside the per-receipt handler before comparisons.
+                json.dumps(value,sort_keys=True,allow_nan=False)
                 if (not isinstance(value,dict) or value.get('schema')!='leaf.x07.profile-workflow.v1' or value.get('state')!='applied'
                     or value.get('customer_key')!=customer_key or value.get('project_key')!=project
                     or not isinstance(value.get('applied_profile'),dict)): raise ValueError()
@@ -39,7 +42,8 @@ def audit_receipts(store, journal, *, customer_key):
             if pin is None:
                 issues['missing_references']+=1; continue
             if (json.dumps(value['applied_profile'],sort_keys=True,allow_nan=False)!=json.dumps(pin,sort_keys=True,allow_nan=False)
-                or value.get('resolved_roles')!=pin['roles']): issues['inconsistent_references']+=1
+                or json.dumps(value.get('resolved_roles'),sort_keys=True,allow_nan=False)!=json.dumps(pin['roles'],sort_keys=True,allow_nan=False)):
+                issues['inconsistent_references']+=1
     return {'schema':'leaf.x07.receipt-history-audit.v1','customer_key':customer_key,'receipt_count':len(rows),'healthy':not any(issues.values()),'issues':issues}
 
 
