@@ -2369,3 +2369,51 @@ assert observed == ['FAIL','FAIL','PASS']
 Both report-total checks remain PASS throughout the equal-grand-total swap.
 Derived comparisons repair independently. Actual oracle producers must supply
 independent values, owners and connections with provenance for live acceptance.
+
+## Oracle load conservation replay
+
+Within Studio X-bench X05, these synthetic checks prove arithmetic conservation
+and failure isolation for the supplied oracle maps. They do not prove that an
+independent extractor produced the maps or establish live acceptance. String
+counts scale by copying explicit unique string IDs and their connections. Panel,
+optimizer and power amounts can also scale while IDs stay fixed. Power scaling
+uses exact quarter units and Fraction references, with no panel-derived power.
+
+Run from the repository root:
+
+```python
+import sys, runpy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+component = fixtures['oracle_load_component']
+union = fixtures['union_oracle_load_components']
+envelope = fixtures['equal_count_ownership_envelope']()
+grid, evidence = union(component('left', scale=2), component('right', scale=2))
+grid['expected_grid_ids'].append('empty-grid')
+evidence['oracle_inverter_ids'].append('idle-device')
+for field in ('string_totals', 'optimizer_totals', 'panel_totals', 'dc_totals'):
+    grid[field]['empty-grid'] = 0
+for counts in evidence['inverter_loads'].values():
+    counts['idle-device'] = 0
+envelope['grid'].update(grid)
+envelope['assurance']['evidence'].update(evidence)
+def show(label):
+    result = m.reconcile_seven_steps_json(m.serialize_result(envelope))
+    loads = result['oracle_loads']
+    counts = [loads['metrics']['panels'][target+'_comparison']['mismatch_count']
+              for target in ('grid', 'inverter')]
+    print(label, loads['verdict'], *counts)
+show('conserved')
+envelope['grid']['panel_totals']['empty-grid'] = 1
+envelope['assurance']['evidence']['inverter_loads']['panels']['idle-device'] = 1
+show('phantom')
+```
+
+Expected output is `conserved PASS 0 0`, then `phantom FAIL 1 1`.
+The composed result retains all unrelated stage diagnostics. This replay replaces
+only the oracle-load projection of an existing synthetic envelope; its other
+saved material is intentionally unrelated and does not constitute a full PASS.
+A zero target needs explicit coverage. An omitted target is uncertainty, not zero.
+The disjoint-union tests additionally combine two contradictory components and a
+clean component: every metric retains four grid and four inverter mismatches.
