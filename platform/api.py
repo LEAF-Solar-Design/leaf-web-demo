@@ -35,29 +35,10 @@ from . import billing_statement, db, tenant_cost_store
 from . import org_invitations
 from .pricebook import load_pricebook
 
-def _archived_project_write_guard(request: Request):
-    """Cover platform writers which predate project-membership authorization."""
-    if request.method in {"GET", "HEAD", "OPTIONS"}:
-        return
-    raw_id = request.path_params.get("project_id")
-    if raw_id is None:
-        return
-    path = request.url.path.rstrip("/")
-    if path in {f"/api/projects/{raw_id}/archive", f"/api/projects/{raw_id}/restore"}:
-        return
-    if request.method == "DELETE" and path == f"/api/projects/{raw_id}":
-        return
-    try:
-        project_id = uuid.UUID(str(raw_id))
-    except ValueError:
-        raise HTTPException(422, "invalid project id") from None
-    org_id = get_org_id(request.headers.get("x-org-id"), request.headers.get("authorization"),
-                        request.headers.get("x-demo-session"), request)
-    _lifecycle_response(lambda: project_lifecycle.require_project_writable(org_id, project_id))
-
-
-router = APIRouter(prefix="/api", tags=["platform"],
-                   dependencies=[Depends(_archived_project_write_guard)])
+# Archive checks belong to the mutation transaction, after the project lock.
+# A router dependency releases that lock before the writer and also intercepts
+# authorized lifecycle receipt replays.
+router = APIRouter(prefix="/api", tags=["platform"])
 from .binding_grant_issuance import router as binding_grant_router
 router.include_router(binding_grant_router)
 from .workspace_scope import router as workspace_scope_router
@@ -486,6 +467,10 @@ def _lifecycle_response(operation):
     except project_lifecycle.LifecycleForbidden:
         raise HTTPException(status_code=403, detail="project access denied") from None
     except project_lifecycle.LifecycleConflict as exc:
+        if str(exc) == "archive the project before deleting it":
+            return JSONResponse(status_code=409, content={
+                "detail": str(exc), "code": "project_not_archived",
+            })
         raise HTTPException(status_code=409, detail=str(exc)) from None
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
@@ -1222,9 +1207,10 @@ class DeleteProjectBody(BaseModel):
 
 
 def project_artifact_delete_object(key: str, version_or_sha256: str):
-    # Fail closed until the configured backend exposes exact-identity deletion.
-    # The current upload backend only exposes delete(key), which cannot fulfill
-    # this contract for versioned objects. Keeping the queue is safe/retryable.
+    # Fail closed: key + SHA is inventory, not an atomic delete precondition.
+    # A future backend must use supported conditional deletion (version ID or
+    # ETag match), or producer-proven immutable unique keys. Otherwise leave the
+    # row queued; the current upload backend only exposes delete(key).
     raise RuntimeError("exact-identity artifact deletion backend is not configured")
 
 
@@ -1311,9 +1297,9 @@ def create_job(project_id: uuid.UUID, body: CreateJobBody,
     denial = entitlements.stored_job_entitlement_denial(org_id, body.kind)
     if denial is not None:
         return denial
-    job = store.create_job(
+    job = _lifecycle_response(lambda: store.create_job(
         org_id, project_id, body.kind, tool_name=body.tool, params=body.params
-    )
+    ))
     return {"job": job.to_dict()}
 
 

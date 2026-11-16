@@ -27,6 +27,19 @@ from .models import new_uuid
 PROJECT_ROLES = frozenset({"owner", "editor", "reviewer", "read_only"})
 WRITE_ROLES = frozenset({"owner", "editor"})
 MAX_FILE_BYTES = 1_048_576
+PROJECT_DELETE_CHILD_TABLES = (
+    "project_files", "project_materials", "project_reference_materials",
+    "project_web_page_revisions", "project_drawing_checkouts", "built_tools",
+)
+# Retained in full, including receipt payloads and their artifact references.
+PROJECT_DELETE_RETAINED_AUDIT_COLUMNS = (
+    ("project_lifecycle_receipts", "*"),
+    ("project_lifecycle_receipts", "result_json"),
+    ("drawing_versions", "oss_object"),
+    ("drawing_versions", "intake_ref"),
+    ("drawing_versions", "provenance"),
+    ("project_sizing_exchanges", "*"),
+)
 _RECEIPT_SECRET_KEYS = frozenset({
     "authorization", "password", "secret", "token", "api_key", "apikey",
     "access_token", "refresh_token", "oauth_token", "client_secret", "private_key",
@@ -195,12 +208,13 @@ def _project_membership_role(
 def _require_project_role(
     cur: Any, org_id: uuid.UUID, project_id: uuid.UUID,
     actor_binding_id: uuid.UUID, *, write: bool, lock: bool = True,
+    allow_archived: bool = False,
 ) -> str:
     # Tenant identity proves who the actor is. It never grants authority over
     # every project in that tenant. Named-project access comes only from the
     # active project membership so revocation takes effect on the next request.
     _actor_tenant_role(cur, org_id, actor_binding_id, lock=lock)
-    if write:
+    if write and not allow_archived:
         require_project_writable(org_id, project_id, cur=cur)
     member_role = _project_membership_role(
         cur, org_id, project_id, actor_binding_id,
@@ -300,6 +314,12 @@ def _receipt_replay(
     )
     row = cur.fetchone()
     if row is None:
+        # Existing receipts are reads. New lifecycle receipts/mutations must
+        # pass the archived gate under the caller's project FOR UPDATE lock.
+        if project_id is not None and action not in {
+            "project_archived", "project_restored", "project_deleted",
+        }:
+            require_project_writable(org_id, project_id, cur=cur)
         return None
     if row["input_digest"] != input_digest:
         raise LifecycleConflict("idempotency key is already bound to another request")
@@ -625,7 +645,7 @@ def invite_project_member(
         with conn.cursor() as cur:
             _project_row(cur, org_id, project_id)
             actor_role = _require_project_role(
-                cur, org_id, project_id, actor_binding_id, write=True,
+                cur, org_id, project_id, actor_binding_id, write=True, allow_archived=True,
             )
             replay = _receipt_replay(
                 cur, org_id, project_id, "member_invited", idempotency_key,
@@ -699,7 +719,7 @@ def revoke_project_member(
         with conn.cursor() as cur:
             _project_row(cur, org_id, project_id)
             actor_role = _require_project_role(
-                cur, org_id, project_id, actor_binding_id, write=True,
+                cur, org_id, project_id, actor_binding_id, write=True, allow_archived=True,
             )
             replay = _receipt_replay(
                 cur, org_id, project_id, "member_revoked", idempotency_key,
@@ -762,7 +782,7 @@ def put_project_file(
         with conn.cursor() as cur:
             _project_row(cur, org_id, project_id)
             _require_project_role(
-                cur, org_id, project_id, actor_binding_id, write=True,
+                cur, org_id, project_id, actor_binding_id, write=True, allow_archived=True,
             )
             replay = _receipt_replay(
                 cur, org_id, project_id, "file_put", idempotency_key, input_digest,
@@ -811,7 +831,7 @@ def delete_project_file(
         with conn.cursor() as cur:
             _project_row(cur, org_id, project_id)
             _require_project_role(
-                cur, org_id, project_id, actor_binding_id, write=True,
+                cur, org_id, project_id, actor_binding_id, write=True, allow_archived=True,
             )
             replay = _receipt_replay(
                 cur, org_id, project_id, "file_deleted", idempotency_key,
@@ -1011,7 +1031,7 @@ def rename_project(
         with conn.cursor() as cur:
             project = _project_row(cur, org_id, project_id)
             _require_project_role(
-                cur, org_id, project_id, actor_binding_id, write=True,
+                cur, org_id, project_id, actor_binding_id, write=True, allow_archived=True,
             )
             replay = _receipt_replay(
                 cur, org_id, project_id, "project_renamed", idempotency_key,
@@ -1063,7 +1083,7 @@ def reset_project(
         with conn.cursor() as cur:
             _project_row(cur, org_id, project_id)
             _require_project_role(
-                cur, org_id, project_id, actor_binding_id, write=True,
+                cur, org_id, project_id, actor_binding_id, write=True, allow_archived=True,
             )
             replay = _receipt_replay(
                 cur, org_id, project_id, "project_reset", idempotency_key,
@@ -1092,7 +1112,9 @@ def reset_project(
 
 
 def _require_archive_owner(cur, org_id, project_id, actor_binding_id, *, include_revoked=False):
-    _actor_tenant_role(cur, org_id, actor_binding_id)
+    tenant_role = _actor_tenant_role(cur, org_id, actor_binding_id)
+    if tenant_role == "admin":
+        return
     member_role = _project_membership_role(cur, org_id, project_id, actor_binding_id)
     if member_role == "owner":
         return
@@ -1129,12 +1151,12 @@ def _archive_transition(org_id, project_id, actor_binding_id, *, idempotency_key
             project = _project_row(cur, org_id, project_id, include_deleted=True)
             _require_archive_owner(cur, org_id, project_id, actor_binding_id,
                                    include_revoked=project["status"] == "deleted")
-            if project["status"] == "deleted" or project["deleted_at"] is not None:
-                # Deleted tombstones stay visible only to these state transitions.
-                raise LifecycleConflict("project is deleted")
             replay = _receipt_replay(cur, org_id, project_id, action, idempotency_key, input_digest)
             if replay is not None:
                 return replay
+            if project["status"] == "deleted" or project["deleted_at"] is not None:
+                # Deleted tombstones stay visible only to these state transitions.
+                raise LifecycleConflict("project is deleted")
             args = {"org_id": org_id, "project_id": project_id}
             if restore:
                 if project["status"] != "archived":
@@ -1218,8 +1240,7 @@ def _delete_project_content(cur, org_id, project_id):
     # No table discovery, CASCADE, ledger trigger bypass, shared blob deletion,
     # or deletion of audit-parent rows. Historical drawing identities and jobs
     # may be retained by immutable audit FKs and are not blindly cascaded.
-    for table in ("project_files", "project_materials", "project_reference_materials",
-                  "project_web_page_revisions", "project_drawing_checkouts", "built_tools"):
+    for table in PROJECT_DELETE_CHILD_TABLES:
         cur.execute(f"DELETE FROM {table} WHERE org_id=%s AND project_id=%s", (org_id, project_id))
 
 
@@ -1267,8 +1288,6 @@ def delete_project(
             project = _project_row(cur, org_id, project_id, include_deleted=True)
             _require_archive_owner(cur, org_id, project_id, actor_binding_id,
                                    include_revoked=project["status"] == "deleted")
-            if not isinstance(confirm_name, str) or confirm_name != project["name"]:
-                raise ValueError("confirm_name must exactly match the current project name")
             replay = _receipt_replay(
                 cur, org_id, project_id, "project_deleted", idempotency_key,
                 input_digest,
@@ -1276,7 +1295,11 @@ def delete_project(
             if replay is not None:
                 return replay
             if project["status"] != "archived" or project["deleted_at"] is not None:
+                # PA2 will replace the web DangerZone's old active-project DELETE
+                # with Archive, then Delete with a typed name. No legacy bypass.
                 raise LifecycleConflict("archive the project before deleting it")
+            if not isinstance(confirm_name, str) or confirm_name != project["name"]:
+                raise ValueError("confirm_name must exactly match the current project name")
             artifacts_queued = _queue_project_artifacts(cur, org_id, project_id)
             _delete_project_content(cur, org_id, project_id)
             result = {"project_id": str(project_id), "status": "deleted",

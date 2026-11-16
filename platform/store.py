@@ -603,8 +603,6 @@ def get_authority_mode(org_id: uuid.UUID, project_id: uuid.UUID) -> str:
 
 
 def _require_postgres_authority(org_id: uuid.UUID, project_id: uuid.UUID) -> None:
-    from .project_lifecycle import require_project_writable
-    require_project_writable(org_id, project_id)
     if get_authority_mode(org_id, project_id) != "postgres_canonical":
         raise RuntimeError("canonical ledger is unavailable while authority is legacy_sqlite")
 
@@ -869,6 +867,8 @@ def append_history_operation(org_id: uuid.UUID, project_id: uuid.UUID, operation
     digest = canonical_hash("history-operation", digest_input)
     with connection() as conn:
         with conn.cursor() as cur:
+            from .project_lifecycle import require_project_writable
+            require_project_writable(org_id, project_id, cur=cur)
             cur.execute(
                 "INSERT INTO history_operations (operation_id, org_id, project_id, operation_type, "
                 "payload, idempotency_key, hash_algorithm, hash_canonicalization, hash_domain, hash_value) "
@@ -954,6 +954,8 @@ def append_solve_record(org_id: uuid.UUID, project_id: uuid.UUID, payload: Dict[
     digest = canonical_hash("solve-record", payload)
     with connection() as conn:
         with conn.cursor() as cur:
+            from .project_lifecycle import require_project_writable
+            require_project_writable(org_id, project_id, cur=cur)
             cur.execute(
                 "INSERT INTO solve_records (solve_id, org_id, project_id, payload, idempotency_key, "
                 "hash_algorithm, hash_canonicalization, hash_domain, hash_value) "
@@ -1422,6 +1424,8 @@ def create_job(org_id: uuid.UUID, project_id: uuid.UUID, kind: str, *,
                spine_ref: Optional[str] = None,
                input_version_id: Optional[uuid.UUID] = None) -> Job:
     with cursor() as cur:
+        from .project_lifecycle import require_project_writable
+        require_project_writable(org_id, project_id, cur=cur)
         cur.execute(
             "INSERT INTO jobs "
             "(job_id, project_id, org_id, kind, tool_name, params, spine_ref, input_version_id) "
@@ -1444,6 +1448,8 @@ def create_built_tool(org_id: uuid.UUID, project_id: uuid.UUID, name: str,
                       source_ref: Optional[str] = None,
                       provenance: Optional[Dict[str, Any]] = None) -> BuiltTool:
     with cursor() as cur:
+        from .project_lifecycle import require_project_writable
+        require_project_writable(org_id, project_id, cur=cur)
         cur.execute(
             "INSERT INTO built_tools "
             "(tool_id, project_id, org_id, name, version, manifest, source_ref, provenance) "

@@ -7,7 +7,7 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from leaf_platform import project_lifecycle as lifecycle, store
-from leaf_platform.db import cursor
+from leaf_platform.db import connection, cursor
 
 
 class FakeSweepStore:
@@ -52,11 +52,89 @@ class FakeSweepStore:
         return list(self.result)
 
 
-def test_sweep_passes_exact_key_and_version_or_sha256():
+def test_sweep_passes_inventory_identity_to_a_conditional_backend():
+    # The callback contract is a conditional backend, not proof that a SHA is
+    # safe to pass to an ordinary delete(key). The production default refuses.
     fake = FakeSweepStore()
     calls = []
     assert lifecycle.sweep_project_artifacts(uuid.uuid4(), lambda *args: calls.append(args), store=fake) == 2
     assert calls == [("exact/a.bin", "version-17"), ("exact/b.bin", "a" * 64)]
+
+
+def test_default_sweep_backend_deletes_nothing():
+    from leaf_platform.api import project_artifact_delete_object
+    fake = FakeSweepStore()
+    assert lifecycle.sweep_project_artifacts(
+        uuid.uuid4(), project_artifact_delete_object, store=fake) == 0
+    assert not any(row["swept"] for row in fake.rows)
+
+
+def test_delete_child_table_allowlist_is_frozen():
+    expected = {
+        "project_files", "project_materials", "project_reference_materials",
+        "project_web_page_revisions", "project_drawing_checkouts", "built_tools",
+    }
+    assert set(lifecycle.PROJECT_DELETE_CHILD_TABLES) == expected
+    touched = []
+
+    class DeleteCursor:
+        def execute(self, sql, args):
+            assert sql.startswith("DELETE FROM ")
+            table = sql.split()[2]
+            assert table in expected
+            assert "WHERE org_id=%s AND project_id=%s" in sql
+            touched.append(table)
+
+    lifecycle._delete_project_content(DeleteCursor(), uuid.uuid4(), uuid.uuid4())
+    assert set(touched) == expected
+    assert ("project_lifecycle_receipts", "result_json") in lifecycle.PROJECT_DELETE_RETAINED_AUDIT_COLUMNS
+
+
+def test_job_write_checks_archive_under_project_lock(monkeypatch):
+    class JobCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def execute(self, sql, args):
+            assert sql.startswith("SELECT project_id, org_id, name, status")
+            assert "org_id = %(org_id)s AND project_id = %(project_id)s" in sql
+            assert sql.endswith("FOR UPDATE")
+
+        def fetchone(self):
+            return {"status": "archived"}
+
+    monkeypatch.setattr(store, "cursor", JobCursor)
+    with pytest.raises(lifecycle.LifecycleConflict, match="project is archived"):
+        store.create_job(uuid.uuid4(), uuid.uuid4(), "run")
+
+
+def test_artifact_reference_gained_before_inventory_check_is_not_queued():
+    org_id, project_id = uuid.uuid4(), uuid.uuid4()
+    key = f"tenants/{org_id}/projects/{project_id}/source.dxf"
+
+    class InventoryCursor:
+        def execute(self, sql, args):
+            if sql.startswith("SELECT oss_object"):
+                self.rows = [{"oss_object": key, "intake_ref": None,
+                              "provenance": {"source": {"ref": key, "sha256": "a" * 64}}}]
+            elif sql.startswith("SELECT 1 FROM drawing_versions"):
+                # Simulate another project's reference becoming visible before
+                # the ownership predicate. This fake checks inventory refusal,
+                # not the database's concurrent-transaction serialization.
+                self.rows = [{"present": 1}]
+            else:
+                raise AssertionError("shared object must never be queued: " + sql)
+
+        def fetchall(self):
+            return self.rows
+
+        def fetchone(self):
+            return self.rows[0]
+
+    assert lifecycle._queue_project_artifacts(InventoryCursor(), org_id, project_id) == 0
 
 
 def test_sweep_is_idempotent():
@@ -141,9 +219,45 @@ def test_non_owner_member_cannot_transition(client, project, action):
 def test_delete_requires_archive_and_exact_current_name(client, project):
     assert _action(client, project, "delete").status_code == 409
     for body in ({}, {"confirm_name": "wrong"}, {"confirm_name": project[3] + " "}):
-        assert _action(client, project, "delete", json=body).status_code == 422
+        response = _action(client, project, "delete", json=body)
+        assert response.status_code == 409
+        assert response.json() == {"detail": "archive the project before deleting it",
+                                   "code": "project_not_archived"}
     assert _action(client, project, "archive").status_code == 200
-    assert _action(client, project, "delete", json={}).status_code == 422
+    for body in ({}, {"confirm_name": "wrong"}, {"confirm_name": project[3] + " "}):
+        assert _action(client, project, "delete", json=body).status_code == 422
+
+
+def test_old_delete_without_body_requires_archive(client, project):
+    response = client.delete(f"/api/projects/{project[2]}",
+                             headers=_headers(project[0], project[1], "old-delete"))
+    assert response.status_code == 409
+    assert response.json() == {"detail": "archive the project before deleting it",
+                               "code": "project_not_archived"}
+
+
+def test_delete_replay_rejects_changed_confirm_name(client, project):
+    assert _action(client, project, "archive").status_code == 200
+    assert _action(client, project, "delete", "delete-digest").status_code == 200
+    response = _action(client, project, "delete", "delete-digest", json={"confirm_name": "different"})
+    assert response.status_code == 409
+    assert response.json()["detail"] == "idempotency key is already bound to another request"
+
+
+def test_archived_lifecycle_receipt_replay_precedes_write_guard(client, project):
+    org_id, owner_id, project_id, _ = project
+    headers = _headers(org_id, owner_id, "rename-before-archive")
+    path = f"/api/projects/{project_id}/rename"
+    renamed = client.post(path, json={"name": "Renamed disposable"}, headers=headers)
+    assert renamed.status_code == 200
+    assert _action(client, project, "archive").status_code == 200
+    replay = client.post(path, json={"name": "Renamed disposable"}, headers=headers)
+    assert replay.status_code == 200
+    assert replay.json()["receipt"] == renamed.json()["receipt"]
+    assert replay.json()["replayed"] is True
+    response = client.post(path, json={"name": "Changed payload"}, headers=headers)
+    assert response.status_code == 409
+    assert response.json()["detail"] == "idempotency key is already bound to another request"
 
 
 def test_archive_restore_listing_and_receipt_replay(client, project):
@@ -285,6 +399,89 @@ def test_delete_queues_only_exclusive_publication_identities_and_keeps_shared_ma
         cur.execute("SELECT project_id FROM project_materials WHERE org_id=%s AND sha256=%s",
                     (org_id, material_sha))
         assert [row["project_id"] for row in cur.fetchall()] == [other.project_id]
+
+
+def test_delete_preserves_references_gained_in_its_transaction_window(client, project, monkeypatch):
+    """Real overlapping DB transactions; selected CI supplies DATABASE_URL.
+
+    The project fixture uses the suite's normal DB gate locally. This is not
+    a fake inventory race: the second connection commits after delete has
+    taken its serializable snapshot and inventoried the publication.
+    """
+    org_id, owner_id, project_id, _ = project
+    other = store.create_project(org_id, "Concurrent reference disposable project")
+    drawing = store.create_drawing_artifact(org_id, uuid.UUID(project_id))
+    other_drawing = store.create_drawing_artifact(org_id, other.project_id)
+    version_id, other_version_id, material_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    key = f"tenants/{org_id}/projects/{project_id}/drawings/{drawing.drawing_id}/source.dxf"
+    digest = "d" * 64
+    with cursor() as cur:
+        cur.execute("INSERT INTO drawing_versions "
+                    "(version_id,org_id,project_id,drawing_id,seq,oss_object,provenance) "
+                    "VALUES (%s,%s,%s,%s,1,%s,%s)",
+                    (version_id, org_id, project_id, drawing.drawing_id, key,
+                     Jsonb({"source": {"ref": key, "sha256": digest}})))
+        cur.execute("INSERT INTO project_materials "
+                    "(material_id,org_id,project_id,actor_binding_id,name,media_type,byte_size,sha256,"
+                    "width,height,preview_sha256) VALUES (%s,%s,%s,%s,'shared','image/png',10,%s,1,1,%s)",
+                    (uuid.uuid4(), org_id, project_id, owner_id, digest, digest))
+        cur.execute("SELECT * FROM drawing_versions WHERE version_id=%s", (version_id,))
+        shared_row = cur.fetchone()
+    assert _action(client, project, "archive").status_code == 200
+    delete_content = lifecycle._delete_project_content
+    gained_reference = []
+
+    def gain_reference_then_delete(cur, target_org, target_project):
+        assert (target_org, str(target_project)) == (org_id, project_id)
+        cur.execute("SHOW transaction_isolation")
+        assert cur.fetchone()["transaction_isolation"] == "serializable"
+        cur.execute("SELECT pg_backend_pid() AS pid")
+        deleting_pid = cur.fetchone()["pid"]
+        if not gained_reference:  # A serialization retry must not insert twice.
+            cur.execute("SELECT object_key,object_version_or_sha256 FROM project_artifact_sweep "
+                        "WHERE project_id=%s", (project_id,))
+            assert cur.fetchall() == [{"object_key": key, "object_version_or_sha256": digest}]
+            with connection() as other_conn:
+                with other_conn.cursor() as other_cur:
+                    other_cur.execute("SET LOCAL lock_timeout = '3s'")
+                    other_cur.execute("SELECT pg_backend_pid() AS pid")
+                    assert other_cur.fetchone()["pid"] != deleting_pid
+                    other_cur.execute("INSERT INTO drawing_versions "
+                        "(version_id,org_id,project_id,drawing_id,seq,oss_object) "
+                        "VALUES (%s,%s,%s,%s,1,%s)",
+                        (other_version_id, org_id, other.project_id, other_drawing.drawing_id, key))
+                    other_cur.execute("INSERT INTO project_materials "
+                        "(material_id,org_id,project_id,actor_binding_id,name,media_type,byte_size,sha256,"
+                        "width,height,preview_sha256) VALUES (%s,%s,%s,%s,'shared','image/png',10,%s,1,1,%s)",
+                        (material_id, org_id, other.project_id, owner_id, digest, digest))
+            # The second transaction has committed while delete is still open.
+            gained_reference.append(True)
+        delete_content(cur, target_org, target_project)
+
+    monkeypatch.setattr(lifecycle, "_delete_project_content", gain_reference_then_delete)
+    deleted = _action(client, project, "delete")
+    assert deleted.status_code == 200, deleted.text
+    assert gained_reference == [True]
+    with cursor() as cur:
+        cur.execute("SELECT * FROM drawing_versions WHERE version_id=%s", (version_id,))
+        assert cur.fetchone() == shared_row
+        cur.execute("SELECT project_id,oss_object FROM drawing_versions WHERE version_id=%s",
+                    (other_version_id,))
+        assert cur.fetchone() == {"project_id": other.project_id, "oss_object": key}
+        cur.execute("SELECT project_id,sha256 FROM project_materials WHERE material_id=%s", (material_id,))
+        assert cur.fetchone() == {"project_id": other.project_id, "sha256": digest}
+        cur.execute("SELECT count(*) AS count FROM project_materials WHERE project_id=%s", (project_id,))
+        assert cur.fetchone()["count"] == 0
+        # A serializable snapshot need not see a later reference. Inventory is
+        # not delete authority: the default backend must keep even this queued
+        # object unswept, and all publication/audit rows remain intact.
+        cur.execute("SELECT swept_at FROM project_artifact_sweep WHERE project_id=%s AND object_key=%s",
+                    (project_id, key))
+        queued = cur.fetchall()
+        assert queued == [{"swept_at": None}] or queued == []
+        # A serialization retry can see the committed reference and omit the
+        # queue row altogether. Neither outcome permits an object deletion.
+        assert deleted.json()["artifacts_queued"] == len(queued)
 
 
 def test_delete_preserves_audit_referenced_parents_and_receipts(client, project):
