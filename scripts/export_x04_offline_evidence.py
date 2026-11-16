@@ -197,7 +197,7 @@ def check_output_path(source, output):
         return
     source = Path(source)
     target = Path(output)
-    if source.resolve() == target.resolve() or (target.exists() and source.samefile(target)):
+    if source.resolve() == target.resolve() or (target.exists() and source.exists() and source.samefile(target)):
         raise ValueError('Input and output must refer to different files.')
 
 
