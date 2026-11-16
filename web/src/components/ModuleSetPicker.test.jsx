@@ -12,6 +12,76 @@ const first = () => screen.getByRole('checkbox', { name: 'Design / Panel A: 12 c
 const second = () => screen.getByRole('checkbox', { name: 'Alternate / Panel B: 9 candidates' })
 const submit = () => screen.getByRole('button', { name: 'Count selected set' })
 
+it('gives identical labels unique input IDs and independent explicit associations', () => {
+  const onSelect = vi.fn()
+  const sets = [{ ...data.sets[0], set_id: 'same-label-a' }, { ...data.sets[0], set_id: 'same-label-b' }]
+  const view = render(<ModuleSetPicker data={{ sets }} onSelect={onSelect} />)
+  const inputs = screen.getAllByRole('checkbox')
+  const labels = [...view.container.querySelectorAll('label')]
+  expect(inputs[0].id).not.toBe('')
+  expect(inputs[1].id).not.toBe(inputs[0].id)
+  labels.forEach((label, index) => expect(label.control).toBe(inputs[index]))
+  fireEvent.click(labels[1])
+  expect(inputs[0].checked).toBe(false)
+  expect(inputs[1].checked).toBe(true)
+  fireEvent.click(submit())
+  expect(onSelect).toHaveBeenCalledExactlyOnceWith(['same-label-b'])
+})
+
+it('keeps explicit label IDs unique across simultaneous picker instances', () => {
+  const onA = vi.fn(), onB = vi.fn()
+  const view = render(<><ModuleSetPicker data={data} onSelect={onA} /><ModuleSetPicker data={data} onSelect={onB} /></>)
+  const inputs = screen.getAllByRole('checkbox')
+  const labels = [...view.container.querySelectorAll('label')]
+  expect(new Set(inputs.map((input) => input.id)).size).toBe(4)
+  inputs.forEach((input) => expect(input.id).not.toBe(''))
+  labels.forEach((label, index) => expect(label.control).toBe(inputs[index]))
+  fireEvent.click(labels[0])
+  expect(inputs.map((input) => input.checked)).toEqual([true, false, false, false])
+  fireEvent.click(labels[3])
+  expect(inputs.map((input) => input.checked)).toEqual([true, false, false, true])
+  const buttons = screen.getAllByRole('button', { name: 'Count selected set' })
+  fireEvent.click(buttons[0])
+  fireEvent.click(buttons[1])
+  expect(onA).toHaveBeenCalledExactlyOnceWith(['first'])
+  expect(onB).toHaveBeenCalledExactlyOnceWith(['second'])
+})
+
+it.each([
+  { layer: {} }, { layer: 2 }, { block: {} }, { block: true },
+  { count: -1 }, { count: 1.5 }, { count: NaN }, { count: Infinity }, { count: 9007199254740992 },
+])('refuses malformed labels or candidate counts %# without selection', (fields) => {
+  const onSelect = vi.fn()
+  render(<ModuleSetPicker data={{ sets: [{ ...data.sets[0], ...fields }] }} onSelect={onSelect} />)
+  expect(screen.getByText(/Module sets unavailable.*Run the module tool again/)).toBeTruthy()
+  expect(screen.queryAllByRole('checkbox')).toHaveLength(0)
+  fireEvent.click(submit())
+  expect(onSelect).not.toHaveBeenCalled()
+})
+
+it.each(['duplicate', 'absent'])('refuses a summary with %s candidate IDs', (kind) => {
+  const rows = kind === 'duplicate' ? [data.sets[0], data.sets[0]]
+    : [{ ...data.sets[0], set_id: 'missing' }]
+  render(<ModuleSetPicker data={{ ...data, selected_sets: rows, count: 12 }} onSelect={vi.fn()} />)
+  expect(screen.getByText(/Count summary unavailable/)).toBeTruthy()
+  expect(screen.queryByText(/^Counted /)).toBeNull()
+})
+
+it('keeps focus and choices attached to set IDs when rows reorder', () => {
+  const onSelect = vi.fn()
+  const view = render(<ModuleSetPicker data={data} onSelect={onSelect} />)
+  const focused = first()
+  focused.focus()
+  fireEvent.click(focused)
+  view.rerender(<ModuleSetPicker data={{ sets: [...data.sets].reverse() }} onSelect={onSelect} />)
+  expect(document.activeElement).toBe(focused)
+  expect(first()).toBe(focused)
+  expect(first().checked).toBe(true)
+  expect(second().checked).toBe(false)
+  fireEvent.click(submit())
+  expect(onSelect).toHaveBeenCalledExactlyOnceWith(['first'])
+})
+
 it('hides late completed drawing A counts after switching to drawing B', () => {
   const onSelect = vi.fn()
   const completedA = { ...data, selected_sets: [data.sets[0]], count: 12 }
