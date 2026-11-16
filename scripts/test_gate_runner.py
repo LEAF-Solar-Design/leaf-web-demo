@@ -5737,49 +5737,6 @@ def _jobs_main(g, monkeypatch, capsys, tmp_path, flags):
     return rc, capsys.readouterr().out
 
 
-def _without_suite_memory_emissions(stdout):
-    # Consume both newlines printed by the emitter so interrupted progress
-    # fragments rejoin; splitlines would leave an extra newline behind.
-    return re.sub(r"\nLEAF_SUITE_MEMORY [^\r\n]*\n", "", stdout)
-
-
-@pytest.fixture
-def _jobs_memory_telemetry(monkeypatch):
-    monkeypatch.setenv("LEAF_GATE_MEM", "1")
-
-
-def test_jobs_stdout_ignores_only_memory_emission_order_and_placement():
-    first = '\nLEAF_SUITE_MEMORY {"suite": "pool-0", "sample_count": 1}\n'
-    second = '\nLEAF_SUITE_MEMORY {"suite": "pool-1", "sample_count": 2}\n'
-    ordinary = "header\n  ... pool suite 0 PASS\n\nscoreboard\n"
-    serial = "header\n  ... pool suite 0" + first + " PASS\n" + second + "\nscoreboard\n"
-    reordered = "header\n  ... pool suite 0" + second + " PASS\n" + first + "\nscoreboard\n"
-    parallel = ("header\n" + second + "GATE_RESULT id=pool-1 status=PASS\n"
-                + first + "GATE_RESULT id=pool-0 status=PASS\n"
-                + "  ... pool suite 0 PASS\n\nscoreboard\n")
-    assert serial != reordered
-    assert _without_suite_memory_emissions(serial) == ordinary
-    assert _without_suite_memory_emissions(reordered) == ordinary
-    parallel = _without_suite_memory_emissions(parallel)
-    assert (parallel.split("GATE_RESULT", 1)[0]
-            + parallel[parallel.index("  ... "):]) == ordinary
-
-
-@pytest.mark.parametrize("changed", [
-    "ordinary changed\n\nlast\n",
-    "ordinary\nlast\n",
-    "ordinary\n\nlast",
-    'ordinary LEAF_SUITE_MEMORY {"suite": "pool-0"}\n\nlast\n',
-])
-def test_jobs_stdout_memory_filter_preserves_other_output_differences(changed):
-    ordinary = "ordinary\n\nlast\n"
-    emission = '\nLEAF_SUITE_MEMORY {"suite": "pool-0"}\n'
-    assert _without_suite_memory_emissions(ordinary + emission) == ordinary
-    assert _without_suite_memory_emissions(changed + emission) == changed
-    assert _without_suite_memory_emissions(changed + emission) != ordinary
-
-
-@pytest.mark.usefixtures("_jobs_memory_telemetry")
 def test_jobs_one_is_byte_identical_to_default_without_starting_threads(
         tmp_path, monkeypatch, capsys):
     g = _load_runner()
@@ -5796,16 +5753,12 @@ def test_jobs_one_is_byte_identical_to_default_without_starting_threads(
     default = _jobs_main(g, monkeypatch, capsys, tmp_path, ["--retry", "0"])
     explicit = _jobs_main(g, monkeypatch, capsys, tmp_path,
                           ["--retry", "0", "--jobs", "1"])
-    assert "\nLEAF_SUITE_MEMORY " in default[1]
-    assert "\nLEAF_SUITE_MEMORY " in explicit[1]
-    assert (default[0], _without_suite_memory_emissions(default[1])) == (
-        explicit[0], _without_suite_memory_emissions(explicit[1]))
+    assert default == explicit
     assert default[0] == 0
     assert "GATE SCOREBOARD" in default[1]
     assert "executed-count drift" in default[1]
 
 
-@pytest.mark.usefixtures("_jobs_memory_telemetry")
 def test_jobs_four_keeps_the_same_scoreboard_and_catalog_order(
         tmp_path, monkeypatch, capsys):
     g = _load_runner()
@@ -5818,13 +5771,9 @@ def test_jobs_four_keeps_the_same_scoreboard_and_catalog_order(
     parallel = _jobs_main(g, monkeypatch, capsys, tmp_path,
                           ["--retry", "0", "--jobs", "4"])
     assert parallel[0] == serial[0]
-    assert "\nLEAF_SUITE_MEMORY " in serial[1]
-    assert "\nLEAF_SUITE_MEMORY " in parallel[1]
-    serial_stdout = _without_suite_memory_emissions(serial[1])
-    parallel_stdout = _without_suite_memory_emissions(parallel[1])
     # Ordinary phased runs add completion blocks before the unchanged final rows.
-    assert (parallel_stdout.split("GATE_RESULT", 1)[0]
-            + parallel_stdout[parallel_stdout.index("  ... "):]) == serial_stdout
+    assert (parallel[1].split("GATE_RESULT", 1)[0]
+            + parallel[1][parallel[1].index("  ... "):]) == serial[1]
     assert parallel[0] == 0
     rows = [line for line in parallel[1].splitlines() if line.startswith("pool suite")]
     assert len(rows) == len(suites)
@@ -6162,7 +6111,6 @@ def test_lane_priority_runs_a_long_resource_chain_ahead_of_a_short_pool_suite(
     assert state["stopped_after"] is None
 
 
-@pytest.mark.usefixtures("_jobs_memory_telemetry")
 def test_jobs_red_and_spawn_retry_keep_the_verdict_rows_and_flaked_callout(
         tmp_path, monkeypatch, capsys):
     import json
@@ -6183,13 +6131,9 @@ def test_jobs_red_and_spawn_retry_keep_the_verdict_rows_and_flaked_callout(
     serial_json = json.loads(result_file.read_text(encoding="utf-8"))
     parallel = _jobs_main(g, monkeypatch, capsys, tmp_path, [*flags, "--jobs", "4"])
     assert parallel[0] == serial[0]
-    assert "\nLEAF_SUITE_MEMORY " in serial[1]
-    assert "\nLEAF_SUITE_MEMORY " in parallel[1]
-    serial_stdout = _without_suite_memory_emissions(serial[1])
-    parallel_stdout = _without_suite_memory_emissions(parallel[1])
     # Ordinary phased runs add completion blocks before the unchanged final rows.
-    assert (parallel_stdout.split("GATE_RESULT", 1)[0]
-            + parallel_stdout[parallel_stdout.index("  ... "):]) == serial_stdout
+    assert (parallel[1].split("GATE_RESULT", 1)[0]
+            + parallel[1][parallel[1].index("  ... "):]) == serial[1]
     assert parallel[0] == 1
     data = json.loads(result_file.read_text(encoding="utf-8"))
     assert data == serial_json
