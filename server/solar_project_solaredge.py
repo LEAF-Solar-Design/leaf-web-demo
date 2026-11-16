@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from hashlib import sha256
 import json
 import math
+import re
 import sys
 from time import monotonic
 from uuid import UUID, uuid4
@@ -37,6 +38,28 @@ STORE_SCHEMA = "leaf.solar-project-solaredge-import.v1"
 READ_SCHEMA = "leaf.solar-project-solaredge-tracking-read.v1"
 READ_TOOL = "solar-solaredge-tracking-read"
 ACCEPT_TOOL = "solar-solaredge-accept"
+
+
+class SolarEdgeGridRefusal(GraphValidationError):
+    """Validated object and candidate identity for an unresolved reviewed grid."""
+
+    def __init__(self, code, frame_ref, candidate_ids, action):
+        valid = (
+            code in ("SOLAREDGE_GRID_UNMATCHED", "SOLAREDGE_GRID_AMBIGUOUS")
+            and type(frame_ref) is str and len(frame_ref) <= 128
+            and re.fullmatch(r"[A-Za-z0-9_.:-]+", frame_ref) is not None
+            and type(candidate_ids) is list and len(candidate_ids) <= 20
+            and all(type(value) is int and 0 <= value <= tracking.MAX_INDEX for value in candidate_ids)
+            and len(set(candidate_ids)) == len(candidate_ids)
+            and action == ("redraw_frame" if code == "SOLAREDGE_GRID_UNMATCHED" else "pick_candidate")
+            and (not candidate_ids if code == "SOLAREDGE_GRID_UNMATCHED" else bool(candidate_ids))
+        )
+        if not valid:
+            raise GraphValidationError(tracking.REPORT_INVALID)
+        super().__init__(code)
+        self.frame_ref = frame_ref
+        self.candidate_ids = list(candidate_ids)
+        self.action = action
 
 
 def tracking_read_catalog_availability(tool, tenant, input_version_id):
@@ -564,6 +587,17 @@ def _validated_record(context, meta, report, *, review=False):
 
 def _accepted_record(context, meta, report, matched_only=False):
     if not matched_only:
+        unresolved = [row for row in report["matches"]
+                      if row.get("status") in ("unmatched", "ambiguous")]
+        if unresolved:
+            # Bind diagnostics only after the report's source and references validate.
+            _record(context, meta, report, review=True)
+            row = unresolved[0]
+            unmatched = row["status"] == "unmatched"
+            raise SolarEdgeGridRefusal(
+                "SOLAREDGE_GRID_UNMATCHED" if unmatched else "SOLAREDGE_GRID_AMBIGUOUS",
+                row["frame_ref"], row["candidates"],
+                "redraw_frame" if unmatched else "pick_candidate")
         return _record(context, meta, report)
     record = _record(context, meta, report, review=True)
     _check(bool(record["frames"]) and bool(record["strings"]), "SOLAREDGE_MATCHED_TRACKING_REQUIRED")

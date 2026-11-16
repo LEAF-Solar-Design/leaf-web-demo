@@ -110,6 +110,31 @@ def refused(code, operation):
     assert getattr(exc.value, "code", getattr(exc.value, "reason_code", None)) == code
 
 
+@pytest.mark.parametrize("code,candidates,action", [
+    ("SOLAREDGE_GRID_UNMATCHED", [], "redraw_frame"),
+    ("SOLAREDGE_GRID_AMBIGUOUS", [0, 1], "pick_candidate"),
+])
+def test_typed_grid_refusal_preserves_validated_identity(code, candidates, action):
+    error = se.SolarEdgeGridRefusal(code, "leaf:frame:group-1", candidates, action)
+    assert isinstance(error, GraphValidationError)
+    assert (error.code, error.frame_ref, error.candidate_ids, error.action) == (
+        code, "leaf:frame:group-1", candidates, action)
+    candidates.append(7)
+    assert 7 not in error.candidate_ids
+
+
+@pytest.mark.parametrize("changes", [
+    {"code": "REPORT_INVALID"}, {"frame_ref": "bad\nframe"}, {"frame_ref": "x" * 129},
+    {"candidate_ids": [True]}, {"candidate_ids": []}, {"candidate_ids": [0, 0]},
+    {"candidate_ids": list(range(21))}, {"action": "retry_private_action"},
+])
+def test_typed_grid_refusal_rejects_invalid_diagnostics(changes):
+    args = dict(code="SOLAREDGE_GRID_AMBIGUOUS", frame_ref="leaf:frame:group-1",
+                candidate_ids=[0, 1], action="pick_candidate")
+    args.update(changes)
+    refused(se.tracking.REPORT_INVALID, lambda: se.SolarEdgeGridRefusal(**args))
+
+
 def read(s, context=None, **params):
     ctx = context or s.ctx
     return reads.run_project_read(s.tenant, s.project, s.drawing, ctx.parent_version_id,
@@ -174,8 +199,10 @@ def test_unresolved_review_build_reload_and_reuse_refuses_acceptance(review_lane
     assert report(s) == result
     assert len(s.parses) == 1
     refused(se.tracking.REPORT_INVALID, lambda: se._record(s.ctx, meta, stored))
-    refused(se.tracking.REPORT_INVALID, lambda: se.accept(s.ctx, params(s, result)))
-    refused(se.tracking.REPORT_INVALID, lambda: tools.prepare(s, se.ACCEPT_TOOL, params(s, result), s.ctx))
+    refused("SOLAREDGE_GRID_UNMATCHED" if case == "unmatched" else "SOLAREDGE_GRID_AMBIGUOUS",
+            lambda: se.accept(s.ctx, params(s, result)))
+    refused("SOLAREDGE_GRID_UNMATCHED" if case == "unmatched" else "SOLAREDGE_GRID_AMBIGUOUS",
+            lambda: tools.prepare(s, se.ACCEPT_TOOL, params(s, result), s.ctx))
     assert (s.head, len(s.versions), len(s.calls), s.ctx.graph) == before
 
 
@@ -270,7 +297,7 @@ def test_explicit_association_review_reuse_reset_and_canonical_acceptance(review
     automatic = report(s, source, selection_order="unknown")
     partial = report(s, source, selection_order="unknown", associations={refs[0]: 1})
     assert partial["counts"]["matched_frames"] == 1
-    refused(se.tracking.REPORT_INVALID, lambda: se.accept(s.ctx, params(s, partial)))
+    refused("SOLAREDGE_GRID_AMBIGUOUS", lambda: se.accept(s.ctx, params(s, partial)))
     choices = {refs[1]: 0, refs[0]: 1}
     resolved = report(s, source, selection_order="unknown", associations=choices)
     meta, stored = se._load_report(s.ctx, resolved["report"]["artifact_id"])
@@ -308,7 +335,7 @@ def test_explicit_bridge_review_accepts_complete_choices_without_electrical_enti
     assert partial["counts"]["matched_frames"] == 1
     assert partial["counts"]["bridge_strings"] == 0
     assert partial["counts"]["unassigned_panels"] == 4
-    refused(se.tracking.REPORT_INVALID, lambda: se.accept(s.ctx, params(s, partial)))
+    refused("SOLAREDGE_GRID_AMBIGUOUS", lambda: se.accept(s.ctx, params(s, partial)))
     assert (s.head, len(s.versions), s.ctx.graph) == before
     choices = {refs[0]: 0, refs[1]: 1}
     complete = report(s, selection_order="unknown", associations=choices)
@@ -615,7 +642,7 @@ def test_http_current_review_report_download_is_readable_without_acceptance(http
     refused_flag = http.client.post(http.prefix + "/report", json={**request, "review": True})
     assert refused_flag.status_code == 400
     assert refused_flag.json()["error"]["reason_code"] == "REPORT_REQUEST_INVALID"
-    refused(se.tracking.REPORT_INVALID, lambda: se.accept(s.ctx, params(s, response.json())))
+    refused("SOLAREDGE_GRID_AMBIGUOUS", lambda: se.accept(s.ctx, params(s, response.json())))
     assert (s.head, len(s.versions), s.ctx.graph) == before
 
 
