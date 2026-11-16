@@ -2,6 +2,7 @@
 // No browser/network and no mocked confirmation/apply persistence callbacks.
 const fs = require('node:fs'), path = require('node:path'), os = require('node:os')
 const Module = require('node:module'), { spawn } = require('node:child_process')
+const { StringDecoder } = require('node:string_decoder')
 const assert = require('node:assert/strict')
 const at = process.argv.indexOf('--deps'), deps = path.resolve(at < 0 ? 'web/node_modules' : process.argv[at + 1])
 const dependency = name => require(path.join(deps, name))
@@ -11,7 +12,7 @@ global.window = dom.window; global.document = dom.window.document
 Object.defineProperty(global, 'navigator', { configurable: true, value: dom.window.navigator })
 global.HTMLElement = dom.window.HTMLElement; global.MutationObserver = dom.window.MutationObserver
 global.fetch = dom.window.fetch = () => { throw new Error('Offline JSON journey forbids network') }
-const React = dependency('react'), { render, screen, fireEvent, cleanup, waitFor } = dependency('@testing-library/react')
+const React = dependency('react'), { render, screen, fireEvent, cleanup, waitFor, within } = dependency('@testing-library/react')
 const { transformSync } = dependency('esbuild'), cache = new Map()
 function component(name) {
   if (cache.has(name)) return cache.get(name)
@@ -50,27 +51,37 @@ try:
         elif op=='apply': result=adapter.apply_profile(context,value)
         elif op=='editor_load': result=adapter.load_profile(value)
         elif op=='editor_save': result=adapter.save_profile(value['customer'],value['roles'],expected_version=value['expected_version'])
+        elif op=='seed_max':
+            with store._connection() as db:
+                db.execute('INSERT INTO profile_versions SELECT customer_key,profile_id,?,roles_json,created_at FROM profile_versions WHERE customer_key=? AND version=1',(2**53-1,context['customer_key']))
+            result=adapter.load_profile(context['customer_key'])
         else: raise ValueError('unknown offline operation')
+    fixture=request.get('fixture',{})
+    if op=='editor_load' and 'receipt_version' in fixture:
+        result['version']=fixture['receipt_version'] # malformed-producer fixture, no write
     print(json.dumps({'ok':True,'result':result},ensure_ascii=False))
 except Exception as error:
     print(json.dumps({'ok':False,'error':{'type':type(error).__name__,'message':str(error),'code':getattr(error,'code',None)}}))
 `
-const intake = { inserts: [0, 1, 2, 10, 11, 12].map(x => ({ name: 'Panel', layer: 'MODULES', x, y: 0 })) }
+const intake = { inserts: [0, 1, 2, 10, 11, 12].map(x => ({ name: 'Panel', layer: 'MODULES', x, y: 0 })),
+  polylines: [{ layer: 'ROOF' }, { layer: 'OBSTRUCTION' }] }
 const copies = [0, 10].map(x => ({ block: 'Panel', layer: 'MODULES', design_window: [x, 0, x + 2, 0], oracle_count: 3 }))
 const ctx = (project, drawing = project + ':v1') => ({ customer_key: 'synthetic-a', project_key: project, drawing_key: drawing })
 const calls = [], children = new Set()
-function rpc(bound, op, context, value, signal, fault = null, protocolFault = null) {
+const protocolStats = []
+function rpc(bound, op, context, value, signal, fault = null, protocolFault = null, fixture = {}) {
   calls.push({ op, context, value })
   return new Promise((resolve, reject) => {
     if (signal?.aborted) { reject(new Error('retired')); return }
     const child = spawn('python', ['-X', 'utf8', '-c', python], { cwd: path.resolve(__dirname, '../../..'), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
     children.add(child)
     let stdout = '', stderr = '', finished = false
+    const raw = []
     const timer = setTimeout(() => { child.kill(); }, 15000)
     const abort = () => child.kill()
     signal?.addEventListener('abort', abort, { once: true })
-    child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8')
-    child.stdout.on('data', chunk => { stdout += chunk }); child.stderr.on('data', chunk => { stderr += chunk })
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', chunk => raw.push(chunk)); child.stderr.on('data', chunk => { stderr += chunk })
     const settle = (error, result) => {
       if (finished) return
       finished = true; clearTimeout(timer); signal?.removeEventListener('abort', abort); children.delete(child)
@@ -79,15 +90,32 @@ function rpc(bound, op, context, value, signal, fault = null, protocolFault = nu
     child.on('error', error => settle(error))
     child.stdin.on('error', error => settle(error))
     child.on('close', code => {
+      // Split raw bytes deterministically in the receiver fixture. OS pipe
+      // coalescing cannot turn a split-codepoint test into a whole-string test.
+      let bytes = Buffer.concat(raw)
+      if (fixture.truncate_bytes) bytes = bytes.subarray(0, Math.max(0, bytes.length-fixture.truncate_bytes))
+      if (fixture.truncate_json_bytes) {
+        let end = bytes.length
+        while (end && [9,10,13,32].includes(bytes[end-1])) end--
+        bytes = bytes.subarray(0, Math.max(0, end-fixture.truncate_json_bytes))
+      }
+      const decoder = new StringDecoder('utf8'), pattern = fixture.chunk_pattern || [Math.max(1, bytes.length)]
+      let offset = 0, parts = 0
+      while (offset < bytes.length) {
+        const length = pattern[parts % pattern.length]
+        if (!Number.isSafeInteger(length) || length < 1) { settle(new Error('Invalid fixture chunk pattern.')); return }
+        stdout += decoder.write(bytes.subarray(offset, offset+length)); offset += length; parts++
+      }
+      stdout += decoder.end(); protocolStats.push({ bytes: bytes.length, parts, receipts: 0 })
       if (code !== 0) { const error = new Error('Python JSON worker failed: ' + stderr.slice(0, 500)); error.code = 'BRIDGE_EXIT'; settle(error); return }
       if (!stdout.trim()) { const error = new Error('Python JSON worker returned no JSON.'); error.code = 'BRIDGE_EOF'; settle(error); return }
       try {
         const response = JSON.parse(stdout)
         if (!response.ok) { const error = new Error(response.error.message); error.code = response.error.code; settle(error) }
-        else settle(null, response.result)
+        else { protocolStats[protocolStats.length-1].receipts++; settle(null, response.result) }
       } catch { const error = new Error('Python JSON worker returned malformed JSON.'); error.code = 'BRIDGE_MALFORMED_JSON'; settle(error) }
     })
-    child.stdin.end(JSON.stringify({ database, bound_context: bound, context, op, value, intake, copies, fault, protocol_fault: protocolFault }))
+    child.stdin.end(JSON.stringify({ database, bound_context: bound, context, op, value, intake, copies, fault, protocol_fault: protocolFault, fixture }))
   })
 }
 function mount(context, overrides = {}) {
@@ -158,6 +186,6 @@ async function dispose() {
     if (fs.existsSync(database)) fs.unlinkSync(database)
     fs.rmdirSync(root)
 }
-module.exports = { rpc, ctx, copies, mount, screen, fireEvent, waitFor, cleanup, dispose,
+module.exports = { rpc, ctx, copies, intake, mount, screen, fireEvent, waitFor, cleanup, dispose, component, React, render, within, protocolStats,
   resources: () => ({ child_count: children.size, database, root }) }
 if (require.main === module) main().catch(error => { console.error(error); process.exitCode = 1 })

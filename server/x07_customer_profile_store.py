@@ -6,10 +6,13 @@ never rewrite an existing version or a project's first applied version.
 """
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from functools import lru_cache
 import json
 from pathlib import Path
 import sqlite3
 from uuid import uuid4
+
+MAX_PROFILE_VERSION = 2**53 - 1  # exact JSON/JavaScript integer boundary
 
 
 class ProfileSchemaError(ValueError):
@@ -46,6 +49,8 @@ class CustomerProfileStore:
             if shape_ok:
                 shape_ok = all([row[1] for row in db.execute('PRAGMA table_info(' + name + ')')] == fields
                                for name, fields in expected.items())
+            if shape_ok:
+                shape_ok = self._schema_signature(db) == self._known_schema()
             if version == 1 and not shape_ok:
                 raise ProfileSchemaError('supported version has incompatible schema shape')
             if version == 0 and tables and not shape_ok:
@@ -56,6 +61,23 @@ class CustomerProfileStore:
             if version == 0:
                 db.execute('PRAGMA user_version=1')
             self.schema_status = {'previous_version': version, 'version': 1, 'decision': decision}
+
+    @staticmethod
+    def _schema_signature(db):
+        return tuple((row[0], row[1], ' '.join(row[2].split()) if row[2] else None)
+                     for row in db.execute("SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"))
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _known_schema():
+        # Compare with actual SQLite output from this producer, not names alone.
+        # This reference contains no customer data and is never persisted.
+        db = sqlite3.connect(':memory:')
+        try:
+            CustomerProfileStore._create_schema(db)
+            return CustomerProfileStore._schema_signature(db)
+        finally:
+            db.close()
 
     @staticmethod
     def _create_schema(db):
@@ -108,6 +130,8 @@ class CustomerProfileStore:
     def _profile(row):
         if row is None:
             return None
+        if type(row['version']) is not int or not 1 <= row['version'] <= MAX_PROFILE_VERSION:
+            raise ValueError('profile version must be a positive safe integer')
         result = dict(row)
         result['roles'] = json.loads(result.pop('roles_json'))
         return result
@@ -122,13 +146,15 @@ class CustomerProfileStore:
             raise ValueError('roles must be finite JSON') from exc
         if len(encoded.encode('utf-8')) > 131072:
             raise ValueError('role map exceeds 128 KiB')
-        if expected_version is not None and (type(expected_version) is not int or expected_version < 0):
-            raise ValueError('expected version must be a nonnegative integer')
+        if expected_version is not None and (type(expected_version) is not int or not 0 <= expected_version <= MAX_PROFILE_VERSION):
+            raise ValueError('expected version must be a nonnegative safe integer')
         with self._connection() as db:
             db.execute('BEGIN IMMEDIATE')
             latest = db.execute('SELECT * FROM profile_versions WHERE customer_key=? ORDER BY version DESC LIMIT 1',
                                 (customer_key,)).fetchone()
             current = latest['version'] if latest else 0
+            if type(current) is not int or current >= MAX_PROFILE_VERSION:
+                raise ValueError('profile version limit reached')
             if expected_version is not None and expected_version != current:
                 raise ValueError('profile version changed')
             profile_id = latest['profile_id'] if latest else str(uuid4())
@@ -147,8 +173,8 @@ class CustomerProfileStore:
 
     def apply_to_project(self, project_key, customer_key, *, expected_version=None):
         project_key, customer_key = _key(project_key), _key(customer_key)
-        if expected_version is not None and (type(expected_version) is not int or expected_version < 1):
-            raise ValueError('expected version must be a positive integer')
+        if expected_version is not None and (type(expected_version) is not int or not 1 <= expected_version <= MAX_PROFILE_VERSION):
+            raise ValueError('expected version must be a positive safe integer')
         with self._connection() as db:
             db.execute('BEGIN IMMEDIATE')
             applied = db.execute('SELECT * FROM project_applications WHERE project_key=?', (project_key,)).fetchone()
@@ -159,6 +185,8 @@ class CustomerProfileStore:
                                     (customer_key,)).fetchone()
                 if latest is None:
                     return None
+                if type(latest['version']) is not int or not 1 <= latest['version'] <= MAX_PROFILE_VERSION:
+                    raise ValueError('profile version must be a positive safe integer')
                 if expected_version is not None and latest['version'] != expected_version:
                     raise ValueError('profile version changed before project pin')
                 db.execute('INSERT INTO project_applications VALUES (?, ?, ?, ?)',

@@ -42,6 +42,9 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord }) {
     event.preventDefault()
     if (!profile || !draft || pending.current || stale) return
     if (!draft.module?.block?.trim() || !draft.module?.layer?.trim()) { setError('Module block and layer are required.'); return }
+    if (['roof', 'obstruction'].some(role => draft[role] && !draft[role].layer?.trim())) {
+      setError('Each added role needs a layer.'); return
+    }
     const controller = new AbortController(); pending.current = controller
     setBusy(true); setError(null); setMessage(null)
     Promise.resolve().then(() => current(controller) ? callbacks.current.saveProfile(customerKey, clone(draft),
@@ -60,6 +63,8 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord }) {
       }).finally(() => { if (current(controller)) { pending.current = null; setBusy(false) } })
   }
   const edit = (role, field, value) => { setDraft(previous => ({ ...previous, [role]: { ...previous[role], [field]: value } })); setMessage(null) }
+  const addRole = role => { setDraft(previous => ({ ...previous, [role]: { layer: '' } })); setMessage(null); setError(null) }
+  const removeRole = role => { setDraft(previous => { const next = { ...previous }; delete next[role]; return next }); setMessage(null); setError(null) }
   const pin = profile && applicationRecord?.customer_key === customerKey && applicationRecord.profile_id === profile.profile_id
     && Number.isSafeInteger(applicationRecord.version) && applicationRecord.version > 0 ? applicationRecord : null
   return <section aria-label="Customer role profile">
@@ -75,8 +80,11 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord }) {
           return <div key={role}>
             {(role === 'module' || typeof draft[role].block === 'string') && <label>{label} block<input value={draft[role].block || ''} onChange={event => edit(role, 'block', event.target.value)} /></label>}
             <label>{label} layer<input value={draft[role].layer || ''} onChange={event => edit(role, 'layer', event.target.value)} /></label>
+            {role !== 'module' && <button type="button" onClick={() => removeRole(role)}>Remove {role} role</button>}
           </div>
         })}
+        {['roof', 'obstruction'].filter(role => !draft[role]).map(role =>
+          <button key={role} type="button" onClick={() => addRole(role)}>Add {role} role</button>)}
       </fieldset>
       <button type="submit" disabled={busy || stale || typeof saveProfile !== 'function'}>Save profile</button>
       {stale && <button type="button" disabled={busy} onClick={() => load(true)}>Reload version, keep edits</button>}
