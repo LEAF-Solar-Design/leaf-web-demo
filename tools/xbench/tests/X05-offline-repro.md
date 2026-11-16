@@ -2417,3 +2417,53 @@ saved material is intentionally unrelated and does not constitute a full PASS.
 A zero target needs explicit coverage. An omitted target is uncertainty, not zero.
 The disjoint-union tests additionally combine two contradictory components and a
 clean component: every metric retains four grid and four inverter mismatches.
+
+## Oracle load granularity replay
+
+Within Studio X-bench X05, a conserved grand total can hide opposite errors in
+separate grids. Coarsening is an explicit change of the supplied oracle's
+resolution. It cannot repair the finer evidence or establish live parity.
+
+From the repository root:
+
+```python
+import sys, runpy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+grid, evidence = fixtures['oracle_load_component']('fine', broken=True)
+def show(label, grid, evidence):
+    result = m._seven_step_oracle_loads(grid, evidence)
+    checks = result['metrics']['panels']
+    print(label, result['verdict'],
+          checks['grid_comparison']['mismatch_count'],
+          checks['inverter_comparison']['mismatch_count'],
+          checks['grid_report']['verdict'])
+show('fine', grid, evidence)
+coarse_grid, coarse_evidence = fixtures['coarsen_oracle_load_grids'](grid, evidence)
+show('coarse', coarse_grid, coarse_evidence)
+show('fine preserved', grid, evidence)
+```
+
+Expected output:
+
+```text
+fine FAIL 2 2 PASS
+coarse FAIL 0 2 PASS
+fine preserved FAIL 2 2 PASS
+```
+
+The independent Fraction sum preserves total panels at nine. Fine targets are
+six and three against explicit string loads three and six. The merged target
+nine equals the merged load nine, so grid localization is lost. Inverter IDs,
+connections and device diagnostics stay fixed. The original fine inputs remain
+unchanged. The same test covers strings, optimizers and exact DC power.
+
+Transport tests also keep composed diagnostics equal across direct, strict JSON
+and subprocess CLI paths for report-count and DC numeric lexemes. Report counts
+accept integral decimal or exponent numbers. Per-string panel/optimizer counts
+and grid/device count maps require integer tokens; tests retain that boundary.
+DC accepts decimal/exponent JSON numbers and signed zero, including exact
+nonzero deltas of 1e-77. Textual exponent strings are outside the numeric-string
+schema. These are format and arithmetic checks on synthetic supplied maps,
+not proof of independent extraction, customer drawing coverage or staging.

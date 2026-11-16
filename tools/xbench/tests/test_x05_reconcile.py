@@ -6942,3 +6942,169 @@ def test_oracle_loads_replication_scales_all_four_extensive_counts(factor):
             assert new['mismatch_count'] == old['mismatch_count'] == 2
             assert [Fraction(row['delta']) for row in new['examples']] == [Fraction(row['delta'])*factor for row in old['examples']]
             assert checks[target+'_report']['verdict'] == 'PASS'
+
+
+def test_oracle_load_metric_comparators_once_per_unique_fixture(monkeypatch):
+    from collections import Counter
+    from benches import x05_reconcile as m
+    expected,records = bound_seven_fixture_records()
+    baseline = m.aggregate_bound_seven_steps(expected,records)
+    names = ('compare_grid_string_totals','compare_grid_optimizer_totals','compare_grid_panel_totals','compare_grid_dc_totals',
+             'compare_inverter_string_totals','compare_inverter_optimizer_totals','compare_inverter_panel_totals','compare_inverter_dc_totals')
+    calls,fixtures = Counter(),[]
+    active = []
+    original = m._seven_step_oracle_loads
+    def load(grid,evidence):
+        fixtures.append(evidence)
+        active.append(True)
+        try: return original(grid,evidence)
+        finally: active.pop()
+    def counted(name,original):
+        def invoke(*args,**kwargs):
+            if active: calls[name] += 1
+            return original(*args,**kwargs)
+        return invoke
+    monkeypatch.setattr(m,'_seven_step_oracle_loads',load)
+    for name in names: monkeypatch.setattr(m,name,counted(name,getattr(m,name)))
+    assert m.aggregate_bound_seven_steps(expected,records) == baseline
+    assert calls == dict.fromkeys(names,3) and len(fixtures)==3
+    calls.clear(); fixtures.clear()
+    result = m.aggregate_bound_seven_steps(expected,[dict(fixture_id=expected[0],envelope=None)]+records)
+    assert calls == dict.fromkeys(names,2) and len(fixtures)==2
+    assert all(item is not records[0]['envelope']['assurance']['evidence'] for item in fixtures)
+    assert expected[0] not in result['fixtures'] and result['verdict']=='UNREADABLE'
+    assert all(result['fixtures'][key]==baseline['fixtures'][key] for key in expected[1:])
+
+
+@pytest.mark.parametrize('field,metric',[('oracle_panels','panels'),('oracle_dc_power','kw_dc')])
+@pytest.mark.parametrize('bad',[None,True])
+def test_oracle_load_metric_uncertainty_retains_other_mismatch_and_healthy_results(field,metric,bad):
+    from benches import x05_reconcile as m
+    grid,evidence = oracle_load_component('isolate')
+    grid['optimizer_totals']['isolateg0'],grid['optimizer_totals']['isolateg1'] = 2,1
+    baseline = m._seven_step_oracle_loads(grid,evidence)
+    if bad is None: evidence.pop(field)
+    else: evidence[field][0][metric] = bad
+    original = deepcopy((grid,evidence))
+    result = m._seven_step_oracle_loads(grid,evidence)
+    assert result['verdict']=='UNREADABLE'
+    assert result['metrics'][metric]['grid_comparison']['verdict']=='UNREADABLE'
+    assert result['metrics']['optimizers']==baseline['metrics']['optimizers']
+    assert result['metrics']['optimizers']['grid_comparison']['mismatch_count']==2
+    healthy = 'kw_dc' if metric=='panels' else 'panels'
+    assert result['metrics'][healthy]==baseline['metrics'][healthy]
+    assert result['metrics']['strings']==baseline['metrics']['strings']
+    assert (grid,evidence)==original
+
+
+def coarsen_oracle_load_grids(grid,evidence):
+    """Explicit grid quotient; string IDs, device IDs and connections stay fixed."""
+    from fractions import Fraction
+    grid,evidence = deepcopy((grid,evidence))
+    grid['expected_grid_ids'] = ['coarse']
+    for row in evidence['oracle_string_owners']: row['grid_id']='coarse'
+    for field in ('string_totals','optimizer_totals','panel_totals','dc_totals'):
+        exact = sum(Fraction(value) for value in grid[field].values())
+        if field=='dc_totals':
+            assert 100 % exact.denominator==0
+            cents = exact.numerator*(100//exact.denominator)
+            value = f'{cents//100}.{cents%100:02d}'
+        else:
+            assert exact.denominator==1
+            value = int(exact)
+        grid[field] = {'coarse':value}
+    return grid,evidence
+
+
+@pytest.mark.parametrize('broken',[False,True])
+def test_oracle_load_grid_coarsening_preserves_conservation_and_reveals_cancellation(broken):
+    from fractions import Fraction
+    from benches import x05_reconcile as m
+    grid,evidence = oracle_load_component('fine',broken)
+    original = deepcopy((grid,evidence))
+    fine = m._seven_step_oracle_loads(grid,evidence)
+    coarse_grid,coarse_evidence = coarsen_oracle_load_grids(grid,evidence)
+    coarse = m._seven_step_oracle_loads(coarse_grid,coarse_evidence)
+    for metric,field in dict(strings='string_totals',optimizers='optimizer_totals',panels='panel_totals',kw_dc='dc_totals').items():
+        assert Fraction(coarse_grid[field]['coarse'])==sum(Fraction(value) for value in grid[field].values())
+        assert fine['metrics'][metric]['grid_comparison']['mismatch_count']==(2 if broken else 0)
+        assert coarse['metrics'][metric]['grid_comparison']['mismatch_count']==0
+        assert coarse['metrics'][metric]['grid_report']['verdict']=='PASS'
+        assert coarse['metrics'][metric]['inverter_comparison']==fine['metrics'][metric]['inverter_comparison']
+    assert coarse['verdict']==('FAIL' if broken else 'PASS')
+    assert (grid,evidence)==original
+
+
+@pytest.mark.parametrize('broken',[False,True])
+def test_oracle_load_namespaces_and_distinct_unicode_direct_bound_json(broken):
+    from benches import x05_reconcile as m
+    expected,records = bound_seven_fixture_records()
+    envelope = equal_count_ownership_envelope()
+    names = {'east':'\u00e9','A':'\u00e9','INV-A':'\u00e9','west':'e\u0301','B':'e\u0301','INV-B':'e\u0301'}
+    def rename(value):
+        if type(value) is str: return names.get(value,value)
+        if type(value) is list: return [rename(item) for item in value]
+        if type(value) is dict: return {names.get(key,key):rename(item) for key,item in value.items()}
+        return value
+    envelope = rename(envelope)
+    # Rebind only the chosen fixture's manifest identity to its existing record.
+    source = envelope['assurance']
+    source['manifest']['fixture_id'] = source['evidence']['fixture_id'] = expected[0]
+    source['bindings'] = {key:deepcopy(source['manifest']) for key in PROVENANCE_STAGES}
+    records[0]['envelope'] = envelope
+    evidence = envelope['assurance']['evidence']
+    if broken: envelope['grid']['panel_totals']['\u00e9'],envelope['grid']['panel_totals']['e\u0301'] = 14,10
+    original = deepcopy(records)
+    direct = m._seven_step_oracle_loads(envelope['grid'],evidence)
+    result = m.aggregate_bound_seven_steps_json(serialize_result(dict(expected_ids=expected,fixtures=records)))
+    assert json.loads(serialize_result(direct))==json.loads(serialize_result(result['fixtures'][expected[0]]['reconciliation']['oracle_loads']))
+    assert direct['verdict']==('FAIL' if broken else 'PASS')
+    assert direct['metrics']['panels']['grid_comparison']['mismatch_count']==(2 if broken else 0)
+    assert all(result['fixtures'][key]['verdict']=='PASS' for key in expected[1:])
+    assert len(set(envelope['grid']['expected_grid_ids']))==2 and records==original
+
+
+@pytest.mark.parametrize('tiny',[False,True])
+@pytest.mark.parametrize('spelling',['decimal','exponent','signed_zero'])
+def test_oracle_load_numeric_lexemes_direct_strict_json_cli(tmp_path,tiny,spelling):
+    import re,subprocess,sys
+    from pathlib import Path
+    from decimal import Decimal
+    from benches import x05_reconcile as m
+    envelope = equal_count_ownership_envelope()
+    evidence = envelope['assurance']['evidence']
+    evidence['oracle_dc_power'][0]['kw_dc'] = Decimal('0')
+    evidence['oracle_dc_power'][1]['kw_dc'] = Decimal('9.6')
+    envelope['grid']['dc_totals'] = dict(east=Decimal('0'),west=Decimal('9.6'))
+    evidence['inverter_loads']['kw_dc'] = {'INV-A':Decimal('0'),'INV-B':Decimal('9.6')}
+    if tiny:
+        evidence['oracle_dc_power'][0]['kw_dc'] = Decimal('1e-77')
+        evidence['oracle_dc_power'][1]['kw_dc'] = Decimal('9.5'+'9'*76)
+    plain = serialize_result(envelope)
+    def encoded(value,path=()):
+        if type(value) is dict:
+            return '{'+','.join(json.dumps(key)+':'+encoded(item,path+(key,)) for key,item in value.items())+'}'
+        if type(value) is list:
+            return '['+','.join(encoded(item,path+(index,)) for index,item in enumerate(value))+']'
+        numeric_path = 'oracle_values' in path or 'dc_totals' in path or ('inverter_loads' in path and 'kw_dc' in path) or ('oracle_dc_power' in path and path[-1]=='kw_dc')
+        if numeric_path and type(value) in (int,Decimal):
+            number = format(Decimal(value),'f')
+            if spelling=='signed_zero': return '-0.0' if Decimal(value)==0 else number
+            return number+('e0' if spelling=='exponent' else '.0' if '.' not in number else '')
+        return serialize_result(value)
+    text = encoded(envelope)
+    decoded = json.loads(text,parse_float=Decimal)
+    direct = m._seven_step_envelope(decoded)
+    strict = m.reconcile_seven_steps_json(text)
+    assert strict==direct
+    baseline = m.reconcile_seven_steps_json(plain)
+    assert strict['oracle_loads']==baseline['oracle_loads']
+    power = strict['oracle_loads']['metrics']['kw_dc']
+    assert power['grid_comparison']['mismatch_count']==(2 if tiny else 0)
+    if tiny: assert power['grid_comparison']['examples'][0]['delta']==Decimal('1e-77')
+    run = subprocess.run([sys.executable,'-P',str(Path(m.__file__).resolve()),'--seven-step'],input=text.encode(),capture_output=True,cwd=tmp_path,timeout=20,env={'SystemRoot':'C:\\Windows'})
+    assert run.returncode==(4 if strict['verdict']=='UNREADABLE' else 1 if strict['verdict']=='FAIL' else 0) and not run.stderr
+    assert json.loads(run.stdout)==json.loads(serialize_result(strict))
+    invalid = deepcopy(envelope)
+    invalid['assurance']['evidence']['oracle_strings'][0]['optimizers'] = Decimal('6.0')
+    assert m._seven_step_oracle_loads(invalid['grid'],invalid['assurance']['evidence'])['verdict']=='UNREADABLE'
