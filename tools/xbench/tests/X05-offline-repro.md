@@ -2839,3 +2839,48 @@ cap. Tests also compare direct, strict JSON and bound-aggregate CLI grouping
 results at 19, 20 and 21 interleaved mismatches with clean sibling fixtures.
 These synthetic sequences do not prove what the live UI showed, which report
 count is correct, or independent report acquisition. No result accepts live X05.
+
+## Grouping stable-interleaving replay
+
+Within Studio X-bench X05, an explicit origin map lets an independent model
+predict grouping positions after a stable weave. Reversal must use every
+mismatch position, including those omitted by the diagnostic cap.
+
+```python
+import sys, runpy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+counts = ([1, 2, 3]*9, [2, 1]*8)
+left, right = ([dict(group_count=value) for value in source] for source in counts)
+rows, origins = fixtures['stable_grouping_weave'](left, right, (0, 0, 1))
+expected = [position for position, (source, index) in enumerate(origins)
+            if counts[source][index] != 2]
+result = m.compare_recommendations(2, rows)
+assert result['mismatch_count'] == len(expected)
+print('woven', result['verdict'], result['mismatch_count'],
+      len(result['mismatched_recommendations']),
+      result['mismatched_recommendations'] == expected[:m.MAX_RECOMMENDATION_EXAMPLES])
+reversed_expected = sorted(len(rows)-1-index for index in expected)
+reversed_result = m.compare_recommendations(2, list(reversed(rows)))
+assert reversed_result['mismatch_count'] == len(expected)
+print('reversed', reversed_result['verdict'], reversed_result['mismatch_count'],
+      len(reversed_result['mismatched_recommendations']),
+      reversed_result['mismatched_recommendations'] == reversed_expected[:m.MAX_RECOMMENDATION_EXAMPLES])
+```
+
+Expected output:
+
+```text
+woven FAIL 26 20 True
+reversed FAIL 26 20 True
+```
+
+Each origin pair names the source list and its original row index. The model
+uses those independent counts, not comparator output, to derive the full set
+of 26 mismatch positions. It reverses that full set before selecting the first
+20 examples. Reversing only the previously capped 20 would lose candidates.
+Tests also rotate all 51 offsets of a mixed sequence and count exact linear
+row/count accesses without timing thresholds. Synthetic sequence consistency
+does not prove live UI recommendations or independent report origin, and no
+result accepts live X05.
