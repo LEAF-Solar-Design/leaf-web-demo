@@ -177,6 +177,33 @@ def test_match_handle_first_and_moved():
     assert result == {"matched": 1, "missing": [], "moved": [("A", 3.0)], "extra": 0}
 
 
+def test_match_moved_handle_keeps_export_reserved_for_pending():
+    result = geometry.match_positions([("B", 3, 0), ("A", 0, 0)], [("A", 3, 0)], 0.5)
+    assert result == {"matched": 0, "missing": ["B"], "moved": [("A", 3.0)], "extra": 0}
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_match_maximum_cardinality_in_both_input_orders(reverse):
+    original = [("a", 0, 0), ("b", 0.3, 0)]
+    if reverse:
+        original.reverse()
+    result = geometry.match_positions(original, [("x", 0.1, 0), ("y", -0.4, 0)], 0.5)
+    assert result == {"matched": 2, "missing": [], "moved": [], "extra": 0}
+
+
+def test_match_alternating_chain_under_two_seconds():
+    original = [(f"O{i}", (1999 - i) * 0.3, 0) for i in range(2000)]
+    # The leftmost choices consume the next original's export. Matching the
+    # final original requires an alternating path back to the far endpoint.
+    exported = [(f"E{i}", x + 0.1, y) for i, (_, x, y) in enumerate(original[:-1])]
+    exported.append(("endpoint", original[0][1] + 0.4, 0))
+    started = time.perf_counter()
+    result = geometry.match_positions(original, exported, 0.5)
+    elapsed = time.perf_counter() - started
+    assert result == {"matched": 2000, "missing": [], "moved": [], "extra": 0}
+    assert elapsed < 2
+
+
 def test_match_missing_extra_and_one_to_one():
     result = geometry.match_positions([("A", 0, 0), ("B", 0.1, 0), ("C", 20, 0)],
                                       [("X", 0.05, 0), ("Y", 50, 0)], 0.5)

@@ -1,6 +1,6 @@
 """Pure, model-space DXF measurements for the X01 deliverable grader."""
 
-from collections import defaultdict
+from collections import defaultdict, deque
 import io
 import math
 
@@ -95,28 +95,80 @@ def match_positions(original, exported, tol):
             matched += 1
         else:
             moved.append((handle, distance))
-    buckets = defaultdict(set)
+    buckets = defaultdict(list)
     for index, (_, x, y) in enumerate(exported):
         if index not in used:
-            buckets[(math.floor(x / tol), math.floor(y / tol))].add(index)
-    for handle, x, y in pending:
+            buckets[(math.floor(x / tol), math.floor(y / tol))].append(index)
+    edges = []
+    for _, x, y in pending:
         cx, cy = math.floor(x / tol), math.floor(y / tol)
-        nearest, distance = None, float("inf")
+        neighbours = []
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
                 for index in buckets.get((cx + dx, cy + dy), ()):
                     candidate = exported[index]
                     delta = math.hypot(x - candidate[1], y - candidate[2])
-                    if delta <= tol and (delta < distance or
-                                        (delta == distance and index < nearest)):
-                        nearest, distance = index, delta
-        if nearest is None:
-            missing.append(handle)
-        else:
-            used.add(nearest)
-            _, px, py = exported[nearest]
-            buckets[(math.floor(px / tol), math.floor(py / tol))].remove(nearest)
-            matched += 1
+                    if delta <= tol:
+                        neighbours.append(index)
+        edges.append(neighbours)
+
+    # Hopcroft-Karp: each phase finds a maximal set of shortest augmenting
+    # paths in O(E). Explicit stacks keep long alternating paths recursion-free.
+    left_match = [-1] * len(pending)
+    right_match = [-1] * len(exported)
+    infinity = len(pending) + 1
+    while True:
+        levels = [infinity] * len(pending)
+        queue = deque()
+        for left, right in enumerate(left_match):
+            if right == -1:
+                levels[left] = 0
+                queue.append(left)
+        shortest = infinity
+        while queue:
+            left = queue.popleft()
+            if levels[left] >= shortest:
+                continue
+            for right in edges[left]:
+                partner = right_match[right]
+                if partner == -1:
+                    shortest = levels[left] + 1
+                elif levels[partner] == infinity:
+                    levels[partner] = levels[left] + 1
+                    queue.append(partner)
+        if shortest == infinity:
+            break
+
+        cursors = [0] * len(pending)
+        for root, right in enumerate(left_match):
+            if right != -1 or levels[root] != 0:
+                continue
+            stack, path = [root], []
+            while stack:
+                left = stack[-1]
+                if cursors[left] == len(edges[left]):
+                    levels[left] = infinity
+                    stack.pop()
+                    if path:
+                        path.pop()
+                    continue
+                right = edges[left][cursors[left]]
+                cursors[left] += 1
+                partner = right_match[right]
+                if partner == -1:
+                    if levels[left] + 1 != shortest:
+                        continue
+                    for node, target in zip(stack, path + [right]):
+                        left_match[node] = target
+                        right_match[target] = node
+                    matched += 1
+                    break
+                if levels[partner] == levels[left] + 1:
+                    stack.append(partner)
+                    path.append(right)
+
+    missing.extend(handle for (handle, _, _), right in zip(pending, left_match) if right == -1)
+    used.update(right for right in left_match if right != -1)
     return {"matched": matched, "missing": missing, "moved": moved,
             "extra": len(exported) - len(used)}
 
