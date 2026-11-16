@@ -12,7 +12,7 @@ from export_x04_offline_evidence import (
     positive_byte_limit, read_json, report_failure, write_json,
 )
 from validate_x04_offline_evidence import validate_evidence
-from compare_x04_offline_evidence import compare_evidence
+from compare_x04_offline_evidence import _compare_validated
 from validate_x04_review_report import BATCH, validate_report, require
 
 SCHEMA = 'leaf.x04.evidence-packet.v1'
@@ -77,10 +77,12 @@ def validate_packet(payload):
         claimed = row.get('report')
         validate_report(claimed)
         require(claimed.get('schema') == 'leaf.x04.offline-comparison.v1', 'Comparison requires a comparison report.')
-        expected = compare_evidence(artifacts[row['before']], artifacts[row['after']])
+        expected = _compare_validated(artifacts[row['before']], artifacts[row['after']],
+                                      checked[row['before']], checked[row['after']])
         require(comparison_claims(claimed) == comparison_claims(expected),
                 'Comparison claims contradict the ordered embedded artifacts.')
-        comparisons.append({'id': row['id'], 'before': row['before'], 'after': row['after'], 'report': expected})
+        comparisons.append({'id': row['id'], 'before': row['before'], 'after': row['after'],
+                            'report': deepcopy(expected)})
     for row in sections['batches']:
         claimed = row.get('report')
         validate_report(claimed)

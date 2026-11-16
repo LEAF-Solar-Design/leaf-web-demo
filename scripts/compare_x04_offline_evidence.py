@@ -22,8 +22,8 @@ def membership_delta(before, after):
             'added': [right[key] for key in sorted(right.keys() - left.keys())]}
 
 
-def compare_evidence(before, after):
-    left, right = validate_evidence(before), validate_evidence(after)
+def _compare_validated(before, after, left, right):
+    """Build deltas from artifacts whose supplied results the caller validated."""
     if left['drawing_id'] != right['drawing_id']:
         raise ValueError('Drawing identities must match exactly before comparison.')
     first, second = left['recomputed_result'], right['recomputed_result']
@@ -36,6 +36,10 @@ def compare_evidence(before, after):
                                                       after['observed_dependencies']['dependencies']),
             'original_bytes_integrity': 'unverified',
             'scope_note': 'Validated synthetic replay deltas only. Matching IDs do not establish unchanged drawing content or authenticate source bytes.'}
+
+
+def compare_evidence(before, after):
+    return _compare_validated(before, after, validate_evidence(before), validate_evidence(after))
 
 
 def main(argv=None):
