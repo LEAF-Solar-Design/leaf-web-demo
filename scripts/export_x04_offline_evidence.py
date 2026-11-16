@@ -66,9 +66,9 @@ def positive_byte_limit(value):
     try:
         limit = int(value)
     except ValueError:
-        raise argparse.ArgumentTypeError('Input byte ceiling must be a positive integer.') from None
+        raise argparse.ArgumentTypeError('Byte ceiling must be a positive integer.') from None
     if limit <= 0:
-        raise argparse.ArgumentTypeError('Input byte ceiling must be a positive integer.')
+        raise argparse.ArgumentTypeError('Byte ceiling must be a positive integer.')
     return limit
 
 
@@ -130,11 +130,20 @@ def export_evidence(payload):
                        'original_bytes_integrity': 'unverified'}}
 
 
-def write_json(value, output=None):
+def write_json(value, output=None, max_output_bytes=None):
     encoded = json.dumps(value, ensure_ascii=True, allow_nan=False, indent=2) + '\n'
+    # ASCII escaping makes each encoded character exactly one UTF-8 byte.
+    if max_output_bytes is not None and len(encoded) > max_output_bytes:
+        raise ValueError(f'Encoded output exceeds the {max_output_bytes}-byte ceiling.')
     if output is None:
         try:
-            sys.stdout.write(encoded)
+            offset = 0
+            while offset < len(encoded):
+                chunk = encoded[offset:offset + 65536]
+                written = sys.stdout.write(chunk)
+                if type(written) is not int or written <= 0 or written > len(chunk):
+                    raise OSError('Stdout write did not report valid forward progress.')
+                offset += written
             sys.stdout.flush()
         except (OSError, ValueError):
             # Retire a failed stream so interpreter shutdown does not flush it again.
@@ -185,12 +194,14 @@ def main(argv=None):
     parser.add_argument('--out', type=Path)
     parser.add_argument('--max-input-bytes', type=positive_byte_limit, default=DEFAULT_MAX_INPUT_BYTES,
                         help='Maximum input bytes, including BOM and whitespace (default: 16777216)')
+    parser.add_argument('--max-output-bytes', type=positive_byte_limit,
+                        help='Optional encoded JSON byte ceiling (default: unlimited)')
     args = parser.parse_args(argv)
     try:
         check_output_path(args.input, args.out)
         payload = read_json(args.input, args.max_input_bytes)
         artifact = export_evidence(payload)
-        write_json(artifact, args.out)
+        write_json(artifact, args.out, args.max_output_bytes)
     except (OSError, ValueError, TypeError, RecursionError) as error:
         return report_failure('export', error)
     return 0
