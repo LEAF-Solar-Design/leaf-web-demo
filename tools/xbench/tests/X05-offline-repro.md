@@ -703,6 +703,59 @@ corrected 0 PASS offline_seven_steps
 The correction changes a field name, not evidence custody. Both objects remain
 synthetic supplied claims and cannot establish live X05 acceptance.
 
+`aggregate_seven_steps_json(text)` requires exactly `expected_ids` and `fixtures`
+and uses the existing bounded strict decoder. Per-fixture records have
+`fixture_id` and `envelope`, as in the pure aggregator. Malformed/duplicate
+fixture records retain bounded index-only diagnostics and readable unique
+siblings. Every occurrence of an ambiguous ID excludes that fixture from PASS.
+
+`reconcile_bound_seven_steps(envelope, manifest, import_binding, grid_binding)`
+combines the existing import/grid provenance comparison with seven-step
+reconciliation. Its `provenance` and `reconciliation` results remain visible,
+with UNREADABLE precedence. The assurance manifest must also equal the supplied
+frozen manifest. Agreement checks supplied claims and cannot authenticate origin.
+The `--seven-step` transport uses the same strict UTF-8, read-error and output
+failure behavior as the existing modes, including exit5 for closed stdout.
+
+Executable three-fixture seven-step replay (synthetic source-only builder,
+requires pytest; the pure comparison reads no file and makes no network request):
+
+```powershell
+@'
+import sys, runpy, json
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import aggregate_seven_steps_json
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+expected, rows = builders['seven_fixture_records']()
+rows[0]['envelope']['import']['dwg_imported'] = False
+rows[1]['envelope']['grid'] = None
+result = aggregate_seven_steps_json(json.dumps(dict(expected_ids=expected, fixtures=rows)))
+print(result['verdict'])
+print(*(result['fixtures'][key]['verdict'] for key in expected))
+print(result['fixtures'][expected[0]]['steps']['1']['reason'])
+print(result['fixtures'][expected[1]]['steps']['2']['reason'])
+assert result['verdict'] == 'UNREADABLE'
+expected, rows = builders['seven_fixture_records']()
+corrected = aggregate_seven_steps_json(json.dumps(dict(expected_ids=expected, fixtures=rows)))
+print(corrected['verdict'], *(corrected['fixtures'][key]['verdict'] for key in expected))
+assert corrected['verdict'] == 'PASS'
+'@ | python -P
+```
+
+Exact stdout:
+
+```text
+UNREADABLE
+FAIL UNREADABLE PASS
+supplied_import_evidence
+grid_evidence_unreadable
+PASS PASS PASS PASS
+```
+
+The correction preserves independent sibling diagnostics and demonstrates the
+aggregate precedence for supplied synthetic evidence. Live acquisition and
+frozen-origin authentication remain required by the X05 acceptance contract.
+
 Canonical snapshot compatibility contract:
 
 - Hash UTF-8 bytes of compact JSON arrays with ASCII escapes and no spaces.

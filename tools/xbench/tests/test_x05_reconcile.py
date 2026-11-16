@@ -23,6 +23,7 @@ from benches.x05_reconcile import (METRICS, TABLE_COLUMNS, check_discrepancies,
     MAX_RESULT_CHARS, compare_grid_correspondence, reconcile_seven_steps,
     reconcile_seven_steps_json,
     aggregate_seven_steps, validate_import_grid_provenance,
+    aggregate_seven_steps_json, reconcile_bound_seven_steps,
     compare_csv_view, compare_recommendations, compare_snapshots, compare_strings, compare_table)
 
 
@@ -1181,7 +1182,7 @@ def test_assurance_aggregate_cli_preserves_readable_siblings(tmp_path, kind, exi
         assert observed["fixtures"][expected[1]]["verdict"] == "FAIL"
 
 
-@pytest.mark.parametrize("mode", ["--provenance", "--assurance", "--provenance-aggregate", "--assurance-aggregate"])
+@pytest.mark.parametrize("mode", ["--provenance", "--assurance", "--provenance-aggregate", "--assurance-aggregate", "--seven-step"])
 @pytest.mark.parametrize("raw", [b"\xffsynthetic_private_canary", b"\xf0\x9f\x99"])
 def test_new_modes_invalid_utf8_always_one_sanitized_result(tmp_path, mode, raw):
     import subprocess
@@ -1195,7 +1196,7 @@ def test_new_modes_invalid_utf8_always_one_sanitized_result(tmp_path, mode, raw)
     assert len(result.stdout.splitlines()) == 1
 
 
-@pytest.mark.parametrize("mode", ["--provenance", "--assurance", "--provenance-aggregate", "--assurance-aggregate"])
+@pytest.mark.parametrize("mode", ["--provenance", "--assurance", "--provenance-aggregate", "--assurance-aggregate", "--seven-step"])
 def test_new_modes_read_error_is_sanitized(monkeypatch, mode):
     import sys
     from types import SimpleNamespace
@@ -1566,6 +1567,8 @@ def test_foreign_hex_role_rejected_before_any_decoding(payload, monkeypatch):
 
 
 def cli_payload(mode):
+    if mode == "--seven-step":
+        return seven_step_envelope()
     if mode == "--provenance":
         manifest, bindings, _ = provenance_fixture()
         return dict(evidence=complete_evidence(), manifest=manifest, bindings=bindings)
@@ -1607,7 +1610,7 @@ def test_new_mode_character_and_byte_limits_match_direct_decoder(tmp_path, mode,
         assert len(text.encode("utf-8")) == 4 * MAX_JSON_CHARS + extra
 
 
-@pytest.mark.parametrize("mode", ["--provenance", "--assurance", "--provenance-aggregate", "--assurance-aggregate"])
+@pytest.mark.parametrize("mode", ["--provenance", "--assurance", "--provenance-aggregate", "--assurance-aggregate", "--seven-step"])
 @pytest.mark.parametrize("failure", ["write", "flush", "pipe"])
 def test_new_modes_output_failures_exit_five_without_tracebacks(tmp_path, monkeypatch, mode, failure):
     import subprocess
@@ -2577,3 +2580,107 @@ def test_seven_step_direct_json_differential_mutation_corpus():
         strict = reconcile_seven_steps_json(json.dumps(envelope))
         assert json.loads(serialize_result(direct)) == json.loads(serialize_result(strict))
         assert strict == reconcile_seven_steps_json(json.dumps(envelope)) and envelope == preserved
+
+
+
+
+
+def test_strict_seven_step_aggregate_json_and_readable_siblings():
+    expected, records = seven_fixture_records()
+    payload = dict(expected_ids=expected, fixtures=records)
+    baseline = aggregate_seven_steps_json(json.dumps(payload))
+    assert baseline["verdict"] == "PASS"
+    records[0]["envelope"]["import"] = None
+    observed = aggregate_seven_steps_json(json.dumps(payload))
+    assert observed["verdict"] == "UNREADABLE"
+    for key in expected[1:]:
+        assert observed["fixtures"][key] == baseline["fixtures"][key]
+    for text, reason in [('{}', 'seven_step_aggregate_envelope_unreadable'),
+                         ('{"fixtures":[],"fixtures":[]}', 'json_duplicate_key'),
+                         (' ' * (MAX_JSON_CHARS + 1), 'json_input_too_large')]:
+        assert aggregate_seven_steps_json(text)["reason"] == reason
+    for value in (dict(payload, extra=True), dict(fixtures=records), dict(expected_ids=expected)):
+        assert aggregate_seven_steps_json(json.dumps(value))["reason"] == "seven_step_aggregate_envelope_unreadable"
+
+
+def test_bound_seven_steps_retains_diagnostics_for_swapped_equal_total_claims():
+    envelope = seven_step_envelope()
+    frozen = deepcopy(envelope["assurance"]["manifest"])
+    imported, grid = deepcopy(frozen), deepcopy(frozen)
+    assert reconcile_bound_seven_steps(envelope, frozen, imported, grid)["verdict"] == "PASS"
+    envelope["import"]["dwg_imported"] = False
+    assert reconcile_bound_seven_steps(envelope, frozen, imported, grid)["verdict"] == "FAIL"
+    for stage in ("import", "grid"):
+        for field in ("fixture_id", "inputs"):
+            altered = deepcopy(frozen)
+            altered[field] = "foreign" if field == "fixture_id" else dict(frozen["inputs"], report="d" * 64)
+            preserved = deepcopy((envelope, frozen, altered))
+            result = reconcile_bound_seven_steps(envelope, frozen, altered if stage == "import" else imported,
+                                                 altered if stage == "grid" else grid)
+            assert result["verdict"] == "UNREADABLE" and result["provenance"]["stage"] == stage
+            assert result["reconciliation"] == reconcile_seven_steps_json(json.dumps(envelope))
+            assert (envelope, frozen, altered) == preserved
+    foreign = deepcopy(envelope)
+    foreign["assurance"]["manifest"]["fixture_id"] = "foreign"
+    result = reconcile_bound_seven_steps(foreign, frozen, imported, grid)
+    assert result["provenance"]["reason"] == "seven_step_manifest_conflict"
+    assert result["reconciliation"]["steps"]["1"]["verdict"] == "FAIL"
+
+
+def test_seven_aggregate_ambiguous_duplicate_recovery_preserves_siblings():
+    expected, records = seven_fixture_records()
+    baseline = aggregate_seven_steps(expected, records)
+    valid = records[0]
+    malformed = dict(fixture_id=expected[0], envelope=None)
+    foreign = deepcopy(valid)
+    foreign["envelope"]["assurance"]["evidence"]["fixture_id"] = "foreign"
+    for ordering in permutations([valid, malformed, foreign]):
+        changed = list(ordering) + records[1:]
+        preserved = deepcopy(changed)
+        observed = aggregate_seven_steps_json(json.dumps(dict(expected_ids=expected, fixtures=changed)))
+        assert observed["verdict"] == "UNREADABLE" and expected[0] not in observed["fixtures"]
+        for key in expected[1:]:
+            assert observed["fixtures"][key] == baseline["fixtures"][key]
+        assert changed == preserved
+    assert aggregate_seven_steps(expected, records) == baseline
+
+
+def test_seven_step_aggregate_deterministic_subprocess_mutation_orders(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from benches import x05_reconcile as module
+    expected, records = seven_fixture_records()
+    for row in records:
+        grid = row["envelope"]["grid"]
+        grid["expected_grid_ids"].append("g2")
+        grid["saved_group_ids"].append("p2")
+        grid["rows"].append(dict(grid_id="g2", matches=["p2"], cause=None))
+    records[0]["envelope"]["import"]["report_imported"] = False
+    records[1]["envelope"]["grid"]["rows"][0]["matches"] = ["foreign"]
+    records[1]["envelope"]["assurance"]["inputs_hex"]["report"] = b"swapped".hex()
+    program = ("import sys;sys.path.insert(0,sys.argv[1]);from benches.x05_reconcile import "
+        "aggregate_seven_steps,decode_evidence_json,serialize_result;"
+        "v=decode_evidence_json(sys.stdin.read())['evidence'];"
+        "r=aggregate_seven_steps(v['expected_ids'],v['fixtures']);print(serialize_result(r));"
+        "sys.exit({'PASS':0,'FAIL':1,'UNREADABLE':4}[r['verdict']])")
+    outputs = []
+    for seed in ("0", "73"):
+        for reverse in (False, True):
+            changed = deepcopy(records)
+            if reverse:
+                changed.reverse()
+                for row in changed:
+                    grid = row["envelope"]["grid"]
+                    for field in ("expected_grid_ids", "saved_group_ids", "rows"):
+                        grid[field].reverse()
+                    identities = row["envelope"]["assurance"]["stage_identities"]
+                    row["envelope"]["assurance"]["stage_identities"] = dict(reversed(list(identities.items())))
+            result = subprocess.run([sys.executable, "-P", "-c", program, str(Path(module.__file__).resolve().parents[1])],
+                input=json.dumps(dict(expected_ids=list(reversed(expected)) if reverse else expected, fixtures=changed)).encode(),
+                capture_output=True, cwd=tmp_path, timeout=20,
+                env={"PYTHONHASHSEED": seed, "SystemRoot": "C:\\Windows"})
+            assert result.returncode == 4 and not result.stderr
+            assert json.loads(result.stdout)["fixtures"][expected[2]]["verdict"] == "PASS"
+            outputs.append(result.stdout)
+    assert len(set(outputs)) == 1

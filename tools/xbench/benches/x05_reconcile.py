@@ -144,7 +144,7 @@ def aggregate_provenance(expected_ids, fixtures):
     return _out(verdict, "offline_provenance_fixtures", fixtures=results)
 
 
-def _aggregate_envelope_diagnostics(coverage, expected_ids, fixtures, *, assured):
+def _aggregate_envelope_diagnostics(coverage, expected_ids, fixtures, *, assured, seven=False):
     """Retain readable unique siblings and bounded index-only envelope errors."""
     if (type(expected_ids) is not list or len(expected_ids) != 3
             or any(type(key) is not str or not key.strip() or len(key) > 128 for key in expected_ids)
@@ -172,7 +172,9 @@ def _aggregate_envelope_diagnostics(coverage, expected_ids, fixtures, *, assured
     results = {}
     for key in sorted(indexed.keys() - duplicated):
         row = indexed[key]
-        if assured:
+        if seven:
+            results[key] = _seven_step_envelope(row.get("envelope"))
+        elif assured:
             results[key] = _assurance_envelope(row, fixture_record=True)
         else:
             results[key] = reconcile_with_provenance(row["evidence"], row.get("manifest"), row.get("bindings"))
@@ -520,15 +522,37 @@ def aggregate_seven_steps(expected_ids, fixtures):
         envelope = row.get("envelope") if type(row) is dict else None
         assurance = envelope.get("assurance") if type(envelope) is dict else None
         evidence = assurance.get("evidence") if type(assurance) is dict else None
-        proxies.append(dict(fixture_id=key, evidence=evidence))
+        proxies.append(dict(fixture_id=key, evidence=evidence, envelope=envelope))
     coverage = aggregate_fixtures(expected_ids, proxies)
     if coverage["reason"] != "offline_fixture_reconciliation":
-        return coverage
+        return _aggregate_envelope_diagnostics(coverage, expected_ids, proxies, assured=False, seven=True)
     indexed = {row["fixture_id"]: row for row in fixtures}
     results = {key: _seven_step_envelope(indexed[key]["envelope"]) for key in sorted(expected_ids)}
     verdicts = {result["verdict"] for result in results.values()}
     return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
                 "offline_seven_step_fixtures", fixtures=results)
+
+
+def aggregate_seven_steps_json(text):
+    decoded = decode_evidence_json(text)
+    if decoded["verdict"] != "PASS":
+        return decoded
+    envelope = decoded["evidence"]
+    if set(envelope) != {"expected_ids", "fixtures"}:
+        return _out("UNREADABLE", "seven_step_aggregate_envelope_unreadable")
+    return aggregate_seven_steps(envelope["expected_ids"], envelope["fixtures"])
+
+
+def reconcile_bound_seven_steps(envelope, frozen_manifest, import_binding, grid_binding):
+    provenance = validate_import_grid_provenance(frozen_manifest, import_binding, grid_binding)
+    reconciliation = _seven_step_envelope(envelope)
+    if provenance["verdict"] == "PASS":
+        assurance = envelope.get("assurance") if type(envelope) is dict else None
+        supplied = assurance.get("manifest") if type(assurance) is dict else None
+        if supplied != frozen_manifest:
+            provenance = _out("UNREADABLE", "seven_step_manifest_conflict")
+    verdict = "UNREADABLE" if provenance["verdict"] == "UNREADABLE" else reconciliation["verdict"]
+    return _out(verdict, "offline_bound_seven_steps", provenance=provenance, reconciliation=reconciliation)
 
 
 def aggregate_fixtures(expected_ids, fixtures):
