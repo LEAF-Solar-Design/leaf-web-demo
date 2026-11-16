@@ -1632,7 +1632,7 @@ inverter IDs, expected grid IDs and `{inverter_id, grid_id}` assignments.
 `compare_grid_inverter_oracle_totals` requires exact grid coverage and agreement
 with `oracle_values.inverters`. `compare_inverter_snapshots` compares explicit
 IDs and owners on each side, with bounded added/removed/owner-change diagnostics.
-These inverter helpers remain standalone in this slice.
+These helpers supply the seven-step inverter diagnostics.
 
 Run this synthetic existing-table replay from the repository root.
 
@@ -1670,3 +1670,650 @@ owners are separate evidence needed to settle save/reopen preservation. Missing
 identity evidence stays unknown. This replay establishes supplied synthetic
 comparison behavior, with input origin and live X05 acceptance requiring their
 own receipts.
+
+## Composed inverter recovery replay
+
+Seven-step input requires independent `grid.inverter_totals` and explicit
+`assurance.evidence.saved_inverters`, `before_inverters` and `reopened_inverters`
+rows. Each row contains `inverter_id` and `grid_id`. `grid_inverters` retains
+ownership, independent grid counts and report-total consistency. `inverter_reopen`
+compares device IDs and owners across save/reopen and binds the before map to the
+saved map through `saved_binding`. Missing identity evidence yields UNREADABLE.
+
+Run this synthetic PowerShell replay from the repository root.
+
+```powershell
+@'
+import sys, json, runpy
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches.x05_reconcile import reconcile_seven_steps_json
+builders = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+correct = builders['equal_count_ownership_envelope']()
+swapped = deepcopy(correct)
+swapped['grid']['inverter_totals'] = dict(east=0, west=1)
+contradiction = deepcopy(correct)
+contradiction['grid']['inverter_totals'] = dict(east=1, west=1)
+substituted = deepcopy(correct)
+substituted['assurance']['evidence']['reopened_inverters'][0]['inverter_id'] = 'INV-B'
+missing = deepcopy(correct)
+del missing['assurance']['evidence']['reopened_inverters']
+for name, envelope in [('swapped', swapped), ('contradiction', contradiction), ('substituted', substituted), ('missing', missing), ('corrected', correct)]:
+    result = reconcile_seven_steps_json(json.dumps(envelope))
+    grid = result['grid_inverters']
+    print(name, result['verdict'], grid['comparison']['reason'], grid['oracle_consistency']['reason'], result['inverter_reopen']['reason'])
+    assert result['steps']['7']['verdict'] == 'PASS'
+'@ | python -P -
+```
+
+Expected output
+
+```text
+swapped FAIL grid_inverter_totals_mismatch grid_inverter_oracle_total_equal inverter_snapshots_equal
+contradiction FAIL grid_inverter_totals_mismatch grid_inverter_oracle_total_mismatch inverter_snapshots_equal
+substituted FAIL grid_inverter_totals_equal grid_inverter_oracle_total_equal inverter_snapshots_changed
+missing UNREADABLE grid_inverter_totals_equal grid_inverter_oracle_total_equal inverter_snapshots_invalid
+corrected PASS grid_inverter_totals_equal grid_inverter_oracle_total_equal inverter_snapshots_equal
+```
+
+The grid swap and substituted device preserve the total of one inverter. Explicit
+identity and independent grid evidence expose each mismatch. The inputs in this
+replay are synthetic, with input origin and live X05 acceptance requiring their
+own receipts.
+# String-to-inverter evidence in the X05 parity report
+
+The seven-step report checks inverter identities and grid owners. It does not
+establish which inverter each string connects to. Equal per-inverter counts can
+hide swapped connections. These new standalone helpers require explicit
+`string_id` and `inverter_id` rows, unique existing inverter IDs, and the actual
+saved string ID set. An independent oracle must supply its own assignment rows.
+Save/reopen proof needs both connection snapshots. Missing evidence is
+UNREADABLE. No helper derives a connection from totals or authenticates a source.
+
+Run this synthetic replay from the repository root in PowerShell:
+
+```powershell
+@'
+import json, runpy, sys
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+envelope = fixtures['equal_count_ownership_envelope']()
+before = [dict(string_id='A', inverter_id='I1'), dict(string_id='B', inverter_id='I2')]
+swapped = [dict(string_id='A', inverter_id='I2'), dict(string_id='B', inverter_id='I1')]
+print('existing composition', m.reconcile_seven_steps_json(json.dumps(envelope))['verdict'])
+for name, rows in [('swapped', swapped), ('missing', None), ('corrected', before)]:
+    result = m.compare_string_inverter_snapshots(['I1', 'I2'], ['A', 'B'], before, rows)
+    print(name, result['verdict'], result['reason'])
+assert m.compare_string_inverter_assignments(['I1', 'I2'], ['A', 'B'], before, swapped)['changed_count'] == 2
+'@ | python -P -
+```
+
+Expected: existing composition PASS, swapped FAIL
+`string_inverter_snapshots_changed`, missing UNREADABLE
+`string_inverter_snapshots_invalid`, corrected PASS
+`string_inverter_snapshots_equal`. The supplied connection rows are separate
+evidence, so the existing composition PASS does not settle topology. The replay
+uses no customer data, transport, credentials, staging mutation or live grading.
+# Composed assignment recovery for the X05 parity report
+
+The seven-step composition now requires `oracle_assignments` and
+`saved_assignments`, plus `before_assignments` and `reopened_assignments`.
+Each row names `string_id` and `inverter_id`. Snapshot validation uses each
+snapshot's own string and inverter IDs. The before connections must also equal
+the saved connections. The earlier standalone replay describes the previous
+composition boundary; explicit connection evidence now contributes to its verdict.
+Input origin and oracle independence still require separate producer evidence.
+
+Run this synthetic replay from the repository root:
+
+```powershell
+@'
+import json, runpy, sys
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+for name in ('swapped', 'unrelated before', 'missing reopened', 'corrected'):
+    envelope = fixtures['connection_envelope']()
+    evidence = envelope['assurance']['evidence']
+    if name == 'swapped':
+        fields = ('saved_assignments', 'before_assignments', 'reopened_assignments')
+    elif name == 'unrelated before':
+        fields = ('before_assignments', 'reopened_assignments')
+    else:
+        fields = ()
+    for field in fields:
+        evidence[field][0]['inverter_id'], evidence[field][1]['inverter_id'] = 'INV-B', 'INV-A'
+    if name == 'missing reopened':
+        evidence['reopened_assignments'] = None
+    result = m.reconcile_seven_steps_json(json.dumps(envelope))
+    print(name, result['verdict'], result['assignments']['reason'],
+          result['assignment_reopen']['saved_binding']['reason'],
+          result['assignment_reopen']['comparison']['reason'])
+    assert result['steps']['7']['verdict'] == 'PASS'
+'@ | python -P -
+```
+
+Expected: swapped FAIL with `string_inverter_assignments_changed`, unrelated
+before FAIL with saved binding `string_inverter_assignments_changed`, missing
+reopened UNREADABLE with `string_inverter_snapshots_invalid`, corrected PASS.
+Each swap preserves the per-inverter counts, device identities and grid totals.
+No source independence, customer-data intake or live acceptance is claimed.
+# Per-inverter load evidence for X05 reconciliation
+
+Matching connection identities and grid totals can coexist with report loads
+that differ for each inverter. The standalone load helpers require independent
+per-inverter totals keyed by explicit inverter IDs. String totals count supplied
+connections. Optimizer totals use saved per-string optimizer counts. Panel and
+kW DC totals require their own rows bound to the saved string ID set. The oracle
+consistency helper checks explicit device coverage and each report grand total.
+The DC helper uses exact decimal arithmetic and preserves the caller context.
+
+Run this synthetic replay from the repository root:
+
+```powershell
+@'
+import json, runpy, sys
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+envelope = fixtures['connection_envelope']()
+evidence = envelope['assurance']['evidence']
+owners = evidence['saved_assignments']
+ids = [row['string_id'] for row in evidence['saved_strings']]
+print('composition', m.reconcile_seven_steps_json(json.dumps(envelope))['verdict'])
+checks = [
+    m.compare_inverter_string_totals({'INV-A':2, 'INV-B':0}, ids, owners),
+    m.compare_inverter_optimizer_totals({'INV-A':7, 'INV-B':5}, evidence['saved_strings'], owners),
+    m.compare_inverter_panel_totals({'INV-A':14, 'INV-B':10}, ids, envelope['grid']['panel_counts'], owners),
+    m.compare_inverter_dc_totals({'INV-A':'5.6', 'INV-B':'4'}, ids, envelope['grid']['dc_power'], owners),
+]
+for result in checks:
+    print(result['verdict'], result['reason'], result['mismatch_count'])
+corrected = m.compare_inverter_optimizer_totals({'INV-A':5, 'INV-B':7}, evidence['saved_strings'], owners)
+missing = m.compare_inverter_optimizer_totals(None, evidence['saved_strings'], owners)
+print('corrected', corrected['verdict'], 'missing', missing['verdict'])
+assert all(result['verdict'] == 'FAIL' and result['mismatch_count'] == 2 for result in checks)
+assert corrected['verdict'] == 'PASS' and missing['verdict'] == 'UNREADABLE'
+'@ | python -P -
+```
+
+Expected composition PASS and four per-inverter load FAIL results with two
+mismatches each. Corrected optimizer totals PASS. Absent independent totals are
+UNREADABLE. All independent count and power maps preserve their report grand
+totals in this example. These standalone helpers add per-device comparisons to
+the supplied evidence. Producer provenance and independent report extraction
+remain requirements for live acceptance.
+# Composed inverter load recovery for X05 reconciliation
+
+Seven-step evidence now requires `inverter_loads` with `strings`, `optimizers`,
+`panels` and `kw_dc` maps keyed by inverter ID. Each map must cover the explicit
+saved inverter set and sum to its independent report metric. Save/reopen loads
+come from each snapshot's own connection assignments and per-string counts or
+power rows. Before loads also bind to saved values. The report retains each
+metric's comparison and oracle consistency result when another metric fails.
+
+Run this synthetic replay from the repository root:
+
+```powershell
+@'
+import json, runpy, sys
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+envelope = fixtures['connection_envelope']()
+loads = envelope['assurance']['evidence']['inverter_loads']
+correct = {metric:dict(values) for metric,values in loads.items()}
+for metric in ('optimizers', 'panels'):
+    loads[metric]['INV-A'], loads[metric]['INV-B'] = loads[metric]['INV-B'], loads[metric]['INV-A']
+loads['kw_dc'] = None
+for stage in ('initial', 'optimizer repaired', 'panel repaired', 'power repaired'):
+    if stage == 'optimizer repaired': loads['optimizers'] = correct['optimizers']
+    if stage == 'panel repaired': loads['panels'] = correct['panels']
+    if stage == 'power repaired': loads['kw_dc'] = correct['kw_dc']
+    result = m.reconcile_seven_steps_json(json.dumps(envelope))
+    checks = result['inverter_loads']['metrics']
+    print(stage, result['verdict'], *(checks[metric]['comparison']['reason']
+          for metric in ('optimizers', 'panels', 'kw_dc')))
+    assert result['steps']['7']['verdict'] == 'PASS'
+assert result['verdict'] == 'PASS'
+'@ | python -P -
+```
+
+The first three stages are UNREADABLE while power evidence is absent. The first
+stage retains both `inverter_optimizers_totals_mismatch` and
+`inverter_panels_totals_mismatch`. Repairs clear only their own metric. The final
+stage is PASS. Oracle input origin and independence require producer evidence
+from the actual report extraction path before live acceptance.
+# Independent per-string metric evidence for X05
+
+Grid and inverter totals can agree after panel or DC values move between strings
+on the same inverter. Composition compares supplied snapshots and aggregate
+oracles. Independent per-string panel and kW DC rows are needed to detect this
+case. The standalone `compare_string_panel_counts` and `compare_string_dc_power`
+helpers require explicit oracle IDs and values, with bounded sorted diagnostics.
+Missing or malformed rows return UNREADABLE. Explicit identity or value
+differences return FAIL. DC comparison uses isolated exact decimals.
+
+Run this synthetic replay from the repository root:
+
+```powershell
+@'
+import json, runpy, sys
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+envelope = fixtures['per_string_redistribution_envelope']()
+panels = [dict(string_id='A',panels=10),dict(string_id='B',panels=14)]
+power = [dict(string_id='A',kw_dc='4'),dict(string_id='B',kw_dc='5.6')]
+composition = m.reconcile_seven_steps_json(json.dumps(envelope))
+panel = m.compare_string_panel_counts(panels, envelope['grid']['panel_counts'])
+dc = m.compare_string_dc_power(power, envelope['grid']['dc_power'])
+print('composition', composition['verdict'])
+print('panels', panel['verdict'], panel['reason'], panel['counts']['mismatched'])
+print('power', dc['verdict'], dc['reason'], dc['counts']['mismatched'])
+assert composition['verdict'] == 'PASS'
+assert panel['verdict'] == dc['verdict'] == 'FAIL'
+'@ | python -P -
+```
+
+Expected composition PASS, panels FAIL `string_panels_mismatch` with two changed
+strings, power FAIL `string_kw_dc_mismatch` with two changed strings. Both strings
+retain their IDs, grid, inverter and aggregate totals. Independent report
+extraction must provide the per-string oracle values and their provenance for
+live acceptance. These new comparators remain standalone in this slice.
+# Independent per-string metric recovery in X05
+
+Seven-step `string_metrics` now includes panel/DC comparisons and independent
+oracle coverage/sum checks. Evidence must supply `oracle_panels` and
+`oracle_dc_power` rows with explicit string IDs and values. The following
+standalone replay preserves each diagnostic while repairing panel and DC swaps.
+
+```powershell
+@'
+import sys
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+panels = [dict(string_id='A',panels=10),dict(string_id='B',panels=14)]
+power = [dict(string_id='A',kw_dc='4'),dict(string_id='B',kw_dc='5.6')]
+saved_panels = [dict(string_id='A',panels=14),dict(string_id='B',panels=10)]
+saved_power = [dict(string_id='A',kw_dc='5.6'),dict(string_id='B',kw_dc='4')]
+for stage in ('swapped', 'missing power oracle', 'panels repaired', 'power repaired'):
+    oracle_power = None if stage in ('missing power oracle', 'panels repaired') else power
+    if stage in ('panels repaired', 'power repaired'): saved_panels = panels
+    if stage == 'power repaired': saved_power = power
+    panel = m.compare_string_panel_counts(panels, saved_panels)
+    dc = m.compare_string_dc_power(oracle_power, saved_power)
+    print(stage, panel['verdict'], panel['reason'], dc['verdict'], dc['reason'])
+assert panel['verdict'] == dc['verdict'] == 'PASS'
+'@ | python -P -
+```
+
+Expected panel/DC verdict pairs are FAIL/FAIL, FAIL/UNREADABLE,
+PASS/UNREADABLE, PASS/PASS. Diagnostics name `string_panels_mismatch`,
+`string_kw_dc_mismatch`, `oracle_rows_unreadable`, then their matching
+`string_panels_equal` and `string_kw_dc_equal` results after repair. Composition
+uses UNREADABLE precedence and retains readable sibling diagnostics. Previous
+proof-limit replays now produce composition FAIL once these independent rows
+are supplied. Oracle origin and independence require actual producer evidence.
+# Composed string metric recovery for X05
+
+The seven-step `string_metrics` result includes explicit panel/DC snapshot
+comparisons, snapshot string-ID bindings and before-to-saved value bindings.
+This replay exercises independent oracle failures and incremental repair through
+the composer. It uses only synthetic rows.
+
+```powershell
+@'
+import json, runpy, sys
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+envelope = fixtures['per_string_redistribution_envelope']()
+grid, evidence = envelope['grid'], envelope['assurance']['evidence']
+power = deepcopy(evidence['oracle_dc_power'])
+evidence['oracle_dc_power'] = None
+observed = []
+for stage in ('missing power oracle', 'panels repaired', 'power oracle restored',
+              'power repaired', 'contradictory report sum', 'sum repaired'):
+    if stage == 'panels repaired':
+        for field in ('panel_counts','before_panel_counts','reopened_panel_counts'):
+            grid[field] = deepcopy(evidence['oracle_panels'])
+    if stage == 'power oracle restored': evidence['oracle_dc_power'] = power
+    if stage == 'power repaired':
+        for field in ('dc_power','before_dc_power','reopened_dc_power'):
+            grid[field] = deepcopy(power)
+    if stage == 'contradictory report sum': evidence['oracle_panels'][0]['panels'] = 11
+    if stage == 'sum repaired': evidence['oracle_panels'][0]['panels'] = 10
+    result = m.reconcile_seven_steps_json(json.dumps(envelope))
+    checks = result['string_metrics']['metrics']
+    observed.append(result['verdict'])
+    print(stage, result['verdict'], checks['panels']['comparison']['reason'],
+          checks['kw_dc']['comparison']['reason'], checks['panels']['oracle_consistency']['reason'])
+assert observed == ['UNREADABLE','UNREADABLE','FAIL','PASS','FAIL','PASS']
+'@ | python -P -
+```
+
+Each repair preserves the other metric's diagnostic. Oracle sum contradictions
+produce `string_panels_oracle_total_mismatch`. Independent per-string report
+rows still require producer provenance for live acceptance.
+# Cross-topology evidence for X05
+
+Balanced cross-grid connections can preserve every device and string count.
+Explicit string grid owners, inverter grid owners and string-to-inverter
+connections are needed to establish that both endpoints share a grid. The new
+standalone `validate_cross_topology` helper checks this equality after validating
+all three maps. The existing composer retains its earlier topology boundaries
+until this helper is integrated.
+
+```powershell
+@'
+import sys
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+grids, strings, devices = ['east','west'], ['A','B'], ['I1','I2']
+owners = [dict(string_id='A',grid_id='east'),dict(string_id='B',grid_id='west')]
+inverters = [dict(inverter_id='I1',grid_id='east'),dict(inverter_id='I2',grid_id='west')]
+crossed = [dict(string_id='A',inverter_id='I2'),dict(string_id='B',inverter_id='I1')]
+optimizers = [dict(string_id=k,optimizers=6) for k in strings]
+panels = [dict(string_id=k,panels=12) for k in strings]
+power = [dict(string_id=k,kw_dc='4.8') for k in strings]
+checks = [
+    m.validate_grid_string_ownership(grids,strings,owners),
+    m.validate_grid_inverter_ownership(grids,devices,inverters),
+    m.validate_string_inverter_assignments(devices,strings,crossed),
+    m.compare_inverter_string_totals(dict(I1=1,I2=1),strings,crossed),
+    m.compare_inverter_optimizer_totals(dict(I1=6,I2=6),optimizers,crossed),
+    m.compare_inverter_panel_totals(dict(I1=12,I2=12),strings,panels,crossed),
+    m.compare_inverter_dc_totals(dict(I1='4.8',I2='4.8'),strings,power,crossed),
+]
+for check in checks: print(check['verdict'],check['reason'])
+topology = m.validate_cross_topology(grids,strings,devices,owners,inverters,crossed)
+print(topology['verdict'],topology['reason'],topology['mismatch_count'])
+assert all(check['verdict'] == 'PASS' for check in checks)
+assert topology['verdict'] == 'FAIL' and topology['mismatch_count'] == 2
+'@ | python -P -
+```
+
+Expected seven PASS results and FAIL `cross_topology_mismatch` with two changed
+strings. Missing owner evidence is UNREADABLE. Valid but missing or foreign
+assignments fail their explicit coverage checks. Independent producer evidence
+must bind these identities to the actual saved design for live acceptance.
+# Cross-topology recovery for X05
+
+Seven-step composition now validates saved, before and reopened topology using
+each snapshot's string IDs, inverter IDs, grid owners and connections. Grid
+evidence must explicitly supply `before_string_assignments` as well as saved
+`string_assignments` and `reopened_string_assignments`. The standalone recovery
+below combines missing owner evidence with balanced cross-grid connections.
+
+```powershell
+@'
+import sys
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+grids, strings, devices = ['east','west'], ['A','B'], ['I1','I2']
+owners = [dict(string_id='A',grid_id='east'),dict(string_id='B',grid_id='west')]
+inverters = [dict(inverter_id='I1',grid_id='east'),dict(inverter_id='I2',grid_id='west')]
+crossed = [dict(string_id='A',inverter_id='I2'),dict(string_id='B',inverter_id='I1')]
+correct = [dict(string_id='A',inverter_id='I1'),dict(string_id='B',inverter_id='I2')]
+observed = []
+for name, supplied_owners, connections in [('missing owners',None,crossed),
+        ('owners repaired',inverters,crossed),('connections repaired',inverters,correct)]:
+    result = m.validate_cross_topology(grids,strings,devices,owners,supplied_owners,connections)
+    observed.append(result['verdict'])
+    print(name,result['verdict'],result['reason'],result.get('mismatch_count'))
+assert observed == ['UNREADABLE','FAIL','PASS']
+'@ | python -P -
+```
+
+Expected reasons are `cross_topology_evidence_invalid`,
+`cross_topology_mismatch` with two mismatches, and `cross_topology_equal` with
+zero mismatches. Repairing owner evidence leaves the connection violation
+visible. Independent producer records must bind every supplied identity and
+owner map to its actual design snapshot before live acceptance.
+# Composed cross-topology recovery in X05
+
+This synthetic replay keeps every saved, before and reopened phase diagnostic
+visible while repairing independent cross-grid violations and missing owners.
+
+```powershell
+@'
+import json, runpy, sys
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+envelope = fixtures['equal_count_ownership_envelope']()
+grid, evidence = envelope['grid'], envelope['assurance']['evidence']
+correct = deepcopy(evidence['saved_assignments'])
+before_owners = deepcopy(grid['before_string_assignments'])
+for stage in ('saved','reopened'):
+    rows = evidence[stage+'_assignments']
+    rows[0]['inverter_id'],rows[1]['inverter_id'] = 'INV-B','INV-A'
+grid['before_string_assignments'] = None
+observed = []
+for stage in ('initial','saved repaired','before owners repaired','reopened repaired'):
+    if stage == 'saved repaired': evidence['saved_assignments'] = deepcopy(correct)
+    if stage == 'before owners repaired': grid['before_string_assignments'] = before_owners
+    if stage == 'reopened repaired': evidence['reopened_assignments'] = deepcopy(correct)
+    result = m.reconcile_seven_steps_json(json.dumps(envelope))
+    checks = result['cross_topology']['checks']
+    observed.append(result['verdict'])
+    print(stage,result['verdict'],*(checks[key]['verdict'] for key in ('saved','before','reopened')))
+    print(*(checks[key]['reason'] for key in ('saved','before','reopened')))
+assert observed == ['UNREADABLE','UNREADABLE','FAIL','PASS']
+'@ | python -P -
+```
+
+Phase verdicts progress from FAIL/UNREADABLE/FAIL to PASS/UNREADABLE/FAIL,
+PASS/PASS/FAIL and PASS/PASS/PASS. Violations name `cross_topology_mismatch`,
+missing evidence names `cross_topology_evidence_invalid`, and repaired phases
+name `cross_topology_equal`. Each supplied map needs actual producer provenance
+before live acceptance.
+# Independent owner evidence for X05
+
+Jointly swapping string and inverter grid owners can preserve valid connections
+and balanced grid totals. Independent oracle owner rows establish the expected
+identity-to-grid mapping. The new string and inverter owner comparators remain
+standalone in this slice. Independent inverter ID sets also detect substitutions
+of devices that have no strings connected.
+
+```powershell
+@'
+import sys
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+grids, strings, devices = ['east','west'], ['A','B'], ['I1','I2']
+oracle_strings = [dict(string_id='A',grid_id='east'),dict(string_id='B',grid_id='west')]
+oracle_inverters = [dict(inverter_id='I1',grid_id='east'),dict(inverter_id='I2',grid_id='west')]
+saved_strings = [dict(string_id='A',grid_id='west'),dict(string_id='B',grid_id='east')]
+saved_inverters = [dict(inverter_id='I1',grid_id='west'),dict(inverter_id='I2',grid_id='east')]
+connections = [dict(string_id='A',inverter_id='I1'),dict(string_id='B',inverter_id='I2')]
+checks = [
+    m.validate_cross_topology(grids,strings,devices,saved_strings,saved_inverters,connections),
+    m.compare_grid_string_totals(dict(east=1,west=1),strings,saved_strings),
+    m.compare_grid_inverter_totals(dict(east=1,west=1),devices,saved_inverters),
+]
+for check in checks: print(check['verdict'],check['reason'])
+string_check = m.compare_string_grid_owners(grids,strings,oracle_strings,saved_strings)
+device_check = m.compare_inverter_grid_owners(grids,devices,oracle_inverters,saved_inverters)
+for check in (string_check,device_check):
+    print(check['verdict'],check['reason'],check['mismatch_count'])
+assert all(check['verdict'] == 'PASS' for check in checks)
+assert string_check['mismatch_count'] == device_check['mismatch_count'] == 2
+'@ | python -P -
+```
+
+Expected three PASS results followed by FAIL `string_grid_owners_mismatch` and
+FAIL `inverter_grid_owners_mismatch`, each with two mismatches. Missing oracle
+owner rows are UNREADABLE. Report extraction must supply independently bound
+owner identities and grid mappings for live acceptance.
+# Independent owner recovery in X05
+
+Composition now requires `oracle_string_owners`, `oracle_inverter_owners` and
+`oracle_inverter_ids` in seven-step evidence. Its `independent_owners` result
+retains the three comparisons. This standalone replay repairs balanced owner
+swaps, missing oracle owners and an unconnected-device substitution separately.
+
+```powershell
+@'
+import sys
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+grids, strings = ['east','west'], ['A','B']
+oracle_ids, saved_ids = ['I1','I2','empty-old'], ['I1','I2','empty-new']
+oracle_strings = [dict(string_id='A',grid_id='east'),dict(string_id='B',grid_id='west')]
+oracle_devices = [dict(inverter_id=k,grid_id=v) for k,v in zip(oracle_ids,['east','west','east'])]
+saved_strings = [dict(string_id='A',grid_id='west'),dict(string_id='B',grid_id='east')]
+saved_devices = [dict(inverter_id=k,grid_id=v) for k,v in zip(saved_ids,['west','east','east'])]
+for stage in ('missing owners','string owners restored','string owners repaired','device identity repaired','device owners repaired'):
+    supplied = None if stage == 'missing owners' else oracle_strings
+    if stage == 'string owners repaired': saved_strings = deepcopy(oracle_strings)
+    if stage == 'device identity repaired':
+        saved_ids[-1] = 'empty-old'
+        saved_devices[-1]['inverter_id'] = 'empty-old'
+    if stage == 'device owners repaired': saved_devices = deepcopy(oracle_devices)
+    checks = [m.compare_string_grid_owners(grids,strings,supplied,saved_strings),
+              m.compare_inverter_grid_owners(grids,oracle_ids,oracle_devices,saved_devices),
+              m.compare_inverter_id_sets(oracle_ids,saved_ids)]
+    print(stage,*(check['verdict'] for check in checks))
+    print(*(check['reason'] for check in checks))
+assert all(check['verdict'] == 'PASS' for check in checks)
+'@ | python -P -
+```
+
+Verdict triples progress UNREADABLE/FAIL/FAIL, FAIL/FAIL/FAIL, PASS/FAIL/FAIL,
+PASS/FAIL/PASS and PASS/PASS/PASS. Identity repair leaves balanced device-owner
+swaps visible. Actual report producers must independently bind oracle identities
+and owner maps to the design before live acceptance.
+# Composed independent owner recovery for X05
+
+This replay combines balanced oracle-owner swaps, missing device-owner rows and
+a substituted oracle device ID. Each repair passes through seven-step
+composition and leaves the other independent-owner diagnostics visible.
+
+```powershell
+@'
+import json, runpy, sys
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+envelope = fixtures['independent_owner_conflict_envelope']('owners')
+evidence = envelope['assurance']['evidence']
+evidence['oracle_inverter_owners'] = None
+evidence['oracle_inverter_ids'][1] = 'replacement'
+observed = []
+for stage in ('initial','string owners repaired','device IDs repaired','device owners restored','device owners repaired'):
+    if stage == 'string owners repaired':
+        evidence['oracle_string_owners'] = deepcopy(envelope['grid']['string_assignments'])
+    if stage == 'device IDs repaired': evidence['oracle_inverter_ids'][1] = 'INV-B'
+    if stage == 'device owners restored':
+        evidence['oracle_inverter_owners'] = [dict(inverter_id='INV-A',grid_id='west'),dict(inverter_id='INV-B',grid_id='east')]
+    if stage == 'device owners repaired': evidence['oracle_inverter_owners'] = deepcopy(evidence['saved_inverters'])
+    result = m.reconcile_seven_steps_json(json.dumps(envelope))
+    checks = result['independent_owners']['checks']
+    observed.append(result['verdict'])
+    print(stage,result['verdict'],*(checks[key]['verdict'] for key in ('strings','inverters','inverter_ids')))
+    print(*(checks[key]['reason'] for key in ('strings','inverters','inverter_ids')))
+assert observed == ['UNREADABLE','UNREADABLE','UNREADABLE','FAIL','PASS']
+'@ | python -P -
+```
+
+The initial triple is FAIL/UNREADABLE/FAIL. String repair leaves the device
+failures visible. Identity repair leaves owner evidence UNREADABLE. Restoring
+swapped device owners yields FAIL until their mappings are repaired. Oracle
+identities and owners require independent producer provenance for live acceptance.
+# Independent owner envelope fields in X05
+
+The seven-step `assurance.evidence` object supplies explicit oracle and saved
+identity maps. Consumers retain their own named diagnostics.
+
+| Field | Row shape or value | Consumer |
+| --- | --- | --- |
+| `oracle_strings` | `string_id`, `optimizers` rows | Oracle string IDs and independent string checks |
+| `saved_strings` | `string_id`, `optimizers` rows | Saved string IDs and independent string checks |
+| `oracle_string_owners` | `string_id`, `grid_id` rows | Independent string owners and oracle topology |
+| `grid.string_assignments` | `string_id`, `grid_id` rows | Saved string owners and saved topology |
+| `oracle_inverter_ids` | Unique nonempty ID list | Independent device IDs and oracle topology |
+| `oracle_inverter_owners` | `inverter_id`, `grid_id` rows | Independent device owners and oracle topology |
+| `saved_inverters` | `inverter_id`, `grid_id` rows | Saved device IDs, owners and topology |
+| `oracle_assignments` | `string_id`, `inverter_id` rows | Independent connections and oracle topology |
+| `saved_assignments` | `string_id`, `inverter_id` rows | Saved connections and topology |
+
+`grid.string_assignments` belongs to the envelope's separate `grid` object.
+Omitted or null owner/connection rows are UNREADABLE. An empty owner/connection
+list is readable but fails coverage for this nonempty design. Omitted, null or
+empty device ID lists and oracle string rows are UNREADABLE. Duplicate identity
+lists are UNREADABLE. Duplicate owner rows fail explicit assignment coverage.
+
+```powershell
+@'
+import json, runpy, sys
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+envelope = fixtures['equal_count_ownership_envelope']()
+evidence = envelope['assurance']['evidence']
+evidence['oracle_string_owner'] = evidence.pop('oracle_string_owners')
+broken = m.reconcile_seven_steps_json(json.dumps(envelope))
+check = broken['independent_owners']['checks']['strings']
+print('field typo',broken['verdict'],check['reason'])
+assert broken['verdict'] == 'UNREADABLE'
+evidence['oracle_string_owners'] = evidence.pop('oracle_string_owner')
+fixed = m.reconcile_seven_steps_json(json.dumps(envelope))
+print('field repaired',fixed['verdict'],fixed['independent_owners']['checks']['oracle_topology']['reason'])
+assert fixed['verdict'] == 'PASS'
+'@ | python -P -
+```
+
+Expected field-typo result UNREADABLE `string_grid_owner_evidence_invalid`, then
+PASS with `cross_topology_equal`. Oracle topology checks only internal supplied
+consistency. Independent producer provenance remains required for live acceptance.
+# Oracle topology recovery with saved-phase failures in X05
+
+The composer now also retains `oracle_loads`, deriving grid and inverter loads
+from explicit oracle values and owners/connections. Each metric retains derived
+comparisons and report-total checks. This replay repairs missing oracle
+connections and contradictory oracle owners before repairing saved snapshots.
+
+```powershell
+@'
+import json, runpy, sys
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+envelope = fixtures['equal_count_ownership_envelope']()
+grid, evidence = envelope['grid'], envelope['assurance']['evidence']
+correct = deepcopy(evidence['oracle_assignments'])
+evidence['oracle_assignments'] = None
+rows = evidence['oracle_string_owners']
+rows[0]['grid_id'],rows[1]['grid_id'] = 'west','east'
+for phase in ('saved','before','reopened'):
+    rows = evidence[phase+'_assignments']
+    rows[0]['inverter_id'],rows[1]['inverter_id'] = 'INV-B','INV-A'
+observed = []
+for stage in ('initial','oracle connections restored','oracle owners repaired',
+              'saved repaired','before repaired','reopened repaired'):
+    if stage == 'oracle connections restored': evidence['oracle_assignments'] = deepcopy(correct)
+    if stage == 'oracle owners repaired': evidence['oracle_string_owners'] = deepcopy(grid['string_assignments'])
+    for phase in ('saved','before','reopened'):
+        if stage == phase+' repaired': evidence[phase+'_assignments'] = deepcopy(correct)
+    result = m.reconcile_seven_steps_json(json.dumps(envelope))
+    oracle = result['independent_owners']['checks']['oracle_topology']
+    phases = result['cross_topology']['checks']
+    observed.append(result['verdict'])
+    print(stage,result['verdict'],oracle['verdict'],oracle['reason'],
+          *(phases[key]['verdict'] for key in ('saved','before','reopened')))
+assert observed == ['UNREADABLE','FAIL','FAIL','FAIL','FAIL','PASS']
+'@ | python -P -
+```
+
+Oracle connection repair exposes `cross_topology_mismatch` from the contradictory
+oracle owners. Repairing those owners leaves all saved-phase failures visible.
+Each saved snapshot then repairs independently. These consistency checks require
+actual producer provenance and independent report extraction for live acceptance.

@@ -465,7 +465,7 @@ def _seven_step_inputs(import_evidence, grid_evidence):
     else:
         imported = _out("PASS" if all(import_evidence.values()) else "FAIL", "supplied_import_evidence")
     grid_fields = {"expected_grid_ids", "saved_group_ids", "rows", "require_all_matched"}
-    if type(grid_evidence) is not dict or set(grid_evidence) - {"string_assignments", "optimizer_totals", "reopened_string_assignments", "panel_totals", "panel_counts", "before_panel_counts", "reopened_panel_counts", "dc_totals", "dc_power", "before_dc_power", "reopened_dc_power", "string_totals"} != grid_fields:
+    if type(grid_evidence) is not dict or set(grid_evidence) - {"before_string_assignments", "string_assignments", "optimizer_totals", "reopened_string_assignments", "panel_totals", "panel_counts", "before_panel_counts", "reopened_panel_counts", "dc_totals", "dc_power", "before_dc_power", "reopened_dc_power", "string_totals", "inverter_totals"} != grid_fields:
         grids = _out("UNREADABLE", "grid_evidence_unreadable")
     else:
         grids = compare_grid_correspondence(**{key: grid_evidence[key] for key in grid_fields})
@@ -494,7 +494,19 @@ def reconcile_seven_steps(import_evidence, grid_evidence, assurance):
                               _seven_step_dc_snapshot(grid_evidence, assurance.get("evidence")
                                   if type(assurance) is dict else None),
                               _seven_step_strings(grid_evidence, assurance.get("evidence")
-                                  if type(assurance) is dict else None))
+                                  if type(assurance) is dict else None),
+                              _seven_step_inverters(grid_evidence, assurance.get("evidence")
+                                  if type(assurance) is dict else None),
+                              _seven_step_inverter_snapshot(grid_evidence, assurance.get("evidence")
+                                  if type(assurance) is dict else None),
+                              _seven_step_assignments(assurance.get("evidence") if type(assurance) is dict else None),
+                              _seven_step_assignment_snapshot(assurance.get("evidence") if type(assurance) is dict else None),
+                              _seven_step_inverter_loads(grid_evidence, assurance.get("evidence") if type(assurance) is dict else None),
+                              _seven_step_inverter_load_reopen(grid_evidence, assurance.get("evidence") if type(assurance) is dict else None),
+                              _seven_step_string_metrics(grid_evidence, assurance.get("evidence") if type(assurance) is dict else None),
+                              _seven_step_cross_topology(grid_evidence, assurance.get("evidence") if type(assurance) is dict else None),
+                              _seven_step_independent_owners(grid_evidence, assurance.get("evidence") if type(assurance) is dict else None),
+                              _seven_step_oracle_loads(grid_evidence, assurance.get("evidence") if type(assurance) is dict else None))
 
 
 def _seven_step_ownership(grid_evidence, evidence):
@@ -605,17 +617,288 @@ def _seven_step_strings(grid, evidence):
                 "supplied_grid_string_evidence", comparison=comparison, oracle_consistency=consistency)
 
 
-def _seven_step_result(imported, grids, checked, ownership, grid_optimizers, ownership_reopen, grid_optimizer_reopen, grid_panels, grid_panel_reopen, grid_dc, grid_dc_reopen, grid_strings):
+def _inverter_ids(rows):
+    if type(rows) is not list or any(type(row) is not dict for row in rows):
+        return None
+    return [row.get("inverter_id") for row in rows]
+
+
+def _seven_step_inverters(grid, evidence):
+    if type(grid) is not dict or type(evidence) is not dict:
+        return _out("UNREADABLE", "grid_inverter_evidence_unreadable")
+    rows = evidence.get("saved_inverters")
+    ids = _inverter_ids(rows)
+    ownership = validate_grid_inverter_ownership(grid.get("expected_grid_ids"), ids, rows)
+    comparison = compare_grid_inverter_totals(grid.get("inverter_totals"), ids, rows)
+    consistency = compare_grid_inverter_oracle_totals(grid.get("expected_grid_ids"), grid.get("inverter_totals"),
+                                                     evidence.get("oracle_values"))
+    verdicts = {ownership["verdict"], comparison["verdict"], consistency["verdict"]}
+    return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
+                "supplied_grid_inverter_evidence", ownership=ownership, comparison=comparison,
+                oracle_consistency=consistency)
+
+
+def _seven_step_inverter_snapshot(grid, evidence):
+    if type(grid) is not dict or type(evidence) is not dict:
+        return _out("UNREADABLE", "inverter_snapshot_evidence_unreadable")
+    saved, before, reopened = (evidence.get(key) for key in ("saved_inverters", "before_inverters", "reopened_inverters"))
+    snapshot = compare_inverter_snapshots(grid.get("expected_grid_ids"), _inverter_ids(before), before,
+                                          _inverter_ids(reopened), reopened)
+    binding = compare_inverter_snapshots(grid.get("expected_grid_ids"), _inverter_ids(saved), saved,
+                                         _inverter_ids(before), before)
+    return _with_saved_values(snapshot, binding)
+
+
+def _assignment_ids(evidence, stage):
+    rows = evidence.get("saved_strings") if stage == "saved" else evidence.get(stage + "_rows", {})
+    if stage != "saved":
+        rows = rows.get("strings") if type(rows) is dict else None
+    indexed, error = _index(rows, stage)
+    return (None if error else list(indexed)), _inverter_ids(evidence.get(stage + "_inverters"))
+
+
+def _seven_step_assignments(evidence):
+    if type(evidence) is not dict:
+        return _out("UNREADABLE", "assignment_evidence_unreadable")
+    strings, inverters = _assignment_ids(evidence, "saved")
+    return compare_string_inverter_assignments(inverters, strings,
+        evidence.get("oracle_assignments"), evidence.get("saved_assignments"))
+
+
+def _seven_step_assignment_snapshot(evidence):
+    if type(evidence) is not dict:
+        return _out("UNREADABLE", "assignment_snapshot_evidence_unreadable")
+    states = {}
+    ids = {}
+    for stage in ("saved", "before", "reopened"):
+        strings, inverters = ids[stage] = _assignment_ids(evidence, stage)
+        states[stage] = validate_string_inverter_assignments(inverters, strings, evidence.get(stage + "_assignments"))
+    strings, inverters = ids["saved"]
+    binding = compare_string_inverter_assignments(inverters, strings,
+        evidence.get("saved_assignments"), evidence.get("before_assignments"))
+    strings, inverters = ids["before"]
+    comparison = compare_string_inverter_snapshots(inverters, strings,
+        evidence.get("before_assignments"), evidence.get("reopened_assignments"))
+    verdicts = {value["verdict"] for value in states.values()} | {binding["verdict"], comparison["verdict"]}
+    return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
+        "supplied_assignment_snapshots", states=states, saved_binding=binding, comparison=comparison)
+
+
+def _seven_step_inverter_loads(grid, evidence):
+    if type(grid) is not dict or type(evidence) is not dict:
+        return _out("UNREADABLE", "inverter_load_evidence_unreadable")
+    supplied = evidence.get("inverter_loads")
+    loads = supplied if type(supplied) is dict else {}
+    strings, inverters = _assignment_ids(evidence, "saved")
+    owners = evidence.get("saved_assignments")
+    comparisons = {
+        "strings": compare_inverter_string_totals(loads.get("strings"), strings, owners),
+        "optimizers": compare_inverter_optimizer_totals(loads.get("optimizers"), evidence.get("saved_strings"), owners),
+        "panels": compare_inverter_panel_totals(loads.get("panels"), strings, grid.get("panel_counts"), owners),
+        "kw_dc": compare_inverter_dc_totals(loads.get("kw_dc"), strings, grid.get("dc_power"), owners)}
+    checks = {metric: dict(comparison=value, oracle_consistency=compare_inverter_metric_oracle_totals(
+        inverters, loads.get(metric), evidence.get("oracle_values"), metric)) for metric, value in comparisons.items()}
+    verdicts = {value["verdict"] for check in checks.values() for value in check.values()}
+    if type(supplied) is not dict or set(supplied) != set(comparisons):
+        verdicts.add("UNREADABLE")
+    return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
+                "supplied_inverter_loads", metrics=checks)
+
+
+def _inverter_snapshot_loads(grid, evidence, stage, metric):
+    strings, inverters = _assignment_ids(evidence, stage)
+    owners = evidence.get(stage + "_assignments")
+    ownership = validate_string_inverter_assignments(inverters, strings, owners)
+    if ownership["verdict"] != "PASS":
+        return None, ownership
+    if metric == "strings":
+        values = dict.fromkeys(strings, 1)
+    else:
+        if metric == "optimizers":
+            rows = evidence.get("saved_strings") if stage == "saved" else evidence.get(stage + "_rows", {})
+            rows = rows.get("strings") if stage != "saved" and type(rows) is dict else rows
+        else:
+            field = "panel_counts" if metric == "panels" else "dc_power"
+            rows = grid.get((stage + "_" if stage != "saved" else "") + field)
+        values, error = _index(rows, stage + "_" + metric, metric=metric)
+        if error:
+            return None, _out("UNREADABLE", error)
+        if set(values) != set(strings):
+            return None, _out("UNREADABLE", "inverter_snapshot_string_identity_conflict")
+    totals = dict.fromkeys(inverters, 0)
+    for row in owners:
+        totals[row["inverter_id"]] += values[row["string_id"]]
+    return totals, _out("PASS", "inverter_snapshot_loads_readable")
+
+
+def _compare_inverter_load_maps(before, after):
+    added, removed = after.keys() - before.keys(), before.keys() - after.keys()
+    changed = [key for key in before.keys() & after.keys() if before[key] != after[key]]
+    failed = bool(added or removed or changed)
+    return _out("FAIL" if failed else "PASS", "inverter_loads_changed" if failed else "inverter_loads_equal",
+        counts=dict(added=len(added), removed=len(removed), changed=len(changed)),
+        added_ids=nsmallest(MAX_STRING_EXAMPLES, added), removed_ids=nsmallest(MAX_STRING_EXAMPLES, removed),
+        examples=[dict(inverter_id=key, before=before[key], reopened=after[key], delta=after[key]-before[key])
+                  for key in nsmallest(MAX_STRING_EXAMPLES, changed)])
+
+
+def _seven_step_inverter_load_reopen(grid, evidence):
+    if type(grid) is not dict or type(evidence) is not dict:
+        return _out("UNREADABLE", "inverter_load_snapshot_evidence_unreadable")
+    checks = {}
+    with localcontext(_CONTEXT):
+        for metric in ("strings", "optimizers", "panels", "kw_dc"):
+            states, totals = {}, {}
+            for stage in ("saved", "before", "reopened"):
+                totals[stage], states[stage] = _inverter_snapshot_loads(grid, evidence, stage, metric)
+            binding = (_compare_inverter_load_maps(totals["saved"], totals["before"])
+                       if totals["saved"] is not None and totals["before"] is not None
+                       else _out("UNREADABLE" if "UNREADABLE" in {states["saved"]["verdict"], states["before"]["verdict"]}
+                                 else "FAIL", "inverter_load_binding_invalid"))
+            comparison = (_compare_inverter_load_maps(totals["before"], totals["reopened"])
+                          if totals["before"] is not None and totals["reopened"] is not None
+                          else _out("UNREADABLE" if "UNREADABLE" in {states["before"]["verdict"], states["reopened"]["verdict"]}
+                                    else "FAIL", "inverter_load_reopen_invalid"))
+            checks[metric] = dict(states=states, saved_binding=binding, comparison=comparison)
+    verdicts = {value["verdict"] for check in checks.values()
+                for value in list(check["states"].values()) + [check["saved_binding"], check["comparison"]]}
+    return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
+                "supplied_inverter_load_snapshots", metrics=checks)
+
+
+def compare_string_metric_oracle_total(saved_string_ids, oracle_rows, oracle_values, metric):
+    """Require explicit oracle string coverage and agreement with the report total."""
+    if metric not in ("panels", "kw_dc"):
+        return _out("UNREADABLE", "string_metric_unreadable")
+    indexed, error = _index(oracle_rows, "oracle", metric=metric)
+    if error:
+        return _out("UNREADABLE", error)
+    with localcontext(_CONTEXT):
+        result = _compare_grid_oracle_totals(saved_string_ids, indexed, oracle_values,
+                                             metric, "string_" + metric + "_oracle")
+    if "grid_total" in result:
+        result["string_total"] = result.pop("grid_total")
+    return result
+
+
+def _string_metric_snapshots(grid, evidence, metric, field, compare):
+    """Bind and compare explicit per-string metric values across save and reopen."""
+    bind = compare_panel_string_ids if metric == "panels" else compare_dc_string_ids
+    bindings = {}
+    for stage in ("before", "reopened"):
+        snapshot = evidence.get(stage + "_rows")
+        strings = snapshot.get("strings") if type(snapshot) is dict else None
+        bindings[stage] = bind(strings, grid.get(stage + "_" + field))
+    saved_binding = compare(grid.get(field), grid.get("before_" + field))
+    comparison = compare(grid.get("before_" + field), grid.get("reopened_" + field))
+    verdicts = {check["verdict"] for check in bindings.values()} | {saved_binding["verdict"], comparison["verdict"]}
+    return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
+                "supplied_string_" + metric + "_snapshots", bindings=bindings,
+                saved_binding=saved_binding, comparison=comparison)
+
+
+def _seven_step_string_metrics(grid, evidence):
+    if type(grid) is not dict or type(evidence) is not dict:
+        return _out("UNREADABLE", "string_metric_evidence_unreadable")
+    saved, error = _index(evidence.get("saved_strings"), "saved")
+    ids = None if error else list(saved)
+    checks = {}
+    for metric, field, oracle_field, compare in (
+            ("panels", "panel_counts", "oracle_panels", compare_string_panel_counts),
+            ("kw_dc", "dc_power", "oracle_dc_power", compare_string_dc_power)):
+        oracle = evidence.get(oracle_field)
+        checks[metric] = dict(comparison=compare(oracle, grid.get(field)),
+            oracle_consistency=compare_string_metric_oracle_total(ids, oracle, evidence.get("oracle_values"), metric),
+            snapshots=_string_metric_snapshots(grid, evidence, metric, field, compare))
+    verdicts = {value["verdict"] for check in checks.values() for value in check.values()}
+    return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
+                "supplied_independent_string_metrics", metrics=checks)
+
+
+def _seven_step_cross_topology(grid, evidence):
+    if type(grid) is not dict or type(evidence) is not dict:
+        return _out("UNREADABLE", "cross_topology_evidence_unreadable")
+    checks = {}
+    for stage in ("saved", "before", "reopened"):
+        strings, inverters = _assignment_ids(evidence, stage)
+        field = "string_assignments" if stage == "saved" else stage + "_string_assignments"
+        checks[stage] = validate_cross_topology(grid.get("expected_grid_ids"), strings, inverters,
+            grid.get(field), evidence.get(stage + "_inverters"), evidence.get(stage + "_assignments"))
+    verdicts = {check["verdict"] for check in checks.values()}
+    return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
+                "supplied_cross_topology", checks=checks)
+
+
+def _seven_step_independent_owners(grid, evidence):
+    if type(grid) is not dict or type(evidence) is not dict:
+        return _out("UNREADABLE", "independent_owner_evidence_unreadable")
+    strings, saved_devices = _assignment_ids(evidence, "saved")
+    oracle_devices = evidence.get("oracle_inverter_ids")
+    grids = grid.get("expected_grid_ids")
+    oracle_strings, error = _index(evidence.get("oracle_strings"), "oracle")
+    oracle_topology = validate_cross_topology(grids, None if error else list(oracle_strings), oracle_devices,
+        evidence.get("oracle_string_owners"), evidence.get("oracle_inverter_owners"), evidence.get("oracle_assignments"))
+    checks = dict(oracle_topology=oracle_topology,
+                  strings=compare_string_grid_owners(grids, strings, evidence.get("oracle_string_owners"),
+                                                    grid.get("string_assignments")),
+                  inverters=compare_inverter_grid_owners(grids, oracle_devices, evidence.get("oracle_inverter_owners"),
+                                                        evidence.get("saved_inverters")),
+                  inverter_ids=compare_inverter_id_sets(oracle_devices, saved_devices))
+    verdicts = {check["verdict"] for check in checks.values()}
+    return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
+                "supplied_independent_owners", checks=checks)
+
+
+def _seven_step_oracle_loads(grid, evidence):
+    if type(grid) is not dict or type(evidence) is not dict:
+        return _out("UNREADABLE", "oracle_load_evidence_unreadable")
+    strings = evidence.get("oracle_strings")
+    indexed, error = _index(strings, "oracle")
+    ids = None if error else list(indexed)
+    panels, power = evidence.get("oracle_panels"), evidence.get("oracle_dc_power")
+    owners, connections = evidence.get("oracle_string_owners"), evidence.get("oracle_assignments")
+    supplied = evidence.get("inverter_loads")
+    loads = supplied if type(supplied) is dict else {}
+    grids, devices, report = grid.get("expected_grid_ids"), evidence.get("oracle_inverter_ids"), evidence.get("oracle_values")
+    bindings = dict(owners=validate_grid_string_ownership(grids, ids, owners),
+        connections=validate_string_inverter_assignments(devices, ids, connections),
+        panels=compare_panel_string_ids(strings, panels), kw_dc=compare_dc_string_ids(strings, power))
+    with localcontext(_CONTEXT):
+        grid_checks = {
+            "strings": compare_grid_string_totals(grid.get("string_totals"), ids, owners),
+            "optimizers": compare_grid_optimizer_totals(grid.get("optimizer_totals"), strings, owners),
+            "panels": compare_grid_panel_totals(grid.get("panel_totals"), panels, owners),
+            "kw_dc": compare_grid_dc_totals(grid.get("dc_totals"), power, owners)}
+        inverter_checks = {
+            "strings": compare_inverter_string_totals(loads.get("strings"), ids, connections),
+            "optimizers": compare_inverter_optimizer_totals(loads.get("optimizers"), strings, connections),
+            "panels": compare_inverter_panel_totals(loads.get("panels"), ids, panels, connections),
+            "kw_dc": compare_inverter_dc_totals(loads.get("kw_dc"), ids, power, connections)}
+        fields = dict(strings="string_totals", optimizers="optimizer_totals", panels="panel_totals", kw_dc="dc_totals")
+        metrics = {metric: dict(grid_comparison=grid_checks[metric], inverter_comparison=inverter_checks[metric],
+            grid_report=_compare_grid_oracle_totals(grids, grid.get(fields[metric]), report, metric, "oracle_grid_" + metric),
+            inverter_report=compare_inverter_metric_oracle_totals(devices, loads.get(metric), report, metric))
+            for metric in fields}
+    verdicts = {check["verdict"] for check in bindings.values()} | {
+        check["verdict"] for checks in metrics.values() for check in checks.values()}
+    return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
+                "supplied_oracle_load_consistency", bindings=bindings, metrics=metrics)
+
+
+def _seven_step_result(imported, grids, checked, ownership, grid_optimizers, ownership_reopen, grid_optimizer_reopen, grid_panels, grid_panel_reopen, grid_dc, grid_dc_reopen, grid_strings, grid_inverters, inverter_reopen, assignments, assignment_reopen, inverter_loads, inverter_load_reopen, string_metrics, cross_topology, independent_owners, oracle_loads):
     stages = checked.get("checks", {}).get("provenance", {}).get("reconciliation", {}).get("stages", {})
     absent = _out("UNREADABLE", "stage_evidence_missing")
     steps = {"1": imported, "2": grids, "3": stages.get("strings", absent), "4": stages.get("grouping", absent),
              "5": dict(table=stages.get("table", absent), csv_view=stages.get("csv_view", absent)),
              "6": stages.get("policy", absent), "7": stages.get("reopen", absent)}
-    verdicts = {imported["verdict"], grids["verdict"], checked["verdict"], ownership["verdict"], grid_optimizers["verdict"], ownership_reopen["verdict"], grid_optimizer_reopen["verdict"], grid_panels["verdict"], grid_panel_reopen["verdict"], grid_dc["verdict"], grid_dc_reopen["verdict"], grid_strings["verdict"]}
+    verdicts = {imported["verdict"], grids["verdict"], checked["verdict"], ownership["verdict"], grid_optimizers["verdict"], ownership_reopen["verdict"], grid_optimizer_reopen["verdict"], grid_panels["verdict"], grid_panel_reopen["verdict"], grid_dc["verdict"], grid_dc_reopen["verdict"], grid_strings["verdict"], grid_inverters["verdict"], inverter_reopen["verdict"], assignments["verdict"], assignment_reopen["verdict"], inverter_loads["verdict"], inverter_load_reopen["verdict"], string_metrics["verdict"], cross_topology["verdict"], independent_owners["verdict"], oracle_loads["verdict"]}
     return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL" if "FAIL" in verdicts else "PASS",
                 "offline_seven_steps", steps=steps, assurance=checked, ownership=ownership, grid_optimizers=grid_optimizers,
                 ownership_reopen=ownership_reopen, grid_optimizer_reopen=grid_optimizer_reopen, grid_panels=grid_panels,
-                grid_panel_reopen=grid_panel_reopen, grid_dc=grid_dc, grid_dc_reopen=grid_dc_reopen, grid_strings=grid_strings)
+                grid_panel_reopen=grid_panel_reopen, grid_dc=grid_dc, grid_dc_reopen=grid_dc_reopen, grid_strings=grid_strings,
+                grid_inverters=grid_inverters, inverter_reopen=inverter_reopen,
+                assignments=assignments, assignment_reopen=assignment_reopen,
+                inverter_loads=inverter_loads, inverter_load_reopen=inverter_load_reopen, string_metrics=string_metrics, cross_topology=cross_topology, independent_owners=independent_owners, oracle_loads=oracle_loads)
 
 
 def reconcile_seven_steps_json(text):
@@ -648,7 +931,19 @@ def _seven_step_envelope(envelope):
                               _seven_step_dc_snapshot(envelope["grid"], envelope["assurance"].get("evidence")
                                   if type(envelope["assurance"]) is dict else None),
                               _seven_step_strings(envelope["grid"], envelope["assurance"].get("evidence")
-                                  if type(envelope["assurance"]) is dict else None))
+                                  if type(envelope["assurance"]) is dict else None),
+                              _seven_step_inverters(envelope["grid"], envelope["assurance"].get("evidence")
+                                  if type(envelope["assurance"]) is dict else None),
+                              _seven_step_inverter_snapshot(envelope["grid"], envelope["assurance"].get("evidence")
+                                  if type(envelope["assurance"]) is dict else None),
+                              _seven_step_assignments(envelope["assurance"].get("evidence") if type(envelope["assurance"]) is dict else None),
+                              _seven_step_assignment_snapshot(envelope["assurance"].get("evidence") if type(envelope["assurance"]) is dict else None),
+                              _seven_step_inverter_loads(envelope["grid"], envelope["assurance"].get("evidence") if type(envelope["assurance"]) is dict else None),
+                              _seven_step_inverter_load_reopen(envelope["grid"], envelope["assurance"].get("evidence") if type(envelope["assurance"]) is dict else None),
+                              _seven_step_string_metrics(envelope["grid"], envelope["assurance"].get("evidence") if type(envelope["assurance"]) is dict else None),
+                              _seven_step_cross_topology(envelope["grid"], envelope["assurance"].get("evidence") if type(envelope["assurance"]) is dict else None),
+                              _seven_step_independent_owners(envelope["grid"], envelope["assurance"].get("evidence") if type(envelope["assurance"]) is dict else None),
+                              _seven_step_oracle_loads(envelope["grid"], envelope["assurance"].get("evidence") if type(envelope["assurance"]) is dict else None))
 
 
 def validate_import_grid_provenance(frozen_manifest, import_binding, grid_binding):
@@ -944,7 +1239,169 @@ def validate_grid_inverter_ownership(expected_grid_ids, saved_inverter_ids, assi
     return _validate_grid_ownership(expected_grid_ids, saved_inverter_ids, assignments, "inverter_id", "inverter")
 
 
-def _validate_grid_ownership(expected_grid_ids, saved_ids, assignments, identity_key, label):
+def validate_string_inverter_assignments(inverter_ids, saved_string_ids, assignments):
+    """Require each saved string to name exactly one explicitly existing inverter."""
+    result = _validate_grid_ownership(inverter_ids, saved_string_ids, assignments,
+                                     "string_id", "string", owner_key="inverter_id")
+    reason = {"ownership_evidence_unreadable": "string_inverter_evidence_unreadable",
+              "ownership_row_unreadable": "string_inverter_row_unreadable",
+              "string_ownership_equal": "string_inverter_assignments_equal",
+              "string_ownership_mismatch": "string_inverter_assignments_mismatch"}
+    return dict(result, reason=reason[result["reason"]])
+
+
+def compare_string_inverter_assignments(inverter_ids, saved_string_ids, oracle_assignments, saved_assignments):
+    """Compare explicit independent connections, without inferring them from counts."""
+    oracle = validate_string_inverter_assignments(inverter_ids, saved_string_ids, oracle_assignments)
+    saved = validate_string_inverter_assignments(inverter_ids, saved_string_ids, saved_assignments)
+    verdicts = {oracle["verdict"], saved["verdict"]}
+    if verdicts != {"PASS"}:
+        return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL", "string_inverter_comparison_invalid",
+                    oracle=oracle, saved=saved)
+    old = {row["string_id"]: row["inverter_id"] for row in oracle_assignments}
+    new = {row["string_id"]: row["inverter_id"] for row in saved_assignments}
+    changed = [key for key in old if old[key] != new[key]]
+    return _out("FAIL" if changed else "PASS",
+                "string_inverter_assignments_changed" if changed else "string_inverter_assignments_equal",
+                changed_count=len(changed), examples=[dict(string_id=key, oracle=old[key], saved=new[key])
+                    for key in nsmallest(MAX_STRING_EXAMPLES, changed)])
+
+
+def compare_string_inverter_snapshots(inverter_ids, saved_string_ids, before_assignments, reopened_assignments):
+    """Compare connections for fixed explicit identities across save and reopen."""
+    result = compare_string_inverter_assignments(inverter_ids, saved_string_ids,
+                                                 before_assignments, reopened_assignments)
+    if "oracle" in result:
+        return _out(result["verdict"], "string_inverter_snapshots_invalid",
+                    before=result["oracle"], reopened=result["saved"])
+    return _out(result["verdict"], "string_inverter_snapshots_changed" if result["changed_count"] else
+                "string_inverter_snapshots_equal", changed_count=result["changed_count"],
+                examples=[dict(string_id=row["string_id"], before=row["oracle"], reopened=row["saved"])
+                          for row in result["examples"]])
+
+
+def compare_string_grid_owners(expected_grid_ids, string_ids, oracle_owners, saved_owners):
+    """Compare independent explicit string grid owners, including balanced swaps."""
+    return _compare_independent_grid_owners(expected_grid_ids, string_ids, oracle_owners, saved_owners, "string")
+
+
+def compare_inverter_grid_owners(expected_grid_ids, inverter_ids, oracle_owners, saved_owners):
+    """Compare independent explicit inverter grid owners, including balanced swaps."""
+    return _compare_independent_grid_owners(expected_grid_ids, inverter_ids, oracle_owners, saved_owners, "inverter")
+
+
+def _compare_independent_grid_owners(grids, identities, oracle_rows, saved_rows, label):
+    key = label + "_id"
+    oracle = _validate_grid_ownership(grids, identities, oracle_rows, key, label)
+    saved = _validate_grid_ownership(grids, identities, saved_rows, key, label)
+    verdicts = {oracle["verdict"], saved["verdict"]}
+    if verdicts != {"PASS"}:
+        return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL", label + "_grid_owner_evidence_invalid",
+                    oracle=oracle, saved=saved)
+    expected = {row[key]: row["grid_id"] for row in oracle_rows}
+    actual = {row[key]: row["grid_id"] for row in saved_rows}
+    changed = [identity for identity in expected if expected[identity] != actual[identity]]
+    return _out("FAIL" if changed else "PASS", label + "_grid_owners_mismatch" if changed else label + "_grid_owners_equal",
+                mismatch_count=len(changed), examples=[{key: identity, "oracle": expected[identity], "saved": actual[identity]}
+                    for identity in nsmallest(MAX_STRING_EXAMPLES, changed)])
+
+
+def compare_inverter_id_sets(oracle_ids, saved_ids):
+    """Compare explicit independent device identities, including unconnected devices."""
+    indexed = []
+    for values in (oracle_ids, saved_ids):
+        if (type(values) is not list or not values or any(type(key) is not str or not key.strip() or len(key) > 128
+                for key in values) or len(set(values)) != len(values)):
+            return _out("UNREADABLE", "inverter_id_evidence_unreadable")
+        indexed.append(set(values))
+    missing, foreign = indexed[0] - indexed[1], indexed[1] - indexed[0]
+    failed = bool(missing or foreign)
+    return _out("FAIL" if failed else "PASS", "inverter_ids_mismatch" if failed else "inverter_ids_equal",
+                counts=dict(missing=len(missing), foreign=len(foreign)),
+                missing_ids=nsmallest(MAX_STRING_EXAMPLES, missing), foreign_ids=nsmallest(MAX_STRING_EXAMPLES, foreign))
+
+
+def validate_cross_topology(expected_grid_ids, saved_string_ids, inverter_ids,
+                            string_owners, inverter_owners, assignments):
+    """Require every string and its explicitly assigned inverter to share a grid."""
+    checks = dict(strings=validate_grid_string_ownership(expected_grid_ids, saved_string_ids, string_owners),
+                  inverters=validate_grid_inverter_ownership(expected_grid_ids, inverter_ids, inverter_owners),
+                  assignments=validate_string_inverter_assignments(inverter_ids, saved_string_ids, assignments))
+    verdicts = {check["verdict"] for check in checks.values()}
+    if verdicts != {"PASS"}:
+        return _out("UNREADABLE" if "UNREADABLE" in verdicts else "FAIL", "cross_topology_evidence_invalid",
+                    checks=checks)
+    strings = {row["string_id"]: row["grid_id"] for row in string_owners}
+    inverters = {row["inverter_id"]: row["grid_id"] for row in inverter_owners}
+    connections = {row["string_id"]: row["inverter_id"] for row in assignments}
+    changed = [key for key in strings if strings[key] != inverters[connections[key]]]
+    return _out("FAIL" if changed else "PASS", "cross_topology_mismatch" if changed else "cross_topology_equal",
+                mismatch_count=len(changed), examples=[dict(string_id=key, inverter_id=connections[key],
+                    string_grid=strings[key], inverter_grid=inverters[connections[key]])
+                    for key in nsmallest(MAX_STRING_EXAMPLES, changed)])
+
+
+def compare_inverter_string_totals(expected_totals, saved_string_ids, assignments):
+    """Count explicit saved connections against independent inverter string totals."""
+    return _compare_inverter_loads(expected_totals, saved_string_ids, assignments, "strings")
+
+
+def compare_inverter_optimizer_totals(expected_totals, saved_strings, assignments):
+    """Sum explicit per-string optimizer counts through supplied connections."""
+    indexed, error = _index(saved_strings, "saved")
+    if error:
+        return _out("UNREADABLE", error)
+    return _compare_inverter_loads(expected_totals, list(indexed), assignments, "optimizers", saved_strings)
+
+
+def compare_inverter_panel_totals(expected_totals, saved_string_ids, panel_rows, assignments):
+    """Bind explicit panel counts to saved string IDs before summing inverter loads."""
+    return _compare_inverter_loads(expected_totals, saved_string_ids, assignments, "panels", panel_rows)
+
+
+def compare_inverter_dc_totals(expected_totals, saved_string_ids, power_rows, assignments):
+    """Sum explicit kW DC through supplied connections using isolated exact decimals."""
+    with localcontext(_CONTEXT):
+        return _compare_inverter_loads(expected_totals, saved_string_ids, assignments, "kw_dc", power_rows)
+
+
+def _compare_inverter_loads(expected_totals, saved_string_ids, assignments, metric, rows=None):
+    reason = "inverter_" + metric
+    totals = _grid_dc_totals(expected_totals) if metric == "kw_dc" else expected_totals
+    if totals is None or (metric != "kw_dc" and not _valid_grid_totals(totals)):
+        return _out("UNREADABLE", reason + "_totals_unreadable")
+    ownership = validate_string_inverter_assignments(list(totals), saved_string_ids, assignments)
+    if ownership["verdict"] != "PASS":
+        return _out(ownership["verdict"], reason + "_assignments_invalid", ownership=ownership)
+    values = dict.fromkeys(saved_string_ids, 1)
+    if metric != "strings":
+        values, error = _index(rows, "saved_" + metric, metric=metric)
+        if error:
+            return _out("UNREADABLE", error)
+        if set(values) != set(saved_string_ids):
+            return _out("UNREADABLE", reason + "_string_identity_conflict")
+    actual = dict.fromkeys(totals, 0)
+    for row in assignments:
+        actual[row["inverter_id"]] += values[row["string_id"]]
+    changed = [key for key in totals if totals[key] != actual[key]]
+    return _out("FAIL" if changed else "PASS", reason + "_totals_mismatch" if changed else reason + "_totals_equal",
+                mismatch_count=len(changed), examples=[dict(inverter_id=key, oracle=totals[key], saved=actual[key],
+                    delta=actual[key] - totals[key]) for key in nsmallest(MAX_STRING_EXAMPLES, changed)])
+
+
+def compare_inverter_metric_oracle_totals(inverter_ids, expected_totals, oracle_values, metric):
+    """Require independent inverter coverage and exact report agreement for one metric."""
+    if metric not in ("strings", "optimizers", "panels", "kw_dc"):
+        return _out("UNREADABLE", "inverter_metric_unreadable")
+    with localcontext(_CONTEXT):
+        result = _compare_grid_oracle_totals(inverter_ids, expected_totals, oracle_values,
+                                             metric, "inverter_" + metric + "_oracle")
+    if "grid_total" in result:
+        result["inverter_total"] = result.pop("grid_total")
+    return result
+
+
+def _validate_grid_ownership(expected_grid_ids, saved_ids, assignments, identity_key, label, *, owner_key="grid_id"):
     prefix = "" if label == "string" else label + "_"
     foreign_key = "foreign_" + label
     def valid_ids(values):
@@ -954,7 +1411,8 @@ def _validate_grid_ownership(expected_grid_ids, saved_ids, assignments, identity
     if not valid_ids(expected_grid_ids) or not valid_ids(saved_ids) or type(assignments) is not list:
         return _out("UNREADABLE", prefix + "ownership_evidence_unreadable")
     expected, saved, seen = set(expected_grid_ids), set(saved_ids), set()
-    errors = {"missing": 0, "duplicate": 0, foreign_key: 0, "foreign_grid": 0}
+    foreign_owner = "foreign_grid" if owner_key == "grid_id" else "foreign_inverter"
+    errors = {"missing": 0, "duplicate": 0, foreign_key: 0, foreign_owner: 0}
     examples = {}
     def issue(reason, key):
         errors[reason] += 1
@@ -963,14 +1421,14 @@ def _validate_grid_ownership(expected_grid_ids, saved_ids, assignments, identity
         if len(candidates) > MAX_STRING_EXAMPLES:
             candidates.remove(max(candidates))
     for row in assignments:
-        if (type(row) is not dict or set(row) != {"grid_id", identity_key}
+        if (type(row) is not dict or set(row) != {owner_key, identity_key}
                 or any(type(value) is not str or not value.strip() or len(value) > 128 for value in row.values())):
             return _out("UNREADABLE", prefix + "ownership_row_unreadable")
         key = row[identity_key]
         if key not in saved:
             issue(foreign_key, key)
-        if row["grid_id"] not in expected:
-            issue("foreign_grid", key)
+        if row[owner_key] not in expected:
+            issue(foreign_owner, key)
         if key in seen:
             issue("duplicate", key)
         seen.add(key)
@@ -1499,10 +1957,25 @@ def _index(rows, source, *, metric="optimizers"):
 
 def compare_strings(oracle_rows, saved_rows):
     """Return deterministic, explicit per-string differences, never infer IDs."""
-    oracle, error = _index(oracle_rows, "oracle")
+    return _compare_string_metric_rows(oracle_rows, saved_rows, "optimizers")
+
+
+def compare_string_panel_counts(oracle_rows, saved_rows):
+    """Compare explicit independent per-string panel counts, including equal-total swaps."""
+    return _compare_string_metric_rows(oracle_rows, saved_rows, "panels")
+
+
+def compare_string_dc_power(oracle_rows, saved_rows):
+    """Compare explicit independent per-string kW DC using isolated exact decimals."""
+    with localcontext(_CONTEXT):
+        return _compare_string_metric_rows(oracle_rows, saved_rows, "kw_dc")
+
+
+def _compare_string_metric_rows(oracle_rows, saved_rows, metric):
+    oracle, error = _index(oracle_rows, "oracle", metric=metric)
     if error:
         return {"verdict": "UNREADABLE", "reason": error}
-    saved, error = _index(saved_rows, "saved")
+    saved, error = _index(saved_rows, "saved", metric=metric)
     if error:
         return {"verdict": "UNREADABLE", "reason": error}
     missing = oracle.keys() - saved.keys()
@@ -1511,8 +1984,9 @@ def compare_strings(oracle_rows, saved_rows):
     mismatches = [{"string_id": key, "oracle": oracle[key], "saved": saved[key]}
                   for key in nsmallest(MAX_STRING_EXAMPLES, changed)]
     matched = not (missing or foreign or changed)
-    return {"verdict": "PASS" if matched else "FAIL",
-            "reason": "exact_string_identity" if matched else "string_identity_mismatch",
+    reason = ("exact_string_identity" if matched else "string_identity_mismatch") if metric == "optimizers" else (
+        "string_" + metric + ("_equal" if matched else "_mismatch"))
+    return {"verdict": "PASS" if matched else "FAIL", "reason": reason,
             "missing_ids": nsmallest(MAX_STRING_EXAMPLES, missing),
             "foreign_ids": nsmallest(MAX_STRING_EXAMPLES, foreign), "mismatches": mismatches,
             "counts": {"missing": len(missing), "foreign": len(foreign), "mismatched": len(changed)}}
