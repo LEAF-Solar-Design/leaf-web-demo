@@ -18,7 +18,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import './rails.css'
 
-import BuildQueueCard from './BuildQueueCard.jsx'
+import QueueCard from './BuildQueueCard.jsx'
 import { currentJobCountsAsRunning, fromBrokerJob, runningBuildCount } from '../lib/buildQueue.js'
 import { dayLabel, fmtWhen } from '../lib/railTime.js'
 import { useLoadingPhase } from '../lib/loadingTiming.js'
@@ -26,6 +26,17 @@ import { useLoadingPhase } from '../lib/loadingTiming.js'
 // TM1 time helpers moved to lib/railTime.js (slice 11a); re-exported so
 // WorkspaceSummary and operator/SessionPanel keep importing from here.
 export { dayLabel, fmtWhen }
+
+function BuildQueueCard(props) {
+  const host = useRef(null)
+  useLayoutEffect(() => {
+    const name = host.current?.querySelector('.rail-tool')
+    if (!name) return
+    name.title = props.record.title
+    Object.assign(name.style, { display: 'block', minWidth: '0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' })
+  }, [props.record.title])
+  return <div ref={host} title={props.record.title} style={{ display: 'contents' }}><QueueCard {...props} /></div>
+}
 
 // The empty-state action chip focuses the composer directly (the docked bar's
 // input, falling back to the legacy prompt textarea) — no parent wiring needed.
@@ -229,7 +240,7 @@ export default function JobRail({ mock, jobs, currentJob, inflight, reattaching,
     )
   }
   return (
-    <aside className="rail">
+    <aside className="rail" style={{ minWidth: 240 }}>
       <h2>
         Job monitor
         <span className="n">{mock ? 'session' : `${liveCount} live`}</span>
