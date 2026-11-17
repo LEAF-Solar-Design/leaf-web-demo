@@ -2936,3 +2936,101 @@ the shared numeric-string grammar in CSV and direct row validation, and are
 named UNREADABLE rather than accepted as equal. These are synthetic supplied
 rows and structural repairs, not proof of live exports, independent saved-design
 acquisition or live X05 acceptance.
+
+## CSV column-binding replay
+
+Within Studio X-bench X05, headers bind each decoded cell to a named field.
+Reordering headers with their cells preserves CSV/view equality. Reordering only
+cells changes bindings and must not hide an independent saved-design mismatch.
+
+```python
+import sys, runpy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+evidence = fixtures['complete_evidence']()
+evidence['saved_values']['panels'] += 1
+columns = ('metric', 'delta', 'oracle', 'studio', 'verdict')
+paired = fixtures['csv_fixture'](evidence['view_rows'], columns)
+wrong = fixtures['csv_records_text']([m.TABLE_COLUMNS] +
+        [[row[key] for key in columns] for row in evidence['view_rows']])
+for label, text in [('paired headers and cells', paired), ('cells only', wrong)]:
+    evidence['csv_text'] = text
+    result = m.reconcile_offline(evidence)
+    check = result['stages']['csv_view']
+    if label == 'cells only':
+        assert check['mismatches'] == [dict(metric=metric, field=field)
+            for metric in m.METRICS for field in ('studio', 'delta')]
+    print(label, result['verdict'], check['verdict'], check['reason'],
+          len(check['mismatches']), result['stages']['table']['verdict'])
+```
+
+Expected output:
+
+```text
+paired headers and cells FAIL PASS csv_view_equal 0 FAIL
+cells only FAIL FAIL csv_view_mismatch 10 FAIL
+```
+
+The wrong export swaps studio and delta cells under unchanged headers, producing
+two named field mismatches in each of five metrics. The independent saved panel
+value remains wrong in both cases. Tests enumerate all 120 column permutations
+with distinct numeric fields so equal values cannot conceal wrong bindings.
+They also verify minimal/all quote equivalence, strict verdict tokens, and decoded
+cell budgets for doubled quotes and non-BMP characters. A decoded payload exactly
+at the structural cell budget can still fail metric/header semantics; that is
+separate from an excess decoded length. Parser field limits are restored.
+Synthetic binding consistency does not prove live exports or saved-design truth,
+and no result accepts live X05.
+
+## CSV dialect recovery replay
+
+Within Studio X-bench X05, a supported comma export and saved-design truth are
+separate checks. Repairing a semicolon dialect cannot erase an independent
+saved panel mismatch. This replay uses the same bound fixtures as the tests.
+
+```python
+import sys, runpy, csv, json, subprocess
+from io import StringIO
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+expected, records = fixtures['bound_seven_fixture_records']()
+evidence = records[0]['envelope']['assurance']['evidence']
+evidence['saved_values']['panels'] += 1
+for label, delimiter in [('semicolon', ';'), ('comma', ',')]:
+    output = StringIO(newline='')
+    writer = csv.writer(output, delimiter=delimiter, quoting=csv.QUOTE_MINIMAL,
+                        lineterminator='\n')
+    writer.writerow(m.TABLE_COLUMNS)
+    writer.writerows([row[key] for key in m.TABLE_COLUMNS] for row in evidence['view_rows'])
+    evidence['csv_text'] = output.getvalue()
+    direct = m.compare_csv_view(evidence['csv_text'], evidence['view_rows'])
+    run = subprocess.run([sys.executable, '-P', m.__file__, '--seven-step-bound-aggregate'],
+        input=m.serialize_result(dict(expected_ids=expected, fixtures=records)).encode(),
+        capture_output=True, timeout=20, env={'SystemRoot': 'C:\\Windows'})
+    assert not run.stderr
+    result = json.loads(run.stdout)
+    step = result['fixtures'][expected[0]]['reconciliation']['steps']['5']
+    assert step['csv_view'] == direct
+    siblings = all(result['fixtures'][key]['verdict'] == 'PASS' for key in expected[1:])
+    print(label, direct['verdict'], direct['reason'], run.returncode,
+          step['csv_view']['verdict'], step['table']['verdict'], siblings)
+```
+
+Expected output:
+
+```text
+semicolon UNREADABLE csv_headers_unreadable 4 UNREADABLE FAIL True
+comma PASS csv_view_equal 1 PASS FAIL True
+```
+
+The CLI changes from UNREADABLE exit 4 to readable FAIL exit 1 after CSV recovery.
+The independent saved-design/table failure remains. Tests also reject tab
+separators, single-quote wrappers and backslash-escaped quotes. Standard doubled
+quotes decode structurally; decoded foreign verdict tokens remain invalid.
+Confusable labels and controls are never silently normalized into valid names.
+Empty physical lines decode as empty records, quoted empty lines as one empty
+cell, and whitespace lines as one whitespace cell. Each still consumes a logical
+record and fails exact arity or the row budget. These are synthetic supplied
+exports, not evidence of live export dialects, oracle origin or live X05 acceptance.
