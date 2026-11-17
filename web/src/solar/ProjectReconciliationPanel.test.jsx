@@ -612,6 +612,97 @@ it.each(['Save', 'Reload'])('keeps canceled beforeinput inert through held %s', 
   expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: 1, drafts: historyValues })
 })
 
+it.each(['requestSubmit', 'formdata', 'resize'].flatMap(kind => ['Save', 'Reload'].map(operation => [kind, operation])))
+('isolates parent %s event simulation during held %s', async (kind, operation) => {
+  const submitted = vi.fn()
+  const h = fixture({ parentSubmit: submitted }); canonicalReports(h)
+  read(); await reportsLoaded(); fill(dirtyFormValues)
+  const method = operation === 'Save' ? h.client.saveEngineeringTotals : h.client.loadEngineeringTotals
+  let settle; method.mockReturnValueOnce(new Promise(resolve => { settle = resolve }))
+  if (operation === 'Save') saveTotals(); else reloadTotals()
+  const reads = h.client.loadEngineeringTotals.mock.calls.length
+  const writes = h.client.saveEngineeringTotals.mock.calls.length
+  const form = h.view.container.querySelector('form')
+  if (kind === 'requestSubmit') {
+    act(() => form.requestSubmit())
+    expect(submitted).toHaveBeenCalledTimes(1)
+  } else if (kind === 'formdata') {
+    const data = new FormData(); data.set('panels', '999')
+    const event = new Event('formdata', { bubbles: true })
+    Object.defineProperty(event, 'formData', { value: data })
+    fireEvent(form, event)
+    expect(submitted).not.toHaveBeenCalled()
+  } else for (let index = 0; index < 5; index++) fireEvent(window, new Event('resize'))
+  expect(h.client.loadEngineeringTotals).toHaveBeenCalledTimes(reads)
+  expect(h.client.saveEngineeringTotals).toHaveBeenCalledTimes(writes)
+  expect(inputValues()).toEqual(dirtyFormValues)
+  await act(async () => settle(totalsResponse(1, dirtyFormValues)))
+  const createObjectURL = vi.fn(() => 'blob:parent-event')
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(await blobText(createObjectURL.mock.calls[0][0])).toBe(dirtyFormCsv)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(2, dirtyFormValues))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: 1, drafts: dirtyFormValues })
+})
+
+it.each(['success', 'rejection'])('preserves direction changes through held Save %s', async outcome => {
+  const h = fixture({ parentSubmit: vi.fn() }); canonicalReports(h)
+  read(); await reportsLoaded(); fill(reportValues)
+  let settle, reject
+  h.client.saveEngineeringTotals.mockReturnValueOnce(new Promise((resolve, fail) => { settle = resolve; reject = fail }))
+  saveTotals(); fill(dirtyFormValues)
+  const form = h.view.container.querySelector('form')
+  for (const direction of ['ltr', 'rtl', 'ltr', 'rtl']) {
+    form.setAttribute('dir', direction)
+    expect(inputValues()).toEqual(dirtyFormValues)
+  }
+  if (outcome === 'success') await act(async () => settle(totalsResponse(1, reportValues)))
+  else await act(async () => reject(new Error('synthetic failed write')))
+  expect(inputValues()).toEqual(dirtyFormValues); expect(form.dir).toBe('rtl')
+  const createObjectURL = vi.fn(() => 'blob:direction')
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(await blobText(createObjectURL.mock.calls[0][0])).toBe(dirtyFormCsv)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(outcome === 'success' ? 2 : 1, dirtyFormValues))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: outcome === 'success' ? 1 : 0, drafts: dirtyFormValues })
+})
+
+it.each(['Save', 'Reload'])('preserves mocked reduced-motion transitions during held %s', async operation => {
+  const listeners = new Set()
+  const media = { matches: false, media: '(prefers-reduced-motion: reduce)', onchange: null,
+    addEventListener: vi.fn((type, listener) => listeners.add(listener)),
+    removeEventListener: vi.fn((type, listener) => listeners.delete(listener)),
+    addListener: vi.fn(listener => listeners.add(listener)), removeListener: vi.fn(listener => listeners.delete(listener)) }
+  vi.stubGlobal('matchMedia', vi.fn(() => media))
+  const h = fixture(); canonicalReports(h); read(); await reportsLoaded(); fill(dirtyFormValues)
+  const method = operation === 'Save' ? h.client.saveEngineeringTotals : h.client.loadEngineeringTotals
+  let settle; method.mockReturnValueOnce(new Promise(resolve => { settle = resolve }))
+  if (operation === 'Save') saveTotals(); else reloadTotals()
+  const reads = h.client.loadEngineeringTotals.mock.calls.length
+  const writes = h.client.saveEngineeringTotals.mock.calls.length
+  for (const matches of [true, false, true]) act(() => {
+    media.matches = matches
+    for (const listener of listeners) listener({ matches, media: media.media })
+  })
+  expect(inputValues()).toEqual(dirtyFormValues)
+  expect(h.client.loadEngineeringTotals).toHaveBeenCalledTimes(reads)
+  expect(h.client.saveEngineeringTotals).toHaveBeenCalledTimes(writes)
+  await act(async () => settle(totalsResponse(1, dirtyFormValues)))
+  const createObjectURL = vi.fn(() => 'blob:motion')
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(await blobText(createObjectURL.mock.calls[0][0])).toBe(dirtyFormCsv)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(2, dirtyFormValues))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: 1, drafts: dirtyFormValues })
+  h.view.unmount(); expect(listeners.size).toBe(0)
+})
+
 const privateErrors = ['<img src=x onerror="SYNTHETIC_PRIVATE_X05">', '\u0000\u001b[31mSYNTHETIC_PRIVATE_X05\r\n',
   'private credential SYNTHETIC_PRIVATE_X05']
 
