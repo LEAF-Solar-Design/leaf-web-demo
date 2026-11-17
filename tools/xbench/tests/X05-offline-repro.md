@@ -3151,3 +3151,51 @@ Independent LF, CRLF and CR terminators produce 729 complete supported exports.
 NEL, Unicode line separator and paragraph separator never become implicit CSV
 record boundaries. Appended exports fail even when the first table is complete.
 These supplied synthetic exports do not prove live exports or live X05 parity.
+
+
+## CSV verdict tampering replay
+
+Within Studio X-bench X05, valid PASS/FAIL tokens remain data to compare. A
+syntactically valid verdict change can disagree with the visible table even when
+all numbers agree. Repairing it does not repair independent saved-design truth.
+
+```python
+import sys, runpy, json, subprocess
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+expected, records = fixtures['bound_seven_fixture_records']()
+evidence = records[0]['envelope']['assurance']['evidence']
+evidence['saved_values']['panels'] += 1
+exported = deepcopy(evidence['view_rows'])
+exported[0]['verdict'] = 'FAIL'
+for label, rows in [('verdict changed', exported), ('verdict repaired', evidence['view_rows'])]:
+    evidence['csv_text'] = fixtures['csv_fixture'](rows)
+    direct = m.compare_csv_view(evidence['csv_text'], evidence['view_rows'])
+    run = subprocess.run([sys.executable, '-P', m.__file__, '--seven-step-bound-aggregate'],
+        input=m.serialize_result(dict(expected_ids=expected, fixtures=records)).encode(),
+        capture_output=True, timeout=20, env={'SystemRoot': 'C:\\Windows'})
+    assert not run.stderr
+    result = json.loads(run.stdout)
+    step = result['fixtures'][expected[0]]['reconciliation']['steps']['5']
+    assert step['csv_view'] == direct
+    assert direct['mismatches'] == ([dict(metric='panels', field='verdict')] if label == 'verdict changed' else [])
+    siblings = all(result['fixtures'][key]['verdict'] == 'PASS' for key in expected[1:])
+    print(label, direct['verdict'], direct['reason'], direct['mismatches'],
+          run.returncode, step['table']['verdict'], siblings)
+```
+
+Expected output:
+
+```text
+verdict changed FAIL csv_view_mismatch [{'metric': 'panels', 'field': 'verdict'}] 1 FAIL True
+verdict repaired PASS csv_view_equal [] 1 FAIL True
+```
+
+Tests enumerate all 32 independent verdict masks and derive mismatch positions
+from set bits. Duplicate/missing metrics remain UNREADABLE despite five records.
+Readable numeric and verdict comparisons are symmetric. Fixture permutations
+preserve independent mask diagnostics and table results. Paired column moves,
+mixed quoting and exact equivalent decimal spellings preserve a single verdict
+mismatch. This synthetic replay does not establish live exports or live parity.
