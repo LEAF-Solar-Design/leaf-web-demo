@@ -5,7 +5,7 @@ import hashlib
 import json
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import shutil
 import signal
@@ -150,21 +150,86 @@ def _validate_capture(value):
         raise ValueError('unlabelled source refusal')
 
 
-def read_capture(path):
+def _file_state(metadata):
+    return metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns
+
+
+def _read_regular(path, limit):
+    """Read one bounded file whose path and opened identity remain stable."""
+    metadata = path.lstat()
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError('regular capture required')
+    if metadata.st_size > limit:
+        raise ValueError('file byte budget')
+    flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_NOFOLLOW', 0)
+    descriptor = os.open(path, flags)
+    try:
+        stream = os.fdopen(descriptor, 'rb')
+    except BaseException:
+        os.close(descriptor)
+        raise
+    with stream:
+        opened = os.fstat(stream.fileno())
+        if not stat.S_ISREG(opened.st_mode) or _file_state(opened) != _file_state(metadata):
+            raise ValueError('file changed before read')
+        raw = stream.read(limit + 1)
+        after = os.fstat(stream.fileno())
+        current = path.lstat()
+        if (len(raw) != opened.st_size or len(raw) > limit or not stat.S_ISREG(current.st_mode)
+                or _file_state(after) != _file_state(opened) or _file_state(current) != _file_state(opened)):
+            raise ValueError('file changed during read')
+    return raw
+
+
+def _verify_local_source(value, source_root, recorded_source_root):
+    try:
+        root = Path(source_root)
+        if root.is_symlink():
+            raise ValueError('linked source root')
+        root = root.resolve(strict=True)
+        if not root.is_dir() or not value['source_unchanged']:
+            raise ValueError('source unavailable')
+        for name, digest in value['source_file_sha256'].items():
+            # Interpret recorded Windows paths on POSIX too, without consulting that host.
+            windows = PureWindowsPath(name)
+            recorded = windows if windows.drive or '\\' in name else PurePosixPath(name)
+            if recorded.is_absolute():
+                if recorded_source_root is None:
+                    raise ValueError('explicit recorded source root required')
+                origin = type(recorded)(str(recorded_source_root))
+                if not origin.is_absolute():
+                    raise ValueError('absolute recorded source root required')
+                relative = recorded.relative_to(origin)
+            else:
+                relative = recorded
+            if relative.drive or relative.root or '..' in relative.parts or not relative.parts:
+                raise ValueError('escaping dependency')
+            local = root
+            for part in relative.parts:
+                local = local / part
+                if local.is_symlink():
+                    raise ValueError('linked dependency')
+            local.resolve(strict=True).relative_to(root)
+            if hashlib.sha256(_read_regular(local, MAX_CAPTURE_BYTES)).hexdigest() != digest:
+                raise ValueError('dependency changed')
+        return {'status': 'VERIFIED', 'dependencies': len(value['source_file_sha256'])}
+    except (OSError, ValueError) as error:
+        raise ValueError('SOURCE_UNVERIFIABLE') from error
+
+
+def read_capture(path, *, source_root=None, recorded_source_root=None):
     """Strict current-schema consumer. Partial artifacts never count as success."""
     path = Path(path)
     try:
-        metadata = path.lstat()
-        if not stat.S_ISREG(metadata.st_mode):
-            raise ValueError('regular capture required')
-        if metadata.st_size > MAX_CAPTURE_BYTES:
-            raise ValueError('capture byte budget')
-        with path.open('rb') as stream:
-            raw = stream.read(MAX_CAPTURE_BYTES + 1)
+        raw = _read_regular(path, MAX_CAPTURE_BYTES)
         if len(raw) > MAX_CAPTURE_BYTES or not raw.endswith(b'\n'):
             raise ValueError('incomplete capture')
         value = _bounded_json(raw.decode('utf-8'))
         _validate_capture(value)
+        if recorded_source_root is not None and source_root is None:
+            raise ValueError('SOURCE_UNVERIFIABLE')
+        if source_root is not None:
+            value['local_source_verification'] = _verify_local_source(value, source_root, recorded_source_root)
         return value
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise ValueError('capture unavailable') from error
