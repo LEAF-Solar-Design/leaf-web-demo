@@ -152,12 +152,12 @@ def test_supplied_pins_can_be_rewritten_without_authenticating_origin():
     assert result["integrity_verified"] and not result["origin_authenticated"]
 
 
-def test_missing_inventory_stage_preserves_verified_siblings():
+def test_missing_inventory_stage_retains_unchecked_siblings_without_hashing():
     members, payloads, _ = synthetic_bundle()
     del payloads[members[0]["name"]]
     result = audit(members[1:], payloads)
     assert codes(result) == {"FIXTURE_STAGE_MISSING": 1}
-    assert all(m["bytes_equal"] for m in result["members"])
+    assert all(m["bytes_equal"] is None for m in result["members"])
 
 
 def test_stage_references_retain_independent_conflicts_even_for_equal_bytes():
@@ -192,8 +192,149 @@ def test_exact_diagnostic_totals_survive_bounded_examples_and_composition():
         member["sha256"] = "bad"
     result = audit(members, payloads)
     assert len(result["diagnostics"]) == bundle.MAX_DIAGNOSTICS
-    assert result["diagnostic_total"] == 70
-    assert sum(codes(result).values()) == 70
-    assert all(not m["bytes_equal"] for m in result["members"])
-    # Fourteen fixture and stage errors, fourteen bad hashes, fourteen absent
-    # expected slots, and fourteen byte hash mismatches are counted separately.
+    assert result["diagnostic_total"] == 56
+    assert sum(codes(result).values()) == 56
+    assert all(m["bytes_equal"] is None for m in result["members"])
+    # Invalid metadata prevents hashing. Fourteen errors in each of fixture,
+    # stage, hash syntax and missing coverage are still counted separately.
+
+
+def json_inventory(members=None):
+    if members is None:
+        members = synthetic_bundle()[0]
+    return json.dumps(dict(members=members, expected_fixture_ids=FIXTURES, required_stages=STAGES))
+
+
+@pytest.mark.parametrize("text,code", [
+    ('{"members":[],"members":[]}', "JSON_DUPLICATE_KEY"),
+    ('{"x":{"a":0,"a":1}}', "JSON_DUPLICATE_KEY"),
+    ('{"x":NaN}', "JSON_NONFINITE_NUMBER"),
+    ('{"x":Infinity}', "JSON_NONFINITE_NUMBER"),
+    ('{"x":-Infinity}', "JSON_NONFINITE_NUMBER"),
+    ('{"x":1e9999}', "JSON_NONFINITE_NUMBER"),
+    ('[0]', "INVENTORY_FIELDS_INVALID"), ('{}', "INVENTORY_FIELDS_INVALID"),
+    ('{"members":[]}', "INVENTORY_FIELDS_INVALID"),
+    ('{"x":', "JSON_INVALID"), ('{}{}', "JSON_INVALID"),
+    ('[' * 17 + '0' + ']' * 17, "JSON_DEPTH_EXCEEDED"),
+    (' ' * (bundle.MAX_JSON_CHARS + 1), "JSON_INPUT_UNREADABLE"),
+    (None, "JSON_INPUT_UNREADABLE"), (b'{}', "JSON_INPUT_UNREADABLE"),
+])
+def test_strict_json_rejections_are_sanitized_before_auditing(text, code, monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("hash or byte audit reached invalid JSON")
+    monkeypatch.setattr(bundle, "sha256", forbidden)
+    monkeypatch.setattr(bundle, "audit_bundle_bytes", forbidden)
+    result = bundle.audit_inventory_json(text, object())
+    assert codes(result) == {code: 1}
+    assert result["inventory"] is None and not result["origin_authenticated"]
+
+
+def test_strict_json_accepts_exact_limit_ignores_quoted_brackets_and_rejects_missing_fields():
+    members, payloads, _ = synthetic_bundle()
+    text = json_inventory(members)
+    assert bundle.audit_inventory_json(text, payloads)["integrity_verified"]
+    padded = text + ' ' * (bundle.MAX_JSON_CHARS - len(text))
+    assert bundle.decode_inventory_json(padded)["ok"]
+    assert codes(bundle.decode_inventory_json('[' * 16 + '0' + ']' * 16)) == {"INVENTORY_FIELDS_INVALID": 1}
+    assert codes(bundle.decode_inventory_json(json.dumps({'x': '[\\\"' * 40}))) == {"INVENTORY_FIELDS_INVALID": 1}
+    for field in members[0]:
+        changed = deepcopy(members); del changed[0][field]
+        assert codes(bundle.decode_inventory_json(json_inventory(changed))) == {"MEMBER_FIELDS_INVALID": 1}
+    sentinel = 'SYNTHETIC_PRIVATE_X05'
+    result = bundle.decode_inventory_json('{"x":"' + sentinel + '","x":0}')
+    assert sentinel not in json.dumps(result)
+
+
+# Literal reference vectors, independently cross-checked using Windows .NET
+# SHA256 rather than calculating expected values with this module's digest.
+REFERENCE_VECTORS = [
+    (b'', 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'),
+    (b'\x00', '6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d'),
+    (b'\xff', 'a8100ae6aa1940d0b663bb31cd466142ebbdbd5187131b92d93818987832eb89'),
+]
+
+
+@pytest.mark.parametrize("data,digest", REFERENCE_VECTORS)
+def test_literal_binary_reference_vectors_and_one_byte_changes(data, digest):
+    member = dict(name='unit/saved.bin', fixture='unit', stage='saved', design_version='v1',
+                  byte_length=len(data), sha256=digest)
+    options = dict(expected_fixture_ids=['unit'], required_stages=['saved'])
+    assert bundle.audit_bundle_bytes([member], {member['name']: data}, **options)["integrity_verified"]
+    changed = bytes([data[0] ^ 1]) + data[1:] if data else b'\x00'
+    result = bundle.audit_bundle_bytes([member], {member['name']: changed}, **options)
+    assert codes(result)["PAYLOAD_SHA256_MISMATCH"] == 1
+    assert codes(result).get("PAYLOAD_LENGTH_MISMATCH", 0) == (0 if data else 1)
+
+
+@pytest.mark.parametrize("mutation", ['name', 'fixture', 'stage', 'hash', 'version', 'size', 'coverage', 'count', 'total'])
+def test_all_invalid_inventory_metadata_short_circuits_hashes(mutation, monkeypatch):
+    members, payloads, _ = synthetic_bundle()
+    if mutation == 'name': members[0]['name'] = '../bad'
+    elif mutation == 'fixture': members[0]['fixture'] = 'foreign'
+    elif mutation == 'stage': members[0]['stage'] = 'foreign'
+    elif mutation == 'hash': members[0]['sha256'] = 'bad'
+    elif mutation == 'version': members[0]['design_version'] = None
+    elif mutation == 'size': members[0]['byte_length'] = True
+    elif mutation == 'coverage': members.pop()
+    elif mutation == 'count': members *= 10
+    elif mutation == 'total':
+        for member in members: member['byte_length'] = bundle.MAX_MEMBER_BYTES
+    calls = []
+    monkeypatch.setattr(bundle, 'sha256', lambda data: calls.append(data) or sha256(data))
+    assert not audit(members, payloads)['ok']
+    assert calls == []
+    assert not bundle.audit_inventory_json(json_inventory(members), payloads)['ok']
+    assert calls == []
+
+
+def test_valid_members_are_hashed_once_and_foreign_payloads_are_not(monkeypatch):
+    members, payloads, _ = synthetic_bundle()
+    calls = []
+    monkeypatch.setattr(bundle, 'sha256', lambda data: calls.append(data) or sha256(data))
+    assert audit(members, payloads)['ok']; assert len(calls) == len(members)
+    calls.clear(); payloads['foreign/data.bin'] = b'foreign'
+    assert codes(audit(members, payloads)) == {'PAYLOAD_FOREIGN': 1}
+    assert len(calls) == len(members) and b'foreign' not in calls
+
+
+def diagnostic_signature(result):
+    return {k: result[k] for k in ('ok', 'diagnostic_total', 'diagnostic_counts', 'diagnostics', 'origin_authenticated')}
+
+
+def test_bundle_permutations_preserve_exact_conflicts_past_example_cap_and_inputs():
+    members, payloads, references = synthetic_bundle()
+    for member in members:
+        payloads[member['name']] = b'{"panels":22}'
+        member['design_version'] = 'other-version'
+    for i in range(10): payloads[f'foreign/{i}.bin'] = b''
+    references *= 4
+    references = deepcopy(references)
+    references[0]['name'] = 'beta/import.json'
+    references[1]['name'] = 'alpha/absent.json'
+    expected_audit = diagnostic_signature(audit(members, payloads))
+    expected_refs = diagnostic_signature(refs(members, references))
+    assert expected_audit['diagnostic_total'] == 38
+    assert expected_refs['diagnostic_total'] > bundle.MAX_DIAGNOSTICS
+    for shift in (0, 1, 5, 13):
+        permuted_members = list(reversed(members[shift:] + members[:shift]))
+        permuted_payloads = dict(reversed(list(payloads.items())))
+        permuted_refs = list(reversed(references[shift:] + references[:shift]))
+        before = deepcopy((permuted_members, permuted_payloads, permuted_refs))
+        assert diagnostic_signature(audit(permuted_members, permuted_payloads)) == expected_audit
+        assert diagnostic_signature(refs(permuted_members, permuted_refs)) == expected_refs
+        assert (permuted_members, permuted_payloads, permuted_refs) == before
+
+
+@pytest.mark.parametrize("bad", ['text', None, [], {}, bytearray(b'x'), memoryview(b'x')])
+def test_payload_type_uncertainty_keeps_binary_siblings_and_recovers(bad):
+    members, payloads, _ = synthetic_bundle()
+    original = dict(payloads)
+    payloads[members[0]['name']] = bad
+    payloads[members[1]['name']] = None
+    result = audit(members, payloads)
+    assert codes(result) == {'PAYLOAD_TYPE_INVALID': 2}
+    assert [m['bytes_equal'] for m in result['members']] == [False] * 2 + [True] * 12
+    assert payloads[members[0]['name']] is bad and payloads[members[1]['name']] is None
+    payloads.update(original)  # Repair the same caller-owned mapping, not a fresh auditor instance.
+    assert audit(members, payloads)['integrity_verified']
+    assert not audit(members, payloads)['origin_authenticated']
