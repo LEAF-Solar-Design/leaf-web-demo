@@ -1246,3 +1246,37 @@ Stop on a protected prompt, implicit request, changed draft, aborted held write,
 CSV mismatch or wrong revision. Product actions use visible controls. Event
 simulation and synthetic storage are support setup. No video is used. Frozen
 staging grading awaits its admitted source and window.
+
+
+## Native keyboard undo and redo replay
+
+Parent X05 report persistence. The executed support fixture is
+`D:/agent-data/leaf-research/studio-xbench-2026-11/synthetic-tests/x05-native-history-9u9_47mc/replay.py`.
+Two actual panels share a persistence client, synthetic file storage and mocked
+saved-design reads. Use the 1920 by 2200 forced-colors viewport. This browser
+run uses native keyboard history. The focused unit tests simulate input events.
+
+1. Read saved design in A and B. In A enter `001,0,01,1,0.4`, Save and require
+   the saved cue and file revision 1. Hold the next Save receipt after its
+   synthetic file commits revision 2.
+2. Focus A's Panels input, press End and type `2`. Require `0012`. Press
+   Control+Z. Require the native undo result `001` and download
+   `native-undo.csv`. Its panel row shows Studio `1`, report `001`, delta `0`
+   and PASS.
+3. Press Control+Shift+Z in that input. Require the native redo result `0012`
+   and download `native-redo.csv`. Its panel row shows Studio `1`, report
+   `0012`, delta `-11` and FAIL.
+4. Release the held receipt. Require the newer-edits-unsaved cue and retained
+   `0012`. Download `after-history-receipt.csv`. It must equal the redo CSV.
+   Each of the three CSVs must equal all five visible normalized table rows,
+   15 row pairs total. Capture `native-history-newer-draft.png` with both
+   complete panels and all controls visible.
+5. Save explicitly. Require expected revision 2 and committed revision 3,
+   with write baselines `0,1,2`. Unmount both panels and require zero observers.
+   Close context, browser, server and thread in `finally`. Preserve the proof,
+   source hashes, traffic, CSVs, screenshot, executable replay and this recipe.
+
+Stop on a protected prompt, failed native history, lost lexeme, implicit write,
+CSV mismatch or wrong revision. Support setup controls synthetic transport
+receipts. Product actions use visible controls and native keyboard shortcuts.
+No video is used. Frozen staging grading awaits its admitted source and window.

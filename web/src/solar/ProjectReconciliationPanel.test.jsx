@@ -494,6 +494,124 @@ it.each(['paste', 'cut'].flatMap(action => ['success', 'rejection'].map(outcome 
   expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: outcome === 'success' ? 1 : 0, drafts: values })
 })
 
+const historyValues = ['001', '00', '01', '01', '0.400']
+const historyCsv = 'metric,studio,oracle,delta,verdict\r\n' +
+  '"panels","1","001","0","PASS"\r\n"optimizers","","00","","UNREADABLE"\r\n' +
+  '"inverters","1","01","0","PASS"\r\n"strings","1","01","0","PASS"\r\n' +
+  '"kw_dc","0.4","0.400","0","PASS"\r\n'
+
+it.each(['historyUndo', 'historyRedo'].flatMap(type => ['success', 'rejection'].map(outcome => [type, outcome])))
+('retains %s lexemes across held Save %s', async (type, outcome) => {
+  const h = fixture(); canonicalReports(h); read(); await reportsLoaded(); fill(reportValues)
+  let settle, reject
+  h.client.saveEngineeringTotals.mockReturnValueOnce(new Promise((resolve, fail) => { settle = resolve; reject = fail }))
+  saveTotals(); fill(dirtyFormValues)
+  screen.getAllByRole('textbox').forEach((field, index) => fireEvent.input(field, {
+    target: { value: historyValues[index] }, inputType: 'historyUndo' }))
+  const final = type === 'historyUndo' ? historyValues : dirtyFormValues
+  if (type === 'historyRedo') screen.getAllByRole('textbox').forEach((field, index) => fireEvent.input(field, {
+    target: { value: final[index] }, inputType: 'historyRedo' }))
+  expect(h.client.saveEngineeringTotals).toHaveBeenCalledTimes(1)
+  if (outcome === 'success') await act(async () => settle(totalsResponse(1, reportValues)))
+  else await act(async () => reject(new Error('synthetic failed write')))
+  expect(inputValues()).toEqual(final)
+  const createObjectURL = vi.fn(() => 'blob:history')
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(await blobText(createObjectURL.mock.calls[0][0])).toBe(type === 'historyUndo' ? historyCsv : dirtyFormCsv)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(outcome === 'success' ? 2 : 1, final))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: outcome === 'success' ? 1 : 0, drafts: final })
+})
+
+it.each([0, 1, 2, 3, 4].flatMap(index => [true, false].map(valid => [index, valid])))
+('retains replacement text in field %i valid=%s through a held Save', async (index, valid) => {
+  const h = fixture(); canonicalReports(h); read(); await reportsLoaded(); fill(reportValues)
+  let settle; h.client.saveEngineeringTotals.mockReturnValueOnce(new Promise(resolve => { settle = resolve }))
+  saveTotals()
+  const field = screen.getAllByRole('textbox')[index]
+  const replacement = index === 4 ? '0.600' : '002'
+  const final = [...reportValues]; final[index] = valid ? replacement : 'bad'
+  fireEvent.input(field, { target: { value: final[index] }, inputType: 'insertReplacementText' })
+  await act(async () => settle(totalsResponse(1, reportValues)))
+  expect(inputValues()).toEqual(final)
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(!valid)
+  if (!valid) {
+    expect(field.getAttribute('aria-invalid')).toBe('true')
+    final[index] = replacement
+    fireEvent.input(field, { target: { value: replacement }, inputType: 'insertReplacementText' })
+  }
+  const createObjectURL = vi.fn(() => 'blob:replacement')
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  const csv = await blobText(createObjectURL.mock.calls[0][0])
+  expect(csv.trim().split('\r\n').slice(1).map(line => line.split('","')[2])).toEqual(final)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(2, final))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: 1, drafts: final })
+})
+
+it.each([true, false])('isolates sibling dropped text valid=%s while another panel saves', async valid => {
+  const { h, file, a, b } = sharedPanels()
+  a.click('Read saved design'); b.click('Read saved design'); await a.loaded(); await b.loaded()
+  a.fill(reportValues); b.fill(historyValues)
+  let settle
+  h.client.saveEngineeringTotals.mockImplementationOnce(({ drafts }) => {
+    file.response = totalsResponse(1, drafts)
+    return new Promise(resolve => { settle = resolve })
+  })
+  a.click('Save engineering totals')
+  const field = b.query.getAllByRole('textbox')[0]
+  const final = [...historyValues]; final[0] = valid ? '002' : 'bad'
+  fireEvent.drop(field, { dataTransfer: { getData: () => final[0] } })
+  fireEvent.input(field, { target: { value: final[0] }, inputType: 'insertFromDrop' })
+  await act(async () => settle(totalsResponse(1, reportValues)))
+  expect(a.values()).toEqual(reportValues); expect(b.values()).toEqual(final)
+  expect(h.client.saveEngineeringTotals).toHaveBeenCalledTimes(1)
+  expect(b.query.getByRole('button', { name: 'Download CSV' }).disabled).toBe(!valid)
+  if (!valid) { final[0] = '002'; fireEvent.input(field, { target: { value: final[0] }, inputType: 'insertFromDrop' }) }
+  const createObjectURL = vi.fn(() => 'blob:drop')
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  b.click('Download CSV')
+  expect(await blobText(createObjectURL.mock.calls[0][0])).toContain('"panels","1","002","-1","FAIL"')
+  b.click('Save engineering totals'); await b.query.findByText(/Engineering totals changed/)
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0].expectedRevision).toBe(0)
+  expect(b.values()).toEqual(final)
+  b.click('Reload saved engineering totals'); await b.loaded(); b.fill(final)
+  b.click('Save engineering totals'); await b.query.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: 1, drafts: final })
+})
+
+it.each(['Save', 'Reload'])('keeps canceled beforeinput inert through held %s', async operation => {
+  const h = fixture(); canonicalReports(h); read(); await reportsLoaded(); fill(historyValues)
+  const method = operation === 'Save' ? h.client.saveEngineeringTotals : h.client.loadEngineeringTotals
+  let settle; method.mockReturnValueOnce(new Promise(resolve => { settle = resolve }))
+  if (operation === 'Save') saveTotals(); else reloadTotals()
+  const reads = h.client.loadEngineeringTotals.mock.calls.length
+  const writes = h.client.saveEngineeringTotals.mock.calls.length
+  for (const field of screen.getAllByRole('textbox')) {
+    field.addEventListener('beforeinput', event => event.preventDefault(), { once: true })
+    const event = new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: 'insertText', data: '9' })
+    act(() => { expect(field.dispatchEvent(event)).toBe(false) })
+    expect(event.defaultPrevented).toBe(true)
+  }
+  expect(inputValues()).toEqual(historyValues)
+  expect(h.client.loadEngineeringTotals).toHaveBeenCalledTimes(reads)
+  expect(h.client.saveEngineeringTotals).toHaveBeenCalledTimes(writes)
+  await act(async () => settle(totalsResponse(1, historyValues)))
+  const createObjectURL = vi.fn(() => 'blob:canceled-input')
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(await blobText(createObjectURL.mock.calls[0][0])).toBe(historyCsv)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(2, historyValues))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: 1, drafts: historyValues })
+})
+
 const privateErrors = ['<img src=x onerror="SYNTHETIC_PRIVATE_X05">', '\u0000\u001b[31mSYNTHETIC_PRIVATE_X05\r\n',
   'private credential SYNTHETIC_PRIVATE_X05']
 
