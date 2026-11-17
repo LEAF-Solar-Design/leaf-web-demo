@@ -8555,3 +8555,123 @@ def test_bound_csv_multi_cell_differences_match_fraction_reference_with_opposite
         power=m._table(exported)['kw_dc']
         assert Fraction(power['delta'])==sign*Fraction(1,10**77)
     assert result['fixtures'][expected[2]]['verdict']=='PASS' and records==supplied
+
+
+
+def assert_csv_lexical_bound_parity(text, reason):
+    """Keep foreign CSV text out of diagnostics and preserve readable siblings."""
+    from benches import x05_reconcile as m
+    expected, records = bound_seven_fixture_records()
+    source = records[0]['envelope']['assurance']['evidence']
+    source['csv_text'] = text
+    supplied = deepcopy(records)
+    direct = m.compare_csv_view(text, source['view_rows'])
+    assert direct == dict(verdict='UNREADABLE', reason=reason)
+    result = m.aggregate_bound_seven_steps_json(serialize_result(dict(expected_ids=expected, fixtures=records)))
+    selected = result['fixtures'][expected[0]]
+    assert selected['verdict'] == 'UNREADABLE'
+    assert selected['reconciliation']['steps']['5']['csv_view'] == direct
+    assert all(result['fixtures'][key]['verdict'] == 'PASS' for key in expected[1:])
+    assert records == supplied
+    source['csv_text'] = csv_fixture(source['view_rows'])
+    recovered = m.aggregate_bound_seven_steps_json(serialize_result(dict(expected_ids=expected, fixtures=records)))
+    assert recovered['verdict'] == 'PASS'
+    assert all(recovered['fixtures'][key] == result['fixtures'][key] for key in expected[1:])
+
+
+@pytest.mark.parametrize('prefix', ['\ufeff', '\ufeff\ufeff', ' \ufeff', '\n\ufeff'])
+def test_csv_bom_lexical_prefix_is_exactly_one_at_stream_start(prefix):
+    from benches import x05_reconcile as m
+    _, records = bound_seven_fixture_records()
+    view = records[0]['envelope']['assurance']['evidence']['view_rows']
+    text = prefix + csv_fixture(view)
+    if prefix == '\ufeff':
+        assert m.compare_csv_view(text, view)['verdict'] == 'PASS'
+        expected, records = bound_seven_fixture_records()
+        records[0]['envelope']['assurance']['evidence']['csv_text'] = text
+        assert m.aggregate_bound_seven_steps_json(serialize_result(dict(expected_ids=expected, fixtures=records)))['verdict'] == 'PASS'
+    else:
+        assert_csv_lexical_bound_parity(text, 'csv_headers_unreadable')
+
+
+@pytest.mark.parametrize('record', range(6))
+@pytest.mark.parametrize('column', range(5))
+@pytest.mark.parametrize('placement', ['prefix', 'middle', 'suffix'])
+def test_csv_bom_lexical_inside_every_decoded_field_is_foreign(record, column, placement):
+    _, records = bound_seven_fixture_records()
+    view = records[0]['envelope']['assurance']['evidence']['view_rows']
+    matrix = list(csv.reader(StringIO(csv_fixture(view))))
+    value = matrix[record][column]
+    position = {'prefix': 0, 'middle': len(value)//2, 'suffix': len(value)}[placement]
+    matrix[record][column] = value[:position] + '\ufeff' + value[position:]
+    assert_csv_lexical_bound_parity(csv_records_text(matrix),
+        'csv_headers_unreadable' if record == 0 else 'csv_view_rows_unreadable')
+
+
+@pytest.mark.parametrize('whitespace', [' ', '\t', '\u00a0'])
+@pytest.mark.parametrize('record', range(6))
+@pytest.mark.parametrize('column', range(5))
+def test_csv_whitespace_lexical_fields_never_trim_implicitly(whitespace, record, column):
+    from benches import x05_reconcile as m
+    _, records = bound_seven_fixture_records()
+    view = records[0]['envelope']['assurance']['evidence']['view_rows']
+    matrix = list(csv.reader(StringIO(csv_fixture(view))))
+    value = whitespace + matrix[record][column] + whitespace
+    matrix[record][column] = value
+    equivalent = deepcopy(view)
+    if record:
+        equivalent[record-1][TABLE_COLUMNS[column]] = value
+    else:
+        for row in equivalent:
+            row[value] = row.pop(TABLE_COLUMNS[column])
+    assert m._table(equivalent) is None
+    assert_csv_lexical_bound_parity(csv_records_text(matrix),
+        'csv_headers_unreadable' if record == 0 else 'csv_view_rows_unreadable')
+
+
+@pytest.mark.parametrize('token', ['1,25', '1,000', '1.000,5', '\u0661.\u0662', '\uff11\uff12.\uff15'])
+@pytest.mark.parametrize('record', range(1,6))
+@pytest.mark.parametrize('column', [1,2,3])
+def test_csv_localized_lexical_numeric_tokens_reject_and_canonical_recovers(token, record, column):
+    _, records = bound_seven_fixture_records()
+    view = records[0]['envelope']['assurance']['evidence']['view_rows']
+    matrix = list(csv.reader(StringIO(csv_fixture(view))))
+    matrix[record][column] = token
+    text = csv_records_text(matrix)
+    assert list(csv.reader(StringIO(text)))[record][column] == token
+    assert_csv_lexical_bound_parity(text, 'csv_view_rows_unreadable')
+
+
+@pytest.mark.parametrize('token', ['=1+1', '=SUM(1,2)', '#DIV/0!', '#N/A'])
+@pytest.mark.parametrize('record', range(1,6))
+@pytest.mark.parametrize('column', [1,2,3,4])
+def test_csv_formula_lexical_tokens_reject_without_changing_evidence(token, record, column):
+    _, records = bound_seven_fixture_records()
+    view = records[0]['envelope']['assurance']['evidence']['view_rows']
+    matrix = list(csv.reader(StringIO(csv_fixture(view))))
+    matrix[record][column] = token
+    assert_csv_lexical_bound_parity(csv_records_text(matrix), 'csv_view_rows_unreadable')
+
+
+@pytest.mark.parametrize('character', ['x', chr(0x1F642)])
+@pytest.mark.parametrize('excess', [False, True])
+def test_csv_raw_lexical_budget_precedes_parser_and_restores_global_limit(monkeypatch, character, excess):
+    from benches import x05_reconcile as m
+    _, view = table_fixture()
+    text = character * (m.MAX_CSV_CHARS + int(excess))
+    original = m._csv_rows
+    calls = []
+    def counted(supplied):
+        calls.append(supplied)
+        return original(supplied)
+    monkeypatch.setattr(m, '_csv_rows', counted)
+    previous = csv.field_size_limit()
+    try:
+        csv.field_size_limit(2)
+        result = m.compare_csv_view(text, view)
+        assert result == dict(verdict='UNREADABLE', reason='csv_input_too_large' if excess else 'csv_cell_too_large')
+        assert calls == ([] if excess else [text])
+        assert csv.field_size_limit() == 2
+        assert text not in serialize_result(result)
+    finally:
+        csv.field_size_limit(previous)

@@ -3034,3 +3034,64 @@ Empty physical lines decode as empty records, quoted empty lines as one empty
 cell, and whitespace lines as one whitespace cell. Each still consumes a logical
 record and fails exact arity or the row budget. These are synthetic supplied
 exports, not evidence of live export dialects, oracle origin or live X05 acceptance.
+
+
+## CSV lexical recovery replay
+
+Within Studio X-bench X05, CSV lexical validity and independent saved-design
+truth are separate checks. Run this synthetic replay from the repository root.
+It repairs a relocated BOM, a quoted decimal comma, and a formula token. Each
+fault is isolated so the named diagnostic identifies its own lexical boundary.
+
+```python
+import sys, runpy, csv, json, subprocess
+from io import StringIO
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+expected, records = fixtures['bound_seven_fixture_records']()
+evidence = records[0]['envelope']['assurance']['evidence']
+evidence['saved_values']['panels'] += 1
+canonical = fixtures['csv_fixture'](evidence['view_rows'])
+base = list(csv.reader(StringIO(canonical)))
+localized = [row[:] for row in base]
+localized[1][1] = '1,25'
+formula = [row[:] for row in base]
+formula[1][4] = '=1+1'
+cases = [('relocated BOM', '\n\ufeff' + canonical),
+         ('localized number', fixtures['csv_records_text'](localized)),
+         ('formula token', fixtures['csv_records_text'](formula)),
+         ('canonical', canonical)]
+for label, text in cases:
+    evidence['csv_text'] = text
+    direct = m.compare_csv_view(text, evidence['view_rows'])
+    run = subprocess.run([sys.executable, '-P', m.__file__, '--seven-step-bound-aggregate'],
+        input=m.serialize_result(dict(expected_ids=expected, fixtures=records)).encode(),
+        capture_output=True, timeout=20, env={'SystemRoot': 'C:\\Windows'})
+    assert not run.stderr
+    result = json.loads(run.stdout)
+    step = result['fixtures'][expected[0]]['reconciliation']['steps']['5']
+    assert step['csv_view'] == direct
+    siblings = all(result['fixtures'][key]['verdict'] == 'PASS' for key in expected[1:])
+    print(label, direct['verdict'], direct['reason'], run.returncode,
+          step['csv_view']['verdict'], step['table']['verdict'], siblings)
+```
+
+Expected output:
+
+```text
+relocated BOM UNREADABLE csv_headers_unreadable 4 UNREADABLE FAIL True
+localized number UNREADABLE csv_view_rows_unreadable 4 UNREADABLE FAIL True
+formula token UNREADABLE csv_view_rows_unreadable 4 UNREADABLE FAIL True
+canonical PASS csv_view_equal 1 PASS FAIL True
+```
+
+One BOM at the stream start is supported. BOMs inside decoded fields, extra
+leading BOMs, whitespace around exact labels or numbers, localized number
+spellings, and spreadsheet expressions are foreign values. No implicit trim or
+spreadsheet evaluation occurs. The raw CSV budget counts Python characters,
+including one character per non-BMP code point. Oversized input never enters
+the parser, while exactly bounded input still receives structural validation.
+Diagnostics contain fixed reason codes and no injected cell text. Synthetic
+CSV recovery preserves the saved panel failure and readable sibling fixtures.
+It proves neither live export behavior nor live X05 acceptance.
