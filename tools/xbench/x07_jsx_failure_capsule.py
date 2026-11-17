@@ -1,6 +1,8 @@
 """Retain one synthetic X07 JSX check's bounded source-bound diagnostics."""
+import ctypes
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -16,22 +18,73 @@ MAX_STREAM_BYTES = 256 * 1024
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def stop_tree(child):
-    if sys.platform == 'win32':
-        subprocess.run(['taskkill.exe', '/PID', str(child.pid), '/T', '/F'], stdin=subprocess.DEVNULL,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
-                       creationflags=subprocess.CREATE_NO_WINDOW)
-    else:
-        try:
-            os.killpg(child.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+class WindowsJob:
+    """Own descendants even after their original parent exits."""
+    def __init__(self):
+        from ctypes import wintypes as w
+        class Basic(ctypes.Structure):
+            _fields_ = [('process_time', ctypes.c_longlong), ('job_time', ctypes.c_longlong),
+                        ('flags', w.DWORD), ('minimum', ctypes.c_size_t), ('maximum', ctypes.c_size_t),
+                        ('active', w.DWORD), ('affinity', ctypes.c_size_t), ('priority', w.DWORD), ('scheduling', w.DWORD)]
+        class Extended(ctypes.Structure):
+            _fields_ = [('basic', Basic), ('io', ctypes.c_ulonglong * 6),
+                        ('process_memory', ctypes.c_size_t), ('job_memory', ctypes.c_size_t),
+                        ('peak_process', ctypes.c_size_t), ('peak_job', ctypes.c_size_t)]
+        self.kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        self.kernel.CreateJobObjectW.argtypes = [ctypes.c_void_p, w.LPCWSTR]
+        self.kernel.CreateJobObjectW.restype = w.HANDLE
+        self.kernel.SetInformationJobObject.argtypes = [w.HANDLE, ctypes.c_int, ctypes.c_void_p, w.DWORD]
+        self.kernel.AssignProcessToJobObject.argtypes = [w.HANDLE, w.HANDLE]
+        self.kernel.TerminateJobObject.argtypes = [w.HANDLE, w.UINT]
+        self.kernel.CloseHandle.argtypes = [w.HANDLE]
+        self.handle = self.kernel.CreateJobObjectW(None, None)
+        if not self.handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        information = Extended()
+        information.basic.flags = 0x2000
+        if not self.kernel.SetInformationJobObject(self.handle, 9, ctypes.byref(information), ctypes.sizeof(information)):
+            error = ctypes.WinError(ctypes.get_last_error())
+            self.close()
+            raise error
+    def assign_and_resume(self, child):
+        if not self.kernel.AssignProcessToJobObject(self.handle, int(child._handle)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        resume = ctypes.WinDLL('ntdll').NtResumeProcess
+        resume.argtypes = [ctypes.c_void_p]
+        resume.restype = ctypes.c_long
+        if resume(int(child._handle)) < 0:
+            raise OSError('owned process resume failed')
+    def close(self):
+        if self.handle:
+            self.kernel.TerminateJobObject(self.handle, 1)
+            self.kernel.CloseHandle(self.handle)
+            self.handle = None
 
 
-def run_check(name, output, *, dependencies=None, timeout=90, checks_root=None):
+def snapshot(check, checks, custom_root, dependencies):
+    sources = [check, Path(__file__)] + list(dependencies)
+    if not custom_root:
+        sources += [checks / 'x07_adapter_jsx_journey.cjs']
+        sources += sorted((ROOT / 'web/src/solar').glob('X07*.jsx'))
+        sources += sorted((ROOT / 'server').glob('x07_*.py'))
+        sources += sorted((ROOT / 'tools/xbench').glob('x07_*.py'))
+    return {'source_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+            'dirty': bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT)),
+            'source_file_sha256': {str(path.resolve()): hashlib.sha256(path.read_bytes()).hexdigest() for path in sources}}
+
+
+def stop_group(child):
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def run_check(name, output, *, dependencies=None, timeout=90, checks_root=None,
+              source_dependencies=(), on_chunk=None):
     if not isinstance(name, str) or not re.fullmatch(r'x07_[a-z0-9_]+\.cjs', name):
         raise ValueError('one named X07 check required')
-    if type(timeout) not in (int, float) or not 0 < timeout <= 300:
+    if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 < timeout <= 300:
         raise ValueError('timeout budget')
     checks = Path(checks_root) if checks_root is not None else ROOT / 'tools/xbench/tests'
     check = checks / name
@@ -40,63 +93,93 @@ def run_check(name, output, *, dependencies=None, timeout=90, checks_root=None):
     node = shutil.which('node')
     if node is None:
         raise ValueError('node unavailable')
+    before = snapshot(check, checks, checks_root is not None, source_dependencies)
+    command = [node, str(check.resolve())]
+    if dependencies is not None:
+        command += ['--deps', str(Path(dependencies).resolve())]
     output = Path(output)
-    # Exclusive creation reserves a new artifact before any child starts.
-    with output.open('x', encoding='utf-8') as artifact:
-        sources = [check, Path(__file__)]
-        if checks_root is None:
-            sources += [checks / 'x07_adapter_jsx_journey.cjs']
-            sources += sorted((ROOT / 'web/src/solar').glob('X07*.jsx'))
-            sources += sorted((ROOT / 'server').glob('x07_*.py'))
-            sources += sorted((ROOT / 'tools/xbench').glob('x07_*.py'))
-        digests = {str(path.resolve()): hashlib.sha256(path.read_bytes()).hexdigest() for path in sources}
-        head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
-        dirty = bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT))
-        command = [node, str(check.resolve())]
-        if dependencies is not None:
-            command += ['--deps', str(Path(dependencies).resolve())]
+    artifact = output.open('x', encoding='utf-8')
+    identity = os.fstat(artifact.fileno())
+    job, child, threads = None, None, []
+    streams = {'stdout': bytearray(), 'stderr': bytearray()}
+    exceeded = threading.Event()
+    timed_out = False
+    try:
+        job = WindowsJob() if sys.platform == 'win32' else None
+        flags = (subprocess.CREATE_NO_WINDOW | 4) if job is not None else 0
         child = subprocess.Popen(command, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                 stderr=subprocess.PIPE, start_new_session=sys.platform != 'win32',
-                                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
-        streams = {'stdout': bytearray(), 'stderr': bytearray()}
-        exceeded = threading.Event()
-
+                                 stderr=subprocess.PIPE, start_new_session=job is None, creationflags=flags)
         def consume(label, stream):
             while True:
-                chunk = stream.read(4096)
+                chunk = stream.read1(4096)
                 if not chunk:
                     return
                 available = MAX_STREAM_BYTES - len(streams[label])
                 streams[label].extend(chunk[:available])
                 if len(chunk) > available:
                     exceeded.set()
-
+                if on_chunk is not None:
+                    on_chunk(label, chunk)
         threads = [threading.Thread(target=consume, args=(label, getattr(child, label)), daemon=True) for label in streams]
         for thread in threads:
             thread.start()
-        timed_out = False
+        if job is not None:
+            job.assign_and_resume(child)
         try:
             child.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             timed_out = True
         finally:
-            # Retire descendants even when an assertion exited the parent first.
-            if child.poll() is None or sys.platform != 'win32':
-                stop_tree(child)
+            if job is not None:
+                job.close()
+            else:
+                stop_group(child)
+            child.wait(timeout=10)
+            for thread in threads:
+                thread.join(10)
+        if any(thread.is_alive() for thread in threads):
+            raise ValueError('diagnostic reader did not settle')
+        try:
+            after = snapshot(check, checks, checks_root is not None, source_dependencies)
+        except OSError:
+            after = None
+        unchanged = before == after
+        report = {'schema': 'leaf.x07.jsx-failure-capsule.v1', 'command': command, 'exit_code': child.returncode,
+                  'timed_out': timed_out, 'diagnostics_complete': not exceeded.is_set(),
+                  'stdout': bytes(streams['stdout']).decode('utf-8', errors='replace'),
+                  'stderr': bytes(streams['stderr']).decode('utf-8', errors='replace'),
+                  'owned_processes_settled': True, 'source_unchanged': unchanged}
+        if unchanged:
+            report.update(before)
+        else:
+            report.update(error='SOURCE_CHANGED', source_before=before, source_after=after)
+        artifact.write(json.dumps(report, sort_keys=True) + '\n')
+        artifact.close()
+        return report
+    except BaseException:
+        artifact.close()
+        current = output.lstat()
+        if (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino):
+            output.unlink()
+        raise
+    finally:
+        if job is not None:
+            job.close()
+        if child is not None:
+            if job is None:
+                stop_group(child)
+            if child.poll() is None:
+                child.kill()
             child.wait(timeout=10)
             for thread in threads:
                 thread.join(10)
             child.stdout.close(); child.stderr.close()
-        if any(thread.is_alive() for thread in threads):
-            raise ValueError('diagnostic reader did not settle')
-        report = {'schema': 'leaf.x07.jsx-failure-capsule.v1', 'source_sha': head, 'dirty': dirty,
-                  'source_file_sha256': digests, 'command': command, 'exit_code': child.returncode,
-                  'timed_out': timed_out, 'diagnostics_complete': not exceeded.is_set(),
-                  'stdout': bytes(streams['stdout']).decode('utf-8', errors='replace'),
-                  'stderr': bytes(streams['stderr']).decode('utf-8', errors='replace'),
-                  'owned_processes_settled': True}
-        artifact.write(json.dumps(report, sort_keys=True) + '\n')
-    return report
+
+
+def exit_code(report):
+    if report.get('error') or not report['source_unchanged']:
+        return 2
+    return 0 if report['exit_code'] == 0 and report['diagnostics_complete'] and not report['timed_out'] else 1
 
 
 def main():
@@ -111,9 +194,12 @@ def main():
     except (OSError, ValueError, subprocess.SubprocessError):
         publish_stdout({'schema': 'leaf.x07.jsx-failure-capsule.v1', 'error': 'CAPSULE_UNAVAILABLE'})
         return 2
-    publish_stdout({'schema': report['schema'], 'exit_code': report['exit_code'], 'timed_out': report['timed_out'],
-                    'diagnostics_complete': report['diagnostics_complete']})
-    return 0 if report['exit_code'] == 0 and report['diagnostics_complete'] and not report['timed_out'] else 1
+    summary = {key: report[key] for key in ('schema', 'exit_code', 'timed_out', 'diagnostics_complete', 'source_unchanged')}
+    if report.get('error'):
+        summary['error'] = report['error']
+    if publish_stdout(summary):
+        return 2
+    return exit_code(report)
 
 
 if __name__ == '__main__':
