@@ -1470,7 +1470,8 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
 
 
 @router.get("/api/jobs/{job_id}")
-def get_job(job_id: str, tenant=Depends(deps.require_tenant)):
+def get_job(job_id: str, tenant=Depends(deps.require_tenant), *,
+            assembly_input_version: Optional[uuid.UUID] = None):
     tenant_id = _bound_tenant_id(tenant)
     if is_demo_context(tenant):
         rec, denied = _demo_observation(job_id, tenant)
@@ -1484,6 +1485,10 @@ def get_job(job_id: str, tenant=Depends(deps.require_tenant)):
         return error_response(ErrorCode.BAD_PARAMS, f"unknown job_id: {job_id}",
                               retryable=False, status_code=404)
     denied = _access_error(rec, tenant, job_id)
+    if denied is None and assembly_input_version is not None:
+        from solar_project_solve import readonly_assembly_attribution
+        return with_envelope_fields({"ok": True, "assembly_attribution":
+            readonly_assembly_attribution(tenant, rec, assembly_input_version)})
     return denied if denied is not None else _record_body(_with_client_delivery(rec))
 
 
