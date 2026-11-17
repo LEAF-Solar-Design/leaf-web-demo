@@ -468,6 +468,9 @@ def readonly_assembly_attribution(tenant, observed_job, input_version_id):
                 if exc.code == "INVALID_FINAL_GRID_ORDER" and exc.path in {
                     "split.restitch", "split.coverage", "split.string_length"
                 }:
+                    coverage = getattr(exc, "coverage_attribution", None)
+                    if exc.path == "split.coverage" and coverage is not None:
+                        counts["coverage"] = coverage
                     return {**result, **counts, "status": "attributed", "reason": exc.code,
                             "validation_stage": exc.path}
                 return {**result, "reason": "evidence_validation_failed"}
