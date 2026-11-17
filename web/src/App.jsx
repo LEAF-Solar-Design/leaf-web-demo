@@ -6515,11 +6515,17 @@ export default function App() {
                   onSelectEntity={(handle, gesture) => {
                     if (!projectMode && workspaceCardRef.current?.dataset.cockpitPicking === '1') return
                     if (!projectMode && canvasPickRef.current?.(handle, { additive: !!gesture?.additive })) return
+                    if (projectMode && !gesture?.additive) viewerRef.current?.setHighlight?.([], { nativeHandles: true })
                     setSelectedHandle(handle)
                   }}
-                  marqueeGate={() => !projectMode && typeof canvasMarqueeRef.current === 'function' && workspaceCardRef.current?.dataset.cockpitPicking !== '1'}
+                  marqueeGate={() => (projectMode || typeof canvasMarqueeRef.current === 'function') && workspaceCardRef.current?.dataset.cockpitPicking !== '1'}
                   onMarqueeSelect={(handles, gesture) => {
-                    if (projectMode || workspaceCardRef.current?.dataset.cockpitPicking === '1') return
+                    if (workspaceCardRef.current?.dataset.cockpitPicking === '1') return
+                    if (projectMode) {
+                      if (!gesture?.additive) setSelectedHandle(null)
+                      viewerRef.current?.setHighlight?.(handles, { nativeHandles: true, additive: !!gesture?.additive })
+                      return
+                    }
                     canvasMarqueeRef.current?.(handles, { additive: !!gesture?.additive })
                   }}
                   pendingEdit={projectMode ? null : pendingEdit || writeGhost}
