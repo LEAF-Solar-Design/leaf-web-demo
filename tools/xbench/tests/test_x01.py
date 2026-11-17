@@ -13,7 +13,7 @@ import pytest
 from benches import x01
 import make_synthetic_metres as metres
 import x01_geometry as geometry
-from xbench_studio import StudioClient
+from xbench_studio import StudioClient, StudioError
 
 
 PROJECT = {"project_id": "p", "org_id": "o"}
@@ -795,6 +795,33 @@ def test_row_initializes_import_diagnostics():
     row = x01._row({"id": "synthetic"})
     assert row["upload_drawing_id"] is None
     assert row["import_provenance"] is None
+    assert row["failed_stage"] is None
+
+
+@pytest.mark.parametrize("method,tool,expected_stage", [
+    ("checkout", None, "checkout"),
+    ("drawing_context", None, "context"),
+    ("run", "solar-settings", "run:solar-settings"),
+    ("run", "solar-panels-from-drawing", "run:solar-panels-from-drawing"),
+])
+def test_product_records_failed_studio_stage(fixture, monkeypatch, method, tool, expected_stage):
+    wire = Wire(Path(fixture["path"]).read_bytes())
+    client = StudioClient(wire.transport)
+    original = getattr(client, method)
+
+    def fail(*args, **kwargs):
+        if tool is None or args[0] == tool:
+            raise StudioError(503, "SIP_R1_INTAKE_UNAVAILABLE", "Project Solar admission unavailable.")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(client, method, fail)
+    row = x01.grade_files(client, project=PROJECT, fixtures=[fixture])[fixture["id"]]
+    assert row["failed_stage"] == expected_stage
+    assert row["product_error"]["stage"] == expected_stage
+    assert row["product_error"]["status"] == 503
+    assert row["product_error"]["code"] == "SIP_R1_INTAKE_UNAVAILABLE"
+    assert all(row["steps"][str(n)] == "UNREADABLE" for n in range(1, 6))
+    assert wire.released is (method != "checkout")
 
 
 @pytest.mark.parametrize("source,expected", [
@@ -910,6 +937,7 @@ def test_product_missing_catalog_tool_is_unreadable_and_still_exports(fixture):
 def test_product_flow_original_and_refreshed_export_and_source_unchanged(fixture):
     source = Path(fixture["path"]).read_bytes()
     wire, row = product(fixture)
+    assert row["failed_stage"] is None
     assert row["steps"]["1"] == row["steps"]["2"] == "PASS"
     assert row["original_version_id"] == "v1" and row["export_version_id"] == "v3"
     assert row["dxf_sha256"] == {"original": fixture["sha256"], "export": fixture["sha256"]}
@@ -1034,6 +1062,7 @@ def test_product_plain_exception_records_bounded_redacted_message(fixture, monke
     assert all(row["steps"][str(n)] == "UNREADABLE" for n in range(1, 6))
     assert all(row["evidence"][str(n)] == note for n in range(2, 6))
     assert "product_error" not in row and CAP not in json.dumps(row)
+    assert row["failed_stage"] == "upload"
 
 
 def test_source_mutation_fails_integrity(fixture):
