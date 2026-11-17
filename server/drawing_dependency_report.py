@@ -5,6 +5,26 @@ not claim that a DWG converter preserved every original metadata record.
 """
 from __future__ import annotations
 
+import re
+
+
+_INLINE_FONT = re.compile(r"\\[fF]")
+_FONT_DELIMITER = re.compile(r"[|;]")
+
+
+def _inline_fonts(text):
+    position = 0
+    while control := _INLINE_FONT.search(text, position):
+        delimiter = _FONT_DELIMITER.search(text, control.end())
+        if delimiter is None:
+            break
+        name = text[control.end():delimiter.start()]
+        if name and (delimiter.group() == "|" or name.lower().endswith((".shx", ".ttf", ".otf"))):
+            yield name
+        # Consume the entire control once, including a literal path. An
+        # unterminated suffix is searched once rather than once per prefix.
+        position = delimiter.end()
+
 
 def from_pairs(pairs):
     dependencies = {}
@@ -16,6 +36,8 @@ def from_pairs(pairs):
               "DWFDEFINITION": {"OBJECTS"}, "DGNDEFINITION": {"OBJECTS"},
               "ACAD_PROXY_ENTITY": {"ENTITIES", "BLOCKS"}, "PROXY_ENTITY": {"ENTITIES", "BLOCKS"},
               "ACAD_PROXY_OBJECT": {"OBJECTS"}, "PROXY_OBJECT": {"OBJECTS"}}
+    inline_entities = {"MTEXT", "MULTILEADER", "TABLE", "ACAD_TABLE"}
+    owners.update({kind: {"ENTITIES", "BLOCKS"} for kind in inline_entities})
 
     def add(kind, name, disposition, **details):
         if name:
@@ -30,8 +52,12 @@ def from_pairs(pairs):
             continue
         end = i + 1
         groups = {}
+        text_parts = []
+        inline_record = kind.upper() in inline_entities
         while end < len(pairs) and pairs[end][0] != 0:
             groups.setdefault(*pairs[end])
+            if inline_record and pairs[end][0] in (1, 3, 304):
+                text_parts.append(pairs[end][1])
             end += 1
         kind = kind.upper()
         if kind == "EOF":
@@ -70,6 +96,11 @@ def from_pairs(pairs):
             add("underlay", groups.get(1) or groups.get(2) or groups.get(5), "underlay omitted")
         elif kind in ("ACAD_PROXY_ENTITY", "ACAD_PROXY_OBJECT", "PROXY_ENTITY", "PROXY_OBJECT"):
             add("proxy", groups.get(5) or groups.get(1) or kind, "proxy omitted")
+        elif kind in inline_entities:
+            # Font controls can span repeated DXF text chunks. Read them in
+            # record order; a first-value map would lose split font names.
+            for name in _inline_fonts("".join(text_parts)):
+                add("font", name, "font remapped", remapped_to="sans-serif")
         i = end
     return {"schema": "leaf.drawing-dependencies.v1",
             "scope": "local_dxf_records", "external_files_opened": False,

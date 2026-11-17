@@ -42,6 +42,53 @@ def test_empty_dependencies_are_an_explicit_empty_report():
     assert from_pairs([])["dependencies"] == []
 
 
+@pytest.mark.parametrize("kind", ["MTEXT", "MULTILEADER", "TABLE", "ACAD_TABLE"])
+def test_inline_font_controls_preserve_chunk_order_and_literal_names(kind):
+    pairs = [(0, "SECTION"), (2, "ENTITIES"), (0, kind),
+             (3, r"{\fSynthetic "), (3, "Panel"),
+             (1, " Sans|b0|i0;Label} "), (304, r"\Fother.SHX;more"),
+             (0, "ENDSEC"), (0, "EOF")]
+    report = from_pairs(pairs)
+    assert report["dependencies"] == [
+        {"kind": "font", "name": "Synthetic Panel Sans",
+         "disposition": "font remapped", "remapped_to": "sans-serif"},
+        {"kind": "font", "name": "other.SHX",
+         "disposition": "font remapped", "remapped_to": "sans-serif"}]
+
+
+def test_inline_font_dependencies_reach_normal_reader_without_following_paths(monkeypatch):
+    raw = ("0\nSECTION\n2\nENTITIES\n0\nMTEXT\n5\nA1\n8\nNotes\n"
+           "10\n0\n20\n0\n40\n1\n1\n{\\f../missing.ttf;Label}\n"
+           "0\nENDSEC\n0\nEOF\n").encode()
+    import builtins
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Inline font dependencies must not open referenced paths")
+
+    with monkeypatch.context() as guard:
+        guard.setattr(builtins, "open", forbidden)
+        intake = parse_dxf_bytes(raw)
+    assert {row["name"] for row in intake["dependency_report"]["dependencies"]} == {"../missing.ttf"}
+    assert intake["texts"]
+
+
+def test_inline_fonts_ignore_nonfont_controls_wrong_sections_and_deduplicate():
+    pairs = [(0, "SECTION"), (2, "TABLES"), (0, "MTEXT"),
+             (1, r"\fWrong Section|b0;bad"), (0, "ENDSEC"),
+             (0, "SECTION"), (2, "ENTITIES"),
+             (0, "TEXT"), (1, r"\fLiteral DTEXT|b0;not formatting"),
+             (0, "MTEXT"), (1, r"\fplainword;not a font \fRepeat|b0;yes \FRepeat|i0;again"),
+             (0, "ENDSEC"), (0, "EOF")]
+    assert [row["name"] for row in from_pairs(pairs)["dependencies"]] == ["Repeat"]
+
+
+def test_inline_scanner_preserves_literal_paths_and_refuses_unterminated_controls():
+    text = r"\fC:\Fonts\family.ttf;caption \fPanel Sans|b0;label"
+    rows = from_pairs([(0, "MTEXT"), (1, text)])["dependencies"]
+    assert [row["name"] for row in rows] == [r"C:\Fonts\family.ttf", "Panel Sans"]
+    assert from_pairs([(0, "MTEXT"), (1, r"\f" * 10000)])["dependencies"] == []
+
+
 @pytest.mark.parametrize("path", [r"\\unavailable-host\share\reference.dat",
                                 r"C:\not-present\reference.dat", "../../reference.dat"])
 def test_dependency_paths_are_reported_without_any_filesystem_access(path, monkeypatch):
