@@ -1359,10 +1359,12 @@ const Viewer = forwardRef(function Viewer(
     // across centred on the snapped point, or nothing. Called when the snap CHANGES (the
     // picker remembers the last one), so it disposes what it replaces and
     // allocates nothing when clearing an empty group.
-    setHighlight: (ids) => {
-      setGroupHighlight(Array.from(ids || [], (id) => {
+    setHighlight: (ids, { nativeHandles = false, additive = false } = {}) => {
+      const handles = Array.from(ids || [], (id) => {
+        if (nativeHandles) return String(id)
         try { return BigInt(id).toString(16).toUpperCase() } catch { return String(id) }
-      }))
+      })
+      setGroupHighlight(current => additive ? [...new Set([...current, ...handles])] : handles)
     },
     // B1b: the glyph is the snap kind's own (snapMarkerSegments), so an
     // unknown kind or a bad point or size draws nothing.

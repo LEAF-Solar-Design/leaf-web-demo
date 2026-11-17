@@ -162,6 +162,40 @@ it('R13G2A-02 project Viewer props exclude standalone overlays and ghosts', () =
   expect(env.canvasMarqueeRef.current).not.toHaveBeenCalled()
 })
 
+it.each([false, true])('project marquee commits native handles with additive=%s', additive => {
+  const scope = projection(environment())
+  const highlight = vi.fn()
+  scope.viewerRef.current.setHighlight = highlight
+  const env = viewerEnv(scope, { workspaceCardRef: { current: { dataset: {} } } })
+  const viewer = element('Viewer')
+  expect(evaluate(prop(viewer, 'marqueeGate'), env)()).toBe(true)
+  evaluate(prop(viewer, 'onMarqueeSelect'), env)(['10', 'CA'], { additive })
+  expect(highlight).toHaveBeenCalledWith(['10', 'CA'], { nativeHandles: true, additive })
+  expect(env.canvasMarqueeRef.current).not.toHaveBeenCalled()
+  if (additive) expect(env.setSelectedHandle).not.toHaveBeenCalled()
+  else expect(env.setSelectedHandle).toHaveBeenCalledWith(null)
+})
+
+it('standalone marquee still delegates to the drawing selection owner', () => {
+  const env = viewerEnv(projection(environment()), {
+    projectMode: false, workspaceCardRef: { current: { dataset: {} } },
+  })
+  const viewer = element('Viewer')
+  expect(evaluate(prop(viewer, 'marqueeGate'), env)()).toBe(true)
+  evaluate(prop(viewer, 'onMarqueeSelect'), env)(['CA'], { additive: true })
+  expect(env.canvasMarqueeRef.current).toHaveBeenCalledWith(['CA'], { additive: true })
+  expect(env.setSelectedHandle).not.toHaveBeenCalled()
+})
+
+it('a plain project click replaces the previous marquee highlight', () => {
+  const scope = projection(environment()), highlight = vi.fn()
+  scope.viewerRef.current.setHighlight = highlight
+  const env = viewerEnv(scope)
+  evaluate(prop(element('Viewer'), 'onSelectEntity'), env)('CA', { additive: false })
+  expect(highlight).toHaveBeenCalledWith([], { nativeHandles: true })
+  expect(env.setSelectedHandle).toHaveBeenCalledWith('CA')
+})
+
 it('R13G2A-03 engine presentation cannot overwrite the project drawing', async () => {
   const session = { engineParsed: true, errorKind: null, documentId: 'parsed.dxf',
     entities: [{ id: 'e1', type: 'LINE', layer: 'Engine', vertices: [[0, 0, 0], [100, 50, 0]] }],

@@ -99,7 +99,7 @@ it('refuses oversized takeoff output and leaves invalid quantities unpriced', as
   h.mount({ openTool: h.row })
   fireEvent.click(screen.getByRole('button', { name: 'Read project quantities' }))
   await screen.findByText('The project quantity read was refused.')
-  expect(screen.queryByRole('table')).toBeNull()
+  expect(screen.getByRole('region', { name: 'Ground estimate preview' }).querySelector('table')).toBeNull()
   h.client.readSolar.mockResolvedValue(takeoffResult([takeoffLine('invalid', '-1'), takeoffLine('long', '1'.repeat(41))]))
   fireEvent.click(screen.getByRole('button', { name: 'Read project quantities' }))
   await screen.findByLabelText('TEST rate USD invalid')
@@ -395,6 +395,20 @@ it('aborts a pending export on unmount before creating any download', async () =
   expect(options.isCurrent()).toBe(false)
   await act(async () => pending.resolve({ ok: true, data: { bytes: new Uint8Array([123, 125]) } }))
   expect(h.listeners.size).toBe(0)
+})
+
+it('hosts engineering reconciliation in the admitted project scope and removes it when stale', async () => {
+  const h = fixture()
+  h.mount()
+  expect(screen.getByRole('region', { name: 'Engineering reconciliation' })).toBeTruthy()
+  expect(h.client.readContext).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Read saved design' }))
+  await screen.findByText(/Saved design unavailable/)
+  expect(h.client.readContext).toHaveBeenCalledWith({ signal: expect.any(AbortSignal) })
+  h.current = false
+  act(() => h.emit())
+  expect(screen.queryByRole('region', { name: 'Engineering reconciliation' })).toBeNull()
+  expect(h.submit).not.toHaveBeenCalled()
 })
 
 it('S02 focuses recovery once when an active editor is removed by lost authority', async () => {
@@ -1715,7 +1729,7 @@ describe('Project Solar workspace composition', () => {
   it('R13E-44 composition owns no Viewer or runtime and all new copy uses the frozen maps', () => {
     const source = readFileSync(`${process.cwd()}/src/solar/ProjectSolarWorkspace.jsx`, 'utf8')
     const imports = [...source.matchAll(new RegExp("from ['\"]([^'\"]+)['\"]", 'g'))].map((match) => match[1])
-    expect(imports).toEqual(['react', './solarDrawingBinding.js', './SolarSettingsForm.jsx', './solarSettingsWire.js', './ProjectSolarReadPanel.jsx', './ProjectSolveReview.jsx', './ProjectSolarEdgePanel.jsx', './ProjectGroundEstimatePanel.jsx', './ProjectSolarPreparedSolveForm.jsx', './DrawingRoleProposal.jsx'])
+    expect(imports).toEqual(['react', './solarDrawingBinding.js', './SolarSettingsForm.jsx', './solarSettingsWire.js', './ProjectSolarReadPanel.jsx', './ProjectSolveReview.jsx', './ProjectSolarEdgePanel.jsx', './ProjectGroundEstimatePanel.jsx', './ProjectSolarPreparedSolveForm.jsx', './DrawingRoleProposal.jsx', './ProjectReconciliationPanel.jsx'])
     const reviewSource = readFileSync(`${process.cwd()}/src/solar/ProjectSolveReview.jsx`, 'utf8')
     const reviewImports = [...reviewSource.matchAll(new RegExp("from ['\"]([^'\"]+)['\"]", 'g'))].map((match) => match[1])
     for (const dependency of reviewImports) {

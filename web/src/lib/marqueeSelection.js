@@ -31,7 +31,7 @@ function intersects(a, b, rect) {
 
 export function marqueeHandles(polylines, rect, mode, isVisible = () => true) {
   const handles = []
-  const seen = new Set()
+  const groups = new Map()
   if (!rect || !(rect.maxX > rect.minX) || !(rect.maxY > rect.minY)) return Object.freeze(handles)
   for (const pl of polylines) {
     if (typeof pl?.handle !== 'string' || !pl.pts?.length || !isVisible(pl)) continue
@@ -50,10 +50,15 @@ export function marqueeHandles(polylines, rect, mode, isVisible = () => true) {
     }
     if (!valid) continue
     if (mode === 'crossing' && !touches && pl.closed) touches = intersects(pl.pts[pl.pts.length - 1], pl.pts[0], rect)
-    if ((allInside || (mode === 'crossing' && touches)) && !seen.has(pl.handle)) {
-      seen.add(pl.handle)
-      handles.push(pl.handle)
-    }
+    // A block can project into several polylines with one source handle.
+    // Window selection contains the whole visible entity, not just one edge.
+    const group = groups.get(pl.handle) || { allInside: true, touches: false }
+    group.allInside = group.allInside && allInside
+    group.touches = group.touches || touches
+    groups.set(pl.handle, group)
+  }
+  for (const [handle, group] of groups) {
+    if (group.allInside || (mode === 'crossing' && group.touches)) handles.push(handle)
   }
   return Object.freeze(handles)
 }

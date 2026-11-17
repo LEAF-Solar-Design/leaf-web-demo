@@ -22,10 +22,18 @@ Each recipe creates a temporary check and a new artifact, checks the actual CLI 
 
 A timeout receipt remains evidence of a timeout. It does not show that the check passed. Endpoint source revalidation detects changed, added, removed or unreadable measured dependencies; it does not claim to detect a hostile edit restored to identical bytes between observations.
 
+Cancellation returns CLI2 with `CAPTURE_CANCELLED` and removes only its owned failed reservation after worker cleanup. Reader failure returns CLI2 with `READER_FAILED`, incomplete diagnostics and settled-resource metadata. Its retained prefix is evidence of failure, never a successful check.
+
+Use `read_capture(path)` from the capsule module to consume current captures. It requires complete newline-terminated JSON, the current schema, settlement metadata and a source binding or labelled source refusal. A producer killed during publication can leave partial bytes. Preserve those bytes and any foreign artifacts; retry into a fresh output path. Do not infer success from a file merely existing, and do not overwrite a partial file during retry. Historical artifacts keep their original bytes and producer-version semantics.
+
+The consumer admits regular files up to 8 MiB, JSON nesting depth 32 and 20,000 nodes. Nodes include containers, member keys and scalar values. It checks file size before opening and scans depth and nodes before allocating the JSON object tree. Duplicate decoded keys, nonfinite numbers, trailing JSON, BOMs, invalid UTF-8 and lone surrogates refuse. These bounds are inclusive.
+
+Current captures record per-stream received and retained byte counts, EOF flags and retained-byte SHA256 digests. Binary diagnostics retain canonical base64 alongside replacement-decoded display text. The consumer cross-checks these fields, overall completeness, reader errors, process settlement and exact scalar types. These checks prove internal consistency, not authenticity against an author who can rewrite every field. Missing fields in older captures refuse; consume those with their original producer version rather than adding attestations afterward.
+
 For a retained actual JSX capture, run from the checkout root and supply a new private output path:
 
 ```powershell
 python tools/xbench/x07_jsx_failure_capsule.py --check x07_receipt_audit_jsx_journey.cjs --deps C:/tmp/x07-web-check-20261115/node_modules --out D:/agent-data/leaf-research/studio-xbench-2026-11/runs/X07/new-capsule.json --timeout 90
 ```
 
-The artifact records command, source commit, dirty state, file digests, exit, timeout, bounded streams and process settlement. Source-change refusals record separately labelled before/after observations. Existing artifacts are never replaced. Read-only refusal is not a staging acceptance receipt. The staging incident hold continues until E3 posts a coherent recovery receipt.
+The artifact records command, source commit, dirty state, file digests, exit, timeout, bounded streams and process settlement. Source-change refusals record separately labelled before/after observations. Existing artifacts are never replaced. Read-only refusal is not a staging acceptance receipt. Follow the current E3 delivery receipt and drawing-upload hold for staging work.
