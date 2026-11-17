@@ -5973,6 +5973,8 @@ export default function App() {
                   GraphForm={ProjectSolarGraphForm}
                   newProjectIntentKey={mintCorrelationId}
                   onProjectSubmit={projectSolarRuntime.onProjectSubmit}
+                  onEstimatePublished={(receipt, captured, isCurrent) => seatProjectDrawingPublication(workspaceController, receipt,
+                    () => isCurrent() && workspaceController.getSnapshot().canonicalVersionId === captured.input_version_id)}
                   submissionSignal={projectSolarRuntime.submissionSignal}
                   openTool={projectSolarRuntime.openTool}
                   onOpenTool={onOpenProjectSolarTool}

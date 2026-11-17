@@ -362,7 +362,8 @@ export default function ProjectSolarWorkspace(props) {
   const ReadPanel = editorRow?.name === 'solar-takeoff' ? ProjectGroundEstimatePanel : ProjectSolarReadPanel
   if (host === 'read') editor = <ReadPanel tool={editorRow} solarBinding={owner.binding}
     authorityKey={owner.authorityKey} projectClient={owner.projectClient} projectCatalog={owner.projectCatalog}
-    isCurrent={scope.isCurrent} busy={busy} />
+    isCurrent={scope.isCurrent} busy={busy}
+    {...(editorRow?.name === 'solar-takeoff' ? { onEstimatePublished: props.onEstimatePublished, newProjectIntentKey } : {})} />
   const solveRow = owner.rows.find((row) => row.name === 'solar-solve-proposal')
   const commitRow = owner.rows.find((row) => row.name === 'solar-commit-solve')
   if (host === 'solve') {

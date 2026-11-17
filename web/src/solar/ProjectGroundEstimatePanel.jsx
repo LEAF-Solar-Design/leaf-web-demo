@@ -77,11 +77,29 @@ export default function ProjectGroundEstimatePanel(props) {
   const [, refresh] = useState(0)
   const [rates, setRates] = useState({})
   const [rateVersion, setRateVersion] = useState('TEST-1')
+  const [checkpoint, setCheckpoint] = useState(null)
+  const [notice, setNotice] = useState('')
+  const [working, setWorking] = useState(false)
+  const [dirty, setDirty] = useState(false)
+  const custody = useRef(null), retry = useRef(null), draftSource = useRef(null), source = useRef(null), savedRead = useRef(null)
+  if (!source.current || source.current.bindingKey !== owner.key || source.current.authorityKey !== owner.authorityKey ||
+      source.current.client !== owner.projectClient) {
+    source.current = { bindingKey: owner.key, authorityKey: owner.authorityKey, client: owner.projectClient }
+  }
+  const sourceKey = source.current
+  const sourceChanged = draftSource.current !== sourceKey
+  if (sourceChanged) {
+    draftSource.current = sourceKey
+    retry.current = null
+    custody.current?.abort()
+    savedRead.current?.abort()
+  }
   const invalidate = () => {
     generation.current += 1
     operation.current?.controller.abort()
     operation.current = null
     presented.current = null
+    custody.current?.abort()
   }
   if (!same(latest.current, owner) || (presented.current && !current(presented.current))) invalidate()
   latest.current = owner
@@ -95,12 +113,113 @@ export default function ProjectGroundEstimatePanel(props) {
     mounted.current = true
     let unsubscribe
     try { unsubscribe = props.projectClient?.subscribe(() => observe.current()) } catch { /* unavailable */ }
-    return () => { mounted.current = false; invalidate(); try { unsubscribe?.() } catch { /* observer isolation */ } }
+    return () => { mounted.current = false; invalidate(); custody.current?.abort(); try { unsubscribe?.() } catch { /* observer isolation */ } }
   }, [props.projectClient])
+
+  useLayoutEffect(() => {
+    setRates({}); setRateVersion('TEST-1'); setCheckpoint(null); setDirty(false); setNotice(''); setWorking(false)
+  }, [sourceKey])
+
+  useLayoutEffect(() => {
+    if (!owner.valid || typeof owner.projectClient.readEstimate !== 'function') return
+    const controller = new AbortController()
+    savedRead.current = controller
+    const key = sourceKey
+    const valid = () => mounted.current && !controller.signal.aborted && draftSource.current === key &&
+      current(latest.current.isCurrent) && latest.current.valid
+    void owner.projectClient.readEstimate({ signal: controller.signal }).then((outcome) => {
+      if (!valid()) return
+      if (outcome.ok && outcome.data.result.saved) setCheckpoint({ ...outcome.data.result, key })
+      else setNotice(outcome.ok ? 'No saved estimate for this version.' : 'Saved estimate read was refused.')
+    }).catch(() => { if (valid()) setNotice('Saved estimate read was refused.') })
+    return () => controller.abort()
+  }, [sourceKey, owner.valid])
+
+  const saved = checkpoint?.key === sourceKey && owner.valid ? checkpoint : null
+  const edit = () => { setDirty(true); setNotice('Unsaved changes.') }
+  const act = async (kind) => {
+    const admitted = describe(latest.current)
+    if (!admitted.valid || working || props.busy || !mounted.current) return
+    if (kind === 'reopen' && retry.current) return
+    savedRead.current?.abort()
+    if (kind === 'reopen') invalidate()
+    const key = sourceKey, controller = new AbortController()
+    custody.current?.abort(); custody.current = controller
+    const valid = () => mounted.current && !controller.signal.aborted && draftSource.current === key &&
+      same(latest.current, admitted) && same(admitted, describe(admitted))
+    setWorking(true)
+    try {
+      if (kind === 'checkout') {
+        const outcome = await admitted.projectClient.acquireCheckout({ signal: controller.signal })
+        if (mounted.current && draftSource.current === key) setNotice(outcome.ok ? 'Drawing checked out. Read quantities to save.' : 'Drawing checkout was refused.')
+      } else if (kind === 'reopen') {
+        const outcome = await admitted.projectClient.readEstimate({ signal: controller.signal })
+        if (!valid()) return
+        if (!outcome.ok) throw new Error('Saved estimate read was refused.')
+        const result = outcome.data.result
+        if (!result.saved) { setCheckpoint(null); setNotice('No saved estimate for this version.'); return }
+        const estimate = result.estimate
+        setRates(Object.fromEntries(estimate.rate_card.rates.map((row) => [row.line_id, row.rate])))
+        setRateVersion(estimate.rate_card.version)
+        retry.current = null
+        setDirty(false); setCheckpoint({ ...result, key })
+        presented.current = () => mounted.current && draftSource.current === key &&
+          same(latest.current, admitted) && same(admitted, describe(admitted))
+        setState({ phase: 'presented', generation: generation.current, lines: estimate.takeoff.lines,
+          savedDigest: estimate.content_sha256 })
+        setNotice('Saved estimate reopened.')
+      } else if (kind === 'save') {
+        if (!admitted.projectClient.getSnapshot().ownsCheckout) { setNotice('Check out drawing before saving an estimate.'); return }
+        if (!visible.lines && !retry.current) return
+        if (!retry.current) {
+          const rateCard = { schema: 'leaf.solar-estimate-rate-card.v1', label: 'TEST RATES', currency: 'USD',
+            version: rateVersion, rates: visible.lines.filter((line) => (rates[line.line_id] ?? '') !== '').map((line) =>
+              ({ line_id: line.line_id, unit: line.unit, rate: rates[line.line_id] })) }
+          const requestId = props.newProjectIntentKey ? props.newProjectIntentKey() : globalThis.crypto.randomUUID()
+          rateCard.rates.forEach(Object.freeze)
+          Object.freeze(rateCard.rates)
+          retry.current = Object.freeze({ requestId, rateCard: Object.freeze(rateCard), catalogDigest: admitted.digest })
+        }
+        const outcome = await admitted.projectClient.saveEstimate({ ...retry.current, signal: controller.signal })
+        if (!valid()) return
+        if (!outcome.ok) {
+          const ambiguous = outcome.status >= 500 || (outcome.status == null &&
+            ['SIP_R7_TRANSPORT_FAILED', 'SIP_R7_TIMEOUT', 'SIP_R7_ABORTED', 'SIP_R7_RESPONSE_INVALID'].includes(outcome.reason))
+          if (!ambiguous) retry.current = null
+          setNotice(ambiguous ? 'Save outcome unknown. Retry Save estimate with the unchanged card.' : 'Estimate save was refused. Your rates are retained.')
+          return
+        }
+        retry.current = null
+        const result = outcome.data.result
+        setCheckpoint({ ...result, key }); setDirty(false)
+        const receipt = `Estimate saved as version ${result.publication.drawing_version.version_id}.`
+        setNotice(receipt)
+        try {
+          const seated = await props.onEstimatePublished?.(result.publication, admitted.binding, valid)
+          if (valid()) setNotice(seated === true ? receipt : `${receipt} Reopen that saved version to continue; selection was not changed.`)
+        } catch { if (valid()) setNotice(`${receipt} Reopen that saved version to continue; selection was not changed.`) }
+      } else if (kind === 'export' && saved && !dirty && !retry.current) {
+        const outcome = await admitted.projectClient.exportEstimate({ contentSha256: saved.content_sha256,
+          signal: controller.signal, isCurrent: valid })
+        if (!valid()) return
+        if (!outcome.ok) throw new Error('Saved estimate export was refused.')
+        const url = URL.createObjectURL(new Blob([outcome.data.bytes], { type: 'application/json' }))
+        try {
+          if (!valid()) return
+          const anchor = document.createElement('a')
+          anchor.href = url; anchor.download = 'estimate.json'; anchor.click()
+        } finally { URL.revokeObjectURL(url) }
+      }
+    } catch {
+      if (valid()) setNotice(kind === 'save' && retry.current ?
+        'Save outcome unknown. Retry Save estimate with the unchanged card.' : 'Estimate operation was refused. Your rates are retained.')
+    }
+    finally { if (mounted.current && draftSource.current === key && custody.current === controller) setWorking(false) }
+  }
 
   const read = async () => {
     const admitted = describe(latest.current)
-    if (props.busy || !admitted.valid || !same(admitted, latest.current) || operation.current || !mounted.current) return
+    if (props.busy || working || retry.current || !admitted.valid || !same(admitted, latest.current) || operation.current || !mounted.current) return
     invalidate()
     const token = generation.current, controller = new AbortController()
     const active = { controller, check: null }
@@ -112,7 +231,7 @@ export default function ProjectGroundEstimatePanel(props) {
     try {
       captured = admitted.projectClient.captureCatalogScope()
       if (!active.check()) return
-      setRates({})
+      if (saved) setDirty(true)
       setState({ phase: 'reading', generation: token })
       const outcome = await admitted.projectClient.readSolar({ tool: 'solar-takeoff',
         params: { drawing_id: admitted.binding.drawing_id }, catalogDigest: admitted.digest,
@@ -128,26 +247,41 @@ export default function ProjectGroundEstimatePanel(props) {
       if (operation.current === active) operation.current = null
     }
   }
-  const amounts = visible.lines?.map((line) => estimateLineCents(line, rates[line.line_id] ?? '')) || []
+  const amounts = visible.lines?.map((line) => {
+    if (saved && !dirty && visible.savedDigest === saved.content_sha256) {
+      const amount = saved.estimate.lines.find((row) => row.line_id === line.line_id)?.amount
+      return typeof amount === 'string' && /^\d+\.\d{2}$/.test(amount) ? BigInt(amount.replace('.', '')) : null
+    }
+    return estimateLineCents(line, rates[line.line_id] ?? '')
+  }) || []
   const subtotal = amounts.reduce((total, cents) => total + (cents ?? 0n), 0n)
   return <section aria-label="Ground estimate preview">
     <p>Preview quantities and TEST RATES USD. This is an incomplete estimate preview. Full GroundPhysical flow is unavailable.</p>
-    <button type="button" disabled={!owner.valid || props.busy || visible.phase === 'reading'} onClick={read}>Read project quantities</button>
+    <button type="button" disabled={!owner.valid || props.busy || working || !!retry.current || visible.phase === 'reading'} onClick={read}>Read project quantities</button>
+    <button type="button" disabled={!owner.valid || working || props.busy} onClick={() => act('checkout')}>Check out drawing</button>
+    <button type="button" disabled={!owner.valid || working || props.busy || (!visible.lines && !retry.current)} onClick={() => act('save')}>Save estimate</button>
+    <button type="button" disabled={!owner.valid || working || props.busy || !!retry.current} onClick={() => act('reopen')}>Reopen saved estimate</button>
+    <button type="button" disabled={!saved || dirty || working || props.busy || !!retry.current || !!saved.publication} onClick={() => act('export')}>Export saved estimate</button>
+    {!owner.projectClient?.getSnapshot()?.ownsCheckout && <p>Check out drawing before saving. Saved estimates can be reopened and exported without checkout.</p>}
+    {saved && <p>Saved content hash: {saved.content_sha256}. Saved subtotal: {saved.estimate.priced_subtotal ?? 'Unpriced'} USD.</p>}
     <p role="status">{!owner.valid ? 'The drawing or catalog changed. Reopen this preview.' :
-      visible.phase === 'reading' ? 'Reading project quantities…' : visible.phase === 'refused' ? 'The project quantity read was refused.' : ''}</p>
+      visible.phase === 'reading' ? 'Reading project quantities…' : visible.phase === 'refused' ? 'The project quantity read was refused.' :
+        !sourceChanged ? notice : ''}</p>
     {visible.phase === 'presented' && <>
-      <label>TEST rate card version<input maxLength={120} value={rateVersion} onChange={(event) => setRateVersion(event.target.value.slice(0, 120))} /></label>
+      <label>TEST rate card version<input disabled={working || !!retry.current} maxLength={120} value={rateVersion} onChange={(event) => { edit(); setRateVersion(event.target.value.slice(0, 120)) }} /></label>
       <table><thead><tr>{['Description', 'Unit', 'Quantity', 'TEST rate USD', 'Amount USD'].map((label) => <th key={label}>{label}</th>)}</tr></thead>
         <tbody>{visible.lines.map((line, index) => <tr key={line.line_id}>
           <td>{line.description}</td><td>{line.unit}</td><td>{line.quantity ?? 'Unavailable'}</td>
-          <td><input aria-label={`TEST rate USD ${line.line_id}`} inputMode="decimal" maxLength={MAX_DECIMAL}
+          <td><input disabled={working || !!retry.current} aria-label={`TEST rate USD ${line.line_id}`} inputMode="decimal" maxLength={MAX_DECIMAL}
             value={rates[line.line_id] ?? ''} onChange={(event) => {
               const value = event.target.value.slice(0, MAX_DECIMAL)
+              edit()
               setRates((previous) => ({ ...previous, [line.line_id]: value }))
             }} /></td><td>{amounts[index] === null ? 'Unpriced' : money(amounts[index])}</td>
         </tr>)}</tbody></table>
       <p>Priced subtotal (preview): {money(subtotal)}</p>
-      <p>{amounts.filter((amount) => amount === null).length} unpriced lines. TEST rates only; preview is not saved.</p>
+      <p>{amounts.filter((amount) => amount === null).length} unpriced lines. {saved && !dirty && visible.savedDigest === saved.content_sha256 ?
+        'Saved checkpoint; TEST rates only.' : 'TEST rates only; preview is not saved.'}</p>
     </>}
   </section>
 }

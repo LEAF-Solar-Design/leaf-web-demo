@@ -221,6 +221,182 @@ function fixture(name = STEP[0], { code = null, realGraph = false, rows = null }
 }
 const last = (values) => values[values.length - 1]
 
+function savedEstimateFixture() {
+  const lines = [takeoffLine('panels', '2.000'), takeoffLine('missing', null), takeoffLine('no-rate', '3')]
+    .map((line) => ({ ...line, category: 'equipment', reason: null, source: {} }))
+  const rate_card = { schema: 'leaf.solar-estimate-rate-card.v1', label: 'TEST RATES', currency: 'USD',
+    version: 'TEST-saved', rates: [{ line_id: 'panels', unit: 'ea', rate: '1.005' }] }
+  return { schema: 'leaf.solar-estimate.v1', label: 'TEST RATES', currency: 'USD', rate_version: rate_card.version,
+    complete: false, priced_subtotal: '2.01', unpriced_count: 2, content_sha256: 'a'.repeat(64),
+    takeoff_sha256: 'b'.repeat(64), rate_card_sha256: 'c'.repeat(64), source_binding: {
+      organization_id: B.organization_id, project_id: B.project_id, drawing_id: B.drawing_id,
+      input_version_id: B.input_version_id, graph_sha256: 'd'.repeat(64), intake_sha256: 'e'.repeat(64) },
+    takeoff: { schema: 'leaf.solar-takeoff.v1', complete: false, source: { project_id: B.project_id,
+      drawing_id: B.drawing_id, graph_sha256: 'd'.repeat(64), drawing_version: 1 }, lines }, rate_card,
+    lines: lines.map((line, index) => ({ ...line, rate: index === 0 ? '1.005' : null,
+      amount: index === 0 ? '2.01' : null, pricing_reason: index === 0 ? null : index === 1 ? 'QUANTITY_MISSING' : 'RATE_MISSING' })) }
+}
+function estimateControlsFixture() {
+  const h = fixture('solar-takeoff'), estimate = savedEstimateFixture()
+  const publication = { organization_id: B.organization_id, project_id: B.project_id, drawing_id: B.drawing_id,
+    parent_version_id: B.input_version_id, request_id: JOB, drawing_version: {
+      version_id: JOB, org_id: B.organization_id, project_id: B.project_id, drawing_id: B.drawing_id } }
+  h.saved = { schema: 'leaf.project-estimate.v1', saved: true, organization_id: B.organization_id,
+    project_id: B.project_id, drawing_id: B.drawing_id, input_version_id: B.input_version_id,
+    content_sha256: estimate.content_sha256, estimate }
+  h.snapshot = { ...h.snapshot, ownsCheckout: true }
+  h.key.mockReturnValue(JOB)
+  h.published = vi.fn(async () => true)
+  h.client.readEstimate = vi.fn(async () => ({ ok: true, data: { result: { ...h.saved, saved: false } } }))
+  h.client.saveEstimate = vi.fn(async () => ({ ok: true, data: { result: {
+    schema: 'leaf.project-estimate.v1', saved: true, estimate, content_sha256: estimate.content_sha256, publication } } }))
+  h.client.acquireCheckout = vi.fn(async () => { h.snapshot = { ...h.snapshot, ownsCheckout: true }; h.emit(); return { ok: true } })
+  h.client.exportEstimate = vi.fn(async () => ({ ok: true, data: { bytes: new TextEncoder().encode(JSON.stringify(estimate)) } }))
+  h.client.readSolar.mockResolvedValue(takeoffResult(estimate.takeoff.lines))
+  h.mountEstimate = () => h.mount({ openTool: h.row, onEstimatePublished: h.published })
+  h.draft = async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Read project quantities' }))
+    await screen.findByLabelText('TEST rate USD panels')
+    fireEvent.change(screen.getByLabelText('TEST rate USD panels'), { target: { value: '1.005' } })
+  }
+  return h
+}
+
+it('saves through the validated callback boundary, reopens all saved quantities and exports exact Blob bytes', async () => {
+  const h = estimateControlsFixture(), blobs = []
+  const oldCreate = URL.createObjectURL, oldRevoke = URL.revokeObjectURL
+  URL.createObjectURL = vi.fn((blob) => { blobs.push(blob); return 'blob:estimate' })
+  URL.revokeObjectURL = vi.fn()
+  const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  try {
+    h.mountEstimate(); await h.draft()
+    fireEvent.click(screen.getByRole('button', { name: 'Save estimate' }))
+    await waitFor(() => expect(h.published).toHaveBeenCalledTimes(1))
+    expect(h.client.saveEstimate.mock.calls[0][0]).toMatchObject({ requestId: JOB, catalogDigest: D,
+      rateCard: { rates: [{ line_id: 'panels', unit: 'ea', rate: '1.005' }] } })
+    expect(h.published.mock.calls[0][1]).toEqual(B)
+    expect(h.published.mock.calls[0][2]()).toBe(true)
+    h.client.readEstimate.mockResolvedValue({ ok: true, data: { result: h.saved } })
+    fireEvent.click(screen.getByRole('button', { name: 'Reopen saved estimate' }))
+    await screen.findByText('Saved estimate reopened.')
+    expect(screen.getByLabelText('TEST rate card version').value).toBe('TEST-saved')
+    expect(screen.getByText('2.000')).toBeTruthy()
+    expect(screen.getAllByText('Unpriced')).toHaveLength(2)
+    expect(screen.getByText(/Saved subtotal: 2.01 USD/)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Export saved estimate' }))
+    await waitFor(() => expect(click).toHaveBeenCalledTimes(1))
+    const exported = await new Promise((resolve) => {
+      const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.readAsText(blobs[0])
+    })
+    expect(exported).toBe(JSON.stringify(h.saved.estimate))
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:estimate')
+    fireEvent.change(screen.getByLabelText('TEST rate USD panels'), { target: { value: '7' } })
+    expect(screen.getByRole('button', { name: 'Export saved estimate' }).disabled).toBe(true)
+  } finally { URL.createObjectURL = oldCreate; URL.revokeObjectURL = oldRevoke }
+})
+
+it('offers checkout for save while allowing a reader to reopen and export', async () => {
+  const h = estimateControlsFixture()
+  h.snapshot = { ...h.snapshot, ownsCheckout: false }
+  h.mountEstimate(); await h.draft()
+  fireEvent.click(screen.getByRole('button', { name: 'Save estimate' }))
+  await screen.findByText('Check out drawing before saving an estimate.')
+  expect(h.client.saveEstimate).not.toHaveBeenCalled()
+  h.client.readEstimate.mockResolvedValue({ ok: true, data: { result: h.saved } })
+  fireEvent.click(screen.getByRole('button', { name: 'Reopen saved estimate' }))
+  await screen.findByText('Saved estimate reopened.')
+  expect(screen.getByRole('button', { name: 'Export saved estimate' }).disabled).toBe(false)
+  fireEvent.click(screen.getByRole('button', { name: 'Check out drawing' }))
+  await waitFor(() => expect(h.client.acquireCheckout).toHaveBeenCalledTimes(1))
+})
+
+it.each(['refused', 'ambiguous'])('keeps drafts after a %s save and reuses the original ambiguous nonce', async (kind) => {
+  const h = estimateControlsFixture()
+  h.client.saveEstimate.mockResolvedValueOnce({ ok: false, status: kind === 'refused' ? 409 : null,
+    reason: kind === 'refused' ? 'ESTIMATE_SOURCE_CHANGED' : 'SIP_R7_TIMEOUT' })
+  h.mountEstimate(); await h.draft()
+  fireEvent.click(screen.getByRole('button', { name: 'Save estimate' }))
+  await screen.findByText(kind === 'refused' ? 'Estimate save was refused. Your rates are retained.' :
+    'Save outcome unknown. Retry Save estimate with the unchanged card.')
+  expect(screen.getByLabelText('TEST rate USD panels').value).toBe('1.005')
+  expect(screen.getByLabelText('TEST rate USD panels').disabled).toBe(kind === 'ambiguous')
+  if (kind === 'ambiguous') {
+    const first = h.client.saveEstimate.mock.calls[0][0]
+    fireEvent.click(screen.getByRole('button', { name: 'Save estimate' }))
+    await waitFor(() => expect(h.published).toHaveBeenCalledTimes(1))
+    expect(h.key).toHaveBeenCalledTimes(1)
+    expect(h.client.saveEstimate.mock.calls[1][0]).toMatchObject({ requestId: first.requestId, rateCard: first.rateCard })
+  }
+})
+
+it('retains a known saved receipt if publication seating fails', async () => {
+  const h = estimateControlsFixture()
+  h.published.mockRejectedValue(new Error('hydrate failed'))
+  h.mountEstimate(); await h.draft()
+  fireEvent.click(screen.getByRole('button', { name: 'Save estimate' }))
+  await screen.findByText(new RegExp(`Estimate saved as version ${JOB}.*selection was not changed`))
+  expect(screen.getByText(/Saved content hash:/)).toBeTruthy()
+})
+
+it('aborts late save and export on lost scope and cleans up listeners on unmount', async () => {
+  const h = estimateControlsFixture(), pending = deferred()
+  h.client.saveEstimate.mockReturnValue(pending.promise)
+  h.mountEstimate(); await h.draft()
+  fireEvent.click(screen.getByRole('button', { name: 'Save estimate' }))
+  const signal = h.client.saveEstimate.mock.calls[0][0].signal
+  h.current = false
+  act(() => h.emit())
+  expect(signal.aborted).toBe(true)
+  await act(async () => pending.resolve({ ok: true, data: { result: h.saved } }))
+  expect(h.published).not.toHaveBeenCalled()
+  expect(screen.queryByLabelText('TEST rate USD panels')).toBeNull()
+  h.view.unmount()
+  expect(h.listeners.size).toBe(0)
+})
+
+it('preserves same-source drafts while refreshing quantity proof and clears drafts for a new version', async () => {
+  const h = estimateControlsFixture()
+  const props = { tool: h.row, solarBinding: B, authorityKey: 'epoch-1', projectClient: h.client,
+    projectCatalog: h.catalog, isCurrent: () => h.current, newProjectIntentKey: h.key }
+  const view = render(<ProjectGroundEstimatePanel {...props} />)
+  await h.draft()
+  fireEvent.change(screen.getByLabelText('TEST rate card version'), { target: { value: 'draft-version' } })
+  h.epoch += 1
+  act(() => h.emit())
+  expect(screen.queryByLabelText('TEST rate USD panels')).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: 'Read project quantities' }))
+  await screen.findByLabelText('TEST rate USD panels')
+  expect(screen.getByLabelText('TEST rate USD panels').value).toBe('1.005')
+  expect(screen.getByLabelText('TEST rate card version').value).toBe('draft-version')
+  const next = { ...B, input_version_id: JOB }
+  h.snapshot = { ...h.snapshot, binding: next }
+  h.catalog = { ...h.catalog, binding: next }
+  const outcome = takeoffResult(savedEstimateFixture().takeoff.lines)
+  outcome.data.result.input_version_id = JOB
+  h.client.readSolar.mockResolvedValue(outcome)
+  view.rerender(<ProjectGroundEstimatePanel {...props} solarBinding={next} projectCatalog={h.catalog} />)
+  expect(screen.queryByLabelText('TEST rate USD panels')).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: 'Read project quantities' }))
+  await screen.findByLabelText('TEST rate USD panels')
+  expect(screen.getByLabelText('TEST rate USD panels').value).toBe('')
+  expect(screen.getByLabelText('TEST rate card version').value).toBe('TEST-1')
+})
+
+it('aborts a pending export on unmount before creating any download', async () => {
+  const h = estimateControlsFixture(), pending = deferred()
+  h.client.readEstimate.mockResolvedValue({ ok: true, data: { result: h.saved } })
+  h.client.exportEstimate.mockReturnValue(pending.promise)
+  h.mountEstimate()
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Export saved estimate' }).disabled).toBe(false))
+  fireEvent.click(screen.getByRole('button', { name: 'Export saved estimate' }))
+  const options = h.client.exportEstimate.mock.calls[0][0]
+  h.view.unmount()
+  expect(options.signal.aborted).toBe(true)
+  expect(options.isCurrent()).toBe(false)
+  await act(async () => pending.resolve({ ok: true, data: { bytes: new Uint8Array([123, 125]) } }))
+  expect(h.listeners.size).toBe(0)
+})
+
 it('S02 focuses recovery once when an active editor is removed by lost authority', async () => {
   vi.spyOn(document, 'hasFocus').mockReturnValue(true)
   const h = fixture('solar-panel-groups')
