@@ -9,14 +9,48 @@ from pathlib import Path
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
+import time
 from x07_profile_version_diff import JsonArgumentParser, publish_stdout
 
 
 MAX_STREAM_BYTES = 256 * 1024
 ROOT = Path(__file__).resolve().parents[2]
+MAX_CAPTURE_BYTES = 8 * 1024 * 1024
+
+
+class CaptureCancelled(ValueError):
+    pass
+
+
+def read_capture(path):
+    """Strict current-schema consumer. Partial artifacts never count as success."""
+    path = Path(path)
+    try:
+        if not stat.S_ISREG(path.lstat().st_mode):
+            raise ValueError('regular capture required')
+        with path.open('rb') as stream:
+            raw = stream.read(MAX_CAPTURE_BYTES + 1)
+        if len(raw) > MAX_CAPTURE_BYTES or not raw.endswith(b'\n'):
+            raise ValueError('incomplete capture')
+        value = json.loads(raw.decode('utf-8'))
+        if (not isinstance(value, dict) or value.get('schema') != 'leaf.x07.jsx-failure-capsule.v1'
+                or value.get('owned_processes_settled') is not True or type(value.get('exit_code')) is not int
+                or any(type(value.get(key)) is not bool for key in ('timed_out', 'diagnostics_complete', 'source_unchanged'))
+                or not isinstance(value.get('command'), list) or not value['command']):
+            raise ValueError('invalid capture')
+        if value['source_unchanged']:
+            if (not re.fullmatch(r'[a-f0-9]{40}', value.get('source_sha', ''))
+                    or type(value.get('dirty')) is not bool or not value.get('source_file_sha256')):
+                raise ValueError('missing source binding')
+        elif value.get('error') != 'SOURCE_CHANGED' or not isinstance(value.get('source_before'), dict):
+            raise ValueError('unlabelled source refusal')
+        return value
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError('capture unavailable') from error
 
 
 class WindowsJob:
@@ -82,7 +116,7 @@ def stop_group(child):
 
 
 def run_check(name, output, *, dependencies=None, timeout=90, checks_root=None,
-              source_dependencies=(), on_chunk=None, stream_limit=MAX_STREAM_BYTES):
+              source_dependencies=(), on_chunk=None, stream_limit=MAX_STREAM_BYTES, cancel_event=None):
     if not isinstance(name, str) or not re.fullmatch(r'x07_[a-z0-9_]+\.cjs', name):
         raise ValueError('one named X07 check required')
     if type(timeout) not in (int, float) or not 0 < timeout <= 300 or not math.isfinite(timeout):
@@ -107,6 +141,8 @@ def run_check(name, output, *, dependencies=None, timeout=90, checks_root=None,
     job, child, threads = None, None, []
     streams = {'stdout': bytearray(), 'stderr': bytearray()}
     exceeded = threading.Event()
+    reader_failed = threading.Event()
+    reader_errors = []
     timed_out = False
     try:
         job = WindowsJob() if sys.platform == 'win32' else None
@@ -114,25 +150,41 @@ def run_check(name, output, *, dependencies=None, timeout=90, checks_root=None,
         child = subprocess.Popen(command, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                  stderr=subprocess.PIPE, start_new_session=job is None, creationflags=flags)
         def consume(label, stream):
-            while True:
-                chunk = stream.read1(4096)
-                if not chunk:
-                    return
-                available = stream_limit - len(streams[label])
-                streams[label].extend(chunk[:available])
-                if len(chunk) > available:
-                    exceeded.set()
-                if on_chunk is not None:
-                    on_chunk(label, chunk)
+            try:
+                while True:
+                    chunk = stream.read1(4096)
+                    if not chunk:
+                        return
+                    available = stream_limit - len(streams[label])
+                    streams[label].extend(chunk[:available])
+                    if len(chunk) > available:
+                        exceeded.set()
+                    if on_chunk is not None:
+                        on_chunk(label, chunk)
+            except BaseException:
+                reader_errors.append(label)
+                reader_failed.set()
         threads = [threading.Thread(target=consume, args=(label, getattr(child, label)), daemon=True) for label in streams]
         for thread in threads:
             thread.start()
         if job is not None:
             job.assign_and_resume(child)
         try:
-            child.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
+            deadline = time.monotonic() + timeout
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise CaptureCancelled('capture cancelled')
+                if reader_failed.is_set():
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                try:
+                    child.wait(timeout=min(.05, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
         finally:
             if job is not None:
                 job.close()
@@ -150,7 +202,7 @@ def run_check(name, output, *, dependencies=None, timeout=90, checks_root=None,
         unchanged = before == after
         report = {'schema': 'leaf.x07.jsx-failure-capsule.v1', 'command': command, 'exit_code': child.returncode,
                   'worker_pid': child.pid,
-                  'timed_out': timed_out, 'diagnostics_complete': not exceeded.is_set(),
+                  'timed_out': timed_out, 'diagnostics_complete': not exceeded.is_set() and not reader_errors,
                   'stdout': bytes(streams['stdout']).decode('utf-8', errors='replace'),
                   'stderr': bytes(streams['stderr']).decode('utf-8', errors='replace'),
                   'owned_processes_settled': True, 'source_unchanged': unchanged,
@@ -169,13 +221,17 @@ def run_check(name, output, *, dependencies=None, timeout=90, checks_root=None,
             report.update(before)
         else:
             report.update(error='SOURCE_CHANGED', source_before=before, source_after=after)
+        if reader_errors:
+            report['reader_errors'] = sorted(reader_errors)
+            if 'error' not in report:
+                report['error'] = 'READER_FAILED'
         serialized = json.dumps(report, sort_keys=True) + '\n'
         if artifact.write(serialized) != len(serialized):
             raise OSError('short capture write')
         artifact.flush()
         artifact.close()
         return report
-    except BaseException:
+    except BaseException as error:
         try:
             artifact.close()
         except OSError:
@@ -183,6 +239,8 @@ def run_check(name, output, *, dependencies=None, timeout=90, checks_root=None,
         current = output.lstat()
         if (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino):
             output.unlink()
+        if isinstance(error, KeyboardInterrupt):
+            raise CaptureCancelled('capture cancelled') from None
         raise
     finally:
         if job is not None:
@@ -214,6 +272,9 @@ def main():
     arguments = parser.parse_args()
     try:
         report = run_check(arguments.check, arguments.out, dependencies=arguments.deps, timeout=arguments.timeout, stream_limit=arguments.stream_bytes)
+    except (CaptureCancelled, KeyboardInterrupt):
+        publish_stdout({'schema': 'leaf.x07.jsx-failure-capsule.v1', 'error': 'CAPTURE_CANCELLED'})
+        return 2
     except (OSError, ValueError, subprocess.SubprocessError):
         publish_stdout({'schema': 'leaf.x07.jsx-failure-capsule.v1', 'error': 'CAPSULE_UNAVAILABLE'})
         return 2

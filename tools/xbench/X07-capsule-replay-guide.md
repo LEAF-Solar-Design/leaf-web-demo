@@ -22,6 +22,10 @@ Each recipe creates a temporary check and a new artifact, checks the actual CLI 
 
 A timeout receipt remains evidence of a timeout. It does not show that the check passed. Endpoint source revalidation detects changed, added, removed or unreadable measured dependencies; it does not claim to detect a hostile edit restored to identical bytes between observations.
 
+Cancellation returns CLI2 with `CAPTURE_CANCELLED` and removes only its owned failed reservation after worker cleanup. Reader failure returns CLI2 with `READER_FAILED`, incomplete diagnostics and settled-resource metadata. Its retained prefix is evidence of failure, never a successful check.
+
+Use `read_capture(path)` from the capsule module to consume current captures. It requires complete newline-terminated JSON, the current schema, settlement metadata and a source binding or labelled source refusal. A producer killed during publication can leave partial bytes. Preserve those bytes and any foreign artifacts; retry into a fresh output path. Do not infer success from a file merely existing, and do not overwrite a partial file during retry. Historical artifacts keep their original bytes and producer-version semantics.
+
 For a retained actual JSX capture, run from the checkout root and supply a new private output path:
 
 ```powershell
