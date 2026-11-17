@@ -1341,6 +1341,103 @@ def test_failed_log_retention_tail_and_total_budget(tmp_path):
                for entry in manifest["files"][8:])
 
 
+@pytest.mark.parametrize("oversized", [False, True])
+def test_failed_log_retention_window_without_marker(tmp_path, monkeypatch, oversized):
+    import hashlib
+    helper = _failed_log_retention_helper()
+    monkeypatch.setattr(helper, "FILE_LIMIT", 4096)
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    # Marker-like text inside a line must not select a failure window.
+    content = b"prefix FAIL: not a marker\n" * (400 if oversized else 4) + b"final summary\n"
+    (logs / "red.log").write_bytes(content)
+    manifest = helper.retain_failed_logs(result, logs, output)
+    copied = (output / "red.log").read_bytes()
+    assert copied == content[-helper.FILE_LIMIT:]
+    entry = manifest["files"][0]
+    assert entry["truncated"] is oversized
+    assert entry["source_sha256"] == hashlib.sha256(content).hexdigest()
+    assert entry["copy_sha256"] == hashlib.sha256(copied).hexdigest()
+
+
+@pytest.mark.parametrize("marker", [
+    b"================ FAILURES ================\n",
+    b"================ ERRORS ================\n",
+    b"FAIL: test_x\n",
+    b"ERROR: test_x\n",
+    b"Traceback (most recent call last):\n",
+])
+def test_failed_log_retention_failure_window(tmp_path, monkeypatch, marker):
+    import hashlib
+    helper = _failed_log_retention_helper()
+    monkeypatch.setattr(helper, "FILE_LIMIT", 4096)
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    content = (b"setup output\n" * 400 + marker
+               + b"Traceback (most recent call last):\nAssertionError: Roles confirmed\n"
+               + b"0.00s call test_x\n" * 3000 + b"1 failed, 3000 passed\n")
+    (logs / "red.log").write_bytes(content)
+    manifest = helper.retain_failed_logs(result, logs, output)
+    copied = (output / "red.log").read_bytes()
+    assert copied.startswith(marker)
+    assert b"AssertionError: Roles confirmed\n" in copied
+    assert b"\n[device CI: middle of log omitted]\n" in copied
+    assert copied.endswith(b"1 failed, 3000 passed\n")
+    assert len(copied) <= helper.FILE_LIMIT
+    assert manifest["files"][0]["truncated"] is True
+    assert manifest["files"][0]["source_sha256"] == hashlib.sha256(content).hexdigest()
+
+
+@pytest.mark.parametrize("marker", [
+    b"================ FAILURES ================\n",
+    b"FAIL: test_x\n",
+    b"Traceback (most recent call last):\n",
+    b"=" * 65536 + b" ERRORS =\n",
+])
+def test_failed_log_retention_marker_crosses_digest_chunk(tmp_path, monkeypatch, marker):
+    helper = _failed_log_retention_helper()
+    monkeypatch.setattr(helper, "FILE_LIMIT", 8192)
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    content = (b"x" * (65536 - 5) + b"\n" + marker + b"AssertionError: boundary\n"
+               + b"0.00s call test_x\n" * 1000 + b"1 failed\n")
+    (logs / "red.log").write_bytes(content)
+    helper.retain_failed_logs(result, logs, output)
+    copied = (output / "red.log").read_bytes()
+    if len(marker) < helper.FILE_LIMIT:
+        assert copied.startswith(marker)
+        assert b"AssertionError: boundary\n" in copied
+    else:
+        # An unbounded banner must still be detected with bounded scanner memory.
+        assert copied.startswith(b"\n[device CI: middle of log omitted]\n")
+    assert copied.endswith(b"1 failed\n")
+    assert len(copied) <= helper.FILE_LIMIT
+
+
+def test_failed_log_retention_window_tail_drops_partial_line(tmp_path, monkeypatch):
+    helper = _failed_log_retention_helper()
+    monkeypatch.setattr(helper, "FILE_LIMIT", 4096)
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    content = (b"setup\n" * 1000 + b"FAIL: test_x\nAssertionError: failure\n"
+               + b"timing row\n" * 1000 + b"credential=" + b"s" * 1500
+               + b"\ncomplete final line\n")
+    (logs / "red.log").write_bytes(content)
+    helper.retain_failed_logs(result, logs, output)
+    copied = (output / "red.log").read_bytes()
+    head, notice, tail = copied.partition(b"\n[device CI: middle of log omitted]\n")
+    assert notice
+    assert head.endswith(b"\n")
+    assert tail == b"complete final line\n"
+    assert len(copied) <= helper.FILE_LIMIT
+
+
+def test_failed_log_retention_window_overlapping_tail(tmp_path, monkeypatch):
+    helper = _failed_log_retention_helper()
+    monkeypatch.setattr(helper, "FILE_LIMIT", 4096)
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    failure = b"FAIL: test_x\nAssertionError: failure\n" + b"timing row\n" * 100 + b"1 failed\n"
+    (logs / "red.log").write_bytes(b"setup\n" * 1000 + failure)
+    helper.retain_failed_logs(result, logs, output)
+    assert (output / "red.log").read_bytes() == failure
+
+
 def test_failed_log_retention_count_cap_and_result_cap(tmp_path):
     helper = _failed_log_retention_helper()
     result, logs, output = _failed_log_retention_inputs(tmp_path, [
