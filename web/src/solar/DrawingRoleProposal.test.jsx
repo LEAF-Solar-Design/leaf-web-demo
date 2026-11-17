@@ -17,6 +17,33 @@ it('names the module block and layer as first choice without a user action', asy
   expect(screen.getByRole('cell', { name: '7' })).toBeTruthy()
 })
 
+it('keeps nearby insertion locations distinct and names their drawing units', async () => {
+  const candidates = [
+    { ...row, block: 'Nearby A', insertion_bounds: [0.001, 0.002, 0.003, 0.004] },
+    { ...row, block: 'Nearby B', insertion_bounds: [0.0011, 0.0021, 0.0031, 0.0041] },
+  ]
+  const data = { ...reply.data.role_discovery, module: { first_choice: candidates[0], candidates, competing: true } }
+  render(<DrawingRoleProposal {...props} projectClient={{ readContext: vi.fn().mockResolvedValue({ ok: true, data: { role_discovery: data } }) }} />)
+  expect(await screen.findByRole('cell', { name: '0.001, 0.002, 0.003, 0.004' })).toBeTruthy()
+  expect(screen.getByRole('cell', { name: '0.0011, 0.0021, 0.0031, 0.0041' })).toBeTruthy()
+  expect(screen.getByRole('columnheader', { name: 'Insertion bounds (drawing units)' })).toBeTruthy()
+})
+
+it('preserves finite coordinate values across supported magnitudes', async () => {
+  const candidates = [
+    { ...row, block: 'Integer', insertion_bounds: [-10, 0, 10, 20] },
+    { ...row, block: 'Small', insertion_bounds: [-1e-12, -1e-13, 1e-12, 1e-11] },
+    { ...row, block: 'Large', insertion_bounds: [1e21, 2e21, 3e21, 4e21] },
+  ]
+  const data = { ...reply.data.role_discovery, module: { first_choice: candidates[0], candidates, competing: true } }
+  render(<DrawingRoleProposal {...props} projectClient={{ readContext: vi.fn().mockResolvedValue({ ok: true, data: { role_discovery: data } }) }} />)
+  await screen.findByRole('table', { name: 'Module sets' })
+  for (const candidate of candidates) {
+    const cell = screen.getByRole('cell', { name: candidate.insertion_bounds.map(String).join(', ') })
+    expect(cell.textContent.split(', ').map(Number)).toEqual(candidate.insertion_bounds)
+  }
+})
+
 it('does not let a retired project response populate the next project', async () => {
   let resolve
   const old = { readContext: () => new Promise(done => { resolve = done }) }
