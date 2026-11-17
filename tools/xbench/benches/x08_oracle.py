@@ -109,6 +109,28 @@ def _sample_edges(edges, limit):
     return [edges[i * (len(edges) - 1) // (limit - 1)] for i in range(limit)]
 
 
+def guarded_window_rect(modules, rect, expected_handles):
+    """Give rounded native edges room without changing the independent set.
+
+    The native CSV records six decimal places. Drawing geometry can retain
+    more precision, so an exactly coincident drag edge is not a robust input.
+    Only native bounds determine this margin; rendered selections never do.
+    """
+    rows = _modules(modules)
+    rect = _rect(rect, positive=True)
+    expected = sorted(expected_handles)
+    if contained_handles(rows, rect) != expected:
+        raise ValueError("window does not match independent handles")
+    margin = min(rect[2] - rect[0], rect[3] - rect[1]) * 0.02
+    for _ in range(24):
+        candidate = [rect[0] - margin, rect[1] - margin,
+                     rect[2] + margin, rect[3] + margin]
+        if all(isfinite(v) for v in candidate) and contained_handles(rows, candidate) == expected:
+            return candidate
+        margin /= 2
+    return rect
+
+
 def choose_window(modules, target=500, tolerance=10):
     """Find an exact full-bounds window or conservatively refuse the layout.
 
@@ -152,5 +174,5 @@ def choose_window(modules, target=500, tolerance=10):
                     rect = [bottom, xlow, top, right]
                 handles = contained_handles(rows, rect)
                 if lower <= len(handles) <= upper:
-                    return {"rect": rect, "expected_handles": handles}
+                    return {"rect": guarded_window_rect(rows, rect, handles), "expected_handles": handles}
     raise ValueError("bounded search found no suitable full-bounds window")
