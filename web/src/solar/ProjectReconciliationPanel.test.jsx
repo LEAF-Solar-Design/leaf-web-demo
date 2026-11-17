@@ -125,6 +125,106 @@ function canonicalReports(h, file = { response: totalsResponse() }) {
 }
 const reportsLoaded = () => screen.findByText(/No saved engineering totals|Saved engineering totals loaded/)
 
+function sharedPanels() {
+  const listeners = new Set()
+  const h = { client: { getSnapshot: () => ({ binding, authorityKey: 'a' }),
+    readContext: vi.fn(async () => response()),
+    subscribe: vi.fn(listener => { listeners.add(listener); return () => listeners.delete(listener) }) } }
+  const file = canonicalReports(h)
+  const props = { solarBinding: binding, authorityKey: 'a', projectClient: h.client, isCurrent: () => true }
+  const panel = name => {
+    const view = render(<section aria-label={name}><ProjectReconciliationPanel {...props} /></section>)
+    const query = within(screen.getByRole('region', { name }))
+    return { view, query, click: label => fireEvent.click(query.getByRole('button', { name: label })),
+      fill: values => query.getAllByRole('textbox').forEach((input, i) => fireEvent.change(input, { target: { value: values[i] } })),
+      values: () => query.getAllByRole('textbox').map(input => input.value),
+      loaded: () => query.findByText(/No saved engineering totals|Saved engineering totals loaded/) }
+  }
+  return { h, file, listeners, a: panel('Client A'), b: panel('Client B') }
+}
+
+it('keeps independent CAS baselines and losing drafts when two panels share one client', async () => {
+  const { h, file, a, b } = sharedPanels()
+  a.click('Read saved design'); b.click('Read saved design'); await a.loaded(); await b.loaded()
+  const av = ['1', '0', '1', '1', '0.4'], bv = ['2', '0', '1', '1', '0.5']
+  a.fill(av); b.fill(bv); a.click('Save engineering totals'); await a.query.findByText('Engineering totals saved.')
+  const first = structuredClone(file.response)
+  b.click('Save engineering totals'); await b.query.findByText(/Engineering totals changed/)
+  expect(file.response).toEqual(first); expect(a.values()).toEqual(av); expect(b.values()).toEqual(bv)
+  b.click('Reload saved engineering totals'); await b.loaded(); expect(b.values()).toEqual(av)
+  b.fill(bv); b.click('Save engineering totals'); await b.query.findByText('Engineering totals saved.')
+  const second = structuredClone(file.response)
+  a.click('Save engineering totals'); await a.query.findByText(/Engineering totals changed/)
+  expect(file.response).toEqual(second); expect(a.values()).toEqual(av); expect(b.values()).toEqual(bv)
+  expect(h.client.saveEngineeringTotals.mock.calls.map(([x]) => x.expectedRevision)).toEqual([0, 0, 1, 1])
+})
+
+it.each(['save', 'load'])('unmounting shared-client panel during %s leaves its survivor request and subscription intact', async operation => {
+  const { h, listeners, a, b } = sharedPanels()
+  a.click('Read saved design'); b.click('Read saved design'); await a.loaded(); await b.loaded()
+  let settleA, settleB
+  const method = operation === 'save' ? h.client.saveEngineeringTotals : h.client.loadEngineeringTotals
+  method.mockReturnValueOnce(new Promise(resolve => { settleA = resolve }))
+  a.fill(reportValues); a.click(operation === 'save' ? 'Save engineering totals' : 'Reload saved engineering totals')
+  const old = method.mock.calls.at(-1)[0]
+  const survivor = ['2', '0', '1', '1', '0.5']; b.fill(survivor)
+  h.client.saveEngineeringTotals.mockReturnValueOnce(new Promise(resolve => { settleB = resolve }))
+  b.click('Save engineering totals'); const active = h.client.saveEngineeringTotals.mock.calls.at(-1)[0]
+  expect(listeners.size).toBe(2); a.view.unmount()
+  expect(old.signal.aborted).toBe(true); expect(active.signal.aborted).toBe(false); expect(listeners.size).toBe(1)
+  await act(async () => settleA(totalsResponse(1, reportValues)))
+  expect(b.values()).toEqual(survivor); expect(b.query.getByText('Saving engineering totals.')).toBeTruthy()
+  await act(async () => settleB(totalsResponse(1, survivor)))
+  expect(b.query.getByText('Engineering totals saved.')).toBeTruthy()
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(2, survivor))
+  b.click('Save engineering totals'); await b.query.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0].expectedRevision).toBe(1)
+  expect(listeners.size).toBe(1)
+})
+
+it.each([0, 1, 2, 3, 4])('rejects substituted acknowledged report value %i despite valid receipt metadata', async index => {
+  const h = fixture(); canonicalReports(h); read(); await reportsLoaded(); fill(reportValues)
+  const altered = [...reportValues]; altered[index] = index === 4 ? '0.5' : '2'
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(1, altered))
+  saveTotals(); await screen.findByText(/Engineering totals could not be saved/)
+  expect(screen.queryByText('Engineering totals saved.')).toBeNull(); expect(inputValues()).toEqual(reportValues)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(1, reportValues))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls.map(([x]) => x.expectedRevision)).toEqual([0, 0])
+})
+
+it('isolates accepted Save receipt aliases from drafts, CSV and the next CAS baseline', async () => {
+  const h = fixture(); canonicalReports(h); read(); await reportsLoaded(); fill(reportValues)
+  const receipt = totalsResponse(1, reportValues)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(receipt)
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  receipt.data.record.values.fill('9'); receipt.data.record.binding.project_id = '99999999-9999-4999-8999-999999999999'
+  receipt.data.revision = 99; receipt.data.canWrite = false
+  expect(inputValues()).toEqual(reportValues)
+  const createObjectURL = vi.fn(() => 'blob:save-alias')
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(await blobText(createObjectURL.mock.calls[0][0])).toContain('"panels","1","01","0","PASS"')
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(2, reportValues))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: 1, drafts: reportValues })
+})
+
+it.each([0, 1, 2, 3, 4])('retains conservative dirty feedback after pending field %i is edited and restored exactly', async index => {
+  const h = fixture(); canonicalReports(h); read(); await reportsLoaded(); fill(reportValues)
+  let settle; h.client.saveEngineeringTotals.mockReturnValueOnce(new Promise(resolve => { settle = resolve }))
+  saveTotals(); const input = screen.getAllByRole('textbox')[index]
+  fireEvent.change(input, { target: { value: index === 4 ? '0.5' : '2' } })
+  fireEvent.change(input, { target: { value: reportValues[index] } })
+  await act(async () => settle(totalsResponse(1, reportValues)))
+  expect(inputValues()).toEqual(reportValues)
+  expect(screen.getByText('Submitted engineering totals saved. Newer edits remain unsaved.')).toBeTruthy()
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(2, reportValues))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: 1, drafts: reportValues })
+})
+
 it('contains a synchronous Reload throw, retains dirty values and releases its guard', async () => {
   const h = fixture(); canonicalReports(h, { response: totalsResponse(4, reportValues) })
   read(); await reportsLoaded()

@@ -932,3 +932,32 @@ timeout, traffic, exact source hashes and cleanup. `late-reload-newer-retry.png`
 shows both panels after the stale response. Stop on any stale draft, wrong CAS
 revision, row mismatch or browser error. The helper closes its browser, context,
 server and thread in `finally`. No video, staging or PostgreSQL claim is made.
+
+## Shared-client teardown replay
+
+Parent: X05 report persistence. Retained executable support fixture:
+`D:/agent-data/leaf-research/studio-xbench-2026-11/synthetic-tests/x05-shared-client-_b4l0h8b/replay.py`.
+Run with the same local React/esbuild and Python Playwright setup above. Two
+actual panels use one actual persistence client, one synthetic file API and
+mocked saved-design reads. The 1920 by 2200 forced-colors viewport fits the
+surviving panel and all five rows. This is offline evidence, without video.
+
+1. Read saved design in both panels. Require two subscriptions. Enter A's
+   Panels `001` and B's `002`, with `0,01,1,0.4` in their other fields.
+2. Hold A's next Reload GET response after capture. Start that Reload. Hold
+   B's next Save response, then Save B from revision zero.
+3. Unmount only A. Require A's signal aborted, B's Save signal still active
+   and one remaining subscription. Deliver A's old GET. B must keep its dirty
+   `002` and its pending Save cue.
+4. Deliver B's Save response. Require the saved cue. Reload B explicitly and
+   download its CSV. Require all five rows to equal the visible table.
+5. Change B's Panels to `003`, Save, Reload and download again. Captured PUTs
+   must have expected revisions `[0,1]`. Both exports equal ten DOM rows.
+6. Capture `shared-client-survivor.png`, then unmount B. Require zero
+   subscriptions. The helper closes context, browser, server and thread in
+   `finally`; `proof.json` records cleanup, source hashes and exact traffic.
+
+Stop on another panel's abort, stale drafts, changed CAS baseline, retained
+subscription, export disagreement or uncaught error. No staging or database
+claim is made. The separate focused tests also cover losing shared-client
+Save drafts, per-field receipt substitution and edit/revert during Save.
