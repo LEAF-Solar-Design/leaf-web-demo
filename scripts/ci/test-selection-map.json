@@ -196,6 +196,7 @@
     "server-app-conversation-routes",
     "server-appbundle-activity-spec",
     "server-x04-intake-selection",
+    "server-upload-extraction-concurrency",
     "server-approval-consume",
     "server-approval-policy",
     "server-aps-callback-adapter",
