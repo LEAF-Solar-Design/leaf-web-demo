@@ -837,7 +837,8 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
         try:
             xbench_solver_fault.validate(fault_mode)
             if (not deps.auth_live() or session_id is not None or turn_id is not None
-                    or req.tool != "solar-solve-proposal"
+                    or not capability_catalog.is_cloud_proposal(
+                        deps.find_tool(req.tool, str(tenant_id)) or {})
                     or not isinstance(x_org_id, str) or not isinstance(x_project_id, str)):
                 raise GraphValidationError("XBENCH_SOLVER_FAULT_SCOPE_REQUIRED")
         except GraphValidationError as exc:
