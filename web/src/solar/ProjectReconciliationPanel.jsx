@@ -81,7 +81,7 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
     <button type="button" disabled={!live || busy || pending} onClick={read}>Read saved design</button>
     <p aria-live="polite">{!live ? 'Reconciliation unavailable: the selected drawing scope is stale or unavailable.'
       : saved?.status || 'Read the saved design to compare totals.'}</p>
-    <table><caption>Saved Studio vs engineering report/BOM totals</caption>
+    <table className="ops-table"><caption>Saved Studio vs engineering report/BOM totals</caption>
       <thead><tr><th scope="col">Metric</th><th scope="col">Studio</th><th scope="col">Engineering report/BOM</th>
         <th scope="col">Delta</th><th scope="col">Verdict</th></tr></thead>
       <tbody>{rows.map((row, index) => <tr key={row.metric}>
@@ -96,7 +96,7 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
             setDraft({ scope, values })
           }} /></td>
         <td>{row.delta || 'Unavailable'}</td><td>{row.verdict === 'UNREADABLE' ? 'Unavailable' : row.verdict}
-          {row.reason && <small> — {row.reason}</small>}</td>
+          {row.reason && <small>: {row.reason}</small>}</td>
       </tr>)}</tbody>
     </table>
     <p>Delta is Studio minus the supplied report/BOM value.</p>
