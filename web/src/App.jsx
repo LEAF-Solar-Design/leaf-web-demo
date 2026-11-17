@@ -1,5 +1,6 @@
 import './structural.css'
 import InviteAccept from './invites/InviteAccept.jsx'
+import { projectEngineObservationBinding } from './lib/projectDrawingObservation.js'
 import { useSolarGraphOverlay, SOLAR_OVERLAY_REASONS } from './solar/useSolarGraphOverlay.js'
 import { solarOverlayCanvasIntake } from './solar/solarGraphOverlay.js'
 import './site/studioShell.css'
@@ -2500,6 +2501,12 @@ export default function App() {
     } : null,
   })
   const projectEngineIntake = projectEditorEngine?.scopeKey === projectEditorKey ? projectEditorEngine.intake : null
+  const engineObservationBinding = useMemo(() => projectEngineObservationBinding({
+    projectMode, scopeKey: projectEditorEngine?.scopeKey, currentScopeKey: projectEditorKey,
+    engineIntake: projectEngineIntake, engineDocument, engineDirty, canonicalVersionId,
+    drawingKey: projectDrawing.drawingKey,
+  }), [projectMode, projectEditorEngine?.scopeKey, projectEditorKey, projectEngineIntake,
+    engineDocument, engineDirty, canonicalVersionId, projectDrawing.drawingKey])
   const drawingIntake = projectMode ? projectEngineIntake || projectDrawing.intake : activeIntake || shown
   const projectDrawingName = projectDrawing.intake?.dwg || projectSolar.scope.binding?.drawing_id || ''
   const visibleLayers = projectMode ? projectSolarRuntime.visibleLayers : standaloneVisibleLayers
@@ -6508,6 +6515,7 @@ export default function App() {
                   ref={projectMode ? viewerRef : intake ? viewerRef : solarStarterViewerRef}
                   intake={projectMode ? projectDrawing.intake : intake ?? SOLAR_STARTER_EMPTY_INTAKE}
                   drawingKey={projectMode ? projectDrawing.drawingKey : consoleDrawingKey}
+                  engineObservationBinding={engineObservationBinding}
                   solarOverlay={projectMode ? projectDrawing.overlay : solarOverlay}
                   onIntakeOverride={onViewerIntakeOverride}
                   onSceneReady={onDrawingSceneReady}
