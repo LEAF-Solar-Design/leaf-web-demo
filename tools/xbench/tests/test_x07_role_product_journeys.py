@@ -15,6 +15,10 @@ ROOT = Path(__file__).resolve().parents[3]
     'x07_profile_review_client_aba_dom.cjs',
     'x07_role_diff_adapter_dom.cjs',
     '../x07_profile_diff_render_perf.cjs',
+    'x07_selective_restore_keyboard_dom.cjs',
+    'x07_selective_restore_races_dom.cjs',
+    'x07_selective_restore_adapter_dom.cjs',
+    '../x07_selective_restore_soak.cjs',
 ])
 def test_offline_role_product_fixture(name):
     dependencies = ROOT / 'web/node_modules'
@@ -25,7 +29,7 @@ def test_offline_role_product_fixture(name):
         pytest.skip('X07 actual JSX dependency set unavailable on this host; Node-prepared replay required')
     script = Path(__file__).parent / name
     args = [node, str(script), '--deps', str(dependencies)]
-    if 'perf' in name:
+    if 'perf' in name or 'soak' in name:
         args.append('--smoke')
     result = subprocess.run(args, cwd=ROOT, capture_output=True, text=True, encoding='utf-8', timeout=45)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -35,5 +39,10 @@ def test_offline_role_product_fixture(name):
         assert report['cleanup'] is True
         assert len(report['timings']) == 5
         assert all(row['max_nodes'] <= 60 for row in report['timings'])
+    elif 'soak' in name:
+        report = json.loads(result.stdout)
+        assert report['schema'] == 'leaf.x07.selective-restore-soak.v1'
+        assert report['cycles'] == 16 and report['writes'] == 0
+        assert report['max_nodes'] <= 180 and report['cleanup'] is True
     else:
         assert 'PASS:' in result.stdout

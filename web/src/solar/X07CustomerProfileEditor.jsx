@@ -8,6 +8,10 @@ const valid = (record, customer) => record?.customer_key === customer && typeof 
   && Object.entries(record.roles).every(([role, value]) => !['module', 'roof', 'obstruction'].includes(role)
     || (object(value) && typeof value.layer === 'string' && (value.block === undefined || typeof value.block === 'string')))
 const clone = value => JSON.parse(JSON.stringify(value))
+const roleNames = ['module', 'roof', 'obstruction']
+const roleDiffers = (before, after, role) => Boolean(before[role]) !== Boolean(after[role])
+  || ['block', 'layer'].some(field => Object.hasOwn(before[role] || {}, field) !== Object.hasOwn(after[role] || {}, field)
+    || before[role]?.[field] !== after[role]?.[field])
 
 export default function X07CustomerProfileEditor(props) {
   return <LeaveBoundary {...props} />
@@ -53,11 +57,13 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, pinn
   const focusedError = useRef(null)
   useEffect(() => {
     if (!error) focusedError.current = null
-    if (busy) return
     if (focusRole.current) {
       form.current?.querySelector(`[data-role-layer="${focusRole.current}"]`)?.focus()
       focusRole.current = null
-    } else if (error && focusedError.current !== error) {
+      return
+    }
+    if (busy) return
+    if (error && focusedError.current !== error) {
       focusedError.current = error
       if (!profile) retryButton.current?.focus()
       else if (stale) reloadButton.current?.focus()
@@ -141,6 +147,18 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, pinn
   const edit = (role, field, value) => { draftRevision.current++; onDirtyChange?.(true);setDraft(previous => ({ ...previous, [role]: { ...previous[role], [field]: value } })); setMessage(null) }
   const addRole = role => { draftRevision.current++; onDirtyChange?.(true);focusRole.current = role; setDraft(previous => ({ ...previous, [role]: { layer: '' } })); setMessage(null); setError(null) }
   const removeRole = role => { draftRevision.current++; onDirtyChange?.(true);focusRole.current = 'module'; setDraft(previous => { const next = { ...previous }; delete next[role]; return next }); setMessage(null); setError(null) }
+  const restoreRole = role => {
+    if (!profile || !draft || !roleNames.includes(role)) return
+    const next = { ...draft }
+    if (Object.hasOwn(profile.roles, role)) next[role] = clone(profile.roles[role])
+    else delete next[role]
+    draftRevision.current++
+    focusRole.current = next[role] ? role : 'module'
+    setDraft(next); setError(null)
+    onDirtyChange?.(saving.current || roleNames.some(name => roleDiffers(profile.roles, next, name)))
+    setMessage(`Loaded ${role} value restored in draft. Save to keep changes.`)
+  }
+  const changedRoles = profile && draft ? roleNames.filter(role => roleDiffers(profile.roles, draft, role)) : []
   const pin = profile && applicationRecord?.customer_key === customerKey && applicationRecord.profile_id === profile.profile_id
     && Number.isSafeInteger(applicationRecord.version) && applicationRecord.version > 0 ? applicationRecord : null
   return <section aria-label="Customer role profile">
@@ -155,6 +173,9 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, pinn
       onCompositionEnd={() => { composing.current = false }}
       onKeyDown={event => { if (event.key === 'Enter' && (composing.current || event.nativeEvent.isComposing || event.keyCode === 229)) event.preventDefault() }}>
       <X07ProfileRoleDiff beforeRoles={profile.roles} afterRoles={draft} label={`Draft changes from loaded version ${profile.version}`} />
+      {changedRoles.map(role => <button key={role} type="button" onClick={() => restoreRole(role)}>
+        Restore loaded {role} value
+      </button>)}
       <fieldset><legend>Drawing roles</legend>
         {Object.keys(draft).filter(role => ['module', 'roof', 'obstruction'].includes(role)).map(role => {
           const label = role[0].toUpperCase() + role.slice(1)

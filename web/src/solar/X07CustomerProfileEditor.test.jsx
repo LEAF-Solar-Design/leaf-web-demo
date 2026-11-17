@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import X07CustomerProfileEditor from './X07CustomerProfileEditor.jsx'
 afterEach(cleanup)
@@ -27,4 +27,43 @@ it('clears the previous customer and never displays its pinned record', async ()
   await screen.findByText('Profile id: profile-b')
   expect(screen.queryByText('Profile id: profile-a')).toBeNull()
   expect(screen.queryByText(/Project is pinned/)).toBeNull()
+})
+
+it('restores changed, removed and draft-only roles independently without an implicit save', async () => {
+  const loaded = { ...record('a'), roles: { ...record('a').roles, roof: { layer: 'ROOF' } } }
+  const save = vi.fn().mockImplementation(async (_customer, roles) => ({ ...loaded, version: 2, roles }))
+  render(<X07CustomerProfileEditor customerKey="a" drawingKey="a:v1" loadProfile={async () => loaded} saveProfile={save} />)
+  fireEvent.change(await screen.findByLabelText('Module layer'), { target: { value: 'EDITED' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Remove roof role' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Add obstruction role' }))
+  fireEvent.change(screen.getByLabelText('Obstruction layer'), { target: { value: 'NEW' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Restore loaded roof value' }))
+  expect(screen.getByLabelText('Roof layer')).toHaveValue('ROOF')
+  expect(document.activeElement).toBe(screen.getByLabelText('Roof layer'))
+  expect(screen.getByLabelText('Module layer')).toHaveValue('EDITED')
+  expect(screen.getByLabelText('Obstruction layer')).toHaveValue('NEW')
+  fireEvent.click(screen.getByRole('button', { name: 'Restore loaded obstruction value' }))
+  expect(screen.queryByLabelText('Obstruction layer')).toBeNull()
+  expect(document.activeElement).toBe(screen.getByLabelText('Module layer'))
+  expect(save).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Save profile' }))
+  await screen.findByText('Profile version: 2')
+  expect(save.mock.calls[0][1]).toEqual({ module: { block: 'Panel', layer: 'EDITED' }, roof: { layer: 'ROOF' } })
+})
+
+it('keeps a selective restore made during a pending save after its earlier acknowledgment', async () => {
+  let finish
+  const save = vi.fn((_customer, roles) => new Promise(resolve => { finish = () => resolve({ ...record('a', 2), roles }) }))
+  render(<X07CustomerProfileEditor customerKey="a" drawingKey="a:v1" loadProfile={async () => record('a')} saveProfile={save} />)
+  fireEvent.change(await screen.findByLabelText('Module layer'), { target: { value: 'SUBMITTED' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Save profile' }))
+  await act(async () => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Restore loaded module value' }))
+  expect(screen.getByLabelText('Module layer')).toHaveValue('MODULES')
+  expect(document.activeElement).toBe(screen.getByLabelText('Module layer'))
+  await act(async () => finish())
+  expect(await screen.findByText('Profile saved. Newer edits are unsaved.')).toBeTruthy()
+  expect(screen.getByLabelText('Module layer')).toHaveValue('MODULES')
+  expect(screen.getByRole('region', { name: 'Draft changes from loaded version 2' })).toHaveTextContent('1 changed.')
+  expect(save).toHaveBeenCalledTimes(1)
 })
