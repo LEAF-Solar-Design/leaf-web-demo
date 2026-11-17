@@ -140,6 +140,7 @@ class PutProjectFileBody(BaseModel):
     path: str = Field(min_length=1, max_length=512)
     media_type: str = Field(min_length=3, max_length=200)
     content: str = Field(max_length=1_048_576)
+    expected_revision: Optional[int] = Field(default=None, strict=True, ge=0, le=2147483646)
 
 
 class CloneProjectBody(BaseModel):
@@ -1078,6 +1079,18 @@ def revoke_project_member(
     ))
 
 
+@router.get("/projects/{project_id}/files/by-path")
+def get_project_file_by_path(
+    project_id: uuid.UUID,
+    path: str = Query(min_length=1, max_length=512),
+    actor: _LifecycleActor = Depends(_get_lifecycle_actor),
+):
+    result = _lifecycle_response(lambda: project_lifecycle.get_project_file_by_path(
+        actor.org_id, project_id, actor.binding_id, path=path,
+    ))
+    return JSONResponse(result, headers={"Cache-Control": "private, no-store"})
+
+
 @router.put("/projects/{project_id}/files")
 def put_project_file(
     project_id: uuid.UUID,
@@ -1088,7 +1101,7 @@ def put_project_file(
     return _lifecycle_response(lambda: project_lifecycle.put_project_file(
         actor.org_id, project_id, actor.binding_id, path=body.path,
         media_type=body.media_type, content=body.content,
-        idempotency_key=idempotency_key,
+        idempotency_key=idempotency_key, expected_revision=body.expected_revision,
     ))
 
 

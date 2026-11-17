@@ -7,6 +7,7 @@ import tempfile
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import jwt
 import pytest
@@ -471,6 +472,119 @@ def test_concurrent_blank_creation_mints_one_project_and_replays_one_receipt(mak
 
     assert first["project"]["project_id"] == second["project"]["project_id"]
     assert sorted([first["replayed"], second["replayed"]]) == [False, True]
+
+
+@pytest.mark.parametrize("revision", [True, False, 1.0, 0.5, -1, 2147483647, "1"])
+def test_file_service_rejects_non_strict_revision(revision):
+    with pytest.raises(ValueError, match="expected_revision"):
+        project_lifecycle.put_project_file(
+            uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), path="report.json",
+            media_type="application/json", content="{}", idempotency_key="invalid",
+            expected_revision=revision,
+        )
+
+
+def test_concurrent_file_cas_updates_once(make_org):
+    org = make_org("Report CAS concurrency")
+    owner = _binding(org.org_id, f"report-cas-{uuid.uuid4()}", "owner")
+    created = project_lifecycle.create_blank_project(
+        org.org_id, owner.binding_id, name="Concurrent reports", idempotency_key="create",
+    )
+    project_id = uuid.UUID(created["project"]["project_id"])
+    first = project_lifecycle.put_project_file(
+        org.org_id, project_id, owner.binding_id, path="reports/manual.json",
+        media_type="application/json", content="initial", idempotency_key="initial",
+        expected_revision=0,
+    )
+    barrier = Barrier(2)
+
+    def update(index):
+        barrier.wait(timeout=10)
+        try:
+            return project_lifecycle.put_project_file(
+                org.org_id, project_id, owner.binding_id, path="reports/manual.json",
+                media_type="application/json", content=str(index),
+                idempotency_key=f"writer-{index}",
+                expected_revision=first["file"]["revision"],
+            )
+        except project_lifecycle.LifecycleConflict as exc:
+            return str(exc)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(update, range(2)))
+    winners = [result for result in results if isinstance(result, dict)]
+    assert len(winners) == 1, results
+    assert results.count("project_file_revision_conflict") == 1
+    read = project_lifecycle.get_project_file_by_path(
+        org.org_id, project_id, owner.binding_id, path="reports/manual.json",
+    )
+    assert read["file"]["revision"] == first["file"]["revision"] + 1
+    assert read["file"]["content_sha256"] == winners[0]["file"]["content_sha256"]
+    assert read["file"]["content"] in {"0", "1"}
+
+
+def test_file_by_path_live_tenant_and_membership_guards(client, make_org, live_auth):
+    org = make_org("Scoped report reads")
+    other = make_org("Foreign report reads")
+    subjects = {role: f"report-{role}-{uuid.uuid4()}" for role in ("owner", "reader", "outsider", "foreign")}
+    owner = _binding(org.org_id, subjects["owner"], "owner")
+    reader = _binding(org.org_id, subjects["reader"], "read_only")
+    outsider = _binding(org.org_id, subjects["outsider"], "owner")
+    _binding(other.org_id, subjects["foreign"], "owner")
+    created = project_lifecycle.create_blank_project(
+        org.org_id, owner.binding_id, name="Scoped reports", idempotency_key="create",
+    )
+    project_id = uuid.UUID(created["project"]["project_id"])
+    invited = project_lifecycle.invite_project_member(
+        org.org_id, project_id, owner.binding_id, member_binding_id=reader.binding_id,
+        role="read_only", idempotency_key="invite",
+    )
+    for path, content in (("reports/manual.json", "target"), ("reports/private.json", "unrelated")):
+        project_lifecycle.put_project_file(
+            org.org_id, project_id, owner.binding_id, path=path,
+            media_type="application/json", content=content, idempotency_key=path,
+        )
+    url = f"/api/projects/{project_id}/files/by-path"
+    for role, can_write in (("owner", True), ("reader", False)):
+        response = client.get(url, params={"path": "reports/manual.json"}, headers=_bearer(org.org_id, subjects[role]))
+        assert response.status_code == 200, response.text
+        assert set(response.json()) == {"organization_id", "project_id", "can_write", "file"}
+        assert response.json()["can_write"] is can_write
+        assert response.json()["file"]["content"] == "target"
+        assert "unrelated" not in response.text
+    for tenant, subject, status in (
+        (org.org_id, subjects["outsider"], 403),
+        (other.org_id, subjects["foreign"], 404),
+    ):
+        for path in ("reports/manual.json", "absent.json"):
+            response = client.get(url, params={"path": path}, headers=_bearer(tenant, subject))
+            assert response.status_code == status, response.text
+    missing_project = client.get(
+        f"/api/projects/{uuid.uuid4()}/files/by-path", params={"path": "reports/manual.json"},
+        headers=_bearer(org.org_id, subjects["owner"]),
+    )
+    assert missing_project.status_code == 404
+    for path in ("../secret", "/absolute", "a/./b", "folder\\file"):
+        response = client.get(url, params={"path": path}, headers=_bearer(org.org_id, subjects["owner"]))
+        assert response.status_code == 422, response.text
+    denied = client.put(
+        f"/api/projects/{project_id}/files",
+        json={"path": "reports/manual.json", "media_type": "application/json", "content": "changed", "expected_revision": 1},
+        headers=_bearer(org.org_id, subjects["reader"], "denied"),
+    )
+    assert denied.status_code == 403, denied.text
+    with pytest.raises(project_lifecycle.LifecycleForbidden):
+        project_lifecycle.get_project_file_by_path(
+            org.org_id, project_id, outsider.binding_id, path="reports/manual.json",
+        )
+    project_lifecycle.revoke_project_member(
+        org.org_id, project_id, owner.binding_id,
+        membership_id=uuid.UUID(invited["member"]["membership_id"]), idempotency_key="revoke",
+    )
+    revoked = client.get(
+        url, params={"path": "reports/manual.json"}, headers=_bearer(org.org_id, subjects["reader"]),
+    )
+    assert revoked.status_code == 403, revoked.text
 
 
 def test_lifecycle_receipts_are_sanitized_and_database_immutable(make_org):
