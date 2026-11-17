@@ -1016,3 +1016,31 @@ reads are mocked. The 1920 by 2200 forced-colors viewport fits both full panels.
 Stop on an implicit GET, inherited draft, wrong CAS revision, row mismatch or
 uncaught error. This is offline browser evidence, without staging or PostgreSQL
 acceptance. No video or private engineering inputs are used.
+
+## Panel-local accessible-name and help replay
+
+Parent: X05 multi-panel reconciliation. Executed support fixture:
+`D:/agent-data/leaf-research/studio-xbench-2026-11/synthetic-tests/x05-label-isolation-d7cpi9g5/replay.py`.
+Run with the same local React/esbuild and Python Playwright setup above. Two
+actual panels share one actual persistence client. Saved-design reads and the
+file API are mocked. The 1920 by 2200 forced-colors viewport fits both panels.
+
+1. Read saved design in both panels. Fill A with `001,0,01,1,0.4` and B with
+   `002,0,01,1,0.400`. Change A's Panels and B's kW DC to `bad`.
+2. Require both fields marked invalid and both CSV controls disabled. Resolve
+   each input by its accessible name within its panel. Require every input ID
+   unique in the document and every described help ID to resolve inside that
+   same panel. Capture `panel-local-invalid-help.png`.
+3. Repair only A's Panels to `001`. Require A's CSV enabled, while B's invalid
+   DC text and disabled CSV remain unchanged. Download A's actual CSV and
+   compare all five rows with its DOM table.
+4. Repair B's DC to `0.400`. Download B's actual CSV and compare all five rows.
+   Two exports must equal ten DOM rows, preserving each report's exact lexemes.
+   Capture `panel-local-repaired-csv.png`. No PUT may occur in this replay.
+5. Unmount both panels and require zero subscriptions. Browser, context, server
+   and thread close in `finally`; `proof.json` records source hashes, assertions,
+   traffic and cleanup. The executable and settled `REPLAY.md` remain beside it.
+
+Stop on duplicate IDs, a cross-panel help reference, an enabled export for an
+invalid report, a sibling repair or a CSV mismatch. This is offline evidence,
+without a staging or PostgreSQL claim. No video or customer data is used.

@@ -16,15 +16,18 @@ const response = () => ({ ok: true, data: { context: { ...binding }, intake: {
     inverters: [{ id: id('inverter'), equipment_type: 'string_inverter' }],
   },
 } } })
-function fixture({ strict = false, subscribe } = {}) {
+function fixture({ strict = false, subscribe, parentSubmit } = {}) {
   const h = { snapshot: { binding, authorityKey: 'a' }, current: true, listeners: new Set() }
   h.client = { readContext: vi.fn(async () => response()), getSnapshot: () => h.snapshot,
     subscribe: (listener) => { h.listeners.add(listener); return () => h.listeners.delete(listener) },
     uploadSolarEdgePdf: vi.fn(), submitRun: vi.fn() }
   if (subscribe) h.client.subscribe = subscribe
   h.props = { solarBinding: binding, authorityKey: 'a', projectClient: h.client, isCurrent: () => h.current }
-  const element = () => strict ? <React.StrictMode><ProjectReconciliationPanel {...h.props} /></React.StrictMode>
-    : <ProjectReconciliationPanel {...h.props} />
+  const element = () => {
+    const panel = strict ? <React.StrictMode><ProjectReconciliationPanel {...h.props} /></React.StrictMode>
+      : <ProjectReconciliationPanel {...h.props} />
+    return parentSubmit ? <form onSubmit={event => { event.preventDefault(); parentSubmit() }}>{panel}</form> : panel
+  }
   h.view = render(element())
   h.update = (props) => { h.props = { ...h.props, ...props }; h.view.rerender(element()) }
   h.emit = () => act(() => { for (const listener of h.listeners) listener() })
@@ -144,6 +147,97 @@ function sharedPanels({ late = false } = {}) {
   }
   return { h, file, listeners, mount: panel, a: panel('Client A'), b: late ? null : panel('Client B') }
 }
+
+it('keeps input names, IDs and help links local after a sibling unmount and remount', async () => {
+  const { a, b, mount } = sharedPanels()
+  const verify = panels => {
+    const ids = [...document.querySelectorAll('[id]')].map(node => node.id)
+    expect(new Set(ids).size).toBe(ids.length)
+    for (const panel of panels) for (const metric of ['Panels', 'Optimizers', 'Inverters', 'Strings', 'kW DC']) {
+      const input = panel.query.getByRole('textbox', { name: `${metric} engineering report/BOM` })
+      expect(document.getElementById(input.id)).toBe(input)
+      for (const id of input.getAttribute('aria-describedby').split(' ')) {
+        const help = document.getElementById(id)
+        expect(help).not.toBeNull(); expect(input.closest('section').contains(help)).toBe(true)
+        expect(help.textContent).toMatch(/whole number|nonnegative decimal|optional/)
+      }
+    }
+  }
+  a.click('Read saved design'); b.click('Read saved design'); await a.loaded(); await b.loaded()
+  a.fill(['bad', '0', '1', '1', '0.4']); b.fill(['1', '0', '1', '1', 'bad'])
+  verify([a, b]); const survivorIds = b.query.getAllByRole('textbox').map(input => input.id)
+  a.view.unmount(); const replacement = mount('Client A'); verify([replacement, b])
+  expect(b.query.getAllByRole('textbox').map(input => input.id)).toEqual(survivorIds)
+  expect(b.query.getAllByRole('textbox')[4].getAttribute('aria-invalid')).toBe('true')
+  replacement.click('Read saved design'); await replacement.loaded(); replacement.fill(reportValues); verify([replacement, b])
+  expect(b.values()[4]).toBe('bad')
+})
+
+it('announces a failed Save only in its writer while the sibling announces a loaded report', async () => {
+  const { h, a, b } = sharedPanels()
+  a.click('Read saved design'); b.click('Read saved design'); await a.loaded(); await b.loaded()
+  a.fill(reportValues); let reject
+  h.client.saveEngineeringTotals.mockReturnValueOnce(new Promise((_resolve, no) => { reject = no }))
+  a.click('Save engineering totals')
+  h.client.loadEngineeringTotals.mockResolvedValueOnce(totalsResponse(3, reportValues))
+  b.click('Reload saved engineering totals'); await b.loaded()
+  await act(async () => reject(new Error('PRIVATE_LIVE_MESSAGE')))
+  const failure = a.query.getByText('Engineering totals could not be saved. Retry Save engineering totals.')
+  expect(failure.getAttribute('aria-live')).toBe('polite')
+  expect(b.query.getByText('Saved engineering totals loaded.').getAttribute('aria-live')).toBe('polite')
+  expect(b.query.queryByText(/could not be saved|PRIVATE_LIVE_MESSAGE/)).toBeNull()
+  for (const panel of [a, b]) expect(panel.query.queryByText('Engineering totals saved.')).toBeNull()
+})
+
+it('keeps Read, Save, Reload and CSV actions out of an enclosing parent form submission', async () => {
+  const parentSubmit = vi.fn(), h = fixture({ parentSubmit }); canonicalReports(h)
+  read(); await reportsLoaded(); fill(reportValues)
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  reloadTotals(); await reportsLoaded()
+  vi.stubGlobal('URL', { createObjectURL: () => 'blob:parent-form', revokeObjectURL: vi.fn() })
+  const download = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(download).toHaveBeenCalledOnce()
+  for (const label of ['Read saved design', 'Save engineering totals', 'Reload saved engineering totals', 'Download CSV']) {
+    expect(screen.getByRole('button', { name: label }).type).toBe('button')
+  }
+  expect(parentSubmit).not.toHaveBeenCalled()
+})
+
+it.each(['timeout', 'conflict'])('preserves sibling field focus, selection and draft across writer %s and recovery', async cause => {
+  const { h, a, b } = sharedPanels()
+  a.click('Read saved design'); b.click('Read saved design'); await a.loaded(); await b.loaded()
+  a.fill(reportValues); b.fill(reportValues); let settle
+  h.client.saveEngineeringTotals.mockReturnValueOnce(new Promise(resolve => { settle = resolve }))
+  if (cause === 'timeout') vi.useFakeTimers()
+  a.click('Save engineering totals')
+  const field = b.query.getAllByRole('textbox')[0]
+  fireEvent.change(field, { target: { value: '0123' } }); field.focus(); field.setSelectionRange(1, 3)
+  if (cause === 'timeout') { act(() => vi.advanceTimersByTime(RECONCILIATION_READ_TIMEOUT_MS)); vi.useRealTimers() }
+  else await act(async () => settle({ ok: false, status: 409 }))
+  const check = () => {
+    expect(document.activeElement).toBe(field); expect(field.value).toBe('0123')
+    expect([field.selectionStart, field.selectionEnd]).toEqual([1, 3])
+  }
+  check(); a.click('Reload saved engineering totals'); await a.loaded(); check()
+})
+
+it.each([0, 1, 2, 3, 4])('retains composed field %i across a held Save receipt without an implicit write', async index => {
+  const h = fixture(); canonicalReports(h); read(); await reportsLoaded(); fill(reportValues)
+  let settle; h.client.saveEngineeringTotals.mockReturnValueOnce(new Promise(resolve => { settle = resolve }))
+  saveTotals(); const field = screen.getAllByRole('textbox')[index]
+  const interim = index === 4 ? '0.12' : '12', final = index === 4 ? '0.123' : '123'
+  fireEvent.compositionStart(field); fireEvent.change(field, { target: { value: interim } })
+  await act(async () => settle(totalsResponse(1, reportValues)))
+  expect(field.value).toBe(interim)
+  fireEvent.compositionEnd(field, { data: final }); fireEvent.change(field, { target: { value: final } })
+  expect(field.value).toBe(final); expect(h.client.saveEngineeringTotals).toHaveBeenCalledTimes(1)
+  expect(screen.getByText('Engineering totals have unsaved changes.')).toBeTruthy()
+  const values = [...reportValues]; values[index] = final
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(2, values))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: 1, drafts: values })
+})
 
 it('requires a late subscriber fresh Read without inheriting its shared-client sibling dirty state', async () => {
   const { h, file, a, mount } = sharedPanels({ late: true })
