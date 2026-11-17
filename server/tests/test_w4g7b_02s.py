@@ -30,6 +30,12 @@ INSERT_LINE = b"ADDINSERT|0|Fixture|10.000,20.000,0.000|90.000000|2.0000,3.0000,
 ACCORECONSOLE, CONSOLE_DISCLOSURE = resolve_accoreconsole()
 
 
+def _without_dependency_report(parsed):
+    """parse_dxf_bytes adds a derived dependency_report (X04 #3129); the round-trip contract covers the intake itself."""
+    assert isinstance(parsed.get("dependency_report"), dict)
+    return {key: value for key, value in parsed.items() if key != "dependency_report"}
+
+
 def _base():
     return {
         "dwg": "upload.dxf", "layers": ["0"], "polylines": [], "inserts": [],
@@ -180,7 +186,7 @@ def test_mock_insert_uses_intake_shape_and_dxf_maps_its_temporary_handle():
     assert parsed["blocks"] == base["blocks"]
     result["inserts"][0]["handle"] = "A1"
     # DXF reads the whole file, so member evidence coverage is unconditional.
-    assert dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf(result)) == {**result, "memberEvidenceCovered": True}
+    assert _without_dependency_report(dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf(result))) == {**result, "memberEvidenceCovered": True}
 
 
 def test_verifier_binds_added_insert_to_actual_handle(monkeypatch):
