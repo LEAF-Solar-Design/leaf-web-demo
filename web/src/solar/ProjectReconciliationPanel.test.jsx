@@ -41,6 +41,124 @@ const blobText = blob => new Promise(resolve => {
   reader.readAsText(blob)
 })
 
+it.each(['binding', 'authority'])('rejects synchronous subscribe revocation of %s and owns each disposer', async revoked => {
+  const h = fixture()
+  read(); await loaded(); fill()
+  const oldCallbacks = [], oldDispose = vi.fn(), freshDispose = vi.fn()
+  const replacement = { ...h.client, readContext: vi.fn(async () => response()),
+    subscribe: vi.fn(callback => {
+      oldCallbacks.push(callback)
+      h.snapshot = revoked === 'binding'
+        ? { binding: { ...binding, drawing_id: '55555555-5555-4555-8555-555555555555' }, authorityKey: 'a' }
+        : { binding, authorityKey: 'revoked' }
+      callback() // Revocation arrives before subscribe returns its disposer.
+      return oldDispose
+    }) }
+  const createObjectURL = vi.fn(() => 'blob:fresh'), revokeObjectURL = vi.fn()
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  h.update({ projectClient: replacement })
+  expect(replacement.subscribe).toHaveBeenCalledOnce()
+  expect(oldDispose).not.toHaveBeenCalled()
+  expect(h.listeners.size).toBe(0)
+  expect(screen.getByText(/selected drawing scope is stale or unavailable/)).toBeTruthy()
+  expect(screen.queryByText(/Saved design revision|^PASS$/)).toBeNull()
+  expect(screen.getAllByRole('textbox').every(input => input.disabled && input.value === '')).toBe(true)
+  expect(screen.getByRole('button', { name: 'Read saved design' }).disabled).toBe(true)
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(true)
+  read(); fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(replacement.readContext).not.toHaveBeenCalled()
+  expect(createObjectURL).not.toHaveBeenCalled()
+  let settleFresh
+  const fresh = { ...h.client,
+    readContext: vi.fn(() => new Promise(resolve => { settleFresh = resolve })),
+    subscribe: vi.fn(() => freshDispose) }
+  h.snapshot = { binding, authorityKey: 'fresh' }
+  h.update({ projectClient: fresh, authorityKey: 'fresh' })
+  expect(oldDispose).toHaveBeenCalledOnce()
+  expect(freshDispose).not.toHaveBeenCalled()
+  read()
+  const signal = fresh.readContext.mock.calls[0][0].signal
+  act(() => oldCallbacks.forEach(callback => callback()))
+  expect(signal.aborted).toBe(false)
+  expect(screen.getByText('Reading saved design.')).toBeTruthy()
+  await act(async () => settleFresh(response()))
+  fill()
+  const accepted = screen.getByRole('table').textContent
+  act(() => oldCallbacks.forEach(callback => callback()))
+  expect(screen.getByRole('table').textContent).toBe(accepted)
+  expect(screen.getAllByText('PASS')).toHaveLength(4)
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(createObjectURL).toHaveBeenCalledOnce()
+  expect(revokeObjectURL).toHaveBeenCalledWith('blob:fresh')
+  expect(fresh.readContext).toHaveBeenCalledOnce()
+  expect(replacement.readContext).not.toHaveBeenCalled()
+  h.view.unmount()
+  expect(oldDispose).toHaveBeenCalledOnce()
+  expect(freshDispose).toHaveBeenCalledOnce()
+  act(() => oldCallbacks.forEach(callback => callback()))
+  expect(oldDispose).toHaveBeenCalledOnce()
+  expect(freshDispose).toHaveBeenCalledOnce()
+})
+
+it.each([
+  ['remove', true, false, false], ['revoke', false, true, false], ['both', true, true, false],
+  ['click and remove', true, false, true], ['click and revoke', false, true, true],
+  ['click and both', true, true, true],
+])('contains %s cleanup failures and retries with unchanged CSV bytes', async (_name, failRemove, failRevoke, failClick) => {
+  const derive = vi.spyOn(reconciliation, 'savedReconciliationValues'), h = fixture()
+  const drafts = ['01', '00', '01', '01', '0.400']
+  read(); await loaded(); fill(drafts)
+  const table = screen.getByRole('table').textContent, derivations = derive.mock.calls.length
+  const events = [], anchors = [], removedAnchors = [], connectedAtClick = []
+  let failing = true
+  const createObjectURL = vi.fn(() => `blob:cleanup-${createObjectURL.mock.calls.length}`)
+  const revokeObjectURL = vi.fn(url => {
+    events.push(['revoke', url])
+    if (failing && failRevoke) throw new Error('private revoke failure')
+  })
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function () {
+    anchors.push(this)
+    connectedAtClick.push(this.isConnected)
+    if (failing && failClick) throw new Error('private click failure')
+  })
+  const nativeRemove = HTMLAnchorElement.prototype.remove
+  const remove = vi.spyOn(HTMLAnchorElement.prototype, 'remove').mockImplementation(function () {
+    removedAnchors.push(this)
+    events.push(['remove', this.getAttribute('href')])
+    if (failing && failRemove) throw new Error('private remove failure')
+    nativeRemove.call(this)
+  })
+  const download = screen.getByRole('button', { name: 'Download CSV' })
+  const expected = 'metric,studio,oracle,delta,verdict\r\n' +
+    '"panels","1","01","0","PASS"\r\n"optimizers","","00","","UNREADABLE"\r\n' +
+    '"inverters","1","01","0","PASS"\r\n"strings","1","01","0","PASS"\r\n' +
+    '"kw_dc","0.4","0.400","0","PASS"\r\n'
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    fireEvent.click(download)
+    expect(events).toEqual(Array.from({ length: attempt }, (_, i) => [
+      ['remove', `blob:cleanup-${i + 1}`], ['revoke', `blob:cleanup-${i + 1}`],
+    ]).flat())
+    expect(remove).toHaveBeenCalledTimes(attempt)
+    expect(removedAnchors[attempt - 1]).toBe(anchors[attempt - 1])
+    expect(revokeObjectURL).toHaveBeenCalledTimes(attempt)
+    expect(await blobText(createObjectURL.mock.calls[attempt - 1][0])).toBe(expected)
+    expect(screen.getByRole('table').textContent).toBe(table)
+    expect(screen.getAllByRole('textbox').map(input => input.value)).toEqual(drafts)
+    expect(download.disabled).toBe(false)
+    if (failing && failClick) expect(screen.getByRole('alert').textContent).toMatch(/Try Download CSV again/)
+    else expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByText(/private .* failure/)).toBeNull()
+    failing = false
+  }
+  expect(new Set(anchors).size).toBe(2)
+  expect(connectedAtClick).toEqual([false, false])
+  expect(anchors.every(anchor => !anchor.isConnected)).toBe(true)
+  expect(h.client.readContext).toHaveBeenCalledOnce()
+  expect(derive).toHaveBeenCalledTimes(derivations)
+})
+
 it.each([0, 1, 2, 3, 4])('clears report %s after export and restores exact cached rows and lexemes', async index => {
   const derive = vi.spyOn(reconciliation, 'savedReconciliationValues'), h = fixture()
   const drafts = ['01', '00', '01', '01', '0.400']
