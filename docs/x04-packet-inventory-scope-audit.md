@@ -9,9 +9,9 @@ Studio X-bench X04 optionally checks a caller's expected embedded artifact-local
 | Expected label syntax | `scripts/validate_x04_evidence_packet.py:20-26` and `:120-122` | Each repeated expected ID uses the existing ASCII local-ID rule. Invalid or missing values refuse during argument parsing. |
 | Duplicate expectations | `scripts/validate_x04_evidence_packet.py:123-125` | Duplicate expected labels refuse before output alias checks or input reads. Expected order is irrelevant. |
 | Input buffer and optional digest | `scripts/validate_x04_evidence_packet.py:127-129`, shared `scripts/export_x04_offline_evidence.py:44-81` | Existing alias checks and byte ceilings precede raw-buffer digest matching and strict JSON decoding. |
-| Expected inventory | `scripts/validate_x04_evidence_packet.py:130-138` | The decoded artifact entries must expose valid local IDs whose set equals the expected set. Missing, extra or renamed labels refuse before trusted validation. |
-| Original packet semantics | `scripts/validate_x04_evidence_packet.py:139` and `:37-105` | Existing duplicate actual IDs, references, artifact validation and comparison/batch bindings still apply. Matching inventory does not waive them. |
-| Publication | `scripts/validate_x04_evidence_packet.py:140-142` | Existing bounded output encoding and atomic replacement follow validation. Handled refusal preserves prior output. |
+| Expected inventory | `scripts/validate_x04_evidence_packet.py:129-137` | The decoded artifact entries must expose valid local IDs whose set equals the expected set. Missing, extra or renamed labels refuse before trusted validation. |
+| Original packet semantics | `scripts/validate_x04_evidence_packet.py:138` and `:37-105` | Existing duplicate actual IDs, references, artifact validation and comparison/batch bindings still apply. Matching inventory does not waive them. |
+| Publication | `scripts/validate_x04_evidence_packet.py:139-142` | Existing bounded output encoding and atomic replacement follow validation. Handled refusal preserves prior output. |
 
 Actual source line ranges should be rechecked if surrounding code changes. The pure `validate_packet` function retains its original signature and semantics. The optional expected set belongs to each CLI invocation and reaches no shared mutable inventory state.
 
