@@ -72,7 +72,8 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
     except Exception as exc:  # pragma: no cover - decode with replace cannot raise
         raise DxfParseError(f"undecodable DXF: {exc}") from exc
 
-    pairs = _group_pairs(text)
+    literal_text = {}
+    pairs = _group_pairs(text, literal_text=literal_text)
     layers: List[str] = []
     # Membership set beside the ordered list. `layers` stays a list because
     # first-seen ORDER is part of the intake shape; the set only answers
@@ -462,7 +463,7 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
     if parse_errors:
         out["parseErrors"] = parse_errors
     from drawing_dependency_report import from_pairs
-    out["dependency_report"] = from_pairs(pairs)
+    out["dependency_report"] = from_pairs(pairs, literal_text=literal_text)
     return out
 
 
@@ -902,10 +903,11 @@ def _finish_entity(entity: Dict[str, Any], seq: int, layers: List[str],
         properties[entity["handle"]] = props
 
 
-def _group_pairs(text: str) -> List[Tuple[int, str]]:
+def _group_pairs(text: str, *, literal_text=None) -> List[Tuple[int, str]]:
     """DXF is (code line, value line) pairs. Tolerates \r\n and blank tail."""
     lines = text.splitlines()
     pairs: List[Tuple[int, str]] = []
+    inline_record = False
     for k in range(0, len(lines) - 1, 2):
         code_raw = lines[k].strip()
         try:
@@ -916,7 +918,15 @@ def _group_pairs(text: str) -> List[Tuple[int, str]]:
             # with a stray blank line — real writers do not produce these, but
             # a hand-edited demo file might.)
             continue
-        pairs.append((code, lines[k + 1].strip()))
+        value = lines[k + 1].strip()
+        if literal_text is not None:
+            if code == 0:
+                inline_record = value.upper() in {"MTEXT", "MULTILEADER", "TABLE", "ACAD_TABLE"}
+            elif inline_record and code in (1, 3, 304) and lines[k + 1] != value:
+                # Dependency identity needs the exact text at chunk edges.
+                # Retain only differing inline values, indexed by pair position.
+                literal_text[len(pairs)] = lines[k + 1]
+        pairs.append((code, value))
     if not pairs:
         raise DxfParseError("no DXF group-code pairs found")
     return pairs
