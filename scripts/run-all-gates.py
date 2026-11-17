@@ -2162,7 +2162,10 @@ def build_suites() -> List[Suite]:
                   "tests/test_x04_packet_drawing_runtime_matrix.py",
                   "tests/test_x04_packet_drawing_read_races.py",
                   "tests/test_x04_packet_drawing_call_isolation.py",
-              ], 1876),
+                  "tests/test_x04_operand_binding_arguments.py",
+                  "tests/test_x04_operand_binding_substitution.py",
+                  "tests/test_x04_operand_binding_precedence.py",
+              ], 1934),
         Suite("server-dxf-intake-lines-text", "server tests/test_dxf_intake_lines_text.py",
               "pytest", SERVER, _py_pytest("tests/test_dxf_intake_lines_text.py"), 4),
         # W4g engine reach (2026-09-04): the intake -> DXF synthesizer (the

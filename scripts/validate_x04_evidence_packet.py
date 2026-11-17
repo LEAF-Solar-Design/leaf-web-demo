@@ -32,6 +32,14 @@ def artifact_drawing(value):
     return local_id(identity), expected_drawing_id(drawing)
 
 
+def comparison_operands(value):
+    identity, separator, operands = value.partition('=')
+    parts = operands.split(',')
+    if not separator or len(parts) != 2:
+        raise argparse.ArgumentTypeError('Expected comparison operands must use ID=BEFORE,AFTER.')
+    return local_id(identity), (local_id(parts[0]), local_id(parts[1]))
+
+
 def comparison_claims(report):
     result = {key: report[key] for key in ('drawing_id', 'count', 'original_bytes_integrity')}
     for field in ('selected_ids', 'highlight_handles', 'literal_dependencies'):
@@ -132,7 +140,12 @@ def main(argv=None):
                         help='Repeat for the exact expected set of batch report IDs')
     parser.add_argument('--expected-artifact-drawing', type=artifact_drawing, action='append',
                         metavar='ID=DRAWING', help='Bind an embedded artifact ID to its exact drawing.id label')
+    parser.add_argument('--expected-comparison-operands', type=comparison_operands, action='append',
+                        metavar='ID=BEFORE,AFTER', help='Bind a comparison ID to ordered artifact-local references')
     args = parser.parse_args(argv)
+    operand_bindings = dict(args.expected_comparison_operands or [])
+    if len(operand_bindings) != len(args.expected_comparison_operands or []):
+        parser.error('Expected comparison operand keys must be unique.')
     drawing_bindings = dict(args.expected_artifact_drawing or [])
     if len(drawing_bindings) != len(args.expected_artifact_drawing or []):
         parser.error('Expected artifact drawing keys must be unique.')
@@ -172,6 +185,19 @@ def main(argv=None):
                 drawing = artifact.get('drawing') if isinstance(artifact, dict) else None
                 require(isinstance(drawing, dict) and drawing.get('id') == expected,
                         'Expected artifact drawing ID does not match drawing.id exactly.')
+        if operand_bindings:
+            require(isinstance(payload, dict) and isinstance(payload.get('comparisons'), list),
+                    'Packet comparisons must be an array for operand bindings.')
+            comparisons = {}
+            for row in payload['comparisons']:
+                require(isinstance(row, dict), 'Packet comparison entry must be an object.')
+                comparisons[local_id(row.get('id'))] = row
+            require(operand_bindings.keys() <= comparisons.keys(),
+                    'Expected comparison operand key must name an embedded comparison.')
+            for identity, expected in operand_bindings.items():
+                row = comparisons[identity]
+                require((row.get('before'), row.get('after')) == expected,
+                        'Expected comparison operands do not match ordered before/after references.')
         result = validate_packet(payload)
         write_json(result, args.out, args.max_output_bytes)
     except (OSError, ValueError, TypeError, RecursionError) as error:
