@@ -334,6 +334,47 @@ describe('ResultPanel row arrays', () => {
 })
 
 describe('ResultPanel actionable error guidance', () => {
+  it.each([
+    ['SOLAREDGE_GRID_UNMATCHED', [], 'redraw_frame', 'Group frame:roof-7: no matching SolarEdge grid. Redraw this group.', 'Redraw this group.'],
+    ['SOLAREDGE_GRID_AMBIGUOUS', [4, 17], 'pick_candidate', 'Group frame:roof-7: multiple SolarEdge grids (candidates 4, 17). Select one grid.', 'Select one grid.'],
+  ])('renders typed %s cause, exact identities and one action', (reason_code, candidate_ids, action, text, instruction) => {
+    render(<ResultPanel result={{ ok: false, error: { reason_code, error_code: 'BAD_PARAMS',
+      message: 'The panel group needs review.', frame_ref: 'frame:roof-7', candidate_ids, action,
+      next_action: 'Rebuild the report.', retryable: true } }} onRetry={vi.fn()} />)
+    const alert = screen.getByRole('alert')
+    expect(alert.textContent).toBe(text)
+    expect(alert.textContent.split(instruction)).toHaveLength(2)
+    expect(alert.textContent.length).toBeLessThan(200)
+    expect(alert).toHaveAttribute('data-error-code', reason_code)
+    expect(alert.querySelector('code, img, svg')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+  })
+
+  it('renders unresolved identity as plain text instead of accepting markup as a group', () => {
+    render(<ResultPanel result={{ ok: false, error: {
+      reason_code: 'SOLAREDGE_GRID_UNMATCHED', frame_ref: '<img src=x>',
+      candidate_ids: [], action: 'redraw_frame',
+    } }} />)
+    expect(screen.getByRole('alert').textContent).toBe('Group identity unresolved: no matching SolarEdge grid. Redraw this group.')
+    expect(screen.getByRole('alert').querySelector('img')).toBeNull()
+  })
+
+  it.each(['SOLVE_TIMEOUT', 'solve_outcome_unknown'])('requires reconciliation before resubmitting %s in either error path', (reason_code) => {
+    for (const path of ['result', 'error']) {
+      const onRetry = vi.fn()
+      const refusal = { body: { error: { reason_code, retryable: true,
+        message: 'Solve Roof-West has no confirmed outcome. Retry now.', next_action: 'Retry now.' } } }
+      const props = path === 'result' ? { result: { ok: false, error: refusal } } : { error: refusal }
+      render(<ResultPanel {...props} running={false} onRetry={onRetry} />)
+      expect(screen.getByRole('alert').textContent).toBe('Solve Roof-West has no confirmed outcome. Reconcile the solve status before retrying.')
+      expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+      fireEvent.keyDown(window, { key: 'r' })
+      fireEvent.keyDown(window, { key: 'R' })
+      expect(onRetry).not.toHaveBeenCalled()
+      cleanup()
+    }
+  })
+
   it('shows the next action and responsible actor from the shared envelope', () => {
     render(
       <ResultPanel
