@@ -10,11 +10,14 @@ after the focused offhost suite finishes. It uses the installed Python Playwrigh
 and native esbuild, the actual panel and app stylesheet, and only synthetic local
 data. It creates a unique artifact directory outside git, launches one Chromium,
 and retains its actual CSV, screenshot, bundle and hash-bearing JSON proof there.
-It also checks keyboard read/export failure announcements and retries. No auth,
+It also checks keyboard read/export failure announcements and retries, then
+separately reads duplicate panel IDs, foreign string references and missing frame
+power, downloads each five-row comparison, and repairs each through a saved reread. No auth,
 video, real drawings, environment/secret reads, staging, or uploads are involved.
 
 ```python
 import csv
+import copy
 import functools
 import hashlib
 import json
@@ -54,6 +57,7 @@ entry.write_text(
     'const binding = ' + json.dumps(binding) + ';\n'
     'const response = ' + json.dumps(response) + ';\n' + '''
 let attempts = 0;
+window.setSavedGraph = graph => { response.data.intake.solar_design_graph = structuredClone(graph); };
 const client = {
   getSnapshot: () => ({binding, authorityKey: 'synthetic'}),
   subscribe: () => () => {},
@@ -142,18 +146,21 @@ try:
     assert clicked.value.failure() is None
     assert csv_path.read_bytes() == (artifact / 'engineering-reconciliation-click.csv').read_bytes()
     metrics = dict(zip([label.casefold() for label in labels], ['panels', 'optimizers', 'inverters', 'strings', 'kw_dc']))
-    visible = []
-    rows = page.locator('tbody tr')
-    assert rows.count() == 5
-    for row in rows.all():
-        cells = row.locator('td')
-        studio, delta = cells.nth(0).inner_text().strip(), cells.nth(2).inner_text().strip()
-        verdict = cells.nth(3).inner_text().strip().split(':', 1)[0].strip()
-        visible.append(dict(metric=metrics[row.locator('th').inner_text().strip().casefold()],
-                            studio='' if studio == 'Unavailable' else studio,
-                            oracle=cells.nth(1).locator('input').input_value(),
-                            delta='' if delta == 'Unavailable' else delta,
-                            verdict='UNREADABLE' if verdict == 'Unavailable' else verdict))
+    def visible_rows():
+        visible = []
+        rows = page.locator('tbody tr')
+        assert rows.count() == 5
+        for row in rows.all():
+            cells = row.locator('td')
+            studio, delta = cells.nth(0).inner_text().strip(), cells.nth(2).inner_text().strip()
+            verdict = cells.nth(3).inner_text().strip().split(':', 1)[0].strip()
+            visible.append(dict(metric=metrics[row.locator('th').inner_text().strip().casefold()],
+                                studio='' if studio == 'Unavailable' else studio,
+                                oracle=cells.nth(1).locator('input').input_value(),
+                                delta='' if delta == 'Unavailable' else delta,
+                                verdict='UNREADABLE' if verdict == 'Unavailable' else verdict))
+        return visible
+    visible = visible_rows()
     with csv_path.open(newline='', encoding='utf-8') as stream:
         actual = list(csv.DictReader(stream))
     assert actual == visible, 'Actual browser download differs from the rendered comparison'
@@ -161,12 +168,63 @@ try:
     assert actual[2] == dict(metric='inverters', studio='1', oracle='2', delta='-1', verdict='FAIL')
     assert [row['verdict'] for row in actual] == ['PASS', 'UNREADABLE', 'FAIL', 'PASS', 'PASS']
     page.screenshot(path=str(artifact / 'comparison.png'), full_page=True)
+    def capture_comparison(name):
+        rendered = visible_rows()
+        with page.expect_download() as pending:
+            download_button.click()
+        download = pending.value
+        assert download.failure() is None
+        path = artifact / (name + '.csv')
+        download.save_as(path)
+        with path.open(newline='', encoding='utf-8') as stream:
+            downloaded = list(csv.DictReader(stream))
+        assert len(downloaded) == 5 and downloaded == rendered, name + ': CSV/DOM mismatch'
+        page.screenshot(path=str(artifact / (name + '.png')), full_page=True)
+        return dict(visible=rendered, downloaded=downloaded, csv=path.name)
+
+    cases = []
+    for index, (name, affected) in enumerate([
+        ('duplicate-panel-ids', {0, 3, 4}),
+        ('foreign-string-reference', {3}),
+        ('incomplete-frame-power', {4}),
+    ]):
+        malformed = copy.deepcopy(graph)
+        malformed['rev'] = 10 + index * 2
+        if name == 'duplicate-panel-ids':
+            malformed['panels'].append(copy.deepcopy(malformed['panels'][0]))
+        elif name == 'foreign-string-reference':
+            malformed['strings'][0]['ordered_panel_refs'] = [panels[0], entity('panel', 99)]
+        else:
+            del malformed['frames'][0]['module_power_watts']
+        page.evaluate('(graph) => window.setSavedGraph(graph)', malformed)
+        assert visible_rows() == actual, 'Client mutation changed accepted evidence without a read'
+        read.click()
+        expect(page.get_by_text(f"Saved design revision {malformed['rev']}.", exact=True)).to_be_visible()
+        broken = capture_comparison(name)
+        for row_index, row in enumerate(broken['downloaded']):
+            if row_index in affected:
+                assert row == dict(metric=actual[row_index]['metric'], studio='',
+                                   oracle=actual[row_index]['oracle'], delta='', verdict='UNREADABLE')
+            else:
+                assert row == actual[row_index], name + ': valid sibling changed'
+        repaired = copy.deepcopy(graph)
+        repaired['rev'] = malformed['rev'] + 1
+        page.evaluate('(graph) => window.setSavedGraph(graph)', repaired)
+        assert visible_rows() == broken['visible'], 'Repair was accepted without a saved reread'
+        read.click()
+        expect(page.get_by_text(f"Saved design revision {repaired['rev']}.", exact=True)).to_be_visible()
+        recovery = capture_comparison(name + '-repaired')
+        assert recovery['downloaded'] == actual, name + ': repaired comparison did not recover'
+        assert (artifact / recovery['csv']).read_bytes() == csv_path.read_bytes()
+        cases.append(dict(name=name, affected_metrics=[actual[i]['metric'] for i in sorted(affected)],
+                          malformed=broken, repaired=recovery, explicit_saved_reread=True))
     def digest(path):
         return hashlib.sha256(path.read_bytes()).hexdigest()
     inputs = json.loads((artifact / 'meta.json').read_text(encoding='utf-8'))['inputs']
     sources = {(repo / name).resolve() for name in inputs}
     sources.add(repo / 'web/src/styles.css')
     proof = dict(synthetic=True, rows_matched=5, visible=visible, downloaded=actual,
+                 malformed_graph_replays=cases,
                  keyboard_read_retry=True, keyboard_export_retry=True,
                  source_sha256={str(path): digest(path) for path in sorted(sources)},
                  artifact_sha256={path.name: digest(path) for path in artifact.iterdir() if path.is_file()})
@@ -193,5 +251,6 @@ finally:
                     if thread_started:
                         thread.join(timeout=10)
                         assert not thread.is_alive(), 'Local server did not stop'
-print(json.dumps({'proof': str(proof_path), 'rows_matched': 5, 'keyboard_retries_passed': 2}))
+print(json.dumps({'proof': str(proof_path), 'rows_matched': 5, 'keyboard_retries_passed': 2,
+                  'malformed_graph_repairs': len(cases)}))
 ```

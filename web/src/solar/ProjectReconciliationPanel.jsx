@@ -8,10 +8,11 @@ const unavailableValues = savedReconciliationValues(null)
 export default function ProjectReconciliationPanel({ solarBinding, authorityKey, projectClient, isCurrent, busy = false }) {
   let bindingKey = null
   try { bindingKey = solarDrawingBindingKey(solarBinding) } catch { /* unavailable */ }
-  const scope = useMemo(() => ({ binding: solarBinding, authorityKey, projectClient, isCurrent, alive: true }),
+  const scope = useMemo(() => ({ binding: solarBinding, authorityKey, projectClient, isCurrent, alive: false }),
     [bindingKey, authorityKey, projectClient, isCurrent])
   const [view, setView] = useState(null)
   const [draft, setDraft] = useState(null)
+  const [, refreshObserver] = useState(0)
   const inputId = useId()
   const request = useRef(null)
   const readButton = useRef(null)
@@ -25,21 +26,41 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
     } catch { return false }
   }
   useLayoutEffect(() => {
+    const observer = {}
+    scope.observer = observer
     scope.alive = true
+    scope.observationError = null
+    const cancelRead = () => {
+      if (request.current?.observer !== observer) return
+      const active = request.current
+      request.current = null
+      active.abort.abort()
+    }
     const invalidate = () => {
+      if (scope.observer !== observer) return
       if (current()) return
       scope.alive = false
-      request.current?.abort()
+      cancelRead()
       setView({ scope, graph: null })
       setDraft(null)
     }
     let unsubscribe
-    try { unsubscribe = projectClient?.subscribe(invalidate) } catch { scope.alive = false }
-    invalidate()
-    return () => {
+    try {
+      unsubscribe = projectClient?.subscribe(invalidate)
+      if (typeof unsubscribe !== 'function') throw new Error('Invalid observer')
+    } catch {
       scope.alive = false
-      request.current?.abort()
-      try { unsubscribe?.() } catch { /* observer isolation */ }
+      scope.observationError = 'Reconciliation unavailable: saved design changes could not be observed. Reconnect the project client to try again.'
+    }
+    invalidate()
+    refreshObserver(value => value + 1)
+    return () => {
+      if (scope.observer === observer) {
+        scope.alive = false
+        scope.observer = null
+      }
+      cancelRead()
+      try { if (typeof unsubscribe === 'function') unsubscribe() } catch { /* observer isolation */ }
     }
   }, [scope])
   const live = current()
@@ -56,35 +77,40 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
   const reportValid = drafts.every((value, index) => (index === 4 && value === '') || parseReconciliationNumber(value, index !== 4) !== null)
   const canExport = live && !busy && !pending && !!saved?.graph && reportValid
   async function read() {
-    if (!current() || busy || pending) return
+    if (!current() || busy || request.current) return
     restoreReadFocus.current = document.activeElement === readButton.current
-    request.current?.abort()
     const abort = new AbortController()
-    request.current = abort
+    const active = { abort, observer: scope.observer }
+    request.current = active
     setView({ scope, pending: true, graph: null, status: 'Reading saved design.' })
     const timer = setTimeout(() => {
-      abort.abort()
-      if (request.current === abort && current()) {
+      if (request.current !== active) return
+      request.current = null
+      if (current()) {
         setView({ scope, error: 'Saved design read timed out. Try reading it again.' })
       }
+      abort.abort()
     }, RECONCILIATION_READ_TIMEOUT_MS)
     abort.signal.addEventListener('abort', () => clearTimeout(timer), { once: true })
     try {
       const response = await projectClient.readContext({ signal: abort.signal })
-      if (abort.signal.aborted || request.current !== abort || !current()) return
+      if (abort.signal.aborted || request.current !== active || !current()) return
       if (!validReconciliationResponse(response, scope.binding)) {
         setView({ scope, error: 'Saved design unavailable: the response, drawing identity or graph is invalid. Try reading it again.' })
         return
       }
       const graph = structuredClone(response.data.intake.solar_design_graph)
       const values = savedReconciliationValues(graph)
-      if (abort.signal.aborted || request.current !== abort || !current()) return
+      if (abort.signal.aborted || request.current !== active || !current()) return
       setView({ scope, graph, values, status: `Saved design revision ${graph.rev}.` })
     } catch {
-      if (!abort.signal.aborted && request.current === abort && current()) {
+      if (!abort.signal.aborted && request.current === active && current()) {
         setView({ scope, error: 'Saved design could not be read. Try reading it again.' })
       }
-    } finally { clearTimeout(timer) }
+    } finally {
+      clearTimeout(timer)
+      if (request.current === active) request.current = null
+    }
   }
   function download() {
     if (!canExport || !current()) return
@@ -110,7 +136,7 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
     <p>Enter user-supplied engineering report/BOM totals. These values are not independently verified.</p>
     <p id={`${inputId}-dc-optional`}>kW DC is optional when unknown. Leave it blank to export an unreadable comparison, with no report value or delta; it cannot pass.</p>
     <button ref={readButton} type="button" disabled={!live || busy || pending} onClick={read}>Read saved design</button>
-    <p aria-live="polite">{!live ? 'Reconciliation unavailable: the selected drawing scope is stale or unavailable.'
+    <p aria-live="polite">{!live ? scope.observationError || 'Reconciliation unavailable: the selected drawing scope is stale or unavailable.'
       : saved?.status || 'Read the saved design to compare totals.'}</p>
     {saved?.error && <p role="alert">{saved.error}</p>}
     <table className="ops-table"><caption>Saved Studio vs engineering report/BOM totals</caption>

@@ -16,14 +16,17 @@ const response = () => ({ ok: true, data: { context: { ...binding }, intake: {
     inverters: [{ id: id('inverter'), equipment_type: 'string_inverter' }],
   },
 } } })
-function fixture() {
+function fixture({ strict = false, subscribe } = {}) {
   const h = { snapshot: { binding, authorityKey: 'a' }, current: true, listeners: new Set() }
   h.client = { readContext: vi.fn(async () => response()), getSnapshot: () => h.snapshot,
     subscribe: (listener) => { h.listeners.add(listener); return () => h.listeners.delete(listener) },
     uploadSolarEdgePdf: vi.fn(), submitRun: vi.fn() }
+  if (subscribe) h.client.subscribe = subscribe
   h.props = { solarBinding: binding, authorityKey: 'a', projectClient: h.client, isCurrent: () => h.current }
-  h.view = render(<ProjectReconciliationPanel {...h.props} />)
-  h.update = (props) => { h.props = { ...h.props, ...props }; h.view.rerender(<ProjectReconciliationPanel {...h.props} />) }
+  const element = () => strict ? <React.StrictMode><ProjectReconciliationPanel {...h.props} /></React.StrictMode>
+    : <ProjectReconciliationPanel {...h.props} />
+  h.view = render(element())
+  h.update = (props) => { h.props = { ...h.props, ...props }; h.view.rerender(element()) }
   h.emit = () => act(() => { for (const listener of h.listeners) listener() })
   return h
 }
@@ -32,6 +35,119 @@ const fill = (values = ['1', '0', '1', '1', '0.4']) => screen.getAllByRole('text
   fireEvent.change(input, { target: { value: values[index] } })
 })
 const loaded = () => screen.findByText('Saved design revision 9.')
+
+it('guards reentrant reads before React commits and releases ownership after success', async () => {
+  const h = fixture()
+  let resolve
+  h.client.readContext.mockImplementationOnce(() => {
+    read()
+    return new Promise(yes => { resolve = yes })
+  })
+  act(() => { read(); read() })
+  expect(h.client.readContext).toHaveBeenCalledTimes(1)
+  await act(async () => resolve(response()))
+  read(); await loaded()
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+})
+
+it.each(['timeout', 'failure'])('retries after %s and protects the new request from late old completion', async (failure) => {
+  vi.useFakeTimers()
+  const h = fixture(); fill()
+  let resolveOld, rejectOld, resolveNew
+  h.client.readContext.mockImplementationOnce(() => new Promise((yes, no) => { resolveOld = yes; rejectOld = no }))
+  read()
+  const oldSignal = h.client.readContext.mock.calls[0][0].signal
+  if (failure === 'timeout') act(() => vi.advanceTimersByTime(RECONCILIATION_READ_TIMEOUT_MS))
+  else await act(async () => rejectOld(new Error('private failure')))
+  expect(screen.getByRole('alert').textContent).toMatch(/Try reading it again/)
+  expect(oldSignal.aborted).toBe(failure === 'timeout')
+  h.client.readContext.mockImplementationOnce(() => new Promise(yes => { resolveNew = yes }))
+  read()
+  await act(async () => resolveOld(response()))
+  expect(screen.queryByText('Saved design revision 9.')).toBeNull()
+  read()
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+  await act(async () => resolveNew(response()))
+  expect(screen.getAllByText('PASS')).toHaveLength(4)
+  expect(screen.getAllByRole('textbox').map(input => input.value)).toEqual(['1', '0', '1', '1', '0.4'])
+})
+
+it('keeps one live StrictMode observer and aborts the final pending read on unmount', async () => {
+  const h = fixture({ strict: true })
+  expect(h.listeners.size).toBe(1)
+  expect(screen.getByRole('button', { name: 'Read saved design' }).disabled).toBe(false)
+  read(); await loaded(); fill()
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(false)
+  let resolve
+  h.client.readContext.mockImplementationOnce(() => new Promise(yes => { resolve = yes }))
+  read()
+  const signal = h.client.readContext.mock.calls[1][0].signal
+  h.view.unmount()
+  expect(signal.aborted).toBe(true)
+  expect(h.listeners.size).toBe(0)
+  await act(async () => resolve(response()))
+  expect(screen.queryByText('Saved design revision 9.')).toBeNull()
+})
+
+it.each(['throw', 'nonfunction'])('renders subscription %s failure closed and recovers with a replacement client', async (failure) => {
+  const invalid = { dispose: vi.fn() }
+  const subscribe = () => {
+    if (failure === 'throw') throw new Error('private observer details')
+    return invalid
+  }
+  const h = fixture({ subscribe })
+  expect(screen.getByText(/saved design changes could not be observed/)).toBeTruthy()
+  expect(screen.queryByText(/private observer details/)).toBeNull()
+  expect(screen.getByRole('button', { name: 'Read saved design' }).disabled).toBe(true)
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(true)
+  expect(screen.getAllByRole('textbox').every(input => input.disabled)).toBe(true)
+  read()
+  expect(h.client.readContext).not.toHaveBeenCalled()
+  const replacement = { ...h.client, subscribe: listener => {
+    h.listeners.add(listener)
+    return () => h.listeners.delete(listener)
+  } }
+  h.update({ projectClient: replacement })
+  expect(h.listeners.size).toBe(1)
+  read(); await loaded(); fill()
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(false)
+  expect(invalid.dispose).not.toHaveBeenCalled()
+})
+
+it('fails closed when a replacement subscription fails after an accepted read', async () => {
+  const h = fixture(); read(); await loaded(); fill()
+  h.update({ projectClient: { ...h.client, subscribe: () => { throw new Error('private replacement') } } })
+  expect(h.listeners.size).toBe(0)
+  expect(screen.getByText(/saved design changes could not be observed/)).toBeTruthy()
+  expect(screen.queryByText(/private replacement/)).toBeNull()
+  expect(screen.queryByText('PASS')).toBeNull()
+  expect(screen.getByRole('button', { name: 'Read saved design' }).disabled).toBe(true)
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(true)
+})
+
+it('ignores an old observer and pending completion after a new scope starts reading', async () => {
+  const h = fixture({ strict: true })
+  const oldObserver = [...h.listeners][0]
+  let resolveOld, resolveNew
+  h.client.readContext.mockImplementationOnce(() => new Promise(yes => { resolveOld = yes }))
+  read()
+  const oldSignal = h.client.readContext.mock.calls[0][0].signal
+  const replacement = { ...h.client, readContext: vi.fn(() => new Promise(yes => { resolveNew = yes })) }
+  h.update({ projectClient: replacement })
+  expect(oldSignal.aborted).toBe(true)
+  expect(h.listeners.size).toBe(1)
+  read()
+  const newSignal = replacement.readContext.mock.calls[0][0].signal
+  act(() => oldObserver())
+  await act(async () => resolveOld(response()))
+  expect(newSignal.aborted).toBe(false)
+  expect(screen.queryByText('Saved design revision 9.')).toBeNull()
+  await act(async () => resolveNew(response()))
+  fill()
+  expect(screen.getAllByText('PASS')).toHaveLength(4)
+  h.view.unmount()
+  expect(h.listeners.size).toBe(0)
+})
 
 it.each(['blob', 'url', 'anchor', 'click'])('recovers from %s download failure without losing evidence or drafts', async (failure) => {
   fixture(); read(); await loaded(); fill()
