@@ -1168,7 +1168,15 @@ def test_assembly_attribution_real_assembly_refusal_is_sanitized_current_source_
         "implementation_source_sha": ASSEMBLY_SOURCE, "job_id": str(ASSEMBLY_JOB), "input_version_id": str(ASSEMBLY_VERSION),
         "status": "attributed", "reason": "INVALID_FINAL_GRID_ORDER", "validation_stage": "split.coverage",
         "completed_pieces": len(assembly_world.children), "total_pieces": len(assembly_world.children),
-        "piece_order": list(range(len(assembly_world.children))), "piece_order_truncated": False}
+        "piece_order": list(range(len(assembly_world.children))), "piece_order_truncated": False,
+        "coverage": {"empty_extraction": True, "unknown_identity": False,
+            "repeated_identity": False, "missing_members": True,
+            "expected_members": 201, "extracted_members": 0, "unknown_members": 0,
+            "repeated_members": 0, "missing_member_count": 201,
+            "before_restitch": {"identified_cells": 201, "positive_sequences": 0,
+                "nonpositive_sequences": 201, "repeated_positive_sequences": 0},
+            "after_restitch": {"identified_cells": 201, "positive_sequences": 0,
+                "nonpositive_sequences": 201, "repeated_positive_sequences": 0}}}
     assert (assembly_world.parent, assembly_world.children, assembly_world.job) == before
 
 
@@ -1178,6 +1186,49 @@ def test_assembly_attribution_byte_limit_refuses_before_loading_evidence(assembl
     assert result["status"] == "unavailable"
     assert result["reason"] == "evidence_integrity_or_limit_refusal"
     assert len(assembly_world.db.queries) == 1
+
+
+@pytest.mark.parametrize("kind", ["unknown", "repeated", "missing"])
+def test_assembly_coverage_predicates_preserve_refusal_and_hide_identities(assembly_world, monkeypatch, kind):
+    members = assembly_world.context.graph["frames"][0]["panel_refs"]
+    extracted = [ref.upper() for ref in members]
+    if kind == "unknown":
+        extracted[0] = "PRIVATE-UNKNOWN-IDENTITY"
+    elif kind == "repeated":
+        extracted[0] = extracted[1]
+    else:
+        extracted.pop()
+    # Isolate the extraction boundary after real stored evidence verification.
+    monkeypatch.setattr(solve.kernel, "ordered_strings", lambda merged: [extracted])
+    before = deepcopy((assembly_world.parent, assembly_world.children, assembly_world.job))
+    result = read_assembly(assembly_world).json()["assembly_attribution"]
+    assert result["status"] == "attributed"
+    assert result["reason"] == "INVALID_FINAL_GRID_ORDER"
+    assert result["validation_stage"] == "split.coverage"
+    coverage = result["coverage"]
+    assert coverage["empty_extraction"] is False
+    assert coverage["unknown_identity"] is (kind == "unknown")
+    assert coverage["repeated_identity"] is (kind == "repeated")
+    assert coverage["missing_members"] is True
+    assert coverage["expected_members"] == 201
+    assert coverage["extracted_members"] == (200 if kind == "missing" else 201)
+    assert coverage["unknown_members"] == int(kind == "unknown")
+    assert coverage["repeated_members"] == int(kind == "repeated")
+    assert coverage["missing_member_count"] == 1
+    for stage in ("before_restitch", "after_restitch"):
+        counts = coverage[stage]
+        assert set(counts) == {"identified_cells", "positive_sequences",
+                              "nonpositive_sequences", "repeated_positive_sequences"}
+        assert counts["identified_cells"] == counts["positive_sequences"] == 201
+        assert counts["nonpositive_sequences"] == 0
+        assert all(type(value) is int and 0 <= value <= 201 for value in counts.values())
+    assert set(coverage) == {"empty_extraction", "unknown_identity", "repeated_identity",
+        "missing_members", "expected_members", "extracted_members", "unknown_members",
+        "repeated_members", "missing_member_count", "before_restitch", "after_restitch"}
+    serialized = json.dumps(result)
+    assert "PRIVATE-UNKNOWN-IDENTITY" not in serialized
+    assert all(ref not in serialized and ref.upper() not in serialized for ref in members)
+    assert (assembly_world.parent, assembly_world.children, assembly_world.job) == before
 
 
 def test_assembly_attribution_unattested_current_source_is_explicitly_unavailable(assembly_world, monkeypatch):

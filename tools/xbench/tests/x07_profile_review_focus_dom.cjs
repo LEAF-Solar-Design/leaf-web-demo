@@ -8,6 +8,7 @@ async function main() {
     props.saveProfile = async () => { saves++; throw Error('Unexpected save') }
     h.render(h.draw(props))
     await h.enter(await h.screen.findByRole('button', { name: 'Confirm roles' }))
+    await h.screen.findByRole('alert')
     const retry = await h.screen.findByRole('button', { name: 'Retry loading profile' })
     await h.waitFor(() => assert.equal(document.activeElement, retry))
     assert.ok(retry.isConnected)

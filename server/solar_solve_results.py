@@ -20,7 +20,7 @@ from solar_design_graph import (
     COLLECTIONS, MAX_GRAPH_NODES, MAX_NODES, SCHEMA_VERSION,
     GraphValidationError, _bounded_json, entities, new_id, validate_graph,
 )
-from solar_grid_restitch import failed_group_indices, ordered_strings, restitch
+from solar_grid_restitch import _int, _panels, failed_group_indices, ordered_strings, restitch
 from solar_sizing_client import advance, checked_graph
 
 
@@ -550,6 +550,16 @@ def complete_split_search(graph, binding, proposals):
             "background_complete": binding["phase"] == "background"}
 
 
+def _sequence_counts(responses):
+    cells = [cell for response in responses
+             for cell in _panels(response["data"]["final_grid"])]
+    sequences = [_int(cell.get("Seq")) for cell in cells if cell.get("Id")]
+    positive = [sequence for sequence in sequences if sequence > 0]
+    return {"identified_cells": len(sequences), "positive_sequences": len(positive),
+            "nonpositive_sequences": len(sequences) - len(positive),
+            "repeated_positive_sequences": len(positive) - len(set(positive))}
+
+
 def accept_split_candidate(graph, candidate, *, expected_rev):
     """The plugin's split commit: restitch the pieces, cut strings in final-grid Seq
     order (StringPlacement), then the same graph mutation as accept_candidate."""
@@ -581,7 +591,21 @@ def accept_split_candidate(graph, candidate, *, expected_rev):
     flat = [ref for string in ordered_lists for ref in string]
     if (not ordered_lists or any(not string for string in ordered_lists)
             or None in flat or len(set(flat)) != len(flat) or set(flat) != members):
-        raise GraphValidationError("INVALID_FINAL_GRID_ORDER", "split.coverage")
+        failure = GraphValidationError("INVALID_FINAL_GRID_ORDER", "split.coverage")
+        known = [ref for ref in flat if ref is not None]
+        failure.coverage_attribution = {
+            "empty_extraction": not ordered_lists or any(not string for string in ordered_lists),
+            "unknown_identity": None in flat,
+            "repeated_identity": len(set(known)) != len(known),
+            "missing_members": bool(members - set(known)),
+            "expected_members": len(members), "extracted_members": len(flat),
+            "unknown_members": len(flat) - len(known),
+            "repeated_members": len(known) - len(set(known)),
+            "missing_member_count": len(members - set(known)),
+            "before_restitch": _sequence_counts(responses),
+            "after_restitch": _sequence_counts([merged]),
+        }
+        raise failure
     proofs = verified["proofs"]
     response_sha256 = digest([proof["response_sha256"] for proof in proofs])
     _replace_frame_strings(before, result, frame, previous, ordered_lists, response_sha256)
