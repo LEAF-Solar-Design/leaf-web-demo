@@ -183,7 +183,7 @@ def test_stop_on_client_error(fixture, monkeypatch, method, status):
 
     def fail_second(*args, **kw):
         if len(uploads) == 2:
-            raise StudioError(status, "UNAVAILABLE", CAP)
+            raise StudioError(status, "UNAVAILABLE", "server unavailable")
         return original(*args, **kw)
 
     def transport(method, path, **kw):
