@@ -903,3 +903,32 @@ uncaught browser error. `proof.json`, `independent-clients-conflict.png` and
 `read-cancels-save-observation.png` preserve the result. This replay is separate
 from the single-client lost-response recipe above; its two clients share neither
 the client instance nor panel state.
+
+## Late Reload after a newer retry
+
+Parent: X05 durable report reconciliation. Executed replay and source hashes:
+`D:/agent-data/leaf-research/studio-xbench-2026-11/synthetic-tests/x05-report-persistence-_isz7cma/replay.py`.
+Run this retained Python helper with the same React/esbuild cache and Playwright
+setup described above. It uses actual panels and independent persistence clients,
+a synthetic file API, and mocked saved-design reads. This is offline browser
+evidence. The 1920 by 2200 forced-colors viewport fits both complete panels.
+
+1. Complete the preceding competing-save and failed-GET recovery sequence. After
+   the held Save response is discarded, explicitly Reload both panels. Each
+   adopts Panels `005` at file revision 3.
+2. Hold A's next GET response after the server has captured that record. Click
+   Reload in A. In B, enter Panels `007` and Save. Require the saved cue and file
+   revision 4.
+3. Wait for A's real 20-second load timeout and retry message. Explicitly Reload
+   A again. Require the loaded cue and `007`. Deliver the old GET response last.
+   A must retain `007`, and B must remain unchanged.
+4. Download both actual CSVs and compare every field with each panel's five DOM
+   rows. Enter Panels `008` in A and Save. The captured PUT must name
+   `expected_revision: 4`, the file must advance to revision 5, and B stays `007`.
+   Download A's CSV again and compare all five rows.
+
+The complete run checks 11 exports against 55 DOM rows. `proof.json` records the
+timeout, traffic, exact source hashes and cleanup. `late-reload-newer-retry.png`
+shows both panels after the stale response. Stop on any stale draft, wrong CAS
+revision, row mismatch or browser error. The helper closes its browser, context,
+server and thread in `finally`. No video, staging or PostgreSQL claim is made.

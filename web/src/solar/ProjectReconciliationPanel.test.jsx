@@ -125,6 +125,112 @@ function canonicalReports(h, file = { response: totalsResponse() }) {
 }
 const reportsLoaded = () => screen.findByText(/No saved engineering totals|Saved engineering totals loaded/)
 
+it('contains a synchronous Reload throw, retains dirty values and releases its guard', async () => {
+  const h = fixture(); canonicalReports(h, { response: totalsResponse(4, reportValues) })
+  read(); await reportsLoaded()
+  const dirty = ['2', '0', '1', '1', '0.5']; fill(dirty)
+  h.client.loadEngineeringTotals.mockImplementationOnce(() => { throw new Error('PRIVATE_SYNC_RELOAD') })
+  reloadTotals()
+  expect(screen.getByText(/Engineering totals could not be loaded/)).toBeTruthy()
+  expect(screen.queryByText(/PRIVATE_SYNC_RELOAD/)).toBeNull()
+  expect(inputValues()).toEqual(dirty)
+  expect(screen.getByRole('button', { name: 'Reload saved engineering totals' }).disabled).toBe(false)
+  const fresh = ['3', '0', '1', '1', '0.6']
+  h.client.loadEngineeringTotals.mockResolvedValueOnce(totalsResponse(5, fresh))
+  reloadTotals(); await reportsLoaded()
+  expect(inputValues()).toEqual(fresh)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(6, fresh))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls[0][0].expectedRevision).toBe(5)
+})
+
+it('keeps the accepted Reload retry values, CSV and CAS baseline after old timeout completion', async () => {
+  const h = fixture(); canonicalReports(h, { response: totalsResponse(1, reportValues) })
+  read(); await reportsLoaded()
+  let settle
+  h.client.loadEngineeringTotals.mockReturnValueOnce(new Promise(resolve => { settle = resolve }))
+  vi.useFakeTimers(); reloadTotals()
+  const old = h.client.loadEngineeringTotals.mock.calls[1][0]
+  act(() => vi.advanceTimersByTime(RECONCILIATION_READ_TIMEOUT_MS)); vi.useRealTimers()
+  expect(old.signal.aborted).toBe(true)
+  const fresh = ['3', '0', '1', '1', '0.6']
+  h.client.loadEngineeringTotals.mockResolvedValueOnce(totalsResponse(3, fresh))
+  reloadTotals(); await reportsLoaded()
+  await act(async () => settle(totalsResponse(99, ['9', '9', '9', '9', '9'])))
+  expect(inputValues()).toEqual(fresh)
+  expect(screen.getByText('Saved engineering totals loaded.')).toBeTruthy()
+  const createObjectURL = vi.fn(() => 'blob:retry'); vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  const text = await blobText(createObjectURL.mock.calls[0][0])
+  expect(text.includes('"panels","1","3","-2","FAIL"')).toBe(true)
+  expect(text.includes('99')).toBe(false)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(4, fresh))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls[0][0].expectedRevision).toBe(3)
+})
+
+it.each([0, 1, 2, 3, 4])('preserves field %i edited during a deferred Reload with explicit conflict', async index => {
+  const h = fixture(); canonicalReports(h, { response: totalsResponse(1, reportValues) })
+  read(); await reportsLoaded(); fill(reportValues)
+  let settle
+  h.client.loadEngineeringTotals.mockReturnValueOnce(new Promise(resolve => { settle = resolve }))
+  reloadTotals()
+  const input = screen.getAllByRole('textbox')[index]
+  const changed = [...reportValues]; changed[index] = index === 4 ? '1.2' : '2'
+  expect(input.disabled).toBe(false)
+  fireEvent.change(input, { target: { value: changed[index] } })
+  const newer = ['3', '0', '1', '1', '0.6']
+  await act(async () => settle(totalsResponse(2, newer)))
+  expect(inputValues()).toEqual(changed)
+  expect(screen.getByText(/Engineering totals changed/)).toBeTruthy()
+  expect(screen.getByRole('button', { name: 'Save engineering totals' }).disabled).toBe(true)
+  h.client.loadEngineeringTotals.mockResolvedValueOnce(totalsResponse(2, newer))
+  reloadTotals(); await reportsLoaded()
+  expect(inputValues()).toEqual(newer)
+})
+
+it.each(['before-read', 'after-read'])('rejects an A-B-A old report GET that settles %s', async order => {
+  const h = fixture({ strict: true }); canonicalReports(h, { response: totalsResponse(1, reportValues) })
+  read(); await reportsLoaded()
+  let settle
+  h.client.loadEngineeringTotals.mockReturnValueOnce(new Promise(resolve => { settle = resolve }))
+  reloadTotals()
+  const old = h.client.loadEngineeringTotals.mock.calls[1][0]
+  const b = { ...binding, drawing_id: '55555555-5555-4555-8555-555555555555' }
+  h.snapshot = { binding: b, authorityKey: 'b' }; h.update({ solarBinding: b, authorityKey: 'b' })
+  h.snapshot = { binding, authorityKey: 'a' }; h.update({ solarBinding: binding, authorityKey: 'a' })
+  expect(old.signal.aborted).toBe(true)
+  const late = () => act(async () => settle(totalsResponse(99, ['9', '9', '9', '9', '9'])))
+  if (order === 'before-read') await late()
+  const fresh = ['3', '0', '1', '1', '0.6']
+  h.client.loadEngineeringTotals.mockResolvedValueOnce(totalsResponse(3, fresh))
+  read(); await reportsLoaded()
+  if (order === 'after-read') await late()
+  expect(inputValues()).toEqual(fresh)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(4, fresh))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls[0][0].expectedRevision).toBe(3)
+})
+
+it('aborts explicit Reload and clears its timer on unmount before a fresh panel accepts data', async () => {
+  const h = fixture(); canonicalReports(h)
+  read(); await reportsLoaded()
+  let settle
+  h.client.loadEngineeringTotals.mockReturnValueOnce(new Promise(resolve => { settle = resolve }))
+  vi.useFakeTimers(); reloadTotals()
+  const old = h.client.loadEngineeringTotals.mock.calls[1][0]
+  expect(vi.getTimerCount()).toBe(1)
+  h.view.unmount(); expect(old.signal.aborted).toBe(true); expect(vi.getTimerCount()).toBe(0)
+  vi.useRealTimers()
+  const fresh = fixture(); canonicalReports(fresh, { response: totalsResponse(3, reportValues) })
+  read(); await reportsLoaded(); fill(['4', '0', '1', '1', '0.7'])
+  await act(async () => settle(totalsResponse(99, ['9', '9', '9', '9', '9'])))
+  expect(inputValues()).toEqual(['4', '0', '1', '1', '0.7'])
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(fresh.client.saveEngineeringTotals.mock.calls[0][0].expectedRevision).toBe(3)
+})
+
 it('guards two Reload activations before React commits and releases after rejection', async () => {
   const h = fixture(); canonicalReports(h)
   read(); await reportsLoaded(); fill(reportValues)
