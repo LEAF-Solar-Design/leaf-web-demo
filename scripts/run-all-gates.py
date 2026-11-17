@@ -2280,7 +2280,7 @@ def build_suites() -> List[Suite]:
         Suite("server-w4g7c-03s", "server tests/test_w4g7c_03s.py", "pytest", SERVER,
               _py_pytest("tests/test_w4g7c_03s.py"), 37),
         Suite("server-w4g7b-01s", "server tests/test_w4g7b_01s.py", "pytest", SERVER,
-              _py_pytest("tests/test_w4g7b_01s.py"), 49),
+              [*_py_pytest("tests/test_w4g7b_01s.py"), "tests/test_x04_anonymous_block_intake.py"], 58),
         Suite("server-w4g7b-02s", "server tests/test_w4g7b_02s.py", "pytest", SERVER,
               _py_pytest("tests/test_w4g7b_02s.py"), 64,
               allowed_skip_reasons=(r"no AutoCAD console found; .+",)),
