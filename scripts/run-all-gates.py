@@ -109,10 +109,11 @@ import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
+from datetime import date
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 from typing import List, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 # Keep audit backoff instrumentation local to this runner. Patching the shared
 # time module also patches subprocess's POSIX timeout wait, whose internal
@@ -5513,6 +5514,15 @@ AUDIT_SUBPROCESS_TIMEOUT_S = 90                # hard safety net if npm ignores 
 AUDIT_WORST_CASE_WALL_S = (AUDIT_MAX_ATTEMPTS * AUDIT_SUBPROCESS_TIMEOUT_S
                            + sum(AUDIT_BACKOFF_S))  # == 350
 AUDIT_ADVISORY_ENDPOINT = "registry.npmjs.org/-/npm/v1/security/advisories/bulk"
+# Operator, 2026-11-17 about 12:20 PM CT, relayed by orchestrator 61e6960b: 'yes approve the 14 day exception'. Approved scope: GHSA-fc5q-39xc-vjpf only, in harness-audit-high only, expires 2026-12-01 or when a patched picomatch publishes (whichever first); production high findings stay enforced.
+# remove this entry when a patched picomatch publishes (bump the lock instead) or on expiry
+AUDIT_ADVISORY_EXCEPTIONS = {
+    "GHSA-fc5q-39xc-vjpf": {
+        "expires": "2026-12-01",
+        "reason": "picomatch ReDoS, no patched release; dev-only test toolchain",
+        "approval": "operator 2026-11-17: 'yes approve the 14 day exception'",
+    },
+}
 # Real reason phrases npm itself prints next to a 5xx transport failure. Used
 # ONLY as a same-LINE co-occurrence check (see _audit_transport_signal) —
 # never a whole-blob substring test — specifically so this can never fire on
@@ -5566,8 +5576,81 @@ def _audit_transport_signal(combined: str) -> Optional[str]:
     return None
 
 
+def _excepted_high_findings(report, lock, today,
+                            exceptions=AUDIT_ADVISORY_EXCEPTIONS) -> tuple[bool, str]:
+    """Except only known, unexpired high leaves on exclusively dev packages."""
+    vulns = report.get("vulnerabilities")
+    if not isinstance(vulns, dict):
+        return False, "no vulnerabilities map"
+
+    def leaves(name, visited):
+        if name in visited:
+            return set(), True
+        finding = vulns.get(name)
+        if not isinstance(finding, dict) or not isinstance(finding.get("via"), list):
+            return set(), False
+        visited = visited | {name}
+        ids = set()
+        for via in finding["via"]:
+            if isinstance(via, str):
+                child_ids, known = leaves(via, visited)
+                if not known:
+                    return set(), False
+                ids.update(child_ids)
+            elif isinstance(via, dict):
+                if via.get("severity") not in ("high", "critical"):
+                    continue
+                url = via.get("url")
+                if not isinstance(url, str):
+                    return set(), False
+                try:
+                    parsed = urlparse(url)
+                except ValueError:
+                    return set(), False
+                advisory = parsed.path.rsplit("/", 1)[-1]
+                if (parsed.netloc != "github.com" or
+                        not parsed.path.startswith("/advisories/") or
+                        not advisory.startswith("GHSA-")):
+                    return set(), False
+                ids.add(advisory)
+            else:
+                return set(), False
+        return ids, True
+
+    packages = lock.get("packages") if isinstance(lock, dict) else None
+    count, all_ids, expiries = 0, set(), []
+    for name, finding in vulns.items():
+        if not isinstance(finding, dict) or finding.get("severity") not in ("high", "critical"):
+            continue
+        ids, known = leaves(name, set())
+        if not known or not ids:
+            return False, f"{name}: no complete high/critical advisory leaves"
+        for advisory in sorted(ids):
+            exception = exceptions.get(advisory)
+            try:
+                expiry = date.fromisoformat(exception["expires"])
+            except (TypeError, KeyError, ValueError):
+                return False, f"{name}: {advisory} has no valid exception"
+            if today >= expiry:
+                return False, f"{name}: {advisory} exception expired"
+            expiries.append(expiry)
+        key = f"node_modules/{name}"
+        if not isinstance(packages, dict) or key not in packages:
+            return False, f"{name}: missing lockfile package"
+        for path, package in packages.items():
+            if path == key or path.endswith("/" + key):
+                if not isinstance(package, dict) or package.get("dev") is not True:
+                    return False, f"{name}: lockfile package is not dev-only"
+        count += 1
+        all_ids.update(ids)
+    if not count:
+        return False, "no high/critical findings"
+    return True, (f"{count} high/critical finding(s) excepted: "
+                  f"{sorted(all_ids)} until {min(expiries).isoformat()}")
+
+
 def _classify_npm_audit(rc: int, stdout: str, stderr: str,
-                        timed_out: bool) -> tuple[str, str]:
+                        timed_out: bool, *, lock=None, today=None) -> tuple[str, str]:
     """Classify one npm-audit attempt. Never guesses: a real JSON advisory
     report wins on its own terms regardless of exit code text, and an
     unrecognized failure with no report and no transport signal FAILS closed
@@ -5613,6 +5696,10 @@ def _classify_npm_audit(rc: int, stdout: str, stderr: str,
             detail = f"{total} advisories reported (all severities)"
         else:
             detail = "advisories reported"
+        if lock is not None and today is not None:
+            excepted, note = _excepted_high_findings(report, lock, today)
+            if excepted:
+                return "PASS", f"real advisory report: {detail}; EXCEPTED: {note}"
         return "FAIL", f"real advisory report: {detail}"
     combined = f"{stdout}\n{stderr}"
     if timed_out:
@@ -5715,6 +5802,13 @@ def run_npm_audit_suite(suite: Suite, log_path: Path) -> Result:
     argv = [str(a) for a in suite.argv]
     t0 = time.perf_counter()
     status, note = "FAIL", "no attempt executed"
+    try:
+        lock = json.loads((suite.cwd / "package-lock.json").read_text(encoding="utf-8"))
+    except Exception:
+        lock = None
+    # The operator's exception applies to this suite only.
+    if suite.id != "harness-audit-high":
+        lock = None
     with open(log_path, "w", encoding="utf-8", errors="replace") as logf:
         for i in range(1, AUDIT_MAX_ATTEMPTS + 1):
             rc, stdout, stderr, timed_out, spawn_err = _run_npm_audit_attempt(
@@ -5722,7 +5816,8 @@ def run_npm_audit_suite(suite: Suite, log_path: Path) -> Result:
             if spawn_err:
                 status, note = "FAIL", f"spawn failure: {spawn_err}"
             else:
-                status, note = _classify_npm_audit(rc, stdout, stderr, timed_out)
+                status, note = _classify_npm_audit(
+                    rc, stdout, stderr, timed_out, lock=lock, today=date.today())
             if status != "UNAVAILABLE":
                 break
             if i < AUDIT_MAX_ATTEMPTS:
@@ -5738,7 +5833,8 @@ def run_npm_audit_suite(suite: Suite, log_path: Path) -> Result:
                     f"NOT PROVEN BY AUDIT: registry unavailable, lockfile "
                     f"unchanged since {sha}")
         elif status == "PASS" and i > 1:
-            note = f"recovered from registry outage on attempt {i}/{AUDIT_MAX_ATTEMPTS}"
+            note = (f"recovered from registry outage on attempt {i}/{AUDIT_MAX_ATTEMPTS}"
+                    + (f"; {note}" if note else ""))
         logf.write((note or "(no note)") + "\n")
     return Result(suite, status,
                   {"PASS": "ok", "FAIL": "err", "UNAVAILABLE": "unavailable"}[status],
