@@ -1312,6 +1312,7 @@ def test_flagged_normal_ui_lifecycle_is_independent_sanitized_and_cleans_up(monk
     def observe(page, **kwargs):
         assert page is not None
         assert kwargs["project_name"] == ctx.created_name
+        assert kwargs["save_report"] is True
         assert kwargs["version_id"] == "v4"
         assert kwargs["grouping_label"] == ("solar-panel-groups" if mode == "fallback-label" else "Normal grouping")
         assert kwargs["oracle_values"] == dict(panels="4", optimizers="2", inverters="1", strings="2", kw_dc=None)

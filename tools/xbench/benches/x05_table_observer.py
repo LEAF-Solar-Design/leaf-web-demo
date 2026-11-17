@@ -158,7 +158,7 @@ def _grouping(page, label):
 
 
 def observe_reconciliation(page, *, base, project_name, version_id, oracle_values,
-                           out_dir, grouping_label=None):
+                           out_dir, grouping_label=None, save_report=False):
     """Return sanitized observations, not a reconciliation or persistence verdict.
 
     The output directory must already exist. Existing artifacts are never replaced.
@@ -166,6 +166,9 @@ def observe_reconciliation(page, *, base, project_name, version_id, oracle_value
     """
     owned = None
     try:
+        if type(save_report) is not bool:
+            raise ValueError
+        report_saved = False
         values = _inputs(base, project_name, version_id, oracle_values, grouping_label)
         target = Path(out_dir) / CSV_NAME
         if target.exists() or target.is_symlink() or not target.parent.is_dir():
@@ -176,6 +179,14 @@ def observe_reconciliation(page, *, base, project_name, version_id, oracle_value
         for key, title in zip(METRICS, TITLES):
             region.get_by_role("textbox", name=title + " engineering report/BOM", exact=True).fill(values[key])
         before_drafts, before_rows = _drafts(region), _rows(region)
+        if save_report:
+            save = region.get_by_role("button", name="Save engineering totals", exact=True)
+            if save.count() > 1:
+                raise ValueError
+            if save.count() == 1:
+                save.click()
+                region.get_by_text("Engineering totals saved.", exact=True).wait_for(state="visible")
+                report_saved = True
         with page.expect_download() as event:
             region.get_by_role("button", name="Download CSV", exact=True).click()
         owned = target
@@ -197,7 +208,7 @@ def observe_reconciliation(page, *, base, project_name, version_id, oracle_value
     # The validated download and initial observations remain evidence even if a
     # later, independent UI stage cannot be observed.
     result = dict(status="OBSERVED", before_rows=before_rows, csv_text=csv_text,
-                  before_drafts=before_drafts, reopened_rows=None,
+                  before_drafts=before_drafts, report_saved=report_saved, reopened_rows=None,
                   reopened_drafts=None, reopen_observed=False,
                   saved_revision_before=revision_before, saved_revision_after=None,
                   recommendations=None, grouping_status="not_observed",
@@ -211,8 +222,12 @@ def observe_reconciliation(page, *, base, project_name, version_id, oracle_value
     try:
         page.reload(wait_until="domcontentloaded")
         reopened = _select(page, project_name, version_id)
-        result["reopened_drafts"] = _drafts(reopened)
+        result["drafts_before_reopen_read"] = _drafts(reopened)
+        result["reopened_drafts"] = result["drafts_before_reopen_read"]
         result["saved_revision_after"] = _read(reopened)
+        if report_saved:
+            reopened.get_by_text("Saved engineering totals loaded.", exact=True).wait_for(state="visible")
+            result["reopened_drafts"] = _drafts(reopened)
         result["reopened_rows"] = _rows(reopened)
         result["reopen_observed"] = True
     except Exception:

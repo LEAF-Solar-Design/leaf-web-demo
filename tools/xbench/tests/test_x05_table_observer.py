@@ -40,12 +40,16 @@ class Locator:
         return self.items[index]
 
     def count(self):
+        if self.kind == "save":
+            return self.page.save_buttons
         return len(self.items) if self.items is not None else 1
 
     def wait_for(self, *, state):
         assert state == "visible"
         if self.kind == "missing" or self.page.timeout:
             raise TimeoutError("secret project/version/path")
+        if self.kind == "restore_status" and self.page.fail_restore:
+            raise TimeoutError("private restore failure")
         if self.kind == "graph_revision":
             self.page.events.append(("wait_graph_revision",))
             if self.page.missing_graph_revision or self.page.same_source_invalidated:
@@ -64,6 +68,13 @@ class Locator:
                 # Reading must happen after draft capture and must not refill.
                 assert p.captured == [0, 1, 2, 3, 4]
                 assert p.fills == 5
+                if p.persisted_drafts is not None and not p.fail_restore:
+                    p.drafts = list(p.persisted_drafts)
+                    p.restored = True
+        if self.kind == "save":
+            if p.fail_report_save:
+                raise ValueError("private save failure")
+            p.persisted_drafts = list(p.drafts)
         if self.kind == "download":
             assert p.expecting
             p.download_clicked = True
@@ -101,12 +112,12 @@ class Locator:
         if self.kind == "studio":
             return "secret DOM" if p.bad_table == "number" and i == 0 else ["12", "Unavailable", "1", "2", "4.2"][i]
         if self.kind == "delta":
-            return "Unavailable" if p.reopened or i == 1 or p.drafts[i] == "" else ["2", "", "0", "0", "0"][i]
+            return "Unavailable" if (p.reopened and not p.restored) or i == 1 or p.drafts[i] == "" else ["2", "", "0", "0", "0"][i]
         if self.kind == "verdict":
             if p.bad_table == "verdict" and i == 0:
                 return "PASS secret"
             return ("Unavailable: Supply a valid engineering report/BOM value."
-                    if p.reopened or i == 1 or p.drafts[i] == "" else ["FAIL", "", "PASS", "PASS", "PASS"][i])
+                    if (p.reopened and not p.restored) or i == 1 or p.drafts[i] == "" else ["FAIL", "", "PASS", "PASS", "PASS"][i])
         raise AssertionError(self.kind)
 
     def locator(self, selector):
@@ -117,10 +128,14 @@ class Locator:
                 rows.pop()
             return Locator(p, "list", items=rows)
         if self.kind == "verdict" and selector == "small":
-            return Locator(p, "list", items=[Locator(p, "small")] if p.reopened or self.index == 1 or p.drafts[self.index] == "" else [])
+            return Locator(p, "list", items=[Locator(p, "small")] if (p.reopened and not p.restored) or self.index == 1 or p.drafts[self.index] == "" else [])
         raise AssertionError((self.kind, selector))
 
-    def get_by_text(self, name):
+    def get_by_text(self, name, exact=False):
+        if self.kind == "region" and isinstance(name, str):
+            assert exact
+            return Locator(self.page, {"Engineering totals saved.": "save_status",
+                "Saved engineering totals loaded.": "restore_status"}[name])
         if self.kind == "groups":
             assert isinstance(name, re.Pattern) and name.fullmatch("Graph revision 7")
             assert self.page.membership_source == "manual"
@@ -134,7 +149,7 @@ class Locator:
         if self.kind == "region":
             if role == "button":
                 assert exact
-                return Locator(p, {"Read saved design": "read", "Download CSV": "download"}[name])
+                return Locator(p, {"Read saved design": "read", "Download CSV": "download", "Save engineering totals": "save"}[name])
             if role == "textbox":
                 assert exact
                 return Locator(p, "input", [title + " engineering report/BOM" for title in TITLES].index(name))
@@ -204,6 +219,8 @@ class Page:
         self.bad_table = None
         self.membership_source, self.same_source_invalidated = "manual", False
         self.groups, self.fills, self.reads = 2, 0, 0
+        self.save_buttons, self.persisted_drafts = 0, None
+        self.restored = self.fail_restore = self.fail_report_save = False
 
     def goto(self, url, *, wait_until):
         assert url == BASE + "/app?surface=solar" and wait_until == "domcontentloaded"
@@ -275,6 +292,53 @@ def test_actual_download_and_normal_reopen_without_retyping(tmp_path):
     assert [(e[1], e[2]) for e in page.events if e[0] == "click" and e[1] == "project"] == [("project", False), ("project", True)]
     assert [e for e in page.events if e[:2] == ("select", "version")] == [
         ("select", "version", {"value": "version-1"}), ("select", "version", {"value": "version-1"})]
+
+
+def test_opted_in_owned_fixture_saves_then_reads_restored_totals_without_retyping(tmp_path):
+    page = Page()
+    page.save_buttons = 1
+    result = observe(page, tmp_path, save_report=True)
+    assert result["status"] == "OBSERVED" and result["report_saved"] is True
+    assert result["reopened_drafts"] == result["before_drafts"]
+    assert result["reopened_rows"] == result["before_rows"] == EXPECTED
+    assert result["drafts_before_reopen_read"] == dict.fromkeys(VALUES, "")
+    assert page.fills == 5
+    assert [e for e in page.events if e[:2] == ("click", "save")] == [("click", "save", False)]
+
+
+@pytest.mark.parametrize("save_report,buttons", [(False, 1), (True, 0)])
+def test_default_read_only_and_legacy_source_never_save(tmp_path, save_report, buttons):
+    page = Page()
+    page.save_buttons = buttons
+    result = observe(page, tmp_path, save_report=save_report)
+    assert result["status"] == "OBSERVED" and result["report_saved"] is False
+    assert result["reopened_drafts"] == dict.fromkeys(VALUES, "")
+    assert not any(e[:2] == ("click", "save") for e in page.events)
+
+
+@pytest.mark.parametrize("failure", ["save", "ambiguous", "restore"])
+def test_explicit_save_failures_are_unreadable_and_reopen_preserves_csv(tmp_path, failure):
+    page = Page()
+    page.save_buttons = 2 if failure == "ambiguous" else 1
+    page.fail_report_save = failure == "save"
+    page.fail_restore = failure == "restore"
+    result = observe(page, tmp_path, save_report=True)
+    assert result["status"] == "UNREADABLE"
+    assert "private" not in str(result)
+    if failure == "restore":
+        assert result["csv_text"] == CSV and result["before_rows"] == EXPECTED
+        assert result["reopen_observed"] is False
+        assert (tmp_path / "x05-reconciliation.csv").read_bytes() == CSV.encode()
+    else:
+        assert result == UNREADABLE
+        assert not page.saved
+
+
+@pytest.mark.parametrize("value", [None, 1, "true"])
+def test_save_opt_in_requires_literal_boolean(tmp_path, value):
+    page = Page()
+    assert observe(page, tmp_path, save_report=value) == UNREADABLE
+    assert page.events == []
 
 
 @pytest.mark.parametrize("groups,expected,status", [(2, [{"group_count": 2}], "proposals_shown"), (0, [], "no_proposals_shown")])
