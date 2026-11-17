@@ -539,6 +539,77 @@ def module_calls(client):
     return [call[2] for call in client.calls if call[:2] == ("POST", "/api/run?wait=1")]
 
 
+def test_set_evidence_normalizes_duplicate_handles_and_omits_geometry():
+    intake = {"inserts": [{"name": "MODULE", "layer": "Modules", "handle": handle,
+                           "pt": [1, 2, 3], "private": "omit"}
+                          for handle in ("0x000a", "A", " 000A ")]}
+    original = deepcopy(intake)
+    assert x04.set_evidence(intake, DESIGN_SET["set_id"]) == {
+        "rows_total": 3, "distinct_handles": 1, "duplicate_handle_rows": 2,
+        "multiplicity": [[1, 1, 3]], "space_layout": [["model", "Model", 3]],
+        "sample_handles": ["A"]}
+    assert intake == original
+
+
+def test_set_evidence_records_array_multiplicity():
+    intake = {"inserts": [{"name": "MODULE", "layer": "Modules", "rows": 1, "columns": 3}]}
+    evidence = x04.set_evidence(intake, DESIGN_SET["set_id"])
+    assert evidence["rows_total"] == 1
+    assert evidence["multiplicity"] == [[1, 3, 1]]
+    assert evidence["distinct_handles"] == evidence["duplicate_handle_rows"] == 0
+
+
+def test_set_evidence_splits_spaces_and_layouts_without_filtering_paper():
+    intake = {"inserts": [
+        {"name": "MODULE", "layer": "Modules"},
+        {"name": "MODULE", "layer": "Modules", "space": "model", "layout": "Model"},
+        {"name": "MODULE", "layer": "Modules", "space": "paper", "layout": "Sheet 1"},
+        {"name": "OTHER", "layer": "Modules"},
+        {"name": "MODULE", "layer": "Other"}]}
+    evidence = x04.set_evidence(intake, DESIGN_SET["set_id"])
+    assert evidence["rows_total"] == 3
+    assert evidence["duplicate_handle_rows"] == 0
+    assert evidence["space_layout"] == [["model", "Model", 2], ["paper", "Sheet 1", 1]]
+
+
+@pytest.mark.parametrize("intake", [None, {"inserts": {}}, {"inserts": [None]},
+                                     {"inserts": [{"handle": []}]}])
+def test_set_evidence_malformed_intake_returns_error(intake):
+    evidence = x04.set_evidence(intake, DESIGN_SET["set_id"])
+    assert set(evidence) == {"error"}
+    assert isinstance(evidence["error"], str) and evidence["error"]
+
+
+def test_set_evidence_polylines_default_layer_and_cap_samples():
+    intake = {"polylines": [{"handle": f"0x{n:04x}"} for n in range(12)]
+              + [{"layer": "Other", "handle": "FF"}]}
+    evidence = x04.set_evidence(intake, '["LWPOLYLINE","0",""]')
+    assert evidence == {
+        "rows_total": 12, "distinct_handles": 12, "duplicate_handle_rows": 0,
+        "multiplicity": [], "space_layout": [["model", "Model", 12]],
+        "sample_handles": [f"{n:X}" for n in range(10)]}
+
+
+@pytest.mark.parametrize("oracle", [11, 12])
+def test_selection_records_set_evidence_without_changing_verdict(fixture, monkeypatch, oracle):
+    fixture["modules"] = oracle
+    client = module_client(fixture, multi=True)
+    client.intake["inserts"] *= 3
+    for entry in client.intake["inserts"]:
+        entry["handle"] = "0x000A"
+    row = grade(fixture, client)
+    assert row["set_evidence"] == {DESIGN_SET["set_id"]: {
+        "rows_total": 3, "distinct_handles": 1, "duplicate_handle_rows": 2,
+        "multiplicity": [[1, 1, 3]], "space_layout": [["model", "Model", 3]],
+        "sample_handles": ["A"]}}
+    monkeypatch.setattr(x04, "set_evidence", lambda intake, set_id: {})
+    without_evidence = grade(fixture, module_client(fixture, multi=True))
+    assert row["steps"] == without_evidence["steps"]
+    assert row["evidence"] == without_evidence["evidence"]
+    assert row["counts"] == without_evidence["counts"] == [12]
+    assert row["steps"]["5"] == ("PASS" if oracle == 12 else "FAIL")
+
+
 @pytest.mark.parametrize("stage", ["catalog", "module_listing", "module_selection", "layer"])
 def test_stop_on_later_http_error(fixture, monkeypatch, stage):
     client = module_client(fixture) if stage.startswith("module_") else FakeClient()
