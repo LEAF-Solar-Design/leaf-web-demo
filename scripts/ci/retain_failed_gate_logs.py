@@ -305,7 +305,10 @@ def _snapshot(directory, name, limit):
             stream.seek(marker)
             head = stream.read(min(head_budget, before.st_size - marker))
             if marker + len(head) < before.st_size:
-                head = head[:head.rfind(b"\n") + 1]
+                last_newline = head.rfind(b"\n")
+                # Long diagnostic lines must not erase the first failure window.
+                if last_newline >= min(32 * 1024, head_budget):
+                    head = head[:last_newline + 1]
             if marker + len(head) >= tail_start or limit < tail_budget + len(notice):
                 stream.seek(marker)
                 tail = stream.read(min(limit, before.st_size - marker))
