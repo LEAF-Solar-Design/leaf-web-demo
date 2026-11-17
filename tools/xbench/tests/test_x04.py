@@ -288,6 +288,8 @@ def test_dependency_report_absent(fixture):
     row = grade(fixture)
     assert row["steps"]["2"] == "FAIL"
     assert row["evidence"]["2"] == "no dependency report exposed"
+    assert row["dependency_report"] is None
+    assert row["missing_deps"] == []
 
 
 def test_dependency_report_precedence():
@@ -311,6 +313,55 @@ def test_dependency_inventory_needs_every_disposition(fixture):
     assert grade(fixture, client)["steps"]["2"] == "PASS"
     del client.upload["dependencies"][1]["disposition"]
     assert grade(fixture, client)["steps"]["2"] == "FAIL"
+
+
+def test_dependency_evidence_names_only_missing_dependencies(fixture):
+    client = FakeClient()
+    fixture["deps"] = [{"kind": "xref", "name": "reference"},
+                       {"kind": "font", "name": "face"},
+                       {"kind": "image", "name": "site.png"}]
+    client.upload["dependencies"] = [
+        {"kind": "xref", "name": "reference", "disposition": "bound"},
+        {"kind": "font", "name": "face"}]
+    row = grade(fixture, client)
+    assert row["steps"]["2"] == "FAIL"
+    assert row["evidence"]["2"] == (
+        "dependency missing or without disposition: 2 of 3 missing: font:face; image:site.png")
+    assert row["missing_deps"] == fixture["deps"][1:]
+    assert row["dependency_report"] == {"dependencies": client.upload["dependencies"]}
+
+
+@pytest.mark.parametrize("source", ["upload", "provenance", "intake"])
+def test_complete_dependencies_save_report_and_empty_missing_list(fixture, source):
+    client = FakeClient()
+    fixture["deps"] = [{"kind": "xref", "name": "reference"},
+                       {"kind": "font", "name": "face"}]
+    dependencies = [{**fixture["deps"][0], "disposition": "bound"},
+                    {**fixture["deps"][1], "disposition": "font remapped"}]
+    getattr(client, source)["dependencies"] = dependencies
+    client.upload["checkout_capability"] = CAP
+    client.intake["arbitrary_text"] = CAP
+    row = grade(fixture, client)
+    assert row["steps"]["2"] == "PASS"
+    assert row["evidence"]["2"] == "dependency dispositions complete"
+    assert row["missing_deps"] == []
+    assert row["dependency_report"] == {"dependencies": dependencies}
+    assert CAP not in json.dumps(row)
+
+
+def test_missing_dependency_evidence_caps_entries_without_truncating_names(fixture):
+    client = FakeClient()
+    fixture["deps"] = [{"kind": "xref", "name": f"reference-{n:02}-" + "x" * 100}
+                       for n in range(25)]
+    client.upload["dependencies"] = []
+    row = grade(fixture, client)
+    assert row["steps"]["2"] == "FAIL"
+    prefix = "dependency missing or without disposition: 25 of 25 missing: "
+    assert row["evidence"]["2"].startswith(prefix)
+    assert row["evidence"]["2"][len(prefix):].split("; ") == [
+        f"xref:{dep['name']}" for dep in fixture["deps"][:20]]
+    assert row["missing_deps"] == fixture["deps"]
+    assert len(row["missing_deps"]) == 25
 
 
 @pytest.mark.parametrize("dep,record,expected", [

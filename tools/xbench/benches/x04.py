@@ -255,6 +255,7 @@ def grade_files(client, transport, *, project, fixtures, clock=time.monotonic,
     for fixture in fixtures:
         fid = fixture["id"]
         row = {"id": fid, "timings": {}, "statuses": {}, "counts": [], "limits": [],
+               "missing_deps": [], "dependency_report": None,
                "steps": {str(n): "UNREADABLE" for n in range(1, 7)},
                "evidence": {str(n): "upload unavailable" for n in range(1, 7)},
                "insert_fixture": fixture.get("module_entity") == "INSERT" and
@@ -311,14 +312,18 @@ def grade_files(client, transport, *, project, fixtures, clock=time.monotonic,
 
         provenance = adoption.get("provenance", {})
         report = find_dependency_report(upload, provenance, intake)
+        row["dependency_report"] = report
         if report is None:
             mark(2, "FAIL", "no dependency report exposed")
         elif "deps" not in fixture:
             mark(2, "UNREADABLE", "dependency inventory unavailable")
         else:
-            ok = all(_dependency_present(report, dep) for dep in fixture["deps"])
+            missing = [dep for dep in fixture["deps"] if not _dependency_present(report, dep)]
+            row["missing_deps"] = [{"kind": dep["kind"], "name": dep["name"]} for dep in missing]
+            ok = not missing
             mark(2, "PASS" if ok else "FAIL", "dependency dispositions complete" if ok else
-                 "dependency missing or without disposition")
+                 f"dependency missing or without disposition: {len(missing)} of {len(fixture['deps'])} missing: "
+                 + "; ".join(f"{dep['kind']}:{dep['name']}" for dep in missing[:20]))
         retained = find_sha(provenance, fixture["sha256"]) or find_sha(upload, fixture["sha256"])
         mark(3, "PASS" if retained else "FAIL", "original SHA-256 exposed" if retained else
              "original SHA-256 not exposed")
