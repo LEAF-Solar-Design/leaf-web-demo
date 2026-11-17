@@ -3854,6 +3854,142 @@ def test_npm_audit_real_advisory_report_counts_only_at_or_above_the_configured_l
     assert "1 advisories at/above high (2 total across all severities)" in note
 
 
+@pytest.fixture
+def picomatch_audit_report_and_lock():
+    report = {
+        "vulnerabilities": {
+            "picomatch": {"severity": "high", "via": [{
+                "severity": "high",
+                "url": "https://github.com/advisories/GHSA-fc5q-39xc-vjpf",
+            }]},
+            "fdir": {"severity": "high", "via": ["picomatch"]},
+            "tinyglobby": {"severity": "high", "via": ["fdir", "picomatch"]},
+            "vite": {"severity": "high", "via": ["tinyglobby"]},
+            "vitest": {"severity": "high", "via": ["vite"]},
+        },
+        "metadata": {"vulnerabilities": {"high": 5, "total": 5}},
+    }
+    lock = {"packages": {
+        f"node_modules/{name}": {"dev": True}
+        for name in report["vulnerabilities"]
+    }}
+    return report, lock
+
+
+def test_npm_audit_dev_picomatch_exception_passes(picomatch_audit_report_and_lock):
+    g = _load_runner()
+    report, lock = picomatch_audit_report_and_lock
+    status, note = g._classify_npm_audit(
+        1, json.dumps(report), "", False, lock=lock, today=g.date(2026, 11, 20))
+    assert status == "PASS"
+    assert "EXCEPTED" in note and "GHSA-fc5q-39xc-vjpf" in note
+    assert "5 high/critical finding(s)" in note and "until 2026-12-01" in note
+
+
+def test_npm_audit_picomatch_exception_expires(picomatch_audit_report_and_lock):
+    g = _load_runner()
+    report, lock = picomatch_audit_report_and_lock
+    status, _ = g._classify_npm_audit(
+        1, json.dumps(report), "", False, lock=lock, today=g.date(2026, 12, 1))
+    assert status == "FAIL"
+
+
+@pytest.mark.parametrize("entry", [{"dev": False}, {}])
+@pytest.mark.parametrize("path", ["node_modules/picomatch",
+                                  "node_modules/other/node_modules/picomatch"])
+def test_npm_audit_picomatch_exception_rejects_production_or_unknown_dev(
+        picomatch_audit_report_and_lock, entry, path):
+    g = _load_runner()
+    report, lock = picomatch_audit_report_and_lock
+    lock["packages"][path] = entry
+    status, _ = g._classify_npm_audit(
+        1, json.dumps(report), "", False, lock=lock, today=g.date(2026, 11, 20))
+    assert status == "FAIL"
+
+
+def test_npm_audit_picomatch_exception_rejects_unrelated_high(picomatch_audit_report_and_lock):
+    g = _load_runner()
+    report, lock = picomatch_audit_report_and_lock
+    report["vulnerabilities"]["other"] = {"severity": "high", "via": [{
+        "severity": "high", "url": "https://github.com/advisories/GHSA-xxxx-yyyy-zzzz",
+    }]}
+    lock["packages"]["node_modules/other"] = {"dev": True}
+    status, _ = g._classify_npm_audit(
+        1, json.dumps(report), "", False, lock=lock, today=g.date(2026, 11, 20))
+    assert status == "FAIL"
+
+
+def test_npm_audit_picomatch_exception_ignores_moderate_leaf(picomatch_audit_report_and_lock):
+    g = _load_runner()
+    report, lock = picomatch_audit_report_and_lock
+    report["vulnerabilities"]["vite"]["via"].append({
+        "severity": "moderate", "url": "https://github.com/advisories/GHSA-8g5g-mxqh-grgj",
+    })
+    status, note = g._classify_npm_audit(
+        1, json.dumps(report), "", False, lock=lock, today=g.date(2026, 11, 20))
+    assert status == "PASS" and "EXCEPTED" in note
+
+
+def test_npm_audit_picomatch_exception_requires_lock(picomatch_audit_report_and_lock):
+    g = _load_runner()
+    report, _ = picomatch_audit_report_and_lock
+    status, _ = g._classify_npm_audit(
+        1, json.dumps(report), "", False, lock=None, today=g.date(2026, 11, 20))
+    assert status == "FAIL"
+
+
+def test_npm_audit_picomatch_exception_rejects_leafless_cycle():
+    g = _load_runner()
+    report = {"vulnerabilities": {
+        "a": {"severity": "high", "via": ["b"]},
+        "b": {"severity": "high", "via": ["a"]},
+    }}
+    lock = {"packages": {"node_modules/a": {"dev": True},
+                         "node_modules/b": {"dev": True}}}
+    status, _ = g._classify_npm_audit(
+        1, json.dumps(report), "", False, lock=lock, today=g.date(2026, 11, 20))
+    assert status == "FAIL"
+
+
+@pytest.mark.parametrize("via", [["unknown"], [{"severity": "high"}],
+                                 [{"severity": "high", "url": "https://["}]])
+def test_npm_audit_picomatch_exception_rejects_unknown_leaves(
+        picomatch_audit_report_and_lock, via):
+    g = _load_runner()
+    report, lock = picomatch_audit_report_and_lock
+    report["vulnerabilities"]["picomatch"]["via"] = via
+    excepted, note = g._excepted_high_findings(report, lock, g.date(2026, 11, 20))
+    assert not excepted and "picomatch" in note
+
+
+@pytest.mark.parametrize("suite_id,lock_state,expected", [
+    ("harness-audit-high", "dev", "PASS"),
+    ("another-audit", "dev", "FAIL"),
+    ("harness-audit-high", "missing", "FAIL"),
+    ("harness-audit-high", "invalid", "FAIL"),
+])
+def test_npm_audit_exception_runner_scope_and_lock_loading(
+        tmp_path, monkeypatch, picomatch_audit_report_and_lock, suite_id, lock_state, expected):
+    g = _load_runner()
+    report, lock = picomatch_audit_report_and_lock
+
+    class FixedDate(g.date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 11, 20)
+
+    monkeypatch.setattr(g, "date", FixedDate)
+    monkeypatch.setattr(g, "_run_npm_audit_attempt",
+                        lambda *args, **kwargs: (1, json.dumps(report), "", False, None))
+    if lock_state != "missing":
+        (tmp_path / "package-lock.json").write_text(
+            json.dumps(lock) if lock_state == "dev" else "invalid JSON", encoding="utf-8")
+    suite = g.Suite(suite_id, "audit stub", "npm-audit", tmp_path, ["npm"], None)
+    result = g.run_npm_audit_suite(suite, tmp_path / "audit.log")
+    assert result.status == expected
+    assert ("EXCEPTED" in result.note) == (expected == "PASS")
+
+
 def test_npm_audit_bare_5xx_digit_in_unrelated_text_does_not_mask_a_real_failure():
     """The exact repro that caught round-1 blocker 1: a whole-blob
     `re.search(r'\\b5\\d\\d\\b')` classified ANY bare 500-599 number as a
