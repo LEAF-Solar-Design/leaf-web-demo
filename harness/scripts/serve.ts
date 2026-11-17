@@ -55,6 +55,8 @@ import type { AgentGrant, HarnessPorts, OAuthGrantProvider } from "../src/ports/
 import type { ConverseRunner } from "../src/ports/converse.js";
 import { SpineTurnAdapter } from "../src/agent/spineTurnAdapter.js";
 import { PortfolioProposalService } from "../src/agent/portfolioProposal.js";
+import { SdkProjectVideoInspector } from "../src/agent/projectVideoInspection.js";
+import { SdkRepoEditor } from "../src/vendor/mushy-author/ports/impl/repoEditRunner.js";
 import { AgentSdkRunner } from "../src/ports/impl/agentSdkRunner.js";
 import { BrokerApsClientHttp } from "../src/ports/impl/brokerApsClient.js";
 import { ConverseSdkRunner } from "../src/ports/impl/converseSdkRunner.js";
@@ -457,7 +459,10 @@ async function main(): Promise<void> {
     : undefined;
   const serverOptions = {
     portfolioProposals: new PortfolioProposalService({ oauth: ports.oauth }),
-    ...(projectRepositoryEdits ? { projectRepositoryEdits } : {}),
+    ...(projectRepositoryEdits ? { projectRepositoryEdits,
+      projectSourceAuthoring: { oauth: ports.oauth,
+        editor: new SdkRepoEditor({ maxTurns: 24, maxWallTimeMs: 240000 }),
+        videoInspector: new SdkProjectVideoInspector() } } : {}),
     ...(standardServicesApproval ? { standardServicesApproval } : {}),
     ...(glugMushyAuthor ? { glugMushyAuthor } : {}),
     ...(ports.labDocuments ? { labDocuments: ports.labDocuments } : {}),
