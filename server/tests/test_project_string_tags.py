@@ -1,12 +1,10 @@
 """Real source TEXT splicing and mounted canonical publication, without parser stubs."""
 from copy import deepcopy
-import base64
 import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
-import zlib
 
 import pytest
 
@@ -33,64 +31,322 @@ def groups(*rows):
     return "".join(f"{code}\n{value}\n" for code, value in rows).encode("latin-1")
 
 
-# ezdxf 1.4.3 R2010 source, preserved verbatim; no runtime ezdxf dependency.
-_PACKED_SOURCE = (
-    "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"
-    "7lhT"
+# ezdxf 1.4.3 R2010 source as readable bytes; exact producer hash below.
+# No opaque compression, decoding dependency, or security-scan exemption.
+_REAL_SOURCE = (
+    b'  0\nSECTION\n  2\nHEADER\n  9\n$ACADVER\n  1\nAC1024\n  9\n$ACADMAINTVER\n'
+    b' 70\n6\n  9\n$DWGCODEPAGE\n  3\nANSI_1252\n  9\n$LASTSAVEDBY\n  1\nezdxf\n'
+    b'  9\n$INSBASE\n 10\n0.0\n 20\n0.0\n 30\n0.0\n  9\n$EXTMIN\n'
+    b' 10\n1e+20\n 20\n1e+20\n 30\n1e+20\n  9\n$EXTMAX\n 10\n-1e+20\n'
+    b' 20\n-1e+20\n 30\n-1e+20\n  9\n$LIMMIN\n 10\n0.0\n 20\n0.0\n'
+    b'  9\n$LIMMAX\n 10\n420.0\n 20\n297.0\n  9\n$ORTHOMODE\n 70\n0\n'
+    b'  9\n$REGENMODE\n 70\n1\n  9\n$FILLMODE\n 70\n1\n  9\n$QTEXTMODE\n'
+    b' 70\n0\n  9\n$MIRRTEXT\n 70\n1\n  9\n$LTSCALE\n 40\n1.0\n'
+    b'  9\n$ATTMODE\n 70\n1\n  9\n$TEXTSIZE\n 40\n2.5\n  9\n$TRACEWID\n'
+    b' 40\n1.0\n  9\n$TEXTSTYLE\n  7\nStandard\n  9\n$CLAYER\n  8\n0\n'
+    b'  9\n$CELTYPE\n  6\nByLayer\n  9\n$CECOLOR\n 62\n256\n  9\n$CELTSCALE\n'
+    b' 40\n1.0\n  9\n$DISPSILH\n 70\n0\n  9\n$DIMSCALE\n 40\n1.0\n'
+    b'  9\n$DIMASZ\n 40\n2.5\n  9\n$DIMEXO\n 40\n0.625\n  9\n$DIMDLI\n'
+    b' 40\n3.75\n  9\n$DIMRND\n 40\n0.0\n  9\n$DIMDLE\n 40\n0.0\n'
+    b'  9\n$DIMEXE\n 40\n1.25\n  9\n$DIMTP\n 40\n0.0\n  9\n$DIMTM\n'
+    b' 40\n0.0\n  9\n$DIMTXT\n 40\n2.5\n  9\n$DIMCEN\n 40\n2.5\n'
+    b'  9\n$DIMTSZ\n 40\n0.0\n  9\n$DIMTOL\n 70\n0\n  9\n$DIMLIM\n'
+    b' 70\n0\n  9\n$DIMTIH\n 70\n0\n  9\n$DIMTOH\n 70\n0\n'
+    b'  9\n$DIMSE1\n 70\n0\n  9\n$DIMSE2\n 70\n0\n  9\n$DIMTAD\n'
+    b' 70\n1\n  9\n$DIMZIN\n 70\n8\n  9\n$DIMBLK\n  1\n\n'
+    b'  9\n$DIMASO\n 70\n1\n  9\n$DIMSHO\n 70\n1\n  9\n$DIMPOST\n'
+    b'  1\n\n  9\n$DIMAPOST\n  1\n\n  9\n$DIMALT\n 70\n0\n'
+    b'  9\n$DIMALTD\n 70\n3\n  9\n$DIMALTF\n 40\n0.03937007874\n  9\n$DIMLFAC\n'
+    b' 40\n1.0\n  9\n$DIMTOFL\n 70\n1\n  9\n$DIMTVP\n 40\n0.0\n'
+    b'  9\n$DIMTIX\n 70\n0\n  9\n$DIMSOXD\n 70\n0\n  9\n$DIMSAH\n'
+    b' 70\n0\n  9\n$DIMBLK1\n  1\n\n  9\n$DIMBLK2\n  1\n\n'
+    b'  9\n$DIMSTYLE\n  2\nISO-25\n  9\n$DIMCLRD\n 70\n0\n  9\n$DIMCLRE\n'
+    b' 70\n0\n  9\n$DIMCLRT\n 70\n0\n  9\n$DIMTFAC\n 40\n1.0\n'
+    b'  9\n$DIMGAP\n 40\n0.625\n  9\n$DIMJUST\n 70\n0\n  9\n$DIMSD1\n'
+    b' 70\n0\n  9\n$DIMSD2\n 70\n0\n  9\n$DIMTOLJ\n 70\n0\n'
+    b'  9\n$DIMTZIN\n 70\n8\n  9\n$DIMALTZ\n 70\n0\n  9\n$DIMALTTZ\n'
+    b' 70\n0\n  9\n$DIMUPT\n 70\n0\n  9\n$DIMDEC\n 70\n2\n'
+    b'  9\n$DIMTDEC\n 70\n2\n  9\n$DIMALTU\n 70\n2\n  9\n$DIMALTTD\n'
+    b' 70\n3\n  9\n$DIMTXSTY\n  7\nStandard\n  9\n$DIMAUNIT\n 70\n0\n'
+    b'  9\n$DIMADEC\n 70\n0\n  9\n$DIMALTRND\n 40\n0.0\n  9\n$DIMAZIN\n'
+    b' 70\n0\n  9\n$DIMDSEP\n 70\n44\n  9\n$DIMATFIT\n 70\n3\n'
+    b'  9\n$DIMFRAC\n 70\n0\n  9\n$DIMLDRBLK\n  1\n\n  9\n$DIMLUNIT\n'
+    b' 70\n2\n  9\n$DIMLWD\n 70\n-2\n  9\n$DIMLWE\n 70\n-2\n'
+    b'  9\n$DIMTMOVE\n 70\n0\n  9\n$DIMFXL\n 40\n1.0\n  9\n$DIMFXLON\n'
+    b' 70\n0\n  9\n$DIMJOGANG\n 40\n0.785398163397\n  9\n$DIMTFILL\n 70\n0\n'
+    b'  9\n$DIMTFILLCLR\n 70\n0\n  9\n$DIMARCSYM\n 70\n0\n  9\n$DIMLTYPE\n'
+    b'  6\n\n  9\n$DIMLTEX1\n  6\n\n  9\n$DIMLTEX2\n  6\n\n'
+    b'  9\n$DIMTXTDIRECTION\n 70\n0\n  9\n$LUNITS\n 70\n2\n  9\n$LUPREC\n'
+    b' 70\n4\n  9\n$SKETCHINC\n 40\n1.0\n  9\n$FILLETRAD\n 40\n10.0\n'
+    b'  9\n$AUNITS\n 70\n0\n  9\n$AUPREC\n 70\n2\n  9\n$MENU\n'
+    b'  1\n.\n  9\n$ELEVATION\n 40\n0.0\n  9\n$PELEVATION\n 40\n0.0\n'
+    b'  9\n$THICKNESS\n 40\n0.0\n  9\n$LIMCHECK\n 70\n0\n  9\n$CHAMFERA\n'
+    b' 40\n0.0\n  9\n$CHAMFERB\n 40\n0.0\n  9\n$CHAMFERC\n 40\n0.0\n'
+    b'  9\n$CHAMFERD\n 40\n0.0\n  9\n$SKPOLY\n 70\n0\n  9\n$TDCREATE\n'
+    b' 40\n2461361.9604166667\n  9\n$TDUCREATE\n 40\n2458532.153996898\n  9\n$TDUPDATE\n 40\n2461361.9604166667\n'
+    b'  9\n$TDUUPDATE\n 40\n2458532.1544311\n  9\n$TDINDWG\n 40\n0.0\n  9\n$TDUSRTIMER\n'
+    b' 40\n0.0\n  9\n$USRTIMER\n 70\n1\n  9\n$ANGBASE\n 50\n0.0\n'
+    b'  9\n$ANGDIR\n 70\n0\n  9\n$PDMODE\n 70\n0\n  9\n$PDSIZE\n'
+    b' 40\n0.0\n  9\n$PLINEWID\n 40\n0.0\n  9\n$SPLFRAME\n 70\n0\n'
+    b'  9\n$SPLINETYPE\n 70\n6\n  9\n$SPLINESEGS\n 70\n8\n  9\n$HANDSEED\n'
+    b'  5\n35\n  9\n$SURFTAB1\n 70\n6\n  9\n$SURFTAB2\n 70\n6\n'
+    b'  9\n$SURFTYPE\n 70\n6\n  9\n$SURFU\n 70\n6\n  9\n$SURFV\n'
+    b' 70\n6\n  9\n$UCSBASE\n  2\n\n  9\n$UCSNAME\n  2\n\n'
+    b'  9\n$UCSORG\n 10\n0.0\n 20\n0.0\n 30\n0.0\n  9\n$UCSXDIR\n'
+    b' 10\n1.0\n 20\n0.0\n 30\n0.0\n  9\n$UCSYDIR\n 10\n0.0\n'
+    b' 20\n1.0\n 30\n0.0\n  9\n$UCSORTHOREF\n  2\n\n  9\n$UCSORTHOVIEW\n'
+    b' 70\n0\n  9\n$UCSORGTOP\n 10\n0.0\n 20\n0.0\n 30\n0.0\n'
+    b'  9\n$UCSORGBOTTOM\n 10\n0.0\n 20\n0.0\n 30\n0.0\n  9\n$UCSORGLEFT\n'
+    b' 10\n0.0\n 20\n0.0\n 30\n0.0\n  9\n$UCSORGRIGHT\n 10\n0.0\n'
+    b' 20\n0.0\n 30\n0.0\n  9\n$UCSORGFRONT\n 10\n0.0\n 20\n0.0\n'
+    b' 30\n0.0\n  9\n$UCSORGBACK\n 10\n0.0\n 20\n0.0\n 30\n0.0\n'
+    b'  9\n$PUCSBASE\n  2\n\n  9\n$PUCSNAME\n  2\n\n  9\n$PUCSORG\n'
+    b' 10\n0.0\n 20\n0.0\n 30\n0.0\n  9\n$PUCSXDIR\n 10\n1.0\n'
+    b' 20\n0.0\n 30\n0.0\n  9\n$PUCSYDIR\n 10\n0.0\n 20\n1.0\n'
+    b' 30\n0.0\n  9\n$PUCSORTHOREF\n  2\n\n  9\n$PUCSORTHOVIEW\n 70\n0\n'
+    b'  9\n$PUCSORGTOP\n 10\n0.0\n 20\n0.0\n 30\n0.0\n  9\n$PUCSORGBOTTOM\n'
+    b' 10\n0.0\n 20\n0.0\n 30\n0.0\n  9\n$PUCSORGLEFT\n 10\n0.0\n'
+    b' 20\n0.0\n 30\n0.0\n  9\n$PUCSORGRIGHT\n 10\n0.0\n 20\n0.0\n'
+    b' 30\n0.0\n  9\n$PUCSORGFRONT\n 10\n0.0\n 20\n0.0\n 30\n0.0\n'
+    b'  9\n$PUCSORGBACK\n 10\n0.0\n 20\n0.0\n 30\n0.0\n  9\n$USERI1\n'
+    b' 70\n0\n  9\n$USERI2\n 70\n0\n  9\n$USERI3\n 70\n0\n'
+    b'  9\n$USERI4\n 70\n0\n  9\n$USERI5\n 70\n0\n  9\n$USERR1\n'
+    b' 40\n0.0\n  9\n$USERR2\n 40\n0.0\n  9\n$USERR3\n 40\n0.0\n'
+    b'  9\n$USERR4\n 40\n0.0\n  9\n$USERR5\n 40\n0.0\n  9\n$WORLDVIEW\n'
+    b' 70\n1\n  9\n$SHADEDGE\n 70\n3\n  9\n$SHADEDIF\n 70\n70\n'
+    b'  9\n$TILEMODE\n 70\n1\n  9\n$MAXACTVP\n 70\n64\n  9\n$PINSBASE\n'
+    b' 10\n0.0\n 20\n0.0\n 30\n0.0\n  9\n$PLIMCHECK\n 70\n0\n'
+    b'  9\n$PEXTMIN\n 10\n1e+20\n 20\n1e+20\n 30\n1e+20\n  9\n$PEXTMAX\n'
+    b' 10\n-1e+20\n 20\n-1e+20\n 30\n-1e+20\n  9\n$PLIMMIN\n 10\n0.0\n'
+    b' 20\n0.0\n  9\n$PLIMMAX\n 10\n420.0\n 20\n297.0\n  9\n$UNITMODE\n'
+    b' 70\n0\n  9\n$VISRETAIN\n 70\n1\n  9\n$PLINEGEN\n 70\n0\n'
+    b'  9\n$PSLTSCALE\n 70\n1\n  9\n$TREEDEPTH\n 70\n3020\n  9\n$CMLSTYLE\n'
+    b'  2\nStandard\n  9\n$CMLJUST\n 70\n0\n  9\n$CMLSCALE\n 40\n20.0\n'
+    b'  9\n$PROXYGRAPHICS\n 70\n1\n  9\n$MEASUREMENT\n 70\n1\n  9\n$CELWEIGHT\n'
+    b'370\n-1\n  9\n$ENDCAPS\n280\n0\n  9\n$JOINSTYLE\n280\n0\n'
+    b'  9\n$LWDISPLAY\n290\n0\n  9\n$INSUNITS\n 70\n1\n  9\n$HYPERLINKBASE\n'
+    b'  1\n\n  9\n$STYLESHEET\n  1\n\n  9\n$XEDIT\n290\n1\n'
+    b'  9\n$CEPSNTYPE\n380\n0\n  9\n$PSTYLEMODE\n290\n1\n  9\n$FINGERPRINTGUID\n'
+    b'  2\n{67CB5B24-502D-4E1E-A004-34D9DC0309A6}\n  9\n$VERSIONGUID\n  2\n{19B8A595-A104-46D6-A3BD-CCD5D40049D5}\n  9\n$EXTNAMES\n290\n1\n'
+    b'  9\n$PSVPSCALE\n 40\n0.0\n  9\n$OLESTARTUP\n290\n0\n  9\n$SORTENTS\n'
+    b'280\n127\n  9\n$INDEXCTL\n280\n0\n  9\n$HIDETEXT\n280\n1\n'
+    b'  9\n$XCLIPFRAME\n280\n1\n  9\n$HALOGAP\n280\n0\n  9\n$OBSCOLOR\n'
+    b' 70\n257\n  9\n$OBSLTYPE\n280\n0\n  9\n$INTERSECTIONDISPLAY\n280\n0\n'
+    b'  9\n$INTERSECTIONCOLOR\n 70\n257\n  9\n$DIMASSOC\n280\n2\n  9\n$PROJECTNAME\n'
+    b'  1\n\n  9\n$CAMERADISPLAY\n290\n0\n  9\n$LENSLENGTH\n 40\n50.0\n'
+    b'  9\n$CAMERAHEIGHT\n 40\n0.0\n  9\n$STEPSPERSEC\n 40\n24.0\n  9\n$STEPSIZE\n'
+    b' 40\n100.0\n  9\n$3DDWFPREC\n 40\n2.0\n  9\n$PSOLWIDTH\n 40\n0.005\n'
+    b'  9\n$PSOLHEIGHT\n 40\n0.08\n  9\n$LOFTANG1\n 40\n1.570796326795\n  9\n$LOFTANG2\n'
+    b' 40\n1.570796326795\n  9\n$LOFTMAG1\n 40\n0.0\n  9\n$LOFTMAG2\n 40\n0.0\n'
+    b'  9\n$LOFTPARAM\n 70\n7\n  9\n$LOFTNORMALS\n280\n1\n  9\n$LATITUDE\n'
+    b' 40\n37.795\n  9\n$LONGITUDE\n 40\n-122.394\n  9\n$NORTHDIRECTION\n 40\n0.0\n'
+    b'  9\n$TIMEZONE\n 70\n-8000\n  9\n$LIGHTGLYPHDISPLAY\n280\n1\n  9\n$TILEMODELIGHTSYNCH\n'
+    b'280\n1\n  9\n$CMATERIAL\n347\n20\n  9\n$SOLIDHIST\n280\n0\n'
+    b'  9\n$SHOWHIST\n280\n1\n  9\n$DWFFRAME\n280\n2\n  9\n$DGNFRAME\n'
+    b'280\n2\n  9\n$REALWORLDSCALE\n290\n1\n  9\n$INTERFERECOLOR\n 62\n256\n'
+    b'  9\n$CSHADOW\n280\n0\n  9\n$SHADOWPLANELOCATION\n 40\n0.0\n  0\nENDSEC\n'
+    b'  0\nSECTION\n  2\nCLASSES\n  0\nCLASS\n  1\nACDBDICTIONARYWDFLT\n  2\nAcDbDictionaryWithDefault\n'
+    b'  3\nObjectDBX Classes\n 90\n0\n 91\n0\n280\n0\n281\n0\n'
+    b'  0\nCLASS\n  1\nSUN\n  2\nAcDbSun\n  3\nSCENEOE\n 90\n1153\n'
+    b' 91\n0\n280\n0\n281\n0\n  0\nCLASS\n  1\nVISUALSTYLE\n'
+    b'  2\nAcDbVisualStyle\n  3\nObjectDBX Classes\n 90\n4095\n 91\n0\n280\n0\n'
+    b'281\n0\n  0\nCLASS\n  1\nMATERIAL\n  2\nAcDbMaterial\n  3\nObjectDBX Classes\n'
+    b' 90\n1153\n 91\n0\n280\n0\n281\n0\n  0\nCLASS\n'
+    b'  1\nSCALE\n  2\nAcDbScale\n  3\nObjectDBX Classes\n 90\n1153\n 91\n0\n'
+    b'280\n0\n281\n0\n  0\nCLASS\n  1\nTABLESTYLE\n  2\nAcDbTableStyle\n'
+    b'  3\nObjectDBX Classes\n 90\n4095\n 91\n0\n280\n0\n281\n0\n'
+    b'  0\nCLASS\n  1\nMLEADERSTYLE\n  2\nAcDbMLeaderStyle\n  3\nACDB_MLEADERSTYLE_CLASS\n 90\n4095\n'
+    b' 91\n0\n280\n0\n281\n0\n  0\nCLASS\n  1\nDICTIONARYVAR\n'
+    b'  2\nAcDbDictionaryVar\n  3\nObjectDBX Classes\n 90\n0\n 91\n0\n280\n0\n'
+    b'281\n0\n  0\nCLASS\n  1\nCELLSTYLEMAP\n  2\nAcDbCellStyleMap\n  3\nObjectDBX Classes\n'
+    b' 90\n1152\n 91\n0\n280\n0\n281\n0\n  0\nCLASS\n'
+    b'  1\nMENTALRAYRENDERSETTINGS\n  2\nAcDbMentalRayRenderSettings\n  3\nSCENEOE\n 90\n1024\n 91\n0\n'
+    b'280\n0\n281\n0\n  0\nCLASS\n  1\nACDBDETAILVIEWSTYLE\n  2\nAcDbDetailViewStyle\n'
+    b'  3\nObjectDBX Classes\n 90\n1025\n 91\n0\n280\n0\n281\n0\n'
+    b'  0\nCLASS\n  1\nACDBSECTIONVIEWSTYLE\n  2\nAcDbSectionViewStyle\n  3\nObjectDBX Classes\n 90\n1025\n'
+    b' 91\n0\n280\n0\n281\n0\n  0\nCLASS\n  1\nRASTERVARIABLES\n'
+    b'  2\nAcDbRasterVariables\n  3\nISM\n 90\n0\n 91\n0\n280\n0\n'
+    b'281\n0\n  0\nCLASS\n  1\nACDBPLACEHOLDER\n  2\nAcDbPlaceHolder\n  3\nObjectDBX Classes\n'
+    b' 90\n0\n 91\n0\n280\n0\n281\n0\n  0\nCLASS\n'
+    b'  1\nLAYOUT\n  2\nAcDbLayout\n  3\nObjectDBX Classes\n 90\n0\n 91\n0\n'
+    b'280\n0\n281\n0\n  0\nENDSEC\n  0\nSECTION\n  2\nTABLES\n'
+    b'  0\nTABLE\n  2\nVPORT\n  5\n8\n330\n0\n100\nAcDbSymbolTable\n'
+    b' 70\n1\n  0\nVPORT\n  5\n23\n330\n8\n100\nAcDbSymbolTableRecord\n'
+    b'100\nAcDbViewportTableRecord\n  2\n*Active\n 70\n0\n 10\n0.0\n 20\n0.0\n'
+    b' 11\n1.0\n 21\n1.0\n 12\n0.0\n 22\n0.0\n 13\n0.0\n'
+    b' 23\n0.0\n 14\n0.5\n 24\n0.5\n 15\n0.5\n 25\n0.5\n'
+    b' 16\n0.0\n 26\n0.0\n 36\n1.0\n 17\n0.0\n 27\n0.0\n'
+    b' 37\n0.0\n 40\n1000.0\n 41\n1.34\n 42\n50.0\n 43\n0.0\n'
+    b' 44\n0.0\n 50\n0.0\n 51\n0.0\n 71\n0\n 72\n1000\n'
+    b' 73\n1\n 74\n3\n 75\n0\n 76\n0\n 77\n0\n'
+    b' 78\n0\n281\n0\n 65\n0\n146\n0.0\n  0\nENDTAB\n'
+    b'  0\nTABLE\n  2\nLTYPE\n  5\n2\n330\n0\n100\nAcDbSymbolTable\n'
+    b' 70\n3\n  0\nLTYPE\n  5\n24\n330\n2\n100\nAcDbSymbolTableRecord\n'
+    b'100\nAcDbLinetypeTableRecord\n  2\nByBlock\n 70\n0\n  3\n\n 72\n65\n'
+    b' 73\n0\n 40\n0.0\n  0\nLTYPE\n  5\n25\n330\n2\n'
+    b'100\nAcDbSymbolTableRecord\n100\nAcDbLinetypeTableRecord\n  2\nByLayer\n 70\n0\n  3\n\n'
+    b' 72\n65\n 73\n0\n 40\n0.0\n  0\nLTYPE\n  5\n26\n'
+    b'330\n2\n100\nAcDbSymbolTableRecord\n100\nAcDbLinetypeTableRecord\n  2\nContinuous\n 70\n0\n'
+    b'  3\n\n 72\n65\n 73\n0\n 40\n0.0\n  0\nENDTAB\n'
+    b'  0\nTABLE\n  2\nLAYER\n  5\n1\n330\n0\n100\nAcDbSymbolTable\n'
+    b' 70\n3\n  0\nLAYER\n  5\n27\n330\n1\n100\nAcDbSymbolTableRecord\n'
+    b'100\nAcDbLayerTableRecord\n  2\n0\n 70\n0\n 62\n7\n  6\nContinuous\n'
+    b'370\n-3\n390\n13\n347\n21\n  0\nLAYER\n  5\n28\n'
+    b'330\n1\n100\nAcDbSymbolTableRecord\n100\nAcDbLayerTableRecord\n  2\nDefpoints\n 70\n0\n'
+    b' 62\n7\n  6\nContinuous\n290\n0\n370\n-3\n390\n13\n'
+    b'347\n21\n  0\nLAYER\n  5\n2F\n330\n1\n100\nAcDbSymbolTableRecord\n'
+    b'100\nAcDbLayerTableRecord\n  2\nNotes\n 70\n0\n 62\n3\n  6\nContinuous\n'
+    b'370\n-3\n390\n13\n347\n21\n  0\nENDTAB\n  0\nTABLE\n'
+    b'  2\nSTYLE\n  5\n5\n330\n0\n100\nAcDbSymbolTable\n 70\n1\n'
+    b'  0\nSTYLE\n  5\n29\n330\n5\n100\nAcDbSymbolTableRecord\n100\nAcDbTextStyleTableRecord\n'
+    b'  2\nStandard\n 70\n0\n 40\n0.0\n 41\n1.0\n 50\n0.0\n'
+    b' 71\n0\n 42\n2.5\n  3\ntxt\n  4\n\n  0\nENDTAB\n'
+    b'  0\nTABLE\n  2\nVIEW\n  5\n7\n330\n0\n100\nAcDbSymbolTable\n'
+    b' 70\n0\n  0\nENDTAB\n  0\nTABLE\n  2\nUCS\n  5\n6\n'
+    b'330\n0\n100\nAcDbSymbolTable\n 70\n0\n  0\nENDTAB\n  0\nTABLE\n'
+    b'  2\nAPPID\n  5\n3\n330\n0\n100\nAcDbSymbolTable\n 70\n3\n'
+    b'  0\nAPPID\n  5\n2A\n330\n3\n100\nAcDbSymbolTableRecord\n100\nAcDbRegAppTableRecord\n'
+    b'  2\nACAD\n 70\n0\n  0\nAPPID\n  5\n32\n330\n3\n'
+    b'100\nAcDbSymbolTableRecord\n100\nAcDbRegAppTableRecord\n  2\nHATCHBACKGROUNDCOLOR\n 70\n0\n  0\nAPPID\n'
+    b'  5\n33\n330\n3\n100\nAcDbSymbolTableRecord\n100\nAcDbRegAppTableRecord\n  2\nEZDXF\n'
+    b' 70\n0\n  0\nENDTAB\n  0\nTABLE\n  2\nDIMSTYLE\n  5\n4\n'
+    b'330\n0\n100\nAcDbSymbolTable\n 70\n1\n100\nAcDbDimStyleTable\n  0\nDIMSTYLE\n'
+    b'105\n2B\n330\n4\n100\nAcDbSymbolTableRecord\n100\nAcDbDimStyleTableRecord\n  2\nStandard\n'
+    b' 70\n0\n 40\n1.0\n 41\n2.5\n 42\n0.625\n 43\n3.75\n'
+    b' 44\n1.25\n 45\n0.0\n 46\n0.0\n 47\n0.0\n 48\n0.0\n'
+    b' 49\n2.5\n140\n2.5\n141\n2.5\n142\n0.0\n143\n0.03937007874\n'
+    b'144\n1.0\n145\n0.0\n146\n1.0\n147\n0.625\n148\n0.0\n'
+    b' 69\n0\n 70\n0\n 71\n0\n 72\n0\n 73\n0\n'
+    b' 74\n0\n 75\n0\n 76\n0\n 77\n1\n 78\n8\n'
+    b' 79\n3\n170\n0\n171\n3\n172\n1\n173\n0\n'
+    b'174\n0\n175\n0\n176\n0\n177\n0\n178\n0\n'
+    b'179\n2\n271\n2\n272\n2\n273\n2\n274\n3\n'
+    b'275\n0\n276\n0\n277\n2\n278\n44\n279\n0\n'
+    b'280\n0\n281\n0\n282\n0\n283\n0\n284\n8\n'
+    b'285\n0\n286\n0\n288\n0\n289\n3\n290\n0\n'
+    b'371\n-2\n372\n-2\n  0\nENDTAB\n  0\nTABLE\n  2\nBLOCK_RECORD\n'
+    b'  5\n9\n330\n0\n100\nAcDbSymbolTable\n 70\n2\n  0\nBLOCK_RECORD\n'
+    b'  5\n17\n330\n9\n100\nAcDbSymbolTableRecord\n100\nAcDbBlockTableRecord\n  2\n*Model_Space\n'
+    b'340\n1A\n 70\n0\n280\n1\n281\n0\n  0\nBLOCK_RECORD\n'
+    b'  5\n1B\n330\n9\n100\nAcDbSymbolTableRecord\n100\nAcDbBlockTableRecord\n  2\n*Paper_Space\n'
+    b'340\n1E\n 70\n0\n280\n1\n281\n0\n  0\nENDTAB\n'
+    b'  0\nENDSEC\n  0\nSECTION\n  2\nBLOCKS\n  0\nBLOCK\n  5\n18\n'
+    b'330\n17\n100\nAcDbEntity\n  8\n0\n100\nAcDbBlockBegin\n  2\n*Model_Space\n'
+    b' 70\n0\n 10\n0.0\n 20\n0.0\n 30\n0.0\n  3\n*Model_Space\n'
+    b'  1\n\n  0\nENDBLK\n  5\n19\n330\n17\n100\nAcDbEntity\n'
+    b'  8\n0\n100\nAcDbBlockEnd\n  0\nBLOCK\n  5\n1C\n330\n1B\n'
+    b'100\nAcDbEntity\n  8\n0\n100\nAcDbBlockBegin\n  2\n*Paper_Space\n 70\n0\n'
+    b' 10\n0.0\n 20\n0.0\n 30\n0.0\n  3\n*Paper_Space\n  1\n\n'
+    b'  0\nENDBLK\n  5\n1D\n330\n1B\n100\nAcDbEntity\n  8\n0\n'
+    b'100\nAcDbBlockEnd\n  0\nENDSEC\n  0\nSECTION\n  2\nENTITIES\n  0\nTEXT\n'
+    b'  5\nA1\n330\n17\n100\nAcDbEntity\n  8\nNotes\n100\nAcDbText\n'
+    b' 10\n15.0\n 20\n25.0\n 30\n0.0\n 40\n5.0\n  1\nCustomer label\n'
+    b'100\nAcDbText\n  0\nLINE\n  5\nA2\n330\n17\n100\nAcDbEntity\n'
+    b'  8\nNotes\n100\nAcDbLine\n 10\n0.0\n 20\n0.0\n 30\n0.0\n'
+    b' 11\n40.0\n 21\n80.0\n 31\n0.0\n  0\nENDSEC\n  0\nSECTION\n'
+    b'  2\nOBJECTS\n  0\nDICTIONARY\n  5\nA\n330\n0\n100\nAcDbDictionary\n'
+    b'281\n1\n  3\nACAD_COLOR\n350\nB\n  3\nACAD_GROUP\n350\nC\n'
+    b'  3\nACAD_LAYOUT\n350\nD\n  3\nACAD_MATERIAL\n350\nE\n  3\nACAD_MLEADERSTYLE\n'
+    b'350\nF\n  3\nACAD_MLINESTYLE\n350\n10\n  3\nACAD_PLOTSETTINGS\n350\n11\n'
+    b'  3\nACAD_PLOTSTYLENAME\n350\n12\n  3\nACAD_SCALELIST\n350\n14\n  3\nACAD_TABLESTYLE\n'
+    b'350\n15\n  3\nACAD_VISUALSTYLE\n350\n16\n  3\nEZDXF_META\n350\n2D\n'
+    b'  0\nDICTIONARY\n  5\nB\n330\nA\n100\nAcDbDictionary\n281\n1\n'
+    b'  0\nDICTIONARY\n  5\nC\n330\nA\n100\nAcDbDictionary\n281\n1\n'
+    b'  0\nDICTIONARY\n  5\nD\n330\nA\n100\nAcDbDictionary\n281\n1\n'
+    b'  3\nModel\n350\n1A\n  3\nLayout1\n350\n1E\n  0\nDICTIONARY\n'
+    b'  5\nE\n330\nA\n100\nAcDbDictionary\n281\n1\n  3\nByBlock\n'
+    b'350\n1F\n  3\nByLayer\n350\n20\n  3\nGlobal\n350\n21\n'
+    b'  0\nDICTIONARY\n  5\nF\n330\nA\n100\nAcDbDictionary\n281\n1\n'
+    b'  3\nStandard\n350\n2C\n  0\nDICTIONARY\n  5\n10\n330\nA\n'
+    b'100\nAcDbDictionary\n281\n1\n  3\nStandard\n350\n22\n  0\nDICTIONARY\n'
+    b'  5\n11\n330\nA\n100\nAcDbDictionary\n281\n1\n  0\nACDBDICTIONARYWDFLT\n'
+    b'  5\n12\n330\nA\n100\nAcDbDictionary\n281\n1\n  3\nNormal\n'
+    b'350\n13\n100\nAcDbDictionaryWithDefault\n340\n13\n  0\nACDBPLACEHOLDER\n  5\n13\n'
+    b'330\n12\n  0\nDICTIONARY\n  5\n14\n330\nA\n100\nAcDbDictionary\n'
+    b'281\n1\n  0\nDICTIONARY\n  5\n15\n330\nA\n100\nAcDbDictionary\n'
+    b'281\n1\n  0\nDICTIONARY\n  5\n16\n330\nA\n100\nAcDbDictionary\n'
+    b'281\n1\n  0\nLAYOUT\n  5\n1A\n330\nD\n100\nAcDbPlotSettings\n'
+    b'  1\n\n  4\nA3\n  6\n\n 40\n7.5\n 41\n20.0\n'
+    b' 42\n7.5\n 43\n20.0\n 44\n420.0\n 45\n297.0\n 46\n0.0\n'
+    b' 47\n0.0\n 48\n0.0\n 49\n0.0\n140\n0.0\n141\n0.0\n'
+    b'142\n1.0\n143\n1.0\n 70\n1024\n 72\n1\n 73\n0\n'
+    b' 74\n5\n  7\n\n 75\n16\n 76\n0\n 77\n2\n'
+    b' 78\n300\n147\n1.0\n148\n0.0\n149\n0.0\n100\nAcDbLayout\n'
+    b'  1\nModel\n 70\n1\n 71\n0\n 10\n0.0\n 20\n0.0\n'
+    b' 11\n420.0\n 21\n297.0\n 12\n0.0\n 22\n0.0\n 32\n0.0\n'
+    b' 14\n1e+20\n 24\n1e+20\n 34\n1e+20\n 15\n-1e+20\n 25\n-1e+20\n'
+    b' 35\n-1e+20\n146\n0.0\n 13\n0.0\n 23\n0.0\n 33\n0.0\n'
+    b' 16\n1.0\n 26\n0.0\n 36\n0.0\n 17\n0.0\n 27\n1.0\n'
+    b' 37\n0.0\n 76\n1\n330\n17\n  0\nLAYOUT\n  5\n1E\n'
+    b'330\nD\n100\nAcDbPlotSettings\n  1\n\n  4\nA3\n  6\n\n'
+    b' 40\n7.5\n 41\n20.0\n 42\n7.5\n 43\n20.0\n 44\n420.0\n'
+    b' 45\n297.0\n 46\n0.0\n 47\n0.0\n 48\n0.0\n 49\n0.0\n'
+    b'140\n0.0\n141\n0.0\n142\n1.0\n143\n1.0\n 70\n0\n'
+    b' 72\n1\n 73\n0\n 74\n5\n  7\n\n 75\n16\n'
+    b' 76\n0\n 77\n2\n 78\n300\n147\n1.0\n148\n0.0\n'
+    b'149\n0.0\n100\nAcDbLayout\n  1\nLayout1\n 70\n1\n 71\n1\n'
+    b' 10\n0.0\n 20\n0.0\n 11\n420.0\n 21\n297.0\n 12\n0.0\n'
+    b' 22\n0.0\n 32\n0.0\n 14\n1e+20\n 24\n1e+20\n 34\n1e+20\n'
+    b' 15\n-1e+20\n 25\n-1e+20\n 35\n-1e+20\n146\n0.0\n 13\n0.0\n'
+    b' 23\n0.0\n 33\n0.0\n 16\n1.0\n 26\n0.0\n 36\n0.0\n'
+    b' 17\n0.0\n 27\n1.0\n 37\n0.0\n 76\n1\n330\n1B\n'
+    b'  0\nMATERIAL\n  5\n1F\n102\n{ACAD_REACTORS\n330\nE\n102\n}\n'
+    b'330\nE\n100\nAcDbMaterial\n  1\nByBlock\n  2\n\n 70\n0\n'
+    b' 40\n1.0\n 71\n1\n 41\n1.0\n 91\n-1023410177\n 42\n1.0\n'
+    b' 72\n1\n  3\n\n 73\n1\n 74\n1\n 75\n1\n'
+    b' 44\n0.5\n 73\n0\n 45\n1.0\n 46\n1.0\n 77\n1\n'
+    b'  4\n\n 78\n1\n 79\n1\n170\n1\n 48\n1.0\n'
+    b'171\n1\n  6\n\n172\n1\n173\n1\n174\n1\n'
+    b'140\n1.0\n141\n1.0\n175\n1\n  7\n\n176\n1\n'
+    b'177\n1\n178\n1\n143\n1.0\n179\n1\n  8\n\n'
+    b'270\n1\n271\n1\n272\n1\n145\n1.0\n146\n1.0\n'
+    b'273\n1\n  9\n\n274\n1\n275\n1\n276\n1\n'
+    b' 42\n1.0\n 72\n1\n  3\n\n 73\n1\n 74\n1\n'
+    b' 75\n1\n 94\n63\n  0\nMATERIAL\n  5\n20\n102\n{ACAD_REACTORS\n'
+    b'330\nE\n102\n}\n330\nE\n100\nAcDbMaterial\n  1\nByLayer\n'
+    b'  2\n\n 70\n0\n 40\n1.0\n 71\n1\n 41\n1.0\n'
+    b' 91\n-1023410177\n 42\n1.0\n 72\n1\n  3\n\n 73\n1\n'
+    b' 74\n1\n 75\n1\n 44\n0.5\n 73\n0\n 45\n1.0\n'
+    b' 46\n1.0\n 77\n1\n  4\n\n 78\n1\n 79\n1\n'
+    b'170\n1\n 48\n1.0\n171\n1\n  6\n\n172\n1\n'
+    b'173\n1\n174\n1\n140\n1.0\n141\n1.0\n175\n1\n'
+    b'  7\n\n176\n1\n177\n1\n178\n1\n143\n1.0\n'
+    b'179\n1\n  8\n\n270\n1\n271\n1\n272\n1\n'
+    b'145\n1.0\n146\n1.0\n273\n1\n  9\n\n274\n1\n'
+    b'275\n1\n276\n1\n 42\n1.0\n 72\n1\n  3\n\n'
+    b' 73\n1\n 74\n1\n 75\n1\n 94\n63\n  0\nMATERIAL\n'
+    b'  5\n21\n102\n{ACAD_REACTORS\n330\nE\n102\n}\n330\nE\n'
+    b'100\nAcDbMaterial\n  1\nGlobal\n  2\n\n 70\n0\n 40\n1.0\n'
+    b' 71\n1\n 41\n1.0\n 91\n-1023410177\n 42\n1.0\n 72\n1\n'
+    b'  3\n\n 73\n1\n 74\n1\n 75\n1\n 44\n0.5\n'
+    b' 73\n0\n 45\n1.0\n 46\n1.0\n 77\n1\n  4\n\n'
+    b' 78\n1\n 79\n1\n170\n1\n 48\n1.0\n171\n1\n'
+    b'  6\n\n172\n1\n173\n1\n174\n1\n140\n1.0\n'
+    b'141\n1.0\n175\n1\n  7\n\n176\n1\n177\n1\n'
+    b'178\n1\n143\n1.0\n179\n1\n  8\n\n270\n1\n'
+    b'271\n1\n272\n1\n145\n1.0\n146\n1.0\n273\n1\n'
+    b'  9\n\n274\n1\n275\n1\n276\n1\n 42\n1.0\n'
+    b' 72\n1\n  3\n\n 73\n1\n 74\n1\n 75\n1\n'
+    b' 94\n63\n  0\nMLINESTYLE\n  5\n22\n102\n{ACAD_REACTORS\n330\n10\n'
+    b'102\n}\n330\n10\n100\nAcDbMlineStyle\n  2\nStandard\n 70\n0\n'
+    b'  3\n\n 62\n256\n 51\n90.0\n 52\n90.0\n 71\n2\n'
+    b' 49\n0.5\n 62\n256\n  6\nBYLAYER\n 49\n-0.5\n 62\n256\n'
+    b'  6\nBYLAYER\n  0\nMLEADERSTYLE\n  5\n2C\n102\n{ACAD_REACTORS\n330\nF\n'
+    b'102\n}\n330\nF\n100\nAcDbMLeaderStyle\n179\n2\n170\n2\n'
+    b'171\n1\n172\n0\n 90\n2\n 40\n0.0\n 41\n0.0\n'
+    b'173\n1\n 91\n-1056964608\n 92\n-2\n290\n1\n 42\n2.0\n'
+    b'291\n1\n 43\n8.0\n  3\nStandard\n 44\n4.0\n300\n\n'
+    b'342\n29\n174\n1\n175\n1\n176\n0\n178\n1\n'
+    b' 93\n-1056964608\n 45\n4.0\n292\n0\n297\n0\n 46\n4.0\n'
+    b' 94\n-1056964608\n 47\n1.0\n 49\n1.0\n140\n1.0\n294\n1\n'
+    b'141\n0.0\n177\n0\n142\n1.0\n295\n0\n296\n0\n'
+    b'143\n3.75\n271\n0\n272\n9\n273\n9\n  0\nDICTIONARY\n'
+    b'  5\n2D\n330\nA\n100\nAcDbDictionary\n280\n1\n281\n1\n'
+    b'  3\nCREATED_BY_EZDXF\n350\n2E\n  3\nWRITTEN_BY_EZDXF\n350\n34\n  0\nDICTIONARYVAR\n'
+    b'  5\n2E\n330\n2D\n100\nDictionaryVariables\n280\n0\n  1\n1.4.3 @ 2026-11-17T05:03:00.108882+00:00\n'
+    b'  0\nDICTIONARYVAR\n  5\n34\n330\n2D\n100\nDictionaryVariables\n280\n0\n'
+    b'  1\n1.4.3 @ 2026-11-17T05:03:00.109388+00:00\n  0\nENDSEC\n999\ncaf\xe9 raw source\n  0\nEOF\n'
 )
-_REAL_SOURCE = zlib.decompress(base64.b64decode(_PACKED_SOURCE))
 assert len(_REAL_SOURCE) == 15657
 assert hashlib.sha256(_REAL_SOURCE).hexdigest() == "bf31b9596eaa6bc9967f87d82197031de51294d873ece34bf6ff9a7eac105ab2"
 
