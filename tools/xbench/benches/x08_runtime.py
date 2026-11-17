@@ -344,7 +344,7 @@ class LiveRuntime:
         # Decorative fallback glyphs prefix DOM text but are aria-hidden.
         # Match the option's accessible name so they cannot hide the command.
         filtered = call(commands.get_by_role, 'option',
-                        name=re.compile(r'^/count-by-layer(?:\s|$)'))
+                        name=re.compile(r'^\/count-by-layer(?:\s|$)'))
         option = call(lambda: filtered.first)
         call(option.click, timed=True)
         control = call(self.page.get_by_role, 'button', name='Run count-by-layer', exact=True)
