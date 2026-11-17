@@ -63,6 +63,7 @@
       "kind": "script",
       "engine_op": "count_modules",
       "entry": "builtins/count_modules.py",
+      "local_only": true,
       "params": {
         "type": "object",
         "properties": {
