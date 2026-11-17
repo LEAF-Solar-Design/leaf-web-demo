@@ -36,6 +36,93 @@ const fill = (values = ['1', '0', '1', '1', '0.4']) => screen.getAllByRole('text
 })
 const loaded = () => screen.findByText('Saved design revision 9.')
 
+const metadataCases = [
+  ...['organization_id', 'project_id', 'drawing_id', 'input_version_id'].flatMap(key =>
+    ['mismatch', 'missing', 'number', 'null', 'object'].map(type => [`${key} ${type}`, value => {
+      if (type === 'missing') delete value.data.context[key]
+      else value.data.context[key] = { mismatch: '99999999-9999-4999-8999-999999999999', number: 1,
+        null: null, object: { injected: 'private metadata' } }[type]
+    }])),
+  ...[undefined, null, '9', -1, 1.5, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity].map(rev =>
+    [`revision ${String(rev)}`, value => { value.data.intake.solar_design_graph.rev = rev }]),
+  ...[undefined, null, 123, {}, '', 'a'.repeat(63), 'a'.repeat(65), 'g'.repeat(64), 'private metadata'].map(sha =>
+    [`digest ${String(sha)}`, value => { value.data.intake.solar_design_graph_sha256 = sha }]),
+]
+it.each(metadataCases)('rejects %s metadata and recovers exact rows and drafts on a clean retry', async (_name, mutate) => {
+  const h = fixture(), drafts = ['01', '00', '01', '01', '0.400']
+  read(); await loaded(); fill(drafts)
+  const baseline = screen.getByRole('table').textContent
+  const bad = response(); mutate(bad)
+  h.client.readContext.mockResolvedValueOnce(bad)
+  read()
+  expect((await screen.findByRole('alert')).textContent).toBe(
+    'Saved design unavailable: the response, drawing identity or graph is invalid. Try reading it again.')
+  expect(screen.queryByText(/Saved design revision/)).toBeNull()
+  expect(screen.queryByText(/private metadata/)).toBeNull()
+  expect(screen.queryByText('PASS')).toBeNull()
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(true)
+  expect(screen.getByRole('button', { name: 'Read saved design' }).disabled).toBe(false)
+  expect(screen.getAllByRole('textbox').map(input => input.value)).toEqual(drafts)
+  read(); await loaded()
+  expect(screen.queryByRole('alert')).toBeNull()
+  expect(screen.getByRole('table').textContent).toBe(baseline)
+  expect(screen.getAllByRole('textbox').map(input => input.value)).toEqual(drafts)
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(false)
+})
+
+it('isolates throwing disposers during StrictMode replacement and final pending unmount', async () => {
+  const callbacks = [], live = new Set(), disposers = []
+  const subscribe = listener => {
+    callbacks.push(listener); live.add(listener)
+    const dispose = vi.fn(() => { live.delete(listener); throw new Error('private disposer injection') })
+    disposers.push(dispose)
+    return dispose
+  }
+  const h = fixture({ strict: true, subscribe })
+  expect(live.size).toBe(1)
+  let resolveOld, resolveNew, resolveFinal
+  h.client.readContext.mockImplementationOnce(() => new Promise(resolve => { resolveOld = resolve }))
+  read()
+  const oldSignal = h.client.readContext.mock.calls[0][0].signal
+  const oldCallbacks = [...callbacks]
+  const replacement = { ...h.client, subscribe,
+    readContext: vi.fn(() => new Promise(resolve => { resolveNew = resolve })) }
+  h.update({ projectClient: replacement })
+  expect(oldSignal.aborted).toBe(true)
+  expect(live.size).toBe(1)
+  read()
+  const newSignal = replacement.readContext.mock.calls[0][0].signal
+  await act(async () => {
+    oldCallbacks.forEach(callback => callback())
+    const old = response(); old.data.intake.solar_design_graph.rev = 77
+    resolveOld(old)
+  })
+  expect(newSignal.aborted).toBe(false)
+  expect(screen.getByText('Reading saved design.')).toBeTruthy()
+  expect(screen.queryByText('Saved design revision 77.')).toBeNull()
+  read(); expect(replacement.readContext).toHaveBeenCalledTimes(1)
+  await act(async () => resolveNew(response()))
+  fill()
+  const createObjectURL = vi.fn(() => 'blob:replacement'), revokeObjectURL = vi.fn()
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL })
+  const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(click).toHaveBeenCalledOnce()
+  expect(revokeObjectURL).toHaveBeenCalledWith('blob:replacement')
+  expect(screen.getAllByText('PASS')).toHaveLength(4)
+  expect(screen.queryByText(/private disposer injection/)).toBeNull()
+  replacement.readContext.mockImplementationOnce(() => new Promise(resolve => { resolveFinal = resolve }))
+  read()
+  const finalSignal = replacement.readContext.mock.calls[1][0].signal
+  expect(() => h.view.unmount()).not.toThrow()
+  expect(finalSignal.aborted).toBe(true)
+  expect(live.size).toBe(0)
+  disposers.forEach(dispose => expect(dispose).toHaveBeenCalledOnce())
+  await act(async () => { callbacks.forEach(callback => callback()); resolveFinal(response()) })
+  expect(screen.queryByRole('table')).toBeNull()
+  expect(createObjectURL).toHaveBeenCalledOnce()
+})
+
 it.each(['resolve', 'reject'])('preserves drafts when a deferred read settles by %s while busy', async outcome => {
   const h = fixture(), drafts = ['01', '0', '1', '1', '0.400']
   fill(drafts)

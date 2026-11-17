@@ -19,6 +19,72 @@ function graph() {
 }
 
 describe('saved engineering reconciliation', () => {
+  it('repairs a compact Ground/explicit Roof ID collision without changing devices or caller evidence', () => {
+    const saved = graph(), drafts = ['02', '0', '2', '1', '0.800']
+    const baseline = reconciliationRows(saved, drafts)
+    saved.panels.push({ id: id('panel', 2) })
+    const before = structuredClone(saved), rows = reconciliationRows(saved, drafts)
+    for (const index of [0, 3, 4]) {
+      expect(rows[index]).toMatchObject({ studio: '', oracle: drafts[index], delta: '', verdict: 'UNREADABLE' })
+    }
+    expect(rows[0].reason).toMatch(/Panel IDs or compact Ground slots/)
+    expect(rows[3].reason).toMatch(/panel union is invalid/)
+    expect(rows[4].reason).toMatch(/complete, unique frame coverage/)
+    for (const index of [1, 2]) expect(rows[index]).toEqual(baseline[index])
+    expect(saved).toStrictEqual(before)
+    saved.panels.pop()
+    expect(reconciliationRows(saved, drafts)).toEqual(baseline)
+    expect(drafts).toEqual(['02', '0', '2', '1', '0.800'])
+  })
+  it.each([
+    [-1000000, '999999999999999000'], [0, null], [1000000, null],
+  ])('bounds aggregate DC with supported individual integer watts: offset %s', (offset, expected) => {
+    const saved = { rev: 1, panels: [], frames: [], strings: [], inverters: graph().inverters }
+    // 2000 * 500000000000000000 W = 10^21 W = 10^18 kW.
+    // Each power and offset is exactly representable; unique coverage cannot cause rejection.
+    let integerWatts = 0n
+    for (let n = 1; n <= 2000; n++) {
+      const panel = id('panel', n), power = 500000000000000000 + (n === 2000 ? offset : 0)
+      integerWatts += BigInt(power)
+      const frame = { id: id('frame', n), panel_refs: [panel], module_power_watts: power }
+      expect(savedReconciliationValues({ panels: [{ id: panel }], frames: [frame], strings: [], inverters: [] })[4].value)
+        .toBe(BigInt(power) * 10n ** 15n)
+      saved.panels.push({ id: panel }); saved.frames.push(frame)
+    }
+    expect(integerWatts).toBe(10n ** 21n + BigInt(offset))
+    const before = structuredClone(saved), drafts = ['2000', '0', '2', '0', '999999999999999000']
+    const rows = reconciliationRows(saved, drafts)
+    expect(rows.slice(0, 4).map(row => [row.studio, row.verdict]))
+      .toEqual([['2000', 'PASS'], ['', 'UNREADABLE'], ['2', 'PASS'], ['0', 'PASS']])
+    expect(rows[4]).toMatchObject(expected === null
+      ? { studio: '', delta: '', verdict: 'UNREADABLE' }
+      : { studio: expected, delta: '0', verdict: 'PASS' })
+    if (expected === null) expect(rows[4].reason).toMatch(/supported module watts/)
+    expect(saved).toStrictEqual(before)
+  })
+  it.each(['strings', 'DC'])('repairs compound foreign references and missing coverage independently, %s first', first => {
+    const saved = graph(), drafts = ['2', '0', '2', '1', '0.8']
+    const baseline = reconciliationRows(saved, drafts)
+    saved.strings[0].ordered_panel_refs[1] = id('panel', 99)
+    saved.frames[0].panel_refs = []
+    const check = (unavailable) => {
+      const before = structuredClone(saved), rows = reconciliationRows(saved, drafts)
+      rows.forEach((row, index) => {
+        if (unavailable.includes(index)) {
+          expect(row).toMatchObject({ studio: '', delta: '', verdict: 'UNREADABLE' })
+          expect(row.reason).toBeTruthy()
+        } else expect(row).toEqual(baseline[index])
+      })
+      expect(saved).toStrictEqual(before)
+      expect(drafts).toEqual(['2', '0', '2', '1', '0.8'])
+    }
+    check([3, 4])
+    const repairStrings = () => { saved.strings[0].ordered_panel_refs[1] = id('panel', 2) }
+    const repairDC = () => { saved.frames[0].panel_refs = [id('panel', 1)] }
+    if (first === 'strings') { repairStrings(); check([4]); repairDC() }
+    else { repairDC(); check([3]); repairStrings() }
+    check([])
+  })
   it.each(['first', 'middle', 'last', 'all', 'singleton'])('rejects %s sparse ordered references and recovers from dense evidence', position => {
     const saved = graph(), drafts = ['03', '0', '2', '1', '1.2001']
     saved.panels.push({ id: id('panel', 3) })

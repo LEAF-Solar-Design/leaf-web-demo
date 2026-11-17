@@ -24,6 +24,12 @@ scroller. Each replay retains all five CSV rows, normalized DOM parity, focused
 field screenshots and hashes. Inspect the retained narrow/zoom images before
 acceptance. The final proof records browser/context/server cleanup after it runs.
 
+The stalled-read case waits for the product's actual 20-second timeout (no clock
+override). It checks the aborted signal and retry controls, reads distinct retry
+evidence with fresh reports, then settles the old promise last. Both actual CSV
+downloads must contain only the retry's five rows; timeout and recovery screenshots
+and source/artifact hashes remain in the same cleanup-bearing proof.
+
 Finally, the replay switches immutable drawing bindings and matching client
 snapshots through normal React props while an old drawing read is deferred.
 It records the aborted old request, resolves its distinct revision/totals, and
@@ -89,6 +95,7 @@ let attempts = 0;
 let deferOld = false, settleOld, oldSignal;
 window.scopeProof = {newReads: 0, oldSettled: false};
 window.deferOldRead = () => { deferOld = true; };
+window.readAttempts = () => attempts;
 window.resolveOldRead = () => { settleOld(); window.scopeProof.oldSettled = true; };
 window.setSavedGraph = graph => { response.data.intake.solar_design_graph = structuredClone(graph); };
 const client = {
@@ -359,6 +366,67 @@ try:
                                    computed_zoom=computed_zoom, fields=field_proofs, scroll=scroll,
                                    overflow=overflow, visible=rendered, downloaded=downloaded, csv=path.name,
                                    keyboard_download=True))
+    # Real product timeout: no timer interception or virtual elapsed-time claim.
+    page.set_viewport_size({'width': 1440, 'height': 900})
+    page.evaluate('document.documentElement.style.zoom = "1"')
+    timeout_old = copy.deepcopy(graph)
+    timeout_old['rev'] = 81
+    timeout_old['frames'][0]['module_power_watts'] = 700
+    timeout_retry = copy.deepcopy(next_graph)
+    timeout_retry['rev'] = 82
+    timeout_old_drafts = ['02', '01', '01', '01', '1.400']
+    for label, value in zip(labels, timeout_old_drafts):
+        page.get_by_role('textbox', name=label + ' engineering report/BOM', exact=True).fill(value)
+    attempts_before = page.evaluate('window.readAttempts()')
+    page.evaluate('(graph) => { window.setSavedGraph(graph); window.deferOldRead(); }', timeout_old)
+    read.click()
+    expect(page.get_by_text('Reading saved design.', exact=True)).to_be_visible()
+    expect(read).to_be_disabled()
+    expect(download_button).to_be_disabled()
+    assert not page.evaluate('window.oldReadAborted()')
+    expect(page.get_by_role('alert')).to_have_text(
+        'Saved design read timed out. Try reading it again.', timeout=30000)
+    assert page.evaluate('window.oldReadAborted()')
+    expect(read).to_be_enabled()
+    expect(download_button).to_be_disabled()
+    expect(page.get_by_text('Saved design revision 81.', exact=True)).to_have_count(0)
+    for label, value in zip(labels, timeout_old_drafts):
+        field = page.get_by_role('textbox', name=label + ' engineering report/BOM', exact=True)
+        expect(field).to_be_enabled()
+        expect(field).to_have_value(value)
+    page.screenshot(path=str(artifact / 'stalled-read-timeout.png'), full_page=True)
+    retry_drafts = ['003', '00', '02', '02', '1.500']
+    for label, value in zip(labels, retry_drafts):
+        page.get_by_role('textbox', name=label + ' engineering report/BOM', exact=True).fill(value)
+    page.evaluate('(graph) => window.setSavedGraph(graph)', timeout_retry)
+    read.click()
+    expect(page.get_by_text('Saved design revision 82.', exact=True)).to_be_visible()
+    expect(page.get_by_role('alert')).to_have_count(0)
+    retry_comparison = capture_comparison('timeout-retry')
+    expected_retry = [dict(zip(['metric', 'studio', 'oracle', 'delta', 'verdict'], row)) for row in [
+        ['panels', '3', '003', '0', 'PASS'],
+        ['optimizers', '', '00', '', 'UNREADABLE'],
+        ['inverters', '2', '02', '0', 'PASS'],
+        ['strings', '2', '02', '0', 'PASS'],
+        ['kw_dc', '1.5', '1.500', '0', 'PASS'],
+    ]]
+    assert retry_comparison['downloaded'] == expected_retry
+    page.evaluate('window.resolveOldRead()')
+    page.evaluate('() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+    expect(page.get_by_text('Saved design revision 81.', exact=True)).to_have_count(0)
+    expect(page.get_by_text('Saved design revision 82.', exact=True)).to_be_visible()
+    expect(page.get_by_role('alert')).to_have_count(0)
+    expect(read).to_be_enabled()
+    assert page.evaluate('window.oldReadAborted()')
+    assert page.evaluate('window.readAttempts()') == attempts_before + 2
+    late_comparison = capture_comparison('timeout-old-settled-last')
+    assert late_comparison['downloaded'] == expected_retry
+    assert (artifact / retry_comparison['csv']).read_bytes() == (artifact / late_comparison['csv']).read_bytes()
+    timeout_recovery = dict(timeout_method='actual product 20000ms timer; no clock override',
+                            old_revision=81, retry_revision=82, old_request_aborted=True,
+                            old_settled_last=True, read_attempts=2, old_drafts=timeout_old_drafts,
+                            retry_drafts=retry_drafts, retry=retry_comparison, late=late_comparison)
+
     # Change props/client scope on the same mounted panel during an old read.
     page.set_viewport_size({'width': 1440, 'height': 900})
     page.evaluate('document.documentElement.style.zoom = "1"')
@@ -434,6 +502,7 @@ try:
                  malformed_graph_replays=cases,
                  narrow_zoom_replays=narrow_replays,
                  two_drawing_isolation=isolation,
+                 stalled_read_timeout_recovery=timeout_recovery,
                  keyboard_read_retry=True, keyboard_export_retry=True,
                  source_sha256={str(path): digest(path) for path in sorted(sources)},
                  artifact_sha256={path.name: digest(path) for path in artifact.iterdir() if path.is_file()})
@@ -467,5 +536,5 @@ if proof_path.is_file():
     proof_path.write_text(json.dumps(proof, indent=2), encoding='utf-8')
 print(json.dumps({'proof': str(proof_path), 'rows_matched': 5, 'keyboard_retries_passed': 2,
                   'malformed_graph_repairs': len(cases), 'narrow_zoom_replays': len(narrow_replays),
-                  'two_drawing_isolation': True}))
+                  'two_drawing_isolation': True, 'stalled_read_timeout_recovery': True}))
 ```
