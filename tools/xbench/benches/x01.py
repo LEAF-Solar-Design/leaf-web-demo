@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 
 from benches.x02 import _transport
-from xbench_core import Step, utc_now, write_json_atomic
+from xbench_core import EXIT_USAGE, Step, utc_now, write_json_atomic
 import x01_geometry as geometry
 import xbench_session
 from xbench_studio import StudioClient, StudioError, disposable_project, new_idempotency_key, parse_error
@@ -162,40 +162,60 @@ def _tool_result(body):
         body = body["result"]
 
 
-def grade_files(client, *, project, fixtures, out_dir=None):
+def _source_hash(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def grade_files(client, *, project, fixtures, out_dir=None, resume=None):
     rows = {}
     for fixture in fixtures:
+        if resume is not None and fixture["id"] != resume["fixture"]:
+            continue
         row = _row(fixture)
         rows[fixture["id"]] = row
         capability, did, source = None, None, None
         stage = "upload"
         pid = project["project_id"]
         try:
-            source = Path(fixture["path"]).read_bytes()
-            row["source_sha256_before"] = hashlib.sha256(source).hexdigest()
-            if (len(source) != fixture["bytes"] or row["source_sha256_before"] != fixture["sha256"]):
-                raise ValueError("fixture differs from manifest")
-            stage = "upload"
-            upload = client.upload_drawing(Path(fixture["path"]).name, source)
-            row["upload_drawing_id"] = upload
-            stage = "wait_upload"
-            client.wait_upload(upload)
-            stage = "adopt"
-            drawing = client.adopt_drawing(pid, upload, fixture["id"])
-            provenance = drawing.get("provenance")
-            source_provenance = provenance.get("source") if isinstance(provenance, dict) else None
-            if isinstance(source_provenance, dict):
-                row["import_provenance"] = {key: source_provenance[key]
-                                            for key in ("drawing_id", "version") if key in source_provenance}
-                intake = source_provenance.get("intake")
-                if isinstance(intake, dict):
-                    row["import_provenance"]["intake"] = {key: intake[key]
-                                                         for key in ("ref", "sha256") if key in intake}
-            did, version = drawing["drawing_id"], drawing["version_id"]
-            row["drawing_id"], row["original_version_id"] = did, version
-            stage = "original_dxf"
-            original = client.dxf_bytes(pid, did, version)
-            row["dxf_sha256"]["original"] = hashlib.sha256(original).hexdigest()
+            if resume is not None:
+                did, version = resume["drawing"], resume["version"]
+                row["drawing_id"], row["original_version_id"] = did, version
+                row["resumed"] = True
+                stage = "source_hash"
+                source = _source_hash(fixture["path"])
+                row["source_sha256_before"] = source
+                if Path(fixture["path"]).stat().st_size != fixture["bytes"] or source != fixture["sha256"]:
+                    raise ValueError("fixture differs from manifest")
+            else:
+                source = Path(fixture["path"]).read_bytes()
+                row["source_sha256_before"] = hashlib.sha256(source).hexdigest()
+                if (len(source) != fixture["bytes"] or row["source_sha256_before"] != fixture["sha256"]):
+                    raise ValueError("fixture differs from manifest")
+                stage = "upload"
+                upload = client.upload_drawing(Path(fixture["path"]).name, source)
+                row["upload_drawing_id"] = upload
+                stage = "wait_upload"
+                client.wait_upload(upload)
+                stage = "adopt"
+                drawing = client.adopt_drawing(pid, upload, fixture["id"])
+                provenance = drawing.get("provenance")
+                source_provenance = provenance.get("source") if isinstance(provenance, dict) else None
+                if isinstance(source_provenance, dict):
+                    row["import_provenance"] = {key: source_provenance[key]
+                                                for key in ("drawing_id", "version") if key in source_provenance}
+                    intake = source_provenance.get("intake")
+                    if isinstance(intake, dict):
+                        row["import_provenance"]["intake"] = {key: intake[key]
+                                                             for key in ("ref", "sha256") if key in intake}
+                did, version = drawing["drawing_id"], drawing["version_id"]
+                row["drawing_id"], row["original_version_id"] = did, version
+                stage = "original_dxf"
+                original = client.dxf_bytes(pid, did, version)
+                row["dxf_sha256"]["original"] = hashlib.sha256(original).hexdigest()
             stage = "checkout"
             capability, _ = client.checkout(pid, did, ttl_s=900)
             stage = "context"
@@ -295,7 +315,13 @@ def grade_files(client, *, project, fixtures, out_dir=None):
             row["export_version_id"] = version
             stage = "export_dxf"
             exported = client.dxf_bytes(pid, did, version)
-            grade_pair(fixture, original, exported, row=row)
+            if resume is None:
+                grade_pair(fixture, original, exported, row=row)
+            else:
+                row["dxf_sha256"]["export"] = hashlib.sha256(exported).hexdigest()
+                _mark(row, 1, "UNREADABLE", "resume export SHA-256 recorded; original DXF skipped")
+                for n in range(2, 6):
+                    _mark(row, n, "UNREADABLE", "resume skipped original DXF; pair comparison unavailable")
             if out_dir is not None:
                 try:
                     # IDs are manifest data, never allow them to escape the evidence directory.
@@ -331,14 +357,21 @@ def grade_files(client, *, project, fixtures, out_dir=None):
                     row["release_note"] = f"checkout release unavailable: {type(exc).__name__}"
             if source is not None:
                 try:
-                    after = Path(fixture["path"]).read_bytes()
-                    row["source_sha256_after"] = hashlib.sha256(after).hexdigest()
+                    after = (_source_hash(fixture["path"]) if resume is not None else
+                             Path(fixture["path"]).read_bytes())
+                    row["source_sha256_after"] = (after if resume is not None else
+                                                  hashlib.sha256(after).hexdigest())
                     unchanged = after == source
-                    fetched = set(row["dxf_sha256"]) == {"original", "export"}
-                    _mark(row, 1, "FAIL" if not unchanged else "PASS" if fetched else row["steps"]["1"],
-                          "source fixture changed" if not unchanged else
-                          "normal-route original/export SHA-256 recorded; source unchanged" if fetched else
-                          row["evidence"]["1"] + "; source unchanged, export unavailable")
+                    if resume is not None:
+                        _mark(row, 1, row["steps"]["1"] if unchanged else "FAIL",
+                              row["evidence"]["1"] + "; source unchanged" if unchanged else
+                              "source fixture changed")
+                    else:
+                        fetched = set(row["dxf_sha256"]) == {"original", "export"}
+                        _mark(row, 1, "FAIL" if not unchanged else "PASS" if fetched else row["steps"]["1"],
+                              "source fixture changed" if not unchanged else
+                              "normal-route original/export SHA-256 recorded; source unchanged" if fetched else
+                              row["evidence"]["1"] + "; source unchanged, export unavailable")
                 except OSError:
                     _mark(row, 1, "FAIL", "source fixture unavailable after run")
     return rows
@@ -385,15 +418,26 @@ def score(rows):
 
 
 def run(ctx):
+    options = getattr(ctx, "options", {})
+    resume_keys = ("resume_project", "resume_drawing", "resume_version", "resume_fixture")
+    resume = None
+    if any(key in options for key in resume_keys):
+        if not all(options.get(key) for key in resume_keys):
+            raise SystemExit(EXIT_USAGE)
+        resume = {key.removeprefix("resume_"): options[key] for key in resume_keys}
+        if not any(fixture["id"] == resume["fixture"] for fixture in ctx.manifest["fixtures"]):
+            raise SystemExit(EXIT_USAGE)
     repo = Path(__file__).resolve().parents[3]
     with xbench_session.signed_in(repo, ctx.source_sha, origin=ctx.base) as (page, _):
         client = StudioClient(_transport(page, origin=ctx.base))
         keep_project = getattr(ctx, "options", {}).get("keep_project") == "1"
         name = f"XBench X01 {ctx.source_sha[:8]} {utc_now()}"
-        project_scope = (nullcontext(client.create_project(name)) if keep_project else
+        project_scope = (nullcontext(client.project(resume["project"])) if resume is not None else
+                         nullcontext(client.create_project(name)) if keep_project else
                          disposable_project(client, name))
         with project_scope as project:
-            rows = grade_files(client, project=project, fixtures=ctx.manifest["fixtures"], out_dir=ctx.out_dir)
+            rows = grade_files(client, project=project, fixtures=ctx.manifest["fixtures"], out_dir=ctx.out_dir,
+                               resume=resume)
             if keep_project:
                 for row in rows.values():
                     row["kept_project_id"] = project["project_id"]

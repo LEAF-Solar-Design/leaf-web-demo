@@ -682,6 +682,8 @@ class Wire:
 
     def transport(self, method, path, **kw):
         self.calls.append((method, path, deepcopy(kw)))
+        if path == "/api/projects" and method == "GET":
+            return 200, {"projects": [PROJECT]}
         if path == "/api/projects" and method == "POST":
             return 200, {"created": True, "project": PROJECT}
         if path == "/api/projects/p" and method == "DELETE":
@@ -1113,3 +1115,143 @@ def test_run_writes_fixture_receipt_and_plot(fixture, tmp_path, monkeypatch, opt
             assert receipt["kept_project_id"] == PROJECT["project_id"]
         else:
             assert "kept_project_id" not in receipt
+
+
+@pytest.mark.parametrize("body,status,code", [
+    ({"projects": []}, 404, "PROJECT_NOT_FOUND"),
+    ({"projects": [{"project_id": "other", "org_id": "o"}]}, 404, "PROJECT_NOT_FOUND"),
+    ({"projects": [{"project_id": "p"}]}, 502, "INVALID_PROJECT_RESPONSE"),
+    ({}, 502, "INVALID_PROJECT_RESPONSE"),
+])
+def test_project_read_fails_closed(body, status, code):
+    calls = []
+
+    def transport(method, path, **kwargs):
+        calls.append((method, path))
+        return 200, body
+
+    with pytest.raises(StudioError) as raised:
+        StudioClient(transport).project("p")
+    assert raised.value.status == status and raised.value.error_code == code
+    assert calls == [("GET", "/api/projects")]
+
+
+@pytest.mark.parametrize("keep_project", [False, True])
+def test_run_resumes_only_named_fixture_without_intake_or_project_writes(
+        fixture, tmp_path, monkeypatch, keep_project):
+    source = Path(fixture["path"]).read_bytes()
+    wire = Wire(source)
+    options = {"resume_project": "p", "resume_drawing": "d", "resume_version": "v1",
+               "resume_fixture": fixture["id"]}
+    if keep_project:
+        options["keep_project"] = "1"
+    untouched = {**fixture, "id": "untouched", "path": str(tmp_path / "does-not-exist")}
+    ctx = SimpleNamespace(options=options, manifest={"fixtures": [untouched, fixture]},
+                          base="https://example.test", source_sha="b" * 40, out_dir=tmp_path / "evidence")
+
+    @contextmanager
+    def signed_in(*args, **kwargs):
+        yield "page", {}
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("resume attempted intake or project mutation")
+
+    for name in ("upload_drawing", "wait_upload", "adopt_drawing", "create_project", "delete_project"):
+        monkeypatch.setattr(StudioClient, name, forbidden)
+    monkeypatch.setattr(x01.xbench_session, "signed_in", signed_in)
+    monkeypatch.setattr(x01, "_transport", lambda page, **kwargs: wire.transport)
+    monkeypatch.setattr(geometry, "render_pdf", lambda doc, path: Path(path).write_bytes(b"%PDF evidence"))
+    assert len(x01.run(ctx)) == 7
+    rows = json.loads((ctx.out_dir / "fixtures.json").read_text())
+    assert list(rows) == [fixture["id"]]
+    row = rows[fixture["id"]]
+    assert row["resumed"] is True
+    assert row["drawing_id"] == "d" and row["original_version_id"] == "v1"
+    assert row["failed_stage"] is None and row["export_version_id"] == "v3"
+    assert row["source_sha256_before"] == row["source_sha256_after"] == fixture["sha256"]
+    assert row["dxf_sha256"] == {"export": fixture["sha256"]}
+    assert row["steps"]["2"] == "UNREADABLE"
+    assert row["upload_drawing_id"] is None and row["import_provenance"] is None
+    assert [(method, path) for method, path, _ in wire.calls[:2]] == [
+        ("GET", "/api/projects"), ("POST", "/api/projects/p/drawings/d/checkout")]
+    assert [path for _, path, _ in wire.calls if path.endswith("/dxf")] == [
+        "/api/projects/p/drawings/d/versions/v3/dxf"]
+    writes = [kw["json_body"] for _, path, kw in wire.calls if path == "/api/run"]
+    assert [write["tool"] for write in writes] == ["solar-settings", "solar-panels-from-drawing"]
+    assert writes[0]["dwg"] == "v1"
+    assert all(kw["headers"]["X-Project-Id"] == "p" and kw["headers"]["X-Org-Id"] == "o"
+               for _, path, kw in wire.calls if path == "/api/run")
+    assert wire.released and not wire.deleted
+    assert Path(fixture["path"]).read_bytes() == source
+
+
+@pytest.mark.parametrize("failed_stage", ["checkout", "run:solar-settings"])
+def test_resume_records_first_failure_without_retry(fixture, monkeypatch, failed_stage):
+    wire = Wire(Path(fixture["path"]).read_bytes())
+    client = StudioClient(wire.transport)
+    attempts = []
+    method = "checkout" if failed_stage == "checkout" else "run"
+
+    def fail(*args, **kwargs):
+        attempts.append(args)
+        raise StudioError(503, "SIP_R1_INTAKE_UNAVAILABLE", "Project Solar admission unavailable.")
+
+    monkeypatch.setattr(client, method, fail)
+    rows = x01.grade_files(client, project=PROJECT, fixtures=[fixture],
+                           resume={"fixture": fixture["id"], "drawing": "d", "version": "v1"})
+    row = rows[fixture["id"]]
+    assert len(attempts) == 1
+    if method == "run":
+        assert attempts[0][0] == "solar-settings"
+    assert row["failed_stage"] == row["product_error"]["stage"] == failed_stage
+    assert row["product_error"]["status"] == 503
+    assert row["source_sha256_before"] == row["source_sha256_after"] == fixture["sha256"]
+    assert all(row["steps"][str(n)] == "UNREADABLE" for n in range(1, 6))
+    assert wire.released is (method == "run")
+    assert not any(path.endswith("/dxf") or path == "/api/drawings/upload" for _, path, _ in wire.calls)
+
+
+@pytest.mark.parametrize("mask", range(1, 15))
+def test_partial_resume_options_refuse_before_sign_in(monkeypatch, mask):
+    keys = ("resume_project", "resume_drawing", "resume_version", "resume_fixture")
+    options = {key: "value" for index, key in enumerate(keys) if mask & (1 << index)}
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("partial resume attempted sign-in")
+
+    monkeypatch.setattr(x01.xbench_session, "signed_in", forbidden)
+    with pytest.raises(SystemExit) as raised:
+        x01.run(SimpleNamespace(options=options))
+    assert raised.value.code == 5
+
+
+@pytest.mark.parametrize("fixture_id", ["synthetic", "unknown"])
+def test_invalid_resume_options_refuse_before_sign_in(monkeypatch, fixture_id):
+    options = {"resume_project": "p", "resume_drawing": "d", "resume_version": "v1",
+               "resume_fixture": fixture_id}
+    if fixture_id == "synthetic":
+        options["resume_version"] = ""
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid resume attempted sign-in")
+
+    monkeypatch.setattr(x01.xbench_session, "signed_in", forbidden)
+    with pytest.raises(SystemExit) as raised:
+        x01.run(SimpleNamespace(options=options, manifest={"fixtures": [{"id": "synthetic"}]}))
+    assert raised.value.code == 5
+
+
+def test_resume_detects_source_mutation(fixture):
+    wire = Wire(Path(fixture["path"]).read_bytes())
+    original = wire.transport
+
+    def transport(method, path, **kwargs):
+        if path.endswith("/versions/v3/dxf"):
+            Path(fixture["path"]).write_bytes(b"mutated test fixture")
+        return original(method, path, **kwargs)
+
+    rows = x01.grade_files(StudioClient(transport), project=PROJECT, fixtures=[fixture],
+                           resume={"fixture": fixture["id"], "drawing": "d", "version": "v1"})
+    row = rows[fixture["id"]]
+    assert row["source_sha256_before"] != row["source_sha256_after"]
+    assert row["steps"]["1"] == "FAIL" and wire.released
