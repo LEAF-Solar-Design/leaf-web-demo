@@ -879,24 +879,26 @@ def test_worker_controls_need_deploy(rig, action):
 
 
 def test_status_worker_fields_and_liveness(rig, monkeypatch):
+    revision = "liveness-" + rig.tenant
     now = store._now()
     monkeypatch.setattr(store, "_now", lambda: now - timedelta(seconds=61))
     store.record_worker_status(rig.tenant + "-stale", "old", "idle", 0, 0)
     monkeypatch.setattr(store, "_now", lambda: now)
-    store.record_worker_status(rig.tenant, "abc1234", "active", 1, 2)
+    store.record_worker_status(rig.tenant, revision, "active", 1, 2)
     create(rig)
     response = rig.http.get("/api/lab/status")
     assert response.status_code == 200, response.text
     status = response.json()["worker"]
     assert set(status) == {"paused", "workers", "queue_age_max_s"}
-    worker = next(w for w in status["workers"] if w["build_revision"] == "abc1234")
+    worker = next(w for w in status["workers"] if w["build_revision"] == revision)
     assert set(worker) == {"build_revision", "color", "heartbeat_age_s", "active_runs", "queued_runs"}
     assert worker["color"] == "active" and worker["active_runs"] == 1 and worker["queued_runs"] == 2
     assert worker["heartbeat_age_s"] >= 0 and status["queue_age_max_s"] >= 0
     assert not any(w["build_revision"] == "old" for w in status["workers"])
     assert "worker_id" not in response.text and "lease_owner" not in response.text and "fence" not in response.text
     store._run("lab-worker-control", lambda sql: sql.execute(
-        "DELETE FROM lab_worker_status WHERE worker_id=?", (rig.tenant + "-stale",)), write=True)
+        "DELETE FROM lab_worker_status WHERE worker_id IN (?,?)",
+        (rig.tenant, rig.tenant + "-stale")), write=True)
 
 
 @pytest.mark.parametrize("body", [{}, {"doc_id": "doc", "graph_revision": True},
