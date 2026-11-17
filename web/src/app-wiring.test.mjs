@@ -445,6 +445,7 @@ it('R13G2B-05 workspace props use the existing canonical owners', () => {
     projectClient: 'projectSolar.projectClient', projectCatalog: 'catalogState.projectCatalog', isCurrent: 'projectSolar.isCurrent',
     FlowRail: 'SolarFlowRail', StepEditor: 'SolarStepEditor', GraphForm: 'ProjectSolarGraphForm',
     newProjectIntentKey: 'mintCorrelationId', onProjectSubmit: 'projectSolarRuntime.onProjectSubmit',
+    onEstimatePublished: '(receipt, captured, isCurrent) => seatProjectDrawingPublication(workspaceController, receipt,\n                    () => isCurrent() && workspaceController.getSnapshot().canonicalVersionId === captured.input_version_id)',
     submissionSignal: 'projectSolarRuntime.submissionSignal', openTool: 'projectSolarRuntime.openTool',
     onOpenTool: 'onOpenProjectSolarTool', onClose: 'onCloseProjectSolarTool', busy: 'projectSolarRuntime.busy',
     projectRunMemory: 'projectSolarRuntime.projectRunMemory', projectPending: 'projectSolarRuntime.projectPending',
@@ -460,7 +461,7 @@ it('R13G2B-05 workspace props use the existing canonical owners', () => {
     'solar-settings', 'solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
     'solar-string-conductors', 'solar-assign-equipment', 'solar-panels-from-drawing', 'solar-panel-groups',
     'solar-homeruns', 'solar-schedule', 'solar-feeders', 'solar-string-data',
-    'solar-electrical-schedules', 'solar-cable-export',
+    'solar-electrical-schedules', 'solar-cable-export', 'solar-takeoff',
     'solar-solaredge-accept', 'solar-solaredge-tracking-read',
   ])
 })
