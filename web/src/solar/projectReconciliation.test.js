@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseReconciliationNumber, reconciliationRows, savedReconciliationValues, validReconciliationResponse, reconciliationCsv } from './projectReconciliation.js'
+import { parseReconciliationNumber, reconciliationRows, reconciliationRowsFromValues, savedReconciliationValues, validReconciliationResponse, reconciliationCsv } from './projectReconciliation.js'
 
 const id = (kind, n) => `leaf:${kind}:00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
 function graph() {
@@ -19,6 +19,11 @@ function graph() {
 }
 
 describe('saved engineering reconciliation', () => {
+  it('reuses derived totals with the same exact row semantics and optional blank DC', () => {
+    const saved = graph(), drafts = ['2', '0', '2', '1', '']
+    expect(reconciliationRowsFromValues(savedReconciliationValues(saved), drafts)).toEqual(reconciliationRows(saved, drafts))
+    expect(reconciliationRows(saved, drafts)[4]).toMatchObject({ studio: '0.8', oracle: '', delta: '', verdict: 'UNREADABLE' })
+  })
   it('unions ordinary and decoded Ground panels, counts saved strings and actual inverter devices', () => {
     const rows = reconciliationRows(graph(), ['2', '2', '2', '1', '0.8'])
     expect(rows.map(({ metric, studio, delta, verdict }) => [metric, studio, delta, verdict])).toEqual([

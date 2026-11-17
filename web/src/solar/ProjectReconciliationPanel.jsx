@@ -1,6 +1,9 @@
-import { useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { sameSolarDrawingBinding, solarDrawingBindingKey } from './solarDrawingBinding.js'
-import { parseReconciliationNumber, reconciliationRows, reconciliationCsv, validReconciliationResponse } from './projectReconciliation.js'
+import { parseReconciliationNumber, savedReconciliationValues, reconciliationRowsFromValues, reconciliationCsv, validReconciliationResponse } from './projectReconciliation.js'
+
+export const RECONCILIATION_READ_TIMEOUT_MS = 20000
+const unavailableValues = savedReconciliationValues(null)
 
 export default function ProjectReconciliationPanel({ solarBinding, authorityKey, projectClient, isCurrent, busy = false }) {
   let bindingKey = null
@@ -9,7 +12,10 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
     [bindingKey, authorityKey, projectClient, isCurrent])
   const [view, setView] = useState(null)
   const [draft, setDraft] = useState(null)
+  const inputId = useId()
   const request = useRef(null)
+  const readButton = useRef(null)
+  const restoreReadFocus = useRef(false)
   const current = () => {
     try {
       const snapshot = projectClient.getSnapshot()
@@ -39,54 +45,81 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
   const live = current()
   const saved = live && view?.scope === scope ? view : null
   const drafts = live && draft?.scope === scope ? draft.values : ['', '', '', '', '']
-  const rows = reconciliationRows(saved?.graph, drafts)
+  const rows = reconciliationRowsFromValues(saved?.values || unavailableValues, drafts)
   const pending = saved?.pending === true
-  const reportValid = drafts.every((value, index) => parseReconciliationNumber(value, index !== 4) !== null)
+  useLayoutEffect(() => {
+    if (!pending && restoreReadFocus.current) {
+      if (live && document.activeElement === document.body) readButton.current?.focus()
+      restoreReadFocus.current = false
+    }
+  }, [pending, live])
+  const reportValid = drafts.every((value, index) => (index === 4 && value === '') || parseReconciliationNumber(value, index !== 4) !== null)
   const canExport = live && !busy && !pending && !!saved?.graph && reportValid
   async function read() {
     if (!current() || busy || pending) return
+    restoreReadFocus.current = document.activeElement === readButton.current
     request.current?.abort()
     const abort = new AbortController()
     request.current = abort
     setView({ scope, pending: true, graph: null, status: 'Reading saved design.' })
+    const timer = setTimeout(() => {
+      abort.abort()
+      if (request.current === abort && current()) {
+        setView({ scope, error: 'Saved design read timed out. Try reading it again.' })
+      }
+    }, RECONCILIATION_READ_TIMEOUT_MS)
+    abort.signal.addEventListener('abort', () => clearTimeout(timer), { once: true })
     try {
       const response = await projectClient.readContext({ signal: abort.signal })
       if (abort.signal.aborted || request.current !== abort || !current()) return
       if (!validReconciliationResponse(response, scope.binding)) {
-        setView({ scope, status: 'Saved design unavailable: the response, drawing identity or graph is invalid.' })
+        setView({ scope, error: 'Saved design unavailable: the response, drawing identity or graph is invalid. Try reading it again.' })
         return
       }
-      const graph = response.data.intake.solar_design_graph
-      setView({ scope, graph, status: `Saved design revision ${graph.rev}.` })
+      const graph = structuredClone(response.data.intake.solar_design_graph)
+      const values = savedReconciliationValues(graph)
+      if (abort.signal.aborted || request.current !== abort || !current()) return
+      setView({ scope, graph, values, status: `Saved design revision ${graph.rev}.` })
     } catch {
       if (!abort.signal.aborted && request.current === abort && current()) {
-        setView({ scope, status: 'Saved design could not be read. Try reading it again.' })
+        setView({ scope, error: 'Saved design could not be read. Try reading it again.' })
       }
-    }
+    } finally { clearTimeout(timer) }
   }
   function download() {
     if (!canExport || !current()) return
-    const url = URL.createObjectURL(new Blob([reconciliationCsv(rows)], { type: 'text/csv;charset=utf-8' }))
+    let url
     try {
+      url = URL.createObjectURL(new Blob([reconciliationCsv(rows)], { type: 'text/csv;charset=utf-8' }))
       if (!current()) return
       const anchor = document.createElement('a')
       anchor.href = url
       anchor.download = 'engineering-reconciliation.csv'
       anchor.click()
-    } finally { URL.revokeObjectURL(url) }
+      if (current()) setView({ ...saved, error: null })
+    } catch {
+      if (current()) setView({ ...saved, error: 'CSV could not be downloaded. Try Download CSV again.' })
+    } finally {
+      if (url !== undefined) {
+        try { URL.revokeObjectURL(url) } catch { /* cleanup must not erase accepted evidence */ }
+      }
+    }
   }
   return <section aria-label="Engineering reconciliation">
     <h3>Engineering reconciliation</h3>
     <p>Enter user-supplied engineering report/BOM totals. These values are not independently verified.</p>
-    <button type="button" disabled={!live || busy || pending} onClick={read}>Read saved design</button>
+    <p id={`${inputId}-dc-optional`}>kW DC is optional when unknown. Leave it blank to export an unreadable comparison, with no report value or delta; it cannot pass.</p>
+    <button ref={readButton} type="button" disabled={!live || busy || pending} onClick={read}>Read saved design</button>
     <p aria-live="polite">{!live ? 'Reconciliation unavailable: the selected drawing scope is stale or unavailable.'
       : saved?.status || 'Read the saved design to compare totals.'}</p>
+    {saved?.error && <p role="alert">{saved.error}</p>}
     <table className="ops-table"><caption>Saved Studio vs engineering report/BOM totals</caption>
       <thead><tr><th scope="col">Metric</th><th scope="col">Studio</th><th scope="col">Engineering report/BOM</th>
         <th scope="col">Delta</th><th scope="col">Verdict</th></tr></thead>
       <tbody>{rows.map((row, index) => <tr key={row.metric}>
         <th scope="row">{row.metric}</th><td>{row.studio || 'Unavailable'}</td>
-        <td><input aria-label={`${row.metric} engineering report/BOM`} inputMode={index === 4 ? 'decimal' : 'numeric'}
+        <td><input id={`${inputId}-${index}`} aria-label={`${row.metric} engineering report/BOM`} inputMode={index === 4 ? 'decimal' : 'numeric'}
+          aria-describedby={`${inputId}-${index}-help${index === 4 ? ` ${inputId}-dc-optional` : ''}`}
           disabled={!live || busy || pending} value={drafts[index]} maxLength={37}
           aria-invalid={drafts[index] !== '' && parseReconciliationNumber(drafts[index], index !== 4) === null}
           onChange={(event) => {
@@ -94,7 +127,9 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
             const values = [...drafts]
             values[index] = event.target.value
             setDraft({ scope, values })
-          }} /></td>
+          }} /><small id={`${inputId}-${index}-help`}>{index === 4
+            ? 'Use a nonnegative decimal with up to 18 integer and 18 fractional digits, or leave blank when unknown.'
+            : 'Enter a whole number from 0 to 9007199254740991. Counts are required; do not use signs, decimals or exponents.'}</small></td>
         <td>{row.delta || 'Unavailable'}</td><td>{row.verdict === 'UNREADABLE' ? 'Unavailable' : row.verdict}
           {row.reason && <small>: {row.reason}</small>}</td>
       </tr>)}</tbody>

@@ -109,7 +109,10 @@ export function savedReconciliationValues(graph) {
 }
 
 export function reconciliationRows(graph, drafts = []) {
-  const studio = savedReconciliationValues(graph)
+  return reconciliationRowsFromValues(savedReconciliationValues(graph), drafts)
+}
+
+export function reconciliationRowsFromValues(studio, drafts = []) {
   return RECONCILIATION_METRICS.map((metric, index) => {
     const oracle = parseReconciliationNumber(drafts[index], index !== 4)
     const value = studio[index].value
