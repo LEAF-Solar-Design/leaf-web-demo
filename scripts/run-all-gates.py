@@ -4165,6 +4165,11 @@ def build_suites() -> List[Suite]:
         Suite("server-project-drawing-write", "server C01 project drawing.write producer on a private PostgreSQL project", "pytest", SERVER,
               _unprivileged_pytest("tests/test_project_drawing_write.py"), 9,
               uses_database=True, db_gated=True),
+        Suite("server-project-string-tags", "server project string tags on a private PostgreSQL project", "pytest", SERVER,
+              _unprivileged_pytest("tests/test_project_string_tags.py"), 48,
+              uses_database=True, db_gated=True),
+        Suite("server-solar-string-tags", "server tests/test_solar_string_tags.py", "pytest", SERVER,
+              _py_pytest("tests/test_solar_string_tags.py"), 82),
         # BSP43 accepted focused floors; run through the normal server CI rail.
         Suite("server-project-solar-materialization", "server canonical physical layout publication", "pytest", SERVER,
               _py_pytest("tests/test_project_solar_materialization.py"), 30, uses_database=True),
