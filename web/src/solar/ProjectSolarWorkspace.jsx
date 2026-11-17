@@ -8,6 +8,7 @@ import ProjectSolarEdgePanel from './ProjectSolarEdgePanel.jsx'
 import ProjectGroundEstimatePanel from './ProjectGroundEstimatePanel.jsx'
 import { ProjectSolarPreparedSolveForm } from './ProjectSolarPreparedSolveForm.jsx'
 import DrawingRoleProposal from './DrawingRoleProposal.jsx'
+import X07ProjectProfileReview from './X07ProjectProfileReview.jsx'
 import ProjectReconciliationPanel from './ProjectReconciliationPanel.jsx'
 
 const STEP_TOOLS = ['solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
@@ -413,6 +414,9 @@ export default function ProjectSolarWorkspace(props) {
   })
   return <section className="project-solar-workspace">
     {(!owner.reason || owner.reason === 'catalog_unavailable') && <DrawingRoleProposal
+      projectClient={owner.projectClient} solarBinding={owner.binding}
+      authorityKey={owner.authorityKey} isCurrent={props.isCurrent} />}
+    {(!owner.reason || owner.reason === 'catalog_unavailable') && <X07ProjectProfileReview
       projectClient={owner.projectClient} solarBinding={owner.binding}
       authorityKey={owner.authorityKey} isCurrent={props.isCurrent} />}
     {!owner.reason && <ProjectReconciliationPanel projectClient={owner.projectClient} solarBinding={owner.binding}
