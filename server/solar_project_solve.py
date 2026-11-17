@@ -353,7 +353,7 @@ def _piece_manifest(exchanges):
         for exchange in exchanges]})
 
 
-def _derive_split(job, context, plan, exchange, *, conn=None):
+def _derive_split(job, context, plan, exchange, *, conn=None, children=None):
     store = _store()
     scope, _lease = _authority(job)
     reservation = _reservation(job, context, plan, exchange["classification"])
@@ -363,8 +363,11 @@ def _derive_split(job, context, plan, exchange, *, conn=None):
         return [store.read_completed_piece_exchange(
             _piece_scope(scope, plan["split_binding"], index), conn=connection)
             for index in range(len(plan["split_binding"]["pieces"]))]
-    children = (read_children(conn) if conn is not None
-                else platform_link.platform_db().run_transaction(read_children))
+    if children is None:
+        children = (read_children(conn) if conn is not None
+                    else platform_link.platform_db().run_transaction(read_children))
+    if len(children) != len(plan["split_binding"]["pieces"]):
+        raise GraphValidationError("INVALID_SOLVE_BINDING")
     proposals = []
     for index, child in enumerate(children):
         receipt, candidate, proof = _piece_evidence(job, context, plan, index, child)
@@ -403,6 +406,86 @@ def _derive_split(job, context, plan, exchange, *, conn=None):
     proof = {"scope": scope_value, "proposal_proofs": candidate["proofs"],
              "candidate_sha256": _sha(cloud.canonical_bytes(envelope))}
     return cloud.canonical_bytes(envelope), cloud.canonical_bytes(proof), summary
+
+
+def readonly_assembly_attribution(tenant, observed_job, input_version_id):
+    """Revalidate cached children under current code, without changing the job."""
+    from deployment_identity import release_source_identity
+    identity = release_source_identity()
+    result = {"schema": "leaf.solar-assembly-attribution.v1",
+              "mode": "current-source-read-only-rederivation",
+              "historical_instruction_attributed": False,
+              "implementation_source_sha": identity["release_source_sha"],
+              "job_id": str(observed_job["job_id"]), "input_version_id": str(input_version_id),
+              "status": "unavailable", "reason": "evidence_unavailable"}
+    if identity["source_identity"] != "built":
+        return {**result, "reason": "implementation_source_unavailable"}
+    try:
+        if (observed_job.get("status") != "failed" or observed_job.get("tool_name") != TOOL_NAME
+                or str(observed_job.get("input_version_id")) != str(input_version_id)):
+            return {**result, "reason": "failed_parent_binding_required"}
+        verified = project.resolve_context(tenant, UUID(str(observed_job["project_id"])),
+            input_version_id, drawing_id=UUID(observed_job["execution_context"]["drawing_id"]))
+        context = graph.resolve_project_graph_context(verified)
+
+        def derive(conn):
+            job_id = UUID(str(observed_job["job_id"]))
+            job = graph._stored_job(job_id, conn)
+            jobs = platform_link._canonical_jobs_module()
+            org, proj, parent, stored_id, drawing, _actor = jobs._graph_ids(job)
+            if (job["status"] != "failed" or job["tool_name"] != TOOL_NAME
+                    or job["request_tenant_id"] != observed_job["tenant_id"]
+                    or (org, proj, parent, stored_id, drawing) != (
+                        context.organization_id, context.project_id, context.parent_version_id,
+                        job_id, context.drawing_id)
+                    or context.intake_sha256 != job["execution_context"]["parent_intake_sha256"]):
+                return {**result, "reason": "failed_parent_binding_required"}
+            jobs._graph_scope(job, conn)
+            plan = _plan(job, context)
+            if "split_binding" not in plan:
+                return {**result, "reason": "split_parent_required"}
+            scope = _store().ExchangeScope(org, proj, drawing, job_id)
+            count = len(plan["split_binding"]["pieces"])
+            parent_exchange, children = _store().read_assembly_inputs(scope, parent, count, conn=conn)
+            if any(parent_exchange[key] != value for key, value in
+                   _reservation(job, context, plan, parent_exchange["classification"]).items()):
+                return {**result, "reason": "evidence_binding_invalid"}
+            manifest = _piece_manifest(children)
+            if (parent_exchange["state"] == "completed"
+                    and (parent_exchange["response_bytes"] != manifest
+                         or parent_exchange["solver_endpoint"] != cloud.SOLVER_URL
+                         or parent_exchange["solver_version"] != "1.0.0")):
+                return {**result, "reason": "evidence_binding_invalid"}
+            projected = {**parent_exchange, "response_bytes": manifest, "response_sha256": _sha(manifest),
+                         "solver_endpoint": cloud.SOLVER_URL, "solver_version": "1.0.0"}
+            counts = {"completed_pieces": count, "total_pieces": count,
+                      "piece_order": [row["piece_index"] for row in children[:32]],
+                      "piece_order_truncated": count > 32}
+            try:
+                candidate, proof, _summary = _derive_split(
+                    job, context, plan, projected, conn=conn, children=children)
+            except GraphValidationError as exc:
+                if exc.code == "INVALID_FINAL_GRID_ORDER" and exc.path in {
+                    "split.restitch", "split.coverage", "split.string_length"
+                }:
+                    return {**result, **counts, "status": "attributed", "reason": exc.code,
+                            "validation_stage": exc.path}
+                return {**result, "reason": "evidence_validation_failed"}
+            if (parent_exchange["state"] == "completed"
+                    and (candidate != parent_exchange["candidate_bytes"]
+                         or proof != parent_exchange["proof_bytes"])):
+                return {**result, "reason": "evidence_binding_invalid"}
+            return {**result, **counts, "status": "validated", "reason": "assembly_valid"}
+
+        return platform_link.platform_db().run_transaction(derive, max_attempts=1)
+    except project.ProjectContextError as exc:
+        reasons = {"SIP_W1C_EXCHANGE_NOT_FOUND": "completed_child_evidence_missing",
+                   "SIP_W1C_EXCHANGE_STATE_INVALID": "completed_child_evidence_incomplete",
+                   "SIP_W1C_EXCHANGE_INPUT_INVALID": "evidence_integrity_or_limit_refusal"}
+        return {**result, "reason": reasons.get(exc.reason_code, "evidence_binding_invalid")}
+    except Exception:
+        # This diagnostic never exposes arbitrary exception text or changes history.
+        return result
 
 
 def _prepare_split(job, context, plan, exchange, scope, lease, guard):
