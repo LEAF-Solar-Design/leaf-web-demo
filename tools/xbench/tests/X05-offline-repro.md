@@ -3383,3 +3383,52 @@ without replaying that prefix or flushing again. Binary/text short-write schedul
 advance exactly by accepted progress, including across the 8192-character or byte
 submission boundary. Work-count tests use exact offsets and hashes rather than
 timing limits. These offline delivery results do not establish live X05 parity.
+
+
+## Dual-fault exit precedence replay
+
+Within Studio X-bench X05, delivery failure overrides the comparison verdict.
+A sanitized input error is useful only when its one JSON result is delivered.
+This replay uses local synthetic streams and verifies a clean call afterward.
+
+```python
+import sys, runpy, json
+from io import BytesIO, StringIO
+from types import SimpleNamespace
+from unittest.mock import patch
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+Sink = fixtures['DeliveryOutput']
+clean = m.serialize_result(fixtures['framed_payload'](None)).encode()
+cases = [('bad input delivered', b'\xff', Sink(True, limit=8192)),
+         ('bad input undelivered', b'\xff', Sink(True, failure='write')),
+         ('clean recovery', clean, Sink(True, limit=8192))]
+for label, raw, sink in cases:
+    errors = StringIO()
+    with patch.object(sys, 'stdin', SimpleNamespace(buffer=BytesIO(raw))), \
+         patch.object(sys, 'stdout', SimpleNamespace(buffer=sink)), \
+         patch.object(sys, 'stderr', errors):
+        code = m.main([])
+    assert errors.getvalue() == ''
+    if label == 'bad input delivered':
+        assert sink.accepted == b'{"reason":"cli_evidence_unreadable","verdict":"UNREADABLE"}\n'
+    if label == 'bad input undelivered':
+        assert not sink.accepted and len(sink.requests) == 1 and sink.flushes == 0
+    verdict = json.loads(sink.accepted)['verdict'] if sink.accepted else 'undelivered'
+    print(label, code, verdict, sink.flushes)
+```
+
+Expected output:
+
+```text
+bad input delivered 4 UNREADABLE 1
+bad input undelivered 5 undelivered 0
+clean recovery 0 PASS 1
+```
+
+Tests cross PASS, FAIL and UNREADABLE with output write/flush failures in every
+CLI mode. Binary buffers take precedence over text interfaces; partial binary
+failure never triggers a text fallback. The CLI leaves borrowed input/output
+streams and their buffers open on success, malformed input and delivery failure.
+Exit 5 is a delivery failure, not a fabricated product FAIL or live X05 verdict.

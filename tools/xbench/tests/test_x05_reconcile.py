@@ -9283,3 +9283,128 @@ def test_io_fault_submission_work_count_tracks_progress_with_bounded_pieces(bina
     output = CountedOutput(); m._write_all(output, payload)
     assert output.offset == len(payload) and output.calls == (len(payload)+progress-1)//progress
     assert output.flushes == 1 and output.digest.digest() == sha256(text.encode('ascii')).digest()
+
+
+
+CLI_DECODERS = dict(zip(STDIO_MODES, ['reconcile_json', 'aggregate_fixtures_json', 'reconcile_provenance_json',
+    'reconcile_assurance_json', 'aggregate_provenance_json', 'aggregate_assurance_json', 'reconcile_seven_steps_json',
+    'aggregate_seven_steps_json', 'reconcile_bound_seven_steps_json', 'aggregate_bound_seven_steps_json']))
+
+
+@pytest.mark.parametrize('mode', STDIO_MODES)
+@pytest.mark.parametrize('verdict', ['PASS', 'FAIL', 'UNREADABLE'])
+@pytest.mark.parametrize('binary', [False, True])
+@pytest.mark.parametrize('failure', ['write', 'flush'])
+def test_delivery_precedence_output_failure_overrides_every_comparison_exit(monkeypatch, mode, verdict, binary, failure):
+    from benches import x05_reconcile as m
+    decoded = []
+    def synthetic_decode(text):
+        decoded.append(text)
+        return dict(verdict=verdict, reason='synthetic_comparison')
+    with monkeypatch.context() as patch:
+        patch.setattr(m, CLI_DECODERS[mode], synthetic_decode)
+        output = DeliveryOutput(binary, limit=8192, failure=failure)
+        assert delivery_run(patch, mode, output, raw=b'{}') == 5
+    assert decoded == ['{}'] and len(output.requests) == 1
+    if failure == 'write': assert not output.accepted and output.flushes == 0
+    else: assert json.loads(output.accepted)['verdict'] == verdict and output.flushes == 1
+
+
+@pytest.mark.parametrize('mode', STDIO_MODES)
+@pytest.mark.parametrize('binary', [False, True])
+@pytest.mark.parametrize('input_fault', ['utf8', 'read'])
+@pytest.mark.parametrize('failure', ['write', 'flush', 'after-prefix'])
+def test_delivery_precedence_simultaneous_input_and_output_faults_return_five(monkeypatch, mode, binary, input_fault, failure):
+    from benches import x05_reconcile as m
+    reads = []
+    class BadRead:
+        def read(self, size):
+            reads.append(size)
+            if len(reads) == 1: return b'{"prefix":'
+            raise OSError('private-read-error')
+    output = DeliveryOutput(binary, limit=11 if failure == 'after-prefix' else 8192, failure=failure)
+    assert delivery_run(monkeypatch, mode, output, raw=b'\xff', input_stream=BadRead() if input_fault == 'read' else None) == 5
+    expected = m.serialize_result(dict(verdict='UNREADABLE', reason='cli_evidence_unreadable'))+chr(10)
+    expected = expected.encode() if binary else expected
+    assert output.accepted == (expected[:11] if failure == 'after-prefix' else expected if failure == 'flush' else expected[:0])
+    assert len(output.requests) == (2 if failure == 'after-prefix' else 1)
+    assert output.flushes == (1 if failure == 'flush' else 0)
+    if input_fault == 'read': assert len(reads) == 2
+
+
+def delivery_channel_call(monkeypatch, mode, source, output):
+    import sys
+    from benches import x05_reconcile as m
+    errors = StringIO()
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, 'stdin', source); patch.setattr(sys, 'stdout', output); patch.setattr(sys, 'stderr', errors)
+        code = m.main([mode] if mode else [])
+    assert errors.getvalue() == ''
+    return code
+
+
+@pytest.mark.parametrize('mode', STDIO_MODES)
+@pytest.mark.parametrize('failure', [False, True])
+def test_delivery_precedence_binary_stdout_never_falls_back_to_poison_text(monkeypatch, mode, failure):
+    from io import BytesIO
+    from types import SimpleNamespace
+    sink = DeliveryOutput(True, limit=11 if failure else 8192, failure='after-prefix' if failure else None)
+    class BothOutputs:
+        buffer = sink
+        text_calls = 0
+        def write(self, value): self.text_calls += 1; raise AssertionError('text fallback')
+        def flush(self): self.text_calls += 1; raise AssertionError('text flush fallback')
+    output = BothOutputs()
+    source = SimpleNamespace(buffer=BytesIO(serialize_result(framed_payload(mode)).encode()))
+    assert delivery_channel_call(monkeypatch, mode, source, output) == (5 if failure else 0)
+    assert output.text_calls == 0
+    if failure: assert len(sink.accepted) == 11 and len(sink.requests) == 2 and sink.flushes == 0
+    else: assert json.loads(sink.accepted)['verdict'] == 'PASS' and sink.flushes == 1
+
+
+@pytest.mark.parametrize('mode', STDIO_MODES)
+@pytest.mark.parametrize('binary_case', ['valid', 'malformed', 'read-error'])
+def test_delivery_precedence_binary_stdin_alone_determines_diagnostics(monkeypatch, mode, binary_case):
+    from io import BytesIO
+    from types import SimpleNamespace
+    raw = serialize_result(framed_payload(mode)).encode() if binary_case == 'valid' else b'{'
+    class BadInput:
+        def read(self, size): raise OSError('private-binary-input')
+    class BothInputs:
+        buffer = BadInput() if binary_case == 'read-error' else BytesIO(raw)
+        # Deliberately contradictory text document; it must never be read.
+        text_document = '{' if binary_case == 'valid' else serialize_result(framed_payload(mode))
+        text_reads = 0
+        def read(self, size=-1): self.text_reads += 1; return self.text_document
+    source = BothInputs(); output = DeliveryOutput(True)
+    code = delivery_channel_call(monkeypatch, mode, source, SimpleNamespace(buffer=output))
+    assert source.text_reads == 0 and code == (0 if binary_case == 'valid' else 4)
+    if binary_case == 'read-error':
+        assert json.loads(output.accepted) == dict(verdict='UNREADABLE', reason='cli_evidence_unreadable')
+    else:
+        baseline = DeliveryOutput(True)
+        assert delivery_run(monkeypatch, mode, baseline, raw=raw) == code and baseline.accepted == output.accepted
+
+
+@pytest.mark.parametrize('mode', STDIO_MODES)
+@pytest.mark.parametrize('binary', [False, True])
+@pytest.mark.parametrize('case', ['success', 'malformed', 'output-failure'])
+def test_delivery_precedence_borrowed_streams_and_buffers_remain_open(monkeypatch, mode, binary, case):
+    from io import BytesIO
+    class OwnedInputBuffer(BytesIO):
+        closes = 0
+        def close(self): self.closes += 1; super().close()
+    class OwnedOutput(DeliveryOutput):
+        closes = 0
+        def close(self): self.closes += 1
+    class Wrapper:
+        closes = 0
+        def __init__(self, buffer): self.buffer = buffer
+        def close(self): self.closes += 1
+    raw = b'{' if case == 'malformed' else serialize_result(framed_payload(mode)).encode()
+    input_buffer = OwnedInputBuffer(raw); source = Wrapper(input_buffer)
+    sink = OwnedOutput(binary, limit=8192, failure='write' if case == 'output-failure' else None)
+    output = Wrapper(sink) if binary else sink
+    assert delivery_channel_call(monkeypatch, mode, source, output) == (5 if case == 'output-failure' else 4 if case == 'malformed' else 0)
+    assert source.closes == input_buffer.closes == sink.closes == 0 and not input_buffer.closed
+    assert output.closes == 0
