@@ -1,9 +1,29 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
+import { useLayoutEffect } from 'react'
 import X07CustomerProfileEditor from './X07CustomerProfileEditor.jsx'
 afterEach(cleanup)
 const record = (customer, version = 1) => ({ customer_key: customer, profile_id: 'profile-' + customer,
   version, roles: { module: { block: 'Panel', layer: 'MODULES' } } })
+it('does not mount a retry before an actual load refusal', async () => {
+  let initialRetry, refuse
+  const load = vi.fn(() => new Promise((_resolve, reject) => { refuse = reject }))
+  function MountProbe() {
+    useLayoutEffect(() => { initialRetry = screen.queryByRole('button', { name: 'Retry loading profile' }) }, [])
+    return <X07CustomerProfileEditor customerKey="a" drawingKey="a:v1" loadProfile={load} />
+  }
+  render(<MountProbe />)
+  expect(initialRetry).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Retry loading profile' })).toBeNull()
+  await waitFor(() => expect(load).toHaveBeenCalledTimes(1))
+  await act(async () => refuse(new Error('PRIVATE_LOAD')))
+  await screen.findByRole('alert')
+  const retry = screen.getByRole('button', { name: 'Retry loading profile' })
+  expect(retry.isConnected).toBe(true)
+  expect(document.activeElement).toBe(retry)
+  expect(load).toHaveBeenCalledTimes(1)
+  expect(document.body.textContent).not.toContain('PRIVATE_LOAD')
+})
 it('keeps edits on a stale save and displays the older project pin', async () => {
   const load = vi.fn().mockResolvedValueOnce(record('a')).mockResolvedValueOnce(record('a', 2))
   const save = vi.fn().mockRejectedValueOnce({ code: 'STALE_VERSION' })
