@@ -138,6 +138,79 @@ def test_413_fails_only_that_file(fixture):
     assert b'filename="customer-02.dwg"' in calls[1]["data"]
 
 
+@pytest.mark.parametrize("status,stop_on_5xx,stops", [
+    (503, True, True), (503, False, False), (503, None, False), (413, True, False),
+])
+def test_stop_on_upload_http_error(fixture, status, stop_on_5xx, stops):
+    client = FakeClient()
+    fixtures = [{**fixture, "id": f"customer-{n:02}"} for n in range(1, 4)]
+    uploads = []
+
+    def transport(method, path, **kw):
+        if path == "/api/drawings/upload":
+            uploads.append(kw["data"])
+            if len(uploads) == 2:
+                return status, {}
+        return client.transport(method, path, **kw)
+
+    options = {} if stop_on_5xx is None else {"stop_on_5xx": stop_on_5xx}
+    rows = x04.grade_files(client, transport, project=PROJECT, fixtures=fixtures, **options)
+    assert list(rows) == [item["id"] for item in fixtures]
+    assert rows["customer-01"]["steps"]["1"] == "PASS"
+    assert rows["customer-02"]["steps"]["1"] == "FAIL"
+    assert rows["customer-02"]["evidence"]["1"] == f"upload HTTP {status}"
+    assert len(uploads) == (2 if stops else 3)
+    if stops:
+        assert rows["customer-03"]["steps"] == {str(n): "UNREADABLE" for n in range(1, 7)}
+        assert rows["customer-03"]["evidence"] == {
+            str(n): "not attempted: pass stopped after HTTP 503 on customer-02"
+            for n in range(1, 7)}
+        assert rows["customer-03"]["timings"] == rows["customer-03"]["statuses"] == {}
+    else:
+        assert rows["customer-03"]["steps"]["1"] == "PASS"
+        assert b'filename="customer-03.dwg"' in uploads[2]
+
+
+@pytest.mark.parametrize("method,status", [
+    ("wait_upload", 502), ("adopt_drawing", 503), ("drawing_context", 504),
+    ("run", 500), ("wait_upload", 422),
+])
+def test_stop_on_client_error(fixture, monkeypatch, method, status):
+    client = FakeClient()
+    fixtures = [{**fixture, "id": f"customer-{n:02}"} for n in range(1, 4)]
+    uploads = []
+    original = getattr(client, method)
+
+    def fail_second(*args, **kw):
+        if len(uploads) == 2:
+            raise StudioError(status, "UNAVAILABLE", CAP)
+        return original(*args, **kw)
+
+    def transport(method, path, **kw):
+        if path == "/api/drawings/upload":
+            uploads.append(kw["data"])
+        return client.transport(method, path, **kw)
+
+    monkeypatch.setattr(client, method, fail_second)
+    rows = x04.grade_files(client, transport, project=PROJECT, fixtures=fixtures,
+                           stop_on_5xx=True)
+    assert CAP not in json.dumps(rows)
+    failed = rows["customer-02"]
+    assert failed["steps"]["1"] == ("FAIL" if method == "wait_upload" else "PASS")
+    if method == "run":
+        assert failed["steps"]["4"] == "PASS"
+        assert failed["steps"]["5"] == "UNREADABLE"
+    if status >= 500:
+        assert len(uploads) == 2
+        assert rows["customer-03"]["steps"] == {str(n): "UNREADABLE" for n in range(1, 7)}
+        assert rows["customer-03"]["evidence"] == {
+            str(n): f"not attempted: pass stopped after HTTP {status} on customer-02"
+            for n in range(1, 7)}
+    else:
+        assert len(uploads) == 3
+        assert rows["customer-03"]["steps"]["1"] == "PASS"
+
+
 def test_timeout_uses_real_poller_with_fake_clock(fixture):
     timer = FakeClock()
 
@@ -413,6 +486,48 @@ def module_client(fixture, *, multi=False, count=12):
 
 def module_calls(client):
     return [call[2] for call in client.calls if call[:2] == ("POST", "/api/run?wait=1")]
+
+
+@pytest.mark.parametrize("stage", ["catalog", "module_listing", "module_selection", "layer"])
+def test_stop_on_later_http_error(fixture, monkeypatch, stage):
+    client = module_client(fixture) if stage.startswith("module_") else FakeClient()
+    fixtures = [{**fixture, "id": f"customer-{n:02}"} for n in range(1, 4)]
+    uploads, module_requests = [], []
+    responses = deepcopy(client.module_responses)
+    original_run = client.run
+
+    def run(*args, **kw):
+        if len(uploads) == 2:
+            return 503, {}
+        return original_run(*args, **kw)
+
+    def transport(method, path, **kw):
+        if path == "/api/drawings/upload":
+            uploads.append(kw["data"])
+            client.module_responses = deepcopy(responses)
+            module_requests.clear()
+        if path == "/api/run?wait=1":
+            module_requests.append(kw)
+        if len(uploads) == 2 and (
+                (stage == "catalog" and path == "/api/tools") or
+                (stage == "module_listing" and path == "/api/run?wait=1") or
+                (stage == "module_selection" and path == "/api/run?wait=1"
+                 and len(module_requests) == 2)):
+            return 503, {}
+        return client.transport(method, path, **kw)
+
+    if stage == "layer":
+        monkeypatch.setattr(client, "run", run)
+    rows = x04.grade_files(client, transport, project=PROJECT, fixtures=fixtures,
+                           stop_on_5xx=True)
+    assert len(uploads) == 2
+    assert rows["customer-02"]["steps"]["1"] == "PASS"
+    assert rows["customer-02"]["steps"]["4"] == "PASS"
+    assert rows["customer-02"]["steps"]["5"] == "UNREADABLE"
+    assert rows["customer-03"]["steps"] == {str(n): "UNREADABLE" for n in range(1, 7)}
+    assert rows["customer-03"]["evidence"] == {
+        str(n): "not attempted: pass stopped after HTTP 503 on customer-02"
+        for n in range(1, 7)}
 
 
 @pytest.mark.parametrize("selector", ["set_id", "set_ids"])
@@ -727,13 +842,23 @@ def test_no_insert_fixtures_unreadable(fixture):
     assert x04.score({fixture["id"]: row}, ("PASS", "no hits"))[3].verdict == "UNREADABLE"
 
 
-def test_run_writes_safe_files_and_uses_manifest(fixture, tmp_path, monkeypatch):
+@pytest.mark.parametrize("option", [None, "1", "0", True])
+def test_run_writes_safe_files_and_uses_manifest(fixture, tmp_path, monkeypatch, option):
     client = FakeClient()
     client.upload["checkout_capability"] = CAP
     client.provenance["arbitrary_text"] = CAP
     ctx = SimpleNamespace(manifest={"fixtures": [fixture], "source_repo": "repo"},
                           fixtures=[{"id": fixture["id"], "ok": True}], out_dir=tmp_path,
                           source_sha=SOURCE, base="https://example.test")
+    if option is not None:
+        ctx.options = {"stop_on_5xx": option}
+    original_grade_files = x04.grade_files
+
+    def grade_files(*args, **kw):
+        assert kw["stop_on_5xx"] is (option == "1")
+        return original_grade_files(*args, **kw)
+
+    monkeypatch.setattr(x04, "grade_files", grade_files)
 
     @contextmanager
     def signed_in(repo, source_sha, *, origin):

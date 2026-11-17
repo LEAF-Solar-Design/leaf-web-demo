@@ -226,8 +226,32 @@ def _grade_modules(transport, project, adoption, fixture, tool, row, mark):
         mark(6, "UNREADABLE", reason)
 
 
-def grade_files(client, transport, *, project, fixtures, clock=time.monotonic):
+def grade_files(client, transport, *, project, fixtures, clock=time.monotonic,
+                stop_on_5xx=False):
     rows = {}
+    stopped = None
+
+    def record_status(status):
+        nonlocal stopped
+        if stop_on_5xx and status >= 500 and stopped is None:
+            stopped = f"not attempted: pass stopped after HTTP {status} on {fid}"
+
+    def record_error(exc):
+        if isinstance(exc, StudioError):
+            record_status(exc.status)
+
+    if stop_on_5xx:
+        original_transport = transport
+
+        def transport(*args, **kwargs):
+            try:
+                status, body = original_transport(*args, **kwargs)
+            except StudioError as exc:
+                record_error(exc)
+                raise
+            record_status(status)
+            return status, body
+
     for fixture in fixtures:
         fid = fixture["id"]
         row = {"id": fid, "timings": {}, "statuses": {}, "counts": [], "limits": [],
@@ -236,6 +260,9 @@ def grade_files(client, transport, *, project, fixtures, clock=time.monotonic):
                "insert_fixture": fixture.get("module_entity") == "INSERT" and
                                  bool(fixture.get("module_blocks"))}
         rows[fid] = row
+        if stopped is not None:
+            row["evidence"] = {str(n): stopped for n in range(1, 7)}
+            continue
 
         def mark(n, verdict, evidence):
             row["steps"][str(n)] = verdict
@@ -257,6 +284,7 @@ def grade_files(client, transport, *, project, fixtures, clock=time.monotonic):
                 continue
             mark(1, "PASS", "ready within deadline")
         except Exception as exc:
+            record_error(exc)
             if isinstance(exc, StudioError):
                 row["statuses"]["upload_error"] = exc.status
             mark(1, "FAIL", "upload failed or timed out")
@@ -270,6 +298,7 @@ def grade_files(client, transport, *, project, fixtures, clock=time.monotonic):
             intake = client.drawing_context(project["project_id"], adoption["version_id"],
                                             adoption["drawing_id"])["intake"]
         except Exception as exc:
+            record_error(exc)
             message = xbench_session.redact(str(exc))
             if isinstance(exc, StudioError):
                 code = exc.reason_code or exc.error_code
@@ -343,6 +372,7 @@ def grade_files(client, transport, *, project, fixtures, clock=time.monotonic):
                                           project_id=project["project_id"], version_id=adoption["version_id"],
                                           params={"drawing_id": adoption["drawing_id"], "layer": layer})
                 row["statuses"].setdefault("count", []).append(status)
+                record_status(status)
                 if status != 200:
                     raise ValueError("count not inline")
                 count = body["result"]["counts"][layer]
@@ -353,7 +383,8 @@ def grade_files(client, transport, *, project, fixtures, clock=time.monotonic):
             verdict = "PASS" if total == fixture["modules"] else "FAIL" if whole else "UNREADABLE"
             mark(5, verdict, f"count {total}, oracle {fixture['modules']}" if whole or verdict == "PASS"
                  else "competing-set pick needs the UI, not built")
-        except Exception:
+        except Exception as exc:
+            record_error(exc)
             mark(5, "UNREADABLE", "layer count unavailable")
     return rows
 
@@ -415,7 +446,8 @@ def run(ctx):
         transport = _transport(page, origin=ctx.base)
         client = StudioClient(transport)
         with disposable_project(client, f"XBench X04 {ctx.source_sha[:8]} {utc_now()}") as project:
-            rows = grade_files(client, transport, project=project, fixtures=fixtures)
+            rows = grade_files(client, transport, project=project, fixtures=fixtures,
+                               stop_on_5xx=(getattr(ctx, "options", {}).get("stop_on_5xx") == "1"))
             write_json_atomic(Path(ctx.out_dir) / "files.json", rows)
     tokens = [token for fixture in fixtures for token in forbidden_tokens(fixture)]
     step7 = scan_source(ctx.manifest.get("source_repo", "D:/GitHub/leaf-web-demo"), ctx.source_sha, tokens)
