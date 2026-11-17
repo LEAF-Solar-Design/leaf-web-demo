@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react'
+import X07ProfileRoleDiff from './X07ProfileRoleDiff.jsx'
 
 const object = value => value && typeof value === 'object' && !Array.isArray(value)
 const valid = (record, customer) => record?.customer_key === customer && typeof record.profile_id === 'string'
@@ -7,6 +8,10 @@ const valid = (record, customer) => record?.customer_key === customer && typeof 
   && Object.entries(record.roles).every(([role, value]) => !['module', 'roof', 'obstruction'].includes(role)
     || (object(value) && typeof value.layer === 'string' && (value.block === undefined || typeof value.block === 'string')))
 const clone = value => JSON.parse(JSON.stringify(value))
+const roleNames = ['module', 'roof', 'obstruction']
+const roleDiffers = (before, after, role) => Boolean(before[role]) !== Boolean(after[role])
+  || ['block', 'layer'].some(field => Object.hasOwn(before[role] || {}, field) !== Object.hasOwn(after[role] || {}, field)
+    || before[role]?.[field] !== after[role]?.[field])
 
 export default function X07CustomerProfileEditor(props) {
   return <LeaveBoundary {...props} />
@@ -39,11 +44,12 @@ function LeaveBoundary(props) {
   return <>{message && <p role="status">{message}</p>}<Editor key={held.key} {...active} onDirtyChange={value => { dirty.current = value }} /></>
 }
 
-function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, onDirtyChange }) {
+function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, pinnedRoles, onDirtyChange }) {
   const [profile, setProfile] = useState(null), [draft, setDraft] = useState(null)
   const [busy, setBusy] = useState(false), [error, setError] = useState(null)
   const [stale, setStale] = useState(false), [message, setMessage] = useState(null)
   const [reconcile, setReconcile] = useState(false)
+  const [undo, setUndo] = useState(null)
   const form = useRef(null), saveButton = useRef(null), reloadButton = useRef(null), retryButton = useRef(null)
   const composing = useRef(false)
   const draftRevision = useRef(0)
@@ -52,11 +58,13 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, onDi
   const focusedError = useRef(null)
   useEffect(() => {
     if (!error) focusedError.current = null
-    if (busy) return
     if (focusRole.current) {
       form.current?.querySelector(`[data-role-layer="${focusRole.current}"]`)?.focus()
       focusRole.current = null
-    } else if (error && focusedError.current !== error) {
+      return
+    }
+    if (busy) return
+    if (error && focusedError.current !== error) {
       focusedError.current = error
       if (!profile) retryButton.current?.focus()
       else if (stale) reloadButton.current?.focus()
@@ -71,6 +79,7 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, onDi
   const current = controller => alive.current && pending.current === controller && !controller.signal.aborted
   const load = keepEdits => {
     if (pending.current) return
+    setUndo(null)
     const restoreRetryFocus = document.activeElement === retryButton.current && retryButton.current !== null
     const controller = new AbortController(); pending.current = controller
     setBusy(true); setError(null)
@@ -126,6 +135,7 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, onDi
   }
   const resetDraft = () => {
     if (!profile) return
+    setUndo(null)
     draftRevision.current++
     setDraft(clone(profile.roles)); setError(null); onDirtyChange?.(saving.current)
     setMessage(saving.current ? 'Draft reset. The pending save may still change the stored profile.' : 'Draft reset to the loaded profile.')
@@ -133,25 +143,54 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, onDi
   const cancelSave = () => {
     if (!saving.current || !pending.current) return
     pending.current.abort(); pending.current = null; saving.current = false
+    setUndo(null)
     draftRevision.current++; setDraft(clone(profile.roles)); onDirtyChange?.(false)
     setBusy(false); setError(null); setReconcile(true)
     setMessage('Save cancelled. Stored changes may have completed. Reload the profile to reconcile.')
   }
-  const edit = (role, field, value) => { draftRevision.current++; onDirtyChange?.(true);setDraft(previous => ({ ...previous, [role]: { ...previous[role], [field]: value } })); setMessage(null) }
-  const addRole = role => { draftRevision.current++; onDirtyChange?.(true);focusRole.current = role; setDraft(previous => ({ ...previous, [role]: { layer: '' } })); setMessage(null); setError(null) }
-  const removeRole = role => { draftRevision.current++; onDirtyChange?.(true);focusRole.current = 'module'; setDraft(previous => { const next = { ...previous }; delete next[role]; return next }); setMessage(null); setError(null) }
+  const edit = (role, field, value) => { setUndo(null); draftRevision.current++; onDirtyChange?.(true);setDraft(previous => ({ ...previous, [role]: { ...previous[role], [field]: value } })); setMessage(null) }
+  const addRole = role => { setUndo(null); draftRevision.current++; onDirtyChange?.(true);focusRole.current = role; setDraft(previous => ({ ...previous, [role]: { layer: '' } })); setMessage(null); setError(null) }
+  const removeRole = role => { setUndo(null); draftRevision.current++; onDirtyChange?.(true);focusRole.current = 'module'; setDraft(previous => { const next = { ...previous }; delete next[role]; return next }); setMessage(null); setError(null) }
+  const restoreRole = role => {
+    if (!profile || !draft || !roleNames.includes(role)) return
+    setUndo({ draft: clone(draft), role })
+    const next = { ...draft }
+    if (Object.hasOwn(profile.roles, role)) next[role] = clone(profile.roles[role])
+    else delete next[role]
+    draftRevision.current++
+    focusRole.current = next[role] ? role : 'module'
+    setDraft(next); setError(null)
+    onDirtyChange?.(saving.current || roleNames.some(name => roleDiffers(profile.roles, next, name)))
+    setMessage(`Loaded ${role} value restored in draft. Save to keep changes.`)
+  }
+  const undoRestore = () => {
+    if (!undo || !profile) return
+    const next = clone(undo.draft)
+    draftRevision.current++
+    focusRole.current = next[undo.role] ? undo.role : 'module'
+    setDraft(next); setUndo(null); setError(null)
+    onDirtyChange?.(saving.current || roleNames.some(role => roleDiffers(profile.roles, next, role)))
+    setMessage('Last restore undone in draft. Save to keep changes.')
+  }
+  const changedRoles = profile && draft ? roleNames.filter(role => roleDiffers(profile.roles, draft, role)) : []
   const pin = profile && applicationRecord?.customer_key === customerKey && applicationRecord.profile_id === profile.profile_id
     && Number.isSafeInteger(applicationRecord.version) && applicationRecord.version > 0 ? applicationRecord : null
   return <section aria-label="Customer role profile">
     <h3>Customer role profile</h3><p>Customer: {customerKey}</p>
     {profile && <><p>Profile id: {profile.profile_id}</p><p aria-live="polite" aria-atomic="true">Profile version: {profile.version}</p></>}
     {pin && <p>Project is pinned to version {pin.version}.</p>}
+    {profile && pinnedRoles && <X07ProfileRoleDiff beforeRoles={pinnedRoles} afterRoles={profile.roles} label="Pinned versus current roles" />}
     {error && <p id={errorId} role="alert">{error}</p>}{message && <p role="status">{message}</p>}
     {!profile && !busy && <button ref={retryButton} type="button" onClick={() => load(false)}>Retry loading profile</button>}
     {draft && <form ref={form} onSubmit={save} onReset={event => { event.preventDefault(); event.stopPropagation(); resetDraft() }} aria-describedby={error ? errorId : undefined}
       onCompositionStart={() => { composing.current = true }}
       onCompositionEnd={() => { composing.current = false }}
       onKeyDown={event => { if (event.key === 'Enter' && (composing.current || event.nativeEvent.isComposing || event.keyCode === 229)) event.preventDefault() }}>
+      <X07ProfileRoleDiff beforeRoles={profile.roles} afterRoles={draft} label={`Draft changes from loaded version ${profile.version}`} />
+      {changedRoles.map(role => <button key={role} type="button" onClick={() => restoreRole(role)}>
+        Restore loaded {role} value
+      </button>)}
+      {undo && <button type="button" onClick={undoRestore}>Undo last restore</button>}
       <fieldset><legend>Drawing roles</legend>
         {Object.keys(draft).filter(role => ['module', 'roof', 'obstruction'].includes(role)).map(role => {
           const label = role[0].toUpperCase() + role.slice(1)

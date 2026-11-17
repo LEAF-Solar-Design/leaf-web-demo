@@ -20,7 +20,7 @@ function component(name) {
   const file = path.resolve(__dirname, '../../../web/src/solar/' + name + '.jsx')
   const compiled = new Module(file, module); compiled.filename = file; compiled.paths = [deps]
   const nativeRequire = compiled.require.bind(compiled)
-  compiled.require = request => request.startsWith('./X07') ? { default: component(request.slice(2)), __esModule: true } : nativeRequire(request)
+  compiled.require = request => request.startsWith('./X07') ? { default: component(request.slice(2).replace(/\.jsx$/, '')), __esModule: true } : nativeRequire(request)
   compiled._compile(transformSync(fs.readFileSync(file, 'utf8'), { loader: 'jsx', format: 'cjs', jsx: 'automatic' }).code, file)
   cache.set(name, compiled.exports.default); return compiled.exports.default
 }
