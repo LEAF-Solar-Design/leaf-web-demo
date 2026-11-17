@@ -131,7 +131,7 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
       }
     }
   }
-  return <section aria-label="Engineering reconciliation">
+  return <section aria-label="Engineering reconciliation" style={{ minWidth: 0, maxWidth: '100%', overflowWrap: 'anywhere' }}>
     <h3>Engineering reconciliation</h3>
     <p>Enter user-supplied engineering report/BOM totals. These values are not independently verified.</p>
     <p id={`${inputId}-dc-optional`}>kW DC is optional when unknown. Leave it blank to export an unreadable comparison, with no report value or delta; it cannot pass.</p>
@@ -139,14 +139,15 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
     <p aria-live="polite">{!live ? scope.observationError || 'Reconciliation unavailable: the selected drawing scope is stale or unavailable.'
       : saved?.status || 'Read the saved design to compare totals.'}</p>
     {saved?.error && <p role="alert">{saved.error}</p>}
-    <table className="ops-table"><caption>Saved Studio vs engineering report/BOM totals</caption>
+    <div role="region" aria-label="Reconciliation comparison table" tabIndex={0} style={{ maxWidth: '100%', overflowX: 'auto' }}>
+    <table className="ops-table" style={{ display: 'table', width: '44rem', minWidth: '44rem', tableLayout: 'fixed', overflowWrap: 'normal' }}><caption>Saved Studio vs engineering report/BOM totals</caption>
       <thead><tr><th scope="col">Metric</th><th scope="col">Studio</th><th scope="col">Engineering report/BOM</th>
         <th scope="col">Delta</th><th scope="col">Verdict</th></tr></thead>
       <tbody>{rows.map((row, index) => <tr key={row.metric}>
-        <th scope="row">{row.metric}</th><td>{row.studio || 'Unavailable'}</td>
-        <td><input id={`${inputId}-${index}`} aria-label={`${row.metric} engineering report/BOM`} inputMode={index === 4 ? 'decimal' : 'numeric'}
+        <th scope="row">{row.metric}</th><td style={{ overflowWrap: 'anywhere' }}>{row.studio || 'Unavailable'}</td>
+        <td style={{ verticalAlign: 'top' }}><input id={`${inputId}-${index}`} aria-label={`${row.metric} engineering report/BOM`} inputMode={index === 4 ? 'decimal' : 'numeric'}
           aria-describedby={`${inputId}-${index}-help${index === 4 ? ` ${inputId}-dc-optional` : ''}`}
-          disabled={!live || busy || pending} value={drafts[index]} maxLength={37}
+          disabled={!live || busy || pending} value={drafts[index]} maxLength={37} style={{ width: '12ch' }}
           aria-invalid={drafts[index] !== '' && parseReconciliationNumber(drafts[index], index !== 4) === null}
           onChange={(event) => {
             if (!current() || busy || pending) return
@@ -156,10 +157,11 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
           }} /><small id={`${inputId}-${index}-help`}>{index === 4
             ? 'Use a nonnegative decimal with up to 18 integer and 18 fractional digits, or leave blank when unknown.'
             : 'Enter a whole number from 0 to 9007199254740991. Counts are required; do not use signs, decimals or exponents.'}</small></td>
-        <td>{row.delta || 'Unavailable'}</td><td>{row.verdict === 'UNREADABLE' ? 'Unavailable' : row.verdict}
+        <td style={{ overflowWrap: 'anywhere' }}>{row.delta || 'Unavailable'}</td><td>{row.verdict === 'UNREADABLE' ? 'Unavailable' : row.verdict}
           {row.reason && <small>: {row.reason}</small>}</td>
       </tr>)}</tbody>
     </table>
+    </div>
     <p>Delta is Studio minus the supplied report/BOM value.</p>
     <button type="button" disabled={!canExport} onClick={download}>Download CSV</button>
   </section>

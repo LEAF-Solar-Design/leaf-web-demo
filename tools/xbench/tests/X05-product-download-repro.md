@@ -15,6 +15,15 @@ separately reads duplicate panel IDs, foreign string references and missing fram
 power, downloads each five-row comparison, and repairs each through a saved reread. No auth,
 video, real drawings, environment/secret reads, staging, or uploads are involved.
 
+The same browser then repeats keyboard entry/export at a 390 by 844 viewport,
+at 100% and at 200% using explicit local CSS `zoom: 2` on the document element.
+This is CSS layout zoom emulation, not native browser zoom or a DPR test; the
+computed zoom is asserted and recorded. Maximum accepted count/decimal report
+lengths exercise horizontal input scrolling and the panel's keyboard table
+scroller. Each replay retains all five CSV rows, normalized DOM parity, focused
+field screenshots and hashes. Inspect the retained narrow/zoom images before
+acceptance. The final proof records browser/context/server cleanup after it runs.
+
 ```python
 import csv
 import copy
@@ -83,6 +92,7 @@ if (repo / 'web/public/fonts').is_dir():
     shutil.copytree(repo / 'web/public/fonts', artifact / 'fonts')
 (artifact / 'index.html').write_text('''<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><title>X05 synthetic product download</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="/styles.css"></head><body>
 <main id="root"></main><script type="module" src="/app.js"></script></body></html>''', encoding='utf-8')
 
@@ -114,10 +124,16 @@ try:
     page.keyboard.press('Enter')
     expect(page.get_by_text('Saved design revision 9.', exact=True)).to_be_visible()
     labels = ['Panels', 'Optimizers', 'Inverters', 'Strings', 'kW DC']
+    def tab_to(target):
+        for _ in range(20):
+            page.keyboard.press('Tab')
+            if target.evaluate('(node) => node === document.activeElement'):
+                expect(target).to_be_focused()
+                return
+        raise AssertionError('Control was not reachable by keyboard')
     for label, value in zip(labels, ['2', '1', '2', '1', '0.8']):
-        page.keyboard.press('Tab')
         field = page.get_by_role('textbox', name=label + ' engineering report/BOM', exact=True)
-        expect(field).to_be_focused()
+        tab_to(field)
         page.keyboard.insert_text(value)
     page.keyboard.press('Tab')
     download_button = page.get_by_role('button', name='Download CSV', exact=True)
@@ -218,6 +234,91 @@ try:
         assert (artifact / recovery['csv']).read_bytes() == csv_path.read_bytes()
         cases.append(dict(name=name, affected_metrics=[actual[i]['metric'] for i in sorted(affected)],
                           malformed=broken, repaired=recovery, explicit_saved_reread=True))
+
+    narrow_replays = []
+    maximum_reports = ['9007199254740991'] * 4 + ['999999999999999999.999999999999999999']
+    for zoom in [1, 2]:
+        name = f'narrow-css-zoom-{zoom}'
+        page.set_viewport_size({'width': 390, 'height': 844})
+        page.evaluate('(zoom) => { document.documentElement.style.zoom = String(zoom); }', zoom)
+        computed_zoom = page.evaluate('Number(getComputedStyle(document.documentElement).zoom)')
+        assert computed_zoom == zoom
+        tab_to(read)
+        page.keyboard.press('Enter')
+        expect(page.get_by_text(f"Saved design revision {repaired['rev']}.", exact=True)).to_be_visible()
+        field_proofs = []
+        for index, (label, value) in enumerate(zip(labels, maximum_reports)):
+            field = page.get_by_role('textbox', name=label + ' engineering report/BOM', exact=True)
+            tab_to(field)
+            page.keyboard.press('Control+A')
+            page.keyboard.insert_text(value)
+            expect(field).to_have_value(value)
+            expect(field).to_have_attribute('aria-invalid', 'false')
+            # Tab focus must reveal the whole control inside every clipping ancestor.
+            geometry = field.evaluate('''node => {
+              const r = node.getBoundingClientRect();
+              let left = 0, right = innerWidth, top = 0, bottom = innerHeight;
+              for (let p = node.parentElement; p; p = p.parentElement) {
+                const s = getComputedStyle(p), b = p.getBoundingClientRect();
+                if (/(auto|scroll|hidden|clip)/.test(s.overflowX)) {
+                  left = Math.max(left, b.left); right = Math.min(right, b.right);
+                }
+                if (/(auto|scroll|hidden|clip)/.test(s.overflowY)) {
+                  top = Math.max(top, b.top); bottom = Math.min(bottom, b.bottom);
+                }
+              }
+              return {left: r.left, right: r.right, top: r.top, bottom: r.bottom,
+                revealed: r.left >= left - 1 && r.right <= right + 1 &&
+                  r.top >= top - 1 && r.bottom <= bottom + 1};
+            }''')
+            assert geometry['revealed'], (name, label, geometry)
+            page.keyboard.press('Home')
+            assert field.evaluate('(node) => node.selectionStart') == 0
+            page.screenshot(path=str(artifact / f'{name}-field-{index}-start.png'))
+            page.keyboard.press('End')
+            assert field.evaluate('(node) => node.selectionStart') == len(value)
+            page.screenshot(path=str(artifact / f'{name}-field-{index}-end.png'))
+            field_proofs.append(dict(label=label, value=value, keyboard_reached=True, geometry=geometry))
+        tab_to(download_button)
+        expect(download_button).to_be_in_viewport()
+        rendered = visible_rows()
+        with page.expect_download() as pending:
+            page.keyboard.press('Enter')
+        download = pending.value
+        assert download.failure() is None
+        path = artifact / (name + '.csv')
+        download.save_as(path)
+        with path.open(newline='', encoding='utf-8') as stream:
+            downloaded = list(csv.DictReader(stream))
+        assert len(downloaded) == 5 and downloaded == rendered
+        assert [row['oracle'] for row in downloaded] == maximum_reports
+        assert [row['studio'] for row in downloaded] == ['2', '', '1', '1', '0.8']
+        assert [row['delta'] for row in downloaded] == [
+            '-9007199254740989', '', '-9007199254740990', '-9007199254740990',
+            '-999999999999999999.199999999999999999']
+        assert [row['verdict'] for row in downloaded] == ['FAIL', 'UNREADABLE', 'FAIL', 'FAIL', 'FAIL']
+        page.screenshot(path=str(artifact / (name + '.png')), full_page=True)
+        scroller = page.get_by_role('region', name='Reconciliation comparison table', exact=True)
+        tab_to(scroller)
+        for _ in range(60):
+            page.keyboard.press('ArrowLeft')
+        page.screenshot(path=str(artifact / (name + '-table-left.png')))
+        for _ in range(60):
+            page.keyboard.press('ArrowRight')
+        scroll = scroller.evaluate('(node) => ({left: node.scrollLeft, width: node.clientWidth, content: node.scrollWidth})')
+        assert scroll['content'] <= scroll['width'] + 1 or scroll['left'] > 0
+        page.screenshot(path=str(artifact / (name + '-table-right.png')))
+        overflow = page.evaluate('''() => ({viewport: innerWidth,
+          body: document.body.getBoundingClientRect().width,
+          bodyScroll: document.body.scrollWidth, bodyClient: document.body.clientWidth,
+          pageScroll: document.scrollingElement.scrollWidth, pageClient: document.scrollingElement.clientWidth})''')
+        assert overflow['bodyScroll'] <= overflow['bodyClient'] + 1, overflow
+        assert overflow['pageScroll'] <= overflow['pageClient'] + 1, overflow
+        narrow_replays.append(dict(name=name, viewport=dict(width=390, height=844),
+                                   zoom_method='document.documentElement.style.zoom (CSS layout emulation)',
+                                   computed_zoom=computed_zoom, fields=field_proofs, scroll=scroll,
+                                   overflow=overflow, visible=rendered, downloaded=downloaded, csv=path.name,
+                                   keyboard_download=True))
     def digest(path):
         return hashlib.sha256(path.read_bytes()).hexdigest()
     inputs = json.loads((artifact / 'meta.json').read_text(encoding='utf-8'))['inputs']
@@ -225,6 +326,7 @@ try:
     sources.add(repo / 'web/src/styles.css')
     proof = dict(synthetic=True, rows_matched=5, visible=visible, downloaded=actual,
                  malformed_graph_replays=cases,
+                 narrow_zoom_replays=narrow_replays,
                  keyboard_read_retry=True, keyboard_export_retry=True,
                  source_sha256={str(path): digest(path) for path in sorted(sources)},
                  artifact_sha256={path.name: digest(path) for path in artifact.iterdir() if path.is_file()})
@@ -251,6 +353,11 @@ finally:
                     if thread_started:
                         thread.join(timeout=10)
                         assert not thread.is_alive(), 'Local server did not stop'
+if proof_path.is_file():
+    proof = json.loads(proof_path.read_text(encoding='utf-8'))
+    proof['cleanup'] = dict(context_closed=True, browser_closed=True, playwright_stopped=True,
+                            server_closed=True, server_thread_stopped=not thread.is_alive())
+    proof_path.write_text(json.dumps(proof, indent=2), encoding='utf-8')
 print(json.dumps({'proof': str(proof_path), 'rows_matched': 5, 'keyboard_retries_passed': 2,
-                  'malformed_graph_repairs': len(cases)}))
+                  'malformed_graph_repairs': len(cases), 'narrow_zoom_replays': len(narrow_replays)}))
 ```

@@ -36,6 +36,60 @@ const fill = (values = ['1', '0', '1', '1', '0.4']) => screen.getAllByRole('text
 })
 const loaded = () => screen.findByText('Saved design revision 9.')
 
+it.each(['resolve', 'reject'])('preserves drafts when a deferred read settles by %s while busy', async outcome => {
+  const h = fixture(), drafts = ['01', '0', '1', '1', '0.400']
+  fill(drafts)
+  let resolve, reject
+  h.client.readContext.mockImplementationOnce(() => new Promise((yes, no) => { resolve = yes; reject = no }))
+  const createObjectURL = vi.fn(() => 'blob:busy'), revokeObjectURL = vi.fn()
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  const download = () => fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  const assertDisabled = () => {
+    expect(screen.getByRole('button', { name: 'Read saved design' }).disabled).toBe(true)
+    expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(true)
+    expect(screen.getAllByRole('textbox').every(input => input.disabled)).toBe(true)
+    fill(['9', '9', '9', '9', '9']); read(); download()
+    expect(screen.getAllByRole('textbox').map(input => input.value)).toEqual(drafts)
+    expect(h.client.readContext).toHaveBeenCalledTimes(1)
+    expect(createObjectURL).not.toHaveBeenCalled()
+  }
+  read()
+  const signal = h.client.readContext.mock.calls[0][0].signal
+  h.update({ busy: true })
+  assertDisabled()
+  await act(async () => {
+    if (outcome === 'resolve') resolve(response())
+    else reject(new Error('private busy failure: token=synthetic-secret'))
+  })
+  assertDisabled()
+  expect(signal.aborted).toBe(false)
+  expect(screen.queryByText(/private busy failure|synthetic-secret/)).toBeNull()
+  h.update({ busy: false })
+  expect(screen.getAllByRole('textbox').every(input => !input.disabled)).toBe(true)
+  expect(screen.getAllByRole('textbox').map(input => input.value)).toEqual(drafts)
+  expect(screen.getByRole('button', { name: 'Read saved design' }).disabled).toBe(false)
+  expect(h.client.readContext).toHaveBeenCalledTimes(1)
+  if (outcome === 'reject') {
+    expect(screen.getByRole('alert').textContent).toBe('Saved design could not be read. Try reading it again.')
+    expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(true)
+    expect(screen.queryByText('PASS')).toBeNull()
+    read(); await loaded()
+    expect(h.client.readContext).toHaveBeenCalledTimes(2)
+  } else expect(screen.getByText('Saved design revision 9.')).toBeTruthy()
+  expect(screen.getAllByText('PASS')).toHaveLength(4)
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(false)
+  download()
+  expect(createObjectURL).toHaveBeenCalledOnce()
+  expect(revokeObjectURL).toHaveBeenCalledWith('blob:busy')
+  const csv = await new Promise(resolveCsv => {
+    const reader = new FileReader(); reader.onload = () => resolveCsv(reader.result)
+    reader.readAsText(createObjectURL.mock.calls[0][0])
+  })
+  expect(csv).toContain('"panels","1","01","0","PASS"')
+  expect(csv).toContain('"kw_dc","0.4","0.400","0","PASS"')
+})
+
 it('guards reentrant reads before React commits and releases ownership after success', async () => {
   const h = fixture()
   let resolve
