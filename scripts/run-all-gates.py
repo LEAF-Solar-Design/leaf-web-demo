@@ -1321,7 +1321,7 @@ def build_suites() -> List[Suite]:
                   (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_consumer_source.py").as_posix(),
                   (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_consumer_perf.py").as_posix(),
                   (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_consumer_portability.py").as_posix(),
-                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_role_product_journeys.py").as_posix()], 428,
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_role_product_journeys.py").as_posix()], 432,
               allowed_skip_reasons=(r"X07 actual JSX dependency set unavailable on this host; Node-prepared replay required",)),
         # W5 Rooftop workflow flow (2026-09-24, contracts G34/G34a/G34b): server/solar_workflow_flow.py,
         # the pure progression engine (every step's CanAdvance and HasDrawingPrerequisites, the L1/L2

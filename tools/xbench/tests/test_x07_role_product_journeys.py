@@ -19,6 +19,10 @@ ROOT = Path(__file__).resolve().parents[3]
     'x07_selective_restore_races_dom.cjs',
     'x07_selective_restore_adapter_dom.cjs',
     '../x07_selective_restore_soak.cjs',
+    'x07_restore_undo_keyboard_dom.cjs',
+    'x07_restore_undo_races_dom.cjs',
+    'x07_restore_undo_adapter_dom.cjs',
+    '../x07_restore_undo_soak.cjs',
 ])
 def test_offline_role_product_fixture(name):
     dependencies = ROOT / 'web/node_modules'
@@ -41,8 +45,9 @@ def test_offline_role_product_fixture(name):
         assert all(row['max_nodes'] <= 60 for row in report['timings'])
     elif 'soak' in name:
         report = json.loads(result.stdout)
-        assert report['schema'] == 'leaf.x07.selective-restore-soak.v1'
+        undo = 'restore_undo' in name
+        assert report['schema'] == ('leaf.x07.restore-undo-soak.v1' if undo else 'leaf.x07.selective-restore-soak.v1')
         assert report['cycles'] == 16 and report['writes'] == 0
-        assert report['max_nodes'] <= 180 and report['cleanup'] is True
+        assert report['max_nodes'] <= (200 if undo else 180) and report['cleanup'] is True
     else:
         assert 'PASS:' in result.stdout
