@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import SolarGroundInputForm from './SolarGroundInputForm.jsx'
 
-afterEach(cleanup)
+afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 
 describe('ground form instance isolation', () => {
   it.each([0, 1])('keeps instance %s edits, feedback, reset and callbacks independent', async active => {
@@ -10,7 +10,7 @@ describe('ground form instance isolation', () => {
     const forms = () => <>{callbacks.map((callback, index) =>
       <SolarGroundInputForm key={index} onParameters={callback} />)}</>
     const view = render(forms())
-    const fieldsets = [...view.container.querySelectorAll('fieldset')]
+    const fieldsets = view.getAllByRole('group', { name: 'Ground layout inputs' })
     const scopes = fieldsets.map(fieldset => within(fieldset))
     const edit = (index, label, value) => fireEvent.change(scopes[index].getByLabelText(label), { target: { value } })
     const current = index => callbacks[index].mock.calls.at(-1)[0]
@@ -120,7 +120,7 @@ describe('ground form instance isolation', () => {
       delete value.drawing_units
     })
     const view = render(<SolarGroundInputForm onParameters={onParameters} />)
-    const scope = within(view.container.querySelector('fieldset'))
+    const scope = within(view.getByRole('group', { name: 'Ground layout inputs' }))
     const edit = (label, value) => fireEvent.change(scope.getByLabelText(label), { target: { value } })
     const json = () => JSON.parse(scope.getByLabelText('Generated source input parameters JSON').textContent)
     edit('Site width (drawing units)', '10')
@@ -156,5 +156,116 @@ describe('ground form instance isolation', () => {
     expect(replacement.mock.calls.at(-1)[0]).toEqual({ ...expected,
       boundary: [[0, 0], [11, 0], [11, 21], [0, 21]] })
     expect(json()).toEqual(replacement.mock.calls.at(-1)[0])
+  })
+})
+
+describe('ground clipboard scope and accessible groups', () => {
+  function mount(writeText) {
+    vi.stubGlobal('navigator', writeText === undefined ? {} : { clipboard: { writeText } })
+    const onParameters = vi.fn()
+    const view = render(<SolarGroundInputForm onParameters={onParameters} />)
+    const scope = within(view.getByRole('group', { name: 'Ground layout inputs' }))
+    const edit = (label, value) => fireEvent.change(scope.getByLabelText(label), { target: { value } })
+    edit('Site width (drawing units)', '10'); edit('Site height (drawing units)', '20')
+    const disclose = () => { view.container.querySelector('details').open = true }
+    disclose()
+    const copy = () => scope.getByRole('button', { name: 'Copy generated JSON' })
+    return { view, scope, edit, onParameters, disclose, copy }
+  }
+  it('copies exactly the private pretty JSON with Unicode only on an explicit disclosed click', async () => {
+    const write = vi.fn(async () => undefined)
+    const { scope, edit, copy, disclose } = mount(write)
+    edit('Preset name', '中文 🌞')
+    disclose()
+    const text = scope.getByLabelText('Generated source input parameters JSON').textContent
+    expect(write).not.toHaveBeenCalled()
+    expect(scope.queryByRole('status')).toBeNull()
+    expect(copy().closest('details')).toBeTruthy()
+    await act(async () => { fireEvent.click(copy()) })
+    expect(write).toHaveBeenCalledExactlyOnceWith(text)
+    expect(JSON.parse(text).preset.Name).toBe('中文 🌞')
+    expect(scope.getByRole('status').textContent).toBe('Generated JSON copied.')
+  })
+  it.each(['missing', 'rejected'])('announces a friendly handled %s clipboard API outcome', async mode => {
+    const write = mode === 'missing' ? undefined : vi.fn(async () => { throw new Error('denied') })
+    const { scope, copy } = mount(write)
+    await act(async () => { fireEvent.click(copy()) })
+    expect(scope.getByRole('status').textContent).toContain(mode === 'missing' ? 'Clipboard is unavailable.' : 'Could not copy generated JSON.')
+    expect(copy().disabled).toBe(false)
+  })
+  it.each(['edit', 'reset', 'disable', 'unmount', 'composition'])(
+    'ignores late clipboard settlement after %s without another write', async change => {
+      let resolve
+      const write = vi.fn(() => new Promise(done => { resolve = done }))
+      const { view, scope, edit, onParameters, copy } = mount(write)
+      const button = copy()
+      fireEvent.click(button); fireEvent.click(button)
+      expect(write).toHaveBeenCalledOnce()
+      expect(button.disabled).toBe(true)
+      if (change === 'edit') edit('Preset name', 'new name')
+      if (change === 'reset') fireEvent.click(scope.getByRole('button', { name: 'Reset structured inputs' }))
+      if (change === 'disable') view.rerender(<SolarGroundInputForm disabled onParameters={onParameters} />)
+      if (change === 'unmount') view.unmount()
+      if (change === 'composition') fireEvent.compositionStart(scope.getByLabelText('Preset name'))
+      await act(async () => { resolve() })
+      expect(write).toHaveBeenCalledOnce()
+      expect(view.container.textContent).not.toContain('Generated JSON copied.')
+      expect(view.container.textContent).not.toContain('Copying generated JSON.')
+    })
+  it('does not announce stale clipboard rejection after an edit', async () => {
+    let reject
+    const write = vi.fn(() => new Promise((_, fail) => { reject = fail }))
+    const { scope, edit, copy } = mount(write)
+    fireEvent.click(copy())
+    edit('Module rows', '2')
+    await act(async () => { reject(new Error('late denial')) })
+    expect(scope.queryByRole('status')).toBeNull()
+    expect(write).toHaveBeenCalledOnce()
+  })
+  it('keeps clipboard source local despite callback mutation and other mounted forms', async () => {
+    const write = vi.fn(async () => undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText: write } })
+    const mutate = vi.fn(value => { if (value) value.preset.Name = 'caller mutation' })
+    const view = render(<><SolarGroundInputForm onParameters={mutate} /><SolarGroundInputForm onParameters={vi.fn()} /></>)
+    const scopes = view.getAllByRole('group', { name: 'Ground layout inputs' }).map(node => within(node))
+    for (const [i, scope] of scopes.entries()) {
+      for (const [label, value] of [['Site width (drawing units)', '10'], ['Site height (drawing units)', '20'], ['Preset name', `Local ${i}`]])
+        fireEvent.change(scope.getByLabelText(label), { target: { value } })
+    }
+    for (const details of view.container.querySelectorAll('details')) details.open = true
+    const expected = scopes[1].getByLabelText('Generated source input parameters JSON').textContent
+    await act(async () => { fireEvent.click(scopes[1].getByRole('button', { name: 'Copy generated JSON' })) })
+    expect(write).toHaveBeenCalledExactlyOnceWith(expected)
+    expect(JSON.parse(expected).preset.Name).toBe('Local 1')
+    expect(scopes[0].queryByRole('status')).toBeNull()
+  })
+  it('groups named controls under nested legends while preserving the shared help root', () => {
+    const { scope } = mount()
+    for (const [name, labels] of [
+      ['Site inputs', ['Site origin X (drawing units)', 'Site origin Y (drawing units)', 'Site width (drawing units)', 'Site height (drawing units)', 'Site drawing units']],
+      ['Module inputs', ['Preset name', 'Module length (metres)', 'Module width (metres)', 'Module thickness (metres)', 'Module power (watts)', 'Horizontal module gap (metres)', 'Vertical module gap (metres)', 'Module orientation']],
+      ['Frame inputs', ['Module rows', 'Module columns', 'Tilt (degrees)', 'Axis azimuth (degrees)']],
+    ]) {
+      const group = scope.getByRole('group', { name })
+      expect(group.tagName).toBe('FIELDSET')
+      expect(group.querySelector('legend').textContent).toBe(name)
+      for (const label of labels) expect(within(group).getByLabelText(label)).toBeTruthy()
+    }
+    const site = within(scope.getByRole('group', { name: 'Site inputs' }))
+    expect(site.getByRole('button', { name: /Convert site units/ })).toBeTruthy()
+    expect(site.getByRole('button', { name: 'Reset structured inputs' })).toBeTruthy()
+  })
+  it('disabled controls cannot edit or complete a composition into a new publication snapshot', () => {
+    const { view, scope, edit, onParameters } = mount(vi.fn())
+    const input = scope.getByLabelText('Preset name')
+    fireEvent.compositionStart(input)
+    edit('Preset name', '中')
+    const count = onParameters.mock.calls.length
+    view.rerender(<SolarGroundInputForm disabled onParameters={onParameters} />)
+    fireEvent.compositionEnd(input, { target: { value: '中 🌞' } })
+    edit('Site width (drawing units)', '50')
+    expect(onParameters.mock.calls).toHaveLength(count)
+    expect(onParameters.mock.calls.at(-1)[0]).toBeNull()
+    expect(scope.queryByRole('button', { name: 'Copy generated JSON' })).toBeNull()
   })
 })
