@@ -450,12 +450,18 @@ def live_harness(monkeypatch, *, failure=None, health=None, server_code=None, en
                     return 422, {"error": {"code": "synthetic-private-canary"}}
                 if failure == "accept-unknown":
                     return 200, {"unexpected": "synthetic-private-canary"}
-                if failure in ("accept-async", "accept-job-failed"):
+                if failure in ("accept-async", "accept-job-failed", "accept-job-no-result"):
                     return 202, {"job_id": "accept-job"}
             else:
                 assert tool == "solar-panels-from-drawing"
                 return 202, {"job_id": "panels-job"}
             self.stage += 1
+            if tool == "solar-solaredge-accept":
+                version = "v2" if failure == "accept-stale-version" else f"v{self.stage}"
+                return 200, {"graph_commit": {"output_version_id":
+                    "v-wrong" if failure == "accept-receipt-mismatch" else version},
+                    "output_version_id": version, "history_operation_id": "synthetic-operation",
+                    "history_hash": "a" * 64, "execution_provenance": {}}
             return 200, {"output": {}}
 
         def wait_job(self, job_id, timeout_s=300):
@@ -464,6 +470,11 @@ def live_harness(monkeypatch, *, failure=None, health=None, server_code=None, en
             if failure == "mutation" or (job_id == "accept-job" and failure == "accept-job-failed"):
                 return {"status": "failed"}
             self.stage += 1
+            if job_id == "accept-job" and failure != "accept-job-no-result":
+                return {"status": "complete", "result": {
+                    "graph_commit": {"output_version_id": f"v{self.stage}"},
+                    "output_version_id": f"v{self.stage}", "history_operation_id": "synthetic-operation",
+                    "history_hash": "a" * 64, "execution_provenance": {}}}
             return {"status": "complete"}
 
         def release(self, project_id, drawing_id, capability):
@@ -1043,3 +1054,12 @@ def test_async_normal_accept_counts_fresh_head_only_after_completion(monkeypatch
         "wait-job", ("context", "v3", 4), ("context", "v4", 4)]
     assert receipts[0]["results"][0]["saved_string_count"] == 0
     assert events.count("release") == events.count("delete") == 1
+
+
+@pytest.mark.parametrize("failure", ["accept-stale-version", "accept-receipt-mismatch", "accept-job-no-result"])
+def test_accept_completion_must_bind_receipt_and_independently_read_head(monkeypatch, tmp_path, failure):
+    ctx, events, requests, receipts = pinned_harness(monkeypatch, tmp_path, failure=failure, saved_strings=[])
+    assert x05.run(ctx)[2].verdict == "UNREADABLE"
+    assert receipts[0]["results"][0]["reason_code"] == "SAVED_STRINGS_UNREADABLE"
+    assert events.count("release") == events.count("delete") == 1
+    assert "synthetic-private-canary" not in json.dumps(receipts)

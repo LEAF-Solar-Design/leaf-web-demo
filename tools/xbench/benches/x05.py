@@ -408,19 +408,29 @@ def _project(ctx, client, request, project, result):
                                   version_id=version, params={"drawing_id": drawing_id, **params},
                                   capability=capability,
                                   idempotency_key="xbench-x05-" + uuid4().hex)
+        completed = body
         if status == 202 and isinstance(body, dict) and isinstance(body.get("job_id"), str):
             terminal = client.wait_job(body["job_id"], timeout_s=300)
             if not isinstance(terminal, dict) or terminal.get("status") != "complete":
                 raise ObservationError(code="JOB_NOT_COMPLETE")
-            if tool == "solar-solaredge-accept" and "error" in terminal:
-                raise ObservationError(code="SAVED_STRINGS_UNREADABLE")
+            completed = terminal.get("result")
         elif status != 200:
             raise ObservationError(status, "MUTATION_UNREADABLE")
-        if tool == "solar-solaredge-accept" and (
-                not isinstance(body, dict) or "error" in body
-                or (status == 200 and not isinstance(body.get("output"), dict))):
+        output_version = None
+        if tool == "solar-solaredge-accept":
+            if not isinstance(completed, dict) or "error" in completed:
+                raise ObservationError(code="SAVED_STRINGS_UNREADABLE")
+            receipt = completed.get("graph_commit")
+            output_version = completed.get("output_version_id")
+            if (not isinstance(receipt, dict) or type(output_version) is not str
+                    or not 1 <= len(output_version) <= 128
+                    or receipt.get("output_version_id") != output_version):
+                raise ObservationError(code="SAVED_STRINGS_UNREADABLE")
+        current = context()
+        if (output_version is not None
+                and current["context"]["head_version_id"] != output_version):
             raise ObservationError(code="SAVED_STRINGS_UNREADABLE")
-        return context()
+        return current
 
     try:
         org_id = created["org_id"]
