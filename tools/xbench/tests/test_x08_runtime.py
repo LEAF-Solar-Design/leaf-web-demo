@@ -437,6 +437,13 @@ def test_ack_prepares_ui_and_returns_final_control_without_running():
 
         def get_by_role(self, role, **kwargs):
             events.append(('role', role, kwargs))
+            assert role == 'option'
+            matcher = kwargs['name']
+            # PromptBox's aria-hidden fallback glyph prefixes textContent.
+            # Its accessible option name still starts with the route label.
+            assert matcher.search('/count-by-layer · Count entities by layer')
+            assert not matcher.search('/count-by-layer-extra · Other command')
+            assert not matcher.search('/other-count-by-layer · Other command')
             return option
 
         def filter(self, **kwargs):
@@ -780,8 +787,9 @@ def test_ack_preparation_uses_one_budget_and_returns_only_ready_control(mode):
             assert state == 'visible'
             consume(timeout)
 
-        def get_by_role(self, role):
+        def get_by_role(self, role, **kwargs):
             assert role == 'option'
+            assert kwargs['name'].search('/count-by-layer · Count entities')
             return self
 
         def filter(self, **kwargs):
