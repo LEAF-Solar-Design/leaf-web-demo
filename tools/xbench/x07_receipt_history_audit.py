@@ -105,8 +105,10 @@ def audit_receipts(store, journal, *, customer_key):
         begin_audit(db); _check_connection(receipts)
         receipts.execute('BEGIN')
         count,total=receipts.execute('SELECT count(*),coalesce(sum(length(CAST(result AS BLOB))),0) FROM main.confirmations WHERE customer_key=?', (customer_key,)).fetchone()
-        if count>MAX_AUDIT_ROWS or total>MAX_TOTAL_RECEIPT_BYTES:
-            raise ReceiptBudgetError('scoped receipt budget exceeded')
+        if count>MAX_AUDIT_ROWS:
+            raise ReceiptBudgetError('row budget exceeded')
+        if total>MAX_TOTAL_RECEIPT_BYTES:
+            raise ReceiptBudgetError('scoped receipt byte budget exceeded')
         rows = receipts.execute('SELECT project_key,result FROM main.confirmations WHERE customer_key=? ORDER BY project_key LIMIT ?', (customer_key,MAX_AUDIT_ROWS+1)).fetchall()
         if len(rows)>MAX_AUDIT_ROWS: raise ValueError('row budget exceeded')
         for project, encoded in rows:

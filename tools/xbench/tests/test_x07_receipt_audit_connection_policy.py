@@ -132,12 +132,17 @@ class ReceiptAuditConnectionPolicy(unittest.TestCase):
                     else:
                         writer.execute("UPDATE confirmations SET result=? WHERE project_key='old-a'", (original_result,))
                         receipts._connect = dirty_reader
+                    # Independently prove the unsafe reader can hide the
+                    # committed finding, before the settled-file preflight
+                    # refuses without acquiring any injected reader.
+                    probe = dirty_reader()
+                    probe.close()
                     with self.assertRaises(ValueError):
                         audit.audit_receipts(read, receipts, customer_key='a')
                     code, value = self.cli(profile, journal, read, receipts)
                     self.assertEqual(code, 2)
                     self.assertEqual(value['error'], 'AUDIT_UNAVAILABLE')
-                    self.assertEqual(observed, ['extra-a' if side == 'profile' else original_result] * 2)
+                    self.assertEqual(observed, ['extra-a' if side == 'profile' else original_result])
                     self.assertTrue(writer.in_transaction)
                 finally:
                     read._connection, receipts._connect = original_profile, original_journal

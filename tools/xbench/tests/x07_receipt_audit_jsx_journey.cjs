@@ -4,7 +4,10 @@ const { rpc: rawRpc, ctx, copies, component, React, render, screen, fireEvent, w
   resources } = require('./x07_adapter_jsx_journey.cjs')
 const Editor = component('X07CustomerProfileEditor'), Confirmation = component('X07RoleConfirmation'), Workflow = component('X07ProfileWorkflow')
 const journal = path.join(resources().root, 'settled-receipts.sqlite')
-const rpc = (scope, op, context, value, signal, fault, protocol) => rawRpc(scope, op, context, value, signal, fault, protocol, { receipt_database: journal })
+const rpc = (scope, op, context, value, signal, fault, protocol) => rawRpc(scope, op, context, value, signal, fault, protocol, {
+  receipt_database: journal,
+  on_worker_failure: detail => console.error('X07_SYNTHETIC_WORKER_DIAGNOSTIC ' + JSON.stringify(detail))
+})
 function auditBoth() {
   const before = [fs.readFileSync(resources().database), fs.readFileSync(journal)]
   const code = `import sys,json
