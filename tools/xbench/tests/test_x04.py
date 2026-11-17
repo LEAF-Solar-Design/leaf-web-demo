@@ -663,6 +663,7 @@ def test_count_modules_live_uses_manifest_selection_and_records_catalog(fixture,
     assert row["counts"] == [12]
     assert row["tool"] == MODULE_TOOL and row["limits"] == []
     assert row["candidate_sets"] == [DESIGN_SET]
+    assert "design_subset" not in fixture and "design_window" not in row
     calls = module_calls(client)
     assert calls[0]["json_body"] == {
         "tool": "count-modules", "catalog_digest": MODULE_TOOL["catalog_digest"], "dwg": "v",
@@ -681,6 +682,85 @@ def test_count_modules_mismatch_fails_even_for_competing_sets(fixture):
     assert row["steps"]["5"] == "FAIL"
     assert row["evidence"]["5"] == "count 12, oracle 11"
     assert row["steps"]["6"] == "PASS"
+
+
+@pytest.mark.parametrize("count,verdict", [(510, "PASS"), (1530, "FAIL")])
+def test_design_window_selects_subset_of_module_set(fixture, count, verdict):
+    client = module_client(fixture, count=count)
+    fixture["modules"] = 510
+    window = [0, 1.5, 100, 200]
+    fixture["design_subset"] = {"required": True, "window": window, "param": "region"}
+    for _, body in client.module_responses:
+        result = body["result"]
+        result["sets"][0]["count"] = 1530
+        if result["selected_sets"]:
+            result["selected_sets"][0]["count"] = 1530
+            result["selected_set"]["count"] = 1530
+    row = grade(fixture, client)
+    assert row["steps"]["5"] == verdict
+    assert row["evidence"]["5"] == f"count {count}, oracle 510"
+    assert row["steps"]["6"] == "PASS"
+    assert row["counts"] == [count]
+    assert row["design_window"] == window
+    calls = module_calls(client)
+    assert calls[0]["json_body"]["params"] == {"drawing_id": "d"}
+    assert calls[1]["json_body"]["params"] == {
+        "drawing_id": "d", "set_ids": [DESIGN_SET["set_id"]], "region": window}
+
+
+@pytest.mark.parametrize("bound", [False, True])
+def test_required_design_window_missing_skips_selection(fixture, bound):
+    client = module_client(fixture, multi=True)
+    fixture["design_subset"] = {"required": True}
+    if bound:
+        fixture["design_subset"]["window"] = None
+    row = grade(fixture, client)
+    assert row["steps"]["5"] == "FAIL"
+    assert row["evidence"]["5"] == (
+        "X04_DESIGN_SUBSET_SELECTION_MISSING: design window not bound")
+    assert row["steps"]["6"] == "PASS"
+    assert row["evidence"]["6"] == "module_set selected"
+    assert len(module_calls(client)) == 1
+    assert row["counts"] == []
+
+
+@pytest.mark.parametrize("status,ok", [(200, False), (422, False), (503, True)])
+@pytest.mark.parametrize("error", ["region boundary is ambiguous",
+                                   {"message": "region boundary is ambiguous"}])
+def test_product_refusal_of_design_window_fails(fixture, status, ok, error):
+    client = module_client(fixture)
+    fixture["design_subset"] = {"required": True, "window": [0, 0, 100, 100]}
+    client.module_responses[1] = (status, {"ok": ok, "error": error})
+    row = grade(fixture, client)
+    assert row["steps"]["5"] == "FAIL"
+    assert row["evidence"]["5"] == (
+        "X04_DESIGN_SUBSET_SELECTION_MISSING: region boundary is ambiguous")
+    assert len(module_calls(client)) == 2
+    assert row["counts"] == []
+
+
+def test_design_window_refusal_redacts_product_message(fixture):
+    client = module_client(fixture)
+    fixture["design_subset"] = {"window": [0, 0, 100, 100]}
+    secret = "secret1234567890abcdefghij"
+    client.module_responses[1] = (422, {"error": {"message": f"boundary {secret}"}})
+    row = grade(fixture, client)
+    assert row["steps"]["5"] == "FAIL"
+    assert row["evidence"]["5"] == (
+        "X04_DESIGN_SUBSET_SELECTION_MISSING: boundary [redacted]")
+    assert secret not in json.dumps(row)
+
+
+@pytest.mark.parametrize("window", [[0, 0, 1], [0, 0, 1, float("inf")],
+                                    [0, 0, 1, float("nan")], [0, 0, 1, True],
+                                    [0, 0, 1, "2"]])
+def test_invalid_design_window_is_not_sent(fixture, window):
+    client = module_client(fixture)
+    fixture["design_subset"] = {"window": window}
+    row = grade(fixture, client)
+    assert row["steps"]["5"] == "UNREADABLE"
+    assert row["evidence"]["5"] == "design_subset.window"
+    assert len(module_calls(client)) == 1
 
 
 def test_count_modules_absent_preserves_layer_fallback_and_notes_limit(fixture):

@@ -1,6 +1,7 @@
 """Raw customer DWG intake acceptance, using the Studio product routes."""
 
 import json
+import math
 from pathlib import Path
 import re
 import subprocess
@@ -141,6 +142,16 @@ def _module_result(transport, project, adoption, tool, selector):
                    "params": {"drawing_id": adoption["drawing_id"], **selector}})
     if status in (404, 405, 501) and not selector:
         raise ValueError("module-set picker not live")
+    if "region" in selector and (status != 200 or (
+            isinstance(body, dict) and body.get("ok") is False)):
+        message = body.get("error") if isinstance(body, dict) else None
+        if isinstance(message, dict):
+            message = message.get("message")
+        if not message and isinstance(body, dict):
+            message = body.get("message") or body.get("detail")
+        message = message or f"count-modules HTTP {status} or ok false"
+        raise ValueError("X04_DESIGN_SUBSET_SELECTION_MISSING: "
+                         + xbench_session.redact(str(message))[:300])
     if status != 200:
         raise ValueError("count-modules HTTP status")
     if not isinstance(body, dict) or body.get("ok") is not True:
@@ -247,8 +258,21 @@ def _grade_modules(transport, project, adoption, fixture, tool, row, mark, intak
             raise ValueError("module_set set_id absent from sets")
         # Match the picker callback even for the schema's singular set_id form.
         ids = list(dict.fromkeys(ids))
+        subset = fixture.get("design_subset", {})
+        window = subset.get("window")
+        if window is None and subset.get("required") is True:
+            mark(5, "FAIL", "X04_DESIGN_SUBSET_SELECTION_MISSING: design window not bound")
+            mark(6, "PASS", "module_set selected" if len(candidates) > 1 else "nothing to pick")
+            return
+        if window is not None and (not isinstance(window, list) or len(window) != 4 or any(
+                type(value) not in (int, float) or not math.isfinite(value) for value in window)):
+            raise ValueError("design_subset.window")
+        selection = {"set_ids": ids}
+        if window is not None:
+            selection["region"] = window
+            row["design_window"] = window
         field = "count-modules selection response"
-        result = _module_result(transport, project, adoption, tool, {"set_ids": ids})
+        result = _module_result(transport, project, adoption, tool, selection)
         if _module_sets(result.get("sets"), "sets") != candidates:
             raise ValueError("sets changed during selection")
         selected = _module_sets(result.get("selected_sets"), "selected_sets")
@@ -268,7 +292,8 @@ def _grade_modules(transport, project, adoption, fixture, tool, row, mark, intak
         if type(count) is not int or not 0 <= count <= 2**53 - 1:
             raise ValueError("count")
         # Sets can overlap; the total is a union, not necessarily their sum.
-        if not max(item["count"] for item in selected.values()) <= count <= sum(
+        minimum = 0 if window is not None else max(item["count"] for item in selected.values())
+        if not minimum <= count <= sum(
                 item["count"] for item in selected.values()):
             raise ValueError("count inconsistent with selected_sets")
         row["set_evidence"] = {set_id: set_evidence(intake, set_id) for set_id in ids}
@@ -279,7 +304,8 @@ def _grade_modules(transport, project, adoption, fixture, tool, row, mark, intak
              f"count {count}, oracle {fixture['modules']}")
     except Exception as exc:
         reason = str(exc) if isinstance(exc, ValueError) else field + " unavailable"
-        mark(5, "UNREADABLE", reason)
+        mark(5, "FAIL" if reason.startswith("X04_DESIGN_SUBSET_SELECTION_MISSING: ")
+             else "UNREADABLE", reason)
         mark(6, "UNREADABLE", reason)
 
 
