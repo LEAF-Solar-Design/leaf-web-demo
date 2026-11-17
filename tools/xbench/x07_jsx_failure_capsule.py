@@ -1,5 +1,6 @@
 """Retain one synthetic X07 JSX check's bounded source-bound diagnostics."""
 import ctypes
+import base64
 import hashlib
 import json
 import math
@@ -81,14 +82,17 @@ def stop_group(child):
 
 
 def run_check(name, output, *, dependencies=None, timeout=90, checks_root=None,
-              source_dependencies=(), on_chunk=None):
+              source_dependencies=(), on_chunk=None, stream_limit=MAX_STREAM_BYTES):
     if not isinstance(name, str) or not re.fullmatch(r'x07_[a-z0-9_]+\.cjs', name):
         raise ValueError('one named X07 check required')
-    if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 < timeout <= 300:
+    if type(timeout) not in (int, float) or not 0 < timeout <= 300 or not math.isfinite(timeout):
         raise ValueError('timeout budget')
+    if type(stream_limit) is not int or not 1 <= stream_limit <= MAX_STREAM_BYTES:
+        raise ValueError('stream byte budget')
     checks = Path(checks_root) if checks_root is not None else ROOT / 'tools/xbench/tests'
     check = checks / name
-    if not check.is_file() or check.is_symlink():
+    if (checks.is_symlink() or not check.is_file() or check.is_symlink()
+            or check.resolve().parent != checks.resolve() or check.stat().st_nlink != 1):
         raise ValueError('regular check required')
     node = shutil.which('node')
     if node is None:
@@ -114,7 +118,7 @@ def run_check(name, output, *, dependencies=None, timeout=90, checks_root=None,
                 chunk = stream.read1(4096)
                 if not chunk:
                     return
-                available = MAX_STREAM_BYTES - len(streams[label])
+                available = stream_limit - len(streams[label])
                 streams[label].extend(chunk[:available])
                 if len(chunk) > available:
                     exceeded.set()
@@ -145,19 +149,37 @@ def run_check(name, output, *, dependencies=None, timeout=90, checks_root=None,
             after = None
         unchanged = before == after
         report = {'schema': 'leaf.x07.jsx-failure-capsule.v1', 'command': command, 'exit_code': child.returncode,
+                  'worker_pid': child.pid,
                   'timed_out': timed_out, 'diagnostics_complete': not exceeded.is_set(),
                   'stdout': bytes(streams['stdout']).decode('utf-8', errors='replace'),
                   'stderr': bytes(streams['stderr']).decode('utf-8', errors='replace'),
-                  'owned_processes_settled': True, 'source_unchanged': unchanged}
+                  'owned_processes_settled': True, 'source_unchanged': unchanged,
+                  'stream_limit': stream_limit,
+                  'resources': {'readers_started': len(threads), 'readers_alive': sum(thread.is_alive() for thread in threads),
+                                'parent_reaped': child.returncode is not None, 'job_closed': job is None or job.handle is None}}
+        for label, raw in streams.items():
+            report[label + '_bytes'] = len(raw)
+            try:
+                raw.decode('utf-8', errors='strict')
+                report[label + '_encoding'] = 'utf-8'
+            except UnicodeDecodeError:
+                report[label + '_encoding'] = 'binary-base64'
+                report[label + '_base64'] = base64.b64encode(raw).decode('ascii')
         if unchanged:
             report.update(before)
         else:
             report.update(error='SOURCE_CHANGED', source_before=before, source_after=after)
-        artifact.write(json.dumps(report, sort_keys=True) + '\n')
+        serialized = json.dumps(report, sort_keys=True) + '\n'
+        if artifact.write(serialized) != len(serialized):
+            raise OSError('short capture write')
+        artifact.flush()
         artifact.close()
         return report
     except BaseException:
-        artifact.close()
+        try:
+            artifact.close()
+        except OSError:
+            pass
         current = output.lstat()
         if (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino):
             output.unlink()
@@ -188,9 +210,10 @@ def main():
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--deps', type=Path)
     parser.add_argument('--timeout', type=float, default=90)
+    parser.add_argument('--stream-bytes', type=int, default=MAX_STREAM_BYTES)
     arguments = parser.parse_args()
     try:
-        report = run_check(arguments.check, arguments.out, dependencies=arguments.deps, timeout=arguments.timeout)
+        report = run_check(arguments.check, arguments.out, dependencies=arguments.deps, timeout=arguments.timeout, stream_limit=arguments.stream_bytes)
     except (OSError, ValueError, subprocess.SubprocessError):
         publish_stdout({'schema': 'leaf.x07.jsx-failure-capsule.v1', 'error': 'CAPSULE_UNAVAILABLE'})
         return 2
