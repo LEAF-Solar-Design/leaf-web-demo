@@ -130,6 +130,20 @@ function fixture(name = STEP[0], { code = null, realGraph = false, rows = null }
 }
 const last = (values) => values[values.length - 1]
 
+it('hosts engineering reconciliation in the admitted project scope and removes it when stale', async () => {
+  const h = fixture()
+  h.mount()
+  expect(screen.getByRole('region', { name: 'Engineering reconciliation' })).toBeTruthy()
+  expect(h.client.readContext).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Read saved design' }))
+  await screen.findByText(/Saved design unavailable/)
+  expect(h.client.readContext).toHaveBeenCalledWith({ signal: expect.any(AbortSignal) })
+  h.current = false
+  act(() => h.emit())
+  expect(screen.queryByRole('region', { name: 'Engineering reconciliation' })).toBeNull()
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
 it('S02 focuses recovery once when an active editor is removed by lost authority', async () => {
   vi.spyOn(document, 'hasFocus').mockReturnValue(true)
   const h = fixture('solar-panel-groups')
@@ -1448,7 +1462,7 @@ describe('Project Solar workspace composition', () => {
   it('R13E-44 composition owns no Viewer or runtime and all new copy uses the frozen maps', () => {
     const source = readFileSync(`${process.cwd()}/src/solar/ProjectSolarWorkspace.jsx`, 'utf8')
     const imports = [...source.matchAll(new RegExp("from ['\"]([^'\"]+)['\"]", 'g'))].map((match) => match[1])
-    expect(imports).toEqual(['react', './solarDrawingBinding.js', './SolarSettingsForm.jsx', './solarSettingsWire.js', './ProjectSolarReadPanel.jsx', './ProjectSolveReview.jsx', './ProjectSolarEdgePanel.jsx', './ProjectSolarPreparedSolveForm.jsx', './DrawingRoleProposal.jsx'])
+    expect(imports).toEqual(['react', './solarDrawingBinding.js', './SolarSettingsForm.jsx', './solarSettingsWire.js', './ProjectSolarReadPanel.jsx', './ProjectSolveReview.jsx', './ProjectSolarEdgePanel.jsx', './ProjectSolarPreparedSolveForm.jsx', './DrawingRoleProposal.jsx', './ProjectReconciliationPanel.jsx'])
     const reviewSource = readFileSync(`${process.cwd()}/src/solar/ProjectSolveReview.jsx`, 'utf8')
     const reviewImports = [...reviewSource.matchAll(new RegExp("from ['\"]([^'\"]+)['\"]", 'g'))].map((match) => match[1])
     for (const dependency of reviewImports) {
