@@ -1044,3 +1044,34 @@ file API are mocked. The 1920 by 2200 forced-colors viewport fits both panels.
 Stop on duplicate IDs, a cross-panel help reference, an enabled export for an
 invalid report, a sibling repair or a CSV mismatch. This is offline evidence,
 without a staging or PostgreSQL claim. No video or customer data is used.
+
+## Busy persistence recovery replay
+
+Parent: X05 report request lifecycle. Executed support fixture:
+`D:/agent-data/leaf-research/studio-xbench-2026-11/synthetic-tests/x05-busy-persistence-uppn73z8/replay.py`.
+Use the local React/esbuild and Python Playwright setup above. Two actual panels
+share one actual client, with a synthetic file API and mocked saved-design read.
+The 1920 by 2200 forced-colors viewport fits both full panels.
+
+1. Read saved design in both panels. Enter A's `001,0,01,1,0.4`. Save and hold
+   the response after the file commits revision 1. Set A busy while waiting.
+   Require all four actions and all five inputs disabled.
+2. Deliver the Save receipt while A remains busy. Require the saved cue and
+   unchanged values, with actions still disabled. Capture
+   `busy-save-actions-disabled.png`. Clear busy and export A's actual CSV;
+   compare all five rows with its DOM table.
+3. Reload B, change Panels to `003` and Save at expected revision 1. Hold A's
+   next explicit Reload response, set A busy, and deliver that response.
+   Require loaded values `003,0,01,1,0.4`, a loaded cue and disabled actions.
+   Capture `busy-reload-actions-disabled.png`.
+4. Clear busy and export A again. Enter Panels `004` and Save. Require expected
+   revision 2 and file revision 3. Export once more. Three CSVs equal 15 DOM rows.
+   Capture `busy-recovered-csv.png`.
+5. Unmount both panels, require zero observers, and close browser, context,
+   server and thread in `finally`. `proof.json` binds source hashes, request
+   traffic, accepted baselines and cleanup. Replay and `REPLAY.md` are retained.
+
+Stop on an enabled action while busy, a lost draft, a wrong CAS revision or a
+CSV mismatch. Focused synthetic tests separately cover rejection and timeout.
+This browser replay proves successful held responses only, without staging or
+PostgreSQL acceptance. No video or private engineering inputs are used.
