@@ -194,12 +194,13 @@ it('restarts a cancelled review before submission with a fresh scoped read and e
 })
 
 it('composes confirmation and optional-role editing while retaining the supplied old pin', async () => {
-  const pin = { customer_key: 'synthetic-a', profile_id: 'profile-a', version: 1 }
+  const pin = { customer_key: 'synthetic-a', profile_id: 'profile-a', project_key: 'synthetic-project', version: 1,
+    roles: { module: { block: 'Review Panel', layer: 'MODULES' } } }
   const profile = { ...pin, roles: { module: { block: 'Review Panel', layer: 'MODULES' } } }
   const loadProfile = vi.fn().mockResolvedValue(profile)
   const saveProfile = vi.fn(async (customer, roles) => ({ ...profile, version: 2, roles }))
   render(<X07DrawingRoleProfileReview {...scope} customerKey="synthetic-a" drawingKey="drawing-a"
-    projectClient={{ readContext: async () => reply }} onConfirm={async () => ({ ok: true, applied_profile: pin })}
+    projectClient={{ readContext: async () => reply }} onConfirm={async () => ({ ok: true, drawing_key: 'drawing-a', applied_profile: pin })}
     loadProfile={loadProfile} saveProfile={saveProfile} />)
   expect(loadProfile).not.toHaveBeenCalled()
   fireEvent.click(await screen.findByRole('button', { name: 'Confirm roles' }))

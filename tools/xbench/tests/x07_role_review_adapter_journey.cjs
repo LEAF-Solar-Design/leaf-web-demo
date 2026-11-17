@@ -54,7 +54,7 @@ async function main() {
       assert.equal(result.customer_key, scope.customer_key)
       assert.equal(result.project_key, scope.project_key)
       assert.equal(result.drawing_key, scope.drawing_key)
-      return { ok: true, applied_profile: result.applied_profile }
+      return { ...result, ok: true }
     }
     h.render(h.React.createElement(ProfileReview, { projectClient: client, solarBinding: binding,
       authorityKey: 'synthetic-authority', isCurrent: () => true, onConfirm, customerKey: scope.customer_key,
@@ -72,6 +72,10 @@ async function main() {
     h.fireEvent.click(h.screen.getByRole('button', { name: 'Save profile' }))
     await h.screen.findByText('Profile version: 2', {}, { timeout: 15000 })
     assert.ok(h.screen.getByText('Project is pinned to version 1.'))
+    const pinned = h.screen.getByRole('region', { name: 'Pinned drawing roles' })
+    assert.ok(pinned.textContent.includes('Pinned profile version: 1'))
+    assert.ok(pinned.textContent.includes('Panel on MODULES'))
+    assert.equal(pinned.textContent.includes('ROOF'), false)
     const firstPin = (await h.rpc(scope, 'load', scope, null, null, null, null, fixture)).application_record
     h.cleanup()
 
