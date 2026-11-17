@@ -121,7 +121,10 @@ export default function SolarGroundInputForm({ disabled, onParameters }) {
     return { errors, parameters: initialSolarParameters(
       [[x, y], [x + width, y], [x + width, y + height], [x, y + height]], preset, units) }
   }, [draft, units])
-  useEffect(() => { onParameters(result.parameters) }, [onParameters, result.parameters])
+  // The bounded producer JSON is both the semantic key and the snapshot source.
+  // Callers own their copy, including any mutations they make after delivery.
+  const parametersJSON = JSON.stringify(result.parameters)
+  useEffect(() => { onParameters(JSON.parse(parametersJSON)) }, [onParameters, parametersJSON])
 
   const convertUnits = () => {
     if (disabled) return
@@ -146,22 +149,24 @@ export default function SolarGroundInputForm({ disabled, onParameters }) {
     setUnits(units === 'm' ? 'ft' : 'm')
     setConversionMessage('Site units converted. Module metres and power are unchanged.')
   }
-  const previewScale = Math.max(Number(draft.width), Number(draft.height))
-  const previewWidth = result.parameters ? Math.max(2, 100 * (Number(draft.width) / previewScale)) : 0
-  const previewHeight = result.parameters ? Math.max(2, 100 * (Number(draft.height) / previewScale)) : 0
-  const displayFactor = units === 'ft' ? metresPerFoot : 1
-  const rectangleWidthM = Number(draft.width) * displayFactor
-  const rectangleHeightM = Number(draft.height) * displayFactor
   const boundary = result.parameters?.boundary
+  const rectangleWidth = boundary ? boundary[1][0] - boundary[0][0] : 0
+  const rectangleHeight = boundary ? boundary[3][1] - boundary[0][1] : 0
+  const previewScale = Math.max(rectangleWidth, rectangleHeight)
+  const previewWidth = boundary ? Math.max(2, 100 * (rectangleWidth / previewScale)) : 0
+  const previewHeight = boundary ? Math.max(2, 100 * (rectangleHeight / previewScale)) : 0
+  const displayFactor = units === 'ft' ? metresPerFoot : 1
+  const rectangleWidthM = rectangleWidth * displayFactor
+  const rectangleHeightM = rectangleHeight * displayFactor
   const centre = boundary && boundary[0].map((value, axis) => value + (boundary[2][axis] - value) / 2)
 
   return <fieldset disabled={disabled} aria-describedby={description}>
     <legend>Ground layout inputs</legend>
-    <p id={description}>Site coordinates and dimensions use drawing units. Module dimensions and gaps use metres; angles use degrees.</p>
-    <label htmlFor={`${description}-units`}>Site drawing units</label><select id={`${description}-units`} value={units} onChange={event => { setEdited(true); setUnits(event.target.value); setConversionMessage('') }}>
+    <p id={description}>Site coordinates and dimensions use drawing units. Module dimensions and gaps use metres; angles use degrees. The unit selector reinterprets current numbers in the selected drawing units. Convert site units converts site origins and sizes to preserve geometry; module metres are unchanged.</p>
+    <label htmlFor={`${description}-units`}>Site drawing units</label><select id={`${description}-units`} aria-describedby={description} value={units} onChange={event => { setEdited(true); setUnits(event.target.value); setConversionMessage('') }}>
       <option value="m">Metres</option><option value="ft">Feet</option>
     </select>
-    <button type="button" onClick={convertUnits}>Convert site units to {units === 'm' ? 'feet' : 'metres'}</button>
+    <button type="button" aria-describedby={description} onClick={convertUnits}>Convert site units to {units === 'm' ? 'feet' : 'metres'}</button>
     <button type="button" onClick={() => {
       if (disabled) return
       setDraft({ ...defaultDraft }); setUnits('m'); setEdited(false); setConversionMessage('')
@@ -193,7 +198,7 @@ export default function SolarGroundInputForm({ disabled, onParameters }) {
         }}>{label}</a>
       </li>)}</ul>
     </div>}
-    {result.parameters && <p>Site {draft.width.trim()} × {draft.height.trim()} {units === 'm' ? 'metres' : 'feet'}
+    {result.parameters && <p>Site {String(rectangleWidth)} × {String(rectangleHeight)} {units === 'm' ? 'metres' : 'feet'}
       {' · '}{result.parameters.preset.Rows * result.parameters.preset.Columns} modules per frame.</p>}
     {result.parameters && <p>Per-frame DC watts: {result.parameters.preset.Rows * result.parameters.preset.Columns * result.parameters.preset.ModulePowerWp}. This is the module power sum for one frame.</p>}
     {result.parameters && <p>Site rectangle area: {rectangleMeasurement(rectangleWidthM * rectangleHeightM)} square metres.
@@ -201,7 +206,7 @@ export default function SolarGroundInputForm({ disabled, onParameters }) {
     {result.parameters && <p>Site rectangle schematic (not to scale). Narrow dimensions are enlarged for visibility.</p>}
     {result.parameters && <svg role="img" aria-labelledby={`${description}-preview-title`} aria-describedby={`${description}-preview-desc`} viewBox="0 0 120 120" width="240" height="240">
       <title id={`${description}-preview-title`}>Site rectangle schematic (not to scale)</title>
-      <desc id={`${description}-preview-desc`}>Rectangle {draft.width.trim()} by {draft.height.trim()} {units === 'm' ? 'metres' : 'feet'}, origin X {draft.x.trim()}, Y {draft.y.trim()}. Schematic only, not to scale; narrow dimensions are enlarged for visibility. No module geometry or terrain assessment.</desc>
+      <desc id={`${description}-preview-desc`}>Rectangle {String(rectangleWidth)} by {String(rectangleHeight)} {units === 'm' ? 'metres' : 'feet'}, origin X {String(boundary[0][0])}, Y {String(boundary[0][1])}. Schematic only, not to scale; narrow dimensions are enlarged for visibility. No module geometry or terrain assessment.</desc>
       <rect x="10" y="10" width={previewWidth} height={previewHeight} fill="none" stroke="currentColor" />
     </svg>}
     {result.parameters && units === 'ft' && <p>Converted site size: {rectangleMeasurement(rectangleWidthM)} × {rectangleMeasurement(rectangleHeightM)} metres. Module dimensions and gaps remain in metres.</p>}

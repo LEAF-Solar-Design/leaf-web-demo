@@ -1467,6 +1467,60 @@ describe('canonical project layout publication action', () => {
     change('Site width (drawing units)', '0e-999')
     expect(onParameters.mock.calls.at(-1)[0]).toBeNull()
   })
+  it.each([
+    ['900000000', '900000000', '0.000001', '0.000002', 'm'],
+    ['-900000000', '-900000000', '0.000001', '0.000002', 'm'],
+    ['900000000', '-900000000', '0.000001', '0.000002', 'ft'],
+    ['-900000000', '900000000', '0.000001', '0.000002', 'ft'],
+    ['10', '-20', '100', '50', 'm'],
+    ['10', '-20', '100', '50', 'ft'],
+  ])('measures represented edges at %s %s with draft %s by %s %s', (x, y, width, height, units) => {
+    const onParameters = vi.fn()
+    render(<SolarGroundInputForm onParameters={onParameters} />)
+    change('Site origin X (drawing units)', x); change('Site origin Y (drawing units)', y)
+    change('Site width (drawing units)', width); change('Site height (drawing units)', height)
+    change('Site drawing units', units)
+    const parameters = onParameters.mock.calls.at(-1)[0]
+    const boundary = parameters.boundary
+    const w = boundary[1][0] - boundary[0][0], h = boundary[3][1] - boundary[0][1]
+    const factor = units === 'ft' ? 0.3048 : 1
+    const format = value => value < 1e-6 ? 'below display precision' : String(Number(value.toFixed(6)))
+    expect(screen.getByText(`Site ${w} × ${h} ${units === 'ft' ? 'feet' : 'metres'} · 48 modules per frame.`)).toBeTruthy()
+    expect(screen.getByText(`Site rectangle area: ${format(w * factor * h * factor)} square metres. Site rectangle perimeter: ${format(2 * (w * factor + h * factor))} metres.`)).toBeTruthy()
+    if (units === 'ft') expect(screen.getByText(`Converted site size: ${format(w * factor)} × ${format(h * factor)} metres. Module dimensions and gaps remain in metres.`)).toBeTruthy()
+    const svg = screen.getByRole('img', { name: 'Site rectangle schematic (not to scale)' })
+    expect(document.getElementById(svg.getAttribute('aria-describedby')).textContent).toContain(`Rectangle ${w} by ${h}`)
+    expect(Number(svg.querySelector('rect').getAttribute('width'))).toBe(Math.max(2, 100 * (w / Math.max(w, h))))
+    expect(Number(svg.querySelector('rect').getAttribute('height'))).toBe(Math.max(2, 100 * (h / Math.max(w, h))))
+    expect(JSON.parse(screen.getByLabelText('Generated source input parameters JSON').textContent)).toEqual(parameters)
+    expect(screen.getByLabelText('Site width (drawing units)').value).toBe(width)
+    expect(screen.getByLabelText('Site height (drawing units)').value).toBe(height)
+    if (Math.abs(Number(x)) === 900000000) expect(w).not.toBe(Number(width))
+  })
+  it('describes unit reinterpretation and conversion on their stable accessible controls', () => {
+    render(<SolarGroundInputForm onParameters={vi.fn()} />)
+    change('Site width (drawing units)', '10'); change('Site height (drawing units)', '20')
+    change('Site origin X (drawing units)', '-5')
+    const selector = screen.getByLabelText('Site drawing units')
+    const button = screen.getByRole('button', { name: 'Convert site units to feet' })
+    const helpId = selector.getAttribute('aria-describedby')
+    expect(button.getAttribute('aria-describedby')).toBe(helpId)
+    expect(selector.closest('fieldset').getAttribute('aria-describedby')).toBe(helpId)
+    const help = document.getElementById(helpId)
+    expect(help.textContent).toContain('unit selector reinterprets current numbers in the selected drawing units')
+    expect(help.textContent).toContain('converts site origins and sizes to preserve geometry; module metres are unchanged')
+    expect(help.hidden).toBe(false)
+    change('Site drawing units', 'ft')
+    expect(screen.getByLabelText('Site width (drawing units)').value).toBe('10')
+    expect(screen.getByLabelText('Site origin X (drawing units)').value).toBe('-5')
+    fireEvent.click(button)
+    expect(selector.value).toBe('m')
+    expect(screen.getByLabelText('Site width (drawing units)').value).toBe(String(10 * 0.3048))
+    expect(screen.getByLabelText('Site origin X (drawing units)').value).toBe(String(-5 * 0.3048))
+    expect(screen.getByLabelText('Module length (metres)').value).toBe('2.384')
+    expect(selector.getAttribute('aria-describedby')).toBe(helpId)
+    expect(button.getAttribute('aria-describedby')).toBe(helpId)
+  })
   it('shows rectangle area and perimeter in metres without changing coordinate capture', () => {
     const onParameters = vi.fn()
     render(<SolarGroundInputForm onParameters={onParameters} />)

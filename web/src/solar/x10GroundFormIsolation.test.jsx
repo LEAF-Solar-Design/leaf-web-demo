@@ -97,12 +97,64 @@ describe('ground form instance isolation', () => {
     expect(callbacks[active]).toHaveBeenCalledExactlyOnceWith(capture)
     await act(async () => { await Promise.resolve() })
     expect(retired.mock.calls).toHaveLength(retiredCalls)
-    expect(current(active)).toBe(capture)
+    expect(current(active)).toEqual(capture)
+    expect(current(active)).not.toBe(capture)
+    expect(current(active).boundary).not.toBe(capture.boundary)
+    expect(current(active).preset).not.toBe(capture.preset)
     assertOther()
     idsResolveLocally()
     view.unmount()
     const counts = callbacks.map(callback => callback.mock.calls.length)
     await act(async () => { await Promise.resolve() })
     expect(callbacks.map(callback => callback.mock.calls.length)).toEqual(counts)
+  })
+
+  it('keeps private parameters independent of synchronous and retained callback mutations', () => {
+    const snapshots = []
+    const onParameters = vi.fn(value => {
+      if (!value) return
+      snapshots.push(value)
+      value.boundary[0][0] = 999
+      value.preset.Name = 'Caller mutation'
+      value.extra = { caller: true }
+      delete value.drawing_units
+    })
+    const view = render(<SolarGroundInputForm onParameters={onParameters} />)
+    const scope = within(view.container.querySelector('fieldset'))
+    const edit = (label, value) => fireEvent.change(scope.getByLabelText(label), { target: { value } })
+    const json = () => JSON.parse(scope.getByLabelText('Generated source input parameters JSON').textContent)
+    edit('Site width (drawing units)', '10')
+    edit('Site height (drawing units)', '20')
+    const expected = json()
+    expect(expected).toMatchObject({ boundary: [[0, 0], [10, 0], [10, 20], [0, 20]],
+      preset: { Name: 'Default' }, drawing_units: 'm' })
+    expect(expected.extra).toBeUndefined()
+    const html = view.container.innerHTML
+    snapshots[0].boundary.push([123, 456])
+    snapshots[0].preset.Rows = 999
+    delete snapshots[0].preset.ModulePowerWp
+    view.rerender(<SolarGroundInputForm onParameters={onParameters} />)
+    expect(view.container.innerHTML).toBe(html)
+    const calls = onParameters.mock.calls.length
+    edit('Site width (drawing units)', '1e1')
+    expect(onParameters.mock.calls).toHaveLength(calls)
+    expect(json()).toEqual(expected)
+    edit('Site width (drawing units)', '11')
+    expect(snapshots).toHaveLength(2)
+    expect(json()).toEqual({ ...expected, boundary: [[0, 0], [11, 0], [11, 20], [0, 20]] })
+    const replacement = vi.fn()
+    view.rerender(<SolarGroundInputForm onParameters={replacement} />)
+    expect(replacement).toHaveBeenCalledExactlyOnceWith(json())
+    const fresh = replacement.mock.calls[0][0]
+    expect(fresh).not.toBe(snapshots[1])
+    expect(fresh.boundary).not.toBe(snapshots[1].boundary)
+    expect(fresh.preset).not.toBe(snapshots[1].preset)
+    expect(onParameters.mock.calls).toHaveLength(calls + 1)
+    fresh.boundary[1][0] = -1
+    fresh.preset.Name = 'Replacement mutation'
+    edit('Site height (drawing units)', '21')
+    expect(replacement.mock.calls.at(-1)[0]).toEqual({ ...expected,
+      boundary: [[0, 0], [11, 0], [11, 21], [0, 21]] })
+    expect(json()).toEqual(replacement.mock.calls.at(-1)[0])
   })
 })
