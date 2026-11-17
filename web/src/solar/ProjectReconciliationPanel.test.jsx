@@ -125,6 +125,97 @@ function canonicalReports(h, file = { response: totalsResponse() }) {
 }
 const reportsLoaded = () => screen.findByText(/No saved engineering totals|Saved engineering totals loaded/)
 
+it('guards two Reload activations before React commits and releases after rejection', async () => {
+  const h = fixture(); canonicalReports(h)
+  read(); await reportsLoaded(); fill(reportValues)
+  let reject
+  h.client.loadEngineeringTotals.mockImplementationOnce(() => new Promise((_yes, no) => { reject = no }))
+  const button = screen.getByRole('button', { name: 'Reload saved engineering totals' })
+  act(() => { button.click(); button.click() })
+  expect(h.client.loadEngineeringTotals).toHaveBeenCalledTimes(2)
+  await act(async () => reject(new Error('private report GET failure')))
+  expect(inputValues()).toEqual(reportValues)
+  expect(screen.getByText(/Engineering totals could not be loaded/)).toBeTruthy()
+  expect(button.disabled).toBe(false)
+  reloadTotals(); await reportsLoaded()
+  expect(h.client.loadEngineeringTotals).toHaveBeenCalledTimes(3)
+})
+
+it.each(['completion-first', 'timeout-first'])('settles the Reload deadline coherently (%s)', async order => {
+  const h = fixture(); canonicalReports(h, { response: totalsResponse(1, reportValues) })
+  read(); await reportsLoaded()
+  const newer = ['2', '0', '1', '1', '0.5']
+  let settle
+  h.client.loadEngineeringTotals.mockReturnValueOnce(new Promise(resolve => { settle = resolve }))
+  vi.useFakeTimers()
+  const complete = () => settle(totalsResponse(2, newer))
+  if (order === 'completion-first') setTimeout(complete, RECONCILIATION_READ_TIMEOUT_MS)
+  reloadTotals()
+  if (order === 'timeout-first') setTimeout(complete, RECONCILIATION_READ_TIMEOUT_MS)
+  const pending = h.client.loadEngineeringTotals.mock.calls[1][0]
+  await act(async () => { await vi.advanceTimersByTimeAsync(RECONCILIATION_READ_TIMEOUT_MS) })
+  expect(vi.getTimerCount()).toBe(0)
+  const revision = order === 'completion-first' ? 2 : 1
+  expect(pending.signal.aborted).toBe(order === 'timeout-first')
+  expect(inputValues()).toEqual(order === 'completion-first' ? newer : reportValues)
+  expect(screen.queryByText(/Engineering totals could not be loaded/) !== null).toBe(order === 'timeout-first')
+  vi.useRealTimers()
+  const drafts = ['3', '0', '1', '1', '0.6']; fill(drafts)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(revision + 1, drafts))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls[0][0].expectedRevision).toBe(revision)
+})
+
+it('retains dirty comparisons through read-only report loads and recovers on writable reload', async () => {
+  const h = fixture(); canonicalReports(h, { response: totalsResponse(1, reportValues) })
+  read(); await reportsLoaded()
+  const dirty = ['2', '0', '1', '1', '0.5']; fill(dirty)
+  h.client.loadEngineeringTotals.mockResolvedValueOnce(totalsResponse(1, reportValues, false))
+  read(); await screen.findByText(/Engineering totals are read-only/)
+  expect(inputValues()).toEqual(dirty)
+  expect(screen.getByRole('button', { name: 'Save engineering totals' }).disabled).toBe(true)
+  const createObjectURL = vi.fn(() => 'blob:read-only'); vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' })); expect(click).toHaveBeenCalledOnce()
+  expect((await blobText(createObjectURL.mock.calls[0][0])).includes('"panels","1","2","-1","FAIL"')).toBe(true)
+  h.client.loadEngineeringTotals.mockResolvedValueOnce(totalsResponse(1, dirty, true))
+  reloadTotals(); await reportsLoaded()
+  expect(inputValues()).toEqual(dirty)
+  expect(screen.getByRole('button', { name: 'Save engineering totals' }).disabled).toBe(false)
+})
+
+it('retains dirty values when an absent record is explicitly reloaded after conflict', async () => {
+  const h = fixture(); canonicalReports(h, { response: totalsResponse(2, reportValues) })
+  read(); await reportsLoaded()
+  const dirty = ['4', '0', '1', '1', '0.7']; fill(dirty)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce({ ok: false, status: 409 })
+  saveTotals(); await screen.findByText(/Engineering totals changed/)
+  h.client.loadEngineeringTotals.mockResolvedValueOnce(totalsResponse(0, null))
+  reloadTotals(); await reportsLoaded()
+  expect(inputValues()).toEqual(dirty)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(1, dirty))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls[1][0]).toMatchObject({ expectedRevision: 0, drafts: dirty })
+})
+
+it('owns accepted loaded report values against later producer mutation', async () => {
+  const h = fixture(); canonicalReports(h)
+  const returned = totalsResponse(4, reportValues)
+  h.client.loadEngineeringTotals.mockResolvedValueOnce(returned)
+  read(); await reportsLoaded()
+  returned.data.record.values.fill('999')
+  returned.data.record.binding.project_id = '99999999-9999-4999-8999-999999999999'
+  returned.data.revision = 99
+  expect(inputValues()).toEqual(reportValues)
+  const createObjectURL = vi.fn(() => 'blob:owned'); vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect((await blobText(createObjectURL.mock.calls[0][0])).includes('999')).toBe(false)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(5, reportValues))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls[0][0]).toMatchObject({ expectedRevision: 4, drafts: reportValues })
+})
+
 it.each(['before-read', 'after-read'])('rejects the old A Save after A-B-A when receipt settles %s', async order => {
   const h = fixture({ strict: true }); canonicalReports(h)
   read(); await reportsLoaded(); fill(reportValues)

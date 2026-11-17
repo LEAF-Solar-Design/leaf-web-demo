@@ -155,8 +155,11 @@ window.switchDrawing = () => render(nextBinding, 'synthetic-next', nextClient);
 window.oldReadAborted = () => oldSignal?.aborted === true;
 window.enableReportPersistence = () => {
   let loseSaveResponse = false;
+  let failReportGet = false;
   window.loseNextSaveResponse = () => { loseSaveResponse = true; };
+  window.failNextReportReload = () => { failReportGet = true; };
   const exchange = async (method, body, signal) => {
+    if (method === 'GET' && failReportGet) { failReportGet = false; throw new Error('Synthetic report GET failure'); }
     const result = await fetch('/mock-engineering-totals', {
       method, signal, headers: {'Content-Type': 'application/json'},
       ...(body ? {body: JSON.stringify(body)} : {}),
@@ -787,6 +790,21 @@ try:
     assert page.get_by_role('textbox').evaluate_all('(nodes) => nodes.map(n => n.value)') == lost_values
     assert canonical_file.read_bytes() == committed_bytes
     recovered = capture_comparison('lost-save-response-recovered')
+    # A failed report GET must retain a usable dirty comparison and export.
+    dirty_values = ['006', '01', '02', '01', '0.8']
+    for label, value in zip(labels, dirty_values):
+        page.get_by_role('textbox', name=label + ' engineering report/BOM', exact=True).fill(value)
+    page.evaluate('window.failNextReportReload()')
+    page.get_by_role('button', name='Reload saved engineering totals', exact=True).click()
+    expect(page.get_by_text('Engineering totals could not be loaded. Reload saved engineering totals to try again.', exact=True)).to_be_visible()
+    assert page.get_by_role('textbox').evaluate_all('(nodes) => nodes.map(n => n.value)') == dirty_values
+    assert canonical_file.read_bytes() == committed_bytes
+    failed_reload = capture_comparison('failed-report-get-dirty-csv')
+    page.get_by_role('button', name='Reload saved engineering totals', exact=True).click()
+    expect(page.get_by_text('Saved engineering totals loaded.', exact=True)).to_be_visible()
+    assert page.get_by_role('textbox').evaluate_all('(nodes) => nodes.map(n => n.value)') == lost_values
+    assert canonical_file.read_bytes() == committed_bytes
+    reload_recovered = capture_comparison('failed-report-get-recovered-csv')
     final_document = json.loads(committed_bytes)
     assert final_document['intake'] == first_document['intake'] and final_document['version'] == 7
     report_persistence = dict(restored=restored, exact_values=persisted_values, blank_dc=True,
@@ -794,6 +812,7 @@ try:
         stale_save_rejected=True, stale_save_file_bytes_unchanged=True,
         explicit_reload_values=newer_values, graph_and_version_unchanged=True,
         lost_save_response_recovered=True, recovery_without_write=True, recovered=recovered,
+        failed_reload=failed_reload, failed_reload_recovered=reload_recovered,
         canonical_file_sha256=hashlib.sha256(committed_bytes).hexdigest())
     def digest(path):
         return hashlib.sha256(path.read_bytes()).hexdigest()
