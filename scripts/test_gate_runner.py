@@ -875,6 +875,7 @@ def test_unprivileged_named_gates_preserve_contract(monkeypatch, tmp_path):
         ("server-lab-runs", "tests/test_lab_runs.py", 24, False),
         ("server-lab-corpus-executor", "tests/test_lab_corpus_executor.py", 14, True),
         ("server-project-drawing-write", "tests/test_project_drawing_write.py", 9, True),
+        ("server-project-string-tags", "tests/test_project_string_tags.py", 48, True),
     ):
         # The launcher must accept every target the registry routes through it (job 18101).
         launched = runner._py_pytest(target)[2:]
@@ -6702,6 +6703,31 @@ def test_server_test_targets_count_only_real_targets(tmp_path):
         SimpleNamespace(cwd=server, argv=["python", "-m", "pytest", "tests/test_f.py::test_one"]),
     ]
     assert _server_test_targets(suites, tests) == {"test_a.py"}
+
+
+def test_string_tag_suites_registered():
+    runner = _load_runner()
+    suites = runner.build_suites()
+    for sid, target, floor, database in (
+        ("server-solar-string-tags", "tests/test_solar_string_tags.py", 82, False),
+        ("server-project-string-tags", "tests/test_project_string_tags.py", 48, True),
+    ):
+        rows = [suite for suite in suites if suite.id == sid]
+        assert len(rows) == 1
+        suite = rows[0]
+        assert suite.kind == "pytest" and suite.cwd == runner.SERVER
+        assert suite.expected == floor
+        assert suite.uses_database is database and suite.db_gated is database
+        assert not suite.opt_in_env and not suite.db_deferred
+        assert suite.allowed_skip_reasons == () and suite.database_skip_reasons == ()
+        if database:
+            assert suite.argv == runner._unprivileged_pytest(target)
+            launched = runner._py_pytest(target)[2:]
+            assert _unprivileged_helper().validate_args(launched) == launched
+        else:
+            assert suite.argv == runner._py_pytest(target)
+    registered = _server_test_targets(suites, runner.SERVER / "tests")
+    assert {"test_solar_string_tags.py", "test_project_string_tags.py"} <= registered
 
 
 def test_every_server_test_file_is_registered_or_named():
