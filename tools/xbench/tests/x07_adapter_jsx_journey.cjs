@@ -239,7 +239,7 @@ function rpc(bound, op, context, value, signal, fault = null, protocolFault = nu
     const script = protocolFault === 'stdin_epipe'
       ? "import os,sys,threading;os.close(0);print('STDIN_CLOSED',flush=True);threading.Event().wait(60)" : python
     let child
-    try { child = spawn(fixture.interpreter || 'python', ['-X', 'utf8', '-c', script], { cwd: path.resolve(__dirname, '../../..'), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32' }) }
+    try { child = spawn(fixture.interpreter || 'python', ['-P', '-X', 'utf8', '-c', script], { cwd: path.resolve(__dirname, '../../..'), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32' }) }
     catch { const error = new Error('Python JSON worker could not start.'); error.code = 'BRIDGE_STARTUP'; reject(error); return }
     children.add(child)
     let stdout = '', stderr = '', finished = false, stdoutBytes = 0, stderrBytes = 0, terminalError = null
@@ -303,7 +303,11 @@ function rpc(bound, op, context, value, signal, fault = null, protocolFault = nu
         stdout += decoder.write(bytes.subarray(offset, offset+length)); offset += length; parts++
       }
       stdout += decoder.end(); protocolStats.push({ bytes: bytes.length, parts, receipts: 0 })
-      if (code !== 0) { const error = new Error('Python JSON worker failed.'); error.code = 'BRIDGE_EXIT'; settle(error); return }
+      if (code !== 0) {
+        // Optional sink belongs to a synthetic harness, never its rendered UI.
+        try { fixture.on_worker_failure?.({ exit_code: code, stderr }) } catch {}
+        const error = new Error('Python JSON worker failed.'); error.code = 'BRIDGE_EXIT'; settle(error); return
+      }
       if (!stdout.trim()) { const error = new Error('Python JSON worker returned no JSON.'); error.code = 'BRIDGE_EOF'; settle(error); return }
       try {
         const response = strictJSON(stdout)
