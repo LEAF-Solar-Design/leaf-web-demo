@@ -22,6 +22,39 @@ def _model(entity):
     return entity.get("space") != "paper" and entity.get("layout", "Model") in ("", "Model")
 
 
+def _selection_window(params):
+    if "selection_window" not in params:
+        return None
+    bounds = params["selection_window"]
+    if not isinstance(bounds, list) or len(bounds) != 4:
+        raise ValueError("Design window requires [minimum X, minimum Y, maximum X, maximum Y].")
+    try:
+        valid = all(type(value) in (int, float) and math.isfinite(value) for value in bounds)
+    except OverflowError:
+        valid = False
+    if not valid or bounds[0] >= bounds[2] or bounds[1] >= bounds[3]:
+        raise ValueError("Design window coordinates must be finite with minimums below maximums.")
+    return bounds
+
+
+def _within_window(entity, key, bounds, dimensions):
+    if key == "inserts":
+        if dimensions != (1, 1):
+            raise ValueError("Design windows require individual INSERT references. Count an INSERT array as a whole set.")
+        points = [(entity.get("x"), entity.get("y"))]
+    else:
+        points = entity["pts"]
+    try:
+        valid = all(type(value) in (int, float) and math.isfinite(value)
+                    for point in points for value in point[:2])
+    except OverflowError:
+        valid = False
+    if not valid:
+        raise ValueError("A module candidate has no finite drawing position. Re-import the drawing before using a design window.")
+    return all(bounds[0] <= point[0] <= bounds[2] and bounds[1] <= point[1] <= bounds[3]
+               for point in points)
+
+
 def _four_corners(entity):
     closed = entity.get("closed")
     # Saved closure accepts booleans and the exact integer flag, never truthiness.
@@ -79,6 +112,8 @@ def _four_corners(entity):
 
 
 def run(intake, params):
+    params = params or {}
+    window = _selection_window(params)
     if not isinstance(intake, dict):
         raise ValueError("Saved intake must be an object; re-import the drawing.")
     for key in ("inserts", "polylines"):
@@ -99,8 +134,6 @@ def run(intake, params):
             layer = entity.get("layer") or "0"
             block = (entity.get("name") or "") if key == "inserts" else ""
             identity = (entity_type, layer, block)
-            group = groups.setdefault(identity, {"entity_type": entity_type,
-                "layer": layer, "block": block, "count": 0, "handles": [], "_keys": set()})
             handle = str(entity.get("handle") or "").strip().upper().removeprefix("0X")
             if handle and all(c in "0123456789ABCDEF" for c in handle):
                 handle = handle.lstrip("0") or "0"
@@ -108,6 +141,10 @@ def run(intake, params):
             dimensions = (entity.get("rows", 1), entity.get("columns", 1)) if key == "inserts" else (1, 1)
             if any(type(value) is not int or not 1 <= value <= 65535 for value in dimensions):
                 raise ValueError(f"INSERT {handle or index} has invalid array multiplicity; rows and columns must be positive UInt16 integers.")
+            if window is not None and not _within_window(entity, key, window, dimensions):
+                continue
+            group = groups.setdefault(identity, {"entity_type": entity_type,
+                "layer": layer, "block": block, "count": 0, "handles": [], "_keys": set()})
             if entity_key in multiplicities and multiplicities[entity_key] != dimensions:
                 raise ValueError(f"INSERT {handle or index} has conflicting array multiplicity; re-import the drawing.")
             multiplicities[entity_key] = dimensions
@@ -120,17 +157,19 @@ def run(intake, params):
     for identity, group in sorted(groups.items()):
         group["set_id"] = json.dumps(identity, ensure_ascii=True, separators=(",", ":"))
         sets.append(group)
-    params = params or {}
     selected_ids = list(dict.fromkeys(params.get("set_ids") or
         ([params["set_id"]] if params.get("set_id") else [])))
     selected_sets = [s for s in sets if s["set_id"] in selected_ids]
     if len(selected_sets) != len(selected_ids):
+        if window is not None:
+            raise ValueError("A selected module set has no candidates in this design window. Check the window and list the sets again.")
         raise ValueError("Selected module set is absent from this drawing; list the sets again.")
     selected = selected_sets[0] if len(selected_sets) == 1 else None
     def public_set(group):
         return {k: v for k, v in group.items() if k not in ("handles", "_keys")}
 
     return ({"sets": [public_set(s) for s in sets],
+             **({"selection_window": list(window)} if window is not None else {}),
              "original_bytes_integrity": "unverified",
              "selection_required": not selected_sets,
              "selected_sets": [public_set(s) for s in selected_sets],

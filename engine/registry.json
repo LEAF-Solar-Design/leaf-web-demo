@@ -59,7 +59,7 @@
     {
       "name": "count-modules",
       "version": "1.0.0",
-      "description": "Lists candidate module sets by layer and block. Select a listed set to count its modules.",
+      "description": "Lists candidate module sets by layer and block. Select a listed set and optionally a design window to count one repeated design copy.",
       "kind": "script",
       "engine_op": "count_modules",
       "entry": "builtins/count_modules.py",
@@ -67,7 +67,8 @@
         "type": "object",
         "properties": {
           "set_id": {"type": "string", "description": "Single set identity from this drawing's listing. Omit to list sets."},
-          "set_ids": {"type": "array", "items": {"type": "string"}, "description": "Choose the listed sets that together form the intended design."}
+          "set_ids": {"type": "array", "items": {"type": "string"}, "description": "Choose the listed sets that together form the intended design."},
+          "selection_window": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4, "description": "Optional world-XY [minimum X, minimum Y, maximum X, maximum Y]. Counts individual INSERT origins and fully enclosed eligible outlines. INSERT arrays require whole-set counting."}
         },
         "required": []
       },

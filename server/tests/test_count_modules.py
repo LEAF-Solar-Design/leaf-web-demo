@@ -75,6 +75,65 @@ def test_normal_registry_and_trusted_loader_resolve_builtin():
     assert envelope["result"]["selection_required"] is True
 
 
+def test_design_window_counts_one_copy_and_records_exact_highlights_through_loader():
+    import copy
+    import tool_loader
+
+    intake = {"inserts": [
+        {"name": "Panel", "layer": "Design", "handle": f"{copy_index * 10 + index + 1:X}",
+         "x": copy_index * 100 + index, "y": index}
+        for copy_index in range(3) for index in range(4)]}
+    before = copy.deepcopy(intake)
+    tool = next(t for t in json.loads((PATH.parents[2] / "engine/registry.json").read_text())["tools"]
+                if t["name"] == "count-modules")
+    listing, _ = module.run(intake, {})
+    identity = listing["sets"][0]["set_id"]
+    assert module.run(intake, {"set_id": identity})[0]["count"] == 12
+    params = {"set_ids": [identity], "selection_window": [99, -1, 104, 4]}
+    result = tool_loader.run_tool_dynamic(tool, intake, params, aps_live=False)
+    assert result["error"] is None
+    assert result["result"]["count"] == 4
+    assert result["result"]["selection_window"] == params["selection_window"]
+    assert result["result"]["selected_set"]["count"] == 4
+    assert set(result["overlay"]["highlight_handles"]) == {"B", "C", "D", "E"}
+    assert intake == before
+
+
+@pytest.mark.parametrize("bounds", [None, [], [0, 1, 2], [0, 0, 1, float("nan")],
+    [False, 0, 1, 1], ["0", 0, 1, 1], [1, 0, 1, 2], [2, 0, 1, 2]])
+def test_invalid_design_windows_refuse_atomically(bounds):
+    with pytest.raises(ValueError, match="window"):
+        module.run({"inserts": []}, {"selection_window": bounds})
+
+
+def test_window_encloses_outlines_and_preserves_physical_handle_union():
+    polyline = {"closed": True, "pts": [[0, 0], [2, 0], [2, 1], [0, 1]],
+                "layer": "Design", "handle": "A"}
+    intake = {"polylines": [polyline, dict(polyline),
+        {**polyline, "handle": "B", "pts": [[2, 0], [4, 0], [4, 1], [2, 1]]}]}
+    result, _ = module.run(intake, {})
+    selected, overlay = module.run(intake, {"set_id": result["sets"][0]["set_id"],
+        "selection_window": [0, 0, 2, 1]})
+    assert selected["count"] == 1
+    assert overlay["highlight_handles"] == ["A"]
+
+
+def test_window_rejects_missing_positions_and_array_references_without_partial_results():
+    for entity, message in [({"name": "Panel"}, "finite drawing position"),
+        ({"name": "Panel", "x": 0, "y": 0, "columns": 3}, "individual INSERT")]:
+        with pytest.raises(ValueError, match=message):
+            module.run({"inserts": [{"name": "Panel", "x": 0, "y": 0}, entity]},
+                       {"selection_window": [-1, -1, 1, 1]})
+
+
+def test_window_with_no_selected_candidates_refuses_actionably():
+    intake = {"inserts": [{"name": "Panel", "handle": "A", "x": 0, "y": 0}]}
+    listing, _ = module.run(intake, {})
+    with pytest.raises(ValueError, match="no candidates in this design window"):
+        module.run(intake, {"set_id": listing["sets"][0]["set_id"],
+                           "selection_window": [10, 10, 20, 20]})
+
+
 @pytest.mark.parametrize("ordering", ["reverse", "rotate"])
 def test_input_order_preserves_set_identity_counts_and_highlight_membership(ordering):
     panel = {"layer": "Design", "closed": True,
