@@ -144,3 +144,84 @@ finally:
 
 Stop on any failed assertion. No file, browser, archive, network service or
 product state is created. Hash equality still establishes no origin identity.
+
+## Bundle-to-seven-step semantic replay
+
+`reconcile_bundle` first audits the complete inventory and supplied bytes, then
+checks fixture/version stage references. Only intact, bound fixture members
+reach strict UTF-8/JSON evidence decoding. All embedded fixture claims and saved
+design versions must match the explicitly supplied outer bindings before the
+existing bound seven-step comparator runs. Integrity and reference diagnostics
+remain separate from semantic results. A byte failure in one fixture does not
+hide a readable sibling's PASS or FAIL. The offline aggregate gives UNREADABLE
+precedence; it does not change the live grader's frozen FAIL dominance.
+
+`decode_replay_json` accepts exactly `inventory`, `references`,
+`expected_fixture_versions`, `evidence_stage` and `member_bytes_hex`. The inventory
+uses the strict three-field envelope above. Hex values allow only paired hex
+digits, with no spaces. The decoder checks all lengths, individual and total
+decoded budgets before creating any `bytes.fromhex` output. Its encoded-text
+limit is twice the 8 MiB decoded budget plus 262,144 metadata characters, with
+16 container levels. Optional `max_member_bytes` and `max_total_bytes` can lower
+the hard limits; they cannot raise them. Successful decoding alone proves no
+integrity. `replay_bundle_json` then invokes the adapter.
+
+This executable uses the checkout's existing complete synthetic seven-step
+builder. It requires the test dependency `pytest` for importing that builder;
+it does not run or collect a test suite. All product helpers remain standard
+library only. Save the block outside git and run `python -P -B` from this
+checkout. The support builder supplies fake provenance, oracles and design IDs;
+none is an independent real-world authority.
+
+```python
+from copy import deepcopy
+from pathlib import Path
+import json
+import sys
+
+repo = Path('D:/GitHub/xbench-x05-late-subscribers')
+sys.path.insert(0, str(repo / 'tools/xbench'))
+from benches import x05_bundle as bundle
+from tests.test_x05_bundle import reconciliation_bundle, replay_envelope
+
+clean_source = reconciliation_bundle()
+before = deepcopy(clean_source)
+clean = bundle.replay_bundle_json(json.dumps(replay_envelope(clean_source)))
+assert clean['integrity']['integrity_verified'] and clean['semantic']['verdict'] == 'PASS'
+failed_source = reconciliation_bundle(failed=('alpha',))
+failed = bundle.replay_bundle_json(json.dumps(replay_envelope(failed_source)))
+assert failed['integrity']['integrity_verified'] and failed['semantic']['verdict'] == 'FAIL'
+assert failed['semantic']['fixtures']['alpha']['result']['reconciliation']['steps']['1']['verdict'] == 'FAIL'
+
+tampered_source = deepcopy(clean_source)
+tampered_source['payloads']['alpha/seven.json'] += b' '  # Still valid JSON, wrong pinned bytes.
+calls = []
+original_decode = bundle.reconciliation.decode_evidence_json
+original_reconcile = bundle.reconciliation.reconcile_bound_seven_steps
+def forbidden(*args, **kwargs):
+    calls.append(1)
+    raise AssertionError('Tampered evidence reached semantics')
+bundle.reconciliation.decode_evidence_json = forbidden
+bundle.reconciliation.reconcile_bound_seven_steps = forbidden
+try:
+    tampered = bundle.replay_bundle_json(json.dumps(replay_envelope(tampered_source)))
+    assert not tampered['integrity']['integrity_verified']
+    assert tampered['semantic']['verdict'] == 'UNREADABLE' and calls == []
+    assert tampered['integrity']['diagnostic_counts'] == {
+        'PAYLOAD_LENGTH_MISMATCH': 1, 'PAYLOAD_SHA256_MISMATCH': 1}
+finally:
+    bundle.reconciliation.decode_evidence_json = original_decode
+    bundle.reconciliation.reconcile_bound_seven_steps = original_reconcile
+assert clean_source == before
+assert all(not r['origin_authenticated'] for r in (clean, failed, tampered))
+print(json.dumps(dict(clean='PASS', readable_mismatch='FAIL', tampered='UNREADABLE',
+    tampered_diagnostics=tampered['integrity']['diagnostic_counts'],
+    tampered_semantic_calls=len(calls), origin_authenticated=False), sort_keys=True))
+```
+
+Stop on any failed assertion. Instrumentation is restored in `finally`. The
+replay starts no browser, service, extraction or product mutation. Hash-correct
+duplicate-key JSON or foreign fixture/version claims also remain UNREADABLE.
+An attacker who rewrites every pin and matching claim can still pass this
+offline comparison. Origin authentication and the admitted live grade remain
+separate controls.
