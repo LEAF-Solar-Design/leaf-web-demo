@@ -50,6 +50,11 @@ _MIGRATION_LEDGER_COLUMNS = {"name", "sha256", "applied_at"}
 # compatibility contract, not a provider choice. Additions stay additive so an
 # older application can continue to read a database prepared by a newer image.
 _REQUIRED_COLUMNS = {
+    "x07_customers": {"customer_key", "profile_id"},
+    "x07_profile_versions": {
+        "customer_key", "profile_id", "version", "roles_json", "created_at",
+    },
+    "x07_project_applications": {"project_key", "customer_key", "profile_id", "version"},
     "project_checkout_custody": {
         "delegation_id", "tenant_id", "confirmation_id", "session_id", "subject",
         "actor_binding_id", "input_binding", "approved_args", "fence", "expires_at",

@@ -432,6 +432,35 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
         },
       })
     }),
+    readRoleProfile: (options = {}) => guarded((scope) => {
+      assert(plain(options))
+      const b = scope.binding
+      return request(`/api/projects/${b.project_id}/drawings/${b.drawing_id}/versions/${b.input_version_id}/role-profile`, {
+        scope, signal: options.signal, validate: (data) => data?.customer_key === b.organization_id &&
+          data?.project_key === b.project_id && data?.drawing_key === b.drawing_id && data?.input_version_id === b.input_version_id,
+      })
+    }),
+    confirmRoleProfile: (selection, options = {}) => guarded((scope) => {
+      assert(plain(selection) && plain(options))
+      const b = scope.binding
+      return request(`/api/projects/${b.project_id}/drawings/${b.drawing_id}/versions/${b.input_version_id}/role-profile`, {
+        scope, signal: options.signal, method: 'POST',
+        body: JSON.stringify(copyJson({ block: selection.block, layer: selection.layer,
+          design_window: selection.design_window, expected_version: options.expected_version })),
+        validate: (data) => data?.ok === true && data?.customer_key === b.organization_id &&
+          data?.project_key === b.project_id && data?.drawing_key === b.drawing_id && data?.input_version_id === b.input_version_id,
+      })
+    }),
+    saveRoleProfile: (roles, options = {}) => guarded((scope) => {
+      assert(plain(roles) && plain(options))
+      const b = scope.binding
+      return request(`/api/projects/${b.project_id}/drawings/${b.drawing_id}/versions/${b.input_version_id}/role-profile`, {
+        scope, signal: options.signal, method: 'PUT',
+        body: JSON.stringify(copyJson({ roles, expected_version: options.expected_version })),
+        validate: (data) => data?.customer_key === b.organization_id && data?.project_key === b.project_id &&
+          data?.drawing_key === b.drawing_id && data?.input_version_id === b.input_version_id,
+      })
+    }),
     readContext: (options = {}) => guarded((scope) => {
       assert(plain(options))
       const { signal, prepareSolve = false, solveFrame } = options
