@@ -1280,3 +1280,36 @@ Stop on a protected prompt, failed native history, lost lexeme, implicit write,
 CSV mismatch or wrong revision. Support setup controls synthetic transport
 receipts. Product actions use visible controls and native keyboard shortcuts.
 No video is used. Frozen staging grading awaits its admitted source and window.
+
+
+## RTL viewport and keyboard persistence replay
+
+Parent X05 report persistence. Executed support fixture:
+`D:/agent-data/leaf-research/studio-xbench-2026-11/synthetic-tests/x05-rtl-responsive-xgqxxk7q/replay.py`.
+It bundles one actual panel and persistence client against synthetic file storage
+and a mocked saved-design read. Start at 1440 by 1800 with forced colors active.
+Unit resize and media-query cases are event simulations; this replay resizes
+an actual Chromium viewport. No staging or customer drawing is used.
+
+1. Read saved design. Enter `001,0,01,1,0.4`. Tab to Save engineering totals
+   and press Enter. Require the saved cue and file revision 1.
+2. Tab to Save and press Enter again. Support transport commits revision 2
+   while holding its receipt. Enter newer values `002,0,01,1,0.6`.
+3. Resize the actual viewport to 1024 by 1800 and set the ancestor direction
+   to RTL. Require retained lexemes, no extra requests and a live held signal.
+   All controls must fit. Tab to Download CSV and press Enter.
+4. Preserve `held-rtl.csv`. Release the receipt and require the newer-edits
+   unsaved cue. Press Enter on the focused Download CSV control again.
+   `receipt-rtl.csv` must equal the first CSV. Both must equal the five
+   normalized DOM rows, ten row pairs total.
+5. Tab to Save and press Enter. Require expected revision 2 and file revision
+   3 containing all five exact newer lexemes. Inspect `saved-rtl.png` for
+   complete panel fit. Unmount and require zero observers. Close context,
+   browser, server and thread in finally. Preserve proof.json, source hashes,
+   traffic, two CSVs, screenshots and the executable replay.
+
+Stop on a protected prompt, unreachable action, lost value, unexpected request,
+CSV mismatch or wrong revision. No video is used. The first exploratory run
+reached the final Save but used an incorrect dictionary assertion for the
+stored values array. The successful run checks the actual five-value array.
+Frozen staging grading still awaits its admitted source and window.
