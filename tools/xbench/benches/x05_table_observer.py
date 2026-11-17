@@ -148,7 +148,8 @@ def _grouping(page, label):
     region = page.get_by_role("region", name="Panel groups", exact=True)
     region.wait_for(state="visible")
     source = region.get_by_role("combobox", name="Membership source", exact=True)
-    source.select_option(label="Use proposed memberships")
+    if source.input_value() != "manual":
+        source.select_option(label="Use proposed memberships")
     region.get_by_text(re.compile(r"^Graph revision [0-9]+\.?$")).wait_for(state="visible")
     proposals = region.get_by_role("textbox", name=re.compile(r"^Group [1-9][0-9]* name$"))
     count = sum(proposals.nth(i).is_visible() for i in range(proposals.count()))

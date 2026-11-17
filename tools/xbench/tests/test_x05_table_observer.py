@@ -48,7 +48,7 @@ class Locator:
             raise TimeoutError("secret project/version/path")
         if self.kind == "graph_revision":
             self.page.events.append(("wait_graph_revision",))
-            if self.page.missing_graph_revision:
+            if self.page.missing_graph_revision or self.page.same_source_invalidated:
                 raise TimeoutError("private graph status")
             self.page.graph_ready = True
 
@@ -70,6 +70,9 @@ class Locator:
 
     def select_option(self, **kwargs):
         self.page.events.append(("select", self.kind, kwargs))
+        if self.kind == "source":
+            self.page.same_source_invalidated = self.page.membership_source == "manual"
+            self.page.membership_source = "manual"
 
     def fill(self, value):
         assert self.kind == "input" and not self.page.reopened
@@ -77,6 +80,8 @@ class Locator:
         self.page.fills += 1
 
     def input_value(self):
+        if self.kind == "source":
+            return self.page.membership_source
         assert self.kind == "input"
         if self.page.reopened and self.page.reads == 1:
             self.page.captured.append(self.index)
@@ -118,7 +123,7 @@ class Locator:
     def get_by_text(self, name):
         if self.kind == "groups":
             assert isinstance(name, re.Pattern) and name.fullmatch("Graph revision 7")
-            assert ("select", "source", {"label": "Use proposed memberships"}) in self.page.events
+            assert self.page.membership_source == "manual"
             return Locator(self.page, "graph_revision")
         assert self.kind == "region" and isinstance(name, re.Pattern)
         assert name.search("Saved design revision 7.")
@@ -197,6 +202,7 @@ class Page:
         self.missing_graph_revision = self.graph_ready = self.fail_reopen = False
         self.bad_reopened_table = None
         self.bad_table = None
+        self.membership_source, self.same_source_invalidated = "manual", False
         self.groups, self.fills, self.reads = 2, 0, 0
 
     def goto(self, url, *, wait_until):
@@ -272,13 +278,16 @@ def test_actual_download_and_normal_reopen_without_retyping(tmp_path):
 
 
 @pytest.mark.parametrize("groups,expected,status", [(2, [{"group_count": 2}], "proposals_shown"), (0, [], "no_proposals_shown")])
-def test_only_visible_group_proposals(tmp_path, groups, expected, status):
+@pytest.mark.parametrize("source", ["manual", "discover"])
+def test_only_visible_group_proposals(tmp_path, groups, expected, status, source):
     page = Page()
     page.groups = groups
+    page.membership_source = source
     result = observe(page, tmp_path, grouping_label="Catalog grouping")
     assert result["status"] == "OBSERVED"
     assert result["recommendations"] == expected and result["grouping_status"] == status
-    assert ("select", "source", {"label": "Use proposed memberships"}) in page.events
+    assert (("select", "source", {"label": "Use proposed memberships"}) in page.events) == (source != "manual")
+    assert not page.same_source_invalidated
     assert page.events.index(("wait_graph_revision",)) < page.events.index(("count_proposals", True))
     assert not any(e[0] == "click" and e[1] == "Run" for e in page.events)
 
