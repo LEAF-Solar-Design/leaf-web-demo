@@ -1680,8 +1680,10 @@ def test_new_modes_output_failures_exit_five_without_tracebacks(tmp_path, monkey
     if failure != "pipe":
         class BrokenOutput:
             writes = flushes = 0
+            def __init__(self): self.pieces = []
             def write(self, value):
                 self.writes += 1
+                self.pieces.append(value)
                 if failure == "write":
                     raise BrokenPipeError("synthetic_private_canary")
                 return len(value)
@@ -1693,7 +1695,15 @@ def test_new_modes_output_failures_exit_five_without_tracebacks(tmp_path, monkey
         monkeypatch.setattr(sys, "stdout", output)
         monkeypatch.setattr(sys, "stderr", errors)
         assert module.main([mode]) == 5 and not errors.getvalue()
-        assert output.writes == 1 and output.flushes == (1 if failure == "flush" else 0)
+        assert output.flushes == (1 if failure == "flush" else 0)
+        if failure == "write":
+            assert output.writes == 1
+        else:
+            delivered = "".join(output.pieces)
+            assert all(0 < len(piece) <= 8192 for piece in output.pieces)
+            assert output.writes == (len(delivered)+8191)//8192
+            assert len(delivered.splitlines()) == 1 and delivered.endswith("\n")
+            assert json.loads(delivered)["verdict"] in ("PASS", "FAIL", "UNREADABLE")
     else:
         child = subprocess.Popen([sys.executable, "-P", str(Path(module.__file__).resolve()), mode],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=tmp_path)
@@ -9031,3 +9041,129 @@ def test_csv_law_parser_configuration_preserves_newlines_until_semantic_validati
         assert result['fixtures'][expected[0]]['reconciliation']['steps']['5']['csv_view']['reason'] == 'csv_view_rows_unreadable'
     assert len(seen_streams) >= 2 and len(seen_tokens) >= 2
     assert all(value == token for value in seen_tokens)
+
+
+
+STDIO_MODES = [None, '--aggregate', '--provenance', '--assurance', '--provenance-aggregate',
+    '--assurance-aggregate', '--seven-step', '--seven-step-aggregate', '--seven-step-bound',
+    '--seven-step-bound-aggregate']
+
+
+class DeliveryOutput:
+    """Synthetic sink that records only the prefix it actually accepts."""
+    def __init__(self, binary, limit=7, invalid='unused', failure=None):
+        self.binary = binary; self.limit = limit; self.invalid = invalid; self.failure = failure
+        self.accepted = b'' if binary else ''; self.requests = []; self.flushes = 0
+    def write(self, value):
+        assert type(value) is (bytes if self.binary else str)
+        self.requests.append(value)
+        if self.failure == 'write': raise ValueError('private-closed-output')
+        if self.failure == 'after-prefix' and len(self.requests) > 1: raise OSError('private-late-output')
+        if self.invalid != 'unused':
+            return len(value)+1 if self.invalid == 'oversized' else self.invalid
+        count = min(len(value), self.limit)
+        self.accepted += value[:count]
+        return count
+    def flush(self):
+        self.flushes += 1
+        if self.failure == 'flush': raise ValueError('private-closed-output')
+
+
+def delivery_run(monkeypatch, mode, output, raw=None, input_stream=None):
+    from io import BytesIO
+    from types import SimpleNamespace
+    from benches import x05_reconcile as m
+    import sys
+    if raw is None: raw = serialize_result(framed_payload(mode)).encode()
+    errors = StringIO()
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, 'stdin', SimpleNamespace(buffer=input_stream if input_stream is not None else BytesIO(raw)))
+        patch.setattr(sys, 'stdout', SimpleNamespace(buffer=output) if output.binary else output)
+        patch.setattr(sys, 'stderr', errors)
+        code = m.main([mode] if mode else [])
+    assert errors.getvalue() == ''
+    return code
+
+
+@pytest.mark.parametrize('mode', STDIO_MODES)
+@pytest.mark.parametrize('binary', [False, True])
+@pytest.mark.parametrize('limit', [1, 7])
+def test_stdio_positive_short_writes_deliver_complete_single_json_all_modes(monkeypatch, mode, binary, limit):
+    baseline = DeliveryOutput(binary, limit=8192)
+    baseline_code = delivery_run(monkeypatch, mode, baseline)
+    assert baseline_code == 0
+    output = DeliveryOutput(binary, limit=limit)
+    assert delivery_run(monkeypatch, mode, output) == baseline_code
+    assert output.accepted == baseline.accepted
+    assert len(output.accepted.splitlines()) == 1 and json.loads(output.accepted)['verdict'] == 'PASS'
+    assert len(output.requests) > 1 and output.flushes == 1
+
+
+@pytest.mark.parametrize('mode', STDIO_MODES)
+@pytest.mark.parametrize('binary', [False, True])
+@pytest.mark.parametrize('invalid', [0, None, -1, False, True, 'oversized'])
+def test_stdio_invalid_write_counts_fail_once_without_recursive_reporting(monkeypatch, mode, binary, invalid):
+    output = DeliveryOutput(binary, invalid=invalid)
+    assert delivery_run(monkeypatch, mode, output) == 5
+    assert len(output.requests) == 1 and output.flushes == 0 and not output.accepted
+
+
+@pytest.mark.parametrize('mode', STDIO_MODES)
+@pytest.mark.parametrize('binary', [False, True])
+def test_stdio_late_write_failure_preserves_one_prefix_without_restart(monkeypatch, mode, binary):
+    baseline = DeliveryOutput(binary, limit=8192)
+    assert delivery_run(monkeypatch, mode, baseline) == 0
+    output = DeliveryOutput(binary, limit=11, failure='after-prefix')
+    assert delivery_run(monkeypatch, mode, output) == 5
+    assert output.accepted == baseline.accepted[:11]
+    assert len(output.requests) == 2 and output.requests[1] == baseline.accepted[11:11+8192]
+    assert output.flushes == 0
+
+
+@pytest.mark.parametrize('mode', STDIO_MODES)
+@pytest.mark.parametrize('kind', ['none', 'text', 'bytearray', 'oversized'])
+def test_stdio_stdin_return_contract_after_valid_prefix_is_sanitized_and_recovers(monkeypatch, mode, kind):
+    raw = serialize_result(framed_payload(mode)).encode()
+    calls = []
+    class BadInput:
+        def read(self, size):
+            calls.append(size)
+            if len(calls) == 1: return raw[:13]
+            if len(calls) > 2: pytest.fail('read continued after invalid chunk')
+            return {'none': lambda: None, 'text': lambda: 'private-input',
+                'bytearray': lambda: bytearray(b'private-input'), 'oversized': lambda: b'x'*(size+1)}[kind]()
+    output = DeliveryOutput(True)
+    assert delivery_run(monkeypatch, mode, output, input_stream=BadInput()) == 4
+    assert output.accepted == b'{"reason":"cli_evidence_unreadable","verdict":"UNREADABLE"}\n'
+    assert len(calls) == 2 and calls[1] == calls[0]-13
+    clean = DeliveryOutput(True)
+    assert delivery_run(monkeypatch, mode, clean, raw=raw) == 0
+    assert json.loads(clean.accepted)['verdict'] == 'PASS'
+
+
+@pytest.mark.parametrize('mode', STDIO_MODES)
+@pytest.mark.parametrize('binary', [False, True])
+@pytest.mark.parametrize('failure', ['write', 'flush'])
+def test_stdio_closed_write_and_flush_return_five_without_traceback_or_retry(monkeypatch, mode, binary, failure):
+    output = DeliveryOutput(binary, limit=8192, failure=failure)
+    assert delivery_run(monkeypatch, mode, output) == 5
+    assert output.flushes == (1 if failure == 'flush' else 0)
+    if failure == 'write':
+        assert len(output.requests) == 1 and not output.accepted
+    else:
+        assert len(output.accepted.splitlines()) == 1 and json.loads(output.accepted)['verdict'] == 'PASS'
+
+
+
+@pytest.mark.parametrize('mode', STDIO_MODES)
+@pytest.mark.parametrize('binary', [False, True])
+@pytest.mark.parametrize('failure', ['write', 'flush'])
+def test_stdio_closed_stdout_write_and_flush_return_five_without_recursive_output(monkeypatch, mode, binary, failure):
+    output = DeliveryOutput(binary, limit=8192, failure=failure)
+    assert delivery_run(monkeypatch, mode, output) == 5
+    if failure == 'write':
+        assert len(output.requests) == 1 and not output.accepted and output.flushes == 0
+    else:
+        assert len(output.accepted.splitlines()) == 1
+        assert json.loads(output.accepted)['verdict'] == 'PASS' and output.flushes == 1
+    assert b'private-closed-output' not in output.accepted if binary else 'private-closed-output' not in output.accepted
