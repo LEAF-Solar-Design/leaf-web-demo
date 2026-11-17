@@ -601,3 +601,7 @@ def solar_artifact_route(project_id: str, drawing_id: str, artifact_id: str, cur
             return Response(content=b"", status_code=304, headers=headers)
         return Response(content=content, media_type=meta["media_type"], headers=headers)
     return _output_dispatch(operation)
+
+
+from routers.project_estimates import router as estimate_router
+router.include_router(estimate_router)

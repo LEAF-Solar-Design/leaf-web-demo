@@ -323,3 +323,251 @@ def test_sip_r6_no_publication_and_bounds(lane, monkeypatch):
         else:
             monkeypatch.setenv("LEAF_SOLAR_PROJECT_RUN_ENABLED", value)
         refused("project_execution_disabled", lambda: run(lane))
+
+
+@pytest.fixture
+def estimate_lane(lane, monkeypatch):
+    """Instrument the real editor boundary; selected successor is a verified read double."""
+    import json
+    import project_estimate_custody as custody
+    s = lane
+    s.source_id = s.head
+    s.source = project.resolve_context(s.tenant, s.project, s.source_id, drawing_id=s.drawing)
+    s.raw_dxf = b"unchanged canonical DXF source\r\n"
+    s.publications = []
+    s.successor_id = UUID(int=999999)
+    s.card = {"schema": "leaf.solar-estimate-rate-card.v1", "label": "TEST RATES",
+              "version": "test-v7", "currency": "USD", "rates": [
+                  {"line_id": "strings.modules", "unit": "module", "rate": "1.25"}]}
+    # Match the real E1 unit, rather than inventing quantities or a takeoff result.
+    summary = run(s, "solar-takeoff", {})["result"]["output"]["summary"]
+    s.card["rates"][0]["unit"] = next(row["unit"] for row in summary["lines"]
+                                                 if row["line_id"] == "strings.modules")
+    s.request_id = UUID(int=999998)
+    s.capability = "boundary-capability"
+    s.receipt = {"drawing_version": {"version_id": str(s.successor_id)}}
+    def capture(tenant, proj, drawing, parent, raw, **kwargs):
+        s.publications.append((tenant, proj, drawing, parent, raw, deepcopy(kwargs)))
+        return deepcopy(s.receipt)
+    monkeypatch.setattr(custody.editor, "save_dxf", capture)
+    monkeypatch.setattr(custody.editor, "read_dxf", lambda *args: (s.raw_dxf, sha256(s.raw_dxf).hexdigest()))
+    s.resolve_original = project.resolve_context
+    def selected(tenant, proj, version, **kwargs):
+        if version == s.successor_id and proj == s.project and kwargs.get("drawing_id") == s.drawing:
+            return s.successor
+        return s.resolve_original(tenant, proj, version, **kwargs)
+    monkeypatch.setattr(project, "resolve_context", selected)
+    def save(card=None):
+        return custody.save_estimate(s.tenant, s.project, s.drawing, s.source_id,
+            s.card if card is None else card, catalog_digest=tools_cases.manifest("solar-takeoff"),
+            request_id=s.request_id, capability=s.capability)
+    s.save_estimate = save
+    s.saved = save()
+    s.snapshot_bytes = s.publications[-1][-1]["_restored_intake"]
+    version = deepcopy(s.source.binding.version)
+    version.version_id = s.successor_id
+    version.seq += 1
+    binding = replace(s.source.binding, input_version_id=s.successor_id,
+                      head_version_id=s.successor_id, is_head=True, version=version)
+    s.successor = replace(s.source, binding=binding, intake_bytes=s.snapshot_bytes,
+        intake=json.loads(s.snapshot_bytes), intake_sha256=sha256(s.snapshot_bytes).hexdigest())
+    return s
+
+
+def test_estimate_canonical_save_and_exact_historical_retry(estimate_lane):
+    import project_estimate_custody as custody
+    s = estimate_lane
+    original = deepcopy(s.source.intake)
+    card = deepcopy(s.card)
+    result = s.saved["result"]
+    estimate = result["estimate"]
+    assert result["publication"] == s.receipt and result["saved"] is True
+    assert result["content_sha256"] == estimate["content_sha256"]
+    assert estimate["rate_version"] == "test-v7"
+    assert estimate["source_binding"] == {"organization_id": str(s.org),
+        "project_id": str(s.project), "drawing_id": str(s.drawing),
+        "input_version_id": str(s.source_id), "intake_sha256": s.source.intake_sha256,
+        "graph_sha256": s.source.intake["solar_design_graph_sha256"]}
+    takeoff = run(s, "solar-takeoff", {})["result"]["output"]["summary"]
+    assert estimate == custody.material.price_takeoff(takeoff, card,
+                                                     source_binding=estimate["source_binding"])
+    companion = deepcopy(s.successor.intake)
+    snapshot = companion.pop(custody.KEY)
+    assert companion == original and s.card == card and s.source.intake == original
+    assert snapshot == {"schema": custody.SNAPSHOT_SCHEMA,
+        "estimate": custody.material.encode_estimate(estimate).decode(),
+        "source_dxf_sha256": sha256(s.raw_dxf).hexdigest(), "source_version_id": str(s.source_id)}
+    first = deepcopy(s.publications[0])
+    assert first[1:5] == (s.project, s.drawing, s.source_id, s.raw_dxf)
+    assert first[-1]["capability"] == s.capability and first[-1]["request_id"] == s.request_id
+    s.head = s.successor_id
+    assert s.save_estimate() == s.saved
+    assert s.publications[-1] == first
+
+
+def test_estimate_reopen_empty_and_changed_source(estimate_lane, monkeypatch):
+    import project_estimate_custody as custody
+    s = estimate_lane
+    def reopen():
+        return custody.read_estimate(s.tenant, s.project, s.drawing, s.successor_id)
+    reopened = reopen()["result"]
+    assert reopened["estimate"] == s.saved["result"]["estimate"]
+    identity = {"organization_id": str(s.org), "project_id": str(s.project),
+                "drawing_id": str(s.drawing), "input_version_id": str(s.successor_id)}
+    assert {key: reopened[key] for key in identity} == identity
+    assert reopened["estimate"]["source_binding"]["input_version_id"] == str(s.source_id)
+    empty = custody.read_estimate(s.tenant, s.project, s.drawing, s.source_id)["result"]
+    assert empty == {"schema": custody.RESULT_SCHEMA, "saved": False,
+                     **identity, "input_version_id": str(s.source_id)}
+    monkeypatch.setattr(custody.editor, "read_dxf", lambda *args:
+        (b"edited" if args[-1] == s.successor_id else s.raw_dxf, "unused"))
+    refused("ESTIMATE_SOURCE_CHANGED", reopen)
+    monkeypatch.setattr(custody.editor, "read_dxf", lambda *args: (s.raw_dxf, "unused"))
+    intake = deepcopy(s.successor.intake)
+    intake["solar_design_graph"]["project"]["name"] = "Changed estimate source"
+    intake["solar_design_graph_sha256"] = sha256(canonical_bytes(intake["solar_design_graph"])).hexdigest()
+    raw = canonical_bytes(intake)
+    s.successor = replace(s.successor, intake=intake, intake_bytes=raw, intake_sha256=sha256(raw).hexdigest())
+    refused("ESTIMATE_SOURCE_CHANGED", reopen)
+    assert custody.read_estimate(s.tenant, s.project, s.drawing, s.source_id)["result"]["saved"] is False
+
+
+@pytest.mark.parametrize("change", ["shape", "version", "project", "intake"])
+def test_estimate_refuses_wrong_snapshot_source(estimate_lane, change):
+    import project_estimate_custody as custody
+    s = estimate_lane
+    intake = deepcopy(s.successor.intake)
+    snapshot = intake[custody.KEY]
+    if change == "shape":
+        snapshot["extra"] = True
+        reason = "ESTIMATE_SNAPSHOT_INVALID"
+    elif change == "version":
+        snapshot["source_version_id"] = str(UUID(int=11111))
+        reason = "ESTIMATE_SOURCE_MISMATCH"
+    else:
+        estimate = custody.material.decode_estimate(snapshot["estimate"])
+        binding = deepcopy(estimate["source_binding"])
+        takeoff = deepcopy(estimate["takeoff"])
+        if change == "project":
+            binding["project_id"] = str(UUID(int=11111))
+            takeoff["source"]["project_id"] = binding["project_id"]
+        else:
+            binding["intake_sha256"] = "0" * 64
+        changed = custody.material.price_takeoff(takeoff, estimate["rate_card"], source_binding=binding)
+        snapshot["estimate"] = custody.material.encode_estimate(changed).decode()
+        reason = "ESTIMATE_SOURCE_MISMATCH"
+    raw = canonical_bytes(intake)
+    s.successor = replace(s.successor, intake=intake, intake_bytes=raw, intake_sha256=sha256(raw).hexdigest())
+    refused(reason, lambda: custody.read_estimate(s.tenant, s.project, s.drawing, s.successor_id))
+
+
+def test_estimate_publication_refusals_propagate(estimate_lane, monkeypatch):
+    import project_estimate_custody as custody
+    s = estimate_lane
+    before = deepcopy(s.source.intake), len(s.publications)
+    for reason in ("STALE_VERSION", "CHECKOUT_DENIED", "CHECKOUT_REQUIRED"):
+        def deny(*args, **kwargs):
+            project.refuse(reason)
+        monkeypatch.setattr(custody.editor, "save_dxf", deny)
+        refused("SIP_R1_" + reason, s.save_estimate)
+    def conflict(*args, **kwargs):
+        raise project.ProjectContextError("SIP_R2_IDEMPOTENCY_CONFLICT")
+    monkeypatch.setattr(custody.editor, "save_dxf", conflict)
+    changed = {**s.card, "version": "changed-card"}
+    refused("SIP_R2_IDEMPOTENCY_CONFLICT", lambda: s.save_estimate(changed))
+    def no_write(tenant, proj, *, write):
+        if write:
+            project.refuse("PROJECT_FORBIDDEN")
+        return s.org, s.actor
+    monkeypatch.setattr(project, "_access", no_write)
+    refused("SIP_R1_PROJECT_FORBIDDEN", s.save_estimate)
+    monkeypatch.setattr(custody.entitlements, "entitlements_for", lambda *args: {"run_read": False})
+    assert custody.read_estimate(s.tenant, s.project, s.drawing, s.successor_id).status_code == 403
+    monkeypatch.setattr(project, "_access", lambda *args, **kwargs: (s.org, s.actor))
+    assert s.save_estimate().status_code == 403
+    assert (s.source.intake, len(s.publications)) == before
+
+
+def test_estimate_parent_router_save_read_export_and_request_guards(estimate_lane, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import project_estimate_custody as custody
+    s = estimate_lane
+    app = FastAPI()
+    app.include_router(routes.router)
+    app.dependency_overrides[deps.require_active_tenant] = lambda: s.tenant
+    client = TestClient(app)
+    base = f"/api/projects/{s.project}/drawings/{s.drawing}/versions/"
+    url = base + str(s.source_id) + "/estimates"
+    saved_url = base + str(s.successor_id) + "/estimates"
+    headers = {"Idempotency-Key": str(s.request_id), "X-Checkout-Capability": s.capability}
+    body = {"rate_card": s.card, "catalog_digest": tools_cases.manifest("solar-takeoff")}
+    saved = client.post(url, json=body, headers=headers)
+    assert saved.status_code == 200 and saved.json()["result"] == s.saved["result"]
+    reopened = client.get(saved_url)
+    assert reopened.status_code == 200 and reopened.json()["result"]["estimate"] == s.saved["result"]["estimate"]
+    identity = {"organization_id": str(s.org), "project_id": str(s.project),
+                "drawing_id": str(s.drawing), "input_version_id": str(s.successor_id)}
+    assert {key: reopened.json()["result"][key] for key in identity} == identity
+    empty = client.get(url)
+    assert empty.status_code == 200
+    assert empty.json()["result"] == {"schema": custody.RESULT_SCHEMA, "saved": False,
+                                     **identity, "input_version_id": str(s.source_id)}
+    exported = client.get(saved_url + "/export")
+    assert exported.status_code == 200
+    assert exported.content == custody.material.encode_estimate(s.saved["result"]["estimate"])
+    assert exported.headers["etag"] == '"' + s.saved["result"]["content_sha256"] + '"'
+    assert exported.headers["content-disposition"] == 'attachment; filename="estimate.json"'
+    assert exported.headers["content-type"] == "application/json"
+    assert client.get(url + "/export").status_code == 404
+    before = len(s.publications)
+    for content, media, status in ((b'{"rate_card":{},"rate_card":{},"catalog_digest":"x"}', "application/json", 400),
+            (b'{"rate_card":{},"catalog_digest":NaN}', "application/json", 400),
+            (b" " * 262145, "application/json", 413), (b"{}", "text/plain", 415),
+            (b'{"rate_card":{},"catalog_digest":"x","total":1}', "application/json", 400)):
+        response = client.post(url, content=content, headers={**headers, "Content-Type": media})
+        assert response.status_code == status, response.text
+        assert response.headers["cache-control"] == "no-store"
+    response = client.post(url, json=body, headers={**headers, "X-Project-Id": str(UUID(int=111))})
+    assert response.status_code == 404 and response.headers["cache-control"] == "no-store"
+    response = client.post(url, json=body)
+    assert response.status_code == 400 and response.headers["cache-control"] == "no-store"
+    assert len(s.publications) == before
+    assert saved.headers["cache-control"] == reopened.headers["cache-control"] == exported.headers["cache-control"] == "no-store"
+    monkeypatch.setattr(custody.editor, "read_dxf", lambda *args:
+        (b"later drawing edit" if args[-1] == s.successor_id else s.raw_dxf, "unused"))
+    stale = client.get(saved_url + "/export")
+    assert stale.status_code == 409 and stale.headers["cache-control"] == "no-store"
+    assert stale.json()["error"]["reason_code"] == "ESTIMATE_SOURCE_CHANGED"
+    assert "priced_subtotal" not in stale.text
+    assert s.successor.intake[custody.KEY]["estimate"].encode() == exported.content
+    def no_tenant():
+        from fastapi import HTTPException
+        raise HTTPException(status_code=401, detail="private authentication detail")
+    app.dependency_overrides[deps.require_active_tenant] = no_tenant
+    response = client.get(saved_url)
+    assert response.status_code == 401 and response.headers["cache-control"] == "no-store"
+    assert "private authentication detail" not in response.text
+
+
+def test_estimate_manifest_flag_and_unavailable_read_are_not_empty(estimate_lane, monkeypatch):
+    import project_estimate_custody as custody
+    from routers import project_estimates as estimate_routes
+    s = estimate_lane
+    before = len(s.publications)
+    refused("SIP_R6_TOOL_MANIFEST_MISMATCH", lambda: custody.save_estimate(
+        s.tenant, s.project, s.drawing, s.source_id, s.card, catalog_digest="changed",
+        request_id=s.request_id, capability=s.capability))
+    monkeypatch.setenv("LEAF_SOLAR_PROJECT_RUN_ENABLED", "0")
+    refused("project_execution_disabled", s.save_estimate)
+    refused("project_execution_disabled", lambda:
+        custody.read_estimate(s.tenant, s.project, s.drawing, s.source_id))
+    monkeypatch.setenv("LEAF_SOLAR_PROJECT_RUN_ENABLED", "1")
+    def unavailable(*args, **kwargs):
+        raise custody.editor.EditorError("PROJECT_EDITOR_SOURCE_UNAVAILABLE", 503, True)
+    monkeypatch.setattr(custody.editor, "read_dxf", unavailable)
+    response = estimate_routes._dispatch(lambda:
+        custody.read_estimate(s.tenant, s.project, s.drawing, s.successor_id))
+    assert response.status_code == 503 and b'"saved":false' not in response.body
+    assert response.headers["cache-control"] == "no-store"
+    assert len(s.publications) == before
