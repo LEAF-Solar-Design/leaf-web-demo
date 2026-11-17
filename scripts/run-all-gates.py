@@ -1284,7 +1284,13 @@ def build_suites() -> List[Suite]:
                   (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_physical_corruption.py").as_posix(),
                   (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_wal_sidecars.py").as_posix(),
                   (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_schema_drift.py").as_posix(),
-                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_stdout_encoding.py").as_posix()], 368),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_stdout_encoding.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_file_swap.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_hot_journal.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_storage_classes.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_output_budget.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_impact_schema_drift.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_jsx_failure_capsule.py").as_posix()], 375),
         # W5 Rooftop workflow flow (2026-09-24, contracts G34/G34a/G34b): server/solar_workflow_flow.py,
         # the pure progression engine (every step's CanAdvance and HasDrawingPrerequisites, the L1/L2
         # gates on the host's setting, AdvanceStep, GoBack and NavigateToStep Stale marking over the
