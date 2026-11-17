@@ -1062,3 +1062,275 @@ def test_takeoff_source_argument_is_copied_and_proof_rederives_it(backend, monke
     forged.update(output_sha256=digest(forged["output"]), output_bytes=len(canonical_bytes(forged["output"])))
     with pytest.raises(ValueError, match="^graph read terminal proof rejected$"):
         takeoff_proof(backend, forged)
+
+
+# ---- source-bound estimate material (synthetic inputs only) ----
+def estimate_inputs(quantities=("1",), rates=None):
+    binding = {key: f"abcdef00-0000-4000-8000-{n:012d}" for n, key in enumerate(
+        ("organization_id", "project_id", "drawing_id", "input_version_id"), 1)}
+    binding.update(intake_sha256="a" * 64, graph_sha256="b" * 64)
+    source = {key: binding[key] for key in ("drawing_id", "project_id", "graph_sha256")}
+    source["drawing_version"] = 7
+    lines = [{"line_id": f"synthetic.line_{n}", "category": "Synthetic",
+              "description": "Inline test quantity", "unit": "ea", "quantity": quantity,
+              "status": "computed", "reason": None, "priceable": True,
+              "source": {"kind": "graph", "drawing_version": 7, "basis": "synthetic"}}
+             for n, quantity in enumerate(quantities)]
+    summary = {"schema": "leaf.solar-takeoff.v1", "maturity": "preview", "complete": False,
+               "head": None, "source": source, "settings": {"pile_spacing_m": "5.0"},
+               "counts": {"computed": len(lines), "unavailable": 0, "not_computed": 0},
+               "lines": lines}
+    rates = ["1.00"] * len(lines) if rates is None else rates
+    card = {"schema": "leaf.solar-estimate-rate-card.v1", "label": "TEST RATES",
+            "version": "synthetic v1", "currency": "USD",
+            "rates": [{"line_id": line["line_id"], "unit": "ea", "rate": rate}
+                      for line, rate in zip(lines, rates)]}
+    return summary, card, binding
+
+
+def estimate_price(inputs):
+    from solar_estimate import price_takeoff
+    return price_takeoff(inputs[0], inputs[1], source_binding=inputs[2])
+
+
+def test_estimate_mixed_rows_zero_absence_and_source_reasons():
+    inputs = estimate_inputs(("0", None, "3", "4", "5", "6", "7"))
+    summary, card, binding = inputs
+    summary["lines"][2].update(status="not-computed", reason="phase-b:E4", priceable=False)
+    summary["lines"][3]["priceable"] = False
+    card["rates"][4]["unit"] = "m"
+    card["rates"].pop(5)
+    del summary["lines"][6]["quantity"]
+    saved = copy.deepcopy(inputs)
+    value = estimate_price(inputs)
+    assert inputs == saved
+    assert value["label"] == "TEST RATES" and value["currency"] == "USD"
+    assert value["rate_version"] == card["version"]
+    assert value["priced_subtotal"] == "0.00" and value["unpriced_count"] == 6
+    assert value["complete"] is False
+    assert [line["amount"] for line in value["lines"]] == ["0.00"] + [None] * 6
+    assert [line["pricing_reason"] for line in value["lines"]] == [None, "QUANTITY_MISSING",
+        "NONCOMPUTED_LINE", "NONPRICEABLE_LINE", "UNIT_MISMATCH", "RATE_MISSING", "QUANTITY_MISSING"]
+    assert value["lines"][2]["reason"] == "phase-b:E4"
+    assert value["lines"][1]["quantity"] is None and "quantity" not in value["lines"][6]
+    assert value["source_binding"] == binding
+    assert value["takeoff"]["source"]["drawing_version"] == 7
+    value["takeoff"]["source"]["drawing_version"] = 8
+    value["source_binding"]["project_id"] = "changed"
+    assert inputs == saved
+
+
+def test_estimate_half_even_per_line_and_caller_precision():
+    from solar_estimate import encode_estimate, decode_estimate
+    inputs = estimate_inputs(("1", "1", "1", "1"), ("0.005", "0.005", "0.015", "0.025"))
+    with decimal.localcontext() as ctx:
+        ctx.prec = 2
+        ctx.rounding = decimal.ROUND_UP
+        ctx.traps[decimal.Inexact] = True
+        value = estimate_price(inputs)
+        assert [line["amount"] for line in value["lines"]] == ["0.00", "0.00", "0.02", "0.02"]
+        assert value["priced_subtotal"] == "0.04"  # Net rounding would produce 0.05.
+        raw = encode_estimate(value)
+        assert decode_estimate(raw) == value
+        assert encode_estimate(decode_estimate(raw)) == raw
+
+
+def test_estimate_bounds_and_long_exact_decimals():
+    inputs = estimate_inputs(("1000000000000", "0.12345678901234567890123456789012345678"),
+                             ("1000000000000", "0.12345678901234567890123456789012345678"))
+    with decimal.localcontext() as ctx:
+        ctx.prec = 1
+        value = estimate_price(inputs)
+    assert value["lines"][0]["amount"] == "1000000000000000000000000.00"
+    assert value["lines"][1]["amount"] == "0.02"
+    assert value["priced_subtotal"] == "1000000000000000000000000.02"
+    inputs = estimate_inputs(tuple("1" for _ in range(128)))
+    assert estimate_price(inputs)["priced_subtotal"] == "128.00"
+    inputs[0]["lines"].append(copy.deepcopy(inputs[0]["lines"][0]))
+    refused("ESTIMATE_LIMIT_EXCEEDED", estimate_price, inputs)
+
+
+@pytest.mark.parametrize("quantity", [None, True, False, 1, 1.0, "", "-1", "+1", "1e2",
+    "NaN", "Infinity", " 1", "1 ", ".5", "1.", "١", "１", "1\n", "1000000000001", "0" * 41, [], {}])
+def test_estimate_invalid_quantity_never_becomes_zero(quantity):
+    value = estimate_price(estimate_inputs((quantity,)))
+    assert value["lines"][0]["amount"] is None
+    assert value["lines"][0]["quantity"] == quantity
+    assert value["priced_subtotal"] is None and value["unpriced_count"] == 1
+    assert value["complete"] is False
+
+
+@pytest.mark.parametrize("rate", [None, True, 1, 1.0, "", "-0", "-1", "+1", "1e2", "NaN",
+    "Infinity", " 1", "1\n", ".5", "1.", "١", "1000000000001", "0" * 41, [], {}])
+def test_estimate_invalid_declared_rate_rejected(rate):
+    refused("ESTIMATE_RATE_CARD_INVALID", estimate_price, estimate_inputs(rates=(rate,)))
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), decimal.Decimal("1")])
+def test_estimate_non_json_or_nonfinite_rejected(value):
+    refused("ESTIMATE_INPUT_INVALID", estimate_price, estimate_inputs((value,)))
+    refused("ESTIMATE_INPUT_INVALID", estimate_price, estimate_inputs(rates=(value,)))
+
+
+def test_estimate_rate_changes_order_stability_and_immutability():
+    from solar_estimate import encode_estimate
+    inputs = estimate_inputs(("2", "3"), ("01.2500", "2.00"))
+    inputs[1]["version"] = "Entered version é  "
+    saved = copy.deepcopy(inputs)
+    original = estimate_price(inputs)
+    assert original["rate_card"]["rates"][0]["rate"] == "01.2500"
+    assert original["rate_version"] == "Entered version é  "
+    inputs[0]["lines"].reverse()
+    inputs[1]["rates"].reverse()
+    assert encode_estimate(estimate_price(inputs)) == encode_estimate(original)
+    inputs = copy.deepcopy(saved)
+    inputs[1]["rates"][0]["rate"] = "2.00"
+    edited = estimate_price(inputs)
+    assert edited["priced_subtotal"] != original["priced_subtotal"]
+    assert edited["rate_card_sha256"] != original["rate_card_sha256"]
+    assert edited["content_sha256"] != original["content_sha256"]
+    inputs = copy.deepcopy(saved)
+    inputs[1]["version"] = "v2"
+    edited = estimate_price(inputs)
+    assert edited["priced_subtotal"] == original["priced_subtotal"]
+    assert edited["rate_card_sha256"] != original["rate_card_sha256"]
+    assert edited["content_sha256"] != original["content_sha256"]
+    assert original["takeoff"] == saved[0] and original["rate_card"] == saved[1]
+
+
+@pytest.mark.parametrize("defect", ["duplicate-line", "empty-line", "duplicate-rate", "foreign-rate",
+    "rate-extra", "card-extra", "currency", "label", "version", "schema"])
+def test_estimate_closed_rate_card_and_inventory(defect):
+    inputs = estimate_inputs()
+    summary, card, _ = inputs
+    code = "ESTIMATE_RATE_CARD_INVALID"
+    if defect == "duplicate-line":
+        summary["lines"].append(copy.deepcopy(summary["lines"][0]))
+        code = "ESTIMATE_TAKEOFF_INVALID"
+    elif defect == "empty-line":
+        summary["lines"][0]["line_id"] = ""
+        code = "ESTIMATE_TAKEOFF_INVALID"
+    elif defect == "duplicate-rate":
+        card["rates"].append(copy.deepcopy(card["rates"][0]))
+    elif defect == "foreign-rate":
+        card["rates"][0]["line_id"] = "foreign.line"
+    elif defect == "rate-extra":
+        card["rates"][0]["extra"] = True
+    elif defect == "card-extra":
+        card["extra"] = True
+    else:
+        card[defect] = {"currency": "EUR", "label": "LIVE", "version": "x" * 121,
+                        "schema": "other"}[defect]
+    refused(code, estimate_price, inputs)
+
+
+@pytest.mark.parametrize("key", ["organization_id", "project_id", "drawing_id", "input_version_id",
+                                "intake_sha256", "graph_sha256"])
+def test_estimate_binding_is_closed_canonical_and_required(key):
+    for bad in (None, True, "", "not-a-uuid", "A" * 64,
+                "ABCDEF00-0000-4000-8000-000000000001"):
+        inputs = estimate_inputs()
+        inputs[2][key] = bad
+        refused("ESTIMATE_SOURCE_INVALID", estimate_price, inputs)
+    inputs = estimate_inputs()
+    del inputs[2][key]
+    refused("ESTIMATE_SOURCE_INVALID", estimate_price, inputs)
+
+
+def test_estimate_e1_source_must_match_but_sequence_is_distinct():
+    for key in ("drawing_id", "project_id", "graph_sha256"):
+        inputs = estimate_inputs()
+        inputs[0]["source"][key] = "c" * 64 if key == "graph_sha256" else inputs[2]["organization_id"]
+        refused("ESTIMATE_SOURCE_MISMATCH", estimate_price, inputs)
+    for version in (None, True, 0, -1, "7"):
+        inputs = estimate_inputs()
+        inputs[0]["source"]["drawing_version"] = version
+        refused("ESTIMATE_SOURCE_INVALID", estimate_price, inputs)
+    inputs = estimate_inputs()
+    inputs[2]["extra"] = True
+    refused("ESTIMATE_SOURCE_INVALID", estimate_price, inputs)
+    inputs = estimate_inputs()
+    inputs[0]["complete"] = True
+    assert estimate_price(inputs)["complete"] is True
+    inputs[1]["rates"] = []
+    value = estimate_price(inputs)
+    assert value["complete"] is False and value["priced_subtotal"] is None
+
+
+def test_estimate_canonical_reopen_rejects_tampering_even_with_new_digest():
+    from solar_estimate import encode_estimate, decode_estimate
+    original = estimate_price(estimate_inputs(("2", "3"), ("1.25", "2")))
+    raw = encode_estimate(original)
+    assert decode_estimate(raw) == decode_estimate(raw.decode("utf-8")) == original
+    assert raw == json.dumps(original, sort_keys=True, separators=(",", ":"),
+                             ensure_ascii=False, allow_nan=False).encode("utf-8")
+    for defect in ("amount", "version", "subtotal", "inventory", "complete", "count", "hash", "type"):
+        value = copy.deepcopy(original)
+        if defect == "amount":
+            value["lines"][0]["amount"] = "0.00"
+        elif defect == "version":
+            value["rate_card"]["version"] = "tampered"
+        elif defect == "subtotal":
+            value["priced_subtotal"] = "0.00"
+        elif defect == "inventory":
+            value["lines"].pop()
+        elif defect == "complete":
+            value["complete"] = True
+        elif defect == "count":
+            value["unpriced_count"] = 1
+        elif defect == "type":
+            value["unpriced_count"] = False
+        else:
+            value["takeoff_sha256"] = "0" * 64
+        encoded = json.dumps(value).encode()
+        refused("ESTIMATE_DIGEST_MISMATCH", decode_estimate, encoded)
+        payload = {k: v for k, v in value.items() if k != "content_sha256"}
+        value["content_sha256"] = hashlib.sha256(json.dumps(payload, sort_keys=True,
+            separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+        refused("ESTIMATE_MATERIAL_MISMATCH", decode_estimate, json.dumps(value).encode())
+        refused("ESTIMATE_MATERIAL_MISMATCH", encode_estimate, value)
+
+
+def test_estimate_decode_duplicate_escaped_keys_and_bounds():
+    from solar_estimate import decode_estimate, encode_estimate
+    raw = encode_estimate(estimate_price(estimate_inputs()))
+    refused("ESTIMATE_DUPLICATE_KEY", decode_estimate,
+            raw.replace(b'"currency":"USD"', b'"currency":"USD","currenc\\u0079":"USD"', 1))
+    for raw in (b'{"x":NaN}', b'{"x":Infinity}', b'{"x":-Infinity}', b'\xff', b'{', b'[]'):
+        with pytest.raises(GraphValidationError) as error:
+            decode_estimate(raw)
+        assert error.value.code.startswith("ESTIMATE_")
+    refused("ESTIMATE_LIMIT_EXCEEDED", decode_estimate, b" " * 262145)
+    inputs = estimate_inputs()
+    inputs[0]["lines"][0]["description"] = "x" * 262145
+    refused("ESTIMATE_LIMIT_EXCEEDED", estimate_price, inputs)
+
+
+def test_estimate_partial_positive_subtotal_and_grouping_preserved():
+    inputs = estimate_inputs(("2", "-12.500", None), ("3.125", "1", "1"))
+    inputs[0]["lines"][1]["priceable"] = False  # E1 earthwork net may be negative.
+    grouping = ["gauge B", "gauge A"]
+    inputs[0]["lines"][0]["source"]["grouping"] = grouping
+    value = estimate_price(inputs)
+    assert value["priced_subtotal"] == "6.25" and value["unpriced_count"] == 2
+    assert value["complete"] is False
+    assert value["takeoff"]["lines"][0]["source"]["grouping"] == grouping
+    assert value["lines"][1]["quantity"] == "-12.500"
+    assert value["lines"][1]["amount"] is None
+
+
+def test_estimate_decode_schema_binding_and_digest_validation():
+    from solar_estimate import decode_estimate
+    original = estimate_price(estimate_inputs())
+    for key in ("content_sha256", "takeoff_sha256", "rate_card_sha256"):
+        value = copy.deepcopy(original)
+        value[key] = "A" * 64
+        refused("ESTIMATE_DIGEST_INVALID", decode_estimate, json.dumps(value))
+    value = dict(original, schema="other")
+    refused("ESTIMATE_SCHEMA_INVALID", decode_estimate, json.dumps(value))
+    value = copy.deepcopy(original)
+    value["source_binding"]["organization_id"] = "not-a-uuid"
+    payload = {k: v for k, v in value.items() if k != "content_sha256"}
+    value["content_sha256"] = hashlib.sha256(json.dumps(payload, sort_keys=True,
+        separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+    refused("ESTIMATE_SOURCE_INVALID", decode_estimate, json.dumps(value))

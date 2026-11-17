@@ -749,7 +749,7 @@ const PROJECT_SOLAR_SUPPORTED_TOOLS = new Set([
   'solar-settings', 'solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
   'solar-string-conductors', 'solar-assign-equipment', 'solar-panels-from-drawing', 'solar-panel-groups',
   'solar-homeruns', 'solar-schedule', 'solar-feeders', 'solar-string-data',
-  'solar-electrical-schedules', 'solar-cable-export',
+  'solar-electrical-schedules', 'solar-cable-export', 'solar-takeoff',
   'solar-solaredge-accept', 'solar-solaredge-tracking-read',
 ])
 
@@ -5990,6 +5990,8 @@ export default function App() {
                   GraphForm={ProjectSolarGraphForm}
                   newProjectIntentKey={mintCorrelationId}
                   onProjectSubmit={projectSolarRuntime.onProjectSubmit}
+                  onEstimatePublished={(receipt, captured, isCurrent) => seatProjectDrawingPublication(workspaceController, receipt,
+                    () => isCurrent() && workspaceController.getSnapshot().canonicalVersionId === captured.input_version_id)}
                   submissionSignal={projectSolarRuntime.submissionSignal}
                   openTool={projectSolarRuntime.openTool}
                   onOpenTool={onOpenProjectSolarTool}

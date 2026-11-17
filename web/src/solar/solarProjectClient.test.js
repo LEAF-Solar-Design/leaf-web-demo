@@ -206,6 +206,95 @@ describe('scope-bound engineering project files', () => {
   })
 })
 
+const estimateCard = { schema: 'leaf.solar-estimate-rate-card.v1', label: 'TEST RATES', currency: 'USD',
+  version: 'TEST-1', rates: [{ line_id: 'panels', unit: 'ea', rate: '1.005' }] }
+function estimateFixture() {
+  const line = { line_id: 'panels', category: 'equipment', description: 'Panels', unit: 'ea', quantity: '2.000',
+    status: 'computed', reason: null, priceable: true, source: {} }
+  return { schema: 'leaf.solar-estimate.v1', label: 'TEST RATES', currency: 'USD', rate_version: 'TEST-1',
+    complete: true, priced_subtotal: '2.01', unpriced_count: 0, content_sha256: 'a'.repeat(64),
+    takeoff_sha256: 'b'.repeat(64), rate_card_sha256: 'c'.repeat(64),
+    source_binding: { ...identity, input_version_id: V, graph_sha256: 'd'.repeat(64), intake_sha256: 'e'.repeat(64) },
+    takeoff: { schema: 'leaf.solar-takeoff.v1', complete: true, source: { project_id: P, drawing_id: D,
+      graph_sha256: 'd'.repeat(64), drawing_version: 1 }, lines: [line] }, rate_card: estimateCard,
+    lines: [{ ...line, rate: '1.005', amount: '2.01', pricing_reason: null }] }
+}
+function estimateReceipt() {
+  return { result: { schema: 'leaf.project-estimate.v1', saved: true, content_sha256: 'a'.repeat(64),
+    estimate: estimateFixture(), publication: { ...identity, parent_version_id: V, request_id: J,
+      drawing_version: { version_id: J, org_id: O, project_id: P, drawing_id: D } } } }
+}
+
+describe('canonical estimate custody', () => {
+  const save = { requestId: J, rateCard: estimateCard, catalogDigest: digest }
+  it('requires a held checkout, then forwards only the copied rate card and catalog with private proof', async () => {
+    const h = setup(acquired())
+    expect(await h.client.saveEstimate(save)).toMatchObject({ ok: false, reason: 'SIP_R7_CHECKOUT_NOT_HELD' })
+    expect(h.fetchImpl).not.toHaveBeenCalled()
+    await h.client.acquireCheckout()
+    h.fetchImpl.mockResolvedValueOnce(response(estimateReceipt()))
+    expect((await h.client.saveEstimate(save)).ok).toBe(true)
+    expect(url(h.fetchImpl)).toContain(`/versions/${V}/estimates`)
+    expect(init(h.fetchImpl)).toMatchObject({ method: 'POST', cache: 'no-store', headers: {
+      Authorization: 'Bearer synthetic', 'X-Org-Id': O, 'X-Project-Id': P,
+      'X-Checkout-Capability': token(), 'Idempotency-Key': J } })
+    expect(JSON.parse(init(h.fetchImpl).body)).toEqual({ rate_card: estimateCard, catalog_digest: digest })
+    expect(await h.client.saveEstimate({ ...save, requestId: 'not-a-uuid' })).toMatchObject({ ok: false })
+    expect(await h.client.saveEstimate({ ...save, rateCard: { ...estimateCard, version: 'x'.repeat(262144) } })).toMatchObject({ ok: false })
+  })
+  it.each(['parent', 'request', 'child', 'organization', 'digest', 'source'])('refuses a mismatching %s receipt', async (field) => {
+    const h = setup(acquired())
+    await h.client.acquireCheckout()
+    const receipt = estimateReceipt(), r = receipt.result
+    if (field === 'parent') r.publication.parent_version_id = J
+    if (field === 'request') r.publication.request_id = V
+    if (field === 'child') r.publication.drawing_version.version_id = V
+    if (field === 'organization') r.publication.drawing_version.org_id = J
+    if (field === 'digest') r.content_sha256 = 'f'.repeat(64)
+    if (field === 'source') r.estimate.source_binding.input_version_id = J
+    h.fetchImpl.mockResolvedValueOnce(response(receipt))
+    expect(await h.client.saveEstimate(save)).toMatchObject({ ok: false, reason: 'SIP_R7_RESPONSE_INVALID' })
+  })
+  it('binds reads to the selected successor while retaining the origin parent', async () => {
+    const result = { ...estimateReceipt().result, ...identity, input_version_id: J }
+    const h = setup({ result })
+    h.client.setScope({ ...binding, input_version_id: J }, 'session-1')
+    expect((await h.client.readEstimate()).ok).toBe(true)
+    h.client.setScope(binding, 'session-1')
+    expect((await h.client.readEstimate()).ok).toBe(false)
+    h.fetchImpl.mockResolvedValueOnce(response({ result: { schema: 'leaf.project-estimate.v1', saved: false,
+      ...identity, input_version_id: V } }))
+    expect(await h.client.readEstimate()).toMatchObject({ ok: true, data: { result: { saved: false } } })
+  })
+  it('refuses late save success after a source switch', async () => {
+    const h = setup(acquired()), pending = deferred()
+    await h.client.acquireCheckout()
+    h.fetchImpl.mockReturnValueOnce(pending.promise)
+    const saving = h.client.saveEstimate(save)
+    h.client.setScope({ ...binding, input_version_id: J }, 'session-1')
+    pending.resolve(response(estimateReceipt()))
+    expect(await saving).toMatchObject({ ok: false, reason: 'SIP_R7_SCOPE_STALE' })
+  })
+  it('exports exact UTF8 bytes with a quoted matching ETag without checkout', async () => {
+    const h = setup(), raw = ' \n' + JSON.stringify(estimateFixture()) + '\n'
+    h.fetchImpl.mockResolvedValueOnce(new Response(raw, { headers: { ETag: '"' + 'a'.repeat(64) + '"' } }))
+    const outcome = await h.client.exportEstimate({ contentSha256: 'a'.repeat(64) })
+    expect(outcome.ok).toBe(true)
+    expect(new TextDecoder().decode(outcome.data.bytes)).toBe(raw)
+    expect(init(h.fetchImpl).headers['X-Checkout-Capability']).toBeUndefined()
+  })
+  it('cancels oversized export streams and refuses changed caller guards and ETags', async () => {
+    const h = setup(), cancel = vi.fn()
+    h.fetchImpl.mockResolvedValueOnce({ ok: true, status: 200, headers: new Headers({ ETag: '"' + 'a'.repeat(64) + '"' }),
+      body: new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array(262145)) }, cancel }) })
+    expect((await h.client.exportEstimate({ contentSha256: 'a'.repeat(64) })).ok).toBe(false)
+    expect(cancel).toHaveBeenCalled()
+    h.fetchImpl.mockResolvedValueOnce(new Response(JSON.stringify(estimateFixture()), { headers: { ETag: '"wrong"' } }))
+    expect((await h.client.exportEstimate({ contentSha256: 'a'.repeat(64) })).ok).toBe(false)
+    expect((await h.client.exportEstimate({ contentSha256: 'a'.repeat(64), isCurrent: () => false })).ok).toBe(false)
+  })
+})
+
 it('requests opt-in frame preparation and rejects mismatched frame/revision metadata', async () => {
   const prepared = { ...contextData, intake: { solar_design_graph: { rev: 4 }, solar_design_graph_sha256: 'a'.repeat(64) },
     solve_preparation: { schema: 'leaf.project-solve-preparation.v1', available: true, graph_revision: 4,
