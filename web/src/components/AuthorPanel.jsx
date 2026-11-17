@@ -492,7 +492,7 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, onStag
     <div className="author-panel author-inner">
       <p className="panel-sub">Describe a CAD tool in plain English. Leaf stages it for review before publication.</p>
       {stageActivity?.lookupRequest && !stageActivity.pointer && !authored && (
-        <div className="customization-state">
+        <div className="customization-state author-request-recovery">
           <label>Existing authoring request ID
             <input value={recoveryId} onChange={(event) => setRecoveryId(event.target.value)} />
           </label>
