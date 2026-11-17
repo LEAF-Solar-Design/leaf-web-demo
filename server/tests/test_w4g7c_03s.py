@@ -13,6 +13,12 @@ BASE_SHA = "1" * 64
 MLEADER_LINE = b"ADDMLEADER|0|Standard|0.000,0.000,0.000|5.000,4.000,0.000|Valve\n"
 
 
+def _without_dependency_report(parsed):
+    """parse_dxf_bytes adds a derived dependency_report (X04 #3129); the round-trip contract covers the intake itself."""
+    assert isinstance(parsed.get("dependency_report"), dict)
+    return {key: value for key, value in parsed.items() if key != "dependency_report"}
+
+
 def _base():
     return {"layers": ["0", "SITE"], "polylines": [], "mlstyles": [{
         "name": "Standard", "textstyle": "Standard", "height": 0.18,
@@ -317,11 +323,11 @@ def test_mleader_dxf_round_trip_probe_and_second_style():
     from intake_dxf import intake_to_dxf
 
     intake = _mleader_dxf_fixture()
-    assert parse_dxf_bytes(intake_to_dxf(intake), source_name="probe.dxf") == intake
+    assert _without_dependency_report(parse_dxf_bytes(intake_to_dxf(intake), source_name="probe.dxf")) == intake
     intake["mlstyles"].append({"name": "Two segments", "textstyle": "Notes",
                                "height": 0.12345, "arrow": 0.23456,
                                "dogleg": 0.34567, "gap": 0.04567, "segments": 2})
-    assert parse_dxf_bytes(intake_to_dxf(intake), source_name="probe.dxf") == intake
+    assert _without_dependency_report(parse_dxf_bytes(intake_to_dxf(intake), source_name="probe.dxf")) == intake
 
 
 def test_mleader_dxf_probe_group_sequence_and_references():
@@ -397,9 +403,9 @@ def test_mleader_dxf_only_when_and_styles_without_entities():
 
     blank = {"dwg": "probe.dxf", "layers": ["0"], "polylines": [],
              "memberEvidenceCovered": True}
-    assert parse_dxf_bytes(intake_to_dxf(blank), source_name="probe.dxf") == blank
+    assert _without_dependency_report(parse_dxf_bytes(intake_to_dxf(blank), source_name="probe.dxf")) == blank
     styles = {**blank, "mlstyles": _base()["mlstyles"]}
-    assert parse_dxf_bytes(intake_to_dxf(styles), source_name="probe.dxf") == styles
+    assert _without_dependency_report(parse_dxf_bytes(intake_to_dxf(styles), source_name="probe.dxf")) == styles
 
 
 def test_mleader_dxf_preserves_vertex_order_and_inspection_precision():
@@ -409,9 +415,9 @@ def test_mleader_dxf_preserves_vertex_order_and_inspection_precision():
     intake = _mleader_dxf_fixture()
     intake["mleaders"][0]["pts"].insert(1, [2.123, 3, 0])
     intake["mleaders"][0]["height"] = 0.12345
-    assert parse_dxf_bytes(intake_to_dxf(intake), source_name="probe.dxf") == intake
+    assert _without_dependency_report(parse_dxf_bytes(intake_to_dxf(intake), source_name="probe.dxf")) == intake
     raw = intake_to_dxf(intake).replace(b"4.091\n", b"4.09147\n")
-    assert parse_dxf_bytes(raw, source_name="probe.dxf") == intake
+    assert _without_dependency_report(parse_dxf_bytes(raw, source_name="probe.dxf")) == intake
 
 
 def test_mleader_dxf_points_share_total_bound(monkeypatch):
