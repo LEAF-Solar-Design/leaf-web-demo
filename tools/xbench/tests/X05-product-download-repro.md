@@ -15,6 +15,28 @@ separately reads duplicate panel IDs, foreign string references and missing fram
 power, downloads each five-row comparison, and repairs each through a saved reread. No auth,
 video, real drawings, environment/secret reads, staging, or uploads are involved.
 
+The same browser then repeats keyboard entry/export at a 390 by 844 viewport,
+at 100% and at 200% using explicit local CSS `zoom: 2` on the document element.
+This is CSS layout zoom emulation, not native browser zoom or a DPR test; the
+computed zoom is asserted and recorded. Maximum accepted count/decimal report
+lengths exercise horizontal input scrolling and the panel's keyboard table
+scroller. Each replay retains all five CSV rows, normalized DOM parity, focused
+field screenshots and hashes. Inspect the retained narrow/zoom images before
+acceptance. The final proof records browser/context/server cleanup after it runs.
+
+The stalled-read case waits for the product's actual 20-second timeout (no clock
+override). It checks the aborted signal and retry controls, reads distinct retry
+evidence with fresh reports, then settles the old promise last. Both actual CSV
+downloads must contain only the retry's five rows; timeout and recovery screenshots
+and source/artifact hashes remain in the same cleanup-bearing proof.
+
+Finally, the replay switches immutable drawing bindings and matching client
+snapshots through normal React props while an old drawing read is deferred.
+It records the aborted old request, resolves its distinct revision/totals, and
+checks that no old evidence or drafts become accepted. The second drawing needs
+an explicit read and fresh reports before its exact five-row CSV can download.
+This uses the same mounted panel, with no project-state reset or forced remount.
+
 ```python
 import csv
 import copy
@@ -49,26 +71,60 @@ graph = dict(rev=9, panels=[dict(id=p) for p in panels],
                         dict(id=entity('inverter', 2), equipment_type='combiner_box')])
 response = dict(ok=True, data=dict(context=binding, intake=dict(
     solar_design_graph=graph, solar_design_graph_sha256='a' * 64)))
+next_binding = dict(binding, drawing_id='55555555-5555-4555-8555-555555555555',
+                    input_version_id='66666666-6666-4666-8666-666666666666')
+next_panels = [entity('panel', n) for n in [11, 12, 13]]
+next_graph = dict(rev=42, panels=[dict(id=p) for p in next_panels],
+                  frames=[dict(id=entity('frame', 11), panel_refs=next_panels, module_power_watts=500)],
+                  strings=[dict(id=entity('string', 11), module_count=2, ordered_panel_refs=next_panels[:2]),
+                           dict(id=entity('string', 12), module_count=1, ordered_panel_refs=next_panels[2:])],
+                  inverters=[dict(id=entity('inverter', n), equipment_type='central_inverter') for n in [11, 12]] +
+                            [dict(id=entity('inverter', 13), equipment_type='combiner_box')])
+next_response = dict(ok=True, data=dict(context=next_binding, intake=dict(
+    solar_design_graph=next_graph, solar_design_graph_sha256='b' * 64)))
 entry = artifact / 'entry.jsx'
 entry.write_text(
     'import React from ' + json.dumps((repo / 'web/node_modules/react/index.js').as_posix()) + ';\n'
     'import {createRoot} from ' + json.dumps((repo / 'web/node_modules/react-dom/client.js').as_posix()) + ';\n'
     'import Panel from ' + json.dumps(panel.as_posix()) + ';\n'
-    'const binding = ' + json.dumps(binding) + ';\n'
+    'const binding = Object.freeze(' + json.dumps(binding) + ');\n'
+    'const nextBinding = Object.freeze(' + json.dumps(next_binding) + ');\n'
+    'const nextResponse = ' + json.dumps(next_response) + ';\n'
     'const response = ' + json.dumps(response) + ';\n' + '''
 let attempts = 0;
+let deferOld = false, settleOld, oldSignal;
+window.scopeProof = {newReads: 0, oldSettled: false};
+window.deferOldRead = () => { deferOld = true; };
+window.readAttempts = () => attempts;
+window.resolveOldRead = () => { settleOld(); window.scopeProof.oldSettled = true; };
 window.setSavedGraph = graph => { response.data.intake.solar_design_graph = structuredClone(graph); };
 const client = {
   getSnapshot: () => ({binding, authorityKey: 'synthetic'}),
   subscribe: () => () => {},
-  readContext: async () => {
+  readContext: async ({signal}) => {
     if (++attempts === 1) throw new Error('synthetic private read error');
+    if (deferOld) {
+      deferOld = false;
+      oldSignal = signal;
+      const captured = structuredClone(response);
+      return new Promise(resolve => { settleOld = () => resolve(captured); });
+    }
     return response;
   },
 };
-createRoot(document.getElementById('root')).render(
-  <Panel solarBinding={binding} authorityKey="synthetic"
-    projectClient={client} isCurrent={() => true} />);
+const nextClient = {
+  getSnapshot: () => ({binding: nextBinding, authorityKey: 'synthetic-next'}),
+  subscribe: () => () => {},
+  readContext: async () => { window.scopeProof.newReads++; return nextResponse; },
+};
+const root = createRoot(document.getElementById('root'));
+const isCurrent = () => true;
+const render = (solarBinding, authorityKey, projectClient) => root.render(
+  <Panel solarBinding={solarBinding} authorityKey={authorityKey}
+    projectClient={projectClient} isCurrent={isCurrent} />);
+window.switchDrawing = () => render(nextBinding, 'synthetic-next', nextClient);
+window.oldReadAborted = () => oldSignal?.aborted === true;
+render(binding, 'synthetic', client);
 ''', encoding='utf-8')
 command = [str(repo / 'web/node_modules/@esbuild/win32-x64/esbuild.exe'), str(entry),
            '--bundle', '--format=esm', '--jsx=automatic',
@@ -83,6 +139,7 @@ if (repo / 'web/public/fonts').is_dir():
     shutil.copytree(repo / 'web/public/fonts', artifact / 'fonts')
 (artifact / 'index.html').write_text('''<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><title>X05 synthetic product download</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="/styles.css"></head><body>
 <main id="root"></main><script type="module" src="/app.js"></script></body></html>''', encoding='utf-8')
 
@@ -114,10 +171,16 @@ try:
     page.keyboard.press('Enter')
     expect(page.get_by_text('Saved design revision 9.', exact=True)).to_be_visible()
     labels = ['Panels', 'Optimizers', 'Inverters', 'Strings', 'kW DC']
+    def tab_to(target):
+        for _ in range(20):
+            page.keyboard.press('Tab')
+            if target.evaluate('(node) => node === document.activeElement'):
+                expect(target).to_be_focused()
+                return
+        raise AssertionError('Control was not reachable by keyboard')
     for label, value in zip(labels, ['2', '1', '2', '1', '0.8']):
-        page.keyboard.press('Tab')
         field = page.get_by_role('textbox', name=label + ' engineering report/BOM', exact=True)
-        expect(field).to_be_focused()
+        tab_to(field)
         page.keyboard.insert_text(value)
     page.keyboard.press('Tab')
     download_button = page.get_by_role('button', name='Download CSV', exact=True)
@@ -218,13 +281,228 @@ try:
         assert (artifact / recovery['csv']).read_bytes() == csv_path.read_bytes()
         cases.append(dict(name=name, affected_metrics=[actual[i]['metric'] for i in sorted(affected)],
                           malformed=broken, repaired=recovery, explicit_saved_reread=True))
+
+    narrow_replays = []
+    maximum_reports = ['9007199254740991'] * 4 + ['999999999999999999.999999999999999999']
+    for zoom in [1, 2]:
+        name = f'narrow-css-zoom-{zoom}'
+        page.set_viewport_size({'width': 390, 'height': 844})
+        page.evaluate('(zoom) => { document.documentElement.style.zoom = String(zoom); }', zoom)
+        computed_zoom = page.evaluate('Number(getComputedStyle(document.documentElement).zoom)')
+        assert computed_zoom == zoom
+        tab_to(read)
+        page.keyboard.press('Enter')
+        expect(page.get_by_text(f"Saved design revision {repaired['rev']}.", exact=True)).to_be_visible()
+        field_proofs = []
+        for index, (label, value) in enumerate(zip(labels, maximum_reports)):
+            field = page.get_by_role('textbox', name=label + ' engineering report/BOM', exact=True)
+            tab_to(field)
+            page.keyboard.press('Control+A')
+            page.keyboard.insert_text(value)
+            expect(field).to_have_value(value)
+            expect(field).to_have_attribute('aria-invalid', 'false')
+            # Tab focus must reveal the whole control inside every clipping ancestor.
+            geometry = field.evaluate('''node => {
+              const r = node.getBoundingClientRect();
+              let left = 0, right = innerWidth, top = 0, bottom = innerHeight;
+              for (let p = node.parentElement; p; p = p.parentElement) {
+                const s = getComputedStyle(p), b = p.getBoundingClientRect();
+                if (/(auto|scroll|hidden|clip)/.test(s.overflowX)) {
+                  left = Math.max(left, b.left); right = Math.min(right, b.right);
+                }
+                if (/(auto|scroll|hidden|clip)/.test(s.overflowY)) {
+                  top = Math.max(top, b.top); bottom = Math.min(bottom, b.bottom);
+                }
+              }
+              return {left: r.left, right: r.right, top: r.top, bottom: r.bottom,
+                revealed: r.left >= left - 1 && r.right <= right + 1 &&
+                  r.top >= top - 1 && r.bottom <= bottom + 1};
+            }''')
+            assert geometry['revealed'], (name, label, geometry)
+            page.keyboard.press('Home')
+            assert field.evaluate('(node) => node.selectionStart') == 0
+            page.screenshot(path=str(artifact / f'{name}-field-{index}-start.png'))
+            page.keyboard.press('End')
+            assert field.evaluate('(node) => node.selectionStart') == len(value)
+            page.screenshot(path=str(artifact / f'{name}-field-{index}-end.png'))
+            field_proofs.append(dict(label=label, value=value, keyboard_reached=True, geometry=geometry))
+        tab_to(download_button)
+        expect(download_button).to_be_in_viewport()
+        rendered = visible_rows()
+        with page.expect_download() as pending:
+            page.keyboard.press('Enter')
+        download = pending.value
+        assert download.failure() is None
+        path = artifact / (name + '.csv')
+        download.save_as(path)
+        with path.open(newline='', encoding='utf-8') as stream:
+            downloaded = list(csv.DictReader(stream))
+        assert len(downloaded) == 5 and downloaded == rendered
+        assert [row['oracle'] for row in downloaded] == maximum_reports
+        assert [row['studio'] for row in downloaded] == ['2', '', '1', '1', '0.8']
+        assert [row['delta'] for row in downloaded] == [
+            '-9007199254740989', '', '-9007199254740990', '-9007199254740990',
+            '-999999999999999999.199999999999999999']
+        assert [row['verdict'] for row in downloaded] == ['FAIL', 'UNREADABLE', 'FAIL', 'FAIL', 'FAIL']
+        page.screenshot(path=str(artifact / (name + '.png')), full_page=True)
+        scroller = page.get_by_role('region', name='Reconciliation comparison table', exact=True)
+        tab_to(scroller)
+        for _ in range(60):
+            page.keyboard.press('ArrowLeft')
+        page.screenshot(path=str(artifact / (name + '-table-left.png')))
+        for _ in range(60):
+            page.keyboard.press('ArrowRight')
+        scroll = scroller.evaluate('(node) => ({left: node.scrollLeft, width: node.clientWidth, content: node.scrollWidth})')
+        assert scroll['content'] <= scroll['width'] + 1 or scroll['left'] > 0
+        page.screenshot(path=str(artifact / (name + '-table-right.png')))
+        overflow = page.evaluate('''() => ({viewport: innerWidth,
+          body: document.body.getBoundingClientRect().width,
+          bodyScroll: document.body.scrollWidth, bodyClient: document.body.clientWidth,
+          pageScroll: document.scrollingElement.scrollWidth, pageClient: document.scrollingElement.clientWidth})''')
+        assert overflow['bodyScroll'] <= overflow['bodyClient'] + 1, overflow
+        assert overflow['pageScroll'] <= overflow['pageClient'] + 1, overflow
+        narrow_replays.append(dict(name=name, viewport=dict(width=390, height=844),
+                                   zoom_method='document.documentElement.style.zoom (CSS layout emulation)',
+                                   computed_zoom=computed_zoom, fields=field_proofs, scroll=scroll,
+                                   overflow=overflow, visible=rendered, downloaded=downloaded, csv=path.name,
+                                   keyboard_download=True))
+    # Real product timeout: no timer interception or virtual elapsed-time claim.
+    page.set_viewport_size({'width': 1440, 'height': 900})
+    page.evaluate('document.documentElement.style.zoom = "1"')
+    timeout_old = copy.deepcopy(graph)
+    timeout_old['rev'] = 81
+    timeout_old['frames'][0]['module_power_watts'] = 700
+    timeout_retry = copy.deepcopy(next_graph)
+    timeout_retry['rev'] = 82
+    timeout_old_drafts = ['02', '01', '01', '01', '1.400']
+    for label, value in zip(labels, timeout_old_drafts):
+        page.get_by_role('textbox', name=label + ' engineering report/BOM', exact=True).fill(value)
+    attempts_before = page.evaluate('window.readAttempts()')
+    page.evaluate('(graph) => { window.setSavedGraph(graph); window.deferOldRead(); }', timeout_old)
+    read.click()
+    expect(page.get_by_text('Reading saved design.', exact=True)).to_be_visible()
+    expect(read).to_be_disabled()
+    expect(download_button).to_be_disabled()
+    assert not page.evaluate('window.oldReadAborted()')
+    expect(page.get_by_role('alert')).to_have_text(
+        'Saved design read timed out. Try reading it again.', timeout=30000)
+    assert page.evaluate('window.oldReadAborted()')
+    expect(read).to_be_enabled()
+    expect(download_button).to_be_disabled()
+    expect(page.get_by_text('Saved design revision 81.', exact=True)).to_have_count(0)
+    for label, value in zip(labels, timeout_old_drafts):
+        field = page.get_by_role('textbox', name=label + ' engineering report/BOM', exact=True)
+        expect(field).to_be_enabled()
+        expect(field).to_have_value(value)
+    page.screenshot(path=str(artifact / 'stalled-read-timeout.png'), full_page=True)
+    retry_drafts = ['003', '00', '02', '02', '1.500']
+    for label, value in zip(labels, retry_drafts):
+        page.get_by_role('textbox', name=label + ' engineering report/BOM', exact=True).fill(value)
+    page.evaluate('(graph) => window.setSavedGraph(graph)', timeout_retry)
+    read.click()
+    expect(page.get_by_text('Saved design revision 82.', exact=True)).to_be_visible()
+    expect(page.get_by_role('alert')).to_have_count(0)
+    retry_comparison = capture_comparison('timeout-retry')
+    expected_retry = [dict(zip(['metric', 'studio', 'oracle', 'delta', 'verdict'], row)) for row in [
+        ['panels', '3', '003', '0', 'PASS'],
+        ['optimizers', '', '00', '', 'UNREADABLE'],
+        ['inverters', '2', '02', '0', 'PASS'],
+        ['strings', '2', '02', '0', 'PASS'],
+        ['kw_dc', '1.5', '1.500', '0', 'PASS'],
+    ]]
+    assert retry_comparison['downloaded'] == expected_retry
+    page.evaluate('window.resolveOldRead()')
+    page.evaluate('() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+    expect(page.get_by_text('Saved design revision 81.', exact=True)).to_have_count(0)
+    expect(page.get_by_text('Saved design revision 82.', exact=True)).to_be_visible()
+    expect(page.get_by_role('alert')).to_have_count(0)
+    expect(read).to_be_enabled()
+    assert page.evaluate('window.oldReadAborted()')
+    assert page.evaluate('window.readAttempts()') == attempts_before + 2
+    late_comparison = capture_comparison('timeout-old-settled-last')
+    assert late_comparison['downloaded'] == expected_retry
+    assert (artifact / retry_comparison['csv']).read_bytes() == (artifact / late_comparison['csv']).read_bytes()
+    timeout_recovery = dict(timeout_method='actual product 20000ms timer; no clock override',
+                            old_revision=81, retry_revision=82, old_request_aborted=True,
+                            old_settled_last=True, read_attempts=2, old_drafts=timeout_old_drafts,
+                            retry_drafts=retry_drafts, retry=retry_comparison, late=late_comparison)
+
+    # Change props/client scope on the same mounted panel during an old read.
+    page.set_viewport_size({'width': 1440, 'height': 900})
+    page.evaluate('document.documentElement.style.zoom = "1"')
+    old_deferred = copy.deepcopy(graph)
+    old_deferred['rev'] = 91
+    old_deferred['frames'][0]['module_power_watts'] = 700
+    old_drafts = ['02', '01', '02', '01', '0.800']
+    for label, value in zip(labels, old_drafts):
+        page.get_by_role('textbox', name=label + ' engineering report/BOM', exact=True).fill(value)
+    page.evaluate('(graph) => { window.setSavedGraph(graph); window.deferOldRead(); }', old_deferred)
+    downloads_after_switch = []
+    page.on('download', lambda download: downloads_after_switch.append(download.suggested_filename))
+    read.click()
+    expect(page.get_by_text('Reading saved design.', exact=True)).to_be_visible()
+    expect(download_button).to_be_disabled()
+    page.evaluate('window.switchDrawing()')
+    expect(read).to_be_enabled()
+    page.wait_for_function('window.oldReadAborted()')
+    for label in labels:
+        expect(page.get_by_role('textbox', name=label + ' engineering report/BOM', exact=True)).to_have_value('')
+    expect(download_button).to_be_disabled()
+    assert page.evaluate('window.scopeProof.newReads') == 0
+    page.evaluate('window.resolveOldRead()')
+    # Let the old promise continuation and any React work finish before checking isolation.
+    page.evaluate('() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+    expect(page.get_by_text('Saved design revision 91.', exact=True)).to_have_count(0)
+    expect(page.get_by_text('Saved design revision 42.', exact=True)).to_have_count(0)
+    before_new_read = visible_rows()
+    assert all(row['studio'] == row['oracle'] == row['delta'] == '' and row['verdict'] == 'UNREADABLE'
+               for row in before_new_read)
+    assert page.evaluate('window.scopeProof.newReads') == 0
+    assert downloads_after_switch == []
+    page.screenshot(path=str(artifact / 'drawing-switch-old-settled.png'), full_page=True)
+    read.click()
+    expect(page.get_by_text('Saved design revision 42.', exact=True)).to_be_visible()
+    expect(download_button).to_be_disabled()
+    fresh_without_reports = visible_rows()
+    assert [row['studio'] for row in fresh_without_reports] == ['3', '', '2', '2', '1.5']
+    assert all(row['oracle'] == row['delta'] == '' and row['verdict'] == 'UNREADABLE'
+               for row in fresh_without_reports)
+    assert downloads_after_switch == []
+    page.screenshot(path=str(artifact / 'drawing-switch-fresh-read.png'), full_page=True)
+    new_drafts = ['003', '00', '02', '02', '1.500']
+    for index, (label, value) in enumerate(zip(labels, new_drafts)):
+        page.get_by_role('textbox', name=label + ' engineering report/BOM', exact=True).fill(value)
+        if index < 3:
+            expect(download_button).to_be_disabled()
+    expect(download_button).to_be_enabled()
+    isolated = capture_comparison('drawing-switch-new-only')
+    expected_new = [dict(zip(['metric', 'studio', 'oracle', 'delta', 'verdict'], row)) for row in [
+        ['panels', '3', '003', '0', 'PASS'],
+        ['optimizers', '', '00', '', 'UNREADABLE'],
+        ['inverters', '2', '02', '0', 'PASS'],
+        ['strings', '2', '02', '0', 'PASS'],
+        ['kw_dc', '1.5', '1.500', '0', 'PASS'],
+    ]]
+    assert isolated['downloaded'] == expected_new
+    assert downloads_after_switch == ['engineering-reconciliation.csv']
+    assert page.evaluate('window.scopeProof') == dict(newReads=1, oldSettled=True)
+    isolation = dict(old_binding=binding, new_binding=next_binding, old_revision=91, new_revision=42,
+                     old_request_aborted=page.evaluate('window.oldReadAborted()'),
+                     old_response_settled=True, before_new_read=before_new_read,
+                     fresh_without_reports=fresh_without_reports, old_drafts=old_drafts,
+                     new_drafts=new_drafts, new_read_count=1, downloads=downloads_after_switch,
+                     comparison=isolated)
     def digest(path):
         return hashlib.sha256(path.read_bytes()).hexdigest()
     inputs = json.loads((artifact / 'meta.json').read_text(encoding='utf-8'))['inputs']
     sources = {(repo / name).resolve() for name in inputs}
     sources.add(repo / 'web/src/styles.css')
+    sources.add(repo / 'tools/xbench/tests/X05-product-download-repro.md')
     proof = dict(synthetic=True, rows_matched=5, visible=visible, downloaded=actual,
                  malformed_graph_replays=cases,
+                 narrow_zoom_replays=narrow_replays,
+                 two_drawing_isolation=isolation,
+                 stalled_read_timeout_recovery=timeout_recovery,
                  keyboard_read_retry=True, keyboard_export_retry=True,
                  source_sha256={str(path): digest(path) for path in sorted(sources)},
                  artifact_sha256={path.name: digest(path) for path in artifact.iterdir() if path.is_file()})
@@ -251,6 +529,12 @@ finally:
                     if thread_started:
                         thread.join(timeout=10)
                         assert not thread.is_alive(), 'Local server did not stop'
+if proof_path.is_file():
+    proof = json.loads(proof_path.read_text(encoding='utf-8'))
+    proof['cleanup'] = dict(context_closed=True, browser_closed=True, playwright_stopped=True,
+                            server_closed=True, server_thread_stopped=not thread.is_alive())
+    proof_path.write_text(json.dumps(proof, indent=2), encoding='utf-8')
 print(json.dumps({'proof': str(proof_path), 'rows_matched': 5, 'keyboard_retries_passed': 2,
-                  'malformed_graph_repairs': len(cases)}))
+                  'malformed_graph_repairs': len(cases), 'narrow_zoom_replays': len(narrow_replays),
+                  'two_drawing_isolation': True, 'stalled_read_timeout_recovery': True}))
 ```

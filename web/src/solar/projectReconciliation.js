@@ -3,7 +3,7 @@ import { createSolarDrawingBinding } from './solarDrawingBinding.js'
 
 export const RECONCILIATION_METRICS = ['Panels', 'Optimizers', 'Inverters', 'Strings', 'kW DC']
 const ID = /^leaf:[a-z][a-z0-9-]*:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
-const validId = (id) => typeof id === 'string' && id.length <= 100 && ID.test(id)
+const validId = (id, kind) => typeof id === 'string' && id.length <= 100 && id.startsWith(`leaf:${kind}:`) && ID.test(id)
 const SCALE = 10n ** 18n
 const LIMIT = 10n ** 36n
 
@@ -53,10 +53,10 @@ export function validReconciliationResponse(response, binding) {
   } catch { return false }
 }
 
-function uniqueIds(items) {
+function uniqueIds(items, kind) {
   const ids = new Set()
   for (const item of items) {
-    if (!validId(item?.id) || ids.has(item.id)) return null
+    if (!validId(item?.id, kind) || ids.has(item.id)) return null
     ids.add(item.id)
   }
   return ids
@@ -69,35 +69,38 @@ export function savedReconciliationValues(graph) {
   if (!graph || !['frames', 'panels', 'strings', 'inverters'].every((key) => Array.isArray(graph[key]))) return values
   const available = (value) => ({ value, reason: '' })
   const decoded = decodeGroundFrameSlots(graph.frames)
-  const panels = uniqueIds(graph.panels)
+  const panels = uniqueIds(graph.panels, 'panel')
   let panelValid = panels !== null && decoded !== null
   if (panelValid) for (const id of decoded.panelIds) {
-    if (panels.has(id)) panelValid = false
+    if (!validId(id, 'panel') || panels.has(id)) panelValid = false
     panels.add(id)
   }
   values[0] = panelValid ? available(BigInt(panels.size) * SCALE)
     : unavailable('Panel IDs or compact Ground slots are invalid or duplicated.')
-  const strings = uniqueIds(graph.strings)
+  const strings = uniqueIds(graph.strings, 'string')
   const assigned = new Set()
   let overlap = false
-  const stringsValid = panelValid && strings && graph.strings.every((item) => Array.isArray(item.ordered_panel_refs) &&
-    Number.isSafeInteger(item.module_count) && item.module_count >= 0 && item.module_count === item.ordered_panel_refs.length &&
-    new Set(item.ordered_panel_refs).size === item.ordered_panel_refs.length &&
-    item.ordered_panel_refs.every((id) => {
-      if (!validId(id) || !panels.has(id)) return false
+  const stringsValid = panelValid && strings && graph.strings.every((item) => {
+    const refs = item.ordered_panel_refs
+    if (!Array.isArray(refs) || !Number.isSafeInteger(item.module_count) || item.module_count <= 0 ||
+        item.module_count !== refs.length || new Set(refs).size !== refs.length) return false
+    // Array iteration visits holes as undefined; every() would skip missing evidence.
+    for (const id of refs) {
+      if (!validId(id, 'panel') || !panels.has(id)) return false
       if (assigned.has(id)) { overlap = true; return false }
       assigned.add(id)
-      return true
-    }))
+    }
+    return true
+  })
   values[3] = stringsValid ? available(BigInt(strings.size) * SCALE)
     : unavailable(overlap ? 'A saved panel reference belongs to more than one string.'
-      : 'Saved panel union is invalid, or string IDs, module counts and ordered panel references disagree.')
-  const devices = uniqueIds(graph.inverters)
+      : 'Saved panel union is invalid, or string IDs, positive module counts and ordered panel references disagree.')
+  const devices = uniqueIds(graph.inverters, 'inverter')
   const types = ['string_inverter', 'central_inverter', 'combiner_box']
   values[2] = devices && graph.inverters.every((item) => types.includes(item.equipment_type))
     ? available(BigInt(graph.inverters.filter((item) => item.equipment_type !== 'combiner_box').length) * SCALE)
     : unavailable('Saved device IDs or equipment types are missing, unknown or duplicated.')
-  let dcValid = panelValid && panels.size > 0 && uniqueIds(graph.frames) !== null
+  let dcValid = panelValid && panels.size > 0 && uniqueIds(graph.frames, 'frame') !== null
   const covered = new Set(), ground = new Map(decoded?.frames.map((frame) => [frame.frameIndex, frame.slots.map((slot) => slot.panelId)]) || [])
   let total = 0n
   for (const [index, frame] of graph.frames.entries()) {
@@ -105,7 +108,7 @@ export function savedReconciliationValues(graph) {
     const power = watts(frame?.module_power_watts)
     if (!Array.isArray(refs) || power === null) { dcValid = false; continue }
     for (const ref of refs) {
-      if (!validId(ref) || !panels?.has(ref) || covered.has(ref)) dcValid = false
+      if (!validId(ref, 'panel') || !panels?.has(ref) || covered.has(ref)) dcValid = false
       covered.add(ref)
       total += power / 1000n
       if (total >= LIMIT) dcValid = false

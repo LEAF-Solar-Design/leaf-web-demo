@@ -19,6 +19,240 @@ function graph() {
 }
 
 describe('saved engineering reconciliation', () => {
+  it('repairs a compact Ground/explicit Roof ID collision without changing devices or caller evidence', () => {
+    const saved = graph(), drafts = ['02', '0', '2', '1', '0.800']
+    const baseline = reconciliationRows(saved, drafts)
+    saved.panels.push({ id: id('panel', 2) })
+    const before = structuredClone(saved), rows = reconciliationRows(saved, drafts)
+    for (const index of [0, 3, 4]) {
+      expect(rows[index]).toMatchObject({ studio: '', oracle: drafts[index], delta: '', verdict: 'UNREADABLE' })
+    }
+    expect(rows[0].reason).toMatch(/Panel IDs or compact Ground slots/)
+    expect(rows[3].reason).toMatch(/panel union is invalid/)
+    expect(rows[4].reason).toMatch(/complete, unique frame coverage/)
+    for (const index of [1, 2]) expect(rows[index]).toEqual(baseline[index])
+    expect(saved).toStrictEqual(before)
+    saved.panels.pop()
+    expect(reconciliationRows(saved, drafts)).toEqual(baseline)
+    expect(drafts).toEqual(['02', '0', '2', '1', '0.800'])
+  })
+  it.each([
+    [-1000000, '999999999999999000'], [0, null], [1000000, null],
+  ])('bounds aggregate DC with supported individual integer watts: offset %s', (offset, expected) => {
+    const saved = { rev: 1, panels: [], frames: [], strings: [], inverters: graph().inverters }
+    // 2000 * 500000000000000000 W = 10^21 W = 10^18 kW.
+    // Each power and offset is exactly representable; unique coverage cannot cause rejection.
+    let integerWatts = 0n
+    for (let n = 1; n <= 2000; n++) {
+      const panel = id('panel', n), power = 500000000000000000 + (n === 2000 ? offset : 0)
+      integerWatts += BigInt(power)
+      const frame = { id: id('frame', n), panel_refs: [panel], module_power_watts: power }
+      expect(savedReconciliationValues({ panels: [{ id: panel }], frames: [frame], strings: [], inverters: [] })[4].value)
+        .toBe(BigInt(power) * 10n ** 15n)
+      saved.panels.push({ id: panel }); saved.frames.push(frame)
+    }
+    expect(integerWatts).toBe(10n ** 21n + BigInt(offset))
+    const before = structuredClone(saved), drafts = ['2000', '0', '2', '0', '999999999999999000']
+    const rows = reconciliationRows(saved, drafts)
+    expect(rows.slice(0, 4).map(row => [row.studio, row.verdict]))
+      .toEqual([['2000', 'PASS'], ['', 'UNREADABLE'], ['2', 'PASS'], ['0', 'PASS']])
+    expect(rows[4]).toMatchObject(expected === null
+      ? { studio: '', delta: '', verdict: 'UNREADABLE' }
+      : { studio: expected, delta: '0', verdict: 'PASS' })
+    if (expected === null) expect(rows[4].reason).toMatch(/supported module watts/)
+    expect(saved).toStrictEqual(before)
+  })
+  it.each(['strings', 'DC'])('repairs compound foreign references and missing coverage independently, %s first', first => {
+    const saved = graph(), drafts = ['2', '0', '2', '1', '0.8']
+    const baseline = reconciliationRows(saved, drafts)
+    saved.strings[0].ordered_panel_refs[1] = id('panel', 99)
+    saved.frames[0].panel_refs = []
+    const check = (unavailable) => {
+      const before = structuredClone(saved), rows = reconciliationRows(saved, drafts)
+      rows.forEach((row, index) => {
+        if (unavailable.includes(index)) {
+          expect(row).toMatchObject({ studio: '', delta: '', verdict: 'UNREADABLE' })
+          expect(row.reason).toBeTruthy()
+        } else expect(row).toEqual(baseline[index])
+      })
+      expect(saved).toStrictEqual(before)
+      expect(drafts).toEqual(['2', '0', '2', '1', '0.8'])
+    }
+    check([3, 4])
+    const repairStrings = () => { saved.strings[0].ordered_panel_refs[1] = id('panel', 2) }
+    const repairDC = () => { saved.frames[0].panel_refs = [id('panel', 1)] }
+    if (first === 'strings') { repairStrings(); check([4]); repairDC() }
+    else { repairDC(); check([3]); repairStrings() }
+    check([])
+  })
+  it.each(['first', 'middle', 'last', 'all', 'singleton'])('rejects %s sparse ordered references and recovers from dense evidence', position => {
+    const saved = graph(), drafts = ['03', '0', '2', '1', '1.2001']
+    saved.panels.push({ id: id('panel', 3) })
+    saved.frames[0].panel_refs.push(id('panel', 3))
+    const dense = position === 'singleton' ? [id('panel', 1)] : [id('panel', 1), id('panel', 2), id('panel', 3)]
+    saved.strings[0].module_count = dense.length
+    saved.strings[0].ordered_panel_refs = [...dense]
+    const baseline = reconciliationRows(saved, drafts)
+    const refs = saved.strings[0].ordered_panel_refs
+    for (const index of position === 'all' ? [0, 1, 2] : [{ first: 0, middle: 1, last: 2, singleton: 0 }[position]]) delete refs[index]
+    const before = structuredClone(saved), rows = reconciliationRows(saved, drafts)
+    expect(refs.length).toBe(dense.length)
+    expect(rows[3]).toMatchObject({ studio: '', oracle: '1', delta: '', verdict: 'UNREADABLE' })
+    expect(rows[3].reason).toMatch(/ordered panel references disagree/)
+    for (const index of [0, 1, 2, 4]) expect(rows[index]).toEqual(baseline[index])
+    expect(saved).toStrictEqual(before)
+    expect(drafts).toEqual(['03', '0', '2', '1', '1.2001'])
+    saved.strings[0].ordered_panel_refs = [...dense]
+    expect(reconciliationRows(saved, drafts)).toEqual(baseline)
+  })
+  it.each([
+    [0, 'central_inverter', '2', '0'], [0, 'combiner_box', '1', '-1'],
+    [1, 'string_inverter', '2', '0'], [1, 'combiner_box', '1', '-1'],
+    [2, 'string_inverter', '3', '1'], [2, 'central_inverter', '3', '1'],
+  ])('reclassifies device %s to %s without counting combiners or changing siblings', (index, type, total, delta) => {
+    const saved = graph(), drafts = ['2', '0', '2', '1', '0.8']
+    const baseline = reconciliationRows(saved, drafts), original = saved.inverters[index].equipment_type
+    saved.inverters[index].equipment_type = type
+    const before = structuredClone(saved), rows = reconciliationRows(saved, drafts)
+    expect(rows[2]).toMatchObject({ studio: total, oracle: '2', delta, verdict: delta === '0' ? 'PASS' : 'FAIL' })
+    for (const sibling of [0, 1, 3, 4]) expect(rows[sibling]).toEqual(baseline[sibling])
+    expect(saved).toStrictEqual(before)
+    expect(drafts).toEqual(['2', '0', '2', '1', '0.8'])
+    saved.inverters[index].equipment_type = original
+    expect(reconciliationRows(saved, drafts)).toEqual(baseline)
+  })
+  const kindCases = [
+    ['panel collection', 'panel', [0, 3, 4], (g, kind) => { g.panels[0].id = id(kind, 1) }],
+    ['Roof frame collection', 'frame', [4], (g, kind) => { g.frames[0].id = id(kind, 1) }],
+    ['Ground frame collection', 'frame', [4], (g, kind) => { g.frames[1].id = id(kind, 2) }],
+    ['string collection', 'string', [3], (g, kind) => { g.strings[0].id = id(kind, 1) }],
+    ['inverter collection', 'inverter', [2], (g, kind) => { g.inverters[0].id = id(kind, 1) }],
+    ['ordinary frame reference', 'panel', [4], (g, kind) => { g.frames[0].panel_refs[0] = id(kind, 1) }],
+    ['ordinary string reference', 'panel', [3], (g, kind) => { g.strings[0].ordered_panel_refs[0] = id(kind, 1) }],
+    ['compact Ground string reference', 'panel', [3], (g, kind) => { g.strings[0].ordered_panel_refs[1] = id(kind, 2) }],
+  ].flatMap(([name, correct, affected, change]) => ['panel', 'frame', 'string', 'inverter']
+    .filter(kind => kind !== correct).map(kind => [name, kind, correct, affected, change]))
+  it.each(kindCases)('rejects %s with valid UUID but wrong %s kind and repairs it', (_name, kind, correct, affected, change) => {
+    const saved = graph(), drafts = ['2', '0', '2', '1', '0.8']
+    const baseline = reconciliationRows(saved, drafts)
+    change(saved, kind)
+    const before = structuredClone(saved), rows = reconciliationRows(saved, drafts)
+    rows.forEach((row, index) => {
+      if (affected.includes(index)) {
+        expect(row).toMatchObject({ metric: baseline[index].metric, studio: '', delta: '', verdict: 'UNREADABLE' })
+        expect(row.reason).toBeTruthy()
+      } else expect(row).toEqual(baseline[index])
+    })
+    expect(saved).toEqual(before)
+    expect(drafts).toEqual(['2', '0', '2', '1', '0.8'])
+    change(saved, correct)
+    expect(reconciliationRows(saved, drafts)).toEqual(baseline)
+  })
+  it('distinguishes no drawn strings from an empty string row and repairs positive evidence', () => {
+    const saved = graph(), drafts = ['2', '0', '2', '0', '0.8']
+    saved.strings = []
+    const baseline = reconciliationRows(saved, drafts)
+    expect(baseline[3]).toMatchObject({ studio: '0', delta: '0', verdict: 'PASS' })
+    saved.strings.push({ id: id('string', 1), module_count: 0, ordered_panel_refs: [] })
+    const before = structuredClone(saved), rows = reconciliationRows(saved, drafts)
+    expect(rows[3]).toMatchObject({ studio: '', delta: '', verdict: 'UNREADABLE' })
+    expect(rows[3].reason).toMatch(/positive module counts/)
+    for (const index of [0, 1, 2, 4]) expect(rows[index]).toEqual(baseline[index])
+    expect(saved).toEqual(before)
+    saved.strings[0] = graph().strings[0]
+    expect(reconciliationRows(saved, ['2', '0', '2', '1', '0.8'])[3])
+      .toMatchObject({ studio: '1', delta: '0', verdict: 'PASS' })
+  })
+  it.each(['frame', 'string', 'inverter'])('requires panel kind in ordinary Ground references, not %s', kind => {
+    const saved = graph(), drafts = ['2', '0', '2', '1', '0.8']
+    delete saved.frames[1].ground_slots
+    saved.frames[1].panel_refs = [id('panel', 2)]
+    saved.panels.push({ id: id('panel', 2) })
+    const baseline = reconciliationRows(saved, drafts)
+    expect(baseline[4].verdict).toBe('PASS')
+    saved.frames[1].panel_refs[0] = id(kind, 2)
+    const before = structuredClone(saved), rows = reconciliationRows(saved, drafts)
+    expect(rows.slice(0, 4)).toEqual(baseline.slice(0, 4))
+    expect(rows[4]).toMatchObject({ metric: 'kW DC', studio: '', delta: '', verdict: 'UNREADABLE' })
+    expect(saved).toEqual(before)
+    saved.frames[1].panel_refs[0] = id('panel', 2)
+    expect(reconciliationRows(saved, drafts)).toEqual(baseline)
+  })
+  // Literal decimal expectations come from integer watts (or femtowatts), not a floating sum or production helper.
+  it.each([
+    [400.125, 399.875, '0.8', '0.800000000000000001', '-0.000000000000000001', 'FAIL'],
+    [1e-7, 3e-7, '0.0000000004', '0.0000000004', '0', 'PASS'],
+    [1e-15, 1e-15, '0.000000000000000002', '0.000000000000000003', '-0.000000000000000001', 'FAIL'],
+    [100000000000000000, 1000, '100000000000001', '100000000000000', '1', 'FAIL'],
+    [999999999999999900, 1000, '1000000000000000.9', '1000000000000000', '0.9', 'FAIL'],
+  ])('exports independent mixed Roof/Ground watts %s + %s exactly', (roof, ground, total, oracle, delta, verdict) => {
+    const saved = graph()
+    saved.frames[0].module_power_watts = roof
+    saved.frames[1].module_power_watts = ground
+    const before = structuredClone(saved)
+    expect(reconciliationCsv(reconciliationRows(saved, ['2', '0', '2', '1', oracle]))).toBe(
+      'metric,studio,oracle,delta,verdict\r\n"panels","2","2","0","PASS"\r\n' +
+      '"optimizers","","0","","UNREADABLE"\r\n"inverters","2","2","0","PASS"\r\n' +
+      '"strings","1","1","0","PASS"\r\n' +
+      `"kw_dc","${total}","${oracle}","${delta}","${verdict}"\r\n`)
+    expect(saved).toEqual(before)
+  })
+  it.each([1e-16, 1.0000000000000002e-15, 1e18, 1e21, undefined, null, 0])(
+    'keeps independent counts when watt precision/range/coverage is unsupported: %s', power => {
+      const saved = graph(), drafts = ['2', '0', '2', '1', '0.8']
+      const baseline = reconciliationRows(saved, drafts)
+      saved.frames[1].module_power_watts = power
+      const before = structuredClone(saved), rows = reconciliationRows(saved, drafts)
+      expect(rows.slice(0, 4)).toEqual(baseline.slice(0, 4))
+      expect(rows[4]).toMatchObject({ studio: '', oracle: '0.8', delta: '', verdict: 'UNREADABLE' })
+      expect(reconciliationCsv(rows)).toContain('"kw_dc","","0.8","","UNREADABLE"\r\n')
+      expect(saved).toEqual(before)
+      saved.frames[1].module_power_watts = 399.9
+      expect(reconciliationRows(saved, drafts)).toEqual(baseline)
+    })
+  it.each([8, 64, 512])('bounds observed graph visits linearly for %s mixed frame pairs without mutation', size => {
+    const saved = { rev: 1, panels: [], frames: [], strings: [], inverters: [] }
+    for (let n = 1; n <= size; n++) {
+      const roof = id('panel', n * 2 - 1), ground = id('panel', n * 2)
+      const hex = ground.split(':')[2].replaceAll('-', '')
+      const bytes = Uint8Array.from(hex.match(/../g), pair => parseInt(pair, 16))
+      saved.panels.push({ id: roof })
+      saved.frames.push({ id: id('frame', n * 2 - 1), panel_refs: [roof], module_power_watts: 401 },
+        { id: id('frame', n * 2), module_power_watts: 599, ground_slots: {
+          ...graph().frames[1].ground_slots, panel_ids: btoa(String.fromCharCode(...bytes)),
+        } })
+      saved.strings.push({ id: id('string', n), module_count: 2, ordered_panel_refs: [roof, ground] })
+      saved.inverters.push({ id: id('inverter', n), equipment_type: 'string_inverter' })
+    }
+    const before = JSON.stringify(saved), visits = {}, entries = {}
+    // Accessors observe public evidence reads, including nested references/compact columns.
+    // Frozen containers and throwing setters reject writes without proxying production helpers.
+    function observe(value, counter) {
+      if (!value || typeof value !== 'object') return
+      for (const key of Object.keys(value)) {
+        const child = value[key]
+        observe(child, counter)
+        Object.defineProperty(value, key, { enumerable: true, get() { visits[counter]++; return child },
+          set() { throw new Error('Evidence was mutated') } })
+      }
+      Object.freeze(value)
+    }
+    for (const key of ['panels', 'frames', 'strings', 'inverters']) {
+      visits[key] = 0
+      entries[key] = saved[key].length
+      observe(saved[key], key)
+    }
+    Object.freeze(saved)
+    const rows = reconciliationRows(saved, [String(size * 2), '0', String(size), String(size), String(size)])
+    const observed = { ...visits }
+    expect(rows.map(row => row.studio)).toEqual([String(size * 2), '', String(size), String(size), String(size)])
+    expect(rows.map(row => row.delta)).toEqual(['0', '', '0', '0', '0'])
+    for (const key of Object.keys(observed)) {
+      expect(observed[key]).toBeGreaterThanOrEqual(entries[key])
+      expect(observed[key]).toBeLessThanOrEqual(100 * entries[key])
+    }
+    expect(JSON.stringify(saved)).toBe(before)
+  })
   it.each([1, 2])('rejects cross-string ownership of panel %s and recovers after repair', (panel) => {
     const saved = graph(), drafts = ['2', '0', '2', '1', '0.8']
     const baseline = reconciliationRows(saved, drafts)
