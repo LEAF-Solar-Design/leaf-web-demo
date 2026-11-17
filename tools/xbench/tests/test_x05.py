@@ -1079,6 +1079,7 @@ def ui_contract():
             for m, v in values.items()]
     ui = dict(before_rows=rows, reopened_rows=deepcopy(rows),
               before_drafts=dict(values), reopened_drafts=dict(values),
+              saved_revision_before=7, saved_revision_after=7,
               reopen_observed=True, recommendations=[{"group_count": 2}],
               grouping_status="proposals_shown")
     ui["csv_text"] = table_csv(rows)
@@ -1092,6 +1093,31 @@ def ui_contract():
 def table_csv(rows):
     return ",".join(x05.COLUMNS) + "\n" + "\n".join(
         ",".join(row[key] for key in x05.COLUMNS) for row in rows) + "\n"
+
+
+def test_reopen_different_revision_cannot_pass_with_equal_content():
+    project, result = ui_contract()
+    result["ui_observation"]["saved_revision_after"] = 8
+    steps = score([project], [result])
+    assert steps[6].verdict == "FAIL"
+    assert [s.verdict for s in steps[3:6]] == ["PASS"] * 3
+
+
+@pytest.mark.parametrize("key", ["saved_revision_before", "saved_revision_after"])
+@pytest.mark.parametrize("value", [None, True, False, -1, 7.0, "7", 10 ** 1000])
+def test_reopen_unreadable_revision_preserves_other_stages(key, value):
+    project, result = ui_contract()
+    result["ui_observation"][key] = value
+    steps = score([project], [result])
+    assert steps[6].verdict == "UNREADABLE"
+    assert [s.verdict for s in steps[3:6]] == ["PASS"] * 3
+
+
+@pytest.mark.parametrize("key", ["saved_revision_before", "saved_revision_after"])
+def test_reopen_missing_revision_is_unreadable(key):
+    project, result = ui_contract()
+    del result["ui_observation"][key]
+    assert score([project], [result])[6].verdict == "UNREADABLE"
 
 
 def test_complete_ui_scorer_contract_preserves_step3_uncertainty():

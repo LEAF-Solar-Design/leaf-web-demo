@@ -365,6 +365,7 @@ def _ui_scores(project, result):
     if reopened is not None:
         diagnostics["table_sha256_after"] = _table_hash(reopened)
     hashes = [result.get(key) for key in ("strings_sha256_before", "strings_sha256_after")]
+    revisions = [ui.get(key) for key in ("saved_revision_before", "saved_revision_after")]
     drafts = []
     for key in ("before_drafts", "reopened_drafts"):
         value = ui.get(key)
@@ -373,9 +374,11 @@ def _ui_scores(project, result):
                         _observed_number(value[m], count=m != "kw_dc")) for m in METRICS)):
             drafts.append(value)
     if (ui.get("reopen_observed") is True and rows is not None and reopened is not None
-            and len(drafts) == 2 and all(type(h) is str and re.fullmatch(r"[0-9a-f]{64}", h) for h in hashes)):
+            and len(drafts) == 2 and all(_integer(r) for r in revisions)
+            and all(type(h) is str and re.fullmatch(r"[0-9a-f]{64}", h) for h in hashes)):
         stages[7] = ("PASS" if hashes[0] == hashes[1] and rows == reopened
-                     and drafts[0] == drafts[1] else "FAIL"), "normal_reopen_persistence"
+                     and drafts[0] == drafts[1] and revisions[0] == revisions[1]
+                     else "FAIL"), "normal_reopen_persistence"
     return stages, diagnostics
 
 
