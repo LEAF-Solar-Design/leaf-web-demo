@@ -1301,6 +1301,15 @@ describe('canonical project layout publication action', () => {
     change('Preset name', '  My frame  ')
     change('Module length (metres)', '2.5')
     change('Module width (metres)', '1.2')
+    expect(screen.getByLabelText('Module power (watts)').value).toBe('715')
+    expect(screen.getByLabelText('Horizontal module gap (metres)').value).toBe('0.02')
+    expect(screen.getByLabelText('Vertical module gap (metres)').value).toBe('0.02')
+    expect(screen.getByLabelText('Module orientation').value).toBe('Portrait')
+    expect([...screen.getByLabelText('Module orientation').options].map(option => option.value)).toEqual(['Portrait', 'Landscape'])
+    change('Module power (watts)', '550')
+    change('Horizontal module gap (metres)', '0')
+    change('Vertical module gap (metres)', '0.05')
+    change('Module orientation', 'Landscape')
     change('Module rows', '3')
     change('Module columns', '10')
     change('Tilt (degrees)', '25')
@@ -1313,8 +1322,8 @@ describe('canonical project layout publication action', () => {
     expect(captured.mode).toBe('initial')
     expect(JSON.parse(captured.parameters_json)).toEqual({ boundary: [[10, -20], [110, -20], [110, 30], [10, 30]],
       drawing_units: units, preset: { Name: 'My frame', ModuleLengthM: 2.5, ModuleWidthM: 1.2,
-        ModuleThicknessM: 0.033, ModulePowerWp: 715, FramingType: 'FixedTilt', Orientation: 'Portrait',
-        Rows: 3, Columns: 10, TiltDegrees: 25, HorizontalGapM: 0.02, VerticalGapM: 0.02, AxisAzimuthDeg: 190 } })
+        ModuleThicknessM: 0.033, ModulePowerWp: 550, FramingType: 'FixedTilt', Orientation: 'Landscape',
+        Rows: 3, Columns: 10, TiltDegrees: 25, HorizontalGapM: 0, VerticalGapM: 0.05, AxisAzimuthDeg: 190 } })
     await waitFor(() => expect(f.props.onProjectDrawingPublished).toHaveBeenCalledOnce())
     expect(f.props.onProjectDrawingPublished.mock.calls[0][2]()).toBe(true)
   })
@@ -1331,6 +1340,10 @@ describe('canonical project layout publication action', () => {
       ['Site origin Y (drawing units)', ['1000000000', 'NaN']],
       ['Module length (metres)', ['0', '-1', '101', '1e999']],
       ['Module width (metres)', ['', 'Infinity', '101']],
+      ['Module power (watts)', ['', ' ', '1.5', '0', '-1', 'NaN', 'Infinity', '1e999', '9007199254740992', '1000001', '1'.repeat(65)]],
+      ['Horizontal module gap (metres)', ['', ' ', '-0.01', 'NaN', 'Infinity', '1e999', '101', '1'.repeat(65)]],
+      ['Vertical module gap (metres)', ['', '-1', 'NaN', 'Infinity', '1e999', '100.01']],
+      ['Module orientation', ['Diagonal']],
       ['Module rows', ['0', '1.5', '1001', '1000']],
       ['Module columns', ['0', '1001']],
       ['Tilt (degrees)', ['-1', '91']], ['Axis azimuth (degrees)', ['-1', '361']],
@@ -1342,17 +1355,101 @@ describe('canonical project layout publication action', () => {
         change(label, invalid)
         expect(generate().disabled).toBe(true)
         expect(screen.getByRole('alert').textContent.length).toBeGreaterThan(0)
+        const input = screen.getByLabelText(label)
+        expect(input.getAttribute('aria-invalid')).toBe('true')
+        const errorId = input.getAttribute('aria-describedby').split(' ').at(-1)
+        expect(document.getElementById(errorId).textContent.length).toBeGreaterThan(0)
         fireEvent.click(generate())
       }
       change(label, previous)
       expect(generate().disabled).toBe(false)
+      expect(screen.getByLabelText(label).hasAttribute('aria-invalid')).toBe(false)
     }
     expect(f.api.publish).not.toHaveBeenCalled()
+  })
+  it('associates stable field errors with labels and clears corrected fields independently', async () => {
+    const f = initialFixture()
+    render(<SolarWorkspaceTools {...f.props} />)
+    const labels = ['Site origin X (drawing units)', 'Site width (drawing units)',
+      'Site height (drawing units)', 'Module rows', 'Module columns', 'Module power (watts)',
+      'Horizontal module gap (metres)', 'Vertical module gap (metres)', 'Module orientation']
+    const ids = labels.map(label => screen.getByLabelText(label).id)
+    expect(ids.every(Boolean)).toBe(true)
+    expect(screen.getByLabelText('Site width (drawing units)').hasAttribute('aria-invalid')).toBe(false)
+    site(); await readInitial()
+    const fieldError = (label, text) => {
+      const input = screen.getByLabelText(label)
+      expect(input.getAttribute('aria-invalid')).toBe('true')
+      const descriptions = input.getAttribute('aria-describedby').split(' ').map(id => document.getElementById(id))
+      expect(descriptions.every(Boolean)).toBe(true)
+      expect(descriptions.map(node => node.textContent).join(' ')).toContain(text)
+      return descriptions[descriptions.length - 1].id
+    }
+    change('Module power (watts)', '0')
+    change('Horizontal module gap (metres)', '-1')
+    const powerError = fieldError('Module power (watts)', 'safe whole number')
+    fieldError('Horizontal module gap (metres)', '0 to 100 metres')
+    change('Module power (watts)', '550')
+    expect(document.getElementById(powerError)).toBeNull()
+    expect(screen.getByLabelText('Module power (watts)').hasAttribute('aria-invalid')).toBe(false)
+    fieldError('Horizontal module gap (metres)', '0 to 100 metres')
+    change('Horizontal module gap (metres)', '0')
+    change('Module rows', '1000')
+    fieldError('Module rows', '10,000 modules')
+    fieldError('Module columns', '10,000 modules')
+    change('Module columns', '10')
+    for (const label of ['Module rows', 'Module columns'])
+      expect(screen.getByLabelText(label).hasAttribute('aria-invalid')).toBe(false)
+    change('Site origin X (drawing units)', '1000000000')
+    fieldError('Site origin X (drawing units)', 'All site corners')
+    fieldError('Site width (drawing units)', 'All site corners')
+    expect(screen.getByLabelText('Site height (drawing units)').hasAttribute('aria-invalid')).toBe(false)
+    change('Site origin X (drawing units)', '10')
+    change('Site drawing units', 'ft')
+    change('Module orientation', 'Landscape')
+    expect(labels.map(label => screen.getByLabelText(label).id)).toEqual(ids)
+    const allIds = [...document.querySelectorAll('[id]')].map(node => node.id)
+    expect(new Set(allIds).size).toBe(allIds.length)
+    expect(screen.queryByRole('alert')).toBeNull()
+    for (const label of labels) {
+      const input = screen.getByLabelText(label)
+      expect(input.hasAttribute('aria-invalid')).toBe(false)
+      expect(document.getElementById(input.getAttribute('aria-describedby'))).toBeTruthy()
+    }
+    expect(generate().disabled).toBe(false)
+    expect(f.api.publish).not.toHaveBeenCalled()
+  })
+  it.each(['m', 'ft'])('previews feet in metres without converting %s publication coordinates', async units => {
+    const f = initialFixture()
+    render(<SolarWorkspaceTools {...f.props} />)
+    site()
+    change('Site width (drawing units)', '10')
+    change('Site height (drawing units)', '10')
+    change('Horizontal module gap (metres)', '0.125')
+    change('Vertical module gap (metres)', '0')
+    change('Site drawing units', 'ft')
+    expect(screen.getByText('Converted site size: 3.048 × 3.048 metres. Module dimensions and gaps remain in metres.')).toBeTruthy()
+    expect(screen.getByText('Site 10 × 10 feet · 48 modules per frame.')).toBeTruthy()
+    change('Site drawing units', units)
+    if (units === 'm') expect(screen.queryByText(/Converted site size:/)).toBeNull()
+    await readInitial()
+    fireEvent.click(generate())
+    await waitFor(() => expect(f.api.publish).toHaveBeenCalledOnce())
+    expect(JSON.parse(f.api.publish.mock.calls[0][0].parameters_json)).toEqual({
+      boundary: [[10, -20], [20, -20], [20, -10], [10, -10]], drawing_units: units,
+      preset: { Name: 'Default', ModuleLengthM: 2.384, ModuleWidthM: 1.303, ModuleThicknessM: 0.033,
+        ModulePowerWp: 715, FramingType: 'FixedTilt', Orientation: 'Portrait', Rows: 4, Columns: 12,
+        TiltDegrees: 20, HorizontalGapM: 0.125, VerticalGapM: 0, AxisAzimuthDeg: 180 },
+    })
   })
   it('preserves separate mode drafts and drops them when the selected project changes', async () => {
     const f = initialFixture()
     const view = render(<SolarWorkspaceTools {...f.props} />)
     site(); await readInitial()
+    change('Module power (watts)', '550')
+    change('Horizontal module gap (metres)', '0')
+    change('Vertical module gap (metres)', '0.05')
+    change('Module orientation', 'Landscape')
     expect(generate().disabled).toBe(false)
     fireEvent.click(screen.getByRole('button', { name: 'Advanced JSON' }))
     expect(generate().disabled).toBe(true)
@@ -1361,12 +1458,20 @@ describe('canonical project layout publication action', () => {
     expect(generate().disabled).toBe(false)
     fireEvent.click(screen.getByRole('button', { name: 'Structured inputs' }))
     expect(screen.getByLabelText('Site width (drawing units)').value).toBe('100')
+    expect(screen.getByLabelText('Module power (watts)').value).toBe('550')
+    expect(screen.getByLabelText('Horizontal module gap (metres)').value).toBe('0')
+    expect(screen.getByLabelText('Vertical module gap (metres)').value).toBe('0.05')
+    expect(screen.getByLabelText('Module orientation').value).toBe('Landscape')
     expect(generate().disabled).toBe(false)
     fireEvent.click(screen.getByRole('button', { name: 'Advanced JSON' }))
     expect(screen.getByLabelText('Complete preset (JSON)').value).toBe(JSON.stringify(generationIntake.active_preset))
     view.rerender(<SolarWorkspaceTools {...f.props} projectId={id(99)}
       projectScope={{ ...f.props.projectScope, project_id: id(99) }} />)
     expect(screen.getByLabelText('Site width (drawing units)').value).toBe('')
+    expect(screen.getByLabelText('Module power (watts)').value).toBe('715')
+    expect(screen.getByLabelText('Horizontal module gap (metres)').value).toBe('0.02')
+    expect(screen.getByLabelText('Vertical module gap (metres)').value).toBe('0.02')
+    expect(screen.getByLabelText('Module orientation').value).toBe('Portrait')
     await readInitial()
     expect(generate().disabled).toBe(true)
     fireEvent.click(generate())
@@ -1387,7 +1492,8 @@ describe('canonical project layout publication action', () => {
     fireEvent.click(generate())
     await waitFor(() => expect(f.api.publish).toHaveBeenCalledOnce())
     const assertLocked = () => {
-      for (const label of ['Site width (drawing units)', 'Site drawing units', 'Site boundary (JSON)',
+      for (const label of ['Site width (drawing units)', 'Site drawing units', 'Module power (watts)',
+        'Horizontal module gap (metres)', 'Vertical module gap (metres)', 'Module orientation', 'Site boundary (JSON)',
         'Complete preset (JSON)', 'Drawing units for publication', 'Original layout intake (JSON)'])
         expect(screen.getByLabelText(label).matches(':disabled')).toBe(true)
       expect(screen.getByRole('button', { name: mode === 'advanced' ? 'Structured inputs' : 'Advanced JSON' }).matches(':disabled')).toBe(true)
