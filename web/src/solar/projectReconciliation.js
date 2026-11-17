@@ -68,7 +68,12 @@ export function savedReconciliationValues(graph) {
   values[1] = unavailable('The saved graph has no explicit measured optimizer count.')
   if (!graph || !['frames', 'panels', 'strings', 'inverters'].every((key) => Array.isArray(graph[key]))) return values
   const available = (value) => ({ value, reason: '' })
-  const decoded = decodeGroundFrameSlots(graph.frames)
+  // A missing frame may hide compact panels, so the entire panel union is unknown.
+  let framesDense = true
+  for (let index = 0; index < graph.frames.length; index++) {
+    if (!Object.hasOwn(graph.frames, index)) { framesDense = false; break }
+  }
+  const decoded = framesDense ? decodeGroundFrameSlots(graph.frames) : null
   const panels = uniqueIds(graph.panels, 'panel')
   let panelValid = panels !== null && decoded !== null
   if (panelValid) for (const id of decoded.panelIds) {

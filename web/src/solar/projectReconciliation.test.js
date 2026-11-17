@@ -19,6 +19,104 @@ function graph() {
 }
 
 describe('saved engineering reconciliation', () => {
+  it('adds disjoint Roof/Ground components and preserves totals under consistent typed renaming', () => {
+    const roof = { panels: [{ id: id('panel', 1) }],
+      frames: [{ id: id('frame', 1), panel_refs: [id('panel', 1)], module_power_watts: 401 }],
+      strings: [{ id: id('string', 1), module_count: 1, ordered_panel_refs: [id('panel', 1)] }],
+      inverters: [{ id: id('inverter', 1), equipment_type: 'string_inverter' }] }
+    const ground = { panels: [], frames: [{ ...graph().frames[1], module_power_watts: 599 }],
+      strings: [{ id: id('string', 2), module_count: 1, ordered_panel_refs: [id('panel', 2)] }],
+      inverters: [{ id: id('inverter', 2), equipment_type: 'central_inverter' },
+        { id: id('inverter', 3), equipment_type: 'combiner_box' }] }
+    const before = structuredClone([roof, ground])
+    const combined = { rev: 7 }
+    for (const key of ['panels', 'frames', 'strings', 'inverters']) combined[key] = [...roof[key], ...ground[key]]
+    // Independent arithmetic: 1+1 panels/devices/strings; 401+599=1000 integer watts.
+    for (const [saved, reports, totals] of [
+      [roof, ['1', '0', '1', '1', '0.401'], ['1', '', '1', '1', '0.401']],
+      [ground, ['1', '0', '1', '1', '0.599'], ['1', '', '1', '1', '0.599']],
+      [combined, ['2', '0', '2', '2', '1'], ['2', '', '2', '2', '1']],
+    ]) {
+      const rows = reconciliationRows(saved, reports)
+      expect(rows.map(row => row.studio)).toEqual(totals)
+      expect(rows.map(row => row.verdict)).toEqual(['PASS', 'UNREADABLE', 'PASS', 'PASS', 'PASS'])
+    }
+    const drafts = ['02', '00', '02', '02', '1.000']
+    const baseline = reconciliationRows(combined, drafts), csv = reconciliationCsv(baseline)
+    const renamed = structuredClone(combined)
+    const rename = value => value.replace(/(\d{12})$/, digits => String(Number(digits) + 100).padStart(12, '0'))
+    for (const key of ['panels', 'frames', 'strings', 'inverters']) for (const entity of renamed[key]) {
+      entity.id = rename(entity.id)
+      for (const refs of ['panel_refs', 'ordered_panel_refs']) if (entity[refs]) entity[refs] = entity[refs].map(rename)
+    }
+    const hex = rename(id('panel', 2)).split(':')[2].replaceAll('-', '')
+    renamed.frames[1].ground_slots.panel_ids = btoa(String.fromCharCode(...hex.match(/../g).map(pair => parseInt(pair, 16))))
+    const renamedBefore = structuredClone(renamed)
+    expect(reconciliationRows(renamed, drafts)).toEqual(baseline)
+    expect(reconciliationCsv(reconciliationRows(renamed, drafts))).toBe(csv)
+    renamed.strings[1].ordered_panel_refs[0] = id('panel', 999)
+    const brokenBefore = structuredClone(renamed), broken = reconciliationRows(renamed, drafts)
+    expect(broken[3]).toMatchObject({ studio: '', delta: '', verdict: 'UNREADABLE' })
+    expect(broken[3].reason).toMatch(/ordered panel references disagree/)
+    for (const index of [0, 1, 2, 4]) expect(broken[index]).toEqual(baseline[index])
+    expect(renamed).toStrictEqual(brokenBefore)
+    renamed.strings[1].ordered_panel_refs[0] = rename(id('panel', 2))
+    expect(reconciliationCsv(reconciliationRows(renamed, drafts))).toBe(csv)
+    expect(renamed).toStrictEqual(renamedBefore)
+    expect([roof, ground]).toStrictEqual(before)
+    expect(drafts).toEqual(['02', '00', '02', '02', '1.000'])
+  })
+  it.each([
+    ['frames', [0, 3, 4]], ['panels', [0, 3, 4]], ['strings', [3]], ['inverters', [2]],
+  ])('rejects sparse %s with named dependent metrics and recovers dense evidence', (collection, affected) => {
+    for (const position of ['first', 'last', 'all']) {
+      const saved = graph(), drafts = ['2', '0', '2', '1', '0.8']
+      const dense = [...saved[collection]], baseline = reconciliationRows(saved, drafts)
+      const removed = position === 'all' ? dense.map((_, index) => index)
+        : [position === 'first' ? 0 : dense.length - 1]
+      removed.forEach(index => { delete saved[collection][index] })
+      const before = structuredClone(saved), rows = reconciliationRows(saved, drafts)
+      rows.forEach((row, index) => {
+        if (affected.includes(index)) {
+          expect(row).toMatchObject({ metric: baseline[index].metric, studio: '', delta: '', verdict: 'UNREADABLE' })
+          expect(row.reason).toBeTruthy()
+        } else expect(row).toEqual(baseline[index])
+      })
+      expect(saved).toStrictEqual(before)
+      removed.forEach(index => expect(Object.hasOwn(saved[collection], index)).toBe(false))
+      saved[collection] = dense
+      expect(reconciliationRows(saved, drafts)).toEqual(baseline)
+      expect(drafts).toEqual(['2', '0', '2', '1', '0.8'])
+    }
+  })
+  it('reverses literal count and DC deltas when two valid mixed graphs exchange roles', () => {
+    const a = graph(), b = graph()
+    b.panels.push({ id: id('panel', 3) })
+    b.frames[0].panel_refs.push(id('panel', 3))
+    b.strings = [
+      { id: id('string', 1), module_count: 2, ordered_panel_refs: [id('panel', 1), id('panel', 2)] },
+      { id: id('string', 2), module_count: 1, ordered_panel_refs: [id('panel', 3)] },
+    ]
+    // In integer tenths of watts: A=8000, B=12001; difference=4001 (0.4001 kW).
+    const before = structuredClone([a, b])
+    const totalsA = ['2', '0', '2', '1', '0.8'], totalsB = ['3', '0', '2', '2', '1.2001']
+    for (const [saved, reports, totals, deltas] of [
+      [a, totalsB, ['2', '', '2', '1', '0.8'], ['-1', '', '0', '-1', '-0.4001']],
+      [b, totalsA, ['3', '', '2', '2', '1.2001'], ['1', '', '0', '1', '0.4001']],
+    ]) {
+      const rows = reconciliationRows(saved, reports)
+      expect(rows.map(row => row.studio)).toEqual(totals)
+      expect(rows.map(row => row.delta)).toEqual(deltas)
+      expect(rows.map(row => row.verdict)).toEqual(['FAIL', 'UNREADABLE', 'PASS', 'FAIL', 'FAIL'])
+    }
+    for (const [saved, reports] of [[a, totalsA], [b, totalsB]]) {
+      expect(reconciliationRows(saved, reports).map(row => row.verdict))
+        .toEqual(['PASS', 'UNREADABLE', 'PASS', 'PASS', 'PASS'])
+    }
+    expect([a, b]).toStrictEqual(before)
+    expect(totalsA).toEqual(['2', '0', '2', '1', '0.8'])
+    expect(totalsB).toEqual(['3', '0', '2', '2', '1.2001'])
+  })
   it('repairs a compact Ground/explicit Roof ID collision without changing devices or caller evidence', () => {
     const saved = graph(), drafts = ['02', '0', '2', '1', '0.800']
     const baseline = reconciliationRows(saved, drafts)
@@ -252,6 +350,12 @@ describe('saved engineering reconciliation', () => {
       expect(observed[key]).toBeLessThanOrEqual(100 * entries[key])
     }
     expect(JSON.stringify(saved)).toBe(before)
+    const csv = reconciliationCsv(rows)
+    for (let repeat = 0; repeat < 3; repeat++) {
+      expect(reconciliationCsv(reconciliationRows(saved,
+        [String(size * 2), '0', String(size), String(size), String(size)]))).toBe(csv)
+      expect(JSON.stringify(saved)).toBe(before)
+    }
   })
   it.each([1, 2])('rejects cross-string ownership of panel %s and recovers after repair', (panel) => {
     const saved = graph(), drafts = ['2', '0', '2', '1', '0.8']
