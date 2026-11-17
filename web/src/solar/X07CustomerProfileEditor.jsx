@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react'
+import X07ProfileRoleDiff from './X07ProfileRoleDiff.jsx'
 
 const object = value => value && typeof value === 'object' && !Array.isArray(value)
 const valid = (record, customer) => record?.customer_key === customer && typeof record.profile_id === 'string'
@@ -39,7 +40,7 @@ function LeaveBoundary(props) {
   return <>{message && <p role="status">{message}</p>}<Editor key={held.key} {...active} onDirtyChange={value => { dirty.current = value }} /></>
 }
 
-function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, onDirtyChange }) {
+function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, pinnedRoles, onDirtyChange }) {
   const [profile, setProfile] = useState(null), [draft, setDraft] = useState(null)
   const [busy, setBusy] = useState(false), [error, setError] = useState(null)
   const [stale, setStale] = useState(false), [message, setMessage] = useState(null)
@@ -146,12 +147,14 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, onDi
     <h3>Customer role profile</h3><p>Customer: {customerKey}</p>
     {profile && <><p>Profile id: {profile.profile_id}</p><p aria-live="polite" aria-atomic="true">Profile version: {profile.version}</p></>}
     {pin && <p>Project is pinned to version {pin.version}.</p>}
+    {profile && pinnedRoles && <X07ProfileRoleDiff beforeRoles={pinnedRoles} afterRoles={profile.roles} label="Pinned versus current roles" />}
     {error && <p id={errorId} role="alert">{error}</p>}{message && <p role="status">{message}</p>}
     {!profile && !busy && <button ref={retryButton} type="button" onClick={() => load(false)}>Retry loading profile</button>}
     {draft && <form ref={form} onSubmit={save} onReset={event => { event.preventDefault(); event.stopPropagation(); resetDraft() }} aria-describedby={error ? errorId : undefined}
       onCompositionStart={() => { composing.current = true }}
       onCompositionEnd={() => { composing.current = false }}
       onKeyDown={event => { if (event.key === 'Enter' && (composing.current || event.nativeEvent.isComposing || event.keyCode === 229)) event.preventDefault() }}>
+      <X07ProfileRoleDiff beforeRoles={profile.roles} afterRoles={draft} label={`Draft changes from loaded version ${profile.version}`} />
       <fieldset><legend>Drawing roles</legend>
         {Object.keys(draft).filter(role => ['module', 'roof', 'obstruction'].includes(role)).map(role => {
           const label = role[0].toUpperCase() + role.slice(1)

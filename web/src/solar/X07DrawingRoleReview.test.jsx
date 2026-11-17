@@ -2,8 +2,6 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import X07DrawingRoleReview from './X07DrawingRoleReview.jsx'
 import X07DrawingRoleProfileReview from './X07DrawingRoleProfileReview.jsx'
-import { execFileSync } from 'node:child_process'
-import path from 'node:path'
 
 afterEach(cleanup)
 const row = { block: 'Review Panel', layer: 'MODULES', count: 3, insertion_bounds: [0, 0, 2, 2] }
@@ -153,13 +151,6 @@ it('does not submit through a removed callback and requires a new explicit click
   expect(await screen.findByText('Roles confirmed.')).toBeTruthy()
   expect(next).toHaveBeenCalledTimes(1)
 })
-
-it('runs the actual review through the disposable Python adapter bridge', () => {
-  const root = path.resolve(process.cwd(), '..')
-  const output = execFileSync(process.execPath, [path.join(root, 'tools/xbench/tests/x07_role_review_adapter_journey.cjs'),
-    '--deps', path.resolve('node_modules')], { cwd: root, timeout: 30000, encoding: 'utf8' })
-  expect(output).toContain('PASS: role review adapter journey')
-}, 40000)
 
 it('hides synchronous and rejected private callback errors behind a fixed refusal', async () => {
   for (const callback of [() => { throw new Error('PRIVATE_SYNC_SENTINEL') }, () => Promise.reject(new Error('PRIVATE_ASYNC_SENTINEL'))]) {

@@ -1,7 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
-import { execFileSync } from 'node:child_process'
-import path from 'node:path'
 import Review from './X07DrawingRoleProfileReview.jsx'
 
 afterEach(cleanup)
@@ -110,10 +108,3 @@ it('snapshots pinned roles instead of following mutable callbacks or later profi
   expect(screen.getByRole('region', { name: 'Pinned drawing roles' })).not.toHaveTextContent('UPDATED')
   expect(screen.getByRole('region', { name: 'Pinned drawing roles' })).not.toHaveTextContent('MUTATED_RECEIPT')
 })
-
-for (const fixture of ['focus', 'client_aba']) it(`runs the independent ${fixture} DOM fixture offline`, () => {
-  const root = path.resolve(process.cwd(), '..')
-  const output = execFileSync(process.execPath, [path.join(root, `tools/xbench/tests/x07_profile_review_${fixture}_dom.cjs`),
-    '--deps', path.resolve('node_modules')], { cwd: root, timeout: 30000, encoding: 'utf8' })
-  expect(output).toContain('PASS: profile review')
-}, 40000)

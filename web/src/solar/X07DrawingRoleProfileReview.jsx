@@ -84,7 +84,7 @@ function ScopedProfileReview(props) {
       </div>)}</dl>
     </section>
     <X07CustomerProfileEditor customerKey={props.customerKey} drawingKey={props.drawingKey}
-      loadProfile={props.loadProfile} saveProfile={props.saveProfile} applicationRecord={applied.pin} />
+      loadProfile={props.loadProfile} saveProfile={props.saveProfile} applicationRecord={applied.pin} pinnedRoles={applied.pin.roles} />
   </section>
   return <X07DrawingRoleReview {...props} onConfirm={typeof props.onConfirm === 'function' ? confirm : undefined} />
 }
