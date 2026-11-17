@@ -13,11 +13,20 @@ truncation. Both the current and target site must satisfy the numeric, bounds an
 distinct-corner checks; target tokens must also fit 64 characters. A refusal
 keeps all input values, selected units and publication parameters unchanged and
 announces the reason. Conversion itself never publishes anything.
+Before stringifying target numbers, conversion also refuses any nonzero source
+coordinate or dimension that becomes numeric zero. For example, feet origins
+`5e-324` and `-5e-324` cannot convert to metres. Refusal preserves the entire
+draft, units and exact parameter object without another callback. Literal zero,
+negative zero and representable tiny converted coordinates remain legal.
 For example, origin (10, -20), width 10, height 10 produces corners
 `[[10,-20],[20,-20],[20,-10],[10,-10]]` in the selected drawing units.
 Feet shows a separate converted size: 10 ft is 3.048 metres, rounded to at most
 six decimal places. That display never converts published coordinates or
 `drawing_units`; module dimensions, thickness and gaps always use metres.
+Each positive feet dimension below display precision, including multiplication
+underflow, reads "below display precision" in the converted size. Width and
+height are formatted independently, so a tiny width can appear alongside a
+normal height such as 3.048 metres without showing a false zero.
 
 Edit **Module thickness (metres)** (default 0.033), **Module power (watts)**
 (default 715), **Horizontal module gap (metres)**
@@ -36,6 +45,22 @@ It shows only the site rectangle, with normalized ratios and a visible minimum
 for narrow dimensions. It changes no publication coordinates, renders no actual
 module geometry and makes no terrain claim. Invalid inputs hide the schematic.
 Read the current layout, review it, then use **Generate editable project drawing**.
+
+For valid inputs, **Site boundary coordinates (drawing units: m)** or the feet
+equivalent lists the exact four generated boundary vertices in their existing
+order. Corner row headers and X/Y column headers identify the selected drawing
+units. Coordinates use full roundtrippable Number strings; no closing vertex is
+added. **Site rectangle centre (drawing coordinates)** gives X/Y in m or ft,
+derived from the generated boundary's opposite corners. Conversion preserves the
+centre's physical meaning within Number arithmetic. This is the rectangle centre,
+with no module, site DC or terrain interpretation.
+
+Open **Generated source input parameters (JSON)** to inspect read-only source
+inputs for generation, not a saved result. The disclosure starts closed. Its
+escaped text is JSON from the exact parameter object passed to the callback,
+including the current boundary, native preset and drawing units. Edits and unit
+conversion update it. Names containing Unicode or HTML-like text remain text.
+Invalid inputs and reset remove the disclosure, coordinate table and centre.
 
 Numeric tokens must be finite decimal numbers of at most 64 characters; blank,
 NaN, Infinity and overflowing exponents refuse publication. Watts must be a safe
@@ -66,8 +91,13 @@ decimal places. Positive measurements below 0.000001, including calculation
 underflow, read "below display precision" instead of a false exact zero. These
 rectangle measurements make no buildable area or site DC claim and disappear
 with invalid inputs. Publication coordinates remain in the selected units.
-Trimmed preset names have 1 to 256
-characters. Orientation accepts only Portrait/Landscape. Revealed errors attach
+Raw preset names reject C0 and C1 controls, including leading, trailing and
+embedded newlines or tabs, before trimming. Lone high or low UTF-16 surrogates
+are rejected; paired emoji, non-Latin names and composed or decomposed text are
+retained without normalization or rewriting. Valid names receive trimming only
+and must have 1 to 256 characters after trimming. Name errors attach to the name
+control, clear parameters and disable generation.
+Orientation accepts only Portrait/Landscape. Revealed errors attach
 to the implicated controls; correcting a field removes its error association.
 The single revealed error summary links each invalid field by its human label.
 Links focus the real control without hash navigation. Correcting one field
@@ -116,6 +146,16 @@ draft/reset coverage is
 `-t "preserves separate mode drafts|resets structured inputs|reset structured inputs preserves"`.
 The full command is the acceptance check. These notes record reproduction steps,
 not a LIVE or bench PASS result.
+
+Conversion underflow and display filters are
+`-t "subnormal|representable origin conversion|tiny feet size"`.
+Raw name and Unicode publication filters are
+`-t "raw preset name controls|valid Unicode with trim only"`.
+Exact disclosure, coordinate table and centre coverage uses
+`-t "discloses exact read-only source JSON"`.
+These cases use the real form with callback capture or the mounted workspace
+with mocked publication. The refusal cases assert no publication call; the
+direct form cases compare the full draft, callback count and parameter identity.
 
 New numeric and display filters are
 `-t "nonzero decimal underflow|mathematical zero|rectangle area and perimeter"`.

@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { initialSolarParameters } from './solarProjectMaterializationClient.js'
 
 const fields = [
@@ -22,6 +22,7 @@ const fields = [
 const defaultDraft = Object.freeze(Object.fromEntries(fields.map(([key, , value]) => [key, value])))
 const siteKeys = ['x', 'y', 'width', 'height']
 const metresPerFoot = 0.3048
+const rectangle = ({ x, y, width, height }) => [[x, y], [x + width, y], [x + width, y + height], [x, y + height]]
 
 function validateSite(values, addError) {
   for (const key of ['x', 'y']) {
@@ -64,11 +65,30 @@ function rectangleMeasurement(value) {
   return String(Number(value.toFixed(6)))
 }
 
+function invalidNameCharacters(name) {
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(name)) return true
+  for (let index = 0; index < name.length; index++) {
+    const code = name.charCodeAt(index)
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = name.charCodeAt(++index)
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return true
+    } else if (code >= 0xdc00 && code <= 0xdfff) return true
+  }
+  return false
+}
+
 export default function SolarGroundInputForm({ disabled, onParameters }) {
   const [draft, setDraft] = useState(() => ({ ...defaultDraft }))
   const [units, setUnits] = useState('m')
   const [edited, setEdited] = useState(false)
   const [conversionMessage, setConversionMessage] = useState('')
+  const [conversionSource, setConversionSource] = useState(null)
+  const [composing, setComposing] = useState(false)
+  const compositionActive = useRef(false)
+  const [copyMessage, setCopyMessage] = useState('')
+  const [copyPending, setCopyPending] = useState(false)
+  const copyScope = useRef(0)
+  const copyInFlight = useRef(false)
   const description = useId()
   const result = useMemo(() => {
     const errors = {}
@@ -82,6 +102,7 @@ export default function SolarGroundInputForm({ disabled, onParameters }) {
       values[key] = numberToken(draft[key], integer)
       if (values[key] === null) addError([key], `${label}: enter a finite ${integer ? 'whole ' : ''}number of at most 64 characters.`)
     }
+    if (invalidNameCharacters(draft.name)) addError(['name'], 'Preset name: control characters and unpaired Unicode surrogates are not allowed.')
     const name = draft.name.trim()
     if (!name || name.length > 256) addError(['name'], 'Preset name: enter 1 to 256 characters after trimming.')
     if (!['Portrait', 'Landscape'].includes(draft.orientation)) addError(['orientation'], 'Module orientation must be Portrait or Landscape.')
@@ -99,16 +120,53 @@ export default function SolarGroundInputForm({ disabled, onParameters }) {
     check('tilt', n => n >= 0 && n <= 90, 'Tilt must be from 0 to 90 degrees.')
     check('azimuth', n => n >= 0 && n <= 360, 'Axis azimuth must be from 0 to 360 degrees.')
     const { x, y, width, height } = values
-    if (Object.keys(errors).length) return { errors, parameters: null }
+    const count = ['rows', 'columns'].every(key => values[key] !== null && Number.isInteger(values[key]) && values[key] >= 1 && values[key] <= 1000)
+      ? values.rows * values.columns : null
+    if (Object.keys(errors).length) return { errors, count, parameters: null }
     // Native FramePreset decoder keys and BuildDefault values from solar_ground_frames.py.
     const preset = { Name: name, ModuleLengthM: values.length, ModuleWidthM: values.moduleWidth,
       ModuleThicknessM: values.thickness, ModulePowerWp: values.power, FramingType: 'FixedTilt', Orientation: draft.orientation,
       Rows: values.rows, Columns: values.columns, TiltDegrees: values.tilt,
       HorizontalGapM: values.horizontalGap, VerticalGapM: values.verticalGap, AxisAzimuthDeg: values.azimuth }
-    return { errors, parameters: initialSolarParameters(
-      [[x, y], [x + width, y], [x + width, y + height], [x, y + height]], preset, units) }
+    return { errors, count, parameters: initialSolarParameters(rectangle({ x, y, width, height }), preset, units) }
   }, [draft, units])
-  useEffect(() => { onParameters(result.parameters) }, [onParameters, result.parameters])
+  // The bounded producer JSON is both the semantic key and the snapshot source.
+  // Callers own their copy, including any mutations they make after delivery.
+  const parameters = composing ? null : result.parameters
+  const parametersJSON = JSON.stringify(parameters)
+  useEffect(() => { onParameters(JSON.parse(parametersJSON)) }, [onParameters, parametersJSON])
+  const invalidateCopy = () => {
+    copyScope.current += 1
+    copyInFlight.current = false
+    setCopyPending(false)
+    setCopyMessage('')
+  }
+  useLayoutEffect(() => {
+    // Retire outcomes at commit, including disable and unmount. A user-started
+    // clipboard write itself cannot be undone.
+    invalidateCopy()
+    return () => { copyScope.current += 1; copyInFlight.current = false }
+  }, [draft, units, disabled, composing])
+  const clearConversion = () => { setConversionMessage(''); setConversionSource(null) }
+  const copyJSON = async () => {
+    if (disabled || compositionActive.current || !parameters || copyInFlight.current) return
+    const scope = copyScope.current
+    if (typeof navigator.clipboard?.writeText !== 'function') {
+      setCopyMessage('Clipboard is unavailable. You can select the generated JSON to copy it.')
+      return
+    }
+    copyInFlight.current = true
+    setCopyPending(true)
+    setCopyMessage('Copying generated JSON.')
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(parameters, null, 2))
+      if (scope === copyScope.current) setCopyMessage('Generated JSON copied.')
+    } catch {
+      if (scope === copyScope.current) setCopyMessage('Could not copy generated JSON. You can select the JSON to copy it.')
+    } finally {
+      if (scope === copyScope.current) { copyInFlight.current = false; setCopyPending(false) }
+    }
+  }
 
   const convertUnits = () => {
     if (disabled) return
@@ -117,55 +175,97 @@ export default function SolarGroundInputForm({ disabled, onParameters }) {
     const values = Object.fromEntries(siteKeys.map(key => [key, numberToken(draft[key])]))
     if (siteKeys.some(key => values[key] === null)) errors.push('Enter finite site numbers of at most 64 characters before converting.')
     validateSite(values, addError)
-    const converted = Object.fromEntries(siteKeys.map(key => [key,
-      String(units === 'm' ? values[key] / metresPerFoot : values[key] * metresPerFoot)]))
+    const convertedValues = Object.fromEntries(siteKeys.map(key => [key,
+      units === 'm' ? values[key] / metresPerFoot : values[key] * metresPerFoot]))
+    if (siteKeys.some(key => values[key] !== null && values[key] !== 0 && convertedValues[key] === 0))
+      errors.push('A nonzero site value would become zero in the target units. Keep the current units to preserve exact geometry.')
+    const converted = Object.fromEntries(siteKeys.map(key => [key, String(convertedValues[key])]))
     const target = Object.fromEntries(siteKeys.map(key => [key, numberToken(converted[key])]))
     if (siteKeys.some(key => target[key] === null)) errors.push('Converted site numbers must be finite and at most 64 characters.')
     validateSite(target, addError)
     if (errors.length) {
+      setConversionSource(null)
       setConversionMessage(`Site units were not converted. ${[...new Set(errors)].join(' ')}`)
       return
     }
+    const sourceBoundary = result.parameters?.boundary ?? rectangle(values)
+    const targetBoundary = rectangle(target)
+    const sourceFactor = units === 'ft' ? metresPerFoot : 1
+    const targetFactor = units === 'm' ? metresPerFoot : 1
+    // Reconstruct after converting the site values back, preserving the
+    // producer's addition order. Compare both paths in common metres exactly.
+    const roundtrip = rectangle(Object.fromEntries(siteKeys.map(key => [key,
+      units === 'm' ? target[key] * metresPerFoot : target[key] / metresPerFoot])))
+    const precisionLoss = sourceBoundary.some((point, corner) => point.some((value, axis) =>
+      value * sourceFactor !== targetBoundary[corner][axis] * targetFactor
+      || value * sourceFactor !== roundtrip[corner][axis] * sourceFactor))
+    invalidateCopy()
+    setConversionSource({ boundary: sourceBoundary, units, targetBoundary, targetUnits: units === 'm' ? 'ft' : 'm' })
     setDraft(current => ({ ...current, ...converted }))
     setUnits(units === 'm' ? 'ft' : 'm')
-    setConversionMessage('Site units converted. Module metres and power are unchanged.')
+    setConversionMessage(`Site units converted. Module metres and power are unchanged.${precisionLoss ? ' Precision loss: unit conversion changed represented corners. Review the boundary coordinates.' : ''}`)
   }
-  const previewScale = Math.max(Number(draft.width), Number(draft.height))
-  const previewWidth = result.parameters ? Math.max(2, 100 * (Number(draft.width) / previewScale)) : 0
-  const previewHeight = result.parameters ? Math.max(2, 100 * (Number(draft.height) / previewScale)) : 0
+  const boundary = parameters?.boundary
+  const rectangleWidth = boundary ? boundary[1][0] - boundary[0][0] : 0
+  const rectangleHeight = boundary ? boundary[3][1] - boundary[0][1] : 0
+  const previewScale = Math.max(rectangleWidth, rectangleHeight)
+  const previewWidth = boundary ? Math.max(2, 100 * (rectangleWidth / previewScale)) : 0
+  const previewHeight = boundary ? Math.max(2, 100 * (rectangleHeight / previewScale)) : 0
   const displayFactor = units === 'ft' ? metresPerFoot : 1
-  const rectangleWidthM = Number(draft.width) * displayFactor
-  const rectangleHeightM = Number(draft.height) * displayFactor
+  const rectangleWidthM = rectangleWidth * displayFactor
+  const rectangleHeightM = rectangleHeight * displayFactor
+  const centre = boundary && boundary[0].map((value, axis) => value + (boundary[2][axis] - value) / 2)
+  const renderFields = keys => fields.filter(([key]) => keys.includes(key)).map(([key, label]) => {
+    const id = `${description}-${key}`
+    const error = edited && result.errors[key]
+    const props = { id, 'aria-invalid': error ? 'true' : undefined,
+      'aria-describedby': error ? `${description} ${id}-error` : description,
+      value: draft[key], onChange: event => {
+        if (disabled) return
+        invalidateCopy()
+        setEdited(true)
+        if (siteKeys.includes(key)) clearConversion()
+        setDraft(current => ({ ...current, [key]: event.target.value }))
+      } }
+    return <div key={key}><label htmlFor={id}>{label}</label>{key === 'orientation'
+      ? <select {...props}><option value="Portrait">Portrait</option><option value="Landscape">Landscape</option></select>
+      : <input type="text" {...props}
+        onCompositionStart={key === 'name' ? () => {
+          if (disabled || compositionActive.current) return
+          invalidateCopy(); compositionActive.current = true; setComposing(true)
+        } : undefined}
+        onCompositionEnd={key === 'name' ? event => {
+          if (disabled || !compositionActive.current) return
+          invalidateCopy(); compositionActive.current = false
+          setDraft(current => ({ ...current, name: event.target.value }))
+          setEdited(true); setComposing(false)
+        } : undefined}
+        inputMode={key === 'name' ? 'text' : 'decimal'}
+        maxLength={key === 'name' ? 512 : 64} />}
+    {error && <p id={`${id}-error`}>{error}</p>}</div>
+  })
 
   return <fieldset disabled={disabled} aria-describedby={description}>
     <legend>Ground layout inputs</legend>
-    <p id={description}>Site coordinates and dimensions use drawing units. Module dimensions and gaps use metres; angles use degrees.</p>
-    <label htmlFor={`${description}-units`}>Site drawing units</label><select id={`${description}-units`} value={units} onChange={event => { setEdited(true); setUnits(event.target.value); setConversionMessage('') }}>
+    <p id={description}>Site coordinates and dimensions use drawing units. Module dimensions and gaps use metres; angles use degrees. The unit selector reinterprets current numbers in the selected drawing units. Convert site units converts site origins and sizes to preserve geometry; module metres are unchanged.</p>
+    <fieldset aria-describedby={description}><legend>Site inputs</legend>
+    <label htmlFor={`${description}-units`}>Site drawing units</label><select id={`${description}-units`} aria-describedby={description} value={units} onChange={event => { if (disabled) return; invalidateCopy(); setEdited(true); setUnits(event.target.value); clearConversion() }}>
       <option value="m">Metres</option><option value="ft">Feet</option>
     </select>
-    <button type="button" onClick={convertUnits}>Convert site units to {units === 'm' ? 'feet' : 'metres'}</button>
+    <button type="button" aria-describedby={description} onClick={convertUnits}>Convert site units to {units === 'm' ? 'feet' : 'metres'}</button>
     <button type="button" onClick={() => {
       if (disabled) return
-      setDraft({ ...defaultDraft }); setUnits('m'); setEdited(false); setConversionMessage('')
+      invalidateCopy(); compositionActive.current = false; setComposing(false)
+      setDraft({ ...defaultDraft }); setUnits('m'); setEdited(false); clearConversion()
     }}>Reset structured inputs</button>
     {conversionMessage && <p role="status">{conversionMessage}</p>}
-    {fields.map(([key, label]) => {
-      const id = `${description}-${key}`
-      const error = edited && result.errors[key]
-      const props = { id, 'aria-invalid': error ? 'true' : undefined,
-        'aria-describedby': error ? `${description} ${id}-error` : description,
-        value: draft[key], onChange: event => {
-          setEdited(true)
-          if (siteKeys.includes(key)) setConversionMessage('')
-          setDraft(current => ({ ...current, [key]: event.target.value }))
-        } }
-      return <div key={key}><label htmlFor={id}>{label}</label>{key === 'orientation'
-        ? <select {...props}><option value="Portrait">Portrait</option><option value="Landscape">Landscape</option></select>
-        : <input type="text" {...props}
-          inputMode={key === 'name' ? 'text' : 'decimal'}
-          maxLength={key === 'name' ? 512 : 64} />}
-      {error && <p id={`${id}-error`}>{error}</p>}</div>
-    })}
+    {renderFields(siteKeys)}
+    </fieldset>
+    <fieldset><legend>Module inputs</legend>{renderFields(fields.slice(4, 12).map(([key]) => key))}</fieldset>
+    <fieldset><legend>Frame inputs</legend>{renderFields(fields.slice(12).map(([key]) => key))}</fieldset>
+    {result.count !== null && <p>{result.count <= 10000
+      ? `Remaining per-frame modules: ${10000 - result.count} (10,000 module limit).`
+      : `Per-frame module count exceeds the 10,000 module limit by ${result.count - 10000}.`}</p>}
     {edited && Object.keys(result.errors).length > 0 && <div role="alert">
       <p>{[...new Set(Object.values(result.errors))].join(' ')}</p>
       <ul>{fields.filter(([key]) => result.errors[key]).map(([key, label]) => <li key={key}>
@@ -175,18 +275,52 @@ export default function SolarGroundInputForm({ disabled, onParameters }) {
         }}>{label}</a>
       </li>)}</ul>
     </div>}
-    {result.parameters && <p>Site {draft.width.trim()} × {draft.height.trim()} {units === 'm' ? 'metres' : 'feet'}
-      {' · '}{result.parameters.preset.Rows * result.parameters.preset.Columns} modules per frame.</p>}
-    {result.parameters && <p>Per-frame DC watts: {result.parameters.preset.Rows * result.parameters.preset.Columns * result.parameters.preset.ModulePowerWp}. This is the module power sum for one frame.</p>}
-    {result.parameters && <p>Site rectangle area: {rectangleMeasurement(rectangleWidthM * rectangleHeightM)} square metres.
+    {parameters && <p>Site {String(rectangleWidth)} × {String(rectangleHeight)} {units === 'm' ? 'metres' : 'feet'}
+      {' · '}{parameters.preset.Rows * parameters.preset.Columns} modules per frame.</p>}
+    {parameters && <p>Per-frame DC watts: {parameters.preset.Rows * parameters.preset.Columns * parameters.preset.ModulePowerWp}. This is the module power sum for one frame.</p>}
+    {parameters && <p>Site rectangle area: {rectangleMeasurement(rectangleWidthM * rectangleHeightM)} square metres.
       {' '}Site rectangle perimeter: {rectangleMeasurement(2 * (rectangleWidthM + rectangleHeightM))} metres.</p>}
-    {result.parameters && <p>Site rectangle schematic (not to scale). Narrow dimensions are enlarged for visibility.</p>}
-    {result.parameters && <svg role="img" aria-labelledby={`${description}-preview-title`} aria-describedby={`${description}-preview-desc`} viewBox="0 0 120 120" width="240" height="240">
+    {parameters && <p>Site rectangle schematic (not to scale). Narrow dimensions are enlarged for visibility.</p>}
+    {parameters && <svg role="img" aria-labelledby={`${description}-preview-title`} aria-describedby={`${description}-preview-desc`} viewBox="0 0 120 120" width="240" height="240">
       <title id={`${description}-preview-title`}>Site rectangle schematic (not to scale)</title>
-      <desc id={`${description}-preview-desc`}>Rectangle {draft.width.trim()} by {draft.height.trim()} {units === 'm' ? 'metres' : 'feet'}, origin X {draft.x.trim()}, Y {draft.y.trim()}. Schematic only, not to scale; narrow dimensions are enlarged for visibility. No module geometry or terrain assessment.</desc>
+      <desc id={`${description}-preview-desc`}>Rectangle {String(rectangleWidth)} by {String(rectangleHeight)} {units === 'm' ? 'metres' : 'feet'}, origin X {String(boundary[0][0])}, Y {String(boundary[0][1])}. Schematic only, not to scale; narrow dimensions are enlarged for visibility. No module geometry or terrain assessment.</desc>
       <rect x="10" y="10" width={previewWidth} height={previewHeight} fill="none" stroke="currentColor" />
     </svg>}
-    {result.parameters && units === 'ft' && <p>Converted site size: {Number((Number(draft.width) * 0.3048).toFixed(6))} × {Number((Number(draft.height) * 0.3048).toFixed(6))} metres. Module dimensions and gaps remain in metres.</p>}
+    {parameters && units === 'ft' && <p>Converted site size: {rectangleMeasurement(rectangleWidthM)} × {rectangleMeasurement(rectangleHeightM)} metres. Module dimensions and gaps remain in metres.</p>}
+    {parameters && <>
+      <p>Site rectangle centre (drawing coordinates): X {String(centre[0])}, Y {String(centre[1])} {units}.</p>
+      <table>
+        <caption>Site boundary coordinates (drawing units: {units})</caption>
+        <thead><tr><th scope="col">Corner</th><th scope="col">X ({units})</th><th scope="col">Y ({units})</th></tr></thead>
+        <tbody>{boundary.map((point, index) => <tr key={index}>
+          <th scope="row">Corner {index + 1}</th><td>{String(point[0])}</td><td>{String(point[1])}</td>
+        </tr>)}</tbody>
+      </table>
+      <details>
+        <summary>Generated source input parameters (JSON)</summary>
+        <p>Read-only source inputs for generation, not a saved result.</p>
+        <pre aria-label="Generated source input parameters JSON">{JSON.stringify(parameters, null, 2)}</pre>
+        <button type="button" disabled={disabled || copyPending} onClick={copyJSON}>Copy generated JSON</button>
+        {copyMessage && <p role="status">{copyMessage}</p>}
+      </details>
+    </>}
+    {!composing && conversionSource && <>
+      <p>Conversion review compares JavaScript Number representation only. No terrain or engineering assessment.</p>
+      <table>
+        <caption>Source boundary before conversion (drawing units: {conversionSource.units})</caption>
+        <thead><tr><th scope="col">Corner</th><th scope="col">X ({conversionSource.units})</th><th scope="col">Y ({conversionSource.units})</th></tr></thead>
+        <tbody>{conversionSource.boundary.map((point, index) => <tr key={index}>
+          <th scope="row">Corner {index + 1}</th><td>{String(point[0])}</td><td>{String(point[1])}</td>
+        </tr>)}</tbody>
+      </table>
+      {!parameters && <table>
+        <caption>Converted boundary after conversion (drawing units: {conversionSource.targetUnits})</caption>
+        <thead><tr><th scope="col">Corner</th><th scope="col">X ({conversionSource.targetUnits})</th><th scope="col">Y ({conversionSource.targetUnits})</th></tr></thead>
+        <tbody>{conversionSource.targetBoundary.map((point, index) => <tr key={index}>
+          <th scope="row">Corner {index + 1}</th><td>{String(point[0])}</td><td>{String(point[1])}</td>
+        </tr>)}</tbody>
+      </table>}
+    </>}
     <p>Terrain-free layout preview. No terrain or engineering assessment is included.</p>
   </fieldset>
 }
