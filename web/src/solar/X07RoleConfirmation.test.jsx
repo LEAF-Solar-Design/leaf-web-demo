@@ -37,3 +37,26 @@ it('cancels without confirming', () => {
   expect(cancel).toHaveBeenCalledTimes(1)
   expect(confirm).not.toHaveBeenCalled()
 })
+
+it('bounds candidate work during paging across ten thousand sets', async () => {
+  let reads = 0
+  const candidates = Array.from({ length: 10000 }, (_, index) => ({
+    get block() { reads++; return `Panel ${index}` }, layer: 'MODULES', count: index + 1, insertion_bounds: [0, 0, 2, 2],
+  }))
+  const confirm = vi.fn().mockResolvedValue({ ok: true })
+  const large = { module: { candidates, first_choice: candidates[9999] } }
+  render(<X07RoleConfirmation proposal={large} onConfirm={confirm} />)
+  expect(screen.getAllByRole('radio')).toHaveLength(10)
+  const initialReads = reads
+  fireEvent.click(screen.getByRole('button', { name: 'Previous choices' }))
+  const pageReads = reads - initialReads
+  expect(initialReads).toBeGreaterThan(10000)
+  expect(pageReads).toBeLessThan(300)
+  expect(screen.getAllByRole('radio')).toHaveLength(10)
+  expect(screen.getByText(/Selected module set:/)).toHaveTextContent('Panel 9999')
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm roles' }))
+  expect(await screen.findByText('Roles confirmed.')).toBeTruthy()
+  expect(confirm).toHaveBeenCalledTimes(1)
+  expect(confirm.mock.calls[0][0].block).toBe('Panel 9999')
+  console.info(JSON.stringify({ synthetic_sets: 10000, initial_block_reads: initialReads, paging_block_reads: pageReads }))
+}, 15000)

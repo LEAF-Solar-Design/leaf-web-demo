@@ -408,8 +408,9 @@ export default function ProjectSolarWorkspace(props) {
     recoveryStatus.current?.scrollIntoView?.({ block: 'nearest' })
   })
   return <section className="project-solar-workspace">
-    {!owner.reason && <DrawingRoleProposal projectClient={owner.projectClient} solarBinding={owner.binding}
-      authorityKey={owner.authorityKey} isCurrent={scope.isCurrent} />}
+    {(!owner.reason || owner.reason === 'catalog_unavailable') && <DrawingRoleProposal
+      projectClient={owner.projectClient} solarBinding={owner.binding}
+      authorityKey={owner.authorityKey} isCurrent={props.isCurrent} />}
     {!owner.reason && <ProjectReconciliationPanel projectClient={owner.projectClient} solarBinding={owner.binding}
       authorityKey={owner.authorityKey} isCurrent={scope.isCurrent} busy={busy} />}
     {writeAccessDenied && <p role="status">{projectSolarWorkspaceReason('write_access_required')}</p>}
