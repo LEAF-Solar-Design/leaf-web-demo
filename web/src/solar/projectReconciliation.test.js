@@ -19,6 +19,53 @@ function graph() {
 }
 
 describe('saved engineering reconciliation', () => {
+  it('adds disjoint Roof/Ground components and preserves totals under consistent typed renaming', () => {
+    const roof = { panels: [{ id: id('panel', 1) }],
+      frames: [{ id: id('frame', 1), panel_refs: [id('panel', 1)], module_power_watts: 401 }],
+      strings: [{ id: id('string', 1), module_count: 1, ordered_panel_refs: [id('panel', 1)] }],
+      inverters: [{ id: id('inverter', 1), equipment_type: 'string_inverter' }] }
+    const ground = { panels: [], frames: [{ ...graph().frames[1], module_power_watts: 599 }],
+      strings: [{ id: id('string', 2), module_count: 1, ordered_panel_refs: [id('panel', 2)] }],
+      inverters: [{ id: id('inverter', 2), equipment_type: 'central_inverter' },
+        { id: id('inverter', 3), equipment_type: 'combiner_box' }] }
+    const before = structuredClone([roof, ground])
+    const combined = { rev: 7 }
+    for (const key of ['panels', 'frames', 'strings', 'inverters']) combined[key] = [...roof[key], ...ground[key]]
+    // Independent arithmetic: 1+1 panels/devices/strings; 401+599=1000 integer watts.
+    for (const [saved, reports, totals] of [
+      [roof, ['1', '0', '1', '1', '0.401'], ['1', '', '1', '1', '0.401']],
+      [ground, ['1', '0', '1', '1', '0.599'], ['1', '', '1', '1', '0.599']],
+      [combined, ['2', '0', '2', '2', '1'], ['2', '', '2', '2', '1']],
+    ]) {
+      const rows = reconciliationRows(saved, reports)
+      expect(rows.map(row => row.studio)).toEqual(totals)
+      expect(rows.map(row => row.verdict)).toEqual(['PASS', 'UNREADABLE', 'PASS', 'PASS', 'PASS'])
+    }
+    const drafts = ['02', '00', '02', '02', '1.000']
+    const baseline = reconciliationRows(combined, drafts), csv = reconciliationCsv(baseline)
+    const renamed = structuredClone(combined)
+    const rename = value => value.replace(/(\d{12})$/, digits => String(Number(digits) + 100).padStart(12, '0'))
+    for (const key of ['panels', 'frames', 'strings', 'inverters']) for (const entity of renamed[key]) {
+      entity.id = rename(entity.id)
+      for (const refs of ['panel_refs', 'ordered_panel_refs']) if (entity[refs]) entity[refs] = entity[refs].map(rename)
+    }
+    const hex = rename(id('panel', 2)).split(':')[2].replaceAll('-', '')
+    renamed.frames[1].ground_slots.panel_ids = btoa(String.fromCharCode(...hex.match(/../g).map(pair => parseInt(pair, 16))))
+    const renamedBefore = structuredClone(renamed)
+    expect(reconciliationRows(renamed, drafts)).toEqual(baseline)
+    expect(reconciliationCsv(reconciliationRows(renamed, drafts))).toBe(csv)
+    renamed.strings[1].ordered_panel_refs[0] = id('panel', 999)
+    const brokenBefore = structuredClone(renamed), broken = reconciliationRows(renamed, drafts)
+    expect(broken[3]).toMatchObject({ studio: '', delta: '', verdict: 'UNREADABLE' })
+    expect(broken[3].reason).toMatch(/ordered panel references disagree/)
+    for (const index of [0, 1, 2, 4]) expect(broken[index]).toEqual(baseline[index])
+    expect(renamed).toStrictEqual(brokenBefore)
+    renamed.strings[1].ordered_panel_refs[0] = rename(id('panel', 2))
+    expect(reconciliationCsv(reconciliationRows(renamed, drafts))).toBe(csv)
+    expect(renamed).toStrictEqual(renamedBefore)
+    expect([roof, ground]).toStrictEqual(before)
+    expect(drafts).toEqual(['02', '00', '02', '02', '1.000'])
+  })
   it.each([
     ['frames', [0, 3, 4]], ['panels', [0, 3, 4]], ['strings', [3]], ['inverters', [2]],
   ])('rejects sparse %s with named dependent metrics and recovers dense evidence', (collection, affected) => {
@@ -303,6 +350,12 @@ describe('saved engineering reconciliation', () => {
       expect(observed[key]).toBeLessThanOrEqual(100 * entries[key])
     }
     expect(JSON.stringify(saved)).toBe(before)
+    const csv = reconciliationCsv(rows)
+    for (let repeat = 0; repeat < 3; repeat++) {
+      expect(reconciliationCsv(reconciliationRows(saved,
+        [String(size * 2), '0', String(size), String(size), String(size)]))).toBe(csv)
+      expect(JSON.stringify(saved)).toBe(before)
+    }
   })
   it.each([1, 2])('rejects cross-string ownership of panel %s and recovers after repair', (panel) => {
     const saved = graph(), drafts = ['2', '0', '2', '1', '0.8']

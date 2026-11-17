@@ -41,6 +41,83 @@ const blobText = blob => new Promise(resolve => {
   reader.readAsText(blob)
 })
 
+it.each([0, 1, 2, 3, 4])('clears report %s after export and restores exact cached rows and lexemes', async index => {
+  const derive = vi.spyOn(reconciliation, 'savedReconciliationValues'), h = fixture()
+  const drafts = ['01', '00', '01', '01', '0.400']
+  const createObjectURL = vi.fn(() => 'blob:report'), revokeObjectURL = vi.fn()
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  read(); await loaded(); fill(drafts)
+  expect(derive).toHaveBeenCalledOnce()
+  const table = screen.getByRole('table').textContent
+  const inputs = screen.getAllByRole('textbox')
+  const guidance = inputs.map(input => input.getAttribute('aria-describedby'))
+  const download = screen.getByRole('button', { name: 'Download CSV' })
+  fireEvent.click(download)
+  const baseline = await blobText(createObjectURL.mock.calls[0][0])
+  expect(baseline).toBe('metric,studio,oracle,delta,verdict\r\n' +
+    '"panels","1","01","0","PASS"\r\n"optimizers","","00","","UNREADABLE"\r\n' +
+    '"inverters","1","01","0","PASS"\r\n"strings","1","01","0","PASS"\r\n' +
+    '"kw_dc","0.4","0.400","0","PASS"\r\n')
+  fireEvent.change(inputs[index], { target: { value: '' } })
+  expect(download.disabled).toBe(index !== 4)
+  fireEvent.click(download)
+  expect(createObjectURL).toHaveBeenCalledTimes(index === 4 ? 2 : 1)
+  if (index === 4) {
+    const fresh = await blobText(createObjectURL.mock.calls[1][0])
+    expect(fresh).toBe(baseline.replace('"kw_dc","0.4","0.400","0","PASS"',
+      '"kw_dc","0.4","","","UNREADABLE"'))
+  }
+  expect(inputs.map(input => input.value)).toEqual(drafts.map((value, i) => i === index ? '' : value))
+  expect(inputs.map(input => input.getAttribute('aria-describedby'))).toEqual(guidance)
+  fireEvent.change(inputs[index], { target: { value: drafts[index] } })
+  expect(screen.getByRole('table').textContent).toBe(table)
+  expect(inputs.map(input => input.value)).toEqual(drafts)
+  fireEvent.click(download)
+  expect(await blobText(createObjectURL.mock.calls.at(-1)[0])).toBe(baseline)
+  expect(revokeObjectURL).toHaveBeenCalledTimes(createObjectURL.mock.calls.length)
+  expect(h.client.readContext).toHaveBeenCalledOnce()
+  expect(derive).toHaveBeenCalledOnce()
+})
+
+it.each(['completion-first', 'timeout-first'])('settles an equal-deadline race coherently: %s', async order => {
+  vi.useFakeTimers()
+  const h = fixture()
+  let resolveOld
+  const old = new Promise(resolve => { resolveOld = resolve })
+  const late = response(); late.data.intake.solar_design_graph.rev = 77
+  const complete = () => resolveOld(late)
+  // The product installs its timeout before calling the client. Register the
+  // completion on either side of read(), at the exact same clock deadline.
+  if (order === 'completion-first') setTimeout(complete, RECONCILIATION_READ_TIMEOUT_MS)
+  h.client.readContext.mockReturnValueOnce(old)
+  act(() => { read(); read() })
+  if (order === 'timeout-first') setTimeout(complete, RECONCILIATION_READ_TIMEOUT_MS)
+  const signal = h.client.readContext.mock.calls[0][0].signal
+  expect(h.client.readContext).toHaveBeenCalledOnce()
+  await act(async () => { await vi.advanceTimersByTimeAsync(RECONCILIATION_READ_TIMEOUT_MS) })
+  if (order === 'completion-first') {
+    expect(screen.getByText('Saved design revision 77.')).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(signal.aborted).toBe(false)
+  } else {
+    expect(screen.getByRole('alert').textContent).toBe('Saved design read timed out. Try reading it again.')
+    expect(screen.queryByText(/Saved design revision/)).toBeNull()
+    expect(signal.aborted).toBe(true)
+    expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(true)
+  }
+  expect(screen.getByRole('button', { name: 'Read saved design' }).disabled).toBe(false)
+  expect(vi.getTimerCount()).toBe(0)
+  await act(async () => { read(); read() })
+  expect(screen.getByText('Saved design revision 9.')).toBeTruthy()
+  expect(screen.queryByText('Saved design revision 77.')).toBeNull()
+  expect(screen.queryByRole('alert')).toBeNull()
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+  expect(vi.getTimerCount()).toBe(0)
+  h.view.unmount()
+  expect(vi.getTimerCount()).toBe(0)
+})
+
 it.each(['binding', 'client'].flatMap(change => ['before', 'after'].map(phase => [change, phase])))(
   'rejects the first A read after A-to-B-to-A reuses %s scope inputs and settles %s the fresh read', async (change, phase) => {
   const h = fixture(), original = { ...h.props }

@@ -43,6 +43,12 @@ string panel references and equal totals. Revision labels and read counts must
 advance; the latter CSV bytes must stay equal. This proves accepted-revision
 refresh and aggregate equality, not assignment parity from a count CSV.
 
+A failed-refresh replay first exports successfully, rejects the next explicit
+read, and checks that saved evidence disappears and the disabled export produces
+no download. A same-mounted-panel retry accepts changed totals and fresh report
+lexemes; its actual five-row CSV must match normalized DOM and literal rows.
+Error/recovery screenshots and CSV hashes are retained with the cleanup proof.
+
 ```python
 import csv
 import copy
@@ -99,6 +105,8 @@ entry.write_text(
     'const response = ' + json.dumps(response) + ';\n' + '''
 let attempts = 0;
 let deferOld = false, settleOld, oldSignal;
+let rejectNext = false;
+window.rejectNextRead = () => { rejectNext = true; };
 window.scopeProof = {newReads: 0, oldSettled: false};
 window.deferOldRead = () => { deferOld = true; };
 window.readAttempts = () => attempts;
@@ -109,6 +117,7 @@ const client = {
   subscribe: () => () => {},
   readContext: async ({signal}) => {
     if (++attempts === 1) throw new Error('synthetic private read error');
+    if (rejectNext) { rejectNext = false; throw new Error('synthetic private refresh error'); }
     if (deferOld) {
       deferOld = false;
       oldSignal = signal;
@@ -425,6 +434,60 @@ try:
                             before=refresh_before, changed=refreshed, reassigned=reassigned,
                             equal_csv_bytes=True, assignment_parity_claimed=False)
 
+    # Successful export -> rejected refresh -> changed totals, same mounted scope.
+    baseline_reports = ['02', '00', '01', '01', '0.800']
+    page.evaluate('(graph) => window.setSavedGraph(graph)', graph)
+    read.click()
+    expect(page.get_by_text('Saved design revision 9.', exact=True)).to_be_visible()
+    for label, value in zip(labels, baseline_reports):
+        page.get_by_role('textbox', name=label + ' engineering report/BOM', exact=True).fill(value)
+    refresh_baseline = capture_comparison('failed-refresh-baseline')
+    assert [row['studio'] for row in refresh_baseline['downloaded']] == ['2', '', '1', '1', '0.8']
+    failure_downloads = []
+    def observe_failed_refresh(download):
+        failure_downloads.append(download.suggested_filename)
+    page.on('download', observe_failed_refresh)
+    failure_reads = page.evaluate('window.readAttempts()')
+    page.evaluate('window.rejectNextRead()')
+    read.click()
+    expect(page.get_by_role('alert')).to_have_text('Saved design could not be read. Try reading it again.')
+    expect(page.get_by_text('Saved design revision 9.', exact=True)).to_have_count(0)
+    expect(read).to_be_enabled()
+    expect(download_button).to_be_disabled()
+    failed_rows = visible_rows()
+    assert all(row['studio'] == row['delta'] == '' and row['verdict'] == 'UNREADABLE' for row in failed_rows)
+    assert [row['oracle'] for row in failed_rows] == baseline_reports
+    # Native click on a disabled button must not emit an actual browser download.
+    download_button.evaluate('(node) => node.click()')
+    page.evaluate('() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+    assert failure_downloads == []
+    assert page.evaluate('window.readAttempts()') == failure_reads + 1
+    page.screenshot(path=str(artifact / 'failed-refresh-error.png'), full_page=True)
+    recovered_graph = copy.deepcopy(next_graph)
+    recovered_graph['rev'] = 75
+    recovery_reports = ['003', '00', '02', '02', '1.500']
+    for label, value in zip(labels, recovery_reports):
+        page.get_by_role('textbox', name=label + ' engineering report/BOM', exact=True).fill(value)
+    expect(download_button).to_be_disabled()
+    page.evaluate('(graph) => window.setSavedGraph(graph)', recovered_graph)
+    read.click()
+    expect(page.get_by_text('Saved design revision 75.', exact=True)).to_be_visible()
+    expect(page.get_by_role('alert')).to_have_count(0)
+    expect(download_button).to_be_enabled()
+    assert failure_downloads == []
+    recovered = capture_comparison('failed-refresh-recovered')
+    assert recovered['downloaded'] == expected_refresh
+    assert page.evaluate('window.readAttempts()') == failure_reads + 2
+    assert failure_downloads == ['engineering-reconciliation.csv']
+    page.remove_listener('download', observe_failed_refresh)
+    failed_refresh = dict(binding=binding, baseline=refresh_baseline, failed=failed_rows,
+                          disabled_export_checked=True, downloads_during_failure=0,
+                          read_attempts=2, recovery_reports=recovery_reports, recovery=recovered,
+                          baseline_sha256=hashlib.sha256((artifact / refresh_baseline['csv']).read_bytes()).hexdigest(),
+                          recovery_sha256=hashlib.sha256((artifact / recovered['csv']).read_bytes()).hexdigest(),
+                          assignment_parity_claimed=False)
+    assert failed_refresh['baseline_sha256'] != failed_refresh['recovery_sha256']
+
     # Real product timeout: no timer interception or virtual elapsed-time claim.
     page.set_viewport_size({'width': 1440, 'height': 900})
     page.evaluate('document.documentElement.style.zoom = "1"')
@@ -562,6 +625,7 @@ try:
                  narrow_zoom_replays=narrow_replays,
                  two_drawing_isolation=isolation,
                  same_drawing_revision_refresh=revision_refresh,
+                 failed_refresh_export_isolation=failed_refresh,
                  stalled_read_timeout_recovery=timeout_recovery,
                  keyboard_read_retry=True, keyboard_export_retry=True,
                  source_sha256={str(path): digest(path) for path in sorted(sources)},
