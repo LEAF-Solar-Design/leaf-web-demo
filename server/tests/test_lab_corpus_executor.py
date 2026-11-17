@@ -18,6 +18,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import lab_corpus_executor as corpus
+import lab_corpus_failures as failures
 
 
 SECCOMP_REFRESH_ATTEMPTS = 3
@@ -864,3 +865,54 @@ def test_kernel_cage_real_cli_and_network_refusal(installed, tmp_path, monkeypat
     probe = subprocess.run(command, capture_output=True, timeout=5,
         env={'PATH': '/usr/bin:/bin', 'OPENBLAS_NUM_THREADS': '1', 'OMP_NUM_THREADS': '1'})
     assert probe.returncode == 0, 'Kernel cage did not refuse socket creation.'
+
+
+@pytest.mark.parametrize('message,reason', [
+    ('Pinned corpus evaluator did not produce a bounded result.', 'bounded_result_absent'),
+    ('Corpus result identity mismatch.', 'result_identity'),
+    ('Corpus attempt lost its lease or execution budget.', 'lease_or_budget'),
+    ('Corpus kernel network isolation is unavailable.', 'kernel_isolation_unavailable'),
+])
+def test_failure_reason_is_fixed_and_survives_child_cleanup(message, reason):
+    error = ValueError(message)
+    assert failures.failure_reason(error) == reason
+    stopped = corpus.CorpusStopped(str(error))
+    assert failures.failure_reason(stopped) == reason
+    assert message == str(stopped)
+
+
+def test_failure_reason_does_not_expose_exception_text():
+    private = 'synthetic-private-path-or-token'
+    assert failures.failure_reason(ValueError(private)) == 'unclassified'
+    stopped = corpus.CorpusStopped(private)
+    assert private not in failures.failure_reason(stopped)
+    assert failures.failure_reason(stopped) == 'unclassified'
+
+
+@pytest.mark.parametrize('child_stopped', [False, True])
+def test_corpus_job_persists_sanitized_failure_category(monkeypatch, child_stopped):
+    import jobs
+    from types import SimpleNamespace
+    observed = []
+    reaped = []
+    row = {'status': 'running', 'attempt': 1,
+           'lease': {'owner': 'owned-worker', 'expires_at': time.time() + 600}}
+    monkeypatch.setattr(jobs, 'get_job', lambda job_id: row)
+    monkeypatch.setattr(jobs, '_pg_store', SimpleNamespace(durable_context=lambda job_id: {'execution': {}}))
+    monkeypatch.setattr(corpus, 'record_context', lambda *args: {})
+    failure = ValueError('Corpus result identity mismatch.')
+    if child_stopped:
+        failure = corpus.CorpusStopped(str(failure))
+    def failed(*args, **kwargs):
+        raise failure
+    monkeypatch.setattr(corpus, 'run', failed)
+    monkeypatch.setattr(jobs, '_ack_corpus_reap', lambda *args: reaped.append(args))
+    monkeypatch.setattr(jobs, 'complete_callback', lambda *args, **kwargs: observed.append((args, kwargs)))
+    jobs._run_lab_corpus('owned-job', _worker_id='owned-worker', _attempt=1)
+    assert len(observed) == 1
+    args, kwargs = observed[0]
+    assert args == ('owned-job', 'failed')
+    assert kwargs['error']['error_code'] == 'INTERNAL'
+    assert kwargs['error']['corpus_failure'] == 'result_identity'
+    assert kwargs['error']['retryable'] is False
+    assert bool(reaped) is child_stopped

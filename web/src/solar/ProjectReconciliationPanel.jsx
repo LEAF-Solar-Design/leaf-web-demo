@@ -114,11 +114,11 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
   }
   function download() {
     if (!canExport || !current()) return
-    let url
+    let url, anchor
     try {
       url = URL.createObjectURL(new Blob([reconciliationCsv(rows)], { type: 'text/csv;charset=utf-8' }))
       if (!current()) return
-      const anchor = document.createElement('a')
+      anchor = document.createElement('a')
       anchor.href = url
       anchor.download = 'engineering-reconciliation.csv'
       anchor.click()
@@ -126,6 +126,7 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
     } catch {
       if (current()) setView({ ...saved, error: 'CSV could not be downloaded. Try Download CSV again.' })
     } finally {
+      try { anchor?.remove() } catch { /* cleanup failures are independent */ }
       if (url !== undefined) {
         try { URL.revokeObjectURL(url) } catch { /* cleanup must not erase accepted evidence */ }
       }

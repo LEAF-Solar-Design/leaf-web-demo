@@ -177,11 +177,163 @@ def test_invalid_selected_candidates_are_unreadable(candidates, count):
     assert score([project], [result])[1].verdict == "UNREADABLE"
 
 
-def live_harness(monkeypatch, *, failure=None, health=None, server_code=None, envelope=None):
+def null_observation():
+    project, result = observation()
+    project.update(expected_grids=None, grid_count_policy="match_or_named")
+    result["report"]["counts"]["matchable_grids"] = 29
+    for row, grid in zip(result["report"]["matches"], (7, 41)):
+        row.update(pdf_grid=grid, pdf_matrix=grid + 3, candidates=[grid, 99],
+                   candidate_count=8)
+    return project, result
+
+
+def test_null_policy_accepts_noncontiguous_grids_and_capped_candidates_without_oracle():
+    project, result = null_observation()
+    assert x05._setup(project)
+    for count in (0, 1, 29):
+        result["report"]["counts"]["matchable_grids"] = count
+        steps = score([project], [result])
+        assert [s.verdict for s in steps] == ["PASS", "PASS"] + ["UNREADABLE"] * 5
+        assert "match_or_named_grid_coverage" in steps[1].evidence
+
+
+@pytest.mark.parametrize("statuses", [("unmatched", "ambiguous"),
+                                     ("ambiguous", None), ("unmatched", None)])
+def test_null_policy_names_unresolved_statuses_including_single_candidate_ambiguity(statuses):
+    project, result = null_observation()
+    for row, status in zip(result["report"]["matches"], statuses):
+        if status is not None:
+            candidates = [77] if status == "ambiguous" else []
+            row.update(status=status, pdf_grid=None, pdf_matrix=None, pdf_sub_grid=None,
+                       candidates=candidates, candidate_count=len(candidates))
+    result["report"]["counts"]["matched_frames"] = statuses.count(None)
+    steps = score([project], [result])
+    assert [s.verdict for s in steps] == ["PASS", "PASS"] + ["UNREADABLE"] * 5
+    assert "normalized status causes (not emitted row codes)" in steps[1].evidence
+    for status in set(statuses) - {None}:
+        assert "SOLAREDGE_GRID_" + status.upper() in steps[1].evidence
+
+
+@pytest.mark.parametrize("broken", ["missing", "foreign", "duplicate-frame", "duplicate-grid",
+                                    "extra", "duplicate-saved-frame"])
+def test_null_policy_requires_exact_saved_frame_coverage_and_unique_matched_grids(broken):
+    project, result = null_observation()
+    rows = result["report"]["matches"]
+    if broken == "missing":
+        rows.pop()
+        result["report"]["counts"]["matched_frames"] = 1
+    elif broken == "extra":
+        rows.append(dict(rows[0], frame_ref="extra", pdf_grid=99, candidates=[99]))
+        result["report"]["counts"]["matched_frames"] = 3
+    elif broken == "foreign":
+        rows[1]["frame_ref"] = "foreign"
+    elif broken == "duplicate-frame":
+        rows[1]["frame_ref"] = rows[0]["frame_ref"]
+    elif broken == "duplicate-grid":
+        rows[1].update(pdf_grid=7, candidates=[7])
+    else:
+        result["frame_refs"][1] = result["frame_refs"][0]
+    assert score([project], [result])[1].verdict in ("FAIL", "UNREADABLE")
+
+
+@pytest.mark.parametrize("path,value", [
+    (("panel_count",), None), (("panel_count",), 3), (("frame_count",), 0),
+    (("frame_count",), True), (("frame_count",), 3), (("frame_refs",), None),
+    (("frame_refs",), ["frame-a", " "]), (("frame_refs",), [[], "frame-b"]),
+    (("report",), None), (("report", "counts"), []), (("report", "matches"), {}),
+    (("report", "matches", 0), None),
+    (("report", "matches", 0, "status"), None),
+    (("report", "matches", 0, "status"), []),
+    (("report", "matches", 0, "status"), "matched"),
+    (("report", "matches", 0, "pdf_grid"), None),
+    (("report", "matches", 0, "pdf_matrix"), True),
+    (("report", "matches", 0, "pdf_sub_grid"), -2),
+    (("report", "matches", 0, "candidates"), None),
+    (("report", "matches", 0, "candidates"), [[7]]),
+    (("report", "matches", 0, "candidates"), [True]),
+    (("report", "matches", 0, "candidates"), [7, 7]),
+    (("report", "matches", 0, "candidates"), []),
+    (("report", "matches", 0, "candidates"), [99]),
+    (("report", "matches", 0, "candidate_count"), 1),
+    (("report", "matches", 0, "candidate_count"), 2**53),
+])
+def test_null_policy_malformed_observations_are_named_unreadable(path, value):
+    project, result = null_observation()
+    container = result
+    for key in path[:-1]:
+        container = container[key]
+    container[path[-1]] = value
+    step = score([project], [result])[1]
+    assert step.verdict == "UNREADABLE"
+    assert "unreadable" in step.evidence or "blocker" in step.evidence
+
+
+@pytest.mark.parametrize("field", ["pdf_panels", "matchable_grids", "frames", "matched_frames"])
+def test_null_policy_counts_are_safe_integers_and_matched_count_is_recomputed(field):
+    project, result = null_observation()
+    for value in (None, True, -1, 1.5, 2**53):
+        result["report"]["counts"][field] = value
+        assert score([project], [result])[1].verdict == "UNREADABLE"
+    result["report"]["counts"][field] = 1
+    assert score([project], [result])[1].verdict == ("PASS" if field == "matchable_grids" else "UNREADABLE")
+
+
+@pytest.mark.parametrize("status,candidates,count", [
+    ("unmatched", [7], 1), ("ambiguous", [], 0), ("ambiguous", [7], 2),
+    ("ambiguous", [7, 7], 2), ("unmatched", [], True),
+])
+def test_null_policy_unresolved_candidates_must_agree_with_status(status, candidates, count):
+    project, result = null_observation()
+    result["report"]["matches"][0].update(
+        status=status, pdf_grid=None, pdf_matrix=None, pdf_sub_grid=None,
+        candidates=candidates, candidate_count=count)
+    result["report"]["counts"]["matched_frames"] = 1
+    assert score([project], [result])[1].verdict == "UNREADABLE"
+
+
+@pytest.mark.parametrize("field", ["pdf_grid", "pdf_matrix", "pdf_sub_grid"])
+@pytest.mark.parametrize("missing", [False, True])
+def test_null_policy_unresolved_assignments_must_be_explicit_nulls(field, missing):
+    project, result = null_observation()
+    row = result["report"]["matches"][0]
+    row.update(status="unmatched", pdf_grid=None, pdf_matrix=None, pdf_sub_grid=None,
+               candidates=[], candidate_count=0)
+    if missing:
+        del row[field]
+    else:
+        row[field] = 0
+    result["report"]["counts"]["matched_frames"] = 1
+    assert score([project], [result])[1].verdict == "UNREADABLE"
+
+
+def test_null_policy_refusal_requires_readable_saved_frame_setup():
+    project, result = null_observation()
+    result["report_product_failure"] = True
+    del result["report"]
+    assert score([project], [result])[1].verdict == "FAIL"
+    for field in ("panel_count", "frame_count", "frame_refs", "setup_verified"):
+        changed = dict(result)
+        del changed[field]
+        assert score([project], [changed])[1].verdict == "UNREADABLE"
+
+
+def test_null_policy_missing_counts_and_non_object_results_are_unreadable():
+    project, result = null_observation()
+    for value in (None, [], "unknown"):
+        assert x05._grid_score(project, value) == ("UNREADABLE", "report_wire_unreadable")
+    for field in result["report"]["counts"]:
+        changed = deepcopy(result)
+        del changed["report"]["counts"][field]
+        assert score([project], [changed])[1].verdict == "UNREADABLE"
+
+
+def live_harness(monkeypatch, *, failure=None, health=None, server_code=None, envelope=None,
+                 installation_design="Roof"):
     """Exact owner-confirmed client signatures, with no browser or disk IO."""
     import xbench_session
 
     project, result = observation()
+    project["installation_design"] = installation_design
     events, requests, receipts = [], [], []
     mutation_keys = set()
     source_sha = "a" * 40
@@ -282,7 +434,7 @@ def live_harness(monkeypatch, *, failure=None, health=None, server_code=None, en
             elif tool == "solar-panel-groups":
                 assert params["geometry_only"] is True
                 assert params["discover"] == {"BranchMaxOffset": 1, "AlignmentTolerance": 0.1,
-                                               "InstallationDesign": "Roof"}
+                                               "InstallationDesign": installation_design}
             else:
                 assert tool == "solar-panels-from-drawing"
                 return 202, {"job_id": "panels-job"}
@@ -350,8 +502,11 @@ def live_harness(monkeypatch, *, failure=None, health=None, server_code=None, en
     return ctx, events, requests, receipts
 
 
-def test_live_client_contract_and_current_version_routes(monkeypatch):
-    ctx, events, requests, receipts = live_harness(monkeypatch)
+@pytest.mark.parametrize("installation_design", ["Roof", "Ground"])
+def test_live_client_contract_and_current_version_routes(monkeypatch, installation_design):
+    ctx, events, requests, receipts = live_harness(
+        monkeypatch, installation_design=installation_design)
+    assert x05._setup(ctx.manifest["projects"][0])
     assert [s.verdict for s in x05.run(ctx)] == ["PASS", "PASS"] + ["UNREADABLE"] * 5
     base = "/api/projects/new-project/drawings/adopted-drawing/versions/"
     source_routes = [path for method, path, _ in requests if path.endswith("/solaredge-pdf")]
@@ -362,7 +517,67 @@ def test_live_client_contract_and_current_version_routes(monkeypatch):
     assert events[0] == "health"
     assert events[-4:] == ["release", "delete", "close", "health"]
     assert events.count("wait-job") == 1
+    assert events.count("solar-panel-groups") == 1
+    assert ("GET", "/api/report-artifact", None) in requests
     assert "private-capability" not in json.dumps(receipts)
+
+
+@pytest.mark.parametrize("installation_design", ["Roof", "Ground"])
+@pytest.mark.parametrize("failure", [None, "report-refusal"])
+def test_null_policy_collects_report_with_actual_frames_and_cleans_up(monkeypatch,
+                                                                   installation_design, failure):
+    ctx, events, requests, receipts = live_harness(
+        monkeypatch, installation_design=installation_design, failure=failure)
+    ctx.manifest["projects"][0].update(expected_grids=None, grid_count_policy="match_or_named")
+    steps = x05.run(ctx)
+    assert [s.verdict for s in steps] == ["PASS", "FAIL" if failure else "PASS"] + ["UNREADABLE"] * 5
+    assert receipts[0]["results"][0]["frame_count"] == 2
+    assert any(path.endswith("/report") for _, path, _ in requests)
+    assert events[-4:] == ["release", "delete", "close", "health"]
+    assert events.count("release") == events.count("delete") == 1
+    if failure is None:
+        assert ("GET", "/api/report-artifact", None) in requests
+    else:
+        assert "product_report_refusal" in steps[1].evidence
+
+
+@pytest.mark.parametrize("policy", [None, "exact", "MATCH_OR_NAMED", "match_or_named ", [], {}])
+def test_null_grid_requires_explicit_policy_before_any_io(monkeypatch, policy):
+    ctx, events, requests, receipts = live_harness(monkeypatch)
+    project = ctx.manifest["projects"][0]
+    project["expected_grids"] = None
+    if policy is not None:
+        project["grid_count_policy"] = policy
+    assert not x05._setup(project)
+    assert all(s.verdict == "UNREADABLE" for s in x05.run(ctx))
+    assert events == [] and requests == []
+    assert receipts[0]["results"] == []
+
+
+@pytest.mark.parametrize("field,value", [
+    ("expected_modules", None), ("expected_strings", 0), ("expected_grids", True),
+    ("expected_grids", 0), ("expected_grids", 2**53),
+    ("branch_max_offset", float("inf")), ("alignment_tolerance", False),
+])
+def test_null_policy_preserves_other_numeric_setup_guards_without_io(monkeypatch, field, value):
+    ctx, events, requests, receipts = live_harness(monkeypatch)
+    project = ctx.manifest["projects"][0]
+    project.update(expected_grids=None, grid_count_policy="match_or_named")
+    project[field] = value
+    assert not x05._setup(project)
+    assert all(s.verdict == "UNREADABLE" for s in x05.run(ctx))
+    assert events == [] and requests == []
+
+
+def test_explicit_policy_does_not_weaken_positive_exact_grid_contract():
+    project, result = observation()
+    project["grid_count_policy"] = "match_or_named"
+    result["report"]["matches"][0].update(status="unmatched", pdf_grid=None)
+    assert score([project], [result])[1].verdict == "FAIL"
+    project, result = observation()
+    project["grid_count_policy"] = "match_or_named"
+    result["report"]["matches"][0].update(pdf_grid=7, candidates=[7])
+    assert score([project], [result])[1].verdict == "FAIL"
 
 
 @pytest.mark.parametrize("failure", ["upload", "checkout", "mutation"])
@@ -441,20 +656,46 @@ def test_invalid_sibling_does_not_suppress_configured_drawing(monkeypatch):
     assert len(receipts[0]["results"]) == 2
 
 
-def test_ground_setup_is_explicitly_unreadable_in_roof_slice(monkeypatch):
-    ctx, events, requests, receipts = live_harness(monkeypatch)
-    ctx.manifest["projects"][0]["installation_design"] = "Ground"
+@pytest.mark.parametrize("expected_grids", [1, 3])
+def test_ground_discovery_requires_exact_grid_count_and_cleans_up(monkeypatch, expected_grids):
+    ctx, events, requests, receipts = live_harness(monkeypatch, installation_design="Ground")
+    ctx.manifest["projects"][0]["expected_grids"] = expected_grids
+    steps = x05.run(ctx)
+    assert [step.verdict for step in steps] == ["PASS"] + ["UNREADABLE"] * 6
+    assert "discovery_count_blocker" in steps[1].evidence
+    assert events.count("solar-panel-groups") == 1
+    assert events[-4:] == ["release", "delete", "close", "health"]
+    assert events.count("release") == events.count("delete") == 1
+    source_routes = [path for method, path, _ in requests if path.endswith("/solaredge-pdf")]
+    assert source_routes == [
+        "/api/projects/new-project/drawings/adopted-drawing/versions/v1/imports/solaredge-pdf"]
+    assert not any(path.endswith("/report") or path == "/api/report-artifact"
+                   for _, path, _ in requests)
+    assert receipts[0]["results"][0]["frame_count"] == 2
+
+
+@pytest.mark.parametrize("installation_design", [
+    "ground", "GROUND", "roof", "Roof ", " Ground", "", "Wall", None, True, 1,
+    [], {}, ["Ground"],
+])
+def test_unsupported_installation_design_is_unreadable_without_io(monkeypatch, installation_design):
+    ctx, events, requests, receipts = live_harness(
+        monkeypatch, installation_design=installation_design)
     assert not x05._setup(ctx.manifest["projects"][0])
     assert all(step.verdict == "UNREADABLE" for step in x05.run(ctx))
     assert events == [] and requests == []
+    assert receipts[0]["results"] == []
 
 
 @pytest.mark.parametrize("field", ["expected_modules", "expected_grids", "expected_strings",
                                    "branch_max_offset", "alignment_tolerance"])
-@pytest.mark.parametrize("value", [True, False, float("nan"), float("inf"),
+@pytest.mark.parametrize("value", [None, 0, True, False, float("nan"), float("inf"),
                                    float("-inf"), -1, 10**400])
-def test_numeric_setup_boundaries_are_unreadable_without_io(monkeypatch, field, value):
-    ctx, events, requests, receipts = live_harness(monkeypatch)
+@pytest.mark.parametrize("installation_design", ["Roof", "Ground"])
+def test_numeric_setup_boundaries_are_unreadable_without_io(monkeypatch, field, value,
+                                                           installation_design):
+    ctx, events, requests, receipts = live_harness(
+        monkeypatch, installation_design=installation_design)
     ctx.manifest["projects"][0][field] = value
     steps = x05.run(ctx)
     assert all(step.verdict == "UNREADABLE" for step in steps)
