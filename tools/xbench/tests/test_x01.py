@@ -678,6 +678,7 @@ class Wire:
         self.transport_error = False
         self.released = False
         self.deleted = False
+        self.drawing_version = {"drawing_id": "d", "version_id": "v1"}
 
     def transport(self, method, path, **kw):
         self.calls.append((method, path, deepcopy(kw)))
@@ -695,7 +696,7 @@ class Wire:
             return 200, {"status": "ready"}
         if path.endswith("/drawing-versions/import"):
             assert kw["json_body"]["source"]["version"] == 1
-            return 200, {"drawing_version": {"drawing_id": "d", "version_id": "v1"}}
+            return 200, {"drawing_version": self.drawing_version}
         if path.endswith("/dxf"):
             return 200, self.content
         if path.endswith("/checkout"):
@@ -788,6 +789,55 @@ def product(fixture, *, wire=None, out_dir=None):
     wire = wire or Wire(Path(fixture["path"]).read_bytes())
     rows = x01.grade_files(StudioClient(wire.transport), project=PROJECT, fixtures=[fixture], out_dir=out_dir)
     return wire, rows[fixture["id"]]
+
+
+def test_row_initializes_import_diagnostics():
+    row = x01._row({"id": "synthetic"})
+    assert row["upload_drawing_id"] is None
+    assert row["import_provenance"] is None
+
+
+@pytest.mark.parametrize("source,expected", [
+    ({"drawing_id": "uploaded", "version": 1, "kind": "account_upload",
+      "intake": {"ref": "intake-ref", "sha256": "a" * 64, "private": "excluded"}},
+     {"drawing_id": "uploaded", "version": 1, "intake": {"ref": "intake-ref", "sha256": "a" * 64}}),
+    ({"version": 1, "intake": {"ref": "intake-ref"}},
+     {"version": 1, "intake": {"ref": "intake-ref"}}),
+    ({"drawing_id": "uploaded"}, {"drawing_id": "uploaded"}),
+])
+def test_product_records_only_allowed_import_provenance(fixture, source, expected):
+    wire = Wire(Path(fixture["path"]).read_bytes())
+    wire.drawing_version["provenance"] = {"source": source, "private": "excluded"}
+    _, row = product(fixture, wire=wire)
+    assert row["upload_drawing_id"] == "uploaded"
+    assert row["import_provenance"] == expected
+    assert row["steps"]["1"] == row["steps"]["2"] == "PASS"
+
+
+@pytest.mark.parametrize("extra", [{}, {"provenance": None}, {"provenance": {}},
+                                   {"provenance": {"source": None}}])
+def test_product_missing_import_provenance_is_harmless(fixture, extra):
+    wire = Wire(Path(fixture["path"]).read_bytes())
+    wire.drawing_version.update(extra)
+    _, row = product(fixture, wire=wire)
+    assert row["upload_drawing_id"] == "uploaded"
+    assert row["import_provenance"] is None
+    assert row["steps"]["1"] == row["steps"]["2"] == "PASS"
+    assert wire.released
+
+
+def test_product_upload_id_survives_upload_wait_failure(fixture, monkeypatch):
+    client = StudioClient(Wire(Path(fixture["path"]).read_bytes()).transport)
+
+    def wait_upload(upload):
+        assert upload == "uploaded"
+        raise RuntimeError("conversion unavailable")
+
+    monkeypatch.setattr(client, "wait_upload", wait_upload)
+    row = x01.grade_files(client, project=PROJECT, fixtures=[fixture])[fixture["id"]]
+    assert row["upload_drawing_id"] == "uploaded"
+    assert row["import_provenance"] is None
+    assert row["steps"]["1"] == "UNREADABLE"
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
@@ -999,10 +1049,15 @@ def test_source_mutation_fails_integrity(fixture):
     assert rows[fixture["id"]]["steps"]["1"] == "FAIL"
 
 
-def test_run_writes_fixture_receipt_and_plot(fixture, tmp_path, monkeypatch):
+@pytest.mark.parametrize("options", [None, {}, {"keep_project": "0"},
+                                   {"keep_project": 1}, {"keep_project": "1"}])
+def test_run_writes_fixture_receipt_and_plot(fixture, tmp_path, monkeypatch, options):
     wire = Wire(Path(fixture["path"]).read_bytes())
-    ctx = SimpleNamespace(manifest={"fixtures": [fixture]}, fixtures=[{"id": fixture["id"], "ok": True}],
+    unavailable = {**fixture, "id": "unavailable", "bytes": fixture["bytes"] + 1}
+    ctx = SimpleNamespace(manifest={"fixtures": [fixture, unavailable]}, fixtures=[{"id": fixture["id"], "ok": True}],
                           base="https://example.test", source_sha="b" * 40, out_dir=tmp_path / "evidence")
+    if options is not None:
+        ctx.options = options
 
     @contextmanager
     def signed_in(repo, source_sha, *, origin):
@@ -1015,8 +1070,17 @@ def test_run_writes_fixture_receipt_and_plot(fixture, tmp_path, monkeypatch):
     monkeypatch.setattr(geometry, "render_pdf", lambda doc, path: Path(path).write_bytes(b"%PDF evidence"))
     assert len(x01.run(ctx)) == 7
     raw = (ctx.out_dir / "fixtures.json").read_text()
-    row = json.loads(raw)[fixture["id"]]
+    rows = json.loads(raw)
+    row = rows[fixture["id"]]
     assert row["plot"] == "plot-synthetic.pdf" and (ctx.out_dir / row["plot"]).is_file()
     assert row["original_version_id"] == "v1" and row["export_version_id"] == "v3"
     assert CAP not in raw and "SECRET-TAG" not in raw
-    assert wire.deleted and wire.released
+    keep_project = options is not None and options.get("keep_project") == "1"
+    assert wire.deleted is (not keep_project)
+    assert wire.released
+    assert rows["unavailable"]["steps"]["1"] == "UNREADABLE"
+    for receipt in rows.values():
+        if keep_project:
+            assert receipt["kept_project_id"] == PROJECT["project_id"]
+        else:
+            assert "kept_project_id" not in receipt

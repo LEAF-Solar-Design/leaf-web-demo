@@ -1,5 +1,6 @@
 """Grade Studio's converted original against its manifest-driven solar export."""
 
+from contextlib import nullcontext
 from copy import deepcopy
 import hashlib
 from pathlib import Path
@@ -17,6 +18,7 @@ LIMITS = "X01: original and export both come from Studio's own DWG conversion (v
 
 def _row(fixture):
     return {"id": fixture["id"], "drawing_id": None, "original_version_id": None,
+            "upload_drawing_id": None, "import_provenance": None,
             "export_version_id": None, "dxf_sha256": {}, "counts": {},
             "observed_insunits": None, "expected_insunits": fixture.get("insunits"), "failures": {},
             "steps": {str(n): "UNREADABLE" for n in range(1, 6)},
@@ -173,8 +175,18 @@ def grade_files(client, *, project, fixtures, out_dir=None):
             if (len(source) != fixture["bytes"] or row["source_sha256_before"] != fixture["sha256"]):
                 raise ValueError("fixture differs from manifest")
             upload = client.upload_drawing(Path(fixture["path"]).name, source)
+            row["upload_drawing_id"] = upload
             client.wait_upload(upload)
             drawing = client.adopt_drawing(pid, upload, fixture["id"])
+            provenance = drawing.get("provenance")
+            source_provenance = provenance.get("source") if isinstance(provenance, dict) else None
+            if isinstance(source_provenance, dict):
+                row["import_provenance"] = {key: source_provenance[key]
+                                            for key in ("drawing_id", "version") if key in source_provenance}
+                intake = source_provenance.get("intake")
+                if isinstance(intake, dict):
+                    row["import_provenance"]["intake"] = {key: intake[key]
+                                                         for key in ("ref", "sha256") if key in intake}
             did, version = drawing["drawing_id"], drawing["version_id"]
             row["drawing_id"], row["original_version_id"] = did, version
             original = client.dxf_bytes(pid, did, version)
@@ -360,7 +372,14 @@ def run(ctx):
     repo = Path(__file__).resolve().parents[3]
     with xbench_session.signed_in(repo, ctx.source_sha, origin=ctx.base) as (page, _):
         client = StudioClient(_transport(page, origin=ctx.base))
-        with disposable_project(client, f"XBench X01 {ctx.source_sha[:8]} {utc_now()}") as project:
+        keep_project = getattr(ctx, "options", {}).get("keep_project") == "1"
+        name = f"XBench X01 {ctx.source_sha[:8]} {utc_now()}"
+        project_scope = (nullcontext(client.create_project(name)) if keep_project else
+                         disposable_project(client, name))
+        with project_scope as project:
             rows = grade_files(client, project=project, fixtures=ctx.manifest["fixtures"], out_dir=ctx.out_dir)
+            if keep_project:
+                for row in rows.values():
+                    row["kept_project_id"] = project["project_id"]
             write_json_atomic(Path(ctx.out_dir) / "fixtures.json", rows)
             return score(rows)
