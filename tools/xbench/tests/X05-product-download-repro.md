@@ -847,3 +847,40 @@ print(json.dumps({'proof': str(proof_path), 'rows_matched': 5, 'keyboard_retries
                   'valid_empty_design': True,
                   'same_drawing_revision_refresh': True}))
 ```
+
+## Independent two-panel CAS replay
+
+Parent: X05 durable report reconciliation. The executed support fixture is
+`D:/agent-data/leaf-research/studio-xbench-2026-11/synthetic-tests/x05-report-persistence-hhl93ep9/replay.py`.
+It bundles the actual panel and persistence client from the lifecycle worktree.
+It runs one browser, two independently scoped clients, one synthetic file API
+and one file store. Its saved-design read is mocked. It does not prove PostgreSQL
+concurrency or staging behavior. No authentication, customer data or video is used.
+
+Use the compatible React/esbuild cache and installed Python Playwright. Run that
+retained `replay.py` on Windows. The viewport is 1920 by 2200, forced colors active;
+both complete panels and their controls fit side by side. The helper records exact
+source hashes and closes browser, context, server and thread in `finally`.
+
+1. Explicitly Read saved design in both panels. Enter A's reports
+   `001,0,01,1,blank` and B's `002,0,01,1,0.4`, both based on file revision zero.
+2. Save A and wait for its saved cue. Save B and require the conflict cue. B keeps
+   its entered values, A remains unchanged, and the entire newer file stays equal.
+3. Download A and B CSVs. Normalize each panel's five DOM rows independently and
+   require exact equality with its downloaded rows, including unreadable text.
+4. Explicitly reload B's report. It adopts A's saved values without a write.
+   Change B's Panels to `003`, DC to `0.4`, and Save. Change A's Panels to `004`
+   and Save from its stale baseline. Require conflict and unchanged newer bytes.
+5. Download each panel again and compare all rows. Explicitly reload A, require
+   B's saved values, and repeat both downloads. Six exports and 30 rows must agree.
+6. Set A's Panels to `005`, hold only its next Save response, and Save. Edit A to
+   `006` while pending. Explicitly Read saved design. The old save observation is
+   cancelled, the fresh read detects the committed newer report, and A retains
+   `006` with explicit reload required. Deliver the old receipt last. It must not
+   show a saved cue or change the file, drafts, baseline or B's accepted values.
+
+Stop on extra writes, row disagreement, stale saved cue, changed newer file or an
+uncaught browser error. `proof.json`, `independent-clients-conflict.png` and
+`read-cancels-save-observation.png` preserve the result. This replay is separate
+from the single-client lost-response recipe above; its two clients share neither
+the client instance nor panel state.

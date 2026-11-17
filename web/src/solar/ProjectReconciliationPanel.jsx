@@ -106,7 +106,7 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
   async function store(operation, hash, readGeneration, reload = false) {
     if (!current() || storageRequest.current) return
     const abort = new AbortController()
-    const active = { abort, observer: scope.observer }
+    const active = { abort, observer: scope.observer, operation }
     storageRequest.current = active
     const before = scope.report || {}, edits = scope.edits || 0
     const accepted = () => !abort.signal.aborted && storageRequest.current === active &&
@@ -170,7 +170,16 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
     }
   }
   async function read() {
-    if (!current() || busy || request.current || storageRequest.current) return
+    if (!current() || busy || request.current) return
+    if (storageRequest.current) {
+      if (storageRequest.current.operation !== 'save') return
+      const old = storageRequest.current
+      storageRequest.current = null
+      old.abort.abort()
+      updateReport({ ...scope.report, pending: null,
+        status: 'Save response cancelled. Reloading the saved design.' })
+      if (!current()) return
+    }
     const readGeneration = ++generation.current
     restoreReadFocus.current = document.activeElement === readButton.current
     const abort = new AbortController()
@@ -236,7 +245,7 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
     <h3>Engineering reconciliation</h3>
     <p>Enter user-supplied engineering report/BOM totals. These values are not independently verified.</p>
     <p id={`${inputId}-dc-optional`}>kW DC is optional when unknown. Leave it blank to export an unreadable comparison, with no report value or delta; it cannot pass.</p>
-    <button ref={readButton} type="button" disabled={!live || busy || pending || storagePending} onClick={read}>Read saved design</button>
+    <button ref={readButton} type="button" disabled={!live || busy || pending || (storagePending && totals.pending !== 'save')} onClick={read}>Read saved design</button>
     <p aria-live="polite">{!live ? scope.observationError || 'Reconciliation unavailable: the selected drawing scope is stale or unavailable.'
       : saved?.status || 'Read the saved design to compare totals.'}</p>
     {saved?.error && <p role="alert">{saved.error}</p>}

@@ -125,6 +125,123 @@ function canonicalReports(h, file = { response: totalsResponse() }) {
 }
 const reportsLoaded = () => screen.findByText(/No saved engineering totals|Saved engineering totals loaded/)
 
+it.each(['before-read', 'after-read'])('rejects the old A Save after A-B-A when receipt settles %s', async order => {
+  const h = fixture({ strict: true }); canonicalReports(h)
+  read(); await reportsLoaded(); fill(reportValues)
+  let settle
+  h.client.saveEngineeringTotals.mockImplementationOnce(() => new Promise(resolve => { settle = resolve }))
+  saveTotals()
+  const old = h.client.saveEngineeringTotals.mock.calls[0][0]
+  const b = { ...binding, drawing_id: '55555555-5555-4555-8555-555555555555' }
+  h.snapshot = { binding: b, authorityKey: 'b' }; h.update({ solarBinding: b, authorityKey: 'b' })
+  h.snapshot = { binding, authorityKey: 'a' }; h.update({ solarBinding: binding, authorityKey: 'a' })
+  expect(old.signal.aborted).toBe(true)
+  fill(['2', '0', '1', '1', '0.5']); saveTotals()
+  expect(h.client.saveEngineeringTotals).toHaveBeenCalledOnce()
+  const late = () => act(async () => settle(totalsResponse(99, reportValues)))
+  if (order === 'before-read') await late()
+  read(); await reportsLoaded()
+  if (order === 'after-read') await late()
+  expect(inputValues()).toEqual(['2', '0', '1', '1', '0.5'])
+  expect(screen.queryByText('Engineering totals saved.')).toBeNull()
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls[1][0]).toMatchObject({ expectedRevision: 0, drafts: ['2', '0', '1', '1', '0.5'] })
+})
+
+it('aborts a save and clears its timer on unmount without touching a remounted panel', async () => {
+  const old = fixture(); canonicalReports(old)
+  read(); await reportsLoaded(); fill(reportValues)
+  let settle
+  old.client.saveEngineeringTotals.mockImplementationOnce(() => new Promise(resolve => { settle = resolve }))
+  vi.useFakeTimers(); saveTotals()
+  const signal = old.client.saveEngineeringTotals.mock.calls[0][0].signal
+  expect(vi.getTimerCount()).toBe(1)
+  old.view.unmount()
+  expect(signal.aborted).toBe(true); expect(vi.getTimerCount()).toBe(0)
+  vi.useRealTimers()
+  const fresh = fixture(); canonicalReports(fresh)
+  read(); await reportsLoaded(); fill(['3', '0', '1', '1', '0.7'])
+  await act(async () => settle(totalsResponse(77, reportValues)))
+  expect(inputValues()).toEqual(['3', '0', '1', '1', '0.7'])
+  expect(screen.queryByText('Engineering totals saved.')).toBeNull()
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(fresh.client.saveEngineeringTotals.mock.calls[0][0].expectedRevision).toBe(0)
+})
+
+it.each(['completion-first', 'timeout-first'])('settles an exact Save deadline coherently (%s)', async order => {
+  const h = fixture(); canonicalReports(h)
+  read(); await reportsLoaded(); fill(reportValues)
+  let settle
+  const completed = new Promise(resolve => { settle = resolve })
+  h.client.saveEngineeringTotals.mockReturnValueOnce(completed)
+  vi.useFakeTimers()
+  const complete = () => settle(totalsResponse(1, reportValues))
+  if (order === 'completion-first') setTimeout(complete, RECONCILIATION_READ_TIMEOUT_MS)
+  saveTotals()
+  if (order === 'timeout-first') setTimeout(complete, RECONCILIATION_READ_TIMEOUT_MS)
+  const first = h.client.saveEngineeringTotals.mock.calls[0][0]
+  await act(async () => { await vi.advanceTimersByTimeAsync(RECONCILIATION_READ_TIMEOUT_MS) })
+  expect(vi.getTimerCount()).toBe(0)
+  expect(inputValues()).toEqual(reportValues)
+  if (order === 'completion-first') {
+    expect(first.signal.aborted).toBe(false)
+    expect(screen.getByText('Engineering totals saved.')).toBeTruthy()
+    expect(screen.queryByText(/could not be saved/)).toBeNull()
+  } else {
+    expect(first.signal.aborted).toBe(true)
+    expect(screen.getByText(/Engineering totals could not be saved/)).toBeTruthy()
+    expect(screen.queryByText('Engineering totals saved.')).toBeNull()
+  }
+  vi.useRealTimers()
+  const revision = order === 'completion-first' ? 1 : 0
+  fill(['4', '0', '1', '1', '0.8'])
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(revision + 1, ['4', '0', '1', '1', '0.8']))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls[1][0].expectedRevision).toBe(revision)
+})
+
+it.each(['organization_id', 'project_id', 'drawing_id', 'input_version_id', 'hash', 'revision-negative', 'revision-zero', 'revision-jump', 'revision-bool', 'revision-fraction'])('rejects Save receipt %s without advancing CAS or losing dirty drafts', async field => {
+  const h = fixture(); canonicalReports(h)
+  read(); await reportsLoaded(); fill(reportValues)
+  const bad = totalsResponse(1, reportValues)
+  if (field.endsWith('_id')) bad.data.record.binding[field] = '99999999-9999-4999-8999-999999999999'
+  else if (field === 'hash') bad.data.record.graph_sha256 = 'b'.repeat(64)
+  else bad.data.revision = { 'revision-negative': -1, 'revision-zero': 0, 'revision-jump': 2, 'revision-bool': true, 'revision-fraction': 1.5 }[field]
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(bad)
+  saveTotals(); await screen.findByText(/Engineering totals could not be saved/)
+  expect(screen.queryByText('Engineering totals saved.')).toBeNull()
+  expect(inputValues()).toEqual(reportValues)
+  const first = h.client.saveEngineeringTotals.mock.calls[0][0]
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  const retry = h.client.saveEngineeringTotals.mock.calls[1][0]
+  expect(retry.expectedRevision).toBe(0)
+  expect(retry.idempotencyKey).toBe(first.idempotencyKey)
+})
+
+it('accepts a newer explicit Read during Save and ignores the old receipt afterward', async () => {
+  const h = fixture(); canonicalReports(h)
+  read(); await reportsLoaded(); fill(reportValues)
+  let settle
+  h.client.saveEngineeringTotals.mockImplementationOnce(() => new Promise(resolve => { settle = resolve }))
+  saveTotals()
+  const old = h.client.saveEngineeringTotals.mock.calls[0][0]
+  const fresh = response(); fresh.data.intake.solar_design_graph.rev = 10; fresh.data.intake.solar_design_graph_sha256 = 'b'.repeat(64)
+  h.client.readContext.mockResolvedValueOnce(fresh)
+  const button = screen.getByRole('button', { name: 'Read saved design' })
+  expect(button.disabled).toBe(false); read()
+  await screen.findByText('Saved design revision 10.')
+  await reportsLoaded()
+  expect(old.signal.aborted).toBe(true)
+  expect(inputValues()).toEqual(reportValues)
+  await act(async () => settle(totalsResponse(1, reportValues)))
+  expect(screen.getByText('Saved design revision 10.')).toBeTruthy()
+  expect(screen.queryByText('Engineering totals saved.')).toBeNull()
+  const newResult = totalsResponse(1, reportValues); newResult.data.record.graph_sha256 = 'b'.repeat(64)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(newResult)
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls[1][0]).toMatchObject({ graphSha256: 'b'.repeat(64), expectedRevision: 0 })
+})
+
 it('guards two save activations before React commits and releases the guard after rejection', async () => {
   const h = fixture(); canonicalReports(h)
   read(); await reportsLoaded(); fill(reportValues)
@@ -295,7 +412,7 @@ it.each(['transport', 'timeout'])('retries an unchanged %s save with the same im
   saveTotals()
   if (failure === 'timeout') {
     expect(screen.getAllByRole('textbox').every(input => !input.disabled)).toBe(true)
-    expect(screen.getByRole('button', { name: 'Read saved design' }).disabled).toBe(true)
+    expect(screen.getByRole('button', { name: 'Read saved design' }).disabled).toBe(false)
     act(() => vi.advanceTimersByTime(RECONCILIATION_READ_TIMEOUT_MS))
     expect(h.client.saveEngineeringTotals.mock.calls[0][0].signal.aborted).toBe(true)
     vi.useRealTimers()
@@ -328,7 +445,7 @@ it.each([false, true])('isolates a pending save across A-B-A scope changes (Stri
   let settle
   h.client.saveEngineeringTotals.mockImplementationOnce(() => new Promise(resolve => { settle = resolve }))
   saveTotals()
-  saveTotals(); read(); reloadTotals()
+  saveTotals(); reloadTotals()
   expect(h.client.saveEngineeringTotals).toHaveBeenCalledOnce()
   expect(h.client.readContext).toHaveBeenCalledOnce()
   expect(h.client.loadEngineeringTotals).toHaveBeenCalledOnce()
