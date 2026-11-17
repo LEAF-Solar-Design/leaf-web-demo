@@ -1,5 +1,6 @@
 """Raw customer DWG intake acceptance, using the Studio product routes."""
 
+import json
 from pathlib import Path
 import re
 import subprocess
@@ -155,7 +156,62 @@ def _module_result(transport, project, adoption, tool, selector):
     return result
 
 
-def _grade_modules(transport, project, adoption, fixture, tool, row, mark):
+def set_evidence(intake, set_id):
+    """Summarize matching intake rows without exposing geometry or changing counts."""
+    try:
+        identity = json.loads(set_id) if isinstance(set_id, str) else set_id
+        if (not isinstance(identity, (list, tuple)) or len(identity) != 3
+                or any(not isinstance(value, str) for value in identity)):
+            raise ValueError("set_id must be a JSON triple of strings")
+        entity_type, layer, block = identity
+        if entity_type not in ("INSERT", "LWPOLYLINE"):
+            raise ValueError("unsupported set_id entity_type")
+        if not isinstance(intake, dict):
+            raise ValueError("intake must be an object")
+        key = "inserts" if entity_type == "INSERT" else "polylines"
+        entries = intake.get(key, [])
+        if not isinstance(entries, list):
+            raise ValueError(f"intake {key} must be a list")
+        total, duplicates = 0, 0
+        handles, samples, multiplicity, spaces = set(), [], {}, {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError(f"intake {key} row must be an object")
+            for field in ("layer", "name", "handle", "space", "layout"):
+                if field in entry and not isinstance(entry[field], str):
+                    raise ValueError(f"intake {key} {field} must be a string")
+            if (entry.get("layer") or "0") != layer:
+                continue
+            if entity_type == "INSERT" and entry.get("name") != block:
+                continue
+            total += 1
+            handle = (entry.get("handle") or "").strip().upper().removeprefix("0X")
+            if handle and all(char in "0123456789ABCDEF" for char in handle):
+                handle = handle.lstrip("0") or "0"
+            if handle:
+                if handle in handles:
+                    duplicates += 1
+                else:
+                    handles.add(handle)
+                    if len(samples) < 10:
+                        samples.append(handle)
+            if entity_type == "INSERT":
+                dimensions = (entry.get("rows", 1), entry.get("columns", 1))
+                if any(type(value) is not int or not 1 <= value <= 65535 for value in dimensions):
+                    raise ValueError("intake inserts rows and columns must be positive UInt16 integers")
+                multiplicity[dimensions] = multiplicity.get(dimensions, 0) + 1
+            location = (entry.get("space") or "model", entry.get("layout") or "Model")
+            spaces[location] = spaces.get(location, 0) + 1
+        return {"rows_total": total, "distinct_handles": len(handles),
+                "duplicate_handle_rows": duplicates,
+                "multiplicity": [[*pair, n] for pair, n in sorted(multiplicity.items())],
+                "space_layout": [[*pair, n] for pair, n in sorted(spaces.items())],
+                "sample_handles": samples}
+    except (TypeError, ValueError) as exc:
+        return {"error": str(exc)}
+
+
+def _grade_modules(transport, project, adoption, fixture, tool, row, mark, intake):
     field = "count-modules candidate response"
     try:
         listing = _module_result(transport, project, adoption, tool, {})
@@ -215,6 +271,7 @@ def _grade_modules(transport, project, adoption, fixture, tool, row, mark):
         if not max(item["count"] for item in selected.values()) <= count <= sum(
                 item["count"] for item in selected.values()):
             raise ValueError("count inconsistent with selected_sets")
+        row["set_evidence"] = {set_id: set_evidence(intake, set_id) for set_id in ids}
         row["counts"].append(count)
         row["module_set"] = {"set_ids": ids}
         mark(6, "PASS", "module_set selected" if len(candidates) > 1 else "nothing to pick")
@@ -364,7 +421,7 @@ def grade_files(client, transport, *, project, fixtures, clock=time.monotonic,
             continue
         if tool is not None:
             row["tool"] = tool
-            _grade_modules(transport, project, adoption, fixture, tool, row, mark)
+            _grade_modules(transport, project, adoption, fixture, tool, row, mark, intake)
             continue
         row["limits"].append("count-modules not live")
         layers = list(dict.fromkeys(fixture.get("module_layers", [])))
