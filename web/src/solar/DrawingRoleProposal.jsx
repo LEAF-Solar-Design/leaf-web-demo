@@ -25,10 +25,10 @@ function Proposal({ proposal }) {
     {proposal.module.competing && <p>Multiple module sets need review.</p>}
     <p>{candidates.length} module sets</p>
     {candidates.length > 0 && <table><caption>Module sets</caption>
-      <thead><tr><th>Block</th><th>Layer</th><th>Count</th><th>Insertion bounds</th></tr></thead>
+      <thead><tr><th>Block</th><th>Layer</th><th>Count</th><th>Insertion bounds (drawing units)</th></tr></thead>
       <tbody>{rows.map((item, index) => <tr key={page * ROLE_PAGE_SIZE + index}>
         <td>{item.block}</td><td>{item.layer}</td><td>{item.count}</td>
-        <td>{item.insertion_bounds.map(value => value.toFixed(2)).join(', ')}</td>
+        <td>{item.insertion_bounds.map(String).join(', ')}</td>
       </tr>)}</tbody></table>}
     {pages > 1 && <nav aria-label="Module set pages">
       <button type="button" disabled={page === 0} onClick={() => setPage(value => value - 1)}>Previous module sets</button>
