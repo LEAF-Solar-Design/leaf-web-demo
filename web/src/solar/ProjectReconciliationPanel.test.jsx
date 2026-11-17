@@ -703,6 +703,207 @@ it.each(['Save', 'Reload'])('preserves mocked reduced-motion transitions during 
   h.view.unmount(); expect(listeners.size).toBe(0)
 })
 
+const traceVersions = [
+    { values: ['01', '00', '01', '01', '0.400'], panelDelta: '0', powerDelta: '0', verdict: 'PASS' },
+    { values: ['002', '0', '01', '1', '0.6'], panelDelta: '-1', powerDelta: '-0.2', verdict: 'FAIL' },
+    { values: ['003', '00', '1', '01', '0.5'], panelDelta: '-2', powerDelta: '-0.1', verdict: 'FAIL' },
+    { values: ['004', '0', '01', '01', '0.7'], panelDelta: '-3', powerDelta: '-0.3', verdict: 'FAIL' },
+]
+const traceCsv = version => {
+  const v = version.values
+  return 'metric,studio,oracle,delta,verdict\r\n' +
+    `"panels","1","${v[0]}","${version.panelDelta}","${version.verdict}"\r\n` +
+    `"optimizers","","${v[1]}","","UNREADABLE"\r\n` +
+    `"inverters","1","${v[2]}","0","PASS"\r\n` +
+    `"strings","1","${v[3]}","0","PASS"\r\n` +
+    `"kw_dc","0.4","${v[4]}","${version.powerDelta}","${version.verdict}"\r\n`
+}
+function traceDownload() {
+  const createObjectURL = vi.fn(() => 'blob:command-trace')
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  return async (version, root = screen) => {
+    fireEvent.click(root.getByRole('button', { name: 'Download CSV' }))
+    expect(await blobText(createObjectURL.mock.calls.at(-1)[0])).toBe(traceCsv(version))
+  }
+}
+const saveCommandTraces = Array.from({ length: 16 }, (_, mask) => ({ mask,
+  cycles: [0, 1].map(cycle => ({ succeeds: !!(mask & (1 << cycle)), editsWhilePending: !!(mask & (1 << (cycle + 2))) })) }))
+it.each(saveCommandTraces)('matches the committed-record model for bounded Save trace $mask', async ({ cycles }) => {
+  const versions = traceVersions
+  // This model contains only committed state and commands. It does not use the
+  // panel's reconciliation, retry identity, pending or scope implementation.
+  const model = { revision: 1, committed: versions[0], draft: versions[0], writes: [] }
+  const h = fixture(); canonicalReports(h, { response: totalsResponse(1, model.committed.values) })
+  let pending
+  h.client.saveEngineeringTotals.mockImplementation(args => new Promise((resolve, reject) => { pending = { args, resolve, reject } }))
+  const download = traceDownload()
+  const check = async () => {
+    expect(inputValues()).toEqual(model.draft.values)
+    expect(h.client.loadEngineeringTotals).toHaveBeenCalledTimes(1)
+    expect(h.client.saveEngineeringTotals.mock.calls.map(([args]) => ({ expectedRevision: args.expectedRevision, drafts: args.drafts }))).toEqual(model.writes)
+    expect(screen.getByRole('button', { name: 'Save engineering totals' }).disabled).toBe(!!pending)
+    await download(model.draft)
+  }
+  read(); await reportsLoaded(); await check()
+  for (const [index, cycle] of cycles.entries()) {
+    model.draft = versions[index * 2]; fill(model.draft.values); await check()
+    const submitted = model.draft
+    model.writes.push({ expectedRevision: model.revision, drafts: [...submitted.values] })
+    saveTotals(); await check()
+    expect(pending.args.signal.aborted).toBe(false)
+    if (cycle.editsWhilePending) {
+      model.draft = versions[index * 2 + 1]; fill(model.draft.values); await check()
+    }
+    const request = pending; pending = null
+    if (cycle.succeeds) {
+      model.revision++; model.committed = submitted
+      await act(async () => request.resolve(totalsResponse(model.revision, model.committed.values)))
+    } else await act(async () => request.reject(new Error('synthetic trace rejection')))
+    await check()
+  }
+  // The next actual request exposes the baseline left by both earlier receipts.
+  model.writes.push({ expectedRevision: model.revision, drafts: [...model.draft.values] })
+  saveTotals(); await check()
+  const last = pending; pending = null
+  model.revision++; model.committed = model.draft
+  await act(async () => last.resolve(totalsResponse(model.revision, model.committed.values)))
+  await check()
+})
+
+it.each(Array.from({ length: 8 }, (_, mask) => mask))('matches explicit records for bounded Reload trace %i', async mask => {
+  const h = fixture(); canonicalReports(h, { response: totalsResponse(3, traceVersions[0].values) })
+  const download = traceDownload()
+  read(); await reportsLoaded(); await download(traceVersions[0])
+  let draft = traceVersions[mask & 4 ? 1 : 2]
+  fill(draft.values); await download(draft)
+  let resolve, reject
+  h.client.loadEngineeringTotals.mockReturnValueOnce(new Promise((pass, fail) => { resolve = pass; reject = fail }))
+  reloadTotals(); await download(draft)
+  expect(h.client.loadEngineeringTotals).toHaveBeenCalledTimes(2)
+  if (mask & 2) { draft = traceVersions[3]; fill(draft.values); await download(draft) }
+  if (mask & 1) await act(async () => reject(new Error('synthetic reload trace failure')))
+  else {
+    await act(async () => resolve(totalsResponse(4, traceVersions[1].values)))
+    if (!(mask & 2)) draft = traceVersions[1]
+  }
+  expect(inputValues()).toEqual(draft.values); await download(draft)
+  expect(h.client.saveEngineeringTotals).not.toHaveBeenCalled()
+  expect(screen.getByRole('button', { name: 'Save engineering totals' }).disabled).toBe(!(mask & 1) && !!(mask & 2))
+  h.client.loadEngineeringTotals.mockResolvedValueOnce(totalsResponse(5, traceVersions[2].values))
+  reloadTotals(); await screen.findByText('Saved engineering totals loaded.')
+  expect(h.client.loadEngineeringTotals).toHaveBeenCalledTimes(3)
+  expect(inputValues()).toEqual(traceVersions[2].values); await download(traceVersions[2])
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(6, traceVersions[2].values))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals).toHaveBeenCalledTimes(1)
+  expect(h.client.saveEngineeringTotals.mock.calls[0][0]).toMatchObject({ expectedRevision: 5, drafts: traceVersions[2].values })
+  expect(inputValues()).toEqual(traceVersions[2].values); await download(traceVersions[2])
+})
+
+it('checks three committed conflict rounds with alternating writers and explicit loser reloads', async () => {
+  const file = { response: totalsResponse() }
+  const panels = [fixture(), fixture()]
+  const download = traceDownload()
+  const histories = [[], []]
+  for (const h of panels) {
+    canonicalReports(h, file); h.ui = within(h.view.container)
+    fireEvent.click(h.ui.getByRole('button', { name: 'Read saved design' }))
+    await h.ui.findByText('No saved engineering totals. Entered drafts were retained.')
+  }
+  const edit = (h, version) => h.ui.getAllByRole('textbox').forEach((input, index) => fireEvent.change(input, { target: { value: version.values[index] } }))
+  for (let round = 1; round <= 3; round++) {
+    const winnerIndex = (round - 1) % 2, loserIndex = 1 - winnerIndex
+    const winner = panels[winnerIndex], loser = panels[loserIndex], version = traceVersions[round]
+    edit(winner, version); edit(loser, traceVersions[0])
+    histories[winnerIndex].push({ expectedRevision: round - 1, drafts: version.values })
+    fireEvent.click(winner.ui.getByRole('button', { name: 'Save engineering totals' }))
+    await winner.ui.findByText('Engineering totals saved.')
+    expect(file.response.data.revision).toBe(round)
+    expect(file.response.data.record.values).toEqual(version.values)
+    await download(version, winner.ui)
+    histories[loserIndex].push({ expectedRevision: round - 1, drafts: traceVersions[0].values })
+    fireEvent.click(loser.ui.getByRole('button', { name: 'Save engineering totals' }))
+    await loser.ui.findByText('Engineering totals changed. Reload saved engineering totals before saving.')
+    expect(file.response.data.revision).toBe(round)
+    expect(loser.ui.getAllByRole('textbox').map(input => input.value)).toEqual(traceVersions[0].values)
+    await download(traceVersions[0], loser.ui)
+    fireEvent.click(loser.ui.getByRole('button', { name: 'Reload saved engineering totals' }))
+    await loser.ui.findByText('Saved engineering totals loaded.')
+    expect(loser.ui.getAllByRole('textbox').map(input => input.value)).toEqual(version.values)
+    await download(version, loser.ui)
+    for (const [index, h] of panels.entries()) {
+      expect(h.client.saveEngineeringTotals.mock.calls.map(([args]) => ({ expectedRevision: args.expectedRevision, drafts: args.drafts }))).toEqual(histories[index])
+    }
+  }
+  const loser = panels[1]
+  loser.client.saveEngineeringTotals.mockRejectedValueOnce(new Error('synthetic baseline probe without commit'))
+  fireEvent.click(loser.ui.getByRole('button', { name: 'Save engineering totals' }))
+  await loser.ui.findByText(/Engineering totals could not be saved/)
+  expect(loser.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: 3, drafts: traceVersions[3].values })
+  expect(file.response.data.revision).toBe(3); await download(traceVersions[3], loser.ui)
+})
+
+it('recovers two committed writes with lost receipts using explicit Reload without duplicate commits', async () => {
+  const h = fixture(), file = canonicalReports(h)
+  const download = traceDownload()
+  let commits = 0
+  h.client.saveEngineeringTotals.mockImplementation(async ({ drafts, expectedRevision }) => {
+    expect(expectedRevision).toBe(file.response.data.revision)
+    file.response = totalsResponse(expectedRevision + 1, [...drafts]); commits++
+    throw new Error('synthetic lost receipt')
+  })
+  read(); await reportsLoaded()
+  for (let round = 1; round <= 2; round++) {
+    const version = traceVersions[round]
+    fill(version.values); saveTotals(); await screen.findByText(/Engineering totals could not be saved/)
+    expect(commits).toBe(round); expect(file.response.data.revision).toBe(round)
+    expect(file.response.data.record.values).toEqual(version.values)
+    expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: round - 1, drafts: version.values })
+    expect(inputValues()).toEqual(version.values); await download(version)
+    reloadTotals(); await screen.findByText('Saved engineering totals loaded.')
+    expect(inputValues()).toEqual(version.values); expect(commits).toBe(round); await download(version)
+  }
+  h.client.saveEngineeringTotals.mockRejectedValueOnce(new Error('synthetic no-commit baseline probe'))
+  saveTotals(); await screen.findByText(/Engineering totals could not be saved/)
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: 2, drafts: traceVersions[2].values })
+  expect(commits).toBe(2); expect(h.client.loadEngineeringTotals).toHaveBeenCalledTimes(3)
+  await download(traceVersions[2])
+})
+
+it('releases observers and timers through twenty mount and held-request cycles on one client', async () => {
+  vi.useFakeTimers()
+  const h = fixture(); canonicalReports(h)
+  h.client.loadEngineeringTotals.mockResolvedValue(totalsResponse(1, traceVersions[0].values))
+  const retired = []
+  let view = h.view
+  for (let cycle = 0; cycle < 20; cycle++) {
+    if (cycle) view = render(<ProjectReconciliationPanel {...h.props} />)
+    expect(h.listeners.size).toBe(1)
+    read(); await act(async () => {})
+    expect(screen.getByText('Saved design revision 9.')).toBeTruthy()
+    fill(traceVersions[1].values)
+    const method = cycle % 2 ? h.client.loadEngineeringTotals : h.client.saveEngineeringTotals
+    let resolve, reject
+    method.mockReturnValueOnce(new Promise((pass, fail) => { resolve = pass; reject = fail }))
+    if (cycle % 2) reloadTotals(); else saveTotals()
+    const request = method.mock.calls.at(-1)[0]
+    expect(request.signal.aborted).toBe(false); expect(vi.getTimerCount()).toBeGreaterThan(0)
+    retired.push({ resolve, reject, signal: request.signal })
+    view.unmount()
+    expect(request.signal.aborted).toBe(true)
+    expect(h.listeners.size).toBe(0); expect(vi.getTimerCount()).toBe(0)
+  }
+  const counts = [h.client.readContext.mock.calls.length, h.client.loadEngineeringTotals.mock.calls.length, h.client.saveEngineeringTotals.mock.calls.length]
+  for (const [index, request] of retired.reverse().entries()) {
+    await act(async () => index % 2 ? request.reject(new Error('synthetic retired receipt')) : request.resolve(totalsResponse(2, traceVersions[1].values)))
+    expect(request.signal.aborted).toBe(true)
+    expect(h.listeners.size).toBe(0); expect(vi.getTimerCount()).toBe(0)
+    expect(screen.queryByRole('region', { name: 'Engineering reconciliation' })).toBeNull()
+    expect([h.client.readContext.mock.calls.length, h.client.loadEngineeringTotals.mock.calls.length, h.client.saveEngineeringTotals.mock.calls.length]).toEqual(counts)
+  }
+})
+
 const privateErrors = ['<img src=x onerror="SYNTHETIC_PRIVATE_X05">', '\u0000\u001b[31mSYNTHETIC_PRIVATE_X05\r\n',
   'private credential SYNTHETIC_PRIVATE_X05']
 

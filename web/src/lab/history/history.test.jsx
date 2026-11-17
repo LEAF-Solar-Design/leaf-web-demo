@@ -19,7 +19,8 @@ const changes = [
   { op: 'replace', path: '/pipes', before: [], after: second.pipes },
 ]
 const copy = value => JSON.parse(JSON.stringify(value))
-const response = (data, status = 200) => ({ ok: status < 400, status, json: async () => copy(data) })
+const response = (data, status = 200) => ({ ok: status < 400, status,
+  json: async () => copy(data), text: async () => JSON.stringify(data) })
 const hash = value => createHash('sha256').update(canonicalJSON(value)).digest('hex')
 function exportFixture() {
   const identity = { tenant_id: 'test-tenant', doc_id: 'strategy', revision: 1, parent_revision: null,
@@ -903,4 +904,81 @@ describe('Strategy revision ledger', () => {
     expect(screen.getByText('replace /unknown')).toBeVisible()
     expect(screen.queryByText(/DO-NOT-RENDER/)).not.toBeInTheDocument()
   })
+})
+
+
+describe('original export response text', () => {
+  it('downloads the verified response bytes with the producer numeric spelling intact', async () => {
+    const { bundle, client, fetchImpl } = exportFixture()
+    const producer = bundle.parts.evaluations[0].complete_results['job-1']
+    const producerText = canonicalJSON(producer.result).replace('"score":2', '"score":2.0')
+    producer.result_sha256 = createHash('sha256').update(producerText + '\n').digest('hex')
+    bundle.manifest.parts.evaluations = hash(bundle.parts.evaluations)
+    const serverText = canonicalJSON(bundle).replace('"score":2', '"score":2.0')
+    const parsedDecoy = vi.fn(async () => ({ schema: 'different-response' }))
+    const originalFetch = fetchImpl.getMockImplementation()
+    fetchImpl.mockImplementation(async (url, init) => url.endsWith('/export')
+      ? { ok: true, status: 200, text: async () => serverText, json: parsedDecoy }
+      : originalFetch(url, init))
+    let downloaded
+    vi.stubGlobal('URL', class extends URL {
+      static createObjectURL(blob) { downloaded = blob; return 'blob:raw-export' }
+      static revokeObjectURL() {}
+    })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    render(<HistoryView client={client} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Export', exact: true })).toBeEnabled())
+    fireEvent.change(screen.getByLabelText('Export revision'), { target: { value: '1' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Export', exact: true }))
+    await screen.findByText('Exported r1.')
+    const downloadedText = await blobText(downloaded)
+    expect(downloadedText).toBe(serverText)
+    const jobOffset = downloadedText.indexOf('"job-1":')
+    const resultOffset = downloadedText.indexOf('"result":', jobOffset) + '"result":'.length
+    const digestOffset = downloadedText.indexOf(',"result_sha256":', resultOffset)
+    const downloadedResult = downloadedText.slice(resultOffset, digestOffset)
+    expect(createHash('sha256').update(downloadedResult + '\n').digest('hex')).toBe(producer.result_sha256)
+    expect(verifyLabBundle(JSON.parse(downloadedText))).toEqual(bundle)
+    expect(parsedDecoy).not.toHaveBeenCalled()
+  })
+
+  it('rejects tampered response text even when a separate JSON reader would return a valid bundle', async () => {
+    const { bundle, client, fetchImpl } = exportFixture()
+    const serverText = canonicalJSON(bundle).replace('"field":"price"', '"field":"tampered"')
+    const parsedDecoy = vi.fn(async () => bundle)
+    const originalFetch = fetchImpl.getMockImplementation()
+    fetchImpl.mockImplementation(async (url, init) => url.endsWith('/export')
+      ? { ok: true, status: 200, text: async () => serverText, json: parsedDecoy }
+      : originalFetch(url, init))
+    const createObjectURL = vi.fn()
+    vi.stubGlobal('URL', class extends URL {
+      static createObjectURL = createObjectURL
+      static revokeObjectURL() {}
+    })
+    render(<HistoryView client={client} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Export', exact: true })).toBeEnabled())
+    fireEvent.click(screen.getByRole('button', { name: 'Export', exact: true }))
+    await screen.findByText('Export failed: Bundle integrity check failed. No graph was opened.')
+    expect(createObjectURL).not.toHaveBeenCalled()
+    expect(parsedDecoy).not.toHaveBeenCalled()
+    expect(client.state.restoredGraph).toBeNull()
+  })
+
+  it.each(['document', 'account'])('refuses retained response text after a %s change', async change => {
+    const { bundle, client, fetchImpl } = exportFixture()
+    const body = deferred()
+    fetchImpl.mockResolvedValueOnce({ ok: true, status: 200, text: () => body.promise })
+    const exporting = client.exportBundle('strategy', 1, { preserveText: true })
+    const tenant = config.tenant
+    try {
+      if (change === 'document') client.setDocId('other')
+      else config.tenant = 'another-tenant'
+      body.resolve(JSON.stringify(bundle))
+      const result = await exporting
+      expect(result).toMatchObject({ ok: false })
+      expect(result).not.toHaveProperty('text')
+      expect(client.state.openedBundle).toBeNull()
+    } finally { config.tenant = tenant }
+  })
+
 })

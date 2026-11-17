@@ -75,7 +75,7 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
   const authority = () => canonicalJSON([config.apiBase, config.tenant, authHeaders()])
   const maximum = (left, right) => right == null ? left : left == null ? right : Math.max(left, right)
   const merge = rows => [...new Map([...state.revisions, ...rows].map(row => [row.revision, row])).values()].sort((a, b) => a.revision - b.revision)
-  async function request(id, path, body, resolveConflict = true, token = capture(id), method = body === undefined ? 'GET' : 'POST') {
+  async function request(id, path, body, resolveConflict = true, token = capture(id), method = body === undefined ? 'GET' : 'POST', readBody = null) {
     identifier(id)
     const started = now()
     try {
@@ -84,7 +84,7 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
         headers: { accept: 'application/json', 'content-type': 'application/json', 'X-Tenant-Id': config.tenant, ...authHeaders() },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       }, path.endsWith('/export') ? EXPORT_RESPONSE_TIMEOUT_MS : undefined)
-      const data = await response.json().catch(() => ({}))
+      const data = await (response.ok && readBody ? readBody(response) : response.json()).catch(() => ({}))
       if (response.ok) {
         if (data.graph && data.sha256) graphLayouts.set(data.graph, { load: () => getLayout(id, data.sha256) })
         return { ...data, ok: true }
@@ -203,16 +203,22 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
       return result
     },
     revision: (id, n) => request(id, `revisions/${encodeURIComponent(n)}`),
-    async exportBundle(id, revision) {
+    async exportBundle(id, revision, { preserveText = false } = {}) {
       const token = capture(id), scope = authority()
-      const result = await request(id, `revisions/${encodeURIComponent(revision)}/export`, undefined, false, token)
+      let text
+      const readBody = preserveText ? async response => {
+        text = await response.text()
+        return JSON.parse(text)
+      } : null
+      const result = await request(id, `revisions/${encodeURIComponent(revision)}/export`,
+        undefined, false, token, 'GET', readBody)
       if (!result.ok) return result
       if (!current(token) || scope !== authority()) return { ok: false, detail: 'Document or account changed. Try exporting again.' }
       try {
         const { ok: unused, ...bundle } = result
         verifyLabBundle(bundle)
         if (bundle.parts.identity.doc_id !== id || bundle.parts.identity.revision !== Number(revision)) throw new Error(bundleError)
-        return { ok: true, bundle }
+        return preserveText ? { ok: true, bundle, text } : { ok: true, bundle }
       } catch { return { ok: false, detail: bundleError } }
     },
     async reopenBundle(text) {
