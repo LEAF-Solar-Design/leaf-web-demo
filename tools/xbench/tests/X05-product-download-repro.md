@@ -1313,3 +1313,37 @@ CSV mismatch or wrong revision. No video is used. The first exploratory run
 reached the final Save but used an incorrect dictionary assertion for the
 stored values array. The successful run checks the actual five-value array.
 Frozen staging grading still awaits its admitted source and window.
+
+
+## Three-round conflict recovery replay
+
+Parent X05 report persistence. Executed support fixture:
+`D:/agent-data/leaf-research/studio-xbench-2026-11/synthetic-tests/x05-three-conflicts-hjradxa6/replay.py`.
+Two actual panels use one persistence client and synthetic file storage with
+revision CAS. Saved-design reads are mocked. Use a 1920 by 2200 viewport with
+forced colors active so both complete panels and actions fit. No video is used.
+
+1. Read saved design in A and B. Both show no saved report. In round 1 A wins,
+   round 2 B wins, and round 3 A wins. Winner inputs for each round are
+   `002,0,01,1,0.6`, `003,00,1,01,0.5`, and `004,0,01,01,0.7`.
+   Before each round enter loser inputs `01,00,01,01,0.400`.
+2. Save the winner and require the saved cue. Inspect the synthetic file:
+   its revision must equal the round number and all five stored lexemes must
+   equal that round's winner inputs. Download `round-N-winner.csv`.
+3. Save the loser and require the changed/reload-required cue. Its own drafts
+   remain unchanged, and the file revision must not advance. Download
+   `round-N-conflict.csv` with the loser's exact values.
+4. Explicitly Reload the loser and require the loaded cue and all five winner
+   lexemes. Download `round-N-reload.csv`; it must equal the winner CSV.
+   Repeat through all three rounds. Each actual CSV must equal all five
+   normalized visible rows: nine downloads, 45 row pairs in total.
+5. Require write baselines `0,0,1,1,2,2`, exactly three commits and final
+   file revision 3. Inspect `three-rounds-saved.png` for complete panel fit.
+   Unmount both panels and require zero observers. Close context, browser,
+   server and thread in finally. Preserve proof.json, traffic, source hashes,
+   nine CSVs, screenshot, executable replay and this recipe.
+
+Stop on a protected prompt, lost draft, implicit extra commit, wrong baseline,
+CSV mismatch or missing conflict cue. Support setup controls synthetic storage;
+the visible actions use actual panel controls. Frozen staging grading still
+awaits its admitted source and window.
