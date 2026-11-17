@@ -23,7 +23,7 @@ def _model(entity):
 
 
 def _selection_window(params):
-    if "selection_window" not in params:
+    if params.get("selection_window") is None:
         return None
     bounds = params["selection_window"]
     if not isinstance(bounds, list) or len(bounds) != 4:

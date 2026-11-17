@@ -99,7 +99,24 @@ def test_design_window_counts_one_copy_and_records_exact_highlights_through_load
     assert intake == before
 
 
-@pytest.mark.parametrize("bounds", [None, [], [0, 1, 2], [0, 0, 1, float("nan")],
+def test_null_window_preserves_omission_and_lab_projection():
+    import lab_tool_manifests
+
+    intake = {"inserts": [{"name": "Panel", "layer": "Design", "handle": "A"}]}
+    assert module.run(intake, {"selection_window": None}) == module.run(intake, {})
+    identity = module.run(intake, {})[0]["sets"][0]["set_id"]
+    assert module.run(intake, {"set_id": identity, "selection_window": None}) == module.run(
+        intake, {"set_id": identity})
+    tool = next(t for t in json.loads((PATH.parents[2] / "engine/registry.json").read_text())["tools"]
+                if t["name"] == "count-modules")
+    projection = lab_tool_manifests.project_tool(tool, "builtin")
+    assert projection.reason is None
+    assert projection.manifest["sample_input"]["selection-window"] is None
+    pin = projection.manifest["inputs"]["selection-window"]
+    assert pin["nullable"] and pin["has_default"] and pin["default"] is None
+
+
+@pytest.mark.parametrize("bounds", [[],  [0, 1, 2], [0, 0, 1, float("nan")],
     [False, 0, 1, 1], ["0", 0, 1, 1], [1, 0, 1, 2], [2, 0, 1, 2]])
 def test_invalid_design_windows_refuse_atomically(bounds):
     with pytest.raises(ValueError, match="window"):
