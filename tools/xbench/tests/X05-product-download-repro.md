@@ -1148,3 +1148,37 @@ lost newer draft, CSV mismatch or wrong revision. The support fixture controls
 the delayed transport receipts. Product actions use the visible controls.
 This run proves offline synthetic persistence and browser rendering. Frozen
 staging grading still requires its admitted window and source receipt.
+
+
+## Expired Reload rejection replay
+
+Parent X05 report persistence. The executed support fixture is
+`D:/agent-data/leaf-research/studio-xbench-2026-11/synthetic-tests/x05-stale-rejection-z4ox8_u6/replay.py`.
+Use its saved source hashes, synthetic project-file API and mocked saved-design
+read. Two actual panels share one actual persistence client. The 1920 by 2200
+forced-colors viewport shows both complete panels and their controls.
+
+1. Read saved design in A and B. In A enter `001,0,01,1,0.4` and Save.
+   Require the saved cue and synthetic file revision 1.
+2. Hold A's next report GET at the mocked fetch boundary. Click Reload and
+   wait for the actual 20-second timeout. Require retry feedback and an
+   aborted old signal. Keep the expired promise available to reject later.
+3. In B Reload revision 1, enter `003,0,01,1,0.6` and Save. Require revision 2.
+   In A Reload again and require the saved-load cue and those exact values.
+   Download `newer-reload.csv` through A's visible button.
+4. Reject the expired predecessor using the support fixture. Require the
+   accepted saved-load cue, retained `003` and `0.6`, and zero stale load-error
+   messages. Download `after-expired-rejection.csv`. Both files must equal
+   their five normalized visible rows and each other. The DC row shows
+   Studio `0.4`, report `0.6`, delta `-0.2` and FAIL. Capture
+   `newer-load-survives-rejection.png`.
+5. In A enter `004,0,01,1,0.7` and Save. Require expected revision 2 and
+   committed revision 3. The complete write baseline sequence is `0,1,2`.
+6. Unmount both panels and require zero observers. Close context, browser,
+   server and thread in `finally`. Preserve `proof.json`, the synthetic file,
+   CSVs, screenshot, executable replay and this settled recipe. No video is used.
+
+Stop on a protected prompt, stale error, changed accepted value, CSV mismatch
+or wrong revision. The support fixture controls only transport timing and
+synthetic material. Product actions use visible controls. This is offline
+browser evidence. Frozen staging grading awaits its admitted window.
