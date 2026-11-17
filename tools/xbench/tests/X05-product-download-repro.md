@@ -56,6 +56,13 @@ count, and DC remains UNREADABLE without positive module/panel power evidence;
 neither becomes an inferred zero. Its actual five-row CSV, normalized DOM,
 literal expected bytes, screenshot and hashes join the same cleanup-bearing proof.
 
+The final report-persistence replay enables a local mocked canonical-file API.
+Only the synthetic artifact file stores totals; the panel uses no browser storage.
+It saves exact report strings including blank DC, reloads the page and explicitly
+reads them back, then simulates another writer. A stale Save must return 409 and
+leave the entire canonical file byte-identical until explicit report reload.
+The mock is replay infrastructure, not a call to any live project API.
+
 ```python
 import csv
 import copy
@@ -146,6 +153,20 @@ const render = (solarBinding, authorityKey, projectClient) => root.render(
     projectClient={projectClient} isCurrent={isCurrent} />);
 window.switchDrawing = () => render(nextBinding, 'synthetic-next', nextClient);
 window.oldReadAborted = () => oldSignal?.aborted === true;
+window.enableReportPersistence = () => {
+  const exchange = async (method, body, signal) => {
+    const result = await fetch('/mock-engineering-totals', {
+      method, signal, headers: {'Content-Type': 'application/json'},
+      ...(body ? {body: JSON.stringify(body)} : {}),
+    });
+    return {ok: result.ok, status: result.status, data: await result.json()};
+  };
+  const reportClient = {...client, readContext: async () => structuredClone(response),
+    loadEngineeringTotals: ({signal}) => exchange('GET', null, signal),
+    saveEngineeringTotals: ({signal, ...body}) => exchange('POST', body, signal),
+  };
+  render(binding, 'synthetic', reportClient);
+};
 render(binding, 'synthetic', client);
 ''', encoding='utf-8')
 command = [str(repo / 'web/node_modules/@esbuild/win32-x64/esbuild.exe'), str(entry),
@@ -165,9 +186,48 @@ if (repo / 'web/public/fonts').is_dir():
 <link rel="stylesheet" href="/styles.css"></head><body>
 <main id="root"></main><script type="module" src="/app.js"></script></body></html>''', encoding='utf-8')
 
+canonical_file = artifact / 'mock-canonical-project.json'
+canonical_file.write_text(json.dumps(dict(intake=response['data']['intake'], version=7,
+    record=None, revision=0, receipts={})), encoding='utf-8')
+canonical_lock = threading.Lock()
 class QuietHandler(SimpleHTTPRequestHandler):
     def log_message(self, *args):
         pass
+    def report_reply(self, status, document):
+        payload = json.dumps(document).encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+    def do_GET(self):
+        if self.path != '/mock-engineering-totals':
+            return super().do_GET()
+        with canonical_lock:
+            document = json.loads(canonical_file.read_text(encoding='utf-8'))
+            self.report_reply(200, dict(record=document['record'], revision=document['revision'], canWrite=True))
+    def do_POST(self):
+        assert self.path == '/mock-engineering-totals'
+        request = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        with canonical_lock:
+            document = json.loads(canonical_file.read_text(encoding='utf-8'))
+            key = request['idempotencyKey']
+            receipt = document['receipts'].get(key)
+            if receipt:
+                assert receipt['request'] == request
+                return self.report_reply(200, receipt['response'])
+            if request['expectedRevision'] != document['revision']:
+                return self.report_reply(409, {})
+            assert request['graphSha256'] == 'a' * 64
+            assert len(request['drafts']) == 5 and all(isinstance(v, str) for v in request['drafts'])
+            document['record'] = dict(schema='leaf.engineering-reconciliation.v1', binding={k: v for k, v in binding.items() if k != 'kind'},
+                graph_sha256=request['graphSha256'], values=request['drafts'],
+                provenance='user_supplied_unverified')
+            document['revision'] += 1
+            result = dict(record=document['record'], revision=document['revision'], canWrite=True)
+            document['receipts'][key] = dict(request=request, response=result)
+            canonical_file.write_text(json.dumps(document), encoding='utf-8')
+            self.report_reply(200, result)
 
 server = thread = browser = context = playwright = None
 thread_started = False
@@ -663,6 +723,52 @@ try:
                      fresh_without_reports=fresh_without_reports, old_drafts=old_drafts,
                      new_drafts=new_drafts, new_read_count=1, downloads=downloads_after_switch,
                      comparison=isolated)
+    # Return to the original synthetic scope in a fresh page, with a file-backed mock API.
+    page.reload(wait_until='networkidle')
+    page.evaluate('window.enableReportPersistence()')
+    read.click()
+    expect(page.get_by_text('No saved engineering totals. Entered drafts were retained.', exact=True)).to_be_visible()
+    persisted_values = ['002', '01', '02', '01', '']
+    for label, value in zip(labels, persisted_values):
+        page.get_by_role('textbox', name=label + ' engineering report/BOM', exact=True).fill(value)
+    save = page.get_by_role('button', name='Save engineering totals', exact=True)
+    save.click()
+    expect(page.get_by_text('Engineering totals saved.', exact=True)).to_be_visible()
+    first_document = json.loads(canonical_file.read_text(encoding='utf-8'))
+    assert first_document['record']['values'] == persisted_values
+    assert first_document['intake'] == response['data']['intake'] and first_document['version'] == 7
+    page.reload(wait_until='networkidle')
+    page.evaluate('window.enableReportPersistence()')
+    assert page.get_by_role('textbox').evaluate_all('(nodes) => nodes.map(n => n.value)') == ['', '', '', '', '']
+    read.click()
+    expect(page.get_by_text('Saved engineering totals loaded.', exact=True)).to_be_visible()
+    assert page.get_by_role('textbox').evaluate_all('(nodes) => nodes.map(n => n.value)') == persisted_values
+    restored = capture_comparison('canonical-report-restored-blank-dc')
+    assert restored['downloaded'][-1]['oracle'] == restored['downloaded'][-1]['delta'] == ''
+    assert restored['downloaded'][-1]['verdict'] == 'UNREADABLE'
+    newer_values = ['003', '01', '02', '01', '0.8']
+    external = context.request.post(origin + '/mock-engineering-totals', data=dict(
+        graphSha256='a' * 64, drafts=newer_values, expectedRevision=1,
+        idempotencyKey='synthetic-other-writer'))
+    assert external.status == 200
+    newer_bytes = canonical_file.read_bytes()
+    page.get_by_role('textbox', name='Panels engineering report/BOM', exact=True).fill('004')
+    save.click()
+    expect(page.get_by_text('Engineering totals changed. Reload saved engineering totals before saving.', exact=True)).to_be_visible()
+    expect(save).to_be_disabled()
+    assert canonical_file.read_bytes() == newer_bytes
+    assert page.get_by_role('textbox').evaluate_all('(nodes) => nodes.map(n => n.value)')[0] == '004'
+    page.screenshot(path=str(artifact / 'canonical-stale-save-rejected.png'), full_page=True)
+    page.get_by_role('button', name='Reload saved engineering totals', exact=True).click()
+    expect(page.get_by_text('Saved engineering totals loaded.', exact=True)).to_be_visible()
+    assert page.get_by_role('textbox').evaluate_all('(nodes) => nodes.map(n => n.value)') == newer_values
+    assert canonical_file.read_bytes() == newer_bytes
+    final_document = json.loads(newer_bytes)
+    assert final_document['intake'] == first_document['intake'] and final_document['version'] == 7
+    report_persistence = dict(restored=restored, exact_values=persisted_values, blank_dc=True,
+        stale_save_rejected=True, stale_save_file_bytes_unchanged=True,
+        explicit_reload_values=newer_values, graph_and_version_unchanged=True,
+        canonical_file_sha256=hashlib.sha256(newer_bytes).hexdigest())
     def digest(path):
         return hashlib.sha256(path.read_bytes()).hexdigest()
     inputs = json.loads((artifact / 'meta.json').read_text(encoding='utf-8'))['inputs']
@@ -677,6 +783,7 @@ try:
                  valid_empty_design=empty_design,
                  failed_refresh_export_isolation=failed_refresh,
                  stalled_read_timeout_recovery=timeout_recovery,
+                 canonical_report_persistence=report_persistence,
                  keyboard_read_retry=True, keyboard_export_retry=True,
                  source_sha256={str(path): digest(path) for path in sorted(sources)},
                  artifact_sha256={path.name: digest(path) for path in artifact.iterdir() if path.is_file()})
