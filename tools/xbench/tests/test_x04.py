@@ -411,6 +411,7 @@ def test_count_modules_live_uses_manifest_selection_and_records_catalog(fixture,
     assert row["steps"]["5"] == row["steps"]["6"] == "PASS"
     assert row["counts"] == [12]
     assert row["tool"] == MODULE_TOOL and row["limits"] == []
+    assert row["candidate_sets"] == [DESIGN_SET]
     calls = module_calls(client)
     assert calls[0]["json_body"] == {
         "tool": "count-modules", "catalog_digest": MODULE_TOOL["catalog_digest"], "dwg": "v",
@@ -448,6 +449,7 @@ def test_competing_module_set_selected_through_picker_api(fixture):
     row = grade(fixture, client)
     assert row["steps"]["5"] == row["steps"]["6"] == "PASS"
     assert row["evidence"]["6"] == "module_set selected"
+    assert row["candidate_sets"] == [OTHER_SET, DESIGN_SET]
     assert module_calls(client)[1]["json_body"]["params"]["set_ids"] == [DESIGN_SET["set_id"]]
 
 
@@ -471,8 +473,61 @@ def test_competing_sets_without_manifest_binding_are_unreadable(fixture):
     del fixture["module_set"]
     row = grade(fixture, client)
     assert row["steps"]["5"] == row["steps"]["6"] == "UNREADABLE"
-    assert row["evidence"]["6"] == "no module_set bound in manifest"
+    assert row["candidate_sets"] == [OTHER_SET, DESIGN_SET]
+    assert row["evidence"]["5"] == row["evidence"]["6"] == (
+        "no module_set bound in manifest; 2 candidates; top three: "
+        f"{OTHER_SET['set_id']} (Alternate/Panel B, 24); "
+        f"{DESIGN_SET['set_id']} (Modules/MODULE, 12)")
     assert len(module_calls(client)) == 1
+
+
+def test_unbound_candidates_are_sorted_and_evidence_shows_only_top_three(fixture):
+    client = module_client(fixture)
+    del fixture["module_set"]
+    sets = [{**DESIGN_SET, "set_id": set_id, "count": count, "extra": "ignored"}
+            for set_id, count in [("z", 12), ("b", 24), ("a", 24), ("c", 18)]]
+    client.module_responses[0][1]["result"]["sets"] = sets
+    row = grade(fixture, client)
+    assert row["candidate_sets"] == [
+        {key: item[key] for key in ("set_id", "layer", "block", "entity_type", "count")}
+        for item in (sets[2], sets[1], sets[3], sets[0])]
+    assert row["steps"]["5"] == row["steps"]["6"] == "UNREADABLE"
+    assert row["evidence"]["5"] == row["evidence"]["6"] == (
+        "no module_set bound in manifest; 4 candidates; top three: "
+        "a (Modules/MODULE, 24); b (Modules/MODULE, 24); c (Modules/MODULE, 18)")
+    assert len(module_calls(client)) == 1
+
+
+def test_single_unbound_candidate_preserves_nothing_to_pick_verdict(fixture):
+    client = module_client(fixture)
+    del fixture["module_set"]
+    row = grade(fixture, client)
+    assert row["candidate_sets"] == [DESIGN_SET]
+    assert row["steps"]["5"] == "UNREADABLE"
+    assert "1 candidates" in row["evidence"]["5"]
+    assert row["steps"]["6"] == "PASS"
+    assert row["evidence"]["6"] == "nothing to pick"
+
+
+@pytest.mark.parametrize("bound", [False, True])
+def test_recorded_candidates_are_capped_without_limiting_selection(fixture, bound):
+    client = module_client(fixture)
+    if not bound:
+        del fixture["module_set"]
+    sets = [DESIGN_SET, *[{**OTHER_SET, "set_id": f"set-{n:02}", "count": 100 + n}
+                          for n in range(51)]]
+    for _, body in client.module_responses:
+        body["result"]["sets"] = deepcopy(sets)
+    row = grade(fixture, client)
+    assert row["candidate_sets"] == list(reversed(sets[2:]))
+    assert len(row["candidate_sets"]) == 50
+    if bound:
+        assert row["steps"]["5"] == row["steps"]["6"] == "PASS"
+        assert row["counts"] == [12]
+        assert row["module_set"] == {"set_ids": [DESIGN_SET["set_id"]]}
+    else:
+        assert row["steps"]["5"] == row["steps"]["6"] == "UNREADABLE"
+        assert "52 candidates" in row["evidence"]["5"]
 
 
 @pytest.mark.parametrize("catalog_live", [False, True])
