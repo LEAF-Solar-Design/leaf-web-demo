@@ -125,7 +125,7 @@ function canonicalReports(h, file = { response: totalsResponse() }) {
 }
 const reportsLoaded = () => screen.findByText(/No saved engineering totals|Saved engineering totals loaded/)
 
-function sharedPanels() {
+function sharedPanels({ late = false } = {}) {
   const listeners = new Set()
   const h = { snapshot: { binding, authorityKey: 'a' } }
   h.client = { getSnapshot: () => h.snapshot,
@@ -142,8 +142,127 @@ function sharedPanels() {
       values: () => query.getAllByRole('textbox').map(input => input.value),
       loaded: () => query.findByText(/No saved engineering totals|Saved engineering totals loaded/) }
   }
-  return { h, file, listeners, a: panel('Client A'), b: panel('Client B') }
+  return { h, file, listeners, mount: panel, a: panel('Client A'), b: late ? null : panel('Client B') }
 }
+
+it('requires a late subscriber fresh Read without inheriting its shared-client sibling dirty state', async () => {
+  const { h, file, a, mount } = sharedPanels({ late: true })
+  a.click('Read saved design'); await a.loaded(); a.fill(reportValues)
+  let settle
+  h.client.saveEngineeringTotals.mockImplementationOnce(({ drafts }) => {
+    file.response = totalsResponse(1, drafts)
+    return new Promise(resolve => { settle = resolve })
+  })
+  a.click('Save engineering totals')
+  const b = mount('Client B')
+  expect(b.values()).toEqual(['', '', '', '', ''])
+  expect(b.query.getByRole('button', { name: 'Save engineering totals' }).disabled).toBe(true)
+  expect(h.client.loadEngineeringTotals).toHaveBeenCalledTimes(1)
+  b.click('Read saved design'); await b.loaded(); expect(b.values()).toEqual(reportValues)
+  const next = ['3', '0', '1', '1', '0.6']; b.fill(next); b.click('Save engineering totals')
+  await b.query.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0].expectedRevision).toBe(1)
+  await act(async () => settle(totalsResponse(1, reportValues)))
+  expect(b.values()).toEqual(next); expect(a.values()).toEqual(reportValues)
+  b.click('Save engineering totals'); await b.query.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0].expectedRevision).toBe(2)
+})
+
+it('exports a sibling own five rows twice during Save with exact URL cleanup and no extra transport', async () => {
+  const { h, a, b } = sharedPanels()
+  a.click('Read saved design'); b.click('Read saved design'); await a.loaded(); await b.loaded()
+  a.fill(reportValues); const bv = ['002', '00', '01', '01', '0.400']; b.fill(bv)
+  h.client.saveEngineeringTotals.mockReturnValueOnce(new Promise(() => {})); a.click('Save engineering totals')
+  const loads = h.client.loadEngineeringTotals.mock.calls.length, saves = h.client.saveEngineeringTotals.mock.calls.length
+  let n = 0; const createObjectURL = vi.fn(() => `blob:sibling-${++n}`), revokeObjectURL = vi.fn()
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL })
+  const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  const expected = 'metric,studio,oracle,delta,verdict\r\n' +
+    '"panels","1","002","-1","FAIL"\r\n"optimizers","","00","","UNREADABLE"\r\n' +
+    '"inverters","1","01","0","PASS"\r\n"strings","1","01","0","PASS"\r\n' +
+    '"kw_dc","0.4","0.400","0","PASS"\r\n'
+  for (let i = 0; i < 2; i++) {
+    b.click('Download CSV'); expect(await blobText(createObjectURL.mock.calls[i][0])).toBe(expected)
+  }
+  expect(click).toHaveBeenCalledTimes(2); expect(revokeObjectURL.mock.calls).toEqual([['blob:sibling-1'], ['blob:sibling-2']])
+  expect(h.client.loadEngineeringTotals).toHaveBeenCalledTimes(loads)
+  expect(h.client.saveEngineeringTotals).toHaveBeenCalledTimes(saves); expect(b.values()).toEqual(bv)
+})
+
+it('replaces one shared-client Save observer without cancelling its sibling Reload or baseline', async () => {
+  const { h, listeners, a, b } = sharedPanels()
+  a.click('Read saved design'); b.click('Read saved design'); await a.loaded(); await b.loaded()
+  a.fill(reportValues); let settleA, settleB
+  h.client.saveEngineeringTotals.mockReturnValueOnce(new Promise(resolve => { settleA = resolve }))
+  h.client.loadEngineeringTotals.mockReturnValueOnce(new Promise(resolve => { settleB = resolve }))
+  a.click('Save engineering totals'); b.click('Reload saved engineering totals')
+  const oldA = h.client.saveEngineeringTotals.mock.calls.at(-1)[0], oldB = h.client.loadEngineeringTotals.mock.calls.at(-1)[0]
+  const fresh = { client: { ...h.client, subscribe: vi.fn(() => () => {}), readContext: vi.fn(async () => response()) } }
+  const av = ['7', '0', '1', '1', '0.7'], bv = ['2', '0', '1', '1', '0.5']
+  canonicalReports(fresh, { response: totalsResponse(7, av) }); a.update({ projectClient: fresh.client })
+  expect(oldA.signal.aborted).toBe(true); expect(oldB.signal.aborted).toBe(false); expect(listeners.size).toBe(1)
+  expect(a.query.getByRole('button', { name: 'Save engineering totals' }).disabled).toBe(true)
+  a.click('Read saved design'); await a.loaded()
+  await act(async () => settleB(totalsResponse(2, bv))); await b.loaded()
+  await act(async () => settleA(totalsResponse(1, reportValues)))
+  expect(a.values()).toEqual(av); expect(b.values()).toEqual(bv)
+  a.click('Save engineering totals'); await a.query.findByText('Engineering totals saved.')
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(3, bv))
+  b.click('Save engineering totals'); await b.query.findByText('Engineering totals saved.')
+  expect(fresh.client.saveEngineeringTotals.mock.calls[0][0].expectedRevision).toBe(7)
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0].expectedRevision).toBe(2)
+})
+
+it('isolates a rejected shared-client Save after its sibling accepts a newer Reload', async () => {
+  const { h, a, b } = sharedPanels()
+  a.click('Read saved design'); b.click('Read saved design'); await a.loaded(); await b.loaded()
+  a.fill(reportValues); let reject
+  h.client.saveEngineeringTotals.mockReturnValueOnce(new Promise((_resolve, no) => { reject = no }))
+  a.click('Save engineering totals')
+  const fresh = ['3', '0', '1', '1', '0.6']
+  h.client.loadEngineeringTotals.mockResolvedValueOnce(totalsResponse(7, fresh))
+  b.click('Reload saved engineering totals'); await b.loaded()
+  const createObjectURL = vi.fn(() => 'blob:rejected-sibling')
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  b.click('Download CSV'); const before = await blobText(createObjectURL.mock.calls[0][0])
+  await act(async () => reject(new Error('PRIVATE_WRITER_REJECTION')))
+  expect(a.query.getByText(/Engineering totals could not be saved/)).toBeTruthy()
+  expect(b.query.queryByText(/could not be saved|PRIVATE_WRITER_REJECTION/)).toBeNull()
+  expect(a.values()).toEqual(reportValues); expect(b.values()).toEqual(fresh)
+  b.click('Download CSV'); expect(await blobText(createObjectURL.mock.calls[1][0])).toBe(before)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(8, fresh))
+  b.click('Save engineering totals'); await b.query.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0].expectedRevision).toBe(7)
+})
+
+it.each([[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]])('arbitrates three-panel CAS commit order %j with one winner and two explicit recoveries', async (...order) => {
+  const { h, file, a, b, mount } = sharedPanels(); const c = mount('Client C'), panels = [a, b, c]
+  const values = panels.map((_p, i) => [String(i + 1), '0', '1', '1', '0.4'])
+  for (let i = 0; i < 3; i++) { panels[i].click('Read saved design'); await panels[i].loaded(); panels[i].fill(values[i]) }
+  const writes = []
+  h.client.saveEngineeringTotals.mockImplementation(request => new Promise(resolve => { writes.push({ request, resolve }) }))
+  for (const panel of panels) panel.click('Save engineering totals')
+  expect(writes.map(x => x.request.expectedRevision)).toEqual([0, 0, 0])
+  for (const i of order) await act(async () => {
+    const { request, resolve } = writes[i]
+    if (request.expectedRevision !== file.response.data.revision) resolve({ ok: false, status: 409 })
+    else { file.response = totalsResponse(1, request.drafts); resolve(structuredClone(file.response)) }
+  })
+  const winner = order[0]
+  expect(file.response.data.record.values).toEqual(values[winner]); expect(file.response.data.revision).toBe(1)
+  for (let i = 0; i < 3; i++) {
+    expect(panels[i].values()).toEqual(values[i])
+    expect(panels[i].query.getByText(i === winner ? 'Engineering totals saved.' : 'Engineering totals changed. Reload saved engineering totals before saving.')).toBeTruthy()
+  }
+  canonicalReports(h, file)
+  for (const i of order.slice(1)) {
+    panels[i].click('Reload saved engineering totals'); await panels[i].loaded()
+    panels[i].fill(values[i]); panels[i].click('Save engineering totals'); await panels[i].query.findByText('Engineering totals saved.')
+  }
+  expect(file.response.data.revision).toBe(3)
+  expect(h.client.saveEngineeringTotals.mock.calls.map(([x]) => x.expectedRevision)).toEqual([1, 2])
+})
 
 function replacementClient(h, revision, values) {
   const fresh = { client: { ...h.client, readContext: vi.fn(async () => response()),
