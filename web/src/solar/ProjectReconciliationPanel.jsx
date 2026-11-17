@@ -104,7 +104,7 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
   const canSave = canExport && !storagePending && totals?.canWrite === true &&
     totals?.hash === saved.hash && Number.isSafeInteger(totals?.revision) && !totals?.conflict && typeof projectClient.saveEngineeringTotals === 'function'
   async function store(operation, hash, readGeneration, reload = false) {
-    if (!current() || storageRequest.current) return
+    if (!current() || storageRequest.current || generation.current !== readGeneration) return
     const abort = new AbortController()
     const active = { abort, observer: scope.observer, operation }
     storageRequest.current = active
