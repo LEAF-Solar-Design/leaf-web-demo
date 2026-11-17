@@ -7,12 +7,17 @@ Names use slash normalization solely for comparison, never as filesystem paths.
 
 from collections import Counter
 from hashlib import sha256
+import json
+import math
 import re
 
 MAX_MEMBERS = 128
 MAX_MEMBER_BYTES = 1_048_576
 MAX_TOTAL_BYTES = 8_388_608
 MAX_DIAGNOSTICS = 32
+MAX_JSON_CHARS = 262_144
+MAX_JSON_DEPTH = 16
+_MEMBER_FIELDS = {"name", "fixture", "stage", "byte_length", "sha256", "design_version"}
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}\Z")
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
 _NAME = re.compile(r"[A-Za-z0-9_./\\-]{1,160}\Z")
@@ -39,6 +44,7 @@ def _result(errors, *, previous=(), **details):
         total += result["diagnostic_total"]
         examples.extend(result["diagnostics"])
     examples.extend(errors)
+    examples.sort(key=lambda e: tuple((key, e[key]) for key in sorted(e)))
     return {"ok": total == 0, "diagnostic_total": total,
             "diagnostic_counts": dict(sorted(counts.items())),
             "diagnostics": examples[:MAX_DIAGNOSTICS], "integrity_verified": False,
@@ -49,12 +55,32 @@ def _error(errors, code, **indices):
     errors.append({"code": code, **indices})
 
 
+def _sort_value(value):
+    if type(value) is str:
+        return ("str", (_name(value) or value)[:161])
+    if type(value) is int:
+        return ("int", max(-1, min(value, MAX_TOTAL_BYTES + 1)))
+    return (type(value).__name__, "")
+
+
+def _ordered_rows(rows):
+    """Canonical diagnostic ranks, with original positions kept separately."""
+    def key(pair):
+        row = pair[1]
+        if type(row) is not dict:
+            return (_sort_value(row),)
+        return tuple(_sort_value(row.get(field)) for field in
+                     ("name", "fixture", "stage", "design_version", "sha256", "byte_length"))
+    return [(rank, original, row) for rank, (original, row) in
+            enumerate(sorted(enumerate(rows), key=key))]
+
+
 def validate_member_names(names):
     """Validate bounded literal names and reject slash-normalized duplicates."""
     errors, seen = [], set()
     if type(names) is not list or len(names) > MAX_MEMBERS:
         return _result([{"code": "MEMBER_NAMES_UNREADABLE"}])
-    for index, value in enumerate(names):
+    for index, value in enumerate(sorted(names, key=_sort_value)):
         name = _name(value)
         if name is None:
             _error(errors, "MEMBER_NAME_INVALID", member_index=index)
@@ -77,7 +103,7 @@ def check_resource_budget(members, *, max_members=MAX_MEMBERS,
         return _result([{"code": "MEMBERS_UNREADABLE"}])
     if len(members) > max_members:
         return _result([{"code": "MEMBER_COUNT_EXCEEDED"}])
-    for index, member in enumerate(members):
+    for index, _, member in _ordered_rows(members):
         size = member.get("byte_length") if type(member) is dict else None
         if type(size) is not int or size < 0:
             _error(errors, "MEMBER_SIZE_INVALID", member_index=index)
@@ -113,7 +139,7 @@ def validate_inventory(members, *, expected_fixture_ids, required_stages):
         return budget
     names = validate_member_names([m.get("name") if type(m) is dict else None for m in members])
     covered = set()
-    for index, member in enumerate(members):
+    for index, _, member in _ordered_rows(members):
         if type(member) is not dict:
             _error(errors, "MEMBER_METADATA_INVALID", member_index=index)
             continue
@@ -145,6 +171,8 @@ def audit_bundle_bytes(members, payloads, *, expected_fixture_ids, required_stag
     if not budget["ok"]:
         return budget
     inventory = validate_inventory(members, expected_fixture_ids=expected_fixture_ids, required_stages=required_stages)
+    if not inventory["ok"]:
+        return {**inventory, "members": [{"member_index": i, "bytes_equal": None} for i in range(len(members))]}
     errors = []
     if type(payloads) is not dict or len(payloads) > MAX_MEMBERS or any(type(k) is not str for k in payloads):
         return _result([{"code": "PAYLOADS_UNREADABLE"}], previous=(inventory,))
@@ -159,7 +187,7 @@ def audit_bundle_bytes(members, payloads, *, expected_fixture_ids, required_stag
         if name not in expected_names:
             _error(errors, "PAYLOAD_FOREIGN", payload_index=payload_index)
     actual_total, results = 0, []
-    for index, member in enumerate(members):
+    for index, original_index, member in _ordered_rows(members):
         name = _name(member.get("name")) if type(member) is dict else None
         found = grouped.get(name, [])
         codes = []
@@ -186,7 +214,8 @@ def audit_bundle_bytes(members, payloads, *, expected_fixture_ids, required_stag
                         codes.append("PAYLOAD_SHA256_MISMATCH")
         for code in codes:
             _error(errors, code, member_index=index)
-        results.append({"member_index": index, "bytes_equal": not codes})
+        results.append({"member_index": original_index, "bytes_equal": not codes})
+    results.sort(key=lambda m: m["member_index"])
     result = _result(errors, previous=(inventory, names), members=results)
     result["integrity_verified"] = result["ok"]
     return result
@@ -205,7 +234,7 @@ def check_stage_references(members, references, *, expected_fixture_versions, re
     if type(references) is not list or len(references) > MAX_MEMBERS:
         return _result([{"code": "REFERENCES_UNREADABLE"}], previous=(inventory,))
     lookup = {}
-    for index, member in enumerate(members):
+    for index, _, member in _ordered_rows(members):
         if type(member) is not dict:
             continue
         name = _name(member.get("name"))
@@ -215,7 +244,7 @@ def check_stage_references(members, references, *, expected_fixture_versions, re
         if _token(fixture) and fixture in expected_fixture_versions and member.get("design_version") != expected_fixture_versions[fixture]:
             _error(errors, "MEMBER_DESIGN_VERSION_CONFLICT", member_index=index)
     covered = set()
-    for index, ref in enumerate(references):
+    for index, _, ref in _ordered_rows(references):
         if type(ref) is not dict:
             _error(errors, "REFERENCE_INVALID", reference_index=index)
             continue
@@ -247,3 +276,86 @@ def check_stage_references(members, references, *, expected_fixture_versions, re
             if (fixture, stage) not in covered:
                 _error(errors, "REFERENCE_STAGE_MISSING", fixture_index=fixture_index, stage_index=stage_index)
     return _result(errors, previous=(inventory,))
+
+
+class _DecodeError(ValueError):
+    pass
+
+
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DecodeError("JSON_DUPLICATE_KEY")
+        result[key] = value
+    return result
+
+
+def _nonfinite(_):
+    raise _DecodeError("JSON_NONFINITE_NUMBER")
+
+
+def _finite_float(text):
+    value = float(text)
+    if not math.isfinite(value):
+        raise _DecodeError("JSON_NONFINITE_NUMBER")
+    return value
+
+
+def decode_inventory_json(text):
+    """Decode one bounded JSON inventory envelope, never accessing payloads.
+
+    The envelope has exactly members, expected_fixture_ids and required_stages.
+    Valid data is returned as inventory; rejected input is never echoed.
+    """
+    def rejected(code):
+        return _result([{"code": code}], inventory=None)
+    if type(text) is not str or len(text) > MAX_JSON_CHARS:
+        return rejected("JSON_INPUT_UNREADABLE")
+    depth, quoted, escaped = 0, False, False
+    for char in text:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+        elif char in "[{":
+            depth += 1
+            if depth > MAX_JSON_DEPTH:
+                return rejected("JSON_DEPTH_EXCEEDED")
+        elif char in "]}":
+            depth -= 1
+            if depth < 0:
+                return rejected("JSON_INVALID")
+    try:
+        data = json.loads(text, object_pairs_hook=_unique_object,
+                          parse_constant=_nonfinite, parse_float=_finite_float)
+    except _DecodeError as error:
+        return rejected(str(error))
+    except (ValueError, RecursionError):
+        return rejected("JSON_INVALID")
+    if type(data) is not dict or set(data) != {"members", "expected_fixture_ids", "required_stages"}:
+        return rejected("INVENTORY_FIELDS_INVALID")
+    members = data["members"]
+    if type(members) is not list or len(members) > MAX_MEMBERS:
+        return rejected("INVENTORY_MEMBERS_INVALID")
+    errors = [{"code": "MEMBER_FIELDS_INVALID", "member_index": index}
+              for index, _, row in _ordered_rows(members)
+              if type(row) is not dict or set(row) != _MEMBER_FIELDS]
+    if errors:
+        return _result(errors, inventory=None)
+    result = validate_inventory(members, expected_fixture_ids=data["expected_fixture_ids"],
+                                required_stages=data["required_stages"])
+    return {**result, "inventory": data if result["ok"] else None}
+
+
+def audit_inventory_json(text, payloads):
+    """Strict decoding and full metadata validation precede every byte hash."""
+    decoded = decode_inventory_json(text)
+    if not decoded["ok"]:
+        return decoded
+    return audit_bundle_bytes(payloads=payloads, **decoded["inventory"])
