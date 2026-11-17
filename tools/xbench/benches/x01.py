@@ -18,7 +18,7 @@ LIMITS = "X01: original and export both come from Studio's own DWG conversion (v
 
 def _row(fixture):
     return {"id": fixture["id"], "drawing_id": None, "original_version_id": None,
-            "upload_drawing_id": None, "import_provenance": None,
+            "upload_drawing_id": None, "import_provenance": None, "failed_stage": None,
             "export_version_id": None, "dxf_sha256": {}, "counts": {},
             "observed_insunits": None, "expected_insunits": fixture.get("insunits"), "failures": {},
             "steps": {str(n): "UNREADABLE" for n in range(1, 6)},
@@ -168,15 +168,19 @@ def grade_files(client, *, project, fixtures, out_dir=None):
         row = _row(fixture)
         rows[fixture["id"]] = row
         capability, did, source = None, None, None
+        stage = "upload"
         pid = project["project_id"]
         try:
             source = Path(fixture["path"]).read_bytes()
             row["source_sha256_before"] = hashlib.sha256(source).hexdigest()
             if (len(source) != fixture["bytes"] or row["source_sha256_before"] != fixture["sha256"]):
                 raise ValueError("fixture differs from manifest")
+            stage = "upload"
             upload = client.upload_drawing(Path(fixture["path"]).name, source)
             row["upload_drawing_id"] = upload
+            stage = "wait_upload"
             client.wait_upload(upload)
+            stage = "adopt"
             drawing = client.adopt_drawing(pid, upload, fixture["id"])
             provenance = drawing.get("provenance")
             source_provenance = provenance.get("source") if isinstance(provenance, dict) else None
@@ -189,20 +193,27 @@ def grade_files(client, *, project, fixtures, out_dir=None):
                                                          for key in ("ref", "sha256") if key in intake}
             did, version = drawing["drawing_id"], drawing["version_id"]
             row["drawing_id"], row["original_version_id"] = did, version
+            stage = "original_dxf"
             original = client.dxf_bytes(pid, did, version)
             row["dxf_sha256"]["original"] = hashlib.sha256(original).hexdigest()
+            stage = "checkout"
             capability, _ = client.checkout(pid, did, ttl_s=900)
+            stage = "context"
             context = client.drawing_context(pid, version, did)
             rev = context.get("intake", {}).get("solar_design_graph", {}).get("rev", 0)
 
             def refresh():
-                nonlocal version, rev, context
+                nonlocal version, rev, context, stage
+                stage = "refresh_context"
                 context = client.drawing_context(pid, version, did)
                 version = context["context"]["head_version_id"]
+                stage = "refresh_context"
                 context = client.drawing_context(pid, version, did)
                 rev = context.get("intake", {}).get("solar_design_graph", {}).get("rev", rev + 1)
 
             def call(tool, params, *, receipt=None):
+                nonlocal stage
+                stage = f"run:{tool}"
                 status, body = client.run(tool, org_id=project["org_id"], project_id=pid,
                                           version_id=version, params=params, capability=capability,
                                           idempotency_key=new_idempotency_key("x01"))
@@ -215,6 +226,7 @@ def grade_files(client, *, project, fixtures, out_dir=None):
                 if status == 202:
                     if not isinstance(body, dict) or not body.get("job_id"):
                         raise StudioError(502, "INVALID_JOB_RESPONSE", "Write accepted without a job ID")
+                    stage = f"run:{tool}"
                     body = client.wait_job(body["job_id"], timeout_s=600)
                 if receipt is not None and isinstance(body, dict):
                     receipt["status"] = body.get("status", "complete")
@@ -245,6 +257,7 @@ def grade_files(client, *, project, fixtures, out_dir=None):
                                    "run_id": None, "status": "not_started"}
                         row["stringing_runs"].append(receipt)
                         # Bind session-specific fields only when the catalog accepts them.
+                        stage = f"run:{tool['name']}"
                         catalog = next((entry for entry in client.tools() if entry.get("name") == tool["name"]), {})
                         properties = catalog.get("params", {}).get("properties", {})
                         for key, value in (("drawing_id", did), ("expected_rev", rev)):
@@ -280,6 +293,7 @@ def grade_files(client, *, project, fixtures, out_dir=None):
                     # A refused run may still have published a drawing version.
                     refresh()
             row["export_version_id"] = version
+            stage = "export_dxf"
             exported = client.dxf_bytes(pid, did, version)
             grade_pair(fixture, original, exported, row=row)
             if out_dir is not None:
@@ -293,6 +307,7 @@ def grade_files(client, *, project, fixtures, out_dir=None):
                 except Exception as exc:
                     row["plot_note"] = f"evidence plot unavailable: {type(exc).__name__}"
         except Exception as exc:
+            row["failed_stage"] = stage
             verdict = "FAIL" if _product_refusal(exc) else "UNREADABLE"
             if isinstance(exc, StudioError):
                 code = exc.reason_code or exc.error_code or "STUDIO_REFUSAL"
@@ -301,7 +316,7 @@ def grade_files(client, *, project, fixtures, out_dir=None):
                     note = f"{code}: {xbench_session.redact(message)}"
                 else:
                     note = xbench_session.redact(f"{code}: {message}")
-                row["product_error"] = {"status": exc.status, "code": code, "message": note}
+                row["product_error"] = {"status": exc.status, "code": code, "message": note, "stage": stage}
             else:
                 note = f"fixture unavailable: {type(exc).__name__}: {xbench_session.redact(str(exc))[:300]}"
             for n in range(2, 6):
@@ -310,6 +325,7 @@ def grade_files(client, *, project, fixtures, out_dir=None):
         finally:
             if capability is not None:
                 try:
+                    stage = "release"
                     client.release(pid, did, capability)
                 except Exception as exc:
                     row["release_note"] = f"checkout release unavailable: {type(exc).__name__}"
