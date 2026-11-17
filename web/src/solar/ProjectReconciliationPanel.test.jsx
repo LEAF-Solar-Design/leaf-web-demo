@@ -35,6 +35,138 @@ const fill = (values = ['1', '0', '1', '1', '0.4']) => screen.getAllByRole('text
   fireEvent.change(input, { target: { value: values[index] } })
 })
 const loaded = () => screen.findByText('Saved design revision 9.')
+const blobText = blob => new Promise(resolve => {
+  const reader = new FileReader()
+  reader.onload = () => resolve(reader.result)
+  reader.readAsText(blob)
+})
+
+it.each(['binding', 'client'].flatMap(change => ['before', 'after'].map(phase => [change, phase])))(
+  'rejects the first A read after A-to-B-to-A reuses %s scope inputs and settles %s the fresh read', async (change, phase) => {
+  const h = fixture(), original = { ...h.props }
+  let settleOld
+  h.client.readContext.mockImplementationOnce(() => new Promise(resolve => { settleOld = resolve }))
+  fill(['77', '77', '77', '77', '77'])
+  read()
+  const oldSignal = h.client.readContext.mock.calls[0][0].signal
+  const bBinding = change === 'binding' ? { ...binding, drawing_id: '55555555-5555-4555-8555-555555555555' } : binding
+  const bResponse = response()
+  bResponse.data.context = { ...bBinding }
+  bResponse.data.intake.solar_design_graph.rev = 20
+  const bClient = change === 'client' ? { ...h.client, readContext: vi.fn(async () => bResponse) } : h.client
+  if (change === 'binding') h.client.readContext.mockResolvedValueOnce(bResponse)
+  h.snapshot = { binding: bBinding, authorityKey: 'a' }
+  h.update({ solarBinding: bBinding, projectClient: bClient })
+  expect(oldSignal.aborted).toBe(true)
+  read(); await screen.findByText('Saved design revision 20.')
+  fill(['20', '20', '20', '20', '20'])
+  h.snapshot = { binding, authorityKey: 'a' }
+  h.update(original)
+  expect(screen.queryByText(/Saved design revision/)).toBeNull()
+  expect(screen.getAllByRole('textbox').map(input => input.value)).toEqual(['', '', '', '', ''])
+  expect(h.client.readContext).toHaveBeenCalledTimes(change === 'binding' ? 2 : 1)
+  const createObjectURL = vi.fn(() => 'blob:returned-a'), revokeObjectURL = vi.fn()
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  const download = () => fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  download(); expect(createObjectURL).not.toHaveBeenCalled()
+  const settleFirstA = async () => act(async () => {
+    const old = response(); old.data.intake.solar_design_graph.rev = 77
+    settleOld(old)
+  })
+  if (phase === 'before') {
+    await settleFirstA()
+    expect(screen.queryByText(/Saved design revision|PASS/)).toBeNull()
+    expect(screen.getAllByRole('textbox').map(input => input.value)).toEqual(['', '', '', '', ''])
+    expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(true)
+    expect(h.client.readContext).toHaveBeenCalledTimes(change === 'binding' ? 2 : 1)
+    download(); expect(createObjectURL).not.toHaveBeenCalled()
+  }
+  const fresh = response()
+  fresh.data.intake.solar_design_graph.rev = 10
+  fresh.data.intake.solar_design_graph.frames[0].module_power_watts = 800
+  h.client.readContext.mockResolvedValueOnce(fresh)
+  act(() => { read(); read() })
+  await screen.findByText('Saved design revision 10.')
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(true)
+  fill(['1', '0', '1', '1', '0.8'])
+  const accepted = screen.getByRole('table').textContent
+  if (phase === 'after') await settleFirstA()
+  expect(screen.queryByText('Saved design revision 77.')).toBeNull()
+  expect(screen.getByText('Saved design revision 10.')).toBeTruthy()
+  expect(screen.getByRole('table').textContent).toBe(accepted)
+  expect(h.client.readContext).toHaveBeenCalledTimes(change === 'binding' ? 3 : 2)
+  if (change === 'client') expect(bClient.readContext).toHaveBeenCalledOnce()
+  expect(oldSignal.aborted).toBe(true)
+  download()
+  expect(await blobText(createObjectURL.mock.calls[0][0])).toBe(
+    'metric,studio,oracle,delta,verdict\r\n"panels","1","1","0","PASS"\r\n' +
+    '"optimizers","","0","","UNREADABLE"\r\n"inverters","1","1","0","PASS"\r\n' +
+    '"strings","1","1","0","PASS"\r\n"kw_dc","0.8","0.8","0","PASS"\r\n')
+  expect(createObjectURL).toHaveBeenCalledOnce()
+  expect(revokeObjectURL.mock.calls).toEqual([['blob:returned-a']])
+})
+
+it.each(['silent', 'observer', 'throw'])('rejects synchronous authority revocation during cloning (%s) and recovers', async mode => {
+  const h = fixture(), clone = globalThis.structuredClone
+  const createObjectURL = vi.fn(() => 'blob:authorized'), revokeObjectURL = vi.fn()
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  vi.stubGlobal('structuredClone', vi.fn(value => {
+    h.current = false
+    if (mode !== 'silent') for (const listener of h.listeners) listener()
+    if (mode === 'throw') throw new Error('private clone exception token=synthetic-secret')
+    return clone(value)
+  }))
+  fill(); read()
+  await act(async () => {})
+  expect(h.client.readContext.mock.calls[0][0].signal.aborted).toBe(mode !== 'silent')
+  expect(screen.queryByText(/Saved design revision|private clone|synthetic-secret/)).toBeNull()
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(true)
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(createObjectURL).not.toHaveBeenCalled()
+  vi.stubGlobal('structuredClone', clone)
+  h.current = true
+  h.snapshot = { binding, authorityKey: 'fresh' }
+  h.update({ authorityKey: 'fresh' })
+  expect(screen.getAllByRole('textbox').map(input => input.value)).toEqual(['', '', '', '', ''])
+  read(); await loaded()
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(true)
+  fill()
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(createObjectURL).toHaveBeenCalledOnce()
+  expect(await blobText(createObjectURL.mock.calls[0][0])).toContain('"kw_dc","0.4","0.4","0","PASS"')
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+})
+
+it('alternates export success and failure from one cached snapshot with exactly-once URL cleanup', async () => {
+  const derive = vi.spyOn(reconciliation, 'savedReconciliationValues'), h = fixture()
+  read(); await loaded(); fill()
+  const derivations = derive.mock.calls.length
+  const createObjectURL = vi.fn(() => `blob:attempt-${createObjectURL.mock.calls.length}`), revokeObjectURL = vi.fn()
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL })
+  const anchors = [], successful = []
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function () {
+    anchors.push(this)
+    if (anchors.length % 2 === 0) throw new Error('private export failure')
+    successful.push(createObjectURL.mock.calls.at(-1)[0])
+  })
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+    expect(revokeObjectURL.mock.calls).toEqual(Array.from({ length: attempt }, (_, i) => [`blob:attempt-${i + 1}`]))
+    if (attempt % 2 === 0) expect(screen.getByRole('alert').textContent).toBe('CSV could not be downloaded. Try Download CSV again.')
+    else expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(false)
+  }
+  expect(new Set(anchors).size).toBe(5)
+  const bytes = await Promise.all(successful.map(blobText))
+  expect(bytes).toHaveLength(3)
+  expect(bytes.every(value => value === bytes[0])).toBe(true)
+  expect(bytes[0]).toContain('"kw_dc","0.4","0.4","0","PASS"')
+  expect(h.client.readContext).toHaveBeenCalledOnce()
+  expect(derive).toHaveBeenCalledTimes(derivations)
+  expect(screen.queryByText(/private export failure/)).toBeNull()
+})
 
 const metadataCases = [
   ...['organization_id', 'project_id', 'drawing_id', 'input_version_id'].flatMap(key =>

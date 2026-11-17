@@ -37,6 +37,12 @@ checks that no old evidence or drafts become accepted. The second drawing needs
 an explicit read and fresh reports before its exact five-row CSV can download.
 This uses the same mounted panel, with no project-state reset or forced remount.
 
+A same-drawing refresh also reads changed Panel/Inverter/String/DC totals with
+fresh reports, then explicitly reads a further revision with valid reassigned
+string panel references and equal totals. Revision labels and read counts must
+advance; the latter CSV bytes must stay equal. This proves accepted-revision
+refresh and aggregate equality, not assignment parity from a count CSV.
+
 ```python
 import csv
 import copy
@@ -366,6 +372,59 @@ try:
                                    computed_zoom=computed_zoom, fields=field_proofs, scroll=scroll,
                                    overflow=overflow, visible=rendered, downloaded=downloaded, csv=path.name,
                                    keyboard_download=True))
+    # Same mounted drawing/client: only an explicit read accepts a new revision.
+    page.set_viewport_size({'width': 1440, 'height': 900})
+    page.evaluate('document.documentElement.style.zoom = "1"')
+    refresh_before = visible_rows()
+    refresh_reads = page.evaluate('window.readAttempts()')
+    changed_revision = copy.deepcopy(next_graph)
+    changed_revision['rev'] = 70
+    page.evaluate('(graph) => window.setSavedGraph(graph)', changed_revision)
+    assert visible_rows() == refresh_before
+    assert page.evaluate('window.readAttempts()') == refresh_reads
+    read.click()
+    expect(page.get_by_text('Saved design revision 70.', exact=True)).to_be_visible()
+    assert page.evaluate('window.readAttempts()') == refresh_reads + 1
+    fresh_reports = ['003', '00', '02', '02', '1.500']
+    for label, value in zip(labels, fresh_reports):
+        page.get_by_role('textbox', name=label + ' engineering report/BOM', exact=True).fill(value)
+    refreshed = capture_comparison('same-drawing-changed-revision')
+    expected_refresh = [dict(zip(['metric', 'studio', 'oracle', 'delta', 'verdict'], row)) for row in [
+        ['panels', '3', '003', '0', 'PASS'],
+        ['optimizers', '', '00', '', 'UNREADABLE'],
+        ['inverters', '2', '02', '0', 'PASS'],
+        ['strings', '2', '02', '0', 'PASS'],
+        ['kw_dc', '1.5', '1.500', '0', 'PASS'],
+    ]]
+    assert refreshed['downloaded'] == expected_refresh
+    assert [row['studio'] for row in refresh_before] == ['2', '', '1', '1', '0.8']
+    reassigned_revision = copy.deepcopy(changed_revision)
+    reassigned_revision['rev'] = 71
+    reassigned_revision['strings'][0]['ordered_panel_refs'] = [next_panels[0], next_panels[2]]
+    reassigned_revision['strings'][1]['ordered_panel_refs'] = [next_panels[1]]
+    # Independent fixture validity: positive counts, unique ownership, complete panel set.
+    refs = [ref for string in reassigned_revision['strings'] for ref in string['ordered_panel_refs']]
+    assert len(refs) == len(set(refs)) == 3 and set(refs) == set(next_panels)
+    assert all(string['module_count'] == len(string['ordered_panel_refs']) > 0
+               for string in reassigned_revision['strings'])
+    assert changed_revision['strings'] != reassigned_revision['strings']
+    page.evaluate('(graph) => window.setSavedGraph(graph)', reassigned_revision)
+    expect(page.get_by_text('Saved design revision 70.', exact=True)).to_be_visible()
+    assert visible_rows() == refreshed['visible']
+    assert page.evaluate('window.readAttempts()') == refresh_reads + 1
+    read.click()
+    expect(page.get_by_text('Saved design revision 71.', exact=True)).to_be_visible()
+    expect(page.get_by_text('Saved design revision 70.', exact=True)).to_have_count(0)
+    assert page.evaluate('window.readAttempts()') == refresh_reads + 2
+    reassigned = capture_comparison('same-drawing-equal-totals-reassignment')
+    assert reassigned['downloaded'] == expected_refresh
+    assert (artifact / refreshed['csv']).read_bytes() == (artifact / reassigned['csv']).read_bytes()
+    revision_refresh = dict(binding=binding, changed_revision=changed_revision,
+                            reassigned_revision=reassigned_revision, fresh_reports=fresh_reports,
+                            reads_before=refresh_reads, reads_after=refresh_reads + 2,
+                            before=refresh_before, changed=refreshed, reassigned=reassigned,
+                            equal_csv_bytes=True, assignment_parity_claimed=False)
+
     # Real product timeout: no timer interception or virtual elapsed-time claim.
     page.set_viewport_size({'width': 1440, 'height': 900})
     page.evaluate('document.documentElement.style.zoom = "1"')
@@ -502,6 +561,7 @@ try:
                  malformed_graph_replays=cases,
                  narrow_zoom_replays=narrow_replays,
                  two_drawing_isolation=isolation,
+                 same_drawing_revision_refresh=revision_refresh,
                  stalled_read_timeout_recovery=timeout_recovery,
                  keyboard_read_retry=True, keyboard_export_retry=True,
                  source_sha256={str(path): digest(path) for path in sorted(sources)},
@@ -536,5 +596,6 @@ if proof_path.is_file():
     proof_path.write_text(json.dumps(proof, indent=2), encoding='utf-8')
 print(json.dumps({'proof': str(proof_path), 'rows_matched': 5, 'keyboard_retries_passed': 2,
                   'malformed_graph_repairs': len(cases), 'narrow_zoom_replays': len(narrow_replays),
-                  'two_drawing_isolation': True, 'stalled_read_timeout_recovery': True}))
+                  'two_drawing_isolation': True, 'stalled_read_timeout_recovery': True,
+                  'same_drawing_revision_refresh': True}))
 ```
