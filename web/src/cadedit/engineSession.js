@@ -1721,6 +1721,16 @@ export default function useEngineSession({
     }
     const projectTarget = saveTargetRef.current
     if (projectTarget?.kind === 'project') {
+      const current = sessionRef.current
+      if (current.busy || pendingEditRef.current) {
+        patch({ status: 'Wait for the current drawing operation to finish, then open another drawing.' })
+        return null
+      }
+      if (current.savedBytes !== null && current.savedBytes !== current.committedBytes) {
+        patch({ errorKind: SESSION_ERROR.REFUSED,
+          status: 'Save or undo your current edits before opening another drawing. Download the edited DXF to keep a copy.' })
+        return null
+      }
       const generation = generationRef.current
       const scopeKey = projectTarget.scopeKey
       patch({ busy: true, errorKind: null, status: `Adding ${file.name} to the project...` })
