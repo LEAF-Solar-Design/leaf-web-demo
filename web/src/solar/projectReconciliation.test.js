@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { parseReconciliationNumber, reconciliationRows, reconciliationRowsFromValues, savedReconciliationValues, validReconciliationResponse, reconciliationCsv } from './projectReconciliation.js'
 
 const id = (kind, n) => `leaf:${kind}:00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
@@ -19,6 +19,108 @@ function graph() {
 }
 
 describe('saved engineering reconciliation', () => {
+  it('equates explicit panels and genuine compact slots under an explicit typed ID mapping', () => {
+    const explicit = { rev: 8, panels: [1, 2, 3, 4].map(n => ({ id: id('panel', n) })),
+      frames: [
+        { id: id('frame', 1), panel_refs: [id('panel', 1), id('panel', 2)], module_power_watts: 401 },
+        { id: id('frame', 2), panel_refs: [id('panel', 3), id('panel', 4)], module_power_watts: 599 },
+      ], strings: [
+        { id: id('string', 1), module_count: 2, ordered_panel_refs: [id('panel', 1), id('panel', 3)] },
+        { id: id('string', 2), module_count: 2, ordered_panel_refs: [id('panel', 2), id('panel', 4)] },
+      ], inverters: graph().inverters }
+    const mapping = new Map([
+      ...[1, 2, 3, 4].map(n => [id('panel', n), id('panel', n + 10)]),
+      ...[1, 2].map(n => [id('frame', n), id('frame', n + 10)]),
+      ...[1, 2].map(n => [id('string', n), id('string', n + 10)]),
+      ...[1, 2, 3].map(n => [id('inverter', n), id('inverter', n + 10)]),
+    ])
+    const compact = { rev: 8, panels: [], frames: explicit.frames.map(frame => {
+      const ids = frame.panel_refs.flatMap(ref => mapping.get(ref).split(':')[2].replaceAll('-', '')
+        .match(/../g).map(hex => parseInt(hex, 16)))
+      const centres = new Uint8Array(32), view = new DataView(centres.buffer)
+      view.setFloat64(0, 10, true); view.setFloat64(8, 20, true)
+      view.setFloat64(16, 12, true); view.setFloat64(24, 20, true)
+      return { id: mapping.get(frame.id), module_power_watts: frame.module_power_watts,
+        ground_slots: { codec: 'leaf.solar-ground-slots.v1', count: 2,
+          panel_ids: btoa(String.fromCharCode(...ids)), centres: btoa(String.fromCharCode(...centres)),
+          angle: 0, panel: { rev: 0, provenance: {}, validity: {}, extra: {} } } }
+    }), strings: explicit.strings.map(string => ({ ...string, id: mapping.get(string.id),
+      ordered_panel_refs: string.ordered_panel_refs.map(ref => mapping.get(ref)) })),
+    inverters: explicit.inverters.map(device => ({ ...device, id: mapping.get(device.id) })) }
+    const drafts = ['4', '0', '2', '2', '2'], before = structuredClone([explicit, compact, drafts])
+    // Four panels, two power-converting devices, two disjoint strings;
+    // 2*401 + 2*599 = 2000 integer watts = 2 kW. Optimizers have no measurement.
+    const expectedCsv = 'metric,studio,oracle,delta,verdict\r\n' +
+      '"panels","4","4","0","PASS"\r\n"optimizers","","0","","UNREADABLE"\r\n' +
+      '"inverters","2","2","0","PASS"\r\n"strings","2","2","0","PASS"\r\n' +
+      '"kw_dc","2","2","0","PASS"\r\n'
+    const explicitRows = reconciliationRows(explicit, drafts)
+    expect(explicitRows.map(row => row.studio)).toEqual(['4', '', '2', '2', '2'])
+    expect(explicitRows.map(row => row.verdict)).toEqual(['PASS', 'UNREADABLE', 'PASS', 'PASS', 'PASS'])
+    expect(reconciliationCsv(explicitRows)).toBe(expectedCsv)
+    expect(reconciliationRows(compact, drafts)).toEqual(explicitRows)
+    expect(reconciliationCsv(reconciliationRows(compact, drafts))).toBe(expectedCsv)
+    expect([explicit, compact, drafts]).toStrictEqual(before)
+  })
+  it('preserves all rows when a powered frame is split and isolates missing split-frame power', () => {
+    const refs = [1, 2, 3].map(n => id('panel', n))
+    const original = { rev: 1, panels: refs.map(id => ({ id })),
+      frames: [{ id: id('frame', 1), panel_refs: [...refs], module_power_watts: 401 }],
+      strings: [{ id: id('string', 1), module_count: 3, ordered_panel_refs: [...refs] }],
+      inverters: graph().inverters }
+    const split = structuredClone(original)
+    split.frames = [
+      { id: id('frame', 1), panel_refs: refs.slice(0, 1), module_power_watts: 401 },
+      { id: id('frame', 2), panel_refs: refs.slice(1), module_power_watts: 401 },
+    ]
+    const drafts = ['3', '0', '2', '1', '1.203'], before = structuredClone([original, split, drafts])
+    const baseline = reconciliationRows(original, drafts)
+    expect(baseline.map(row => row.studio)).toEqual(['3', '', '2', '1', '1.203'])
+    expect(baseline.map(row => row.verdict)).toEqual(['PASS', 'UNREADABLE', 'PASS', 'PASS', 'PASS'])
+    expect(reconciliationRows(split, drafts)).toEqual(baseline)
+    expect([original, split, drafts]).toStrictEqual(before)
+    delete split.frames[1].module_power_watts
+    const missingBefore = structuredClone(split), missing = reconciliationRows(split, drafts)
+    expect(missing.slice(0, 4)).toEqual(baseline.slice(0, 4))
+    expect(missing[4]).toMatchObject({ studio: '', oracle: '1.203', delta: '', verdict: 'UNREADABLE' })
+    expect(missing[4].reason).toMatch(/positive supported module watts for every panel/)
+    expect(split).toStrictEqual(missingBefore)
+    split.frames[1].module_power_watts = 401
+    expect(reconciliationRows(split, drafts)).toEqual(baseline)
+    expect([original, split, drafts]).toStrictEqual(before)
+  })
+  it('keeps literal signed DC CSV canonical under decimal-comma and grouped locale formatters', () => {
+    const saved = graph()
+    saved.frames[0].module_power_watts = 1234567
+    saved.frames[1].module_power_watts = 7654321
+    // 1,234,567 + 7,654,321 = 8,888,888 W = 8888.888 kW exactly.
+    const vectors = [
+      ['8888.887999999999999999', '0.000000000000000001'],
+      ['8888.888000000000000001', '-0.000000000000000001'],
+    ]
+    const before = structuredClone([saved, vectors]), spies = []
+    try {
+      spies.push(vi.spyOn(Number.prototype, 'toLocaleString').mockReturnValue('8.888,888'))
+      spies.push(vi.spyOn(BigInt.prototype, 'toLocaleString').mockReturnValue('8.888.888'))
+      spies.push(vi.spyOn(Intl, 'NumberFormat').mockImplementation(function () {
+        return { format: () => '8.888,888' }
+      }))
+      expect((8888.888).toLocaleString()).toBe('8.888,888')
+      expect((8888888n).toLocaleString()).toBe('8.888.888')
+      expect(new Intl.NumberFormat().format(8888.888)).toBe('8.888,888')
+      for (const [report, delta] of vectors) {
+        const drafts = ['2', '0', '2', '1', report], draftBefore = [...drafts]
+        const rows = reconciliationRows(saved, drafts)
+        expect(rows[4]).toMatchObject({ studio: '8888.888', oracle: report, delta, verdict: 'FAIL' })
+        expect(reconciliationCsv(rows)).toBe('metric,studio,oracle,delta,verdict\r\n' +
+          '"panels","2","2","0","PASS"\r\n"optimizers","","0","","UNREADABLE"\r\n' +
+          '"inverters","2","2","0","PASS"\r\n"strings","1","1","0","PASS"\r\n' +
+          `"kw_dc","8888.888","${report}","${delta}","FAIL"\r\n`)
+        expect(drafts).toStrictEqual(draftBefore)
+      }
+      expect([saved, vectors]).toStrictEqual(before)
+    } finally { spies.reverse().forEach(spy => spy.mockRestore()) }
+  })
   it('adds disjoint Roof/Ground components and preserves totals under consistent typed renaming', () => {
     const roof = { panels: [{ id: id('panel', 1) }],
       frames: [{ id: id('frame', 1), panel_refs: [id('panel', 1)], module_power_watts: 401 }],

@@ -49,6 +49,13 @@ no download. A same-mounted-panel retry accepts changed totals and fresh report
 lexemes; its actual five-row CSV must match normalized DOM and literal rows.
 Error/recovery screenshots and CSV hashes are retained with the cleanup proof.
 
+A valid empty-design replay reads a revision and SHA-bearing response with four
+empty collections on the same mounted panel. Zero report totals produce PASS for
+Panels, Inverters and Strings. Optimizers remain UNREADABLE without a measured
+count, and DC remains UNREADABLE without positive module/panel power evidence;
+neither becomes an inferred zero. Its actual five-row CSV, normalized DOM,
+literal expected bytes, screenshot and hashes join the same cleanup-bearing proof.
+
 ```python
 import csv
 import copy
@@ -434,6 +441,48 @@ try:
                             before=refresh_before, changed=refreshed, reassigned=reassigned,
                             equal_csv_bytes=True, assignment_parity_claimed=False)
 
+    # A valid empty saved graph is evidence for zero counts, not for measured DC
+    # or optimizer totals. Keep the current mounted drawing and explicitly read.
+    empty_graph = dict(rev=72, panels=[], frames=[], strings=[], inverters=[])
+    empty_reports = ['0', '0', '0', '0', '0']
+    empty_reads_before = page.evaluate('window.readAttempts()')
+    page.evaluate('(graph) => window.setSavedGraph(graph)', empty_graph)
+    assert visible_rows() == reassigned['visible']
+    read.click()
+    expect(page.get_by_text('Saved design revision 72.', exact=True)).to_be_visible()
+    assert page.evaluate('window.readAttempts()') == empty_reads_before + 1
+    for label, value in zip(labels, empty_reports):
+        page.get_by_role('textbox', name=label + ' engineering report/BOM', exact=True).fill(value)
+    expect(download_button).to_be_enabled()
+    expect(page.get_by_text('The saved graph has no explicit measured optimizer count.', exact=False)).to_be_visible()
+    expect(page.get_by_text('DC needs complete, unique frame coverage and positive supported module watts for every panel.',
+                            exact=False)).to_be_visible()
+    empty = capture_comparison('valid-empty-design')
+    expected_empty = [dict(zip(['metric', 'studio', 'oracle', 'delta', 'verdict'], row)) for row in [
+        ['panels', '0', '0', '0', 'PASS'],
+        ['optimizers', '', '0', '', 'UNREADABLE'],
+        ['inverters', '0', '0', '0', 'PASS'],
+        ['strings', '0', '0', '0', 'PASS'],
+        ['kw_dc', '', '0', '', 'UNREADABLE'],
+    ]]
+    assert empty['downloaded'] == empty['visible'] == expected_empty
+    empty_bytes = (artifact / empty['csv']).read_bytes()
+    assert empty_bytes == (
+        'metric,studio,oracle,delta,verdict\r\n'
+        '"panels","0","0","0","PASS"\r\n'
+        '"optimizers","","0","","UNREADABLE"\r\n'
+        '"inverters","0","0","0","PASS"\r\n'
+        '"strings","0","0","0","PASS"\r\n'
+        '"kw_dc","","0","","UNREADABLE"\r\n').encode('ascii')
+    empty_design = dict(binding=binding, graph=empty_graph,
+                        response_sha256=response['data']['intake']['solar_design_graph_sha256'],
+                        reports=empty_reports, comparison=empty, expected=expected_empty,
+                        csv_sha256=hashlib.sha256(empty_bytes).hexdigest(),
+                        screenshot='valid-empty-design.png',
+                        screenshot_sha256=hashlib.sha256((artifact / 'valid-empty-design.png').read_bytes()).hexdigest(),
+                        explicit_saved_reread=True, no_remount=True,
+                        optimizer_measurement_available=False, positive_panel_power_available=False)
+
     # Successful export -> rejected refresh -> changed totals, same mounted scope.
     baseline_reports = ['02', '00', '01', '01', '0.800']
     page.evaluate('(graph) => window.setSavedGraph(graph)', graph)
@@ -625,6 +674,7 @@ try:
                  narrow_zoom_replays=narrow_replays,
                  two_drawing_isolation=isolation,
                  same_drawing_revision_refresh=revision_refresh,
+                 valid_empty_design=empty_design,
                  failed_refresh_export_isolation=failed_refresh,
                  stalled_read_timeout_recovery=timeout_recovery,
                  keyboard_read_retry=True, keyboard_export_retry=True,
@@ -661,5 +711,6 @@ if proof_path.is_file():
 print(json.dumps({'proof': str(proof_path), 'rows_matched': 5, 'keyboard_retries_passed': 2,
                   'malformed_graph_repairs': len(cases), 'narrow_zoom_replays': len(narrow_replays),
                   'two_drawing_isolation': True, 'stalled_read_timeout_recovery': True,
+                  'valid_empty_design': True,
                   'same_drawing_revision_refresh': True}))
 ```
