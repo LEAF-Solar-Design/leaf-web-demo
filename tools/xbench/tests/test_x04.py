@@ -240,6 +240,20 @@ def test_dependency_inventory_needs_every_disposition(fixture):
     assert grade(fixture, client)["steps"]["2"] == "FAIL"
 
 
+@pytest.mark.parametrize("dep,record,expected", [
+    ({"kind": "underlay", "name": "u.pdf"},
+     {"kind": "underlay", "name": "u.pdf", "disposition": "underlay omitted"}, True),
+    ({"kind": "proxy", "name": "p"},
+     {"kind": "proxy", "name": "p", "disposition": "proxy_omitted"}, True),
+    ({"kind": "underlay", "name": "u.pdf"},
+     {"kind": "image", "name": "u.pdf", "disposition": "underlay omitted"}, False),
+    ({"kind": "underlay", "name": "u.pdf"},
+     {"kind": "underlay", "name": "u.pdf", "disposition": "ignored"}, False),
+])
+def test_dependency_present_omission_dispositions(dep, record, expected):
+    assert x04._dependency_present(record, dep) is expected
+
+
 def test_sha_in_nested_provenance_and_absent(fixture):
     client = FakeClient()
     assert grade(fixture, client)["steps"]["3"] == "PASS"

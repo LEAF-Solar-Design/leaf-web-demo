@@ -65,7 +65,8 @@ def forbidden_tokens(fixture):
 
 def _dependency_present(report, dep):
     """Require the inventory name and a disposition in the same report record."""
-    dispositions = {"bound", "detached", "font remapped", "image omitted"}
+    dispositions = {"bound", "detached", "font remapped", "image omitted",
+                    "underlay omitted", "proxy omitted"}
 
     def visit(obj):
         if isinstance(obj, dict):
