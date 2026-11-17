@@ -1226,6 +1226,16 @@ export function createHarness(ports: HarnessPorts, opts?: {
         if (requiredAuth) return send(res, 401, requiredAuth);
         res.setHeader("cache-control", "no-store");
         if (!authoredExecutionEnabled() || !opts?.projectRepositoryEdits || !opts.projectSourceAuthoring) {
+          const attempt = req.headers["x-source-author-attempt"];
+          const digest = req.headers["x-source-author-wire-sha256"];
+          if (typeof attempt === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(attempt)
+              && typeof digest === "string" && /^[0-9a-f]{64}$/.test(digest)) {
+            // Echo caller correlation only. This gate has not read the body.
+            // Capturing this disposition never authorizes another dispatch.
+            return send(res, 503, { error: { code: "source_unavailable", message: "source is unavailable" },
+              disposition: { schema: "leaf.project-source-author-disposition.v1", attempt_id: attempt,
+                wire_sha256: digest, outcome: "not_started", stage: "author_dependency_gate" } });
+          }
           return send(res, 503, { error: { code: "source_unavailable", message: "source is unavailable" } });
         }
         const controller = new AbortController();
