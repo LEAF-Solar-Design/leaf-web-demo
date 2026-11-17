@@ -6659,9 +6659,9 @@ export default function App() {
             tool={selectedTool}
             onSelectModuleSet={selectedTool?.name === 'count-modules' &&
               result?.origin?.drawingKey && result.origin.drawingKey === resultDrawingKey
-              ? (setIds, selectionWindow) => onRequestCatalogRun(selectedTool, {
+              ? (setIds, region) => onRequestCatalogRun(selectedTool, {
                 set_ids: setIds,
-                ...(selectionWindow ? { selection_window: selectionWindow } : {}),
+                ...(region ? { region: region } : {}),
               }, null, 'catalog', { complete: true })
               : undefined}
             onRetry={onRetry}

@@ -22,37 +22,114 @@ def _model(entity):
     return entity.get("space") != "paper" and entity.get("layout", "Model") in ("", "Model")
 
 
-def _selection_window(params):
-    if params.get("selection_window") is None:
+def _selection_region(params):
+    bounds = params.get("region")
+    legacy = params.get("selection_window")
+    if bounds is not None and legacy is not None and bounds != legacy:
+        raise ValueError("Conflicting region and legacy design window. Supply one selection region.")
+    if bounds is None:
+        bounds = legacy
+    if bounds is None:
         return None
-    bounds = params["selection_window"]
     if not isinstance(bounds, list) or len(bounds) != 4:
-        raise ValueError("Design window requires [minimum X, minimum Y, maximum X, maximum Y].")
+        raise ValueError("Design window region requires [minimum X, minimum Y, maximum X, maximum Y].")
     try:
         valid = all(type(value) in (int, float) and math.isfinite(value) for value in bounds)
     except OverflowError:
         valid = False
     if not valid or bounds[0] >= bounds[2] or bounds[1] >= bounds[3]:
-        raise ValueError("Design window coordinates must be finite with minimums below maximums.")
+        raise ValueError("Design window region coordinates must be finite with minimums below maximums.")
     return bounds
 
 
-def _within_window(entity, key, bounds, dimensions):
-    if key == "inserts":
-        if dimensions != (1, 1):
-            raise ValueError("Design windows require individual INSERT references. Count an INSERT array as a whole set.")
-        points = [(entity.get("x"), entity.get("y"))]
-    else:
-        points = entity["pts"]
+def _point3(value):
+    if not isinstance(value, (list, tuple)) or len(value) not in (2, 3):
+        raise ValueError("Region containment requires complete finite instance geometry.")
+    point = list(value) + ([0] if len(value) == 2 else [])
     try:
-        valid = all(type(value) in (int, float) and math.isfinite(value)
-                    for point in points for value in point[:2])
+        valid = all(type(v) in (int, float) and math.isfinite(v) for v in point)
     except OverflowError:
         valid = False
     if not valid:
-        raise ValueError("A module candidate has no finite drawing position. Re-import the drawing before using a design window.")
-    return all(bounds[0] <= point[0] <= bounds[2] and bounds[1] <= point[1] <= bounds[3]
-               for point in points)
+        raise ValueError("Region containment requires complete finite instance geometry.")
+    return point
+
+
+
+def _unit_normal(value):
+    point = _point3(value)
+    scale = max(abs(v) for v in point)
+    if scale == 0:
+        raise ValueError("Region containment requires a nonzero plane normal.")
+    scaled = [v / scale for v in point]
+    magnitude = math.hypot(*scaled)
+    return [v / magnitude for v in scaled]
+
+
+def _definition_points(definition):
+    from dxf_intake import _ocs_to_wcs
+
+    if not isinstance(definition, dict) or definition.get("complete") is not True:
+        raise ValueError("Region containment requires a complete block definition. Re-import the drawing.")
+    children = definition.get("children")
+    if (not isinstance(children, list) or not children
+            or definition.get("count", len(children)) != len(children)):
+        raise ValueError("Region containment requires all block children. Re-import the drawing.")
+    base = _point3(definition.get("base"))
+    points = []
+    for child in children:
+        if not isinstance(child, dict) or child.get("kind") not in ("POINT", "LINE", "LWPOLYLINE"):
+            raise ValueError("Region containment requires complete straight-edge block geometry.")
+        raw = [child.get("pt")] if child["kind"] == "POINT" else child.get("pts")
+        if not isinstance(raw, list) or len(raw) < (1 if child["kind"] == "POINT" else 2):
+            raise ValueError("Region containment requires complete finite instance geometry.")
+        child_points = [_point3(point) for point in raw]
+        if child["kind"] == "LWPOLYLINE":
+            normal = _unit_normal(child.get("nrm", [0, 0, 1]))
+            elevation = _point3([child.get("elev", 0), 0, 0])[0]
+            if child.get("thickness", 0) != 0 or any(child.get("bulges", [])):
+                raise ValueError("Region containment requires complete straight-edge block geometry.")
+            child_points = [_ocs_to_wcs([p[0], p[1], elevation], normal) for p in child_points]
+        points.extend(tuple(p[i] - base[i] for i in range(3)) for p in child_points)
+    return points
+
+
+def _insert_points(entity, definitions, cache):
+    from dxf_intake import _ocs_to_wcs
+
+    name = entity.get("name")
+    if name not in cache:
+        cache[name] = _definition_points(definitions.get(name))
+    origin = _point3([entity.get("x"), entity.get("y"), entity.get("z", 0)])
+    scale = _point3(entity.get("scale", [1, 1, 1]))
+    normal = _unit_normal(entity.get("nrm", [0, 0, 1]))
+    rotation = _point3([entity.get("rot", 0), 0, 0])[0]
+    if not all(scale):
+        raise ValueError("Region containment requires a finite instance transform.")
+    cosine, sine = math.cos(rotation), math.sin(rotation)
+    points = []
+    for point in cache[name]:
+        x, y, z = (point[i] * scale[i] for i in range(3))
+        rotated = [x * cosine - y * sine, x * sine + y * cosine, z]
+        world = _ocs_to_wcs(rotated, normal)
+        points.append(_point3([origin[i] + world[i] for i in range(3)]))
+    return points
+
+
+def _within_region(entity, key, bounds, dimensions, definitions, cache):
+    if key == "inserts":
+        if dimensions != (1, 1):
+            raise ValueError("Design windows require individual INSERT references. Count an INSERT array as a whole set.")
+        points = _insert_points(entity, definitions, cache)
+    else:
+        points = [_point3(point) for point in entity["pts"]]
+    left, bottom = min(p[0] for p in points), min(p[1] for p in points)
+    right, top = max(p[0] for p in points), max(p[1] for p in points)
+    if bounds[0] <= left and right <= bounds[2] and bounds[1] <= bottom and top <= bounds[3]:
+        return True
+    if right <= bounds[0] or left >= bounds[2] or top <= bounds[1] or bottom >= bounds[3]:
+        return False
+    raise ValueError("Ambiguous region boundary overlaps a module instance. Move the boundary clear of its complete bounds.")
 
 
 def _four_corners(entity):
@@ -113,7 +190,7 @@ def _four_corners(entity):
 
 def run(intake, params):
     params = params or {}
-    window = _selection_window(params)
+    window = _selection_region(params)
     if not isinstance(intake, dict):
         raise ValueError("Saved intake must be an object; re-import the drawing.")
     for key in ("inserts", "polylines"):
@@ -125,6 +202,14 @@ def run(intake, params):
             for field in ("layer", "name", "handle", "space", "layout"):
                 if field in row and not isinstance(row[field], str):
                     raise ValueError(f"Saved intake {key} candidate {field} must be a string; re-import the drawing.")
+    selected_ids = list(dict.fromkeys(params.get("set_ids") or
+        ([params["set_id"]] if params.get("set_id") else [])))
+    if window is not None and not selected_ids:
+        raise ValueError("Select module sets before applying a design window region.")
+    definitions = intake.get("blocks", {})
+    if window is not None and not isinstance(definitions, dict):
+        raise ValueError("Region containment requires a block-definition map. Re-import the drawing.")
+    geometry_cache = {}
     groups = {}
     multiplicities = {}
     for entity_type, key in (("INSERT", "inserts"), ("LWPOLYLINE", "polylines")):
@@ -141,7 +226,9 @@ def run(intake, params):
             dimensions = (entity.get("rows", 1), entity.get("columns", 1)) if key == "inserts" else (1, 1)
             if any(type(value) is not int or not 1 <= value <= 65535 for value in dimensions):
                 raise ValueError(f"INSERT {handle or index} has invalid array multiplicity; rows and columns must be positive UInt16 integers.")
-            if window is not None and not _within_window(entity, key, window, dimensions):
+            selected = json.dumps(identity, ensure_ascii=True, separators=(",", ":")) in selected_ids
+            if (window is not None and selected
+                    and not _within_region(entity, key, window, dimensions, definitions, geometry_cache)):
                 continue
             group = groups.setdefault(identity, {"entity_type": entity_type,
                 "layer": layer, "block": block, "count": 0, "handles": [], "_keys": set()})
@@ -157,8 +244,6 @@ def run(intake, params):
     for identity, group in sorted(groups.items()):
         group["set_id"] = json.dumps(identity, ensure_ascii=True, separators=(",", ":"))
         sets.append(group)
-    selected_ids = list(dict.fromkeys(params.get("set_ids") or
-        ([params["set_id"]] if params.get("set_id") else [])))
     selected_sets = [s for s in sets if s["set_id"] in selected_ids]
     if len(selected_sets) != len(selected_ids):
         if window is not None:
@@ -169,7 +254,7 @@ def run(intake, params):
         return {k: v for k, v in group.items() if k not in ("handles", "_keys")}
 
     return ({"sets": [public_set(s) for s in sets],
-             **({"selection_window": list(window)} if window is not None else {}),
+             **({"region": list(window)} if window is not None else {}),
              "original_bytes_integrity": "unverified",
              "selection_required": not selected_sets,
              "selected_sets": [public_set(s) for s in selected_sets],

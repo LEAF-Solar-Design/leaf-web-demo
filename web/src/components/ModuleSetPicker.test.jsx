@@ -27,7 +27,7 @@ it('submits an explicit design window with the selected set and retains recorded
   fireEvent.click(submit())
   expect(onSelect).toHaveBeenCalledExactlyOnceWith(['first'], [0, -10, 100, 20])
   const counted = { sets: [{ ...data.sets[0], count: 4 }],
-    selected_sets: [{ ...data.sets[0], count: 4 }], count: 4, selection_window: [0, -10, 100, 20] }
+    selected_sets: [{ ...data.sets[0], count: 4 }], count: 4, region: [0, -10, 100, 20] }
   view.rerender(<ModuleSetPicker drawingKey="window" data={counted} onSelect={onSelect} />)
   expect(screen.getByText('Counted 4 modules on Design / Panel A.')).toBeTruthy()
   fireEvent.change(screen.getByLabelText('Maximum X'), { target: { value: '90' } })
@@ -54,7 +54,7 @@ it('requires complete ordered bounds and resets window fields when the drawing c
 
 it('restores a recorded design window on a fresh result and locks its fields while running', () => {
   const recorded = { ...data, selected_sets: [data.sets[0]], count: 12,
-    selection_window: [-20, -10, 20, 10] }
+    region: [-20, -10, 20, 10] }
   const onSelect = vi.fn()
   const view = render(<ModuleSetPicker drawingKey="recorded" data={recorded} onSelect={onSelect} />)
   expect(screen.getByLabelText('Minimum X').value).toBe('-20')
@@ -844,4 +844,14 @@ it('isolates two mounted drawings during interleaved checkbox changes and submis
   expect(onB).toHaveBeenCalledExactlyOnceWith(['second'])
   expect(a.getByRole('button').disabled).toBe(true)
   expect(onA).toHaveBeenCalledTimes(1)
+})
+
+
+it('restores a legacy saved window through the region picker', () => {
+  const onSelect = vi.fn()
+  render(<ModuleSetPicker drawingKey="legacy" onSelect={onSelect} data={{ sets: [
+    { set_id: 'A', layer: 'Design', block: 'Panel', count: 1 }],
+    selection_window: [0, 0, 10, 10] }} />)
+  expect(screen.getByLabelText('Minimum X')).toHaveValue(0)
+  expect(screen.getByLabelText('Maximum Y')).toHaveValue(10)
 })

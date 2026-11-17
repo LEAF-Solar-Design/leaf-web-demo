@@ -8,8 +8,9 @@ export default function ModuleSetPicker({ data, drawingKey, onSelect, running = 
   const inputId = (id) => `${pickerId}-set-${id.split('').map((unit) =>
     unit.charCodeAt(0).toString(16).padStart(4, '0')).join('')}`
   const [selection, setSelection] = useState({ drawingKey, choices: [], edited: false })
+  const recordedRegion = data?.region ?? data?.selection_window
   const [designWindow, setDesignWindow] = useState(() => ({ drawingKey,
-    values: Array.isArray(data?.selection_window) ? data.selection_window.map(String) : ['', '', '', ''] }))
+    values: Array.isArray(recordedRegion) ? recordedRegion.map(String) : ['', '', '', ''] }))
   const [submitError, setSubmitError] = useState(null)
   const [pendingRequest, setPendingRequest] = useState(null)
   const submitEpoch = useRef(0)
@@ -51,7 +52,7 @@ export default function ModuleSetPicker({ data, drawingKey, onSelect, running = 
   const validWindow = !windowEnabled || (windowValues.every((value) => value.trim() !== '')
     && bounds.every(Number.isFinite) && bounds[0] < bounds[2] && bounds[1] < bounds[3])
   const windowMatchesSummary = JSON.stringify(windowEnabled ? bounds : null)
-    === JSON.stringify(data?.selection_window ?? null)
+    === JSON.stringify(recordedRegion ?? null)
   const summaryMatchesChoices = !selection.edited || (summaryIds.length === choices.length
     && summaryIds.every((id) => choiceIds.has(id)) && windowMatchesSummary)
   const validSummary = Array.isArray(data?.selected_sets) && data.selected_sets.length > 0
@@ -116,7 +117,7 @@ export default function ModuleSetPicker({ data, drawingKey, onSelect, running = 
             setSubmitError(null)
           }} />
       </label>)}
-      <p>Window counts include individual INSERT origins and fully enclosed outlines.</p>
+      <p>Window counts require fully contained instances. A boundary overlapping an instance needs adjustment.</p>
     </details>
     {windowEnabled && !validWindow && <p role="alert">Enter four finite bounds with minimums below maximums.</p>}
     <button type="button" className="chip-act" disabled={unavailable || !validWindow || !selected.length || running || submitting || !onSelect}
