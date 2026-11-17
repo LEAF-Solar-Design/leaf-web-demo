@@ -3095,3 +3095,59 @@ the parser, while exactly bounded input still receives structural validation.
 Diagnostics contain fixed reason codes and no injected cell text. Synthetic
 CSV recovery preserves the saved panel failure and readable sibling fixtures.
 It proves neither live export behavior nor live X05 acceptance.
+
+
+## CSV truncation and concatenation replay
+
+Within Studio X-bench X05, complete CSV syntax and saved-design correctness
+remain separate checks. This synthetic replay accepts the complete last quoted
+record without a newline, rejects a partial last record and a second appended
+export, and repairs each while preserving an independent saved panel mismatch.
+
+```python
+import sys, runpy, json, subprocess
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+expected, records = fixtures['bound_seven_fixture_records']()
+evidence = records[0]['envelope']['assurance']['evidence']
+evidence['saved_values']['panels'] += 1
+canonical = fixtures['csv_fixture'](evidence['view_rows'])
+complete = canonical.removesuffix('\r\n')
+cases = [('complete without newline', complete),
+         ('truncated quoted row', complete[:-1]),
+         ('truncation repaired', canonical),
+         ('appended export', canonical+canonical),
+         ('concatenation repaired', canonical)]
+for label, text in cases:
+    evidence['csv_text'] = text
+    direct = m.compare_csv_view(text, evidence['view_rows'])
+    run = subprocess.run([sys.executable, '-P', m.__file__, '--seven-step-bound-aggregate'],
+        input=m.serialize_result(dict(expected_ids=expected, fixtures=records)).encode(),
+        capture_output=True, timeout=20, env={'SystemRoot': 'C:\\Windows'})
+    assert not run.stderr
+    result = json.loads(run.stdout)
+    step = result['fixtures'][expected[0]]['reconciliation']['steps']['5']
+    assert step['csv_view'] == direct
+    siblings = all(result['fixtures'][key]['verdict'] == 'PASS' for key in expected[1:])
+    print(label, direct['verdict'], direct['reason'], run.returncode,
+          step['table']['verdict'], siblings)
+```
+
+Expected output:
+
+```text
+complete without newline PASS csv_view_equal 1 FAIL True
+truncated quoted row UNREADABLE csv_evidence_unreadable 4 FAIL True
+truncation repaired PASS csv_view_equal 1 FAIL True
+appended export UNREADABLE csv_excess_rows 4 FAIL True
+concatenation repaired PASS csv_view_equal 1 FAIL True
+```
+
+The tests cut the quoted export at every character. Only the complete closing
+quote and its optional CR/LF suffixes are accepted. All 32 quote masks per record
+preserve decoded fields when those fields contain no delimiters or quotes.
+Independent LF, CRLF and CR terminators produce 729 complete supported exports.
+NEL, Unicode line separator and paragraph separator never become implicit CSV
+record boundaries. Appended exports fail even when the first table is complete.
+These supplied synthetic exports do not prove live exports or live X05 parity.

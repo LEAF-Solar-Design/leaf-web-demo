@@ -8675,3 +8675,110 @@ def test_csv_raw_lexical_budget_precedes_parser_and_restores_global_limit(monkey
         assert text not in serialize_result(result)
     finally:
         csv.field_size_limit(previous)
+
+
+
+def assert_csv_record_bound_result(records, expected, text, verdict):
+    from benches import x05_reconcile as m
+    source = records[0]['envelope']['assurance']['evidence']
+    source['csv_text'] = text
+    supplied = deepcopy(records)
+    direct = m.compare_csv_view(text, source['view_rows'])
+    assert direct['verdict'] == verdict
+    if verdict == 'UNREADABLE':
+        assert direct == dict(verdict='UNREADABLE', reason=direct['reason'])
+        assert direct['reason'] in {'csv_headers_unreadable', 'csv_evidence_unreadable',
+            'csv_row_unreadable', 'csv_view_rows_unreadable', 'csv_excess_rows', 'csv_cell_too_large'}
+    result = m.aggregate_bound_seven_steps_json(serialize_result(dict(expected_ids=expected, fixtures=records)))
+    assert result['fixtures'][expected[0]]['reconciliation']['steps']['5']['csv_view'] == direct
+    assert all(result['fixtures'][key]['verdict'] == 'PASS' for key in expected[1:])
+    assert records == supplied
+    return result
+
+
+def test_csv_record_prefix_truncation_at_every_character_and_clean_recovery():
+    from benches import x05_reconcile as m
+    expected, records = bound_seven_fixture_records()
+    source = records[0]['envelope']['assurance']['evidence']
+    canonical = csv_fixture(source['view_rows'])
+    assert canonical.endswith('"\r\n')
+    accepted = []
+    for cut in range(len(canonical)+1):
+        complete = cut >= len(canonical)-2
+        result = assert_csv_record_bound_result(records, expected, canonical[:cut], 'PASS' if complete else 'UNREADABLE')
+        assert result['verdict'] == ('PASS' if complete else 'UNREADABLE')
+        if complete: accepted.append(cut)
+        recovered = assert_csv_record_bound_result(records, expected, canonical, 'PASS')
+        assert recovered['verdict'] == 'PASS'
+    assert accepted == [len(canonical)-2, len(canonical)-1, len(canonical)]
+
+
+@pytest.mark.parametrize('record', range(6))
+def test_csv_record_mixed_cell_quote_masks_preserve_decoded_rows_and_bound_evidence(record):
+    from benches import x05_reconcile as m
+    expected, records = bound_seven_fixture_records()
+    source = records[0]['envelope']['assurance']['evidence']
+    matrix = list(csv.reader(StringIO(csv_fixture(source['view_rows']))))
+    baseline = m.compare_csv_view(csv_records_text(matrix), source['view_rows'])
+    for mask in range(32):
+        lines = []
+        for index, row in enumerate(matrix):
+            assert all(not any(c in value for c in ',"\r\n') for value in row)
+            lines.append(','.join('"'+value+'"' if index != record or mask & (1<<column) else value
+                for column, value in enumerate(row)))
+        text = '\n'.join(lines)+'\n'
+        assert list(csv.reader(StringIO(text))) == matrix
+        result = assert_csv_record_bound_result(records, expected, text, 'PASS')
+        assert result['fixtures'][expected[0]]['reconciliation']['steps']['5']['csv_view'] == baseline
+
+
+@pytest.mark.parametrize('first', ['\n', '\r\n', '\r'])
+def test_csv_record_mixed_terminators_exhaustive_with_limit_restoration(first):
+    from itertools import product
+    from benches import x05_reconcile as m
+    expected, records = bound_seven_fixture_records()
+    source = records[0]['envelope']['assurance']['evidence']
+    matrix = list(csv.reader(StringIO(csv_fixture(source['view_rows']))))
+    content = [csv_records_text([row]).removesuffix('\n') for row in matrix]
+    previous = csv.field_size_limit()
+    try:
+        csv.field_size_limit(2)
+        for suffix in product(['\n', '\r\n', '\r'], repeat=5):
+            text = ''.join(row+ending for row, ending in zip(content, (first,)+suffix))
+            result = assert_csv_record_bound_result(records, expected, text, 'PASS')
+            assert result['verdict'] == 'PASS' and csv.field_size_limit() == 2
+            decoded, error = m._csv_rows(text)
+            assert error is None
+            assert [[row[key] for key in TABLE_COLUMNS] for row in decoded] == matrix[1:]
+            assert csv.field_size_limit() == 2
+    finally:
+        csv.field_size_limit(previous)
+
+
+@pytest.mark.parametrize('separator', ['\u0085', '\u2028', '\u2029'])
+@pytest.mark.parametrize('boundary', range(5))
+def test_csv_record_unicode_separators_do_not_split_records_and_recover(separator, boundary):
+    expected, records = bound_seven_fixture_records()
+    source = records[0]['envelope']['assurance']['evidence']
+    matrix = list(csv.reader(StringIO(csv_fixture(source['view_rows']))))
+    content = [csv_records_text([row]).removesuffix('\n') for row in matrix]
+    text = ''.join(row+(separator if index == boundary else '\n') for index, row in enumerate(content))
+    result = assert_csv_record_bound_result(records, expected, text, 'UNREADABLE')
+    assert result['verdict'] == 'UNREADABLE'
+    assert assert_csv_record_bound_result(records, expected, csv_records_text(matrix), 'PASS')['verdict'] == 'PASS'
+
+
+@pytest.mark.parametrize('final_newline', [False, True])
+@pytest.mark.parametrize('separator', ['', '\n'])
+def test_csv_record_concatenated_exports_never_accept_first_table(final_newline, separator):
+    expected, records = bound_seven_fixture_records()
+    source = records[0]['envelope']['assurance']['evidence']
+    source['saved_values']['panels'] += 1
+    canonical = csv_fixture(source['view_rows'])
+    first = canonical if final_newline else canonical.removesuffix('\r\n')
+    result = assert_csv_record_bound_result(records, expected, first+separator+canonical, 'UNREADABLE')
+    assert result['verdict'] == 'UNREADABLE'
+    assert result['fixtures'][expected[0]]['reconciliation']['steps']['5']['table']['verdict'] == 'FAIL'
+    recovered = assert_csv_record_bound_result(records, expected, canonical, 'PASS')
+    assert recovered['verdict'] == 'FAIL'
+    assert recovered['fixtures'][expected[0]]['reconciliation']['steps']['5']['table']['verdict'] == 'FAIL'
