@@ -1,5 +1,48 @@
 import { describe, expect, it, vi } from 'vitest'
-import { parseReconciliationNumber, reconciliationRows, reconciliationRowsFromValues, savedReconciliationValues, validReconciliationResponse, reconciliationCsv } from './projectReconciliation.js'
+import { parseReconciliationNumber, reconciliationRows, reconciliationRowsFromValues, savedReconciliationValues, validReconciliationResponse, reconciliationCsv,
+  engineeringTotalsPath, createEngineeringTotalsRecord, parseEngineeringTotalsRecord } from './projectReconciliation.js'
+
+describe('private engineering totals records', () => {
+  const binding = { kind: 'project', organization_id: '11111111-1111-1111-1111-111111111111',
+    project_id: '22222222-2222-2222-2222-222222222222', drawing_id: '33333333-3333-3333-3333-333333333333',
+    input_version_id: '44444444-4444-4444-4444-444444444444' }
+  const hash = 'a'.repeat(64), drafts = ['0002', '0', '01', '1', '00.8000']
+  const make = (values = drafts) => createEngineeringTotalsRecord(binding, hash, values)
+  it('preserves entered strings, copies inputs and binds the exact private path', () => {
+    const record = make(), content = JSON.stringify(record)
+    expect(record).toEqual({ schema: 'leaf.engineering-reconciliation.v1',
+      binding: { organization_id: binding.organization_id, project_id: binding.project_id,
+        drawing_id: binding.drawing_id, input_version_id: binding.input_version_id },
+      graph_sha256: hash, values: drafts, provenance: 'user_supplied_unverified' })
+    expect(engineeringTotalsPath(binding)).toBe(`.leaf/engineering-reconciliation/${binding.drawing_id}/${binding.input_version_id}.json`)
+    expect(parseEngineeringTotalsRecord(content, binding, hash)).toEqual(record)
+    expect(record.values).not.toBe(drafts)
+    expect(record.binding).not.toBe(binding)
+    expect(make([...drafts.slice(0, 4), '']).values[4]).toBe('')
+    expect(make([...drafts.slice(0, 4), '0']).values[4]).toBe('0')
+  })
+  it('requires dense five-string inputs with four valid counts and optional valid DC', () => {
+    const sparse = [...drafts]; delete sparse[1]
+    for (const values of [sparse, drafts.slice(1), [...drafts, '0'], [2, '0', '1', '1', '0'],
+      ['', '0', '1', '1', '0'], ['1.0', '0', '1', '1', '0'], ['9007199254740992', '0', '1', '1', '0'],
+      [...drafts.slice(0, 4), ' '], [...drafts.slice(0, 4), '-1'], [...drafts.slice(0, 4), '1e2']]) expect(make(values)).toBeNull()
+    expect(createEngineeringTotalsRecord(binding, hash.toUpperCase(), drafts)).toBeNull()
+    expect(engineeringTotalsPath({ ...binding, project_id: 'bad' })).toBeNull()
+    expect(createEngineeringTotalsRecord({ ...binding, extra: true }, hash, drafts)).toBeNull()
+  })
+  it('accepts only the exact canonical writer bytes and matching owner and graph', () => {
+    const record = make(), content = JSON.stringify(record)
+    for (const invalid of ['null', '{}', content + '\n', JSON.stringify(record, null, 2),
+      content.replace('{', '{"extra":true,'), content.replace('{', '{"schema":"other",'),
+      content.replace('0002', '\\u0030002'), JSON.stringify({ ...record, provenance: 'verified' }),
+      ' '.repeat(4097), 'é'.repeat(2049)]) expect(parseEngineeringTotalsRecord(invalid, binding, hash)).toBeNull()
+    for (const key of ['organization_id', 'project_id', 'drawing_id', 'input_version_id']) {
+      expect(parseEngineeringTotalsRecord(content, { ...binding, [key]: '55555555-5555-5555-5555-555555555555' }, hash)).toBeNull()
+    }
+    expect(parseEngineeringTotalsRecord(content, binding, 'b'.repeat(64))).toBeNull()
+    expect(drafts).toEqual(['0002', '0', '01', '1', '00.8000'])
+  })
+})
 
 const id = (kind, n) => `leaf:${kind}:00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
 function graph() {

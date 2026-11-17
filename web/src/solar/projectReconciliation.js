@@ -7,6 +7,44 @@ const validId = (id, kind) => typeof id === 'string' && id.length <= 100 && id.s
 const SCALE = 10n ** 18n
 const LIMIT = 10n ** 36n
 
+export function engineeringTotalsPath(binding) {
+  try {
+    const owner = createSolarDrawingBinding(binding)
+    return `.leaf/engineering-reconciliation/${owner.drawing_id}/${owner.input_version_id}.json`
+  } catch { return null }
+}
+
+export function createEngineeringTotalsRecord(binding, graphSha256, drafts) {
+  try {
+    const owner = createSolarDrawingBinding(binding)
+    if (typeof graphSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(graphSha256) ||
+        !Array.isArray(drafts) || drafts.length !== 5) return null
+    const values = []
+    for (let index = 0; index < 5; index++) {
+      const descriptor = Object.getOwnPropertyDescriptor(drafts, String(index))
+      if (!descriptor || !Object.hasOwn(descriptor, 'value') || typeof descriptor.value !== 'string') return null
+      const value = descriptor.value
+      if (!(index === 4 && value === '') && parseReconciliationNumber(value, index !== 4) === null) return null
+      values.push(value)
+    }
+    return { schema: 'leaf.engineering-reconciliation.v1', binding: {
+      organization_id: owner.organization_id, project_id: owner.project_id,
+      drawing_id: owner.drawing_id, input_version_id: owner.input_version_id,
+    }, graph_sha256: graphSha256, values, provenance: 'user_supplied_unverified' }
+  } catch { return null }
+}
+
+// Private writer format: exactly JSON.stringify(record), with the field order above.
+// Reconstructing and comparing bytes rejects duplicate/unknown fields and alternate encodings.
+export function parseEngineeringTotalsRecord(content, binding, graphSha256) {
+  try {
+    if (typeof content !== 'string' || content.length > 4096 || new TextEncoder().encode(content).byteLength > 4096) return null
+    const parsed = JSON.parse(content)
+    const record = createEngineeringTotalsRecord(binding, graphSha256, parsed?.values)
+    return record && JSON.stringify(record) === content ? record : null
+  } catch { return null }
+}
+
 // Eighteen integer and fractional digits; all arithmetic stays in scaled integers.
 export function parseReconciliationNumber(value, count = false) {
   if (typeof value !== 'string' || value.length > 37 ||

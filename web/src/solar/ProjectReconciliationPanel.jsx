@@ -1,9 +1,18 @@
 import { useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { sameSolarDrawingBinding, solarDrawingBindingKey } from './solarDrawingBinding.js'
-import { parseReconciliationNumber, savedReconciliationValues, reconciliationRowsFromValues, reconciliationCsv, validReconciliationResponse } from './projectReconciliation.js'
+import { mintCorrelationId } from '../runIntent.js'
+import { parseReconciliationNumber, parseEngineeringTotalsRecord, savedReconciliationValues, reconciliationRowsFromValues, reconciliationCsv, validReconciliationResponse } from './projectReconciliation.js'
 
 export const RECONCILIATION_READ_TIMEOUT_MS = 20000
 const unavailableValues = savedReconciliationValues(null)
+const validDrafts = values => Array.isArray(values) && values.length === 5 && Array.from(values).every((value, index) =>
+  typeof value === 'string' && ((index === 4 && value === '') || parseReconciliationNumber(value, index !== 4) !== null))
+function validTotals(response, binding, hash) {
+  const data = response?.data, record = data?.record
+  return response?.ok === true && Number.isSafeInteger(data?.revision) && data.revision >= 0 && data.revision <= 2147483647 &&
+    typeof data.canWrite === 'boolean' && (record === null ? data.revision === 0 :
+      !!record && data.revision > 0 && parseEngineeringTotalsRecord(JSON.stringify(record), binding, hash) !== null)
+}
 
 export default function ProjectReconciliationPanel({ solarBinding, authorityKey, projectClient, isCurrent, busy = false }) {
   let bindingKey = null
@@ -12,9 +21,12 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
     [bindingKey, authorityKey, projectClient, isCurrent])
   const [view, setView] = useState(null)
   const [draft, setDraft] = useState(null)
+  const [report, setReport] = useState(null)
   const [, refreshObserver] = useState(0)
   const inputId = useId()
   const request = useRef(null)
+  const storageRequest = useRef(null)
+  const generation = useRef(0)
   const readButton = useRef(null)
   const restoreReadFocus = useRef(false)
   const current = () => {
@@ -31,6 +43,11 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
     scope.alive = true
     scope.observationError = null
     const cancelRead = () => {
+      if (storageRequest.current?.observer === observer) {
+        const active = storageRequest.current
+        storageRequest.current = null
+        active.abort.abort()
+      }
       if (request.current?.observer !== observer) return
       const active = request.current
       request.current = null
@@ -43,6 +60,7 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
       cancelRead()
       setView({ scope, graph: null })
       setDraft(null)
+      setReport(null)
     }
     let unsubscribe
     try {
@@ -68,16 +86,92 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
   const drafts = live && draft?.scope === scope ? draft.values : ['', '', '', '', '']
   const rows = reconciliationRowsFromValues(saved?.values || unavailableValues, drafts)
   const pending = saved?.pending === true
+  const totals = live && report?.scope === scope ? report : null
+  const storagePending = !!totals?.pending
+  function updateReport(value) {
+    // Keep the CAS baseline synchronous across read completion and its separate report load.
+    scope.report = value
+    setReport({ scope, ...value })
+  }
   useLayoutEffect(() => {
     if (!pending && restoreReadFocus.current) {
       if (live && document.activeElement === document.body) readButton.current?.focus()
       restoreReadFocus.current = false
     }
   }, [pending, live])
-  const reportValid = drafts.every((value, index) => (index === 4 && value === '') || parseReconciliationNumber(value, index !== 4) !== null)
+  const reportValid = validDrafts(drafts)
   const canExport = live && !busy && !pending && !!saved?.graph && reportValid
+  const canSave = canExport && !storagePending && totals?.canWrite === true &&
+    totals?.hash === saved.hash && Number.isSafeInteger(totals?.revision) && !totals?.conflict && typeof projectClient.saveEngineeringTotals === 'function'
+  async function store(operation, hash, readGeneration, reload = false) {
+    if (!current() || storageRequest.current) return
+    const abort = new AbortController()
+    const active = { abort, observer: scope.observer }
+    storageRequest.current = active
+    const before = scope.report || {}, edits = scope.edits || 0
+    const accepted = () => !abort.signal.aborted && storageRequest.current === active &&
+      scope.observer === active.observer && generation.current === readGeneration && current()
+    const failed = () => updateReport({ ...before, pending: null,
+      status: operation === 'save' ? 'Engineering totals could not be saved. Retry Save engineering totals.'
+        : 'Engineering totals could not be loaded. Reload saved engineering totals to try again.' })
+    updateReport({ ...before, pending: operation, status: operation === 'save' ? 'Saving engineering totals.' : 'Loading engineering totals.' })
+    const timer = setTimeout(() => {
+      if (storageRequest.current !== active) return
+      if (accepted()) failed()
+      storageRequest.current = null
+      abort.abort()
+    }, RECONCILIATION_READ_TIMEOUT_MS)
+    abort.signal.addEventListener('abort', () => clearTimeout(timer), { once: true })
+    try {
+      let response, submitted
+      if (operation === 'save') {
+        const signature = JSON.stringify([hash, before.revision, drafts])
+        if (scope.retry?.signature !== signature) scope.retry = { signature, request: Object.freeze({
+          graphSha256: hash, drafts: Object.freeze([...drafts]), expectedRevision: before.revision, idempotencyKey: mintCorrelationId(),
+        }) }
+        if (!accepted()) return
+        submitted = scope.retry.request
+        response = await projectClient.saveEngineeringTotals({ ...submitted, signal: abort.signal })
+      } else response = await projectClient.loadEngineeringTotals({ graphSha256: hash, signal: abort.signal })
+      if (!accepted()) return
+      if (response?.status === 409) {
+        scope.retry = null
+        updateReport({ ...before, pending: null, conflict: true,
+          status: 'Engineering totals changed. Reload saved engineering totals before saving.' })
+        return
+      }
+      if (!validTotals(response, scope.binding, hash) || (operation === 'save' &&
+          (!response.data.record || response.data.record.values.some((value, index) => value !== submitted.drafts[index]) ||
+            response.data.revision !== before.revision + 1))) { failed(); return }
+      const { record, revision, canWrite } = response.data
+      const restoredValues = record ? [...record.values] : null
+      if (!accepted()) return
+      const unchanged = (scope.edits || 0) === edits
+      const conflict = operation === 'load' && scope.dirty &&
+        ((!reload || !unchanged) && Number.isSafeInteger(before.revision) && before.revision !== revision ||
+          before.conflict && (!reload || !unchanged))
+      if (operation === 'save') {
+        scope.dirty = !unchanged
+        scope.retry = null
+      } else if (record && unchanged && !conflict && (reload || !scope.dirty)) {
+        setDraft({ scope, values: restoredValues })
+        scope.dirty = false
+      }
+      updateReport({ hash, revision: conflict ? before.revision : revision, canWrite, conflict, pending: null,
+        status: operation === 'save' ? unchanged ? 'Engineering totals saved.'
+          : 'Submitted engineering totals saved. Newer edits remain unsaved.' : conflict
+          ? 'Engineering totals changed. Reload saved engineering totals before saving.'
+          : record && scope.dirty ? 'Saved engineering totals exist. Your entered drafts were retained.'
+            : record ? 'Saved engineering totals loaded.' : 'No saved engineering totals. Entered drafts were retained.' })
+    } catch { if (accepted()) failed() }
+    finally {
+      clearTimeout(timer)
+      if (storageRequest.current === active) storageRequest.current = null
+    }
+  }
   async function read() {
-    if (!current() || busy || request.current) return
+    if (!current() || busy || request.current || storageRequest.current) return
+    const readGeneration = ++generation.current
     restoreReadFocus.current = document.activeElement === readButton.current
     const abort = new AbortController()
     const active = { abort, observer: scope.observer }
@@ -102,7 +196,13 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
       const graph = structuredClone(response.data.intake.solar_design_graph)
       const values = savedReconciliationValues(graph)
       if (abort.signal.aborted || request.current !== active || !current()) return
-      setView({ scope, graph, values, status: `Saved design revision ${graph.rev}.` })
+      const hash = response.data.intake.solar_design_graph_sha256
+      if (scope.hash !== hash) {
+        scope.hash = hash
+        scope.retry = null
+      }
+      setView({ scope, graph, values, hash, generation: readGeneration, status: `Saved design revision ${graph.rev}.` })
+      if (typeof projectClient.loadEngineeringTotals === 'function') void store('load', hash, readGeneration)
     } catch {
       if (!abort.signal.aborted && request.current === active && current()) {
         setView({ scope, error: 'Saved design could not be read. Try reading it again.' })
@@ -136,10 +236,14 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
     <h3>Engineering reconciliation</h3>
     <p>Enter user-supplied engineering report/BOM totals. These values are not independently verified.</p>
     <p id={`${inputId}-dc-optional`}>kW DC is optional when unknown. Leave it blank to export an unreadable comparison, with no report value or delta; it cannot pass.</p>
-    <button ref={readButton} type="button" disabled={!live || busy || pending} onClick={read}>Read saved design</button>
+    <button ref={readButton} type="button" disabled={!live || busy || pending || storagePending} onClick={read}>Read saved design</button>
     <p aria-live="polite">{!live ? scope.observationError || 'Reconciliation unavailable: the selected drawing scope is stale or unavailable.'
       : saved?.status || 'Read the saved design to compare totals.'}</p>
     {saved?.error && <p role="alert">{saved.error}</p>}
+    <button type="button" disabled={!canSave} onClick={() => { if (canSave) void store('save', saved.hash, saved.generation) }}>Save engineering totals</button>
+    <button type="button" disabled={!live || busy || pending || storagePending || !saved?.hash || typeof projectClient.loadEngineeringTotals !== 'function'}
+      onClick={() => { if (current() && !busy && saved?.hash) void store('load', saved.hash, saved.generation, true) }}>Reload saved engineering totals</button>
+    <p aria-live="polite">{totals?.status}{totals?.canWrite === false ? ' Engineering totals are read-only.' : ''}</p>
     <div role="region" aria-label="Reconciliation comparison table" tabIndex={0} style={{ maxWidth: '100%', overflowX: 'auto' }}>
     <table className="ops-table" style={{ display: 'table', width: '44rem', minWidth: '44rem', tableLayout: 'fixed', overflowWrap: 'normal' }}><caption>Saved Studio vs engineering report/BOM totals</caption>
       <thead><tr><th scope="col">Metric</th><th scope="col">Studio</th><th scope="col">Engineering report/BOM</th>
@@ -154,6 +258,12 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
             if (!current() || busy || pending) return
             const values = [...drafts]
             values[index] = event.target.value
+            scope.edits = (scope.edits || 0) + 1
+            scope.dirty = true
+            scope.retry = null
+            if (scope.report && !scope.report.pending && !scope.report.conflict) {
+              updateReport({ ...scope.report, status: 'Engineering totals have unsaved changes.' })
+            }
             setDraft({ scope, values })
           }} /><small id={`${inputId}-${index}-help`}>{index === 4
             ? 'Use a nonnegative decimal with up to 18 integer and 18 fractional digits, or leave blank when unknown.'

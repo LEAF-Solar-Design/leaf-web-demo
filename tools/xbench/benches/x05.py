@@ -805,7 +805,7 @@ def run(ctx):
                     except FileExistsError:
                         continue
                 return observe_reconciliation(page, base=ctx.base, out_dir=private_dir,
-                                              grouping_label=label, **kwargs)
+                                              grouping_label=label, save_report=True, **kwargs)
 
             for project in projects if isinstance(projects, list) else []:
                 result = {"id": project.get("id")} if isinstance(project, dict) else {}
