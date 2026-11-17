@@ -3432,3 +3432,80 @@ CLI mode. Binary buffers take precedence over text interfaces; partial binary
 failure never triggers a text fallback. The CLI leaves borrowed input/output
 streams and their buffers open on success, malformed input and delivery failure.
 Exit 5 is a delivery failure, not a fabricated product FAIL or live X05 verdict.
+
+
+## Discrepancy scope and clock replay
+
+Within Studio X-bench X05, supplied revision policy is separate from measured
+table truth. This synthetic replay repairs fixture scope and freeze time in
+sequence. A passing policy does not erase the independent nonzero table deltas.
+
+```python
+import sys, runpy, json, subprocess
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+expected, records = fixtures['bound_seven_fixture_records']()
+evidence = records[0]['envelope']['assurance']['evidence']
+deltas = dict.fromkeys(m.METRICS, 0)
+deltas.update(panels=-1, optimizers=-2)
+for metric in ('panels', 'optimizers'):
+    evidence['saved_values'][metric] += deltas[metric]
+foreign = dict(fixture_id=expected[1], metric='panels', delta=-1,
+               name='synthetic revision scope', frozen_at='2026-11-15T12:00:00Z')
+late = dict(fixture_id=expected[0], metric='optimizers', delta=-2,
+            name='synthetic revision clock', frozen_at=evidence['run_started_at'])
+evidence['discrepancy_records'] = [foreign, late]
+for label in ('foreign and late', 'scope repaired', 'clock repaired'):
+    if label == 'scope repaired': foreign['fixture_id'] = expected[0]
+    if label == 'clock repaired': late['frozen_at'] = '2026-11-15T12:00:00Z'
+    direct = m.check_discrepancies(expected[0], deltas, evidence['discrepancy_records'], evidence['run_started_at'])
+    strict = m.reconcile_json(m.serialize_result(evidence))['stages']['policy']
+    run = subprocess.run([sys.executable, '-P', m.__file__, '--seven-step-bound-aggregate'],
+        input=m.serialize_result(dict(expected_ids=expected, fixtures=records)).encode(),
+        capture_output=True, timeout=20, env={'SystemRoot': 'C:\\Windows'})
+    assert not run.stderr and run.returncode == 1
+    result = json.loads(run.stdout)
+    steps = result['fixtures'][expected[0]]['reconciliation']['steps']
+    assert direct == strict == steps['6']
+    assert all(result['fixtures'][key]['verdict'] == 'PASS' for key in expected[1:])
+    print(label, direct['verdict'], direct['reason'], direct['rejected_metrics'],
+          steps['5']['table']['verdict'], run.returncode)
+```
+
+Expected output:
+
+```text
+foreign and late FAIL unfrozen_nonzero_delta ['panels', 'optimizers'] FAIL 1
+scope repaired FAIL unfrozen_nonzero_delta ['optimizers'] FAIL 1
+clock repaired PASS discrepancy_policy_satisfied [] FAIL 1
+```
+
+Approvals must bind the same fixture, metric and signed delta and precede the
+run. Equal or later freeze instants do not authorize nonzero deltas. Tests shift
+both clocks together, permute metric bindings, swap fixture approvals and reuse
+records across calls without changing prior outputs. These are supplied synthetic
+policy records. The helper grants no real approval and accepts no live X05 run.
+
+
+## Discrepancy covariance replay
+
+Parent X05 independent reconciliation policy. Run the preserved synthetic script
+`D:/agent-data/leaf-research/studio-xbench-2026-11/synthetic-tests/x05-discrepancy-covariance-replay.py`
+with `python -P`. Its adjacent JSON stores the four exact output cases.
+
+1. Baseline uses signed deltas `1,-2,3,-4,0.25` for the five metrics and timely
+   named matching records. Require policy PASS and all five measured row
+   verdicts FAIL. Table integrity passes because its displayed values and
+   deltas correctly represent the supplied maps.
+2. Add 100 to each saved and oracle baseline. Require identical signed deltas
+   and policy outcome.
+3. Multiply deltas and approval deltas by 3. Require exact deltas
+   `3,-6,9,-12,0.75`, policy PASS and five measured row FAIL verdicts.
+4. Keep those scaled values but restore unscaled approval deltas. Require
+   policy FAIL with all five metrics rejected. Table integrity still passes.
+
+The script uses Fraction to derive signed differences and Decimal to emit exact
+finite values. It reads no customer inputs or transport. These synthetic policy
+records provide comparator evidence. Frozen X05 acceptance still needs the
+admitted live pass and its independently supplied revision record.
