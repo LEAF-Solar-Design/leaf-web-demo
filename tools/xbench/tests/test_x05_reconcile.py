@@ -8782,3 +8782,109 @@ def test_csv_record_concatenated_exports_never_accept_first_table(final_newline,
     recovered = assert_csv_record_bound_result(records, expected, canonical, 'PASS')
     assert recovered['verdict'] == 'FAIL'
     assert recovered['fixtures'][expected[0]]['reconciliation']['steps']['5']['table']['verdict'] == 'FAIL'
+
+
+
+@pytest.mark.parametrize('mask', range(32))
+def test_csv_verdict_masks_have_exact_independent_mismatch_positions(mask):
+    from benches import x05_reconcile as m
+    expected, records = bound_seven_fixture_records()
+    source = records[0]['envelope']['assurance']['evidence']
+    exported = deepcopy(source['view_rows'])
+    assert all(row['verdict'] == 'PASS' for row in exported)
+    reference = [dict(metric=row['metric'], field='verdict') for index, row in enumerate(exported) if mask & (1<<index)]
+    for index, row in enumerate(exported):
+        row['verdict'] = 'FAIL' if mask & (1<<index) else 'PASS'
+    result = assert_csv_record_bound_result(records, expected, csv_fixture(exported), 'FAIL' if mask else 'PASS')
+    comparison = result['fixtures'][expected[0]]['reconciliation']['steps']['5']['csv_view']
+    assert comparison['mismatches'] == reference and len(reference) == mask.bit_count()
+    assert comparison['reason'] == ('csv_view_mismatch' if mask else 'csv_view_equal')
+    assert result['fixtures'][expected[0]]['reconciliation']['steps']['5']['table']['verdict'] == 'PASS'
+
+
+@pytest.mark.parametrize('target,replacement', [(target, replacement) for target in range(5)
+    for replacement in range(5) if target != replacement])
+def test_csv_verdict_metric_substitution_names_missing_duplicate_coverage_and_recovers(target, replacement):
+    expected, records = bound_seven_fixture_records()
+    source = records[0]['envelope']['assurance']['evidence']
+    exported = deepcopy(source['view_rows'])
+    exported[target] = deepcopy(exported[replacement])
+    assert len(exported) == 5 and len({row['metric'] for row in exported}) == 4
+    result = assert_csv_record_bound_result(records, expected, csv_fixture(exported), 'UNREADABLE')
+    assert result['fixtures'][expected[0]]['reconciliation']['steps']['5']['csv_view']['reason'] == 'csv_view_rows_unreadable'
+    assert assert_csv_record_bound_result(records, expected, csv_fixture(source['view_rows']), 'PASS')['verdict'] == 'PASS'
+
+
+@pytest.mark.parametrize('metric', range(5))
+@pytest.mark.parametrize('field', ['studio', 'oracle', 'delta', 'verdict'])
+def test_csv_verdict_comparison_symmetry_for_readable_numeric_and_verdict_changes(metric, field):
+    from fractions import Fraction
+    from benches import x05_reconcile as m
+    _, original = table_fixture()
+    changed = deepcopy(original)
+    if field == 'verdict':
+        changed[metric][field] = 'FAIL' if original[metric][field] == 'PASS' else 'PASS'
+    else:
+        increment = Fraction(1,10) if metric == 4 else Fraction(1)
+        changed[metric][field] = fraction_fixed_text(Fraction(original[metric][field]) + increment)
+    supplied = deepcopy((original, changed))
+    forward = m.compare_csv_view(csv_fixture(original), changed)
+    reverse = m.compare_csv_view(csv_fixture(changed), original)
+    reference = [dict(metric=original[metric]['metric'], field=field)]
+    assert forward == reverse == dict(verdict='FAIL', reason='csv_view_mismatch', mismatches=reference)
+    assert (original, changed) == supplied
+
+
+@pytest.mark.parametrize('order', list(__import__('itertools').permutations(range(3))))
+def test_csv_verdict_fixture_masks_stay_isolated_under_record_permutations(order):
+    from benches import x05_reconcile as m
+    expected, records = bound_seven_fixture_records()
+    baseline = m.aggregate_bound_seven_steps(expected, records)
+    masks = [0, 5, 26]
+    for record, mask in zip(records, masks):
+        source = record['envelope']['assurance']['evidence']
+        exported = deepcopy(source['view_rows'])
+        for index, row in enumerate(exported):
+            row['verdict'] = 'FAIL' if mask & (1<<index) else 'PASS'
+        source['csv_text'] = csv_fixture(exported)
+    supplied = deepcopy(records)
+    result = m.aggregate_bound_seven_steps_json(serialize_result(dict(expected_ids=expected, fixtures=[records[index] for index in order])))
+    for key, mask in zip(expected, masks):
+        step = result['fixtures'][key]['reconciliation']['steps']['5']
+        reference = [dict(metric=metric, field='verdict') for index, metric in enumerate(m.METRICS) if mask & (1<<index)]
+        assert step['csv_view']['mismatches'] == reference and len(reference) == mask.bit_count()
+        assert step['table'] == baseline['fixtures'][key]['reconciliation']['steps']['5']['table']
+        assert result['fixtures'][key]['verdict'] == ('FAIL' if mask else 'PASS')
+    assert records == supplied
+
+
+def test_csv_verdict_transformation_composition_preserves_one_exact_mismatch():
+    from itertools import permutations
+    from fractions import Fraction
+    from benches import x05_reconcile as m
+    expected, records = bound_seven_fixture_records()
+    source = records[0]['envelope']['assurance']['evidence']
+    changed = deepcopy(source['view_rows'])
+    changed[2]['verdict'] = 'FAIL'
+    reference = [dict(metric=changed[2]['metric'], field='verdict')]
+    seen_masks = set()
+    for index, columns in enumerate(permutations(TABLE_COLUMNS)):
+        mask = index % 32
+        seen_masks.add(mask)
+        matrix = [list(columns)]
+        for row in changed:
+            values = []
+            for field in columns:
+                value = str(row[field])
+                if field in ('studio', 'oracle', 'delta'):
+                    canonical = fraction_fixed_text(Fraction(value))
+                    value = '000'+canonical+('00' if '.' in canonical else '.000')
+                    assert Fraction(value) == Fraction(row[field])
+                values.append(value)
+            matrix.append(values)
+        text = '\n'.join(','.join('"'+value+'"' if mask & (1<<column) else value
+            for column, value in enumerate(row)) for row in matrix)+'\n'
+        result = assert_csv_record_bound_result(records, expected, text, 'FAIL')
+        check = result['fixtures'][expected[0]]['reconciliation']['steps']['5']['csv_view']
+        assert check == dict(verdict='FAIL', reason='csv_view_mismatch', mismatches=reference)
+    assert seen_masks == set(range(32))
