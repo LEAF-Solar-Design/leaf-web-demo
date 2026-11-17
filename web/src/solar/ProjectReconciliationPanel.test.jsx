@@ -173,6 +173,74 @@ it.each([['0.400', ''], ['', '0']])('retains optional DC changed from %j to %j d
   expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: 1, drafts: newer })
 })
 
+it.each([['', '0', ''], ['0', '', '0']])('reloads optional DC through %j, %j and %j without coercion', async (...dcValues) => {
+  const h = fixture(); canonicalReports(h); read(); await reportsLoaded()
+  const createObjectURL = vi.fn(() => 'blob:dc-reload')
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  for (const [index, dc] of dcValues.entries()) {
+    const values = [...reportValues]; values[4] = dc
+    h.client.loadEngineeringTotals.mockResolvedValueOnce(totalsResponse(7 + index, values))
+    reloadTotals(); await reportsLoaded()
+    expect(inputValues()).toEqual(values)
+    fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+    const expected = 'metric,studio,oracle,delta,verdict\r\n' +
+      '"panels","1","01","0","PASS"\r\n"optimizers","","00","","UNREADABLE"\r\n' +
+      '"inverters","1","01","0","PASS"\r\n"strings","1","01","0","PASS"\r\n' +
+      (dc === '' ? '"kw_dc","0.4","","","UNREADABLE"\r\n' : '"kw_dc","0.4","0","0.4","FAIL"\r\n')
+    expect(await blobText(createObjectURL.mock.calls.at(-1)[0])).toBe(expected)
+  }
+  const final = [...reportValues]; final[4] = dcValues.at(-1)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(10, final))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls[0][0]).toMatchObject({ expectedRevision: 9, drafts: final })
+})
+
+it('accepts a Save receipt permission downgrade and requires a fresh writable load', async () => {
+  const h = fixture(); canonicalReports(h); read(); await reportsLoaded(); fill(reportValues)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(1, reportValues, false))
+  saveTotals(); await screen.findByText('Engineering totals saved. Engineering totals are read-only.')
+  expect(inputValues()).toEqual(reportValues)
+  const save = () => screen.getByRole('button', { name: 'Save engineering totals' })
+  expect(save().disabled).toBe(true)
+  const createObjectURL = vi.fn(() => 'blob:permission-downgrade')
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(await blobText(createObjectURL.mock.calls[0][0])).toContain('"kw_dc","0.4","0.400","0","PASS"')
+  fill(['2', '00', '01', '01', '0.400'])
+  expect(save().disabled).toBe(true); fireEvent.click(save())
+  expect(h.client.saveEngineeringTotals).toHaveBeenCalledTimes(1)
+  h.client.loadEngineeringTotals.mockResolvedValueOnce(totalsResponse(1, reportValues, false))
+  reloadTotals(); await reportsLoaded(); expect(save().disabled).toBe(true)
+  h.client.loadEngineeringTotals.mockResolvedValueOnce(totalsResponse(1, reportValues, true))
+  reloadTotals(); await reportsLoaded(); expect(save().disabled).toBe(false)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(2, reportValues))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: 1, drafts: reportValues })
+})
+
+it.each([[0, '001', '1'], [4, '0.400', '0.4']])('renews retry identity for a lexical change in field %i', async (index, original, replacement) => {
+  const h = fixture(); canonicalReports(h); read(); await reportsLoaded()
+  const values = [...reportValues]; values[index] = original; fill(values)
+  h.client.saveEngineeringTotals.mockRejectedValue(new Error('synthetic failed write'))
+  saveTotals(); await screen.findByText(/Engineering totals could not be saved/)
+  const first = h.client.saveEngineeringTotals.mock.calls[0][0]
+  saveTotals(); await waitFor(() => expect(h.client.saveEngineeringTotals).toHaveBeenCalledTimes(2))
+  await screen.findByText(/Engineering totals could not be saved/)
+  expect(h.client.saveEngineeringTotals.mock.calls[1][0].idempotencyKey).toBe(first.idempotencyKey)
+  const changed = [...values]; changed[index] = replacement; fill(changed)
+  saveTotals(); await waitFor(() => expect(h.client.saveEngineeringTotals).toHaveBeenCalledTimes(3))
+  await screen.findByText(/Engineering totals could not be saved/)
+  const third = h.client.saveEngineeringTotals.mock.calls[2][0]
+  expect(third).toMatchObject({ expectedRevision: 0, drafts: changed })
+  expect(third.idempotencyKey).not.toBe(first.idempotencyKey)
+  expect(first.drafts).toEqual(values)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(1, changed))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls[3][0]).toMatchObject({ idempotencyKey: third.idempotencyKey, expectedRevision: 0, drafts: changed })
+})
+
 const privateErrors = ['<img src=x onerror="SYNTHETIC_PRIVATE_X05">', '\u0000\u001b[31mSYNTHETIC_PRIVATE_X05\r\n',
   'private credential SYNTHETIC_PRIVATE_X05']
 

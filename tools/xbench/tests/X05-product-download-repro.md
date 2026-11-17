@@ -1110,3 +1110,41 @@ acceptance. The focused tests independently cover each error shape and numeric
 boundaries. They also reproduce same-turn Read then Reload sending a stale
 report request; the generation guard now rejects it before transport. Both
 action orders recover through a fresh graph/report read and ignore old results.
+
+
+## Blank and zero DC persistence replay
+
+Parent X05 report persistence. The executed support fixture is
+`D:/agent-data/leaf-research/studio-xbench-2026-11/synthetic-tests/x05-optional-dc-fehb_3fd/replay.py`.
+Its `proof.json` binds the three product source hashes, mocked transport,
+request revisions and cleanup. Use the existing React/esbuild and Python
+Playwright setup. The two actual panels share one persistence client and a
+synthetic file API. Saved-design reads use the one-panel 0.4 kW graph fixture.
+Use the 1920 by 2200 forced-colors viewport so all controls and rows fit.
+
+1. Read saved design in both panels. In A enter `001,0,01,1,` with DC blank.
+   Hold the first Save receipt after the synthetic file commits revision 1.
+   Enter explicit DC `0` before releasing the receipt. Require the newer-edit
+   feedback and retained zero. Export `newer-zero.csv`. Its DC row must show
+   Studio `0.4`, report `0`, delta `0.4` and FAIL. Capture
+   `held-blank-newer-zero.png`.
+2. Reload explicitly. Require the committed blank DC, with no report value
+   or delta and UNREADABLE in `reloaded-blank.csv`. Capture
+   `reloaded-blank.png`.
+3. Enter zero and hold the second Save receipt after revision 2 commits.
+   Clear DC before releasing it. Require newer-edit feedback and retained
+   blank. Export `newer-blank.csv`, whose DC row remains UNREADABLE.
+4. Reload explicitly. Require committed zero, numeric delta `0.4` and FAIL
+   in `reloaded-zero.csv`. Capture `reloaded-zero.png`. Each of the four CSVs
+   must equal its five normalized visible table rows, 20 row pairs total.
+5. Clear DC and Save. Require expected revision 2 and committed revision 3.
+   Require the complete write baseline sequence `0,1,2`.
+6. Unmount both panels and require zero observers. Close context, browser,
+   server and thread in `finally`. Preserve the replay, proof, synthetic file,
+   CSVs and screenshots. No video is required.
+
+Stop on a protected prompt, changed lexical value, incorrect DC verdict,
+lost newer draft, CSV mismatch or wrong revision. The support fixture controls
+the delayed transport receipts. Product actions use the visible controls.
+This run proves offline synthetic persistence and browser rendering. Frozen
+staging grading still requires its admitted window and source receipt.
