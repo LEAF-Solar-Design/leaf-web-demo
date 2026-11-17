@@ -14,6 +14,7 @@ import * as civilClients from './solarCivilClient.js'
 import * as civilPanels from './SolarCivilPanel.jsx'
 import * as publicationClients from './solarProjectMaterializationClient.js'
 import generationIntake from '../../../docs/parity/evidence/ground/generate/intake.json'
+import SolarGroundInputForm from './SolarGroundInputForm.jsx'
 import { FLOW_PANELS } from './solarWorkspacePanels.js'
 import { TRACKER_ROWS_PANEL_REASONS as TRACKER_SENTENCES } from './SolarTrackerRowsPanel.jsx'
 import SolarWorkspaceTools, { TERRAIN_WORKSPACE_REASONS, SOLAREDGE_WORKSPACE_REASONS } from './SolarWorkspaceTools.jsx'
@@ -1301,6 +1302,8 @@ describe('canonical project layout publication action', () => {
     change('Preset name', '  My frame  ')
     change('Module length (metres)', '2.5')
     change('Module width (metres)', '1.2')
+    expect(screen.getByLabelText('Module thickness (metres)').value).toBe('0.033')
+    change('Module thickness (metres)', '0.04')
     expect(screen.getByLabelText('Module power (watts)').value).toBe('715')
     expect(screen.getByLabelText('Horizontal module gap (metres)').value).toBe('0.02')
     expect(screen.getByLabelText('Vertical module gap (metres)').value).toBe('0.02')
@@ -1322,7 +1325,7 @@ describe('canonical project layout publication action', () => {
     expect(captured.mode).toBe('initial')
     expect(JSON.parse(captured.parameters_json)).toEqual({ boundary: [[10, -20], [110, -20], [110, 30], [10, 30]],
       drawing_units: units, preset: { Name: 'My frame', ModuleLengthM: 2.5, ModuleWidthM: 1.2,
-        ModuleThicknessM: 0.033, ModulePowerWp: 550, FramingType: 'FixedTilt', Orientation: 'Landscape',
+        ModuleThicknessM: 0.04, ModulePowerWp: 550, FramingType: 'FixedTilt', Orientation: 'Landscape',
         Rows: 3, Columns: 10, TiltDegrees: 25, HorizontalGapM: 0, VerticalGapM: 0.05, AxisAzimuthDeg: 190 } })
     await waitFor(() => expect(f.props.onProjectDrawingPublished).toHaveBeenCalledOnce())
     expect(f.props.onProjectDrawingPublished.mock.calls[0][2]()).toBe(true)
@@ -1340,6 +1343,7 @@ describe('canonical project layout publication action', () => {
       ['Site origin Y (drawing units)', ['1000000000', 'NaN']],
       ['Module length (metres)', ['0', '-1', '101', '1e999']],
       ['Module width (metres)', ['', 'Infinity', '101']],
+      ['Module thickness (metres)', ['', ' ', '0', '-0.01', 'NaN', 'Infinity', '1e999', '1.01', '1'.repeat(65)]],
       ['Module power (watts)', ['', ' ', '1.5', '0', '-1', 'NaN', 'Infinity', '1e999', '9007199254740992', '1000001', '1'.repeat(65)]],
       ['Horizontal module gap (metres)', ['', ' ', '-0.01', 'NaN', 'Infinity', '1e999', '101', '1'.repeat(65)]],
       ['Vertical module gap (metres)', ['', '-1', 'NaN', 'Infinity', '1e999', '100.01']],
@@ -1366,6 +1370,207 @@ describe('canonical project layout publication action', () => {
       expect(screen.getByLabelText(label).hasAttribute('aria-invalid')).toBe(false)
     }
     expect(f.api.publish).not.toHaveBeenCalled()
+  })
+  it.each([['X', 'width', '900000000'], ['X', 'width', '-900000000'],
+    ['Y', 'height', '900000000'], ['Y', 'height', '-900000000']])(
+    'refuses representationally collapsed %s corners at origin %s %s', async (axis, size, origin) => {
+      const f = initialFixture()
+      render(<SolarWorkspaceTools {...f.props} />)
+      site(); await readInitial()
+      const originLabel = `Site origin ${axis} (drawing units)`
+      const sizeLabel = `Site ${size} (drawing units)`
+      change(originLabel, origin)
+      change(sizeLabel, '1e-20')
+      expect(generate().disabled).toBe(true)
+      for (const label of [originLabel, sizeLabel]) {
+        const input = screen.getByLabelText(label)
+        expect(input.getAttribute('aria-invalid')).toBe('true')
+        expect(document.getElementById(input.getAttribute('aria-describedby').split(' ').at(-1)).textContent).toContain('distinct corners')
+      }
+      fireEvent.click(generate())
+      expect(f.api.publish).not.toHaveBeenCalled()
+      change(sizeLabel, '0.000001')
+      expect(generate().disabled).toBe(false)
+    })
+  it('emits null parameters for collapsed corners and preserves representable tiny geometry', () => {
+    const onParameters = vi.fn()
+    render(<SolarGroundInputForm onParameters={onParameters} />)
+    site()
+    change('Site origin X (drawing units)', '-900000000')
+    change('Site width (drawing units)', '1e-20')
+    expect(onParameters.mock.calls.at(-1)[0]).toBeNull()
+    const calls = onParameters.mock.calls.length
+    fireEvent.click(screen.getByRole('button', { name: 'Convert site units to feet' }))
+    expect(onParameters.mock.calls).toHaveLength(calls)
+    expect(screen.getByLabelText('Site drawing units').value).toBe('m')
+    expect(screen.getByRole('status').textContent).toContain('distinct corners')
+    change('Site origin X (drawing units)', '0')
+    expect(onParameters.mock.calls.at(-1)[0].boundary[1][0]).toBe(1e-20)
+  })
+  it('updates per-frame DC watts only for valid parameters', () => {
+    const f = initialFixture()
+    render(<SolarWorkspaceTools {...f.props} />)
+    site()
+    expect(screen.getByText(/Per-frame DC watts: 34320\./)).toBeTruthy()
+    change('Module rows', '2')
+    expect(screen.getByText(/Per-frame DC watts: 17160\./)).toBeTruthy()
+    change('Module columns', '5')
+    change('Module power (watts)', '550')
+    expect(screen.getByText(/Per-frame DC watts: 5500\./)).toBeTruthy()
+    change('Module rows', '1000')
+    change('Module columns', '10')
+    change('Module power (watts)', '1000000')
+    expect(screen.getByText(/Per-frame DC watts: 10000000000\./)).toBeTruthy()
+    change('Module thickness (metres)', '0')
+    expect(screen.queryByText(/Per-frame DC watts:/)).toBeNull()
+  })
+  it('resets structured inputs to pristine defaults and null output with stable IDs', () => {
+    const onParameters = vi.fn()
+    const view = render(<SolarGroundInputForm onParameters={onParameters} />)
+    const controls = () => [...view.container.querySelectorAll('input, select')]
+    const defaults = controls().map(node => [node.id, node.value])
+    site()
+    fireEvent.click(screen.getByRole('button', { name: 'Convert site units to feet' }))
+    expect(screen.getByRole('status').textContent).toContain('Site units converted')
+    for (const input of controls()) fireEvent.change(input, { target: {
+      value: input.tagName === 'SELECT' ? input.options[input.options.length - 1].value : '0',
+    } })
+    expect(screen.getByRole('alert')).toBeTruthy()
+    const errorIds = [...view.container.querySelectorAll('[aria-invalid="true"]')]
+      .map(node => node.getAttribute('aria-describedby').split(' ').at(-1))
+    fireEvent.click(screen.getByRole('button', { name: 'Reset structured inputs' }))
+    expect(controls().map(node => [node.id, node.value])).toEqual(defaults)
+    expect(view.container.querySelector('[aria-invalid]')).toBeNull()
+    expect(errorIds.every(id => !document.getElementById(id))).toBe(true)
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(onParameters.mock.calls.at(-1)[0]).toBeNull()
+    expect(screen.queryByRole('img')).toBeNull()
+  })
+  it('reset structured inputs preserves the separate advanced draft in the workspace', async () => {
+    const f = initialFixture()
+    render(<SolarWorkspaceTools {...f.props} />)
+    site(); await readInitial()
+    fireEvent.click(screen.getByRole('button', { name: 'Advanced JSON' }))
+    change('Site boundary (JSON)', JSON.stringify(generationIntake.boundary))
+    change('Complete preset (JSON)', JSON.stringify(generationIntake.active_preset))
+    change('Drawing units for publication', 'ft')
+    fireEvent.click(screen.getByRole('button', { name: 'Structured inputs' }))
+    change('Module thickness (metres)', '0')
+    fireEvent.click(screen.getByRole('button', { name: 'Reset structured inputs' }))
+    expect(generate().disabled).toBe(true)
+    expect(screen.queryByRole('alert')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Advanced JSON' }))
+    expect(screen.getByLabelText('Site boundary (JSON)').value).toBe(JSON.stringify(generationIntake.boundary))
+    expect(screen.getByLabelText('Complete preset (JSON)').value).toBe(JSON.stringify(generationIntake.active_preset))
+    expect(screen.getByLabelText('Drawing units for publication').value).toBe('ft')
+    expect(generate().disabled).toBe(false)
+    expect(f.api.publish).not.toHaveBeenCalled()
+  })
+  it('converts site units with roundtrippable values and captures explicit converted coordinates', async () => {
+    const f = initialFixture()
+    render(<SolarWorkspaceTools {...f.props} />)
+    site(); await readInitial()
+    change('Module thickness (metres)', '0.04')
+    const original = ['10', '-20', '100', '50']
+    const labels = ['Site origin X (drawing units)', 'Site origin Y (drawing units)', 'Site width (drawing units)', 'Site height (drawing units)']
+    const moduleValues = ['Module length (metres)', 'Module width (metres)', 'Module thickness (metres)',
+      'Module power (watts)', 'Horizontal module gap (metres)', 'Vertical module gap (metres)'].map(label => [label, screen.getByLabelText(label).value])
+    fireEvent.click(screen.getByRole('button', { name: 'Convert site units to feet' }))
+    expect(labels.map(label => screen.getByLabelText(label).value)).toEqual(original.map(value => String(Number(value) / 0.3048)))
+    expect(screen.getByLabelText('Site drawing units').value).toBe('ft')
+    fireEvent.click(screen.getByRole('button', { name: 'Convert site units to metres' }))
+    labels.forEach((label, index) => expect(Number(screen.getByLabelText(label).value)).toBeCloseTo(Number(original[index]), 12))
+    fireEvent.click(screen.getByRole('button', { name: 'Convert site units to feet' }))
+    for (const [label, value] of moduleValues) expect(screen.getByLabelText(label).value).toBe(value)
+    expect(f.api.publish).not.toHaveBeenCalled()
+    const [x, y, width, height] = labels.map(label => Number(screen.getByLabelText(label).value))
+    fireEvent.click(generate())
+    await waitFor(() => expect(f.api.publish).toHaveBeenCalledOnce())
+    expect(JSON.parse(f.api.publish.mock.calls[0][0].parameters_json)).toMatchObject({
+      boundary: [[x, y], [x + width, y], [x + width, y + height], [x, y + height]],
+      drawing_units: 'ft', preset: { ModuleThicknessM: 0.04 },
+    })
+  })
+  it.each([['Site width (drawing units)', '1000000'], ['Site width (drawing units)', '304800.00000000006'],
+    ['Site origin X (drawing units)', '304799990'], ['Site origin X (drawing units)', '900000000'],
+    ['Site origin X (drawing units)', '-900000000'], ['Site width (drawing units)', ''],
+    ['Site height (drawing units)', 'NaN']])('refuses site conversion atomically for %s = %s', async (label, value) => {
+    const f = initialFixture()
+    render(<SolarWorkspaceTools {...f.props} />)
+    site(); await readInitial()
+    change(label, value)
+    const inputs = [...document.querySelectorAll('input, select')]
+    const before = inputs.map(node => node.value)
+    const wasDisabled = generate().disabled
+    fireEvent.click(screen.getByRole('button', { name: 'Convert site units to feet' }))
+    expect(inputs.map(node => node.value)).toEqual(before)
+    expect(generate().disabled).toBe(wasDisabled)
+    expect(screen.getByText(/Site units were not converted\./).getAttribute('role')).toBe('status')
+    expect(f.api.publish).not.toHaveBeenCalled()
+  })
+  it('keeps the exact parameters on conversion refusal and clears feedback on reset', () => {
+    const onParameters = vi.fn()
+    render(<SolarGroundInputForm onParameters={onParameters} />)
+    site()
+    change('Site width (drawing units)', '1000000')
+    const before = onParameters.mock.calls.at(-1)[0]
+    const calls = onParameters.mock.calls.length
+    fireEvent.click(screen.getByRole('button', { name: 'Convert site units to feet' }))
+    expect(onParameters.mock.calls).toHaveLength(calls)
+    expect(onParameters.mock.calls.at(-1)[0]).toBe(before)
+    expect(screen.getByRole('status').textContent).toContain('not converted')
+    fireEvent.click(screen.getByRole('button', { name: 'Reset structured inputs' }))
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(onParameters.mock.calls.at(-1)[0]).toBeNull()
+  })
+  it('refuses site conversion when a positive feet dimension would underflow in metres', () => {
+    const onParameters = vi.fn()
+    render(<SolarGroundInputForm onParameters={onParameters} />)
+    change('Site width (drawing units)', '5e-324')
+    change('Site height (drawing units)', '10')
+    change('Site drawing units', 'ft')
+    const before = onParameters.mock.calls.at(-1)[0]
+    expect(before).not.toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Convert site units to metres' }))
+    expect(onParameters.mock.calls.at(-1)[0]).toBe(before)
+    expect(screen.getByLabelText('Site drawing units').value).toBe('ft')
+    expect(screen.getByLabelText('Site width (drawing units)').value).toBe('5e-324')
+    expect(screen.getByRole('status').textContent).toContain('not converted')
+  })
+  it.each([['-10', '-20', '100', '50'], ['0', '0', '5e-324', '1000000'],
+    ['0', '0', '1000000', '5e-324'], ['0', '0', '5e-324', '5e-324']])(
+    'renders an accessible finite schematic for origin %s %s and dimensions %s %s', (x, y, width, height) => {
+      const onParameters = vi.fn()
+      const view = render(<SolarGroundInputForm onParameters={onParameters} />)
+      change('Site origin X (drawing units)', x); change('Site origin Y (drawing units)', y)
+      change('Site width (drawing units)', width); change('Site height (drawing units)', height)
+      const svg = screen.getByRole('img', { name: 'Site rectangle schematic (not to scale)' })
+      const desc = document.getElementById(svg.getAttribute('aria-describedby'))
+      expect(desc.textContent).toContain(`Rectangle ${width} by ${height} metres, origin X ${x}, Y ${y}`)
+      expect(desc.textContent).toContain('not to scale')
+      expect(document.getElementById(svg.getAttribute('aria-labelledby')).tagName.toLowerCase()).toBe('title')
+      for (const token of svg.getAttribute('viewBox').split(' ')) expect(Number.isFinite(Number(token))).toBe(true)
+      for (const attr of ['x', 'y', 'width', 'height']) expect(Number.isFinite(Number(svg.querySelector('rect').getAttribute(attr)))).toBe(true)
+      expect(Number(svg.querySelector('rect').getAttribute('width'))).toBeGreaterThan(0)
+      expect(Number(svg.querySelector('rect').getAttribute('height'))).toBeGreaterThan(0)
+      expect(onParameters.mock.calls.at(-1)[0].boundary[0]).toEqual([Number(x), Number(y)])
+      const titleId = svg.getAttribute('aria-labelledby')
+      change('Site drawing units', 'ft')
+      expect(svg.getAttribute('aria-labelledby')).toBe(titleId)
+      expect(desc.textContent).toContain('feet')
+      change('Module thickness (metres)', '0')
+      expect(screen.queryByRole('img')).toBeNull()
+      expect(view.container.querySelector('title')).toBeNull()
+    })
+  it('uses unique preview title and description IDs across mounted forms', () => {
+    const onParameters = vi.fn()
+    const view = render(<><SolarGroundInputForm onParameters={onParameters} /><SolarGroundInputForm onParameters={onParameters} /></>)
+    for (const label of ['Site width (drawing units)', 'Site height (drawing units)'])
+      for (const input of screen.getAllByLabelText(label)) fireEvent.change(input, { target: { value: '10' } })
+    expect(screen.getAllByRole('img')).toHaveLength(2)
+    const ids = [...view.container.querySelectorAll('[id]')].map(node => node.id)
+    expect(new Set(ids).size).toBe(ids.length)
   })
   it('associates stable field errors with labels and clears corrected fields independently', async () => {
     const f = initialFixture()
@@ -1492,11 +1697,13 @@ describe('canonical project layout publication action', () => {
     fireEvent.click(generate())
     await waitFor(() => expect(f.api.publish).toHaveBeenCalledOnce())
     const assertLocked = () => {
-      for (const label of ['Site width (drawing units)', 'Site drawing units', 'Module power (watts)',
+      for (const label of ['Site width (drawing units)', 'Site drawing units', 'Module power (watts)', 'Module thickness (metres)',
         'Horizontal module gap (metres)', 'Vertical module gap (metres)', 'Module orientation', 'Site boundary (JSON)',
         'Complete preset (JSON)', 'Drawing units for publication', 'Original layout intake (JSON)'])
         expect(screen.getByLabelText(label).matches(':disabled')).toBe(true)
       expect(screen.getByRole('button', { name: mode === 'advanced' ? 'Structured inputs' : 'Advanced JSON' }).matches(':disabled')).toBe(true)
+      for (const name of ['Reset structured inputs', 'Convert site units to feet'])
+        expect(screen.getByRole('button', { name, hidden: true }).matches(':disabled')).toBe(true)
     }
     assertLocked()
     await act(async () => pending.resolve({ ok: false, code: 'PROJECT_LAYOUT_OUTCOME_UNKNOWN', outcomeUnknown: true }))
