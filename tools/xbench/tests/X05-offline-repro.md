@@ -2792,3 +2792,306 @@ those indices without changing the mismatch total. A separately accepted frozen
 table discrepancy cannot erase a grouping mismatch. These are synthetic supplied
 sequences and report counts, not evidence that the live UI showed them or that
 an independent report extractor produced the count. No result accepts live X05.
+
+## Grouping sequence-composition replay
+
+Within Studio X-bench X05, grouping diagnostics keep exact totals while capping
+example indices. Concatenation offsets the right sequence's indices; deletion
+compacts each surviving original position independently.
+
+```python
+import sys
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+left = [1, 2]*14
+right = [3, 2]*13
+counts = left + right
+rows = [dict(group_count=value) for value in counts]
+expected = ([i for i, value in enumerate(left) if value != 2] +
+            [len(left)+i for i, value in enumerate(right) if value != 2])
+joined = m.compare_recommendations(2, rows)
+assert joined['mismatch_count'] == len(expected)
+assert joined['mismatched_recommendations'] == expected[:m.MAX_RECOMMENDATION_EXAMPLES]
+print('joined', joined['mismatch_count'], len(joined['mismatched_recommendations']),
+      joined['mismatched_recommendations'][-3:])
+removed = {1, 2, 38}
+kept = [(i, row) for i, row in enumerate(rows) if i not in removed]
+expected = [i-sum(deleted < i for deleted in removed)
+            for i, row in kept if row['group_count'] != 2]
+compacted = m.compare_recommendations(2, [row for _, row in kept])
+assert compacted['mismatch_count'] == len(expected)
+assert compacted['mismatched_recommendations'] == expected[:m.MAX_RECOMMENDATION_EXAMPLES]
+print('compacted', compacted['mismatch_count'], len(compacted['mismatched_recommendations']),
+      compacted['mismatched_recommendations'][-3:])
+```
+
+Expected output:
+
+```text
+joined 27 20 [34, 36, 38]
+compacted 25 20 [34, 37, 39]
+```
+
+Deletion removes one matching and two mismatching rows. The surviving total is
+25, while only the first 20 remapped zero-based indices are emitted. The
+independent model checks the entire exact total before applying the example
+cap. Tests also compare direct, strict JSON and bound-aggregate CLI grouping
+results at 19, 20 and 21 interleaved mismatches with clean sibling fixtures.
+These synthetic sequences do not prove what the live UI showed, which report
+count is correct, or independent report acquisition. No result accepts live X05.
+
+## Grouping stable-interleaving replay
+
+Within Studio X-bench X05, an explicit origin map lets an independent model
+predict grouping positions after a stable weave. Reversal must use every
+mismatch position, including those omitted by the diagnostic cap.
+
+```python
+import sys, runpy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+counts = ([1, 2, 3]*9, [2, 1]*8)
+left, right = ([dict(group_count=value) for value in source] for source in counts)
+rows, origins = fixtures['stable_grouping_weave'](left, right, (0, 0, 1))
+expected = [position for position, (source, index) in enumerate(origins)
+            if counts[source][index] != 2]
+result = m.compare_recommendations(2, rows)
+assert result['mismatch_count'] == len(expected)
+print('woven', result['verdict'], result['mismatch_count'],
+      len(result['mismatched_recommendations']),
+      result['mismatched_recommendations'] == expected[:m.MAX_RECOMMENDATION_EXAMPLES])
+reversed_expected = sorted(len(rows)-1-index for index in expected)
+reversed_result = m.compare_recommendations(2, list(reversed(rows)))
+assert reversed_result['mismatch_count'] == len(expected)
+print('reversed', reversed_result['verdict'], reversed_result['mismatch_count'],
+      len(reversed_result['mismatched_recommendations']),
+      reversed_result['mismatched_recommendations'] == reversed_expected[:m.MAX_RECOMMENDATION_EXAMPLES])
+```
+
+Expected output:
+
+```text
+woven FAIL 26 20 True
+reversed FAIL 26 20 True
+```
+
+Each origin pair names the source list and its original row index. The model
+uses those independent counts, not comparator output, to derive the full set
+of 26 mismatch positions. It reverses that full set before selecting the first
+20 examples. Reversing only the previously capped 20 would lose candidates.
+Tests also rotate all 51 offsets of a mixed sequence and count exact linear
+row/count accesses without timing thresholds. Synthetic sequence consistency
+does not prove live UI recommendations or independent report origin, and no
+result accepts live X05.
+
+## CSV structural-repair replay
+
+Within Studio X-bench X05, CSV/view equality and saved-design truth are separate
+checks. Repairing CSV structure must not erase an independent saved-value
+mismatch. The parser already uses strict quote grammar and exact arity; this
+replay and the negative tests preserve those existing boundaries.
+
+```python
+import sys, runpy
+from copy import deepcopy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+evidence = fixtures['complete_evidence']()
+evidence['saved_values']['panels'] += 1
+valid = evidence['csv_text']
+records = [list(m.TABLE_COLUMNS)] + [[row[key] for key in m.TABLE_COLUMNS]
+          for row in evidence['view_rows']]
+records[1].append('')
+extra_cell = fixtures['csv_records_text'](records)
+for label, text in [('bad quote', '"synthetic-unclosed'),
+                    ('quote repaired, extra cell', extra_cell),
+                    ('cells repaired', valid)]:
+    evidence['csv_text'] = text
+    result = m.reconcile_offline(evidence)
+    csv_check = result['stages']['csv_view']
+    print(label, result['verdict'], csv_check['verdict'], csv_check['reason'],
+          result['stages']['table']['verdict'])
+```
+
+Expected output:
+
+```text
+bad quote UNREADABLE UNREADABLE csv_evidence_unreadable FAIL
+quote repaired, extra cell UNREADABLE UNREADABLE csv_row_unreadable FAIL
+cells repaired FAIL PASS csv_view_equal FAIL
+```
+
+Unterminated quotes and text after a closing quote produce sanitized UNREADABLE
+results. Missing or surplus header/data cells are rejected, including empty
+surplus cells and trailing delimiters. A quoted newline stays within one logical
+record; an extra record exceeds the five-metric bound. One readable overflow
+record is inspected before the parser stops without consuming the remaining
+tail. Caller field limits are restored on each early return and parse error.
+
+Numeric plain decimal spellings and signed zero are normalized. Exact nonzero
+DC deltas of 1e-77 survive comparison. Textual exponent strings remain outside
+the shared numeric-string grammar in CSV and direct row validation, and are
+named UNREADABLE rather than accepted as equal. These are synthetic supplied
+rows and structural repairs, not proof of live exports, independent saved-design
+acquisition or live X05 acceptance.
+
+## CSV column-binding replay
+
+Within Studio X-bench X05, headers bind each decoded cell to a named field.
+Reordering headers with their cells preserves CSV/view equality. Reordering only
+cells changes bindings and must not hide an independent saved-design mismatch.
+
+```python
+import sys, runpy
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+evidence = fixtures['complete_evidence']()
+evidence['saved_values']['panels'] += 1
+columns = ('metric', 'delta', 'oracle', 'studio', 'verdict')
+paired = fixtures['csv_fixture'](evidence['view_rows'], columns)
+wrong = fixtures['csv_records_text']([m.TABLE_COLUMNS] +
+        [[row[key] for key in columns] for row in evidence['view_rows']])
+for label, text in [('paired headers and cells', paired), ('cells only', wrong)]:
+    evidence['csv_text'] = text
+    result = m.reconcile_offline(evidence)
+    check = result['stages']['csv_view']
+    if label == 'cells only':
+        assert check['mismatches'] == [dict(metric=metric, field=field)
+            for metric in m.METRICS for field in ('studio', 'delta')]
+    print(label, result['verdict'], check['verdict'], check['reason'],
+          len(check['mismatches']), result['stages']['table']['verdict'])
+```
+
+Expected output:
+
+```text
+paired headers and cells FAIL PASS csv_view_equal 0 FAIL
+cells only FAIL FAIL csv_view_mismatch 10 FAIL
+```
+
+The wrong export swaps studio and delta cells under unchanged headers, producing
+two named field mismatches in each of five metrics. The independent saved panel
+value remains wrong in both cases. Tests enumerate all 120 column permutations
+with distinct numeric fields so equal values cannot conceal wrong bindings.
+They also verify minimal/all quote equivalence, strict verdict tokens, and decoded
+cell budgets for doubled quotes and non-BMP characters. A decoded payload exactly
+at the structural cell budget can still fail metric/header semantics; that is
+separate from an excess decoded length. Parser field limits are restored.
+Synthetic binding consistency does not prove live exports or saved-design truth,
+and no result accepts live X05.
+
+## CSV dialect recovery replay
+
+Within Studio X-bench X05, a supported comma export and saved-design truth are
+separate checks. Repairing a semicolon dialect cannot erase an independent
+saved panel mismatch. This replay uses the same bound fixtures as the tests.
+
+```python
+import sys, runpy, csv, json, subprocess
+from io import StringIO
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+expected, records = fixtures['bound_seven_fixture_records']()
+evidence = records[0]['envelope']['assurance']['evidence']
+evidence['saved_values']['panels'] += 1
+for label, delimiter in [('semicolon', ';'), ('comma', ',')]:
+    output = StringIO(newline='')
+    writer = csv.writer(output, delimiter=delimiter, quoting=csv.QUOTE_MINIMAL,
+                        lineterminator='\n')
+    writer.writerow(m.TABLE_COLUMNS)
+    writer.writerows([row[key] for key in m.TABLE_COLUMNS] for row in evidence['view_rows'])
+    evidence['csv_text'] = output.getvalue()
+    direct = m.compare_csv_view(evidence['csv_text'], evidence['view_rows'])
+    run = subprocess.run([sys.executable, '-P', m.__file__, '--seven-step-bound-aggregate'],
+        input=m.serialize_result(dict(expected_ids=expected, fixtures=records)).encode(),
+        capture_output=True, timeout=20, env={'SystemRoot': 'C:\\Windows'})
+    assert not run.stderr
+    result = json.loads(run.stdout)
+    step = result['fixtures'][expected[0]]['reconciliation']['steps']['5']
+    assert step['csv_view'] == direct
+    siblings = all(result['fixtures'][key]['verdict'] == 'PASS' for key in expected[1:])
+    print(label, direct['verdict'], direct['reason'], run.returncode,
+          step['csv_view']['verdict'], step['table']['verdict'], siblings)
+```
+
+Expected output:
+
+```text
+semicolon UNREADABLE csv_headers_unreadable 4 UNREADABLE FAIL True
+comma PASS csv_view_equal 1 PASS FAIL True
+```
+
+The CLI changes from UNREADABLE exit 4 to readable FAIL exit 1 after CSV recovery.
+The independent saved-design/table failure remains. Tests also reject tab
+separators, single-quote wrappers and backslash-escaped quotes. Standard doubled
+quotes decode structurally; decoded foreign verdict tokens remain invalid.
+Confusable labels and controls are never silently normalized into valid names.
+Empty physical lines decode as empty records, quoted empty lines as one empty
+cell, and whitespace lines as one whitespace cell. Each still consumes a logical
+record and fails exact arity or the row budget. These are synthetic supplied
+exports, not evidence of live export dialects, oracle origin or live X05 acceptance.
+
+
+## CSV lexical recovery replay
+
+Within Studio X-bench X05, CSV lexical validity and independent saved-design
+truth are separate checks. Run this synthetic replay from the repository root.
+It repairs a relocated BOM, a quoted decimal comma, and a formula token. Each
+fault is isolated so the named diagnostic identifies its own lexical boundary.
+
+```python
+import sys, runpy, csv, json, subprocess
+from io import StringIO
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+expected, records = fixtures['bound_seven_fixture_records']()
+evidence = records[0]['envelope']['assurance']['evidence']
+evidence['saved_values']['panels'] += 1
+canonical = fixtures['csv_fixture'](evidence['view_rows'])
+base = list(csv.reader(StringIO(canonical)))
+localized = [row[:] for row in base]
+localized[1][1] = '1,25'
+formula = [row[:] for row in base]
+formula[1][4] = '=1+1'
+cases = [('relocated BOM', '\n\ufeff' + canonical),
+         ('localized number', fixtures['csv_records_text'](localized)),
+         ('formula token', fixtures['csv_records_text'](formula)),
+         ('canonical', canonical)]
+for label, text in cases:
+    evidence['csv_text'] = text
+    direct = m.compare_csv_view(text, evidence['view_rows'])
+    run = subprocess.run([sys.executable, '-P', m.__file__, '--seven-step-bound-aggregate'],
+        input=m.serialize_result(dict(expected_ids=expected, fixtures=records)).encode(),
+        capture_output=True, timeout=20, env={'SystemRoot': 'C:\\Windows'})
+    assert not run.stderr
+    result = json.loads(run.stdout)
+    step = result['fixtures'][expected[0]]['reconciliation']['steps']['5']
+    assert step['csv_view'] == direct
+    siblings = all(result['fixtures'][key]['verdict'] == 'PASS' for key in expected[1:])
+    print(label, direct['verdict'], direct['reason'], run.returncode,
+          step['csv_view']['verdict'], step['table']['verdict'], siblings)
+```
+
+Expected output:
+
+```text
+relocated BOM UNREADABLE csv_headers_unreadable 4 UNREADABLE FAIL True
+localized number UNREADABLE csv_view_rows_unreadable 4 UNREADABLE FAIL True
+formula token UNREADABLE csv_view_rows_unreadable 4 UNREADABLE FAIL True
+canonical PASS csv_view_equal 1 PASS FAIL True
+```
+
+One BOM at the stream start is supported. BOMs inside decoded fields, extra
+leading BOMs, whitespace around exact labels or numbers, localized number
+spellings, and spreadsheet expressions are foreign values. No implicit trim or
+spreadsheet evaluation occurs. The raw CSV budget counts Python characters,
+including one character per non-BMP code point. Oversized input never enters
+the parser, while exactly bounded input still receives structural validation.
+Diagnostics contain fixed reason codes and no injected cell text. Synthetic
+CSV recovery preserves the saved panel failure and readable sibling fixtures.
+It proves neither live export behavior nor live X05 acceptance.

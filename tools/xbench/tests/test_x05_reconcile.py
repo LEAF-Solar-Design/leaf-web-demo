@@ -8012,3 +8012,666 @@ def test_grouping_failure_and_frozen_table_policy_repair_independently(repair_fi
     evidence['saved_values']['panels']=evidence['oracle_values']['panels']
     evidence['discrepancy_records']=[]
     assert m.reconcile_offline(evidence)['verdict']=='PASS' and accepted==preserved
+
+
+@pytest.mark.parametrize('report',[1,2,3])
+@pytest.mark.parametrize('left,right',[([2]*4,[2,1,2]),([1,2,3]*12,[3,2,1]*11),([],[1,2,1])])
+def test_grouping_concatenation_adds_totals_offsets_indices_and_caps(report,left,right):
+    from benches import x05_reconcile as m
+    rows_left=[dict(group_count=value) for value in left]; rows_right=[dict(group_count=value) for value in right]
+    original=deepcopy((rows_left,rows_right))
+    first=m.compare_recommendations(report,rows_left,no_recommendations_shown=not rows_left)
+    second=m.compare_recommendations(report,rows_right,no_recommendations_shown=not rows_right)
+    left_bad=[i for i,value in enumerate(left) if value!=report]
+    right_bad=[len(left)+i for i,value in enumerate(right) if value!=report]
+    expected=left_bad+right_bad
+    prior=deepcopy((first,second)); result=m.compare_recommendations(report,rows_left+rows_right)
+    assert result['mismatch_count']==first['mismatch_count']+second['mismatch_count']==len(expected)
+    assert result['mismatched_recommendations']==expected[:MAX_RECOMMENDATION_EXAMPLES]
+    assert result['verdict']==('FAIL' if expected else 'PASS')
+    assert (rows_left,rows_right)==original and (first,second)==prior
+
+
+@pytest.mark.parametrize('removed',[(0,),(1,),(36,37,38,39,40),(38,39,40,41),(0,1,48,49)])
+def test_grouping_deletion_compacts_independent_surviving_indices(removed):
+    from benches import x05_reconcile as m
+    counts=[1,2]*25; rows=[dict(group_count=value) for value in counts]
+    original=deepcopy(rows); before=m.compare_recommendations(2,rows); preserved=deepcopy(before)
+    kept=[(index,row) for index,row in enumerate(rows) if index not in removed]
+    compact=[row for _,row in kept]
+    expected=[old_index-sum(deleted<old_index for deleted in removed) for old_index,row in kept if row['group_count']!=2]
+    result=m.compare_recommendations(2,compact)
+    assert result['mismatch_count']==25-sum(counts[index]!=2 for index in removed)==len(expected)
+    assert result['mismatched_recommendations']==expected[:MAX_RECOMMENDATION_EXAMPLES]
+    assert result['verdict']=='FAIL' and before==preserved and rows==original
+
+
+@pytest.mark.parametrize('length',[8,24])
+@pytest.mark.parametrize('bump',[0,1,2])
+def test_grouping_unequal_run_replication_matches_expanded_reference(length,bump):
+    from benches import x05_reconcile as m
+    counts=([1,2,3,2]*6)[:length]
+    factors=[1+(index%3)+bump for index in range(length)]
+    rows=[dict(group_count=value) for value in counts]; original=deepcopy((rows,factors))
+    expected=[]; offset=0
+    for value,factor in zip(counts,factors):
+        if value!=2: expected.extend(range(offset,offset+factor))
+        offset+=factor
+    expanded=[dict(row) for row,factor in zip(rows,factors) for _ in range(factor)]
+    supplied=deepcopy(expanded); result=m.compare_recommendations(2,expanded)
+    assert result['mismatch_count']==len(expected)
+    assert result['mismatched_recommendations']==expected[:MAX_RECOMMENDATION_EXAMPLES]
+    assert len(result['mismatched_recommendations'])==min(len(expected),MAX_RECOMMENDATION_EXAMPLES)
+    assert (rows,factors)==original and expanded==supplied
+
+
+@pytest.mark.parametrize('report',[1,2,3])
+def test_grouping_bijective_count_renaming_keeps_bound_diagnostics(report):
+    from benches import x05_reconcile as m
+    expected,records=bound_seven_fixture_records()
+    evidence=records[0]['envelope']['assurance']['evidence']
+    evidence['report_grid_count']=report
+    evidence['recommendations']=[dict(group_count=value) for value in [1,2,3]*13]
+    baseline=m.aggregate_bound_seven_steps(expected,records); preserved=deepcopy(baseline)
+    rename={1:11,2:37,3:5}
+    evidence['report_grid_count']=rename[report]
+    for row in evidence['recommendations']: row['group_count']=rename[row['group_count']]
+    supplied=deepcopy(records); result=m.aggregate_bound_seven_steps(expected,records)
+    first,second=baseline['fixtures'][expected[0]],result['fixtures'][expected[0]]
+    assert second['reconciliation']['steps']['4']==first['reconciliation']['steps']['4']
+    assert second['verdict']==first['verdict']=='FAIL'
+    assert all(result['fixtures'][key]==baseline['fixtures'][key] for key in expected[1:])
+    assert records==supplied and baseline==preserved
+
+
+@pytest.mark.parametrize('count',[19,20,21])
+def test_grouping_cap_boundary_direct_strict_json_bound_cli_agree(tmp_path,count):
+    import subprocess,sys
+    from pathlib import Path
+    from benches import x05_reconcile as m
+    expected,records=bound_seven_fixture_records()
+    evidence=records[0]['envelope']['assurance']['evidence']
+    evidence['report_grid_count']=2
+    evidence['recommendations']=[dict(group_count=value) for value in [1,2]*count]
+    original=deepcopy(records)
+    direct=m.compare_recommendations(2,evidence['recommendations'])
+    strict=m.reconcile_seven_steps_json(serialize_result(records[0]['envelope']))['steps']['4']
+    assert strict==direct
+    assert direct['mismatch_count']==count
+    assert direct['mismatched_recommendations']==list(range(0,2*count,2))[:MAX_RECOMMENDATION_EXAMPLES]
+    run=subprocess.run([sys.executable,'-P',str(Path(m.__file__).resolve()),'--seven-step-bound-aggregate'],input=serialize_result(dict(expected_ids=expected,fixtures=records)).encode(),capture_output=True,cwd=tmp_path,timeout=20,env={'SystemRoot':'C:\\Windows'})
+    assert run.returncode==1 and not run.stderr
+    parsed=json.loads(run.stdout)
+    assert parsed['fixtures'][expected[0]]['reconciliation']['steps']['4']==direct
+    assert parsed['fixtures'][expected[0]]['verdict']=='FAIL'
+    assert all(parsed['fixtures'][key]['verdict']=='PASS' for key in expected[1:])
+    assert records==original
+
+
+def stable_grouping_weave(left,right,schedule):
+    sources=[left,right]; cursors=[0,0]; origins=[]; rows=[]
+    while any(cursors[source]<len(sources[source]) for source in (0,1)):
+        for source in schedule:
+            index=cursors[source]
+            if index<len(sources[source]):
+                origins.append((source,index)); rows.append(sources[source][index]); cursors[source]+=1
+    return rows,origins
+
+
+@pytest.mark.parametrize('schedule',[(0,1),(0,0,1),(0,1,1,1)])
+@pytest.mark.parametrize('report',[1,2,3])
+def test_grouping_stable_weaves_match_explicit_origin_reference(schedule,report):
+    from benches import x05_reconcile as m
+    counts=([1,2,3]*13,[2,3,1]*9)
+    left,right=([dict(group_count=value) for value in values] for values in counts)
+    original=deepcopy((left,right))
+    rows,origins=stable_grouping_weave(left,right,schedule)
+    assert [index for source,index in origins if source==0]==list(range(len(left)))
+    assert [index for source,index in origins if source==1]==list(range(len(right)))
+    expected=[position for position,(source,index) in enumerate(origins) if counts[source][index]!=report]
+    result=m.compare_recommendations(report,rows)
+    assert result['verdict']=='FAIL'
+    assert result['mismatch_count']==len(expected)==sum(value!=report for values in counts for value in values)
+    assert result['mismatched_recommendations']==expected[:MAX_RECOMMENDATION_EXAMPLES]
+    assert (left,right)==original
+
+
+@pytest.mark.parametrize('report',[1,2,3])
+def test_grouping_reversal_uses_full_reference_positions_beyond_cap(report):
+    from benches import x05_reconcile as m
+    counts=[1,2,3,2]*17; rows=[dict(group_count=value) for value in counts]
+    original=deepcopy(rows); before=m.compare_recommendations(report,rows); preserved=deepcopy(before)
+    full=[index for index,value in enumerate(counts) if value!=report]
+    expected=sorted(len(rows)-1-index for index in full)
+    result=m.compare_recommendations(report,list(reversed(rows)))
+    assert len(full)>MAX_RECOMMENDATION_EXAMPLES
+    assert result['mismatch_count']==before['mismatch_count']==len(full)
+    assert result['mismatched_recommendations']==expected[:MAX_RECOMMENDATION_EXAMPLES]
+    assert result['mismatched_recommendations']!=sorted(len(rows)-1-index for index in before['mismatched_recommendations'])[:MAX_RECOMMENDATION_EXAMPLES]
+    assert before==preserved and rows==original
+
+
+def test_grouping_every_cyclic_offset_remaps_full_positions_and_new_cap():
+    from benches import x05_reconcile as m
+    counts=[1,2,3]*17; rows=[dict(group_count=value) for value in counts]
+    full=[index for index,value in enumerate(counts) if value!=2]
+    original=deepcopy(rows); history=[]; frozen=[]
+    for offset in range(len(rows)):
+        rotated=rows[offset:]+rows[:offset]
+        expected=sorted((index-offset)%len(rows) for index in full)
+        supplied=deepcopy(rotated); result=m.compare_recommendations(2,rotated)
+        assert result['mismatch_count']==len(full)==34
+        assert result['mismatched_recommendations']==expected[:MAX_RECOMMENDATION_EXAMPLES]
+        assert rotated==supplied
+        history.append(result); frozen.append(deepcopy(result))
+    assert history==frozen and rows==original
+    assert len({tuple(result['mismatched_recommendations']) for result in history})>1
+
+
+@pytest.mark.parametrize('size',[10,100,1000])
+@pytest.mark.parametrize('mode',['valid','mismatch','late-invalid'])
+def test_grouping_recommendation_access_is_exactly_linear(size,mode):
+    from benches import x05_reconcile as m
+    work=dict(iterated=0,gets=0)
+    class Row(dict):
+        def get(self,*args):
+            work['gets']+=1
+            return super().get(*args)
+    class Rows(list):
+        def __iter__(self):
+            for row in super().__iter__():
+                work['iterated']+=1
+                yield row
+    values=[2 if mode=='valid' else 1 for _ in range(size)]
+    if mode=='late-invalid': values[-1]=True
+    rows=Rows(Row(group_count=value) for value in values)
+    result=m.compare_recommendations(2,rows)
+    assert work==dict(iterated=size,gets=size)
+    assert result['verdict']==dict(valid='PASS',mismatch='FAIL',**{'late-invalid':'UNREADABLE'})[mode]
+    if mode!='late-invalid': assert result['mismatch_count']==(0 if mode=='valid' else size)
+    assert [dict.get(row,'group_count') for row in list.__iter__(rows)]==values
+
+
+def test_grouping_shared_rows_refresh_only_sharing_fixtures_and_preserve_prior():
+    from benches import x05_reconcile as m
+    expected,records=bound_seven_fixture_records()
+    shared=dict(group_count=2)
+    for record in records[:2]:
+        record['envelope']['assurance']['evidence']['recommendations']=[shared]
+    baseline=m.aggregate_bound_seven_steps(expected,records); frozen=deepcopy(baseline)
+    assert baseline['verdict']=='PASS'
+    shared['group_count']=1
+    supplied=deepcopy(records); result=m.aggregate_bound_seven_steps(expected,records)
+    for key in expected[:2]:
+        grouping=result['fixtures'][key]['reconciliation']['steps']['4']
+        assert grouping['verdict']=='FAIL' and grouping['mismatch_count']==1 and grouping['mismatched_recommendations']==[0]
+        assert result['fixtures'][key]['verdict']=='FAIL'
+    assert result['fixtures'][expected[2]]==baseline['fixtures'][expected[2]]
+    assert records==supplied and baseline==frozen
+    assert all(record['envelope']['assurance']['evidence']['recommendations'][0] is shared for record in records[:2])
+    preserved=deepcopy(result)
+    shared['group_count']=2
+    assert m.aggregate_bound_seven_steps(expected,records)==baseline and result==preserved
+
+
+def csv_records_text(records,newline='\n'):
+    output=StringIO(newline='')
+    writer=csv.writer(output,lineterminator=newline,quoting=csv.QUOTE_ALL)
+    writer.writerows(records)
+    return output.getvalue()
+
+
+@pytest.mark.parametrize('record',range(6))
+@pytest.mark.parametrize('broken',['unterminated','after-close'])
+def test_csv_strict_quote_grammar_sanitized_and_field_limit_restored(record,broken):
+    from benches import x05_reconcile as m
+    _,view=table_fixture(); matrix=list(csv.reader(StringIO(csv_fixture(view))))
+    prefix=csv_records_text(matrix[:record])
+    bad='"private-csv-canary' if broken=='unterminated' else '"private-csv-canary"text'
+    text=prefix+','.join([bad]+matrix[record][1:])+'\n'
+    original=csv.field_size_limit()
+    try:
+        csv.field_size_limit(1)
+        result=m.compare_csv_view(text,view)
+        assert result==dict(verdict='UNREADABLE',reason='csv_evidence_unreadable')
+        assert 'private-csv-canary' not in serialize_result(result)
+        assert csv.field_size_limit()==1
+        assert m.compare_csv_view(csv_fixture(view),view)['verdict']=='PASS'
+        assert csv.field_size_limit()==1
+    finally: csv.field_size_limit(original)
+
+
+@pytest.mark.parametrize('record',range(6))
+@pytest.mark.parametrize('mutation',['missing','extra-empty','trailing'])
+def test_csv_exact_record_arity_at_each_header_and_data_position(record,mutation):
+    from benches import x05_reconcile as m
+    _,view=table_fixture(); matrix=list(csv.reader(StringIO(csv_fixture(view))))
+    positions=range(5) if mutation=='missing' else range(6) if mutation=='extra-empty' else [5]
+    for position in positions:
+        changed=deepcopy(matrix)
+        if mutation=='missing': changed[record].pop(position)
+        elif mutation=='extra-empty': changed[record].insert(position,'')
+        if mutation=='trailing':
+            text=''.join(csv_records_text([row]).rstrip('\n')+(',' if index==record else '')+'\n' for index,row in enumerate(changed))
+        else: text=csv_records_text(changed)
+        original=deepcopy(view); result=m.compare_csv_view(text,view)
+        assert result==dict(verdict='UNREADABLE',reason='csv_headers_unreadable' if record==0 else 'csv_row_unreadable')
+        assert view==original
+
+
+@pytest.mark.parametrize('spelling',['decimal','signed-zero','exponent'])
+@pytest.mark.parametrize('tiny',[False,True])
+def test_csv_numeric_lexemes_match_direct_rows_or_named_contract_rejection(spelling,tiny):
+    from fractions import Fraction
+    from benches import x05_reconcile as m
+    _,view=table_fixture(); expected=deepcopy(view)
+    if tiny:
+        row=next(row for row in expected if row['metric']=='kw_dc')
+        value=Fraction(row['studio'])+Fraction(1,10**77)
+        row['studio']=fraction_fixed_text(value); row['delta']=fraction_fixed_text(Fraction(1,10**77)); row['verdict']='FAIL'
+    lexical=deepcopy(expected)
+    for row in lexical:
+        for field in ('studio','oracle','delta'):
+            value=Fraction(row[field]); plain=fraction_fixed_text(value)
+            row[field]=plain+'e0' if spelling=='exponent' else '-0.000' if spelling=='signed-zero' and not value else plain+('.000' if '.' not in plain else '')
+    text=csv_fixture(lexical); result=m.compare_csv_view(text,expected)
+    if spelling=='exponent':
+        assert result==dict(verdict='UNREADABLE',reason='csv_view_rows_unreadable')
+        assert m._table(lexical) is None  # textual exponent strings are unsupported in both paths
+    else:
+        assert result['verdict']=='PASS' and m._table(lexical)==m._table(expected)
+        parsed,error=m._csv_rows(text); assert error is None
+        power=m._table(parsed)['kw_dc']
+        assert Fraction(power['delta'])==(Fraction(1,10**77) if tiny else 0)
+        if tiny:
+            different=m.compare_csv_view(text,view)
+            assert different['verdict']=='FAIL'
+            assert {'metric':'kw_dc','field':'delta'} in different['mismatches']
+            assert Fraction(power['studio'])-Fraction(power['oracle'])==Fraction(1,10**77)
+
+
+@pytest.mark.parametrize('newline',['\n','\r\n'])
+@pytest.mark.parametrize('kind',['embedded-at-limit','extra-record','malformed-last','malformed-overflow'])
+def test_csv_logical_record_boundaries_and_malformed_final_records_restore_limits(newline,kind):
+    from benches import x05_reconcile as m
+    _,view=table_fixture(); matrix=list(csv.reader(StringIO(csv_fixture(view))))
+    if kind=='embedded-at-limit':
+        matrix[-1][-1]='PA'+newline+'SS'
+        text=csv_records_text(matrix,newline)
+    elif kind=='extra-record': text=csv_records_text(matrix+[matrix[-1]],newline)
+    elif kind=='malformed-last': text=csv_records_text(matrix[:-1],newline)+'"unterminated'
+    else: text=csv_records_text(matrix,newline)+'"unterminated'
+    original=csv.field_size_limit()
+    try:
+        csv.field_size_limit(1)
+        rows,error=m._csv_rows(text)
+        if kind=='embedded-at-limit':
+            assert error is None and len(rows)==5
+            assert rows[-1]['verdict']=='PA'+newline+'SS'
+            assert m.compare_csv_view(text,view)['reason']=='csv_view_rows_unreadable'
+        else:
+            assert rows is None
+            assert error==('csv_excess_rows' if kind=='extra-record' else 'csv_evidence_unreadable')
+        assert csv.field_size_limit()==1
+    finally: csv.field_size_limit(original)
+
+
+@pytest.mark.parametrize('size',[20,100,500])
+def test_csv_overflow_stops_after_one_logical_lookahead_without_tail_scan(monkeypatch,size):
+    from benches import x05_reconcile as m
+    original_reader=csv.reader; work=[]
+    class CountedReader:
+        def __init__(self,reader): self.reader=reader
+        def __iter__(self): return self
+        def __next__(self):
+            work.append(1)
+            return next(self.reader)
+    monkeypatch.setattr(m.csv,'reader',lambda *args,**kwargs:CountedReader(original_reader(*args,**kwargs)))
+    _,view=table_fixture()
+    text=','.join(TABLE_COLUMNS)+'\n'+('panels,1,1,0,PASS\n'*size)+'"private-unparsed-tail'
+    assert len(text)<m.MAX_CSV_CHARS
+    previous=csv.field_size_limit()
+    try:
+        csv.field_size_limit(2)
+        result=m.compare_csv_view(text,view)
+        assert result==dict(verdict='UNREADABLE',reason='csv_excess_rows')
+        assert len(work)==1+len(METRICS)+1  # header, five accepted records, one overflow
+        assert 'private-unparsed-tail' not in serialize_result(result)
+        assert csv.field_size_limit()==2
+    finally: csv.field_size_limit(previous)
+
+
+def distinct_csv_binding_rows():
+    _,rows=table_fixture()
+    values=dict(panels=(25,24,1),optimizers=(13,12,1),inverters=(3,1,2),strings=(5,2,3),kw_dc=('9.6','8.5','1.1'))
+    for row in rows:
+        row['studio'],row['oracle'],row['delta']=values[row['metric']]
+        row['verdict']='FAIL'
+    return rows
+
+
+def test_all_csv_column_permutations_preserve_paired_bindings_detect_cells_only():
+    from itertools import permutations
+    from benches import x05_reconcile as m
+    rows=distinct_csv_binding_rows(); original=deepcopy(rows); outcomes=dict(PASS=0,FAIL=0,UNREADABLE=0)
+    baseline=m.compare_csv_view(csv_fixture(rows),rows)
+    assert baseline['verdict']=='PASS'
+    for columns in permutations(TABLE_COLUMNS):
+        assert m.compare_csv_view(csv_fixture(rows,columns),rows)==baseline
+        text=csv_records_text([TABLE_COLUMNS]+[[row[key] for key in columns] for row in rows])
+        result=m.compare_csv_view(text,rows)
+        if columns==TABLE_COLUMNS: expected='PASS'
+        elif columns[0]=='metric' and columns[-1]=='verdict': expected='FAIL'
+        else: expected='UNREADABLE'
+        assert result['verdict']==expected
+        outcomes[expected]+=1
+    assert outcomes==dict(PASS=1,FAIL=5,UNREADABLE=114) and rows==original
+
+
+@pytest.mark.parametrize('mismatch',[False,True])
+def test_csv_minimal_and_all_quoting_agree_direct_and_bound(mismatch):
+    from benches import x05_reconcile as m
+    expected,records=bound_seven_fixture_records(); evidence=records[0]['envelope']['assurance']['evidence']
+    exported=deepcopy(evidence['view_rows'])
+    if mismatch: evidence['view_rows'][0]['studio']+=1
+    results=[]
+    for quoting in (csv.QUOTE_MINIMAL,csv.QUOTE_ALL):
+        output=StringIO(newline=''); writer=csv.writer(output,quoting=quoting,lineterminator='\r\n')
+        writer.writerow(TABLE_COLUMNS); writer.writerows([row[key] for key in TABLE_COLUMNS] for row in exported)
+        evidence['csv_text']=output.getvalue(); supplied=deepcopy(records)
+        direct=m.compare_csv_view(evidence['csv_text'],evidence['view_rows'])
+        aggregate=m.aggregate_bound_seven_steps(expected,records)
+        assert aggregate['fixtures'][expected[0]]['reconciliation']['steps']['5']['csv_view']==direct
+        assert direct['verdict']==('FAIL' if mismatch else 'PASS')
+        assert all(aggregate['fixtures'][key]['verdict']=='PASS' for key in expected[1:])
+        assert records==supplied
+        results.append(aggregate)
+    assert results[0]==results[1]
+
+
+@pytest.mark.parametrize('index',range(5))
+@pytest.mark.parametrize('token',['pass','fail','private-verdict-canary','',0])
+def test_csv_verdict_tokens_are_strict_sanitized_and_recover(index,token):
+    from benches import x05_reconcile as m
+    _,view=table_fixture(); exported=deepcopy(view)
+    exported[index]['verdict']=token; original=deepcopy(exported)
+    result=m.compare_csv_view(csv_fixture(exported),view)
+    assert result==dict(verdict='UNREADABLE',reason='csv_view_rows_unreadable')
+    assert 'private-verdict-canary' not in serialize_result(result) and exported==original
+    exported[index]['verdict']=view[index]['verdict']
+    assert m.compare_csv_view(csv_fixture(exported),view)['verdict']=='PASS'
+
+
+@pytest.mark.parametrize('header',[False,True])
+@pytest.mark.parametrize('character',['"',chr(0x1F642)])
+@pytest.mark.parametrize('excess',[False,True])
+def test_csv_decoded_field_budget_handles_escaping_and_non_bmp_with_restoration(header,character,excess):
+    from benches import x05_reconcile as m
+    _,view=table_fixture(); matrix=list(csv.reader(StringIO(csv_fixture(view))))
+    payload=character*(m.MAX_CSV_CELL+int(excess))
+    matrix[0 if header else 1][0]=payload
+    text=csv_records_text(matrix)
+    if character=='"': assert len(text)>2*len(payload)
+    previous=csv.field_size_limit()
+    try:
+        csv.field_size_limit(3)
+        rows,error=m._csv_rows(text)
+        if excess: assert rows is None and error=='csv_cell_too_large'
+        elif header: assert rows is None and error=='csv_headers_unreadable'
+        else:
+            assert error is None and len(rows[0]['metric'])==m.MAX_CSV_CELL and rows[0]['metric']==payload
+        assert csv.field_size_limit()==3
+        result=m.compare_csv_view(text,view)
+        assert result['verdict']=='UNREADABLE' and payload not in serialize_result(result)
+        assert csv.field_size_limit()==3
+    finally: csv.field_size_limit(previous)
+
+
+@pytest.mark.parametrize('order',[('csv','table'),('table','csv')])
+def test_bound_csv_structure_and_independent_table_faults_repair_separately(order):
+    from benches import x05_reconcile as m
+    expected,records=bound_seven_fixture_records(); source=records[0]['envelope']['assurance']['evidence']
+    baseline=m.aggregate_bound_seven_steps(expected,records)
+    valid_csv=source['csv_text']; saved_panels=source['saved_values']['panels']
+    source['csv_text']='"private-broken-export'; source['saved_values']['panels']+=1
+    remaining={'csv','table'}; history=[]; frozen=[]
+    for repair in order+(None,):
+        supplied=deepcopy(records); result=m.aggregate_bound_seven_steps(expected,records)
+        fixture=result['fixtures'][expected[0]]; step=fixture['reconciliation']['steps']['5']
+        assert step['csv_view']['verdict']==('UNREADABLE' if 'csv' in remaining else 'PASS')
+        assert step['table']['verdict']==('FAIL' if 'table' in remaining else 'PASS')
+        assert fixture['verdict']==('UNREADABLE' if 'csv' in remaining else 'FAIL' if 'table' in remaining else 'PASS')
+        assert all(result['fixtures'][key]==baseline['fixtures'][key] for key in expected[1:])
+        assert 'private-broken-export' not in serialize_result(result) and records==supplied
+        history.append(result); frozen.append(deepcopy(result))
+        if repair=='csv': source['csv_text']=valid_csv
+        elif repair=='table': source['saved_values']['panels']=saved_panels
+        if repair is not None: remaining.remove(repair)
+    assert history==frozen and history[-1]==baseline
+
+
+@pytest.mark.parametrize('kind',['semicolon','tab','backslash','single-quote'])
+def test_csv_unsupported_dialects_reject_then_comma_and_doubled_quotes_recover(kind):
+    from benches import x05_reconcile as m
+    _,view=table_fixture()
+    if kind in ('semicolon','tab'):
+        output=StringIO(newline=''); writer=csv.writer(output,delimiter=';' if kind=='semicolon' else '\t',quoting=csv.QUOTE_MINIMAL)
+        writer.writerow(TABLE_COLUMNS); writer.writerows([row[key] for key in TABLE_COLUMNS] for row in view)
+        text=output.getvalue(); reason='csv_headers_unreadable'
+    elif kind=='single-quote':
+        matrix=[TABLE_COLUMNS]+[[str(row[key]) for key in TABLE_COLUMNS] for row in view]
+        text='\n'.join(','.join("'"+str(value)+"'" for value in row) for row in matrix)+'\n'; reason='csv_headers_unreadable'
+    else:
+        text='"private\\"escaped",studio,oracle,delta,verdict\n'; reason='csv_evidence_unreadable'
+    result=m.compare_csv_view(text,view)
+    assert result==dict(verdict='UNREADABLE',reason=reason) and 'private' not in serialize_result(result)
+    assert m.compare_csv_view(csv_fixture(view),view)['verdict']=='PASS'
+    structural=deepcopy(view); structural[0]['verdict']='PA"SS'
+    decoded,error=m._csv_rows(csv_fixture(structural))
+    assert error is None and decoded[0]['verdict']=='PA"SS'
+    assert m.compare_csv_view(csv_fixture(structural),view)['verdict']=='UNREADABLE'  # valid quote syntax, foreign verdict
+    assert m.compare_csv_view(csv_fixture(view),view)['verdict']=='PASS'
+
+
+@pytest.mark.parametrize('where',['header','metric'])
+@pytest.mark.parametrize('kind',['lookalike','zero-width'])
+@pytest.mark.parametrize('index',range(5))
+def test_csv_foreign_confusable_labels_never_bind(where,kind,index):
+    from benches import x05_reconcile as m
+    _,view=table_fixture(); matrix=list(csv.reader(StringIO(csv_fixture(view))))
+    row,column=(0,index) if where=='header' else (index+1,0)
+    label=matrix[row][column]
+    lookalikes={'m':'\u043c','s':'\u0455','o':'\u03bf','d':'\u0501','v':'\u0475','p':'\u0440','i':'\u0456','k':'\u043a'}
+    foreign=lookalikes[label[0]]+label[1:] if kind=='lookalike' else label[0]+'\u200b'+label[1:]
+    assert foreign!=label
+    matrix[row][column]=foreign; original=deepcopy(view)
+    result=m.compare_csv_view(csv_records_text(matrix),view)
+    assert result==dict(verdict='UNREADABLE',reason='csv_headers_unreadable' if where=='header' else 'csv_view_rows_unreadable')
+    assert foreign not in serialize_result(result) and view==original
+    assert m.compare_csv_view(csv_fixture(view),view)['verdict']=='PASS'
+
+
+@pytest.mark.parametrize('control',['\x00','\x1b','\x08'])
+@pytest.mark.parametrize('record',range(6))
+@pytest.mark.parametrize('column',range(5))
+def test_csv_controls_at_every_header_and_data_field_are_sanitized(record,column,control):
+    from benches import x05_reconcile as m
+    _,view=table_fixture(); matrix=list(csv.reader(StringIO(csv_fixture(view))))
+    matrix[record][column]=matrix[record][column]+control+'private-control-canary'
+    previous=csv.field_size_limit()
+    try:
+        csv.field_size_limit(2)
+        result=m.compare_csv_view(csv_records_text(matrix),view)
+        assert result==dict(verdict='UNREADABLE',reason='csv_headers_unreadable' if record==0 else 'csv_view_rows_unreadable')
+        assert 'private-control-canary' not in serialize_result(result) and control not in serialize_result(result)
+        assert csv.field_size_limit()==2
+        assert m.compare_csv_view(csv_fixture(view),view)['verdict']=='PASS' and csv.field_size_limit()==2
+    finally: csv.field_size_limit(previous)
+
+
+@pytest.mark.parametrize('newline',['\n','\r\n'])
+@pytest.mark.parametrize('kind',['empty-physical','quoted-empty','whitespace'])
+@pytest.mark.parametrize('position',range(7))
+def test_csv_blank_logical_records_are_not_silently_ignored(newline,kind,position):
+    from benches import x05_reconcile as m
+    _,view=table_fixture(); matrix=list(csv.reader(StringIO(csv_fixture(view))))
+    token={'empty-physical':'','quoted-empty':'""','whitespace':' \t '}[kind]
+    line=token+newline
+    parsed=list(csv.reader(StringIO(line,newline='')))
+    assert parsed==[[] if kind=='empty-physical' else [''] if kind=='quoted-empty' else [' \t ']]
+    pieces=[csv_records_text([row],newline) for row in matrix]; pieces.insert(position,line)
+    result=m.compare_csv_view(''.join(pieces),view)
+    reason='csv_headers_unreadable' if position==0 else 'csv_excess_rows' if position==6 else 'csv_row_unreadable'
+    assert result==dict(verdict='UNREADABLE',reason=reason)
+    assert m.compare_csv_view(csv_records_text(matrix,newline),view)['verdict']=='PASS'
+
+
+def test_bound_csv_multi_cell_differences_match_fraction_reference_with_opposite_tiny_deltas():
+    from fractions import Fraction
+    from benches import x05_reconcile as m
+    expected,records=bound_seven_fixture_records()
+    for record,sign in zip(records[:2],[1,-1]):
+        evidence=record['envelope']['assurance']['evidence']; exported=deepcopy(evidence['view_rows'])
+        for index,row in enumerate(exported):
+            quantum=Fraction(1,10**77) if row['metric']=='kw_dc' else Fraction(index+1)
+            row['studio']=fraction_fixed_text(Fraction(row['studio'])+quantum)
+            row['oracle']=fraction_fixed_text(Fraction(row['oracle'])+2*quantum)
+            row['delta']=fraction_fixed_text(sign*quantum)
+            row['verdict']='FAIL'
+        evidence['csv_text']=csv_fixture(exported)
+    supplied=deepcopy(records); result=m.aggregate_bound_seven_steps(expected,records)
+    assert result['verdict']=='FAIL'
+    for key,record,sign in zip(expected[:2],records[:2],[1,-1]):
+        evidence=record['envelope']['assurance']['evidence']
+        exported,error=m._csv_rows(evidence['csv_text']); assert error is None
+        original={row['metric']:row for row in evidence['view_rows']}
+        reference=[]
+        for row in exported:
+            for field in ('studio','oracle','delta','verdict'):
+                unequal=row[field]!=original[row['metric']][field] if field=='verdict' else Fraction(row[field])!=Fraction(original[row['metric']][field])
+                if unequal: reference.append(dict(metric=row['metric'],field=field))
+        observed=result['fixtures'][key]['reconciliation']['steps']['5']['csv_view']
+        assert observed['verdict']=='FAIL' and observed['mismatches']==reference and len(reference)==20
+        power=m._table(exported)['kw_dc']
+        assert Fraction(power['delta'])==sign*Fraction(1,10**77)
+    assert result['fixtures'][expected[2]]['verdict']=='PASS' and records==supplied
+
+
+
+def assert_csv_lexical_bound_parity(text, reason):
+    """Keep foreign CSV text out of diagnostics and preserve readable siblings."""
+    from benches import x05_reconcile as m
+    expected, records = bound_seven_fixture_records()
+    source = records[0]['envelope']['assurance']['evidence']
+    source['csv_text'] = text
+    supplied = deepcopy(records)
+    direct = m.compare_csv_view(text, source['view_rows'])
+    assert direct == dict(verdict='UNREADABLE', reason=reason)
+    result = m.aggregate_bound_seven_steps_json(serialize_result(dict(expected_ids=expected, fixtures=records)))
+    selected = result['fixtures'][expected[0]]
+    assert selected['verdict'] == 'UNREADABLE'
+    assert selected['reconciliation']['steps']['5']['csv_view'] == direct
+    assert all(result['fixtures'][key]['verdict'] == 'PASS' for key in expected[1:])
+    assert records == supplied
+    source['csv_text'] = csv_fixture(source['view_rows'])
+    recovered = m.aggregate_bound_seven_steps_json(serialize_result(dict(expected_ids=expected, fixtures=records)))
+    assert recovered['verdict'] == 'PASS'
+    assert all(recovered['fixtures'][key] == result['fixtures'][key] for key in expected[1:])
+
+
+@pytest.mark.parametrize('prefix', ['\ufeff', '\ufeff\ufeff', ' \ufeff', '\n\ufeff'])
+def test_csv_bom_lexical_prefix_is_exactly_one_at_stream_start(prefix):
+    from benches import x05_reconcile as m
+    _, records = bound_seven_fixture_records()
+    view = records[0]['envelope']['assurance']['evidence']['view_rows']
+    text = prefix + csv_fixture(view)
+    if prefix == '\ufeff':
+        assert m.compare_csv_view(text, view)['verdict'] == 'PASS'
+        expected, records = bound_seven_fixture_records()
+        records[0]['envelope']['assurance']['evidence']['csv_text'] = text
+        assert m.aggregate_bound_seven_steps_json(serialize_result(dict(expected_ids=expected, fixtures=records)))['verdict'] == 'PASS'
+    else:
+        assert_csv_lexical_bound_parity(text, 'csv_headers_unreadable')
+
+
+@pytest.mark.parametrize('record', range(6))
+@pytest.mark.parametrize('column', range(5))
+@pytest.mark.parametrize('placement', ['prefix', 'middle', 'suffix'])
+def test_csv_bom_lexical_inside_every_decoded_field_is_foreign(record, column, placement):
+    _, records = bound_seven_fixture_records()
+    view = records[0]['envelope']['assurance']['evidence']['view_rows']
+    matrix = list(csv.reader(StringIO(csv_fixture(view))))
+    value = matrix[record][column]
+    position = {'prefix': 0, 'middle': len(value)//2, 'suffix': len(value)}[placement]
+    matrix[record][column] = value[:position] + '\ufeff' + value[position:]
+    assert_csv_lexical_bound_parity(csv_records_text(matrix),
+        'csv_headers_unreadable' if record == 0 else 'csv_view_rows_unreadable')
+
+
+@pytest.mark.parametrize('whitespace', [' ', '\t', '\u00a0'])
+@pytest.mark.parametrize('record', range(6))
+@pytest.mark.parametrize('column', range(5))
+def test_csv_whitespace_lexical_fields_never_trim_implicitly(whitespace, record, column):
+    from benches import x05_reconcile as m
+    _, records = bound_seven_fixture_records()
+    view = records[0]['envelope']['assurance']['evidence']['view_rows']
+    matrix = list(csv.reader(StringIO(csv_fixture(view))))
+    value = whitespace + matrix[record][column] + whitespace
+    matrix[record][column] = value
+    equivalent = deepcopy(view)
+    if record:
+        equivalent[record-1][TABLE_COLUMNS[column]] = value
+    else:
+        for row in equivalent:
+            row[value] = row.pop(TABLE_COLUMNS[column])
+    assert m._table(equivalent) is None
+    assert_csv_lexical_bound_parity(csv_records_text(matrix),
+        'csv_headers_unreadable' if record == 0 else 'csv_view_rows_unreadable')
+
+
+@pytest.mark.parametrize('token', ['1,25', '1,000', '1.000,5', '\u0661.\u0662', '\uff11\uff12.\uff15'])
+@pytest.mark.parametrize('record', range(1,6))
+@pytest.mark.parametrize('column', [1,2,3])
+def test_csv_localized_lexical_numeric_tokens_reject_and_canonical_recovers(token, record, column):
+    _, records = bound_seven_fixture_records()
+    view = records[0]['envelope']['assurance']['evidence']['view_rows']
+    matrix = list(csv.reader(StringIO(csv_fixture(view))))
+    matrix[record][column] = token
+    text = csv_records_text(matrix)
+    assert list(csv.reader(StringIO(text)))[record][column] == token
+    assert_csv_lexical_bound_parity(text, 'csv_view_rows_unreadable')
+
+
+@pytest.mark.parametrize('token', ['=1+1', '=SUM(1,2)', '#DIV/0!', '#N/A'])
+@pytest.mark.parametrize('record', range(1,6))
+@pytest.mark.parametrize('column', [1,2,3,4])
+def test_csv_formula_lexical_tokens_reject_without_changing_evidence(token, record, column):
+    _, records = bound_seven_fixture_records()
+    view = records[0]['envelope']['assurance']['evidence']['view_rows']
+    matrix = list(csv.reader(StringIO(csv_fixture(view))))
+    matrix[record][column] = token
+    assert_csv_lexical_bound_parity(csv_records_text(matrix), 'csv_view_rows_unreadable')
+
+
+@pytest.mark.parametrize('character', ['x', chr(0x1F642)])
+@pytest.mark.parametrize('excess', [False, True])
+def test_csv_raw_lexical_budget_precedes_parser_and_restores_global_limit(monkeypatch, character, excess):
+    from benches import x05_reconcile as m
+    _, view = table_fixture()
+    text = character * (m.MAX_CSV_CHARS + int(excess))
+    original = m._csv_rows
+    calls = []
+    def counted(supplied):
+        calls.append(supplied)
+        return original(supplied)
+    monkeypatch.setattr(m, '_csv_rows', counted)
+    previous = csv.field_size_limit()
+    try:
+        csv.field_size_limit(2)
+        result = m.compare_csv_view(text, view)
+        assert result == dict(verdict='UNREADABLE', reason='csv_input_too_large' if excess else 'csv_cell_too_large')
+        assert calls == ([] if excess else [text])
+        assert csv.field_size_limit() == 2
+        assert text not in serialize_result(result)
+    finally:
+        csv.field_size_limit(previous)

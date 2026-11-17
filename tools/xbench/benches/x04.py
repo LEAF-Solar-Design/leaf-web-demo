@@ -165,11 +165,17 @@ def _grade_modules(transport, project, adoption, fixture, tool, row, mark):
                               ("selected_set", None), ("count", None)):
             if key not in listing or type(listing[key]) is not type(expected) or listing[key] != expected:
                 raise ValueError("candidate " + key)
+        row["candidate_sets"] = sorted(
+            candidates.values(), key=lambda item: (-item["count"], item["set_id"]))[:50]
         selector = fixture.get("module_set")
         if selector is None:
-            mark(5, "UNREADABLE", "no module_set bound in manifest")
+            top = "; ".join(
+                f"{item['set_id']} ({item['layer']}/{item['block']}, {item['count']})"
+                for item in row["candidate_sets"][:3])
+            reason = f"no module_set bound in manifest; {len(candidates)} candidates; top three: {top}"
+            mark(5, "UNREADABLE", reason)
             mark(6, "UNREADABLE" if len(candidates) > 1 else "PASS",
-                 "no module_set bound in manifest" if len(candidates) > 1 else "nothing to pick")
+                 reason if len(candidates) > 1 else "nothing to pick")
             return
         field = "manifest module_set"
         if not isinstance(selector, dict) or not selector or set(selector) - {"set_id", "set_ids"}:

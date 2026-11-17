@@ -15,6 +15,8 @@ TOTAL_LIMIT = 2 * 1024 * 1024
 FILE_LIMIT = 256 * 1024
 FILE_COUNT_LIMIT = 128
 SUITE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
+_FAILURE_MARKER = re.compile(
+    rb"^(?:=+ (?:FAILURES|ERRORS) =+|(?:FAIL|ERROR): |Traceback \(most recent call last\):)")
 STDOUT_LIMIT = TOTAL_LIMIT
 CHUNK_CHARS = 4096
 _PRIVATE_CONTAINER = re.compile(
@@ -263,14 +265,54 @@ def _snapshot(directory, name, limit):
         before = os.fstat(stream.fileno())
         digest = hashlib.sha256()
         remaining = before.st_size
+        marker = None
+        line_start, prefix = 0, b""
         while remaining:
             chunk = stream.read(min(65536, remaining))
             if not chunk:
                 raise ValueError("source_changed")
             digest.update(chunk)
+            if before.st_size > limit and marker is None:
+                offset = before.st_size - remaining
+                parts = chunk.split(b"\n")
+                for index, part in enumerate(parts):
+                    # Only a short line prefix is needed. Collapse leading '='
+                    # runs so even arbitrarily wide pytest banners stay bounded.
+                    if not prefix and part.startswith(b"="):
+                        prefix = b"="
+                        part = part.lstrip(b"=")
+                    elif prefix == b"=":
+                        part = part.lstrip(b"=")
+                    prefix += part[:max(0, 64 - len(prefix))]
+                    if _FAILURE_MARKER.match(prefix):
+                        marker = line_start
+                        break
+                    offset += len(parts[index])
+                    if index < len(parts) - 1:
+                        line_start = offset + 1
+                        prefix = b""
+                        offset += 1
             remaining -= len(chunk)
         stream.seek(max(0, before.st_size - limit))
         tail = stream.read(min(limit, before.st_size))
+        if before.st_size > limit and marker is not None:
+            tail_budget = min(32 * 1024, limit // 4)
+            notice = b"\n[device CI: middle of log omitted]\n"
+            head_budget = max(0, limit - tail_budget - len(notice))
+            tail = tail[-tail_budget:] if tail_budget else b""
+            tail = tail.partition(b"\n")[2]
+            tail_start = before.st_size - len(tail)
+            stream.seek(marker)
+            head = stream.read(min(head_budget, before.st_size - marker))
+            if marker + len(head) < before.st_size:
+                head = head[:head.rfind(b"\n") + 1]
+            if marker + len(head) >= tail_start or limit < tail_budget + len(notice):
+                stream.seek(marker)
+                tail = stream.read(min(limit, before.st_size - marker))
+                if marker + len(tail) < before.st_size:
+                    tail = tail[:tail.rfind(b"\n") + 1]
+            else:
+                tail = head + notice + tail
         after = os.fstat(stream.fileno())
         if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
                 after.st_size, after.st_mtime_ns, after.st_ctime_ns):
