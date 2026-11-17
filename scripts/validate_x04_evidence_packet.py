@@ -11,7 +11,7 @@ from export_x04_offline_evidence import (
     DEFAULT_MAX_INPUT_BYTES, MAX_JSON_CONTAINER_DEPTH, check_output_path,
     positive_byte_limit, read_json, report_failure, validate_sha256_pin, write_json,
 )
-from validate_x04_offline_evidence import validate_evidence
+from validate_x04_offline_evidence import expected_drawing_id, validate_evidence
 from compare_x04_offline_evidence import _compare_validated
 from validate_x04_review_report import BATCH, validate_report, require
 
@@ -23,6 +23,13 @@ def local_id(value):
     require(isinstance(value, str) and LOCAL_ID.fullmatch(value) is not None,
             'Packet IDs must be ASCII local labels, not paths or URLs.')
     return value
+
+
+def artifact_drawing(value):
+    identity, separator, drawing = value.partition('=')
+    if not separator:
+        raise argparse.ArgumentTypeError('Expected artifact drawing must use ID=DRAWING.')
+    return local_id(identity), expected_drawing_id(drawing)
 
 
 def comparison_claims(report):
@@ -123,7 +130,12 @@ def main(argv=None):
                         help='Repeat for the exact expected set of comparison report IDs')
     parser.add_argument('--expected-batch-id', type=local_id, action='append',
                         help='Repeat for the exact expected set of batch report IDs')
+    parser.add_argument('--expected-artifact-drawing', type=artifact_drawing, action='append',
+                        metavar='ID=DRAWING', help='Bind an embedded artifact ID to its exact drawing.id label')
     args = parser.parse_args(argv)
+    drawing_bindings = dict(args.expected_artifact_drawing or [])
+    if len(drawing_bindings) != len(args.expected_artifact_drawing or []):
+        parser.error('Expected artifact drawing keys must be unique.')
     expectations = (
         ('artifacts', 'artifact', args.expected_artifact_id),
         ('comparisons', 'comparison', args.expected_comparison_id),
@@ -146,6 +158,20 @@ def main(argv=None):
                     identities.append(local_id(row.get('id')))
                 require(set(identities) == set(expected_ids),
                         f'Packet {label} IDs do not match the expected inventory.')
+        if drawing_bindings:
+            require(isinstance(payload, dict) and isinstance(payload.get('artifacts'), list),
+                    'Packet artifacts must be an array for drawing bindings.')
+            artifacts = {}
+            for row in payload['artifacts']:
+                require(isinstance(row, dict), 'Packet artifact entry must be an object.')
+                artifacts[local_id(row.get('id'))] = row.get('artifact')
+            require(drawing_bindings.keys() <= artifacts.keys(),
+                    'Expected artifact drawing key must name an embedded artifact.')
+            for identity, expected in drawing_bindings.items():
+                artifact = artifacts[identity]
+                drawing = artifact.get('drawing') if isinstance(artifact, dict) else None
+                require(isinstance(drawing, dict) and drawing.get('id') == expected,
+                        'Expected artifact drawing ID does not match drawing.id exactly.')
         result = validate_packet(payload)
         write_json(result, args.out, args.max_output_bytes)
     except (OSError, ValueError, TypeError, RecursionError) as error:
