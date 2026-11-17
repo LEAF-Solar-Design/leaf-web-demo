@@ -181,7 +181,7 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, pinn
     {pin && <p>Project is pinned to version {pin.version}.</p>}
     {profile && pinnedRoles && <X07ProfileRoleDiff beforeRoles={pinnedRoles} afterRoles={profile.roles} label="Pinned versus current roles" />}
     {error && <p id={errorId} role="alert">{error}</p>}{message && <p role="status">{message}</p>}
-    {!profile && !busy && <button ref={retryButton} type="button" onClick={() => load(false)}>Retry loading profile</button>}
+    {!profile && !busy && error && <button ref={retryButton} type="button" onClick={() => load(false)}>Retry loading profile</button>}
     {draft && <form ref={form} onSubmit={save} onReset={event => { event.preventDefault(); event.stopPropagation(); resetDraft() }} aria-describedby={error ? errorId : undefined}
       onCompositionStart={() => { composing.current = true }}
       onCompositionEnd={() => { composing.current = false }}
