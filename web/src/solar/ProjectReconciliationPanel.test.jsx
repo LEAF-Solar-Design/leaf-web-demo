@@ -16,15 +16,18 @@ const response = () => ({ ok: true, data: { context: { ...binding }, intake: {
     inverters: [{ id: id('inverter'), equipment_type: 'string_inverter' }],
   },
 } } })
-function fixture({ strict = false, subscribe } = {}) {
+function fixture({ strict = false, subscribe, parentSubmit } = {}) {
   const h = { snapshot: { binding, authorityKey: 'a' }, current: true, listeners: new Set() }
   h.client = { readContext: vi.fn(async () => response()), getSnapshot: () => h.snapshot,
     subscribe: (listener) => { h.listeners.add(listener); return () => h.listeners.delete(listener) },
     uploadSolarEdgePdf: vi.fn(), submitRun: vi.fn() }
   if (subscribe) h.client.subscribe = subscribe
   h.props = { solarBinding: binding, authorityKey: 'a', projectClient: h.client, isCurrent: () => h.current }
-  const element = () => strict ? <React.StrictMode><ProjectReconciliationPanel {...h.props} /></React.StrictMode>
-    : <ProjectReconciliationPanel {...h.props} />
+  const element = () => {
+    const panel = strict ? <React.StrictMode><ProjectReconciliationPanel {...h.props} /></React.StrictMode>
+      : <ProjectReconciliationPanel {...h.props} />
+    return parentSubmit ? <form onSubmit={event => { event.preventDefault(); parentSubmit() }}>{panel}</form> : panel
+  }
   h.view = render(element())
   h.update = (props) => { h.props = { ...h.props, ...props }; h.view.rerender(element()) }
   h.emit = () => act(() => { for (const listener of h.listeners) listener() })
@@ -125,6 +128,122 @@ function canonicalReports(h, file = { response: totalsResponse() }) {
 }
 const reportsLoaded = () => screen.findByText(/No saved engineering totals|Saved engineering totals loaded/)
 
+it.each(['success', 'rejection', 'timeout'])('settles Save %s while busy without enabling actions or corrupting the next CAS', async outcome => {
+  const h = fixture(); canonicalReports(h); read(); await reportsLoaded(); fill(reportValues)
+  let settle, reject
+  h.client.saveEngineeringTotals.mockReturnValueOnce(new Promise((yes, no) => { settle = yes; reject = no }))
+  if (outcome === 'timeout') vi.useFakeTimers()
+  saveTotals(); h.update({ busy: true })
+  const disabled = () => {
+    for (const label of ['Read saved design', 'Save engineering totals', 'Reload saved engineering totals', 'Download CSV']) {
+      expect(screen.getByRole('button', { name: label }).disabled).toBe(true)
+    }
+    for (const field of screen.getAllByRole('textbox')) expect(field.disabled).toBe(true)
+  }
+  disabled()
+  if (outcome === 'success') await act(async () => settle(totalsResponse(1, reportValues)))
+  else if (outcome === 'rejection') await act(async () => reject(new Error('PRIVATE_BUSY_SAVE')))
+  else { act(() => vi.advanceTimersByTime(RECONCILIATION_READ_TIMEOUT_MS)); vi.useRealTimers() }
+  disabled(); expect(inputValues()).toEqual(reportValues)
+  expect(screen.queryByText(/PRIVATE_BUSY_SAVE/)).toBeNull()
+  h.update({ busy: false })
+  const baseline = outcome === 'success' ? 1 : 0
+  expect(screen.getByRole('button', { name: 'Save engineering totals' }).disabled).toBe(false)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(baseline + 1, reportValues))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0].expectedRevision).toBe(baseline)
+})
+
+it.each(['success', 'rejection', 'timeout'])('settles Reload %s while busy and recovers only validated values and CAS', async outcome => {
+  const h = fixture(); canonicalReports(h, { response: totalsResponse(1, reportValues) })
+  read(); await reportsLoaded(); let settle, reject
+  h.client.loadEngineeringTotals.mockReturnValueOnce(new Promise((yes, no) => { settle = yes; reject = no }))
+  if (outcome === 'timeout') vi.useFakeTimers()
+  reloadTotals(); h.update({ busy: true })
+  const fresh = ['2', '0', '1', '1', '0.5']
+  if (outcome === 'success') await act(async () => settle(totalsResponse(2, fresh)))
+  else if (outcome === 'rejection') await act(async () => reject(new Error('PRIVATE_BUSY_RELOAD')))
+  else { act(() => vi.advanceTimersByTime(RECONCILIATION_READ_TIMEOUT_MS)); vi.useRealTimers() }
+  for (const label of ['Read saved design', 'Save engineering totals', 'Reload saved engineering totals', 'Download CSV']) {
+    expect(screen.getByRole('button', { name: label }).disabled).toBe(true)
+  }
+  expect(inputValues()).toEqual(outcome === 'success' ? fresh : reportValues)
+  expect(screen.queryByText(/PRIVATE_BUSY_RELOAD/)).toBeNull()
+  h.update({ busy: false }); let baseline = 2
+  if (outcome !== 'success') {
+    h.client.loadEngineeringTotals.mockResolvedValueOnce(totalsResponse(3, fresh))
+    reloadTotals(); await reportsLoaded(); baseline = 3
+    await act(async () => settle(totalsResponse(99, ['9', '9', '9', '9', '9'])))
+  }
+  expect(inputValues()).toEqual(fresh)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(baseline + 1, fresh))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: baseline, drafts: fresh })
+})
+
+it.each(['save', 'load'])('serializes same-turn cross-operation clicks when %s starts first', async first => {
+  const h = fixture(); canonicalReports(h, { response: totalsResponse(1, reportValues) })
+  read(); await reportsLoaded(); fill(reportValues); let settle
+  const method = first === 'save' ? h.client.saveEngineeringTotals : h.client.loadEngineeringTotals
+  method.mockReturnValueOnce(new Promise(resolve => { settle = resolve }))
+  const save = screen.getByRole('button', { name: 'Save engineering totals' })
+  const reload = screen.getByRole('button', { name: 'Reload saved engineering totals' })
+  act(() => { if (first === 'save') { save.click(); reload.click() } else { reload.click(); save.click() } })
+  expect(h.client.saveEngineeringTotals).toHaveBeenCalledTimes(first === 'save' ? 1 : 0)
+  expect(h.client.loadEngineeringTotals).toHaveBeenCalledTimes(first === 'load' ? 2 : 1)
+  expect(inputValues()).toEqual(reportValues)
+  await act(async () => settle(totalsResponse(2, reportValues)))
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(3, reportValues))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0].expectedRevision).toBe(2)
+})
+
+it('accepts deeply frozen report records and receipts without mutating evidence or later CSV/CAS', async () => {
+  const freeze = value => {
+    if (value && typeof value === 'object') { for (const nested of Object.values(value)) freeze(nested); Object.freeze(value) }
+    return value
+  }
+  const values = ['001', '00', '01', '01', '0.400'], loadedRecord = freeze(totalsResponse(1, values))
+  const receipt = freeze(totalsResponse(2, values)), originals = [JSON.stringify(loadedRecord), JSON.stringify(receipt)]
+  const h = fixture(); canonicalReports(h)
+  h.client.loadEngineeringTotals.mockResolvedValueOnce(loadedRecord)
+  read(); await reportsLoaded(); expect(inputValues()).toEqual(values)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(receipt)
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  const createObjectURL = vi.fn(() => 'blob:frozen-record')
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  const csv = await blobText(createObjectURL.mock.calls[0][0])
+  expect(csv).toContain('"panels","1","001","0","PASS"')
+  expect(csv).toContain('"kw_dc","0.4","0.400","0","PASS"')
+  expect([JSON.stringify(loadedRecord), JSON.stringify(receipt)]).toEqual(originals)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(3, values))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: 2, drafts: values })
+})
+
+it.each([0, 4])('keeps numerically equivalent newer lexemes in field %i through Save receipt, CSV and next intent', async index => {
+  const h = fixture(); canonicalReports(h); read(); await reportsLoaded()
+  const values = ['001', '00', '01', '01', '0.400']; fill(values)
+  let settle; h.client.saveEngineeringTotals.mockReturnValueOnce(new Promise(resolve => { settle = resolve }))
+  saveTotals(); const next = [...values]; next[index] = index === 0 ? '1' : '0.4'
+  fireEvent.change(screen.getAllByRole('textbox')[index], { target: { value: next[index] } })
+  await act(async () => settle(totalsResponse(1, values)))
+  expect(inputValues()).toEqual(next)
+  expect(screen.getByText('Submitted engineering totals saved. Newer edits remain unsaved.')).toBeTruthy()
+  const createObjectURL = vi.fn(() => 'blob:equivalent-value')
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  const csv = await blobText(createObjectURL.mock.calls[0][0])
+  expect(csv).toContain(index === 0 ? '"panels","1","1","0","PASS"' : '"kw_dc","0.4","0.4","0","PASS"')
+  expect(h.client.saveEngineeringTotals).toHaveBeenCalledTimes(1)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(2, next))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: 1, drafts: next })
+})
+
 function sharedPanels({ late = false } = {}) {
   const listeners = new Set()
   const h = { snapshot: { binding, authorityKey: 'a' } }
@@ -144,6 +263,97 @@ function sharedPanels({ late = false } = {}) {
   }
   return { h, file, listeners, mount: panel, a: panel('Client A'), b: late ? null : panel('Client B') }
 }
+
+it('keeps input names, IDs and help links local after a sibling unmount and remount', async () => {
+  const { a, b, mount } = sharedPanels()
+  const verify = panels => {
+    const ids = [...document.querySelectorAll('[id]')].map(node => node.id)
+    expect(new Set(ids).size).toBe(ids.length)
+    for (const panel of panels) for (const metric of ['Panels', 'Optimizers', 'Inverters', 'Strings', 'kW DC']) {
+      const input = panel.query.getByRole('textbox', { name: `${metric} engineering report/BOM` })
+      expect(document.getElementById(input.id)).toBe(input)
+      for (const id of input.getAttribute('aria-describedby').split(' ')) {
+        const help = document.getElementById(id)
+        expect(help).not.toBeNull(); expect(input.closest('section').contains(help)).toBe(true)
+        expect(help.textContent).toMatch(/whole number|nonnegative decimal|optional/)
+      }
+    }
+  }
+  a.click('Read saved design'); b.click('Read saved design'); await a.loaded(); await b.loaded()
+  a.fill(['bad', '0', '1', '1', '0.4']); b.fill(['1', '0', '1', '1', 'bad'])
+  verify([a, b]); const survivorIds = b.query.getAllByRole('textbox').map(input => input.id)
+  a.view.unmount(); const replacement = mount('Client A'); verify([replacement, b])
+  expect(b.query.getAllByRole('textbox').map(input => input.id)).toEqual(survivorIds)
+  expect(b.query.getAllByRole('textbox')[4].getAttribute('aria-invalid')).toBe('true')
+  replacement.click('Read saved design'); await replacement.loaded(); replacement.fill(reportValues); verify([replacement, b])
+  expect(b.values()[4]).toBe('bad')
+})
+
+it('announces a failed Save only in its writer while the sibling announces a loaded report', async () => {
+  const { h, a, b } = sharedPanels()
+  a.click('Read saved design'); b.click('Read saved design'); await a.loaded(); await b.loaded()
+  a.fill(reportValues); let reject
+  h.client.saveEngineeringTotals.mockReturnValueOnce(new Promise((_resolve, no) => { reject = no }))
+  a.click('Save engineering totals')
+  h.client.loadEngineeringTotals.mockResolvedValueOnce(totalsResponse(3, reportValues))
+  b.click('Reload saved engineering totals'); await b.loaded()
+  await act(async () => reject(new Error('PRIVATE_LIVE_MESSAGE')))
+  const failure = a.query.getByText('Engineering totals could not be saved. Retry Save engineering totals.')
+  expect(failure.getAttribute('aria-live')).toBe('polite')
+  expect(b.query.getByText('Saved engineering totals loaded.').getAttribute('aria-live')).toBe('polite')
+  expect(b.query.queryByText(/could not be saved|PRIVATE_LIVE_MESSAGE/)).toBeNull()
+  for (const panel of [a, b]) expect(panel.query.queryByText('Engineering totals saved.')).toBeNull()
+})
+
+it('keeps Read, Save, Reload and CSV actions out of an enclosing parent form submission', async () => {
+  const parentSubmit = vi.fn(), h = fixture({ parentSubmit }); canonicalReports(h)
+  read(); await reportsLoaded(); fill(reportValues)
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  reloadTotals(); await reportsLoaded()
+  vi.stubGlobal('URL', { createObjectURL: () => 'blob:parent-form', revokeObjectURL: vi.fn() })
+  const download = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(download).toHaveBeenCalledOnce()
+  for (const label of ['Read saved design', 'Save engineering totals', 'Reload saved engineering totals', 'Download CSV']) {
+    expect(screen.getByRole('button', { name: label }).type).toBe('button')
+  }
+  expect(parentSubmit).not.toHaveBeenCalled()
+})
+
+it.each(['timeout', 'conflict'])('preserves sibling field focus, selection and draft across writer %s and recovery', async cause => {
+  const { h, a, b } = sharedPanels()
+  a.click('Read saved design'); b.click('Read saved design'); await a.loaded(); await b.loaded()
+  a.fill(reportValues); b.fill(reportValues); let settle
+  h.client.saveEngineeringTotals.mockReturnValueOnce(new Promise(resolve => { settle = resolve }))
+  if (cause === 'timeout') vi.useFakeTimers()
+  a.click('Save engineering totals')
+  const field = b.query.getAllByRole('textbox')[0]
+  fireEvent.change(field, { target: { value: '0123' } }); field.focus(); field.setSelectionRange(1, 3)
+  if (cause === 'timeout') { act(() => vi.advanceTimersByTime(RECONCILIATION_READ_TIMEOUT_MS)); vi.useRealTimers() }
+  else await act(async () => settle({ ok: false, status: 409 }))
+  const check = () => {
+    expect(document.activeElement).toBe(field); expect(field.value).toBe('0123')
+    expect([field.selectionStart, field.selectionEnd]).toEqual([1, 3])
+  }
+  check(); a.click('Reload saved engineering totals'); await a.loaded(); check()
+})
+
+it.each([0, 1, 2, 3, 4])('retains composed field %i across a held Save receipt without an implicit write', async index => {
+  const h = fixture(); canonicalReports(h); read(); await reportsLoaded(); fill(reportValues)
+  let settle; h.client.saveEngineeringTotals.mockReturnValueOnce(new Promise(resolve => { settle = resolve }))
+  saveTotals(); const field = screen.getAllByRole('textbox')[index]
+  const interim = index === 4 ? '0.12' : '12', final = index === 4 ? '0.123' : '123'
+  fireEvent.compositionStart(field); fireEvent.change(field, { target: { value: interim } })
+  await act(async () => settle(totalsResponse(1, reportValues)))
+  expect(field.value).toBe(interim)
+  fireEvent.compositionEnd(field, { data: final }); fireEvent.change(field, { target: { value: final } })
+  expect(field.value).toBe(final); expect(h.client.saveEngineeringTotals).toHaveBeenCalledTimes(1)
+  expect(screen.getByText('Engineering totals have unsaved changes.')).toBeTruthy()
+  const values = [...reportValues]; values[index] = final
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(2, values))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: 1, drafts: values })
+})
 
 it('requires a late subscriber fresh Read without inheriting its shared-client sibling dirty state', async () => {
   const { h, file, a, mount } = sharedPanels({ late: true })
