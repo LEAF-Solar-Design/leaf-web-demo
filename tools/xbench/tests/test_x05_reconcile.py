@@ -9408,3 +9408,117 @@ def test_delivery_precedence_borrowed_streams_and_buffers_remain_open(monkeypatc
     assert delivery_channel_call(monkeypatch, mode, source, output) == (5 if case == 'output-failure' else 4 if case == 'malformed' else 0)
     assert source.closes == input_buffer.closes == sink.closes == 0 and not input_buffer.closed
     assert output.closes == 0
+
+
+
+def discrepancy_scope_records():
+    expected, records = bound_seven_fixture_records()
+    for key, record in zip(expected, records):
+        source = record['envelope']['assurance']['evidence']
+        source['saved_values']['panels'] -= 1
+        source['discrepancy_records'] = [dict(fixture_id=key, metric='panels', delta=-1,
+            name='synthetic revision '+key, frozen_at='2026-11-15T12:00:00Z')]
+    return expected, records
+
+
+@pytest.mark.parametrize('owners', list(__import__('itertools').permutations(range(3))))
+def test_discrepancy_scope_equal_deltas_cannot_borrow_other_fixture_approval(owners):
+    from benches import x05_reconcile as m
+    expected, records = discrepancy_scope_records()
+    baseline = m.aggregate_bound_seven_steps(expected, records)
+    approvals = [deepcopy(record['envelope']['assurance']['evidence']['discrepancy_records'][0]) for record in records]
+    for record, owner in zip(records, owners):
+        record['envelope']['assurance']['evidence']['discrepancy_records'] = [deepcopy(approvals[owner])]
+    supplied = deepcopy(records)
+    result = m.aggregate_bound_seven_steps(expected, records)
+    for index, key in enumerate(expected):
+        step = result['fixtures'][key]['reconciliation']['steps']
+        policy = step['6']
+        assert policy['verdict'] == ('PASS' if owners[index] == index else 'FAIL')
+        assert policy['rejected_metrics'] == ([] if owners[index] == index else ['panels'])
+        assert step['5']['table'] == baseline['fixtures'][key]['reconciliation']['steps']['5']['table']
+        assert step['5']['table']['verdict'] == 'FAIL'
+        if owners[index] == index: assert result['fixtures'][key] == baseline['fixtures'][key]
+    assert result['verdict'] == 'FAIL' and records == supplied
+
+
+@pytest.mark.parametrize('relative', [-1,0,1])
+@pytest.mark.parametrize('shift_seconds', [-31536000,-123456,0,123456,31536000])
+def test_discrepancy_scope_clock_translation_preserves_early_tied_late_results(relative, shift_seconds):
+    from datetime import datetime, timedelta, timezone
+    from benches import x05_reconcile as m
+    started = datetime(2026,11,15,13,tzinfo=timezone.utc)
+    deltas, record = discrepancy_fixture()
+    stamp = lambda value: value.isoformat().replace('+00:00','Z')
+    record['frozen_at'] = stamp(started+timedelta(seconds=relative))
+    original = deepcopy((deltas, record))
+    baseline = m.check_discrepancies('synthetic', deltas, [record], stamp(started))
+    shift = timedelta(seconds=shift_seconds)
+    translated = dict(record, frozen_at=stamp(started+timedelta(seconds=relative)+shift))
+    supplied = deepcopy(translated)
+    observed = m.check_discrepancies('synthetic', deltas, [translated], stamp(started+shift))
+    assert observed == baseline and observed['verdict'] == ('PASS' if relative < 0 else 'FAIL')
+    assert (deltas, record) == original and translated == supplied
+
+
+@pytest.mark.parametrize('order', list(__import__('itertools').permutations(['panels','optimizers','inverters','strings'])))
+def test_discrepancy_scope_metric_permutations_need_matching_metric_and_signed_delta(order):
+    from benches import x05_reconcile as m
+    metrics = ['panels','optimizers','inverters','strings']
+    original = dict(zip(metrics, [1,-2,3,-4])); original['kw_dc'] = 0
+    moved = dict.fromkeys(m.METRICS,0)
+    approvals = []
+    for source, target in zip(metrics, order):
+        moved[target] = original[source]
+        approvals.append(dict(fixture_id='synthetic', metric=target, delta=original[source],
+            name='synthetic '+target, frozen_at='2026-11-15T12:00:00Z'))
+    supplied = deepcopy((original,moved,approvals))
+    paired = m.check_discrepancies('synthetic', moved, approvals, '2026-11-15T13:00:00Z')
+    assert paired['verdict'] == 'PASS' and paired['rejected_metrics'] == []
+    wrong = m.check_discrepancies('synthetic', original, approvals, '2026-11-15T13:00:00Z')
+    by_metric = {record['metric']: record['delta'] for record in approvals}
+    reference = [metric for metric in m.METRICS if original[metric] != 0 and original[metric] != by_metric.get(metric)]
+    assert wrong['rejected_metrics'] == reference and wrong['verdict'] == ('FAIL' if reference else 'PASS')
+    assert (original,moved,approvals) == supplied
+
+
+@pytest.mark.parametrize('field,bad', [('frozen_at','2026-11-15T13:00:00Z'),('delta',1)])
+def test_discrepancy_scope_shared_record_mutation_refreshes_results_and_preserves_history(field,bad):
+    from benches import x05_reconcile as m
+    deltas, record = discrepancy_fixture(); shared = [record]
+    original = record[field]; history = []; frozen = []
+    for value, verdict in [(original,'PASS'),(bad,'FAIL'),(original,'PASS')]:
+        record[field] = value
+        supplied = deepcopy((deltas, shared))
+        result = m.check_discrepancies('synthetic', deltas, shared, '2026-11-15T13:00:00Z')
+        assert result['verdict'] == verdict and (deltas, shared) == supplied and shared[0] is record
+        history.append(result); frozen.append(deepcopy(result))
+    assert history == frozen and history[0] == history[2]
+
+
+@pytest.mark.parametrize('order', list(__import__('itertools').permutations(range(3))))
+def test_discrepancy_scope_direct_strict_and_bound_cli_agree_on_simultaneous_faults(tmp_path,order):
+    from pathlib import Path
+    import subprocess, sys
+    from benches import x05_reconcile as m
+    expected, records = bound_seven_fixture_records()
+    source = records[0]['envelope']['assurance']['evidence']
+    deltas = dict.fromkeys(m.METRICS,0); deltas.update(panels=-1,optimizers=-2,strings=-1)
+    for metric in ('panels','optimizers','strings'): source['saved_values'][metric] += deltas[metric]
+    approvals = [dict(fixture_id=expected[1],metric='panels',delta=-1,name='foreign synthetic',frozen_at='2026-11-15T12:00:00Z'),
+        dict(fixture_id=expected[0],metric='optimizers',delta=-2,name='late synthetic',frozen_at=source['run_started_at']),
+        dict(fixture_id=expected[0],metric='strings',delta=1,name='wrong sign synthetic',frozen_at='2026-11-15T12:00:00Z')]
+    source['discrepancy_records'] = [approvals[index] for index in order]
+    supplied = deepcopy(records)
+    direct = m.check_discrepancies(expected[0],deltas,source['discrepancy_records'],source['run_started_at'])
+    assert direct == dict(verdict='FAIL',reason='unfrozen_nonzero_delta',rejected_metrics=['panels','optimizers','strings'])
+    strict = m.reconcile_json(serialize_result(source))['stages']['policy']
+    run = subprocess.run([sys.executable,'-P',str(Path(m.__file__).resolve()),'--seven-step-bound-aggregate'],
+        input=serialize_result(dict(expected_ids=expected,fixtures=records)).encode(),capture_output=True,
+        cwd=tmp_path,timeout=20,env={'SystemRoot':r'C:\Windows'})
+    assert run.returncode == 1 and not run.stderr and len(run.stdout.splitlines()) == 1
+    observed = json.loads(run.stdout)
+    assert direct == strict == observed['fixtures'][expected[0]]['reconciliation']['steps']['6']
+    assert observed['fixtures'][expected[0]]['reconciliation']['steps']['5']['table']['verdict'] == 'FAIL'
+    assert all(observed['fixtures'][key]['verdict'] == 'PASS' for key in expected[1:])
+    assert records == supplied
