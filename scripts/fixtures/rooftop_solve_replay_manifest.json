@@ -4,63 +4,63 @@
   "package": {
     "path": "scripts/fixtures/rooftop_solve_replay.json",
     "bytes": 366852,
-    "sha256": "53ed4b7b1f8d5c22c9a5e991d0eafd100e6fb598fe702114b091d3f7d66c4618"
+    "sha256": "e0601c0102f9f532d02161de7a8d5b8c051c01ed5fd1a367101d901ad8bbddbc"
   },
   "fixtures": [
     {
       "id": "rooftop-piece-12",
       "request_bytes": 21300,
-      "request_wire_sha256": "7be3421b5834ca07ad32ad340d403ad628649cd3d490d532946503d035a515bb",
+      "request_wire_sha256": "4f4f7767d097c05620bc70563308437a5ddfdf8565fb9f1af52acb9e9edd1c9d",
       "response_bytes": 23162,
-      "response_wire_sha256": "9e30176bcfb9d8cbf127ccbdbb3dff6ba5d737d3db394e5c6df517c5b24b0110",
+      "response_wire_sha256": "370d530103ca6e43868d83f49207c820244046f775025a1f1cbd21657a7d9fb4",
       "response_encoding": "canonical-json"
     },
     {
       "id": "rooftop-piece-13",
       "request_bytes": 20141,
-      "request_wire_sha256": "495a015e052494930c929e69bf2dd04523a65ea74dd9cfc661b6c9b0a4f3ecab",
+      "request_wire_sha256": "e95bb33e0466436121dfcc53af4b28f950d3e6ad62e905fc810ecb859f557db0",
       "response_bytes": 21959,
-      "response_wire_sha256": "673f016c46ead20fe15cdd4c04773e75d04d2dab52e0d668165f0a1035ee1cd0",
+      "response_wire_sha256": "46c1fc4629b37764d7fb87d062c00df0bc0300bf87b8138101fea5bb1e2664ad",
       "response_encoding": "canonical-json"
     },
     {
       "id": "rooftop-piece-16",
       "request_bytes": 18152,
-      "request_wire_sha256": "b7b3139ac495d8b50a986e196b54cda65c3856c6ae1080480b864e10c9af741d",
+      "request_wire_sha256": "b8f5020f0562286c62abee22c1004f192a7d4c253b5d528161e719d036e20355",
       "response_bytes": 19915,
-      "response_wire_sha256": "09009716285ee7304e5dca54b68606c149eb508b86fabf7a6c41d7e51103e50f",
+      "response_wire_sha256": "fe631d2f4f50ac97d2a975f7c8c723fbb393700ec5ca53994549d980d37c3f98",
       "response_encoding": "canonical-json"
     },
     {
       "id": "rooftop-piece-19",
       "request_bytes": 22296,
-      "request_wire_sha256": "edcc9f287a3456f3585b8dddcf0e9bb14df9e20ca62c5b6aa6f39c3367b4c1fd",
+      "request_wire_sha256": "dda6c0d2c080fe284e58f36d347f3cae6030b34e2e597515ad735091c4b856da",
       "response_bytes": 24408,
-      "response_wire_sha256": "0501d452148aa892adad922ae576c02c8375f445932023e38766a41956594c2d",
+      "response_wire_sha256": "22b525749d0cefb4e676e2faec1d8fad017a2863b158a192837cda881092e766",
       "response_encoding": "canonical-json"
     },
     {
       "id": "rooftop-piece-20",
       "request_bytes": 30096,
-      "request_wire_sha256": "5f43f72c977fbc48ad8db34b9b57b7f0c2c56962d6dc67eaae0adea3073f5c18",
+      "request_wire_sha256": "25773870cfb48ba751bc6f080c9b7e714d54b58113943248191b9311e21bb420",
       "response_bytes": 32228,
-      "response_wire_sha256": "80f45979bd6da379adadbe72960f20470ecc744ae07b1400bf0ee852dbab865f",
+      "response_wire_sha256": "6b9173dfb9ce1f9818c4aa33d3acf020cf8d4d69e7fc1f2fced42f42e0bc4447",
       "response_encoding": "canonical-json"
     },
     {
       "id": "rooftop-piece-21",
       "request_bytes": 35306,
-      "request_wire_sha256": "27747c602e70236fae1d38f1a6fa4279d84ae810dffb95cfb123e59f76f48bdd",
+      "request_wire_sha256": "87b47b27519e1c7e022062b36ba48c36a7eac175bbba84f3df73bc2330e4168c",
       "response_bytes": 37384,
-      "response_wire_sha256": "6d59868565dd397b3b455e555a15d3b38307d02a475b0a70a1d75ad647a78c7a",
+      "response_wire_sha256": "160f7d805da7659dab4dd083dd9c837f8204d5b1fd2d290637a9d9e665c159c0",
       "response_encoding": "canonical-json"
     },
     {
       "id": "rooftop-piece-22",
       "request_bytes": 28622,
-      "request_wire_sha256": "bf739a8eb93c699d1ed3f04bb95283ae12de573a241bd0af1f19257af1293c27",
+      "request_wire_sha256": "0bbf109389b7951c5dbf4e0d76861d203a54fc977669ae70ef6676ac727b6078",
       "response_bytes": 31093,
-      "response_wire_sha256": "2e21188a3a85864125516d54a576ea200d9fee5ac65f8aa958117778d022e0c4",
+      "response_wire_sha256": "0bd5846fc0d5d9d470ad64b7c923f44f877e8b16db024579c7f70b495393542d",
       "response_encoding": "canonical-json"
     }
   ]
