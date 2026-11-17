@@ -509,6 +509,53 @@ def synthetic_response(request):
         "improvement": None, "second_pass_triggered": False}}
 
 
+@pytest.fixture
+def sequenced_piece():
+    params, _ = real_piece()
+    source = params["request"]["grid"]
+    cells = copy.deepcopy(source["Rows"][0]["Panels"][:3])
+    blank = dict(cells[0], Code=0, Id="", Seq=0, X=0.0, Y=0.0, Angle=0.0)
+    source.update(Sequences=[[3, 0], [1, 0]], Rows=[
+        {"Panels": cells[:2]}, {"Panels": [cells[2], blank]},
+    ])
+    request = cloud.validate_piece_params(params).request
+    return params, synthetic_response(request)
+
+
+@pytest.mark.parametrize("partial", [False, True], ids=["full", "partial"])
+@pytest.mark.parametrize("sequence", [0, -1], ids=["zero", "negative"])
+def test_piece_refuses_required_nonpositive_sequence(sequenced_piece, monkeypatch, partial, sequence):
+    params, response = sequenced_piece
+    if partial:
+        response = as_partial_beam(response)
+    response["data"]["final_grid"]["Rows"][0]["Panels"][0]["Seq"] = sequence
+    before = copy.deepcopy(response)
+    monkeypatch.setattr(cloud, "resolve_grant", lambda *args: CloudGrant(TENANT, ""))
+    monkeypatch.setattr(cloud, "post_stringer", lambda *args: cloud.canonical_bytes(response))
+    with pytest.raises(CloudError) as refused:
+        cloud.piece_proposal(params, TENANT, "job")
+    assert refused.value.classification == "cloud_response_invalid"
+    assert response == before
+
+
+@pytest.mark.parametrize("partial", [False, True], ids=["full", "partial"])
+def test_piece_keeps_positive_members_and_zero_blank(sequenced_piece, monkeypatch, partial):
+    params, response = sequenced_piece
+    if partial:
+        response = as_partial_beam(response)
+    before = copy.deepcopy(response)
+    monkeypatch.setattr(cloud, "resolve_grant", lambda *args: CloudGrant(TENANT, ""))
+    monkeypatch.setattr(cloud, "post_stringer", lambda *args: cloud.canonical_bytes(response))
+    result = cloud.piece_proposal(params, TENANT, "job")
+    proof = cloud.piece_proposal_provenance(result, params, TENANT, "job")
+    assert proof["partial_beam"] is partial
+    assert len(result["visited_path"]) == (0 if partial else 3)
+    grid = result["proposal"]["data"]["final_grid"]
+    assert grid["Rows"][1]["Panels"][1]["Code"] == 0
+    assert grid["Rows"][1]["Panels"][1]["Seq"] == 0
+    assert response == before
+
+
 class PieceStore:
     """Unit protocol double. The PostgreSQL suite proves durable concurrency."""
     def __init__(self):
