@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import time
 from uuid import UUID
@@ -16,6 +17,8 @@ import solar_solve_results as kernel
 import solar_solve_request as requests
 import solar_tools
 from solar_design_graph import GraphValidationError
+
+logger = logging.getLogger(__name__)
 
 TOOL_NAME = cloud.TOOL_NAME
 COMMIT_TOOL = "solar-commit-solve"
@@ -386,7 +389,7 @@ def _derive_split(job, context, plan, exchange, *, conn=None):
         if not members.intersection(refs):
             continue
         if not 1 <= len(refs) <= plan["max_string_length"]:
-            raise GraphValidationError("INVALID_FINAL_GRID_ORDER")
+            raise GraphValidationError("INVALID_FINAL_GRID_ORDER", "split.string_length")
         summary.append({"panel_count": len(refs), "endpoints": [refs[0], refs[-1]]})
     if len(summary) > 4096:
         raise GraphValidationError("INVALID_SOLVE_PROPOSAL")
@@ -436,6 +439,15 @@ def _prepare_split(job, context, plan, exchange, scope, lease, guard):
     except Exception as exc:
         exc.solve_progress = {"status": "partial", "completed_pieces": len(children),
                               "total_pieces": len(children), "phase": "assembly"}
+        if isinstance(exc, GraphValidationError) and exc.code == "INVALID_FINAL_GRID_ORDER":
+            stage = exc.path if exc.path in {
+                "split.restitch", "split.coverage", "split.string_length"
+            } else "split.unknown"
+            piece_order = [child["piece_index"] for child in children[:32]]
+            exc.solve_progress.update(validation_stage=stage, piece_order=piece_order,
+                                      piece_order_truncated=len(children) > 32)
+            logger.warning("Split assembly refused job=%s stage=%s completed_pieces=%d piece_order=%s",
+                           job["job_id"], stage, len(children), piece_order)
         raise
     if guard.lost:
         return None
