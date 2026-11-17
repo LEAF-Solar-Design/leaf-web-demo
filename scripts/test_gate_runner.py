@@ -6704,6 +6704,16 @@ def test_server_test_targets_count_only_real_targets(tmp_path):
     assert _server_test_targets(suites, tests) == {"test_a.py"}
 
 
+def test_x07_role_product_wrapper_registered_with_five_cases():
+    g = _load_runner()
+    suite = next(suite for suite in g.build_suites() if suite.id == 'server-x07-offline')
+    target = (Path('..') / 'tools' / 'xbench' / 'tests' / 'test_x07_role_product_journeys.py').as_posix()
+    assert suite.argv.count(target) == 1
+    assert suite.expected >= 424
+    assert suite.allowed_skip_reasons == (
+        r'X07 actual JSX dependency set unavailable on this host; Node-prepared replay required',)
+
+
 def test_every_server_test_file_is_registered_or_named():
     g = _load_runner()
     registered = _server_test_targets(g.build_suites(), REPO / "server" / "tests")
