@@ -8888,3 +8888,146 @@ def test_csv_verdict_transformation_composition_preserves_one_exact_mismatch():
         check = result['fixtures'][expected[0]]['reconciliation']['steps']['5']['csv_view']
         assert check == dict(verdict='FAIL', reason='csv_view_mismatch', mismatches=reference)
     assert seen_masks == set(range(32))
+
+
+
+def csv_law_reference(left, right):
+    from fractions import Fraction
+    right_by_metric = {row['metric']: row for row in right}
+    return [dict(metric=row['metric'], field=field) for row in left
+        for field in ('studio', 'oracle', 'delta', 'verdict')
+        if (row[field] != right_by_metric[row['metric']][field] if field == 'verdict'
+            else Fraction(row[field]) != Fraction(right_by_metric[row['metric']][field]))]
+
+
+def test_csv_law_triangle_symmetry_self_distance_and_independent_normalized_cells():
+    from itertools import product
+    from benches import x05_reconcile as m
+    _, base = table_fixture()
+    tables = []
+    for mask in range(8):
+        rows = deepcopy(base)
+        if mask & 1: rows[0]['studio'] += 1
+        if mask & 2: rows[2]['verdict'] = 'FAIL'
+        if mask & 4: rows[4]['delta'] = '-0.00000000000000000001'
+        tables.append(rows)
+    supplied = deepcopy(tables)
+    distances = {}
+    for a, b in product(range(8), repeat=2):
+        result = m.compare_csv_view(csv_fixture(tables[a]), tables[b])
+        reference = csv_law_reference(tables[a], tables[b])
+        assert result['verdict'] == ('FAIL' if reference else 'PASS')
+        assert result['mismatches'] == reference
+        distances[a,b] = len(reference)
+    for a, b, c in product(range(8), repeat=3):
+        assert distances[a,a] == 0
+        assert distances[a,b] == distances[b,a]
+        assert distances[a,c] <= distances[a,b] + distances[b,c]
+    assert tables == supplied
+
+
+@pytest.mark.parametrize('first,second', [({0,1,7}, {1,7,19}), ({0,4}, {9,18}),
+    ({0,5,10,15,19}, {0,5,10,15,19}), (set(), {3,11})])
+def test_csv_law_binary_toggle_composition_is_symmetric_difference(first, second):
+    from fractions import Fraction
+    expected, records = bound_seven_fixture_records()
+    source = records[0]['envelope']['assurance']['evidence']
+    base = deepcopy(source['view_rows']); changed = deepcopy(base)
+    fields = ('studio', 'oracle', 'delta', 'verdict')
+    for toggles in (first, second):
+        for cell in toggles:
+            row, column = divmod(cell,4); field = fields[column]
+            original = base[row][field]
+            if field == 'verdict':
+                changed[row][field] = 'FAIL' if changed[row][field] == original else original
+            else:
+                changed[row][field] = fraction_fixed_text(Fraction(original)+1) if Fraction(changed[row][field]) == Fraction(original) else original
+    reference = [dict(metric=base[row]['metric'], field=fields[column])
+        for row in range(5) for column in range(4) if row*4+column in first.symmetric_difference(second)]
+    result = assert_csv_record_bound_result(records, expected, csv_fixture(changed), 'FAIL' if reference else 'PASS')
+    assert result['fixtures'][expected[0]]['reconciliation']['steps']['5']['csv_view']['mismatches'] == reference
+    assert csv_law_reference(changed, base) == reference
+
+
+@pytest.mark.parametrize('failure', ['construction']+list(range(7)))
+def test_csv_law_reader_faults_are_sanitized_restore_limits_and_cleanly_recover(monkeypatch, failure):
+    from benches import x05_reconcile as m
+    expected, records = bound_seven_fixture_records()
+    source = records[0]['envelope']['assurance']['evidence']
+    text = csv_fixture(source['view_rows']).replace('\r\n', '\n')
+    original = m.csv.reader
+    matrix = list(original(StringIO(text)))
+    canary = 'private-reader-fault-'+'x'*1000
+    def broken_reader(*args, **kwargs):
+        if args[0].getvalue() != text: return original(*args, **kwargs)
+        if failure == 'construction': raise csv.Error(canary)
+        class Broken:
+            def __init__(self): self.index = 0
+            def __iter__(self): return self
+            def __next__(self):
+                index = self.index; self.index += 1
+                if index == failure: raise csv.Error(canary)
+                if index >= len(matrix): raise StopIteration
+                return matrix[index]
+        return Broken()
+    previous = csv.field_size_limit()
+    try:
+        csv.field_size_limit(3)
+        with monkeypatch.context() as patch:
+            patch.setattr(m.csv, 'reader', broken_reader)
+            result = assert_csv_record_bound_result(records, expected, text, 'UNREADABLE')
+            check = result['fixtures'][expected[0]]['reconciliation']['steps']['5']['csv_view']
+            assert check == dict(verdict='UNREADABLE', reason='csv_evidence_unreadable')
+            assert canary not in serialize_result(result) and csv.field_size_limit() == 3
+        assert assert_csv_record_bound_result(records, expected, text, 'PASS')['verdict'] == 'PASS'
+        assert csv.field_size_limit() == 3
+    finally:
+        csv.field_size_limit(previous)
+
+
+@pytest.mark.parametrize('failure', ['header']+list(range(5)))
+def test_csv_law_early_invalid_reader_stops_before_poison_tail(monkeypatch, failure):
+    from benches import x05_reconcile as m
+    _, view = table_fixture(); matrix = [list(TABLE_COLUMNS)]+[[str(row[key]) for key in TABLE_COLUMNS] for row in view]
+    decisive = 0 if failure == 'header' else failure+1
+    matrix[decisive] = ['foreign'] if failure == 'header' else matrix[decisive][:-1]
+    visits = []
+    class PoisonReader:
+        def __iter__(self): return self
+        def __next__(self):
+            index = len(visits)
+            if index > decisive: raise AssertionError('poison tail consumed')
+            visits.append(index)
+            return matrix[index]
+    monkeypatch.setattr(m.csv, 'reader', lambda *args, **kwargs: PoisonReader())
+    result = m.compare_csv_view('synthetic stub', view)
+    assert result == dict(verdict='UNREADABLE', reason='csv_headers_unreadable' if failure == 'header' else 'csv_row_unreadable')
+    assert visits == list(range(decisive+1))
+
+
+@pytest.mark.parametrize('content', ['\r', '\n', '\r\n'])
+def test_csv_law_parser_configuration_preserves_newlines_until_semantic_validation(monkeypatch, content):
+    from benches import x05_reconcile as m
+    expected, records = bound_seven_fixture_records()
+    source = records[0]['envelope']['assurance']['evidence']
+    matrix = list(csv.reader(StringIO(csv_fixture(source['view_rows']))))
+    token = 'PA'+content+'SS'; matrix[2][4] = token
+    text = csv_records_text(matrix)
+    original_reader = m.csv.reader; original_table = m._table
+    seen_streams = []; seen_tokens = []
+    def reader_spy(stream, *args, **kwargs):
+        if stream.getvalue() != text: return original_reader(stream, *args, **kwargs)
+        assert not args and kwargs == dict(strict=True)
+        assert stream.getvalue() == text
+        seen_streams.append(stream.getvalue())
+        return original_reader(stream, *args, **kwargs)
+    def table_spy(rows):
+        if isinstance(rows,list):
+            seen_tokens.extend(row.get('verdict') for row in rows if isinstance(row,dict) and token == row.get('verdict'))
+        return original_table(rows)
+    with monkeypatch.context() as patch:
+        patch.setattr(m.csv, 'reader', reader_spy); patch.setattr(m, '_table', table_spy)
+        result = assert_csv_record_bound_result(records, expected, text, 'UNREADABLE')
+        assert result['fixtures'][expected[0]]['reconciliation']['steps']['5']['csv_view']['reason'] == 'csv_view_rows_unreadable'
+    assert len(seen_streams) >= 2 and len(seen_tokens) >= 2
+    assert all(value == token for value in seen_tokens)
