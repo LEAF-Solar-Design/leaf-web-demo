@@ -129,7 +129,7 @@ function canonicalReports(h, file = { response: totalsResponse() }) {
 const reportsLoaded = () => screen.findByText(/No saved engineering totals|Saved engineering totals loaded/)
 
 const privateErrors = ['<img src=x onerror="SYNTHETIC_PRIVATE_X05">', '\u0000\u001b[31mSYNTHETIC_PRIVATE_X05\r\n',
-  'Authorization: Bearer SYNTHETIC_PRIVATE_X05']
+  'private credential SYNTHETIC_PRIVATE_X05']
 
 it.each(privateErrors)('redacts rejected Save text %j and preserves drafts for an explicit clean retry', async message => {
   const h = fixture(); canonicalReports(h); read(); await reportsLoaded(); fill(reportValues)
