@@ -3818,8 +3818,16 @@ export default function App() {
     // in-flight beat rather than interleave two typing loops.
     const seq = (cannedSeq.current += 1)
     setTourLanded(false)
+    // The version beat lands when a NEWER head is seated. The demo opens the
+    // sample drawing with no version head (drawingState.head stays null until
+    // the first write seats one), and a null baseline used to keep Next locked
+    // forever after the delete committed. In mock the in-memory chain is the
+    // version authority, and an unseeded chain starts at v1.
+    const versionBaseHead = drawingState?.head ?? (mock
+      ? (mockVersions.isSeeded() ? mockVersions.view('head').head : 1)
+      : null)
     tourVersionStartRef.current = step?.action === 'version'
-      ? { seq, drawingId: drawingState?.drawing_id, head: drawingState?.head }
+      ? { seq, drawingId: drawingState?.drawing_id ?? (mock ? mockVersions.DRAWING_ID : null), head: versionBaseHead }
       : null
     // self-type into the real bar so the audience sees the sentence being written
     runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
@@ -3857,7 +3865,7 @@ export default function App() {
       // AuthorPanel reports staging only after its card or failure is rendered.
       if (cannedSeq.current === seq && step?.action !== 'version' && !(step?.action === 'author' && r?.lane === 'build')) setTourLanded(true)
     }
-  }, [dismissRoute, onDispatch, onPromptChange, onRequestCatalogRun, onConfirmCatalogRun, setRunErr, tools, drawingState])
+  }, [dismissRoute, onDispatch, onPromptChange, onRequestCatalogRun, onConfirmCatalogRun, setRunErr, tools, drawingState, mock])
 
   const onTourStepChange = useCallback((index) => {
     tourStepRef.current = index
@@ -7018,6 +7026,7 @@ export default function App() {
           onExit={onTourExit}
           landed={tourLanded && !running && !routing}
           busy={running || routing}
+          result={result}
         />
       )}
       {/* Lane E operator console entry: renders nothing unless a single
