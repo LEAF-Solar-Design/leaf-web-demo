@@ -117,11 +117,24 @@ def main(argv=None):
     parser.add_argument('--max-output-bytes', type=positive_byte_limit)
     parser.add_argument('--expected-packet-sha256', type=validate_sha256_pin,
                         help='Optional SHA-256 of the exact file or stdin bytes read and decoded')
+    parser.add_argument('--expected-artifact-id', type=local_id, action='append',
+                        help='Repeat for the exact expected set of embedded artifact-local IDs')
     args = parser.parse_args(argv)
+    if args.expected_artifact_id is not None and len(set(args.expected_artifact_id)) != len(args.expected_artifact_id):
+        parser.error('Expected artifact IDs must be unique.')
     try:
         check_output_path(args.input, args.out)
         payload = read_json(args.input, args.max_input_bytes) if args.expected_packet_sha256 is None else read_json(
             args.input, args.max_input_bytes, args.expected_packet_sha256)
+        if args.expected_artifact_id is not None:
+            require(isinstance(payload, dict) and isinstance(payload.get('artifacts'), list),
+                    'Packet artifacts must be an array for the inventory check.')
+            identities = []
+            for row in payload['artifacts']:
+                require(isinstance(row, dict), 'Packet artifact entry must be an object.')
+                identities.append(local_id(row.get('id')))
+            require(set(identities) == set(args.expected_artifact_id),
+                    'Packet artifact IDs do not match the expected inventory.')
         result = validate_packet(payload)
         write_json(result, args.out, args.max_output_bytes)
     except (OSError, ValueError, TypeError, RecursionError) as error:
