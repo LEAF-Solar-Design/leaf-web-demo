@@ -1998,6 +1998,18 @@ def _compare_string_metric_rows(oracle_rows, saved_rows, metric):
             "counts": {"missing": len(missing), "foreign": len(foreign), "mismatched": len(changed)}}
 
 
+def _write_all(stream, payload):
+    """Deliver one payload without restarting after a partial write."""
+    offset = 0
+    while offset < len(payload):
+        piece = payload[offset:offset + 8192]
+        count = stream.write(piece)
+        if type(count) is not int or not 0 < count <= len(piece):
+            raise ValueError("stdout_write_unreadable")
+        offset += count
+    stream.flush()
+
+
 def main(argv=None):
     """CLI:0 PASS,1 FAIL,4 UNREADABLE,5 output failure without recursive reporting."""
     import argparse
@@ -2054,12 +2066,10 @@ def main(argv=None):
     try:
         binary_output = getattr(sys.stdout, "buffer", None)
         if binary_output is None:
-            sys.stdout.write(output + "\n")
-            sys.stdout.flush()
+            _write_all(sys.stdout, output + "\n")
         else:
-            binary_output.write(output.encode("ascii") + b"\n")
-            binary_output.flush()
-    except (OSError, UnicodeError):
+            _write_all(binary_output, output.encode("ascii") + b"\n")
+    except (OSError, UnicodeError, ValueError):
         # A real pipe may fail only on flush. Redirect this process's stdout
         # descriptor so interpreter shutdown cannot retry the failed pipe.
         try:

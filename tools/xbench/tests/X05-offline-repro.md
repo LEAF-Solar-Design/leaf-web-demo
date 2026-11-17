@@ -3258,3 +3258,58 @@ The comparison-law tests count normalized cells independently with Fraction,
 verify all 512 triples among eight readable tables, and check overlapping binary
 toggle cancellation with exact direct and bound diagnostics. No live input,
 upload, staging mutation, or live X05 acceptance is part of this replay.
+
+
+## Stdout delivery contract replay
+
+Within Studio X-bench X05, a comparison verdict is delivered only after the
+entire JSON result and newline are written and the stream flush succeeds.
+This replay uses synthetic local sinks. A partial delivery is never restarted.
+
+```python
+import sys, runpy, json
+from io import BytesIO, StringIO
+from types import SimpleNamespace
+from unittest.mock import patch
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+Sink = fixtures['DeliveryOutput']
+raw = m.serialize_result(fixtures['framed_payload'](None)).encode()
+cases = [('short writes', Sink(True, limit=7)),
+         ('zero progress', Sink(True, invalid=0)),
+         ('failure after prefix', Sink(True, limit=11, failure='after-prefix')),
+         ('clean recovery', Sink(True, limit=8192))]
+for label, sink in cases:
+    errors = StringIO()
+    with patch.object(sys, 'stdin', SimpleNamespace(buffer=BytesIO(raw))), \
+         patch.object(sys, 'stdout', SimpleNamespace(buffer=sink)), \
+         patch.object(sys, 'stderr', errors):
+        code = m.main([])
+    assert errors.getvalue() == ''
+    try:
+        complete = json.loads(sink.accepted)['verdict'] == 'PASS'
+    except (ValueError, KeyError):
+        complete = False
+    if label == 'failure after prefix':
+        assert len(sink.accepted) == 11 and len(sink.requests) == 2
+        assert sink.requests[1] == sink.requests[0][11:]
+    print(label, code, complete, sink.flushes)
+```
+
+Expected output:
+
+```text
+short writes 0 True 1
+zero progress 5 False 0
+failure after prefix 5 False 0
+clean recovery 0 True 1
+```
+
+The CLI retries only the unwritten suffix after a positive short count. Zero,
+None, negative, boolean and oversized counts fail at once. Closed writes or
+flushes return exit 5 without a traceback or recursive result. A flush can fail
+after complete bytes were accepted; those bytes do not establish delivery
+success. Tests cover binary/text sinks in all ten modes and reject invalid stdin
+return types or oversized chunks after valid prefixes, preserving sanitized
+UNREADABLE output and clean recovery. No live streams or X05 acceptance are used.
