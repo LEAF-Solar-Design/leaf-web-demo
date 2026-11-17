@@ -19,6 +19,7 @@ function identifier(id) {
 const initial = () => ({ head: null, published: null, revisions: [], lastSaved: null, conflict: null,
   events: [], saveTimes: [], requestTimes: [], restoredGraph: null, restoredKey: 0, headLoaded: false, headLookupFailed: false, openedBundle: null })
 
+const EXPORT_RESPONSE_TIMEOUT_MS = 60000
 const bundleParts = ['evaluations', 'graph', 'identity', 'layout', 'policy_reference']
 const bundleHash = value => sha256Hex(canonicalJSON(value))
 const sameKeys = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
@@ -82,7 +83,7 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
         method, credentials: 'same-origin', redirect: 'error',
         headers: { accept: 'application/json', 'content-type': 'application/json', 'X-Tenant-Id': config.tenant, ...authHeaders() },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      })
+      }, path.endsWith('/export') ? EXPORT_RESPONSE_TIMEOUT_MS : undefined)
       const data = await response.json().catch(() => ({}))
       if (response.ok) {
         if (data.graph && data.sha256) graphLayouts.set(data.graph, { load: () => getLayout(id, data.sha256) })
