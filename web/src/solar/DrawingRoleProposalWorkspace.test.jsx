@@ -11,9 +11,13 @@ const context = { context: { ...binding, head_version_id: binding.input_version_
   role_discovery: { schema: 'leaf.drawing-role-discovery.v1',
     module: { first_choice: row, candidates: [row], competing: false }, roof: [], obstruction: [] } }
 const clients = []
+const profileState = { customer_key: binding.organization_id, project_key: binding.project_id,
+  drawing_key: binding.drawing_id, input_version_id: binding.input_version_id,
+  expected_version: 0, profile: null, application_record: null }
 afterEach(() => { cleanup(); clients.splice(0).forEach(client => client.dispose()) })
 
-function setup(fetchImpl = vi.fn(async () => ({ ok: true, status: 200, json: async () => context }))) {
+function setup(fetchImpl = vi.fn(async url => ({ ok: true, status: 200,
+  json: async () => url.endsWith('/role-profile') ? profileState : context }))) {
   const client = createSolarProjectClient({ fetchImpl })
   client.setScope(binding, 'synthetic-authority')
   clients.push(client)
@@ -29,10 +33,13 @@ it('shows the first choice from the real scoped context client while catalog is 
   expect(screen.getByText(/Module first choice:/).textContent).toContain('Synthetic Panel')
   expect(screen.getByText(/Module first choice:/).textContent).toContain('MODULES')
   expect(screen.getByRole('cell', { name: '7' })).toBeTruthy()
-  expect(h.fetchImpl.mock.calls).toHaveLength(1)
-  expect(h.fetchImpl.mock.calls[0][0]).toContain('/context?')
-  expect(h.fetchImpl.mock.calls[0][1].method).toBe('GET')
-  expect(screen.queryAllByRole('button')).toHaveLength(0)
+  expect(await screen.findByRole('button', { name: 'Confirm roles' })).toBeTruthy()
+  const calls = h.fetchImpl.mock.calls
+  expect(calls).toHaveLength(3)
+  expect(calls.filter(([url]) => url.includes('/context?'))).toHaveLength(2)
+  expect(calls.filter(([url]) => url.endsWith('/role-profile'))).toHaveLength(1)
+  expect(calls.every(([, init]) => init.method === 'GET')).toBe(true)
+  expect(screen.queryAllByRole('button')).toHaveLength(2)
 })
 
 it('rejects a late context after the current project changes', async () => {

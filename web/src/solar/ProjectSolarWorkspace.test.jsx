@@ -1729,7 +1729,7 @@ describe('Project Solar workspace composition', () => {
   it('R13E-44 composition owns no Viewer or runtime and all new copy uses the frozen maps', () => {
     const source = readFileSync(`${process.cwd()}/src/solar/ProjectSolarWorkspace.jsx`, 'utf8')
     const imports = [...source.matchAll(new RegExp("from ['\"]([^'\"]+)['\"]", 'g'))].map((match) => match[1])
-    expect(imports).toEqual(['react', './solarDrawingBinding.js', './SolarSettingsForm.jsx', './solarSettingsWire.js', './ProjectSolarReadPanel.jsx', './ProjectSolveReview.jsx', './ProjectSolarEdgePanel.jsx', './ProjectGroundEstimatePanel.jsx', './ProjectSolarPreparedSolveForm.jsx', './DrawingRoleProposal.jsx', './ProjectReconciliationPanel.jsx'])
+    expect(imports).toEqual(['react', './solarDrawingBinding.js', './SolarSettingsForm.jsx', './solarSettingsWire.js', './ProjectSolarReadPanel.jsx', './ProjectSolveReview.jsx', './ProjectSolarEdgePanel.jsx', './ProjectGroundEstimatePanel.jsx', './ProjectSolarPreparedSolveForm.jsx', './DrawingRoleProposal.jsx', './X07ProjectProfileReview.jsx', './ProjectReconciliationPanel.jsx'])
     const reviewSource = readFileSync(`${process.cwd()}/src/solar/ProjectSolveReview.jsx`, 'utf8')
     const reviewImports = [...reviewSource.matchAll(new RegExp("from ['\"]([^'\"]+)['\"]", 'g'))].map((match) => match[1])
     for (const dependency of reviewImports) {
