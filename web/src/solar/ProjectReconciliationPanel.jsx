@@ -87,7 +87,6 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
   const rows = reconciliationRowsFromValues(saved?.values || unavailableValues, drafts)
   const pending = saved?.pending === true
   const totals = live && report?.scope === scope ? report : null
-  const saving = totals?.pending === 'save'
   const storagePending = !!totals?.pending
   function updateReport(value) {
     // Keep the CAS baseline synchronous across read completion and its separate report load.
@@ -124,14 +123,15 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
     }, RECONCILIATION_READ_TIMEOUT_MS)
     abort.signal.addEventListener('abort', () => clearTimeout(timer), { once: true })
     try {
-      let response
+      let response, submitted
       if (operation === 'save') {
         const signature = JSON.stringify([hash, before.revision, drafts])
         if (scope.retry?.signature !== signature) scope.retry = { signature, request: Object.freeze({
           graphSha256: hash, drafts: Object.freeze([...drafts]), expectedRevision: before.revision, idempotencyKey: mintCorrelationId(),
         }) }
         if (!accepted()) return
-        response = await projectClient.saveEngineeringTotals({ ...scope.retry.request, signal: abort.signal })
+        submitted = scope.retry.request
+        response = await projectClient.saveEngineeringTotals({ ...submitted, signal: abort.signal })
       } else response = await projectClient.loadEngineeringTotals({ graphSha256: hash, signal: abort.signal })
       if (!accepted()) return
       if (response?.status === 409) {
@@ -141,7 +141,7 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
         return
       }
       if (!validTotals(response, scope.binding, hash) || (operation === 'save' &&
-          (!response.data.record || response.data.record.values.some((value, index) => value !== scope.retry.request.drafts[index]) ||
+          (!response.data.record || response.data.record.values.some((value, index) => value !== submitted.drafts[index]) ||
             response.data.revision !== before.revision + 1))) { failed(); return }
       const { record, revision, canWrite } = response.data
       const restoredValues = record ? [...record.values] : null
@@ -151,14 +151,15 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
         ((!reload || !unchanged) && Number.isSafeInteger(before.revision) && before.revision !== revision ||
           before.conflict && (!reload || !unchanged))
       if (operation === 'save') {
-        scope.dirty = false
+        scope.dirty = !unchanged
         scope.retry = null
       } else if (record && unchanged && !conflict && (reload || !scope.dirty)) {
         setDraft({ scope, values: restoredValues })
         scope.dirty = false
       }
       updateReport({ hash, revision: conflict ? before.revision : revision, canWrite, conflict, pending: null,
-        status: operation === 'save' ? 'Engineering totals saved.' : conflict
+        status: operation === 'save' ? unchanged ? 'Engineering totals saved.'
+          : 'Submitted engineering totals saved. Newer edits remain unsaved.' : conflict
           ? 'Engineering totals changed. Reload saved engineering totals before saving.'
           : record && scope.dirty ? 'Saved engineering totals exist. Your entered drafts were retained.'
             : record ? 'Saved engineering totals loaded.' : 'No saved engineering totals. Entered drafts were retained.' })
@@ -251,10 +252,10 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
         <th scope="row">{row.metric}</th><td style={{ overflowWrap: 'anywhere' }}>{row.studio || 'Unavailable'}</td>
         <td style={{ verticalAlign: 'top' }}><input id={`${inputId}-${index}`} aria-label={`${row.metric} engineering report/BOM`} inputMode={index === 4 ? 'decimal' : 'numeric'}
           aria-describedby={`${inputId}-${index}-help${index === 4 ? ` ${inputId}-dc-optional` : ''}`}
-          disabled={!live || busy || pending || saving} value={drafts[index]} maxLength={37} style={{ width: '12ch' }}
+          disabled={!live || busy || pending} value={drafts[index]} maxLength={37} style={{ width: '12ch' }}
           aria-invalid={drafts[index] !== '' && parseReconciliationNumber(drafts[index], index !== 4) === null}
           onChange={(event) => {
-            if (!current() || busy || pending || saving) return
+            if (!current() || busy || pending) return
             const values = [...drafts]
             values[index] = event.target.value
             scope.edits = (scope.edits || 0) + 1

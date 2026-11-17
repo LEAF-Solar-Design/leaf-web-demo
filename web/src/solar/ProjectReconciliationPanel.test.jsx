@@ -125,6 +125,92 @@ function canonicalReports(h, file = { response: totalsResponse() }) {
 }
 const reportsLoaded = () => screen.findByText(/No saved engineering totals|Saved engineering totals loaded/)
 
+it('guards two save activations before React commits and releases the guard after rejection', async () => {
+  const h = fixture(); canonicalReports(h)
+  read(); await reportsLoaded(); fill(reportValues)
+  let reject
+  h.client.saveEngineeringTotals.mockImplementationOnce(() => new Promise((_yes, no) => { reject = no }))
+  const button = screen.getByRole('button', { name: 'Save engineering totals' })
+  act(() => { button.click(); button.click() })
+  expect(h.client.saveEngineeringTotals).toHaveBeenCalledOnce()
+  await act(async () => reject(new Error('private rejected save')))
+  expect(screen.getByText(/Engineering totals could not be saved/)).toBeTruthy()
+  expect(button.disabled).toBe(false)
+  expect(inputValues()).toEqual(reportValues)
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals).toHaveBeenCalledTimes(2)
+})
+
+it('ignores a timed-out save after a changed retry and keeps the retry CAS baseline', async () => {
+  const h = fixture(); canonicalReports(h)
+  read(); await reportsLoaded(); fill(reportValues)
+  let settle
+  h.client.saveEngineeringTotals.mockImplementationOnce(() => new Promise(resolve => { settle = resolve }))
+  vi.useFakeTimers(); saveTotals()
+  const first = h.client.saveEngineeringTotals.mock.calls[0][0]
+  act(() => vi.advanceTimersByTime(RECONCILIATION_READ_TIMEOUT_MS)); vi.useRealTimers()
+  expect(first.signal.aborted).toBe(true)
+  const fresh = ['2', '0', '1', '1', '0.5']
+  fill(fresh); saveTotals(); await screen.findByText('Engineering totals saved.')
+  await act(async () => settle(totalsResponse(9, reportValues)))
+  expect(inputValues()).toEqual(fresh)
+  expect(screen.getByText('Engineering totals saved.')).toBeTruthy()
+  fill(['3', '0', '1', '1', '0.6']); saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls[2][0].expectedRevision).toBe(1)
+})
+
+it.each([0, 1, 2, 3, 4])('acknowledges submitted values while preserving a newer dirty edit in field %i', async index => {
+  const h = fixture(); canonicalReports(h)
+  read(); await reportsLoaded(); fill(reportValues)
+  let settle
+  h.client.saveEngineeringTotals.mockImplementationOnce(() => new Promise(resolve => { settle = resolve }))
+  saveTotals()
+  const submitted = h.client.saveEngineeringTotals.mock.calls[0][0]
+  const newer = [...reportValues]; newer[index] = index === 4 ? '1.2' : '2'
+  const input = screen.getAllByRole('textbox')[index]
+  expect(input.disabled).toBe(false)
+  fireEvent.change(input, { target: { value: newer[index] } })
+  await act(async () => settle(totalsResponse(1, submitted.drafts)))
+  expect(submitted.drafts).toEqual(reportValues)
+  expect(inputValues()).toEqual(newer)
+  expect(screen.getByText(/Newer edits remain unsaved/)).toBeTruthy()
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(2, newer))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls[1][0]).toMatchObject({ drafts: newer, expectedRevision: 1 })
+})
+
+it('requires a fresh authorized read after rejecting a revoked save receipt', async () => {
+  const h = fixture(); canonicalReports(h)
+  read(); await reportsLoaded(); fill(reportValues)
+  let settle
+  h.client.saveEngineeringTotals.mockImplementationOnce(() => new Promise(resolve => { settle = resolve }))
+  saveTotals()
+  const signal = h.client.saveEngineeringTotals.mock.calls[0][0].signal
+  h.current = false; h.emit()
+  await act(async () => settle(totalsResponse(99, reportValues)))
+  expect(signal.aborted).toBe(true)
+  expect(screen.queryByText('Engineering totals saved.')).toBeNull()
+  h.current = true; h.snapshot = { binding, authorityKey: 'renewed' }; h.update({ authorityKey: 'renewed' })
+  fill(reportValues); saveTotals()
+  expect(h.client.saveEngineeringTotals).toHaveBeenCalledOnce()
+  read(); await reportsLoaded(); saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+  expect(h.client.saveEngineeringTotals.mock.calls[1][0].expectedRevision).toBe(0)
+})
+
+it('contains a synchronous save throw, retains dirty inputs and retries explicitly', async () => {
+  const h = fixture(); canonicalReports(h)
+  read(); await reportsLoaded(); fill(reportValues)
+  h.client.saveEngineeringTotals.mockImplementationOnce(() => { throw new Error('private synchronous save') })
+  saveTotals()
+  expect(screen.getByText(/Engineering totals could not be saved/)).toBeTruthy()
+  expect(screen.queryByText(/private synchronous/)).toBeNull()
+  expect(inputValues()).toEqual(reportValues)
+  expect(screen.getByRole('button', { name: 'Save engineering totals' }).disabled).toBe(false)
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals).toHaveBeenCalledTimes(2)
+})
+
 it.each(['', '0.000'])('explicitly persists exact report strings including DC %j across a new mount', async dc => {
   const h = fixture(), file = canonicalReports(h), values = [...reportValues.slice(0, 4), dc]
   expect(h.client.loadEngineeringTotals).not.toHaveBeenCalled()
@@ -208,7 +294,7 @@ it.each(['transport', 'timeout'])('retries an unchanged %s save with the same im
   } else h.client.saveEngineeringTotals.mockRejectedValueOnce(new Error('private storage error'))
   saveTotals()
   if (failure === 'timeout') {
-    expect(screen.getAllByRole('textbox').every(input => input.disabled)).toBe(true)
+    expect(screen.getAllByRole('textbox').every(input => !input.disabled)).toBe(true)
     expect(screen.getByRole('button', { name: 'Read saved design' }).disabled).toBe(true)
     act(() => vi.advanceTimersByTime(RECONCILIATION_READ_TIMEOUT_MS))
     expect(h.client.saveEngineeringTotals.mock.calls[0][0].signal.aborted).toBe(true)

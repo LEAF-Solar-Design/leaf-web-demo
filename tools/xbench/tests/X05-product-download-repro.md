@@ -154,6 +154,8 @@ const render = (solarBinding, authorityKey, projectClient) => root.render(
 window.switchDrawing = () => render(nextBinding, 'synthetic-next', nextClient);
 window.oldReadAborted = () => oldSignal?.aborted === true;
 window.enableReportPersistence = () => {
+  let loseSaveResponse = false;
+  window.loseNextSaveResponse = () => { loseSaveResponse = true; };
   const exchange = async (method, body, signal) => {
     const result = await fetch('/mock-engineering-totals', {
       method, signal, headers: {'Content-Type': 'application/json'},
@@ -163,7 +165,11 @@ window.enableReportPersistence = () => {
   };
   const reportClient = {...client, readContext: async () => structuredClone(response),
     loadEngineeringTotals: ({signal}) => exchange('GET', null, signal),
-    saveEngineeringTotals: ({signal, ...body}) => exchange('POST', body, signal),
+    saveEngineeringTotals: async ({signal, ...body}) => {
+      const result = await exchange('POST', body, signal);
+      if (loseSaveResponse) { loseSaveResponse = false; throw new Error('Synthetic lost save response'); }
+      return result;
+    },
   };
   render(binding, 'synthetic', reportClient);
 };
@@ -765,13 +771,30 @@ try:
     expect(page.get_by_text('Saved engineering totals loaded.', exact=True)).to_be_visible()
     assert page.get_by_role('textbox').evaluate_all('(nodes) => nodes.map(n => n.value)') == newer_values
     assert canonical_file.read_bytes() == newer_bytes
-    final_document = json.loads(newer_bytes)
+    # Commit succeeds in the mock file store but its response is lost.
+    lost_values = ['005', '01', '02', '01', '0.8']
+    for label, value in zip(labels, lost_values):
+        page.get_by_role('textbox', name=label + ' engineering report/BOM', exact=True).fill(value)
+    page.evaluate('window.loseNextSaveResponse()')
+    save.click()
+    expect(page.get_by_text('Engineering totals could not be saved. Retry Save engineering totals.', exact=True)).to_be_visible()
+    committed_bytes = canonical_file.read_bytes()
+    committed_document = json.loads(committed_bytes)
+    assert committed_document['record']['values'] == lost_values
+    assert committed_document['revision'] == 3
+    page.get_by_role('button', name='Reload saved engineering totals', exact=True).click()
+    expect(page.get_by_text('Saved engineering totals loaded.', exact=True)).to_be_visible()
+    assert page.get_by_role('textbox').evaluate_all('(nodes) => nodes.map(n => n.value)') == lost_values
+    assert canonical_file.read_bytes() == committed_bytes
+    recovered = capture_comparison('lost-save-response-recovered')
+    final_document = json.loads(committed_bytes)
     assert final_document['intake'] == first_document['intake'] and final_document['version'] == 7
     report_persistence = dict(restored=restored, exact_values=persisted_values, blank_dc=True,
         forced_colors_active=True, textual_verdicts_and_five_csv_rows=True,
         stale_save_rejected=True, stale_save_file_bytes_unchanged=True,
         explicit_reload_values=newer_values, graph_and_version_unchanged=True,
-        canonical_file_sha256=hashlib.sha256(newer_bytes).hexdigest())
+        lost_save_response_recovered=True, recovery_without_write=True, recovered=recovered,
+        canonical_file_sha256=hashlib.sha256(committed_bytes).hexdigest())
     def digest(path):
         return hashlib.sha256(path.read_bytes()).hexdigest()
     inputs = json.loads((artifact / 'meta.json').read_text(encoding='utf-8'))['inputs']
