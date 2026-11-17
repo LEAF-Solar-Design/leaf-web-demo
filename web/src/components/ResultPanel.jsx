@@ -4,7 +4,7 @@ import './resultObjectLinks.css'
 import ModuleSetPicker from './ModuleSetPicker.jsx'
 import './resultParity.css'
 import { humanKey } from '../labels.js'
-import { compactRefusal, errorActorLabel, errorPresentation } from '../errorPresentation.js'
+import { compactRefusal, errorActorLabel, errorPresentation, requiresReconciliation } from '../errorPresentation.js'
 import { modChord } from '../lib/keys.js'
 import { readSingleKeyShortcuts } from '../lib/singleKeyPreference.js'
 import ArloProposalReview from './ArloProposalReview.jsx'
@@ -29,7 +29,7 @@ function errParts(e) {
 }
 
 function isRetryable(e) {
-  if (compactRefusal(e)) return false
+  if (requiresReconciliation(e) || compactRefusal(e)) return false
   return !!(e && typeof e === 'object' && e.retryable)
 }
 
@@ -408,6 +408,7 @@ function ResultBody({ result, density, solarBinding, authorityKey, projectClient
 function ErrorLine({ err, onRetry, retry, quota, toolName }) {
   const refusal = compactRefusal(err)
   if (refusal) return <div className="inline-error" role="alert" data-error-code={refusal.code}>{refusal.text}</div>
+  if (requiresReconciliation(err)) return <div className="inline-error" role="alert">{err}</div>
   const { message, code, nextAction, actor } = errParts(err)
   return (
     <div className={`inline-error ${quota ? 'quota' : ''}`} role="alert">
@@ -534,6 +535,7 @@ export default function ResultPanel({ running, error, result, tool, onRetry, not
   // is visible. Skipped while typing in a field and while a run is in flight;
   // the condition mirrors the `retry` props on the two ErrorLine sites below.
   const canRetryKey = !running && !!onRetry &&
+    !requiresReconciliation(error) && !requiresReconciliation(result?.error) &&
     ((!!error && !compactRefusal(error)) || !!(result && result.error && !isEnt && isRetryable(result.error)))
   useEffect(() => {
     if (!canRetryKey) return undefined

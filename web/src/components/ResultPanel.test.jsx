@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, within } from '@testing-library/rea
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import ResultPanel from './ResultPanel.jsx'
+import { humanizeError } from '../errorHumanize.js'
 import { SINGLE_KEY_SHORTCUTS_KEY, writeSingleKeyShortcuts } from '../lib/singleKeyPreference.js'
 import { act, waitFor } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
@@ -334,6 +335,29 @@ describe('ResultPanel row arrays', () => {
 })
 
 describe('ResultPanel actionable error guidance', () => {
+  it.each(['SOLVE_TIMEOUT', 'solve_outcome_unknown'])('renders humanized %s once without retry controls', (reason_code) => {
+    const error = humanizeError({ body: { error: { reason_code, retryable: true,
+      message: 'Solve Roof-West has no confirmed outcome. Retry now.' } } })
+    const onRetry = vi.fn()
+    const view = render(<ResultPanel error={error} running={false} onRetry={onRetry} />)
+    expect(screen.getByRole('alert').textContent).toBe(error)
+    expect(view.container.textContent.split('Reconcile the solve status before retrying.')).toHaveLength(2)
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+    expect(screen.queryByText('R')).toBeNull()
+    expect(screen.getByRole('alert').children).toHaveLength(0)
+    fireEvent.keyDown(window, { key: 'r' })
+    fireEvent.keyDown(window, { key: 'R' })
+    expect(onRetry).not.toHaveBeenCalled()
+  })
+
+  it('keeps legacy transport errors retryable by button and R', () => {
+    const onRetry = vi.fn()
+    render(<ResultPanel error={humanizeError(new Error('Failed to fetch'))} running={false} onRetry={onRetry} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    fireEvent.keyDown(window, { key: 'r' })
+    expect(onRetry).toHaveBeenCalledTimes(2)
+  })
+
   it.each([
     ['SOLAREDGE_GRID_UNMATCHED', [], 'redraw_frame', 'Group frame:roof-7: no matching SolarEdge grid. Redraw this group.', 'Redraw this group.'],
     ['SOLAREDGE_GRID_AMBIGUOUS', [4, 17], 'pick_candidate', 'Group frame:roof-7: multiple SolarEdge grids (candidates 4, 17). Select one grid.', 'Select one grid.'],

@@ -81,6 +81,7 @@ const WORKSPACE_QUICK_AFTER = Object.freeze([
 ])
 import Legend from './components/Legend.jsx'
 import ResultPanel from './components/ResultPanel.jsx'
+import { requiresReconciliation } from './errorPresentation.js'
 import DrawingDependencyReport from './components/DrawingDependencyReport.jsx'
 import SelectionReadout from './components/SelectionReadout.jsx'
 import PromptBox, { shouldSkipPromptFocus } from './components/PromptBox.jsx'
@@ -3357,10 +3358,11 @@ export default function App() {
 
   // Retry the last run (plain affordance for retryable failures / transport hiccups).
   const onRetry = useCallback(() => {
+    if (requiresReconciliation(runErr) || requiresReconciliation(result?.error)) return
     const last = lastRunRef.current
     if (refuseProjectSolar(last?.tool?.name)) return
     if (last) onRequestCatalogRun(last.tool, last.params, null, 'catalog', { complete: true })
-  }, [onRequestCatalogRun, refuseProjectSolar])
+  }, [onRequestCatalogRun, refuseProjectSolar, runErr, result])
 
   // S20: a failed job row's Retry in the rail re-dispatches that job's tool
   // through the same confirm path as onRetry (never a silent run). The row
@@ -4056,7 +4058,7 @@ export default function App() {
     [catalog, openFamilies],
   )
   // Mirrors ResultPanel's own canRetryKey condition (its listener is authoritative).
-  const resultOwnsR = !running && (!!runErr ||
+  const resultOwnsR = !running && !requiresReconciliation(runErr) && !requiresReconciliation(result?.error) && (!!runErr ||
     !!(result && result.error && !result.entitlement_required && result.error.retryable))
   const rTarget = useMemo(() => {
     if (running) return null
@@ -6817,14 +6819,16 @@ export default function App() {
                   : runErr}
                 <span className="dim"> · your last good result is unchanged</span>
               </span>
-              <button
-                type="button"
-                className="chip-act"
-                onClick={routeErr ? onDispatch : onRetry}
-              >
-                Retry
-              </button>
-              <span className="key">R</span>
+              {(routeErr || !requiresReconciliation(runErr)) && <>
+                <button
+                  type="button"
+                  className="chip-act"
+                  onClick={routeErr ? onDispatch : onRetry}
+                >
+                  Retry
+                </button>
+                <span className="key">R</span>
+              </>}
             </div>
           )}
           {/* Calm agent-tier advisory (degraded fallback / quota / grant):

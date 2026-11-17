@@ -7,6 +7,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import useJobController, { PENDING_RUN_KEY, savePendingRun } from './controllers/useJobController.js'
 import SolarToolForm from './solar/SolarToolForm.jsx'
 import { humanizeError } from './errorHumanize.js'
+import { requiresReconciliation } from './errorPresentation.js'
 
 afterEach(cleanup)
 const source = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
@@ -28,6 +29,9 @@ function callback(name, env) {
   const node = find(n => n.type === 'VariableDeclarator' && n.id.name === name).init.arguments[0]
   return new Function(...Object.keys(env), `return (${source.slice(node.start, node.end)})`)(...Object.values(env))
 }
+function evaluate(node, env) {
+  return new Function(...Object.keys(env), `return (${source.slice(node.start, node.end)})`)(...Object.values(env))
+}
 const tool = { name: 'solar-test', label: 'Solar layout', capabilities: ['drawing.write'], params: { type: 'object', properties: {} } }
 function refusalEnv(overrides = {}) {
   return {
@@ -37,6 +41,67 @@ function refusalEnv(overrides = {}) {
     setRunErr: vi.fn(), ...overrides,
   }
 }
+
+it('refuses uncertain retries without changing last-valid inputs or result', () => {
+  const last = Object.freeze({ tool, params: Object.freeze({ spacing: 8 }) })
+  const lastGood = Object.freeze({ ok: true, result: Object.freeze({ total: 4 }) })
+  for (const reason_code of ['SOLVE_TIMEOUT', 'solve_outcome_unknown']) {
+    const error = { body: { error: { reason_code, retryable: true } } }
+    for (const state of [
+      { runErr: humanizeError(error), result: lastGood },
+      { runErr: null, result: { ok: false, error } },
+    ]) {
+      const env = { ...state, requiresReconciliation, lastRunRef: { current: last },
+        refuseProjectSolar: vi.fn(() => false), onRequestCatalogRun: vi.fn() }
+      callback('onRetry', env)()
+      expect(env.onRequestCatalogRun).not.toHaveBeenCalled()
+      expect(env.refuseProjectSolar).not.toHaveBeenCalled()
+      expect(env.lastRunRef.current).toBe(last)
+      expect(env.lastRunRef.current.params).toEqual({ spacing: 8 })
+      expect(env.result).toBe(state.result)
+      expect(lastGood.result).toEqual({ total: 4 })
+    }
+  }
+})
+
+it('arms ordinary retries with the saved tool and params', () => {
+  const last = { tool, params: { spacing: 8 } }
+  for (const state of [
+    { runErr: humanizeError(new Error('Failed to fetch')), result: null },
+    { runErr: null, result: { ok: false, error: { error_code: 'UPSTREAM_TIMEOUT', retryable: true } } },
+  ]) {
+    const env = { ...state, requiresReconciliation, lastRunRef: { current: last },
+      refuseProjectSolar: vi.fn(() => false), onRequestCatalogRun: vi.fn() }
+    callback('onRetry', env)()
+    expect(env.onRequestCatalogRun).toHaveBeenCalledTimes(1)
+    expect(env.onRequestCatalogRun).toHaveBeenCalledWith(tool, last.params, null, 'catalog', { complete: true })
+    expect(env.lastRunRef.current).toBe(last)
+  }
+  const retry = find(n => n.type === 'VariableDeclarator' && n.id.name === 'onRetry').init
+  expect(retry.arguments[1].elements.map(n => n.name)).toEqual(expect.arrayContaining(['runErr', 'result']))
+})
+
+it('guards the failure strip and R ownership while preserving route retries', () => {
+  const failure = find(n => n.type === 'JSXElement' && n.openingElement.attributes.some(
+    a => a.name?.name === 'className' && a.value?.value === 'strip-failed enter'))
+  const controls = find(n => n.type === 'LogicalExpression' && n.right.type === 'JSXFragment', failure)
+  expect(controls).not.toBeNull()
+  expect(source.slice(controls.right.start, controls.right.end)).toContain('onClick={routeErr ? onDispatch : onRetry}')
+  expect(source.slice(controls.right.start, controls.right.end)).toContain('<span className="key">R</span>')
+  const ownsR = find(n => n.type === 'VariableDeclarator' && n.id.name === 'resultOwnsR').init
+  const timeout = humanizeError({ reason_code: 'SOLVE_TIMEOUT' })
+  for (const [runErr, result, expected] of [
+    [timeout, null, false],
+    [null, { error: { reason_code: 'solve_outcome_unknown', retryable: true } }, false],
+    ['Network unavailable.', null, true],
+    [null, { error: { error_code: 'UPSTREAM_TIMEOUT', retryable: true } }, true],
+  ]) {
+    expect(evaluate(ownsR, { running: false, runErr, result, requiresReconciliation })).toBe(expected)
+  }
+  expect(Boolean(evaluate(controls.left, { routeErr: null, runErr: timeout, requiresReconciliation }))).toBe(false)
+  expect(Boolean(evaluate(controls.left, { routeErr: 'Route failed.', runErr: timeout, requiresReconciliation }))).toBe(true)
+  expect(Boolean(evaluate(controls.left, { routeErr: null, runErr: 'Network unavailable.', requiresReconciliation }))).toBe(true)
+})
 
 it('explains each refused run, including a second run while one is active', () => {
   for (const [state, reason] of [

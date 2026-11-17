@@ -48,6 +48,13 @@ const REFUSAL_ACTIONS = {
   IMPORT_PDF_MALFORMED: 'Upload a valid PDF.',
 }
 
+export function requiresReconciliation(value) {
+  if (typeof value === 'string') {
+    return value.endsWith(` ${REFUSAL_ACTIONS.SOLVE_TIMEOUT}`)
+  }
+  return Boolean(compactRefusal(value)?.reconcileFirst)
+}
+
 const REFUSAL_CAUSES = {
   LAYER_NOT_FOUND: 'Layer not found',
   PANEL_LAYER_FILTER_REQUIRED: 'Panel layer filter is missing',

@@ -1,6 +1,33 @@
 import { describe, expect, it } from 'vitest'
 
-import { compactRefusal, errorActorLabel, errorPresentation } from './errorPresentation.js'
+import { compactRefusal, errorActorLabel, errorPresentation, requiresReconciliation } from './errorPresentation.js'
+import { humanizeError } from './errorHumanize.js'
+
+describe('reconciliation retry guard', () => {
+  it.each(['SOLVE_TIMEOUT', 'solve_outcome_unknown'])('recognises structured and formatted %s', (reason_code) => {
+    const error = { reason_code, retryable: true, message: 'Solve Roof-West has no confirmed outcome.' }
+    for (const value of [error, { error }, { body: { error } }]) {
+      expect(requiresReconciliation(value)).toBe(true)
+      expect(requiresReconciliation(humanizeError(value))).toBe(true)
+    }
+  })
+
+  it.each([
+    null, undefined, '', new Error('Failed to fetch'), 'The connection timed out.',
+    { error_code: 'UPSTREAM_TIMEOUT', retryable: true },
+    { reason_code: 'LAYER_NOT_FOUND' },
+    { reason_code: 'AUTHORING_DISABLED', error_code: 'SOLVE_TIMEOUT' },
+    'Reconcile the solve status before retrying.',
+    'Solve failed. reconcile the solve status before retrying.',
+    'Solve failed. Reconcile the solve status before retrying',
+    'Solve failed. Reconcile the solve status before retrying. Later.',
+    'Solve failed. Reconcile the solve status before retrying. ',
+    'Solve failed. Reconcile the solve status before retrying.\n',
+    'Solve failed. Reconcile the solve status before retrying now.',
+  ])('leaves ordinary errors and near matches retryable: %j', (value) => {
+    expect(requiresReconciliation(value)).toBe(false)
+  })
+})
 
 describe('shared error presentation', () => {
   it.each(['SOLAREDGE_GRID_UNMATCHED', 'SOLAREDGE_GRID_AMBIGUOUS', 'CLOUD_REQUEST_REJECTED', 'solve_outcome_unknown'])(
