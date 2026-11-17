@@ -151,6 +151,28 @@ it.each([2147483646, 2147483647])('retains drafts, CSV and CAS at the revision c
   expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0].expectedRevision).toBe(2147483647)
 })
 
+it.each([['0.400', ''], ['', '0']])('retains optional DC changed from %j to %j during Save', async (submittedDc, newerDc) => {
+  const h = fixture(); canonicalReports(h); read(); await reportsLoaded()
+  const submitted = [...reportValues]; submitted[4] = submittedDc; fill(submitted)
+  let settle
+  h.client.saveEngineeringTotals.mockReturnValueOnce(new Promise(resolve => { settle = resolve }))
+  saveTotals()
+  const newer = [...submitted]; newer[4] = newerDc; fill(newer)
+  await act(async () => settle(totalsResponse(1, submitted)))
+  expect(inputValues()).toEqual(newer)
+  expect(screen.getByText('Submitted engineering totals saved. Newer edits remain unsaved.')).toBeTruthy()
+  expect(h.client.saveEngineeringTotals).toHaveBeenCalledTimes(1)
+  const createObjectURL = vi.fn(() => 'blob:optional-dc-race')
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  const expectedRow = newerDc === '' ? '"kw_dc","0.4","","","UNREADABLE"' : '"kw_dc","0.4","0","0.4","FAIL"'
+  expect(await blobText(createObjectURL.mock.calls[0][0])).toContain(expectedRow)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(2, newer))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: 1, drafts: newer })
+})
+
 const privateErrors = ['<img src=x onerror="SYNTHETIC_PRIVATE_X05">', '\u0000\u001b[31mSYNTHETIC_PRIVATE_X05\r\n',
   'private credential SYNTHETIC_PRIVATE_X05']
 
