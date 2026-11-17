@@ -256,6 +256,8 @@ def _capabilities(x_internal_role, x_ops_secret, tenant, drawing_id, project_id,
         names = {row.get("name") for family in families
                  for row in family.get("capabilities") or []
                  if row.get("name") in availability.SOLAR_CAPABILITIES}
+        # Takeoff uses the synchronous exact-version read lane, never worker admission.
+        names.discard("solar-takeoff")
         try:
             requests = _project_requests(project_runs, names, drawing_id)
         except (ValueError, TypeError, UnicodeError, RecursionError):
@@ -310,6 +312,22 @@ def _capabilities(x_internal_role, x_ops_secret, tenant, drawing_id, project_id,
                     continue
                 if name not in drawing_states:
                     tool = raw_by_name.get(name, {})
+                    if name == "solar-takeoff":
+                        import solar_project_read
+                        trusted = False
+                        try:
+                            solar_project_read._trusted(tenant, name, deps.catalog_tool_digest(tool))
+                            trusted = True
+                        except (ValueError, TypeError, UnicodeError, RecursionError,
+                                solar_project_read.GraphValidationError):
+                            pass
+                        state = solar_project_admission.project_drawing_tool_availability(
+                            tool, tenant, read_tool=trusted, exact_version=exact_version)
+                        state["engine_ready"] = state["engine_ready"] and state["entitled"]
+                        state["project_read"] = state["project_read"] and state["entitled"]
+                        drawing_states[name] = state
+                        row["availability"] = deepcopy(state)
+                        continue
                     drawing_states[name] = solar_project_admission.project_drawing_tool_availability(
                         tool, tenant, read_tool=jobs_router._is_project_read_tool(tool),
                         exact_version=exact_version,

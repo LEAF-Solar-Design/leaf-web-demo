@@ -7,6 +7,7 @@ import SolarFlowRail from './SolarFlowRail.jsx'
 import ProjectSolarGraphForm from './ProjectSolarGraphForm.jsx'
 import { PROJECT_SOLAR_WORKSPACE_LABELS, PROJECT_SOLAR_WORKSPACE_REASONS, projectSolarWorkspaceReason } from './ProjectSolarReadPanel.jsx'
 import { SEED_SETTINGS } from './solarSettingsModel.js'
+import ProjectGroundEstimatePanel, { estimateLineCents } from './ProjectGroundEstimatePanel.jsx'
 
 // Discovery reads and status rendering have dedicated component tests.
 vi.mock('./DrawingRoleProposal.jsx', () => ({
@@ -15,6 +16,96 @@ vi.mock('./DrawingRoleProposal.jsx', () => ({
 
 afterEach(cleanup)
 afterEach(() => vi.restoreAllMocks())
+
+const takeoffLine = (line_id, quantity, changes = {}) => ({ line_id, description: line_id,
+  unit: 'ea', quantity, status: 'computed', priceable: true, ...changes })
+
+function takeoffResult(lines) {
+  const outcome = readResult('solar-takeoff')
+  outcome.data.result.output = { summary: { schema: 'leaf.solar-takeoff.v1', lines } }
+  return outcome
+}
+
+it('prices TEST decimals with half-even cents and refuses missing or nonpriceable values', () => {
+  expect(estimateLineCents(takeoffLine('a', '1'), '0.005')).toBe(0n)
+  expect(estimateLineCents(takeoffLine('a', '1'), '0.015')).toBe(2n)
+  expect(estimateLineCents(takeoffLine('a', '3'), '0.335')).toBe(100n)
+  expect(estimateLineCents(takeoffLine('a', '9007199254.741'), '1000000')).toBe(900719925474100000n)
+  for (const rate of ['', '-1', '1e2', 'NaN', '1000000000001', '1'.repeat(41)]) {
+    expect(estimateLineCents(takeoffLine('a', '1'), rate)).toBeNull()
+  }
+  expect(estimateLineCents(takeoffLine('a', null), '1')).toBeNull()
+  expect(estimateLineCents(takeoffLine('a', '1', { status: 'not-computed' }), '1')).toBeNull()
+  expect(estimateLineCents(takeoffLine('a', '1', { priceable: false }), '1')).toBeNull()
+})
+
+it('mounts the takeoff inspection host and edits preview rates without worker submission', async () => {
+  const h = fixture('solar-takeoff')
+  h.client.readSolar.mockResolvedValue(takeoffResult([
+    takeoffLine('one', '1'), takeoffLine('two', '1'), takeoffLine('missing', null),
+    takeoffLine('later', '1', { status: 'not-computed' }), takeoffLine('net', '1', { priceable: false }),
+  ]))
+  h.mount()
+  h.inspect()
+  fireEvent.click(screen.getByRole('button', { name: 'Read project quantities' }))
+  await screen.findByLabelText('TEST rate USD one')
+  expect(screen.getAllByText('Unpriced')).toHaveLength(5)
+  fireEvent.change(screen.getByLabelText('TEST rate USD one'), { target: { value: '0.005' } })
+  fireEvent.change(screen.getByLabelText('TEST rate USD two'), { target: { value: '0.015' } })
+  fireEvent.change(screen.getByLabelText('TEST rate USD missing'), { target: { value: '100' } })
+  expect(screen.getByText('Priced subtotal (preview): $0.02')).toBeTruthy()
+  expect(screen.getAllByText('Unpriced')).toHaveLength(3)
+  fireEvent.change(screen.getByLabelText('TEST rate card version'), { target: { value: 'TEST-2' } })
+  expect(screen.getByLabelText('TEST rate card version').value).toBe('TEST-2')
+  fireEvent.change(screen.getByLabelText('TEST rate USD one'), { target: { value: '' } })
+  expect(screen.getAllByText('Unpriced')).toHaveLength(4)
+  expect(h.client.readSolar).toHaveBeenCalledWith(expect.objectContaining({ tool: 'solar-takeoff', catalogDigest: D, current: true }))
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
+it.each(['version', 'authority', 'catalog'])('retires a pending takeoff on %s change and rejects late output', async (change) => {
+  const h = fixture('solar-takeoff'), pending = deferred()
+  h.client.readSolar.mockReturnValue(pending.promise)
+  const props = { tool: h.row, solarBinding: B, authorityKey: 'epoch-1', projectClient: h.client,
+    projectCatalog: h.catalog, isCurrent: () => h.current }
+  const view = render(<ProjectGroundEstimatePanel {...props} />)
+  fireEvent.click(screen.getByRole('button', { name: 'Read project quantities' }))
+  const signal = h.client.readSolar.mock.calls[0][0].signal
+  if (change === 'version') h.snapshot = { ...h.snapshot, binding: { ...B, input_version_id: JOB } }
+  if (change === 'authority') h.snapshot = { ...h.snapshot, authorityKey: 'epoch-2' }
+  if (change === 'catalog') h.epoch += 1
+  act(() => h.emit())
+  expect(signal.aborted).toBe(true)
+  await act(async () => pending.resolve(takeoffResult([takeoffLine('late', '1')])))
+  expect(screen.queryByLabelText('TEST rate USD late')).toBeNull()
+  view.unmount()
+  expect(h.listeners.size).toBe(0)
+})
+
+it('hides presented takeoff quantities when the catalog receipt changes', async () => {
+  const h = fixture('solar-takeoff')
+  h.client.readSolar.mockResolvedValue(takeoffResult([takeoffLine('old', '1')]))
+  h.mount({ openTool: h.row })
+  fireEvent.click(screen.getByRole('button', { name: 'Read project quantities' }))
+  await screen.findByLabelText('TEST rate USD old')
+  h.catalogCurrent = false
+  act(() => h.emit())
+  expect(screen.queryByLabelText('TEST rate USD old')).toBeNull()
+})
+
+it('refuses oversized takeoff output and leaves invalid quantities unpriced', async () => {
+  const h = fixture('solar-takeoff')
+  h.client.readSolar.mockResolvedValue(takeoffResult(Array.from({ length: 129 }, (_, index) => takeoffLine(`line${index}`, '1'))))
+  h.mount({ openTool: h.row })
+  fireEvent.click(screen.getByRole('button', { name: 'Read project quantities' }))
+  await screen.findByText('The project quantity read was refused.')
+  expect(screen.queryByRole('table')).toBeNull()
+  h.client.readSolar.mockResolvedValue(takeoffResult([takeoffLine('invalid', '-1'), takeoffLine('long', '1'.repeat(41))]))
+  fireEvent.click(screen.getByRole('button', { name: 'Read project quantities' }))
+  await screen.findByLabelText('TEST rate USD invalid')
+  fireEvent.change(screen.getByLabelText('TEST rate USD invalid'), { target: { value: '1' } })
+  expect(screen.getAllByText('Unpriced')).toHaveLength(2)
+})
 
 const B = {
   kind: 'project',
@@ -1448,7 +1539,7 @@ describe('Project Solar workspace composition', () => {
   it('R13E-44 composition owns no Viewer or runtime and all new copy uses the frozen maps', () => {
     const source = readFileSync(`${process.cwd()}/src/solar/ProjectSolarWorkspace.jsx`, 'utf8')
     const imports = [...source.matchAll(new RegExp("from ['\"]([^'\"]+)['\"]", 'g'))].map((match) => match[1])
-    expect(imports).toEqual(['react', './solarDrawingBinding.js', './SolarSettingsForm.jsx', './solarSettingsWire.js', './ProjectSolarReadPanel.jsx', './ProjectSolveReview.jsx', './ProjectSolarEdgePanel.jsx', './ProjectSolarPreparedSolveForm.jsx', './DrawingRoleProposal.jsx'])
+    expect(imports).toEqual(['react', './solarDrawingBinding.js', './SolarSettingsForm.jsx', './solarSettingsWire.js', './ProjectSolarReadPanel.jsx', './ProjectSolveReview.jsx', './ProjectSolarEdgePanel.jsx', './ProjectGroundEstimatePanel.jsx', './ProjectSolarPreparedSolveForm.jsx', './DrawingRoleProposal.jsx'])
     const reviewSource = readFileSync(`${process.cwd()}/src/solar/ProjectSolveReview.jsx`, 'utf8')
     const reviewImports = [...reviewSource.matchAll(new RegExp("from ['\"]([^'\"]+)['\"]", 'g'))].map((match) => match[1])
     for (const dependency of reviewImports) {

@@ -5,13 +5,14 @@ import { canOpenSolarSettingsForm } from './solarSettingsWire.js'
 import ProjectSolarReadPanel, { PROJECT_SOLAR_WORKSPACE_LABELS, projectSolarWorkspaceReason } from './ProjectSolarReadPanel.jsx'
 import ProjectSolveReview, { ProjectSolarSchemaForm } from './ProjectSolveReview.jsx'
 import ProjectSolarEdgePanel from './ProjectSolarEdgePanel.jsx'
+import ProjectGroundEstimatePanel from './ProjectGroundEstimatePanel.jsx'
 import { ProjectSolarPreparedSolveForm } from './ProjectSolarPreparedSolveForm.jsx'
 import DrawingRoleProposal from './DrawingRoleProposal.jsx'
 
 const STEP_TOOLS = ['solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
   'solar-string-conductors', 'solar-assign-equipment']
 const GRAPH_TOOLS = ['solar-panels-from-drawing', 'solar-panel-groups', 'solar-homeruns', 'solar-schedule', 'solar-feeders']
-const READ_TOOLS = ['solar-string-data', 'solar-electrical-schedules', 'solar-cable-export', 'solar-solaredge-tracking-read']
+const READ_TOOLS = ['solar-string-data', 'solar-electrical-schedules', 'solar-cable-export', 'solar-solaredge-tracking-read', 'solar-takeoff']
 const SOLVE_TOOLS = ['solar-solve-proposal', 'solar-commit-solve', 'solar-correct-string']
 const DIGEST = new RegExp('^sha256:[0-9a-f]{64}$')
 const TOOL_NAME = new RegExp('^[a-z0-9][a-z0-9-]{0,127}$')
@@ -358,7 +359,8 @@ export default function ProjectSolarWorkspace(props) {
     projectOutcome={projectOutcome} submissionSignal={submissionSignal} />
   if (host === 'solaredge') editor = <ProjectSolarEdgePanel {...shared} isCurrent={scope.isCurrent}
     submissionSignal={submissionSignal} />
-  if (host === 'read') editor = <ProjectSolarReadPanel tool={editorRow} solarBinding={owner.binding}
+  const ReadPanel = editorRow?.name === 'solar-takeoff' ? ProjectGroundEstimatePanel : ProjectSolarReadPanel
+  if (host === 'read') editor = <ReadPanel tool={editorRow} solarBinding={owner.binding}
     authorityKey={owner.authorityKey} projectClient={owner.projectClient} projectCatalog={owner.projectCatalog}
     isCurrent={scope.isCurrent} busy={busy} />
   const solveRow = owner.rows.find((row) => row.name === 'solar-solve-proposal')

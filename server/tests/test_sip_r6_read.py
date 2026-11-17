@@ -1,5 +1,6 @@
 """Exact canonical source, read population, computations and deferred output bounds."""
 from copy import deepcopy
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,13 +19,15 @@ from solar_design_graph import GraphValidationError
 from routers import project_drawings as routes
 import test_sip_r3b_tools as tools_cases
 import test_sip_r3b_chain as chain_cases
+import test_sip_r5_routes as catalog_cases
+from test_sip_r5_routes import lane as catalog_lane  # noqa: F401
 
 SAFE = frozenset((
     "solar-select-by-zone", "solar-design-presets-list", "solar-autofill-plan",
     "solar-string-rebuild", "solar-string-data", "solar-color-strings", "solar-guardrails-read",
     "solar-electrical-schedules", "solar-cable-export", "solar-nec-ampacity-correction",
     "solar-nec-ac-voltage-drop", "solar-nec-conduit-fill", "solar-nec-feeder-ocpd",
-    "solar-solaredge-tracking-read"))
+    "solar-solaredge-tracking-read", "solar-takeoff"))
 NEC = {
     "solar-nec-ampacity-correction": dict(base_ampacity=100, temp_factor=.91, conduit_factor=.8),
     "solar-nec-ac-voltage-drop": dict(current_a=100, one_way_length_ft=100,
@@ -74,7 +77,7 @@ def blocked(*args, **kwargs):
 
 
 def test_sip_r6_exact_read_population(lane, monkeypatch):
-    assert read.SUPPORTED_READ_TOOLS == SAFE and len(SAFE) == 14
+    assert read.SUPPORTED_READ_TOOLS == SAFE and len(SAFE) == 15
     for declaration in solar_tools.entries():
         if declaration["name"] not in SAFE:
             refused("SIP_R6_TOOL_UNSUPPORTED", lambda: run(lane, declaration["name"], {}))
@@ -131,6 +134,78 @@ def test_sip_r6_nec_outputs(lane):
     assert ocpd["egc_gauge"] == "6 AWG"
 
 
+def test_sip_r6_takeoff_graph_and_absent_physical(lane, monkeypatch):
+    monkeypatch.setattr(local.solar_physical_head, "load_physical_head", blocked)
+    monkeypatch.setattr(read.native, "_canonical_state", blocked)
+    result = run(lane, "solar-takeoff", {})["result"]
+    summary = result["output"]["summary"]
+    assert summary["maturity"] == "preview" and summary["complete"] is False
+    assert summary["head"] is None
+    lines = {line["line_id"]: line for line in summary["lines"]}
+    assert lines["strings.count"]["quantity"] == str(len(lane.ctx.graph["strings"]))
+    assert lines["strings.modules"]["quantity"] == str(sum(s["module_count"] for s in lane.ctx.graph["strings"]))
+    assert lines["ground.modules"]["quantity"] is None
+    assert lines["ground.modules"]["reason"] == "PHYSICAL_STATE_ABSENT"
+    assert lines["phase_b.labor"]["priceable"] is False
+    assert result["drawing_changed"] is False
+
+
+def test_sip_r6_takeoff_selected_native_and_corrupt_refusal(lane, monkeypatch):
+    import project_drawing_editor as editor
+    original = project.resolve_context
+    first = next(value for value in lane.versions.values() if value.seq == 2)
+    def selected(*args, **kwargs):
+        verified = original(*args, **kwargs)
+        if verified.binding.input_version_id != first.version_id:
+            return verified
+        intake = {**verified.intake, read.native.KEY: {}}
+        raw = canonical_bytes(intake)
+        return replace(verified, intake=intake, intake_bytes=raw, intake_sha256=sha256(raw).hexdigest())
+    monkeypatch.setattr(project, "resolve_context", selected)
+    monkeypatch.setattr(local.solar_physical_head, "load_physical_head", blocked)
+    # Invalid embedded metadata is a decoder refusal, never absent physical state.
+    with pytest.raises(editor.EditorError) as exc:
+        read.native._canonical_state(selected(lane.tenant, lane.project, first.version_id,
+                                             drawing_id=lane.drawing, write=False))
+    assert exc.value.code == "PROJECT_LAYOUT_NATIVE_METADATA_INVALID"
+    refused("SIP_R6_ARTIFACT_SOURCE_MISMATCH", lambda:
+        run(lane, "solar-takeoff", {}, version=first.version_id))
+    response = routes._output_dispatch(lambda:
+        run(lane, "solar-takeoff", {}, version=first.version_id))
+    assert response.status_code == 500
+    assert b'"reason_code":"SIP_R6_ARTIFACT_SOURCE_MISMATCH"' in response.body
+    assert b"The project artifact does not match its source version." in response.body
+    seen = []
+    def decode(verified):
+        seen.append(verified.binding.input_version_id)
+        return ({"kind": "canonical_version_intake", "version_id": str(verified.binding.input_version_id),
+                 "index": verified.binding.version.seq - 1,
+                 "state": {"artifact_id": verified.intake_sha256, "content_sha256": "a" * 64}},
+                {"units": {"meters_per_unit": 1.0}, "state": {}}, {})
+    monkeypatch.setattr(read.native, "_canonical_state", decode)
+    result = run(lane, "solar-takeoff", {}, version=first.version_id)["result"]
+    assert seen == [first.version_id]
+    assert run(lane, "solar-takeoff", {})["result"]["output"]["summary"]["head"] is None
+    assert seen == [first.version_id]
+    summary = result["output"]["summary"]
+    ref = summary["head"]["state"]
+    assert ref == {"schema": "leaf.solar-canonical-native-state-ref.v1",
+                   "version_id": str(first.version_id), "intake_sha256": result["input_intake_sha256"],
+                   "state_sha256": "a" * 64}
+    assert "download" not in ref and "artifact_id" not in ref
+    ground = next(line for line in summary["lines"] if line["line_id"] == "ground.modules")
+    assert ground["reason"] == "TRACKER_ROWS_ABSENT"
+    assert ground["source"]["drawing_version"] == first.seq
+    module = local._load_builtin("solar-takeoff")
+    wrapper = {"head": summary["head"], "document": {"units": {"meters_per_unit": 1.0}, "state": {}}}
+    module._physical(wrapper)
+    for key, value in (("schema", "other"), ("version_id", "head"), ("intake_sha256", "bad"),
+                       ("state_sha256", "bad"), ("download", {})):
+        invalid = deepcopy(wrapper)
+        invalid["head"]["state"][key] = value
+        refused("TAKEOFF_PHYSICAL_INPUT_INVALID", lambda: module._physical(invalid))
+
+
 def test_sip_r6_graph_reports_and_no_file(lane):
     for tool in ("solar-select-by-zone", "solar-design-presets-list", "solar-autofill-plan",
                  "solar-string-rebuild", "solar-color-strings", "solar-guardrails-read"):
@@ -143,6 +218,32 @@ def test_sip_r6_graph_reports_and_no_file(lane):
             assert output(lane, tool, params) == expected
     assert output(lane, "solar-string-data", {}) == {
         "status": "no-file", "reason": "no-groups", "selected_strings": 1, "groups": 0}
+
+
+def test_sip_r6_takeoff_catalog_uses_read_authority(catalog_lane, monkeypatch):
+    import entitlements
+    s = catalog_lane
+    query = {"project_id": str(s.s.project), "drawing_id": str(s.s.drawing),
+             "input_version_id": str(s.s.parent.version_id)}
+    def state():
+        return catalog_cases.states(s.client.get("/api/capabilities", params=query,
+                                    headers=catalog_cases.headers(s)))["solar-takeoff"]
+    granted = entitlements.entitlements_for
+    monkeypatch.setattr(entitlements, "entitlements_for",
+                        lambda *args, **kwargs: {**granted(*args, **kwargs), "run_read": True})
+    available = state()
+    assert available["project_read"] is True and available["engine_ready"] is True
+    assert available["runnable"] is True and available["admission_checked"] is False
+    query.pop("input_version_id")
+    assert state()["project_read"] is False
+    query["input_version_id"] = str(s.s.parent.version_id)
+    s.tools["solar-takeoff"]["description"] += " changed"
+    assert state()["project_read"] is False and state()["engine_ready"] is False
+    s.tools["solar-takeoff"] = solar_tools.trusted_record("solar-takeoff")
+    monkeypatch.setattr(entitlements, "entitlements_for",
+                        lambda *args, **kwargs: {**granted(*args, **kwargs), "run_read": False})
+    assert state()["project_read"] is False and state()["engine_ready"] is False
+    assert not s.records
 
 
 def test_sip_r6_currentness_and_sizing_refusals(lane, monkeypatch):
