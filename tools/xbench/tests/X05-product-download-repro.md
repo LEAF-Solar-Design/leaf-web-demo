@@ -24,6 +24,13 @@ scroller. Each replay retains all five CSV rows, normalized DOM parity, focused
 field screenshots and hashes. Inspect the retained narrow/zoom images before
 acceptance. The final proof records browser/context/server cleanup after it runs.
 
+Finally, the replay switches immutable drawing bindings and matching client
+snapshots through normal React props while an old drawing read is deferred.
+It records the aborted old request, resolves its distinct revision/totals, and
+checks that no old evidence or drafts become accepted. The second drawing needs
+an explicit read and fresh reports before its exact five-row CSV can download.
+This uses the same mounted panel, with no project-state reset or forced remount.
+
 ```python
 import csv
 import copy
@@ -58,26 +65,59 @@ graph = dict(rev=9, panels=[dict(id=p) for p in panels],
                         dict(id=entity('inverter', 2), equipment_type='combiner_box')])
 response = dict(ok=True, data=dict(context=binding, intake=dict(
     solar_design_graph=graph, solar_design_graph_sha256='a' * 64)))
+next_binding = dict(binding, drawing_id='55555555-5555-4555-8555-555555555555',
+                    input_version_id='66666666-6666-4666-8666-666666666666')
+next_panels = [entity('panel', n) for n in [11, 12, 13]]
+next_graph = dict(rev=42, panels=[dict(id=p) for p in next_panels],
+                  frames=[dict(id=entity('frame', 11), panel_refs=next_panels, module_power_watts=500)],
+                  strings=[dict(id=entity('string', 11), module_count=2, ordered_panel_refs=next_panels[:2]),
+                           dict(id=entity('string', 12), module_count=1, ordered_panel_refs=next_panels[2:])],
+                  inverters=[dict(id=entity('inverter', n), equipment_type='central_inverter') for n in [11, 12]] +
+                            [dict(id=entity('inverter', 13), equipment_type='combiner_box')])
+next_response = dict(ok=True, data=dict(context=next_binding, intake=dict(
+    solar_design_graph=next_graph, solar_design_graph_sha256='b' * 64)))
 entry = artifact / 'entry.jsx'
 entry.write_text(
     'import React from ' + json.dumps((repo / 'web/node_modules/react/index.js').as_posix()) + ';\n'
     'import {createRoot} from ' + json.dumps((repo / 'web/node_modules/react-dom/client.js').as_posix()) + ';\n'
     'import Panel from ' + json.dumps(panel.as_posix()) + ';\n'
-    'const binding = ' + json.dumps(binding) + ';\n'
+    'const binding = Object.freeze(' + json.dumps(binding) + ');\n'
+    'const nextBinding = Object.freeze(' + json.dumps(next_binding) + ');\n'
+    'const nextResponse = ' + json.dumps(next_response) + ';\n'
     'const response = ' + json.dumps(response) + ';\n' + '''
 let attempts = 0;
+let deferOld = false, settleOld, oldSignal;
+window.scopeProof = {newReads: 0, oldSettled: false};
+window.deferOldRead = () => { deferOld = true; };
+window.resolveOldRead = () => { settleOld(); window.scopeProof.oldSettled = true; };
 window.setSavedGraph = graph => { response.data.intake.solar_design_graph = structuredClone(graph); };
 const client = {
   getSnapshot: () => ({binding, authorityKey: 'synthetic'}),
   subscribe: () => () => {},
-  readContext: async () => {
+  readContext: async ({signal}) => {
     if (++attempts === 1) throw new Error('synthetic private read error');
+    if (deferOld) {
+      deferOld = false;
+      oldSignal = signal;
+      const captured = structuredClone(response);
+      return new Promise(resolve => { settleOld = () => resolve(captured); });
+    }
     return response;
   },
 };
-createRoot(document.getElementById('root')).render(
-  <Panel solarBinding={binding} authorityKey="synthetic"
-    projectClient={client} isCurrent={() => true} />);
+const nextClient = {
+  getSnapshot: () => ({binding: nextBinding, authorityKey: 'synthetic-next'}),
+  subscribe: () => () => {},
+  readContext: async () => { window.scopeProof.newReads++; return nextResponse; },
+};
+const root = createRoot(document.getElementById('root'));
+const isCurrent = () => true;
+const render = (solarBinding, authorityKey, projectClient) => root.render(
+  <Panel solarBinding={solarBinding} authorityKey={authorityKey}
+    projectClient={projectClient} isCurrent={isCurrent} />);
+window.switchDrawing = () => render(nextBinding, 'synthetic-next', nextClient);
+window.oldReadAborted = () => oldSignal?.aborted === true;
+render(binding, 'synthetic', client);
 ''', encoding='utf-8')
 command = [str(repo / 'web/node_modules/@esbuild/win32-x64/esbuild.exe'), str(entry),
            '--bundle', '--format=esm', '--jsx=automatic',
@@ -319,14 +359,81 @@ try:
                                    computed_zoom=computed_zoom, fields=field_proofs, scroll=scroll,
                                    overflow=overflow, visible=rendered, downloaded=downloaded, csv=path.name,
                                    keyboard_download=True))
+    # Change props/client scope on the same mounted panel during an old read.
+    page.set_viewport_size({'width': 1440, 'height': 900})
+    page.evaluate('document.documentElement.style.zoom = "1"')
+    old_deferred = copy.deepcopy(graph)
+    old_deferred['rev'] = 91
+    old_deferred['frames'][0]['module_power_watts'] = 700
+    old_drafts = ['02', '01', '02', '01', '0.800']
+    for label, value in zip(labels, old_drafts):
+        page.get_by_role('textbox', name=label + ' engineering report/BOM', exact=True).fill(value)
+    page.evaluate('(graph) => { window.setSavedGraph(graph); window.deferOldRead(); }', old_deferred)
+    downloads_after_switch = []
+    page.on('download', lambda download: downloads_after_switch.append(download.suggested_filename))
+    read.click()
+    expect(page.get_by_text('Reading saved design.', exact=True)).to_be_visible()
+    expect(download_button).to_be_disabled()
+    page.evaluate('window.switchDrawing()')
+    expect(read).to_be_enabled()
+    page.wait_for_function('window.oldReadAborted()')
+    for label in labels:
+        expect(page.get_by_role('textbox', name=label + ' engineering report/BOM', exact=True)).to_have_value('')
+    expect(download_button).to_be_disabled()
+    assert page.evaluate('window.scopeProof.newReads') == 0
+    page.evaluate('window.resolveOldRead()')
+    # Let the old promise continuation and any React work finish before checking isolation.
+    page.evaluate('() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+    expect(page.get_by_text('Saved design revision 91.', exact=True)).to_have_count(0)
+    expect(page.get_by_text('Saved design revision 42.', exact=True)).to_have_count(0)
+    before_new_read = visible_rows()
+    assert all(row['studio'] == row['oracle'] == row['delta'] == '' and row['verdict'] == 'UNREADABLE'
+               for row in before_new_read)
+    assert page.evaluate('window.scopeProof.newReads') == 0
+    assert downloads_after_switch == []
+    page.screenshot(path=str(artifact / 'drawing-switch-old-settled.png'), full_page=True)
+    read.click()
+    expect(page.get_by_text('Saved design revision 42.', exact=True)).to_be_visible()
+    expect(download_button).to_be_disabled()
+    fresh_without_reports = visible_rows()
+    assert [row['studio'] for row in fresh_without_reports] == ['3', '', '2', '2', '1.5']
+    assert all(row['oracle'] == row['delta'] == '' and row['verdict'] == 'UNREADABLE'
+               for row in fresh_without_reports)
+    assert downloads_after_switch == []
+    page.screenshot(path=str(artifact / 'drawing-switch-fresh-read.png'), full_page=True)
+    new_drafts = ['003', '00', '02', '02', '1.500']
+    for index, (label, value) in enumerate(zip(labels, new_drafts)):
+        page.get_by_role('textbox', name=label + ' engineering report/BOM', exact=True).fill(value)
+        if index < 3:
+            expect(download_button).to_be_disabled()
+    expect(download_button).to_be_enabled()
+    isolated = capture_comparison('drawing-switch-new-only')
+    expected_new = [dict(zip(['metric', 'studio', 'oracle', 'delta', 'verdict'], row)) for row in [
+        ['panels', '3', '003', '0', 'PASS'],
+        ['optimizers', '', '00', '', 'UNREADABLE'],
+        ['inverters', '2', '02', '0', 'PASS'],
+        ['strings', '2', '02', '0', 'PASS'],
+        ['kw_dc', '1.5', '1.500', '0', 'PASS'],
+    ]]
+    assert isolated['downloaded'] == expected_new
+    assert downloads_after_switch == ['engineering-reconciliation.csv']
+    assert page.evaluate('window.scopeProof') == dict(newReads=1, oldSettled=True)
+    isolation = dict(old_binding=binding, new_binding=next_binding, old_revision=91, new_revision=42,
+                     old_request_aborted=page.evaluate('window.oldReadAborted()'),
+                     old_response_settled=True, before_new_read=before_new_read,
+                     fresh_without_reports=fresh_without_reports, old_drafts=old_drafts,
+                     new_drafts=new_drafts, new_read_count=1, downloads=downloads_after_switch,
+                     comparison=isolated)
     def digest(path):
         return hashlib.sha256(path.read_bytes()).hexdigest()
     inputs = json.loads((artifact / 'meta.json').read_text(encoding='utf-8'))['inputs']
     sources = {(repo / name).resolve() for name in inputs}
     sources.add(repo / 'web/src/styles.css')
+    sources.add(repo / 'tools/xbench/tests/X05-product-download-repro.md')
     proof = dict(synthetic=True, rows_matched=5, visible=visible, downloaded=actual,
                  malformed_graph_replays=cases,
                  narrow_zoom_replays=narrow_replays,
+                 two_drawing_isolation=isolation,
                  keyboard_read_retry=True, keyboard_export_retry=True,
                  source_sha256={str(path): digest(path) for path in sorted(sources)},
                  artifact_sha256={path.name: digest(path) for path in artifact.iterdir() if path.is_file()})
@@ -359,5 +466,6 @@ if proof_path.is_file():
                             server_closed=True, server_thread_stopped=not thread.is_alive())
     proof_path.write_text(json.dumps(proof, indent=2), encoding='utf-8')
 print(json.dumps({'proof': str(proof_path), 'rows_matched': 5, 'keyboard_retries_passed': 2,
-                  'malformed_graph_repairs': len(cases), 'narrow_zoom_replays': len(narrow_replays)}))
+                  'malformed_graph_repairs': len(cases), 'narrow_zoom_replays': len(narrow_replays),
+                  'two_drawing_isolation': True}))
 ```

@@ -315,6 +315,81 @@ it('keeps focused retry controls and announces read and download errors assertiv
   expect(document.activeElement).toBe(download)
 })
 
+it.each(['\u0661', '\uff11', '1,0', '1\u200b', '=1+1', '+SUM(1)', '@SUM(1)', '-1+2'])(
+  'rejects pasted lexeme %s in every report field and repairs only that field', async token => {
+    fixture(); read(); await loaded()
+    const drafts = ['01', '00', '001', '01', '0.400']
+    fill(drafts)
+    const inputs = screen.getAllByRole('textbox')
+    const guidance = inputs.map(input => [input.id, input.getAttribute('aria-describedby')])
+    const download = screen.getByRole('button', { name: 'Download CSV' })
+    const createObjectURL = vi.fn(() => 'blob:lexemes')
+    vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    for (const [index, input] of inputs.entries()) {
+      // A paste delivers the whole lexeme in one input change, without key filtering.
+      fireEvent.paste(input, { clipboardData: { getData: () => token } })
+      fireEvent.change(input, { target: { value: token } })
+      expect(download.disabled).toBe(true)
+      fireEvent.click(download)
+      expect(createObjectURL).not.toHaveBeenCalled()
+      inputs.forEach((field, sibling) => {
+        expect(field.value).toBe(sibling === index ? token : drafts[sibling])
+        expect(field.getAttribute('aria-invalid')).toBe(sibling === index ? 'true' : 'false')
+        expect([field.id, field.getAttribute('aria-describedby')]).toEqual(guidance[sibling])
+        field.getAttribute('aria-describedby').split(' ').forEach(id => expect(document.getElementById(id)?.textContent).toBeTruthy())
+      })
+      fireEvent.change(input, { target: { value: drafts[index] } })
+      expect(input.getAttribute('aria-invalid')).toBe('false')
+      expect(download.disabled).toBe(false)
+      expect(inputs.map(field => field.value)).toEqual(drafts)
+    }
+    fireEvent.click(download)
+    const csv = await new Promise(resolve => {
+      const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.readAsText(createObjectURL.mock.calls[0][0])
+    })
+    expect(csv).toBe('metric,studio,oracle,delta,verdict\r\n"panels","1","01","0","PASS"\r\n' +
+      '"optimizers","","00","","UNREADABLE"\r\n"inverters","1","001","0","PASS"\r\n' +
+      '"strings","1","01","0","PASS"\r\n"kw_dc","0.4","0.400","0","PASS"\r\n')
+  })
+
+it('revokes authority during URL allocation and requires fresh evidence and drafts in the replacement scope', async () => {
+  const h = fixture(); read(); await loaded(); fill()
+  const revokeObjectURL = vi.fn(() => { throw new Error('private authority cleanup token=synthetic-secret') })
+  const createObjectURL = vi.fn(() => {
+    h.snapshot = { binding, authorityKey: 'b' }
+    return 'blob:revoked'
+  })
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL })
+  const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(click).not.toHaveBeenCalled()
+  expect(revokeObjectURL.mock.calls).toEqual([['blob:revoked']])
+  h.emit()
+  expect(screen.queryByText(/private authority|synthetic-secret/)).toBeNull()
+  expect(screen.queryByText('PASS')).toBeNull()
+  const replacement = { ...h.client, readContext: vi.fn(async () => response()) }
+  h.update({ authorityKey: 'b', projectClient: replacement })
+  const download = screen.getByRole('button', { name: 'Download CSV' })
+  expect(replacement.readContext).not.toHaveBeenCalled()
+  expect(screen.getAllByRole('textbox').map(input => input.value)).toEqual(['', '', '', '', ''])
+  expect(download.disabled).toBe(true)
+  read(); await loaded()
+  expect(download.disabled).toBe(true)
+  expect(screen.queryByText('PASS')).toBeNull()
+  fill(['01', '0', '1', '1', '0.400'])
+  createObjectURL.mockImplementationOnce(() => 'blob:fresh')
+  revokeObjectURL.mockImplementation(() => {})
+  fireEvent.click(download)
+  expect(click).toHaveBeenCalledOnce()
+  expect(revokeObjectURL.mock.calls).toEqual([['blob:revoked'], ['blob:fresh']])
+  const csv = await new Promise(resolve => {
+    const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.readAsText(createObjectURL.mock.calls[1][0])
+  })
+  expect(csv).toContain('"panels","1","01","0","PASS"')
+  expect(csv).toContain('"kw_dc","0.4","0.400","0","PASS"')
+})
+
 it('exports blank unknown DC as unreadable while requiring all four count reports', async () => {
   fixture(); read(); await loaded(); fill(['1', '0', '1', '1', ''])
   const createObjectURL = vi.fn(() => 'blob:blank')
@@ -371,12 +446,16 @@ it('treats snapshot failure as a retryable read failure', async () => {
   const clone = globalThis.structuredClone
   vi.stubGlobal('structuredClone', vi.fn(() => { throw new Error('private snapshot') }))
   fixture(); fill(); read()
-  await screen.findByRole('alert')
+  expect((await screen.findByRole('alert')).textContent).toBe('Saved design could not be read. Try reading it again.')
   expect(screen.queryByText(/private snapshot/)).toBeNull()
   expect(screen.queryByText('PASS')).toBeNull()
+  expect(screen.queryByText('Saved design revision 9.')).toBeNull()
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(true)
   vi.stubGlobal('structuredClone', clone)
   read(); await loaded()
   expect(screen.getAllByText('PASS')).toHaveLength(4)
+  expect(screen.queryByRole('alert')).toBeNull()
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(false)
 })
 
 it('reads only on demand, shows five editable rows and exports precisely the current comparison', async () => {

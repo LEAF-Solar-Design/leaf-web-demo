@@ -80,15 +80,18 @@ export function savedReconciliationValues(graph) {
   const strings = uniqueIds(graph.strings, 'string')
   const assigned = new Set()
   let overlap = false
-  const stringsValid = panelValid && strings && graph.strings.every((item) => Array.isArray(item.ordered_panel_refs) &&
-    Number.isSafeInteger(item.module_count) && item.module_count > 0 && item.module_count === item.ordered_panel_refs.length &&
-    new Set(item.ordered_panel_refs).size === item.ordered_panel_refs.length &&
-    item.ordered_panel_refs.every((id) => {
+  const stringsValid = panelValid && strings && graph.strings.every((item) => {
+    const refs = item.ordered_panel_refs
+    if (!Array.isArray(refs) || !Number.isSafeInteger(item.module_count) || item.module_count <= 0 ||
+        item.module_count !== refs.length || new Set(refs).size !== refs.length) return false
+    // Array iteration visits holes as undefined; every() would skip missing evidence.
+    for (const id of refs) {
       if (!validId(id, 'panel') || !panels.has(id)) return false
       if (assigned.has(id)) { overlap = true; return false }
       assigned.add(id)
-      return true
-    }))
+    }
+    return true
+  })
   values[3] = stringsValid ? available(BigInt(strings.size) * SCALE)
     : unavailable(overlap ? 'A saved panel reference belongs to more than one string.'
       : 'Saved panel union is invalid, or string IDs, positive module counts and ordered panel references disagree.')

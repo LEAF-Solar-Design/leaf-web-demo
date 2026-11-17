@@ -19,6 +19,42 @@ function graph() {
 }
 
 describe('saved engineering reconciliation', () => {
+  it.each(['first', 'middle', 'last', 'all', 'singleton'])('rejects %s sparse ordered references and recovers from dense evidence', position => {
+    const saved = graph(), drafts = ['03', '0', '2', '1', '1.2001']
+    saved.panels.push({ id: id('panel', 3) })
+    saved.frames[0].panel_refs.push(id('panel', 3))
+    const dense = position === 'singleton' ? [id('panel', 1)] : [id('panel', 1), id('panel', 2), id('panel', 3)]
+    saved.strings[0].module_count = dense.length
+    saved.strings[0].ordered_panel_refs = [...dense]
+    const baseline = reconciliationRows(saved, drafts)
+    const refs = saved.strings[0].ordered_panel_refs
+    for (const index of position === 'all' ? [0, 1, 2] : [{ first: 0, middle: 1, last: 2, singleton: 0 }[position]]) delete refs[index]
+    const before = structuredClone(saved), rows = reconciliationRows(saved, drafts)
+    expect(refs.length).toBe(dense.length)
+    expect(rows[3]).toMatchObject({ studio: '', oracle: '1', delta: '', verdict: 'UNREADABLE' })
+    expect(rows[3].reason).toMatch(/ordered panel references disagree/)
+    for (const index of [0, 1, 2, 4]) expect(rows[index]).toEqual(baseline[index])
+    expect(saved).toStrictEqual(before)
+    expect(drafts).toEqual(['03', '0', '2', '1', '1.2001'])
+    saved.strings[0].ordered_panel_refs = [...dense]
+    expect(reconciliationRows(saved, drafts)).toEqual(baseline)
+  })
+  it.each([
+    [0, 'central_inverter', '2', '0'], [0, 'combiner_box', '1', '-1'],
+    [1, 'string_inverter', '2', '0'], [1, 'combiner_box', '1', '-1'],
+    [2, 'string_inverter', '3', '1'], [2, 'central_inverter', '3', '1'],
+  ])('reclassifies device %s to %s without counting combiners or changing siblings', (index, type, total, delta) => {
+    const saved = graph(), drafts = ['2', '0', '2', '1', '0.8']
+    const baseline = reconciliationRows(saved, drafts), original = saved.inverters[index].equipment_type
+    saved.inverters[index].equipment_type = type
+    const before = structuredClone(saved), rows = reconciliationRows(saved, drafts)
+    expect(rows[2]).toMatchObject({ studio: total, oracle: '2', delta, verdict: delta === '0' ? 'PASS' : 'FAIL' })
+    for (const sibling of [0, 1, 3, 4]) expect(rows[sibling]).toEqual(baseline[sibling])
+    expect(saved).toStrictEqual(before)
+    expect(drafts).toEqual(['2', '0', '2', '1', '0.8'])
+    saved.inverters[index].equipment_type = original
+    expect(reconciliationRows(saved, drafts)).toEqual(baseline)
+  })
   const kindCases = [
     ['panel collection', 'panel', [0, 3, 4], (g, kind) => { g.panels[0].id = id(kind, 1) }],
     ['Roof frame collection', 'frame', [4], (g, kind) => { g.frames[0].id = id(kind, 1) }],
