@@ -64,6 +64,18 @@ function rectangleMeasurement(value) {
   return String(Number(value.toFixed(6)))
 }
 
+function invalidNameCharacters(name) {
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(name)) return true
+  for (let index = 0; index < name.length; index++) {
+    const code = name.charCodeAt(index)
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = name.charCodeAt(++index)
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return true
+    } else if (code >= 0xdc00 && code <= 0xdfff) return true
+  }
+  return false
+}
+
 export default function SolarGroundInputForm({ disabled, onParameters }) {
   const [draft, setDraft] = useState(() => ({ ...defaultDraft }))
   const [units, setUnits] = useState('m')
@@ -82,6 +94,7 @@ export default function SolarGroundInputForm({ disabled, onParameters }) {
       values[key] = numberToken(draft[key], integer)
       if (values[key] === null) addError([key], `${label}: enter a finite ${integer ? 'whole ' : ''}number of at most 64 characters.`)
     }
+    if (invalidNameCharacters(draft.name)) addError(['name'], 'Preset name: control characters and unpaired Unicode surrogates are not allowed.')
     const name = draft.name.trim()
     if (!name || name.length > 256) addError(['name'], 'Preset name: enter 1 to 256 characters after trimming.')
     if (!['Portrait', 'Landscape'].includes(draft.orientation)) addError(['orientation'], 'Module orientation must be Portrait or Landscape.')
@@ -117,8 +130,11 @@ export default function SolarGroundInputForm({ disabled, onParameters }) {
     const values = Object.fromEntries(siteKeys.map(key => [key, numberToken(draft[key])]))
     if (siteKeys.some(key => values[key] === null)) errors.push('Enter finite site numbers of at most 64 characters before converting.')
     validateSite(values, addError)
-    const converted = Object.fromEntries(siteKeys.map(key => [key,
-      String(units === 'm' ? values[key] / metresPerFoot : values[key] * metresPerFoot)]))
+    const convertedValues = Object.fromEntries(siteKeys.map(key => [key,
+      units === 'm' ? values[key] / metresPerFoot : values[key] * metresPerFoot]))
+    if (siteKeys.some(key => values[key] !== null && values[key] !== 0 && convertedValues[key] === 0))
+      errors.push('A nonzero site value would become zero in the target units. Keep the current units to preserve exact geometry.')
+    const converted = Object.fromEntries(siteKeys.map(key => [key, String(convertedValues[key])]))
     const target = Object.fromEntries(siteKeys.map(key => [key, numberToken(converted[key])]))
     if (siteKeys.some(key => target[key] === null)) errors.push('Converted site numbers must be finite and at most 64 characters.')
     validateSite(target, addError)
@@ -136,6 +152,8 @@ export default function SolarGroundInputForm({ disabled, onParameters }) {
   const displayFactor = units === 'ft' ? metresPerFoot : 1
   const rectangleWidthM = Number(draft.width) * displayFactor
   const rectangleHeightM = Number(draft.height) * displayFactor
+  const boundary = result.parameters?.boundary
+  const centre = boundary && boundary[0].map((value, axis) => value + (boundary[2][axis] - value) / 2)
 
   return <fieldset disabled={disabled} aria-describedby={description}>
     <legend>Ground layout inputs</legend>
@@ -186,7 +204,22 @@ export default function SolarGroundInputForm({ disabled, onParameters }) {
       <desc id={`${description}-preview-desc`}>Rectangle {draft.width.trim()} by {draft.height.trim()} {units === 'm' ? 'metres' : 'feet'}, origin X {draft.x.trim()}, Y {draft.y.trim()}. Schematic only, not to scale; narrow dimensions are enlarged for visibility. No module geometry or terrain assessment.</desc>
       <rect x="10" y="10" width={previewWidth} height={previewHeight} fill="none" stroke="currentColor" />
     </svg>}
-    {result.parameters && units === 'ft' && <p>Converted site size: {Number((Number(draft.width) * 0.3048).toFixed(6))} × {Number((Number(draft.height) * 0.3048).toFixed(6))} metres. Module dimensions and gaps remain in metres.</p>}
+    {result.parameters && units === 'ft' && <p>Converted site size: {rectangleMeasurement(rectangleWidthM)} × {rectangleMeasurement(rectangleHeightM)} metres. Module dimensions and gaps remain in metres.</p>}
+    {result.parameters && <>
+      <p>Site rectangle centre (drawing coordinates): X {String(centre[0])}, Y {String(centre[1])} {units}.</p>
+      <table>
+        <caption>Site boundary coordinates (drawing units: {units})</caption>
+        <thead><tr><th scope="col">Corner</th><th scope="col">X ({units})</th><th scope="col">Y ({units})</th></tr></thead>
+        <tbody>{boundary.map((point, index) => <tr key={index}>
+          <th scope="row">Corner {index + 1}</th><td>{String(point[0])}</td><td>{String(point[1])}</td>
+        </tr>)}</tbody>
+      </table>
+      <details>
+        <summary>Generated source input parameters (JSON)</summary>
+        <p>Read-only source inputs for generation, not a saved result.</p>
+        <pre aria-label="Generated source input parameters JSON">{JSON.stringify(result.parameters, null, 2)}</pre>
+      </details>
+    </>}
     <p>Terrain-free layout preview. No terrain or engineering assessment is included.</p>
   </fieldset>
 }
