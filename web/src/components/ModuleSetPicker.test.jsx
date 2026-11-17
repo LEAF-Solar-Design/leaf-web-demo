@@ -13,6 +13,58 @@ const first = () => screen.getByRole('checkbox', { name: 'Design / Panel A: 12 c
 const second = () => screen.getByRole('checkbox', { name: 'Alternate / Panel B: 9 candidates' })
 const submit = () => screen.getByRole('button', { name: 'Count selected set' })
 
+const enterWindow = (values) => {
+  const labels = ['Minimum X', 'Minimum Y', 'Maximum X', 'Maximum Y']
+  values.forEach((value, index) => fireEvent.change(screen.getByLabelText(labels[index]),
+    { target: { value: String(value) } }))
+}
+
+it('submits an explicit design window with the selected set and retains recorded bounds', () => {
+  const onSelect = vi.fn()
+  const view = render(<ModuleSetPicker drawingKey="window" data={data} onSelect={onSelect} />)
+  fireEvent.click(first())
+  enterWindow([0, -10, 100, 20])
+  fireEvent.click(submit())
+  expect(onSelect).toHaveBeenCalledExactlyOnceWith(['first'], [0, -10, 100, 20])
+  const counted = { sets: [{ ...data.sets[0], count: 4 }],
+    selected_sets: [{ ...data.sets[0], count: 4 }], count: 4, region: [0, -10, 100, 20] }
+  view.rerender(<ModuleSetPicker drawingKey="window" data={counted} onSelect={onSelect} />)
+  expect(screen.getByText('Counted 4 modules on Design / Panel A.')).toBeTruthy()
+  fireEvent.change(screen.getByLabelText('Maximum X'), { target: { value: '90' } })
+  expect(screen.queryByText(/^Counted /)).toBeNull()
+  expect(screen.getByText('Choices changed. Count the selected set to update this result.')).toBeTruthy()
+})
+
+it('requires complete ordered bounds and resets window fields when the drawing changes', () => {
+  const onSelect = vi.fn()
+  const view = render(<ModuleSetPicker drawingKey="first" data={data} onSelect={onSelect} />)
+  fireEvent.click(first())
+  enterWindow([0, 0, 10, ''])
+  expect(submit().disabled).toBe(true)
+  expect(screen.getByRole('alert').textContent).toMatch(/four finite bounds/)
+  enterWindow([10, 0, 0, 10])
+  expect(submit().disabled).toBe(true)
+  enterWindow([0, 0, 10, 10])
+  expect(submit().disabled).toBe(false)
+  view.rerender(<ModuleSetPicker drawingKey="second" data={data} onSelect={onSelect} />)
+  expect(screen.getByLabelText('Minimum X').value).toBe('')
+  expect(submit().disabled).toBe(true)
+  expect(onSelect).not.toHaveBeenCalled()
+})
+
+it('restores a recorded design window on a fresh result and locks its fields while running', () => {
+  const recorded = { ...data, selected_sets: [data.sets[0]], count: 12,
+    region: [-20, -10, 20, 10] }
+  const onSelect = vi.fn()
+  const view = render(<ModuleSetPicker drawingKey="recorded" data={recorded} onSelect={onSelect} />)
+  expect(screen.getByLabelText('Minimum X').value).toBe('-20')
+  expect(screen.getByText(/^Counted 12 modules/)).toBeTruthy()
+  view.rerender(<ModuleSetPicker drawingKey="recorded" data={recorded} onSelect={onSelect} running />)
+  fireEvent.change(screen.getByLabelText('Minimum X'), { target: { value: '-99' } })
+  expect(screen.getByLabelText('Minimum X').value).toBe('-20')
+  expect(onSelect).not.toHaveBeenCalled()
+})
+
 it.each(['resolve', 'reject'])('keeps choices intact when a callback mutates its arguments then %ss', async (terminal) => {
   let settle, fail
   const pending = new Promise((resolve, reject) => { settle = resolve; fail = reject })
@@ -123,7 +175,7 @@ it('selects, submits and rerenders deeply frozen candidates and recorded results
   expect(onSelect).toHaveBeenCalledExactlyOnceWith(['first'])
   view.rerender(<ModuleSetPicker drawingKey="frozen" data={completed} onSelect={onSelect} />)
   expect(screen.getByText('Counted 12 modules on Design / Panel A.')).toBeTruthy()
-  expect(screen.getByRole('group').disabled).toBe(false)
+  expect(screen.getByRole('group', { name: 'Module set' }).disabled).toBe(false)
   fireEvent.click(first())
   fireEvent.click(second())
   fireEvent.click(submit())
@@ -151,7 +203,7 @@ it('keeps external running and pending promises as independent submission locks'
   expect(onSelect).toHaveBeenCalledTimes(1)
   view.rerender(<ModuleSetPicker data={data} onSelect={onSelect} running />)
   await act(async () => { settle(); await pending })
-  expect(screen.getByRole('group').disabled).toBe(true)
+  expect(screen.getByRole('group', { name: 'Module set' }).disabled).toBe(true)
   expect(submit().disabled).toBe(true)
   view.rerender(<ModuleSetPicker data={data} onSelect={onSelect} running={false} />)
   expect(submit().disabled).toBe(false)
@@ -363,7 +415,7 @@ it('associates lone-surrogate opaque IDs safely without aliasing a replacement c
   const onSelect = vi.fn()
   const view = render(<ModuleSetPicker data={{ sets: ids.map((set_id) => ({ ...data.sets[0], set_id })) }} onSelect={onSelect} />)
   const inputs = screen.getAllByRole('checkbox')
-  const labels = [...view.container.querySelectorAll('label')]
+  const labels = [...view.container.querySelectorAll('li label')]
   expect(new Set(inputs.map((input) => input.id)).size).toBe(3)
   labels.forEach((label, index) => expect(label.control).toBe(inputs[index]))
   fireEvent.click(labels[0])
@@ -439,7 +491,7 @@ it('gives identical labels unique input IDs and independent explicit association
   const sets = [{ ...data.sets[0], set_id: 'same-label-a' }, { ...data.sets[0], set_id: 'same-label-b' }]
   const view = render(<ModuleSetPicker data={{ sets }} onSelect={onSelect} />)
   const inputs = screen.getAllByRole('checkbox')
-  const labels = [...view.container.querySelectorAll('label')]
+  const labels = [...view.container.querySelectorAll('li label')]
   expect(inputs[0].id).not.toBe('')
   expect(inputs[1].id).not.toBe(inputs[0].id)
   labels.forEach((label, index) => expect(label.control).toBe(inputs[index]))
@@ -454,7 +506,7 @@ it('keeps explicit label IDs unique across simultaneous picker instances', () =>
   const onA = vi.fn(), onB = vi.fn()
   const view = render(<><ModuleSetPicker data={data} onSelect={onA} /><ModuleSetPicker data={data} onSelect={onB} /></>)
   const inputs = screen.getAllByRole('checkbox')
-  const labels = [...view.container.querySelectorAll('label')]
+  const labels = [...view.container.querySelectorAll('li label')]
   expect(new Set(inputs.map((input) => input.id)).size).toBe(4)
   inputs.forEach((input) => expect(input.id).not.toBe(''))
   labels.forEach((label, index) => expect(label.control).toBe(inputs[index]))
@@ -615,7 +667,7 @@ it.each([
   fireEvent.click(first())
   view.rerender(<ModuleSetPicker data={{ sets: rows }} onSelect={onSelect} />)
   expect(screen.getByText(/Module sets unavailable.*Run the module tool again/)).toBeTruthy()
-  expect(screen.getByRole('group').disabled).toBe(true)
+  expect(screen.getByRole('group', { name: 'Module set' }).disabled).toBe(true)
   expect(screen.queryAllByRole('checkbox')).toHaveLength(0)
   expect(submit().disabled).toBe(true)
   fireEvent.click(submit())
@@ -637,9 +689,9 @@ it('lists competing sets and submits only an explicit pick', () => {
 it('cannot submit while a run is active or the drawing binding is stale', () => {
   const onSelect = vi.fn()
   const view = render(<ModuleSetPicker data={data} onSelect={onSelect} running />)
-  expect(screen.getByRole('group').disabled).toBe(true)
+  expect(screen.getByRole('group', { name: 'Module set' }).disabled).toBe(true)
   view.rerender(<ModuleSetPicker data={data} />)
-  expect(screen.getByRole('group').disabled).toBe(true)
+  expect(screen.getByRole('group', { name: 'Module set' }).disabled).toBe(true)
   expect(submit().disabled).toBe(true)
   expect(onSelect).not.toHaveBeenCalled()
 })
@@ -669,7 +721,7 @@ it('keeps only current choices across selection and running transitions', () => 
   fireEvent.click(second())
   fireEvent.click(submit())
   view.rerender(<ModuleSetPicker data={data} onSelect={onSelect} running />)
-  expect(screen.getByRole('group').disabled).toBe(true)
+  expect(screen.getByRole('group', { name: 'Module set' }).disabled).toBe(true)
   fireEvent.click(submit())
   expect(onSelect).toHaveBeenCalledTimes(1)
   view.rerender(<ModuleSetPicker data={data} onSelect={onSelect} />)
@@ -761,13 +813,13 @@ it('never revives a vanished choice when its candidate later reappears', () => {
 it('explains unavailable selection and accepts an explicit choice after callback restoration', () => {
   const onSelect = vi.fn()
   const view = render(<ModuleSetPicker drawingKey="callback-drawing" data={data} />)
-  expect(screen.getByRole('group').disabled).toBe(true)
+  expect(screen.getByRole('group', { name: 'Module set' }).disabled).toBe(true)
   expect(screen.getByText('Run the module tool on the current drawing to choose a set.')).toBeTruthy()
   fireEvent.click(first())
   fireEvent.click(submit())
   expect(onSelect).not.toHaveBeenCalled()
   view.rerender(<ModuleSetPicker drawingKey="callback-drawing" data={data} onSelect={onSelect} />)
-  expect(screen.getByRole('group').disabled).toBe(false)
+  expect(screen.getByRole('group', { name: 'Module set' }).disabled).toBe(false)
   expect(first().checked).toBe(false)
   fireEvent.click(second())
   fireEvent.click(submit())
@@ -792,4 +844,14 @@ it('isolates two mounted drawings during interleaved checkbox changes and submis
   expect(onB).toHaveBeenCalledExactlyOnceWith(['second'])
   expect(a.getByRole('button').disabled).toBe(true)
   expect(onA).toHaveBeenCalledTimes(1)
+})
+
+
+it('restores a legacy saved window through the region picker', () => {
+  const onSelect = vi.fn()
+  render(<ModuleSetPicker drawingKey="legacy" onSelect={onSelect} data={{ sets: [
+    { set_id: 'A', layer: 'Design', block: 'Panel', count: 1 }],
+    selection_window: [0, 0, 10, 10] }} />)
+  expect(screen.getByLabelText('Minimum X')).toHaveValue(0)
+  expect(screen.getByLabelText('Maximum Y')).toHaveValue(10)
 })

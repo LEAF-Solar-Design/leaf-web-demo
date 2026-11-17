@@ -8,6 +8,9 @@ export default function ModuleSetPicker({ data, drawingKey, onSelect, running = 
   const inputId = (id) => `${pickerId}-set-${id.split('').map((unit) =>
     unit.charCodeAt(0).toString(16).padStart(4, '0')).join('')}`
   const [selection, setSelection] = useState({ drawingKey, choices: [], edited: false })
+  const recordedRegion = data?.region ?? data?.selection_window
+  const [designWindow, setDesignWindow] = useState(() => ({ drawingKey,
+    values: Array.isArray(recordedRegion) ? recordedRegion.map(String) : ['', '', '', ''] }))
   const [submitError, setSubmitError] = useState(null)
   const [pendingRequest, setPendingRequest] = useState(null)
   const submitEpoch = useRef(0)
@@ -35,6 +38,7 @@ export default function ModuleSetPicker({ data, drawingKey, onSelect, running = 
       submitEpoch.current += 1
       activeRequest.current = null
       if (pendingRequest) setPendingRequest(null)
+      setDesignWindow({ drawingKey, values: ['', '', '', ''] })
     }
     setSelection({ drawingKey, choices, edited: !drawingChanged && selection.edited })
   }
@@ -42,8 +46,15 @@ export default function ModuleSetPicker({ data, drawingKey, onSelect, running = 
   const selected = sets.filter((set) => choiceIds.has(set.set_id))
   const summaryIds = Array.isArray(data?.selected_sets) ? data.selected_sets.map((set) => set?.set_id) : []
   const summaryIdSet = new Set(summaryIds)
+  const windowValues = designWindow.drawingKey === drawingKey ? designWindow.values : ['', '', '', '']
+  const windowEnabled = windowValues.some((value) => value.trim() !== '')
+  const bounds = windowValues.map(Number)
+  const validWindow = !windowEnabled || (windowValues.every((value) => value.trim() !== '')
+    && bounds.every(Number.isFinite) && bounds[0] < bounds[2] && bounds[1] < bounds[3])
+  const windowMatchesSummary = JSON.stringify(windowEnabled ? bounds : null)
+    === JSON.stringify(recordedRegion ?? null)
   const summaryMatchesChoices = !selection.edited || (summaryIds.length === choices.length
-    && summaryIds.every((id) => choiceIds.has(id)))
+    && summaryIds.every((id) => choiceIds.has(id)) && windowMatchesSummary)
   const validSummary = Array.isArray(data?.selected_sets) && data.selected_sets.length > 0
     && !unavailable && summaryIdSet.size === summaryIds.length
     && validCount(data.count) && data.selected_sets.every((set) => set !== null && typeof set === 'object'
@@ -54,7 +65,7 @@ export default function ModuleSetPicker({ data, drawingKey, onSelect, running = 
       && set.block === (candidateById.get(set.set_id).block || ''))
     && data.count <= data.selected_sets.reduce((sum, set) => sum + set.count, 0)
   const submitSelection = () => {
-    if (unavailable || !selected.length || running || submitting || !onSelect
+    if (unavailable || !validWindow || !selected.length || running || submitting || !onSelect
       || (activeRequest.current && activeRequest.current.drawingKey === drawingKey)) return
     const epoch = ++submitEpoch.current
     activeRequest.current = { drawingKey, epoch }
@@ -65,7 +76,8 @@ export default function ModuleSetPicker({ data, drawingKey, onSelect, running = 
       setSubmitError(failed ? { drawingKey, message: 'Unable to start module count. Try counting the selected set again.' } : null)
     }
     try {
-      const outcome = onSelect(selected.map((set) => set.set_id))
+      const ids = selected.map((set) => set.set_id)
+      const outcome = windowEnabled ? onSelect(ids, [...bounds]) : onSelect(ids)
       if (outcome && typeof outcome.then === 'function') {
         setPendingRequest({ drawingKey, epoch })
         Promise.resolve(outcome).then(() => finish(), () => finish(true))
@@ -90,7 +102,25 @@ export default function ModuleSetPicker({ data, drawingKey, onSelect, running = 
         {set.layer}{set.block ? ` / ${set.block}` : ' / closed four-corner shapes'}: {set.count} candidates
       </label></li>)}
     </ul>
-    <button type="button" className="chip-act" disabled={unavailable || !selected.length || running || submitting || !onSelect}
+    <details open={windowEnabled || undefined}>
+      <summary>Design window</summary>
+      <p>Enter drawing coordinates to count one design copy. Blank bounds count the whole set.</p>
+      {['Minimum X', 'Minimum Y', 'Maximum X', 'Maximum Y'].map((label, index) => <label key={label}>
+        {label}
+        <input type="number" step="any" value={windowValues[index]}
+          onChange={(event) => {
+            if (running || submitting || !onSelect) return
+            const values = [...windowValues]
+            values[index] = event.target.value
+            setDesignWindow({ drawingKey, values })
+            setSelection({ drawingKey, choices, edited: true })
+            setSubmitError(null)
+          }} />
+      </label>)}
+      <p>Window counts require fully contained instances. A boundary overlapping an instance needs adjustment.</p>
+    </details>
+    {windowEnabled && !validWindow && <p role="alert">Enter four finite bounds with minimums below maximums.</p>}
+    <button type="button" className="chip-act" disabled={unavailable || !validWindow || !selected.length || running || submitting || !onSelect}
       onClick={submitSelection}>
       Count selected set
     </button>

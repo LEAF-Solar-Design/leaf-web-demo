@@ -1056,6 +1056,8 @@ def _validated_blocks(blocks, note_layer):
                                elev=_number(child.get("elev"), where))
                     if not any(row["nrm"]):
                         _fail(f"{where}: nrm must not be the zero vector")
+            elif kind == "POINT":
+                row["pt"] = _vector(child.get("pt"), where)
             elif kind in ("CIRCLE", "ARC"):
                 row.update(c=_vector(child.get("c"), where), r=_number(child.get("r"), where),
                            nrm=_vector(child.get("nrm"), where))
@@ -1087,7 +1089,9 @@ def _emit_block_child(child, handle, owner):
     kind = child["kind"]
     out = ["0", kind, "5", handle, "330", owner, "100", "AcDbEntity", "8", child["layer"]]
     out += _entity_property_groups({handle: child.get("properties", {})}, handle, "block child")
-    if kind == "LINE":
+    if kind == "POINT":
+        out += ["100", "AcDbPoint", *_point_groups(child["pt"])]
+    elif kind == "LINE":
         out += ["100", "AcDbLine", *_point_groups(child["pts"][0]), *_point_groups(child["pts"][1], 11)]
     elif kind == "LWPOLYLINE":
         out += ["100", "AcDbPolyline", "90", str(len(child["pts"])),

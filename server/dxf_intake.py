@@ -597,13 +597,22 @@ def _group_point(groups, code=10, default=(0.0, 0.0, 0.0)):
     return [_float(groups.get(code + j * 10, str(v))) for j, v in enumerate(default)]
 
 
+
+def _insert_array_count(raw):
+    try:
+        count = int(raw)
+    except (ValueError, TypeError):
+        return 0  # Preserve invalid input for the count tool's multiplicity refusal.
+    return count or 1  # Native individual INSERT records use zero default counts.
+
+
 def _parse_insert(pairs, i, dropped=None):
     groups, i = _entity_groups(pairs, i)
     normal = _group_point(groups, 210, (0.0, 0.0, 1.0))
     point = _ocs_to_wcs(_group_point(groups), normal)
     array = {}
     if any(code in groups for code in (70, 71, 44, 45)):
-        array = {"columns": _int(groups.get(70, "1")), "rows": _int(groups.get(71, "1")),
+        array = {"columns": _insert_array_count(groups.get(70, "1")), "rows": _insert_array_count(groups.get(71, "1")),
                  "column_spacing": _float(groups.get(44, "0")),
                  "row_spacing": _float(groups.get(45, "0"))}
     # Match the IN parser's existing x/y/z and nrm keys, including WCS position.
@@ -624,14 +633,18 @@ def _parse_block_child(pairs, i, kind):
     properties = _entity_properties(groups.get(62), groups.get(6), groups.get(370), groups.get(420))
     if properties is not None:
         child["properties"] = properties
-    if kind in ("LINE", "LWPOLYLINE", "CIRCLE", "ARC"):
+    if kind in ("POINT", "LINE", "LWPOLYLINE", "CIRCLE", "ARC"):
         # These children must not inherit the legacy top-level parsers'
         # substitution of zero for unreadable coordinates.
         for code, value in pairs[i:end]:
             if code in (10, 20, 30, 11, 21, 31, 38, 40, 50, 51, 210, 220, 230):
                 if not math.isfinite(float(value)):
                     raise ValueError("malformed block geometry")
-    if kind == "LINE":
+    if kind == "POINT":
+        if not all(code in groups for code in (10, 20)):
+            raise ValueError("POINT needs a complete position")
+        child["pt"] = [round(v, 3) for v in _group_point(groups)]
+    elif kind == "LINE":
         if not all(code in groups for code in (10, 20, 11, 21)):
             raise ValueError("LINE needs two points")
         entity, end = _parse_line(pairs, i)
